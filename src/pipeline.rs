@@ -2173,6 +2173,34 @@ pub fn fresh_lens_profile(raw: &Path) -> crate::recipe::LensProfile {
     p
 }
 
+/// [`fresh_lens_profile`] for a photo whose masks came from a SIDECAR — the
+/// only form that can answer the mask-warp question correctly (R29 Batch-3).
+///
+/// `crs:LensProfileEnable="0"` says Lightroom applied no lens correction, so
+/// the frame it stored a mask in IS the frame it exported that mask into and
+/// the warp is the identity. That is a DIFFERENT fact from "nobody could solve
+/// a warp for this photo", and `MaskWarpSource` keeps them apart:
+/// `DisabledInSidecar` versus the five other refusals.
+///
+/// Only the WARP is answered from the sidecar. The vignette / distortion / CA
+/// toggles are the photographer's own and are left exactly as
+/// [`fresh_lens_profile`] stamped them — see [`crate::xmp::lens_profile_enabled`]
+/// for why reading Lightroom's switch as an instruction would be wrong.
+///
+/// `None` sidecar, or a document that says nothing, is [`fresh_lens_profile`]
+/// unchanged.
+pub fn fresh_lens_profile_for_sidecar(
+    raw: &Path,
+    sidecar: Option<&str>,
+) -> crate::recipe::LensProfile {
+    let mut p = fresh_lens_profile(raw);
+    if sidecar.and_then(crate::xmp::lens_profile_enabled) == Some(false) {
+        p.mask_warp.clear();
+        p.mask_warp_src = crate::recipe::MaskWarpSource::DisabledInSidecar;
+    }
+    p
+}
+
 /// Fresh as-shot WB anchor for `raw` — the camera's absolute Kelvin + tint
 /// from its own metadata (`render::as_shot_wb`; metadata-only decode, no
 /// demosaic). `(None, None)` when unavailable (non-RAW, no colour matrix,
@@ -4324,6 +4352,47 @@ pub fn find_sources_counted(dir: &Path) -> Result<(Vec<PathBuf>, usize)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// R29 Batch-3. `crs:LensProfileEnable="0"` is a REASON, not an absence:
+    /// Lightroom drew no lens correction, so the frame it stored a mask in is
+    /// the frame it exported that mask into and an identity warp is CORRECT.
+    ///
+    /// The distinction is the whole point of the variant — a photographer
+    /// looking at `Absent` should go looking for a profile, and one looking at
+    /// `DisabledInSidecar` should not.
+    #[test]
+    fn a_sidecar_that_switched_the_lens_profile_off_names_its_identity_warp() {
+        use crate::recipe::MaskWarpSource;
+        // No RAW behind it: `fresh_lens_profile` answers `Absent` for a path it
+        // cannot read, which is the baseline this test moves off.
+        let raw = std::env::temp_dir().join("r29b3-no-such-photo.arw");
+        assert_eq!(fresh_lens_profile(&raw).mask_warp_src, MaskWarpSource::Absent);
+        assert_eq!(
+            fresh_lens_profile_for_sidecar(&raw, None).mask_warp_src,
+            MaskWarpSource::Absent,
+            "no document = no opinion"
+        );
+        let off = r#"<x:xmpmeta><rdf:RDF><rdf:Description xmlns:crs="http://ns.adobe.com/camera-raw-settings/1.0/" crs:LensProfileEnable="0" crs:Version="15.0"></rdf:Description></rdf:RDF></x:xmpmeta>"#;
+        let on = off.replace(r#"crs:LensProfileEnable="0""#, r#"crs:LensProfileEnable="1""#);
+        // PREMISE: the reader really sees the switch, or the assertion below
+        // would pass against a document it failed to parse.
+        assert_eq!(crate::xmp::lens_profile_enabled(off), Some(false));
+        assert_eq!(crate::xmp::lens_profile_enabled(&on), Some(true));
+        assert_eq!(
+            fresh_lens_profile_for_sidecar(&raw, Some(off)).mask_warp_src,
+            MaskWarpSource::DisabledInSidecar
+        );
+        // ON does NOT overwrite the answer the photograph gave: the switch can
+        // only say "the frames coincide", never "a warp exists".
+        assert_eq!(
+            fresh_lens_profile_for_sidecar(&raw, Some(&on)).mask_warp_src,
+            MaskWarpSource::Absent
+        );
+        // The photographer's own toggles are untouched either way — reading
+        // Lightroom's switch as an instruction would silently overwrite them.
+        let p = fresh_lens_profile_for_sidecar(&raw, Some(off));
+        assert!(p.mask_warp.is_empty() && !p.distortion_on && !p.vignette_on && !p.ca_on);
+    }
 
     /// The PRODUCTION text of `rel`, with every `#[cfg(test)]` item removed.
     ///

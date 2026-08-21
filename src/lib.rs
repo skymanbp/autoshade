@@ -19,6 +19,7 @@ pub mod fit;
 pub mod fit_zoned;
 pub mod generative;
 pub mod jobs;
+pub mod lcp;
 pub mod lensmeta;
 pub mod openai_models;
 pub mod pipeline;

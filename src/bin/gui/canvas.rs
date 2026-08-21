@@ -268,7 +268,17 @@ impl AutoshopApp {
                     self.overlay_stale = true;
                     return;
                 }
-                let img = autoshop::render::develop_preview(base, &pre);
+                // `AsRendered`, explicitly: this reference exists to be SAMPLED
+                // for pixel values, and no geometry stage runs over it. `pre`
+                // still carries the lens profile (its vignette is part of the
+                // pixels a range mask is judged on), so letting the recipe
+                // answer would unwarp its prefix masks off those very pixels.
+                let img = autoshop::render::develop_preview_framed(
+                    base,
+                    &pre,
+                    &autoshop::diag::pixels(),
+                    autoshop::render::MaskFrame::AsRendered,
+                );
                 self.overlay_ref = Some((pre, img));
             }
             &self.overlay_ref.as_ref().expect("range reference cached").1
@@ -287,10 +297,20 @@ impl AutoshopApp {
         } else {
             reference
         };
-        let mut cov = image::DynamicImage::ImageLuma8(autoshop::render::mask_coverage(&mask, cov_ref));
         // The COMPOSED profile (R25 B3) — manual CA rides the same knots.
+        // Hoisted above the coverage build so ONE `MaskFrame` decides both the
+        // overlay's own frame adaptation and whether it is warped below — the
+        // same rule the render arms follow (R29 Batch-3). A parametric mask is
+        // stored in Lightroom's post-correction frame and the render now puts
+        // it back there; an overlay that skipped the adaptation would advertise
+        // coverage the render does not apply, by the whole field.
         let cov_geom = autoshop::render::geometry_profile(&self.recipe);
-        if cov_geom.geometry_active() || self.recipe.lens_distortion != 0.0 {
+        let cov_frame =
+            autoshop::render::MaskFrame::downstream(&cov_geom, self.recipe.lens_distortion);
+        let mut cov = image::DynamicImage::ImageLuma8(autoshop::render::mask_coverage(
+            &mask, cov_ref, cov_frame,
+        ));
+        if cov_frame.warps() {
             // The coverage overlay must follow the SAME geometric chain as the
             // rendered pixels — profile distortion included, or the red wash
             // drifts off its mask near the frame edges.
@@ -871,7 +891,14 @@ impl AutoshopApp {
             pre.lens_distortion = 0.0;
             pre.crop = None;
             if !matches!(&self.overlay_ref, Some((r, _)) if *r == pre) {
-                let img = autoshop::render::develop_preview(&base, &pre);
+                // `AsRendered` for the same reason as the overlay's own build
+                // above, and it must MATCH it — the two share this cache.
+                let img = autoshop::render::develop_preview_framed(
+                    &base,
+                    &pre,
+                    &autoshop::diag::pixels(),
+                    autoshop::render::MaskFrame::AsRendered,
+                );
                 self.overlay_ref = Some((pre, img));
             }
             let reference = &self.overlay_ref.as_ref().expect("range reference cached").1;

@@ -537,6 +537,95 @@ impl Default for EditRecipe {
     }
 }
 
+/// How many knots [`LensProfile::mask_warp`] carries when it is solved.
+///
+/// Sixteen, because that is what every real Sony `0x7037` array holds and the
+/// two sources must land on ONE placement or the shared interpolator would be
+/// reading two conventions (see the field's own doc).
+pub const MASK_WARP_KNOTS: usize = 16;
+
+/// Where [`LensProfile::mask_warp`] came from — or, when it is empty, WHY.
+///
+/// A typed answer rather than an empty vector, for the reason every disclosure
+/// in this codebase is typed: "no warp" has six causes and they send the
+/// photographer to six different places (install Camera Raw; this lens has no
+/// profile; the sidecar switched the correction off; the profile is a fisheye
+/// and we refuse to fake it; …). An empty `Vec` says none of that, and a
+/// comment beside the call site is not a channel.
+///
+/// PERSISTED in `recipe.json` on purpose. The map is solved on the machine that
+/// has the camera metadata and the Adobe profile pool; a `recipe.json` opened
+/// somewhere else must still be able to say what was known when it was written
+/// and what was not, without re-deriving anything.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum MaskWarpSource {
+    /// No map, and nothing was tried — the ordinary state for a photograph
+    /// with no lens-correction data of any kind.
+    #[default]
+    Absent,
+    /// Solved from the in-camera knots already in `distortion`
+    /// (`render::mask_warp_from_camera_knots`). Source A: no external file, and
+    /// exactly the polynomial the camera maker calibrated for this shot.
+    CameraMetadata,
+    /// Solved from an Adobe `.lcp` on this machine (`lcp::solve_mask_warp`).
+    /// Source B, for bodies whose RAWs carry no knots.
+    Lcp,
+    /// The sidecar says `crs:LensProfileEnable="0"`: Lightroom drew NO lens
+    /// correction, so the frame the mask was stored in IS the frame it was
+    /// exported in. An identity warp here is the right answer, not a missing
+    /// one — which is why this is its own variant and not [`Self::Absent`].
+    DisabledInSidecar,
+    /// A profile was found and REFUSED because it is a fisheye model. Applying
+    /// the rectilinear polynomial to one returns finite, plausible numbers and
+    /// would move every mask by an invented amount (`lcp::Refusal::Fisheye`).
+    FisheyeRefused,
+    /// A profile was named or matched and could not be parsed or solved.
+    Unparseable,
+    /// This machine has no Adobe lens-profile directory — Camera Raw was never
+    /// installed, or the build is not on Windows, where those roots live.
+    NoProfileRoots,
+}
+
+impl MaskWarpSource {
+    /// Every source — the ONE list the disclosure surfaces iterate, exactly as
+    /// `xmp::MaskImportReason::ALL` serves the mask half. Pinned by
+    /// `mask_warp_source_all_covers_every_variant`.
+    pub const ALL: [MaskWarpSource; 7] = [
+        MaskWarpSource::Absent,
+        MaskWarpSource::CameraMetadata,
+        MaskWarpSource::Lcp,
+        MaskWarpSource::DisabledInSidecar,
+        MaskWarpSource::FisheyeRefused,
+        MaskWarpSource::Unparseable,
+        MaskWarpSource::NoProfileRoots,
+    ];
+
+    /// Did a real map come out of this? The two `true` answers are the only
+    /// ones that may be accompanied by a non-empty `mask_warp`, which
+    /// `clamp` enforces rather than trusts.
+    pub fn is_solved(self) -> bool {
+        matches!(self, MaskWarpSource::CameraMetadata | MaskWarpSource::Lcp)
+    }
+
+    /// English label for the prose channel (CLI stderr / batch warnings).
+    pub fn en(self) -> &'static str {
+        match self {
+            MaskWarpSource::Absent => "no lens-correction data for this photo",
+            MaskWarpSource::CameraMetadata => "solved from the in-camera lens profile",
+            MaskWarpSource::Lcp => "solved from an Adobe lens profile (.lcp)",
+            MaskWarpSource::DisabledInSidecar => {
+                "the sidecar turned the lens profile off - no warp is the correct answer"
+            }
+            MaskWarpSource::FisheyeRefused => {
+                "the Adobe lens profile is a fisheye model - refused, not applied"
+            }
+            MaskWarpSource::Unparseable => "the Adobe lens profile could not be read",
+            MaskWarpSource::NoProfileRoots => "no Adobe lens-profile directory on this machine",
+        }
+    }
+}
+
 /// In-camera lens profile corrections in ENGINE space: per-knot factors over
 /// the normalised radius (0 = centre, 1 = corner; knot `i` sits at
 /// `(i + 0.5) / (n − 1)`, the placement RawTherapee's metadata path uses).
@@ -544,6 +633,13 @@ impl Default for EditRecipe {
 /// radius scale factors (CA multiplies the distortion map per channel).
 /// Conversion from the camera's raw integers lives in `lensmeta` — this
 /// struct is camera-agnostic on purpose. Engine-only, never written to XMP.
+///
+/// **R29 Batch-3 adds `mask_warp` + `mask_warp_src`, and that is a HARD
+/// FORWARD BREAK.** This struct denies unknown fields, so a v0.34 binary
+/// refuses any `recipe.json` a v0.35 binary wrote whose lens profile is
+/// present. Backwards is fine (both fields default), forwards is not, and it
+/// is deliberate: silently dropping a coordinate-frame map would be the one
+/// failure mode a mask frame cannot survive.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 #[serde(default, deny_unknown_fields)]
 pub struct LensProfile {
@@ -554,6 +650,26 @@ pub struct LensProfile {
     pub vignette_on: bool,
     pub distortion_on: bool,
     pub ca_on: bool,
+    /// The MASK WARP: `m(r) = r_exported / r_stored`, the radial magnification
+    /// between the frame Lightroom STORED a mask's coordinates in and the frame
+    /// it EXPORTED that mask into. Same knot placement, same interpolator and
+    /// same shape as `distortion` above — one convention, two producers
+    /// (`render::mask_warp_from_camera_knots` and `lcp::solve_mask_warp`).
+    ///
+    /// Empty = identity, and `mask_warp_src` says why.
+    ///
+    /// **This is a LIGHTROOM-frame quantity, not a description of this
+    /// engine's own render.** What each consumer must do with it depends on
+    /// where that consumer evaluates masks; `render::lr_mask_warp_norm` is the
+    /// one place it is applied and its doc carries the frame table.
+    ///
+    /// NEVER written to XMP. The recipe keeps the sidecar's stored, plain-frame
+    /// coordinates verbatim — `xmp::lr_to_engine` / `engine_to_lr` stay exact
+    /// inverses of each other and this field is not part of that boundary.
+    pub mask_warp: Vec<f32>,
+    /// Where `mask_warp` came from, or why there is none. See
+    /// [`MaskWarpSource`].
+    pub mask_warp_src: MaskWarpSource,
 }
 
 impl LensProfile {
@@ -585,7 +701,13 @@ impl LensProfile {
     /// gains and radius factors held to physically plausible bands (the real
     /// Sony data sits well inside: gains ≲ 1.5×, distortion within ±6%).
     pub fn clamp(&mut self) {
-        for v in [&mut self.vignette, &mut self.distortion, &mut self.ca_r, &mut self.ca_b] {
+        for v in [
+            &mut self.vignette,
+            &mut self.distortion,
+            &mut self.ca_r,
+            &mut self.ca_b,
+            &mut self.mask_warp,
+        ] {
             v.truncate(32);
             // A non-finite knot survives f32::clamp and poisons the whole
             // correction spline — drop it (the base_curve knot rule).
@@ -599,6 +721,28 @@ impl LensProfile {
         }
         for f in self.ca_r.iter_mut().chain(self.ca_b.iter_mut()) {
             *f = f.clamp(0.98, 1.02);
+        }
+        // The SAME band as `distortion`, because it is the same kind of
+        // quantity — a radius factor — solved from the same polynomials. The
+        // widest real value this batch measured is 1.0425 (105 mm centre) and
+        // the narrowest 0.9734 (24 mm centre), so ±30 % is defensive rather
+        // than restrictive.
+        for f in self.mask_warp.iter_mut() {
+            *f = f.clamp(0.7, 1.3);
+        }
+        // The tag and the data must agree, and the tag is the one that carries
+        // a REASON — so it wins. A hand-edited file claiming `fisheye_refused`
+        // beside sixteen knots is claiming two contradictory things, and
+        // honouring the knots would render a warp whose provenance line says it
+        // was refused. Enforced, not trusted: `clamp` is what every reader runs.
+        if !self.mask_warp_src.is_solved() {
+            self.mask_warp.clear();
+        } else if self.mask_warp.len() < 2 {
+            // A solved source with no usable spline is not solved. One knot is
+            // a constant and zero is nothing; either way the reason is gone, so
+            // say the honest thing rather than interpolate over a stub.
+            self.mask_warp.clear();
+            self.mask_warp_src = MaskWarpSource::Unparseable;
         }
     }
 }
@@ -1332,9 +1476,18 @@ pub struct BrushStroke {
     /// BEFORE the screen; a one-parameter flow odds law, κ = 0.1219 ± 0.0027;
     /// an 11-rung hardness kernel TABLE with no closed form) — what still
     /// gates RENDERING, never carrying, is the kernel's missing closed form
-    /// plus Lightroom rasterising the mask in its PRE-lens-correction frame
     /// (docs/V2_PLAN.md §7 item 13; implementation sketch in
     /// `batch10-report.md` §7.4).
+    ///
+    /// ~~plus Lightroom rasterising the mask in its PRE-lens-correction
+    /// frame~~ — that half is CLOSED (R29 Batch-3). Lightroom does rasterise
+    /// a brush pre-correction, and so does this engine: `render::apply_masks`
+    /// runs before `render::apply_lens_geometry`, so the geometry stage
+    /// carries a brush mask exactly as it carries the pixels. These
+    /// coordinates are therefore already in the frame a renderer would want
+    /// them in, and warping them would apply the lens field twice. The
+    /// measurements, the per-mask-type frame table and the two regression
+    /// pins are in `render.rs`'s mask-warp block header.
     pub dabs: String,
 }
 
@@ -2676,6 +2829,10 @@ mod tests {
                 vignette_on: true,
                 distortion_on: true,
                 ca_on: true,
+                // The mask warp is stamped calibration like everything else
+                // here, and the as-stamped no-op rule must survive it: it is
+                // not a control the photographer moved.
+                ..Default::default()
             },
             ..Default::default()
         };
@@ -2709,6 +2866,98 @@ mod tests {
         let json = serde_json::to_string(&toggled).unwrap();
         let back: EditRecipe = serde_json::from_str(&json).unwrap();
         assert_eq!(back.lens_profile, toggled.lens_profile);
+    }
+
+    /// R29 Batch-3: the mask-warp field's schema contract, in the four parts
+    /// that can each break silently.
+    #[test]
+    fn mask_warp_source_all_covers_every_variant_and_the_schema_reads_both_ways() {
+        // (a) The iteration array is complete and has prose for every member —
+        // the `MaskImportReason::ALL` guard, for the same reason: `en`'s match
+        // stops the build when a variant is added, an array does not.
+        let mut seen = MaskWarpSource::ALL.to_vec();
+        seen.sort_by_key(|s| format!("{s:?}"));
+        seen.dedup();
+        assert_eq!(seen.len(), MaskWarpSource::ALL.len(), "ALL repeats a variant");
+        for s in MaskWarpSource::ALL {
+            assert!(!s.en().is_empty(), "{s:?} has no prose");
+        }
+        assert_eq!(MaskWarpSource::default(), MaskWarpSource::Absent);
+
+        // (b) BACKWARDS compatible: a recipe.json written before this field
+        // existed reads as "no warp, nobody looked", not as an error.
+        let legacy: EditRecipe = serde_json::from_str(r#"{"exposure_ev":0.5}"#).unwrap();
+        assert!(legacy.lens_profile.mask_warp.is_empty());
+        assert_eq!(legacy.lens_profile.mask_warp_src, MaskWarpSource::Absent);
+
+        // (c) FORWARDS it is a HARD BREAK, and that is the point: `LensProfile`
+        // denies unknown fields, so a build without these two keys refuses a
+        // recipe that has them rather than dropping a coordinate frame on the
+        // floor. Asserted through the same door a v0.34 binary would use.
+        #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        #[allow(dead_code)]
+        struct PreR29LensProfile {
+            #[serde(default)]
+            vignette: Vec<f32>,
+            #[serde(default)]
+            distortion: Vec<f32>,
+            #[serde(default)]
+            ca_r: Vec<f32>,
+            #[serde(default)]
+            ca_b: Vec<f32>,
+            #[serde(default)]
+            vignette_on: bool,
+            #[serde(default)]
+            distortion_on: bool,
+            #[serde(default)]
+            ca_on: bool,
+        }
+        let current = serde_json::to_string(&LensProfile {
+            distortion: vec![1.0, 0.95],
+            distortion_on: true,
+            mask_warp: vec![0.98, 1.02],
+            mask_warp_src: MaskWarpSource::CameraMetadata,
+            ..Default::default()
+        })
+        .unwrap();
+        assert!(current.contains("\"mask_warp\""), "{current}");
+        assert!(
+            serde_json::from_str::<PreR29LensProfile>(&current).is_err(),
+            "a pre-R29 reader must REFUSE this recipe, not silently drop the frame"
+        );
+        // …and the current reader round-trips it exactly.
+        let back: LensProfile = serde_json::from_str(&current).unwrap();
+        assert_eq!(back.mask_warp, vec![0.98, 1.02]);
+        assert_eq!(back.mask_warp_src, MaskWarpSource::CameraMetadata);
+
+        // (d) `clamp` holds the band AND the tag/data invariant. A hand-edited
+        // file cannot claim a refusal and carry knots, and cannot smuggle a
+        // 4× radius factor or a NaN past the interpolator.
+        let mut wild = LensProfile {
+            mask_warp: vec![4.0, f32::NAN, 0.1, 1.02],
+            mask_warp_src: MaskWarpSource::Lcp,
+            ..Default::default()
+        };
+        wild.clamp();
+        assert_eq!(wild.mask_warp, vec![1.3, 0.7, 1.02], "band and NaN drop");
+        let mut lying = LensProfile {
+            mask_warp: vec![1.02; 16],
+            mask_warp_src: MaskWarpSource::FisheyeRefused,
+            ..Default::default()
+        };
+        lying.clamp();
+        assert!(lying.mask_warp.is_empty(), "a refusal cannot carry a warp");
+        assert_eq!(lying.mask_warp_src, MaskWarpSource::FisheyeRefused, "…and keeps its reason");
+        // A solved tag with no usable spline is not solved, and says so.
+        let mut stub = LensProfile {
+            mask_warp: vec![1.02],
+            mask_warp_src: MaskWarpSource::Lcp,
+            ..Default::default()
+        };
+        stub.clamp();
+        assert!(stub.mask_warp.is_empty());
+        assert_eq!(stub.mask_warp_src, MaskWarpSource::Unparseable);
     }
 
     #[test]

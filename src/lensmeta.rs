@@ -21,14 +21,40 @@
 //! interpolates linearly and clamps outside. Each array's FIRST element is
 //! the value count; a malformed count degrades that component to "absent",
 //! never an error (a photo without correction data is a normal photo).
+//!
+//! # The MASK WARP, and why it is solved here (R29 Batch-3)
+//!
+//! [`LensProfile::mask_warp`] is the radial magnification between the frame
+//! Lightroom STORES a mask's coordinates in and the frame it EXPORTS that mask
+//! into (`render`'s mask-warp block header carries the measurements). It has
+//! two possible sources and this function is where the choice is made, because
+//! this is the one place that already holds the camera's own knots:
+//!
+//! * **Source A** — the in-camera `0x7037` spline just read above, inverted by
+//!   [`crate::render::mask_warp_from_camera_knots`]. Preferred whenever it
+//!   exists: it is the maker's calibration for THIS shot, needs no external
+//!   file, and scored 2.30 px against Adobe's own 2.11 px on the 138-patch
+//!   pixel field.
+//! * **Source B** — an Adobe `.lcp` on this machine ([`crate::lcp`]), for
+//!   bodies that write no knots at all.
+//!
+//! Every failure is TAGGED, never silent: [`crate::recipe::MaskWarpSource`]
+//! names which source answered or which of the five refusals applies.
+//!
+//! **The warp depends on the frame's ASPECT only, not its pixel count.** Both
+//! solves normalise radius by the half-diagonal and the `.lcp` reference length
+//! is proportional to the width, so the frame's size cancels out of `m(r)`. The
+//! dimensions read below are therefore a shape, and a preview-sized render and
+//! a full-resolution export share one map — which is what lets it be solved
+//! once, here, and stored.
 
 use std::path::Path;
 
 use rawler::formats::tiff::reader::TiffReader;
 use rawler::formats::tiff::{GenericTiffReader, Value};
-use rawler::tags::ExifTag;
+use rawler::tags::{DngTag, ExifTag};
 
-use crate::recipe::LensProfile;
+use crate::recipe::{LensProfile, MASK_WARP_KNOTS, MaskWarpSource};
 
 /// Read the in-camera lens correction profile from a RAW file. Every failure
 /// path returns an EMPTY component (profile with nothing to apply) — absent
@@ -84,8 +110,91 @@ pub fn read(path: &Path) -> LensProfile {
         out.ca_r = ca[..half].iter().map(f).collect();
         out.ca_b = ca[half..].iter().map(f).collect();
     }
+
+    // --- the mask warp (R29 Batch-3) -------------------------------------
+    let text = |tag: ExifTag| -> String {
+        root.get_entry_recursive(tag)
+            .and_then(|e| e.value.as_string().cloned())
+            .unwrap_or_default()
+            .trim()
+            .to_string()
+    };
+    let number = |tag: ExifTag| -> Option<f32> {
+        root.get_entry_recursive(tag)?.value.get_f32(0).ok().flatten().filter(|v| v.is_finite())
+    };
+    // `DefaultCropSize` FIRST, and for the reason `xmp`'s frame doc spells out
+    // at length: it is the frame every normalised coordinate in a sidecar is
+    // measured against, where `ImageWidth/Length` is the raw sensor array
+    // including the masked border. Only the ASPECT of this reaches the answer,
+    // but the two aspects differ by ~0.3 % on a real ARW and the fallback is
+    // the second-best shape, not an equal one.
+    let dims = frame_dims(root);
+    match dims {
+        Some(dims) if !out.distortion.is_empty() => {
+            let w = crate::render::mask_warp_from_camera_knots(
+                &out.distortion,
+                dims,
+                MASK_WARP_KNOTS,
+            );
+            if w.len() >= 2 {
+                out.mask_warp = w;
+                out.mask_warp_src = MaskWarpSource::CameraMetadata;
+            } else {
+                // The inversion is only unsolvable for a spline that folds
+                // inside the frame — a corrupt array, not a real lens.
+                out.mask_warp_src = MaskWarpSource::Unparseable;
+            }
+        }
+        Some(dims) => {
+            // No in-camera knots: this is exactly the body source B exists for.
+            let lens = {
+                let m = text(ExifTag::LensModel);
+                if m.is_empty() { text(ExifTag::LensMake) } else { m }
+            };
+            match crate::lcp::solve_mask_warp(
+                None,
+                &text(ExifTag::Make),
+                &lens,
+                number(ExifTag::FocalLength),
+                dims,
+                MASK_WARP_KNOTS,
+            ) {
+                Ok(w) => {
+                    out.mask_warp = w;
+                    out.mask_warp_src = MaskWarpSource::Lcp;
+                }
+                Err(r) => out.mask_warp_src = r.into(),
+            }
+        }
+        // A file that declares no frame declares no aspect, and the map is a
+        // function of the aspect. Refusing beats guessing 3:2.
+        None => out.mask_warp_src = MaskWarpSource::Absent,
+    }
+
     out.clamp(); // same defensive ranges as a hand-edited recipe
     out
+}
+
+/// The frame this photo's normalised coordinates are measured against:
+/// `DefaultCropSize` when the file states one, else the raw array.
+///
+/// Split out so the precedence is one statement rather than a nested `match`
+/// inside `read` — and so a test can state it.
+fn frame_dims(root: &rawler::formats::tiff::IFD) -> Option<(f32, f32)> {
+    let pair = |a: Option<f32>, b: Option<f32>| -> Option<(f32, f32)> {
+        let (w, h) = (a?, b?);
+        (w.is_finite() && h.is_finite() && w > 0.0 && h > 0.0).then_some((w, h))
+    };
+    let dng = root.get_entry_recursive(DngTag::DefaultCropSize).map(|e| &e.value);
+    if let Some(v) = dng
+        && let Some(d) = pair(v.get_f32(0).ok().flatten(), v.get_f32(1).ok().flatten())
+    {
+        return Some(d);
+    }
+    pair(
+        root.get_entry_recursive(ExifTag::ImageWidth)?.value.get_f32(0).ok().flatten(),
+        root.get_entry_recursive(ExifTag::ImageHeight)?.value.get_f32(0).ok().flatten(),
+    )
 }
 
 /// Sony vignetting knot → linear-light gain (RawTherapee's formula).
@@ -144,7 +253,16 @@ mod tests {
             p.ca_r.len(),
             p.ca_b.len()
         );
+        eprintln!(
+            "mask warp: {:?} ({} knots, centre {:?}, corner {:?})",
+            p.mask_warp_src,
+            p.mask_warp.len(),
+            p.mask_warp.first(),
+            p.mask_warp.last()
+        );
         assert!(!p.vignette.is_empty() && !p.distortion.is_empty(), "A7RIV files carry all three");
         assert!((p.vignette[0] - 1.0).abs() < 0.02, "centre gain ~1.0");
+        assert_eq!(p.mask_warp_src, MaskWarpSource::CameraMetadata);
+        assert_eq!(p.mask_warp.len(), MASK_WARP_KNOTS);
     }
 }

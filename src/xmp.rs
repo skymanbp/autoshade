@@ -142,22 +142,55 @@ fn local_fmt(v: f32) -> String {
 /// scale — which is exactly why three frames read 0.984/1.000/1.004 and the
 /// probe frames read ≈1.032. So the sidecar's stored geometry lives in the
 /// PLAIN frame (measures 0.998 with the profile off), Lightroom rasterises
-/// the mask BEFORE its lens correction, and the export shows it warped by a
-/// per-lens per-focal polynomial this engine does not model (no `.lcp`
-/// parser; `crs:LensProfileEnable` is never read; our own geometry stage
-/// uses Sony EXIF knots — a DIFFERENT polynomial). This constant is
-/// therefore wrong in BOTH toggle arms; the decision between 1.0 / Sony-warp
-/// / LCP is with the user (`batch10-report.md` §7.5) and lands here only.
+/// the BRUSH mask before its lens correction, and the export shows it warped
+/// by a per-lens per-focal polynomial. ~~this engine does not model (no
+/// `.lcp` parser; `crs:LensProfileEnable` is never read…)~~ **Both of those
+/// parentheses expired on 2026-08-20 (R29 Batch-3) and are corrected below.**
 ///
 /// **RULED 2026-08-19 (user): `1.0`** — render the geometry the sidecar
 /// actually stores (the plain frame, measured 0.998 with the profile off)
-/// and leave Adobe's warp UNMODELLED, disclosed here rather than faked with
-/// one frame's polynomial sample. Strictly better than 1.032 on every frame
-/// measured in Batches 8 and 10; the residual error on any frame is now the
-/// frame's own lens-profile warp (0–3.4 % observed), which only an `.lcp`
-/// reader can remove — registered as the R28 candidate. The `k` plumbing
-/// below is kept (it is exactly the shape a future warp model needs to slot
-/// into); at 1.0 every affine below is the identity.
+/// and leave Adobe's warp to a model rather than to one frame's polynomial
+/// sample. Strictly better than 1.032 on every frame measured in Batches 8
+/// and 10. The `k` plumbing below is kept; at 1.0 every affine below is the
+/// identity.
+///
+/// # What R29 Batch-3 changed, and what it did NOT
+///
+/// The two things this comment used to say the engine lacked, it now has:
+/// [`crate::lcp`] parses Adobe's `.lcp` profiles, and
+/// [`lens_profile_enabled`] reads `crs:LensProfileEnable`. The warp itself is
+/// solved into [`crate::recipe::LensProfile::mask_warp`] from either the
+/// in-camera knots or an `.lcp`, with
+/// [`crate::recipe::MaskWarpSource`] naming which — or which of five refusals
+/// applies.
+///
+/// **This constant stays `1.0`, and now for a POSITIVE reason rather than for
+/// want of a model.** The 2026-08-20 `D` adjudication settled that Lightroom
+/// uses two frames by mask TYPE: brush dabs are stored pre-correction, and
+/// radial / linear shapes — the only geometry this constant touches — are
+/// stored POST-correction (the pixels move 87.5 px on the 105 mm pair while
+/// the mask measures the identity to 0.05 %, 88.7 px apart). A stored radial
+/// box is therefore already in the frame Lightroom drew it in, and carrying
+/// it through this boundary UNSCALED is exactly right. The residual this
+/// comment used to register — "the frame's own lens-profile warp, 0–3.4 %" —
+/// is not a boundary error at all.
+///
+/// Where it WAS a live question is the RENDER: this engine evaluates every
+/// mask BEFORE its geometry stage, so a stored-post-correction radial was
+/// moved by our own distortion map when Lightroom would not move it — up to
+/// 186 px at 24 mm and 88 px at 105 mm. **Fixed in the same batch by user
+/// ruling of 2026-08-20** (`render::MaskFrame`): a parametric shape's sample
+/// point is mapped through the inverse of the geometry stage before
+/// rasterisation, so after the resample its effect lands back on the
+/// coordinates this boundary carried through unscaled. The two halves now
+/// agree by construction — this constant preserves the stored box, and the
+/// render puts the effect where that box says.
+///
+/// That is a deliberate RENDER-BEHAVIOUR change for every imported radial and
+/// linear mask on a photo with an active lens profile, and it rides the
+/// v0.35.0 hard schema break. See the mask-warp block header in `render.rs`
+/// for the frame table, the measured magnitudes and the three regression pins.
+/// Nothing about it reaches this constant, which is the point.
 const LR_MASK_FRAME_SCALE: f64 = 1.0;
 
 /// The frame every normalised `crs:` coordinate — mask box AND crop rectangle
@@ -1806,6 +1839,39 @@ pub fn import_losses(xmp: &str) -> Vec<MaskImportLoss> {
     // outside the crs Description's own scope in principle, and the decode
     // needs them (see `FrameAspect`).
     mask_summary(scope.as_ref(), authored_by_autoshop, FrameAspect::from_xmp(xmp)).losses
+}
+
+/// Did this sidecar's document have Lightroom's LENS PROFILE CORRECTION
+/// switched on? `None` when the document says nothing.
+///
+/// Read for exactly one purpose (R29 Batch-3): the mask-warp frame. The whole
+/// difference between the frame a mask was STORED in and the frame it was
+/// EXPORTED into is Lightroom's lens correction, so `crs:LensProfileEnable="0"`
+/// means the two frames are the SAME and an identity warp is the right answer —
+/// not a missing one. [`crate::recipe::MaskWarpSource::DisabledInSidecar`] is
+/// where that distinction is recorded, and
+/// [`crate::pipeline::fresh_lens_profile_for_sidecar`] is what applies it.
+///
+/// This does NOT touch what this engine renders. Autoshop's own geometry stage
+/// is driven by the photographer's `lens_profile` toggles, which are theirs to
+/// set; reading Lightroom's switch as an instruction would silently overwrite
+/// them from a file they may have imported only for its masks.
+///
+/// Adobe writes `"0"` / `"1"`; `"False"` / `"True"` are accepted too because
+/// the surrounding boolean keys in the same namespace use that spelling and a
+/// reader that took only one of the two would be right by luck.
+pub fn lens_profile_enabled(xmp: &str) -> Option<bool> {
+    let scope = crs_own_scope(xmp);
+    let raw = Scope::new(scope.as_ref()).crs_str("LensProfileEnable")?;
+    match raw.trim() {
+        "1" => Some(true),
+        "0" => Some(false),
+        s if s.eq_ignore_ascii_case("true") => Some(true),
+        s if s.eq_ignore_ascii_case("false") => Some(false),
+        // A value neither spelling covers is not a "no": saying nothing is
+        // honest where guessing would decide a coordinate frame.
+        _ => None,
+    }
 }
 
 /// One English sentence for what an import carried and what it left behind, or
@@ -11396,6 +11462,144 @@ mod tests {
     /// `MaskImportReason::BrushCarried`, which imports the correction SILENTLY
     /// — the failure mode this project treats as worse than the refusal it
     /// replaced.
+    /// R29 Batch-3: `crs:LensProfileEnable` is READ, in both spellings, and a
+    /// document that says nothing gets no opinion put in its mouth.
+    ///
+    /// This is the fact that separates "no warp because Lightroom drew no
+    /// correction" (the frames coincide; identity is CORRECT) from "no warp
+    /// because nobody could solve one" (the frames differ by an unknown
+    /// amount). `MaskWarpSource` keeps them apart and this reader is what
+    /// supplies the first one.
+    #[test]
+    fn the_sidecar_lens_profile_switch_is_read_in_both_spellings() {
+        let with = |v: &str| {
+            lr_doc("").replace("crs:Version=", &format!("crs:LensProfileEnable=\"{v}\"\n    crs:Version="))
+        };
+        // PREMISE: the substitution really landed, or every case below is
+        // reading a document with no such key and agreeing by accident.
+        assert!(with("0").contains("crs:LensProfileEnable=\"0\""), "{}", with("0"));
+        assert_eq!(lens_profile_enabled(&with("0")), Some(false));
+        assert_eq!(lens_profile_enabled(&with("1")), Some(true));
+        assert_eq!(lens_profile_enabled(&with("False")), Some(false));
+        assert_eq!(lens_profile_enabled(&with("true")), Some(true));
+        // Says nothing / says something unreadable ⇒ no opinion. Guessing here
+        // would decide a coordinate frame from a value nobody wrote.
+        assert_eq!(lens_profile_enabled(&lr_doc("")), None);
+        assert_eq!(lens_profile_enabled(&with("maybe")), None);
+        // `crs:LensProfileName` must not answer for `crs:LensProfileEnable` —
+        // MUTATION THIS KILLS: dropping the `crs:` key anchoring in `crs_str`.
+        let named = lr_doc("").replace(
+            "crs:Version=",
+            "crs:LensProfileName=\"Adobe (Sony FE 24-105mm F4 G OSS)\"\n    crs:Version=",
+        );
+        assert_eq!(lens_profile_enabled(&named), None);
+    }
+
+    /// R29 Batch-3 ACCEPTANCE ④ — the mask warp does NOT touch this boundary.
+    ///
+    /// `LensProfile::mask_warp` is a RENDER-TIME map. The recipe keeps the
+    /// coordinates the sidecar stored, verbatim, so `lr_to_engine` and
+    /// `engine_to_lr` stay exact inverses of one another and a republished
+    /// sidecar is byte-faithful to what Lightroom wrote — brush dab streams
+    /// included, which is the payload with the least tolerance for a rewrite
+    /// (`BrushStroke::dabs` is carried as a STRING for exactly that reason).
+    ///
+    /// The document here carries a radial, a gradient and a two-stroke brush
+    /// group, and is exported twice: once from a recipe with no warp and once
+    /// from the same recipe carrying the full 105 mm warp — the most violent
+    /// one measured (`m` from 1.0425 at the centre to 0.9976 at the corner,
+    /// ~88 px at r = 3250). The two documents must be EQUAL, byte for byte.
+    ///
+    /// MUTATION THIS KILLS: applying `render::lr_mask_warp_norm` inside
+    /// `masks_xml` / `radial_mask_xml` / `brush_mask_xml`, or anywhere else on
+    /// the way out. Any of them makes these two strings differ.
+    #[test]
+    fn the_mask_warp_never_reaches_the_xmp_boundary() {
+        let frame = FrameAspect::from_size(9504.0, 6336.0);
+        let doc = in_frame(
+            &lr_doc(&format!(
+                "{}{}",
+                lr_correction("Mask 7", "", &format!("{}{}", lr_gradient("0"), lr_brush_group("false", ""))),
+                lr_correction(
+                    "R",
+                    "",
+                    &lr_radial_at("-0.082402", "-0.008723", "1.109604", "1.090228", "28.229232")
+                ),
+            )),
+            9504,
+            6336,
+        );
+        let plain = xmp_to_recipe(&doc);
+        // PREMISE: the document really did bring in the geometry whose frame
+        // this test is about, or it would prove nothing.
+        assert_eq!(plain.masks.len(), 2, "both corrections must import: {:?}", plain.masks);
+        assert!(
+            plain.masks.iter().any(|m| m
+                .components
+                .iter()
+                .any(|c| matches!(c.geometry, MaskGeometry::Brush { .. }))),
+            "the brush group must be in the recipe"
+        );
+        let mut warped = plain.clone();
+        warped.lens_profile = crate::recipe::LensProfile {
+            mask_warp: crate::lcp::PerspectiveModel {
+                focal_mm: Some(105.0),
+                focus_distance: Some(10000.0),
+                scale: 0.959207,
+                k: [0.961677, 1.182717, -8.218554],
+                focal_x: None,
+                sensor_format_factor: 1.0,
+            }
+            .mask_warp_knots((9504.0, 6336.0), crate::recipe::MASK_WARP_KNOTS)
+            .expect("the 105mm node solves"),
+            mask_warp_src: crate::recipe::MaskWarpSource::Lcp,
+            ..Default::default()
+        };
+        // PREMISE: the warp really is a warp — a 16-knot identity would make
+        // the equality below vacuous.
+        let w = &warped.lens_profile.mask_warp;
+        assert_eq!(w.len(), 16);
+        assert!(w[0] > 1.04 && w[15] < 1.0, "the 105mm warp is not the identity: {w:?}");
+
+        let a = recipe_to_xmp_in_frame(&plain, frame).0;
+        let b = recipe_to_xmp_in_frame(&warped, frame).0;
+        assert_eq!(a, b, "an active mask warp changed the written sidecar");
+        // And the ROUND TRIP still lands on the same recipe geometry, so the
+        // equality above is not two identically-broken documents.
+        //
+        // Compared field by field rather than with one `assert_eq!` on the
+        // masks, because `crs:MaskSyncID` legitimately differs: the writer
+        // MINTS a fresh identity for every component it emits (see
+        // `BrushStroke::sync_id`), so a whole-struct comparison would fail on
+        // the one field that is supposed to change and say nothing about the
+        // frame.
+        let back = xmp_to_recipe(&b);
+        assert_eq!(back.masks.len(), plain.masks.len());
+        for (got, want) in back.masks.iter().zip(&plain.masks) {
+            assert_eq!(got.mask, want.mask, "base geometry moved");
+            assert_eq!(got.components.len(), want.components.len());
+            for (g, w) in got.components.iter().zip(&want.components) {
+                match (&g.geometry, &w.geometry) {
+                    (
+                        MaskGeometry::Brush { strokes: gs, name: gn, .. },
+                        MaskGeometry::Brush { strokes: ws, name: wn, .. },
+                    ) => {
+                        assert_eq!(gn, wn);
+                        assert_eq!(gs.len(), ws.len());
+                        for (a, b) in gs.iter().zip(ws) {
+                            // The DAB STREAM, token for token — the payload a
+                            // coordinate warp would have rewritten.
+                            assert_eq!(a.dabs, b.dabs, "a dab stream was rewritten");
+                            assert_eq!((a.value, a.radius, a.flow, a.center_weight),
+                                (b.value, b.radius, b.flow, b.center_weight));
+                        }
+                    }
+                    (g, w) => assert_eq!(g, w, "component geometry moved"),
+                }
+            }
+        }
+    }
+
     #[test]
     fn a_lightroom_brush_group_imports_beside_the_shapes_it_used_to_take_down() {
         let doc = lr_doc(&lr_correction(

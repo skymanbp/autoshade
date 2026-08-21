@@ -153,7 +153,13 @@ fn xmp_arm(
     if !knots.is_empty() {
         r.base_curve = knots;
     }
-    r.lens_profile = autoshop::pipeline::fresh_lens_profile(p);
+    // The SIDECAR-aware form (R29 Batch-3): this is the one stamp site that
+    // holds the document and the photograph at the same moment, so it is the
+    // one that can tell "no warp because Lightroom drew no correction" from
+    // "no warp because nobody could solve one". The other stamp sites reach
+    // `fresh_lens_profile` with no document in hand and correctly say the
+    // second thing.
+    r.lens_profile = autoshop::pipeline::fresh_lens_profile_for_sidecar(p, Some(text));
     if r.as_shot_k.is_none() {
         let (ask, ast) = autoshop::pipeline::fresh_as_shot_wb(p);
         r.as_shot_k = ask;

@@ -376,7 +376,14 @@ pub fn render_to_image_in(
     apply_recipe_wb(&mut data, recipe);
 
     // --- tone + clarity + sat/vibrance + NR + sharpen (shared pipeline) -------
-    apply_develop_with_rasters(&mut data, w, h, recipe, &rasters);
+    // ONE value decides both the mask chain's frame adaptation and whether the
+    // geometry stage runs below (`MaskFrame`): a radial/linear mask is stored
+    // in Lightroom's POST-correction frame, so it is mapped through the inverse
+    // of exactly the resample that is about to happen — and if that resample is
+    // not going to happen, it is not mapped at all.
+    let geom = geometry_profile(recipe);
+    let frame = MaskFrame::downstream(&geom, recipe.lens_distortion);
+    apply_develop_with_rasters(&mut data, w, h, recipe, &rasters, frame);
 
     // --- pack to 16-bit (highest precision; JPEG downconverts at encode) ------
     let mut buf: Vec<u16> = vec![0u16; w * h * 3];
@@ -398,9 +405,9 @@ pub fn render_to_image_in(
     // small preview and this full render.
     // `geometry_profile`, not `recipe.lens_profile`: the manual CA pair rides
     // the same per-channel knots (R25 B3), and reading the raw profile here
-    // would skip it on a photo with no in-camera CA data.
-    let geom = geometry_profile(recipe);
-    if geom.geometry_active() || recipe.lens_distortion != 0.0 {
+    // would skip it on a photo with no in-camera CA data. Hoisted above the
+    // develop so the mask chain and this resample are ONE decision.
+    if frame.warps() {
         dynimg = apply_lens_geometry(&dynimg, &geom, recipe.lens_distortion);
     }
 
@@ -860,7 +867,11 @@ pub fn render_baked_to_image(
     }
 
     apply_recipe_wb(&mut data, recipe);
-    apply_develop_with_rasters(&mut data, w, h, recipe, &rasters);
+    // Same ONE-value rule as the RAW arm above (`MaskFrame`): the mask chain's
+    // frame adaptation and the geometry gate below are the same decision.
+    let geom = geometry_profile(recipe);
+    let frame = MaskFrame::downstream(&geom, recipe.lens_distortion);
+    apply_develop_with_rasters(&mut data, w, h, recipe, &rasters, frame);
 
     let mut buf: Vec<u16> = vec![0u16; w * h * 3];
     buf.par_chunks_mut(3).zip(data.par_iter()).for_each(|(o, px)| {
@@ -875,8 +886,7 @@ pub fn render_baked_to_image(
     // Lens geometry, then straighten, before the user crop — same order as
     // the RAW path (the geometric chain is original → corrected → view), and
     // the same composed profile (manual CA included).
-    let geom = geometry_profile(recipe);
-    if geom.geometry_active() || recipe.lens_distortion != 0.0 {
+    if frame.warps() {
         dynimg = apply_lens_geometry(&dynimg, &geom, recipe.lens_distortion);
     }
     if recipe.straighten_deg != 0.0 {
@@ -1707,6 +1717,25 @@ pub fn develop_preview(preview: &DynamicImage, recipe: &EditRecipe) -> DynamicIm
     develop_preview_with(preview, recipe, &crate::diag::pixels())
 }
 
+/// [`develop_preview_with`] for a caller that states its own [`MaskFrame`].
+///
+/// The two forms above assume the caller runs the geometry stage when the
+/// recipe's geometry is active, because the three surfaces that look at a
+/// preview all do (`bin/gui/util.rs`'s `build_preview`, `serve.rs`'s preview
+/// route, and the GUI coverage overlay). This form is for the exception, and
+/// the exception is real: the GUI's range REFERENCE builds develop a recipe
+/// that still carries a lens profile and then apply NO geometry, because they
+/// exist to sample pixel VALUES rather than to be looked at. They pass
+/// [`MaskFrame::AsRendered`] and their prefix masks stay on their own pixels.
+pub fn develop_preview_framed(
+    preview: &DynamicImage,
+    recipe: &EditRecipe,
+    diag: &crate::diag::Diag<'_>,
+    frame: MaskFrame<'_>,
+) -> DynamicImage {
+    develop_preview_inner(preview, recipe, diag, Some(frame))
+}
+
 /// [`develop_preview`] with the caller's own diagnostics channel — the injected
 /// form of the preview arm. `diag` states whose pixels these are (or that
 /// nobody's are), and where the mask loader's refusals go.
@@ -1715,12 +1744,29 @@ pub fn develop_preview_with(
     recipe: &EditRecipe,
     diag: &crate::diag::Diag<'_>,
 ) -> DynamicImage {
+    develop_preview_inner(preview, recipe, diag, None)
+}
+
+/// The preview develop. `frame` is `None` for the two entry points that let the
+/// RECIPE answer "will geometry follow?" and `Some` for the caller that knows
+/// better — see [`develop_preview_framed`].
+fn develop_preview_inner(
+    preview: &DynamicImage,
+    recipe: &EditRecipe,
+    diag: &crate::diag::Diag<'_>,
+    frame: Option<MaskFrame<'_>>,
+) -> DynamicImage {
     // Entry-point sanitisation: ONE construction, ONE disclosure — the
     // ValidatedRecipe token (arch item c) replaces four hand-rolled
     // clone+clamp+eprintln triplets that had already drifted apart.
     let validated = crate::recipe::ValidatedRecipe::new(recipe);
     validated.disclose(diag);
     let recipe = &*validated;
+    // Derived from the CLAMPED recipe, and from the same composed profile the
+    // preview surfaces hand `apply_lens_geometry` — `geometry_profile`, not the
+    // raw one, because the manual CA pair rides those knots (R25 B3).
+    let geom = geometry_profile(recipe);
+    let frame = frame.unwrap_or_else(|| MaskFrame::downstream(&geom, recipe.lens_distortion));
     let rgb = preview.to_rgb8();
     let (w, h) = rgb.dimensions();
     let mut data: Vec<[f32; 3]> = rgb
@@ -1729,7 +1775,7 @@ pub fn develop_preview_with(
         .map(|p| [p[0] as f32 / 255.0, p[1] as f32 / 255.0, p[2] as f32 / 255.0])
         .collect();
     apply_recipe_wb(&mut data, recipe);
-    apply_develop(&mut data, w as usize, h as usize, recipe, diag);
+    apply_develop(&mut data, w as usize, h as usize, recipe, diag, frame);
     let mut buf = vec![0u8; (w * h * 3) as usize];
     buf.par_chunks_mut(3).zip(data.par_iter()).for_each(|(o, px)| {
         o[0] = to_u8(px[0]);
@@ -1752,9 +1798,10 @@ fn apply_develop(
     h: usize,
     r: &EditRecipe,
     diag: &crate::diag::Diag<'_>,
+    frame: MaskFrame<'_>,
 ) {
     let rasters = best_effort_mask_raster_snapshot(r, diag);
-    apply_develop_with_rasters(data, w, h, r, &rasters);
+    apply_develop_with_rasters(data, w, h, r, &rasters, frame);
 }
 
 /// [`apply_develop`] on pixels with no owner and no caller to route to — the
@@ -1763,7 +1810,10 @@ fn apply_develop(
 /// un-injected preview arm does, said once here instead of at ~40 call sites.
 #[cfg(test)]
 fn apply_develop_anon(data: &mut [[f32; 3]], w: usize, h: usize, r: &EditRecipe) {
-    apply_develop(data, w, h, r, &crate::diag::pixels());
+    // `AsRendered`: these fixtures construct a raw pixel buffer and inspect it
+    // directly — no geometry stage runs after them, so every mask belongs at
+    // its stored coordinates (`MaskFrame`).
+    apply_develop(data, w, h, r, &crate::diag::pixels(), MaskFrame::AsRendered);
 }
 
 fn apply_develop_with_rasters(
@@ -1772,6 +1822,7 @@ fn apply_develop_with_rasters(
     h: usize,
     r: &EditRecipe,
     rasters: &MaskRasterSnapshot,
+    frame: MaskFrame<'_>,
 ) {
     // 0/0a) vignette — the in-camera profile falloff map and the manual
     //    slider compensation, both radial gains in LINEAR light, applied as
@@ -1878,7 +1929,7 @@ fn apply_develop_with_rasters(
     }
     // 6) local masked adjustments (linear/radial gradients).
     if !r.masks.is_empty() {
-        apply_masks(data, w, h, r, rasters);
+        apply_masks(data, w, h, r, rasters, frame);
     }
 }
 
@@ -2143,10 +2194,17 @@ fn apply_masks(
     h: usize,
     r: &EditRecipe,
     rasters: &MaskRasterSnapshot,
+    frame: MaskFrame<'_>,
 ) {
     if w == 0 || h == 0 {
         return; // both passes below chunk by w; rayon asserts chunk_size != 0
     }
+    // The frame adaptation, built ONCE per frame rather than per mask or per
+    // pixel (see `MaskUnwarp`). `None` whenever nothing downstream moves these
+    // pixels, which is what keeps a photo with no active geometry byte-identical
+    // to what this function produced before R29 Batch-3.
+    let unwarp = frame.unwarp((w as f32, h as f32));
+    let unwarp = unwarp.as_ref();
     // Airlight for every masked dehaze in this frame, estimated ONCE and only
     // when some mask actually asks for dehaze (the estimate is a full-frame
     // histogram — a real cost at 61 MP). Estimating it here, from the frame as
@@ -2244,7 +2302,7 @@ fn apply_masks(
         // combined mask coverage × master amount at a pixel (with inversion).
         let weight_at = |x: usize, y: usize| -> f32 {
             let (nx, ny) = (x as f32 / w as f32, y as f32 / h as f32);
-            let mut wgt = combined_mask_weight(m, nx, ny, bmp, &comp_bmps);
+            let mut wgt = combined_mask_weight(m, nx, ny, bmp, &comp_bmps, unwarp);
             if m.inverted {
                 wgt = 1.0 - wgt;
             }
@@ -2465,6 +2523,230 @@ fn apply_masks(
     }
 }
 
+/// WHERE a mask chain's output will be sampled — the value that keeps
+/// parametric mask geometry and the pixel warp travelling together.
+///
+/// # The defect this closes (R29 Batch-3, user ruling 2026-08-20)
+///
+/// Lightroom stores mask geometry in two frames, by mask TYPE. Brush dabs live
+/// PRE-lens-correction; RADIAL and LINEAR shapes live POST-correction. The `D`
+/// adjudication measured the second one at pixel level on the 105 mm pair: the
+/// PIXELS move +87.5 px at r ≈ 3250 (the `.lcp` model at 2.69 px rms over 30
+/// NCC points, tangential rms 1.22 px) while the radial mask itself measures a
+/// similarity of 0.99956 — the identity to 0.05 %, and **88.7 px away from the
+/// pixel field**.
+///
+/// This engine evaluates every mask BEFORE its geometry stage (`apply_masks`
+/// runs inside `apply_develop`, `apply_lens_geometry` after it) and then
+/// resamples the whole frame. So a mask it draws is CARRIED by the distortion
+/// field exactly as the pixels are:
+///
+/// * a BRUSH is then already right — Lightroom rasterises it in that same
+///   pre-correction frame, so the two agree with nothing applied. Warping a
+///   dab here would apply the field twice.
+/// * a RADIAL or LINEAR was **wrong by the whole field** — up to 186 px at
+///   24 mm and 88 px at 105 mm — because Lightroom does not move it and this
+///   engine did.
+///
+/// The fix is to map a parametric shape's SAMPLE POINT through the INVERSE of
+/// the geometry stage before rasterising, so that after the resample the effect
+/// lands back on the stored coordinates. [`MaskUnwarp`] is that map.
+///
+/// # Why this is a parameter and not derived from the recipe
+///
+/// Because "does the geometry stage run?" is the CALLER's fact, not the
+/// recipe's. Five surfaces compose develop-then-geometry (`render_to_file`'s
+/// two arms, the GUI preview, the GUI coverage overlay, the web preview) and
+/// all five gate on the same expression — but the GUI's range REFERENCE builds
+/// (`canvas.rs`) deliberately develop a recipe that still carries a lens
+/// profile and then apply NO geometry, because they exist to sample pixel
+/// values, not to be looked at. Deriving the answer inside the mask chain would
+/// unwarp masks for those two and put the reference's own prefix masks off
+/// their pixels.
+///
+/// So the invariant is stated as a value: **whoever runs the geometry stage
+/// builds this from the same profile and amount it will pass to
+/// [`apply_lens_geometry`], and uses [`MaskFrame::warps`] to decide whether to
+/// run it at all.** One value, both decisions, no way for them to disagree.
+#[derive(Clone, Copy, Debug)]
+pub enum MaskFrame<'a> {
+    /// The caller WILL resample this buffer through [`apply_lens_geometry`]
+    /// with exactly this profile and manual amount.
+    WarpedDownstream { profile: &'a crate::recipe::LensProfile, amount: f32 },
+    /// Nothing downstream moves these pixels: the mask chain's output IS what
+    /// will be looked at, so every geometry is evaluated at its stored
+    /// coordinates.
+    AsRendered,
+}
+
+impl<'a> MaskFrame<'a> {
+    /// What a caller that runs the geometry stage passes.
+    ///
+    /// Answers [`MaskFrame::AsRendered`] when the profile and amount do not in
+    /// fact resample anything — the SAME condition `apply_lens_geometry`'s call
+    /// site gates on, so an inert profile leaves the mask chain byte-identical
+    /// to what it produced before this batch existed.
+    pub fn downstream(profile: &'a crate::recipe::LensProfile, amount: f32) -> Self {
+        if profile.geometry_active() || amount != 0.0 {
+            MaskFrame::WarpedDownstream { profile, amount }
+        } else {
+            MaskFrame::AsRendered
+        }
+    }
+
+    /// Will the geometry stage run? The caller's gate, so that the gate and the
+    /// mask map are one decision.
+    pub fn warps(self) -> bool {
+        matches!(self, MaskFrame::WarpedDownstream { .. })
+    }
+
+    /// The inverse map for this frame, or `None` when nothing moves.
+    fn unwarp(self, dims: (f32, f32)) -> Option<MaskUnwarp> {
+        match self {
+            MaskFrame::WarpedDownstream { profile, amount } => {
+                MaskUnwarp::new(profile, amount, dims)
+            }
+            MaskFrame::AsRendered => None,
+        }
+    }
+}
+
+/// ORIGINAL-frame point → the point it will OCCUPY after the geometry stage,
+/// precomputed as a radial factor LUT.
+///
+/// Exactly [`lens_ungeom_norm`], and built BY calling it — not by a second
+/// implementation of the same inversion. That matters twice over: it is the
+/// precise inverse of what [`apply_lens_geometry`] does (composed profile,
+/// manual amount and the CA fill scale all included, green map, the C2 shared
+/// convention), and it cannot drift away from the resampler because there is
+/// only one solver.
+///
+/// **The manual `lens_distortion` amount is covered with no residue**, and that
+/// is why this uses `lens_ungeom_norm` rather than the `.lcp`-derived
+/// [`crate::recipe::LensProfile::mask_warp`]. The requirement is that the
+/// effect land at its stored coordinates in OUR export, which is our own
+/// geometry stage's inverse — exactly. `mask_warp` models LIGHTROOM's
+/// correction instead and would leave our-map-vs-their-map residue (6.74 px
+/// rms, 24.97 px max, measured between the two on the 24 mm frame) for no gain.
+/// `mask_warp` keeps its own job: the brush-frame model and its provenance.
+///
+/// A LUT because `lens_ungeom_norm` costs a 256-step peak scan plus 40
+/// bisection steps per call, and this is a per-pixel question on frames up to
+/// 61 MP. The map is radial, so [`LUT_N`] nodes over the normalised radius
+/// carry it exactly as the resampler's own per-channel LUTs carry the forward
+/// map, at the same node density.
+struct MaskUnwarp {
+    /// Factor `r_corrected / r_original` at node `i` = radius `i/(LUT_N−1)` of
+    /// the half-diagonal.
+    lut: Vec<f32>,
+    rr: f32,
+    w: f32,
+    h: f32,
+}
+
+impl MaskUnwarp {
+    fn new(profile: &crate::recipe::LensProfile, amount: f32, dims: (f32, f32)) -> Option<Self> {
+        let (w, h) = dims;
+        if !(w > 0.0 && h > 0.0) {
+            return None;
+        }
+        let rr = (0.5 * (w * w + h * h).sqrt()).max(1e-6);
+        // Sampled along the +x axis: the map is radial, so one ray carries it,
+        // and going through the public entry point keeps this honest.
+        let lut: Vec<f32> = (0..LUT_N)
+            .map(|i| {
+                let rho = i as f32 / (LUT_N - 1) as f32;
+                let dx = rho * rr;
+                if dx <= 1e-6 {
+                    // The centre is a fixed point of every radial map; the
+                    // ratio there is 0/0 and the limit is the next node's.
+                    return f32::NAN;
+                }
+                let (ox, _) = lens_ungeom_norm(dx / w + 0.5, 0.5, dims, profile, amount);
+                (ox - 0.5) * w / dx
+            })
+            .collect();
+        let mut lut = lut;
+        if lut.len() > 1 {
+            lut[0] = lut[1];
+        }
+        // Identity map = nothing to do, and saying so here is what keeps a
+        // distortion-free profile bit-identical rather than merely close.
+        //
+        // The threshold is in PIXELS, not in factor units, because that is the
+        // question: a factor of 1 ± 1e-7 on a 9504 px frame moves a mask by
+        // 6e-4 px, which is not a displacement, it is the bisection's own
+        // residue (`lens_ungeom_norm` does not short-circuit for an active
+        // profile whose knots are all 1.0 — it solves, and lands a few ulps
+        // off). Anything a real lens produces is four orders larger: the
+        // gentlest frame measured in this batch moves 0.6 % at the centre.
+        //
+        // MUTATION THIS KILLS: dropping this guard makes every coordinate on a
+        // distortion-free profile take a float round trip through `at`, and
+        // `with_the_geometry_stage_inactive_the_mask_chain_is_untouched` goes red.
+        if lut.iter().all(|f| (f - 1.0).abs() * rr < 0.01) {
+            return None;
+        }
+        Some(MaskUnwarp { lut, rr, w, h })
+    }
+
+    /// The point `(nx, ny)` will occupy after the geometry stage.
+    fn at(&self, nx: f32, ny: f32) -> (f32, f32) {
+        let (dx, dy) = ((nx - 0.5) * self.w, (ny - 0.5) * self.h);
+        let rho = ((dx * dx + dy * dy).sqrt() / self.rr).clamp(0.0, 1.0);
+        let t = rho * (LUT_N - 1) as f32;
+        let i = (t.floor() as usize).min(LUT_N - 2);
+        let f = t - i as f32;
+        let k = self.lut[i] * (1.0 - f) + self.lut[i + 1] * f;
+        ((dx * k) / self.w + 0.5, (dy * k) / self.h + 0.5)
+    }
+}
+
+/// Is this geometry one Lightroom stores in its POST-correction frame?
+///
+/// The whole per-type split, in one predicate so the three arms are decided in
+/// one place and the reasons sit beside each other:
+///
+/// * `Radial` / `Linear` — YES. Measured post-correction (`MaskFrame`).
+/// * `Brush` — no. Measured PRE-correction, which is the frame this engine
+///   already evaluates in; the geometry stage carries it correctly untouched.
+/// * `Bitmap` / `AiMask` — no, and not for want of measuring. These rasters are
+///   ENGINE-generated (our segmenter, the GUI's own paint), so there is no
+///   Lightroom rendering for them to agree with; they are authored in the frame
+///   the engine draws them in and stay there.
+/// * A colour / luminance `RangeMask` is not here at all because it selects by
+///   pixel VALUE, not position, and a pixel keeps its value through a resample
+///   — approximately frame-invariant, so nothing to map. (Approximately: the
+///   resampler interpolates, so a value on a steep edge shifts slightly. That
+///   residue is sub-pixel and is registered here rather than modelled.)
+fn is_lr_post_correction_geometry(g: &MaskGeometry) -> bool {
+    matches!(g, MaskGeometry::Radial { .. } | MaskGeometry::Linear { .. })
+}
+
+/// [`mask_weight`] with the frame adaptation applied — the ONE place a stored
+/// coordinate becomes the coordinate this engine's pre-geometry rasteriser
+/// should be asked about.
+///
+/// Split from `mask_weight` rather than folded into it so that `mask_weight`
+/// keeps meaning exactly "the weight of this geometry at this STORED point",
+/// which is what every unit test in this file asserts and what the XMP
+/// boundary's byte fidelity is defined against.
+fn mask_weight_in(
+    g: &MaskGeometry,
+    nx: f32,
+    ny: f32,
+    bmp: Option<&image::GrayImage>,
+    unwarp: Option<&MaskUnwarp>,
+) -> f32 {
+    match unwarp {
+        Some(u) if is_lr_post_correction_geometry(g) => {
+            let (nx, ny) = u.at(nx, ny);
+            mask_weight(g, nx, ny, bmp)
+        }
+        _ => mask_weight(g, nx, ny, bmp),
+    }
+}
+
 /// Mask coverage [0,1] at normalised frame coordinate (nx, ny).
 fn mask_weight(g: &MaskGeometry, nx: f32, ny: f32, bmp: Option<&image::GrayImage>) -> f32 {
     match g {
@@ -2590,6 +2872,25 @@ fn mask_weight(g: &MaskGeometry, nx: f32, ny: f32, bmp: Option<&image::GrayImage
         // was kept out of the renderer for. Both disclosure channels name this
         // (`MaskImportReason::BrushCarried`, `MaskLossReason::BrushCarried`),
         // so it is a stated limit and not a silent zero.
+        //
+        // R29 Batch-3 closed the OTHER half of that registration — the frame.
+        // Lightroom rasterises a brush in its pre-lens-correction frame, and
+        // so does this engine: `apply_masks` runs before `apply_lens_geometry`
+        // and the geometry stage carries the mask exactly as it carries the
+        // photograph. So when the kernel lands, the dab coordinates below are
+        // ALREADY in the right frame and need no warp — see the mask-warp
+        // block header for the measurements and the frame table, and
+        // `the_engine_evaluates_masks_before_the_geometry_stage` for the pin.
+        // Applying a warp here would apply the field TWICE.
+        //
+        // That is why `is_lr_post_correction_geometry` excludes this arm while
+        // the SAME batch wired the radial and linear ones: the two shapes are
+        // stored in different frames, so they need different amounts of
+        // nothing-and-something, and the split is decided in that one predicate
+        // (`only_lightrooms_post_correction_shapes_are_frame_adapted` pins it,
+        // brush included).
+        //
+        // What is left, and it is only this: the kernel.
         MaskGeometry::Brush { .. } => 0.0,
         // AI mask: the RECOMPUTED alpha, sampled exactly like a raster mask —
         // because that is what it is. `segment::resolve_ai_masks` runs our own
@@ -3166,16 +3467,23 @@ fn load_mask_raster_snapshot_with_budget(
 /// Add / Subtract / Intersect grammar — the algebra is documented on
 /// [`crate::recipe::MaskCombine`]). Inversion / amount / range are the
 /// caller's layers, exactly as with the single-geometry `mask_weight`.
+///
+/// `unwarp` is the frame adaptation ([`MaskFrame`]) — applied PER COMPONENT,
+/// through [`mask_weight_in`], because a correction can hold a post-correction
+/// radial and a pre-correction brush side by side and each must be asked about
+/// in its own frame. Folding the map in at this level instead would have moved
+/// the brush too.
 fn combined_mask_weight(
     m: &crate::recipe::LocalAdjustment,
     nx: f32,
     ny: f32,
     base: Option<&image::GrayImage>,
     comp_bmps: &[Option<&image::GrayImage>],
+    unwarp: Option<&MaskUnwarp>,
 ) -> f32 {
-    let mut w = mask_weight(&m.mask, nx, ny, base);
+    let mut w = mask_weight_in(&m.mask, nx, ny, base, unwarp);
     for (c, bmp) in m.components.iter().zip(comp_bmps) {
-        let cw = mask_weight(&c.geometry, nx, ny, *bmp);
+        let cw = mask_weight_in(&c.geometry, nx, ny, *bmp, unwarp);
         w = match c.mode {
             crate::recipe::MaskCombine::Add => 1.0 - (1.0 - w) * (1.0 - cw),
             crate::recipe::MaskCombine::Subtract => w * (1.0 - cw),
@@ -3330,9 +3638,18 @@ pub(crate) fn sample_gray_norm(b: &image::GrayImage, nx: f32, ny: f32) -> f32 {
 /// apply_masks' sequential stacking; the GUI's overlay and range sampler
 /// both do). Output is an 8-bit map at the reference's size
 /// (255 = full effect), in the ORIGINAL frame like every mask.
+///
+/// `frame` must be the SAME [`MaskFrame`] the caller will use on the pixels
+/// this overlay is painted over. The GUI's overlay applies
+/// [`apply_lens_geometry`] to the coverage raster so the red wash follows the
+/// rendered pixels; with the R29 Batch-3 wiring the render now puts a
+/// parametric mask back on its STORED coordinates, so an overlay built without
+/// the same adaptation would advertise coverage the render does not apply —
+/// by the full field, up to 186 px at 24 mm.
 pub fn mask_coverage(
     m: &crate::recipe::LocalAdjustment,
     reference: &DynamicImage,
+    frame: MaskFrame<'_>,
 ) -> image::GrayImage {
     let rgb = reference.to_rgb8();
     let (w, h) = rgb.dimensions();
@@ -3340,6 +3657,8 @@ pub fn mask_coverage(
     if !m.enabled {
         return image::GrayImage::new(w, h);
     }
+    let unwarp = frame.unwarp((w as f32, h as f32));
+    let unwarp = unwarp.as_ref();
     // DROPPED channel, for the same reason as `dead_bitmap_rasters` (R29-1):
     // this is the overlay probe, it runs per frame, and a dead raster's
     // disclosure is the empty coverage it returns plus the ⚠ on the mask row —
@@ -3372,6 +3691,7 @@ pub fn mask_coverage(
             y as f32 / h as f32,
             bmp.as_deref(),
             &comp_refs,
+            unwarp,
         );
         if m.inverted {
             wgt = 1.0 - wgt;
@@ -5824,6 +6144,234 @@ pub fn lens_ungeom_norm(
     ((dx * f) / w.max(1e-6) + 0.5, (dy * f) / h.max(1e-6) + 0.5)
 }
 
+// --- the MASK WARP: Lightroom's stored mask frame → Lightroom's export frame -
+//
+// Everything in this block is about LIGHTROOM's frames, not this engine's. The
+// two are not the same and the difference is the whole reason the block needs a
+// header rather than a one-line doc.
+//
+// WHAT WAS MEASURED (R27 Batches 8-10, closed by the R29 `D` adjudication,
+// 2026-08-20). Lightroom stores mask geometry in TWO frames, by mask TYPE:
+//
+//   * BRUSH dabs are stored PRE-lens-correction. Eleven disjoint dabs on the
+//     24 mm frame are displaced from their stored coordinates by exactly the
+//     lens-profile distortion field: the `.lcp` model with ZERO free parameters
+//     scores 4.63 px rms against a 4.19 px tangential noise floor, and the same
+//     field read off the camera's own knots scores 5.13 px. On 138 pixel
+//     patches of a `LensProfileEnable` 0→1 pair the two score 2.11 / 2.30 px.
+//   * RADIAL and LINEAR shapes are stored POST-correction. On the 105 mm `D`
+//     pair the PIXELS move +87.5 px at r ≈ 3250 (the `.lcp` model at 2.69 px
+//     rms, 30 NCC points, tangential rms 1.22 px) while the radial mask itself
+//     measures a similarity of 0.99956 — identity to within 0.05 %, and 88.7 px
+//     away from the pixel field.
+//
+// So `m(r)` below is one number per radius: where a stored radius LANDS in
+// Lightroom's export. `LensProfile::mask_warp` holds it as knots.
+//
+// WHAT THIS ENGINE DOES WITH IT — and the part that is NOT the same question.
+// This pipeline evaluates every mask in the PRE-lens-correction frame and then
+// resamples the whole frame through the geometry stage (`develop` applies masks
+// at line ~379 and `apply_lens_geometry` at ~404; the comment there states the
+// order outright). A mask this engine draws is therefore carried by the
+// distortion field exactly as the pixels are, without anyone applying `m`:
+//
+//   | mask kind        | Lightroom stores in | this engine evaluates in | transform |
+//   |------------------|---------------------|--------------------------|-----------|
+//   | brush            | pre-correction      | pre-correction           | IDENTITY  |
+//   | radial / linear  | post-correction     | pre-correction           | m⁻¹       |
+//   | bitmap / AI      | engine-native       | pre-correction           | IDENTITY  |
+//
+// The brush row is why nothing here is wired into `mask_weight` for a dab:
+// applying `m` to a dab centre AND letting the geometry stage move it would
+// apply the field twice, putting a 24 mm corner dab ~186 px past where
+// Lightroom puts it.
+//
+// The radial row WAS a live mismatch — every imported radial on a
+// profile-corrected photo rendered up to 186 px (24 mm) / 88 px (105 mm) away
+// from where Lightroom puts it — and it is FIXED, by user ruling of
+// 2026-08-20, in this same batch. The fix is not here: it is `MaskFrame` +
+// `MaskUnwarp` beside `mask_weight`, which map a parametric shape's sample
+// point through the inverse of the geometry stage that is about to run, so the
+// effect lands back on the stored coordinates. That map is `lens_ungeom_norm`,
+// this engine's own resample inverse, NOT the knots below — see `MaskUnwarp`
+// for why the exact inverse beats a model of Adobe's correction here.
+//
+// So the two fields below have one job each and they do not overlap:
+// `LensProfile::mask_warp` models LIGHTROOM's correction, for the brush frame
+// and its provenance; `MaskUnwarp` models OURS, for the parametric wiring.
+// The rows are pinned by `the_engine_evaluates_masks_before_the_geometry_stage`
+// (the ordering), `a_parametric_mask_lands_on_its_stored_coordinates_under_lens_geometry`
+// (the fix, end to end) and `with_the_geometry_stage_inactive_the_mask_chain_is_untouched`
+// (that it costs an un-warped frame nothing).
+//
+// THE RADIUS, decided here because there is nowhere better. A brush dab is a
+// circle of radius `r` and the map is not conformal, so a warped dab is an
+// ELLIPSE: the local Jacobian's tangential eigenvalue is `m(r)` and its radial
+// one is `d(r·m)/dr`, and they differ by up to 6.15 % at 24 mm and 7.66 % at
+// 105 mm — MORE than the isotropic part a radius scale would fix (3.25 % and
+// 4.25 %). No scalar radius can represent that, so no scalar is the right
+// answer, and nothing in the measurement set observes a dab RADIUS at all (the
+// eleven-dab ladder measures centres). The map below therefore takes POINTS and
+// has no radius argument: the exact way to warp a brush mask is to rasterise
+// the stroke in its stored frame and resample the resulting PLANE through
+// `m` — which is precisely what this engine's geometry stage already does to
+// every mask it draws.
+
+/// [`LensProfile::mask_warp`]'s interpolator: the radial magnification at
+/// normalised radius `rn` (1 = the corner half-diagonal).
+///
+/// The SAME spline the in-camera `distortion` knots are read with, deliberately
+/// — the two sources write one field and a second interpolator is how two
+/// conventions get in.
+///
+/// [`LensProfile::mask_warp`]: crate::recipe::LensProfile::mask_warp
+pub fn mask_warp_factor(knots: &[f32], rn: f32) -> f32 {
+    if knots.is_empty() {
+        return 1.0;
+    }
+    profile_knot_interp(knots, rn)
+}
+
+/// Solve the mask warp from the IN-CAMERA knots — source A.
+///
+/// The camera's `distortion` spline is a BACKWARD map like Adobe's: at
+/// corrected radius `rn` the source sample sits at `rn · g(rn)/s_p`. A mask
+/// stored in the source frame needs the other direction, so this inverts that
+/// map at each knot radius by bisection on its rising prefix — the same
+/// construction (and the same fold guard) [`lens_ungeom_norm`] uses, because it
+/// is the same inversion.
+///
+/// Deliberately NOT composed with the manual `lens_distortion` slider or the
+/// CA fill scale. Those are this engine's own edit and this engine's own
+/// resampling artefact; `mask_warp` models what LIGHTROOM's correction did, and
+/// folding our slider into it would make the answer depend on the user's later
+/// choices.
+///
+/// Empty in ⇒ empty out: no knots is not a warp of 1.0, it is no answer, and
+/// `MaskWarpSource` is where that difference is stated.
+pub fn mask_warp_from_camera_knots(distortion: &[f32], dims: (f32, f32), n: usize) -> Vec<f32> {
+    if distortion.is_empty() || n < 2 {
+        return Vec::new();
+    }
+    let s_p = profile_fill_scale(distortion, dims);
+    let fwd = |rn: f32| rn * profile_knot_interp(distortion, rn) / s_p;
+    // Peak scan first: past the fold the map is no longer injective and a
+    // bisection would land on an arbitrary preimage.
+    let mut hi_max = 2.0f32;
+    let mut peak = 0.0f32;
+    for i in 1..=256 {
+        let rn = 2.0 * i as f32 / 256.0;
+        let v = fwd(rn);
+        if v < peak {
+            hi_max = 2.0 * (i - 1) as f32 / 256.0;
+            break;
+        }
+        peak = v;
+    }
+    let mut out = Vec::with_capacity(n);
+    for i in 0..n {
+        let rho = (i as f32 + 0.5) / (n - 1) as f32;
+        if fwd(hi_max) <= rho {
+            // Beyond what the map reaches: clamp at the peak, exactly as
+            // `lens_ungeom_norm` does, rather than extrapolate a factor.
+            out.push(hi_max / rho);
+            continue;
+        }
+        let (mut lo, mut hi) = (0.0f32, hi_max);
+        for _ in 0..40 {
+            let mid = 0.5 * (lo + hi);
+            if fwd(mid) < rho {
+                lo = mid;
+            } else {
+                hi = mid;
+            }
+        }
+        out.push(0.5 * (lo + hi) / rho);
+    }
+    out
+}
+
+/// STORED mask point → the point Lightroom EXPORTED it at, both normalised
+/// 0..1 on the frame corner origin.
+///
+/// Identity when the profile carries no solved warp, which is the honest answer
+/// for a photo whose frame nobody could model — see
+/// [`crate::recipe::MaskWarpSource`] for which of the five "no warp" states
+/// applies and why they are not one state.
+///
+/// Read the block header above before wiring this into a render path: which
+/// mask kinds need it, and in which direction, depends on where that path
+/// evaluates masks, and for THIS engine's own `mask_weight` the answer for a
+/// brush is identity.
+pub fn lr_mask_warp_norm(
+    nx: f32,
+    ny: f32,
+    dims: (f32, f32),
+    profile: &crate::recipe::LensProfile,
+) -> (f32, f32) {
+    if profile.mask_warp.is_empty() {
+        return (nx, ny);
+    }
+    let (w, h) = dims;
+    let rr = (0.5 * (w * w + h * h).sqrt()).max(1e-6);
+    let (dx, dy) = ((nx - 0.5) * w, (ny - 0.5) * h);
+    let f = mask_warp_factor(&profile.mask_warp, (dx * dx + dy * dy).sqrt() / rr);
+    ((dx * f) / w.max(1e-6) + 0.5, (dy * f) / h.max(1e-6) + 0.5)
+}
+
+/// EXPORTED point → the point Lightroom STORED it as: the numeric inverse of
+/// [`lr_mask_warp_norm`], by the same rising-prefix bisection
+/// [`lens_ungeom_norm`] uses.
+///
+/// This is the direction a POST-correction geometry (a radial, a linear) would
+/// need to be brought into this engine's pre-geometry evaluation frame — see
+/// the frame table in the block header, and note that nothing calls it for that
+/// purpose yet.
+pub fn lr_mask_unwarp_norm(
+    nx: f32,
+    ny: f32,
+    dims: (f32, f32),
+    profile: &crate::recipe::LensProfile,
+) -> (f32, f32) {
+    if profile.mask_warp.is_empty() {
+        return (nx, ny);
+    }
+    let (w, h) = dims;
+    let rr = (0.5 * (w * w + h * h).sqrt()).max(1e-6);
+    let (dx, dy) = ((nx - 0.5) * w, (ny - 0.5) * h);
+    let rho = (dx * dx + dy * dy).sqrt() / rr;
+    if rho < 1e-6 {
+        return (nx, ny);
+    }
+    let fwd = |rn: f32| rn * mask_warp_factor(&profile.mask_warp, rn);
+    let mut hi = 2.0f32;
+    let mut peak = 0.0f32;
+    for i in 1..=256 {
+        let rn = 2.0 * i as f32 / 256.0;
+        let v = fwd(rn);
+        if v < peak {
+            hi = 2.0 * (i - 1) as f32 / 256.0;
+            break;
+        }
+        peak = v;
+    }
+    if fwd(hi) <= rho {
+        let f = hi / rho;
+        return ((dx * f) / w.max(1e-6) + 0.5, (dy * f) / h.max(1e-6) + 0.5);
+    }
+    let mut lo = 0.0f32;
+    for _ in 0..40 {
+        let mid = 0.5 * (lo + hi);
+        if fwd(mid) < rho {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    let f = 0.5 * (lo + hi) / rho;
+    ((dx * f) / w.max(1e-6) + 0.5, (dy * f) / h.max(1e-6) + 0.5)
+}
+
 /// View-frame normalised point (the straightened, auto-cropped frame the user
 /// SEES, before the user crop) → ORIGINAL-frame normalised point: un-rotate
 /// (view → corrected, the counter-clockwise matrix), then the forward sampling
@@ -8119,6 +8667,9 @@ mod tests {
             vignette_on: true,
             distortion_on: true,
             ca_on: true,
+            // The mask warp plays no part in the PIXEL maps this test scores —
+            // it is a mask-frame quantity and no resampler reads it.
+            ..Default::default()
         };
         // (a) Vignette: corners brighten, the centre stays put.
         let base = DynamicImage::ImageRgb8(RgbImage::from_pixel(120, 80, image::Rgb([100, 100, 100])));
@@ -8167,6 +8718,588 @@ mod tests {
             "CA directions: ca_r > 1 samples farther out (smaller ramp value \
              at the left edge), ca_b < 1 nearer (larger) — a symmetric split \
              also passed a swapped R/B correction (Codex batch 40): {p:?}"
+        );
+    }
+
+    /// The A7RIV frame every mask-frame measurement in R27 Batches 8-10 and
+    /// R29's `D` adjudication was made on.
+    const MASK_WARP_DIMS: (f32, f32) = (9504.0, 6336.0);
+
+    /// The 24 mm mask warp, from the SAME `.lcp` node the recon solved — one
+    /// fixture, so a change to either solver shows up as a disagreement rather
+    /// than as two independently drifting sets of numbers.
+    fn lcp_24mm_warp() -> Vec<f32> {
+        let n = crate::lcp::PerspectiveModel {
+            focal_mm: Some(24.0),
+            focus_distance: Some(10000.0),
+            scale: 1.027391,
+            k: [-0.127336, 0.087661, -0.019675],
+            focal_x: None,
+            sensor_format_factor: 1.0,
+        };
+        n.mask_warp_knots(MASK_WARP_DIMS, crate::recipe::MASK_WARP_KNOTS).expect("solvable")
+    }
+
+    /// Source A and source B are two readings of ONE physical field, so they
+    /// have to agree — and the recon says by how much: the camera's own knot
+    /// map and Adobe's polynomial score 2.30 px and 2.11 px against the same
+    /// 138-patch pixel field, and differ from each other by 6.74 px rms over a
+    /// warp that reaches 185.7 px at the corner.
+    ///
+    /// Asserted as a BAND, both ends. Too-large means one solver drifted; the
+    /// too-small end is the one that matters, because a source A that silently
+    /// became a copy of source B (or of the identity) would pass every other
+    /// test in this file.
+    #[test]
+    fn the_two_mask_warp_sources_agree_to_the_measured_tolerance() {
+        // `exp_C_ref.ARW`'s OWN `0x7037` array, converted by `lensmeta`'s
+        // `v·2⁻¹⁴ + 1` and dumped on this machine — the real A7RIV @ 24 mm
+        // barrel profile, not a curve shaped like one.
+        let camera: Vec<f32> = vec![
+            1.000793, 0.999878, 0.998108, 0.995972, 0.992737, 0.989014, 0.984619, 0.980042,
+            0.974915, 0.969727, 0.964355, 0.959229, 0.954163, 0.949646, 0.945496, 0.942078,
+        ];
+        // The engine's own fill scale on that array, against the value the
+        // recon computed independently: `profile_fill_scale` is the s_p this
+        // whole inversion divides by, so a drift there is a silent drift in
+        // every mask-warp knot below.
+        assert!(
+            (profile_fill_scale(&camera, MASK_WARP_DIMS) - 0.975835).abs() < 1e-5,
+            "fill scale {} vs the recon's 0.975835",
+            profile_fill_scale(&camera, MASK_WARP_DIMS)
+        );
+        let a = mask_warp_from_camera_knots(&camera, MASK_WARP_DIMS, 16);
+        let b = lcp_24mm_warp();
+        assert_eq!(a.len(), 16, "source A must fill the shared knot count");
+        assert_eq!(b.len(), 16);
+        let half_diag = 0.5 * (MASK_WARP_DIMS.0.hypot(MASK_WARP_DIMS.1));
+        let mut worst = 0.0f32;
+        for i in 0..16 {
+            let r = (i as f32 + 0.5) / 15.0 * half_diag;
+            worst = worst.max(((a[i] - b[i]) * r).abs());
+        }
+        assert!(worst < 40.0, "the two sources diverged by {worst:.1} px");
+        // PREMISE: both really are a warp, not the identity dressed up as one.
+        for (name, k) in [("camera", &a), ("lcp", &b)] {
+            let corner = (k[15] - 1.0) * half_diag;
+            assert!(corner.abs() > 100.0, "{name} corner displacement {corner:.1} px is not a warp");
+            assert!(k[0] < 0.995, "{name} centre magnification {} is not a warp", k[0]);
+        }
+    }
+
+    /// ACCEPTANCE ⑦ (engine half). The forward map and its bisection inverse
+    /// compose to the identity across the frame — the property every consumer
+    /// of a coordinate map in this file is held to.
+    #[test]
+    fn the_mask_warp_point_map_round_trips() {
+        let profile = crate::recipe::LensProfile {
+            mask_warp: lcp_24mm_warp(),
+            mask_warp_src: crate::recipe::MaskWarpSource::Lcp,
+            ..Default::default()
+        };
+        let mut moved = 0.0f32;
+        for i in 0..=10 {
+            for j in 0..=10 {
+                let (nx, ny) = (i as f32 / 10.0, j as f32 / 10.0);
+                let (wx, wy) = lr_mask_warp_norm(nx, ny, MASK_WARP_DIMS, &profile);
+                let (bx, by) = lr_mask_unwarp_norm(wx, wy, MASK_WARP_DIMS, &profile);
+                assert!((bx - nx).abs() < 1e-4 && (by - ny).abs() < 1e-4, "({nx},{ny})");
+                moved = moved.max(((wx - nx) * MASK_WARP_DIMS.0).abs());
+            }
+        }
+        // PREMISE: a round trip through two identities also round-trips.
+        assert!(moved > 50.0, "the map moved at most {moved:.1} px — it is not a warp");
+        // The frame CENTRE is a fixed point of a radial map, exactly.
+        assert_eq!(lr_mask_warp_norm(0.5, 0.5, MASK_WARP_DIMS, &profile), (0.5, 0.5));
+    }
+
+    /// ACCEPTANCE ⑤. With no solved warp the map is the IDENTITY — bit-for-bit,
+    /// not approximately — and the reason is available by name rather than
+    /// inferred from an empty vector.
+    #[test]
+    fn an_absent_profile_is_an_identity_warp_with_a_named_reason() {
+        use crate::recipe::MaskWarpSource as S;
+        let none = crate::recipe::LensProfile::default();
+        assert_eq!(none.mask_warp_src, S::Absent);
+        for i in 0..=7 {
+            for j in 0..=7 {
+                let (nx, ny) = (i as f32 / 7.0, j as f32 / 7.0);
+                assert_eq!(lr_mask_warp_norm(nx, ny, MASK_WARP_DIMS, &none), (nx, ny));
+                assert_eq!(lr_mask_unwarp_norm(nx, ny, MASK_WARP_DIMS, &none), (nx, ny));
+            }
+        }
+        // Every "no warp" state names itself, and none of them is silent.
+        for s in S::ALL {
+            assert!(!s.en().is_empty(), "{s:?} has no prose");
+            let mut p = crate::recipe::LensProfile { mask_warp_src: s, ..Default::default() };
+            // A tag that is not SOLVED cannot keep knots — `clamp` enforces it,
+            // so a hand-edited recipe cannot claim "fisheye refused" and warp.
+            p.mask_warp = vec![1.02; 16];
+            p.clamp();
+            if s.is_solved() {
+                assert_eq!(p.mask_warp.len(), 16, "{s:?} is a solved source");
+            } else {
+                assert!(p.mask_warp.is_empty(), "{s:?} kept knots it has no claim to");
+                assert_eq!(lr_mask_warp_norm(0.3, 0.7, MASK_WARP_DIMS, &p), (0.3, 0.7));
+            }
+        }
+        // Empty knots in, empty out: "no data" is not a warp of 1.0.
+        assert!(mask_warp_from_camera_knots(&[], MASK_WARP_DIMS, 16).is_empty());
+    }
+
+    /// A strong, real-shaped barrel profile for the frame-wiring tests:
+    /// falling radius factors, the shape every Sony `0x7037` array has.
+    fn barrel_profile() -> crate::recipe::LensProfile {
+        crate::recipe::LensProfile {
+            distortion: (0..16).map(|i| 1.0 - 0.12 * (i as f32 / 15.0).powi(2)).collect(),
+            distortion_on: true,
+            ..Default::default()
+        }
+    }
+
+    /// A hard-edged radial at a KNOWN stored centre, dark enough to find.
+    fn probe_radial(cx: f32, cy: f32, r: f32) -> crate::recipe::LocalAdjustment {
+        crate::recipe::LocalAdjustment {
+            mask: MaskGeometry::Radial {
+                top: cy - r,
+                left: cx - r,
+                bottom: cy + r,
+                right: cx + r,
+                feather: 0.0,
+                roundness: 0.0,
+                flipped: false,
+                angle: 0.0,
+                midpoint: 50.0,
+                mask_version: 0,
+            },
+            exposure_ev: -4.0,
+            ..Default::default()
+        }
+    }
+
+    /// Centroid of the darkened pixels, in output-frame pixels.
+    fn effect_centroid(img: &DynamicImage) -> (f64, f64) {
+        let g = img.to_rgb8();
+        let (mut sx, mut sy, mut n) = (0.0f64, 0.0f64, 0.0f64);
+        for (x, y, p) in g.enumerate_pixels() {
+            if p.0[1] < 90 {
+                sx += x as f64;
+                sy += y as f64;
+                n += 1.0;
+            }
+        }
+        assert!(n > 40.0, "the mask must darken a real region, got {n} px");
+        (sx / n, sy / n)
+    }
+
+
+    /// ACCEPTANCE ⑥, REWRITTEN by the 2026-08-20 user ruling — the
+    /// PARAMETRIC-LANDS-ON-STORED-COORDINATES property.
+    ///
+    /// # What this replaces, and why
+    ///
+    /// Its predecessor pinned the opposite: that a radial's rendered weight is
+    /// computed at its stored coordinates in the PRE-geometry frame and never
+    /// touched. That was the shipped behaviour and it was wrong, because this
+    /// engine then resampled the whole frame and carried the mask with it —
+    /// while Lightroom does not move a parametric shape at all. The `D`
+    /// adjudication measured the gap on the 105 mm pair: the PIXELS move
+    /// +87.5 px at r ≈ 3250 (the `.lcp` model at 2.69 px rms, 30 NCC points,
+    /// tangential rms 1.22 px) while the radial mask measures a similarity of
+    /// 0.99956 — the identity to 0.05 %, and **88.7 px away from the pixel
+    /// field** (rms; 89.56 px max). That 88.7 px now supports THIS direction.
+    ///
+    /// # The property, end to end
+    ///
+    /// A radial at a known stored centre, developed and then resampled through
+    /// an active geometry stage — the real composition, `develop_preview` then
+    /// `apply_lens_geometry`, which is the same order `render_to_file` runs —
+    /// must put its darkened region back on the STORED centre.
+    ///
+    /// The control in the same test provenances the tolerance: the identical
+    /// chain with [`MaskFrame::AsRendered`] (i.e. the behaviour before this
+    /// wiring) displaces the effect by the field, and that displacement is
+    /// asserted to be an order larger than the tolerance — so a passing test
+    /// cannot be a test of nothing.
+    ///
+    /// MUTATION THIS KILLS: dropping the `unwarp` from `mask_weight_in`, or
+    /// widening `is_lr_post_correction_geometry` to exclude `Radial`.
+    #[test]
+    fn a_parametric_mask_lands_on_its_stored_coordinates_under_lens_geometry() {
+        let (w, h) = (960u32, 640u32);
+        let base = DynamicImage::ImageRgb8(RgbImage::from_pixel(w, h, image::Rgb([128, 128, 128])));
+        // A stronger barrel than `barrel_profile`, so the field is many pixels
+        // rather than one: corner factor 0.75, fill scale 0.923.
+        let profile = crate::recipe::LensProfile {
+            distortion: (0..16).map(|i| 1.0 - 0.25 * (i as f32 / 15.0).powi(2)).collect(),
+            distortion_on: true,
+            ..Default::default()
+        };
+        // TWO placements at different radii. The frame centre is a fixed point
+        // of every radial map, so one off-centre mask could pass by accident of
+        // where it sat; two at different radii cannot.
+        //
+        // MEASURED on this fixture (the numbers the tolerances below come from,
+        // scanned over frame size x barrel strength x placement):
+        //
+        //   | stored cx | wired error | UNWIRED drift |
+        //   |-----------|-------------|---------------|
+        //   | 0.10      | 0.30 px     | 23.84 px      |
+        //   | 0.32      | 0.09 px     |  8.39 px      |
+        //
+        // The sub-pixel residue is resampling, not geometry: the effect is a
+        // filled disc whose centroid is recovered from 8-bit thresholded
+        // pixels, and the bilinear resample softens its rim.
+        for (cx, min_drift) in [(0.10f32, 15.0f64), (0.32f32, 5.0f64)] {
+            let cy = 0.5f32;
+            let recipe = EditRecipe {
+                masks: vec![probe_radial(cx, cy, 0.05)],
+                lens_profile: profile.clone(),
+                ..Default::default()
+            };
+            let want = (cx as f64 * w as f64, cy as f64 * h as f64);
+
+            // WIRED: `develop_preview` derives `WarpedDownstream` from the
+            // recipe, exactly as the GUI and web preview surfaces do before
+            // they warp, and the same decision `render_to_file` makes.
+            let wired = apply_lens_geometry(&develop_preview(&base, &recipe), &profile, 0.0);
+            let got = effect_centroid(&wired);
+
+            // CONTROL: the identical chain with the adaptation switched off —
+            // the behaviour before this wiring, and where the tolerance's
+            // provenance comes from.
+            let unwired = apply_lens_geometry(
+                &develop_preview_framed(
+                    &base,
+                    &recipe,
+                    &crate::diag::pixels(),
+                    MaskFrame::AsRendered,
+                ),
+                &profile,
+                0.0,
+            );
+            let drifted = effect_centroid(&unwired);
+
+            let err = ((got.0 - want.0).powi(2) + (got.1 - want.1).powi(2)).sqrt();
+            let drift = ((drifted.0 - want.0).powi(2) + (drifted.1 - want.1).powi(2)).sqrt();
+            // PREMISE: the field really does move this mask, or the assertion
+            // below is satisfied by an identity map and proves nothing.
+            assert!(
+                drift > min_drift,
+                "cx={cx}: the control must displace by the field; it moved \
+                 {drift:.2} px (centroid {drifted:?} vs stored {want:?})"
+            );
+            assert!(
+                err < 1.5,
+                "cx={cx}: the wired chain must land on the STORED centre: \
+                 {err:.2} px off (centroid {got:?} vs stored {want:?}; \
+                 control drifts {drift:.2} px)"
+            );
+            assert!(
+                err * 5.0 < drift,
+                "cx={cx}: the fix must be an order better: {err:.2} vs {drift:.2}"
+            );
+        }
+    }
+
+    /// The COMPANION pin: with the geometry stage inactive, the mask chain is
+    /// unchanged — bit for bit, not approximately.
+    ///
+    /// This is the other half of the "mask map and pixel warp travel together"
+    /// invariant, and the half that protects every photograph that has no lens
+    /// profile and no manual distortion (every non-Sony frame, and every Sony
+    /// frame whose photographer switched the correction off). The wiring must
+    /// cost them nothing at all.
+    ///
+    /// MUTATION THIS KILLS: making `MaskFrame::downstream` return
+    /// `WarpedDownstream` unconditionally, or dropping `MaskUnwarp::new`'s
+    /// identity check.
+    #[test]
+    fn with_the_geometry_stage_inactive_the_mask_chain_is_untouched() {
+        let (w, h) = (240u32, 160u32);
+        let base = DynamicImage::ImageRgb8(RgbImage::from_pixel(w, h, image::Rgb([128, 128, 128])));
+        let masks = vec![probe_radial(0.24, 0.5, 0.1)];
+        // (a) No profile at all, and a profile whose data is present but
+        //     TOGGLED OFF — both are inert, and the second is the one a naive
+        //     `!profile.distortion.is_empty()` gate would get wrong.
+        let none = EditRecipe { masks: masks.clone(), ..Default::default() };
+        let toggled_off = EditRecipe {
+            lens_profile: crate::recipe::LensProfile {
+                distortion_on: false,
+                ..barrel_profile()
+            },
+            ..none.clone()
+        };
+        let a = develop_preview(&base, &none);
+        let b = develop_preview(&base, &toggled_off);
+        assert_eq!(a.to_rgb8().as_raw(), b.to_rgb8().as_raw(), "an inert profile moved a mask");
+        // …and both equal the explicitly-unadapted chain, which is what
+        // "unchanged from before this batch" means.
+        let c = develop_preview_framed(&base, &none, &crate::diag::pixels(), MaskFrame::AsRendered);
+        assert_eq!(a.to_rgb8().as_raw(), c.to_rgb8().as_raw());
+
+        // (a2) The case the identity short-circuit in `MaskUnwarp::new` exists
+        //      for, and the one `downstream` cannot catch: a profile that IS
+        //      active by the gate — sixteen knots, toggle on — whose map is
+        //      nevertheless the identity, because the lens has no distortion to
+        //      correct. `geometry_active()` is true, so the frame says
+        //      `WarpedDownstream`; the map must then recognise itself as inert
+        //      and return `None` rather than push every mask coordinate through
+        //      a float round trip.
+        let flat = EditRecipe {
+            lens_profile: crate::recipe::LensProfile {
+                distortion: vec![1.0; 16],
+                distortion_on: true,
+                ..Default::default()
+            },
+            ..none.clone()
+        };
+        assert!(
+            MaskFrame::downstream(&flat.lens_profile, 0.0).warps(),
+            "premise: a flat profile is still ACTIVE by the gate"
+        );
+        assert!(
+            MaskUnwarp::new(&flat.lens_profile, 0.0, (w as f32, h as f32)).is_none(),
+            "an identity map must short-circuit, not round-trip every coordinate"
+        );
+        let d = develop_preview(&base, &flat);
+        assert_eq!(
+            a.to_rgb8().as_raw(),
+            d.to_rgb8().as_raw(),
+            "a distortion-free lens profile moved a mask"
+        );
+
+        // (b) The decision itself, at the source: an inert profile answers
+        //     `AsRendered`, so the geometry stage is not run either.
+        let inert = crate::recipe::LensProfile::default();
+        assert!(!MaskFrame::downstream(&inert, 0.0).warps());
+        assert!(MaskFrame::downstream(&inert, 0.0).unwarp((240.0, 160.0)).is_none());
+        assert!(!MaskFrame::downstream(&toggled_off.lens_profile, 0.0).warps());
+        // …and an ACTIVE one answers the other way, in both of the two ways it
+        // can be active (profile knots, and the manual amount alone).
+        assert!(MaskFrame::downstream(&barrel_profile(), 0.0).warps());
+        assert!(MaskFrame::downstream(&inert, 25.0).warps(), "the manual amount alone warps");
+        assert!(
+            MaskFrame::downstream(&inert, 25.0).unwarp((240.0, 160.0)).is_some(),
+            "the manual lens_distortion must be covered, not half-covered"
+        );
+    }
+
+    /// The GUI's red coverage wash must advertise exactly what the render
+    /// applies — including the frame adaptation.
+    ///
+    /// The overlay is built by `mask_coverage` and then warped by the caller
+    /// (`bin/gui/canvas.rs`) so it follows the rendered pixels. Both halves take
+    /// the SAME [`MaskFrame`]; if the coverage build skipped the adaptation
+    /// while the render performed it, the wash would sit a whole field away
+    /// from the effect it claims to show — up to 186 px at 24 mm.
+    ///
+    /// Asserted as agreement between the two, not against a hand-computed
+    /// expectation: the property is that the overlay and the render say the
+    /// same thing, whatever that thing is.
+    ///
+    /// MUTATION THIS KILLS: dropping the `unwarp` from `mask_coverage`.
+    #[test]
+    fn the_gui_coverage_overlay_matches_what_the_render_applies() {
+        let (w, h) = (480u32, 320u32);
+        let base = DynamicImage::ImageRgb8(RgbImage::from_pixel(w, h, image::Rgb([255, 255, 255])));
+        let profile = crate::recipe::LensProfile {
+            distortion: (0..16).map(|i| 1.0 - 0.25 * (i as f32 / 15.0).powi(2)).collect(),
+            distortion_on: true,
+            ..Default::default()
+        };
+        let adj = probe_radial(0.20, 0.5, 0.08);
+        let recipe =
+            EditRecipe { masks: vec![adj.clone()], lens_profile: profile.clone(), ..Default::default() };
+        let frame = MaskFrame::downstream(&profile, 0.0);
+        assert!(frame.warps(), "premise: this fixture's geometry is active");
+
+        // The overlay, exactly as the GUI builds it: coverage then the same warp.
+        let cov = DynamicImage::ImageLuma8(mask_coverage(&adj, &base, frame));
+        let cov = apply_lens_geometry(&cov, &profile, 0.0).to_luma8();
+
+        // The render, exactly as a preview surface builds it.
+        let rendered = apply_lens_geometry(&develop_preview(&base, &recipe), &profile, 0.0).to_rgb8();
+
+        // Where the overlay claims full coverage, the render must have applied
+        // the effect (-4 EV on white); where it claims none, it must not have.
+        let (mut claimed, mut agreed, mut clear, mut clean) = (0u32, 0u32, 0u32, 0u32);
+        for (x, y, p) in cov.enumerate_pixels() {
+            let lit = rendered.get_pixel(x, y).0[1];
+            if p.0[0] > 200 {
+                claimed += 1;
+                if lit < 160 {
+                    agreed += 1;
+                }
+            } else if p.0[0] < 20 {
+                clear += 1;
+                if lit > 200 {
+                    clean += 1;
+                }
+            }
+        }
+        assert!(claimed > 200 && clear > 200, "premise: {claimed} covered / {clear} clear px");
+        assert!(
+            agreed * 100 >= claimed * 97,
+            "the overlay claims coverage the render does not apply: {agreed}/{claimed}"
+        );
+        assert!(
+            clean * 100 >= clear * 97,
+            "the render applies an effect the overlay does not show: {clean}/{clear}"
+        );
+    }
+
+    /// The per-TYPE split, at the predicate that owns it: only the two shapes
+    /// Lightroom stores post-correction are adapted.
+    ///
+    /// A brush would be moved TWICE if it were included here (Lightroom
+    /// rasterises it pre-correction and so does this engine); an engine-authored
+    /// raster has no Lightroom rendering to agree with; a range mask selects by
+    /// pixel value and is frame-invariant, so it is not a geometry at all.
+    #[test]
+    fn only_lightrooms_post_correction_shapes_are_frame_adapted() {
+        assert!(is_lr_post_correction_geometry(&MaskGeometry::Linear {
+            zero_x: 0.1,
+            zero_y: 0.2,
+            full_x: 0.8,
+            full_y: 0.9
+        }));
+        assert!(is_lr_post_correction_geometry(&probe_radial(0.3, 0.3, 0.1).mask));
+        assert!(!is_lr_post_correction_geometry(&MaskGeometry::Brush {
+            name: "Brush 1".into(),
+            blend_mode: 0,
+            value: 1.0,
+            inverted: false,
+            strokes: Vec::new(),
+        }));
+        assert!(!is_lr_post_correction_geometry(&MaskGeometry::Bitmap { path: String::new() }));
+        assert!(!is_lr_post_correction_geometry(&MaskGeometry::AiMask {
+            name: String::new(),
+            subtype: 0,
+            ref_x: 0.5,
+            ref_y: 0.5,
+            blend_mode: 0,
+            value: 1.0,
+            inverted: false,
+            mask_version: 0,
+            gesture: Vec::new(),
+            provenance: Vec::new(),
+            raster: None,
+        }));
+        // And the adapter honours it: with the SAME unwarp in hand, a brush
+        // and a bitmap are asked at the un-adapted point.
+        let u = MaskUnwarp::new(&barrel_profile(), 0.0, (480.0, 320.0)).expect("active");
+        let moved = u.at(0.2, 0.5);
+        assert!((moved.0 - 0.2).abs() > 1e-4, "premise: the map really moves this point");
+        let brush = MaskGeometry::Brush {
+            name: "Brush 1".into(),
+            blend_mode: 0,
+            value: 1.0,
+            inverted: false,
+            strokes: Vec::new(),
+        };
+        assert_eq!(
+            mask_weight_in(&brush, 0.2, 0.5, None, Some(&u)),
+            mask_weight(&brush, 0.2, 0.5, None),
+            "a brush must not be frame-adapted"
+        );
+        let rad = probe_radial(0.24, 0.5, 0.1).mask;
+        assert_eq!(
+            mask_weight_in(&rad, 0.2, 0.5, None, Some(&u)),
+            mask_weight(&rad, moved.0, moved.1, None),
+            "a radial must be asked at the adapted point"
+        );
+    }
+
+    /// The frame table in the mask-warp block header, asserted rather than
+    /// asserted-in-prose: this engine evaluates masks BEFORE the geometry
+    /// stage, so a mask it draws is carried by the distortion field exactly as
+    /// the pixels are.
+    ///
+    /// That is what makes an extra warp on the brush arm a DOUBLE application
+    /// (Lightroom rasterises brush dabs pre-correction too), and what makes the
+    /// radial arm — whose coordinates Lightroom stores POST-correction — a
+    /// mismatch this batch exposed rather than created.
+    ///
+    /// Measured here rather than cited, in the two halves that make an order:
+    /// the mask stage's OUTPUT does not depend on the lens profile at all (it
+    /// runs first and cannot see it), and running the geometry stage over that
+    /// output MOVES the mask's footprint (so it runs second, over pixels the
+    /// mask is already baked into). That composition — `apply_develop` then
+    /// `apply_lens_geometry` — is exactly the one `render_to_file` performs.
+    #[test]
+    fn the_engine_evaluates_masks_before_the_geometry_stage() {
+        // 480 px wide, not 240: the displacement this measures is a FRACTION of
+        // the frame (~0.6 % of the width for this profile), so a small fixture
+        // frame puts the whole effect inside a pixel and the test would pass on
+        // rounding rather than on the property.
+        let base = DynamicImage::ImageRgb8(RgbImage::from_pixel(480, 320, image::Rgb([128, 128, 128])));
+        let mask = crate::recipe::LocalAdjustment {
+            mask: MaskGeometry::Radial {
+                top: 0.30,
+                left: 0.05,
+                bottom: 0.70,
+                right: 0.28,
+                feather: 0.0,
+                roundness: 0.0,
+                flipped: false,
+                angle: 0.0,
+                midpoint: 50.0,
+                mask_version: 0,
+            },
+            exposure_ev: -4.0,
+            ..Default::default()
+        };
+        // A strong barrel profile, shaped like a real one (falling factors).
+        let profile = crate::recipe::LensProfile {
+            distortion: (0..16).map(|i| 1.0 - 0.12 * (i as f32 / 15.0).powi(2)).collect(),
+            distortion_on: true,
+            ..Default::default()
+        };
+        let off = EditRecipe { masks: vec![mask.clone()], ..Default::default() };
+        let on = EditRecipe { lens_profile: profile.clone(), ..off.clone() };
+        let dark_centroid = |img: &DynamicImage| -> (f64, f64) {
+            let g = img.to_rgb8();
+            let (mut sx, mut sy, mut n) = (0.0f64, 0.0f64, 0.0f64);
+            for (x, y, p) in g.enumerate_pixels() {
+                if p.0[1] < 90 {
+                    sx += x as f64;
+                    sy += y as f64;
+                    n += 1.0;
+                }
+            }
+            assert!(n > 50.0, "the mask must darken a real region, got {n} px");
+            (sx / n, sy / n)
+        };
+        // HALF ONE: the mask stage runs FIRST — it rasterises into the
+        // PRE-geometry buffer and nothing it does moves a pixel. Asked with
+        // `AsRendered` (no geometry downstream) it renders the same pixels
+        // whether or not a profile is present, because the profile is not a
+        // tonal control and the frame adaptation is switched off.
+        //
+        // Deliberately NOT `develop_preview` here any more: since R29 Batch-3
+        // that entry point DOES read the profile — to adapt a parametric mask's
+        // frame for the resample it expects to follow (`MaskFrame`). That is
+        // the fix, not a counter-example to the ordering, and asking with the
+        // frame pinned is how the ordering stays measurable.
+        let anon = crate::diag::pixels();
+        let masked_off = develop_preview_framed(&base, &off, &anon, MaskFrame::AsRendered);
+        let masked_on = develop_preview_framed(&base, &on, &anon, MaskFrame::AsRendered);
+        assert_eq!(
+            masked_off.to_rgb8().as_raw(),
+            masked_on.to_rgb8().as_raw(),
+            "the mask stage moved pixels by itself - it is not a pure rasteriser"
+        );
+        // HALF TWO: the geometry stage runs SECOND, over pixels the mask is
+        // already baked into, so it CARRIES the mask exactly as it carries the
+        // photograph. If masks were evaluated after geometry this would be
+        // zero, and the brush arm would need the warp the block header
+        // describes instead of already having it.
+        let before = dark_centroid(&masked_off);
+        let after = dark_centroid(&apply_lens_geometry(&masked_off, &profile, 0.0));
+        assert!(
+            (before.0 - after.0).abs() > 1.5,
+            "the geometry stage did not carry the mask: centroids {before:?} vs {after:?}"
         );
     }
 
@@ -8333,7 +9466,7 @@ mod tests {
                 control.as_raw(),
                 "missing raster (inverted={inverted}) must render byte-identically to no mask"
             );
-            let cov = mask_coverage(&adj, &base);
+            let cov = mask_coverage(&adj, &base, MaskFrame::AsRendered);
             assert!(
                 cov.as_raw().iter().all(|&v| v == 0),
                 "overlay must show zero coverage (inverted={inverted})"
@@ -8580,7 +9713,7 @@ mod tests {
                     (MaskCombine::Subtract, b * (1.0 - c)),
                     (MaskCombine::Intersect, b * c),
                 ] {
-                    let got = combined_mask_weight(&with(mode), nx, ny, None, &[None]);
+                    let got = combined_mask_weight(&with(mode), nx, ny, None, &[None], None);
                     assert!(
                         (got - want).abs() < 1e-6,
                         "{mode:?} at ({nx},{ny}): got {got}, want {want}"
@@ -8593,7 +9726,7 @@ mod tests {
             mask: MaskGeometry::Linear { zero_x: 0.0, zero_y: 0.5, full_x: 1.0, full_y: 0.5 },
             ..Default::default()
         };
-        assert_eq!(combined_mask_weight(&plain, 0.3, 0.9, None, &[]), 0.3);
+        assert_eq!(combined_mask_weight(&plain, 0.3, 0.9, None, &[], None), 0.3);
         // Components fold IN LIST ORDER: subtract-then-add differs from
         // add-then-subtract, so a reorder is a real semantic change.
         let vertical = MaskGeometry::Linear { zero_x: 0.5, zero_y: 0.0, full_x: 0.5, full_y: 1.0 };
@@ -8610,7 +9743,7 @@ mod tests {
             let w = nx * (1.0 - ny);
             1.0 - (1.0 - w) * (1.0 - ny)
         };
-        let got = combined_mask_weight(&sub_then_add, nx, ny, None, &[None, None]);
+        let got = combined_mask_weight(&sub_then_add, nx, ny, None, &[None, None], None);
         assert!((got - want).abs() < 1e-6, "sequential fold: got {got}, want {want}");
     }
 
@@ -8696,7 +9829,7 @@ mod tests {
             err.to_string().contains("carved"),
             "the refusal names the mask whose edit would be dropped: {err:#}"
         );
-        let cov = mask_coverage(&r.masks[0], &DynamicImage::new_rgb8(8, 8));
+        let cov = mask_coverage(&r.masks[0], &DynamicImage::new_rgb8(8, 8), MaskFrame::AsRendered);
         assert!(
             cov.pixels().all(|p| p[0] == 0),
             "the overlay must not advertise coverage the render will not apply"
@@ -9494,7 +10627,7 @@ d 0.113862 0.987261"
             mask: MaskGeometry::Linear { zero_x: 0.5, zero_y: 0.0, full_x: 0.5, full_y: 1.0 },
             ..Default::default()
         };
-        let cov = mask_coverage(&grad, &grey);
+        let cov = mask_coverage(&grad, &grey, MaskFrame::AsRendered);
         assert_eq!(cov.get_pixel(10, 0)[0], 0, "zero end must be 0");
         assert!(cov.get_pixel(10, 19)[0] > 235, "full end: {}", cov.get_pixel(10, 19)[0]);
         let mid = cov.get_pixel(10, 10)[0];
@@ -9502,9 +10635,9 @@ d 0.113862 0.987261"
 
         // (b) amount halves the whole map; inversion flips its direction.
         let half = LocalAdjustment { amount: 0.5, ..grad.clone() };
-        assert!((mask_coverage(&half, &grey).get_pixel(10, 19)[0] as i32 - 128).abs() < 15);
+        assert!((mask_coverage(&half, &grey, MaskFrame::AsRendered).get_pixel(10, 19)[0] as i32 - 128).abs() < 15);
         let inv = LocalAdjustment { inverted: true, ..grad.clone() };
-        let icov = mask_coverage(&inv, &grey);
+        let icov = mask_coverage(&inv, &grey, MaskFrame::AsRendered);
         assert!(icov.get_pixel(10, 0)[0] > 235 && icov.get_pixel(10, 19)[0] < 20);
 
         // (c) A luminance range gates the map by the REFERENCE pixels: with a
@@ -9519,7 +10652,7 @@ d 0.113862 0.987261"
             range: Some(RangeMask::Luminance { lo_outer: 0.5, lo: 0.6, hi: 1.0, hi_outer: 1.0 }),
             ..Default::default()
         };
-        let rcov = mask_coverage(&ranged, &split);
+        let rcov = mask_coverage(&ranged, &split, MaskFrame::AsRendered);
         assert_eq!(rcov.get_pixel(3, 10)[0], 0, "dark side gated out");
         assert!(rcov.get_pixel(16, 10)[0] > 235, "bright side kept: {}", rcov.get_pixel(16, 10)[0]);
     }
@@ -10608,6 +11741,7 @@ d 0.113862 0.987261"
                 h,
                 &EditRecipe { masks: vec![m], ..Default::default() },
                 &MaskRasterSnapshot::default(),
+                MaskFrame::AsRendered,
             );
             out
         };
@@ -10686,6 +11820,7 @@ d 0.113862 0.987261"
                 h,
                 &EditRecipe { masks: vec![m], ..Default::default() },
                 &MaskRasterSnapshot::default(),
+                MaskFrame::AsRendered,
             );
             out
         };
@@ -10734,6 +11869,7 @@ d 0.113862 0.987261"
                 ..Default::default()
             },
             &MaskRasterSnapshot::default(),
+            MaskFrame::AsRendered,
         );
         let energy = |d: &[[f32; 3]], lo: usize, hi: usize| -> f32 {
             let mut e = 0.0;
@@ -10768,6 +11904,7 @@ d 0.113862 0.987261"
                 ..Default::default()
             },
             &MaskRasterSnapshot::default(),
+            MaskFrame::AsRendered,
         );
         assert!(
             energy(&softened, 0, ew / 4) < energy(&flat, 0, ew / 4) * 0.99,
@@ -11291,10 +12428,10 @@ d 0.113862 0.987261"
         let snapshot = load_mask_raster_snapshot(&recipe, &crate::diag::pixels()).unwrap();
         let untouched = vec![[0.25, 0.25, 0.25]; 4];
         let mut before_delete = untouched.clone();
-        apply_develop_with_rasters(&mut before_delete, 2, 2, &recipe, &snapshot);
+        apply_develop_with_rasters(&mut before_delete, 2, 2, &recipe, &snapshot, MaskFrame::AsRendered);
         std::fs::remove_file(&mask).unwrap();
         let mut after_delete = untouched.clone();
-        apply_develop_with_rasters(&mut after_delete, 2, 2, &recipe, &snapshot);
+        apply_develop_with_rasters(&mut after_delete, 2, 2, &recipe, &snapshot, MaskFrame::AsRendered);
         assert_eq!(after_delete, before_delete);
         assert_ne!(after_delete, untouched, "the retained white mask must still apply");
         let _ = std::fs::remove_dir_all(&dir);
@@ -11949,7 +13086,7 @@ d 0.113862 0.987261"
         // whole frame.
         let reference = DynamicImage::ImageRgb8(image::RgbImage::new(8, 8));
         for inverted in [false, true] {
-            let cov = mask_coverage(&ai(inverted), &reference);
+            let cov = mask_coverage(&ai(inverted), &reference, MaskFrame::AsRendered);
             let lit = cov.pixels().filter(|p| p.0[0] > 0).count();
             assert_eq!(
                 lit, 0,
