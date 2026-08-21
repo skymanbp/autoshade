@@ -917,6 +917,35 @@ fn record_measured(log: &StateLog, notes: &[crate::rationale::Note], row: &State
     true
 }
 
+/// The report line that says what the transport's one-repeat funnel did this
+/// run (R29 ruling 拍板一: 524 and 529 are each posted a second time).
+///
+/// `None` when nothing repeated, because a row of zeros would bury the
+/// interesting case — a run that hit no transient at all — under a line that
+/// looks the same as one that hit four. When something DID repeat, both halves
+/// are named, and they are not the same fact: a repeat that then answered is
+/// the photograph the ruling BOUGHT (it is in the table and in saved
+/// progress), while a repeat that failed again is a photograph that still fell
+/// back, so it is inside the fallback count on the line above and deliberately
+/// not persisted. The 524 sentence is not decoration either: the ruling
+/// accepted at most one duplicate charge per photograph as the price of not
+/// scrapping a 147-photo run, and a transcript that never says so hides the
+/// cost that was accepted. It names the class rather than a count because this
+/// layer is given counts, not codes — the per-occurrence stderr disclosure,
+/// which does know the code, is where an operator reads which one it was.
+fn retry_disclosure(t: crate::advisor::RetryTally) -> Option<String> {
+    (t.repeated > 0).then(|| {
+        format!(
+            "{} upstream call(s) failed transiently and were posted a second time: {} \
+             recovered, {} failed again (those photographs fell back). A repeated relay \
+             timeout (HTTP 524) may have been billed twice.",
+            t.repeated,
+            t.recovered,
+            t.exhausted()
+        )
+    })
+}
+
 /// The pool body's FIRST decision: a photograph a valid saved row already
 /// answers for is not measured — no decode, no API call, no spend.
 ///
@@ -1023,6 +1052,10 @@ pub fn run(
     // standing in for the proposer. A COUNT, order-independent, so an atomic
     // is honest here where an f64 sum would not be.
     let fallbacks = std::sync::atomic::AtomicU32::new(0);
+    // The transport's one-repeat funnel is counted process-wide, so THIS run's
+    // numbers are a difference across the work below (see `advisor::RetryTally`
+    // for why the counters do not travel through `produce_recipe`).
+    let retries_before = crate::advisor::retry_tally();
     // `plan_for` for the same reason `batch` uses it (R28 Batch-4 4a), even
     // though `eval`'s work list is RAW+.xmp pairs by construction and the
     // survey therefore finds nothing to raise: the door a caller takes should
@@ -1372,6 +1405,12 @@ pub fn run(
          measured this run, {} fallback row(s) NOT persisted.",
         fallbacks.load(std::sync::atomic::Ordering::Relaxed)
     );
+    // …and WHY that count is as low as it is: a run that spent repeats is not
+    // the same run as one that never needed them, and the fallback number
+    // above is the number those repeats were bought to hold down.
+    if let Some(line) = retry_disclosure(crate::advisor::retry_tally().since(retries_before)) {
+        println!("{line}");
+    }
     println!("progress file: {}", state_path.display());
     println!("{:<22} {:>4} {:>10} {:>13} {:>8}", "field", "n", "mean|Δ|", "bias(AI−you)", "AI-omit");
     for row in &ruler {
@@ -2340,6 +2379,37 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].stem, "proposer_answered");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A repeat that rescued a photograph and a repeat that failed again are
+    /// NOT the same fact, and the provenance block has to keep them apart: the
+    /// first is a row in the table that the R29 ruling paid to keep, the second
+    /// is a photograph that still fell back and is therefore inside the
+    /// fallback count on the line above it. A clean run says nothing at all —
+    /// zeros here would read exactly like a run that repeated four times.
+    ///
+    /// MUTATION THIS CATCHES: printing unconditionally (a clean run grows a
+    /// noise line), collapsing the two numbers into one total, or dropping the
+    /// 524 double-billing sentence the ruling accepted out loud.
+    #[test]
+    fn the_report_separates_a_rescued_repeat_from_one_that_still_fell_back() {
+        use crate::advisor::RetryTally;
+        assert_eq!(retry_disclosure(RetryTally::default()), None, "a clean run stays quiet");
+
+        let line = retry_disclosure(RetryTally { repeated: 5, recovered: 4 })
+            .expect("a run that repeated says so");
+        assert!(line.contains("5 upstream call(s)"), "{line}");
+        assert!(line.contains("4 recovered"), "{line}");
+        assert!(line.contains("1 failed again"), "the exhausted half is derived, not dropped: {line}");
+        assert!(line.contains("fell back"), "…and named as what it costs the table: {line}");
+        assert!(line.contains("524"), "the accepted double-billing risk is disclosed: {line}");
+
+        // Every repeat failing is the attempt-3 shape, and it must not read as
+        // a success: nothing recovered, everything fell back.
+        let all_lost = retry_disclosure(RetryTally { repeated: 5, recovered: 0 })
+            .expect("a run whose repeats all failed says so");
+        assert!(all_lost.contains("0 recovered"), "{all_lost}");
+        assert!(all_lost.contains("5 failed again"), "{all_lost}");
     }
 
     /// The progress file lands in the per-user store and nowhere near the

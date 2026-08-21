@@ -945,14 +945,18 @@ pub(crate) fn post_ai_json_with(
     // A caller that built its own `reasoning` object owns it completely —
     // neither knob is grafted on top of a hand-written one.
     let caller_owns_reasoning = body.get("reasoning").is_some();
-    // ONE extra POST per request, never a loop. Measured upstream rate is
-    // ~0.8% of calls, so a single repeat rescues almost every run that a lone
-    // `response.failed` used to scrap (two 147-photo evals died to exactly one
-    // such event) while a SECOND repeat mostly buys charges from a provider
-    // that is actually down. Deliberately NOT part of `Refused`: that carries
-    // what the endpoint cannot ACCEPT, and a caller with a retry of its own
-    // (`openai_verify` drops the temperature pin) is posting a DIFFERENT body,
-    // which is its own request and gets its own single repeat.
+    // ONE extra POST per request, never a loop, and ONE flag for every class
+    // that qualifies — not one flag per class. A single repeat rescues almost
+    // every run that a lone upstream blip used to scrap (two 147-photo evals
+    // died to one `response.failed` each; a third died to four relay 524s and
+    // one 529) while a SECOND repeat mostly buys charges from a provider that
+    // is actually down. The shared flag is also what keeps the accepted cost
+    // at what the ruling accepted: at most ONE duplicate charge per
+    // photograph, whatever mixture of classes the call happens to hit.
+    // Deliberately NOT part of `Refused`: that carries what the endpoint
+    // cannot ACCEPT, and a caller with a retry of its own (`openai_verify`
+    // drops the temperature pin) is posting a DIFFERENT body, which is its
+    // own request and gets its own single repeat.
     let mut transient_retried = false;
 
     loop {
@@ -1042,17 +1046,13 @@ pub(crate) fn post_ai_json_with(
                     // no photo, so the stem comes from the caller's own line
                     // when the retry also fails (pipeline.rs's proposer arm).
                     match assembled {
-                        Err(e) if !transient_retried && transient_stream_failure(&e) => {
-                            transient_retried = true;
-                            eprintln!(
-                                "  ⚠ the AI reported the response failed mid-stream ({e}) — \
-                                 retrying once (a SECOND paid call; the request is re-posted \
-                                 unchanged)"
-                            );
-                            std::thread::sleep(TRANSIENT_RETRY_BACKOFF);
-                            continue;
+                        Err(e) => {
+                            if spend_repeat(&mut transient_retried, &e) {
+                                continue;
+                            }
+                            return settle_repeat(transient_retried, Err(e));
                         }
-                        other => return other,
+                        ok => return settle_repeat(transient_retried, ok),
                     }
                 }
                 // NO re-POST on the blocking path either — read OR parse: a
@@ -1062,8 +1062,14 @@ pub(crate) fn post_ai_json_with(
                 // buys a second charge for a request that already succeeded
                 // on their side. (The old code retried the read case within
                 // 30 s — exactly the double-billing window.)
+                // Every exit from here on is wrapped in `settle_repeat` — the
+                // successes and the failures alike. Wrapping only the arms
+                // that can carry an answer would make "did the repeat work?"
+                // a property of WHICH LINES call the helper, which no test can
+                // pin; wrapping all of them puts the question where it can be
+                // answered, in the one `is_ok` test inside it.
                 match into_json_capped(r) {
-                    Ok(v) => return Ok(v),
+                    Ok(v) => return settle_repeat(transient_retried, Ok(v)),
                     Err(e) => {
                         let msg = if e.kind() == std::io::ErrorKind::InvalidData {
                             format!("the AI endpoint answered with unreadable JSON: {e}")
@@ -1074,7 +1080,10 @@ pub(crate) fn post_ai_json_with(
                                  automatically; re-run to retry"
                             )
                         };
-                        return Err(AdvisorError::Transport(msg));
+                        return settle_repeat(
+                            transient_retried,
+                            Err(AdvisorError::Transport(msg)),
+                        );
                     }
                 }
             }
@@ -1130,10 +1139,27 @@ pub(crate) fn post_ai_json_with(
                     refused.stream = true;
                     continue;
                 }
-                return Err(AdvisorError::Http {
+                let err = AdvisorError::Http {
                     status: code,
                     body: BoundedUntrustedText::diagnostic(&b, &[key]),
-                });
+                };
+                // The SECOND mouth of the funnel above, not a second funnel:
+                // same flag, same pause, same one-repeat cap, same counter.
+                // [`TRANSIENT_STATUSES`] carries what the two stream events
+                // carry — the upstream saying this call produced no answer —
+                // and it arrives HERE instead of in the stream arm because
+                // the failure happens before any stream exists. That is the
+                // shape the eval run behind the ruling actually died in: four
+                // relay 524s and one 529, not one stream death among them, so
+                // covering only the streaming arm would have left the
+                // measured failure mode untouched. Our own socket cannot
+                // pre-empt these either — a Cloudflare 524 fires at 100 s,
+                // well inside the 600 s `STREAM_STALL_FLOOR_SECS` floor — so
+                // they really do reach this arm as a status.
+                if spend_repeat(&mut transient_retried, &err) {
+                    continue;
+                }
+                return settle_repeat(transient_retried, Err(err));
             }
             Err(ureq::Error::Transport(t)) => {
                 let elapsed = started.elapsed().as_secs();
@@ -1158,12 +1184,15 @@ pub(crate) fn post_ai_json_with(
                 // `config::header_safe_key` refuses such a key at the
                 // boundary; this is the second layer, and it also covers a
                 // base URL that embedded credentials.
-                return Err(match err {
-                    AdvisorError::Transport(msg) => AdvisorError::Transport(
-                        BoundedUntrustedText::diagnostic(&msg, &[key]).into_string(),
-                    ),
-                    other => other,
-                });
+                return settle_repeat(
+                    transient_retried,
+                    Err(match err {
+                        AdvisorError::Transport(msg) => AdvisorError::Transport(
+                            BoundedUntrustedText::diagnostic(&msg, &[key]).into_string(),
+                        ),
+                        other => other,
+                    }),
+                );
             }
         }
     }
@@ -1186,18 +1215,207 @@ const STREAM_FAILURE_PREFIX: &str = "AI stream error: ";
 /// clear, short enough that a 147-photo run does not notice it.
 const TRANSIENT_RETRY_BACKOFF: std::time::Duration = std::time::Duration::from_secs(2);
 
+/// One repeatable HTTP status, with the two things a disclosure has to say
+/// about it: WHAT happened, and what the repeat COSTS.
+///
+/// The cost travels with the code because that is exactly where the two
+/// entries differ, and one shared sentence would have to be wrong about one of
+/// them — either hiding a real double-billing risk or inventing one.
+struct TransientStatus {
+    code: u16,
+    /// The plain-language event, for the head of the disclosure line.
+    what: &'static str,
+    /// What posting again costs, stated as bluntly as it is known.
+    cost: &'static str,
+}
+
+/// The HTTP statuses that mean what [`TRANSIENT_STREAM_EVENTS`] mean — the
+/// upstream saying this call produced no answer — but that arrive as a STATUS
+/// because they are raised before any stream exists.
+///
+/// Both are non-IANA codes owned by exactly ONE hop, which is why the numeric
+/// code alone identifies the channel and no prose is ever matched:
+///
+/// * `529` is Anthropic's own overloaded reply. The R29 ruling
+///   (`~/.claude/plans/r29-materials/r29-rulings-2026-08-20.md`, 拍板一)
+///   records it as NOT billed — the provider refuses before generating — so
+///   the repeat is free.
+/// * `524` is a Cloudflare-fronted relay giving up on its origin. Whether the
+///   AI behind that relay did, and BILLED, the work is unknowable from here,
+///   so the repeat may be charged a second time for that one photograph. The
+///   same ruling accepts that worst case explicitly (a few cents) against the
+///   alternative it was measured against: one 147-photo eval scrapped by the
+///   frozen zero-fallback criterion, then re-bought.
+///
+/// Everything else stays terminal. 429 and the generic 5xx family (500 / 502 /
+/// 503 / 504) are deliberately OUT: they are emitted by every hop in the
+/// chain, so neither the channel nor the billing can be read off the code, and
+/// the `post_ai_json` rule against re-POSTing when billing is unknown applies.
+/// Every 4xx is out because it names something wrong with the REQUEST, which a
+/// byte-identical second POST reproduces at full price.
+const TRANSIENT_STATUSES: [TransientStatus; 2] = [
+    TransientStatus {
+        code: 524,
+        what: "the relay timed out waiting for the AI (HTTP 524)",
+        cost: "a SECOND call that MAY be billed twice — the gateway gave up, but the AI \
+               behind it may already have done the work",
+    },
+    TransientStatus {
+        code: 529,
+        what: "the AI is overloaded (HTTP 529)",
+        cost: "not a second charge — the provider refuses an overloaded request before \
+               generating",
+    },
+];
+
+/// Why a failure is worth ONE repeat of the SAME request — and `None` for
+/// everything that is not.
+///
+/// Two arms, one funnel. Both say the same thing about the call (the upstream
+/// itself reports that no answer was produced) and differ only in where the
+/// upstream said it, which is what the disclosure has to get right.
+enum Repeat {
+    /// The upstream reported that an ACCEPTED response died mid-stream.
+    StreamFailure,
+    /// A status that names the call as unanswered, and prices the repeat.
+    Status(&'static TransientStatus),
+}
+
+impl Repeat {
+    /// The one line an operator sees when a repeat fires. Both arms name the
+    /// second call out loud; the status arm additionally names what that
+    /// second call may cost, because for 524 the honest answer is "possibly
+    /// twice" and hiding that would make the ruling's accepted worst case
+    /// invisible in the transcript.
+    fn disclosure(&self, e: &AdvisorError) -> String {
+        match self {
+            Repeat::StreamFailure => format!(
+                "  ⚠ the AI reported the response failed mid-stream ({e}) — retrying once \
+                 (a SECOND paid call; the request is re-posted unchanged)"
+            ),
+            Repeat::Status(s) => format!(
+                "  ⚠ {} ({e}) — retrying once ({}; the request is re-posted unchanged)",
+                s.what, s.cost
+            ),
+        }
+    }
+}
+
 /// Is this failure one the SAME request is worth posting again?
 ///
-/// ONLY the upstream reporting that an accepted response died
-/// ([`TRANSIENT_STREAM_EVENTS`]). Everything else stays terminal for one of
-/// two reasons: a stream `error` event, a truncating `finish_reason` and every
-/// 4xx name something wrong with the REQUEST, which a byte-identical second
-/// POST reproduces at full price; a transport abort or a stream that ends
-/// without a result leaves it UNKNOWN whether the work was already done and
-/// billed, which is the `post_ai_json` rule that forbids re-POSTing past a 2xx.
-fn transient_stream_failure(e: &AdvisorError) -> bool {
-    let AdvisorError::ModelFailure(m) = e else { return false };
-    TRANSIENT_STREAM_EVENTS.iter().any(|ev| m.starts_with(&format!("{STREAM_FAILURE_PREFIX}{ev}")))
+/// ONLY the two upstream statements that an accepted call produced no answer:
+/// [`TRANSIENT_STREAM_EVENTS`] when a stream had already opened, and
+/// [`TRANSIENT_STATUSES`] when it had not. Everything else stays terminal for
+/// one of two reasons: a stream `error` event, a truncating `finish_reason`
+/// and every 4xx name something wrong with the REQUEST, which a byte-identical
+/// second POST reproduces at full price; a transport abort, a generic 5xx or a
+/// stream that ends without a result leaves it UNKNOWN whether the work was
+/// already done and billed, which is the `post_ai_json` rule that forbids
+/// re-POSTing past a 2xx.
+fn worth_one_repeat(e: &AdvisorError) -> Option<Repeat> {
+    match e {
+        AdvisorError::ModelFailure(m) => TRANSIENT_STREAM_EVENTS
+            .iter()
+            .any(|ev| m.starts_with(&format!("{STREAM_FAILURE_PREFIX}{ev}")))
+            .then_some(Repeat::StreamFailure),
+        // The STATUS CODE is the whole test. 524 and 529 are each owned by one
+        // hop, so the number identifies the channel; matching the body's prose
+        // would let a relay's error text about "overloaded" upstream buy a
+        // repeat the code never authorised.
+        AdvisorError::Http { status, .. } => {
+            TRANSIENT_STATUSES.iter().find(|s| s.code == *status).map(Repeat::Status)
+        }
+        _ => None,
+    }
+}
+
+/// Spend the one repeat, or decline to.
+///
+/// One place, because two call sites now feed it and the cap, the pause, the
+/// disclosure and the counting must not drift apart between them. `spent` is
+/// the caller's single flag: once true, nothing repeats again, whatever class
+/// the second failure belongs to.
+fn spend_repeat(spent: &mut bool, e: &AdvisorError) -> bool {
+    if *spent {
+        return false;
+    }
+    let Some(repeat) = worth_one_repeat(e) else { return false };
+    *spent = true;
+    eprintln!("{}", repeat.disclosure(e));
+    TRANSIENT_REPEATS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    std::thread::sleep(TRANSIENT_RETRY_BACKOFF);
+    true
+}
+
+/// Calls this PROCESS has repeated under the R29 ruling.
+static TRANSIENT_REPEATS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+/// …of which this many then returned an answer.
+static TRANSIENT_REPEATS_RECOVERED: std::sync::atomic::AtomicU32 =
+    std::sync::atomic::AtomicU32::new(0);
+
+/// Close the books on one logical call: if it SPENT its repeat, record whether
+/// the repeat then produced an answer.
+///
+/// Wrapped around EVERY return of `post_ai_json_with`, not only the two that
+/// can carry an answer, so the `is_ok` test is the thing that decides — the
+/// alternative (calling it only where the value is known to be `Ok`) makes the
+/// decision an unwritten property of which lines happen to call it, which no
+/// test can hold. Only the recoveries are stored; the failures are derived as
+/// `repeated − recovered` by [`RetryTally::exhausted`], so an exit path added
+/// later that forgets this wrapper is counted as a failure rather than
+/// silently vanishing from the report.
+fn settle_repeat(
+    repeated: bool,
+    out: Result<serde_json::Value, AdvisorError>,
+) -> Result<serde_json::Value, AdvisorError> {
+    if repeated && out.is_ok() {
+        TRANSIENT_REPEATS_RECOVERED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+    out
+}
+
+/// What the one-repeat funnel did, as two COUNTS.
+///
+/// Process-global behind [`retry_tally`] rather than a value threaded out of
+/// `post_ai_json`, because the consumer is `eval`'s end-of-run report and the
+/// path between them is `produce_recipe` and every one of its ~30 callers —
+/// a signature sweep to carry two integers. Counts are order-independent, so
+/// relaxed atomics are honest here exactly as they are for `eval`'s own
+/// fallback counter, and a caller reads a DIFFERENCE of two snapshots so a
+/// process that did other AI work first cannot inflate a run's numbers.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RetryTally {
+    /// Logical calls that spent their one repeat.
+    pub repeated: u32,
+    /// …of which this many then returned an answer.
+    pub recovered: u32,
+}
+
+impl RetryTally {
+    /// The repeats whose second attempt ALSO failed — in `eval` those are
+    /// exactly the photographs that still fell back to the deterministic
+    /// baseline, which is the number a frozen-criterion baseline run cares
+    /// about.
+    pub fn exhausted(self) -> u32 {
+        self.repeated.saturating_sub(self.recovered)
+    }
+
+    /// What happened between an earlier snapshot and this one.
+    pub fn since(self, earlier: Self) -> Self {
+        Self {
+            repeated: self.repeated.saturating_sub(earlier.repeated),
+            recovered: self.recovered.saturating_sub(earlier.recovered),
+        }
+    }
+}
+
+/// A snapshot of the process-wide repeat counters. Take one before a run and
+/// one after, and [`RetryTally::since`] gives that run's numbers.
+pub fn retry_tally() -> RetryTally {
+    RetryTally {
+        repeated: TRANSIENT_REPEATS.load(std::sync::atomic::Ordering::Relaxed),
+        recovered: TRANSIENT_REPEATS_RECOVERED.load(std::sync::atomic::Ordering::Relaxed),
+    }
 }
 
 /// Reassemble a streamed AI response into the endpoint's BLOCKING shape, so
@@ -1218,25 +1436,34 @@ fn assemble_sse(
             let mut out: Option<serde_json::Value> = None;
             let mut failure: Option<String> = None;
             for_each_sse_json(r, CAP, progress_budget, |v| {
-                if v.get("error").is_some()
-                    || v.get("type").and_then(serde_json::Value::as_str) == Some("error")
-                {
+                let ty = v.get("type").and_then(serde_json::Value::as_str).unwrap_or("");
+                // The TYPE is read FIRST and the generic `error`-key check is
+                // the fallback. B1a had the two the other way round and
+                // registered the consequence rather than fixing it: a relay
+                // that lifts the failure's own `error` object to the top of a
+                // `response.failed` event turned that event into an untyped
+                // error string, which `worth_one_repeat` then does not
+                // recognise — the same transient, the same money, no repeat.
+                // Same root as this batch's statuses (the funnel failing to
+                // RECOGNISE a transient the upstream did name), so it is fixed
+                // in the same change. Nothing widens: `error` is not a
+                // transient event name, so a bare `{"type":"error"}` and a
+                // top-level `error` key on any other event stay terminal.
+                if TRANSIENT_STREAM_EVENTS.contains(&ty) {
+                    // The event name leads the message: it is the marker
+                    // `worth_one_repeat` reads back.
+                    failure = Some(format!("{ty}: {v}"));
+                    return Break(());
+                }
+                if v.get("error").is_some() || ty == "error" {
                     failure = Some(v.to_string());
                     return Break(());
                 }
-                match v.get("type").and_then(serde_json::Value::as_str).unwrap_or("") {
-                    "response.completed" => {
-                        out = v.get("response").cloned();
-                        Break(())
-                    }
-                    ty if TRANSIENT_STREAM_EVENTS.contains(&ty) => {
-                        // The event name leads the message: it is the marker
-                        // `transient_stream_failure` reads back.
-                        failure = Some(format!("{ty}: {v}"));
-                        Break(())
-                    }
-                    _ => Continue(()),
+                if ty == "response.completed" {
+                    out = v.get("response").cloned();
+                    return Break(());
                 }
+                Continue(())
             })
             .map_err(|e| AdvisorError::Transport(format!("read AI stream: {e}")))?;
             if let Some(f) = failure {
@@ -2636,30 +2863,52 @@ Final answer: {"decision":"accept","reasons":[]}"#;
         );
     }
 
-    /// The classifier and the arm that feeds it must agree on ONE set. This
-    /// pins the whole failure taxonomy, not just the happy pair: everything
-    /// outside `TRANSIENT_STREAM_EVENTS` is terminal, so widening the retry by
-    /// accident (e.g. "any ModelFailure") fails here.
+    /// The classifier and the arms that feed it must agree on ONE set. This
+    /// pins the whole failure taxonomy, not just the happy cases: everything
+    /// outside `TRANSIENT_STREAM_EVENTS` + `TRANSIENT_STATUSES` is terminal,
+    /// so widening the retry by accident (e.g. "any ModelFailure", "any 5xx")
+    /// fails here.
     fn responses_failure(body: &str) -> AdvisorError {
         assemble_sse(body.as_bytes(), SseFamily::Responses, None)
             .expect_err("the scenario is a failing stream")
     }
 
+    fn status_error(code: u16, body: &str) -> AdvisorError {
+        AdvisorError::Http { status: code, body: BoundedUntrustedText::diagnostic(body, &[]) }
+    }
+
+    fn repeatable(e: &AdvisorError) -> bool {
+        worth_one_repeat(e).is_some()
+    }
+
+    /// Serialises every test that SPENDS a repeat. The counters behind
+    /// [`retry_tally`] are process-global (that is the point — `eval` reads
+    /// them at the far end of `produce_recipe`), and the tally test measures a
+    /// DIFFERENCE across its own scenario, so two repeat tests on different
+    /// threads would each see the other's increments.
+    static REPEAT_TESTS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn repeat_test_guard() -> std::sync::MutexGuard<'static, ()> {
+        // A panicking test must not cascade into "poisoned" failures in every
+        // other test that shares this lock.
+        REPEAT_TESTS.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
     #[test]
-    fn only_a_failed_or_incomplete_response_event_counts_as_transient() {
-        assert!(transient_stream_failure(&responses_failure(
+    fn only_the_upstream_saying_no_answer_counts_as_repeatable() {
+        assert!(repeatable(&responses_failure(
             "data: {\"type\":\"response.failed\",\"response\":{\"error\":{\"message\":\"boom\"}}}\n\n"
         )));
-        assert!(transient_stream_failure(&responses_failure(
+        assert!(repeatable(&responses_failure(
             "data: {\"type\":\"response.incomplete\",\"response\":{\"status\":\"incomplete\"}}\n\n"
         )));
         // A stream `error` event names something wrong with the REQUEST — a
         // byte-identical second POST reproduces it at full price.
-        assert!(!transient_stream_failure(&responses_failure(
+        assert!(!repeatable(&responses_failure(
             "data: {\"error\":{\"code\":\"invalid_prompt\",\"message\":\"schema refused\"}}\n\n"
         )));
         // A stream that simply stops leaves the billing question open.
-        assert!(!transient_stream_failure(&responses_failure(
+        assert!(!repeatable(&responses_failure(
             "data: {\"type\":\"response.created\",\"response\":{}}\n\n"
         )));
         // Chat truncation is a completed, billed generation, not a blip.
@@ -2671,12 +2920,222 @@ Final answer: {"decision":"accept","reasons":[]}"#;
             None,
         )
         .expect_err("a non-stop finish is a failure");
-        assert!(!transient_stream_failure(&truncated));
-        assert!(!transient_stream_failure(&AdvisorError::Http {
-            status: 401,
-            body: BoundedUntrustedText::diagnostic("invalid api key", &[]),
-        }));
-        assert!(!transient_stream_failure(&AdvisorError::Transport("connection reset".into())));
+        assert!(!repeatable(&truncated));
+        assert!(!repeatable(&AdvisorError::Transport("connection reset".into())));
+
+        // The two statuses the R29 ruling admitted, by CODE — each owned by
+        // exactly one hop, which is what makes the number sufficient.
+        assert!(repeatable(&status_error(524, "<html>A timeout occurred</html>")));
+        assert!(repeatable(&status_error(529, r#"{"type":"overloaded_error"}"#)));
+        // …and the whole neighbourhood that stays terminal. 502/503/504 are
+        // emitted by every hop in the chain, so neither the channel nor the
+        // billing can be read off the code; 429 is a quota decision; 4xx names
+        // the request. A body that TALKS like a transient must not buy a
+        // repeat the status never authorised — that is the string-guessing
+        // this classifier exists to refuse.
+        for (code, body) in [
+            (400u16, "bad request"),
+            (401, "invalid api key"),
+            (429, r#"{"error":{"message":"overloaded, please retry"}}"#),
+            (500, "internal error"),
+            (502, "bad gateway"),
+            (503, r#"{"error":{"message":"overloaded_error"}}"#),
+            (504, "gateway timeout"),
+            (525, "ssl handshake failed"),
+        ] {
+            assert!(!repeatable(&status_error(code, body)), "{code} must stay terminal");
+        }
+    }
+
+    /// A relay 524 and an Anthropic 529 are the shape the eval run behind the
+    /// ruling actually died in — four of the first, one of the second — and
+    /// neither is a stream death, so only a counted transport proves the
+    /// NON-STREAMING arm repeats. Both scenarios also pin the second POST as
+    /// byte-identical: a repeat that changed the body would be a different
+    /// request, and its result would not be the one the run was buying.
+    #[test]
+    fn a_relay_timeout_and_an_overload_each_repeat_exactly_once() {
+        for (code, body) in
+            [(524u16, "<html>A timeout occurred</html>"), (529, r#"{"type":"overloaded_error"}"#)]
+        {
+            let _serial = repeat_test_guard();
+            let (url, seen, handle) = stub_endpoint(vec![
+                (code, "text/html", body.into()),
+                (200, "application/json", r#"{"answer":42}"#.into()),
+            ]);
+            let v = post_ai_json(
+                &url,
+                "test-key",
+                serde_json::json!({"model": "m"}),
+                5,
+                SseFamily::Responses,
+                None,
+            )
+            .unwrap_or_else(|e| panic!("the single repeat recovers the run after {code}: {e}"));
+            assert_eq!(v["answer"], 42);
+            join_stub(handle);
+            let bodies = seen.lock().unwrap().clone();
+            assert_eq!(bodies.len(), 2, "{code}: exactly one repeat — two POSTs: {bodies:?}");
+            assert_eq!(bodies[0], bodies[1], "{code}: the repeat re-posts the request UNCHANGED");
+        }
+    }
+
+    /// The cap is ONE repeat per logical call, shared across classes — not one
+    /// per class. Mixing them is exactly how a run would quietly spend three
+    /// charges on one photograph, and 524's charge is the one whose second
+    /// billing the ruling accepted ONCE.
+    #[test]
+    fn the_one_repeat_is_shared_across_classes() {
+        let _serial = repeat_test_guard();
+        let (url, seen, handle) = stub_endpoint(vec![
+            (524, "text/html", "<html>A timeout occurred</html>".into()),
+            (
+                200,
+                "text/event-stream",
+                "data: {\"type\":\"response.failed\",\"response\":{\"error\":\
+{\"message\":\"and now this\"}}}\n\n"
+                    .into(),
+            ),
+        ]);
+        let err = post_ai_json(
+            &url,
+            "test-key",
+            serde_json::json!({"model": "m"}),
+            5,
+            SseFamily::Responses,
+            None,
+        )
+        .expect_err("the spent repeat is not renewed by a different class");
+        assert!(matches!(err, AdvisorError::ModelFailure(_)), "{err}");
+        join_stub(handle);
+        assert_eq!(seen.lock().unwrap().len(), 2, "one repeat total — no third charge");
+    }
+
+    /// Same rule as the stream arm's: a provider that is actually down must
+    /// not be paid a third time for one photograph, and the ORIGINAL status
+    /// has to survive so the transcript names what happened.
+    #[test]
+    fn a_second_consecutive_transient_status_is_terminal() {
+        let _serial = repeat_test_guard();
+        let (url, seen, handle) = stub_endpoint(vec![
+            (529, "application/json", r#"{"type":"overloaded_error"}"#.into()),
+            (529, "application/json", r#"{"type":"overloaded_error"}"#.into()),
+        ]);
+        let err = post_ai_json(
+            &url,
+            "test-key",
+            serde_json::json!({"model": "m"}),
+            5,
+            SseFamily::Responses,
+            None,
+        )
+        .expect_err("a second overload surfaces the status");
+        assert!(matches!(err, AdvisorError::Http { status: 529, .. }), "{err}");
+        join_stub(handle);
+        assert_eq!(seen.lock().unwrap().len(), 2, "one repeat, never two");
+    }
+
+    /// The report line `eval` prints has to separate the repeats that RESCUED
+    /// a photograph from the repeats that failed again — those are the
+    /// photographs that still fell back, which is what a frozen-criterion
+    /// baseline run has to look at. Counted through the real transport,
+    /// because the tally's whole job is to reflect what the caller got.
+    #[test]
+    fn the_tally_separates_a_rescued_repeat_from_an_exhausted_one() {
+        let _serial = repeat_test_guard();
+        let before = retry_tally();
+
+        let (url, _seen, handle) = stub_endpoint(vec![
+            (524, "text/html", "<html>A timeout occurred</html>".into()),
+            (200, "application/json", r#"{"answer":1}"#.into()),
+        ]);
+        post_ai_json(&url, "k", serde_json::json!({"model": "m"}), 5, SseFamily::Responses, None)
+            .expect("the repeat rescues this one");
+        join_stub(handle);
+
+        let (url, _seen, handle) = stub_endpoint(vec![
+            (529, "application/json", r#"{"type":"overloaded_error"}"#.into()),
+            (529, "application/json", r#"{"type":"overloaded_error"}"#.into()),
+        ]);
+        let _ = post_ai_json(
+            &url,
+            "k",
+            serde_json::json!({"model": "m"}),
+            5,
+            SseFamily::Responses,
+            None,
+        )
+        .expect_err("this one stays down");
+        join_stub(handle);
+
+        // A call that never repeated must leave both counters alone.
+        let (url, _seen, handle) =
+            stub_endpoint(vec![(401, "application/json", r#"{"error":{}}"#.into())]);
+        let _ = post_ai_json(
+            &url,
+            "k",
+            serde_json::json!({"model": "m"}),
+            5,
+            SseFamily::Responses,
+            None,
+        )
+        .expect_err("an auth status is terminal");
+        join_stub(handle);
+
+        let run = retry_tally().since(before);
+        assert_eq!(run.repeated, 2, "two calls spent their repeat: {run:?}");
+        assert_eq!(run.recovered, 1, "one of them then answered: {run:?}");
+        assert_eq!(run.exhausted(), 1, "the other fell back: {run:?}");
+    }
+
+    /// The billing sentence is BOUND to its class, not merely present
+    /// somewhere: 524's repeat may be charged twice (the gateway gave up, the
+    /// AI behind it may have finished) and 529's is free (the provider refuses
+    /// before generating). Swapping the two sentences leaves every taxonomy
+    /// and transport test green — this test exists because a supervisor
+    /// mutation proved exactly that — yet it would tell an operator the
+    /// opposite of the truth about money, which is the one thing the R29
+    /// ruling asked the disclosure to get right.
+    #[test]
+    fn each_transient_status_discloses_its_own_billing_truth() {
+        let five_two_four = status_error(524, "<html>A timeout occurred</html>");
+        let Some(repeat) = worth_one_repeat(&five_two_four) else {
+            panic!("524 is repeatable");
+        };
+        let line = repeat.disclosure(&five_two_four);
+        assert!(line.contains("billed twice"), "524 must own the double-billing risk: {line}");
+        assert!(!line.contains("not a second charge"), "…and never deny it: {line}");
+
+        let five_two_nine = status_error(529, r#"{"type":"overloaded_error"}"#);
+        let Some(repeat) = worth_one_repeat(&five_two_nine) else {
+            panic!("529 is repeatable");
+        };
+        let line = repeat.disclosure(&five_two_nine);
+        assert!(line.contains("not a second charge"), "529's repeat is free: {line}");
+        assert!(!line.contains("billed twice"), "…and must not claim the 524 risk: {line}");
+    }
+
+    /// The wart B1a registered instead of fixing: a relay that copies the
+    /// failure's own `error` object to the TOP of a `response.failed` event
+    /// used to have that event classified as an untyped error, which the
+    /// classifier does not recognise — the same transient, the same money, no
+    /// repeat. Both spellings must now reach the same verdict.
+    #[test]
+    fn a_transient_event_carrying_a_top_level_error_key_is_still_transient() {
+        let masked = responses_failure(
+            "data: {\"type\":\"response.failed\",\"error\":{\"message\":\"upstream blip\"},\
+\"response\":{\"error\":{\"message\":\"upstream blip\"}}}\n\n",
+        );
+        assert!(repeatable(&masked), "the event name decides, not the key beside it: {masked}");
+        assert!(masked.to_string().contains("response.failed"), "and it is named: {masked}");
+        // Nothing widened: an untyped error, and the `error` TYPE, stay
+        // terminal even though both carry the same key.
+        assert!(!repeatable(&responses_failure(
+            "data: {\"type\":\"error\",\"error\":{\"code\":\"invalid_prompt\"}}\n\n"
+        )));
+        assert!(!repeatable(&responses_failure(
+            "data: {\"error\":{\"code\":\"invalid_prompt\"}}\n\n"
+        )));
     }
 
     /// One `response.failed` used to scrap a whole 147-photo eval run (twice,
@@ -2684,6 +3143,7 @@ Final answer: {"decision":"accept","reasons":[]}"#;
     /// assert "exactly one repeat" — a source grep cannot.
     #[test]
     fn a_failed_response_stream_is_retried_exactly_once_and_then_succeeds() {
+        let _serial = repeat_test_guard();
         let (url, seen, handle) = stub_endpoint(vec![
             (
                 200,
@@ -2718,6 +3178,7 @@ Final answer: {"decision":"accept","reasons":[]}"#;
     /// down must not be paid a third time for the same photo.
     #[test]
     fn a_second_consecutive_stream_failure_is_terminal() {
+        let _serial = repeat_test_guard();
         let failed = "data: {\"type\":\"response.failed\",\"response\":{\"error\":\
 {\"message\":\"still down\"}}}\n\n";
         let (url, seen, handle) = stub_endpoint(vec![
