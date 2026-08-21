@@ -1109,8 +1109,11 @@ fn attach_one_zone(
 
 /// Per-pixel mask weights for an analysis frame of `w`×`h` — the SAME
 /// normalisation and bilinear sampling the engine's mask stage uses
-/// (`render::sample_gray_norm` with x/w, y/h), so the moments are measured
-/// exactly where the render will apply them.
+/// (`render::sample_gray_norm` at PIXEL CENTRES, through the shared
+/// [`render::MASK_SAMPLE_CENTRE`]), so the moments are measured exactly where
+/// the render will apply them. R29 C2 moved this and `apply_masks`' own
+/// `weight_at` together; a zone measured on one grid and rendered on another
+/// would put the gains half a pixel off the population they were solved from.
 fn mask_weights(mask: &GrayImage, w: u32, h: u32) -> Vec<f32> {
     // usize-widen BEFORE multiplying: `w * h` is a u32 product and a frame
     // over u32::MAX pixels would overflow the reservation (panic in debug,
@@ -1118,7 +1121,11 @@ fn mask_weights(mask: &GrayImage, w: u32, h: u32) -> Vec<f32> {
     let mut out = Vec::with_capacity(w as usize * h as usize);
     for y in 0..h {
         for x in 0..w {
-            out.push(render::sample_gray_norm(mask, x as f32 / w as f32, y as f32 / h as f32));
+            out.push(render::sample_gray_norm(
+                mask,
+                (x as f32 + render::MASK_SAMPLE_CENTRE) / w as f32,
+                (y as f32 + render::MASK_SAMPLE_CENTRE) / h as f32,
+            ));
         }
     }
     out
@@ -1207,6 +1214,24 @@ mod tests {
         // An EMPTY side has no opinion at all.
         assert_eq!(joint_reading(&[], &[]), None);
         assert_eq!(joint_buckets(&[], &tiny).len(), 0);
+    }
+
+    /// The analysis grid IS the render's grid. [`mask_weights`] and
+    /// `render::apply_masks`' own `weight_at` must ask about the same points,
+    /// or every zone is SOLVED on a population half a pixel away from the one
+    /// the mask will actually reach (R29 C2 — `render::MASK_SAMPLE_CENTRE`).
+    ///
+    /// The fixture is the discriminating one: a 2-wide raster [0, 255] read by
+    /// a 4-wide frame. At pixel centres, `sx = nx·2 − 0.5` over
+    /// nx = 0.125/0.375/0.625/0.875 gives −0.25, 0.25, 0.75, 1.25, which clamp
+    /// to 0, ¼, ¾, 1 — symmetric about the frame centre and reaching BOTH
+    /// ends. At the refuted `x/w` the same raster reads 0, ½, 1, 1.
+    #[test]
+    fn zone_moments_sample_on_the_renders_own_grid() {
+        let mut m = GrayImage::new(2, 1);
+        m.put_pixel(0, 0, image::Luma([0]));
+        m.put_pixel(1, 0, image::Luma([255]));
+        assert_eq!(mask_weights(&m, 4, 1), vec![0.0, 0.25, 0.75, 1.0]);
     }
 
     #[test]

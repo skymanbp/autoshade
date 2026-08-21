@@ -2317,8 +2317,14 @@ fn apply_masks(
             continue;
         }
         // combined mask coverage × master amount at a pixel (with inversion).
+        //
+        // PIXEL CENTRES, `(x + 0.5)/w` — see `MASK_SAMPLE_CENTRE` for the
+        // measurement, the derivation, and the render-behaviour change.
         let weight_at = |x: usize, y: usize| -> f32 {
-            let (nx, ny) = (x as f32 / w as f32, y as f32 / h as f32);
+            let (nx, ny) = (
+                (x as f32 + MASK_SAMPLE_CENTRE) / w as f32,
+                (y as f32 + MASK_SAMPLE_CENTRE) / h as f32,
+            );
             let mut wgt = combined_mask_weight(m, nx, ny, bmp, &comp_bmps, unwarp);
             if m.inverted {
                 wgt = 1.0 - wgt;
@@ -3236,6 +3242,51 @@ const RADIAL_FALLOFF: [[f32; 8]; 290] = [
     [0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000],
     [0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000],
 ];
+
+/// Where inside a pixel a mask is sampled, as a fraction of the pixel's own
+/// width — `0.5`, its CENTRE.
+///
+/// **The whole mask family samples through this one constant** (R29 C2): the
+/// frame loops that ask for a weight ([`apply_masks`]' `weight_at`,
+/// [`mask_coverage`]'s overlay, `fit_zoned`'s analysis moments), the texel grid
+/// [`rasterise_brush_group`] stamps onto, and the texel grid
+/// [`sample_gray_norm`] reads back from. Radial, Linear, Brush, Bitmap and
+/// AiMask all land on it, because all five reach the frame through those.
+///
+/// **MEASURED, on two different negatives.** R29 B7 fitted the hard edge
+/// (`Feather = 0`) of a Lightroom-exported radial mask on a 6240 × 4160 frame
+/// whose sidecar geometry is `Left = 0.333333`, `Right = 0.666667`,
+/// `Top = 0.4`, `Bottom = 0.6` — a centre at normalised `(0.5, 0.5)`, i.e.
+/// `(3120.0, 2080.0)` in continuous frame units. The fit, in PIXEL-INDEX
+/// coordinates, put it at **(3119.46, 2079.50)** (`b7_03`, edge rms 0.24 px);
+/// R29 B7-2 re-fitted a SECOND capture — a different body, lens, day and
+/// `OriginalDocumentID` (`b7b_18`, D6) — and got **(3119.49, 2079.51)**. An
+/// ellipse fitted over pixel INDICES returns `p − 0.5` for a true continuous
+/// centre `p`, so both readings say `p = 3119.96 / 3119.99 ≈ 3120` and
+/// `2080.00 / 2080.01 ≈ 2080`: Lightroom maps the stored fraction `u` to the
+/// continuous position `u·W`, and pixel `i` — whose centre is at `i + 0.5` —
+/// therefore carries the mask value of `u = (i + 0.5)/W`.
+///
+/// **It is also what the rest of this engine already assumed.**
+/// [`apply_lens_geometry`] measures every pixel's radius from
+/// `cx = (w − 1)/2`, and `x − (w − 1)/2` IS `x + 0.5 − w/2` — the pixel-centre
+/// offset. [`MaskUnwarp::at`] takes `(nx − 0.5)·w`, which equals that same
+/// offset only under this convention; with `nx = x/w` the mask un-warp sat
+/// half a pixel off the resampler it is defined to invert. The two now agree
+/// exactly rather than nearly.
+///
+/// **⚠ RENDER-BEHAVIOUR CHANGE**, the seventh on the v0.35.0 list: every mask
+/// of every type now lands half a pixel up and to the left of where this
+/// engine used to put it. That is the direction the measurement demands — the
+/// old `x/w` gave pixel `x` the value belonging to continuous position `x`,
+/// which is its own top-left CORNER — and the size of the correction is
+/// exactly 0.5 px on each axis, everywhere, with no dependence on feather,
+/// geometry or frame size.
+///
+/// Not a tunable: it is `0.5` because a pixel's centre is at its middle. It is
+/// named only so the four sites that must agree can be seen to agree, and so
+/// that a mutation of any one of them is a mutation of a shared constant.
+pub(crate) const MASK_SAMPLE_CENTRE: f32 = 0.5;
 
 /// [`mask_weight`] with the frame adaptation applied — the ONE place a stored
 /// coordinate becomes the coordinate this engine's pre-geometry rasteriser
@@ -4177,18 +4228,36 @@ fn load_mask_bitmap(
 /// Bilinear weight lookup in an 8-bit greyscale mask at normalised (nx, ny).
 pub(crate) fn sample_gray_norm(b: &image::GrayImage, nx: f32, ny: f32) -> f32 {
     let (w, h) = (b.width() as f32, b.height() as f32);
-    // EXTENT scaling (`* w`), not endpoint scaling (`* (w - 1)`): every
-    // producer normalises with `x / w` (apply_masks' weight_at and the overlay
-    // builder both say so in their own comments), so mapping onto 0..=size-1
-    // here was a DIFFERENT convention. A frame-sized mask then never reached
-    // its last row/column — a 2-wide mask holding [0,255] rendered [0, 0.5]
+    // EXTENT scaling (`* w`), not endpoint scaling (`* (w - 1)`): a texel owns
+    // a SLICE of the frame, `[i/w, (i+1)/w]`, so mapping onto 0..=size-1 here
+    // was a DIFFERENT convention. A frame-sized mask then never reached its
+    // last row/column — a 2-wide mask holding [0,255] rendered [0, 0.5]
     // instead of [0, 1] — and because the shortfall is one source pixel out of
     // `w`, the same mask landed differently in a 1280 px preview than in a
-    // 9504 px export. With extent scaling and nx = x/w the sample index is
-    // exactly x for a same-size mask (no interpolation blur at all), and a
-    // smaller mask scales proportionally as intended.
-    let sx = (nx.clamp(0.0, 1.0) * w).max(0.0).min(w - 1.0);
-    let sy = (ny.clamp(0.0, 1.0) * h).max(0.0).min(h - 1.0);
+    // 9504 px export.
+    //
+    // The `− MASK_SAMPLE_CENTRE` is the other half of that slice reading, and
+    // it is what makes this the TEXEL-CENTRE lookup its producers stamp for
+    // (R29 C2): texel `i` owns `[i/w, (i+1)/w]`, so its centre is the
+    // normalised `(i + 0.5)/w` and the texel coordinate of a normalised `nx`
+    // is `nx·w − 0.5`. Bilinear then interpolates between the two texel
+    // CENTRES that bracket the sample, which is the only reading under which a
+    // raster and the frame it covers agree about where a given physical point
+    // is. Without it the interpolation is anchored on texel top-left corners
+    // and every raster mask sits half a texel out.
+    //
+    // The exactness the old comment claimed is KEPT, and by construction: a
+    // frame-sized raster read from a frame loop that also samples at pixel
+    // centres gives `nx·w − 0.5 = (x + 0.5) − 0.5 = x`, an exact texel hit
+    // with no interpolation at all. `rasterise_brush_group` sizes and stamps
+    // its raster to land on this same grid.
+    //
+    // Clamping to `0 ..= size-1` is clamp-to-edge, and it is what the outer
+    // half-texel band on each side gets: a sample at `nx = 0` asks for texel
+    // −0.5, which is outside the first texel's centre, and the honest answer
+    // for a mask that says nothing beyond its own edge is the edge value.
+    let sx = (nx.clamp(0.0, 1.0) * w - MASK_SAMPLE_CENTRE).clamp(0.0, w - 1.0);
+    let sy = (ny.clamp(0.0, 1.0) * h - MASK_SAMPLE_CENTRE).clamp(0.0, h - 1.0);
     let x0 = sx.floor().min(w - 1.0);
     let y0 = sy.floor().min(h - 1.0);
     let x1 = (x0 + 1.0).min(w - 1.0);
@@ -4603,11 +4672,17 @@ fn rasterise_brush_group(
     prod.par_chunks_mut(rwu).enumerate().for_each(|(j, row)| {
         let jf = j as f32;
         for d in &dabs {
-            // Centre and half-extents in TEXEL index space. `sample_gray_norm`
-            // uses extent scaling (`nx·w`), so texel i sits at nx = i/rw
-            // exactly — stamp on that grid and a same-size raster reads back
-            // with no interpolation at all.
-            let (cx, cy) = (d.x * rwf, d.y * rhf);
+            // Centre and half-extents in TEXEL index space. Texel `i` owns the
+            // normalised slice `[i/rw, (i+1)/rw]`, so its CENTRE is
+            // `(i + MASK_SAMPLE_CENTRE)/rw` and a dab stored at the normalised
+            // `d.x` sits at texel coordinate `d.x·rw − MASK_SAMPLE_CENTRE`.
+            // That is the same grid `sample_gray_norm` reads back on, so a
+            // same-size raster still costs no interpolation at all — and it is
+            // the same grid the frame loop samples in, so the dab lands where
+            // Lightroom puts it rather than half a pixel down and right
+            // (R29 C2; both halves move, and their derivations are one).
+            let (cx, cy) =
+                (d.x * rwf - MASK_SAMPLE_CENTRE, d.y * rhf - MASK_SAMPLE_CENTRE);
             let (ex, ey) = (d.r * rwf, d.r * aspect * rhf);
             // A degenerate or overflowed extent has no disc to stamp. NaN is
             // caught by `is_finite`, so the comparisons only ever see a number.
@@ -4778,11 +4853,13 @@ pub fn mask_coverage(
     let amount = m.amount.clamp(0.0, 1.0);
     let mut out = image::GrayImage::new(w, h);
     for (x, y, px) in out.enumerate_pixels_mut() {
-        // Same normalisation as apply_masks' weight_at (x/w, not x/(w-1)).
+        // Same normalisation as apply_masks' weight_at — pixel CENTRES,
+        // through the shared [`MASK_SAMPLE_CENTRE`], so the wash cannot drift
+        // half a pixel from the weight the render applies.
         let mut wgt = combined_mask_weight(
             m,
-            x as f32 / w as f32,
-            y as f32 / h as f32,
+            (x as f32 + MASK_SAMPLE_CENTRE) / w as f32,
+            (y as f32 + MASK_SAMPLE_CENTRE) / h as f32,
             bmp.as_deref(),
             &comp_refs,
             unwarp,
@@ -8638,18 +8715,195 @@ mod tests {
 
     #[test]
     fn bitmap_mask_sampling_matches_the_producers_convention() {
-        // Producers normalise with x / w; the sampler must agree, or a
-        // frame-sized mask loses its last row/column and its placement drifts
-        // with resolution.
+        // Producers normalise at PIXEL CENTRES, `(x + MASK_SAMPLE_CENTRE)/w`;
+        // the sampler must read on the matching TEXEL-CENTRE grid, or a
+        // frame-sized mask loses its last row/column, its placement drifts
+        // with resolution, and the whole family sits half a texel out.
         let mut m = image::GrayImage::new(2, 1);
         m.put_pixel(0, 0, image::Luma([0]));
         m.put_pixel(1, 0, image::Luma([255]));
-        // The two pixel positions a 2-wide FRAME produces.
-        assert_eq!(sample_gray_norm(&m, 0.0 / 2.0, 0.0), 0.0);
-        assert_eq!(sample_gray_norm(&m, 1.0 / 2.0, 0.0), 1.0, "last texel must be reachable");
-        // Resolution independence: an 8-wide frame over the same 2-wide mask
-        // must still end at full coverage.
-        assert_eq!(sample_gray_norm(&m, 7.0 / 8.0, 0.0), 1.0);
+        // The two pixel positions a 2-wide FRAME produces — 0.5/2 and 1.5/2 —
+        // are exactly the two TEXEL centres, so both are exact hits with no
+        // interpolation: sx = nx·2 − 0.5 = 0 and 1.
+        assert_eq!(sample_gray_norm(&m, 0.5 / 2.0, 0.0), 0.0);
+        assert_eq!(sample_gray_norm(&m, 1.5 / 2.0, 0.0), 1.0, "last texel must be reachable");
+        // Resolution independence: an 8-wide frame over the same 2-wide mask.
+        // Pixel 7 sits at nx = 7.5/8 → sx = 1.875 − 0.5 = 1.375, past the last
+        // texel centre → clamp-to-edge → full coverage. Pixel 0 sits at
+        // nx = 0.5/8 → sx = −0.375 → clamp → nothing.
+        assert_eq!(sample_gray_norm(&m, 7.5 / 8.0, 0.0), 1.0);
+        assert_eq!(sample_gray_norm(&m, 0.5 / 8.0, 0.0), 0.0);
+        // …and the interpolated interior is SYMMETRIC about the frame centre,
+        // which is the half-pixel convention made visible on this arm. Every
+        // value here is dyadic, so the arithmetic is exact in f32:
+        //   pixel 3 → nx = 3.5/8 = 0.4375 → sx = 0.875 − 0.5 = 0.375 → 0.375
+        //   pixel 4 → nx = 4.5/8 = 0.5625 → sx = 1.125 − 0.5 = 0.625 → 0.625
+        // Under the refuted `x/w` reading they are 0.75 and 1.0 — a pair that
+        // is neither symmetric nor even distinct at the top end.
+        let p3 = sample_gray_norm(&m, 3.5 / 8.0, 0.0);
+        let p4 = sample_gray_norm(&m, 4.5 / 8.0, 0.0);
+        assert_eq!(p3, 0.375);
+        assert_eq!(p4, 0.625);
+        assert_eq!(p3 + p4, 1.0, "the ramp must be symmetric about the frame centre");
+    }
+
+    /// **The half-pixel convention itself, on every arm of the family that can
+    /// carry one** — the R29 C2 pin, and the one test built so that reverting
+    /// [`MASK_SAMPLE_CENTRE`] to 0 fails it four separate ways.
+    ///
+    /// The measurement is in that constant's doc (two Lightroom captures, both
+    /// putting a nominally centred radial's centre at pixel-index 3119.5 on a
+    /// 6240-wide frame). What is pinned HERE is that the engine's own arms all
+    /// implement it, and each fixture is chosen so the two readings disagree by
+    /// a whole feature rather than by a rounding:
+    ///
+    /// | arm | fixture | at pixel centres | at `x/w` |
+    /// |---|---|---|---|
+    /// | Radial | ellipse = the middle half of a 4 × 4 frame | a centred 2 × 2 block | ONE off-centre pixel (measured) |
+    /// | Linear | ramp from row 0's centre to row 3's centre | 0, ⅓, ⅔, 1 | 0, ⅙, ½, ⅚ — never reaches full |
+    /// | Bitmap | a 2-wide raster over a 4-wide frame | 0, ¼, ¾, 1 (symmetric) | 0, ½, 1, 1 (saturates early) |
+    /// | Brush | one dab at `d 0.5 0.5` on a 16 × 16 frame | mirror-symmetric alpha | the dab lands ON texel 8 |
+    ///
+    /// Both frame producers are exercised: [`mask_coverage`]'s loop reads the
+    /// weights directly, and `apply_masks`' own `weight_at` is pinned through a
+    /// real develop at the end — they are separate lines of code and a mutation
+    /// of either one alone must be caught.
+    #[test]
+    fn every_mask_family_samples_at_pixel_centres() {
+        use crate::recipe::{EditRecipe, LocalAdjustment, MaskGeometry};
+        let flat = |n: u32| {
+            DynamicImage::ImageRgb8(image::RgbImage::from_pixel(n, n, image::Rgb([128, 128, 128])))
+        };
+
+        // --- (a) RADIAL -----------------------------------------------------
+        // Ellipse centred at (0.5, 0.5) with rx = ry = 0.25, hard edge. On a
+        // 4 × 4 frame the pixel centres are nx ∈ {0.125, 0.375, 0.625, 0.875},
+        // so (nx − 0.5)/0.25 ∈ {−1.5, −0.5, +0.5, +1.5} and
+        // d² ∈ {0.5, 2.5, 4.5}: the four pixels with d = √0.5 = 0.707 are
+        // inside and the twelve with d ≥ 1.58 are outside. A centred 2 × 2
+        // block, and `radial_falloff(0, d)` is the exact step `d < 1`, so the
+        // coverage bytes are exactly 255 and 0 with nothing to round.
+        let ell = LocalAdjustment {
+            mask: MaskGeometry::Radial {
+                top: 0.25,
+                left: 0.25,
+                bottom: 0.75,
+                right: 0.75,
+                feather: 0.0,
+                roundness: 0.0,
+                flipped: false,
+                angle: 0.0,
+                midpoint: 50.0,
+                mask_version: 2,
+            },
+            ..Default::default()
+        };
+        let cov = mask_coverage(&ell, &flat(4), MaskFrame::AsRendered);
+        let inside: Vec<(u32, u32)> = (0..4)
+            .flat_map(|y| (0..4).map(move |x| (x, y)))
+            .filter(|&(x, y)| cov.get_pixel(x, y)[0] == 255)
+            .collect();
+        // At the refuted `x/w` the offsets are {−2, −1, 0, +1} instead, so
+        // d² ∈ {0, 1, 2, …} and the four neighbours land at d = 1 EXACTLY,
+        // which the strict `d < 1` hard edge excludes: the whole mask collapses
+        // to the single pixel (2, 2). Measured, not predicted — reverting
+        // `MASK_SAMPLE_CENTRE` prints `left: [(2, 2)]` here.
+        assert_eq!(
+            inside,
+            vec![(1, 1), (2, 1), (1, 2), (2, 2)],
+            "a centred ellipse must cover a CENTRED block, not one corner-anchored pixel"
+        );
+        for y in 0..4 {
+            for x in 0..4 {
+                let v = cov.get_pixel(x, y)[0];
+                assert!(v == 0 || v == 255, "a hard edge has no partial texel: ({x},{y}) = {v}");
+            }
+        }
+
+        // --- (b) LINEAR -----------------------------------------------------
+        // Zero end on row 0's centre (ny = 0.125), full end on row 3's centre
+        // (ny = 0.875). vy = 0.75, len2 = 0.5625, so the weights are
+        // (ny − 0.125)·0.75/0.5625 = 0, 1/3, 2/3, 1 — every operand dyadic, and
+        // the last one EXACTLY 1. Bytes: 0, round(85.0) = 85, round(170.0) =
+        // 170, 255.
+        let ramp = LocalAdjustment {
+            mask: MaskGeometry::Linear {
+                zero_x: 0.5, zero_y: 0.125, full_x: 0.5, full_y: 0.875,
+            },
+            ..Default::default()
+        };
+        let lcov = mask_coverage(&ramp, &flat(4), MaskFrame::AsRendered);
+        let column: Vec<u8> = (0..4).map(|y| lcov.get_pixel(2, y)[0]).collect();
+        assert_eq!(column, vec![0, 85, 170, 255], "the ramp must span its ends exactly");
+
+        // --- (c) BITMAP -----------------------------------------------------
+        // A 2-wide raster [0, 255] read by a 4-wide frame. Texel centres sit at
+        // nx = 0.25 and 0.75; the frame's pixel centres at 0.125/0.375/0.625/
+        // 0.875 give sx = nx·2 − 0.5 = −0.25, 0.25, 0.75, 1.25, which clamp to
+        // 0, 0.25, 0.75, 1 — symmetric about the frame centre, and reaching
+        // BOTH ends. The `Bitmap` arm ignores its path when a raster is handed
+        // in, so this needs no file.
+        let mut ras = image::GrayImage::new(2, 1);
+        ras.put_pixel(0, 0, image::Luma([0]));
+        ras.put_pixel(1, 0, image::Luma([255]));
+        let bmp = MaskGeometry::Bitmap { path: "unused — the raster is passed in".into() };
+        let row: Vec<f32> = (0..4u32)
+            .map(|x| {
+                mask_weight(&bmp, (x as f32 + MASK_SAMPLE_CENTRE) / 4.0, 0.5, Some(&ras))
+            })
+            .collect();
+        assert_eq!(row, vec![0.0, 0.25, 0.75, 1.0]);
+        assert_eq!(row[0] + row[3], 1.0, "the two ends must mirror");
+        assert_eq!(row[1] + row[2], 1.0, "…and so must the interior");
+
+        // --- (d) BRUSH ------------------------------------------------------
+        // One dab at the exact frame centre of a 16 × 16 frame. `rasterise_
+        // brush_group` stamps it at texel coordinate 0.5·16 − 0.5 = 7.5, i.e.
+        // BETWEEN texels 7 and 8, so the alpha is mirror-symmetric about the
+        // frame centre; the frame then reads texel x exactly (16 is a power of
+        // two, so (x + 0.5)/16 · 16 − 0.5 = x with no rounding at all). At
+        // `x/w` the dab would land ON texel 8 and the mirror would break —
+        // texel 4 falls exactly on ρ = 1 and reads 0 while its partner texel 11
+        // is still lit.
+        let dab = probe_brush(&[(1.0, 0.25, 1.0, 0.5, "d 0.5 0.5")]);
+        let braster = brush_raster(&dab, 16, 16).expect("one dab");
+        assert_eq!(braster.dimensions(), (16, 16), "small frame = 1:1 raster");
+        let at = |x: u32, y: u32| {
+            mask_weight(
+                &dab,
+                (x as f32 + MASK_SAMPLE_CENTRE) / 16.0,
+                (y as f32 + MASK_SAMPLE_CENTRE) / 16.0,
+                Some(&braster),
+            )
+        };
+        for x in 0..16u32 {
+            assert_eq!(at(x, 7), at(15 - x, 7), "the dab is not mirrored in x at column {x}");
+            assert_eq!(at(7, x), at(7, 15 - x), "the dab is not mirrored in y at row {x}");
+        }
+        // The mirror is only meaningful if the dab is actually THERE and the
+        // pair straddling the centre share the peak (a single peak texel is the
+        // `x/w` signature).
+        assert!(at(7, 7) > 0.9, "premise: the dab covers the centre: {}", at(7, 7));
+        assert_eq!(at(7, 7), at(8, 8), "the centre must be shared, not owned by one texel");
+        assert_eq!(at(0, 7), 0.0, "…and the dab still ends: {}", at(0, 7));
+
+        // --- both frame producers -------------------------------------------
+        // `mask_coverage` above is the OVERLAY's loop. `apply_masks`' own
+        // `weight_at` is a separate line, so pin it on the same radial: exactly
+        // the centred 2 × 2 may move.
+        let r = EditRecipe {
+            masks: vec![LocalAdjustment { exposure_ev: -4.0, ..ell }],
+            ..Default::default()
+        };
+        let mut data = vec![[0.6_f32; 3]; 16];
+        apply_develop_anon(&mut data, 4, 4, &r);
+        let moved: Vec<usize> =
+            (0..16).filter(|&i| (data[i][0] - 0.6).abs() > 1e-4).collect();
+        assert_eq!(
+            moved,
+            vec![5, 6, 9, 10],
+            "the render's own producer must agree with the overlay's"
+        );
     }
 
     #[test]
@@ -9105,7 +9359,26 @@ mod tests {
         let (w, h) = (1usize, 4usize);
         let mut data = vec![[0.6_f32, 0.6, 0.6]; w * h];
         apply_develop_anon(&mut data, w, h, &r);
-        assert!((data[0][0] - 0.6).abs() < 0.03, "top should be ~unchanged: {}", data[0][0]);
+        // The four rows sample at their CENTRES, ny = (y + 0.5)/4, so the
+        // weights are exactly 1/8, 3/8, 5/8, 7/8 — the top row is no longer
+        // AT the gradient's zero end, it is an eighth of the way past it, and
+        // it darkens accordingly (R29 C2's half-pixel move, visible here).
+        // Pinned EXACTLY rather than bounded: a degenerate linear (zero ==
+        // full) renders weight 1 everywhere, so `amount = 0.125` puts the
+        // identical 0.125 through `weight_at` and every stage below it.
+        let eighth = EditRecipe {
+            masks: vec![LocalAdjustment {
+                mask: MaskGeometry::Linear { zero_x: 0.5, zero_y: 0.5, full_x: 0.5, full_y: 0.5 },
+                amount: 0.125,
+                exposure_ev: -4.0,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let mut eighth_px = vec![[0.6_f32, 0.6, 0.6]; 1];
+        apply_develop_anon(&mut eighth_px, 1, 1, &eighth);
+        assert_eq!(data[0], eighth_px[0], "top row carries exactly its 1/8 coverage");
+        assert!(data[0][0] < 0.6, "…which is a real darkening: {}", data[0][0]);
         assert!(data[3][0] < 0.5, "bottom should darken: {}", data[3][0]);
         // The interior rows carry the actual gradient — the endpoint checks
         // alone let a "positive weight ⇒ full coverage" mutation render the
@@ -9243,11 +9516,21 @@ mod tests {
         // them (render.rs listed them as "deferred") — so the GUI's mask
         // Temp/Tint sliders did nothing in-app, and the zoned reverse-fit
         // would have nothing to drive. A warm local temperature must boost
-        // red / cut blue inside the mask; the uncovered end must stay equal
-        // to a mask-less control render (the mask pass skips weight 0).
+        // red / cut blue inside the mask; a row of weight EXACTLY 0 must stay
+        // equal to a mask-less control render (the mask pass skips it).
+        //
+        // The gradient's zero end sits at `zero_y = 0.125`, which is the TOP
+        // ROW'S CENTRE on this 4-row frame (R29 C2: rows sample at
+        // ny = (y + 0.5)/4). It has to, for the skip to be exercised at all —
+        // under pixel-centre sampling no row of a 0→1 gradient carries weight
+        // 0, and the old `zero_y = 0.0` fixture stopped testing the skip the
+        // moment the convention was corrected. The weights here are exactly
+        // 0, 1/3, 2/3, 1: `(ny − 0.125)·0.75 / 0.5625`, all dyadic.
         let r = EditRecipe {
             masks: vec![LocalAdjustment {
-                mask: MaskGeometry::Linear { zero_x: 0.5, zero_y: 0.0, full_x: 0.5, full_y: 1.0 },
+                mask: MaskGeometry::Linear {
+                    zero_x: 0.5, zero_y: 0.125, full_x: 0.5, full_y: 0.875,
+                },
                 amount: 1.0,
                 temperature: 100.0,
                 ..Default::default()
@@ -9266,6 +9549,24 @@ mod tests {
             px[0] > grey[0] + 0.02 && px[2] < grey[2] - 0.02,
             "full end must warm (red up, blue down): {px:?}"
         );
+        // …and the SAME geometry read on the old `y/h` grid would give the top
+        // row weight (0 − 0.125)·0.75/0.5625 < 0 → clamped to 0 as well, so the
+        // skip alone cannot separate the two conventions. The bottom row can:
+        // at ny = 0.875 the weight is exactly 1, while `y/h` puts row 3 at
+        // ny = 0.75 → weight 5/6, short of the full end. Assert the full end is
+        // REACHED by comparing against an amount-1 whole-frame mask.
+        let full = EditRecipe {
+            masks: vec![LocalAdjustment {
+                mask: MaskGeometry::Linear { zero_x: 0.5, zero_y: 0.5, full_x: 0.5, full_y: 0.5 },
+                amount: 1.0,
+                temperature: 100.0,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let mut full_px = vec![grey; 1];
+        apply_develop_anon(&mut full_px, 1, 1, &full);
+        assert_eq!(data[3], full_px[0], "the last row's centre IS the gradient's full end");
     }
 
     #[test]
@@ -12769,10 +13070,15 @@ mod tests {
     /// The RASTER is the closed form, texel for texel — the join between the
     /// measured model and the pixels.
     ///
-    /// `sample_gray_norm` uses EXTENT scaling, so `nx = i / rw` lands exactly on
-    /// texel `i` with no interpolation; the frame here is small enough that the
-    /// raster is built 1:1, so every sample below is a stamped value read back
-    /// and the only error left is the 8-bit quantum (1/255 = 0.0039).
+    /// The frame here is small enough that the raster is built 1:1, so this
+    /// reads the stamped texels DIRECTLY and the only error left is the 8-bit
+    /// quantum (1/255 = 0.0039, so ≤ 1/510 after rounding). Direct rather than
+    /// through `mask_weight`: since R29 C2 a texel's own normalised centre is
+    /// `(i + MASK_SAMPLE_CENTRE)/rw`, and going through the lookup to assert a
+    /// property OF the raster would only put a round trip between the claim and
+    /// the evidence. The lookup's half of the convention is pinned by
+    /// `bitmap_mask_sampling_matches_the_producers_convention` and
+    /// `every_mask_family_samples_at_pixel_centres`.
     ///
     /// MUTATION-LINED: dropping the `value` (density) factor, or scaling by the
     /// GROUP's `MaskValue` instead of the stroke's, moves every sample by 30 %.
@@ -12784,34 +13090,36 @@ mod tests {
         let g = probe_brush(&[(0.7, 0.25, 1.0, 0.5, "d 0.5 0.5")]);
         let raster = brush_raster(&g, fw, fh).expect("one dab");
         assert_eq!(raster.dimensions(), (fw, fh), "small frame = 1:1 raster");
-        // Texel 240 is the centre and the dab's half-extent is 120 texels, so
-        // texel 240+d sits at ρ = d/120 exactly.
-        for d in [0i32, 12, 30, 60, 90, 114, 119] {
+        let texel = |i: u32, j: u32| raster.get_pixel(i, j)[0] as f32 / 255.0;
+        // The dab's centre is texel coordinate 0.5·480 − 0.5 = 239.5 in x and
+        // 0.5·320 − 0.5 = 159.5 in y — BETWEEN texels, because the frame has an
+        // even number of them — and its half-extent is 120 texels on both axes.
+        // Reading row 160 (half a texel below the centre), texel 240+d sits at
+        //     ρ = √((d + 0.5)² + 0.5²) / 120.
+        for d in [0i32, 12, 30, 60, 90, 114, 118] {
             let i = 240 + d;
-            let got = mask_weight(&g, i as f32 / fw as f32, 0.5, Some(&raster));
-            let want = 0.7 * brush_kernel(d as f32 / 120.0, 0.5);
+            let rho = ((d as f32 + 0.5).powi(2) + 0.25).sqrt() / 120.0;
+            let got = texel(i as u32, 160);
+            let want = 0.7 * brush_kernel(rho, 0.5);
             assert!(
                 (got - want).abs() <= 0.005,
-                "texel {i} (ρ = {}) reads {got}, the closed form says {want}",
-                d as f32 / 120.0
+                "texel ({i}, 160) (ρ = {rho}) reads {got}, the closed form says {want}"
             );
         }
-        // …and stops. ρ = 1 is the outer support, so the texel one past the
-        // half-extent is blank, not faint.
-        assert_eq!(
-            mask_weight(&g, 361.0 / fw as f32, 0.5, Some(&raster)),
-            0.0,
-            "support ends EXACTLY at ρ = 1 (B6 §4.1)"
-        );
+        // …and stops. ρ = 1 is the outer support: on row 160 the support ends at
+        // |i − 239.5| = √(120² − 0.5²) = 119.99896, so texel 359 is the last lit
+        // one and 360 is blank — not faint.
+        assert!(texel(359, 160) > 0.0, "texel 359 is inside the support");
+        assert_eq!(texel(360, 160), 0.0, "support ends EXACTLY at ρ = 1 (B6 §4.1)");
         // A dab is a circle in PIXELS, not in normalised coordinates: at this
         // 3:2 frame the mask must reach 0.25 of the WIDTH on both axes, i.e.
-        // 0.25·(480/320) = 0.375 of the HEIGHT.
-        let vertical = mask_weight(&g, 0.5, (160.0 + 0.9 * 120.0) / fh as f32, Some(&raster));
-        let horizontal = mask_weight(&g, (240.0 + 0.9 * 120.0) / fw as f32, 0.5, Some(&raster));
-        assert!(
-            (vertical - horizontal).abs() <= 0.006,
-            "the dab is not round in pixels: {vertical} vs {horizontal}"
-        );
+        // 0.25·(480/320) = 0.375 of the HEIGHT. Both half-extents are therefore
+        // 120 TEXELS, so ρ depends only on (Δi² + Δj²) and a pair of texels with
+        // swapped offsets from (239.5, 159.5) must read EXACTLY equal.
+        let horizontal = texel(347, 159); // Δ = (+107.5, −0.5)
+        let vertical = texel(239, 267); //   Δ = (−0.5, +107.5)
+        assert_eq!(horizontal, vertical, "the dab is not round in pixels");
+        assert!(horizontal > 0.0, "premise: both probes are inside the dab");
     }
 
     /// A brush group with nothing drawable in it is INERT — including when the
@@ -13079,10 +13387,16 @@ mod tests {
             ..Default::default()
         };
         let cov = mask_coverage(&grad, &grey, MaskFrame::AsRendered);
-        assert_eq!(cov.get_pixel(10, 0)[0], 0, "zero end must be 0");
-        assert!(cov.get_pixel(10, 19)[0] > 235, "full end: {}", cov.get_pixel(10, 19)[0]);
-        let mid = cov.get_pixel(10, 10)[0];
-        assert!((mid as i32 - 128).abs() < 15, "midpoint ≈ half: {mid}");
+        // Rows sample at their CENTRES, ny = (y + 0.5)/20, so this 0→1
+        // gradient reads 0.025 / 0.525 / 0.975 at rows 0 / 10 / 19 and the map
+        // quantises to `round(w · 255)` = 6 / 134 / 249. Pinned EXACTLY, both
+        // because the arithmetic is exact and because these three numbers are
+        // what separate the conventions: `y/h` gives 0.0 / 0.5 / 0.95 → 0 /
+        // 128 / 242, and the old `assert_eq!(…, 0)` on row 0 was the whole
+        // reason this test caught R29 C2 rather than sleeping through it.
+        assert_eq!(cov.get_pixel(10, 0)[0], 6, "zero end = half a row in, not on the edge");
+        assert_eq!(cov.get_pixel(10, 19)[0], 249, "full end = half a row short of it");
+        assert_eq!(cov.get_pixel(10, 10)[0], 134, "midpoint sits half a row past centre");
 
         // (b) amount halves the whole map; inversion flips its direction.
         let half = LocalAdjustment { amount: 0.5, ..grad.clone() };
