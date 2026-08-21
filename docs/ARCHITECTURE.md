@@ -1295,11 +1295,11 @@ experiment:
   the measurement itself. Since **v0.35.0** the `MaskGeometry::Radial` arm of
   `mask_weight` calls `render::radial_falloff`, which interpolates Lightroom's
   measured α(ρ) out of a table: rows are the measurement's own ρ bins
-  (`0.0025 + 0.005 i`, 290 of them), columns are `Feather` 1 / 5 / 10 / 25 / 50
-  / 75 / 90 / 100, and `Feather = 0` is an analytic hard edge rather than a
-  measured column. That table and the reasoning behind every choice in it live
-  in `radial_falloff`'s own doc comment; this is the summary of how it was
-  arrived at.
+  (`0.0025 + 0.005 i`, 290 of them), columns are `Feather` 1 / 5 / 10 / 15 / 25
+  / 35 / 50 / 65 / 75 / 90 / 100, and `Feather = 0` is an analytic hard edge
+  rather than a measured column. That table and the reasoning behind every
+  choice in it live in `radial_falloff`'s own doc comment; this is the summary
+  of how it was arrived at.
 
   v0.32.0 landed `ramp(1 − f, 1 + f/2, d)`: a cubic smoothstep from
   `d_in = 1−f` to `d_out = 1+f/2`, fitted on an 11-rung exposure ladder across
@@ -1329,11 +1329,25 @@ experiment:
   CORRECT for `Feather ≤ 5`, so the table degenerates to an exact hard edge as
   feather → 0 rather than to a table row, and the narrow rungs are pinned as
   absolute numbers in `the_radial_falloff_beats_the_refuted_ramp_on_every_feather`.
-  Registered rather than modelled, and named in the code: `d_out`'s absolute
-  value is 1.43 ± 0.015 (B7's ±0.002 was measuring JPEG 8×8 block spill, so √2 is
-  back inside the bar), the `Feather = 1` far tail is unresolved, and aspect
-  invariance of the falloff SHAPE is unsampled — all eight rungs are one ellipse.
-  (`~/.claude/plans/r29-materials/b7-analysis.md` and `…-2.md`; the item lives in
+
+  **R29 me3 then tightened it twice over.** Three more controlled exports
+  measured `Feather` 15 / 35 / 65 — the gaps the eight-column table had to
+  interpolate across — and it was reading 14.8 px and 24.9 px wide on the
+  α = 0.5 contour at 15 and 35. Those three columns are INSERTED (the eight
+  earlier ones carry over bit for bit, max |Δ| = 0.000000), because changing the
+  interpolation family instead buys 1.5× where carrying the measurement buys the
+  whole residual. Two registered residuals close with them: `d_out` is **√2**,
+  with 1.43 and B7's 1.4335 excluded by four shape-free instruments and by a
+  forward check that puts their predicted endpoints past what the pixels show
+  (the table never states `d_out`, so this costs zero pixels), and aspect
+  invariance is sampled once — the shipped table scores rms(α) 0.0009 on a
+  held-out aspect 1.2 export against 0.0004 on the fitted 2.5, with the best
+  single radial rescale between the two at k = 1.00076, i.e. nothing in the
+  falloff is anchored in pixels. Still registered: that check is one extra
+  aspect at `Feather = 50` only, the `Feather = 1` far tail is unresolved, and
+  BETWEEN columns is still unmeasured at the `Feather ≤ 10` end.
+  (`~/.claude/plans/r29-materials/b7-analysis.md`, `…-2.md`, `me3-a-report.md`
+  and `me3-b-report.md`; the item lives in
   V2_PLAN §7 item 1 — M1_PLAN and V2_PLAN are development ledgers kept outside
   the public tree since 2026-08-20, the same standing as the probe reports these
   sections cite.)
