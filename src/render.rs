@@ -2759,17 +2759,22 @@ fn mask_weight(g: &MaskGeometry, nx: f32, ny: f32, bmp: Option<&image::GrayImage
             (((nx - zero_x) * vx + (ny - zero_y) * vy) / len2).clamp(0.0, 1.0)
         }
         // `roundness` is carried but deliberately NOT rendered — pure ellipse,
-        // see `MaskGeometry::Radial` in recipe.rs. Its DOMAIN is now known
+        // see `MaskGeometry::Radial` in recipe.rs. Its DOMAIN is known
         // (Lightroom's ±100 integer slider — v0.31.1 widened the importer and
-        // the clamp to match), but its pixel MEANING is not: nothing in the
-        // repo fixes how a Roundness of +40 reshapes the ellipse (docs/
-        // V2_PLAN.md §7 item 1; every radial in the reference Lightroom
-        // sidecars carries Roundness="0", so there is nothing to calibrate on).
+        // the clamp to match), and since R29 B7 (2026-08-20) the no-op is a
+        // MEASURED fact, not a guess: a hand-authored Roundness="100" probe
+        // renders geometry within 0.1 px of its Roundness=0 reference (edge
+        // rms 0.31 px over 1440 angles — no circularisation, no superellipse)
+        // and is pixel-identical to it where the two masks overlap. Scope of
+        // that measurement, stated rather than generalised: +100 only,
+        // Feather=0 only (a falloff-shape meaning would be invisible on a
+        // hard edge — the registered residual is a Roundness×Feather cross
+        // probe), one geometry (docs/V2_PLAN.md §7 item 11).
         // The sibling `feather` HAD the same guessing bug — Lightroom writes it
         // 0..100 and xmp.rs used to import the value raw, so Feather="72"
         // clamped to fully feathered; both XMP directions now convert on the
         // boundary (xmp.rs). Test radial_roundness_is_a_documented_no_op pins
-        // the roundness no-op until a real sidecar fixes the mapping.
+        // the roundness no-op, now as the measured behaviour.
         // `midpoint: _` joins it for the same reason (R25 P5): Lightroom's
         // second falloff knob, carried through the recipe and the sidecar
         // unchanged, with no published mapping onto this engine's `feather`.
@@ -2829,6 +2834,22 @@ fn mask_weight(g: &MaskGeometry, nx: f32, ny: f32, bmp: Option<&image::GrayImage
             // one. Deliberately left standing — a two-branch replacement law
             // needs its own adjudication (`batch10-report.md` §8;
             // docs/V2_PLAN.md §7 item 1).
+            //
+            // R29 B7 (2026-08-20) re-measured the ladder WITH the nomask
+            // reference both earlier batches lacked, and the replacement is
+            // now specified rather than open: d_out = 1.4335, CONSTANT in
+            // feather — the 「saturation」 and the 0.79 − 0.94f d_in were
+            // both artefacts of forcing one smoothstep across the profile —
+            // and α(0) = 1 at EVERY feather (mask centres pixel-identical
+            // to the feather-0 frame), so there is no inner knee at all.
+            // No two-parameter closed form reaches the 0.003 measurement
+            // floor; the adjudicated landing shape is the measured α(ρ)
+            // LUT. This ramp scores rms(α) 0.093–0.156 against it and
+            // renders the α ≥ 0.5 region up to 2.08× too large at f = 1.
+            // Still deliberately standing: the f ∈ (0, 25) support opening
+            // and d_out's aspect invariance are unsampled (b7-analysis.md
+            // §10), and a falloff swap is a render-behaviour change that
+            // rides its own batch with its own top notice.
             //
             // What this replaces: `d_out = 1`, i.e. the effect reaching zero
             // exactly on the ellipse. Measured at f = 0.5 it reaches 1.25 —
@@ -3872,14 +3893,23 @@ fn unsharp_luma_weighted(
 /// "Texture −60" preserve a different band on a 1280 px preview than on the
 /// 61 MP export, which is the exact promise R25 B2 made.
 ///
-/// **What is NOT measured, stated plainly.** There is no Lightroom ground truth
-/// in this tree for the negative-texture transfer curve — no controlled export
-/// of a −100 frame to fit against — so `r_fine = radius/4` and the notch depth
-/// are OURS, chosen to keep the endpoint band-limited, not fitted to Adobe. What
-/// the endpoint test pins is the SHAPE (fine detail survives, the mid band
-/// drops), which is the property the old parameterisation could not have; the
-/// exact curve is an approximation and the sidecar carries the raw slider value
-/// so Lightroom re-renders it with its own model — the same stance
+/// **Measured 2026-08-20 (R29 B8), and REFUTED IN SHAPE.** A controlled
+/// three-step Lightroom ladder (Texture 0/−50/−100, single-key sidecar diff)
+/// read by block cross-spectrum shows LR's negative Texture is a monotone
+/// HIGH-SHELF, not a notch: low frequencies hold (H→1.02 below ν ≈ 0.006
+/// c/px), the half-depth corner sits at a 49 px period, and the attenuation
+/// PLATEAUS at H = 0.729 (−100) / 0.848 (−50) all the way through the fine
+/// end — a 4 px pattern keeps 0.72 in LR where this pass keeps 0.9992.
+/// Depth scales as |t|^0.74, not linearly. Against that ground truth this
+/// band form over-smooths the 40–130 px mid band by up to −13.0 dB and
+/// under-smooths everything finer than ~18 px by up to +2.9 dB; refitting
+/// the band form with every parameter free cannot beat 2.3× the residual of
+/// a two-lowpass mix — wrong function family, not mistuned constants. The
+/// operator is also amplitude-adaptive (not LTI), so any fixed kernel only
+/// matches the ensemble. The band form deliberately STANDS until the
+/// replacement lands (blocked on a Sharpness=0 ladder and a two-resolution
+/// export — b8-analysis.md §7); the sidecar carries the raw slider value so
+/// Lightroom re-renders it with its own model — the same stance
 /// [`manual_vignette_lut`] takes.
 ///
 /// The cascade is also why this needs no third plane: `coarse` is blurred FROM
@@ -9652,11 +9682,14 @@ mod tests {
         // carried by recipe/XMP/AI schema but NOT rendered. Its DOMAIN is no
         // longer the gap — v0.31.1 measured it as Lightroom's ±100 integer
         // slider (24/24 real radials write a bare signed integer) and both the
-        // clamp and the importer's gate moved to that band. What stays
-        // unmeasured is what the number DOES to the ellipse in pixels
-        // (docs/V2_PLAN.md §7 item 11), which is why carrying it verbatim
-        // beats converting it. Pinning the no-op so any future implementation
-        // lands together with the doc and the XMP round-trip.
+        // clamp and the importer's gate moved to that band. R29 B7 then
+        // measured what the number DOES at +100 / Feather=0: nothing, to
+        // 0.1 px and JPEG noise — so this no-op is Lightroom's measured
+        // behaviour there, and carrying the value verbatim stays right.
+        // Negatives and the Roundness×Feather cross term remain open
+        // (docs/V2_PLAN.md §7 item 11). Pinning the no-op so any future
+        // falloff-shape implementation lands together with the doc and the
+        // XMP round-trip.
         let radial = |roundness: f32| MaskGeometry::Radial {
             top: 0.2,
             left: 0.1,
@@ -11316,12 +11349,15 @@ d 0.113862 0.987261"
     /// ledgered 2026-08-20): `texture = −100` was a FULL Gaussian blur — the
     /// old negative branch's transfer is `1 − |amount|·(1 − G)`, which at the
     /// endpoint is `G` exactly, so every scale finer than the radius went to
-    /// zero. Lightroom's Texture is a mid-band control that keeps fine detail
-    /// and edges at its negative end.
+    /// zero. (R29 B8 then measured Lightroom itself: its negative end is a
+    /// broadband HIGH-SHELF that also takes ~28 % out of a 4 px pattern — so
+    /// this test pins the improvement over the pre-R28 full blur, NOT
+    /// agreement with Lightroom; see `texture_pass`'s doc for the measured
+    /// curve and the registered replacement.)
     ///
-    /// This test states the SHAPE, which is all that is claimable without a
-    /// Lightroom ground truth for the negative transfer curve (there is none in
-    /// this tree — see `texture_pass`): at the endpoint a fine pattern keeps
+    /// This test states the SHAPE against the OLD branch (the ground-truth
+    /// fit is `texture_pass`'s registered follow-up, not this test's job):
+    /// at the endpoint a fine pattern keeps
     /// most of its contrast while a mid-band pattern loses most of its. The old
     /// operator is not described here, it is CALLED — `unsharp_luma` at
     /// `amount = −1` and the same radius IS the pre-R28 branch — so the

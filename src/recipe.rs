@@ -1132,17 +1132,19 @@ pub enum MaskGeometry {
     /// Radial/elliptical gradient. Maps to ACR `What="Mask/CircularGradient"`.
     /// `feather` IS engine-rendered (clamped to 0..1). `roundness` is **carried
     /// only** — persisted, XMP round-tripped and accepted from the AI, but NOT
-    /// rendered: the engine draws a pure ellipse. Honouring it would reshape
-    /// imported and AI-authored masks on a guess; see `mask_weight` in render.rs.
+    /// rendered: the engine draws a pure ellipse. Since R29 B7 (2026-08-20)
+    /// that is Lightroom's MEASURED behaviour at `Roundness = +100` with
+    /// `Feather = 0` — a hand-authored probe rendered pixel-identically to
+    /// its Roundness=0 reference — not just a refusal to guess; see
+    /// `mask_weight` in render.rs. Negatives and the Roundness×Feather cross
+    /// term are still unmeasured, so the value stays carried verbatim.
     ///
-    /// Its DOMAIN is no longer a guess, though: `crs:Roundness` is Lightroom's
+    /// Its DOMAIN is no longer a guess either: `crs:Roundness` is Lightroom's
     /// ±100 integer slider (all 24 radials in the harvested real-sidecar corpus
     /// write a bare signed integer, every one of them at the default `0`), not
     /// the 0..1 aspect ratio this field was once clamped to. v0.31.1 widened
     /// the clamp and the importer's gate to ±100 so a user who moved that
-    /// slider keeps their mask; what the number MEANS in pixels is still
-    /// unmeasured (docs/V2_PLAN.md §7 item 1), which is exactly why it is
-    /// carried verbatim rather than converted.
+    /// slider keeps their mask (docs/V2_PLAN.md §7 item 11).
     ///
     /// `angle` (degrees, ENGINE convention: CLOCKWISE on screen about the bbox
     /// centre, 0 = axis-aligned — normalised frame coords are y-DOWN, so the
