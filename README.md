@@ -773,10 +773,16 @@ per-user `autoshop.local.json` overrides the environment. The two sidecar knobs
   is nothing to calibrate against. `|Angle| > 45°` is untested. A sidecar that
   declares no frame size still exports a rotated radial *unrotated*, because the
   pixel↔normalised fold needs the aspect — and the save says so in those words.
-  The feather falloff law was **refuted at both endpoints** by direct
-  measurement this round; two measurements of the outer endpoint are not yet
-  reconciled, and the engine's ramp is deliberately left where it is until they
-  are.
+  The feather falloff is no longer a law at all: four rounds of measurement
+  refuted three successive closed forms, so the engine now renders Lightroom's
+  **measured** α(ρ) out of an eight-column table. What is still open there is
+  named in the table's own provenance — the support radius is 1.43 ± 0.015 (√2
+  is inside the bar), the narrowest rung's far tail is unresolved, and every
+  rung was shot on one ellipse aspect.
+- **Radial masks with feather ≥ 10 render differently from v0.35.0.** The
+  falloff moved from a fitted smoothstep to the measured table above; at
+  Feather 100 the old law painted 2.08× the area Lightroom does. Feather 0 is
+  byte-identical, and version snapshots keep the earlier render.
 - **Imported radial geometry changed in v0.33.0.** Previous builds dilated every
   imported radial by 3.2 %. They now render at the sidecar's stored geometry.
   Renders of the same recipe differ across that boundary; version snapshots keep

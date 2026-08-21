@@ -1237,35 +1237,52 @@ experiment:
   construction, so the real-sidecar suites pass unchanged; what moves is the
   RENDER — an imported radial is no longer dilated 3.2 %, and the residual on
   any frame is that frame's own Adobe warp (0–3.4 % observed).
-* **the falloff endpoints** — measured in v0.32.0, REFUTED at both ends a round
-  later, and deliberately still in the code. What v0.32.0 landed, and what the
-  engine runs today, is `ramp(1 − f, 1 + f/2, d)`
-  ([`src/render.rs`](../src/render.rs), the `MaskGeometry::Radial` arm of
-  `mask_weight`): a cubic smoothstep — the family the engine already used —
-  from `d_in = 1−f` to `d_out = 1+f/2`, fitted on an 11-rung exposure ladder
-  across five frames (aspect 1.03 … 7.46, one rotated, one corner-placed). The
-  engine's outer edge had been at `d = 1`; the measured one at `Feather = 50`
-  is 1.25, i.e. **the mask was 29 % under-sized** and no amount of correct
-  geometry upstream could recover it. The law was written with a `k` on both
-  endpoints, folded into the semi-axes at the XMP boundary; at
-  `LR_MASK_FRAME_SCALE = 1.0` that factor is the identity and folds out, so
-  imported and engine-native radials share one law outright instead of by
-  cancellation. **R27 Batch-10 then measured the WHOLE feather range on two
-  geometries and refuted both endpoints.** An untouched reference export
-  unlocked the inner branch for the first time: `d_in` reads 0.558 / 0.348 /
+* **the falloff** — three successive closed forms, all refuted, now replaced by
+  the measurement itself. Since **v0.35.0** the `MaskGeometry::Radial` arm of
+  `mask_weight` calls `render::radial_falloff`, which interpolates Lightroom's
+  measured α(ρ) out of a table: rows are the measurement's own ρ bins
+  (`0.0025 + 0.005 i`, 290 of them), columns are `Feather` 1 / 5 / 10 / 25 / 50
+  / 75 / 90 / 100, and `Feather = 0` is an analytic hard edge rather than a
+  measured column. That table and the reasoning behind every choice in it live
+  in `radial_falloff`'s own doc comment; this is the summary of how it was
+  arrived at.
+
+  v0.32.0 landed `ramp(1 − f, 1 + f/2, d)`: a cubic smoothstep from
+  `d_in = 1−f` to `d_out = 1+f/2`, fitted on an 11-rung exposure ladder across
+  five frames (aspect 1.03 … 7.46, one rotated, one corner-placed). The engine's
+  outer edge had been at `d = 1`; the measured one at `Feather = 50` is 1.25,
+  i.e. **the mask was 29 % under-sized** and no amount of correct geometry
+  upstream could recover it. That much survives — the outer boundary does move
+  with feather. **R27 Batch-10 then refuted both endpoints**: an untouched
+  reference export unlocked the inner branch and `d_in` read 0.558 / 0.348 /
   0.041 / **−0.144** at `Feather` 25/50/75/100 against the law's
-  0.75/0.50/0.25/0.00 (measured `d_in ≈ 0.79 − 0.94 f`, negative at the end
-  stop). `d_out` SATURATES at ≈ 1.41 instead of climbing to 1.5 — 1.220 /
-  1.409 / 1.419 / 1.433 on a 4.35-aspect off-centre ellipse, reproducing the
-  first geometry's 1.223 / 1.402 / 1.406 / 1.414 to ≤ 0.019. The outer branch
-  IS a clean smoothstep (rms 0.0006–0.0072, at or below the quantisation
-  floor); the inner branch is not the same one (forcing a single smoothstep
-  across both costs rms 0.012–0.018). The code is unchanged on purpose: the
-  falloff sits on the same reviewer-owned geometry surface as the frame
-  constant above, and a two-branch replacement law needs its own adjudication
-  (`batch10-report.md` §8; the item lives in V2_PLAN §7 item 1 — M1_PLAN and
-  V2_PLAN are development ledgers kept outside the public tree since
-  2026-08-20, the same standing as the probe reports these sections cite).
+  0.75/0.50/0.25/0.00, while `d_out` appeared to SATURATE near 1.41 instead of
+  climbing to 1.5.
+
+  **R29 Batch-7 found out why, and Batch-7-2 closed it.** Both readings were
+  artefacts of forcing ONE smoothstep across a profile that is not one: with the
+  nomask reference the earlier batches lacked, `d_out` is CONSTANT in feather
+  and α(0) = 1 at EVERY feather (mask centres pixel-identical to the feather-0
+  frame on all eight rungs), so there is no inner knee to fit. No two-parameter
+  closed form reaches the 0.003 measurement floor — the best of five families is
+  3.1× it, the shipped smoothstep 4.5× — and the one candidate law the four-rung
+  batch had spotted, `a ≈ 1.9/f`, misses by 58× at `Feather = 1`. So the table
+  IS the model. Scored on the batch's own grid it reads rms(α) ≤ 0.0009 on every
+  rung against the old law's 0.0093 … 0.1557, and puts the α ≥ 0.5 area ratio at
+  1.000 against 1.105 … 2.077.
+
+  Better on every rung was the requirement, not a bonus: the old law was already
+  CORRECT for `Feather ≤ 5`, so the table degenerates to an exact hard edge as
+  feather → 0 rather than to a table row, and the narrow rungs are pinned as
+  absolute numbers in `the_radial_falloff_beats_the_refuted_ramp_on_every_feather`.
+  Registered rather than modelled, and named in the code: `d_out`'s absolute
+  value is 1.43 ± 0.015 (B7's ±0.002 was measuring JPEG 8×8 block spill, so √2 is
+  back inside the bar), the `Feather = 1` far tail is unresolved, and aspect
+  invariance of the falloff SHAPE is unsampled — all eight rungs are one ellipse.
+  (`~/.claude/plans/r29-materials/b7-analysis.md` and `…-2.md`; the item lives in
+  V2_PLAN §7 item 1 — M1_PLAN and V2_PLAN are development ledgers kept outside
+  the public tree since 2026-08-20, the same standing as the probe reports these
+  sections cite.)
 * **`crs:LocalHue`'s scale is 180, not 100.** A controlled export with the mask
   Hue slider at +50 wrote `crs:LocalHue="0.277778"`; 0.277778 × 180 = 50.00004.
 
@@ -1296,7 +1313,10 @@ deliberate, disclosed change (version snapshots keep the earlier render), and
 re-importing the original Lightroom sidecar is what recovers the intent for a
 mask that came from one. (v0.33.0 moves a stored radial a SECOND time, in the
 other direction and for the frame constant rather than the falloff — the first
-bullet above.)
+bullet above. **v0.35.0 moves it a THIRD time**, back to the falloff and this
+time to the measured table: every radial carrying `Feather ≥ 10` re-renders,
+`Feather ≤ 5` moves by the old law's own residual there, and `Feather = 0` is
+byte-identical because it takes the analytic branch.)
 
 #### The five-tier control registry (v0.30.0; populated in v0.31.0)
 
