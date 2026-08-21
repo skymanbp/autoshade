@@ -1463,43 +1463,55 @@ pub enum MaskLossReason {
     /// A [`MaskGeometry::Brush`] component is emitted in full (see
     /// [`brush_mask_xml`]), so a mask whose only extra component is a brush
     /// group loses nothing here and this is not raised for it — what that mask
-    /// gets instead is [`BrushCarried`], which is a statement about the RENDER
+    /// gets instead is [`BrushRendered`], which is a statement about the RENDER
     /// and not about the sidecar.
     ///
-    /// [`BrushCarried`]: MaskLossReason::BrushCarried
+    /// [`BrushRendered`]: MaskLossReason::BrushRendered
     ComponentsFlattened,
     /// A brush group (`Mask/Aggregate` + its `Mask/Paint` strokes) rides out
-    /// into the sidecar COMPLETE — and this engine does not draw it, so the
-    /// XMP Lightroom reads and the pixels Autoshop shows do not agree about
-    /// that mask.
+    /// into the sidecar COMPLETE — and the pixels Autoshop showed for it were
+    /// drawn by **our** rasteriser from a measured model of Lightroom's brush,
+    /// not by Adobe's. The XMP is exact; the alpha is an approximation.
     ///
     /// The odd one out in this enum, deliberately: every other variant names
     /// something the PROJECTION could not carry. This one names something the
-    /// projection carries perfectly and the RENDERER does not honour, which is
-    /// the opposite direction of loss and needs saying in the same breath —
-    /// a photographer who exports a brush mask to Lightroom and sees it appear
-    /// there has to know why it was invisible here.
+    /// projection carries perfectly and the RENDERER reproduces only to within
+    /// a measurement, which is the opposite direction of loss and needs saying
+    /// in the same breath.
     ///
-    /// The blocker is the alpha KERNEL alone (`recipe::BrushStroke::dabs`):
-    /// the sidecar stores the stroke and never the alpha, so the falloff and
-    /// the accumulation law come from a controlled Lightroom measurement or
-    /// from a guess, and this project does not guess about mask shape.
-    BrushCarried,
+    /// **This variant used to be `BrushCarried`, and it meant「not drawn at
+    /// all」** — weight 0 everywhere, from R27 Batch-4 until R29 Batch-6b. What
+    /// changed is that the one missing input arrived: the alpha kernel is not
+    /// in the sidecar (`recipe::BrushStroke::dabs` — the file stores the
+    /// stroke, never the alpha), so it had to be MEASURED, and R29 Batch-6 did
+    /// measure it on 29 controlled Lightroom exports —
+    /// `k(ρ;h) = (1 − ρ^m(h))^n(h)` at rms 0.0109 held-out, a one-parameter
+    /// flow odds law at κ = 0.1284, screen accumulation, density scaling the
+    /// dab. `render::brush_raster` is the implementation. Renaming rather than
+    /// keeping both was the honest option: nothing raises「carried, not drawn」
+    /// any more, and a disclosure variant with no producer is a claim the code
+    /// cannot make (this enum's own header: a disclosure must never say
+    /// something other than what was actually emitted).
+    ///
+    /// What is still worth saying, and is what the label now says: our edges
+    /// are not Adobe's. The model reproduces the measured ladder to ~0.01 in α
+    /// — an order better than the AI-mask arm's re-derivation, and not zero.
+    BrushRendered,
     /// An AI mask (`Mask/Image`) rides out into the sidecar COMPLETE — and the
     /// alpha this engine rendered was **recomputed by our own segmenter**, not
     /// Adobe's, so the XMP Lightroom reads and the pixels Autoshop showed do
     /// not describe the same coverage.
     ///
-    /// The second member of [`BrushCarried`]'s odd-one-out class, and the one
-    /// where the gap is largest. A brush mask is carried and NOT drawn — the
-    /// user sees nothing and knows it. An AI mask IS drawn, which is worse to
-    /// leave unsaid: the photographer sees a sky selection that looks right and
-    /// has no way to know its edges came from a different model. The sidecar
-    /// carries no raster at all (F2's anatomy: 218 instances, longest attribute
-    /// value 55 characters), so this is structural and permanent, not a
-    /// to-do.
+    /// The second member of [`BrushRendered`]'s odd-one-out class, and the one
+    /// where the gap is largest. Both are drawn here by something that is not
+    /// Adobe's code, but a brush is drawn from a MEASUREMENT of Adobe's own
+    /// rasteriser (R29 Batch-6, ~0.01 in α on the ladder it was fitted to),
+    /// while an AI mask is drawn by a different SEGMENTER whose edges have
+    /// never been compared to Adobe's at all. The sidecar carries no raster
+    /// (F2's anatomy: 218 instances, longest attribute value 55 characters), so
+    /// this one is structural and permanent, not a to-do.
     ///
-    /// [`BrushCarried`]: MaskLossReason::BrushCarried
+    /// [`BrushRendered`]: MaskLossReason::BrushRendered
     AiMaskRecomputed,
     /// A rotated radial exports as its UNROTATED ellipse. v0.32.0 NARROWED
     /// this to one case: `crs:Angle`'s sign and pivot are measured now and the
@@ -1542,7 +1554,7 @@ impl MaskLossReason {
         MaskLossReason::Bitmap,
         MaskLossReason::Disabled,
         MaskLossReason::ComponentsFlattened,
-        MaskLossReason::BrushCarried,
+        MaskLossReason::BrushRendered,
         MaskLossReason::AiMaskRecomputed,
         MaskLossReason::Rotation(0),
         MaskLossReason::Recolour,
@@ -1563,9 +1575,9 @@ impl MaskLossReason {
             MaskLossReason::Bitmap => "bitmap mask(s) skipped",
             MaskLossReason::Disabled => "muted mask(s) skipped",
             MaskLossReason::ComponentsFlattened => "extra shape component(s) flattened",
-            MaskLossReason::BrushCarried => {
-                "brush mask(s) carried, not yet rendered - the measured kernel has no closed \
-                 form and the mask lives in a pre-lens-correction frame"
+            MaskLossReason::BrushRendered => {
+                "brush mask(s) drawn from Autoshop's measured model of Lightroom's brush - \
+                 not Adobe's own rasteriser"
             }
             MaskLossReason::AiMaskRecomputed => {
                 "AI mask(s) re-derived by the local segmenter - not Adobe's own raster"
@@ -1616,7 +1628,7 @@ pub enum MaskImportReason {
     /// correctly because two of its four members were never right:
     ///  * `Mask/Aggregate` and `Mask/Paint` LEFT in R27 Batch-4 — a brush
     ///    group is a first-class geometry now ([`MaskGeometry::Brush`]),
-    ///    imported, carried and written back, with [`BrushCarried`] as its
+    ///    imported, carried and written back, with [`BrushRendered`] as its
     ///    note. It is not a drop and has not been one since.
     ///  * `Mask/Ellipse` was never a member in the first place. It is the
     ///    spot-healing shape and lives under `crs:RetouchAreas` ONLY — 84 of
@@ -1627,7 +1639,7 @@ pub enum MaskImportReason {
     /// and recomputes the alpha from a model, so the sidecar holds no pixels
     /// and no geometry to take.
     ///
-    /// [`BrushCarried`]: MaskImportReason::BrushCarried
+    /// [`BrushRendered`]: MaskImportReason::BrushRendered
     /// [`MaskGeometry::Brush`]: crate::recipe::MaskGeometry::Brush
     Unrepresentable,
     /// DROP. The values READ fine but land outside this engine's model (an
@@ -1655,26 +1667,37 @@ pub enum MaskImportReason {
     ///
     /// PARAMETRIC shapes only. A brush group is imported as a real component
     /// since R27 Batch-4, so it is not one of the "extra shapes that do not"
-    /// and does not raise this; [`BrushCarried`] speaks for it.
+    /// and does not raise this; [`BrushRendered`] speaks for it.
     ///
-    /// [`BrushCarried`]: MaskImportReason::BrushCarried
+    /// [`BrushRendered`]: MaskImportReason::BrushRendered
     MultiComponent,
     /// A `Mask/Aggregate` brush group imported WHOLE — strokes, dab streams,
-    /// group blend mode and all — and the engine does not draw it yet.
+    /// group blend mode and all — and **drawn here by our own rasteriser**,
+    /// from a measured model of Lightroom's brush rather than Adobe's code.
     ///
-    /// R27 Batch-4 (L-08). Before it, a correction holding one of these was
-    /// refused entire under [`Unrepresentable`], which cost the photographer
-    /// not only the brush but every gradient standing beside it: 18 corrections
-    /// and 14 already-drawable parametric shapes across the reference library,
-    /// thrown away because a neighbouring component was a brush. The geometry
-    /// is now read, carried in `recipe.json` and written back to the sidecar
-    /// intact, so the only thing still missing is the RENDER — and the one
+    /// R27 Batch-4 (L-08) made it importable. Before that, a correction holding
+    /// one of these was refused entire under [`Unrepresentable`], which cost
+    /// the photographer not only the brush but every gradient standing beside
+    /// it: 18 corrections and 14 already-drawable parametric shapes across the
+    /// reference library, thrown away because a neighbouring component was a
+    /// brush.
+    ///
+    /// **R29 Batch-6b then made it RENDER, and this variant was renamed from
+    /// `BrushCarried` because「carried, not drawn」stopped being true.** The one
     /// input a renderer needs that no sidecar contains is the alpha kernel
-    /// (`recipe::BrushStroke::dabs`). A note, therefore, not a drop: the
-    /// correction and its neighbours arrive.
+    /// (`recipe::BrushStroke::dabs`), so it was measured instead of guessed:
+    /// 29 controlled Lightroom exports, `k(ρ;h) = (1 − ρ^m(h))^n(h)` held-out
+    /// at rms 0.0109, `D(f) = κf/(1−f+κf)` with κ = 0.1284, screen
+    /// accumulation, density scaling the dab (R29 Batch-6; `render::brush_raster`).
+    ///
+    /// Raised on the IMPORT itself, exactly like [`AiMaskRecomputed`]: the
+    /// photographer is being told what KIND of thing arrived, and「the alpha
+    /// will be ours, from a measurement」is true the moment the group is read.
+    /// A note, not a drop — the correction and its neighbours arrive.
     ///
     /// [`Unrepresentable`]: MaskImportReason::Unrepresentable
-    BrushCarried,
+    /// [`AiMaskRecomputed`]: MaskImportReason::AiMaskRecomputed
+    BrushRendered,
     /// A `Mask/Image` AI mask imported as INTENT and **re-derived on this
     /// machine by a different segmenter** — the dominant refusal before R27
     /// Batch-5, and the one arm that cannot be closed by any parser.
@@ -1761,7 +1784,7 @@ impl MaskImportReason {
         MaskImportReason::Rotation(0),
         MaskImportReason::BlendMode,
         MaskImportReason::MultiComponent,
-        MaskImportReason::BrushCarried,
+        MaskImportReason::BrushRendered,
         MaskImportReason::AiMaskRecomputed,
         MaskImportReason::AiMaskUnresolved,
         MaskImportReason::ForeignRangeMask,
@@ -1795,9 +1818,9 @@ impl MaskImportReason {
             MaskImportReason::Rotation(_) => "radial rotation(s) read as 0",
             MaskImportReason::BlendMode => "non-default blend mode(s) ignored",
             MaskImportReason::MultiComponent => "extra shape component(s) dropped",
-            MaskImportReason::BrushCarried => {
-                "brush mask(s) carried, not yet rendered - the measured kernel has no closed \
-                 form and the mask lives in a pre-lens-correction frame"
+            MaskImportReason::BrushRendered => {
+                "brush mask(s) drawn from Autoshop's measured model of Lightroom's brush - \
+                 not Adobe's own rasteriser"
             }
             MaskImportReason::AiMaskRecomputed => {
                 "AI mask(s) re-derived by the local segmenter - not Adobe's own raster"
@@ -2401,14 +2424,16 @@ fn masks_xml(r: &EditRecipe, frame: Option<FrameAspect>) -> (String, Vec<MaskLos
                 reason: MaskLossReason::ComponentsFlattened,
             });
         }
-        // The other direction of loss: the sidecar gets the brush WHOLE and
-        // this engine does not draw it. Raised once per mask that carries one
-        // anywhere — base or component — because it is a fact about the mask,
-        // not about how many groups it holds.
+        // The other direction of loss: the sidecar gets the brush WHOLE and the
+        // pixels this engine showed for it came from OUR rasteriser, working
+        // from a measured model of Lightroom's brush (R29 Batch-6b). Raised
+        // once per mask that carries one anywhere — base or component —
+        // because it is a fact about the mask, not about how many groups it
+        // holds.
         if matches!(m.mask, MaskGeometry::Brush { .. })
             || m.components.iter().any(|c| matches!(c.geometry, MaskGeometry::Brush { .. }))
         {
-            losses.push(MaskLoss { name: name.clone(), reason: MaskLossReason::BrushCarried });
+            losses.push(MaskLoss { name: name.clone(), reason: MaskLossReason::BrushRendered });
         }
         // The AI mask's own direction of loss, and it is the sharper one: the
         // sidecar gets the INTENT whole (so Lightroom will reproduce its own
@@ -5061,7 +5086,7 @@ fn parse_masks(
 ///
 /// BRUSH corrections stopped being counted here in R27 Batch-4: a
 /// `Mask/Aggregate` group imports, so it is no longer a refusal at all. It
-/// carries a `BrushCarried` note instead, which [`import_losses`] reports and
+/// carries a `BrushRendered` note instead, which [`import_losses`] reports and
 /// this counter deliberately does not (see below).
 ///
 /// COUNTS DROPS ONLY, not every import defect (R25 P1) — a correction that
@@ -6124,9 +6149,11 @@ fn classify_correction(
                 // fully determined by the sidecar (see `MaskGeometry::Brush`),
                 // so it is read, carried and written back — and the correction
                 // it sits in, plus every parametric shape standing beside it,
-                // arrives instead of being thrown away. What is NOT determined
-                // by the sidecar is the alpha kernel, so the render leaves the
-                // group inert and `BrushCarried` says so in both directions.
+                // arrives instead of being thrown away. What is NOT in the
+                // sidecar is the alpha kernel — that one was MEASURED rather
+                // than guessed (R29 Batch-6), so the render now draws the
+                // group from our own model of it and `BrushRendered` says so
+                // in both directions.
                 //
                 // `verdict` is deliberately unused here: the attribute checks
                 // it performs are the PARAMETRIC ones (Angle, the subtract
@@ -6223,7 +6250,7 @@ fn classify_correction(
         reasons.push(MaskImportReason::MultiComponent);
     }
     if brush_count > 0 {
-        reasons.push(MaskImportReason::BrushCarried);
+        reasons.push(MaskImportReason::BrushRendered);
     }
     // Raised on the IMPORT itself, not on whether the segmenter has run: the
     // photographer is being told what kind of thing arrived, and "the alpha
@@ -8802,7 +8829,7 @@ mod tests {
                 MaskLossReason::Bitmap => 0,
                 MaskLossReason::Disabled => 1,
                 MaskLossReason::ComponentsFlattened => 2,
-                MaskLossReason::BrushCarried => 3,
+                MaskLossReason::BrushRendered => 3,
                 MaskLossReason::AiMaskRecomputed => 4,
                 MaskLossReason::Rotation(_) => 5,
                 MaskLossReason::Recolour => 6,
@@ -11129,7 +11156,7 @@ mod tests {
                 MaskImportReason::Rotation(_) => 2,
                 MaskImportReason::BlendMode => 3,
                 MaskImportReason::MultiComponent => 4,
-                MaskImportReason::BrushCarried => 5,
+                MaskImportReason::BrushRendered => 5,
                 MaskImportReason::AiMaskRecomputed => 6,
                 MaskImportReason::AiMaskUnresolved => 7,
                 MaskImportReason::ForeignRangeMask => 8,
@@ -11459,7 +11486,7 @@ mod tests {
     /// batch report): reverting the `"Mask/Aggregate"` arm of
     /// `classify_correction` to `unknown_component = true`; deleting
     /// `parse_one_correction`'s brush-component collection; never pushing
-    /// `MaskImportReason::BrushCarried`, which imports the correction SILENTLY
+    /// `MaskImportReason::BrushRendered`, which imports the correction SILENTLY
     /// — the failure mode this project treats as worse than the refusal it
     /// replaced.
     /// R29 Batch-3: `crs:LensProfileEnable` is READ, in both spellings, and a
@@ -11634,11 +11661,11 @@ mod tests {
              r 0.580873\nd 0.229292 1.011389\nr 0.581205\nd 0.112441 1.007149"
         );
         assert_eq!(strokes[1].dabs, "f 1\nh 1\nd 0.500000 0.500000");
-        // And the import SAYS so — carried, not rendered.
+        // And the import SAYS so — imported whole, drawn from our model.
         let losses = import_losses(&doc);
         assert!(
-            losses.iter().any(|l| l.reason == MaskImportReason::BrushCarried),
-            "a carried-but-unrendered brush must be disclosed: {losses:?}"
+            losses.iter().any(|l| l.reason == MaskImportReason::BrushRendered),
+            "a brush drawn from our own model must be disclosed: {losses:?}"
         );
         assert!(
             !losses.iter().any(|l| l.reason.is_drop()),
@@ -11758,8 +11785,8 @@ mod tests {
         // 4. And the WRITER discloses the same fact the reader did.
         let losses = mask_export_losses(&once);
         assert!(
-            losses.iter().any(|l| l.reason == MaskLossReason::BrushCarried),
-            "the writer must say the brush it emitted is not rendered: {losses:?}"
+            losses.iter().any(|l| l.reason == MaskLossReason::BrushRendered),
+            "the writer must say the brush it emitted was drawn by us: {losses:?}"
         );
         assert!(
             !losses.iter().any(|l| l.reason == MaskLossReason::ComponentsFlattened),
@@ -12057,22 +12084,37 @@ mod tests {
         }
     }
 
-    /// A brush group is INERT in the render and NAMED in both disclosure
-    /// channels — it neither silently covers the frame nor silently covers
-    /// nothing.
+    /// A brush group is DRAWN by our own rasteriser and NAMED in both
+    /// disclosure channels — it is neither passed off as Adobe's alpha nor
+    /// silently approximated.
+    ///
+    /// R29 Batch-6b rewrote this from `a_carried_brush_is_named_…`: the phrase
+    /// it used to require ("carried" + "not yet rendered") was the disclosure
+    /// of an engine that drew nothing, and keeping it green would have meant
+    /// shipping a sentence the renderer had stopped honouring.
+    ///
+    /// MUTATION-LINED: reverting either `en()` to the old
+    /// 「carried, not yet rendered」wording fails the phrase asserts below, and
+    /// dropping either variant from `ALL` fails the first two lines — the lists
+    /// every disclosure surface iterates.
     #[test]
-    fn a_carried_brush_is_named_in_both_channels_and_is_not_a_drop() {
+    fn a_rendered_brush_is_named_in_both_channels_and_is_not_a_drop() {
         // Import twin and export twin describe the SAME fact, so both `ALL`
         // arrays — the lists every disclosure surface iterates — must hold it.
-        assert!(MaskImportReason::ALL.contains(&MaskImportReason::BrushCarried));
-        assert!(MaskLossReason::ALL.contains(&MaskLossReason::BrushCarried));
-        assert!(!MaskImportReason::BrushCarried.is_drop(), "the correction DID import");
-        for phrase in [MaskImportReason::BrushCarried.en(), MaskLossReason::BrushCarried.en()] {
-            assert!(phrase.contains("carried"), "{phrase}");
-            assert!(phrase.contains("not yet rendered"), "{phrase}");
+        assert!(MaskImportReason::ALL.contains(&MaskImportReason::BrushRendered));
+        assert!(MaskLossReason::ALL.contains(&MaskLossReason::BrushRendered));
+        assert!(!MaskImportReason::BrushRendered.is_drop(), "the correction DID import");
+        for phrase in [MaskImportReason::BrushRendered.en(), MaskLossReason::BrushRendered.en()] {
+            // Both halves of the sentence, because either one alone misleads:
+            // "drawn" without "not Adobe's" reads as a raster round trip, and
+            // "not Adobe's" without "drawn" reads as the old refusal.
+            assert!(phrase.contains("drawn"), "{phrase}");
+            assert!(phrase.contains("measured model"), "{phrase}");
+            assert!(phrase.contains("not Adobe's own rasteriser"), "{phrase}");
+            assert!(!phrase.contains("not yet rendered"), "the old refusal wording: {phrase}");
         }
         // The RENDER half of the same claim lives in render.rs, where
-        // `mask_weight` is: `a_carried_brush_group_draws_nothing_anywhere`.
+        // `mask_weight` is: `a_carried_brush_group_draws_its_dabs`.
     }
 
     /// FORENSIC REGRESSION, run against the user's own Lightroom library.

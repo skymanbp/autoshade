@@ -774,7 +774,14 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
 
     // ── Canvas mask badge + model-picker placeholder ─────────────────────────
     ("▨ Bitmap mask", "▨ 位图蒙版"),
-    ("▨ Brush mask (carried, not rendered)", "▨ 画笔蒙版（已带走，未渲染）"),
+    // R29 Batch-6b. 「本机实测模型」 not 「导入」 on purpose, exactly like the AI
+    // badge below: Lightroom's sidecar holds the STROKE and no alpha at all, so
+    // what the canvas shows was drawn by our own rasteriser from a measured
+    // model of Lightroom's kernel, and the badge has to say so. Every CJK glyph
+    // here already occurs elsewhere in the GUI tree — 「实」×8 「测」×3 「模」
+    // 「型」「渲」「染」「本」「机」 — so the shipped subset covers it
+    // (`python scripts/subset_gui_fonts.py --check`).
+    ("▨ Brush mask (drawn from our measured model)", "▨ 画笔蒙版（本机实测模型渲染）"),
     // R27 Batch-5. 「重算」 not 「导入」 on purpose: Lightroom's sidecar holds no
     // raster, so what the canvas shows came from OUR segmenter and the badge
     // has to say so — a photographer looking at a sky selection that looks
@@ -885,13 +892,13 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     ("muted masks ×{n}", "已静音蒙版 ×{n}"),
     ("shape components flattened ×{n}", "形状组件已压平 ×{n}"),
     // R27 Batch-4 (L-08). The odd member of the export bucket: the brush group
-    // IS written to the sidecar, complete — what is missing is this engine's
-    // rendering of it, so the phrase has to break out of the frame sentence's
-    // 「不会带走」 rather than sit inside it. Every glyph checked against the
-    // shipped CJK subset first: 「画」「笔」「蒙」「版」「已」「带」「走」「但」
-    // 「此」「处」「未」「渲」「染」 all already occur in this table.
-    ("brush masks ×{n} carried but not rendered here",
-        "画笔蒙版 ×{n} 已带走，但此处未渲染"),
+    // IS written to the sidecar, complete — so the phrase has to break out of
+    // the frame sentence's 「不会带走」 rather than sit inside it. Since R29
+    // Batch-6b what it breaks out to say is the AI line's correction, one
+    // notch weaker: the brush IS drawn here, from a measurement of Lightroom's
+    // own kernel rather than from Adobe's code, so the alpha is ours.
+    ("brush masks ×{n} drawn from our measured model, not Adobe's raster",
+        "画笔蒙版 ×{n} 由本机实测模型渲染——非 Adobe 原栅格"),
     // The AI mask's line has to carry the OPPOSITE correction to the brush's:
     // the sidecar gets the intent WHOLE (Lightroom will rebuild its own mask
     // from it), so nothing was left out of the XMP — what differs is the alpha
@@ -1424,10 +1431,12 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
         "旋转 {a}° 按 0 读入（画幅尺寸未知）"),
     ("Blend mode", "混合模式"),
     ("Extra shapes", "附加形状"),
-    // R27 Batch-4 (L-08). Import twin of the export line above — the strokes,
-    // their dab streams and the group's blend mode all arrive and round-trip;
-    // the alpha kernel is what is still being measured, so nothing is drawn.
-    ("Brush mask (carried, not rendered)", "画笔蒙版（已带走，未渲染）"),
+    // R27 Batch-4 (L-08) / R29 Batch-6b. Import twin of the export line above —
+    // the strokes, their dab streams and the group's blend mode all arrive and
+    // round-trip, and the alpha kernel that used to be missing was MEASURED, so
+    // the mask is drawn. What the label must still refuse to imply is that the
+    // alpha came from Lightroom.
+    ("Brush mask (drawn from our measured model)", "画笔蒙版（本机实测模型渲染）"),
     // Two sentences, not one, because they are two different states: the mask
     // rendered from OUR alpha, or it rendered nothing at all. Collapsing them
     // would let a failed model run read as a successful approximation.

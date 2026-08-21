@@ -2282,9 +2282,24 @@ fn apply_masks(
         // Bitmap geometry: decode each raster ONCE per mask per develop
         // (never inside the pixel loop); both the tone and the NR pass share
         // them. Components load alongside the base.
-        let bmp = rasters.get(&m.mask);
-        let comp_bmps: Vec<Option<&image::GrayImage>> =
-            m.components.iter().map(|c| rasters.get(&c.geometry)).collect();
+        //
+        // A BRUSH group arrives through the same slot (R29 Batch-6b). It has
+        // no file, so the snapshot has nothing for it; `brush_raster` stamps
+        // its dab stream instead — once per mask per develop, memoised across
+        // develops, and at THIS frame's size because a dab is a circle in
+        // pixels. The two sources cannot collide: `rasters.get` answers only
+        // for a geometry with a raster PATH (`geometry_raster_path`), which a
+        // brush never has.
+        let brush_base = brush_raster(&m.mask, w as u32, h as u32);
+        let brush_comps: Vec<Option<std::sync::Arc<image::GrayImage>>> =
+            m.components.iter().map(|c| brush_raster(&c.geometry, w as u32, h as u32)).collect();
+        let bmp = rasters.get(&m.mask).or(brush_base.as_deref());
+        let comp_bmps: Vec<Option<&image::GrayImage>> = m
+            .components
+            .iter()
+            .zip(&brush_comps)
+            .map(|(c, brush)| rasters.get(&c.geometry).or(brush.as_deref()))
+            .collect();
         // An unloadable raster carries NO coverage, so its weight must never
         // reach the inversion below: 0 with `inverted` would apply this
         // adjustment to the WHOLE frame at full strength. Skipping the whole
@@ -2890,32 +2905,53 @@ fn mask_weight(g: &MaskGeometry, nx: f32, ny: f32, bmp: Option<&image::GrayImage
             Some(b) => sample_gray_norm(b, nx, ny),
             None => 0.0,
         },
-        // Brush group: CARRIED, NOT RENDERED (R27 Batch-4, L-08). Weight 0
-        // everywhere, which is the SAME inert contract a raster mask with an
-        // unreadable file gets — and it is inert in both compositions: an
-        // `Add` component folds in as `1−(1−w)(1−0) = w` and a `Subtract` as
-        // `w·(1−0) = w`, so a correction that also holds a real gradient
-        // renders exactly the gradient. Nothing is invented.
+        // Brush group: RENDERED since R29 Batch-6b, from a MEASURED model —
+        // sampled exactly like a raster mask, because by the time it reaches
+        // here it IS one. `brush_raster` stamps the dab stream into an 8-bit
+        // grey alpha at develop time (a render-time artefact: no schema field,
+        // no `schema_era` gate, nothing in `recipe.json` moved) and the caller
+        // hands it in through the same `bmp` slot `Bitmap` and `AiMask` use.
         //
-        // WHY, precisely: the geometry is fully measured (dab stream, frame,
-        // spacing law — see `MaskGeometry::Brush` and `BrushStroke::dabs`) and
-        // the alpha KERNEL is not. The file stores the stroke, never the
-        // alpha. Drawing on the only published kernel — a third-party
-        // decompile reconstruction — would reshape every imported brush mask
-        // on a guess, which is the decision `MaskGeometry::Radial::roundness`
-        // was kept out of the renderer for. Both disclosure channels name this
-        // (`MaskImportReason::BrushCarried`, `MaskLossReason::BrushCarried`),
-        // so it is a stated limit and not a silent zero.
+        // `None` is the SAME inert contract an unreadable raster gets, and it
+        // has exactly two causes: the group yielded no drawable dab (an empty
+        // or state-token-only stream, a zero radius, flow 0 — Lightroom draws
+        // nothing there either), or the caller never asked for a raster (the
+        // unit tests below, which assert `mask_weight`'s meaning at a stored
+        // coordinate). Inert is also inert in both compositions — an `Add`
+        // component folds in as `1−(1−w)(1−0) = w` and a `Subtract` as
+        // `w·(1−0) = w`.
         //
-        // R29 Batch-3 closed the OTHER half of that registration — the frame.
-        // Lightroom rasterises a brush in its pre-lens-correction frame, and
-        // so does this engine: `apply_masks` runs before `apply_lens_geometry`
-        // and the geometry stage carries the mask exactly as it carries the
-        // photograph. So when the kernel lands, the dab coordinates below are
-        // ALREADY in the right frame and need no warp — see the mask-warp
-        // block header for the measurements and the frame table, and
-        // `the_engine_evaluates_masks_before_the_geometry_stage` for the pin.
-        // Applying a warp here would apply the field TWICE.
+        // THE MODEL, and every number in it is measured, not chosen (R29
+        // Batch-6, `~/.claude/plans/r29-materials/b6-analysis.md`; the two
+        // laws re-confirmed out-of-sample against R27 Batch-8/10):
+        //
+        //     ρ       = |p − dab| / (Radius·W)          dab is a circle in PIXELS
+        //     k(ρ;h)  = (1 − ρ^m(h))^n(h)               0 ≤ ρ < 1, else exactly 0
+        //     D(f)    = κf / (1 − f + κf)               κ = 0.1284, D(1) = 1 exact
+        //     α       = 1 − Π_i (1 − value·D(f_i)·k(ρ_i; h_i))        SCREEN
+        //
+        // with `ln m(h)` and `ln n(h)` cubics in the hardness (§4.4). See
+        // `brush_kernel` / `brush_flow_deposit` for the coefficients and their
+        // provenance, and `brush_kernel_matches_the_measured_nine_rungs` /
+        // `brush_flow_law_matches_the_measured_deposit` for the pins.
+        //
+        // WHAT THIS REPLACES, and it is a HARD render-behaviour change: this
+        // arm answered `0.0` for every pixel from R27 Batch-4 until now, so a
+        // brush-only correction rendered NOTHING while the sidecar carried it
+        // whole. Every recipe holding a brush mask therefore renders
+        // DIFFERENTLY from here on — that is the point, and it is why the
+        // disclosure variants moved with it (`MaskImportReason::BrushRendered`
+        // / `MaskLossReason::BrushRendered`, which now say「drawn from our
+        // measured model, not Adobe's rasteriser」rather than「not drawn」).
+        //
+        // The frame half was closed first, by R29 Batch-3. Lightroom rasterises
+        // a brush in its pre-lens-correction frame, and so does this engine:
+        // `apply_masks` runs before `apply_lens_geometry` and the geometry
+        // stage carries the mask exactly as it carries the photograph. So the
+        // dab coordinates are ALREADY in the right frame and get no warp — see
+        // the mask-warp block header for the measurements and the frame table,
+        // and `the_engine_evaluates_masks_before_the_geometry_stage` for the
+        // pin. Applying a warp here would apply the field TWICE.
         //
         // That is why `is_lr_post_correction_geometry` excludes this arm while
         // the SAME batch wired the radial and linear ones: the two shapes are
@@ -2924,8 +2960,37 @@ fn mask_weight(g: &MaskGeometry, nx: f32, ny: f32, bmp: Option<&image::GrayImage
         // (`only_lightrooms_post_correction_shapes_are_frame_adapted` pins it,
         // brush included).
         //
-        // What is left, and it is only this: the kernel.
-        MaskGeometry::Brush { .. } => 0.0,
+        // The two group-level fields are spelled out rather than swept into
+        // `..`, the same discipline `Radial` follows, so a field added to the
+        // geometry cannot reach the renderer unnoticed:
+        //
+        //  * `inverted` (`crs:MaskInverted` on the Aggregate) IS rendered —
+        //    `1 − α` — but only where an alpha exists. Measured `true` on 1 of
+        //    39 real groups (F2 anatomy). It is deliberately NOT lifted into
+        //    `LocalAdjustment::inverted` at import (xmp.rs: one bit, one home),
+        //    so this arm is the only place it can be honoured at all.
+        //  * `value` (`crs:MaskValue` on the Aggregate) is NOT a strength and
+        //    must never scale anything here: it is the other half of the
+        //    subtract pair, measured `(blend_mode, value)` as `(1, 0)` ×23 and
+        //    `(0, 1)` ×16, and reading it as a density neutralises every
+        //    subtract brush in the library (`recipe::MaskGeometry::Brush`).
+        //    The per-STROKE `BrushStroke::value` is the genuine density, and it
+        //    scales each dab BEFORE the screen, inside `brush_raster`.
+        MaskGeometry::Brush { inverted, name: _, blend_mode: _, value: _, strokes: _ } => {
+            match bmp {
+                Some(b) => {
+                    let w = sample_gray_norm(b, nx, ny);
+                    if *inverted { 1.0 - w } else { w }
+                }
+                // No alpha = no coverage, and NO inversion either. `1 − 0` here
+                // would turn a group that drew nothing into a WHOLE-FRAME
+                // adjustment at full strength — the identical failure
+                // `is_raster_backed` exists to keep a dead bitmap out of, said
+                // locally because a brush needs no file and so cannot use that
+                // gate (a dab-less group is inert, not broken).
+                None => 0.0,
+            }
+        }
         // AI mask: the RECOMPUTED alpha, sampled exactly like a raster mask —
         // because that is what it is. `segment::resolve_ai_masks` runs our own
         // segmenter at the reference point the sidecar names and caches the
@@ -3663,6 +3728,505 @@ pub(crate) fn sample_gray_norm(b: &image::GrayImage, nx: f32, ny: f32) -> f32 {
     top * (1.0 - fy) + bot * fy
 }
 
+// --- Lightroom's brush, rasterised ------------------------------------------
+//
+// Everything from here to `brush_raster` is ONE measurement made executable:
+// R29 Batch-6 (`~/.claude/plans/r29-materials/b6-analysis.md`), 29 controlled
+// Lightroom exports on one capture — a nine-rung hardness ladder (class 07,
+// Δh = 0.125, one dab at the exact frame centre) and a 5 × 2 × 2 flow × radius
+// × hardness grid of drags (class 06) — read back through batch-10's `par`
+// composition law and un-warped into Lightroom's own pre-correction frame.
+//
+//     ρ       = |p − dab| / (Radius·W)          a dab is a circle in PIXELS
+//     k(ρ;h)  = (1 − ρ^m(h))^n(h)               0 ≤ ρ < 1, else exactly 0
+//     D(f)    = κf / (1 − f + κf)               κ = 0.1284 ± 0.0029, D(1) = 1
+//     α       = 1 − Π_i (1 − value·D(f_i)·k(ρ_i; h_i))        SCREEN
+//
+// NOTHING here is a schema field. The raster is a render-time artefact keyed by
+// the dab stream and the frame size, exactly as a `Bitmap` mask's decode is
+// keyed by (path, mtime, size) — `recipe.json` gained no member and no
+// `schema_era` gate moved.
+
+/// Kernel exponents `(m, n)` of `k(ρ;h) = (1 − ρ^m)^n` at hardness `h`
+/// (`crs:CenterWeight`, and the dab stream's `h` token — one quantity, two
+/// spellings, agreeing to 4 dp on the census).
+///
+/// **Measured, not chosen** (B6 §4.4). Nine rungs, each fitted independently
+/// with a profile-likelihood interval 5–15 % wide, so both parameters are
+/// separately IDENTIFIED at every rung — which is what batch-10's rival
+/// `disc ⊛ gaussian` was not (its disc radius jumped 0.002 → 0.503 between
+/// adjacent rungs). `ln m` and `ln n` are then cubics in `h` fitted against all
+/// nine at once: 8 numbers total, pooled rms 0.0102, **held-out 0.0109** (fit 5
+/// rungs, predict the 4 interleaved ones) against 0.0180 for interpolating the
+/// measured table itself. That is why this ships as a FORM and not as a table.
+///
+/// The physical reading (B6 §4.5): re-parametrised as `exp(−cρ^m)` the exponent
+/// runs 1.95–2.15 at `h ≤ 0.25` — an actual gaussian — and 20.8 at `h = 1`, a
+/// super-gaussian barely distinguishable from a top-hat. Hardness is the ORDER
+/// of the falloff, not a plateau radius.
+///
+/// `h` is CLAMPED to Lightroom's own 0..1 before the cubics are evaluated. They
+/// are empirical fits over exactly that interval and diverge outside it — at
+/// `h = 2` they return `m = 5×10⁻⁴`, which would paint the whole frame. The
+/// clamp is the guard, and it is the only one needed: on [0, 1] the cubics are
+/// bounded at `m ∈ [1.66, 18.0]`, `n ∈ [1.40, 6.43]`.
+///
+/// Evaluated in f64 and returned as f32: the cubic coefficients carry six
+/// decimals and `exp` of a sum near 2.9 loses the last of them in f32.
+fn brush_kernel_exponents(h: f32) -> (f32, f32) {
+    // NaN clamps to NEITHER end — `f32::clamp` propagates it — and a NaN
+    // exponent turns the whole raster into `0 as u8` further down, silently.
+    // A hand-edited `recipe.json` is the only way to get one, and Lightroom's
+    // own default `CenterWeight` is what it degrades to.
+    let h = if h.is_nan() { 0.0 } else { f64::from(h).clamp(0.0, 1.0) };
+    // Horner, from B6 §4.4:
+    //   ln m(h) = −5.272996 h³ + 9.420690 h² − 1.864655 h + 0.605303
+    //   ln n(h) = −5.976385 h³ + 12.872100 h² − 7.987943 h + 1.861162
+    let ln_m = ((-5.272996 * h + 9.420690) * h - 1.864655) * h + 0.605303;
+    let ln_n = ((-5.976385 * h + 12.872100) * h - 7.987943) * h + 1.861162;
+    (ln_m.exp() as f32, ln_n.exp() as f32)
+}
+
+/// One dab's alpha profile: `k(ρ; h)`, the falloff at normalised radius `ρ`.
+///
+/// **Support ends EXACTLY at ρ = 1**, re-confirmed at nine hardnesses: α is
+/// ≤ 5×10⁻⁴ in magnitude at every ρ ≥ 1.002 on every rung, so `crs:Radius` is
+/// the outer support and not a half-width (B6 §4.1). Returning a hard 0 there
+/// is therefore the measurement, not a convenience — and it is what keeps a
+/// dab's cost proportional to its own area instead of the frame's.
+///
+/// `k(0) = 1` is likewise measured, not normalised in by hand: the
+/// un-normalised peak reads 1.00288 ± 0.00229 across the nine rungs with no
+/// trend in `h`, which is also an independent confirmation of `D(1) = 1`.
+///
+/// TESTS ONLY, and deliberately: the rasteriser hoists `brush_kernel_exponents`
+/// out of its inner loop, so composing them per call is a convenience no pixel
+/// path wants. The falloff ITSELF is [`brush_kernel_at`], which both this and
+/// the rasteriser go through — so a mutation to the closed form still reaches
+/// production, and the nine-rung pin still bites it.
+#[cfg(test)]
+fn brush_kernel(rho: f32, h: f32) -> f32 {
+    let (m, n) = brush_kernel_exponents(h);
+    brush_kernel_at(rho * rho, m * 0.5, n)
+}
+
+/// [`brush_kernel`] with ρ² in hand and the exponents already resolved — the
+/// form the rasteriser's inner loop wants, and the ONE place the falloff is
+/// actually computed, so the pinned closed form and the pixels cannot drift.
+///
+/// `ρ^m = (ρ²)^(m/2)`: one exponentiation per texel, and no square root at all.
+fn brush_kernel_at(rho2: f32, half_m: f32, n: f32) -> f32 {
+    // NaN takes this branch too, deliberately: a NaN weight survives
+    // `wgt <= 0.001` and casts to black (the same trap the radial arm's guarded
+    // ramp documents), and an unreachable NaN is still a NaN once someone
+    // hand-edits a `recipe.json`.
+    if rho2.is_nan() || rho2 >= 1.0 {
+        return 0.0;
+    }
+    if rho2 <= 0.0 {
+        return 1.0;
+    }
+    (1.0 - rho2.powf(half_m)).max(0.0).powf(n)
+}
+
+/// The per-dab DEPOSIT at flow `f` — how much alpha one stamp lays down before
+/// the screen accumulation folds the stamps together.
+///
+/// **A one-parameter ODDS law**, `D/(1−D) = κ·f/(1−f)` (B6 §5.3). Identified,
+/// not fitted: over the sixteen unsaturated cells it scores rms 0.0030 against
+/// 0.0207 for `1−(1−f)ⁿ` (6.9×) and 0.0383 for the naive linear `D = κf`
+/// (12.7×), and giving the law a second free exponent returns n = 1.024 and
+/// buys 0.0004. κ is UNIVERSAL to 2.24 % across a 3× radius change and both
+/// hardness ends (0.12496 / 0.12804 / 0.12752 / 0.13293).
+///
+/// `D(1) = 1` is EXACT and free — `κ/(1−1+κ)` — which is also exact in f32
+/// here, so a flow-1 dab deposits its full density with no epsilon. Pinning it
+/// at 1 rather than fitting it costs at most 0.0037 on the four saturated
+/// frames, below the α quantum (B6 §5.2).
+///
+/// **Registered wart, not swept** (B6 §5.4, §9): the per-rung κ rises ~11 %
+/// from f = 0.10 to f = 0.75 in all four cells, so the law carries a small real
+/// curvature no better one-parameter form absorbed. It is also why this κ
+/// (four cells, 0.1284 ± 0.0029) sits 5.3 % above batch-10's single-cell
+/// 0.12189 ± 0.00270 — about 1.6σ. **The two must not be quoted as agreeing to
+/// better than 5 %.**
+fn brush_flow_deposit(f: f32) -> f32 {
+    /// B6 §5.4, four cells: 0.12836 ± 0.00288. Supersedes batch-10's 0.12189.
+    const KAPPA: f32 = 0.1284;
+    let f = f.clamp(0.0, 1.0);
+    let kf = KAPPA * f;
+    let denom = 1.0 - f + kf;
+    // Unreachable on [0, 1] — `denom ≥ κ > 0` — but a division that can only be
+    // reasoned about is a division that eventually is not.
+    if denom <= 0.0 { 1.0 } else { (kf / denom).clamp(0.0, 1.0) }
+}
+
+/// One stamp, fully resolved out of the token stream — position and radius in
+/// the stored normalised frame, and the deposit and falloff in force when the
+/// `d` token was reached.
+///
+/// The state tokens are resolved HERE and not in the pixel loop: `a` folds the
+/// stroke density into `D(flow)` and `(half_m, n)` folds the hardness through
+/// [`brush_kernel_exponents`], so the rasteriser's per-texel work is one
+/// exponentiation and a multiply, and its per-(row, dab) work is a bounds test.
+#[derive(Clone, Copy)]
+struct BrushDab {
+    /// `d <x>` — fraction of the frame WIDTH.
+    x: f32,
+    /// `d <y>` — fraction of the frame HEIGHT.
+    y: f32,
+    /// The current `r`, in WIDTH units on BOTH axes (a dab is a circle in
+    /// pixels, so the y half-extent is `r·W/H` in normalised coordinates).
+    r: f32,
+    /// `BrushStroke::value · D(flow)` — the density-scaled deposit. Density
+    /// scales the DAB, pre-screen (R27 Batch-8: the rival `min(MaskValue, ·)`
+    /// cap reading is refuted at 13×).
+    a: f32,
+    /// `m(h)/2`, ready for the `ρ^m = (ρ²)^(m/2)` form.
+    half_m: f32,
+    /// `n(h)`.
+    n: f32,
+}
+
+/// Total dabs one brush group may stamp. Four times the ENTIRE reference
+/// library (15,964 dabs over 382 components) and ~100× its largest single
+/// stroke (645). It is not reachable from a sidecar — `xmp::parse_dabs` caps a
+/// stroke at 65,536 TOKENS and `recipe::clamp_strings` caps its stream at
+/// 256 KiB — so only a hand-written `recipe.json` can meet it, and what it buys
+/// is a hard ceiling on the rasteriser's work that does not depend on the
+/// resolution search below.
+const BRUSH_MAX_DABS: usize = 65_536;
+
+/// Long edge of a brush alpha raster, before the work budget. Batch-10 §7.4's
+/// own figure: at 2048 the 8-bit alpha quantum is 1/255 = 0.0039, which is
+/// below the 0.0085 measurement quantum the whole model was fitted against, and
+/// a dab's own transition width is ~5 raster px even at h = 1 (m = 18, so the
+/// 10–90 % edge spans Δρ ≈ 0.05).
+///
+/// A raster is never UPSCALED past the frame it serves, so a 1280 px preview
+/// gets a 1280 px raster and `sample_gray_norm`'s extent scaling then makes the
+/// lookup an exact texel hit with no interpolation at all. Only a full-res
+/// export downsamples (9504 → 2048, 4.6×), and what that costs is edge
+/// sharpness on a dab far smaller than the ones this model was measured on.
+const BRUSH_RASTER_MAX_EDGE: u32 = 2048;
+
+/// Floor for the same edge. Below this the raster stops describing the mask at
+/// all, so the work budget is allowed to be exceeded rather than the mask
+/// destroyed — and `BRUSH_MAX_DABS` is what bounds the overrun.
+const BRUSH_RASTER_MIN_EDGE: u32 = 32;
+
+/// Kernel evaluations one group may spend, which is what actually sets the
+/// raster's resolution for a heavy stroke.
+///
+/// The work is `Σ_dabs min(π·(r·W_r)², W_r·H_r)` — each dab pays for its own
+/// disc, clipped to the raster — and it scales as `s²` with the raster scale,
+/// so the largest `s` meeting this budget is a closed form, not a search.
+///
+/// **The budget SELF-BALANCES, which is why one constant is enough.** A dab's
+/// cost grows as `r²` while the resolution it NEEDS grows as `1/r`: coarsening
+/// only ever blurs the dabs that were cheap. A 645-dab stroke at r = 0.05 (the
+/// library's largest) costs 21 M evaluations and keeps the full 2048 raster; a
+/// 645-dab stroke at r = 0.58 would ask for 1.8 G, and the 236 px raster the
+/// budget hands it is ample for a mask whose every feature is 0.58 frame-widths
+/// across.
+///
+/// **Sized against a measurement, not a guess.** The reference library's
+/// largest real stroke — 645 dabs at r = 0.05 — rasterises for a 9504 × 6336
+/// frame in **445 ms in a DEBUG build** on this machine (2048 × 1365 raster,
+/// 2.13e7 evaluations, so ~21 ns each wall-clock across the row-parallel loop;
+/// a release build is several times quicker again, and it is not measured
+/// here). Straight-line proportionality puts a group that spends the whole
+/// budget at ~0.5 s debug, once per (group, frame size) and then memoised.
+///
+/// The `BRUSH_MAX_DABS` × `BRUSH_RASTER_MIN_EDGE` corner — the only way past
+/// this number, and reachable only from a hand-written `recipe.json` — bounds
+/// out at 44 M evaluations.
+const BRUSH_RASTER_MAX_WORK: f64 = 24_000_000.0;
+
+/// Process-wide cache budget for finished brush alphas, in bytes. Small on
+/// purpose: at the 2048 edge one raster is 2.8 MB for a 3:2 frame (4.2 MB for a
+/// square one), so this holds a handful and hard-resets rather than keeping LRU
+/// books — the same trade `load_mask_bitmap`'s cache makes, and the same
+/// reasoning, since a recipe holds a handful of masks.
+///
+/// **The memory accounting, stated rather than assumed.** Peak added by this
+/// whole feature is `cache + one build transient` = 16 MB + (4·1 + 1)·4.2 Mpx
+/// ≈ 37 MB, against the 256 MB `MASK_RASTER_BUDGET_BYTES` already reserves for
+/// a SINGLE bitmap-mask decode. It rides inside that envelope with room to
+/// spare and does not move `jobs::PER_PHOTO_PEAK_COMMIT_MB` (1800), which
+/// budgets the develop's own f32 planes and never counted mask rasters.
+const BRUSH_RASTER_CACHE_BYTES: usize = 16 * 1024 * 1024;
+
+/// The brush raster's size for a frame of `fw × fh`, given `cost` = the
+/// kernel evaluations stamping this group would take at FULL frame resolution
+/// (`Σ min(π·(r·fw)², fw·fh)`).
+///
+/// Three bounds, in this order, and the third wins:
+///
+/// 1. [`BRUSH_RASTER_MAX_EDGE`], never upscaling past the frame itself;
+/// 2. [`BRUSH_RASTER_MAX_WORK`] — work goes as `s²`, so the largest scale that
+///    fits the budget is `sqrt(budget / cost)`, a closed form and not a search;
+/// 3. [`BRUSH_RASTER_MIN_EDGE`], which OVERRIDES the budget: below it the
+///    raster stops describing the mask at all, and `BRUSH_MAX_DABS` is what
+///    bounds the overrun instead.
+///
+/// Split out of [`rasterise_brush_group`] so the policy can be asserted at a
+/// cost the assertion does not have to pay — exercising the work budget by
+/// actually rasterising costs, by construction, exactly the budget.
+fn brush_raster_dims(cost: f64, fw: u32, fh: u32) -> (u32, u32) {
+    let long = f64::from(fw.max(fh)).max(1.0);
+    let by_edge = (f64::from(BRUSH_RASTER_MAX_EDGE) / long).min(1.0);
+    let by_work = if cost > 0.0 { (BRUSH_RASTER_MAX_WORK / cost).sqrt() } else { 1.0 };
+    let floor = (f64::from(BRUSH_RASTER_MIN_EDGE) / long).min(1.0);
+    let scale = by_edge.min(by_work).max(floor);
+    (
+        (f64::from(fw) * scale).round().max(1.0) as u32,
+        (f64::from(fh) * scale).round().max(1.0) as u32,
+    )
+}
+
+/// `<num>` off a dab token, or `None` — finite only.
+fn brush_token_num(it: &mut std::str::SplitWhitespace<'_>) -> Option<f32> {
+    it.next().and_then(|t| t.parse::<f32>().ok()).filter(|v| v.is_finite())
+}
+
+/// The `crs:Dabs` state machine, run (`recipe::BrushStroke::dabs`). Four token
+/// forms and no others — `r <f>` / `f <f>` / `h <f>` set the current state,
+/// `d <x> <y>` stamps at it — with the stroke's own attributes as the INITIAL
+/// state (measured: 102 components carry no `r` token at all and every one of
+/// them has a non-zero `Radius` attribute).
+///
+/// **Nothing is interpolated.** Lightroom has already densified the polyline at
+/// 0.2000·r (15,582 steps, IQR [0.1998, 0.2001], zero pen-lifts), so a renderer
+/// stamps exactly the dabs it is given — which is also what makes the screen
+/// accumulation's `N_eff` come out flat across the flow ladder (B6 §5.1).
+///
+/// Malformed tokens are SKIPPED, not refused. The XMP boundary already rejects
+/// anything outside the grammar (`xmp::dab_token_is_known`, which is what makes
+/// the round trip lossless); this parser also has to survive a hand-edited
+/// `recipe.json`, where refusing the stroke would mean a silent whole-mask
+/// change and skipping one token means a missing stamp.
+fn brush_dabs(strokes: &[crate::recipe::BrushStroke], out: &mut Vec<BrushDab>) {
+    for s in strokes {
+        let value = s.value.clamp(0.0, 1.0);
+        let (mut r, mut f, mut h) = (s.radius, s.flow, s.center_weight);
+        for token in s.dabs.split('\n') {
+            if out.len() >= BRUSH_MAX_DABS {
+                return;
+            }
+            let mut it = token.split_whitespace();
+            match it.next() {
+                Some("r") => {
+                    if let Some(v) = brush_token_num(&mut it) {
+                        r = v;
+                    }
+                }
+                Some("f") => {
+                    if let Some(v) = brush_token_num(&mut it) {
+                        f = v;
+                    }
+                }
+                Some("h") => {
+                    if let Some(v) = brush_token_num(&mut it) {
+                        h = v;
+                    }
+                }
+                Some("d") => {
+                    let (Some(x), Some(y)) =
+                        (brush_token_num(&mut it), brush_token_num(&mut it))
+                    else {
+                        continue;
+                    };
+                    let a = value * brush_flow_deposit(f);
+                    // A zero radius or a zero deposit stamps nothing — and
+                    // Lightroom draws nothing there either, so this is the
+                    // model and not a shortcut. Dropping them here is what
+                    // lets `rasterise_brush_group` answer `None` for a group
+                    // that genuinely has no coverage.
+                    if r.is_finite() && r > 0.0 && a > 0.0 {
+                        let (m, n) = brush_kernel_exponents(h);
+                        out.push(BrushDab { x, y, r, a, half_m: m * 0.5, n });
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
+/// Stamp one brush group's dab stream into an 8-bit grey alpha for a frame of
+/// `fw × fh` pixels, or `None` when the group has no drawable dab.
+///
+/// **Pre-rasterised, not evaluated per pixel**, and the reason is arithmetic:
+/// `mask_weight` runs per pixel and is called by up to five passes per mask, so
+/// stamping N dabs inside it would be O(pixels × dabs × passes) — 5×10⁹ kernel
+/// evaluations for a 90-dab stroke at 61 MP, before the passes multiply it.
+/// Rasterising once costs `Σ` each dab's OWN disc and turns every later lookup
+/// into the bilinear read a `Bitmap` mask already pays (batch-10 §7.4).
+///
+/// The accumulation carries the PRODUCT `Π(1 − a·k)` in f32 and converts once at
+/// the end, so the screen law is applied in the form it was measured in and the
+/// dab order cannot matter (it does not: the product is commutative, which is
+/// itself part of why screen beat `max` by 3.4× and sum-clamp by 1.8×). That
+/// commutativity is also what makes the row-parallel loop below sound without a
+/// single lock — each row owns its slice, every dab is read-only, and no two
+/// threads can disagree about a texel because none of them share one.
+///
+/// Coordinates are the STORED ones and are not warped — see the `Brush` arm of
+/// `mask_weight` and `the_engine_evaluates_masks_before_the_geometry_stage`.
+fn rasterise_brush_group(
+    strokes: &[crate::recipe::BrushStroke],
+    fw: u32,
+    fh: u32,
+) -> Option<image::GrayImage> {
+    if fw == 0 || fh == 0 {
+        return None;
+    }
+    let mut dabs: Vec<BrushDab> = Vec::new();
+    brush_dabs(strokes, &mut dabs);
+    if dabs.is_empty() {
+        return None;
+    }
+    // The cost of stamping this group at FULL frame resolution: each dab pays
+    // for its own disc, clipped to the frame, which is what makes one absurd
+    // radius cost a frame and not a universe. Saturating by construction.
+    let frame_cells = f64::from(fw) * f64::from(fh);
+    let cost: f64 = dabs
+        .iter()
+        .map(|d| {
+            let disc = std::f64::consts::PI * (f64::from(d.r) * f64::from(fw)).powi(2);
+            if disc.is_finite() { disc.min(frame_cells) } else { frame_cells }
+        })
+        .sum();
+    let (rw, rh) = brush_raster_dims(cost, fw, fh);
+    let (rwf, rhf) = (rw as f32, rh as f32);
+    // A dab is a circle in PIXELS, so its y half-extent in normalised
+    // coordinates is `r·W/H`. Read off the FRAME, not off the raster: rounding
+    // rw and rh independently moves their ratio by up to a texel's worth.
+    let aspect = fw as f32 / fh as f32;
+
+    let (rwu, rhu) = (rw as usize, rh as usize);
+    let mut prod = vec![1.0f32; rwu * rhu];
+    // BY ROW, in parallel. Each row owns its slice and every dab is read-only,
+    // so the accumulation needs no synchronisation at all — and because the
+    // screen product is commutative, a row's result does not depend on which
+    // thread reached it or in what order the dabs are folded in. The scan is
+    // over ALL dabs per row (a bounds test each, ~10 flops), which is cheaper
+    // than building and holding a per-row index for a list this size.
+    prod.par_chunks_mut(rwu).enumerate().for_each(|(j, row)| {
+        let jf = j as f32;
+        for d in &dabs {
+            // Centre and half-extents in TEXEL index space. `sample_gray_norm`
+            // uses extent scaling (`nx·w`), so texel i sits at nx = i/rw
+            // exactly — stamp on that grid and a same-size raster reads back
+            // with no interpolation at all.
+            let (cx, cy) = (d.x * rwf, d.y * rhf);
+            let (ex, ey) = (d.r * rwf, d.r * aspect * rhf);
+            // A degenerate or overflowed extent has no disc to stamp. NaN is
+            // caught by `is_finite`, so the comparisons only ever see a number.
+            if !(ex.is_finite() && ey.is_finite()) || ex <= 0.0 || ey <= 0.0 {
+                continue;
+            }
+            let dy = (jf - cy) / ey;
+            let dy2 = dy * dy;
+            if dy2 >= 1.0 {
+                continue; // this row misses the dab entirely
+            }
+            // Clamped in f64 BEFORE the cast: an absurd hand-edited radius
+            // makes these ±inf, and the range is clearer closed than saturated.
+            let clamp_i = |v: f32| f64::from(v).clamp(0.0, f64::from(rw - 1)) as u32;
+            let half = ex * (1.0 - dy2).sqrt(); // the chord, not the bbox
+            let (i0, i1) = (clamp_i((cx - half).ceil()), clamp_i((cx + half).floor()));
+            let sx = 1.0 / ex;
+            for i in i0..=i1 {
+                let dx = (i as f32 - cx) * sx;
+                let rho2 = dx * dx + dy2;
+                if rho2 >= 1.0 {
+                    continue; // support ends EXACTLY at ρ = 1 (B6 §4.1)
+                }
+                let k = brush_kernel_at(rho2, d.half_m, d.n);
+                row[i as usize] *= 1.0 - d.a * k;
+            }
+        }
+    });
+    let buf: Vec<u8> = prod
+        .iter()
+        .map(|p| ((1.0 - p).clamp(0.0, 1.0) * 255.0).round() as u8)
+        .collect();
+    image::GrayImage::from_raw(rw, rh, buf)
+}
+
+/// The brush alpha for one geometry at one frame size, through a process-wide
+/// cache — the brush twin of [`load_mask_bitmap`], and cached for the same
+/// reason: the GUI re-develops the preview on every slider tick, and stamping a
+/// 645-dab stroke per tick would dominate the develop exactly as decoding the
+/// segmentation PNG per tick used to.
+///
+/// `None` for a non-brush geometry (the caller asks about every geometry and
+/// lets this one answer), and for a brush group with no drawable dab — which
+/// renders inert, which is what Lightroom renders for the same group.
+///
+/// **The key is `(content hash, stroke count, stream bytes, fw, fh)`.** The
+/// frame size belongs in it because a dab is a circle in pixels, so the same
+/// stream is a different raster at a different aspect — and because the preview
+/// and the export legitimately want different resolutions. The identity is a
+/// 64-bit hash reinforced by two structural counts rather than a byte compare:
+/// the alternative is holding a second copy of every dab stream (256 KiB per
+/// stroke) for the life of the process. That is a weaker identity than a
+/// content compare and it is stated as such; `load_mask_bitmap` accepts the
+/// same shape of trade with (mtime, size).
+fn brush_raster(g: &MaskGeometry, fw: u32, fh: u32) -> Option<std::sync::Arc<image::GrayImage>> {
+    use std::hash::{Hash, Hasher};
+    use std::sync::{Arc, Mutex, OnceLock};
+    let MaskGeometry::Brush { strokes, .. } = g else {
+        return None;
+    };
+    if strokes.is_empty() {
+        return None;
+    }
+    type Key = (u64, usize, usize, u32, u32);
+    type Cache = Mutex<std::collections::HashMap<Key, Option<Arc<image::GrayImage>>>>;
+    static CACHE: OnceLock<Cache> = OnceLock::new();
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    let mut bytes = 0usize;
+    for s in strokes {
+        // `to_bits`, not the float: f32 is not `Hash`, and the bit pattern is
+        // the right identity here anyway — two streams that differ only in the
+        // sign of a zero are two different streams to the sidecar writer.
+        s.value.to_bits().hash(&mut hasher);
+        s.radius.to_bits().hash(&mut hasher);
+        s.flow.to_bits().hash(&mut hasher);
+        s.center_weight.to_bits().hash(&mut hasher);
+        s.dabs.hash(&mut hasher);
+        bytes += s.dabs.len();
+    }
+    let key: Key = (hasher.finish(), strokes.len(), bytes, fw, fh);
+    let cache = CACHE.get_or_init(Default::default);
+    {
+        // No user code runs under the lock, so poisoning is not reachable —
+        // recover anyway rather than turning a past panic into a new one.
+        let map = cache.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(hit) = map.get(&key) {
+            return hit.clone();
+        }
+    }
+    let built = rasterise_brush_group(strokes, fw, fh).map(Arc::new);
+    {
+        let mut map = cache.lock().unwrap_or_else(|p| p.into_inner());
+        let held: usize =
+            map.values().filter_map(|i| i.as_ref()).map(|i| i.as_raw().len()).sum();
+        let incoming = built.as_ref().map_or(0, |i| i.as_raw().len());
+        // A rare hard reset beats LRU bookkeeping for a handful of entries —
+        // `load_mask_bitmap`'s cache makes the same call, in bytes as well as
+        // entries, and for the same reason.
+        if held.saturating_add(incoming) > BRUSH_RASTER_CACHE_BYTES {
+            map.clear();
+        }
+        map.insert(key, built.clone());
+    }
+    built
+}
+
 /// Coverage map of ONE local adjustment for on-screen display: geometry ×
 /// inversion × amount × range, evaluated with the SAME primitives
 /// `apply_masks` uses (`mask_weight` / `range_weight`), so the overlay the
@@ -3699,9 +4263,18 @@ pub fn mask_coverage(
     // not a console line the windowed surface cannot show anyway. Under 5c
     // this was a `None` that suppressed only the STEM.
     let probe = crate::diag::dropped();
-    let bmp = load_mask_bitmap(&m.mask, &probe);
-    let comp_bmps: Vec<Option<std::sync::Arc<image::GrayImage>>> =
-        m.components.iter().map(|c| load_mask_bitmap(&c.geometry, &probe)).collect();
+    // `or_else`, not a second branch: a brush group has no file for
+    // `load_mask_bitmap` to find and a bitmap has no dab stream to stamp, so
+    // exactly one of the two answers for any geometry. Same frame size the
+    // caller will paint this overlay over, so the wash is the weight the
+    // render applies — which is what
+    // `the_gui_coverage_overlay_matches_what_the_render_applies` asserts.
+    let bmp = load_mask_bitmap(&m.mask, &probe).or_else(|| brush_raster(&m.mask, w, h));
+    let comp_bmps: Vec<Option<std::sync::Arc<image::GrayImage>>> = m
+        .components
+        .iter()
+        .map(|c| load_mask_bitmap(&c.geometry, &probe).or_else(|| brush_raster(&c.geometry, w, h)))
+        .collect();
     // Same load-failure contract as `apply_masks` (inert, inversion included,
     // components included), so the overlay never advertises coverage the
     // render will not apply.
@@ -5363,10 +5936,27 @@ pub fn orient_recipe_coords(r: &mut EditRecipe, o: Orientation) -> bool {
         // A brush group DOES carry coordinates — thousands of them, inside
         // `crs:Dabs` — and they are deliberately NOT turned. The stream is
         // carried VERBATIM so a republished sidecar is byte-faithful to what
-        // Lightroom wrote; rewriting every dab would forfeit exactly that, to
-        // migrate a geometry nothing renders yet. So the brush shares the
-        // raster's honest status here: `recipe_has_raster_masks` counts it, and
-        // the migration's disclosure says the mask could not be turned.
+        // Lightroom wrote. So the brush shares the raster's honest status here:
+        // `recipe_has_raster_masks` counts it, and the migration's disclosure
+        // says the mask could not be turned.
+        //
+        // ⚠ R29 Batch-6b REGISTRATION, stated because the cost of this line
+        // just went up and nothing else says so. Until that batch the brush
+        // rendered NOTHING, so an un-turned dab stream was invisible; now that
+        // it renders, a rotate leaves the strokes at their old coordinates
+        // while every parametric shape beside them moves. The disclosure still
+        // fires (`recipe_has_raster_masks`), and it is still true, but it now
+        // stands in for a mask drawn in the wrong PLACE rather than one not
+        // drawn at all.
+        //
+        // Not fixed here, and the reason is a missing input, not a missing
+        // will: `crs:Radius` is in WIDTH units and a dab is a circle in PIXELS,
+        // so a quarter turn has to rescale every radius by W/H — and this
+        // function is handed an `Orientation` and nothing else. `orient_point`
+        // is aspect-free by construction; a correct dab migration is not. That
+        // makes it a change with its own decision (turn the stream and lose the
+        // verbatim round trip, or carry the frame's aspect in here), which is
+        // adjudicated separately rather than smuggled into the wiring batch.
         MaskGeometry::Brush { .. } => {}
         // An AI mask DOES carry a coordinate — the reference point is the one
         // spatial fact the sidecar holds — so it turns like any other. Its
@@ -5420,7 +6010,9 @@ pub fn recipe_has_frame_coords(r: &EditRecipe) -> bool {
             // Brush joins Bitmap on the NOT-turnable side: `orient_recipe_
             // coords` leaves its dab stream alone on purpose, so counting it
             // here would claim the migration moved something it did not.
-            // `recipe_has_raster_masks` is what speaks for both of them.
+            // `recipe_has_raster_masks` is what speaks for both of them — and
+            // since R29 Batch-6b it speaks about a mask that is drawn, so the
+            // split matters more than it used to (that arm's registration).
             let parametric = |g: &MaskGeometry| {
                 !matches!(g, MaskGeometry::Bitmap { .. } | MaskGeometry::Brush { .. })
             };
@@ -5437,11 +6029,15 @@ pub fn recipe_has_frame_coords(r: &EditRecipe) -> bool {
 /// TWO members, not one: a raster [`MaskGeometry::Bitmap`] (the pixels are a
 /// FILE, and rewriting someone's PNG is not a coordinate migration) and a
 /// [`MaskGeometry::Brush`] group (its dabs are carried VERBATIM so the sidecar
-/// round-trips byte-faithfully — turning them would forfeit that for a
-/// geometry nothing renders yet). The function keeps its raster NAME because
+/// round-trips byte-faithfully, and a quarter turn would also have to rescale
+/// every `crs:Radius` by the frame aspect, which this migration is never told
+/// — see the `Brush` arm of [`orient_recipe_coords`]). The function keeps its
+/// raster NAME because
 /// that is what every call site and every disclosure string says; what it
 /// MEANS is "cannot be turned", and both members qualify for the same reason
-/// stated two different ways.
+/// stated two different ways. Since R29 Batch-6b the brush half of that
+/// disclosure is load-bearing rather than academic: the mask it names is now
+/// DRAWN, so failing to turn it is visible.
 pub fn recipe_has_raster_masks(r: &EditRecipe) -> bool {
     let unturnable =
         |g: &MaskGeometry| matches!(g, MaskGeometry::Bitmap { .. } | MaskGeometry::Brush { .. });
@@ -9244,17 +9840,31 @@ mod tests {
         let u = MaskUnwarp::new(&barrel_profile(), 0.0, (480.0, 320.0)).expect("active");
         let moved = u.at(0.2, 0.5);
         assert!((moved.0 - 0.2).abs() > 1e-4, "premise: the map really moves this point");
-        let brush = MaskGeometry::Brush {
-            name: "Brush 1".into(),
-            blend_mode: 0,
-            value: 1.0,
-            inverted: false,
-            strokes: Vec::new(),
-        };
+        // A brush that actually PAINTS at the sample point (R29 Batch-6b). With
+        // the empty stroke list this test used to carry, both sides of the
+        // equality were the inert 0 and it held for the wrong reason. The
+        // sample sits on the RIM of a hard dab (h = 1, so the falloff is a
+        // near-step) — the one place a fraction of a per-cent of frame width
+        // changes the weight by more than the 8-bit raster quantum.
+        let brush = probe_brush(&[(1.0, 0.05, 1.0, 1.0, "d 0.2 0.5")]);
+        let braster = brush_raster(&brush, 480, 320).expect("one dab");
+        let rim = (0.2 + 0.05 * 0.94, 0.5);
+        let rim_moved = u.at(rim.0, rim.1);
+        assert!(
+            mask_weight(&brush, rim.0, rim.1, Some(&braster)) > 0.2,
+            "premise: the brush really paints at the rim sample"
+        );
         assert_eq!(
-            mask_weight_in(&brush, 0.2, 0.5, None, Some(&u)),
-            mask_weight(&brush, 0.2, 0.5, None),
+            mask_weight_in(&brush, rim.0, rim.1, Some(&braster), Some(&u)),
+            mask_weight(&brush, rim.0, rim.1, Some(&braster)),
             "a brush must not be frame-adapted"
+        );
+        assert!(
+            (mask_weight_in(&brush, rim.0, rim.1, Some(&braster), Some(&u))
+                - mask_weight(&brush, rim_moved.0, rim_moved.1, Some(&braster)))
+            .abs()
+                > 1e-3,
+            "…and the adapted point is a DIFFERENT weight, so the equality is not vacuous"
         );
         let rad = probe_radial(0.24, 0.5, 0.1).mask;
         assert_eq!(
@@ -10450,60 +11060,83 @@ mod tests {
         assert_eq!(r, before, "the raster path must survive byte-for-byte");
     }
 
-    /// R27 Batch-4 (L-08): a carried brush group draws NOTHING, anywhere.
-    ///
-    /// This is the assertion that turns "we have not measured the alpha
-    /// kernel yet" from a comment into a behaviour. Weight 0 is inert under
-    /// BOTH compositions — `Add` folds a component in as `1−(1−w)(1−0) = w`
-    /// and `Subtract` as `w·(1−0) = w` — so a correction that also holds a
-    /// real gradient renders exactly that gradient, and a brush-only
-    /// correction renders nothing rather than something invented.
-    ///
-    /// MUTATION-LINED: returning any non-zero constant from `mask_weight`'s
-    /// `Brush` arm fails here; so does answering `1.0`, which is the shape a
-    /// "just treat it as fully painted" shortcut would take.
-    #[test]
-    fn a_carried_brush_group_draws_nothing_anywhere() {
-        use crate::recipe::BrushStroke;
-        let g = MaskGeometry::Brush {
+    /// One brush group with `n` strokes built from `(value, radius, flow,
+    /// hardness, dabs)` — the fixture every brush test below stands on.
+    fn probe_brush(strokes: &[(f32, f32, f32, f32, &str)]) -> MaskGeometry {
+        MaskGeometry::Brush {
             name: "Brush 1".into(),
             blend_mode: 0,
+            // The AGGREGATE's MaskValue: the subtract pair's other half, never
+            // a strength — `mask_weight`'s `Brush` arm spells out why.
             value: 1.0,
             inverted: false,
-            strokes: vec![BrushStroke {
-                value: 0.439815,
-                radius: 0.582157,
-                flow: 1.0,
-                center_weight: 0.0,
-                sync_id: "FA7459A9F5626F4881D7B730C3093F95".into(),
-                // `_DSC9583` Mask 7 -> Brush 1, stroke 1: dabs at
-                // (0.000684, 0.940004) and (0.113862, 0.987261), radius 0.5818.
-                dabs: "r 0.581835
-d 0.000684 0.940004
-r 0.581172
-d 0.113862 0.987261"
-                    .into(),
-            }],
-        };
-        // Sampled ON the dabs, at their rim, at the frame centre and at the
-        // corners: every one of them is a point a renderer WOULD paint.
-        for (nx, ny) in [
-            (0.0f32, 0.0f32),
-            (0.5, 0.5),
-            (0.000684, 0.940004),
-            (0.113862, 0.987261),
-            (0.4, 0.9),
-            (1.0, 1.0),
-        ] {
-            assert_eq!(
-                mask_weight(&g, nx, ny, None),
-                0.0,
-                "a carried brush must not draw at ({nx}, {ny})"
-            );
+            strokes: strokes
+                .iter()
+                .map(|&(value, radius, flow, center_weight, dabs)| crate::recipe::BrushStroke {
+                    value,
+                    radius,
+                    flow,
+                    center_weight,
+                    sync_id: "FA7459A9F5626F4881D7B730C3093F95".into(),
+                    dabs: dabs.into(),
+                })
+                .collect(),
         }
-        // And the migration treats it like a raster: carried verbatim for the
-        // sidecar round trip, so it is REPORTED as unturnable rather than
-        // quietly rewritten dab by dab.
+    }
+
+    /// R27 Batch-4 (L-08) → **R29 Batch-6b: a carried brush group draws its
+    /// DABS.** Rewritten, not deleted: this test was mutation-lined against
+    /// exactly this change, and what it pins now is the other side of it.
+    ///
+    /// Until R29 Batch-6b `mask_weight`'s `Brush` arm was the literal `=> 0.0`
+    /// and this test asserted that zero at six points. The zero was honest
+    /// while the alpha kernel was unmeasured; R29 Batch-6 measured it (29
+    /// controlled Lightroom exports), so the zero became the invention it had
+    /// been guarding against.
+    ///
+    /// MUTATION-LINED, in both directions:
+    ///  * restoring `=> 0.0` fails the「paints」asserts;
+    ///  * answering `1.0` (the "just treat it as fully painted" shortcut) fails
+    ///    the far-corner asserts;
+    ///  * dropping `brush_raster` from `apply_masks`/`mask_coverage` leaves the
+    ///    `bmp` slot `None`, which fails the same「paints」asserts.
+    #[test]
+    fn a_carried_brush_group_draws_its_dabs() {
+        // `_DSC9583` Mask 7 -> Brush 1, stroke 1: two dabs near the bottom-left
+        // corner, radius 0.5818 in WIDTH units, density 0.4398.
+        let g = probe_brush(&[(
+            0.439815,
+            0.582157,
+            1.0,
+            0.0,
+            "r 0.581835\nd 0.100684 0.840004\nr 0.581172\nd 0.213862 0.887261",
+        )]);
+        let (fw, fh) = (480u32, 320u32);
+        let raster = brush_raster(&g, fw, fh).expect("a group with two dabs rasterises");
+        // ON the dabs it paints; three frame-widths away it does not. Both
+        // halves matter: the first was `0.0` before this batch, and the second
+        // is what a blanket `1.0` would break.
+        for (nx, ny) in [(0.100684f32, 0.840004f32), (0.213862, 0.887261)] {
+            let w = mask_weight(&g, nx, ny, Some(&raster));
+            assert!(w > 0.3, "a brush must paint on its own dab at ({nx}, {ny}): {w}");
+        }
+        for (nx, ny) in [(0.0f32, 0.0f32), (0.99, 0.02)] {
+            let w = mask_weight(&g, nx, ny, Some(&raster));
+            assert!(w < 0.02, "and nothing at ({nx}, {ny}), ρ > 1 from every dab: {w}");
+        }
+        // The raster is a RENDER-time artefact, so `mask_weight` still means
+        // "the weight of this geometry at this STORED point" and answers the
+        // inert 0 when no alpha was built — which is also the contract every
+        // other test in this file asserts `mask_weight` against.
+        assert_eq!(
+            mask_weight(&g, 0.100684, 0.840004, None),
+            0.0,
+            "no alpha in hand = inert, never a guess"
+        );
+        // And the migration STILL treats it like a raster: the dab stream is
+        // carried verbatim for the sidecar round trip rather than rewritten
+        // dab by dab. That is now a registered cost rather than a free choice
+        // — see the `Brush` arm of `orient_recipe_coords`.
         use crate::recipe::LocalAdjustment;
         let mut r = EditRecipe {
             masks: vec![LocalAdjustment { mask: g, ..Default::default() }],
@@ -10514,6 +11147,380 @@ d 0.113862 0.987261"
         let before = r.clone();
         orient_recipe_coords(&mut r, Orientation::Rotate270);
         assert_eq!(r, before, "the dab stream must survive byte-for-byte");
+    }
+
+    /// The WIRING, end to end: `apply_develop` really hands the brush arm a
+    /// raster, and `mask_coverage` really advertises the same one.
+    ///
+    /// Every other brush test in this file builds the alpha itself and passes
+    /// it to `mask_weight`, which pins the MODEL and would stay green if the
+    /// two production call sites forgot to ask for it. This is the test that
+    /// fails when they do — and「forgot to ask」is exactly the shape the arm's
+    /// old `=> 0.0` had.
+    ///
+    /// MUTATION-LINED: dropping either `brush_raster` call — the one in
+    /// `apply_masks` or the one in `mask_coverage` — turns one of the two
+    /// halves below into the frame it started from.
+    #[test]
+    fn the_develop_hands_the_brush_arm_its_raster() {
+        use crate::recipe::LocalAdjustment;
+        let (w, h) = (240usize, 160usize);
+        // Hard dab (h = 1) at the frame centre, radius 0.2 of the width, at
+        // −3 EV: the centre must go dark and the corner must not move at all.
+        let mask = LocalAdjustment {
+            mask: probe_brush(&[(1.0, 0.2, 1.0, 1.0, "d 0.5 0.5")]),
+            exposure_ev: -3.0,
+            ..Default::default()
+        };
+        let r = EditRecipe { masks: vec![mask.clone()], ..Default::default() };
+        let mut data = vec![[0.5f32; 3]; w * h];
+        apply_develop_anon(&mut data, w, h, &r);
+        let at = |x: usize, y: usize| data[y * w + x][1];
+        assert!(at(w / 2, h / 2) < 0.2, "the dab centre must darken: {}", at(w / 2, h / 2));
+        assert!(
+            (at(2, 2) - 0.5).abs() < 1e-6,
+            "and the far corner must not move: {}",
+            at(2, 2)
+        );
+        // The GUI's red wash reads the SAME alpha through a different call
+        // site, so it gets its own half of the assertion (the overlay agreeing
+        // with the render is `the_gui_coverage_overlay_matches_what_the_render_applies`).
+        let base = DynamicImage::ImageRgb8(RgbImage::from_pixel(
+            w as u32,
+            h as u32,
+            image::Rgb([128, 128, 128]),
+        ));
+        let cov = mask_coverage(&mask, &base, MaskFrame::AsRendered);
+        assert!(
+            cov.get_pixel(w as u32 / 2, h as u32 / 2)[0] > 200,
+            "the overlay must show the coverage the render applied"
+        );
+        assert_eq!(cov.get_pixel(2, 2)[0], 0, "and none where the render applied none");
+    }
+
+    /// The kernel closed form against the MEASURED nine-rung table.
+    ///
+    /// Provenance for every number below: R29 Batch-6 §4.1 (the table, nine
+    /// hardness rungs × thirteen ρ rows, each rung normalised by its own
+    /// ρ < 0.05 core, zero point +0.00199) and §4.4 (the two cubics and the
+    /// `(m, n)` they reproduce) —
+    /// `~/.claude/plans/r29-materials/b6-analysis.md`.
+    ///
+    /// **The tolerances are the report's own numbers, not a bar tuned to pass.**
+    /// The deg-3 law scores pooled rms 0.0102 against this table (B6 §4.4's
+    /// "pooled 0.01020"), and its single largest cell deviation over the 99
+    /// cells with ρ < 1 is 0.0297 — at (ρ = 0.792, h = 0.125), which is the
+    /// worst rung in the report's own per-rung residual list. So the pooled bar
+    /// is 0.012 and the per-cell bar 0.035; anything that moves either
+    /// coefficient moves the pooled figure well past its bar.
+    ///
+    /// MUTATION-LINED: flipping the sign of any cubic coefficient, or swapping
+    /// `m` and `n`, blows the pooled rms by more than an order of magnitude.
+    #[test]
+    fn brush_kernel_reproduces_the_measured_nine_rungs() {
+        const HS: [f32; 9] = [0.0, 0.125, 0.25, 0.375, 0.5, 0.625, 0.75, 0.875, 1.0];
+        // B6 §4.1, verbatim. The last two rows of the printed table (ρ = 1.002
+        // and 1.042) are the ZERO check and are asserted separately below.
+        const TABLE: [(f32, [f32; 9]); 11] = [
+            (0.092, [0.9350, 0.9643, 0.9814, 0.9908, 0.9959, 0.9975, 0.9972, 0.9977, 0.9973]),
+            (0.193, [0.7326, 0.8494, 0.9235, 0.9657, 0.9869, 0.9948, 0.9975, 0.9981, 0.9979]),
+            (0.292, [0.4790, 0.6831, 0.8321, 0.9232, 0.9710, 0.9904, 0.9980, 0.9991, 0.9989]),
+            (0.393, [0.2646, 0.5000, 0.7138, 0.8630, 0.9467, 0.9840, 0.9964, 0.9992, 0.9995]),
+            (0.492, [0.1302, 0.3359, 0.5775, 0.7794, 0.9073, 0.9697, 0.9935, 0.9989, 0.9999]),
+            (0.593, [0.0645, 0.2084, 0.4298, 0.6609, 0.8353, 0.9360, 0.9806, 0.9948, 0.9975]),
+            (0.693, [0.0339, 0.1244, 0.2875, 0.5030, 0.7102, 0.8603, 0.9461, 0.9842, 0.9966]),
+            (0.792, [0.0151, 0.0685, 0.1671, 0.3153, 0.4978, 0.6772, 0.8207, 0.9159, 0.9679]),
+            (0.893, [0.0023, 0.0232, 0.0672, 0.1366, 0.2316, 0.3494, 0.4832, 0.6214, 0.7505]),
+            (0.943, [0.0002, 0.0063, 0.0230, 0.0522, 0.0956, 0.1530, 0.2249, 0.3109, 0.4094]),
+            (0.972, [-0.0007, 0.0007, 0.0046, 0.0126, 0.0246, 0.0424, 0.0656, 0.0954, 0.1318]),
+        ];
+        let (mut sq, mut cells, mut worst) = (0.0f64, 0usize, 0.0f32);
+        for (rho, row) in TABLE {
+            for (h, want) in HS.into_iter().zip(row) {
+                let got = brush_kernel(rho, h);
+                let d = got - want;
+                sq += f64::from(d) * f64::from(d);
+                cells += 1;
+                worst = worst.max(d.abs());
+                assert!(
+                    d.abs() <= 0.035,
+                    "k({rho}, {h}) = {got}, measured {want} (B6 §4.1); the law's own worst \
+                     cell on this table is 0.0297"
+                );
+            }
+        }
+        let rms = (sq / cells as f64).sqrt();
+        assert_eq!(cells, 99, "the whole ρ < 1 table, not a corner of it");
+        assert!(rms <= 0.012, "pooled rms {rms} against B6 §4.4's own 0.01020");
+        assert!(worst <= 0.035, "worst cell {worst}");
+
+        // The two structural facts, which are measurements and not conventions:
+        // the core is exactly 1 and the support ends exactly at ρ = 1 (B6 §4.1
+        // reads |α| ≤ 5e-4 at every ρ ≥ 1.002 on every rung).
+        for h in HS {
+            assert_eq!(brush_kernel(0.0, h), 1.0, "k(0) = 1 at h = {h}");
+            for rho in [1.0f32, 1.002, 1.042, 4.0] {
+                assert_eq!(brush_kernel(rho, h), 0.0, "k({rho}) = 0 at h = {h}");
+            }
+        }
+        // Monotone in h at EVERY ρ: B6 counted 0 inversions against batch-10's
+        // 3 failures of 80, and it is the property that makes「harder = more
+        // covered」true rather than approximately true.
+        for (rho, _) in TABLE {
+            let ks: Vec<f32> = HS.into_iter().map(|h| brush_kernel(rho, h)).collect();
+            for w in ks.windows(2) {
+                assert!(w[1] >= w[0] - 1e-6, "k is not monotone in h at ρ = {rho}: {ks:?}");
+            }
+        }
+        // And the exponents themselves, against B6 §4.4's "Reproduced values"
+        // (3 dp, so the bar is one unit in the last place plus rounding).
+        const MN: [(f32, f32); 9] = [
+            (1.832, 6.431),
+            (1.664, 2.864),
+            (1.907, 1.778),
+            (2.593, 1.434),
+            (3.932, 1.402),
+            (6.249, 1.549),
+            (9.790, 1.803),
+            (14.210, 2.061),
+            (17.964, 2.157),
+        ];
+        for (h, (m_w, n_w)) in HS.into_iter().zip(MN) {
+            let (m, n) = brush_kernel_exponents(h);
+            assert!((m - m_w).abs() <= 0.001, "m({h}) = {m}, B6 §4.4 prints {m_w}");
+            assert!((n - n_w).abs() <= 0.001, "n({h}) = {n}, B6 §4.4 prints {n_w}");
+        }
+        // `h` outside Lightroom's own 0..1 is CLAMPED, not extrapolated: the
+        // cubics are fits over exactly that interval and at h = 2 they return
+        // m = 5e-4, which would paint the frame.
+        assert_eq!(brush_kernel_exponents(-3.0), brush_kernel_exponents(0.0));
+        assert_eq!(brush_kernel_exponents(9.0), brush_kernel_exponents(1.0));
+        // NaN clamps to NEITHER end (`f32::clamp` propagates it), and a NaN
+        // exponent turns the whole raster into black without a word.
+        assert_eq!(brush_kernel_exponents(f32::NAN), brush_kernel_exponents(0.0));
+    }
+
+    /// The flow law against the MEASURED deposit — R29 Batch-6 §5.3.
+    ///
+    /// `D(f) = κf/(1−f+κf)`, κ = 0.1284 (§5.4, four cells, 0.12836 ± 0.00288).
+    /// The four `mean` column values below are the deposits fitted per frame
+    /// under screen accumulation over the 5 × 2 × 2 drag grid; the law's
+    /// residual against them is +0.00099 / +0.00168 / +0.00193 / −0.00137, so
+    /// the bar is 0.0025.
+    ///
+    /// MUTATION-LINED: the linear rival `D = 0.31252·f` — the best straight
+    /// line through these very points — misses them by rms 0.0382, which is the
+    /// 25× the last assert insists on (B6 quotes 12.7× over all sixteen cells).
+    #[test]
+    fn brush_flow_law_matches_the_measured_deposit() {
+        const LADDER: [(f32, f32); 4] =
+            [(0.10, 0.01307), (0.25, 0.03935), (0.50, 0.11182), (0.75, 0.27937)];
+        let (mut odds_sq, mut lin_sq) = (0.0f64, 0.0f64);
+        for (f, measured) in LADDER {
+            let d = brush_flow_deposit(f);
+            assert!(
+                (d - measured).abs() <= 0.0025,
+                "D({f}) = {d}, measured {measured} (B6 §5.3, max residual 0.00193)"
+            );
+            odds_sq += f64::from(d - measured).powi(2);
+            lin_sq += f64::from(0.31252 * f - measured).powi(2);
+        }
+        // `D(1) = 1` EXACTLY and with no free parameter — κ/(1−1+κ) — which is
+        // also exact in f32, so a flow-1 dab deposits its full density with no
+        // epsilon (B6 §5.2 pins it at ≤ 0.0037 cost against a free fit).
+        assert_eq!(brush_flow_deposit(1.0), 1.0, "D(1) must be exactly 1");
+        assert_eq!(brush_flow_deposit(0.0), 0.0, "a flow-0 dab deposits nothing");
+        // Off-domain flows clamp rather than run the odds law negative.
+        assert_eq!(brush_flow_deposit(-1.0), 0.0);
+        assert_eq!(brush_flow_deposit(7.0), 1.0);
+        let (odds, lin) = ((odds_sq / 4.0).sqrt(), (lin_sq / 4.0).sqrt());
+        assert!(
+            lin > odds * 10.0,
+            "the linear rival must lose decisively: odds {odds}, linear {lin}"
+        );
+    }
+
+    /// Dabs accumulate by SCREEN — not by sum, not by max.
+    ///
+    /// R29 Batch-6 §5.2 re-adjudicated this out-of-sample on 20 fresh drags:
+    /// mean field rms 0.01583 for screen against 0.02880 for sum-clamp (1.8×)
+    /// and 0.05343 for max (3.4×). Two overlapping dabs is the smallest fixture
+    /// that separates the three, and it separates them by far more than the
+    /// 8-bit raster quantum.
+    ///
+    /// The flow is 0.75 on purpose: at low flow all three laws agree to within
+    /// a couple of quantisation steps, which is exactly how a sum-clamp
+    /// implementation could pass a weaker test.
+    #[test]
+    fn brush_dabs_accumulate_by_screen_not_sum_or_max() {
+        let (fw, fh) = (480u32, 320u32);
+        // Two dabs 0.2 apart, radius 0.25, so the frame centre sits at ρ = 0.4
+        // from BOTH — an exact texel in x (240) and in y (160), so no bilinear
+        // blend stands between the assertion and the accumulation.
+        let g = probe_brush(&[(1.0, 0.25, 0.75, 0.5, "d 0.4 0.5\nd 0.6 0.5")]);
+        let raster = brush_raster(&g, fw, fh).expect("two dabs");
+        let got = mask_weight(&g, 0.5, 0.5, Some(&raster));
+        let a = brush_flow_deposit(0.75) * brush_kernel(0.4, 0.5);
+        let screen = 1.0 - (1.0 - a) * (1.0 - a);
+        let sum = (a + a).min(1.0);
+        let max = a;
+        assert!(
+            (got - screen).abs() <= 0.006,
+            "α = {got}, screen says {screen} (8-bit raster, so the bar is ~1.5 quanta)"
+        );
+        assert!((got - sum).abs() >= 0.05, "sum-clamp would say {sum}");
+        assert!((got - max).abs() >= 0.15, "max would say {max}");
+        // Screen is also what makes a single dab reach exactly its deposit —
+        // the premise the two-dab comparison stands on.
+        let one = probe_brush(&[(1.0, 0.25, 0.75, 0.5, "d 0.5 0.5")]);
+        let r1 = brush_raster(&one, fw, fh).expect("one dab");
+        let solo = mask_weight(&one, 0.4, 0.5, Some(&r1));
+        assert!((solo - a).abs() <= 0.006, "one dab deposits {a}, got {solo}");
+    }
+
+    /// The RASTER is the closed form, texel for texel — the join between the
+    /// measured model and the pixels.
+    ///
+    /// `sample_gray_norm` uses EXTENT scaling, so `nx = i / rw` lands exactly on
+    /// texel `i` with no interpolation; the frame here is small enough that the
+    /// raster is built 1:1, so every sample below is a stamped value read back
+    /// and the only error left is the 8-bit quantum (1/255 = 0.0039).
+    ///
+    /// MUTATION-LINED: dropping the `value` (density) factor, or scaling by the
+    /// GROUP's `MaskValue` instead of the stroke's, moves every sample by 30 %.
+    #[test]
+    fn brush_raster_stamps_the_closed_form() {
+        let (fw, fh) = (480u32, 320u32);
+        // Density 0.7, flow 1 (so D = 1 exactly), one dab at the frame centre:
+        // α(ρ) must be 0.7·k(ρ; h) with nothing else in the way.
+        let g = probe_brush(&[(0.7, 0.25, 1.0, 0.5, "d 0.5 0.5")]);
+        let raster = brush_raster(&g, fw, fh).expect("one dab");
+        assert_eq!(raster.dimensions(), (fw, fh), "small frame = 1:1 raster");
+        // Texel 240 is the centre and the dab's half-extent is 120 texels, so
+        // texel 240+d sits at ρ = d/120 exactly.
+        for d in [0i32, 12, 30, 60, 90, 114, 119] {
+            let i = 240 + d;
+            let got = mask_weight(&g, i as f32 / fw as f32, 0.5, Some(&raster));
+            let want = 0.7 * brush_kernel(d as f32 / 120.0, 0.5);
+            assert!(
+                (got - want).abs() <= 0.005,
+                "texel {i} (ρ = {}) reads {got}, the closed form says {want}",
+                d as f32 / 120.0
+            );
+        }
+        // …and stops. ρ = 1 is the outer support, so the texel one past the
+        // half-extent is blank, not faint.
+        assert_eq!(
+            mask_weight(&g, 361.0 / fw as f32, 0.5, Some(&raster)),
+            0.0,
+            "support ends EXACTLY at ρ = 1 (B6 §4.1)"
+        );
+        // A dab is a circle in PIXELS, not in normalised coordinates: at this
+        // 3:2 frame the mask must reach 0.25 of the WIDTH on both axes, i.e.
+        // 0.25·(480/320) = 0.375 of the HEIGHT.
+        let vertical = mask_weight(&g, 0.5, (160.0 + 0.9 * 120.0) / fh as f32, Some(&raster));
+        let horizontal = mask_weight(&g, (240.0 + 0.9 * 120.0) / fw as f32, 0.5, Some(&raster));
+        assert!(
+            (vertical - horizontal).abs() <= 0.006,
+            "the dab is not round in pixels: {vertical} vs {horizontal}"
+        );
+    }
+
+    /// A brush group with nothing drawable in it is INERT — including when the
+    /// group's own `crs:MaskInverted` is set, which is the one way a mask with
+    /// no coverage can become a whole-frame adjustment.
+    ///
+    /// The three ways a group can carry strokes and paint nothing, all of them
+    /// states Lightroom also paints nothing for: no `d` token at all, a zero
+    /// radius, and flow 0.
+    #[test]
+    fn a_brush_group_with_no_drawable_dab_is_inert() {
+        let (fw, fh) = (240u32, 160u32);
+        for (what, stream, radius, flow) in [
+            ("state tokens only", "r 0.2\nf 1\nh 0.5", 0.2f32, 1.0f32),
+            ("zero radius", "d 0.5 0.5", 0.0, 1.0),
+            ("zero flow", "d 0.5 0.5", 0.2, 0.0),
+            ("garbage", "wobble\nd\nd 0.5", 0.2, 1.0),
+        ] {
+            let g = probe_brush(&[(1.0, radius, flow, 0.5, stream)]);
+            assert!(brush_raster(&g, fw, fh).is_none(), "{what} must not rasterise");
+            assert_eq!(mask_weight(&g, 0.5, 0.5, None), 0.0, "{what} must draw nothing");
+            // The hazard, said in a test: `1 − 0` on an inverted group would
+            // apply the correction to the WHOLE frame at full strength.
+            let MaskGeometry::Brush { name, blend_mode, value, strokes, .. } = g else {
+                unreachable!()
+            };
+            let flipped =
+                MaskGeometry::Brush { name, blend_mode, value, inverted: true, strokes };
+            assert_eq!(
+                mask_weight(&flipped, 0.5, 0.5, None),
+                0.0,
+                "{what}: an inverted group with no alpha must not cover the frame"
+            );
+        }
+        // A group with no strokes at all takes the same path.
+        assert!(brush_raster(&probe_brush(&[]), fw, fh).is_none());
+        // And a non-brush geometry answers `None` here rather than being asked
+        // to explain itself at the call site.
+        assert!(brush_raster(&MaskGeometry::Bitmap { path: "x.png".into() }, fw, fh).is_none());
+    }
+
+    /// The GROUP's own `crs:MaskInverted` IS rendered — `1 − α` — and it is the
+    /// only place it can be, because the importer deliberately does not lift it
+    /// into `LocalAdjustment::inverted` (xmp.rs: one bit, one home).
+    ///
+    /// Measured `true` on 1 of 39 real groups (F2 anatomy), which is exactly
+    /// the population size that makes this worth a test rather than a comment.
+    #[test]
+    fn a_brush_groups_own_inversion_is_rendered() {
+        let (fw, fh) = (480u32, 320u32);
+        let plain = probe_brush(&[(1.0, 0.25, 1.0, 1.0, "d 0.5 0.5")]);
+        let MaskGeometry::Brush { name, blend_mode, value, strokes, .. } = plain.clone() else {
+            unreachable!()
+        };
+        let inverted = MaskGeometry::Brush { name, blend_mode, value, inverted: true, strokes };
+        let raster = brush_raster(&plain, fw, fh).expect("one dab");
+        // The SAME raster serves both: inversion is a reading of the alpha, not
+        // a different alpha (which is also why it costs no second rasterise).
+        assert_eq!(brush_raster(&inverted, fw, fh).map(|r| r.dimensions()), Some((fw, fh)));
+        for (nx, ny) in [(0.5f32, 0.5f32), (0.55, 0.5), (0.02, 0.02)] {
+            let w = mask_weight(&plain, nx, ny, Some(&raster));
+            let f = mask_weight(&inverted, nx, ny, Some(&raster));
+            assert!((w + f - 1.0).abs() <= 1e-6, "({nx}, {ny}): {w} + {f} != 1");
+        }
+    }
+
+    /// The raster's SIZE policy, asserted at a cost the assertion does not have
+    /// to pay: exercising the work budget by really rasterising costs, by
+    /// construction, exactly the budget.
+    ///
+    /// Three regimes, one function (`brush_raster_dims`): a small frame is 1:1,
+    /// a 61 MP frame is capped at the 2048 long edge, and a group heavy enough
+    /// to blow `BRUSH_RASTER_MAX_WORK` is shrunk until it fits — with
+    /// `BRUSH_RASTER_MIN_EDGE` overriding the budget rather than the mask being
+    /// destroyed.
+    #[test]
+    fn the_brush_raster_size_policy_is_bounded_three_ways() {
+        // 1:1 while both bounds are slack — which is what makes a GUI preview's
+        // lookup an exact texel hit rather than a bilinear blend.
+        assert_eq!(brush_raster_dims(1_000.0, 480, 320), (480, 320));
+        // The A7R IV frame, capped on the long edge and only there.
+        assert_eq!(brush_raster_dims(1_000.0, 9504, 6336), (2048, 1365));
+        // Heavy: 400 dabs each covering a 4000 × 3000 frame is 4.8e9 texels of
+        // work at full size, so the budget takes the scale to sqrt(24e6/4.8e9).
+        let heavy = 400.0 * 4000.0 * 3000.0;
+        let (w, h) = brush_raster_dims(heavy, 4000, 3000);
+        assert!(w < 2048, "the work budget must bite before the edge cap: {w}×{h}");
+        assert!(w >= BRUSH_RASTER_MIN_EDGE, "and must not shrink past the floor: {w}");
+        assert!(
+            (f64::from(w) * f64::from(h) * 400.0) <= BRUSH_RASTER_MAX_WORK * 1.05,
+            "the chosen size must actually meet the budget: {w}×{h}"
+        );
+        // The floor OVERRIDES the budget: an absurd cost cannot take the raster
+        // to a single texel, because a 1 px mask is not a cheaper mask, it is a
+        // wrong one. `BRUSH_MAX_DABS` is what bounds the overrun instead.
+        let (w, h) = brush_raster_dims(f64::MAX, 4000, 3000);
+        assert_eq!(w.max(h), BRUSH_RASTER_MIN_EDGE, "floor wins: {w}×{h}");
     }
 
     /// Real-machine probe, never run in CI (it allocates gigabytes): the

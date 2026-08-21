@@ -1232,10 +1232,22 @@ pub enum MaskGeometry {
     /// mask inert (weight 0) with a stderr warning rather than failing.
     Bitmap { path: String },
     /// Lightroom's BRUSH group — one `crs:What="Mask/Aggregate"` component and
-    /// the `Mask/Paint` strokes it contains (R27 Batch-4, L-08). CARRIED, NOT
-    /// RENDERED: [`render::mask_weight`] answers 0 for this geometry and the
-    /// import/export disclosures both say so by name. The reason is the alpha
-    /// KERNEL, and only the kernel — see [`BrushStroke::dabs`].
+    /// the `Mask/Paint` strokes it contains (R27 Batch-4, L-08).
+    ///
+    /// **RENDERED since R29 Batch-6b, from a measured model** — and until then
+    /// it was carried and NOT rendered, which is a hard behaviour change for
+    /// every recipe that holds one. `render::mask_weight` answered a literal
+    /// `0.0` for this geometry from R27 Batch-4 until that batch, because the
+    /// one input a rasteriser needs is the alpha kernel and the sidecar does
+    /// not contain it (see [`BrushStroke::dabs`]). R29 Batch-6 MEASURED the
+    /// kernel instead of guessing at it — 29 controlled Lightroom exports, a
+    /// nine-rung hardness ladder and a 5 × 2 × 2 flow × radius × hardness grid
+    /// of drags — so `render::brush_raster` now stamps the dab stream into an
+    /// alpha and the geometry draws. **Nothing in this file changed for it:**
+    /// the raster is a render-time artefact, so there is no new field, no
+    /// schema bump and no `schema_era` gate. Both disclosures moved with the
+    /// behaviour and now name the approximation rather than the absence
+    /// (`MaskImportReason::BrushRendered` / `MaskLossReason::BrushRendered`).
     ///
     /// **The encoding, as measured** (F2 anatomy, 2026-08-19: 171 sidecars of
     /// the user's own library, real XML parser, 0 parse failures; 39
@@ -1261,11 +1273,9 @@ pub enum MaskGeometry {
     /// a brush mask this app imports and republishes still says what Lightroom
     /// said. `blend_mode` is therefore stored HERE as well as being projected
     /// onto the owning [`MaskComponent`]'s [`MaskCombine`] on import: the
-    /// component's mode is what a future renderer will compose with, and this
-    /// is what the WRITER re-emits. They are two spellings of one fact and the
-    /// import is the only place that maps between them.
-    ///
-    /// [`render::mask_weight`]: crate::render
+    /// component's mode is what the renderer composes with, and this is what
+    /// the WRITER re-emits. They are two spellings of one fact and the import
+    /// is the only place that maps between them.
     Brush {
         /// `crs:MaskName` on the Aggregate — always "Brush *n*" in some UI
         /// language (`画笔 1` ×23, `Brush 1` ×7, `画笔 2` ×6, …). Carried so a
@@ -1380,8 +1390,17 @@ pub enum MaskGeometry {
         /// REFINEMENT of the AI mask (present on 83 of 218 components, exactly
         /// one Paint each in the F2 census).
         ///
-        /// Carried, not rendered, for exactly [`BrushStroke::dabs`]'s reason:
-        /// the alpha kernel is not in the file. Carrying it is still what makes
+        /// Carried, not rendered — and since R29 Batch-6b that is no longer
+        /// [`BrushStroke::dabs`]'s reason. The kernel IS measured now and a
+        /// standalone [`MaskGeometry::Brush`] group draws
+        /// (`render::brush_raster`); what is still unmeasured here is the
+        /// COMPOSITION. A gesture refines Adobe's alpha, and the alpha this
+        /// engine holds for an AI mask is not Adobe's — it is our own
+        /// segmenter's re-derivation (see `raster` below) — so folding the
+        /// photographer's correction strokes onto a different model's mask is a
+        /// different operation from the one Lightroom performs, and nothing has
+        /// measured what it should do at the seams. Registered rather than
+        /// guessed, exactly as `roundness` was. Carrying it is still what makes
         /// the 7 corrections whose ONLY brush content is a gesture importable
         /// at all.
         gesture: Vec<BrushStroke>,
@@ -1475,11 +1494,23 @@ pub struct BrushStroke {
     /// shape around a renderer nobody has written; carrying it verbatim
     /// guarantees the round trip is exact meanwhile. R27 Batches 8-10 then
     /// MADE the measurement (screen accumulation; density scales each dab
-    /// BEFORE the screen; a one-parameter flow odds law, κ = 0.1219 ± 0.0027;
-    /// an 11-rung hardness kernel TABLE with no closed form) — what still
-    /// gates RENDERING, never carrying, is the kernel's missing closed form
-    /// (docs/V2_PLAN.md §7 item 13; implementation sketch in
-    /// `batch10-report.md` §7.4).
+    /// BEFORE the screen; a one-parameter flow odds law; an 11-rung hardness
+    /// kernel TABLE with no closed form).
+    ///
+    /// ~~What still gates RENDERING, never carrying, is the kernel's missing
+    /// closed form~~ — **CLOSED 2026-08-21 (R29 Batch-6), and the stream is
+    /// still a String for the reason above: this type is the sidecar's shape,
+    /// not the renderer's.** The closed form is
+    /// `k(ρ;h) = (1 − ρ^m(h))^n(h)` with `ln m` and `ln n` cubic in the
+    /// hardness — 8 numbers, pooled rms 0.0102 and held-out 0.0109 against a
+    /// nine-rung measured table that the table's own interpolation only
+    /// reaches 0.0180 on — and the flow law is re-measured at κ = 0.1284 ±
+    /// 0.0029 (universal to 2.24 % across a 3× radius change and both hardness
+    /// ends; batch-10's single-cell 0.12189 sits 5.3 % low and the two must not
+    /// be quoted as agreeing better than that). `render::brush_dabs` runs this
+    /// state machine at develop time and `render::brush_raster` stamps it;
+    /// neither writes anything back here. (docs/V2_PLAN.md §7 item 13;
+    /// `~/.claude/plans/r29-materials/b6-analysis.md`.)
     ///
     /// ~~plus Lightroom rasterising the mask in its PRE-lens-correction
     /// frame~~ — that half is CLOSED (R29 Batch-3). Lightroom does rasterise

@@ -1047,14 +1047,25 @@ eval corpus fell the same way, 2.35 → 0.05 masks per photo.)
 and each stroke's `Radius`/`Flow`/`CenterWeight`/`MaskSyncID` plus its `crs:Dabs`
 token stream, the stream carried VERBATIM as a string. It is parsed, kept in
 `recipe.json`, and written back into the sidecar as the same `Mask/Aggregate`
-element it arrived as. What it is NOT is rendered: the one input a rasterizer
-needs that no sidecar contains is the alpha kernel (the falloff versus hardness
-and the per-dab accumulation law — the file stores the STROKE, never the alpha),
-so `render::mask_weight` answers 0 and both disclosure channels carry a named
-reason, `MaskImportReason::BrushCarried` / `MaskLossReason::BrushCarried`
-(「brush mask(s) carried, not yet rendered - the measured kernel has no closed
-form and the mask lives in a pre-lens-correction frame」 — the wording since
-v0.34.0; R27's said the measurement was in flight, and it landed). It is a gate on RENDERING, not on carrying. Measured on the specimen
+element it arrived as. **And it is RENDERED, since R29 Batch-6b** — from a
+measured model rather than from Adobe's code. The one input a rasterizer needs
+that no sidecar contains is the alpha kernel (the falloff versus hardness and
+the per-dab accumulation law — the file stores the STROKE, never the alpha), so
+it was MEASURED: 29 controlled Lightroom exports gave
+`k(ρ;h) = (1 − ρ^m(h))^n(h)` with `ln m`/`ln n` cubic in the hardness (held-out
+rms 0.0109), a one-parameter flow odds law `D(f) = κf/(1−f+κf)` at κ = 0.1284,
+SCREEN accumulation, and the stroke's `MaskValue` scaling each dab before the
+screen. `render::brush_raster` stamps the dab stream into an 8-bit grey alpha at
+develop time (a render-time artefact — no schema field, no `schema_era` gate)
+and `render::mask_weight` samples it exactly as it samples a `Bitmap` mask.
+⚠ **Render-behaviour hard change:** from R27 Batch-4 until then that arm was the
+literal `=> 0.0`, so every recipe holding a brush mask renders differently now.
+Both disclosure channels moved with it and are named
+`MaskImportReason::BrushRendered` / `MaskLossReason::BrushRendered`
+(「brush mask(s) drawn from Autoshop's measured model of Lightroom's brush -
+not Adobe's own rasteriser」), because the edges are ours and not Adobe's — the
+same shape of statement the AI-mask arm makes, one notch weaker because ours
+came from a measurement of Adobe's own output. Measured on the specimen
 folder that has brush work in it: `_DSC9583` went from 8 of 11 corrections
 imported to 10 of 11, and the one still refused is refused for
 `CorrectionAmount="1.1"`, not for its brush.

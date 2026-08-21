@@ -513,9 +513,9 @@ on stderr beside the `xmp ->` line.
 
 | what | what Autoshop does |
 |---|---|
-| **Mask import losses** | Named, not counted: `brush mask(s) carried, not yet rendered`, `AI mask(s) re-derived by the local segmenter - not Adobe's own raster`, `radial rotation(s) read as 0`, `local point curve(s) unreadable`, `unmodelled local slider(s)`, `unknown local setting(s)`, and more |
+| **Mask import losses** | Named, not counted: `brush mask(s) drawn from Autoshop's measured model of Lightroom's brush - not Adobe's own rasteriser`, `AI mask(s) re-derived by the local segmenter - not Adobe's own raster`, `radial rotation(s) read as 0`, `local point curve(s) unreadable`, `unmodelled local slider(s)`, `unknown local setting(s)`, and more |
 | **Mask export losses** | The same list in the other direction — a mask this engine drew that the sidecar cannot carry says which one and why |
-| **Brush masks** | Carried byte-exact, rendered nowhere, disclosed on both directions. Not silently drawn approximately |
+| **Brush masks** | Carried byte-exact **and drawn** — from a measured model of Lightroom's own brush (kernel, flow law and screen accumulation all read off controlled exports), never from a guess. Disclosed in both directions, because the alpha is ours |
 | **AI masks** | The alpha is **recomputed** by the local segmenter and every surface says so. Never passed off as Adobe's raster |
 | **No embedded preview** | 12 of the 24 formats store none. Those degrade to Autoshop's own neutral develop *and say so* — you are told you are looking at our render, not the camera's |
 | **X-Trans** | Disclosed on every render (see below) |

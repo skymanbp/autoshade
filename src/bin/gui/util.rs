@@ -115,13 +115,14 @@ pub(crate) fn draw_mask_overlay(
         }
         // A brush group has thousands of dab coordinates and no outline. It
         // gets the same badge treatment as a raster, with the honest extra
-        // half of the sentence: the strokes are in the recipe and in the
-        // sidecar, and this build does not draw them (R27 Batch-4, L-08).
+        // half of the sentence: since R29 Batch-6b the strokes ARE drawn, from
+        // our own measurement of Lightroom's kernel — the sidecar carries no
+        // alpha, so these edges are ours and the badge says so.
         MaskGeometry::Brush { .. } => {
             p.text(
                 xf.rect.left_top() + egui::vec2(10.0, 10.0),
                 egui::Align2::LEFT_TOP,
-                tr(lang, "▨ Brush mask (carried, not rendered)"),
+                tr(lang, "▨ Brush mask (drawn from our measured model)"),
                 egui::FontId::proportional(14.0),
                 ACCENT,
             );
@@ -419,12 +420,16 @@ pub(crate) fn xmp_loss_line(
             R::Disabled => trf(lang, "muted masks ×{n}", &[("n", &n)]),
             R::ComponentsFlattened => trf(lang, "shape components flattened ×{n}", &[("n", &n)]),
             // The one entry in this list that is NOT about the XMP: the brush
-            // rides out COMPLETE and the engine does not draw it, so the frame
-            // sentence 「the Lightroom XMP does not carry:」 would be a lie
-            // about this item alone. Its own phrase carries the correction.
-            R::BrushCarried => {
-                trf(lang, "brush masks ×{n} carried but not rendered here", &[("n", &n)])
-            }
+            // rides out COMPLETE, so the frame sentence 「the Lightroom XMP
+            // does not carry:」 would be a lie about this item alone. Its own
+            // phrase carries the correction — and since R29 Batch-6b the
+            // correction is 「we drew it, from our measurement of Lightroom's
+            // brush」 rather than 「we did not draw it」.
+            R::BrushRendered => trf(
+                lang,
+                "brush masks ×{n} drawn from our measured model, not Adobe's raster",
+                &[("n", &n)],
+            ),
             // The other non-XMP entry, and the sharper one: the INTENT rides
             // out whole (Lightroom will rebuild its own mask from it), while
             // the pixels shown here came from OUR segmenter. Saying only
@@ -639,11 +644,12 @@ pub(crate) fn xmp_import_line(
             },
             R::BlendMode => tr(lang, "Blend mode").into(),
             R::MultiComponent => tr(lang, "Extra shapes").into(),
-            // NOT a loss of the mask: the strokes arrived and they round-trip.
-            // What did not arrive is the DRAWING of them, which waits on a
-            // kernel closed form + the pre-lens-correction frame (the R27
-            // measurement itself landed) — so the label says both halves.
-            R::BrushCarried => tr(lang, "Brush mask (carried, not rendered)").into(),
+            // NOT a loss of the mask: the strokes arrived, they round-trip,
+            // and since R29 Batch-6b they are DRAWN. What the label must not
+            // let the reader assume is that the alpha is Adobe's — the sidecar
+            // carries no alpha at all, so ours comes from a measured model of
+            // Lightroom's kernel and its edges are ours.
+            R::BrushRendered => tr(lang, "Brush mask (drawn from our measured model)").into(),
             // NOT a loss either — the correction arrived, and so did every
             // shape standing beside it (the 78-correction gain). What the
             // label must not let the reader assume is that the ALPHA came from
