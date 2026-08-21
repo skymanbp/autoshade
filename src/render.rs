@@ -1897,7 +1897,9 @@ fn apply_develop_with_rasters(
     //     −100 endpoint would have split the calibration in half. At weight 1
     //     the positive branch is still exactly `unsharp_luma`, so this adds no
     //     new mechanism there, and it runs and DROPS its planes before the next
-    //     stage like the other two spatial passes.
+    //     stage like the other two spatial passes. The NEGATIVE branch is the
+    //     measured two-lowpass mix since R29 B8-2 (`texture_negative_pass`) —
+    //     a rendering change for every negative value, here and in the mask.
     if r.texture != 0.0 {
         texture_pass(data, w, h, r.texture / 100.0, |_, _, _| 1.0);
     }
@@ -2484,11 +2486,13 @@ fn apply_masks(
             // it works fine detail across the whole tonal range where clarity
             // works midtone volume. The GLOBAL texture stage (R25 B2,
             // `apply_develop` stage 3b) calls the SAME function, so the two are
-            // one calibration — 0.5% of the short edge floored at 2 px, and
-            // since R28 Batch-5 a band-limited negative half, both still OURS
-            // because Adobe's model is proprietary. Same honesty stance as
-            // `manual_vignette_lut`: the XMP carries the raw slider value, so
-            // Lightroom re-renders it with its own model.
+            // one calibration — 0.5% of the short edge floored at 2 px on the
+            // positive half, and since R29 B8-2 a MEASURED two-lowpass mix on
+            // the negative one (`texture_negative_pass`). Positive is ours
+            // (Adobe's model is proprietary); negative is fitted to controlled
+            // Lightroom ladders and carries its own residuals. Same honesty
+            // stance as `manual_vignette_lut` either way: the XMP carries the
+            // raw slider value, so Lightroom re-renders it with its own model.
             texture_pass(data, w, h, m.texture / 100.0, spatial_weight);
         }
         if m.sharpness != 0.0 {
@@ -4436,82 +4440,129 @@ fn unsharp_luma_weighted(
     });
 }
 
+/// Weight of the COARSE arm in the negative texture mix, and the fraction of
+/// the render raster's short edge its Gaussian σ binds to (B8-2 §6-1, five-step
+/// joint fit, 890 residuals, rms 0.0048).
+///
+/// Landmarks rather than bare digits: σ₁ = 12.99 px on a 4160 px short edge,
+/// a half-power period of 69.3 px, and 36.1 % of the total depth.
+const TEXTURE_COARSE_AMPLITUDE: f32 = 0.172_443;
+const TEXTURE_COARSE_SIGMA_FRAC: f32 = 0.003_123_5;
+
+/// The FINE arm — the one B8 missed entirely and B8-2 found under the capture
+/// sharpening: σ₂ = 1.174 px at a 4160 px short edge, half-power period 6.3 px,
+/// and **63.9 % of the total depth**. Losing it is why the R28 band form kept
+/// 0.9992 of a 4 px pattern where Lightroom keeps 0.57.
+const TEXTURE_FINE_AMPLITUDE: f32 = 0.304_888;
+const TEXTURE_FINE_SIGMA_FRAC: f32 = 0.000_282_2;
+
+/// The one free parameter of the DEPTH law, `w(t) = t(1+d)/(1+d·t)` (B8-2 §1
+/// ruling 3). `w(1) = 1` is exact and free, so the endpoint is the plateau
+/// `1 − (A₁+A₂) = 0.52267` with no epsilon.
+const TEXTURE_DEPTH_D: f32 = 0.558_583;
+
+/// Below this σ (in RENDER-raster pixels) an arm is dropped rather than
+/// approximated — the ruling of 2026-08-21 (`r29-rulings-2026-08-20.md`
+/// 拍板三), and the threshold is where a sampled kernel stops representing the
+/// continuous Gaussian it stands for rather than a round number.
+///
+/// Measured, at the frequencies that matter: at σ = 0.49 the 4σ-truncated FIR
+/// transfers 0.601 at Nyquist where the continuous `G` is 0.306, and at the
+/// σ₂ = 0.2407 a 1280 px preview actually asks for (`gui/model.rs:296`,
+/// short edge ≈ 853) the kernel collapses to `[1.8e−4, 1, 1.8e−4]` and
+/// transfers 0.9993 — an identity wearing a Gaussian's name. At σ₂ = 1.174
+/// (a 4160 px raster) the discrete and continuous responses agree to 4 dp.
+/// So the clamp is not a behaviour cliff — it makes explicit what a sub-pixel
+/// spatial kernel was going to do anyway, and stops the pass paying for it.
+const TEXTURE_MIN_SIGMA_PX: f32 = 0.5;
+
+/// `w(t) = t(1+d)/(1+d·t)` — the negative half's DEPTH against the slider,
+/// evaluated in f64 and returned in f32 (the constants are quoted to 6 digits;
+/// f32 division would spend two of them for nothing).
+///
+/// **The linear reading is refuted, not merely improved on.** The engine's old
+/// `strength = -amount` is exactly `w(t) = t` — bit-verified at
+/// D(−50)/D(−100) = 0.5000 — where the five-step Lightroom ladder gives 0.605.
+/// Even with the endpoint matched, linear under-depths −50 by 18 % and −10 by
+/// 32 % (`w(0.5) = 0.609`, `w(0.1) = 0.148`). A single power law is refuted
+/// too: the local exponent drifts 0.85 → 0.67 across the ladder, the best fit
+/// `t^0.778` misses ±0.024 at the ends, and this one-parameter hyperbolic form
+/// holds them to ±0.008 (B8-2 §6-4 items 1-2).
+fn texture_depth(t: f32) -> f32 {
+    let t = f64::from(t.clamp(0.0, 1.0));
+    let d = f64::from(TEXTURE_DEPTH_D);
+    (t * (1.0 + d) / (1.0 + d * t)) as f32
+}
+
+/// The `(σ_coarse, σ_fine)` the negative half runs at on a `w × h` raster.
+///
+/// **`min(w, h)` is the RENDER raster's short edge, and that is adjudicated
+/// rather than assumed.** A two-resolution export pair — 6240 × 4160 and
+/// 3120 × 2080, sidecars byte-identical but for the delivery size — separates
+/// "σ is a fixed pixel count" from "σ is a fixed fraction of the short edge" by
+/// **16×** (rms 0.0886 vs 0.0054 across 4 ≤ k ≤ 96), and a leave-out check
+/// carries the full-size fit onto the half-size file with σ scaled by the
+/// short-edge ratio for rms 0.0048 — its own in-sample residual (B8-2 §1
+/// ruling 4). This engine is the architecture that makes that reading
+/// unambiguous: the develop runs at FULL resolution and `--long-edge` resamples
+/// the FINISHED pixels as the last stage (`src/main.rs:891-894`, the resize at
+/// `src/render.rs:1569-1575`), so the `(w, h)` handed to this pass IS the
+/// render raster and never the delivery size.
+///
+/// What the two-resolution pair does NOT decide is whether σ tracks the FILM's
+/// resolution or a fixed pixel count — every fixture came off one ARW, so both
+/// readings predict the same numbers (B8-2 §7-1). The proportional form is kept
+/// because at a single film resolution it introduces no known error and it is
+/// what the pass already did.
+fn texture_sigmas(w: usize, h: usize) -> (f32, f32) {
+    let short = w.min(h) as f32;
+    (TEXTURE_COARSE_SIGMA_FRAC * short, TEXTURE_FINE_SIGMA_FRAC * short)
+}
+
+/// The integer box³ radius whose equivalent σ = √(r(r+1)) sits nearest `sigma`.
+///
+/// Closed form, not a search: `σ² = r(r+1)` inverts to
+/// `r = (√(1+4σ²) − 1)/2`, and only the two integers around it can win.
+fn box3_radius_for_sigma(sigma: f32) -> usize {
+    // `is_finite` FIRST so a NaN σ leaves by this door rather than through a
+    // comparison that is false either way.
+    if !sigma.is_finite() || sigma <= 0.0 {
+        return 0;
+    }
+    let s = f64::from(sigma);
+    // The clamp bounds a hand-written frame size out of an overflowing `+ 1`
+    // below; no raster reaches it (σ = 1e9 needs a 3.2e11 px short edge).
+    let lo = (((1.0 + 4.0 * s * s).sqrt() - 1.0) * 0.5).floor().clamp(0.0, 1e9) as usize;
+    let err = |r: usize| {
+        let r = r as f64;
+        ((r * (r + 1.0)).sqrt() - s).abs()
+    };
+    if err(lo) <= err(lo + 1) { lo } else { lo + 1 }
+}
+
 /// **The texture operator** — the ONE calibration the global stage
 /// ([`apply_develop`] 3b) and the mask arm ([`apply_masks`]) both call, so
 /// "Texture −40" cannot come to mean two different things depending on whether
-/// a mask is in the way. `amount` is the slider ÷ 100 (−1..=1) and the radius is
-/// the resolution-normalised one both arms have shared since R25 B2: 0.5 % of
-/// the short edge, floored at 2 px.
+/// a mask is in the way. `amount` is the slider ÷ 100 (−1..=1).
 ///
-/// **POSITIVE — unchanged, and measured.** A plain unsharp mask at that radius
-/// with no midtone weighting: `l + amount·(l − blur)`. R27 P2 measured this half
-/// against Lightroom and it is not touched here.
+/// **POSITIVE — unchanged, and measured.** A plain unsharp mask at the
+/// resolution-normalised radius both arms have shared since R25 B2 (0.5 % of
+/// the short edge, floored at 2 px), with no midtone weighting:
+/// `l + amount·(l − blur)`. R27 P2 measured this half against Lightroom and not
+/// one character of it is touched here.
 ///
-/// **NEGATIVE — band-limited since R28 Batch-5 (5a), and NOT measured.** The old
-/// negative half ran the same formula with a negative amount, which makes the
-/// transfer `1 − |amount|·(1 − G)`: at the endpoint that is exactly `G`, i.e.
-/// the frame REPLACED by its own blur. The visual-inspection pack measured it
-/// (`crops/D-texture-m100__branches.jpg`, σ −92 %) and it is a full Gaussian
-/// blur — every scale finer than the radius gone, edges included. Lightroom's
-/// Texture is a mid-frequency control: at −100 it smooths the mid band and
-/// leaves fine detail and edges standing.
+/// **NEGATIVE — measured against Lightroom and rebuilt to the measurement
+/// (R29 B8-2, landed 2026-08-21).** See [`texture_negative_pass`] for the
+/// model, the kernels and the evidence; this function only picks the σ pair.
 ///
-/// So the negative half extracts a BAND instead of everything above a cutoff:
-///
-/// ```text
-///   band  = blur(luma, r_fine) − blur(blur(luma, r_fine), radius)
-///   new_l = l − |amount|·band
-/// ```
-///
-/// with `r_fine = max(1, radius/4)`. The transfer is then `1 − |amount|·(G_f −
-/// G_c)`, which tends to 1 at BOTH ends of the spectrum — fine detail survives
-/// (`G_f → 0`) and large structure survives (`G_f − G_c → 0`) — and dips in the
-/// middle, where the smoothing is meant to happen. The coarse plane is the fine
-/// one blurred FURTHER, so the band is `G_f·(1 − G_r)` — bounded by the fine
-/// blur's own response rather than free to run away. (Exactly: three box passes
-/// are a sinc³, whose first side-lobe reaches ≈ −1 %, so the band can exceed 1
-/// by about that much in one razor-thin frequency; the endpoint response there
-/// is ≈ −0.01 instead of 0. That is a hundredth of a code, not an inversion a
-/// photograph can show — stated rather than rounded to "never".)
-///
-/// `r_fine` is a FRACTION of the radius, not a fixed pixel count, because the
-/// whole texture calibration is resolution-normalised: a fixed floor would make
-/// "Texture −60" preserve a different band on a 1280 px preview than on the
-/// 61 MP export, which is the exact promise R25 B2 made.
-///
-/// **Measured (R29 B8 2026-08-20, re-measured on a clean base R29 B8-2
-/// 2026-08-21), and REFUTED IN SHAPE.** Controlled Lightroom ladders read by
-/// block cross-spectrum show LR's negative Texture is a monotone HIGH-SHELF,
-/// not a notch. B8's numbers carried a confound — its fixtures had capture
-/// sharpening at maximum (`Sharpness=150`), which rebuilds fine contrast
-/// AFTER Texture and inflated H at the fine end — so the clean-base (B8-2,
-/// Sharpness=0, five steps −10…−100) values are authoritative: low
-/// frequencies hold (H(ν→0)=0.9996, no lift — B8's +1.8 % LF lift was pure
-/// sharpening), the attenuation plateaus at H = 0.549 (−100) / 0.722 (−50),
-/// and a 4 px pattern keeps 0.57 in LR where this pass keeps 0.9992. Depth
-/// follows a one-parameter hyperbolic saturation w = t(1+d)/(1+dt),
-/// d = 0.5586 (a single power law is refuted by the five-step ladder; the
-/// engine's linear `strength = -amount` under-depths −50 by 17 % and −10 by
-/// 30 % even if the endpoint were matched). Against the clean ground truth
-/// this band form over-smooths the mid band by up to −12.97 dB at a 57 px
-/// period and under-smooths the fine end by up to +5.26 dB at 3 px;
-/// refitting the band form with every parameter free is 8.2× worse than a
-/// two-lowpass parallel mix — wrong function family, not mistuned constants.
-/// The operator is also amplitude-adaptive (not LTI; confirmed on the clean
-/// base, span 0.33→0.85 across detail amplitude), so any fixed kernel only
-/// matches the ensemble, and the fit only holds in the sRGB-gamma domain
-/// (linear-light diverges by 0.04 at 4 px — domain choice is load-bearing).
-/// The replacement is fully adjudicated (b8-analysis-2.md §6: parameters,
-/// σ short-edge normalisation pinned by a two-resolution export at 16×
-/// separation, 45 acceptance anchors) and rides its own render batch with
-/// its own top notice; until then this band form deliberately STANDS. The
-/// sidecar carries the raw slider value so Lightroom re-renders it with its
-/// own model — the same stance [`manual_vignette_lut`] takes.
-///
-/// The cascade is also why this needs no third plane: `coarse` is blurred FROM
-/// `fine` (σ² adds), so the pass holds two f32 planes exactly like the positive
-/// one, and `l` is recomputed from the pixel — which is the same number the
-/// dropped luma plane held, since each pixel is read before it is written.
+/// **RENDER-BEHAVIOUR HARD CHANGE, every negative Texture value, global and
+/// per mask.** The R28 Batch-5 band form this replaces was a notch —
+/// `1 − |t|·(G_f − G_c)`, returning to 1 at BOTH spectral ends — designed with
+/// no Lightroom ground truth in the tree. Two controlled ladders now say the
+/// shape itself was wrong: Lightroom's negative Texture is a monotone
+/// HIGH-SHELF. Recipes re-render; version snapshots keep the old pixels. The
+/// sidecar still carries the raw slider value so Lightroom re-renders it with
+/// its own model — the same stance [`manual_vignette_lut`] takes.
 fn texture_pass(
     data: &mut [[f32; 3]],
     w: usize,
@@ -4519,21 +4570,130 @@ fn texture_pass(
     amount: f32,
     weight: impl Fn(usize, usize, &[f32; 3]) -> f32 + Sync,
 ) {
-    let radius = ((0.005 * w.min(h) as f32).round() as usize).max(2);
     if amount >= 0.0 {
+        let radius = ((0.005 * w.min(h) as f32).round() as usize).max(2);
         unsharp_luma_weighted(data, w, h, radius, amount, false, weight);
         return;
     }
+    let (sigma_coarse, sigma_fine) = texture_sigmas(w, h);
+    texture_negative_pass(data, w, h, -amount, sigma_coarse, sigma_fine, weight);
+}
+
+/// The negative half, at an explicit σ pair — **two low-passes mixed in
+/// PARALLEL, scaled by a hyperbolic depth law**:
+///
+/// ```text
+///   l' = l − w(t)·[ A₁·(l − G_σ₁∗l) + A₂·(l − G_σ₂∗l) ]
+/// ```
+///
+/// `t = |slider|/100`. Parallel, NOT cascaded: the two high-passes are summed,
+/// not composed, and the arms carry 36 % / 64 % of the depth. Free-refitting
+/// the old cascade band form against the same ground truth lands 8.2× worse
+/// (rms 0.0392 vs 0.0048) — a wrong function family, not mistuned constants
+/// (B8-2 §1 ruling 5).
+///
+/// **Why σ is a parameter here and not read off `(w, h)`.** The acceptance
+/// grid is defined on a 4160 px short edge; a test that had to build a
+/// 4160 × 4160 frame to reach it would cost 200 MB to assert nine numbers.
+/// Splitting the σ choice ([`texture_sigmas`]) from the filter lets the anchor
+/// test drive the real filter at the real σ on a 2048 × 64 strip.
+///
+/// **The kernels, and why they are not the same kernel.** The anchor grid is
+/// the arbiter, and it rejected the cheap answer:
+///
+/// | scheme | max dev vs the closed form, 45 anchors |
+/// |---|---|
+/// | box³ both arms, integer radius | **0.0443 — fails** |
+/// | box³ both arms, fractional (extended-box) radius | **0.0373 — fails** |
+/// | box³ coarse + true Gaussian FIR fine | 0.0088 |
+/// | **as shipped** (below) | **0.0037** |
+///
+/// σ₂ = 1.174 px is simply not on the box³ grid — the nearest integer radius
+/// (r = 1) is σ = 1.414, and no fractional-radius box³ has the right SHAPE at
+/// that support either (its sinc³ transfer reads 0.037 at a 4 px period where
+/// the Gaussian reads 0.183). So the fine arm is a real separable Gaussian FIR
+/// ([`gauss_blur_plane`]), and the coarse arm stays on the O(N) box³ the whole
+/// file already uses, where at σ₁ ≈ 13 px the shape error is a rounding
+/// difference.
+///
+/// **`coarse` is still grown FROM `fine`, and that is the parallel model, not a
+/// cascade.** Gaussians compose — `G_σ₁ = G_σ₂ ∗ G_√(σ₁²−σ₂²)` — so blurring
+/// the fine plane by the residual σ′ = 12.941 px produces exactly the coarse
+/// arm the formula asks for, while the luma plane dies before the coarse blur
+/// starts. The pass therefore holds the same TWO f32 planes the old band form
+/// did (`jobs::PER_PHOTO_PEAK_COMMIT_MB` unmoved), and `l` is recomputed from
+/// the pixel — the same number the dropped luma plane held, since every pixel
+/// is read before it is written.
+///
+/// **Cost of the FIR arm**, stated rather than hoped: the kernel is 2⌈4σ₂⌉+1
+/// taps, so 11 at a 4160 px short edge and 17 at 61 MP — 0.57 and 2.05 G
+/// multiply-adds across both separable passes, against ~0.7 G for the entire
+/// box³ chain. It is row-parallel like every other plane pass here.
+///
+/// **The domain is load-bearing.** The fit holds in the sRGB-gamma domain and
+/// diverges by 0.041 at a 4 px period in linear light (B8-2 §6-3), so this pass
+/// must run on gamma-encoded pixels. It does: the develop's buffer is
+/// sRGB-encoded before `apply_develop` is ever called (`src/render.rs:326`, the
+/// baked path; `src/render.rs:1417`, `calibrate_camera_buffer`'s last line).
+///
+/// **Where the model is honest about not applying.** Lightroom's operator is
+/// amplitude-adaptive — not LTI: H spans 0.33 → 0.85 with detail amplitude
+/// inside one octave on the clean base, against ≤ 0.009 for an LTI control. A
+/// fixed kernel can only match the ENSEMBLE, which is what the anchor grid is
+/// (512-block cross-spectrum over one 6240 × 4160 frame). Edge-preserving
+/// behaviour is not modelled here and is registered, not silently claimed.
+///
+/// **Preview fidelity, and the promise that does not hold on this branch.**
+/// R25 B2 promised one slider value means one structure at a 1280 px preview
+/// and at 61 MP. On the negative half it still does not — the reason has
+/// changed from "`fine_radius = radius/4` degenerates to 1" to "σ₂ is
+/// sub-pixel". At the GUI preview raster (`gui/model.rs:296`, short edge ≈ 853)
+/// σ₂ = 0.241 px, so [`TEXTURE_MIN_SIGMA_PX`] drops the fine arm and the
+/// preview's negative Texture is WEAKER than the export's by up to 0.021 in
+/// transfer at a 4 px preview period, 0.036 at 3 px and 0.076 at its Nyquist.
+/// User ruling of 2026-08-21: clamp and disclose, no approximation and no 1:1
+/// patch render. The export is exact; the preview is honestly weaker.
+///
+/// Below a 228 px short edge the coarse arm's own box³ radius rounds to 0 and
+/// the whole negative half becomes a no-op — a thumbnail has no mid band left
+/// to take out, and a radius-0 box³ would have silently applied the FINE arm's
+/// high-pass at the COARSE arm's amplitude.
+fn texture_negative_pass(
+    data: &mut [[f32; 3]],
+    w: usize,
+    h: usize,
+    t: f32,
+    sigma_coarse: f32,
+    sigma_fine: f32,
+    weight: impl Fn(usize, usize, &[f32; 3]) -> f32 + Sync,
+) {
     if w == 0 || h == 0 {
         return; // par_chunks_mut(0) asserts; a 0-dim frame has no pixels anyway
     }
-    let fine_radius = (radius / 4).max(1);
+    let fine_on = sigma_fine >= TEXTURE_MIN_SIGMA_PX;
+    // The coarse arm is grown from the fine plane, so what it must supply is the
+    // RESIDUAL σ′ = √(σ₁²−σ₂²) — and the whole σ₁ when the fine arm was clamped
+    // out and the plane is still the raw luma.
+    let residual = if fine_on {
+        (sigma_coarse * sigma_coarse - sigma_fine * sigma_fine).max(0.0).sqrt()
+    } else {
+        sigma_coarse
+    };
+    let coarse_r =
+        if sigma_coarse >= TEXTURE_MIN_SIGMA_PX { box3_radius_for_sigma(residual) } else { 0 };
+    let coarse_on = coarse_r >= 1;
+    let depth = texture_depth(t);
+    if (!fine_on && !coarse_on) || depth <= 0.0 {
+        return;
+    }
+    // Either the fine arm's plane or — when it is clamped out — the luma itself.
+    // Either way it is what the coarse arm is grown from, and either way the
+    // luma plane is gone by the time the coarse blur allocates.
     let fine = {
         let luma: Vec<f32> = data.par_iter().map(luma601).collect();
-        blur_plane(&luma, w, h, fine_radius)
+        if fine_on { gauss_blur_plane(&luma, w, h, sigma_fine) } else { luma }
     };
-    let coarse = blur_plane(&fine, w, h, radius);
-    let strength = -amount;
+    let coarse = if coarse_on { Some(blur_plane(&fine, w, h, coarse_r)) } else { None };
     data.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
         for (x, px) in row.iter_mut().enumerate() {
             let wgt = weight(x, y, px);
@@ -4542,8 +4702,14 @@ fn texture_pass(
             }
             let i = y * w + x;
             let l = luma601(px);
-            let band = fine[i] - coarse[i];
-            let new_l = (l - strength * band * wgt).clamp(0.0, 1.0);
+            // `fine` holding the unblurred luma would make this term exactly
+            // zero on its own (same function, same pixel, read before written);
+            // the guard states the arm is OFF rather than leaving a reader to
+            // rediscover that.
+            let hp_fine = if fine_on { l - fine[i] } else { 0.0 };
+            let hp_coarse = coarse.as_ref().map_or(0.0, |c| l - c[i]);
+            let mix = TEXTURE_COARSE_AMPLITUDE * hp_coarse + TEXTURE_FINE_AMPLITUDE * hp_fine;
+            let new_l = (l - depth * mix * wgt).clamp(0.0, 1.0);
             scale_chroma(px, l, new_l);
         }
     });
@@ -4586,6 +4752,90 @@ fn blur_plane(src: &[f32], w: usize, h: usize, radius: usize) -> Vec<f32> {
         buf = box_blur_v(&buf, w, h, radius);
     }
     buf
+}
+
+/// A TRUE separable Gaussian blur — the one place in this file that cannot use
+/// [`blur_plane`], because the σ it is asked for is small enough that box³'s
+/// shape stops being an approximation of a Gaussian and starts being a
+/// different filter.
+///
+/// [`texture_negative_pass`] is the caller and its doc carries the arbitration:
+/// at σ = 1.174 px a fractional-radius box³ transfers 0.037 at a 4 px period
+/// where the Gaussian transfers 0.183, which alone misses the acceptance grid
+/// by 0.037 against a ±0.02 budget. Above ~5 px the two agree to a rounding
+/// difference and `blur_plane`'s O(N) running sums are the right tool; this is
+/// for the other end.
+///
+/// O(taps) per pixel per axis rather than O(1), so the kernel truncation is
+/// also the cost: 2⌈4σ⌉+1 taps, the tail beyond 4σ being `exp(−8) = 3.4e−4` of
+/// the peak and renormalised away. Both passes are row-parallel and the
+/// vertical one accumulates row-major, for the same cache reason
+/// [`box_blur_v`] gives.
+fn gauss_blur_plane(src: &[f32], w: usize, h: usize, sigma: f32) -> Vec<f32> {
+    if w == 0 || h == 0 {
+        return src.to_vec();
+    }
+    // A kernel wider than the plane buys nothing: past the edge every tap reads
+    // the same clamped sample.
+    let Some(kernel) = gauss_kernel(sigma, w.max(h)) else {
+        return src.to_vec();
+    };
+    let r = kernel.len() / 2;
+    let mut mid = vec![0.0f32; src.len()];
+    mid.par_chunks_mut(w).enumerate().for_each(|(y, orow)| {
+        let row = &src[y * w..][..w];
+        for (x, o) in orow.iter_mut().enumerate() {
+            let mut acc = 0.0f32;
+            if x >= r && x + r < w {
+                // Interior — no clamp in the hot loop. Same tap ORDER as the
+                // border arm, so the two are bit-identical where they meet.
+                for (k, wk) in kernel.iter().enumerate() {
+                    acc += row[x + k - r] * wk;
+                }
+            } else {
+                for (k, wk) in kernel.iter().enumerate() {
+                    acc += row[(x + k).saturating_sub(r).min(w - 1)] * wk;
+                }
+            }
+            *o = acc;
+        }
+    });
+    let mut out = vec![0.0f32; src.len()];
+    out.par_chunks_mut(w).enumerate().for_each(|(y, orow)| {
+        for (k, wk) in kernel.iter().enumerate() {
+            let row = &mid[(y + k).saturating_sub(r).min(h - 1) * w..][..w];
+            for (o, v) in orow.iter_mut().zip(row) {
+                *o += v * wk;
+            }
+        }
+    });
+    out
+}
+
+/// The normalised 1-D Gaussian taps for `sigma`, or `None` when there is no
+/// kernel to build. Summed and normalised in f64: the taps are quoted to f32 in
+/// the end, but a kernel whose weights do not sum to 1 is a DC gain error, and
+/// that is the one error a blur must not have.
+fn gauss_kernel(sigma: f32, max_radius: usize) -> Option<Vec<f32>> {
+    if !sigma.is_finite() || sigma <= 0.0 {
+        return None;
+    }
+    let s = f64::from(sigma);
+    let r = ((4.0 * s).ceil() as usize).clamp(1, max_radius.max(1));
+    let mut k: Vec<f64> = (0..=2 * r)
+        .map(|i| {
+            let d = i as f64 - r as f64;
+            (-0.5 * (d / s) * (d / s)).exp()
+        })
+        .collect();
+    let sum: f64 = k.iter().sum();
+    if !sum.is_finite() || sum <= 0.0 {
+        return None;
+    }
+    for v in k.iter_mut() {
+        *v /= sum;
+    }
+    Some(k.into_iter().map(|v| v as f32).collect())
 }
 
 fn box_blur_h(src: &[f32], w: usize, h: usize, radius: usize) -> Vec<f32> {
@@ -12348,17 +12598,57 @@ mod tests {
     /// its peak-to-peak measures every frequency at once and cannot say which
     /// BAND a filter took — which is the whole question below. One tone per
     /// probe, and the peak-to-peak reads that tone's transfer directly.
-    fn stripe_frame(w: usize, h: usize, period: usize) -> Vec<[f32; 3]> {
+    ///
+    /// `period` is fractional because two of the acceptance anchors are FFT bin
+    /// centres (64/3 px and 2.9942 px), not round pixel counts. That costs
+    /// nothing in accuracy: every kernel here is symmetric and therefore
+    /// zero-phase, so the filtered samples are the input samples scaled by the
+    /// transfer and the peak-to-peak RATIO is exact whatever the sampling
+    /// phases land on.
+    fn stripe_frame(w: usize, h: usize, period: f32) -> Vec<[f32; 3]> {
         let mut data = Vec::with_capacity(w * h);
         for _ in 0..h {
             for x in 0..w {
-                let phase = std::f32::consts::TAU * x as f32 / period as f32;
+                let phase = std::f32::consts::TAU * x as f32 / period;
                 let v = 0.5 + 0.06 * phase.sin();
                 data.push([v, v, v]);
             }
         }
         data
     }
+
+    /// The nine acceptance periods, and the closed form's own transfer at each
+    /// of the five ladder steps — b8-analysis-2 §6-3, the RIGHT half of the
+    /// table (the left half is the Lightroom measurement, quoted below as
+    /// ground truth but deliberately NOT asserted: it carries this frame's
+    /// scene dependence, and the operator is not LTI).
+    ///
+    /// ```text
+    ///   period  ν c/px   LR −10  −25   −50   −75  −100 ‖ closed −10  −25   −50   −75  −100
+    ///     256  0.00391  0.9993 0.9982 .9965 .9951 .9939 ‖ 0.9987 0.9970 .9947 .9929 .9913
+    ///     128  0.00781  0.9957 0.9897 .9813 .9744 .9689 ‖ 0.9952 0.9890 .9804 .9734 .9678
+    ///      64  0.01562  0.9853 0.9655 .9376 .9151 .8969 ‖ 0.9855 0.9665 .9403 .9192 .9020
+    ///      32  0.03125  0.9762 0.9439 .8986 .8619 .8324 ‖ 0.9743 0.9406 .8941 .8568 .8262
+    ///      21  0.04688  0.9728 0.9359 .8840 .8419 .8081 ‖ 0.9720 0.9350 .8842 .8435 .8100
+    ///      16  0.06250  0.9694 0.9283 .8701 .8231 .7852 ‖ 0.9700 0.9305 .8762 .8326 .7968
+    ///       8  0.12500  0.9611 0.9091 .8358 .7769 .7291 ‖ 0.9590 0.9049 .8306 .7709 .7220
+    ///       4  0.25000  0.9354 0.8533 .7374 .6443 .5695 ‖ 0.9378 0.8558 .7431 .6526 .5783
+    ///       3  0.33398  0.9297 0.8438 .7224 .6254 .5466 ‖ 0.9317 0.8418 .7182 .6188 .5373
+    /// ```
+    const TEXTURE_ANCHOR_PERIODS: [f32; 9] =
+        [256.0, 128.0, 64.0, 32.0, 64.0 / 3.0, 16.0, 8.0, 4.0, 2.9942];
+    const TEXTURE_ANCHOR_STEPS: [f32; 5] = [0.10, 0.25, 0.50, 0.75, 1.00];
+    const TEXTURE_ANCHOR_CLOSED: [[f32; 5]; 9] = [
+        [0.9987, 0.9970, 0.9947, 0.9929, 0.9913],
+        [0.9952, 0.9890, 0.9804, 0.9734, 0.9678],
+        [0.9855, 0.9665, 0.9403, 0.9192, 0.9020],
+        [0.9743, 0.9406, 0.8941, 0.8568, 0.8262],
+        [0.9720, 0.9350, 0.8842, 0.8435, 0.8100],
+        [0.9700, 0.9305, 0.8762, 0.8326, 0.7968],
+        [0.9590, 0.9049, 0.8306, 0.7709, 0.7220],
+        [0.9378, 0.8558, 0.7431, 0.6526, 0.5783],
+        [0.9317, 0.8418, 0.7182, 0.6188, 0.5373],
+    ];
 
     /// Peak-to-peak luma of the middle row, sampled away from the borders so
     /// the box blur's clamped edge seeding cannot answer for the interior.
@@ -12373,97 +12663,234 @@ mod tests {
         hi - lo
     }
 
-    /// R28 Batch-5 5a — THE −100 ENDPOINT, pinned.
+    /// R29 Batch-8-2 — **THE 45 ACCEPTANCE ANCHORS**, the arbiter of the
+    /// negative half.
     ///
-    /// Measured defect (visual-inspection pack `D-texture-m100__branches.jpg`,
-    /// ledgered 2026-08-20): `texture = −100` was a FULL Gaussian blur — the
-    /// old negative branch's transfer is `1 − |amount|·(1 − G)`, which at the
-    /// endpoint is `G` exactly, so every scale finer than the radius went to
-    /// zero. (R29 B8 then measured Lightroom itself: its negative end is a
-    /// broadband HIGH-SHELF that also takes ~28 % out of a 4 px pattern — so
-    /// this test pins the improvement over the pre-R28 full blur, NOT
-    /// agreement with Lightroom; see `texture_pass`'s doc for the measured
-    /// curve and the registered replacement.)
+    /// Nine periods × five ladder steps against the closed form of
+    /// b8-analysis-2 §6-1, at the σ pair a 6240 × 4160 render raster asks for
+    /// (σ₁ = 12.9938 px, σ₂ = 1.1740 px) — the raster the ground truth was
+    /// measured on. The probe is a SYNTHETIC sinusoid, not a photograph: the
+    /// closed form is an LTI model and only an LTI probe can say whether this
+    /// implementation realises it. Lightroom's own column is quoted beside it
+    /// in [`TEXTURE_ANCHOR_CLOSED`]'s doc as ground truth and is NOT asserted —
+    /// the operator is amplitude-adaptive, so the measured column carries that
+    /// frame's scene dependence and belongs in a comment, not an assertion.
     ///
-    /// This test states the SHAPE against the OLD branch (the ground-truth
-    /// fit is `texture_pass`'s registered follow-up, not this test's job):
-    /// at the endpoint a fine pattern keeps
-    /// most of its contrast while a mid-band pattern loses most of its. The old
-    /// operator is not described here, it is CALLED — `unsharp_luma` at
-    /// `amount = −1` and the same radius IS the pre-R28 branch — so the
-    /// comparison is against the real thing and reverting `texture_pass` makes
-    /// the two identical, which fails the first assertion.
+    /// **Tolerance ±0.02, and it is a budget, not a round number** (§6-3): the
+    /// model's own rms residual 0.0048 and max residual 0.0163, the
+    /// cross-resolution leave-out rms 0.0048, and the JPEG noise bias < 0.0040.
+    /// **Do not widen it to admit an implementation** — the whole point of the
+    /// grid is that it rejected three cheaper kernel schemes (the numbers are
+    /// in [`texture_negative_pass`]'s doc). As shipped the worst anchor sits at
+    /// 0.0037, a fifth of the budget.
     ///
-    /// Measured on this frame (800 px, radius 4, fine radius 1), contrast kept
-    /// at `texture = −100`:
-    ///
-    /// ```text
-    ///            4 px tone     16 px tone
-    ///   now       0.963          0.294
-    ///   pre-R28   0.001          0.174
-    /// ```
-    ///
-    /// i.e. the endpoint went from "erases the 4 px tone" to "keeps 96 % of it",
-    /// while still taking 71 % out of the mid band. The thresholds below are set
-    /// well inside those numbers so box-blur arithmetic drift cannot flip the
-    /// test without the SHAPE having actually changed.
+    /// A 2048 × 64 strip rather than a 4160 px square: σ is a PARAMETER of
+    /// `texture_negative_pass`, the stripes are constant down the frame so the
+    /// vertical passes are exactly identity, and 2048 px carries eight cycles
+    /// of the longest anchor with the sampled window kept clear of the clamped
+    /// borders.
     #[test]
-    fn texture_at_minus_100_is_band_limited_not_a_full_blur() {
-        // 800 px short edge → radius 4, fine radius 1: the band this endpoint
-        // removes sits between them, and 4 px / 16 px straddle it.
-        let (w, h) = (800usize, 800usize);
-        let recipe = EditRecipe { texture: -100.0, ..Default::default() };
-        let survives = |period: usize| -> (f32, f32) {
+    fn texture_negative_hits_the_forty_five_lightroom_anchors() {
+        let (w, h) = (2048usize, 64usize);
+        // THE RASTER THE GROUND TRUTH WAS MEASURED ON — read through the
+        // shipping function, so a change to the short-edge fractions or to the
+        // `min(w, h)` normalisation moves the whole grid.
+        let (sigma_coarse, sigma_fine) = texture_sigmas(6240, 4160);
+        let mut worst = 0.0f32;
+        let mut worst_at = (0.0f32, 0.0f32);
+        for (pi, &period) in TEXTURE_ANCHOR_PERIODS.iter().enumerate() {
             let src = stripe_frame(w, h, period);
             let before = stripe_contrast(&src, w, h);
-            let mut new = src.clone();
-            apply_develop_anon(&mut new, w, h, &recipe);
-            // The PRE-R28 branch, called rather than paraphrased.
-            let mut old = src.clone();
-            let radius = ((0.005 * w.min(h) as f32).round() as usize).max(2);
-            unsharp_luma(&mut old, w, h, radius, -1.0, false);
-            (
-                stripe_contrast(&new, w, h) / before,
-                stripe_contrast(&old, w, h) / before,
-            )
-        };
-        let (fine_new, fine_old) = survives(4);
-        let (mid_new, mid_old) = survives(16);
-        eprintln!(
-            "texture −100: fine 4px {fine_new:.3} (was {fine_old:.3}), mid 16px {mid_new:.3} (was {mid_old:.3})"
-        );
-
-        // 1) FINE DETAIL SURVIVES. This is the assertion the old branch fails:
-        //    a full blur at radius 4 leaves a 4 px pattern nothing at all.
+            for (si, &t) in TEXTURE_ANCHOR_STEPS.iter().enumerate() {
+                let mut got = src.clone();
+                texture_negative_pass(&mut got, w, h, t, sigma_coarse, sigma_fine, |_, _, _| 1.0);
+                let transfer = stripe_contrast(&got, w, h) / before;
+                let want = TEXTURE_ANCHOR_CLOSED[pi][si];
+                let dev = (transfer - want).abs();
+                if dev > worst {
+                    worst = dev;
+                    worst_at = (period, t);
+                }
+                assert!(
+                    dev <= 0.02,
+                    "anchor {period:.4} px @ t={t:.2}: got {transfer:.4}, closed form {want:.4}, \
+                     off by {dev:.4} — the ±0.02 budget is b8-analysis-2 §6-3 and is not the \
+                     thing to widen"
+                );
+            }
+        }
+        eprintln!("texture anchors: worst |dev| {worst:.4} at period {:.4} px, t={:.2}", worst_at.0, worst_at.1);
+        // …and the grid must actually be TIGHT, or a future implementation
+        // could drift most of the way across the budget unnoticed. 0.006 is
+        // chosen against a measurement, not for roundness: the shipped kernels
+        // sit at 0.0037, and dropping just the Gaussian-semigroup correction
+        // (blurring the fine plane by the whole σ₁ instead of the residual σ′,
+        // a 4 % σ error) takes the grid to 0.0092 while still inside ±0.02.
+        // The arithmetic here is plain f32 with no reordering and no
+        // contraction, so there is no platform drift for the margin to absorb.
         assert!(
-            fine_new > 0.70,
-            "a 4 px pattern must keep most of its contrast at texture −100, kept {fine_new:.3}"
+            worst < 0.006,
+            "the shipped kernels measured 0.0037 across this grid; {worst:.4} means the filter \
+             changed, not that the budget was always this loose"
+        );
+    }
+
+    /// R29 Batch-8-2 — the SHAPE, and the two operators it supersedes.
+    ///
+    /// The acceptance grid above pins the numbers; this pins what the numbers
+    /// MEAN, which is the claim two previous designs got wrong:
+    ///
+    /// * **pre-R28** ran `unsharp_luma` at `amount = −1`, whose transfer is
+    ///   `G` exactly — a full Gaussian blur that erased fine detail (measured
+    ///   in the visual-inspection pack, σ −92 %). It is CALLED here, not
+    ///   paraphrased, so the comparison is against the real thing.
+    /// * **R28 Batch-5** replaced it with a NOTCH — `1 − |t|·(G_f − G_c)`,
+    ///   returning to 1 at both spectral ends — and R29 B8-2 refuted the shape:
+    ///   Lightroom's negative Texture is a monotone HIGH-SHELF, taking MOST out
+    ///   of the finest scales, where the notch kept 0.9992 of a 4 px pattern.
+    ///
+    /// So monotonicity is the historical assertion: any notch — including the
+    /// one this file shipped in v0.34.0 — turns back up at the fine end and
+    /// fails it.
+    #[test]
+    fn texture_negative_is_a_monotone_high_shelf_not_a_notch_and_not_a_blur() {
+        let (w, h) = (2048usize, 64usize);
+        let (sigma_coarse, sigma_fine) = texture_sigmas(6240, 4160);
+        // The pre-R28 operator's own radius on that raster: 0.5 % of 4160.
+        let old_radius = ((0.005 * 4160.0_f32).round() as usize).max(2);
+        let mut curve = Vec::new();
+        for &period in TEXTURE_ANCHOR_PERIODS.iter() {
+            let src = stripe_frame(w, h, period);
+            let before = stripe_contrast(&src, w, h);
+            let mut now = src.clone();
+            texture_negative_pass(&mut now, w, h, 1.0, sigma_coarse, sigma_fine, |_, _, _| 1.0);
+            let mut pre_r28 = src.clone();
+            unsharp_luma(&mut pre_r28, w, h, old_radius, -1.0, false);
+            curve.push((
+                period,
+                stripe_contrast(&now, w, h) / before,
+                stripe_contrast(&pre_r28, w, h) / before,
+            ));
+        }
+        for (p, now, old) in &curve {
+            eprintln!("texture −100 @ {p:8.4} px: now {now:.4}, pre-R28 {old:.4}");
+        }
+
+        // 1) MONOTONE from coarse to fine. `TEXTURE_ANCHOR_PERIODS` runs long
+        //    period → short, so the transfer must never rise.
+        for pair in curve.windows(2) {
+            let (pa, ha, _) = pair[0];
+            let (pb, hb, _) = pair[1];
+            assert!(
+                hb <= ha + 1e-3,
+                "a high shelf never turns back up: {pa:.4} px keeps {ha:.4} but {pb:.4} px \
+                 keeps {hb:.4} — that is the notch shape B8-2 refuted"
+            );
+        }
+
+        // 2) The fine end is where MOST is taken, and the plateau is the
+        //    model's own `1 − (A₁+A₂) = 0.5227`, approached from above.
+        let (_, fine_now, fine_old) = *curve.last().expect("nine anchors");
+        assert!(
+            (0.50..0.60).contains(&fine_now),
+            "at −100 the finest anchor must sit on the plateau (0.5227), kept {fine_now:.4}"
         );
         assert!(
             fine_old < 0.05,
-            "the pre-R28 branch really did erase it ({fine_old:.3}) — if this fails the \
+            "the pre-R28 branch really did erase it ({fine_old:.4}) — if this fails the \
              comparison is not measuring what the ledger says it measures"
         );
 
-        // 2) …and the MID BAND still drops, or this is not a smoothing control
-        //    at all, merely a weaker one.
+        // 3) …while the COARSE end is nearly untouched: H(ν→0) = 0.9996 on the
+        //    clean base, and B8's +1.8 % low-frequency LIFT was pure capture
+        //    sharpening, so a value above 1 here would be re-importing the
+        //    confound the second batch removed.
+        let (_, coarse_now, _) = curve[0];
         assert!(
-            mid_new < 0.55,
-            "a 16 px pattern must lose most of its contrast at texture −100, kept {mid_new:.3}"
+            (0.98..=1.0).contains(&coarse_now),
+            "a 256 px pattern must survive at −100 and must NOT be lifted above 1, kept \
+             {coarse_now:.4}"
         );
-        assert!(
-            mid_new < fine_new * 0.75,
-            "mid must drop FURTHER than fine — that ordering is the whole difference \
-             between a band control and an amount cap (fine {fine_new:.3}, mid {mid_new:.3})"
-        );
-        assert!(mid_old < mid_new, "the old branch smoothed the mid band at least as hard");
+    }
 
-        // 3) ONE calibration: the negative half is the same operator inside a
-        //    mask as outside it, bit for bit — the law the positive half is
-        //    already pinned to two tests above.
-        let src = stripe_frame(w, h, 16);
+    /// R29 Batch-8-2 — the σ model and the preview clamp, in one test because
+    /// they are one decision: σ binds to the RENDER raster's short edge, and an
+    /// arm whose σ has gone sub-pixel on that raster is dropped rather than
+    /// approximated (user ruling 2026-08-21).
+    #[test]
+    fn texture_sigmas_track_the_render_rasters_short_edge_and_clamp_sub_pixel_arms() {
+        // The measurement raster, both ways round: `min(w, h)`, never the first
+        // argument and never the delivery size.
+        let (c, f) = texture_sigmas(6240, 4160);
+        assert!((c - 12.9938).abs() < 1e-3, "σ₁ at short edge 4160 is 12.9938 px, got {c:.4}");
+        assert!((f - 1.1740).abs() < 1e-3, "σ₂ at short edge 4160 is 1.1740 px, got {f:.4}");
+        assert_eq!(texture_sigmas(4160, 6240), (c, f), "the SHORT edge, whichever axis it is on");
+        // …and it is proportional, not a fixed pixel count: half the raster,
+        // half the σ. (Which reading Lightroom uses was settled at 16×
+        // separation — b8-analysis-2 §1 ruling 4.)
+        let (c2, f2) = texture_sigmas(3120, 2080);
+        assert!((c2 * 2.0 - c).abs() < 1e-3 && (f2 * 2.0 - f).abs() < 1e-3);
+
+        // The GUI preview raster (`gui/model.rs:296`: 1280 long edge, so ≈ 853
+        // short) puts σ₂ at 0.241 px — under half a pixel, so the fine arm goes.
+        let (pc, pf) = texture_sigmas(1280, 853);
+        assert!(pf < TEXTURE_MIN_SIGMA_PX, "preview σ₂ = {pf:.4} px is the clamped case");
+        assert!(pc >= TEXTURE_MIN_SIGMA_PX, "preview σ₁ = {pc:.4} px still renders");
+        // 2080 is the first common raster where the fine arm survives — the
+        // half-size export of the fixture set.
+        assert!(texture_sigmas(3120, 2080).1 >= TEXTURE_MIN_SIGMA_PX);
+
+        // The clamp is visible in the pixels, not just in the constants: on the
+        // preview raster the fine arm's share of the depth is simply absent, so
+        // a 3 px pattern keeps MORE than the full model would leave it.
+        let (w, h) = (1024usize, 64usize);
+        let src = stripe_frame(w, h, 3.0);
+        let before = stripe_contrast(&src, w, h);
+        let transfer = |sc: f32, sf: f32| {
+            let mut d = src.clone();
+            texture_negative_pass(&mut d, w, h, 1.0, sc, sf, |_, _, _| 1.0);
+            stripe_contrast(&d, w, h) / before
+        };
+        let preview = transfer(pc, pf);
+        // The same coarse arm with a fine arm that is NOT sub-pixel, so the
+        // comparison isolates the clamp and not the σ pair.
+        let both_arms = transfer(pc, 1.0);
+        eprintln!("preview clamp @ 3 px: fine arm off {preview:.4}, fine arm on {both_arms:.4}");
+        assert!(
+            preview > both_arms + 0.15,
+            "the clamped preview must be visibly WEAKER (higher transfer) than a rendered fine \
+             arm — off {preview:.4}, on {both_arms:.4}"
+        );
+
+        // Below a 228 px short edge even the coarse arm's box³ radius rounds to
+        // zero, and the pass declines rather than mis-applying the fine arm's
+        // high-pass at the coarse arm's amplitude.
+        let tiny = texture_sigmas(300, 200);
+        let mut small = stripe_frame(32, 32, 4.0);
+        let untouched = small.clone();
+        texture_negative_pass(&mut small, 32, 32, 1.0, tiny.0, tiny.1, |_, _, _| 1.0);
+        assert_eq!(
+            frame_bits_fnv64(&small),
+            frame_bits_fnv64(&untouched),
+            "a 200 px short edge has no representable arm left — the pass must be a no-op"
+        );
+    }
+
+    /// ONE calibration: the negative half is the same operator inside a mask as
+    /// outside it, bit for bit — the law the positive half is already pinned to
+    /// two tests above, restated on the branch that was rebuilt.
+    #[test]
+    fn mask_negative_texture_at_full_coverage_is_the_global_one_bit_for_bit() {
+        let (w, h) = (800usize, 800usize);
+        let recipe = EditRecipe { texture: -100.0, ..Default::default() };
+        let src = stripe_frame(w, h, 16.0);
         let mut global = src.clone();
         apply_develop_anon(&mut global, w, h, &recipe);
+        assert_ne!(
+            frame_bits_fnv64(&src),
+            frame_bits_fnv64(&global),
+            "global texture −100 must move this frame, or the comparison below is vacuous"
+        );
         let mut local = src.clone();
         apply_develop_anon(
             &mut local,

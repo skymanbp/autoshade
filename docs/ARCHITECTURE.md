@@ -850,28 +850,43 @@ saturation/vibrance → noise reduction → sharpening → local adjustments
 (linear/radial/bitmap masks).
 
 Two R25 additions ride existing stages rather than adding one. **Texture**
-(`render::texture_pass`) is a small-radius detail operator (0.005·min(w,h),
-floor 2), placed between clarity and saturation for ACR's Basic-panel order and
-called by the global stage and the mask arm alike — so 「Texture +30」 means the
-same structure globally and inside a mask, on a 1280 px preview and at 61 MP.
-**Its two halves are not the same operator, since v0.34.0.** Positive is the
-plain `unsharp_luma` of clarity at that radius, measured against Lightroom in
-R27. Negative is **band-limited**: it subtracts `blur(r/4) − blur(blur(r/4), r)`
-rather than the full high-pass, so the transfer returns to 1 at both ends of the
-spectrum and dips only in the middle (the coarse plane is the fine one blurred
-further, so the band is bounded by the fine blur's own response). The old negative half ran the same
-unsharp with a negative amount, whose endpoint is exactly the blur — 「Texture
-−100」 was a full Gaussian blur that erased edges and fine detail, which the
-visual-inspection package measured (σ −92 %) and Lightroom's mid-band control
-does not do. **This IS a rendering change for every negative texture value,
-global and per mask.** There is no Lightroom ground truth in this repository for
-the negative transfer curve, so the fine-radius fraction and the notch depth are
-OURS, chosen to keep the endpoint band-limited, not fitted to Adobe — the same
-stance `manual_vignette_lut` takes, and the XMP still carries the raw slider so
-Lightroom re-renders it with its own model. What is pinned by test is the SHAPE
-(`texture_at_minus_100_is_band_limited_not_a_full_blur`: at −100 a 4 px tone
-keeps 96 % of its contrast, where the old branch left 0.1 %, while a 16 px tone
-still loses 71 %). **Manual CA** (`ca_r`/`ca_b`) folds into the
+(`render::texture_pass`) is a small-radius detail operator placed between
+clarity and saturation for ACR's Basic-panel order and called by the global
+stage and the mask arm alike — so 「Texture +30」 means the same structure
+globally and inside a mask. **Its two halves are not the same operator.**
+Positive is the plain `unsharp_luma` of clarity at 0.005·min(w,h) (floor 2),
+measured against Lightroom in R27 and untouched since. Negative is **fitted to
+Lightroom, since R29 Batch-8-2** (`render::texture_negative_pass` — two
+controlled ladders, the second on a clean base after the first turned out to
+have been shot with capture sharpening at maximum):
+
+```text
+l' = l − w(t)·[ A₁·(l − G_σ₁∗l) + A₂·(l − G_σ₂∗l) ],  t = |slider|/100
+A₁ = 0.172443  σ₁ = 0.0031235·min(w,h)      w(t) = t(1+d)/(1+d·t)
+A₂ = 0.304888  σ₂ = 0.0002822·min(w,h)      d    = 0.558583
+```
+
+Two low-passes mixed in **parallel** (not cascaded), scaled by a hyperbolic
+depth law. The shape is a monotone **high shelf** — at −100 a 256 px tone keeps
+0.992 and the finest scales settle on the plateau 1 − (A₁+A₂) = 0.523 — and 45
+acceptance anchors (nine periods × five ladder steps, b8-analysis-2 §6-3) are
+pinned as a test at ±0.02, where the shipped kernels measure 0.0037. σ binds to
+the **render raster's** short edge, adjudicated at 16× separation by a
+two-resolution export pair; this engine develops at full resolution and resizes
+last (`main.rs:891-894`), so that is already what `texture_pass` is handed. The
+fit only holds in the sRGB-gamma domain, which is where the develop buffer
+already lives. **This IS a rendering change for every negative texture value,
+global and per mask** — the second such change on this branch: v0.34.0 replaced
+the pre-R28 full Gaussian blur (whose endpoint erased fine detail, σ −92 % in
+the visual-inspection package) with a band-limited **notch**, and R29 B8-2
+refuted the notch's shape outright — Lightroom takes MOST out of the finest
+scales, where the notch kept 0.9992 of a 4 px pattern against Lightroom's 0.57.
+Two honest limits stay registered rather than papered over: Lightroom's operator
+is amplitude-adaptive (not LTI), so a fixed kernel matches the *ensemble*; and
+on the 1280 px GUI preview σ₂ falls to 0.241 px, so that arm is **clamped off**
+and the preview's negative texture is weaker than the export's by up to 0.076 in
+transfer (user ruling: clamp and disclose). The XMP still carries the raw slider
+so Lightroom re-renders it with its own model. **Manual CA** (`ca_r`/`ca_b`) folds into the
 per-channel radial factor the lens-profile CA correction already builds
 (`MANUAL_CA_PER_UNIT = 2e-5` per slider unit, i.e. ±0.2 % of the half-diagonal
 at the ends — derived beside the constant), so it is a scaling of an existing
