@@ -423,6 +423,42 @@ GUI 与导出路径——原生另存对话框本体不可自动化，验收=对
 
 ## 当前状态（已完成，勿重做）
 
+- **R29 收口批 C1+C3/C4 已落地（2026-08-21，未发版，`d03abaa`）：旋转
+  数值重写笔刷 dab 流 + 分割侧五项收口——「不留遗留项」令的工程半场**。
+  **C1（拍板六兑现）**：`render::CoordFrame` 类型化补上缺失输入（转前帧
+  `W/H`），`orient_recipe_coords` 第三参、四调用点全供帧（era-0 迁移=
+  传感器矩形经 memo 化 `source_frame_memo`；rotate=懒读
+  `frame_size_turned` 且仅当 `recipe_has_brush_strokes`，读不到帧＝报错
+  不半转；XMP 读侧=源矩形、写侧=`displayed()`）；`d` 过 `orient_point`、
+  `r`/`crs:Radius` 仅四换轴态按 `W/H` 缩放、`f`/`h` 不动；AiMask 的
+  `crs:Gesture` 同 payload 同重写；`recipe_has_raster_masks` 收回只剩
+  Bitmap（名副其实）。落格式=LR 实测六位定点（`LR_DAB_DECIMALS`，
+  用户库 census 全形一致），纯旋转下十进制格闭合＝3:2 竖幅往返落回
+  原文数字（测试钉字面 `crs:Radius="0.582157"`）；**接受成本披露**：
+  旋转过（含从未动过的竖幅）照片 republish 的 dab 流为计算值非拷贝
+  （非 3:2 帧 ≤1e-6 内），未旋转横幅零变化；brush-only 配方写 XMP 新增
+  一次画幅读取＝顺手闭「显示帧笔刷配传感器帧 tiff 块」潜伏洞。
+  **C3/C4（B4 三登记+store+文档全闭）**：`segment_file` 回传
+  `SegmentReport{backend,birefnet_deps}`（stdout 两行=合同、Rust 侧测试
+  钉拼写），GUI 状态行具名后端+回退升 Error toast 带补救；alpha 旁
+  `ai-mask-*.backend` 三行版本化标记+`--probe-backend` 能力探针（实测
+  4.3s/0.1s、进程 memo）驱动**一次性**回退换代（比对「写入时能力 vs
+  今日能力」＝digest 坏机不死循环；unknown 永不当 yes）；sky 七文件+
+  ADE20K 类表全 sha256+字节钉版 `local_files_only`+`use_fast=False` 钉
+  （transformers 5.2 换 Fast 处理器实测归一化张量 max|Δ|0.0175＝静默改
+  蒙版字节），**掘出并钉住 SKY_REVISION 从未覆盖的第二仓洞**
+  （oneformer_demo dataset 仓 moving main、`HF_HUB_OFFLINE=1` 亲证；
+  该仓无声明许可＝拍板十一裁「自写同构元数据」随文档 sweep 落）；store
+  tombstone 夹具 Drop 守卫在首个可失败点前武装（panic 对偶测试；症状
+  勘误=成功路本就幂等，真缺陷=夹具不抗 unwind 写真实中央库）；笔刷
+  release 性能实测 416ms（~1.3×，替换「快好几倍」旧猜测）。**门（合并
+  树主审亲跑）**：clippy 0×2；**812(9i)/14/132/2+2** 双配置；check_docs
+  20P0F；fonts 803/803。变异=代理 7+7 组+主审亲手 2 组（换轴条件取反→
+  Rotate90 行红；换代规则 None 当 yes→第 4 行红）全字节还原复绿。
+  **仍开（具名）**：gesture 仍不渲染（合成未测）；store 测试仍写真实
+  中央库（残留已不存活）；`audit_i18n.py` GBK 控制台报缺键遇非 GBK 字
+  符崩（既存 wart）；sky/object 训练集条款未审。
+
 - **R29 B4 已落地（2026-08-21，未发版，`790825e`）：主体分割换钉版通用
   BiRefNet——R29 全部批次至此收官**。对照包（b4-inspection/，九帧三臂）
   先行+用户拍板五：**通用版 ZhengPeng7/BiRefNet@e2bf8e4460fc，非 R27
