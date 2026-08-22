@@ -420,7 +420,7 @@ GUI 与导出路径——原生另存对话框本体不可自动化，验收=对
 |---|---|---|
 | **M-A** | 一组新的「反推瞎搞」复现对（RAW + 参考成片），给联合梯子建真实基线 | ✅ R24 自采六对真同帧 |
 | **M-B** | 一次 LR 采样实验的 sidecar 族：①径向旋到已知角度 ②径向组件组合 ③含局部点曲线的蒙版 ④AI/画笔蒙版 | ✅ **全部交齐**。R24 自采 160 份取证覆盖③④与阴性结果；**①已知角度 ✅ 2026-08-18 十二张受控导出已交，已在 R26 v0.32.0 全部消费**；~~Defringe 非零仍欠~~ **← 2026-08-19 勘误：Defringe 非零同在 2026-08-18 那批里已交**（`_DSC9597.xmp: crs:DefringePurpleAmount="10"`、`DefringePurpleHueLo="19"`、`DefringePurpleHueHi="49"`；同批另七份全带静息块 `0/30/70` + `0/40/60`，反过来独立确证 R25 选的非零默认）。该行原是一次部分编辑的残留，不是判断 |
-| **M-C** | `f944ef3` 那 147 张 RAW+xmp 对照集是否还在、路径确认 | ✅ R25 全量重跑（数字见 v0.31.0 条）→ **R27 第三次尝试落地成新基线（2026-08-19）**：HEAD `f43dd85`、中转端点（gpt-5.6-sol）+ `--jobs 3` 并行、147/147 全 done、**双流零回退**、约 38 分钟；`~/.claude/plans/r27-materials/mc-eval-147-r27.txt` 自此为唯一参照，R25 降为历史。前两次尝试在案：#1 死于 83/147 commit 内存墙（Batch-7 已根治）、#2 有 2 条中转上游 `stream_read_error` 回退按判据废稿。头条：**gap 15.5%；蒙版拒收 2.35→0.05 张/照（Batch-4 导入根修实证）；whites 偏置 +22.55→+16.20、blacks −14.18→−10.87** → **v0.34.0 重基线接替（2026-08-20，B1a 重试+续传首个实战）**：attempt-1/2 各废于一条中转流错（`response.failed`，判据执行）；attempt-3 单进程 147 全 done 但 **5 回退**（4×中转 http 524 计费不明类＋1 畸形 JSON）+ **1 硬败**（Claude 529 过载）＝报告混入启发式行弃用；**续跑 141 行免费载入＋6 张补买零回退**（提源行 `147 rows: 141 loaded, 6 measured, 0 fallback`）→ `~/.claude/plans/r28-materials/mc-eval-147-v0340-resume1.txt` 为现行唯一基线（同目录 attempt-3 全量转录留档），R27 降为历史。头条：**gap 16.0%**（vs R27 15.5%——R28 5b 四条 `color_grade.*_hue` 行口径改两侧过阈自报跨版不可比，其余行可比）；whites +16.12 / blacks −10.60（与 R27 同量级）；蒙版拒收 0.05 张/照持平；AI 蒙版 1.99 vs 用户 2.30 张/照。**登记 R29 候选**：524/529 类非流死亡瞬态传输失败是否纳入重试（本次漏斗 6/147≈4%，524 属计费不明须拍板；已落 `74ffa25`）；W_EMB 两臂标定仍欠第二臂（已于 v0.35.0 判分窗闭合，见下） → **v0.35.0 重基线接替（2026-08-21，拍板八，发布位 exe）**：`~/.claude/plans/r29-materials/mc-eval-147-v0350-resume1.txt` 为现行唯一基线（`147 rows: 145 loaded, 2 measured, 0 fallback`），v0.34.0 降为历史。头条：**gap 17.7%**（vs 16.0%——**⚠ 双重跨版不可比**：R29 七项渲染硬变更 + **verifier 从 oauth/opus 换成中转 gpt-5.6-sol**（opus 经继承的中转 env 产 16% 畸形 JSON 被迫切换，用户拍板），差值混 verifier 效应非纯渲染信号）；whites +14.85 / blacks −10.91；蒙版拒收 0.05 张/照持平；AI 蒙版 1.99 vs 2.30 持平。W_EMB 标定同窗闭合（离线 leave-one-out，settings 目标平坦 CI 跨零 → **默认 2.0 不动**；细账见「当前状态」判分条 + V2_PLAN §7-8）。判读细读归用户 |
+| **M-C** | `f944ef3` 那 147 张 RAW+xmp 对照集是否还在、路径确认 | ✅ R25 全量重跑（数字见 v0.31.0 条）→ **R27 第三次尝试落地成新基线（2026-08-19）**：HEAD `f43dd85`、中转端点（gpt-5.6-sol）+ `--jobs 3` 并行、147/147 全 done、**双流零回退**、约 38 分钟；`~/.claude/plans/r27-materials/mc-eval-147-r27.txt` 自此为唯一参照，R25 降为历史。前两次尝试在案：#1 死于 83/147 commit 内存墙（Batch-7 已根治）、#2 有 2 条中转上游 `stream_read_error` 回退按判据废稿。头条：**gap 15.5%；蒙版拒收 2.35→0.05 张/照（Batch-4 导入根修实证）；whites 偏置 +22.55→+16.20、blacks −14.18→−10.87** → **v0.34.0 重基线接替（2026-08-20，B1a 重试+续传首个实战）**：attempt-1/2 各废于一条中转流错（`response.failed`，判据执行）；attempt-3 单进程 147 全 done 但 **5 回退**（4×中转 http 524 计费不明类＋1 畸形 JSON）+ **1 硬败**（Claude 529 过载）＝报告混入启发式行弃用；**续跑 141 行免费载入＋6 张补买零回退**（提源行 `147 rows: 141 loaded, 6 measured, 0 fallback`）→ `~/.claude/plans/r28-materials/mc-eval-147-v0340-resume1.txt` 为现行唯一基线（同目录 attempt-3 全量转录留档），R27 降为历史。头条：**gap 16.0%**（vs R27 15.5%——R28 5b 四条 `color_grade.*_hue` 行口径改两侧过阈自报跨版不可比，其余行可比）；whites +16.12 / blacks −10.60（与 R27 同量级）；蒙版拒收 0.05 张/照持平；AI 蒙版 1.99 vs 用户 2.30 张/照。**登记 R29 候选**：524/529 类非流死亡瞬态传输失败是否纳入重试（本次漏斗 6/147≈4%，524 属计费不明须拍板；已落 `74ffa25`）；W_EMB 两臂标定仍欠第二臂（已于 v0.35.0 判分窗闭合，见下） → **v0.35.0 重基线接替（2026-08-21，拍板八，发布位 exe）**：`~/.claude/plans/r29-materials/mc-eval-147-v0350-resume1.txt` 为现行唯一基线（`147 rows: 145 loaded, 2 measured, 0 fallback`），v0.34.0 降为历史。头条：**gap 17.7%**（vs 16.0%——**⚠ 差值=verifier 效应+采样噪声，与 R29 渲染硬变更无关**（2026-08-22 勘误：eval 不渲染像素，proposer 提示词/量表跨版逐字同=`openai.rs`/`catalogue.rs` 零 diff 亲证；verifier 从 oauth/opus 换成中转 gpt-5.6-sol 系 opus 经继承中转 env 产 16% 畸形 JSON 被迫切换，verify→revise 环直接改提案数值），不构成渲染回归证据）；whites +14.85 / blacks −10.91；蒙版拒收 0.05 张/照持平；AI 蒙版 1.99 vs 2.30 持平。W_EMB 标定同窗闭合（离线 leave-one-out，settings 目标平坦 CI 跨零 → **默认 2.0 不动**；细账见「当前状态」判分条 + V2_PLAN §7-8）。判读细读归用户 |
 | **M-D** | #2 蒙版精修报错的 toast 原文（分流哪条臂） | ✅ R24 两臂都修 + 实跑否证 |
 
 ## 当前状态（已完成，勿重做）
@@ -434,14 +434,24 @@ GUI 与导出路径——原生另存对话框本体不可自动化，验收=对
   `~/.claude/plans/r29-materials/mc-eval-147-v0350-resume1.txt`。头条：
   **gap 17.7%**（vs v0.34.0 的 16.0%）；whites mean|Δ| 19.41 / bias
   +14.85、blacks 16.92 / −10.91；蒙版拒收 0.05 张/照持平；AI 蒙版
-  1.99 vs 用户 2.30 张/照持平。**⚠ 跨版可比性双重受限，判读必须带着
-  这两条**：(a) R29 七项渲染硬变更（笔刷实装/质感换形/径向 LUT/半像素
-  /蒙版换帧）本来就该动渲染面数字；(b) **verifier 换了模型**——原
+  1.99 vs 用户 2.30 张/照持平。**⚠ 跨版可比性受限——但归因要写对
+  （2026-08-22 主审勘误，接替昨夜初稿的错误归因）**：eval **不渲染
+  像素**（`judge=false` 无视觉环、`style=0` 无检索、proposer 输入=
+  相机内嵌预览+直方图），gap=提案滑杆值 vs 用户 XMP 滑杆值的纯数值
+  比较——所以 **R29 七项渲染硬变更不可能移动 gap**（初稿说「本来就
+  该动渲染面数字」是错的；亲证=`git diff v0.34.0..v0.35.0` 下
+  `openai.rs`/`catalogue.rs` **零改动**＝proposer 提示词与量表逐字
+  同，`advisor/mod.rs` +714 行全是 524/529 传输漏斗）。能动 gap 的
+  只有三个：(a) **verifier 换了模型**——原
   oauth/opus 经本会话继承的 ANTHROPIC_* 中转 env 产畸形 JSON（16%
   失败率，3/19），用户拍板切 analysis 角色到中转 gpt-5.6-sol xhigh
   （中央 Settings 五字段，原配置备份 `.bak-v0350-verifier`；试 1 张
-  合法 JSON 后全量）——所以 17.7% vs 16.0% 的差混着 verifier 效应，
-  **不是纯渲染回归信号**。跑中经历：中途 3 张 verifier 畸形 JSON 废
+  合法 JSON 后全量）——verifier 的 verify→revise 环（≤2 轮）直接改
+  提案数值，换 verifier=换这只手；(b) proposer 采样噪声（temperature
+  非 0 的跨跑抖动，v0.34.0 两次尝试间同样存在）；(c) R28 5b 四条
+  `*_hue` 行口径（已自报不可比）。**判读结论：17.7% vs 16.0% 的
+  +1.7pt 是 verifier 效应+采样噪声，与 R29 渲染工作无关，不构成对
+  v0.35.0 任何渲染变更的回归证据**。跑中经历：中途 3 张 verifier 畸形 JSON 废
   首跑（state 头拒混 opus/gpt 两 verifier，正确拒绝）→ 归档
   `mc-eval-147-v0350-opus-verifier-aborted.jsonl` 后全新跑；会话重启
   期一度双 eval 进程并发写同一 state（stopped 通知≠进程死，教训），
