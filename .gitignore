@@ -43,3 +43,7 @@ desktop.ini
 .claude/
 
 .ce/
+
+# Stable local install dir (desktop shortcut target; survives cargo clean).
+# The v1.0.0 installer formalizes the install location; dist/ stays local.
+/dist/
