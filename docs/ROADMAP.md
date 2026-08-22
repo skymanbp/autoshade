@@ -426,6 +426,40 @@ GUI 与导出路径——原生另存对话框本体不可自动化，验收=对
 
 ## 当前状态（已完成，勿重做）
 
+- **R30 B1 已落地（2026-08-22，`ef5a71a`：零素材六项 ⑤⑥⑧⑨⑩⑪，
+  Codex gpt-5.6-sol 实现（中转断粮一次续做）+主审全量 diff 对抗复审
+  三发现归并一次修复批+亲跑门+2 变异）**。**⑪ eval 低 n 稳健化（本批
+  最大项）**：报告行 n<20 加 `[low n]` 标注+图例行（阈值常数
+  `LOW_N_ANNOTATION_THRESHOLD=20`，论据=配对分析 8.48× 不稳定比）；
+  头条旁增补充行「Supplementary n-weighted gap」＝标量块内按 n 重分、
+  项结构与头条同构（等 n 时精确还原头条，测试钉死）；**头条定义/state
+  文件/n≥20 行逐字节不动**（byte-stability 测试钉死）＝跨版可比性
+  不变式。**⑧**：advisor Status 臂错误体改走 `into_text_capped`（house
+  BODY_CAP；vendored ureq 自带 10MiB 帽故属家规对称非活洞）+超帽测试。
+  **⑨**：529 计费句改 provider 条件式真话（Anthropic 原生=拒绝先于
+  生成不二次计费；非 Anthropic 中转可能先完工后 529=一次重试可能
+  双计费）——计费句绑定测试双向钉死；**同类扫尾**=eval 汇总句从只提
+  524 扩为 524/529 双类中转双计费风险。**⑩**：retry_disclosure
+  「recovered」精确为外层响应恢复语义。**⑥**：F2 census 六数第一方
+  重导（177 sidecars/42 Aggregate/105 Image/398 Paint/1081 Mask/40
+  Gesture、0 解析失败），xmp/recipe 陈旧总数改注 provenance（纯注释
+  零行为变更亲验）；check_docs 新增 census claim（`AUTOSHOP_CENSUS_ROOT`
+  未设=SKIP 保 CI、设了=PASS 亲验）→23 claims；机器路径从公开注释
+  移除。**⑤**：store `*_in` 根参数孪生补全——legacy-tombstone 测试
+  从写真实用户 `%LOCALAPPDATA%` 改临时根（原注释自承的风险除净）。
+  **主审复审三发现（已修）**：补充行公式初版塌标量为 1 项除以
+  (1+曲线)=稀释伪影支配（≈3-4% vs 17.7% 的对比讲的是除法不是 n 加权）
+  →改同构重分；529 中转双计费漏扫 eval 汇总句；`D:\Photography` 入
+  公开注释。**门（主审亲跑）**=clippy 0×2+**822(9i)/14/132/2+2**
+  （+6 净集差：eval×5+advisor×1，基数 816）+check_docs 23 claims
+  20P0F3S（census 臂 21P2S 亲验）；**主审 2 变异**（阈值 20→21 红/
+  529 计费句换旧红）全红还原。**事故登记**：主审 M2 首跑 sed 模式
+  空变异+`git checkout` 误抹未提交 advisor 改动——按上下文 diff 六块
+  重施，diff 形状 45+9=54 与原批恰合+靶向测试绿；教训=未提交批上
+  变异只用 Edit 往返。B1 报告存档
+  `scratchpad/task-b1-codex2.log`（10MB，会话级）。**余 R30 批**：
+  B2（②须用户重导 sidecar）/B3（①）/B4（③）/⑦④ 素材依赖。
+
 - **M-C 同版本重复跑落账（2026-08-22，拍板②兑现；Codex 配对分析
   `scratchpad/mc-repeat-paired-analysis.md` 存档→
   `~/.claude/plans/r29-materials/mc-repeat-paired-analysis.md`，主审四点
