@@ -425,6 +425,24 @@ GUI 与导出路径——原生另存对话框本体不可自动化，验收=对
 
 ## 当前状态（已完成，勿重做）
 
+- **v0.35.0 已发布（2026-08-21，tag → `e75f728`，发布链收官）**。
+  发布页 `https://github.com/skymanbp/autoshop/releases/tag/v0.35.0`，
+  发版说明置顶七项硬变更（终稿清单见 sweep 批条目）。**字节验证**：
+  cli `e48f6bbc9a6e9bf4aa98b01240eb6d733136d68320b6e79312d9b239bddfa6c6`
+  = 31,063,300 B / gui
+  `b58b7be4b5e83b3f70e33b8023aba3bcfb985a1762d6eed7e39ef1deafb9a492`
+  = 40,706,348 B，两资产回下载 `cmp` 逐位零差异后才写进 README 资产表
+  （表已从 v0.34.0 替换）。**tag 位门**：CI 双 OS 绿（run 32541861238）；
+  电池 816(9i)/14/132/2+2 双配置；`check_docs --gates` 22/22；fonts
+  803/803；audit_i18n 0；env 门三跑在 e75f728 复跑 9 passed/0 failed
+  （zoo 9/9 九厂牌、M-B 7 sidecars/42 masks 0 拒收、LR 探针——细目输出
+  在 c8b7d54 跑亲验，e75f728 与之零测试集差）。发版前独立防线=Codex
+  只读审阅裁决批（见下条，BLOCK 推翻、4 修落库后才 tag）。
+  **发布后欠两件（已拍板，接续做）**：①M-C 全量重基线+②W_EMB 第二臂
+  ——同窗两轮付费判分，跑在发布 exe 上走中转。GUI smoke 与宣传批
+  逐字批仍在用户侧。零 recipe schema 迁移义务=v0.34→v0.35 单向断裂
+  已在七项清单第 1 条披露。
+
 - **R29 Codex 只读发版审阅裁决批已落地（2026-08-21，未发版，本批）：判
   BLOCK 被主审逐条第一方核实推翻，4 修（2 码 2 文档）+ 4 登记 + 2 确认**。
   审阅=Codex gpt-5.6-sol（xhigh，中转，read-only，用户 2026-08-21 解禁指令

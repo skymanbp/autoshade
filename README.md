@@ -196,14 +196,12 @@ global/local composition, and it is written down rather than curated away.
 Each tagged release ships **both** front-ends prebuilt for Windows, with the
 byte size and sha256 of each published asset written down here after they have
 been re-downloaded and compared byte-for-byte against the local build. The
-table below is **v0.34.0's** — v0.35.0's binaries are built, verified and
-listed as the last step of cutting that tag, and until they are, an unlisted
-digest is better than an unverified one:
+table below is **v0.35.0's**, verified that way at the tag:
 
 | file | size | sha256 |
 |---|---|---|
-| `autoshop.exe` (CLI) | 30,752,116 B | `1697fe87f4eefe28b002fdede65254eeffe47de15ee872c0d0e4d262f4c07231` |
-| `autoshop-gui.exe` (desktop app) | 40,373,202 B | `53cba5b1188012e91ac20b42a0dde36a94cd29e05b1d338acb79d8d2bebb14d2` |
+| `autoshop.exe` (CLI) | 31,063,300 B | `e48f6bbc9a6e9bf4aa98b01240eb6d733136d68320b6e79312d9b239bddfa6c6` |
+| `autoshop-gui.exe` (desktop app) | 40,706,348 B | `b58b7be4b5e83b3f70e33b8023aba3bcfb985a1762d6eed7e39ef1deafb9a492` |
 
 ### Or build it
 
