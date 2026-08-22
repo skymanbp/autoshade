@@ -102,7 +102,8 @@ fn xmp_arm(
     // Clamped door (R28 2b): what the recipe's SIZE caps cut on the way in is
     // loss `import_losses` below cannot see — it reads the document, this
     // reads the recipe the document produced.
-    let (mut r, imported_clamp) = autoshop::xmp::xmp_to_recipe_clamped(text);
+    let diag = autoshop::diag::photo(p);
+    let (mut r, imported_clamp) = autoshop::xmp::xmp_to_recipe_clamped_with_diag(text, &diag);
     // Collected for EVERY consulted file — a no-op import included (the
     // persist.rs rule, Codex 32-#1 + review R12-11): a sidecar whose ONLY
     // edit is corrupt restores nothing, and the next save overwrites it in
@@ -127,7 +128,10 @@ fn xmp_arm(
     // entry in this batch channel; the window's own localized twin is
     // `util::xmp_import_line`.
     if let Some(line) =
-        autoshop::xmp::describe_import_losses(r.masks.len(), &autoshop::xmp::import_losses(text))
+        autoshop::xmp::describe_import_losses(
+            r.masks.len(),
+            &autoshop::xmp::import_losses_for_photo(text, p),
+        )
     {
         warns.push(line);
     }

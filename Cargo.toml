@@ -39,6 +39,9 @@ gui = ["dep:eframe", "dep:egui", "dep:rfd", "dep:ab_glyph", "eframe/persistence"
 [dependencies]
 anyhow = "1.0.103"
 base64 = "0.22"
+# Lightroom's MaskBrushTable objects use Brotli inside the sibling ACR store.
+# Already locked through jxl-oxide; direct because the XMP reader calls it.
+brotli-decompressor = "=5.0.3"
 # Zero-copy Vec<[f32;3]> ↔ Vec<f32> casts in the orientation stage (a 61 MP
 # portrait RAW otherwise pays three ~732 MB full-frame copies — see orient_f32).
 bytemuck = "1"
@@ -59,6 +62,9 @@ getrandom = "0.3.4"
 image = { version = "0.25", default-features = false, features = [
     "jpeg", "png", "tiff", "webp", "bmp", "gif",
 ] }
+# Integrity key for ACR content-addressed objects (not authentication). Already
+# locked through rawler; direct because MaskBrushTable verifies the target blob.
+md5 = "=0.8.0"
 rawler = "0.7.2"
 # ICC → sRGB for baked imports (the LR "Edit in…" round-trip exports ProPhoto
 # 16-bit TIFFs; treating those pixels as sRGB fed every tone decision wrong

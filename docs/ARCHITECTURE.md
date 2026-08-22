@@ -1869,11 +1869,13 @@ comments are the source of these one-liners.
 |---|---|
 | `anyhow` 1.0.103 | the application error type everything fallible returns |
 | `base64` 0.22 | the preview image goes to the vision API as a base64 `input_image` data URL, and images come back the same way |
+| `brotli-decompressor` 5.0.3 | bounded decompression of modern Lightroom `MaskBrushTable` objects from the sibling ACR store; pinned to the version already present through jxl-oxide |
 | `bytemuck` 1 | zero-copy `Vec<[f32;3]>` ↔ `Vec<f32>` casts in the orientation stage — a 61 MP portrait RAW otherwise pays three ~732 MB full-frame copies (`render::orient_f32`) |
 | `clap` 4.6.1 (`derive`) | the CLI surface: subcommands, `--jobs`, `--strength`, the rest |
 | `dotenvy` 0.15 | reads `.env` — under the trust table of §3, which is why a `.env` may carry a `Secret` and not a `Destination` |
 | `getrandom` 0.3.4 | CSPRNG bytes for the `serve` session token gating image URLs; anything seeded from the clock is guessable, which is the whole attack. Already transitive, so no new dependency |
 | `image` 0.25 | baked-source decode + every export encode. `default-features = false` and the codec set is opt-in one at a time — `jpeg`, `png`, `tiff`, `webp`, `bmp`, `gif`. avif/heic stay OUT because they mean a C toolchain (dav1d) this tree does not have; R27 added the last three only after checking each one's dependency closure (all pure Rust, no `build.rs`, no bundled C) |
+| `md5` 0.8.0 | verifies the content-addressed key of an ACR `MaskBrushTable` object before parsing it; integrity only, never authentication, and pinned to the version already present through rawler |
 | `qcms` 0.3 | ICC → sRGB for baked imports; LR's "Edit in…" exports ProPhoto 16-bit TIFFs, and treating those pixels as sRGB fed every tone decision wrong numbers. Pure Rust |
 | `rawler` 0.7.2 | RAW decode — 24 formats, 725 camera models, embedded preview, full EXIF, as-shot WB (§4.1) |
 | `rayon` 1 | row-parallel per-pixel stages; it was already in the tree (rawler's demosaic uses it), so our serial tail joins the same pool. Every conversion is per-pixel independent, so outputs stay bit-identical |

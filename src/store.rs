@@ -3760,7 +3760,7 @@ fn backup_saved_develop_unlocked(
     // so version numbers encode intent order (higher n = newer intent).
     let lr_intent = match lightroom_sidecar(src) {
         LrSidecar::Only(t) | LrSidecar::NewerThanStore(t)
-            if !crate::xmp::xmp_to_recipe(&t).is_noop() =>
+            if !crate::xmp::xmp_to_recipe_for_photo(&t, src).is_noop() =>
         {
             Some(t)
         }
@@ -4039,7 +4039,8 @@ fn snapshot_xmp_text(src: &Path, text: String) -> std::io::Result<Option<u32>> {
     if discarded_xmp_matches(&dev, &text) {
         return Ok(None);
     }
-    let mut derived = crate::xmp::xmp_to_recipe(&text);
+    let diag = crate::diag::photo(src);
+    let mut derived = crate::xmp::xmp_to_recipe_with_diag(&text, &diag);
     // A6 disclosure: numbers the import cannot read become silent neutrals
     // in this derived snapshot. Background path — the trace goes to stderr;
     // the interactive surfaces disclose the same fact at restore time.

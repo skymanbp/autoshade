@@ -932,7 +932,8 @@ fn api_recipe(request: &Request, state: &AppState) -> Result<ResponseBox> {
     let mut xmp_warn: Option<Header> = None;
     match ranked {
         crate::store::LrSidecar::NewerThanStore(text) | crate::store::LrSidecar::Only(text) => {
-            let mut r = crate::xmp::xmp_to_recipe(text);
+            let diag = crate::diag::photo(raw);
+            let mut r = crate::xmp::xmp_to_recipe_with_diag(text, &diag);
             xmp_warn = recipe_warning_header(text);
             if !r.is_noop() {
                 r.clamp();
@@ -1100,7 +1101,8 @@ fn api_recipe(request: &Request, state: &AppState) -> Result<ResponseBox> {
         };
         {
             store_answered = true;
-            let mut r = crate::xmp::xmp_to_recipe(&text);
+            let diag = crate::diag::photo(raw);
+            let mut r = crate::xmp::xmp_to_recipe_with_diag(&text, &diag);
             // First consulted file wins the disclosure slot (GUI accumulates
             // the same way) — set regardless of noop-ness.
             if xmp_warn.is_none() {
@@ -1157,7 +1159,8 @@ fn api_recipe(request: &Request, state: &AppState) -> Result<ResponseBox> {
         crate::store::embedded_packet_for_restore(raw)
     } {
         Ok(Some(text)) => {
-            let mut r = crate::xmp::xmp_to_recipe(&text);
+            let diag = crate::diag::photo(raw);
+            let mut r = crate::xmp::xmp_to_recipe_with_diag(&text, &diag);
             if xmp_warn.is_none() {
                 xmp_warn = recipe_warning_header(&text);
             }

@@ -1888,6 +1888,25 @@ pub fn import_losses(xmp: &str) -> Vec<MaskImportLoss> {
     mask_summary(scope.as_ref(), authored_by_autoshop, FrameAspect::from_xmp(xmp)).losses
 }
 
+/// [`import_losses`] with the photo identity needed to resolve a sibling ACR
+/// MaskBrushTable. The structured loss channel is already user-visible, so
+/// this re-read is silent; the recipe import emits any named table refusal.
+pub fn import_losses_for_photo(xmp: &str, photo: &std::path::Path) -> Vec<MaskImportLoss> {
+    if xmp.len() > MAX_XMP_BYTES {
+        return Vec::new();
+    }
+    let authored_by_autoshop = is_autoshop_sidecar(xmp);
+    let scope = crs_own_scope(xmp);
+    mask_summary_with_source(
+        scope.as_ref(),
+        authored_by_autoshop,
+        FrameAspect::from_xmp(xmp),
+        Some(photo),
+        None,
+    )
+    .losses
+}
+
 /// Did this sidecar's document have Lightroom's LENS PROFILE CORRECTION
 /// switched on? `None` when the document says nothing.
 ///
@@ -4398,6 +4417,18 @@ pub fn merge_recipe_into_xmp_in_frame(
     r: &EditRecipe,
     frame: Option<FrameAspect>,
 ) -> Option<MergeOutcome> {
+    merge_recipe_into_xmp_in_frame_for_photo(existing, r, frame, None)
+}
+
+/// Path-aware merge used when the base can carry MaskBrushTable references.
+/// An unchanged imported mask compares through the same ACR-backed reader and
+/// therefore keeps the base mask block verbatim instead of synthesizing Paints.
+pub fn merge_recipe_into_xmp_in_frame_for_photo(
+    existing: &str,
+    r: &EditRecipe,
+    frame: Option<FrameAspect>,
+    photo: Option<&std::path::Path>,
+) -> Option<MergeOutcome> {
     let (frame, declare_frame) = merge_frame(existing, frame);
     if existing.len() > MAX_XMP_BYTES {
         return None;
@@ -4467,7 +4498,13 @@ pub fn merge_recipe_into_xmp_in_frame(
     // attribute-only strip left the old element value in the body beside
     // the attribute we append — one document, two conflicting answers.
     let mask_scope = crs_own_scope(existing);
-    let summary = mask_summary(mask_scope.as_ref(), is_autoshop_sidecar(existing), frame);
+    let summary = mask_summary_with_source(
+        mask_scope.as_ref(),
+        is_autoshop_sidecar(existing),
+        frame,
+        photo,
+        None,
+    );
     // Preserve the base's own mask block ONLY while this develop has not
     // moved away from it. The recipe in hand is the newest intent by
     // definition — it is what is being saved right now — so once it differs,
@@ -4508,7 +4545,12 @@ pub fn merge_recipe_into_xmp_in_frame(
     // question is asked directly — DOES THE BASE HAVE A BLOCK — and the
     // answer decides both the preserve and the note.
     let preserve_masks = summary.corrections > 0
-        && (r.masks.is_empty() || r.masks == xmp_to_recipe(existing).masks);
+        && (r.masks.is_empty()
+            || r.masks
+                == photo.map_or_else(
+                    || xmp_to_recipe(existing).masks,
+                    |path| xmp_to_recipe_for_photo(existing, path).masks,
+                ));
     if summary.corrections > 0 && !preserve_masks {
         // Two shapes, because the trigger now has two shapes. The defect
         // clause was written when only a LOSSY block could reach here and
@@ -5100,17 +5142,20 @@ fn parse_curve(xmp: &str, tag: &str) -> Vec<CurvePoint> {
 /// classic-XMP encoding is our own `Bitmap` rasters (skipped by the writer, so
 /// symmetric) and Lightroom's AI `Mask/Image` masks (skipped by this reader,
 /// because the sidecar carries no pixels for them to be read from).
-fn parse_masks(
+fn parse_masks_with_source(
     xmp: &str,
     authored_by_autoshop: bool,
     frame: Option<FrameAspect>,
+    photo: Option<&std::path::Path>,
+    diag: Option<&crate::diag::Diag<'_>>,
 ) -> Vec<LocalAdjustment> {
     // Err (present-but-unterminated) imports no masks — the LOSS half of that
     // outcome is `mask_summary`'s to report, and it does.
     let Ok(Some(block)) = owned_element_body(xmp, "crs:MaskGroupBasedCorrections") else {
         return Vec::new();
     };
-    mask_summary_from_block(block, authored_by_autoshop, frame).supported
+    let mut brush_reader = MaskBrushReader::new(photo, diag);
+    mask_summary_from_block(block, authored_by_autoshop, frame, &mut brush_reader).supported
 }
 
 /// How many corrections in this sidecar produced NO mask at all — AI / depth
@@ -5135,6 +5180,22 @@ pub fn unsupported_corrections(xmp: &str) -> usize {
     let authored_by_autoshop = is_autoshop_sidecar(xmp);
     let scope = crs_own_scope(xmp);
     mask_summary(scope.as_ref(), authored_by_autoshop, FrameAspect::from_xmp(xmp)).dropped
+}
+
+pub fn unsupported_corrections_for_photo(xmp: &str, photo: &std::path::Path) -> usize {
+    if xmp.len() > MAX_XMP_BYTES {
+        return 0;
+    }
+    let authored_by_autoshop = is_autoshop_sidecar(xmp);
+    let scope = crs_own_scope(xmp);
+    mask_summary_with_source(
+        scope.as_ref(),
+        authored_by_autoshop,
+        FrameAspect::from_xmp(xmp),
+        Some(photo),
+        None,
+    )
+    .dropped
 }
 
 /// One correction's verdict. R25 P1 retired the third state ("Partial", which
@@ -5214,8 +5275,21 @@ fn mask_summary(
     authored_by_autoshop: bool,
     frame: Option<FrameAspect>,
 ) -> MaskSummary {
+    mask_summary_with_source(xmp, authored_by_autoshop, frame, None, None)
+}
+
+fn mask_summary_with_source(
+    xmp: &str,
+    authored_by_autoshop: bool,
+    frame: Option<FrameAspect>,
+    photo: Option<&std::path::Path>,
+    diag: Option<&crate::diag::Diag<'_>>,
+) -> MaskSummary {
     match owned_element_body(xmp, "crs:MaskGroupBasedCorrections") {
-        Ok(Some(block)) => mask_summary_from_block(block, authored_by_autoshop, frame),
+        Ok(Some(block)) => {
+            let mut brush_reader = MaskBrushReader::new(photo, diag);
+            mask_summary_from_block(block, authored_by_autoshop, frame, &mut brush_reader)
+        }
         Ok(None) => MaskSummary::default(),
         // The group OPENS but never closes: whatever corrections it holds
         // cannot be counted, so the one honest summary is "a loss, and there
@@ -5253,6 +5327,7 @@ fn mask_summary_from_block(
     block: &str,
     authored_by_autoshop: bool,
     frame: Option<FrameAspect>,
+    brush_reader: &mut MaskBrushReader<'_, '_>,
 ) -> MaskSummary {
     const MAX_MASKS_FROM_XMP: usize = 64;
     const DESCRIPTION_CLOSE: &str = "</rdf:Description>";
@@ -5290,7 +5365,7 @@ fn mask_summary_from_block(
         let own = correction_own_scope(seg);
         let own = Scope::new(own.as_ref());
         let name = correction_name(own, seen);
-        match classify_correction(seg, own, authored_by_autoshop, frame) {
+        match classify_correction(seg, own, authored_by_autoshop, frame, brush_reader) {
             MaskCorrectionParse::Supported(mask, reasons)
                 if summary.supported.len() < MAX_MASKS_FROM_XMP =>
             {
@@ -5740,8 +5815,672 @@ fn component_import_reasons(
 ///    an empty `<crs:Masks>` would put a construct into a sidecar that
 ///    Lightroom never writes;
 ///  * the per-stroke gates in [`parse_paint_stroke`].
-fn parse_brush_group(scope: &str, agg: &XmlComponent<'_>) -> Result<MaskGeometry, ()> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MaskBrushTableRefusal {
+    MaskBrushTableUnavailable,
+    ContainerInvalid,
+    ReferenceMismatch,
+    DigestMismatch,
+    EncodingUnsupported,
+    Corrupt,
+    LengthMismatch,
+    PayloadUnsupported,
+    PayloadInvalid,
+}
+
+impl MaskBrushTableRefusal {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::MaskBrushTableUnavailable => "MaskBrushTableUnavailable",
+            Self::ContainerInvalid => "ContainerInvalid",
+            Self::ReferenceMismatch => "ReferenceMismatch",
+            Self::DigestMismatch => "DigestMismatch",
+            Self::EncodingUnsupported => "EncodingUnsupported",
+            Self::Corrupt => "Corrupt",
+            Self::LengthMismatch => "LengthMismatch",
+            Self::PayloadUnsupported => "PayloadUnsupported",
+            Self::PayloadInvalid => "PayloadInvalid",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MaskBrushError {
+    class: MaskBrushTableRefusal,
+    detail: String,
+}
+
+impl MaskBrushError {
+    fn new(class: MaskBrushTableRefusal, detail: impl Into<String>) -> Self {
+        Self { class, detail: detail.into() }
+    }
+}
+
+// The companion is an object store, not one allocation. Its file gate follows
+// the RAW reader's per-file ceiling; the tighter gates below bound everything
+// this parser actually materialises.
+const MAX_ACR_BYTES: u64 = 4 * 1024 * 1024 * 1024;
+const MAX_ACR_DIRECTORY_ENTRIES: usize = 4_096;
+const MAX_MASK_BRUSH_BLOB_BYTES: usize = 16 * 1024 * 1024;
+const MAX_MASK_BRUSH_UNCOMPRESSED_BYTES: usize = 16 * 1024 * 1024;
+const MAX_MASK_BRUSH_RECORDS: usize = 256;
+const MAX_MASK_BRUSH_D_COUNT: usize = 65_536;
+const MAX_MASK_BRUSH_TOKENS: usize = 65_536;
+
+#[derive(Clone)]
+struct AcrEntry {
+    key: [u8; 16],
+    len: u64,
+    offset: u64,
+}
+
+#[derive(Clone)]
+struct AcrIndex {
+    path: std::path::PathBuf,
+    entries: Vec<AcrEntry>,
+}
+
+struct MaskBrushReader<'a, 'sink> {
+    acr_path: Option<std::path::PathBuf>,
+    diag: Option<&'a crate::diag::Diag<'sink>>,
+    index: Option<Result<AcrIndex, MaskBrushError>>,
+    tables: std::collections::HashMap<usize, Result<Vec<BrushStroke>, MaskBrushError>>,
+    reported: std::collections::HashSet<usize>,
+}
+
+impl<'a, 'sink> MaskBrushReader<'a, 'sink> {
+    fn new(photo: Option<&std::path::Path>, diag: Option<&'a crate::diag::Diag<'sink>>) -> Self {
+        Self {
+            acr_path: photo.map(|p| p.with_extension("acr")),
+            diag,
+            index: None,
+            tables: std::collections::HashMap::new(),
+            reported: std::collections::HashSet::new(),
+        }
+    }
+
+    fn report(&mut self, owner_at: usize, token: &str, error: &MaskBrushError) {
+        if self.reported.insert(owner_at)
+            && let Some(diag) = self.diag
+        {
+            diag.warn(format!(
+                "{}: MaskBrushTable {} refused ({})",
+                error.class.name(),
+                token,
+                error.detail
+            ));
+        }
+    }
+
+    fn table(
+        &mut self,
+        owner_at: usize,
+        token: &str,
+        expected: usize,
+    ) -> Result<Vec<BrushStroke>, MaskBrushError> {
+        if let Some(cached) = self.tables.get(&owner_at) {
+            return cached.clone();
+        }
+        let result = self.read_table(token, expected);
+        if let Err(error) = &result {
+            self.report(owner_at, token, error);
+        }
+        self.tables.insert(owner_at, result.clone());
+        result
+    }
+
+    fn read_table(
+        &mut self,
+        token: &str,
+        expected: usize,
+    ) -> Result<Vec<BrushStroke>, MaskBrushError> {
+        let key = mask_brush_key(token)?;
+        if expected > MAX_MASK_BRUSH_UNCOMPRESSED_BYTES {
+            return Err(MaskBrushError::new(
+                MaskBrushTableRefusal::LengthMismatch,
+                format!(
+                    "advertised output {expected} exceeds the {MAX_MASK_BRUSH_UNCOMPRESSED_BYTES}-byte limit"
+                ),
+            ));
+        }
+        if self.index.is_none() {
+            self.index = Some(match &self.acr_path {
+                Some(path) => load_acr_index(path),
+                None => Err(MaskBrushError::new(
+                    MaskBrushTableRefusal::MaskBrushTableUnavailable,
+                    "no photo path was available for sibling .acr discovery",
+                )),
+            });
+        }
+        let index = match self.index.as_ref().expect("index was initialized") {
+            Ok(index) => index,
+            Err(error) => return Err(error.clone()),
+        };
+        let mut matches = index.entries.iter().filter(|entry| entry.key == key);
+        let Some(entry) = matches.next() else {
+            return Err(MaskBrushError::new(
+                MaskBrushTableRefusal::ReferenceMismatch,
+                "directory contains no matching key",
+            ));
+        };
+        if matches.next().is_some() {
+            return Err(MaskBrushError::new(
+                MaskBrushTableRefusal::ReferenceMismatch,
+                "directory contains a duplicate matching key",
+            ));
+        }
+        let blob_len = usize::try_from(entry.len).map_err(|_| {
+            MaskBrushError::new(MaskBrushTableRefusal::Corrupt, "blob length does not fit memory")
+        })?;
+        if blob_len > MAX_MASK_BRUSH_BLOB_BYTES {
+            return Err(MaskBrushError::new(
+                MaskBrushTableRefusal::Corrupt,
+                format!("blob exceeds the {MAX_MASK_BRUSH_BLOB_BYTES}-byte limit"),
+            ));
+        }
+        let mut blob = Vec::new();
+        blob.try_reserve_exact(blob_len).map_err(|_| {
+            MaskBrushError::new(MaskBrushTableRefusal::Corrupt, "blob allocation refused")
+        })?;
+        blob.resize(blob_len, 0);
+        let mut file = std::fs::File::open(&index.path).map_err(|error| {
+            MaskBrushError::new(
+                MaskBrushTableRefusal::MaskBrushTableUnavailable,
+                format!("cannot reopen {}: {error}", index.path.display()),
+            )
+        })?;
+        use std::io::{Read as _, Seek as _};
+        file.seek(std::io::SeekFrom::Start(entry.offset)).map_err(|error| {
+            MaskBrushError::new(
+                MaskBrushTableRefusal::ContainerInvalid,
+                format!("cannot seek to object: {error}"),
+            )
+        })?;
+        file.read_exact(&mut blob).map_err(|error| {
+            MaskBrushError::new(
+                MaskBrushTableRefusal::ContainerInvalid,
+                format!("object range became unreadable: {error}"),
+            )
+        })?;
+        if md5::compute(&blob).0 != key {
+            return Err(MaskBrushError::new(
+                MaskBrushTableRefusal::DigestMismatch,
+                "MD5(blob) does not equal the XMP/directory key",
+            ));
+        }
+        if blob.len() < 16 {
+            return Err(MaskBrushError::new(
+                MaskBrushTableRefusal::EncodingUnsupported,
+                "object is shorter than the 16-byte envelope",
+            ));
+        }
+        let envelope = [
+            le_u32_at(&blob, 0),
+            le_u32_at(&blob, 4),
+            le_u32_at(&blob, 8),
+            le_u32_at(&blob, 12),
+        ];
+        let stream_len = blob.len() - 16;
+        if envelope != [4, 1, 64_000, stream_len as u32] {
+            return Err(MaskBrushError::new(
+                MaskBrushTableRefusal::EncodingUnsupported,
+                format!("unsupported object envelope {envelope:?}"),
+            ));
+        }
+        let payload = decode_mask_brush_brotli(&blob[16..], expected)?;
+        parse_mask_brush_payload(&payload)
+    }
+}
+
+fn load_acr_index(path: &std::path::Path) -> Result<AcrIndex, MaskBrushError> {
+    use std::io::Read as _;
+    let mut file = std::fs::File::open(path).map_err(|error| {
+        MaskBrushError::new(
+            MaskBrushTableRefusal::MaskBrushTableUnavailable,
+            format!("cannot read sibling {}: {error}", path.display()),
+        )
+    })?;
+    let file_len = file.metadata().map_err(|error| {
+        MaskBrushError::new(
+            MaskBrushTableRefusal::MaskBrushTableUnavailable,
+            format!("cannot inspect sibling {}: {error}", path.display()),
+        )
+    })?.len();
+    if file_len > MAX_ACR_BYTES {
+        return Err(MaskBrushError::new(
+            MaskBrushTableRefusal::ContainerInvalid,
+            format!("ACR file exceeds the {MAX_ACR_BYTES}-byte limit"),
+        ));
+    }
+    let mut header = [0u8; 20];
+    file.read_exact(&mut header).map_err(|error| {
+        MaskBrushError::new(
+            MaskBrushTableRefusal::ContainerInvalid,
+            format!("truncated ACR header: {error}"),
+        )
+    })?;
+    if &header[0..4] != b"ACR\0"
+        || le_u32_at(&header, 4) != 1
+        || &header[8..12] != b"ARW\0"
+        || le_u32_at(&header, 16) != 0
+    {
+        return Err(MaskBrushError::new(
+            MaskBrushTableRefusal::ContainerInvalid,
+            "header is not the established ACR/1/ARW/reserved-zero shape",
+        ));
+    }
+    let count = le_u32_at(&header, 12) as usize;
+    if count > MAX_ACR_DIRECTORY_ENTRIES {
+        return Err(MaskBrushError::new(
+            MaskBrushTableRefusal::ContainerInvalid,
+            format!("directory count exceeds the {MAX_ACR_DIRECTORY_ENTRIES}-entry limit"),
+        ));
+    }
+    let directory_bytes = count.checked_mul(32).ok_or_else(|| {
+        MaskBrushError::new(MaskBrushTableRefusal::ContainerInvalid, "directory size overflow")
+    })?;
+    let directory_end = 20u64.checked_add(directory_bytes as u64).ok_or_else(|| {
+        MaskBrushError::new(MaskBrushTableRefusal::ContainerInvalid, "directory end overflow")
+    })?;
+    if directory_end > file_len {
+        return Err(MaskBrushError::new(
+            MaskBrushTableRefusal::ContainerInvalid,
+            "directory extends past end of file",
+        ));
+    }
+    let mut raw = Vec::new();
+    raw.try_reserve_exact(directory_bytes).map_err(|_| {
+        MaskBrushError::new(
+            MaskBrushTableRefusal::ContainerInvalid,
+            "directory allocation refused",
+        )
+    })?;
+    raw.resize(directory_bytes, 0);
+    file.read_exact(&mut raw).map_err(|error| {
+        MaskBrushError::new(
+            MaskBrushTableRefusal::ContainerInvalid,
+            format!("truncated ACR directory: {error}"),
+        )
+    })?;
+    let mut entries = Vec::new();
+    entries.try_reserve_exact(count).map_err(|_| {
+        MaskBrushError::new(
+            MaskBrushTableRefusal::ContainerInvalid,
+            "entry allocation refused",
+        )
+    })?;
+    for chunk in raw.chunks_exact(32) {
+        let mut key = [0u8; 16];
+        key.copy_from_slice(&chunk[..16]);
+        let len = le_u64_at(chunk, 16);
+        let offset = le_u64_at(chunk, 24);
+        let end = offset.checked_add(len).ok_or_else(|| {
+            MaskBrushError::new(MaskBrushTableRefusal::ContainerInvalid, "object range overflow")
+        })?;
+        if len == 0 || offset < directory_end || end > file_len {
+            return Err(MaskBrushError::new(
+                MaskBrushTableRefusal::ContainerInvalid,
+                "object range is empty, overlaps the directory, or is out of bounds",
+            ));
+        }
+        entries.push(AcrEntry { key, len, offset });
+    }
+    let mut ranges = Vec::new();
+    ranges.try_reserve_exact(entries.len()).map_err(|_| {
+        MaskBrushError::new(
+            MaskBrushTableRefusal::ContainerInvalid,
+            "range allocation refused",
+        )
+    })?;
+    ranges.extend(entries.iter().map(|entry| (entry.offset, entry.offset + entry.len)));
+    ranges.sort_unstable();
+    if ranges.windows(2).any(|pair| pair[0].1 > pair[1].0) {
+        return Err(MaskBrushError::new(
+            MaskBrushTableRefusal::ContainerInvalid,
+            "directory object ranges overlap",
+        ));
+    }
+    let mut cursor = directory_end;
+    for &(start, end) in &ranges {
+        let padding = (4 - cursor % 4) % 4;
+        if start != cursor + padding {
+            return Err(MaskBrushError::new(
+                MaskBrushTableRefusal::ContainerInvalid,
+                "object gap is not the established four-byte alignment padding",
+            ));
+        }
+        validate_acr_padding(&mut file, cursor, padding)?;
+        cursor = end;
+    }
+    let trailing = (4 - cursor % 4) % 4;
+    if file_len != cursor + trailing {
+        return Err(MaskBrushError::new(
+            MaskBrushTableRefusal::ContainerInvalid,
+            "trailing gap is not the established four-byte alignment padding",
+        ));
+    }
+    validate_acr_padding(&mut file, cursor, trailing)?;
+    Ok(AcrIndex { path: path.to_path_buf(), entries })
+}
+
+fn validate_acr_padding(
+    file: &mut std::fs::File,
+    offset: u64,
+    len: u64,
+) -> Result<(), MaskBrushError> {
+    use std::io::{Read as _, Seek as _};
+    let mut padding = [0u8; 3];
+    let len = usize::try_from(len).expect("four-byte alignment padding is at most three bytes");
+    file.seek(std::io::SeekFrom::Start(offset)).map_err(|error| {
+        MaskBrushError::new(
+            MaskBrushTableRefusal::ContainerInvalid,
+            format!("cannot seek to alignment padding: {error}"),
+        )
+    })?;
+    file.read_exact(&mut padding[..len]).map_err(|error| {
+        MaskBrushError::new(
+            MaskBrushTableRefusal::ContainerInvalid,
+            format!("cannot read alignment padding: {error}"),
+        )
+    })?;
+    if padding[..len].iter().any(|byte| *byte != 0) {
+        return Err(MaskBrushError::new(
+            MaskBrushTableRefusal::ContainerInvalid,
+            "alignment padding is not zero-filled",
+        ));
+    }
+    Ok(())
+}
+
+fn mask_brush_key(token: &str) -> Result<[u8; 16], MaskBrushError> {
+    if token.len() != 32 || !token.is_ascii() {
+        return Err(MaskBrushError::new(
+            MaskBrushTableRefusal::ReferenceMismatch,
+            "reference is not exactly 32 ASCII hex bytes",
+        ));
+    }
+    let mut key = [0u8; 16];
+    for (i, pair) in token.as_bytes().chunks_exact(2).enumerate() {
+        let hex = |b: u8| match b {
+            b'0'..=b'9' => Some(b - b'0'),
+            b'a'..=b'f' => Some(b - b'a' + 10),
+            b'A'..=b'F' => Some(b - b'A' + 10),
+            _ => None,
+        };
+        let (Some(hi), Some(lo)) = (hex(pair[0]), hex(pair[1])) else {
+            return Err(MaskBrushError::new(
+                MaskBrushTableRefusal::ReferenceMismatch,
+                "reference contains a non-hex byte",
+            ));
+        };
+        key[i] = (hi << 4) | lo;
+    }
+    Ok(key)
+}
+
+fn decode_mask_brush_brotli(
+    stream: &[u8],
+    expected: usize,
+) -> Result<Vec<u8>, MaskBrushError> {
+    use brotli_decompressor::{
+        BrotliDecompressStream, BrotliResult, BrotliState, StandardAlloc,
+    };
+    let mut state = BrotliState::new(
+        StandardAlloc::default(),
+        StandardAlloc::default(),
+        StandardAlloc::default(),
+    );
+    let mut available_in = stream.len();
+    let mut input_offset = 0usize;
+    let mut buffer = [0u8; 4_096];
+    let mut available_out = buffer.len();
+    let mut output_offset = 0usize;
+    let mut total_out = 0usize;
+    let mut output = Vec::new();
+    output.try_reserve_exact(expected).map_err(|_| {
+        MaskBrushError::new(MaskBrushTableRefusal::Corrupt, "output allocation refused")
+    })?;
+    loop {
+        let result = BrotliDecompressStream(
+            &mut available_in,
+            &mut input_offset,
+            stream,
+            &mut available_out,
+            &mut output_offset,
+            &mut buffer,
+            &mut total_out,
+            &mut state,
+        );
+        if output.len().saturating_add(output_offset) > expected
+            || output.len().saturating_add(output_offset)
+                > MAX_MASK_BRUSH_UNCOMPRESSED_BYTES
+        {
+            return Err(MaskBrushError::new(
+                MaskBrushTableRefusal::LengthMismatch,
+                "Brotli output exceeded the advertised or implementation limit",
+            ));
+        }
+        output.extend_from_slice(&buffer[..output_offset]);
+        output_offset = 0;
+        available_out = buffer.len();
+        match result {
+            BrotliResult::ResultSuccess => {
+                if available_in != 0 || input_offset != stream.len() {
+                    return Err(MaskBrushError::new(
+                        MaskBrushTableRefusal::Corrupt,
+                        "Brotli stream has trailing input",
+                    ));
+                }
+                break;
+            }
+            BrotliResult::NeedsMoreInput if available_in == 0 => {
+                return Err(MaskBrushError::new(
+                    MaskBrushTableRefusal::Corrupt,
+                    "Brotli stream is truncated",
+                ));
+            }
+            BrotliResult::ResultFailure => {
+                return Err(MaskBrushError::new(
+                    MaskBrushTableRefusal::Corrupt,
+                    "Brotli decoder rejected the stream",
+                ));
+            }
+            BrotliResult::NeedsMoreInput | BrotliResult::NeedsMoreOutput => {}
+        }
+    }
+    if output.len() != expected {
+        return Err(MaskBrushError::new(
+            MaskBrushTableRefusal::LengthMismatch,
+            format!("decoded {} bytes, XMP advertises {expected}", output.len()),
+        ));
+    }
+    Ok(output)
+}
+
+struct MaskBrushCursor<'a> {
+    bytes: &'a [u8],
+    at: usize,
+}
+
+impl<'a> MaskBrushCursor<'a> {
+    fn new(bytes: &'a [u8]) -> Self {
+        Self { bytes, at: 0 }
+    }
+
+    fn take(&mut self, len: usize) -> Result<&'a [u8], MaskBrushError> {
+        let end = self.at.checked_add(len).ok_or_else(|| {
+            MaskBrushError::new(MaskBrushTableRefusal::PayloadInvalid, "payload offset overflow")
+        })?;
+        let out = self.bytes.get(self.at..end).ok_or_else(|| {
+            MaskBrushError::new(MaskBrushTableRefusal::PayloadInvalid, "truncated payload field")
+        })?;
+        self.at = end;
+        Ok(out)
+    }
+
+    fn u16(&mut self) -> Result<u16, MaskBrushError> {
+        let bytes: [u8; 2] = self.take(2)?.try_into().expect("two-byte slice");
+        Ok(u16::from_le_bytes(bytes))
+    }
+
+    fn u32(&mut self) -> Result<u32, MaskBrushError> {
+        let bytes: [u8; 4] = self.take(4)?.try_into().expect("four-byte slice");
+        Ok(u32::from_le_bytes(bytes))
+    }
+}
+
+fn parse_mask_brush_payload(bytes: &[u8]) -> Result<Vec<BrushStroke>, MaskBrushError> {
+    let mut cursor = MaskBrushCursor::new(bytes);
+    if cursor.u32()? != 1 {
+        return Err(MaskBrushError::new(
+            MaskBrushTableRefusal::PayloadUnsupported,
+            "table word is not 1",
+        ));
+    }
+    let record_count = cursor.u32()? as usize;
+    if record_count > MAX_MASK_BRUSH_RECORDS {
+        return Err(MaskBrushError::new(
+            MaskBrushTableRefusal::PayloadInvalid,
+            format!("record count exceeds the {MAX_MASK_BRUSH_RECORDS}-record limit"),
+        ));
+    }
+    if record_count
+        .checked_mul(70)
+        .and_then(|n| n.checked_add(8))
+        .is_none_or(|minimum| minimum > bytes.len())
+    {
+        return Err(MaskBrushError::new(
+            MaskBrushTableRefusal::PayloadInvalid,
+            "record count cannot fit in the payload",
+        ));
+    }
+    let mut records = Vec::new();
+    records.try_reserve_exact(record_count).map_err(|_| {
+        MaskBrushError::new(MaskBrushTableRefusal::PayloadInvalid, "record allocation refused")
+    })?;
+    let mut table_tokens = 0usize;
+    for _ in 0..record_count {
+        let what = cursor.u32()?;
+        let active = cursor.u32()?;
+        let blend = cursor.u32()?;
+        let inverted = cursor.u16()?;
+        let id_len = cursor.u32()? as usize;
+        if what != 0 || active > 1 || blend != 0 || inverted != 0 || id_len != 32 {
+            return Err(MaskBrushError::new(
+                MaskBrushTableRefusal::PayloadUnsupported,
+                format!(
+                    "unsupported record fields What={what}, active={active}, blend={blend}, inverted={inverted}, id_len={id_len}"
+                ),
+            ));
+        }
+        let id = cursor.take(id_len)?;
+        if !id.is_ascii() {
+            return Err(MaskBrushError::new(
+                MaskBrushTableRefusal::PayloadUnsupported,
+                "MaskSyncID is not ASCII",
+            ));
+        }
+        let sync_id = std::str::from_utf8(id)
+            .expect("ASCII is UTF-8")
+            .to_string();
+        let value = cursor.u32()?;
+        let radius = cursor.u32()?;
+        let flow = cursor.u32()?;
+        let center_weight = cursor.u32()?;
+        let d_count = cursor.u32()? as usize;
+        if d_count > MAX_MASK_BRUSH_D_COUNT {
+            return Err(MaskBrushError::new(
+                MaskBrushTableRefusal::PayloadInvalid,
+                format!("d-count exceeds the {MAX_MASK_BRUSH_D_COUNT}-dab limit"),
+            ));
+        }
+        let mut d_seen = 0usize;
+        let mut dabs = String::new();
+        while d_seen < d_count {
+            if table_tokens >= MAX_MASK_BRUSH_TOKENS {
+                return Err(MaskBrushError::new(
+                    MaskBrushTableRefusal::PayloadInvalid,
+                    format!("token count exceeds the {MAX_MASK_BRUSH_TOKENS}-token limit"),
+                ));
+            }
+            let opcode = cursor.take(1)?[0];
+            let token = match opcode {
+                0x01 => format!("r {}", fixed_decimal(cursor.u32()?, 6)),
+                0x02 => format!("f {}", fixed_decimal(cursor.u32()?, 4)),
+                0x06 => {
+                    d_seen += 1;
+                    format!(
+                        "d {} {}",
+                        fixed_decimal(cursor.u32()?, 6),
+                        fixed_decimal(cursor.u32()?, 6)
+                    )
+                }
+                _ => {
+                    return Err(MaskBrushError::new(
+                        MaskBrushTableRefusal::PayloadUnsupported,
+                        format!("unsupported opcode 0x{opcode:02X}"),
+                    ));
+                }
+            };
+            if !dabs.is_empty() {
+                dabs.push('\n');
+            }
+            dabs.push_str(&token);
+            table_tokens += 1;
+        }
+        records.push(BrushStroke {
+            // A valid inactive record remains in table order but contributes no
+            // density; the original bytes remain authoritative on write-back.
+            value: if active == 0 { 0.0 } else { value as f32 / 1_000_000.0 },
+            radius: radius as f32 / 1_000_000.0,
+            flow: flow as f32 / 1_000_000.0,
+            center_weight: center_weight as f32 / 1_000_000.0,
+            sync_id,
+            dabs,
+        });
+    }
+    if cursor.at != bytes.len() {
+        return Err(MaskBrushError::new(
+            MaskBrushTableRefusal::PayloadInvalid,
+            format!("{} trailing payload byte(s)", bytes.len() - cursor.at),
+        ));
+    }
+    Ok(records)
+}
+
+fn fixed_decimal(value: u32, places: usize) -> String {
+    let scale = 10u64.pow(places as u32);
+    let value = u64::from(value);
+    let whole = value / scale;
+    let fraction = value % scale;
+    if fraction == 0 {
+        return whole.to_string();
+    }
+    let mut out = format!("{whole}.{fraction:0places$}");
+    while out.ends_with('0') {
+        out.pop();
+    }
+    out
+}
+
+fn le_u32_at(bytes: &[u8], at: usize) -> u32 {
+    u32::from_le_bytes(bytes[at..at + 4].try_into().expect("validated fixed-width field"))
+}
+
+fn le_u64_at(bytes: &[u8], at: usize) -> u64 {
+    u64::from_le_bytes(bytes[at..at + 8].try_into().expect("validated fixed-width field"))
+}
+
+fn parse_brush_group(
+    scope: &str,
+    agg: &XmlComponent<'_>,
+    brush_reader: &mut MaskBrushReader<'_, '_>,
+) -> Result<MaskGeometry, ()> {
     let tag = Tag::new(agg.tag);
+    // `agg.start` is relative to one correction's component block and can be
+    // identical in sibling corrections. The tag's address identifies this
+    // Aggregate for the lifetime of the shared classify/build reader.
+    let owner_id = agg.tag.as_ptr() as usize;
     // A muted component changes what the mask covers — refused for exactly the
     // reason `component_import_reasons` refuses a muted parametric shape.
     if !matches!(tag.crs_str("MaskActive").as_deref(), None | Some("true")) {
@@ -5765,21 +6504,49 @@ fn parse_brush_group(scope: &str, agg: &XmlComponent<'_>) -> Result<MaskGeometry
     };
     let name = tag.crs_str("MaskName").map(|v| v.into_owned()).unwrap_or_default();
 
-    let Some(body) = component_body(scope, agg)? else {
-        // Self-closing: an Aggregate with no `crs:Masks` child is a group with
-        // no strokes, refused by the same rule as an empty one.
-        return Err(());
-    };
-    let kids = components_in(body);
-    if kids.iter().any(|k| k.depth > 0) {
-        return Err(());
-    }
     let mut strokes = Vec::new();
-    for k in &kids {
-        if k.what.as_ref() != "Mask/Paint" {
+    let table = tag.crs_str("MaskBrushTable");
+    let advertised = tag.crs_str("MaskBrushUncompressedBytes");
+    if table.is_some() || advertised.is_some() {
+        let reference = match table {
+            Some(table) => Some(table),
+            None => {
+                let error = MaskBrushError::new(
+                    MaskBrushTableRefusal::ReferenceMismatch,
+                    "MaskBrushUncompressedBytes is present without MaskBrushTable",
+                );
+                brush_reader.report(owner_id, "<missing>", &error);
+                None
+            }
+        };
+        if let Some(table) = reference {
+            match advertised.and_then(|v| v.trim().parse::<usize>().ok()) {
+                Some(expected) => {
+                    if let Ok(table_strokes) = brush_reader.table(owner_id, table.trim(), expected) {
+                        strokes.extend(table_strokes);
+                    }
+                }
+                None => {
+                    let error = MaskBrushError::new(
+                        MaskBrushTableRefusal::LengthMismatch,
+                        "MaskBrushUncompressedBytes is missing or unreadable",
+                    );
+                    brush_reader.report(owner_id, table.trim(), &error);
+                }
+            }
+        }
+    }
+    if let Some(body) = component_body(scope, agg)? {
+        let kids = components_in(body);
+        if kids.iter().any(|k| k.depth > 0) {
             return Err(());
         }
-        strokes.push(parse_paint_stroke(body, k)?);
+        for k in &kids {
+            if k.what.as_ref() != "Mask/Paint" {
+                return Err(());
+            }
+            strokes.push(parse_paint_stroke(body, k)?);
+        }
     }
     if strokes.is_empty() {
         return Err(());
@@ -6103,6 +6870,7 @@ fn classify_correction(
     own: Scope<'_>,
     authored_by_autoshop: bool,
     frame: Option<FrameAspect>,
+    brush_reader: &mut MaskBrushReader<'_, '_>,
 ) -> MaskCorrectionParse {
     let mut geometry_count = 0usize;
     let mut brush_count = 0usize;
@@ -6216,7 +6984,7 @@ fn classify_correction(
                     // Same cost as an unreadable parametric component: the
                     // values are legible and the SHAPE is outside the model
                     // this parser measured, which takes the correction.
-                    if parse_brush_group(mask_block, component).is_err() {
+                    if parse_brush_group(mask_block, component, brush_reader).is_err() {
                         geometry_unusable = true;
                     }
                 }
@@ -6301,7 +7069,7 @@ fn classify_correction(
         Err(reason) => return MaskCorrectionParse::Unsupported(reason),
     }
 
-    let Some(mut parsed) = parse_one_correction(seg, own, frame) else {
+    let Some(mut parsed) = parse_one_correction_with_reader(seg, own, frame, brush_reader) else {
         return MaskCorrectionParse::Unsupported(MaskImportReason::OutOfModel);
     };
     // A range we cannot honour costs the RANGE, not the mask: the geometry is
@@ -6439,10 +7207,21 @@ fn base_element(seg: &str, p: usize) -> &str {
 /// itself is still what the GEOMETRY reads walk, because the components live
 /// inside it and each of those reads is separately bounded to the component it
 /// belongs to.
+#[cfg(test)]
 fn parse_one_correction(
     seg: &str,
     own: Scope<'_>,
     frame: Option<FrameAspect>,
+) -> Option<LocalAdjustment> {
+    let mut brush_reader = MaskBrushReader::new(None, None);
+    parse_one_correction_with_reader(seg, own, frame, &mut brush_reader)
+}
+
+fn parse_one_correction_with_reader(
+    seg: &str,
+    own: Scope<'_>,
+    frame: Option<FrameAspect>,
+    brush_reader: &mut MaskBrushReader<'_, '_>,
 ) -> Option<LocalAdjustment> {
     let scaled = |k: &str, scale: f32| {
         own.crs_f32(k).map_or(0.0, |v| (v * scale * 10_000.0).round() / 10_000.0)
@@ -6459,7 +7238,7 @@ fn parse_one_correction(
     let mut ai_masks: Vec<MaskGeometry> = Vec::new();
     for c in comps.iter().filter(|c| c.depth == 0) {
         match c.what.as_ref() {
-            "Mask/Aggregate" => brushes.push(parse_brush_group(block, c).ok()?),
+            "Mask/Aggregate" => brushes.push(parse_brush_group(block, c, brush_reader).ok()?),
             // R27 Batch-5, same discipline: parsed once up front by the strict
             // validator, so a `?` here refuses the correction exactly as
             // `classify_correction`'s own call did and the two cannot disagree
@@ -6832,6 +7611,19 @@ pub fn xmp_to_recipe(xmp: &str) -> EditRecipe {
     xmp_to_recipe_clamped(xmp).0
 }
 
+/// Path-aware import for an XMP sidecar that may reference a sibling `.acr`.
+/// The diagnostic's photo is the single source of both discovery identity and
+/// attribution, matching the rest of the injected diagnostic discipline.
+pub fn xmp_to_recipe_with_diag(xmp: &str, diag: &crate::diag::Diag<'_>) -> EditRecipe {
+    xmp_to_recipe_clamped_with_diag(xmp, diag).0
+}
+
+/// Silent path-aware import used for equality/probe work whose caller owns a
+/// separate disclosure channel.
+pub fn xmp_to_recipe_for_photo(xmp: &str, photo: &std::path::Path) -> EditRecipe {
+    xmp_to_recipe_clamped_impl(xmp, Some(photo), None).0
+}
+
 /// [`xmp_to_recipe`] plus WHAT THE CLAMP COST — the door for every surface
 /// that DISCLOSES import loss.
 ///
@@ -6848,6 +7640,21 @@ pub fn xmp_to_recipe(xmp: &str) -> EditRecipe {
 /// unclamped-summary form stays the exception, not the default, so no caller
 /// is obliged to handle a value it has no surface for.
 pub fn xmp_to_recipe_clamped(xmp: &str) -> (EditRecipe, crate::recipe::ClampSummary) {
+    xmp_to_recipe_clamped_impl(xmp, None, None)
+}
+
+pub fn xmp_to_recipe_clamped_with_diag(
+    xmp: &str,
+    diag: &crate::diag::Diag<'_>,
+) -> (EditRecipe, crate::recipe::ClampSummary) {
+    xmp_to_recipe_clamped_impl(xmp, diag.photo(), Some(diag))
+}
+
+fn xmp_to_recipe_clamped_impl(
+    xmp: &str,
+    photo: Option<&std::path::Path>,
+    diag: Option<&crate::diag::Diag<'_>>,
+) -> (EditRecipe, crate::recipe::ClampSummary) {
     if xmp.len() > MAX_XMP_BYTES {
         return (EditRecipe::default(), crate::recipe::ClampSummary::default());
     }
@@ -7030,7 +7837,7 @@ pub fn xmp_to_recipe_clamped(xmp: &str) -> (EditRecipe, crate::recipe::ClampSumm
         red_curve: parse_curve(scope.text(), "ToneCurvePV2012Red"),
         green_curve: parse_curve(scope.text(), "ToneCurvePV2012Green"),
         blue_curve: parse_curve(scope.text(), "ToneCurvePV2012Blue"),
-        masks: parse_masks(scope.text(), ours, frame),
+        masks: parse_masks_with_source(scope.text(), ours, frame, photo, diag),
 
         // The PASS-THROUGH blocks (R25 B4), read as STRINGS and stored
         // verbatim. `crs_str` already reads BOTH spellings — the
@@ -14758,5 +15565,538 @@ mod tests {
                 .expect("a positive rectangle"),
             "no element declares the pair, so all three properties come from the document"
         );
+    }
+
+    // Authored synthetic MaskBrushTable payloads, Brotli-compressed once with
+    // Python's `brotli` module. No byte below comes from a user specimen.
+    const MB_GOOD_A_LEN: usize = 185;
+    const MB_GOOD_A: &[u8] = &[
+        0x1B, 0xB8, 0x00, 0xF8, 0x8F, 0xC2, 0xB6, 0xB5, 0x73, 0x94, 0x79, 0x28, 0xD3,
+        0x42, 0xF8, 0xC9, 0x20, 0x88, 0x9B, 0xDF, 0xC6, 0x02, 0xEA, 0x3A, 0x0F, 0x6C,
+        0x2C, 0x91, 0x28, 0x0E, 0x3C, 0xF0, 0x31, 0x51, 0xD6, 0x46, 0xAC, 0x01, 0x14,
+        0x4E, 0xC4, 0xC3, 0x06, 0x9C, 0xA8, 0x07, 0x1E, 0xA0, 0x47, 0x32, 0xDD, 0x01,
+        0x20, 0x10, 0xC7, 0x27, 0x96, 0x08, 0x80, 0x08, 0x00, 0x08, 0x00, 0x00, 0x58,
+        0x10, 0xF9, 0xEE, 0xDC, 0x49, 0x6B, 0xC2, 0x58, 0x07, 0x20, 0x02, 0x42, 0x78,
+        0x81, 0x98, 0x81, 0x5A, 0xD8, 0xAA, 0xBC, 0x89, 0xFA, 0x9B, 0xAA, 0x71, 0x28,
+        0x13, 0x13, 0xC2, 0x58, 0xB7, 0xC6, 0x30, 0x36, 0x54, 0xBF, 0x44, 0x93, 0x3B,
+        0x1A,
+    ];
+    const MB_GOOD_B_LEN: usize = 87;
+    const MB_GOOD_B: &[u8] = &[
+        0x1B, 0x56, 0x00, 0xF8, 0x9F, 0x07, 0x76, 0x0C, 0x99, 0x22, 0x68, 0xF8, 0x02,
+        0xE9, 0xA5, 0x10, 0x26, 0xF7, 0x24, 0xE1, 0x08, 0xDB, 0x12, 0x4C, 0x23, 0xA8,
+        0x84, 0xA0, 0x93, 0xE0, 0x81, 0xBA, 0x12, 0x66, 0x61, 0x03, 0x4E, 0x38, 0x0D,
+        0x14, 0x47, 0x5A, 0x66, 0xBF, 0x1C, 0x20, 0xC1, 0x40, 0x03, 0xB5, 0x8C, 0xFB,
+        0xE9, 0xD1, 0x02, 0x81, 0xBC, 0x35, 0x01,
+    ];
+    const MB_UNKNOWN_OPCODE_LEN: usize = 83;
+    const MB_UNKNOWN_OPCODE: &[u8] = &[
+        0x1B, 0x52, 0x00, 0xF8, 0x07, 0x61, 0x73, 0x13, 0xE9, 0x1A, 0xA2, 0xCD, 0x52,
+        0xE5, 0xBC, 0x45, 0xD0, 0x05, 0x99, 0x7A, 0xA4, 0x03, 0x01, 0x80, 0x40, 0xA0,
+        0x3C, 0x0C, 0x3E, 0xDD, 0x2B, 0xBD, 0x64, 0x08, 0xE4,
+    ];
+    const MB_TRAILING_LEN: usize = 88;
+    const MB_TRAILING: &[u8] = &[
+        0x1B, 0x57, 0x00, 0xF8, 0x9F, 0x07, 0x76, 0x0C, 0x99, 0x22, 0x68, 0xF8, 0x02,
+        0xE9, 0xA5, 0x10, 0x26, 0xF7, 0x24, 0xE1, 0x08, 0xDB, 0x12, 0x4C, 0x23, 0xA8,
+        0x84, 0xA0, 0x93, 0xE0, 0x81, 0xBA, 0x12, 0x66, 0x61, 0x03, 0x4E, 0x38, 0x0D,
+        0x18, 0x37, 0x5A, 0x66, 0xBF, 0x1C, 0x20, 0xC1, 0x40, 0x03, 0xB5, 0x8C, 0xFB,
+        0xE9, 0xD1, 0x02, 0x81, 0xBC, 0x35, 0x01,
+    ];
+    const MB_TABLE_WORD_LEN: usize = 8;
+    const MB_TABLE_WORD: &[u8] =
+        &[0x1B, 0x07, 0x00, 0xF8, 0xA7, 0x00, 0x04, 0x82, 0x92, 0x40, 0x20];
+    const MB_RECORD_BOUND_LEN: usize = 8;
+    const MB_RECORD_BOUND: &[u8] =
+        &[0x8B, 0x03, 0x80, 0x01, 0x00, 0x00, 0x00, 0x01, 0x01, 0x00, 0x00, 0x03];
+    const MB_DCOUNT_BOUND_LEN: usize = 78;
+    const MB_DCOUNT_BOUND: &[u8] = &[
+        0x1B, 0x4D, 0x00, 0xF8, 0x07, 0xE1, 0x64, 0x17, 0x12, 0x21, 0x6A, 0x4A, 0x35,
+        0x1B, 0xD8, 0x80, 0x13, 0x4E, 0x03, 0x87, 0x05, 0x06, 0x5A, 0x4E, 0x07, 0x02,
+        0x68, 0xC9, 0xC0, 0x02, 0xFD, 0xBC, 0xDA, 0x4B, 0x35, 0x14, 0x78, 0xAF,
+    ];
+    const MB_TOKEN_BOUND_LEN: usize = 327_772;
+    const MB_TOKEN_BOUND: &[u8] = &[
+        0x5B, 0x5B, 0x00, 0x85, 0x7F, 0x28, 0xF0, 0x76, 0x5F, 0x54, 0x42, 0xD4, 0x94,
+        0x6A, 0x82, 0x76, 0x44, 0x97, 0xAE, 0x7E, 0x93, 0x08, 0x5C, 0xC0, 0x55, 0x49,
+        0x08, 0x10, 0x80, 0x8D, 0x4F, 0xF7, 0x4D, 0xEB, 0xD0, 0x7D, 0xEF, 0x09, 0x20,
+        0x84, 0xB1, 0x1F, 0x08,
+    ];
+
+    fn mb_object(stream: &[u8]) -> Vec<u8> {
+        let mut object = Vec::with_capacity(16 + stream.len());
+        for word in [4u32, 1, 64_000, stream.len() as u32] {
+            object.extend_from_slice(&word.to_le_bytes());
+        }
+        object.extend_from_slice(stream);
+        object
+    }
+
+    fn mb_acr(objects: &[Vec<u8>]) -> (Vec<u8>, Vec<String>) {
+        let directory_end = 20 + 32 * objects.len();
+        let mut offsets = Vec::with_capacity(objects.len());
+        let mut at = directory_end as u64;
+        for object in objects {
+            offsets.push(at);
+            at += object.len() as u64;
+            at += (4 - at % 4) % 4;
+        }
+        let mut acr = Vec::with_capacity(at as usize);
+        acr.extend_from_slice(b"ACR\0");
+        acr.extend_from_slice(&1u32.to_le_bytes());
+        acr.extend_from_slice(b"ARW\0");
+        acr.extend_from_slice(&(objects.len() as u32).to_le_bytes());
+        acr.extend_from_slice(&0u32.to_le_bytes());
+        let mut tokens = Vec::new();
+        for (object, offset) in objects.iter().zip(offsets) {
+            let digest = md5::compute(object);
+            acr.extend_from_slice(&digest.0);
+            acr.extend_from_slice(&(object.len() as u64).to_le_bytes());
+            acr.extend_from_slice(&offset.to_le_bytes());
+            tokens.push(format!("{digest:X}"));
+        }
+        for object in objects {
+            acr.extend_from_slice(object);
+            while acr.len() % 4 != 0 {
+                acr.push(0);
+            }
+        }
+        (acr, tokens)
+    }
+
+    fn mb_temp(tag: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!(
+            "autoshop-mask-brush-{tag}-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let raw = dir.join("synthetic.arw");
+        std::fs::write(&raw, b"synthetic raw identity").unwrap();
+        (dir, raw)
+    }
+
+    fn mb_group(name: &str, token: &str, bytes: usize) -> String {
+        format!(
+            "<rdf:li crs:What=\"Mask/Aggregate\" crs:MaskActive=\"true\" \
+             crs:MaskName=\"{name}\" crs:MaskBlendMode=\"0\" crs:MaskInverted=\"false\" \
+             crs:MaskSyncID=\"0000000000000000000000000000000D\" crs:MaskValue=\"1\" \
+             crs:MaskBrushTable=\"{token}\" crs:MaskBrushUncompressedBytes=\"{bytes}\"/>\n"
+        )
+    }
+
+    fn mb_doc(groups: &[(&str, &str, usize)]) -> String {
+        let corrections: String = groups
+            .iter()
+            .map(|(correction, token, bytes)| {
+                lr_correction(correction, "", &mb_group("Brush 1", token, *bytes))
+            })
+            .collect();
+        lr_doc(&corrections)
+    }
+
+    fn mb_parse(
+        raw: &std::path::Path,
+        doc: &str,
+    ) -> (EditRecipe, Vec<crate::diag::Line>) {
+        let collector = crate::diag::Collector::new();
+        let diag = crate::diag::Diag::about(&collector, raw);
+        let recipe = xmp_to_recipe_with_diag(doc, &diag);
+        (recipe, collector.take())
+    }
+
+    fn mb_assert_refusal(
+        tag: &str,
+        acr: Option<&[u8]>,
+        token: &str,
+        advertised: usize,
+        expected: MaskBrushTableRefusal,
+    ) {
+        let (dir, raw) = mb_temp(tag);
+        if let Some(acr) = acr {
+            std::fs::write(raw.with_extension("acr"), acr).unwrap();
+        }
+        let doc = mb_doc(&[("Mask 1", token, advertised)]);
+        let (recipe, lines) = mb_parse(&raw, &doc);
+        assert!(recipe.masks.is_empty(), "a refused table imported partial geometry");
+        let matching: Vec<_> = lines
+            .iter()
+            .filter(|line| line.text.contains(expected.name()))
+            .collect();
+        assert_eq!(matching.len(), 1, "named refusal must be loud exactly once: {lines:?}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn mask_brush_tables_import_independently_in_owner_and_table_order() {
+        let (dir, raw) = mb_temp("happy-multi");
+        let objects = [mb_object(MB_GOOD_A), mb_object(MB_GOOD_B)];
+        let (acr, tokens) = mb_acr(&objects);
+        std::fs::write(raw.with_extension("acr"), acr).unwrap();
+        let doc = mb_doc(&[
+            ("First", &tokens[0], MB_GOOD_A_LEN),
+            ("Second", &tokens[1], MB_GOOD_B_LEN),
+        ]);
+        let (recipe, lines) = mb_parse(&raw, &doc);
+        assert!(lines.is_empty(), "valid tables emitted diagnostics: {lines:?}");
+        assert_eq!(recipe.masks.len(), 2);
+        let MaskGeometry::Brush { strokes: first, .. } = &recipe.masks[0].mask else {
+            panic!("first table did not stay with its aggregate")
+        };
+        let MaskGeometry::Brush { strokes: second, .. } = &recipe.masks[1].mask else {
+            panic!("second table did not stay with its aggregate")
+        };
+        assert_eq!(first.len(), 2);
+        assert_eq!(second.len(), 1);
+        assert_eq!(first[0].sync_id, "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA");
+        assert_eq!(first[1].sync_id, "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB");
+        assert_eq!(second[0].sync_id, "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn mask_brush_fixed_point_fields_and_r_f_d_tokens_map_exactly() {
+        let (dir, raw) = mb_temp("fixed-point");
+        let (acr, tokens) = mb_acr(&[mb_object(MB_GOOD_A)]);
+        std::fs::write(raw.with_extension("acr"), acr).unwrap();
+        let recipe = mb_parse(&raw, &mb_doc(&[("Mask 1", &tokens[0], MB_GOOD_A_LEN)])).0;
+        let MaskGeometry::Brush { strokes, .. } = &recipe.masks[0].mask else { panic!() };
+        assert_eq!((strokes[0].value * 1_000_000.0).round() as u32, 51_402);
+        assert_eq!((strokes[0].radius * 1_000_000.0).round() as u32, 36_957);
+        assert_eq!((strokes[0].flow * 1_000_000.0).round() as u32, 1_000_000);
+        assert_eq!(strokes[0].center_weight, 0.0);
+        assert_eq!(
+            strokes[0].dabs,
+            "r 0.123456\nf 0.0103\nd 0.404621 0.692602\nd 0.401151 0.693698"
+        );
+        assert!(!strokes[0].dabs.lines().any(|token| token.starts_with("h ")));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn missing_mask_brush_companion_is_mask_brush_table_unavailable() {
+        mb_assert_refusal(
+            "unavailable",
+            None,
+            "00000000000000000000000000000000",
+            MB_GOOD_A_LEN,
+            MaskBrushTableRefusal::MaskBrushTableUnavailable,
+        );
+    }
+
+    #[test]
+    fn malformed_mask_brush_directory_is_container_invalid() {
+        let (mut acr, tokens) = mb_acr(&[mb_object(MB_GOOD_A)]);
+        acr[12..16].copy_from_slice(&((MAX_ACR_DIRECTORY_ENTRIES + 1) as u32).to_le_bytes());
+        mb_assert_refusal(
+            "container",
+            Some(&acr),
+            &tokens[0],
+            MB_GOOD_A_LEN,
+            MaskBrushTableRefusal::ContainerInvalid,
+        );
+
+        let (mut acr, tokens) = mb_acr(&[mb_object(MB_GOOD_A), mb_object(MB_GOOD_B)]);
+        let len = le_u64_at(&acr, 36);
+        let offset = le_u64_at(&acr, 44);
+        let padding = usize::try_from(offset + len).unwrap();
+        assert_eq!(acr[padding], 0, "fixture must have inter-object padding");
+        acr[padding] = 1;
+        mb_assert_refusal(
+            "container-padding",
+            Some(&acr),
+            &tokens[0],
+            MB_GOOD_A_LEN,
+            MaskBrushTableRefusal::ContainerInvalid,
+        );
+    }
+
+    #[test]
+    fn absent_mask_brush_key_is_reference_mismatch() {
+        let (acr, _) = mb_acr(&[mb_object(MB_GOOD_A)]);
+        mb_assert_refusal(
+            "reference",
+            Some(&acr),
+            "00000000000000000000000000000000",
+            MB_GOOD_A_LEN,
+            MaskBrushTableRefusal::ReferenceMismatch,
+        );
+    }
+
+    #[test]
+    fn changed_mask_brush_blob_is_digest_mismatch() {
+        let (mut acr, tokens) = mb_acr(&[mb_object(MB_GOOD_A)]);
+        let len = le_u64_at(&acr, 36);
+        let offset = le_u64_at(&acr, 44);
+        let last = usize::try_from(offset + len - 1).unwrap();
+        acr[last] ^= 0x01;
+        mb_assert_refusal(
+            "digest",
+            Some(&acr),
+            &tokens[0],
+            MB_GOOD_A_LEN,
+            MaskBrushTableRefusal::DigestMismatch,
+        );
+    }
+
+    #[test]
+    fn unknown_mask_brush_envelope_is_encoding_unsupported() {
+        let mut object = mb_object(MB_GOOD_A);
+        object[0..4].copy_from_slice(&5u32.to_le_bytes());
+        let (acr, tokens) = mb_acr(&[object]);
+        mb_assert_refusal(
+            "encoding",
+            Some(&acr),
+            &tokens[0],
+            MB_GOOD_A_LEN,
+            MaskBrushTableRefusal::EncodingUnsupported,
+        );
+    }
+
+    #[test]
+    fn invalid_mask_brush_brotli_is_corrupt() {
+        let (acr, tokens) = mb_acr(&[mb_object(&[0xFF])]);
+        mb_assert_refusal(
+            "corrupt",
+            Some(&acr),
+            &tokens[0],
+            1,
+            MaskBrushTableRefusal::Corrupt,
+        );
+    }
+
+    #[test]
+    fn wrong_mask_brush_advertised_size_is_length_mismatch() {
+        let (acr, tokens) = mb_acr(&[mb_object(MB_GOOD_A)]);
+        mb_assert_refusal(
+            "length",
+            Some(&acr),
+            &tokens[0],
+            MB_GOOD_A_LEN + 1,
+            MaskBrushTableRefusal::LengthMismatch,
+        );
+    }
+
+    #[test]
+    fn binary_h_opcode_is_payload_unsupported() {
+        let (acr, tokens) = mb_acr(&[mb_object(MB_UNKNOWN_OPCODE)]);
+        mb_assert_refusal(
+            "payload-unsupported",
+            Some(&acr),
+            &tokens[0],
+            MB_UNKNOWN_OPCODE_LEN,
+            MaskBrushTableRefusal::PayloadUnsupported,
+        );
+    }
+
+    #[test]
+    fn trailing_mask_brush_payload_is_payload_invalid() {
+        let (acr, tokens) = mb_acr(&[mb_object(MB_TRAILING)]);
+        mb_assert_refusal(
+            "payload-invalid",
+            Some(&acr),
+            &tokens[0],
+            MB_TRAILING_LEN,
+            MaskBrushTableRefusal::PayloadInvalid,
+        );
+    }
+
+    #[test]
+    fn one_bad_mask_brush_table_does_not_take_down_an_independent_table() {
+        let objects = [mb_object(MB_GOOD_B), mb_object(MB_UNKNOWN_OPCODE)];
+        let (acr, tokens) = mb_acr(&objects);
+        let (dir, raw) = mb_temp("independent-refusal");
+        std::fs::write(raw.with_extension("acr"), acr).unwrap();
+        let survivor = lr_paint(
+            "1111111111111111111111111111111C",
+            "1",
+            "0",
+            "false",
+            &["d 0.25 0.75"],
+        );
+        let bad_group = format!(
+            "<rdf:li crs:What=\"Mask/Aggregate\" crs:MaskActive=\"true\" \
+             crs:MaskName=\"Bad table\" crs:MaskBlendMode=\"0\" crs:MaskInverted=\"false\" \
+             crs:MaskSyncID=\"0000000000000000000000000000000E\" crs:MaskValue=\"1\" \
+             crs:MaskBrushTable=\"{}\" crs:MaskBrushUncompressedBytes=\"{}\">\n{}\
+             </rdf:li>\n",
+            tokens[1], MB_UNKNOWN_OPCODE_LEN, survivor
+        );
+        let doc = lr_doc(&format!(
+            "{}{}",
+            lr_correction(
+                "Good",
+                "",
+                &mb_group("Brush 1", &tokens[0], MB_GOOD_B_LEN),
+            ),
+            lr_correction("Bad", "", &bad_group),
+        ));
+        let (recipe, lines) = mb_parse(&raw, &doc);
+        assert_eq!(
+            recipe.masks.len(),
+            2,
+            "the good table and bad table's text survivor must both import: {recipe:?}"
+        );
+        let MaskGeometry::Brush { strokes, .. } = &recipe.masks[1].mask else { panic!() };
+        assert_eq!(strokes.len(), 1, "a refused table must contribute no partial records");
+        assert_eq!(strokes[0].sync_id, "1111111111111111111111111111111C");
+        assert!(lines.iter().any(|line| line.text.contains("PayloadUnsupported")));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn non_one_mask_brush_table_word_is_payload_unsupported() {
+        let (acr, tokens) = mb_acr(&[mb_object(MB_TABLE_WORD)]);
+        mb_assert_refusal(
+            "table-word",
+            Some(&acr),
+            &tokens[0],
+            MB_TABLE_WORD_LEN,
+            MaskBrushTableRefusal::PayloadUnsupported,
+        );
+    }
+
+    #[test]
+    fn mask_brush_record_count_bound_refuses_before_allocation() {
+        let (acr, tokens) = mb_acr(&[mb_object(MB_RECORD_BOUND)]);
+        mb_assert_refusal(
+            "record-bound",
+            Some(&acr),
+            &tokens[0],
+            MB_RECORD_BOUND_LEN,
+            MaskBrushTableRefusal::PayloadInvalid,
+        );
+    }
+
+    #[test]
+    fn mask_brush_d_count_bound_refuses_before_token_walk() {
+        let (acr, tokens) = mb_acr(&[mb_object(MB_DCOUNT_BOUND)]);
+        mb_assert_refusal(
+            "d-count-bound",
+            Some(&acr),
+            &tokens[0],
+            MB_DCOUNT_BOUND_LEN,
+            MaskBrushTableRefusal::PayloadInvalid,
+        );
+    }
+
+    #[test]
+    fn mask_brush_token_count_bound_covers_unbounded_state_tokens() {
+        let (acr, tokens) = mb_acr(&[mb_object(MB_TOKEN_BOUND)]);
+        mb_assert_refusal(
+            "token-bound",
+            Some(&acr),
+            &tokens[0],
+            MB_TOKEN_BOUND_LEN,
+            MaskBrushTableRefusal::PayloadInvalid,
+        );
+    }
+
+    #[test]
+    fn table_import_preserves_residual_aggregate_and_gesture_paints() {
+        let (dir, raw) = mb_temp("survivors");
+        let (acr, tokens) = mb_acr(&[mb_object(MB_GOOD_B)]);
+        std::fs::write(raw.with_extension("acr"), acr).unwrap();
+        let aggregate_survivor = lr_brush_group("false", "");
+        let gesture = lr_paint(
+            "1111111111111111111111111111111B",
+            "1",
+            "0",
+            "false",
+            &["h 1.0000", "d 0.25 0.75"],
+        )
+        .replace(
+            "crs:CenterWeight=\"0\">",
+            "crs:CenterWeight=\"0\" crs:BrushGestureInterpretation=\"0\">",
+        );
+        let corrections = format!(
+            "{}{}",
+            lr_correction(
+                "Brushes",
+                "",
+                &format!(
+                    "{}{}",
+                    mb_group("Binary", &tokens[0], MB_GOOD_B_LEN),
+                    aggregate_survivor
+                ),
+            ),
+            lr_correction("Gesture", "", &lr_ai_mask("0", "0", "1", "", &gesture)),
+        );
+        let doc = lr_doc(&corrections);
+        let recipe = mb_parse(&raw, &doc).0;
+        assert_eq!(recipe.masks.len(), 2);
+        assert_eq!(recipe.masks[0].components.len(), 1, "aggregate survivor was dropped");
+        let MaskGeometry::AiMask { gesture, .. } = &recipe.masks[1].mask else { panic!() };
+        assert_eq!(gesture.len(), 1, "gesture survivor was dropped");
+        assert!(gesture[0].dabs.starts_with("h 1.0000\n"), "text h token must survive");
+        let merged = merge_recipe_into_xmp_in_frame_for_photo(&doc, &recipe, None, Some(&raw))
+            .expect("the survivor document merges");
+        assert!(merged.doc.contains("crs:BrushGestureInterpretation=\"0\""));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn unchanged_table_mask_round_trip_keeps_attributes_without_text_paints() {
+        let (dir, raw) = mb_temp("writer-round-trip");
+        let (acr, tokens) = mb_acr(&[mb_object(MB_GOOD_A)]);
+        std::fs::write(raw.with_extension("acr"), acr).unwrap();
+        let doc = mb_doc(&[("Mask 1", &tokens[0], MB_GOOD_A_LEN)]);
+        let mut recipe = mb_parse(&raw, &doc).0;
+        recipe.exposure_ev = 0.75;
+        let merged = merge_recipe_into_xmp_in_frame_for_photo(&doc, &recipe, None, Some(&raw))
+            .expect("table-bearing base must merge");
+        assert_eq!(merged.doc.matches("crs:MaskBrushTable=").count(), 1);
+        assert!(merged.doc.contains(&format!("crs:MaskBrushTable=\"{}\"", tokens[0])));
+        assert!(merged.doc.contains(&format!(
+            "crs:MaskBrushUncompressedBytes=\"{MB_GOOD_A_LEN}\""
+        )));
+        assert_eq!(
+            merged.doc.matches("crs:What=\"Mask/Paint\"").count(),
+            0,
+            "table records must not be synthesized as duplicate text Paints"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn env_mask_brush_sample_matches_stage_three_ground_truth() {
+        let Ok(root) = std::env::var("AUTOSHOP_MB_SAMPLE_ROOT") else {
+            eprintln!("SKIP env_mask_brush_sample_matches_stage_three_ground_truth: AUTOSHOP_MB_SAMPLE_ROOT unset");
+            return;
+        };
+        let root = std::path::Path::new(&root);
+        let xmp_path = root.join("_DSC8904-rewritten-brushtable.xmp");
+        let photo = root.join("_DSC8904-rewritten.arw");
+        let text = std::fs::read_to_string(&xmp_path).expect("read rewritten _DSC8904 XMP");
+        let collector = crate::diag::Collector::new();
+        let diag = crate::diag::Diag::about(&collector, &photo);
+        let recipe = xmp_to_recipe_with_diag(&text, &diag);
+        assert!(collector.take().is_empty(), "the confirmed specimen must parse without refusal");
+        let mut tables: Vec<&Vec<BrushStroke>> = Vec::new();
+        for mask in &recipe.masks {
+            for geometry in std::iter::once(&mask.mask)
+                .chain(mask.components.iter().map(|component| &component.geometry))
+            {
+                if let MaskGeometry::Brush { strokes, .. } = geometry
+                    && matches!(strokes.len(), 54 | 4 | 18)
+                {
+                    tables.push(strokes);
+                }
+            }
+        }
+        assert_eq!(
+            tables.iter().map(|table| table.len()).collect::<Vec<_>>(),
+            [54, 4, 18],
+            "the three table record counts stay in XMP order"
+        );
+        let d_count: usize = tables
+            .iter()
+            .flat_map(|table| table.iter())
+            .map(|stroke| stroke.dabs.lines().filter(|token| token.starts_with("d ")).count())
+            .sum();
+        assert_eq!(d_count, 3_043);
+        let t2_first = &tables[1][0];
+        assert_eq!((t2_first.value * 1_000_000.0).round() as u32, 51_402);
+        assert_eq!(t2_first.dabs.lines().next(), Some("d 0.404621 0.692602"));
     }
 }

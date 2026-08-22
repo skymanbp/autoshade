@@ -1376,8 +1376,8 @@ pub fn run(
             // corrections it REFUSES (foreign brush/AI masks): reporting only the
             // importable ones would understate how much local work the photograph
             // actually had.
-            let imported = crate::xmp::xmp_to_recipe(&xmp_text).masks.len();
-            let refused = crate::xmp::unsupported_corrections(&xmp_text);
+            let imported = crate::xmp::xmp_to_recipe_for_photo(&xmp_text, raw).masks.len();
+            let refused = crate::xmp::unsupported_corrections_for_photo(&xmp_text, raw);
             if imported + refused + ai.masks.len() > 0 {
                 stats.masks = Some((imported, refused, ai.masks.len()));
             }

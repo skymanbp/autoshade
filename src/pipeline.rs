@@ -2052,7 +2052,7 @@ fn saved_recipe_snapshot(raw: &Path) -> Option<EditRecipe> {
     // the restore surfaces stamp.
     match crate::store::lightroom_sidecar(raw) {
         crate::store::LrSidecar::Only(t) | crate::store::LrSidecar::NewerThanStore(t)
-            if !crate::xmp::xmp_to_recipe(&t).is_noop() =>
+            if !crate::xmp::xmp_to_recipe_for_photo(&t, raw).is_noop() =>
         {
             return None;
         }
@@ -2615,8 +2615,9 @@ fn write_xmp_doc(
             crate::render::recipe_has_frame_coords(recipe) || recipe.straighten_deg != 0.0
         })
         .and_then(|p| photo_frame_aspect(p, recipe.quarter_turns));
-    let merged =
-        merge_base.and_then(|(_, b)| xmp::merge_recipe_into_xmp_in_frame(&b, recipe, frame));
+    let merged = merge_base.and_then(|(_, b)| {
+        xmp::merge_recipe_into_xmp_in_frame_for_photo(&b, recipe, frame, photo)
+    });
     // A merge that SUCCEEDED can still have losses it could not avoid (the
     // base's unrepresentable mask block giving way to the recipe's own
     // masks) — its notes ride the same channel as the regeneration note.

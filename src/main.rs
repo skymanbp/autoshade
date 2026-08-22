@@ -571,13 +571,14 @@ fn lightroom_import_note(raw: &Path) -> Option<String> {
     let autoshop::store::SidecarRead::Ok(text) = autoshop::store::read_sidecar_checked(&lr) else {
         return None;
     };
-    let losses = autoshop::xmp::import_losses(&text);
+    let losses = autoshop::xmp::import_losses_for_photo(&text, raw);
     // The count the reader WOULD carry — the same number the GUI's open path
     // passes (`bin/gui/export.rs`), so the two surfaces cannot report the same
     // file differently. Taken through the CLAMPED door (R28 2b) because the
     // third sentence below needs what the size caps cut, and re-parsing the
     // document to learn it would be a second producer of one fact.
-    let (parsed, clamped) = autoshop::xmp::xmp_to_recipe_clamped(&text);
+    let diag = autoshop::diag::photo(raw);
+    let (parsed, clamped) = autoshop::xmp::xmp_to_recipe_clamped_with_diag(&text, &diag);
     let imported = parsed.masks.len();
     // The mask sentence and the CROP sentence (R27) ride together: a file can
     // lose either, both or neither, and a `?` on the first would have swallowed

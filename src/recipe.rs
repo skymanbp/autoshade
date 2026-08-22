@@ -1273,23 +1273,22 @@ pub enum MaskGeometry {
     /// in-correction Paints) are corpus measurements, not schema fields; the
     /// invariants they describe are enforced independently by the parser.
     ///
-    /// **⚠ A NEWER LIGHTROOM DOES NOT ALWAYS WRITE THIS FORM.** Registered
-    /// 2026-08-21 (R29 me5), unmodelled: when Lightroom 18.4 rewrote one of
-    /// these sidecars after an AI-mask update, it collapsed the file
-    /// 44,540 → 19,261 B by deleting all 14 standalone `Mask/Paint`
-    /// components — every `Dabs`, `Radius`, `Flow` and `CenterWeight` string
-    /// with them — and emitting `crs:MaskBrushTable` +
-    /// `crs:MaskBrushUncompressedBytes` instead, a compressed blob carrying the
-    /// same data. Only the two Paints belonging to a `crs:Gesture` kept their
-    /// text form. Every sidecar in the reference library is still the old text
-    /// form, so nothing measured here is affected — but a file this engine
-    /// reads AFTER a modern Lightroom has rewritten it has no dab stream to
-    /// import. Neither half of the consequence is verified against a specimen
-    /// yet: what the blob encodes, and whether the surviving structure trips
-    /// `parse_brush_group`'s existing refusals (a loud `OutOfModel`) or slips
-    /// past them. R30 candidate — reconnoitre the format, then either read it
-    /// or refuse it BY NAME. A brush that disappears quietly is the one
-    /// outcome this module is built not to allow.
+    /// **NEWER LIGHTROOM MAY STORE THESE STROKES IN A COMPANION `.acr`.**
+    /// Lightroom 18.4 can replace text `Mask/Paint` children with a
+    /// `MaskBrushTable` reference on the Aggregate. Before R30 B2, the two
+    /// rewritten specimens failed loudly as `OutOfModel` (one owning
+    /// correction in `_DSC9206`, two in `_DSC8904`); their table strokes did
+    /// not render. The path-aware XMP reader now imports the adjudicated ACR
+    /// grammar under strict bounds and reports one of nine named refusal
+    /// classes when any unestablished form is encountered. Within an
+    /// Aggregate, table records precede its surviving text Paint children in
+    /// document order; gesture Paints remain with their gesture owner.
+    ///
+    /// The binary table is deliberately not recipe state. An unchanged
+    /// path-aware merge reparses the base sidecar, recognizes that the recipe
+    /// mask is unchanged, and preserves the original Aggregate block verbatim.
+    /// Its table attributes and residual Paints therefore ride through without
+    /// synthesizing a second text representation of the table-derived strokes.
     ///
     /// All four numbers ride out into the sidecar exactly as they rode in, so
     /// a brush mask this app imports and republishes still says what Lightroom

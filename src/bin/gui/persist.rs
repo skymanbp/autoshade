@@ -147,14 +147,16 @@ pub(crate) fn read_saved_develop_locked(src: &std::path::Path) -> RestoredDevelo
         // summary — a sidecar whose brush dabs were truncated on import
         // toasted nothing. Both halves are absorbed, and they cannot double
         // count: the second clamp is idempotent over the first.
-        let (mut r, imported_clamp) = autoshop::xmp::xmp_to_recipe_clamped(&text);
+        let diag = autoshop::diag::photo(src);
+        let (mut r, imported_clamp) =
+            autoshop::xmp::xmp_to_recipe_clamped_with_diag(&text, &diag);
         xmp_bad = autoshop::xmp::unparsable_crs_numbers(&text);
         // Neutral / foreign content restores nothing — the store answers
         // exactly as before.
         if !r.is_noop() {
             clamp_dropped.absorb(imported_clamp);
             clamp_dropped.absorb(r.clamp());
-            let mask_import = autoshop::xmp::import_losses(&text);
+            let mask_import = autoshop::xmp::import_losses_for_photo(&text, src);
             let imported_masks = r.masks.len();
             return RestoredDevelop {
                 saved: SavedDevelop::Restored(r, kind),
@@ -241,7 +243,9 @@ pub(crate) fn read_saved_develop_locked(src: &std::path::Path) -> RestoredDevelo
         };
         any = true;
         // Clamped door, same reason as the Lightroom branch above (R28 2b).
-        let (mut r, imported_clamp) = autoshop::xmp::xmp_to_recipe_clamped(&text);
+        let diag = autoshop::diag::photo(src);
+        let (mut r, imported_clamp) =
+            autoshop::xmp::xmp_to_recipe_clamped_with_diag(&text, &diag);
         // Accumulated regardless of noop-ness (dedup vs the LR sidecar's
         // list) — see the accumulator's contract above.
         for k in autoshop::xmp::unparsable_crs_numbers(&text) {
@@ -254,7 +258,7 @@ pub(crate) fn read_saved_develop_locked(src: &std::path::Path) -> RestoredDevelo
         if !r.is_noop() {
             clamp_dropped.absorb(imported_clamp);
             clamp_dropped.absorb(r.clamp());
-            mask_import = autoshop::xmp::import_losses(&text);
+            mask_import = autoshop::xmp::import_losses_for_photo(&text, src);
             imported_masks = r.masks.len();
             carried_globals = autoshop::xmp::unmodelled_global_crs(&text);
             fallback = Some((r, kind));
@@ -274,7 +278,9 @@ pub(crate) fn read_saved_develop_locked(src: &std::path::Path) -> RestoredDevelo
         match autoshop::store::embedded_packet_for_restore(src) {
             Ok(Some(text)) => {
                 // Clamped door (R28 2b), like both branches above.
-                let (mut r, imported_clamp) = autoshop::xmp::xmp_to_recipe_clamped(&text);
+                let diag = autoshop::diag::photo(src);
+                let (mut r, imported_clamp) =
+                    autoshop::xmp::xmp_to_recipe_clamped_with_diag(&text, &diag);
                 for k in autoshop::xmp::unparsable_crs_numbers(&text) {
                     if !xmp_bad.contains(&k) {
                         xmp_bad.push(k);
@@ -283,7 +289,7 @@ pub(crate) fn read_saved_develop_locked(src: &std::path::Path) -> RestoredDevelo
                 if !r.is_noop() {
                     clamp_dropped.absorb(imported_clamp);
                     clamp_dropped.absorb(r.clamp());
-                    mask_import = autoshop::xmp::import_losses(&text);
+                    mask_import = autoshop::xmp::import_losses_for_photo(&text, src);
                     imported_masks = r.masks.len();
                     carried_globals = autoshop::xmp::unmodelled_global_crs(&text);
                     fallback = Some((r, "XMP (embedded in the RAW)"));
