@@ -426,6 +426,40 @@ GUI 与导出路径——原生另存对话框本体不可自动化，验收=对
 
 ## 当前状态（已完成，勿重做）
 
+- **R30 B3 手势→SAM 点提示已落地（2026-08-22，feat `1e99e84`，Codex
+  侦查+实现两批、主审全量 diff 对抗复审）**。机制=me5 定案（subtype=0
+  手势是分割模型的区域提示、两子类型下渲染期合成均不存在）；此前引擎
+  object 后端只送 `ReferencePoint`、`resolve_ai_masks` 用 `..` 吞掉
+  gesture。**实现=侦查 Rank 1**：ReferencePoint 首位 + 每个有序
+  `d x y` 全量作正点（label 1、保重复保序）；`r/f/h`/MaskValue/Radius/
+  Flow/硬度=状态非证据；负点/权重/框/质心/采样/密集提示**具名拒绝
+  实现**（未确立语义，码内注明）。**IPC**=有界 gp1 JSON 提示文件
+  （`--prompt-file`，argv 装不下几百点；`create_new` 确权后武装 RAII
+  清理、成功失败路全删；256KiB 字节界+2..=2048 点界+点 0 必等 argv
+  ReferencePoint）；无手势路径 argv 与 generation-2 缓存键**逐字节
+  不动**（`ai-mask-a253729c2afcc1cf` 平台无关字面量钉死，主审另用
+  独立 python FNV 实现复算相符）。**缓存=作用域组件**
+  `|gp1:<发送点列 LE f32 位型 FNV-1a>` 仅 subtype-0 带手势时入键
+  （爆炸半径精确=语料 40 手势/10 文件全中、65/105 AI 组件及全部
+  subject/sky 不动；gp1 字面量即映射版本）；`AI_BACKEND_GENERATION`
+  维持 2。**坐标零新变换**：手势点与 ReferencePoint 同帧（镜前、
+  旋转已由 orient 重写），python 同一 `clamp(v)*1023` 映射；serde_json
+  Ryu-f32 最短往返 ⇒ 6 位小数域 argv/JSON 两路 python f64 必同值
+  （f32 舍入区间 ~3e-8 内仅含原 6 位值，等值门健全）。**python 侧**
+  =gp1 解析全验（schema/版本/界/有限/点 0 等值）+多点能力守卫
+  （transformers 未钉版，API 不符走既有具名 die）+`test_segment.py`
+  4 测试（纯 stdlib；**未接 CI，登记**）。**门（主审亲跑，降优批）**
+  =clippy 0×2+**849(9i)/14/132/2+2** 双配置（+8 逐名集差 HEAD=0）+
+  python 4P+check_docs 20P0F3S+**真 SAM 差分探针实弹**（Codex 未放、
+  主审补放：SAM 2.1 Hiera-Large 665f8e2a 合成双矩形夹具一点 vs 三点
+  74.5s，两 alpha 皆软非常数且不同=特性心脏对真模型验证）。**主审
+  3 变异全红还原**（还原后 diff 与批逐字节全等亲证）：①reference
+  改尾插=顺序测试红；②作用域键改传 None=身份测试红；③Drop 清理
+  抽空=双清理测试红。**⚠ v0.36.0 义务**：带手势 subtype-0 蒙版
+  alpha 换键重算（一次性、仅该类）+行为变更披露；subject/sky/无手势
+  object 零变化。**后续登记**：LR 证伪实验（radius/多重性/框/质心
+  语义）gate 后续细化非本批；2048 点界上限性能未测（超限具名拒收
+  非截断）。下步=B4③ 训练集条款审计；⑦④ 素材依赖。
 - **R30 B2 MaskBrushTable 守卫导入已落地（2026-08-22，feat `2cb59a5`，
   Codex gpt-5.6-sol 实现+主审全量 diff 对抗复审）**。
   状态=**完整读+写侧保真，无 recipe schema 变更**：path-aware XMP 读取器按
