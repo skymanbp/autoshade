@@ -8,7 +8,7 @@
 An AI decides *what to change*. A deterministic Rust engine *does* it.
 **The AI never touches a pixel.**
 
-[Download v0.34.0](https://github.com/skymanbp/autoshop/releases/tag/v0.34.0) ·
+[Download v0.35.0](https://github.com/skymanbp/autoshop/releases/tag/v0.35.0) ·
 [Architecture](docs/ARCHITECTURE.md) ·
 [Roadmap](docs/ROADMAP.md) ·
 [MIT](LICENSE)
@@ -190,16 +190,17 @@ global/local composition, and it is written down rather than curated away.
 
 ### Download
 
-Each tagged release ships **both** front-ends prebuilt for Windows. For
-v0.34.0:
+Each tagged release ships **both** front-ends prebuilt for Windows, with the
+byte size and sha256 of each published asset written down here after they have
+been re-downloaded and compared byte-for-byte against the local build. The
+table below is **v0.34.0's** — v0.35.0's binaries are built, verified and
+listed as the last step of cutting that tag, and until they are, an unlisted
+digest is better than an unverified one:
 
 | file | size | sha256 |
 |---|---|---|
 | `autoshop.exe` (CLI) | 30,752,116 B | `1697fe87f4eefe28b002fdede65254eeffe47de15ee872c0d0e4d262f4c07231` |
 | `autoshop-gui.exe` (desktop app) | 40,373,202 B | `53cba5b1188012e91ac20b42a0dde36a94cd29e05b1d338acb79d8d2bebb14d2` |
-
-Both digests were verified by re-downloading the published assets and comparing
-them byte-for-byte against the local build.
 
 ### Or build it
 
@@ -218,11 +219,12 @@ Cross-platform **compilation and the test battery** are CI-verified: the
 [`build` workflow](.github/workflows/build.yml) compiles both feature
 configurations and runs `cargo test --locked` (default and `--features gui`)
 on `ubuntu-latest` and `macos-latest` on every push to `main` and on every
-pull request (first fully green run:
-[32405954918](https://github.com/skymanbp/autoshop/actions/runs/32405954918),
-2026-08-20 — 728 library, 10 CLI, 131 GUI and 4 contract tests per platform;
-the 12 Windows-gated tests, the byte-exact dehaze golden among them, compile
-only on Windows). Interactive runtime behaviour on those platforms is still
+pull request. The counts CI reports are a little under the Windows battery
+above, because a dozen tests are Windows-gated — the byte-exact dehaze golden
+among them — and compile only there; the first fully green run
+([32405954918](https://github.com/skymanbp/autoshop/actions/runs/32405954918),
+2026-08-20, at v0.34.0) measured 728 library, 10 CLI, 131 GUI and 4 contract
+tests per platform. Interactive runtime behaviour on those platforms is still
 unverified, and prebuilt binaries remain Windows-only.
 
 ### Three front-ends, one engine
@@ -306,9 +308,15 @@ worth reading. The `1.032` frame scale measured in v0.32.0 turned out to be one
 frame's Adobe *lens-profile warp* mistaken for a universal affine — proven by a
 `LensProfileEnable` A/B export and an 11-dab displacement field. In v0.33.0 it
 is **1.0**: an imported radial renders at the geometry the sidecar actually
-stores, instead of 3.2 % dilated. The residual on any frame is now that frame's
-own unmodelled lens warp (0–3.4 % observed), and an `.lcp` reader is the named
-candidate fix.
+stores, instead of 3.2 % dilated. The residual on any frame was then that
+frame's own unmodelled lens warp (0–3.4 % observed) — and **v0.35.0 models it**:
+Autoshop reads Adobe's own `.lcp` lens profiles, and a further round of exports
+settled that Lightroom does not place every mask in one frame. A brush is
+rasterised *before* the lens correction, a radial or linear *after* it. Reading
+the two in one frame was leaving the radial arm up to 186 px out on a
+profile-corrected frame; each now renders in its own, landing within 0.3 px.
+The recipe carries the solved profile, and names which of seven sources
+produced it — an in-camera knot set, a solved `.lcp`, or an honest none.
 
 ### Local masks
 
@@ -317,16 +325,25 @@ sky / object, add–subtract–intersect shape composition, per-mask eye toggle 
 duplicate, per-mask point curves, brush-editable AI rasters with
 feather / expand / contract and full-resolution guided refine.
 
-**Brush masks are the honest exception.** Lightroom's dab-stream brush groups
-are imported, carried and written back byte-exact — and **rendered nowhere**.
-The engine's `mask_weight` answers 0 for that geometry, and both the import and
-the export disclose it by name (`BrushCarried`). The alpha model is now largely
-measured — screen accumulation, density as a pre-screen scale, a one-parameter
-flow law (κ = 0.1219 ± 0.0027), an 11-rung hardness kernel table — but the
-kernel has no closed form and the mask lives in Lightroom's *pre-lens-correction*
-frame, which this engine cannot yet reproduce. Drawing it anyway would mean
-burning pixels at a position known to be wrong. Autoshop's *own* painted and
-AI-derived rasters are a different thing entirely and do render.
+**Brush masks are drawn, from v0.35.0 — and that took two blockers falling.**
+Lightroom's dab-stream brush groups have been imported, carried and written back
+byte-exact since v0.33.0, but the renderer answered a literal zero for them,
+for two stated reasons: the alpha kernel had no closed form, and the mask
+appeared to live in a frame this engine could not reproduce. Both are now
+closed. Denser sampling found the kernel: `(1 − ρ^m)^n` with `ln m` and `ln n`
+cubic in the hardness — eight numbers, held-out rms 0.0109, better than
+interpolating the 11-rung table it replaced — alongside screen accumulation,
+density as a pre-screen scale and a one-parameter flow law (κ = 0.1284 ±
+0.0029). And the frame question dissolved: Lightroom rasterises a brush
+*before* its lens correction, which is exactly where this engine evaluates
+masks, so a dab stream needs no warp at all. `render::brush_raster` now stamps
+the dab stream into an alpha at develop time and the mask samples like any
+other raster. Every one of those numbers was read off controlled exports of the
+author's own photographs — so both directions disclose the result by name
+(`BrushRendered`, "drawn from Autoshop's measured model of Lightroom's brush -
+not Adobe's own rasteriser"), because the edges are ours. Autoshop's *own*
+painted and AI-derived rasters are a different thing entirely and always did
+render.
 
 ### Style retrieval and the two taste dials
 
@@ -382,6 +399,19 @@ corpus average, and says which file raised the bill. The 147-photo
 eval went from ~2.3 h serial to a measured **38 min** at `--jobs 3`. Transcripts
 are index-ordered, so re-running the same folder gives the same record.
 
+**`eval` resumes.** A 147-photo run is hours of paid calls, and one dead
+connection used to cost the whole thing, so progress is written per photograph
+and a rerun folds in what an interrupted run already measured, spending nothing
+on those frames. The file lives under the per-user data directory — never in
+your photo library, which stays read-only — and is named from the folder and
+`--limit`, so a command finds its own progress and no other run's. `--fresh`
+discards it and measures everything again; `--state FILE` puts it somewhere you
+choose. Progress measured by a **different** build or a different model is
+**refused rather than mixed in**, printing both sides, because one table
+measured by two different things is not a measurement. A photograph the vision
+proposer did not actually answer for is never saved as progress either, so a
+fallback cannot quietly bake itself into a baseline.
+
 ### PNG/TIFF source mode
 
 Feed an already-processed image — denoised in Lightroom, exported from
@@ -424,10 +454,11 @@ through OpenAI Images and are labelled experimental everywhere. `heal` is the
 The `.raf` tile shows the **v0.34.0** render — the X-Trans colour fix, on the
 sample that exposed the defect. Through v0.33.0 this tile was visibly green and
 dark (measured channel means 53.6/82.9/39.9 against the camera preview's
-110.2/104.9/99.8): the Bayer demosaic's chroma pass left R and B unwritten at
-16 of every 36 photosites. v0.34.0 demosaics over the array's own geometry;
-this very render measures whole-frame **G/R 0.9473** against the preview's
-0.95, inside the 0.81–1.08 band the other eight formats occupy. Fine detail is
+110.2/104.9/99.8): the Bayer demosaic's chroma pass left R unwritten at 8 of
+every 36 photosites and B at a different 8. v0.34.0 demosaics over the array's
+own geometry; this very render measures whole-frame **G/R 0.9473** against the
+preview's 0.95, inside the 0.81–1.08 band the other eight formats occupy.
+Fine detail is
 still softer than a dedicated X-Trans converter, and the render says so.
 See [X-Trans, restated](#x-trans-restated).</sub>
 
@@ -449,7 +480,8 @@ Decoding is `rawler` 0.7.2, which carries **725 camera models**. An extension
 being on that list means the file reaches the RAW engine — not that your
 particular body is in the database. **Nine cameras, one per format, are verified
 end to end** on CC0 sample files, and that zoo is a release gate
-(`AUTOSHOP_RAW_ZOO`, 9/9 at v0.34.0).
+(`AUTOSHOP_RAW_ZOO`) — nine of nine at the last release, and re-run and
+re-counted at every one.
 
 **If your camera is not recognised**, or its format is not listed: run the file
 through the free **Adobe DNG Converter** and open the `.dng`. That is not a
@@ -470,16 +502,17 @@ reports per-control error and bias plus one aggregate **gap score** — the mean
 per-control divergence including the tone curve, where lower means closer to
 your look.
 
-The current baseline, re-run on all **147 pairs** at v0.33.0 (an
-OpenAI-compatible endpoint, `--jobs 3`, 147/147 completed, **zero fallbacks**,
-~38 minutes):
+The current baseline is the full **147-pair** run at v0.34.0 (an
+OpenAI-compatible endpoint, 147/147 completed, **zero fallbacks** in the rows
+that count — it took a resume to get there, which is why `eval` learned to
+resume):
 
 | metric | value |
 |---|---|
-| **Overall gap score** | **15.5 %** |
+| **Overall gap score** | **16.0 %** |
 | Mask-import refusals | **2.35 → 0.05 per photo** |
-| `whites` bias | +22.55 → **+16.20** |
-| `blacks` bias | −14.18 → **−10.87** |
+| `whites` bias | +22.55 → **+16.12** |
+| `blacks` bias | −14.18 → **−10.60** |
 
 The mask row is the one to read twice. Before the v0.31.0 import fix, `eval`
 counted 2.35 of the photographer's own masks *refused by our importer* on the
@@ -491,12 +524,26 @@ The remaining bias is real and unresolved: the AI still sets `whites` about 16
 points higher and `blacks` about 11 points lower than this photographer does.
 That is a taste gap, stated as a number instead of a claim.
 
-**Release gates at v0.34.0** (both build configurations): clippy clean ×2;
-727 library (9 `#[ignore]`d forensic probes) / 11 CLI / 131 GUI / 2+2 contract
-tests; 16/16 real Lightroom radial sidecars byte-round-tripped; 42/42 mask
-imports on the forensic corpus with 0 refusals; RAW zoo 9/9; font subset
+The gap score is **not comparable across every release boundary**, and the tool
+says so rather than letting a reader diff two numbers that were measured by
+different rulers. The 16.0 % above reads against v0.33.0's 15.5 % only on the
+rows v0.34.0 did not redefine (four `color_grade.*_hue` rows changed meaning
+there). v0.35.0 moves the ruler again — brush masks now render, negative
+`Texture` and the radial falloff changed shape, and every mask moved half a
+pixel — so this table is the **v0.34.0** measurement and a v0.35.0 re-baseline
+is owed, not silently assumed.
+
+**Release gates at v0.35.0** (both build configurations): clippy clean ×2;
+816 library (9 `#[ignore]`d forensic probes) / 14 CLI / 132 GUI / 2+2 contract
+tests; 16/16 real Lightroom radial sidecars byte-round-tripped; font subset
 check 803/803 needed codepoints embedded (68 symbols + 735 CJK); i18n audit
-0 findings; doc gate 11/11 with the battery transcript. That doc-drift gate
+0 findings; doc gate 22/22 with the battery transcript. Two further suites run
+against real corpora that cannot ship with the source, so they are
+environment-gated and a bare `cargo test` *silently skips* them — which is why
+they are re-run and re-counted as part of cutting each release rather than
+quoted from the previous one: the forensic mask-import set and the nine-camera
+RAW zoo, 42/42 imports with 0 refusals and 9/9 respectively at the last
+release. That doc-drift gate
 ([`scripts/check_docs.py`](scripts/check_docs.py)) re-derives the shipped
 version, the battery's test counts, the format counts, the dependency
 inventory and the toolchain from the tree — and pins this README's own
@@ -517,6 +564,7 @@ on stderr beside the `xmp ->` line.
 | **Mask export losses** | The same list in the other direction — a mask this engine drew that the sidecar cannot carry says which one and why |
 | **Brush masks** | Carried byte-exact **and drawn** — from a measured model of Lightroom's own brush (kernel, flow law and screen accumulation all read off controlled exports), never from a guess. Disclosed in both directions, because the alpha is ours |
 | **AI masks** | The alpha is **recomputed** by the local segmenter and every surface says so. Never passed off as Adobe's raster |
+| **A weaker segmenter** | If a machine cannot run the pinned subject model, the fallback is **named on the result**, not silently substituted — and the mask is re-derived by itself, once, after that machine gains what it was missing, saying why |
 | **No embedded preview** | 12 of the 24 formats store none. Those degrade to Autoshop's own neutral develop *and say so* — you are told you are looking at our render, not the camera's |
 | **X-Trans** | Disclosed on every render (see below) |
 | **Untagged 16-bit input** | Read as sRGB, and flagged — right for 8-bit JPEG, often wrong for the 16-bit files an editor produces |
@@ -705,7 +753,7 @@ autoshop apply   <src> <recipe.json> -o out [--long-edge N]  # render a recipe t
 autoshop auto    <src> [--denoise] [--guidance "..."] [--style 0..1] [--strength 0..1] [--long-edge N]   # analyze + render, end-to-end
 autoshop denoise <src> [--strength 0..1] [--model ...]  # AI denoise → clean 16-bit master
 autoshop batch   <dir> [--render] [--limit N] [--jobs N] [--include-baked] [--long-edge N]  # a whole folder (--jobs = photos in flight, default 3)
-autoshop eval    <dir> [--limit N] [--jobs N]  # compare AI edits vs your own .xmp (--jobs default 1 = serial)
+autoshop eval    <dir> [--limit N] [--jobs N] [--fresh] [--state FILE]  # compare AI edits vs your own .xmp (--jobs default 1 = serial; resumes by default)
 autoshop style-index <dir>                   # build the "your taste" reference index (also in the GUI: AI panel › Style reference library)
 autoshop serve   <dir> [--port 8080]         # local web UI
 autoshop reimagine <raw> --prompt "..."      # experimental generative restyle
@@ -768,25 +816,56 @@ per-user `autoshop.local.json` overrides the environment. The two sidecar knobs
   control is *rendered*, *carried* or *passed through verbatim* is stated per
   control — see [the honesty model](#the-honesty-model-is-a-feature).
 - **Radial masks have named remaining gaps.** `crs:Roundness` and `crs:Midpoint`
-  are carried and never rendered — every radial reachable here writes their
-  defaults and current Lightroom has no slider for either on a radial, so there
-  is nothing to calibrate against. `|Angle| > 45°` is untested. A sidecar that
+  are carried and never rendered — and as of v0.35.0 that is *measured*, not
+  assumed: hand-authored `Roundness` −100 / 0 / +100 and `Midpoint` 0 / 50 / 100
+  probes render identically, several of the pairs byte-for-byte over the whole
+  frame. What is still unsampled is a second ellipse geometry, the values
+  strictly between those endpoints, and `Roundness` combined with a rotation.
+  A sidecar that
   declares no frame size still exports a rotated radial *unrotated*, because the
   pixel↔normalised fold needs the aspect — and the save says so in those words.
   The feather falloff is no longer a law at all: four rounds of measurement
   refuted three successive closed forms, so the engine now renders Lightroom's
-  **measured** α(ρ) out of an eight-column table. What is still open there is
-  named in the table's own provenance — the support radius is 1.43 ± 0.015 (√2
-  is inside the bar), the narrowest rung's far tail is unresolved, and every
-  rung was shot on one ellipse aspect.
+  **measured** α(ρ) out of a table — 290 ρ bins × 11 feather columns, with
+  `Feather = 0` kept as an analytic hard edge. What is still open there is
+  named in the table's own provenance: the support radius is **√2** (the two
+  earlier readings, 1.43 and 1.4335, are excluded by four instruments that do
+  not depend on the falloff's shape), the narrowest rung's far tail is
+  unresolved, aspect-ratio invariance has been checked on exactly one extra
+  ellipse aspect at one feather value, and *between* columns is still
+  unmeasured at the narrow end.
 - **Radial masks with feather ≥ 10 render differently from v0.35.0.** The
-  falloff moved from a fitted smoothstep to the measured table above; at
-  Feather 100 the old law painted 2.08× the area Lightroom does. Feather 0 is
+  falloff moved from a fitted smoothstep to the measured table described above;
+  at Feather 100 the old law painted 2.08× the area Lightroom does. Feather 0 is
   byte-identical, and version snapshots keep the earlier render.
+- **Brush masks are drawn from v0.35.0, where they used to be inert.** Every
+  recipe holding a Lightroom brush mask renders differently — that arm answered
+  a literal zero from v0.33.0 until now. The alpha is Autoshop's measured model
+  of Lightroom's brush, not Adobe's rasteriser, and both directions say so by
+  name.
+- **Negative `Texture` was re-shaped in v0.35.0.** The second change of shape on
+  this branch: it is now two low-passes mixed in parallel against 45 measured
+  Lightroom anchors, so any recipe with a negative texture value — global or
+  per-mask — renders differently from v0.34.0.
+- **Every mask moved half a pixel in v0.35.0.** Radial, linear, brush, bitmap
+  and AI masks alike now sample at pixel *centres* (`(x + 0.5)/w`), which is
+  where Lightroom samples: measured on two different negatives, and worth
+  exactly 0.5 px up and to the left, on every frame, at every feather.
+- **Subject masks are all re-derived once on v0.35.0.** The subject backend is a
+  commit-pinned BiRefNet, with U²-Net as a named fallback when a machine cannot
+  run it; the cache key carries the backend generation, so each subject alpha is
+  recomputed on the first develop after the upgrade. A mask that was produced by
+  the fallback is re-derived again by itself once the machine can run the
+  better model, and the run says so.
 - **Imported radial geometry changed in v0.33.0.** Previous builds dilated every
   imported radial by 3.2 %. They now render at the sidecar's stored geometry.
   Renders of the same recipe differ across that boundary; version snapshots keep
   the old one.
+- **Radial and linear masks moved again in v0.35.0, on lens-corrected frames.**
+  Lightroom rasterises those shapes *after* its lens correction and a brush
+  *before* it; the engine now reads each in its own frame instead of both in
+  one. Where a lens profile is active this lands the shape within 0.3 px of
+  where Lightroom puts it, against 8–24 px before.
 - **Every Sony ARW render moved by (32, 20) px in v0.32.0.** The develop window
   now starts at the RAW's own `DefaultCropOrigin`, where the camera and Lightroom
   put the picture, instead of the sensor's top-left corner.
@@ -798,6 +877,14 @@ per-user `autoshop.local.json` overrides the environment. The two sidecar knobs
   recipe and vice versa; what changed is renders (X-Trans colour, negative
   texture, the ≥138.5 MP RAW refusal) and the AI-mask cache key, which simply
   re-derives each alpha once on the first develop.
+- **Forward compatibility breaks again at v0.35.0.** The recipe's lens-profile
+  block gained the solved mask warp — the coordinate frame a mask is placed in
+  — and that block is written on **every** recipe, so a v0.34.0 binary
+  hard-refuses **any** `recipe.json` a v0.35.0 binary saved, not only ones with
+  a lens profile in them. It is a loud refusal by design: silently dropping a
+  coordinate frame is the one failure a mask cannot survive. That is the third
+  such break on this branch. Reading the other direction is unaffected —
+  v0.35.0 opens everything older and renders it as it did.
 - **AI denoise runs on the demosaiced RGB**, not the raw Bayer mosaic like Adobe
   Denoise, and takes ~3 min for a 60 MP frame on an RTX 4060 Ti. Excellent, not
   identical to Adobe.

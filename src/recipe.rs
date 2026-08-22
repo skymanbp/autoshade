@@ -1269,6 +1269,29 @@ pub enum MaskGeometry {
     ///    Anything else is someone else's writer and is refused, not guessed
     ///    (the roundness rule).
     ///
+    /// The TOTALS above (171 sidecars, 39 Aggregates, 382 Paints, 300
+    /// in-correction Paints) are pending re-derivation — see the note on
+    /// `AI_MASK_PROVENANCE_KEYS` in xmp.rs for why the counts are stale while
+    /// the invariants they describe are not.
+    ///
+    /// **⚠ A NEWER LIGHTROOM DOES NOT ALWAYS WRITE THIS FORM.** Registered
+    /// 2026-08-21 (R29 me5), unmodelled: when Lightroom 18.4 rewrote one of
+    /// these sidecars after an AI-mask update, it collapsed the file
+    /// 44,540 → 19,261 B by deleting all 14 standalone `Mask/Paint`
+    /// components — every `Dabs`, `Radius`, `Flow` and `CenterWeight` string
+    /// with them — and emitting `crs:MaskBrushTable` +
+    /// `crs:MaskBrushUncompressedBytes` instead, a compressed blob carrying the
+    /// same data. Only the two Paints belonging to a `crs:Gesture` kept their
+    /// text form. Every sidecar in the reference library is still the old text
+    /// form, so nothing measured here is affected — but a file this engine
+    /// reads AFTER a modern Lightroom has rewritten it has no dab stream to
+    /// import. Neither half of the consequence is verified against a specimen
+    /// yet: what the blob encodes, and whether the surviving structure trips
+    /// `parse_brush_group`'s existing refusals (a loud `OutOfModel`) or slips
+    /// past them. R30 candidate — reconnoitre the format, then either read it
+    /// or refuse it BY NAME. A brush that disappears quietly is the one
+    /// outcome this module is built not to allow.
+    ///
     /// All four numbers ride out into the sidecar exactly as they rode in, so
     /// a brush mask this app imports and republishes still says what Lightroom
     /// said. `blend_mode` is therefore stored HERE as well as being projected
@@ -1371,12 +1394,25 @@ pub enum MaskGeometry {
         /// `ModelVersion`, `ErrorReason`, `MaskSubCategoryID`.
         ///
         /// **PROVENANCE ONLY. Nothing here is read.** `FullMaskSize`
-        /// (`"2880,1920"`) is the resolution Adobe's segmenter worked at and
-        /// `WholeImageArea` / `Origin` are the crop rect and bbox origin in
-        /// those proxy pixels — they describe a raster this engine does not
-        /// have and would only mislead a renderer that consulted them. They are
-        /// kept so the sidecar round-trips and so a future measurement has the
-        /// numbers, not so anything can act on them.
+        /// (`"2880,1920"`) is the resolution Adobe's segmenter worked at,
+        /// `Origin` is the mask raster's bbox origin in those proxy pixels, and
+        /// `WholeImageArea` is the proxy frame's EFFECTIVE IMAGE AREA — four
+        /// rationals in `(top, left, bottom, right)` order. R29 me3-c
+        /// (2026-08-21) measured both halves of that sentence, because the
+        /// version it replaces called `WholeImageArea` the crop rect and it is
+        /// not one: the specimen carries `HasCrop="True"` with a visible crop
+        /// and still writes `"0/1,0/1,1920/1,2880/1"` = the whole proxy frame,
+        /// and across the library 85 of 94 values are the full frame while the
+        /// 9 inset ones pair with a SHORTER `FullMaskSize` (`"2880,1913"`) —
+        /// the signature of a lens-geometry inset, not of a user crop. The
+        /// frame those numbers live in is the UNCROPPED one: projecting the
+        /// decoded alpha through `FullMaskSize` as an uncropped frame and then
+        /// applying `crs:Crop*` lands it on the subject including flyaway hair,
+        /// while reading `FullMaskSize` as the cropped frame lands it visibly
+        /// small and displaced. They still describe a raster this engine does
+        /// not have and would still mislead a renderer that consulted them.
+        /// They are kept so the sidecar round-trips and so a future measurement
+        /// has the numbers, not so anything can act on them.
         ///
         /// A key outside the measured vocabulary is REFUSED by the parser
         /// rather than carried ([`xmp`]'s `AI_MASK_PROVENANCE_KEYS`): an
@@ -1388,21 +1424,42 @@ pub enum MaskGeometry {
         provenance: Vec<(String, String)>,
         /// The `crs:Gesture` child's `Mask/Paint` strokes — the user's brush
         /// REFINEMENT of the AI mask (present on 83 of 218 components, exactly
-        /// one Paint each in the F2 census).
+        /// one Paint each in the F2 census; that COUNT is pending
+        /// re-derivation — see the note on `AI_MASK_PROVENANCE_KEYS` in
+        /// xmp.rs — the shape it describes is not). Re-measured on the
+        /// library as it stands
+        /// 2026-08-21: 40 gesture blocks over 10 files, one Paint each (40/40),
+        /// every one of them on `MaskSubType="0"`.
         ///
-        /// Carried, not rendered — and since R29 Batch-6b that is no longer
-        /// [`BrushStroke::dabs`]'s reason. The kernel IS measured now and a
-        /// standalone [`MaskGeometry::Brush`] group draws
-        /// (`render::brush_raster`); what is still unmeasured here is the
-        /// COMPOSITION. A gesture refines Adobe's alpha, and the alpha this
-        /// engine holds for an AI mask is not Adobe's — it is our own
-        /// segmenter's re-derivation (see `raster` below) — so folding the
-        /// photographer's correction strokes onto a different model's mask is a
-        /// different operation from the one Lightroom performs, and nothing has
-        /// measured what it should do at the seams. Registered rather than
-        /// guessed, exactly as `roundness` was. Carrying it is still what makes
-        /// the 7 corrections whose ONLY brush content is a gesture importable
-        /// at all.
+        /// Carried, not rendered — and since R29 me3-c / me5 (2026-08-21) that
+        /// is MEASURED in both subtypes rather than registered as unknown.
+        /// There is no render-time composition to miss: a gesture is not an
+        /// overlay Lightroom adds to a finished alpha.
+        ///
+        ///  * `MaskSubType="1"` (Subject): a hand-authored `crs:Gesture` is
+        ///    accepted as a first-class object — Lightroom re-serialises it,
+        ///    keeps `BrushGestureInterpretation`, and silently recomputes past
+        ///    the stale digests — and contributes EXACTLY ZERO to the render.
+        ///    The two full-size exports are pixel-identical (39 M px,
+        ///    max|Δ| = 0) and their entropy-coded segments are byte-identical.
+        ///  * `MaskSubType="0"` (Object): the gesture IS read, but as an INPUT
+        ///    to the segmentation — the region prompt that says which object.
+        ///    Deleting it changed 511,020 px (max|Δ| = 74 DN) inside a bbox
+        ///    that contains all 12 dabs, while the same frame's two Sky masks
+        ///    (subtype 2, no gesture) stayed bit-identical outside it. The
+        ///    component was not dropped; Lightroom recomputed a DIFFERENT alpha
+        ///    from the remaining inputs.
+        ///
+        /// So carrying without drawing is right in both subtypes, and the open
+        /// question moved: not "how do the strokes composite onto an alpha",
+        /// but "should they steer OUR segmenter the way they steer Adobe's".
+        /// This engine's object backend (SAM 2.1) is prompted today only by
+        /// `crs:ReferencePoint`; turning the gesture dabs into additional SAM
+        /// point/box prompts is an R30 candidate. That is a segmentation-INPUT
+        /// fidelity improvement, not a render gap — an AI mask's alpha is
+        /// declared a local re-derivation on every surface either way.
+        /// Carrying it is still what makes the corrections whose ONLY brush
+        /// content is a gesture importable at all.
         ///
         /// Carried, and since R29 C1 also TURNED: these are `BrushStroke`s and
         /// they ride `render::orient_recipe_coords`' rewrite with the rest.

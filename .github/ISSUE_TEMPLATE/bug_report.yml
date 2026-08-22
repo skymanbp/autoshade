@@ -36,7 +36,7 @@ body:
       label: Version
       description: "`autoshop --version`, or the title bar of the desktop app."
       options:
-        - v0.34.0 (latest release)
+        - v0.35.0 (latest release)
         - older — please say which, in the next field
     validations:
       required: true

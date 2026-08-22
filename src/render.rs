@@ -3384,10 +3384,30 @@ fn mask_weight(g: &MaskGeometry, nx: f32, ny: f32, bmp: Option<&image::GrayImage
         // (2026-08-21) then closed the biggest hole with a Roundness=100 &
         // Feather=50 cross probe: the no-op HOLDS with feather active
         // (|Δα| ≤ 0.006 on both falloff branches, same support endpoint), so
-        // Roundness does not modulate the falloff shape either. Scope still
-        // stated rather than generalised: +100 only (negatives untested),
-        // one geometry, and the feathered inner-branch shape is only covered
-        // on the minor-axis sector (docs/V2_PLAN.md §7 item 11).
+        // Roundness does not modulate the falloff shape either. R29 me3-b
+        // (2026-08-21) closed the two scope caveats this comment used to carry.
+        // NEGATIVES are no longer untested: a hand-authored Roundness="-100"
+        // probe renders the same geometry as its Roundness="+100" sibling on
+        // the same frame at Feather=0 (ellipse parameters within 0.03 px,
+        // |Δα| ≤ 0.0024 — me3-b §4), and Lightroom accepts and writes the
+        // value back verbatim, so the ±100 domain gate in xmp.rs matches what
+        // was measured. The "minor-axis sector only" caveat is GONE too: the
+        // Roundness 0 vs +100 pair at Feather=50 is byte-identical over the
+        // WHOLE exported frame — same entropy-coded segment, max|Δ| = 0 across
+        // 26 M pixels (me3-b §5, re-verified first-hand at adjudication) — so
+        // every sector is covered, not just the one the earlier fit sampled.
+        // What genuinely stays open (docs/V2_PLAN.md §7 item 11): all four
+        // probes are the SAME box (Top 0.4 / Left 0.333333 / Bottom 0.6 /
+        // Right 0.666667, aspect 2.5, centred, Angle 0), so a second geometry
+        // is still zero-sample; only {−100, 0, +100} were exported, so an
+        // implementation that acts strictly INSIDE the endpoints would be
+        // invisible here; and Roundness × Angle≠0 is untested.
+        // Registered, not claimed (me3-b §4.3, H8): the −100 and +100 exports
+        // differ by a whole-frame, zero-mean dither rearrangement of ≤ ±4 DN
+        // with no spatial structure and no far-field asymmetry. Mechanism
+        // unresolved. It is written down so a later batch that meets the same
+        // ±1 DN wash on these probe negatives checks for THIS before reading
+        // it as a signal.
         // The sibling `feather` HAD the same guessing bug — Lightroom writes it
         // 0..100 and xmp.rs used to import the value raw, so Feather="72"
         // clamped to fully feathered; both XMP directions now convert on the
@@ -11845,10 +11865,16 @@ mod tests {
         // measured what the number DOES at +100 / Feather=0: nothing, to
         // 0.1 px and JPEG noise — so this no-op is Lightroom's measured
         // behaviour there, and carrying the value verbatim stays right.
-        // Negatives and the Roundness×Feather cross term remain open
-        // (docs/V2_PLAN.md §7 item 11). Pinning the no-op so any future
-        // falloff-shape implementation lands together with the doc and the
-        // XMP round-trip.
+        // The negatives this loop has always exercised (`-100/-35/-1`) are no
+        // longer a guess either: R29 B7-2 measured the Roundness×Feather cross
+        // term at +100/Feather=50 and R29 me3-b measured −100 at Feather=0 and
+        // the whole-frame Roundness×Feather identity at Feather=50, so the
+        // assertions below now pin MEASURED behaviour rather than a documented
+        // assumption — the values did not have to change for that. Still open
+        // (docs/V2_PLAN.md §7 item 11): a second geometry, the values strictly
+        // between the endpoints, and Roundness × Angle≠0. Pinning the no-op so
+        // any future falloff-shape implementation lands together with the doc
+        // and the XMP round-trip.
         let radial = |roundness: f32| MaskGeometry::Radial {
             top: 0.2,
             left: 0.1,

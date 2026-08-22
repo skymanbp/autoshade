@@ -460,8 +460,8 @@ def main() -> int:
     # The house pattern its two sibling scripts already carry (check_docs.py,
     # subset_gui_fonts.py) and this one was missing: a redirected Windows stdout
     # gets the ANSI codepage, and everything printed below is quoted back OUT OF
-    # UTF-8 SOURCE. A missing key holding one character CP936 has no mapping for
-    # (`²` is the one this was caught with) made `print` raise
+    # UTF-8 SOURCE. A missing key whose text held a single character that CP936
+    # cannot encode (`²` is the one this was caught with) made `print` raise
     # UnicodeEncodeError mid-report, so the gate died at the FIRST finding it
     # had to quote — the report stopped there and the checks
     # after it (dead keys, bypasses, placeholder mismatches) never ran. A crash

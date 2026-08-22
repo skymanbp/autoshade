@@ -1,6 +1,14 @@
 # Autoshop — Architecture
 
-> Status: **implemented** (v0.34.0 — R28, five batches: the X-Trans colour cast
+> Status: **implemented** (v0.35.0 — R29, the round that turned measurements
+> into renders: Lightroom's **brush masks are drawn**, not just carried; the
+> radial falloff is a measured 290 × 11 table instead of a fourth refuted
+> closed form; negative `Texture` is re-shaped onto 45 Lightroom anchors; the
+> `.lcp` reader lands and with it a per-mask-TYPE frame decision (a new
+> `LensProfile` recipe block, and a **hard forward break** at this boundary);
+> every mask family samples at pixel CENTRES; and subject segmentation runs a
+> commit-pinned BiRefNet with a NAMED U²-Net fallback — atop R28's five
+> batches: the X-Trans colour cast
 > root-fixed by an in-tree CFA-geometry demosaic, every store read capped
 > classwide, AI-mask frame identity in the cache key, per-file 4 GiB memory
 > ceilings on BOTH develop doors, and typed XMP read scopes — atop R27's ten
@@ -71,17 +79,18 @@
 > experimental generative edits, an optional pixel-**heal** retouch mode (§4.7)
 > the deterministic look **reverse-fit** (§4.8) and the local server's refusal
 > model (§4.9).
-> 727 library + 11 CLI + 131 GUI + 2+2 contract tests pass in both build
+> 816 library + 14 CLI + 132 GUI + 2+2 contract tests pass in both build
 > configurations, with 9 further library tests `#[ignore]`d as forensic probes
-> (counts refreshed 2026-08-20 from the v0.34.0 release battery). THREE suites are ADDITIONAL and
+> (counts refreshed 2026-08-21 from the v0.35.0 release battery). THREE suites are ADDITIONAL and
 > env-gated, so a bare `cargo test` does not include them:
 > `AUTOSHOP_LR_PROBE_FIXTURES` (16 real Lightroom radial sidecars, byte
 > round-trip), `AUTOSHOP_MB_FIXTURES` (the 7-file M-B forensic set — 42 of its
 > 42 corrections imported, 0 refused) and, since R27, `AUTOSHOP_RAW_ZOO` (the
 > CC0 nine-camera zoo, one RAW per format —
 > `every_make_in_the_raw_zoo_decodes_and_agrees_with_itself` in
-> [`src/decode.rs`](../src/decode.rs), 9/9 at v0.34.0). Every release runs all
-> three and records their counts — see ROADMAP「发版链 + 环境门套件」.
+> [`src/decode.rs`](../src/decode.rs), 9/9 at the last release). Every release
+> runs all three and records their own counts, rather than carrying the previous
+> release's forward — see ROADMAP「发版链 + 环境门套件」.
 > v0.23.3 (round 13): the XMP xmlns conflict gate resolves namespace bindings
 > through an element SCOPE STACK and refuses only where a binding would
 > actually corrupt this document's reading (a nested rebound island nobody
@@ -1139,38 +1148,63 @@ folder that has brush work in it: `_DSC9583` went from 8 of 11 corrections
 imported to 10 of 11, and the one still refused is refused for
 `CorrectionAmount="1.1"`, not for its brush.
 
-**The measurement then LANDED, and the arm still does not render (R27
-Batches 8-10).** Two controlled Lightroom experiments — 16 hand-made exports,
+~~**The measurement then LANDED, and the arm still does not render (R27
+Batches 8-10).**~~ **← HISTORICAL from here to the end of this block: it
+records the R27 state, and both of the blockers it names fell in R29 (the
+paragraph above is the shipped behaviour). Kept because the measurements are
+still the provenance of the model that ships, and because the two blockers are
+worth being able to look up. Read every present tense below as「in R27」.**
+Two controlled Lightroom experiments — 16 hand-made exports,
 then 17 states written as SYNTHESIZED sidecars that Lightroom imported and
 rendered without complaint — close the alpha model except at one axis:
 accumulation is **screen**, within a stroke and across components (a held-out
 51-dab stroke predicts at rms 0.0045); **density (`MaskValue`) scales each dab
 BEFORE the screen** rather than capping it (the cap reading is refuted 13×);
 and **flow** obeys a one-parameter odds law, `D/(1−D) = κ·f/(1−f)` with
-**κ = 0.1219 ± 0.0027** (fit rms 0.0070 over 11 rungs, held-out 0.0097, and
+~~**κ = 0.1219 ± 0.0027**~~ (fit rms 0.0070 over 11 rungs, held-out 0.0097, and
 `D(1) = 1` exactly with no free parameter — which killed the earlier
-「flow 1.0 takes a different code path」 hypothesis). Two identities fell out:
+「flow 1.0 takes a different code path」 hypothesis). **← the SHIPPED value is
+R29 B6's `κ = 0.1284 ± 0.0029`** (`render::KAPPA`), re-measured out of sample
+and universal to 2.24 % across a 3× radius change and both hardness ends. The
+R27 number sits 5.3 % low, ≈ 1.6 σ — real, and not to be quoted as agreeing
+with the shipped one better than 5 %; the odds law carries a genuine ~11 %
+per-rung κ drift across flow, which is registered rather than fitted away.
+Two identities fell out:
 Lightroom's brush **Size is the α = 0.5 diameter** (266.1 ± 5.0 px, invariant
 across the feather ladder) while `crs:Radius` is the OUTER support, and
 `CenterWeight ≠ 1 − Feather/100` (Feather 50 → 0.1621).
 
-Two named reasons keep the renderer at weight 0. **(1) The kernel has no closed
-form.** `k(ρ;h)` is measured at 11 hardness rungs; six families were tried and
-the only one spanning h = 0 → 1 has parameters DISCONTINUOUS in h, so what
-exists is a measured TABLE whose h-interpolation predicts a held-out rung at
-rms 0.0115 and max **0.0344** — 4× the 0.0085 quantisation floor. **(2) The
-mask does not live in the frame this engine renders in**: Lightroom rasterises
+Two named reasons kept the renderer at weight 0 through R27, **and BOTH are
+closed** — the strikethroughs below are what changed, not the record.
+~~**(1) The kernel has no closed form.**~~ `k(ρ;h)` is measured at 11 hardness
+rungs; six families were tried and the only one spanning h = 0 → 1 has
+parameters DISCONTINUOUS in h, so what exists is a measured TABLE whose
+h-interpolation predicts a held-out rung at rms 0.0115 and max **0.0344** — 4×
+the 0.0085 quantisation floor. **← R29 B6 found the closed form on denser
+sampling: `k(ρ;h) = (1 − ρ^m(h))^n(h)` with `ln m` and `ln n` cubic in the
+hardness — 8 numbers, held-out rms 0.0109, BETTER than interpolating that table
+(0.0180). The table was the measurement; the closed form is what ships.**
+~~**(2) The mask does not live in the frame this engine renders in**~~:
+Lightroom rasterises
 it BEFORE its lens correction (the same artefact the `k = 1.032` bullet below
 closes), displacing exported dabs by up to 57 px and stretching them 7.4 %
-anisotropically at the frame corners — and this engine has no `.lcp` parser,
+anisotropically at the frame corners — ~~and this engine has no `.lcp` parser,
 never reads `crs:LensProfileEnable`, and runs Sony EXIF knots in its own
-geometry stage, a DIFFERENT polynomial. Baking a mask into pixels at a position
+geometry stage, a DIFFERENT polynomial~~. **← R29 Batch-3 (`src/lcp.rs`) both
+built the `.lcp` reader and read `crs:LensProfileEnable` — and for BRUSHES the
+frame half turned out to need nothing at all: this engine evaluates masks
+BEFORE its own geometry stage, which IS Lightroom's pre-correction frame, so a
+dab stream is already in the right place and gets no warp. The parametric
+shapes are the ones that needed the reader; see the mask-frame block below.**
+~~Baking a mask into pixels at a position
 known to be wrong is worse than the honest `BrushCarried` disclosure, so the
 implementation waits: the sketch is on file (`batch10-report.md` §7.4 —
 pre-rasterise the dab group and sample it exactly like `Bitmap`/`AiMask`, no
 schema change, with κ and the 11-rung table as the pinned test values), and the
 frame half of the blocker is what an `.lcp` reader would answer (the named R28
-candidate).
+candidate).~~ **← the sketch was followed in R29 B6b, and the disclosure was
+renamed with the behaviour: `BrushCarried` no longer exists in the tree — it is
+`BrushRendered` in both directions.**
 
 Reading a Paint required three parser fixes in the same batch, all of them
 latent-until-now: `classify_correction` walked the component list FLAT (so a
@@ -1280,17 +1314,53 @@ experiment:
   narrow annulus a distortion polynomial is locally indistinguishable from a
   scale, which is exactly why single frames read 0.984 … 1.032 at all. So the
   sidecar's geometry lives in the PLAIN frame (0.998 measured with the profile
-  off) and **Lightroom rasterises its masks BEFORE the lens correction**, a
+  off) and **Lightroom rasterises its masks BEFORE the lens correction**, ~~a
   frame this engine cannot reproduce today — no `.lcp` parser,
   `crs:LensProfileEnable` never read, and its own geometry stage runs Sony EXIF
-  knots, a different polynomial. Rendering the geometry the sidecar actually
-  stores and leaving Adobe's warp UNMODELLED is what the user ruled; an `.lcp`
-  reader is the named R28 candidate. The `k` plumbing stays (it is the shape a
+  knots, a different polynomial~~. Rendering the geometry the sidecar actually
+  stores and leaving Adobe's warp UNMODELLED is what the user ruled; ~~an `.lcp`
+  reader is the named R28 candidate~~. The `k` plumbing stays (it is the shape a
   warp model slots into) and is now the identity everywhere. **What this
   costs and what it does not:** the byte round-trips were `k`-invariant by
   construction, so the real-sidecar suites pass unchanged; what moves is the
   RENDER — an imported radial is no longer dilated 3.2 %, and the residual on
   any frame is that frame's own Adobe warp (0–3.4 % observed).
+* **The mask frame is a per-mask-TYPE decision, and the warp is now solved
+  rather than registered — R29 Batch-3, v0.35.0.** The `.lcp` reader landed
+  ([`src/lcp.rs`](../src/lcp.rs), both XML spellings, a Newton inverse with
+  fold detection), `xmp::lens_profile_enabled` reads `crs:LensProfileEnable`,
+  and the recipe carries the result in a new `LensProfile` block whose
+  `MaskWarpSource` names which of seven states produced it (an in-camera knot
+  set, a solved `.lcp`, or an honest none). What the measurement settled is
+  that Lightroom does not put every mask in one frame: a BRUSH is rasterised in
+  the pre-correction frame — which is where this engine already evaluates masks,
+  before `apply_lens_geometry`, so a dab stream needs no warp at all — while a
+  RADIAL or LINEAR is placed in the corrected frame, and reading one in the
+  other put the radial arm out by up to 186 px on the probe frames. So the
+  parametric shapes take `MaskUnwarp` (the exact inverse of the resampler, via
+  `lens_ungeom_norm` — not a second solver) and the dab streams take the
+  identity, pinned by `only_lightrooms_post_correction_shapes_are_frame_adapted`.
+  Landing residual on the probe frames: 0.09–0.30 px, against 8–24 px unwired.
+  ⚠ Two consequences ride the version boundary: `LensProfile` is a **hard
+  forward break** (a pre-v0.35.0 binary cannot parse a recipe carrying it), and
+  a geometry-active radial or linear now RENDERS at the stored coordinates it
+  always claimed to.
+* **A mask is sampled at PIXEL CENTRES — R29 C2, v0.35.0.** `render::
+  MASK_SAMPLE_CENTRE` is the one constant behind five sites that must agree
+  (`apply_masks`' frame producer, `mask_coverage`'s overlay, `sample_gray_norm`'s
+  texel lookup, `rasterise_brush_group`'s stamp grid, and `fit_zoned`'s analysis
+  moments). Measured on two different negatives: a hard-edged radial whose
+  nominal centre is the continuous `(3120.0, 2080.0)` fits at `(3119.46,
+  2079.50)` and `(3119.49, 2079.51)` in PIXEL-INDEX space, and an ellipse fitted
+  over indices returns `p − 0.5` — so Lightroom maps a stored fraction `u` to
+  `u·W` and pixel `i` carries the value at `u = (i + 0.5)/W`. The old `x/w` gave
+  pixel `x` the value belonging to its own top-left CORNER. ⚠ Every mask of
+  every family therefore lands half a pixel up and to the left of where this
+  engine used to put it — exactly 0.5 px on each axis, with no dependence on
+  feather, geometry or frame size. No calibration needed compensating: the
+  falloff table's ρ is normalised against a fitted centre and semi-axes
+  (convention-neutral), the brush kernel's radial profile moves by O((δ/r)²),
+  and the texture anchors are a spatial filter with no mask coordinate in them.
 * **the falloff** — three successive closed forms, all refuted, now replaced by
   the measurement itself. Since **v0.35.0** the `MaskGeometry::Radial` arm of
   `mask_weight` calls `render::radial_falloff`, which interpolates Lightroom's

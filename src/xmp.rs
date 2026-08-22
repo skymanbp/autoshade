@@ -1200,6 +1200,21 @@ crs:Midpoint=\"{midpoint}\" crs:Version=\"{mask_version}\"",
 /// ([`MaskGeometry::AiMask`]) plus `crs:What` and `crs:MaskActive` (an
 /// invariant, `"true"` on 218/218) and `crs:MaskSyncID` (re-minted by this
 /// writer like every other component's). These eleven are the rest.
+///
+/// **⚠ THE COUNTS ARE PENDING RE-DERIVATION — the INVARIANTS are not.** Read
+/// every `N of 218` / `382/382` / `300/300` figure in this file and in
+/// recipe.rs as "the shape measured in the F2 census", not as a number you can
+/// reproduce today. R29 me3-c re-ran the census over `D:\Photography\**\*.xmp`
+/// (177 sidecars) on 2026-08-21 and got 105 `Mask/Image`, 398 `Mask/Paint`,
+/// 1081 `Mask/*` and 40 `crs:Gesture` blocks — none of the older totals came
+/// back, and the R28 MANIFEST reported the same divergence independently. What
+/// moved is almost certainly the CORPUS ROOT the census walked (the F2 batch's
+/// note does not record it), not the library. The numbers are therefore left
+/// exactly as they were measured rather than quietly replaced: re-deriving
+/// them needs the root back, and a doc number swapped for a differently-scoped
+/// one is worse than a stale one that says it is stale. Nothing in the code
+/// depends on a count — the allowlists and the refusals depend on the
+/// vocabulary and the invariants, which BOTH censuses agree on.
 const AI_MASK_PROVENANCE_KEYS: [&str; 11] = [
     "MaskSubCategoryID",
     "InputDigest",

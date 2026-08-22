@@ -569,10 +569,21 @@ CLAIMS: list[Claim | SetClaim] = [
         r"\[Download v(?P<version>\d+\.\d+\.\d+)\]",
         cargo_version,
     ),
+    # The `9/9 at v<version>` alternative was dropped 2026-08-21. It pinned the
+    # RAW zoo's COUNT to the shipped version, and those are two different kinds
+    # of fact: the version is a doc copy of `Cargo.toml`, while the zoo count is
+    # a MEASUREMENT of an environment-gated suite the release chain runs against
+    # a corpus that does not ship with the source. Coupling them forced the
+    # version bump to assert a result nobody had measured yet — the gate demands
+    # the string, the string reads as a finding — which is the exact failure this
+    # file exists to prevent, pointed the wrong way. The zoo count now stands
+    # unversioned in README and is re-recorded per release (ROADMAP
+    # 「发版链 + 环境门套件」: 数字每版实录, 勿抄上一版). The version copies that
+    # ARE copies stay pinned below.
     Claim(
         README,
-        "shipped version — download link URL + release-table + gates + zoo",
-        r"(?:releases/tag/v|Release gates at v|9/9 at v)(?P<version>\d+\.\d+\.\d+)",
+        "shipped version — download link URL + release-gates line",
+        r"(?:releases/tag/v|Release gates at v)(?P<version>\d+\.\d+\.\d+)",
         cargo_version,
     ),
     Claim(
