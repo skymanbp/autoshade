@@ -42,6 +42,18 @@ be licensed for the use we are instructing. Both backends were re-checked
     ~51 and far above the B0 that was actually shipped here. The licence-clean
     pick is the better pick; there is no quality trade.
 
+  * SKY + OBJECT TRAINING SETS, AUDITED AND CLOSED (R30 B4, 2026-08-22).
+    ADE20K's terms (https://ade20k.csail.mit.edu/terms/) govern access to and
+    use/redistribution of the database; they contain no clause binding trained
+    models or their downstream users. SA-1B's terms likewise govern its images
+    and metadata, not trained models, weights or outputs (canonical dataset page:
+    https://ai.meta.com/datasets/segment-anything/; clause text checked in the
+    secondary mirror at https://huggingface.co/datasets/xiuqhou/SA-Det-100k/blob/main/LICENSE).
+    Autoshop downloads and executes only the separately licensed model files,
+    never either training set. The ADE20K class table shipped here is our own,
+    rebuilt from MIT model metadata and cross-checked against MIT OneFormer
+    source as documented below; it is not an ADE20K annotation download.
+
   * SUBJECT, PINNED IN PLACE — and since R29 B4 it is the FALLBACK tier rather
     than the primary. `rembg.remove()` with no session argument
     resolves to whatever THAT INSTALL's default model is. On rembg 2.0.76 that
