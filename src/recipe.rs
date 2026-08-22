@@ -1429,10 +1429,10 @@ pub enum MaskGeometry {
         /// 2026-08-21: 40 gesture blocks over 10 files, one Paint each (40/40),
         /// every one of them on `MaskSubType="0"`.
         ///
-        /// Carried, not rendered — and since R29 me3-c / me5 (2026-08-21) that
-        /// is MEASURED in both subtypes rather than registered as unknown.
-        /// There is no render-time composition to miss: a gesture is not an
-        /// overlay Lightroom adds to a finished alpha.
+        /// Carried, not composited by the renderer — and since R29 me3-c / me5
+        /// (2026-08-21) that is MEASURED in both subtypes rather than registered
+        /// as unknown. There is no render-time overlay to miss: a gesture is a
+        /// segmentation input, not paint added to a finished alpha.
         ///
         ///  * `MaskSubType="1"` (Subject): a hand-authored `crs:Gesture` is
         ///    accepted as a first-class object — Lightroom re-serialises it,
@@ -1448,14 +1448,14 @@ pub enum MaskGeometry {
         ///    component was not dropped; Lightroom recomputed a DIFFERENT alpha
         ///    from the remaining inputs.
         ///
-        /// So carrying without drawing is right in both subtypes, and the open
-        /// question moved: not "how do the strokes composite onto an alpha",
-        /// but "should they steer OUR segmenter the way they steer Adobe's".
-        /// This engine's object backend (SAM 2.1) is prompted today only by
-        /// `crs:ReferencePoint`; turning the gesture dabs into additional SAM
-        /// point/box prompts is an R30 candidate. That is a segmentation-INPUT
-        /// fidelity improvement, not a render gap — an AI mask's alpha is
-        /// declared a local re-derivation on every surface either way.
+        /// R30 B3 now uses the measured subtype-0 meaning: the ReferencePoint is
+        /// the first positive SAM point, followed by every ordered `d x y` dab
+        /// from every Paint, with duplicates preserved. `r/f/h`, MaskValue,
+        /// Radius, Flow and hardness remain state, not points or weights; there
+        /// are no negative labels, boxes, centroids, sampling or dense prompts.
+        /// Subtype 1/2 gestures remain transport-only and never steer their
+        /// backends. This is a segmentation-INPUT fidelity improvement, not a
+        /// render gap — an AI alpha is declared a local re-derivation either way.
         /// Carrying it is still what makes the corrections whose ONLY brush
         /// content is a gesture importable at all.
         ///
@@ -1467,8 +1467,10 @@ pub enum MaskGeometry {
         gesture: Vec<BrushStroke>,
         /// The RECOMPUTED alpha, once our segmenter has produced one — a path
         /// to an 8-bit grey PNG inside the photo's develop dir, keyed by
-        /// (photo, subtype, reference point, backend) so a re-render reuses it
-        /// instead of re-running the model (`segment::resolve_ai_masks`).
+        /// (photo, subtype, reference point, frame, backend generation), plus a
+        /// scoped hash of the exact sent point list for subtype-0 gestures, so a
+        /// re-render reuses it instead of re-running the model
+        /// (`segment::resolve_ai_masks`).
         ///
         /// Machine-local, like every other raster path in this file: it joins
         /// [`LocalAdjustment::bitmap_paths_mut`], so the store relativizes,

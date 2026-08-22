@@ -9,6 +9,7 @@
 //! (BiRefNet, OneFormer, SAM 2.1, each behind a sha256 gate) or `~/.u2net` for
 //! the subject fallback tier, which gates its own — no weights in the repo.
 
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -21,8 +22,9 @@ use crate::config::Config;
 pub struct SegmentOpts {
     pub python_bin: String,
     pub script: PathBuf,
-    /// `"subject"` (BiRefNet, with U²-Net as the fallback tier) or `"sky"`
-    /// (OneFormer ADE20K Swin-L). Both backends are licence-pinned on the
+    /// `"subject"` (BiRefNet, with U²-Net as the fallback tier), `"sky"`
+    /// (OneFormer ADE20K Swin-L), or `"object"` (SAM 2.1). All backends are
+    /// licence-pinned on the
     /// Python side — see `python/segment.py`'s module docstring: the sky model
     /// was SegFormer-B0 until R27 Batch-4, whose weights are licensed for
     /// "research or evaluation purposes only", and the subject fallback names
@@ -38,9 +40,12 @@ pub struct SegmentOpts {
     pub target: String,
     /// `crs:ReferencePoint` as the sidecar spells it — two space-separated
     /// normalised floats. REQUIRED by `--target object` and ignored by the
-    /// other two (R27 Batch-5): SAM 2.1 is point-prompted, and the point is
-    /// the one spatial fact a Lightroom `Mask/Image` component carries.
+    /// other two. A gesture-free object run sends exactly this legacy argv.
     pub reference_point: Option<String>,
+    /// The complete positive SAM prompt, ReferencePoint first, followed by
+    /// every ordered `d x y` from a subtype-0 gesture. `None` preserves the
+    /// legacy process contract; `Some` is staged as a bounded JSON sidecar.
+    pub prompt_points: Option<Vec<[f32; 2]>>,
 }
 
 impl SegmentOpts {
@@ -50,11 +55,13 @@ impl SegmentOpts {
             script: PathBuf::from(&cfg.segment_script),
             target: target.to_string(),
             reference_point: None,
+            prompt_points: None,
         }
     }
 
     /// [`from_config`](SegmentOpts::from_config) for one imported AI mask: the
-    /// backend its `crs:MaskSubType` names, prompted at its own click.
+    /// backend its `crs:MaskSubType` names, initially prompted at its own click.
+    /// [`resolve_ai_masks`] adds measured subtype-0 gesture dabs when present.
     ///
     /// The subtype mapping is the measured one — **0 = Object/Background,
     /// 1 = Subject, 2 = Sky** — and the 0 case is where the honesty lives:
@@ -80,8 +87,110 @@ impl SegmentOpts {
             // (`"0.517578 0.260997"`), so the value that reaches the model is
             // the value the file wrote to the precision the file wrote it at.
             reference_point: Some(format!("{ref_x:.6} {ref_y:.6}")),
+            prompt_points: None,
         })
     }
+}
+
+/// Maximum TOTAL point count in a gesture prompt, including ReferencePoint.
+/// The observed corpus gestures are single-Paint and roughly 12 dabs; this is
+/// a safety valve, not a sampling policy. Evidence over the bound is refused.
+pub const MAX_GESTURE_PROMPT_POINTS: usize = 2048;
+
+/// Prompt mapping and IPC-schema version. It also names the scoped cache-key
+/// component, so a future coordinate/label policy cannot reuse today's alpha.
+const GESTURE_PROMPT_MAPPING_VERSION: &str = "gp1";
+const GESTURE_PROMPT_REFUSAL: &str = "gesture point prompt refused";
+
+/// Build the exact point list sent to SAM, or `None` when the legacy path must
+/// remain untouched. Only subtype 0 has measured gesture semantics.
+fn gesture_prompt_points(
+    subtype: u32,
+    ref_x: f32,
+    ref_y: f32,
+    gesture: &[crate::recipe::BrushStroke],
+) -> Result<Option<Vec<[f32; 2]>>> {
+    if subtype != 0 {
+        return Ok(None);
+    }
+
+    let mut dabs = Vec::new();
+    for (stroke_i, stroke) in gesture.iter().enumerate() {
+        for (token_i, token) in stroke.dabs.split('\n').enumerate() {
+            let mut fields = token.split_whitespace();
+            match fields.next() {
+                Some("d") => {
+                    let (Some(x), Some(y)) = (fields.next(), fields.next()) else {
+                        bail!(
+                            "{GESTURE_PROMPT_REFUSAL}: stroke {} token {} is not `d x y`",
+                            stroke_i + 1,
+                            token_i + 1
+                        );
+                    };
+                    if fields.next().is_some() {
+                        bail!(
+                            "{GESTURE_PROMPT_REFUSAL}: stroke {} token {} is not `d x y`",
+                            stroke_i + 1,
+                            token_i + 1
+                        );
+                    }
+                    let x = x.parse::<f32>().with_context(|| {
+                        format!(
+                            "{GESTURE_PROMPT_REFUSAL}: stroke {} token {} has a non-numeric x",
+                            stroke_i + 1,
+                            token_i + 1
+                        )
+                    })?;
+                    let y = y.parse::<f32>().with_context(|| {
+                        format!(
+                            "{GESTURE_PROMPT_REFUSAL}: stroke {} token {} has a non-numeric y",
+                            stroke_i + 1,
+                            token_i + 1
+                        )
+                    })?;
+                    if !x.is_finite() || !y.is_finite() {
+                        bail!(
+                            "{GESTURE_PROMPT_REFUSAL}: stroke {} token {} has a non-finite coordinate",
+                            stroke_i + 1,
+                            token_i + 1
+                        );
+                    }
+                    if dabs.len() + 1 >= MAX_GESTURE_PROMPT_POINTS {
+                        bail!(
+                            "{GESTURE_PROMPT_REFUSAL}: {} points exceeds MAX_GESTURE_PROMPT_POINTS={MAX_GESTURE_PROMPT_POINTS}",
+                            dabs.len() + 2
+                        );
+                    }
+                    dabs.push([x, y]);
+                }
+                // These are brush STATE, never SAM evidence. MaskValue, Flow,
+                // hardness and Radius likewise stay ignored: no weights,
+                // negative labels, boxes, centroids, sampling or dense-mask
+                // prompt is established by the Lightroom measurements.
+                Some("r" | "f" | "h") => {}
+                Some(kind) => bail!(
+                    "{GESTURE_PROMPT_REFUSAL}: stroke {} token {} has unknown kind {kind:?}",
+                    stroke_i + 1,
+                    token_i + 1
+                ),
+                None => {}
+            }
+        }
+    }
+    if dabs.is_empty() {
+        return Ok(None);
+    }
+
+    // Use the same six-place value the legacy `--reference-point` carries, so
+    // the JSON list and its scoped cache identity describe what reaches Python.
+    let reference_text = format!("{ref_x:.6} {ref_y:.6}");
+    let mut reference = reference_text.split_whitespace().map(str::parse::<f32>);
+    let reference = [reference.next().unwrap()?, reference.next().unwrap()?];
+    if !reference[0].is_finite() || !reference[1].is_finite() {
+        bail!("{GESTURE_PROMPT_REFUSAL}: ReferencePoint has a non-finite coordinate");
+    }
+    dabs.insert(0, reference);
+    Ok(Some(dabs))
 }
 
 /// The word the sidecar puts inside [`SegmentReport::backend`] when the run
@@ -175,6 +284,106 @@ impl SegmentReport {
     }
 }
 
+#[derive(serde::Serialize)]
+struct GesturePromptPayload<'a> {
+    version: &'static str,
+    points: &'a [[f32; 2]],
+}
+
+/// A staged prompt is caller-owned IPC and must never survive the sidecar run.
+/// Drop covers spawn, timeout, non-zero exit, output refusal and success paths.
+#[derive(Debug)]
+struct StagedPromptFile {
+    path: PathBuf,
+}
+
+impl Drop for StagedPromptFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+fn parse_reference_point_text(text: &str) -> Option<[f32; 2]> {
+    let mut fields = text.split_whitespace();
+    let out: [f32; 2] = [fields.next()?.parse().ok()?, fields.next()?.parse().ok()?];
+    (fields.next().is_none() && out[0].is_finite() && out[1].is_finite()).then_some(out)
+}
+
+fn prompt_staging_path(input: &Path) -> PathBuf {
+    static TMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    std::env::temp_dir().join(format!(
+        "autoshop-ai-prompt-{}-{}-{}.json",
+        std::process::id(),
+        TMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+        crate::pipeline::stem(input)
+    ))
+}
+
+fn stage_prompt_file(opts: &SegmentOpts, input: &Path) -> Result<Option<StagedPromptFile>> {
+    let Some(points) = opts.prompt_points.as_deref() else { return Ok(None) };
+    if opts.target != "object" {
+        bail!("{GESTURE_PROMPT_REFUSAL}: --prompt-file is valid only for target object");
+    }
+    if !(2..=MAX_GESTURE_PROMPT_POINTS).contains(&points.len()) {
+        bail!(
+            "{GESTURE_PROMPT_REFUSAL}: point count {} is outside 2..={MAX_GESTURE_PROMPT_POINTS}",
+            points.len()
+        );
+    }
+    if points.iter().flatten().any(|v| !v.is_finite()) {
+        bail!("{GESTURE_PROMPT_REFUSAL}: prompt contains a non-finite coordinate");
+    }
+    let reference = opts
+        .reference_point
+        .as_deref()
+        .and_then(parse_reference_point_text)
+        .context("gesture point prompt refused: object prompt has no valid ReferencePoint")?;
+    if points[0] != reference {
+        bail!("{GESTURE_PROMPT_REFUSAL}: first point is not the argv ReferencePoint");
+    }
+
+    let path = prompt_staging_path(input);
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+        .with_context(|| format!("stage gesture point prompt {}", path.display()))?;
+    // Only arm cleanup after `create_new` proves this process owns the file.
+    let staged = StagedPromptFile { path };
+    serde_json::to_writer(
+        &mut file,
+        &GesturePromptPayload { version: GESTURE_PROMPT_MAPPING_VERSION, points },
+    )
+    .with_context(|| format!("write gesture point prompt {}", staged.path.display()))?;
+    file.flush()
+        .with_context(|| format!("flush gesture point prompt {}", staged.path.display()))?;
+    drop(file);
+    Ok(Some(staged))
+}
+
+fn append_segment_args(
+    cmd: &mut Command,
+    opts: &SegmentOpts,
+    input: &Path,
+    output: &Path,
+    prompt_file: Option<&Path>,
+) {
+    cmd.arg("-E")
+        .arg(&opts.script)
+        .arg("--input")
+        .arg(input)
+        .arg("--output")
+        .arg(output)
+        .arg("--target")
+        .arg(&opts.target);
+    if let Some(p) = &opts.reference_point {
+        cmd.arg("--reference-point").arg(p);
+    }
+    if let Some(path) = prompt_file {
+        cmd.arg("--prompt-file").arg(path);
+    }
+}
+
 /// Run the sidecar: `input` (any image file) → `output` (8-bit grayscale PNG).
 /// The mask is in the INPUT's frame — feed it the original-frame preview so it
 /// lands in the same space recipe masks live in.
@@ -192,6 +401,7 @@ pub fn segment_file(opts: &SegmentOpts, input: &Path, output: &Path) -> Result<S
     // "the mask exists" is true before the sidecar ever runs — the original
     // `exists()` guard here never fired for them.
     let before = crate::artifact_state(output);
+    let prompt_file = stage_prompt_file(opts, input)?;
     let mut cmd = Command::new(&opts.python_bin);
     // What a `.env` may push at this child is an ALLOWLIST, not "everything
     // the capability table did not refuse" — see `config::dotenv_child_env`.
@@ -204,17 +414,13 @@ pub fn segment_file(opts: &SegmentOpts, input: &Path, output: &Path) -> Result<S
     cmd.envs(crate::config::dotenv_child_env());
     // `-E`: ignore PYTHON* environment variables — same import-hijack
     // guard as the denoise sidecar (config.rs protects them too).
-    cmd.arg("-E")
-        .arg(&opts.script)
-        .arg("--input")
-        .arg(input)
-        .arg("--output")
-        .arg(output)
-        .arg("--target")
-        .arg(&opts.target);
-    if let Some(p) = &opts.reference_point {
-        cmd.arg("--reference-point").arg(p);
-    }
+    append_segment_args(
+        &mut cmd,
+        opts,
+        input,
+        output,
+        prompt_file.as_ref().map(|p| p.path.as_path()),
+    );
     cmd
         // CAPTURE, never inherit: the release GUI is windows_subsystem="windows"
         // and has NO console, so inherited handles discard the sidecar's output —
@@ -577,11 +783,12 @@ impl AiMaskResolution {
 /// The cache key for one AI mask's recomputed alpha: everything that decides
 /// the pixels, and nothing that does not.
 ///
-/// `(photo identity, subtype, reference point, FRAME, backend generation)` — so
-/// a re-render of the same recipe reuses the file, a moved click recomputes, a
-/// TURNED photo recomputes, and a photo's two AI masks never collide. The NAME
-/// is deliberately absent: it is a localised label the photographer may rename
-/// without changing one pixel.
+/// `(photo identity, subtype, reference point, FRAME, backend generation)` plus
+/// a scoped `gp1` component only when subtype 0 sends gesture dabs. Thus all
+/// unaffected generation-2 keys stay byte-identical, while a changed ordered
+/// point list cannot reuse a ReferencePoint-only alpha. The NAME is deliberately
+/// absent: it is a localised label the photographer may rename without changing
+/// one pixel.
 ///
 /// **The frame term is R28 Batch-3 (adjudication F1-A), and the sentence above
 /// was FALSE without it.** The segmenter runs on the frame
@@ -638,6 +845,28 @@ fn ai_cache_key(raw: &Path, subtype: u32, ref_x: f32, ref_y: f32, quarter_turns:
     ai_cache_key_gen(raw, subtype, ref_x, ref_y, quarter_turns, AI_BACKEND_GENERATION)
 }
 
+fn ai_cache_key_with_prompt(
+    raw: &Path,
+    subtype: u32,
+    ref_x: f32,
+    ref_y: f32,
+    quarter_turns: u8,
+    prompt_points: Option<&[[f32; 2]]>,
+) -> String {
+    let Some(prompt_points) = prompt_points else {
+        return ai_cache_key(raw, subtype, ref_x, ref_y, quarter_turns);
+    };
+    ai_cache_key_gen_scoped(
+        raw,
+        subtype,
+        ref_x,
+        ref_y,
+        quarter_turns,
+        AI_BACKEND_GENERATION,
+        Some((prompt_points, GESTURE_PROMPT_MAPPING_VERSION)),
+    )
+}
+
 /// [`ai_cache_key`] with the generation handed IN, so the term can be exercised
 /// by a test instead of being the one field in the identity string that only a
 /// release could prove. Nothing but [`ai_cache_key`] and its tests calls it, and
@@ -650,6 +879,67 @@ fn ai_cache_key_gen(
     quarter_turns: u8,
     generation: u32,
 ) -> String {
+    ai_cache_key_gen_scoped(
+        raw,
+        subtype,
+        ref_x,
+        ref_y,
+        quarter_turns,
+        generation,
+        None,
+    )
+}
+
+fn fnv1a64(bytes: impl IntoIterator<Item = u8>) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in bytes {
+        h ^= u64::from(b);
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    h
+}
+
+fn gesture_prompt_cache_component(points: &[[f32; 2]], version: &str) -> String {
+    // The sent VALUES, not BrushStroke storage: two canonical IEEE-754 words
+    // per ordered point. Duplicate points remain duplicate words; r/f/h and
+    // value/radius/flow/hardness never enter this stream because Python never
+    // receives them. Little-endian fixes the hash across host architectures.
+    let bytes = points
+        .iter()
+        .flat_map(|point| point.iter())
+        .flat_map(|value| value.to_bits().to_le_bytes());
+    format!("|{version}:{:016x}", fnv1a64(bytes))
+}
+
+fn ai_cache_key_gen_scoped(
+    raw: &Path,
+    subtype: u32,
+    ref_x: f32,
+    ref_y: f32,
+    quarter_turns: u8,
+    generation: u32,
+    prompt: Option<(&[[f32; 2]], &str)>,
+) -> String {
+    ai_cache_key_from_photo_key(
+        &crate::store::photo_key(raw),
+        subtype,
+        ref_x,
+        ref_y,
+        quarter_turns,
+        generation,
+        prompt,
+    )
+}
+
+fn ai_cache_key_from_photo_key(
+    photo_key: &str,
+    subtype: u32,
+    ref_x: f32,
+    ref_y: f32,
+    quarter_turns: u8,
+    generation: u32,
+    prompt: Option<(&[[f32; 2]], &str)>,
+) -> String {
     // FNV-1a over the identity string: small, stable across runs and platforms
     // (unlike `DefaultHasher`, whose output std explicitly does not guarantee
     // between releases — a cache name that moved between builds would silently
@@ -658,16 +948,14 @@ fn ai_cache_key_gen(
     // `% 4` because that is what the RENDER folds the field by
     // (`render::quarter_turn_orientation`): a hand-edited `quarter_turns: 5`
     // renders as one turn, and the key must not invent a second frame for it.
-    let ident = format!(
-        "{}|{subtype}|{ref_x:.6}|{ref_y:.6}|t{}|{generation}",
-        crate::store::photo_key(raw),
+    let mut ident = format!(
+        "{photo_key}|{subtype}|{ref_x:.6}|{ref_y:.6}|t{}|{generation}",
         quarter_turns % 4
     );
-    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-    for b in ident.as_bytes() {
-        h ^= *b as u64;
-        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    if let Some((points, version)) = prompt {
+        ident.push_str(&gesture_prompt_cache_component(points, version));
     }
+    let h = fnv1a64(ident.bytes());
     format!("ai-mask-{h:016x}")
 }
 
@@ -677,10 +965,11 @@ fn ai_cache_key_gen(
 ///
 /// **This is a RECOMPUTATION, not an import, and the whole design turns on
 /// that.** Lightroom's `Mask/Image` component carries no raster and no
-/// geometry — only the intent (`MaskSubType` + `ReferencePoint`) and
-/// provenance digests. So the only way to render one is to run a segmenter of
-/// our own, whose alpha differs from Adobe's at every edge and can differ
-/// grossly on a hard scene. Every surface that shows the result must say so;
+/// raster geometry — only the intent (`MaskSubType` + `ReferencePoint`), an
+/// optional region-hint gesture, and provenance digests. So the only way to
+/// render one is to run a segmenter of our own, whose alpha differs from Adobe's
+/// at every edge and can differ grossly on a hard scene. Every surface that
+/// shows the result must say so;
 /// [`AiMaskResolution::describe`] is this function's half of that, and
 /// [`crate::xmp::MaskImportReason::AiMaskRecomputed`] is the parser's.
 ///
@@ -745,17 +1034,38 @@ pub fn resolve_ai_masks(
         let mask_name = if m.name.is_empty() { "unnamed".to_string() } else { m.name.clone() };
         for g in std::iter::once(&mut m.mask).chain(m.components.iter_mut().map(|c| &mut c.geometry))
         {
-            let MaskGeometry::AiMask { subtype, ref_x, ref_y, raster, .. } = g else { continue };
+            let MaskGeometry::AiMask { subtype, ref_x, ref_y, gesture, raster, .. } = g else {
+                continue;
+            };
             let (subtype, rx, ry) = (*subtype, *ref_x, *ref_y);
+            let prompt_points = match gesture_prompt_points(subtype, rx, ry, gesture) {
+                Ok(points) => points,
+                Err(e) => {
+                    out.unresolved.push((mask_name.clone(), format!("{e:#}")));
+                    continue;
+                }
+            };
             // KEYED AND HOMED ON THE PHOTO, never on the pixel source (F1-C).
-            let target =
-                crate::store::raster_target(raw, &ai_cache_key(raw, subtype, rx, ry, turns));
+            let target = crate::store::raster_target(
+                raw,
+                &ai_cache_key_with_prompt(
+                    raw,
+                    subtype,
+                    rx,
+                    ry,
+                    turns,
+                    prompt_points.as_deref(),
+                ),
+            );
             // Built BEFORE the cache probe now, because the probe needs it —
             // `should_renew_cached_alpha` asks the sidecar whether this machine
             // has gained the primary backend. Still cheap (two clones and a
             // format), and a subtype with no backend keeps its old behaviour:
             // the cache still answers for it, and only a MISS reports it.
-            let opts = SegmentOpts::for_ai_mask(cfg, subtype, rx, ry);
+            let mut opts = SegmentOpts::for_ai_mask(cfg, subtype, rx, ry);
+            if let Some(opts) = opts.as_mut() {
+                opts.prompt_points = prompt_points;
+            }
             // CACHE HIT, and it is checked by DECODING, not by `exists()`: a
             // half-written or truncated PNG on disk is exactly the file a
             // cheap existence test would serve forever.
@@ -922,6 +1232,7 @@ mod tests {
             script,
             target: "sky".into(),
             reference_point: None,
+            prompt_points: None,
         };
         let input = dir.join("in.png");
         std::fs::write(&input, b"not-really-a-png").unwrap();
@@ -1048,6 +1359,7 @@ mod tests {
             script,
             target: "subject".into(),
             reference_point: None,
+            prompt_points: None,
         };
         let input = dir.join("in.png");
         std::fs::write(&input, b"src bytes").unwrap();
@@ -1148,6 +1460,7 @@ mod tests {
             script: dir.join("does-not-exist.py"),
             target: "subject".into(),
             reference_point: None,
+            prompt_points: None,
         };
         assert!(!should_renew_cached_alpha(&alpha, &opts), "no marker ⇒ no re-derivation");
         let _ = std::fs::remove_dir_all(&dir);
@@ -1184,6 +1497,7 @@ mod tests {
             script,
             target: "sky".into(),
             reference_point: None,
+            prompt_points: None,
         };
         let input = dir.join("in.png");
         std::fs::write(&input, b"src bytes").unwrap();
@@ -1221,6 +1535,364 @@ mod tests {
             }],
             ..Default::default()
         }
+    }
+
+    fn gesture(dabs: &str) -> Vec<crate::recipe::BrushStroke> {
+        vec![crate::recipe::BrushStroke { dabs: dabs.into(), ..Default::default() }]
+    }
+
+    #[test]
+    fn subtype_zero_prompt_is_reference_then_every_ordered_dab_only() {
+        let strokes = vec![
+            crate::recipe::BrushStroke {
+                value: 0.2,
+                radius: 0.9,
+                flow: 0.3,
+                center_weight: 0.4,
+                dabs: "r 0.8\nd 0.1 0.2\nf 0.6\nh 0.4\nd 0.3 0.4".into(),
+                ..Default::default()
+            },
+            crate::recipe::BrushStroke {
+                dabs: "d 0.3 0.4\nd 0.9 0.8".into(),
+                ..Default::default()
+            },
+        ];
+        let got = gesture_prompt_points(0, 0.123_456_78, 0.765_432_1, &strokes)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            got,
+            vec![[0.123457, 0.765432], [0.1, 0.2], [0.3, 0.4], [0.3, 0.4], [0.9, 0.8]],
+            "ReferencePoint first; stroke/token order and duplicates survive; r/f/h do not"
+        );
+    }
+
+    #[test]
+    fn subtype_and_empty_dab_gates_preserve_every_legacy_prompt_path() {
+        let hostile = gesture("d NaN 0.5");
+        assert!(
+            gesture_prompt_points(1, 0.2, 0.3, &hostile).unwrap().is_none(),
+            "Subject gestures have measured zero effect and are not even interpreted"
+        );
+        assert!(
+            gesture_prompt_points(2, 0.2, 0.3, &hostile).unwrap().is_none(),
+            "Sky gesture semantics are unestablished"
+        );
+        assert!(
+            gesture_prompt_points(0, 0.2, 0.3, &gesture("r NaN\nf 0.2\nh 0.8"))
+                .unwrap()
+                .is_none(),
+            "state-only content must not engage the prompt-file transport"
+        );
+
+        let opts = SegmentOpts {
+            python_bin: "python".into(),
+            script: PathBuf::from("python/segment.py"),
+            target: "object".into(),
+            reference_point: Some("0.200000 0.300000".into()),
+            prompt_points: None,
+        };
+        let mut cmd = Command::new("python");
+        append_segment_args(&mut cmd, &opts, Path::new("in.png"), Path::new("out.png"), None);
+        let argv: Vec<String> = cmd
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            argv,
+            [
+                "-E",
+                "python/segment.py",
+                "--input",
+                "in.png",
+                "--output",
+                "out.png",
+                "--target",
+                "object",
+                "--reference-point",
+                "0.200000 0.300000",
+            ],
+            "a gesture-free subtype-0 invocation keeps the exact legacy argv"
+        );
+    }
+
+    #[test]
+    fn malformed_or_excessive_gesture_points_are_named_and_leave_the_mask_inert() {
+        for dabs in ["d NaN 0.5".to_string(), "d 0.5".to_string(), "q 0.5".to_string()] {
+            let err = gesture_prompt_points(0, 0.2, 0.3, &gesture(&dabs)).unwrap_err();
+            assert!(format!("{err:#}").contains(GESTURE_PROMPT_REFUSAL), "{err:#}");
+        }
+        let over = std::iter::repeat_n("d 0 0", MAX_GESTURE_PROMPT_POINTS)
+            .collect::<Vec<_>>()
+            .join("\n");
+        let err = gesture_prompt_points(0, 0.2, 0.3, &gesture(&over)).unwrap_err();
+        let why = format!("{err:#}");
+        assert!(why.contains(GESTURE_PROMPT_REFUSAL), "{why}");
+        assert!(why.contains("2049 points"), "the ReferencePoint counts toward the bound: {why}");
+        let at_bound = std::iter::repeat_n("d 0 0", MAX_GESTURE_PROMPT_POINTS - 1)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(
+            gesture_prompt_points(0, 0.2, 0.3, &gesture(&at_bound))
+                .unwrap()
+                .unwrap()
+                .len(),
+            MAX_GESTURE_PROMPT_POINTS
+        );
+
+        for prompt_points in [vec![[0.2, 0.3]], vec![[0.2, 0.3], [f32::INFINITY, 0.4]]] {
+            let opts = SegmentOpts {
+                python_bin: "python".into(),
+                script: "python/segment.py".into(),
+                target: "object".into(),
+                reference_point: Some("0.200000 0.300000".into()),
+                prompt_points: Some(prompt_points),
+            };
+            let err = stage_prompt_file(&opts, Path::new("input.png")).unwrap_err();
+            assert!(format!("{err:#}").contains(GESTURE_PROMPT_REFUSAL), "{err:#}");
+        }
+
+        let mut geometry = ai_geometry(0, 0.2, 0.3);
+        let crate::recipe::MaskGeometry::AiMask { gesture, .. } = &mut geometry else {
+            unreachable!()
+        };
+        *gesture = super::tests::gesture("d inf 0.5");
+        let mut recipe = ai_recipe(geometry);
+        let got = resolve_ai_masks(
+            &Config::load(),
+            Path::new("D:/rolls/2024/DSC0001.ARW"),
+            Path::new("D:/rolls/2024/DSC0001.ARW"),
+            &mut recipe,
+        );
+        assert_eq!(got.resolved, 0);
+        assert_eq!(got.unresolved.len(), 1);
+        assert!(got.unresolved[0].1.contains(GESTURE_PROMPT_REFUSAL), "{got:?}");
+        let crate::recipe::MaskGeometry::AiMask { raster, .. } = &recipe.masks[0].mask else {
+            unreachable!()
+        };
+        assert!(raster.is_none(), "a refused prompt must leave the adjustment inert");
+    }
+
+    #[test]
+    fn quarter_turn_moves_reference_and_dabs_together_without_lens_unwarp() {
+        let mut geometry = ai_geometry(0, 0.2, 0.3);
+        let crate::recipe::MaskGeometry::AiMask { gesture, .. } = &mut geometry else {
+            unreachable!()
+        };
+        *gesture = super::tests::gesture("r 0.2\nd 0.25 0.8");
+        let profile = crate::recipe::LensProfile {
+            mask_warp: vec![1.2; crate::recipe::MASK_WARP_KNOTS],
+            mask_warp_src: crate::recipe::MaskWarpSource::Lcp,
+            ..Default::default()
+        };
+        let mut recipe = ai_recipe(geometry);
+        recipe.lens_profile = profile.clone();
+        assert!(crate::render::orient_recipe_coords(
+            &mut recipe,
+            rawler::Orientation::Rotate90,
+            crate::render::CoordFrame::new(600.0, 400.0),
+        ));
+        let crate::recipe::MaskGeometry::AiMask { subtype, ref_x, ref_y, gesture, .. } =
+            &recipe.masks[0].mask
+        else {
+            unreachable!()
+        };
+        let points = gesture_prompt_points(*subtype, *ref_x, *ref_y, gesture)
+            .unwrap()
+            .unwrap();
+        assert_eq!(points, [[0.7, 0.2], [0.2, 0.25]]);
+        let unwarped = crate::render::lr_mask_unwarp_norm(0.2, 0.25, (400.0, 600.0), &profile);
+        assert_ne!(unwarped, (points[1][0], points[1][1]), "premise: this profile would move it");
+        assert_eq!(
+            points[1],
+            [0.2, 0.25],
+            "the prompt stays in the turned pre-lens recipe frame"
+        );
+    }
+
+    #[test]
+    fn scoped_gesture_cache_identity_tracks_only_exact_sent_points_and_gp_version() {
+        let raw = Path::new("D:/rolls/2024/DSC0001.ARW");
+        let a = [[0.5, 0.5], [0.1, 0.2], [0.3, 0.4]];
+        let reordered = [[0.5, 0.5], [0.3, 0.4], [0.1, 0.2]];
+        let duplicated = [[0.5, 0.5], [0.1, 0.2], [0.1, 0.2], [0.3, 0.4]];
+        let moved = [[0.5, 0.5], [0.1, 0.21], [0.3, 0.4]];
+        let key = ai_cache_key_with_prompt(raw, 0, 0.5, 0.5, 0, Some(&a));
+        for points in [&reordered[..], &duplicated[..], &moved[..]] {
+            assert_ne!(key, ai_cache_key_with_prompt(raw, 0, 0.5, 0.5, 0, Some(points)));
+        }
+        let old_version =
+            ai_cache_key_gen_scoped(raw, 0, 0.5, 0.5, 0, 2, Some((&a, "gp0")));
+        assert_ne!(key, old_version, "the gp mapping version participates in identity");
+        let component = gesture_prompt_cache_component(&a, GESTURE_PROMPT_MAPPING_VERSION);
+        assert!(component.starts_with("|gp1:"), "{component}");
+        assert_eq!(component.len(), "|gp1:".len() + 16, "FNV-1a is fixed-width lowercase hex");
+        assert!(component[5..].chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
+
+        let base = gesture("r 0.8\nf 0.7\nh 0.6\nd 0.1 0.2\nd 0.3 0.4");
+        let mut ignored_edits = base.clone();
+        ignored_edits[0].value = 0.1;
+        ignored_edits[0].radius = 0.2;
+        ignored_edits[0].flow = 0.3;
+        ignored_edits[0].center_weight = 0.4;
+        ignored_edits[0].dabs = "r 0.1\nf 0.2\nh 0.3\nd 0.1 0.2\nd 0.3 0.4".into();
+        let p1 = gesture_prompt_points(0, 0.5, 0.5, &base).unwrap().unwrap();
+        let p2 = gesture_prompt_points(0, 0.5, 0.5, &ignored_edits).unwrap().unwrap();
+        assert_eq!(p1, p2, "ignored brush state cannot change the sent values");
+        assert_eq!(
+            ai_cache_key_with_prompt(raw, 0, 0.5, 0.5, 0, Some(&p1)),
+            ai_cache_key_with_prompt(raw, 0, 0.5, 0.5, 0, Some(&p2))
+        );
+    }
+
+    #[test]
+    fn unaffected_ai_cache_keys_remain_exact_generation_two_bytes() {
+        let raw = Path::new("D:/rolls/2024/DSC0001.ARW");
+        let legacy = ai_cache_key(raw, 0, 0.5, 0.5, 0);
+        assert_eq!(ai_cache_key_with_prompt(raw, 0, 0.5, 0.5, 0, None), legacy);
+        assert_eq!(
+            ai_cache_key_from_photo_key("photo-key", 0, 0.5, 0.5, 0, 2, None),
+            "ai-mask-a253729c2afcc1cf",
+            "the no-gesture identity bytes are pinned independently of path spelling"
+        );
+        assert_eq!(AI_BACKEND_GENERATION, 2);
+        for subtype in 0..=2 {
+            assert_eq!(
+                ai_cache_key_with_prompt(raw, subtype, 0.5, 0.5, 0, None),
+                ai_cache_key(raw, subtype, 0.5, 0.5, 0),
+                "subtype {subtype} without sent gesture points stays generation-2 exact"
+            );
+        }
+    }
+
+    fn prompt_observer(
+        dir: &Path,
+        seed: Option<&Path>,
+    ) -> (PathBuf, PathBuf, PathBuf) {
+        let observed = dir.join("observed-prompt.json");
+        let path_record = dir.join("prompt-path.txt");
+        #[cfg(windows)]
+        let runner = {
+            let runner = dir.join("prompt-observer.bat");
+            let observed = observed.to_string_lossy().replace('/', "\\");
+            let path_record = path_record.to_string_lossy().replace('/', "\\");
+            let mut body = "@set \"out=%~6\"\r\n".to_string();
+            for _ in 0..10 {
+                body.push_str("@shift\r\n");
+            }
+            body.push_str(&format!(
+                "@>\"{path_record}\" echo %~2\r\n@copy /y \"%~2\" \"{observed}\" >nul\r\n"
+            ));
+            if let Some(seed) = seed {
+                let seed = seed.to_string_lossy().replace('/', "\\");
+                body.push_str(&format!(
+                    "@copy /y \"{seed}\" \"%out%\" >nul\r\n\
+                     @echo segment.py: object mask [stand-in] -^> %out%\r\n@exit /b 0\r\n"
+                ));
+            } else {
+                body.push_str("@echo segment.py: gesture stand-in refused 1>&2\r\n@exit /b 7\r\n");
+            }
+            std::fs::write(&runner, body).unwrap();
+            runner
+        };
+        #[cfg(not(windows))]
+        let runner = {
+            use std::os::unix::fs::PermissionsExt;
+            let runner = dir.join("prompt-observer.sh");
+            let finish = if let Some(seed) = seed {
+                format!(
+                    "cp '{}' \"$6\"\necho 'segment.py: object mask [stand-in] -> ' \"$6\"\nexit 0\n",
+                    seed.display()
+                )
+            } else {
+                "echo 'segment.py: gesture stand-in refused' >&2\nexit 7\n".into()
+            };
+            std::fs::write(
+                &runner,
+                format!(
+                    "#!/bin/sh\nprintf '%s' \"${{12}}\" > '{}'\ncp \"${{12}}\" '{}'\n{finish}",
+                    path_record.display(),
+                    observed.display()
+                ),
+            )
+            .unwrap();
+            std::fs::set_permissions(&runner, std::fs::Permissions::from_mode(0o755)).unwrap();
+            runner
+        };
+        (runner, observed, path_record)
+    }
+
+    fn observed_prompt_path(path_record: &Path) -> PathBuf {
+        PathBuf::from(std::fs::read_to_string(path_record).unwrap().trim())
+    }
+
+    #[test]
+    fn prompt_file_payload_is_structured_and_cleaned_after_success() {
+        let dir = std::env::temp_dir().join(format!(
+            "autoshop-seg-test-prompt-success-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let seed = dir.join("seed.png");
+        image::GrayImage::from_pixel(2, 2, image::Luma([128u8])).save(&seed).unwrap();
+        let (runner, observed, path_record) = prompt_observer(&dir, Some(&seed));
+        let script = dir.join("segment.py");
+        std::fs::write(&script, "# stand-in\n").unwrap();
+        let points = vec![[0.5, 0.5], [0.1, 0.2], [0.1, 0.2], [0.9, 0.8]];
+        let opts = SegmentOpts {
+            python_bin: runner.to_string_lossy().into_owned(),
+            script,
+            target: "object".into(),
+            reference_point: Some("0.500000 0.500000".into()),
+            prompt_points: Some(points.clone()),
+        };
+        let input = dir.join("input with spaces.png");
+        std::fs::write(&input, b"stand-in input").unwrap();
+        let output = dir.join("mask.png");
+        segment_file(&opts, &input, &output).expect("the prompt-aware stand-in succeeds");
+
+        let payload: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&observed).unwrap()).unwrap();
+        assert_eq!(payload["version"], GESTURE_PROMPT_MAPPING_VERSION);
+        assert_eq!(
+            payload["points"],
+            serde_json::json!([[0.5, 0.5], [0.1, 0.2], [0.1, 0.2], [0.9, 0.8]])
+        );
+        let staged = observed_prompt_path(&path_record);
+        assert!(!staged.exists(), "success leaked staged prompt {}", staged.display());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn prompt_file_is_cleaned_and_sidecar_reason_disclosed_after_failure() {
+        let dir = std::env::temp_dir().join(format!(
+            "autoshop-seg-test-prompt-failure-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let (runner, observed, path_record) = prompt_observer(&dir, None);
+        let script = dir.join("segment.py");
+        std::fs::write(&script, "# stand-in\n").unwrap();
+        let opts = SegmentOpts {
+            python_bin: runner.to_string_lossy().into_owned(),
+            script,
+            target: "object".into(),
+            reference_point: Some("0.500000 0.500000".into()),
+            prompt_points: Some(vec![[0.5, 0.5], [0.2, 0.3]]),
+        };
+        let input = dir.join("in.png");
+        std::fs::write(&input, b"stand-in input").unwrap();
+        let output = dir.join("mask.png");
+        let err = segment_file(&opts, &input, &output).unwrap_err();
+        let why = format!("{err:#}");
+        assert!(why.contains("gesture stand-in refused"), "{why}");
+        assert!(observed.exists(), "the stand-in must have received and copied the payload");
+        let staged = observed_prompt_path(&path_record);
+        assert!(!staged.exists(), "failure leaked staged prompt {}", staged.display());
+        assert!(!output.exists(), "a failed sidecar cannot leave a cache candidate");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The cache key is exactly the things that decide the PIXELS: the photo,
@@ -1403,47 +2075,86 @@ mod tests {
     /// `cargo test` must not download 898 MB of weights); LOUD when set and the
     /// backend does not deliver.
     ///
-    /// Point `AUTOSHOP_SEG_PROBE` at an image file. It runs the point-prompted
-    /// object backend at the frame centre and asserts the contract the render
-    /// depends on: an 8-bit grey raster, decodable through the mask budget
-    /// gate, with a coverage that is neither empty nor the whole frame.
+    /// Point `AUTOSHOP_SEG_PROBE` at an image file (the sibling subject/sky
+    /// probes use it). This object arm creates its own synthetic fixture and
+    /// runs it twice: legacy ReferencePoint-only, then gp1 multi-point. Both
+    /// alphas must be soft/nonconstant and they must differ.
     #[test]
     fn seg_probe_object_backend_produces_a_usable_soft_mask() {
-        let Ok(input) = std::env::var("AUTOSHOP_SEG_PROBE") else { return };
-        let input = std::path::PathBuf::from(&input);
-        assert!(input.is_file(), "AUTOSHOP_SEG_PROBE is set but is not a file: {}", input.display());
+        let Ok(gate_input) = std::env::var("AUTOSHOP_SEG_PROBE") else { return };
+        let gate_input = std::path::PathBuf::from(&gate_input);
+        assert!(
+            gate_input.is_file(),
+            "AUTOSHOP_SEG_PROBE is set but is not a file: {}",
+            gate_input.display()
+        );
         let cfg = Config::load();
-        let opts = SegmentOpts::for_ai_mask(&cfg, 0, 0.5, 0.5)
+        let single = SegmentOpts::for_ai_mask(&cfg, 0, 0.25, 0.5)
             .expect("subtype 0 must route to a backend");
         assert!(
-            opts.script.exists(),
+            single.script.exists(),
             "AUTOSHOP_SEG_PROBE is set but the sidecar is not at {} — set AUTOSHOP_SEGMENT_SCRIPT",
-            opts.script.display()
+            single.script.display()
         );
-        let out = std::env::temp_dir()
-            .join(format!("autoshop-seg-probe-{}.png", std::process::id()));
-        let _ = std::fs::remove_file(&out);
-        segment_file(&opts, &input, &out).expect("the pinned SAM 2.1 backend must produce a mask");
-        let img = crate::render::open_mask_bounded(&out)
-            .expect("the mask must decode through the budget gate")
-            .to_luma8();
-        let n = (img.width() as u64) * (img.height() as u64);
-        let sum: u64 = img.pixels().map(|p| p.0[0] as u64).sum();
-        let coverage = sum as f64 / (n as f64 * 255.0);
-        let soft = img.pixels().any(|p| (1..=254).contains(&p.0[0]));
-        println!(
-            "AUTOSHOP_SEG_PROBE — {} -> {}x{} coverage={coverage:.4} soft={soft}",
-            input.display(),
-            img.width(),
-            img.height()
-        );
-        assert!(
-            (0.0005..0.999).contains(&coverage),
-            "a point prompt at the frame centre must select SOMETHING and not everything \
-             (coverage {coverage:.4})"
-        );
-        assert!(img.width().max(img.height()) <= 4096, "the long-edge cap must hold");
-        let _ = std::fs::remove_file(&out);
+        let temp = std::env::temp_dir();
+        let input = temp.join(format!("autoshop-seg-probe-synthetic-{}.png", std::process::id()));
+        let single_out =
+            temp.join(format!("autoshop-seg-probe-single-{}.png", std::process::id()));
+        let multi_out = temp.join(format!("autoshop-seg-probe-multi-{}.png", std::process::id()));
+        for path in [&input, &single_out, &multi_out] {
+            let _ = std::fs::remove_file(path);
+        }
+        let mut fixture = image::RgbImage::from_pixel(512, 384, image::Rgb([218, 222, 215]));
+        for y in 72..312 {
+            for x in 48..224 {
+                let border = !(60..212).contains(&x) || !(84..300).contains(&y);
+                fixture.put_pixel(x, y, if border { image::Rgb([90, 28, 24]) } else { image::Rgb([210, 62, 46]) });
+            }
+            for x in 288..464 {
+                let border = !(300..452).contains(&x) || !(84..300).contains(&y);
+                fixture.put_pixel(x, y, if border { image::Rgb([24, 48, 92]) } else { image::Rgb([48, 106, 210]) });
+            }
+        }
+        fixture.save(&input).unwrap();
+
+        let single_report = segment_file(&single, &input, &single_out)
+            .expect("the pinned SAM 2.1 backend must produce the one-point mask");
+        let mut multi = SegmentOpts::for_ai_mask(&cfg, 0, 0.25, 0.5).unwrap();
+        multi.prompt_points = Some(vec![[0.25, 0.5], [0.65, 0.3], [0.78, 0.7]]);
+        let multi_report = segment_file(&multi, &input, &multi_out)
+            .expect("the pinned SAM 2.1 backend must produce the multi-point mask");
+        let expected_backend = "SAM 2.1 Hiera-Large 665f8e2ad61c";
+        assert_eq!(single_report.backend, expected_backend);
+        assert_eq!(multi_report.backend, expected_backend);
+
+        let read = |path: &Path| {
+            crate::render::open_mask_bounded(path)
+                .expect("the mask must decode through the budget gate")
+                .to_luma8()
+        };
+        let one = read(&single_out);
+        let many = read(&multi_out);
+        for (name, img) in [("one-point", &one), ("multi-point", &many)] {
+            let (mut lo, mut hi) = (u8::MAX, u8::MIN);
+            for pixel in img.pixels() {
+                lo = lo.min(pixel.0[0]);
+                hi = hi.max(pixel.0[0]);
+            }
+            let soft = img.pixels().any(|p| (1..=254).contains(&p.0[0]));
+            println!(
+                "AUTOSHOP_SEG_PROBE object {name} synthetic [{}] -> {}x{} range={lo}..{hi} soft={soft}",
+                single_report.backend,
+                img.width(),
+                img.height()
+            );
+            assert!(lo < hi, "{name} alpha must be nonconstant");
+            assert!(soft, "{name} alpha must retain SAM's soft logits");
+        }
+        assert_eq!(one.dimensions(), many.dimensions());
+        assert_ne!(one.as_raw(), many.as_raw(), "gesture dabs must change the real SAM output");
+        for path in [&input, &single_out, &multi_out] {
+            let _ = std::fs::remove_file(path);
+        }
     }
 
     /// Tier-3 probe, R29 C3/C4: the REAL sky backend end to end, through the

@@ -1728,12 +1728,12 @@ pub enum MaskImportReason {
     /// Batch-5, and the one arm that cannot be closed by any parser.
     ///
     /// The current corpus measures 105 instances: the component carries `MaskSubType` +
-    /// `ReferencePoint` + `MaskName`, the provenance digests, and the proxy
-    /// frame Adobe's model ran in — **no raster payload and no geometry
-    /// payload**, longest attribute value 55 characters. So there is nothing to
-    /// import in the sense the other variants mean it. What lands is a
-    /// RECOMPUTATION: our own subject / sky / point-prompted segmenter produces
-    /// its own alpha, which will differ from Adobe's at every edge.
+    /// `ReferencePoint` + `MaskName`, optional gesture region hints, provenance
+    /// digests, and the proxy frame Adobe's model ran in — **no raster payload**.
+    /// So there is no alpha to import in the sense the other variants mean.
+    /// What lands is a RECOMPUTATION: our own subject / sky / point-prompted
+    /// segmenter produces its own alpha, which will differ from Adobe's at every
+    /// edge; subtype-0 gesture dabs now join its positive point prompt.
     ///
     /// A note, not a drop, and that is the whole gain: 78 corrections across 40
     /// files — 40 % of every file in the reference library that has a mask at

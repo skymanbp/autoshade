@@ -6,7 +6,8 @@ pattern as denoise.py: the Rust side shells out, this script does one job and
 exits non-zero with a human-readable reason on stderr when it can't.
 
 Usage:
-  python segment.py --input photo.png --output mask.png --target subject|sky
+  python segment.py --input photo.png --output mask.png --target subject|sky|object
+      [--reference-point "x y"] [--prompt-file gp1.json]
 
 Backends (weights auto-download on first run — nothing is stored in the repo,
 consistent with .gitignore'ing python/weights):
@@ -144,6 +145,8 @@ render engine samples bilinearly — so edges come pre-feathered.
 """
 
 import argparse
+import json
+import math
 import os
 import sys
 
@@ -852,13 +855,14 @@ def sky_mask(img_path: str, cache_dir: str):
     return Image.fromarray(m, mode="L")
 
 
-# --- OBJECT: SAM 2.1, point-prompted at the sidecar's own click -------------
+# --- OBJECT: SAM 2.1, point-prompted from ReferencePoint + region dabs -------
 #
 # The third backend (R27 Batch-5, L-08 Arm C). Lightroom's `Mask/Image` carries
 # `crs:ReferencePoint` on 218/218 real instances — the photographer's own
 # normalised click — and `MaskSubType=0` means "the object (or background)
-# there". A point-promptable model is a LITERAL match for that: the file hands
-# us a click and SAM's native interface IS a click.
+# there". R30 B3 additionally passes every ordered `d` coordinate from its
+# optional region-hint gesture. SAM natively accepts that exact positive-point
+# list; no inferred brush weights, boxes, negative points or dense mask enter it.
 #
 # LICENCE: "The SAM 2 model checkpoints, SAM 2 demo code (front-end and
 # back-end), and SAM 2 training code are licensed under Apache 2.0"
@@ -895,6 +899,13 @@ SAM = {
     },
 }
 
+# Mirrored by `segment::MAX_GESTURE_PROMPT_POINTS`. This includes the leading
+# ReferencePoint. The observed gesture is about 12 dabs; 2048 is a safety valve,
+# never permission to truncate or sample the photographer's ordered evidence.
+MAX_GESTURE_PROMPT_POINTS = 2048
+GESTURE_PROMPT_VERSION = "gp1"
+MAX_GESTURE_PROMPT_FILE_BYTES = 256 * 1024
+
 
 def _sam_cache(cache_dir):
     """Fetch every pinned SAM file into one directory and return it.
@@ -925,8 +936,86 @@ def _sam_cache(cache_dir):
     return d
 
 
-def object_mask(img_path: str, point, cache_dir: str, min_iou: float):
-    """Soft alpha for the object under `point` (normalised x, y)."""
+def load_prompt_points(path: str, reference_point):
+    """Read one bounded gp1 positive-point payload, preserving order/duplicates."""
+    try:
+        with open(path, "rb") as f:
+            raw = f.read(MAX_GESTURE_PROMPT_FILE_BYTES + 1)
+    except OSError as e:
+        die(f"--prompt-file could not be read ({e})")
+    if len(raw) > MAX_GESTURE_PROMPT_FILE_BYTES:
+        die(
+            f"--prompt-file exceeds the {MAX_GESTURE_PROMPT_FILE_BYTES}-byte IPC bound"
+        )
+    try:
+        payload = json.loads(raw)
+    except (json.JSONDecodeError, UnicodeDecodeError) as e:
+        die(f"--prompt-file is not valid UTF-8 JSON ({e})")
+    if not isinstance(payload, dict) or set(payload) != {"version", "points"}:
+        die("--prompt-file must be an object with exactly 'version' and 'points'")
+    if payload["version"] != GESTURE_PROMPT_VERSION:
+        die(
+            f"--prompt-file version must be {GESTURE_PROMPT_VERSION!r}, "
+            f"got {payload['version']!r}"
+        )
+    raw_points = payload["points"]
+    if not isinstance(raw_points, list) or not (
+        2 <= len(raw_points) <= MAX_GESTURE_PROMPT_POINTS
+    ):
+        count = len(raw_points) if isinstance(raw_points, list) else "non-list"
+        die(
+            f"--prompt-file point count {count} is outside "
+            f"2..={MAX_GESTURE_PROMPT_POINTS}"
+        )
+    points = []
+    for i, point in enumerate(raw_points):
+        if not isinstance(point, list) or len(point) != 2:
+            die(f"--prompt-file point {i} must be a two-number [x,y] array")
+        if any(isinstance(v, bool) or not isinstance(v, (int, float)) for v in point):
+            die(f"--prompt-file point {i} must contain two numbers")
+        point = (float(point[0]), float(point[1]))
+        if not all(math.isfinite(v) for v in point):
+            die(f"--prompt-file point {i} contains a non-finite coordinate")
+        points.append(point)
+    if points[0] != tuple(reference_point):
+        die("--prompt-file point 0 must equal --reference-point")
+    return points
+
+
+def sam_prompt_values(points, edge=1024):
+    """Nested values for [1,1,N,2] float points and [1,1,N] label-1 tensors."""
+    mapped = [
+        [
+            float(min(max(point[0], 0.0), 1.0) * (edge - 1)),
+            float(min(max(point[1], 0.0), 1.0) * (edge - 1)),
+        ]
+        for point in points
+    ]
+    return [[mapped]], [[[1 for _ in mapped]]]
+
+
+def require_multi_point_capability(model, point_count):
+    """Refuse an older/incompatible transformers API without a traceback."""
+    if point_count <= 1:
+        return
+    import inspect
+
+    capability = (
+        "Sam2Model.forward accepting input_points [1,1,N,2] and "
+        "input_labels [1,1,N] for N>1"
+    )
+    try:
+        params = inspect.signature(model.forward).parameters.values()
+    except (TypeError, ValueError) as e:
+        die(f"multi-point SAM prompts need {capability}; this API cannot be inspected ({e})")
+    names = {p.name for p in params}
+    has_kwargs = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params)
+    if not has_kwargs and not {"input_points", "input_labels"}.issubset(names):
+        die(f"multi-point SAM prompts need {capability}; upgrade transformers")
+
+
+def object_mask(img_path: str, points, cache_dir: str, min_iou: float):
+    """Soft alpha for the object under ordered positive normalised points."""
     try:
         import torch
         from transformers import Sam2Model
@@ -968,8 +1057,6 @@ def object_mask(img_path: str, point, cache_dir: str, min_iou: float):
     # against it below: squash to 1024x1024 (`default_to_square: true`, so
     # there is no letterbox and no padding to undo), resample 2 = BILINEAR,
     # rescale 1/255, normalise by the ImageNet statistics.
-    import json
-
     with open(os.path.join(d, "preprocessor_config.json"), encoding="utf-8") as f:
         pc = json.load(f)
     size = pc.get("size") or {}
@@ -993,23 +1080,31 @@ def object_mask(img_path: str, point, cache_dir: str, min_iou: float):
     pixel_values = torch.from_numpy(
         np.ascontiguousarray(arr.transpose(2, 0, 1))
     ).unsqueeze(0)
-    # The normalised click -> MODEL-frame pixels. The Rust bridge hands over
-    # the ORIGINAL-frame preview, so the point and the pixels are in the same
-    # frame by construction; the squash above is a pure scale, so the click
-    # maps by multiplying with the model edge. Clamping keeps a click written
-    # at exactly 1.0 (or a hair outside, which Lightroom does write) on the
-    # last addressable pixel instead of one past the edge.
-    px = min(max(point[0], 0.0), 1.0) * (edge - 1)
-    py = min(max(point[1], 0.0), 1.0) * (edge - 1)
-    pts = torch.tensor([[[[float(px), float(py)]]]], dtype=torch.float32)
-    labels = torch.tensor([[[1]]], dtype=torch.long)
+    # Normalised recipe-frame points -> MODEL-frame pixels. ReferencePoint is
+    # first and every ordered gesture dab follows. Orientation/quarter turns
+    # already rewrote both in Rust; brush/AI coordinates are pre-lens, so there
+    # is no crop/lens transform or pixel-centre offset here. Every point is
+    # positive label 1. Negative labels, boxes, weights, centroids, sampling and
+    # dense-mask prompts are deliberately not part of gp1.
+    point_values, label_values = sam_prompt_values(points, edge)
+    pts = torch.tensor(point_values, dtype=torch.float32)
+    labels = torch.tensor(label_values, dtype=torch.long)
+    require_multi_point_capability(model, len(points))
     with torch.no_grad():
-        out = model(
-            pixel_values=pixel_values.to(device),
-            input_points=pts.to(device),
-            input_labels=labels.to(device),
-            multimask_output=True,
-        )
+        try:
+            out = model(
+                pixel_values=pixel_values.to(device),
+                input_points=pts.to(device),
+                input_labels=labels.to(device),
+                multimask_output=True,
+            )
+        except (TypeError, ValueError) as e:
+            if len(points) > 1:
+                die(
+                    "multi-point SAM prompts need Sam2Model.forward accepting "
+                    f"input_points [1,1,N,2] and input_labels [1,1,N] for N>1 ({e})"
+                )
+            raise
     # LOGITS, then sigmoid — never `binarize=True`'s hard 0/1. The render
     # engine samples this bilinearly and multiplies it in, so a hard mask is a
     # hard edge on every adjustment; the logits carry the model's own soft
@@ -1034,7 +1129,8 @@ def object_mask(img_path: str, point, cache_dir: str, min_iou: float):
         # adopting a blob.
         print(
             f"segment.py: declining the object mask - best predicted IoU {iou:.3f} is below "
-            f"--min-iou {min_iou:.3f} at reference point ({point[0]:.4f}, {point[1]:.4f})",
+            f"--min-iou {min_iou:.3f} at reference point "
+            f"({points[0][0]:.4f}, {points[0][1]:.4f})",
             file=sys.stderr,
         )
         sys.exit(3)
@@ -1079,6 +1175,10 @@ def main() -> None:
     ap.add_argument(
         "--reference-point",
         help="crs:ReferencePoint verbatim, e.g. \"0.517578 0.260997\" (required for --target object)",
+    )
+    ap.add_argument(
+        "--prompt-file",
+        help="optional gp1 JSON positive-point payload for a subtype-0 gesture",
     )
     ap.add_argument(
         "--min-iou",
@@ -1133,9 +1233,17 @@ def main() -> None:
     if a.target == "object":
         if not a.reference_point:
             die("--target object needs --reference-point (the sidecar's crs:ReferencePoint)")
-        mask = object_mask(a.input, parse_point(a.reference_point), a.cache, a.min_iou)
+        reference_point = parse_point(a.reference_point)
+        points = (
+            load_prompt_points(a.prompt_file, reference_point)
+            if a.prompt_file
+            else [reference_point]
+        )
+        mask = object_mask(a.input, points, a.cache, a.min_iou)
         backend = "SAM 2.1 Hiera-Large " + SAM["revision"][:12]
     elif a.target == "subject":
+        if a.prompt_file:
+            die("--prompt-file applies only to --target object")
         if a.infer_size < 32:
             die(f"--infer-size {a.infer_size} is too small to segment anything")
         # BEFORE the mask, not after: `subject_mask` imports torchvision itself
@@ -1144,6 +1252,8 @@ def main() -> None:
         deps_missing = birefnet_deps_error()
         mask, backend = subject_mask(a.input, a.cache, a.infer_size)
     else:
+        if a.prompt_file:
+            die("--prompt-file applies only to --target object")
         mask = sky_mask(a.input, a.cache)
         backend = "OneFormer ADE20K Swin-L " + SKY_REVISION[:12]
     mask = mask.convert("L")

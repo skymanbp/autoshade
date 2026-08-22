@@ -1216,14 +1216,15 @@ later component's `MaskValue` could answer for a base that omitted its own).
 All three are nesting-aware now, through one shared `components_in` walk.
 
 `Mask/Image` — the AI subject/sky/object masks — was the other half, and R27
-Batch-5 took it. Those files carry no raster and no geometry payload at all:
-only the INTENT (`MaskSubType`, `MaskName`, `ReferencePoint`), the provenance
+Batch-5 took it. Those files carry no raster: only the INTENT (`MaskSubType`,
+`MaskName`, `ReferencePoint`), optional gesture region hints, the provenance
 digests, and the proxy geometry the model ran in. So reproducing one was never
 a parser question: it needs a segmenter of our own producing our own alpha,
 which is a DIFFERENT feature — `MaskGeometry::AiMask` carries the intent and
 the 11 whitelisted provenance attributes verbatim, `segment::resolve_ai_masks`
-recomputes the alpha at develop time and caches it, and every surface calls it
-a re-derivation (see 「AI masks are a RECOMPUTATION」 above). With that arm the
+recomputes the alpha at develop time and caches it, and subtype-0 gestures add
+their ordered positive dab points after the ReferencePoint. Every surface calls
+the result a re-derivation (see 「AI masks are a RECOMPUTATION」 above). With that arm the
 7-file M-B set imports 42 of 42 corrections and refuses none.
 
 **Every front-end hears it, the CLI included (R27).** `xmp::import_losses` →

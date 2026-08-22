@@ -7018,8 +7018,8 @@ pub fn orient_recipe_coords(
                 turn_brush_strokes(strokes, o, f);
             }
         }
-        // An AI mask DOES carry a coordinate — the reference point is the one
-        // spatial fact the sidecar holds — so it turns like any other. Its
+        // An AI mask carries a reference coordinate and may carry gesture dab
+        // coordinates, so both turn like every other point in the frame. Its
         // cached alpha does not: that raster was segmented in the OLD frame, so
         // rotating it is not a coordinate migration, it is a re-render. The
         // cache is DROPPED and the next develop recomputes it at the turned
@@ -7028,11 +7028,10 @@ pub fn orient_recipe_coords(
         // turned, and claiming it did would be the wrong disclosure.
         //
         // The `gesture` strokes are `BrushStroke`s under a different parent and
-        // ride the SAME rewrite (R29 C1). They are carried, not rendered, but
-        // they are written back into the sidecar, so leaving them in the old
-        // frame would hand Lightroom a refinement stroke beside a reference
-        // point that had moved — the same defect as the brush arm's, one
-        // component along.
+        // ride the SAME rewrite (R29 C1). The renderer does not composite them;
+        // subtype 0 sends their `d` points to the segmenter. They are also
+        // written back, so leaving them in the old frame would hand Lightroom a
+        // refinement stroke beside a moved reference point.
         MaskGeometry::AiMask { ref_x, ref_y, raster, gesture, .. } => {
             (*ref_x, *ref_y) = orient_point(o, *ref_x, *ref_y);
             *raster = None;

@@ -1715,6 +1715,7 @@ mod tests {
             script: "Cargo.toml".into(),
             target: "sky".into(),
             reference_point: None,
+            prompt_points: None,
         };
         let mask_path = fixture_mask_path("zoned-orch-nopython-mask");
         let report = fit_recipe_zoned(&src, &tgt, &seg, &mask_path);
