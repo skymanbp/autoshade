@@ -696,7 +696,15 @@ pub fn solve_mask_warp(
     n: usize,
 ) -> Result<Vec<f32>, Refusal> {
     let path = locate(filename, make, lens)?;
-    let xml = std::fs::read_to_string(&path).map_err(|_| Refusal::Unreadable)?;
+    // BOUNDED read (the R28 B2 rule): the pool directory is not this app's to
+    // trust — `AUTOSHOP_LCP_DIR` and `%APPDATA%` are user-writable, so a file
+    // there can be anything. The largest of the 3,576 profiles in the local
+    // Adobe pool measures 4.3 MiB; 16 MiB is the same ceiling every
+    // sidecar-class read in this codebase carries, and an over-cap file is an
+    // `Unreadable` refusal — named, like every other degradation on this path.
+    const MAX_LCP_BYTES: u64 = 16 * 1024 * 1024;
+    let xml = crate::store::read_text_capped(&path, MAX_LCP_BYTES)
+        .map_err(|_| Refusal::Unreadable)?;
     let profile = parse(&xml)?;
     let model = profile.model_at(focal_mm)?;
     model.mask_warp_knots(dims, n).ok_or(Refusal::Unsolvable)

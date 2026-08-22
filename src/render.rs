@@ -4860,8 +4860,10 @@ fn brush_raster(g: &MaskGeometry, fw: u32, fh: u32) -> Option<std::sync::Arc<ima
         let incoming = built.as_ref().map_or(0, |i| i.as_raw().len());
         // A rare hard reset beats LRU bookkeeping for a handful of entries —
         // `load_mask_bitmap`'s cache makes the same call, in bytes as well as
-        // entries, and for the same reason.
-        if held.saturating_add(incoming) > BRUSH_RASTER_CACHE_BYTES {
+        // entries, and for the same reason. The entry bound is what bounds the
+        // `None` results (no drawable dabs): they weigh zero bytes, so without
+        // it a stream of unique non-drawing groups would grow the map forever.
+        if map.len() > 16 || held.saturating_add(incoming) > BRUSH_RASTER_CACHE_BYTES {
             map.clear();
         }
         map.insert(key, built.clone());

@@ -53,8 +53,11 @@ The vision model only ever emits an [`EditRecipe`](src/recipe.rs) — a small,
 bounded, Lightroom/ACR-style JSON of slider values — and a deterministic engine
 renders from the original RAW. Five consequences, and they are the whole point:
 
-- **Reproducible.** The same recipe and the same RAW give the same pixels, on
-  any machine, forever. Nothing is sampled, nothing is temperature-dependent.
+- **Reproducible.** The same recipe, the same RAW and the same mask rasters
+  give the same pixels, on any machine, forever. Nothing is sampled, nothing is
+  temperature-dependent. (AI masks are referenced raster files the recipe names;
+  re-deriving one from scratch depends on which segmentation backend that
+  machine has.)
 - **Non-destructive.** Your library is opened read-only. Develop state lives in
   a per-user store keyed by the photo's own path; the RAW is never rewritten.
 - **Auditable.** Every edit is ~2 KB of readable JSON you can diff, hand-edit,
@@ -309,14 +312,18 @@ frame's Adobe *lens-profile warp* mistaken for a universal affine — proven by 
 `LensProfileEnable` A/B export and an 11-dab displacement field. In v0.33.0 it
 is **1.0**: an imported radial renders at the geometry the sidecar actually
 stores, instead of 3.2 % dilated. The residual on any frame was then that
-frame's own unmodelled lens warp (0–3.4 % observed) — and **v0.35.0 models it**:
-Autoshop reads Adobe's own `.lcp` lens profiles, and a further round of exports
-settled that Lightroom does not place every mask in one frame. A brush is
-rasterised *before* the lens correction, a radial or linear *after* it. Reading
-the two in one frame was leaving the radial arm up to 186 px out on a
-profile-corrected frame; each now renders in its own, landing within 0.3 px.
-The recipe carries the solved profile, and names which of seven sources
-produced it — an in-camera knot set, a solved `.lcp`, or an honest none.
+frame's own unmodelled lens warp (0–3.4 % observed) — and **v0.35.0 closes the
+frame question**: a further round of exports settled that Lightroom does not
+place every mask in one frame. A brush is rasterised *before* the lens
+correction, a radial or linear *after* it. Reading the two in one frame was
+leaving the radial arm up to 186 px out on a profile-corrected frame; each now
+renders in its own frame — mapped through this engine's **own** geometry
+inverse, landing within 0.3 px. Autoshop also reads Adobe's own `.lcp` lens
+profiles and solves them into the recipe as a named model of Lightroom's warp;
+that model is carried provenance, not yet a render-time input — a frame this
+engine does not itself correct still renders masks at their stored coordinates.
+The recipe names which of seven sources produced the model — an in-camera knot
+set, a solved `.lcp`, or an honest none.
 
 ### Local masks
 
