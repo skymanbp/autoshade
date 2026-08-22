@@ -1265,7 +1265,11 @@ fn develop_dir_in(root: &Path, src: &Path) -> PathBuf {
 
 /// The working recipe — the single source of truth for a photo's develop.
 pub fn recipe_target(src: &Path) -> PathBuf {
-    develop_dir(src).join("recipe.json")
+    recipe_target_in(&store_root(), src)
+}
+
+fn recipe_target_in(root: &Path, src: &Path) -> PathBuf {
+    develop_dir_in(root, src).join("recipe.json")
 }
 
 /// How many clockwise quarter turns the photo's SAVED develop asks for
@@ -1328,7 +1332,11 @@ pub fn saved_quarter_turns(src: &Path) -> u8 {
 /// The Lightroom XMP projection. Keeps the `<stem>.xmp` name so copying it
 /// beside the RAW for Lightroom needs no rename.
 pub fn xmp_target(src: &Path) -> PathBuf {
-    develop_dir(src).join(format!("{}.xmp", crate::pipeline::stem(src)))
+    xmp_target_in(&store_root(), src)
+}
+
+fn xmp_target_in(root: &Path, src: &Path) -> PathBuf {
+    develop_dir_in(root, src).join(format!("{}.xmp", crate::pipeline::stem(src)))
 }
 
 /// Where [`export_xmp_beside`] delivers: `<photo folder>/<name>.xmp`, spelled
@@ -1567,7 +1575,11 @@ pub fn detach_rasters(src: &Path, r: &mut EditRecipe, prefix: &str) {
 /// without this record, reopening a photo silently reverted the canvas to the
 /// un-retouched source (the "variant linkage lost on navigation" boundary).
 pub fn pixel_source_path(src: &Path) -> PathBuf {
-    develop_dir(src).join("pixels.json")
+    pixel_source_path_in(&store_root(), src)
+}
+
+fn pixel_source_path_in(root: &Path, src: &Path) -> PathBuf {
+    develop_dir_in(root, src).join("pixels.json")
 }
 
 /// Record `origin` as the photo's baked pixel source. Stored by bare name when
@@ -1645,13 +1657,17 @@ pub fn clear_pixel_source(src: &Path) -> std::io::Result<()> {
 }
 
 fn clear_pixel_source_unlocked(src: &Path) -> std::io::Result<()> {
+    clear_pixel_source_unlocked_in(&store_root(), src)
+}
+
+fn clear_pixel_source_unlocked_in(root: &Path, src: &Path) -> std::io::Result<()> {
     let rm = |p: PathBuf| match std::fs::remove_file(p) {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(e) => Err(e),
     };
-    rm(develop_dir(src).join("pixels.json.bak"))?;
-    rm(pixel_source_path(src))
+    rm(develop_dir_in(root, src).join("pixels.json.bak"))?;
+    rm(pixel_source_path_in(root, src))
 }
 
 /// GUI-only sidecar persisting the photo's VARIANT STRIP beyond the single
@@ -1665,7 +1681,11 @@ fn clear_pixel_source_unlocked(src: &Path) -> std::io::Result<()> {
 /// variants counted as permanently-unsavable work that pinned the quit
 /// guard's dialog forever.
 pub fn variants_path(src: &Path) -> PathBuf {
-    develop_dir(src).join("variants.json")
+    variants_path_in(&store_root(), src)
+}
+
+fn variants_path_in(root: &Path, src: &Path) -> PathBuf {
+    develop_dir_in(root, src).join("variants.json")
 }
 
 /// One BACKGROUND variant in a [`VariantsRecord`]: three-valued kind
@@ -2052,7 +2072,11 @@ pub struct DevelopCommit {
 }
 
 fn commit_dir(src: &Path) -> PathBuf {
-    develop_dir(src).join(".commit")
+    commit_dir_in(&store_root(), src)
+}
+
+fn commit_dir_in(root: &Path, src: &Path) -> PathBuf {
+    develop_dir_in(root, src).join(".commit")
 }
 
 /// The staged-generation manifest (`.commit/COMMIT`), whose single durable
@@ -2780,9 +2804,13 @@ fn recover_orphan_baks_unlocked(src: &Path) -> std::io::Result<()> {
 /// commonest causes. This predicate answers the question that caller is
 /// really asking.
 pub fn has_pixel_source(src: &Path) -> bool {
-    let dev = develop_dir(src);
+    has_pixel_source_in(&store_root(), src)
+}
+
+fn has_pixel_source_in(root: &Path, src: &Path) -> bool {
+    let dev = develop_dir_in(root, src);
     // The .bak counts: a crashed publish still means a master WAS recorded.
-    pixel_source_path(src).exists() || dev.join("pixels.json.bak").exists()
+    pixel_source_path_in(root, src).exists() || dev.join("pixels.json.bak").exists()
 }
 
 /// The photo's recorded baked pixel source, if it still resolves on disk:
@@ -2944,6 +2972,16 @@ pub fn legacy_recipe(src: &Path) -> PathBuf {
     }
 }
 
+#[cfg(test)]
+fn legacy_recipe_in(root: &Path, legacy_root: &Path, src: &Path) -> PathBuf {
+    let name = format!("{}.recipe.json", crate::pipeline::stem(src));
+    if legacy_suppressed_in(root, src) {
+        suppressed_legacy_path_in(root, src, &name)
+    } else {
+        legacy_root.join(name)
+    }
+}
+
 pub fn legacy_xmp(src: &Path) -> PathBuf {
     let name = format!("{}.xmp", crate::pipeline::stem(src));
     if legacy_suppressed(src) {
@@ -2972,20 +3010,24 @@ fn legacy_tombstone_in(root: &Path, src: &Path) -> PathBuf {
     develop_dir_in(root, src).join("legacy.tombstone")
 }
 
-fn legacy_tombstone(src: &Path) -> PathBuf {
-    legacy_tombstone_in(&store_root(), src)
-}
-
 fn legacy_suppressed(src: &Path) -> bool {
-    legacy_tombstone(src).exists()
+    legacy_suppressed_in(&store_root(), src)
 }
 
-fn suppress_legacy(src: &Path) -> std::io::Result<()> {
-    durable_write(&legacy_tombstone(src), LEGACY_TOMBSTONE)
+fn legacy_suppressed_in(root: &Path, src: &Path) -> bool {
+    legacy_tombstone_in(root, src).exists()
+}
+
+fn suppress_legacy_in(root: &Path, src: &Path) -> std::io::Result<()> {
+    durable_write(&legacy_tombstone_in(root, src), LEGACY_TOMBSTONE)
 }
 
 fn suppressed_legacy_path(src: &Path, name: &str) -> PathBuf {
-    develop_dir(src).join(".legacy-suppressed").join(name)
+    suppressed_legacy_path_in(&store_root(), src, name)
+}
+
+fn suppressed_legacy_path_in(root: &Path, src: &Path, name: &str) -> PathBuf {
+    develop_dir_in(root, src).join(".legacy-suppressed").join(name)
 }
 
 /// Does this photo have ANY saved develop — central or legacy, recipe or XMP?
@@ -2997,7 +3039,11 @@ fn suppressed_legacy_path(src: &Path, name: &str) -> PathBuf {
 /// the newest-intent ranking treats it like the cleared stamp, and
 /// recovery completes the sweep on the next locked touch.
 fn clear_pending(src: &Path) -> PathBuf {
-    develop_dir(src).join("clear.pending")
+    clear_pending_in(&store_root(), src)
+}
+
+fn clear_pending_in(root: &Path, src: &Path) -> PathBuf {
+    develop_dir_in(root, src).join("clear.pending")
 }
 
 pub fn has_develop(src: &Path) -> bool {
@@ -3329,7 +3375,11 @@ fn rank_lightroom_sidecar(
 /// cannot resurrect edits that were just cleared. Never counted by
 /// [`has_develop`]; rewritten in place — only the mtime matters.
 pub fn mark_develop_cleared(src: &Path) -> std::io::Result<()> {
-    let dir = develop_dir(src);
+    mark_develop_cleared_in(&store_root(), src)
+}
+
+fn mark_develop_cleared_in(root: &Path, src: &Path) -> std::io::Result<()> {
+    let dir = develop_dir_in(root, src);
     std::fs::create_dir_all(&dir)?;
     durable_write(
         &dir.join("cleared.txt"),
@@ -3365,41 +3415,67 @@ pub struct ClearOutcome {
 /// A file already missing IS the desired end state; any OTHER removal failure
 /// reaches the caller — a surviving sidecar resurrects the edits on reopen.
 pub fn clear_develop(src: &Path) -> std::io::Result<ClearOutcome> {
-    with_develop_lock(src, DevelopLockMode::Wait, || clear_develop_unlocked(src))
+    let root = store_root();
+    let legacy_roots = legacy_out_roots();
+    clear_develop_in(&root, &legacy_roots, src)
 }
 
-fn clear_develop_unlocked(src: &Path) -> std::io::Result<ClearOutcome> {
+fn clear_develop_in(
+    root: &Path,
+    legacy_roots: &[PathBuf],
+    src: &Path,
+) -> std::io::Result<ClearOutcome> {
+    with_develop_lock_in(root, src, DevelopLockMode::Wait, || {
+        clear_develop_unlocked_in(root, legacy_roots, src)
+    })
+}
+
+fn clear_develop_unlocked_in(
+    root: &Path,
+    legacy_roots: &[PathBuf],
+    src: &Path,
+) -> std::io::Result<ClearOutcome> {
     // TRANSACTION MARKER FIRST (L03): a kill mid-sweep used to leave a
     // half-cleared develop — recipe gone, XMP or variants alive — that
     // every reader took for a real partial develop, resurrecting edits the
     // user explicitly cleared (and recover_orphan_baks republished the very
     // .baks the clear was deleting). The marker records the intent durably;
     // recovery completes the sweep on the next locked touch.
-    durable_write(&clear_pending(src), b"develop clear in progress\n")?;
-    let (removed, first_err) = clear_sweep(src);
+    durable_write(&clear_pending_in(root, src), b"develop clear in progress\n")?;
+    let (removed, first_err) = clear_sweep_in(root, legacy_roots, src);
     if let Some(e) = first_err {
         // The marker STAYS — recovery retries the sweep.
         return Err(e);
     }
-    let marker_warning = mark_develop_cleared(src).err().map(|e| e.to_string());
+    let marker_warning = mark_develop_cleared_in(root, src).err().map(|e| e.to_string());
     if marker_warning.is_none() {
         // Only after the durable cleared stamp exists — between the two
         // writes BOTH markers exist, so the clear's intent is never
         // invisible. A failed stamp keeps the pending marker: recovery
         // retries it, and the ranking treats the marker itself as newest
         // intent meanwhile.
-        let _ = std::fs::remove_file(clear_pending(src));
-        settle_consumed_marker(&clear_pending(src));
+        let _ = std::fs::remove_file(clear_pending_in(root, src));
+        settle_consumed_marker(&clear_pending_in(root, src));
     }
     Ok(ClearOutcome { removed, marker_warning })
 }
 
-/// The sweep half of [`clear_develop_unlocked`], IDEMPOTENT so recovery may
+/// The sweep half of [`clear_develop_in`], IDEMPOTENT so recovery may
 /// repeat it: legacy tombstone, the central files (retired `.bak`s
 /// included) and the pixel-source pair. Returns what it removed and the
 /// first failure (later removals still run — retrying costs nothing and a
 /// partial sweep is smaller than the one it retries).
 fn clear_sweep(src: &Path) -> (bool, Option<std::io::Error>) {
+    let root = store_root();
+    let legacy_roots = legacy_out_roots();
+    clear_sweep_in(&root, &legacy_roots, src)
+}
+
+fn clear_sweep_in(
+    root: &Path,
+    legacy_roots: &[PathBuf],
+    src: &Path,
+) -> (bool, Option<std::io::Error>) {
     let del = |p: &Path| match std::fs::remove_file(p) {
         Ok(()) => Ok(true),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
@@ -3430,16 +3506,16 @@ fn clear_sweep(src: &Path) -> (bool, Option<std::io::Error>) {
     // path; leaving a root unswept does not avoid it, it only makes the clear
     // fail while the same shared file resurrects the edits on the next read.
     let stem = crate::pipeline::stem(src);
-    let legacy_was_visible = !legacy_suppressed(src)
-        && legacy_out_roots().into_iter().any(|root| {
-            root.join(format!("{stem}.recipe.json")).exists()
-                || root.join(format!("{stem}.xmp")).exists()
+    let legacy_was_visible = !legacy_suppressed_in(root, src)
+        && legacy_roots.iter().any(|legacy_root| {
+            legacy_root.join(format!("{stem}.recipe.json")).exists()
+                || legacy_root.join(format!("{stem}.xmp")).exists()
         });
     // The tombstone lands BEFORE central files are removed. A crash can
     // therefore leave the old central develop visible, or leave it cleared
     // with legacy already suppressed, but cannot expose the ambiguous
     // fallback in between.
-    if let Err(e) = suppress_legacy(src) {
+    if let Err(e) = suppress_legacy_in(root, src) {
         return (removed, Some(e));
     }
     removed |= legacy_was_visible;
@@ -3448,7 +3524,7 @@ fn clear_sweep(src: &Path) -> (bool, Option<std::io::Error>) {
     // the newer intent (commit_develop completes a pending clear before it
     // stages), and a surviving `.commit` would REPLAY the very develop this
     // sweep removes.
-    match std::fs::remove_dir_all(commit_dir(src)) {
+    match std::fs::remove_dir_all(commit_dir_in(root, src)) {
         Ok(()) => {}
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
         Err(e) => {
@@ -3457,14 +3533,14 @@ fn clear_sweep(src: &Path) -> (bool, Option<std::io::Error>) {
     }
 
     for p in [
-        develop_dir(src).join("recipe.json.bak"),
-        recipe_target(src),
-        xmp_target(src),
+        develop_dir_in(root, src).join("recipe.json.bak"),
+        recipe_target_in(root, src),
+        xmp_target_in(root, src),
         // The strip record goes with the develop it describes — a surviving
         // variants.json would resurrect background variants over a develop
         // the user explicitly cleared.
-        develop_dir(src).join("variants.json.bak"),
-        variants_path(src),
+        develop_dir_in(root, src).join("variants.json.bak"),
+        variants_path_in(root, src),
     ] {
         match del(&p) {
             Ok(b) => removed |= b,
@@ -3476,8 +3552,8 @@ fn clear_sweep(src: &Path) -> (bool, Option<std::io::Error>) {
     // Asked BEFORE the removal, and of the predicate that counts the `.bak`: a
     // develop whose only surviving trace was the retired master still had
     // something to remove.
-    let had_pixels = has_pixel_source(src);
-    match clear_pixel_source(src) {
+    let had_pixels = has_pixel_source_in(root, src);
+    match clear_pixel_source_unlocked_in(root, src) {
         Ok(()) => removed |= had_pixels,
         Err(e) => {
             first_err.get_or_insert(e);
@@ -8444,33 +8520,11 @@ mod tests {
         /// Everything this test creates OUTSIDE its own temp dir, removed on
         /// the way out — including the way out through a panic.
         ///
-        /// **This is the fixture, not tidiness (R29 C3/C4).** The test drives
-        /// the REAL roots: `develop_dir` resolves through [`store_root`], which
-        /// is the user's own `%LOCALAPPDATA%\autoshop` (or `$XDG_DATA_HOME`),
-        /// and `legacy_file` resolves cwd-relative to `./out`. It cannot use a
-        /// temp root instead — `clear_develop` has no root-parameterized twin,
-        /// and `AUTOSHOP_DATA_DIR` is process-global environment that `set_var`
-        /// makes unsafe and racy under edition 2024 (the reason
-        /// [`develop_dir_in`] exists at all).
-        ///
-        /// So the cleanup has to survive a FAILURE, and as a tail of
-        /// `let _ = remove_*` statements it did not: the first assert to fire
-        /// skipped all of them, and the residue was
-        /// `<store>/develops/<key>/legacy.tombstone` — after which
-        /// `legacy_recipe(&a)` answers with the `.legacy-suppressed` path
-        /// forever and EVERY later run of this test fails at a different,
-        /// misleading assertion, on this machine and on any other, until a
-        /// human deletes a directory inside their own app data. Measured, not
-        /// argued: forcing a panic after the `legacy.exists()` assert left
-        /// `develops/dsc001-…/{legacy.tombstone,cleared.txt}` plus
-        /// `out/DSC001.recipe.json`, and the next run then failed at
-        /// `assert_eq!(legacy_recipe(&a), legacy)` with
-        /// `left: "…\.legacy-suppressed\DSC001.recipe.json"`.
-        ///
-        /// `Drop` runs during the unwind, so the guard cleans up on both paths.
-        /// It holds PATHS, not state: the test computes them once, before it
-        /// can fail, so a guard built from a half-run test still names the
-        /// right files.
+        /// **This is the fixture, not tidiness (R29 C3/C4).** The root-aware
+        /// clear twin exercises the production sweep without mutating the
+        /// process-global store or cwd-relative legacy state.
+        /// The fixture stays in the temporary root and is cleaned by `Drop`
+        /// on both success and unwind, with the guard armed before writes.
         struct LegacyTombstoneFixture {
             base: PathBuf,
             legacy: PathBuf,
@@ -8498,7 +8552,8 @@ mod tests {
 
             let a = base.join("trip-a").join("DSC001.ARW");
             let b = base.join("trip-b").join("DSC001.ARW");
-            let legacy = legacy_file("DSC001.recipe.json");
+            let legacy_root = base.join("out");
+            let legacy = legacy_root.join("DSC001.recipe.json");
             // ARMED BEFORE THE FIRST THING THAT CAN FAIL, and before anything
             // is written: `develop_dir` is resolved here, once, so the guard
             // targets the same key the test does even if a later call would
@@ -8506,20 +8561,24 @@ mod tests {
             let _fixture = LegacyTombstoneFixture {
                 base: base.clone(),
                 legacy: legacy.clone(),
-                develops: vec![develop_dir(&a), develop_dir(&b)],
+                develops: vec![develop_dir_in(&base, &a), develop_dir_in(&base, &b)],
             };
             if let Some(parent) = legacy.parent() {
                 std::fs::create_dir_all(parent).unwrap();
             }
             std::fs::write(&legacy, b"{\"contrast\":22.0}").unwrap();
 
-            assert_eq!(legacy_recipe(&a), legacy);
-            assert_eq!(legacy_recipe(&b), legacy);
-            let outcome = clear_develop(&a).unwrap();
+            assert_eq!(legacy_recipe_in(&base, &legacy_root, &a), legacy);
+            assert_eq!(legacy_recipe_in(&base, &legacy_root, &b), legacy);
+            let outcome = clear_develop_in(&base, std::slice::from_ref(&legacy_root), &a).unwrap();
             assert!(outcome.removed, "suppressing a visible legacy develop is a clear");
             assert!(legacy.exists(), "the ambiguous shared file is never unlinked");
-            assert!(!legacy_recipe(&a).exists(), "photo A's tombstone suppresses fallback");
-            assert_eq!(legacy_recipe(&b), legacy, "photo B still sees the old store");
+            assert_eq!(legacy_recipe_in(&base, &legacy_root, &a), suppressed_legacy_path_in(
+                &base,
+                &a,
+                "DSC001.recipe.json",
+            ));
+            assert_eq!(legacy_recipe_in(&base, &legacy_root, &b), legacy, "photo B still sees the old store");
             assert_eq!(
                 std::fs::read(&legacy).unwrap(),
                 b"{\"contrast\":22.0}",

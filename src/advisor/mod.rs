@@ -632,6 +632,23 @@ pub(crate) fn into_json_capped(r: ureq::Response) -> std::io::Result<serde_json:
     into_json_capped_at(r, BODY_CAP)
 }
 
+/// Read a status body through the same house cap as every other response.
+/// ureq's `into_string` has its own smaller implementation limit, but keeping
+/// the application-level bound here makes the status arm obey the same rule
+/// when that dependency changes or a different response type is introduced.
+pub(crate) fn into_text_capped(r: ureq::Response, cap: u64) -> std::io::Result<String> {
+    use std::io::Read as _;
+    let mut text = String::new();
+    let read = r.into_reader().take(cap.saturating_add(1)).read_to_string(&mut text)?;
+    if read as u64 > cap {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("response body exceeds the {cap}-byte cap"),
+        ));
+    }
+    Ok(text)
+}
+
 /// [`transport_error`]'s streaming sibling. Crucially it reports the MEASURED
 /// elapsed time: ureq surfaces both a connect-phase kill (≈10 s) and a real
 /// read stall with the same "timed out reading response" text, and a real
@@ -1088,7 +1105,7 @@ pub(crate) fn post_ai_json_with(
                 }
             }
             Err(ureq::Error::Status(code, r)) => {
-                let b = r.into_string().unwrap_or_default();
+                let b = into_text_capped(r, BODY_CAP).unwrap_or_default();
                 // Only capability-shaped statuses negotiate (bad request /
                 // not found / unprocessable). 401/403/429 etc. are NOT — an
                 // auth or quota body that happens to mention a parameter must
@@ -1238,8 +1255,8 @@ struct TransientStatus {
 ///
 /// * `529` is Anthropic's own overloaded reply. The R29 ruling
 ///   (`~/.claude/plans/r29-materials/r29-rulings-2026-08-20.md`, 拍板一)
-///   records it as NOT billed — the provider refuses before generating — so
-///   the repeat is free.
+///   native Anthropic refusal semantics mean no second charge; relay semantics
+///   remain provider-dependent and are disclosed in the cost string below.
 /// * `524` is a Cloudflare-fronted relay giving up on its origin. Whether the
 ///   AI behind that relay did, and BILLED, the work is unknowable from here,
 ///   so the repeat may be charged a second time for that one photograph. The
@@ -1263,8 +1280,8 @@ const TRANSIENT_STATUSES: [TransientStatus; 2] = [
     TransientStatus {
         code: 529,
         what: "the AI is overloaded (HTTP 529)",
-        cost: "not a second charge — the provider refuses an overloaded request before \
-               generating",
+        cost: "not a second charge for Anthropic's native 529 (a non-Anthropic relay may \
+               have completed the work before returning 529, so one retry can be billed twice)",
     },
 ];
 
@@ -2600,6 +2617,18 @@ Final answer: {"decision":"accept","reasons":[]}"#;
         let _ = handle.join();
     }
 
+    #[test]
+    fn status_body_reader_enforces_the_house_cap() {
+        let (url, _seen, handle) = stub_endpoint(vec![(400, "text/plain", "x".repeat(128))]);
+        let response = match ureq::get(&url).call() {
+            Err(ureq::Error::Status(_, response)) => response,
+            other => panic!("the stub must return a status response: {other:?}"),
+        };
+        let err = into_text_capped(response, 16).expect_err("the body exceeds the test cap");
+        assert!(err.to_string().contains("16-byte cap"), "{err}");
+        join_stub(handle);
+    }
+
     /// The effort tier is spelled per FAMILY and negotiated away like every
     /// other optional knob. Pinned on the wire, because the two families
     /// disagree — `/responses` nests it under `reasoning` beside the summary
@@ -3090,8 +3119,9 @@ Final answer: {"decision":"accept","reasons":[]}"#;
 
     /// The billing sentence is BOUND to its class, not merely present
     /// somewhere: 524's repeat may be charged twice (the gateway gave up, the
-    /// AI behind it may have finished) and 529's is free (the provider refuses
-    /// before generating). Swapping the two sentences leaves every taxonomy
+    /// AI behind it may have finished) while native Anthropic 529 is a
+    /// refusal-before-generation case. A non-Anthropic relay may have
+    /// completed work before returning 529. Swapping the two sentences leaves every taxonomy
     /// and transport test green — this test exists because a supervisor
     /// mutation proved exactly that — yet it would tell an operator the
     /// opposite of the truth about money, which is the one thing the R29
@@ -3111,8 +3141,14 @@ Final answer: {"decision":"accept","reasons":[]}"#;
             panic!("529 is repeatable");
         };
         let line = repeat.disclosure(&five_two_nine);
-        assert!(line.contains("not a second charge"), "529's repeat is free: {line}");
-        assert!(!line.contains("billed twice"), "…and must not claim the 524 risk: {line}");
+        assert!(
+            line.contains("not a second charge for Anthropic's native 529"),
+            "529's native-provider semantics are named: {line}"
+        );
+        assert!(
+            line.contains("non-Anthropic relay") && line.contains("billed twice"),
+            "relay semantics are disclosed too: {line}"
+        );
     }
 
     /// The wart B1a registered instead of fixing: a relay that copies the

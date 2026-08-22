@@ -42,8 +42,10 @@ utf-8 and normalised to LF *inside* the checker only.
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import sys
+import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Callable, NamedTuple
 
@@ -469,6 +471,46 @@ def camera_model_count(_args: argparse.Namespace) -> Truth:
     return Truth((m.group("models"),), f"src/decode.rs:{line_of(src, m.start())}")
 
 
+def census_counts(_args: argparse.Namespace) -> Truth | Skip:
+    """Re-derive the active XMP census when its corpus root is supplied.
+
+    The corpus is user data, not a repository fixture, so the default gate
+    reports SKIP rather than pretending the machine-local count is universal.
+    CI/release runs that have the corpus set `AUTOSHOP_CENSUS_ROOT` and get a
+    first-party count check against the source-of-truth comment.
+    """
+    raw = os.environ.get("AUTOSHOP_CENSUS_ROOT")
+    if not raw:
+        return Skip("AUTOSHOP_CENSUS_ROOT is unset: the census corpus is outside the repo")
+    root = Path(raw)
+    if not root.is_dir():
+        raise LookupError(f"AUTOSHOP_CENSUS_ROOT is not a directory: {root}")
+    files = list(root.rglob("*.xmp"))
+    counts = {"Mask/Aggregate": 0, "Mask/Image": 0, "Mask/Paint": 0, "Mask/*": 0, "Gesture": 0}
+    for path in files:
+        try:
+            document = ET.parse(path)
+        except ET.ParseError as exc:
+            raise LookupError(f"{path}: XML parse failed: {exc}") from exc
+        for element in document.iter():
+            for name, value in element.attrib.items():
+                if name.rsplit("}", 1)[-1] != "What" or not value.startswith("Mask/"):
+                    continue
+                counts["Mask/*"] += 1
+                counts[value] = counts.get(value, 0) + 1
+            if element.tag.rsplit("}", 1)[-1] == "Gesture":
+                counts["Gesture"] += 1
+    values = (
+        str(len(files)),
+        str(counts["Mask/Aggregate"]),
+        str(counts["Mask/Image"]),
+        str(counts["Mask/Paint"]),
+        str(counts["Mask/*"]),
+        str(counts["Gesture"]),
+    )
+    return Truth(values, f"{root} (recursive *.xmp census, XML parser)")
+
+
 # ── The CLAIMS registry ─────────────────────────────────────────────────────
 
 
@@ -640,6 +682,15 @@ CLAIMS: list[Claim | SetClaim] = [
         "baked ext count — formats header",
         r"Baked rasters — (?P<baked>\d+) extensions",
         ext_count("src/pipeline.rs", "const BAKED_EXTS"),
+    ),
+    Claim(
+        "src/xmp.rs",
+        "active XMP census",
+        r"Current corpus re-derivation: (?P<sidecars>\d+) sidecars; "
+        r"(?P<aggregate>\d+) Mask/Aggregate;\s*"
+        r"(?P<mask_image>\d+)\s*///\s*Mask/Image; (?P<mask_paint>\d+) Mask/Paint; "
+        r"(?P<mask_any>\d+) Mask/\*; (?P<gesture>\d+) crs:Gesture",
+        census_counts,
     ),
 ]
 

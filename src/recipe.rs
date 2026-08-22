@@ -1249,15 +1249,15 @@ pub enum MaskGeometry {
     /// behaviour and now name the approximation rather than the absence
     /// (`MaskImportReason::BrushRendered` / `MaskLossReason::BrushRendered`).
     ///
-    /// **The encoding, as measured** (F2 anatomy, 2026-08-19: 171 sidecars of
-    /// the user's own library, real XML parser, 0 parse failures; 39
-    /// `Mask/Aggregate` and 382 `Mask/Paint` instances):
+    /// **The encoding, as re-derived** (current corpus: 177 sidecars of
+    /// the user's own library, real XML parser, 0 parse failures; 42
+    /// `Mask/Aggregate` and 398 `Mask/Paint` instances):
     ///
     ///  * an Aggregate is a ONE-LEVEL group. Its children are `Mask/Paint`,
-    ///    300/300 — never a Gradient, a Radial, a RangeMask, an Image or
+    ///    398/398 — never a Gradient, a Radial, a RangeMask, an Image or
     ///    another Aggregate — and the maximum component nesting depth in the
     ///    whole library is exactly 2. `Mask/Paint` is NEVER a top-level
-    ///    correction component (300/300 of the in-correction Paints are
+    ///    correction component (398/398 of the in-correction Paints are
     ///    children of an Aggregate).
     ///  * the composition mode relative to the rest of the correction sits on
     ///    the GROUP: `(blend_mode, value, inverted)` measured as `(1, 0, false)`
@@ -1265,14 +1265,13 @@ pub enum MaskGeometry {
     ///    pair and its plain add, the same encoding v0.31.1 taught the reader
     ///    for parametric components.
     ///  * the strokes INSIDE only ever union with each other: `MaskBlendMode`
-    ///    is `"0"` on 382/382 Paints and `MaskInverted` `"false"` on 382/382.
+    ///    is `"0"` on 398/398 Paints and `MaskInverted` `"false"` on 398/398.
     ///    Anything else is someone else's writer and is refused, not guessed
     ///    (the roundness rule).
     ///
-    /// The TOTALS above (171 sidecars, 39 Aggregates, 382 Paints, 300
-    /// in-correction Paints) are pending re-derivation — see the note on
-    /// `AI_MASK_PROVENANCE_KEYS` in xmp.rs for why the counts are stale while
-    /// the invariants they describe are not.
+    /// The TOTALS above (177 sidecars, 42 Aggregates, 398 Paints, 398
+    /// in-correction Paints) are corpus measurements, not schema fields; the
+    /// invariants they describe are enforced independently by the parser.
     ///
     /// **⚠ A NEWER LIGHTROOM DOES NOT ALWAYS WRITE THIS FORM.** Registered
     /// 2026-08-21 (R29 me5), unmodelled: when Lightroom 18.4 rewrote one of
@@ -1324,7 +1323,7 @@ pub enum MaskGeometry {
     /// different thing from an import.
     ///
     /// **Why this cannot be an import.** F2's anatomy enumerated the full
-    /// attribute vocabulary over 105 real instances (re-measured at 218 across
+    /// attribute vocabulary over 105 real instances (the current corpus count,
     /// the wider library for this batch, 21 attribute names, one child element)
     /// and found **no raster payload and no geometry payload** — the longest
     /// attribute value anywhere on one is 55 characters. The sidecar names
@@ -1358,17 +1357,17 @@ pub enum MaskGeometry {
         name: String,
         /// `crs:MaskSubType` — **0 = Object/Background, 1 = Subject, 2 = Sky**
         /// (decoded by cross-tabulating against `MaskName` over 105 instances;
-        /// re-measured 218 in this batch, still exactly three values).
+        /// still exactly three values).
         ///
         /// Object and Background share the value 0 and the sidecar does not
-        /// separate them: `crs:MaskSubCategoryID` appears on 8 of 218 with two
+        /// separate them: `crs:MaskSubCategoryID` appears on 8 of 105 with two
         /// values, far too few to call an enum. So the segmenter is pointed at
         /// the OBJECT under the click point in both cases, and the possibility
         /// that the photographer meant its complement is disclosed rather than
         /// guessed — the roundness rule.
         subtype: u32,
         /// `crs:ReferencePoint` — the user's own click, normalised to the
-        /// frame, present on 218/218. This is the ONLY spatial information the
+        /// frame, present on 105/105. This is the ONLY spatial information the
         /// component carries, and it is what a point-promptable segmenter
         /// (SAM 2.1) consumes directly.
         ref_x: f32,
@@ -1384,7 +1383,7 @@ pub enum MaskGeometry {
         value: f32,
         /// `crs:MaskInverted`.
         inverted: bool,
-        /// `crs:MaskVersion` — `"1"` on 218/218. Lightroom's own schema stamp
+        /// `crs:MaskVersion` — `"1"` on 105/105. Lightroom's own schema stamp
         /// for the component, carried and never interpreted, exactly like
         /// [`MaskGeometry::Radial::mask_version`].
         mask_version: u32,
@@ -1423,10 +1422,10 @@ pub enum MaskGeometry {
         /// [`xmp`]: crate::xmp
         provenance: Vec<(String, String)>,
         /// The `crs:Gesture` child's `Mask/Paint` strokes — the user's brush
-        /// REFINEMENT of the AI mask (present on 83 of 218 components, exactly
-        /// one Paint each in the F2 census; that COUNT is pending
-        /// re-derivation — see the note on `AI_MASK_PROVENANCE_KEYS` in
-        /// xmp.rs — the shape it describes is not). Re-measured on the
+        /// REFINEMENT of the AI mask (present on 40 of 105 components, exactly
+        /// one Paint each in the current corpus census; the count is
+        /// gate-checked by `scripts/check_docs.py` (the shape it describes is
+        /// not). Re-measured on the
         /// library as it stands
         /// 2026-08-21: 40 gesture blocks over 10 files, one Paint each (40/40),
         /// every one of them on `MaskSubType="0"`.
@@ -1486,7 +1485,7 @@ pub enum MaskGeometry {
 
 /// One `crs:What="Mask/Paint"` stroke inside a [`MaskGeometry::Brush`] group.
 ///
-/// Exactly nine attributes on 300/300 in-correction instances, no optional
+/// Exactly nine attributes on 398/398 in-correction instances, no optional
 /// fields and no variation: `What`, `MaskActive`, `MaskBlendMode`,
 /// `MaskInverted`, `MaskSyncID`, `MaskValue`, `Radius`, `Flow`, `CenterWeight`,
 /// plus exactly one child element, `crs:Dabs`. The three whose value is an
@@ -1525,7 +1524,7 @@ pub struct BrushStroke {
     /// The `crs:Dabs` token stream, VERBATIM — one token per line, in the
     /// order the file lists its `<rdf:li>` items.
     ///
-    /// **The grammar, measured** (22,966 tokens over 382 components, zero
+    /// **Historical grammar measurement** (22,966 tokens over 382 components, zero
     /// malformed): four forms and no others —
     ///
     /// | token | meaning |
@@ -1552,7 +1551,7 @@ pub struct BrushStroke {
     /// of hardness, and the per-dab accumulation law. The file stores the
     /// stroke, never the alpha, so no amount of parsing recovers it, and the
     /// only published model for it is a third-party decompile reconstruction
-    /// whose `Density` field does not exist in any of the 382 real components.
+    /// whose `Density` field does not exist in any of those historical components.
     /// Structuring the stream before that measurement existed would freeze a
     /// shape around a renderer nobody has written; carrying it verbatim kept
     /// the round trip exact meanwhile. R27 Batches 8-10 then MADE the

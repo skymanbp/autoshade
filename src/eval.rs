@@ -93,6 +93,11 @@ struct Row {
     circular: bool,
 }
 
+/// Rows below this sample size are visibly marked in the report. The paired
+/// same-version analysis found n<20 rows 8.48x less stable per row than
+/// n>=20 rows, so this is an annotation threshold, not a score threshold.
+const LOW_N_ANNOTATION_THRESHOLD: usize = 20;
+
 impl Row {
     /// Full scale this control's MAE is normalised by for the gap score. Kept
     /// as the pre-R23 normaliser (a "typical" full range, not the clamp band)
@@ -520,6 +525,60 @@ impl Acc {
     }
 }
 
+fn low_n_marker(n: u32) -> &'static str {
+    if (n as usize) < LOW_N_ANNOTATION_THRESHOLD {
+        " [low n]"
+    } else {
+        ""
+    }
+}
+
+/// Preserve the established scalar table formatting, adding only the new
+/// low-sample marker to rows that need it.
+fn format_scalar_report_line(metric: &str, a: &Acc) -> String {
+    let label = format!("{metric}{}", low_n_marker(a.n));
+    if a.n > 0 {
+        format!(
+            "{label:<22} {:>4} {:>10.2} {:>+13.2} {:>8}\n",
+            a.n,
+            a.sum_abs / a.n as f64,
+            a.sum_signed / a.n as f64,
+            a.omit
+        )
+    } else {
+        format!("{label:<22} {:>4} {:>10} {:>13} {:>8}\n", a.n, "—", "—", a.omit)
+    }
+}
+
+fn format_scalar_report_rows(ruler: &[Row], acc: &BTreeMap<String, Acc>) -> String {
+    let mut out = format!(
+        "Legend: [low n] marks rows with n < {LOW_N_ANNOTATION_THRESHOLD}; treat their per-control means as less stable.\n"
+    );
+    for row in ruler {
+        let Some(a) = acc.get(&row.metric) else { continue };
+        if a.n == 0 && a.omit == 0 {
+            continue;
+        }
+        out.push_str(&format_scalar_report_line(&row.metric, a));
+    }
+    out
+}
+
+fn format_supplementary_gap_line(weighted: f64) -> String {
+    format!(
+        "Supplementary n-weighted gap score: {weighted:.1}%  (scalar block redistributed by n; term structure unchanged)\n"
+    )
+}
+
+fn n_weighted_scalar_mean(rows: &[(f64, u32)]) -> Option<f64> {
+    let total_n: u64 = rows.iter().map(|(_, n)| u64::from(*n)).sum();
+    (total_n > 0).then(|| {
+        rows.iter()
+            .map(|(value, n)| *value * f64::from(*n) / total_n as f64)
+            .sum()
+    })
+}
+
 /// What became of one photograph. The three non-`Stats` arms exist because the
 /// serial loop had three distinct exits (`continue` on a failed analysis, `?` on
 /// an unreadable sidecar, and — new — "an earlier photo already aborted the
@@ -930,20 +989,61 @@ fn record_measured(log: &StateLog, notes: &[crate::rationale::Note], row: &State
 /// not persisted. The 524 sentence is not decoration either: the ruling
 /// accepted at most one duplicate charge per photograph as the price of not
 /// scrapping a 147-photo run, and a transcript that never says so hides the
-/// cost that was accepted. It names the class rather than a count because this
-/// layer is given counts, not codes — the per-occurrence stderr disclosure,
-/// which does know the code, is where an operator reads which one it was.
+/// cost that was accepted. It names both transient classes rather than a count
+/// because this layer is given counts, not codes — the per-occurrence stderr
+/// disclosure, which does know the code, is where an operator reads which one
+/// it was.
 fn retry_disclosure(t: crate::advisor::RetryTally) -> Option<String> {
     (t.repeated > 0).then(|| {
         format!(
-            "{} upstream call(s) failed transiently and were posted a second time: {} \
-             recovered, {} failed again (those photographs fell back). A repeated relay \
-             timeout (HTTP 524) may have been billed twice.",
+            "{} upstream call(s) failed transiently and were posted a second time: \
+             {} recovered (the repeated call's outer response succeeded), {} failed again \
+             (those photographs fell back). A repeated relay timeout (HTTP 524) or relay \
+             overload response (HTTP 529) may have been billed twice.",
             t.repeated,
             t.recovered,
             t.exhausted()
         )
     })
+}
+
+/// Supplementary gap view: keep the headline's active-term structure and
+/// redistribute only the scalar block by observed sample counts (n / total
+/// scalar n). With equal n, this is exactly the headline over the same rows;
+/// the curve terms and their one-term-per-curve normalization are unchanged.
+/// This intentionally does not replace the headline or alter the state file.
+fn supplementary_weighted_gap(
+    ruler: &[Row],
+    acc: &BTreeMap<String, Acc>,
+    curve_n: u32,
+    sum_curve_rmse: f64,
+    rgb_acc: &[(u32, f64); 3],
+) -> Option<f64> {
+    let scalar: Vec<(f64, u32)> = ruler
+        .iter()
+        .filter_map(|row| {
+            let a = acc.get(&row.metric)?;
+            (a.n > 0).then(|| (((a.sum_abs / a.n as f64) / row.full_scale()), a.n))
+        })
+        .collect();
+    let scalar_terms = scalar.len() as u32;
+    let mut sum = if scalar_terms > 0 {
+        f64::from(scalar_terms) * n_weighted_scalar_mean(&scalar).unwrap()
+    } else {
+        0.0
+    };
+    let mut terms = scalar_terms;
+    if curve_n > 0 {
+        sum += (sum_curve_rmse / curve_n as f64) / 255.0;
+        terms += 1;
+    }
+    for (n, total) in rgb_acc {
+        if *n > 0 {
+            sum += (*total / *n as f64) / 255.0;
+            terms += 1;
+        }
+    }
+    (terms > 0).then(|| 100.0 * sum / terms as f64)
 }
 
 /// The pool body's FIRST decision: a photograph a valid saved row already
@@ -1413,20 +1513,7 @@ pub fn run(
     }
     println!("progress file: {}", state_path.display());
     println!("{:<22} {:>4} {:>10} {:>13} {:>8}", "field", "n", "mean|Δ|", "bias(AI−you)", "AI-omit");
-    for row in &ruler {
-        let Some(a) = acc.get(&row.metric) else { continue };
-        if a.n == 0 && a.omit == 0 {
-            continue;
-        }
-        if a.n > 0 {
-            let mae = a.sum_abs / a.n as f64;
-            let bias = a.sum_signed / a.n as f64;
-            println!("{:<22} {:>4} {:>10.2} {:>+13.2} {:>8}", row.metric, a.n, mae, bias, a.omit);
-        } else {
-            // You used it, the AI never engaged it — no Δ to report, just the miss.
-            println!("{:<22} {:>4} {:>10} {:>13} {:>8}", row.metric, a.n, "—", "—", a.omit);
-        }
-    }
+    print!("{}", format_scalar_report_rows(&ruler, &acc));
 
     // --- master tone curve summary -------------------------------------------
     if curve_n > 0 {
@@ -1502,6 +1589,9 @@ pub fn run(
         println!(
             "\nOverall gap score: {gap:.1}%  (mean per-control divergence incl. tone curve; lower = closer to your look)"
         );
+        if let Some(weighted) = supplementary_weighted_gap(&ruler, &acc, curve_n, sum_curve_rmse, &rgb_acc) {
+            print!("{}", format_supplementary_gap_line(weighted));
+        }
     } else {
         println!(
             "\nOverall gap score: n/a — no comparable controls were measured (the XMPs may hold \
@@ -2399,16 +2489,17 @@ mod tests {
         let line = retry_disclosure(RetryTally { repeated: 5, recovered: 4 })
             .expect("a run that repeated says so");
         assert!(line.contains("5 upstream call(s)"), "{line}");
-        assert!(line.contains("4 recovered"), "{line}");
+        assert!(line.contains("4 recovered (the repeated call's outer response succeeded)"), "{line}");
         assert!(line.contains("1 failed again"), "the exhausted half is derived, not dropped: {line}");
         assert!(line.contains("fell back"), "…and named as what it costs the table: {line}");
-        assert!(line.contains("524"), "the accepted double-billing risk is disclosed: {line}");
+        assert!(line.contains("HTTP 524"), "the accepted 524 double-billing risk is disclosed: {line}");
+        assert!(line.contains("HTTP 529"), "the relay 529 double-billing risk is disclosed: {line}");
 
         // Every repeat failing is the attempt-3 shape, and it must not read as
         // a success: nothing recovered, everything fell back.
         let all_lost = retry_disclosure(RetryTally { repeated: 5, recovered: 0 })
             .expect("a run whose repeats all failed says so");
-        assert!(all_lost.contains("0 recovered"), "{all_lost}");
+        assert!(all_lost.contains("0 recovered (the repeated call's outer response succeeded)"), "{all_lost}");
         assert!(all_lost.contains("5 failed again"), "{all_lost}");
     }
 
@@ -2445,5 +2536,78 @@ mod tests {
             parse_tone_curve(xmp, "ToneCurvePV2012"),
             vec![(64.0, 64.0)]
         );
+    }
+
+    #[test]
+    fn low_sample_annotation_threshold_is_exactly_twenty() {
+        assert_eq!(low_n_marker(19), " [low n]");
+        assert_eq!(low_n_marker(20), "");
+    }
+
+    #[test]
+    fn n_weighted_scalar_arithmetic_matches_a_hand_computed_fixture() {
+        // (1 * 1 + 3 * 3) / (1 + 3) = 2.5.
+        assert_eq!(n_weighted_scalar_mean(&[(1.0, 1), (3.0, 3)]), Some(2.5));
+    }
+
+    #[test]
+    fn supplementary_gap_weights_scalar_rows_by_observed_n() {
+        let ruler = vec![
+            Row { metric: "contrast".into(), crs: String::new(), rule: Rule::Plain, source: Source::Field, circular: false },
+            Row { metric: "exposure_ev".into(), crs: String::new(), rule: Rule::Plain, source: Source::Field, circular: false },
+        ];
+        let acc = BTreeMap::from([
+            ("contrast".to_string(), Acc { sum_abs: 10.0, n: 1, ..Default::default() }),
+            ("exposure_ev".to_string(), Acc { sum_abs: 10.0, n: 3, ..Default::default() }),
+        ]);
+        let score = supplementary_weighted_gap(&ruler, &acc, 1, 63.75, &[(0, 0.0); 3]).unwrap();
+        // The scalar block is redistributed by n but retains its two headline
+        // terms; the curve term remains a third term: 100 * (2 *
+        // ((0.1 * 1 + (2/3) * 3) / 4) + 0.25) / 3 = 43.333...%.
+        assert!((score - 43.3333333333).abs() < 1e-5, "{score}");
+    }
+
+    #[test]
+    fn supplementary_gap_equals_headline_when_scalar_sample_counts_are_equal() {
+        let ruler = vec![
+            Row { metric: "contrast".into(), crs: String::new(), rule: Rule::Plain, source: Source::Field, circular: false },
+            Row { metric: "exposure_ev".into(), crs: String::new(), rule: Rule::Plain, source: Source::Field, circular: false },
+        ];
+        let acc = BTreeMap::from([
+            ("contrast".to_string(), Acc { sum_abs: 20.0, n: 2, ..Default::default() }),
+            ("exposure_ev".to_string(), Acc { sum_abs: 1.0, n: 2, ..Default::default() }),
+        ]);
+        let headline = 100.0 * (0.1 + 0.1 + 0.1) / 3.0;
+        let weighted = supplementary_weighted_gap(&ruler, &acc, 1, 25.5, &[(0, 0.0); 3]).unwrap();
+        assert_eq!(weighted, headline);
+    }
+
+    #[test]
+    fn report_printer_keeps_old_lines_and_adds_low_sample_marker() {
+        let regular = Acc { sum_abs: 50.0, sum_signed: -10.0, n: 20, omit: 2 };
+        let legacy = format!(
+            "{:<22} {:>4} {:>10.2} {:>+13.2} {:>8}\n",
+            "contrast", regular.n, regular.sum_abs / regular.n as f64,
+            regular.sum_signed / regular.n as f64, regular.omit
+        );
+        assert_eq!(format_scalar_report_line("contrast", &regular), legacy);
+
+        let ruler = vec![
+            Row { metric: "contrast".into(), crs: String::new(), rule: Rule::Plain, source: Source::Field, circular: false },
+            Row { metric: "exposure_ev".into(), crs: String::new(), rule: Rule::Plain, source: Source::Field, circular: false },
+        ];
+        let acc = BTreeMap::from([
+            ("contrast".to_string(), regular),
+            ("exposure_ev".to_string(), Acc { sum_abs: 19.0, sum_signed: 1.0, n: 19, omit: 0 }),
+        ]);
+        let report = format_scalar_report_rows(&ruler, &acc);
+        assert!(report.contains(&legacy), "the established row stays byte-stable");
+        assert!(report.contains("Legend: [low n]"), "the report carries its marker legend");
+        assert!(format_supplementary_gap_line(52.5).contains("52.5%"), "the new line is printable");
+
+        let low = Acc { sum_abs: 19.0, sum_signed: 1.0, n: 19, omit: 0 };
+        let low_line = format_scalar_report_line("contrast", &low);
+        assert!(low_line.starts_with("contrast [low n]"), "{low_line}");
+        assert!(low_line.contains("  19 "), "the original n column remains: {low_line}");
     }
 }

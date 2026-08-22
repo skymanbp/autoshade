@@ -1195,24 +1195,27 @@ crs:Midpoint=\"{midpoint}\" crs:Version=\"{mask_version}\"",
 /// emits only names from this list — so a hand-edited `recipe.json` cannot
 /// smuggle a novel attribute, or markup, into a sidecar.
 ///
-/// Measured over the user's library on 2026-08-19: 218 `Mask/Image` instances,
+/// Current corpus re-derivation: 177 sidecars; 42 Mask/Aggregate; 105
+/// Mask/Image; 398 Mask/Paint; 1081 Mask/*; 40 crs:Gesture (recursive `*.xmp`
+/// census over the operator-supplied corpus root (env `AUTOSHOP_CENSUS_ROOT`),
+/// real XML parser, 0 parse failures). Measured
+/// over this corpus: 105 `Mask/Image` instances,
 /// 21 distinct attribute names, of which 7 are modelled fields
 /// ([`MaskGeometry::AiMask`]) plus `crs:What` and `crs:MaskActive` (an
-/// invariant, `"true"` on 218/218) and `crs:MaskSyncID` (re-minted by this
+/// invariant, `"true"` on 105/105) and `crs:MaskSyncID` (re-minted by this
 /// writer like every other component's). These eleven are the rest.
 ///
-/// **⚠ THE COUNTS ARE PENDING RE-DERIVATION — the INVARIANTS are not.** Read
-/// every `N of 218` / `382/382` / `300/300` figure in this file and in
-/// recipe.rs as "the shape measured in the F2 census", not as a number you can
-/// reproduce today. R29 me3-c re-ran the census over `D:\Photography\**\*.xmp`
-/// (177 sidecars) on 2026-08-21 and got 105 `Mask/Image`, 398 `Mask/Paint`,
+/// The counts above are the current scoped measurements; the invariants are
+/// enforced independently by the vocabulary and parser tests. Read
+/// Historical F2 figures elsewhere in this file and in recipe.rs are retained
+/// only as provenance; the active counts above are the re-derived values.
+/// A commanded XML census over the operator-supplied corpus root
+/// (`AUTOSHOP_CENSUS_ROOT`) and its recursive `*.xmp` files
+/// found 177 sidecars, 42 `Mask/Aggregate`, 105 `Mask/Image`, 398 `Mask/Paint`,
 /// 1081 `Mask/*` and 40 `crs:Gesture` blocks — none of the older totals came
-/// back, and the R28 MANIFEST reported the same divergence independently. What
-/// moved is almost certainly the CORPUS ROOT the census walked (the F2 batch's
-/// note does not record it), not the library. The numbers are therefore left
-/// exactly as they were measured rather than quietly replaced: re-deriving
-/// them needs the root back, and a doc number swapped for a differently-scoped
-/// one is worse than a stale one that says it is stale. Nothing in the code
+/// back, and the R28 MANIFEST reported the same divergence independently. The
+/// active values above are now the scoped, re-derived corpus counts; historical
+/// values remain only as provenance. Nothing in the code
 /// depends on a count — the allowlists and the refusals depend on the
 /// vocabulary and the invariants, which BOTH censuses agree on.
 const AI_MASK_PROVENANCE_KEYS: [&str; 11] = [
@@ -1312,7 +1315,7 @@ crs:MaskSubType=\"{subtype}\"\n\
         id = guid(sync_seed),
     );
     Some(if painted.is_empty() {
-        // Self-closing when there is no gesture — 135 of 218 real instances.
+        // Self-closing when there is no gesture — 65 of 105 current instances.
         format!("         <rdf:li>\n{head}/>\n         </rdf:li>\n")
     } else {
         format!(
@@ -1336,7 +1339,7 @@ crs:MaskSubType=\"{subtype}\"\n\
 /// Lightroom's own order, the Paint's nine in Lightroom's own order, one
 /// `<rdf:li>` per dab token. Three of those attributes are LITERALS because
 /// they are invariants rather than data — `MaskActive="true"` on both,
-/// `MaskBlendMode="0"` and `MaskInverted="false"` on the Paint (382/382), and
+/// `MaskBlendMode="0"` and `MaskInverted="false"` on the Paint (398/398), and
 /// the reader refuses anything else rather than storing it.
 ///
 /// The numbers go out through plain `Display`, NOT through `local_fmt` or
@@ -1530,7 +1533,7 @@ pub enum MaskLossReason {
     /// rasteriser (R29 Batch-6, ~0.01 in α on the ladder it was fitted to),
     /// while an AI mask is drawn by a different SEGMENTER whose edges have
     /// never been compared to Adobe's at all. The sidecar carries no raster
-    /// (F2's anatomy: 218 instances, longest attribute value 55 characters), so
+    /// (current corpus: 105 instances, longest attribute value 55 characters), so
     /// this one is structural and permanent, not a to-do.
     ///
     /// [`BrushRendered`]: MaskLossReason::BrushRendered
@@ -1724,8 +1727,7 @@ pub enum MaskImportReason {
     /// machine by a different segmenter** — the dominant refusal before R27
     /// Batch-5, and the one arm that cannot be closed by any parser.
     ///
-    /// F2's anatomy settled the mechanism on 105 real instances (re-measured at
-    /// 218 for this batch): the component carries `MaskSubType` +
+    /// The current corpus measures 105 instances: the component carries `MaskSubType` +
     /// `ReferencePoint` + `MaskName`, the provenance digests, and the proxy
     /// frame Adobe's model ran in — **no raster payload and no geometry
     /// payload**, longest attribute value 55 characters. So there is nothing to
@@ -5723,14 +5725,14 @@ fn component_import_reasons(
 /// past. `scope` is the string `agg`'s offsets are measured in.
 ///
 /// **What is refused, and why refusing beats guessing.** Every gate below has
-/// ZERO counter-examples in the 171-sidecar reference library, so a document
+/// ZERO counter-examples in the 177-sidecar current corpus, so a document
 /// that trips one was written by something other than Lightroom and this
 /// module has no measurement to model it with. The caller turns the `Err` into
 /// [`MaskImportReason::OutOfModel`] — "a value we can read that lands outside
 /// this engine's model" — which costs the correction and says so, rather than
 /// importing a shape the file does not describe.
 ///
-///  * a child that is not `Mask/Paint` (measured: 300/300 children are Paint,
+///  * a child that is not `Mask/Paint` (measured: 398/398 children are Paint,
 ///    never a Gradient, Radial, RangeMask, Image or another Aggregate);
 ///  * anything nested BELOW the Paints (measured: maximum component nesting
 ///    depth in the whole library is exactly 2);
@@ -5746,7 +5748,7 @@ fn parse_brush_group(scope: &str, agg: &XmlComponent<'_>) -> Result<MaskGeometry
         return Err(());
     }
     // The group's three composition attributes, carried VERBATIM. Absent reads
-    // as Lightroom's default in each case (it writes all three on 39/39 real
+    // as Lightroom's default in each case (it writes all three on 42/42 real
     // Aggregates, so absence is a foreign writer's terseness, not a value).
     let blend_mode = match tag.crs_str("MaskBlendMode") {
         None => 0u32,
@@ -5790,14 +5792,14 @@ fn parse_brush_group(scope: &str, agg: &XmlComponent<'_>) -> Result<MaskGeometry
 /// past. `scope` is the string `img`'s offsets are measured in.
 ///
 /// **What is refused, and why refusing beats guessing** — every gate has zero
-/// counter-examples in the 218 real instances measured for R27 Batch-5:
+/// counter-examples in the 105 current instances:
 ///
-///  * a muted component (`MaskActive` other than `"true"`) — 218/218 are
+///  * a muted component (`MaskActive` other than `"true"`) — 105/105 are
 ///    `"true"`, and a muted component changes what the mask covers;
 ///  * a missing or unreadable `MaskSubType` / `ReferencePoint` — both sit on
-///    218/218, and they ARE the mask: without the pair there is nothing to
+///    105/105, and they ARE the mask: without the pair there is nothing to
 ///    point a segmenter at;
-///  * a `MaskSubType` outside `{0, 1, 2}` — three values on 218/218, and each
+///  * a `MaskSubType` outside `{0, 1, 2}` — three values on 105/105, and each
 ///    routes to a specific backend. A fourth would have no backend and
 ///    guessing one would invent a selection;
 ///  * an attribute name outside the modelled set plus
@@ -5938,11 +5940,11 @@ fn crs_attributes(tag: &str) -> Vec<(String, &str)> {
 /// One `crs:What="Mask/Paint"` child of a brush group → [`BrushStroke`].
 ///
 /// The three attribute INVARIANTS are gates, not fields: `MaskActive="true"`,
-/// `MaskBlendMode="0"` and `MaskInverted="false"` hold on 382/382 real Paints,
+/// `MaskBlendMode="0"` and `MaskInverted="false"` hold on 398/398 real Paints,
 /// so a Paint that says otherwise is asserting a composition inside a group
 /// that has never been observed to have one. The four NUMBERS are required
 /// rather than defaulted for the same reason — all nine attributes sit on
-/// 300/300 in-correction instances, with no optional fields and no variation,
+/// 398/398 in-correction instances, with no optional fields and no variation,
 /// so a missing one means this is not the encoding we measured.
 fn parse_paint_stroke(scope: &str, p: &XmlComponent<'_>) -> Result<BrushStroke, ()> {
     let tag = Tag::new(p.tag);
@@ -5981,7 +5983,7 @@ fn parse_dabs(scope: &str, p: &XmlComponent<'_>) -> Result<String, ()> {
         return Err(());
     };
     let Some(seq) = owned_element_body(body, "crs:Dabs")? else {
-        // Present on 382/382. A Paint without one is not a stroke.
+        // Present on 398/398. A Paint without one is not a stroke.
         return Err(());
     };
     let mut out = String::new();
@@ -6069,8 +6071,8 @@ fn dab_token_is_known(t: &str) -> Result<(), ()> {
 /// How a brush group composes onto the coverage built so far — the ONE place
 /// `crs:MaskBlendMode` is mapped onto this engine's [`MaskCombine`].
 ///
-/// `1` is Lightroom's subtract (paired with `MaskValue="0"`, 23 of 39 real
-/// Aggregates); every other value, `0` included, is the plain union. The
+/// `1` is Lightroom's subtract (paired with `MaskValue="0"`, observed on 23
+/// current Aggregates); every other value, `0` included, is the plain union. The
 /// carried `blend_mode` stays the authority for the WRITER, so an unmapped
 /// mode still rides back out as itself instead of being normalised to what we
 /// happened to render it as.
@@ -6359,7 +6361,7 @@ fn classify_correction(
 ///
 /// R27 Batch-4 hazard 2 — it used to scan the WHOLE correction segment for the
 /// first `crs:What="Mask/Gradient"` / `"Mask/CircularGradient"`, nesting-blind.
-/// No Aggregate in the reference library contains a parametric shape (300/300
+/// No Aggregate in the current corpus contains a parametric shape (398/398
 /// children are Paint), so it could not fire — but nothing in the code enforced
 /// that, and a foreign writer that DID nest a gradient inside a brush group
 /// would have had it promoted to the correction's base shape. The search is now
@@ -12077,7 +12079,7 @@ mod tests {
     /// The other half of the same rule, and the one the brush arm needs: a
     /// parametric shape nested INSIDE a brush group is refused rather than
     /// promoted. "An Aggregate whose child is not a Paint" has zero
-    /// counter-examples in 171 real sidecars, so a document with one was
+    /// counter-examples in 177 current sidecars, so a document with one was
     /// written by something other than Lightroom.
     ///
     /// MUTATION-LINED: loosening `parse_brush_group`'s child-kind gate from
@@ -12133,7 +12135,7 @@ mod tests {
     /// The measured INVARIANTS are gates, not fields: a `Mask/Paint` that
     /// asserts a composition, a missing attribute, a dab token outside
     /// `{r,d,f,h}`, a Paint with no `crs:Dabs`. Each has zero counter-examples
-    /// in 171 real sidecars, so each costs the correction rather than being
+    /// in 177 current sidecars, so each costs the correction rather than being
     /// guessed past — the roundness rule, applied to a stroke.
     ///
     /// MUTATION-LINED: loosening any one gate in `parse_brush_group` /
@@ -14268,7 +14270,7 @@ mod tests {
     }
 
     /// The `crs:Gesture` child — the photographer's brush refinement of the AI
-    /// mask (83 of 218 instances) — is carried, so the 7 corrections whose only
+    /// mask (40 of 105 instances) — is carried, so the corrections whose only
     /// brush content is a gesture arrive whole.
     #[test]
     fn an_ai_masks_gesture_strokes_are_carried() {
@@ -14461,7 +14463,7 @@ mod tests {
     ///
     /// The nearest real threat this closes: Lightroom really does write
     /// `crs:Local*` NAMES on nested components (`LocalInputDigest` and friends,
-    /// 218 measured instances). They are strings nobody parses as numbers
+    /// 105 measured instances). They are strings nobody parses as numbers
     /// today, which is why nothing has caught fire — a coincidence, now a
     /// guard.
     ///
