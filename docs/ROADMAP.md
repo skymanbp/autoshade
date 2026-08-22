@@ -426,7 +426,32 @@ GUI 与导出路径——原生另存对话框本体不可自动化，验收=对
 
 ## 当前状态（已完成，勿重做）
 
-- **R30 B1 已落地（2026-08-22，`ef5a71a`：零素材六项 ⑤⑥⑧⑨⑩⑪，
+- **R30 B2 格式侦查两级收官 + 主审裁决（2026-08-22，Codex ×2 分析批，
+  零仓库改动；报告
+  `~/.claude/plans/r30-materials/mb-format-report{,2}.md` + 素材真值对
+  `mb-sample/`）**。素材=用户 3 分钟重导（`_DSC9206` 桌面副本改名破
+  LR 判重 + 任意滑杆改动触发全量重写；图库原件零触碰）：xmp
+  44,541→18,834B、文本 Paint 16→2（手势自带 2 个保留=me5 恰合）、
+  `.acr` 278,260→280,580B。**一级（xmp）**：`crs:MaskBrushTable` 仅
+  32-hex token+`MaskBrushUncompressedBytes=4193`，载荷不在 xmp（六种
+  解压器全拒、覆盖 0/4193 如实报零）；Adobe 文档钉 LR Classic 15+ 写
+  伴随 `.acr`。**二级（.acr）完全破格**：`.acr`=专有小端**内容寻址
+  对象库**（`ACR\0` 魔数 + 32B 目录项=16B **MD5 内容键**+LE64 长
+  +LE64 偏移，七个目录项键=MD5(blob) 全验）；token 即 MD5 键命中目录
+  项 2（2,286B @0x42A08）→16B 信封+2,270B **Brotli** 流→恰好 4,193B
+  →**14 记录 381 token（48r/325d/8f/0h）九字段+全坐标对文本真值
+  定点整数缩放后逐一全等**；重写=旧三 blob 字节不动仅挪偏移+新增一项
+  +2 对齐字节（2,320B 差额精确闭合）；框架覆盖 100%、语义
+  4,189/4,193=99.90%（一个表级 4B 字未定）。**主审裁决（拍板 R30②
+  实现形态）**：窄域守卫解析——sibling `.acr` 发现→token 精确目录键
+  查找→MD5+界校验→限量 Brotli 解码→严格 payload 文法（仅已观测
+  opcode，声明数 d 记录、精确耗尽缓冲）；**9 具名拒收臂**
+  （Unavailable/ContainerInvalid/ReferenceMismatch/DigestMismatch/
+  EncodingUnsupported/Corrupt/LengthMismatch/PayloadUnsupported/
+  PayloadInvalid）——未观测构造（含 `h` opcode 二进制形）一律具名拒收
+  不外推。**实现前置**：样本二（`_DSC8904`，84 笔刷+8 AI 蒙版压力例）
+  已备桌面待用户同流程重导——扩观测文法（h/f opcode、多聚合、大表）
+  后开实现批。旧 `.acr`（2024）无笔刷对象=该编码确系新 LR 时代产物。零素材六项 ⑤⑥⑧⑨⑩⑪，
   Codex gpt-5.6-sol 实现（中转断粮一次续做）+主审全量 diff 对抗复审
   三发现归并一次修复批+亲跑门+2 变异）**。**⑪ eval 低 n 稳健化（本批
   最大项）**：报告行 n<20 加 `[low n]` 标注+图例行（阈值常数
