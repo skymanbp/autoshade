@@ -425,6 +425,38 @@ GUI 与导出路径——原生另存对话框本体不可自动化，验收=对
 
 ## 当前状态（已完成，勿重做）
 
+- **R29 Codex 只读发版审阅裁决批已落地（2026-08-21，未发版，本批）：判
+  BLOCK 被主审逐条第一方核实推翻，4 修（2 码 2 文档）+ 4 登记 + 2 确认**。
+  审阅=Codex gpt-5.6-sol（xhigh，中转，read-only，用户 2026-08-21 解禁指令
+  首战）对 c8b7d54 全库审，359,980 tokens，出 9 findings
+  （2H/3M/2L/2NOTE）判 BLOCK。裁决（全文
+  `~/.claude/plans/r29-materials/codex-v035-adjudication.md`）：
+  **H2「524/529 错误体无界读→内存耗尽」被证伪**——vendored ureq 2.12.1
+  `response.rs:33/464-469` 亲读，`into_string()` 自带 10 MiB 硬帽，降 NOTE；
+  **H1「.lcp 蒙版帧修复未接线」半真**——`lr_mask_warp_norm` 确无生产调用，
+  但这是 B3 码内量化拍板的刻意设计（`render.rs:2649-2656`：MaskUnwarp 用
+  引擎自身逆、实测 6.74px rms 我图-他图残差；`:8063-8066` 明写 nothing
+  calls it yet），真缺陷=README 归因失真。**修四点**：①README Reproducible
+  句补「+ same mask rasters」前提（AI 蒙版重推导依赖本机后端，F6
+  CONFIRMED）；②README `.lcp` 段归因改真（0.3px 落点来自引擎自身几何逆；
+  `.lcp` 解算=携带的来源具名模型非渲染输入；引擎未校正帧上蒙版按存储坐标
+  渲染）；③`render.rs` `brush_raster` 缓存补 `map.len() > 16` 条目界（F3
+  CONFIRMED——相邻注释声称 bytes+entries 双界而代码只有 bytes、None 零字节
+  永不触发清空；补界使注释为真，与 `load_mask_bitmap` 同构同值）；
+  ④`lcp.rs` 唯一在类无界读换 `read_text_capped` 16 MiB 帽（F7 CONFIRMED=
+  R28 B2 同类；全库 109 命中普查生产在类仅此一处；帽值有据=本机池 3,576 档
+  最大 4,489,652 B 实测，超帽=既有 `Refusal::Unreadable` 具名退化，零
+  schema）。**登记不修**：F4 自定义中继 529 计费语义（拍板注释
+  `advisor/mod.rs:1245-1248` 已显式接受最坏情形+计费句被测试双向钉死，
+  改=推翻拍板）→R30⑨；F5 recovered=外层口径（`settle_repeat` 注释自证
+  刻意、总账自洽）→R30⑩；H2 残留家规对称→R30⑧；H1 接线→R30⑦。两
+  NOTE（F8/F9）=对 LensProfile 前向断裂与 LUT 守卫的确认，无动作。
+  **无测试披露**：③④两处无判别测试（③fn 内 `static` 无观察缝、④
+  `AUTOSHOP_LCP_DIR` 缝与真池验收测试并发竞态），收敛=双配置电池零集差+
+  clippy 0+同构被测 sibling 模式。**tag 前义务重申**：zoo/M-B/LR 探针已在
+  c8b7d54 实跑（zoo 9/9、M-B 7 sidecars/42 masks、LR 探针含于 9 passed，
+  release+gui 配置）——但本批动了 `src/`，**三跑须在 tag 位复跑重记**。
+
 - **R29 全量文档 sweep 批已落地（2026-08-21，未发版，本批）：版本推到
   v0.35.0 + 五份文档与五处代码注释真化 + 发版置顶义务清单定稿**。用户令
   ＝「全量更新所有文档并发布新 release」；本批是发版链前最后一个文档批，
@@ -524,7 +556,14 @@ GUI 与导出路径——原生另存对话框本体不可自动化，验收=对
   本模块唯一不能允许的结局）；③sky（ADE20K）/ object（SA-1B）**训练集条款
   审计**（C5 §7.6 具名范围外项，BiRefNet 链已闭）；④GUI 预览 ↔ 导出的半
   像素实拍复核（C2 是引擎侧算术一致，两条显示路径未拍实片对过）；
-  ⑤`store` 测试的 `*_in` 孪生；⑥F2 census 计数**重新溯源**（见下条）。
+  ⑤`store` 测试的 `*_in` 孪生；⑥F2 census 计数**重新溯源**（见下条）；
+  **⑦–⑩（Codex 审阅裁决批追加，细节见其台账条）**：⑦`lr_mask_unwarp_norm`
+  接线——引擎未校正帧上 LR-已校正径向/线性的 LR 保真转换（需新 LR 实验
+  证据；今日行为=按存储坐标渲染，README 已如实披露）；⑧advisor Status 臂
+  错误体改走 BODY_CAP（ureq `into_string` 自带 10 MiB 硬帽，纯家规对称）；
+  ⑨529 计费句 provider 语义注记（非 Anthropic 中继若做完工作再发 529，
+  「非二次计费」句在该中继上不真；帽=1 次、最坏一次重复计费已拍板接受）；
+  ⑩`retry_disclosure`「recovered」=外层响应恢复的措辞精确化。
 
   **me5 迷你包台账（3 对，2026-08-21，主审第一方判读，无子代理，
   `~/.claude/plans/r29-materials/me5-results.md`）**：**①手势 subtype=0
