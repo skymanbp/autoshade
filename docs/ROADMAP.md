@@ -426,6 +426,36 @@ GUI 与导出路径——原生另存对话框本体不可自动化，验收=对
 
 ## 当前状态（已完成，勿重做）
 
+- **R30 B2 MaskBrushTable 守卫导入已落地（2026-08-22，feat `2cb59a5`，
+  Codex gpt-5.6-sol 实现+主审全量 diff 对抗复审）**。
+  状态=**完整读+写侧保真，无 recipe schema 变更**：path-aware XMP 读取器按
+  裁决文法独立解析每个 Aggregate 的 `.acr` 表，严格核验 ACR 目录/MD5/
+  信封/Brotli 长度/表框架与 token，并以 9 个既定类具名拒收；表记录保持
+  所属 Aggregate 和表内顺序，随后拼接全部残留文本 Paint。旧行为第一方
+  复测并非静默丢失：重写样本 `_DSC9206` 有 1 个 correction、`_DSC8904`
+  有 2 个 correction loud `OutOfModel`；本批后这些笔刷进入 recipe 并渲染，
+  属有意行为变化。写侧不把二进制表收入 recipe；未改蒙版的 path-aware
+  merge 识别 base 等价后逐字保留原 Aggregate，故
+  `MaskBrushTable`/`MaskBrushUncompressedBytes` 与残留 Paint 原样骑出，且
+  不合成 table-derived 文本 Paint 双份表示。新增 19 个 CI-safe 测试，含
+  2 表/2 聚合 happy path、9 拒收臂、定点映射、幸存 Paint、三类上限、
+  写回保真及 `AUTOSHOP_MB_SAMPLE_ROOT` 环境门控真样本抽验。**门（主审
+  亲跑，降优先级批）**=clippy 0×2 + **841(9i)/14/132/2+2** 双配置（lib
+  相对 822 净增 19，19 个新测试名对 HEAD 逐名集差=全新增）+ 真样本
+  门控 1P + check_docs **20P0F3S**。**主审 3 变异全红还原**（Edit 往返，
+  遵 M2 教训不动 git checkout）：①value 缩放 1e6→1e5=定点测试红；
+  ②`report()` 去重条件反转=拒收失声，16 臂测试 13 红；③写侧
+  `corrections>0`→`>9000`=保留路瘫痪，往返测试红。**主审登记三软点**：
+  active=0（未观测、裁决允许 {0,1}）映射零密度且注明写回以原字节为准；
+  token 十六进制大小写皆收（同键等价，无害放宽）；表转文本 dab 去尾零
+  =数值精确、格式归一（仅用户改蒙版转本方 authorship 时出现）。依赖
+  零新增：`brotli-decompressor`=5.0.3/`md5`=0.8.0 均为锁树既有
+  （jxl-oxide/rawler 携带）仅提直接引用，Cargo.lock 仅 +2 行。
+  **⚠ 渲染行为变更（v0.36.0 发版说明义务）**：现代 LR 重写 sidecar
+  的表编码笔刷从 loud 拒收变为导入渲染。事故登记：批派发两次失败
+  （CreateProcess 不解析 npm shim `codex`；`cmd /c` 引号碎裂）后改
+  node 直调；Codex 沙箱禁写 plans 目录、报告落仓库根由主审移出
+  （公开仓零残留）。
 - **R30 B2 三级证伪收官=CONFIRM + eCO 申报已提交（2026-08-22，Codex
   三级分析批零仓库改动；报告
   `~/.claude/plans/r30-materials/mb-format-report3.md` + 分析器
