@@ -426,6 +426,26 @@ GUI 与导出路径——原生另存对话框本体不可自动化，验收=对
 
 ## 当前状态（已完成，勿重做）
 
+- **R30 B4③ 训练集条款审计收官=初判确认（2026-08-22，`70832eb`，
+  主审一手取证+Codex 全库声明盘点，25 声明 19 TRUE/3 STALE/0 FALSE/
+  3 SILENT）**。证据=主审 WebFetch 一手抓取（Codex 无网、被明令禁止
+  回忆许可文本）：**ADE20K 条款**（ade20k.csail.mit.edu/terms）把
+  非商业研究/教育条件放在 Database 使用本身，**对训练出的模型及其
+  下游用户零条款**；**SA-1B 许可**同构——Licensed Content=图像+元数据、
+  限非商业研究，**同样无及于模型权重/输出的条款**（⚠条文引自 HF 镜像
+  xiuqhou/SA-Det-100k=二手来源，Meta 官方页只见「Limited; see full
+  license language」+「Research purposes only」；此注随一切引用条文的
+  结论同行）。**裁决**：Autoshop 只下载执行各自独立许可的权重
+  （OneFormer=MIT、SAM 2.1=Apache 2.0，权重层 R27-R29 已闭）、活码
+  零数据集端点、自写 ADE20K 类表源自 MIT 模型元数据非数据集标注
+  ⇒ **两训练集条款对 Autoshop 及其用户零义务**。**真话补丁**
+  =`python/segment.py` 许可块 +12 行纯注释（审计日期+两范围结论+三
+  URL+镜像注）；电池亲跑 849(9i)/14/132/2+2 全绿=embed.rs 源契约
+  测试零触线；check_docs 20P0F3S。**本条接替**：C5 NOTE「sky/object
+  训练集条款仍未审」、B4 排程句、R30 候选池③行——三处 SILENT 就此
+  关闭（层积不改写）。3 STALE=历史记录自带接替句，照层积纪律不动。
+  **R30 至此 B1/B2/B3/B4 四批全落**；余⑦（需用户新 LR 实验）④（需
+  用户 GUI 目检）素材依赖，v0.36.0 发版链待此二项或用户拍板先发。
 - **R30 B3 手势→SAM 点提示已落地（2026-08-22，feat `1e99e84`，Codex
   侦查+实现两批、主审全量 diff 对抗复审）**。机制=me5 定案（subtype=0
   手势是分割模型的区域提示、两子类型下渲染期合成均不存在）；此前引擎
