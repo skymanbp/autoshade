@@ -320,6 +320,10 @@ inverse, landing within 0.3 px. Autoshop also reads Adobe's own `.lcp` lens
 profiles and solves them into the recipe as a named model of Lightroom's warp;
 that model is carried provenance, not yet a render-time input — a frame this
 engine does not itself correct still renders masks at their stored coordinates.
+Independently of any lens model, a linear gradient's normalized endpoints are
+now evaluated in the pixel/aspect-correct metric Lightroom uses: on the
+9504x6336 probe an angled gradient moved from an 874 px-class half-contour
+error to 9.8 px. Radials and brushes are untouched by that change.
 The recipe names which of seven sources produced the model — an in-camera knot
 set, a solved `.lcp`, or an honest none.
 
@@ -871,6 +875,11 @@ per-user `autoshop.local.json` overrides the environment. The two sidecar knobs
   *before* it; the engine now reads each in its own frame instead of both in
   one. Where a lens profile is active this lands the shape within 0.3 px of
   where Lightroom puts it, against 8–24 px before.
+- **Angled linear-mask falloff changed in v1.0.0.** Linear endpoints remain
+  normalized in the recipe, but their dot product now uses the frame's pixel
+  aspect ratio. Axis-aligned and square-frame gradients are byte-stable; an
+  angled gradient on the 9504x6336 probe moved from an 874 px-class half-
+  contour error to 9.8 px. Radial, brush, and AI paths are unchanged.
 - **Every Sony ARW render moved by (32, 20) px in v0.32.0.** The develop window
   now starts at the RAW's own `DefaultCropOrigin`, where the camera and Lightroom
   put the picture, instead of the sensor's top-left corner.

@@ -2325,7 +2325,15 @@ fn apply_masks(
                 (x as f32 + MASK_SAMPLE_CENTRE) / w as f32,
                 (y as f32 + MASK_SAMPLE_CENTRE) / h as f32,
             );
-            let mut wgt = combined_mask_weight(m, nx, ny, bmp, &comp_bmps, unwarp);
+            let mut wgt = combined_mask_weight(
+                m,
+                nx,
+                ny,
+                bmp,
+                &comp_bmps,
+                unwarp,
+                (w as f32, h as f32),
+            );
             if m.inverted {
                 wgt = 1.0 - wgt;
             }
@@ -3352,17 +3360,53 @@ fn mask_weight_in(
     ny: f32,
     bmp: Option<&image::GrayImage>,
     unwarp: Option<&MaskUnwarp>,
+    dims: (f32, f32),
 ) -> f32 {
-    match unwarp {
+    let (nx, ny) = match unwarp {
         Some(u) if is_lr_post_correction_geometry(g) => {
-            let (nx, ny) = u.at(nx, ny);
-            mask_weight(g, nx, ny, bmp)
+            u.at(nx, ny)
+        }
+        _ => (nx, ny),
+    };
+    mask_weight_metric(g, nx, ny, bmp, dims)
+}
+
+/// Evaluate a geometry using the metric Lightroom uses for its stored frame.
+///
+/// Linear endpoints are stored as normalized coordinates, but their dot
+/// product is a pixel-space measurement. On a non-square frame the two are
+/// not equivalent: the pixel vector is `(vx * w, vy * h)`. Axis-aligned and
+/// square-frame gradients deliberately retain the old normalized arithmetic,
+/// keeping those render bytes stable while making the angled case exact.
+fn mask_weight_metric(
+    g: &MaskGeometry,
+    nx: f32,
+    ny: f32,
+    bmp: Option<&image::GrayImage>,
+    dims: (f32, f32),
+) -> f32 {
+    match g {
+        MaskGeometry::Linear { zero_x, zero_y, full_x, full_y } => {
+            let (vx, vy) = (full_x - zero_x, full_y - zero_y);
+            let len2 = vx * vx + vy * vy;
+            if len2 < 1e-9 {
+                return 1.0;
+            }
+            let (w, h) = dims;
+            if vx == 0.0 || vy == 0.0 || w == h || !(w > 0.0 && h > 0.0) {
+                return (((nx - zero_x) * vx + (ny - zero_y) * vy) / len2).clamp(0.0, 1.0);
+            }
+            let dx = (nx - zero_x) * w;
+            let dy = (ny - zero_y) * h;
+            let px = vx * w;
+            let py = vy * h;
+            ((dx * px + dy * py) / (px * px + py * py)).clamp(0.0, 1.0)
         }
         _ => mask_weight(g, nx, ny, bmp),
     }
 }
 
-/// Mask coverage [0,1] at normalised frame coordinate (nx, ny).
+/// Mask coverage [0,1] at normalized frame coordinate (nx, ny).
 fn mask_weight(g: &MaskGeometry, nx: f32, ny: f32, bmp: Option<&image::GrayImage>) -> f32 {
     match g {
         MaskGeometry::Linear { zero_x, zero_y, full_x, full_y } => {
@@ -4182,10 +4226,11 @@ fn combined_mask_weight(
     base: Option<&image::GrayImage>,
     comp_bmps: &[Option<&image::GrayImage>],
     unwarp: Option<&MaskUnwarp>,
+    dims: (f32, f32),
 ) -> f32 {
-    let mut w = mask_weight_in(&m.mask, nx, ny, base, unwarp);
+    let mut w = mask_weight_in(&m.mask, nx, ny, base, unwarp, dims);
     for (c, bmp) in m.components.iter().zip(comp_bmps) {
-        let cw = mask_weight_in(&c.geometry, nx, ny, *bmp, unwarp);
+        let cw = mask_weight_in(&c.geometry, nx, ny, *bmp, unwarp, dims);
         w = match c.mode {
             crate::recipe::MaskCombine::Add => 1.0 - (1.0 - w) * (1.0 - cw),
             crate::recipe::MaskCombine::Subtract => w * (1.0 - cw),
@@ -4945,6 +4990,7 @@ pub fn mask_coverage(
             bmp.as_deref(),
             &comp_refs,
             unwarp,
+            (w as f32, h as f32),
         );
         if m.inverted {
             wgt = 1.0 - wgt;
@@ -11168,12 +11214,12 @@ mod tests {
             "premise: the brush really paints at the rim sample"
         );
         assert_eq!(
-            mask_weight_in(&brush, rim.0, rim.1, Some(&braster), Some(&u)),
+            mask_weight_in(&brush, rim.0, rim.1, Some(&braster), Some(&u), (480.0, 320.0)),
             mask_weight(&brush, rim.0, rim.1, Some(&braster)),
             "a brush must not be frame-adapted"
         );
         assert!(
-            (mask_weight_in(&brush, rim.0, rim.1, Some(&braster), Some(&u))
+            (mask_weight_in(&brush, rim.0, rim.1, Some(&braster), Some(&u), (480.0, 320.0))
                 - mask_weight(&brush, rim_moved.0, rim_moved.1, Some(&braster)))
             .abs()
                 > 1e-3,
@@ -11181,7 +11227,7 @@ mod tests {
         );
         let rad = probe_radial(0.24, 0.5, 0.1).mask;
         assert_eq!(
-            mask_weight_in(&rad, 0.2, 0.5, None, Some(&u)),
+            mask_weight_in(&rad, 0.2, 0.5, None, Some(&u), (480.0, 320.0)),
             mask_weight(&rad, moved.0, moved.1, None),
             "a radial must be asked at the adapted point"
         );
@@ -11932,7 +11978,7 @@ mod tests {
                     (MaskCombine::Subtract, b * (1.0 - c)),
                     (MaskCombine::Intersect, b * c),
                 ] {
-                    let got = combined_mask_weight(&with(mode), nx, ny, None, &[None], None);
+                    let got = combined_mask_weight(&with(mode), nx, ny, None, &[None], None, (1.0, 1.0));
                     assert!(
                         (got - want).abs() < 1e-6,
                         "{mode:?} at ({nx},{ny}): got {got}, want {want}"
@@ -11945,7 +11991,7 @@ mod tests {
             mask: MaskGeometry::Linear { zero_x: 0.0, zero_y: 0.5, full_x: 1.0, full_y: 0.5 },
             ..Default::default()
         };
-        assert_eq!(combined_mask_weight(&plain, 0.3, 0.9, None, &[], None), 0.3);
+        assert_eq!(combined_mask_weight(&plain, 0.3, 0.9, None, &[], None, (1.0, 1.0)), 0.3);
         // Components fold IN LIST ORDER: subtract-then-add differs from
         // add-then-subtract, so a reorder is a real semantic change.
         let vertical = MaskGeometry::Linear { zero_x: 0.5, zero_y: 0.0, full_x: 0.5, full_y: 1.0 };
@@ -11962,7 +12008,7 @@ mod tests {
             let w = nx * (1.0 - ny);
             1.0 - (1.0 - w) * (1.0 - ny)
         };
-        let got = combined_mask_weight(&sub_then_add, nx, ny, None, &[None, None], None);
+        let got = combined_mask_weight(&sub_then_add, nx, ny, None, &[None, None], None, (1.0, 1.0));
         assert!((got - want).abs() < 1e-6, "sequential fold: got {got}, want {want}");
     }
 
@@ -13559,6 +13605,95 @@ mod tests {
         let rcov = mask_coverage(&ranged, &split, MaskFrame::AsRendered);
         assert_eq!(rcov.get_pixel(3, 10)[0], 0, "dark side gated out");
         assert!(rcov.get_pixel(16, 10)[0] > 235, "bright side kept: {}", rcov.get_pixel(16, 10)[0]);
+    }
+
+    #[test]
+    fn angled_linear_mask_matches_the_pixel_metric_closed_form() {
+        let g = MaskGeometry::Linear {
+            zero_x: 0.15,
+            zero_y: 0.20,
+            full_x: 0.85,
+            full_y: 0.80,
+        };
+        let (w, h) = (300.0f32, 200.0f32);
+        let (zx, zy, fx, fy) = match &g {
+            MaskGeometry::Linear { zero_x, zero_y, full_x, full_y } => (*zero_x, *zero_y, *full_x, *full_y),
+            _ => unreachable!(),
+        };
+        let (vx, vy) = (fx - zx, fy - zy);
+        let (px, py) = (vx * w, vy * h);
+        let den = px * px + py * py;
+        for (nx, ny) in [(0.30, 0.25), (0.55, 0.50), (0.75, 0.65)] {
+            let dx = (nx - zx) * w;
+            let dy = (ny - zy) * h;
+            let want = ((dx * px + dy * py) / den).clamp(0.0, 1.0);
+            let got = mask_weight_in(&g, nx, ny, None, None, (w, h));
+            assert!((got - want).abs() < 1e-6, "({nx},{ny}): got {got}, want {want}");
+            let normalized = mask_weight(&g, nx, ny, None);
+            assert!((got - normalized).abs() > 1e-3, "({nx},{ny}) did not expose aspect skew");
+        }
+    }
+
+    #[test]
+    fn axis_aligned_linear_coverage_is_byte_stable() {
+        let (w, h) = (13u32, 9u32);
+        let g = MaskGeometry::Linear {
+            zero_x: 0.4,
+            zero_y: 0.1,
+            full_x: 0.4,
+            full_y: 0.9,
+        };
+        let m = LocalAdjustment { mask: g.clone(), ..Default::default() };
+        let reference = DynamicImage::ImageRgb8(RgbImage::from_pixel(w, h, image::Rgb([120, 120, 120])));
+        let got = mask_coverage(&m, &reference, MaskFrame::AsRendered);
+        let mut want = image::GrayImage::new(w, h);
+        for (x, y, px) in want.enumerate_pixels_mut() {
+            let weight = mask_weight(
+                &g,
+                (x as f32 + MASK_SAMPLE_CENTRE) / w as f32,
+                (y as f32 + MASK_SAMPLE_CENTRE) / h as f32,
+                None,
+            );
+            *px = image::Luma([(weight * 255.0).round() as u8]);
+        }
+        assert_eq!(got.as_raw(), want.as_raw(), "axis-aligned coverage changed byte-for-byte");
+    }
+
+    #[test]
+    fn gui_coverage_overlay_matches_an_angled_linear_render_weight() {
+        let (w, h) = (96u32, 64u32);
+        let base = DynamicImage::ImageRgb8(RgbImage::from_pixel(w, h, image::Rgb([255, 255, 255])));
+        let adj = LocalAdjustment {
+            mask: MaskGeometry::Linear {
+                zero_x: 0.08,
+                zero_y: 0.15,
+                full_x: 0.92,
+                full_y: 0.85,
+            },
+            exposure_ev: -4.0,
+            ..Default::default()
+        };
+        let recipe = EditRecipe { masks: vec![adj.clone()], ..Default::default() };
+        let coverage = mask_coverage(&adj, &base, MaskFrame::AsRendered);
+        let rendered = develop_preview_framed(&base, &recipe, &crate::diag::pixels(), MaskFrame::AsRendered).to_rgb8();
+        let (mut claimed, mut agreed, mut clear, mut clean) = (0u32, 0u32, 0u32, 0u32);
+        for (x, y, p) in coverage.enumerate_pixels() {
+            let lit = rendered.get_pixel(x, y).0[1];
+            if p[0] > 200 {
+                claimed += 1;
+                if lit < 160 {
+                    agreed += 1;
+                }
+            } else if p[0] < 20 {
+                clear += 1;
+                if lit > 200 {
+                    clean += 1;
+                }
+            }
+        }
+        assert!(claimed > 500 && clear > 200, "premise: {claimed} covered / {clear} clear px");
+        assert!(agreed * 100 >= claimed * 97, "angled overlay coverage disagrees: {agreed}/{claimed}");
+        assert!(clean * 100 >= clear * 97, "angled overlay shows a clean pixel as covered: {clean}/{clear}");
     }
 
     #[test]
