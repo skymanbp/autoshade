@@ -1,0 +1,5 @@
+# CodeEraser exemptions — human-adjudicated (user ruling 2026-08-23).
+# docs/ROADMAP-archive.md is the append-forever history ledger split out
+# of docs/ROADMAP.md; verbatim archival entries are exempt from the
+# 750-line hard budget by design.
+docs/ROADMAP-archive.md
