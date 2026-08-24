@@ -6,9 +6,10 @@ ACR/Lightroom "Denoise". Uses SCUNet (cszn/SCUNet) `color_real` weights — a
 Swin-Conv-UNet trained on a *practical* (real sensor) degradation model, so it
 targets the noise you actually get from a camera, not synthetic Gaussian.
 
-The Rust engine (src/render.rs) hands us a developed/linear RGB image as a
-16-bit PNG or TIFF; we denoise the pixels and write the result back at the same
-bit depth. The AI never decides *edits* here — it only cleans noise; the rest of
+The Rust engine (src/render.rs) hands us full-resolution developed sRGB-gamma
+RGB, encoded through the temporary 16-bit PNG/TIFF bridge; we denoise the pixels
+and write the result back at the same bit depth. The AI never decides *edits*
+here — it only cleans noise; the rest of
 the develop pipeline (tone/colour/sharpen) runs in Rust afterward.
 
 Design choices (all verified in this environment 2026-06-26):

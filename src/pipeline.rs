@@ -2763,9 +2763,11 @@ pub fn xmp_target(raw: &Path) -> PathBuf {
     crate::store::xmp_target(raw)
 }
 
-/// Guarantee the read-only library: refuse to write `out` if it lands inside the
-/// source RAW's own folder (or below it). Outputs belong in ./out (exports) or
-/// the central develop store (sidecars).
+/// By default, Autoshop keeps the source library read-only. If the configured
+/// Delivery folder is inside or above a photo’s folder, that delivery subtree is
+/// intentionally writable; Settings warns when this removes the folder’s
+/// protection. “Export .xmp beside the photo” is the separate, confirmed
+/// per-photo sidecar exception.
 ///
 /// The PROJECT's ./out and the per-user store root are always writable, even
 /// when the source itself lives there (e.g. `match` fitting a look onto a

@@ -12,13 +12,15 @@ body:
         1. **The disclosure lines.** Autoshop names its own degradations out
            loud rather than hiding them. Pasting those lines is often half the
            answer — there is a field for them below.
-        2. **The `recipe.json`.** Every edit is a small readable JSON of slider
-           values. It reproduces the render exactly, and it carries no pixels.
+        2. **The `recipe.json`.** The recipe reproduces parameter-only renders
+           exactly when paired with the same source photo. Bitmap/AI-mask renders
+           also require the referenced mask raster files; attach or preserve those
+           separately after removing sensitive path components.
 
         If what you hit is already written down as a known limit —
-        [Honest scope](https://github.com/skymanbp/autoshop#honest-scope),
-        [the honesty model](https://github.com/skymanbp/autoshop#the-honesty-model-is-a-feature),
-        [X-Trans](https://github.com/skymanbp/autoshop#x-trans-restated) — an
+        [privacy and trust](https://github.com/skymanbp/autoshop#privacy-trust-and-paid-feature-boundary),
+        [status and roadmap](https://github.com/skymanbp/autoshop#status-and-roadmap),
+        [supported formats](https://github.com/skymanbp/autoshop#supported-formats) — an
         issue is still welcome if the *documented* behaviour is wrong or the
         wording misleads. Say which line you are reading against.
 
@@ -52,7 +54,7 @@ body:
         develop window moving by (32, 20) px at v0.32.0, and the white-balance
         gains when the blackbody curve was repaired. Knowing which side of those
         you are on matters; they are all listed under
-        [Honest scope](https://github.com/skymanbp/autoshop#honest-scope).
+        [privacy and trust](https://github.com/skymanbp/autoshop#privacy-trust-and-paid-feature-boundary).
       placeholder: "v0.31.2 — or: built from main at abc1234"
 
   - type: dropdown
@@ -134,9 +136,8 @@ body:
         - **Local web UI** — the same sentence in the reply text.
         - **The save side** — what the written `.xmp` could not carry, and why.
 
-        Lines such as `brush mask(s) carried, not yet rendered - the measured
-        kernel has no closed form and the mask lives in a pre-lens-correction
-        frame`, `AI mask(s) re-derived by the local segmenter - not Adobe's own
+        Lines such as `brush mask(s) drawn from Autoshop's measured model of
+        Lightroom's brush - not Adobe's own rasteriser`, `AI mask(s) re-derived by the local segmenter - not Adobe's own
         raster`, `radial rotation(s) read as 0`, `local point curve(s)
         unreadable`, `unmodelled local slider(s)` or the X-Trans note are
         **expected behaviour, disclosed on purpose** — and they very often
@@ -146,7 +147,7 @@ body:
         real data point: it means the engine believes it rendered your edit
         whole, which narrows the bug considerably.
       placeholder: |
-        ⚠ imported 12 Lightroom mask(s); 2 brush mask(s) carried, not yet rendered - the measured kernel has no closed form and the mask lives in a pre-lens-correction frame (Sky brush, Skin brush); 1 radial rotation(s) read as 0 (Lift porch) — the sidecar itself is not modified
+        ⚠ imported 12 Lightroom mask(s); 2 brush mask(s) drawn from Autoshop's measured model of Lightroom's brush - not Adobe's own rasteriser (Sky brush, Skin brush); 1 radial rotation(s) read as 0 (Lift porch) — the sidecar itself is not modified
     validations:
       required: true
 

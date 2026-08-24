@@ -332,10 +332,7 @@ configured provider. The verifier receives recipe, EXIF, histogram, clipping,
 and rationale data—not pixels—and Responses request bodies set `store:false`.
 The local web UI binds to loopback only, checks Host/Origin and cross-site
 requests, requires a fresh per-run session token for state changes, disables API
-caching, and denies framing. The source library remains read-only: recipes,
-XMP, versions, and masks live in the per-user store and rendered exports go to
-an output destination. The confirmed **Export .xmp beside the photo** action is
-the deliberate, per-photo exception.
+caching, and denies framing. By default, Autoshop keeps the source library read-only. If the configured Delivery folder is inside or above a photo’s folder, that delivery subtree is intentionally writable; Settings warns when this removes the folder’s protection. “Export .xmp beside the photo” is the separate, confirmed per-photo sidecar exception.
 
 ## Showcase Part A — AI analysis and style transfer
 
@@ -363,7 +360,8 @@ of these three older pairs.
 
 The proposal protected white brick while opening the porch and black wall. Its
 model judge moved from 84 to 86 after a bounded revision. Honest blemish: the
-linear sky mask leaves a faint lighter band near the top-left corner.
+linear sky mask leaves a faint lighter band near the top-left corner. These are
+model-judge scores recorded when the pair was produced (v0.33.0 showcase batch).
 
 #### `_DSC9711`: detail and texture
 
@@ -375,8 +373,10 @@ linear sky mask leaves a faint lighter band near the top-left corner.
 </table>
 
 The siding and shaded structure gain separation; the model judge moved from 78
-to 84. This pair is deliberately kept as a counter-example: the sky is paler
-than the neutral base even though the local mask asks for more sky depth.
+to 84. These are model-judge scores recorded when the pair was produced
+(v0.33.0 showcase batch). This pair is deliberately kept as a counter-example:
+the sky is paler than the neutral base even though the local mask asks for more
+sky depth.
 
 #### `_DSC9712`: establishing scene
 
@@ -388,9 +388,10 @@ than the neutral base even though the local mask asks for more sky depth.
 </table>
 
 Automated visual model review rejected the first acidic-green proposal at 63
-and retained a revision scored 87. The landscape gains separation, but the sky is again
-paler and milkier than the neutral conversion; that known behavior is not
-captioned as an improvement.
+and retained a revision scored 87. These are model-judge scores recorded when
+the pair was produced (v0.33.0 showcase batch). The landscape gains separation,
+but the sky is again paler and milkier than the neutral conversion; that known
+behavior is not captioned as an improvement.
 
 ### Style read: neutral, AI develop, and AI develop with references
 
@@ -588,6 +589,8 @@ recipes remain readable. v1.0.0 recipes can carry the new
 `LensProfile.mask_warp_center` and `LensProfile.linear_handle_warp` frame facts;
 older binaries cannot safely ignore those fields and therefore refuse recipes
 that contain them.
+
+Existing content that may rerender includes angled LINEAR masks on non-square frames, RADIAL/LINEAR masks with camera-metadata lens profiles, modern table-backed Lightroom brushes, and subtype-0 object masks with gesture points. RADIAL closes 41/41 measured vectors to ≤1 px; clean dilation is within 0.35 pp, R1 about 0.5 pp, with an open R2 excess of about 1.2 pp. LINEAR remains not pixel-closed: ON RMS 9.748/7.025/6.336 px and OFF RMS 12.449/9.943/4.979 px.
 
 See [docs/ROADMAP.md](docs/ROADMAP.md) for planned work and
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for subsystem boundaries and

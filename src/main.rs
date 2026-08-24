@@ -13,7 +13,7 @@ use clap::{Parser, Subcommand};
 use image::GenericImageView;
 
 // The engine modules now live in the `autoshop` library crate (src/lib.rs),
-// shared with the native GUI binary (src/bin/gui.rs).
+// shared with the native GUI binary (src/bin/gui/main.rs and its module tree).
 use autoshop::{decode, denoise, eval, fit, generative, pipeline, render, retouch, serve};
 use autoshop::advisor::Verdict;
 use autoshop::config::Config;
@@ -38,10 +38,13 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Decode a RAW: extract its embedded preview, EXIF, and histogram.
-    /// Reads the RAW only; writes the preview to ./out (never beside the source).
+    /// Decode a supported RAW or baked image and print metadata and histogram.
+    /// RAW inputs use their embedded preview; baked inputs use the image pixels.
+    /// Embedded-XMP reporting applies to RAW inputs only.
+    /// Writes the preview to ./out (never beside the source).
     Decode {
-        /// Path to the RAW file (e.g. .ARW, .DNG).
+        /// Path to a supported RAW or baked image.
+        #[arg(value_name = "SOURCE")]
         raw: PathBuf,
         /// Preview output path (default: ./out/<stem>.preview.jpg).
         #[arg(short, long)]
@@ -343,7 +346,7 @@ enum Command {
     },
     /// Start the local web UI (open the printed URL in a browser).
     Serve {
-        /// Photo library folder to browse (scanned recursively for .ARW).
+        /// Photo folder to browse, scanned recursively for the shared 24 RAW and 8 baked extensions.
         dir: PathBuf,
         /// Port to listen on.
         #[arg(short, long, default_value_t = 8080)]
@@ -464,7 +467,7 @@ fn decode_cmd(raw: &Path, out: Option<PathBuf>) -> Result<()> {
 
     let m = &decoded.meta;
     let dash = || "-".to_string();
-    println!("RAW: {}", raw.display());
+    println!("source: {}", raw.display());
     println!("  camera : {} {}", m.make, m.model);
     println!("  lens   : {}", m.lens.as_deref().unwrap_or("-"));
     println!(

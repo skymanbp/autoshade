@@ -329,8 +329,9 @@
   （gui/util.rs），否则旧缓存继续端出歪图。
 - `develop_preview`（render.rs）跑 `apply_recipe_wb` + `apply_develop`；
   **不应用裁剪**（GUI 用 uv 窗显示、导出端真裁）。**几何链**由 GUI `redevelop`
-  在 develop_preview 之后依次调引擎 `apply_lens_distortion`（C2 畸变）→
-  `rotate_straighten`（拉直）完成（导出路径同函数、同顺序）。
+  在 develop_preview 之后依次调引擎 `geometry_profile` → `apply_lens_geometry`
+  (camera/LCP/CA plus manual fallback) → `rotate_straighten`（拉直）完成（导出路径
+  同函数、同顺序）。
 - **坐标帧代 `EditRecipe.coord_era`（v0.30.0 新字段）**：0 = v0.29.x 及以前写的
   配方，其 crop/masks 存在**传感器帧**（1 = EXIF 显示帧）。载入时由
   `pipeline::migrate_recipe_coord_frame` 一次性纯旋转双射迁移（`render::
@@ -347,9 +348,10 @@
   （旋转+内接裁剪）→ view；`recipe.crop` 存 view 空间；masks/画笔/吸管/
   region 存 original 空间——gui/util.rs `view_norm_to_orig /
   orig_norm_to_view / geom_to_view`（三者带 `dist` 参数，来源 `geom_ctx`）
-  在数据边界换算，共用引擎 `inscribed_dims / distort_norm /
-  undistort_norm`，全零恒等。完整合约见 render.rs "Manual lens
-  distortion" 注释块。
+  在数据边界换算，共用引擎 `view_to_original_norm` / `original_to_view_norm`，
+  backed by `lens_geom_norm` / `lens_ungeom_norm`; the manual-only fallback
+  remains `distort_norm` / `undistort_norm`，全零恒等。完整合约见 render.rs
+  "Manual lens distortion" 注释块。
 - tone 模型单一事实来源：`render::TONE_KNOTS_X / tone_slider_basis /
   tone_exposure_curve`（pub(crate)，fit.rs 逆着它解）；曲线采样单一事实来源
   `render::curve_lut`（pub，GUI 曲线编辑器直接画它）。
@@ -411,7 +413,7 @@
 2. 密钥扫描（`sk-[A-Za-z0-9]{20,}|OPENAI_API_KEY=|ANTHROPIC_API_KEY=`）后
    提交（结尾 `Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>`），
    用户说 push 才推、说发布才发 release。
-3. 攒够一批（如 ①②③）可提议发 v0.3.0。
+3. When a release-sized batch accumulates, propose the next SemVer version appropriate to its compatibility boundary; never hard-code an already-released version here.
 
 ## v1.0.0 发版义务清单（终稿，W4 汇编）
 

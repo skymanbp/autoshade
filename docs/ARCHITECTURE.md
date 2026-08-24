@@ -69,9 +69,9 @@
 > describe exactly what the user sees (pinned to 1e-6 by a unit test)).
 > The full decode →
 > advise → verify → render
-> pipeline ships across TWO front-ends — a native desktop GUI (`autoshop-gui`,
-> egui/eframe, which links this library in-process) and the local web UI
-> (`serve`) — plus the CLI, AI denoise (SCUNet sidecar), the PNG/TIFF
+> pipeline ships across three front ends — a native desktop GUI (`autoshop-gui`,
+> egui/eframe, which links this library in-process), the local web UI (`serve`),
+> and the CLI — plus AI denoise (SCUNet sidecar), the PNG/TIFF
 > baked-source mode, style retrieval, XMP sidecars (global + local masks),
 > experimental generative edits, an optional pixel-**heal** retouch mode (§4.7)
 > the deterministic look **reverse-fit** (§4.8) and the local server's refusal

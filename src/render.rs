@@ -3751,12 +3751,11 @@ fn mask_weight(g: &MaskGeometry, nx: f32, ny: f32, bmp: Option<&image::GrayImage
         // and `the_engine_evaluates_masks_before_the_geometry_stage` for the
         // pin. Applying a warp here would apply the field TWICE.
         //
-        // That is why `is_lr_post_correction_geometry` excludes this arm while
-        // the SAME batch wired the radial and linear ones: the two shapes are
-        // stored in different frames, so they need different amounts of
-        // nothing-and-something, and the split is decided in that one predicate
-        // (`only_lightrooms_post_correction_shapes_are_frame_adapted` pins it,
-        // brush included).
+        // Production routing is the explicit `mask_weight_in` match over
+        // `MaskFrame`: the RADIAL arm uses `MaskUnwarp::at`, the LINEAR arm uses
+        // `MaskUnwarp::engine_at`, and this brush arm stays on its stored point.
+        // `is_lr_post_correction_geometry` is retained only as a historical
+        // classification assertion in tests.
         //
         // The two group-level fields are spelled out rather than swept into
         // `..`, the same discipline `Radial` follows, so a field added to the
@@ -11688,8 +11687,9 @@ mod tests {
     /// asserted to be an order larger than the tolerance — so a passing test
     /// cannot be a test of nothing.
     ///
-    /// MUTATION THIS KILLS: dropping the `unwarp` from `mask_weight_in`, or
-    /// widening `is_lr_post_correction_geometry` to exclude `Radial`.
+    /// MUTATION THIS KILLS: dropping or retargeting the explicit RADIAL/LINEAR
+    /// arms in `mask_weight_in` so RADIAL no longer uses `MaskUnwarp::at` or
+    /// LINEAR no longer uses `MaskUnwarp::engine_at`.
     #[test]
     fn a_parametric_mask_lands_on_its_stored_coordinates_under_lens_geometry() {
         let (w, h) = (960u32, 640u32);

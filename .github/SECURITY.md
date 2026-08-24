@@ -21,8 +21,9 @@ exact steps. A proof of concept is welcome and never required.
 
 ## Scope
 
-Autoshop runs on your machine and reads your library read-only, so the parts
-with a real attacker are the ones that take input from somewhere else: the
+By default, Autoshop keeps the source library read-only. If the configured Delivery folder is inside or above a photo’s folder, that delivery subtree is intentionally writable; Settings warns when this removes the folder’s protection. “Export .xmp beside the photo” is the separate, confirmed per-photo sidecar exception.
+
+The parts with a real attacker are the ones that take input from somewhere else: the
 **local web server** (`serve`), the **settings and key-resolution rules**, the
 **child processes** (the `claude` verifier and the Python sidecars), and the
 **third-party decoders** that parse untrusted RAW files. Both threat models are

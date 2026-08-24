@@ -180,8 +180,8 @@ fn local_fmt(v: f32) -> String {
 /// rejects moving RADIAL with the pixel field blindly: pixels move +87.5 px at
 /// r≈3250 while the mask similarity is 0.99956.
 ///
-/// These are deliberate RENDER-BEHAVIOUR changes in the unreleased v1.0.0
-/// window. See the mask-warp block header in `render.rs` for the frame table,
+/// These are deliberate RENDER-BEHAVIOUR changes introduced for the v1.0.0
+/// release. See the mask-warp block header in `render.rs` for the frame table,
 /// measured magnitudes and regression pins.
 /// Nothing about it reaches this constant, which is the point.
 const LR_MASK_FRAME_SCALE: f64 = 1.0;
