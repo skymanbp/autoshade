@@ -14,15 +14,14 @@ Then open `http://localhost:8000/`. This command is only a local preview; the pr
 
 ## Cloudflare Pages deployment
 
-Deployment is intentionally a separate supervisor step. From the repository root:
+Deployment is a manual step (there is no GitHub integration; pushing `main` does not publish). From the repository root:
 
-1. Provide `CLOUDFLARE_API_TOKEN` through the deployment environment.
-2. Publish the directory:
+```text
+node scripts/deploy_site.js
+```
 
-   ```text
-   wrangler pages deploy site --project-name autoshop
-   ```
+The script reads the master token from the git-ignored `.secret` file, mints a one-hour token scoped to Cloudflare Pages, runs `wrangler pages deploy site --project-name autoshop`, and deletes the temporary token afterwards. No token value is printed or written anywhere. The production alias is `autoshop-d7w.pages.dev`; each deployment also gets its own preview URL. After deploying, verify every published file byte-for-byte against `site/` before calling it live.
 
-3. In the Cloudflare dashboard, open the `autoshop` Pages project, choose **Custom domains**, and add `skymanbp-autoshop.dev`. Follow the dashboard's ownership and DNS prompts.
+To attach `skymanbp-autoshop.dev`, open the `autoshop` Pages project in the Cloudflare dashboard, choose **Custom domains**, and follow the ownership and DNS prompts (the zone must exist in the same account).
 
 Do not store deployment credentials in this directory or commit them to the repository.
