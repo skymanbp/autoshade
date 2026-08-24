@@ -1,19 +1,16 @@
 # Autoshop — Architecture
 
-> Status: **implemented** (v0.35.0 — R29, the round that turned measurements
-> into renders: Lightroom's **brush masks are drawn**, not just carried; the
-> radial falloff is a measured 290 × 11 table instead of a fourth refuted
-> closed form; negative `Texture` is re-shaped onto 45 Lightroom anchors; the
-> `.lcp` reader lands and with it a per-mask-TYPE frame decision (a new
-> `LensProfile` recipe block, and a **hard forward break** at this boundary);
-> every mask family samples at pixel CENTRES; and subject segmentation runs a
-> commit-pinned BiRefNet with a NAMED U²-Net fallback — atop R28's five
-> batches: the X-Trans colour cast
-> root-fixed by an in-tree CFA-geometry demosaic, every store read capped
-> classwide, AI-mask frame identity in the cache key, per-file 4 GiB memory
-> ceilings on BOTH develop doors, and typed XMP read scopes — atop R27's ten
-> batches: the input path stopped
-> being one camera. **24 RAW extensions + 8 baked formats**
+> Status: **implemented** (v1.0.0 — the first major). Since v0.35.0, R30 adds
+> guarded modern `MaskBrushTable` import, gesture-aware SAM point prompts with
+> a scoped cache re-key, and stronger eval/error disclosures. D1 changes angled
+> LINEAR masks to the pixel/aspect metric (`ecb6505`). D2 establishes the
+> `(i+1)/16` camera-knot law, the Lightroom radial centre and exact-once
+> transport (`706ac84`), then splits LINEAR onto the measured H2
+> handle-transport topology (`ad6de62`); the two new persisted frame facts are
+> deliberate forward schema breaks. This is atop R29's measured radial
+> falloff, negative Texture, `.lcp` reader, pixel-centre mask sampling and
+> BiRefNet subject path, plus R28/R27's input and safety work. The accepted
+> input set remains **24 RAW extensions + 8 baked formats**
 > (`decode::RAW_EXTS` / `pipeline::BAKED_EXTS`, one predicate app-wide), with
 > nine cameras — one per format — run end to end from CC0 sample files.
 > `batch` and `eval` gained **memory-budgeted `--jobs N` parallelism**
@@ -79,9 +76,9 @@
 > experimental generative edits, an optional pixel-**heal** retouch mode (§4.7)
 > the deterministic look **reverse-fit** (§4.8) and the local server's refusal
 > model (§4.9).
-> 816 library + 14 CLI + 132 GUI + 2+2 contract tests pass in both build
-> configurations, with 9 further library tests `#[ignore]`d as forensic probes
-> (counts refreshed 2026-08-21 from the v0.35.0 release battery). THREE suites are ADDITIONAL and
+> 871 library + 14 CLI + 132 GUI + 2+2 contract tests are enumerated in the GUI
+> build; the library result is 862 pass + 9 `#[ignore]`d forensic probes
+> (counts refreshed 2026-08-24 for the v1.0.0 release battery). THREE suites are ADDITIONAL and
 > env-gated, so a bare `cargo test` does not include them:
 > `AUTOSHOP_LR_PROBE_FIXTURES` (16 real Lightroom radial sidecars, byte
 > round-trip), `AUTOSHOP_MB_FIXTURES` (the 7-file M-B forensic set — 42 of its
@@ -1326,26 +1323,44 @@ experiment:
   construction, so the real-sidecar suites pass unchanged; what moves is the
   RENDER — an imported radial is no longer dilated 3.2 %, and the residual on
   any frame is that frame's own Adobe warp (0–3.4 % observed).
-* **The mask frame is a per-mask-TYPE decision, and the warp is now solved
-  rather than registered — R29 Batch-3, v0.35.0.** The `.lcp` reader landed
-  ([`src/lcp.rs`](../src/lcp.rs), both XML spellings, a Newton inverse with
-  fold detection), `xmp::lens_profile_enabled` reads `crs:LensProfileEnable`,
-  and the recipe carries the result in a new `LensProfile` block whose
-  `MaskWarpSource` names which of seven states produced it (an in-camera knot
-  set, a solved `.lcp`, or an honest none). What the measurement settled is
-  that Lightroom does not put every mask in one frame: a BRUSH is rasterised in
-  the pre-correction frame — which is where this engine already evaluates masks,
-  before `apply_lens_geometry`, so a dab stream needs no warp at all — while a
-  RADIAL or LINEAR is placed in the corrected frame, and reading one in the
-  other put the radial arm out by up to 186 px on the probe frames. So the
-  parametric shapes take `MaskUnwarp` (the exact inverse of the resampler, via
-  `lens_ungeom_norm` — not a second solver) and the dab streams take the
-  identity, pinned by `only_lightrooms_post_correction_shapes_are_frame_adapted`.
-  Landing residual on the probe frames: 0.09–0.30 px, against 8–24 px unwired.
-  ⚠ Two consequences ride the version boundary: `LensProfile` is a **hard
-  forward break** (a pre-v0.35.0 binary cannot parse a recipe carrying it), and
-  a geometry-active radial or linear now RENDERS at the stored coordinates it
-  always claimed to.
+* **The mask frame is a per-mask-TYPE and per-topology decision — R29 Batch-3,
+  D2 `706ac84`, and D2 LINEAR `ad6de62`.** The `.lcp` reader
+  ([`src/lcp.rs`](../src/lcp.rs)) and camera metadata solve the Lightroom map;
+  `MaskWarpSource` names which of seven provenance/refusal states applies.
+  Sony's 16 private distortion samples are interpreted on their measured native
+  radii `(i+1)/16`, resampled to 2048 canonical nodes for the mask solve, and
+  emitted as a 64-knot `mask_warp`. Camera-metadata profiles also persist
+  `mask_warp_center = raw_full_dims/2 − DefaultCropOrigin`, rather than assuming
+  the stored-frame centre. The ordinary render spline keeps its established
+  calibration because the image-registration gate rejected changing it.
+
+  The resulting frame table is exact about topology:
+
+  | Mask | Downstream geometry | Frame operation |
+  |---|---|---|
+  | Brush / bitmap / AI | either | identity |
+  | RADIAL | active | sample through `m_lr⁻¹ ∘ T_engine` exactly once |
+  | RADIAL | inactive | identity at stored coordinates |
+  | LINEAR | active | sample at `T_engine(p)` only; rebuild the straight line in the corrected frame |
+  | LINEAR | inactive | map Zero/Full once through `D_fwd`; rebuild one straight line in the raw pixel metric |
+
+  `MaskFrame` makes the caller's downstream fact explicit with three states:
+  `WarpedDownstream`, `LinearHandlesToRaw`, and `AsRendered`. The disabled-
+  sidecar case keeps RADIAL identity in `mask_warp` while retaining LINEAR's
+  handle map separately in `linear_handle_warp`; every other solved state uses
+  `mask_warp` as the handle source. Pixel loops never call the handle map.
+
+  Radial transport closes all 41 measured point vectors to ≤1 px (wall 20/20
+  RMS 0.568 px; second set 21/21 RMS 0.243 px). Clean dilation is ≤0.35 pp and
+  R1 is about 0.5 pp; the R2 big-mask excess remains open at about 1.2 pp.
+  LINEAR H2 is intentionally not described as 1 px-closed: ON residuals are
+  9.748/7.025/6.336 px RMS and OFF residuals are 12.449/9.943/4.979 px RMS.
+  A fitted anisotropic-aspect candidate is diagnostic only and is not shipped.
+
+  ⚠ `mask_warp_center` and `linear_handle_warp` are two deliberate v1.0.0
+  **hard forward schema breaks** inside `LensProfile`: older `deny_unknown_fields`
+  readers refuse a recipe carrying either fact instead of silently dropping a
+  coordinate map. Old recipes default both fields and remain readable.
 * **A mask is sampled at PIXEL CENTRES — R29 C2, v0.35.0.** `render::
   MASK_SAMPLE_CENTRE` is the one constant behind five sites that must agree
   (`apply_masks`' frame producer, `mask_coverage`'s overlay, `sample_gray_norm`'s

@@ -8,7 +8,7 @@
 An AI decides *what to change*. A deterministic Rust engine *does* it.
 **In the recipe-development path, the AI never touches a pixel.**
 
-[Download v0.35.0](https://github.com/skymanbp/autoshop/releases/tag/v0.35.0) ·
+[Download v1.0.0](https://github.com/skymanbp/autoshop/releases/tag/v1.0.0) ·
 [Architecture](docs/ARCHITECTURE.md) ·
 [Roadmap](docs/ROADMAP.md) ·
 [MIT](LICENSE)
@@ -66,17 +66,21 @@ the UI distinguishes generated pixels from engine-rendered develops.
 
 ### Download a release
 
-The v0.35.0 release provides both Windows front ends. Linux and macOS are built
-and tested in CI, but no prebuilt binaries are published for them yet.
+The v1.0.0 release will provide both Windows front ends. Linux and macOS are
+built and tested in CI, but no prebuilt binaries are published for them yet.
+v1.0.0 is being prepared; until W5 builds and publishes the artifacts,
+v0.35.0 remains the latest published release. The size and checksum fields in
+both rows below are deliberately deferred rather than copied from the previous
+release.
 
 | File | Size | SHA-256 |
 |---|---:|---|
-| `autoshop.exe` (CLI) | 31,063,300 B | `e48f6bbc9a6e9bf4aa98b01240eb6d733136d68320b6e79312d9b239bddfa6c6` |
-| `autoshop-gui.exe` (desktop app) | 40,706,348 B | `b58b7be4b5e83b3f70e33b8023aba3bcfb985a1762d6eed7e39ef1deafb9a492` |
+| `autoshop.exe` (CLI) | *Deferred to the W5 release build* | *Deferred to W5* |
+| `autoshop-gui.exe` (desktop app) | *Deferred to the W5 release build* | *Deferred to W5* |
 
-Download the archive from [Releases](https://github.com/skymanbp/autoshop/releases/tag/v0.35.0),
-extract it, and keep the executable beside the bundled assets and Python
-sidecars.
+After W5 publishes it, download the archive from the
+[v1.0.0 release page](https://github.com/skymanbp/autoshop/releases/tag/v1.0.0),
+extract it, and keep the executable beside the bundled assets and Python sidecars.
 
 ### Build from source
 
@@ -209,7 +213,7 @@ master and a web copy.
 
 ### CLI reference
 
-The following commands and flags match the v0.35.0 command definitions in
+The following commands and flags match the v1.0.0 command definitions in
 `src/main.rs`:
 
 ```text
@@ -523,17 +527,22 @@ silent reuse.
 
 ### Lens correction and mask-coordinate transport
 
-`src/lensmeta.rs` reads camera metadata corrections, including Sony tag 0x7037
-distortion as a 16-sample piecewise-linear spline; the related camera knots are
-applied during render. `src/lcp.rs` reads Adobe `.lcp` perspective polynomials
-and solves their inverse for Lightroom mask-coordinate transport when camera
-knots are unavailable, while refusing unsupported fisheye profiles.
+`src/lensmeta.rs` reads camera metadata corrections. For Lightroom mask
+transport, Sony tag 0x7037's 16 native samples use the measured `(i+1)/16`
+radius law and are resampled onto a dense canonical spline; the ordinary image
+render keeps its independently calibrated knot convention. `src/lcp.rs` reads
+Adobe `.lcp` perspective polynomials and solves their inverse when camera knots
+are unavailable, while refusing unsupported fisheye profiles.
 
-Measurements against real Lightroom exports showed that brush masks are
-rasterized before lens correction while radial masks are interpreted after it.
-`src/render.rs` and `src/xmp.rs` therefore transport mask coordinates through
-the engine's inverse geometry model instead of treating every mask as if it
-lived in one frame; the measured probe lands within 0.3 px.
+Mask frames are type-specific. Brushes and bitmap/AI masks stay in the raw
+frame. A radial mask with downstream lens geometry uses the exact-once
+`m_lr^-1 ∘ T_engine` sampler; without downstream geometry it stays at stored
+coordinates. A linear mask keeps a straight gradient: with correction on it is
+sampled in the corrected frame, while with correction off its Zero/Full handles
+are transported once through the forward camera map and the line is rebuilt in
+the raw pixel metric. Radial point transport closes all 41 measured vectors to
+≤1 px. LINEAR is deliberately disclosed as not 1 px-closed: ON residuals are
+9.748/7.025/6.336 px RMS and OFF residuals are 12.449/9.943/4.979 px RMS.
 
 ### Lightroom sidecar round-trip
 
@@ -570,7 +579,7 @@ for `serve`. The embedded web UI is compiled with `include_str!`, so it has no
 runtime CDN or frontend build step.
 
 The [`build` workflow](.github/workflows/build.yml) builds and tests the default
-and GUI feature sets on Ubuntu and macOS. The current battery is **857 library (9 `#[ignore]`d forensic probes) / 14 CLI / 132 GUI / 2+2 contract** tests, and both default and GUI Clippy runs are clean. The
+and GUI feature sets on Ubuntu and macOS. The current battery is **871 library (862 pass + 9 `#[ignore]`d forensic probes) / 14 CLI / 132 GUI / 2+2 contract** tests, and the GUI-feature Clippy run is clean. The
 [`scripts/check_docs.py`](scripts/check_docs.py) release gate re-derives pinned
 version, format, camera, dependency, toolchain, and battery claims from the
 tree.
@@ -581,16 +590,18 @@ embeddings. Model weights are not stored in this repository.
 
 ## Status and roadmap
 
-Release gates at v0.35.0 cover the CLI, desktop GUI, sidecar contracts, format
-fixtures, deterministic renderer, and documented binary hashes. Prebuilt
-artifacts are Windows-only; CI checks source builds on Ubuntu and macOS, while
-interactive use there remains less exercised.
+Release gates for v1.0.0 cover the CLI, desktop GUI, sidecar contracts, format
+fixtures, and deterministic renderer; W5 will add the built artifacts' sizes
+and hashes. Prebuilt artifacts are Windows-only; CI checks source builds on
+Ubuntu and macOS, while interactive use there remains less exercised.
 
 Current honesty markers include the approximate X-Trans path, locally
 re-derived rather than Adobe-identical AI masks, measured-but-not-bit-exact
 Lightroom rendering parity, and lossy generated reimagine targets. Older
-recipes remain readable; v0.35.0 recipes contain lens-coordinate provenance
-that older binaries cannot safely ignore and therefore refuse.
+recipes remain readable. v1.0.0 recipes can carry the new
+`LensProfile.mask_warp_center` and `LensProfile.linear_handle_warp` frame facts;
+older binaries cannot safely ignore those fields and therefore refuse recipes
+that contain them.
 
 See [docs/ROADMAP.md](docs/ROADMAP.md) for planned work and
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for subsystem boundaries and

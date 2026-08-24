@@ -195,6 +195,91 @@ def ext_count(rel: str, anchor: str) -> Callable[[argparse.Namespace], Truth]:
     return extract
 
 
+def _set_verdict(
+    got: list[str],
+    want: list[str],
+    got_source: str,
+    truth_source: str,
+) -> tuple[str, list[str]]:
+    """Compare named memberships, with duplicate detection and useful deltas."""
+    got_norm = [v.lower().lstrip(".") for v in got]
+    want_norm = [v.lower().lstrip(".") for v in want]
+    got_set, want_set = set(got_norm), set(want_norm)
+    duplicates = sorted({v for v in got_norm if got_norm.count(v) > 1})
+    missing = sorted(want_set - got_set)
+    extra = sorted(got_set - want_set)
+    if duplicates or missing or extra:
+        detail = [
+            f"        doc      {len(got_norm)} item(s) from {got_source}",
+            f"        truth    {len(want_set)} member(s) from {truth_source}",
+        ]
+        if missing:
+            detail.append("        missing  " + ", ".join(missing))
+        if extra:
+            detail.append("        extra    " + ", ".join(extra))
+        if duplicates:
+            detail.append("        duplicate " + ", ".join(duplicates))
+        return "FAIL", detail
+    return "PASS", [f"        exact {len(want_set)}-member set"]
+
+
+def check_readme_raw_ext_membership(
+    _args: argparse.Namespace,
+) -> tuple[str, list[str]]:
+    """README's fenced RAW list must name exactly `decode::RAW_EXTS`."""
+    doc = text("README.md")
+    m = re.search(
+        r"\*\*Camera RAW — \d+ extensions\*\*.*?```text\n(?P<items>.*?)\n```",
+        doc,
+        re.S,
+    )
+    if not m:
+        raise LookupError("README Camera RAW fenced list moved; re-anchor the set gate")
+    got = [v.strip() for v in m.group("items").replace("\n", " ").split(",") if v.strip()]
+    source = text("src/decode.rs")
+    want = _literals_in_const(source, "const RAW_EXTS")
+    return _set_verdict(
+        got,
+        want,
+        f"README.md:{line_of(doc, m.start('items'))}",
+        f"src/decode.rs:{line_of(source, source.find('const RAW_EXTS'))} (const RAW_EXTS)",
+    )
+
+
+def check_readme_no_preview_membership(
+    _args: argparse.Namespace,
+) -> tuple[str, list[str]]:
+    """README's no-preview names must equal decode.rs's no-rendition set."""
+    doc = text("README.md")
+    m = re.search(
+        r"\*\*No embedded\s+preview:\*\*.*?They are (?P<items>.*?); Autoshop",
+        doc,
+        re.S,
+    )
+    if not m:
+        raise LookupError("README no-preview sentence moved; re-anchor the set gate")
+    got = re.findall(r"`([A-Za-z0-9]+)`", m.group("items"))
+
+    source = text("src/decode.rs")
+    truth = re.search(
+        r"overrides none of the three\s+///\s+rendition methods for (?P<items>.*?)\s+"
+        r"\(the trait defaults",
+        source,
+        re.S,
+    )
+    if not truth:
+        raise LookupError(
+            "src/decode.rs no-rendition source comment moved; re-anchor the set gate"
+        )
+    want = re.findall(r"\b[A-Z0-9]{2,4}\b", truth.group("items"))
+    return _set_verdict(
+        got,
+        want,
+        f"README.md:{line_of(doc, m.start('items'))}",
+        f"src/decode.rs:{line_of(source, truth.start('items'))} (no-rendition set)",
+    )
+
+
 def cargo_version(_args: argparse.Namespace) -> Truth:
     src = text("Cargo.toml")
     at = src.index("[package]")
@@ -203,6 +288,24 @@ def cargo_version(_args: argparse.Namespace) -> Truth:
     if not m:
         raise LookupError("Cargo.toml: no [package] version = \"X.Y.Z\"")
     return Truth((m.group(1),), f"Cargo.toml:{line_of(src, at + m.start())}")
+
+
+def latest_published_version(args: argparse.Namespace) -> Truth:
+    """Latest already-published release during a pre-release documentation pass.
+
+    W4 deliberately prepares Cargo/docs for the next version before W5 builds
+    and publishes it. While README carries that explicit pre-release sentence,
+    the issue template must keep offering the actually published release. Once
+    W5 removes the sentence, the package version becomes the truth again.
+    """
+    src = text("README.md")
+    m = re.search(r"v(\d+\.\d+\.\d+) remains the latest published release", src)
+    if m:
+        return Truth(
+            (m.group(1),),
+            f"README.md:{line_of(src, m.start())} (pre-release publication status)",
+        )
+    return cargo_version(args)
 
 
 # ── Cargo dependency inventory (tech-stack completeness) ────────────────────
@@ -471,6 +574,25 @@ def camera_model_count(_args: argparse.Namespace) -> Truth:
     return Truth((m.group("models"),), f"src/decode.rs:{line_of(src, m.start())}")
 
 
+def readme_battery_numbers(_args: argparse.Namespace) -> Truth:
+    """All README battery numbers, reordered to match ARCHITECTURE's sentence."""
+    src = text("README.md")
+    m = re.search(
+        r"current battery is \*\*(?P<lib>\d+) library "
+        r"\((?P<passed>\d+) pass \+ (?P<ignored>\d+) `#\[ignore\]`d forensic probes\) / "
+        r"(?P<cli>\d+) CLI / (?P<gui>\d+) GUI / "
+        r"(?P<c1>\d+)\+(?P<c2>\d+) contract\*\* tests",
+        src,
+    )
+    if not m:
+        raise LookupError("README.md: current battery sentence moved; re-anchor the extractor")
+    value = tuple(
+        m.group(name)
+        for name in ("lib", "cli", "gui", "c1", "c2", "passed", "ignored")
+    )
+    return Truth(value, f"README.md:{line_of(src, m.start())} (doc-internal battery source)")
+
+
 def census_counts(_args: argparse.Namespace) -> Truth | Skip:
     """Re-derive the active XMP census when its corpus root is supplied.
 
@@ -553,6 +675,14 @@ CLAIMS: list[Claim | SetClaim] = [
     ),
     Claim(
         ARCH,
+        "battery numbers — ARCHITECTURE vs README",
+        r"(?P<lib>\d+) library \+ (?P<cli>\d+) CLI \+ (?P<gui>\d+) GUI "
+        r"\+ (?P<c1>\d+)\+(?P<c2>\d+) contract tests[\s\S]*?"
+        r"library result is (?P<passed>\d+) pass \+ (?P<ignored>\d+) `#\[ignore\]`d",
+        readme_battery_numbers,
+    ),
+    Claim(
+        ARCH,
         "RAW ext count — §4 milestone table",
         r"RAW decode \+ features \((?P<formats>\d+) formats",
         ext_count("src/decode.rs", "const RAW_EXTS"),
@@ -630,14 +760,14 @@ CLAIMS: list[Claim | SetClaim] = [
     ),
     Claim(
         ".github/ISSUE_TEMPLATE/bug_report.yml",
-        "shipped version — bug template dropdown",
+        "latest published version — bug template dropdown",
         r"- v(?P<version>\d+\.\d+\.\d+) \(latest release\)",
-        cargo_version,
+        latest_published_version,
     ),
     Claim(
         README,
         "test counts — Release gates list",
-        r"(?P<lib>\d+) library \(\d+ `#\[ignore\]`d forensic probes\) / "
+        r"(?P<lib>\d+) library \((?:\d+ pass \+ )?\d+ `#\[ignore\]`d forensic probes\) / "
         r"(?P<cli>\d+) CLI / (?P<gui>\d+) GUI / (?P<c1>\d+)\+(?P<c2>\d+) contract",
         battery_test_counts,
     ),
@@ -683,6 +813,8 @@ CLAIMS: list[Claim | SetClaim] = [
         r"Baked rasters — (?P<baked>\d+) extensions",
         ext_count("src/pipeline.rs", "const BAKED_EXTS"),
     ),
+    SetClaim(README, "RAW extension membership", check_readme_raw_ext_membership),
+    SetClaim(README, "no-preview format membership", check_readme_no_preview_membership),
     Claim(
         "src/xmp.rs",
         "active XMP census",

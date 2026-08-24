@@ -274,27 +274,29 @@
   务**：含径向/线性蒙版+相机元数据镜头档案的配方渲染全变+schema 前向
   断裂（旧 exe 拒读带 mask_warp_center 的新 recipe）。台账拆分第二批：
   轮 7a 及更早 12 条逐字迁入 docs/ROADMAP-archive.md（主文件保近五条）。
-- **🎯 D2 轮 8c 机理零参数定案：图心=全帧中心−DCO、函数=引擎反演唯一
-  改 knot 落位 (i+1)/16 ⇒ 双场景 41/41 点向量 ≤1px 零自由参数
-  （2026-08-24；主审亲跑收尾，Codex 中转两死；报告
-  `~/.claude/plans/r30-materials/d2-delta-report.md`）**。**图心第一方
-  证实**：decode.rs:1211-1213 记载 DCO(32,20)+DefaultCropSize 9504×6336
-  嵌于 **9600×6376 全帧** ⇒ 存储系图心 (4768,3168)，距自由拟合 0.4px、
-  自由重拟合不再改进=元数据图心即最优。**推导误差=raw knots 半径落位**：
-  移植引擎反演（复现 1.6e-7/2.5e-7、fill 逐位同）后 80 候选零参数格扫
-  描，(i+1)/16（末结恰在画幅角 r=1）胜出——引擎 (i+0.5)/15（末结 1.033
-  出角）同图心仅 22/41；**胜者+密化输出表（16→64+结）=wall 20/20
-  （RMS 0.568/max 0.916）+DSC 21/21（RMS 0.243/max 0.683）全闭**；
-  f(0.333) 校验 −0.01643/−0.01529 vs 提取 −0.01683/−0.01540。**尺寸律
-  =有界残差**：boundary_mean R1 双集首次 PASS（−0.492/−0.471）、
-  boundary_geo DSC 15/17，洁净格 RMS 0.13-0.17pp 但 3-4 格 0.2-0.35pp
-  超 0.18 闸；**R2 大蒙版超额 −1.0..−1.2pp=独立小机制**（同蒙版点律
-  0.3px 闭合；候选=LR 蒙版栅格化）。**修复设计输入就位**（图心元数据
-  式+knot 落位改正限 Sony CameraMetadata 源+表密化+2615-2700 整臂反推
-  义务清单在报告 §5）；零修复授权维持待拍板。**⚠中转事故**：8c 重试批
-  陷「Testing direct functions.exec call」退化循环烧 2,994,622 tokens
-  后二次 403 断供（退款证据=request id 67c9827c-…-812281405500）——两
-  拍板已上呈：①机理是否就此定案进修复批 ②中转退款/充值/模型通道。
+- **🎯 v1.0.0 程序三线落地：W6 官网上线 + Inno 安装脚本 + W4 全文彻查
+  （2026-08-24；Codex 额度见顶阵亡一次后续做重派完成）**。**W6**：`site/`
+  静态站（8b99111，零 JS/CDN/字体/分析，CSP `script-src 'none'`，含技术栈
+  section，资产与 docs/images 字节同源，主审独立验证零问题）；部署走
+  CodeEraser 同款 `scripts/deploy_site.js`（母 token 铸 1 小时 Pages Write
+  临时 token→wrangler→finally 销毁，237b8cc）；Pages 项目 `autoshop` 经
+  API 直建（wrangler create 需 memberships 权限会失败）；**已上线
+  `autoshop-d7w.pages.dev`**（首部署预览 1b4e25b2.…），25/25 发布文件与本地
+  字节一致、安全头生效；自定义域 skymanbp-autoshop.dev 待 zone 接入。教训：
+  母 token 仅 API Tokens Write、/accounts 为空是常态，勿误判「账户未启用
+  Pages」。**Inno**（183b5b0）：`installer/autoshop.iss`+`scripts/
+  build_installer.ps1`（PS5.1、每用户 x64、27 文件载荷按 config.rs 程序树解
+  析/build.rs 内嵌/README 契约核定、权重与测试排除、安全 PATH 任务、卸载留
+  develop store、输出 target/installer）；对 0.35.0 dist 实跑产出
+  19,761,632 B SHA 98ffa1a1…（主审复算同），安装包未执行。**W4**（本条
+  提交）：版本推 1.0.0、电池 871(862+9i)/14/132/2+2、README/ARCHITECTURE/
+  V2_PLAN 帧法与 schema 披露对源、`## v1.0.0 发版义务清单（终稿）` 附于本
+  文件尾、`docs/RELEASE_NOTES_v1.0.0.md` 英文草稿、check_docs 23→26 行
+  （RAW 成员/无预览成员/ARCH-README 电池一致三行，各变异红绿）+`latest_
+  published_version` 预发布桥；资产表四格与安装包行留 W5。门主审亲跑见
+  提交说明。**下步 W5**：build release→dist→`build_installer.ps1`→tag
+  v1.0.0→release（两 exe+安装包+发版说明）→回下载字节比对→README/发版
+  说明资产表→消除 W4/W5 内部术语→台账。
 ## 关键架构事实（新会话必读）
 
 > gui.rs 已于第十二轮拆为 `src/bin/gui/*` 模块树（app/actions/canvas/
@@ -405,3 +407,61 @@
    提交（结尾 `Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>`），
    用户说 push 才推、说发布才发 release。
 3. 攒够一批（如 ①②③）可提议发 v0.3.0。
+
+## v1.0.0 发版义务清单（终稿，W4 汇编）
+
+> 审计范围=`e75f728..ad6de62`，共 50 笔提交。R30 台账在 v1.0.0 总纲
+> （`2bd8167`）下达前写成的所有「v0.36.0 义务」，现统一是 **v1.0.0
+> 义务**；历史层积条目保留当时原文，本节是发版与 W5 release page 的现行
+> 唯一汇总。
+
+- **R30 B1 报告/安全行为与披露（`ef5a71a`）**：eval 的 n<20 行必须带
+  `[low n]`，新增与头条同构的 supplementary n-weighted gap；既有头条、
+  state 文件与 n≥20 行定义不变，保障跨版可比。advisor Status 错误体同样受
+  house body cap；529 文案按 provider 区分，非 Anthropic 中转的 524/529
+  重试均披露潜在双计费；`recovered` 只表示外层响应恢复。XMP census 门与
+  store 临时根孪生是发布验证/用户数据安全义务，不改像素或 recipe schema。
+- **M-C 评估解释（`2c0f6b4`、`1d00790`、`bba9de0`）**：v0.35.0 的
+  17.7% gap 不是 R29 渲染回归证据；同版本重复跑为 16.3%，1.4 pt 摆动与
+  跨版本 1.7 pt 同量级。公开材料必须把该结论与低 n 标记一起给出，不能把
+  verifier/抽样效应归因给渲染器。
+- **R30 B2 现代笔刷载体行为变更（`2cb59a5`）**：读取 sibling `.acr` 的
+  content-addressed `MaskBrushTable`，严格核验目录/MD5/信封/Brotli/载荷，
+  未观测结构走九类具名拒收；未改蒙版写回时逐字保留原表。现代 Lightroom
+  重写 sidecar 的表编码笔刷由 loud refusal 变为导入并按现有笔刷核渲染。
+  **零 recipe schema 变化**，但这是必须置顶说明的渲染行为变化。
+- **R30 B3 对象蒙版提示与缓存重键（`1e99e84`）**：subtype-0 的 gesture
+  `d` 点按原序作为 SAM 正提示，走有界 gp1 JSON prompt IPC；仅「subtype-0
+  + gesture」的 alpha cache 加 `gp1` 点列身份并一次性重算。subject、sky、
+  无 gesture 的 object 缓存与行为不变；负点、框、权重等未测语义不猜。
+- **R30 B4 训练数据/权重披露（`70832eb`）**：ADE20K 与 SA-1B 条款约束
+  数据集本身，不自动传递到本仓只下载执行的 OneFormer/SAM 权重；运行时
+  权重仍分别按 MIT/Apache-2.0 与既有 digest gate。该批是注释/许可范围真化，
+  零运行时与 schema 变化。
+- **D1 LINEAR 像素度量渲染硬变更（`ecb6505`）**：非正方帧的斜向线性
+  蒙版由归一化坐标度量改为 pixel/aspect metric，实测半等值线误差
+  874 px → 9.8 px；轴对齐与正方帧逐字节不变，径向/笔刷不受影响。
+- **D2 RADIAL/镜头帧硬变更（`706ac84`）**：Sony 0x7037 原生结半径定为
+  `(i+1)/16`，仅蒙版求解边界重采样为 2048 canonical nodes，持久表增至
+  64 knots；新增 `LensProfile.mask_warp_center = raw_full_dims/2 −
+  DefaultCropOrigin`，`MaskUnwarp` 恰一次组合 `m_lr⁻¹ ∘ T_engine`。径向
+  41/41 点向量 ≤1 px（wall 20/20 RMS 0.568 px；第二集 21/21 RMS
+  0.243 px），洁净膨胀 ≤0.35 pp、R1≈0.5 pp；**R2 大蒙版约 1.2 pp
+  超额仍开放**。普通图像渲染结约定经配准闸维持不动。含相机元数据镜头
+  档案的径向配方会重渲染；`mask_warp_center` 是第一处 v1.0.0 硬前向
+  schema 断裂。
+- **D2 LINEAR H2 硬变更（`ad6de62`）**：`MaskFrame` 三态为
+  `WarpedDownstream` / `LinearHandlesToRaw` / `AsRendered`。校正开时线性
+  蒙版只在 `T_engine(p)` 的校正帧重建直线；校正关时只把 Zero/Full 两手柄
+  一次过 `D_fwd`，再在 raw pixel metric 重建直线，像素环绝不逐点调图。
+  新增 `LensProfile.linear_handle_warp`，只在 `DisabledInSidecar` 留存
+  LINEAR 手柄图，同时 RADIAL 保持存储坐标恒等；这是第二处 v1.0.0 硬前向
+  schema 断裂。含 LINEAR+相机档案的配方在校正开/关两臂均重渲染；中间态
+  `706ac84` 从未发布。精度须原样披露为**非 1 px 闭合**：ON
+  9.748/7.025/6.336 px RMS，OFF 12.449/9.943/4.979 px RMS；拟合级
+  anisotropic-aspect 候选未出货。
+- **兼容边界**：v1.0.0 能读取旧配方（两个新字段均有默认值）；旧 exe 对
+  `LensProfile` 使用 `deny_unknown_fields`，因此会拒读携带
+  `mask_warp_center` 或 `linear_handle_warp` 的 v1.0.0 配方，而不是静默
+  丢掉坐标帧事实。W5 的 release notes、README 资产表与发布页必须同时陈述
+  这两处 schema 硬断裂、上述重渲染范围、两组精度数字和 R2 开口。

@@ -53,3 +53,4 @@ desktop.ini
 # The v1.0.0 installer formalizes the install location; dist/ stays local.
 /dist/
 .secret*
+.wrangler/
