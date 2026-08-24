@@ -6,7 +6,7 @@
 **AI-assisted automatic development of RAW photographs.**
 
 An AI decides *what to change*. A deterministic Rust engine *does* it.
-**The AI never touches a pixel.**
+**In the recipe-development path, the AI never touches a pixel.**
 
 [Download v0.35.0](https://github.com/skymanbp/autoshop/releases/tag/v0.35.0) ·
 [Architecture](docs/ARCHITECTURE.md) ·
@@ -17,428 +17,411 @@ An AI decides *what to change*. A deterministic Rust engine *does* it.
 
 ---
 
+Autoshop is a non-destructive photo developer for RAW and baked images. Its
+main workflow turns an AI proposal into a small, inspectable `EditRecipe`, then
+applies that recipe with the same local Rust renderer used by the desktop app,
+CLI, and embedded web UI. Generative tools are separate, opt-in paths and are
+labelled as such.
+
+<p align="center">
+<img src="docs/images/showcase-cat-analyze-pair.jpg" alt="Sony α7R IVA ARW: neutral cat photo beside its AI analyze develop" />
+<br />
+<sub><b>AI analyze develop.</b> Sony α7R IVA <code>.ARW</code>, 61 MP: neutral engine conversion at left; AI-proposed crop, global tone, a radial cat lift, and a linear water hold at right. The model judge moved from 62 to 86; that score is automated review, not human aesthetic approval.</sub>
+</p>
+
 ## Contents
 
-[What it is](#what-it-is) ·
-[See it work](#see-it-work) ·
-[Quick start](#quick-start) ·
-[Feature tour](#feature-tour) ·
-[Formats](#input-formats) ·
-[Measured results](#measured-results) ·
-[The honesty model](#the-honesty-model-is-a-feature) ·
-[Privacy & trust](#privacy--trust) ·
-[AI setup](#ai-setup) ·
-[Commands](#command-reference) ·
-[Configuration](#configuration-env-vars) ·
-[Honest scope](#honest-scope) ·
-[Tech](#tech) ·
-[Credits](#credits--licences)
+- [Feature overview](#feature-overview)
+- [Install and quickstart](#install-and-quickstart)
+- [User manual](#user-manual)
+- [Showcase Part A — AI analysis and style transfer](#showcase-part-a--ai-analysis-and-style-transfer)
+- [Showcase Part B — full-image generation to recipe inversion](#showcase-part-b--full-image-generation-to-recipe-inversion)
+- [Supported formats](#supported-formats)
+- [Tech stack and algorithms](#tech-stack-and-algorithms)
+- [Status and roadmap](#status-and-roadmap)
+- [License and acknowledgements](#license-and-acknowledgements)
 
----
+## Feature overview
 
-## What it is
+- A shared, deterministic develop engine with exposure, white balance, curves,
+  HSL, color grading, texture, clarity, dehaze, detail, crop, and lens-aware
+  local adjustments.
+- Linear, radial, brush, luminance-range, and color-range masks, plus local AI
+  subject, sky, and point-prompted object selection.
+- AI `analyze` and `auto` workflows that propose editable recipes, validate
+  them against image statistics, render them, and optionally run one bounded
+  visual-review revision.
+- Lightroom/ACR sidecars in both directions, with conservative merge behavior
+  for fields Autoshop does not model.
+- Versions and variants for ordinary develops, generated targets, and
+  reverse-fitted looks without rewriting the source photo.
+- Desktop GUI, scriptable CLI, and a small local web UI, all using the same
+  library.
 
-The judgement-heavy part of developing a photo is *deciding what to change* —
-this sky is blown, those shadows are crushed, the white balance is too cool.
-The mechanical part is *applying* it. Autoshop splits exactly there:
+The core develop path never invents scene content. Local SCUNet denoise,
+generative reimagine/retouch, and pixel heal are explicit opt-in exceptions;
+the UI distinguishes generated pixels from engine-rendered develops.
 
-```
- RAW ─► decode + features ─► [vision advisor] ─► EditRecipe ─► [verifier] ─► [visual judge] ─► Rust render engine
- 24 fmts  preview+EXIF+hist    looks at photo      JSON        data-only QA   scores + 1 revision      │
-                                                                                                       ▼
-                                                                              XMP sidecar  +  16-bit master
-```
+## Install and quickstart
 
-The vision model only ever emits an [`EditRecipe`](src/recipe.rs) — a small,
-bounded, Lightroom/ACR-style JSON of slider values — and a deterministic engine
-renders from the original RAW. Five consequences, and they are the whole point:
+### Download a release
 
-- **Reproducible.** The same recipe, the same RAW and the same mask rasters
-  give the same pixels, on any machine, forever. Nothing is sampled, nothing is
-  temperature-dependent. (AI masks are referenced raster files the recipe names;
-  re-deriving one from scratch depends on which segmentation backend that
-  machine has.)
-- **Non-destructive.** Your library is opened read-only. Develop state lives in
-  a per-user store keyed by the photo's own path; the RAW is never rewritten.
-- **Auditable.** Every edit is ~2 KB of readable JSON you can diff, hand-edit,
-  version, or throw away. Nothing about the result is locked inside a model.
-- **Interoperable.** The same recipe serialises to an ACR/Lightroom `.xmp`
-  sidecar, so the AI's edit opens in your catalog as adjustable sliders — and a
-  sidecar Lightroom already wrote is read back the other way.
-- **No hallucinated pixels.** Detail that was not in the sensor data does not
-  appear. There is no upscaler, no generative "enhance" in the main path.
+The v0.35.0 release provides both Windows front ends. Linux and macOS are built
+and tested in CI, but no prebuilt binaries are published for them yet.
 
-Three *opt-in, clearly-labelled* exceptions do touch pixels, and each one says
-so on itself: AI **denoise** (SCUNet), the experimental **generative** restyle
-and object removal, and **pixel heal** (which samples surrounding real pixels
-and invents nothing).
-
----
-
-## See it work
-
-Three frames, developed end to end by the closed loop below — no human slider
-moves, no presets. Sony A7R V, 61 MP, shot by the author. The **before** is
-Autoshop's own neutral develop of the same RAW (not the camera JPEG), so the
-comparison isolates what the AI decided.
-
-Each run: an OpenAI-compatible **vision advisor** proposed the recipe, the
-**`claude` CLI** verified it against the histogram and clipping statistics
-without ever seeing the image, and the **visual judge** then scored the actual
-render and bought exactly one guided revision — adopted only because it
-re-scored higher.
-
-### `_DSC9706` — the tonal-range frame
-
-<table>
-<tr>
-<td width="50%"><img src="docs/images/showcase-1-before.jpg" alt="_DSC9706 neutral develop" /><br /><sub><b>Before</b> — neutral develop</sub></td>
-<td width="50%"><img src="docs/images/showcase-1-after.jpg" alt="_DSC9706 AI develop" /><br /><sub><b>After</b> — AI develop</sub></td>
-</tr>
-</table>
-
-The widest tonal spread in the set: sunlit white brick against a fully shaded
-porch wall. The recipe answers it with **Highlights −38 / Shadows +27 / Whites
-+18 / Blacks −17** over a five-point S-curve, Vibrance +17 at Saturation 0,
-white balance pinned to 5700 K, blue HSL luminance −12, and **two local masks** —
-a linear *Hold Bright Sky* (−0.18 EV, highlights −25) and a radial *Lift Main
-House* (+0.18 EV, shadows +21). It also crops 1 % left, 3.5 % top, 1.5 % bottom.
-
-The brick reads white with its texture still resolved instead of clipping to a
-flat patch, the black wall and porch open into real detail, and the blacks are
-*set* rather than lifted — no grey veil. Judge 84 → revision → **86/100**,
-verdict Accept, confidence 0.91. **Blemish, named:** the linear sky mask leaves
-a faintly lighter band across the top-left corner if you go looking for it.
-
-### `_DSC9711` — the detail-and-texture frame
-
-<table>
-<tr>
-<td width="50%"><img src="docs/images/showcase-2-before.jpg" alt="_DSC9711 neutral develop" /><br /><sub><b>Before</b> — neutral develop</sub></td>
-<td width="50%"><img src="docs/images/showcase-2-after.jpg" alt="_DSC9711 AI develop" /><br /><sub><b>After</b> — AI develop</sub></td>
-</tr>
-</table>
-
-A vertical frame of repeating lap siding, hard shadow and a diagonal railing —
-the one that shows what Texture and Clarity actually do. **Texture +10 /
-Clarity +8 / Dehaze +4**, Shadows +29 / Highlights −34, an S-curve with a
-*lifted toe*, blue HSL luminance −16, plus two linear masks. The siding gets
-warmer and board-by-board legible, the shaded tree and the railing shadows open
-instead of going to mud, and the white window reveals hold. Judge 78 →
-revision → **84/100**, Accept, confidence 0.87.
-
-**Counter-example, kept in on purpose:** the sky here came out *paler* than the
-neutral base, not deeper — the global toe and white-point lift outvote the
-recipe's own −0.20 EV *Sky depth* mask. The recipe says one thing and the render
-does another, and this README is not going to caption that as a win.
-
-### `_DSC9712` — the establishing scene
-
-<table>
-<tr>
-<td width="50%"><img src="docs/images/showcase-3-before.jpg" alt="_DSC9712 neutral develop" /><br /><sub><b>Before</b> — neutral develop</sub></td>
-<td width="50%"><img src="docs/images/showcase-3-after.jpg" alt="_DSC9712 AI develop" /><br /><sub><b>After</b> — AI develop</sub></td>
-</tr>
-</table>
-
-The deepest frame — sky, hillside architecture, mid-ground greenery, foreground
-road. The only one of the three where the AI reached for the **global Contrast
-slider (+17) and deliberately left the tone curve empty**, with restrained
-colour (Vibrance +8, Saturation −2), as-shot white balance kept, and green/aqua
-HSL saturation pulled down.
-
-This is also where the visual judge earned its cost: it scored the *first*
-proposal **63/100** — «foliage turns acidic yellow-green, deep trees lose
-shadow detail, uneven cyan patch at upper left» — and the guided revision came
-back at **87/100**. The retaining walls, boxwoods, crosswalk and pond all gain
-detail instead of reading as flat grey, and the greens are calmed rather than
-acid. **Same caveat as above:** the sky is paler and milkier than the neutral
-before. Two of three frames show it; it is a real behaviour of the current
-global/local composition, and it is written down rather than curated away.
-
-> **One of the four analyse calls failed**, and that is worth showing too. The
-> first attempt on `_DSC9706` lost its vision arm to a transient HTTP 524 from
-> the endpoint. Autoshop degraded to its histogram heuristic (exposure −0.2 EV,
-> confidence 0.4), and the verifier refused it: *«Heuristic fallback recipe (AI
-> vision failed); confidence 0.4 too low to auto-apply.»* No silent bad edit.
-> The retry went through cleanly.
->
-> **Reproducibility footnote:** the JPEGs above are downscaled from full-sensor
-> renders (9504×6336 / 6336×9504), and the resize was done **outside** Autoshop,
-> because at the time there was no export-at-size command. There is one now —
-> `apply … --long-edge 1200`. How much it matters, measured on a 9504×6336
-> frame at `--long-edge 2048` against the resize applied to the 16-bit render
-> (the reference, since that is the same Lanczos3 kernel with no encoder in the
-> way — from a *lossless* intermediate the two routes are identical, worst
-> channel difference **0**):
->
-> | route | mean \|Δ\| vs the 16-bit reference | worst |
-> |---|---|---|
-> | `--long-edge 2048` straight to JPEG q95 | **1.82**/255 | 22/255 |
-> | full-res JPEG q95, then resample it | **3.11**/255 | 70/255 |
->
-> So the flag is worth about **one JPEG generation** — the two deliverables
-> differ from each other by a mean 3.00/255 (worst 76/255). Notably it is *not*
-> the intermediate's block noise doing the damage: resampling averages nearly
-> all of that away (0.22/255 before the second encode). It is simply that the
-> old route encodes twice. It also skips writing a 33 MB file to deliver a
-> 1.3 MB one.
->
-> The faint `© skymanbp` watermark protects the author's photographs and sits
-> identically on both halves of every pair — it is not part of the develop.
-
----
-
-## Quick start
-
-### Download
-
-Each tagged release ships **both** front-ends prebuilt for Windows, with the
-byte size and sha256 of each published asset written down here after they have
-been re-downloaded and compared byte-for-byte against the local build. The
-table below is **v0.35.0's**, verified that way at the tag:
-
-| file | size | sha256 |
-|---|---|---|
+| File | Size | SHA-256 |
+|---|---:|---|
 | `autoshop.exe` (CLI) | 31,063,300 B | `e48f6bbc9a6e9bf4aa98b01240eb6d733136d68320b6e79312d9b239bddfa6c6` |
 | `autoshop-gui.exe` (desktop app) | 40,706,348 B | `b58b7be4b5e83b3f70e33b8023aba3bcfb985a1762d6eed7e39ef1deafb9a492` |
 
-### Or build it
+Download the archive from [Releases](https://github.com/skymanbp/autoshop/releases/tag/v0.35.0),
+extract it, and keep the executable beside the bundled assets and Python
+sidecars.
+
+### Build from source
+
+Autoshop uses Rust edition 2024 and rustc/cargo 1.94.
 
 ```bash
-cargo build --release                                    # CLI → target/release/autoshop(.exe)
-cargo build --release --features gui --bin autoshop-gui  # desktop app → autoshop-gui(.exe)
-cargo test                                               # unit + engine tests
+cargo build --release
+cargo build --release --features gui --bin autoshop-gui
 ```
 
-The GUI sits behind the `gui` feature, so a plain `cargo build` / `cargo test`
-never pulls in eframe + winit + the GL stack. Both binaries link the same engine
-library — the desktop app is not a wrapper around the CLI, it links the crate
-in-process.
+The first command builds the CLI. The second builds the desktop app; GUI
+dependencies stay behind the `gui` feature.
 
-Cross-platform **compilation and the test battery** are CI-verified: the
-[`build` workflow](.github/workflows/build.yml) compiles both feature
-configurations and runs `cargo test --locked` (default and `--features gui`)
-on `ubuntu-latest` and `macos-latest` on every push to `main` and on every
-pull request. The counts CI reports are a little under the Windows battery
-above, because a dozen tests are Windows-gated — the byte-exact dehaze golden
-among them — and compile only there; the first fully green run
-([32405954918](https://github.com/skymanbp/autoshop/actions/runs/32405954918),
-2026-08-20, at v0.34.0) measured 728 library, 10 CLI, 131 GUI and 4 contract
-tests per platform. Interactive runtime behaviour on those platforms is still
-unverified, and prebuilt binaries remain Windows-only.
+The Rust build covers the core application. Source builds that use the local AI
+tools also need Python packages:
 
-### Three front-ends, one engine
+- **SCUNet denoise** ([`python/denoise.py`](python/denoise.py)): install a
+  suitable `torch` build, then OpenCV, NumPy, einops, and requests. The CUDA
+  setup used by the sidecar is:
 
-| | how | when |
-|---|---|---|
-| **Desktop app** | run `autoshop-gui` and point it at a folder | the full editor — library grid, develop panel, masks, crop, versions. No server, no browser. English / 中文 |
-| **Local web UI** | double-click `Autoshop-UI.bat`, or `autoshop serve "…\photos" --port 8080` | a quick gallery on `127.0.0.1` with live before/after and a text direction box |
-| **CLI** | `autoshop auto "photo.ARW" --guidance "warm golden-hour, lift shadows"` | scripting, batches, evaluation, CI |
+  ```bash
+  pip install torch --index-url https://download.pytorch.org/whl/cu128
+  pip install opencv-python numpy einops requests
+  ```
 
-### What needs a key, and what does not
+- **BiRefNet subject masks:** `pip install torchvision timm einops` using a
+  `torchvision` build matched to `torch`.
+- **U²-Net subject fallback:** `pip install rembg`.
+- **OneFormer sky and SAM 2.1 object masks:** `pip install transformers torch`.
 
-| runs **without any API key** | needs a vision key |
+Weights download on first use and are not committed to the repository.
+
+### First run: desktop app
+
+1. Start `autoshop-gui`.
+2. Choose **Open photo…** or press `Ctrl+O`, then select a supported photo. You
+   can also drag a photo into the window or use **Open folder…** for the library
+   view.
+3. Move a Develop slider and compare it with the neutral conversion.
+4. Press `Ctrl+Shift+E` to open Export, choose a destination and format, then
+   export a copy. The original remains untouched.
+
+### First run: CLI
+
+Decode a preview and metadata, then make a manual recipe render:
+
+```text
+autoshop decode "photo.ARW" -o "preview.jpg"
+autoshop apply "photo.ARW" "recipe.json" -o "developed.tif"
+```
+
+With the image/vision role configured, an end-to-end AI develop is:
+
+```text
+autoshop auto "photo.ARW" --guidance "natural color; protect highlights" -o "developed.tif"
+```
+
+## User manual
+
+### 1. Open and inspect a photo
+
+Use **Open photo…** (`Ctrl+O`), drag and drop, or **Open folder…**. The library
+is read-only: Autoshop stores develop state separately and never rewrites the
+source RAW. The viewer applies EXIF orientation before crop and mask geometry,
+so every tool works in the displayed frame.
+
+The neutral view is Autoshop's own conversion, not the camera JPEG. Use the
+before/after control while editing; histogram and clipping information are
+computed from the decoded image and also feed the AI verifier.
+
+### 2. Develop the image
+
+The Develop panel exposes white balance, exposure and tonal controls, RGB point
+curves, HSL, color grading, texture, clarity, dehaze, noise reduction,
+sharpening, vignette, crop, and lens-related settings. Changes render through
+the same engine as `autoshop apply`; there is no hidden GUI-only look.
+
+Press **Save develop** or `Ctrl+S` to persist the recipe and, for a RAW, its XMP
+projection in the per-user develop store. A neighboring Lightroom/ACR `.xmp`,
+when present, is read only as the merge base; Save does not overwrite it. A
+baked image keeps an Autoshop recipe but does not receive a RAW XMP. To deliver
+the stored projection where Lightroom reads it, choose **Export .xmp beside the
+photo**; replacing an existing neighboring sidecar requires confirmation.
+
+### 3. Add local masks
+
+Open **Local Masks**, create a mask, then adjust the sliders inside that mask.
+Shapes can be combined with Add, Subtract, or Intersect and can carry luminance
+or color range restrictions.
+
+- **Linear gradient:** choose **＋ Linear gradient**, then drag from the fully
+  affected side toward the unaffected side. Hold `Shift` to lock an axis.
+- **Radial gradient:** choose **＋ Radial gradient**, drag the ellipse, then
+  position, rotate, and feather it.
+- **Brush:** choose **🖌 Brush** and paint. Use Erase to subtract, `[` and `]`
+  to change brush size, and **Apply** to bake the stroke into a bitmap alpha.
+- **AI select subject:** runs local BiRefNet, with a named U²-Net fallback when
+  the preferred backend cannot run.
+- **AI select sky:** runs local OneFormer ADE20K sky segmentation.
+- **Point-prompted object:** imported object intent and ordered positive click
+  gestures are re-derived locally with SAM 2.1.
+
+AI mask rasters are cached with backend provenance. If a better backend becomes
+available, the cache key forces an honest re-derivation instead of presenting
+an older alpha as the new model's result.
+
+### 4. Use versions and variants
+
+Choose **＋ Save as version** to snapshot the current develop and return to it
+later. Versions are recipes; they do not duplicate or alter the source photo.
+
+The variants strip labels three different states: **▣ Original**, **✨ AI
+generated**, and **◭ Reverse-fit**. A generated variant is a pixel result and
+has no editable XMP develop. Reverse-fit estimates an engine recipe from that
+look; copy the fitted develop to Original and save it when you want an editable
+recipe and sidecar for the full-resolution source.
+
+### 5. Export
+
+Open Export with the toolbar, `Ctrl+Shift+E`, or `Ctrl+E`. Choose JPEG, 8- or
+16-bit PNG, or 8- or 16-bit TIFF; set JPEG quality, long-edge size, output
+sharpening, and sRGB, Display P3, or Adobe RGB delivery color space. Resizing is
+the last step, uses Lanczos3, preserves aspect ratio, and never enlarges a
+smaller image.
+
+CLI exports use q95 sRGB. `--long-edge N` is available on `apply`, `auto`, and
+`batch --render`; `0` or omission means full resolution. It is deliberately an
+export option rather than a recipe field, so one recipe can deliver both a
+master and a web copy.
+
+### CLI reference
+
+The following commands and flags match the v0.35.0 command definitions in
+`src/main.rs`:
+
+```text
+autoshop decode <src> [-o|--out FILE]
+autoshop analyze <src> [-o|--out FILE] [--guidance TEXT] [--style 0..1] [--strength 0..1] [--deep]
+autoshop apply <src> <recipe.json> (-o|--out) FILE [--long-edge N]
+autoshop auto <src> [-o|--out FILE] [--guidance TEXT] [--style 0..1] [--strength 0..1] [--deep] [--denoise] [--denoise-strength 0..1] [--denoise-model NAME] [--long-edge N]
+autoshop denoise <src> [-o|--out FILE] [--strength 0..1] [--model NAME]
+autoshop batch <dir> [--render] [--limit N] [--include-baked] [--jobs N] [--long-edge N]
+autoshop eval <dir> [--limit N] [--jobs N] [--fresh] [--state FILE]
+autoshop style-index <dir>
+autoshop reimagine <src> --prompt TEXT [--fidelity high|low] [--quality low|medium|high|auto] [-o|--out FILE]
+autoshop match <src> <target> [--render] [--zoned] [--style-prompt] [--ai-judge] [--deep] [-o|--out FILE]
+autoshop retouch <src> --mask FILE --prompt TEXT [--quality low|medium|high|auto] [--full-res] [-o|--out FILE]
+autoshop heal <src> [--mask FILE] [--no-auto] [--full-res] [-o|--out FILE]
+autoshop serve <dir> [-p|--port N]
+autoshop recipe-schema
+```
+
+`<src>` is a RAW or baked image. For commands that save develop state, baked
+sources get recipe JSON but no RAW XMP. `batch` skips baked photos unless
+`--include-baked` is set, avoiding duplicate analysis and billing for RAW+JPEG
+pairs.
+
+`auto` is `analyze` plus render. `batch` analyzes RAWs by default, accepts
+`--include-baked`, and defaults to three photos in flight; `eval` defaults to
+serial work and resumes from its state file. `--long-edge` on `batch` requires
+`--render`, and denoise-strength/model overrides require `--denoise` on
+`auto`.
+
+`match` itself is local inverse rendering and needs no key. Its optional
+`--ai-judge` and `--deep` review paths do; `--deep` permits one guided retry.
+`heal` can use a supplied mask offline, while its automatic detector uses the
+vision role.
+
+### Lightroom and XMP interoperability
+
+Autoshop reads and writes sidecar XMP for global settings, point curves, HSL,
+crop, and supported local corrections. Its writer merges owned fields into the
+existing document and preserves unmodeled content byte-for-byte instead of
+round-tripping the whole file through a general XML serializer.
+
+In the desktop Save workflow, that merged XMP projection is written to the
+per-user develop store. A Lightroom sidecar beside the RAW is only a merge base
+and remains untouched. **Export .xmp beside the photo** is the separate,
+explicit action that copies the stored projection into the photo folder for
+Lightroom, with a second confirmation before replacement.
+
+Linear and radial masks round-trip as editable geometry. Lightroom brush dab
+streams are imported from the sibling `MaskBrushTable`, validated and Brotli
+decoded, then rendered with Autoshop's measured brush model. Classic XMP does
+not contain Lightroom's computed subject/sky/object alpha or arbitrary bitmap
+alpha, so Autoshop preserves the selection intent and clearly re-derives the
+mask with its own local model; generated image variants remain generated pixels
+until reverse-fit produces an editable recipe.
+
+### Configure and use the AI features
+
+Open **Settings** to configure the image/vision role and the analysis-verifier
+role. The image role uses an OpenAI-compatible API for visual proposals and
+generative images. The verifier defaults to the signed-in `claude` CLI over
+OAuth, receives statistics and recipe data rather than image pixels, and can
+instead use an API provider.
+
+The same roles can be configured from the environment. `OPENAI_API_KEY` serves
+the image/vision and generative role; `AUTOSHOP_ANALYSIS_API_KEY` is used only
+when the verifier is set to API mode. Settings are saved in the per-user
+`autoshop.local.json`; do not put real credentials in the repository.
+
+There is an additional trust guard for `./autoshop.local.json` in the current
+working directory: it may select model/provider preferences, but it cannot
+supply API credentials, endpoints, executable/script paths, or output
+destinations. This allows a project to express harmless preferences without
+turning an opened photo folder into a credential or path override.
+
+- **Analyze:** choose **Analyze** in the AI panel or run `autoshop analyze`.
+  The vision advisor proposes bounded sliders and masks, a data-only verifier
+  checks the proposal, and normal visual review may attempt one revision;
+  `--deep` permits additional bounded rounds. Accepted output remains a normal
+  recipe and XMP.
+- **Style match/read:** build the style reference library from Lightroom
+  RAW+XMP pairs with the GUI or `style-index`. The Style control retrieves
+  similar prior edits as soft references; Strength independently controls how
+  strongly the proposal is allowed to move.
+- **Reimagine:** enter a prompt in the AI panel or use `reimagine`. This creates
+  a generated, lower-resolution target. Use **Reverse-fit** or `match` to infer
+  a deterministic recipe, then apply it to the original RAW at full resolution.
+
+Local denoise and segmentation do not need an API key. Their Python sidecars
+resolve relative to the installed program tree, and downloaded weights are
+kept in the local cache rather than committed to the repository.
+
+### Privacy, trust, and paid-feature boundary
+
+| Runs locally without an API key | Uses the configured vision/generative API role |
 |---|---|
-| the whole render engine (`apply`) | `analyze` / `auto` (the AI proposal) |
-| **`match`** — reverse-fit a finished look into an editable recipe | the visual judge and `--ai-judge` / `--deep` |
-| XMP read + write, mask import/export | `reimagine` / `retouch` (generative) |
-| crop, masks, curves, every slider in the GUI | AI auto-detect in `heal` (painting a mask works offline) |
-| **AI denoise** (local SCUNet on your GPU) | |
-| local AI mask re-derivation (SAM 2.1 / OneFormer / BiRefNet) | |
-| style indexing and retrieval | |
+| Deterministic render and manual develop, including `apply` | Full vision-backed `analyze` / `auto` proposals and visual model review |
+| Local `match` inverse rendering | `match --style-prompt`, `--ai-judge`, or `--deep` |
+| XMP read/write, masks, curves, and GUI sliders | Generative `reimagine` / `retouch` |
+| SCUNet denoise and local BiRefNet/U²-Net, OneFormer, and SAM masks | Automatic target detection in `heal`; a supplied mask works offline |
+| Style indexing and retrieval | |
 
-The **verifier** role needs no API key at all when it runs over OAuth: it shells
-out to the `claude` CLI you are already signed in to. Without a vision key,
-`analyze` falls back to a histogram heuristic and *says so* in the rationale —
-which, as the failure above shows, the verifier is entitled to refuse.
+Without the vision role, the advisor can fall back to its disclosed histogram
+heuristic; that is not equivalent to the full vision-backed feature. The
+data-only verifier defaults to the signed-in `claude` CLI over OAuth, so it does
+not require an API key, although provider-backed operations may still consume a
+subscription or incur charges.
 
----
+Photos leave the machine only for AI operations the user requests through a
+configured provider. The verifier receives recipe, EXIF, histogram, clipping,
+and rationale data—not pixels—and Responses request bodies set `store:false`.
+The local web UI binds to loopback only, checks Host/Origin and cross-site
+requests, requires a fresh per-run session token for state changes, disables API
+caching, and denies framing. The source library remains read-only: recipes,
+XMP, versions, and masks live in the per-user store and rendered exports go to
+an output destination. The confirmed **Export .xmp beside the photo** action is
+the deliberate, per-photo exception.
 
-## Feature tour
+## Showcase Part A — AI analysis and style transfer
 
-### One-shot develop, with a visual closed loop
+### AI `analyze`: before and after
 
-`auto` decodes a RAW, asks the vision advisor for an `EditRecipe`, has the
-verifier acceptance-check it against EXIF/histogram/clipping statistics
-(**data-only — the verifier is never sent pixels**), then renders a 16-bit TIFF
-master. Since v0.26.2 the interactive surfaces close the loop *visually*: the
-proposal is rendered and scored by the vision model, which may buy one guided
-revision — adopted only if it re-scores at least as high. `batch` and `eval`
-skip the paid loop, and the rationale discloses every branch taken.
+The hero cat pair is the first `analyze` example: a Sony α7R IVA 61 MP `.ARW`,
+shown as straight conversion and AI develop. The AI chose the crop and a
+restrained global develop plus radial and linear parametric masks; it did not
+use an AI bitmap segmentation mask.
 
-### XMP sidecars, both directions
+The three established pairs below remain because they show different decisions
+and, importantly, two current failure modes. Each before is Autoshop's neutral
+conversion of the same Sony α7R IVA `.ARW`; each after is an AI-proposed engine
+render, not a generated image. The faint watermark is identical on both halves
+of these three older pairs.
 
-The recipe serialises to an ACR/Lightroom `.xmp`: global sliders, Texture, the
-Detail axes, de-fringe, post-crop vignetting and grain, local linear/radial
-masks with their own point curves, and the Transform/Calibration blocks carried
-verbatim. The XMP layer is hand-rolled ([`src/xmp.rs`](src/xmp.rs)) and *merges
-into* an existing document, preserving byte-for-byte everything this engine does
-not model — a serialise-from-a-DOM round trip cannot promise that.
+#### `_DSC9706`: tonal range
 
-Reading back is the harder direction, and v0.31.0 fixed a real hole: **every**
-Lightroom mask used to be discarded on import, because LR writes `crs:Angle` and
-`crs:MaskBlendMode` on all of them and either one was enough to drop the whole
-correction. On the 7-file forensic corpus that is now 42 of 42 corrections
-imported, 0 refused.
+<table>
+<tr>
+<td width="50%"><img src="docs/images/showcase-1-before.jpg" alt="Sony α7R IVA ARW _DSC9706 neutral develop" /><br /><sub><b>Before:</b> neutral engine conversion.</sub></td>
+<td width="50%"><img src="docs/images/showcase-1-after.jpg" alt="Sony α7R IVA ARW _DSC9706 AI develop" /><br /><sub><b>After:</b> AI tone, white balance, crop, a linear sky hold, and a radial house lift.</sub></td>
+</tr>
+</table>
 
-Lightroom's **AI masks** (Sky / Subject / Object) arrive too — but as a
-*re-derivation*, not an import. The sidecar carries only the intent and the click
-point, never a raster, so the alpha is recomputed here by a local segmenter and
-**every surface says so** rather than letting it pass for Adobe's own mask.
+The proposal protected white brick while opening the porch and black wall. Its
+model judge moved from 84 to 86 after a bounded revision. Honest blemish: the
+linear sky mask leaves a faint lighter band near the top-left corner.
 
-### The radial mask geometry is measured, not guessed
+#### `_DSC9711`: detail and texture
 
-Twelve purpose-shot Lightroom exports plus pixel measurement of the results
-settled what `Mask/CircularGradient` actually means. `crs:Top/Left/Bottom/Right`
-is **not a bounding box**: it is the pair of *rotated corners* of the ellipse's
-own box, in pixel space. Reading it naively — which this app, and every other
-implementation we could find, did — gets the axis ratio wrong by a median factor
-of **1.84** and leaves 8 % of real masks unreadable. Sixteen real sidecars now
-round-trip their corners byte for byte.
+<table>
+<tr>
+<td width="50%"><img src="docs/images/showcase-2-before.jpg" alt="Sony α7R IVA ARW _DSC9711 neutral develop" /><br /><sub><b>Before:</b> neutral engine conversion.</sub></td>
+<td width="50%"><img src="docs/images/showcase-2-after.jpg" alt="Sony α7R IVA ARW _DSC9711 AI develop" /><br /><sub><b>After:</b> AI texture, clarity, dehaze, tonal changes, and two linear masks.</sub></td>
+</tr>
+</table>
 
-The method policy, stated once so it can be cited: every piece of format
-knowledge here comes from **behavioural measurement** — sidecars and exports of
-the author's own photographs from the author's own Lightroom, compared at the
-XMP and pixel level. Nothing was decompiled or disassembled. The one published
-decompile-derived model in this space (of the brush alpha kernel) is precisely
-what this project **refuses** to build on.
+The siding and shaded structure gain separation; the model judge moved from 78
+to 84. This pair is deliberately kept as a counter-example: the sky is paler
+than the neutral base even though the local mask asks for more sky depth.
 
-The follow-up round then **refuted one of its own constants**, which is the part
-worth reading. The `1.032` frame scale measured in v0.32.0 turned out to be one
-frame's Adobe *lens-profile warp* mistaken for a universal affine — proven by a
-`LensProfileEnable` A/B export and an 11-dab displacement field. In v0.33.0 it
-is **1.0**: an imported radial renders at the geometry the sidecar actually
-stores, instead of 3.2 % dilated. The residual on any frame was then that
-frame's own unmodelled lens warp (0–3.4 % observed) — and **v0.35.0 closes the
-frame question**: a further round of exports settled that Lightroom does not
-place every mask in one frame. A brush is rasterised *before* the lens
-correction, a radial or linear *after* it. Reading the two in one frame was
-leaving the radial arm up to 186 px out on a profile-corrected frame; each now
-renders in its own frame — mapped through this engine's **own** geometry
-inverse, landing within 0.3 px. Autoshop also reads Adobe's own `.lcp` lens
-profiles and solves them into the recipe as a named model of Lightroom's warp;
-that model is carried provenance, not yet a render-time input — a frame this
-engine does not itself correct still renders masks at their stored coordinates.
-Independently of any lens model, a linear gradient's normalized endpoints are
-now evaluated in the pixel/aspect-correct metric Lightroom uses: on the
-9504x6336 probe an angled gradient moved from an 874 px-class half-contour
-error to 9.8 px. Radials and brushes are untouched by that change.
-The recipe names which of seven sources produced the model — an in-camera knot
-set, a solved `.lcp`, or an honest none.
+#### `_DSC9712`: establishing scene
 
-### Local masks
+<table>
+<tr>
+<td width="50%"><img src="docs/images/showcase-3-before.jpg" alt="Sony α7R IVA ARW _DSC9712 neutral develop" /><br /><sub><b>Before:</b> neutral engine conversion.</sub></td>
+<td width="50%"><img src="docs/images/showcase-3-after.jpg" alt="Sony α7R IVA ARW _DSC9712 AI develop" /><br /><sub><b>After:</b> AI global contrast, restrained color, and green/aqua HSL reductions.</sub></td>
+</tr>
+</table>
 
-Linear gradients, radials (rotatable), free-form rasters, AI-selected subject /
-sky / object, add–subtract–intersect shape composition, per-mask eye toggle and
-duplicate, per-mask point curves, brush-editable AI rasters with
-feather / expand / contract and full-resolution guided refine.
+Automated visual model review rejected the first acidic-green proposal at 63
+and retained a revision scored 87. The landscape gains separation, but the sky is again
+paler and milkier than the neutral conversion; that known behavior is not
+captioned as an improvement.
 
-**Brush masks are drawn, from v0.35.0 — and that took two blockers falling.**
-Lightroom's dab-stream brush groups have been imported, carried and written back
-byte-exact since v0.33.0, but the renderer answered a literal zero for them,
-for two stated reasons: the alpha kernel had no closed form, and the mask
-appeared to live in a frame this engine could not reproduce. Both are now
-closed. Denser sampling found the kernel: `(1 − ρ^m)^n` with `ln m` and `ln n`
-cubic in the hardness — eight numbers, held-out rms 0.0109, better than
-interpolating the 11-rung table it replaced — alongside screen accumulation,
-density as a pre-screen scale and a one-parameter flow law (κ = 0.1284 ±
-0.0029). And the frame question dissolved: Lightroom rasterises a brush
-*before* its lens correction, which is exactly where this engine evaluates
-masks, so a dab stream needs no warp at all. `render::brush_raster` now stamps
-the dab stream into an alpha at develop time and the mask samples like any
-other raster. Every one of those numbers was read off controlled exports of the
-author's own photographs — so both directions disclose the result by name
-(`BrushRendered`, "drawn from Autoshop's measured model of Lightroom's brush -
-not Adobe's own rasteriser"), because the edges are ours. Autoshop's *own*
-painted and AI-derived rasters are a different thing entirely and always did
-render.
+### Style read: neutral, AI develop, and AI develop with references
 
-### Style retrieval and the two taste dials
+These triptychs show three states of the same Sony α7R IVA 61 MP `.ARW`: straight
+conversion, an AI develop with style influence disabled, and an AI develop that
+read similar edits from the local style library. They demonstrate the style
+retrieval path, not a pixel-copy or generative transfer.
 
-**Style** learns from *similar* past edits you have made (k-NN over EXIF +
-histogram, optionally a SigLIP 2 image embedding) and offers them to the advisor
-as soft reference. Build the index from the GUI, the web panel, or
-`autoshop style-index <dir>`; every analysis names the shots it actually leaned
-on.
+<img src="docs/images/showcase-lake-style-triptych.jpg" alt="Lake scene: straight conversion, AI develop, and AI develop with style read" />
 
-**Strength** is the second, independent dial: *Style* asks how close to your own
-past edits, *Strength* asks how committed the result should be. One value drives
-all six places that used to decide restraint on their own — the proposer's
-numeric guardrails and wording, the recipe's soft caps, the verifier's two-sided
-band, the judge's rubric, whether a retrieved reference is a ceiling or a floor,
-and the no-key fallback. `0.50` reproduces the calibrated *numbers* of releases
-up to v0.28.0 bit-for-bit; the default `0.65` pushes a little further; above
-`0.70` the AI is told to commit. **The clipping and white-point safeguards never
-move with it.**
+<sub><b>Lake and boat, <code>_DSC0070</code>.</b> The style-read run referenced four similar edits from the indexed Lightroom library and was accepted. The style-off middle panel rendered under a Revise verdict and therefore has no saved recipe/XMP; it is retained only as a transparent comparison.</sub>
 
-### Look matching (reverse-fit) — no API key
+<img src="docs/images/showcase-sunset-style-triptych.jpg" alt="Sunset scene: straight conversion, AI develop, and AI develop with style read" />
 
-`match` takes the same frame twice — your source and a finished rendition of it
-(a Lightroom export, the camera JPEG, a `reimagine` output) — and *solves* for
-the `EditRecipe` that reproduces it through the engine: CDF tone matching, then
-saturation, then colour cast. No pixels are copied, so the fit applies at full
-sensor resolution and writes `recipe.json` + XMP. Deterministic and key-free.
+<sub><b>Sunset, <code>DSC09938</code>.</b> The middle panel is an accepted style-off develop. The style-read proposal at right used retrieved references and rendered at full RAW resolution, but the model judge marked it Revise (85); its attempted revision scored 84 and was discarded, so no style-read recipe/XMP was saved.</sub>
 
-Two honesty readings ride every fit: the frame-global look residual, and a joint
-distribution check over luminance × chroma ranges which **can only lower the
-reported confidence, never raise it**. Opt-in AI review (`--ai-judge`) scores
-how faithfully the fitted render matches the target; opt-in `--deep` lets that
-review *act*, buying one guided retry that is kept only if it re-scores at least
-as high.
+## Showcase Part B — full-image generation to recipe inversion
 
-### AI denoise (SCUNet, GPU)
+Part B is a different workflow: generate a complete visual target, then fit an
+ordinary engine recipe to its look. The generated target can invent content;
+the fitted render cannot. The recovered recipe is editable and can be applied
+deterministically to the original full-resolution RAW.
 
-ACR/LR-style denoise for high-ISO and astro frames, via a local Python sidecar.
-Off by default; triggered by `--denoise`, the `denoise` command, or a UI button.
-Runs entirely on your machine.
+### Sunset reimagine and reverse-fit
 
-<div align="center"><img src="assets/denoise-demo.png" width="520" alt="AI denoise before/after" /></div>
+<img src="docs/images/showcase-sunset-reimagine-fit-triptych.jpg" alt="Sunset scene: neutral conversion, AI-generated target, and reverse-fitted full-resolution engine render" />
 
-### Parallel batch and self-evaluation
+<sub><b>Sony α7R IVA 61 MP <code>.ARW</code>, <code>DSC09938</code>.</b> Left: neutral engine conversion. Center: a 3520×2352 full-image target generated with a configured <code>gpt-image-2</code>. Right: the recovered recipe rendered by Autoshop on the original RAW at 9504×6336. The statistical look error moved from 0.060 to 0.042 at fit confidence 0.746691; this is a deterministic tonal/color approximation, not a pixel-aligned reconstruction of generated detail.</sub>
 
-`batch` processes a folder; `eval` runs the AI against RAWs that have your own
-`.xmp` beside them and reports per-control error and bias. Both take `--jobs N`,
-**capped by a memory budget**: one 61 MP photo's pipeline pass peaks at ~1.77 GB
-of commit charge (measured, not guessed — 1,771 MB, re-measured at v0.34.0 with
-the full-resolution render included), so the worker count is bounded by free
-memory — and the run *discloses* when the cap overrules your flag. Where a
-file's own header is free to read, the budget asks it instead of assuming the
-corpus average, and says which file raised the bill. The 147-photo
-eval went from ~2.3 h serial to a measured **38 min** at `--jobs 3`. Transcripts
-are index-ordered, so re-running the same folder gives the same record.
+### Viaduct reimagine and reverse-fit
 
-**`eval` resumes.** A 147-photo run is hours of paid calls, and one dead
-connection used to cost the whole thing, so progress is written per photograph
-and a rerun folds in what an interrupted run already measured, spending nothing
-on those frames. The file lives under the per-user data directory — never in
-your photo library, which stays read-only — and is named from the folder and
-`--limit`, so a command finds its own progress and no other run's. `--fresh`
-discards it and measures everything again; `--state FILE` puts it somewhere you
-choose. Progress measured by a **different** build or a different model is
-**refused rather than mixed in**, printing both sides, because one table
-measured by two different things is not a measurement. A photograph the vision
-proposer did not actually answer for is never saved as progress either, so a
-fallback cannot quietly bake itself into a baseline.
+<img src="docs/images/showcase-viaduct-reimagine-fit-triptych.jpg" alt="Stone viaduct scene: neutral conversion, AI-generated target, and reverse-fitted full-resolution engine render" />
 
-### PNG/TIFF source mode
+<sub><b>Sony α7R IVA 61 MP <code>.ARW</code>, <code>_DSC0639</code>.</b> Left: neutral engine conversion. Center: a 3520×2352 full-image target generated with the same configured <code>gpt-image-2</code>. Right: the recovered recipe rendered on the original RAW at 9504×6336. The statistical look error moved from 0.057 to 0.019 at fit confidence 0.678264; the fitted color-cast stage was rejected by the fit's own do-no-harm review, so the recovered recipe carries tone and saturation only.</sub>
 
-Feed an already-processed image — denoised in Lightroom, exported from
-Photoshop — and Autoshop grades it directly. Auto-detected by file type; no RAW
-required. Embedded ICC profiles (LR's "Edit in…" exports ProPhoto 16-bit by
-default) are normalised into the sRGB working space with 16-bit depth preserved,
-instead of being read as if they were sRGB.
+Reverse-fit can recover global tone, saturation, and guarded color casts. It
+does not claim to recover local masks, generated objects or detail, or
+unidentifiable per-band HSL from a non-aligned target.
 
-### Experimental pixel modes
-
-`reimagine` (generative restyle) and `retouch` (generative object removal) go
-through OpenAI Images and are labelled experimental everywhere. `heal` is the
-*non*-generative retoucher: it removes dust, blemishes and specks by sampling
-**surrounding real pixels** and invents nothing.
-
----
-
-## Input formats
+## Supported formats
 
 <table>
 <tr>
@@ -454,558 +437,212 @@ through OpenAI Images and are labelled experimental everywhere. `heal` is the
 <tr>
 <td align="center"><img src="docs/images/formats/pef.jpg" alt="Pentax PEF develop" /><br /><sub><b>.pef</b> · Pentax K-5</sub></td>
 <td align="center"><img src="docs/images/formats/dng.jpg" alt="Ricoh DNG develop" /><br /><sub><b>.dng</b> · Ricoh GR II</sub></td>
-<td align="center"><img src="docs/images/formats/raf.jpg" alt="Fujifilm RAF develop" /><br /><sub><b>.raf</b> · Fujifilm X-S10 — X-Trans, approximate</sub></td>
+<td align="center"><img src="docs/images/formats/raf.jpg" alt="Fujifilm RAF X-Trans develop" /><br /><sub><b>.raf</b> · Fujifilm X-S10 — X-Trans, approximate</sub></td>
 </tr>
 </table>
 
-<sub>Nine cameras, one per format, each a **full neutral develop** by
-`autoshop apply` from a CC0 sample file — not the camera's embedded preview.
-The `.raf` tile shows the **v0.34.0** render — the X-Trans colour fix, on the
-sample that exposed the defect. Through v0.33.0 this tile was visibly green and
-dark (measured channel means 53.6/82.9/39.9 against the camera preview's
-110.2/104.9/99.8): the Bayer demosaic's chroma pass left R unwritten at 8 of
-every 36 photosites and B at a different 8. v0.34.0 demosaics over the array's
-own geometry; this very render measures whole-frame **G/R 0.9473** against the
-preview's 0.95, inside the 0.81–1.08 band the other eight formats occupy.
-Fine detail is
-still softer than a dedicated X-Trans converter, and the render says so.
-See [X-Trans, restated](#x-trans-restated).</sub>
+This grid is also the nine-camera RAW zoo: one real CC0 file per format tile,
+each fully decoded and neutral-rendered rather than copied from an embedded
+preview. The corpus cannot ship in the repository, so the suite is
+environment-gated and a bare test run skips it; the release process reruns and
+records it explicitly. The last recorded release gate was 9/9.
 
 **Camera RAW — 24 extensions**, one predicate app-wide (`decode::is_raw`):
 
-```
-arw dng raw raf nef cr2 cr3 orf rw2 pef srw 3fr fff iiq
-mef mos erf kdc dcr dcs crw nrw mrw ari
-```
-
-**Baked rasters — 8 extensions:** `png tif tiff jpg jpeg webp bmp gif`. All
-decoders are pure Rust. AVIF and HEIC are **deliberately excluded** — they would need a C image
-codec (dav1d), and every image decoder in this tree is pure Rust. (Full
-honesty on the wider graph: the TLS stack's `ring` compiles C via `cc` —
-the one transitive C build dependency in the tree, and it is not ours to
-swap without changing TLS stacks.)
-
-Decoding is `rawler` 0.7.2, which carries **725 camera models**. An extension
-being on that list means the file reaches the RAW engine — not that your
-particular body is in the database. **Nine cameras, one per format, are verified
-end to end** on CC0 sample files, and that zoo is a release gate
-(`AUTOSHOP_RAW_ZOO`) — nine of nine at the last release, and re-run and
-re-counted at every one.
-
-**If your camera is not recognised**, or its format is not listed: run the file
-through the free **Adobe DNG Converter** and open the `.dng`. That is not a
-second-class path — rawler builds a DNG's entire camera profile, colour matrices
-included, from the file's own tags, so a converted file needs no database entry
-at all. Autoshop's error message says this too, with the file named.
-
-`.x3f` (Sigma Foveon) is **permanently excluded**: rawler 0.7.2's metadata reader
-for it is a literal `todo!()`, which panics.
-
----
-
-## Measured results
-
-Autoshop grades itself against the photographer's own edits. `eval` takes RAWs
-that have your Lightroom `.xmp` beside them, runs the full AI pipeline, and
-reports per-control error and bias plus one aggregate **gap score** — the mean
-per-control divergence including the tone curve, where lower means closer to
-your look.
-
-The current baseline is the full **147-pair** run at v0.34.0 (an
-OpenAI-compatible endpoint, 147/147 completed, **zero fallbacks** in the rows
-that count — it took a resume to get there, which is why `eval` learned to
-resume):
-
-| metric | value |
-|---|---|
-| **Overall gap score** | **16.0 %** |
-| Mask-import refusals | **2.35 → 0.05 per photo** |
-| `whites` bias | +22.55 → **+16.12** |
-| `blacks` bias | −14.18 → **−10.60** |
-
-The mask row is the one to read twice. Before the v0.31.0 import fix, `eval`
-counted 2.35 of the photographer's own masks *refused by our importer* on the
-average photo — a number the tool reported about itself, on its own corpus,
-because the refusal was counted rather than swallowed. That is what got fixed,
-and this is the proof on the full corpus.
-
-The remaining bias is real and unresolved: the AI still sets `whites` about 16
-points higher and `blacks` about 11 points lower than this photographer does.
-That is a taste gap, stated as a number instead of a claim.
-
-The gap score is **not comparable across every release boundary**, and the tool
-says so rather than letting a reader diff two numbers that were measured by
-different rulers. The 16.0 % above reads against v0.33.0's 15.5 % only on the
-rows v0.34.0 did not redefine (four `color_grade.*_hue` rows changed meaning
-there). v0.35.0 moves the ruler again — brush masks now render, negative
-`Texture` and the radial falloff changed shape, and every mask moved half a
-pixel — so this table is the **v0.34.0** measurement and a v0.35.0 re-baseline
-is owed, not silently assumed.
-
-**Release gates at v0.35.0** (both build configurations): clippy clean ×2;
-816 library (9 `#[ignore]`d forensic probes) / 14 CLI / 132 GUI / 2+2 contract
-tests; 16/16 real Lightroom radial sidecars byte-round-tripped; font subset
-check 803/803 needed codepoints embedded (68 symbols + 735 CJK); i18n audit
-0 findings; doc gate 22/22 with the battery transcript. Two further suites run
-against real corpora that cannot ship with the source, so they are
-environment-gated and a bare `cargo test` *silently skips* them — which is why
-they are re-run and re-counted as part of cutting each release rather than
-quoted from the previous one: the forensic mask-import set and the nine-camera
-RAW zoo, 42/42 imports with 0 refusals and 9/9 respectively at the last
-release. That doc-drift gate
-([`scripts/check_docs.py`](scripts/check_docs.py)) re-derives the shipped
-version, the battery's test counts, the format counts, the dependency
-inventory and the toolchain from the tree — and pins this README's own
-copies of the version, battery line and format counts — before each release.
-
----
-
-## The honesty model is a feature
-
-Most of the interesting engineering in this project is in what it **refuses to
-pretend**. Every degradation has a name, and that name reaches every front-end —
-the desktop app's open banner, the web reply, and `analyze` / `auto` / `match`
-on stderr beside the `xmp ->` line.
-
-| what | what Autoshop does |
-|---|---|
-| **Mask import losses** | Named, not counted: `brush mask(s) drawn from Autoshop's measured model of Lightroom's brush - not Adobe's own rasteriser`, `AI mask(s) re-derived by the local segmenter - not Adobe's own raster`, `radial rotation(s) read as 0`, `local point curve(s) unreadable`, `unmodelled local slider(s)`, `unknown local setting(s)`, and more |
-| **Mask export losses** | The same list in the other direction — a mask this engine drew that the sidecar cannot carry says which one and why |
-| **Brush masks** | Carried byte-exact **and drawn** — from a measured model of Lightroom's own brush (kernel, flow law and screen accumulation all read off controlled exports), never from a guess. Disclosed in both directions, because the alpha is ours |
-| **AI masks** | The alpha is **recomputed** by the local segmenter and every surface says so. Never passed off as Adobe's raster |
-| **A weaker segmenter** | If a machine cannot run the pinned subject model, the fallback is **named on the result**, not silently substituted — and the mask is re-derived by itself, once, after that machine gains what it was missing, saying why |
-| **No embedded preview** | 12 of the 24 formats store none. Those degrade to Autoshop's own neutral develop *and say so* — you are told you are looking at our render, not the camera's |
-| **X-Trans** | Disclosed on every render (see below) |
-| **Untagged 16-bit input** | Read as sRGB, and flagged — right for 8-bit JPEG, often wrong for the 16-bit files an editor produces |
-| **Unsupported sensors** | Monochrome and 4-colour (CYGM/RGBE) arrays are **refused before the develop**, not after it |
-| **Refusal causes** | Unknown make, unknown model and no decoder are three different failures with three different messages, each offering the DNG on-ramp |
-| **Parser panics** | A third-party decoder panic becomes a named error; the process survives, so one bad file cannot kill a `batch` run |
-| **Carried, not rendered** | Every control declares which of three things it is (below). No control moves a number without either moving a pixel or admitting that it doesn't |
-| **Memory cap** | When the `--jobs` budget overrules your flag, it prints a line. A silent downgrade reads as "the flag didn't work" |
-| **A file too big to develop** | A photo whose develop would peak over 4 GiB is **refused by name**, with the estimate and what it is based on — and told outright that `--jobs 1` will not help, because one file's peak is not a concurrency budget. RAW and baked share the one ceiling |
-| **Style embedding gaps** | If the optional embedding sidecar fails for some photos, the index is still built — and the count of photos without a vector is reported, so "all of them failed" no longer looks identical to "all of them worked" |
-| **AI fallback** | A failed vision call degrades to the histogram heuristic with `confidence 0.4` — and the verifier is allowed to refuse it, as it did in the showcase above |
-
-Each control is exactly one of three kinds, and the registry states it once:
-
-- **Rendered** — drawn here approximately and written to the sidecar. The
-  ordinary sliders.
-- **Carried, not rendered** — written to the sidecar; the canvas deliberately
-  does not draw it, because the operator behind it is unpublished and
-  approximating it would mean putting an operator *we invented* between you and
-  your picture. Film grain, the post-crop vignette family, the Sharpen and
-  Noise-Reduction detail axes, colour noise reduction, de-fringe, the auto-CA
-  switch, `crs:Roundness`, `crs:Midpoint`.
-- **Passed through verbatim** — the Transform/Upright and Camera Calibration
-  blocks, carried byte-for-byte and never interpreted, which is why the app
-  shows their values and offers no slider for them.
-
-### X-Trans, restated
-
-Through v0.33.0, non-Bayer colour filter arrays developed through rawler's
-Bayer demosaic, whose guard checks the pattern's *name* rather than its
-geometry. The measured consequence on the X-S10 zoo sample was a strong
-green-and-dark cast — and the mechanism turned out to be starker than a
-detail approximation: the Bayer chroma pass fills a green photosite's missing
-channels from exactly the neighbour to its right and the neighbour below, and
-inside X-Trans's four 2×2 all-green blocks per tile that assumption is false.
-**R was simply never written (left at zero) at 8 of every 36 photosites, B at
-a different 8.** Correct white balance cannot repair that — a per-channel gain
-and a per-channel hole are both diagonal, so they commute — which is why the
-cast survived metadata that read perfectly.
-
-**Fixed in v0.34.0:** a non-2×2 RGB array is now demosaiced
-in-tree over the array's own geometry — every channel is interpolated only
-from photosites that actually measured it, with per-phase plane-fit weights.
-On the same sample the whole-frame G/R moved **1.5503 → 0.9473** (measured
-on the release binary) and G/B 2.08 → 1.03, inside the 0.81–1.08 band the other eight formats occupy;
-per-phase channel spread fell from 158 % to 0.34 % of the channel mean. The
-render still disclaims what remains true: fine detail is reconstructed by a
-general rule rather than by an algorithm built for this array (Markesteijn),
-and is softer than a dedicated converter would resolve.
-
----
-
-## Privacy & trust
-
-**Your photos never leave your machine except to the AI endpoints you
-configured**, and only when you ask for an AI operation. Everything else —
-render, XMP, masks, denoise, segmentation, style indexing, reverse-fit — is
-local.
-
-- **`store: false` on every AI request body.** Nothing you send persists in the
-  key owner's account. There is a unit test asserting it on every frame,
-  including the style reference image, because a stored response is an exfil
-  channel.
-- **The verifier never sees pixels.** It judges the recipe against EXIF,
-  histogram and clipping statistics plus the advisor's rationale.
-- **The local server is loopback-only and hostile to the rest of your browser.**
-  `serve` binds `127.0.0.1`, refuses any request whose `Host`/`Origin` is not
-  that exact loopback authority *on its own port*, requires the page's per-run
-  session token on every state-changing request, marks all `/api/*` responses
-  `no-store`, never returns a key (settings answer `key_present: true/false`),
-  and sends `X-Frame-Options: DENY` so a page you visit cannot frame the UI.
-- **Your library is read-only.** The engine refuses to write into a source RAW's
-  folder. Exports go to `./out` or a destination you choose; develop state lives
-  in a per-user store keyed by path hash, so two same-named photos never collide.
-  The one deliberate exception is «Export .xmp beside the photo» — a per-photo
-  click, never batched, that refuses to replace an existing `.xmp` without a
-  second confirming click, because beside the photo is the only place Lightroom
-  reads one.
-
-### A settings file in the current directory is not trusted with your key
-
-Autoshop reads an `autoshop.local.json` sitting in the folder it was launched
-from — that is the pre-store layout, kept so old setups keep working — but since
-v0.18.0 such a file may only choose models and providers. Settings resolve per
-**field**, so a file supplying just `image_base_url` would have redirected the
-endpoint while your real key still came from `.env`, and the next Analyze would
-have posted that key to whoever wrote the file. Extracting a shared archive of
-photos and running Autoshop inside it was enough.
-
-Since v0.23.2 that rule is stated **once**, as a property of each setting
-(`config::SETTINGS`), rather than as three hand-kept lists:
-
-| kind | examples | who may set it |
-|---|---|---|
-| **secret** | `OPENAI_API_KEY`, `AUTOSHOP_ANALYSIS_API_KEY` | your environment, your `.env`, the Settings panel |
-| **destination** | the two base URLs, `AUTOSHOP_CLAUDE_BIN`, `AUTOSHOP_PYTHON`, the sidecar scripts and weight cache, `AUTOSHOP_DATA_DIR`, `PATH`, `PYTHONPATH`, `PYTHONHOME`, `ANTHROPIC_*` | your environment and the Settings panel **only** |
-| **preference** | every model id, both provider selectors, both reasoning-effort tiers, the tuning numbers | anything, including an ambient file |
-
-So keys and **models** from a `.env` work, while nothing ambient can name where
-bytes go, which account pays, or what program runs. Two further routes were
-closed with it: **saving settings no longer launders an ambient file into your
-trusted one** (both writers read-merge-write, so one ordinary "save" used to
-copy a planted base URL into your user profile), and **a `.env` may no longer
-choose the endpoint** — `dotenvy` searches every parent directory and its
-override mode beats a variable you really set.
-
-One place the table deliberately does *not* apply: what a `.env` may push into
-the child processes (the `claude` verifier and the Python sidecars). There,
-"unlisted" is not a closed set — it includes every loader hook the platform
-defines — so that block is an **allowlist** of compute knobs
-(`CUDA_VISIBLE_DEVICES`, thread counts, the offline flags). Anything else a
-`.env` names is dropped, and the app says which. Your own environment is
-unaffected: the children inherit it.
-
-A saved key also remembers **which endpoint it was saved for**. The two image
-providers share one key slot, and flipping providers swaps the base URL — which
-used to leave the previous key armed for the new endpoint. Each save now records
-the base the key was typed beside, and the key is simply not sent anywhere else.
-Keys from your environment are exempt; that pairing is your own.
-
-Bundled Python sidecar scripts and the weight cache resolve against the
-**program's own directory tree**, never the folder you run from — an unzipped
-photo pack cannot substitute its own `denoise.py` or its own weights.
-
----
-
-## AI setup
-
-Two roles, each configurable in the in-app **Settings (⚙)** panel or via env:
-
-| Role | What it does | Default | Other option |
-|------|------|---------|--------------|
-| **分析 / Analysis** (verifier) | data-only acceptance check of each recipe | **OAuth** — the `claude` CLI on PATH, signed in (reuses Claude Code OAuth, **no API key**), model `opus` | **API** — any OpenAI-compatible chat endpoint (base URL + key + model) |
-| **图像 / Image** (vision advisor) | looks at the photo → `EditRecipe` | **API** — `OPENAI_API_KEY`; model = `AUTOSHOP_OPENAI_MODEL` (default in the [env table](#configuration-env-vars)) | any OpenAI-compatible **vision** endpoint. Without a key, a histogram heuristic is used |
-
-The `claude` CLI has no image input in print mode, so the image role always
-speaks the OpenAI-compatible HTTP protocol. The Settings panel's "OAuth" choice
-for the image role is a preset that points the endpoint at a local subscription
-bridge instead of a keyed API — same wire protocol, different
-endpoint/credentials.
-
-Keys and models are written to `autoshop.local.json` in your per-user Autoshop
-folder (never in a repo), which overrides the environment. You can also use a
-`.env`:
-
-```
-OPENAI_API_KEY=sk-...
+```text
+arw, dng, raw, raf, nef, cr2, cr3, orf, rw2, pef, srw, 3fr,
+fff, iiq, mef, mos, erf, kdc, dcr, dcs, crw, nrw, mrw, ari
 ```
 
-Reasoning effort is a **suggestion, not a contract**: the tiers differ per
-provider (the `claude` CLI documents `low, medium, high, xhigh, max`;
-OpenAI-compatible endpoints take the first three), so the pickers offer the
-right list beside a free-text field, and an endpoint that does not know the tier
-is automatically retried without it. Blank means "send no such parameter" — the
-only correct request for a model that does not reason — and a blank *saved in
-Settings* is a real choice that silences an `AUTOSHOP_*_EFFORT` from the
-environment. The model lists beside those pickers are whatever the endpoint's
-own `/models` returned, minus the ids recognisable as something else; a name can
-only rule things OUT, so a wrong pick fails loudly, and unbilled, on the first
-call.
+Decoding is rawler 0.7.2, which carries **725 camera models**. **No embedded
+preview:** 12 of the 24 formats store none. They are `orf`, `srw`, `nrw`, `mef`,
+`mos`, `kdc`, `dcr`, `dcs`, `erf`, `iiq`, `crw`, and `ari`; Autoshop shows its
+own neutral rendition instead and says so.
 
-### AI denoise setup
+**Baked rasters — 8 extensions:** `jpg`, `jpeg`, `png`, `tif`, `tiff`, `bmp`,
+`webp`, `gif`. ICC profiles on baked imports are converted through qcms when
+present.
 
-The denoiser is a Python sidecar ([`python/denoise.py`](python/denoise.py))
-running **SCUNet** on the GPU. It needs Python with:
+Decode degradation and refusal behavior is explicit:
 
-```bash
-pip install torch --index-url https://download.pytorch.org/whl/cu128   # CUDA build
-pip install opencv-python numpy einops requests
-```
+- An untagged 16-bit baked image is read as sRGB and flagged; that assumption
+  is often wrong for an editor export even though it is usually right for an
+  8-bit JPEG.
+- Monochrome and four-colour sensor arrays are refused before development;
+  Autoshop does not reinterpret them as three-channel colour.
+- Unknown make, unknown model, and no matching decoder are differentiated and
+  point to the DNG conversion route; a recognized but corrupt file keeps its
+  separate integrity error.
+- A third-party RAW parser panic is contained as a named per-file error, so one
+  malformed file does not terminate a batch run.
 
-On first use it downloads model weights (~72 MB each) into `python/weights/`
-(gitignored), gated on sha256 **and** an exact byte count. Trigger it via
-`autoshop auto --denoise`, `autoshop denoise <src>`, or the **AI Denoise**
-checkbox in the UIs. Models: `color_real_psnr` (default, blind, best for real
-high-ISO/astro), `color_real_gan`, `color_15/25/50`.
+## Tech stack and algorithms
 
----
+### RAW decode and orientation
 
-## Command reference
+`src/decode.rs` uses rawler for **RAW decode, 24 formats**, and the database
+currently covers 725 bodies. Bayer files take rawler's normal demosaic path;
+non-2×2 RGB CFA data uses Autoshop's X-Trans geometric path, which fits color
+planes over a 5×5 neighborhood per CFA phase while retaining the measured
+photosite channel. That path closes zero-sample holes but remains an
+**approximate** X-Trans develop rather than a directional Markesteijn-class
+demosaic. `src/render.rs` applies EXIF orientation at the head of the displayed
+chain, before masks, straighten, and crop.
 
-```
-autoshop decode  <src>                       # preview + EXIF + histogram
-autoshop analyze <src> [--guidance "..."] [--style 0..1] [--strength 0..1]   # AI → recipe.json + .xmp (no render; incl. visual review loop)
-autoshop apply   <src> <recipe.json> -o out [--long-edge N]  # render a recipe to an image
-autoshop auto    <src> [--denoise] [--guidance "..."] [--style 0..1] [--strength 0..1] [--long-edge N]   # analyze + render, end-to-end
-autoshop denoise <src> [--strength 0..1] [--model ...]  # AI denoise → clean 16-bit master
-autoshop batch   <dir> [--render] [--limit N] [--jobs N] [--include-baked] [--long-edge N]  # a whole folder (--jobs = photos in flight, default 3)
-autoshop eval    <dir> [--limit N] [--jobs N] [--fresh] [--state FILE]  # compare AI edits vs your own .xmp (--jobs default 1 = serial; resumes by default)
-autoshop style-index <dir>                   # build the "your taste" reference index (also in the GUI: AI panel › Style reference library)
-autoshop serve   <dir> [--port 8080]         # local web UI
-autoshop reimagine <raw> --prompt "..."      # experimental generative restyle
-autoshop match   <raw> <target> [--render] [--zoned] [--ai-judge] [--deep]  # reverse-fit a look → editable recipe + XMP (no key; --ai-judge scores the match and --deep lets it buy one guided retry, both need a key)
-autoshop retouch   <raw> --mask m.png --prompt "..."    # experimental generative object removal
-autoshop heal      <src> [--mask m.png] [--no-auto]     # pixel heal: spot/blemish removal (NOT generative)
-autoshop recipe-schema                       # print the EditRecipe JSON shape
-```
+### Develop engine and measured Lightroom parity
 
-`<src>` is a RAW **or** a baked image — the develop pipeline runs on either.
-RAWs also get an `.xmp`; baked sources get `recipe.json` only, because XMP is
-meaningful only for RAW in Lightroom. `batch` skips baked photos by default and
-takes `--include-baked` to opt in: shooting RAW+JPEG is common, and analyzing —
-and **billing** — the camera JPEG beside every RAW is not a default.
+`src/render.rs` is an f32 pipeline with explicit linear-light operations where
+the algorithm requires them; the standard rawler output is gamma-encoded f32,
+so the implementation does not pretend every stage is uniformly linear. After
+orientation and optional denoise, anchored white balance precedes lens/manual
+vignetting and linear-light dehaze; exposure, contrast, whites, blacks,
+highlights, shadows, and the base/tone curve are combined in the tone LUT, then
+RGB curves, HSL, and color grading run in that order. Clarity and Texture,
+global color/detail, local masks, lens geometry, straighten, and crop follow;
+the Highlights control belongs to the tone LUT, with no separate
+highlight-reconstruction pass claimed.
 
-`--long-edge N` **exports at a size**: the develop still runs at full sensor
-resolution and the finished pixels are resampled last (Lanczos3, aspect kept,
-**never** enlarged — a frame already under `N` is saved untouched, and `0` means
-full resolution). It is a flag, not a recipe field, because one develop
-legitimately delivers both a 61 MP master and a 2048 px web copy; nothing is
-written into `recipe.json`. On `batch` it applies per photo — a portrait and a
-landscape in the same folder each come out at `N` on **their** long edge — and
-it requires `--render`, since a size for files that are never written is a typo.
-`denoise` deliberately has no such flag: its output is a master a later develop
-reads back, not a deliverable.
+The parity work in `src/render.rs` is measurement-driven. Period/step-response
+measurements refuted the earlier band-limited notch model for negative Texture;
+the current operator mixes fine Gaussian and coarse box low-passes against 45
+anchors spanning nine periods and five slider levels. Radial feather uses a
+measured 290×11 `(radius, feather)` alpha LUT, with feather zero kept as an
+analytic hard edge. Brush dabs use `k = (1 - ρ^m(h))^n(h)`, cubic fits for
+`ln(m)` and `ln(n)` over hardness, screen accumulation, and a measured flow law;
+the held-out kernel RMS is 0.0109.
 
----
+### Masks and local segmentation
 
-## Configuration (env vars)
+`src/recipe.rs` and `src/render.rs` implement radial, linear, brush, bitmap,
+luminance-range, and color-range masks with Add/Subtract/Intersect composition.
+`src/segment.rs` and `python/segment.py` add local BiRefNet subject selection,
+U²-Net fallback, OneFormer sky segmentation, and SAM 2.1 point-prompted object
+gestures. Cached alphas record the photo, mask subtype, orientation/click data,
+and backend generation, so provenance changes trigger re-derivation rather than
+silent reuse.
 
-The AI-provider rows are also settable in the **Settings (⚙)** panel; the
-per-user `autoshop.local.json` overrides the environment. The two sidecar knobs
-(`AUTOSHOP_PYTHON`, `AUTOSHOP_DENOISE_MODEL`) are environment-only.
+### Lens correction and mask-coordinate transport
 
-| Variable | Default | Purpose |
-|----------|---------|---------|
-| `OPENAI_API_KEY` | — | image (vision) advisor + generative key |
-| `AUTOSHOP_OPENAI_MODEL` | `gpt-5.5` | image/vision model id |
-| `AUTOSHOP_OPENAI_BASE_URL` | `https://api.openai.com/v1` | image API base (any OpenAI-compatible) |
-| `AUTOSHOP_OPENAI_IMAGE_MODEL` | `gpt-image-1.5` | generative (retouch/reimagine) model |
-| `AUTOSHOP_ANALYSIS_PROVIDER` | `oauth` | verifier provider: `oauth` (claude CLI) or `api` |
-| `AUTOSHOP_ANALYSIS_MODEL` | `opus` | verifier model (claude alias for oauth; chat id for api) |
-| `AUTOSHOP_ANALYSIS_API_KEY` | — | verifier key when provider = `api` |
-| `AUTOSHOP_ANALYSIS_BASE_URL` | `https://api.openai.com/v1` | verifier API base when provider = `api` |
-| `AUTOSHOP_IMAGE_EFFORT` | — | image-role reasoning effort; blank ⇒ the provider decides |
-| `AUTOSHOP_ANALYSIS_EFFORT` | — | verifier reasoning effort; blank ⇒ the provider decides |
-| `AUTOSHOP_DATA_DIR` | `%LOCALAPPDATA%/autoshop` | the develop store root (recipes, XMP, versions, mask rasters) |
-| `AUTOSHOP_PYTHON` | `python` | interpreter for the ML sidecars (denoise / segment / embed) |
-| `AUTOSHOP_DENOISE_MODEL` | `color_real_psnr` | default SCUNet weights |
-| `AUTOSHOP_EMBED_SCRIPT` | bundled `python/embed.py` | style-embedding sidecar (SigLIP 2) |
-| `AUTOSHOP_STYLE_EMBED` | off | opt in to SigLIP 2 style embeddings — the first run downloads **1.50 GB** of weights, so this is never taken without being asked |
-| `AUTOSHOP_STYLE_EMBED_WEIGHT` | `2.0` | weight of the embedding block in the retrieval distance; `0` reproduces the pre-embedding ranking exactly. **Not calibrated** — the value was chosen, not measured |
-| `AUTOSHOP_EMBED_FP32` | off (i.e. half precision is ON) | force the embedding sidecar to load in fp32. Half precision halves the model on the GPU (1.50 → 0.75 GB) and is a no-op on CPU; the vector is still normalised in fp32, so nothing the Rust side checks changes. Set this to reproduce an index built before v0.34.0 in exactly the arithmetic it was built with |
+`src/lensmeta.rs` reads camera metadata corrections, including Sony tag 0x7037
+distortion as a 16-sample piecewise-linear spline; the related camera knots are
+applied during render. `src/lcp.rs` reads Adobe `.lcp` perspective polynomials
+and solves their inverse for Lightroom mask-coordinate transport when camera
+knots are unavailable, while refusing unsupported fisheye profiles.
 
----
+Measurements against real Lightroom exports showed that brush masks are
+rasterized before lens correction while radial masks are interpreted after it.
+`src/render.rs` and `src/xmp.rs` therefore transport mask coordinates through
+the engine's inverse geometry model instead of treating every mask as if it
+lived in one frame; the measured probe lands within 0.3 px.
 
-## Honest scope
+### Lightroom sidecar round-trip
 
-- **Render ops are tasteful approximations of Lightroom, not bit-exact.** Which
-  control is *rendered*, *carried* or *passed through verbatim* is stated per
-  control — see [the honesty model](#the-honesty-model-is-a-feature).
-- **Radial masks have named remaining gaps.** `crs:Roundness` and `crs:Midpoint`
-  are carried and never rendered — and as of v0.35.0 that is *measured*, not
-  assumed: hand-authored `Roundness` −100 / 0 / +100 and `Midpoint` 0 / 50 / 100
-  probes render identically, several of the pairs byte-for-byte over the whole
-  frame. What is still unsampled is a second ellipse geometry, the values
-  strictly between those endpoints, and `Roundness` combined with a rotation.
-  A sidecar that
-  declares no frame size still exports a rotated radial *unrotated*, because the
-  pixel↔normalised fold needs the aspect — and the save says so in those words.
-  The feather falloff is no longer a law at all: four rounds of measurement
-  refuted three successive closed forms, so the engine now renders Lightroom's
-  **measured** α(ρ) out of a table — 290 ρ bins × 11 feather columns, with
-  `Feather = 0` kept as an analytic hard edge. What is still open there is
-  named in the table's own provenance: the support radius is **√2** (the two
-  earlier readings, 1.43 and 1.4335, are excluded by four instruments that do
-  not depend on the falloff's shape), the narrowest rung's far tail is
-  unresolved, aspect-ratio invariance has been checked on exactly one extra
-  ellipse aspect at one feather value, and *between* columns is still
-  unmeasured at the narrow end.
-- **Radial masks with feather ≥ 10 render differently from v0.35.0.** The
-  falloff moved from a fitted smoothstep to the measured table described above;
-  at Feather 100 the old law painted 2.08× the area Lightroom does. Feather 0 is
-  byte-identical, and version snapshots keep the earlier render.
-- **Brush masks are drawn from v0.35.0, where they used to be inert.** Every
-  recipe holding a Lightroom brush mask renders differently — that arm answered
-  a literal zero from v0.33.0 until now. The alpha is Autoshop's measured model
-  of Lightroom's brush, not Adobe's rasteriser, and both directions say so by
-  name.
-- **Negative `Texture` was re-shaped in v0.35.0.** The second change of shape on
-  this branch: it is now two low-passes mixed in parallel against 45 measured
-  Lightroom anchors, so any recipe with a negative texture value — global or
-  per-mask — renders differently from v0.34.0.
-- **Every mask moved half a pixel in v0.35.0.** Radial, linear, brush, bitmap
-  and AI masks alike now sample at pixel *centres* (`(x + 0.5)/w`), which is
-  where Lightroom samples: measured on two different negatives, and worth
-  exactly 0.5 px up and to the left, on every frame, at every feather.
-- **Subject masks are all re-derived once on v0.35.0.** The subject backend is a
-  commit-pinned BiRefNet, with U²-Net as a named fallback when a machine cannot
-  run it; the cache key carries the backend generation, so each subject alpha is
-  recomputed on the first develop after the upgrade. A mask that was produced by
-  the fallback is re-derived again by itself once the machine can run the
-  better model, and the run says so.
-- **Imported radial geometry changed in v0.33.0.** Previous builds dilated every
-  imported radial by 3.2 %. They now render at the sidecar's stored geometry.
-  Renders of the same recipe differ across that boundary; version snapshots keep
-  the old one.
-- **Radial and linear masks moved again in v0.35.0, on lens-corrected frames.**
-  Lightroom rasterises those shapes *after* its lens correction and a brush
-  *before* it; the engine now reads each in its own frame instead of both in
-  one. Where a lens profile is active this lands the shape within 0.3 px of
-  where Lightroom puts it, against 8–24 px before.
-- **Angled linear-mask falloff changed in v1.0.0.** Linear endpoints remain
-  normalized in the recipe, but their dot product now uses the frame's pixel
-  aspect ratio. Axis-aligned and square-frame gradients are byte-stable; an
-  angled gradient on the 9504x6336 probe moved from an 874 px-class half-
-  contour error to 9.8 px. Radial, brush, and AI paths are unchanged.
-- **Every Sony ARW render moved by (32, 20) px in v0.32.0.** The develop window
-  now starts at the RAW's own `DefaultCropOrigin`, where the camera and Lightroom
-  put the picture, instead of the sensor's top-left corner.
-- **Forward compatibility breaks at v0.33.0.** A v0.32.0 binary **hard-refuses**
-  a v0.33.0 recipe carrying a 90° rotation, a brush mask or an AI mask — a loud
-  schema refusal by design, never a silent drop. Recipes using none of those
-  serialise byte-identically and stay readable both ways.
-- **v0.34.0 changes no recipe schema at all.** A v0.33.0 binary reads a v0.34.0
-  recipe and vice versa; what changed is renders (X-Trans colour, negative
-  texture, the ≥138.5 MP RAW refusal) and the AI-mask cache key, which simply
-  re-derives each alpha once on the first develop.
-- **Forward compatibility breaks again at v0.35.0.** The recipe's lens-profile
-  block gained the solved mask warp — the coordinate frame a mask is placed in
-  — and that block is written on **every** recipe, so a v0.34.0 binary
-  hard-refuses **any** `recipe.json` a v0.35.0 binary saved, not only ones with
-  a lens profile in them. It is a loud refusal by design: silently dropping a
-  coordinate frame is the one failure a mask cannot survive. That is the third
-  such break on this branch. Reading the other direction is unaffected —
-  v0.35.0 opens everything older and renders it as it did.
-- **AI denoise runs on the demosaiced RGB**, not the raw Bayer mosaic like Adobe
-  Denoise, and takes ~3 min for a 60 MP frame on an RTX 4060 Ti. Excellent, not
-  identical to Adobe.
-- **Kelvin white balance is absolute only on a RAW**, where the as-shot
-  temperature is read from camera metadata. A baked PNG/TIFF has no as-shot
-  reading, so the slider anchors at 5500 K and acts as a relative shift — it
-  moves pixels, it just cannot claim to be the scene's true colour temperature.
-- **The blackbody curve behind the Temp slider was repaired**, and that changed
-  white-balance gains. The published piecewise fit's branches did not meet: at
-  6600 K green jumped 1.31 % and blue 0.96 %, and red sat clamped flat from 6600
-  to 6688 K, so an 88 K band carried no temperature signal at all. Measured
-  against a 5500 K shot, as the change in each channel's gain:
+[`src/xmp.rs`](src/xmp.rs) is a hand-written sidecar reader/writer designed
+around conservative round trips: replace fields Autoshop owns, preserve
+unmodeled document content, and refuse unsupported semantics rather than
+silently flattening them.
+`src/pipeline.rs` connects that layer to the recipe/version store. The reader
+also imports Lightroom's sibling `MaskBrushTable`, validates its structure, and
+Brotli-decodes brush dab groups for the measured renderer; AI selection intent
+round-trips, but proprietary computed alpha is re-derived locally.
 
-  | Temp target | red | blue |
-  |---|---|---|
-  | 2000 K (candle — the slider's floor) | 0 % | **−4.43 %** |
-  | 2500 K | 0 % | −0.67 % |
-  | 3000–5000 K | 0 % | −0.32 % … −0.03 % |
-  | 6500 K and below | **0 %** | +0.03 % |
-  | above 6600 K (any cool target) | **+3.19 %** | **+2.35 %** |
+### AI proposal, style fit, and generation
 
-  Re-exports of older work at those settings will differ by that much, and this
-  change has **not** had visual acceptance.
-- **Generative `reimagine` is a low-res, lossy re-render** — an experiment, not
-  a master. `retouch` regenerates only the masked region and composites it back
-  onto the source's own develop with a feathered seam, so the rest of the frame
-  keeps its original pixels. That base is the **engine's own neutral develop**,
-  capped at 2048 px on the long edge by default, never the camera's embedded
-  JPEG. `--full-res` composites at full resolution instead (slow).
-- **Pixel heal removes only small defects** — dust, blemishes, specks — by
-  sampling surrounding real pixels. Best on fairly uniform backgrounds (sky,
-  skin, wall, water); busy backgrounds heal approximately. AI auto-detection
-  needs the vision key; painting a mask works offline.
-- **Export-at-size is one knob, not an export panel.** `apply`, `auto` and
-  `batch --render` take `--long-edge N` (Lanczos3, aspect kept, never enlarged,
-  `0` = full resolution), applied to the finished pixels after a full-resolution
-  develop. That is the whole CLI delivery surface: JPEG quality, output
-  sharpening, 8-bit TIFF/PNG and the Display P3 / Adobe RGB delivery spaces are
-  all things the engine can do and only the desktop **Export** panel exposes, so
-  a CLI-only workflow still gets q95 sRGB and nothing else. `denoise` has no
-  size flag on purpose — its output is a master, not a deliverable.
+`src/advisor/mod.rs` turns the vision proposal into a bounded `EditRecipe`, and
+`src/advisor/claude.rs` supplies the Claude-based data-only verifier; pixels are
+not sent to that verifier. `src/style.rs` indexes prior RAW+XMP edits and
+retrieves similar examples, optionally with local SigLIP 2 embeddings.
 
----
+`src/fit.rs` performs inverse rendering for `match`: luminance-CDF matching,
+exposure search, regularized engine-basis fitting and a residual tone curve are
+followed by closed-loop saturation and gated cast curves. `src/generative.rs`
+supports the configured `gpt-image-2` used for the Part B reimagine; generation
+produces a lossy target, while fit/apply returns an editable deterministic
+full-resolution approximation. Style indexes, develop state, and segmentation
+alphas are cached locally.
 
-## Tech
+### Application and infrastructure
 
-Rust (rustc/cargo 1.94, edition 2024) · `rawler` (RAW decode, 24 formats /
-725 bodies) · `image` (pure-Rust codecs, opt-in one at a time) · `qcms` (ICC →
-sRGB for baked imports) · `rayon` (row-parallel per-pixel stages) · `clap` ·
-`serde` · `ureq` · `eframe`/`egui` (desktop GUI) · `tiny_http` (local web UI,
-one `include_str!`'d HTML file, zero build step, zero CDN) · a hand-rolled XMP
-reader/writer with no XML crate, because a Lightroom sidecar must be *merged
-into*.
+Rust (rustc/cargo **1.94**, edition 2024) · rawler (RAW decode, 24 formats / 725 bodies) ·
+`image` and `qcms` for raster/color I/O · `rayon` for row-parallel stages ·
+`clap`, `serde`, and `ureq` · `eframe`/`egui` for the desktop GUI · `tiny_http`
+for `serve`. The embedded web UI is compiled with `include_str!`, so it has no
+runtime CDN or frontend build step.
 
-Six ML models run locally through three Python sidecars, none of them shipped
-in this repository — the weights are fetched on first use and pinned:
+The [`build` workflow](.github/workflows/build.yml) builds and tests the default
+and GUI feature sets on Ubuntu and macOS. The current battery is **857 library (9 `#[ignore]`d forensic probes) / 14 CLI / 132 GUI / 2+2 contract** tests, and both default and GUI Clippy runs are clean. The
+[`scripts/check_docs.py`](scripts/check_docs.py) release gate re-derives pinned
+version, format, camera, dependency, toolchain, and battery claims from the
+tree.
 
-| model | job | licence |
-|---|---|---|
-| **SCUNet** ×5 | AI denoise | Apache-2.0 (KAIR) |
-| **BiRefNet** (general) | subject segmentation | MIT |
-| **U²-Net** | subject segmentation — fallback tier | Apache-2.0 |
-| **OneFormer** ADE20K Swin-L | sky segmentation | MIT |
-| **SAM 2.1** Hiera-Large | point-prompted object masks | Apache-2.0 |
-| **SigLIP 2** base/16 @384 | style embeddings (opt-in) | Apache-2.0 |
+Local ML sidecars use SCUNet for denoise, BiRefNet/U²-Net for subject masks,
+OneFormer for sky, SAM 2.1 for object prompts, and optional SigLIP 2 for style
+embeddings. Model weights are not stored in this repository.
 
-Licence is a selection criterion here, not a footnote: candidates whose model
-cards restrict *use* were passed over even though the weights are never
-redistributed — and in each case the licence-clean option was also the stronger
-model.
+## Status and roadmap
 
-**See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) §5** for the complete
-dependency list with each entry's reason, the two-tier weight-pinning policy,
-and the rest of the design.
+Release gates at v0.35.0 cover the CLI, desktop GUI, sidecar contracts, format
+fixtures, deterministic renderer, and documented binary hashes. Prebuilt
+artifacts are Windows-only; CI checks source builds on Ubuntu and macOS, while
+interactive use there remains less exercised.
 
----
+Current honesty markers include the approximate X-Trans path, locally
+re-derived rather than Adobe-identical AI masks, measured-but-not-bit-exact
+Lightroom rendering parity, and lossy generated reimagine targets. Older
+recipes remain readable; v0.35.0 recipes contain lens-coordinate provenance
+that older binaries cannot safely ignore and therefore refuse.
 
-## Credits & licences
+See [docs/ROADMAP.md](docs/ROADMAP.md) for planned work and
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for subsystem boundaries and
+dependency rationale.
+
+## License and acknowledgements
 
 **Autoshop is MIT-licensed** — see [LICENSE](LICENSE).
 
-**RAW format samples.** The nine files behind the format strip come from the
-[raw.pixls.us](https://raw.pixls.us/) community sample repository and are all
-licensed **CC0 1.0 Public Domain**
-(<https://creativecommons.org/publicdomain/zero/1.0/>). Only CC0 rows of that
-index were eligible; every sha256 was verified against the index before use.
+### RAW format samples
 
-| format | camera | MP | sample |
-|---|---|---|---|
+The nine files behind the format grid come from the
+[raw.pixls.us](https://raw.pixls.us/) community sample repository under CC0
+1.0 Public Domain. The recorded sample SHA-256 values were verified against
+that index before use.
+
+| Format | Camera | MP | Sample |
+|---|---|---:|---|
 | CR2 | Canon EOS 40D | 10.08 | `RAW (3:2)` |
 | CR3 | Canon EOS R6 | 19.96 | `3:2` |
-| NEF | Nikon D700 | 12.2 | `14bit 14bit compressed (Lossless) (3:2)` |
-| RAF | Fujifilm X-S10 | 26.7 | `14bit 14bit compressed (3:2)` |
+| NEF | Nikon D700 | 12.2 | `14bit compressed (Lossless) (3:2)` |
+| RAF | Fujifilm X-S10 | 26.7 | `14bit compressed (3:2)` |
 | ORF | Olympus E-M5 | 16.11 | `16bit (4:3)` |
 | RW2 | Panasonic DMC-GX85 | 15.9 | `4:3` |
 | PEF | Pentax K-5 | 16.39 | `14bit (3:2)` |
 | DNG | Ricoh GR II | 16.27 | `12bit (3:2)` |
-| ARW | Sony ILCE-7M3 | 24.34 | `14bit 14bit compressed (3:2)` |
+| ARW | Sony ILCE-7M3 | 24.34 | `14bit compressed (3:2)` |
 
-**Showcase photographs** (`_DSC9706`, `_DSC9711`, `_DSC9712`) are the author's
-own, shot on a Sony A7R V — **© 2026 skymanbp, all rights reserved**. Unlike
-the code, these images are **not** MIT-licensed: they are included solely to
-document Autoshop's output and may not be reused without permission. Each file
-carries a visible watermark and embedded copyright metadata on purpose.
+### Showcase photographs
 
-**Fonts.** The GUI bundles subset Noto faces under the SIL Open Font License —
-see [`assets/fonts/`](assets/fonts/) for each licence text.
+The showcase photographs are the author's own Sony α7R IVA frames — © 2026
+skymanbp, all rights reserved. They are included only to document Autoshop's
+output and are not covered by the software's MIT license. The three established
+before/after pairs retain their matching visible watermarks and embedded
+copyright metadata; the newer composed cat/style/reimagine JPEGs omit EXIF and
+do not add a watermark.
 
-**Model weights** are the property of their respective authors under the
-licences in the table above; none of them are redistributed by this project.
+### Fonts and model weights
+
+The GUI bundles subset Noto faces under the SIL Open Font License; license texts
+are under `assets/fonts/`. Model weights are downloaded separately and remain
+the property of their authors; none are redistributed in this repository.
+
+| Model | Purpose | License |
+|---|---|---|
+| SCUNet | AI denoise | Apache-2.0 |
+| BiRefNet | Subject segmentation | MIT |
+| U²-Net | Subject fallback | Apache-2.0 |
+| OneFormer ADE20K | Sky segmentation | MIT |
+| SAM 2.1 | Point-prompted object masks | Apache-2.0 |
+| SigLIP 2 | Optional style embeddings | Apache-2.0 |
+
+The project acknowledges the rawler, image, qcms, rayon, clap, serde, ureq,
+egui/eframe, tiny_http, and local-model communities whose work makes these
+pipelines possible.
