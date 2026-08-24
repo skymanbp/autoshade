@@ -1,7 +1,10 @@
 # ROADMAP — “一定程度直接取代 Photoshop” 路线（v0.5.0 之后 · UX 阶段）
 
 > 交接文档：每项都附实现要点与 `file:line` 锚点，供新会话不重读全库即可
-> 开工。更新于 2026-08-22（**v0.35.0 已发布 2026-08-21**，tag → `e75f728`，
+> 开工。更新于 2026-08-24（**v1.0.0 已发布 2026-08-24**，tag → `9128cff`，
+> 四资产回下载字节验证——硬变更/schema 断裂清单见本文件尾「v1.0.0 发版义务
+> 清单」与 docs/RELEASE_NOTES_v1.0.0.md；官网 autoshop-d7w.pages.dev；
+> 此前 **v0.35.0 已发布 2026-08-21**，tag → `e75f728`，
 > 两 exe 字节验证——七项渲染/兼容硬变更清单见发版说明置顶与「当前状态」
 > 发布条；**R30 全池 11 项用户拍板开工 2026-08-22**，见「当前状态」首条；
 > 此前横幅（2026-08-21 前写，含「发版链未跑」旧句）为
@@ -192,6 +195,50 @@
 
 ## 当前状态（已完成，勿重做）
 
+- **🎉 v1.0.0 已发布（2026-08-24，tag `v1.0.0` → `9128cff`，release 四资产
+  回下载字节比对全同）**。发版链：W5 批在 8dbcd57 上跑门（clippy 0、
+  871(862+9i)/14/132/2+2 隔离根、check_docs 23P0F）→ `cargo build
+  --release` 双目标入 dist（CLI 打印 `autoshop 1.0.0`；GUI 不探针）→
+  `build_installer.ps1` 无覆盖 → 便携 zip 与安装包同构 27 文件 → 公开文档
+  定稿（README 资产表四行+安装/便携两法、发版说明校验表、bug 模板 v1.0.0、
+  内部术语 W4/W5/TBD/Deferred 零残留）；沙箱 .git 只读故 commit/tag 由主审
+  完成（`release: v1.0.0` 9128cff + 注释 tag），`gh release create` 四资产
+  +`--notes-file docs/RELEASE_NOTES_v1.0.0.md`。**资产（主审复算+回下载
+  cmp 全同）**：`autoshop.exe` 31,180,152 B `116a3841…68c0`；
+  `autoshop-gui.exe` 40,810,704 B `847f42c4…58ce`；
+  `Autoshop-Setup-1.0.0.exe` 19,768,387 B `28c4acd3…4750`；
+  `autoshop-1.0.0-windows-x64.zip` 27,131,443 B `47389ed4…717e`。硬变更/
+  schema 断裂/精度披露全文见本文件尾「v1.0.0 发版义务清单（终稿）」与发版
+  说明；M1/V2_PLAN 快照 `~/.claude/plans/autoshop-ledger-snapshots/
+  2026-08-24/`。**同日全程**：D2 线性判决失败→H2 机理→修复 ad6de62；W3
+  README 53bb77f；官网 autoshop-d7w.pages.dev 上线（8b99111/237b8cc）；
+  Inno 183b5b0；W4 8dbcd57。余：自定义域 skymanbp-autoshop.dev 待 zone
+  接入、④ GUI 目检（可用安装包）、登记跟进（linear_handle_unwarp_norm 去
+  重、R2 大蒙版 ≈1.2pp、图心齐备渲染候选、线性 1px 孤立网格素材、
+  check_docs --gates 双配置转录）。
+- **🎯 v1.0.0 程序三线落地：W6 官网上线 + Inno 安装脚本 + W4 全文彻查
+  （2026-08-24；Codex 额度见顶阵亡一次后续做重派完成）**。**W6**：`site/`
+  静态站（8b99111，零 JS/CDN/字体/分析，CSP `script-src 'none'`，含技术栈
+  section，资产与 docs/images 字节同源，主审独立验证零问题）；部署走
+  CodeEraser 同款 `scripts/deploy_site.js`（母 token 铸 1 小时 Pages Write
+  临时 token→wrangler→finally 销毁，237b8cc）；Pages 项目 `autoshop` 经
+  API 直建（wrangler create 需 memberships 权限会失败）；**已上线
+  `autoshop-d7w.pages.dev`**（首部署预览 1b4e25b2.…），25/25 发布文件与本地
+  字节一致、安全头生效；自定义域 skymanbp-autoshop.dev 待 zone 接入。教训：
+  母 token 仅 API Tokens Write、/accounts 为空是常态，勿误判「账户未启用
+  Pages」。**Inno**（183b5b0）：`installer/autoshop.iss`+`scripts/
+  build_installer.ps1`（PS5.1、每用户 x64、27 文件载荷按 config.rs 程序树解
+  析/build.rs 内嵌/README 契约核定、权重与测试排除、安全 PATH 任务、卸载留
+  develop store、输出 target/installer）；对 0.35.0 dist 实跑产出
+  19,761,632 B SHA 98ffa1a1…（主审复算同），安装包未执行。**W4**（本条
+  提交）：版本推 1.0.0、电池 871(862+9i)/14/132/2+2、README/ARCHITECTURE/
+  V2_PLAN 帧法与 schema 披露对源、`## v1.0.0 发版义务清单（终稿）` 附于本
+  文件尾、`docs/RELEASE_NOTES_v1.0.0.md` 英文草稿、check_docs 23→26 行
+  （RAW 成员/无预览成员/ARCH-README 电池一致三行，各变异红绿）+`latest_
+  published_version` 预发布桥；资产表四格与安装包行留 W5。门主审亲跑见
+  提交说明。**下步 W5**：build release→dist→`build_installer.ps1`→tag
+  v1.0.0→release（两 exe+安装包+发版说明）→回下载字节比对→README/发版
+  说明资产表→消除 W4/W5 内部术语→台账。
 - **🎯 D2 线性 H2 修复批已落地（2026-08-24，feat 见本条提交；用户拍板
   「全改」两路）：线性蒙版帧法与径向拆分**。`MaskFrame` 三态=
   WarpedDownstream（径向 `MaskUnwarp::at` = m_lr⁻¹∘T_engine **字节未
@@ -255,48 +302,6 @@
   1.56%@0.288 非单调）=机理开放，两张 v2 导出在手可续分析。**待拍
   板**：撤线性接线（回存储渲染）继续 v1.0.0 vs 先追线性机理。批纪
   律：估计器固定双臂同跑、armB 未扣共模、闸未动、仓库树净 706ac84。
-- **🎯 D2 修复批已落地（2026-08-24，feat 见本条提交）：LR 蒙版几何零参
-  数模型实装**。Sony 畸变结原生域 (i+1)/16 在 lensmeta 边界重采样
-  2048 结（**限蒙版求解**；渲染样条经配准闸有据保持）+ mask_warp 图心
-  =全帧中心−DCO（`LensProfile.mask_warp_center` 新字段=schema 硬前向断
-  裂，v1.0.0 窗口）+ 输出表 16→64 结（clamp `truncate(32)` 会砍 64 结
-  的旧洞同笔堵）+ `MaskUnwarp` 改双图恰一次组合 m_lr⁻¹∘T_engine（数学
-  论证=集合 {p:T_engine(p)∈m_lr(shape)} 导出恰落 m_lr(stored)）。门主
-  审亲跑：**857(9i)/14/132/2+2 全绿**（集差恰 +5 具名：lensmeta 重采样
-  契约/41 向量零参夹具/图心/组合恰一次/实栅格化 wired 落点）、clippy
-  0、**三变异亲手红→绿**（落位回退/图心回退/16 结回退=G3 1.0095px 恰
-  破 1px 闸）。**渲染侧配准闸**：仅换结候选使墙面 RMS 2.83→3.62 被拒、
-  渲染字节不变（SHA D6B721…/BE4950…）——但该候选未含图心移位、左好右
-  坏签名与蒙版侧同构⇒**登记跟进：图心齐备的渲染候选未测**。精度披露：
-  点 ≤1px/洁净膨胀 ≤0.35pp/R1≈0.5pp/R2 大蒙版 ≈1.2pp 超额=独立开口。
-  105mm B3 与 wired 0.09-0.30px 幸存论证在批报告 §6（归档
-  `~/.claude/plans/r30-materials/task-d2-fix-report.md`）。**⚠v1.0.0 义
-  务**：含径向/线性蒙版+相机元数据镜头档案的配方渲染全变+schema 前向
-  断裂（旧 exe 拒读带 mask_warp_center 的新 recipe）。台账拆分第二批：
-  轮 7a 及更早 12 条逐字迁入 docs/ROADMAP-archive.md（主文件保近五条）。
-- **🎯 v1.0.0 程序三线落地：W6 官网上线 + Inno 安装脚本 + W4 全文彻查
-  （2026-08-24；Codex 额度见顶阵亡一次后续做重派完成）**。**W6**：`site/`
-  静态站（8b99111，零 JS/CDN/字体/分析，CSP `script-src 'none'`，含技术栈
-  section，资产与 docs/images 字节同源，主审独立验证零问题）；部署走
-  CodeEraser 同款 `scripts/deploy_site.js`（母 token 铸 1 小时 Pages Write
-  临时 token→wrangler→finally 销毁，237b8cc）；Pages 项目 `autoshop` 经
-  API 直建（wrangler create 需 memberships 权限会失败）；**已上线
-  `autoshop-d7w.pages.dev`**（首部署预览 1b4e25b2.…），25/25 发布文件与本地
-  字节一致、安全头生效；自定义域 skymanbp-autoshop.dev 待 zone 接入。教训：
-  母 token 仅 API Tokens Write、/accounts 为空是常态，勿误判「账户未启用
-  Pages」。**Inno**（183b5b0）：`installer/autoshop.iss`+`scripts/
-  build_installer.ps1`（PS5.1、每用户 x64、27 文件载荷按 config.rs 程序树解
-  析/build.rs 内嵌/README 契约核定、权重与测试排除、安全 PATH 任务、卸载留
-  develop store、输出 target/installer）；对 0.35.0 dist 实跑产出
-  19,761,632 B SHA 98ffa1a1…（主审复算同），安装包未执行。**W4**（本条
-  提交）：版本推 1.0.0、电池 871(862+9i)/14/132/2+2、README/ARCHITECTURE/
-  V2_PLAN 帧法与 schema 披露对源、`## v1.0.0 发版义务清单（终稿）` 附于本
-  文件尾、`docs/RELEASE_NOTES_v1.0.0.md` 英文草稿、check_docs 23→26 行
-  （RAW 成员/无预览成员/ARCH-README 电池一致三行，各变异红绿）+`latest_
-  published_version` 预发布桥；资产表四格与安装包行留 W5。门主审亲跑见
-  提交说明。**下步 W5**：build release→dist→`build_installer.ps1`→tag
-  v1.0.0→release（两 exe+安装包+发版说明）→回下载字节比对→README/发版
-  说明资产表→消除 W4/W5 内部术语→台账。
 ## 关键架构事实（新会话必读）
 
 > gui.rs 已于第十二轮拆为 `src/bin/gui/*` 模块树（app/actions/canvas/
