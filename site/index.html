@@ -1,0 +1,411 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Autoshop — AI-assisted RAW development</title>
+  <meta name="description" content="Autoshop is a non-destructive photo developer where AI proposes inspectable edits and a deterministic Rust engine renders them.">
+  <link rel="canonical" href="https://skymanbp-autoshop.dev/">
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="Autoshop">
+  <meta property="og:title" content="Autoshop — AI-assisted RAW development">
+  <meta property="og:description" content="AI decides what to change. A deterministic Rust engine does it.">
+  <meta property="og:url" content="https://skymanbp-autoshop.dev/">
+  <meta property="og:image" content="https://skymanbp-autoshop.dev/images/showcase-cat-analyze-pair.jpg">
+  <meta property="og:image:alt" content="A neutral Sony α7R IVA cat photo beside its AI-proposed Autoshop develop">
+  <meta name="theme-color" content="#f5f1e9" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#101817" media="(prefers-color-scheme: dark)">
+  <link rel="icon" type="image/png" href="favicon.png">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <a class="skip-link" href="#main-content">Skip to content</a>
+
+  <header class="site-header">
+    <div class="header-inner">
+      <a class="brand" href="#top" aria-label="Autoshop home">
+        <img src="favicon.png" width="40" height="40" alt="Autoshop icon">
+        <span>Autoshop</span>
+      </a>
+      <nav aria-label="Primary navigation">
+        <a href="#overview">Overview</a>
+        <a href="#download">Download</a>
+        <a href="#showcase-a">Showcase</a>
+        <a href="#formats">Formats</a>
+        <a href="#technology">Technology</a>
+        <a href="#docs">Docs</a>
+      </nav>
+      <a class="header-repo" href="https://github.com/skymanbp/autoshop">GitHub</a>
+    </div>
+  </header>
+
+  <main id="main-content">
+    <section class="hero section" id="top" aria-labelledby="hero-title">
+      <div class="hero-copy">
+        <p class="eyebrow">Open source · Non-destructive · Deterministic</p>
+        <h1 id="hero-title">AI-assisted automatic development of RAW photographs.</h1>
+        <p class="hero-lede">An AI decides <em>what to change</em>. A deterministic Rust engine <em>does</em> it. In the recipe-development path, the AI never touches a pixel.</p>
+        <div class="actions">
+          <a class="button button-primary" href="https://github.com/skymanbp/autoshop/releases/latest">Download latest release</a>
+          <a class="button button-secondary" href="https://github.com/skymanbp/autoshop">View source</a>
+        </div>
+        <dl class="hero-facts">
+          <div>
+            <dt>Develop path</dt>
+            <dd>Editable recipes</dd>
+          </div>
+          <div>
+            <dt>Renderer</dt>
+            <dd>Shared Rust engine</dd>
+          </div>
+          <div>
+            <dt>License</dt>
+            <dd>MIT</dd>
+          </div>
+        </dl>
+      </div>
+      <figure class="hero-figure">
+        <img src="images/showcase-cat-analyze-pair.jpg" width="1600" height="594" alt="Sony α7R IVA ARW: neutral cat photo beside its AI analyze develop">
+        <figcaption><strong>AI analyze develop.</strong> Sony α7R IVA <code>.ARW</code>, 61 MP: neutral engine conversion at left; AI-proposed crop, global tone, a radial cat lift, and a linear water hold at right. The model judge moved from 62 to 86; that score is automated review, not human aesthetic approval.</figcaption>
+      </figure>
+    </section>
+
+    <section class="section prose-intro" id="overview" aria-labelledby="overview-title">
+      <p class="section-kicker">What it is</p>
+      <h2 id="overview-title">A small recipe between the model and your photograph.</h2>
+      <p class="section-lede">Autoshop is a non-destructive photo developer for RAW and baked images. Its main workflow turns an AI proposal into a small, inspectable <code>EditRecipe</code>, then applies that recipe with the same local Rust renderer used by the desktop app, CLI, and embedded web UI.</p>
+
+      <div class="feature-grid">
+        <article>
+          <h3>One develop engine</h3>
+          <p>Exposure, white balance, curves, HSL, color grading, texture, clarity, dehaze, detail, crop, and lens-aware local adjustments render through one deterministic engine.</p>
+        </article>
+        <article>
+          <h3>Editable AI proposals</h3>
+          <p><code>analyze</code> and <code>auto</code> propose recipes, validate them against image statistics, render them, and can run one bounded visual-review revision.</p>
+        </article>
+        <article>
+          <h3>Local masks</h3>
+          <p>Linear, radial, brush, luminance-range, and color-range masks sit alongside local subject, sky, and point-prompted object selection.</p>
+        </article>
+        <article>
+          <h3>Sidecars both ways</h3>
+          <p>Lightroom/ACR sidecars round-trip with conservative merge behavior for fields Autoshop does not model.</p>
+        </article>
+        <article>
+          <h3>Versions and variants</h3>
+          <p>Ordinary develops, generated targets, and reverse-fitted looks remain distinct without rewriting the source photo.</p>
+        </article>
+        <article>
+          <h3>Three front ends</h3>
+          <p>The desktop GUI, scriptable CLI, and small local web UI all use the same library.</p>
+        </article>
+      </div>
+
+      <aside class="honesty" aria-label="Pixel provenance note">
+        <strong>Know which path you are using.</strong>
+        <p>The core develop path never invents scene content. Local SCUNet denoise, generative reimagine/retouch, and pixel heal are explicit opt-in exceptions; the UI distinguishes generated pixels from engine-rendered develops.</p>
+      </aside>
+    </section>
+
+    <section class="section split-section" id="download" aria-labelledby="download-title">
+      <div>
+        <p class="section-kicker">Download</p>
+        <h2 id="download-title">Start with the latest release.</h2>
+        <p>The documented release provides both Windows front ends: <code>autoshop.exe</code> for the CLI and <code>autoshop-gui.exe</code> for the desktop app. Linux and macOS are built and tested in CI, but prebuilt binaries are not published for them.</p>
+        <p><a class="button button-primary" href="https://github.com/skymanbp/autoshop/releases/latest">Open GitHub Releases</a></p>
+        <p class="quiet">Extract the release archive and keep the executable beside its bundled assets and Python sidecars.</p>
+      </div>
+      <div class="quickstart" aria-labelledby="quickstart-title">
+        <h3 id="quickstart-title">Quickstart</h3>
+        <h4>Desktop</h4>
+        <ol>
+          <li>Start <code>autoshop-gui</code>.</li>
+          <li>Choose <strong>Open photo…</strong>, press <kbd>Ctrl</kbd>+<kbd>O</kbd>, or drag in a supported photo.</li>
+          <li>Move a Develop slider and compare it with the neutral conversion.</li>
+          <li>Press <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>E</kbd> to export a copy. The original remains untouched.</li>
+        </ol>
+        <h4>CLI</h4>
+        <pre><code>autoshop decode "photo.ARW" -o "preview.jpg"
+autoshop apply "photo.ARW" "recipe.json" -o "developed.tif"</code></pre>
+        <p>With the image/vision role configured:</p>
+        <pre><code>autoshop auto "photo.ARW" --guidance "natural color; protect highlights" -o "developed.tif"</code></pre>
+        <p class="source-link"><a href="https://github.com/skymanbp/autoshop/blob/main/README.md#install-and-quickstart">Build and setup details in the README →</a></p>
+      </div>
+    </section>
+
+    <section class="section showcase" id="showcase-a" aria-labelledby="showcase-a-title">
+      <p class="section-kicker">Showcase · Part A</p>
+      <h2 id="showcase-a-title">AI analysis and style transfer</h2>
+      <p class="section-lede">The cat comparison above is the first <code>analyze</code> example: a Sony α7R IVA 61 MP <code>.ARW</code>, shown as straight conversion and AI develop. The AI chose the crop and a restrained global develop plus radial and linear parametric masks; it did not use an AI bitmap segmentation mask.</p>
+      <p>The three established pairs below show different decisions and two current failure modes. Each before is Autoshop's neutral conversion of the same Sony α7R IVA <code>.ARW</code>; each after is an AI-proposed engine render, not a generated image. The faint watermark is identical on both halves of these three older pairs.</p>
+
+      <article class="case-study">
+        <header>
+          <p class="case-number">01</p>
+          <div>
+            <h3><code>_DSC9706</code>: tonal range</h3>
+            <p>The proposal protected white brick while opening the porch and black wall. Its model judge moved from 84 to 86 after a bounded revision. <strong>Honest blemish:</strong> the linear sky mask leaves a faint lighter band near the top-left corner.</p>
+          </div>
+        </header>
+        <div class="image-pair">
+          <figure>
+            <img src="images/showcase-1-before.jpg" width="1200" height="768" alt="Sony α7R IVA ARW _DSC9706 neutral develop" loading="lazy">
+            <figcaption><strong>Before:</strong> neutral engine conversion.</figcaption>
+          </figure>
+          <figure>
+            <img src="images/showcase-1-after.jpg" width="1200" height="768" alt="Sony α7R IVA ARW _DSC9706 AI develop" loading="lazy">
+            <figcaption><strong>After:</strong> AI tone, white balance, crop, a linear sky hold, and a radial house lift.</figcaption>
+          </figure>
+        </div>
+      </article>
+
+      <article class="case-study">
+        <header>
+          <p class="case-number">02</p>
+          <div>
+            <h3><code>_DSC9711</code>: detail and texture</h3>
+            <p>The siding and shaded structure gain separation; the model judge moved from 78 to 84. <strong>Counter-example:</strong> the sky is paler than the neutral base even though the local mask asks for more sky depth.</p>
+          </div>
+        </header>
+        <div class="image-pair portrait-pair">
+          <figure>
+            <img src="images/showcase-2-before.jpg" width="800" height="1200" alt="Sony α7R IVA ARW _DSC9711 neutral develop" loading="lazy">
+            <figcaption><strong>Before:</strong> neutral engine conversion.</figcaption>
+          </figure>
+          <figure>
+            <img src="images/showcase-2-after.jpg" width="800" height="1200" alt="Sony α7R IVA ARW _DSC9711 AI develop" loading="lazy">
+            <figcaption><strong>After:</strong> AI texture, clarity, dehaze, tonal changes, and two linear masks.</figcaption>
+          </figure>
+        </div>
+      </article>
+
+      <article class="case-study">
+        <header>
+          <p class="case-number">03</p>
+          <div>
+            <h3><code>_DSC9712</code>: establishing scene</h3>
+            <p>Automated visual model review rejected the first acidic-green proposal at 63 and retained a revision scored 87. The landscape gains separation, but the sky is again paler and milkier than the neutral conversion; that known behavior is not captioned as an improvement.</p>
+          </div>
+        </header>
+        <div class="image-pair">
+          <figure>
+            <img src="images/showcase-3-before.jpg" width="1200" height="800" alt="Sony α7R IVA ARW _DSC9712 neutral develop" loading="lazy">
+            <figcaption><strong>Before:</strong> neutral engine conversion.</figcaption>
+          </figure>
+          <figure>
+            <img src="images/showcase-3-after.jpg" width="1200" height="800" alt="Sony α7R IVA ARW _DSC9712 AI develop" loading="lazy">
+            <figcaption><strong>After:</strong> AI global contrast, restrained color, and green/aqua HSL reductions.</figcaption>
+          </figure>
+        </div>
+      </article>
+
+      <div class="subsection-heading">
+        <p class="section-kicker">Style read</p>
+        <h3>Neutral, AI develop, and AI develop with references</h3>
+        <p>These triptychs show three states of the same Sony α7R IVA 61 MP <code>.ARW</code>: straight conversion, an AI develop with style influence disabled, and an AI develop that read similar edits from the local style library. They demonstrate the style retrieval path, not a pixel-copy or generative transfer.</p>
+      </div>
+
+      <figure class="wide-figure">
+        <img src="images/showcase-lake-style-triptych.jpg" width="1600" height="564" alt="Lake scene: straight conversion, AI develop, and AI develop with style read" loading="lazy">
+        <figcaption><strong>Lake and boat, <code>_DSC0070</code>.</strong> The style-read run referenced four similar edits from the indexed Lightroom library and was accepted. The style-off middle panel rendered under a Revise verdict and therefore has no saved recipe/XMP; it is retained only as a transparent comparison.</figcaption>
+      </figure>
+
+      <figure class="wide-figure">
+        <img src="images/showcase-sunset-style-triptych.jpg" width="1600" height="564" alt="Sunset scene: straight conversion, AI develop, and AI develop with style read" loading="lazy">
+        <figcaption><strong>Sunset, <code>DSC09938</code>.</strong> The middle panel is an accepted style-off develop. The style-read proposal at right used retrieved references and rendered at full RAW resolution, but the model judge marked it Revise (85); its attempted revision scored 84 and was discarded, so no style-read recipe/XMP was saved.</figcaption>
+      </figure>
+    </section>
+
+    <section class="section showcase part-b" id="showcase-b" aria-labelledby="showcase-b-title">
+      <p class="section-kicker">Showcase · Part B</p>
+      <h2 id="showcase-b-title">Reimagine → reverse-fit</h2>
+      <p class="section-lede">Generate a complete visual target, then fit an ordinary engine recipe to its look. The generated target can invent content; the fitted render cannot. The recovered recipe is editable and can be applied deterministically to the original full-resolution RAW.</p>
+
+      <figure class="wide-figure">
+        <img src="images/showcase-sunset-reimagine-fit-triptych.jpg" width="1600" height="564" alt="Sunset scene: neutral conversion, AI-generated target, and reverse-fitted full-resolution engine render" loading="lazy">
+        <figcaption><strong>Sony α7R IVA 61 MP <code>.ARW</code>, <code>DSC09938</code>.</strong> Left: neutral engine conversion. Center: a 3520×2352 full-image target generated with a configured <code>gpt-image-2</code>. Right: the recovered recipe rendered by Autoshop on the original RAW at 9504×6336. The statistical look error moved from 0.060 to 0.042 at fit confidence 0.746691; this is a deterministic tonal/color approximation, not a pixel-aligned reconstruction of generated detail.</figcaption>
+      </figure>
+
+      <figure class="wide-figure">
+        <img src="images/showcase-viaduct-reimagine-fit-triptych.jpg" width="1600" height="564" alt="Stone viaduct scene: neutral conversion, AI-generated target, and reverse-fitted full-resolution engine render" loading="lazy">
+        <figcaption><strong>Sony α7R IVA 61 MP <code>.ARW</code>, <code>_DSC0639</code>.</strong> Left: neutral engine conversion. Center: a 3520×2352 full-image target generated with the same configured <code>gpt-image-2</code>. Right: the recovered recipe rendered on the original RAW at 9504×6336. The statistical look error moved from 0.057 to 0.019 at fit confidence 0.678264; the fitted color-cast stage was rejected by the fit's own do-no-harm review, so the recovered recipe carries tone and saturation only.</figcaption>
+      </figure>
+
+      <aside class="honesty" aria-label="Reverse-fit limitation">
+        <strong>What reverse-fit can—and cannot—recover.</strong>
+        <p>Reverse-fit can recover global tone, saturation, and guarded color casts. It does not claim to recover local masks, generated objects or detail, or unidentifiable per-band HSL from a non-aligned target.</p>
+      </aside>
+    </section>
+
+    <section class="section" id="formats" aria-labelledby="formats-title">
+      <p class="section-kicker">Supported formats</p>
+      <h2 id="formats-title">A nine-camera RAW zoo, backed by 24 RAW extensions.</h2>
+      <p class="section-lede">Every tile below is a neutral Autoshop render of one real CC0 file—not an embedded preview. The environment-gated release suite last recorded 9/9.</p>
+
+      <div class="format-grid">
+        <figure>
+          <img src="images/formats/cr2.jpg" width="600" height="400" alt="Canon CR2 develop" loading="lazy">
+          <figcaption><strong>.cr2</strong><span>Canon EOS 40D</span></figcaption>
+        </figure>
+        <figure>
+          <img src="images/formats/cr3.jpg" width="600" height="400" alt="Canon CR3 develop" loading="lazy">
+          <figcaption><strong>.cr3</strong><span>Canon EOS R6</span></figcaption>
+        </figure>
+        <figure>
+          <img src="images/formats/nef.jpg" width="600" height="399" alt="Nikon NEF develop" loading="lazy">
+          <figcaption><strong>.nef</strong><span>Nikon D700</span></figcaption>
+        </figure>
+        <figure>
+          <img src="images/formats/arw.jpg" width="600" height="400" alt="Sony ARW develop" loading="lazy">
+          <figcaption><strong>.arw</strong><span>Sony α7 III</span></figcaption>
+        </figure>
+        <figure>
+          <img src="images/formats/orf.jpg" width="600" height="450" alt="Olympus ORF develop" loading="lazy">
+          <figcaption><strong>.orf</strong><span>Olympus E-M5</span></figcaption>
+        </figure>
+        <figure>
+          <img src="images/formats/rw2.jpg" width="600" height="451" alt="Panasonic RW2 develop" loading="lazy">
+          <figcaption><strong>.rw2</strong><span>Panasonic DMC-GX85</span></figcaption>
+        </figure>
+        <figure>
+          <img src="images/formats/pef.jpg" width="600" height="397" alt="Pentax PEF develop" loading="lazy">
+          <figcaption><strong>.pef</strong><span>Pentax K-5</span></figcaption>
+        </figure>
+        <figure>
+          <img src="images/formats/dng.jpg" width="600" height="398" alt="Ricoh DNG develop" loading="lazy">
+          <figcaption><strong>.dng</strong><span>Ricoh GR II</span></figcaption>
+        </figure>
+        <figure>
+          <img src="images/formats/raf.jpg" width="600" height="400" alt="Fujifilm RAF X-Trans develop" loading="lazy">
+          <figcaption><strong>.raf</strong><span>Fujifilm X-S10 · X-Trans, approximate</span></figcaption>
+        </figure>
+      </div>
+
+      <div class="format-details">
+        <article>
+          <h3>Camera RAW · 24 extensions</h3>
+          <p><code>arw, dng, raw, raf, nef, cr2, cr3, orf, rw2, pef, srw, 3fr, fff, iiq, mef, mos, erf, kdc, dcr, dcs, crw, nrw, mrw, ari</code></p>
+          <p>Decoding uses rawler, whose database covers 725 camera models. Twelve formats carry no embedded preview; Autoshop shows its own neutral rendition instead and says so.</p>
+        </article>
+        <article>
+          <h3>Baked rasters · 8 extensions</h3>
+          <p><code>jpg, jpeg, png, tif, tiff, bmp, webp, gif</code></p>
+          <p>ICC profiles on baked imports are converted through qcms when present. Monochrome and four-colour sensor arrays are refused rather than reinterpreted as three-channel colour.</p>
+        </article>
+      </div>
+      <p class="attribution">The nine format samples come from the <a href="https://raw.pixls.us/">raw.pixls.us community sample repository</a> under CC0 1.0 Public Domain.</p>
+    </section>
+
+    <section class="section technology" id="technology" aria-labelledby="technology-title">
+      <p class="section-kicker">Tech stack &amp; algorithms</p>
+      <h2 id="technology-title">The implementation details—not a logo strip.</h2>
+      <p class="section-lede">Seven parts connect decode, measured rendering, local selection, coordinate transport, sidecars, AI proposal and application infrastructure.</p>
+
+      <div class="tech-list">
+        <article id="tech-decode">
+          <div class="tech-index" aria-hidden="true">01</div>
+          <div>
+            <h3>RAW decode and orientation</h3>
+            <p><a class="code-link" href="https://github.com/skymanbp/autoshop/blob/main/src/decode.rs"><code>src/decode.rs</code></a> uses rawler for <strong>RAW decode, 24 formats</strong>, and the database covers 725 bodies. Bayer files take rawler's normal demosaic path; non-2×2 RGB CFA data uses Autoshop's X-Trans geometric path, which fits color planes over a 5×5 neighborhood per CFA phase while retaining the measured photosite channel. That path closes zero-sample holes but remains an <strong>approximate</strong> X-Trans develop rather than a directional Markesteijn-class demosaic. <a class="code-link" href="https://github.com/skymanbp/autoshop/blob/main/src/render.rs"><code>src/render.rs</code></a> applies EXIF orientation at the head of the displayed chain, before masks, straighten, and crop.</p>
+          </div>
+        </article>
+
+        <article id="tech-render">
+          <div class="tech-index" aria-hidden="true">02</div>
+          <div>
+            <h3>Develop engine and measured Lightroom parity</h3>
+            <p><a class="code-link" href="https://github.com/skymanbp/autoshop/blob/main/src/render.rs"><code>src/render.rs</code></a> is an f32 pipeline with explicit linear-light operations where the algorithm requires them; the standard rawler output is gamma-encoded f32, so the implementation does not pretend every stage is uniformly linear. After orientation and optional denoise, anchored white balance precedes lens/manual vignetting and linear-light dehaze; exposure, contrast, whites, blacks, highlights, shadows, and the base/tone curve are combined in the tone LUT, then RGB curves, HSL, and color grading run in that order. Clarity and Texture, global color/detail, local masks, lens geometry, straighten, and crop follow; the Highlights control belongs to the tone LUT, with no separate highlight-reconstruction pass claimed.</p>
+            <p>The parity work in <a class="code-link" href="https://github.com/skymanbp/autoshop/blob/main/src/render.rs"><code>src/render.rs</code></a> is measurement-driven. Period/step-response measurements refuted the earlier band-limited notch model for negative Texture; the current operator mixes fine Gaussian and coarse box low-passes against 45 anchors spanning nine periods and five slider levels. Radial feather uses a measured 290×11 <code>(radius, feather)</code> alpha LUT, with feather zero kept as an analytic hard edge. Brush dabs use <code>k = (1 - ρ<sup>m(h)</sup>)<sup>n(h)</sup></code>, cubic fits for <code>ln(m)</code> and <code>ln(n)</code> over hardness, screen accumulation, and a measured flow law; the held-out kernel RMS is 0.0109.</p>
+          </div>
+        </article>
+
+        <article id="tech-masks">
+          <div class="tech-index" aria-hidden="true">03</div>
+          <div>
+            <h3>Masks and local segmentation</h3>
+            <p><a class="code-link" href="https://github.com/skymanbp/autoshop/blob/main/src/recipe.rs"><code>src/recipe.rs</code></a> and <a class="code-link" href="https://github.com/skymanbp/autoshop/blob/main/src/render.rs"><code>src/render.rs</code></a> implement radial, linear, brush, bitmap, luminance-range, and color-range masks with Add/Subtract/Intersect composition. <a class="code-link" href="https://github.com/skymanbp/autoshop/blob/main/src/segment.rs"><code>src/segment.rs</code></a> and <a class="code-link" href="https://github.com/skymanbp/autoshop/blob/main/python/segment.py"><code>python/segment.py</code></a> add local BiRefNet subject selection, U²-Net fallback, OneFormer sky segmentation, and SAM 2.1 point-prompted object gestures. Cached alphas record the photo, mask subtype, orientation/click data, and backend generation, so provenance changes trigger re-derivation rather than silent reuse.</p>
+          </div>
+        </article>
+
+        <article id="tech-lens">
+          <div class="tech-index" aria-hidden="true">04</div>
+          <div>
+            <h3>Lens correction and mask-coordinate transport</h3>
+            <p><a class="code-link" href="https://github.com/skymanbp/autoshop/blob/main/src/lensmeta.rs"><code>src/lensmeta.rs</code></a> reads camera metadata corrections, including Sony tag 0x7037 distortion as a 16-sample piecewise-linear spline; the related camera knots are applied during render. <a class="code-link" href="https://github.com/skymanbp/autoshop/blob/main/src/lcp.rs"><code>src/lcp.rs</code></a> reads Adobe <code>.lcp</code> perspective polynomials and solves their inverse for Lightroom mask-coordinate transport when camera knots are unavailable, while refusing unsupported fisheye profiles.</p>
+            <p>Measurements against real Lightroom exports showed that brush masks are rasterized before lens correction while radial masks are interpreted after it. <a class="code-link" href="https://github.com/skymanbp/autoshop/blob/main/src/render.rs"><code>src/render.rs</code></a> and <a class="code-link" href="https://github.com/skymanbp/autoshop/blob/main/src/xmp.rs"><code>src/xmp.rs</code></a> therefore transport mask coordinates through the engine's inverse geometry model instead of treating every mask as if it lived in one frame; the measured probe lands within 0.3 px.</p>
+          </div>
+        </article>
+
+        <article id="tech-xmp">
+          <div class="tech-index" aria-hidden="true">05</div>
+          <div>
+            <h3>Lightroom sidecar round-trip</h3>
+            <p><a class="code-link" href="https://github.com/skymanbp/autoshop/blob/main/src/xmp.rs"><code>src/xmp.rs</code></a> is a hand-written sidecar reader/writer designed around conservative round trips: replace fields Autoshop owns, preserve unmodeled document content, and refuse unsupported semantics rather than silently flattening them. <a class="code-link" href="https://github.com/skymanbp/autoshop/blob/main/src/pipeline.rs"><code>src/pipeline.rs</code></a> connects that layer to the recipe/version store. The reader also imports Lightroom's sibling <code>MaskBrushTable</code>, validates its structure, and Brotli-decodes brush dab groups for the measured renderer; AI selection intent round-trips, but proprietary computed alpha is re-derived locally.</p>
+          </div>
+        </article>
+
+        <article id="tech-ai">
+          <div class="tech-index" aria-hidden="true">06</div>
+          <div>
+            <h3>AI proposal, style fit, and generation</h3>
+            <p><a class="code-link" href="https://github.com/skymanbp/autoshop/blob/main/src/advisor/mod.rs"><code>src/advisor/mod.rs</code></a> turns the vision proposal into a bounded <code>EditRecipe</code>, and <a class="code-link" href="https://github.com/skymanbp/autoshop/blob/main/src/advisor/claude.rs"><code>src/advisor/claude.rs</code></a> supplies the Claude-based data-only verifier; pixels are not sent to that verifier. <a class="code-link" href="https://github.com/skymanbp/autoshop/blob/main/src/style.rs"><code>src/style.rs</code></a> indexes prior RAW+XMP edits and retrieves similar examples, optionally with local SigLIP 2 embeddings.</p>
+            <p><a class="code-link" href="https://github.com/skymanbp/autoshop/blob/main/src/fit.rs"><code>src/fit.rs</code></a> performs inverse rendering for <code>match</code>: luminance-CDF matching, exposure search, regularized engine-basis fitting and a residual tone curve are followed by closed-loop saturation and gated cast curves. <a class="code-link" href="https://github.com/skymanbp/autoshop/blob/main/src/generative.rs"><code>src/generative.rs</code></a> supports the configured <code>gpt-image-2</code> used for the Part B reimagine; generation produces a lossy target, while fit/apply returns an editable deterministic full-resolution approximation. Style indexes, develop state, and segmentation alphas are cached locally.</p>
+          </div>
+        </article>
+
+        <article id="tech-app">
+          <div class="tech-index" aria-hidden="true">07</div>
+          <div>
+            <h3>Application and infrastructure</h3>
+            <p>Rust (rustc/cargo <strong>1.94</strong>, edition 2024) · rawler (RAW decode, 24 formats / 725 bodies) · <code>image</code> and <code>qcms</code> for raster/color I/O · <code>rayon</code> for row-parallel stages · <code>clap</code>, <code>serde</code>, and <code>ureq</code> · <code>eframe</code>/<code>egui</code> for the desktop GUI · <code>tiny_http</code> for <code>serve</code>. The embedded web UI is compiled with <code>include_str!</code>, so it has no runtime CDN or frontend build step.</p>
+            <p>The <a class="code-link" href="https://github.com/skymanbp/autoshop/blob/main/.github/workflows/build.yml"><code>build</code> workflow</a> builds and tests the default and GUI feature sets on Ubuntu and macOS. The documented battery is <strong>857 library (9 <code>#[ignore]</code>d forensic probes) / 14 CLI / 132 GUI / 2+2 contract</strong> tests, and both default and GUI Clippy runs are clean. The <a class="code-link" href="https://github.com/skymanbp/autoshop/blob/main/scripts/check_docs.py"><code>scripts/check_docs.py</code></a> release gate re-derives pinned version, format, camera, dependency, toolchain, and battery claims from the tree.</p>
+            <p>Local ML sidecars use SCUNet for denoise, BiRefNet/U²-Net for subject masks, OneFormer for sky, SAM 2.1 for object prompts, and optional SigLIP 2 for style embeddings. Model weights are not stored in the repository.</p>
+          </div>
+        </article>
+      </div>
+    </section>
+
+    <section class="section docs" id="docs" aria-labelledby="docs-title">
+      <p class="section-kicker">Documentation</p>
+      <h2 id="docs-title">Follow the implementation all the way down.</h2>
+      <div class="doc-grid">
+        <a href="https://github.com/skymanbp/autoshop/blob/main/README.md">
+          <span>Read first</span>
+          <strong>User manual &amp; CLI reference</strong>
+          <small>Install, develop, masks, versions, export, AI roles, privacy, and trust boundaries.</small>
+        </a>
+        <a href="https://github.com/skymanbp/autoshop/blob/main/docs/ARCHITECTURE.md">
+          <span>Go deeper</span>
+          <strong>Architecture</strong>
+          <small>Subsystem boundaries and dependency rationale.</small>
+        </a>
+        <a href="https://github.com/skymanbp/autoshop/blob/main/docs/ROADMAP.md">
+          <span>What is next</span>
+          <strong>Roadmap</strong>
+          <small>Planned work and known limitations.</small>
+        </a>
+        <a href="https://github.com/skymanbp/autoshop/blob/main/LICENSE">
+          <span>Use it</span>
+          <strong>MIT license</strong>
+          <small>The software is open source under the MIT license.</small>
+        </a>
+      </div>
+    </section>
+  </main>
+
+  <footer class="site-footer">
+    <div>
+      <a class="brand footer-brand" href="#top">
+        <img src="favicon.png" width="36" height="36" alt="Autoshop icon">
+        <span>Autoshop</span>
+      </a>
+      <p>AI-assisted automatic development of RAW photographs.</p>
+    </div>
+    <div class="footer-notes">
+      <p>Software: MIT. Showcase photographs: © 2026 skymanbp, all rights reserved.</p>
+      <p><a href="https://github.com/skymanbp/autoshop">Source on GitHub</a> · <a href="https://github.com/skymanbp/autoshop/releases/latest">Latest release</a></p>
+    </div>
+  </footer>
+</body>
+</html>
