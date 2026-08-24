@@ -111,10 +111,16 @@
     <section class="section split-section" id="download" aria-labelledby="download-title">
       <div>
         <p class="section-kicker">Download</p>
-        <h2 id="download-title">Start with the latest release.</h2>
-        <p>The documented release provides both Windows front ends: <code>autoshop.exe</code> for the CLI and <code>autoshop-gui.exe</code> for the desktop app. Linux and macOS are built and tested in CI, but prebuilt binaries are not published for them.</p>
-        <p><a class="button button-primary" href="https://github.com/skymanbp/autoshop/releases/latest">Open GitHub Releases</a></p>
-        <p class="quiet">Extract the release archive and keep the executable beside its bundled assets and Python sidecars.</p>
+        <h2 id="download-title">Download v1.0.0.</h2>
+        <p>The published Windows release has four assets:</p>
+        <ul>
+          <li><code>autoshop.exe</code> — 31,180,152 bytes (CLI)</li>
+          <li><code>autoshop-gui.exe</code> — 40,810,704 bytes (desktop GUI)</li>
+          <li><code>Autoshop-Setup-1.0.0.exe</code> — 19,768,387 bytes (installer)</li>
+          <li><code>autoshop-1.0.0-windows-x64.zip</code> — 27,131,443 bytes (portable bundle)</li>
+        </ul>
+        <p>Choose the <strong>installer</strong> for the recommended current-user setup with no administrator access, or the <strong>portable ZIP</strong> to extract and keep the executables beside their bundled assets and Python sidecars. Linux and macOS are built and tested in CI, but prebuilt binaries are not published for them.</p>
+        <p><a class="button button-primary" href="https://github.com/skymanbp/autoshop/releases/tag/v1.0.0">Open the v1.0.0 release</a></p>
       </div>
       <div class="quickstart" aria-labelledby="quickstart-title">
         <h3 id="quickstart-title">Quickstart</h3>
@@ -300,67 +306,78 @@ autoshop apply "photo.ARW" "recipe.json" -o "developed.tif"</code></pre>
     <section class="section technology" id="technology" aria-labelledby="technology-title">
       <p class="section-kicker">Tech stack &amp; algorithms</p>
       <h2 id="technology-title">The implementation details—not a logo strip.</h2>
-      <p class="section-lede">Seven parts connect decode, measured rendering, local selection, coordinate transport, sidecars, AI proposal and application infrastructure.</p>
+      <p class="section-lede">Eight implementation areas connect decode, measured rendering, local and AI selection, coordinate transport, sidecars, AI proposal, and application infrastructure. Each Details link opens the canonical equations, parameter provenance, measurements, disclosures, and source paths.</p>
 
       <div class="tech-list">
         <article id="tech-decode">
           <div class="tech-index" aria-hidden="true">01</div>
           <div>
-            <h3>RAW decode and orientation</h3>
-            <p><a class="code-link" href="https://github.com/skymanbp/autoshop/blob/main/src/decode.rs"><code>src/decode.rs</code></a> uses rawler for <strong>RAW decode, 24 formats</strong>, and the database covers 725 bodies. Bayer files take rawler's normal demosaic path; non-2×2 RGB CFA data uses Autoshop's X-Trans geometric path, which fits color planes over a 5×5 neighborhood per CFA phase while retaining the measured photosite channel. That path closes zero-sample holes but remains an <strong>approximate</strong> X-Trans develop rather than a directional Markesteijn-class demosaic. <a class="code-link" href="https://github.com/skymanbp/autoshop/blob/main/src/render.rs"><code>src/render.rs</code></a> applies EXIF orientation at the head of the displayed chain, before masks, straighten, and crop.</p>
+            <h3>RAW decode and CFA</h3>
+            <p>rawler covers <strong>24 RAW formats and 725 camera bodies</strong>. Bayer uses the normal demosaic path; the <strong>approximate</strong> X-Trans path fits colour planes over a 5×5 CFA neighbourhood and moved the measured X-S10 G/R ratio from 1.5503 to 0.9476. EXIF orientation runs at the head of the chain, while no-preview, untagged-16-bit, unsupported-sensor, and decoder failures remain explicit.</p>
+            <p class="source-link"><a href="https://github.com/skymanbp/autoshop/blob/main/docs/TECH_STACK.md#raw-decode-and-cfa">Details: RAW decode and CFA →</a></p>
           </div>
         </article>
 
         <article id="tech-render">
           <div class="tech-index" aria-hidden="true">02</div>
           <div>
-            <h3>Develop engine and measured Lightroom parity</h3>
-            <p><a class="code-link" href="https://github.com/skymanbp/autoshop/blob/main/src/render.rs"><code>src/render.rs</code></a> is an f32 pipeline with explicit linear-light operations where the algorithm requires them; the standard rawler output is gamma-encoded f32, so the implementation does not pretend every stage is uniformly linear. After orientation and optional denoise, anchored white balance precedes lens/manual vignetting and linear-light dehaze; exposure, contrast, whites, blacks, highlights, shadows, and the base/tone curve are combined in the tone LUT, then RGB curves, HSL, and color grading run in that order. Clarity and Texture, global color/detail, local masks, lens geometry, straighten, and crop follow; the Highlights control belongs to the tone LUT, with no separate highlight-reconstruction pass claimed.</p>
-            <p>The parity work in <a class="code-link" href="https://github.com/skymanbp/autoshop/blob/main/src/render.rs"><code>src/render.rs</code></a> is measurement-driven. Period/step-response measurements refuted the earlier band-limited notch model for negative Texture; the current operator mixes fine Gaussian and coarse box low-passes against 45 anchors spanning nine periods and five slider levels. Radial feather uses a measured 290×11 <code>(radius, feather)</code> alpha LUT, with feather zero kept as an analytic hard edge. Brush dabs use <code>k = (1 - ρ<sup>m(h)</sup>)<sup>n(h)</sup></code>, cubic fits for <code>ln(m)</code> and <code>ln(n)</code> over hardness, screen accumulation, and a measured flow law; the held-out kernel RMS is 0.0109.</p>
+            <h3>Develop pipeline and tone model</h3>
+            <p>The deterministic f32 renderer uses explicit linear-light vignette/dehaze stages, then a monotone Fritsch–Carlson tone LUT with Highlights inside it, followed by RGB curves, HSL, colour grade, clarity/Texture, saturation, NR, sharpening, and local edits. Negative Texture is two parallel measured low-pass arms (<code>A1=0.172443</code>, <code>A2=0.304888</code>) with a hyperbolic depth law; <strong>45 Lightroom anchors</strong> are all within ±0.02.</p>
+            <p class="source-link"><a href="https://github.com/skymanbp/autoshop/blob/main/docs/TECH_STACK.md#develop-pipeline-and-tone-model">Details: develop pipeline and tone model →</a></p>
           </div>
         </article>
 
         <article id="tech-masks">
           <div class="tech-index" aria-hidden="true">03</div>
           <div>
-            <h3>Masks and local segmentation</h3>
-            <p><a class="code-link" href="https://github.com/skymanbp/autoshop/blob/main/src/recipe.rs"><code>src/recipe.rs</code></a> and <a class="code-link" href="https://github.com/skymanbp/autoshop/blob/main/src/render.rs"><code>src/render.rs</code></a> implement radial, linear, brush, bitmap, luminance-range, and color-range masks with Add/Subtract/Intersect composition. <a class="code-link" href="https://github.com/skymanbp/autoshop/blob/main/src/segment.rs"><code>src/segment.rs</code></a> and <a class="code-link" href="https://github.com/skymanbp/autoshop/blob/main/python/segment.py"><code>python/segment.py</code></a> add local BiRefNet subject selection, U²-Net fallback, OneFormer sky segmentation, and SAM 2.1 point-prompted object gestures. Cached alphas record the photo, mask subtype, orientation/click data, and backend generation, so provenance changes trigger re-derivation rather than silent reuse.</p>
+            <h3>Masks</h3>
+            <p>Radial, linear, brush, bitmap, luminance-range, and colour-range masks compose as Add/Subtract/Intersect. Radial feather samples a measured <strong>290×11 alpha LUT</strong>; brush dabs use <code>(1−rho<sup>m</sup>)<sup>n</sup></code>, <code>kappa=0.1284</code> flow, and screen accumulation. Pixel-centre sampling plus the pixel/aspect linear metric reduced the D1 error from <strong>874 px to 9.8 px</strong>.</p>
+            <p class="source-link"><a href="https://github.com/skymanbp/autoshop/blob/main/docs/TECH_STACK.md#masks">Details: masks →</a></p>
+          </div>
+        </article>
+
+        <article id="tech-ai-masks">
+          <div class="tech-index" aria-hidden="true">04</div>
+          <div>
+            <h3>AI masks</h3>
+            <p>Subject selection uses commit-pinned BiRefNet with a named U²-Net fallback; sky uses OneFormer and a checked-in <strong>150-class</strong> ADE20K table; object gestures become ordered positive points for SAM 2.1 over the <code>gp1</code> contract. Cache keys bind backend provenance and exact prompts. The pinned BiRefNet weights are <strong>444,473,596 bytes</strong>; locally derived alpha is disclosed as non-Adobe.</p>
+            <p class="source-link"><a href="https://github.com/skymanbp/autoshop/blob/main/docs/TECH_STACK.md#ai-masks">Details: AI masks →</a></p>
           </div>
         </article>
 
         <article id="tech-lens">
-          <div class="tech-index" aria-hidden="true">04</div>
+          <div class="tech-index" aria-hidden="true">05</div>
           <div>
-            <h3>Lens correction and mask-coordinate transport</h3>
-            <p><a class="code-link" href="https://github.com/skymanbp/autoshop/blob/main/src/lensmeta.rs"><code>src/lensmeta.rs</code></a> reads camera metadata corrections, including Sony tag 0x7037 distortion as a 16-sample piecewise-linear spline; the related camera knots are applied during render. <a class="code-link" href="https://github.com/skymanbp/autoshop/blob/main/src/lcp.rs"><code>src/lcp.rs</code></a> reads Adobe <code>.lcp</code> perspective polynomials and solves their inverse for Lightroom mask-coordinate transport when camera knots are unavailable, while refusing unsupported fisheye profiles.</p>
-            <p>Measurements against real Lightroom exports showed that brush masks are rasterized before lens correction while radial masks are interpreted after it. <a class="code-link" href="https://github.com/skymanbp/autoshop/blob/main/src/render.rs"><code>src/render.rs</code></a> and <a class="code-link" href="https://github.com/skymanbp/autoshop/blob/main/src/xmp.rs"><code>src/xmp.rs</code></a> therefore transport mask coordinates through the engine's inverse geometry model instead of treating every mask as if it lived in one frame; the measured probe lands within 0.3 px.</p>
+            <h3>Lens correction and Lightroom mask-frame laws</h3>
+            <p>Sony 0x7037's <strong>16 samples at (i+1)/16</strong> feed a 2048-node/64-knot mask solve; guarded Newton inversion reads rectilinear <code>.lcp</code> profiles and refuses fisheye-only entries. Radials cross <code>m_lr<sup>−1</sup> ∘ T_engine</code> exactly once and close <strong>41/41 vectors to ≤1 px</strong>. Linear H2 preserves straight gradients but openly records multi-pixel ON/OFF RMS residuals; brushes stay raw-frame.</p>
+            <p class="source-link"><a href="https://github.com/skymanbp/autoshop/blob/main/docs/TECH_STACK.md#lens-correction-and-lightroom-mask-frame-laws">Details: lens correction and Lightroom mask-frame laws →</a></p>
           </div>
         </article>
 
         <article id="tech-xmp">
-          <div class="tech-index" aria-hidden="true">05</div>
+          <div class="tech-index" aria-hidden="true">06</div>
           <div>
-            <h3>Lightroom sidecar round-trip</h3>
-            <p><a class="code-link" href="https://github.com/skymanbp/autoshop/blob/main/src/xmp.rs"><code>src/xmp.rs</code></a> is a hand-written sidecar reader/writer designed around conservative round trips: replace fields Autoshop owns, preserve unmodeled document content, and refuse unsupported semantics rather than silently flattening them. <a class="code-link" href="https://github.com/skymanbp/autoshop/blob/main/src/pipeline.rs"><code>src/pipeline.rs</code></a> connects that layer to the recipe/version store. The reader also imports Lightroom's sibling <code>MaskBrushTable</code>, validates its structure, and Brotli-decodes brush dab groups for the measured renderer; AI selection intent round-trips, but proprietary computed alpha is re-derived locally.</p>
+            <h3>XMP and Lightroom interoperability</h3>
+            <p>Typed <code>Tag</code>/<code>Scope</code> traversal reads Camera Raw's own scope, including nested <code>Look</code>, then conservative merge preserves unmodeled document fields. Save uses the per-user store; beside-RAW export is explicit. Measured domains include <code>LocalExposure2012=EV/4</code>, local Hue <code>/180</code>, the other local family <code>/100</code>, and global Sharpness <strong>1:1</strong>; a 201/201 polarity census assigns inversion to <code>MaskInverted</code>.</p>
+            <p class="source-link"><a href="https://github.com/skymanbp/autoshop/blob/main/docs/TECH_STACK.md#xmp-and-lightroom-interoperability">Details: XMP and Lightroom interoperability →</a></p>
           </div>
         </article>
 
         <article id="tech-ai">
-          <div class="tech-index" aria-hidden="true">06</div>
+          <div class="tech-index" aria-hidden="true">07</div>
           <div>
-            <h3>AI proposal, style fit, and generation</h3>
-            <p><a class="code-link" href="https://github.com/skymanbp/autoshop/blob/main/src/advisor/mod.rs"><code>src/advisor/mod.rs</code></a> turns the vision proposal into a bounded <code>EditRecipe</code>, and <a class="code-link" href="https://github.com/skymanbp/autoshop/blob/main/src/advisor/claude.rs"><code>src/advisor/claude.rs</code></a> supplies the Claude-based data-only verifier; pixels are not sent to that verifier. <a class="code-link" href="https://github.com/skymanbp/autoshop/blob/main/src/style.rs"><code>src/style.rs</code></a> indexes prior RAW+XMP edits and retrieves similar examples, optionally with local SigLIP 2 embeddings.</p>
-            <p><a class="code-link" href="https://github.com/skymanbp/autoshop/blob/main/src/fit.rs"><code>src/fit.rs</code></a> performs inverse rendering for <code>match</code>: luminance-CDF matching, exposure search, regularized engine-basis fitting and a residual tone curve are followed by closed-loop saturation and gated cast curves. <a class="code-link" href="https://github.com/skymanbp/autoshop/blob/main/src/generative.rs"><code>src/generative.rs</code></a> supports the configured <code>gpt-image-2</code> used for the Part B reimagine; generation produces a lossy target, while fit/apply returns an editable deterministic full-resolution approximation. Style indexes, develop state, and segmentation alphas are cached locally.</p>
+            <h3>AI advisor and reverse fit</h3>
+            <p>AI proposals become bounded recipes with <code>store:false</code>, a data-only verifier, and a do-no-harm revision gate. RAW+XMP style retrieval adds optional SigLIP 2; <code>W_EMB=2.0</code> stayed after a <strong>147-exemplar</strong> calibration. <code>match</code> fits CDF/exposure/basis/tone/saturation/cast stages and vetoes foreign hues at <strong>≥45° over ≥5%</strong> of the frame; reimagine and heal remain explicit generated-pixel operations.</p>
+            <p class="source-link"><a href="https://github.com/skymanbp/autoshop/blob/main/docs/TECH_STACK.md#ai-advisor-and-reverse-fit">Details: AI advisor and reverse fit →</a></p>
           </div>
         </article>
 
         <article id="tech-app">
-          <div class="tech-index" aria-hidden="true">07</div>
+          <div class="tech-index" aria-hidden="true">08</div>
           <div>
             <h3>Application and infrastructure</h3>
-            <p>Rust (rustc/cargo <strong>1.94</strong>, edition 2024) · rawler (RAW decode, 24 formats / 725 bodies) · <code>image</code> and <code>qcms</code> for raster/color I/O · <code>rayon</code> for row-parallel stages · <code>clap</code>, <code>serde</code>, and <code>ureq</code> · <code>eframe</code>/<code>egui</code> for the desktop GUI · <code>tiny_http</code> for <code>serve</code>. The embedded web UI is compiled with <code>include_str!</code>, so it has no runtime CDN or frontend build step.</p>
-            <p>The <a class="code-link" href="https://github.com/skymanbp/autoshop/blob/main/.github/workflows/build.yml"><code>build</code> workflow</a> builds and tests the default and GUI feature sets on Ubuntu and macOS. The documented battery is <strong>857 library (9 <code>#[ignore]</code>d forensic probes) / 14 CLI / 132 GUI / 2+2 contract</strong> tests, and both default and GUI Clippy runs are clean. The <a class="code-link" href="https://github.com/skymanbp/autoshop/blob/main/scripts/check_docs.py"><code>scripts/check_docs.py</code></a> release gate re-derives pinned version, format, camera, dependency, toolchain, and battery claims from the tree.</p>
-            <p>Local ML sidecars use SCUNet for denoise, BiRefNet/U²-Net for subject masks, OneFormer for sky, SAM 2.1 for object prompts, and optional SigLIP 2 for style embeddings. Model weights are not stored in the repository.</p>
+            <p>Rust 2024 backs one library shared by the CLI, egui desktop app, and self-contained loopback web UI. The server combines a 32-byte token with Host/Origin/no-store defenses; the GUI keeps variants, versions, and deleted-version identities; SCUNet must satisfy <code>sidecar_wrote</code>. A <strong>1771 MB</strong> probe sets the 1800 MB per-photo budget. The current battery is <strong>871 library (862 pass + 9 <code>#[ignore]</code>d forensic probes) / 14 CLI / 132 GUI / 2+2 contract</strong>.</p>
+            <p class="source-link"><a href="https://github.com/skymanbp/autoshop/blob/main/docs/TECH_STACK.md#application-and-infrastructure">Details: application and infrastructure →</a></p>
           </div>
         </article>
       </div>

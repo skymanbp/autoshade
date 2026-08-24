@@ -487,111 +487,92 @@ Decode degradation and refusal behavior is explicit:
 
 ## Tech stack and algorithms
 
-### RAW decode and orientation
+The canonical implementation page is **[Tech stack and algorithms](docs/TECH_STACK.md)**.
+It gives the equations, parameter provenance, measured Lightroom/camera results,
+honesty markers, and source paths behind each summary below.
 
-`src/decode.rs` uses rawler for **RAW decode, 24 formats**, and the database
-currently covers 725 bodies. Bayer files take rawler's normal demosaic path;
-non-2×2 RGB CFA data uses Autoshop's X-Trans geometric path, which fits color
-planes over a 5×5 neighborhood per CFA phase while retaining the measured
-photosite channel. That path closes zero-sample holes but remains an
-**approximate** X-Trans develop rather than a directional Markesteijn-class
-demosaic. `src/render.rs` applies EXIF orientation at the head of the displayed
-chain, before masks, straighten, and crop.
+### RAW decode and CFA
 
-### Develop engine and measured Lightroom parity
+`src/decode.rs` uses rawler for **RAW decode, 24 formats**, with 725 bodies in
+the release database. Bayer data takes rawler's demosaic path; X-Trans uses an
+**approximate** 5×5 CFA-geometry plane fit that moved the measured X-S10 G/R
+ratio from 1.5503 to 0.9476. `orient_f32` applies EXIF orientation at the head
+of the chain; no-preview RAWs receive a neutral develop, untagged 16-bit rasters
+are disclosed as assumed sRGB, and mono/four-colour sensors are refused.
 
-`src/render.rs` is an f32 pipeline with explicit linear-light operations where
-the algorithm requires them; the standard rawler output is gamma-encoded f32,
-so the implementation does not pretend every stage is uniformly linear. After
-orientation and optional denoise, anchored white balance precedes lens/manual
-vignetting and linear-light dehaze; exposure, contrast, whites, blacks,
-highlights, shadows, and the base/tone curve are combined in the tone LUT, then
-RGB curves, HSL, and color grading run in that order. Clarity and Texture,
-global color/detail, local masks, lens geometry, straighten, and crop follow;
-the Highlights control belongs to the tone LUT, with no separate
-highlight-reconstruction pass claimed.
+### Develop pipeline and tone model
 
-The parity work in `src/render.rs` is measurement-driven. Period/step-response
-measurements refuted the earlier band-limited notch model for negative Texture;
-the current operator mixes fine Gaussian and coarse box low-passes against 45
-anchors spanning nine periods and five slider levels. Radial feather uses a
-measured 290×11 `(radius, feather)` alpha LUT, with feather zero kept as an
-analytic hard edge. Brush dabs use `k = (1 - ρ^m(h))^n(h)`, cubic fits for
-`ln(m)` and `ln(n)` over hardness, screen accumulation, and a measured flow law;
-the held-out kernel RMS is 0.0109.
+`src/render.rs` is a deterministic f32 pipeline with explicit linear-light
+vignette/dehaze stages, a monotone Fritsch–Carlson tone LUT with
+`tone_knot_weights` and Highlights inside the LUT, then RGB curves, HSL, colour
+grade, clarity/Texture, saturation, NR, sharpening, and local edits. Negative
+Texture is two measured parallel low-pass arms (`A1=0.172443`, `A2=0.304888`)
+with a calibrated hyperbolic depth law; all 45 Lightroom period/depth anchors
+land inside ±0.02.
 
-### Masks and local segmentation
+### Masks
 
-`src/recipe.rs` and `src/render.rs` implement radial, linear, brush, bitmap,
-luminance-range, and color-range masks with Add/Subtract/Intersect composition.
-`src/segment.rs` and `python/segment.py` add local BiRefNet subject selection,
-U²-Net fallback, OneFormer sky segmentation, and SAM 2.1 point-prompted object
-gestures. Cached alphas record the photo, mask subtype, orientation/click data,
-and backend generation, so provenance changes trigger re-derivation rather than
-silent reuse.
+`src/recipe.rs`, `src/render.rs`, and `src/xmp.rs` implement radial, linear,
+brush, bitmap, luminance-range, and colour-range masks with ordered
+Add/Subtract/Intersect composition. Radial feather is a measured 290×11
+`alpha(rho, feather)` LUT with an analytic hard edge at zero; brush dabs use
+`(1-rho^m)^n`, the measured `kappa=0.1284` flow law, and screen accumulation.
+Pixel-centre sampling and the pixel/aspect linear metric reduced the D1 error
+from 874 px to 9.8 px; `MaskBrushTable` import validates MD5→`.acr`→Brotli.
 
-### Lens correction and mask-coordinate transport
+### AI masks
 
-`src/lensmeta.rs` reads camera metadata corrections. For Lightroom mask
-transport, Sony tag 0x7037's 16 native samples use the measured `(i+1)/16`
-radius law and are resampled onto a dense canonical spline; the ordinary image
-render keeps its independently calibrated knot convention. `src/lcp.rs` reads
-Adobe `.lcp` perspective polynomials and solves their inverse when camera knots
-are unavailable, while refusing unsupported fisheye profiles.
+`src/segment.rs` and `python/segment.py` run commit-pinned BiRefNet subject
+selection with a named U²-Net fallback, OneFormer ADE20K sky selection through
+the 150-class checked-in table, and SAM 2.1 object selection from ordered
+positive gesture points over the `gp1` IPC. Provenance-keyed caches include the
+backend generation and exact prompt points, so a fallback alpha is re-derived
+when the pinned backend becomes available; these are local re-creations, not
+Adobe-computed mask pixels.
 
-Mask frames are type-specific. Brushes and bitmap/AI masks stay in the raw
-frame. A radial mask with downstream lens geometry uses the exact-once
-`m_lr^-1 ∘ T_engine` sampler; without downstream geometry it stays at stored
-coordinates. A linear mask keeps a straight gradient: with correction on it is
-sampled in the corrected frame, while with correction off its Zero/Full handles
-are transported once through the forward camera map and the line is rebuilt in
-the raw pixel metric. Radial point transport closes all 41 measured vectors to
-≤1 px. LINEAR is deliberately disclosed as not 1 px-closed: ON residuals are
-9.748/7.025/6.336 px RMS and OFF residuals are 12.449/9.943/4.979 px RMS.
+### Lens correction and Lightroom mask-frame laws
 
-### Lightroom sidecar round-trip
+`src/lensmeta.rs`, `src/lcp.rs`, and `src/render.rs` combine Sony 0x7037's 16
+native `(i+1)/16` samples, a 2048-node/64-knot mask solve, and guarded Newton
+inversion for rectilinear `.lcp` profiles while refusing fisheye-only entries.
+Radials use exact-once `m_lr^-1 ∘ T_engine` transport and close 41/41 vectors to
+≤1 px. Linear H2 keeps corrected-frame handles but is openly not pixel-closed:
+ON RMS is 9.748/7.025/6.336 px and OFF is 12.449/9.943/4.979 px; brushes remain
+in the raw frame.
 
-[`src/xmp.rs`](src/xmp.rs) is a hand-written sidecar reader/writer designed
-around conservative round trips: replace fields Autoshop owns, preserve
-unmodeled document content, and refuse unsupported semantics rather than
-silently flattening them.
-`src/pipeline.rs` connects that layer to the recipe/version store. The reader
-also imports Lightroom's sibling `MaskBrushTable`, validates its structure, and
-Brotli-decodes brush dab groups for the measured renderer; AI selection intent
-round-trips, but proprietary computed alpha is re-derived locally.
+### XMP and Lightroom interoperability
 
-### AI proposal, style fit, and generation
+[`src/xmp.rs`](src/xmp.rs) uses scoped, typed XML traversal, including nested
+`Look`, and conservatively merges owned edits while preserving unmodeled
+fields. Ordinary Save writes the per-user develop store; beside-RAW export is
+explicit. `LR_MASK_FRAME_SCALE=1.0`, `LocalExposure2012=EV/4`, local Hue is
+`degrees/180`, the other measured local family is `/100`, global Sharpness is
+1:1, and polarity comes from `MaskInverted` rather than `Flipped`.
 
-`src/advisor/mod.rs` turns the vision proposal into a bounded `EditRecipe`, and
-`src/advisor/claude.rs` supplies the Claude-based data-only verifier; pixels are
-not sent to that verifier. `src/style.rs` indexes prior RAW+XMP edits and
-retrieves similar examples, optionally with local SigLIP 2 embeddings.
+### AI advisor and reverse fit
 
-`src/fit.rs` performs inverse rendering for `match`: luminance-CDF matching,
-exposure search, regularized engine-basis fitting and a residual tone curve are
-followed by closed-loop saturation and gated cast curves. `src/generative.rs`
-supports the configured `gpt-image-2` used for the Part B reimagine; generation
-produces a lossy target, while fit/apply returns an editable deterministic
-full-resolution approximation. Style indexes, develop state, and segmentation
-alphas are cached locally.
+`src/advisor/` validates AI proposals into bounded recipes, keeps Responses at
+`store:false`, gives the verifier data rather than pixels, and adopts a guided
+revision only when it does not lower the score. `src/style.rs` retrieves
+z-scored RAW+XMP exemplars with optional SigLIP 2 (`W_EMB=2.0` retained after a
+147-exemplar calibration). `src/fit.rs` performs luminance-CDF, exposure,
+basis, tone, saturation, and cast inverse stages with a ≥45°/≥5% foreign-hue
+veto; `src/generative.rs` negotiates gpt-image-2 reimagine sizes, and
+`src/retouch.rs` supplies deterministic pixel heal.
 
 ### Application and infrastructure
 
 Rust (rustc/cargo **1.94**, edition 2024) · rawler (RAW decode, 24 formats / 725 bodies) ·
-`image` and `qcms` for raster/color I/O · `rayon` for row-parallel stages ·
-`clap`, `serde`, and `ureq` · `eframe`/`egui` for the desktop GUI · `tiny_http`
-for `serve`. The embedded web UI is compiled with `include_str!`, so it has no
-runtime CDN or frontend build step.
-
-The [`build` workflow](.github/workflows/build.yml) builds and tests the default
-and GUI feature sets on Ubuntu and macOS. The current battery is **871 library (862 pass + 9 `#[ignore]`d forensic probes) / 14 CLI / 132 GUI / 2+2 contract** tests, and the GUI-feature Clippy run is clean. The
-[`scripts/check_docs.py`](scripts/check_docs.py) release gate re-derives pinned
-version, format, camera, dependency, toolchain, and battery claims from the
-tree.
-
-Local ML sidecars use SCUNet for denoise, BiRefNet/U²-Net for subject masks,
-OneFormer for sky, SAM 2.1 for object prompts, and optional SigLIP 2 for style
-embeddings. Model weights are not stored in this repository.
+`image`, qcms, rayon, clap, serde, ureq, `eframe`/egui, and `tiny_http` back the
+shared library, CLI, desktop GUI, and embedded loopback web UI. The server uses
+a 32-byte token plus Host/Origin/no-store defenses; the GUI keeps variants,
+versions, and a deleted-version registry; SCUNet success requires the typed
+`sidecar_wrote` contract. A 1771 MB reference probe sets the 1800 MB per-photo
+budget, while the 4 GiB RAW gate bounds admission. The [`build`
+workflow](.github/workflows/build.yml) covers default and GUI feature sets on
+Ubuntu and macOS. The current battery is **871 library (862 pass + 9 `#[ignore]`d forensic probes) / 14 CLI / 132 GUI / 2+2 contract** tests; the
+[`scripts/check_docs.py`](scripts/check_docs.py) gate re-derives pinned release
+claims. Model weights are not stored in this repository.
 
 ## Status and roadmap
 
