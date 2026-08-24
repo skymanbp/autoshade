@@ -213,9 +213,10 @@
   素材）：非参数提取 LR 有效径向函数（wall 20+DSC 向量）、审读
   src/lensmeta.rs 解算路径、候选构造（fill 施加方式/逆向参数化/lcp）择
   一复现「内段深 8%+零交叉不动+外段同」、由 G4/G6+G5 钉 cx。零修复授权
-  维持。**Codex 中转按用户令切换（2026-08-24）**：model gpt-5.5 xhigh、
-  新中转站（域名只记私有记忆），`RELAY-OK` 实测；旧 config/auth 备份在
-  ~/.codex。
+  维持。**Codex 中转站按用户令切换（2026-08-24）**：只换站点（域名只记
+  私有记忆），**模型保持 gpt-5.6-sol xhigh**（用户令「用gpt 5.6 sol！！！」
+  ——我曾误随截图改成 gpt-5.5、首派 8a 跑错模型已中止重派），新站
+  gpt-5.6-sol `RELAY-OK` 实测；旧 config/auth 备份在 ~/.codex。
 - **D2 轮 7a 墙面两对孪生构建批落地=四张待用户导出（2026-08-23；报告
   `~/.claude/plans/r30-materials/d2-wallgrid-report.md`，件在
   `Desktop\mw-exp\d2wg\`）**。pair1 `wallgrid_g/h`=九格 M（轮 3 d2g 同
