@@ -100,7 +100,7 @@ body:
         no decoder are three different failures), and the exact wording says
         which one you hit.
       placeholder: |
-        autoshop auto "D:\photos\_DSC1234.ARW" --guidance "warm, lift shadows"
+        autoshop auto "D:\photos\photo.ARW" --guidance "warm, lift shadows"
 
         ...and the highlights came out clipped flat, where the recipe says
         Highlights -38.

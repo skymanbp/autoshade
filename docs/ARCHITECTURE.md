@@ -1141,7 +1141,7 @@ Both disclosure channels moved with it and are named
 not Adobe's own rasteriser」), because the edges are ours and not Adobe's — the
 same shape of statement the AI-mask arm makes, one notch weaker because ours
 came from a measurement of Adobe's own output. Measured on the specimen
-folder that has brush work in it: `_DSC9583` went from 8 of 11 corrections
+folder that has brush work in it: `P12` went from 8 of 11 corrections
 imported to 10 of 11, and the one still refused is refused for
 `CorrectionAmount="1.1"`, not for its brush.
 
@@ -1289,7 +1289,7 @@ literally unreadable (a negative semi-axis). The corner model is not a fit: with
 no free parameters it predicts that `Left > Right` forces `Angle > 0` and
 `Top > Bottom` forces `Angle < 0` and that both at once is impossible — the
 library agrees 16/16, p = 2.5 × 10⁻⁵ — and the two rendered subjects land on
-it at the pixel (`_DSC9689` 8.3 : 1 at +24.35°; `_DSC9685` decoded tilt
+it at the pixel (`P24` 8.3 : 1 at +24.35°; `P22` decoded tilt
 −60.486° against a measured −60.5°).
 
 Three more constants ride with it, each measured on the same twelve-export
@@ -1445,7 +1445,7 @@ R27 Batch-3:** `W, H` are the **un-rotated SOURCE frame** — `DefaultCropSize`,
 which equals the exported dimensions only while `HasCrop="False"` and the
 capture is landscape. The two readings diverge the moment a crop exists
 (`P5-cropped-mask-frame.md` §1: reading a cropped export's own dimensions
-displaces `DSC09401_16.9.JPG`'s five radials by 834–1384 px) and again on a
+displaces `P32_16.9.JPG`'s five radials by 834–1384 px) and again on a
 portrait capture (`P1-portrait-mask-frame.md` §1: an `Orientation=8` export is
 already upright and carries no `tiff:` at all, while its `crs:` numbers are
 still fractions of the 9504 × 6336 sensor array). Only the RATIO survives the
