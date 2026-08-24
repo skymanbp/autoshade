@@ -16,6 +16,11 @@
 /python/weights/
 **/__pycache__/
 
+# User-provided deploy credential (Cloudflare API token for the site, user
+# directive 2026-08-23): lives at repo root by the user's choice, must never
+# be committed or printed. Deploy tooling reads it into the process env.
+.secret
+
 # Local config that may hold secrets (OpenAI/analysis API keys, model choices).
 # Written by the in-app Settings panel; never commit it. The glob also covers
 # .env.evalbak — eval batches shelve .env aside for their duration so the
