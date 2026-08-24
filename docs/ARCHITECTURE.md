@@ -76,9 +76,9 @@
 > experimental generative edits, an optional pixel-**heal** retouch mode (§4.7)
 > the deterministic look **reverse-fit** (§4.8) and the local server's refusal
 > model (§4.9).
-> 871 library + 14 CLI + 139 GUI + 2+2 contract tests are enumerated in the GUI
-> build; the library result is 862 pass + 9 `#[ignore]`d forensic probes
-> (counts refreshed 2026-08-24 after the post-v1.0.0 variant-baseline batch: GUI 132→139). THREE suites are ADDITIONAL and
+> 889 library + 14 CLI + 139 GUI + 2+2 contract tests are enumerated in the GUI
+> build; the library result is 880 pass + 9 `#[ignore]`d forensic probes
+> (counts refreshed 2026-08-24 after the reverse-fit Atmosphere batch: library 871→889, GUI 132→139). THREE suites are ADDITIONAL and
 > env-gated, so a bare `cargo test` does not include them:
 > `AUTOSHOP_LR_PROBE_FIXTURES` (16 real Lightroom radial sidecars, byte
 > round-trip), `AUTOSHOP_MB_FIXTURES` (the 7-file M-B forensic set — 42 of its
@@ -1631,13 +1631,16 @@ The inverse of the advisor path: given the same frame twice — the untouched
 source and a *target rendition* of it (a `reimagine` output, an exported JPEG,
 any finished reference of that shot) — solve for the `EditRecipe` that
 reproduces the target through our own engine ([`src/fit.rs`](../src/fit.rs)).
-No pixels are copied, so the answer is sliders + curves: it applies at full
-sensor resolution and serialises to XMP like any other develop. Deterministic
-and key-free.
+No target pixels are copied: the answer is global sliders + curves and,
+optionally, engine-rendered bitmap sky/land adjustments. It applies at full
+sensor resolution; classic XMP carries the representable global controls and
+the bitmap zones stay engine-only. Deterministic and key-free.
 
 The method is deliberately **distribution-level, not per-pixel regression** — a
 generative target is not pixel-aligned with its source, so only statistics are
-trustworthy. Three stages, in this order: luminance-CDF tone matching (sampled
+trustworthy. A rank/gradient/pyramid structural-divergence reading selects the
+global policy before any CDF solve. **Full** mode keeps three stages, in this
+order: luminance-CDF tone matching (sampled
 at the engine's own tone knots and least-squares solved against the engine's own
 slider basis, with a ridge + penalised model-selection prior so numerically
 equivalent but semantically ruinous slider combos lose); then saturation by
@@ -1645,7 +1648,10 @@ mean-chroma ratio, secant-refined through real renders and closed with a
 do-no-harm check; then per-channel CDF residuals as red/green/blue curves,
 admitted only through three vetoes (aggregate error, foreign-hue, rotation
 budget) — each veto is a specific real-photo failure recorded at its const
-block.
+block. **Atmosphere** mode instead uses bounded robust exposure, white balance,
+a five-point tone curve and saturation, never per-channel curves, and caps the
+reported confidence because develop controls cannot reconstruct the changed
+structure.
 
 The tone stage's evidence prefers NEAR-NEUTRAL pixels (saturated ones carry
 chroma-clipped luma), which rests on an identification assumption — "grey"
@@ -1672,11 +1678,15 @@ and a steep camera base compresses fixed-x samples into 38-u8 gaps whose
 piecewise-linear chords sag ~10/255. `--zoned` ([`src/fit_zoned.rs`](../src/fit_zoned.rs)) adds a sky-to-sky
 local correction on top of the global fit via the segmentation sidecar; the
 XMP carries the global fit only, since classic sidecars cannot hold raster
-masks. Each zone's correction is judged zone-locally by a two-arm gate
+masks. The same structural statistic independently selects **Full** or bounded
+**Atmosphere** policy for each zone; structural divergence never drops a zone
+by itself. Every candidate must preserve mask-weighted texture energy and
+clipped-luma share. A Full-zone correction then uses the two-arm gate
 (v0.26.1): halve the zone error, or land it at/below an absolute matched
 floor (0.02 of linear-mean error, brightness within a quarter stop — the
 floor lives in scale-dependent linear light, so the EV companion rides
-both absolute yardsticks) with a real ≥20% gain. A zone already inside the
+both absolute yardsticks) with a real ≥20% gain; an Atmosphere zone uses
+zone-local do-no-harm instead. A zone already inside the
 observed matched DOMAIN (≤0.012, same EV companion) is left alone with an
 honest "already matches" note instead of being dialled, regressed, and
 reported as a dropped improvement; zones between the two yardsticks are

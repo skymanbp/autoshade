@@ -69,12 +69,22 @@ pub mod keys {
          pixel-aligned, so local masks and per-band HSL are not recovered): luma-CDF \
          → tone sliders (no residual curve), chroma → saturation, per-channel cast \
          curves. Residual look error {err_before} → {err_after}.";
+    pub const FIT_SUMMARY_ATMOSPHERE: &str =
+        "Reverse-fit Atmosphere mode (structural divergence D={d}): the target's \
+         structure cannot be reconstructed by develop controls, so only its atmosphere \
+         and overall tone/colour were matched with bounded robust controls. Residual look \
+         error {err_before} → {err_after}.";
     pub const FIT_NOTE_FAR: &str =
         " NOTE: the fitted recipe still renders far from the target \
          (residual {err_after}) — this look exceeds what global \
          sliders can express; consider the AI variant itself or a zoned \
          edit.";
     pub const FIT_NOTE_SAT_PEGGED: &str = " Saturation demand exceeded the model cap (±60).";
+    pub const FIT_NOTE_ATMOSPHERE_SAT_PEGGED: &str =
+        " Atmosphere-mode saturation demand exceeded its conservative cap (±30).";
+    pub const FIT_NOTE_ATMOSPHERE_CONFIDENCE: &str =
+        " Atmosphere-mode confidence is capped at {cap} because develop controls cannot \
+         recreate the divergent structure.";
     pub const FIT_DEGENERATE: &str = " Fit refused: the source or target frame has no tonal variation (blank or single-tone), so a statistical match would produce a constant tone map — no recipe was fitted.";
     pub const FIT_NOTE_REGRESSED: &str =
         " The full fit rendered farther from the target than the untouched \
@@ -129,6 +139,10 @@ pub mod keys {
          highlights/shadows/whites/blacks, a tone curve, one global \
          saturation and the three channel curves) — that part of the look \
          cannot arrive through this route.";
+    pub const FIT_NOTE_ATMOSPHERE_UNREPRESENTED: &str =
+        " This target's remaining look appears to need {controls}; Atmosphere mode only \
+         solves bounded exposure, white balance, a robust five-point tone curve and \
+         saturation, so that part cannot arrive through this route.";
     /// R23-6 D: the deep reverse-fit adopted a guided retry. The persisted
     /// record has to say the shipped recipe is not the plain solve — the
     /// status line is transient, the rationale is what reopening the photo
@@ -162,6 +176,20 @@ pub mod keys {
     pub const ZONE_TOO_SMALL: &str =
         " The {label} zone covers too little of the frame (source {s}%, \
          target {t}%) — skipped.";
+    pub const ZONE_MODE_FULL: &str =
+        " The {label} structural divergence is D={d}; Full zone fit selected.";
+    pub const ZONE_MODE_ATMOSPHERE: &str =
+        " The {label} structure cannot be reconstructed by develop controls; \
+         matching atmosphere only (D={d}).";
+    pub const ZONE_QUALITY_PASSED: &str =
+        " Local quality gate passed for {label}: texture ratio {texture}, clipped \
+         share {clip_before}% → {clip_after}%.";
+    pub const ZONE_QUALITY_TEXTURE_FAILED: &str =
+        " Zoned {label} correction dropped by the local-quality texture gate: \
+         ratio {ratio} is outside [{min}, {max}].";
+    pub const ZONE_QUALITY_CLIPPING_FAILED: &str =
+        " Zoned {label} correction dropped by the local-quality clipping gate: \
+         clipped share {before}% → {after}% (allowed growth {growth} percentage point).";
     pub const ZONE_ATTACHED: &str =
         " Zoned {label} correction attached ({label}-to-{label} moments → \
          local exposure {ev} EV, colour gains [{g0} {g1} {g2}], \
@@ -178,6 +206,10 @@ pub mod keys {
         " Zoned {label} correction dropped: zone residual {before} → {after} \
          (needs ≤ {ratio}% of the original, or ≤ {floor} with a ≥ {gain}% \
          gain) with frame-global drift {drift} (tolerance {tol}).";
+    pub const ZONE_ATMOSPHERE_DROPPED: &str =
+        " Zoned {label} atmosphere correction dropped: zone residual {before} → \
+         {after} did not satisfy do-no-harm, or frame-global drift {drift} exceeded \
+         tolerance {tol}.";
     pub const ZONE_ALREADY_MATCHED: &str =
         " The {label} zone already matches the target (zone residual \
          {before}) — no correction needed.";

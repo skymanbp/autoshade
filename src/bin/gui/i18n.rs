@@ -1493,6 +1493,11 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
       → tone sliders (no residual curve), chroma → saturation, per-channel cast \
       curves. Residual look error {err_before} → {err_after}.",
         "从目标成品反推（统计匹配；目标未像素对齐，故局部蒙版与分色相 HSL 无法恢复）：亮度 CDF → 影调滑杆（无残差曲线），色度 → 饱和度，逐通道色偏曲线。剩余观感误差 {err_before} → {err_after}。"),
+    ("Reverse-fit Atmosphere mode (structural divergence D={d}): the target's \
+      structure cannot be reconstructed by develop controls, so only its atmosphere \
+      and overall tone/colour were matched with bounded robust controls. Residual look \
+      error {err_before} → {err_after}.",
+        "反推氛围模式（结构差异 D={d}）：目标结构无法通过显影控制恢复，因此仅以有界的可靠控制匹配其氛围和整体影调/色调。剩余观感误差 {err_before} → {err_after}。"),
     (" NOTE: the fitted recipe still renders far from the target \
       (residual {err_after}) — this look exceeds what global \
       sliders can express; consider the AI variant itself or a zoned \
@@ -1500,6 +1505,11 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
         " 注意：拟合配方的渲染结果仍与目标相距较远（残差 {err_after}）——此风格超出全局滑杆的表达范围；可考虑直接使用 AI 变体或分区编辑。"),
     (" Saturation demand exceeded the model cap (±60).",
         " 饱和度需求超出模型上限（±60）。"),
+    (" Atmosphere-mode saturation demand exceeded its conservative cap (±30).",
+        " 氛围模式的饱和度需求超出其更低上限（±30）。"),
+    (" Atmosphere-mode confidence is capped at {cap} because develop controls cannot \
+      recreate the divergent structure.",
+        " 由于显影控制无法重建差异结构，氛围模式的置信度上限为 {cap}。"),
     (" Fit refused: the source or target frame has no tonal variation (blank or single-tone), so a statistical match would produce a constant tone map — no recipe was fitted.",
         " 拟合已拒绝：源图或目标图没有影调变化（空白或单色画面），统计匹配只会产生恒定影调映射——未生成拟合配方。"),
     (" The full fit rendered farther from the target than the untouched \
@@ -1549,6 +1559,10 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
       saturation and the three channel curves) — that part of the look \
       cannot arrive through this route.",
         " 目标成品的风格里可能用到了 {controls}，而反推从不求解这些参数（它的整个求解域只有曝光/对比度/高光/阴影/白色/黑色、一条影调曲线、一个全局饱和度和三条通道曲线）——这部分风格无法从这条路径得到。"),
+    (" This target's remaining look appears to need {controls}; Atmosphere mode only \
+      solves bounded exposure, white balance, a robust five-point tone curve and \
+      saturation, so that part cannot arrive through this route.",
+        " 此目标剩余的观感可能需要 {controls}；氛围模式只求解有界曝光、白平衡、可靠的 5 点影调曲线和饱和度，因此这部分无法通过此路径得到。"),
     (" WARNING: the reference's proportions do not match this photo's — it \
       was CROPPED, or it is not the same frame. Either way the two \
       distributions are not comparable, because a crop changes which pixels \
@@ -1563,6 +1577,20 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     (" The {label} zone covers too little of the frame (source {s}%, \
       target {t}%) — skipped.",
         " {label} 区占画面比例过小（原图 {s}%、目标 {t}%）——已跳过。"),
+    (" The {label} structural divergence is D={d}; Full zone fit selected.",
+        " {label} 区的结构差异为 D={d}；已选择完整分区拟合。"),
+    (" The {label} structure cannot be reconstructed by develop controls; \
+      matching atmosphere only (D={d}).",
+        " {label} 结构无法通过配方恢复，只匹配氛围（D={d}）。"),
+    (" Local quality gate passed for {label}: texture ratio {texture}, clipped \
+      share {clip_before}% → {clip_after}%.",
+        " {label} 区已通过局部质量门：纹理比 {texture}，裁切占比 {clip_before}% → {clip_after}%。"),
+    (" Zoned {label} correction dropped by the local-quality texture gate: \
+      ratio {ratio} is outside [{min}, {max}].",
+        " {label} 区校正被局部质量纹理门弃用：比值 {ratio} 超出 [{min}, {max}]。"),
+    (" Zoned {label} correction dropped by the local-quality clipping gate: \
+      clipped share {before}% → {after}% (allowed growth {growth} percentage point).",
+        " {label} 区校正被局部质量裁切门弃用：裁切占比 {before}% → {after}%（允许增加 {growth}%）。"),
     (" Zoned {label} correction attached ({label}-to-{label} moments → \
       local exposure {ev} EV, colour gains [{g0} {g1} {g2}], \
       saturation {sat}): zone residual {before} → {after}. The correction \
@@ -1579,6 +1607,10 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
       (needs ≤ {ratio}% of the original, or ≤ {floor} with a ≥ {gain}% \
       gain) with frame-global drift {drift} (tolerance {tol}).",
         " 已弃用 {label} 区校正：区残差 {before} → {after}（需 ≤ 原值的 {ratio}%，或 ≤ {floor} 同时增益 ≥ {gain}%），全画面漂移 {drift}（容差 {tol}）。"),
+    (" Zoned {label} atmosphere correction dropped: zone residual {before} → \
+      {after} did not satisfy do-no-harm, or frame-global drift {drift} exceeded \
+      tolerance {tol}.",
+        " 已弃用 {label} 区氛围校正：区残差 {before} → {after} 未通过不伤害原则，或全画面漂移 {drift} 超出容差 {tol}。"),
     (" The {label} zone already matches the target (zone residual \
       {before}) — no correction needed.",
         " {label} 区已与目标匹配（区残差 {before}）——无需校正。"),

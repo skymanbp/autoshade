@@ -69,6 +69,282 @@ use crate::render;
 /// saturation, each a 384-px develop).
 pub(crate) const ANALYZE_EDGE: u32 = 384;
 const HIST_BINS: usize = 1024;
+/// Global structural-divergence threshold. Calibration on same-content pairs:
+/// showcase 1/2/3 = 0.075/0.168/0.095, viaduct = 0.070 and sunset = 0.226;
+/// the generated-cloud failure is 0.491.
+pub(crate) const DIVERGENCE_GLOBAL: f32 = 0.35;
+/// Per-zone structural-divergence threshold. The same-content top-35% strips
+/// peak at 0.532, while the generated-cloud sky is 1.186 (land = 0.436).
+pub(crate) const DIVERGENCE_ZONE: f32 = 0.65;
+/// A divergent semantic partition covering this source-frame share promotes
+/// the global solve to Atmosphere mode. The failing sky covers 44.36%.
+pub(crate) const DIVERGENT_COVER_PROMOTES: f32 = 0.35;
+/// Independent cap for every residual tone-curve segment. The three showcase
+/// curves peak at 1.762/1.905/1.762; the generated-cloud failure reached 4.52.
+const RESIDUAL_SLOPE_CAP: f32 = 2.0;
+
+const ATMOSPHERE_EV_LIMIT: f32 = 1.0;
+const ATMOSPHERE_SAT_LIMIT: f32 = 30.0;
+const ATMOSPHERE_WB_GAIN_MIN: f32 = 0.80;
+const ATMOSPHERE_WB_GAIN_MAX: f32 = 1.25;
+const ATMOSPHERE_WB_GAIN_RATIO: f32 = 1.40;
+const ATMOSPHERE_CURVE_SLOPE_MIN: f32 = 0.5;
+const ATMOSPHERE_CURVE_SLOPE_MAX: f32 = 1.5;
+const ATMOSPHERE_CONFIDENCE_CAP: f32 = 0.50;
+
+/// The global reverse-fit policy selected before any CDF solve.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FitMode {
+    Full,
+    Atmosphere,
+}
+
+/// The two calibrated components of structural divergence and their Euclidean
+/// combination `d = sqrt((1-correlation)^2 + energy_error^2)`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Divergence {
+    pub correlation: f32,
+    pub energy_error: f32,
+    pub d: f32,
+}
+
+impl Divergence {
+    fn matched() -> Self {
+        Self { correlation: 1.0, energy_error: 0.0, d: 0.0 }
+    }
+}
+
+/// Tone-invariant structural comparison shared by the global and zoned
+/// solvers. Luma is rank-equalized through a mask-weighted 1024-bin CDF; a
+/// three-pixel erosion keeps semantic-mask boundaries out of the reading.
+/// Central-difference rank-gradient maps are pooled at sigma 2 and correlated
+/// over translations of +/-6 pixels. Five Gaussian bands (sigma 1/2/4/8/16)
+/// contribute the RMS log2 energy-ratio error.
+pub(crate) fn structure_divergence(
+    src_px: &[[f32; 3]],
+    tgt_px: &[[f32; 3]],
+    w: u32,
+    h: u32,
+    weights: &[f32],
+) -> Divergence {
+    let n = w as usize * h as usize;
+    if n == 0 || src_px.len() != n || tgt_px.len() != n || weights.len() != n {
+        return Divergence::matched();
+    }
+
+    let rank_equalized = |px: &[[f32; 3]]| -> Vec<f32> {
+        let mut hist = [0.0f64; HIST_BINS];
+        let mut bins = Vec::with_capacity(n);
+        for (p, &weight) in px.iter().zip(weights) {
+            let bin = (luma601(p).clamp(0.0, 1.0) * (HIST_BINS - 1) as f32).round() as usize;
+            bins.push(bin);
+            hist[bin] += weight.max(0.0) as f64;
+        }
+        let total = hist.iter().sum::<f64>();
+        if total <= 1e-12 {
+            return vec![0.0; n];
+        }
+        let mut acc = 0.0f64;
+        for v in &mut hist {
+            acc += *v;
+            *v = acc / total;
+        }
+        bins.into_iter().map(|i| hist[i] as f32).collect()
+    };
+
+    let mut core: Vec<bool> = weights.iter().map(|&v| v > 0.8).collect();
+    let (wu, hu) = (w as usize, h as usize);
+    for _ in 0..3 {
+        let mut next = core.clone();
+        for y in 0..hu {
+            for x in 0..wu {
+                let i = y * wu + x;
+                next[i] = x > 0
+                    && x + 1 < wu
+                    && y > 0
+                    && y + 1 < hu
+                    && core[i]
+                    && core[i - 1]
+                    && core[i + 1]
+                    && core[i - wu]
+                    && core[i + wu];
+            }
+        }
+        core = next;
+    }
+    if core.iter().filter(|&&v| v).count() < 100 {
+        return Divergence::matched();
+    }
+
+    let gaussian_blur = |input: &[f32], sigma: f32| -> Vec<f32> {
+        let radius = (3.0 * sigma).ceil().max(1.0) as isize;
+        let mut kernel = Vec::with_capacity((2 * radius + 1) as usize);
+        for i in -radius..=radius {
+            kernel.push((-(i * i) as f32 / (2.0 * sigma * sigma)).exp());
+        }
+        let sum: f32 = kernel.iter().sum();
+        for v in &mut kernel {
+            *v /= sum;
+        }
+        let mut tmp = vec![0.0f32; n];
+        let mut out = vec![0.0f32; n];
+        for y in 0..hu {
+            for x in 0..wu {
+                let mut v = 0.0f32;
+                for (ki, &kv) in kernel.iter().enumerate() {
+                    let sx = x as isize + ki as isize - radius;
+                    if (0..wu as isize).contains(&sx) {
+                        v += input[y * wu + sx as usize] * kv;
+                    }
+                }
+                tmp[y * wu + x] = v;
+            }
+        }
+        for y in 0..hu {
+            for x in 0..wu {
+                let mut v = 0.0f32;
+                for (ki, &kv) in kernel.iter().enumerate() {
+                    let sy = y as isize + ki as isize - radius;
+                    if (0..hu as isize).contains(&sy) {
+                        v += tmp[sy as usize * wu + x] * kv;
+                    }
+                }
+                out[y * wu + x] = v;
+            }
+        }
+        out
+    };
+
+    let signature = |rank: &[f32]| -> (Vec<f32>, [f32; 5]) {
+        let blurred: Vec<Vec<f32>> =
+            [1.0, 2.0, 4.0, 8.0, 16.0].iter().map(|&s| gaussian_blur(rank, s)).collect();
+        let mut energy = [0.0f32; 5];
+        let count = core.iter().filter(|&&v| v).count() as f64;
+        for band in 0..5 {
+            let mut sum = 0.0f64;
+            for i in 0..n {
+                if !core[i] {
+                    continue;
+                }
+                let v = if band == 0 {
+                    rank[i] - blurred[0][i]
+                } else {
+                    blurred[band - 1][i] - blurred[band][i]
+                };
+                sum += (v * v) as f64;
+            }
+            energy[band] = (sum / count).sqrt() as f32;
+        }
+        let mut gradient = vec![0.0f32; n];
+        for y in 1..hu.saturating_sub(1) {
+            for x in 1..wu.saturating_sub(1) {
+                let i = y * wu + x;
+                let dx = 0.5 * (rank[i + 1] - rank[i - 1]);
+                let dy = 0.5 * (rank[i + wu] - rank[i - wu]);
+                gradient[i] = (dx * dx + dy * dy).sqrt();
+            }
+        }
+        (gaussian_blur(&gradient, 2.0), energy)
+    };
+
+    let src_rank = rank_equalized(src_px);
+    let tgt_rank = rank_equalized(tgt_px);
+    let (src_gradient, src_energy) = signature(&src_rank);
+    let (tgt_gradient, tgt_energy) = signature(&tgt_rank);
+
+    let mut best = -1.0f64;
+    for dy in -6isize..=6 {
+        for dx in -6isize..=6 {
+            let mut count = 0usize;
+            let (mut sx_sum, mut ty_sum) = (0.0f64, 0.0f64);
+            for y in 0..hu {
+                for x in 0..wu {
+                    let i = y * wu + x;
+                    let sy = y as isize - dy;
+                    let sx = x as isize - dx;
+                    if core[i]
+                        && (0..hu as isize).contains(&sy)
+                        && (0..wu as isize).contains(&sx)
+                    {
+                        sx_sum += src_gradient[sy as usize * wu + sx as usize] as f64;
+                        ty_sum += tgt_gradient[i] as f64;
+                        count += 1;
+                    }
+                }
+            }
+            if count < 100 {
+                continue;
+            }
+            let (sx_mean, ty_mean) = (sx_sum / count as f64, ty_sum / count as f64);
+            let (mut cross, mut sa, mut sb) = (0.0f64, 0.0f64, 0.0f64);
+            for y in 0..hu {
+                for x in 0..wu {
+                    let i = y * wu + x;
+                    let sy = y as isize - dy;
+                    let sx = x as isize - dx;
+                    if core[i]
+                        && (0..hu as isize).contains(&sy)
+                        && (0..wu as isize).contains(&sx)
+                    {
+                        let a = src_gradient[sy as usize * wu + sx as usize] as f64 - sx_mean;
+                        let b = tgt_gradient[i] as f64 - ty_mean;
+                        cross += a * b;
+                        sa += a * a;
+                        sb += b * b;
+                    }
+                }
+            }
+            let den = (sa * sb).sqrt();
+            if den > 0.0 {
+                best = best.max(cross / den);
+            }
+        }
+    }
+    let correlation = if best >= -1.0 { best as f32 } else { 1.0 };
+    let energy_error = (src_energy
+        .iter()
+        .zip(tgt_energy)
+        .map(|(&a, b)| ((b + 1e-6) / (a + 1e-6)).log2().powi(2))
+        .sum::<f32>()
+        / 5.0)
+        .sqrt();
+    let d = ((1.0 - correlation).powi(2) + energy_error.powi(2)).sqrt();
+    Divergence { correlation, energy_error, d }
+}
+
+/// The common, pixel-aligned 384×256 analysis raster used by both scopes and
+/// by the calibration prototype. Both sides are Lanczos-resampled onto that
+/// one grid and the source is placed in the calibration/base domain before
+/// ranks are measured.
+pub(crate) fn divergence_raster(
+    src: &DynamicImage,
+    target: &DynamicImage,
+    base: &EditRecipe,
+) -> (Vec<[f32; 3]>, Vec<[f32; 3]>, u32, u32) {
+    let (w, h) = (ANALYZE_EDGE, ANALYZE_EDGE * 2 / 3);
+    let src_grid = src.resize_exact(w, h, image::imageops::FilterType::Lanczos3);
+    let tgt_grid = target.resize_exact(w, h, image::imageops::FilterType::Lanczos3);
+    let src_base = render::develop_preview(&src_grid, base);
+    (pixels_of(&src_base), pixels_of(&tgt_grid), w, h)
+}
+
+pub(crate) fn structure_divergence_for(
+    src: &DynamicImage,
+    target: &DynamicImage,
+    base: &EditRecipe,
+    weights: Option<&[f32]>,
+) -> Divergence {
+    let (sp, tp, w, h) = divergence_raster(src, target, base);
+    let all;
+    let weights = match weights {
+        Some(v) => v,
+        None => {
+            all = vec![1.0; sp.len()];
+            &all
+        }
+    };
+    structure_divergence(&sp, &tp, w, h, weights)
+}
 /// Quantile clip for CDF inversion — the extreme tails of a generative render
 /// are noise (a few blown/crushed pixels would otherwise own the end knots).
 pub(crate) const P_CLIP: f32 = 0.002;
@@ -359,6 +635,11 @@ pub struct FitReport {
     pub recipe: EditRecipe,
     pub err_before: f32,
     pub err_after: f32,
+    /// Global solve policy selected before any CDF fitting.
+    pub mode: FitMode,
+    /// Structural reading that selected `mode` (promotion may select
+    /// Atmosphere even when this frame-global value is below its threshold).
+    pub divergence: Divergence,
     /// The rationale as typed notes (L12#2B): `render_en(&notes)` is the
     /// recipe's `rationale` byte-for-byte (empty prose prefix — the fit
     /// rationale is fully deterministic), so the GUI renders it localized
@@ -390,6 +671,17 @@ pub fn fit_recipe_from(
     target: &DynamicImage,
     base: &EditRecipe,
 ) -> FitReport {
+    fit_recipe_from_promoted(src, target, base, false)
+}
+
+/// Zoned entry point: semantic divergence is known before the global solve and
+/// may promote it without changing the public non-zoned API.
+pub(crate) fn fit_recipe_from_promoted(
+    src: &DynamicImage,
+    target: &DynamicImage,
+    base: &EditRecipe,
+    divergent_zone_promotes: bool,
+) -> FitReport {
     // CALLER CONTRACT: `base` must be calibration-only (build it with
     // `pipeline::calibration_recipe`, or pass the default). A base smuggling
     // user edits (curves/masks/sliders) breaks the residual algebra AND the
@@ -414,6 +706,12 @@ pub fn fit_recipe_from(
     let sp = pixels_of(&s_base);
     let tp = pixels_of(&t_img);
     let err_before = look_err(&sp, &tp);
+    let divergence = structure_divergence_for(src, target, base, None);
+    let mode = if divergence.d >= DIVERGENCE_GLOBAL || divergent_zone_promotes {
+        FitMode::Atmosphere
+    } else {
+        FitMode::Full
+    };
 
     // A DEGENERATE pair carries no tone evidence: on a zero-variance source
     // or target (lens-cap frame, blank card, an empty crop) the inverse CDF
@@ -435,7 +733,26 @@ pub fn fit_recipe_from(
         // success path — the persisted JSON stays canonical (review R16 #2).
         let mut recipe = EditRecipe { rationale, ..base.clone() };
         recipe.clamp();
-        return FitReport { recipe, err_before, err_after: err_before, notes };
+        return FitReport {
+            recipe,
+            err_before,
+            err_after: err_before,
+            notes,
+            mode,
+            divergence,
+        };
+    }
+
+    if mode == FitMode::Atmosphere {
+        return fit_atmosphere_from_parts(
+            &s_img,
+            &sp,
+            &tp,
+            base,
+            err_before,
+            same_frame,
+            divergence,
+        );
     }
 
     let mut recipe = base.clone();
@@ -648,14 +965,245 @@ pub fn fit_recipe_from(
             after_px: &after_px,
             tp: &tp,
             same_frame,
+            mode,
+            divergence,
         },
         SolveFacts {
-            sat_pegged,
+            sat_pegged: sat_pegged.then_some(FitMode::Full),
             cast,
             sat_fitted: sat_reduced.then_some(sat_fitted),
             regressed: fit_regressed.then_some(joint_regressed),
         },
     )
+}
+
+/// Bounded global solve used when structural correspondence has failed. It
+/// deliberately has no local-symptom branches: one budget table governs a
+/// robust exposure/WB/tone/saturation atmosphere match, and RGB curves are
+/// absent by construction.
+fn fit_atmosphere_from_parts(
+    s_img: &DynamicImage,
+    sp: &[[f32; 3]],
+    tp: &[[f32; 3]],
+    base: &EditRecipe,
+    err_before: f32,
+    same_frame: bool,
+    divergence: Divergence,
+) -> FitReport {
+    let mut recipe = base.clone();
+
+    let linear_luma_cdf = |px: &[[f32; 3]]| {
+        cdf_from_values(
+            px.iter().map(|p| {
+                0.299 * render::srgb_to_linear(p[0])
+                    + 0.587 * render::srgb_to_linear(p[1])
+                    + 0.114 * render::srgb_to_linear(p[2])
+            }),
+            px.len(),
+        )
+    };
+    let (sl, tl) = (linear_luma_cdf(sp), linear_luma_cdf(tp));
+    let exposure = (quantile(&tl, 0.5).max(1e-5) / quantile(&sl, 0.5).max(1e-5))
+        .log2()
+        .clamp(-ATMOSPHERE_EV_LIMIT, ATMOSPHERE_EV_LIMIT);
+    recipe.exposure_ev = round2(exposure);
+
+    // Robust per-channel medians identify the atmospheric cast without
+    // letting a newly generated cloud highlight own a frame-wide mean. Remove
+    // their common brightness through the geometric mean, then invert the
+    // engine's own WB model. A demand outside the one calibrated gain budget
+    // is not partially clamped: the recipe stays as-shot.
+    let mut ratio = [1.0f32; 3];
+    for ch in 0..3 {
+        let sc = cdf_from_values(sp.iter().map(|p| render::srgb_to_linear(p[ch])), sp.len());
+        let tc = cdf_from_values(tp.iter().map(|p| render::srgb_to_linear(p[ch])), tp.len());
+        ratio[ch] = quantile(&tc, 0.5).max(1e-5) / quantile(&sc, 0.5).max(1e-5);
+    }
+    let common = (ratio[0] * ratio[1] * ratio[2]).max(1e-12).powf(1.0 / 3.0);
+    let wanted = ratio.map(|v| v / common);
+    let anchor = base.as_shot_k.unwrap_or(5500.0);
+    let (lo, hi) = ((2000.0f32).ln(), (40000.0f32).ln());
+    let tint = ((1.0 - wanted[1]) / 0.20 * 100.0).clamp(-100.0, 100.0);
+    let mut best = (anchor, f32::INFINITY);
+    for i in 0..=400 {
+        let k = (lo + (hi - lo) * i as f32 / 400.0).exp();
+        let gains = render::wb_gains(anchor, k, tint);
+        let err = gains
+            .iter()
+            .zip(wanted)
+            .map(|(&g, want)| (g.max(1e-5) / want.max(1e-5)).log2().powi(2))
+            .sum::<f32>();
+        if err < best.1 {
+            best = (k, err);
+        }
+    }
+    let wb_k = (best.0 / 50.0).round() * 50.0;
+    let wb_tint = round1(tint);
+    let gains = render::wb_gains(anchor, wb_k, wb_tint);
+    let (gain_min, gain_max) = gains
+        .iter()
+        .fold((f32::INFINITY, f32::NEG_INFINITY), |(lo, hi), &g| (lo.min(g), hi.max(g)));
+    if gains.iter().all(|&g| (ATMOSPHERE_WB_GAIN_MIN..=ATMOSPHERE_WB_GAIN_MAX).contains(&g))
+        && gain_max / gain_min.max(1e-6) <= ATMOSPHERE_WB_GAIN_RATIO
+    {
+        recipe.temperature_k = Some(wb_k);
+        recipe.tint = wb_tint;
+    }
+
+    let provisional = pixels_of(&render::develop_preview(s_img, &recipe));
+    recipe.tone_curve = atmosphere_tone_curve(&provisional, tp);
+
+    let target_chroma = mean_chroma(tp);
+    let mut sat_pegged = false;
+    for _ in 0..2 {
+        let cur = pixels_of(&render::develop_preview(s_img, &recipe));
+        let current_chroma = mean_chroma(&cur);
+        if current_chroma < 1e-4 {
+            break;
+        }
+        let step = ((target_chroma / current_chroma - 1.0) * 100.0).clamp(-40.0, 40.0);
+        if step.abs() < 1.0 {
+            break;
+        }
+        let want = recipe.saturation + step;
+        let clamped = want.clamp(-ATMOSPHERE_SAT_LIMIT, ATMOSPHERE_SAT_LIMIT);
+        if (want - clamped).abs() > 0.5 {
+            sat_pegged = true;
+        }
+        recipe.saturation = round1(clamped);
+    }
+    // Atmosphere mode never emits channel curves, including after any
+    // saturation pull-back.
+    recipe.red_curve.clear();
+    recipe.green_curve.clear();
+    recipe.blue_curve.clear();
+
+    let sat_fitted = recipe.saturation;
+    let mut err_after = look_err(&pixels_of(&render::develop_preview(s_img, &recipe)), tp);
+    while err_after > err_before + 1e-4 && recipe.saturation != 0.0 {
+        let next = if recipe.saturation.abs() < 4.0 { 0.0 } else { recipe.saturation / 2.0 };
+        recipe.saturation = round1(next);
+        err_after = look_err(&pixels_of(&render::develop_preview(s_img, &recipe)), tp);
+    }
+    let sat_reduced = recipe.saturation != sat_fitted;
+    let joint_base = crate::fit_zoned::joint_reading(sp, tp);
+    let mut after_px = pixels_of(&render::develop_preview(s_img, &recipe));
+    let mut joint_after = crate::fit_zoned::joint_reading(&after_px, tp);
+    let harm = terminal_harm(err_before, err_after, joint_base, joint_after);
+    let mut fit_regressed = false;
+    let joint_regressed = harm.joint;
+    if harm.any() {
+        recipe = base.clone();
+        err_after = err_before;
+        after_px = sp.to_vec();
+        joint_after = joint_base;
+        fit_regressed = true;
+    }
+    compose_report(
+        recipe,
+        Measured {
+            err_before,
+            err_after,
+            joint_after,
+            after_px: &after_px,
+            tp,
+            same_frame,
+            mode: FitMode::Atmosphere,
+            divergence,
+        },
+        SolveFacts {
+            sat_pegged: sat_pegged.then_some(FitMode::Atmosphere),
+            cast: CastOutcome::default(),
+            sat_fitted: sat_reduced.then_some(sat_fitted),
+            regressed: fit_regressed.then_some(joint_regressed),
+        },
+    )
+}
+
+fn atmosphere_tone_curve(cur: &[[f32; 3]], tgt: &[[f32; 3]]) -> Vec<CurvePoint> {
+    let (cc, tc) = (luma_cdf(cur), luma_cdf(tgt));
+    let mut points = vec![CurvePoint { input: 0, output: 0 }];
+    let mut prev_input = 0u8;
+    let mut prev_output = 0u8;
+    for (index, p) in [0.05, 0.50, 0.95].into_iter().enumerate() {
+        let input = (quantile(&cc, p) * 255.0).round().clamp(1.0, 254.0) as u8;
+        let output = (quantile(&tc, p) * 255.0).round().clamp(1.0, 254.0) as u8;
+        // Reserve one input code for each remaining robust quantile and the
+        // fixed 255 endpoint. Even a strongly concentrated but non-degenerate
+        // frame therefore keeps exactly five strictly ordered points.
+        let upper = 252 + index as u8;
+        let input = input.max(prev_input.saturating_add(1)).min(upper);
+        let output = output.max(prev_output);
+        points.push(CurvePoint { input, output });
+        prev_input = input;
+        prev_output = output;
+    }
+    points.push(CurvePoint { input: 255, output: 255 });
+    project_curve_slopes(&points, ATMOSPHERE_CURVE_SLOPE_MIN, ATMOSPHERE_CURVE_SLOPE_MAX)
+}
+
+/// Constrained monotone projection with fixed x coordinates and fixed endpoint
+/// values. Slopes are redistributed across neighboring segments; no point is
+/// deleted. Inputs already inside the budget return byte-identically.
+fn project_curve_slopes(points: &[CurvePoint], min_slope: f32, max_slope: f32) -> Vec<CurvePoint> {
+    if points.len() < 2 {
+        return points.to_vec();
+    }
+    let slopes: Vec<f32> = points
+        .windows(2)
+        .map(|pair| {
+            (pair[1].output as f32 - pair[0].output as f32)
+                / (pair[1].input as f32 - pair[0].input as f32).max(1.0)
+        })
+        .collect();
+    if slopes.iter().all(|&s| s >= min_slope - 1e-6 && s <= max_slope + 1e-6) {
+        return points.to_vec();
+    }
+    let dx: Vec<f32> = points
+        .windows(2)
+        .map(|pair| (pair[1].input - pair[0].input) as f32)
+        .collect();
+    let mut projected: Vec<f32> = slopes.iter().map(|&s| s.clamp(min_slope, max_slope)).collect();
+    let target = points.last().unwrap().output as f32 - points[0].output as f32;
+    let current: f32 = projected.iter().zip(&dx).map(|(s, x)| s * x).sum();
+    let delta = target - current;
+    if delta > 0.0 {
+        let capacity: f32 = projected.iter().zip(&dx).map(|(s, x)| (max_slope - s) * x).sum();
+        if capacity > 1e-6 {
+            let fraction = (delta / capacity).clamp(0.0, 1.0);
+            for slope in &mut projected {
+                *slope += fraction * (max_slope - *slope);
+            }
+        }
+    } else if delta < 0.0 {
+        let capacity: f32 = projected.iter().zip(&dx).map(|(s, x)| (s - min_slope) * x).sum();
+        if capacity > 1e-6 {
+            let fraction = (-delta / capacity).clamp(0.0, 1.0);
+            for slope in &mut projected {
+                *slope -= fraction * (*slope - min_slope);
+            }
+        }
+    }
+
+    let first = points[0].output as f32;
+    let end = points.last().unwrap();
+    let mut y = first;
+    let mut out = Vec::with_capacity(points.len());
+    out.push(points[0]);
+    for i in 1..points.len() - 1 {
+        y += projected[i - 1] * dx[i - 1];
+        let prev = out[i - 1].output as i32;
+        let seg_dx = dx[i - 1] as i32;
+        let remaining_dx = end.input as i32 - points[i].input as i32;
+        let lower = (prev + (min_slope * seg_dx as f32).ceil() as i32)
+            .max(end.output as i32 - (max_slope * remaining_dx as f32).floor() as i32);
+        let upper = (prev + (max_slope * seg_dx as f32).floor() as i32)
+            .min(end.output as i32 - (min_slope * remaining_dx as f32).ceil() as i32);
+        let output = (y.round() as i32).clamp(lower, upper).clamp(0, 255) as u8;
+        out.push(CurvePoint { input: points[i].input, output });
+    }
+    out.push(*end);
+    out
 }
 
 /// What a [`FitReport`]'s notes need that only a MEASUREMENT can supply — all
@@ -669,6 +1217,8 @@ struct Measured<'a> {
     /// The target thumbnail.
     tp: &'a [[f32; 3]],
     same_frame: bool,
+    mode: FitMode,
+    divergence: Divergence,
 }
 
 /// …and what only the SOLVE can supply: decisions the solver made on its way to
@@ -677,10 +1227,13 @@ struct Measured<'a> {
 /// Split out from [`Measured`] precisely because the split is the contract for
 /// [`rescore_report`]: a recipe someone ADJUSTED after the solve can honestly
 /// re-derive everything on the measured side and nothing on this one.
-#[derive(Default, Clone, Copy)]
+#[derive(Clone, Copy)]
 struct SolveFacts {
-    /// The chroma chase hit the ±60 model cap with demand to spare.
-    sat_pegged: bool,
+    /// The chroma chase hit this mode's model cap with demand to spare. The
+    /// mode travels with the solve fact because `rescore_report` may classify
+    /// an old adjusted recipe differently without changing what the original
+    /// solve actually did.
+    sat_pegged: Option<FitMode>,
     /// Which of the colour stage's gates (if either) refused the cast curves.
     cast: CastOutcome,
     /// `Some(sat_fitted)` when the do-no-harm loop shrank saturation away from
@@ -713,10 +1266,10 @@ fn compose_report(mut recipe: EditRecipe, m: Measured<'_>, solve: SolveFacts) ->
     // The summary comes first; the note fragments append after it. Two full
     // summary keys instead of a nested English fragment argument — a
     // fragment inside an arg would stay English in the zh rendering.
-    let summary_key = if recipe.tone_curve.is_empty() {
-        keys::FIT_SUMMARY_NO_CURVE
-    } else {
-        keys::FIT_SUMMARY_WITH_CURVE
+    let summary_key = match m.mode {
+        FitMode::Atmosphere => keys::FIT_SUMMARY_ATMOSPHERE,
+        FitMode::Full if recipe.tone_curve.is_empty() => keys::FIT_SUMMARY_NO_CURVE,
+        FitMode::Full => keys::FIT_SUMMARY_WITH_CURVE,
     };
     push_note(
         &mut rationale,
@@ -726,6 +1279,7 @@ fn compose_report(mut recipe: EditRecipe, m: Measured<'_>, solve: SolveFacts) ->
             vec![
                 ("err_before", format!("{err_before:.3}")),
                 ("err_after", format!("{err_after:.3}")),
+                ("d", format!("{:.3}", m.divergence.d)),
             ],
         ),
     );
@@ -767,8 +1321,13 @@ fn compose_report(mut recipe: EditRecipe, m: Measured<'_>, solve: SolveFacts) ->
         // the confidence below is the look-error ladder on its own.
         push_note(&mut rationale, &mut notes, Note::plain(keys::FIT_NOTE_JOINT_NONE));
     }
-    if solve.sat_pegged {
-        push_note(&mut rationale, &mut notes, Note::plain(keys::FIT_NOTE_SAT_PEGGED));
+    if let Some(sat_mode) = solve.sat_pegged {
+        let key = if sat_mode == FitMode::Atmosphere {
+            keys::FIT_NOTE_ATMOSPHERE_SAT_PEGGED
+        } else {
+            keys::FIT_NOTE_SAT_PEGGED
+        };
+        push_note(&mut rationale, &mut notes, Note::plain(key));
     }
     if let Some(joint_regressed) = solve.regressed {
         push_note(&mut rationale, &mut notes, Note::plain(keys::FIT_NOTE_REGRESSED));
@@ -797,11 +1356,21 @@ fn compose_report(mut recipe: EditRecipe, m: Measured<'_>, solve: SolveFacts) ->
     // Which controls this target's look may need that the solver has no way
     // to reach — SPECIFIC to this pair, not the blanket sentence the summary
     // already carries (R23-6 A-5).
-    if let Some(n) = unrepresented_note(&recipe, m.after_px, m.tp, err_after) {
+    if let Some(n) = unrepresented_note(&recipe, m.after_px, m.tp, err_after, m.mode) {
         push_note(&mut rationale, &mut notes, n);
     }
     if !m.same_frame {
         push_note(&mut rationale, &mut notes, Note::plain(keys::FIT_NOTE_NOT_SAME_FRAME));
+    }
+    if m.mode == FitMode::Atmosphere {
+        push_note(
+            &mut rationale,
+            &mut notes,
+            Note::new(
+                keys::FIT_NOTE_ATMOSPHERE_CONFIDENCE,
+                vec![("cap", format!("{ATMOSPHERE_CONFIDENCE_CAP:.2}"))],
+            ),
+        );
     }
     recipe.rationale = rationale;
     // Confidence: the look-error ladder, and never MORE than the joint
@@ -827,8 +1396,18 @@ fn compose_report(mut recipe: EditRecipe, m: Measured<'_>, solve: SolveFacts) ->
     if !m.same_frame {
         recipe.confidence = recipe.confidence.min(NOT_SAME_FRAME_CONFIDENCE_CAP);
     }
+    if m.mode == FitMode::Atmosphere {
+        recipe.confidence = recipe.confidence.min(ATMOSPHERE_CONFIDENCE_CAP);
+    }
     recipe.clamp();
-    FitReport { recipe, err_before, err_after, notes }
+    FitReport {
+        recipe,
+        err_before,
+        err_after,
+        notes,
+        mode: m.mode,
+        divergence: m.divergence,
+    }
 }
 
 /// Re-measure an ADJUSTED recipe the way [`fit_recipe_from`] measures its own
@@ -888,6 +1467,12 @@ pub fn rescore_report(
     let after_px = pixels_of(&render::develop_preview(&s, recipe));
     let joint_after = crate::fit_zoned::joint_reading(&after_px, &tp);
     let carried = |k: &str| prior.iter().any(|n| n.key == k);
+    let divergence = structure_divergence_for(src, target, &EditRecipe::default(), None);
+    let mode = if divergence.d >= DIVERGENCE_GLOBAL || carried(keys::FIT_SUMMARY_ATMOSPHERE) {
+        FitMode::Atmosphere
+    } else {
+        FitMode::Full
+    };
     compose_report(
         recipe.clone(),
         Measured {
@@ -897,9 +1482,17 @@ pub fn rescore_report(
             after_px: &after_px,
             tp: &tp,
             same_frame,
+            mode,
+            divergence,
         },
         SolveFacts {
-            sat_pegged: carried(keys::FIT_NOTE_SAT_PEGGED),
+            sat_pegged: if carried(keys::FIT_NOTE_ATMOSPHERE_SAT_PEGGED) {
+                Some(FitMode::Atmosphere)
+            } else if carried(keys::FIT_NOTE_SAT_PEGGED) {
+                Some(FitMode::Full)
+            } else {
+                None
+            },
             cast: CastOutcome {
                 rehue_blocked: carried(keys::FIT_NOTE_REHUE_BLOCKED),
                 ratio_rejected: carried(keys::FIT_NOTE_CAST_REJECTED),
@@ -1028,6 +1621,7 @@ fn unrepresented_note(
     after_px: &[[f32; 3]],
     tp: &[[f32; 3]],
     err_after: f32,
+    mode: FitMode,
 ) -> Option<crate::rationale::Note> {
     // Nothing left to explain.
     if err_after <= FIT_QUANT_CLEAN {
@@ -1096,9 +1690,9 @@ fn unrepresented_note(
             names.push("color_grade");
         }
     }
-    // A surviving UNIFORM channel-mean offset is the white-balance shape,
-    // and `temperature_k` / `tint` are assigned NOWHERE in this module or
-    // the zoned one — the one control family the user will look for first.
+    // A surviving UNIFORM channel-mean offset is the white-balance shape.
+    // Full mode never assigns temperature/tint; Atmosphere mode names them
+    // only when its bounded WB solve declined the demand.
     let mean = |px: &[[f32; 3]], ch: usize| -> f32 {
         if px.is_empty() {
             0.0
@@ -1107,14 +1701,18 @@ fn unrepresented_note(
         }
     };
     let rb = (mean(after_px, 0) - mean(tp, 0)) - (mean(after_px, 2) - mean(tp, 2));
-    if rb.abs() >= UNREPRESENTED_WB_RB {
+    if rb.abs() >= UNREPRESENTED_WB_RB && recipe.temperature_k.is_none() {
         names.push("temperature_k/tint");
     }
     if names.is_empty() {
         return None;
     }
     Some(crate::rationale::Note::new(
-        crate::rationale::keys::FIT_NOTE_UNREPRESENTED,
+        if mode == FitMode::Atmosphere {
+            crate::rationale::keys::FIT_NOTE_ATMOSPHERE_UNREPRESENTED
+        } else {
+            crate::rationale::keys::FIT_NOTE_UNREPRESENTED
+        },
         vec![("controls", names.join(", "))],
     ))
 }
@@ -1317,7 +1915,7 @@ fn residual_tone_curve(recipe: &EditRecipe, tone_map: &impl Fn(f32) -> f32) -> V
     if max_dev < 0.015 {
         Vec::new() // the sliders already express the map — keep the recipe clean
     } else {
-        pts
+        project_curve_slopes(&pts, 0.0, RESIDUAL_SLOPE_CAP)
     }
 }
 
@@ -1812,6 +2410,28 @@ fn round2(v: f32) -> f32 {
     (v * 100.0).round() / 100.0
 }
 
+/// The OPTIONAL structural-divergence calibration corpus, located exactly the
+/// way `scripts/check_docs.py` locates the XMP census (`AUTOSHOP_CENSUS_ROOT`):
+/// through an environment variable, never a source literal. The corpus is a
+/// photographer's own RAW and its generative rendition, so it cannot live in
+/// this public repository — and a machine-specific path baked into a test would
+/// publish a home directory, a develop-store id and a photo's filename along
+/// with it. With the variable unset the fixtures still assert the SYNTHETIC
+/// pairs; only the measured real-pair numbers go unpinned.
+///
+/// Expected contents, under canonical names so no corpus filename reaches the
+/// source either:
+/// * `neutral.jpg` — calibration-only render of the source frame,
+/// * `target.jpg` — the generated rendition being fitted,
+/// * `fitted.recipe.json` — the saved zoned develop of that pair,
+/// * `sky-mask.png` — the sky raster that develop references,
+/// * `source.arw` — optional; the RAW behind `neutral.jpg`.
+#[cfg(test)]
+pub(crate) fn calibration_dir() -> Option<std::path::PathBuf> {
+    let dir = std::path::PathBuf::from(std::env::var_os("AUTOSHOP_FIT_CALIBRATION_DIR")?);
+    dir.is_dir().then_some(dir)
+}
+
 // --------------------------------------------------------------------------
 
 #[cfg(test)]
@@ -1919,6 +2539,326 @@ mod tests {
             }
         }
         DynamicImage::ImageRgb8(img)
+    }
+
+    /// Same landscape footprint, but the target grows a high-frequency cloud
+    /// deck over the source's smooth sky. The lower half is kept identical so
+    /// the fixture exercises structural evidence rather than a wholesale
+    /// unrelated-frame rejection.
+    fn flat_sky_to_cloud_deck() -> (DynamicImage, DynamicImage) {
+        let (w, h) = (384u32, 256u32);
+        let build = |clouds: bool| {
+            DynamicImage::ImageRgb8(RgbImage::from_fn(w, h, |x, y| {
+                let xf = x as f32 / (w - 1) as f32;
+                let yf = y as f32 / (h - 1) as f32;
+                let l = if y < h / 2 {
+                    if clouds {
+                        let broad = (xf * 8.0 + yf * 5.0).sin();
+                        let billow = (xf * 31.0 - yf * 17.0).sin();
+                        let knots = if ((x / 18) + (y / 12)) % 2 == 0 { -0.16 } else { 0.16 };
+                        (0.55 + 0.28 * broad + 0.18 * billow + knots).clamp(0.04, 0.98)
+                    } else {
+                        0.62 + 0.05 * xf - 0.03 * yf
+                    }
+                } else {
+                    let ridge = if yf > 0.68 + 0.10 * (xf * 9.0).sin() { 0.22 } else { 0.42 };
+                    (ridge + 0.18 * xf + 0.03 * (xf * 43.0).sin()).clamp(0.02, 0.90)
+                };
+                let p = if y < h / 2 {
+                    [l * 0.83, l * 0.92, l]
+                } else {
+                    [l, l * 0.78, l * 0.55]
+                };
+                image::Rgb(p.map(|v| (v.clamp(0.0, 1.0) * 255.0).round() as u8))
+            }))
+        };
+        (build(false), build(true))
+    }
+
+    /// A pure structural permutation: both frames carry exactly the same
+    /// pixel population, while the sky's spatial arrangement is scrambled.
+    /// Atmosphere mode therefore has a reachable neutral look target even
+    /// though structural correlation is intentionally broken.
+    fn structural_permutation_pair() -> (DynamicImage, DynamicImage) {
+        let (w, h) = (384u32, 256u32);
+        let source = RgbImage::from_fn(w, h, |x, y| {
+            let xf = x as f32 / (w - 1) as f32;
+            let yf = y as f32 / (h - 1) as f32;
+            let l = if y < h / 2 {
+                (0.55 + 0.22 * (xf * 19.0 + yf * 7.0).sin()
+                    + 0.10 * (xf * 53.0 - yf * 11.0).sin())
+                    .clamp(0.05, 0.95)
+            } else {
+                (0.25 + 0.45 * xf + 0.08 * (xf * 29.0).sin()).clamp(0.03, 0.90)
+            };
+            image::Rgb(if y < h / 2 {
+                [l * 0.82, l * 0.92, l]
+            } else {
+                [l, l * 0.78, l * 0.55]
+            }
+            .map(|v| (v * 255.0).round() as u8))
+        });
+        let mut target = source.clone();
+        let sky_n = (w * h / 2) as usize;
+        for i in 0..sky_n {
+            let from = (i * 193) % sky_n;
+            let (x, y) = ((i as u32) % w, (i as u32) / w);
+            let (sx, sy) = ((from as u32) % w, (from as u32) / w);
+            target.put_pixel(x, y, *source.get_pixel(sx, sy));
+        }
+        (DynamicImage::ImageRgb8(source), DynamicImage::ImageRgb8(target))
+    }
+
+    #[test]
+    fn content_divergence_fires_on_flat_sky_to_cloud_deck() {
+        let (src, tgt) = flat_sky_to_cloud_deck();
+        let synthetic = structure_divergence_for(&src, &tgt, &EditRecipe::default(), None);
+        assert!(
+            synthetic.d >= DIVERGENCE_GLOBAL,
+            "a generated cloud deck must cross the global threshold: {synthetic:?}"
+        );
+
+        // The calibration corpus is intentionally optional for portable
+        // CI (see `calibration_dir`); where present it pins the measured
+        // number rather than merely the side of the threshold.
+        let Some(root) = calibration_dir() else { return };
+        if root.join("neutral.jpg").exists() {
+            let source = image::open(root.join("neutral.jpg")).unwrap();
+            let target = image::open(root.join("target.jpg")).unwrap();
+            let measured = structure_divergence_for(
+                &source,
+                &target,
+                &EditRecipe::default(),
+                None,
+            );
+            assert!(
+                (measured.d - 0.491).abs() <= 0.05,
+                "generated-cloud calibration drifted: {measured:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn content_divergence_does_not_fire_on_showcase_same_content() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/images");
+        let expected = [0.075f32, 0.168, 0.095];
+        for (index, &want) in expected.iter().enumerate() {
+            let source = image::open(root.join(format!("showcase-{}-before.jpg", index + 1)))
+                .unwrap();
+            let target = image::open(root.join(format!("showcase-{}-after.jpg", index + 1)))
+                .unwrap();
+            let measured = structure_divergence_for(
+                &source,
+                &target,
+                &EditRecipe::default(),
+                None,
+            );
+            assert!(
+                measured.d < DIVERGENCE_GLOBAL && (measured.d - want).abs() <= 0.05,
+                "showcase {} calibration drifted: {measured:?}, expected {want:.3}",
+                index + 1
+            );
+        }
+        for (file, want) in [
+            ("showcase-viaduct-reimagine-fit-triptych.jpg", 0.070f32),
+            ("showcase-sunset-reimagine-fit-triptych.jpg", 0.226f32),
+        ] {
+            let triptych = image::open(root.join(file)).unwrap();
+            let source = triptych.crop_imm(0, 136, 532, 356);
+            let target = triptych.crop_imm(535, 136, 530, 356);
+            let measured = structure_divergence_for(
+                &source,
+                &target,
+                &EditRecipe::default(),
+                None,
+            );
+            assert!(
+                measured.d < DIVERGENCE_GLOBAL && (measured.d - want).abs() <= 0.05,
+                "{file} calibration drifted: {measured:?}, expected {want:.3}"
+            );
+        }
+    }
+
+    #[test]
+    fn atmosphere_global_obeys_ev_wb_saturation_and_curve_budgets() {
+        let (src, tgt) = structural_permutation_pair();
+        let report = fit_recipe(&src, &tgt);
+        assert_eq!(report.mode, FitMode::Atmosphere, "premise: {:?}", report.divergence);
+        let r = &report.recipe;
+        assert!(r.exposure_ev.abs() <= ATMOSPHERE_EV_LIMIT);
+        assert!(r.saturation.abs() <= ATMOSPHERE_SAT_LIMIT);
+        if let Some(k) = r.temperature_k {
+            let gains = render::wb_gains(r.as_shot_k.unwrap_or(5500.0), k, r.tint);
+            let lo = gains.iter().copied().fold(f32::INFINITY, f32::min);
+            let hi = gains.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+            assert!(gains.iter().all(|g| {
+                (ATMOSPHERE_WB_GAIN_MIN..=ATMOSPHERE_WB_GAIN_MAX).contains(g)
+            }));
+            assert!(hi / lo <= ATMOSPHERE_WB_GAIN_RATIO + 1e-5);
+        }
+        assert_eq!(r.tone_curve.len(), 5, "Atmosphere tone must stay a robust five-point map");
+        for pair in r.tone_curve.windows(2) {
+            let slope = (pair[1].output as f32 - pair[0].output as f32)
+                / (pair[1].input as f32 - pair[0].input as f32);
+            assert!(
+                (ATMOSPHERE_CURVE_SLOPE_MIN - 1e-6..=ATMOSPHERE_CURVE_SLOPE_MAX + 1e-6)
+                    .contains(&slope),
+                "atmosphere slope {slope} escaped its budget: {:?}",
+                r.tone_curve
+            );
+        }
+    }
+
+    #[test]
+    fn atmosphere_global_never_emits_rgb_curves_and_caps_confidence() {
+        let (src, tgt) = structural_permutation_pair();
+        let report = fit_recipe(&src, &tgt);
+        assert_eq!(report.mode, FitMode::Atmosphere);
+        assert!(report.recipe.red_curve.is_empty());
+        assert!(report.recipe.green_curve.is_empty());
+        assert!(report.recipe.blue_curve.is_empty());
+        assert!(report.recipe.confidence <= ATMOSPHERE_CONFIDENCE_CAP);
+    }
+
+    #[test]
+    fn a_divergent_sky_promotes_the_global_fit_when_it_covers_35_percent() {
+        let source = synth();
+        let full = fit_recipe_from_promoted(&source, &source, &EditRecipe::default(), false);
+        assert_eq!(full.mode, FitMode::Full, "premise: matched content uses Full mode");
+        let promoted = fit_recipe_from_promoted(&source, &source, &EditRecipe::default(), true);
+        assert_eq!(promoted.mode, FitMode::Atmosphere);
+        assert!(
+            promoted.divergence.d < DIVERGENCE_GLOBAL,
+            "the zone-share branch, not global D, must be load-bearing"
+        );
+        assert_eq!(DIVERGENT_COVER_PROMOTES, 0.35);
+    }
+
+    #[test]
+    fn residual_curve_cannot_exceed_two_to_one_slope() {
+        let cliff = vec![
+            CurvePoint { input: 0, output: 0 },
+            CurvePoint { input: 64, output: 20 },
+            CurvePoint { input: 128, output: 40 },
+            CurvePoint { input: 149, output: 98 },
+            CurvePoint { input: 170, output: 193 },
+            CurvePoint { input: 255, output: 255 },
+        ];
+        let projected = project_curve_slopes(&cliff, 0.0, RESIDUAL_SLOPE_CAP);
+        assert_eq!(projected.first(), cliff.first());
+        assert_eq!(projected.last(), cliff.last());
+        for pair in projected.windows(2) {
+            assert!(pair[1].output >= pair[0].output, "projection lost monotonicity");
+            let slope = (pair[1].output as f32 - pair[0].output as f32)
+                / (pair[1].input as f32 - pair[0].input as f32);
+            assert!(slope <= RESIDUAL_SLOPE_CAP + 1e-6, "slope {slope}: {projected:?}");
+        }
+        let already_safe = vec![
+            CurvePoint { input: 0, output: 0 },
+            CurvePoint { input: 64, output: 48 },
+            CurvePoint { input: 128, output: 128 },
+            CurvePoint { input: 192, output: 208 },
+            CurvePoint { input: 255, output: 255 },
+        ];
+        assert_eq!(
+            project_curve_slopes(&already_safe, 0.0, RESIDUAL_SLOPE_CAP),
+            already_safe,
+            "an in-budget showcase-like curve must remain byte-identical"
+        );
+    }
+
+    #[test]
+    fn atmosphere_saturation_cap_is_load_bearing() {
+        // A structurally divergent pair whose target ALSO demands far more
+        // chroma than the ±30 budget allows. The emitted value must land ON the
+        // budget: without the clamp the chase would run past it, so this pins
+        // the constant by consequence and not only by restating it.
+        let (src, tgt) = structural_permutation_pair();
+        let boosted = render::develop_preview(
+            &tgt,
+            &EditRecipe { saturation: 90.0, ..Default::default() },
+        );
+        let report = fit_recipe(&src, &boosted);
+        assert_eq!(report.mode, FitMode::Atmosphere, "premise: {:?}", report.divergence);
+        assert_eq!(ATMOSPHERE_SAT_LIMIT, 30.0, "the calibrated atmosphere saturation budget");
+        assert_eq!(
+            report.recipe.saturation, ATMOSPHERE_SAT_LIMIT,
+            "a demand past the budget must land exactly on it, not past it"
+        );
+        assert!(
+            report
+                .notes
+                .iter()
+                .any(|n| n.key == crate::rationale::keys::FIT_NOTE_ATMOSPHERE_SAT_PEGGED),
+            "hitting the cap has to be disclosed: {}",
+            report.recipe.rationale
+        );
+    }
+
+    #[test]
+    fn residual_tone_curve_projects_a_cliff_through_the_real_producer() {
+        // The PRODUCER, not the projector helper: `residual_curve_cannot_
+        // exceed_two_to_one_slope` passes the cap into `project_curve_slopes`
+        // itself, so it stays green when the constant is raised or when the
+        // producer stops calling it. This drives the 4:1 upper ramp that the
+        // generated-cloud fit drew and demands the shipped points obey 2:1.
+        let recipe = EditRecipe::default();
+        let cliff = |x: f32| {
+            if x < 0.62 { x * 0.45 } else { (0.279 + (x - 0.62) * 4.0).min(1.0) }
+        };
+        let pts = residual_tone_curve(&recipe, &cliff);
+        assert!(!pts.is_empty(), "premise: the sliders alone cannot express this map");
+        assert_eq!(RESIDUAL_SLOPE_CAP, 2.0, "the calibrated residual-curve slope cap");
+        for pair in pts.windows(2) {
+            let slope = (pair[1].output as f32 - pair[0].output as f32)
+                / (pair[1].input as f32 - pair[0].input as f32).max(1.0);
+            assert!(
+                slope <= 2.0 + 1e-6,
+                "a shipped residual segment kept slope {slope}: {pts:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn ordinary_same_content_roundtrip_remains_in_full_fit_mode() {
+        let source = synth();
+        let target = render::develop_preview(
+            &source,
+            &EditRecipe {
+                exposure_ev: 0.35,
+                contrast: 18.0,
+                highlights: -25.0,
+                whites: 12.0,
+                saturation: 15.0,
+                ..Default::default()
+            },
+        );
+        let report = fit_recipe(&source, &target);
+        assert_eq!(
+            report.mode,
+            FitMode::Full,
+            "same-content engine roundtrip diverged: {:?}",
+            report.divergence
+        );
+    }
+
+    #[test]
+    fn atmosphere_rationale_names_unrecoverable_structure_and_discloses_d() {
+        let (src, tgt) = structural_permutation_pair();
+        let report = fit_recipe(&src, &tgt);
+        let summary = report
+            .notes
+            .iter()
+            .find(|n| n.key == crate::rationale::keys::FIT_SUMMARY_ATMOSPHERE)
+            .expect("Atmosphere summary note");
+        let disclosed = summary.args.iter().find(|(key, _)| *key == "d").unwrap().1.clone();
+        assert_eq!(disclosed, format!("{:.3}", report.divergence.d));
+        assert!(report.recipe.rationale.contains("structure cannot be reconstructed"));
+        assert!(report.recipe.rationale.contains(&format!("D={disclosed}")));
+        assert!(report
+            .notes
+            .iter()
+            .any(|n| n.key == crate::rationale::keys::FIT_NOTE_ATMOSPHERE_CONFIDENCE));
     }
 
     #[test]
@@ -3047,6 +3987,7 @@ mod tests {
                     n.key == keys::FIT_NOTE_CAST_REJECTED
                         || n.key == keys::FIT_NOTE_REHUE_BLOCKED
                         || n.key == keys::FIT_NOTE_REGRESSED
+                        || n.key == keys::FIT_SUMMARY_ATMOSPHERE
                 }),
                 "{name}: an empty colour stage must disclose WHY: {}",
                 rep.recipe.rationale
@@ -3190,7 +4131,9 @@ mod tests {
         // (4) The outcome notes are re-DERIVED, not absent: the summary quotes
         // this recipe's own residual, and the report is self-consistent.
         assert!(
-            has(keys::FIT_SUMMARY_WITH_CURVE) || has(keys::FIT_SUMMARY_NO_CURVE),
+            has(keys::FIT_SUMMARY_WITH_CURVE)
+                || has(keys::FIT_SUMMARY_NO_CURVE)
+                || has(keys::FIT_SUMMARY_ATMOSPHERE),
             "no summary was derived"
         );
         assert_eq!(rep.err_before, solved.err_before, "err_before is the caller's, unchanged");

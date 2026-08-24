@@ -515,8 +515,9 @@ and remains a deterministic pixel operation rather than XMP.
   revision gate.
 - `src/style.rs` and `src/embed.rs` — feature index, z-scoring, SigLIP vectors,
   and hybrid distance.
-- `src/fit.rs` and `src/fit_zoned.rs` — CDF targets, basis solve, tone,
-  saturation, cast fitting, vetoes, and do-no-harm.
+- `src/fit.rs` and `src/fit_zoned.rs` — structural-divergence modes, bounded
+  atmosphere fitting, CDF/basis tone solves, per-zone quality gates, cast
+  vetoes, and do-no-harm.
 - `src/generative.rs` — gpt-image-2 sizing, streamed refusal attribution,
   staged publication, reimagine, and generative fill.
 - `src/retouch.rs` — deterministic heal.
@@ -571,7 +572,7 @@ than the pre-call state; model weights remain outside the repository.
 - The 61 MP RAW probe measured `151 MB` peak commit for decode,
   `1771 MB` for calibration/render preparation, and `1766 MB` for the
   full-resolution render tail; the combined process peak remained `1771 MB`.
-- The release battery is **871 library (862 pass + 9 `#[ignore]`d forensic
+- The release battery is **889 library (880 pass + 9 `#[ignore]`d forensic
   probes) / 14 CLI / 139 GUI / 2+2 contract** tests. Environment-gated real
   Lightroom, brush-table, and RAW-zoo suites are additional and are not
   smuggled into the ordinary count.

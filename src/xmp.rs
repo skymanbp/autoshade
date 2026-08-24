@@ -7908,6 +7908,54 @@ fn xmp_to_recipe_clamped_impl(
 mod tests {
     use super::*;
 
+    #[test]
+    fn atmosphere_xmp_contains_only_representable_global_controls() {
+        let recipe = EditRecipe {
+            exposure_ev: -0.8,
+            temperature_k: Some(9000.0),
+            tint: 10.0,
+            saturation: 30.0,
+            tone_curve: vec![
+                CurvePoint { input: 0, output: 0 },
+                CurvePoint { input: 64, output: 48 },
+                CurvePoint { input: 128, output: 112 },
+                CurvePoint { input: 192, output: 208 },
+                CurvePoint { input: 255, output: 255 },
+            ],
+            masks: vec![LocalAdjustment {
+                mask: MaskGeometry::Bitmap { path: "atmosphere-sky.png".into() },
+                role: crate::recipe::MaskRole::ZoneSky,
+                exposure_ev: -0.5,
+                color_gains: Some([1.18, 0.96, 0.85]),
+                saturation: -20.0,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let (doc, losses) = recipe_to_xmp_with_losses(&recipe);
+        assert!(doc.contains(r#"crs:Exposure2012="-0.80""#));
+        assert!(doc.contains(r#"crs:Temperature="9000""#));
+        assert!(doc.contains(r#"crs:Tint="+10""#));
+        assert!(doc.contains(r#"crs:Saturation="+30""#));
+        assert!(doc.contains("crs:ToneCurvePV2012"));
+        assert!(!doc.contains("ToneCurvePV2012Red"));
+        assert!(!doc.contains("ToneCurvePV2012Green"));
+        assert!(!doc.contains("ToneCurvePV2012Blue"));
+        assert!(!doc.contains("MaskGroupBasedCorrections"));
+        assert_eq!(losses.len(), 1, "the bitmap zone stays engine-only");
+
+        let projected = xmp_to_recipe(&doc);
+        assert_eq!(projected.exposure_ev, -0.8);
+        assert_eq!(projected.temperature_k, Some(9000.0));
+        assert_eq!(projected.tint, 10.0);
+        assert_eq!(projected.saturation, 30.0);
+        assert_eq!(projected.tone_curve, recipe.tone_curve);
+        assert!(projected.masks.is_empty());
+        assert!(projected.red_curve.is_empty());
+        assert!(projected.green_curve.is_empty());
+        assert!(projected.blue_curve.is_empty());
+    }
+
     /// R24-5 M0, EXPORT direction: the sidecar cannot carry the camera base
     /// curve or the lens-profile correction, and the user has to hear it —
     /// silence there is a photo that renders differently in Lightroom for a

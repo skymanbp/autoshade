@@ -436,9 +436,11 @@ deterministically to the original full-resolution RAW.
 
 <sub><b>Stone viaduct, Sony α7R IVA 61 MP <code>.ARW</code>.</b> Left: neutral engine conversion. Center: a 3520×2352 full-image target generated with the same configured <code>gpt-image-2</code>. Right: the recovered recipe rendered on the original RAW at 9504×6336. The statistical look error moved from 0.057 to 0.019 at fit confidence 0.678264; the fitted color-cast stage was rejected by the fit's own do-no-harm review, so the recovered recipe carries tone and saturation only.</sub>
 
-Reverse-fit can recover global tone, saturation, and guarded color casts. It
-does not claim to recover local masks, generated objects or detail, or
-unidentifiable per-band HSL from a non-aligned target.
+Reverse-fit measures structural divergence first: same-content targets keep the
+full tone, saturation, and guarded-cast solve, while structurally changed
+targets use bounded Atmosphere mode for overall tone and colour. Zoned fits
+retain independently bounded sky/land adjustments behind a local-quality gate;
+they do not claim to reconstruct generated objects or detail.
 
 ## Supported formats
 
@@ -580,7 +582,7 @@ versions, and a deleted-version registry; SCUNet success requires the typed
 `sidecar_wrote` contract. A 1771 MB reference probe sets the 1800 MB per-photo
 budget, while the 4 GiB RAW gate bounds admission. The [`build`
 workflow](.github/workflows/build.yml) covers default and GUI feature sets on
-Ubuntu and macOS. The current battery is **871 library (862 pass + 9 `#[ignore]`d forensic probes) / 14 CLI / 139 GUI / 2+2 contract** tests; the
+Ubuntu and macOS. The current battery is **889 library (880 pass + 9 `#[ignore]`d forensic probes) / 14 CLI / 139 GUI / 2+2 contract** tests; the
 [`scripts/check_docs.py`](scripts/check_docs.py) gate re-derives pinned release
 claims. Model weights are not stored in this repository.
 
