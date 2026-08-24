@@ -66,21 +66,26 @@ the UI distinguishes generated pixels from engine-rendered develops.
 
 ### Download a release
 
-The v1.0.0 release will provide both Windows front ends. Linux and macOS are
-built and tested in CI, but no prebuilt binaries are published for them yet.
-v1.0.0 is being prepared; until W5 builds and publishes the artifacts,
-v0.35.0 remains the latest published release. The size and checksum fields in
-both rows below are deliberately deferred rather than copied from the previous
-release.
+The v1.0.0 release provides both Windows front ends. Linux and macOS are built
+and tested in CI, but no prebuilt binaries are published for them yet.
 
 | File | Size | SHA-256 |
 |---|---:|---|
-| `autoshop.exe` (CLI) | *Deferred to the W5 release build* | *Deferred to W5* |
-| `autoshop-gui.exe` (desktop app) | *Deferred to the W5 release build* | *Deferred to W5* |
+| `autoshop.exe` (CLI) | 31,180,152 bytes | `116a38410a810b1b27602c97daa4db614241b89fffbb80c6691a275fc7f168c0` |
+| `autoshop-gui.exe` (desktop app) | 40,810,704 bytes | `847f42c4b35c09ab5dd040fdf8e90f99d597c66624ef131ac02d93071bcb58ce` |
+| `Autoshop-Setup-1.0.0.exe` (installer) | 19,768,387 bytes | `28c4acd37089e78bf02182cd8b20a214a63cababb1b02971209be3fdf33d4750` |
+| `autoshop-1.0.0-windows-x64.zip` (portable archive) | 27,131,443 bytes | `47389ed42f80798ead96980d69ce10f5063ece606e0f0d548482c58aef9f717e` |
 
-After W5 publishes it, download the archive from the
-[v1.0.0 release page](https://github.com/skymanbp/autoshop/releases/tag/v1.0.0),
-extract it, and keep the executable beside the bundled assets and Python sidecars.
+Download from the
+[v1.0.0 release page](https://github.com/skymanbp/autoshop/releases/tag/v1.0.0):
+
+- **Installer (recommended):** run `Autoshop-Setup-1.0.0.exe`. It installs for
+  the current user without administrator access, adds Start Menu shortcuts,
+  offers optional desktop and user `PATH` tasks, and removes its own files on
+  uninstall while keeping the develop store in `%LOCALAPPDATA%\autoshop`.
+- **Portable archive:** extract `autoshop-1.0.0-windows-x64.zip` to a directory
+  you can keep intact. Run either executable from that directory so it remains
+  beside the bundled `assets/` and `python/` sidecars.
 
 ### Build from source
 
@@ -591,9 +596,9 @@ embeddings. Model weights are not stored in this repository.
 ## Status and roadmap
 
 Release gates for v1.0.0 cover the CLI, desktop GUI, sidecar contracts, format
-fixtures, and deterministic renderer; W5 will add the built artifacts' sizes
-and hashes. Prebuilt artifacts are Windows-only; CI checks source builds on
-Ubuntu and macOS, while interactive use there remains less exercised.
+fixtures, and deterministic renderer; the built artifacts' sizes and hashes
+are listed above. Prebuilt artifacts are Windows-only; CI checks source builds
+on Ubuntu and macOS, while interactive use there remains less exercised.
 
 Current honesty markers include the approximate X-Trans path, locally
 re-derived rather than Adobe-identical AI masks, measured-but-not-bit-exact

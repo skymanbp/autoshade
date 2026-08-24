@@ -57,6 +57,9 @@ Rust renderer owns the pixels.
 
 ### Application and evaluation
 
+- A new per-user Windows installer needs no administrator access, creates Start
+  Menu shortcuts, offers optional desktop and user `PATH` tasks, and preserves
+  the develop store on uninstall.
 - Evaluation rows with fewer than 20 observations are marked `[low n]`, and a
   supplementary n-weighted gap is reported without changing the established
   headline, state-file, or n≥20 definitions (`ef5a71a`).
@@ -133,12 +136,11 @@ The v1.0.0 source battery is 871 library tests (862 pass + 9 ignored forensic
 probes), 14 CLI tests, 132 GUI-feature tests, and two integration suites with
 2 tests each. The GUI-feature Clippy and compile gates are clean.
 
-## Checksums — W5 release build placeholder
-
-W5 must replace every placeholder below from the final release artifacts; no
-v0.35.0 value may be copied forward.
+## Checksums
 
 | Artifact | Size | SHA-256 |
 |---|---:|---|
-| `autoshop.exe` (CLI) | _TBD by W5_ | _TBD by W5_ |
-| `autoshop-gui.exe` (desktop app) | _TBD by W5_ | _TBD by W5_ |
+| `autoshop.exe` (CLI) | 31,180,152 bytes | `116a38410a810b1b27602c97daa4db614241b89fffbb80c6691a275fc7f168c0` |
+| `autoshop-gui.exe` (desktop app) | 40,810,704 bytes | `847f42c4b35c09ab5dd040fdf8e90f99d597c66624ef131ac02d93071bcb58ce` |
+| `Autoshop-Setup-1.0.0.exe` (installer) | 19,768,387 bytes | `28c4acd37089e78bf02182cd8b20a214a63cababb1b02971209be3fdf33d4750` |
+| `autoshop-1.0.0-windows-x64.zip` (portable archive) | 27,131,443 bytes | `47389ed42f80798ead96980d69ce10f5063ece606e0f0d548482c58aef9f717e` |
