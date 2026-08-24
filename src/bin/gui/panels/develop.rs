@@ -425,7 +425,13 @@ impl AutoshopApp {
                             if i == 0 {
                                 self.strip_thumb_rect = Some(resp.rect);
                             }
-                            if resp.on_hover_text(tr(lang, "Click to switch to this variant (lossless)")).clicked() {
+                            if resp
+                                .on_hover_text(tr(
+                                    lang,
+                                    "Click to switch to this variant (lossless); Ctrl+S saves every card for this photo",
+                                ))
+                                .clicked()
+                            {
                                 act = Some(VariantAction::Switch(i));
                             }
                             ui.horizontal(|ui| {
@@ -576,7 +582,7 @@ impl AutoshopApp {
             drawn.push("＋");
             if ui
                 .add_enabled(!busy, egui::Button::new("＋").small())
-                .on_hover_text(tr(lang, "Save all current develop parameters as a numbered snapshot (v<N>.recipe.json in this photo's develop store), reloadable anytime"))
+                .on_hover_text(tr(lang, "Snapshot this card's develop only as a numbered version (v<N>.recipe.json with frozen mask rasters); Ctrl+S saves every card"))
                 .clicked()
             {
                 act = Some(VariantAction::SaveVersion);
@@ -2430,7 +2436,7 @@ impl AutoshopApp {
                     ui.label(
                         egui::RichText::new(trf(
                             lang,
-                            "Variants ({n})",
+                            "Variants (cards) ({n})",
                             &[("n", &n_var.to_string())],
                         ))
                         .weak()
@@ -2520,9 +2526,14 @@ impl AutoshopApp {
                     ui.add_space(SPACE_XS);
                     ui.separator();
                 }
+                ui.label(
+                    egui::RichText::new(tr(lang, "Snapshot history"))
+                        .weak()
+                        .small(),
+                );
                 if ui
                     .button(tr(lang, "＋ Save as version"))
-                    .on_hover_text(tr(lang, "Save all current develop parameters as a numbered snapshot (v<N>.recipe.json in this photo's develop store), reloadable anytime"))
+                    .on_hover_text(tr(lang, "Snapshot this card's develop only as a numbered version (v<N>.recipe.json with frozen mask rasters); Ctrl+S saves every card"))
                     .clicked()
                 {
                     self.save_version();

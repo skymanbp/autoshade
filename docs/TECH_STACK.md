@@ -530,7 +530,10 @@ and remains a deterministic pixel operation rather than XMP.
 The library is the product boundary. `clap` exposes it as the CLI,
 `eframe`/`egui` supplies the desktop application, and `tiny_http` serves an
 embedded `include_str!` web UI with no runtime CDN or frontend build step.
-The GUI models one source photo as variants and numbered versions; discarded
+The GUI models one source photo as variant cards (base pixels + one develop,
+all saved by one `Ctrl+S`) and numbered versions (a snapshot of one card's
+develop at one moment). Loading a version replaces the active card's canvas as
+one undo step; `auto` versions are the backup gate's snapshots. Discarded
 version identities are written to a deleted-versions registry so a later save
 cannot silently reuse an identity that may still exist in an export or log.
 
@@ -569,7 +572,7 @@ than the pre-call state; model weights remain outside the repository.
   `1771 MB` for calibration/render preparation, and `1766 MB` for the
   full-resolution render tail; the combined process peak remained `1771 MB`.
 - The release battery is **871 library (862 pass + 9 `#[ignore]`d forensic
-  probes) / 14 CLI / 132 GUI / 2+2 contract** tests. Environment-gated real
+  probes) / 14 CLI / 139 GUI / 2+2 contract** tests. Environment-gated real
   Lightroom, brush-table, and RAW-zoo suites are additional and are not
   smuggled into the ordinary count.
 - The build workflow checks default and GUI feature sets on Ubuntu and macOS;

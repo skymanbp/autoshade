@@ -195,6 +195,46 @@
 
 ## 当前状态（已完成，勿重做）
 
+- **🔁 变体 ● 误报修复 + 变体/版本语义澄清落地（2026-08-24，用户拍板
+  「派 Codex 修」「并入 ● 修复批一起改」）**：根因=四处未保存判定（状态栏 ●、
+  关窗守卫、导航暂存门、退出对话 PendingSave）都拿画布比 `saved_recipe`/
+  `pixels_on_disk` 单槽，而该槽只描述保存时的活动卡片；Ctrl+S 早已把其余卡片
+  存进 `variants.json.others`，所以切卡即被当成编辑。一次系统性改动（Codex
+  gpt-5.6-sol xhigh 写批，主审全读 diff）：`actions.rs` 新增唯一 owner
+  `active_baseline()`（id 优先；无 id 旧记录回退 kind+位置，与 `version_is_from`
+  同序；无记录时仅平凡孤卡映射 recipe.json/pixels.json；保存后新推的卡片无基
+  线=未保存）＋ `active_canvas_dirty` 承担配方与像素两半，四处调用点各走具名
+  谓词（`unsaved_marker_dirty`/`quit_guard_open_dirty`/`nav_stash_gate_dirty`/
+  `pending_save_gate_dirty`），无一保留自己的单槽比对；`open_dirty_variants`
+  改按身份与「记录活动卡 ∪ others」联合比对，不再比 `active_pos/kind/id`——
+  裁定：**切卡=导航不算未保存**，选择只随下次保存落盘，**重开落在最近保存的
+  活动卡而非最后浏览的卡**；改名/新推/删卡/配方/像素来源变化仍算未保存
+  （R24-3 不变）；`variants.json` 格式零改动、store.rs 未动。UI：Versions &
+  Export 分「变体（卡片）」/「快照历史」两栏（批写的 zh「条目」由主审改回「卡
+  片」；「卡」U+5361 原不在嵌入 CJK 子集，`embedded_fonts_cover_every_ui_symbol`
+  红 → 按 `scripts/subset_gui_fonts.py` 文档自 google/fonts ofl 树取五个捐赠
+  字体重建 `assets/fonts/` 五个子集，`--check` 804/804、SC 子集 737 码点，四个
+  符号子集字节数不变仅哈希变）、＋ 悬停明示只快照本卡、条带与 ● 悬停明示
+  Ctrl+S 保存全部卡片，中英齐全（audit_i18n 0 问题）。README §4、ARCHITECTURE、TECH_STACK 同步改写语
+  义；四处电池数 132→139 GUI（README/ARCHITECTURE/TECH_STACK/site），官网重部
+  署 a5179c1c → 别名 autoshop-d7w.pages.dev 首页与 site/index.html 字节全同
+  （sha256 a2819e4e…、29571 B）；assets/fonts/README 计数刷新。门主审亲
+  跑：clippy 0；871(862+9i)/14/**139**/2+2（GUI +7 具名：
+  switching_persisted_cards_keeps_all_four_unsaved_consumers_clean /
+  edit_save_and_switch_back_use_each_cards_persisted_develop /
+  pushed_and_deleted_cards_remain_unsaved_strip_work /
+  persisted_card_ids_outrank_kind_and_position /
+  legacy_idless_strip_uses_kind_and_position_baselines /
+  switched_generated_card_uses_its_own_persisted_pixel_origin /
+  renaming_a_switched_to_card_is_still_unsaved_work；既有测试零改动）；三项亲
+  手变异全红（● 回指单槽→6 红、去 id 优先→1 红、去像素半边→1 红，文件字节还
+  原）；check_docs 23P0F；公开文档照片文件名 grep 0。行为变化须知：三处决策点
+  不再逐次读盘 `read_pixel_source`，改用逐卡镜像基线（镜像在 open/save/
+  analyze-save/clear 推进，写失败不推进故保护仍武装）；原 pixels.json 的
+  generated 标志比对随之取消——标志=kind，而 kind 漂移已在 `open_dirty_variants`
+  按卡计脏。登记跟进：`src/bin/gui/i18n.rs` 1748 行超 cc-enforcer 750 行硬预算
+  （本次 zh 一词改动经脚本落盘、行数零增长），拆分另立批。用户复测待办：切
+  卡不再 ●、重开落在最近保存的卡。反推氛围模式只读诊断批仍在飞。
 - **🧹 展示图注去文件名 + 官网重部署（2026-08-24，用户令「官网/readme 上不
   要出现我自己的照片文件名」）**：README 13 处 + site/index.html 13 处（三对
   分析对的标题/alt、两张风格三联图注、两张反推三联图注）由脚本逐条断言计数

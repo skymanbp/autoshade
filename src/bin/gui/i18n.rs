@@ -533,8 +533,8 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     // ── Develop · Versions ───────────────────────────────────────────────────
     ("Versions ({n})", "版本 · Versions ({n})"),
     ("＋ Save as version", "＋ 存为版本"),
-    ("Save all current develop parameters as a numbered snapshot (v<N>.recipe.json in this photo's develop store), reloadable anytime",
-        "把当前全部 develop 参数存为一个编号快照（此照片显影库中的 v<N>.recipe.json），随时可回"),
+    ("Snapshot this card's develop only as a numbered version (v<N>.recipe.json with frozen mask rasters); Ctrl+S saves every card",
+        "仅把当前变体的显影保存为编号版本（v<N>.recipe.json，并冻结蒙版栅格）；Ctrl+S 会保存所有变体"),
     ("Load", "载入"),
     ("Replace current parameters (one Ctrl+Z to undo)", "替换当前参数（一步 Ctrl+Z 可撤销）"),
     ("Like LR virtual copies: store multiple parameter sets for one photo (B&W, cropped…) without overwriting.",
@@ -556,7 +556,8 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     ("this snapshot was taken on a generated variant, whose look lives in its pixels — the photo's own camera base look was applied so it renders on the negative",
         "这个快照存自 AI 生成变体，效果在像素里——已补上本照片自己的相机基础色调，让它在底片上正常渲染"),
     // R24-4: the edit-state list (variant cards above the version rows).
-    ("Variants ({n})", "变体 · Variants ({n})"),
+    ("Variants (cards) ({n})", "变体（卡片） · Variants (cards) ({n})"),
+    ("Snapshot history", "快照历史 · Snapshot history"),
     ("· current", "· 当前"),
     ("· pixel-state (no XMP)", "· 像素态（不出 XMP）"),
     ("· on baked pixels", "· 基于烘焙像素"),
@@ -600,6 +601,8 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     // two different destructive actions.
     ("Variants", "变体"),
     ("Click to switch to this variant (lossless)", "点击切到此变体（无损）"),
+    ("Click to switch to this variant (lossless); Ctrl+S saves every card for this photo",
+        "点击切换到此变体（无损）；Ctrl+S 会保存此照片的所有变体"),
     ("Delete this variant", "删除此变体"),
     // R24-3: the card's own name (the strip is where the cards live, so the
     // rename box lives there too) — 「Name」/「Name…」 reuse the mask panel's.
@@ -976,8 +979,8 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
         "本照片的修饰母版已超过 999 个 — 请先清理 ./out"),
     (" · previous save backed up as v{n}", " · 之前的保存已备份为 v{n}"),
     ("● unsaved", "● 未保存"),
-    ("Edits (or a baked retouch) differ from your saved develop — Ctrl+S saves; switching photos keeps them for this session only",
-        "编辑与已保存的显影不同 — Ctrl+S 保存；切换照片仅在本会话内暂存"),
+    ("This card differs from its saved develop — Ctrl+S saves every card; switching photos keeps unsaved work for this session only",
+        "当前变体与已保存的显影不同——Ctrl+S 会保存所有变体；切换照片只会在本次会话中保留未保存的工作"),
     ("ready — restored this session's unsaved edits (● not saved yet; Ctrl+S)",
         "就绪 — 已恢复本会话未保存的编辑（● 尚未保存；Ctrl+S）"),
     ("recipe limits discarded {n} mask(s), {m} component(s), {c} curve point(s) and {s} string byte(s) on restore — the saved file exceeds the app's caps",

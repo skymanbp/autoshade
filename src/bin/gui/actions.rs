@@ -4,6 +4,27 @@ use super::*;
 
 use autoshop::advisor::{hint_action, FitAction};
 
+/// The persisted develop state belonging to the card that is on the canvas.
+///
+/// `recipe.json` / `pixels.json` describe whichever card was active at the
+/// last save; a different persisted card gets its baseline from the matching
+/// `variants.json.others[]` entry. Keeping this pair behind one owner prevents
+/// a card switch from being mistaken for an edit by one of the four unsaved
+/// consumers.
+pub(crate) struct ActiveBaseline<'a> {
+    pub(crate) recipe: &'a EditRecipe,
+    pub(crate) origin: Option<&'a std::path::Path>,
+}
+
+struct PersistedCard<'a> {
+    position: usize,
+    kind: VariantKind,
+    id: Option<&'a str>,
+    name: Option<&'a str>,
+    recipe: &'a EditRecipe,
+    origin: Option<&'a std::path::Path>,
+}
+
 impl AutoshopApp {
     /// Restore persisted prefs (last folder, view mode, export options) and
     /// re-open the library the user was browsing. Window geometry itself is
@@ -215,27 +236,12 @@ impl AutoshopApp {
         // so a same-path reopen becomes "reload, preserving unsaved work".
         if let Some(old) = self.src_path.clone() {
             let origin = self.active_variant().and_then(|v| v.origin.clone());
-            // Compared BOTH ways: a canvas that dropped its baked master
-            // (undo back to source) is as unsaved as one that gained it —
-            // without the stash, reopening would resurrect the disk pixels.
-            // The WHOLE identity counts, generated flag included: the
-            // classification decides whether calibration is stripped on
-            // restore, so a flag drift is as unsaved as a path drift.
-            let recorded = autoshop::store::read_pixel_source(&old);
-            let live_generated = self.active_is_generated();
-            let pixels_unsaved = !(same_master_opt(
-                recorded.as_ref().map(|(p, _)| p.as_path()),
-                origin.as_deref(),
-            ) && recorded.as_ref().map(|(_, g)| *g)
-                == origin.as_ref().map(|_| live_generated));
             // Background variants count too (H4): their unsaved work has no
             // sidecar to survive in, and the strip used to collapse to the
             // active canvas alone on navigation. THIS photo's strip only:
             // the cross-photo sum (inactive_dirty_variants) belongs to the
             // quit dialog, and using it here chain-stashed clean photos.
-            let background_dirty = self.open_dirty_variants() > 0;
-            if dirty_vs(&self.recipe, &self.saved_recipe) || pixels_unsaved || background_dirty
-            {
+            if self.nav_stash_gate_dirty() {
                 let others: Vec<StashedVariant> = self
                     .variants
                     .iter()
@@ -491,14 +497,139 @@ impl AutoshopApp {
         }
     }
 
-    /// How many BACKGROUND variants hold work that quitting would discard.
+    /// Match a live card to a persisted card. Stable IDs are authoritative
+    /// when both sides carry one; an id-less legacy side falls back to kind +
+    /// strip position, mirroring [`Self::version_is_from`]'s ID-first rule.
+    fn persisted_identity_matches(
+        live: &Variant,
+        live_position: usize,
+        saved_kind: VariantKind,
+        saved_position: usize,
+        saved_id: Option<&str>,
+    ) -> bool {
+        if !live.id.is_empty()
+            && let Some(id) = saved_id.filter(|id| !id.is_empty())
+        {
+            return live.id == id;
+        }
+        live.kind == saved_kind && live_position == saved_position
+    }
+
+    fn persisted_card_for(&self, live_position: usize) -> Option<PersistedCard<'_>> {
+        let live = self.variants.get(live_position)?;
+        let rec = match &self.saved_strip {
+            Some(rec) => rec,
+            None => {
+                let trivial = self.variants.len() == 1
+                    && live_position == 0
+                    && crate::model::strip_is_trivial(
+                        live.kind,
+                        &live.id,
+                        live.name.as_deref(),
+                        0,
+                    );
+                return trivial.then_some(PersistedCard {
+                    position: 0,
+                    kind: VariantKind::Original,
+                    id: Some(ORIGINAL_VARIANT_ID),
+                    name: None,
+                    recipe: &self.saved_recipe,
+                    origin: self.pixels_on_disk.as_deref(),
+                });
+            }
+        };
+
+        if let Some(kind) = VariantKind::from_store_str(&rec.active_kind)
+            && Self::persisted_identity_matches(
+                live,
+                live_position,
+                kind,
+                rec.active_pos,
+                rec.active_id.as_deref(),
+            )
+        {
+            return Some(PersistedCard {
+                position: rec.active_pos,
+                kind,
+                id: rec.active_id.as_deref(),
+                name: rec.active_name.as_deref(),
+                recipe: &self.saved_recipe,
+                origin: self.pixels_on_disk.as_deref(),
+            });
+        }
+
+        rec.others.iter().enumerate().find_map(|(i, entry)| {
+            let position = if i < rec.active_pos { i } else { i + 1 };
+            let kind = VariantKind::from_store_str(&entry.kind)?;
+            Self::persisted_identity_matches(
+                live,
+                live_position,
+                kind,
+                position,
+                entry.id.as_deref(),
+            )
+            .then_some(PersistedCard {
+                position,
+                kind,
+                id: entry.id.as_deref(),
+                name: entry.name.as_deref(),
+                recipe: &entry.recipe,
+                origin: entry.origin.as_deref(),
+            })
+        })
+    }
+
+    /// The ONE owner for the persisted `(recipe, origin)` of the active card.
+    /// A card created after the last save has no baseline and is therefore
+    /// unsaved. With no strip record, only the trivial lone Original maps to
+    /// `recipe.json` / `pixels.json`.
+    pub(crate) fn active_baseline(&self) -> Option<ActiveBaseline<'_>> {
+        let saved = self.persisted_card_for(self.active)?;
+        Some(ActiveBaseline { recipe: saved.recipe, origin: saved.origin })
+    }
+
+    fn active_canvas_dirty(&self) -> bool {
+        if self.src_path.is_none() || self.active_variant().is_none() {
+            return false;
+        }
+        self.active_baseline().is_none_or(|saved| {
+            dirty_vs(&self.recipe, saved.recipe)
+                || !same_master_opt(
+                    self.active_variant().and_then(|v| v.origin.as_deref()),
+                    saved.origin,
+                )
+        })
+    }
+
+    /// Per-frame status-bar consumer of [`Self::active_baseline`].
+    pub(crate) fn unsaved_marker_dirty(&self) -> bool {
+        self.active_canvas_dirty()
+    }
+
+    /// Window-close consumer of [`Self::active_baseline`].
+    pub(crate) fn quit_guard_open_dirty(&self) -> bool {
+        self.active_canvas_dirty()
+    }
+
+    /// Navigation-stash consumer: active canvas plus this photo's strip work.
+    pub(crate) fn nav_stash_gate_dirty(&self) -> bool {
+        self.active_canvas_dirty() || self.open_dirty_variants() > 0
+    }
+
+    /// Quit-dialog `PendingSave` consumer: the same open-photo state as the
+    /// navigation stash, without counting other photos' stash entries.
+    pub(crate) fn pending_save_gate_dirty(&self) -> bool {
+        self.active_canvas_dirty() || self.open_dirty_variants() > 0
+    }
+
+    /// How many persisted-card mismatches hold work that quitting would discard.
     ///
-    /// Dirty means: the live strip minus the active card differs from the
-    /// photo's persisted `variants.json` mirror ([`Self::saved_strip`]) — in
-    /// kind, recipe, raster origin, count, or in the active card's own
-    /// identity (kind/position, which the record also persists). A `None`
-    /// mirror means nothing is persisted, so every background card is
-    /// unsaved work. The OPEN photo's strip only — the per-photo half of
+    /// Dirty means: a live card cannot be matched to the union of the saved
+    /// active card (`recipe.json` / `pixels.json`) and `variants.json.others`,
+    /// or a matched card differs in kind/name/develop, or a persisted card was
+    /// deleted. IDs match first; id-less records fall back to kind + position.
+    /// Which card is selected is navigation, not an edit. The OPEN photo's
+    /// strip only — the per-photo half of
     /// [`Self::inactive_dirty_variants`]; the stash decision in `open_path`
     /// keys on THIS (summing other photos' stashed variants into the gate
     /// chain-stashed every clean photo the user merely visited).
@@ -509,52 +640,94 @@ impl AutoshopApp {
     /// generate→fit flow) counted dirty forever, no save could clear it, and
     /// the quit dialog re-armed until 「Discard」.
     pub(crate) fn open_dirty_variants(&self) -> usize {
-        let live: Vec<&Variant> = self
-            .variants
-            .iter()
-            .enumerate()
-            .filter(|(i, _)| *i != self.active)
-            .map(|(_, v)| v)
-            .collect();
+        if self.variants.is_empty() {
+            return 0;
+        }
         let Some(rec) = &self.saved_strip else {
-            return live.len();
+            let active = self.active_variant();
+            let trivial = self.variants.len() == 1
+                && self.active == 0
+                && active.is_some_and(|v| {
+                    crate::model::strip_is_trivial(
+                        v.kind,
+                        &v.id,
+                        v.name.as_deref(),
+                        0,
+                    )
+                });
+            let background = self.variants.len().saturating_sub(1);
+            return if background > 0 {
+                background
+            } else if trivial {
+                0
+            } else {
+                1
+            };
         };
-        let mut n = 0usize;
-        for (i, v) in live.iter().enumerate() {
-            let matches = rec.others.get(i).is_some_and(|e| {
-                VariantKind::from_store_str(&e.kind) == Some(v.kind)
-                    && !dirty_vs(&v.recipe, &e.recipe)
-                    && same_master_opt(v.origin.as_deref(), e.origin.as_deref())
-                    // …and the NAME (R24-3): renaming a card is unsaved work
-                    // like any other — the record is its only home, so
-                    // quitting on a renamed card without this comparison
-                    // discarded the name with no prompt. Deferred in R24-2
-                    // for want of a producer; the strip's rename box is one.
-                    // The card's ID is deliberately NOT compared: nothing in
-                    // the app re-mints an existing card's identity, so a
-                    // difference here could only come from the record, and
-                    // the read path already mints what it lacks.
-                    && e.name == v.name
+
+        let mut persisted = Vec::with_capacity(rec.others.len() + 1);
+        if let Some(kind) = VariantKind::from_store_str(&rec.active_kind) {
+            persisted.push(PersistedCard {
+                position: rec.active_pos,
+                kind,
+                id: rec.active_id.as_deref(),
+                name: rec.active_name.as_deref(),
+                recipe: &self.saved_recipe,
+                origin: self.pixels_on_disk.as_deref(),
             });
-            if !matches {
-                n += 1;
+        }
+        persisted.extend(rec.others.iter().enumerate().filter_map(|(i, entry)| {
+            let kind = VariantKind::from_store_str(&entry.kind)?;
+            Some(PersistedCard {
+                position: if i < rec.active_pos { i } else { i + 1 },
+                kind,
+                id: entry.id.as_deref(),
+                name: entry.name.as_deref(),
+                recipe: &entry.recipe,
+                origin: entry.origin.as_deref(),
+            })
+        }));
+
+        let mut dirty = 0usize;
+        for (position, live) in self.variants.iter().enumerate() {
+            let Some(saved) = persisted.iter().find(|saved| {
+                Self::persisted_identity_matches(
+                    live,
+                    position,
+                    saved.kind,
+                    saved.position,
+                    saved.id,
+                )
+            }) else {
+                dirty += 1;
+                continue;
+            };
+            let develop_dirty = position != self.active
+                && (dirty_vs(&live.recipe, saved.recipe)
+                    || !same_master_opt(live.origin.as_deref(), saved.origin));
+            if live.kind != saved.kind || live.name.as_deref() != saved.name || develop_dirty {
+                dirty += 1;
             }
         }
-        // Cards persisted but no longer live: the deletion is unsaved too —
-        // quitting now would resurrect them on the next open.
-        n += rec.others.len().saturating_sub(live.len());
-        // Active-card identity drift: a changed kind, position or NAME
-        // reopens as a different strip even when every background card
-        // matches. (The active card's name lives in the record's own
-        // `active_name` — it is not in `others`.)
-        let ak = self.active_variant().map_or(VariantKind::Original, |v| v.kind);
-        if VariantKind::from_store_str(&rec.active_kind) != Some(ak)
-            || rec.active_pos != self.active
-            || rec.active_name != self.active_variant().and_then(|v| v.name.clone())
-        {
-            n = n.max(1);
-        }
-        n
+
+        // Persisted cards with no live identity are deletions. Selection drift
+        // never enters this comparison, so merely viewing another card stays
+        // clean and reopening still returns to the last SAVED active card.
+        dirty
+            + persisted
+                .iter()
+                .filter(|saved| {
+                    !self.variants.iter().enumerate().any(|(position, live)| {
+                        Self::persisted_identity_matches(
+                            live,
+                            position,
+                            saved.kind,
+                            saved.position,
+                            saved.id,
+                        )
+                    })
+                })
+                .count()
     }
 
     pub(crate) fn inactive_dirty_variants(&self) -> usize {
@@ -2183,22 +2356,11 @@ impl AutoshopApp {
             // it even when the canvas is clean (the user reverted) — the loop
             // below would otherwise write the stale stashed edits to disk.
             pending.retain(|e| e.photo != p);
-            // Both directions count (gained OR dropped master) — see open_path.
-            let recorded = autoshop::store::read_pixel_source(&p);
-            let live_generated = self.active_is_generated();
-            let pixels_unsaved = !(same_master_opt(
-                recorded.as_ref().map(|(q, _)| q.as_path()),
-                origin.as_deref(),
-            ) && recorded.as_ref().map(|(_, g)| *g)
-                == origin.as_ref().map(|_| live_generated));
             // The strip counts as unsaved work of the OPEN photo too — a
             // clean canvas over an unpersisted strip must still be listed,
             // or Save-all had nothing to write and the guard's re-check
             // bounced the close forever (the v0.21 dead-button livelock).
-            if dirty_vs(&self.recipe, &self.saved_recipe)
-                || pixels_unsaved
-                || self.open_dirty_variants() > 0
-            {
+            if self.pending_save_gate_dirty() {
                 let pix = origin.map(|o| (o, self.active_is_generated()));
                 pending.push(PendingSave {
                     photo: p,

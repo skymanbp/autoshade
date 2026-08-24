@@ -194,14 +194,23 @@ an older alpha as the new model's result.
 
 ### 4. Use versions and variants
 
-Choose **＋ Save as version** to snapshot the current develop and return to it
-later. Versions are recipes; they do not duplicate or alter the source photo.
+A variant is one card for the same photo: **▣ Original**, **✨ AI generated**,
+or **◭ Reverse-fit**. Each card combines its own base pixels with one develop.
+`Ctrl+S` saves every card in the strip together. Switching cards is navigation,
+not an edit; reopening returns to the card that was active at the last save,
+not the last card viewed.
 
-The variants strip labels three different states: **▣ Original**, **✨ AI
-generated**, and **◭ Reverse-fit**. A generated variant is a pixel result and
-has no editable XMP develop. Reverse-fit estimates an engine recipe from that
-look; copy the fitted develop to Original and save it when you want an editable
-recipe and sidecar for the full-resolution source.
+A version is a numbered snapshot of one card's develop at one moment. **＋ Save
+as version** writes `v<N>.recipe.json`, frozen `v<N>.mask-*.png` rasters, and
+`.version-meta.json` provenance (`from_kind`/`from_id`, name, and `user` or
+`auto` origin). Loading a version replaces the active card's canvas as one undo
+step. `auto` versions are snapshots made by the backup gate before it replaces
+a saved develop.
+
+An AI-generated variant carries its look in pixels and has no editable XMP
+develop. Reverse-fit estimates an engine recipe from that look; copy the fitted
+develop to Original when you want an editable recipe and sidecar for the
+full-resolution source.
 
 ### 5. Export
 
@@ -571,7 +580,7 @@ versions, and a deleted-version registry; SCUNet success requires the typed
 `sidecar_wrote` contract. A 1771 MB reference probe sets the 1800 MB per-photo
 budget, while the 4 GiB RAW gate bounds admission. The [`build`
 workflow](.github/workflows/build.yml) covers default and GUI feature sets on
-Ubuntu and macOS. The current battery is **871 library (862 pass + 9 `#[ignore]`d forensic probes) / 14 CLI / 132 GUI / 2+2 contract** tests; the
+Ubuntu and macOS. The current battery is **871 library (862 pass + 9 `#[ignore]`d forensic probes) / 14 CLI / 139 GUI / 2+2 contract** tests; the
 [`scripts/check_docs.py`](scripts/check_docs.py) gate re-derives pinned release
 claims. Model weights are not stored in this repository.
 

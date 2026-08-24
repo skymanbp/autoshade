@@ -76,9 +76,9 @@
 > experimental generative edits, an optional pixel-**heal** retouch mode (§4.7)
 > the deterministic look **reverse-fit** (§4.8) and the local server's refusal
 > model (§4.9).
-> 871 library + 14 CLI + 132 GUI + 2+2 contract tests are enumerated in the GUI
+> 871 library + 14 CLI + 139 GUI + 2+2 contract tests are enumerated in the GUI
 > build; the library result is 862 pass + 9 `#[ignore]`d forensic probes
-> (counts refreshed 2026-08-24 for the v1.0.0 release battery). THREE suites are ADDITIONAL and
+> (counts refreshed 2026-08-24 after the post-v1.0.0 variant-baseline batch: GUI 132→139). THREE suites are ADDITIONAL and
 > env-gated, so a bare `cargo test` does not include them:
 > `AUTOSHOP_LR_PROBE_FIXTURES` (16 real Lightroom radial sidecars, byte
 > round-trip), `AUTOSHOP_MB_FIXTURES` (the 7-file M-B forensic set — 42 of its
@@ -1046,9 +1046,20 @@ live strip and the navigation stash) — since the cards became renameable in
 v0.30.0, a name or an id IS a reason for the record to exist, because nothing
 else stores either.
 
+One GUI `Ctrl+S` saves every variant card: the active card's develop and pixel
+origin go to `recipe.json` / `pixels.json`, and every other card goes to the
+same generation's `variants.json.others`. Unsaved-state checks resolve each
+live card against that persisted union by stable ID first, with kind + strip
+position only for an id-less legacy side. Changing `active_kind`, `active_pos`,
+or `active_id` merely by viewing another card is navigation, not an edit; the
+selection is persisted only by the next save, so reopening lands on the last
+SAVED active card rather than the last viewed one. Card names remain saved
+strip state and therefore remain unsaved work when changed.
+
 On the strip itself the ACTIVE card carries the actions that act on the live
-canvas: 「＋」 saves the develop as a numbered snapshot (v0.30.0), the card's
-name is editable in place (the rename buffer is keyed by the card's own id, so
+canvas: 「＋」 snapshots THIS card's develop only as a numbered version
+(`v<n>.recipe.json` + frozen mask rasters + `.version-meta.json`; v0.30.0), the
+card's name is editable in place (the rename buffer is keyed by the card's own id, so
 an async push that renumbers the strip cannot land the text on another card),
 and 「▣」 copies this card's develop onto the ▣ Original card. That last one
 keeps two things apart on purpose: it overwrites the Original CARD's develop

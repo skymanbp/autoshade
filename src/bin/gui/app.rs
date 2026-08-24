@@ -113,16 +113,14 @@ pub(crate) struct AutoshopApp {
     pub(crate) undo_stack: Vec<UndoStep>,  // prior states, most recent last
     pub(crate) redo_stack: Vec<UndoStep>,  // states undone away (cleared on a new edit)
     // --- unsaved-edit protection ---
-    // What the sidecar last held for the open photo (neutral when none): the
-    // canvas differing from it is the "● unsaved" condition. Navigation stashes
-    // an unsaved canvas per-path for THIS session so switching photos can never
-    // silently destroy work; only Ctrl+S writes disk.
+    // What recipe.json last held: the develop of the card that was active at
+    // the last save. `active_baseline` joins it with saved_strip so every card
+    // is compared to its own persisted state.
     pub(crate) saved_recipe: EditRecipe,
     // Mirror of the open photo's pixels.json (the saved baked-master path, if
     // any) so the per-frame ● indicator can compare pixel identity WITHOUT a
-    // disk read per frame. Updated at open, save, analyze-save and clear; the
-    // decision points (close guard, quit dialog, navigation stash) still read
-    // the disk — the authority.
+    // disk read per frame. Updated at open, save, analyze-save and clear; it is
+    // the pixel half of the last-saved active card's baseline.
     pub(crate) pixels_on_disk: Option<PathBuf>,
     /// Mirror of the photo's persisted `variants.json` (resolved form), the
     /// baseline the background-variant dirty test compares the live strip
@@ -1179,26 +1177,19 @@ impl AutoshopApp {
                 }
                 // The unsaved marker: canvas differs from the saved develop
                 // (base_curve excluded — calibration is not an edit, dirty_vs)
-                // OR the canvas pixels differ from the recorded baked master
-                // (`pixels_on_disk` mirrors pixels.json — an unsaved heal is
-                // unsaved work even under an untouched recipe). It sits FIRST
+                // OR its pixels differ from that same card's recorded master.
+                // `active_baseline` resolves both halves after card switches;
+                // an unsaved heal is work even under an untouched recipe. It sits FIRST
                 // — before the batch bar and the status text — so neither can
                 // ever push it out of view at narrow widths.
-                let pixels_dirty = self.src_path.is_some()
-                    && !same_master_opt(
-                        self.active_variant().and_then(|v| v.origin.as_deref()),
-                        self.pixels_on_disk.as_deref(),
-                    );
-                if self.src_path.is_some()
-                    && (dirty_vs(&self.recipe, &self.saved_recipe) || pixels_dirty)
-                {
+                if self.unsaved_marker_dirty() {
                     ui.label(
                         egui::RichText::new(tr(self.lang, "● unsaved"))
                             .color(ui.visuals().warn_fg_color),
                     )
                     .on_hover_text(tr(
                         self.lang,
-                        "Edits (or a baked retouch) differ from your saved develop — Ctrl+S saves; switching photos keeps them for this session only",
+                        "This card differs from its saved develop — Ctrl+S saves every card; switching photos keeps unsaved work for this session only",
                     ));
                 }
                 // Live batch-render progress, beside the spinner (its old home
@@ -1759,17 +1750,7 @@ impl eframe::App for AutoshopApp {
             // advisory sidecar), but it must not die with the window either,
             // so the last boundary before the quit decision flushes the lot.
             self.commit_pending_names();
-            // Unsaved covers PIXELS too: a baked retouch whose master isn't
-            // recorded in the store yet dies with the window exactly like an
-            // unsaved slider move (the master PNG survives, its linkage not).
-            let pixels_unsaved = self.src_path.as_deref().is_some_and(|p| {
-                let origin = self.active_variant().and_then(|v| v.origin.clone());
-                // Both directions count (gained OR dropped master).
-                let recorded = autoshop::store::read_pixel_source(p).map(|(q, _)| q);
-                !same_master_opt(recorded.as_deref(), origin.as_deref())
-            });
-            let unsaved_open = self.src_path.is_some()
-                && (dirty_vs(&self.recipe, &self.saved_recipe) || pixels_unsaved);
+            let unsaved_open = self.quit_guard_open_dirty();
             if self.busy {
                 // A running export / retouch / paid AI generation dies with
                 // the process — the ✕ used to bypass every guard mid-flight.

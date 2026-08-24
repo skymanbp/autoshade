@@ -3312,6 +3312,227 @@
         }
     }
 
+    fn persisted_two_card_fixture() -> AutoshopApp {
+        let original_recipe = EditRecipe { exposure_ev: 0.4, ..Default::default() };
+        let fitted_recipe = EditRecipe { contrast: 18.0, ..Default::default() };
+        AutoshopApp {
+            src_path: Some(PathBuf::from("D:/library/__variant-baseline__.ARW")),
+            recipe: original_recipe.clone(),
+            saved_recipe: original_recipe.clone(),
+            pixels_on_disk: None,
+            variants: vec![
+                Variant {
+                    kind: VariantKind::Original,
+                    id: "card-x".into(),
+                    name: Some("negative".into()),
+                    recipe: original_recipe,
+                    base: None,
+                    origin: None,
+                    thumb: None,
+                },
+                Variant {
+                    kind: VariantKind::Fitted,
+                    id: "card-y".into(),
+                    name: Some("fitted".into()),
+                    recipe: fitted_recipe.clone(),
+                    base: None,
+                    origin: None,
+                    thumb: None,
+                },
+            ],
+            active: 0,
+            saved_strip: Some(autoshop::store::VariantsRecord {
+                v: 1,
+                active_kind: "original".into(),
+                active_pos: 0,
+                active_id: Some("card-x".into()),
+                active_name: Some("negative".into()),
+                others: vec![autoshop::store::VariantEntry {
+                    kind: "fitted".into(),
+                    recipe: fitted_recipe,
+                    origin: None,
+                    id: Some("card-y".into()),
+                    name: Some("fitted".into()),
+                    extra: Default::default(),
+                }],
+                extra: Default::default(),
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn switching_persisted_cards_keeps_all_four_unsaved_consumers_clean() {
+        let mut app = persisted_two_card_fixture();
+        let ctx = egui::Context::default();
+        app.switch_variant(1, &ctx);
+
+        assert!(!app.unsaved_marker_dirty(), "the ● marker predicate stays clean");
+        assert!(!app.quit_guard_open_dirty(), "the window-close predicate stays clean");
+        assert!(!app.nav_stash_gate_dirty(), "the navigation-stash gate stays clean");
+        assert!(!app.pending_save_gate_dirty(), "the PendingSave gate stays clean");
+        assert_eq!(
+            app.open_dirty_variants(),
+            0,
+            "the saved-active card is now background and resolves through recipe.json"
+        );
+        assert_eq!(
+            app.saved_strip.as_ref().and_then(|r| r.active_id.as_deref()),
+            Some("card-x"),
+            "viewing another card does not move the persisted selection"
+        );
+
+        let old = app.src_path.clone().unwrap();
+        app.open_path(PathBuf::from("D:/library/__variant-baseline-next__.ARW"));
+        assert!(
+            !app.nav_stash.contains_key(&old),
+            "the production navigation call site must not stash a clean card switch"
+        );
+    }
+
+    #[test]
+    fn edit_save_and_switch_back_use_each_cards_persisted_develop() {
+        let mut app = persisted_two_card_fixture();
+        let ctx = egui::Context::default();
+        app.switch_variant(1, &ctx);
+        app.recipe.contrast = 27.0;
+        assert!(app.unsaved_marker_dirty(), "editing the switched-to card is dirty");
+        assert!(app.quit_guard_open_dirty(), "the close guard sees that edit");
+        assert!(app.nav_stash_gate_dirty(), "the nav gate sees that edit");
+        assert!(app.pending_save_gate_dirty(), "the quit save list sees that edit");
+
+        app.variants[app.active].recipe = app.recipe.clone();
+        app.saved_recipe = app.recipe.clone();
+        app.pixels_on_disk = app.active_variant().and_then(|v| v.origin.clone());
+        app.saved_strip = app.current_strip_record();
+        assert!(!app.unsaved_marker_dirty(), "saving on card Y advances Y's baseline");
+        assert_eq!(app.open_dirty_variants(), 0, "the whole strip is clean after that save");
+
+        app.switch_variant(0, &ctx);
+        assert!(!app.unsaved_marker_dirty(), "card X now resolves from saved_strip.others");
+        assert!(!app.quit_guard_open_dirty(), "switching back does not arm close");
+        assert!(!app.nav_stash_gate_dirty(), "switching back does not arm navigation");
+        assert!(!app.pending_save_gate_dirty(), "switching back adds no PendingSave");
+        assert_eq!(app.open_dirty_variants(), 0, "both persisted cards still match");
+    }
+
+    #[test]
+    fn pushed_and_deleted_cards_remain_unsaved_strip_work() {
+        let mut pushed = persisted_two_card_fixture();
+        pushed.variants.push(Variant {
+            kind: VariantKind::Generated,
+            id: "card-new".into(),
+            name: None,
+            recipe: EditRecipe::default(),
+            base: None,
+            origin: Some(PathBuf::from("D:/masters/new.png")),
+            thumb: None,
+        });
+        pushed.active = 2;
+        pushed.recipe = EditRecipe::default();
+        assert!(pushed.unsaved_marker_dirty(), "a pushed active card has no baseline");
+        assert!(pushed.open_dirty_variants() > 0, "the pushed card is absent on disk");
+        assert!(pushed.nav_stash_gate_dirty(), "navigation protects the pushed card");
+        assert!(pushed.pending_save_gate_dirty(), "quit Save-all includes the pushed card");
+
+        let mut deleted = persisted_two_card_fixture();
+        deleted.variants.remove(1);
+        assert!(!deleted.unsaved_marker_dirty(), "the surviving active card itself is clean");
+        assert!(deleted.open_dirty_variants() > 0, "a persisted card was deleted live");
+        assert!(deleted.nav_stash_gate_dirty(), "navigation protects the deletion");
+        assert!(deleted.pending_save_gate_dirty(), "quit Save-all persists the deletion");
+        assert!(
+            deleted.quit_guard_open_dirty() || deleted.inactive_dirty_variants() > 0,
+            "the complete quit guard remains armed for a deletion"
+        );
+    }
+
+    #[test]
+    fn persisted_card_ids_outrank_kind_and_position() {
+        let mut app = persisted_two_card_fixture();
+        app.variants.swap(0, 1);
+        app.active = 0;
+        app.recipe = app.variants[0].recipe.clone();
+
+        assert_eq!(
+            app.active_baseline().map(|b| b.recipe.contrast),
+            Some(18.0),
+            "card-y follows its stable id to the saved others entry"
+        );
+        assert!(!app.unsaved_marker_dirty(), "position cannot override a matching id");
+        assert_eq!(
+            app.open_dirty_variants(),
+            0,
+            "the saved-active card also follows its id after becoming background"
+        );
+    }
+
+    #[test]
+    fn legacy_idless_strip_uses_kind_and_position_baselines() {
+        let mut app = persisted_two_card_fixture();
+        let rec = app.saved_strip.as_mut().unwrap();
+        rec.active_id = None;
+        rec.others[0].id = None;
+        let ctx = egui::Context::default();
+        app.switch_variant(1, &ctx);
+
+        assert_eq!(
+            app.active_baseline().map(|b| b.recipe.contrast),
+            Some(18.0),
+            "the id-less fitted entry resolves by its kind and strip position"
+        );
+        assert!(!app.unsaved_marker_dirty());
+        assert!(!app.quit_guard_open_dirty());
+        assert!(!app.nav_stash_gate_dirty());
+        assert!(!app.pending_save_gate_dirty());
+        assert_eq!(app.open_dirty_variants(), 0);
+    }
+
+    #[test]
+    fn switched_generated_card_uses_its_own_persisted_pixel_origin() {
+        let mut app = persisted_two_card_fixture();
+        let original_origin = PathBuf::from("D:/masters/original-heal.png");
+        let generated_origin = PathBuf::from("D:/masters/generated.png");
+        app.variants[0].origin = Some(original_origin.clone());
+        app.pixels_on_disk = Some(original_origin);
+        app.variants[1].kind = VariantKind::Generated;
+        app.variants[1].origin = Some(generated_origin.clone());
+        app.variants[1].base = Some(Arc::new(image::DynamicImage::new_rgb8(4, 3)));
+        let entry = &mut app.saved_strip.as_mut().unwrap().others[0];
+        entry.kind = "generated".into();
+        entry.origin = Some(generated_origin);
+        let ctx = egui::Context::default();
+        app.switch_variant(1, &ctx);
+
+        assert!(!app.unsaved_marker_dirty(), "pixels.json belongs to card X, not card Y");
+        assert!(!app.quit_guard_open_dirty(), "the quit pixel half uses Y's entry");
+        assert!(!app.nav_stash_gate_dirty(), "the nav pixel half uses Y's entry");
+        assert!(!app.pending_save_gate_dirty(), "PendingSave uses Y's entry");
+
+        app.variants[1].origin = Some(PathBuf::from("D:/masters/generated-edited.png"));
+        assert!(app.unsaved_marker_dirty(), "changing Y's origin re-arms the marker");
+        assert!(app.quit_guard_open_dirty(), "changing Y's origin re-arms close");
+        assert!(app.nav_stash_gate_dirty(), "changing Y's origin re-arms navigation");
+        assert!(app.pending_save_gate_dirty(), "changing Y's origin re-arms Save-all");
+    }
+
+    #[test]
+    fn renaming_a_switched_to_card_is_still_unsaved_work() {
+        let mut app = persisted_two_card_fixture();
+        let ctx = egui::Context::default();
+        app.switch_variant(1, &ctx);
+        app.variants[1].name = Some("new fitted name".into());
+
+        assert!(!app.unsaved_marker_dirty(), "the canvas develop itself did not change");
+        assert!(app.open_dirty_variants() > 0, "the card name's only home changed");
+        assert!(app.nav_stash_gate_dirty(), "navigation protects the rename");
+        assert!(app.pending_save_gate_dirty(), "Save-all includes the rename");
+        assert!(
+            app.quit_guard_open_dirty() || app.inactive_dirty_variants() > 0,
+            "the complete quit guard remains armed for the rename"
+        );
+    }
+
     #[test]
     fn a_saved_retouch_is_not_re_reported_as_unsaved() {
         // The store records the master ABSOLUTIZED while an in-session
