@@ -195,6 +195,20 @@
 
 ## 当前状态（已完成，勿重做）
 
+- **🧹 展示图注去文件名 + 官网重部署（2026-08-24，用户令「官网/readme 上不
+  要出现我自己的照片文件名」）**：README 13 处 + site/index.html 13 处（三对
+  分析对的标题/alt、两张风格三联图注、两张反推三联图注）由脚本逐条断言计数
+  替换为场景名（Townhouse and pond / Balcony view / Hillside neighborhood /
+  Lake and boat / Sunset / Stone viaduct），两文件 `_?DSC\d{4,5}` 余 0；
+  check_docs 23P0F；部署 a38fd7a0 → autoshop-d7w.pages.dev 首页与 site/
+  index.html 字节全同，www 仅多一段 Cloudflare Web Analytics beacon（zone 级
+  自动注入，被站点 CSP `script-src 'none'` 拦截，非站点内容）。其他公开文档
+  仍含文件名（ARCHITECTURE 3 处、ROADMAP/计划/存档若干）待用户裁定。同日
+  用户 ④ GUI 目检通过 → v1.0.0 计划 #12 用户侧闭合。同日用户报三问题待拍
+  板：变体切换后 ● 误报（根因=● 只比 `saved_recipe`=recipe.json 单槽，
+  app.rs:1192，而 Ctrl+S 已把其余卡片存进 variants.json）、变体/版本语义
+  混淆、反推质量差（沙漠峡谷片：目标含生成云层=内容差异，统计拟合结构性
+  失败，置信 0.458）。
 - **✅ v1.0.0 发布后彻底收尾（2026-08-24，用户四项令）**。①**全量文档深度漂
   移审计**：只读对抗批 205 条主张双侧 file:line → 1 BLOCK（「库只读」保证漏
   交付目录设在库内即可写的例外）+20 FIX（README 兼容披露缺重渲范围/精度

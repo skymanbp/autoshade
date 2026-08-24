@@ -349,12 +349,12 @@ conversion of the same Sony α7R IVA `.ARW`; each after is an AI-proposed engine
 render, not a generated image. The faint watermark is identical on both halves
 of these three older pairs.
 
-#### `_DSC9706`: tonal range
+#### Townhouse and pond: tonal range
 
 <table>
 <tr>
-<td width="50%"><img src="docs/images/showcase-1-before.jpg" alt="Sony α7R IVA ARW _DSC9706 neutral develop" /><br /><sub><b>Before:</b> neutral engine conversion.</sub></td>
-<td width="50%"><img src="docs/images/showcase-1-after.jpg" alt="Sony α7R IVA ARW _DSC9706 AI develop" /><br /><sub><b>After:</b> AI tone, white balance, crop, a linear sky hold, and a radial house lift.</sub></td>
+<td width="50%"><img src="docs/images/showcase-1-before.jpg" alt="Sony α7R IVA ARW, townhouse and pond: neutral develop" /><br /><sub><b>Before:</b> neutral engine conversion.</sub></td>
+<td width="50%"><img src="docs/images/showcase-1-after.jpg" alt="Sony α7R IVA ARW, townhouse and pond: AI develop" /><br /><sub><b>After:</b> AI tone, white balance, crop, a linear sky hold, and a radial house lift.</sub></td>
 </tr>
 </table>
 
@@ -363,12 +363,12 @@ model judge moved from 84 to 86 after a bounded revision. Honest blemish: the
 linear sky mask leaves a faint lighter band near the top-left corner. These are
 model-judge scores recorded when the pair was produced (v0.33.0 showcase batch).
 
-#### `_DSC9711`: detail and texture
+#### Balcony view: detail and texture
 
 <table>
 <tr>
-<td width="50%"><img src="docs/images/showcase-2-before.jpg" alt="Sony α7R IVA ARW _DSC9711 neutral develop" /><br /><sub><b>Before:</b> neutral engine conversion.</sub></td>
-<td width="50%"><img src="docs/images/showcase-2-after.jpg" alt="Sony α7R IVA ARW _DSC9711 AI develop" /><br /><sub><b>After:</b> AI texture, clarity, dehaze, tonal changes, and two linear masks.</sub></td>
+<td width="50%"><img src="docs/images/showcase-2-before.jpg" alt="Sony α7R IVA ARW, balcony view: neutral develop" /><br /><sub><b>Before:</b> neutral engine conversion.</sub></td>
+<td width="50%"><img src="docs/images/showcase-2-after.jpg" alt="Sony α7R IVA ARW, balcony view: AI develop" /><br /><sub><b>After:</b> AI texture, clarity, dehaze, tonal changes, and two linear masks.</sub></td>
 </tr>
 </table>
 
@@ -378,12 +378,12 @@ to 84. These are model-judge scores recorded when the pair was produced
 the sky is paler than the neutral base even though the local mask asks for more
 sky depth.
 
-#### `_DSC9712`: establishing scene
+#### Hillside neighborhood: establishing scene
 
 <table>
 <tr>
-<td width="50%"><img src="docs/images/showcase-3-before.jpg" alt="Sony α7R IVA ARW _DSC9712 neutral develop" /><br /><sub><b>Before:</b> neutral engine conversion.</sub></td>
-<td width="50%"><img src="docs/images/showcase-3-after.jpg" alt="Sony α7R IVA ARW _DSC9712 AI develop" /><br /><sub><b>After:</b> AI global contrast, restrained color, and green/aqua HSL reductions.</sub></td>
+<td width="50%"><img src="docs/images/showcase-3-before.jpg" alt="Sony α7R IVA ARW, hillside neighborhood: neutral develop" /><br /><sub><b>Before:</b> neutral engine conversion.</sub></td>
+<td width="50%"><img src="docs/images/showcase-3-after.jpg" alt="Sony α7R IVA ARW, hillside neighborhood: AI develop" /><br /><sub><b>After:</b> AI global contrast, restrained color, and green/aqua HSL reductions.</sub></td>
 </tr>
 </table>
 
@@ -402,11 +402,11 @@ retrieval path, not a pixel-copy or generative transfer.
 
 <img src="docs/images/showcase-lake-style-triptych.jpg" alt="Lake scene: straight conversion, AI develop, and AI develop with style read" />
 
-<sub><b>Lake and boat, <code>_DSC0070</code>.</b> The style-read run referenced four similar edits from the indexed Lightroom library and was accepted. The style-off middle panel rendered under a Revise verdict and therefore has no saved recipe/XMP; it is retained only as a transparent comparison.</sub>
+<sub><b>Lake and boat.</b> The style-read run referenced four similar edits from the indexed Lightroom library and was accepted. The style-off middle panel rendered under a Revise verdict and therefore has no saved recipe/XMP; it is retained only as a transparent comparison.</sub>
 
 <img src="docs/images/showcase-sunset-style-triptych.jpg" alt="Sunset scene: straight conversion, AI develop, and AI develop with style read" />
 
-<sub><b>Sunset, <code>DSC09938</code>.</b> The middle panel is an accepted style-off develop. The style-read proposal at right used retrieved references and rendered at full RAW resolution, but the model judge marked it Revise (85); its attempted revision scored 84 and was discarded, so no style-read recipe/XMP was saved.</sub>
+<sub><b>Sunset.</b> The middle panel is an accepted style-off develop. The style-read proposal at right used retrieved references and rendered at full RAW resolution, but the model judge marked it Revise (85); its attempted revision scored 84 and was discarded, so no style-read recipe/XMP was saved.</sub>
 
 ## Showcase Part B — full-image generation to recipe inversion
 
@@ -419,13 +419,13 @@ deterministically to the original full-resolution RAW.
 
 <img src="docs/images/showcase-sunset-reimagine-fit-triptych.jpg" alt="Sunset scene: neutral conversion, AI-generated target, and reverse-fitted full-resolution engine render" />
 
-<sub><b>Sony α7R IVA 61 MP <code>.ARW</code>, <code>DSC09938</code>.</b> Left: neutral engine conversion. Center: a 3520×2352 full-image target generated with a configured <code>gpt-image-2</code>. Right: the recovered recipe rendered by Autoshop on the original RAW at 9504×6336. The statistical look error moved from 0.060 to 0.042 at fit confidence 0.746691; this is a deterministic tonal/color approximation, not a pixel-aligned reconstruction of generated detail.</sub>
+<sub><b>Sunset, Sony α7R IVA 61 MP <code>.ARW</code>.</b> Left: neutral engine conversion. Center: a 3520×2352 full-image target generated with a configured <code>gpt-image-2</code>. Right: the recovered recipe rendered by Autoshop on the original RAW at 9504×6336. The statistical look error moved from 0.060 to 0.042 at fit confidence 0.746691; this is a deterministic tonal/color approximation, not a pixel-aligned reconstruction of generated detail.</sub>
 
 ### Viaduct reimagine and reverse-fit
 
 <img src="docs/images/showcase-viaduct-reimagine-fit-triptych.jpg" alt="Stone viaduct scene: neutral conversion, AI-generated target, and reverse-fitted full-resolution engine render" />
 
-<sub><b>Sony α7R IVA 61 MP <code>.ARW</code>, <code>_DSC0639</code>.</b> Left: neutral engine conversion. Center: a 3520×2352 full-image target generated with the same configured <code>gpt-image-2</code>. Right: the recovered recipe rendered on the original RAW at 9504×6336. The statistical look error moved from 0.057 to 0.019 at fit confidence 0.678264; the fitted color-cast stage was rejected by the fit's own do-no-harm review, so the recovered recipe carries tone and saturation only.</sub>
+<sub><b>Stone viaduct, Sony α7R IVA 61 MP <code>.ARW</code>.</b> Left: neutral engine conversion. Center: a 3520×2352 full-image target generated with the same configured <code>gpt-image-2</code>. Right: the recovered recipe rendered on the original RAW at 9504×6336. The statistical look error moved from 0.057 to 0.019 at fit confidence 0.678264; the fitted color-cast stage was rejected by the fit's own do-no-harm review, so the recovered recipe carries tone and saturation only.</sub>
 
 Reverse-fit can recover global tone, saturation, and guarded color casts. It
 does not claim to recover local masks, generated objects or detail, or
