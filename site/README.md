@@ -22,6 +22,6 @@ node scripts/deploy_site.js
 
 The script reads the master token from the git-ignored `.secret` file, mints a one-hour token scoped to Cloudflare Pages, runs `wrangler pages deploy site --project-name autoshop`, and deletes the temporary token afterwards. No token value is printed or written anywhere. The production alias is `autoshop-d7w.pages.dev`; each deployment also gets its own preview URL. After deploying, verify every published file byte-for-byte against `site/` before calling it live.
 
-To attach `skymanbp-autoshop.dev`, open the `autoshop` Pages project in the Cloudflare dashboard, choose **Custom domains**, and follow the ownership and DNS prompts (the zone must exist in the same account).
+The custom domain `skymanbp-autoshop.dev` (and `www.`) is attached to the `autoshop` Pages project: the zone lives in the same account and both names are proxied CNAME records pointing at `autoshop-d7w.pages.dev`, with certificates issued by Pages. Re-attaching after a project rebuild is done through the Pages project's **Custom domains** page or the Pages domains API.
 
 Do not store deployment credentials in this directory or commit them to the repository.
