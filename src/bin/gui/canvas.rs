@@ -268,16 +268,14 @@ impl AutoshopApp {
                     self.overlay_stale = true;
                     return;
                 }
-                // `AsRendered`, explicitly: this reference exists to be SAMPLED
-                // for pixel values, and no geometry stage runs over it. `pre`
-                // still carries the lens profile (its vignette is part of the
-                // pixels a range mask is judged on), so letting the recipe
-                // answer would unwarp its prefix masks off those very pixels.
+                // No downstream geometry, explicitly: this reference exists to
+                // be SAMPLED for pixel values. The profile still matters for
+                // LINEAR's handle-only raw-frame rule; RADIAL remains stored.
                 let img = autoshop::render::develop_preview_framed(
                     base,
                     &pre,
                     &autoshop::diag::pixels(),
-                    autoshop::render::MaskFrame::AsRendered,
+                    autoshop::render::MaskFrame::without_downstream(&pre.lens_profile),
                 );
                 self.overlay_ref = Some((pre, img));
             }
@@ -891,13 +889,13 @@ impl AutoshopApp {
             pre.lens_distortion = 0.0;
             pre.crop = None;
             if !matches!(&self.overlay_ref, Some((r, _)) if *r == pre) {
-                // `AsRendered` for the same reason as the overlay's own build
-                // above, and it must MATCH it — the two share this cache.
+                // The explicit no-downstream frame for the same reason as the
+                // overlay build above, and it must MATCH it — they share cache.
                 let img = autoshop::render::develop_preview_framed(
                     &base,
                     &pre,
                     &autoshop::diag::pixels(),
-                    autoshop::render::MaskFrame::AsRendered,
+                    autoshop::render::MaskFrame::without_downstream(&pre.lens_profile),
                 );
                 self.overlay_ref = Some((pre, img));
             }

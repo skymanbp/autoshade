@@ -2221,10 +2221,11 @@ pub fn fresh_lens_profile(raw: &Path) -> crate::recipe::LensProfile {
 /// only form that can answer the mask-warp question correctly (R29 Batch-3).
 ///
 /// `crs:LensProfileEnable="0"` says Lightroom applied no lens correction, so
-/// the frame it stored a mask in IS the frame it exported that mask into and
-/// the warp is the identity. That is a DIFFERENT fact from "nobody could solve
-/// a warp for this photo", and `MaskWarpSource` keeps them apart:
-/// `DisabledInSidecar` versus the five other refusals.
+/// RADIAL geometry stays in its stored frame. LINEAR is different: Lightroom
+/// transports its two corrected-frame handles through the available camera map
+/// and reconstructs a straight gradient in the raw frame. The ordinary
+/// `mask_warp` therefore remains identity for RADIAL while the same solved map
+/// moves once into `linear_handle_warp` for that LINEAR-only operation.
 ///
 /// Only the WARP is answered from the sidecar. The vignette / distortion / CA
 /// toggles are the photographer's own and are left exactly as
@@ -2239,10 +2240,18 @@ pub fn fresh_lens_profile_for_sidecar(
 ) -> crate::recipe::LensProfile {
     let mut p = fresh_lens_profile(raw);
     if sidecar.and_then(crate::xmp::lens_profile_enabled) == Some(false) {
-        p.mask_warp.clear();
-        p.mask_warp_src = crate::recipe::MaskWarpSource::DisabledInSidecar;
+        retain_disabled_linear_handle_warp(&mut p);
     }
     p
+}
+
+/// Preserve the solved camera/LCP map across the disabled-sidecar boundary for
+/// LINEAR H2 without exposing it to RADIAL's `mask_warp` path. Kept at this
+/// upstream boundary so every importer and render surface receives one coherent
+/// frame fact rather than reconstructing it at individual call sites.
+fn retain_disabled_linear_handle_warp(p: &mut crate::recipe::LensProfile) {
+    p.linear_handle_warp = std::mem::take(&mut p.mask_warp);
+    p.mask_warp_src = crate::recipe::MaskWarpSource::DisabledInSidecar;
 }
 
 /// Fresh as-shot WB anchor for `raw` — the camera's absolute Kelvin + tint
@@ -4444,6 +4453,64 @@ mod tests {
         // Lightroom's switch as an instruction would silently overwrite them.
         let p = fresh_lens_profile_for_sidecar(&raw, Some(off));
         assert!(p.mask_warp.is_empty() && !p.distortion_on && !p.vignette_on && !p.ca_on);
+    }
+
+    #[test]
+    fn disabled_sidecar_retains_the_camera_map_only_for_linear_handles() {
+        use crate::recipe::{LensProfile, MaskWarpSource, MaskWarpCenter};
+
+        let solved = (0..crate::recipe::MASK_WARP_KNOTS)
+            .map(|i| 0.975 + 0.06 * i as f32 / (crate::recipe::MASK_WARP_KNOTS - 1) as f32)
+            .collect::<Vec<_>>();
+        let centre = MaskWarpCenter {
+            stored_px: [4768.0, 3168.0],
+            stored_dims: [9504.0, 6336.0],
+        };
+        let mut profile = LensProfile {
+            mask_warp: solved.clone(),
+            mask_warp_src: MaskWarpSource::CameraMetadata,
+            mask_warp_center: Some(centre),
+            ..Default::default()
+        };
+
+        retain_disabled_linear_handle_warp(&mut profile);
+        profile.clamp();
+
+        assert!(profile.mask_warp.is_empty(), "disabled RADIAL must retain identity");
+        assert_eq!(profile.mask_warp_src, MaskWarpSource::DisabledInSidecar);
+        assert_eq!(profile.linear_handle_warp(), solved);
+        assert_eq!(profile.mask_warp_center, Some(centre));
+
+        // This is a persisted frame fact, not a transient import cache.
+        let json = serde_json::to_string(&profile).unwrap();
+        assert!(json.contains("\"linear_handle_warp\""), "{json}");
+        let reopened: LensProfile = serde_json::from_str(&json).unwrap();
+        assert_eq!(reopened, profile);
+
+        #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        #[allow(dead_code)]
+        struct PreLinearLensProfile {
+            vignette: Vec<f32>,
+            distortion: Vec<f32>,
+            ca_r: Vec<f32>,
+            ca_b: Vec<f32>,
+            vignette_on: bool,
+            distortion_on: bool,
+            ca_on: bool,
+            mask_warp: Vec<f32>,
+            mask_warp_src: MaskWarpSource,
+            mask_warp_center: Option<MaskWarpCenter>,
+        }
+        assert!(
+            serde_json::from_str::<PreLinearLensProfile>(&json).is_err(),
+            "an older strict reader must refuse the new frame fact"
+        );
+
+        let mut legacy_value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        legacy_value.as_object_mut().unwrap().remove("linear_handle_warp");
+        let legacy: LensProfile = serde_json::from_value(legacy_value).unwrap();
+        assert!(legacy.linear_handle_warp.is_empty(), "missing field defaults to legacy identity");
     }
 
     /// The PRODUCTION text of `rel`, with every `#[cfg(test)]` item removed.

@@ -572,9 +572,10 @@ pub enum MaskWarpSource {
     /// Source B, for bodies whose RAWs carry no knots.
     Lcp,
     /// The sidecar says `crs:LensProfileEnable="0"`: Lightroom drew NO lens
-    /// correction, so the frame the mask was stored in IS the frame it was
-    /// exported in. An identity warp here is the right answer, not a missing
-    /// one — which is why this is its own variant and not [`Self::Absent`].
+    /// correction. RADIAL therefore stays at stored coordinates; LINEAR uses
+    /// its separately retained camera map to transport two handles into the raw
+    /// frame. This is its own variant rather than [`Self::Absent`] because both
+    /// the identity radial answer and the LINEAR transport are known facts.
     DisabledInSidecar,
     /// A profile was found and REFUSED because it is a fisheye model. Applying
     /// the rectilinear polynomial to one returns finite, plausible numbers and
@@ -615,7 +616,7 @@ impl MaskWarpSource {
             MaskWarpSource::CameraMetadata => "solved from the in-camera lens profile",
             MaskWarpSource::Lcp => "solved from an Adobe lens profile (.lcp)",
             MaskWarpSource::DisabledInSidecar => {
-                "the sidecar turned the lens profile off - no warp is the correct answer"
+                "the sidecar turned the lens profile off - radial stays stored; linear transports handles"
             }
             MaskWarpSource::FisheyeRefused => {
                 "the Adobe lens profile is a fisheye model - refused, not applied"
@@ -640,7 +641,8 @@ impl MaskWarpSource {
 /// struct is camera-agnostic on purpose. Engine-only, never written to XMP.
 ///
 /// **R29 Batch-3 adds `mask_warp` + `mask_warp_src`; D2 adds
-/// `mask_warp_center`. Each is a HARD FORWARD BREAK.** This struct denies
+/// `mask_warp_center`; D2 LINEAR adds `linear_handle_warp`. Each is a HARD
+/// FORWARD BREAK.** This struct denies
 /// unknown fields, so an older binary refuses a `recipe.json` carrying a frame
 /// fact it cannot honour. Backwards is fine (all fields default), forwards is
 /// deliberately not: silently dropping a coordinate-frame map would be the
@@ -655,10 +657,12 @@ pub struct LensProfile {
     pub vignette_on: bool,
     pub distortion_on: bool,
     pub ca_on: bool,
-    /// The MASK WARP: `m(r) = r_exported / r_stored`, the radial magnification
-    /// between the frame Lightroom STORED a mask's coordinates in and the frame
-    /// it EXPORTED that mask into. Same knot placement, same interpolator and
-    /// same shape as `distortion` above — one convention, two producers
+    /// The RADIAL MASK WARP: `m(r) = r_exported / r_stored`, the radial
+    /// magnification between the frame Lightroom STORED a radial point in and
+    /// the frame it EXPORTED that point into. LINEAR uses the same solved camera
+    /// map only as a two-handle forward transform when no geometry follows; it
+    /// never applies this map pointwise. Same knot placement, same interpolator
+    /// and same shape as `distortion` above — one convention, two producers
     /// (`render::mask_warp_from_camera_knots` and `lcp::solve_mask_warp`).
     ///
     /// Empty = identity, and `mask_warp_src` says why.
@@ -673,6 +677,18 @@ pub struct LensProfile {
     /// coordinates verbatim — `xmp::lr_to_engine` / `engine_to_lr` stay exact
     /// inverses of each other and this field is not part of that boundary.
     pub mask_warp: Vec<f32>,
+    /// The camera map retained solely for LINEAR handle transport when the
+    /// sidecar disabled lens correction. In that state [`Self::mask_warp`]
+    /// remains empty, preserving RADIAL's measured stored-coordinate identity,
+    /// while render maps a LINEAR component's two handles through this spline
+    /// once and reconstructs one straight gradient in the raw pixel metric.
+    ///
+    /// Empty in every other state: when correction was not explicitly disabled,
+    /// an inactive downstream geometry stage can use `mask_warp` itself for the
+    /// same handle-only operation. Persisted because the camera/LCP solve may
+    /// not be reproducible on the machine that later opens `recipe.json`.
+    /// Never written to XMP.
+    pub linear_handle_warp: Vec<f32>,
     /// Where `mask_warp` came from, or why there is none. See
     /// [`MaskWarpSource`].
     pub mask_warp_src: MaskWarpSource,
@@ -702,6 +718,17 @@ pub struct MaskWarpCenter {
 }
 
 impl LensProfile {
+    /// Camera map available for LINEAR's corrections-off handle transport.
+    /// The dedicated field wins only for the disabled-sidecar state; otherwise
+    /// the ordinary solved map supplies the same forward transform.
+    pub fn linear_handle_warp(&self) -> &[f32] {
+        if self.mask_warp_src == MaskWarpSource::DisabledInSidecar {
+            &self.linear_handle_warp
+        } else {
+            &self.mask_warp
+        }
+    }
+
     /// Vignette stage active? (toggle on AND data present)
     pub fn vignette_active(&self) -> bool {
         self.vignette_on && !self.vignette.is_empty()
@@ -738,6 +765,8 @@ impl LensProfile {
         }
         self.mask_warp.truncate(MASK_WARP_KNOTS);
         self.mask_warp.retain(|k| k.is_finite());
+        self.linear_handle_warp.truncate(MASK_WARP_KNOTS);
+        self.linear_handle_warp.retain(|k| k.is_finite());
         for g in self.vignette.iter_mut() {
             *g = g.clamp(0.25, 4.0);
         }
@@ -753,6 +782,9 @@ impl LensProfile {
         // the narrowest 0.9734 (24 mm centre), so ±30 % is defensive rather
         // than restrictive.
         for f in self.mask_warp.iter_mut() {
+            *f = f.clamp(0.7, 1.3);
+        }
+        for f in self.linear_handle_warp.iter_mut() {
             *f = f.clamp(0.7, 1.3);
         }
         if self
@@ -785,6 +817,16 @@ impl LensProfile {
             // say the honest thing rather than interpolate over a stub.
             self.mask_warp.clear();
             self.mask_warp_src = MaskWarpSource::Unparseable;
+        }
+        // This second map has exactly one honest state: the sidecar disabled
+        // correction, so RADIAL needs identity while LINEAR still needs the
+        // camera map for its two raw-frame handles. In every solved state the
+        // ordinary `mask_warp` is the source; in every refusal there is no map
+        // to retain. Two or more knots are required for a real spline.
+        if self.mask_warp_src != MaskWarpSource::DisabledInSidecar
+            || self.linear_handle_warp.len() < 2
+        {
+            self.linear_handle_warp.clear();
         }
     }
 }

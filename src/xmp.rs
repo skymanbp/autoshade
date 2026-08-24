@@ -166,25 +166,23 @@ fn local_fmt(v: f32) -> String {
 ///
 /// **This constant stays `1.0`, and now for a POSITIVE reason rather than for
 /// want of a model.** This boundary represents the STORED sidecar frame, and
-/// therefore preserves the coordinates Lightroom wrote. D2 later measured
-/// how Lightroom transports Radial/Linear geometry for export: a radial map
-/// about the full-raw centre, using the inverse per-shot Sony distortion
-/// spline divided by minimal fill. That is a render-frame operation, not an
-/// XMP-coordinate conversion. Brush dabs remain pre-correction identity.
+/// therefore preserves the coordinates Lightroom wrote. D2 measured two
+/// distinct render laws. RADIAL uses point transport about the full-raw centre.
+/// LINEAR stores corrected-frame handles: correction ON evaluates its straight
+/// gradient in that frame, while correction OFF maps only Zero/Full forward and
+/// rebuilds one straight raw-frame gradient. Neither is an XMP-coordinate
+/// conversion. Brush dabs remain pre-correction identity.
 ///
-/// The render is the live composition: this engine evaluates masks before its
-/// own geometry stage, so `render::MaskFrame` asks a Radial/Linear at
-/// `m_lr⁻¹(T_engine(p))`. The downstream resample supplies `T_engine` exactly
-/// once and the resulting effect lands at Lightroom's transported coordinate
-/// `m_lr(stored)`. This constant preserves the stored box; the render owns both
-/// frame maps. The 105 mm observation still rejects following the pixel field
-/// blindly: pixels move +87.5 px at r≈3250 while the mask similarity is
-/// 0.99956.
+/// The render owns those frame operations. RADIAL asks each pre-geometry sample
+/// at `m_lr⁻¹(T_engine(p))`. Active LINEAR asks it at `T_engine(p)` only;
+/// inactive LINEAR maps its two handles once through `D_fwd`. This constant
+/// preserves the stored parameters for all three. The 105 mm observation still
+/// rejects moving RADIAL with the pixel field blindly: pixels move +87.5 px at
+/// r≈3250 while the mask similarity is 0.99956.
 ///
-/// That is a deliberate RENDER-BEHAVIOUR change for every imported radial and
-/// linear mask on a photo with an active lens profile, and it rides the
-/// v0.35.0 hard schema break. See the mask-warp block header in `render.rs`
-/// for the frame table, the measured magnitudes and the three regression pins.
+/// These are deliberate RENDER-BEHAVIOUR changes in the unreleased v1.0.0
+/// window. See the mask-warp block header in `render.rs` for the frame table,
+/// measured magnitudes and regression pins.
 /// Nothing about it reaches this constant, which is the point.
 const LR_MASK_FRAME_SCALE: f64 = 1.0;
 
