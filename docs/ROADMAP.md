@@ -192,6 +192,13 @@
 
 ## 当前状态（已完成，勿重做）
 
+- **W6 官网素材就位：域名已购+部署凭据交付（2026-08-23 用户令）**。
+  域名=`skymanbp-autoshop.dev`（.dev 强制 HTTPS，Cloudflare Pages 原
+  生满足）——W6 唯一外部阻塞解除；用户 Cloudflare API 令牌交付在仓库
+  根 `.secret`（**已 gitignore `5748dec`；从未跟踪、历史零命中亲验；
+  绝不打印/入对话/入提交/入任务书/交 Codex，用时进程内读入 env**，
+  处理规则全文在项目记忆 autoshop-site-deploy.md）。W6 排位不变=
+  D2→修复→⑦→W3→W4→W5 之后。
 - **D2 轮 6d 按拍元数据=前提证实、完整假设诚实失败；共性残差指向图
   心（2026-08-23，零素材桌面批；报告
   `~/.claude/plans/r30-materials/d2-wallknots-report.md`）**。**首方
