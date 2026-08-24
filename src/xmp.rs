@@ -165,26 +165,21 @@ fn local_fmt(v: f32) -> String {
 /// applies.
 ///
 /// **This constant stays `1.0`, and now for a POSITIVE reason rather than for
-/// want of a model.** The 2026-08-20 `D` adjudication settled that Lightroom
-/// uses two frames by mask TYPE: brush dabs are stored pre-correction, and
-/// radial / linear shapes — the only geometry this constant touches — are
-/// stored POST-correction (the pixels move 87.5 px on the 105 mm pair while
-/// the mask measures the identity to 0.05 %, 88.7 px apart). A stored radial
-/// box is therefore already in the frame Lightroom drew it in, and carrying
-/// it through this boundary UNSCALED is exactly right. The residual this
-/// comment used to register — "the frame's own lens-profile warp, 0–3.4 %" —
-/// is not a boundary error at all.
+/// want of a model.** This boundary represents the STORED sidecar frame, and
+/// therefore preserves the coordinates Lightroom wrote. D2 later measured
+/// how Lightroom transports Radial/Linear geometry for export: a radial map
+/// about the full-raw centre, using the inverse per-shot Sony distortion
+/// spline divided by minimal fill. That is a render-frame operation, not an
+/// XMP-coordinate conversion. Brush dabs remain pre-correction identity.
 ///
-/// Where it WAS a live question is the RENDER: this engine evaluates every
-/// mask BEFORE its geometry stage, so a stored-post-correction radial was
-/// moved by our own distortion map when Lightroom would not move it — up to
-/// 186 px at 24 mm and 88 px at 105 mm. **Fixed in the same batch by user
-/// ruling of 2026-08-20** (`render::MaskFrame`): a parametric shape's sample
-/// point is mapped through the inverse of the geometry stage before
-/// rasterisation, so after the resample its effect lands back on the
-/// coordinates this boundary carried through unscaled. The two halves now
-/// agree by construction — this constant preserves the stored box, and the
-/// render puts the effect where that box says.
+/// The render is the live composition: this engine evaluates masks before its
+/// own geometry stage, so `render::MaskFrame` asks a Radial/Linear at
+/// `m_lr⁻¹(T_engine(p))`. The downstream resample supplies `T_engine` exactly
+/// once and the resulting effect lands at Lightroom's transported coordinate
+/// `m_lr(stored)`. This constant preserves the stored box; the render owns both
+/// frame maps. The 105 mm observation still rejects following the pixel field
+/// blindly: pixels move +87.5 px at r≈3250 while the mask similarity is
+/// 0.99956.
 ///
 /// That is a deliberate RENDER-BEHAVIOUR change for every imported radial and
 /// linear mask on a photo with an active lens profile, and it rides the
@@ -12494,25 +12489,40 @@ mod tests {
             "the brush group must be in the recipe"
         );
         let mut warped = plain.clone();
-        warped.lens_profile = crate::recipe::LensProfile {
-            mask_warp: crate::lcp::PerspectiveModel {
-                focal_mm: Some(105.0),
-                focus_distance: Some(10000.0),
-                scale: 0.959207,
-                k: [0.961677, 1.182717, -8.218554],
-                focal_x: None,
-                sensor_format_factor: 1.0,
-            }
+        let model = crate::lcp::PerspectiveModel {
+            focal_mm: Some(105.0),
+            focus_distance: Some(10000.0),
+            scale: 0.959207,
+            k: [0.961677, 1.182717, -8.218554],
+            focal_x: None,
+            sensor_format_factor: 1.0,
+        };
+        let legacy_warp = model
+            .mask_warp_knots((9504.0, 6336.0), 16)
+            .expect("the legacy 105mm table solves");
+        let dense_warp = model
             .mask_warp_knots((9504.0, 6336.0), crate::recipe::MASK_WARP_KNOTS)
-            .expect("the 105mm node solves"),
+            .expect("the dense 105mm table solves");
+        let half_diag = 0.5f32 * 9504.0f32.hypot(6336.0);
+        let radius = 3250.0f32;
+        let rho = radius / half_diag;
+        let tabulation_delta =
+            (crate::render::mask_warp_factor(&dense_warp, rho)
+                - crate::render::mask_warp_factor(&legacy_warp, rho))
+            .abs()
+                * radius;
+        eprintln!("105mm mask-warp n=16→64 delta at r=3250: {tabulation_delta:.4}px");
+        assert!(tabulation_delta < 0.35, "105mm survival bound: {tabulation_delta}px");
+        warped.lens_profile = crate::recipe::LensProfile {
+            mask_warp: dense_warp,
             mask_warp_src: crate::recipe::MaskWarpSource::Lcp,
             ..Default::default()
         };
-        // PREMISE: the warp really is a warp — a 16-knot identity would make
+        // PREMISE: the warp really is a warp — an identity table would make
         // the equality below vacuous.
         let w = &warped.lens_profile.mask_warp;
-        assert_eq!(w.len(), 16);
-        assert!(w[0] > 1.04 && w[15] < 1.0, "the 105mm warp is not the identity: {w:?}");
+        assert_eq!(w.len(), crate::recipe::MASK_WARP_KNOTS);
+        assert!(w[0] > 1.04 && w[w.len() - 1] < 1.0, "the 105mm warp is not the identity: {w:?}");
 
         let a = recipe_to_xmp_in_frame(&plain, frame).0;
         let b = recipe_to_xmp_in_frame(&warped, frame).0;

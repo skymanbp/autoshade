@@ -2571,8 +2571,9 @@ fn apply_masks(
 ///
 /// This engine evaluates every mask BEFORE its geometry stage (`apply_masks`
 /// runs inside `apply_develop`, `apply_lens_geometry` after it) and then
-/// resamples the whole frame. So a mask it draws is CARRIED by the distortion
-/// field exactly as the pixels are:
+/// resamples the whole frame. Let `T_engine` map an original pixel to the
+/// corrected output and `m_lr` map Lightroom's stored parametric geometry to
+/// its exported point. The sample adapter therefore has this table:
 ///
 /// * a BRUSH is then already right — Lightroom rasterises it in that same
 ///   pre-correction frame, so the two agree with nothing applied. Warping a
@@ -2581,9 +2582,11 @@ fn apply_masks(
 ///   24 mm and 88 px at 105 mm — because Lightroom does not move it and this
 ///   engine did.
 ///
-/// The fix is to map a parametric shape's SAMPLE POINT through the INVERSE of
-/// the geometry stage before rasterising, so that after the resample the effect
-/// lands back on the stored coordinates. [`MaskUnwarp`] is that map.
+/// The fix maps a parametric shape's SAMPLE POINT first through the inverse
+/// description of where the engine geometry will put it, then through the
+/// inverse Lightroom mask transport. After the downstream resample, the effect
+/// lands at Lightroom's predicted exported coordinate. [`MaskUnwarp`] is that
+/// exact-once composition.
 ///
 /// # Why this is a parameter and not derived from the recipe
 ///
@@ -2644,24 +2647,22 @@ impl<'a> MaskFrame<'a> {
     }
 }
 
-/// ORIGINAL-frame point → the point it will OCCUPY after the geometry stage,
-/// precomputed as a radial factor LUT.
+/// ORIGINAL-frame point → the Lightroom-stored sample point whose effect will
+/// occupy the right Lightroom export point after this engine's geometry stage.
 ///
-/// Exactly [`lens_ungeom_norm`], and built BY calling it — not by a second
-/// implementation of the same inversion. That matters twice over: it is the
-/// precise inverse of what [`apply_lens_geometry`] does (composed profile,
-/// manual amount and the CA fill scale all included, green map, the C2 shared
-/// convention), and it cannot drift away from the resampler because there is
-/// only one solver.
+/// This is the composition `m_lr^-1(T_engine(p))`: first ask where original
+/// pixel `p` will land under the exact downstream engine resample, then pull
+/// that output coordinate back through Lightroom's corrected mask transport.
+/// `T_engine` is built by calling [`lens_ungeom_norm`], not by reimplementing
+/// it. `m_lr^-1` is built by calling [`lr_mask_unwarp_norm`]. Each appears
+/// exactly once; the downstream resample supplies the corresponding one
+/// `T_engine` application after mask rasterisation.
 ///
-/// **The manual `lens_distortion` amount is covered with no residue**, and that
-/// is why this uses `lens_ungeom_norm` rather than the `.lcp`-derived
-/// [`crate::recipe::LensProfile::mask_warp`]. The requirement is that the
-/// effect land at its stored coordinates in OUR export, which is our own
-/// geometry stage's inverse — exactly. `mask_warp` models LIGHTROOM's
-/// correction instead and would leave our-map-vs-their-map residue (6.74 px
-/// rms, 24.97 px max, measured between the two on the 24 mm frame) for no gain.
-/// `mask_warp` keeps its own job: the brush-frame model and its provenance.
+/// **The manual `lens_distortion` amount is covered with no residue** in the
+/// first half. The second half deliberately uses the Lightroom mask map, not
+/// the engine map a second time: D2's paired 24 mm measurements show that
+/// Radial/Linear geometry itself moves by that map. Brush/bitmap/AI never call
+/// this adapter (`is_lr_post_correction_geometry` is the type gate).
 ///
 /// A LUT because `lens_ungeom_norm` costs a 256-step peak scan plus 40
 /// bisection steps per call, and this is a per-pixel question on frames up to
@@ -2672,9 +2673,15 @@ struct MaskUnwarp {
     /// Factor `r_corrected / r_original` at node `i` = radius `i/(LUT_N−1)` of
     /// the half-diagonal.
     lut: Vec<f32>,
+    /// Factor `r_stored / r_exported` for Lightroom's mask transport, sampled
+    /// about `lr_cx,lr_cy`. `None` is Lightroom identity.
+    lr_lut: Option<Vec<f32>>,
     rr: f32,
     w: f32,
     h: f32,
+    lr_cx: f32,
+    lr_cy: f32,
+    lr_rmax: f32,
 }
 
 impl MaskUnwarp {
@@ -2703,6 +2710,38 @@ impl MaskUnwarp {
         if lut.len() > 1 {
             lut[0] = lut[1];
         }
+        let [lr_cx, lr_cy] = lr_mask_center_px(dims, profile);
+        let lr_rmax = [
+            lr_cx.hypot(lr_cy),
+            (w - lr_cx).hypot(lr_cy),
+            lr_cx.hypot(h - lr_cy),
+            (w - lr_cx).hypot(h - lr_cy),
+        ]
+        .into_iter()
+        .fold(1.0f32, f32::max)
+            / rr;
+        let lr_lut = if profile.mask_warp.is_empty() {
+            None
+        } else {
+            let mut lr_lut: Vec<f32> = (0..LUT_N)
+                .map(|i| {
+                    let rho = lr_rmax * i as f32 / (LUT_N - 1) as f32;
+                    let dx = rho * rr;
+                    if dx <= 1e-6 {
+                        return f32::NAN;
+                    }
+                    let (sx, _) = lr_mask_unwarp_norm(
+                        (lr_cx + dx) / w,
+                        lr_cy / h,
+                        dims,
+                        profile,
+                    );
+                    (sx * w - lr_cx) / dx
+                })
+                .collect();
+            lr_lut[0] = lr_lut[1];
+            Some(lr_lut)
+        };
         // Identity map = nothing to do, and saying so here is what keeps a
         // distortion-free profile bit-identical rather than merely close.
         //
@@ -2717,10 +2756,14 @@ impl MaskUnwarp {
         // MUTATION THIS KILLS: dropping this guard makes every coordinate on a
         // distortion-free profile take a float round trip through `at`, and
         // `with_the_geometry_stage_inactive_the_mask_chain_is_untouched` goes red.
-        if lut.iter().all(|f| (f - 1.0).abs() * rr < 0.01) {
+        let engine_identity = lut.iter().all(|f| (f - 1.0).abs() * rr < 0.01);
+        let lr_identity = lr_lut
+            .as_ref()
+            .is_none_or(|v| v.iter().all(|f| (f - 1.0).abs() * rr < 0.01));
+        if engine_identity && lr_identity {
             return None;
         }
-        Some(MaskUnwarp { lut, rr, w, h })
+        Some(MaskUnwarp { lut, lr_lut, rr, w, h, lr_cx, lr_cy, lr_rmax })
     }
 
     /// The point `(nx, ny)` will occupy after the geometry stage.
@@ -2731,7 +2774,18 @@ impl MaskUnwarp {
         let i = (t.floor() as usize).min(LUT_N - 2);
         let f = t - i as f32;
         let k = self.lut[i] * (1.0 - f) + self.lut[i + 1] * f;
-        ((dx * k) / self.w + 0.5, (dy * k) / self.h + 0.5)
+        let (nx, ny) = ((dx * k) / self.w + 0.5, (dy * k) / self.h + 0.5);
+        let Some(lr_lut) = &self.lr_lut else { return (nx, ny) };
+        let (dx, dy) = (nx * self.w - self.lr_cx, ny * self.h - self.lr_cy);
+        let rho = ((dx * dx + dy * dy).sqrt() / self.rr).clamp(0.0, self.lr_rmax);
+        let t = rho / self.lr_rmax * (LUT_N - 1) as f32;
+        let i = (t.floor() as usize).min(LUT_N - 2);
+        let f = t - i as f32;
+        let k = lr_lut[i] * (1.0 - f) + lr_lut[i + 1] * f;
+        (
+            (dx * k + self.lr_cx) / self.w,
+            (dy * k + self.lr_cy) / self.h,
+        )
     }
 }
 
@@ -7580,7 +7634,7 @@ pub fn apply_lens_distortion(img: &DynamicImage, amount: f32) -> DynamicImage {
 // the frame is only softened by a single bilinear step.
 
 /// Linear interpolation over profile knots at (i+0.5)/(n−1), clamped outside.
-fn profile_knot_interp(knots: &[f32], r: f32) -> f32 {
+pub(crate) fn profile_knot_interp(knots: &[f32], r: f32) -> f32 {
     let n = knots.len();
     if n == 0 {
         return 1.0;
@@ -7959,11 +8013,11 @@ pub fn lens_ungeom_norm(
 // order outright). A mask this engine draws is therefore carried by the
 // distortion field exactly as the pixels are, without anyone applying `m`:
 //
-//   | mask kind        | Lightroom stores in | this engine evaluates in | transform |
-//   |------------------|---------------------|--------------------------|-----------|
-//   | brush            | pre-correction      | pre-correction           | IDENTITY  |
-//   | radial / linear  | post-correction     | pre-correction           | m⁻¹       |
-//   | bitmap / AI      | engine-native       | pre-correction           | IDENTITY  |
+//   | mask kind        | Lightroom geometry | engine sample transform          |
+//   |------------------|--------------------|----------------------------------|
+//   | brush            | pre-correction     | IDENTITY                         |
+//   | radial / linear  | transported by m_lr| m_lr⁻¹ composed with T_engine   |
+//   | bitmap / AI      | engine-native      | IDENTITY                         |
 //
 // The brush row is why nothing here is wired into `mask_weight` for a dab:
 // applying `m` to a dab centre AND letting the geometry stage move it would
@@ -7972,17 +8026,11 @@ pub fn lens_ungeom_norm(
 //
 // The radial row WAS a live mismatch — every imported radial on a
 // profile-corrected photo rendered up to 186 px (24 mm) / 88 px (105 mm) away
-// from where Lightroom puts it — and it is FIXED, by user ruling of
-// 2026-08-20, in this same batch. The fix is not here: it is `MaskFrame` +
-// `MaskUnwarp` beside `mask_weight`, which map a parametric shape's sample
-// point through the inverse of the geometry stage that is about to run, so the
-// effect lands back on the stored coordinates. That map is `lens_ungeom_norm`,
-// this engine's own resample inverse, NOT the knots below — see `MaskUnwarp`
-// for why the exact inverse beats a model of Adobe's correction here.
-//
-// So the two fields below have one job each and they do not overlap:
-// `LensProfile::mask_warp` models LIGHTROOM's correction, for the brush frame
-// and its provenance; `MaskUnwarp` models OURS, for the parametric wiring.
+// from where Lightroom puts it. `MaskFrame` + `MaskUnwarp` now compose the two
+// independent maps exactly once: `T_engine` cancels the downstream engine
+// resample at rasterisation time, while `m_lr⁻¹` asks the stored Lightroom
+// geometry at the exported point its own model predicts. Omitting either map
+// leaves a whole correction field; repeating either double-counts it.
 // The rows are pinned by `the_engine_evaluates_masks_before_the_geometry_stage`
 // (the ordering), `a_parametric_mask_lands_on_its_stored_coordinates_under_lens_geometry`
 // (the fix, end to end) and `with_the_geometry_stage_inactive_the_mask_chain_is_untouched`
@@ -8098,19 +8146,19 @@ pub fn lr_mask_warp_norm(
     }
     let (w, h) = dims;
     let rr = (0.5 * (w * w + h * h).sqrt()).max(1e-6);
-    let (dx, dy) = ((nx - 0.5) * w, (ny - 0.5) * h);
+    let [cx, cy] = lr_mask_center_px(dims, profile);
+    let (dx, dy) = (nx * w - cx, ny * h - cy);
     let f = mask_warp_factor(&profile.mask_warp, (dx * dx + dy * dy).sqrt() / rr);
-    ((dx * f) / w.max(1e-6) + 0.5, (dy * f) / h.max(1e-6) + 0.5)
+    ((dx * f + cx) / w.max(1e-6), (dy * f + cy) / h.max(1e-6))
 }
 
 /// EXPORTED point → the point Lightroom STORED it as: the numeric inverse of
 /// [`lr_mask_warp_norm`], by the same rising-prefix bisection
 /// [`lens_ungeom_norm`] uses.
 ///
-/// This is the direction a POST-correction geometry (a radial, a linear) would
-/// need to be brought into this engine's pre-geometry evaluation frame — see
-/// the frame table in the block header, and note that nothing calls it for that
-/// purpose yet.
+/// This is the Lightroom half of the sample composition for a radial or
+/// linear geometry. [`MaskUnwarp`] calls it after the engine-map half; brush,
+/// bitmap and AI geometry never take that arm.
 pub fn lr_mask_unwarp_norm(
     nx: f32,
     ny: f32,
@@ -8122,7 +8170,8 @@ pub fn lr_mask_unwarp_norm(
     }
     let (w, h) = dims;
     let rr = (0.5 * (w * w + h * h).sqrt()).max(1e-6);
-    let (dx, dy) = ((nx - 0.5) * w, (ny - 0.5) * h);
+    let [cx, cy] = lr_mask_center_px(dims, profile);
+    let (dx, dy) = (nx * w - cx, ny * h - cy);
     let rho = (dx * dx + dy * dy).sqrt() / rr;
     if rho < 1e-6 {
         return (nx, ny);
@@ -8141,7 +8190,7 @@ pub fn lr_mask_unwarp_norm(
     }
     if fwd(hi) <= rho {
         let f = hi / rho;
-        return ((dx * f) / w.max(1e-6) + 0.5, (dy * f) / h.max(1e-6) + 0.5);
+        return ((dx * f + cx) / w.max(1e-6), (dy * f + cy) / h.max(1e-6));
     }
     let mut lo = 0.0f32;
     for _ in 0..40 {
@@ -8153,7 +8202,19 @@ pub fn lr_mask_unwarp_norm(
         }
     }
     let f = 0.5 * (lo + hi) / rho;
-    ((dx * f) / w.max(1e-6) + 0.5, (dy * f) / h.max(1e-6) + 0.5)
+    ((dx * f + cx) / w.max(1e-6), (dy * f + cy) / h.max(1e-6))
+}
+
+/// Lightroom's full-raw centre in the dimensions currently being rendered.
+/// Legacy recipes carry no frame fact and retain stored-frame-centre behaviour.
+fn lr_mask_center_px(
+    dims: (f32, f32),
+    profile: &crate::recipe::LensProfile,
+) -> [f32; 2] {
+    let (w, h) = dims;
+    profile.mask_warp_center.map_or([w * 0.5, h * 0.5], |c| {
+        [c.stored_px[0] * w / c.stored_dims[0], c.stored_px[1] * h / c.stored_dims[1]]
+    })
 }
 
 /// View-frame normalised point (the straightened, auto-cropped frame the user
@@ -10759,37 +10820,60 @@ mod tests {
     /// became a copy of source B (or of the identity) would pass every other
     /// test in this file.
     #[test]
+    #[allow(clippy::excessive_precision)] // exact decoded 0x7037 fixture decimals
     fn the_two_mask_warp_sources_agree_to_the_measured_tolerance() {
         // `exp_C_ref.ARW`'s OWN `0x7037` array, converted by `lensmeta`'s
         // `v·2⁻¹⁴ + 1` and dumped on this machine — the real A7RIV @ 24 mm
         // barrel profile, not a curve shaped like one.
-        let camera: Vec<f32> = vec![
-            1.000793, 0.999878, 0.998108, 0.995972, 0.992737, 0.989014, 0.984619, 0.980042,
-            0.974915, 0.969727, 0.964355, 0.959229, 0.954163, 0.949646, 0.945496, 0.942078,
+        let camera_native: Vec<f32> = vec![
+            1.0007934570,
+            0.9998779297,
+            0.9981079102,
+            0.9959716797,
+            0.9927368164,
+            0.9890136719,
+            0.9846191406,
+            0.9800415039,
+            0.9749145508,
+            0.9696044922,
+            0.9641113281,
+            0.9589843750,
+            0.9538574219,
+            0.9492187500,
+            0.9448242188,
+            0.9412231445,
         ];
+        let camera = crate::lensmeta::resample_sony_distortion(
+            &camera_native,
+            crate::lensmeta::SONY_DISTORTION_CANONICAL_KNOTS,
+        );
         // The engine's own fill scale on that array, against the value the
         // recon computed independently: `profile_fill_scale` is the s_p this
         // whole inversion divides by, so a drift there is a silent drift in
         // every mask-warp knot below.
         assert!(
-            (profile_fill_scale(&camera, MASK_WARP_DIMS) - 0.975835).abs() < 1e-5,
-            "fill scale {} vs the recon's 0.975835",
+            (profile_fill_scale(&camera, MASK_WARP_DIMS) - 0.9755544).abs() < 1e-5,
+            "fill scale {} vs the zero-parameter model's 0.9755544",
             profile_fill_scale(&camera, MASK_WARP_DIMS)
         );
-        let a = mask_warp_from_camera_knots(&camera, MASK_WARP_DIMS, 16);
+        let a = mask_warp_from_camera_knots(
+            &camera,
+            MASK_WARP_DIMS,
+            crate::recipe::MASK_WARP_KNOTS,
+        );
         let b = lcp_24mm_warp();
-        assert_eq!(a.len(), 16, "source A must fill the shared knot count");
-        assert_eq!(b.len(), 16);
+        assert_eq!(a.len(), crate::recipe::MASK_WARP_KNOTS);
+        assert_eq!(b.len(), crate::recipe::MASK_WARP_KNOTS);
         let half_diag = 0.5 * (MASK_WARP_DIMS.0.hypot(MASK_WARP_DIMS.1));
         let mut worst = 0.0f32;
-        for i in 0..16 {
-            let r = (i as f32 + 0.5) / 15.0 * half_diag;
+        for i in 0..crate::recipe::MASK_WARP_KNOTS {
+            let r = (i as f32 + 0.5) / (crate::recipe::MASK_WARP_KNOTS - 1) as f32 * half_diag;
             worst = worst.max(((a[i] - b[i]) * r).abs());
         }
         assert!(worst < 40.0, "the two sources diverged by {worst:.1} px");
         // PREMISE: both really are a warp, not the identity dressed up as one.
         for (name, k) in [("camera", &a), ("lcp", &b)] {
-            let corner = (k[15] - 1.0) * half_diag;
+            let corner = (k[k.len() - 1] - 1.0) * half_diag;
             assert!(corner.abs() > 100.0, "{name} corner displacement {corner:.1} px is not a warp");
             assert!(k[0] < 0.995, "{name} centre magnification {} is not a warp", k[0]);
         }
@@ -10819,6 +10903,186 @@ mod tests {
         assert!(moved > 50.0, "the map moved at most {moved:.1} px — it is not a warp");
         // The frame CENTRE is a fixed point of a radial map, exactly.
         assert_eq!(lr_mask_warp_norm(0.5, 0.5, MASK_WARP_DIMS, &profile), (0.5, 0.5));
+    }
+
+    fn d2_camera_profile(native: &[f32]) -> crate::recipe::LensProfile {
+        let distortion = crate::lensmeta::resample_sony_distortion(
+            native,
+            crate::lensmeta::SONY_DISTORTION_CANONICAL_KNOTS,
+        );
+        crate::recipe::LensProfile {
+            mask_warp: mask_warp_from_camera_knots(
+                &distortion,
+                MASK_WARP_DIMS,
+                crate::recipe::MASK_WARP_KNOTS,
+            ),
+            mask_warp_src: crate::recipe::MaskWarpSource::CameraMetadata,
+            mask_warp_center: Some(crate::recipe::MaskWarpCenter {
+                stored_px: [4768.0, 3168.0],
+                stored_dims: [9504.0, 6336.0],
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    #[allow(clippy::excessive_precision)] // exact D2 knot/vector fixture decimals
+    fn d2_zero_parameter_camera_model_closes_all_41_measured_vectors() {
+        const WALL_NATIVE: [f32; 16] = [
+            1.0007934570,
+            0.9998779297,
+            0.9981079102,
+            0.9959716797,
+            0.9927368164,
+            0.9890136719,
+            0.9846191406,
+            0.9800415039,
+            0.9749145508,
+            0.9696044922,
+            0.9641113281,
+            0.9589843750,
+            0.9538574219,
+            0.9492187500,
+            0.9448242188,
+            0.9412231445,
+        ];
+        const DSC_NATIVE: [f32; 16] = [
+            1.0007934570,
+            0.9998779297,
+            0.9982299805,
+            0.9961547852,
+            0.9932250977,
+            0.9898071289,
+            0.9856567383,
+            0.9813842773,
+            0.9766235352,
+            0.9719238281,
+            0.9668579102,
+            0.9622802734,
+            0.9576416016,
+            0.9538574219,
+            0.9503173828,
+            0.9478149414,
+        ];
+        type Row = (&'static str, (f32, f32), (f32, f32));
+        const WALL: [Row; 20] = [
+            ("G1", (1710.72, 1267.20), (-20.897, -12.931)),
+            ("G2", (4752.00, 1267.20), (-0.011, 31.992)),
+            ("G3", (7793.28, 1267.20), (19.025, -12.135)),
+            ("G4", (1710.72, 3168.00), (4.924, -0.025)),
+            ("G5", (4752.00, 3168.00), (0.244, -0.019)),
+            ("G6", (7793.28, 3168.00), (-6.669, 0.026)),
+            ("G7", (1710.72, 5068.80), (-20.836, 12.932)),
+            ("G8", (4752.00, 5068.80), (0.097, -31.970)),
+            ("G9", (7793.28, 5068.80), (19.105, 12.141)),
+            ("R1", (2851.20, 2027.52), (24.874, 14.890)),
+            ("R2", (6652.80, 3991.68), (-28.390, -12.427)),
+            ("centre_S", (4752.00, 3168.00), (0.535, 0.035)),
+            ("centre_M", (4752.00, 3168.00), (0.393, 0.009)),
+            ("centre_L", (4752.00, 3168.00), (0.303, 0.010)),
+            ("edge_S", (1710.72, 3168.00), (4.962, -0.040)),
+            ("edge_M", (1710.72, 3168.00), (5.085, -0.083)),
+            ("edge_L", (1710.72, 3168.00), (4.990, 0.037)),
+            ("corner_S", (1710.72, 1267.20), (-20.927, -12.969)),
+            ("corner_M", (1710.72, 1267.20), (-20.710, -12.895)),
+            ("corner_L", (1710.72, 1267.20), (-20.880, -12.903)),
+        ];
+        const DSC: [Row; 21] = [
+            ("G1", (1710.72, 1267.20), (-18.900, -11.770)),
+            ("G2", (4752.00, 1267.20), (0.140, 29.250)),
+            ("G3", (7793.28, 1267.20), (17.480, -11.020)),
+            ("G4", (1710.72, 3168.00), (4.610, -0.010)),
+            ("G5", (4752.00, 3168.00), (0.300, -0.070)),
+            ("G6", (7793.28, 3168.00), (-5.920, -0.020)),
+            ("G7", (1710.72, 5068.80), (-18.360, 11.960)),
+            ("G8", (4752.00, 5068.80), (0.230, -29.280)),
+            ("G9", (7793.28, 5068.80), (17.570, 11.000)),
+            ("original", (2283.03, 951.41), (-5.820, -5.100)),
+            ("R1", (2851.20, 2027.52), (22.950, 13.600)),
+            ("R2", (6652.80, 3991.68), (-26.060, -11.330)),
+            ("centre_S", (4752.00, 3168.00), (0.620, -0.080)),
+            ("centre_M", (4752.00, 3168.00), (0.420, -0.030)),
+            ("centre_L", (4752.00, 3168.00), (0.400, 0.040)),
+            ("edge_S", (1710.72, 3168.00), (4.760, -0.050)),
+            ("edge_M", (1710.72, 3168.00), (4.380, -0.030)),
+            ("edge_L", (1710.72, 3168.00), (4.550, -0.070)),
+            ("corner_S", (1710.72, 1267.20), (-18.790, -11.690)),
+            ("corner_M", (1710.72, 1267.20), (-18.740, -11.730)),
+            ("corner_L", (1710.72, 1267.20), (-18.930, -11.730)),
+        ];
+
+        let check = |label: &str, native: &[f32], rows: &[Row], expected_rms: f32| {
+            let profile = d2_camera_profile(native);
+            let mut sum_sq = 0.0f32;
+            let mut worst = 0.0f32;
+            for &(cell, (x, y), (mx, my)) in rows {
+                let (wx, wy) =
+                    lr_mask_warp_norm(x / MASK_WARP_DIMS.0, y / MASK_WARP_DIMS.1, MASK_WARP_DIMS, &profile);
+                let (px, py) = (wx * MASK_WARP_DIMS.0 - x, wy * MASK_WARP_DIMS.1 - y);
+                let err = (px - mx).hypot(py - my);
+                sum_sq += err * err;
+                worst = worst.max(err);
+                assert!(err <= 1.0, "{label}/{cell}: predicted ({px},{py}), measured ({mx},{my}), error {err}");
+            }
+            let rms = (sum_sq / rows.len() as f32).sqrt();
+            assert!((rms - expected_rms).abs() < 0.02, "{label}: rms {rms}, max {worst}");
+        };
+        check("wall", &WALL_NATIVE, &WALL, 0.568);
+        check("DSC08276", &DSC_NATIVE, &DSC, 0.243);
+    }
+
+    #[test]
+    fn mask_warp_uses_the_full_raw_centre_in_stored_coordinates() {
+        let shifted = crate::recipe::LensProfile {
+            mask_warp: vec![1.05; crate::recipe::MASK_WARP_KNOTS],
+            mask_warp_src: crate::recipe::MaskWarpSource::CameraMetadata,
+            mask_warp_center: Some(crate::recipe::MaskWarpCenter {
+                stored_px: [4768.0, 3168.0],
+                stored_dims: [9504.0, 6336.0],
+            }),
+            ..Default::default()
+        };
+        let fixed = (4768.0 / MASK_WARP_DIMS.0, 3168.0 / MASK_WARP_DIMS.1);
+        assert_eq!(lr_mask_warp_norm(fixed.0, fixed.1, MASK_WARP_DIMS, &shifted), fixed);
+        let stored_centre = lr_mask_warp_norm(0.5, 0.5, MASK_WARP_DIMS, &shifted);
+        assert!(stored_centre.0 < 0.5, "shifted centre was ignored: {stored_centre:?}");
+
+        // The same stored-pixel centre scales with a working-resolution
+        // preview instead of remaining thousands of pixels off-frame.
+        let preview_dims = (950.4, 633.6);
+        let preview_fixed = (476.8 / preview_dims.0, 316.8 / preview_dims.1);
+        assert_eq!(
+            lr_mask_warp_norm(preview_fixed.0, preview_fixed.1, preview_dims, &shifted),
+            preview_fixed
+        );
+
+        let legacy = crate::recipe::LensProfile { mask_warp_center: None, ..shifted };
+        assert_eq!(lr_mask_warp_norm(0.5, 0.5, MASK_WARP_DIMS, &legacy), (0.5, 0.5));
+    }
+
+    #[test]
+    fn mask_frame_composes_the_engine_map_with_the_lr_inverse_exactly_once() {
+        let profile = crate::recipe::LensProfile {
+            distortion: (0..16).map(|i| 1.0 - 0.12 * (i as f32 / 15.0).powi(2)).collect(),
+            distortion_on: true,
+            mask_warp: (0..crate::recipe::MASK_WARP_KNOTS)
+                .map(|i| 0.98 + 0.05 * i as f32 / (crate::recipe::MASK_WARP_KNOTS - 1) as f32)
+                .collect(),
+            mask_warp_src: crate::recipe::MaskWarpSource::CameraMetadata,
+            mask_warp_center: Some(crate::recipe::MaskWarpCenter {
+                stored_px: [4768.0, 3168.0],
+                stored_dims: [9504.0, 6336.0],
+            }),
+            ..Default::default()
+        };
+        let dims = MASK_WARP_DIMS;
+        let u = MaskUnwarp::new(&profile, 0.0, dims).expect("both maps are active");
+        for (nx, ny) in [(0.15, 0.2), (0.5, 0.5), (0.82, 0.74)] {
+            let engine = lens_ungeom_norm(nx, ny, dims, &profile, 0.0);
+            let expected = lr_mask_unwarp_norm(engine.0, engine.1, dims, &profile);
+            let got = u.at(nx, ny);
+            assert!((got.0 - expected.0).abs() < 2e-5 && (got.1 - expected.1).abs() < 2e-5);
+        }
     }
 
     /// ACCEPTANCE ⑤. With no solved warp the map is the IDENTITY — bit-for-bit,
@@ -11007,6 +11271,64 @@ mod tests {
                 err * 5.0 < drift,
                 "cx={cx}: the fix must be an order better: {err:.2} vs {drift:.2}"
             );
+        }
+    }
+
+    /// D2 continuation of the wired-centroid test above: when the Lightroom
+    /// transport is non-identity, the same exact-once engine cancellation must
+    /// land on `m_lr(stored)`, not on the stored point and not on a second copy
+    /// of either lens field.
+    #[test]
+    #[allow(clippy::excessive_precision)] // exact decoded 0x7037 fixture decimals
+    fn d2_wired_camera_mask_lands_at_the_lr_transported_coordinate() {
+        const WALL_NATIVE: [f32; 16] = [
+            1.0007934570,
+            0.9998779297,
+            0.9981079102,
+            0.9959716797,
+            0.9927368164,
+            0.9890136719,
+            0.9846191406,
+            0.9800415039,
+            0.9749145508,
+            0.9696044922,
+            0.9641113281,
+            0.9589843750,
+            0.9538574219,
+            0.9492187500,
+            0.9448242188,
+            0.9412231445,
+        ];
+        let (w, h) = (1920u32, 1280u32);
+        let base = DynamicImage::ImageRgb8(RgbImage::from_pixel(w, h, image::Rgb([128, 128, 128])));
+        let mut profile = d2_camera_profile(&WALL_NATIVE);
+        // The render-side adjudication retained this established 16-knot
+        // calibration; only the mask solve uses the corrected dense spline.
+        profile.distortion = WALL_NATIVE.to_vec();
+        profile.distortion_on = true;
+
+        for cx in [0.10f32, 0.32f32] {
+            let cy = 0.5f32;
+            let recipe = EditRecipe {
+                masks: vec![probe_radial(cx, cy, 0.025)],
+                lens_profile: profile.clone(),
+                ..Default::default()
+            };
+            let target = lr_mask_warp_norm(cx, cy, (w as f32, h as f32), &profile);
+            let want = (target.0 as f64 * w as f64, target.1 as f64 * h as f64);
+            let got = effect_centroid(&apply_lens_geometry(
+                &develop_preview(&base, &recipe),
+                &profile,
+                0.0,
+            ));
+            let err = (got.0 - want.0).hypot(got.1 - want.1);
+            let transport = (want.0 - cx as f64 * w as f64)
+                .hypot(want.1 - cy as f64 * h as f64);
+            eprintln!(
+                "D2 wired centroid cx={cx:.2}: error={err:.3}px, Lightroom transport={transport:.3}px"
+            );
+            assert!(transport > 1.0, "premise: D2 transport is only {transport:.3}px");
+            assert!(err < 1.0, "cx={cx}: centroid {got:?}, target {want:?}, error {err:.3}px");
         }
     }
 

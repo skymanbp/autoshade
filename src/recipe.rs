@@ -539,10 +539,10 @@ impl Default for EditRecipe {
 
 /// How many knots [`LensProfile::mask_warp`] carries when it is solved.
 ///
-/// Sixteen, because that is what every real Sony `0x7037` array holds and the
-/// two sources must land on ONE placement or the shared interpolator would be
-/// reading two conventions (see the field's own doc).
-pub const MASK_WARP_KNOTS: usize = 16;
+/// The map used to copy the source profile's sixteen samples. D2 measured up
+/// to 0.3 px of interpolation error from that output table, so both producers
+/// now publish the same dense canonical table.
+pub const MASK_WARP_KNOTS: usize = 64;
 
 /// Where [`LensProfile::mask_warp`] came from — or, when it is empty, WHY.
 ///
@@ -627,19 +627,24 @@ impl MaskWarpSource {
 }
 
 /// In-camera lens profile corrections in ENGINE space: per-knot factors over
-/// the normalised radius (0 = centre, 1 = corner; knot `i` sits at
-/// `(i + 0.5) / (n − 1)`, the placement RawTherapee's metadata path uses).
-/// `vignette` holds linear-light GAINS; `distortion` / `ca_r` / `ca_b` hold
-/// radius scale factors (CA multiplies the distortion map per channel).
+/// normalised radius (0 = centre, 1 = corner). The engine's established
+/// interpolator places knot `i` at `(i + 0.5) / (n − 1)`. D2 established that
+/// Sony's private distortion tag uses `(i+1)/16`; `lensmeta` converts that
+/// native domain onto a dense canonical spline for the Lightroom mask solve.
+/// Its ordinary render field deliberately remains on the established
+/// calibration after the image-registration adjudication gate rejected a
+/// render-path change. `vignette` holds linear-light GAINS;
+/// `distortion` / `ca_r` / `ca_b` hold radius scale factors (CA multiplies the
+/// distortion map per channel).
 /// Conversion from the camera's raw integers lives in `lensmeta` — this
 /// struct is camera-agnostic on purpose. Engine-only, never written to XMP.
 ///
-/// **R29 Batch-3 adds `mask_warp` + `mask_warp_src`, and that is a HARD
-/// FORWARD BREAK.** This struct denies unknown fields, so a v0.34 binary
-/// refuses any `recipe.json` a v0.35 binary wrote whose lens profile is
-/// present. Backwards is fine (both fields default), forwards is not, and it
-/// is deliberate: silently dropping a coordinate-frame map would be the one
-/// failure mode a mask frame cannot survive.
+/// **R29 Batch-3 adds `mask_warp` + `mask_warp_src`; D2 adds
+/// `mask_warp_center`. Each is a HARD FORWARD BREAK.** This struct denies
+/// unknown fields, so an older binary refuses a `recipe.json` carrying a frame
+/// fact it cannot honour. Backwards is fine (all fields default), forwards is
+/// deliberately not: silently dropping a coordinate-frame map would be the
+/// one failure mode a mask frame cannot survive.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 #[serde(default, deny_unknown_fields)]
 pub struct LensProfile {
@@ -660,8 +665,9 @@ pub struct LensProfile {
     ///
     /// **This is a LIGHTROOM-frame quantity, not a description of this
     /// engine's own render.** What each consumer must do with it depends on
-    /// where that consumer evaluates masks; `render::lr_mask_warp_norm` is the
-    /// one place it is applied and its doc carries the frame table.
+    /// where that consumer evaluates masks; `render::lr_mask_warp_norm` and
+    /// its inverse are the two primitive directions, and their block carries
+    /// the frame table.
     ///
     /// NEVER written to XMP. The recipe keeps the sidecar's stored, plain-frame
     /// coordinates verbatim — `xmp::lr_to_engine` / `engine_to_lr` stay exact
@@ -670,6 +676,29 @@ pub struct LensProfile {
     /// Where `mask_warp` came from, or why there is none. See
     /// [`MaskWarpSource`].
     pub mask_warp_src: MaskWarpSource,
+    /// Lightroom's radial-map centre in stored-frame pixels, paired with the
+    /// stored-frame dimensions those pixels use. Camera-metadata profiles
+    /// populate `raw_full_dims/2 - DefaultCropOrigin`; `None` is the legacy
+    /// contract and means the current render's stored-frame centre.
+    ///
+    /// The dimensions are part of this ONE frame fact because previews are
+    /// developed after a working-resolution downscale. They let render scale
+    /// the pixel centre without guessing the source size.
+    ///
+    /// Persisted, never written to XMP. Adding it is a deliberate v1.0.0
+    /// forward schema break: an older `deny_unknown_fields` reader refuses a
+    /// recipe rather than silently discarding a coordinate-frame fact.
+    pub mask_warp_center: Option<MaskWarpCenter>,
+}
+
+/// One stored-coordinate frame fact for Lightroom's radial mask transport.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MaskWarpCenter {
+    /// Full-raw-frame centre expressed in stored/default-crop pixels.
+    pub stored_px: [f32; 2],
+    /// Dimensions of that stored/default-crop pixel frame.
+    pub stored_dims: [f32; 2],
 }
 
 impl LensProfile {
@@ -701,18 +730,14 @@ impl LensProfile {
     /// gains and radius factors held to physically plausible bands (the real
     /// Sony data sits well inside: gains ≲ 1.5×, distortion within ±6%).
     pub fn clamp(&mut self) {
-        for v in [
-            &mut self.vignette,
-            &mut self.distortion,
-            &mut self.ca_r,
-            &mut self.ca_b,
-            &mut self.mask_warp,
-        ] {
+        for v in [&mut self.vignette, &mut self.distortion, &mut self.ca_r, &mut self.ca_b] {
             v.truncate(32);
             // A non-finite knot survives f32::clamp and poisons the whole
             // correction spline — drop it (the base_curve knot rule).
             v.retain(|k| k.is_finite());
         }
+        self.mask_warp.truncate(MASK_WARP_KNOTS);
+        self.mask_warp.retain(|k| k.is_finite());
         for g in self.vignette.iter_mut() {
             *g = g.clamp(0.25, 4.0);
         }
@@ -730,9 +755,26 @@ impl LensProfile {
         for f in self.mask_warp.iter_mut() {
             *f = f.clamp(0.7, 1.3);
         }
+        if self
+            .mask_warp_center
+            .is_some_and(|c| {
+                let [x, y] = c.stored_px;
+                let [w, h] = c.stored_dims;
+                !x.is_finite()
+                    || !y.is_finite()
+                    || !w.is_finite()
+                    || !h.is_finite()
+                    || x < 0.0
+                    || y < 0.0
+                    || w <= 0.0
+                    || h <= 0.0
+            })
+        {
+            self.mask_warp_center = None;
+        }
         // The tag and the data must agree, and the tag is the one that carries
         // a REASON — so it wins. A hand-edited file claiming `fisheye_refused`
-        // beside sixteen knots is claiming two contradictory things, and
+        // beside warp knots is claiming two contradictory things, and
         // honouring the knots would render a warp whose provenance line says it
         // was refused. Enforced, not trusted: `clamp` is what every reader runs.
         if !self.mask_warp_src.is_solved() {
@@ -2999,9 +3041,10 @@ mod tests {
         let legacy: EditRecipe = serde_json::from_str(r#"{"exposure_ev":0.5}"#).unwrap();
         assert!(legacy.lens_profile.mask_warp.is_empty());
         assert_eq!(legacy.lens_profile.mask_warp_src, MaskWarpSource::Absent);
+        assert_eq!(legacy.lens_profile.mask_warp_center, None);
 
         // (c) FORWARDS it is a HARD BREAK, and that is the point: `LensProfile`
-        // denies unknown fields, so a build without these two keys refuses a
+        // denies unknown fields, so a build without these frame keys refuses a
         // recipe that has them rather than dropping a coordinate frame on the
         // floor. Asserted through the same door a v0.34 binary would use.
         #[derive(serde::Deserialize)]
@@ -3028,6 +3071,10 @@ mod tests {
             distortion_on: true,
             mask_warp: vec![0.98, 1.02],
             mask_warp_src: MaskWarpSource::CameraMetadata,
+            mask_warp_center: Some(MaskWarpCenter {
+                stored_px: [4768.0, 3168.0],
+                stored_dims: [9504.0, 6336.0],
+            }),
             ..Default::default()
         })
         .unwrap();
@@ -3040,6 +3087,13 @@ mod tests {
         let back: LensProfile = serde_json::from_str(&current).unwrap();
         assert_eq!(back.mask_warp, vec![0.98, 1.02]);
         assert_eq!(back.mask_warp_src, MaskWarpSource::CameraMetadata);
+        assert_eq!(
+            back.mask_warp_center,
+            Some(MaskWarpCenter {
+                stored_px: [4768.0, 3168.0],
+                stored_dims: [9504.0, 6336.0],
+            })
+        );
 
         // (d) `clamp` holds the band AND the tag/data invariant. A hand-edited
         // file cannot claim a refusal and carry knots, and cannot smuggle a

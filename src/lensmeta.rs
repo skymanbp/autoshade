@@ -16,11 +16,16 @@
 //! * CA radius factor  `v·2⁻²¹ + 1` (16 red knots then 16 blue; multiplies
 //!   the distortion/green map per channel)
 //!
-//! Knot `i` sits at normalised radius `(i + 0.5)/(n − 1)` (0 = centre,
-//! 1 = corner half-diagonal) — RawTherapee's placement; the engine
-//! interpolates linearly and clamps outside. Each array's FIRST element is
-//! the value count; a malformed count degrades that component to "absent",
-//! never an error (a photo without correction data is a normal photo).
+//! Vignette and CA retain the engine's established canonical knot convention.
+//! D2's paired Lightroom measurements establish a narrower exception for the
+//! Sony distortion array: its sixteen native samples sit at `(i+1)/16`, with
+//! the last sample exactly at the corner. It is resampled here, at the source
+//! boundary, onto a dense canonical `(i+0.5)/(n−1)` grid for the Lightroom
+//! mask-transport solve. The ordinary render spline retains its established
+//! placement because D2's required image-registration gate rejected changing
+//! that path. Each array's FIRST element is the value count; a malformed count
+//! degrades that component to "absent", never an error (a photo without
+//! correction data is a normal photo).
 //!
 //! # The MASK WARP, and why it is solved here (R29 Batch-3)
 //!
@@ -54,7 +59,13 @@ use rawler::formats::tiff::reader::TiffReader;
 use rawler::formats::tiff::{GenericTiffReader, Value};
 use rawler::tags::{DngTag, ExifTag};
 
-use crate::recipe::{LensProfile, MASK_WARP_KNOTS, MaskWarpSource};
+use crate::recipe::{LensProfile, MASK_WARP_KNOTS, MaskWarpCenter, MaskWarpSource};
+
+/// Dense enough that representing either measured 16-knot Sony distortion
+/// spline on the engine's offset canonical grid has <1e-5 maximum factor
+/// error, including the awkward r=1 endpoint between the last two canonical
+/// nodes. The contract test records the measured maximum.
+pub(crate) const SONY_DISTORTION_CANONICAL_KNOTS: usize = 2048;
 
 /// Read the in-camera lens correction profile from a RAW file. Every failure
 /// path returns an EMPTY component (profile with nothing to apply) — absent
@@ -95,10 +106,17 @@ pub fn read(path: &Path) -> LensProfile {
         .iter()
         .map(|&v| vignette_gain(v))
         .collect();
-    out.distortion = knots(ExifTag::DistortionCorrParams)
+    let sony_distortion: Vec<f32> = knots(ExifTag::DistortionCorrParams)
         .iter()
         .map(|&v| v as f32 * (-14f32).exp2() + 1.0)
         .collect();
+    // Adjudication gate: direct engine-vs-Lightroom image registration rejects
+    // changing the render spline's placement (the edge/corner residual grows).
+    // Keep the established render calibration here; the corrected native
+    // domain is consumed only by Lightroom's mask transport solve below.
+    out.distortion = sony_distortion.clone();
+    let lr_mask_distortion =
+        resample_sony_distortion(&sony_distortion, SONY_DISTORTION_CANONICAL_KNOTS);
     let ca = knots(ExifTag::ChromaticAberrationCorrParams);
     // The pair split needs an even count AND enough knots per channel for a
     // meaningful radial spline (real bodies write 16+16; a malformed 2-value
@@ -129,10 +147,11 @@ pub fn read(path: &Path) -> LensProfile {
     // but the two aspects differ by ~0.3 % on a real ARW and the fallback is
     // the second-best shape, not an equal one.
     let dims = frame_dims(root);
+    out.mask_warp_center = mask_warp_center(root, dims);
     match dims {
-        Some(dims) if !out.distortion.is_empty() => {
+        Some(dims) if !lr_mask_distortion.is_empty() => {
             let w = crate::render::mask_warp_from_camera_knots(
-                &out.distortion,
+                &lr_mask_distortion,
                 dims,
                 MASK_WARP_KNOTS,
             );
@@ -197,6 +216,67 @@ fn frame_dims(root: &rawler::formats::tiff::IFD) -> Option<(f32, f32)> {
     )
 }
 
+/// Resample the Sony distortion spline from its native `(i+1)/n` radii onto
+/// the canonical grid consumed by `render::profile_knot_interp`.
+pub(crate) fn resample_sony_distortion(native: &[f32], n: usize) -> Vec<f32> {
+    if native.is_empty() || n < 2 {
+        return Vec::new();
+    }
+    (0..n)
+        .map(|i| {
+            let r = (i as f32 + 0.5) / (n - 1) as f32;
+            sony_distortion_interp(native, r)
+        })
+        .collect()
+}
+
+/// Sony `0x7037` piecewise-linear interpolation at native radius `(i+1)/n`,
+/// clamped before the first and after the last sample.
+fn sony_distortion_interp(knots: &[f32], r: f32) -> f32 {
+    let n = knots.len();
+    if n == 0 {
+        return 1.0;
+    }
+    if n == 1 {
+        return knots[0];
+    }
+    let t = r * n as f32 - 1.0;
+    if t <= 0.0 {
+        return knots[0];
+    }
+    if t >= (n - 1) as f32 {
+        return knots[n - 1];
+    }
+    let i = t.floor() as usize;
+    let f = t - i as f32;
+    knots[i] * (1.0 - f) + knots[i + 1] * f
+}
+
+/// Full-raw-frame centre expressed in the stored/default-crop frame.
+/// Requires both first-party facts; missing either preserves legacy centre
+/// behaviour through `LensProfile::mask_warp_center = None`.
+fn mask_warp_center(
+    root: &rawler::formats::tiff::IFD,
+    stored_dims: Option<(f32, f32)>,
+) -> Option<MaskWarpCenter> {
+    let pair = |value: &Value| -> Option<(f32, f32)> {
+        let x = value.get_f32(0).ok().flatten()?;
+        let y = value.get_f32(1).ok().flatten()?;
+        (x.is_finite() && y.is_finite()).then_some((x, y))
+    };
+    let number = |tag: ExifTag| -> Option<f32> {
+        root.get_entry_recursive(tag)?.value.get_f32(0).ok().flatten().filter(|v| v.is_finite())
+    };
+    let full = (number(ExifTag::ImageWidth)?, number(ExifTag::ImageHeight)?);
+    let origin = pair(&root.get_entry_recursive(DngTag::DefaultCropOrigin)?.value)?;
+    let centre = [full.0 * 0.5 - origin.0, full.1 * 0.5 - origin.1];
+    let (stored_w, stored_h) = stored_dims?;
+    (centre[0] >= 0.0 && centre[1] >= 0.0).then_some(MaskWarpCenter {
+        stored_px: centre,
+        stored_dims: [stored_w, stored_h],
+    })
+}
+
 /// Sony vignetting knot → linear-light gain (RawTherapee's formula).
 fn vignette_gain(v: i16) -> f32 {
     1.0 / (0.5 - (v as f32 * (-13f32).exp2() - 1.0).exp2()).exp2()
@@ -204,7 +284,101 @@ fn vignette_gain(v: i16) -> f32 {
 
 #[cfg(test)]
 mod tests {
+    // These are decimal transcriptions of decoded integer knots and solved D2
+    // fixture outputs; keep the report's digits rather than rewriting them to
+    // clippy's display-oriented f32 spelling.
+    #![allow(clippy::excessive_precision)]
+
     use super::*;
+
+    const WALL_DISTORTION: [f32; 16] = [
+        1.0007934570,
+        0.9998779297,
+        0.9981079102,
+        0.9959716797,
+        0.9927368164,
+        0.9890136719,
+        0.9846191406,
+        0.9800415039,
+        0.9749145508,
+        0.9696044922,
+        0.9641113281,
+        0.9589843750,
+        0.9538574219,
+        0.9492187500,
+        0.9448242188,
+        0.9412231445,
+    ];
+    const DSC_DISTORTION: [f32; 16] = [
+        1.0007934570,
+        0.9998779297,
+        0.9982299805,
+        0.9961547852,
+        0.9932250977,
+        0.9898071289,
+        0.9856567383,
+        0.9813842773,
+        0.9766235352,
+        0.9719238281,
+        0.9668579102,
+        0.9622802734,
+        0.9576416016,
+        0.9538574219,
+        0.9503173828,
+        0.9478149414,
+    ];
+
+    #[test]
+    fn sony_distortion_native_domain_resamples_to_the_d2_mask_warp_fixtures() {
+        const RADII: [f32; 6] = [0.0, 0.2, 1.0 / 3.0, 0.5, 0.75, 1.0];
+        const EXPECTED: [[f32; 6]; 2] = [
+            [
+                0.97478093,
+                0.97767276,
+                0.98359925,
+                0.99524465,
+                1.01848750,
+                1.03647513,
+            ],
+            [
+                0.97644290,
+                0.97922226,
+                0.98473749,
+                0.99560184,
+                1.01649349,
+                1.03102158,
+            ],
+        ];
+        for (name, native, expected) in [
+            ("wall", &WALL_DISTORTION[..], EXPECTED[0]),
+            ("DSC08276", &DSC_DISTORTION[..], EXPECTED[1]),
+        ] {
+            let dense = resample_sony_distortion(native, SONY_DISTORTION_CANONICAL_KNOTS);
+            assert_eq!(dense.len(), SONY_DISTORTION_CANONICAL_KNOTS);
+
+            let mut worst = 0.0f32;
+            for i in 0..=65_536 {
+                let r = i as f32 / 65_536.0;
+                worst = worst.max(
+                    (crate::render::profile_knot_interp(&dense, r)
+                        - sony_distortion_interp(native, r))
+                    .abs(),
+                );
+            }
+            assert!(worst < 1e-5, "{name}: canonical resampling error {worst}");
+
+            let warp = crate::render::mask_warp_from_camera_knots(
+                &dense,
+                (9504.0, 6336.0),
+                MASK_WARP_KNOTS,
+            );
+            assert_eq!(warp.len(), MASK_WARP_KNOTS);
+            for (r, want) in RADII.into_iter().zip(expected) {
+                let got = crate::render::mask_warp_factor(&warp, r);
+                assert!((got - want).abs() < 2e-5, "{name} r={r}: {got} vs {want}");
+            }
+        }
+    }
 
     #[test]
     fn conversion_matches_the_real_a7riv_vectors() {
