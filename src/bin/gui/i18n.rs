@@ -1736,6 +1736,14 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
         "以上快捷键全部免费——没有 Creative 档位，没有 Cloud，没有每月赎金。"),
     // ── R22 #4/#14b: AI panel (analysis / whole-image / reverse-fit) ──────────
     //    + the develop panel's group captions
+    (" Boundary-continuity gate kept {n} zoned correction(s): signed transition \
+      rim {before} to {after} luma after shared differential shrink k={k} \
+      (budget {max}, {transitions} measured transitions).",
+        " 分区边界连续性门保留了 {n} 个分区校正：共享差异收缩 k={k} 后，有符号过渡边缘亮度由 {before} 降至 {after}（预算 {max}，测量了 {transitions} 个过渡）。"),
+    (" Zoned corrections dropped by the boundary-continuity gate: candidate \
+      rim {before} luma, and even shared shrink k=0 left {after} \
+      (budget {max}, {transitions} measured transitions).",
+        " 分区校正被边界连续性门弃用：候选边缘亮度为 {before}，且共享收缩 k=0 时仍为 {after}（预算 {max}，测量了 {transitions} 个过渡）。"),
     ("Analysis", "分析"),
     ("Pixel-level AI tools stay at their tools: select subject / select sky in Local Masks, denoise in Detail, heal and fill in Retouch.",
         "像素级 AI 工具就近放置：选主体 / 选天空在局部蒙版，降噪在细节，修复填充在修饰。"),

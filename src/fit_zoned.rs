@@ -63,6 +63,19 @@ const ZONE_TEXTURE_MIN: f32 = 0.70;
 const ZONE_TEXTURE_MAX: f32 = 1.95;
 /// Weighted clipped-luma share may grow by at most one percentage point.
 const ZONE_CLIP_GROWTH: f32 = 0.01;
+/// Maximum signed sky-side luma bump across the 5%-95% mask feather. The
+/// statistic is the 90th percentile of `brightest sky-half - settled sky` on
+/// rows/columns carrying BOTH settled interiors, so positive means the
+/// feather bows into the bright-rim direction. At the 384-edge analysis size
+/// the synthetic bright-half probe reads +0.120, the opposite-sign probe
+/// +0.013, the same-sign probe -0.020, the four accepted repository fixture
+/// entries -0.007, the no-zone calibration +0.013, the previous fitted pair
+/// -0.009, and HEAD's opposite-sign pair +0.054. The real pair measures +0.038
+/// before the gate and +0.012 after its largest passing shrink (k=0.093).
+/// The calibrated round budget is +0.012; the supervisor's independent RAW
+/// rim metric is the final regression check because it samples a 40px crossing
+/// neighbourhood rather than this analysis-grid statistic.
+const ZONE_BOUNDARY_RIM_MAX: f32 = 0.012;
 /// Acceptance: the zone-local error ([`zone_err`]) must fall to ≤ this
 /// fraction of its pre-correction value. The correction is judged on ITS
 /// zone, not on the frame-global `look_err` — measured on the real pair
@@ -350,6 +363,179 @@ fn local_quality(
         texture_ratio,
         clipped_before,
         clipped_after,
+    }
+}
+
+const ZONE_BOUNDARY_LOW: f32 = 0.05;
+const ZONE_BOUNDARY_HIGH: f32 = 0.95;
+const ZONE_BOUNDARY_MID: f32 = 0.5;
+const ZONE_BOUNDARY_PERCENTILE: f32 = 0.90;
+const ZONE_BOUNDARY_INTERIOR_MIN: usize = 4;
+
+#[derive(Clone, Copy, Debug)]
+struct BoundaryReading {
+    rim: f32,
+    transitions: usize,
+}
+
+fn median(mut values: Vec<f32>) -> f32 {
+    values.sort_by(f32::total_cmp);
+    let middle = values.len() / 2;
+    if values.len().is_multiple_of(2) {
+        (values[middle - 1] + values[middle]) * 0.5
+    } else {
+        values[middle]
+    }
+}
+
+/// Add signed readings for one row or column. A transition contributes only
+/// when that SAME scan line reaches settled sky (>=95%) and settled land
+/// (<=5%); this keeps a soft but one-sided mask edge from inventing an
+/// interior. Within the 5%-95% run, the sky half is tested for a bright
+/// overshoot against the median settled sky on that same row/column. The
+/// settled land is required as the other side of a real crossing; the signed
+/// sky-side amplitude deliberately matches the visible defect and the
+/// supervisor's independent render metric.
+fn boundary_line_rims(
+    px: &[[f32; 3]],
+    weights: &[f32],
+    start: usize,
+    step: usize,
+    len: usize,
+    out: &mut Vec<f32>,
+) {
+    let luma = |p: &[f32; 3]| 0.299 * p[0] + 0.587 * p[1] + 0.114 * p[2];
+    let mut sky = Vec::new();
+    let mut land = Vec::new();
+    for p in 0..len {
+        let i = start + p * step;
+        if i >= px.len() || i >= weights.len() {
+            break;
+        }
+        if weights[i] >= ZONE_BOUNDARY_HIGH {
+            sky.push(luma(&px[i]));
+        } else if weights[i] <= ZONE_BOUNDARY_LOW {
+            land.push(luma(&px[i]));
+        }
+    }
+    if sky.len() < ZONE_BOUNDARY_INTERIOR_MIN || land.len() < ZONE_BOUNDARY_INTERIOR_MIN {
+        return;
+    }
+    let sky_settled = median(sky);
+    let mut p = 0usize;
+    while p < len {
+        let i = start + p * step;
+        if i >= weights.len()
+            || !(ZONE_BOUNDARY_LOW..ZONE_BOUNDARY_HIGH).contains(&weights[i])
+        {
+            p += 1;
+            continue;
+        }
+        let mut sky_max: Option<f32> = None;
+        while p < len {
+            let i = start + p * step;
+            if i >= px.len()
+                || i >= weights.len()
+                || !(ZONE_BOUNDARY_LOW..ZONE_BOUNDARY_HIGH).contains(&weights[i])
+            {
+                break;
+            }
+            let here = luma(&px[i]);
+            if weights[i] >= ZONE_BOUNDARY_MID {
+                sky_max = Some(sky_max.map_or(here, |v| v.max(here)));
+            }
+            p += 1;
+        }
+        if let Some(sky_edge) = sky_max {
+            out.push(sky_edge - sky_settled);
+        }
+    }
+}
+
+/// Boundary-continuity reading beside [`local_quality`]. Unlike that
+/// mask-weighted in-zone average, this samples ONLY the transition band and
+/// compares it with both settled interiors on the same rows/columns. The
+/// signed 90th percentile is robust to isolated silhouette highlights while
+/// retaining the systematic bright bow that repeats along an edge.
+fn boundary_rim(
+    px: &[[f32; 3]],
+    weights: &[f32],
+    width: u32,
+    height: u32,
+) -> BoundaryReading {
+    let (w, h) = (width as usize, height as usize);
+    let mut rims = Vec::new();
+    for y in 0..h {
+        boundary_line_rims(px, weights, y * w, 1, w, &mut rims);
+    }
+    for x in 0..w {
+        boundary_line_rims(px, weights, x, w, h, &mut rims);
+    }
+    if rims.is_empty() {
+        return BoundaryReading { rim: 0.0, transitions: 0 };
+    }
+    rims.sort_by(f32::total_cmp);
+    let rank = ((rims.len() as f32 * ZONE_BOUNDARY_PERCENTILE).ceil() as usize)
+        .saturating_sub(1)
+        .min(rims.len() - 1);
+    BoundaryReading { rim: rims[rank], transitions: rims.len() }
+}
+
+/// Apply one scalar to every correction in the accepted zone set. Each dial
+/// is decomposed into its source-share-weighted common component plus its
+/// per-zone differential; BOTH terms carry `k`, because `k=0` is required to
+/// be no local correction (holding the common term would leave a full-frame
+/// masked correction). Thus additive dials land at zero and gains at unity,
+/// every zone keeps its fitted direction, and `k=1` is byte-for-byte the
+/// candidate. The decomposition makes the common policy explicit even though
+/// `k*c + k*(v-c)` deliberately simplifies to `k*v`.
+fn shrink_zone_corrections(
+    masks: &mut [LocalAdjustment],
+    originals: &[LocalAdjustment],
+    shares: &[f32],
+    k: f32,
+) {
+    debug_assert_eq!(masks.len(), originals.len());
+    debug_assert_eq!(masks.len(), shares.len());
+    let k = k.clamp(0.0, 1.0);
+    let share_total = shares.iter().copied().sum::<f32>().max(1e-6);
+    macro_rules! shrink_additive {
+        ($field:ident) => {{
+            let common = originals
+                .iter()
+                .zip(shares)
+                .map(|(m, share)| m.$field * *share)
+                .sum::<f32>()
+                / share_total;
+            for ((dst, src), _) in masks.iter_mut().zip(originals).zip(shares) {
+                dst.$field = k * common + k * (src.$field - common);
+            }
+        }};
+    }
+    shrink_additive!(exposure_ev);
+    shrink_additive!(contrast);
+    shrink_additive!(highlights);
+    shrink_additive!(shadows);
+    shrink_additive!(whites);
+    shrink_additive!(blacks);
+    shrink_additive!(saturation);
+    for channel in 0..3 {
+        let common = originals
+            .iter()
+            .zip(shares)
+            .map(|(m, share)| (m.color_gains.unwrap_or([1.0; 3])[channel] - 1.0) * *share)
+            .sum::<f32>()
+            / share_total;
+        for ((dst, src), _) in masks.iter_mut().zip(originals).zip(shares) {
+            let fitted = src.color_gains.unwrap_or([1.0; 3])[channel] - 1.0;
+            let gains = dst.color_gains.get_or_insert([1.0; 3]);
+            gains[channel] = 1.0 + k * common + k * (fitted - common);
+        }
+    }
+    if k == 0.0 {
+        for mask in masks {
+            mask.color_gains = None;
+        }
     }
 }
 
@@ -1060,11 +1246,46 @@ fn attach_zones_with_divergence(
         true,
         divergence.land.divergence,
     );
-    let accepted: Vec<AcceptedZone> = [sky, land].into_iter().flatten().collect();
+    let mut accepted: Vec<AcceptedZone> = [sky, land].into_iter().flatten().collect();
     if accepted.is_empty() {
         std::fs::remove_file(mask_path).ok();
         return;
     }
+    let first_zone = report.recipe.masks.len() - accepted.len();
+    let initial_px = accepted.last().expect("at least one accepted zone").rendered.clone();
+    let final_px = match enforce_boundary_gate(
+        &s_img,
+        report,
+        &sw,
+        s_share,
+        first_zone,
+        initial_px,
+    ) {
+        BoundaryGateResult::Kept { k, before, after, pixels } => {
+            debug_assert!((0.0..=1.0).contains(&k));
+            debug_assert!(before.rim.is_finite() && after.rim.is_finite());
+            pixels
+        }
+        BoundaryGateResult::Dropped => {
+            std::fs::remove_file(mask_path).ok();
+            return;
+        }
+    };
+    // The boundary shrink changes the actual zone landings, so the attached
+    // notes and confidence are measured again from the kept render rather
+    // than repeating the pre-gate candidate's dials/residuals.
+    for zone in &mut accepted {
+        let (source_weights, target_weights) = match zone.role {
+            MaskRole::ZoneSky => (&sw, &tw),
+            MaskRole::ZoneLand => (&swl, &twl),
+            MaskRole::Custom => unreachable!("zoned fit only creates semantic zone roles"),
+        };
+        let after = zone_moments(&final_px, source_weights);
+        let target = zone_moments(&tgt_px, target_weights);
+        zone.after = zone_err(&after, &target);
+        push_zone_attached_note(report, zone);
+    }
+    frame_err = fit::look_err(&final_px, &tgt_px);
     // `err_after` keeps its CONTRACT — the frame-global look distance of the
     // recipe that actually ships, in the same unit as `err_before`, which is
     // what every printout pairs it with. What changes is that it no longer
@@ -1097,8 +1318,169 @@ fn attach_zones_with_divergence(
 /// A zone whose correction was kept — what [`attach_zones`] needs to report
 /// on the stage as a whole.
 struct AcceptedZone {
+    /// The stable semantic identity of this correction.
+    role: MaskRole,
+    /// The zone-local residual before this correction.
+    before: f32,
     /// The zone-local residual it landed at ([`zone_err`]).
     after: f32,
+    /// The candidate render, retained so the boundary gate reuses the final
+    /// analysis render instead of buying another full candidate render.
+    rendered: Vec<[f32; 3]>,
+}
+
+enum BoundaryGateResult {
+    Kept {
+        k: f32,
+        before: BoundaryReading,
+        after: BoundaryReading,
+        pixels: Vec<[f32; 3]>,
+    },
+    Dropped,
+}
+
+fn boundary_note_args(
+    n: usize,
+    k: f32,
+    before: BoundaryReading,
+    after: BoundaryReading,
+) -> Vec<(&'static str, String)> {
+    vec![
+        ("n", n.to_string()),
+        ("k", format!("{k:.3}")),
+        ("before", format!("{:.3}", before.rim)),
+        ("after", format!("{:.3}", after.rim)),
+        ("max", format!("{ZONE_BOUNDARY_RIM_MAX:.3}")),
+        ("transitions", after.transitions.to_string()),
+    ]
+}
+
+/// Enforce the pair-level boundary budget after the independent zone-local
+/// gates. `initial_px` is the analysis render the last accepted zone already
+/// made. Only re-measurements during an actual shrink render again, always at
+/// analysis size; no full-resolution render is introduced.
+fn enforce_boundary_gate(
+    s_img: &DynamicImage,
+    report: &mut FitReport,
+    sky_weights: &[f32],
+    sky_share: f32,
+    first_zone: usize,
+    initial_px: Vec<[f32; 3]>,
+) -> BoundaryGateResult {
+    let initial = boundary_rim(&initial_px, sky_weights, s_img.width(), s_img.height());
+    let zone_count = report.recipe.masks.len().saturating_sub(first_zone);
+    if initial.rim <= ZONE_BOUNDARY_RIM_MAX {
+        crate::rationale::push_note(
+            &mut report.recipe.rationale,
+            &mut report.notes,
+            crate::rationale::Note::new(
+                crate::rationale::keys::ZONE_BOUNDARY_PASSED,
+                boundary_note_args(zone_count, 1.0, initial, initial),
+            ),
+        );
+        return BoundaryGateResult::Kept {
+            k: 1.0,
+            before: initial,
+            after: initial,
+            pixels: initial_px,
+        };
+    }
+
+    let originals = report.recipe.masks[first_zone..].to_vec();
+    let shares: Vec<f32> = originals
+        .iter()
+        .map(|m| match m.role {
+            MaskRole::ZoneSky => sky_share,
+            MaskRole::ZoneLand => 1.0 - sky_share,
+            MaskRole::Custom => 0.0,
+        })
+        .collect();
+    let render_at = |report: &mut FitReport, k: f32| -> (BoundaryReading, Vec<[f32; 3]>) {
+        shrink_zone_corrections(
+            &mut report.recipe.masks[first_zone..],
+            &originals,
+            &shares,
+            k,
+        );
+        let pixels = fit::pixels_of(&render::develop_preview(s_img, &report.recipe));
+        let reading = boundary_rim(&pixels, sky_weights, s_img.width(), s_img.height());
+        (reading, pixels)
+    };
+
+    let (zero, zero_px) = render_at(report, 0.0);
+    if zero.rim > ZONE_BOUNDARY_RIM_MAX {
+        report.recipe.masks.truncate(first_zone);
+        crate::rationale::push_note(
+            &mut report.recipe.rationale,
+            &mut report.notes,
+            crate::rationale::Note::new(
+                crate::rationale::keys::ZONE_BOUNDARY_DROPPED,
+                boundary_note_args(zone_count, 0.0, initial, zero),
+            ),
+        );
+        return BoundaryGateResult::Dropped;
+    }
+
+    // Monotone in the differential for the bounded pointwise zone dials.
+    // Twelve bisections resolve k to <0.00025, much finer than the displayed
+    // three decimals or the 8-bit analysis render can distinguish.
+    let (mut lo, mut hi) = (0.0f32, 1.0f32);
+    let mut best = (zero, zero_px);
+    for _ in 0..12 {
+        let mid = (lo + hi) * 0.5;
+        let measured = render_at(report, mid);
+        if measured.0.rim <= ZONE_BOUNDARY_RIM_MAX {
+            lo = mid;
+            best = measured;
+        } else {
+            hi = mid;
+        }
+    }
+    shrink_zone_corrections(
+        &mut report.recipe.masks[first_zone..],
+        &originals,
+        &shares,
+        lo,
+    );
+    crate::rationale::push_note(
+        &mut report.recipe.rationale,
+        &mut report.notes,
+        crate::rationale::Note::new(
+            crate::rationale::keys::ZONE_BOUNDARY_PASSED,
+            boundary_note_args(zone_count, lo, initial, best.0),
+        ),
+    );
+    BoundaryGateResult::Kept { k: lo, before: initial, after: best.0, pixels: best.1 }
+}
+
+fn push_zone_attached_note(report: &mut FitReport, zone: &AcceptedZone) {
+    let label = zone.role.tag();
+    let (ev, gains, saturation) = {
+        let mask = report
+            .recipe
+            .masks
+            .iter()
+            .find(|m| m.role == zone.role)
+            .expect("accepted zone mask remains attached");
+        (mask.exposure_ev, mask.color_gains.unwrap_or([1.0; 3]), mask.saturation)
+    };
+    crate::rationale::push_note(
+        &mut report.recipe.rationale,
+        &mut report.notes,
+        crate::rationale::Note::new(
+            crate::rationale::keys::ZONE_ATTACHED,
+            vec![
+                ("label", label.to_string()),
+                ("ev", format!("{ev:+.2}")),
+                ("g0", format!("{:.2}", gains[0])),
+                ("g1", format!("{:.2}", gains[1])),
+                ("g2", format!("{:.2}", gains[2])),
+                ("sat", format!("{saturation:+.0}")),
+                ("before", format!("{:.3}", zone.before)),
+                ("after", format!("{:.3}", zone.after)),
+            ],
+        ),
+    );
 }
 
 /// Confidence slope on the ZONE scale — the joint family's and the global
@@ -1337,35 +1719,19 @@ fn attach_one_zone(
             ),
         );
     }
-    if zone_accepted
-        && zoned_err <= *frame_err + ZONE_GLOBAL_REGRESSION_TOL
-    {
-        let m = report.recipe.masks.last().expect("zone mask just pushed");
-        let g = m.color_gains.unwrap_or([1.0; 3]);
-        crate::rationale::push_note(
-            &mut report.recipe.rationale,
-            &mut report.notes,
-            crate::rationale::Note::new(
-                crate::rationale::keys::ZONE_ATTACHED,
-                vec![
-                    ("label", label.to_string()),
-                    ("ev", format!("{:+.2}", m.exposure_ev)),
-                    ("g0", format!("{:.2}", g[0])),
-                    ("g1", format!("{:.2}", g[1])),
-                    ("g2", format!("{:.2}", g[2])),
-                    ("sat", format!("{:+.0}", m.saturation)),
-                    ("before", format!("{zone_before:.3}")),
-                    ("after", format!("{zone_after:.3}")),
-                ],
-            ),
-        );
+    if zone_accepted && zoned_err <= *frame_err + ZONE_GLOBAL_REGRESSION_TOL {
         // The running frame-global value advances so the NEXT zone's drift
         // budget is measured from here — but neither `err_after` nor
         // `confidence` is written from it any more (R23-6): see the comment
         // in [`attach_zones`] and this module's own [`ZONE_ACCEPT_RATIO`]
         // proof that this number cannot judge a zone.
         *frame_err = zoned_err;
-        Some(AcceptedZone { after: zone_after })
+        Some(AcceptedZone {
+            role,
+            before: zone_before,
+            after: zone_after,
+            rendered: zoned_px,
+        })
     } else {
         report.recipe.masks.pop();
         crate::rationale::push_note(
@@ -1921,6 +2287,280 @@ mod tests {
             .iter()
             .any(|n| n.key == crate::rationale::keys::ZONE_MODE_FULL));
         std::fs::remove_file(mask_path).ok();
+    }
+
+    fn boundary_fixture_pixels(rim_each_side: f32) -> (Vec<[f32; 3]>, Vec<f32>, u32, u32) {
+        let (w, h) = (12u32, 4u32);
+        let line_weights = [1.0, 1.0, 1.0, 1.0, 0.8, 0.6, 0.4, 0.2, 0.0, 0.0, 0.0, 0.0];
+        let mut pixels = Vec::with_capacity((w * h) as usize);
+        let mut weights = Vec::with_capacity((w * h) as usize);
+        for _ in 0..h {
+            for (x, weight) in line_weights.iter().copied().enumerate() {
+                let value = match x {
+                    0..=3 => 0.20,
+                    4..=5 => 0.20 + rim_each_side,
+                    6..=7 => 0.40 - rim_each_side,
+                    _ => 0.40,
+                };
+                pixels.push([value; 3]);
+                weights.push(weight);
+            }
+        }
+        (pixels, weights, w, h)
+    }
+
+    fn soft_zone_pair(
+        name: &str,
+        sky_ev: f32,
+        land_ev: f32,
+    ) -> (DynamicImage, GrayImage, std::path::PathBuf, fit::FitReport) {
+        let (w, h) = (32u32, 12u32);
+        let source = DynamicImage::ImageRgb8(RgbImage::from_pixel(w, h, image::Rgb([115; 3])));
+        let mask = GrayImage::from_fn(w, h, |x, _| {
+            let value = if x < 8 {
+                255
+            } else if x >= 24 {
+                0
+            } else {
+                (((23 - x) as f32 / 15.0) * 255.0).round() as u8
+            };
+            image::Luma([value])
+        });
+        let path = fixture_mask_path(name);
+        mask.save(&path).unwrap();
+        let geometry = MaskGeometry::Bitmap { path: path.to_string_lossy().into_owned() };
+        let mut report = neutral_report(&source, &source);
+        report.recipe.masks = vec![
+            LocalAdjustment {
+                mask: geometry.clone(),
+                role: MaskRole::ZoneSky,
+                amount: 1.0,
+                exposure_ev: sky_ev,
+                color_gains: Some([0.94, 0.98, 1.02]),
+                ..Default::default()
+            },
+            LocalAdjustment {
+                mask: geometry,
+                role: MaskRole::ZoneLand,
+                amount: 1.0,
+                inverted: true,
+                exposure_ev: land_ev,
+                color_gains: Some([1.03, 1.01, 0.98]),
+                ..Default::default()
+            },
+        ];
+        (source, mask, path, report)
+    }
+
+    fn note_number(note: &crate::rationale::Note, name: &str) -> f32 {
+        note.args
+            .iter()
+            .find(|(key, _)| *key == name)
+            .unwrap_or_else(|| panic!("missing {name} in {:?}", note.args))
+            .1
+            .parse()
+            .unwrap()
+    }
+
+    #[test]
+    fn boundary_rim_is_measured_across_the_mask_transition_band() {
+        let (pixels, weights, w, h) = boundary_fixture_pixels(0.12);
+        let reading = boundary_rim(&pixels, &weights, w, h);
+        assert_eq!(reading.transitions, h as usize, "one feather crossing per row");
+        assert!(
+            (reading.rim - 0.12).abs() <= 1e-6,
+            "the brightest sky-half deviation must be measured against the settled sky: {reading:?}"
+        );
+    }
+
+    #[test]
+    fn opposite_sign_zone_pair_exceeds_the_rim_budget_before_shrinking() {
+        assert_eq!(ZONE_BOUNDARY_RIM_MAX, 0.012, "the measured calibration is pinned");
+        let (pixels, weights, w, h) = boundary_fixture_pixels(0.013);
+        let reading = boundary_rim(&pixels, &weights, w, h);
+        assert!(
+            reading.rim > ZONE_BOUNDARY_RIM_MAX,
+            "the just-over-budget opposite-sign shape must exercise the gate: {reading:?}"
+        );
+    }
+
+    #[test]
+    fn rim_shrink_keeps_each_zones_direction_and_lands_inside_the_budget() {
+        let (source, mask, path, mut report) = soft_zone_pair("zoned-rim-shrink", -0.65, 0.20);
+        let weights = mask_weights(&mask, source.width(), source.height());
+        let initial = fit::pixels_of(&render::develop_preview(&source, &report.recipe));
+        let verdict = enforce_boundary_gate(&source, &mut report, &weights, 0.5, 0, initial);
+        let BoundaryGateResult::Kept { k, before, after, .. } = verdict else {
+            panic!("a shrinkable pair was dropped: {}", report.recipe.rationale);
+        };
+        assert!(before.rim > ZONE_BOUNDARY_RIM_MAX, "premise: {before:?}");
+        assert!((0.0..1.0).contains(&k), "the largest passing k must really shrink: {k}");
+        assert!(after.rim <= ZONE_BOUNDARY_RIM_MAX, "shrunk rim: {after:?}");
+        let sky = &report.recipe.masks[0];
+        let land = &report.recipe.masks[1];
+        assert!(sky.exposure_ev < 0.0, "a darkening sky reversed: {}", sky.exposure_ev);
+        assert!(land.exposure_ev > 0.0, "a brightening land reversed: {}", land.exposure_ev);
+        assert!((sky.exposure_ev / -0.65 - k).abs() < 1e-5);
+        assert!((land.exposure_ev / 0.20 - k).abs() < 1e-5);
+        for (gain, original) in sky.color_gains.unwrap().into_iter().zip([0.94, 0.98, 1.02]) {
+            assert_eq!((gain - 1.0).signum(), (original - 1.0f32).signum());
+            assert!(((gain - 1.0) / (original - 1.0) - k).abs() < 1e-5);
+        }
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn same_sign_zone_pair_needs_no_shrink() {
+        let (pixels, weights, w, h) = boundary_fixture_pixels(-0.02);
+        let reading = boundary_rim(&pixels, &weights, w, h);
+        assert!(reading.rim < 0.0, "the previous-fit direction must not look like a bright rim");
+
+        let source = DynamicImage::ImageRgb8(RgbImage::from_fn(w, h, |x, y| {
+            let p = pixels[(y * w + x) as usize];
+            image::Rgb(p.map(|c| (c * 255.0).round() as u8))
+        }));
+        let mut report = neutral_report(&source, &source);
+        report.recipe.masks = vec![
+            LocalAdjustment { role: MaskRole::ZoneSky, exposure_ev: -0.35, ..Default::default() },
+            LocalAdjustment { role: MaskRole::ZoneLand, exposure_ev: -0.90, ..Default::default() },
+        ];
+        // Pin the same-sign policy independently of scene content: a monotone
+        // transition reading is already inside budget, so the gate must keep
+        // the candidate exactly at k=1.
+        let verdict = enforce_boundary_gate(&source, &mut report, &weights, 0.5, 0, pixels);
+        let BoundaryGateResult::Kept { k, after, .. } = verdict else {
+            panic!("same-sign pair was dropped");
+        };
+        assert_eq!(k, 1.0);
+        assert_eq!(after.rim, reading.rim);
+        assert_eq!(report.recipe.masks[0].exposure_ev, -0.35);
+        assert_eq!(report.recipe.masks[1].exposure_ev, -0.90);
+    }
+
+    #[test]
+    fn every_accepted_fixture_zone_still_passes_the_boundary_gate() {
+        let (src, tgt, sky_mask) = zoned_pair();
+        let path = fixture_mask_path("zoned-boundary-calibration-sky");
+        sky_mask.save(&path).unwrap();
+        let mut sky_report = fit::fit_recipe(&src, &tgt);
+        attach_zones(&src, &tgt, &mut sky_report, &sky_mask, &sky_mask, &path);
+
+        let (w, h) = (16u32, 16u32);
+        let build = |sky: [f32; 3], rock: [f32; 3]| -> DynamicImage {
+            DynamicImage::ImageRgb8(RgbImage::from_fn(w, h, |_, y| {
+                let p = if y >= 12 { sky } else { rock };
+                image::Rgb(p.map(|c| (c * 255.0).round() as u8))
+            }))
+        };
+        let land_src = build([0.60, 0.63, 0.67], [0.45, 0.42, 0.40]);
+        let land_tgt = build([0.92, 0.72, 0.48], [0.80, 0.50, 0.28]);
+        let land_path = fixture_mask_path("zoned-boundary-calibration-land");
+        sky_mask.save(&land_path).unwrap();
+        let mut land_report = fit::fit_recipe(&land_src, &land_tgt);
+        attach_zones(
+            &land_src,
+            &land_tgt,
+            &mut land_report,
+            &sky_mask,
+            &sky_mask,
+            &land_path,
+        );
+
+        let mut measured = Vec::new();
+        for (fixture, report) in [("sky", &sky_report), ("sky+land", &land_report)] {
+            let note = report
+                .notes
+                .iter()
+                .find(|n| n.key == crate::rationale::keys::ZONE_BOUNDARY_PASSED)
+                .unwrap_or_else(|| panic!("{fixture} lacked a boundary verdict: {}", report.recipe.rationale));
+            let rim = note_number(note, "after");
+            assert!(rim <= ZONE_BOUNDARY_RIM_MAX, "{fixture} rim {rim:.3}");
+            for mask in &report.recipe.masks {
+                measured.push((fixture, mask.role, rim));
+            }
+        }
+        assert_eq!(measured.len(), 4, "the repository calibration covers sky and land: {measured:?}");
+        let expected = [-0.007f32, -0.007, -0.007, -0.007];
+        for ((fixture, role, rim), expected) in measured.iter().zip(expected) {
+            assert!(
+                (*rim - expected).abs() <= 0.002,
+                "{fixture}/{role:?} boundary calibration drifted: {rim:.3} vs {expected:.3}"
+            );
+        }
+        assert!(
+            measured.iter().all(|(_, _, rim)| *rim <= ZONE_BOUNDARY_RIM_MAX),
+            "accepted fixture calibration: {measured:?}"
+        );
+        std::fs::remove_file(path).ok();
+        std::fs::remove_file(land_path).ok();
+    }
+
+    #[test]
+    fn a_rim_that_cannot_be_shrunk_is_dropped_with_its_own_note() {
+        let (pixels, line_weights, w, h) = boundary_fixture_pixels(0.03);
+        let source = DynamicImage::ImageRgb8(RgbImage::from_fn(w, h, |x, y| {
+            let p = pixels[(y * w + x) as usize];
+            image::Rgb(p.map(|c| (c * 255.0).round() as u8))
+        }));
+        let mask = GrayImage::from_fn(w, h, |x, y| {
+            image::Luma([(line_weights[(y * w + x) as usize] * 255.0).round() as u8])
+        });
+        let path = fixture_mask_path("zoned-rim-unshrinkable");
+        mask.save(&path).unwrap();
+        let geometry = MaskGeometry::Bitmap { path: path.to_string_lossy().into_owned() };
+        let mut report = neutral_report(&source, &source);
+        report.recipe.masks = vec![
+            LocalAdjustment {
+                mask: geometry.clone(),
+                role: MaskRole::ZoneSky,
+                amount: 1.0,
+                exposure_ev: -0.2,
+                ..Default::default()
+            },
+            LocalAdjustment {
+                mask: geometry,
+                role: MaskRole::ZoneLand,
+                amount: 1.0,
+                inverted: true,
+                exposure_ev: 0.1,
+                ..Default::default()
+            },
+        ];
+        let initial = fit::pixels_of(&render::develop_preview(&source, &report.recipe));
+        let verdict = enforce_boundary_gate(&source, &mut report, &line_weights, 0.5, 0, initial);
+        assert!(matches!(verdict, BoundaryGateResult::Dropped));
+        assert!(report.recipe.masks.is_empty(), "the failed pair must be removed");
+        let note = report
+            .notes
+            .iter()
+            .find(|n| n.key == crate::rationale::keys::ZONE_BOUNDARY_DROPPED)
+            .expect("the boundary failure needs its own typed note");
+        assert_eq!(note_number(note, "k"), 0.0);
+        assert!(note_number(note, "after") > ZONE_BOUNDARY_RIM_MAX);
+        assert!(report.recipe.rationale.contains("even shared shrink k=0"));
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn boundary_gate_discloses_the_applied_shrink_and_measured_rim() {
+        let (source, mask, path, mut report) = soft_zone_pair("zoned-rim-disclosure", -0.65, 0.20);
+        let weights = mask_weights(&mask, source.width(), source.height());
+        let initial = fit::pixels_of(&render::develop_preview(&source, &report.recipe));
+        let verdict = enforce_boundary_gate(&source, &mut report, &weights, 0.5, 0, initial);
+        let BoundaryGateResult::Kept { k, before, after, .. } = verdict else {
+            panic!("disclosure fixture dropped");
+        };
+        let note = report
+            .notes
+            .iter()
+            .find(|n| n.key == crate::rationale::keys::ZONE_BOUNDARY_PASSED)
+            .expect("typed boundary pass note");
+        assert!((note_number(note, "k") - k).abs() <= 0.0005);
+        assert!((note_number(note, "before") - before.rim).abs() <= 0.0005);
+        assert!((note_number(note, "after") - after.rim).abs() <= 0.0005);
+        assert!(report.recipe.rationale.contains("signed transition rim"));
+        assert!(report.recipe.rationale.contains("shared differential shrink k="));
+        std::fs::remove_file(path).ok();
     }
 
     #[test]

@@ -190,6 +190,14 @@ pub mod keys {
     pub const ZONE_QUALITY_CLIPPING_FAILED: &str =
         " Zoned {label} correction dropped by the local-quality clipping gate: \
          clipped share {before}% → {after}% (allowed growth {growth} percentage point).";
+    pub const ZONE_BOUNDARY_PASSED: &str =
+        " Boundary-continuity gate kept {n} zoned correction(s): signed transition \
+         rim {before} to {after} luma after shared differential shrink k={k} \
+         (budget {max}, {transitions} measured transitions).";
+    pub const ZONE_BOUNDARY_DROPPED: &str =
+        " Zoned corrections dropped by the boundary-continuity gate: candidate \
+         rim {before} luma, and even shared shrink k=0 left {after} \
+         (budget {max}, {transitions} measured transitions).";
     pub const ZONE_ATTACHED: &str =
         " Zoned {label} correction attached ({label}-to-{label} moments → \
          local exposure {ev} EV, colour gains [{g0} {g1} {g2}], \

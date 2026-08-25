@@ -76,9 +76,9 @@
 > experimental generative edits, an optional pixel-**heal** retouch mode (§4.7)
 > the deterministic look **reverse-fit** (§4.8) and the local server's refusal
 > model (§4.9).
-> 889 library + 14 CLI + 139 GUI + 2+2 contract tests are enumerated in the GUI
-> build; the library result is 880 pass + 9 `#[ignore]`d forensic probes
-> (counts refreshed 2026-08-24 after the reverse-fit Atmosphere batch: library 871→889, GUI 132→139). THREE suites are ADDITIONAL and
+> 896 library + 14 CLI + 139 GUI + 2+2 contract tests are enumerated in the GUI
+> build; the library result is 887 pass + 9 `#[ignore]`d forensic probes
+> (counts refreshed 2026-08-24 after the zone boundary-continuity gate: library 871→896, GUI 132→139). THREE suites are ADDITIONAL and
 > env-gated, so a bare `cargo test` does not include them:
 > `AUTOSHOP_LR_PROBE_FIXTURES` (16 real Lightroom radial sidecars, byte
 > round-trip), `AUTOSHOP_MB_FIXTURES` (the 7-file M-B forensic set — 42 of its
@@ -1681,7 +1681,12 @@ XMP carries the global fit only, since classic sidecars cannot hold raster
 masks. The same structural statistic independently selects **Full** or bounded
 **Atmosphere** policy for each zone; structural divergence never drops a zone
 by itself. Every candidate must preserve mask-weighted texture energy and
-clipped-luma share. A Full-zone correction then uses the two-arm gate
+clipped-luma share; the same analysis render also feeds a boundary-continuity
+gate that reads the signed luma bow only in the mask's 5%-95% transition band
+against settled sky and land on the same rows/columns, then applies the largest
+shared, direction-preserving differential shrink `k` inside its calibrated
+budget (dropping the zones with a named note only when even `k=0`, no local
+correction, fails). A Full-zone correction then uses the two-arm gate
 (v0.26.1): halve the zone error, or land it at/below an absolute matched
 floor (0.02 of linear-mean error, brightness within a quarter stop — the
 floor lives in scale-dependent linear light, so the EV companion rides
