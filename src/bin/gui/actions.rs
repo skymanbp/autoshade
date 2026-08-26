@@ -321,6 +321,9 @@ impl AutoshopApp {
         }
         self.spawn_worker(
             move || {
+                // Full-frame commit budget (budget.rs): the demosaic transient
+                // pays the corpus peak whatever `edge` caps afterwards.
+                let _mem = crate::budget::heavy_permit(crate::budget::estimate_mb(Some(&path)));
                 // Build a CLEAN preview base by developing the RAW sensor data
                 // (downscaled), NOT the camera's already-baked 8-bit JPEG preview:
                 // re-developing that double-processes it and amplifies its grain when
@@ -2967,6 +2970,7 @@ impl AutoshopApp {
         self.analyze_inflight = true;
         self.spawn_worker(
             move || {
+                let _mem = crate::budget::heavy_permit(crate::budget::estimate_mb(Some(&path))); // full-frame commit budget (budget.rs)
                 // Config is reloaded in-thread (cheap) so we don't need it to be Clone.
                 let cfg = autoshop::config::Config::load();
                 let res = autoshop::pipeline::produce_recipe(
@@ -3031,6 +3035,9 @@ impl AutoshopApp {
         self.status = running;
         self.spawn_worker(
             move || {
+                // Full-frame commit budget (budget.rs); the reference's own
+                // header raises the floor when it is the bigger file.
+                let _mem = crate::budget::heavy_permit(crate::budget::estimate_mb(Some(&tgt)));
                 let res = (|| -> anyhow::Result<FitOutcome> {
                     // THE raw-vs-baked dispatch (R22-1): the reference may now
                     // be any file the user picked, including a RAW, which

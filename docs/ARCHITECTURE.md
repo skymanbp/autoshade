@@ -17,7 +17,12 @@
 > ([`src/jobs.rs`](../src/jobs.rs)): one 61 MP photo's pipeline pass peaks at
 > ~1.77 GB of commit charge, so the worker count is capped by free memory and
 > DISCLOSES when the cap overrules the flag — the 147-photo eval went from
-> ~2.3 h serial to a measured 38 min at `--jobs 3`. Lightroom **brush and AI
+> ~2.3 h serial to a measured 38 min at `--jobs 3`. The GUI applies the same
+> discipline (`src/bin/gui/budget.rs`, 2026-08-25): every worker that pays a
+> full-frame peak takes a byte reservation before the expensive call and QUEUES
+> — never refuses, never downscales — while the machine's current free memory
+> cannot carry it beside a 2 GB reserve, and on an already-tight machine the
+> global rayon pool starts clamped to 8 workers. Lightroom **brush and AI
 > masks are carried first-class** (dab streams and mask intent round-trip
 > byte-exact), and an AI mask's alpha is **recomputed locally** by our own
 > segmenter, disclosed as a recomputation in both directions and never passed
@@ -76,7 +81,7 @@
 > experimental generative edits, an optional pixel-**heal** retouch mode (§4.7)
 > the deterministic look **reverse-fit** (§4.8) and the local server's refusal
 > model (§4.9).
-> 917 library + 14 CLI + 140 GUI + 2+2 contract tests are enumerated in the GUI
+> 917 library + 14 CLI + 144 GUI + 2+2 contract tests are enumerated in the GUI
 > build; the library result is 908 pass + 9 `#[ignore]`d forensic probes
 > (counts refreshed 2026-08-25 after the evidence-gating series: library 896→917, set diff vs the prior release +22/−1 by name). THREE suites are ADDITIONAL and
 > env-gated, so a bare `cargo test` does not include them:

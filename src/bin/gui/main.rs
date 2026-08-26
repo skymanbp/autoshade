@@ -37,6 +37,7 @@ mod theme;
 mod util;
 mod actions;
 mod app;
+mod budget;
 mod canvas;
 mod export;
 mod masks;
@@ -111,6 +112,10 @@ fn main() -> eframe::Result<()> {
     // writes the report beside the develop store and says so in a native
     // message box — the one channel that needs no working event loop.
     install_panic_reporter();
+    // Before the first render can touch rayon: on an already-tight machine
+    // the global pool is built narrower than one-per-logical-core (measured
+    // trade-off in budget.rs).
+    budget::clamp_global_rayon();
     let opts = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1400.0, 880.0])

@@ -241,6 +241,7 @@ impl AutoshopApp {
                     }),
                     cancel: flag,
                 }));
+                let _mem = crate::budget::heavy_permit(crate::budget::estimate_mb(Some(&path))); // full-frame commit budget (budget.rs)
                 let res = (|| -> RetouchDone {
                     let cfg = autoshop::config::Config::load();
                     let mask_tmp = gui_tmp_png("fill");
@@ -309,6 +310,7 @@ impl AutoshopApp {
         let (epoch, _flag) = self.arm_cancel(); // local compute: Cancel = abandon (epoch discard)
         self.spawn_worker(
             move || {
+                let _mem = crate::budget::heavy_permit(crate::budget::estimate_mb(Some(&path))); // full-frame commit budget (budget.rs)
                 let res = (|| -> RetouchDone {
                     let cfg = autoshop::config::Config::load();
                     let mask_tmp = match mask_png {
@@ -388,6 +390,7 @@ impl AutoshopApp {
         let (epoch, _flag) = self.arm_cancel(); // sidecar compute: Cancel = abandon (epoch discard)
         self.spawn_worker(
             move || {
+                let _mem = crate::budget::heavy_permit(crate::budget::estimate_mb(Some(&path))); // full-frame commit budget (budget.rs)
                 let res = (|| -> RetouchDone {
                     let cfg = autoshop::config::Config::load();
                     let opts =
@@ -443,6 +446,7 @@ impl AutoshopApp {
         let (epoch, _flag) = self.arm_cancel(); // local compute: Cancel = abandon (epoch discard)
         self.spawn_worker(
             move || {
+                let _mem = crate::budget::heavy_permit(crate::budget::estimate_mb(Some(&path))); // full-frame commit budget (budget.rs)
                 let res = (|| -> RetouchDone {
                     let mask_tmp = gui_tmp_png("clone");
                     std::fs::write(&mask_tmp, &mask_png)?;
@@ -538,6 +542,7 @@ impl AutoshopApp {
                     }),
                     cancel: flag,
                 }));
+                let _mem = crate::budget::heavy_permit(crate::budget::estimate_mb(Some(&path))); // full-frame commit budget (budget.rs)
                 let res = (|| -> RetouchDone {
                     let cfg = autoshop::config::Config::load();
                     // fidelity "high" keeps it recognisably the same photo.

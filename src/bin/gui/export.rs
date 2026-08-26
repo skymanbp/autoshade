@@ -405,6 +405,7 @@ impl AutoshopApp {
         let src_photo = self.src_path.clone();
         self.spawn_worker(
             move || {
+                let _mem = crate::budget::heavy_permit(crate::budget::estimate_mb(Some(&path))); // full-frame commit budget (budget.rs)
                 let res = (|| {
                     if let Some(p) = out.parent() {
                         std::fs::create_dir_all(p)?;
@@ -558,6 +559,9 @@ impl AutoshopApp {
         }
         self.spawn_worker(
             move || {
+                // ONE permit across the whole batch: the loop is sequential, so
+                // its peak is one photo's (budget.rs).
+                let _mem = crate::budget::heavy_permit(crate::budget::estimate_mb(None));
                 // A plain block, not an IIFE: since the summary became typed
                 // facts (L12#4) nothing early-returns at this level — the
                 // per-photo closure below owns the `?` scope.

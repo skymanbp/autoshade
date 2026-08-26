@@ -94,6 +94,7 @@ impl AutoshopApp {
         let (p2, o2) = (photo.clone(), origin.clone());
         self.spawn_worker(
             move || {
+                let _mem = crate::budget::heavy_permit(crate::budget::estimate_mb(Some(&origin))); // full-frame commit budget (budget.rs)
                 // The same >24 MP permit `request_thumb` takes: a master
                 // decode is deliberately not `busy`-gated, so N cold cards
                 // with distinct origins could otherwise decode N 60 MP

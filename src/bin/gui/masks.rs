@@ -325,6 +325,9 @@ impl AutoshopApp {
         let recipe_at_spawn = self.recipe.clone();
         self.spawn_worker(
             move || {
+                // Budget permit BEFORE the big-decode mutex — the one ordering
+                // every taker of both follows (budget.rs).
+                let _mem = crate::budget::heavy_permit(crate::budget::estimate_mb(Some(&guide_src)));
                 let res = (|| -> anyhow::Result<MaskRefineOutcome> {
                     let mask = autoshop::render::open_mask_bounded(std::path::Path::new(&path))
                         .map_err(|e| anyhow::anyhow!("load mask raster {path}: {e}"))?
