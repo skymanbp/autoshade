@@ -147,6 +147,61 @@ pub fn correspond_file(
     field
 }
 
+/// The fit's correspondence provider (step 7b), shared by the CLI and the
+/// GUI: stages both renditions as bounded PNGs the sidecar can read, runs
+/// it, and hands back the parsed field. Everything staged — including the
+/// field JSON — is an intermediate here and is removed; the fit's report
+/// carries the derived per-pair data instead. Failures return `Err` and the
+/// fit discloses the reason (`FIT_CORRESPONDENCE_UNAVAILABLE`); by the
+/// user's ruling (2026-08-26, 完全自动) this runs unconditionally on
+/// content-divergent pairs, first-run weight download included.
+pub fn fit_provider(
+    opts: CorrespondOpts,
+) -> impl Fn(&image::DynamicImage, &image::DynamicImage) -> Result<CorrespondenceField> {
+    move |src, target| {
+        let dir = std::env::temp_dir();
+        let pid = std::process::id();
+        let s = dir.join(format!("autoshop-corr-fit-src-{pid}.png"));
+        let t = dir.join(format!("autoshop-corr-fit-tgt-{pid}.png"));
+        let out = dir.join(format!("autoshop-corr-fit-field-{pid}.json"));
+        // 1024 px is comfortably above the sidecar's own 768² working size;
+        // staging the full frame would spend more on the PNG encode than on
+        // the model.
+        let stage = |img: &image::DynamicImage, p: &std::path::Path| -> Result<()> {
+            img.thumbnail(1024, 1024)
+                .save(p)
+                .with_context(|| format!("stage {} for the correspondence sidecar", p.display()))
+        };
+        let field = stage(src, &s)
+            .and_then(|()| stage(target, &t))
+            .and_then(|()| correspond_file(&opts, &s, &t, &out));
+        for p in [&s, &t, &out] {
+            let _ = std::fs::remove_file(p);
+        }
+        field
+    }
+}
+
+/// TEST-ONLY: a full-confidence identity field over the sidecar's grid —
+/// every cell maps to itself. The conservation fixture both fit test suites
+/// share: a field that says "nothing moved, everything corresponds" must
+/// change nothing.
+#[cfg(test)]
+pub(crate) fn identity_test_field() -> CorrespondenceField {
+    let cells = GRID * GRID;
+    CorrespondenceField {
+        model: "test".into(),
+        revision: "0000000000000000000000000000000000000000".into(),
+        grid_w: GRID,
+        grid_h: GRID,
+        input_size: 768,
+        map_x: (0..cells).map(|c| (c % GRID) as f32).collect(),
+        map_y: (0..cells).map(|c| (c / GRID) as f32).collect(),
+        confidence: vec![1.0; cells],
+        sim: vec![1.0; cells],
+    }
+}
+
 /// One sidecar JSON record → the field, with every invariant a consumer would
 /// otherwise have to re-derive. Refuses, rather than repairs: a record that
 /// carries an `error`, a grid other than [`GRID`]², an array of the wrong

@@ -1248,6 +1248,13 @@ fn match_cmd(
         );
     }
     println!("reverse-fitting {} onto the look of {} …", raw.display(), target.display());
+    // 完全自动 (user ruling 2026-08-26): every fit may consult the local DIFT
+    // sidecar — the fit's own D gate decides IF (content-divergent pairs
+    // only), first-run weight download included. Failures degrade into the
+    // rationale, never fail the fit.
+    let corr = autoshop::correspond::fit_provider(
+        autoshop::correspond::CorrespondOpts::from_config(&Config::load()),
+    );
     let run_fit = |seg_on: bool| -> Result<fit::FitReport> {
         Ok(if seg_on {
         // Sky mask lands at the GUI's convention (the photo's develop dir,
@@ -1268,9 +1275,16 @@ fn match_cmd(
         let mask = autoshop::store::OwnedRaster::claim(raw, "mask-zone-sky")?;
         pipeline::guard_readonly(mask.path(), raw)?;
         println!("  zoned: segmenting the sky in both images (local python sidecar) …");
-        autoshop::fit_zoned::fit_recipe_zoned(&src, &tgt, &seg, &mask)
+        autoshop::fit_zoned::fit_recipe_zoned_with(
+            &src,
+            &tgt,
+            &seg,
+            &mask,
+            &EditRecipe::default(),
+            Some(&corr),
+        )
         } else {
-            fit::fit_recipe(&src, &tgt)
+            fit::fit_recipe_with(&src, &tgt, Some(&corr))
         })
     };
     let mut rep = run_fit(zoned)?;

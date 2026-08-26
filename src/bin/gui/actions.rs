@@ -3137,6 +3137,14 @@ impl AutoshopApp {
                     // it, so a discarded candidate would leave a zero-reference
                     // file behind (R23 review LOW-5). The claimed PATH, never a
                     // rebuilt name — the claim may be the `-2` / `-3` suffix.
+                    // 完全自动 (user ruling 2026-08-26): the fit's D gate may
+                    // consult the local DIFT sidecar on content-divergent
+                    // pairs; failures degrade into the rationale.
+                    let corr = autoshop::correspond::fit_provider(
+                        autoshop::correspond::CorrespondOpts::from_config(
+                            &autoshop::config::Config::load(),
+                        ),
+                    );
                     let run_zoned = |seg_on: bool|
                      -> anyhow::Result<(autoshop::fit::FitReport, Option<std::path::PathBuf>)> {
                         Ok(match (seg_on, &src_path) {
@@ -3146,13 +3154,15 @@ impl AutoshopApp {
                                     autoshop::segment::SegmentOpts::from_config(&cfg, "sky");
                                 let mask =
                                     autoshop::store::OwnedRaster::claim(p, "mask-zone-sky")?;
-                                let rep = autoshop::fit_zoned::fit_recipe_zoned_from(
-                                    &base, &target, &seg, &mask, &fit_base,
+                                let rep = autoshop::fit_zoned::fit_recipe_zoned_with(
+                                    &base, &target, &seg, &mask, &fit_base, Some(&corr),
                                 );
                                 (rep, Some(mask.into_path()))
                             }
                             _ => (
-                                autoshop::fit::fit_recipe_from(&base, &target, &fit_base),
+                                autoshop::fit::fit_recipe_from_with(
+                                    &base, &target, &fit_base, Some(&corr),
+                                ),
                                 None,
                             ),
                         })

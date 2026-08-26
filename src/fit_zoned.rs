@@ -1061,6 +1061,19 @@ pub fn fit_recipe_zoned(
     fit_recipe_zoned_from(src, target, seg, mask_path, &crate::recipe::EditRecipe::default())
 }
 
+/// [`fit_recipe_zoned`] with a correspondence provider (step 7b) — see
+/// [`fit::fit_recipe_with`]. `None` is bit-for-bit the plain zoned fit.
+pub fn fit_recipe_zoned_with(
+    src: &DynamicImage,
+    target: &DynamicImage,
+    seg: &SegmentOpts,
+    mask_path: &crate::store::OwnedRaster,
+    base: &crate::recipe::EditRecipe,
+    provider: Option<fit::CorrespondenceProvider>,
+) -> FitReport {
+    fit_recipe_zoned_inner(src, target, seg, mask_path, base, provider)
+}
+
 /// [`fit_recipe_zoned`] with a calibration-only base composed into the
 /// solve — see [`fit::fit_recipe_from`]. The zone passes need no changes
 /// of their own: every zone statistic is measured on a render of the
@@ -1072,6 +1085,17 @@ pub fn fit_recipe_zoned_from(
     seg: &SegmentOpts,
     mask_path: &crate::store::OwnedRaster,
     base: &crate::recipe::EditRecipe,
+) -> FitReport {
+    fit_recipe_zoned_inner(src, target, seg, mask_path, base, None)
+}
+
+fn fit_recipe_zoned_inner(
+    src: &DynamicImage,
+    target: &DynamicImage,
+    seg: &SegmentOpts,
+    mask_path: &crate::store::OwnedRaster,
+    base: &crate::recipe::EditRecipe,
+    provider: Option<fit::CorrespondenceProvider>,
 ) -> FitReport {
     match segment_both(src, target, seg, mask_path) {
         Ok((src_mask, tgt_mask)) => {
@@ -1087,6 +1111,7 @@ pub fn fit_recipe_zoned_from(
                 base,
                 divergent_cover >= fit::DIVERGENT_COVER_PROMOTES,
                 true,
+                provider,
             );
             attach_zones_with_divergence(
                 src,
@@ -1100,7 +1125,9 @@ pub fn fit_recipe_zoned_from(
             report
         }
         Err(e) => {
-            let mut report = fit::fit_recipe_from(src, target, base);
+            // The provider still rides the fallback: a failed segmentation
+            // must not also cost the global fit its correspondence.
+            let mut report = fit::fit_recipe_from_with(src, target, base, provider);
             crate::rationale::push_note(
                 &mut report.recipe.rationale,
                 &mut report.notes,
@@ -1328,6 +1355,9 @@ fn attach_zones_with_divergence(
     // so the value still has to be carried; it is simply no longer the same
     // variable as the report's verdict.
     let mut frame_err = report.err_after;
+    // Taken, not borrowed: each zone needs the field WHILE holding the
+    // report mutably; restored below so the report keeps carrying it.
+    let corr = report.correspondence.take();
     let sky = attach_one_zone(
         &s_img,
         &tgt_px,
@@ -1339,6 +1369,7 @@ fn attach_zones_with_divergence(
         MaskRole::ZoneSky,
         false,
         divergence.sky.divergence,
+        corr.as_ref(),
     );
     let land = attach_one_zone(
         &s_img,
@@ -1351,7 +1382,9 @@ fn attach_zones_with_divergence(
         MaskRole::ZoneLand,
         true,
         divergence.land.divergence,
+        corr.as_ref(),
     );
+    report.correspondence = corr;
     let mut accepted: Vec<AcceptedZone> = [sky, land].into_iter().flatten().collect();
     if accepted.is_empty() {
         mask_path.remove();
@@ -1635,26 +1668,22 @@ fn attach_one_zone(
     role: MaskRole,
     inverted: bool,
     divergence: fit::Divergence,
+    corr: Option<&fit::PairCorrespondence>,
 ) -> Option<AcceptedZone> {
     // `label` drives the rationale prose; it's the zone's stable ASCII tag, so
     // the text stays English/identical regardless of the GUI's display language.
     let label = role.tag();
     let cur_px = fit::pixels_of(&render::develop_preview(s_img, &report.recipe));
-    // The SAME robust paired estimator the global tone stage runs (one
-    // mechanism, two call sites): pixels the two zones do not share — the
-    // divergent cloud deck, a moved subject — lose weight by the influence
-    // function, so the moments, the dials, the tone solve and the saturation
-    // chase below all measure the population the zones have in common. No
-    // neutral gate here: a zone is already one coherent population and its
-    // chromatic body (a blue sky) is exactly the evidence.
-    let zone_robust = fit::paired_robust_tone(
-        &cur_px,
-        tgt_px,
-        &|i: usize| {
-            sw.get(i).copied().unwrap_or(0.0).min(tw.get(i).copied().unwrap_or(0.0))
-        },
-        false,
-    );
+    // Mode is derived FIRST since step 7b: the correspondence composes only
+    // into a FULL zone's estimators. An Atmosphere zone is fitted as a
+    // bounded distribution precisely BECAUSE its content was replaced, and
+    // weighting its statistics by "does this pixel correspond" would starve
+    // the very zone the divergent-zones-are-never-dropped ruling protects.
+    let mode = if divergence.d >= fit::DIVERGENCE_ZONE {
+        ZoneMode::Atmosphere
+    } else {
+        ZoneMode::Full
+    };
     let compose = |base: &[f32], robust: &Option<fit::PairedRobustTone>| -> Vec<f32> {
         let mut out = base.to_vec();
         if let Some(r) = robust {
@@ -1664,11 +1693,66 @@ fn attach_one_zone(
         }
         out
     };
-    let zw_source = compose(sw, &zone_robust);
-    let zw_target = compose(tw, &zone_robust);
-    let ms = zone_moments(&cur_px, &zw_source);
-    let mt = zone_moments(tgt_px, &zw_target);
-    if ms.share < MIN_ZONE_SHARE || mt.share < MIN_ZONE_SHARE {
+    let min_wt =
+        |i: usize| sw.get(i).copied().unwrap_or(0.0).min(tw.get(i).copied().unwrap_or(0.0));
+    // The SAME robust paired estimator the global tone stage runs (one
+    // mechanism, two call sites): pixels the two zones do not share — the
+    // divergent cloud deck, a moved subject — lose weight by the influence
+    // function, so the moments, the dials, the tone solve and the saturation
+    // chase below all measure the population the zones have in common. No
+    // neutral gate here: a zone is already one coherent population and its
+    // chromatic body (a blue sky) is exactly the evidence.
+    //
+    // With a correspondence field (step 7b), a FULL zone pairs against the
+    // CORRESPONDED target and weights each pair by the field's confidence —
+    // shifted content becomes evidence again instead of an outlier. Two
+    // invariants hold by construction: the share GATE below never reads the
+    // confidence (zone size is a zone question — composing it would let a
+    // heavily-shifted zone silently vanish), and a field whose composed
+    // population collapses is dropped WHOLESALE, falling back to the plain
+    // pairing — the field may refuse to help, never starve a zone.
+    let field = match (mode, corr) {
+        (ZoneMode::Full, Some(c)) => {
+            let zr = fit::paired_robust_tone(
+                &cur_px,
+                &c.tp,
+                &|i: usize| min_wt(i) * c.conf.get(i).copied().unwrap_or(0.0),
+                false,
+            );
+            let with_conf = |base: &[f32]| -> Vec<f32> {
+                compose(base, &zr)
+                    .iter()
+                    .enumerate()
+                    .map(|(i, w)| w * c.conf.get(i).copied().unwrap_or(0.0))
+                    .collect()
+            };
+            let zws = with_conf(sw);
+            let zwt = with_conf(tw);
+            let ms = zone_moments(&cur_px, &zws);
+            let mt = zone_moments(&c.tp, &zwt);
+            (ms.share >= MIN_ZONE_SHARE && mt.share >= MIN_ZONE_SHARE)
+                .then_some((c, zr, zws, zwt, ms, mt))
+        }
+        _ => None,
+    };
+    let (tgt_eff, zone_robust, zw_source, zw_target, ms, mt, gate_s_share, gate_t_share) =
+        match field {
+            Some((c, zr, zws, zwt, ms, mt)) => {
+                let gs = zone_moments(&cur_px, &compose(sw, &zr)).share;
+                let gt = zone_moments(tgt_px, &compose(tw, &zr)).share;
+                (c.tp.as_slice(), zr, zws, zwt, ms, mt, gs, gt)
+            }
+            None => {
+                let zr = fit::paired_robust_tone(&cur_px, tgt_px, &|i: usize| min_wt(i), false);
+                let zws = compose(sw, &zr);
+                let zwt = compose(tw, &zr);
+                let ms = zone_moments(&cur_px, &zws);
+                let mt = zone_moments(tgt_px, &zwt);
+                let (gs, gt) = (ms.share, mt.share);
+                (tgt_px, zr, zws, zwt, ms, mt, gs, gt)
+            }
+        };
+    if gate_s_share < MIN_ZONE_SHARE || gate_t_share < MIN_ZONE_SHARE {
         crate::rationale::push_note(
             &mut report.recipe.rationale,
             &mut report.notes,
@@ -1676,18 +1760,13 @@ fn attach_one_zone(
                 crate::rationale::keys::ZONE_TOO_SMALL,
                 vec![
                     ("label", label.to_string()),
-                    ("s", format!("{:.0}", ms.share * 100.0)),
-                    ("t", format!("{:.0}", mt.share * 100.0)),
+                    ("s", format!("{:.0}", gate_s_share * 100.0)),
+                    ("t", format!("{:.0}", gate_t_share * 100.0)),
                 ],
             ),
         );
         return None;
     }
-    let mode = if divergence.d >= fit::DIVERGENCE_ZONE {
-        ZoneMode::Atmosphere
-    } else {
-        ZoneMode::Full
-    };
     let mode_key = match mode {
         ZoneMode::Full => crate::rationale::keys::ZONE_MODE_FULL,
         ZoneMode::Atmosphere => crate::rationale::keys::ZONE_MODE_ATMOSPHERE,
@@ -1707,7 +1786,7 @@ fn attach_one_zone(
     // Composition is an input fact, not an acceptance verdict. Disclose it
     // before any early evidence/quality return so a withheld correction still
     // explains why the two zone populations are not comparable.
-    let (lo, hi) = (ms.share.min(mt.share), ms.share.max(mt.share));
+    let (lo, hi) = (gate_s_share.min(gate_t_share), gate_s_share.max(gate_t_share));
     if hi > 2.0 * lo {
         crate::rationale::push_note(
             &mut report.recipe.rationale,
@@ -1716,8 +1795,8 @@ fn attach_one_zone(
                 crate::rationale::keys::ZONE_SHARE_MISMATCH,
                 vec![
                     ("label", label.to_string()),
-                    ("s", format!("{:.0}", ms.share * 100.0)),
-                    ("t", format!("{:.0}", mt.share * 100.0)),
+                    ("s", format!("{:.0}", gate_s_share * 100.0)),
+                    ("t", format!("{:.0}", gate_t_share * 100.0)),
                 ],
             ),
         );
@@ -1811,7 +1890,7 @@ fn attach_one_zone(
             // knots this zone's own population supports.
             let refit = fit::paired_robust_tone(
                 &rp,
-                tgt_px,
+                tgt_eff,
                 &|i: usize| {
                     zw_source
                         .get(i)
@@ -1832,7 +1911,7 @@ fn attach_one_zone(
                     .collect(),
                 _ => Vec::new(),
             };
-            let t_cdf = zone_luma_cdf(tgt_px, &zw_target);
+            let t_cdf = zone_luma_cdf(tgt_eff, &zw_target);
             let tone_map = |x: f32| {
                 if points.len() >= 6 {
                     fit::sample_tone_points(&points, x)
@@ -2501,6 +2580,7 @@ mod tests {
         let t = tgt.thumbnail(fit::ANALYZE_EDGE, fit::ANALYZE_EDGE);
         let err = fit::look_err(&fit::pixels_of(&s), &fit::pixels_of(&t));
         fit::FitReport {
+            correspondence: None,
             recipe: crate::recipe::EditRecipe::default(),
             err_before: err,
             err_after: err,
@@ -3257,6 +3337,7 @@ mod tests {
             measure_zone_divergence(&src, &tgt, &crate::recipe::EditRecipe::default(), &mask)
                 .sky
                 .divergence,
+            None,
         );
         assert!(accepted.is_some(), "supported luminance must keep the synthetic sky zone: {}", report.recipe.rationale);
         let sky = report.recipe.masks.last().expect("accepted synthetic sky mask");
@@ -3344,6 +3425,7 @@ mod tests {
             measure_zone_divergence(&src, &tgt, &crate::recipe::EditRecipe::default(), &mask)
                 .sky
                 .divergence,
+            None,
         );
         let note = report
             .notes
@@ -3360,6 +3442,71 @@ mod tests {
             report.recipe.rationale
         );
         path.remove();
+    }
+
+    /// Step-7b conservation, zoned: an IDENTITY field (everything
+    /// corresponds in place at full confidence) leaves every zone verdict
+    /// byte-identical, and a ZERO-confidence field abstains wholesale — the
+    /// field may refuse to help, never starve or drop a zone. The latter
+    /// also pins the share GATE never reading the confidence (supervisor
+    /// mutation M-7b-D: compose the gate with confidence and the zero-field
+    /// run drops the zones this asserts equal).
+    #[test]
+    fn an_identity_or_abstaining_field_leaves_the_zone_verdicts_unchanged() {
+        // The synthetic zoned fixture, not the calibration corpus: its two
+        // renditions share one geometry by construction, which is what makes
+        // the identity law EXACT (the corpus target is two rows taller than
+        // its source, and on mismatched geometry an identity field genuinely
+        // row-aligns the pairing — a real, wanted change documented on
+        // `correspondence_for_pair`, not the law under test here).
+        let (source, target, sky_mask) = zoned_pair();
+        let fingerprint = |masks: &[crate::recipe::LocalAdjustment]| -> String {
+            masks
+                .iter()
+                .map(|m| {
+                    let mut m = m.clone();
+                    m.mask = crate::recipe::MaskGeometry::Bitmap { path: String::new() };
+                    serde_json::to_string(&m).unwrap()
+                })
+                .collect::<Vec<_>>()
+                .join("|")
+        };
+        let run = |field: Option<crate::correspond::CorrespondenceField>| -> String {
+            let mask_path = fixture_mask_path("corr-conserve");
+            sky_mask.save(mask_path.path()).unwrap();
+            let mut report = fit::fit_recipe(&source, &target);
+            if let Some(f) = field {
+                let s_img = source.thumbnail(fit::ANALYZE_EDGE, fit::ANALYZE_EDGE);
+                let t_img = target.thumbnail(fit::ANALYZE_EDGE, fit::ANALYZE_EDGE);
+                report.correspondence = Some(fit::correspondence_for_pair(
+                    &f,
+                    &fit::pixels_of(&t_img),
+                    (s_img.width(), s_img.height()),
+                    (t_img.width(), t_img.height()),
+                ));
+            }
+            attach_zones(&source, &target, &mut report, &sky_mask, &sky_mask, &mask_path);
+            mask_path.remove();
+            assert!(
+                !report.recipe.masks.is_empty(),
+                "premise: zones attach on the calibration pair: {}",
+                report.recipe.rationale
+            );
+            fingerprint(&report.recipe.masks)
+        };
+        let plain = run(None);
+        assert_eq!(
+            plain,
+            run(Some(crate::correspond::identity_test_field())),
+            "an identity field must change no zone verdict"
+        );
+        let mut zero = crate::correspond::identity_test_field();
+        zero.confidence = vec![0.0; zero.confidence.len()];
+        assert_eq!(
+            plain,
+            run(Some(zero)),
+            "a zero-confidence field must abstain wholesale, never starve a zone"
+        );
     }
 
     #[test]
@@ -3646,6 +3793,7 @@ mod tests {
             &crate::recipe::EditRecipe::default(),
             false,
             true,
+            None,
         );
         assert!(!report
             .notes

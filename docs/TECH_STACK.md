@@ -481,6 +481,14 @@ scale-dependent, and the smoothness term is what keeps a pixel-shuffle of the
 same frame (the atmosphere-budget fixtures) honestly unmatchable. The sidecar
 writes coordinates, never pixels; its absence degrades to today's behaviour.
 
+Since step 7b the reverse-fit consults the sidecar itself — automatically,
+on content-divergent pairs only (the D gate is single-sourced inside the
+fit; a Full-mode pair never pays for a run). The projected field weights a
+FULL zone's pixel pairs by per-cell confidence and reads shifted content at
+its corresponded position; Atmosphere zones and every share gate keep their
+pre-field semantics, an abstaining field falls back wholesale, and identity
+and zero-confidence fields are conservation-tested to change nothing.
+
 ### Parameters
 
 - Advisor output: catalogue-registered fields only, schema validation and
@@ -507,6 +515,9 @@ writes coordinates, never pixels; its absence degrades to today's behaviour.
   raw cosine excluded (**designed scale-free gate**).
 - Correspondence pinning: 11 files sha256 + byte-capped at one 40-hex commit;
   `local_files_only` loads; fp16 on CUDA, fp32 on CPU (**provenance gate**).
+- Estimator wiring (7b): consulted iff `D >= 0.35`; confidence composes only
+  into FULL zone estimators; share gates never read it; abstain = wholesale
+  fallback (**designed conservation rules, mutation-tested**).
 
 ### Measured results & disclosures
 
@@ -534,6 +545,9 @@ writes coordinates, never pixels; its absence degrades to today's behaviour.
   (2026-08-26: anonymous 401, authenticated 404); the pinned community
   mirror's fp32 tower digests are byte-identical to an independent
   uploader's, and the sha256 gate is the only door at run time.
+- Live zoned A/B on the calibration pair (field on vs unavailable): the recipes' dials are byte-identical (this pair's land-zone corrections are evidence-withheld either way, upstream of where the field composes; only the disclosure differs — field on carries the measured 59% / 0.80 line, field off the unavailable note). Zero regression on the flagship pair; the mechanism's gain is pinned at estimator level by the shift-recovery test (24 px shift, map error < 0.03).
+  The correspondence disclosure line carries coverage and median confidence
+  either way the run went.
 
 ### Source
 

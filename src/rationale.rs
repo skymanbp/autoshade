@@ -221,6 +221,18 @@ pub mod keys {
     pub const FIT_NOTE_DETAIL_WITHHELD: &str =
         " Detail controls were withheld: two-sided structural and luma-range evidence did not support a safe global detail move, so clarity and texture were not moved.";
 
+    /// Step 7b: a content-divergent fit obtained a cross-image correspondence
+    /// field (local DIFT sidecar) and the zone estimators use it.
+    pub const FIT_CORRESPONDENCE: &str =
+        " Cross-image correspondence measured (DIFT): {cov}% of the frame has a \
+         confident counterpart in the target (median confidence {med}); full \
+         zone fits weight pairs by it and read shifted content at its \
+         corresponded position.";
+    /// …and the sidecar failing must degrade with its reason, never silently.
+    pub const FIT_CORRESPONDENCE_UNAVAILABLE: &str =
+        " Cross-image correspondence unavailable ({e}) — the content-divergent \
+         estimators ran without it.";
+
     // --- zoned fit (fit_zoned.rs) ---------------------------------------
     pub const ZONED_UNAVAILABLE: &str = " Zoned sky fit unavailable ({e}) — global fit only.";
     pub const ZONED_NO_PARTITION: &str =

@@ -1818,6 +1818,12 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
         " · 贴合原图（结构差异 D={d}）"),
     (" · the opt-in retry kept the closer of two results (discarded D={d0})",
         " · 自选重试保留了两张中更贴合的一张（弃用 D={d0}）"),
+
+    // ── Reverse-fit · cross-image correspondence (step 7b) ──────────────────
+    (" Cross-image correspondence measured (DIFT): {cov}% of the frame has a confident counterpart in the target (median confidence {med}); full zone fits weight pairs by it and read shifted content at its corresponded position.",
+        " 跨图对应已测量（DIFT）：画面 {cov}% 在目标中有可信对应（中位置信 {med}）；完整区拟合按其为像素对加权，并在对应位置读取被移动的内容。"),
+    (" Cross-image correspondence unavailable ({e}) — the content-divergent estimators ran without it.",
+        " 跨图对应不可用（{e}）——内容分歧估计器已在没有它的情况下运行。"),
 ];
 
 #[cfg(test)]

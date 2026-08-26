@@ -1111,12 +1111,119 @@ pub struct FitReport {
     /// Fixed source/target evidence for every downstream zoned gate and the
     /// finished-render disclosure. In-process only, never serialized.
     pub(crate) evidence: EvidenceModel,
+    /// Cross-image correspondence for a content-divergent pair, when the
+    /// caller supplied a provider and the D gate consulted it (step 7b).
+    /// In-process only, never serialized — the zoned passes read it.
+    pub(crate) correspondence: Option<PairCorrespondence>,
+}
+
+/// What one correspondence field means FOR THIS PAIR's rasters: for every
+/// source-thumbnail index, the target pixel its content corresponds to and
+/// how much that match can be trusted. Derived once from the sidecar's 48x48
+/// field ([`correspondence_for_pair`]); consumed by the zone estimators as a
+/// pair-weight factor and a remapped target.
+pub(crate) struct PairCorrespondence {
+    /// Per-source-index confidence in [0, 1] (cyclic x smoothness).
+    pub(crate) conf: Vec<f32>,
+    /// The target rendition READ AT the corresponded position, one sample per
+    /// source index — same-index pairing against this array is
+    /// correspondence-aware pairing against the original.
+    pub(crate) tp: Vec<[f32; 3]>,
+    /// Share of the frame with a confident counterpart (conf >= 0.5).
+    pub(crate) coverage: f32,
+    /// Median per-cell confidence, for the disclosure.
+    pub(crate) median: f32,
+}
+
+/// A caller-supplied way to obtain a correspondence field for one pair —
+/// the CLI and GUI hand in a closure that runs the local DIFT sidecar
+/// (`correspond::fit_provider`); tests hand in stubs; `None` (or an `Err`)
+/// degrades to the pre-7b behaviour. The fit consults it ONLY on a
+/// content-divergent pair (`divergence.d >= DIVERGENCE_GLOBAL`) — the gate
+/// lives here, single-sourced, not at the callers.
+pub type CorrespondenceProvider<'a> =
+    &'a dyn Fn(&DynamicImage, &DynamicImage) -> anyhow::Result<crate::correspond::CorrespondenceField>;
+
+/// Project one sidecar field onto THIS pair's rasters. Pure geometry:
+/// every source pixel centre lands in one grid cell; its confidence is that
+/// cell's, and its corresponded target sample is read at the cell's mapped
+/// position PLUS the pixel's own within-cell offset (locally the flow is
+/// rigid — the 16-px cells are far below the scale content moves at).
+///
+/// Under an IDENTITY field (every cell maps to itself, full confidence) and
+/// equal raster dims, the output target array is BYTE-IDENTICAL to the input
+/// — the conservation law the wiring's tests pin: a field that says
+/// "nothing moved, everything corresponds" must change nothing. When the two
+/// rasters' dims DIFFER (the calibration target is two rows taller than its
+/// source), same-index pairing carries a small row shear and the normalised
+/// remap quietly corrects it — a real improvement measured at ~0.015 EV on
+/// the calibration land zone, and the reason the conservation tests pin the
+/// law on geometry-normalised fixtures.
+pub(crate) fn correspondence_for_pair(
+    field: &crate::correspond::CorrespondenceField,
+    tp: &[[f32; 3]],
+    (sw, sh): (u32, u32),
+    (tw, th): (u32, u32),
+) -> PairCorrespondence {
+    let (gw, gh) = (field.grid_w, field.grid_h);
+    let n = (sw * sh) as usize;
+    let mut conf = vec![0.0f32; n];
+    let mut out = vec![[0.0f32; 3]; n];
+    for y in 0..sh {
+        for x in 0..sw {
+            let i = (y * sw + x) as usize;
+            let u = (x as f32 + 0.5) / sw as f32;
+            let v = (y as f32 + 0.5) / sh as f32;
+            let cx = ((u * gw as f32) as usize).min(gw - 1);
+            let cy = ((v * gh as f32) as usize).min(gh - 1);
+            let c = cy * gw + cx;
+            conf[i] = field.confidence[c];
+            let fu = u * gw as f32 - cx as f32;
+            let fv = v * gh as f32 - cy as f32;
+            let un = ((field.map_x[c] + fu) / gw as f32).clamp(0.0, 1.0);
+            let vn = ((field.map_y[c] + fv) / gh as f32).clamp(0.0, 1.0);
+            let tx = ((un * tw as f32) as u32).min(tw - 1);
+            let ty = ((vn * th as f32) as u32).min(th - 1);
+            out[i] = tp.get((ty * tw + tx) as usize).copied().unwrap_or([0.0; 3]);
+        }
+    }
+    let coverage = if conf.is_empty() {
+        0.0
+    } else {
+        conf.iter().filter(|&&c| c >= 0.5).count() as f32 / conf.len() as f32
+    };
+    let mut sorted = conf.clone();
+    sorted.sort_by(f32::total_cmp);
+    let median = sorted.get(sorted.len() / 2).copied().unwrap_or(0.0);
+    PairCorrespondence { conf, tp: out, coverage, median }
 }
 
 /// Fit an [`EditRecipe`] mapping `src` (untouched preview) onto the look of
 /// `target` (a rendition of the same frame). Deterministic, no network.
 pub fn fit_recipe(src: &DynamicImage, target: &DynamicImage) -> FitReport {
     fit_recipe_from(src, target, &EditRecipe::default())
+}
+
+/// [`fit_recipe`] with a correspondence provider (step 7b): on a
+/// content-divergent pair the fit asks it for a cross-image field and the
+/// estimators use it. `None` is bit-for-bit the plain fit.
+pub fn fit_recipe_with(
+    src: &DynamicImage,
+    target: &DynamicImage,
+    provider: Option<CorrespondenceProvider>,
+) -> FitReport {
+    fit_recipe_from_with(src, target, &EditRecipe::default(), provider)
+}
+
+/// [`fit_recipe_from`] with a correspondence provider — see
+/// [`fit_recipe_with`].
+pub fn fit_recipe_from_with(
+    src: &DynamicImage,
+    target: &DynamicImage,
+    base: &EditRecipe,
+    provider: Option<CorrespondenceProvider>,
+) -> FitReport {
+    fit_recipe_from_promoted_with_disclosure(src, target, base, false, false, provider)
 }
 
 /// [`fit_recipe`] with the photo's CALIBRATION composed into the solve
@@ -1147,7 +1254,7 @@ pub(crate) fn fit_recipe_from_promoted(
     base: &EditRecipe,
     divergent_zone_promotes: bool,
 ) -> FitReport {
-    fit_recipe_from_promoted_with_disclosure(src, target, base, divergent_zone_promotes, false)
+    fit_recipe_from_promoted_with_disclosure(src, target, base, divergent_zone_promotes, false, None)
 }
 
 /// Zoned fits defer the pair-specific disclosure until their masks and final
@@ -1158,6 +1265,7 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure(
     base: &EditRecipe,
     divergent_zone_promotes: bool,
     defer_disclosure: bool,
+    provider: Option<CorrespondenceProvider>,
 ) -> FitReport {
     // CALLER CONTRACT: `base` must be calibration-only (build it with
     // `pipeline::calibration_recipe`, or pass the default). A base smuggling
@@ -1219,11 +1327,26 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure(
             mode,
             divergence,
             evidence,
+            correspondence: None,
         };
     }
 
     if mode == FitMode::Atmosphere {
-        return fit_atmosphere_from_parts(
+        // THE consultation site (single-sourced D gate): only a
+        // content-divergent pair ever pays for a correspondence run, and the
+        // global-Full call site below deliberately composes nothing — under
+        // this gate `mode == Full` implies no field exists.
+        let correspondence = provider.map(|p| {
+            p(src, target).map(|field| {
+                correspondence_for_pair(
+                    &field,
+                    &tp,
+                    (s_img.width(), s_img.height()),
+                    (t_img.width(), t_img.height()),
+                )
+            })
+        });
+        let mut report = fit_atmosphere_from_parts(
             &s_img,
             &sp,
             &tp,
@@ -1234,6 +1357,36 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure(
             &evidence,
             defer_disclosure,
         );
+        match correspondence {
+            None => {}
+            Some(Ok(c)) => {
+                crate::rationale::push_note(
+                    &mut report.recipe.rationale,
+                    &mut report.notes,
+                    crate::rationale::Note::new(
+                        crate::rationale::keys::FIT_CORRESPONDENCE,
+                        vec![
+                            ("cov", format!("{:.0}", c.coverage * 100.0)),
+                            ("med", format!("{:.2}", c.median)),
+                        ],
+                    ),
+                );
+                report.correspondence = Some(c);
+            }
+            // The sidecar failing (or missing) must degrade with a sentence,
+            // never take the fit down — the field is additive by contract.
+            Some(Err(e)) => {
+                crate::rationale::push_note(
+                    &mut report.recipe.rationale,
+                    &mut report.notes,
+                    crate::rationale::Note::new(
+                        crate::rationale::keys::FIT_CORRESPONDENCE_UNAVAILABLE,
+                        vec![("e", format!("{e:#}"))],
+                    ),
+                );
+            }
+        }
+        return report;
     }
 
     if err_before <= 0.001 {
@@ -2370,6 +2523,7 @@ fn compose_report(mut recipe: EditRecipe, m: Measured<'_>, solve: SolveFacts) ->
         mode: m.mode,
         divergence: m.divergence,
         evidence: m.evidence.clone(),
+        correspondence: None,
     }
 }
 
@@ -4966,6 +5120,170 @@ mod tests {
         );
         let joint = joint_after.expect("the joint family had an opinion before the fit");
         assert!(joint.weighted < 0.08, "joint after {:.4}", joint.weighted);
+    }
+
+    /// Step-7b conservation law, half one: an IDENTITY field (every cell maps
+    /// to itself at full confidence) projects to the original target array
+    /// byte-for-byte — a field that says "nothing moved, everything
+    /// corresponds" must change nothing. Supervisor mutation M-7b-A (the
+    /// within-cell offset dropped from the remap) goes red here: without it
+    /// every pixel of a cell reads the cell's one corner sample.
+    #[test]
+    fn the_field_remap_is_identity_under_an_identity_field() {
+        let (w, h) = (96u32, 64u32);
+        let tp: Vec<[f32; 3]> = (0..w * h)
+            .map(|i| {
+                let v = (i.wrapping_mul(2_654_435_761) >> 8) as u8 as f32 / 255.0;
+                [v, v, v]
+            })
+            .collect();
+        let c = identity_field();
+        let pc = correspondence_for_pair(&c, &tp, (w, h), (w, h));
+        assert_eq!(pc.tp, tp, "identity field, identical dims: the remap must be a no-op");
+        assert!(pc.conf.iter().all(|&x| x == 1.0));
+        assert!((pc.coverage - 1.0).abs() < 1e-6 && (pc.median - 1.0).abs() < 1e-6);
+    }
+
+    /// A full-confidence identity field over the correspondence grid —
+    /// the shared conservation fixture (`correspond::identity_test_field`).
+    fn identity_field() -> crate::correspond::CorrespondenceField {
+        crate::correspond::identity_test_field()
+    }
+
+    /// Step-7b, the mechanism itself: content SHIFTED between the renditions
+    /// breaks same-index pairing (the estimator sees a random association and
+    /// refuses), and the field's remap repairs it — the paired robust fit
+    /// recovers the true tone map through the shift. Supervisor mutation
+    /// M-7b-C (confidence/remap not reaching the pairs) goes red here.
+    #[test]
+    fn a_confident_shift_field_recovers_the_pairs_the_shift_broke() {
+        let g = crate::correspond::GRID;
+        let (w, h) = (192u32, 192u32); // 4 px per grid cell
+        let shift_cells = 6usize; // content moves right by 24 px
+        let col_luma = |x: u32| -> f32 {
+            0.08 + 0.84 * ((x.wrapping_mul(2_654_435_761) >> 8) as u8 as f32 / 255.0)
+        };
+        let tone = |s: f32| 0.15 + 0.6 * s;
+        let sp: Vec<[f32; 3]> = (0..w * h)
+            .map(|i| {
+                let v = col_luma(i % w);
+                [v, v, v]
+            })
+            .collect();
+        // The target: the SAME columns, tone-mapped, moved right by the shift
+        // (content at source x sits at target x + 24).
+        let tp: Vec<[f32; 3]> = (0..w * h)
+            .map(|i| {
+                let x = i % w;
+                let v = tone(col_luma((x + w - 24) % w));
+                [v, v, v]
+            })
+            .collect();
+        // Same-index pairing is a random association: the estimator must not
+        // manufacture a map out of it (either refuses or lands far off).
+        let broken = paired_robust_tone(&sp, &tp, &|_| 1.0, true);
+        let map_err = |r: &PairedRobustTone| {
+            (1..=9)
+                .map(|k| {
+                    let x = k as f32 / 10.0;
+                    (sample_tone_points(&r.points, x) - tone(x)).abs()
+                })
+                .fold(0.0f32, f32::max)
+        };
+        if let Some(r) = broken.as_ref() {
+            assert!(
+                map_err(r) > 0.05 || r.rejected_share > 0.5,
+                "premise: a 24-px shift must actually break same-index pairing"
+            );
+        }
+        // The field that KNOWS the shift: cell cx corresponds to target cell
+        // cx + 6. Confidence 1 — the sidecar's smoothness term would grant a
+        // rigid translation exactly this.
+        let cells = g * g;
+        let field = crate::correspond::CorrespondenceField {
+            map_x: (0..cells).map(|c| (((c % g) + shift_cells) % g) as f32).collect(),
+            ..identity_field()
+        };
+        let pc = correspondence_for_pair(&field, &tp, (w, h), (w, h));
+        let repaired = paired_robust_tone(&sp, &pc.tp, &|i| pc.conf[i], true)
+            .expect("the remapped pairing must carry a fittable map");
+        assert!(
+            map_err(&repaired) < 0.03,
+            "the remap must recover the true tone map through the shift: err {:.4}",
+            map_err(&repaired)
+        );
+    }
+
+    /// Step-7b gate: the provider is consulted EXACTLY on content-divergent
+    /// pairs — never on a Full-mode pair (a paid-in-seconds sidecar run per
+    /// ordinary fit would be a regression), exactly once on a divergent one,
+    /// and a failing provider degrades with the reason in the rationale while
+    /// the atmosphere recipe stands. Supervisor mutation M-7b-B (the gate
+    /// dropped, provider consulted unconditionally) goes red on the first
+    /// assertion.
+    #[test]
+    fn the_provider_is_consulted_only_on_a_content_divergent_pair() {
+        use std::cell::Cell;
+        let calls = Cell::new(0u32);
+        let failing = |_: &DynamicImage,
+                       _: &DynamicImage|
+         -> anyhow::Result<crate::correspond::CorrespondenceField> {
+            calls.set(calls.get() + 1);
+            Err(anyhow::anyhow!("no GPU on this machine"))
+        };
+        // Full-mode pair (a frame against itself): the gate must not consult.
+        let (src, _) = structural_permutation_pair();
+        let full = fit_recipe_with(&src, &src, Some(&failing));
+        assert_eq!(calls.get(), 0, "a Full-mode fit must never pay for a correspondence run");
+        assert_eq!(full.mode, FitMode::Full);
+        // Divergent pair: exactly one consultation; the failure is disclosed
+        // with its reason and the atmosphere fit stands unchanged.
+        let (src, tgt) = structural_permutation_pair();
+        let plain = fit_recipe(&src, &tgt);
+        let report = fit_recipe_with(&src, &tgt, Some(&failing));
+        assert_eq!(calls.get(), 1, "one divergent fit, one consultation");
+        assert_eq!(report.mode, FitMode::Atmosphere);
+        assert!(
+            report.recipe.rationale.contains("no GPU on this machine"),
+            "the failure reason must reach the rationale: {}",
+            report.recipe.rationale
+        );
+        assert_eq!(
+            (report.recipe.exposure_ev, report.recipe.tint, report.recipe.saturation),
+            (plain.recipe.exposure_ev, plain.recipe.tint, plain.recipe.saturation),
+            "a failing provider must leave the fit exactly as it was"
+        );
+    }
+
+    /// Step-7b conservation law, half two: a field that answers "everything
+    /// corresponds in place" leaves the divergent fit's DIALS untouched (the
+    /// disclosure note is the only difference), and mode selection never
+    /// reads the field at all.
+    #[test]
+    fn an_identity_field_discloses_and_changes_no_dial() {
+        let ok = |_: &DynamicImage,
+                  _: &DynamicImage|
+         -> anyhow::Result<crate::correspond::CorrespondenceField> {
+            Ok(identity_field())
+        };
+        let (src, tgt) = structural_permutation_pair();
+        let plain = fit_recipe(&src, &tgt);
+        let report = fit_recipe_with(&src, &tgt, Some(&ok));
+        assert_eq!(report.mode, FitMode::Atmosphere, "mode selection never reads the field");
+        assert!(
+            report
+                .notes
+                .iter()
+                .any(|n| n.key == crate::rationale::keys::FIT_CORRESPONDENCE),
+            "the measured field must be disclosed: {}",
+            report.recipe.rationale
+        );
+        assert_eq!(
+            (report.recipe.exposure_ev, report.recipe.tint, report.recipe.saturation),
+            (plain.recipe.exposure_ev, plain.recipe.tint, plain.recipe.saturation),
+            "an identity field must change no dial"
+        );
+        assert!(report.correspondence.is_some(), "the zoned passes read it from the report");
     }
 
     #[test]

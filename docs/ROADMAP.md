@@ -195,6 +195,30 @@
 
 ## 当前状态（已完成，勿重做）
 
+- **🧵 步7b 对应场接线估计器：D 门单源自动咨询 + Full 区置信加权/流场重映射（2026-08-26，主模型亲写，用户裁定「完全自动」）**：
+  `fit::CorrespondenceProvider` 闭包缝贯通全部入口（`fit_recipe_with`/`fit_recipe_from_with`/
+  `fit_zoned::fit_recipe_zoned_with`，旧签名零变化=测试面天然隔离）；**咨询点唯一**在氛围
+  支路（D≥`DIVERGENCE_GLOBAL` 才咨询，Full 对绝不为对应买单——变异 M-7b-B 钉死；模式选择
+  永不读场）；`correspondence_for_pair` 把 48² 场投影到本对栅格（格内偏移随流刚性搬运，
+  恒等场+等几何=逐字节无操作——守恒律一半；几何不等时归一化重映射顺带修正行剪切，语料
+  target 1600×1069 vs 源 1067 实测 land EV ~0.015 差即此效应，文档现场论证）；FitReport
+  携带 `PairCorrespondence`（进程内如 evidence），逐区消费：**只有 Full 区**组合置信×稳健
+  权重并对 `c.tp`（对应位置读取的目标）配对/求矩/refit/t_cdf，Atmosphere 区与所有份额门
+  保持前场语义（分歧永不丢区的守护——份额门永不读置信、弃权场整体回退，变异 M-7b-D/E 钉
+  死）；帧漂移保险 `zoned_err` 保留原始 tgt_px（诚实分界）。CLI match 与 GUI 反推 worker
+  同一 provider（`correspond::fit_provider`：1024px 暂存双帧→侧车→清理，失败降级进披露注
+  `FIT_CORRESPONDENCE_UNAVAILABLE({e})`）；两把新钥匙+中文对（字体重子集 842/842，况/歧/跨
+  三字形补齐）。**实测**：zoned A/B 语料对（场开 vs 场不可用）——拨盘逐字节全同——该对 land 区修正两侧均被证据门（899798e）先行扣留，场的作用点在其下游，仅披露注不同（场开=实测 59%/0.80，场禁=不可用注）；即旗舰对零回归，复跑噪声地板=零（连 DIFT 场都逐字节复现，仅蒙版声明文件名后缀异）；场的增益由估计器级平移恢复测试钉住（24px 平移打断同下标配对→重映射恢复真调子映射 err<0.03）；披露注实测
+  「59% confident counterpart, median 0.80」与 7a 仪器读数一致。**风险表重裁**：四会翻测试
+  （content_divergent_calibration/invented_sky_gradient/calibration_sky_zone/四 permutation
+  预算）全数保绿——保守接线（模式不动、氛围臂不动、测试不传 provider 即旧路径）使其免翻，
+  新增守恒律测试钉住带场行为（恒等场不改任何 dial、零置信场整体弃权、24px 平移场恢复被平移
+  打断的配对 err<0.03）。**门**：clippy 双特性 0+0；电池 942(933+9i)/15/145/2+2（+5 具名：
+  remap 恒等/平移恢复/门单源/恒等披露不改 dial/zoned 守恒）；五变异亲手红（M-7b-A 格内偏移
+  /B 门失守/C 重映射读源格/D 弃权删除/E 场臂丢稳健）。**登记**：台账 7a 条所记「三调用点」
+  实为两活点——全局 Full 站点在 D 门下不可达对应场（Full⟹D<0.35⟹无场），未接死代码，
+  现场注释与本条如实修正。
+
 - **🔗 跨图对应仪器：DIFT/SD 2.1 第四侧车 + 共享执行器上提（2026-08-26，主模型亲写，计划步 7a）**：
   用户裁定骨干=DIFT（SD 2.1 扩散特征）。`python/correspond.py` 第四侧车：复用
   `denoise._fetch_verified`（下载-校验单实现），11 文件 sha256+字节帽全钉在
