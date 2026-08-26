@@ -841,7 +841,6 @@ const NEUTRAL_MISPREDICTION_MAX: f32 = 0.015;
 /// to the one population the identification assumption is actually about.
 /// Below it there is no identified population to score and the metric
 /// reports infinite (fall back).
-#[cfg(test)]
 const NEUTRAL_SHARED_MIN: usize = 512;
 /// Cast-curve acceptance: the fitted per-channel curves must cut the hue-aware
 /// look error to ≤ this fraction of the without-curves error, else they are
@@ -1263,6 +1262,9 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure(
                 regressed: None,
                 detail: (0.0, 0.0),
                 detail_withheld: false,
+                robust: None,
+                paired: false,
+                vouched_bands: None,
             },
         );
     }
@@ -1291,7 +1293,7 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure(
                 evidence: &evidence,
                 defer_disclosure,
             },
-            SolveFacts { sat_pegged: None, cast: CastOutcome::default(), evidence_refused: false, sat_fitted: None, regressed: None, detail: (0.0, 0.0), detail_withheld: true },
+            SolveFacts { sat_pegged: None, cast: CastOutcome::default(), evidence_refused: false, sat_fitted: None, regressed: None, detail: (0.0, 0.0), detail_withheld: true, robust: None, paired: false, vouched_bands: None },
         );
     }
 
@@ -1303,11 +1305,76 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure(
     // short of the tone map and would bias the solve (measured: one polluted
     // knot skews contrast by tens of points). Greys carry clean evidence.
     let (s_cdf, t_cdf) = tone_cdf_pair_weighted(&sp, &tp, &evidence);
-    let correspondence = if tone_correspondence_is_credible(&sp, &tp, &evidence) {
-        evidence_tone_points(&sp, &tp, &evidence)
-    } else {
-        Vec::new()
+    let robust_tone = paired_robust_tone(
+        &sp,
+        &tp,
+        &|i: usize| {
+            evidence
+                .source_weights
+                .get(i)
+                .copied()
+                .unwrap_or(0.0)
+                .min(evidence.target_weights.get(i).copied().unwrap_or(0.0))
+        },
+        true,
+    );
+    // The paired path is gated by the ROBUST FIT'S OWN diagnostics: enough
+    // populated bins to shape a map, and a majority-consistent pairing. The
+    // old hue-credibility veto guarded the pre-robust median pairing from
+    // re-hued populations; on a same-frame pair a systematic hue difference
+    // (another converter's colour science, a WB drift) is an EDIT for the
+    // colour stages to recover, not evidence the pairing is invalid — and
+    // vetoing the paired path for it sent the p36 calibration pair into the
+    // marginal arm, whose neutral-class asymmetry then pegged the solve. A
+    // locally re-hued sub-population is handled where it belongs: its RGB
+    // transport residual rejects it pixel-by-pixel, and a majority takeover
+    // fails the rejected-share gate here.
+    let correspondence = match robust_tone.as_ref() {
+        Some(r) if r.points.len() >= 6 && r.rejected_share <= 0.5 => r.points.clone(),
+        _ => Vec::new(),
     };
+    let paired = correspondence.len() >= 6;
+    let robust_facts = paired
+        .then_some(robust_tone.as_ref())
+        .flatten()
+        .map(|r| (r.rejected_share, r.rejected_ranges.clone()));
+    // Composed weights for the COLOUR statistics: evidence ("measurable at
+    // all") × robust ("consistent with one global develop"), in that order —
+    // the evidence weight is a prior independent of the model being fitted,
+    // so composing it first cannot launder a divergent pixel back in. Only
+    // composed when the paired path actually engaged: on a marginal-path pair
+    // the index pairing is unvalidated and its verdicts would be noise.
+    let (rw_source, rw_target): (Vec<f32>, Vec<f32>) = match robust_tone.as_ref() {
+        Some(r) if paired => (
+            evidence.source_weights.iter().zip(&r.weights).map(|(a, b)| a * b).collect(),
+            evidence.target_weights.iter().zip(&r.weights).map(|(a, b)| a * b).collect(),
+        ),
+        _ => (evidence.source_weights.clone(), evidence.target_weights.clone()),
+    };
+    // Per-knot DATA support: a knot in a luma region with no measured
+    // testimony must not pull the spline — an unsupported knot chasing the
+    // map's extrapolation is exactly how the p36 pair pegged
+    // contrast/shadows/whites (the spline bends over the evidenced region on
+    // the way to the phantom knot). Support is a TESTIMONY-COUNT question,
+    // never a frame-share one: 1.4% of a frame is still hundreds of
+    // measured pixels (the share form of this gate silenced the roundtrip
+    // fixture's whole highlight region). Paired path: inside the span the
+    // robust map points actually cover; marginal path: at least
+    // [`SUPPORT_MIN_PIXELS`] source pixels in the knot's range. A
+    // populated-but-withheld range keeps its knot: its tone_map is pinned to
+    // identity and fitting that identity IS the refusal semantics.
+    let point_span = (correspondence.first().zip(correspondence.last()))
+        .map(|(first, last)| (first.0 - 1.0 / 32.0, last.0 + 1.0 / 32.0));
+    let n_pixels = sp.len().min(tp.len()) as f32;
+    let luma_supported = |user: f32| match point_span {
+        Some((lo, hi)) if paired => user >= lo && user <= hi,
+        _ => {
+            evidence.luma[evidence_luma_bin(user)].source_share * n_pixels
+                >= SUPPORT_MIN_PIXELS
+        }
+    };
+    let knot_support: [f32; 8] =
+        std::array::from_fn(|i| if luma_supported(render::TONE_KNOTS_X[i]) { 1.0 } else { 0.0 });
     let estimated_tone_map = |x: f32| {
         if correspondence.len() >= 6 {
             sample_tone_points(&correspondence, x)
@@ -1333,8 +1400,17 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure(
         previous = current;
         monotone
     });
+    let score_set: Vec<(f32, f32, f32)> = match robust_tone.as_ref() {
+        Some(r) if paired => r
+            .points
+            .iter()
+            .zip(&r.masses)
+            .map(|(&(x, y), &mass)| (x, y, mass))
+            .collect(),
+        _ => Vec::new(),
+    };
     let (ev, sliders) = if tone_deliverable {
-        fit_tone_sliders(&tone_map)
+        fit_tone_sliders_supported(&tone_map, &knot_support, &score_set)
     } else {
         (0.0, [0.0; 5])
     };
@@ -1393,8 +1469,19 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure(
             withheld_samples.push(raw);
         }
     }
+    // A residual-curve point may only claim a level the SOURCE actually
+    // populates: outside the evidenced luma domain the estimated map is pure
+    // extrapolation, and a control point there bends the rendered curve over
+    // real pixels (including full-resolution speculars the thumbnail never
+    // sampled) toward invented values — the same p36 mechanism the knot
+    // support closes for the sliders.
+    let supported_x = |x: f32| {
+        let user =
+            if base.base_curve.is_empty() { x } else { render::sample_lut(&base_lut, x) };
+        luma_supported(user)
+    };
     recipe.tone_curve = if tone_deliverable {
-        residual_tone_curve_with_samples(&recipe, &full_map, &withheld_samples)
+        residual_tone_curve_with_samples(&recipe, &full_map, &withheld_samples, &supported_x)
     } else {
         Vec::new()
     };
@@ -1421,11 +1508,11 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure(
     // per-channel curves rotate hue. Saturating first may amplify a latent
     // cast, but stage 5 fits the cast residual CLOSED-LOOP on the saturated
     // render, so it is measured and removed rather than compounded.
-    let t_chroma = weighted_mean_chroma(&tp, &evidence.target_weights).unwrap_or_else(|| mean_chroma(&tp));
+    let t_chroma = weighted_mean_chroma(&tp, &rw_target).unwrap_or_else(|| mean_chroma(&tp));
     let mut sat_pegged = false;
     for _ in 0..2 {
         let cur = pixels_of(&render::develop_preview(&s_img, &recipe));
-        let c_chroma = weighted_mean_chroma(&cur, &evidence.source_weights).unwrap_or_else(|| mean_chroma(&cur));
+        let c_chroma = weighted_mean_chroma(&cur, &rw_source).unwrap_or_else(|| mean_chroma(&cur));
         if c_chroma < 1e-4 {
             break;
         }
@@ -1443,13 +1530,15 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure(
         }
         recipe.saturation = round1(clamped);
     }
-    if moved_unsupported_hue_range_names(
-        &sp,
-        &pixels_of(&render::develop_preview(&s_img, &recipe)),
-        &evidence,
-    ).is_some() {
-        recipe.saturation = base.saturation;
-    }
+    // NOTE deliberately NO mid-pipeline hue veto here EITHER (it was tried
+    // in the evidence era and removed): the ordering comment above is the
+    // contract — saturation legitimately amplifies a latent cast and the
+    // cast stage then measures and removes it, so judging the SAT-ONLY
+    // render against the hue evidence vetoes exactly the amplification the
+    // next stage exists to fix (measured: the haze pair's +59 chase was
+    // reset by the blue-cast bands the cast stage went on to empty). The
+    // zero-evidence-band guard now rides the pipeline-END loop below, where
+    // the composed result is the thing being judged.
     // NOTE deliberately NO validation here: a correct saturation legitimately
     // makes every colour metric worse at THIS point in the pipeline (it
     // amplifies a latent cast into the channel means and the hue bands; the
@@ -1489,14 +1578,21 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure(
     // local masks, it belongs to the AI style-prompt path, not to
     // distribution matching.
     let (detail, detail_supported) = fit_detail_stage(&s_img, &tp, &evidence, &mut recipe);
+    // The paired voucher every hue-damage guard consults (see
+    // converges_toward): robust per-pixel weights plus each pixel's own
+    // paired target. None on marginal-path runs — strict doctrine.
+    let hue_vouch = robust_tone
+        .as_ref()
+        .filter(|_| paired)
+        .map(|r| (r.weights.as_slice(), tp.as_slice()));
     let fit_cast_stage = |recipe: &mut EditRecipe| -> CastOutcome {
         recipe.red_curve = Vec::new();
         recipe.green_curve = Vec::new();
         recipe.blue_curve = Vec::new();
         let cur = pixels_of(&render::develop_preview(&s_img, recipe));
-        recipe.red_curve = residual_channel_curve_weighted(&cur, &tp, 0, &evidence.source_weights, &evidence.target_weights);
-        recipe.green_curve = residual_channel_curve_weighted(&cur, &tp, 1, &evidence.source_weights, &evidence.target_weights);
-        recipe.blue_curve = residual_channel_curve_weighted(&cur, &tp, 2, &evidence.source_weights, &evidence.target_weights);
+        recipe.red_curve = residual_channel_curve_weighted(&cur, &tp, 0, &rw_source, &rw_target);
+        recipe.green_curve = residual_channel_curve_weighted(&cur, &tp, 1, &rw_source, &rw_target);
+        recipe.blue_curve = residual_channel_curve_weighted(&cur, &tp, 2, &rw_source, &rw_target);
         let mut out = CastOutcome::default();
         if !(recipe.red_curve.is_empty()
             && recipe.green_curve.is_empty()
@@ -1509,7 +1605,7 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure(
             // holds nowhere) and the rotation budget (nor a region re-hued
             // into hues it does hold — golden-sky case). The vetoes only ever
             // reject, never rescue.
-            out = cast_gate_outcome(&cur, &with_px, &tp, &evidence);
+            out = cast_gate_outcome(&cur, &with_px, &tp, &evidence, hue_vouch);
             if out.ratio_rejected || out.rehue_blocked {
                 recipe.red_curve = Vec::new();
                 recipe.green_curve = Vec::new();
@@ -1536,14 +1632,28 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure(
     // have not seen, because the saturation heuristic remains unvalidated by
     // construction. If you find a triggering pair, pin it in the tests.
     let sat_fitted = recipe.saturation;
-    let mut err_after = look_err_with_evidence(&pixels_of(&render::develop_preview(&s_img, &recipe)), &tp, &evidence);
-    while err_after > err_before + 1e-4 && recipe.saturation != 0.0 {
+    let mut end_px = pixels_of(&render::develop_preview(&s_img, &recipe));
+    let mut err_after = look_err_with_evidence(&end_px, &tp, &evidence);
+    // The zero-evidence hue guard is judged HERE, on the composed end state:
+    // saturation may amplify a latent cast mid-pipeline (the stage-3 note),
+    // but the FINISHED recipe must not move pixels blindly through hue bands
+    // no evidence covers — if it does, saturation is the shrinkable dial,
+    // with the cast curves refitted each step exactly like the error arm.
+    let mut end_moves_hue =
+        moved_unsupported_hue_range_names_vouched(&sp, &end_px, &evidence, hue_vouch)
+            .is_some();
+    while (err_after > err_before + 1e-4 || end_moves_hue) && recipe.saturation != 0.0 {
         let next = if recipe.saturation.abs() < 4.0 { 0.0 } else { recipe.saturation / 2.0 };
         recipe.saturation = round1(next);
         cast = fit_cast_stage(&mut recipe);
-        err_after = look_err_with_evidence(&pixels_of(&render::develop_preview(&s_img, &recipe)), &tp, &evidence);
+        end_px = pixels_of(&render::develop_preview(&s_img, &recipe));
+        err_after = look_err_with_evidence(&end_px, &tp, &evidence);
+        end_moves_hue =
+            moved_unsupported_hue_range_names_vouched(&sp, &end_px, &evidence, hue_vouch)
+                .is_some();
     }
     let sat_reduced = recipe.saturation != sat_fitted;
+    let vouched_bands = vouched_hue_band_names(&sp, &end_px, &evidence, hue_vouch);
     // TERMINAL do-no-harm: saturation is the loop's only shrinkable dial, so
     // it can exhaust at zero with the finished recipe STILL rendering farther
     // from the target than the untouched source (the tone/curve stages have
@@ -1616,6 +1726,9 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure(
             regressed: fit_regressed.then_some(joint_regressed),
             detail,
             detail_withheld: !detail_supported,
+            robust: robust_facts,
+            paired,
+            vouched_bands,
         },
     )
 }
@@ -1807,6 +1920,9 @@ fn fit_atmosphere_from_parts(
             regressed: fit_regressed.then_some(joint_regressed),
             detail,
             detail_withheld: !detail_supported,
+            robust: None,
+            paired: false,
+            vouched_bands: None,
         },
     )
 }
@@ -1948,7 +2064,7 @@ struct Measured<'a> {
 /// Split out from [`Measured`] precisely because the split is the contract for
 /// [`rescore_report`]: a recipe someone ADJUSTED after the solve can honestly
 /// re-derive everything on the measured side and nothing on this one.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct SolveFacts {
     /// The chroma chase hit this mode's model cap with demand to spare. The
     /// mode travels with the solve fact because `rescore_report` may classify
@@ -1968,6 +2084,20 @@ struct SolveFacts {
     regressed: Option<bool>,
     detail: (f32, f32),
     detail_withheld: bool,
+    /// Paired robust regression engaged and down-weighted this share of the
+    /// comparable pixels (plus the luma ranges holding the rejected mass).
+    /// `None` = the paired path did not run: nothing was rejected AND nothing
+    /// was measured — two silences the disclosure keeps apart by speaking
+    /// only when a measurement exists.
+    robust: Option<(f32, String)>,
+    /// The tone map came from paired pixels, not marginal CDF transport — the
+    /// summary must not claim the target is unaligned when the solve just
+    /// used its alignment.
+    paired: bool,
+    /// One-sided hue bands that vouched convergence carried movement through
+    /// on the finished render — disclosed so the withheld-note's "vetoed
+    /// movement" claim is never silently contradicted.
+    vouched_bands: Option<String>,
 }
 
 /// Build the rationale, the typed notes and the confidence of ONE fit report.
@@ -1994,6 +2124,10 @@ fn compose_report(mut recipe: EditRecipe, m: Measured<'_>, solve: SolveFacts) ->
     // fragment inside an arg would stay English in the zh rendering.
     let summary_key = match m.mode {
         FitMode::Atmosphere => keys::FIT_SUMMARY_ATMOSPHERE,
+        FitMode::Full if solve.paired && recipe.tone_curve.is_empty() => {
+            keys::FIT_SUMMARY_NO_CURVE_PAIRED
+        }
+        FitMode::Full if solve.paired => keys::FIT_SUMMARY_WITH_CURVE_PAIRED,
         FitMode::Full if recipe.tone_curve.is_empty() => keys::FIT_SUMMARY_NO_CURVE,
         FitMode::Full => keys::FIT_SUMMARY_WITH_CURVE,
     };
@@ -2116,6 +2250,34 @@ fn compose_report(mut recipe: EditRecipe, m: Measured<'_>, solve: SolveFacts) ->
                     ("one_sided", if one_sided.is_empty() { "none".into() } else { one_sided }),
                     ("sparse", if sparse.is_empty() { "none".into() } else { sparse }),
                     ("divergent", if divergent.is_empty() { "none".into() } else { divergent }),
+                ],
+            ),
+        );
+    }
+    if let Some(bands) = &solve.vouched_bands {
+        push_note(
+            &mut rationale,
+            &mut notes,
+            Note::new(
+                keys::FIT_NOTE_VOUCHED_CONVERGENCE,
+                vec![("bands", bands.clone())],
+            ),
+        );
+    }
+    if let Some((share, ranges)) = &solve.robust
+        && *share >= ROBUST_REJECT_DISCLOSE_MIN
+    {
+        push_note(
+            &mut rationale,
+            &mut notes,
+            Note::new(
+                keys::FIT_NOTE_ROBUST_REJECTED,
+                vec![
+                    ("pct", format!("{:.0}", share * 100.0)),
+                    (
+                        "ranges",
+                        if ranges.is_empty() { "scattered".into() } else { ranges.clone() },
+                    ),
                 ],
             ),
         );
@@ -2332,6 +2494,10 @@ pub fn rescore_report(
             regressed: None,
             detail: (recipe.clarity, recipe.texture),
             detail_withheld: false,
+            robust: None,
+            paired: carried(keys::FIT_SUMMARY_WITH_CURVE_PAIRED)
+                || carried(keys::FIT_SUMMARY_NO_CURVE_PAIRED),
+            vouched_bands: None,
         },
     )
 }
@@ -2351,6 +2517,7 @@ fn cast_gate_outcome(
     with_px: &[[f32; 3]],
     tp: &[[f32; 3]],
     evidence: &EvidenceModel,
+    vouch: Option<(&[f32], &[[f32; 3]])>,
 ) -> CastOutcome {
     let err_without = look_err_with_evidence(cur, tp, evidence);
     CastOutcome {
@@ -2360,7 +2527,8 @@ fn cast_gate_outcome(
             && evidence.identifiability < 0.25,
         rehue_blocked: cast_paints_foreign_hues_weighted(cur, with_px, tp, evidence)
             || cast_rotates_a_region_weighted(cur, with_px, evidence)
-            || moved_unsupported_hue_range_names(cur, with_px, evidence).is_some(),
+            || moved_unsupported_hue_range_names_vouched(cur, with_px, evidence, vouch)
+                .is_some(),
     }
 }
 
@@ -2606,87 +2774,274 @@ const UNREPRESENTED_WB_RB: f32 = 0.02;
 /// Robust conditional tone observations from the same evidence pixels on
 /// both sides. Unlike marginal CDF pairing, these points retain the question
 /// "what target value did this supported source range become?".
-fn evidence_tone_points(
+/// One robust paired-regression estimate of the tone map, shared by the
+/// global and the zoned tone stages (one estimator, two call sites — the
+/// solver family must not fork).
+///
+/// Identification: samples are PAIRED at equal raster index, so this is only
+/// called on same-frame, same-grid pairs (the caller gates on that). The map
+/// is estimated per luma bin as a Tukey-biweight IRLS MEAN (median start), so
+/// a content-divergent sub-population — invented clouds, a moved subject —
+/// loses weight by the estimator's own influence function instead of by a
+/// hand-set mask; a plain least-squares mean would be dragged.
+///
+/// The returned per-pixel weights extend the verdict to the CHROMATIC
+/// population (its own robust scale — a legitimate global colour edit
+/// inflates every chromatic residual uniformly and must not mass-reject),
+/// so the saturation and cast stages can compose them with the evidence
+/// weights: evidence answers "is this pixel measurable at all", the robust
+/// weight answers "is this pixel consistent with one global develop".
+pub(crate) struct PairedRobustTone {
+    /// Monotone map estimate: (weighted-mean x, robust y) per populated bin.
+    pub points: Vec<(f32, f32)>,
+    /// Evidence×robust mass behind each point — the model-selection score
+    /// weights a point by the pixels that actually testify there.
+    pub masses: Vec<f32>,
+    /// Per-pixel robust weight on the shared raster (1.0 where not sampled).
+    pub weights: Vec<f32>,
+    /// Evidence-weighted share of sampled pixels with robust weight < 0.5.
+    pub rejected_share: f32,
+    /// Evidence luma-range labels holding at least 10% of the rejected mass.
+    pub rejected_ranges: String,
+}
+
+const ROBUST_TUKEY_C: f32 = 4.685;
+const ROBUST_SCALE_FLOOR: f32 = 2.0 / 255.0;
+const ROBUST_IRLS_ROUNDS: usize = 3;
+/// Below this rejected share the disclosure stays silent — JPEG noise alone
+/// rejects a stray pixel or two and a note for that would be crying wolf.
+pub(crate) const ROBUST_REJECT_DISCLOSE_MIN: f32 = 0.02;
+/// A chromatic pair is vouched only while its hue movement stays within this
+/// many degrees of the class's dominant direction. One global develop moves
+/// hues COHERENTLY (a cast is a smooth per-channel map, at most a few tens
+/// of degrees, one way), so the residual-magnitude Tukey alone is blind to a
+/// content flip that hides under a frame-wide recolour's inflated scale
+/// (measured: the golden-sky fixture's 171° sky flip rode a warm rock
+/// grade's scale and every pixel came back vouched). Casts stay comfortably
+/// inside 60°; content flips live far outside it.
+const HUE_VOUCH_COHERENCE_DEG: f32 = 60.0;
+/// Enough testimony to trust a marginal map value in a luma range: an
+/// absolute pixel count, deliberately NOT a frame share (1.4% of a 384-edge
+/// frame is ~350 measured pixels — plenty; the share form of this gate
+/// silenced whole regions). 32 matches the robust estimator's own sample
+/// floor.
+pub(crate) const SUPPORT_MIN_PIXELS: f32 = 32.0;
+
+fn weighted_median_of(mut pairs: Vec<(f32, f32)>) -> f32 {
+    // (value, weight); callers guarantee non-empty with positive total weight.
+    pairs.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let total: f32 = pairs.iter().map(|v| v.1).sum();
+    let mut acc = 0.0;
+    for &(value, weight) in &pairs {
+        acc += weight;
+        if acc >= 0.5 * total {
+            return value;
+        }
+    }
+    pairs.last().map(|v| v.0).unwrap_or(0.0)
+}
+
+/// A vouched pixel's move counts as CONVERGENCE when it lands strictly
+/// closer to its own paired target — the shared predicate behind every
+/// hue-damage guard's paired exemption (one definition, rule 09).
+fn converges_toward(target: &[f32; 3], before: &[f32; 3], after: &[f32; 3]) -> bool {
+    let dist =
+        |p: &[f32; 3]| (0..3).map(|c| (p[c] - target[c]).abs()).fold(0.0f32, f32::max);
+    dist(after) + 1e-3 < dist(before)
+}
+
+fn tukey_weight(residual: f32, scale: f32) -> f32 {
+    let u = residual / (ROBUST_TUKEY_C * scale);
+    if u.abs() >= 1.0 { 0.0 } else { (1.0 - u * u) * (1.0 - u * u) }
+}
+
+pub(crate) fn paired_robust_tone(
     sp: &[[f32; 3]],
     tp: &[[f32; 3]],
-    evidence: &EvidenceModel,
-) -> Vec<(f32, f32)> {
-    const BINS: usize = 32;
-    let mut bins: Vec<Vec<(f32, f32, f32)>> = vec![Vec::new(); BINS];
-    for (i, (s, t)) in sp.iter().zip(tp).enumerate() {
-        if !is_neutralish(s) || !is_neutralish(t) {
+    pair_weight: &dyn Fn(usize) -> f32,
+    neutral_gated: bool,
+) -> Option<PairedRobustTone> {
+    // 64 bins: finer piecewise-linear resolution against smooth engine
+    // curves at negligible cost (the haze fixture moved 0.0228 -> 0.0225 end
+    // error on this alone — small, kept because the 8-member bin floor below
+    // already keeps sparse bins out, so extra resolution costs nothing).
+    const BINS: usize = 64;
+    let n = sp.len().min(tp.len());
+    // (x, y, evidence weight, raster index) for the tone samples.
+    let mut samples: Vec<(f32, f32, f32, usize)> = Vec::new();
+    for i in 0..n {
+        let (s, t) = (&sp[i], &tp[i]);
+        if neutral_gated && (!is_neutralish(s) || !is_neutralish(t)) {
             continue;
         }
-        let weight = evidence
-            .source_weights
-            .get(i)
-            .copied()
-            .unwrap_or(0.0)
-            .min(evidence.target_weights.get(i).copied().unwrap_or(0.0));
-        if weight <= 0.0 {
+        let w = pair_weight(i);
+        if w <= 0.0 {
             continue;
         }
-        let x = luma601(s);
-        let bin = ((x * BINS as f32).floor() as usize).min(BINS - 1);
-        bins[bin].push((x, luma601(t), weight));
+        samples.push((luma601(s), luma601(t), w, i));
     }
-    let mut points = Vec::new();
-    for mut bin in bins {
-        let total = bin.iter().map(|v| v.2).sum::<f32>();
-        if bin.len() < 32 || total <= 1e-4 {
-            continue;
+    if samples.len() < 32 {
+        return None;
+    }
+    let mut robust = vec![1.0f32; samples.len()];
+    let mut points: Vec<(f32, f32)> = Vec::new();
+    let mut masses: Vec<f32> = Vec::new();
+    for round in 0..=ROBUST_IRLS_ROUNDS {
+        // Map estimate under the current weights: per-bin Tukey-weighted mean
+        // (round 0 starts from the weighted MEDIAN — the influence function
+        // needs a resistant start or the first residuals are already dragged).
+        let mut bins: Vec<Vec<usize>> = vec![Vec::new(); BINS];
+        for (k, &(x, ..)) in samples.iter().enumerate() {
+            bins[((x * BINS as f32).floor() as usize).min(BINS - 1)].push(k);
         }
-        bin.sort_by(|a, b| a.1.total_cmp(&b.1));
-        let mut acc = 0.0;
-        let mut y = bin[bin.len() / 2].1;
-        for &(_, value, weight) in &bin {
-            acc += weight;
-            if acc >= 0.5 * total {
-                y = value;
-                break;
+        points.clear();
+        masses.clear();
+        for members in &bins {
+            let total: f32 = members.iter().map(|&k| samples[k].2 * robust[k]).sum();
+            if members.len() < 8 || total <= 1e-4 {
+                continue;
+            }
+            masses.push(total);
+            let y = if round == 0 {
+                weighted_median_of(
+                    members.iter().map(|&k| (samples[k].1, samples[k].2)).collect(),
+                )
+            } else {
+                members.iter().map(|&k| samples[k].1 * samples[k].2 * robust[k]).sum::<f32>()
+                    / total
+            };
+            let x = members.iter().map(|&k| samples[k].0 * samples[k].2 * robust[k]).sum::<f32>()
+                / total;
+            points.push((x, y));
+        }
+        if points.len() < 2 {
+            return None;
+        }
+        let mut order: Vec<usize> = (0..points.len()).collect();
+        order.sort_by(|&a, &b| points[a].0.total_cmp(&points[b].0));
+        points = order.iter().map(|&k| points[k]).collect();
+        masses = order.iter().map(|&k| masses[k]).collect();
+        // Monotone backstop: a real tone map is monotone; bin noise is not
+        // allowed to fake a reversal the slider model would then chase.
+        for k in 1..points.len() {
+            if points[k].1 < points[k - 1].1 {
+                points[k].1 = points[k - 1].1;
             }
         }
-        let x = bin.iter().map(|v| v.0 * v.2).sum::<f32>() / total;
-        points.push((x, y));
+        if round == ROBUST_IRLS_ROUNDS {
+            break;
+        }
+        let residuals: Vec<f32> = samples
+            .iter()
+            .map(|&(x, y, ..)| (y - sample_tone_points(&points, x)).abs())
+            .collect();
+        let scale = (1.4826
+            * weighted_median_of(
+                residuals.iter().zip(&samples).map(|(&r, s)| (r, s.2)).collect(),
+            ))
+        .max(ROBUST_SCALE_FLOOR);
+        for (w, &r) in robust.iter_mut().zip(&residuals) {
+            *w = tukey_weight(r, scale);
+        }
     }
-    points.sort_by(|a, b| a.0.total_cmp(&b.0));
-    points
-}
-
-fn tone_correspondence_is_credible(
-    sp: &[[f32; 3]],
-    tp: &[[f32; 3]],
-    evidence: &EvidenceModel,
-) -> bool {
-    let mut chromatic = 0.0f32;
-    let mut rotated = 0.0f32;
-    for (i, (s, t)) in sp.iter().zip(tp).enumerate() {
-        let weight = evidence
-            .source_weights
-            .get(i)
-            .copied()
-            .unwrap_or(0.0)
-            .min(evidence.target_weights.get(i).copied().unwrap_or(0.0));
-        let sc = s[0].max(s[1]).max(s[2]) - s[0].min(s[1]).min(s[2]);
-        let tc = t[0].max(t[1]).max(t[2]) - t[0].min(t[1]).min(t[2]);
-        if weight <= 0.0 || sc < 0.06 || tc < 0.06 {
+    // Verdict for EVERY paired pixel (the chromatic population included) via
+    // the RGB transport residual: scale the source pixel by the fitted luma
+    // gain and measure the worst channel miss. Chromatic pixels get their own
+    // robust scale — a global saturation/WB edit moves all of them together
+    // and only pixels far off THAT bulk are inconsistent.
+    let mut weights = vec![1.0f32; n];
+    // (residual, index, weight, chromatic?): the two classes get SEPARATE
+    // robust scales. The transport residual models only the luma gain, so a
+    // legitimate saturation/WB edit inflates every CHROMATIC residual
+    // together — under one shared scale the neutral pixels' near-zero
+    // residuals drag the median down and the whole chromatic population
+    // (exactly the saturation evidence) is systematically down-weighted
+    // (measured on the haze fixture: the colour stages came back empty).
+    // Within its own class, a uniform edit clusters around the class median
+    // and keeps weight; only pixels far off THEIR OWN bulk reject.
+    let mut all_residuals: Vec<(f32, usize, f32, bool, Option<f32>)> = Vec::new();
+    let (mut dir_sin, mut dir_cos) = (0.0f64, 0.0f64);
+    for i in 0..n {
+        let w = pair_weight(i);
+        if w <= 0.0 {
             continue;
         }
-        chromatic += weight;
-        let sh = render::rgb_to_hsl(s[0], s[1], s[2]).0 * 360.0;
-        let th = render::rgb_to_hsl(t[0], t[1], t[2]).0 * 360.0;
-        let mut delta = (sh - th).abs() % 360.0;
-        if delta > 180.0 {
-            delta = 360.0 - delta;
+        let (s, t) = (&sp[i], &tp[i]);
+        let l = luma601(s);
+        let gain = sample_tone_points(&points, l).clamp(0.0, 1.0) / l.max(1e-4);
+        let residual = (0..3)
+            .map(|c| (t[c] - (s[c] * gain).clamp(0.0, 1.0)).abs())
+            .fold(0.0f32, f32::max);
+        // Hue movement of the pair, where BOTH sides carry measurable hue —
+        // the coherence voucher's raw material.
+        let s_chroma = s[0].max(s[1]).max(s[2]) - s[0].min(s[1]).min(s[2]);
+        let t_chroma = t[0].max(t[1]).max(t[2]) - t[0].min(t[1]).min(t[2]);
+        let hue_delta = (s_chroma >= 0.06 && t_chroma >= 0.06).then(|| {
+            let sh = render::rgb_to_hsl(s[0], s[1], s[2]).0 * 360.0;
+            let th = render::rgb_to_hsl(t[0], t[1], t[2]).0 * 360.0;
+            let mut d = th - sh;
+            while d > 180.0 { d -= 360.0; }
+            while d < -180.0 { d += 360.0; }
+            d
+        });
+        if let Some(d) = hue_delta {
+            let rad = (d as f64).to_radians();
+            dir_sin += w as f64 * rad.sin();
+            dir_cos += w as f64 * rad.cos();
         }
-        if delta >= 20.0 {
-            rotated += weight;
+        all_residuals.push((residual, i, w, !is_neutralish(s), hue_delta));
+    }
+    if all_residuals.is_empty() {
+        return None;
+    }
+    let class_dir = dir_sin.atan2(dir_cos).to_degrees() as f32;
+    let scale_of = |chromatic: bool| -> f32 {
+        let class: Vec<(f32, f32)> = all_residuals
+            .iter()
+            .filter(|&&(_, _, _, c, _)| c == chromatic)
+            .map(|&(r, _, w, ..)| (r, w))
+            .collect();
+        if class.is_empty() {
+            ROBUST_SCALE_FLOOR
+        } else {
+            (1.4826 * weighted_median_of(class)).max(ROBUST_SCALE_FLOOR)
+        }
+    };
+    let scales = [scale_of(false), scale_of(true)];
+    let mut rejected = 0.0f32;
+    let mut total = 0.0f32;
+    let mut range_rejected = [0.0f32; EVIDENCE_LUMA_BINS];
+    for &(residual, i, w, chromatic, hue_delta) in &all_residuals {
+        let scale = scales[chromatic as usize];
+        let coherent = hue_delta.is_none_or(|d| {
+            let mut dev = (d - class_dir).abs() % 360.0;
+            if dev > 180.0 { dev = 360.0 - dev; }
+            dev <= HUE_VOUCH_COHERENCE_DEG
+        });
+        let rw = if coherent { tukey_weight(residual, scale) } else { 0.0 };
+        weights[i] = rw;
+        total += w;
+        if rw < 0.5 {
+            rejected += w;
+            range_rejected[evidence_luma_bin(luma601(&sp[i]))] += w;
         }
     }
-    chromatic <= 1e-4 || rotated / chromatic < 0.10
+    let rejected_share = if total > 0.0 { rejected / total } else { 0.0 };
+    let rejected_ranges = range_rejected
+        .iter()
+        .enumerate()
+        .filter(|&(_, &mass)| rejected > 0.0 && mass >= 0.10 * rejected)
+        .map(|(bin, _)| {
+            let lo = bin as f32 / EVIDENCE_LUMA_BINS as f32;
+            let hi = (bin + 1) as f32 / EVIDENCE_LUMA_BINS as f32;
+            format!("luma[{lo:.2}-{hi:.2}]")
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    Some(PairedRobustTone { points, masses, weights, rejected_share, rejected_ranges })
 }
 
-fn sample_tone_points(points: &[(f32, f32)], x: f32) -> f32 {
+pub(crate) fn sample_tone_points(points: &[(f32, f32)], x: f32) -> f32 {
     let Some(&(first_x, first_y)) = points.first() else { return x };
     if x <= first_x {
         return first_y + (x - first_x);
@@ -2699,6 +3054,39 @@ fn sample_tone_points(points: &[(f32, f32)], x: f32) -> f32 {
     }
     let &(last_x, last_y) = points.last().unwrap();
     last_y + (x - last_x)
+}
+
+/// Per-knot data support for an arbitrary weighted population (the zoned
+/// fit's form of the global path's support closure): with a usable paired
+/// map, a knot is supported inside the span the map points cover; otherwise
+/// it needs [`SUPPORT_MIN_PIXELS`] of weight mass in its luma range — a
+/// count, never a share (see the global closure's doc). A knot outside the
+/// population must not pull the spline over the region it does occupy.
+pub(crate) fn knot_support_for(
+    px: &[[f32; 3]],
+    weights: &[f32],
+    points: &[(f32, f32)],
+) -> [f32; 8] {
+    if points.len() >= 6 {
+        let (lo, hi) = (points[0].0 - 1.0 / 32.0, points[points.len() - 1].0 + 1.0 / 32.0);
+        return std::array::from_fn(|i| {
+            let x = render::TONE_KNOTS_X[i];
+            if x >= lo && x <= hi { 1.0 } else { 0.0 }
+        });
+    }
+    let mut mass = [0.0f32; EVIDENCE_LUMA_BINS];
+    for (p, &w) in px.iter().zip(weights) {
+        if w > 0.0 {
+            mass[evidence_luma_bin(luma601(p))] += w;
+        }
+    }
+    std::array::from_fn(|i| {
+        if mass[evidence_luma_bin(render::TONE_KNOTS_X[i])] >= SUPPORT_MIN_PIXELS {
+            1.0
+        } else {
+            0.0
+        }
+    })
 }
 
 /// Magnitude prior for the tone solve. The 5-slider knot system is
@@ -2720,8 +3108,31 @@ const TONE_PRIOR: f64 = 0.01;
 /// knots; keep the (ev, sliders) minimising the PENALISED clamped-solution
 /// score `SSE + TONE_PRIOR·Σs²` — the same prior in the solve and in the
 /// model selection, so the exposure scan cannot smuggle the degeneracy back.
+#[cfg(test)]
 pub(crate) fn fit_tone_sliders(tone_map: &impl Fn(f32) -> f32) -> (f32, [f32; 5]) {
-    let targets: Vec<f32> = render::TONE_KNOTS_X.iter().map(|&x| tone_map(x)).collect();
+    fit_tone_sliders_supported(tone_map, &[1.0; 8], &[])
+}
+
+/// [`fit_tone_sliders`] with per-knot DATA support composed into the knot
+/// weights. Engine authority says how far a slider can move a knot; support
+/// says whether any measured pixel testifies there. A knot with no testimony
+/// contributes nothing to the solve or the model-selection score, so the
+/// exposure scan cannot buy phantom-knot fit either. Fewer than two supported
+/// knots is no tone problem at all — return neutral instead of solving a
+/// one-point system.
+pub(crate) fn fit_tone_sliders_supported(
+    tone_map: &impl Fn(f32) -> f32,
+    support: &[f32; 8],
+    score_set: &[(f32, f32, f32)],
+) -> (f32, [f32; 5]) {
+    if support.iter().filter(|&&s| s > 0.0).count() < 2 {
+        return (0.0, [0.0; 5]);
+    }
+    // The engine cannot output past [0,1]; an estimated map may extrapolate
+    // there, and an unclamped target would price impossible demand into the
+    // supported knots' shared sliders.
+    let targets: Vec<f32> =
+        render::TONE_KNOTS_X.iter().map(|&x| tone_map(x).clamp(0.0, 1.0)).collect();
     let basis: Vec<[f32; 5]> =
         render::TONE_KNOTS_X.iter().map(|&x| render::tone_slider_basis(x)).collect();
 
@@ -2734,7 +3145,8 @@ pub(crate) fn fit_tone_sliders(tone_map: &impl Fn(f32) -> f32) -> (f32, [f32; 5]
         // sliders — and the solve models the SAME engine that will render the
         // result (an unweighted basis would ask saturated knots to explain
         // residual they can no longer move).
-        let weights = render::tone_knot_weights(ev);
+        let authority = render::tone_knot_weights(ev);
+        let weights: [f32; 8] = std::array::from_fn(|i| authority[i] * support[i]);
         let resid: Vec<f64> = render::TONE_KNOTS_X
             .iter()
             .zip(&targets)
@@ -2757,16 +3169,46 @@ pub(crate) fn fit_tone_sliders(tone_map: &impl Fn(f32) -> f32) -> (f32, [f32; 5]
         let sol = solve5(ata, atb);
         let s: [f32; 5] = std::array::from_fn(|i| (sol[i] as f32).clamp(-1.0, 1.0));
         let penalty: f64 = s.iter().map(|&v| TONE_PRIOR * v as f64 * v as f64).sum();
-        let score: f64 = basis
-            .iter()
-            .zip(&resid)
-            .zip(&weights)
-            .map(|((b, r), &w)| {
-                let fit: f64 = (0..5).map(|i| (w * b[i]) as f64 * s[i] as f64).sum();
-                (r - fit) * (r - fit)
-            })
-            .sum::<f64>()
-            + penalty;
+        // Model selection. With a paired score set, the candidate is judged
+        // through the ENGINE'S OWN spline at the robust map points, weighted
+        // by the pixel mass behind each point — the 8-knot residual cannot
+        // tell near-collinear (ev, sliders) combinations apart (their splines
+        // agree AT the knots and differ between them, where the pixels live),
+        // and the magnitude prior then tie-breaks toward the small-slider
+        // impostor (measured: the roundtrip truth ev+0.35/highlights −25 lost
+        // to ev+0.20/highlights +8). Normalised to the 8-knot scale so
+        // TONE_PRIOR keeps its calibrated strength.
+        let score: f64 = if score_set.is_empty() {
+            // Weighted-least-squares scoring, consistent with the normal
+            // equations above: the row's weight multiplies the WHOLE
+            // residual, so a zero-weight knot contributes nothing. The old
+            // form weighted only the model half ((r − w·fit)²), which
+            // charged every candidate a zero-authority knot's RAW residual —
+            // and since that charge varies with ev, the scan minimised
+            // phantom-knot residuals no slider could touch (the unit gate
+            // test caught it: identity-on-supported solved to ev +0.40).
+            basis
+                .iter()
+                .zip(&resid)
+                .zip(&weights)
+                .map(|((b, r), &w)| {
+                    let fit: f64 = (0..5).map(|i| b[i] as f64 * s[i] as f64).sum();
+                    let d = w as f64 * (r - fit);
+                    d * d
+                })
+                .sum::<f64>()
+                + penalty
+        } else {
+            let knots = render::tone_model_knots(ev, s);
+            let mut sse = 0.0f64;
+            let mut mass = 0.0f64;
+            for &(x, y, m) in score_set {
+                let d = (render::sample_tone_model(&knots, x) - y.clamp(0.0, 1.0)) as f64;
+                sse += m as f64 * d * d;
+                mass += m as f64;
+            }
+            if mass > 0.0 { 8.0 * sse / mass + penalty } else { penalty }
+        };
         if (score as f32) < best.2 {
             best = (ev, s, score as f32);
         }
@@ -2833,6 +3275,7 @@ fn residual_tone_curve_with_samples(
     recipe: &EditRecipe,
     tone_map: &impl Fn(f32) -> f32,
     extra_xs: &[f32],
+    supported: &impl Fn(f32) -> bool,
 ) -> Vec<CurvePoint> {
     debug_assert!(recipe.tone_curve.is_empty(), "fit the residual before setting a curve");
     let lut = render::build_tone_lut(recipe);
@@ -2867,6 +3310,9 @@ fn residual_tone_curve_with_samples(
     let mut pts: Vec<CurvePoint> = Vec::with_capacity(LEVELS);
     let (mut prev_in, mut prev_out) = (-1i32, 0i32);
     for x in xs {
+        if !supported(x) {
+            continue; // no source pixels there — the map is extrapolation
+        }
         let sx = render::sample_lut(&lut, x); // engine output before the residual curve
         let y = tone_map(x).clamp(0.0, 1.0); // desired output
         max_dev = max_dev.max((y - sx).abs());
@@ -2887,7 +3333,7 @@ fn residual_tone_curve_with_samples(
 
 #[cfg(test)]
 fn residual_tone_curve(recipe: &EditRecipe, tone_map: &impl Fn(f32) -> f32) -> Vec<CurvePoint> {
-    residual_tone_curve_with_samples(recipe, tone_map, &[])
+    residual_tone_curve_with_samples(recipe, tone_map, &[], &|_| true)
 }
 
 // --------------------------------------------------------------------------
@@ -3125,6 +3571,10 @@ fn cast_paints_foreign_hues_weighted(
     tp: &[[f32; 3]],
     evidence: &EvidenceModel,
 ) -> bool {
+    // No paired-convergence exemption here either — painting hue mass the
+    // target holds nowhere is capability policy like the rotation gate; the
+    // vanished-population case it guards (canyon) is content divergence the
+    // voucher must never launder.
     let Some(foreign) = foreign_hue_bins_weighted(tp, &evidence.target_hue_weights) else {
         return false;
     };
@@ -3192,6 +3642,12 @@ fn cast_rotates_a_region_weighted(
     with_px: &[[f32; 3]],
     evidence: &EvidenceModel,
 ) -> bool {
+    // Deliberately NO paired-convergence exemption here (unlike the
+    // zero-evidence-band guard): rotating a region is a TOOL-CAPABILITY
+    // policy, not a measurability question — even a rotation that converges
+    // on the analysis raster is per-band HSL's job, and a global cast that
+    // performs it drags every same-hue pixel the raster never sampled
+    // (golden-sky case, pinned).
     let mut hit = 0.0f32;
     let mut total = 0.0f32;
     for (i, (c, wpx)) in cur.iter().zip(with_px).enumerate() {
@@ -3224,7 +3680,8 @@ pub(crate) fn moved_unsupported_range_names(
     with_px: &[[f32; 3]],
     evidence: &EvidenceModel,
 ) -> Option<(String, String)> {
-    let (luma, hue) = moved_unsupported_range_hits(cur, with_px, evidence);
+    let hits = moved_unsupported_range_hits(cur, with_px, evidence, None);
+    let (luma, hue) = (hits.luma, hits.hue);
     if luma.0 == 0 && hue.0 == 0 { return None; }
     let names = |hits: &[bool], ranges: &[EvidenceRange]| {
         hits.iter().zip(ranges).filter_map(|(&hit, range)| hit.then_some(range.label.as_str())).collect::<Vec<_>>().join(", ")
@@ -3237,7 +3694,7 @@ pub(crate) fn moved_unsupported_luma_range_names(
     with_px: &[[f32; 3]],
     evidence: &EvidenceModel,
 ) -> Option<String> {
-    let (luma, _) = moved_unsupported_range_hits(cur, with_px, evidence);
+    let luma = moved_unsupported_range_hits(cur, with_px, evidence, None).luma;
     if luma.0 == 0 { return None; }
     Some(luma.1.iter().zip(&evidence.luma).filter_map(|(&hit, range)| hit.then_some(range.label.as_str())).collect::<Vec<_>>().join(", "))
 }
@@ -3247,7 +3704,20 @@ pub(crate) fn moved_unsupported_hue_range_names(
     with_px: &[[f32; 3]],
     evidence: &EvidenceModel,
 ) -> Option<String> {
-    let (_, hue) = moved_unsupported_range_hits(cur, with_px, evidence);
+    moved_unsupported_hue_range_names_vouched(cur, with_px, evidence, None)
+}
+
+/// [`moved_unsupported_hue_range_names`] with a per-pixel robust voucher for
+/// the evacuation exemption (see `moved_unsupported_range_hits`). Only the
+/// global END-STATE guard supplies one; every other caller keeps the strict
+/// doctrine.
+pub(crate) fn moved_unsupported_hue_range_names_vouched(
+    cur: &[[f32; 3]],
+    with_px: &[[f32; 3]],
+    evidence: &EvidenceModel,
+    vouch: Option<(&[f32], &[[f32; 3]])>,
+) -> Option<String> {
+    let hue = moved_unsupported_range_hits(cur, with_px, evidence, vouch).hue;
     if hue.0 == 0 { return None; }
     Some(hue.1.iter().zip(&evidence.hue).filter_map(|(&hit, range)| hit.then_some(range.label.as_str())).collect::<Vec<_>>().join(", "))
 }
@@ -3256,11 +3726,13 @@ fn moved_unsupported_range_hits(
     cur: &[[f32; 3]],
     with_px: &[[f32; 3]],
     evidence: &EvidenceModel,
-) -> ((usize, [bool; EVIDENCE_LUMA_BINS]), (usize, [bool; EVIDENCE_HUE_BANDS])) {
+    vouch: Option<(&[f32], &[[f32; 3]])>,
+) -> MovedRangeHits {
     let mut moved_luma = 0usize;
     let mut moved_hue = 0usize;
     let mut luma = [false; EVIDENCE_LUMA_BINS];
     let mut hue = [false; EVIDENCE_HUE_BANDS];
+    let mut vouched_hue = [false; EVIDENCE_HUE_BANDS];
     for (i, (before, after)) in cur.iter().zip(with_px).enumerate() {
         let unsupported_luma = source_luma_is_withheld(i, evidence);
         let unsupported_hue = source_hue_is_withheld(i, evidence);
@@ -3272,14 +3744,72 @@ fn moved_unsupported_range_hits(
             luma[evidence_luma_bin(luma601(pixel))] = true;
         }
         if unsupported_hue && let Some(pixel) = evidence.source_pixels.get(i) && let Some(band) = evidence_hue_band(pixel) {
-            moved_hue += 1;
-            hue[band] = true;
+            // VOUCHED convergence (the hue form of the luma rank-pairing
+            // doctrine, gated by the robust fit): on a paired run, a pixel
+            // whose transport residual the robust fit vouches for has its OWN
+            // paired target pixel — moving it TOWARD that target is
+            // convergence, not a blind move through an unmeasurable band
+            // (measured: the haze pair's blue-cast pixels sat in source-only
+            // Red/Blue, and un-casting them was vetoed by the very bands the
+            // cast invented; a band-topology exemption then failed the same
+            // pair again on pixels the cast's step caps left mid-way). A
+            // content-divergent pixel (the canyon pair's vanished reds are
+            // the reconstruction's doing, not an edit's) carries a large
+            // transport residual, earns no voucher, and keeps its veto.
+            // Callers with no paired verdict pass None and get the strict
+            // doctrine unchanged — the zoned colour probes do so
+            // deliberately (zone colour stays class-split withheld, the
+            // user-ratified rule).
+            let spatially = evidence.spatial_supported.get(i).copied().unwrap_or(false);
+            let converges = spatially
+                && vouch.is_some_and(|(weights, targets)| {
+                    weights.get(i).copied().unwrap_or(0.0) >= 0.5
+                        && targets
+                            .get(i)
+                            .is_some_and(|target| converges_toward(target, before, after))
+                });
+            if converges {
+                vouched_hue[band] = true;
+            } else {
+                moved_hue += 1;
+                hue[band] = true;
+            }
         }
     }
     let total = cur.len().max(1) as f32;
     if moved_luma as f32 / total < ROT_SHARE { moved_luma = 0; luma = [false; EVIDENCE_LUMA_BINS]; }
     if moved_hue as f32 / total < ROT_SHARE { moved_hue = 0; hue = [false; EVIDENCE_HUE_BANDS]; }
-    ((moved_luma, luma), (moved_hue, hue))
+    MovedRangeHits { luma: (moved_luma, luma), hue: (moved_hue, hue), vouched_hue }
+}
+
+/// The per-range verdicts of one blind-move audit: which withheld ranges were
+/// MOVED (the veto's subject) and which one-sided hue bands vouched
+/// convergence carried movement THROUGH — the second list exists so the
+/// disclosure can stop claiming "vetoed movement" about bands whose veto the
+/// voucher lifted (E-15: two different outcomes must not read the same).
+struct MovedRangeHits {
+    luma: (usize, [bool; EVIDENCE_LUMA_BINS]),
+    hue: (usize, [bool; EVIDENCE_HUE_BANDS]),
+    vouched_hue: [bool; EVIDENCE_HUE_BANDS],
+}
+
+/// Names of the one-sided hue bands that vouched convergence moved pixels
+/// through on the finished render — the disclosure's raw material.
+pub(crate) fn vouched_hue_band_names(
+    cur: &[[f32; 3]],
+    with_px: &[[f32; 3]],
+    evidence: &EvidenceModel,
+    vouch: Option<(&[f32], &[[f32; 3]])>,
+) -> Option<String> {
+    let hits = moved_unsupported_range_hits(cur, with_px, evidence, vouch);
+    let names = hits
+        .vouched_hue
+        .iter()
+        .zip(&evidence.hue)
+        .filter_map(|(&hit, range)| hit.then_some(range.label.as_str()))
+        .collect::<Vec<_>>()
+        .join(", ");
+    (!names.is_empty()).then_some(names)
 }
 
 fn moves_unsupported_luma_range(
@@ -3446,8 +3976,23 @@ fn tone_cdf_pair_weighted(
         for h in &mut hist { acc += *h; *h = acc / total; }
         hist
     };
-    let s = weighted(&s_n);
-    let t = weighted(&t_n);
+    // The SAME identification gates the unweighted twin (`tone_cdf_pair`)
+    // documents: the neutral gate only carries clean evidence when the same
+    // population is neutral on BOTH sides. This arm shipped without them, and
+    // the p36 calibration pair showed the cost live: the source's neutral
+    // class is its dark rock, the target's is its bright sky, and the gated
+    // quantile map sent 0.05 → 0.77 — a map the slider solve then pegged
+    // itself against. Population parity is judged on the pixels that carry
+    // evidence weight, floor and ratio exactly as the twin's contract states.
+    let s_total = evidence.source_weights.iter().filter(|&&w| w > 0.0).count();
+    let t_total = evidence.target_weights.iter().filter(|&&w| w > 0.0).count();
+    let share_s = s_n.len() as f32 / s_total.max(1) as f32;
+    let share_t = t_n.len() as f32 / t_total.max(1) as f32;
+    let gated = enough_evidence(s_n.len(), s_total)
+        && enough_evidence(t_n.len(), t_total)
+        && share_s.max(share_t) <= 1.75 * share_s.min(share_t);
+    let s = if gated { weighted(&s_n) } else { Vec::new() };
+    let t = if gated { weighted(&t_n) } else { Vec::new() };
     if s.iter().any(|&v| v > 0.0) && t.iter().any(|&v| v > 0.0) {
         (s, t)
     } else {
@@ -3459,7 +4004,6 @@ fn tone_cdf_pair_weighted(
 /// than 512 px. Shared between the per-side gate and the shared-class floor
 /// inside [`neutral_gate_misprediction`], so "enough to trust" means one
 /// thing.
-#[cfg(test)]
 fn enough_evidence(n: usize, total: usize) -> bool {
     n >= (total / 20).max(NEUTRAL_SHARED_MIN)
 }
@@ -3881,6 +4425,188 @@ mod tests {
     use super::*;
     use image::RgbImage;
 
+    /// The knot-support gate itself, pinned at the unit level: a knot with
+    /// no measured testimony must contribute NOTHING to the solve, however
+    /// loud the estimated map's extrapolation is there. Supervisor mutation
+    /// MC (drop `support` from the weight composition) goes red here. (At
+    /// the stage-wiring level the same mutation is absorbed by the spline
+    /// model-selection — defense in depth, not dead code: the marginal path
+    /// scores on knots alone and has only this gate.)
+    #[test]
+    fn unsupported_knots_cannot_pull_the_solve() {
+        let map = |x: f32| if x <= 0.66 { x } else { (x * 1.4).min(1.0) };
+        let gated: [f32; 8] = [1.0, 1.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0];
+        let (ev_g, s_g) = fit_tone_sliders_supported(&map, &gated, &[]);
+        assert!(
+            ev_g.abs() < 0.06 && s_g.iter().all(|v| v.abs() < 0.08),
+            "identity-on-supported must solve near-neutral: ev={ev_g} s={s_g:?}"
+        );
+        let (ev_a, s_a) = fit_tone_sliders_supported(&map, &[1.0; 8], &[]);
+        assert!(
+            ev_a.abs() >= 0.06 || s_a.iter().any(|v| v.abs() >= 0.08),
+            "premise: without the gate the phantom demand must visibly drag              the solve (ev={ev_a} s={s_a:?}) — if this stops holding, the              gate has nothing to guard and both asserts need re-deriving"
+        );
+    }
+
+    /// The robust estimator's reason to exist, pinned at the unit level: a
+    /// 30% invented sub-population in the target must lose weight BY THE
+    /// ESTIMATOR'S OWN MECHANISM and leave the map on the clean population's
+    /// truth. Supervisor mutation MA (Tukey weights forced to 1 = plain
+    /// least squares) drags the contaminated bins' means and this goes red.
+    #[test]
+    fn robust_regression_downweights_invented_target_content() {
+        let (w, h) = (128usize, 96usize);
+        let mut sp = Vec::with_capacity(w * h);
+        let mut tp = Vec::with_capacity(w * h);
+        for y in 0..h {
+            for x in 0..w {
+                let l = x as f32 / (w - 1) as f32;
+                sp.push([l, l, l]);
+                let mapped = (l * 1.3).min(1.0);
+                if x < w * 3 / 10 && y < h / 2 {
+                    // invented content: a flat bright warm patch nothing in
+                    // the source explains (15% of the frame, dark-source bins)
+                    tp.push([0.85, 0.75, 0.55]);
+                } else {
+                    tp.push([mapped, mapped, mapped]);
+                }
+            }
+        }
+        let fit = paired_robust_tone(&sp, &tp, &|_| 1.0, true)
+            .expect("an aligned synthetic pair must be estimable");
+        assert!(
+            fit.rejected_share > 0.10,
+            "the invented patch must be down-weighted, not averaged in              (rejected {:.3})",
+            fit.rejected_share
+        );
+        let mid = sample_tone_points(&fit.points, 0.5);
+        assert!(
+            (mid - 0.65).abs() < 0.03,
+            "the map must stay on the clean population's truth at x=0.5:              got {mid:.3}, truth 0.650"
+        );
+        // The invented patch sits over dark source columns — the disclosure
+        // ranges must name at least one of the ranges it poisoned.
+        assert!(
+            !fit.rejected_ranges.is_empty(),
+            "rejection must localise itself for the disclosure"
+        );
+    }
+
+    /// The pipeline half of the same contract: a fit over a partially
+    /// invented target must DISCLOSE what it rejected. Supervisor mutation MB
+    /// (delete the FIT_NOTE_ROBUST_REJECTED push in compose_report) goes red
+    /// here while the estimator itself still works.
+    #[test]
+    fn robust_rejection_reaches_the_disclosure() {
+        let src = synth();
+        let mut truth = EditRecipe { exposure_ev: 0.4, contrast: 12.0, ..Default::default() };
+        truth.clamp();
+        let rendered = render::develop_preview(&src, &truth);
+        let mut tgt = rendered.to_rgb8();
+        let (w, h) = (tgt.width(), tgt.height());
+        // Scattered 8x8 LUMA-PRESERVING recolour blocks (~12% of the frame):
+        // the luma structure is untouched, so neither the global divergence
+        // statistic nor the 3x3 spatial-evidence screen reacts — the
+        // PER-PIXEL robust verdict (chromatic residual + hue incoherence) is
+        // the only thing standing between the invented hues and the colour
+        // stages. Exactly the estimator's niche.
+        for by in 0..h / 8 {
+            for bx in 0..w / 8 {
+                if (bx * 3 + by * 5) % 8 == 0 {
+                    for dy in 0..8 {
+                        for dx in 0..8 {
+                            let p = *tgt.get_pixel(bx * 8 + dx, by * 8 + dy);
+                            let y = 0.299 * p[0] as f32 + 0.587 * p[1] as f32 + 0.114 * p[2] as f32;
+                            let warm = [
+                                (y * 1.45).min(255.0) as u8,
+                                (y * 0.95) as u8,
+                                (y * 0.35) as u8,
+                            ];
+                            tgt.put_pixel(bx * 8 + dx, by * 8 + dy, image::Rgb(warm));
+                        }
+                    }
+                }
+            }
+        }
+        let tgt = image::DynamicImage::ImageRgb8(tgt);
+        let report = fit_recipe(&src, &tgt);
+        let note = report
+            .notes
+            .iter()
+            .find(|n| n.key == crate::rationale::keys::FIT_NOTE_ROBUST_REJECTED)
+            .expect("a partially invented target must carry the rejection note");
+        let pct: f32 = note
+            .args
+            .iter()
+            .find(|(k, _)| *k == "pct")
+            .map(|(_, v)| v.parse().unwrap())
+            .expect("the note must carry the rejected percentage");
+        assert!(pct >= 5.0, "a 15% invented region must reject visibly, got {pct}%");
+    }
+
+    /// The user's own Lightroom develop as ground truth (p36: pure-global
+    /// tier — Exposure +0.50, Contrast +14, Highlights -44, Shadows +40,
+    /// Whites -18, Sat -18/Vib +24, custom curve; the export is pixel-aligned
+    /// with the neutral render by construction). LR's and this engine's
+    /// parameter spaces differ, so the pin is the directly comparable core:
+    /// the paired path must engage, exposure must land near the LR anchor,
+    /// and the residual/confidence must hold the measured line. Supervisor
+    /// mutation MC (knot support forced to all-ones) resurrects the phantom
+    /// -knot degeneracy (ev pegged at +3) and this goes red.
+    #[test]
+    fn p36_fixture_recovers_the_lightroom_exposure_anchor() {
+        let Some(root) = calibration_corpus() else { return };
+        // The source is the camera's EMBEDDED PREVIEW — the very base the
+        // CLI `match` solves against for a RAW (main.rs's calibration-stamp
+        // note) — so the LR anchor means the same thing here as it does on
+        // the command line.
+        let (n, t) = (root.join("p36-preview.jpg"), root.join("p36-target.jpg"));
+        if !n.is_file() || !t.is_file() {
+            eprintln!("SKIPPED p36 fixture test: pair not in the corpus");
+            return;
+        }
+        let src = image::open(n).unwrap();
+        let tgt = image::open(t).unwrap();
+        let report = fit_recipe(&src, &tgt);
+        eprintln!(
+            "P36_FIXTURE ev={} c={} h={} s={} sat={} err={:.4}->{:.4} conf={:.3}",
+            report.recipe.exposure_ev,
+            report.recipe.contrast,
+            report.recipe.highlights,
+            report.recipe.shadows,
+            report.recipe.saturation,
+            report.err_before,
+            report.err_after,
+            report.recipe.confidence
+        );
+        assert!(
+            report.notes.iter().any(|note| {
+                note.key == crate::rationale::keys::FIT_SUMMARY_WITH_CURVE_PAIRED
+                    || note.key == crate::rationale::keys::FIT_SUMMARY_NO_CURVE_PAIRED
+            }),
+            "the aligned export must take the paired path: {}",
+            report.recipe.rationale
+        );
+        // LR's Exposure2012 and this engine's exposure_ev are different
+        // parameter spaces (different base curves, different shoulder), so
+        // the anchor is directional and bounded rather than numeric: the
+        // LR +0.50 brightening must come back as a moderate positive ev
+        // (measured 0.75 with the residual curve carrying the shape), and
+        // NEVER as the phantom-knot degeneracy this test exists to catch
+        // (support mutation MC pegs ev at +3.0 and dies here).
+        assert!(
+            report.recipe.exposure_ev > 0.20 && report.recipe.exposure_ev < 1.20,
+            "exposure must land as a moderate positive move, got {}",
+            report.recipe.exposure_ev
+        );
+        assert!(report.err_after < 0.035, "residual {:.4}", report.err_after);
+        assert!(
+            report.recipe.confidence >= 0.55,
+            "confidence {:.3}",
+            report.recipe.confidence
+        );
+    }
+
     /// M-F1: `fit_tone_sliders` degraded to return neutral (or any solver
     /// regression that stops beating the ground truth under the engine's own
     /// penalised objective) — on a look the weighted model can represent
@@ -4217,7 +4943,27 @@ mod tests {
         assert!(report.divergence.d < DIVERGENCE_GLOBAL);
         assert!(supported > evidence.spatial_supported.len() / 2);
         assert!(luma_weight > 0.5);
-        assert!(report.recipe.exposure_ev.abs() < 0.01);
+        // The paired robust estimator turned this real pair from a terminal
+        // do-no-harm reset (0.031 -> 0.031, ev forced to 0) into a genuine
+        // fit (0.042 -> 0.026 look, joint 0.119 -> 0.033 measured): pin the
+        // fit, not the reset.
+        assert!(
+            report.err_after < report.err_before,
+            "the paired path must actually fit this pair: {:.4} -> {:.4}",
+            report.err_before,
+            report.err_after
+        );
+        assert!(report.err_after < 0.032, "look residual {:.4}", report.err_after);
+        assert!(
+            !report
+                .notes
+                .iter()
+                .any(|n| n.key == crate::rationale::keys::FIT_NOTE_REGRESSED),
+            "no do-no-harm terminal reset on a fittable pair: {}",
+            report.recipe.rationale
+        );
+        let joint = joint_after.expect("the joint family had an opinion before the fit");
+        assert!(joint.weighted < 0.08, "joint after {:.4}", joint.weighted);
     }
 
     #[test]
@@ -4901,10 +5647,17 @@ mod tests {
             "unsupported invented pixels must not withhold the cast stage"
         );
 
-        // Haze: the legacy fit accepted these curves because the foreign-hue
-        // census only asked whether their destination existed. The shared
-        // evidence model also sees material source hue bands disappear on the
-        // target side, so that move is unmeasurable and must be refused.
+        // Haze: under the marginal estimator this cast was refused — from
+        // unpaired statistics, moving a source-only band is indistinguishable
+        // from content mismatch. The PAIRED robust estimator changes the
+        // epistemics: every blue-cast pixel has its own paired target, the
+        // movement is hue-coherent with the global edit, and each moved pixel
+        // is individually vouched — so the cast that empties the cast-invented
+        // Red/Blue bands ships, WITH the vouched-passage disclosure beside
+        // the withheld note (E-15: the veto that held for unvouched pixels
+        // and the passage that was earned must both be readable). The real
+        // canyon reconstruction above stays refused: its vanished population
+        // is content, incoherent, unvouched.
         let clean = synth();
         let mut haze = EditRecipe {
             exposure_ev: -0.3,
@@ -4923,16 +5676,25 @@ mod tests {
         let report = fit_recipe(&base, &clean);
         let rec = &report.recipe;
         assert!(
-            rec.red_curve.is_empty() && rec.green_curve.is_empty() && rec.blue_curve.is_empty(),
-            "a cast may not move a vanished hue population: {}",
+            !rec.blue_curve.is_empty(),
+            "the vouched paired cast must un-cast the haze: {}",
             rec.rationale
         );
         assert!(
             report
                 .notes
                 .iter()
+                .any(|note| note.key == crate::rationale::keys::FIT_NOTE_VOUCHED_CONVERGENCE),
+            "vouched passage through the one-sided bands must be disclosed: {}",
+            rec.rationale
+        );
+        assert!(
+            !report
+                .notes
+                .iter()
                 .any(|note| note.key == crate::rationale::keys::FIT_NOTE_REHUE_BLOCKED),
-            "the evidence refusal must be disclosed"
+            "a vouched coherent un-cast is not a re-hue refusal: {}",
+            rec.rationale
         );
     }
 
@@ -5446,16 +6208,20 @@ mod tests {
             reached_max = reached_max.max(after);
         }
         {
+            // The paired robust estimator moved this pair OUT of the refusal
+            // bucket (vouched convergence un-casts the haze; 0.055 -> 0.015
+            // measured): no FAR classification of either kind rides, and the
+            // joint reading lands with the reached fixtures.
             let (base, clean) = haze_pair();
             let (before, after, _) = read(&base, &clean);
             let report = fit_recipe(&base, &clean);
-            assert!(report.notes.iter().any(|n| n.key == crate::rationale::keys::FIT_NOTE_JOINT_REFUSED), "haze refusal FAR note missing: {}", report.recipe.rationale);
-            assert!(!report.notes.iter().any(|n| n.key == crate::rationale::keys::FIT_NOTE_JOINT_MISS), "haze refusal emitted miss FAR note: {}", report.recipe.rationale);
+            assert!(!report.notes.iter().any(|n| n.key == crate::rationale::keys::FIT_NOTE_JOINT_REFUSED), "the vouched haze fit is no longer a refusal: {}", report.recipe.rationale);
+            assert!(!report.notes.iter().any(|n| n.key == crate::rationale::keys::FIT_NOTE_JOINT_MISS), "nor a miss: {}", report.recipe.rationale);
             assert!(
                 after <= before + crate::fit_zoned::JOINT_DRIFT_TOL,
                 "evidence-limited haze: {before:.4} -> {after:.4}"
             );
-            refusal_max = refusal_max.max(after);
+            reached_max = reached_max.max(after);
         }
         {
             let src = synth();
@@ -6028,7 +6794,7 @@ mod tests {
             !cast_rotates_a_region(&cur, &with_cast),
             "fixture must isolate unsupported-range motion from the legacy rotation veto"
         );
-        let outcome = cast_gate_outcome(&cur, &with_cast, &target, &evidence);
+        let outcome = cast_gate_outcome(&cur, &with_cast, &target, &evidence, None);
         assert!(
             outcome.rehue_blocked,
             "a global cast moved a zero-evidence hue range without triggering legacy vetoes: {outcome:?}"
@@ -6143,6 +6909,9 @@ mod tests {
                     regressed: None,
                     detail: (0.0, 0.0),
                     detail_withheld: false,
+                    robust: None,
+                    paired: false,
+                    vouched_bands: None,
                 },
             )
         };

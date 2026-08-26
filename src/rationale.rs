@@ -184,6 +184,36 @@ pub mod keys {
          the statistics are taken over. The fit matched them anyway, as it was \
          asked to — treat the result as unreliable.";
 
+    /// The paired-path summaries: same solve family, but the sentence must
+    /// not claim "the target is not pixel-aligned" on the pairs whose
+    /// alignment the solve just used.
+    pub const FIT_SUMMARY_WITH_CURVE_PAIRED: &str =
+        "Reverse-fit from a target rendition (paired robust match on corresponding \
+         pixels; local masks and per-band HSL are still not solved): robust paired \
+         luma regression → tone sliders + residual tone curve, chroma → saturation, \
+         per-channel cast curves. Residual look error {err_before} → {err_after}.";
+    pub const FIT_SUMMARY_NO_CURVE_PAIRED: &str =
+        "Reverse-fit from a target rendition (paired robust match on corresponding \
+         pixels; local masks and per-band HSL are still not solved): robust paired \
+         luma regression → tone sliders (no residual curve), chroma → saturation, \
+         per-channel cast curves. Residual look error {err_before} → {err_after}.";
+    pub const FIT_NOTE_ROBUST_REJECTED: &str =
+        " Paired robust fit: {pct}% of the comparable pixels disagreed with any \
+         single global develop of this source (concentrated in [{ranges}]) and \
+         were down-weighted before the controls were solved.";
+    pub const ZONE_ROBUST_REJECTED: &str =
+        " Zoned {label} robust fit down-weighted {pct}% of the overlapping pixels \
+         as content the two zones do not share (concentrated in [{ranges}]).";
+
+    /// The paired-doctrine refinement's disclosure half: when vouched
+    /// convergence carries movement through a one-sided hue band, the
+    /// withheld-note's "vetoed movement" claim must not stand alone.
+    pub const FIT_NOTE_VOUCHED_CONVERGENCE: &str =
+        " Paired convergence carried movement through one-sided hue bands \
+         [{bands}]: each moved pixel was individually vouched (robust \
+         weight, hue-coherent with the global edit) and moved toward its own \
+         paired target pixel; unvouched pixels kept the veto.";
+
     pub const FIT_NOTE_EVIDENCE_WITHHELD: &str =
         " Evidence gating withheld luma ranges [{luma_ranges}] and hue bands [{hue_bands}]. One-sided [{one_sided}] is UNMEASURABLE, not equal, so it vetoed movement. Sparse on both sides [{sparse}] was excluded from estimation but did not veto a move. Structurally divergent [{divergent}] also vetoed movement.";
     pub const FIT_NOTE_DETAIL: &str =

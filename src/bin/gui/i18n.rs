@@ -1495,6 +1495,28 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
       → tone sliders (no residual curve), chroma → saturation, per-channel cast \
       curves. Residual look error {err_before} → {err_after}.",
         "从目标成品反推（统计匹配；目标未像素对齐，故局部蒙版与分色相 HSL 无法恢复）：亮度 CDF → 影调滑杆（无残差曲线），色度 → 饱和度，逐通道色偏曲线。剩余观感误差 {err_before} → {err_after}。"),
+    ("Reverse-fit from a target rendition (paired robust match on corresponding \
+      pixels; local masks and per-band HSL are still not solved): robust paired \
+      luma regression → tone sliders + residual tone curve, chroma → saturation, \
+      per-channel cast curves. Residual look error {err_before} → {err_after}.",
+        "从目标成品反推（对应像素稳健配对匹配；局部蒙版与分色相 HSL 仍不解算）：稳健配对亮度回归 → 影调滑杆 + 残差影调曲线，色度 → 饱和度，逐通道色偏曲线。剩余观感误差 {err_before} → {err_after}。"),
+    ("Reverse-fit from a target rendition (paired robust match on corresponding \
+      pixels; local masks and per-band HSL are still not solved): robust paired \
+      luma regression → tone sliders (no residual curve), chroma → saturation, \
+      per-channel cast curves. Residual look error {err_before} → {err_after}.",
+        "从目标成品反推（对应像素稳健配对匹配；局部蒙版与分色相 HSL 仍不解算）：稳健配对亮度回归 → 影调滑杆（无残差曲线），色度 → 饱和度，逐通道色偏曲线。剩余观感误差 {err_before} → {err_after}。"),
+    (" Paired convergence carried movement through one-sided hue bands \
+      [{bands}]: each moved pixel was individually vouched (robust \
+      weight, hue-coherent with the global edit) and moved toward its own \
+      paired target pixel; unvouched pixels kept the veto.",
+        " 配对收敛携带移动穿过单侧色相带 [{bands}]：每个被移动的像素都逐一获得担保（稳健权重、与全局编辑色相相干），并向其自身的配对目标像素靠近；未获担保的像素维持否决。"),
+    (" Paired robust fit: {pct}% of the comparable pixels disagreed with any \
+      single global develop of this source (concentrated in [{ranges}]) and \
+      were down-weighted before the controls were solved.",
+        " 配对稳健拟合：{pct}% 的可比像素与本源图的任何单一全局显影都不一致（集中在 [{ranges}]），已在求解控件前降权。"),
+    (" Zoned {label} robust fit down-weighted {pct}% of the overlapping pixels \
+      as content the two zones do not share (concentrated in [{ranges}]).",
+        " 分区 {label} 稳健拟合将 {pct}% 的重叠像素降权：两区并不共有这部分内容（集中在 [{ranges}]）。"),
     ("Reverse-fit Atmosphere mode (structural divergence D={d}): the target's \
       structure cannot be reconstructed by develop controls, so only its atmosphere \
       and overall tone/colour were matched with bounded robust controls. Residual look \

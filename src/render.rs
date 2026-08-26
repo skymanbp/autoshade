@@ -6226,19 +6226,43 @@ pub(crate) fn build_tone_lut(r: &EditRecipe) -> Vec<f32> {
     // sliders. That linearity is load-bearing — `fit_tone_sliders` inverts it
     // analytically — so the limit is applied to the SLIDERS, once, here and in
     // the fit, rather than to the curve afterwards.
-    let [contrast, highlights, shadows, whites, blacks] =
-        limit_tone_sliders(r.exposure_ev, [contrast, highlights, shadows, whites, blacks]);
+    let (ys, m) = tone_model_knots(
+        r.exposure_ev,
+        [contrast, highlights, shadows, whites, blacks],
+    );
+    let curve = curve_lut(&r.tone_curve); // the recipe's own tone_curve, composed on top
+    let user: Vec<f32> = (0..LUT_N)
+        .map(|i| {
+            let x = i as f32 / (LUT_N - 1) as f32;
+            sample_lut(&curve, hermite_eval(&TONE_KNOTS_X, &ys, &m, x))
+        })
+        .collect();
+    if r.base_curve.is_empty() {
+        return user;
+    }
+    // Camera-matched base look: composed UNDER the user controls — sliders act
+    // on the camera-like base, the same profile-then-sliders order Lightroom
+    // uses. final(x) = user(base(x)); one LUT, still zero extra per-pixel cost.
+    let base = base_curve_lut(&r.base_curve);
+    (0..LUT_N).map(|i| sample_lut(&user, base[i])).collect()
+}
 
-
+/// The knot outputs and spline tangents of the engine's slider-tone model
+/// for `(ev, sliders)` — the ONE definition `build_tone_lut` renders and the
+/// reverse fit scores candidates against ([`sample_tone_model`]). Limiter,
+/// authority weights, monotone snap and Fritsch–Carlson exactly as rendered;
+/// no residual tone_curve and no base curve composed.
+pub(crate) fn tone_model_knots(ev: f32, sliders: [f32; 5]) -> ([f32; 8], Vec<f32>) {
+    let [contrast, highlights, shadows, whites, blacks] = limit_tone_sliders(ev, sliders);
     let mut ys = [0.0f32; 8];
-    let weights = tone_knot_weights(r.exposure_ev);
+    let weights = tone_knot_weights(ev);
     for (idx, &x) in TONE_KNOTS_X.iter().enumerate() {
         let b = tone_slider_basis(x);
         // Knot authority fades where exposure saturated BOTH adjacent base
         // intervals (see tone_knot_weights): a strong slider aimed at a
         // region exposure already clipped yields honest clipping, not the
         // interior flat band the backstop below used to manufacture.
-        ys[idx] = tone_exposure_curve(x, r.exposure_ev)
+        ys[idx] = tone_exposure_curve(x, ev)
             + weights[idx]
                 * (b[0] * contrast
                     + b[1] * highlights
@@ -6263,23 +6287,14 @@ pub(crate) fn build_tone_lut(r: &EditRecipe) -> Vec<f32> {
     for v in &mut ys {
         *v = v.clamp(0.0, 1.0);
     }
-
     let m = fc_tangents(&TONE_KNOTS_X, &ys);
-    let curve = curve_lut(&r.tone_curve); // the recipe's own tone_curve, composed on top
-    let user: Vec<f32> = (0..LUT_N)
-        .map(|i| {
-            let x = i as f32 / (LUT_N - 1) as f32;
-            sample_lut(&curve, hermite_eval(&TONE_KNOTS_X, &ys, &m, x))
-        })
-        .collect();
-    if r.base_curve.is_empty() {
-        return user;
-    }
-    // Camera-matched base look: composed UNDER the user controls — sliders act
-    // on the camera-like base, the same profile-then-sliders order Lightroom
-    // uses. final(x) = user(base(x)); one LUT, still zero extra per-pixel cost.
-    let base = base_curve_lut(&r.base_curve);
-    (0..LUT_N).map(|i| sample_lut(&user, base[i])).collect()
+    (ys, m)
+}
+
+/// The engine's slider-tone response at one input — [`tone_model_knots`]
+/// evaluated through the same Hermite the LUT samples.
+pub(crate) fn sample_tone_model(knots: &([f32; 8], Vec<f32>), x: f32) -> f32 {
+    hermite_eval(&TONE_KNOTS_X, &knots.0, &knots.1, x)
 }
 
 /// LUT for the recipe's camera-matched base curve (`EditRecipe::base_curve`).

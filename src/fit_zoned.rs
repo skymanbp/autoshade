@@ -1640,8 +1640,34 @@ fn attach_one_zone(
     // the text stays English/identical regardless of the GUI's display language.
     let label = role.tag();
     let cur_px = fit::pixels_of(&render::develop_preview(s_img, &report.recipe));
-    let ms = zone_moments(&cur_px, sw);
-    let mt = zone_moments(tgt_px, tw);
+    // The SAME robust paired estimator the global tone stage runs (one
+    // mechanism, two call sites): pixels the two zones do not share — the
+    // divergent cloud deck, a moved subject — lose weight by the influence
+    // function, so the moments, the dials, the tone solve and the saturation
+    // chase below all measure the population the zones have in common. No
+    // neutral gate here: a zone is already one coherent population and its
+    // chromatic body (a blue sky) is exactly the evidence.
+    let zone_robust = fit::paired_robust_tone(
+        &cur_px,
+        tgt_px,
+        &|i: usize| {
+            sw.get(i).copied().unwrap_or(0.0).min(tw.get(i).copied().unwrap_or(0.0))
+        },
+        false,
+    );
+    let compose = |base: &[f32], robust: &Option<fit::PairedRobustTone>| -> Vec<f32> {
+        let mut out = base.to_vec();
+        if let Some(r) = robust {
+            for (o, w) in out.iter_mut().zip(&r.weights) {
+                *o *= w;
+            }
+        }
+        out
+    };
+    let zw_source = compose(sw, &zone_robust);
+    let zw_target = compose(tw, &zone_robust);
+    let ms = zone_moments(&cur_px, &zw_source);
+    let mt = zone_moments(tgt_px, &zw_target);
     if ms.share < MIN_ZONE_SHARE || mt.share < MIN_ZONE_SHARE {
         crate::rationale::push_note(
             &mut report.recipe.rationale,
@@ -1715,6 +1741,29 @@ fn attach_one_zone(
         );
         return None;
     }
+    if let Some(r) = zone_robust.as_ref()
+        && r.rejected_share >= fit::ROBUST_REJECT_DISCLOSE_MIN
+    {
+        crate::rationale::push_note(
+            &mut report.recipe.rationale,
+            &mut report.notes,
+            crate::rationale::Note::new(
+                crate::rationale::keys::ZONE_ROBUST_REJECTED,
+                vec![
+                    ("label", label.to_string()),
+                    ("pct", format!("{:.0}", r.rejected_share * 100.0)),
+                    (
+                        "ranges",
+                        if r.rejected_ranges.is_empty() {
+                            "scattered".to_string()
+                        } else {
+                            r.rejected_ranges.clone()
+                        },
+                    ),
+                ],
+            ),
+        );
+    }
     let d = fit_zone_dials(&ms, &mt);
     let round1 = |v: f32| (v * 10.0).round() / 10.0;
     let round2 = |v: f32| (v * 100.0).round() / 100.0;
@@ -1751,15 +1800,51 @@ fn attach_one_zone(
     // an IQR floor, fall back to the moment-EV and leave the tone flat.
     if mode == ZoneMode::Full {
         let rp = fit::pixels_of(&render::develop_preview(s_img, &report.recipe));
-        let s_cdf = zone_luma_cdf(&rp, sw);
+        let s_cdf = zone_luma_cdf(&rp, &zw_source);
         let src_iqr = fit::quantile(&s_cdf, 0.75) - fit::quantile(&s_cdf, 0.25);
         let m = report.recipe.masks.last_mut().expect("zone mask just pushed");
         if src_iqr >= 0.05 {
-            let t_cdf = zone_luma_cdf(tgt_px, tw);
-            let tone_map = |x: f32| {
-                fit::quantile(&t_cdf, fit::cdf_at(&s_cdf, x).clamp(fit::P_CLIP, 1.0 - fit::P_CLIP))
+            // Paired robust regression on the recoloured render (the gains
+            // just changed every zone luma, so the map must be re-estimated),
+            // falling back to the weighted quantile transport only when the
+            // paired estimate is too thin — and either way solving only the
+            // knots this zone's own population supports.
+            let refit = fit::paired_robust_tone(
+                &rp,
+                tgt_px,
+                &|i: usize| {
+                    zw_source
+                        .get(i)
+                        .copied()
+                        .unwrap_or(0.0)
+                        .min(zw_target.get(i).copied().unwrap_or(0.0))
+                },
+                false,
+            );
+            let points = refit.as_ref().map(|r| r.points.clone()).unwrap_or_default();
+            let support = fit::knot_support_for(&rp, &zw_source, &points);
+            let score_set: Vec<(f32, f32, f32)> = match refit.as_ref() {
+                Some(r) if r.points.len() >= 6 => r
+                    .points
+                    .iter()
+                    .zip(&r.masses)
+                    .map(|(&(x, y), &mass)| (x, y, mass))
+                    .collect(),
+                _ => Vec::new(),
             };
-            let (ev, sliders) = fit::fit_tone_sliders(&tone_map);
+            let t_cdf = zone_luma_cdf(tgt_px, &zw_target);
+            let tone_map = |x: f32| {
+                if points.len() >= 6 {
+                    fit::sample_tone_points(&points, x)
+                } else {
+                    fit::quantile(
+                        &t_cdf,
+                        fit::cdf_at(&s_cdf, x).clamp(fit::P_CLIP, 1.0 - fit::P_CLIP),
+                    )
+                }
+            };
+            let (ev, sliders) =
+                fit::fit_tone_sliders_supported(&tone_map, &support, &score_set);
             m.exposure_ev = round2(ev.clamp(-ZONE_EV_LIMIT, ZONE_EV_LIMIT));
             m.contrast = round1(sliders[0] * 100.0);
             m.highlights = round1(sliders[1] * 100.0);
@@ -1777,7 +1862,7 @@ fn attach_one_zone(
     // by themselves — only a render knows where the zone landed).
     for _ in 0..2 {
         let rp = fit::pixels_of(&render::develop_preview(s_img, &report.recipe));
-        let zone_chroma = zone_moments(&rp, sw).chroma;
+        let zone_chroma = zone_moments(&rp, &zw_source).chroma;
         let Some(step) = zone_sat_step(zone_chroma, mt.chroma) else { break };
         let m = report.recipe.masks.last_mut().expect("zone mask just pushed");
         let next = clamp_zone_sat_for_mode((m.saturation + step).round(), mode);

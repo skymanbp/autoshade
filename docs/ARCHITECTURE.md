@@ -1,6 +1,17 @@
 # Autoshop — Architecture
 
-> Status: **implemented** (v1.0.0 — the first major). Since v0.35.0, R30 adds
+> Status: **implemented** (v1.0.0 — the first major). The reverse-fit's
+> in-range estimator is now a PAIRED ROBUST REGRESSION (2026-08-26): on
+> same-frame pairs the tone map is estimated from corresponding pixels
+> (per-bin Tukey-IRLS means, median start, robust weight × evidence weight),
+> candidates are model-selected through the engine's own spline at the map
+> points, knots and residual-curve levels outside the measured luma span
+> carry no weight, and every hue-damage guard consults a per-pixel voucher
+> (robust weight + hue coherence + movement toward the pixel's own paired
+> target) so undoing a cast is no longer vetoed by the bands the cast
+> invented, while incoherent content divergence keeps every veto. What the
+> estimator rejects, and what vouched convergence carried through one-sided
+> bands, are both typed disclosure notes. Since v0.35.0, R30 adds
 > guarded modern `MaskBrushTable` import, gesture-aware SAM point prompts with
 > a scoped cache re-key, and stronger eval/error disclosures. D1 changes angled
 > LINEAR masks to the pixel/aspect metric (`ecb6505`). D2 establishes the
@@ -81,9 +92,9 @@
 > experimental generative edits, an optional pixel-**heal** retouch mode (§4.7)
 > the deterministic look **reverse-fit** (§4.8) and the local server's refusal
 > model (§4.9).
-> 917 library + 14 CLI + 144 GUI + 2+2 contract tests are enumerated in the GUI
-> build; the library result is 908 pass + 9 `#[ignore]`d forensic probes
-> (counts refreshed 2026-08-25 after the evidence-gating series: library 896→917, set diff vs the prior release +22/−1 by name). THREE suites are ADDITIONAL and
+> 921 library + 14 CLI + 144 GUI + 2+2 contract tests are enumerated in the GUI
+> build; the library result is 912 pass + 9 `#[ignore]`d forensic probes
+> (counts refreshed 2026-08-26 after the paired robust-regression batch: library 917→921, set diff +4/−0 by name — `unsupported_knots_cannot_pull_the_solve`, `robust_regression_downweights_invented_target_content`, `robust_rejection_reaches_the_disclosure`, `p36_fixture_recovers_the_lightroom_exposure_anchor`). THREE suites are ADDITIONAL and
 > env-gated, so a bare `cargo test` does not include them:
 > `AUTOSHOP_LR_PROBE_FIXTURES` (16 real Lightroom radial sidecars, byte
 > round-trip), `AUTOSHOP_MB_FIXTURES` (the 7-file M-B forensic set — 42 of its
