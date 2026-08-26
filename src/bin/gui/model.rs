@@ -637,8 +637,10 @@ pub(crate) enum MaskRefineOutcome {
 /// on the persist path; `render_fit_note` (workers.rs) translates it when
 /// the result lands. Owned args only — stringified errors, paths, counts.
 pub(crate) enum FitNote {
-    /// The fit attached at least one zone mask.
+    /// The fit attached at least one semantic bitmap zone.
     IncludesSkyZone,
+    /// The fit contains at least one native range mask.
+    IncludesRangeMasks,
     /// `commit_develop` failed — the fit stays on the canvas unsaved.
     NotPersistedCommit(String),
     /// The Lightroom XMP sidecar landed at this path.

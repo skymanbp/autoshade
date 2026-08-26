@@ -239,6 +239,56 @@ validates its envelope and bounds, Brotli-decompresses it, then parses the
   Brotli decode, and dab-token parser.
 - `docs/ARCHITECTURE.md` and `docs/V2_PLAN.md` — mask measurement ledger.
 
+## Reverse-fit luminance ranges
+
+### Method
+
+When semantic segmentation is disabled or unavailable, the zoned reverse-fit
+keeps its global-first ordering and derives contiguous signed-residual runs
+from the existing 17-bin luminance evidence model. Bands are attempted once in
+ascending luminance order through `attach_one_zone`; robust paired weights,
+evidence withholding, share and mismatch checks, step-7b correspondence,
+local-quality gates, and a parameterized composed-frame gate are shared with
+semantic zones. Range bands use zero regression tolerance; semantic zones keep
+their independently calibrated `0.02` drift insurance.
+Before each attempt, `render::range_weight` is evaluated on the current render,
+and overlapping estimator weights are normalized to a total no greater than
+one. One final value-transition gate shrinks every retained differential by
+the same direction-preserving bisection scalar.
+
+Native masks use `MaskRole::Custom`, deterministic `Luminance range NN` names,
+and an intersecting `RangeMask::Luminance` on the observed-domain full-frame
+sentinel `Linear { zero_x: 0.5, zero_y: -0.8, full_x: 0.5, full_y: -0.4 }`.
+That is the existing Lightroom component grammar, so no recipe era or XMP
+reader/writer branch changes. Segmentation and range production are mutually
+exclusive, and this batch emits no color partitions.
+
+### Parameters and measurements
+
+- `RANGE_MAX_BANDS = 4`; finer value partitions fall below the established
+  evidence stability floor.
+- `RANGE_RESIDUAL_TRIGGER = 0.03`; corrected target-rank/source-bin means put
+  supported neutral bins 01-07 and 12 at no more than `0.025`, the coherent
+  08-11 run at `0.036`-`0.094`, and isolated bin 13 at `0.223`.
+- `RANGE_MIN_RAMP = 1/17` and `RANGE_MAX_RAMP = 2/17`; a hard opposite-half-EV
+  transition measured `5/255` versus a `1/255` smooth-gradient baseline.
+- `RANGE_BOUNDARY_RIM_MAX = 0.012`, shared with semantic zones, and
+  `RANGE_MIN_EVIDENCE_SHARE = 0.015`, shared with the global evidence model.
+- `RANGE_FRAME_REGRESSION_TOL = 0.0`; the live `0.018 -> 0.024` composed-frame
+  regression is refused, while an exactly neutral band remains acceptable.
+- A naive second global residual fit improved its own tone score but regressed
+  composed RGB MAE from `0.074702` to `0.076455`; current-render weighting,
+  one correction per band, strict running frame acceptance, and the final
+  stack gate prevent that double-application pattern.
+
+### Source
+
+- `src/fit.rs` — fixed 17-bin evidence verdict and contiguous-run folding.
+- `src/fit_zoned.rs` — residual runs, generalized weighted attachment, range
+  boundary gate, disclosures, and conservation tests.
+- `src/render.rs` — sequential range evaluation on current rendered pixels.
+- `src/xmp.rs` — intersected native luminance-range projection.
+
 ## AI masks
 
 ### Method
@@ -615,8 +665,8 @@ than the pre-call state; model weights remain outside the repository.
 - The 61 MP RAW probe measured `151 MB` peak commit for decode,
   `1771 MB` for calibration/render preparation, and `1766 MB` for the
   full-resolution render tail; the combined process peak remained `1771 MB`.
-- The release battery is **896 library (887 pass + 9 `#[ignore]`d forensic
-  probes) / 14 CLI / 139 GUI / 2+2 contract** tests. Environment-gated real
+- The release battery is **958 library (949 pass + 9 `#[ignore]`d forensic
+  probes) / 15 CLI / 145 GUI / 2+2 contract** tests. Environment-gated real
   Lightroom, brush-table, and RAW-zoo suites are additional and are not
   smuggled into the ordinary count.
 - The build workflow checks default and GUI feature sets on Ubuntu and macOS;

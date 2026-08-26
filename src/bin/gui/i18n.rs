@@ -108,8 +108,8 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     ("Language", "语言"),
     ("Reverse-fit", "反推 / Reverse-fit"),
     ("Zoned fit (sky)", "分区反推：天空 / Zoned fit (sky)"),
-    ("On reverse-fit, auto-split the sky on both sides and colour-correct sky↔sky separately (exposure / recolour gains / saturation, bitmap mask). Masks are rendered by the local engine; the LR sidecar carries only the global part. Needs the python segmentation deps (transformers + torch); falls back to pure global reverse-fit when unavailable, noting it in the rationale.",
-        "反推时自动分割两侧天空，天空↔天空单独校色（曝光/重着色增益/饱和，位图蒙版）。蒙版由本机引擎渲染；LR sidecar 只携带全局部分。需要 python 分割依赖（transformers + torch）；不可用时自动退回纯全局反推并在理由里说明。"),
+    ("On reverse-fit, fit globally first. When sky segmentation succeeds, add semantic sky/land bitmap corrections; when it is disabled or unavailable, automatically try native luminance-range corrections. If neither is accepted, keep the global fit. Bitmap masks stay engine-only; native luminance ranges are written to the Lightroom sidecar. Segmentation needs the python dependencies (transformers + torch), and every fallback or abstention is noted in the rationale.",
+        "反推时先做全局拟合。天空分割成功时添加语义天空/地面位图校正；分割被关闭或不可用时，自动尝试原生亮度范围校正。两者都未被接受时保留全局拟合。位图蒙版仅由本机引擎渲染；原生亮度范围会写入 Lightroom 边车。分割需要 python 依赖（transformers + torch），每次回退或放弃都会写入理由。"),
     ("Analysis — the verifier", "分析 · 校验器"),
     ("Provider", "提供方"),
     ("Model", "模型"),
@@ -497,6 +497,9 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     ("Swap which side of the ellipse the adjustment affects (composes with Invert)",
         "对调椭圆内外的作用侧（与反转 Invert 叠加生效）"),
     ("Range mask", "范围蒙版"),
+    ("Luminance range", "亮度范围"),
+    ("Color range", "颜色范围"),
+    ("Ordered bounds", "有序边界"),
     ("None", "无"),
     ("Color", "颜色"),
     ("Color range: click the color to pick in the image", "颜色范围：点击图中要选取的颜色"),
@@ -1099,13 +1102,15 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
         "AI 生成出片中…（gpt-image；高质量可能需要数分钟——进度见状态栏；✕ 取消可停止；高分辨率输入需先全幅显影）"),
     ("「AI generated」variant created → {path} · keep tweaking or 「Reverse-fit」",
         "已生成「AI 生成」变体 → {path} · 可继续微调或「反推配方」"),
-    ("Reverse-fitting… (statistical fit + sky segmentation; first run downloads the model)",
-        "反推配方中…（统计拟合 + 天空分割，首次分割会下载模型）"),
+    ("Reverse-fitting… (global fit + semantic sky/land or native luminance ranges)",
+        "反推配方中…（全局拟合 + 语义天空/地面或原生亮度范围）"),
     ("Reverse-fitting… (statistical fit, local compute)", "反推配方中…（统计拟合，本地运算）"),
     ("Reverse-fit done: look residual {before}→{after} · created a「Reverse-fit」variant (editable / XMP / full-res)",
         "反推完成：look 残差 {before}→{after} · 已建「反推」变体（可编辑/导 XMP/出全分辨率）"),
     (" · includes sky-zone correction (adjustable in the mask panel; XMP carries the global part only)",
         " · 含天空分区校正（蒙版面板可调；XMP 只带全局部分）"),
+    (" · includes native range correction (adjustable in the mask panel and written to XMP)",
+        " · 含原生范围校正（蒙版面板可调，并会写入 XMP）"),
     (" · then AI review (vision call)", " · 拟合后 AI 打分（vision 调用）"),
     (" · AI review: match {score}/100 — {critique}",
         " · AI 打分：匹配 {score}/100——{critique}"),
@@ -1618,8 +1623,8 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
       the statistics are taken over. The fit matched them anyway, as it was \
       asked to — treat the result as unreliable.",
         " 警告：参考图与本图的比例不一致——它被裁切过，或者不是同一张。两者都会让两边的分布无法相比，因为裁切会改变统计所覆盖的像素。反推仍按要求做了匹配——结果请视为不可靠。"),
-    (" Zoned sky fit unavailable ({e}) — global fit only.",
-        " 分区天空拟合不可用（{e}）——仅保留全局拟合。"),
+    (" Zoned sky fit unavailable ({e}) — trying the automatic luminance-range fallback.",
+        " 分区天空拟合不可用（{e}）——正在尝试自动亮度范围回退。"),
     (" Zoned fit skipped: no usable sky partition (sky covers {s}% \
       of the source frame, {t}% of the target's).",
         " 分区拟合已跳过：没有可用的天空分割（天空占原图 {s}%、目标图 {t}%）。"),
@@ -1668,6 +1673,33 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
       frame-wide residual {frame} — a frame-wide distribution cannot \
       judge a zone whose share of the two frames differs.",
         " 本次拟合的置信度来自实际被接受的 {n} 个分区校正（最差区残差 {worst}），而不是来自全画面残差 {frame}——当某个区在两张图中所占比例不同时，全画面分布无法判断它。"),
+    (" {label} attached for luminance [{lo}, {hi}] (local exposure {ev} EV, \
+      colour gains [{g0} {g1} {g2}], saturation {sat}): band residual \
+      {before} → {after}. The sentinel-hosted luminance range is native in \
+      the Lightroom sidecar.",
+        " 已附加 {label}，亮度 [{lo}, {hi}]（局部曝光 {ev} EV、色彩增益 [{g0} {g1} {g2}]、饱和度 {sat}）：范围残差 {before} → {after}。由全画面 LINEAR 承载的亮度范围会原生写入 Lightroom 边车。"),
+    (" Luminance range [{lo}, {hi}] abstained: {reason}.",
+        " 亮度范围 [{lo}, {hi}] 已放弃：{reason}。"),
+    (" Luminance range [{lo}, {hi}] merged into [{into_lo}, {into_hi}] \
+      after the four-band evidence cap; both runs have sign {sign}.",
+        " 达到四段证据上限后，亮度范围 [{lo}, {hi}] 已合并到 [{into_lo}, {into_hi}]；两段符号相同，为 {sign}。"),
+    (" Range boundary-continuity gate kept {n} correction(s): signed \
+      transition rim {before} to {after} luma after shared \
+      direction-preserving shrink k={k} (budget {max}, {transitions} \
+      measured crossings).",
+        " 范围边界连续性门保留了 {n} 个校正：共享保方向收缩 k={k} 后，有符号过渡边缘亮度由 {before} 变为 {after}（预算 {max}，测得 {transitions} 个交叉）。"),
+    (" Range corrections refused by the boundary-continuity gate: candidate \
+      rim {before} luma, and even zero differential left {after} (budget \
+      {max}, {transitions} measured crossings).",
+        " 范围校正被边界连续性门拒绝：候选边缘亮度为 {before}，即使差分归零仍为 {after}（预算 {max}，测得 {transitions} 个交叉）。"),
+    (" Range corrections refused after the final boundary pass: the \
+      composed frame residual {after} exceeded the global-only residual \
+      {global} plus tolerance {tol}, so all {n} range correction(s) were removed.",
+        " 最终边界检查后已拒绝范围校正：合成全画面残差 {after} 超过仅全局残差 {global} 加容差 {tol}，因此移除了全部 {n} 个范围校正。"),
+    (" Confidence for this fit includes the {n} accepted luminance-range \
+      correction(s) (worst band residual {worst}); the final frame residual \
+      is {frame}.",
+        " 本次拟合的置信度包含 {n} 个已接受的亮度范围校正（最差范围残差 {worst}）；最终全画面残差为 {frame}。"),
     (" [revision round {round} failed ({e}) — keeping the previous verified proposal]",
         " [第 {round} 轮修订失败（{e}）——保留上一轮已验证的提案]"),
     (" [verification of revision round {round} failed ({e}) — keeping the previous \

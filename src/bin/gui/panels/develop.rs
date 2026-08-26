@@ -1545,17 +1545,23 @@ impl AutoshopApp {
                 let row_resp = ui
                     .horizontal(|ui| {
                         let m = &self.recipe.masks[i];
-                        let kind = match m.mask {
-                            MaskGeometry::Linear { .. } => tr(self.lang, "Linear"),
-                            MaskGeometry::Radial { .. } => tr(self.lang, "Radial"),
-                            MaskGeometry::Bitmap { .. } => tr(self.lang, "Bitmap"),
-                            MaskGeometry::Brush { .. } => tr(self.lang, "Brush"),
-                            // Named "AI" and never "Sky"/"Subject": the row
-                            // must not read as Lightroom's own mask. What it
-                            // draws is our segmenter's re-derivation, and the
-                            // overlay badge plus the import line carry the
-                            // rest of that sentence (R27 Batch-5).
-                            MaskGeometry::AiMask { .. } => tr(self.lang, "AI"),
+                        let kind = match m.range {
+                            Some(RangeMask::Luminance { .. }) => {
+                                tr(self.lang, "Luminance range")
+                            }
+                            Some(RangeMask::Color { .. }) => tr(self.lang, "Color range"),
+                            None => match m.mask {
+                                MaskGeometry::Linear { .. } => tr(self.lang, "Linear"),
+                                MaskGeometry::Radial { .. } => tr(self.lang, "Radial"),
+                                MaskGeometry::Bitmap { .. } => tr(self.lang, "Bitmap"),
+                                MaskGeometry::Brush { .. } => tr(self.lang, "Brush"),
+                                // Named "AI" and never "Sky"/"Subject": the row
+                                // must not read as Lightroom's own mask. What it
+                                // draws is our segmenter's re-derivation, and the
+                                // overlay badge plus the import line carry the
+                                // rest of that sentence (R27 Batch-5).
+                                MaskGeometry::AiMask { .. } => tr(self.lang, "AI"),
+                            },
                         };
                         // A user-given name wins; else a reverse-fit zone shows
                         // its localised role label; else the generic placeholder.
@@ -2168,6 +2174,12 @@ impl AutoshopApp {
                     let mut want_pick = false;
                     match &mut self.recipe.masks[i].range {
                         Some(RangeMask::Luminance { lo_outer, lo, hi, hi_outer }) => {
+                            ui.horizontal(|ui| {
+                                ui.label(tr(lang, "Ordered bounds"));
+                                ui.monospace(format!(
+                                    "{lo_outer:.3} <= {lo:.3} <= {hi:.3} <= {hi_outer:.3}"
+                                ));
+                            });
                             // GUI shows lo/hi + one symmetric feather; the recipe keeps
                             // ACR's 4-number trapezoid (asymmetric AI trapezoids show
                             // their averaged feather until a slider is touched).

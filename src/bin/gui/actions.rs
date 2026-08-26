@@ -3,6 +3,7 @@
 use super::*;
 
 use autoshop::advisor::{hint_action, FitAction};
+use autoshop::recipe::MaskRole;
 
 /// The persisted develop state belonging to the card that is on the canvas.
 ///
@@ -3022,7 +3023,7 @@ impl AutoshopApp {
         let lang = self.lang;
         self.busy = true;
         let mut running = if zoned {
-            tr(lang, "Reverse-fitting… (statistical fit + sky segmentation; first run downloads the model)").to_string()
+            tr(lang, "Reverse-fitting… (global fit + semantic sky/land or native luminance ranges)").to_string()
         } else {
             tr(lang, "Reverse-fitting… (statistical fit, local compute)").to_string()
         };
@@ -3056,8 +3057,11 @@ impl AutoshopApp {
                     // landing during the fit was then overwritten
                     // unversioned. (Claimed unique rasters already made the
                     // fit itself harmless to the saved develop.)
-                    // Zoned sky pass only when enabled AND the photo has a
-                    // real path (the mask raster needs a home). The raster
+                    // Automatic local pass only when enabled AND the photo
+                    // has a real path (the semantic raster needs a home).
+                    // Segmentation success produces semantic sky/land; an
+                    // unavailable sidecar falls through to native luminance
+                    // ranges inside fit_recipe_zoned_with. The raster
                     // gets a FRESH unique name per fit (mask-zone-sky.png,
                     // -2, -3, …, create_new-claimed like every master name):
                     // the old fixed name was rewritten IN PLACE before the
@@ -3323,8 +3327,14 @@ impl AutoshopApp {
                             }
                         }
                     }
-                    if !rep.recipe.masks.is_empty() {
+                    if rep.recipe.masks.iter().any(|mask| {
+                        mask.range.is_none()
+                            && matches!(mask.role, MaskRole::ZoneSky | MaskRole::ZoneLand)
+                    }) {
                         status.push(FitNote::IncludesSkyZone);
+                    }
+                    if rep.recipe.masks.iter().any(|mask| mask.range.is_some()) {
+                        status.push(FitNote::IncludesRangeMasks);
                     }
                     // R23-6 A-3: the terminal do-no-harm reset is "the
                     // reverse-fit did nothing", and a line inside a rationale

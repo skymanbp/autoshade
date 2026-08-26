@@ -234,7 +234,8 @@ pub mod keys {
          estimators ran without it.";
 
     // --- zoned fit (fit_zoned.rs) ---------------------------------------
-    pub const ZONED_UNAVAILABLE: &str = " Zoned sky fit unavailable ({e}) — global fit only.";
+    pub const ZONED_UNAVAILABLE: &str =
+        " Zoned sky fit unavailable ({e}) — trying the automatic luminance-range fallback.";
     pub const ZONED_NO_PARTITION: &str =
         " Zoned fit skipped: no usable sky partition (sky covers {s}% \
          of the source frame, {t}% of the target's).";
@@ -318,6 +319,35 @@ pub mod keys {
          were actually accepted (worst zone residual {worst}), not from the \
          frame-wide residual {frame} — a frame-wide distribution cannot \
          judge a zone whose share of the two frames differs.";
+
+    // --- native luminance-range fallback (fit_zoned.rs) -----------------
+    pub const RANGE_ATTACHED: &str =
+        " {label} attached for luminance [{lo}, {hi}] (local exposure {ev} EV, \
+         colour gains [{g0} {g1} {g2}], saturation {sat}): band residual \
+         {before} → {after}. The sentinel-hosted luminance range is native in \
+         the Lightroom sidecar.";
+    pub const RANGE_ABSTAINED: &str =
+        " Luminance range [{lo}, {hi}] abstained: {reason}.";
+    pub const RANGE_MERGED: &str =
+        " Luminance range [{lo}, {hi}] merged into [{into_lo}, {into_hi}] \
+         after the four-band evidence cap; both runs have sign {sign}.";
+    pub const RANGE_BOUNDARY_PASSED: &str =
+        " Range boundary-continuity gate kept {n} correction(s): signed \
+         transition rim {before} to {after} luma after shared \
+         direction-preserving shrink k={k} (budget {max}, {transitions} \
+         measured crossings).";
+    pub const RANGE_BOUNDARY_REFUSED: &str =
+        " Range corrections refused by the boundary-continuity gate: candidate \
+         rim {before} luma, and even zero differential left {after} (budget \
+         {max}, {transitions} measured crossings).";
+    pub const RANGE_FRAME_REFUSED: &str =
+        " Range corrections refused after the final boundary pass: the \
+         composed frame residual {after} exceeded the global-only residual \
+         {global} plus tolerance {tol}, so all {n} range correction(s) were removed.";
+    pub const RANGE_CONFIDENCE: &str =
+        " Confidence for this fit includes the {n} accepted luminance-range \
+         correction(s) (worst band residual {worst}); the final frame residual \
+         is {frame}.";
 
     // --- the propose/verify pipeline (pipeline.rs) ----------------------
     pub const REVISION_FAILED: &str =

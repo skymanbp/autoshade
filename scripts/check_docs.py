@@ -504,7 +504,7 @@ def battery_test_counts(args: argparse.Namespace) -> Truth | Skip:
             rows = rows[:-1]
         if len(rows) < 3:
             raise LookupError(f"{path.name}: '{name}' has only {len(rows)} suites")
-        return [r[1] for r in rows]
+        return [passed + ignored for _, passed, _, ignored in rows]
 
     default, gui = suites("test default"), suites("test gui")
     lib, cli = default[0], default[1]

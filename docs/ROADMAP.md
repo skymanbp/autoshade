@@ -700,6 +700,23 @@
   双分区 → 每区 zone_err 矩裁判（帧全局 look_err 只作 ±0.02 漂移保险——
   帧级指标会否决正确分区重绘，实测记录在 ZONE_ACCEPT_RATIO 注释）＋区内
   luma-CDF 色调求解（源区 IQR<0.05 退化守卫）。任何失败优雅回退全局 fit。
+- **R30 Step 8 — 自动亮度范围分区（本批）**：保留「全局 fit 优先」，并把
+  本地生产者定为互斥：天空分割成功时沿用语义天空/地面位图路径且不推导范围；
+  分割被禁用或不可用时，纯 Rust 路径在既有 17-bin 证据上按 `0.03` 有符号
+  残差组成连续段，最多四段，按当前渲染从暗到亮各拟合一次。相邻 ramp 为
+  `1/17..=2/17`，估计权重总和归一到 `≤1`，整栈最终共用 `0.012` value-rim
+  门与保方向二分收缩。每段沿用 `attach_one_zone` 的稳健配对、证据、占比、
+  correspondence、局部质量与参数化帧门；语义区保留 `0.02` 漂移保险，亮度范围
+  使用 `RANGE_FRAME_REGRESSION_TOL = 0.0`，合成证据加权帧变差即逐段放弃；
+  零可接受段保持全局配方逐字节不变。
+  持久化使用 `MaskRole::Custom`、确定性英文名与全画面 LINEAR 哨兵交集，故
+  recipe schema/XMP grammar 均不升级；本批不产出 color range。合并、逐段
+  放弃、收缩 k 与零差分仍失败均走 typed rationale，GUI 卡显示原生亮度范围
+  及四个有序边界。
+  **登记观察项（主审裁定）**：Full 模式范围带的色彩增益无独立帽——带自身
+  D<0.65 走 Full 与语义区同 D 同规则并非不对称，且修正后的秩配对派生在旗舰
+  对上不再提出大色彩方案（修正前位置配对曾提出 [1.30,0.87,0.75]、被帧门弃）；
+  若未来出现「过帧门却发明色彩」的实例，跟进带级分歧比例帽。
 - 源照片库只读（`pipeline::guard_readonly`）；输出走 `config::delivery_root()`
   （R24 M8 起为一等设置：settings `out_dir` > `AUTOSHOP_OUT_DIR` > 默认
   `./out`；guard 把配置根与字面 `./out` 都算输出区——见 ARCHITECTURE §4.10。
@@ -771,3 +788,17 @@
   `mask_warp_center` 或 `linear_handle_warp` 的 v1.0.0 配方，而不是静默
   丢掉坐标帧事实。W5 的 release notes、README 资产表与发布页必须同时陈述
   这两处 schema 硬断裂、上述重渲染范围、两组精度数字和 R2 开口。
+
+## v1.1 发版义务清单（进行中）
+
+- **自动范围行为**：release notes 必须说明 zoned 入口始终先做全局 fit；
+  语义分割成功时保持既有天空/地面位图结果，禁用或不可用时才自动尝试亮度
+  范围，无可接受段时保留全局结果。本批没有新 CLI/GUI 范围开关，也不产出
+  color range。
+- **哨兵宿主投影**：说明原生亮度范围以 observed-domain 全画面 LINEAR
+  哨兵承载并作为 intersect range 写入 Lightroom XMP；位图语义分区仍只由
+  本机引擎渲染。`MaskRole::Custom` 与既有 `LocalAdjustment.range` 意味着
+  recipe schema era 不变。
+- **逐段拒绝披露**：release notes 与 GUI 必须保留每个亮度区间的 attach /
+  abstain / merge、边界 rim、共享收缩 `k` 及 typed refusal；不得把单侧或零
+  结构证据静默解释为「相等」。

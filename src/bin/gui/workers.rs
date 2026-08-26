@@ -2430,6 +2430,11 @@ impl AutoshopApp {
                 " · includes sky-zone correction (adjustable in the mask panel; XMP carries the global part only)",
             )
             .to_string(),
+            FitNote::IncludesRangeMasks => tr(
+                lang,
+                " · includes native range correction (adjustable in the mask panel and written to XMP)",
+            )
+            .to_string(),
             FitNote::NotPersistedCommit(e) => trf(
                 lang,
                 " · NOT persisted: saving the develop failed ({err}) — Ctrl+S to save explicitly",

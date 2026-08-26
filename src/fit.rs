@@ -167,6 +167,54 @@ const UNSUPPORTED_RANGE_MOVE: f32 = 2.0 / 255.0;
 /// invented-sky pair retains 0.218. Detail fitting is enabled between them.
 const DETAIL_EVIDENCE_MIN_IDENTIFIABILITY: f32 = 0.30;
 
+/// Fold the existing 17-bin luma verdict over one inclusive contiguous run.
+/// Range partitioning uses this instead of inventing a second evidence model:
+/// population, structural survival and estimator weight retain the global
+/// fit's exact per-bin meanings.
+pub(crate) fn luma_evidence_for_bins(
+    evidence: &EvidenceModel,
+    first: usize,
+    last: usize,
+) -> EvidenceRange {
+    let end = last.saturating_add(1).min(evidence.luma.len());
+    let start = first.min(end);
+    let bins = &evidence.luma[start..end];
+    let source_share = bins.iter().map(|r| r.source_share).sum::<f32>();
+    let target_share = bins.iter().map(|r| r.target_share).sum::<f32>();
+    let source_evidence_share = bins.iter().map(|r| r.source_evidence_share).sum::<f32>();
+    let target_evidence_share = bins.iter().map(|r| r.target_evidence_share).sum::<f32>();
+    let two_sided_share = source_evidence_share.min(target_evidence_share);
+    let structural_mass = bins.iter().map(|r| r.weight).sum::<f32>();
+    let divergence_weight = bins
+        .iter()
+        .filter(|r| r.divergence.is_finite())
+        .map(|r| r.two_sided_share)
+        .sum::<f32>();
+    let divergence = if divergence_weight > 0.0 {
+        bins.iter()
+            .filter(|r| r.two_sided_share > 0.0 && r.divergence.is_finite())
+            .map(|r| r.divergence * r.two_sided_share)
+            .sum::<f32>()
+            / divergence_weight
+    } else {
+        f32::INFINITY
+    };
+    let source_populated = source_share >= EVIDENCE_MIN_SHARE;
+    let target_populated = target_share >= EVIDENCE_MIN_SHARE;
+    EvidenceRange {
+        label: format!("luma bins {start:02}-{last:02}"),
+        source_share,
+        target_share,
+        source_evidence_share,
+        target_evidence_share,
+        two_sided_share,
+        divergence,
+        weight: if source_populated && target_populated { structural_mass } else { 0.0 },
+        source_populated,
+        target_populated,
+    }
+}
+
 pub fn evidence_luma_bin(v: f32) -> usize {
     ((v.clamp(0.0, 1.0) * EVIDENCE_LUMA_BINS as f32).floor() as usize)
         .min(EVIDENCE_LUMA_BINS - 1)

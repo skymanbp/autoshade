@@ -771,7 +771,7 @@ impl AutoshopApp {
         // `start_fit` reads the flag when it runs).
         ui.checkbox(&mut self.zoned_fit, tr(lang, "Zoned fit (sky)")).on_hover_text(tr(
             lang,
-            "On reverse-fit, auto-split the sky on both sides and colour-correct sky↔sky separately (exposure / recolour gains / saturation, bitmap mask). Masks are rendered by the local engine; the LR sidecar carries only the global part. Needs the python segmentation deps (transformers + torch); falls back to pure global reverse-fit when unavailable, noting it in the rationale.",
+            "On reverse-fit, fit globally first. When sky segmentation succeeds, add semantic sky/land bitmap corrections; when it is disabled or unavailable, automatically try native luminance-range corrections. If neither is accepted, keep the global fit. Bitmap masks stay engine-only; native luminance ranges are written to the Lightroom sidecar. Segmentation needs the python dependencies (transformers + torch), and every fallback or abstention is noted in the rationale.",
         ));
     }
 }

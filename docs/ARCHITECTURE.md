@@ -92,8 +92,8 @@
 > experimental generative edits, an optional pixel-**heal** retouch mode (§4.7)
 > the deterministic look **reverse-fit** (§4.8) and the local server's refusal
 > model (§4.9).
-> 942 library + 15 CLI + 145 GUI + 2+2 contract tests are enumerated in the GUI
-> build; the library result is 933 pass + 9 `#[ignore]`d forensic probes
+> 958 library + 15 CLI + 145 GUI + 2+2 contract tests are enumerated in the GUI
+> build; the library result is 949 pass + 9 `#[ignore]`d forensic probes
 > (counts refreshed 2026-08-26 after the paired robust-regression batch: library 917→921, set diff +4/−0 by name — `unsupported_knots_cannot_pull_the_solve`, `robust_regression_downweights_invented_target_content`, `robust_rejection_reaches_the_disclosure`, `p36_fixture_recovers_the_lightroom_exposure_anchor`). THREE suites are ADDITIONAL and
 > env-gated, so a bare `cargo test` does not include them:
 > `AUTOSHOP_LR_PROBE_FIXTURES` (16 real Lightroom radial sidecars, byte
@@ -1663,9 +1663,10 @@ source and a *target rendition* of it (a `reimagine` output, an exported JPEG,
 any finished reference of that shot) — solve for the `EditRecipe` that
 reproduces the target through our own engine ([`src/fit.rs`](../src/fit.rs)).
 No target pixels are copied: the answer is global sliders + curves and,
-optionally, engine-rendered bitmap sky/land adjustments. It applies at full
-sensor resolution; classic XMP carries the representable global controls and
-the bitmap zones stay engine-only. Deterministic and key-free.
+optionally, semantic bitmap sky/land adjustments or native luminance-range
+adjustments. It applies at full sensor resolution; classic XMP carries the
+representable global controls and native ranges, while bitmap zones stay
+engine-only. Deterministic and key-free.
 
 The method is deliberately **distribution-level, not per-pixel regression** — a
 generative target is not pixel-aligned with its source, so only statistics are
@@ -1706,10 +1707,13 @@ the scalar claimed victory). The residual tone curve places its knots
 uniformly in the LUT's OUTPUT domain (inverted through the LUT) rather than
 uniformly in raw input, because the curve's input axis is the engine's output
 and a steep camera base compresses fixed-x samples into 38-u8 gaps whose
-piecewise-linear chords sag ~10/255. `--zoned` ([`src/fit_zoned.rs`](../src/fit_zoned.rs)) adds a sky-to-sky
-local correction on top of the global fit via the segmentation sidecar; the
-XMP carries the global fit only, since classic sidecars cannot hold raster
-masks. The same structural statistic independently selects **Full** or bounded
+piecewise-linear chords sag ~10/255. `--zoned`
+([`src/fit_zoned.rs`](../src/fit_zoned.rs)) is one automatic local-fit entry:
+it fits globally first, then uses mutually exclusive producers. Successful
+segmentation adds semantic sky/land bitmap corrections; a disabled or
+unavailable sidecar instead runs the pure-Rust luminance-range pass; if neither
+producer keeps a correction, the global fit ships unchanged. Segmentation
+success does not derive range bands. The same structural statistic independently selects **Full** or bounded
 **Atmosphere** policy for each zone; structural divergence never drops a zone
 by itself. Every candidate must preserve mask-weighted texture energy and
 clipped-luma share; the same analysis render also feeds a boundary-continuity
@@ -1730,6 +1734,25 @@ always attempted — the skip line and the acceptance floor are split
 constants precisely so nothing fixable is declined untried. The GUI's **反推 / Reverse-fit** action drives the
 same two entry points (`fit_recipe`, `fit_recipe_zoned`) and lands the
 result as an editable variant.
+
+The fallback range producer reuses the global fit's 17 rank-paired luminance
+evidence bins. After the global render it joins contiguous signed residuals at
+`0.03`, keeps at most four evidence-supported runs, and discloses every merge
+or per-band abstention. Each accepted band is fitted once, in ascending-luma
+order, through the same robust weighted estimator, correspondence composition,
+share/mismatch/already-matched/local-quality gates, and parameterized frame
+gate as a semantic zone. Semantic zones retain their measured `0.02` drift
+insurance; a range band has zero drift tolerance and survives only when the
+composed evidence-weighted frame is neutral or better. Source weights are
+re-derived from the current rendered stack before each fit; overlapping
+estimator ramps are normalized to sum to at
+most one. Ramps span one to two bin widths, and one final value-transition gate
+applies a shared direction-preserving bisection shrink against the `0.012` rim
+budget. A native correction uses `MaskRole::Custom`, a deterministic English
+name, and the full-frame sentinel `Linear { zero_x: 0.5, zero_y: -0.8,
+full_x: 0.5, full_y: -0.4 }` intersected with `RangeMask::Luminance`; the XMP
+reader and writer therefore need no new grammar. Color-range partitioning is
+outside this step.
 
 **The reference, and the second reading (v0.29.0, R23-6).** The desktop
 target is no longer only an app-generated variant: `canvas::fit_target`

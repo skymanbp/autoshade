@@ -212,6 +212,17 @@ develop. Reverse-fit estimates an engine recipe from that look; copy the fitted
 develop to Original when you want an editable recipe and sidecar for the
 full-resolution source.
 
+With **Zoned fit (sky)** enabled, reverse-fit always solves the global recipe
+first. Successful segmentation adds semantic sky/land bitmap corrections. If
+segmentation is disabled or unavailable, the same entry automatically tries
+evidence-gated native luminance ranges instead; if no band is accepted, the
+global recipe is kept. A range band is retained only when its composed
+evidence-weighted frame is no worse than the running global/banded result.
+Generated range masks persist as editable **Luminance
+range** cards with their four ordered bounds. Their sentinel-hosted range
+components project to Lightroom XMP, while semantic bitmap masks remain
+engine-only. This release derives luminance ranges only, not color ranges.
+
 ### 5. Export
 
 Open Export with the toolbar, `Ctrl+Shift+E`, or `Ctrl+E`. Choose JPEG, 8- or
@@ -601,7 +612,7 @@ versions, and a deleted-version registry; SCUNet success requires the typed
 `sidecar_wrote` contract. A 1771 MB reference probe sets the 1800 MB per-photo
 budget, while the 4 GiB RAW gate bounds admission. The [`build`
 workflow](.github/workflows/build.yml) covers default and GUI feature sets on
-Ubuntu and macOS. The current battery is **942 library (933 pass + 9 `#[ignore]`d forensic probes) / 15 CLI / 145 GUI / 2+2 contract** tests; the
+Ubuntu and macOS. The current battery is **958 library (949 pass + 9 `#[ignore]`d forensic probes) / 15 CLI / 145 GUI / 2+2 contract** tests; the
 [`scripts/check_docs.py`](scripts/check_docs.py) gate re-derives pinned release
 claims. Model weights are not stored in this repository.
 

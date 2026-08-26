@@ -269,12 +269,11 @@ enum Command {
         /// (./out/<stem>.matched.tif, 16-bit).
         #[arg(long)]
         render: bool,
-        /// Add a sky-to-sky ZONED correction on top of the global fit: segment
-        /// the sky in both images (python sidecar, local) and attach a
-        /// bitmap-masked local adjustment. Rendered in-app / by our engine;
-        /// the Lightroom XMP carries the global fit only (classic sidecars
-        /// cannot hold raster masks). Falls back to the plain global fit with
-        /// a note if segmentation is unavailable.
+        /// Fit globally, then add semantic sky/land bitmap corrections when
+        /// local segmentation succeeds. If segmentation is disabled or
+        /// unavailable, automatically try evidence-gated native luminance
+        /// ranges; otherwise retain the global fit. Bitmap masks stay engine-
+        /// only, while native ranges project to Lightroom XMP. No network.
         #[arg(long)]
         zoned: bool,
         /// Also extract a reusable style PROMPT from the pair via the vision
@@ -1274,7 +1273,7 @@ fn match_cmd(
         // below gates for the zoned path too, immediately before writing.
         let mask = autoshop::store::OwnedRaster::claim(raw, "mask-zone-sky")?;
         pipeline::guard_readonly(mask.path(), raw)?;
-        println!("  zoned: segmenting the sky in both images (local python sidecar) …");
+        println!("  zoned: trying semantic sky/land, then native luminance ranges if unavailable …");
         autoshop::fit_zoned::fit_recipe_zoned_with(
             &src,
             &tgt,
