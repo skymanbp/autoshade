@@ -790,10 +790,7 @@ mod tests {
     /// compared RGB16 and RGBA16 as equal.
     #[test]
     fn a_channel_dropping_denoise_product_is_refused() {
-        let dir = std::env::temp_dir()
-            .join(format!("autoshop-denoise-chan-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::test_dir("denoise-chan");
         write_png(&dir.join("product.png"), 8, 8); // RGB product
         let opts = stand_in_opts(&dir, copying_stand_in(&dir, "product.png"));
         let input = dir.join("in.png"); // RGBA input
@@ -839,10 +836,7 @@ mod tests {
     /// a 1×1 PNG must never be published as this photo's master.
     #[test]
     fn a_wrong_size_denoise_product_is_refused() {
-        let dir = std::env::temp_dir()
-            .join(format!("autoshop-denoise-accept-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::test_dir("denoise-accept");
         write_png(&dir.join("product.png"), 1, 1);
         let opts = stand_in_opts(&dir, copying_stand_in(&dir, "product.png"));
         let input = dir.join("in.png");
@@ -904,44 +898,26 @@ mod tests {
 
     use super::*;
 
-    /// A unique-per-test fixture dir: fixed names let two concurrent test
-    /// processes (nextest, a second worktree) remove_dir_all each other
-    /// mid-run, and a leftover output from an aborted run flips assertions.
+    /// A unique-per-test fixture dir — `crate::test_dir` carries the
+    /// concurrent-test-process rationale.
     fn tdir(tag: &str) -> PathBuf {
-        let dir = std::env::temp_dir()
-            .join(format!("autoshop-dn-test-{tag}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
+        crate::test_dir(&format!("dn-test-{tag}"))
     }
 
     /// A stand-in "python" that exits 0 and, if `writes`, writes the sidecar's
     /// `--output` argument (argv position 6 — position 1 is the `-E`
-    /// isolation flag the real spawn passes). Windows: .bat; elsewhere: sh.
+    /// isolation flag the real spawn passes). Platform ceremony lives in
+    /// `crate::write_stand_in` since step 7a.
     fn stand_in(dir: &Path, writes: bool) -> String {
-        #[cfg(windows)]
-        {
-            let p = dir.join(if writes { "writing.bat" } else { "noop.bat" });
-            let body = if writes {
-                "@echo denoised-bytes>\"%~6\"\r\n@exit /b 0\r\n"
-            } else {
-                "@exit /b 0\r\n"
-            };
-            std::fs::write(&p, body).unwrap();
-            p.to_string_lossy().into_owned()
-        }
-        #[cfg(not(windows))]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let p = dir.join(if writes { "writing.sh" } else { "noop.sh" });
-            let body = if writes {
-                "#!/bin/sh\nprintf denoised-bytes > \"$6\"\nexit 0\n"
-            } else {
-                "#!/bin/sh\nexit 0\n"
-            };
-            std::fs::write(&p, body).unwrap();
-            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
-            p.to_string_lossy().into_owned()
+        if writes {
+            crate::write_stand_in(
+                dir,
+                "writing",
+                "@echo denoised-bytes>\"%~6\"\r\n@exit /b 0\r\n",
+                "printf denoised-bytes > \"$6\"\nexit 0\n",
+            )
+        } else {
+            crate::write_stand_in(dir, "noop", "@exit /b 0\r\n", "exit 0\n")
         }
     }
 
@@ -949,28 +925,15 @@ mod tests {
     /// bytes to the FINAL deliverable name (ignoring the staged `--output`
     /// it was handed) and exits with `code`.
     fn stand_in_publishing(dir: &Path, target: &Path, code: i32) -> String {
-        #[cfg(windows)]
-        {
-            let p = dir.join(format!("publish{code}.bat"));
-            let body = format!(
+        crate::write_stand_in(
+            dir,
+            &format!("publish{code}"),
+            &format!(
                 "@echo another runs pixels>\"{}\"\r\n@exit /b {code}\r\n",
                 target.display()
-            );
-            std::fs::write(&p, body).unwrap();
-            p.to_string_lossy().into_owned()
-        }
-        #[cfg(not(windows))]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let p = dir.join(format!("publish{code}.sh"));
-            let body = format!(
-                "#!/bin/sh\nprintf 'another runs pixels' > \"{}\"\nexit {code}\n",
-                target.display()
-            );
-            std::fs::write(&p, body).unwrap();
-            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
-            p.to_string_lossy().into_owned()
-        }
+            ),
+            &format!("printf 'another runs pixels' > \"{}\"\nexit {code}\n", target.display()),
+        )
     }
 
     fn opts_for(dir: &Path, writes: bool) -> DenoiseOpts {

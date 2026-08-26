@@ -330,11 +330,7 @@ mod tests {
 
     /// Unique-per-test fixture dir (the denoise stand-in idiom).
     fn tdir(tag: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir()
-            .join(format!("autoshop-claude-test-{tag}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
+        crate::test_dir(&format!("claude-test-{tag}"))
     }
 
     /// A stand-in "claude" that records its argv, copies its STDIN to a

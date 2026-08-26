@@ -14,7 +14,7 @@ use image::GenericImageView;
 
 // The engine modules now live in the `autoshop` library crate (src/lib.rs),
 // shared with the native GUI binary (src/bin/gui/main.rs and its module tree).
-use autoshop::{decode, denoise, eval, fit, generative, pipeline, render, retouch, serve};
+use autoshop::{correspond, decode, denoise, eval, fit, generative, pipeline, render, retouch, serve};
 use autoshop::advisor::Verdict;
 use autoshop::config::Config;
 use autoshop::pipeline::{
@@ -301,6 +301,21 @@ enum Command {
         #[arg(short, long)]
         out: Option<PathBuf>,
     },
+    /// EXPERIMENTAL diagnostic: measure the cross-image CORRESPONDENCE between
+    /// two renditions of one frame (DIFT / SD 2.1 python sidecar, local;
+    /// ~2.6 GB weight download on first run). Writes a JSON field of per-cell
+    /// target coordinates + confidences and prints a summary — the instrument
+    /// the reverse-fit's content-divergent mode will read (step 7b). Never
+    /// generates pixels; no API key needed.
+    Correspond {
+        /// Source rendition (RAW or baked image).
+        source: PathBuf,
+        /// Target rendition of the same frame (RAW or baked image).
+        target: PathBuf,
+        /// Output JSON (default: ./out/<stem>.correspond.json).
+        #[arg(short, long)]
+        out: Option<PathBuf>,
+    },
     /// EXPERIMENTAL: generative object removal via OpenAI Images. The mask is an
     /// RGBA PNG; transparent pixels mark the region to regenerate.
     Retouch {
@@ -417,6 +432,7 @@ fn main() -> Result<()> {
             // reviewer is not a configuration, it is a typo.
             match_cmd(&raw, &target, render, zoned, style_prompt, ai_judge || deep, deep, out)
         }
+        Command::Correspond { source, target, out } => correspond_cmd(&source, &target, out),
         Command::Retouch { raw, mask, prompt, quality, full_res, out } => {
             let cfg = Config::load();
             let out = out.unwrap_or_else(|| default_out(&raw, "retouch", "png"));
@@ -441,6 +457,68 @@ fn main() -> Result<()> {
             Ok(())
         }
     }
+}
+
+fn correspond_cmd(source: &Path, target: &Path, out: Option<PathBuf>) -> Result<()> {
+    let cfg = Config::load();
+    let out = out.unwrap_or_else(|| default_out(source, "correspond", "json"));
+    // Output preflight FIRST (L09#1 ordering): a bad -o must refuse before
+    // any decode — and long before a 2.6 GB first-run weight download.
+    pipeline::preflight_out(&out, source)?; // includes the read-only-library guard
+    let opts = correspond::CorrespondOpts::from_config(&cfg);
+    if !opts.available() {
+        anyhow::bail!(
+            "correspondence sidecar not found at {} — run from the project dir or set \
+             AUTOSHOP_CORRESPOND_SCRIPT",
+            opts.script.display()
+        );
+    }
+    // Stage both renditions as PNGs the sidecar can read: a RAW goes through
+    // its embedded preview — correspondence is about CONTENT, and the sidecar
+    // downsizes to 768 px anyway — and a baked image is decoded the same way.
+    let staged = |p: &Path, tag: &str| -> Result<PathBuf> {
+        let dst = std::env::temp_dir()
+            .join(format!("autoshop-correspond-{}-{tag}.png", std::process::id()));
+        decode::preview_only(p)?
+            .save(&dst)
+            .with_context(|| format!("stage {} for the correspondence sidecar", p.display()))?;
+        Ok(dst)
+    };
+    let src_png = staged(source, "src")?;
+    let tgt_png = staged(target, "tgt").inspect_err(|_| {
+        let _ = std::fs::remove_file(&src_png);
+    })?;
+    let field = correspond::correspond_file(&opts, &src_png, &tgt_png, &out);
+    // The staged PNGs are intermediates whatever the outcome.
+    let _ = std::fs::remove_file(&src_png);
+    let _ = std::fs::remove_file(&tgt_png);
+    let field = field?;
+    // The summary 7b's coverage reasoning will read, printed once here.
+    let cells = field.confidence.len();
+    let mut conf = field.confidence.clone();
+    conf.sort_by(|a, b| a.total_cmp(b));
+    let mut flow = 0.0f64;
+    for i in 0..cells {
+        let gx = (i % field.grid_w) as f64;
+        let gy = (i / field.grid_w) as f64;
+        flow += ((field.map_x[i] as f64 - gx).powi(2) + (field.map_y[i] as f64 - gy).powi(2))
+            .sqrt();
+    }
+    println!(
+        "correspondence field -> {} ({}x{} cells, {} @ {})",
+        out.display(),
+        field.grid_w,
+        field.grid_h,
+        field.model,
+        &field.revision[..12]
+    );
+    println!(
+        "  median confidence {:.3} · coverage(conf>=0.5) {:.1}% · mean |flow| {:.2} cells",
+        conf[cells / 2],
+        100.0 * field.coverage(0.5),
+        flow / cells as f64
+    );
+    Ok(())
 }
 
 fn style_index_cmd(dir: &Path) -> Result<()> {
@@ -1918,6 +1996,7 @@ mod tests {
             denoise_cache: String::new(),
             segment_script: String::new(),
             embed_script: String::new(),
+            correspond_script: String::new(),
             style_strength: 0.5,
         }
     }
@@ -2133,6 +2212,25 @@ mod tests {
         .unwrap_err()
         .to_string();
         assert!(e.contains("unsupported output format"), "auto: {e}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Step 7a, same L09#1 family: `correspond` refuses a bad `-o` on the
+    /// OUTPUT — before any decode, and long before the sidecar's first-run
+    /// 2.6 GB weight download could start.
+    #[test]
+    fn correspond_refuses_a_bad_output_before_any_decode() {
+        let dir = std::env::temp_dir()
+            .join(format!("autoshop-corr-prepay-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let e = correspond_cmd(
+            Path::new("no-such.arw"),
+            Path::new("also-no-such.png"),
+            Some(dir.clone()),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(e.contains("is a directory"), "correspond: {e}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

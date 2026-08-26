@@ -4953,10 +4953,7 @@ mod tests {
         // Per-process name (Codex AL F9): the fixture is MANDATORY, and a
         // shared fixed path let a crashed prior run's junction — or a
         // concurrent test process — fail the setup of an unrelated run.
-        let dir = std::env::temp_dir()
-            .join(format!("autoshop-scan-cycle-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::test_dir("scan-cycle");
         std::fs::write(dir.join("a.arw"), b"raw").unwrap();
         // A directory link back to its own parent — the classic cycle. The
         // fixture is MANDATORY: without a link every assertion below holds
@@ -6350,6 +6347,7 @@ mod tests {
             denoise_cache: String::new(),
             segment_script: String::new(),
             embed_script: String::new(),
+            correspond_script: String::new(),
             style_strength: 0.5,
         };
         let e = produce_recipe(

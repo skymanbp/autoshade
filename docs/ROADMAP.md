@@ -195,6 +195,39 @@
 
 ## 当前状态（已完成，勿重做）
 
+- **🔗 跨图对应仪器：DIFT/SD 2.1 第四侧车 + 共享执行器上提（2026-08-26，主模型亲写，计划步 7a）**：
+  用户裁定骨干=DIFT（SD 2.1 扩散特征）。`python/correspond.py` 第四侧车：复用
+  `denoise._fetch_verified`（下载-校验单实现），11 文件 sha256+字节帽全钉在
+  `sd2-community/stable-diffusion-2-1@bb2154823665…`（官方 stabilityai repo 已下架——
+  匿名 401/带权 404，2026-08-26 验证；镜像三塔 fp32 摘要与独立上传者 SfinOe 逐字节同一
+  后才钉定；RAIL++-M 允许商用，限制为行为条款非领域条款，与 SegFormer 落线不同侧，
+  ARCHITECTURE 家族表已如实记载）；`local_files_only` 四处装载、确定性旋钮全套、
+  tmp+fsync+replace 发布。DIFT 配方=论文设定（t=261、768² 双线性、`up_blocks[1]`
+  1280ch@48×48、8 抽签逐一跑限 VRAM）；匹配=互近邻，**置信=循环一致×3×3 中位流平滑
+  （σ=1.5/2.0 格），raw cosine 仅诊断导出不进置信——置换夹具克星按设计进场**（7b 防
+  氛围夹具翻转的前置）。`src/correspond.rs` 桥：解析门（网格 48² 拒偏、四数组等长、
+  坐标域 [0,grid)、置信 [0,1]、余弦 ±1.001、有限性），成功产物**保留**（诊断口交付物，
+  与 embed 删中间件相反、现场论证），坏场丢弃不留伪结果。**rule 09 上提**（复制守卫
+  四连拦、全部按「先削源后立」落地）：`lib.rs::run_model_sidecar`（embed↔correspond
+  同形运行序列单实现，embed.rs 净减 54 行改调用）、`lib.rs::with_model_slot` 升进程级
+  单飞（SigLIP 0.75GB 与 SD2.1 2.4GB 永不同驻，embed 观察测试转钉 crate 级门）、
+  `write_stand_in`/`test_dir` 测试基建收编（denoise 桩×2+内联夹具×2、claude tdir、
+  pipeline 内联×1；GUI tests.rs 三份跨 crate 够不到 lib 的 cfg(test)，合法保留）。
+  CLI `correspond <source> <target> [-o]` 诊断口：L09#1 预检序（坏 -o 在解码与 2.6GB
+  首跑下载前拒收）、经 `decode::preview_only` 暂存双帧、汇总打印（中位置信/覆盖率/
+  平均流）。配置：`correspond_script` 字段 + `AUTOSHOP_CORRESPOND_SCRIPT`
+  （Destination、env-only、信任测试登记）+ 九处全字面量构造点同步。**实测（权重
+  2.6GB 首跑经摘要门全过）**：身份对 median 1.000/覆盖 100.0%/流 0.00 格（零点精确）；
+  分歧语料对（生成天空）整体 0.801/59.7%/3.66 格，**天空格 median 0.009（覆盖 21.5%）
+  vs 地面 median 1.000（覆盖 90.5%）——仪器精确分离被替换与被保留内容**。**门**：
+  clippy 双特性 0+0；电池 937(928+9i)/15/145/2+2，集合差 +13 库（10 解析/argv/源不变
+  量 + 3 loopback 含共享执行器 exit-0 守卫）+1 CLI 具名；五变异亲手红
+  （平滑度项失守/修订钉移动/坐标门失守/执行器删 sidecar_wrote/字节帽掉——家族登记
+  生效性）。**登记跟进**：denoise/segment 各自运行序列变体（暂存转档/stdout 报告/
+  探针口）收编 `run_model_sidecar`、claude.rs stand_in 收编 `write_stand_in`。
+  **下一批 7b**：按 D 门把对应场接进估计器（pair_weight 闭包+tp 重映射三调用点），
+  风险表四会翻测试逐一重裁。
+
 - **🖼 整图生成贴合原图：提示词硬化 + 生成侧 D 披露 + 自选有界重试（2026-08-26，主模型亲写，计划步 6）**：
   `reimagine` 在 `fidelity=high`（CLI 默认、GUI 固定）把提示词组装到**无条件保真前导**上
   （要求模型「重新显影同一张照片」，禁增删移改内容），用户 Direction 附于其后而非替换——

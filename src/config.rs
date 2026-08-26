@@ -615,7 +615,8 @@ pub struct Config {
     pub analysis_base_url: String,
 
     // --- AI denoise sidecar ---------------------------------------------------
-    /// Python interpreter for the AI sidecars (`python/denoise.py`, `segment.py`).
+    /// Python interpreter for the AI sidecars (`python/denoise.py`,
+    /// `segment.py`, `embed.py`, `correspond.py`).
     pub python_bin: String,
     /// SCUNet weight set (color_real_psnr default; see python/denoise.py).
     pub denoise_model: String,
@@ -627,6 +628,10 @@ pub struct Config {
     /// style index (R27 Batch-5). Same trust class as the other two: it names
     /// a program's argv, so it is env-only and Destination-trusted.
     pub embed_script: String,
+    /// Cross-image correspondence sidecar (`python/correspond.py`) — DIFT
+    /// fields for content-divergent reverse-fits (step 7). Same trust class:
+    /// a program's argv, so env-only and Destination-trusted.
+    pub correspond_script: String,
 
     /// How strongly to lean on the user's historical edit style, 0.0..1.0.
     pub style_strength: f32,
@@ -760,6 +765,7 @@ pub(crate) const SETTINGS: &[Setting] = &[
     env_only("AUTOSHOP_DENOISE_SCRIPT", Trust::Destination), // that command's argv
     env_only("AUTOSHOP_SEGMENT_SCRIPT", Trust::Destination),
     env_only("AUTOSHOP_EMBED_SCRIPT", Trust::Destination),
+    env_only("AUTOSHOP_CORRESPOND_SCRIPT", Trust::Destination),
     // A redirected weight cache is a poisoned-model path.
     env_only("AUTOSHOP_DENOISE_CACHE", Trust::Destination),
     env_only("AUTOSHOP_DENOISE_MODEL", Trust::Preference),
@@ -1162,6 +1168,8 @@ impl Config {
             env_val("AUTOSHOP_SEGMENT_SCRIPT").unwrap_or_else(|| bundled_helper("python/segment.py"));
         let embed_script =
             env_val("AUTOSHOP_EMBED_SCRIPT").unwrap_or_else(|| bundled_helper("python/embed.py"));
+        let correspond_script = env_val("AUTOSHOP_CORRESPOND_SCRIPT")
+            .unwrap_or_else(|| bundled_helper("python/correspond.py"));
         Config {
             openai_api_key: header_safe_key(
                 pick_opt(
@@ -1236,6 +1244,7 @@ impl Config {
             denoise_cache,
             segment_script,
             embed_script,
+            correspond_script,
             style_strength: env_val("AUTOSHOP_STYLE_STRENGTH")
                 .and_then(|s| s.parse::<f32>().ok())
                 // "NaN" parses as a valid f32 and SURVIVES clamp (clamp keeps
@@ -1447,6 +1456,7 @@ mod tests {
             "AUTOSHOP_DENOISE_SCRIPT",
             "AUTOSHOP_SEGMENT_SCRIPT",
             "AUTOSHOP_EMBED_SCRIPT",
+            "AUTOSHOP_CORRESPOND_SCRIPT",
             "AUTOSHOP_DENOISE_CACHE",
             "AUTOSHOP_DATA_DIR",
             "PATH",

@@ -10,6 +10,7 @@
 
 pub mod advisor;
 pub mod config;
+pub mod correspond;
 pub mod decode;
 pub mod denoise;
 pub mod diag;
@@ -167,6 +168,96 @@ pub fn assign_kill_group(child: &std::process::Child) -> Option<KillGroup> {
     }
 }
 
+/// SINGLE-FLIGHT over the MODEL sidecars, process-wide: at most one AI model
+/// is resident at a time, whatever the caller's concurrency.
+///
+/// Moved up from `embed.rs` when the correspondence bridge became its second
+/// user (step 7a): the budget it enforces was never about SigLIP specifically
+/// — the models live in VRAM, which none of the host-RAM budgets
+/// (`decode::MAX_CONCURRENT_DECODES`, `jobs`' free-memory division) can see,
+/// and a SigLIP (0.75 GB fp16) resident BESIDE an SD 2.1 UNet (~2.4 GB fp16)
+/// is exactly the co-residency a per-module slot would have permitted. One
+/// process-wide gate makes the budget a single sentence: one model at a time.
+/// (The full gate-not-batcher rationale is on `embed::embed_file`.)
+///
+/// Poison is recovered rather than re-panicked, like every other lock in this
+/// tree: one caller panicking inside a sidecar must not turn every other
+/// caller's run into a second panic.
+pub fn with_model_slot<T>(body: impl FnOnce() -> T) -> T {
+    static SLOT: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _guard = SLOT.lock().unwrap_or_else(|p| p.into_inner());
+    body()
+}
+
+/// Shared executor for the single-artifact MODEL sidecars (`embed.rs`,
+/// `correspond.rs`): spawn under [`with_model_slot`], bound the wait, apply
+/// the exit-0-is-not-success contract, and hand back the artifact's text.
+/// Extracted when the correspondence bridge would have been the FOURTH copy
+/// of this sequence — the two callers here are byte-for-byte the same shape;
+/// `denoise.rs` and `segment.rs` keep their own variants for now (staged
+/// output conversion, stdout report parsing, the probe door — real
+/// per-bridge differences, registered as a follow-up rather than flattened
+/// in passing).
+///
+/// The steps, and why:
+/// * env ALLOWLIST (`config::dotenv_child_env`) + `-E` in the caller's argv —
+///   the two layers against a PYTHON* import hijack;
+/// * stdio CAPTURED, never inherited: the release GUI has no console, so an
+///   inherited handle would discard the reason a missing dependency failed;
+/// * the slot covers the child's whole life — what must be exclusive is the
+///   model RESIDENT in the GPU, and the sidecar timeout
+///   (`denoise::bounded_child_output`) doubles as the gate's release;
+/// * exit 0 alone is not success ([`sidecar_wrote`]) — THIS run must have
+///   produced the artifact;
+/// * every refusal runs `denoise::discard_failed_output`, so a failed run
+///   cannot leave a half-artifact behind masquerading as a result.
+pub fn run_model_sidecar(
+    who: &str,
+    python_bin: &str,
+    args: Vec<std::ffi::OsString>,
+    output: &std::path::Path,
+) -> anyhow::Result<String> {
+    use anyhow::{bail, Context};
+    crate::pipeline::ensure_parent(output)?;
+    // The output name may already exist (a previous run's leftover, or a
+    // caller's 0-byte claim file), so the artifact state is sampled BEFORE
+    // the spawn.
+    let before = artifact_state(output);
+    let mut cmd = std::process::Command::new(python_bin);
+    cmd.envs(crate::config::dotenv_child_env());
+    cmd.args(args)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    hide_child_console(&mut cmd);
+    arm_kill_group(&mut cmd);
+    let discard = || crate::denoise::discard_failed_output(output, before);
+    let out = with_model_slot(|| -> anyhow::Result<std::process::Output> {
+        let child = cmd.spawn().with_context(|| {
+            format!("launch {who} ({python_bin}) — is Python on PATH / AUTOSHOP_PYTHON set?")
+        })?;
+        let group = assign_kill_group(&child);
+        crate::denoise::bounded_child_output(
+            child,
+            who,
+            crate::denoise::sidecar_timeout(),
+            "AUTOSHOP_SIDECAR_TIMEOUT_SECS",
+            group,
+        )
+    })
+    .inspect_err(|_| discard())?;
+    if !out.status.success() {
+        discard();
+        let reason = match out.status.code() {
+            Some(c) => c.to_string(),
+            None => "signal".to_string(),
+        };
+        bail!("{who} exited with {reason}: {}", sidecar_tail(&out.stderr, &out.stdout));
+    }
+    sidecar_wrote(who, output, before).inspect_err(|_| discard())?;
+    std::fs::read_to_string(output).with_context(|| format!("read {who} output {}", output.display()))
+}
+
 /// Snapshot of a sidecar's promised artifact path BEFORE the sidecar runs:
 /// `None` = nothing there, `Some((len, mtime))` = what already exists — a
 /// stale deliverable from an earlier export (the CLI's `default_out` names
@@ -241,6 +332,56 @@ pub fn sidecar_tail(stderr: &[u8], stdout: &[u8]) -> String {
         format!("...{cut}")
     } else {
         text
+    }
+}
+
+/// TEST-ONLY: a unique-per-test fixture dir. Fixed names let two concurrent
+/// test processes (nextest, a second worktree) delete each other's fixtures
+/// mid-run, and a leftover output from an aborted run flips assertions — so
+/// the name carries the caller's tag AND the process id. Extracted with
+/// [`write_stand_in`] (step 7a) from the per-module `tdir` copies in
+/// `denoise.rs` and `advisor/claude.rs`. (The GUI bin crate keeps its own
+/// copies — a dependency's `cfg(test)` items are not compiled into it.)
+#[cfg(test)]
+pub(crate) fn test_dir(tag: &str) -> std::path::PathBuf {
+    use std::{env, fs, process};
+    let dir = env::temp_dir().join(format!("autoshop-{tag}-{}", process::id()));
+    fs::remove_dir_all(&dir).ok();
+    fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+/// TEST-ONLY: write a platform stand-in "interpreter" script into `dir` and
+/// return its path — the shared ceremony behind every sidecar-bridge loopback
+/// test (a `.bat` on Windows, a `chmod +x` sh script elsewhere). Extracted
+/// when `correspond.rs`'s tests would have been the third copy of the
+/// `#[cfg(windows)]` / permissions boilerplate (`denoise.rs`'s harness and
+/// `advisor/claude.rs`'s CLI stub carry the earlier two; the claude stub
+/// speaks a different protocol and converting it is registered follow-up,
+/// not flattened in passing). The BODIES are the test's own — this helper
+/// owns only the platform ceremony, so no behaviour moves.
+#[cfg(test)]
+pub(crate) fn write_stand_in(
+    dir: &std::path::Path,
+    name: &str,
+    bat_body: &str,
+    sh_body: &str,
+) -> String {
+    #[cfg(windows)]
+    {
+        let _ = sh_body;
+        let p = dir.join(format!("{name}.bat"));
+        std::fs::write(&p, bat_body).unwrap();
+        p.to_string_lossy().into_owned()
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = bat_body;
+        use std::os::unix::fs::PermissionsExt;
+        let p = dir.join(format!("{name}.sh"));
+        std::fs::write(&p, format!("#!/bin/sh\n{sh_body}")).unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        p.to_string_lossy().into_owned()
     }
 }
 

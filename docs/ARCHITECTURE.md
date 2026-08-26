@@ -92,8 +92,8 @@
 > experimental generative edits, an optional pixel-**heal** retouch mode (§4.7)
 > the deterministic look **reverse-fit** (§4.8) and the local server's refusal
 > model (§4.9).
-> 924 library + 14 CLI + 145 GUI + 2+2 contract tests are enumerated in the GUI
-> build; the library result is 915 pass + 9 `#[ignore]`d forensic probes
+> 937 library + 15 CLI + 145 GUI + 2+2 contract tests are enumerated in the GUI
+> build; the library result is 928 pass + 9 `#[ignore]`d forensic probes
 > (counts refreshed 2026-08-26 after the paired robust-regression batch: library 917→921, set diff +4/−0 by name — `unsupported_knots_cannot_pull_the_solve`, `robust_regression_downweights_invented_target_content`, `robust_rejection_reaches_the_disclosure`, `p36_fixture_recovers_the_lightroom_exposure_anchor`). THREE suites are ADDITIONAL and
 > env-gated, so a bare `cargo test` does not include them:
 > `AUTOSHOP_LR_PROBE_FIXTURES` (16 real Lightroom radial sidecars, byte
@@ -305,7 +305,7 @@
 > Since shipped, two *opt-in* pixel-level features were added alongside the
 > parametric core: **AI denoise** (a Python/SCUNet GPU sidecar, run before
 > tone/sharpen) and a **baked-source mode** (edit an already-exported PNG/TIFF,
-> e.g. one denoised in Lightroom — auto-detected by file type). Both sidecar
+> e.g. one denoised in Lightroom — auto-detected by file type). All four sidecar
 > bridges share one success contract (`lib.rs::sidecar_wrote`): *exit 0 alone
 > is not success* — THIS run must have produced the artifact, refusing a
 > missing file, an empty file (the callers that pre-claim the output name
@@ -319,8 +319,8 @@
 >
 > ### The ML sidecar family (R27 Batch-5)
 >
-> There are now **three** Python sidecars, and they share one discipline rather
-> than three copies of it. `python/denoise.py` owns the download-and-refuse
+> There are now **four** Python sidecars, and they share one discipline rather
+> than four copies of it. `python/denoise.py` owns the download-and-refuse
 > implementation — `_download` with an in-stream byte cap, `_sha256`,
 > `_reclaim_stale_parts`, `_fetch_verified` — and the other two **import it**
 > (`from denoise import _fetch_verified`) instead of reimplementing it, which
@@ -335,6 +335,7 @@
 > | `segment.py --target sky` (class table) | `segment.rs` | ADE20K label table the processor requires — **ours, rebuilt from the model's own MIT metadata**, ships in `python/`, not downloaded | MIT (sources) | 7,085 B |
 > | `segment.py --target object` | `segment.rs` | **SAM 2.1 Hiera-Large**, point-prompted | Apache-2.0 | 897,897,416 B |
 > | `embed.py` | `embed.rs` | **SigLIP 2 base/16 @384**, 768-dim | Apache-2.0 | 1,501,968,264 B |
+> | `correspond.py` | `correspond.rs` | **Stable Diffusion 2.1** as a DIFT featurizer (unet+vae+text encoder, fp16), sha256-pinned | CreativeML Open RAIL++-M | 2,580,061,174 B |
 >
 > **Licence is a selection criterion, not a footnote.** This is a public
 > repository whose product is being copyright registered, and a licence that
@@ -343,7 +344,15 @@
 > only」); CLIP and OpenCLIP were passed over in Batch-5 because their model
 > cards say deployment is out of scope and the OpenAI HF mirror carries no
 > licence tag at all. In both cases the licence-clean option was also the
-> stronger model. BiRefNet (R29 B4) is MIT, unmodified and ungated on both the
+> stronger model. `correspond.py`'s SD 2.1 (step 7a) is the checkpoint the
+> DIFT paper measured; its RAIL++-M licence **allows commercial use** — the
+> restrictions it carries are conduct-based (unlawful-use clauses that travel
+> with the weights), not field-of-use, which is the line SegFormer fell on.
+> The official `stabilityai` repo being **delisted upstream** (verified
+> 2026-08-26: anonymous 401, authenticated 404) is why the pin names a
+> community mirror — adopted only after its fp32 tower digests proved
+> byte-identical to an independent uploader's, and the sha256 gate below is
+> the only door at run time either way. BiRefNet (R29 B4) is MIT, unmodified and ungated on both the
 > weight repo and the code repository it points at — and the checkpoint chosen
 > is the GENERAL one, not the `_HR-matting` variant the R27 design document
 > named: measured on the photographer's own library, HR-matting returns an
@@ -351,7 +360,7 @@
 > deleted masks rather than approximated them.
 >
 > **Pinning is now ONE tier, and closing the last gap found a second one
-> (R29 C3/C4).** `denoise.py`, `embed.py` and every `segment.py` backend fetch
+> (R29 C3/C4).** `denoise.py`, `embed.py`, `correspond.py` and every `segment.py` backend fetch
 > every file themselves, gate it on sha256 + an exact byte count, and load from
 > a local directory with `local_files_only=True` — the digest is the only door.
 > For BiRefNet that gate covers a file that is **executed**: `birefnet.py` is
@@ -677,6 +686,7 @@ image path and the API analysis path each need an OpenAI-compatible key.
 | V2 | Generative reimagine / retouch | OpenAI Images (`gpt-image-*`); reimagine composes a faithfulness scaffold onto the prompt under `high` (the `input_fidelity` parameter is negotiated away on gpt-image-2), measures the result's structural divergence D with the reverse-fit's own statistic (`fit::structure_divergence_for`, threshold `fit::DIVERGENCE_GLOBAL`), disclosures it, and offers a bounded opt-in retry that keeps the closer of two results | **done (experimental)** |
 | V2 | Pixel retouch / heal (spot removal) | deterministic heal engine + vision spot-detect ([`src/retouch.rs`](../src/retouch.rs)) | **done (experimental)** |
 | V2 | Look matching / reverse-fit (`match`) | distribution-level solve for the recipe that reproduces a target rendition ([`src/fit.rs`](../src/fit.rs); zoned variant [`src/fit_zoned.rs`](../src/fit_zoned.rs)) | **done** |
+| V2 | Cross-image correspondence (content-divergent pairs) | DIFT (SD 2.1) sidecar → 48×48 field of target coordinates + cyclic×smoothness confidences ([`src/correspond.rs`](../src/correspond.rs), [`python/correspond.py`](../python/correspond.py)); CLI `correspond` diagnostic; estimator wiring is the next batch | **instrument done (7a)** |
 
 ### 4.1 RAW decode (M1)
 

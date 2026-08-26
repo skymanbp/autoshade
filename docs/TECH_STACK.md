@@ -470,6 +470,17 @@ the equivalent streamed-refusal wrapper—names that parameter, while `heal`
 copies real neighbouring pixels, mean-corrects and feather-blends the patch,
 and remains a deterministic pixel operation rather than XMP.
 
+`correspond` (step 7a) is the measurement instrument for the content-divergent
+case the reverse-fit's atmosphere mode guards: a DIFT featurizer (one SD 2.1
+UNet pass per noise draw at `t=261` over 768² inputs, `up_blocks[1]` features,
+an averaged 8-draw ensemble run one-at-a-time to bound VRAM) yields a 48×48
+correspondence field between two renditions — per-cell target coordinates
+whose confidence is cyclic consistency × local flow smoothness. Raw cosine is
+exported for diagnostics but excluded from the confidence: it is
+scale-dependent, and the smoothness term is what keeps a pixel-shuffle of the
+same frame (the atmosphere-budget fixtures) honestly unmatchable. The sidecar
+writes coordinates, never pixels; its absence degrades to today's behaviour.
+
 ### Parameters
 
 - Advisor output: catalogue-registered fields only, schema validation and
@@ -489,6 +500,13 @@ and remains a deterministic pixel operation rather than XMP.
   encoded in the client**).
 - Heal auto-detection: bounded to at most 30 spots; painted-mask heal uses the
   same deterministic patch compositor (**designed resource bound**).
+- DIFT recipe: timestep 261, 768² bilinear input, `up_blocks[1]` (1280 ch at
+  48×48), ensemble 8, seed 0 (**the paper's featurizer settings**).
+- Correspondence confidence: `exp(−cyc²/2·1.5²) · exp(−dev²/2·2.0²)` in grid
+  cells — cyclic round-trip distance × deviation from the 3×3 median flow;
+  raw cosine excluded (**designed scale-free gate**).
+- Correspondence pinning: 11 files sha256 + byte-capped at one 40-hex commit;
+  `local_files_only` loads; fp16 on CUDA, fp32 on CPU (**provenance gate**).
 
 ### Measured results & disclosures
 
@@ -507,6 +525,15 @@ and remains a deterministic pixel operation rather than XMP.
   it does not recover the generated pixels or guarantee exact equality.
 - Heal changes pixels and is therefore stored in the pixel-source/version
   model, not misrepresented as a parametric Lightroom adjustment.
+- Correspondence zero point: on an identity pair the field reads median
+  confidence `1.000`, coverage `100.0%`, mean |flow| `0.00` cells. On the
+  content-divergent calibration pair (generated sky), sky cells read median
+  confidence `0.009` (coverage `21.5%`) against ground `1.000` (`90.5%`) —
+  the field separates replaced content from preserved content.
+- SD 2.1 provenance: the official `stabilityai` repo is delisted upstream
+  (2026-08-26: anonymous 401, authenticated 404); the pinned community
+  mirror's fp32 tower digests are byte-identical to an independent
+  uploader's, and the sha256 gate is the only door at run time.
 
 ### Source
 
@@ -521,6 +548,8 @@ and remains a deterministic pixel operation rather than XMP.
 - `src/generative.rs` — gpt-image-2 sizing, streamed refusal attribution,
   staged publication, reimagine, and generative fill.
 - `src/retouch.rs` — deterministic heal.
+- `src/correspond.rs` and `python/correspond.py` — DIFT correspondence
+  field, digest pins, parse gates, and the `correspond` CLI diagnostic.
 - `docs/V2_PLAN.md`, `docs/ARCHITECTURE.md`, and `docs/ROADMAP-archive.md` —
   advisor, style-calibration, reverse-fit, and generation ledger.
 

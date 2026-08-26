@@ -12,7 +12,7 @@
 //! bound everything else (`decode::MAX_CONCURRENT_DECODES`, `jobs`' free-memory
 //! division) ever saw it. Two rules close that: the sidecar is asked for
 //! [`fp16_wanted`] half precision, and calls are SINGLE-FLIGHTED
-//! ([`with_model_slot`]) so at most one model is resident whatever the caller's
+//! ([`crate::with_model_slot`]) so at most one model is resident whatever the caller's
 //! concurrency. Together, 4 concurrent × 1.50 GB becomes 1 × 0.75 GB.
 //!
 //! **The embedding is additive, in both directions.** An index built without
@@ -22,7 +22,6 @@
 //! 1.5 GB download must never be able to turn a working Style panel off.
 
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
 
 use anyhow::{bail, Context, Result};
 
@@ -108,46 +107,35 @@ fn sidecar_args(script: &Path, input: &Path, output: &Path, fp16: bool) -> Vec<s
     v
 }
 
-/// SINGLE-FLIGHT over the sidecar PROCESS: at most one model is resident at a
-/// time, whatever the caller's concurrency.
-///
-/// The fan-out this closes (adjudication F3): `StyleIndex::build` runs up to
-/// `decode::MAX_CONCURRENT_DECODES` = 4 workers and each one used to spawn its
-/// own sidecar, so four SigLIP loads could be live at once — 6.0 GB of fp32
-/// weights, 3.0 GB even with `--fp16`, against a consumer GPU that commonly
-/// has 4. Nothing in the tree serialised them, because every budget in this
-/// codebase is shaped like host RAM (`MAX_CONCURRENT_DECODES` counts 181 MB
-/// decodes, `jobs` divides `GlobalMemoryStatusEx`) and the model does not live
-/// in host RAM at all.
-///
-/// A GATE, not a batcher, chosen over wiring `embed.py --manifest`: the
-/// manifest path helps only the index build, while this covers the develop-time
-/// query too (`pipeline::produce_recipe` under `batch --jobs 3` is three
-/// concurrent single-image calls that no manifest can merge), and it needs no
-/// new record format, no per-line failure mapping and no second staging
-/// lifetime. The cost is honest and bounded: the embedding arm of a build runs
-/// serially, while the decode that dominates it still runs four-wide.
-///
-/// Poison is recovered rather than re-panicked, like every other lock in this
-/// tree: one worker panicking inside the sidecar must not turn every other
-/// worker's embed into a second panic.
-fn with_model_slot<T>(body: impl FnOnce() -> T) -> T {
-    static SLOT: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    let _guard = SLOT.lock().unwrap_or_else(|p| p.into_inner());
-    body()
-}
-
 /// Run the sidecar on ONE image and return its L2-normalised vector.
 ///
 /// `scratch` is the JSON file the sidecar writes; the caller owns its lifetime
 /// (the style build hands over a per-photo temp name so parallel workers never
-/// share one). The file-based contract is the same one `denoise.py` and
-/// `segment.py` use — stdout stays a diagnostic channel, never the payload.
+/// share one). The run itself is [`crate::run_model_sidecar`] — the shared
+/// spawn/bound/exit-0-is-not-success executor, extracted when the
+/// correspondence bridge (step 7a) would have been the fourth copy of it.
 ///
-/// SERIALISED against every other call in this process — see
-/// [`with_model_slot`]. The staging the caller did (writing the PNG) is
-/// deliberately OUTSIDE that gate: it is disk work, it costs no model, and
-/// holding the slot across it would serialise the cheap half too.
+/// SERIALISED against every other model sidecar in this process — see
+/// [`crate::with_model_slot`]. The fan-out that gate closes here
+/// (adjudication F3): `StyleIndex::build` runs up to
+/// `decode::MAX_CONCURRENT_DECODES` = 4 workers and each one used to spawn
+/// its own sidecar, so four SigLIP loads could be live at once — 6.0 GB of
+/// fp32 weights, 3.0 GB even with `--fp16`, against a consumer GPU that
+/// commonly has 4. Nothing else in the tree serialised them, because every
+/// other budget is shaped like host RAM (`MAX_CONCURRENT_DECODES` counts
+/// 181 MB decodes, `jobs` divides `GlobalMemoryStatusEx`) and the model does
+/// not live in host RAM at all.
+///
+/// A GATE, not a batcher, chosen over wiring `embed.py --manifest`: the
+/// manifest path helps only the index build, while the gate covers the
+/// develop-time query too (`pipeline::produce_recipe` under `batch --jobs 3`
+/// is three concurrent single-image calls that no manifest can merge), and it
+/// needs no new record format, no per-line failure mapping and no second
+/// staging lifetime. The cost is honest and bounded: the embedding arm of a
+/// build runs serially, while the decode that dominates it still runs
+/// four-wide. The staging the caller did (writing the PNG) stays OUTSIDE the
+/// gate: it is disk work, it costs no model, and holding the slot across it
+/// would serialise the cheap half too.
 pub fn embed_file(opts: &EmbedOpts, input: &Path, scratch: &Path) -> Result<Vec<f32>> {
     if !opts.script.exists() {
         bail!(
@@ -156,68 +144,12 @@ pub fn embed_file(opts: &EmbedOpts, input: &Path, scratch: &Path) -> Result<Vec<
             opts.script.display()
         );
     }
-    crate::pipeline::ensure_parent(scratch)?;
-    // Same "exit 0 is not success" rule the other two sidecars enforce: the
-    // scratch name may already exist (a previous run's leftover), so the
-    // artifact state is sampled BEFORE the spawn.
-    let before = crate::artifact_state(scratch);
-    let mut cmd = Command::new(&opts.python_bin);
-    // ALLOWLIST, not "everything the capability table did not refuse" — see
-    // `config::dotenv_child_env`.
-    cmd.envs(crate::config::dotenv_child_env());
-    cmd.args(sidecar_args(&opts.script, input, scratch, fp16_wanted()))
-        // CAPTURE, never inherit: the release GUI is windows_subsystem="windows"
-        // and has no console, so an inherited handle discards the reason a
-        // missing dependency failed.
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    crate::hide_child_console(&mut cmd);
-    crate::arm_kill_group(&mut cmd);
-    // THE SLOT covers the child's whole life, not just the spawn: what has to
-    // be exclusive is the model RESIDENT in the GPU, which exists from the
-    // load until the process exits. The sidecar's own timeout
-    // (`bounded_child_output`) therefore doubles as this gate's release —
-    // a hung sidecar cannot park the pool forever.
-    let run = with_model_slot(|| -> Result<std::process::Output> {
-        let child = cmd.spawn().with_context(|| {
-            format!(
-                "launch style-embedding sidecar ({} {}) — is Python on PATH / AUTOSHOP_PYTHON set?",
-                opts.python_bin,
-                opts.script.display()
-            )
-        })?;
-        let group = crate::assign_kill_group(&child);
-        crate::denoise::bounded_child_output(
-            child,
-            "style-embedding sidecar",
-            crate::denoise::sidecar_timeout(),
-            "AUTOSHOP_SIDECAR_TIMEOUT_SECS",
-            group,
-        )
-    });
-    let out = match run {
-        Ok(out) => out,
-        Err(error) => {
-            crate::denoise::discard_failed_output(scratch, before);
-            return Err(error);
-        }
-    };
-    if !out.status.success() {
-        crate::denoise::discard_failed_output(scratch, before);
-        bail!(
-            "style-embedding sidecar exited with {}: {}",
-            out.status.code().map(|c| c.to_string()).unwrap_or_else(|| "signal".into()),
-            crate::sidecar_tail(&out.stderr, &out.stdout)
-        );
-    }
-    let wrote = crate::sidecar_wrote("style-embedding sidecar", scratch, before);
-    if wrote.is_err() {
-        crate::denoise::discard_failed_output(scratch, before);
-        return wrote.map(|()| Vec::new());
-    }
-    let text = std::fs::read_to_string(scratch)
-        .with_context(|| format!("read style-embedding output {}", scratch.display()))?;
+    let text = crate::run_model_sidecar(
+        "style-embedding sidecar",
+        &opts.python_bin,
+        sidecar_args(&opts.script, input, scratch, fp16_wanted()),
+        scratch,
+    )?;
     let v = parse_vector(&text).with_context(|| {
         format!("style-embedding sidecar wrote an unusable record at {}", scratch.display())
     })?;
@@ -361,10 +293,13 @@ mod tests {
     /// SINGLE-FLIGHT, pinned by observation rather than by reading the code:
     /// however many threads call it, the gate never lets two bodies overlap.
     ///
-    /// MUTATION THIS KILLS: delete the lock in `with_model_slot` (make it call
-    /// `body()` directly) and the four threads below all enter together — the
-    /// observed maximum becomes 4 and this fails. That is exactly the state
-    /// F3 measured: four workers, four resident SigLIP models, 6.0 GB.
+    /// MUTATION THIS KILLS: delete the lock in `crate::with_model_slot`
+    /// (make it call `body()` directly) and the four threads below all enter
+    /// together — the observed maximum becomes 4 and this fails. That is
+    /// exactly the state F3 measured: four workers, four resident SigLIP
+    /// models, 6.0 GB. Since step 7a the slot is PROCESS-WIDE in `lib.rs`
+    /// (the correspondence bridge shares it), so this observation now pins
+    /// the crate-level gate.
     #[test]
     fn the_model_slot_admits_one_caller_at_a_time() {
         use std::sync::atomic::{AtomicUsize, Ordering};
@@ -375,7 +310,7 @@ mod tests {
             for _ in 0..4 {
                 let (live, most, entered) = (&live, &most, &entered);
                 s.spawn(move || {
-                    with_model_slot(|| {
+                    crate::with_model_slot(|| {
                         let now = live.fetch_add(1, Ordering::SeqCst) + 1;
                         most.fetch_max(now, Ordering::SeqCst);
                         entered.fetch_add(1, Ordering::SeqCst);
@@ -404,6 +339,16 @@ mod tests {
         include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/python/embed.py"));
     const SEGMENT_SRC: &str =
         include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/python/segment.py"));
+    const CORRESPOND_SRC: &str =
+        include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/python/correspond.py"));
+
+    /// The family roster, in one place: a fifth sidecar that fails to enrol
+    /// here escapes all four shared contracts below.
+    const SIDECARS: [(&str, &str); 3] = [
+        ("embed.py", EMBED_SRC),
+        ("segment.py", SEGMENT_SRC),
+        ("correspond.py", CORRESPOND_SRC),
+    ];
 
     /// Every pinned model file carries BOTH a sha256 and a byte count, in both
     /// sidecars. A partial pin leaves a live unpinned download path — a
@@ -414,7 +359,7 @@ mod tests {
     /// and this fails.
     #[test]
     fn every_pinned_sidecar_download_has_a_digest_and_a_byte_cap() {
-        for (what, src) in [("embed.py", EMBED_SRC), ("segment.py", SEGMENT_SRC)] {
+        for (what, src) in SIDECARS {
             let sha = src.matches("\"sha256\":").count();
             let bytes = src.matches("\"bytes\":").count();
             assert!(sha >= 3, "{what}: extractor non-vacuity — found {sha} digests");
@@ -440,7 +385,7 @@ mod tests {
     #[test]
     fn every_hugging_face_revision_pin_is_a_full_commit_hash() {
         let mut found = 0;
-        for (what, src) in [("embed.py", EMBED_SRC), ("segment.py", SEGMENT_SRC)] {
+        for (what, src) in SIDECARS {
             for line in src.lines() {
                 let l = line.trim();
                 let Some(rest) = l
@@ -458,7 +403,7 @@ mod tests {
                 found += 1;
             }
         }
-        assert!(found >= 2, "extractor non-vacuity: found {found} revision pins");
+        assert!(found >= 3, "extractor non-vacuity: found {found} revision pins");
     }
 
     /// `trust_remote_code` downloads and EXECUTES upstream Python through HF's
@@ -470,8 +415,8 @@ mod tests {
     /// fails.
     #[test]
     fn the_sidecars_never_execute_unpinned_upstream_code() {
-        for (what, src) in [("embed.py", EMBED_SRC), ("segment.py", SEGMENT_SRC)] {
-            // The CALL, not the word: both docstrings name `trust_remote_code`
+        for (what, src) in SIDECARS {
+            // The CALL, not the word: the docstrings name `trust_remote_code`
             // to explain why it is never used, and a test that banned the
             // token would push that explanation out of the file.
             for banned in ["trust_remote_code=", "hf_hub_download(", "snapshot_download("] {
@@ -479,8 +424,9 @@ mod tests {
             }
         }
         // And the fetch itself goes through the ONE verified downloader.
-        assert!(EMBED_SRC.contains("_fetch_verified("), "embed.py must fetch through the gate");
-        assert!(SEGMENT_SRC.contains("_fetch_verified("), "segment.py must fetch through the gate");
+        for (what, src) in SIDECARS {
+            assert!(src.contains("_fetch_verified("), "{what} must fetch through the gate");
+        }
     }
 
     /// R1 / R2, pinned so they cannot come back: the NON-COMMERCIAL SegFormer
@@ -825,7 +771,7 @@ mod tests {
     /// with the page cache.
     #[test]
     fn the_sidecars_publish_durably() {
-        for (what, src) in [("embed.py", EMBED_SRC), ("segment.py", SEGMENT_SRC)] {
+        for (what, src) in SIDECARS {
             assert!(src.contains("os.fsync("), "{what} must fsync before publishing");
             assert!(src.contains("os.replace("), "{what} must publish atomically");
             let fsync = src.find("os.fsync(").unwrap();

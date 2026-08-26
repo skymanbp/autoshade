@@ -241,6 +241,7 @@ autoshop eval <dir> [--limit N] [--jobs N] [--fresh] [--state FILE]
 autoshop style-index <dir>
 autoshop reimagine <src> --prompt TEXT [--fidelity high|low] [--quality low|medium|high|auto] [--fidelity-retry] [-o|--out FILE]
 autoshop match <src> <target> [--render] [--zoned] [--style-prompt] [--ai-judge] [--deep] [-o|--out FILE]
+autoshop correspond <source> <target> [-o|--out FILE]
 autoshop retouch <src> --mask FILE --prompt TEXT [--quality low|medium|high|auto] [--full-res] [-o|--out FILE]
 autoshop heal <src> [--mask FILE] [--no-auto] [--full-res] [-o|--out FILE]
 autoshop serve <dir> [-p|--port N]
@@ -579,7 +580,11 @@ revision only when it does not lower the score. `src/style.rs` retrieves
 z-scored RAW+XMP exemplars with optional SigLIP 2 (`W_EMB=2.0` retained after a
 147-exemplar calibration). `src/fit.rs` performs luminance-CDF, exposure,
 basis, tone, saturation, and cast inverse stages with a ≥45°/≥5% foreign-hue
-veto; `src/generative.rs` negotiates gpt-image-2 reimagine sizes, and
+veto; `src/correspond.rs` + `python/correspond.py` measure a DIFT (SD 2.1)
+correspondence field between two renditions of one frame — 48×48 cells of
+target coordinates whose confidence is cyclic consistency × flow smoothness
+— the diagnostic instrument (`correspond`) for the content-divergent case;
+`src/generative.rs` negotiates gpt-image-2 reimagine sizes, and
 `src/retouch.rs` supplies deterministic pixel heal.
 
 ### Application and infrastructure
@@ -592,7 +597,7 @@ versions, and a deleted-version registry; SCUNet success requires the typed
 `sidecar_wrote` contract. A 1771 MB reference probe sets the 1800 MB per-photo
 budget, while the 4 GiB RAW gate bounds admission. The [`build`
 workflow](.github/workflows/build.yml) covers default and GUI feature sets on
-Ubuntu and macOS. The current battery is **924 library (915 pass + 9 `#[ignore]`d forensic probes) / 14 CLI / 145 GUI / 2+2 contract** tests; the
+Ubuntu and macOS. The current battery is **937 library (928 pass + 9 `#[ignore]`d forensic probes) / 15 CLI / 145 GUI / 2+2 contract** tests; the
 [`scripts/check_docs.py`](scripts/check_docs.py) gate re-derives pinned release
 claims. Model weights are not stored in this repository.
 
