@@ -2278,11 +2278,40 @@ impl AutoshopApp {
                 "Cloned {n} spot(s) → {path}",
                 &[("n", &n.to_string()), ("path", &out.display().to_string())],
             ),
-            RetouchNote::Reimagined(p) => trf(
-                lang,
-                "「AI generated」variant created → {path} · keep tweaking or 「Reverse-fit」",
-                &[("path", &p.display().to_string())],
-            ),
+            RetouchNote::Reimagined { out, divergence, discarded } => {
+                let mut s = trf(
+                    lang,
+                    "「AI generated」variant created → {path} · keep tweaking or 「Reverse-fit」",
+                    &[("path", &out.display().to_string())],
+                );
+                // The generation-side fidelity reading — the SAME statistic
+                // the reverse-fit's mode selector computes, so the warning
+                // names the consequence in that vocabulary.
+                if *divergence >= autoshop::fit::DIVERGENCE_GLOBAL {
+                    s.push_str(&trf(
+                        lang,
+                        " · ⚠ structure diverged from the original (D={d} ≥ {limit}) — a reverse-fit will fall back to atmosphere mode",
+                        &[
+                            ("d", &format!("{divergence:.3}")),
+                            ("limit", &format!("{:.2}", autoshop::fit::DIVERGENCE_GLOBAL)),
+                        ],
+                    ));
+                } else {
+                    s.push_str(&trf(
+                        lang,
+                        " · faithful to the frame (structural divergence D={d})",
+                        &[("d", &format!("{divergence:.3}"))],
+                    ));
+                }
+                if let Some(d0) = discarded {
+                    s.push_str(&trf(
+                        lang,
+                        " · the opt-in retry kept the closer of two results (discarded D={d0})",
+                        &[("d0", &format!("{d0:.3}"))],
+                    ));
+                }
+                s
+            }
         }
     }
 

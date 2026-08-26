@@ -195,6 +195,28 @@
 
 ## 当前状态（已完成，勿重做）
 
+- **🖼 整图生成贴合原图：提示词硬化 + 生成侧 D 披露 + 自选有界重试（2026-08-26，主模型亲写，计划步 6）**：
+  `reimagine` 在 `fidelity=high`（CLI 默认、GUI 固定）把提示词组装到**无条件保真前导**上
+  （要求模型「重新显影同一张照片」，禁增删移改内容），用户 Direction 附于其后而非替换——
+  修复两处既有缺口：① `input_fidelity` 请求参数在 gpt-image-2 上被能力协商静默丢弃，
+  主力模型上线上原本**零**贴合信号；② GUI 用户一旦输入 Direction 就替换掉唯一的保真
+  句（旧空栏回退句）。`low` 维持文档化自由发挥（原文直达）。**生成侧贴合度量**：生成后
+  用反推自己的统计（`fit::structure_divergence_for`，同函数同栅格同中性基）测送入帧 vs
+  生成帧的结构差异 D 并双面披露（CLI println + GUI 落地注，D≥0.35=`DIVERGENCE_GLOBAL`
+  即预警反推将走氛围模式；阈值 pub 化单一定义）。**自选重试**：`--fidelity-retry` /
+  GUI 复选框（Prefs 五点惯例，双默认 false=付费永不默认开；进 Config 会让 cwd 配置
+  文件可拨计费行为故不进）；D 超阈时限一次再买一张，保留 D 较低者，弃用侧 D 一并披露；
+  与「2xx 后禁重发」规则的区别（这是显式二次购买而非同单重发）在现场注释论证。实测
+  夹具：回声帧 D=0.000、噪声帧 D=1.892（阈 0.35 前提牢固）。**门**：clippy 双特性 0+0；
+  电池 924(915+9i)/14/145/2+2，集合差 +4/−0 具名
+  （`the_faithfulness_scaffold_is_unconditional_under_high_fidelity`、
+  `a_reimagine_hardens_the_prompt_and_measures_its_result`、
+  `the_divergence_retry_is_opt_in_bounded_and_keeps_the_closer_result`、
+  GUI `the_reimagine_fidelity_retry_is_off_in_both_defaults`）；audit_i18n 八项零、
+  字体重子集 839/839（付花钱阈偏弃等新字形）。**回滚面**：`hardened_prompt` 恢复透传 +
+  measurement/retry 块删除 + GUI 五点撤销，`ReimagineReport` 是库 API 变更（v1.1 发版
+  义务清单需记）。默认零新增 API 开销（度量本地、重试 opt-in）。
+
 - **🎯 反推估计器换型：对应像素稳健回归（2026-08-26，主模型亲写）**：区内估计器从
   边缘分布匹配（矩/CDF 分位数传输）换为**配对稳健回归**——同帧对上按栅格索引配对，
   逐 64-bin Tukey-IRLS 均值（加权中位数起步、证据×稳健双权、色度族群独立尺度），

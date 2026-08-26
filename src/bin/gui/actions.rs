@@ -51,6 +51,7 @@ impl AutoshopApp {
             app.zoned_fit = prefs.zoned_fit;
             app.fit_ai_judge = prefs.fit_ai_judge;
             app.fit_deep = prefs.fit_deep;
+            app.reimagine_retry = prefs.reimagine_retry;
             app.view_mode = prefs.view_mode;
             app.exp_long_edge = prefs.exp_long_edge;
             app.exp_sharpen = prefs.exp_sharpen.clamp(0.0, 100.0);

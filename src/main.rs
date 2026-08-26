@@ -245,6 +245,11 @@ enum Command {
         /// higher cost). Defaults to AUTOSHOP_IMAGE_QUALITY (config default: high).
         #[arg(long)]
         quality: Option<String>,
+        /// Opt-in: when the result's structural divergence D reaches the
+        /// reverse-fit threshold, buy ONE more generation (a second billed
+        /// image) and keep whichever result measures closer to the input.
+        #[arg(long)]
+        fidelity_retry: bool,
         /// Output PNG (default: ./out/<stem>.reimagine.png).
         #[arg(short, long)]
         out: Option<PathBuf>,
@@ -391,7 +396,7 @@ fn main() -> Result<()> {
             eval::run(&dir, limit, jobs, fresh, state.as_deref())
         }
         Command::StyleIndex { dir } => style_index_cmd(&dir),
-        Command::Reimagine { raw, prompt, fidelity, quality, out } => {
+        Command::Reimagine { raw, prompt, fidelity, quality, fidelity_retry, out } => {
             let cfg = Config::load();
             let out = out.unwrap_or_else(|| default_out(&raw, "reimagine", "png"));
             // Full pre-pay preflight (L10 family): the first API call comes
@@ -402,7 +407,10 @@ fn main() -> Result<()> {
             let q = quality.unwrap_or_else(|| cfg.openai_image_quality.clone());
             require_choice("--quality (or the configured default)", &q, &["low", "medium", "high", "auto"])?;
             require_image_key(&cfg, "reimagine")?;
-            generative::reimagine(&cfg, &raw, &prompt, &fidelity, &q, &out)
+            // The report's D lines were already printed by the library
+            // (they double as the GUI's progress feed) — nothing to add here.
+            generative::reimagine(&cfg, &raw, &prompt, &fidelity, &q, fidelity_retry, &out)
+                .map(|_report| ())
         }
         Command::Match { raw, target, render, zoned, style_prompt, ai_judge, deep, out } => {
             // --deep IS the review, iterated: asking for the loop without the

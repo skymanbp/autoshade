@@ -184,6 +184,9 @@ pub(crate) struct AutoshopApp {
     // REVISION of the R20 decision that the fit's review is informational
     // only — user decision 2026-08-17 ⑥, recorded at `start_fit`.
     pub(crate) fit_deep: bool,
+    // Step-6: opt-in fidelity retry for reimagine — a second billed
+    // generation when the first diverges. Paid and opt-in, like `fit_deep`.
+    pub(crate) reimagine_retry: bool,
     // R23-6 B: an explicitly chosen reverse-fit reference (any finished
     // rendition of this frame — a Lightroom export, a camera JPEG, another
     // RAW's develop). SESSION state, not a preference: it names one file for
@@ -1567,6 +1570,9 @@ impl Default for AutoshopApp {
             fit_ai_judge: false,
             // Paid opt-in, and up to three vision calls — mirror Prefs::default.
             fit_deep: false,
+            // Paid opt-in (a second image per diverged reimagine) — mirror
+            // Prefs::default.
+            reimagine_retry: false,
             // Session state, never persisted (see the field's comment).
             fit_ref: None,
             show_settings: false,
@@ -1954,6 +1960,7 @@ impl eframe::App for AutoshopApp {
                 // other paid opt-in. `fit_ref` deliberately does NOT — it
                 // names one file for one photo (see the field).
                 fit_deep: self.fit_deep,
+                reimagine_retry: self.reimagine_retry,
                 view_mode: self.view_mode,
                 exp_long_edge: self.exp_long_edge,
                 exp_sharpen: self.exp_sharpen,

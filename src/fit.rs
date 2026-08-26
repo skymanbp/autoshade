@@ -79,8 +79,10 @@ pub(crate) const ANALYZE_EDGE: u32 = 384;
 const HIST_BINS: usize = 1024;
 /// Global structural-divergence threshold. Calibration on same-content pairs:
 /// showcase 1/2/3 = 0.075/0.168/0.095, viaduct = 0.070 and sunset = 0.226;
-/// the generated-cloud failure is 0.491.
-pub(crate) const DIVERGENCE_GLOBAL: f32 = 0.35;
+/// the generated-cloud failure is 0.491. `pub` (not `pub(crate)`): the GUI
+/// bin crate quotes the same number in the generation-side fidelity
+/// disclosure, so the threshold has exactly one definition.
+pub const DIVERGENCE_GLOBAL: f32 = 0.35;
 /// Per-zone structural-divergence threshold. The same-content top-35% strips
 /// peak at 0.532, while the generated-cloud sky is 1.186 (land = 0.436).
 pub(crate) const DIVERGENCE_ZONE: f32 = 0.65;

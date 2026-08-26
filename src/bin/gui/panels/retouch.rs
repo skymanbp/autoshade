@@ -528,6 +528,7 @@ impl AutoshopApp {
         // below the resolution the user asked for, behind a refusal whose own
         // remedy (save) Ctrl+S REFUSES for a generated variant.
         let edge = self.preview_edge.clamp(640, 8192);
+        let retry = self.reimagine_retry; // paid opt-in, captured at click time
         let out_claim = out.clone(); // release the claim on failure (worker tail)
         let out_panic = out.clone(); // …and on a worker panic (see the error closure)
         let (epoch, flag) = self.arm_cancel();
@@ -545,12 +546,24 @@ impl AutoshopApp {
                 let _mem = crate::budget::heavy_permit(crate::budget::estimate_mb(Some(&path))); // full-frame commit budget (budget.rs)
                 let res = (|| -> RetouchDone {
                     let cfg = autoshop::config::Config::load();
-                    // fidelity "high" keeps it recognisably the same photo.
-                    autoshop::generative::reimagine(&cfg, &path, &prompt, "high", &cfg.openai_image_quality, &out)?;
+                    // fidelity "high": the library composes the faithfulness
+                    // scaffold onto the prompt and measures D afterwards.
+                    let report = autoshop::generative::reimagine(
+                        &cfg, &path, &prompt, "high", &cfg.openai_image_quality, retry, &out,
+                    )?;
                     // baked-by-construction: the ./out master this job just wrote.
                     let img = autoshop::decode::load_image(&out)?.thumbnail(edge, edge);
                     // NewGenerated: a whole-frame rendition → a new Generated variant.
-                    Ok((img, RetouchNote::Reimagined(out.clone()), out, RetouchKind::NewGenerated))
+                    Ok((
+                        img,
+                        RetouchNote::Reimagined {
+                            out: out.clone(),
+                            divergence: report.divergence.d,
+                            discarded: report.first_divergence,
+                        },
+                        out,
+                        RetouchKind::NewGenerated,
+                    ))
                 })();
                 if res.is_err() {
                     release_empty_claim(&out_claim);

@@ -597,6 +597,20 @@ impl AutoshopApp {
                         }
                     });
                 });
+                // Its OWN row, deliberately: a fourth item in the wrapped
+                // prompt+button row re-opens the R19 width arithmetic.
+                ui.checkbox(
+                    &mut self.reimagine_retry,
+                    tr(lang, "auto-retry once if the result diverges"),
+                )
+                .on_hover_text(trf(
+                    lang,
+                    "After generating, the structural divergence D vs the original is measured. \
+                     If D ≥ {limit} (the reverse-fit's atmosphere threshold), buy ONE more \
+                     generation — a second paid image — and keep the closer result. \
+                     Off = never spend extra.",
+                    &[("limit", &format!("{:.2}", autoshop::fit::DIVERGENCE_GLOBAL))],
+                ));
                 ui.label(
                     egui::RichText::new(tr(lang,
                         "After generating, use 「Reverse-fit recipe」 to turn the look into sliders + XMP \

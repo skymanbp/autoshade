@@ -239,7 +239,7 @@ autoshop denoise <src> [-o|--out FILE] [--strength 0..1] [--model NAME]
 autoshop batch <dir> [--render] [--limit N] [--include-baked] [--jobs N] [--long-edge N]
 autoshop eval <dir> [--limit N] [--jobs N] [--fresh] [--state FILE]
 autoshop style-index <dir>
-autoshop reimagine <src> --prompt TEXT [--fidelity high|low] [--quality low|medium|high|auto] [-o|--out FILE]
+autoshop reimagine <src> --prompt TEXT [--fidelity high|low] [--quality low|medium|high|auto] [--fidelity-retry] [-o|--out FILE]
 autoshop match <src> <target> [--render] [--zoned] [--style-prompt] [--ai-judge] [--deep] [-o|--out FILE]
 autoshop retouch <src> --mask FILE --prompt TEXT [--quality low|medium|high|auto] [--full-res] [-o|--out FILE]
 autoshop heal <src> [--mask FILE] [--no-auto] [--full-res] [-o|--out FILE]
@@ -313,8 +313,18 @@ turning an opened photo folder into a credential or path override.
   similar prior edits as soft references; Strength independently controls how
   strongly the proposal is allowed to move.
 - **Reimagine:** enter a prompt in the AI panel or use `reimagine`. This creates
-  a generated, lower-resolution target. Use **Reverse-fit** or `match` to infer
-  a deterministic recipe, then apply it to the original RAW at full resolution.
+  a generated, lower-resolution target. Under `--fidelity high` (the default,
+  and the GUI's mode) the prompt is composed onto an unconditional
+  faithfulness scaffold — the model is told to re-develop the same photograph,
+  not repaint it — because the `input_fidelity` request parameter is silently
+  rejected by newer models (gpt-image-2). After generating, the structural
+  divergence **D** against the sent input is measured (the same statistic the
+  reverse-fit's mode selector uses) and disclosed; `D ≥ 0.35` warns that a
+  reverse-fit of that result will fall back to atmosphere mode, and the
+  opt-in `--fidelity-retry` (a GUI checkbox as well — off by default, it buys
+  a second image) regenerates once and keeps the closer result. Use
+  **Reverse-fit** or `match` to infer a deterministic recipe, then apply it
+  to the original RAW at full resolution.
 
 Local denoise and segmentation do not need an API key. Their Python sidecars
 resolve relative to the installed program tree, and downloaded weights are
@@ -582,7 +592,7 @@ versions, and a deleted-version registry; SCUNet success requires the typed
 `sidecar_wrote` contract. A 1771 MB reference probe sets the 1800 MB per-photo
 budget, while the 4 GiB RAW gate bounds admission. The [`build`
 workflow](.github/workflows/build.yml) covers default and GUI feature sets on
-Ubuntu and macOS. The current battery is **921 library (912 pass + 9 `#[ignore]`d forensic probes) / 14 CLI / 144 GUI / 2+2 contract** tests; the
+Ubuntu and macOS. The current battery is **924 library (915 pass + 9 `#[ignore]`d forensic probes) / 14 CLI / 145 GUI / 2+2 contract** tests; the
 [`scripts/check_docs.py`](scripts/check_docs.py) gate re-derives pinned release
 claims. Model weights are not stored in this repository.
 

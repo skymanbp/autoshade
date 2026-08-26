@@ -1803,6 +1803,21 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     ("Local & Pixel", "局部与像素"),
     ("Versions & Export", "版本与导出"),
     ("Brush (shared)", "画笔（共用）"),
+
+    // ── Reimagine · generation-side fidelity reading (step 6) ────────────────
+    ("auto-retry once if the result diverges", "结果结构偏离时自动重试一次"),
+    ("After generating, the structural divergence D vs the original is measured. \
+     If D ≥ {limit} (the reverse-fit's atmosphere threshold), buy ONE more \
+     generation — a second paid image — and keep the closer result. \
+     Off = never spend extra.",
+        "生成后会测量结果与原图的结构差异 D。若 D ≥ {limit}（反推的氛围模式阈值），\
+         则再买一张——第二次付费生成——并保留更贴合的一张。关闭 = 绝不额外花钱。"),
+    (" · ⚠ structure diverged from the original (D={d} ≥ {limit}) — a reverse-fit will fall back to atmosphere mode",
+        " · ⚠ 结构偏离原图（D={d} ≥ {limit}）——反推将退回氛围模式"),
+    (" · faithful to the frame (structural divergence D={d})",
+        " · 贴合原图（结构差异 D={d}）"),
+    (" · the opt-in retry kept the closer of two results (discarded D={d0})",
+        " · 自选重试保留了两张中更贴合的一张（弃用 D={d0}）"),
 ];
 
 #[cfg(test)]

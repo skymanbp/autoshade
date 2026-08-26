@@ -222,6 +222,13 @@ pub(crate) struct Prefs {
     /// as `false` — the same answer [`Prefs::default`] gives, so an upgrade
     /// never silently starts spending vision calls on every reverse-fit.
     pub(crate) fit_deep: bool,
+    /// Step-6: the generation-side fidelity retry — when a reimagine's
+    /// structural divergence D reaches the reverse-fit threshold, buy ONE
+    /// more generation and keep the closer result. `#[serde(default)]` on
+    /// the struct decodes an older prefs file as `false` — the same answer
+    /// [`Prefs::default`] gives, so an upgrade never silently starts buying
+    /// a second image per reimagine.
+    pub(crate) reimagine_retry: bool,
     pub(crate) view_mode: ViewMode,
     pub(crate) exp_long_edge: u32,
     pub(crate) exp_sharpen: f32,
@@ -259,6 +266,8 @@ impl Default for Prefs {
             // The deep reverse-fit is the same rule and a bigger bill (up to
             // three vision calls per fit), so the same answer.
             fit_deep: false,
+            // A second billed generation per diverged reimagine — same rule.
+            reimagine_retry: false,
             view_mode: ViewMode::SideBySide,
             exp_long_edge: 0,
             exp_sharpen: 0.0,
@@ -361,8 +370,11 @@ pub(crate) enum RetouchNote {
     Denoised(PathBuf),
     /// Clone stamp: spot count + artifact.
     Cloned { n: usize, out: PathBuf },
-    /// Whole-frame reimagine → a new Generated variant.
-    Reimagined(PathBuf),
+    /// Whole-frame reimagine → a new Generated variant. Carries the
+    /// generation-side fidelity reading: the kept result's structural
+    /// divergence D, and the discarded attempt's D when the opt-in retry
+    /// bought a second generation.
+    Reimagined { out: PathBuf, divergence: f32, discarded: Option<f32> },
 }
 
 /// A finished retouch from any of the five pixel paths (fill/heal/denoise/

@@ -7079,6 +7079,26 @@
         );
     }
 
+    /// Step-6: the generation-side fidelity retry buys a SECOND image per
+    /// diverged reimagine, so it is off in BOTH defaults — a fresh install
+    /// and an older prefs file must give the same answer — and its switch
+    /// renders inside the Reimagine section it governs. Supervisor mutation
+    /// ME (the default flipped on) goes red here.
+    #[test]
+    fn the_reimagine_fidelity_retry_is_off_in_both_defaults() {
+        assert!(!AutoshopApp::default().reimagine_retry, "spending is opt-in");
+        assert!(
+            !Prefs::default().reimagine_retry,
+            "an older prefs file must decode to the same answer"
+        );
+        let mut app = AutoshopApp::default();
+        let seen = tall_frame(&mut app, |a, ui| a.ai_panel(ui));
+        assert!(
+            seen.iter().any(|t| t.contains("auto-retry")),
+            "the switch must exist: {seen:?}"
+        );
+    }
+
     /// R23-6 D (user decision 2026-08-17 ⑥): the deep reverse-fit is a PAID
     /// opt-in on top of another paid opt-in, so it must be off in both
     /// defaults — a prefs file written before the key existed has to decode
