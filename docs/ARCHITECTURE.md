@@ -76,7 +76,7 @@
 > experimental generative edits, an optional pixel-**heal** retouch mode (§4.7)
 > the deterministic look **reverse-fit** (§4.8) and the local server's refusal
 > model (§4.9).
-> 917 library + 14 CLI + 139 GUI + 2+2 contract tests are enumerated in the GUI
+> 917 library + 14 CLI + 140 GUI + 2+2 contract tests are enumerated in the GUI
 > build; the library result is 908 pass + 9 `#[ignore]`d forensic probes
 > (counts refreshed 2026-08-25 after the evidence-gating series: library 896→917, set diff vs the prior release +22/−1 by name). THREE suites are ADDITIONAL and
 > env-gated, so a bare `cargo test` does not include them:

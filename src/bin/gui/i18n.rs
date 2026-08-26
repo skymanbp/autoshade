@@ -992,6 +992,8 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     ("recipe.json is unreadable ({err}) — edits NOT fully restored; Ctrl+S would overwrite it (the unread save is backed up as a version first)",
         "recipe.json 无法解析（{err}）— 编辑未完整恢复；Ctrl+S 会覆盖它（未能读取的保存会先备份为版本）"),
     ("a saved develop exists but holds no effective edits", "已保存的显影存在但不含有效编辑"),
+    ("the current variant holds no edits; this photo's saved edits live in {n} background variant(s)",
+        "当前变体未作修改；本照片已保存的编辑在 {n} 个后台变体中"),
     ("AI develop applied — verdict {v}: NOT saved (Ctrl+S keeps it, Ctrl+Z steps back)",
         "AI 显影已应用 — 判词 {v}：未保存（Ctrl+S 保留，Ctrl+Z 回退）"),
     // Verdict decision words (advisor::decision_key) + the verdict line

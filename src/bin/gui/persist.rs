@@ -549,8 +549,7 @@ pub(crate) fn resolve_saved_develop(
             ));
         }
         SavedDevelop::NoopOnly => {
-            open_note =
-                Some(tr(lang, "a saved develop exists but holds no effective edits").into());
+            open_note = noop_only_note(lang, src);
         }
         SavedDevelop::Nothing => {}
     }
@@ -570,6 +569,43 @@ pub(crate) fn resolve_saved_develop(
         open_note = merge_note(open_note, coord_migration_sentence(lang, c));
     }
     ResolvedSaved { recipe, restored, stamp, open_note, unresolved }
+}
+
+/// The open-note for a develop whose ACTIVE card restored as a no-op.
+///
+/// The sentence it can emit claims something about the WHOLE saved develop,
+/// so it must be decided from the whole store — the active card's own files
+/// (already judged by the caller), the variant strip, and the baked pixel
+/// master. Deciding it from recipe.json alone reported "holds no effective
+/// edits" on photos whose saved work lives in a background variant card or
+/// in baked pixels (user report, 2026-08-25). The reader widens; recipe.json
+/// is NOT rewritten — it stays the active card's sole authority.
+fn noop_only_note(lang: Lang, src: Option<&std::path::Path>) -> Option<String> {
+    // A recorded pixel master IS saved work, and the canvas shows it —
+    // there is no neutral-looking open to explain.
+    if src.is_some_and(autoshop::store::has_pixel_source) {
+        return None;
+    }
+    match src.map(autoshop::store::read_variants_checked) {
+        Some(autoshop::store::VariantsRead::Strip(rec)) => {
+            // A background card holds work when its recipe edits or when it
+            // rides its own baked raster (whose recipe may be neutral).
+            let with_work =
+                rec.others.iter().filter(|v| !v.recipe.is_noop() || v.origin.is_some()).count();
+            if with_work > 0 {
+                return Some(trf(
+                    lang,
+                    "the current variant holds no edits; this photo's saved edits live in {n} background variant(s)",
+                    &[("n", &with_work.to_string())],
+                ));
+            }
+        }
+        // The strip file exists but cannot be read: unknown is not "no
+        // edits", and the Opened handler toasts that state in its own words.
+        Some(autoshop::store::VariantsRead::Unresolved) => return None,
+        _ => {}
+    }
+    Some(tr(lang, "a saved develop exists but holds no effective edits").into())
 }
 
 /// The GUI's OWN localized sentence for a coordinate-frame migration — the

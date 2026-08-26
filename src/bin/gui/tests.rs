@@ -2519,6 +2519,91 @@
         );
     }
 
+    /// The reopen note's claim is about the WHOLE saved develop, so it must
+    /// be decided from the whole store. Deciding it from the active card
+    /// alone reported "holds no effective edits" on photos whose saved work
+    /// lives in a background variant card or in baked pixels (user report,
+    /// 2026-08-25). recipe.json is never rewritten by the fix — only the
+    /// reading side widened.
+    #[test]
+    fn a_neutral_active_card_does_not_deny_strip_or_pixel_work() {
+        let src = std::path::Path::new("D:/library/_noop_note_scope_test.ARW"); // never touched
+        let dev = autoshop::store::develop_dir(src);
+        let _ = std::fs::remove_dir_all(&dev);
+        std::fs::create_dir_all(&dev).unwrap();
+        let _scrub = Scrub(vec![dev.clone()]);
+        let rj = autoshop::store::recipe_target(src);
+        std::fs::write(&rj, serde_json::to_string(&EditRecipe::default()).unwrap()).unwrap();
+        let recipe_bytes = std::fs::read(&rj).unwrap();
+        assert!(
+            matches!(read_saved_develop(src).saved, SavedDevelop::NoopOnly),
+            "premise: a neutral active card restores as NoopOnly"
+        );
+
+        // Nothing anywhere else — the old sentence is TRUE and must stay.
+        let plain = resolve_saved_develop(Lang::En, SavedDevelop::NoopOnly, true, Some(src));
+        assert_eq!(
+            plain.open_note.as_deref(),
+            Some("a saved develop exists but holds no effective edits"),
+            "a genuinely empty develop keeps the plain sentence"
+        );
+
+        // A background card with a real edit: the same reopen used to deny
+        // the work. The note must now say WHERE the edits live instead.
+        let strip = autoshop::store::VariantsRecord {
+            v: 1,
+            active_kind: "original".into(),
+            active_pos: 0,
+            others: vec![autoshop::store::VariantEntry {
+                kind: "fitted".into(),
+                recipe: EditRecipe { exposure_ev: 1.0, ..Default::default() },
+                origin: None,
+                id: None,
+                name: None,
+                extra: Default::default(),
+            }],
+            active_id: None,
+            active_name: None,
+            extra: Default::default(),
+        };
+        autoshop::store::write_variants(src, &strip).unwrap();
+        let noted = resolve_saved_develop(Lang::En, SavedDevelop::NoopOnly, true, Some(src));
+        let note = noted.open_note.as_deref().expect("the strip work must be named");
+        assert!(note.contains("1 background variant"), "{note}");
+        assert!(!note.contains("no effective edits"), "the false denial is back: {note}");
+
+        // A strip whose background cards are themselves neutral holds no
+        // work — the plain sentence returns.
+        let neutral_strip = autoshop::store::VariantsRecord {
+            others: vec![autoshop::store::VariantEntry {
+                kind: "original".into(),
+                recipe: EditRecipe::default(),
+                origin: None,
+                id: None,
+                name: None,
+                extra: Default::default(),
+            }],
+            ..strip.clone()
+        };
+        autoshop::store::write_variants(src, &neutral_strip).unwrap();
+        let plain2 = resolve_saved_develop(Lang::En, SavedDevelop::NoopOnly, true, Some(src));
+        assert_eq!(
+            plain2.open_note.as_deref(),
+            Some("a saved develop exists but holds no effective edits"),
+            "neutral background cards are not work"
+        );
+
+        // A recorded baked pixel master: the canvas shows the work, so
+        // there is no neutral-looking open to explain — no note at all.
+        std::fs::write(autoshop::store::pixel_source_path(src), "{}").unwrap();
+        let silent = resolve_saved_develop(Lang::En, SavedDevelop::NoopOnly, true, Some(src));
+        assert_eq!(silent.open_note, None, "{:?}", silent.open_note);
+
+        // The fix is READ-side only: recipe.json — the active card's sole
+        // authority — is byte-identical throughout.
+        assert_eq!(std::fs::read(&rj).unwrap(), recipe_bytes, "recipe.json was rewritten");
+    }
+
     #[test]
     fn read_saved_develop_lets_a_newer_lightroom_sidecar_win() {
         let dir = std::env::temp_dir().join("autoshop-gui-lr-sidecar");
