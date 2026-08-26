@@ -1545,24 +1545,49 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
       matching value ranges, which the single residual number above \
       cannot show — treat this fit as a starting point, not a match.",
         " 联合失配偏大：两张图在相同的数值区间内仍然不同，而上面那个单一残差数字显示不出这一点——请把本次反推当作起点，而不是匹配结果。"),
-    (" (the joint distribution check found no value range with enough \
-      evidence on both sides, so it has no opinion on this pair — the \
-      confidence above rests on the single residual number alone)",
-        " （联合分布检查没有找到两侧证据都充分的数值区间，因此它对本次配对没有意见——上面的置信度只依据那一个残差数字）"),
+    (" The fit tried the supported controls but did not reach the target: \
+      the two images still differ inside matching value ranges, which the \
+      single residual number above cannot show; treat this fit as a starting \
+      point, not a match.",
+        " 拟合尝试了有证据支持的控制项，但仍未达到目标：两张图在相同的数值区间内仍有差异，而上面的单一残差数字显示不出这一点；请把本次反推当作起点，而不是匹配结果。"),
+    (" The fit withheld supported movement because the evidence was one-sided, \
+      so this result is deliberately farther from the target; this is a \
+      refusal, not a miss.",
+        " 拟合暂不移动有证据支持的控制项，因为证据只在一侧，所以结果有意更远离目标；这是拒绝，不是未命中。"),
     (" (the refusal came from the joint distribution check, not the \
       residual: the fitted recipe pushed the value ranges further apart \
       than leaving the photo alone)",
         " （这次拒绝来自联合分布检查而非残差：拟合配方让各数值区间比不做任何处理时相距更远）"),
+    (" (the joint distribution check found no value range with enough \
+      evidence on both sides, so it has no opinion on this pair; confidence \
+      remains capped by the pair's shared-evidence identifiability)",
+        " （联合分布检查没有找到两侧都有足够证据的数值区间，因此它对本配对没有意见；置信度仍受配对共享证据可识别性上限约束）"),
+    (" Fit refused because the evidence contradicted the proposed correction: the measurable value ranges moved farther apart, so the recipe was reset to the untouched calibration.",
+        " 证据与拟议修正相矛盾：可测量的数值区间变得更加分离，因此配方已重置为未处理的调校基础。"),
+    (" Fit withheld because nothing measurable was available here: no shared value range had enough evidence on both sides, so no correction was fitted.",
+        " 未找到可测量的共享证据：没有任何数值区间在两侧拥有足够证据，因此未拟合任何修正。"),
+    (" Detail evidence fitted clarity {clarity} and texture {texture} within the +/-20 budget; their high-frequency reading used only identifiable pixels.",
+        " 细节证据在 +/-20 限额内拟合了清晰度 {clarity} 和纹理 {texture}；高频测量仅使用可识别像素。"),
+    (" Detail controls were withheld: two-sided structural and luma-range evidence did not support a safe global detail move, so clarity and texture were not moved.",
+        " 细节控制暂不调整：两侧结构与亮度范围的证据不足，因此未移动清晰度与纹理。"),
+    (" Evidence gating withheld luma ranges [{luma_ranges}] and hue bands [{hue_bands}]. One-sided [{one_sided}] is UNMEASURABLE, not equal, so it vetoed movement. Sparse on both sides [{sparse}] was excluded from estimation but did not veto a move. Structurally divergent [{divergent}] also vetoed movement.",
+        " 证据门控暂不调整亮度 [{luma_ranges}] 和色相 [{hue_bands}]，单侧范围 [{one_sided}] 无法测量，两侧证据稀疏 [{sparse}]，结构差异范围 [{divergent}] 也被阻止。"),
+    (" Zoned {label} colour controls withheld: they would move zero-evidence hue bands [{hue_bands}]. Those bands were not adjusted blindly.",
+        " 分区 {label} 的色彩控件暂不调整：它们会移动零证据的色相 [{hue_bands}]，因此未盲目调整。"),
+    (" Zoned {label} tone controls withheld: they would move zero-evidence luma ranges [{luma_ranges}]. Those ranges were not adjusted blindly.",
+        " 分区 {label} 的影调控件暂不调整：它们会移动零证据的亮度范围 [{luma_ranges}]，因此未盲目调整。"),
+    (" No zoned correction attached: the source and target zone shares differ by more than 2:1, so neither population is a comparable measurement of the same subject.",
+        " 未附加任何分区修正：源图与目标的分区占比之比超过 2:1，两侧不是对同一主体的可比测量。"),
     (" This target's look appears to use {controls}, which the reverse-fit \
-      never solves for (its whole solution space is exposure/contrast/\
+      never solves for (its solution space is exposure/contrast/\
       highlights/shadows/whites/blacks, a tone curve, one global \
-      saturation and the three channel curves) — that part of the look \
+      saturation, clarity/texture and the three channel curves) — that part of the look \
       cannot arrive through this route.",
-        " 目标成品的风格里可能用到了 {controls}，而反推从不求解这些参数（它的整个求解域只有曝光/对比度/高光/阴影/白色/黑色、一条影调曲线、一个全局饱和度和三条通道曲线）——这部分风格无法从这条路径得到。"),
+        "此目标的风格似乎使用了 {controls}；反推不会求解这些控制项，因此这部分风格无法通过此路径得到。"),
     (" This target's remaining look appears to need {controls}; Atmosphere mode only \
-      solves bounded exposure, white balance, a robust five-point tone curve and \
-      saturation, so that part cannot arrive through this route.",
-        " 此目标剩余的观感可能需要 {controls}；氛围模式只求解有界曝光、白平衡、可靠的 5 点影调曲线和饱和度，因此这部分无法通过此路径得到。"),
+      solves bounded exposure, white balance, a robust five-point tone curve, \
+      saturation and evidence-gated clarity/texture, so that part cannot arrive through this route.",
+        "此目标剩余的观感可能需要 {controls}；氛围模式只求解有界曝光、白平衡、稳健五点曲线、饱和度及证据门控的细节，因此这部分无法通过此路径得到。"),
     (" WARNING: the reference's proportions do not match this photo's — it \
       was CROPPED, or it is not the same frame. Either way the two \
       distributions are not comparable, because a crop changes which pixels \

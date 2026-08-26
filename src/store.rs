@@ -1538,6 +1538,89 @@ pub fn claim_raster(src: &Path, prefix: &str) -> std::io::Result<PathBuf> {
     )))
 }
 
+/// A raster path whose FILE the holder OWNS and may delete.
+///
+/// The zoned reverse-fit removes its mask when no zone survives, so that file
+/// must be one the same run created. A bare `&Path` cannot carry that: on
+/// 2026-08-25 a test passed the user's calibration corpus `sky-mask.png` into
+/// the deleting chain, a mutation forced the no-zone branch, and the file --
+/// untracked, local-only, referenced by `fitted.recipe.json` by path rather
+/// than by bytes -- was gone. The contract had lived in a doc comment,
+/// invisible at the call site. It now lives in the type: the only ways to
+/// build one are a fresh [`claim_raster`] name and, in tests, an explicit
+/// scratch path, so a borrowed user path cannot reach a deletion.
+#[derive(Debug)]
+pub struct OwnedRaster(PathBuf);
+
+impl OwnedRaster {
+    /// Claim a fresh raster name in the photo's develop dir and own it.
+    pub fn claim(src: &Path, prefix: &str) -> std::io::Result<Self> {
+        claim_raster(src, prefix).map(Self)
+    }
+
+    /// A scratch file a TEST created and may destroy.
+    ///
+    /// Refuses the calibration corpus outright: that directory holds the
+    /// user's hand-made regression pairs, which no run creates and none may
+    /// remove. Refusing at CONSTRUCTION means a corpus path cannot even be
+    /// carried to a deletion, let alone reach one.
+    #[cfg(test)]
+    pub(crate) fn scratch(path: PathBuf) -> Self {
+        assert!(
+            !is_calibration_corpus(&path),
+            "refusing to own a calibration-corpus file: {}",
+            path.display()
+        );
+        Self(path)
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.0
+    }
+
+    pub fn into_path(self) -> PathBuf {
+        self.0
+    }
+
+    /// Delete the owned file, releasing its claimed name. Best-effort, like
+    /// the `remove_file(..).ok()` calls it replaces -- except that a corpus
+    /// path is refused instead of removed, loudly in debug builds so the bug
+    /// is visible where it happens rather than silently in the user's data.
+    pub(crate) fn remove(&self) {
+        if is_calibration_corpus(&self.0) {
+            debug_assert!(
+                false,
+                "the calibration corpus must never be deleted: {}",
+                self.0.display()
+            );
+            return;
+        }
+        std::fs::remove_file(&self.0).ok();
+    }
+}
+
+/// True when `p` lies inside `dir`. Canonicalizes both sides so a relative
+/// or `..`-bearing path cannot slip past, and falls back to a lexical
+/// component-wise prefix test when either side cannot be canonicalized -- the
+/// path may already be gone, which is exactly when the answer still matters.
+///
+/// Split out of [`is_calibration_corpus`] so it can be pinned by a test that
+/// does not mutate a process-global environment variable: a guard whose only
+/// test rewrites `AUTOSHOP_FIT_CALIBRATION_DIR` races every other test in the
+/// binary and passes for reasons that have nothing to do with the guard.
+fn is_within(p: &Path, dir: &Path) -> bool {
+    match (p.canonicalize(), dir.canonicalize()) {
+        (Ok(p), Ok(d)) => p.starts_with(d),
+        _ => p.starts_with(dir),
+    }
+}
+
+/// True when `p` lies inside the corpus named by `AUTOSHOP_FIT_CALIBRATION_DIR`.
+fn is_calibration_corpus(p: &Path) -> bool {
+    std::env::var("AUTOSHOP_FIT_CALIBRATION_DIR")
+        .is_ok_and(|dir| is_within(p, Path::new(&dir)))
+}
+
 /// Give every bitmap mask in `r` its own LIVE raster copy, claimed under
 /// `prefix`, and repoint the recipe at the copies.
 ///
@@ -5633,6 +5716,50 @@ fn migrate_one_recipe(from: &Path, to: &Path, stem: &str, dev: &Path, legacy_out
     // stem-keyed recipe nor its rasters can be proven to belong to this path.
     // Retain all legacy bytes for older builds and same-stem photos.
     true
+}
+
+#[cfg(test)]
+mod ownership_tests {
+    use super::*;
+
+    /// The guard that turns the 2026-08-25 corpus loss from unlikely into
+    /// impossible: the zoned fit's deleting call sites are reachable only
+    /// through [`OwnedRaster`], and no corpus path can become one.
+    #[test]
+    fn a_calibration_corpus_path_can_never_become_an_owned_raster() {
+        let dir = std::env::temp_dir().join("autoshop-ownership-guard");
+        assert!(is_within(&dir.join("sky-mask.png"), &dir), "a file inside the corpus is inside it");
+        assert!(is_within(&dir.join("sub").join("m.png"), &dir), "containment is not depth-limited");
+        let sibling = dir.with_file_name("autoshop-ownership-guard-other");
+        assert!(
+            !is_within(&sibling.join("sky-mask.png"), &dir),
+            "a sibling directory sharing a name PREFIX is not inside the corpus"
+        );
+
+        // And against the real corpus, when one is configured for this run.
+        let Ok(root) = std::env::var("AUTOSHOP_FIT_CALIBRATION_DIR") else { return };
+        let mask = PathBuf::from(&root).join("sky-mask.png");
+        if !mask.exists() {
+            return;
+        }
+        let outcome = std::panic::catch_unwind(|| OwnedRaster::scratch(mask.clone()));
+        assert!(outcome.is_err(), "the corpus mask was accepted as an owned raster");
+        assert!(mask.exists(), "the refusal must leave the corpus untouched");
+    }
+
+    /// `remove` is the only deletion path, and it refuses the corpus too --
+    /// belt as well as braces, because a future constructor could reintroduce
+    /// what `scratch` currently rejects.
+    #[test]
+    fn owned_raster_remove_deletes_only_what_it_owns() {
+        let scratch = std::env::temp_dir()
+            .join(format!("autoshop-owned-remove-{}.png", std::process::id()));
+        std::fs::write(&scratch, b"x").unwrap();
+        let owned = OwnedRaster::scratch(scratch.clone());
+        assert_eq!(owned.path(), scratch.as_path());
+        owned.remove();
+        assert!(!scratch.exists(), "remove must delete the file it owns");
+    }
 }
 
 #[cfg(test)]

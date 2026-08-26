@@ -116,33 +116,49 @@ pub mod keys {
          frame.";
     /// The fail-open case, said out loud. When the joint family finds no
     /// value range with evidence on both sides it has NO opinion — and the
-    /// confidence above is then the look-error ladder alone, which is the
-    /// self-graded number this round exists to stop presenting as a verdict.
+    /// confidence still carries the shared-evidence identifiability cap, so
+    /// the missing joint opinion cannot turn into an unsupported high claim.
     /// Silence here would make two different claims look identical.
     pub const FIT_NOTE_JOINT_NONE: &str =
         " (the joint distribution check found no value range with enough \
-         evidence on both sides, so it has no opinion on this pair — the \
-         confidence above rests on the single residual number alone)";
+         evidence on both sides, so it has no opinion on this pair; confidence \
+         remains capped by the pair's shared-evidence identifiability)";
     pub const FIT_NOTE_JOINT_FAR: &str =
         " That joint mismatch is large: the two images still differ inside \
          matching value ranges, which the single residual number above \
          cannot show — treat this fit as a starting point, not a match.";
+    pub const FIT_NOTE_JOINT_MISS: &str =
+        " The fit tried the supported controls but did not reach the target: \
+         the two images still differ inside matching value ranges, which the \
+         single residual number above cannot show; treat this fit as a starting \
+         point, not a match.";
+    pub const FIT_NOTE_JOINT_REFUSED: &str =
+        " The fit withheld supported movement because the evidence was one-sided, \
+         so this result is deliberately farther from the target; this is a \
+         refusal, not a miss.";
     pub const FIT_NOTE_JOINT_REGRESSED: &str =
         " (the refusal came from the joint distribution check, not the \
          residual: the fitted recipe pushed the value ranges further apart \
          than leaving the photo alone)";
+    pub const FIT_NOTE_EVIDENCE_CONTRADICTED: &str =
+        " Fit refused because the evidence contradicted the proposed correction: \
+         the measurable value ranges moved farther apart, so the recipe was reset \
+         to the untouched calibration.";
+    pub const FIT_NOTE_EVIDENCE_UNMEASURABLE: &str =
+        " Fit withheld because nothing measurable was available here: no shared \
+         value range had enough evidence on both sides, so no correction was fitted.";
     /// R23-6 A-5: which controls THIS pair seems to need that the solver
     /// never assigns.
     pub const FIT_NOTE_UNREPRESENTED: &str =
         " This target's look appears to use {controls}, which the reverse-fit \
-         never solves for (its whole solution space is exposure/contrast/\
+         never solves for (its solution space is exposure/contrast/\
          highlights/shadows/whites/blacks, a tone curve, one global \
-         saturation and the three channel curves) — that part of the look \
+         saturation, clarity/texture and the three channel curves) — that part of the look \
          cannot arrive through this route.";
     pub const FIT_NOTE_ATMOSPHERE_UNREPRESENTED: &str =
         " This target's remaining look appears to need {controls}; Atmosphere mode only \
-         solves bounded exposure, white balance, a robust five-point tone curve and \
-         saturation, so that part cannot arrive through this route.";
+         solves bounded exposure, white balance, a robust five-point tone curve, \
+         saturation and evidence-gated clarity/texture, so that part cannot arrive through this route.";
     /// R23-6 D: the deep reverse-fit adopted a guided retry. The persisted
     /// record has to say the shipped recipe is not the plain solve — the
     /// status line is transient, the rationale is what reopening the photo
@@ -168,6 +184,13 @@ pub mod keys {
          the statistics are taken over. The fit matched them anyway, as it was \
          asked to — treat the result as unreliable.";
 
+    pub const FIT_NOTE_EVIDENCE_WITHHELD: &str =
+        " Evidence gating withheld luma ranges [{luma_ranges}] and hue bands [{hue_bands}]. One-sided [{one_sided}] is UNMEASURABLE, not equal, so it vetoed movement. Sparse on both sides [{sparse}] was excluded from estimation but did not veto a move. Structurally divergent [{divergent}] also vetoed movement.";
+    pub const FIT_NOTE_DETAIL: &str =
+        " Detail evidence fitted clarity {clarity} and texture {texture} within the +/-20 budget; their high-frequency reading used only identifiable pixels.";
+    pub const FIT_NOTE_DETAIL_WITHHELD: &str =
+        " Detail controls were withheld: two-sided structural and luma-range evidence did not support a safe global detail move, so clarity and texture were not moved.";
+
     // --- zoned fit (fit_zoned.rs) ---------------------------------------
     pub const ZONED_UNAVAILABLE: &str = " Zoned sky fit unavailable ({e}) — global fit only.";
     pub const ZONED_NO_PARTITION: &str =
@@ -190,6 +213,26 @@ pub mod keys {
     pub const ZONE_QUALITY_CLIPPING_FAILED: &str =
         " Zoned {label} correction dropped by the local-quality clipping gate: \
          clipped share {before}% → {after}% (allowed growth {growth} percentage point).";
+    /// The zoned fit withholds control CLASSES, not whole corrections: a
+    /// one-sided hue band silences colour movement while supported luma
+    /// evidence still earns the zone its tone correction, and the reverse.
+    /// One sentence claiming "the correction was withheld" therefore said
+    /// something the code does not do, and said the SAME thing for three
+    /// different outcomes (colour-only, tone-only, both). One key per claim;
+    /// when both classes are refused BOTH notes ride and their conjunction
+    /// IS the whole-correction refusal. What survived is stated positively
+    /// by [`ZONE_ATTACHED`], which carries the values that were kept.
+    pub const ZONE_EVIDENCE_WITHHELD_COLOUR: &str =
+        " Zoned {label} colour controls withheld: they would move zero-evidence hue bands [{hue_bands}]. Those bands were not adjusted blindly.";
+    pub const ZONE_EVIDENCE_WITHHELD_TONE: &str =
+        " Zoned {label} tone controls withheld: they would move zero-evidence luma ranges [{luma_ranges}]. Those ranges were not adjusted blindly.";
+    /// The share-mismatch exit attaches NO zone. It used to borrow the
+    /// evidence-withheld sentence with both range lists empty, which read
+    /// as "it would move zero-evidence luma ranges [none]" -- a claim about
+    /// ranges, where the actual reason is that the two populations are not
+    /// measurements of the same subject at all.
+    pub const ZONE_SHARE_NO_CORRECTION: &str =
+        " No zoned correction attached: the source and target zone shares differ by more than 2:1, so neither population is a comparable measurement of the same subject.";
     pub const ZONE_BOUNDARY_PASSED: &str =
         " Boundary-continuity gate kept {n} zoned correction(s): signed transition \
          rim {before} to {after} luma after shared differential shrink k={k} \

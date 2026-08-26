@@ -3136,11 +3136,12 @@ impl AutoshopApp {
                                 let cfg = autoshop::config::Config::load();
                                 let seg =
                                     autoshop::segment::SegmentOpts::from_config(&cfg, "sky");
-                                let mask = autoshop::store::claim_raster(p, "mask-zone-sky")?;
+                                let mask =
+                                    autoshop::store::OwnedRaster::claim(p, "mask-zone-sky")?;
                                 let rep = autoshop::fit_zoned::fit_recipe_zoned_from(
                                     &base, &target, &seg, &mask, &fit_base,
                                 );
-                                (rep, Some(mask))
+                                (rep, Some(mask.into_path()))
                             }
                             _ => (
                                 autoshop::fit::fit_recipe_from(&base, &target, &fit_base),

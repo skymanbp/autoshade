@@ -76,9 +76,9 @@
 > experimental generative edits, an optional pixel-**heal** retouch mode (§4.7)
 > the deterministic look **reverse-fit** (§4.8) and the local server's refusal
 > model (§4.9).
-> 896 library + 14 CLI + 139 GUI + 2+2 contract tests are enumerated in the GUI
-> build; the library result is 887 pass + 9 `#[ignore]`d forensic probes
-> (counts refreshed 2026-08-24 after the zone boundary-continuity gate: library 871→896, GUI 132→139). THREE suites are ADDITIONAL and
+> 917 library + 14 CLI + 139 GUI + 2+2 contract tests are enumerated in the GUI
+> build; the library result is 908 pass + 9 `#[ignore]`d forensic probes
+> (counts refreshed 2026-08-25 after the evidence-gating series: library 896→917, set diff vs the prior release +22/−1 by name). THREE suites are ADDITIONAL and
 > env-gated, so a bare `cargo test` does not include them:
 > `AUTOSHOP_LR_PROBE_FIXTURES` (16 real Lightroom radial sidecars, byte
 > round-trip), `AUTOSHOP_MB_FIXTURES` (the 7-file M-B forensic set — 42 of its
@@ -499,7 +499,12 @@ unrotated ellipse and discloses the angle it could not write — that is all
 `crs:Midpoint` and `crs:Version` are read and written back unchanged — carried,
 never interpreted. Bitmap rasters are immutable once referenced: every raster
 edit (brush add/erase, feather, expand/contract, the full-resolution guided
-refine) bakes a freshly claimed file and repoints the recipe.
+refine) bakes a freshly claimed file and repoints the recipe. Deletable rasters
+are typed: the zoned reverse-fit's cleanup sites take `store::OwnedRaster`,
+constructible only from a fresh claim (or an explicit test scratch that refuses
+the calibration corpus), so a borrowed user path handed to a deleting call site
+fails to compile — the contract that used to live in a doc comment and, on
+2026-08-25, let a test hand the user's calibration mask to the cleanup path.
 
 ## 3. The unified AI provider framework (统一 API 框架)
 

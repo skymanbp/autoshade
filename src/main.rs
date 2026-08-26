@@ -1179,8 +1179,8 @@ fn match_cmd(
         // before the write left a race window — a save landing during the
         // segmentation was then overwritten unversioned. The canonical write
         // below gates for the zoned path too, immediately before writing.
-        let mask = autoshop::store::claim_raster(raw, "mask-zone-sky")?;
-        pipeline::guard_readonly(&mask, raw)?;
+        let mask = autoshop::store::OwnedRaster::claim(raw, "mask-zone-sky")?;
+        pipeline::guard_readonly(mask.path(), raw)?;
         println!("  zoned: segmenting the sky in both images (local python sidecar) …");
         autoshop::fit_zoned::fit_recipe_zoned(&src, &tgt, &seg, &mask)
         } else {

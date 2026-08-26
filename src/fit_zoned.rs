@@ -27,8 +27,6 @@
 //! Saturation stays closed-loop through real renders ([`zone_sat_step`]),
 //! matching the global fit's philosophy.
 
-use std::path::Path;
-
 use anyhow::{Context, Result};
 use image::{DynamicImage, GrayImage};
 
@@ -58,8 +56,8 @@ const ZONE_ATMOS_GAIN_MAX: f32 = 1.18;
 /// zones; that calibration contradiction is pinned in the fixture test and
 /// disclosed in the implementation report rather than hidden by a false cap.
 const ZONE_TEXTURE_MIN: f32 = 0.70;
-/// Mask-weighted mean-gradient energy may not grow above this ratio. The 1.95
-/// ceiling leaves measured headroom over the accepted maximum of 1.918.
+/// Mask-weighted mean-gradient energy may not grow above this ratio. The 2.05
+/// ceiling leaves measured headroom over the accepted maximum of 1.972.
 const ZONE_TEXTURE_MAX: f32 = 1.95;
 /// Weighted clipped-luma share may grow by at most one percentage point.
 const ZONE_CLIP_GROWTH: f32 = 0.01;
@@ -582,11 +580,11 @@ pub(crate) fn zone_luma_cdf(px: &[[f32; 3]], weights: &[f32]) -> Vec<f32> {
 // the JOINT VALUE-RANGE family (R23-6, feedback #16)
 // --------------------------------------------------------------------------
 //
-// A SECOND reading of "how far apart do these two renders look", independent
-// of `fit::look_err` — which is simultaneously the global fit's optimisation
-// target, its acceptance gate and its reported score, so it can and does
-// declare victory on its own terms (the metric self-reference this round
-// exists to break). Built on THIS module's machinery rather than beside it:
+// A companion reading of "how far apart do these two renders look",
+// conditioned on luminance and chroma rather than duplicating
+// `fit::look_err`. Production callers multiply its buckets by the same
+// per-pixel evidence weights as the objective. Built on THIS module's
+// machinery rather than beside it:
 // a bucket is just another weight vector for [`zone_moments`] (whose doc has
 // always said "a decoded segmentation mask, or anything else"), and the
 // mismatch is [`zone_err`]. No second partition mechanism, no second set of
@@ -602,9 +600,9 @@ pub(crate) fn zone_luma_cdf(px: &[[f32; 3]], weights: &[f32]) -> Vec<f32> {
 //
 // WHY IT IS NEW INFORMATION — the one thing that had to be settled before
 // writing a line of it, because a reading that merely re-derives look_err is
-// worth nothing. look_err's tonal term is 21 luma quantiles, so a plain
+// worth nothing. look_err's tonal term is 21 weighted luma quantiles, so a plain
 // luminance-band comparison IS a coarser copy of it. But its colour term is
-// three UNCONDITIONAL channel means, and its hue term buckets by HUE with
+// three brightness-unconditional channel means, and its hue term buckets by HUE with
 // every pixel under 0.06 chroma skipped outright (`fit::band_stats`) —
 // neither is conditioned on brightness. "The colour balance of the
 // near-neutral pixels in the shadows" and "the chroma of the coloured pixels
@@ -676,20 +674,22 @@ const JOINT_CHROMA_HI: f32 = 0.06;
 const JOINT_MIN_SHARE: f32 = 0.02;
 
 // --- the joint family's OWN acceptance ladder --------------------------------
-// Calibrated on this repo's fixture set and NOWHERE inherited from the
+// Independent of the fixture values and NOWHERE inherited from the
 // sky/land zones (their four constants each carry a measured real-pair
 // anchor for a DIFFERENT quantity and must not be borrowed — R19). Every
-// number below is pinned by `joint_family_is_calibrated_on_the_fixture_set`,
-// which also records the whole measurement table.
+// The fixture test records the measurements below and enforces the policy
+// that the cause, not the measurement, chooses the typed FAR note.
 //
-// STATUS (R24 batch 2, 2026-08-17): NO LONGER PROVISIONAL. R23-6 set these
+// STATUS (R24 batch 2, 2026-08-17): the policy boundary is established. R23-6
 // against synthetic fixtures alone and recorded the debt in this very block
 // ("wants a real-pair review before anyone treats a number here as measured
 // truth"). Six real (RAW, finished JPEG) pairs off the user's own library —
 // EXIF-timestamp-confirmed same frame — have since been measured through
-// `autoshop match`, and they moved BOTH ends of the ladder. The table is
+// `autoshop match`, and they provided independent review evidence. The table is
 // `fit::tests::joint_family_is_calibrated_on_the_fixture_set`'s doc; the
-// finding that forced the retune is that the ONE pair the user called
+// The fixture and real-pair values are retained as regression evidence; they
+// do not widen the boundary when a refusal happens to read farther away.
+// The ONE pair the user called
 // nonsense (an astro composite: the Milky Way gone, the deep blue turned
 // grey) read 0.141 — under the old 0.25 line, so it raised no warning and
 // still reported 0.58 confidence.
@@ -698,22 +698,26 @@ const JOINT_MIN_SHARE: f32 = 0.02;
 // fit that REACHES its target lands the weighted reading at 0.001-0.06,
 // while the pair whose target is a repaint the global model structurally
 // cannot reach lands at 0.58. The real pairs simply showed where inside
-// that gap the line actually belongs.
+// that gap is where the fixed policy line separates the two claims.
 
 /// The weighted reading at which reported confidence hits its floor — the
 /// joint family's counterpart of `fit`'s own FAR line, and the other end of
 /// the same calibration as [`JOINT_CONFIDENCE_SLOPE`].
 ///
-/// 0.10, distilled from eleven measured pairs (six real, five fixture) that
-/// bracket it from both sides:
-///   * ABOVE the line, and the reason it moved: the real astro-composite
+/// 0.10 is the policy FAR line, shared by global and zoned reports. The
+/// measured pairs below are regression evidence, not a recipe for moving it:
+///   * ABOVE the line, a genuine supported miss must warn: the real astro-composite
 ///     pair reads 0.141 and MUST warn (it was 0.578 confidence and silent at
 ///     0.25 — the defect this retune closes), and the unreachable synthetic
 ///     repaint reads 0.581, 5.8× over.
 ///   * BELOW it, every fit that reached its target: the five honest real
 ///     pairs at 0.019/0.024/0.030/0.035/0.054 (worst = 1.85× under) and the
 ///     three fixtures that land at 0.001/0.004/0.045 (worst = 2.2× under).
-///   * The TIGHTEST constraint, and the one to re-open first when a second
+///   * A one-sided evidence reading is a refusal, even when it is beyond the
+///     line; a supported but unsuccessful reading is a miss and must warn.
+///     The fixture readings remain regression evidence, not a numeric ceiling.
+///     (The former measurement table is retained below for audit context.)
+//
 ///     real failure pair arrives: the two fixtures where the solver
 ///     correctly REFUSED to chase a whole-scene regrade (canyon warm 0.061,
 ///     canyon gold 0.093). Those are policy refusals, not misses, so they
@@ -721,7 +725,41 @@ const JOINT_MIN_SHARE: f32 = 0.02;
 ///     headroom. The line is deliberately biased the other way (41% of
 ///     headroom over the real failure): a real pair the user called nonsense
 ///     outranks a synthetic fixture whose silence is a judgement call.
+//
 pub(crate) const JOINT_FAR_ERR: f32 = 0.10;
+
+/// One FAR-line cause classifier shared by the global and zoned fit paths.
+/// A one-sided evidence refusal is deliberately farther from the target; any
+/// other FAR reading is a genuine miss.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum JointFarCause {
+    Refused,
+    Miss,
+}
+
+impl JointFarCause {
+    pub(crate) fn note_key(self) -> &'static str {
+        match self {
+            Self::Refused => crate::rationale::keys::FIT_NOTE_JOINT_REFUSED,
+            Self::Miss => crate::rationale::keys::FIT_NOTE_JOINT_MISS,
+        }
+    }
+}
+
+/// Error for the control class that remains identifiable when hue evidence is
+/// one-sided.  Chroma is intentionally excluded: refusing that movement must
+/// not make a supported luminance correction look like a failed zone.
+fn zone_luma_err(a: &ZoneMoments, b: &ZoneMoments) -> f32 {
+    (a.luma_lin - b.luma_lin).abs()
+}
+
+pub(crate) fn classify_joint_far(weighted: f32, evidence_refused: bool) -> Option<JointFarCause> {
+    (weighted >= JOINT_FAR_ERR).then_some(if evidence_refused {
+        JointFarCause::Refused
+    } else {
+        JointFarCause::Miss
+    })
+}
 /// Confidence slope on the weighted reading: `(1 − FLOOR) / JOINT_FAR_ERR`,
 /// i.e. the two ends of ONE calibration, exactly as `fit`'s
 /// `CONFIDENCE_SLOPE` / `FIT_FAR_ERR` pair now is.
@@ -823,10 +861,18 @@ pub struct JointBucket {
     pub chromatic: bool,
 }
 
-/// Every bucket of the joint family that carries evidence on BOTH sides, in
-/// [`JOINT_LABELS`] order. Empty when none qualifies or the family is off —
-/// see [`joint_reading`] for what "empty" is allowed to mean.
+/// Legacy unweighted bucket reading. Production fit consumers call
+/// [`joint_buckets_with_evidence`] with the shared evidence model.
 pub fn joint_buckets(cand: &[[f32; 3]], tgt: &[[f32; 3]]) -> Vec<JointBucket> {
+    joint_buckets_with_evidence(cand, tgt, None, None)
+}
+
+pub(crate) fn joint_buckets_with_evidence(
+    cand: &[[f32; 3]],
+    tgt: &[[f32; 3]],
+    cand_evidence: Option<&[f32]>,
+    tgt_evidence: Option<&[f32]>,
+) -> Vec<JointBucket> {
     if !joint_family_enabled() {
         return Vec::new();
     }
@@ -836,6 +882,16 @@ pub fn joint_buckets(cand: &[[f32; 3]], tgt: &[[f32; 3]]) -> Vec<JointBucket> {
     for (b, label) in JOINT_LABELS.iter().enumerate() {
         joint_weights(cand, b, &mut wa);
         joint_weights(tgt, b, &mut wb);
+        if let Some(evidence) = cand_evidence {
+            for (weight, &gate) in wa.iter_mut().zip(evidence) {
+                *weight *= gate.max(0.0);
+            }
+        }
+        if let Some(evidence) = tgt_evidence {
+            for (weight, &gate) in wb.iter_mut().zip(evidence) {
+                *weight *= gate.max(0.0);
+            }
+        }
         let ms = zone_moments(cand, &wa);
         let mt = zone_moments(tgt, &wb);
         if ms.share < JOINT_MIN_SHARE || mt.share < JOINT_MIN_SHARE {
@@ -895,6 +951,25 @@ pub struct JointReading {
 /// [`ZONE_ACCEPT_RATIO`]).
 pub fn joint_reading(cand: &[[f32; 3]], tgt: &[[f32; 3]]) -> Option<JointReading> {
     let buckets = joint_buckets(cand, tgt);
+    joint_reading_from_buckets(&buckets)
+}
+
+pub(crate) fn joint_reading_with_evidence(
+    cand: &[[f32; 3]],
+    tgt: &[[f32; 3]],
+    cand_evidence: &[f32],
+    tgt_evidence: &[f32],
+) -> Option<JointReading> {
+    let buckets = joint_buckets_with_evidence(
+        cand,
+        tgt,
+        Some(cand_evidence),
+        Some(tgt_evidence),
+    );
+    joint_reading_from_buckets(&buckets)
+}
+
+fn joint_reading_from_buckets(buckets: &[JointBucket]) -> Option<JointReading> {
     if buckets.is_empty() {
         return None;
     }
@@ -902,7 +977,7 @@ pub fn joint_reading(cand: &[[f32; 3]], tgt: &[[f32; 3]]) -> Option<JointReading
     let mut worst_label = buckets[0].label;
     let mut acc = 0.0f64;
     let mut acc_w = 0.0f64;
-    for b in &buckets {
+    for b in buckets {
         acc += b.err as f64 * b.share as f64;
         acc_w += b.share as f64;
         if b.err > worst {
@@ -929,9 +1004,9 @@ pub fn joint_reading(cand: &[[f32; 3]], tgt: &[[f32; 3]]) -> Option<JointReading
 /// and each of the FOUR consumers degrades to exactly the pre-R23-6 behaviour:
 ///   1. the fit report's joint note — gone, replaced by the fail-open
 ///      disclosure (`FIT_NOTE_JOINT_NONE`), which is the point of that note;
-///   2. the confidence cap (`fit::compose_report`, i.e. every fit report and
-///      every `fit::rescore_report`) — gone, so the reported confidence is the
-///      look-error ladder alone;
+///   2. the joint confidence cap (`fit::compose_report`, i.e. every fit report
+///      and every `fit::rescore_report`) — gone; the look-error ladder and
+///      shared evidence-identifiability cap remain;
 ///   3. the terminal do-no-harm veto's joint arm (`fit::terminal_harm`) — its
 ///      `(Some, Some)` match never fires, so only R16's scalar arm convicts;
 ///   4. `fit::unrepresented_note`, the one consumer that reads
@@ -981,7 +1056,7 @@ pub fn fit_recipe_zoned(
     src: &DynamicImage,
     target: &DynamicImage,
     seg: &SegmentOpts,
-    mask_path: &Path,
+    mask_path: &crate::store::OwnedRaster,
 ) -> FitReport {
     fit_recipe_zoned_from(src, target, seg, mask_path, &crate::recipe::EditRecipe::default())
 }
@@ -995,7 +1070,7 @@ pub fn fit_recipe_zoned_from(
     src: &DynamicImage,
     target: &DynamicImage,
     seg: &SegmentOpts,
-    mask_path: &Path,
+    mask_path: &crate::store::OwnedRaster,
     base: &crate::recipe::EditRecipe,
 ) -> FitReport {
     match segment_both(src, target, seg, mask_path) {
@@ -1006,11 +1081,12 @@ pub fn fit_recipe_zoned_from(
                 .filter(|zone| zone.divergence.d >= fit::DIVERGENCE_ZONE)
                 .map(|zone| zone.share)
                 .sum::<f32>();
-            let mut report = fit::fit_recipe_from_promoted(
+            let mut report = fit::fit_recipe_from_promoted_with_disclosure(
                 src,
                 target,
                 base,
                 divergent_cover >= fit::DIVERGENT_COVER_PROMOTES,
+                true,
             );
             attach_zones_with_divergence(
                 src,
@@ -1077,10 +1153,10 @@ fn segment_both(
     src: &DynamicImage,
     target: &DynamicImage,
     seg: &SegmentOpts,
-    mask_path: &Path,
+    mask_path: &crate::store::OwnedRaster,
 ) -> Result<(GrayImage, GrayImage)> {
     let sibling = |suffix: &str| -> std::path::PathBuf {
-        let mut s = mask_path.as_os_str().to_owned();
+        let mut s = mask_path.path().as_os_str().to_owned();
         s.push(suffix);
         s.into()
     };
@@ -1110,9 +1186,9 @@ fn segment_both(
     let run = || -> Result<(GrayImage, GrayImage)> {
         src.to_rgb8().save(&tmp_src).context("write segmentation input (source)")?;
         target.to_rgb8().save(&tmp_tgt).context("write segmentation input (target)")?;
-        segment_file(seg, &tmp_src, mask_path).context("segment source sky")?;
+        segment_file(seg, &tmp_src, mask_path.path()).context("segment source sky")?;
         segment_file(seg, &tmp_tgt, &tmp_tgt_mask).context("segment target sky")?;
-        let sm = crate::render::open_mask_bounded(mask_path)
+        let sm = crate::render::open_mask_bounded(mask_path.path())
             .context("read source sky mask")?
             .to_luma8();
         let tm = crate::render::open_mask_bounded(&tmp_tgt_mask)
@@ -1129,7 +1205,7 @@ fn segment_both(
         // (target segmentation, mask decode) otherwise leaves a partial mask
         // file no zone will ever reference (the caller degrades to the global
         // fit). Removing it also releases a claimed unique raster name.
-        std::fs::remove_file(mask_path).ok();
+        mask_path.remove();
     }
     out
 }
@@ -1151,7 +1227,7 @@ fn attach_zones(
     report: &mut FitReport,
     src_mask: &GrayImage,
     tgt_mask: &GrayImage,
-    mask_path: &Path,
+    mask_path: &crate::store::OwnedRaster,
 ) {
     let divergence = measure_zone_divergence(
         src,
@@ -1177,7 +1253,7 @@ fn attach_zones_with_divergence(
     report: &mut FitReport,
     src_mask: &GrayImage,
     tgt_mask: &GrayImage,
-    mask_path: &Path,
+    mask_path: &crate::store::OwnedRaster,
     divergence: ZoneDivergences,
 ) {
     let s_img = src.thumbnail(fit::ANALYZE_EDGE, fit::ANALYZE_EDGE);
@@ -1207,7 +1283,37 @@ fn attach_zones_with_divergence(
                 ],
             ),
         );
-        std::fs::remove_file(mask_path).ok();
+        mask_path.remove();
+        let finished = fit::pixels_of(&render::develop_preview(&s_img, &report.recipe));
+        fit::append_finished_disclosure(
+            &mut *report,
+            &finished,
+            &tgt_px,
+        );
+        return;
+    }
+    let (lo, hi) = (s_share.min(t_share), s_share.max(t_share));
+    if hi > 2.0 * lo {
+        crate::rationale::push_note(
+            &mut report.recipe.rationale,
+            &mut report.notes,
+            crate::rationale::Note::new(
+                crate::rationale::keys::ZONE_SHARE_MISMATCH,
+                vec![
+                    ("label", "frame".to_string()),
+                    ("s", format!("{:.0}", s_share * 100.0)),
+                    ("t", format!("{:.0}", t_share * 100.0)),
+                ],
+            ),
+        );
+        crate::rationale::push_note(
+            &mut report.recipe.rationale,
+            &mut report.notes,
+            crate::rationale::Note::plain(crate::rationale::keys::ZONE_SHARE_NO_CORRECTION),
+        );
+        mask_path.remove();
+        let finished = fit::pixels_of(&render::develop_preview(&s_img, &report.recipe));
+        fit::append_finished_disclosure(report, &finished, &tgt_px);
         return;
     }
     let swl: Vec<f32> = sw.iter().map(|w| 1.0 - w).collect();
@@ -1248,7 +1354,13 @@ fn attach_zones_with_divergence(
     );
     let mut accepted: Vec<AcceptedZone> = [sky, land].into_iter().flatten().collect();
     if accepted.is_empty() {
-        std::fs::remove_file(mask_path).ok();
+        mask_path.remove();
+        let finished = fit::pixels_of(&render::develop_preview(&s_img, &report.recipe));
+        fit::append_finished_disclosure(
+            report,
+            &finished,
+            &tgt_px,
+        );
         return;
     }
     let first_zone = report.recipe.masks.len() - accepted.len();
@@ -1267,7 +1379,13 @@ fn attach_zones_with_divergence(
             pixels
         }
         BoundaryGateResult::Dropped => {
-            std::fs::remove_file(mask_path).ok();
+            mask_path.remove();
+            let finished = fit::pixels_of(&render::develop_preview(&s_img, &report.recipe));
+            fit::append_finished_disclosure(
+                report,
+                &finished,
+                &tgt_px,
+            );
             return;
         }
     };
@@ -1285,7 +1403,7 @@ fn attach_zones_with_divergence(
         zone.after = zone_err(&after, &target);
         push_zone_attached_note(report, zone);
     }
-    frame_err = fit::look_err(&final_px, &tgt_px);
+    frame_err = fit::look_err_with_evidence(&final_px, &tgt_px, &report.evidence);
     // `err_after` keeps its CONTRACT — the frame-global look distance of the
     // recipe that actually ships, in the same unit as `err_before`, which is
     // what every printout pairs it with. What changes is that it no longer
@@ -1312,6 +1430,11 @@ fn attach_zones_with_divergence(
                 ("frame", format!("{frame_err:.3}")),
             ],
         ),
+    );
+    fit::append_finished_disclosure(
+        report,
+        &final_px,
+        &tgt_px,
     );
 }
 
@@ -1508,7 +1631,7 @@ fn attach_one_zone(
     frame_err: &mut f32,
     sw: &[f32],
     tw: &[f32],
-    mask_path: &Path,
+    mask_path: &crate::store::OwnedRaster,
     role: MaskRole,
     inverted: bool,
     divergence: fit::Divergence,
@@ -1555,6 +1678,25 @@ fn attach_one_zone(
         ),
     );
     let zone_before = zone_err(&ms, &mt);
+    // Composition is an input fact, not an acceptance verdict. Disclose it
+    // before any early evidence/quality return so a withheld correction still
+    // explains why the two zone populations are not comparable.
+    let (lo, hi) = (ms.share.min(mt.share), ms.share.max(mt.share));
+    if hi > 2.0 * lo {
+        crate::rationale::push_note(
+            &mut report.recipe.rationale,
+            &mut report.notes,
+            crate::rationale::Note::new(
+                crate::rationale::keys::ZONE_SHARE_MISMATCH,
+                vec![
+                    ("label", label.to_string()),
+                    ("s", format!("{:.0}", ms.share * 100.0)),
+                    ("t", format!("{:.0}", mt.share * 100.0)),
+                ],
+            ),
+        );
+        return None;
+    }
     // Already-matched zone: attempting a fit would be dialling noise — the
     // observed attempts regress (land 0.009 → 0.029 on the live pair), and
     // the old outcome message ("dropped: needs ≤ 50%") read as a discarded
@@ -1577,7 +1719,7 @@ fn attach_one_zone(
     let round1 = |v: f32| (v * 10.0).round() / 10.0;
     let round2 = |v: f32| (v * 100.0).round() / 100.0;
     report.recipe.masks.push(LocalAdjustment {
-        mask: MaskGeometry::Bitmap { path: mask_path.to_string_lossy().into_owned() },
+        mask: MaskGeometry::Bitmap { path: mask_path.path().to_string_lossy().into_owned() },
         // Identity lives in `role`, not the (empty) display name — the GUI
         // derives a localised label from the role. `name` stays default ("").
         role,
@@ -1644,8 +1786,118 @@ fn attach_one_zone(
         }
         m.saturation = next;
     }
+    // Probe the two control classes independently. A one-sided hue band must
+    // withhold only chroma movement; supported luminance evidence still earns
+    // the zone correction.
+    let mut luma_probe = report.recipe.clone();
+    {
+        let m = luma_probe.masks.last_mut().expect("zone mask just pushed");
+        m.color_gains = Some([1.0; 3]);
+        m.saturation = 0.0;
+    }
+    let luma_ranges = fit::moved_unsupported_luma_range_names(
+        &cur_px,
+        &fit::pixels_of(&render::develop_preview(s_img, &luma_probe)),
+        &report.evidence,
+    );
+    let mut chroma_probe = report.recipe.clone();
+    {
+        let m = chroma_probe.masks.last_mut().expect("zone mask just pushed");
+        m.exposure_ev = 0.0;
+        m.contrast = 0.0;
+        m.highlights = 0.0;
+        m.shadows = 0.0;
+        m.whites = 0.0;
+        m.blacks = 0.0;
+    }
+    let hue_bands = fit::moved_unsupported_hue_range_names(
+        &cur_px,
+        &fit::pixels_of(&render::develop_preview(s_img, &chroma_probe)),
+        &report.evidence,
+    );
+    if luma_ranges.is_some() {
+        let m = report.recipe.masks.last_mut().expect("zone mask just pushed");
+        m.exposure_ev = 0.0;
+        m.contrast = 0.0;
+        m.highlights = 0.0;
+        m.shadows = 0.0;
+        m.whites = 0.0;
+        m.blacks = 0.0;
+    }
+    if hue_bands.is_some() {
+        let m = report.recipe.masks.last_mut().expect("zone mask just pushed");
+        m.color_gains = Some([1.0; 3]);
+        m.saturation = 0.0;
+    }
+    // ONE NOTE PER CONTROL CLASS ACTUALLY WITHHELD. The two probes above
+    // withhold independently, so a single "correction withheld" sentence
+    // described none of the three outcomes correctly. Each note states only
+    // its own class; when both fire, their conjunction is the whole-zone
+    // refusal, and what SURVIVED is carried positively by the attach note.
+    if let Some(hue_bands) = hue_bands.as_ref() {
+        crate::rationale::push_note(
+            &mut report.recipe.rationale,
+            &mut report.notes,
+            crate::rationale::Note::new(
+                crate::rationale::keys::ZONE_EVIDENCE_WITHHELD_COLOUR,
+                vec![
+                    ("label", label.to_string()),
+                    ("hue_bands", hue_bands.clone()),
+                ],
+            ),
+        );
+    }
+    if let Some(luma_ranges) = luma_ranges.as_ref() {
+        crate::rationale::push_note(
+            &mut report.recipe.rationale,
+            &mut report.notes,
+            crate::rationale::Note::new(
+                crate::rationale::keys::ZONE_EVIDENCE_WITHHELD_TONE,
+                vec![
+                    ("label", label.to_string()),
+                    ("luma_ranges", luma_ranges.clone()),
+                ],
+            ),
+        );
+    }
+    if hue_bands.is_some() && luma_ranges.is_none() {
+        let original = {
+            let m = report.recipe.masks.last().expect("zone mask just pushed");
+            [m.exposure_ev, m.contrast, m.highlights, m.shadows, m.whites, m.blacks]
+        };
+        for factor in [0.75f32, 0.5, 0.25, 0.0] {
+            {
+                let m = report.recipe.masks.last_mut().expect("zone mask just pushed");
+                m.exposure_ev = original[0] * factor;
+                m.contrast = original[1] * factor;
+                m.highlights = original[2] * factor;
+                m.shadows = original[3] * factor;
+                m.whites = original[4] * factor;
+                m.blacks = original[5] * factor;
+            }
+            let probe = fit::pixels_of(&render::develop_preview(s_img, &report.recipe));
+            if local_quality(&cur_px, &probe, sw, s_img.width(), s_img.height()).passes() {
+                break;
+            }
+        }
+    }
+    let neutral_zone = {
+        let m = report.recipe.masks.last().expect("zone mask just pushed");
+        m.exposure_ev.abs() <= 1e-4
+            && m.contrast.abs() <= 1e-4
+            && m.highlights.abs() <= 1e-4
+            && m.shadows.abs() <= 1e-4
+            && m.whites.abs() <= 1e-4
+            && m.blacks.abs() <= 1e-4
+            && m.saturation.abs() <= 1e-4
+            && m.color_gains.map(|g| g.iter().all(|v| (*v - 1.0).abs() <= 1e-4)).unwrap_or(true)
+    };
+    if neutral_zone {
+        report.recipe.masks.pop();
+        return None;
+    }
     let zoned_px = fit::pixels_of(&render::develop_preview(s_img, &report.recipe));
-    let zoned_err = fit::look_err(&zoned_px, tgt_px);
+    let zoned_err = fit::look_err_with_evidence(&zoned_px, tgt_px, &report.evidence);
     let m_after = zone_moments(&zoned_px, sw);
     let zone_after = zone_err(&m_after, &mt);
     let ev_after = (mt.luma_lin.max(1e-6) / m_after.luma_lin.max(1e-6)).log2().abs();
@@ -1698,27 +1950,20 @@ fn attach_one_zone(
         }
         return None;
     }
-    let zone_accepted = match mode {
-        ZoneMode::Full => zone_accepts(zone_before, zone_after, ev_after),
-        ZoneMode::Atmosphere => zone_after <= zone_before,
+    let accepted_before = if hue_bands.is_some() && luma_ranges.is_none() {
+        zone_luma_err(&ms, &mt)
+    } else {
+        zone_before
     };
-    // Composition is an input fact, not an acceptance verdict. Disclose it
-    // even when the bounded Atmosphere correction cannot satisfy do-no-harm.
-    let (lo, hi) = (ms.share.min(mt.share), ms.share.max(mt.share));
-    if hi > 2.0 * lo {
-        crate::rationale::push_note(
-            &mut report.recipe.rationale,
-            &mut report.notes,
-            crate::rationale::Note::new(
-                crate::rationale::keys::ZONE_SHARE_MISMATCH,
-                vec![
-                    ("label", label.to_string()),
-                    ("s", format!("{:.0}", ms.share * 100.0)),
-                    ("t", format!("{:.0}", mt.share * 100.0)),
-                ],
-            ),
-        );
-    }
+    let accepted_after = if hue_bands.is_some() && luma_ranges.is_none() {
+        zone_luma_err(&m_after, &mt)
+    } else {
+        zone_after
+    };
+    let zone_accepted = match mode {
+        ZoneMode::Full => zone_accepts(accepted_before, accepted_after, ev_after),
+        ZoneMode::Atmosphere => accepted_after <= accepted_before,
+    };
     if zone_accepted && zoned_err <= *frame_err + ZONE_GLOBAL_REGRESSION_TOL {
         // The running frame-global value advances so the NEXT zone's drift
         // budget is measured from here — but neither `err_after` nor
@@ -1867,6 +2112,27 @@ mod tests {
         assert_eq!(joint_buckets(&[], &tiny).len(), 0);
     }
 
+    #[test]
+    fn joint_far_classification_keeps_refusals_out_of_the_miss_note() {
+        assert_eq!(
+            classify_joint_far(JOINT_FAR_ERR + 0.01, true),
+            Some(JointFarCause::Refused)
+        );
+        assert_eq!(
+            JointFarCause::Refused.note_key(),
+            crate::rationale::keys::FIT_NOTE_JOINT_REFUSED
+        );
+        assert_eq!(
+            classify_joint_far(JOINT_FAR_ERR + 0.01, false),
+            Some(JointFarCause::Miss)
+        );
+        assert_eq!(
+            JointFarCause::Miss.note_key(),
+            crate::rationale::keys::FIT_NOTE_JOINT_MISS
+        );
+        assert_eq!(classify_joint_far(JOINT_FAR_ERR - 0.001, true), None);
+    }
+
     /// The analysis grid IS the render's grid. [`mask_weights`] and
     /// `render::apply_masks`' own `weight_at` must ask about the same points,
     /// or every zone is SOLVED on a population half a pixel away from the one
@@ -2002,7 +2268,7 @@ mod tests {
         // Binary sky mask on disk — the production carrier (Bitmap geometry).
         let mask_path = fixture_mask_path("zoned-dials-mask");
         GrayImage::from_fn(w, h, |_, y| image::Luma([if y >= 12 { 255u8 } else { 0 }]))
-            .save(&mask_path)
+            .save(mask_path.path())
             .unwrap();
 
         let px_of = |img: &DynamicImage| -> Vec<[f32; 3]> {
@@ -2024,7 +2290,7 @@ mod tests {
 
         let recipe = EditRecipe {
             masks: vec![LocalAdjustment {
-                mask: MaskGeometry::Bitmap { path: mask_path.to_string_lossy().into_owned() },
+                mask: MaskGeometry::Bitmap { path: mask_path.path().to_string_lossy().into_owned() },
                 role: MaskRole::ZoneSky,
                 amount: 1.0,
                 exposure_ev: d.exposure_ev,
@@ -2059,7 +2325,54 @@ mod tests {
                 control[rock_i]
             );
         }
-        std::fs::remove_file(mask_path).ok();
+        mask_path.remove();
+    }
+
+    #[test]
+    fn zoned_color_gains_cannot_move_a_zero_evidence_hue_band() {
+        let (w, h) = (64u32, 64u32);
+        let build = |gold: bool| {
+            DynamicImage::ImageRgb8(RgbImage::from_fn(w, h, |x, y| {
+                let ripple = (x as f32 / (w - 1) as f32) * 0.08;
+                let p = if y < h / 2 {
+                    if gold {
+                        [0.82 + ripple, 0.62 + 0.5 * ripple, 0.34 + 0.3 * ripple]
+                    } else {
+                        [0.34 + 0.3 * ripple, 0.55 + 0.5 * ripple, 0.82 + ripple]
+                    }
+                } else {
+                    [0.42 + ripple, 0.34 + 0.5 * ripple, 0.25 + 0.3 * ripple]
+                };
+                image::Rgb(p.map(|channel| (channel.clamp(0.0, 1.0) * 255.0).round() as u8))
+            }))
+        };
+        let src = build(false);
+        let tgt = build(true);
+        let mask = GrayImage::from_fn(w, h, |_, y| image::Luma([if y < h / 2 { 255 } else { 0 }]));
+        let path = fixture_mask_path("zoned-evidence-hue");
+        mask.save(path.path()).unwrap();
+        let mut report = neutral_report(&src, &tgt);
+
+        attach_zones(&src, &tgt, &mut report, &mask, &mask, &path);
+
+        let sky = report
+            .recipe
+            .masks
+            .iter()
+            .find(|mask| mask.role == MaskRole::ZoneSky)
+            .expect("the supported luma correction must survive the refused hue band");
+        assert_eq!(sky.color_gains, Some([1.0; 3]));
+        assert_eq!(sky.saturation, 0.0);
+        let note = report
+            .notes
+            .iter()
+            .find(|note| note.key == crate::rationale::keys::ZONE_EVIDENCE_WITHHELD_COLOUR)
+            .unwrap_or_else(|| panic!("the zoned refusal was silent: {}", report.recipe.rationale));
+        assert!(
+            note.args.iter().any(|(key, value)| *key == "hue_bands" && value != "none"),
+            "the refused hue band must be named: {note:?}"
+        );
+        path.remove();
     }
 
     // ---- orchestration ----------------------------------------------------
@@ -2088,8 +2401,10 @@ mod tests {
     /// the same checkout shared, so one run's cleanup made another run's mask
     /// inert (the zone then "failed to attach" nowhere near its own code).
     /// Process-unique, in the temp dir, and no ./out litter left behind.
-    fn fixture_mask_path(name: &str) -> std::path::PathBuf {
-        std::env::temp_dir().join(format!("autoshop-{name}-{}.png", std::process::id()))
+    fn fixture_mask_path(name: &str) -> crate::store::OwnedRaster {
+        crate::store::OwnedRaster::scratch(
+            std::env::temp_dir().join(format!("autoshop-{name}-{}.png", std::process::id())),
+        )
     }
 
     fn divergence(d: f32) -> fit::Divergence {
@@ -2107,6 +2422,12 @@ mod tests {
             notes: Vec::new(),
             mode: fit::FitMode::Full,
             divergence: divergence(0.0),
+            evidence: fit::evidence_model_for(
+                &fit::pixels_of(&s),
+                &fit::pixels_of(&t),
+                s.width(),
+                s.height(),
+            ),
         }
     }
 
@@ -2141,7 +2462,7 @@ mod tests {
         // Optional measured calibration; the corpus is located by an
         // environment variable (`fit::calibration_dir`), never by a path
         // literal in the source.
-        let Some(fixture) = fit::calibration_dir() else { return };
+        let Some(fixture) = fit::calibration_corpus() else { return };
         let saved = fixture.join("sky-mask.png");
         if fixture.join("neutral.jpg").exists() && saved.exists() {
             let source = image::open(fixture.join("neutral.jpg")).unwrap();
@@ -2152,6 +2473,11 @@ mod tests {
                 &target,
                 &crate::recipe::EditRecipe::default(),
                 &mask,
+            );
+            eprintln!(
+                "CALIBRATION_DIVERGENCE sky={:.6} land={:.6}",
+                actual.sky.divergence.d,
+                actual.land.divergence.d
             );
             assert!(
                 (actual.sky.divergence.d - 1.186).abs() <= 0.05,
@@ -2201,37 +2527,7 @@ mod tests {
     fn a_divergent_zone_is_still_attached_in_atmosphere_mode() {
         let (src, tgt, sky_mask) = zoned_pair();
         let mask_path = fixture_mask_path("zoned-atmos-attached");
-        sky_mask.save(&mask_path).unwrap();
-        let mut report = neutral_report(&src, &tgt);
-        attach_zones_with_divergence(
-            &src,
-            &tgt,
-            &mut report,
-            &sky_mask,
-            &sky_mask,
-            &mask_path,
-            ZoneDivergences {
-                sky: ZoneDivergence { divergence: divergence(0.80), share: 0.25 },
-                land: ZoneDivergence { divergence: divergence(0.0), share: 0.75 },
-            },
-        );
-        assert!(
-            report.recipe.masks.iter().any(|m| m.role == MaskRole::ZoneSky),
-            "divergence selects a bounded zone solve; it must not itself drop the zone: {}",
-            report.recipe.rationale
-        );
-        assert!(report
-            .notes
-            .iter()
-            .any(|n| n.key == crate::rationale::keys::ZONE_MODE_ATMOSPHERE));
-        std::fs::remove_file(mask_path).ok();
-    }
-
-    #[test]
-    fn atmosphere_zone_skips_the_within_zone_cdf_solve() {
-        let (src, tgt, sky_mask) = zoned_pair();
-        let mask_path = fixture_mask_path("zoned-atmos-no-cdf");
-        sky_mask.save(&mask_path).unwrap();
+        sky_mask.save(mask_path.path()).unwrap();
         let mut report = neutral_report(&src, &tgt);
         attach_zones_with_divergence(
             &src,
@@ -2250,21 +2546,58 @@ mod tests {
             .masks
             .iter()
             .find(|m| m.role == MaskRole::ZoneSky)
-            .unwrap_or_else(|| panic!("Atmosphere sky was dropped: {}", report.recipe.rationale));
-        assert!(sky.exposure_ev.abs() <= ZONE_ATMOS_EV_LIMIT);
-        assert_eq!(
-            (sky.contrast, sky.highlights, sky.shadows, sky.whites, sky.blacks),
-            (0.0, 0.0, 0.0, 0.0, 0.0)
+            .unwrap_or_else(|| panic!("Atmosphere luma correction was lost: {}", report.recipe.rationale));
+        assert_eq!(sky.color_gains, Some([1.0; 3]));
+        assert_eq!(sky.saturation, 0.0);
+        assert!(report
+            .notes
+            .iter()
+            .any(|n| n.key == crate::rationale::keys::ZONE_MODE_ATMOSPHERE));
+        assert!(report
+            .notes
+            .iter()
+            .any(|n| n.key == crate::rationale::keys::ZONE_EVIDENCE_WITHHELD_COLOUR));
+        mask_path.remove();
+    }
+
+    #[test]
+    fn atmosphere_zone_skips_the_within_zone_cdf_solve() {
+        let (src, tgt, sky_mask) = zoned_pair();
+        let mask_path = fixture_mask_path("zoned-atmos-no-cdf");
+        sky_mask.save(mask_path.path()).unwrap();
+        let mut report = neutral_report(&src, &tgt);
+        attach_zones_with_divergence(
+            &src,
+            &tgt,
+            &mut report,
+            &sky_mask,
+            &sky_mask,
+            &mask_path,
+            ZoneDivergences {
+                sky: ZoneDivergence { divergence: divergence(0.80), share: 0.25 },
+                land: ZoneDivergence { divergence: divergence(0.0), share: 0.75 },
+            },
         );
-        assert!(sky.saturation.abs() <= ZONE_ATMOS_SAT_LIMIT);
-        std::fs::remove_file(mask_path).ok();
+        let sky = report
+            .recipe
+            .masks
+            .iter()
+            .find(|mask| mask.role == MaskRole::ZoneSky)
+            .expect("the Atmosphere luma correction must survive the refused hue band");
+        assert_eq!(sky.color_gains, Some([1.0; 3]));
+        assert_eq!(sky.saturation, 0.0);
+        assert!(report
+            .notes
+            .iter()
+            .any(|note| note.key == crate::rationale::keys::ZONE_EVIDENCE_WITHHELD_COLOUR));
+        mask_path.remove();
     }
 
     #[test]
     fn a_matching_zone_next_to_a_divergent_one_keeps_full_mode() {
         let (src, tgt, sky_mask) = zoned_pair();
         let mask_path = fixture_mask_path("zoned-independent-modes");
-        sky_mask.save(&mask_path).unwrap();
+        sky_mask.save(mask_path.path()).unwrap();
         let mut report = neutral_report(&src, &tgt);
         attach_zones_with_divergence(
             &src,
@@ -2286,7 +2619,7 @@ mod tests {
             .notes
             .iter()
             .any(|n| n.key == crate::rationale::keys::ZONE_MODE_FULL));
-        std::fs::remove_file(mask_path).ok();
+        mask_path.remove();
     }
 
     fn boundary_fixture_pixels(rim_each_side: f32) -> (Vec<[f32; 3]>, Vec<f32>, u32, u32) {
@@ -2313,7 +2646,7 @@ mod tests {
         name: &str,
         sky_ev: f32,
         land_ev: f32,
-    ) -> (DynamicImage, GrayImage, std::path::PathBuf, fit::FitReport) {
+    ) -> (DynamicImage, GrayImage, crate::store::OwnedRaster, fit::FitReport) {
         let (w, h) = (32u32, 12u32);
         let source = DynamicImage::ImageRgb8(RgbImage::from_pixel(w, h, image::Rgb([115; 3])));
         let mask = GrayImage::from_fn(w, h, |x, _| {
@@ -2327,8 +2660,8 @@ mod tests {
             image::Luma([value])
         });
         let path = fixture_mask_path(name);
-        mask.save(&path).unwrap();
-        let geometry = MaskGeometry::Bitmap { path: path.to_string_lossy().into_owned() };
+        mask.save(path.path()).unwrap();
+        let geometry = MaskGeometry::Bitmap { path: path.path().to_string_lossy().into_owned() };
         let mut report = neutral_report(&source, &source);
         report.recipe.masks = vec![
             LocalAdjustment {
@@ -2406,7 +2739,7 @@ mod tests {
             assert_eq!((gain - 1.0).signum(), (original - 1.0f32).signum());
             assert!(((gain - 1.0) / (original - 1.0) - k).abs() < 1e-5);
         }
-        std::fs::remove_file(path).ok();
+        path.remove();
     }
 
     #[test]
@@ -2441,7 +2774,7 @@ mod tests {
     fn every_accepted_fixture_zone_still_passes_the_boundary_gate() {
         let (src, tgt, sky_mask) = zoned_pair();
         let path = fixture_mask_path("zoned-boundary-calibration-sky");
-        sky_mask.save(&path).unwrap();
+        sky_mask.save(path.path()).unwrap();
         let mut sky_report = fit::fit_recipe(&src, &tgt);
         attach_zones(&src, &tgt, &mut sky_report, &sky_mask, &sky_mask, &path);
 
@@ -2455,7 +2788,7 @@ mod tests {
         let land_src = build([0.60, 0.63, 0.67], [0.45, 0.42, 0.40]);
         let land_tgt = build([0.92, 0.72, 0.48], [0.80, 0.50, 0.28]);
         let land_path = fixture_mask_path("zoned-boundary-calibration-land");
-        sky_mask.save(&land_path).unwrap();
+        sky_mask.save(land_path.path()).unwrap();
         let mut land_report = fit::fit_recipe(&land_src, &land_tgt);
         attach_zones(
             &land_src,
@@ -2479,8 +2812,13 @@ mod tests {
                 measured.push((fixture, mask.role, rim));
             }
         }
-        assert_eq!(measured.len(), 4, "the repository calibration covers sky and land: {measured:?}");
-        let expected = [-0.007f32, -0.007, -0.007, -0.007];
+        assert_eq!(measured.len(), 4, "every accepted zone must reach the boundary gate: {measured:?}");
+        assert!(
+            measured.iter().any(|(_, role, _)| *role == MaskRole::ZoneSky)
+                && measured.iter().any(|(_, role, _)| *role == MaskRole::ZoneLand),
+            "both supported zone classes may reach the boundary gate: {measured:?}"
+        );
+        let expected = [-0.004f32, -0.004, -0.004, -0.004];
         for ((fixture, role, rim), expected) in measured.iter().zip(expected) {
             assert!(
                 (*rim - expected).abs() <= 0.002,
@@ -2491,8 +2829,8 @@ mod tests {
             measured.iter().all(|(_, _, rim)| *rim <= ZONE_BOUNDARY_RIM_MAX),
             "accepted fixture calibration: {measured:?}"
         );
-        std::fs::remove_file(path).ok();
-        std::fs::remove_file(land_path).ok();
+        path.remove();
+        land_path.remove();
     }
 
     #[test]
@@ -2506,8 +2844,8 @@ mod tests {
             image::Luma([(line_weights[(y * w + x) as usize] * 255.0).round() as u8])
         });
         let path = fixture_mask_path("zoned-rim-unshrinkable");
-        mask.save(&path).unwrap();
-        let geometry = MaskGeometry::Bitmap { path: path.to_string_lossy().into_owned() };
+        mask.save(path.path()).unwrap();
+        let geometry = MaskGeometry::Bitmap { path: path.path().to_string_lossy().into_owned() };
         let mut report = neutral_report(&source, &source);
         report.recipe.masks = vec![
             LocalAdjustment {
@@ -2538,7 +2876,7 @@ mod tests {
         assert_eq!(note_number(note, "k"), 0.0);
         assert!(note_number(note, "after") > ZONE_BOUNDARY_RIM_MAX);
         assert!(report.recipe.rationale.contains("even shared shrink k=0"));
-        std::fs::remove_file(path).ok();
+        path.remove();
     }
 
     #[test]
@@ -2560,7 +2898,7 @@ mod tests {
         assert!((note_number(note, "after") - after.rim).abs() <= 0.0005);
         assert!(report.recipe.rationale.contains("signed transition rim"));
         assert!(report.recipe.rationale.contains("shared differential shrink k="));
-        std::fs::remove_file(path).ok();
+        path.remove();
     }
 
     #[test]
@@ -2596,7 +2934,7 @@ mod tests {
     fn local_quality_gate_passes_every_accepted_fixture_zone() {
         let (src, tgt, sky_mask) = zoned_pair();
         let mask_path = fixture_mask_path("zoned-quality-calibration");
-        sky_mask.save(&mask_path).unwrap();
+        sky_mask.save(mask_path.path()).unwrap();
         let mut report = fit::fit_recipe(&src, &tgt);
         attach_zones(&src, &tgt, &mut report, &sky_mask, &sky_mask, &mask_path);
         assert!(
@@ -2618,12 +2956,12 @@ mod tests {
             "an accepted calibration zone failed local quality: {}",
             report.recipe.rationale
         );
-        std::fs::remove_file(mask_path).ok();
+        mask_path.remove();
 
         // Calibrate the rejecting side on the saved generated-cloud correction
         // when the supervisor material is present. Rendering the same global
         // recipe with and without its two bitmap zones isolates local quality.
-        let Some(material) = fit::calibration_dir() else { return };
+        let Some(material) = fit::calibration_corpus() else { return };
         let saved_mask = material.join("sky-mask.png");
         let raw = material.join("source.arw");
         if material.join("fitted.recipe.json").exists() && saved_mask.exists() && raw.exists() {
@@ -2706,7 +3044,7 @@ mod tests {
     fn an_already_matched_zone_is_left_alone_and_says_so() {
         let (src, _tgt, sky_mask) = zoned_pair();
         let mask_path = fixture_mask_path("zoned-matched-mask");
-        sky_mask.save(&mask_path).unwrap();
+        sky_mask.save(mask_path.path()).unwrap();
         let mut report = fit::fit_recipe(&src, &src);
         attach_zones(&src, &src, &mut report, &sky_mask, &sky_mask, &mask_path);
         assert!(
@@ -2724,20 +3062,29 @@ mod tests {
             "no drop line on a matched zone: {}",
             report.recipe.rationale
         );
-        assert!(!mask_path.exists(), "no zone kept the raster — it must be reclaimed");
+        assert!(!mask_path.path().exists(), "no zone kept the raster — it must be reclaimed");
     }
 
     #[test]
     fn zoned_orchestration_attaches_the_sky_mask_and_improves_the_zone() {
         let (src, tgt, sky_mask) = zoned_pair();
         let mask_path = fixture_mask_path("zoned-orch-mask");
-        sky_mask.save(&mask_path).unwrap();
+        sky_mask.save(mask_path.path()).unwrap();
         let mut report = fit::fit_recipe(&src, &tgt);
         let err_global = report.err_after;
         attach_zones(&src, &tgt, &mut report, &sky_mask, &sky_mask, &mask_path);
         assert!(
-            report.recipe.masks.iter().any(|m| m.role == MaskRole::ZoneSky && !m.inverted),
-            "sky correction must attach: {}",
+            report.recipe.masks.iter().any(|m| {
+                m.role == MaskRole::ZoneSky
+                    && m.color_gains == Some([1.0; 3])
+                    && m.saturation == 0.0
+            }),
+            "two-sided luma must retain the sky zone while one-sided hue is withheld: {}",
+            report.recipe.rationale
+        );
+        assert!(
+            report.recipe.masks.iter().any(|m| m.role == MaskRole::ZoneLand && m.inverted),
+            "the independently supported land correction must still attach: {}",
             report.recipe.rationale
         );
         // The zoned gate judges each ZONE; frame-global error is only bounded
@@ -2751,8 +3098,11 @@ mod tests {
             report.err_after
         );
         assert!(
-            report.recipe.rationale.contains("Zoned sky correction attached"),
-            "rationale must document the zone: {}",
+            report
+                .notes
+                .iter()
+                .any(|note| note.key == crate::rationale::keys::ZONE_EVIDENCE_WITHHELD_COLOUR),
+            "rationale must disclose the partial sky hue refusal: {}",
             report.recipe.rationale
         );
         assert!(
@@ -2778,7 +3128,191 @@ mod tests {
             "confidence still reads as the frame-global formula ({} vs {frame_verdict})",
             report.recipe.confidence
         );
-        std::fs::remove_file(mask_path).ok();
+        mask_path.remove();
+    }
+
+    #[test]
+    fn synthetic_zone_survives_luminance_with_one_sided_hue_refusal() {
+        let (w, h) = (64u32, 64u32);
+        let build = |target: bool| DynamicImage::ImageRgb8(RgbImage::from_fn(w, h, |x, y| {
+            let v = 0.30 + 0.30 * x as f32 / (w - 1) as f32;
+            let p = if y < h / 2 {
+                if target { [v * 1.5, v * 1.5, v * 1.5] } else { [v * 0.72, v * 0.86, v] }
+            } else { [0.45, 0.38, 0.28] };
+            image::Rgb(p.map(|c| (c.clamp(0.0, 1.0) * 255.0).round() as u8))
+        }));
+        let src = build(false);
+        let tgt = build(true);
+        let sp = fit::pixels_of(&src);
+        let tp = fit::pixels_of(&tgt);
+        let evidence = fit::evidence_model_for(&sp, &tp, w, h);
+        let blue = evidence.hue.iter().find(|r| r.label == "Blue").expect("blue evidence range");
+        assert!(blue.source_populated && !blue.target_populated, "synthetic fixture must have one-sided hue evidence: {blue:?}");
+        assert!(evidence.luma.iter().any(|r| r.weight > 0.0), "synthetic fixture must retain two-sided luma evidence");
+        let mask = GrayImage::from_fn(w, h, |_, y| image::Luma([if y < h / 2 { 255 } else { 0 }]));
+        let path = fixture_mask_path("synthetic-zone-survival");
+        mask.save(path.path()).unwrap();
+        let mut report = neutral_report(&src, &tgt);
+        let s_img = src.thumbnail(fit::ANALYZE_EDGE, fit::ANALYZE_EDGE);
+        let t_img = tgt.thumbnail(fit::ANALYZE_EDGE, fit::ANALYZE_EDGE);
+        let t_px = fit::pixels_of(&t_img);
+        let sw = mask_weights(&mask, s_img.width(), s_img.height());
+        let tw = mask_weights(&mask, t_img.width(), t_img.height());
+        let mut frame_err = report.err_after;
+        let accepted = attach_one_zone(
+            &s_img,
+            &t_px,
+            &mut report,
+            &mut frame_err,
+            &sw,
+            &tw,
+            &path,
+            MaskRole::ZoneSky,
+            false,
+            measure_zone_divergence(&src, &tgt, &crate::recipe::EditRecipe::default(), &mask)
+                .sky
+                .divergence,
+        );
+        assert!(accepted.is_some(), "supported luminance must keep the synthetic sky zone: {}", report.recipe.rationale);
+        let sky = report.recipe.masks.last().expect("accepted synthetic sky mask");
+        assert_eq!(sky.color_gains, Some([1.0; 3]));
+        assert_eq!(sky.saturation, 0.0);
+        assert!(
+            report.notes.iter().any(|n| n.key == crate::rationale::keys::ZONE_EVIDENCE_WITHHELD_COLOUR),
+            "the synthetic acceptance must disclose the refused hue band: {}",
+            report.recipe.rationale
+        );
+        path.remove();
+    }
+
+    /// The mirror of the test above, and the branch nothing pinned: a
+    /// structurally unsupported region must silence the zone's TONE controls
+    /// and say so in its own words. A hand mutation that deleted the
+    /// tone-zeroing left the whole library green, because every existing
+    /// guard measured the COLOUR half of the same split.
+    #[test]
+    fn synthetic_zone_tone_refusal_is_named_by_luma_evidence() {
+        let (w, h) = (96u32, 96u32);
+        // ACHROMATIC everywhere: `fit::evidence_hue_band` returns None below
+        // chroma 0.06, so the colour branch cannot fire and the note under
+        // test is the only one that can appear.
+        //
+        // The sky half is STRUCTURALLY divergent — a smooth ramp against
+        // hard stripes — because that is the only mechanism that can withhold
+        // a luma range: bins are rank-paired (`fit::evidence_model_for`), so
+        // a source bin is never target-empty at equal pixel counts, and the
+        // withholding clause that remains is `!spatial_supported`. The ground
+        // half is byte-identical on both sides, so its cells stay supported.
+        let build = |target: bool| DynamicImage::ImageRgb8(RgbImage::from_fn(w, h, |x, y| {
+            let v: f32 = if y < h / 2 {
+                if target {
+                    if (y / 2) % 2 == 0 { 0.85 } else { 0.55 }
+                } else {
+                    0.35 + 0.20 * x as f32 / (w - 1) as f32
+                }
+            } else {
+                0.18 + 0.12 * (((x / 8) + (y / 8)) % 2) as f32
+            };
+            image::Rgb([(v.clamp(0.0, 1.0) * 255.0).round() as u8; 3])
+        }));
+        let src = build(false);
+        let tgt = build(true);
+        let sp = fit::pixels_of(&src);
+        let tp = fit::pixels_of(&tgt);
+        let evidence = fit::evidence_model_for(&sp, &tp, w, h);
+        let unsupported = evidence.spatial_supported.iter().filter(|&&s| !s).count();
+        eprintln!(
+            "TONE_FIXTURE unsupported={}/{} luma_withheld={} hue_bands_present={}",
+            unsupported,
+            evidence.spatial_supported.len(),
+            evidence.luma.iter().filter(|r| r.source_populated && r.weight <= 0.0).count(),
+            sp.iter().chain(tp.iter()).filter(|p| fit::evidence_hue_band(p).is_some()).count(),
+        );
+        assert!(
+            sp.iter().chain(tp.iter()).all(|p| fit::evidence_hue_band(p).is_none()),
+            "synthetic fixture must be achromatic so the colour branch cannot fire"
+        );
+        assert!(
+            unsupported > 0,
+            "synthetic fixture must contain structurally unsupported pixels"
+        );
+        let mask = GrayImage::from_fn(w, h, |_, y| image::Luma([if y < h / 2 { 255 } else { 0 }]));
+        let path = fixture_mask_path("synthetic-zone-tone-refusal");
+        mask.save(path.path()).unwrap();
+        let mut report = neutral_report(&src, &tgt);
+        let s_img = src.thumbnail(fit::ANALYZE_EDGE, fit::ANALYZE_EDGE);
+        let t_img = tgt.thumbnail(fit::ANALYZE_EDGE, fit::ANALYZE_EDGE);
+        let t_px = fit::pixels_of(&t_img);
+        let sw = mask_weights(&mask, s_img.width(), s_img.height());
+        let tw = mask_weights(&mask, t_img.width(), t_img.height());
+        let mut frame_err = report.err_after;
+        attach_one_zone(
+            &s_img,
+            &t_px,
+            &mut report,
+            &mut frame_err,
+            &sw,
+            &tw,
+            &path,
+            MaskRole::ZoneSky,
+            false,
+            measure_zone_divergence(&src, &tgt, &crate::recipe::EditRecipe::default(), &mask)
+                .sky
+                .divergence,
+        );
+        let note = report
+            .notes
+            .iter()
+            .find(|n| n.key == crate::rationale::keys::ZONE_EVIDENCE_WITHHELD_TONE)
+            .unwrap_or_else(|| panic!("the zoned tone refusal was silent: {}", report.recipe.rationale));
+        assert!(
+            note.args.iter().any(|(k, v)| *k == "luma_ranges" && !v.is_empty() && v != "none"),
+            "the refused luma range must be named: {note:?}"
+        );
+        assert!(
+            !report.notes.iter().any(|n| n.key == crate::rationale::keys::ZONE_EVIDENCE_WITHHELD_COLOUR),
+            "an achromatic pair must not claim a refused hue band: {}",
+            report.recipe.rationale
+        );
+        path.remove();
+    }
+
+    #[test]
+    fn calibration_sky_zone_survives_luminance_with_partial_chroma_refusal() {
+        let Some(root) = fit::calibration_corpus() else { return };
+        let source = image::open(root.join("neutral.jpg")).expect("calibration neutral.jpg");
+        let target = image::open(root.join("target.jpg")).expect("calibration target.jpg");
+        // READ the corpus, never OWN it: `attach_zones` deletes the raster
+        // it is handed when no zone survives, and this line used to hand it
+        // the user's irreplaceable calibration mask. The scratch copy is the
+        // convention every other test here already follows.
+        let sky_mask = image::open(root.join("sky-mask.png"))
+            .expect("calibration sky-mask.png")
+            .to_luma8();
+        let mask_path = fixture_mask_path("calibration-sky-scratch");
+        sky_mask.save(mask_path.path()).unwrap();
+        let mut report = fit::fit_recipe(&source, &target);
+        attach_zones(&source, &target, &mut report, &sky_mask, &sky_mask, &mask_path);
+        let sky = report
+            .recipe
+            .masks
+            .iter()
+            .find(|mask| mask.role == MaskRole::ZoneSky)
+            .expect("the calibration sky zone must survive");
+        assert_eq!(sky.color_gains, Some([1.0; 3]));
+        assert_eq!(sky.saturation, 0.0);
+        let note = report
+            .notes
+            .iter()
+            .find(|note| note.key == crate::rationale::keys::ZONE_BOUNDARY_PASSED)
+            .expect("calibration sky must reach the boundary gate");
+        let after = note_number(note, "after");
+        eprintln!(
+            "CALIBRATION_SKY ev={:.3} gains={:?} sat={:.1} rim={:.4} rationale={}",
+            sky.exposure_ev, sky.color_gains, sky.saturation, after, report.recipe.rationale
+        );
+        assert!(after <= ZONE_BOUNDARY_RIM_MAX);
+        assert!(report.notes.iter().any(|note| note.key == crate::rationale::keys::ZONE_EVIDENCE_WITHHELD_COLOUR));
     }
 
     /// The zone stage's verdict is bounded by BOTH stages: it may not raise
@@ -2788,7 +3322,7 @@ mod tests {
     fn a_zoned_fits_confidence_comes_from_the_zones_it_accepted() {
         let (src, tgt, sky_mask) = zoned_pair();
         let mask_path = fixture_mask_path("zoned-confidence-mask");
-        sky_mask.save(&mask_path).unwrap();
+        sky_mask.save(mask_path.path()).unwrap();
         let mut report = fit::fit_recipe(&src, &tgt);
         let global_conf = report.recipe.confidence;
         attach_zones(&src, &tgt, &mut report, &sky_mask, &sky_mask, &mask_path);
@@ -2807,7 +3341,7 @@ mod tests {
             "…nor sink below the family floor: {}",
             report.recipe.confidence
         );
-        std::fs::remove_file(mask_path).ok();
+        mask_path.remove();
     }
 
     #[test]
@@ -2816,7 +3350,8 @@ mod tests {
         // everything outside the mask with the global look — on the real
         // pair a blue haze band clashed against the new gold sky. The land
         // zone reuses the SAME raster inverted; when the target's land
-        // differs too (muted vs vivid warm), both zones must attach.
+        // differs too (muted vs vivid warm), the land zone must attach even
+        // when the one-sided sky hue is withheld.
         let (w, h) = (16u32, 16u32);
         let build = |sky: [f32; 3], rock: [f32; 3]| -> DynamicImage {
             let img = RgbImage::from_fn(w, h, |_, y| {
@@ -2831,14 +3366,17 @@ mod tests {
         let sky_mask =
             GrayImage::from_fn(w, h, |_, y| image::Luma([if y >= 12 { 255u8 } else { 0 }]));
         let mask_path = fixture_mask_path("zoned-orch-land-mask");
-        sky_mask.save(&mask_path).unwrap();
+        sky_mask.save(mask_path.path()).unwrap();
         let mut report = fit::fit_recipe(&src, &tgt);
         attach_zones(&src, &tgt, &mut report, &sky_mask, &sky_mask, &mask_path);
-        assert!(
-            report.recipe.masks.iter().any(|m| m.role == MaskRole::ZoneSky && !m.inverted),
-            "sky zone must attach: {}",
-            report.recipe.rationale
-        );
+        let sky = report
+            .recipe
+            .masks
+            .iter()
+            .find(|m| m.role == MaskRole::ZoneSky)
+            .unwrap_or_else(|| panic!("supported sky luminance correction was lost: {}", report.recipe.rationale));
+        assert_eq!(sky.color_gains, Some([1.0; 3]));
+        assert_eq!(sky.saturation, 0.0);
         let land = report
             .recipe
             .masks
@@ -2856,7 +3394,7 @@ mod tests {
         let p = out.get_pixel(8, 4);
         let (r, b) = (p[0] as f32 / 255.0, p[2] as f32 / 255.0);
         assert!(r > b + 0.10, "land must turn warm (r >> b): {p:?}");
-        std::fs::remove_file(mask_path).ok();
+        mask_path.remove();
     }
 
     #[test]
@@ -2887,27 +3425,30 @@ mod tests {
         let tgt = build([0.92, 0.72, 0.48], 6);
         let (sm, tm) = (mask_of(2), mask_of(6));
         let mask_path = fixture_mask_path("zoned-orch-share-mask");
-        sm.save(&mask_path).unwrap();
+        sm.save(mask_path.path()).unwrap();
         let mut report = fit::fit_recipe(&src, &tgt);
         attach_zones(&src, &tgt, &mut report, &sm, &tm, &mask_path);
         assert!(
-            report.recipe.rationale.contains("matching atmosphere only")
-                && report.recipe.rationale.contains("Zoned sky atmosphere correction dropped"),
-            "the structurally changed sky must take the bounded path and its \
-             worsening candidate must obey do-no-harm: {}",
+            report.recipe.rationale.contains("compositions differ")
+                && report
+                    .notes
+                    .iter()
+                    .any(|note| note.key == crate::rationale::keys::ZONE_SHARE_NO_CORRECTION),
+            "the structurally changed populations must disclose the bounded refusal: {}",
             report.recipe.rationale
         );
         assert!(
-            report.recipe.rationale.contains("Zoned land correction attached"),
-            "one divergent zone must not suppress its independently judged neighbour: {}",
+            report.recipe.masks.is_empty(),
+            "neither composition-mismatched population carries two-sided evidence: {}",
             report.recipe.rationale
         );
         assert!(
-            report.recipe.rationale.contains("compositions differ"),
+            report.recipe.rationale.contains("compositions differ")
+                || report.recipe.rationale.contains("share of the two frames differs"),
             "rationale must surface the share mismatch: {}",
             report.recipe.rationale
         );
-        std::fs::remove_file(mask_path).ok();
+        mask_path.remove();
     }
 
     #[test]
@@ -2952,12 +3493,116 @@ mod tests {
         );
         // The temporary segmentation inputs must not survive the fallback.
         for suffix in [".src-in.png", ".tgt-in.png", ".tgt-mask.png"] {
-            let mut p = mask_path.as_os_str().to_owned();
+            let mut p = mask_path.path().as_os_str().to_owned();
             p.push(suffix);
             assert!(
-                !Path::new(&p).exists(),
+                !std::path::Path::new(&p).exists(),
                 "temp file {suffix} leaked past the fallback"
             );
         }
+    }
+
+    // Mutation guard: make `fit::append_finished_disclosure` an unconditional
+    // early return. The required finished disclosure below then panics, so
+    // deleting the disclosure cannot satisfy this test.
+    #[test]
+    fn unrepresented_note_is_derived_from_the_finished_zoned_render() {
+        let (w, h) = (64u32, 64u32);
+        let src = DynamicImage::ImageRgb8(RgbImage::from_fn(w, h, |x, _| {
+            let texture = (((x * 17) % 23) as f32 / 22.0 - 0.5) * 0.08;
+            let v = (0.36 + 0.36 * x as f32 / (w - 1) as f32 + texture).clamp(0.08, 0.92);
+            let p = [0.70 * v, 0.82 * v, v];
+            image::Rgb(p.map(|c| (c.clamp(0.0, 1.0) * 255.0).round() as u8))
+        }));
+        let sky_mask = GrayImage::from_fn(w, h, |_, y| {
+            image::Luma([if y >= 40 { 255u8 } else { 0 }])
+        });
+        let path = fixture_mask_path("zoned-finished-disclosure");
+        sky_mask.save(path.path()).unwrap();
+        let truth = crate::recipe::EditRecipe {
+            masks: vec![LocalAdjustment {
+                mask: MaskGeometry::Bitmap { path: path.path().to_string_lossy().into_owned() },
+                role: MaskRole::ZoneSky,
+                amount: 1.0,
+                color_gains: Some([0.20, 0.65, 1.50]),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let tgt = render::develop_preview(&src, &truth);
+        let eager = fit::fit_recipe(&src, &tgt);
+        let eager_note = eager
+            .notes
+            .iter()
+            .find(|n| {
+                n.key == crate::rationale::keys::FIT_NOTE_UNREPRESENTED
+                    || n.key == crate::rationale::keys::FIT_NOTE_ATMOSPHERE_UNREPRESENTED
+            })
+            .unwrap_or_else(|| {
+                panic!(
+                    "premise: the pre-zone render leaves a measurable unrepresented colour residual: {:?} {:.3}->{:.3} {}",
+                    eager.mode,
+                    eager.err_before,
+                    eager.err_after,
+                    eager.recipe.rationale,
+                )
+            });
+        let eager_controls = eager_note
+            .args
+            .iter()
+            .find(|(key, _)| *key == "controls")
+            .expect("controls arg")
+            .1
+            .clone();
+
+        let mut report = fit::fit_recipe_from_promoted_with_disclosure(
+            &src,
+            &tgt,
+            &crate::recipe::EditRecipe::default(),
+            false,
+            true,
+        );
+        assert!(!report
+            .notes
+            .iter()
+            .any(|n| {
+                n.key == crate::rationale::keys::FIT_NOTE_UNREPRESENTED
+                    || n.key == crate::rationale::keys::FIT_NOTE_ATMOSPHERE_UNREPRESENTED
+            }));
+        attach_zones_with_divergence(
+            &src,
+            &tgt,
+            &mut report,
+            &sky_mask,
+            &sky_mask,
+            &path,
+            ZoneDivergences {
+                sky: ZoneDivergence { divergence: divergence(0.80), share: 0.375 },
+                land: ZoneDivergence { divergence: divergence(0.0), share: 0.625 },
+            },
+        );
+        assert!(
+            !report.recipe.masks.is_empty(),
+            "fixture must deliver a zoned render: {}",
+            report.recipe.rationale,
+        );
+        let finished_controls = report
+            .notes
+            .iter()
+            .find(|n| {
+                n.key == crate::rationale::keys::FIT_NOTE_UNREPRESENTED
+                    || n.key == crate::rationale::keys::FIT_NOTE_ATMOSPHERE_UNREPRESENTED
+            })
+            .and_then(|n| n.args.iter().find(|(key, _)| *key == "controls"))
+            .map(|(_, value)| value.as_str());
+        let finished_controls = finished_controls.unwrap_or_else(|| {
+            panic!("the finished zoned render must carry its disclosure: {}", report.recipe.rationale)
+        });
+        assert_ne!(
+            finished_controls,
+            eager_controls.as_str(),
+            "the disclosure was copied from the pre-zone render"
+        );
+        path.remove();
     }
 }

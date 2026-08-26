@@ -6031,10 +6031,16 @@ mod tests {
         // 18.7/255 of pixel drift on saturated content).
         let s_thumb = src.thumbnail(crate::fit::ANALYZE_EDGE, crate::fit::ANALYZE_EDGE);
         let t_thumb = target.thumbnail(crate::fit::ANALYZE_EDGE, crate::fit::ANALYZE_EDGE);
-        let canvas_err = crate::fit::look_err(
-            &crate::fit::pixels_of(&crate::render::develop_preview(&s_thumb, &rep.recipe)),
-            &crate::fit::pixels_of(&t_thumb),
+        let source_px = crate::fit::pixels_of(&crate::render::develop_preview(&s_thumb, &base));
+        let target_px = crate::fit::pixels_of(&t_thumb);
+        let canvas_px = crate::fit::pixels_of(&crate::render::develop_preview(&s_thumb, &rep.recipe));
+        let evidence = crate::fit::evidence_model_for(
+            &source_px,
+            &target_px,
+            s_thumb.width(),
+            s_thumb.height(),
         );
+        let canvas_err = crate::fit::look_err_with_evidence(&canvas_px, &target_px, &evidence);
         assert!(
             (canvas_err - rep.err_after).abs() < 1e-6,
             "the fit's number must describe the canvas render exactly \
