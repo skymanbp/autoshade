@@ -320,6 +320,45 @@ pub mod keys {
          frame-wide residual {frame} — a frame-wide distribution cannot \
          judge a zone whose share of the two frames differs.";
 
+    // --- spatial residual tiles and bitmap-mask refinement -------------
+    pub const TILE_ELIGIBLE: &str =
+        " Spatial tile {id} eligible in derivation {generation}: frozen evidence \
+         shares source {s}, target {t}, original D={d}, signed residual {residual} \
+         (95% CI +/-{ci}, parent {parent}).";
+    pub const TILE_ATTACHED: &str =
+        " Spatial tile {id} attached as an engine bitmap: local residual \
+         {before} -> {after}, composed frame {frame_before} -> {frame_after}, \
+         boundary {boundary}. Classic XMP omits this correction with the named \
+         bitmap-mask loss.";
+    pub const TILE_ABSTAINED: &str =
+        " Spatial tile {id} abstained in derivation {generation} ({reason}): \
+         frozen evidence shares source \
+         {s}, target {t}, original D={d}, signed residual {residual} (95% CI \
+         +/-{ci}, parent {parent}).";
+    pub const TILE_SWEEP: &str =
+        " Spatial sweep {generation}: eligible parent nodes {eligible}; \
+         abstentions by source share {s}, target share {t}, structural \
+         divergence {d}, confidence interval {ci}, parent proximity {parent}, \
+         other {other}.";
+    pub const TILE_DEPTH_CAP: &str =
+        " Spatial traversal stopped at depth {depth} with a {cap}-tile attachment \
+         cap; {attached} tile(s) attached.";
+    pub const TILE_BOUNDARY_PASSED: &str =
+        " Spatial tile {id} passed the boundary gate: signed rim {before} -> \
+         {after} after direction-preserving shrink k={k} (budget {max}, \
+         {transitions} measured transitions).";
+    pub const TILE_BOUNDARY_REFUSED: &str =
+        " Spatial tile {id} refused by its boundary/composed-frame gate: \
+         candidate rim {before}, final reading {after}, budget {max} \
+         ({transitions} measured transitions, k={k}).";
+    pub const MASK_REFINEMENT_KEPT: &str =
+        " Guided mask refinement kept for {label}: coverage delta {coverage}, \
+         guide-edge alignment {before} -> {after}, core pixels changed {core}.";
+    pub const MASK_REFINEMENT_ABSTAINED: &str =
+        " Guided mask refinement abstained for {label}: coverage delta {coverage}, \
+         guide-edge alignment {before} -> {after}, core pixels changed {core}; \
+         the original mask bytes were retained.";
+
     // --- native luminance-range fallback (fit_zoned.rs) -----------------
     pub const RANGE_ATTACHED: &str =
         " {label} attached for luminance [{lo}, {hi}] (local exposure {ev} EV, \

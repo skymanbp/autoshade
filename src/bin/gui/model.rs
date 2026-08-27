@@ -641,6 +641,10 @@ pub(crate) enum FitNote {
     IncludesSkyZone,
     /// The fit contains at least one native range mask.
     IncludesRangeMasks,
+    /// The fit attached this many engine-only spatial bitmap tiles.
+    IncludesSpatialTiles(usize),
+    /// Guided bitmap-mask production outcomes across semantic/tile masks.
+    MaskRefinement { kept: usize, abstained: usize },
     /// `commit_develop` failed — the fit stays on the canvas unsaved.
     NotPersistedCommit(String),
     /// The Lightroom XMP sidecar landed at this path.

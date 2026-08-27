@@ -3023,7 +3023,7 @@ impl AutoshopApp {
         let lang = self.lang;
         self.busy = true;
         let mut running = if zoned {
-            tr(lang, "Reverse-fitting… (global fit + semantic sky/land or native luminance ranges)").to_string()
+            tr(lang, "Reverse-fitting… (global + semantic/ranges + spatial tiles)").to_string()
         } else {
             tr(lang, "Reverse-fitting… (statistical fit, local compute)").to_string()
         };
@@ -3335,6 +3335,34 @@ impl AutoshopApp {
                     }
                     if rep.recipe.masks.iter().any(|mask| mask.range.is_some()) {
                         status.push(FitNote::IncludesRangeMasks);
+                    }
+                    let tiles = rep
+                        .notes
+                        .iter()
+                        .filter(|note| note.key == autoshop::rationale::keys::TILE_ATTACHED)
+                        .count();
+                    if tiles > 0 {
+                        status.push(FitNote::IncludesSpatialTiles(tiles));
+                    }
+                    let refinement_kept = rep
+                        .notes
+                        .iter()
+                        .filter(|note| {
+                            note.key == autoshop::rationale::keys::MASK_REFINEMENT_KEPT
+                        })
+                        .count();
+                    let refinement_abstained = rep
+                        .notes
+                        .iter()
+                        .filter(|note| {
+                            note.key == autoshop::rationale::keys::MASK_REFINEMENT_ABSTAINED
+                        })
+                        .count();
+                    if refinement_kept + refinement_abstained > 0 {
+                        status.push(FitNote::MaskRefinement {
+                            kept: refinement_kept,
+                            abstained: refinement_abstained,
+                        });
                     }
                     // R23-6 A-3: the terminal do-no-harm reset is "the
                     // reverse-fit did nothing", and a line inside a rationale

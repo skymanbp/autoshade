@@ -22,6 +22,7 @@ pub mod generative;
 pub mod jobs;
 pub mod lcp;
 pub mod lensmeta;
+pub(crate) mod mask_refine;
 pub mod openai_models;
 pub mod pipeline;
 pub mod rationale;

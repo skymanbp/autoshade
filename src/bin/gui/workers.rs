@@ -2435,6 +2435,19 @@ impl AutoshopApp {
                 " · includes native range correction (adjustable in the mask panel and written to XMP)",
             )
             .to_string(),
+            FitNote::IncludesSpatialTiles(n) => trf(
+                lang,
+                " · includes {n} spatial tile correction(s) (adjustable in the mask panel; omitted from classic XMP with a named bitmap loss)",
+                &[("n", &n.to_string())],
+            ),
+            FitNote::MaskRefinement { kept, abstained } => trf(
+                lang,
+                " · guided mask refinement: {kept} kept, {abstained} abstained",
+                &[
+                    ("kept", &kept.to_string()),
+                    ("abstained", &abstained.to_string()),
+                ],
+            ),
             FitNote::NotPersistedCommit(e) => trf(
                 lang,
                 " · NOT persisted: saving the develop failed ({err}) — Ctrl+S to save explicitly",

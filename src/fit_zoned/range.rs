@@ -381,6 +381,7 @@ fn derive_luminance_bands(
                 role: MaskRole::Custom,
                 inverted: false,
                 label: name,
+                min_share: MIN_ZONE_SHARE,
                 frame_regression_tol: RANGE_FRAME_REGRESSION_TOL,
             },
             source,
@@ -1339,6 +1340,7 @@ mod tests {
             role: MaskRole::Custom,
             inverted: false,
             label: "Luminance range 01".to_string(),
+            min_share: MIN_ZONE_SHARE,
             frame_regression_tol: RANGE_FRAME_REGRESSION_TOL,
         };
 
@@ -1400,11 +1402,10 @@ mod tests {
         path.remove();
     }
 
-    #[test]
-    fn segmentation_success_does_not_derive_range_bands() {
+    fn assert_semantic_success_does_not_derive_ranges(name: &str) {
         RANGE_DERIVATION_CALLS.with(|calls| calls.set(0));
         let (source, target, sky) = zoned_pair();
-        let path = fixture_mask_path("range-no-work-segmentation-success");
+        let path = fixture_mask_path(name);
         sky.save(path.path()).unwrap();
         SEGMENT_BOTH_OVERRIDE.with(|value| *value.borrow_mut() = Some((sky.clone(), sky)));
         let seg = SegmentOpts {
@@ -1421,10 +1422,63 @@ mod tests {
             &path,
             &crate::recipe::EditRecipe::default(),
             None,
+            ZonedLayerOpts { spatial: false, refine_masks: false },
         );
         let calls = RANGE_DERIVATION_CALLS.with(std::cell::Cell::get);
         assert_eq!(calls, 0, "semantic success must not even derive range candidates");
         assert!(report.recipe.masks.iter().any(|mask| mask.range.is_none()));
+        path.remove();
+    }
+
+    #[test]
+    fn segmentation_success_does_not_derive_range_bands() {
+        assert_semantic_success_does_not_derive_ranges("range-no-work-segmentation-success");
+    }
+
+    #[test]
+    fn semantic_success_still_does_not_derive_ranges() {
+        assert_semantic_success_does_not_derive_ranges("semantic-no-range-derivation");
+    }
+
+    #[test]
+    fn range_weights_are_unchanged_when_refinement_is_enabled() {
+        let mut residuals = [0.0; 17];
+        residuals[4] = 0.08;
+        residuals[5] = 0.07;
+        let (range_source, range_target, evidence) = synthetic_range_case(residuals);
+        let before = derive_luminance_bands(&range_source, &range_target, &evidence);
+        assert!(!before.bands.is_empty(), "premise: candidate range weights exist");
+
+        let (source, target) = compact_rank_wave_fixture();
+        let seg = SegmentOpts {
+            python_bin: "autoshop-test-no-such-python".into(),
+            script: "Cargo.toml".into(),
+            target: "sky".into(),
+            reference_point: None,
+            prompt_points: None,
+        };
+        let path = fixture_mask_path("range-refinement-conservation");
+        crate::mask_refine::reset_guided_refine_calls();
+        let _ = fit_recipe_zoned_inner(
+            &source,
+            &target,
+            &seg,
+            &path,
+            &crate::recipe::EditRecipe::default(),
+            None,
+            ZonedLayerOpts { spatial: false, refine_masks: true },
+        );
+        assert_eq!(
+            crate::mask_refine::guided_refine_calls(),
+            0,
+            "luminance ranges must never enter the spatial mask refiner",
+        );
+        let after = derive_luminance_bands(&range_source, &range_target, &evidence);
+        assert_eq!(
+            after.bands,
+            before.bands,
+            "enabling semantic refinement changed observed-domain range weights",
+        );
         path.remove();
     }
 

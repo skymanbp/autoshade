@@ -771,7 +771,7 @@ impl AutoshopApp {
         // `start_fit` reads the flag when it runs).
         ui.checkbox(&mut self.zoned_fit, tr(lang, "Zoned fit (sky)")).on_hover_text(tr(
             lang,
-            "On reverse-fit, fit globally first. When sky segmentation succeeds, add semantic sky/land bitmap corrections; when it is disabled or unavailable, automatically try native luminance-range corrections. If neither is accepted, keep the global fit. Bitmap masks stay engine-only; native luminance ranges are written to the Lightroom sidecar. Segmentation needs the python dependencies (transformers + torch), and every fallback or abstention is noted in the rationale.",
+            "On reverse-fit, fit globally first. Sky segmentation and native luminance-range fallback stay exclusive; then frozen-evidence spatial tiles are tried automatically on a 4x4 grid with a four-tile cap and zero frame regression. Conservative guided refinement may keep or abstain before fitting semantic/tile masks, and never changes luminance ranges. Bitmap masks stay engine-only with a named XMP loss; native ranges are written to the Lightroom sidecar. Segmentation needs the python dependencies (transformers + torch), and every fallback or abstention is noted in the rationale.",
         ));
     }
 }

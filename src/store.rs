@@ -1558,6 +1558,43 @@ impl OwnedRaster {
         claim_raster(src, prefix).map(Self)
     }
 
+    /// Atomically claim another owned raster beside this one.
+    ///
+    /// Zoned tile attempts use separate ownership so rejecting one candidate
+    /// can release only that candidate without touching the semantic raster
+    /// or any tile already referenced by the recipe.
+    pub(crate) fn claim_sibling(&self, prefix: &str) -> std::io::Result<Self> {
+        let parent = self.0.parent().ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "owned raster has no parent")
+        })?;
+        if prefix.is_empty()
+            || std::path::Path::new(prefix).components().count() != 1
+            || prefix.contains(['/', '\\'])
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "raster prefix must be one file-name component",
+            ));
+        }
+        std::fs::create_dir_all(parent)?;
+        for n in 0..=998u32 {
+            let name = if n == 0 {
+                format!("{prefix}.png")
+            } else {
+                format!("{prefix}-{}.png", n + 1)
+            };
+            let candidate = parent.join(name);
+            match std::fs::OpenOptions::new().write(true).create_new(true).open(&candidate) {
+                Ok(_) => return Ok(Self(candidate)),
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(e) => return Err(e),
+            }
+        }
+        Err(std::io::Error::other(format!(
+            "over 999 '{prefix}' rasters beside this mask"
+        )))
+    }
+
     /// A scratch file a TEST created and may destroy.
     ///
     /// Refuses the calibration corpus outright: that directory holds the
@@ -5769,6 +5806,26 @@ mod tests {
     // moved to `LocalAdjustment::bitmap_paths_mut`; the fixtures here still
     // construct geometries directly.
     use crate::recipe::{LocalAdjustment, MaskGeometry};
+
+    #[test]
+    fn owned_raster_siblings_are_atomic_and_independently_releasable() {
+        let dir = std::env::temp_dir().join(format!(
+            "autoshop-owned-raster-sibling-{}",
+            std::process::id(),
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let home = OwnedRaster::scratch(dir.join("mask-zone-sky.png"));
+        let first = home.claim_sibling("mask-zone-tile").unwrap();
+        let second = home.claim_sibling("mask-zone-tile").unwrap();
+        assert_eq!(first.path().file_name().unwrap(), "mask-zone-tile.png");
+        assert_eq!(second.path().file_name().unwrap(), "mask-zone-tile-2.png");
+        first.remove();
+        assert!(!first.path().exists());
+        assert!(second.path().exists(), "rejecting one tile removed its accepted sibling");
+        assert!(home.claim_sibling("../escape").is_err());
+        second.remove();
+        std::fs::remove_dir(&dir).unwrap();
+    }
 
     /// Every read of a file this module PERSISTS goes through the capped
     /// reader. A SOURCE-SCANNING gate, in the shape of the GUI's font gate

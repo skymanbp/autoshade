@@ -92,8 +92,8 @@
 > experimental generative edits, an optional pixel-**heal** retouch mode (§4.7)
 > the deterministic look **reverse-fit** (§4.8) and the local server's refusal
 > model (§4.9).
-> 958 library + 15 CLI + 145 GUI + 2+2 contract tests are enumerated in the GUI
-> build; the library result is 949 pass + 9 `#[ignore]`d forensic probes
+> 974 library + 15 CLI + 145 GUI + 2+2 contract tests are enumerated in the GUI
+> build; the library result is 965 pass + 9 `#[ignore]`d forensic probes
 > (counts refreshed 2026-08-26 after the paired robust-regression batch: library 917→921, set diff +4/−0 by name — `unsupported_knots_cannot_pull_the_solve`, `robust_regression_downweights_invented_target_content`, `robust_rejection_reaches_the_disclosure`, `p36_fixture_recovers_the_lightroom_exposure_anchor`). THREE suites are ADDITIONAL and
 > env-gated, so a bare `cargo test` does not include them:
 > `AUTOSHOP_LR_PROBE_FIXTURES` (16 real Lightroom radial sidecars, byte
@@ -1754,6 +1754,45 @@ name, and the full-frame sentinel `Linear { zero_x: 0.5, zero_y: -0.8,
 full_x: 0.5, full_y: -0.4 }` intersected with `RangeMask::Luminance`; the XMP
 reader and writer therefore need no new grammar. Color-range partitioning is
 outside this step.
+
+The final automatic layer is a frozen-evidence spatial quadtree
+([`src/fit_zoned/spatial.rs`](../src/fit_zoned/spatial.rs)). It runs after
+either semantic zones or the mutually exclusive luminance-range fallback and
+always renders the current recipe before deriving residuals. A node intersects
+the original pair's source and target evidence with its normalized rectangle;
+edits cannot move pixels into evidence. Best-first priority is
+`abs(signed_luma_residual) * min(source_share, target_share)`, with
+`(depth,row,col)` as the deterministic tie-break. A child needs at least `0.03`
+evidence share on both sides, original `D < 0.65`, a weighted 95% confidence
+interval excluding zero, and a residual at least `2/255` away from its parent.
+Eligible parents split only to `SPATIAL_MAX_DEPTH = 2` (4x4), accepted leaves
+are re-derived after every attachment, and the stack stops at four tiles.
+Every examined ineligible node lands with its id and reason in that
+generation's single typed sweep note (nodes already attached or refused told
+their story in their own generation); eligible leaf candidates keep a full
+per-node reading, and downstream failures (raster, estimator, boundary) keep
+per-tile notes. The persisted-rationale abuse bound is 16 KiB so this
+disclosure is never what truncation eats.
+
+Each leaf reuses `attach_one_zone` through `ZoneAttachment { min_share: 0.03,
+frame_regression_tol: 0.0 }`, then passes its own `0.012` boundary-rim and
+zero-regression composed-frame gates. Its deterministic normalized-source
+raster is capped at a 2048-pixel long edge and persists as an existing
+`MaskGeometry::Bitmap`, `MaskRole::Custom` adjustment. Recipe schema era 1 is
+unchanged. Classic XMP deliberately skips the bitmap and returns the existing
+named bitmap loss; no gradient approximation is emitted.
+
+Mask refinement is a production step, never a post-fit edit
+([`src/mask_refine.rs`](../src/mask_refine.rs)). A dependency-free local-linear
+guided filter uses integral-image box means, radius 8 and epsilon `(4/255)^2`.
+It may propose semantic silhouettes and the boundary collar of an already
+evidence-eligible tile, but never an observed-domain luminance range. Pixels
+outside a `2 * radius` collar are restored byte for byte, whole-frame coverage
+may change by at most `0.002`, and transition-weighted Sobel guide-edge
+alignment may not decrease. Otherwise the original alpha is retained with a
+typed abstention. A kept alpha is fitted from scratch and still crosses the
+ordinary rim and composed-frame gates. Multi-class semantic production remains
+out of scope.
 
 **The reference, and the second reading (v0.29.0, R23-6).** The desktop
 target is no longer only an app-generated variant: `canvas::fit_target`

@@ -289,6 +289,61 @@ exclusive, and this batch emits no color partitions.
 - `src/render.rs` — sequential range evaluation on current rendered pixels.
 - `src/xmp.rs` — intersected native luminance-range projection.
 
+## Layered spatial reverse-fit and mask refinement
+
+### Method
+
+After the global fit and exactly one local producer (semantic zones or native
+luminance ranges), `fit_zoned::spatial` traverses a quadtree over the current
+render. Rectangle geometry intersects the evidence frozen from the original
+pair. Nodes are visited best-first by absolute signed residual times the lesser
+source/target share, with `(depth,row,col)` ties. Each accepted bitmap leaf is
+re-fitted through the shared robust zone estimator, boundary gate and a
+zero-regression composed-frame law; all readings are re-derived before another
+leaf is considered.
+
+`mask_refine` is a dependency-free guided-filter approximation built from
+integral-image box means and deterministic row-parallel output. It can refine
+semantic silhouettes and eligible tile collars before fitting. Conservation
+restores the non-collar core byte for byte and gates coverage, finite values and
+transition-weighted Sobel guide-edge alignment. It never receives a luminance
+range ramp. Failed refinement retains the original alpha and records the
+reading.
+
+### Parameters and measurements
+
+- `SPATIAL_MAX_DEPTH = 2` (4x4 leaves) and `SPATIAL_MAX_ATTACHMENTS = 4`.
+- Both frozen evidence shares must be at least `0.03`; original `D` must be
+  below `0.65`; the weighted 95% interval must exclude zero and the child must
+  differ from its parent by at least `2/255`.
+- `SPATIAL_FRAME_REGRESSION_TOL = 0.0` and the shared boundary rim ceiling is
+  `0.012`.
+- Tile rasters use normalized source coordinates with a 2048-pixel long-edge
+  cap. JSON is lossless; classic XMP reports the existing named bitmap loss.
+- Guided refinement uses radius `8`, epsilon `(4/255)^2`, a `2 * radius`
+  restored collar boundary, and maximum coverage drift `0.002`.
+- The shipped automatic path on the calibration pair (range fallback)
+  attaches `r2c0` then `r3c0`: frozen shares `3.6%/3.8%` and `3.6%/3.5%`,
+  original `D = 0.303` and `0.438`, signed residuals `-0.092` and `-0.060`
+  (95% CI `0.0006`), composed frame `0.0549 -> 0.0427 -> 0.0345`; every
+  changed-sky node abstains on source share. The semantic-mask refinement
+  probe measured guide-edge alignment `0.046444 -> 0.023914`, so it correctly
+  abstained and retained the original bytes.
+- Ineligible traversal verdicts aggregate into one typed sweep note per
+  generation; the persisted-rationale abuse bound is `16 KiB` (raised from
+  `4096`, which the pre-tile range path already saturated and which truncated
+  the tile attachment disclosure off the persisted recipe).
+- The 384x256 release probe measured 1.72 ms; scaling by pixel count estimates
+  roughly 49 ms for a 2048x1365 mask, not a second benchmark.
+
+### Source
+
+- `src/fit_zoned/spatial.rs` — traversal, tile raster ownership, shared fitting,
+  boundary/frame arbitration, rationale facts and conservation tests.
+- `src/mask_refine.rs` — guided filter, collar restoration and acceptance laws.
+- `src/store.rs` — atomic `OwnedRaster::claim_sibling` ownership.
+- `src/xmp.rs` — existing bitmap-mask omission and named loss.
+
 ## AI masks
 
 ### Method
@@ -665,7 +720,7 @@ than the pre-call state; model weights remain outside the repository.
 - The 61 MP RAW probe measured `151 MB` peak commit for decode,
   `1771 MB` for calibration/render preparation, and `1766 MB` for the
   full-resolution render tail; the combined process peak remained `1771 MB`.
-- The release battery is **958 library (949 pass + 9 `#[ignore]`d forensic
+- The release battery is **974 library (965 pass + 9 `#[ignore]`d forensic
   probes) / 15 CLI / 145 GUI / 2+2 contract** tests. Environment-gated real
   Lightroom, brush-table, and RAW-zoo suites are additional and are not
   smuggled into the ordinary count.

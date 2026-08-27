@@ -272,8 +272,11 @@ enum Command {
         /// Fit globally, then add semantic sky/land bitmap corrections when
         /// local segmentation succeeds. If segmentation is disabled or
         /// unavailable, automatically try evidence-gated native luminance
-        /// ranges; otherwise retain the global fit. Bitmap masks stay engine-
-        /// only, while native ranges project to Lightroom XMP. No network.
+        /// ranges; otherwise retain the global fit. Then automatically try up
+        /// to four frozen-evidence 4x4 spatial bitmap tiles with zero frame
+        /// regression. Conservative guided mask refinement may abstain. Bitmap
+        /// masks stay engine-only with a named XMP loss; native ranges project
+        /// to Lightroom XMP. No network.
         #[arg(long)]
         zoned: bool,
         /// Also extract a reusable style PROMPT from the pair via the vision
@@ -1273,7 +1276,9 @@ fn match_cmd(
         // below gates for the zoned path too, immediately before writing.
         let mask = autoshop::store::OwnedRaster::claim(raw, "mask-zone-sky")?;
         pipeline::guard_readonly(mask.path(), raw)?;
-        println!("  zoned: trying semantic sky/land, then native luminance ranges if unavailable …");
+        println!(
+            "  zoned: global -> semantic sky/land or native luminance ranges -> spatial tiles"
+        );
         autoshop::fit_zoned::fit_recipe_zoned_with(
             &src,
             &tgt,

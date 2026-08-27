@@ -223,6 +223,23 @@ range** cards with their four ordered bounds. Their sentinel-hosted range
 components project to Lightroom XMP, while semantic bitmap masks remain
 engine-only. This release derives luminance ranges only, not color ranges.
 
+After either local producer, reverse-fit automatically examines spatial
+residuals with a frozen-evidence quadtree. It visits the strongest supported
+nodes first, stops at a 4x4 grid and four accepted leaves, and keeps a tile only
+when both frames contribute at least 3% evidence, original structure remains
+comparable, its confidence interval excludes zero, its boundary stays within
+the calibrated rim budget, and the composed frame does not regress. Tiles are
+editable engine bitmap masks; recipe JSON preserves them losslessly, while
+classic XMP omits each one with a named bitmap-mask loss rather than inventing
+an approximate rectangle.
+
+Semantic silhouettes and eligible tile boundaries may be proposed for
+edge-aware guided refinement before their corrections are fitted. The original
+mask bytes win unless coverage is conserved, pixels outside the fixed collar
+are unchanged, guide-edge alignment does not decrease, and the normal rim and
+frame gates still pass. Luminance ranges are never spatially refined. There is
+no additional switch and no multi-class semantic segmentation in this release.
+
 ### 5. Export
 
 Open Export with the toolbar, `Ctrl+Shift+E`, or `Ctrl+E`. Choose JPEG, 8- or
@@ -612,7 +629,7 @@ versions, and a deleted-version registry; SCUNet success requires the typed
 `sidecar_wrote` contract. A 1771 MB reference probe sets the 1800 MB per-photo
 budget, while the 4 GiB RAW gate bounds admission. The [`build`
 workflow](.github/workflows/build.yml) covers default and GUI feature sets on
-Ubuntu and macOS. The current battery is **958 library (949 pass + 9 `#[ignore]`d forensic probes) / 15 CLI / 145 GUI / 2+2 contract** tests; the
+Ubuntu and macOS. The current battery is **974 library (965 pass + 9 `#[ignore]`d forensic probes) / 15 CLI / 145 GUI / 2+2 contract** tests; the
 [`scripts/check_docs.py`](scripts/check_docs.py) gate re-derives pinned release
 claims. Model weights are not stored in this repository.
 

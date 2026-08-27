@@ -2142,8 +2142,14 @@ impl EditRecipe {
         const MAX_MASKS: usize = 64;
         const MAX_CURVE_POINTS: usize = 256;
         const MAX_BASE_KNOTS: usize = 256;
-        /// Room for a paragraph of explanation, not a transcript.
-        const MAX_RATIONALE: usize = 4096;
+        /// An abuse bound, not a disclosure budget. The layered zoned
+        /// fit's typed notes (17-bin range refusals, per-generation tile
+        /// sweeps, refinement readings) legitimately reach ~6 KB on the
+        /// calibration pair; 4096 truncated the tile ATTACHMENT disclosure
+        /// off the persisted recipe while the masks stayed. Sized so honest
+        /// writer output never loses its tail, while a hand-edited foreign
+        /// recipe.json still cannot smuggle a payload.
+        const MAX_RATIONALE: usize = 16 * 1024;
         /// A mask label is a UI affordance; Lightroom's own are far shorter.
         const MAX_NAME: usize = 256;
         /// A path, not a payload — comfortably past Windows' extended limit.
@@ -2887,7 +2893,7 @@ mod tests {
             ..Default::default()
         };
         r.clamp();
-        assert!(r.rationale.len() <= 4096, "rationale unbounded: {}", r.rationale.len());
+        assert!(r.rationale.len() <= 16384, "rationale unbounded: {}", r.rationale.len());
         assert!(r.masks[0].name.len() <= 256, "mask name unbounded: {}", r.masks[0].name.len());
         match &r.masks[0].mask {
             MaskGeometry::Bitmap { path } => {
@@ -2900,7 +2906,7 @@ mod tests {
         // truncate` panics off a char boundary, and this input is unvalidated.
         let mut multi = EditRecipe { rationale: "é".repeat(50_000), ..Default::default() };
         multi.clamp(); // would panic if the cut ignored char boundaries
-        assert!(multi.rationale.len() <= 4096);
+        assert!(multi.rationale.len() <= 16384);
         assert!(multi.rationale.chars().all(|c| c == 'é'), "cut mid-character");
 
         // The neutralisation itself: a zero-area crop is an edit on arrival…
@@ -3848,12 +3854,12 @@ mod tests {
             tone_curve: (0..300u32)
                 .map(|i| CurvePoint { input: (i % 256) as u8, output: 0 })
                 .collect(),
-            rationale: "x".repeat(5000),
+            rationale: "x".repeat(20_000),
             ..Default::default()
         };
         let d = r.clamp();
         assert_eq!(d.truncated_curve_points, 44, "300 points over the 256 cap");
-        assert_eq!(d.truncated_string_bytes, 5000 - 4096, "rationale past its cap");
+        assert_eq!(d.truncated_string_bytes, 20_000 - 16_384, "rationale past its cap");
         assert!(!d.is_empty(), "curve/string loss alone must flip is_empty");
     }
 

@@ -36,6 +36,21 @@ use crate::render;
 use crate::segment::{segment_file, SegmentOpts};
 
 mod range;
+mod spatial;
+
+const MASK_REFINE_RADIUS: u32 = 8;
+const MASK_REFINE_EPSILON: f32 = (4.0 / 255.0) * (4.0 / 255.0);
+
+#[derive(Clone, Copy)]
+struct ZonedLayerOpts {
+    spatial: bool,
+    refine_masks: bool,
+}
+
+const SHIPPED_LAYERS: ZonedLayerOpts = ZonedLayerOpts {
+    spatial: true,
+    refine_masks: true,
+};
 
 /// A zone must cover at least this weighted share of ITS frame on BOTH sides
 /// to carry trustworthy moments (a real sky measures 10–40%; segmentation
@@ -1073,7 +1088,7 @@ pub fn fit_recipe_zoned_with(
     base: &crate::recipe::EditRecipe,
     provider: Option<fit::CorrespondenceProvider>,
 ) -> FitReport {
-    fit_recipe_zoned_inner(src, target, seg, mask_path, base, provider)
+    fit_recipe_zoned_inner(src, target, seg, mask_path, base, provider, SHIPPED_LAYERS)
 }
 
 /// [`fit_recipe_zoned`] with a calibration-only base composed into the
@@ -1088,7 +1103,7 @@ pub fn fit_recipe_zoned_from(
     mask_path: &crate::store::OwnedRaster,
     base: &crate::recipe::EditRecipe,
 ) -> FitReport {
-    fit_recipe_zoned_inner(src, target, seg, mask_path, base, None)
+    fit_recipe_zoned_inner(src, target, seg, mask_path, base, None, SHIPPED_LAYERS)
 }
 
 fn fit_recipe_zoned_inner(
@@ -1098,9 +1113,96 @@ fn fit_recipe_zoned_inner(
     mask_path: &crate::store::OwnedRaster,
     base: &crate::recipe::EditRecipe,
     provider: Option<fit::CorrespondenceProvider>,
+    layers: ZonedLayerOpts,
 ) -> FitReport {
-    match segment_both(src, target, seg, mask_path) {
-        Ok((src_mask, tgt_mask)) => {
+    let mut report = match segment_both(src, target, seg, mask_path) {
+        Ok((mut src_mask, mut tgt_mask)) => {
+            let refinements = if layers.refine_masks {
+                let source = crate::mask_refine::guided_refine(
+                    src,
+                    &src_mask,
+                    MASK_REFINE_RADIUS,
+                    MASK_REFINE_EPSILON,
+                );
+                let target = crate::mask_refine::guided_refine(
+                    target,
+                    &tgt_mask,
+                    MASK_REFINE_RADIUS,
+                    MASK_REFINE_EPSILON,
+                );
+                Some((source, target))
+            } else {
+                None
+            };
+            if let Some((source_refinement, target_refinement)) = refinements {
+                let mut readings = Vec::new();
+                match source_refinement {
+                    crate::mask_refine::RefineOutcome::Kept { mask, reading } => {
+                        if mask.save(mask_path.path()).is_ok() {
+                            src_mask = mask;
+                            readings.push(("semantic source", true, reading));
+                        } else {
+                            readings.push(("semantic source", false, reading));
+                        }
+                    }
+                    crate::mask_refine::RefineOutcome::Abstained { reading } => {
+                        readings.push(("semantic source", false, reading));
+                    }
+                }
+                match target_refinement {
+                    crate::mask_refine::RefineOutcome::Kept { mask, reading } => {
+                        tgt_mask = mask;
+                        readings.push(("semantic target", true, reading));
+                    }
+                    crate::mask_refine::RefineOutcome::Abstained { reading } => {
+                        readings.push(("semantic target", false, reading));
+                    }
+                }
+                let zone_divergence = measure_zone_divergence(src, target, base, &src_mask);
+                let divergent_cover = [zone_divergence.sky, zone_divergence.land]
+                    .into_iter()
+                    .filter(|zone| zone.divergence.d >= fit::DIVERGENCE_ZONE)
+                    .map(|zone| zone.share)
+                    .sum::<f32>();
+                let mut report = fit::fit_recipe_from_promoted_with_disclosure(
+                    src,
+                    target,
+                    base,
+                    divergent_cover >= fit::DIVERGENT_COVER_PROMOTES,
+                    true,
+                    provider,
+                );
+                for (label, kept, reading) in readings {
+                    crate::rationale::push_note(
+                        &mut report.recipe.rationale,
+                        &mut report.notes,
+                        crate::rationale::Note::new(
+                            if kept {
+                                crate::rationale::keys::MASK_REFINEMENT_KEPT
+                            } else {
+                                crate::rationale::keys::MASK_REFINEMENT_ABSTAINED
+                            },
+                            vec![
+                                ("label", label.to_string()),
+                                ("coverage", format!("{:.6}", reading.coverage_delta)),
+                                ("before", format!("{:.6}", reading.edge_before)),
+                                ("after", format!("{:.6}", reading.edge_after)),
+                                ("core", reading.core_changed.to_string()),
+                            ],
+                        ),
+                    );
+                }
+                attach_zones_with_divergence(
+                    src,
+                    target,
+                    &mut report,
+                    &src_mask,
+                    &tgt_mask,
+                    mask_path,
+                    zone_divergence,
+                );
+                report
+            } else {
             let zone_divergence = measure_zone_divergence(src, target, base, &src_mask);
             let divergent_cover = [zone_divergence.sky, zone_divergence.land]
                 .into_iter()
@@ -1125,6 +1227,7 @@ fn fit_recipe_zoned_inner(
                 zone_divergence,
             );
             report
+            }
         }
         Err(e) => {
             // The provider still rides the fallback: a failed segmentation
@@ -1148,7 +1251,11 @@ fn fit_recipe_zoned_inner(
             range::attach_luminance_ranges(src, target, &mut report);
             report
         }
+    };
+    if layers.spatial {
+        spatial::attach_tiles(src, target, &mut report, mask_path, layers.refine_masks);
     }
+    report
 }
 
 #[derive(Clone, Copy)]
@@ -1176,6 +1283,7 @@ struct ZoneAttachment {
     role: MaskRole,
     inverted: bool,
     label: String,
+    min_share: f32,
     frame_regression_tol: f32,
 }
 
@@ -1404,6 +1512,7 @@ fn attach_zones_with_divergence(
         role: MaskRole::ZoneSky,
         inverted: false,
         label: MaskRole::ZoneSky.tag().to_string(),
+        min_share: MIN_ZONE_SHARE,
         frame_regression_tol: ZONE_GLOBAL_REGRESSION_TOL,
     };
     let land_attachment = ZoneAttachment {
@@ -1415,6 +1524,7 @@ fn attach_zones_with_divergence(
         role: MaskRole::ZoneLand,
         inverted: true,
         label: MaskRole::ZoneLand.tag().to_string(),
+        min_share: MIN_ZONE_SHARE,
         frame_regression_tol: ZONE_GLOBAL_REGRESSION_TOL,
     };
     let sky = attach_one_zone(
@@ -1805,7 +1915,7 @@ fn attach_one_zone(
             let zwt = with_conf(tw);
             let ms = zone_moments(&cur_px, &zws);
             let mt = zone_moments(&c.tp, &zwt);
-            (ms.share >= MIN_ZONE_SHARE && mt.share >= MIN_ZONE_SHARE)
+            (ms.share >= attachment.min_share && mt.share >= attachment.min_share)
                 .then_some((c, zr, zws, zwt, ms, mt))
         }
         _ => None,
@@ -1827,7 +1937,7 @@ fn attach_one_zone(
                 (tgt_px, zr, zws, zwt, ms, mt, gs, gt)
             }
         };
-    if gate_s_share < MIN_ZONE_SHARE || gate_t_share < MIN_ZONE_SHARE {
+    if gate_s_share < attachment.min_share || gate_t_share < attachment.min_share {
         crate::rationale::push_note(
             &mut report.recipe.rationale,
             &mut report.notes,
@@ -2664,6 +2774,7 @@ mod tests {
             role: MaskRole::ZoneSky,
             inverted: false,
             label: MaskRole::ZoneSky.tag().to_string(),
+            min_share: MIN_ZONE_SHARE,
             frame_regression_tol: ZONE_GLOBAL_REGRESSION_TOL,
         }
     }
@@ -2691,6 +2802,247 @@ mod tests {
                 s.height(),
             ),
         }
+    }
+
+    fn legacy_zoned_fit(
+        src: &DynamicImage,
+        target: &DynamicImage,
+        seg: &SegmentOpts,
+        mask_path: &crate::store::OwnedRaster,
+        base: &crate::recipe::EditRecipe,
+    ) -> FitReport {
+        match segment_both(src, target, seg, mask_path) {
+            Ok((src_mask, tgt_mask)) => {
+                let zone_divergence = measure_zone_divergence(src, target, base, &src_mask);
+                let divergent_cover = [zone_divergence.sky, zone_divergence.land]
+                    .into_iter()
+                    .filter(|zone| zone.divergence.d >= fit::DIVERGENCE_ZONE)
+                    .map(|zone| zone.share)
+                    .sum::<f32>();
+                let mut report = fit::fit_recipe_from_promoted_with_disclosure(
+                    src,
+                    target,
+                    base,
+                    divergent_cover >= fit::DIVERGENT_COVER_PROMOTES,
+                    true,
+                    None,
+                );
+                attach_zones_with_divergence(
+                    src,
+                    target,
+                    &mut report,
+                    &src_mask,
+                    &tgt_mask,
+                    mask_path,
+                    zone_divergence,
+                );
+                report
+            }
+            Err(e) => {
+                let mut report = fit::fit_recipe_from_promoted_with_disclosure(
+                    src,
+                    target,
+                    base,
+                    false,
+                    true,
+                    None,
+                );
+                crate::rationale::push_note(
+                    &mut report.recipe.rationale,
+                    &mut report.notes,
+                    crate::rationale::Note::new(
+                        crate::rationale::keys::ZONED_UNAVAILABLE,
+                        vec![("e", format!("{e:#}"))],
+                    ),
+                );
+                range::attach_luminance_ranges(src, target, &mut report);
+                report
+            }
+        }
+    }
+
+    #[test]
+    fn layered_disabled_is_byte_identical_to_current_zoned_fit() {
+        let (source, target, sky) = zoned_pair();
+        let seg = SegmentOpts {
+            python_bin: "autoshop-test-no-such-python".into(),
+            script: "Cargo.toml".into(),
+            target: "sky".into(),
+            reference_point: None,
+            prompt_points: None,
+        };
+        let layers = ZonedLayerOpts { spatial: false, refine_masks: false };
+
+        let semantic_path = fixture_mask_path("layered-disabled-semantic");
+        sky.save(semantic_path.path()).unwrap();
+        SEGMENT_BOTH_OVERRIDE.with(|value| *value.borrow_mut() = Some((sky.clone(), sky.clone())));
+        let disabled_semantic = fit_recipe_zoned_inner(
+            &source,
+            &target,
+            &seg,
+            &semantic_path,
+            &crate::recipe::EditRecipe::default(),
+            None,
+            layers,
+        );
+        SEGMENT_BOTH_OVERRIDE.with(|value| *value.borrow_mut() = Some((sky.clone(), sky)));
+        let legacy_semantic = legacy_zoned_fit(
+            &source,
+            &target,
+            &seg,
+            &semantic_path,
+            &crate::recipe::EditRecipe::default(),
+        );
+        assert_eq!(
+            serde_json::to_vec(&disabled_semantic.recipe).unwrap(),
+            serde_json::to_vec(&legacy_semantic.recipe).unwrap(),
+            "disabled semantic layers changed the pre-layer recipe bytes",
+        );
+        assert_eq!(disabled_semantic.err_after.to_bits(), legacy_semantic.err_after.to_bits());
+        semantic_path.remove();
+
+        let range_path = fixture_mask_path("layered-disabled-range");
+        let disabled_range = fit_recipe_zoned_inner(
+            &source,
+            &target,
+            &seg,
+            &range_path,
+            &crate::recipe::EditRecipe::default(),
+            None,
+            layers,
+        );
+        let legacy_range = legacy_zoned_fit(
+            &source,
+            &target,
+            &seg,
+            &range_path,
+            &crate::recipe::EditRecipe::default(),
+        );
+        assert_eq!(
+            serde_json::to_vec(&disabled_range.recipe).unwrap(),
+            serde_json::to_vec(&legacy_range.recipe).unwrap(),
+            "disabled range layers changed the pre-layer recipe bytes",
+        );
+        assert_eq!(disabled_range.err_after.to_bits(), legacy_range.err_after.to_bits());
+        range_path.remove();
+
+        let (Ok(head_semantic), Ok(head_range)) = (
+            std::env::var("AUTOSHOP_LAYERED_HEAD_SEMANTIC"),
+            std::env::var("AUTOSHOP_LAYERED_HEAD_RANGE"),
+        ) else {
+            return;
+        };
+        let root = fit::calibration_corpus().expect("HEAD equivalence needs calibration corpus");
+        let source = image::open(root.join("neutral.jpg")).unwrap();
+        let target = image::open(root.join("target.jpg")).unwrap();
+        let cfg = crate::config::Config::load();
+        let corr = crate::correspond::fit_provider(
+            crate::correspond::CorrespondOpts::from_config(&cfg),
+        );
+        let semantic_path = fixture_mask_path("layered-head-semantic");
+        let mut semantic = fit_recipe_zoned_inner(
+            &source,
+            &target,
+            &SegmentOpts::from_config(&cfg, "sky"),
+            &semantic_path,
+            &crate::recipe::EditRecipe::default(),
+            Some(&corr),
+            layers,
+        );
+        crate::pipeline::stamp_fit_calibration(
+            &mut semantic.recipe,
+            crate::pipeline::fit_calibration(&root.join("neutral.jpg")),
+        );
+        let head_semantic: crate::recipe::EditRecipe =
+            serde_json::from_slice(&std::fs::read(head_semantic).unwrap()).unwrap();
+        assert_head_equivalent(
+            &semantic.recipe,
+            &head_semantic,
+            &root.join("neutral.jpg"),
+            "disabled semantic layers",
+        );
+        semantic_path.remove();
+
+        let range_path = fixture_mask_path("layered-head-range");
+        let range_seg = SegmentOpts {
+            python_bin: cfg.python_bin.clone(),
+            script: "D:/no-such-dir/none.py".into(),
+            target: "sky".into(),
+            reference_point: None,
+            prompt_points: None,
+        };
+        let mut range = fit_recipe_zoned_inner(
+            &source,
+            &target,
+            &range_seg,
+            &range_path,
+            &crate::recipe::EditRecipe::default(),
+            Some(&corr),
+            layers,
+        );
+        crate::pipeline::stamp_fit_calibration(
+            &mut range.recipe,
+            crate::pipeline::fit_calibration(&root.join("neutral.jpg")),
+        );
+        let head_range: crate::recipe::EditRecipe =
+            serde_json::from_slice(&std::fs::read(head_range).unwrap()).unwrap();
+        assert_head_equivalent(
+            &range.recipe,
+            &head_range,
+            &root.join("neutral.jpg"),
+            "disabled range layers",
+        );
+        range_path.remove();
+    }
+
+    /// The pre-batch executable clamped its persisted rationale at 4096
+    /// bytes (this batch raised that bound after the clamp ate the tile
+    /// attachment disclosure): its text must be a clamped prefix of ours,
+    /// never a different story, and every other field must survive the same
+    /// store normalization byte for byte.
+    fn assert_head_equivalent(
+        current: &crate::recipe::EditRecipe,
+        head: &crate::recipe::EditRecipe,
+        raw: &std::path::Path,
+        what: &str,
+    ) {
+        let mut current = current.clone();
+        let mut head = head.clone();
+        let current_rationale = std::mem::take(&mut current.rationale);
+        let head_rationale = std::mem::take(&mut head.rationale);
+        assert!(
+            current_rationale.starts_with(&head_rationale)
+                && (current_rationale.len() == head_rationale.len()
+                    || head_rationale.len() >= 4096 - 4),
+            "{what}: the pre-batch rationale is not a clamped prefix \
+             (head {} bytes, current {} bytes)",
+            head_rationale.len(),
+            current_rationale.len(),
+        );
+        assert_eq!(
+            normalized_persisted_recipe(&current, raw),
+            normalized_persisted_recipe(&head, raw),
+            "{what}: disabled layers differ from the pre-batch executable",
+        );
+    }
+
+    fn normalized_persisted_recipe(
+        recipe: &crate::recipe::EditRecipe,
+        raw: &std::path::Path,
+    ) -> Vec<u8> {
+        let bytes = crate::pipeline::recipe_store_bytes(raw, recipe, crate::diag::stderr()).unwrap();
+        let mut value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        if let Some(masks) = value.get_mut("masks").and_then(serde_json::Value::as_array_mut) {
+            for (index, adjustment) in masks.iter_mut().enumerate() {
+                if let Some(mask) = adjustment.get_mut("mask")
+                    && mask.get("kind").and_then(serde_json::Value::as_str) == Some("bitmap")
+                    && let Some(path) = mask.get_mut("path")
+                {
+                    *path = serde_json::Value::String(format!("<bitmap-{index}>"));
+                }
+            }
+        }
+        serde_json::to_vec(&value).unwrap()
     }
 
     #[test]

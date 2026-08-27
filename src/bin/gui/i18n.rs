@@ -108,8 +108,8 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     ("Language", "语言"),
     ("Reverse-fit", "反推 / Reverse-fit"),
     ("Zoned fit (sky)", "分区反推：天空 / Zoned fit (sky)"),
-    ("On reverse-fit, fit globally first. When sky segmentation succeeds, add semantic sky/land bitmap corrections; when it is disabled or unavailable, automatically try native luminance-range corrections. If neither is accepted, keep the global fit. Bitmap masks stay engine-only; native luminance ranges are written to the Lightroom sidecar. Segmentation needs the python dependencies (transformers + torch), and every fallback or abstention is noted in the rationale.",
-        "反推时先做全局拟合。天空分割成功时添加语义天空/地面位图校正；分割被关闭或不可用时，自动尝试原生亮度范围校正。两者都未被接受时保留全局拟合。位图蒙版仅由本机引擎渲染；原生亮度范围会写入 Lightroom 边车。分割需要 python 依赖（transformers + torch），每次回退或放弃都会写入理由。"),
+    ("On reverse-fit, fit globally first. Sky segmentation and native luminance-range fallback stay exclusive; then frozen-evidence spatial tiles are tried automatically on a 4x4 grid with a four-tile cap and zero frame regression. Conservative guided refinement may keep or abstain before fitting semantic/tile masks, and never changes luminance ranges. Bitmap masks stay engine-only with a named XMP loss; native ranges are written to the Lightroom sidecar. Segmentation needs the python dependencies (transformers + torch), and every fallback or abstention is noted in the rationale.",
+        "反推时先做全局拟合。天空语义分割与原生亮度范围回退二选一；随后自动在 4x4 网格上尝试冻结证据空间图块，最多四个且不允许画面回归。受限的引导细化会在拟合语义/图块蒙版前选择保留或放弃，绝不改变亮度范围。位图蒙版仅由本机引擎渲染并带具名 XMP 损失；原生亮度范围会写入 Lightroom 边车。分割需要 python 依赖（transformers + torch），每次回退或放弃都会写入理由。"),
     ("Analysis — the verifier", "分析 · 校验器"),
     ("Provider", "提供方"),
     ("Model", "模型"),
@@ -1102,8 +1102,8 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
         "AI 生成出片中…（gpt-image；高质量可能需要数分钟——进度见状态栏；✕ 取消可停止；高分辨率输入需先全幅显影）"),
     ("「AI generated」variant created → {path} · keep tweaking or 「Reverse-fit」",
         "已生成「AI 生成」变体 → {path} · 可继续微调或「反推配方」"),
-    ("Reverse-fitting… (global fit + semantic sky/land or native luminance ranges)",
-        "反推配方中…（全局拟合 + 语义天空/地面或原生亮度范围）"),
+    ("Reverse-fitting… (global + semantic/ranges + spatial tiles)",
+        "反推配方中…（全局 + 语义/亮度范围 + 空间图块）"),
     ("Reverse-fitting… (statistical fit, local compute)", "反推配方中…（统计拟合，本地运算）"),
     ("Reverse-fit done: look residual {before}→{after} · created a「Reverse-fit」variant (editable / XMP / full-res)",
         "反推完成：look 残差 {before}→{after} · 已建「反推」变体（可编辑/导 XMP/出全分辨率）"),
@@ -1852,6 +1852,48 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
         " · 自选重试保留了两张中更贴合的一张（弃用 D={d0}）"),
 
     // ── Reverse-fit · cross-image correspondence (step 7b) ──────────────────
+    (" Spatial tile {id} eligible in derivation {generation}: frozen evidence \
+      shares source {s}, target {t}, original D={d}, signed residual {residual} \
+      (95% CI +/-{ci}, parent {parent}).",
+        " 空间图块 {id} 在第 {generation} 次推导中符合条件：冻结证据占比为源图 {s}、目标图 {t}，原始 D={d}，有符号残差 {residual}（95% 置信区间 +/-{ci}，上一层 {parent}）。"),
+    (" Spatial tile {id} attached as an engine bitmap: local residual \
+      {before} -> {after}, composed frame {frame_before} -> {frame_after}, \
+      boundary {boundary}. Classic XMP omits this correction with the named \
+      bitmap-mask loss.",
+        " 空间图块 {id} 已作为引擎位图附加：局部残差 {before} -> {after}，合成画面 {frame_before} -> {frame_after}，边界 {boundary}。经典 XMP 会以具名位图蒙版损失跳过此校正。"),
+    (" Spatial tile {id} abstained in derivation {generation} ({reason}): \
+      frozen evidence shares source \
+      {s}, target {t}, original D={d}, signed residual {residual} (95% CI \
+      +/-{ci}, parent {parent}).",
+        " 空间图块 {id} 在第 {generation} 次推导中放弃（{reason}）：冻结证据占比为源图 {s}、目标图 {t}，原始 D={d}，有符号残差 {residual}（95% 置信区间 +/-{ci}，上一层 {parent}）。"),
+    (" Spatial sweep {generation}: eligible parent nodes {eligible}; \
+      abstentions by source share {s}, target share {t}, structural \
+      divergence {d}, confidence interval {ci}, parent proximity {parent}, \
+      other {other}.",
+        " 空间扫描第 {generation} 代：符合条件的父节点 {eligible}；放弃——源占比 {s}、目标占比 {t}、结构分歧 {d}、置信区间 {ci}、贴近上层 {parent}、其他 {other}。"),
+    (" Spatial traversal stopped at depth {depth} with a {cap}-tile attachment \
+      cap; {attached} tile(s) attached.",
+        " 空间推导在深度 {depth} 停止，附加上限为 {cap} 个图块；实际附加 {attached} 个。"),
+    (" Spatial tile {id} passed the boundary gate: signed rim {before} -> \
+      {after} after direction-preserving shrink k={k} (budget {max}, \
+      {transitions} measured transitions).",
+        " 空间图块 {id} 通过边界门控：保持方向缩减 k={k} 后，有符号边缘由 {before} -> {after}（预算 {max}，测得 {transitions} 个过渡）。"),
+    (" Spatial tile {id} refused by its boundary/composed-frame gate: \
+      candidate rim {before}, final reading {after}, budget {max} \
+      ({transitions} measured transitions, k={k}).",
+        " 空间图块 {id} 被边界/合成画面门控拒绝：候选边缘 {before}，最终读数 {after}，预算 {max}（测得 {transitions} 个过渡，k={k}）。"),
+    (" Guided mask refinement kept for {label}: coverage delta {coverage}, \
+      guide-edge alignment {before} -> {after}, core pixels changed {core}.",
+        " {label} 的引导蒙版细化已保留：覆盖变化 {coverage}，引导边缘对齐 {before} -> {after}，内部像素变化 {core}。"),
+    (" Guided mask refinement abstained for {label}: coverage delta {coverage}, \
+      guide-edge alignment {before} -> {after}, core pixels changed {core}; \
+      the original mask bytes were retained.",
+        " {label} 的引导蒙版细化已放弃：覆盖变化 {coverage}，引导边缘对齐 {before} -> {after}，内部像素变化 {core}；保留原始蒙版字节。"),
+    (" · includes {n} spatial tile correction(s) (adjustable in the mask panel; omitted from classic XMP with a named bitmap loss)",
+        " · 包含 {n} 个空间图块校正（可在蒙版面板调整；经典 XMP 会以具名位图损失跳过）"),
+    (" · guided mask refinement: {kept} kept, {abstained} abstained",
+        " · 引导蒙版细化：保留 {kept} 个，放弃 {abstained} 个"),
+
     (" Cross-image correspondence measured (DIFT): {cov}% of the frame has a confident counterpart in the target (median confidence {med}); full zone fits weight pairs by it and read shifted content at its corresponded position.",
         " 跨图对应已测量（DIFT）：画面 {cov}% 在目标中有可信对应（中位置信 {med}）；完整区拟合按其为像素对加权，并在对应位置读取被移动的内容。"),
     (" Cross-image correspondence unavailable ({e}) — the content-divergent estimators ran without it.",

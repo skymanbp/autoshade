@@ -717,6 +717,22 @@
   D<0.65 走 Full 与语义区同 D 同规则并非不对称，且修正后的秩配对派生在旗舰
   对上不再提出大色彩方案（修正前位置配对曾提出 [1.30,0.87,0.75]、被帧门弃）；
   若未来出现「过帧门却发明色彩」的实例，跟进带级分歧比例帽。
+- **R30 Step 9 — layered spatial fit and gated mask refinement**: shipped order
+  is `global -> (semantic OR luminance ranges) -> quadtree tiles`; the first two
+  local producers remain exclusive. Spatial derivation intersects normalized
+  rectangles with evidence frozen from the original pair, traverses best-first,
+  stops at depth 2 (4x4) and four accepted leaves, and re-derives after every
+  attachment. Both evidence shares must be at least 3%, original `D < 0.65`, the
+  weighted 95% interval must exclude zero, and child/parent residuals must differ
+  by at least `2/255`. Tiles share the robust estimator and `0.012` rim gate but
+  use zero composed-frame regression tolerance. They persist as existing Custom
+  bitmap adjustments at a 2048 long-edge cap: recipe JSON is lossless and
+  classic XMP emits the named bitmap loss, with no gradient approximation.
+  Dependency-free guided refinement (radius 8, epsilon `(4/255)^2`) runs only
+  before semantic/tile fitting, restores every non-collar pixel, caps coverage
+  drift at `0.002`, and abstains when Sobel guide-edge alignment decreases; it
+  never touches luminance ranges. No recipe-era change, no new toggle, and
+  multi-class semantic production remains out of scope.
 - 源照片库只读（`pipeline::guard_readonly`）；输出走 `config::delivery_root()`
   （R24 M8 起为一等设置：settings `out_dir` > `AUTOSHOP_OUT_DIR` > 默认
   `./out`；guard 把配置根与字面 `./out` 都算输出区——见 ARCHITECTURE §4.10。
@@ -802,3 +818,14 @@
 - **逐段拒绝披露**：release notes 与 GUI 必须保留每个亮度区间的 attach /
   abstain / merge、边界 rim、共享收缩 `k` 及 typed refusal；不得把单侧或零
   结构证据静默解释为「相等」。
+- **Automatic layered order**: release notes must state `global -> (semantic OR
+  luminance ranges) -> spatial tiles`, frozen original-pair evidence, depth-2
+  and four-tile caps, re-derivation after attachment, and zero tile frame
+  tolerance. Semantic/range exclusivity remains deliberate.
+- **Engine-only spatial projection**: tile bitmaps remain lossless in recipe
+  JSON and are omitted from classic XMP with the existing named bitmap loss;
+  no four-gradient approximation is implied.
+- **Conservative refinement**: release notes and GUI facts must distinguish
+  kept from abstained semantic/tile refinement, state that the normal rim/frame
+  gates rerun after refinement, and state that luminance ranges are never
+  refined. Multi-class semantic masks remain explicitly out of scope.
