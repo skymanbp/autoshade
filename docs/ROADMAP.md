@@ -195,6 +195,28 @@
 
 ## 当前状态（已完成，勿重做）
 
+- **🔬 步10-B1 已提交 `49a796b`（2026-08-27，主模型亲写——Codex OAuth 额度见顶，按「实在不行就不用 codex」令）**：
+  步10 改题「网格作局部场分析仪」（引擎网格判 DEAD：校准对网格 0.0043 但 4 亮度带投影 0.0030 已复现全部增益，
+  报告 r30-materials/task-fit-bgrid-recon-report.md、设计 design-grid-as-analyzer.md，用户批准 B1→B2→B3）。
+  B1=分区内证据视图：`EvidenceModel::scoped(tp, source_zone, target_zone)` 在**被移动的人口**上重聚合 17 亮度
+  bin/8 色相带（目标 bin 按区内目标成员秩配对、按源:目标质量比；人口线 0.015、结构存活门 0.35、分歧折叠
+  不变；全帧全一成员逐字节=原模型，具名测试钉）。三消费点=`attach_one_zone` 影调/色彩否决改问 scoped 视图、
+  `spatial::read_tile` 瓦片权重/份额按自身几何视图（两侧份额同一人口）、否决覆盖=修正**移动**的栅格
+  （`ZoneAttachment.coverage`：语义蒙版/亮度斜坡即自身，瓦片传栅格——估计器权重已带证据会把被扣留像素藏出
+  人口）；盲动审计 5% 区域线改按 scoped 人口（`EvidenceModel::population`）而非整帧（深度 2 瓦片=整帧
+  6.25%，整帧线下半瓦扣留永不成「区域」=步9 潜在缺口）；色彩被扣留时跳过线改问仅亮度残差（与随后验收同一
+  量）。根因=整帧证据株连分区（校准对范围层找到带 [0.118,0.294] 却被 `luma[0.18-0.41]` 零证据否决——被替换
+  天空占同 bin）。旗舰对语义路径实证：地面影调否决消失（vetoed=false），仅亮度残差 0.0043<0.012 跳过线→
+  「已匹配」，全残差 0.0456 为色度（Blue 单侧扣留），帧保持天空-only 0.01795（首版放行 +0.10 EV 换
+  0.0043→0.0023 反把帧 0.01786→0.01927，主审拦下补跳过线）。合成夹具 384²（三分之二帧扣留、帧 bin6 有
+  人口零权重、地面视图保 bin5/6、天空视图扣 bin6）+ 瓦片覆盖否决夹具（上半被替换、下半 +0.12EV：估计器
+  权重下不可见、栅格覆盖下影调扣留、瓦片不附着）。调试电池首跑揭两处与 B1 无关的 debug-only 红：范围
+  refit 测试违反 `fit_recipe_from_promoted_with_disclosure` 校准-only 基线契约（debug_assert，此前门全
+  `--release` 从未编译）→ 测试改从契约线下进入 `attach_luminance_ranges`；三条空间夹具测试经
+  `source_weights` 注入证据（read_tile 不再读的缝）→ 统一 `pretend_full_support` 从成分注入。
+  活体 A/B（步9 HEAD exe vs B1，各两趟 SHA 全同）：GUI 路径（neutral 显影）旧=天空 −0.08EV+地面 +0.08EV（地面自身残差 0.041→0.045 恶化）+瓦片 r2c0（−0.24EV、增益 1.30/0.86/0.79）帧 0.0175 → B1 仅天空 0.0180（地面仅亮度残差 0.002 判已匹配；r2c0 随后过不了零漂移帧律——scoped 瓦片权重与帧律整帧权重两种货币，B2 正视）；RAW CLI 路径旧 0.0549→0.0427→0.0345 → B1 0.0549→0.0452→0.0369（带 [0.118,0.294] 仍扣留=值域带自身人口就是盲的，B1 前提对值域带证伪，网格赢在位置×亮度只有瓦片/B3 能吃；r2c0 暖增益被区内单侧 Blue/Purple 否决，旧靠整帧份额漏放）；耗时 73→110 s/149→168 s（三块临界瓦片入围后被附着份额门拒：冻结原始份额 vs 稳健合成份额两把尺待统一）。**用户裁定「按规矩来，接受数字略差」**。 env 门 HEAD 等价探针（工件=步9 HEAD neutral）语义半边按设计分歧（理由 3102B vs 2788B：已匹配注替代地面附着）。 门 971(+9i)/15/145/2+2 双特性（集差按名 +6/−0：a_zone_is_judged_by_its_own_members_not_the_frames_bins、a_ground_zone_is_not_vetoed_by_the_sky_it_does_not_touch、calibration_land_zone_is_no_longer_withheld_by_the_replaced_sky、a_zone_whose_movable_class_already_matches_is_left_alone、a_tile_reading_keeps_the_mid_tones_the_frame_withheld、a_tile_is_vetoed_over_the_raster_it_moves_not_its_estimator_weights）、clippy 0+0（SupportField 收 8 参）、i18n 0、字体 843/843、check_docs 23P/--gates 25P 0F（README/ARCHITECTURE 计数 974→980 同步）；release 电池首轮 pipeline/store 各偶发 1 条 fs 类红（pipeline.rs:3908 write_xmp unwrap、store.rs:8356 backup_saved_develop unwrap；单跑与终电池全过，登记负载下抖动待查）；变异 8 条亲跑全红（A scoped 忽略分区/B 否决读整帧/C 瓦片沿用整帧权重/D 存活门关/E 跳过线删/F 目标秩不分区/G 覆盖忽略/H 区域线回整帧；B 首跑串陈旧=假绿，修串后单跑红——变异串须随改行同步）。登记跟进=中性拨盘区无注静默丢弃、窄亮度范围斜坡区配对影调解
+  无支撑结无解、色相 scoped 仅靠全帧同一性钉（无独立变异）、env 门 HEAD 等价工件为步9 HEAD（语义半边按
+  设计分歧）；下步 B2=`src/fit_field.rs` 局部场分析仪（固定 λ=1/s=1）+ 形状门/LOCAL_CEILING 披露+停机。
 - **🧩 步9 已提交 `67084b2`（2026-08-27，Codex 三会话铺至编译绿后接连 OOM/1450/额度 403，按用户裁定主模型接管亲审亲收口）**：
   分层空间反推=全局 →（语义 或 亮度范围，互斥）→ 冻结证据四叉树瓦片（`src/fit_zoned/spatial.rs`）：
   4x4 叶层、附着上限 4、每次附着后重渲重推导；门=双侧冻结份额 ≥3%、原始 D<0.65、加权 95% CI
