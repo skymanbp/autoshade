@@ -223,6 +223,13 @@ range** cards with their four ordered bounds. Their sentinel-hosted range
 components project to Lightroom XMP, while semantic bitmap masks remain
 engine-only. This release derives luminance ranges only, not color ranges.
 
+Evidence verdicts follow the population a correction moves. The global recipe
+and the frame-wide luminance ranges are judged on the whole frame; a semantic
+zone or a spatial tile is judged on its own members, so a land zone is no
+longer withheld because a replaced sky happens to share its luminance bins.
+With its colour controls withheld, a zone whose luminance already matches is
+left alone and says so instead of being dialled for a hairline tone gain.
+
 After either local producer, reverse-fit automatically examines spatial
 residuals with a frozen-evidence quadtree. It visits the strongest supported
 nodes first, stops at a 4x4 grid and four accepted leaves, and keeps a tile only
@@ -629,7 +636,7 @@ versions, and a deleted-version registry; SCUNet success requires the typed
 `sidecar_wrote` contract. A 1771 MB reference probe sets the 1800 MB per-photo
 budget, while the 4 GiB RAW gate bounds admission. The [`build`
 workflow](.github/workflows/build.yml) covers default and GUI feature sets on
-Ubuntu and macOS. The current battery is **974 library (965 pass + 9 `#[ignore]`d forensic probes) / 15 CLI / 145 GUI / 2+2 contract** tests; the
+Ubuntu and macOS. The current battery is **980 library (971 pass + 9 `#[ignore]`d forensic probes) / 15 CLI / 145 GUI / 2+2 contract** tests; the
 [`scripts/check_docs.py`](scripts/check_docs.py) gate re-derives pinned release
 claims. Model weights are not stored in this repository.
 

@@ -92,9 +92,9 @@
 > experimental generative edits, an optional pixel-**heal** retouch mode (§4.7)
 > the deterministic look **reverse-fit** (§4.8) and the local server's refusal
 > model (§4.9).
-> 974 library + 15 CLI + 145 GUI + 2+2 contract tests are enumerated in the GUI
-> build; the library result is 965 pass + 9 `#[ignore]`d forensic probes
-> (counts refreshed 2026-08-26 after the paired robust-regression batch: library 917→921, set diff +4/−0 by name — `unsupported_knots_cannot_pull_the_solve`, `robust_regression_downweights_invented_target_content`, `robust_rejection_reaches_the_disclosure`, `p36_fixture_recovers_the_lightroom_exposure_anchor`). THREE suites are ADDITIONAL and
+> 980 library + 15 CLI + 145 GUI + 2+2 contract tests are enumerated in the GUI
+> build; the library result is 971 pass + 9 `#[ignore]`d forensic probes
+> (counts refreshed 2026-08-27 after the zone-scoped evidence batch: library 974→980, set diff +6/−0 by name — `a_zone_is_judged_by_its_own_members_not_the_frames_bins`, `a_ground_zone_is_not_vetoed_by_the_sky_it_does_not_touch`, `calibration_land_zone_is_no_longer_withheld_by_the_replaced_sky`, `a_zone_whose_movable_class_already_matches_is_left_alone`, `a_tile_reading_keeps_the_mid_tones_the_frame_withheld`, `a_tile_is_vetoed_over_the_raster_it_moves_not_its_estimator_weights`). THREE suites are ADDITIONAL and
 > env-gated, so a bare `cargo test` does not include them:
 > `AUTOSHOP_LR_PROBE_FIXTURES` (16 real Lightroom radial sidecars, byte
 > round-trip), `AUTOSHOP_MB_FIXTURES` (the 7-file M-B forensic set — 42 of its
@@ -1754,6 +1754,41 @@ name, and the full-frame sentinel `Linear { zero_x: 0.5, zero_y: -0.8,
 full_x: 0.5, full_y: -0.4 }` intersected with `RangeMask::Luminance`; the XMP
 reader and writer therefore need no new grammar. Color-range partitioning is
 outside this step.
+
+**Evidence verdicts follow the population a correction moves (B1,
+2026-08-27).** `EvidenceModel::scoped(tp, source_zone, target_zone)`
+([`src/fit.rs`](../src/fit.rs)) re-aggregates the same 17 luma bins and 8 hue
+bands over one zone's soft memberships: target luma bins are rank-paired
+within the zone's own target members at the source:target mass ratio, and the
+structural-survival gate (`1 - DIVERGENCE_ZONE = 0.35`) and the per-pixel
+spatial confidence are unchanged, so over the whole frame the scoped view is
+the model itself byte for byte (pinned by test). Semantic zones and quadtree
+tiles ask their tone/colour vetoes of the view scoped over the coverage their
+raster moves (`ZoneAttachment.coverage`; a tile's estimator weights are
+evidence-weighted and would hide the withheld pixels its raster still moves),
+tiles derive their per-pixel weights from their own view, and the blind-move
+audit's 5% region line is a share of that population (`EvidenceModel::
+population`) rather than of the frame -- a depth-2 tile is 6% of the frame, so
+under the frame line its blind half could never be a "region". The global fit
+and the frame-wide luminance ranges keep the frame view because the frame is
+what they move. On the calibration
+pair this ends the collateral veto in which the replaced sky, sharing the
+land's luma bins, withheld the land's tone controls; with colour withheld the
+skip line is now asked of tone alone, so the land (luma residual 0.004, under
+the 0.012 skip line) is declared already matched instead of being dialled
++0.10 EV for a hairline gain that regressed the frame 0.0179 -> 0.0193. Its
+remaining gap is chroma withheld by the hue doctrine (Blue one-sided). Live
+A/B against the step-9 executable (user-ratified 2026-08-27): on the GUI path
+(neutral development) the old code attached a land +0.08 EV that worsened the
+land's own residual 0.041 -> 0.045 and a tile r2c0 (-0.24 EV, gains 1.30/0.86/
+0.79) that undid most of that; B1 keeps the sky only, frame 0.0175 -> 0.0180.
+On the RAW CLI path the range band [0.118, 0.294] stays tone-withheld -- a
+value range spans replaced sky and land alike, so its own population is blind
+(the grid's win was spatial x value, B2/B3 territory) -- and r2c0's warm gains
+are withheld because Blue/Purple are one-sided inside the tile (the old frame
+share let them through): 0.0549 -> 0.0452 -> 0.0369 against 0.0345. A zone
+whose dials come out neutral is still dropped without a note (registered
+follow-up).
 
 The final automatic layer is a frozen-evidence spatial quadtree
 ([`src/fit_zoned/spatial.rs`](../src/fit_zoned/spatial.rs)). It runs after

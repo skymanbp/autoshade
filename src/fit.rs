@@ -151,6 +151,61 @@ pub struct EvidenceModel {
     pub luma: Vec<EvidenceRange>,
     pub hue: Vec<EvidenceRange>,
     pub identifiability: f32,
+    /// Per-pixel ingredients of the range verdicts above — the pixel's
+    /// spatial-cell confidence, that cell's divergence and the frame-wide
+    /// same-content verdict — kept so [`EvidenceModel::scoped`] can
+    /// re-aggregate the same support over a zone's own population.
+    pub spatial_weights: Vec<f32>,
+    pub spatial_divergence: Vec<f32>,
+    pub globally_same_content: bool,
+    /// Weighted member count of the population these verdicts are over: the
+    /// frame's pixel count for the global model, a coverage's mass for a
+    /// scoped view. The blind-move audit's region line is a share of THIS,
+    /// so a half-withheld 6% tile is a region of its own population, not a
+    /// 3% speckle of the frame.
+    pub population: f32,
+}
+
+impl EvidenceModel {
+    /// This model's range verdicts re-aggregated over ONE zone: `source_zone`
+    /// / `target_zone` are the zone's soft memberships on the analysis
+    /// rasters, `tp` the target's analysis pixels. Evidence verdicts follow
+    /// the population a correction MOVES — the frame for the global fit, the
+    /// zone for a zone — so a ground zone is no longer withheld because a
+    /// replaced sky happens to share its luma bins, while a zone whose own
+    /// members are divergent stays withheld. Per-pixel support
+    /// (`spatial_supported`) is unchanged; over the whole frame this is the
+    /// model itself.
+    pub fn scoped(&self, tp: &[[f32; 3]], source_zone: &[f32], target_zone: &[f32]) -> EvidenceModel {
+        let ranges = aggregate_ranges(
+            &self.source_pixels,
+            tp,
+            source_zone,
+            target_zone,
+            SupportField {
+                spatial_weights: &self.spatial_weights,
+                spatial_divergence: &self.spatial_divergence,
+                globally_same_content: self.globally_same_content,
+            },
+        );
+        EvidenceModel {
+            source_pixels: self.source_pixels.clone(),
+            width: self.width,
+            height: self.height,
+            spatial_supported: self.spatial_supported.clone(),
+            source_weights: ranges.source_weights,
+            target_weights: ranges.target_weights,
+            source_hue_weights: ranges.source_hue_weights,
+            target_hue_weights: ranges.target_hue_weights,
+            luma: ranges.luma,
+            hue: ranges.hue,
+            identifiability: ranges.identifiability,
+            spatial_weights: self.spatial_weights.clone(),
+            spatial_divergence: self.spatial_divergence.clone(),
+            globally_same_content: self.globally_same_content,
+            population: ranges.population,
+        }
+    }
 }
 
 const EVIDENCE_LUMA_BINS: usize = 17;
@@ -232,25 +287,29 @@ pub fn evidence_hue_band(p: &[f32; 3]) -> Option<usize> {
 
 fn evidence_range(
     label: String,
-    source_members: &[bool],
-    target_members: &[bool],
-    spatial_weights: &[f32],
-    spatial_divergence: &[f32],
-    globally_same_content: bool,
+    source_members: &[f32],
+    target_members: &[f32],
+    source_population: f32,
+    target_population: f32,
+    support: SupportField<'_>,
 ) -> EvidenceRange {
-    let n = source_members.len().min(target_members.len()).max(1) as f32;
-    let source_share = source_members.iter().filter(|&&v| v).count() as f32 / n;
-    let target_share = target_members.iter().filter(|&&v| v).count() as f32 / n;
-    let supported_share = |members: &[bool]| {
+    let SupportField { spatial_weights, spatial_divergence, globally_same_content } = support;
+    // Memberships are soft weights (1.0 everywhere for the frame); the
+    // populations are the weighted member counts the shares are taken over.
+    let source_n = source_population.max(1.0);
+    let target_n = target_population.max(1.0);
+    let source_share = source_members.iter().sum::<f32>() / source_n;
+    let target_share = target_members.iter().sum::<f32>() / target_n;
+    let supported_share = |members: &[f32], population: f32| {
         members
             .iter()
             .zip(spatial_weights)
-            .filter_map(|(&member, &weight)| member.then_some(weight))
+            .map(|(&member, &weight)| member * weight)
             .sum::<f32>()
-            / n
+            / population
     };
-    let source_evidence_share = supported_share(source_members);
-    let target_evidence_share = supported_share(target_members);
+    let source_evidence_share = supported_share(source_members, source_n);
+    let target_evidence_share = supported_share(target_members, target_n);
     // Population and structural support are two different facts.  The 1.5%
     // line answers only whether the range exists on each side; applying it a
     // second time after the divergence discount made a weakly-correlated
@@ -264,9 +323,11 @@ fn evidence_range(
         .iter()
         .zip(spatial_weights)
         .zip(spatial_divergence)
-        .filter(|((member, weight), divergence)| **member && **weight > 0.0 && divergence.is_finite())
-        .fold((0.0f32, 0.0f32), |(sum, weight), ((_, &w), &d)| {
-            (sum + w * d, weight + w)
+        .filter(|((member, weight), divergence)| {
+            **member > 0.0 && **weight > 0.0 && divergence.is_finite()
+        })
+        .fold((0.0f32, 0.0f32), |(sum, weight), ((&m, &w), &d)| {
+            (sum + m * w * d, weight + m * w)
         });
     let divergence = if div_weight > 0.0 { div_sum / div_weight } else { f32::INFINITY };
     let structural_survival = (source_evidence_share / source_share.max(1e-6))
@@ -290,6 +351,153 @@ fn evidence_range(
         weight,
         source_populated,
         target_populated,
+    }
+}
+
+/// The value-range verdicts and per-pixel evidence weights of ONE population.
+/// The global fit moves the whole frame and is judged by the frame's bins; a
+/// zone moves only its members, so [`EvidenceModel::scoped`] re-aggregates the
+/// same per-pixel structural support over them. Memberships are soft (a
+/// refined mask's feather), the frame is the all-ones case, and target luma
+/// bins are rank-paired within the population's own target members at its own
+/// source-to-target mass ratio.
+struct RangeAggregate {
+    source_weights: Vec<f32>,
+    target_weights: Vec<f32>,
+    source_hue_weights: Vec<f32>,
+    target_hue_weights: Vec<f32>,
+    luma: Vec<EvidenceRange>,
+    hue: Vec<EvidenceRange>,
+    identifiability: f32,
+    population: f32,
+}
+
+/// The per-pixel structural support one population's verdicts are read
+/// against: the frame's spatial-cell confidence, that cell's divergence and
+/// the frame-wide same-content verdict.
+#[derive(Clone, Copy)]
+struct SupportField<'a> {
+    spatial_weights: &'a [f32],
+    spatial_divergence: &'a [f32],
+    globally_same_content: bool,
+}
+
+fn aggregate_ranges(
+    sp: &[[f32; 3]],
+    tp: &[[f32; 3]],
+    source_zone: &[f32],
+    target_zone: &[f32],
+    support: SupportField<'_>,
+) -> RangeAggregate {
+    let spatial_weights = support.spatial_weights;
+    let n = sp.len().min(tp.len());
+    let member = |zone: &[f32], i: usize| zone.get(i).copied().unwrap_or(0.0).max(0.0);
+    let source_mass = (0..n).map(|i| member(source_zone, i)).sum::<f32>();
+    let target_mass = (0..n).map(|i| member(target_zone, i)).sum::<f32>();
+    let mut luma = Vec::with_capacity(EVIDENCE_LUMA_BINS);
+    let mut luma_source_weights = vec![0.0f32; n];
+    let mut luma_target_weights = vec![0.0f32; n];
+    let mut target_order: Vec<usize> = (0..n).filter(|&i| member(target_zone, i) > 0.0).collect();
+    target_order.sort_by(|&a, &b| luma601(&tp[a]).total_cmp(&luma601(&tp[b])));
+    let ratio = if source_mass > 0.0 { target_mass / source_mass } else { 0.0 };
+    let mut cursor = 0usize;
+    let mut taken = 0.0f32;
+    for bin in 0..EVIDENCE_LUMA_BINS {
+        let sm: Vec<f32> = sp
+            .iter()
+            .enumerate()
+            .map(|(i, p)| {
+                if evidence_luma_bin(luma601(p)) == bin { member(source_zone, i) } else { 0.0 }
+            })
+            .collect();
+        let lo = bin as f32 / EVIDENCE_LUMA_BINS as f32;
+        let hi = (bin + 1) as f32 / EVIDENCE_LUMA_BINS as f32;
+        // Luma correspondence is monotone: a real exposure/tone edit moves a
+        // source bin to a different numeric target interval. Pair the bin to
+        // the same target population ranks, then let spatial evidence decide
+        // whether that population actually survives on both sides.
+        let mut tm = vec![0.0f32; tp.len()];
+        let need = taken + sm.iter().take(n).sum::<f32>() * ratio;
+        while cursor < target_order.len() && taken < need {
+            let i = target_order[cursor];
+            tm[i] = member(target_zone, i);
+            taken += tm[i];
+            cursor += 1;
+        }
+        let range = evidence_range(
+            format!("luma[{lo:.2}-{hi:.2}]"),
+            &sm,
+            &tm,
+            source_mass,
+            target_mass,
+            support,
+        );
+        for (i, &m) in sm.iter().enumerate().take(n) {
+            if m > 0.0 && range.source_evidence_share > 0.0 {
+                luma_source_weights[i] =
+                    m * spatial_weights[i] * range.weight / range.source_evidence_share;
+            }
+        }
+        for (i, &m) in tm.iter().enumerate().take(n) {
+            if m > 0.0 && range.target_evidence_share > 0.0 {
+                luma_target_weights[i] =
+                    m * spatial_weights[i] * range.weight / range.target_evidence_share;
+            }
+        }
+        luma.push(range);
+    }
+    let mut hue = Vec::with_capacity(EVIDENCE_HUE_BANDS);
+    let mut source_hue_weights = vec![0.0f32; n];
+    let mut target_hue_weights = vec![0.0f32; n];
+    for band in 0..EVIDENCE_HUE_BANDS {
+        let sm: Vec<f32> = sp
+            .iter()
+            .enumerate()
+            .map(|(i, p)| {
+                if evidence_hue_band(p) == Some(band) { member(source_zone, i) } else { 0.0 }
+            })
+            .collect();
+        let tm: Vec<f32> = tp
+            .iter()
+            .enumerate()
+            .map(|(i, p)| {
+                if evidence_hue_band(p) == Some(band) { member(target_zone, i) } else { 0.0 }
+            })
+            .collect();
+        let range = evidence_range(
+            crate::recipe::HSL_BANDS[band].to_string(),
+            &sm,
+            &tm,
+            source_mass,
+            target_mass,
+            support,
+        );
+        for (i, &m) in sm.iter().enumerate().take(n) {
+            if m > 0.0 && range.source_evidence_share > 0.0 {
+                source_hue_weights[i] =
+                    m * spatial_weights[i] * range.weight / range.source_evidence_share;
+            }
+        }
+        for (i, &m) in tm.iter().enumerate().take(n) {
+            if m > 0.0 && range.target_evidence_share > 0.0 {
+                target_hue_weights[i] =
+                    m * spatial_weights[i] * range.weight / range.target_evidence_share;
+            }
+        }
+        hue.push(range);
+    }
+    let luma_mass = luma.iter().map(|r| r.weight).sum::<f32>().min(1.0);
+    let hue_mass = hue.iter().map(|r| r.weight).sum::<f32>().min(1.0);
+    let identifiability = (0.75 * luma_mass + 0.25 * hue_mass).clamp(0.0, 1.0);
+    RangeAggregate {
+        source_weights: luma_source_weights,
+        target_weights: luma_target_weights,
+        source_hue_weights,
+        target_hue_weights,
+        luma,
+        hue,
+        identifiability,
+        population: source_mass,
     }
 }
 
@@ -380,92 +588,34 @@ pub fn evidence_model_for(
         .iter()
         .map(|&divergence| globally_same_content || divergence < DIVERGENCE_ZONE)
         .collect::<Vec<_>>();
-    let mut luma = Vec::with_capacity(EVIDENCE_LUMA_BINS);
-    let mut luma_source_weights = vec![0.0f32; n];
-    let mut luma_target_weights = vec![0.0f32; n];
-    let mut target_order: Vec<usize> = (0..n).collect();
-    target_order.sort_by(|&a, &b| luma601(&tp[a]).total_cmp(&luma601(&tp[b])));
-    let mut target_rank = 0usize;
-    for bin in 0..EVIDENCE_LUMA_BINS {
-        let sm: Vec<bool> = sp.iter().map(|p| evidence_luma_bin(luma601(p)) == bin).collect();
-        let lo = bin as f32 / EVIDENCE_LUMA_BINS as f32;
-        let hi = (bin + 1) as f32 / EVIDENCE_LUMA_BINS as f32;
-        // Luma correspondence is monotone: a real exposure/tone edit moves a
-        // source bin to a different numeric target interval. Pair the bin to
-        // the same target population ranks, then let spatial evidence decide
-        // whether that population actually survives on both sides.
-        let mut tm = vec![false; tp.len()];
-        let source_count = sm.iter().take(n).filter(|&&member| member).count();
-        let last = (target_rank + source_count).min(n);
-        for &i in &target_order[target_rank.min(n)..last] {
-            tm[i] = true;
-        }
-        target_rank = last;
-        let range = evidence_range(
-            format!("luma[{lo:.2}-{hi:.2}]"),
-            &sm,
-            &tm,
-            &spatial_weights,
-            &spatial_divergence,
+    let frame = vec![1.0f32; sp.len().max(tp.len())];
+    let ranges = aggregate_ranges(
+        sp,
+        tp,
+        &frame,
+        &frame,
+        SupportField {
+            spatial_weights: &spatial_weights,
+            spatial_divergence: &spatial_divergence,
             globally_same_content,
-        );
-        for (i, &m) in sm.iter().enumerate().take(n) {
-            if m && range.source_evidence_share > 0.0 {
-                luma_source_weights[i] = spatial_weights[i] * range.weight / range.source_evidence_share;
-            }
-        }
-        for (i, &m) in tm.iter().enumerate().take(n) {
-            if m && range.target_evidence_share > 0.0 {
-                luma_target_weights[i] = spatial_weights[i] * range.weight / range.target_evidence_share;
-            }
-        }
-        luma.push(range);
-    }
-    let mut hue = Vec::with_capacity(EVIDENCE_HUE_BANDS);
-    let source_weights = luma_source_weights;
-    let target_weights = luma_target_weights;
-    let mut source_hue_weights = vec![0.0f32; n];
-    let mut target_hue_weights = vec![0.0f32; n];
-    for band in 0..EVIDENCE_HUE_BANDS {
-        let sm: Vec<bool> = sp.iter().map(|p| evidence_hue_band(p) == Some(band)).collect();
-        let tm: Vec<bool> = tp.iter().map(|p| evidence_hue_band(p) == Some(band)).collect();
-        let range = evidence_range(
-            crate::recipe::HSL_BANDS[band].to_string(),
-            &sm,
-            &tm,
-            &spatial_weights,
-            &spatial_divergence,
-            globally_same_content,
-        );
-        for (i, &member) in sm.iter().enumerate().take(n) {
-            if member && range.source_evidence_share > 0.0 {
-                source_hue_weights[i] =
-                    spatial_weights[i] * range.weight / range.source_evidence_share;
-            }
-        }
-        for (i, &member) in tm.iter().enumerate().take(n) {
-            if member && range.target_evidence_share > 0.0 {
-                target_hue_weights[i] =
-                    spatial_weights[i] * range.weight / range.target_evidence_share;
-            }
-        }
-        hue.push(range);
-    }
-    let luma_mass = luma.iter().map(|r| r.weight).sum::<f32>().min(1.0);
-    let hue_mass = hue.iter().map(|r| r.weight).sum::<f32>().min(1.0);
-    let identifiability = (0.75 * luma_mass + 0.25 * hue_mass).clamp(0.0, 1.0);
+        },
+    );
     EvidenceModel {
         source_pixels: sp.iter().take(n).copied().collect(),
         width: w,
         height: h,
         spatial_supported,
-        source_weights,
-        target_weights,
-        source_hue_weights,
-        target_hue_weights,
-        luma,
-        hue,
-        identifiability,
+        source_weights: ranges.source_weights,
+        target_weights: ranges.target_weights,
+        source_hue_weights: ranges.source_hue_weights,
+        target_hue_weights: ranges.target_hue_weights,
+        luma: ranges.luma,
+        hue: ranges.hue,
+        identifiability: ranges.identifiability,
+        spatial_weights,
+        spatial_divergence,
+        globally_same_content,
+        population: ranges.population,
     }
 }
 
@@ -983,8 +1133,10 @@ const VETO_CREATED_SHARE: f32 = 0.05;
 /// Circular hue distance (degrees) beyond which a still-tinted pixel counts
 /// as re-hued rather than corrected.
 const ROT_DEG: f32 = 75.0;
-/// Frame share of re-hued pixels that constitutes a REGION (same region-vs-
-/// speckle logic as [`VETO_CREATED_SHARE`]; the live wrecks measure 12.5%).
+/// Share of re-hued (or blindly moved) pixels that constitutes a REGION of
+/// the population a correction moves -- the frame for the global fit, a
+/// zone's coverage for a zone (same region-vs-speckle logic as
+/// [`VETO_CREATED_SHARE`]; the live wrecks measure 12.5%).
 const ROT_SHARE: f32 = 0.05;
 /// A rotation only counts as a re-hue when it is VISIBLE on at least one
 /// end: before-chroma ≥ this (a tinted pixel moved) or after-chroma ≥
@@ -3980,7 +4132,11 @@ fn moved_unsupported_range_hits(
             }
         }
     }
-    let total = cur.len().max(1) as f32;
+    // The region line is a share of the population the correction moves --
+    // the frame for the global fit, a zone's coverage for a zone (a frame
+    // share let every tile move its blind pixels: a depth-2 tile is 6% of
+    // the frame, so its blind half never reached the 5% line).
+    let total = evidence.population.max(1.0);
     if moved_luma as f32 / total < ROT_SHARE { moved_luma = 0; luma = [false; EVIDENCE_LUMA_BINS]; }
     if moved_hue as f32 / total < ROT_SHARE { moved_hue = 0; hue = [false; EVIDENCE_HUE_BANDS]; }
     MovedRangeHits { luma: (moved_luma, luma), hue: (moved_hue, hue), vouched_hue }

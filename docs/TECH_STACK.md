@@ -289,6 +289,68 @@ exclusive, and this batch emits no color partitions.
 - `src/render.rs` — sequential range evaluation on current rendered pixels.
 - `src/xmp.rs` — intersected native luminance-range projection.
 
+## Zone-scoped evidence view
+
+### Method
+
+Range verdicts follow the population a correction moves.
+`EvidenceModel::scoped(tp, source_zone, target_zone)` re-aggregates the 17
+luma bins and 8 hue bands over one zone's soft memberships from the model's
+per-pixel ingredients (spatial-cell confidence, cell divergence, the frame
+same-content verdict): target luma bins are rank-paired within the zone's own
+target members at the source:target mass ratio, shares are taken over the
+zone's weighted member counts, and the population line, the
+structural-survival gate and the divergence fold are unchanged. Over all-ones
+memberships the scoped view is the frame model byte for byte.
+
+`attach_one_zone` asks the tone and colour vetoes of the view scoped over the
+coverage the correction moves: a semantic mask or a luminance ramp is its own
+coverage (`ZoneAttachment.coverage = None`); a tile passes its raster, because
+its estimator weights are evidence-weighted and would hide the withheld pixels
+the raster still moves. `spatial::read_tile` derives a tile's per-pixel weights
+and shares from the view scoped over its geometry, so both shares are one
+population and agree. The blind-move audit's region line is a share of the
+scoped population (`EvidenceModel::population`), not of the frame. The global
+fit and the frame-wide luminance ranges keep the frame view. With colour
+withheld, the skip line is asked of the luma-only residual, the same quantity
+the zone is then accepted on.
+
+### Parameters and measurements
+
+- `EVIDENCE_RANGE_SURVIVAL_MIN = 1 - DIVERGENCE_ZONE = 0.35` and
+  `EVIDENCE_MIN_SHARE = 0.015` are unchanged and now apply per population.
+- `ROT_SHARE = 0.05` is unchanged; a depth-2 tile is 6.25% of the frame, so
+  under a frame share even a fully withheld tile barely reached the line and a
+  half-withheld one never did.
+- Calibration pair, semantic path: the land zone's tone controls were withheld
+  through the replaced sky's luma bins (`luma[0.18-0.41]`); scoped, no veto
+  fires. Its luma-only residual `0.0043` sits under `ZONE_SKIP_ERR = 0.012`
+  while its full residual is `0.0456` (chroma withheld by the one-sided Blue
+  band), so it is declared already matched instead of taking `+0.10 EV` for a
+  hairline gain that regressed the frame `0.0179 -> 0.0193`.
+- Live A/B, step-9 executable vs B1 (user-ratified 2026-08-27). GUI path
+  (neutral development): old `sky -0.08 EV, land +0.08 EV (own residual
+  0.041 -> 0.045), tile r2c0 -0.24 EV gains [1.30, 0.86, 0.79]` at `0.0175`;
+  B1 `sky -0.08 EV` only at `0.0180` (land matched in tone at `0.002`; r2c0
+  then fails the zero-drift frame law). RAW CLI path (range fallback): the
+  band `[0.118, 0.294]` stays tone-withheld on its own population; r2c0
+  attaches at `-0.99 EV` with colour withheld (Blue/Purple one-sided inside the
+  tile), r3c0 at `-0.87 EV`: `0.0549 -> 0.0452 -> 0.0369` against the old
+  `0.0549 -> 0.0427 -> 0.0345`. Wall time `73 s -> 110 s` (GUI path) and
+  `149 s -> 168 s` (RAW): three more borderline tiles become eligible (shares
+  are now the tile's own population) and are refused by the attachment share
+  gate after refinement and robust reweighting.
+- Synthetic poisoned-bin fixture (384x384): two thirds of the frame withheld,
+  frame bin 6 populated at zero weight, the ground view keeps bins 5 and 6, the
+  sky view withholds bin 6.
+
+### Source
+
+- `src/fit.rs` — `EvidenceModel::scoped`, `aggregate_ranges`, `population`.
+- `src/fit_zoned.rs` — `ZoneAttachment.coverage`, scoped vetoes, luma-only
+  skip line.
+- `src/fit_zoned/spatial.rs` — tile readings and coverage.
+
 ## Layered spatial reverse-fit and mask refinement
 
 ### Method
@@ -323,10 +385,12 @@ reading.
 - Guided refinement uses radius `8`, epsilon `(4/255)^2`, a `2 * radius`
   restored collar boundary, and maximum coverage drift `0.002`.
 - The shipped automatic path on the calibration pair (range fallback)
-  attaches `r2c0` then `r3c0`: frozen shares `3.6%/3.8%` and `3.6%/3.5%`,
-  original `D = 0.303` and `0.438`, signed residuals `-0.092` and `-0.060`
-  (95% CI `0.0006`), composed frame `0.0549 -> 0.0427 -> 0.0345`; every
-  changed-sky node abstains on source share. The semantic-mask refinement
+  attaches `r2c0` then `r3c0`: frozen shares `3.9%/3.9%` and `3.6%/3.6%`,
+  original `D = 0.303` and `0.438`, signed residuals `-0.094` and `-0.060`
+  (95% CI `0.0010`/`0.0006`), composed frame `0.0549 -> 0.0452 -> 0.0369`
+  since the zone-scoped evidence view (r2c0's colour is withheld; the
+  pre-view figures were `0.0549 -> 0.0427 -> 0.0345`); every changed-sky node
+  abstains on source share. The semantic-mask refinement
   probe measured guide-edge alignment `0.046444 -> 0.023914`, so it correctly
   abstained and retained the original bytes.
 - Ineligible traversal verdicts aggregate into one typed sweep note per

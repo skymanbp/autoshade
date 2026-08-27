@@ -1277,6 +1277,12 @@ struct ZoneDivergences {
 struct ZoneAttachment {
     source_weights: Vec<f32>,
     target_weights: Vec<f32>,
+    /// The population the correction MOVES when it differs from the estimator
+    /// weights. `None`: the weights are the coverage (a semantic mask, a
+    /// luminance ramp). A tile passes its raster: its estimator weights are
+    /// evidence-weighted, so asking the evidence vetoes over them would hide
+    /// exactly the withheld pixels the raster still moves.
+    coverage: Option<ZoneCoverage>,
     mask: MaskGeometry,
     range: Option<RangeMask>,
     name: String,
@@ -1285,6 +1291,12 @@ struct ZoneAttachment {
     label: String,
     min_share: f32,
     frame_regression_tol: f32,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct ZoneCoverage {
+    source: Vec<f32>,
+    target: Vec<f32>,
 }
 
 #[cfg(test)]
@@ -1506,6 +1518,7 @@ fn attach_zones_with_divergence(
     let sky_attachment = ZoneAttachment {
         source_weights: sw.clone(),
         target_weights: tw.clone(),
+        coverage: None,
         mask: MaskGeometry::Bitmap { path: mask_path.path().to_string_lossy().into_owned() },
         range: None,
         name: String::new(),
@@ -1518,6 +1531,7 @@ fn attach_zones_with_divergence(
     let land_attachment = ZoneAttachment {
         source_weights: swl,
         target_weights: twl,
+        coverage: None,
         mask: MaskGeometry::Bitmap { path: mask_path.path().to_string_lossy().into_owned() },
         range: None,
         name: String::new(),
@@ -2135,6 +2149,17 @@ fn attach_one_zone(
         }
         m.saturation = next;
     }
+    // Evidence verdicts follow the population a correction MOVES: the global
+    // fit moves the frame and is judged by the frame's bins; this zone moves
+    // its coverage, so its bins are re-aggregated over that. A ground zone
+    // no longer inherits the withheld verdict of a replaced sky that shares
+    // its luma bins (the calibration pair's land fit was vetoed exactly that
+    // way), while a zone whose own members are divergent stays withheld.
+    let (moved_source, moved_target) = match &attachment.coverage {
+        Some(coverage) => (coverage.source.as_slice(), coverage.target.as_slice()),
+        None => (sw, tw),
+    };
+    let zone_evidence = report.evidence.scoped(tgt_px, moved_source, moved_target);
     // Probe the two control classes independently. A one-sided hue band must
     // withhold only chroma movement; supported luminance evidence still earns
     // the zone correction.
@@ -2147,7 +2172,7 @@ fn attach_one_zone(
     let luma_ranges = fit::moved_unsupported_luma_range_names(
         &cur_px,
         &fit::pixels_of(&render::develop_preview(s_img, &luma_probe)),
-        &report.evidence,
+        &zone_evidence,
     );
     let mut chroma_probe = report.recipe.clone();
     {
@@ -2162,7 +2187,7 @@ fn attach_one_zone(
     let hue_bands = fit::moved_unsupported_hue_range_names(
         &cur_px,
         &fit::pixels_of(&render::develop_preview(s_img, &chroma_probe)),
-        &report.evidence,
+        &zone_evidence,
     );
     if luma_ranges.is_some() {
         let m = report.recipe.masks.last_mut().expect("zone mask just pushed");
@@ -2208,6 +2233,26 @@ fn attach_one_zone(
                 ],
             ),
         );
+    }
+    // The skip line, re-asked of the class that can still move: with colour
+    // withheld the acceptance below judges the luma-only residual, so a zone
+    // already matched THERE is left alone with the honest note instead of
+    // being dialled for a hairline tone gain against a chroma gap it may not
+    // touch (the calibration land: luma 0.004, chroma-dominated 0.045).
+    if hue_bands.is_some() && luma_ranges.is_none() {
+        let luma_before = zone_luma_err(&ms, &mt);
+        if zone_skips(luma_before, ev_gap) {
+            report.recipe.masks.pop();
+            crate::rationale::push_note(
+                &mut report.recipe.rationale,
+                &mut report.notes,
+                crate::rationale::Note::new(
+                    crate::rationale::keys::ZONE_ALREADY_MATCHED,
+                    vec![("label", label.to_string()), ("before", format!("{luma_before:.3}"))],
+                ),
+            );
+            return None;
+        }
     }
     if hue_bands.is_some() && luma_ranges.is_none() {
         let original = {
@@ -2768,6 +2813,7 @@ mod tests {
         ZoneAttachment {
             source_weights: sw,
             target_weights: tw,
+            coverage: None,
             mask: MaskGeometry::Bitmap { path: path.path().to_string_lossy().into_owned() },
             range: None,
             name: String::new(),
@@ -3960,6 +4006,299 @@ mod tests {
             run(Some(zero)),
             "a zero-confidence field must abstain wholesale, never starve a zone"
         );
+    }
+
+    /// One luma bin, two populations, built at the analysis size so no
+    /// thumbnail resampling blends its edges. The top two thirds are REPLACED
+    /// content whose source ramp lives entirely in luma bin 6 (0.353-0.412);
+    /// the ground is a near-flat 0.34-0.40 ramp -- identical on both sides,
+    /// then +0.08 brighter on the target -- whose upper part shares that bin.
+    /// Frame-wide the bin keeps well under 35% structural survival and is
+    /// withheld; the ground alone keeps all of it.
+    fn poisoned_bin_fixture() -> (DynamicImage, DynamicImage, GrayImage) {
+        let (w, h) = (fit::ANALYZE_EDGE, fit::ANALYZE_EDGE);
+        let sky_rows = h * 2 / 3;
+        let build = |target: bool| {
+            DynamicImage::ImageRgb8(RgbImage::from_fn(w, h, |x, y| {
+                let v: f32 = if y < sky_rows {
+                    if target {
+                        if (y / 8) % 2 == 0 { 0.05 } else { 0.15 }
+                    } else {
+                        0.36 + 0.04 * x as f32 / (w - 1) as f32
+                    }
+                } else {
+                    let ground = 0.34 + 0.06 * x as f32 / (w - 1) as f32;
+                    if target { ground + 0.08 } else { ground }
+                };
+                image::Rgb([(v.clamp(0.0, 1.0) * 255.0).round() as u8; 3])
+            }))
+        };
+        let sky_mask = GrayImage::from_fn(w, h, |_, y| {
+            image::Luma([if y < sky_rows { 255u8 } else { 0 }])
+        });
+        (build(false), build(true), sky_mask)
+    }
+
+    #[test]
+    fn a_zone_is_judged_by_its_own_members_not_the_frames_bins() {
+        let (src, tgt, sky_mask) = poisoned_bin_fixture();
+        let sp = fit::pixels_of(&src);
+        let tp = fit::pixels_of(&tgt);
+        let evidence = fit::evidence_model(&sp, &tp);
+        let sky = mask_weights(&sky_mask, src.width(), src.height());
+        let ground: Vec<f32> = sky.iter().map(|w| 1.0 - w).collect();
+        let unsupported = evidence.spatial_supported.iter().filter(|&&s| !s).count();
+        assert_eq!(
+            unsupported,
+            (src.width() * src.height() * 2 / 3) as usize,
+            "premise: exactly the replaced sky is structurally unsupported"
+        );
+        let frame_bin = &evidence.luma[6];
+        assert!(
+            frame_bin.source_populated && frame_bin.weight <= 0.0,
+            "premise: frame-wide bin 6 is populated yet withheld: {frame_bin:?}"
+        );
+        let ground_view = evidence.scoped(&tp, &ground, &ground);
+        assert!(
+            ground_view.luma[6].weight > 0.0,
+            "the ground's own bin 6 must carry evidence: {:?}",
+            ground_view.luma[6]
+        );
+        assert!(ground_view.luma[5].weight > 0.0, "{:?}", ground_view.luma[5]);
+        let sky_view = evidence.scoped(&tp, &sky, &sky);
+        assert!(
+            sky_view.luma[6].source_populated && sky_view.luma[6].weight <= 0.0,
+            "the sky's own bin 6 stays withheld: {:?}",
+            sky_view.luma[6]
+        );
+        // Over the whole frame the scoped view IS the frame model, bit for bit.
+        let ones = vec![1.0f32; sp.len()];
+        let frame_view = evidence.scoped(&tp, &ones, &ones);
+        let bits = |v: &[f32]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
+        assert_eq!(frame_view.luma, evidence.luma);
+        assert_eq!(frame_view.hue, evidence.hue);
+        assert_eq!(bits(&frame_view.source_weights), bits(&evidence.source_weights));
+        assert_eq!(bits(&frame_view.target_weights), bits(&evidence.target_weights));
+        assert_eq!(bits(&frame_view.source_hue_weights), bits(&evidence.source_hue_weights));
+        assert_eq!(bits(&frame_view.target_hue_weights), bits(&evidence.target_hue_weights));
+        assert_eq!(frame_view.identifiability.to_bits(), evidence.identifiability.to_bits());
+        assert_eq!(frame_view.population.to_bits(), evidence.population.to_bits());
+        assert_eq!(evidence.population, evidence.source_pixels.len() as f32);
+    }
+
+    /// The ground zone's tone move touches only ground pixels, all of them
+    /// structurally supported; the frame-wide verdict would still have vetoed
+    /// it through the sky-poisoned bin. Judged by its own members it attaches
+    /// with a real exposure move and no tone refusal.
+    #[test]
+    fn a_ground_zone_is_not_vetoed_by_the_sky_it_does_not_touch() {
+        let (src, tgt, sky_mask) = poisoned_bin_fixture();
+        let path = fixture_mask_path("poisoned-bin-land");
+        sky_mask.save(path.path()).unwrap();
+        let mut report = neutral_report(&src, &tgt);
+        let s_img = src.thumbnail(fit::ANALYZE_EDGE, fit::ANALYZE_EDGE);
+        let t_img = tgt.thumbnail(fit::ANALYZE_EDGE, fit::ANALYZE_EDGE);
+        let t_px = fit::pixels_of(&t_img);
+        let sw = mask_weights(&sky_mask, s_img.width(), s_img.height());
+        let tw = mask_weights(&sky_mask, t_img.width(), t_img.height());
+        let land = ZoneAttachment {
+            source_weights: sw.iter().map(|w| 1.0 - w).collect(),
+            target_weights: tw.iter().map(|w| 1.0 - w).collect(),
+            coverage: None,
+            mask: MaskGeometry::Bitmap { path: path.path().to_string_lossy().into_owned() },
+            range: None,
+            name: String::new(),
+            role: MaskRole::ZoneLand,
+            inverted: true,
+            label: MaskRole::ZoneLand.tag().to_string(),
+            min_share: MIN_ZONE_SHARE,
+            frame_regression_tol: ZONE_GLOBAL_REGRESSION_TOL,
+        };
+        let before = fit::pixels_of(&render::develop_preview(&s_img, &report.recipe));
+        let mut frame_err = report.err_after;
+        let accepted = attach_one_zone(
+            &s_img,
+            &t_px,
+            &mut report,
+            &mut frame_err,
+            &land,
+            measure_zone_divergence(&src, &tgt, &crate::recipe::EditRecipe::default(), &sky_mask)
+                .land
+                .divergence,
+            None,
+        );
+        assert!(accepted.is_some(), "the ground zone must attach: {}", report.recipe.rationale);
+        let zone = report.recipe.masks.last().expect("attached land mask");
+        assert!(zone.exposure_ev > 0.0, "a real tone move must survive: {zone:?}");
+        assert!(
+            !report
+                .notes
+                .iter()
+                .any(|n| n.key == crate::rationale::keys::ZONE_EVIDENCE_WITHHELD_TONE),
+            "the ground zone must not be vetoed through the sky's bins: {}",
+            report.recipe.rationale
+        );
+        // Premise, stated by the frame-wide model itself: this very move would
+        // have been vetoed through the replaced sky's identical luma bins.
+        let after = fit::pixels_of(&render::develop_preview(&s_img, &report.recipe));
+        assert!(
+            fit::moved_unsupported_luma_range_names(&before, &after, &report.evidence).is_some(),
+            "premise: the frame-wide verdict names the poisoned bin for this move"
+        );
+        path.remove();
+    }
+
+    /// The calibration pair's land correction used to be withheld on both
+    /// sides: the replaced sky shares the ground's mid-tone luma bins and the
+    /// frame-wide verdict withheld those bins for everyone. Judged by its own
+    /// members the land zone must attach with a real tone move.
+    #[test]
+    fn calibration_land_zone_is_no_longer_withheld_by_the_replaced_sky() {
+        let Some(root) = fit::calibration_corpus() else { return };
+        let source = image::open(root.join("neutral.jpg")).expect("calibration neutral.jpg");
+        let target = image::open(root.join("target.jpg")).expect("calibration target.jpg");
+        let sky_mask = image::open(root.join("sky-mask.png"))
+            .expect("calibration sky-mask.png")
+            .to_luma8();
+        let mask_path = fixture_mask_path("calibration-land-scratch");
+        sky_mask.save(mask_path.path()).unwrap();
+        let mut report = fit::fit_recipe(&source, &target);
+        let global_err = report.err_after;
+        let global_recipe = report.recipe.clone();
+        attach_zones(&source, &target, &mut report, &sky_mask, &sky_mask, &mask_path);
+        let land_tag = MaskRole::ZoneLand.tag();
+        {
+            let s_img = source.thumbnail(fit::ANALYZE_EDGE, fit::ANALYZE_EDGE);
+            let t_img = target.thumbnail(fit::ANALYZE_EDGE, fit::ANALYZE_EDGE);
+            let tgt_px = fit::pixels_of(&t_img);
+            let developed = render::develop_preview(&s_img, &global_recipe);
+            let land_w: Vec<f32> = mask_weights(&sky_mask, developed.width(), developed.height())
+                .iter()
+                .map(|w| 1.0 - w)
+                .collect();
+            let land_t: Vec<f32> = mask_weights(&sky_mask, t_img.width(), t_img.height())
+                .iter()
+                .map(|w| 1.0 - w)
+                .collect();
+            let mt = zone_moments(&tgt_px, &land_t);
+            let global_px = fit::pixels_of(&developed);
+            let final_px = fit::pixels_of(&render::develop_preview(&s_img, &report.recipe));
+            let mut without_land = report.recipe.clone();
+            without_land.masks.retain(|m| m.role != MaskRole::ZoneLand);
+            let sky_only_px = fit::pixels_of(&render::develop_preview(&s_img, &without_land));
+            eprintln!(
+                "CALIBRATION_LAND frame look_err with the sky zone only {:.5}",
+                fit::look_err_with_evidence(&sky_only_px, &tgt_px, &report.evidence)
+            );
+            eprintln!(
+                "CALIBRATION_LAND luma-only zone residual {:.4} -> {:.4}; full zone residual {:.4} -> {:.4}; frame look_err {:.5} -> {:.5}",
+                zone_luma_err(&zone_moments(&global_px, &land_w), &mt),
+                zone_luma_err(&zone_moments(&final_px, &land_w), &mt),
+                zone_err(&zone_moments(&global_px, &land_w), &mt),
+                zone_err(&zone_moments(&final_px, &land_w), &mt),
+                fit::look_err_with_evidence(&global_px, &tgt_px, &report.evidence),
+                fit::look_err_with_evidence(&final_px, &tgt_px, &report.evidence),
+            );
+        }
+        let vetoed = report.notes.iter().any(|note| {
+            note.key == crate::rationale::keys::ZONE_EVIDENCE_WITHHELD_TONE
+                && note.args.iter().any(|(key, value)| *key == "label" && value == land_tag)
+        });
+        let already_matched = report.notes.iter().any(|note| {
+            note.key == crate::rationale::keys::ZONE_ALREADY_MATCHED
+                && note.args.iter().any(|(key, value)| *key == "label" && value == land_tag)
+        });
+        let land = report.recipe.masks.iter().find(|mask| mask.role == MaskRole::ZoneLand);
+        eprintln!(
+            "CALIBRATION_LAND vetoed={vetoed} already_matched={already_matched} land={:?} err {global_err:.5} -> {:.5} rationale={}",
+            land.map(|m| (
+                m.exposure_ev,
+                m.contrast,
+                m.highlights,
+                m.shadows,
+                m.whites,
+                m.blacks,
+                m.color_gains,
+                m.saturation
+            )),
+            report.err_after,
+            report.recipe.rationale
+        );
+        assert!(!vetoed, "the land zone's tone controls must not be withheld through the sky's bins");
+        assert!(
+            land.is_some() || already_matched,
+            "judged by its own members the land zone must attach or be declared matched in tone: {}",
+            report.recipe.rationale
+        );
+        if let Some(land) = land {
+            assert!(
+                land.exposure_ev != 0.0
+                    || land.contrast != 0.0
+                    || land.highlights != 0.0
+                    || land.shadows != 0.0
+                    || land.whites != 0.0
+                    || land.blacks != 0.0,
+                "an attached land zone must carry a tone move: {land:?}"
+            );
+        }
+    }
+
+    /// With its colour class withheld a zone is judged on tone alone -- so the
+    /// skip line is asked of tone alone too. A zone whose luma already matches
+    /// is left alone with the honest note instead of being dialled for a
+    /// hairline tone gain against a chroma gap it may not touch.
+    #[test]
+    fn a_zone_whose_movable_class_already_matches_is_left_alone() {
+        let (w, h) = (16u32, 16u32);
+        let build = |sky: [f32; 3]| -> DynamicImage {
+            DynamicImage::ImageRgb8(RgbImage::from_fn(w, h, |_, y| {
+                let p = if y >= 12 { sky } else { [0.55f32, 0.45, 0.35] };
+                image::Rgb(p.map(|c| (c * 255.0).round() as u8))
+            }))
+        };
+        // Same luma, opposite hue: the blue sky's band exists only on the
+        // source side and the warm target's only on the target side.
+        let src = build([0.60, 0.63, 0.67]);
+        let tgt = build([0.67, 0.62, 0.59]);
+        let sky_mask =
+            GrayImage::from_fn(w, h, |_, y| image::Luma([if y >= 12 { 255u8 } else { 0 }]));
+        let path = fixture_mask_path("movable-class-matched");
+        sky_mask.save(path.path()).unwrap();
+        let mut report = neutral_report(&src, &tgt);
+        let s_img = src.thumbnail(fit::ANALYZE_EDGE, fit::ANALYZE_EDGE);
+        let t_img = tgt.thumbnail(fit::ANALYZE_EDGE, fit::ANALYZE_EDGE);
+        let t_px = fit::pixels_of(&t_img);
+        let sw = mask_weights(&sky_mask, s_img.width(), s_img.height());
+        let tw = mask_weights(&sky_mask, t_img.width(), t_img.height());
+        let attachment = semantic_attachment(sw, tw, &path);
+        let mut frame_err = report.err_after;
+        let accepted = attach_one_zone(
+            &s_img,
+            &t_px,
+            &mut report,
+            &mut frame_err,
+            &attachment,
+            measure_zone_divergence(&src, &tgt, &crate::recipe::EditRecipe::default(), &sky_mask)
+                .sky
+                .divergence,
+            None,
+        );
+        assert!(
+            report.notes.iter().any(|n| n.key == crate::rationale::keys::ZONE_EVIDENCE_WITHHELD_COLOUR),
+            "premise: the one-sided hue withholds colour: {}",
+            report.recipe.rationale
+        );
+        assert!(
+            accepted.is_none() && report.recipe.masks.is_empty(),
+            "a tone-matched zone must not be dialled: {}",
+            report.recipe.rationale
+        );
+        assert!(
+            report.notes.iter().any(|n| n.key == crate::rationale::keys::ZONE_ALREADY_MATCHED),
+            "the movable class already matches and must say so: {}",
+            report.recipe.rationale
+        );
+        path.remove();
     }
 
     #[test]

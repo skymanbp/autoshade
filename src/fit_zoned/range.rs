@@ -375,6 +375,7 @@ fn derive_luminance_bands(
             attachment: ZoneAttachment {
                 source_weights: std::mem::take(&mut source_weights[i]),
                 target_weights: Vec::new(),
+                coverage: None,
                 mask: RANGE_HOST,
                 range: Some(source),
                 name: name.clone(),
@@ -847,6 +848,10 @@ mod tests {
             luma,
             hue: Vec::new(),
             identifiability: 1.0,
+            spatial_weights: vec![1.0; n],
+            spatial_divergence: vec![0.0; n],
+            globally_same_content: true,
+            population: n as f32,
         };
         (source, target, evidence)
     }
@@ -1329,6 +1334,7 @@ mod tests {
         let attachment = ZoneAttachment {
             source_weights: mask_weights(&mask, s_img.width(), s_img.height()),
             target_weights: mask_weights(&mask, t_img.width(), t_img.height()),
+            coverage: None,
             mask: MaskGeometry::Bitmap { path: path.path().to_string_lossy().into_owned() },
             range: Some(RangeMask::Luminance {
                 lo_outer: 0.0,
@@ -1541,6 +1547,10 @@ mod tests {
         );
     }
 
+    /// The fit base is calibration-only by caller contract (debug-asserted in
+    /// `fit_recipe_from_promoted_with_disclosure`), so a recipe that already
+    /// carries a `Custom` range reaches the range producer below that line:
+    /// the producer must keep it in place and never dispatch on its role.
     #[test]
     fn refit_with_existing_custom_range_never_dispatches_on_mask_role() {
         let (source, _, _) = range_boundary_fixture();
@@ -1558,21 +1568,10 @@ mod tests {
             role: MaskRole::Custom,
             ..Default::default()
         };
-        let base = crate::recipe::EditRecipe {
-            masks: vec![existing.clone()],
-            ..Default::default()
-        };
-        let path = fixture_mask_path("custom-range-refit-role-dispatch");
-        let seg = SegmentOpts {
-            python_bin: "missing-custom-range-python".into(),
-            script: "missing-custom-range-script".into(),
-            target: "sky".into(),
-            reference_point: None,
-            prompt_points: None,
-        };
-        let report = fit_recipe_zoned_from(&source, &target, &seg, &path, &base);
+        let mut report = neutral_report(&source, &target);
+        report.recipe.masks.push(existing.clone());
+        attach_luminance_ranges(&source, &target, &mut report);
         assert_eq!(report.recipe.masks.first(), Some(&existing));
         assert!(report.notes.iter().any(|note| note.key == crate::rationale::keys::RANGE_ATTACHED));
-        path.remove();
     }
 }

@@ -103,19 +103,24 @@ fn read_tile(
         .min(target.len())
         .min(evidence.source_weights.len())
         .min(evidence.target_weights.len());
-    let mut source_weights = vec![0.0f32; n];
-    let mut target_weights = vec![0.0f32; n];
     let mut geometry = vec![0.0f32; n];
     for y in 0..evidence.height {
         for x in 0..evidence.width {
             let i = (y * evidence.width + x) as usize;
             if i < n && in_tile(id, x, y, evidence.width, evidence.height) {
-                source_weights[i] = evidence.source_weights[i];
-                target_weights[i] = evidence.target_weights[i];
                 geometry[i] = 1.0;
             }
         }
     }
+    // The tile is judged by ITS population: the frame's per-bin verdicts are
+    // re-aggregated over the tile's own members, so a mid-tone ground tile
+    // keeps the evidence that a replaced sky's identical luma bins withheld
+    // frame-wide.
+    let scoped = evidence.scoped(target, &geometry, &geometry);
+    let mut source_weights = scoped.source_weights;
+    let mut target_weights = scoped.target_weights;
+    source_weights.resize(n, 0.0);
+    target_weights.resize(n, 0.0);
     let source_share = source_weights.iter().map(|v| *v as f64).sum::<f64>() as f32
         / n.max(1) as f32;
     let target_share = target_weights.iter().map(|v| *v as f64).sum::<f64>() as f32
@@ -304,10 +309,12 @@ fn tile_attachment(
     path: &std::path::Path,
     source_weights: Vec<f32>,
     target_weights: Vec<f32>,
+    coverage: ZoneCoverage,
 ) -> ZoneAttachment {
     ZoneAttachment {
         source_weights,
         target_weights,
+        coverage: Some(coverage),
         mask: MaskGeometry::Bitmap { path: path.to_string_lossy().into_owned() },
         range: None,
         name: reading.id.label(),
@@ -559,15 +566,23 @@ pub(super) fn attach_tiles(
             refused.insert(reading.id);
             continue;
         }
+        // The raster is what the correction moves; the estimator weights are
+        // that raster times the tile's own evidence reading.
+        let coverage = ZoneCoverage {
+            source: mask_weights(&mask, s_img.width(), s_img.height()),
+            target: mask_weights(&mask, t_img.width(), t_img.height()),
+        };
         let (source_weights, target_weights) = if refined {
-            let source = mask_weights(&mask, s_img.width(), s_img.height())
-                .into_iter()
-                .zip(&report.evidence.source_weights)
+            let source = coverage
+                .source
+                .iter()
+                .zip(&reading.source_weights)
                 .map(|(mask, evidence)| mask * evidence)
                 .collect::<Vec<_>>();
-            let target = mask_weights(&mask, t_img.width(), t_img.height())
-                .into_iter()
-                .zip(&report.evidence.target_weights)
+            let target = coverage
+                .target
+                .iter()
+                .zip(&reading.target_weights)
                 .map(|(mask, evidence)| mask * evidence)
                 .collect::<Vec<_>>();
             (source, target)
@@ -575,7 +590,7 @@ pub(super) fn attach_tiles(
             (reading.source_weights.clone(), reading.target_weights.clone())
         };
         let attachment =
-            tile_attachment(&reading, owned.path(), source_weights, target_weights);
+            tile_attachment(&reading, owned.path(), source_weights, target_weights, coverage);
         let frame_before = fit::look_err_with_evidence(&current, &tgt_px, &report.evidence);
         let mut frame_err = frame_before;
         let first_tile = report.recipe.masks.len();
@@ -676,6 +691,19 @@ mod tests {
         vec![[value as f32 / 255.0; 3]; (width * height) as usize]
     }
 
+    /// Pretend every pixel is structurally supported. `read_tile` re-aggregates
+    /// the range verdicts over the tile's own members from the model's
+    /// per-pixel ingredients, so a fixture injects support THERE; the frame's
+    /// per-pixel weight vectors are filled too for anything still reading them.
+    fn pretend_full_support(evidence: &mut fit::EvidenceModel) {
+        evidence.spatial_weights.fill(1.0);
+        evidence.spatial_divergence.fill(0.0);
+        evidence.spatial_supported.fill(true);
+        evidence.globally_same_content = true;
+        evidence.source_weights.fill(1.0);
+        evidence.target_weights.fill(1.0);
+    }
+
     fn localized_residual() -> (Vec<[f32; 3]>, Vec<[f32; 3]>, fit::EvidenceModel) {
         let (width, height) = (64u32, 64u32);
         let id = TileId { depth: 2, row: 2, col: 0 };
@@ -693,25 +721,32 @@ mod tests {
             }
         }
         let mut evidence = fit::evidence_model_for(&source, &target, width, height);
-        evidence.source_weights.fill(1.0);
-        evidence.target_weights.fill(1.0);
+        pretend_full_support(&mut evidence);
         (current, target, evidence)
     }
 
+    /// A tile is judged by its own members: its source and target shares are
+    /// the same bin weights over the same geometry, so they agree and an
+    /// unsupported tile is refused on the first share gate. The target-share
+    /// arm stays as the defensive second reading.
     #[test]
     fn tile_requires_source_and_target_evidence_share() {
         let current = flat_pixels(64, 64, 100);
         let target = flat_pixels(64, 64, 120);
+        let id = TileId { depth: 2, row: 0, col: 0 };
         let mut evidence = fit::evidence_model_for(&current, &target, 64, 64);
-        evidence.source_weights.fill(1.0);
-        evidence.target_weights.fill(0.0);
-        let reading = read_tile(
-            TileId { depth: 2, row: 0, col: 0 },
-            &current,
-            &target,
-            &evidence,
+        pretend_full_support(&mut evidence);
+        let supported = read_tile(id, &current, &target, &evidence);
+        assert!(supported.source_share >= MIN_ZONE_SHARE, "{supported:?}");
+        assert!(
+            (supported.source_share - supported.target_share).abs() < 1e-4,
+            "a tile's two shares are one population: {supported:?}"
         );
-        assert_eq!(eligible(&reading, 0.0), Err("target-share"));
+        evidence.spatial_weights.fill(0.0);
+        let unsupported = read_tile(id, &current, &target, &evidence);
+        assert_eq!(unsupported.source_share, 0.0, "{unsupported:?}");
+        assert_eq!(unsupported.target_share, 0.0, "{unsupported:?}");
+        assert_eq!(eligible(&unsupported, 0.0), Err("source-share"));
     }
 
     #[test]
@@ -727,8 +762,7 @@ mod tests {
         }
         let original = fit::pixels_of(&DynamicImage::ImageRgb8(source));
         let mut evidence = fit::evidence_model_for(&original, &target, 64, 64);
-        evidence.source_weights.fill(1.0);
-        evidence.target_weights.fill(1.0);
+        pretend_full_support(&mut evidence);
         let reading = read_tile(
             TileId { depth: 2, row: 0, col: 0 },
             &current,
@@ -758,8 +792,7 @@ mod tests {
             }
         }
         let mut evidence = fit::evidence_model_for(&current, &target, width, height);
-        evidence.source_weights.fill(1.0);
-        evidence.target_weights.fill(1.0);
+        pretend_full_support(&mut evidence);
         evidence.source_pixels = current.clone();
         let (visited, candidate) = next_tile(
             &current,
@@ -845,8 +878,7 @@ mod tests {
         let target_pixels = fit::pixels_of(&target);
         let mut evidence =
             fit::evidence_model_for(&source_pixels, &target_pixels, edge, edge);
-        evidence.source_weights.fill(1.0);
-        evidence.target_weights.fill(1.0);
+        pretend_full_support(&mut evidence);
         evidence.source_pixels = target_pixels.clone();
         let expected = read_tile(id, &current_pixels, &target_pixels, &evidence).residual;
         let stale = read_tile(id, &source_pixels, &target_pixels, &evidence).residual;
@@ -896,9 +928,99 @@ mod tests {
             std::path::Path::new("mask-zone-tile.png"),
             reading.source_weights.clone(),
             reading.target_weights.clone(),
+            ZoneCoverage {
+                source: tile_geometry(reading.id, 64, 64),
+                target: tile_geometry(reading.id, 64, 64),
+            },
         );
         assert_eq!(SPATIAL_FRAME_REGRESSION_TOL.to_bits(), 0.0f32.to_bits());
         assert_eq!(attachment.frame_regression_tol.to_bits(), 0.0f32.to_bits());
+    }
+
+    fn tile_geometry(id: TileId, width: u32, height: u32) -> Vec<f32> {
+        (0..width * height)
+            .map(|i| if in_tile(id, i % width, i / width, width, height) { 1.0 } else { 0.0 })
+            .collect()
+    }
+
+    /// The vetoes are asked over the raster a tile MOVES, not over its
+    /// evidence-weighted estimator weights: a tile whose upper half is
+    /// replaced content (withheld over the tile's own view) and whose lower
+    /// half asks for +0.12 EV would move the withheld half too, and must be
+    /// refused with the tone-withheld note. Scoping the veto over the
+    /// estimator weights would drop those pixels from the population and let
+    /// the tile through.
+    #[test]
+    fn a_tile_is_vetoed_over_the_raster_it_moves_not_its_estimator_weights() {
+        let edge = fit::ANALYZE_EDGE;
+        // A same-content checker texture on both sides keeps the local-quality
+        // texture ratio finite; the halves stay inside luma bins 5 and 10.
+        let build = |lower: f32| -> DynamicImage {
+            DynamicImage::ImageRgb8(RgbImage::from_fn(edge, edge, |x, y| {
+                let base = if y < 48 { 0.30f32 } else { lower };
+                let v = base + 0.02 * ((x + y) % 2) as f32;
+                Rgb([(v * 255.0).round() as u8; 3])
+            }))
+        };
+        let source = build(0.60);
+        let target = build(0.65);
+        let id = TileId { depth: 2, row: 0, col: 0 };
+        let source_px = fit::pixels_of(&source);
+        let target_px = fit::pixels_of(&target);
+        let mut evidence = fit::evidence_model_for(&source_px, &target_px, edge, edge);
+        pretend_full_support(&mut evidence);
+        for y in 0..48u32 {
+            for x in 0..edge {
+                evidence.spatial_weights[(y * edge + x) as usize] = 0.0;
+            }
+        }
+        let reading = read_tile(id, &source_px, &target_px, &evidence);
+        assert!(reading.source_share >= MIN_ZONE_SHARE, "{reading:?}");
+        let upper = (10 * edge + 10) as usize;
+        let lower = (70 * edge + 10) as usize;
+        assert_eq!(reading.source_weights[upper], 0.0, "the replaced half carries no weight");
+        assert!(reading.source_weights[lower] > 0.0, "the supported half carries the fit");
+
+        let (_, raw_mask) = tile_mask(&source, id);
+        let path = super::super::tests::fixture_mask_path("tile-coverage-veto");
+        raw_mask.save(path.path()).unwrap();
+        let coverage = ZoneCoverage {
+            source: mask_weights(&raw_mask, edge, edge),
+            target: mask_weights(&raw_mask, edge, edge),
+        };
+        let attachment = tile_attachment(
+            &reading,
+            path.path(),
+            reading.source_weights.clone(),
+            reading.target_weights.clone(),
+            coverage,
+        );
+        let mut report = super::super::tests::neutral_report(&source, &target);
+        report.evidence = evidence;
+        let mut frame_err = report.err_after;
+        let accepted = attach_one_zone(
+            &source,
+            &target_px,
+            &mut report,
+            &mut frame_err,
+            &attachment,
+            fit::Divergence { correlation: 1.0, energy_error: 0.0, d: 0.0 },
+            None,
+        );
+        path.remove();
+        assert!(
+            report
+                .notes
+                .iter()
+                .any(|n| n.key == crate::rationale::keys::ZONE_EVIDENCE_WITHHELD_TONE),
+            "moving the withheld half must withhold the tone controls: {}",
+            report.recipe.rationale
+        );
+        assert!(
+            accepted.is_none() && report.recipe.masks.is_empty(),
+            "a tile that would move withheld pixels must not attach: {}",
+            report.recipe.rationale
+        );
     }
 
     fn boundary_fixture(
@@ -1024,6 +1146,59 @@ mod tests {
         assert_eq!(losses.len(), 1, "one bitmap tile has one export loss");
         assert_eq!(losses[0].name, "Spatial tile r2c0");
         assert_eq!(losses[0].reason, crate::xmp::MaskLossReason::Bitmap);
+    }
+
+    /// The frame withholds luma bin 6 because a replaced sky dominates it; a
+    /// pure-ground tile that owns a few of that bin's supported pixels must
+    /// count them -- its reading is taken over its own population.
+    #[test]
+    fn a_tile_reading_keeps_the_mid_tones_the_frame_withheld() {
+        let (w, h) = (fit::ANALYZE_EDGE, fit::ANALYZE_EDGE);
+        let build = |target: bool| {
+            image::DynamicImage::ImageRgb8(image::RgbImage::from_fn(w, h, |x, y| {
+                let v: f32 = if y < h * 2 / 3 {
+                    if target {
+                        if (y / 8) % 2 == 0 { 0.05 } else { 0.15 }
+                    } else {
+                        0.36 + 0.04 * x as f32 / (w - 1) as f32
+                    }
+                } else {
+                    let ground = if ((x / 32) + (y / 32)) % 4 == 0 { 0.40 } else { 0.20 };
+                    if target { ground + 0.08 } else { ground }
+                };
+                image::Rgb([(v.clamp(0.0, 1.0) * 255.0).round() as u8; 3])
+            }))
+        };
+        let sp = fit::pixels_of(&build(false));
+        let tp = fit::pixels_of(&build(true));
+        let evidence = fit::evidence_model_for(&sp, &tp, w, h);
+        assert!(
+            evidence.luma[6].weight <= 0.0,
+            "premise: bin 6 is withheld frame-wide: {:?}",
+            evidence.luma[6]
+        );
+        let id = TileId { depth: 2, row: 3, col: 2 };
+        let reading = read_tile(id, &sp, &tp, &evidence);
+        // A 0.40 ground pixel inside r3c2: the frame gives it no weight, the
+        // tile's own population keeps it.
+        let probe = (288 * w + 224) as usize;
+        assert!(in_tile(id, 224, 288, w, h));
+        assert_eq!(fit::evidence_luma_bin(fit::luma601(&sp[probe])), 6);
+        assert_eq!(evidence.source_weights[probe], 0.0);
+        assert!(reading.source_weights[probe] > 0.0, "{}", reading.source_weights[probe]);
+        let frame_share = evidence
+            .source_weights
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| in_tile(id, *i as u32 % w, *i as u32 / w, w, h))
+            .map(|(_, weight)| *weight)
+            .sum::<f32>()
+            / sp.len() as f32;
+        assert!(
+            reading.source_share > frame_share,
+            "{} must exceed the frame-masked share {frame_share}",
+            reading.source_share
+        );
     }
 
     #[test]
