@@ -685,7 +685,7 @@ image path and the API analysis path each need an OpenAI-compatible key.
 | V2 | Baked-source mode (edit exported PNG/TIFF) | extension dispatch; develop runs on loaded pixels | **done** |
 | V2 | Generative reimagine / retouch | OpenAI Images (`gpt-image-*`); reimagine composes a faithfulness scaffold onto the prompt under `high` (the `input_fidelity` parameter is negotiated away on gpt-image-2), measures the result's structural divergence D with the reverse-fit's own statistic (`fit::structure_divergence_for`, threshold `fit::DIVERGENCE_GLOBAL`), disclosures it, and offers a bounded opt-in retry that keeps the closer of two results | **done (experimental)** |
 | V2 | Pixel retouch / heal (spot removal) | deterministic heal engine + vision spot-detect ([`src/retouch.rs`](../src/retouch.rs)) | **done (experimental)** |
-| V2 | Look matching / reverse-fit (`match`) | distribution-level solve for the recipe that reproduces a target rendition ([`src/fit.rs`](../src/fit.rs); zoned variant [`src/fit_zoned.rs`](../src/fit_zoned.rs)) | **done** |
+| V2 | Look matching / reverse-fit (`match`) | distribution-level solve for the recipe that reproduces a target rendition ([`src/fit.rs`](../src/fit.rs); zoned variant [`src/fit_zoned.rs`](../src/fit_zoned.rs), range layer [`src/fit_zoned/range.rs`](../src/fit_zoned/range.rs)) | **done** |
 | V2 | Cross-image correspondence (content-divergent pairs) | DIFT (SD 2.1) sidecar → 48×48 field of target coordinates + cyclic×smoothness confidences ([`src/correspond.rs`](../src/correspond.rs), [`python/correspond.py`](../python/correspond.py)); CLI `correspond` diagnostic; the reverse-fit consults it automatically on content-divergent pairs (the fit's own D gate, single-sourced) and FULL zone fits weight pairs by confidence + read shifted content at its corresponded position — share gates and Atmosphere zones keep pre-field semantics, and identity/zero fields are conservation-tested to change nothing | **done (7a instrument + 7b estimator wiring)** |
 
 ### 4.1 RAW decode (M1)
@@ -1711,7 +1711,8 @@ piecewise-linear chords sag ~10/255. `--zoned`
 ([`src/fit_zoned.rs`](../src/fit_zoned.rs)) is one automatic local-fit entry:
 it fits globally first, then uses mutually exclusive producers. Successful
 segmentation adds semantic sky/land bitmap corrections; a disabled or
-unavailable sidecar instead runs the pure-Rust luminance-range pass; if neither
+unavailable sidecar instead runs the pure-Rust luminance-range pass
+([`src/fit_zoned/range.rs`](../src/fit_zoned/range.rs)); if neither
 producer keeps a correction, the global fit ships unchanged. Segmentation
 success does not derive range bands. The same structural statistic independently selects **Full** or bounded
 **Atmosphere** policy for each zone; structural divergence never drops a zone
