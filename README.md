@@ -100,13 +100,13 @@ multi-class semantic segmentation.
 
 ## What is new here
 
-The ideas below are the ones you will not find in another RAW developer. Every
-number is copied from the source or from
+The techniques below are the ones you will not find in another RAW developer.
+Every number is copied from the source or from
 [docs/TECH_STACK.md](docs/TECH_STACK.md) / [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md);
 the last subsection lists what is designed but not yet shipped, so nothing
 here is a promise dressed as a feature.
 
-### 1. Style reference is retrieval over your whole catalogue, not a global average
+### 1. Style reference is retrieval over your whole catalogue, not a preset
 
 `autoshop style-index <dir>` (or the GUI's **Style reference library**) walks
 your Lightroom RAW+XMP pairs and turns *every finished edit you ever made*
@@ -119,102 +119,123 @@ into an exemplar ([`src/style.rs`](src/style.rs)):
   dehaze), your master tone-curve shape (black-lift and S-strength) and a
   colour-family summary;
 - optionally a 768-dimensional **SigLIP 2** image embedding of the frame
-  (`base/16 @384`, Apache-2.0 — CLIP and OpenCLIP were passed over on licence
-  grounds), computed by a local sidecar through the same 512-px frame the
-  query goes through, so index and query can never disagree.
+  (`base/16 @384`), computed by a local sidecar through the same 512-px frame
+  the query goes through, so index and query can never disagree.
 
 At develop time the photo's own vector retrieves the **4 most similar past
 shots** with the hybrid distance `Σ wᵢ(qᵢ−eᵢ)² + W_EMB·(1−cos(q,e))`
 (`W_EMB = 2.0`, retained after a 147-exemplar calibration that scanned
-0…8). Their measured settings, curve habit and colour families are rendered
-into the advisor's prompt as a *soft reference* — a ceiling below the
-committed strength band, a floor at it — and a capped `blend_toward` pull
+0…8). Their measured settings, curve habit and colour families are handed
+to the advisor as a *soft reference*, and a capped `blend_toward` pull
 (≤ 0.6) moves the proposal toward your historical means without ever copying
-one. The rationale names the shots it leaned on. It is a retrieval system
-sized like one: 5,000 exemplars / 96 MiB, both caps derived from the
-measured 12.41 bytes per serialised embedding element rather than guessed.
+one; the rationale names the shots it leaned on. It is sized like a
+retrieval system — 5,000 exemplars / 96 MiB, both caps derived from the
+measured 12.41 bytes per serialised embedding element — and
+`match --style-prompt` closes the loop from the other side by extracting a
+reusable text style brief from a source/target pair that `reimagine` accepts
+as its Direction.
 
-`match --style-prompt` closes the loop from the other side: given a source
-and a finished target of the same frame, the vision role writes a reusable
-text style brief that `reimagine` accepts as its Direction.
+### 2. Reverse-fit: inverse rendering from any finished look
 
-### 2. One control registry generates the entire AI contract
+`match` recovers an editable recipe from any finished rendition of the same
+frame — a generated image, an export, someone else's grade — without copying
+a pixel ([`src/fit.rs`](src/fit.rs)). It is deliberately
+**distribution-level, not per-pixel regression**, because a generated target
+is not pixel-aligned with its source: luminance CDFs are matched at the
+engine's own tone knots and least-squares solved against the engine's own
+slider basis with a ridge and a model-selection prior (so numerically
+equivalent but semantically ruinous slider combinations lose); saturation
+closes by mean-chroma ratio, secant-refined through real renders; the
+per-channel CDF residual becomes red/green/blue curves admitted only through
+three vetoes, one of which refuses any cast that paints a hue ≥ 45° from every
+target family over ≥ 5 % of the frame. The residual tone curve places its
+knots uniformly in the LUT's *output* domain, which is what keeps a steep
+camera base curve from sagging the chords by ~10/255.
 
-[`src/advisor/catalogue.rs`](src/advisor/catalogue.rs) lists every develop
-control once — range, neutral value, engine-only flag, `crs:` key, purpose —
-and everything downstream is *derived* from it: the strict Responses
-`json_schema` (both mirrors), the proposer's control catalogue, the eval
-ruler, and the style index's reference keys. A field added to `EditRecipe`
-without a registry row does not compile, so the AI side and the measuring
-side cannot silently drift apart.
+### 3. A structural-divergence statistic decides how much to believe a target
 
-### 3. "How hard should the AI push" is one dial wired into six gates
+Before any solve, a structural reading `D` — built from gradient
+correlation and a five-band pyramid energy error — measures whether the
+target still shows the same scene. Same scene → the Full solve above. Repainted scene (`D ≥ 0.35`) →
+bounded **Atmosphere** mode: EV ±1, WB gain [0.80, 1.25], saturation ±30, a
+five-point curve with slope [0.5, 1.5], no per-channel curves, confidence
+capped at 0.50 — read on a *structure-blind* ruler that keeps the one-sided,
+sparse and minimum-share population vetoes but stops asking replaced content
+to survive. That is how a sky that gpt-image-2 invented can still hand the
+original RAW its overall tone and colour without the fit chasing clouds that
+were never there.
 
-`GradeStrength` (GUI **Strength**, CLI `--strength`) reaches the proposer's
-banded restraint prose and its ±Highlights/Shadows guardrail pair, the
-recipe's `temper` soft caps (knees scale by `1 + (s − 0.5)·0.7`), the
-verifier's too-flat/over-cooked bands, the visual judge's rubric, the style
-reference wording, and even the no-key heuristic fallback. `0.50` is the
-calibration point every restraint number was tuned at (147-photo eval);
-`0.65` ships as default. Six constants that used to disagree now read one
-number — which is why turning the dial up cannot be quietly undone by a
-verifier that revises it back.
+### 4. Diffusion features find where the content moved
 
-### 4. Three AIs, and none of them can see what the others see
+On divergent pairs the fit consults a **DIFT correspondence field** —
+Stable Diffusion 2.1's UNet used as a featurizer (one pass per noise draw at
+`t = 261` over 768² inputs, `up_blocks[1]` features, an 8-draw ensemble run
+one at a time to bound VRAM) — yielding a 48×48 grid of target coordinates
+whose confidence is cyclic consistency × local flow smoothness (raw cosine is
+exported for diagnostics but kept out of the confidence, so a pixel-shuffle
+of the same frame stays honestly unmatchable). The field weights a Full
+zone's pixel pairs by per-cell confidence and reads shifted content at its
+corresponded position; on an identity pair it reads median confidence
+1.000 at 100 % coverage, and on the calibration pair's generated sky 0.009
+(21.5 %) against 1.000 (90.5 %) on the ground. Identity and zero-confidence
+fields are conservation-tested to change nothing.
 
-- The **vision advisor** sees the preview and can only answer with bounded
-  controls under a strict schema (`store:false`).
-- The **verifier** (the signed-in `claude` CLI over OAuth, or any
-  OpenAI-compatible chat model) sees the recipe, EXIF, histogram, clipping
-  statistics and the advisor's rationale — never a pixel — and a non-Accept
-  verdict never writes a develop.
-- The **visual judge** sees only two JPEG renders, may buy one guided
-  revision, and the revision is adopted only if it re-scores at least as
-  high.
+### 5. Semantic zones and luminance bands, judged on their own population
 
-The doctrine is structural, not a prompt instruction: in the develop path
-there is no code path by which a model output becomes a pixel.
+Local corrections come from mutually exclusive producers: a local OneFormer
+ADE20K pass yields sky/land bitmap zones; when segmentation is off or
+unavailable, a pure-Rust pass derives **XMP-native luminance-range bands**
+from rank-paired residuals (sorted target rank slices against the current
+source bin means) under an evidence gate that rejects bins before they are
+run into bands. Every verdict follows the population a correction
+moves — a land zone is no longer withheld because a replaced sky happens to
+share its luminance bins — and a zone whose luminance already matches says so
+instead of being dialled for a hairline gain.
 
-### 5. Reverse-fit is inverse rendering with an honesty budget
+### 6. Quadtree tile splitting on frozen evidence
 
-`match` recovers an editable recipe from any finished look of the same frame
-— a generated image, someone else's render — without copying a pixel
-([`src/fit.rs`](src/fit.rs), [`src/fit_zoned.rs`](src/fit_zoned.rs),
-[`src/fit_field.rs`](src/fit_field.rs)):
+After the zones or bands, a frozen-evidence quadtree visits the strongest
+supported nodes first, stops at a 4×4 grid, and keeps a tile only when both
+frames contribute ≥ 3 % evidence, original structure remains comparable, the
+tile's confidence interval excludes zero, its boundary stays within the
+calibrated rim budget (0.012), and the composed frame does not regress at a
+zero tolerance. Tiles are ordinary editable engine bitmap masks; recipe JSON
+keeps them losslessly and classic XMP omits each with a named bitmap-mask
+loss rather than inventing an approximate rectangle.
 
-- **Distribution-level, never per-pixel regression.** Luminance CDFs are
-  matched at the engine's own tone knots and least-squares solved against
-  the engine's own slider basis with a ridge and a model-selection prior;
-  saturation closes through real renders; per-channel curves are admitted
-  only through three vetoes, one of which refuses any cast that paints a
-  hue ≥ 45° from every target family over ≥ 5 % of the frame.
-- **A structural-divergence statistic decides how much to believe.** Same
-  scene → Full solve. Repainted scene (`D ≥ 0.35`) → bounded Atmosphere mode
-  (EV ±1, WB gain [0.80, 1.25], saturation ±30, curve slope [0.5, 1.5],
-  confidence capped at 0.50) on a structure-blind ruler that keeps the
-  population vetoes.
-- **Local corrections are produced by mutually exclusive, evidence-gated
-  producers** — semantic sky/land zones from a local OneFormer pass, or
-  XMP-native luminance-range bands derived from rank-paired residuals — then
-  a frozen-evidence quadtree adds bitmap tiles only when both frames hold
-  ≥ 3 % evidence, structure survives, the confidence interval excludes
-  zero, the boundary rim stays within 0.012, and the composed frame does not
-  regress.
-- **A read-only local-field analyzer measures the ceiling first.** A
-  12×8×8 bilateral grid of five develop parameters is solved by conjugate
-  gradients on the same frozen evidence and reports how much of the
-  remaining difference *any* spatially varying develop could reach — on the
-  calibration pair the global fit reads 0.0961 against a ceiling of 0.0700,
-  and the accepted sky zone realises 0.134 of that distance. The field never
-  touches a pixel; it prices the producers, halves the tile budget when the
-  remainder is not tile-shaped, and says so in the rationale.
-- **Content that moved is matched where it moved to.** On divergent pairs
-  the fit consults a DIFT correspondence field (Stable Diffusion 2.1 as a
-  featurizer, 48×48 cells, confidence = cyclic consistency × flow
-  smoothness) to weight a Full zone's pixel pairs — identity fields are
-  conservation-tested to change nothing.
+### 7. A bilateral-grid local field prices every local producer first
 
-### 6. Lightroom parity is measured, and the residuals are published
+Before any local producer runs, a read-only **12×8×8 bilateral grid**
+(x, y, luma) of five develop parameters (EV, three channel gains, a slope) is
+solved by conjugate gradients in f64 — λ = 1 Tikhonov toward the global fit,
+a Laplacian smoother, ≤ 90 iterations, weights = frozen evidence × local
+structural support × unclipped — on the same analysis thumbnails and the same
+ruler the fit is judged by. Its rendered residual is the **ceiling**: how
+much of the remaining difference *any* spatially varying develop could reach.
+On the calibration pair the global fit reads 0.0961 against a ceiling of
+0.0700 and the accepted sky zone realises 0.134 of that distance. The field
+never touches a pixel: it proposes luminance bands to the range producer
+(mapped through the pixels that occupy them, refused when the sign
+disagrees), reads whether the remainder is band-, tile-, or ramp-shaped
+(weighted R² against 4×4 means and a least-squares plane), halves the tile
+budget when the remainder is not tile-shaped, and ends the fit early when a
+producer already lands within 0.002 of a ceiling that genuinely beat the
+producer-free frame. The Rust solve agrees with the NumPy reference to
+1.5 × 10⁻⁵ across 768 vertices.
+
+### 8. Edge-aware mask refinement that has to earn its keep
+
+Semantic silhouettes and eligible tile boundaries are proposed for guided
+refinement (radius 8) before their corrections are fitted — and the original
+mask bytes win unless coverage is conserved, every pixel outside the fixed
+collar is unchanged, guide-edge alignment does not decrease, and the rim and
+frame gates still pass. The AI masks themselves run locally — BiRefNet
+subject (U²-Net fallback), OneFormer sky, SAM 2.1 point-prompted object —
+with weights pinned to the byte and every alpha cached under a provenance
+key, so a better backend forces an honest re-derivation instead of serving an
+older mask as the new model's result.
+
+### 9. Lightroom parity is measured, and the residuals are published
 
 The tone LUT, the two-arm Texture model (`A1 = 0.172443`, `A2 = 0.304888`;
 45 of 45 Lightroom anchors within ±0.02), the 290×11 radial feather LUT,
@@ -228,36 +249,15 @@ between Lightroom's pixel-space radial tilt and the engine's normalised
 rotation, and Lightroom's Brotli-packed brush dab streams are imported and
 verified (`MD5 → .acr → Brotli`).
 
-### 7. Local models are licence-screened, pinned to the byte, and never in the repo
-
-BiRefNet (444,473,596 B), OneFormer ADE20K Swin-L (881,196,376 B), SAM 2.1
-Hiera-Large (897,897,416 B), SigLIP 2 (1,501,968,264 B), SD 2.1 as a DIFT
-featurizer (2,580,061,174 B) and five SCUNet checkpoints are fetched on
-first use through one shared download-and-refuse implementation
-(sha256 + byte cap), run as `-E` subprocesses inside job-object kill groups
-with a single-flight model slot, and every AI mask is cached under a
-provenance key so a better backend forces an honest re-derivation. SegFormer
-was removed for its research-only licence; the licence is a selection
-criterion, not a footnote.
-
-### 8. Generated pixels are quarantined and measured
+### 10. Generated pixels are quarantined and measured
 
 `reimagine` composes the prompt onto an unconditional faithfulness scaffold
 (because `input_fidelity` is silently dropped by gpt-image-2), measures the
-result's structural divergence with the same statistic the reverse-fit uses,
-warns at `D ≥ 0.35`, and can spend one bounded retry keeping the closer
-image. `heal` only ever copies, shifts and averages pixels that already
-exist. Anything that changed pixels lives on its own card as a pixel source
-— never disguised as a Lightroom adjustment.
-
-### 9. Guards the compiler and the release script enforce
-
-Deletable rasters are a type (`OwnedRaster`): a call site that deletes cannot
-be handed a user path, so the mistake that once reached a calibration mask
-no longer compiles. `scripts/check_docs.py` re-derives 26 pinned release
-claims (formats, camera bodies, test counts, toolchain) from the source and
-the gate transcripts, and every batch ships with named falsifier tests and a
-mutation table.
+result's structural divergence with the same `D` the reverse-fit uses, warns
+at `D ≥ 0.35`, and can spend one bounded retry keeping the closer image.
+`heal` only ever copies, shifts and averages pixels that already exist.
+Anything that changed pixels lives on its own card as a pixel source — never
+disguised as a Lightroom adjustment.
 
 ### Designed, not yet shipped
 
