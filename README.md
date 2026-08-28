@@ -17,11 +17,154 @@ An AI decides *what to change*. A deterministic Rust engine *does* it.
 
 ---
 
+## What Autoshop is
+
 Autoshop is a non-destructive photo developer for RAW and baked images. Its
 main workflow turns an AI proposal into a small, inspectable `EditRecipe`, then
 applies that recipe with the same local Rust renderer used by the desktop app,
 CLI, and embedded web UI. Generative tools are separate, opt-in paths and are
 labelled as such.
+
+Who it is for: photographers who want an AI first pass on a card of RAWs
+without giving up an editable, Lightroom-compatible develop; and anyone who
+wants to know *what* an AI changed, in numbers, before trusting it. The rule
+that shapes every part of the program: **the AI decides what to change, the
+deterministic engine does it**. Every AI proposal is a small JSON recipe with
+bounded controls, a written rationale, and a confidence — the same recipe a
+person can edit by hand, replay a year later, or hand to Lightroom.
+
+## Contents
+
+- [What Autoshop is](#what-autoshop-is)
+- [What it does](#what-it-does)
+- [How it works](#how-it-works)
+- [Results: before and after](#results-before-and-after)
+- [Measured numbers](#measured-numbers)
+- [Install and quickstart](#install-and-quickstart)
+- [User manual](#user-manual)
+- [Supported formats](#supported-formats)
+- [Tech stack, algorithms, and design philosophy](#tech-stack-algorithms-and-design-philosophy)
+- [Status, roadmap, and known limitations](#status-roadmap-and-known-limitations)
+- [License and acknowledgements](#license-and-acknowledgements)
+
+## What it does
+
+- **Feature 1 — AI develop.** `analyze`, `auto`, or the GUI's **Analyze**: a
+  vision advisor turns the preview, EXIF, and histogram into an editable
+  recipe (crop, tone, white balance, curves, HSL, colour grading, texture,
+  clarity, dehaze, detail, and parametric or bitmap local masks); a data-only
+  verifier checks the proposal against the image statistics; the engine renders
+  it; one bounded visual-review revision may follow. Guidance text steers the
+  proposal and a Strength control bounds how far it may move.
+- **Feature 2 — A deterministic develop engine.** Exposure, white balance,
+  tonal controls, RGB point curves, HSL, colour grading, texture, clarity,
+  dehaze, noise reduction, sharpening, vignette, crop, and lens correction, with
+  linear, radial, brush, bitmap, luminance-range, and colour-range masks
+  combined by Add, Subtract, or Intersect. The GUI, the CLI's `apply`, and the
+  web UI render through the same code; there is no hidden GUI-only look.
+- **Feature 3 — Local AI masks.** Subject (BiRefNet, with a named U²-Net
+  fallback), sky (OneFormer ADE20K), and point-prompted object (SAM 2.1)
+  selection run as local Python sidecars with pinned weights and need no API
+  key.
+- **Feature 4 — Lightroom/ACR interoperability.** Sidecar XMP is read as the
+  merge base and written back with unmodeled fields preserved byte for byte;
+  Lightroom brush dab streams are imported; the beside-RAW export is a
+  separate, confirmed action.
+- **Feature 5 — Style read.** Index your own Lightroom RAW+XMP pairs and let
+  the advisor retrieve similar prior edits as soft references. Retrieval steers
+  the proposal; nothing is copied pixel for pixel.
+- **Feature 6 — Reverse-fit.** `match` or the GUI's **Reverse-fit** estimates an
+  engine recipe from any target look — a generated image, someone else's
+  render, a reference frame — measures how far the target's *content* has
+  diverged before deciding how much to trust it, then fits global, zoned, and
+  luminance-range corrections behind evidence gates. The recovered recipe
+  applies deterministically to the original full-resolution RAW.
+- **Feature 7 — Generative and pixel tools, opt-in and labelled.** Reimagine
+  (gpt-image-2) creates a lower-resolution target from a prompt; retouch, heal,
+  and SCUNet denoise change pixels directly. The UI marks generated pixels as
+  generated.
+- **Feature 8 — Versions, variants, and three front ends.** Every photo keeps
+  Original, AI-generated, and Reverse-fit cards with numbered snapshots in a
+  per-user develop store; the desktop GUI, the scriptable CLI, and a small
+  loopback web UI all link the same library.
+
+The core develop path never invents scene content. Local SCUNet denoise,
+generative reimagine/retouch, and pixel heal are explicit opt-in exceptions;
+the UI distinguishes generated pixels from engine-rendered develops.
+
+Out of scope in this release: bit-exact Adobe rendering (parity is measured,
+not identical), an exact X-Trans demosaic (the plane fit is approximate),
+prebuilt Linux and macOS binaries (CI builds and tests them from source), and
+multi-class semantic segmentation.
+
+## How it works
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/architecture-dark.png" />
+  <img src="docs/images/architecture-light.png" alt="Autoshop runtime architecture: three front ends over one Rust library, local Python sidecars, and opt-in external AI services" />
+</picture>
+
+<sub>Runtime architecture. The interactive version is
+[docs/architecture/autoshop.architecture.html](docs/architecture/autoshop.architecture.html),
+generated from [autoshop.architecture.json](docs/architecture/autoshop.architecture.json)
+with [archify](https://github.com/tt-a1i/archify).</sub>
+
+The primary path is short. [`src/decode.rs`](src/decode.rs) decodes the RAW
+and yields a preview, EXIF, and a histogram; the vision advisor in
+[`src/advisor/`](src/advisor/) turns those into an `EditRecipe`
+([`src/recipe.rs`](src/recipe.rs)); a verifier that receives recipe, EXIF,
+histogram, and clipping data — never pixels — checks it; the engine in
+[`src/render.rs`](src/render.rs) applies it; the developed image, the recipe,
+and a Lightroom-readable sidecar ([`src/xmp.rs`](src/xmp.rs)) are written to
+the per-user develop store. Local masks, style retrieval, reverse-fit, and the
+generative tools hang off that path without changing it.
+
+What is deliberately hard about it:
+
+- **One contract between the AI and the pixels.** `EditRecipe` is the only
+  channel. The advisor answers under a strict `json_schema`; every control is
+  bounded and clamped on entry; missing fields take defaults, so older recipes
+  stay readable; and
+  the rationale and confidence the model wrote are shown to the user and
+  stored with the develop. The same struct drives the GUI sliders, the CLI,
+  the web UI, and the XMP projection.
+- **Reproducible by construction.** The renderer is a deterministic f32
+  pipeline: the same recipe on the same RAW yields the same bytes on every
+  run, which is what makes an AI proposal auditable, replayable, and safe to
+  hand to a batch.
+- **Measured against Lightroom, not assumed.** The tone LUT, the two-arm
+  Texture model, the radial feather LUT, the brush flow law, and the lens
+  mask-frame transport were each fitted to measurements and are quoted with
+  their residuals in the next section and in
+  [docs/TECH_STACK.md](docs/TECH_STACK.md); where a law is not closed, the
+  documentation says so instead of rounding it off.
+- **Reverse-fit is an estimator with an honesty budget.** A structural
+  divergence statistic decides whether a target still shows the same scene
+  (full solve) or a repainted one (bounded Atmosphere mode). Semantic zones,
+  luminance-range bands, and quadtree tiles are each admitted only through
+  evidence gates and a do-no-harm frame check, and a read-only local-field
+  analyzer states how much of the remaining difference *any* spatially
+  varying develop could reach before a producer runs — a ceiling reported in
+  numbers, never applied to pixels.
+- **Sidecars are merged, not regenerated.** The XMP writer edits the fields it
+  owns inside the existing document and leaves everything else untouched, so a
+  Lightroom catalogue survives a round trip.
+- **AI masks carry provenance.** Each cached alpha records the backend that
+  produced it; a better backend forces an honest re-derivation instead of
+  presenting an older mask as the new model's result.
+- **Generated pixels are labelled.** Denoise, reimagine, retouch, and heal are
+  explicit exceptions to the develop path, kept on their own cards, and a
+  reimagined target is scored for structural divergence before anything is
+  fitted to it.
+
+## Results: before and after
+
+Every "before" is Autoshop's own neutral conversion of a Sony α7R IVA 61 MP
+`.ARW`, not the camera JPEG; every "after" is rendered by the engine from a
+recipe unless the caption says the image was generated. Model-judge scores are
+automated review, not human aesthetic approval.
+
+### 1. AI analysis
 
 <p align="center">
 <img src="docs/images/showcase-cat-analyze-pair.jpg" alt="Sony α7R IVA ARW: neutral cat photo beside its AI analyze develop" />
@@ -29,38 +172,48 @@ labelled as such.
 <sub><b>AI analyze develop.</b> Sony α7R IVA <code>.ARW</code>, 61 MP: neutral engine conversion at left; AI-proposed crop, global tone, a radial cat lift, and a linear water hold at right. The model judge moved from 62 to 86; that score is automated review, not human aesthetic approval.</sub>
 </p>
 
-## Contents
+### 2. AI analysis with style read
 
-- [Feature overview](#feature-overview)
-- [Install and quickstart](#install-and-quickstart)
-- [User manual](#user-manual)
-- [Showcase Part A — AI analysis and style transfer](#showcase-part-a--ai-analysis-and-style-transfer)
-- [Showcase Part B — full-image generation to recipe inversion](#showcase-part-b--full-image-generation-to-recipe-inversion)
-- [Supported formats](#supported-formats)
-- [Tech stack and algorithms](#tech-stack-and-algorithms)
-- [Status and roadmap](#status-and-roadmap)
-- [License and acknowledgements](#license-and-acknowledgements)
+<p align="center">
+<img src="docs/images/showcase-lake-style-pair.jpg" alt="Sony α7R IVA ARW, lake and boat: neutral conversion beside the AI develop that read four similar edits from the local style library" />
+<br />
+<sub><b>Lake and boat.</b> Left: neutral engine conversion. Right: an AI develop that retrieved four similar edits from the indexed Lightroom library as soft references; the proposal was accepted and saved as a normal recipe and XMP. The references steer the proposal — no pixels are copied and nothing is generated.</sub>
+</p>
 
-## Feature overview
+### 3. AI reimagine and reverse-fit
 
-- A shared, deterministic develop engine with exposure, white balance, curves,
-  HSL, color grading, texture, clarity, dehaze, detail, crop, and lens-aware
-  local adjustments.
-- Linear, radial, brush, luminance-range, and color-range masks, plus local AI
-  subject, sky, and point-prompted object selection.
-- AI `analyze` and `auto` workflows that propose editable recipes, validate
-  them against image statistics, render them, and optionally run one bounded
-  visual-review revision.
-- Lightroom/ACR sidecars in both directions, with conservative merge behavior
-  for fields Autoshop does not model.
-- Versions and variants for ordinary develops, generated targets, and
-  reverse-fitted looks without rewriting the source photo.
-- Desktop GUI, scriptable CLI, and a small local web UI, all using the same
-  library.
+<p align="center">
+<img src="docs/images/showcase-viaduct-reimagine-fit-pair.jpg" alt="Stone viaduct: AI-generated 3520×2352 target beside the reverse-fitted engine render of the original RAW at 9504×6336" />
+<br />
+<sub><b>Stone viaduct.</b> Left: a 3520×2352 full-image target generated with a configured <code>gpt-image-2</code> — it may invent content. Right: the recipe recovered from that look, rendered by Autoshop on the original RAW at 9504×6336 — it cannot. The statistical look error moved from 0.057 to 0.019 at fit confidence 0.678264; the fitted colour-cast stage was rejected by the fit's own do-no-harm review, so the recovered recipe carries tone and saturation only.</sub>
+</p>
 
-The core develop path never invents scene content. Local SCUNet denoise,
-generative reimagine/retouch, and pixel heal are explicit opt-in exceptions;
-the UI distinguishes generated pixels from engine-rendered develops.
+More examples — three further `analyze` pairs including two documented failure
+modes, the style-read triptychs, and the sunset reimagine — are in
+[docs/SHOWCASE.md](docs/SHOWCASE.md).
+
+## Measured numbers
+
+Every figure below is reproduced from the sections that own it; none is an
+estimate. Sources are the pinned claims in
+[docs/TECH_STACK.md](docs/TECH_STACK.md) and the tests that
+[`scripts/check_docs.py`](scripts/check_docs.py) re-derives.
+
+| What | Measured | Where |
+|---|---|---|
+| Automated test battery | 1017 library / 15 CLI / 145 GUI / 2+2 contract tests; `check_docs` re-derives the pinned release claims | [Tech stack](#tech-stack-algorithms-and-design-philosophy) |
+| RAW coverage | 24 extensions, 725 camera bodies; nine-camera format zoo 9/9 at the last release gate | [Supported formats](#supported-formats) |
+| Lightroom Texture parity | 45 of 45 period/depth anchors within ±0.02 | [Develop pipeline](#develop-pipeline-and-tone-model) |
+| Radial mask closure | 41 of 41 measured vectors within ≤1 px | [Lens correction](#lens-correction-and-lightroom-mask-frame-laws) |
+| Linear mask closure (openly not pixel-closed) | RMS 9.748 / 7.025 / 6.336 px with lens correction on, 12.449 / 9.943 / 4.979 px off | [Lens correction](#lens-correction-and-lightroom-mask-frame-laws) |
+| Brush geometry | D1 error 874 px → 9.8 px after pixel-centre sampling and the pixel/aspect metric | [Masks](#masks) |
+| X-Trans demosaic (approximate) | X-S10 G/R ratio 1.5503 → 0.9476 | [RAW decode](#raw-decode-and-cfa) |
+| Reverse-fit, stone viaduct | look error 0.057 → 0.019, confidence 0.678264 | [Results](#results-before-and-after) |
+| Reverse-fit, sunset | look error 0.060 → 0.042, confidence 0.746691 | [docs/SHOWCASE.md](docs/SHOWCASE.md) |
+| Local-field ceiling, calibration pair | global fit 0.0961 against a ceiling of 0.0700; the accepted sky zone realizes 0.134 of the distance | [User manual §4](#4-use-versions-and-variants) |
+| AI develop, model judge | cat pair 62 → 86; townhouse 84 → 86; balcony 78 → 84; hillside 63 → 87 (automated scores) | [Results](#results-before-and-after), [docs/SHOWCASE.md](docs/SHOWCASE.md) |
+| Style retrieval weight | `W_EMB=2.0` retained after a 147-exemplar calibration | [AI advisor](#ai-advisor-and-reverse-fit) |
+| Memory budget | 1800 MB per photo from a 1771 MB reference probe; 4 GiB RAW admission gate | [Application](#application-and-infrastructure) |
 
 ## Install and quickstart
 
@@ -414,108 +567,6 @@ The local web UI binds to loopback only, checks Host/Origin and cross-site
 requests, requires a fresh per-run session token for state changes, disables API
 caching, and denies framing. By default, Autoshop keeps the source library read-only. If the configured Delivery folder is inside or above a photo’s folder, that delivery subtree is intentionally writable; Settings warns when this removes the folder’s protection. “Export .xmp beside the photo” is the separate, confirmed per-photo sidecar exception.
 
-## Showcase Part A — AI analysis and style transfer
-
-### AI `analyze`: before and after
-
-The hero cat pair is the first `analyze` example: a Sony α7R IVA 61 MP `.ARW`,
-shown as straight conversion and AI develop. The AI chose the crop and a
-restrained global develop plus radial and linear parametric masks; it did not
-use an AI bitmap segmentation mask.
-
-The three established pairs below remain because they show different decisions
-and, importantly, two current failure modes. Each before is Autoshop's neutral
-conversion of the same Sony α7R IVA `.ARW`; each after is an AI-proposed engine
-render, not a generated image. The faint watermark is identical on both halves
-of these three older pairs.
-
-#### Townhouse and pond: tonal range
-
-<table>
-<tr>
-<td width="50%"><img src="docs/images/showcase-1-before.jpg" alt="Sony α7R IVA ARW, townhouse and pond: neutral develop" /><br /><sub><b>Before:</b> neutral engine conversion.</sub></td>
-<td width="50%"><img src="docs/images/showcase-1-after.jpg" alt="Sony α7R IVA ARW, townhouse and pond: AI develop" /><br /><sub><b>After:</b> AI tone, white balance, crop, a linear sky hold, and a radial house lift.</sub></td>
-</tr>
-</table>
-
-The proposal protected white brick while opening the porch and black wall. Its
-model judge moved from 84 to 86 after a bounded revision. Honest blemish: the
-linear sky mask leaves a faint lighter band near the top-left corner. These are
-model-judge scores recorded when the pair was produced (v0.33.0 showcase batch).
-
-#### Balcony view: detail and texture
-
-<table>
-<tr>
-<td width="50%"><img src="docs/images/showcase-2-before.jpg" alt="Sony α7R IVA ARW, balcony view: neutral develop" /><br /><sub><b>Before:</b> neutral engine conversion.</sub></td>
-<td width="50%"><img src="docs/images/showcase-2-after.jpg" alt="Sony α7R IVA ARW, balcony view: AI develop" /><br /><sub><b>After:</b> AI texture, clarity, dehaze, tonal changes, and two linear masks.</sub></td>
-</tr>
-</table>
-
-The siding and shaded structure gain separation; the model judge moved from 78
-to 84. These are model-judge scores recorded when the pair was produced
-(v0.33.0 showcase batch). This pair is deliberately kept as a counter-example:
-the sky is paler than the neutral base even though the local mask asks for more
-sky depth.
-
-#### Hillside neighborhood: establishing scene
-
-<table>
-<tr>
-<td width="50%"><img src="docs/images/showcase-3-before.jpg" alt="Sony α7R IVA ARW, hillside neighborhood: neutral develop" /><br /><sub><b>Before:</b> neutral engine conversion.</sub></td>
-<td width="50%"><img src="docs/images/showcase-3-after.jpg" alt="Sony α7R IVA ARW, hillside neighborhood: AI develop" /><br /><sub><b>After:</b> AI global contrast, restrained color, and green/aqua HSL reductions.</sub></td>
-</tr>
-</table>
-
-Automated visual model review rejected the first acidic-green proposal at 63
-and retained a revision scored 87. These are model-judge scores recorded when
-the pair was produced (v0.33.0 showcase batch). The landscape gains separation,
-but the sky is again paler and milkier than the neutral conversion; that known
-behavior is not captioned as an improvement.
-
-### Style read: neutral, AI develop, and AI develop with references
-
-These triptychs show three states of the same Sony α7R IVA 61 MP `.ARW`: straight
-conversion, an AI develop with style influence disabled, and an AI develop that
-read similar edits from the local style library. They demonstrate the style
-retrieval path, not a pixel-copy or generative transfer.
-
-<img src="docs/images/showcase-lake-style-triptych.jpg" alt="Lake scene: straight conversion, AI develop, and AI develop with style read" />
-
-<sub><b>Lake and boat.</b> The style-read run referenced four similar edits from the indexed Lightroom library and was accepted. The style-off middle panel rendered under a Revise verdict and therefore has no saved recipe/XMP; it is retained only as a transparent comparison.</sub>
-
-<img src="docs/images/showcase-sunset-style-triptych.jpg" alt="Sunset scene: straight conversion, AI develop, and AI develop with style read" />
-
-<sub><b>Sunset.</b> The middle panel is an accepted style-off develop. The style-read proposal at right used retrieved references and rendered at full RAW resolution, but the model judge marked it Revise (85); its attempted revision scored 84 and was discarded, so no style-read recipe/XMP was saved.</sub>
-
-## Showcase Part B — full-image generation to recipe inversion
-
-Part B is a different workflow: generate a complete visual target, then fit an
-ordinary engine recipe to its look. The generated target can invent content;
-the fitted render cannot. The recovered recipe is editable and can be applied
-deterministically to the original full-resolution RAW.
-
-### Sunset reimagine and reverse-fit
-
-<img src="docs/images/showcase-sunset-reimagine-fit-triptych.jpg" alt="Sunset scene: neutral conversion, AI-generated target, and reverse-fitted full-resolution engine render" />
-
-<sub><b>Sunset, Sony α7R IVA 61 MP <code>.ARW</code>.</b> Left: neutral engine conversion. Center: a 3520×2352 full-image target generated with a configured <code>gpt-image-2</code>. Right: the recovered recipe rendered by Autoshop on the original RAW at 9504×6336. The statistical look error moved from 0.060 to 0.042 at fit confidence 0.746691; this is a deterministic tonal/color approximation, not a pixel-aligned reconstruction of generated detail.</sub>
-
-### Viaduct reimagine and reverse-fit
-
-<img src="docs/images/showcase-viaduct-reimagine-fit-triptych.jpg" alt="Stone viaduct scene: neutral conversion, AI-generated target, and reverse-fitted full-resolution engine render" />
-
-<sub><b>Stone viaduct, Sony α7R IVA 61 MP <code>.ARW</code>.</b> Left: neutral engine conversion. Center: a 3520×2352 full-image target generated with the same configured <code>gpt-image-2</code>. Right: the recovered recipe rendered on the original RAW at 9504×6336. The statistical look error moved from 0.057 to 0.019 at fit confidence 0.678264; the fitted color-cast stage was rejected by the fit's own do-no-harm review, so the recovered recipe carries tone and saturation only.</sub>
-
-Reverse-fit measures structural divergence first: same-content targets keep the
-full tone, saturation, and guarded-cast solve, while structurally changed
-targets use bounded Atmosphere mode for overall tone and colour. Zoned fits
-retain independently bounded sky/land adjustments behind a local-quality gate;
-they do not claim to reconstruct generated objects or detail.
-Atmosphere controls read population facts on one structure-blind report ruler,
-while Full zones and detail retain the separate structural evidence and the
-recipe rationale discloses that split.
-
 ## Supported formats
 
 <table>
@@ -571,7 +622,29 @@ Decode degradation and refusal behavior is explicit:
 - A third-party RAW parser panic is contained as a named per-file error, so one
   malformed file does not terminate a batch run.
 
-## Tech stack and algorithms
+## Tech stack, algorithms, and design philosophy
+
+### Design philosophy
+
+- **The AI decides what to change; the engine does it.** In the develop path
+  the model never touches a pixel — it writes a bounded recipe, and the same
+  deterministic renderer serves every front end.
+- **Nothing hidden.** Every proposal carries its rationale and confidence;
+  known weaknesses are written down as honesty markers rather than smoothed
+  over in a caption.
+- **Measured, not assumed.** Rendering laws are fitted to Lightroom and camera
+  measurements and quoted with residuals; release claims in the documentation
+  are re-derived by a script, not copied forward.
+- **Non-destructive and interoperable.** The source library stays read-only,
+  develops live in a per-user store, and sidecars are merged so a Lightroom
+  catalogue survives the round trip.
+- **Local first.** Segmentation, denoise, correspondence, and style embeddings
+  run as local sidecars; pixels leave the machine only for an AI operation
+  the user asks for, and the verifier never receives them.
+- **Generated pixels are labelled.** Reimagine, retouch, heal, and denoise are
+  opt-in exceptions kept on their own cards.
+
+### Implementation
 
 The canonical implementation page is **[Tech stack and algorithms](docs/TECH_STACK.md)**.
 It gives the equations, parameter provenance, measured Lightroom/camera results,
@@ -668,7 +741,7 @@ Ubuntu and macOS. The current battery is **1017 library (1006 pass + 11 `#[ignor
 [`scripts/check_docs.py`](scripts/check_docs.py) gate re-derives pinned release
 claims. Model weights are not stored in this repository.
 
-## Status and roadmap
+## Status, roadmap, and known limitations
 
 Release gates for v1.0.0 cover the CLI, desktop GUI, sidecar contracts, format
 fixtures, and deterministic renderer; the built artifacts' sizes and hashes

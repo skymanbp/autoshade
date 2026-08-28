@@ -1,0 +1,340 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "Autoshop — runtime architecture",
+    "locale": "en",
+    "quality_profile": "showcase"
+  },
+  "components": [
+    {
+      "id": "desktop-gui",
+      "type": "frontend",
+      "label": "Desktop GUI",
+      "sublabel": "autoshop-gui · eframe 0.29",
+      "pos": [
+        40,
+        260
+      ],
+      "size": [
+        200,
+        72
+      ]
+    },
+    {
+      "id": "cli",
+      "type": "frontend",
+      "label": "CLI",
+      "sublabel": "autoshop · clap 4.6",
+      "pos": [
+        40,
+        356
+      ],
+      "size": [
+        200,
+        72
+      ]
+    },
+    {
+      "id": "web-ui",
+      "type": "frontend",
+      "label": "Local web UI",
+      "sublabel": "serve · tiny_http 0.12",
+      "tag": "loopback + token",
+      "pos": [
+        40,
+        452
+      ],
+      "size": [
+        200,
+        72
+      ]
+    },
+    {
+      "id": "raw-decode",
+      "type": "backend",
+      "label": "RAW decode",
+      "sublabel": "decode.rs · rawler 0.7.2",
+      "tag": "24 formats · 725 bodies",
+      "pos": [
+        280,
+        356
+      ],
+      "size": [
+        200,
+        72
+      ]
+    },
+    {
+      "id": "ai-advisor",
+      "type": "backend",
+      "label": "AI advisor",
+      "sublabel": "advisor/ · vision, verify, judge",
+      "pos": [
+        520,
+        356
+      ],
+      "size": [
+        200,
+        72
+      ]
+    },
+    {
+      "id": "edit-recipe",
+      "type": "backend",
+      "label": "EditRecipe",
+      "sublabel": "recipe.rs · bounded JSON",
+      "tag": "rationale + confidence",
+      "pos": [
+        760,
+        356
+      ],
+      "size": [
+        200,
+        72
+      ]
+    },
+    {
+      "id": "render-engine",
+      "type": "backend",
+      "label": "Render engine",
+      "sublabel": "render.rs · f32, rayon rows",
+      "tag": "byte-identical output",
+      "pos": [
+        1000,
+        356
+      ],
+      "size": [
+        200,
+        72
+      ]
+    },
+    {
+      "id": "xmp-sidecar",
+      "type": "database",
+      "label": "XMP sidecar",
+      "sublabel": "xmp.rs · hand-rolled crs:",
+      "tag": "merge, never overwrite",
+      "pos": [
+        1000,
+        580
+      ],
+      "size": [
+        200,
+        72
+      ]
+    },
+    {
+      "id": "develop-store",
+      "type": "database",
+      "label": "Develop store",
+      "sublabel": "store.rs · per-user root",
+      "tag": "versions + variants",
+      "pos": [
+        760,
+        580
+      ],
+      "size": [
+        200,
+        72
+      ]
+    },
+    {
+      "id": "py-sidecars",
+      "type": "backend",
+      "label": "Local Python sidecars",
+      "sublabel": "segment.py · denoise.py · correspond.py · embed.py",
+      "tag": "weights pinned, fetched on first use",
+      "pos": [
+        520,
+        780
+      ],
+      "size": [
+        460,
+        72
+      ]
+    },
+    {
+      "id": "responses-api",
+      "type": "external",
+      "label": "Responses API",
+      "sublabel": "OpenAI-compatible",
+      "pos": [
+        520,
+        60
+      ],
+      "size": [
+        200,
+        72
+      ]
+    },
+    {
+      "id": "claude-cli",
+      "type": "external",
+      "label": "claude CLI",
+      "sublabel": "subprocess · Claude Code OAuth",
+      "tag": "no API key",
+      "pos": [
+        760,
+        60
+      ],
+      "size": [
+        200,
+        72
+      ]
+    }
+  ],
+  "boundaries": [
+    {
+      "kind": "region",
+      "label": "One process, one binary — the AI returns a recipe, not pixels",
+      "wraps": [
+        "desktop-gui",
+        "cli",
+        "web-ui",
+        "raw-decode",
+        "ai-advisor",
+        "edit-recipe",
+        "render-engine",
+        "xmp-sidecar",
+        "develop-store"
+      ]
+    },
+    {
+      "kind": "security-group",
+      "label": "Local sidecars — subprocess, pinned weights",
+      "wraps": [
+        "py-sidecars"
+      ]
+    },
+    {
+      "kind": "security-group",
+      "label": "External AI services — opt-in, only on user request",
+      "wraps": [
+        "responses-api",
+        "claude-cli"
+      ]
+    }
+  ],
+  "connections": [
+    {
+      "id": "gui-links-library",
+      "from": "desktop-gui",
+      "to": "raw-decode"
+    },
+    {
+      "id": "cli-opens-raw",
+      "from": "cli",
+      "to": "raw-decode",
+      "variant": "emphasis"
+    },
+    {
+      "id": "web-links-library",
+      "from": "web-ui",
+      "to": "raw-decode"
+    },
+    {
+      "id": "decode-to-advisor",
+      "from": "raw-decode",
+      "to": "ai-advisor",
+      "label": "preview, EXIF, histogram",
+      "variant": "emphasis",
+      "labelDy": -30
+    },
+    {
+      "id": "advisor-calls-responses",
+      "from": "ai-advisor",
+      "to": "responses-api",
+      "label": "HTTPS · strict json_schema",
+      "variant": "security"
+    },
+    {
+      "id": "advisor-to-recipe",
+      "from": "ai-advisor",
+      "to": "edit-recipe",
+      "label": "bounded slider set",
+      "variant": "emphasis",
+      "labelDy": -30
+    },
+    {
+      "id": "recipe-to-verifier",
+      "from": "edit-recipe",
+      "to": "claude-cli",
+      "label": "verify (data, never pixels)",
+      "variant": "emphasis"
+    },
+    {
+      "id": "verifier-to-render",
+      "from": "claude-cli",
+      "to": "render-engine",
+      "label": "accepted recipe",
+      "variant": "emphasis"
+    },
+    {
+      "id": "render-to-xmp",
+      "from": "render-engine",
+      "to": "xmp-sidecar",
+      "label": ".xmp + rendered image",
+      "variant": "emphasis",
+      "labelDy": 24
+    },
+    {
+      "id": "recipe-to-store",
+      "from": "edit-recipe",
+      "to": "develop-store",
+      "label": "saved per photo path",
+      "labelDy": 24
+    },
+    {
+      "id": "render-to-sidecars",
+      "from": "render-engine",
+      "to": "py-sidecars",
+      "label": "AI masks · denoise",
+      "labelDy": 68
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "Doctrine",
+      "items": [
+        "The AI decides what to change; a deterministic Rust engine does it",
+        "Reproducible — same recipe + same RAW ⇒ byte-identical output",
+        "Non-destructive — the recipe is a small JSON, originals are never modified",
+        "Auditable — every recipe carries a rationale + confidence",
+        "Lightroom-interoperable — the sidecar merges into an existing crs: document"
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "Opt-in exceptions that DO produce pixels",
+      "items": [
+        "SCUNet denoise (denoise.rs → python/denoise.py)",
+        "gpt-image-2 reimagine / retouch via the Images API /v1/images/edits",
+        "Deterministic pixel heal (retouch.rs)",
+        "Each is explicit, requested by the user, and labelled as generated"
+      ]
+    },
+    {
+      "dot": "violet",
+      "title": "Reverse-fit and style matching",
+      "items": [
+        "fit.rs, fit_zoned/ and fit_field.rs fit an EditRecipe to a target look",
+        "A structural-divergence gate chooses Full or Atmosphere mode",
+        "Semantic zones or luminance-range bands, then frozen-evidence quadtree tiles",
+        "The local-field analyzer is read-only: it discloses a ceiling and a shape, never reaching the engine",
+        "style.rs ranks z-scored RAW + XMP exemplars, optionally with SigLIP 2 embeddings"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "Trust and privacy",
+      "items": [
+        "The verifier receives the recipe, EXIF and histogram — never pixels",
+        "Responses API requests set store: false",
+        "serve binds 127.0.0.1, mints a per-run session token and checks Host / Origin",
+        "Sidecar weights are sha256- and byte-pinned, fetched on first use, never in the repository"
+      ]
+    }
+  ]
+}
