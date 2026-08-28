@@ -195,7 +195,7 @@
 
 ## 当前状态（已完成，勿重做）
 
-- **🧭 共几何根因 + 氛围结构盲教义已提交（2026-08-27 晚，B1 复审返工 Codex F1–F8 + 共几何/教义主模型亲写 + B″ 实现 Codex
+- **🧭 共几何根因 + 氛围结构盲教义已提交 `10e02bb`（2026-08-27 晚，B1 复审返工 Codex F1–F8 + 共几何/教义主模型亲写 + B″ 实现 Codex
   gpt-5.6-sol xhigh 至活体步撞额度、主模型接管收口）**：
   **根因一**＝两侧分析缩略图独立取样，neutral.jpg 1600×1067→384×256 而 target.jpg 1600×1069→384×257，`structure_divergence`
   遇异长静默 `matched()` → `globally_same_content=true` → 结构证据门对 GUI/neutral 路径**一直关着**（RAW CLI 路径 257 vs 257 门开）
