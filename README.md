@@ -322,8 +322,7 @@ What is deliberately hard about it:
 - **Reverse-fit is an estimator with an honesty budget.** A structural
   divergence statistic decides whether a target still shows the same scene
   (full solve) or a repainted one (bounded Atmosphere mode). Semantic zones,
-  luminance-range bands, quadtree tiles, and free-form remainder masks are
-  each admitted only through
+  luminance-range bands, and quadtree tiles are each admitted only through
   evidence gates and a do-no-harm frame check, and a read-only local-field
   analyzer states how much of the remaining difference *any* spatially
   varying develop could reach before a producer runs — a ceiling reported in
@@ -563,12 +562,6 @@ zone or a spatial tile is judged on its own members, so a land zone is no
 longer withheld because a replaced sky happens to share its luminance bins.
 With its colour controls withheld, a zone whose luminance already matches is
 left alone and says so instead of being dialled for a hairline tone gain.
-
-The free-form field-mask pass then consumes only the remainder not already
-covered by accepted tiles. It uses the field's frozen per-pixel weight, keeps
-opposite signs in separate 4-connected components, and discloses every
-proposal and typed refusal before or after fitting; the layer is enabled with
-the field by default and can be disabled byte-for-byte.
 
 Before either local producer runs, reverse-fit also measures how much of the
 remaining difference a spatially varying develop could reach at all. A
