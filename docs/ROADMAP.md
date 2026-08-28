@@ -195,6 +195,16 @@
 
 ## 当前状态（已完成，勿重做）
 
+- **🧮 步10-B3 余量自由蒙版已提交 `662b688`（2026-08-28，Codex 实现→Codex 只读复审 5 MAJOR + 五视角代理复审 wf_ca8c0e99 判 FIX-THEN-SHIP→Codex 修复批（中转）→主审亲核收口；用户令：此后对抗复审 fan-out 改派多路 Codex）**：
+  局部场之后、瓦片之后的第四生产者读余量：候选像素＝weight>0 ∧ |remainder|>2/255 ∧ 已接受瓦片 alpha<0.5；4-连通同号分量按 Σ|remainder|×weight 排名（seed 决胜＝确定性），
+  64 像素底线→双方 scoped 证据份额≥3%→D<0.65→帽 2；每个分量必有 PROPOSED / ATTACHED / REFUSED{footprint, mass, share, divergence, cap, raster-claim, raster-write, zone-refused, frame, rim} 之一，无候选写 NONE；
+  附着＝最近邻上采样 2048 + 半径 8 引导精修 + ZoneAttachment(Custom/Bitmap) + 与瓦片共用一条 `enforce_bitmap_boundary`（帧零容差 + rim 0.012，Frame/Rim 分型）；拒绝只回滚试探性附着注、保留精修注；停机披露 `skipped` 按层开关派生。
+  修复批闭合复审五项：A 关层逐字节（stop 前/后/不停三分支）；B 拒绝披露保留 + Footprint/RasterWrite 拆分；C 反证补齐（不等质量反号、4-连通、帽、真瓦片排除、typed 拒绝/附着、秩确定性）；D 文档 + check_docs 新增 TECH_STACK 电池 Claim；E `AUTOSHOP_B3_STAGE_TIMING` 删、`propose_free_masks` cfg(test)。
+  主审亲核：四臂配方 compare_recipes 对 B2 supervisor 全 IDENTICAL（拨盘+置信）；六臂 EXIT=0、**无一自由蒙版附着**（neutral 提案 1−/2+ 被 zone-refused/rim 拒，RAW 1−/5+，p36 1+/2− 同）；像素尺 ON 12.49/20.58/5.89、OFF 10.63/16.46/5.87；rationale 11,645/9,282/15,998 B。
+  主审揪出并修：Codex 文档三处（ROADMAP M-表被注释断表 + `\r` 误改→还原；ARCHITECTURE 计数注解 1017/1021 自相矛盾且引本机 target/ 路径；README 两句错位→并为 §6 段落）；手工变异三条：M-B 红（帧/rim 拒绝不计入结构化结果→语料双红），**M-A / M-C 绿＝覆盖缺口**（自由蒙版阶段后的 realized 披露无人钉；真实 zone-refused 路径的 typed 拒绝只被 cfg(test) 捷径覆盖）→补 `free_mask_stage_publishes_its_own_realized_reading` + `free_mask_real_zone_refusal_is_typed`（ZONE_ALREADY_MATCHED 真路径）后复跑均红；Codex 十变异红（mutations.md）。
+  门 1034=1023 pass+11 ignored(+11i)/15/145/2+2 双特性、集差 +17/−0 逐名对 d21304a、clippy 0+0、i18n 0、字体 847/847、check_docs 23P/0F/4S、--gates 26P/0F/1S（主审转录 target/b3-main/gates-final.txt）。
+  同批无代码文档提交：`08e376b` What is new + 两批六帧结果、`d3ed3a0` 删两句提前入 README 的 B3 句、`5bdc202` What is new 按算法重写、`471f15e` archify 图加创新组件、`ada3c68` README 精简（991→896 行，token 集差核对信息不丢）、`a2d6731` 手册拆到 docs/USER_MANUAL.md（243 行；SECURITY/site 链接同步）。
+  登记观察＝瓦片排除用原始 alpha（rim 收缩后的瓦片仍挡提案）、64 像素底线是瓦片无底线的回退、语料上全被下游拒＝本批交付披露非修正、p36 OFF 继承转录 16,384。下步＝F1 自由度轴（用户 12:00 裁定，任务书 task-fit-freedom.md）。
 - **📘 README 九段重构 + archify 架构图已提交 `2ea6c7e`（2026-08-28，用户令：读全局 README 标准；before/after 恰放三对；用 archify 出整体架构图）**：
   README 按九段标准重排＝What Autoshop is（简介+受众+教义）/ What it does（Feature 1–8）/ How it works（archify 架构图 + 主路径 + 七条「难在哪」）/
   Results: before and after（恰三对：①AI 分析＝猫对；②带风格读的 AI 分析＝湖与船 neutral vs 四参考被接受的 style05；③AI 整图+反推＝高架桥 gpt-image-2 3520×2352 目标 vs
@@ -228,7 +238,7 @@
   活体未触发（余 ≥0.0099）单测钉；ZONE_DROPPED 漂移 `{:+.5}` 令 r2c0 +0.00036/+0.00035 不再打成零；rationale +544 B（10331→10875 <16 KiB）；分析仪成本 solve 1.343 s。
   门 1006(+11i)/15/145/2+2 双特性、clippy 0+0、i18n 0、check_docs 23P/--gates 25P、集差 +26/−0 逐名；变异 12 红（Codex/Opus A–G + 主审 stop-guard/own-sign/
   domain-map/union-loop/shape-weight）。复审驳回项（上界尺偏置、离散度单地、外扩取整、停机时序、cfg_attr 死码）与登记项（提案被筛无披露、局部支持退化画幅）
-  见 ARCHITECTURE §4.8。收口＝fitgrid/fitlayer/fitrange 三目录与 target 垃圾按用户 2026-08-28 裁定删除。下步＝B3 余量自由蒙版（Codex 05:17 后可派）。
+  见 ARCHITECTURE §4.8。收口＝fitgrid/fitlayer/fitrange 三目录与 target 垃圾按用户 2026-08-28 裁定删除。下步＝B3 余量自由蒙版（已提交 `662b688`，见上条）。
 - **🧭 共几何根因 + 氛围结构盲教义已提交 `10e02bb`（2026-08-27 晚，B1 复审返工 Codex F1–F8 + 共几何/教义主模型亲写 + B″ 实现 Codex
   gpt-5.6-sol xhigh 至活体步撞额度、主模型接管收口）**：
   **根因一**＝两侧分析缩略图独立取样，neutral.jpg 1600×1067→384×256 而 target.jpg 1600×1069→384×257，`structure_divergence`
