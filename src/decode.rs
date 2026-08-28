@@ -2560,7 +2560,7 @@ mod tests {
             }
             b
         }
-        let dir = std::env::temp_dir().join("autoshop-tiff-guard-test");
+        let dir = std::env::temp_dir().join(format!("autoshop-tiff-guard-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let selfloop = dir.join("selfloop.tif");
         std::fs::write(&selfloop, tiff(&[(8, 8)])).unwrap();
@@ -2635,7 +2635,7 @@ mod tests {
         const STD: &[u8] = b"http://ns.adobe.com/xap/1.0/\0";
         const EXT: &[u8] = b"http://ns.adobe.com/xmp/extension/\0";
         const GUID: &[u8; 32] = b"5CA1AB1E5CA1AB1E5CA1AB1E5CA1AB1E";
-        let dir = std::env::temp_dir().join("autoshop-jpeg-xmp-test");
+        let dir = std::env::temp_dir().join(format!("autoshop-jpeg-xmp-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let standard = {
             let mut v = STD.to_vec();
@@ -2694,7 +2694,7 @@ mod tests {
     /// different develop), and a non-text packet is an error, never "absent".
     #[test]
     fn an_embedded_xmp_packet_is_read_from_the_tiff_tag() {
-        let dir = std::env::temp_dir().join("autoshop-embedded-xmp-test");
+        let dir = std::env::temp_dir().join(format!("autoshop-embedded-xmp-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let doc = crate::xmp::recipe_to_xmp(&crate::recipe::EditRecipe {
             exposure_ev: 0.8,

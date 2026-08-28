@@ -345,6 +345,41 @@ pub fn sidecar_tail(stderr: &[u8], stdout: &[u8]) -> String {
 /// `denoise.rs` and `advisor/claude.rs`. (The GUI bin crate keeps its own
 /// copies — a dependency's `cfg(test)` items are not compiled into it.)
 #[cfg(test)]
+mod fixture_dir_tests {
+    /// Every fixture path a test builds under `temp_dir()` must carry the
+    /// process id: fixed names let concurrent test processes (a second
+    /// worktree's battery, nextest) delete and overwrite each other's fixtures
+    /// mid-run. Measured 2026-08-28 before the sweep: three concurrent
+    /// processes looping three fixed-name `store` tests failed 29 of 36 runs
+    /// (`Os error 5` and cross-process assertion reads); 0 of 36 after.
+    #[test]
+    fn test_fixture_dirs_are_process_unique() {
+        fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+            for entry in std::fs::read_dir(dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    walk(&path, out);
+                } else if path.extension().is_some_and(|e| e == "rs") {
+                    out.push(path);
+                }
+            }
+        }
+        let mut files = Vec::new();
+        walk(std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/src")), &mut files);
+        let mut offenders = Vec::new();
+        for file in files {
+            let text = std::fs::read_to_string(&file).unwrap();
+            for (index, line) in text.lines().enumerate() {
+                if line.contains("temp_dir()") && line.contains(concat!(".join(", "\"autoshop-")) {
+                    offenders.push(format!("{}:{}", file.display(), index + 1));
+                }
+            }
+        }
+        assert!(offenders.is_empty(), "fixed-name fixture dirs (add std::process::id()): {offenders:#?}");
+    }
+}
+
+#[cfg(test)]
 pub(crate) fn test_dir(tag: &str) -> std::path::PathBuf {
     use std::{env, fs, process};
     let dir = env::temp_dir().join(format!("autoshop-{tag}-{}", process::id()));

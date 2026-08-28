@@ -4070,7 +4070,7 @@ fn crs_scope_inner(doc: &str) -> Option<String> {
 /// Correction tag and nothing else carries those names), which is why the
 /// adjudication rated it LOW and adversarial-input-only. But the nearest real
 /// threat is already in the corpus: Lightroom really does put `crs:Local*`
-/// NAMES on nested `Mask/Image` components (`LocalInputDigest` and friends, 218
+/// NAMES on nested `Mask/Image` components (`LocalInputDigest` and friends, 105
 /// measured instances), and today's reader survives that only because those
 /// values are strings nobody parses as a number — a coincidence, not a guard.
 ///
@@ -6565,7 +6565,7 @@ fn parse_brush_group(
 ///  * an attribute name outside the modelled set plus
 ///    [`AI_MASK_PROVENANCE_KEYS`];
 ///  * a child element other than `crs:Gesture`, or a Gesture holding anything
-///    but `Mask/Paint` (83 Gestures, one Paint each).
+///    but `Mask/Paint` (40 Gestures, one Paint each).
 fn parse_ai_mask(scope: &str, img: &XmlComponent<'_>) -> Result<MaskGeometry, ()> {
     let tag = Tag::new(img.tag);
     if !matches!(tag.crs_str("MaskActive").as_deref(), None | Some("true")) {
@@ -14992,15 +14992,15 @@ mod tests {
 
     // --- R27 Batch-5: the `Mask/Image` AI arm (L-08 Arm C) -------------------
     //
-    // Fixtures below reproduce the shape measured across 218 real `Mask/Image`
+    // Fixtures below reproduce the shape measured across 105 real `Mask/Image`
     // instances in the user's library on 2026-08-19: 21 distinct attribute
     // names, `MaskActive="true"` on all of them, `MaskVersion="1"` on all of
     // them, `MaskSubType` in {0, 1, 2}, `ReferencePoint` on all of them, and
-    // exactly one optional child element (`crs:Gesture`, on 83).
+    // exactly one optional child element (`crs:Gesture`, on 40).
 
     /// One `Mask/Image` component. `extra` splices additional attributes;
     /// `gesture` splices a `crs:Gesture` child (empty = self-closing, which is
-    /// what 135 of the 218 real instances are).
+    /// what 65 of the 105 real instances are).
     fn lr_ai_mask(subtype: &str, blend: &str, value: &str, extra: &str, gesture: &str) -> String {
         let head = format!(
             "        <rdf:Description\n\

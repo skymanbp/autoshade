@@ -1255,7 +1255,7 @@ fn fit_recipe_zoned_inner(
                 &mut report.notes,
                 crate::rationale::Note::new(
                     crate::rationale::keys::ZONED_UNAVAILABLE,
-                    vec![("e", format!("{e:#}"))],
+                    vec![("e", crate::rationale::error_line(&e))],
                 ),
             );
             let field = layers.field
@@ -3066,7 +3066,7 @@ mod tests {
                     &mut report.notes,
                     crate::rationale::Note::new(
                         crate::rationale::keys::ZONED_UNAVAILABLE,
-                        vec![("e", format!("{e:#}"))],
+                        vec![("e", crate::rationale::error_line(&e))],
                     ),
                 );
                 range::attach_luminance_ranges(src, target, &mut report, &[]);

@@ -2606,7 +2606,7 @@
 
     #[test]
     fn read_saved_develop_lets_a_newer_lightroom_sidecar_win() {
-        let dir = std::env::temp_dir().join("autoshop-gui-lr-sidecar");
+        let dir = std::env::temp_dir().join(format!("autoshop-gui-lr-sidecar-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let src = dir.join("_gui_lr_probe.ARW");
@@ -2657,7 +2657,7 @@
     /// it (stamp_calibration) before comparing.
     #[test]
     fn batch_export_resolves_the_same_develop_the_open_path_restores() {
-        let dir = std::env::temp_dir().join("autoshop-gui-batch-antidrift");
+        let dir = std::env::temp_dir().join(format!("autoshop-gui-batch-antidrift-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let src = dir.join("_gui_batch_drift.ARW");
@@ -2761,7 +2761,7 @@
     /// L13 rule: the surfaces answer one develop).
     #[test]
     fn an_embedded_raw_xmp_packet_restores_when_nothing_else_answers() {
-        let dir = std::env::temp_dir().join("autoshop-gui-packet-restore");
+        let dir = std::env::temp_dir().join(format!("autoshop-gui-packet-restore-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let src = dir.join("_gui_packet.dng");
@@ -2798,7 +2798,7 @@
     /// into absence.
     #[test]
     fn an_embedded_packet_never_outranks_the_store_or_a_clear() {
-        let dir = std::env::temp_dir().join("autoshop-gui-packet-rank");
+        let dir = std::env::temp_dir().join(format!("autoshop-gui-packet-rank-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let src = dir.join("_gui_packet_rank.dng");
@@ -5783,7 +5783,7 @@
     #[test]
     fn a_delivery_root_that_overlaps_the_open_photos_folder_is_warned_about() {
         // Constructed paths only — the predicate must never touch the disk.
-        let lib = std::env::temp_dir().join("autoshop-lowr3-library");
+        let lib = std::env::temp_dir().join(format!("autoshop-lowr3-library-{}", std::process::id()));
         let trip = lib.join("TripA");
         let photo = trip.join("DSC1.ARW");
         let p = Some(photo.as_path());
@@ -5801,7 +5801,7 @@
 
         assert!(!delivery_root_shadows_photo(&lib.join("TripB"), p), "a sibling folder is fine");
         assert!(
-            !delivery_root_shadows_photo(&std::env::temp_dir().join("autoshop-lowr3-out"), p),
+            !delivery_root_shadows_photo(&std::env::temp_dir().join(format!("autoshop-lowr3-out-{}", std::process::id())), p),
             "a folder outside the library is the normal case and must stay quiet"
         );
         assert!(!delivery_root_shadows_photo(&trip, None), "no photo open, nothing to say");
@@ -7459,7 +7459,7 @@
         app.base_preview = Some(plate.clone());
         app.source_preview = Some(plate);
         app.base_turns = 0;
-        let src = std::env::temp_dir().join("autoshop-rotate-plate.arw");
+        let src = std::env::temp_dir().join(format!("autoshop-rotate-plate-{}.arw", std::process::id()));
         std::fs::write(&src, b"raw").unwrap();
         app.src_path = Some(src);
 

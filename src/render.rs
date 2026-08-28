@@ -8996,7 +8996,7 @@ mod tests {
 
     #[test]
     fn export_publishes_atomically_and_leaves_no_staging_file() {
-        let dir = std::env::temp_dir().join("autoshop-export-atomic");
+        let dir = std::env::temp_dir().join(format!("autoshop-export-atomic-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let src = dir.join("src.png");
@@ -12937,7 +12937,7 @@ mod tests {
     #[test]
     fn dead_bitmap_rasters_reports_only_unloadable_geometries() {
         use crate::recipe::{LocalAdjustment, MaskCombine, MaskComponent, MaskGeometry};
-        let dir = std::env::temp_dir().join("autoshop-dead-raster-probe");
+        let dir = std::env::temp_dir().join(format!("autoshop-dead-raster-probe-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let good = dir.join("good-raster.png");
         image::GrayImage::from_pixel(4, 4, image::Luma([200])).save(&good).unwrap();
@@ -12969,7 +12969,7 @@ mod tests {
     /// the difference). A real small raster passes.
     #[test]
     fn open_mask_bounded_refuses_oversized_headers() {
-        let dir = std::env::temp_dir().join("autoshop-mask-bounded-test");
+        let dir = std::env::temp_dir().join(format!("autoshop-mask-bounded-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let good = dir.join("small.png");
         image::GrayImage::from_pixel(4, 4, image::Luma([1])).save(&good).unwrap();

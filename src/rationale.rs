@@ -600,6 +600,109 @@ pub fn push_note(rationale: &mut String, notes: &mut Vec<Note>, note: Note) {
     }
 }
 
+/// Reduce an operational error to the single sanitized line safe for a
+/// persisted rationale. Full diagnostics remain available to stderr/logging.
+pub fn error_line(error: &anyhow::Error) -> String {
+    let display = error.to_string();
+    let first = display
+        .lines()
+        .next()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .unwrap_or("operation failed");
+    // A Python traceback opens with "Traceback (most recent call last):" and
+    // ends with the exception line; the exception line is the disclosure.
+    let first = if first.to_ascii_lowercase().starts_with("traceback") {
+        display
+            .lines()
+            .rev()
+            .map(str::trim)
+            .find(|line| !line.is_empty())
+            .unwrap_or("operation failed")
+    } else {
+        first
+    };
+    let mut line = sanitize_error_paths(first);
+    if let Some(code) = error.chain().find_map(|cause| exit_code(&cause.to_string())) {
+        let canonical = format!("exit {code}");
+        if !line.contains(&canonical) {
+            let suffix = format!("; {canonical}");
+            let room = 160usize.saturating_sub(suffix.chars().count());
+            line = format!("{}{}", truncate_chars(&line, room), suffix);
+        }
+    }
+    truncate_chars(&line, 160)
+}
+
+fn exit_code(text: &str) -> Option<i32> {
+    let lower = text.to_ascii_lowercase();
+    for marker in ["exited", "exit"] {
+        for (offset, _) in lower.match_indices(marker) {
+            let tail: String = text[offset + marker.len()..].chars().take(32).collect();
+            for token in tail.split(|c: char| !c.is_ascii_digit() && c != '-') {
+                if token.is_empty() || token == "-" {
+                    continue;
+                }
+                if let Ok(value) = token.parse::<i32>() {
+                    return Some(value);
+                }
+            }
+        }
+    }
+    None
+}
+
+fn sanitize_error_paths(text: &str) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = String::with_capacity(text.len());
+    let mut i = 0usize;
+    while i < chars.len() {
+        let drive = chars[i].is_ascii_alphabetic()
+            && chars.get(i + 1) == Some(&':')
+            && matches!(chars.get(i + 2), Some('/' | '\\'));
+        let unix = chars[i] == '/'
+            && chars.get(i + 1).is_some_and(|c| !c.is_whitespace())
+            && (i == 0 || !chars[i - 1].is_ascii_alphanumeric());
+        if drive || unix {
+            let start = i;
+            while i < chars.len()
+                && !chars[i].is_whitespace()
+                && !matches!(chars[i], '(' | ')' | '[' | ']' | '{' | '}' | '<' | '>' | '"' | '\'')
+            {
+                i += 1;
+            }
+            let token: String = chars[start..i].iter().collect();
+            out.push_str(&path_basename(&token));
+        } else {
+            out.push(chars[i]);
+            i += 1;
+        }
+    }
+    out
+}
+
+fn path_basename(token: &str) -> String {
+    let mut value = token.trim_end_matches(|c: char| ",.;!?".contains(c)).to_string();
+    if let Some((before, suffix)) = value.rsplit_once(':')
+        && !suffix.is_empty()
+        && suffix.chars().all(|c| c.is_ascii_digit())
+    {
+        value = before.to_string();
+    }
+    let parts: Vec<&str> = value.split(['/', '\\']).filter(|part| !part.is_empty()).collect();
+    let lower: Vec<String> = parts.iter().map(|part| part.to_ascii_lowercase()).collect();
+    if let Some(index) = lower.iter().position(|part| part == "users" || part == "home")
+        && parts.len() <= index + 2
+    {
+        return "[path]".into();
+    }
+    parts.last().copied().unwrap_or("[path]").into()
+}
+
+fn truncate_chars(text: &str, max: usize) -> String {
+    text.chars().take(max).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -697,6 +800,65 @@ mod tests {
         let both = render_en(&[Note::plain(keys::FIT_NOTE_SAT_PEGGED), Note::plain(keys::FIT_NOTE_REHUE_BLOCKED)]);
         assert!(both.starts_with(" Saturation demand"));
         assert!(both.contains("cap (±60). Colour-cast curves"), "plain concatenation: {both}");
+    }
+
+    #[test]
+    fn sidecar_failure_disclosure_has_no_traceback_or_home_path() {
+        let error = anyhow::anyhow!("model sidecar exited Some(7)")
+            .context("sidecar failed at C:\\Users\\alice\\Pictures\\run.py:17\nTraceback (most recent call last):\n  /home/alice/run.py");
+        let safe = error_line(&error);
+        assert!(!safe.contains("Traceback"), "{safe}");
+        assert!(!safe.contains("alice"), "{safe}");
+        assert!(!safe.contains("Users") && !safe.contains("home"), "{safe}");
+        assert!(safe.contains("run.py") && safe.contains("exit 7"), "{safe}");
+        assert!(safe.chars().count() <= 160, "{} chars", safe.chars().count());
+        let unix = error_line(&anyhow::anyhow!("failed at /home/alice/run.py"));
+        let traceback = error_line(&anyhow::anyhow!(
+            r#"Traceback (most recent call last):
+  File "/home/alice/run.py", line 3, in <module>
+ValueError: boom at C:\Users\alice\x.py"#
+        ));
+        assert!(traceback.starts_with("ValueError: boom"), "{traceback}");
+        assert!(!traceback.contains("Traceback") && !traceback.contains("alice"), "{traceback}");
+        assert!(unix.contains("run.py") && !unix.contains("/home") && !unix.contains("alice"), "{unix}");
+        assert!(error_line(&anyhow::anyhow!("sidecar exited with code 9")).contains("exit 9"));
+        let long = anyhow::anyhow!("worker exited Some(12)").context("x".repeat(300));
+        let long = error_line(&long);
+        assert!(long.chars().count() <= 160 && long.ends_with("; exit 12"), "{long}");
+
+        for key in [
+            keys::FIT_CORRESPONDENCE_UNAVAILABLE,
+            keys::ZONED_UNAVAILABLE,
+            keys::REVISION_FAILED,
+            keys::REVISION_VERIFY_FAILED,
+            keys::STYLE_REVERIFY_FAILED,
+            keys::STYLE_UNAVAILABLE,
+            keys::STYLE_REF_IMAGE_FAILED,
+            keys::JUDGE_ROUND_FAILED,
+            keys::JUDGE_REJUDGE_FAILED,
+            keys::JUDGE_UNAVAILABLE,
+            keys::HEURISTIC_UNAVAILABLE,
+            keys::HEAL_DETECT_FAILED,
+        ] {
+            let rendered = render_one(&Note::new(
+                key,
+                vec![
+                    ("round", "1".into()),
+                    ("score", "70".into()),
+                    ("critique", "test".into()),
+                    ("mean", "100".into()),
+                    ("clip_b", "0".into()),
+                    ("clip_w", "0".into()),
+                    ("ev", "0".into()),
+                    ("hl", "0".into()),
+                    ("sh", "0".into()),
+                    ("e", safe.clone()),
+                ],
+            ));
+            assert!(!rendered.contains("Traceback"), "{key}: {rendered}");
+            assert!(!rendered.contains("alice"), "{key}: {rendered}");
+            assert!(!rendered.contains("C:\\Users") && !rendered.contains("/home/"), "{key}: {rendered}");
+        }
     }
 
     /// push_note keeps string and vec in lockstep, and the vec stops at the
