@@ -195,6 +195,27 @@
 
 ## 当前状态（已完成，勿重做）
 
+- **🧮 步10-B2 局部场分析仪已提交 `d21304a`（2026-08-28，Codex 两度撞额度→阶段 A 主模型/Opus 5 亲写、阶段 B Codex 起头+Opus 5 续跑门/活体/文档、主模型主审+53 代理对抗复审后一次系统修）**：
+  `src/fit_field.rs` 只读 12×8×8 双边网格 ×5 参数（ev/gain_rgb/slope）CG 解（f64 累加、λ=1 Tikhonov + s=1 拉普拉斯、≤90 迭、rr≤1e-10、三线性 splat、
+  界 EV±1.25/增益±0.35/斜率±0.5、占据下限 8），拟合权=冻结证据 source_weights × 局部支持 (1−D，96 格 rayon 并行按格序散布=两次求解逐位同) × 未裁剪；
+  输出 ceiling/global（报告自己的尺）、带边际/带离散度/余量+逐像素拟合权/饱和数；场永不进 render/recipe/xmp（grep-pin）。NumPy 交叉验证（scripts/field_check.py +
+  grid_experiment.py + prepare_pairs.py 自 fitgrid/ 迁入，实验产物与探针 crate 存 r30-materials/fitgrid-experiment）：ceiling 0.070022 两侧同、768 顶点最大差 1.5e-5。
+  `fit_zoned/field.rs` 读判：BAND_DISPERSION_MAX=15/255（阶段 A 扫描：均匀 ≤9.2、结构 21.9–51.8、校准中间调 28.7–29.1 /255）、bin 0 按构造盲（`0:blind` 只报一次）、
+  加权 R² 瓦片/线性（平面先得 linear 后瓦片改增量，故 linear 必带帽 2）、有效瓦片帽 4→2、带提案=当前渲染亮度跨度（非证据 bin 索引）；序列器持有
+  realized=(global−err_after)/(global−ceiling) 与 LOCAL_STOP（≤0.002 且 ceiling<global 才跳过瓦片并点名）；range 并集点 `evidence_bins_for_span` 经占据像素的原始亮度
+  10–90% 分位把跨度映射到证据 bin（−1 EV 全局后两域差约两 bin）、反号重叠/自符号分歧两种典型弃权、同号并入带 `{why}`、仍在四带帽之前；attach_tiles 帽参数化；
+  五键 LOCAL_CEILING/SHAPE/BAND_SKIPPED/REALIZED/STOP + RANGE_MERGED {why} 双语（字体 +场/散/迭/顶 847/847）。
+  **主审+复审修**：Codex 的 clear_finished_disclosure 从 MAX_NOTES 有界 vec 重建 rationale 会截断→删；LOCAL_CEILING 硬写 realized 0.000→实测（校准钉 ==0.000=两尺同一）；
+  复审 9 项确认全修＝停机无守卫、提案域错配、自符号未校验、合并注措辞假、帽无直接断言、余量混入占据置零顶点、并集测试空洞、禁用层同义反复、文本 grep 式帽测试→
+  行为式（cap 0 附 0 瓦）；语料测试钉局部支持非常量（合成夹具 ≤144×96 与 >5.4:1 / <1:4 画幅下支持项退化为 1.0 已登记）。
+  **活体**（修复后 exe 5cfb5e6c vs `autoshop-pre-b2.exe`，四臂各自店）：neutral 开 0.189→0.093、关→0.080、RAW 开 0.194→0.098、关→0.108，四臂拨盘+置信归一化
+  SHA 全同（仅 masks[].mask.path 随店）、apply 渲染逐字节同（7d58d379…/7da778ca…）、像素尺 12.49/20.58/5.89（开）10.63/16.46/5.87（关）不变；披露 global
+  0.096145/ceiling 0.070022/饱和 3/CG 39、R² 瓦片 0.394 线性 0.050 free_form 帽 2、结构 bin [0:blind,3,4] 29.14/28.72、天空区 realized 0.134、范围带 0.620；
+  RAW global 0.107764/ceiling 0.072299/R² 0.331/0.039、天空区 0.280、关 0.000；旗舰对无提案存活（3/4 结构、余者份额/2/255 线），并集未动任何带；LOCAL_STOP
+  活体未触发（余 ≥0.0099）单测钉；ZONE_DROPPED 漂移 `{:+.5}` 令 r2c0 +0.00036/+0.00035 不再打成零；rationale +544 B（10331→10875 <16 KiB）；分析仪成本 solve 1.343 s。
+  门 1006(+11i)/15/145/2+2 双特性、clippy 0+0、i18n 0、check_docs 23P/--gates 25P、集差 +26/−0 逐名；变异 12 红（Codex/Opus A–G + 主审 stop-guard/own-sign/
+  domain-map/union-loop/shape-weight）。复审驳回项（上界尺偏置、离散度单地、外扩取整、停机时序、cfg_attr 死码）与登记项（提案被筛无披露、局部支持退化画幅）
+  见 ARCHITECTURE §4.8。收口＝fitgrid/fitlayer/fitrange 三目录与 target 垃圾按用户 2026-08-28 裁定删除。下步＝B3 余量自由蒙版（Codex 05:17 后可派）。
 - **🧭 共几何根因 + 氛围结构盲教义已提交 `10e02bb`（2026-08-27 晚，B1 复审返工 Codex F1–F8 + 共几何/教义主模型亲写 + B″ 实现 Codex
   gpt-5.6-sol xhigh 至活体步撞额度、主模型接管收口）**：
   **根因一**＝两侧分析缩略图独立取样，neutral.jpg 1600×1067→384×256 而 target.jpg 1600×1069→384×257，`structure_divergence`
