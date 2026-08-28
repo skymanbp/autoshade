@@ -2,11 +2,40 @@
   "schema_version": 1,
   "diagram_type": "architecture",
   "meta": {
-    "title": "Autoshop — runtime architecture",
+    "title": "Autoshop — architecture and the ideas inside it",
     "locale": "en",
     "quality_profile": "showcase"
   },
   "components": [
+    {
+      "id": "responses-api",
+      "type": "external",
+      "label": "Responses API",
+      "sublabel": "OpenAI-compatible vision",
+      "pos": [
+        520,
+        40
+      ],
+      "size": [
+        200,
+        72
+      ]
+    },
+    {
+      "id": "claude-cli",
+      "type": "external",
+      "label": "claude CLI",
+      "sublabel": "subprocess · OAuth · data only",
+      "pos": [
+        760,
+        40
+      ],
+      "size": [
+        200,
+        72
+      ],
+      "tag": "no API key"
+    },
     {
       "id": "desktop-gui",
       "type": "frontend",
@@ -14,7 +43,7 @@
       "sublabel": "autoshop-gui · eframe 0.29",
       "pos": [
         40,
-        260
+        220
       ],
       "size": [
         200,
@@ -28,7 +57,7 @@
       "sublabel": "autoshop · clap 4.6",
       "pos": [
         40,
-        356
+        316
       ],
       "size": [
         200,
@@ -39,40 +68,40 @@
       "id": "web-ui",
       "type": "frontend",
       "label": "Local web UI",
-      "sublabel": "serve · tiny_http 0.12",
-      "tag": "loopback + token",
+      "sublabel": "serve · tiny_http · loopback",
       "pos": [
         40,
-        452
+        412
       ],
       "size": [
         200,
         72
-      ]
+      ],
+      "tag": "per-run token"
     },
     {
       "id": "raw-decode",
       "type": "backend",
       "label": "RAW decode",
       "sublabel": "decode.rs · rawler 0.7.2",
-      "tag": "24 formats · 725 bodies",
       "pos": [
         280,
-        356
+        220
       ],
       "size": [
         200,
         72
-      ]
+      ],
+      "tag": "24 formats · 725 bodies"
     },
     {
       "id": "ai-advisor",
       "type": "backend",
       "label": "AI advisor",
-      "sublabel": "advisor/ · vision, verify, judge",
+      "sublabel": "propose · verify · judge",
       "pos": [
         520,
-        356
+        220
       ],
       "size": [
         200,
@@ -84,25 +113,54 @@
       "type": "backend",
       "label": "EditRecipe",
       "sublabel": "recipe.rs · bounded JSON",
-      "tag": "rationale + confidence",
       "pos": [
         760,
-        356
+        220
       ],
       "size": [
         200,
         72
-      ]
+      ],
+      "tag": "rationale + confidence"
     },
     {
       "id": "render-engine",
       "type": "backend",
       "label": "Render engine",
-      "sublabel": "render.rs · f32, rayon rows",
-      "tag": "byte-identical output",
+      "sublabel": "render.rs · measured LR parity",
       "pos": [
         1000,
-        356
+        220
+      ],
+      "size": [
+        200,
+        72
+      ],
+      "tag": "byte-identical"
+    },
+    {
+      "id": "style-index",
+      "type": "database",
+      "label": "Style index",
+      "sublabel": "14-d + 12 settings + SigLIP 2",
+      "pos": [
+        280,
+        420
+      ],
+      "size": [
+        200,
+        72
+      ],
+      "tag": "k = 4 retrieval"
+    },
+    {
+      "id": "develop-store",
+      "type": "database",
+      "label": "Develop store",
+      "sublabel": "store.rs · versions + variants",
+      "pos": [
+        760,
+        420
       ],
       "size": [
         200,
@@ -113,75 +171,106 @@
       "id": "xmp-sidecar",
       "type": "database",
       "label": "XMP sidecar",
-      "sublabel": "xmp.rs · hand-rolled crs:",
-      "tag": "merge, never overwrite",
+      "sublabel": "xmp.rs · hand-rolled crs: merge",
       "pos": [
         1000,
-        580
+        420
       ],
       "size": [
         200,
         72
-      ]
+      ],
+      "tag": "byte-preserving"
     },
     {
-      "id": "develop-store",
-      "type": "database",
-      "label": "Develop store",
-      "sublabel": "store.rs · per-user root",
-      "tag": "versions + variants",
+      "id": "reverse-fit",
+      "type": "backend",
+      "label": "Reverse-fit",
+      "sublabel": "CDF inverse rendering · D gate",
+      "pos": [
+        520,
+        600
+      ],
+      "size": [
+        200,
+        72
+      ],
+      "tag": "Full / Atmosphere"
+    },
+    {
+      "id": "local-producers",
+      "type": "backend",
+      "label": "Local producers",
+      "sublabel": "zones · bands · quadtree tiles",
       "pos": [
         760,
-        580
+        600
       ],
       "size": [
         200,
         72
-      ]
+      ],
+      "tag": "free-form masks: designed"
     },
     {
-      "id": "py-sidecars",
+      "id": "field-analyzer",
       "type": "backend",
-      "label": "Local Python sidecars",
-      "sublabel": "segment.py · denoise.py · correspond.py · embed.py",
-      "tag": "weights pinned, fetched on first use",
+      "label": "Local-field analyzer",
+      "sublabel": "12x8x8 bilateral grid · CG",
+      "pos": [
+        1000,
+        600
+      ],
+      "size": [
+        200,
+        72
+      ],
+      "tag": "ceiling, read-only"
+    },
+    {
+      "id": "embed-sidecar",
+      "type": "backend",
+      "label": "Embedding sidecar",
+      "sublabel": "embed.py · SigLIP 2 base/16",
+      "pos": [
+        280,
+        780
+      ],
+      "size": [
+        200,
+        72
+      ],
+      "tag": "768-d, pinned"
+    },
+    {
+      "id": "correspond-sidecar",
+      "type": "backend",
+      "label": "Correspondence sidecar",
+      "sublabel": "correspond.py · DIFT on SD 2.1",
       "pos": [
         520,
         780
       ],
       "size": [
-        460,
-        72
-      ]
-    },
-    {
-      "id": "responses-api",
-      "type": "external",
-      "label": "Responses API",
-      "sublabel": "OpenAI-compatible",
-      "pos": [
-        520,
-        60
-      ],
-      "size": [
         200,
         72
-      ]
+      ],
+      "tag": "48x48 field"
     },
     {
-      "id": "claude-cli",
-      "type": "external",
-      "label": "claude CLI",
-      "sublabel": "subprocess · Claude Code OAuth",
-      "tag": "no API key",
+      "id": "segment-sidecar",
+      "type": "backend",
+      "label": "Segmentation sidecar",
+      "sublabel": "BiRefNet · OneFormer · SAM 2.1",
       "pos": [
         760,
-        60
+        780
       ],
       "size": [
         200,
         72
-      ]
+      ],
+      "tag": "guided refine"
     }
   ],
   "boundaries": [
@@ -196,15 +285,21 @@
         "ai-advisor",
         "edit-recipe",
         "render-engine",
+        "style-index",
+        "develop-store",
         "xmp-sidecar",
-        "develop-store"
+        "reverse-fit",
+        "local-producers",
+        "field-analyzer"
       ]
     },
     {
       "kind": "security-group",
-      "label": "Local sidecars — subprocess, pinned weights",
+      "label": "Local sidecars — subprocess, weights pinned to the byte, never in the repo",
       "wraps": [
-        "py-sidecars"
+        "embed-sidecar",
+        "correspond-sidecar",
+        "segment-sidecar"
       ]
     },
     {
@@ -286,54 +381,90 @@
       "labelDy": 24
     },
     {
-      "id": "render-to-sidecars",
-      "from": "render-engine",
-      "to": "py-sidecars",
-      "label": "AI masks · denoise",
-      "labelDy": 68
+      "id": "style-to-advisor",
+      "from": "style-index",
+      "to": "ai-advisor",
+      "label": "4 nearest edits as soft reference"
+    },
+    {
+      "id": "embed-to-style",
+      "from": "embed-sidecar",
+      "to": "style-index",
+      "label": "768-d image embedding",
+      "labelDy": -18
+    },
+    {
+      "id": "fit-to-producers",
+      "from": "reverse-fit",
+      "to": "local-producers",
+      "label": "global fit · mode",
+      "labelDy": -30
+    },
+    {
+      "id": "analyzer-to-producers",
+      "from": "field-analyzer",
+      "to": "local-producers",
+      "label": "ceiling · cap · band proposals",
+      "labelDy": -30
+    },
+    {
+      "id": "producers-to-store",
+      "from": "local-producers",
+      "to": "develop-store",
+      "label": "recovered recipe + masks",
+      "labelDy": -18
+    },
+    {
+      "id": "correspond-to-fit",
+      "from": "correspond-sidecar",
+      "to": "reverse-fit",
+      "label": "where content moved",
+      "labelDy": -18
+    },
+    {
+      "id": "segment-to-producers",
+      "from": "segment-sidecar",
+      "to": "local-producers",
+      "label": "sky/land · subject · object",
+      "labelDy": -18
     }
   ],
   "cards": [
     {
       "dot": "cyan",
-      "title": "Doctrine",
+      "title": "Style reference = retrieval over your whole catalogue",
       "items": [
-        "The AI decides what to change; a deterministic Rust engine does it",
-        "Reproducible — same recipe + same RAW ⇒ byte-identical output",
-        "Non-destructive — the recipe is a small JSON, originals are never modified",
-        "Auditable — every recipe carries a rationale + confidence",
-        "Lightroom-interoperable — the sidecar merges into an existing crs: document"
-      ]
-    },
-    {
-      "dot": "amber",
-      "title": "Opt-in exceptions that DO produce pixels",
-      "items": [
-        "SCUNet denoise (denoise.rs → python/denoise.py)",
-        "gpt-image-2 reimagine / retouch via the Images API /v1/images/edits",
-        "Deterministic pixel heal (retouch.rs)",
-        "Each is explicit, requested by the user, and labelled as generated"
+        "Every Lightroom RAW+XMP pair becomes an exemplar: 14-d EXIF/histogram features, the 12 settings you moved, curve and colour habits",
+        "Optional 768-d SigLIP 2 image embedding; hybrid distance sum w(q-e)^2 + W_EMB(1-cos), W_EMB = 2.0 from a 147-exemplar scan",
+        "The 4 nearest past edits reach the advisor as a soft reference; blend cap 0.6, never a copy; the rationale names them"
       ]
     },
     {
       "dot": "violet",
-      "title": "Reverse-fit and style matching",
+      "title": "Reverse-fit: inverse rendering with an honesty budget",
       "items": [
-        "fit.rs, fit_zoned/ and fit_field.rs fit an EditRecipe to a target look",
-        "A structural-divergence gate chooses Full or Atmosphere mode",
-        "Semantic zones or luminance-range bands, then frozen-evidence quadtree tiles",
-        "The local-field analyzer is read-only: it discloses a ceiling and a shape, never reaching the engine",
-        "style.rs ranks z-scored RAW + XMP exemplars, optionally with SigLIP 2 embeddings"
+        "Luminance CDFs matched at the engine tone knots, least-squares on the slider basis with a model-selection prior; foreign-hue veto >= 45 deg / 5%",
+        "Structural divergence D picks Full or bounded Atmosphere (EV +-1, WB gain 0.80-1.25, sat +-30, slope 0.5-1.5, confidence <= 0.50)",
+        "DIFT (SD 2.1) correspondence: 48x48 field, confidence = cyclic consistency x flow smoothness, consulted only when D >= 0.35"
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "Local corrections, gated on frozen evidence",
+      "items": [
+        "Semantic sky/land zones or XMP-native luminance bands from rank-paired residuals; verdicts follow the population a correction moves",
+        "Quadtree tiles: strongest nodes first, 4x4 stop, both frames >= 3% evidence, CI excludes zero, rim <= 0.012, zero-tolerance frame law",
+        "12x8x8 bilateral-grid analyzer prices the ceiling first (calibration pair: global 0.0961, ceiling 0.0700) and halves the tile budget when the remainder is not tile-shaped",
+        "Designed next: free-form remainder masks, multi-region semantic calibration, colour-range regions"
       ]
     },
     {
       "dot": "rose",
-      "title": "Trust and privacy",
+      "title": "Measured, local, quarantined",
       "items": [
-        "The verifier receives the recipe, EXIF and histogram — never pixels",
-        "Responses API requests set store: false",
-        "serve binds 127.0.0.1, mints a per-run session token and checks Host / Origin",
-        "Sidecar weights are sha256- and byte-pinned, fetched on first use, never in the repository"
+        "Lightroom parity by measurement: Texture 45/45 anchors within 0.02, radial 41/41 vectors within 1 px, brush D1 874 -> 9.8 px; linear openly not pixel-closed",
+        "Local models licence-screened and sha256/byte-pinned: BiRefNet, OneFormer ADE20K, SAM 2.1, SigLIP 2, SD 2.1 as DIFT featurizer, SCUNet",
+        "Generated pixels (gpt-image-2 reimagine via the Images API, heal, denoise) live on their own cards and are measured with the same D before any fit"
       ]
     }
   ]

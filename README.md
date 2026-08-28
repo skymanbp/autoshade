@@ -282,10 +282,10 @@ Written down in the plan and the design memos, in delivery order:
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/architecture-dark.png" />
-  <img src="docs/images/architecture-light.png" alt="Autoshop runtime architecture: three front ends over one Rust library, local Python sidecars, and opt-in external AI services" />
+  <img src="docs/images/architecture-light.png" alt="Autoshop architecture: three front ends over one Rust library with the style index, reverse-fit, local producers and the local-field analyzer; local Python sidecars for embeddings, correspondence and segmentation; opt-in external AI services" />
 </picture>
 
-<sub>Runtime architecture. The interactive version is
+<sub>Architecture with the ideas inside it: the style index, reverse-fit, its local producers, the bilateral-grid analyzer, and the three local sidecars are drawn as the components they are. The interactive version is
 [docs/architecture/autoshop.architecture.html](docs/architecture/autoshop.architecture.html),
 generated from [autoshop.architecture.json](docs/architecture/autoshop.architecture.json)
 with [archify](https://github.com/tt-a1i/archify).</sub>
