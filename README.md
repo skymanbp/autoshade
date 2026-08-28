@@ -233,9 +233,31 @@ longer withheld because a replaced sky happens to share its luminance bins.
 With its colour controls withheld, a zone whose luminance already matches is
 left alone and says so instead of being dialled for a hairline tone gain.
 
+Before either local producer runs, reverse-fit also measures how much of the
+remaining difference a spatially varying develop could reach at all. A
+read-only 12x8x8 bilateral field is solved on the same analysis thumbnails,
+under the same frozen evidence and the same frame ruler the fit is judged by;
+it produces numbers only and never enters the recipe, the engine, or the
+sidecar. Its rendered residual is the *ceiling*. On the calibration pair the
+global fit reads 0.0961 against a ceiling of 0.0700, and the accepted sky zone
+realizes 0.134 of that distance; the rationale says so after every producer.
+The analyzer also reports whether the remainder is band-shaped, tile-shaped,
+linear or free-form, and names the luminance bins that vary too much in space
+for a value band to describe them (bins 3 and 4 on that pair, at 29.1/255 and
+28.7/255 against a 15/255 line). Shape is read only on the pixels the field
+actually measured, so an unmeasured region cannot pose as structure; a
+remainder that the 4x4 tile means do not explain halves the quadtree's budget
+from four tiles to two, and a producer that already lands within 0.002 of a
+ceiling that genuinely beat the producer-free frame ends the fit with a note
+naming the stage it skipped. A band the field proposes reaches the
+luminance-range producer as a span of current-render luma; the producer maps
+it onto its own evidence bins through the pixels occupying that span, refuses
+it when its own rank-paired residual disagrees with the field's sign, and says
+why whenever it absorbs it.
+
 After either local producer, reverse-fit automatically examines spatial
 residuals with a frozen-evidence quadtree. It visits the strongest supported
-nodes first, stops at a 4x4 grid and four accepted leaves, and keeps a tile only
+nodes first, stops at a 4x4 grid and the analyzer's cap, and keeps a tile only
 when both frames contribute at least 3% evidence, original structure remains
 comparable, its confidence interval excludes zero, its boundary stays within
 the calibrated rim budget, and the composed frame does not regress. Tiles are
@@ -642,7 +664,7 @@ versions, and a deleted-version registry; SCUNet success requires the typed
 `sidecar_wrote` contract. A 1771 MB reference probe sets the 1800 MB per-photo
 budget, while the 4 GiB RAW gate bounds admission. The [`build`
 workflow](.github/workflows/build.yml) covers default and GUI feature sets on
-Ubuntu and macOS. The current battery is **991 library (982 pass + 9 `#[ignore]`d forensic probes) / 15 CLI / 145 GUI / 2+2 contract** tests; the
+Ubuntu and macOS. The current battery is **1017 library (1006 pass + 11 `#[ignore]`d forensic probes) / 15 CLI / 145 GUI / 2+2 contract** tests; the
 [`scripts/check_docs.py`](scripts/check_docs.py) gate re-derives pinned release
 claims. Model weights are not stored in this repository.
 

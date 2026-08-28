@@ -1685,8 +1685,8 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     (" Luminance range [{lo}, {hi}] abstained: {reason}.",
         " 亮度范围 [{lo}, {hi}] 已放弃：{reason}。"),
     (" Luminance range [{lo}, {hi}] merged into [{into_lo}, {into_hi}] \
-      after the four-band evidence cap; both runs have sign {sign}.",
-        " 达到四段证据上限后，亮度范围 [{lo}, {hi}] 已合并到 [{into_lo}, {into_hi}]；两段符号相同，为 {sign}。"),
+      {why}; both runs have sign {sign}.",
+        " 亮度范围 [{lo}, {hi}] 已合并到 [{into_lo}, {into_hi}]（{why}）；两段符号相同，为 {sign}。"),
     (" Range boundary-continuity gate kept {n} correction(s): signed \
       transition rim {before} to {after} luma after shared \
       direction-preserving shrink k={k} (budget {max}, {transitions} \
@@ -1704,6 +1704,20 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
       correction(s) (worst band residual {worst}); the final frame residual \
       is {frame}.",
         " 本次拟合的置信度包含 {n} 个已接受的亮度范围校正（最差范围残差 {worst}）；最终全画面残差为 {frame}。"),
+    (" Local-field ceiling: global {global}, ceiling {ceiling}, realized \
+      {realized}, saturated vertices {saturated}, CG iterations {iterations}.",
+        " 局部场上限：全局 {global}，上限 {ceiling}，已实现 {realized}，饱和顶点 {saturated}，CG 迭代 {iterations}。"),
+    (" Local-field shape: R2 tiles {r2_tiles}, R2 linear {r2_linear}, verdict \
+      {shape}, effective tile cap {cap}, structured bins [{structured}].",
+        " 局部场形状：分块 R2 {r2_tiles}，线性 R2 {r2_linear}，判定 {shape}，有效分块上限 {cap}，结构化桶 [{structured}]。"),
+    (" Local-field band skipped: bin {bin}, dispersion {dispersion}/255, \
+      maximum {max}/255.",
+        " 局部场亮度段已跳过：桶 {bin}，离散度 {dispersion}/255，上限 {max}/255。"),
+    (" Local-field realized after {producer}: frame {err_after}, ceiling \
+      {ceiling}, share {realized}.",
+        " 局部场在 {producer} 后的实现量：全画面 {err_after}，上限 {ceiling}，比例 {realized}。"),
+    (" Local-field stop after {producer}: skipped [{skipped}], margin {margin}.",
+        " 局部场在 {producer} 后停止：跳过 [{skipped}]，余量 {margin}。"),
     (" [revision round {round} failed ({e}) — keeping the previous verified proposal]",
         " [第 {round} 轮修订失败（{e}）——保留上一轮已验证的提案]"),
     (" [verification of revision round {round} failed ({e}) — keeping the previous \

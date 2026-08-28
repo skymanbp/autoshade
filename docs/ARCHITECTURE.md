@@ -92,23 +92,37 @@
 > experimental generative edits, an optional pixel-**heal** retouch mode (§4.7)
 > the deterministic look **reverse-fit** (§4.8) and the local server's refusal
 > model (§4.9).
-> 991 library + 15 CLI + 145 GUI + 2+2 contract tests are enumerated in the GUI
-> build; the library result is 982 pass + 9 `#[ignore]`d forensic probes
-> (counts refreshed 2026-08-27 after the shared-geometry + structure-blind Atmosphere
-> batch: library 980→991, set diff +12/−1 by name against the B1 commit — added
-> `analysis_pair_puts_a_one_row_taller_target_in_the_source_geometry`,
-> `one_extra_target_row_does_not_disable_the_structural_gate`,
-> `rank_pairing_uses_a_cumulative_target_quota`,
-> `differently_sized_evidence_uses_one_aligned_prefix_domain`,
-> `frame_evidence_shares_match_an_analytic_four_block_golden`,
-> `blind_move_veto_counts_soft_membership_mass`,
-> `structure_blind_reaggregates_structural_withholding_but_keeps_population_vetoes`,
-> `calibration_atmosphere_report_uses_one_population_ruler`,
-> `calibration_atmosphere_rescore_reproduces_report_ruler`,
-> `p36_full_rescore_round_trip_keeps_structural_evidence_absent`,
-> `full_zone_in_atmosphere_frame_reads_structural_evidence`, and
-> `calibration_land_zone_is_withheld_by_its_own_rerendered_mid_tones`; removed
-> `calibration_land_zone_is_no_longer_withheld_by_the_replaced_sky`). THREE suites are ADDITIONAL and
+> 1017 library + 15 CLI + 145 GUI + 2+2 contract tests are enumerated in the GUI
+> build; the library result is 1006 pass + 11 `#[ignore]`d forensic probes
+> (counts refreshed 2026-08-28 after the local-field analyzer batch: library
+> 991→1017, set diff +26/−0 by name against `10e02bb`, no status change — added,
+> in [`src/fit_field.rs`](../src/fit_field.rs),
+> `field_splat_is_a_partition_of_unity`, `field_adjoint_matches_forward`,
+> `field_infinite_tikhonov_reproduces_the_global_render`,
+> `field_identity_pair_is_all_zero`, `field_solve_is_deterministic`,
+> `field_refuses_without_evidence`,
+> `field_recovers_a_planted_two_band_exposure`,
+> `field_band_dispersion_flags_spatially_structured_bins`,
+> `calibration_field_ceiling_matches_the_numpy_solver`,
+> `the_local_field_never_reaches_the_engine_or_the_recipe_schema`,
+> `calibration_local_support_is_not_constant` and the two new
+> `#[ignore]`d probes `export_calibration_field_inputs_for_numpy` and
+> `compare_calibration_field_with_numpy`; in
+> [`src/fit_zoned/field.rs`](../src/fit_zoned/field.rs),
+> `field_band_proposal_matches_a_two_band_remap`,
+> `field_band_proposal_skips_a_spatially_structured_bin`,
+> `field_shape_reads_a_bright_quadrant_as_tile_shaped`,
+> `field_shape_ignores_unmeasured_pixels`,
+> `field_shape_reads_a_diagonal_ramp_as_linear`,
+> `field_stop_and_realized_helpers_are_well_conditioned`; in
+> `src/fit_zoned/range.rs`, `field_proposals_enter_before_range_sort_and_cap`,
+> `field_proposal_union_merges_same_sign_and_refuses_opposite_overlap` and
+> `field_proposal_spans_are_mapped_through_the_pixels_that_occupy_them`; in
+> `src/fit_zoned/spatial.rs`, `tile_attachment_cap_is_parameterized`; and in
+> `src/fit_zoned.rs`, `field_disabled_layer_is_byte_identical`,
+> `field_stop_rule_skips_the_tile_producer_and_names_it` and
+> `calibration_local_field_discloses_ceiling_and_realized_share`; nothing
+> removed). THREE suites are ADDITIONAL and
 > env-gated, so a bare `cargo test` does not include them:
 > `AUTOSHOP_LR_PROBE_FIXTURES` (16 real Lightroom radial sidecars, byte
 > round-trip), `AUTOSHOP_MB_FIXTURES` (the 7-file M-B forensic set — 42 of its
@@ -1865,6 +1879,98 @@ and after; repeated runs are SHA-identical. A 512 / 768 analysis edge was
 measured and rejected: the same tiles, +4% / +25-50% wall time, and the
 384-calibrated ruler collapses at 768.
 
+**The local-field analyzer (B2, 2026-08-28).** Before any local producer runs,
+`fit_zoned::field::solve_local_field`
+([`src/fit_zoned/field.rs`](../src/fit_zoned/field.rs)) solves a read-only
+12x8x8 bilateral field over the pair's shared analysis geometry
+([`src/fit_field.rs`](../src/fit_field.rs)) and reads shape verdicts off it. It
+is DISCLOSURE ONLY: the field is an owned local of `fit_recipe_zoned_inner`,
+never a `FitReport` member, and a test greps `render.rs` and `recipe.rs` for
+any mention of the module, so recipe schema era 1, the engine and XMP are
+untouched and `src/fit.rs` needed no change at all. `LocalField::solve` returns
+`None` when the objective already calls the pair unmeasurable (identifiability
+<= 1e-5), when the fit weight carries no mass, or when the solve is
+non-finite; a `None` field — like the disabled layer `ZonedLayerOpts { field:
+false }` — leaves all three producers byte for byte as they were
+(`field_disabled_layer_is_byte_identical`).
+
+The SEQUENCER owns the verdicts. The field is not threaded through
+`attach_zones_with_divergence`; only two typed products cross into a producer
+— the band proposals into `range::derive_luminance_bands` and the effective
+attachment cap into `spatial::attach_tiles` — while `fit_recipe_zoned_inner`
+itself reads the running `report.err_after` the producers already maintain (it
+never recomputes it) and appends the realized and stop notes. `realized =
+(global − err_after) / (global − ceiling)`, disclosed as `n/a` rather than
+divided when the denominator is within 1e-6 of zero. When a producer already
+lands within `LOCAL_STOP_MARGIN = 0.002` of the ceiling, the tile stage is
+skipped and named — but only when `ceiling < global`: a field that saturated
+or regularised its way ABOVE the producer-free frame measured nothing about
+the headroom, is disclosed as such, and never vetoes a producer (the adversarial
+review of 2026-08-28 found the unguarded rule would have suppressed the tiles
+after any failed solve). Nothing else is appended on that path: every producer
+already closes its own stage with `fit::append_finished_disclosure` on ITS
+final render, so a skipped tile stage leaves exactly one finished disclosure,
+and the persisted rationale string is never rebuilt from the
+`MAX_NOTES`-bounded typed vector (which would truncate it and render the
+truncation sentinel).
+
+The verdicts are numbers, not prose. `BAND_DISPERSION_MAX = 15/255` separates a
+luma bin a value band can describe from one that only varies in space: the
+phase-A fixture sweep reads a spatially UNIFORM two-band edit at at most
+9.2/255 (sparse, just-supported vertices included), spatially structured edits
+at 21.9–51.8/255, and the calibration pair's re-rendered mid-tones at
+28.7–29.1/255 — an order of magnitude apart, with 15/255 in the gap. Bin 0 is
+excluded by construction rather than by measurement: every term of the
+dispersion metric carries the bin's centre luma as a factor, so it is
+identically 0 at `c = 0` and a band at pure black moves nothing either; the
+disclosure says `0:blind` once instead of pretending to a reading. Surviving
+bins merge while the luma effect of their parameter difference at the shared
+boundary stays under 2/255, are capped at `RANGE_MAX_BANDS`, and must carry
+`RANGE_MIN_EVIDENCE_SHARE` on both sides of the pair, both shares measured on
+the same 3-tap guide luma. Shape is read off the remainder with every sum
+weighted by the solve's own per-pixel fit weight (`LocalField.weight`: frozen
+evidence x local support x unclipped), so a pixel whose vertices hold the
+occupancy-floor policy zero — a missing measurement, not a measured zero —
+cannot pose as spatial structure: `R2(4x4)` against the weighted 4x4 tile
+means, `R2(linear)` against the weighted least-squares plane solved in f64.
+Once the plane earns `LINEAR_SHAPE_MIN = 0.6` the tile figure becomes its
+INCREMENTAL share over the plane's residual — otherwise a smooth ramp, most of
+which coarse block means also capture, would be read as tile-shaped; an
+incremental share cannot reach `TILE_SHAPE_MIN = 0.5` once the plane holds
+0.6, so a `linear` verdict always carries the halved cap by construction.
+Below `TILE_SHAPE_MIN` the quadtree's effective cap drops from
+`SPATIAL_MAX_ATTACHMENTS` to two, and the calibration test pins that the
+`TILE_DEPTH_CAP` note the quadtree prints equals the cap `LOCAL_SHAPE`
+disclosed. Registered, not fixed: `local_support` reads a constant 1.0
+whenever a 12x8 cell erodes under `structure_divergence`'s 100-core-pixel
+floor — every synthetic fixture (144x96 and smaller) and, at `ANALYZE_EDGE =
+384`, analysis rasters wider than about 5.4:1 or taller than 1:4 — so the
+corpus test `calibration_local_support_is_not_constant` is the one place the
+support term is exercised live.
+
+A band proposal is a span `[lo, hi)` of CURRENT-render luma — the field's
+guide domain — and never an evidence-bin index: the range producer bins by the
+ORIGINAL source luma (`evidence.source_pixels`), and after a global tone move
+the two domains no longer coincide (the calibration pair's −1 EV global fit
+shifts them by about two bins). `derive_luminance_bands` therefore maps each
+span onto its own bins through the pixels that occupy it — the weighted
+10th..90th percentile of their original luma
+(`range::evidence_bins_for_span`, pinned by
+`field_proposal_spans_are_mapped_through_the_pixels_that_occupy_them`, where
+the naive index would have been two bins off). The mapped band enters AFTER
+the evidence filter and BEFORE the sort and the cap, so it is judged and ranked
+by exactly the rules a rank-paired band is: an overlapping opposite-sign
+rank-paired run refuses it, a band whose own rank-paired residual disagrees
+with the field's sign is refused as a disagreement (both typed abstentions), an
+overlapping or adjacent same-sign run absorbs it and the merge note names why
+(`absorbed by the overlapping rank-paired run before the cap`, distinct from the
+cap merge's `after the four-band evidence cap`), and the existing
+disjoint-sorted `debug_assert` in front of the cap still holds. On the
+calibration pair no proposal survives its own gates (bins 3 and 4 are
+structured, the rest fail the share or 2/255 magnitude line), so the union
+changes no band and no dial — the analyzer's whole live effect there is the
+disclosure and the smaller tile cap.
+
 The final automatic layer is a frozen-evidence spatial quadtree
 ([`src/fit_zoned/spatial.rs`](../src/fit_zoned/spatial.rs)). It runs after
 either semantic zones or the mutually exclusive luminance-range fallback and
@@ -1876,7 +1982,9 @@ edits cannot move pixels into evidence. Best-first priority is
 evidence share on both sides, original `D < 0.65`, a weighted 95% confidence
 interval excluding zero, and a residual at least `2/255` away from its parent.
 Eligible parents split only to `SPATIAL_MAX_DEPTH = 2` (4x4), accepted leaves
-are re-derived after every attachment, and the stack stops at four tiles.
+are re-derived after every attachment, and the stack stops at the analyzer's
+effective cap (`SPATIAL_MAX_ATTACHMENTS = 4`, halved to two when the local
+field reads the remainder as not tile-shaped).
 Every examined ineligible node lands with its id and reason in that
 generation's single typed sweep note (nodes already attached or refused told
 their story in their own generation); eligible leaf candidates keep a full

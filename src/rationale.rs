@@ -373,7 +373,7 @@ pub mod keys {
         " Luminance range [{lo}, {hi}] abstained: {reason}.";
     pub const RANGE_MERGED: &str =
         " Luminance range [{lo}, {hi}] merged into [{into_lo}, {into_hi}] \
-         after the four-band evidence cap; both runs have sign {sign}.";
+         {why}; both runs have sign {sign}.";
     pub const RANGE_BOUNDARY_PASSED: &str =
         " Range boundary-continuity gate kept {n} correction(s): signed \
          transition rim {before} to {after} luma after shared \
@@ -391,6 +391,22 @@ pub mod keys {
         " Confidence for this fit includes the {n} accepted luminance-range \
          correction(s) (worst band residual {worst}); the final frame residual \
          is {frame}.";
+
+    // --- local-field analyzer (fit_zoned/field.rs) ----------------------
+    pub const LOCAL_CEILING: &str =
+        " Local-field ceiling: global {global}, ceiling {ceiling}, realized \
+         {realized}, saturated vertices {saturated}, CG iterations {iterations}.";
+    pub const LOCAL_SHAPE: &str =
+        " Local-field shape: R2 tiles {r2_tiles}, R2 linear {r2_linear}, verdict \
+         {shape}, effective tile cap {cap}, structured bins [{structured}].";
+    pub const LOCAL_BAND_SKIPPED: &str =
+        " Local-field band skipped: bin {bin}, dispersion {dispersion}/255, \
+         maximum {max}/255.";
+    pub const LOCAL_REALIZED: &str =
+        " Local-field realized after {producer}: frame {err_after}, ceiling \
+         {ceiling}, share {realized}.";
+    pub const LOCAL_STOP: &str =
+        " Local-field stop after {producer}: skipped [{skipped}], margin {margin}.";
 
     // --- the propose/verify pipeline (pipeline.rs) ----------------------
     pub const REVISION_FAILED: &str =

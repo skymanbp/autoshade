@@ -1,8 +1,9 @@
 use super::*;
+use super::field::FieldBandProposal;
 
 /// Four bands is the existing measured stability ceiling for value-range
 /// evidence; finer partitions routinely fall below the evidence floor.
-const RANGE_MAX_BANDS: usize = 4;
+pub(super) const RANGE_MAX_BANDS: usize = 4;
 /// Corrected rank-mean calibration keeps `0.03` between supported neutral
 /// bins (01-07 and 12, at most `0.025`) and the coherent 08-11 run (starting
 /// at `0.036`); the isolated supported bin 13 measures `0.223`.
@@ -17,7 +18,7 @@ const RANGE_MAX_RAMP: f32 = 2.0 / 17.0;
 const RANGE_BOUNDARY_RIM_MAX: f32 = 0.012;
 /// Native bands reuse the global evidence model's measured 1.5% population
 /// floor; a smaller interval is not a two-sided measurement.
-const RANGE_MIN_EVIDENCE_SHARE: f32 = 0.015;
+pub(super) const RANGE_MIN_EVIDENCE_SHARE: f32 = 0.015;
 /// Range bands must pay for themselves on the composed evidence-weighted
 /// frame: the live regression measured `0.018 -> 0.024` after two bands.
 /// Equality is acceptable, but any worse frame restores the running recipe.
@@ -62,6 +63,7 @@ struct RangeMerge {
     into_lo: f32,
     into_hi: f32,
     sign: &'static str,
+    why: &'static str,
 }
 
 #[derive(Debug, Default, PartialEq)]
@@ -164,6 +166,125 @@ fn source_ranges_for_runs(runs: &[ResidualRun]) -> Vec<RangeMask> {
         .collect()
 }
 
+fn residual_run(
+    first: usize,
+    last: usize,
+    bin_residual: &[f32; 17],
+    target_bounds: &[(usize, usize); 17],
+    evidence: &fit::EvidenceModel,
+) -> ResidualRun {
+    let verdict = fit::luma_evidence_for_bins(evidence, first, last);
+    let residual_weight = verdict.two_sided_share.max(1e-6);
+    let residual = (first..=last)
+        .map(|bin| bin_residual[bin] * evidence.luma[bin].two_sided_share.max(1e-6))
+        .sum::<f32>()
+        / (first..=last)
+            .map(|bin| evidence.luma[bin].two_sided_share.max(1e-6))
+            .sum::<f32>();
+    ResidualRun {
+        first,
+        last,
+        target_first: target_bounds[first].0,
+        target_last: target_bounds[last].1,
+        residual,
+        score: residual.abs() * residual_weight,
+    }
+}
+
+fn bands_from_runs(
+    source_px: &[[f32; 3]],
+    target_px: &[[f32; 3]],
+    evidence: &fit::EvidenceModel,
+    target_luma: &[f32],
+    runs: Vec<ResidualRun>,
+) -> Vec<RangeBand> {
+    let source_ranges = source_ranges_for_runs(&runs);
+    let target_ranges = runs
+        .iter()
+        .map(|run| target_range_for_ranks(target_luma, run.target_first, run.target_last))
+        .collect::<Vec<_>>();
+    let mut source_coverage = source_ranges
+        .iter()
+        .map(|range| range_weights_for_pixels(range, source_px))
+        .collect::<Vec<_>>();
+    let mut source_weights = source_coverage.clone();
+    normalize_partition_weights(&mut source_weights);
+    let mut bands = Vec::with_capacity(runs.len());
+    for (i, run) in runs.into_iter().enumerate() {
+        let verdict = fit::luma_evidence_for_bins(evidence, run.first, run.last);
+        let d = if verdict.divergence.is_finite() { verdict.divergence } else { 1.0 };
+        let source = source_ranges[i];
+        let target = target_ranges[i];
+        let name = format!("Luminance range {:02}", i + 1);
+        bands.push(RangeBand {
+            attachment: ZoneAttachment {
+                source_weights: std::mem::take(&mut source_weights[i]),
+                target_weights: Vec::new(),
+                coverage: Some(ZoneCoverage {
+                    source: std::mem::take(&mut source_coverage[i]),
+                    target: range_weights_for_pixels(&target, target_px),
+                }),
+                mask: RANGE_HOST,
+                range: Some(source),
+                name: name.clone(),
+                role: MaskRole::Custom,
+                inverted: false,
+                label: name,
+                min_share: MIN_ZONE_SHARE,
+                frame_regression_tol: RANGE_FRAME_REGRESSION_TOL,
+            },
+            source,
+            target,
+            divergence: fit::Divergence {
+                correlation: (1.0 - d).clamp(-1.0, 1.0),
+                energy_error: 0.0,
+                d,
+            },
+        });
+    }
+    bands
+}
+
+/// Maps a field proposal (a span of CURRENT-render luma) into the evidence-bin
+/// domain (ORIGINAL source luma) through the pixels that occupy the span: the
+/// weighted 10th..90th percentile of their original luma. The band then names
+/// the population the field actually measured, not the same numbers read in a
+/// domain a global tone move already shifted.
+fn evidence_bins_for_span(
+    proposal: &FieldBandProposal,
+    source_px: &[[f32; 3]],
+    evidence: &fit::EvidenceModel,
+) -> Option<(usize, usize)> {
+    let inside = |luma: f32| {
+        luma >= proposal.lo && (luma < proposal.hi || (proposal.hi >= 1.0 && luma <= 1.0))
+    };
+    let mut members = source_px
+        .iter()
+        .zip(&evidence.source_pixels)
+        .zip(&evidence.source_weights)
+        .filter(|((current, _), _)| inside(display_luma(current)))
+        .map(|((_, base), weight)| (display_luma(base), weight.max(0.0)))
+        .filter(|(_, weight)| *weight > 0.0)
+        .collect::<Vec<_>>();
+    members.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let mass = members.iter().map(|(_, weight)| *weight as f64).sum::<f64>();
+    if mass <= 0.0 {
+        return None;
+    }
+    let quantile = |q: f64| {
+        let mut acc = 0.0f64;
+        members
+            .iter()
+            .find(|(_, weight)| {
+                acc += *weight as f64;
+                acc >= q * mass
+            })
+            .map(|(luma, _)| *luma)
+    };
+    let (lo, hi) = (quantile(0.10)?, quantile(0.90)?);
+    Some((fit::evidence_luma_bin(lo), fit::evidence_luma_bin(hi)))
+}
+
 /// Derive coherent residual runs from the current rendered state. Target
 /// populations are monotone rank partners, matching the fixed evidence model;
 /// no spatial alignment is assumed.
@@ -171,6 +292,7 @@ fn derive_luminance_bands(
     source_px: &[[f32; 3]],
     target_px: &[[f32; 3]],
     evidence: &fit::EvidenceModel,
+    proposals: &[FieldBandProposal],
 ) -> RangeDerivation {
     #[cfg(test)]
     RANGE_DERIVATION_CALLS.with(|calls| calls.set(calls.get() + 1));
@@ -252,22 +374,9 @@ fn derive_luminance_bands(
         let qualifies = last > first
             || (first..=last).any(|b| bin_residual[b].abs() >= 2.0 * RANGE_RESIDUAL_TRIGGER);
         if qualifies {
-            let verdict = fit::luma_evidence_for_bins(evidence, first, last);
-            let residual_weight = verdict.two_sided_share.max(1e-6);
-            let residual = (first..=last)
-                .map(|b| bin_residual[b] * evidence.luma[b].two_sided_share.max(1e-6))
-                .sum::<f32>()
-                / (first..=last)
-                    .map(|b| evidence.luma[b].two_sided_share.max(1e-6))
-                    .sum::<f32>();
-            runs.push(ResidualRun {
-                first,
-                last,
-                target_first: target_bounds[first].0,
-                target_last: target_bounds[last].1,
-                residual,
-                score: residual.abs() * residual_weight,
-            });
+            runs.push(residual_run(
+                first, last, &bin_residual, &target_bounds, evidence,
+            ));
         }
         bin = last + 1;
     }
@@ -285,6 +394,81 @@ fn derive_luminance_bands(
             valid.push(run);
         }
     }
+
+    for proposal in proposals {
+        let Some((first, last)) = evidence_bins_for_span(proposal, source_px, evidence) else {
+            out.abstentions.push(RangeAbstention {
+                lo: proposal.lo,
+                hi: proposal.hi,
+                reason: "field proposal covers no evidence population".to_string(),
+            });
+            continue;
+        };
+        let verdict = fit::luma_evidence_for_bins(evidence, first, last);
+        if let Some(reason) = evidence_refusal(&verdict) {
+            out.abstentions.push(RangeAbstention {
+                lo: first as f32 / 17.0,
+                hi: (last + 1) as f32 / 17.0,
+                reason: format!("field proposal: {reason}"),
+            });
+            continue;
+        }
+        let proposed = residual_run(first, last, &bin_residual, &target_bounds, evidence);
+        let overlaps = |run: &ResidualRun| run.first <= last && first <= run.last;
+        if valid.iter().any(|run| overlaps(run)
+            && run.residual.is_sign_positive() != proposal.sign.is_sign_positive())
+        {
+            out.abstentions.push(RangeAbstention {
+                lo: first as f32 / 17.0,
+                hi: (last + 1) as f32 / 17.0,
+                reason: "field proposal conflicts with the rank-paired band".to_string(),
+            });
+            continue;
+        }
+        // The proposal's own rank-paired residual must agree with the field's
+        // sign: a band the two estimators read in opposite directions is a
+        // disagreement to disclose, not a correction to widen.
+        if proposed.residual.is_sign_positive() != proposal.sign.is_sign_positive() {
+            out.abstentions.push(RangeAbstention {
+                lo: first as f32 / 17.0,
+                hi: (last + 1) as f32 / 17.0,
+                reason: "field proposal sign disagrees with its rank-paired residual".to_string(),
+            });
+            continue;
+        }
+        let touches = |run: &ResidualRun| {
+            run.first <= last.saturating_add(1) && first <= run.last.saturating_add(1)
+                && run.residual.is_sign_positive() == proposal.sign.is_sign_positive()
+        };
+        let merged = valid.iter().enumerate()
+            .filter_map(|(i, run)| touches(run).then_some(i)).collect::<Vec<_>>();
+        if let Some(&into) = merged.first() {
+            let old = proposed.clone();
+            valid[into].first = valid[into].first.min(proposed.first);
+            valid[into].last = valid[into].last.max(proposed.last);
+            valid[into].target_first = valid[into].target_first.min(proposed.target_first);
+            valid[into].target_last = valid[into].target_last.max(proposed.target_last);
+            for &index in merged.iter().skip(1).rev() {
+                let joined = valid.remove(index);
+                valid[into].first = valid[into].first.min(joined.first);
+                valid[into].last = valid[into].last.max(joined.last);
+                valid[into].target_first = valid[into].target_first.min(joined.target_first);
+                valid[into].target_last = valid[into].target_last.max(joined.target_last);
+            }
+            out.merges.push(RangeMerge {
+                lo: old.first as f32 / 17.0,
+                hi: (old.last + 1) as f32 / 17.0,
+                into_lo: valid[into].first as f32 / 17.0,
+                into_hi: (valid[into].last + 1) as f32 / 17.0,
+                sign: if proposal.sign.is_sign_positive() { "positive" } else { "negative" },
+                why: "absorbed by the overlapping rank-paired run before the cap",
+            });
+        } else {
+            valid.push(proposed);
+        }
+    }
+    valid.sort_by_key(|run| run.first);
+    debug_assert!(valid.windows(2).all(|pair| pair[0].last < pair[1].first));
 
     if valid.len() > RANGE_MAX_BANDS {
         let mut ranked = (0..valid.len()).collect::<Vec<_>>();
@@ -341,6 +525,7 @@ fn derive_luminance_bands(
                     into_lo: valid[nearest].first as f32 / 17.0,
                     into_hi: (valid[nearest].last + 1) as f32 / 17.0,
                     sign: if old.residual.is_sign_positive() { "positive" } else { "negative" },
+                    why: "after the four-band evidence cap",
                 });
             } else {
                 out.abstentions.push(RangeAbstention {
@@ -355,49 +540,7 @@ fn derive_luminance_bands(
     }
     valid.sort_by_key(|run| run.first);
     debug_assert!(valid.windows(2).all(|pair| pair[0].last < pair[1].first));
-    let source_ranges = source_ranges_for_runs(&valid);
-    let target_ranges = valid
-        .iter()
-        .map(|run| target_range_for_ranks(&target_luma, run.target_first, run.target_last))
-        .collect::<Vec<_>>();
-    let mut source_coverage = source_ranges
-        .iter()
-        .map(|range| range_weights_for_pixels(range, source_px))
-        .collect::<Vec<_>>();
-    let mut source_weights = source_coverage.clone();
-    normalize_partition_weights(&mut source_weights);
-    for (i, run) in valid.into_iter().enumerate() {
-        let verdict = fit::luma_evidence_for_bins(evidence, run.first, run.last);
-        let d = if verdict.divergence.is_finite() { verdict.divergence } else { 1.0 };
-        let source = source_ranges[i];
-        let target = target_ranges[i];
-        let name = format!("Luminance range {:02}", i + 1);
-        out.bands.push(RangeBand {
-            attachment: ZoneAttachment {
-                source_weights: std::mem::take(&mut source_weights[i]),
-                target_weights: Vec::new(),
-                coverage: Some(ZoneCoverage {
-                    source: std::mem::take(&mut source_coverage[i]),
-                    target: range_weights_for_pixels(&target, target_px),
-                }),
-                mask: RANGE_HOST,
-                range: Some(source),
-                name: name.clone(),
-                role: MaskRole::Custom,
-                inverted: false,
-                label: name,
-                min_share: MIN_ZONE_SHARE,
-                frame_regression_tol: RANGE_FRAME_REGRESSION_TOL,
-            },
-            source,
-            target,
-            divergence: fit::Divergence {
-                correlation: (1.0 - d).clamp(-1.0, 1.0),
-                energy_error: 0.0,
-                d,
-            },
-        });
-    }
+    out.bands = bands_from_runs(source_px, target_px, evidence, &target_luma, valid);
     out
 }
 
@@ -647,6 +790,7 @@ pub(super) fn attach_luminance_ranges(
     src: &DynamicImage,
     target: &DynamicImage,
     report: &mut FitReport,
+    proposals: &[FieldBandProposal],
 ) {
     let (s_img, t_img) = fit::analysis_pair(src, target);
     let tgt_px = fit::pixels_of(&t_img);
@@ -655,7 +799,7 @@ pub(super) fn attach_luminance_ranges(
     // every accepted range must be no worse than the recipe already handed
     // to this fallback.
     let global_frame_err = report.err_after;
-    let mut derived = derive_luminance_bands(&global_px, &tgt_px, &report.evidence);
+    let mut derived = derive_luminance_bands(&global_px, &tgt_px, &report.evidence, proposals);
     for merged in &derived.merges {
         crate::rationale::push_note(
             &mut report.recipe.rationale,
@@ -668,6 +812,7 @@ pub(super) fn attach_luminance_ranges(
                     ("into_lo", format!("{:.3}", merged.into_lo)),
                     ("into_hi", format!("{:.3}", merged.into_hi)),
                     ("sign", merged.sign.to_string()),
+                    ("why", merged.why.to_string()),
                 ],
             ),
         );
@@ -866,6 +1011,86 @@ mod tests {
         (source, target, evidence)
     }
 
+    #[test]
+    fn field_proposals_enter_before_range_sort_and_cap() {
+        let cores_of = |derived: &RangeDerivation| derived.bands.iter().map(|band| {
+            let (_, lo, hi, _) = luminance_bounds(band.source);
+            (lo, hi)
+        }).collect::<Vec<_>>();
+        let is_field_band = |(lo, hi): &(f32, f32)| {
+            (lo - 14.0 / 17.0).abs() < 1e-6 && (hi - 15.0 / 17.0).abs() < 1e-6
+        };
+        // Three rank-paired runs plus a field-only band: four bands, the field
+        // band among them. Deleting the union loop leaves three.
+        let mut residuals = [0.0; 17];
+        for (bin, residual) in [(1, 0.08), (4, -0.08), (7, 0.08)] {
+            residuals[bin] = residual;
+        }
+        residuals[14] = 0.02; // below rank trigger: field-only candidate
+        let (source, target, evidence) = synthetic_range_case(residuals);
+        let proposal = FieldBandProposal { lo: 14.0 / 17.0, hi: 15.0 / 17.0, sign: 0.02 };
+        let derived = derive_luminance_bands(&source, &target, &evidence, std::slice::from_ref(&proposal));
+        let cores = cores_of(&derived);
+        assert_eq!(cores.len(), 4, "field band did not enter: {derived:?}");
+        assert!(cores.iter().any(is_field_band), "{cores:?}");
+        assert!(cores.windows(2).all(|pair| pair[0].1 <= pair[1].0), "{cores:?}");
+        // Four rank-paired runs already fill the cap: the weaker field band is
+        // ranked WITH them and cut by the cap, never appended past it.
+        residuals[10] = -0.08;
+        let (source, target, evidence) = synthetic_range_case(residuals);
+        let capped = derive_luminance_bands(&source, &target, &evidence, &[proposal]);
+        let cores = cores_of(&capped);
+        assert_eq!(cores.len(), RANGE_MAX_BANDS, "field union bypassed cap: {capped:?}");
+        assert!(!cores.iter().any(is_field_band), "{cores:?}");
+        assert!(cores.windows(2).all(|pair| pair[0].1 <= pair[1].0), "{cores:?}");
+    }
+
+    #[test]
+    fn field_proposal_union_merges_same_sign_and_refuses_opposite_overlap() {
+        let mut residuals = [0.0; 17];
+        residuals[4] = 0.08;
+        let (source, target, evidence) = synthetic_range_case(residuals);
+        let same = FieldBandProposal { lo: 3.0 / 17.0, hi: 6.0 / 17.0, sign: 0.1 };
+        let merged = derive_luminance_bands(&source, &target, &evidence, &[same]);
+        assert_eq!(merged.bands.len(), 1, "{merged:?}");
+        let (_, lo, hi, _) = luminance_bounds(merged.bands[0].source);
+        assert!((lo - 3.0 / 17.0).abs() < 1e-6 && (hi - 6.0 / 17.0).abs() < 1e-6);
+        assert_eq!(merged.merges.len(), 1);
+        assert_eq!(merged.merges[0].why, "absorbed by the overlapping rank-paired run before the cap");
+
+        let opposite = FieldBandProposal { lo: 3.0 / 17.0, hi: 6.0 / 17.0, sign: -0.1 };
+        let refused = derive_luminance_bands(&source, &target, &evidence, &[opposite]);
+        assert_eq!(refused.bands.len(), 1);
+        assert!(refused.abstentions.iter().any(|a|
+            a.reason == "field proposal conflicts with the rank-paired band"));
+
+        // No rank-paired run at bin 8 (its residual is below the trigger) and
+        // the field reads the opposite direction: a disagreement, not a band.
+        let mut disagreeing = [0.0; 17];
+        disagreeing[8] = -0.02;
+        let (source, target, evidence) = synthetic_range_case(disagreeing);
+        let wrong_way = FieldBandProposal { lo: 8.0 / 17.0, hi: 9.0 / 17.0, sign: 0.1 };
+        let refused = derive_luminance_bands(&source, &target, &evidence, &[wrong_way]);
+        assert!(refused.bands.is_empty(), "{refused:?}");
+        assert!(refused.abstentions.iter().any(|a|
+            a.reason == "field proposal sign disagrees with its rank-paired residual"), "{refused:?}");
+    }
+
+    #[test]
+    fn field_proposal_spans_are_mapped_through_the_pixels_that_occupy_them() {
+        // Every bin is rendered 0.10 darker than its original: a span of
+        // CURRENT luma names ORIGINAL bins about 1.7 bins brighter, so a
+        // proposal read in the field's domain must not be reused as an index.
+        let (source, _target, evidence) = synthetic_range_case([0.10; 17]);
+        let proposal = FieldBandProposal { lo: 0.20, hi: 0.30, sign: 0.1 };
+        let mapped = evidence_bins_for_span(&proposal, &source, &evidence);
+        // Current luma in [0.20, 0.30) <=> original centres 0.324 (bin 5) and
+        // 0.382 (bin 6); the naive index of the span would have been bins 3..5.
+        assert_eq!(mapped, Some((5, 6)), "{mapped:?}");
+        let empty = FieldBandProposal { lo: 0.98, hi: 1.0, sign: 0.1 };
+        assert_eq!(evidence_bins_for_span(&empty, &source, &evidence), None);
+    }
+
     fn luminance_bounds(range: RangeMask) -> (f32, f32, f32, f32) {
         match range {
             RangeMask::Luminance { lo_outer, lo, hi, hi_outer } => {
@@ -886,7 +1111,7 @@ mod tests {
         residuals[12] = -0.105;
         residuals[13] = -0.04;
         let (source, target, evidence) = synthetic_range_case(residuals);
-        let derived = derive_luminance_bands(&source, &target, &evidence);
+        let derived = derive_luminance_bands(&source, &target, &evidence, &[]);
         let cores = derived
             .bands
             .iter()
@@ -906,7 +1131,7 @@ mod tests {
             five[bin] = residual;
         }
         let (source, target, evidence) = synthetic_range_case(five);
-        let capped = derive_luminance_bands(&source, &target, &evidence);
+        let capped = derive_luminance_bands(&source, &target, &evidence, &[]);
         assert_eq!(capped.bands.len(), RANGE_MAX_BANDS);
         assert!(capped.merges.is_empty(), "a merge may not cross the retained opposite-sign core");
         assert!(capped.abstentions.iter().any(|a| a.reason.contains("no adjacent same-sign")));
@@ -925,7 +1150,7 @@ mod tests {
             mergeable[bin] = residual;
         }
         let (source, target, evidence) = synthetic_range_case(mergeable);
-        let merged = derive_luminance_bands(&source, &target, &evidence);
+        let merged = derive_luminance_bands(&source, &target, &evidence, &[]);
         assert_eq!(merged.bands.len(), RANGE_MAX_BANDS);
         assert_eq!(merged.merges.len(), 1, "an adjacent same-sign run remains mergeable");
         let cores = merged
@@ -946,11 +1171,11 @@ mod tests {
         residuals[8] = -0.08;
         residuals[13] = 0.09;
         let (source, target, evidence) = synthetic_range_case(residuals);
-        let expected = derive_luminance_bands(&source, &target, &evidence);
+        let expected = derive_luminance_bands(&source, &target, &evidence, &[]);
         let mut shuffled = target;
         shuffled.rotate_left(37);
         shuffled.reverse();
-        let actual = derive_luminance_bands(&source, &shuffled, &evidence);
+        let actual = derive_luminance_bands(&source, &shuffled, &evidence, &[]);
         let canonical = |mut derived: RangeDerivation| {
             for band in &mut derived.bands {
                 band
@@ -980,7 +1205,7 @@ mod tests {
         evidence.luma[1].target_evidence_share = 0.0;
         evidence.luma[1].two_sided_share = 0.0;
         evidence.luma[1].weight = 0.0;
-        let one_sided = derive_luminance_bands(&source, &target, &evidence);
+        let one_sided = derive_luminance_bands(&source, &target, &evidence, &[]);
         assert!(one_sided.bands.is_empty());
         assert_eq!(one_sided.abstentions.len(), 1);
         assert!(one_sided.abstentions[0].reason.contains("target population"));
@@ -989,14 +1214,14 @@ mod tests {
         evidence.luma[1].target_evidence_share = 1.0 / 17.0;
         evidence.luma[1].two_sided_share = 1.0 / 17.0;
         evidence.luma[1].weight = 1.0 / 17.0;
-        let population_only = derive_luminance_bands(&source, &target, &evidence);
+        let population_only = derive_luminance_bands(&source, &target, &evidence, &[]);
         assert!(population_only.bands.is_empty());
         assert_eq!(population_only.abstentions.len(), 1);
         assert!(population_only.abstentions[0].reason.contains("target population"));
 
         evidence.luma[1].target_share = 1.0 / 17.0;
         evidence.luma[1].weight = 0.0;
-        let structural = derive_luminance_bands(&source, &target, &evidence);
+        let structural = derive_luminance_bands(&source, &target, &evidence, &[]);
         assert!(structural.bands.is_empty());
         assert!(structural.abstentions[0].reason.contains("zero structural evidence"));
 
@@ -1005,7 +1230,7 @@ mod tests {
         adjacent[2] = 0.07;
         let (source, target, mut evidence) = synthetic_range_case(adjacent);
         evidence.luma[2].weight = 0.0;
-        let no_hitchhike = derive_luminance_bands(&source, &target, &evidence);
+        let no_hitchhike = derive_luminance_bands(&source, &target, &evidence, &[]);
         assert_eq!(no_hitchhike.bands.len(), 1);
         let (_, lo, hi, _) = luminance_bounds(no_hitchhike.bands[0].source);
         assert!((lo - 1.0 / 17.0).abs() < 1e-6 && (hi - 2.0 / 17.0).abs() < 1e-6);
@@ -1021,7 +1246,7 @@ mod tests {
         let (source, target, mut evidence) = synthetic_range_case(src_gap);
         evidence.luma[1].source_populated = false;
         evidence.luma[1].source_share = 0.0;
-        let source_side = derive_luminance_bands(&source, &target, &evidence);
+        let source_side = derive_luminance_bands(&source, &target, &evidence, &[]);
         assert!(source_side.bands.is_empty());
         assert!(source_side.abstentions[0].reason.contains("source population"));
     }
@@ -1038,7 +1263,7 @@ mod tests {
         let overlap_value = 6.25 / 17.0;
         source[overlap_i] = [overlap_value; 3];
         source[compensate_i] = [original - (overlap_value - original); 3];
-        let derived = derive_luminance_bands(&source, &target, &evidence);
+        let derived = derive_luminance_bands(&source, &target, &evidence, &[]);
         assert_eq!(derived.bands.len(), 2);
         for band in &derived.bands {
             let (lo_outer, lo, hi, hi_outer) = luminance_bounds(band.source);
@@ -1217,7 +1442,7 @@ mod tests {
         let (source, target) = compact_rank_wave_fixture();
         let mut report = neutral_report(&source, &target);
         let global_err = report.err_after;
-        attach_luminance_ranges(&source, &target, &mut report);
+        attach_luminance_ranges(&source, &target, &mut report, &[]);
         let note = report
             .notes
             .iter()
@@ -1241,7 +1466,7 @@ mod tests {
         let mut report = neutral_report(&source, &target);
         let global_frame_err = report.err_after;
         RANGE_FINAL_FRAME_ERR_OVERRIDE.with(|value| value.set(Some(global_frame_err + 0.001)));
-        attach_luminance_ranges(&source, &target, &mut report);
+        attach_luminance_ranges(&source, &target, &mut report, &[]);
         assert!(report.recipe.masks.is_empty(), "the complete range stack must be reverted");
         assert_eq!(report.err_after, global_frame_err);
         assert!(report.notes.iter().any(|note| {
@@ -1343,7 +1568,7 @@ mod tests {
             true,
             None,
         );
-        attach_luminance_ranges(&source, &source, &mut deferred);
+        attach_luminance_ranges(&source, &source, &mut deferred, &[]);
         assert_eq!(
             serde_json::to_vec(&deferred.recipe).unwrap(),
             serde_json::to_vec(&global.recipe).unwrap(),
@@ -1436,8 +1661,8 @@ mod tests {
                     || note.key == crate::rationale::keys::ZONE_ATMOSPHERE_DROPPED
             })
             .expect("the dropped band must disclose its measured frame drift");
-        assert!(note.args.iter().any(|(key, value)| *key == "drift" && value == "+0.001"));
-        assert!(note.args.iter().any(|(key, value)| *key == "tol" && value == "+0.000"));
+        assert!(note.args.iter().any(|(key, value)| *key == "drift" && value == "+0.00100"));
+        assert!(note.args.iter().any(|(key, value)| *key == "tol" && value == "+0.00000"));
 
         let mut nonregressing = neutral_report(&source, &target);
         let mut no_worse_running_frame = candidate_err;
@@ -1475,7 +1700,7 @@ mod tests {
             &path,
             &crate::recipe::EditRecipe::default(),
             None,
-            ZonedLayerOpts { spatial: false, refine_masks: false },
+            ZonedLayerOpts { field: false, spatial: false, refine_masks: false },
         );
         let calls = RANGE_DERIVATION_CALLS.with(std::cell::Cell::get);
         assert_eq!(calls, 0, "semantic success must not even derive range candidates");
@@ -1499,7 +1724,7 @@ mod tests {
         residuals[4] = 0.08;
         residuals[5] = 0.07;
         let (range_source, range_target, evidence) = synthetic_range_case(residuals);
-        let before = derive_luminance_bands(&range_source, &range_target, &evidence);
+        let before = derive_luminance_bands(&range_source, &range_target, &evidence, &[]);
         assert!(!before.bands.is_empty(), "premise: candidate range weights exist");
 
         let (source, target) = compact_rank_wave_fixture();
@@ -1519,14 +1744,14 @@ mod tests {
             &path,
             &crate::recipe::EditRecipe::default(),
             None,
-            ZonedLayerOpts { spatial: false, refine_masks: true },
+            ZonedLayerOpts { field: false, spatial: false, refine_masks: true },
         );
         assert_eq!(
             crate::mask_refine::guided_refine_calls(),
             0,
             "luminance ranges must never enter the spatial mask refiner",
         );
-        let after = derive_luminance_bands(&range_source, &range_target, &evidence);
+        let after = derive_luminance_bands(&range_source, &range_target, &evidence, &[]);
         assert_eq!(
             after.bands,
             before.bands,
@@ -1587,7 +1812,7 @@ mod tests {
         let (fixture, _, _ranges) = range_boundary_fixture();
         let target = rank_wave_target(&fixture);
         let mut report = neutral_report(&fixture, &target);
-        attach_luminance_ranges(&fixture, &target, &mut report);
+        attach_luminance_ranges(&fixture, &target, &mut report, &[]);
         assert!(
             RANGE_FRESH_RENDER_CALLS.with(std::cell::Cell::get) >= 2,
             "the fallback loop must freshly render each candidate's current stack"
@@ -1617,7 +1842,7 @@ mod tests {
         };
         let mut report = neutral_report(&source, &target);
         report.recipe.masks.push(existing.clone());
-        attach_luminance_ranges(&source, &target, &mut report);
+        attach_luminance_ranges(&source, &target, &mut report, &[]);
         assert_eq!(report.recipe.masks.first(), Some(&existing));
         assert!(report.notes.iter().any(|note| note.key == crate::rationale::keys::RANGE_ATTACHED));
     }

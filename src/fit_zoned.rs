@@ -35,6 +35,7 @@ use crate::recipe::{LocalAdjustment, MaskGeometry, MaskRole, RangeMask};
 use crate::render;
 use crate::segment::{segment_file, SegmentOpts};
 
+mod field;
 mod range;
 mod spatial;
 
@@ -43,11 +44,13 @@ const MASK_REFINE_EPSILON: f32 = (4.0 / 255.0) * (4.0 / 255.0);
 
 #[derive(Clone, Copy)]
 struct ZonedLayerOpts {
+    field: bool,
     spatial: bool,
     refine_masks: bool,
 }
 
 const SHIPPED_LAYERS: ZonedLayerOpts = ZonedLayerOpts {
+    field: true,
     spatial: true,
     refine_masks: true,
 };
@@ -1115,7 +1118,7 @@ fn fit_recipe_zoned_inner(
     provider: Option<fit::CorrespondenceProvider>,
     layers: ZonedLayerOpts,
 ) -> FitReport {
-    let mut report = match segment_both(src, target, seg, mask_path) {
+    let (mut report, field, first_producer) = match segment_both(src, target, seg, mask_path) {
         Ok((mut src_mask, mut tgt_mask)) => {
             let refinements = if layers.refine_masks {
                 let source = crate::mask_refine::guided_refine(
@@ -1192,6 +1195,8 @@ fn fit_recipe_zoned_inner(
                         ),
                     );
                 }
+                let field = layers.field
+                    .then(|| field::solve_local_field(src, target, &mut report)).flatten();
                 attach_zones_with_divergence(
                     src,
                     target,
@@ -1201,7 +1206,7 @@ fn fit_recipe_zoned_inner(
                     mask_path,
                     zone_divergence,
                 );
-                report
+                (report, field, "zones")
             } else {
             let zone_divergence = measure_zone_divergence(src, target, base, &src_mask);
             let divergent_cover = [zone_divergence.sky, zone_divergence.land]
@@ -1217,6 +1222,8 @@ fn fit_recipe_zoned_inner(
                 true,
                 provider,
             );
+            let field = layers.field
+                .then(|| field::solve_local_field(src, target, &mut report)).flatten();
             attach_zones_with_divergence(
                 src,
                 target,
@@ -1226,7 +1233,7 @@ fn fit_recipe_zoned_inner(
                 mask_path,
                 zone_divergence,
             );
-            report
+            (report, field, "zones")
             }
         }
         Err(e) => {
@@ -1248,12 +1255,35 @@ fn fit_recipe_zoned_inner(
                     vec![("e", format!("{e:#}"))],
                 ),
             );
-            range::attach_luminance_ranges(src, target, &mut report);
-            report
+            let field = layers.field
+                .then(|| field::solve_local_field(src, target, &mut report)).flatten();
+            let proposals = field.as_ref()
+                .map(|(_, reading)| reading.proposals.as_slice()).unwrap_or(&[]);
+            range::attach_luminance_ranges(src, target, &mut report, proposals);
+            (report, field, "ranges")
         }
     };
+    // The sequencer only reads `report.err_after` and appends notes: every
+    // producer already closed its own stage with the finished disclosure of
+    // ITS final render, so a skipped tile stage leaves exactly the disclosure
+    // the last producer wrote, and the persisted rationale string is never
+    // rebuilt from the (MAX_NOTES-bounded) typed vec.
+    if let Some((local, _)) = &field {
+        field::push_realized(&mut report, local, first_producer);
+        if field::stop_verdict(local, report.err_after) {
+            field::push_stop(&mut report, first_producer);
+            return report;
+        }
+    }
     if layers.spatial {
-        spatial::attach_tiles(src, target, &mut report, mask_path, layers.refine_masks);
+        let cap = field.as_ref().map(|(_, reading)| reading.effective_tile_cap)
+            .unwrap_or(spatial::SPATIAL_MAX_ATTACHMENTS);
+        spatial::attach_tiles(
+            src, target, &mut report, mask_path, layers.refine_masks, cap,
+        );
+        if let Some((local, _)) = &field {
+            field::push_realized(&mut report, local, "tiles");
+        }
     }
     report
 }
@@ -2394,8 +2424,8 @@ fn attach_one_zone(
                     ("ratio", format!("{:.0}", ZONE_ACCEPT_RATIO * 100.0)),
                     ("floor", format!("{ZONE_MATCHED_ERR:.3}")),
                     ("gain", format!("{:.0}", (1.0 - ZONE_FLOOR_MIN_GAIN) * 100.0)),
-                    ("drift", format!("{:+.3}", zoned_err - *frame_err)),
-                    ("tol", format!("{:+.3}", attachment.frame_regression_tol)),
+                    ("drift", format!("{:+.5}", zoned_err - *frame_err)),
+                    ("tol", format!("{:+.5}", attachment.frame_regression_tol)),
                 ],
             ),
         );
@@ -3010,7 +3040,7 @@ mod tests {
                         vec![("e", format!("{e:#}"))],
                     ),
                 );
-                range::attach_luminance_ranges(src, target, &mut report);
+                range::attach_luminance_ranges(src, target, &mut report, &[]);
                 report
             }
         }
@@ -3026,7 +3056,7 @@ mod tests {
             reference_point: None,
             prompt_points: None,
         };
-        let layers = ZonedLayerOpts { spatial: false, refine_masks: false };
+        let layers = ZonedLayerOpts { field: false, spatial: false, refine_masks: false };
 
         let semantic_path = fixture_mask_path("layered-disabled-semantic");
         sky.save(semantic_path.path()).unwrap();
@@ -3148,6 +3178,123 @@ mod tests {
             "disabled range layers",
         );
         range_path.remove();
+    }
+
+    #[test]
+    fn field_disabled_layer_is_byte_identical() {
+        let (source, target, sky) = zoned_pair();
+        let seg = SegmentOpts {
+            python_bin: "unused-field-none".into(),
+            script: "unused-field-none".into(),
+            target: "sky".into(),
+            reference_point: None,
+            prompt_points: None,
+        };
+        let path = fixture_mask_path("field-disabled-byte-identity");
+        sky.save(path.path()).unwrap();
+        SEGMENT_BOTH_OVERRIDE.with(|value|
+            *value.borrow_mut() = Some((sky.clone(), sky.clone())));
+        let disabled = fit_recipe_zoned_inner(
+            &source, &target, &seg, &path, &crate::recipe::EditRecipe::default(), None,
+            ZonedLayerOpts { field: false, spatial: false, refine_masks: false },
+        );
+        SEGMENT_BOTH_OVERRIDE.with(|value|
+            *value.borrow_mut() = Some((sky.clone(), sky)));
+        field::FIELD_FORCE_NONE.with(|value| value.set(true));
+        let refused = fit_recipe_zoned_inner(
+            &source, &target, &seg, &path, &crate::recipe::EditRecipe::default(), None,
+            ZonedLayerOpts { field: true, spatial: false, refine_masks: false },
+        );
+        assert_eq!(serde_json::to_vec(&disabled.recipe).unwrap(),
+            serde_json::to_vec(&refused.recipe).unwrap());
+        assert_eq!(disabled.recipe.rationale, refused.recipe.rationale);
+        assert_eq!(disabled.err_after.to_bits(), refused.err_after.to_bits());
+        path.remove();
+    }
+
+    #[test]
+    fn field_stop_rule_skips_the_tile_producer_and_names_it() {
+        let (current, target, width, height) = crate::fit_field::tests::two_band_pair();
+        let image = |pixels: &[[f32; 3]]| DynamicImage::ImageRgb8(RgbImage::from_fn(
+            width, height, |x, y| image::Rgb(pixels[(y * width + x) as usize]
+                .map(|value| (value.clamp(0.0, 1.0) * 255.0).round() as u8)),
+        ));
+        let (source, target) = (image(&current), image(&target));
+        let seg = SegmentOpts {
+            python_bin: "autoshop-test-no-such-python".into(),
+            script: "target/b2-no-segment.py".into(),
+            target: "sky".into(),
+            reference_point: None,
+            prompt_points: None,
+        };
+        let path = fixture_mask_path("field-stop");
+        // Ceiling forced to sit 1e-4 under the producer-free frame: any
+        // producer that does not regress the frame then lands inside the
+        // 0.002 stop margin, and the guard `ceiling < global` still holds.
+        field::FIELD_CEILING_OVERRIDE.with(|value| value.set(Some(1e-4)));
+        let report = fit_recipe_zoned_inner(
+            &source, &target, &seg, &path, &crate::recipe::EditRecipe::default(), None,
+            ZonedLayerOpts { field: true, spatial: true, refine_masks: false },
+        );
+        let stop = report.notes.iter().position(|note| note.key == crate::rationale::keys::LOCAL_STOP)
+            .unwrap_or_else(|| panic!("missing stop: {}", report.recipe.rationale));
+        assert!(report.notes[stop].args.iter().any(|(key, value)|
+            *key == "skipped" && value == "tiles"));
+        assert!(report.notes.iter().skip(stop + 1).all(|note| !note.key.starts_with(" Spatial")));
+        let finished = report.notes.iter().filter(|note| {
+            note.key == crate::rationale::keys::FIT_NOTE_UNREPRESENTED
+                || note.key == crate::rationale::keys::FIT_NOTE_ATMOSPHERE_UNREPRESENTED
+        }).count();
+        assert_eq!(finished, 1, "finished disclosure count: {}", report.recipe.rationale);
+        path.remove();
+    }
+
+    #[test]
+    fn calibration_local_field_discloses_ceiling_and_realized_share() {
+        let Some(root) = fit::calibration_corpus() else { return };
+        let source = image::open(root.join("neutral.jpg")).unwrap();
+        let target = image::open(root.join("target.jpg")).unwrap();
+        let seg = SegmentOpts {
+            python_bin: "autoshop-test-no-such-python".into(),
+            script: "target/b2-no-segment.py".into(),
+            target: "sky".into(),
+            reference_point: None,
+            prompt_points: None,
+        };
+        let head_path = fixture_mask_path("field-calibration-head");
+        let head = fit_recipe_zoned_inner(
+            &source, &target, &seg, &head_path, &crate::recipe::EditRecipe::default(), None,
+            ZonedLayerOpts { field: false, spatial: true, refine_masks: true },
+        );
+        let path = fixture_mask_path("field-calibration");
+        let report = fit_recipe_zoned(&source, &target, &seg, &path);
+        let ceiling = report.notes.iter()
+            .find(|note| note.key == crate::rationale::keys::LOCAL_CEILING)
+            .expect("calibration field ceiling disclosure");
+        let number = |name: &str| ceiling.args.iter()
+            .find_map(|(key, value)| (*key == name).then(|| value.parse::<f32>().unwrap()))
+            .unwrap();
+        assert!(number("ceiling") <= number("global"));
+        // The producer-free share is measured, not written: `field.global` and
+        // the report's own `err_after` are the same objective on the same
+        // pixels, so the disclosure must read exactly 0.000 before any producer.
+        assert_eq!(number("realized"), 0.0, "{}", report.recipe.rationale);
+        // The quadtree must run under the cap the analyzer disclosed, end to end.
+        let arg = |key: &str, name: &str| report.notes.iter().find(|note| note.key == key)
+            .and_then(|note| note.args.iter().find_map(|(k, v)| (*k == name).then(|| v.clone())));
+        assert_eq!(arg(crate::rationale::keys::LOCAL_SHAPE, "cap"),
+            arg(crate::rationale::keys::TILE_DEPTH_CAP, "cap"),
+            "{}", report.recipe.rationale);
+        assert!(arg(crate::rationale::keys::LOCAL_SHAPE, "cap").is_some());
+        assert!(report.notes.iter().any(|note| note.key == crate::rationale::keys::LOCAL_REALIZED));
+        assert!(report.err_after <= head.err_after + f32::EPSILON,
+            "field path {} regressed HEAD semantics {}", report.err_after, head.err_after);
+        assert!(report.recipe.rationale.len() < 16 * 1024,
+            "rationale is {} bytes", report.recipe.rationale.len());
+        eprintln!("calibration HEAD={} field={} rationale={}",
+            head.err_after, report.err_after, report.recipe.rationale.len());
+        head_path.remove();
+        path.remove();
     }
 
     /// The pre-batch executable clamped its persisted rationale at 4096

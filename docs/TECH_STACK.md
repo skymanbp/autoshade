@@ -382,6 +382,146 @@ residual, the same quantity the zone is then accepted on.
   skip line.
 - `src/fit_zoned/spatial.rs` — tile readings and coverage.
 
+## Local-field analyzer
+
+### Method
+
+The reverse-fit measures its own ceiling before it spends a local producer on
+the pair. `LocalField::solve` is a Rust port of the validated NumPy experiment
+`scripts/grid_experiment.py`: a `12 x 8 x 8` bilateral grid over
+`(x, y, luma)` carrying five parameters per vertex
+`[ev, gain_r, gain_g, gain_b, slope]`, trilinearly splatted over the analysis
+rasters `fit::analysis_pair` already hands every producer. The modelled
+display-referred delta is `dc = ln2*c*EV + c*gain_ch + (c - guide)*slope`, with
+`guide` the 3-tap-smoothed `luma601` of the CURRENT render — the same pixels
+the producers start from. The fit weight is the FROZEN evidence
+`source_weights` times a local structural support term (`1 - D` from one
+`fit::structure_divergence` reading per `12 x 8` cell) times an unclipped test
+on both frames; the module never builds a second evidence model. The normal
+equations are solved by conjugate gradient with f64 accumulators, Tikhonov
+`lambda = 1` toward zero (= the global recipe) plus an x/y/b Laplacian `s = 1`,
+at most 90 iterations or a squared relative residual of `1e-10`. The CG solve
+and every reduction stay sequential; only the 96 independent cell readings run
+in parallel and are scattered in cell order, so two solves of one input are
+bit-identical (pinned by test). There is no per-image regulariser sweep: the
+experiment's sweep picked `s = 0` on two of its five pairs to buy a last
+`0.003` of the objective, and determinism plus no selection bias are worth
+more. After the solve, vertices are clipped to `EV +-1.25 / gains +-0.35 /
+slope +-0.5` and zeroed below an occupancy floor of `8`; saturation against
+those bounds is COUNTED and disclosed, never widened away.
+
+`ceiling` is `fit::look_err_with_evidence` of the field's rendered analysis
+pixels against the target under the report's own evidence — the same
+objective, the same weights and the same size as `report.err_after`, so the two
+are directly comparable — and `global` is that objective on the unmodified
+current render. `band_marginal[b]` is the occupancy-weighted mean of the five
+parameters over luma bin `b`'s 96 `(x, y)` vertices, `band_dispersion[b]` their
+occupancy-weighted spatial standard deviation converted to a luma effect in
+/255 units at the bin's centre luma, and the remainder is the per-pixel luma
+difference between the field's render and the band-marginal projection's,
+carried together with the solve's per-pixel fit weight so every shape verdict
+is taken on the pixels the field actually measured.
+
+`fit_zoned::field` reads verdicts off that: band proposals for the luminance
+range producer (spans of current-render luma that the producer maps onto its
+own evidence bins through the pixels occupying them, refusing a span whose own
+rank-paired residual disagrees with the field's sign), an effective attachment
+cap for the quadtree, a `FieldShape` label, and the ceiling / realized / stop
+disclosures the sequencer appends — the stop only when the ceiling actually
+beat the producer-free frame. The
+field is analysis-only — it never reaches `render::` or an `EditRecipe`, which
+a test pins by grepping `src/render.rs` and `src/recipe.rs` for the module
+name.
+
+### Parameters and measurements
+
+- Grid `12 x 8 x 8` x 5 parameters = 768 vertices. `TIKHONOV = 1.0`,
+  `SMOOTH = (1, 1, 1)`, `ITERATIONS = 90`, `OCCUPANCY_MIN = 8`,
+  `IDENTIFIABILITY_MIN = 1e-5`, bounds `EV +-1.25 / gains +-0.35 /
+  slope +-0.5`.
+- Verdict constants: `BAND_DISPERSION_MAX = 15/255`, `BAND_MERGE_STEP = 2/255`,
+  `TILE_SHAPE_MIN = 0.5`, `LINEAR_SHAPE_MIN = 0.6`,
+  `LOCAL_STOP_MARGIN = 0.002`. `BAND_DISPERSION_MAX` is a measured line: the
+  phase-A fixture sweep (96x64 to 192x128, amplitudes 0.25 to 0.50, ramps and
+  waves) reads a spatially UNIFORM two-band edit at at most `9.2/255` in sparse
+  bins, spatially structured bins at `21.9-51.8/255`, and the calibration
+  pair's re-rendered mid-tones at `28.7-29.1/255`; `15/255` sits in that gap.
+- NumPy cross-check on the calibration pair, on the Rust module's OWN exported
+  analysis pixels, guide and fit weight (NumPy 2.3.5 / Python 3.13.3,
+  2026-08-27): NumPy ceiling `0.070022` against the Rust port's `0.0700223`,
+  largest per-parameter disagreement over all 768 vertices `1.5e-5`. Re-run
+  2026-08-28 on this tree: `max |grid_rust - grid_numpy| = 0.000015`, Rust
+  `iterations 39`, `relative_residual 6.995e-6`, `ceiling 0.070022`,
+  `global 0.096145`, `saturated 3`, `supported 200/768`. The two
+  `#[ignore]`d probes that produce it are
+  `export_calibration_field_inputs_for_numpy` and
+  `compare_calibration_field_with_numpy`.
+- Calibration pair live, `neutral.jpg -> target.jpg`, one release executable
+  per arm (`match --zoned`, per-run store): `global 0.096145`,
+  `ceiling 0.070022`, 3 saturated vertices, CG 39 iterations,
+  `R2 tiles 0.394`, `R2 linear 0.050` (fit-weighted; the unweighted reading
+  before the 2026-08-28 review fixes was `0.367` / `0.053`), verdict
+  `free_form`, cap 2, structured bins
+  `[0:blind, 3, 4]` at `29.14/255` and `28.72/255`. With segmentation on the
+  sky zone takes the frame to `0.092652` = `0.134` realized; with segmentation
+  off the luminance range takes it to `0.079947` = `0.620` realized. On the RAW
+  arm (`source.arw -> target.jpg`, the embedded-preview path):
+  `global 0.107764`, `ceiling 0.072299`, 5 saturated vertices, CG 42
+  iterations, `R2 tiles 0.331`, `R2 linear 0.039` (unweighted before the
+  review fixes: `0.350` / `0.027`), `free_form`, cap 2,
+  structured bins `[0:blind, 3, 4]` at `28.66/255` and `30.46/255`; the sky
+  zone realizes `0.280` (frame `0.097816`), and with segmentation off no
+  producer is accepted, so the realized share is disclosed as `0.000` at the
+  global `0.107764`.
+- The analyzer moved no dial on any of those four arms: with the rationale
+  dropped and the per-run store path normalised, the dials and `confidence`
+  hash identically to the pre-batch executable's (`compare_recipes.py`), and
+  the two seg-on runs differ only by that store path. The recipe JSON itself is
+  not byte-identical — what changed inside it is the disclosure (`+544`
+  rationale bytes on the semantic arm, `10331 -> 10875`, against a
+  `MAX_RATIONALE` of 16 KiB) and the tile cap the quadtree prints (`4 -> 2`).
+  The same four identities held on the executable rebuilt after the 2026-08-28
+  adversarial-review fixes (sha256 `5cfb5e6c…`; no field proposal survives its
+  gates on this pair, so the domain mapping has no live band to move here).
+- The `ZONE_DROPPED` drift now prints at `{:+.5}`: the r2c0 tile both neutral
+  arms drop reads `drift +0.00036 (tolerance +0.00000)` on the semantic arm and
+  `+0.00035` on the range-fallback arm, where both used to read `+0.000
+  (tolerance +0.000)` and looked like exactly-zero refusals.
+- Pixel ruler (`scripts/pixel_ruler.py`, mean CIE76 dE frame / sky / land at
+  384 px wide), `apply` renders of each match's own recipe and store: the
+  untouched neutral scores `23.48 / 37.04 / 12.42`, the semantic arm
+  `12.49 / 20.58 / 5.89` and the range-fallback arm `10.63 / 16.46 / 5.87` —
+  the same three numbers before and after this batch, because the two renders
+  are byte-identical (sha256 `7d58d379...` on and `7da778ca...` off).
+- Wall time, same machine, one process at a time, pre-batch executable against
+  this one: semantic neutral `168.6 s` against `263.5 / 218.7 s`,
+  range-fallback neutral `104.6 s` against `90.9 / 110.7 s`, semantic RAW
+  `224.0 s` against `196.9 s`, range-fallback RAW `130.6 s` against `97.8 s`.
+  The new executable wins three of those four arms, so the run-to-run spread on
+  this machine is wider than the analyzer's cost. Measured directly instead
+  (`compare_calibration_field_with_numpy`, the second `#[ignore]`d probe):
+  `LocalField::solve` is `1.343 s` on the calibration pair, of which
+  `local_support` — the 96 `structure_divergence` cell readings — is `0.897 s`.
+  Phase A measured the same two sequentially at `6.59 s` and `6.39 s`; running
+  the independent cell readings under `rayon` and scattering them in cell order
+  is bit-identical by construction and the determinism test still passes.
+- `look_err_with_evidence`'s structural term is inert on this pair (its core is
+  under 100 px, so `structure_divergence` answers `matched()`); the ceiling and
+  every realized share inherit that. Registered elsewhere, not compensated for
+  here.
+
+### Source
+
+- `src/fit_field.rs` — the solver, band marginals and dispersion, remainder,
+  saturation count.
+- `src/fit_zoned/field.rs` — shape verdicts, band proposals, `realized_share`,
+  `stop_verdict`, the five disclosures.
+- `src/fit_zoned.rs` — `fit_recipe_zoned_inner`, the sequencer that owns the
+  realized and stop notes.
+- `src/fit_zoned/range.rs` — the proposal union inside
+  `derive_luminance_bands`.
+- `src/fit_zoned/spatial.rs` — the parameterised attachment cap.
+
 ## Layered spatial reverse-fit and mask refinement
 
 ### Method
@@ -405,7 +545,9 @@ reading.
 
 ### Parameters and measurements
 
-- `SPATIAL_MAX_DEPTH = 2` (4x4 leaves) and `SPATIAL_MAX_ATTACHMENTS = 4`.
+- `SPATIAL_MAX_DEPTH = 2` (4x4 leaves) and `SPATIAL_MAX_ATTACHMENTS = 4`, the
+  latter now the DEFAULT cap: `attach_tiles` takes the effective cap as a
+  parameter and the local-field analyzer passes 2 when `R2(4x4) < 0.5`.
 - Both frozen evidence shares must be at least `0.03`; original `D` must be
   below `0.65`; the weighted 95% interval must exclude zero and the child must
   differ from its parent by at least `2/255`.

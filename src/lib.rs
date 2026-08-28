@@ -17,6 +17,7 @@ pub mod diag;
 pub mod embed;
 pub mod eval;
 pub mod fit;
+pub(crate) mod fit_field;
 pub mod fit_zoned;
 pub mod generative;
 pub mod jobs;

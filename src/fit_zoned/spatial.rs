@@ -5,7 +5,7 @@ use image::{DynamicImage, GrayImage, Luma};
 use super::*;
 
 pub(super) const SPATIAL_MAX_DEPTH: u8 = 2;
-const SPATIAL_MAX_ATTACHMENTS: usize = 4;
+pub(super) const SPATIAL_MAX_ATTACHMENTS: usize = 4;
 const SPATIAL_RESIDUAL_MIN: f32 = 2.0 / 255.0;
 const SPATIAL_FRAME_REGRESSION_TOL: f32 = 0.0;
 const TILE_RASTER_EDGE: u32 = 2048;
@@ -442,6 +442,7 @@ pub(super) fn attach_tiles(
     report: &mut FitReport,
     raster_home: &crate::store::OwnedRaster,
     refine: bool,
+    cap: usize,
 ) {
     // One analysis geometry for both rasters (`fit::analysis_pair`), so the
     // coverage and estimator vectors below are congruent by construction —
@@ -452,7 +453,7 @@ pub(super) fn attach_tiles(
     let mut refused = BTreeSet::new();
     let mut generation = 0usize;
     let corr = report.correspondence.take();
-    while attached.len() < SPATIAL_MAX_ATTACHMENTS {
+    while attached.len() < cap {
         let current = fit::pixels_of(&render::develop_preview(&s_img, &report.recipe));
         let root = read_tile(
             TileId { depth: 0, row: 0, col: 0 },
@@ -666,7 +667,7 @@ pub(super) fn attach_tiles(
             crate::rationale::keys::TILE_DEPTH_CAP,
             vec![
                 ("depth", SPATIAL_MAX_DEPTH.to_string()),
-                ("cap", SPATIAL_MAX_ATTACHMENTS.to_string()),
+                ("cap", cap.to_string()),
                 ("attached", attached.len().to_string()),
             ],
         ),
@@ -871,8 +872,21 @@ mod tests {
         assert!(total.iter().all(|value| *value == 255));
     }
 
-    #[test]
-    fn tiles_fit_the_current_render_not_the_global_source() {
+    /// One rendered tile (d2r2c0) is 20/255 brighter in the target than in the
+    /// current render: a pair with exactly one attachable tile, shared by the
+    /// fit-order test and the cap test so neither fixture can go vacuous alone.
+    struct CurrentRenderFixture {
+        source: DynamicImage,
+        target: DynamicImage,
+        evidence: fit::EvidenceModel,
+        base: crate::recipe::EditRecipe,
+        raster_home: crate::store::OwnedRaster,
+        dir: std::path::PathBuf,
+        expected: f32,
+        stale: f32,
+    }
+
+    fn current_render_fixture(tag: &str) -> CurrentRenderFixture {
         let edge = fit::ANALYZE_EDGE;
         let id = TileId { depth: 2, row: 2, col: 0 };
         let source = DynamicImage::ImageRgb8(RgbImage::from_fn(edge, edge, |x, y| {
@@ -880,7 +894,7 @@ mod tests {
             Rgb([value, value, value])
         }));
         let dir = std::env::temp_dir().join(format!(
-            "autoshop-tile-current-render-{}",
+            "autoshop-tile-{tag}-{}",
             std::process::id(),
         ));
         std::fs::create_dir_all(&dir).unwrap();
@@ -923,11 +937,32 @@ mod tests {
         let stale = read_tile(id, &source_pixels, &target_pixels, &evidence).residual;
         assert!(expected.abs() > 0.02, "fixture has no current-render residual");
         assert!((expected - stale).abs() > 0.02, "fixture does not distinguish fit order");
+        CurrentRenderFixture { source, target, evidence, base, raster_home, dir, expected, stale }
+    }
 
-        let mut report = super::super::tests::neutral_report(&source, &target);
-        report.recipe = base;
-        report.evidence = evidence;
-        attach_tiles(&source, &target, &mut report, &raster_home, false);
+    impl CurrentRenderFixture {
+        /// Runs the production traversal under `cap` on a fresh report and
+        /// returns it with the number of masks the traversal attached.
+        fn attach(&self, cap: usize) -> (FitReport, usize) {
+            let mut report = super::super::tests::neutral_report(&self.source, &self.target);
+            report.recipe = self.base.clone();
+            report.evidence = self.evidence.clone();
+            let masks_before = report.recipe.masks.len();
+            attach_tiles(&self.source, &self.target, &mut report, &self.raster_home, false, cap);
+            let added = report.recipe.masks.len() - masks_before;
+            (report, added)
+        }
+    }
+
+    #[test]
+    fn tiles_fit_the_current_render_not_the_global_source() {
+        let fixture = current_render_fixture("current-render");
+        let (expected, stale) = (fixture.expected, fixture.stale);
+        let (report, added) = fixture.attach(2);
+        assert!(added <= 2, "the effective two-tile cap was exceeded");
+        let cap_note = report.notes.iter()
+            .find(|note| note.key == crate::rationale::keys::TILE_DEPTH_CAP).unwrap();
+        assert!(cap_note.args.iter().any(|(key, value)| *key == "cap" && value == "2"));
         let note = report
             .notes
             .iter()
@@ -942,15 +977,31 @@ mod tests {
             .find_map(|(key, value)| (*key == "residual").then(|| value.parse::<f32>().unwrap()))
             .unwrap();
         assert!((measured - expected).abs() < 1e-5, "current={expected} stale={stale}");
-        for mask in &report.recipe.masks {
-            if let MaskGeometry::Bitmap { path } = &mask.mask {
-                let path = std::path::Path::new(path);
-                if path.starts_with(&dir) {
-                    std::fs::remove_file(path).ok();
-                }
-            }
-        }
-        std::fs::remove_dir(&dir).ok();
+        std::fs::remove_dir_all(&fixture.dir).ok();
+    }
+
+    /// Behavioural, not textual: the same pair that attaches its one tile under
+    /// the shipped cap attaches nothing under a cap of zero, and the depth-cap
+    /// note names the cap it was actually given. The `>= 1` guard keeps the
+    /// falsifier honest — a fixture that attached nothing could not tell a
+    /// respected cap from an ignored one.
+    #[test]
+    fn tile_attachment_cap_is_parameterized() {
+        let fixture = current_render_fixture("cap");
+        let cap_of = |report: &FitReport| report.notes.iter()
+            .find(|note| note.key == crate::rationale::keys::TILE_DEPTH_CAP)
+            .and_then(|note| note.args.iter()
+                .find_map(|(key, value)| (*key == "cap").then(|| value.clone())))
+            .unwrap();
+        let (zero, added_zero) = fixture.attach(0);
+        assert_eq!(added_zero, 0, "a zero cap must attach nothing: {}", zero.recipe.rationale);
+        assert_eq!(cap_of(&zero), "0");
+        let (shipped, added_shipped) = fixture.attach(SPATIAL_MAX_ATTACHMENTS);
+        assert!(added_shipped >= 1,
+            "fixture attached nothing, so the cap is untestable: {}", shipped.recipe.rationale);
+        assert!(added_shipped <= SPATIAL_MAX_ATTACHMENTS);
+        assert_eq!(cap_of(&shipped), SPATIAL_MAX_ATTACHMENTS.to_string());
+        std::fs::remove_dir_all(&fixture.dir).ok();
     }
 
     #[test]
