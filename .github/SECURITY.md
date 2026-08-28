@@ -28,9 +28,9 @@ The parts with a real attacker are the ones that take input from somewhere else:
 **child processes** (the `claude` verifier and the Python sidecars), and the
 **third-party decoders** that parse untrusted RAW files. Both threat models are
 already written down — the server's in
-[README § Privacy, trust, and paid-feature boundary](../README.md#privacy-trust-and-paid-feature-boundary) and
+[User manual § Privacy, trust, and paid-feature boundary](../docs/USER_MANUAL.md#privacy-trust-and-paid-feature-boundary) and
 [ARCHITECTURE § 4.9 "What the local web server refuses"](../docs/ARCHITECTURE.md#49-what-the-local-web-server-refuses),
-the settings-trust boundary in the same README section. If you have found a way
+the settings-trust boundary in the same manual section. If you have found a way
 past what those documents claim, that is exactly the report worth making — and
 so is a case where the *documentation* overstates the guarantee.
 
