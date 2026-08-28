@@ -37,8 +37,9 @@ person can edit by hand, replay a year later, or hand to Lightroom.
 
 - [What Autoshop is](#what-autoshop-is)
 - [What it does](#what-it-does)
+- [What is new here](#what-is-new-here)
 - [How it works](#how-it-works)
-- [Results: before and after](#results-before-and-after)
+- [Results: two batches, six frames](#results-two-batches-six-frames)
 - [Measured numbers](#measured-numbers)
 - [Install and quickstart](#install-and-quickstart)
 - [User manual](#user-manual)
@@ -97,6 +98,186 @@ not identical), an exact X-Trans demosaic (the plane fit is approximate),
 prebuilt Linux and macOS binaries (CI builds and tests them from source), and
 multi-class semantic segmentation.
 
+## What is new here
+
+The ideas below are the ones you will not find in another RAW developer. Every
+number is copied from the source or from
+[docs/TECH_STACK.md](docs/TECH_STACK.md) / [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md);
+the last subsection lists what is designed but not yet shipped, so nothing
+here is a promise dressed as a feature.
+
+### 1. Style reference is retrieval over your whole catalogue, not a global average
+
+`autoshop style-index <dir>` (or the GUI's **Style reference library**) walks
+your Lightroom RAW+XMP pairs and turns *every finished edit you ever made*
+into an exemplar ([`src/style.rs`](src/style.rs)):
+
+- a 14-dimensional photographic feature vector from EXIF and the histogram
+  (log/ratio dimensions z-scored, scene-type discriminators weighted 1.5×);
+- the 12 develop settings you actually moved (exposure, contrast, highlights,
+  shadows, whites, blacks, vibrance, clarity, temperature, tint, saturation,
+  dehaze), your master tone-curve shape (black-lift and S-strength) and a
+  colour-family summary;
+- optionally a 768-dimensional **SigLIP 2** image embedding of the frame
+  (`base/16 @384`, Apache-2.0 — CLIP and OpenCLIP were passed over on licence
+  grounds), computed by a local sidecar through the same 512-px frame the
+  query goes through, so index and query can never disagree.
+
+At develop time the photo's own vector retrieves the **4 most similar past
+shots** with the hybrid distance `Σ wᵢ(qᵢ−eᵢ)² + W_EMB·(1−cos(q,e))`
+(`W_EMB = 2.0`, retained after a 147-exemplar calibration that scanned
+0…8). Their measured settings, curve habit and colour families are rendered
+into the advisor's prompt as a *soft reference* — a ceiling below the
+committed strength band, a floor at it — and a capped `blend_toward` pull
+(≤ 0.6) moves the proposal toward your historical means without ever copying
+one. The rationale names the shots it leaned on. It is a retrieval system
+sized like one: 5,000 exemplars / 96 MiB, both caps derived from the
+measured 12.41 bytes per serialised embedding element rather than guessed.
+
+`match --style-prompt` closes the loop from the other side: given a source
+and a finished target of the same frame, the vision role writes a reusable
+text style brief that `reimagine` accepts as its Direction.
+
+### 2. One control registry generates the entire AI contract
+
+[`src/advisor/catalogue.rs`](src/advisor/catalogue.rs) lists every develop
+control once — range, neutral value, engine-only flag, `crs:` key, purpose —
+and everything downstream is *derived* from it: the strict Responses
+`json_schema` (both mirrors), the proposer's control catalogue, the eval
+ruler, and the style index's reference keys. A field added to `EditRecipe`
+without a registry row does not compile, so the AI side and the measuring
+side cannot silently drift apart.
+
+### 3. "How hard should the AI push" is one dial wired into six gates
+
+`GradeStrength` (GUI **Strength**, CLI `--strength`) reaches the proposer's
+banded restraint prose and its ±Highlights/Shadows guardrail pair, the
+recipe's `temper` soft caps (knees scale by `1 + (s − 0.5)·0.7`), the
+verifier's too-flat/over-cooked bands, the visual judge's rubric, the style
+reference wording, and even the no-key heuristic fallback. `0.50` is the
+calibration point every restraint number was tuned at (147-photo eval);
+`0.65` ships as default. Six constants that used to disagree now read one
+number — which is why turning the dial up cannot be quietly undone by a
+verifier that revises it back.
+
+### 4. Three AIs, and none of them can see what the others see
+
+- The **vision advisor** sees the preview and can only answer with bounded
+  controls under a strict schema (`store:false`).
+- The **verifier** (the signed-in `claude` CLI over OAuth, or any
+  OpenAI-compatible chat model) sees the recipe, EXIF, histogram, clipping
+  statistics and the advisor's rationale — never a pixel — and a non-Accept
+  verdict never writes a develop.
+- The **visual judge** sees only two JPEG renders, may buy one guided
+  revision, and the revision is adopted only if it re-scores at least as
+  high.
+
+The doctrine is structural, not a prompt instruction: in the develop path
+there is no code path by which a model output becomes a pixel.
+
+### 5. Reverse-fit is inverse rendering with an honesty budget
+
+`match` recovers an editable recipe from any finished look of the same frame
+— a generated image, someone else's render — without copying a pixel
+([`src/fit.rs`](src/fit.rs), [`src/fit_zoned.rs`](src/fit_zoned.rs),
+[`src/fit_field.rs`](src/fit_field.rs)):
+
+- **Distribution-level, never per-pixel regression.** Luminance CDFs are
+  matched at the engine's own tone knots and least-squares solved against
+  the engine's own slider basis with a ridge and a model-selection prior;
+  saturation closes through real renders; per-channel curves are admitted
+  only through three vetoes, one of which refuses any cast that paints a
+  hue ≥ 45° from every target family over ≥ 5 % of the frame.
+- **A structural-divergence statistic decides how much to believe.** Same
+  scene → Full solve. Repainted scene (`D ≥ 0.35`) → bounded Atmosphere mode
+  (EV ±1, WB gain [0.80, 1.25], saturation ±30, curve slope [0.5, 1.5],
+  confidence capped at 0.50) on a structure-blind ruler that keeps the
+  population vetoes.
+- **Local corrections are produced by mutually exclusive, evidence-gated
+  producers** — semantic sky/land zones from a local OneFormer pass, or
+  XMP-native luminance-range bands derived from rank-paired residuals — then
+  a frozen-evidence quadtree adds bitmap tiles only when both frames hold
+  ≥ 3 % evidence, structure survives, the confidence interval excludes
+  zero, the boundary rim stays within 0.012, and the composed frame does not
+  regress.
+- **A read-only local-field analyzer measures the ceiling first.** A
+  12×8×8 bilateral grid of five develop parameters is solved by conjugate
+  gradients on the same frozen evidence and reports how much of the
+  remaining difference *any* spatially varying develop could reach — on the
+  calibration pair the global fit reads 0.0961 against a ceiling of 0.0700,
+  and the accepted sky zone realises 0.134 of that distance. The field never
+  touches a pixel; it prices the producers, halves the tile budget when the
+  remainder is not tile-shaped, and says so in the rationale.
+- **Content that moved is matched where it moved to.** On divergent pairs
+  the fit consults a DIFT correspondence field (Stable Diffusion 2.1 as a
+  featurizer, 48×48 cells, confidence = cyclic consistency × flow
+  smoothness) to weight a Full zone's pixel pairs — identity fields are
+  conservation-tested to change nothing.
+
+### 6. Lightroom parity is measured, and the residuals are published
+
+The tone LUT, the two-arm Texture model (`A1 = 0.172443`, `A2 = 0.304888`;
+45 of 45 Lightroom anchors within ±0.02), the 290×11 radial feather LUT,
+the brush law `(1 − ρ^m)^n` with the measured flow constant `κ = 0.1284`
+(D1 error 874 px → 9.8 px), and the lens mask-frame transport built from
+Sony's own 16 native samples (radial 41/41 vectors within 1 px; linear
+openly *not* pixel-closed, RMS 9.748/7.025/6.336 px) were each fitted to
+Lightroom output. The XMP layer is hand-rolled on purpose — no XML crate —
+so a catalogue sidecar is merged into byte for byte, down to the SVD fold
+between Lightroom's pixel-space radial tilt and the engine's normalised
+rotation, and Lightroom's Brotli-packed brush dab streams are imported and
+verified (`MD5 → .acr → Brotli`).
+
+### 7. Local models are licence-screened, pinned to the byte, and never in the repo
+
+BiRefNet (444,473,596 B), OneFormer ADE20K Swin-L (881,196,376 B), SAM 2.1
+Hiera-Large (897,897,416 B), SigLIP 2 (1,501,968,264 B), SD 2.1 as a DIFT
+featurizer (2,580,061,174 B) and five SCUNet checkpoints are fetched on
+first use through one shared download-and-refuse implementation
+(sha256 + byte cap), run as `-E` subprocesses inside job-object kill groups
+with a single-flight model slot, and every AI mask is cached under a
+provenance key so a better backend forces an honest re-derivation. SegFormer
+was removed for its research-only licence; the licence is a selection
+criterion, not a footnote.
+
+### 8. Generated pixels are quarantined and measured
+
+`reimagine` composes the prompt onto an unconditional faithfulness scaffold
+(because `input_fidelity` is silently dropped by gpt-image-2), measures the
+result's structural divergence with the same statistic the reverse-fit uses,
+warns at `D ≥ 0.35`, and can spend one bounded retry keeping the closer
+image. `heal` only ever copies, shifts and averages pixels that already
+exist. Anything that changed pixels lives on its own card as a pixel source
+— never disguised as a Lightroom adjustment.
+
+### 9. Guards the compiler and the release script enforce
+
+Deletable rasters are a type (`OwnedRaster`): a call site that deletes cannot
+be handed a user path, so the mistake that once reached a calibration mask
+no longer compiles. `scripts/check_docs.py` re-derives 26 pinned release
+claims (formats, camera bodies, test counts, toolchain) from the source and
+the gate transcripts, and every batch ships with named falsifier tests and a
+mutation table.
+
+### Designed, not yet shipped
+
+Written down in the plan and the design memos, in delivery order:
+
+- **Free-form remainder masks** — the analyzer's fourth producer draws
+  bitmap masks where its remainder says a spatially varying develop is still
+  owed, through the same gates as the tiles (in implementation).
+- **Multi-region semantic calibration** — one OneFormer pass, up to four
+  disjoint class regions each choosing Full or Atmosphere on its own,
+  confidence taken from the worst accepted region; colour-range regions
+  alongside luminance ranges (design memo complete).
+- **Style retrieval expansion** — ingest finished exports as exemplars (not
+  only RAW+XMP pairs), text embeddings so a written style brief retrieves by
+  meaning, the embedding switch in the GUI (today the
+  `AUTOSHOP_STYLE_EMBED` environment variable), and a prompt-adherence axis
+  next to Strength.
+- **Linear-gradient falloff continuity** (C¹ clamp ramp; a rendering change
+  reserved for v1.1) and a **macOS build**.
+
 ## How it works
 
 <picture>
@@ -141,7 +322,8 @@ What is deliberately hard about it:
 - **Reverse-fit is an estimator with an honesty budget.** A structural
   divergence statistic decides whether a target still shows the same scene
   (full solve) or a repainted one (bounded Atmosphere mode). Semantic zones,
-  luminance-range bands, and quadtree tiles are each admitted only through
+  luminance-range bands, quadtree tiles, and free-form remainder masks are
+  each admitted only through
   evidence gates and a do-no-harm frame check, and a read-only local-field
   analyzer states how much of the remaining difference *any* spatially
   varying develop could reach before a producer runs — a ceiling reported in
@@ -157,40 +339,36 @@ What is deliberately hard about it:
   reimagined target is scored for structural divergence before anything is
   fitted to it.
 
-## Results: before and after
+## Results: two batches, six frames
 
-Every "before" is Autoshop's own neutral conversion of a Sony α7R IVA 61 MP
-`.ARW`, not the camera JPEG; every "after" is rendered by the engine from a
-recipe unless the caption says the image was generated. Model-judge scores are
+Each row is one Sony α7R IVA 61 MP `.ARW`. Every frame not marked *generated*
+is rendered by Autoshop's engine from a recipe; the neutral frame is
+Autoshop's own conversion, not the camera JPEG. Model-judge scores are
 automated review, not human aesthetic approval.
 
-### 1. AI analysis
+### Batch 1 — original · AI analysis · AI analysis with a style reference
 
-<p align="center">
-<img src="docs/images/showcase-cat-analyze-pair.jpg" alt="Sony α7R IVA ARW: neutral cat photo beside its AI analyze develop" />
-<br />
-<sub><b>AI analyze develop.</b> Sony α7R IVA <code>.ARW</code>, 61 MP: neutral engine conversion at left; AI-proposed crop, global tone, a radial cat lift, and a linear water hold at right. The model judge moved from 62 to 86; that score is automated review, not human aesthetic approval.</sub>
-</p>
+<table>
+<tr>
+<td width="33%"><img src="docs/images/showcase-lake-neutral.jpg" alt="Lake and boat: neutral engine conversion" /><br /><sub><b>Original.</b> Neutral engine conversion of the RAW.</sub></td>
+<td width="33%"><img src="docs/images/showcase-lake-ai.jpg" alt="Lake and boat: AI develop with style read disabled" /><br /><sub><b>AI analysis.</b> The vision advisor's develop with style influence disabled. This run rendered under a Revise verdict and therefore has no saved recipe/XMP; it is kept as a transparent comparison.</sub></td>
+<td width="33%"><img src="docs/images/showcase-lake-ai-style.jpg" alt="Lake and boat: AI develop with four retrieved style references" /><br /><sub><b>AI analysis + style reference.</b> The same advisor, now handed four similar edits retrieved from the indexed Lightroom library as soft references; accepted and saved as a normal recipe and XMP. Nothing is copied pixel for pixel.</sub></td>
+</tr>
+</table>
 
-### 2. AI analysis with style read
+### Batch 2 — original · AI full-image generation · AI reverse-fit
 
-<p align="center">
-<img src="docs/images/showcase-lake-style-pair.jpg" alt="Sony α7R IVA ARW, lake and boat: neutral conversion beside the AI develop that read four similar edits from the local style library" />
-<br />
-<sub><b>Lake and boat.</b> Left: neutral engine conversion. Right: an AI develop that retrieved four similar edits from the indexed Lightroom library as soft references; the proposal was accepted and saved as a normal recipe and XMP. The references steer the proposal — no pixels are copied and nothing is generated.</sub>
-</p>
+<table>
+<tr>
+<td width="33%"><img src="docs/images/showcase-viaduct-neutral.jpg" alt="Stone viaduct: neutral engine conversion" /><br /><sub><b>Original.</b> Neutral engine conversion of the RAW.</sub></td>
+<td width="33%"><img src="docs/images/showcase-viaduct-reimagine.jpg" alt="Stone viaduct: AI-generated 3520×2352 target" /><br /><sub><b>AI full-image generation</b> (<i>generated</i>). A 3520×2352 target from a configured <code>gpt-image-2</code>; it may invent content, and its structural divergence from the input is measured and disclosed before anything is fitted to it.</sub></td>
+<td width="33%"><img src="docs/images/showcase-viaduct-fit.jpg" alt="Stone viaduct: reverse-fitted recipe rendered on the original RAW at 9504×6336" /><br /><sub><b>AI reverse-fit.</b> The recipe recovered from that look, rendered on the original RAW at 9504×6336 — editable, deterministic, and unable to invent detail. Look error 0.057 → 0.019 at fit confidence 0.678264; the colour-cast stage was rejected by the fit's own do-no-harm review, so the recipe carries tone and saturation only.</sub></td>
+</tr>
+</table>
 
-### 3. AI reimagine and reverse-fit
-
-<p align="center">
-<img src="docs/images/showcase-viaduct-reimagine-fit-pair.jpg" alt="Stone viaduct: AI-generated 3520×2352 target beside the reverse-fitted engine render of the original RAW at 9504×6336" />
-<br />
-<sub><b>Stone viaduct.</b> Left: a 3520×2352 full-image target generated with a configured <code>gpt-image-2</code> — it may invent content. Right: the recipe recovered from that look, rendered by Autoshop on the original RAW at 9504×6336 — it cannot. The statistical look error moved from 0.057 to 0.019 at fit confidence 0.678264; the fitted colour-cast stage was rejected by the fit's own do-no-harm review, so the recovered recipe carries tone and saturation only.</sub>
-</p>
-
-More examples — three further `analyze` pairs including two documented failure
-modes, the style-read triptychs, and the sunset reimagine — are in
-[docs/SHOWCASE.md](docs/SHOWCASE.md).
+More examples — the cat `analyze` pair, three further pairs including two
+documented failure modes, the style-read triptychs, and the sunset
+reimagine — are in [docs/SHOWCASE.md](docs/SHOWCASE.md).
 
 ## Measured numbers
 
@@ -208,10 +386,10 @@ estimate. Sources are the pinned claims in
 | Linear mask closure (openly not pixel-closed) | RMS 9.748 / 7.025 / 6.336 px with lens correction on, 12.449 / 9.943 / 4.979 px off | [Lens correction](#lens-correction-and-lightroom-mask-frame-laws) |
 | Brush geometry | D1 error 874 px → 9.8 px after pixel-centre sampling and the pixel/aspect metric | [Masks](#masks) |
 | X-Trans demosaic (approximate) | X-S10 G/R ratio 1.5503 → 0.9476 | [RAW decode](#raw-decode-and-cfa) |
-| Reverse-fit, stone viaduct | look error 0.057 → 0.019, confidence 0.678264 | [Results](#results-before-and-after) |
+| Reverse-fit, stone viaduct | look error 0.057 → 0.019, confidence 0.678264 | [Results](#results-two-batches-six-frames) |
 | Reverse-fit, sunset | look error 0.060 → 0.042, confidence 0.746691 | [docs/SHOWCASE.md](docs/SHOWCASE.md) |
 | Local-field ceiling, calibration pair | global fit 0.0961 against a ceiling of 0.0700; the accepted sky zone realizes 0.134 of the distance | [User manual §4](#4-use-versions-and-variants) |
-| AI develop, model judge | cat pair 62 → 86; townhouse 84 → 86; balcony 78 → 84; hillside 63 → 87 (automated scores) | [Results](#results-before-and-after), [docs/SHOWCASE.md](docs/SHOWCASE.md) |
+| AI develop, model judge | cat pair 62 → 86; townhouse 84 → 86; balcony 78 → 84; hillside 63 → 87 (automated scores) | [docs/SHOWCASE.md](docs/SHOWCASE.md) |
 | Style retrieval weight | `W_EMB=2.0` retained after a 147-exemplar calibration | [AI advisor](#ai-advisor-and-reverse-fit) |
 | Memory budget | 1800 MB per photo from a 1771 MB reference probe; 4 GiB RAW admission gate | [Application](#application-and-infrastructure) |
 
@@ -385,6 +563,12 @@ zone or a spatial tile is judged on its own members, so a land zone is no
 longer withheld because a replaced sky happens to share its luminance bins.
 With its colour controls withheld, a zone whose luminance already matches is
 left alone and says so instead of being dialled for a hairline tone gain.
+
+The free-form field-mask pass then consumes only the remainder not already
+covered by accepted tiles. It uses the field's frozen per-pixel weight, keeps
+opposite signs in separate 4-connected components, and discloses every
+proposal and typed refusal before or after fitting; the layer is enabled with
+the field by default and can be disabled byte-for-byte.
 
 Before either local producer runs, reverse-fit also measures how much of the
 remaining difference a spatially varying develop could reach at all. A

@@ -1,11 +1,31 @@
 # Autoshop showcase
 
 Further examples behind the three pairs in the
-[README's results section](../README.md#results-before-and-after): the
+[README's results section](../README.md#results-two-batches-six-frames): the
 three established `analyze` pairs — including two documented failure modes
 — the style-read triptychs, and both reimagine/reverse-fit triptychs. Image
 paths are relative to this file's directory; every before is Autoshop's
 neutral conversion of the same Sony α7R IVA `.ARW`.
+
+## Pairs that opened earlier README revisions
+
+<p align="center">
+<img src="images/showcase-cat-analyze-pair.jpg" alt="Sony α7R IVA ARW: neutral cat photo beside its AI analyze develop" />
+<br />
+<sub><b>AI analyze develop.</b> Sony α7R IVA <code>.ARW</code>, 61 MP: neutral engine conversion at left; AI-proposed crop, global tone, a radial cat lift, and a linear water hold at right. The model judge moved from 62 to 86; that score is automated review, not human aesthetic approval.</sub>
+</p>
+
+<p align="center">
+<img src="images/showcase-lake-style-pair.jpg" alt="Lake and boat: neutral conversion beside the AI develop that read four similar edits" />
+<br />
+<sub><b>Lake and boat, style read.</b> Left: neutral engine conversion. Right: the accepted develop that retrieved four similar edits from the indexed Lightroom library as soft references.</sub>
+</p>
+
+<p align="center">
+<img src="images/showcase-viaduct-reimagine-fit-pair.jpg" alt="Stone viaduct: AI-generated target beside the reverse-fitted engine render" />
+<br />
+<sub><b>Stone viaduct, reimagine and reverse-fit.</b> Left: the 3520×2352 generated target. Right: the recovered recipe rendered on the original RAW at 9504×6336 (look error 0.057 → 0.019, confidence 0.678264).</sub>
+</p>
 
 ## Showcase Part A — AI analysis and style transfer
 
