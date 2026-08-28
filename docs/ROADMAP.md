@@ -195,6 +195,19 @@
 
 ## 当前状态（已完成，勿重做）
 
+- **📘 README 九段重构 + archify 架构图已提交 `2ea6c7e`（2026-08-28，用户令：读全局 README 标准；before/after 恰放三对；用 archify 出整体架构图）**：
+  README 按九段标准重排＝What Autoshop is（简介+受众+教义）/ What it does（Feature 1–8）/ How it works（archify 架构图 + 主路径 + 七条「难在哪」）/
+  Results: before and after（恰三对：①AI 分析＝猫对；②带风格读的 AI 分析＝湖与船 neutral vs 四参考被接受的 style05；③AI 整图+反推＝高架桥 gpt-image-2 3520×2352 目标 vs
+  反推配方在 RAW 9504×6336 渲染，0.057→0.019/0.678264）/ Measured numbers（13 行，逐行引自持有该数的段落，无新数）/ Install / User manual / Supported formats /
+  Tech stack, algorithms, and design philosophy（新增六条哲学 + 原技术栈正文原样）/ Status, roadmap, and known limitations / License。
+  逐行集合比对：旧 742 行中 23 行未原样保留＝目录重生成、Feature overview 六条改写为 Feature 1–8（原六项全覆盖）、两个标题改名、SHOWCASE 内 hero 句改指向；
+  Part A/B（三旧对含两处失败模式、两张风格三联、两张反推三联）原样迁 docs/SHOWCASE.md（图径改 images/）。站点 #install-and-quickstart 锚点保留；站点展示按
+  showcase-replace-pending 待步15 一并重部署，本批未动 site/。
+  两张新对图 docs/images/showcase-lake-style-pair.jpg / showcase-viaduct-reimagine-fit-pair.jpg 由 r30-materials/showcase2-out/full 全尺寸渲染合成（1600×594，
+  猫对版式，无 EXIF；scratchpad compose_pairs.py）。架构图＝docs/architecture/autoshop.architecture.json（archify `validate --quality showcase` 0 错 0 警）+
+  autoshop.architecture.html（deliver）+ docs/images/architecture-{light,dark}.png（README `<picture>` 按明暗切换）。首稿由 Opus 5 代理起草，代理撞会话额度后主模型亲手收口：viewBox 2110→1270 分层版式修桌面可读性、六处标签偏移修重叠、截断标签改短；
+  visual-check 可读性/查看器铬通过，**四桌面尺寸纵向溢出登记为已知限制**（卡片区在折叠线下，scrollHeight 1430/1538/1538/1565）；README PNG＝2048×1320 截图舞台区裁切 1452×1132（sha 前缀 json af218bba/html 370970d0）。
+  门：check_docs 23P/0F/3S、--gates（B2 合并转录）25P/0F/1S、README+SHOWCASE 照片文件名扫描 0。
 - **🧮 步10-B2 局部场分析仪已提交 `d21304a`（2026-08-28，Codex 两度撞额度→阶段 A 主模型/Opus 5 亲写、阶段 B Codex 起头+Opus 5 续跑门/活体/文档、主模型主审+53 代理对抗复审后一次系统修）**：
   `src/fit_field.rs` 只读 12×8×8 双边网格 ×5 参数（ev/gain_rgb/slope）CG 解（f64 累加、λ=1 Tikhonov + s=1 拉普拉斯、≤90 迭、rr≤1e-10、三线性 splat、
   界 EV±1.25/增益±0.35/斜率±0.5、占据下限 8），拟合权=冻结证据 source_weights × 局部支持 (1−D，96 格 rayon 并行按格序散布=两次求解逐位同) × 未裁剪；

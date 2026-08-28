@@ -237,7 +237,7 @@
       "id": "decode-to-advisor",
       "from": "raw-decode",
       "to": "ai-advisor",
-      "label": "preview, EXIF, histogram",
+      "label": "preview·EXIF·histogram",
       "variant": "emphasis",
       "labelDy": -30
     },
