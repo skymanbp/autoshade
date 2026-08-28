@@ -85,6 +85,10 @@ pub mod keys {
     pub const FIT_NOTE_ATMOSPHERE_CONFIDENCE: &str =
         " Atmosphere-mode confidence is capped at {cap} because develop controls cannot \
          recreate the divergent structure.";
+    pub const FIT_NOTE_ATMOSPHERE_POPULATION_EVIDENCE: &str =
+        " Atmosphere controls were read on population evidence; structural withholding \
+         of luma ranges [{luma_ranges}] and hue bands [{hue_bands}] applies to the \
+         residual, zone and detail fits, not to the bounded atmosphere controls.";
     pub const FIT_DEGENERATE: &str = " Fit refused: the source or target frame has no tonal variation (blank or single-tone), so a statistical match would produce a constant tone map — no recipe was fitted.";
     pub const FIT_NOTE_REGRESSED: &str =
         " The full fit rendered farther from the target than the untouched \

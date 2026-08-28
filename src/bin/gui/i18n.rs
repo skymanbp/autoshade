@@ -1539,6 +1539,10 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     (" Atmosphere-mode confidence is capped at {cap} because develop controls cannot \
       recreate the divergent structure.",
         " 由于显影控制无法重建差异结构，氛围模式的置信度上限为 {cap}。"),
+    (" Atmosphere controls were read on population evidence; structural withholding \
+      of luma ranges [{luma_ranges}] and hue bands [{hue_bands}] applies to the \
+      residual, zone and detail fits, not to the bounded atmosphere controls.",
+        " 氛围控制依据整体证据读取；结构性保留的明度范围 [{luma_ranges}] 和色相带 [{hue_bands}] 仅适用于残差、区域和细节拟合，不适用于有界氛围控制。"),
     (" Fit refused: the source or target frame has no tonal variation (blank or single-tone), so a statistical match would produce a constant tone map — no recipe was fitted.",
         " 拟合已拒绝：源图或目标图没有影调变化（空白或单色画面），统计匹配只会产生恒定影调映射——未生成拟合配方。"),
     (" The full fit rendered farther from the target than the untouched \

@@ -360,10 +360,11 @@ fn derive_luminance_bands(
         .iter()
         .map(|run| target_range_for_ranks(&target_luma, run.target_first, run.target_last))
         .collect::<Vec<_>>();
-    let mut source_weights = source_ranges
+    let mut source_coverage = source_ranges
         .iter()
         .map(|range| range_weights_for_pixels(range, source_px))
         .collect::<Vec<_>>();
+    let mut source_weights = source_coverage.clone();
     normalize_partition_weights(&mut source_weights);
     for (i, run) in valid.into_iter().enumerate() {
         let verdict = fit::luma_evidence_for_bins(evidence, run.first, run.last);
@@ -375,7 +376,10 @@ fn derive_luminance_bands(
             attachment: ZoneAttachment {
                 source_weights: std::mem::take(&mut source_weights[i]),
                 target_weights: Vec::new(),
-                coverage: None,
+                coverage: Some(ZoneCoverage {
+                    source: std::mem::take(&mut source_coverage[i]),
+                    target: range_weights_for_pixels(&target, target_px),
+                }),
                 mask: RANGE_HOST,
                 range: Some(source),
                 name: name.clone(),
@@ -606,17 +610,18 @@ fn range_weights_from_current_render(
     s_img: &DynamicImage,
     recipe: &crate::recipe::EditRecipe,
     ranges: &[RangeMask],
-) -> Vec<Vec<f32>> {
+) -> (Vec<Vec<f32>>, Vec<Vec<f32>>) {
     #[cfg(test)]
     RANGE_FRESH_RENDER_CALLS.with(|calls| calls.set(calls.get() + 1));
 
     let current = fit::pixels_of(&render::develop_preview(s_img, recipe));
-    let mut weights = ranges
+    let coverage = ranges
         .iter()
         .map(|range| range_weights_for_pixels(range, &current))
         .collect::<Vec<_>>();
+    let mut weights = coverage.clone();
     normalize_partition_weights(&mut weights);
-    weights
+    (weights, coverage)
 }
 
 fn final_range_frame_err(
@@ -643,8 +648,7 @@ pub(super) fn attach_luminance_ranges(
     target: &DynamicImage,
     report: &mut FitReport,
 ) {
-    let s_img = src.thumbnail(fit::ANALYZE_EDGE, fit::ANALYZE_EDGE);
-    let t_img = target.thumbnail(fit::ANALYZE_EDGE, fit::ANALYZE_EDGE);
+    let (s_img, t_img) = fit::analysis_pair(src, target);
     let tgt_px = fit::pixels_of(&t_img);
     let global_px = fit::pixels_of(&render::develop_preview(&s_img, &report.recipe));
     // Preserve the global stage's own reported frame metric as the ceiling;
@@ -677,11 +681,12 @@ pub(super) fn attach_luminance_ranges(
     }
 
     let all_ranges = derived.bands.iter().map(|band| band.source).collect::<Vec<_>>();
-    let mut target_weights = derived
+    let target_coverage = derived
         .bands
         .iter()
         .map(|band| range_weights_for_pixels(&band.target, &tgt_px))
         .collect::<Vec<_>>();
+    let mut target_weights = target_coverage.clone();
     normalize_partition_weights(&mut target_weights);
     for (band, weights) in derived.bands.iter_mut().zip(target_weights) {
         band.attachment.target_weights = weights;
@@ -691,9 +696,13 @@ pub(super) fn attach_luminance_ranges(
     let corr = report.correspondence.take();
     let mut accepted = Vec::new();
     for i in 0..derived.bands.len() {
-        let mut current_weights =
+        let (mut current_weights, mut current_coverage) =
             range_weights_from_current_render(&s_img, &report.recipe, &all_ranges);
         derived.bands[i].attachment.source_weights = std::mem::take(&mut current_weights[i]);
+        derived.bands[i].attachment.coverage = Some(ZoneCoverage {
+            source: std::mem::take(&mut current_coverage[i]),
+            target: target_coverage[i].clone(),
+        });
         let accepted_band = attach_one_zone(
             &s_img,
             &tgt_px,
@@ -838,6 +847,7 @@ mod tests {
         let n = source.len();
         let evidence = fit::EvidenceModel {
             source_pixels: base,
+            source_membership: vec![1.0; n],
             width: n as u32,
             height: 1,
             spatial_supported: vec![true; n],
@@ -941,7 +951,23 @@ mod tests {
         shuffled.rotate_left(37);
         shuffled.reverse();
         let actual = derive_luminance_bands(&source, &shuffled, &evidence);
-        assert_eq!(actual, expected, "target positions must not influence rank-derived bands");
+        let canonical = |mut derived: RangeDerivation| {
+            for band in &mut derived.bands {
+                band
+                    .attachment
+                    .coverage
+                    .as_mut()
+                    .expect("a range owns target coverage")
+                    .target
+                    .sort_by(f32::total_cmp);
+            }
+            derived
+        };
+        assert_eq!(
+            canonical(actual),
+            canonical(expected),
+            "target positions must not influence rank-derived bands or the target ramp's mass",
+        );
     }
 
     #[test]
@@ -1005,7 +1031,13 @@ mod tests {
         let mut residuals = [0.0; 17];
         residuals[5] = 0.07;
         residuals[6] = -0.07;
-        let (source, target, evidence) = synthetic_range_case(residuals);
+        let (mut source, target, evidence) = synthetic_range_case(residuals);
+        let overlap_i = 5 * 8;
+        let compensate_i = overlap_i + 1;
+        let original = source[overlap_i][0];
+        let overlap_value = 6.25 / 17.0;
+        source[overlap_i] = [overlap_value; 3];
+        source[compensate_i] = [original - (overlap_value - original); 3];
         let derived = derive_luminance_bands(&source, &target, &evidence);
         assert_eq!(derived.bands.len(), 2);
         for band in &derived.bands {
@@ -1015,7 +1047,23 @@ mod tests {
             assert!(hi_outer - hi > 0.0 || hi == 1.0, "interior upper ramp is hard");
             assert!(lo - lo_outer <= RANGE_MAX_RAMP + 1e-6);
             assert!(hi_outer - hi <= RANGE_MAX_RAMP + 1e-6);
+            let coverage = band.attachment.coverage.as_ref().expect("a range owns its raw ramp");
+            assert_eq!(coverage.source, range_weights_for_pixels(&band.source, &source));
+            assert_eq!(coverage.target, range_weights_for_pixels(&band.target, &target));
         }
+        let overlap = (0..source.len()).find(|&i| {
+            derived
+                .bands
+                .iter()
+                .filter(|band| band.attachment.coverage.as_ref().unwrap().source[i] > 0.0)
+                .count()
+                > 1
+                && derived.bands.iter().any(|band| {
+                    band.attachment.coverage.as_ref().unwrap().source[i]
+                        > band.attachment.source_weights[i]
+                })
+        });
+        assert!(overlap.is_some(), "adjacent raw feathers must exceed their normalized estimator");
         for i in 0..source.len() {
             let sum = derived
                 .bands
@@ -1320,8 +1368,7 @@ mod tests {
             GrayImage::from_fn(w, h, |_, y| image::Luma([if y < h / 2 { 255 } else { 0 }]));
         let path = fixture_mask_path("range-frame-regression");
         mask.save(path.path()).unwrap();
-        let s_img = source.thumbnail(fit::ANALYZE_EDGE, fit::ANALYZE_EDGE);
-        let t_img = target.thumbnail(fit::ANALYZE_EDGE, fit::ANALYZE_EDGE);
+        let (s_img, t_img) = fit::analysis_pair(&source, &target);
         let tgt_px = fit::pixels_of(&t_img);
         let divergence = measure_zone_divergence(
             &source,

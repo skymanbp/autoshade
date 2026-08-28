@@ -223,6 +223,9 @@ range** cards with their four ordered bounds. Their sentinel-hosted range
 components project to Lightroom XMP, while semantic bitmap masks remain
 engine-only. This release derives luminance ranges only, not color ranges.
 
+Both analysis rasters share one geometry: the target is resampled into the
+source's analysis thumbnail, so a one-row rounding difference between the two
+images can no longer switch the structural evidence gate off.
 Evidence verdicts follow the population a correction moves. The global recipe
 and the frame-wide luminance ranges are judged on the whole frame; a semantic
 zone or a spatial tile is judged on its own members, so a land zone is no
@@ -487,6 +490,9 @@ full tone, saturation, and guarded-cast solve, while structurally changed
 targets use bounded Atmosphere mode for overall tone and colour. Zoned fits
 retain independently bounded sky/land adjustments behind a local-quality gate;
 they do not claim to reconstruct generated objects or detail.
+Atmosphere controls read population facts on one structure-blind report ruler,
+while Full zones and detail retain the separate structural evidence and the
+recipe rationale discloses that split.
 
 ## Supported formats
 
@@ -636,7 +642,7 @@ versions, and a deleted-version registry; SCUNet success requires the typed
 `sidecar_wrote` contract. A 1771 MB reference probe sets the 1800 MB per-photo
 budget, while the 4 GiB RAW gate bounds admission. The [`build`
 workflow](.github/workflows/build.yml) covers default and GUI feature sets on
-Ubuntu and macOS. The current battery is **980 library (971 pass + 9 `#[ignore]`d forensic probes) / 15 CLI / 145 GUI / 2+2 contract** tests; the
+Ubuntu and macOS. The current battery is **991 library (982 pass + 9 `#[ignore]`d forensic probes) / 15 CLI / 145 GUI / 2+2 contract** tests; the
 [`scripts/check_docs.py`](scripts/check_docs.py) gate re-derives pinned release
 claims. Model weights are not stored in this repository.
 

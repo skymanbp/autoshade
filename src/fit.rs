@@ -141,6 +141,10 @@ pub struct EvidenceRange {
 #[derive(Clone, Debug)]
 pub struct EvidenceModel {
     pub source_pixels: Vec<[f32; 3]>,
+    /// Soft membership of each aligned source pixel in this model's
+    /// population: all ones for the frame, the source coverage for a scoped
+    /// view. Blind-move numerators use the same mass as [`Self::population`].
+    pub source_membership: Vec<f32>,
     pub width: u32,
     pub height: u32,
     pub spatial_supported: Vec<bool>,
@@ -173,9 +177,13 @@ impl EvidenceModel {
     /// the population a correction MOVES — the frame for the global fit, the
     /// zone for a zone — so a ground zone is no longer withheld because a
     /// replaced sky happens to share its luma bins, while a zone whose own
-    /// members are divergent stays withheld. Per-pixel support
-    /// (`spatial_supported`) is unchanged; over the whole frame this is the
-    /// model itself.
+    /// members are divergent stays withheld unless the frame-wide
+    /// same-content verdict holds. That verdict deliberately bypasses range
+    /// survival and per-pixel withholding. Per-pixel support
+    /// (`spatial_supported`) is unchanged; over the whole aligned frame this
+    /// is the model itself. The two rasters share one geometry by
+    /// construction ([`analysis_pair`]); the aligned-prefix arithmetic below
+    /// is the defensive form of that contract.
     pub fn scoped(&self, tp: &[[f32; 3]], source_zone: &[f32], target_zone: &[f32]) -> EvidenceModel {
         let ranges = aggregate_ranges(
             &self.source_pixels,
@@ -190,6 +198,7 @@ impl EvidenceModel {
         );
         EvidenceModel {
             source_pixels: self.source_pixels.clone(),
+            source_membership: ranges.source_membership,
             width: self.width,
             height: self.height,
             spatial_supported: self.spatial_supported.clone(),
@@ -205,6 +214,25 @@ impl EvidenceModel {
             globally_same_content: self.globally_same_content,
             population: ranges.population,
         }
+    }
+
+    /// Re-aggregate this frame on Atmosphere mode's structure-blind evidence
+    /// doctrine. Atmosphere mode is entered because structure diverges; its
+    /// instruments are the budgets (EV +/-1, WB gain [0.80, 1.25], saturation
+    /// +/-30, curve slope [0.5, 1.5]) and the population facts, not structural
+    /// survival. Population vetoes remain intact because [`Self::scoped`]
+    /// re-derives them from the unchanged source and target pixels.
+    ///
+    /// On a frame model whose `globally_same_content` is already true, this is
+    /// byte-equal to `scoped(tp, ones, ones)`; the unit test pins that invariant.
+    pub fn structure_blind(&self, tp: &[[f32; 3]]) -> EvidenceModel {
+        let n = self.source_pixels.len().min(tp.len());
+        let ones = vec![1.0; n];
+        let mut blind = self.clone();
+        blind.spatial_weights = ones.clone();
+        blind.spatial_supported = vec![true; n];
+        blind.globally_same_content = true;
+        blind.scoped(tp, &ones, &ones)
     }
 }
 
@@ -360,8 +388,13 @@ fn evidence_range(
 /// same per-pixel structural support over them. Memberships are soft (a
 /// refined mask's feather), the frame is the all-ones case, and target luma
 /// bins are rank-paired within the population's own target members at its own
-/// source-to-target mass ratio.
+/// source-to-target mass ratio. Every sum and share uses the one aligned
+/// `0..min(source.len(), target.len())` prefix. A divergent population is
+/// withheld unless the frame-wide same-content verdict deliberately bypasses
+/// range survival and per-pixel withholding.
 struct RangeAggregate {
+    /// Source membership over the same aligned prefix as every range sum.
+    source_membership: Vec<f32>,
     source_weights: Vec<f32>,
     target_weights: Vec<f32>,
     source_hue_weights: Vec<f32>,
@@ -392,7 +425,8 @@ fn aggregate_ranges(
     let spatial_weights = support.spatial_weights;
     let n = sp.len().min(tp.len());
     let member = |zone: &[f32], i: usize| zone.get(i).copied().unwrap_or(0.0).max(0.0);
-    let source_mass = (0..n).map(|i| member(source_zone, i)).sum::<f32>();
+    let source_membership = (0..n).map(|i| member(source_zone, i)).collect::<Vec<_>>();
+    let source_mass = source_membership.iter().sum::<f32>();
     let target_mass = (0..n).map(|i| member(target_zone, i)).sum::<f32>();
     let mut luma = Vec::with_capacity(EVIDENCE_LUMA_BINS);
     let mut luma_source_weights = vec![0.0f32; n];
@@ -402,8 +436,9 @@ fn aggregate_ranges(
     let ratio = if source_mass > 0.0 { target_mass / source_mass } else { 0.0 };
     let mut cursor = 0usize;
     let mut taken = 0.0f32;
+    let mut quota = 0.0f32;
     for bin in 0..EVIDENCE_LUMA_BINS {
-        let sm: Vec<f32> = sp
+        let sm: Vec<f32> = sp[..n]
             .iter()
             .enumerate()
             .map(|(i, p)| {
@@ -416,9 +451,12 @@ fn aggregate_ranges(
         // source bin to a different numeric target interval. Pair the bin to
         // the same target population ranks, then let spatial evidence decide
         // whether that population actually survives on both sides.
-        let mut tm = vec![0.0f32; tp.len()];
-        let need = taken + sm.iter().take(n).sum::<f32>() * ratio;
-        while cursor < target_order.len() && taken < need {
+        let mut tm = vec![0.0f32; n];
+        quota += sm.iter().sum::<f32>() * ratio;
+        // A rank-boundary target member is consumed whole. Consequently the
+        // cumulative allocation can drift by at most one member over the
+        // entire population, rather than one fresh overshoot in every bin.
+        while cursor < target_order.len() && taken < quota {
             let i = target_order[cursor];
             tm[i] = member(target_zone, i);
             taken += tm[i];
@@ -450,14 +488,14 @@ fn aggregate_ranges(
     let mut source_hue_weights = vec![0.0f32; n];
     let mut target_hue_weights = vec![0.0f32; n];
     for band in 0..EVIDENCE_HUE_BANDS {
-        let sm: Vec<f32> = sp
+        let sm: Vec<f32> = sp[..n]
             .iter()
             .enumerate()
             .map(|(i, p)| {
                 if evidence_hue_band(p) == Some(band) { member(source_zone, i) } else { 0.0 }
             })
             .collect();
-        let tm: Vec<f32> = tp
+        let tm: Vec<f32> = tp[..n]
             .iter()
             .enumerate()
             .map(|(i, p)| {
@@ -490,6 +528,7 @@ fn aggregate_ranges(
     let hue_mass = hue.iter().map(|r| r.weight).sum::<f32>().min(1.0);
     let identifiability = (0.75 * luma_mass + 0.25 * hue_mass).clamp(0.0, 1.0);
     RangeAggregate {
+        source_membership,
         source_weights: luma_source_weights,
         target_weights: luma_target_weights,
         source_hue_weights,
@@ -588,7 +627,7 @@ pub fn evidence_model_for(
         .iter()
         .map(|&divergence| globally_same_content || divergence < DIVERGENCE_ZONE)
         .collect::<Vec<_>>();
-    let frame = vec![1.0f32; sp.len().max(tp.len())];
+    let frame = vec![1.0f32; n];
     let ranges = aggregate_ranges(
         sp,
         tp,
@@ -602,6 +641,7 @@ pub fn evidence_model_for(
     );
     EvidenceModel {
         source_pixels: sp.iter().take(n).copied().collect(),
+        source_membership: ranges.source_membership,
         width: w,
         height: h,
         spatial_supported,
@@ -636,7 +676,7 @@ fn movement_identifiability(after: &[[f32; 3]], evidence: &EvidenceModel) -> f32
             unsupported += movement;
         }
     }
-    let mean_unsupported = unsupported / after.len().max(1) as f32;
+    let mean_unsupported = unsupported / evidence.source_pixels.len().max(1) as f32;
     (-UNSUPPORTED_MOVEMENT_CONFIDENCE_SLOPE * mean_unsupported)
         .exp()
         .clamp(0.0, 1.0)
@@ -1256,6 +1296,33 @@ pub fn same_frame_plausible(src: &DynamicImage, target: &DynamicImage) -> bool {
     (a - b).abs() <= SAME_FRAME_ASPECT_TOL * a.max(b)
 }
 
+/// The two analysis rasters of a pair, in ONE geometry.
+///
+/// Every evidence statistic pairs source pixel `i` with target pixel `i`, and
+/// [`structure_divergence`] refuses (returns `matched`, D = 0) when the two
+/// rasters differ in length. Thumbnailing the two images independently let a
+/// ONE-ROW difference decide that: a 1600x1067 source lands on 384x256 and a
+/// 1600x1069 target on 384x257, the frame-wide divergence read as 0, the
+/// same-content verdict came out true and no evidence range could ever be
+/// withheld -- the calibration pair fitted 0.081 -> 0.018 with the gate silently
+/// off, while the same pixels cropped to equal heights abstained at 0.057 (the
+/// verdict the doctrine actually gives). So the target is thumbnailed into the
+/// source's analysis geometry with the SAME operator the source went through:
+/// `thumbnail(w, h)` is `resize_dimensions` + `thumbnail_exact`, image's box
+/// filter where every full-resolution pixel lands in exactly one cell, so an
+/// equal-shape pair is byte-for-byte the two thumbnails it always was, by
+/// construction and not by a branch. The operator matters: a Lanczos3
+/// `resize_exact` of the target against a box-filtered source keeps more
+/// high-frequency energy on one side than the other, and on a same-scene
+/// pair (a 1536x1027 preview against its 9504x6336 develop) that asymmetry
+/// alone moved the fit from 0.092 -> 0.019 / conf 0.68 to 0.107 -> 0.034 /
+/// conf 0.54 with no range withheld on either arm.
+pub(crate) fn analysis_pair(src: &DynamicImage, target: &DynamicImage) -> (DynamicImage, DynamicImage) {
+    let s_img = src.thumbnail(ANALYZE_EDGE, ANALYZE_EDGE);
+    let t_img = target.thumbnail_exact(s_img.width(), s_img.height());
+    (s_img, t_img)
+}
+
 /// The most a fit may claim once [`same_frame_plausible`] has said no (R24
 /// batch 2). The warning and this cap are ONE decision, for the same reason
 /// [`FIT_FAR_ERR`] and [`CONFIDENCE_SLOPE`] are: printing "treat the result as
@@ -1311,6 +1378,11 @@ pub struct FitReport {
     /// Fixed source/target evidence for every downstream zoned gate and the
     /// finished-render disclosure. In-process only, never serialized.
     pub(crate) evidence: EvidenceModel,
+    /// The structural frame model retained by an Atmosphere report for the two
+    /// consumers for which structure remains a fact: Full zones and detail.
+    /// `None` in Full mode; in Atmosphere mode [`Self::evidence`] is the
+    /// structure-blind population ruler and this field is `Some(structural)`.
+    pub structural_evidence: Option<EvidenceModel>,
     /// Cross-image correspondence for a content-divergent pair, when the
     /// caller supplied a provider and the D gate consulted it (step 7b).
     /// In-process only, never serialized — the zoned passes read it.
@@ -1482,8 +1554,7 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure(
     // long edge and would hide a shape mismatch. A warning only — see
     // [`same_frame_plausible`].
     let same_frame = same_frame_plausible(src, target);
-    let s_img = src.thumbnail(ANALYZE_EDGE, ANALYZE_EDGE);
-    let t_img = target.thumbnail(ANALYZE_EDGE, ANALYZE_EDGE);
+    let (s_img, t_img) = analysis_pair(src, target);
     // The base render IS the reference domain: err_before is "calibration
     // look vs target" and every statistic below describes the delta the
     // solve must close. All-default base ⇒ this is the raw thumbnail.
@@ -1519,14 +1590,21 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure(
         // success path — the persisted JSON stays canonical (review R16 #2).
         let mut recipe = EditRecipe { rationale, ..base.clone() };
         recipe.clamp();
+        let structural_evidence = (mode == FitMode::Atmosphere).then(|| evidence.clone());
+        let report_evidence = structural_evidence
+            .as_ref()
+            .map(|structural| structural.structure_blind(&tp))
+            .unwrap_or_else(|| evidence.clone());
+        let report_err_before = look_err_with_evidence(&sp, &tp, &report_evidence);
         return FitReport {
             recipe,
-            err_before,
-            err_after: err_before,
+            err_before: report_err_before,
+            err_after: report_err_before,
             notes,
             mode,
             divergence,
-            evidence,
+            evidence: report_evidence,
+            structural_evidence,
             correspondence: None,
         };
     }
@@ -1551,7 +1629,6 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure(
             &sp,
             &tp,
             base,
-            err_before,
             same_frame,
             divergence,
             &evidence,
@@ -1607,6 +1684,7 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure(
                 mode,
                 divergence,
                 evidence: &evidence,
+                structural_evidence: None,
                 defer_disclosure,
             },
             SolveFacts {
@@ -1646,6 +1724,7 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure(
                 mode,
                 divergence,
                 evidence: &evidence,
+                structural_evidence: None,
                 defer_disclosure,
             },
             SolveFacts { sat_pegged: None, cast: CastOutcome::default(), evidence_refused: false, sat_fitted: None, regressed: None, detail: (0.0, 0.0), detail_withheld: true, robust: None, paired: false, vouched_bands: None },
@@ -2071,6 +2150,7 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure(
             mode,
             divergence,
             evidence: &evidence,
+            structural_evidence: None,
             defer_disclosure,
         },
         SolveFacts {
@@ -2098,12 +2178,17 @@ fn fit_atmosphere_from_parts(
     sp: &[[f32; 3]],
     tp: &[[f32; 3]],
     base: &EditRecipe,
-    err_before: f32,
     same_frame: bool,
     divergence: Divergence,
-    evidence: &EvidenceModel,
+    structural: &EvidenceModel,
     defer_disclosure: bool,
 ) -> FitReport {
+    let blind = structural.structure_blind(tp);
+    let evidence = &blind;
+    // One report has one frame ruler: the caller's structural `err_before`
+    // belongs to the mode-selection model, while every Atmosphere measurement
+    // below is read on the structure-blind population model.
+    let err_before = look_err_with_evidence(sp, tp, evidence);
     let mut recipe = base.clone();
 
     let linear_luma_cdf = |px: &[[f32; 3]], weights: &[f32]| {
@@ -2214,7 +2299,10 @@ fn fit_atmosphere_from_parts(
     recipe.green_curve.clear();
     recipe.blue_curve.clear();
 
-    let (detail, detail_supported) = fit_detail_stage(s_img, tp, evidence, &mut recipe);
+    // Detail identifiability is a structural fact. Its frequency residual uses
+    // the structural model, while its regression allowance uses the blind
+    // ruler's two frame errors; each term stays on its own stated model.
+    let (detail, detail_supported) = fit_detail_stage(s_img, tp, structural, &mut recipe);
 
     let sat_fitted = recipe.saturation;
     let mut err_after = look_err_with_evidence(&pixels_of(&render::develop_preview(s_img, &recipe)), tp, evidence);
@@ -2241,7 +2329,15 @@ fn fit_atmosphere_from_parts(
     if harm.scalar
         && detail_supported
         && only_detail_and_quantized_companions(&recipe, base)
-        && detail_regression_is_bounded(sp, &after_px, tp, evidence, detail, err_before, err_after)
+        && detail_regression_is_bounded(
+            sp,
+            &after_px,
+            tp,
+            structural,
+            detail,
+            err_before,
+            err_after,
+        )
     {
         harm.scalar = false;
     }
@@ -2265,6 +2361,7 @@ fn fit_atmosphere_from_parts(
             mode: FitMode::Atmosphere,
             divergence,
             evidence,
+            structural_evidence: Some(structural),
             defer_disclosure,
         },
         SolveFacts {
@@ -2410,6 +2507,7 @@ struct Measured<'a> {
     mode: FitMode,
     divergence: Divergence,
     evidence: &'a EvidenceModel,
+    structural_evidence: Option<&'a EvidenceModel>,
     defer_disclosure: bool,
 }
 
@@ -2575,6 +2673,33 @@ fn compose_report(mut recipe: EditRecipe, m: Measured<'_>, solve: SolveFacts) ->
     if let Some(k) = solve.cast.note_key() {
         push_note(&mut rationale, &mut notes, Note::plain(k));
     }
+    // Every Atmosphere `Measured` carries its structural model (the solve and
+    // the rescore both build one); a breach is a programming error, and a
+    // photo app must not panic over a missing disclosure line.
+    debug_assert!(
+        m.mode != FitMode::Atmosphere || m.structural_evidence.is_some(),
+        "an Atmosphere report retains its structural evidence"
+    );
+    if let (FitMode::Atmosphere, Some(structural)) = (m.mode, m.structural_evidence) {
+        let (luma_ranges, hue_bands) = withheld_range_names(structural);
+        push_note(
+            &mut rationale,
+            &mut notes,
+            Note::new(
+                keys::FIT_NOTE_ATMOSPHERE_POPULATION_EVIDENCE,
+                vec![
+                    (
+                        "luma_ranges",
+                        if luma_ranges.is_empty() { "none".into() } else { luma_ranges },
+                    ),
+                    (
+                        "hue_bands",
+                        if hue_bands.is_empty() { "none".into() } else { hue_bands },
+                    ),
+                ],
+            ),
+        );
+    }
     let (withheld_luma, withheld_hue) = withheld_range_names(m.evidence);
     let all_ranges = m.evidence.luma.iter().chain(&m.evidence.hue);
     let one_sided = all_ranges
@@ -2723,6 +2848,7 @@ fn compose_report(mut recipe: EditRecipe, m: Measured<'_>, solve: SolveFacts) ->
         mode: m.mode,
         divergence: m.divergence,
         evidence: m.evidence.clone(),
+        structural_evidence: m.structural_evidence.cloned(),
         correspondence: None,
     }
 }
@@ -2769,12 +2895,14 @@ pub(crate) fn append_finished_disclosure(
 /// reset the deep arm can adopt base ± 10, and the user was told nothing had
 /// been applied while ± 10 was persisted.
 ///
-/// `prior` is the solved report's notes, and exactly TWO families cross over —
-/// both statements about the SOLVE that the adjustment cannot falsify:
+/// `prior` is the solved report's notes, and three families cross over — all
+/// statements about the SOLVE that the adjustment cannot falsify:
 ///   * `FIT_NOTE_SAT_PEGGED` — the chroma chase hit the ±60 model cap, a fact
 ///     about the target's chroma being out of the model's reach;
 ///   * `FIT_NOTE_REHUE_BLOCKED` / `FIT_NOTE_CAST_REJECTED` — which gate refused
 ///     the colour stage, and the adjustment does not refit those curves.
+///   * `FIT_NOTE_VOUCHED_CONVERGENCE` — which one-sided bands the paired solve
+///     individually vouched; adjusting the recipe does not rerun that solve.
 ///
 /// The three that are deliberately DROPPED rather than re-derived, because they
 /// report an action the solver took on a recipe this report no longer describes:
@@ -2787,8 +2915,9 @@ pub(crate) fn append_finished_disclosure(
 /// again). The caller states what it did through `FIT_NOTE_DEEP_ADOPTED`
 /// instead, which is the honest owner of that sentence.
 ///
-/// `err_before` is the caller's, unchanged by construction: it measures the
-/// untouched base against the target and no recipe adjustment can move it.
+/// In Full mode `err_before` is the caller's, unchanged by construction. An
+/// Atmosphere rescore rebuilds the same structure-blind ruler as the solve and
+/// re-measures the untouched base on it, so the report cannot mix rulers.
 pub fn rescore_report(
     src: &DynamicImage,
     target: &DynamicImage,
@@ -2798,36 +2927,51 @@ pub fn rescore_report(
 ) -> FitReport {
     use crate::rationale::keys;
     let same_frame = same_frame_plausible(src, target);
-    let s = src.thumbnail(ANALYZE_EDGE, ANALYZE_EDGE);
-    let tp = pixels_of(&target.thumbnail(ANALYZE_EDGE, ANALYZE_EDGE));
+    let (s, t) = analysis_pair(src, target);
+    let tp = pixels_of(&t);
     let after_px = pixels_of(&render::develop_preview(&s, recipe));
     let base_px = pixels_of(&render::develop_preview(&s, &EditRecipe::default()));
-    let evidence = evidence_model_for(&base_px, &tp, s.width(), s.height());
-    let joint_after = crate::fit_zoned::joint_reading_with_evidence(
-        &after_px,
-        &tp,
-        &evidence.source_weights,
-        &evidence.target_weights,
-    );
+    let structural = evidence_model_for(&base_px, &tp, s.width(), s.height());
     let carried = |k: &str| prior.iter().any(|n| n.key == k);
+    let carried_arg = |note_key: &str, arg_key: &str| {
+        prior
+            .iter()
+            .find(|note| note.key == note_key)
+            .and_then(|note| note.args.iter().find(|(key, _)| *key == arg_key))
+            .map(|(_, value)| value.clone())
+    };
     let divergence = structure_divergence_for(src, target, &EditRecipe::default(), None);
     let mode = if divergence.d >= DIVERGENCE_GLOBAL || carried(keys::FIT_SUMMARY_ATMOSPHERE) {
         FitMode::Atmosphere
     } else {
         FitMode::Full
     };
+    let blind = (mode == FitMode::Atmosphere).then(|| structural.structure_blind(&tp));
+    let evidence = blind.as_ref().unwrap_or(&structural);
+    let err_before = if mode == FitMode::Atmosphere {
+        look_err_with_evidence(&base_px, &tp, evidence)
+    } else {
+        err_before
+    };
+    let joint_after = crate::fit_zoned::joint_reading_with_evidence(
+        &after_px,
+        &tp,
+        &evidence.source_weights,
+        &evidence.target_weights,
+    );
     compose_report(
         recipe.clone(),
         Measured {
             err_before,
-            err_after: look_err_with_evidence(&after_px, &tp, &evidence),
+            err_after: look_err_with_evidence(&after_px, &tp, evidence),
             joint_after,
             after_px: &after_px,
             tp: &tp,
             same_frame,
             mode,
             divergence,
-            evidence: &evidence,
+            evidence,
+            structural_evidence: blind.as_ref().map(|_| &structural),
             defer_disclosure: false,
         },
         SolveFacts {
@@ -2853,7 +2997,7 @@ pub fn rescore_report(
             robust: None,
             paired: carried(keys::FIT_SUMMARY_WITH_CURVE_PAIRED)
                 || carried(keys::FIT_SUMMARY_NO_CURVE_PAIRED),
-            vouched_bands: None,
+            vouched_bands: carried_arg(keys::FIT_NOTE_VOUCHED_CONVERGENCE, "bands"),
         },
     )
 }
@@ -4038,7 +4182,7 @@ pub(crate) fn moved_unsupported_range_names(
 ) -> Option<(String, String)> {
     let hits = moved_unsupported_range_hits(cur, with_px, evidence, None);
     let (luma, hue) = (hits.luma, hits.hue);
-    if luma.0 == 0 && hue.0 == 0 { return None; }
+    if luma.0 == 0.0 && hue.0 == 0.0 { return None; }
     let names = |hits: &[bool], ranges: &[EvidenceRange]| {
         hits.iter().zip(ranges).filter_map(|(&hit, range)| hit.then_some(range.label.as_str())).collect::<Vec<_>>().join(", ")
     };
@@ -4051,7 +4195,7 @@ pub(crate) fn moved_unsupported_luma_range_names(
     evidence: &EvidenceModel,
 ) -> Option<String> {
     let luma = moved_unsupported_range_hits(cur, with_px, evidence, None).luma;
-    if luma.0 == 0 { return None; }
+    if luma.0 == 0.0 { return None; }
     Some(luma.1.iter().zip(&evidence.luma).filter_map(|(&hit, range)| hit.then_some(range.label.as_str())).collect::<Vec<_>>().join(", "))
 }
 
@@ -4074,7 +4218,7 @@ pub(crate) fn moved_unsupported_hue_range_names_vouched(
     vouch: Option<(&[f32], &[[f32; 3]])>,
 ) -> Option<String> {
     let hue = moved_unsupported_range_hits(cur, with_px, evidence, vouch).hue;
-    if hue.0 == 0 { return None; }
+    if hue.0 == 0.0 { return None; }
     Some(hue.1.iter().zip(&evidence.hue).filter_map(|(&hit, range)| hit.then_some(range.label.as_str())).collect::<Vec<_>>().join(", "))
 }
 
@@ -4084,8 +4228,8 @@ fn moved_unsupported_range_hits(
     evidence: &EvidenceModel,
     vouch: Option<(&[f32], &[[f32; 3]])>,
 ) -> MovedRangeHits {
-    let mut moved_luma = 0usize;
-    let mut moved_hue = 0usize;
+    let mut moved_luma = 0.0f32;
+    let mut moved_hue = 0.0f32;
     let mut luma = [false; EVIDENCE_LUMA_BINS];
     let mut hue = [false; EVIDENCE_HUE_BANDS];
     let mut vouched_hue = [false; EVIDENCE_HUE_BANDS];
@@ -4095,8 +4239,10 @@ fn moved_unsupported_range_hits(
         let delta = (0..3).map(|channel| (after[channel] - before[channel]).abs()).sum::<f32>()
             / 3.0;
         if delta < UNSUPPORTED_RANGE_MOVE { continue; }
+        let membership = evidence.source_membership.get(i).copied().unwrap_or(0.0).max(0.0);
+        if membership <= 0.0 { continue; }
         if unsupported_luma && let Some(pixel) = evidence.source_pixels.get(i) {
-            moved_luma += 1;
+            moved_luma += membership;
             luma[evidence_luma_bin(luma601(pixel))] = true;
         }
         if unsupported_hue && let Some(pixel) = evidence.source_pixels.get(i) && let Some(band) = evidence_hue_band(pixel) {
@@ -4127,7 +4273,7 @@ fn moved_unsupported_range_hits(
             if converges {
                 vouched_hue[band] = true;
             } else {
-                moved_hue += 1;
+                moved_hue += membership;
                 hue[band] = true;
             }
         }
@@ -4137,8 +4283,8 @@ fn moved_unsupported_range_hits(
     // share let every tile move its blind pixels: a depth-2 tile is 6% of
     // the frame, so its blind half never reached the 5% line).
     let total = evidence.population.max(1.0);
-    if moved_luma as f32 / total < ROT_SHARE { moved_luma = 0; luma = [false; EVIDENCE_LUMA_BINS]; }
-    if moved_hue as f32 / total < ROT_SHARE { moved_hue = 0; hue = [false; EVIDENCE_HUE_BANDS]; }
+    if moved_luma / total < ROT_SHARE { moved_luma = 0.0; luma = [false; EVIDENCE_LUMA_BINS]; }
+    if moved_hue / total < ROT_SHARE { moved_hue = 0.0; hue = [false; EVIDENCE_HUE_BANDS]; }
     MovedRangeHits { luma: (moved_luma, luma), hue: (moved_hue, hue), vouched_hue }
 }
 
@@ -4148,8 +4294,8 @@ fn moved_unsupported_range_hits(
 /// disclosure can stop claiming "vetoed movement" about bands whose veto the
 /// voucher lifted (E-15: two different outcomes must not read the same).
 struct MovedRangeHits {
-    luma: (usize, [bool; EVIDENCE_LUMA_BINS]),
-    hue: (usize, [bool; EVIDENCE_HUE_BANDS]),
+    luma: (f32, [bool; EVIDENCE_LUMA_BINS]),
+    hue: (f32, [bool; EVIDENCE_HUE_BANDS]),
     vouched_hue: [bool; EVIDENCE_HUE_BANDS],
 }
 
@@ -4177,20 +4323,24 @@ fn moves_unsupported_luma_range(
     with_px: &[[f32; 3]],
     evidence: &EvidenceModel,
 ) -> bool {
-    let mut moved = 0usize;
-    let mut eligible = 0usize;
+    let mut moved = 0.0f32;
+    let mut eligible = 0.0f32;
     for (i, (before, after)) in cur.iter().zip(with_px).enumerate() {
         if !source_luma_is_withheld(i, evidence) {
             continue;
         }
-        eligible += 1;
+        let membership = evidence.source_membership.get(i).copied().unwrap_or(0.0).max(0.0);
+        if membership <= 0.0 {
+            continue;
+        }
+        eligible += membership;
         let before_luma = luma601(before);
         let after_luma = luma601(after);
         if (after_luma - before_luma).abs() >= UNSUPPORTED_RANGE_MOVE {
-            moved += 1;
+            moved += membership;
         }
     }
-    eligible > 0 && moved as f32 / cur.len().max(1) as f32 >= ROT_SHARE
+    eligible > 0.0 && moved / evidence.population.max(1.0) >= ROT_SHARE
 }
 
 // --------------------------------------------------------------------------
@@ -4967,6 +5117,36 @@ mod tests {
         );
     }
 
+    #[test]
+    fn p36_full_rescore_round_trip_keeps_structural_evidence_absent() {
+        let Some(root) = calibration_corpus() else { return };
+        let (source_path, target_path) =
+            (root.join("p36-preview.jpg"), root.join("p36-target.jpg"));
+        if !source_path.is_file() || !target_path.is_file() {
+            eprintln!("SKIPPED p36 rescore test: pair not in the corpus");
+            return;
+        }
+        let source = image::open(source_path).expect("p36 preview");
+        let target = image::open(target_path).expect("p36 target");
+        let solved = fit_recipe(&source, &target);
+        assert_eq!(solved.mode, FitMode::Full);
+        assert!(solved.structural_evidence.is_none());
+        let rescored = rescore_report(
+            &source,
+            &target,
+            &solved.recipe,
+            solved.err_before,
+            &solved.notes,
+        );
+        assert_eq!(rescored.mode, FitMode::Full);
+        assert!(rescored.structural_evidence.is_none());
+        assert_eq!(
+            serde_json::to_vec(&rescored.recipe).unwrap(),
+            serde_json::to_vec(&solved.recipe).unwrap(),
+            "Full-mode rescore must reproduce the solved recipe byte for byte"
+        );
+    }
+
     /// M-F1: `fit_tone_sliders` degraded to return neutral (or any solver
     /// regression that stops beating the ground truth under the engine's own
     /// penalised objective) — on a look the weighted model can represent
@@ -5241,8 +5421,9 @@ mod tests {
         let triptych = image::open(root.join("showcase-viaduct-reimagine-fit-triptych.jpg")).unwrap();
         let source = triptych.crop_imm(0, 136, 532, 356);
         let target = triptych.crop_imm(535, 136, 530, 356);
-        let s_img = source.thumbnail(ANALYZE_EDGE, ANALYZE_EDGE);
-        let t_img = target.thumbnail(ANALYZE_EDGE, ANALYZE_EDGE);
+        // 532x356 against 530x356 thumbnails to 384x257 against 384x258: the
+        // evidence must be built in the one geometry the fit itself uses.
+        let (s_img, t_img) = analysis_pair(&source, &target);
         let sp = pixels_of(&render::develop_preview(&s_img, &EditRecipe::default()));
         let tp = pixels_of(&t_img);
         let evidence = evidence_model_for(&sp, &tp, s_img.width(), s_img.height());
@@ -5526,6 +5707,73 @@ mod tests {
         assert!(report.recipe.red_curve.is_empty());
         assert!(report.recipe.green_curve.is_empty());
         assert!(report.recipe.blue_curve.is_empty());
+        assert!(report.recipe.exposure_ev <= -0.5);
+    }
+
+    #[test]
+    fn calibration_atmosphere_report_uses_one_population_ruler() {
+        let Some(root) = calibration_corpus() else { return };
+        let source = image::open(root.join("neutral.jpg")).expect("calibration neutral.jpg");
+        let target = image::open(root.join("target.jpg")).expect("calibration target.jpg");
+        let report = fit_recipe(&source, &target);
+        assert_eq!(report.mode, FitMode::Atmosphere);
+        assert!(report.structural_evidence.is_some());
+        assert!((-1.0..=-0.5).contains(&report.recipe.exposure_ev));
+        assert_eq!(report.recipe.saturation, 0.0);
+        assert_eq!((report.recipe.clarity, report.recipe.texture), (0.0, 0.0));
+        assert!(!report.recipe.tone_curve.is_empty());
+        assert!(report.err_after < report.err_before);
+        assert!(report.recipe.confidence <= ATMOSPHERE_CONFIDENCE_CAP);
+        let note = report
+            .notes
+            .iter()
+            .find(|note| {
+                note.key == crate::rationale::keys::FIT_NOTE_ATMOSPHERE_POPULATION_EVIDENCE
+            })
+            .expect("Atmosphere reports disclose the structural ranges excluded from their ruler");
+        let ranges = note
+            .args
+            .iter()
+            .find(|(key, _)| *key == "luma_ranges")
+            .map(|(_, value)| value.as_str())
+            .expect("population-evidence note carries luma_ranges");
+        let names_an_interior_range = ranges.split("luma[").skip(1).any(|part| {
+            let Some((bounds, _)) = part.split_once(']') else { return false };
+            let Some((lo, hi)) = bounds.split_once('-') else { return false };
+            let (Ok(lo), Ok(hi)) = (lo.parse::<f32>(), hi.parse::<f32>()) else {
+                return false;
+            };
+            lo >= 0.29 && hi <= 0.82
+        });
+        assert!(
+            names_an_interior_range,
+            "disclosure did not name a structural range in [0.29, 0.82]: {ranges}"
+        );
+    }
+
+    #[test]
+    fn calibration_atmosphere_rescore_reproduces_report_ruler() {
+        let Some(root) = calibration_corpus() else { return };
+        let source = image::open(root.join("neutral.jpg")).expect("calibration neutral.jpg");
+        let target = image::open(root.join("target.jpg")).expect("calibration target.jpg");
+        let solved = fit_recipe(&source, &target);
+        let rescored = rescore_report(
+            &source,
+            &target,
+            &solved.recipe,
+            solved.err_before,
+            &solved.notes,
+        );
+        assert_eq!(rescored.mode, FitMode::Atmosphere);
+        assert!(rescored.structural_evidence.is_some());
+        assert_eq!(rescored.err_before.to_bits(), solved.err_before.to_bits());
+        assert_eq!(rescored.err_after.to_bits(), solved.err_after.to_bits());
+        assert_eq!(
+            rescored.recipe.confidence.to_bits(),
+            solved.recipe.confidence.to_bits(),
+            "solve and rescore must derive confidence from the same blind ruler"
+        );
+        assert_evidence_models_bit_equal(&rescored.evidence, &solved.evidence);
     }
 
     #[test]
@@ -5619,8 +5867,8 @@ mod tests {
     #[test]
     fn atmosphere_saturation_cap_is_load_bearing() {
         // A structurally divergent pair whose target ALSO demands far more
-        // chroma than the ±30 budget allows. The fitted demand must land ON
-        // the budget before the evidence delivery gate refuses to emit it;
+        // chroma than the +/-30 budget allows. Atmosphere reads that demand on
+        // population evidence, so the fitted demand must land ON the budget;
         // without the clamp the chase would run past it.
         let (src, tgt) = structural_permutation_pair();
         let boosted = render::develop_preview(
@@ -5631,8 +5879,8 @@ mod tests {
         assert_eq!(report.mode, FitMode::Atmosphere, "premise: {:?}", report.divergence);
         assert_eq!(ATMOSPHERE_SAT_LIMIT, 30.0, "the calibrated atmosphere saturation budget");
         assert_eq!(
-            report.recipe.saturation, 0.0,
-            "a capped demand sourced from unsupported ranges must not be emitted"
+            report.recipe.saturation, ATMOSPHERE_SAT_LIMIT,
+            "population evidence may reach, but never exceed, the Atmosphere budget"
         );
         assert!(
             report
@@ -5642,10 +5890,9 @@ mod tests {
             "hitting the cap has to be disclosed: {}",
             report.recipe.rationale
         );
-        assert!(report
-            .notes
-            .iter()
-            .any(|n| n.key == crate::rationale::keys::FIT_NOTE_EVIDENCE_WITHHELD));
+        assert!(report.notes.iter().any(|n| {
+            n.key == crate::rationale::keys::FIT_NOTE_ATMOSPHERE_POPULATION_EVIDENCE
+        }));
     }
 
     #[test]
@@ -6002,8 +6249,8 @@ mod tests {
         };
         haze.clamp();
         let base = render::develop_preview(&clean, &haze);
-        let sp = pixels_of(&base.thumbnail(ANALYZE_EDGE, ANALYZE_EDGE));
-        let tp = pixels_of(&clean.thumbnail(ANALYZE_EDGE, ANALYZE_EDGE));
+        let pair = analysis_pair(&base, &clean);
+        let (sp, tp) = (pixels_of(&pair.0), pixels_of(&pair.1));
         let m = neutral_gate_misprediction(&sp, &tp);
         assert!(
             m > NEUTRAL_MISPREDICTION_MAX,
@@ -6026,8 +6273,8 @@ mod tests {
     /// full-pixel CDFs, which include the rocks).
     #[test]
     fn matched_neutral_members_keep_the_gate() {
-        let sp = pixels_of(&canyon(false).thumbnail(ANALYZE_EDGE, ANALYZE_EDGE));
-        let tp = pixels_of(&canyon(true).thumbnail(ANALYZE_EDGE, ANALYZE_EDGE));
+        let pair = analysis_pair(&canyon(false), &canyon(true));
+        let (sp, tp) = (pixels_of(&pair.0), pixels_of(&pair.1));
         let c = neutral_gate_misprediction(&sp, &tp);
         assert!(
             c < 0.5 * NEUTRAL_MISPREDICTION_MAX,
@@ -6119,8 +6366,8 @@ mod tests {
         // diagnostic, not the veto acceptance itself.
         let src = canyon(false);
         let tgt = canyon(true);
-        let s2 = src.thumbnail(ANALYZE_EDGE, ANALYZE_EDGE);
-        let tp2 = pixels_of(&tgt.thumbnail(ANALYZE_EDGE, ANALYZE_EDGE));
+        let (s2, t2) = analysis_pair(&src, &tgt);
+        let tp2 = pixels_of(&t2);
         let mut pre = fit_recipe(&src, &tgt).recipe;
         pre.red_curve.clear();
         pre.green_curve.clear();
@@ -6424,8 +6671,8 @@ mod tests {
         // Pin the gate DECISIONS at stage 4 so this test keeps meaning "only
         // the rotation gate stands here" — if a fixture drift makes the ratio
         // gate reject too, the premise asserts below fail with numbers.
-        let s2 = src.thumbnail(ANALYZE_EDGE, ANALYZE_EDGE);
-        let tp2 = pixels_of(&tgt.thumbnail(ANALYZE_EDGE, ANALYZE_EDGE));
+        let (s2, t2) = analysis_pair(&src, &tgt);
+        let tp2 = pixels_of(&t2);
         let rep = fit_recipe(&src, &tgt);
         let mut pre = rep.recipe.clone();
         pre.red_curve = Vec::new();
@@ -6501,8 +6748,8 @@ mod tests {
         // each leg can assert its premise (an empty-curve pair would make the
         // share trivially 0 and the leg vacuous).
         let stage4 = |src: &DynamicImage, tgt: &DynamicImage| {
-            let s2 = src.thumbnail(ANALYZE_EDGE, ANALYZE_EDGE);
-            let tp2 = pixels_of(&tgt.thumbnail(ANALYZE_EDGE, ANALYZE_EDGE));
+            let (s2, t2) = analysis_pair(src, tgt);
+            let tp2 = pixels_of(&t2);
             let mut pre = fit_recipe(src, tgt).recipe;
             pre.red_curve = Vec::new();
             pre.green_curve = Vec::new();
@@ -7209,6 +7456,306 @@ mod tests {
         assert!(blue.source_populated && !blue.target_populated);
     }
 
+    /// Each source bin owns its share of one cumulative target-rank quota.
+    /// A target member is consumed whole at a boundary, so rounding can drift
+    /// by at most one member over the population; it must not re-charge that
+    /// boundary overshoot to every later bin and starve the tail.
+    #[test]
+    fn rank_pairing_uses_a_cumulative_target_quota() {
+        let source = (0..EVIDENCE_LUMA_BINS)
+            .flat_map(|bin| {
+                let value = (bin as f32 + 0.5) / EVIDENCE_LUMA_BINS as f32;
+                [[value; 3]; 3]
+            })
+            .collect::<Vec<_>>();
+        let target = (0..source.len())
+            .map(|i| {
+                let value = (i as f32 + 0.5) / source.len() as f32;
+                [value; 3]
+            })
+            .collect::<Vec<_>>();
+        let source_zone = vec![1.0; source.len()];
+        let mut target_zone = vec![0.0; target.len()];
+        target_zone[..25].fill(1.0);
+        target_zone[25] = 0.5;
+        let support_weights = vec![1.0; source.len()];
+        let support_divergence = vec![0.0; source.len()];
+        let ranges = aggregate_ranges(
+            &source,
+            &target,
+            &source_zone,
+            &target_zone,
+            SupportField {
+                spatial_weights: &support_weights,
+                spatial_divergence: &support_divergence,
+                globally_same_content: true,
+            },
+        );
+
+        assert!(
+            ranges
+                .luma
+                .iter()
+                .all(|range| range.target_populated && range.target_share > 0.0),
+            "every source bin must receive target rank mass: {:?}",
+            ranges.luma
+        );
+    }
+
+    fn assert_evidence_models_bit_equal(actual: &EvidenceModel, expected: &EvidenceModel) {
+        let bits = |values: &[f32]| values.iter().map(|value| value.to_bits()).collect::<Vec<_>>();
+        assert_eq!(actual.source_pixels, expected.source_pixels);
+        assert_eq!(bits(&actual.source_membership), bits(&expected.source_membership));
+        assert_eq!((actual.width, actual.height), (expected.width, expected.height));
+        assert_eq!(actual.spatial_supported, expected.spatial_supported);
+        assert_eq!(bits(&actual.source_weights), bits(&expected.source_weights));
+        assert_eq!(bits(&actual.target_weights), bits(&expected.target_weights));
+        assert_eq!(bits(&actual.source_hue_weights), bits(&expected.source_hue_weights));
+        assert_eq!(bits(&actual.target_hue_weights), bits(&expected.target_hue_weights));
+        assert_eq!(actual.luma, expected.luma);
+        assert_eq!(actual.hue, expected.hue);
+        assert_eq!(actual.identifiability.to_bits(), expected.identifiability.to_bits());
+        assert_eq!(bits(&actual.spatial_weights), bits(&expected.spatial_weights));
+        assert_eq!(bits(&actual.spatial_divergence), bits(&expected.spatial_divergence));
+        assert_eq!(actual.globally_same_content, expected.globally_same_content);
+        assert_eq!(actual.population.to_bits(), expected.population.to_bits());
+    }
+
+    #[test]
+    fn structure_blind_reaggregates_structural_withholding_but_keeps_population_vetoes() {
+        let mut source = Vec::new();
+        source.extend(std::iter::repeat_n([0.32; 3], 100));
+        source.extend(std::iter::repeat_n([0.50; 3], 100));
+        source.extend(std::iter::repeat_n([0.05, 0.10, 0.80], 100));
+        source.extend(std::iter::repeat_n([0.68, 0.35, 0.12], 100));
+        let mut target = source.clone();
+        let blue_luma = luma601(&source[200]);
+        target[200..300].fill([blue_luma; 3]);
+
+        let n = source.len();
+        let ones = vec![1.0; n];
+        let structural_bin = evidence_luma_bin(0.32);
+        let mut ingredients = evidence_model_for(&source, &target, 20, 20);
+        ingredients.spatial_weights.fill(1.0);
+        ingredients.spatial_divergence.fill(0.0);
+        ingredients.spatial_supported.fill(true);
+        ingredients.globally_same_content = false;
+        for (i, pixel) in source.iter().enumerate() {
+            if evidence_luma_bin(luma601(pixel)) == structural_bin {
+                ingredients.spatial_weights[i] = 0.0;
+                ingredients.spatial_divergence[i] = 2.0;
+                ingredients.spatial_supported[i] = false;
+            }
+        }
+        let structural = ingredients.scoped(&target, &ones, &ones);
+        let withheld = &structural.luma[structural_bin];
+        assert!(withheld.source_populated && withheld.target_populated);
+        assert_eq!(withheld.weight, 0.0, "premise: this range is withheld only for structure");
+
+        let blind = structural.structure_blind(&target);
+        let restored = &blind.luma[structural_bin];
+        assert!(restored.two_sided_share > 0.0);
+        assert_eq!(restored.weight.to_bits(), restored.two_sided_share.to_bits());
+
+        let blue = blind
+            .hue
+            .iter()
+            .find(|range| range.label == "Blue")
+            .expect("Blue evidence band");
+        assert!(blue.source_populated && !blue.target_populated);
+        assert_eq!(blue.weight, 0.0, "a one-sided population fact must still veto");
+        let empty = blind
+            .luma
+            .iter()
+            .find(|range| !range.source_populated && !range.target_populated)
+            .expect("fixture leaves an unpopulated luma range");
+        assert_eq!(empty.weight, 0.0, "an unpopulated range must remain excluded");
+        assert_eq!(blind.population.to_bits(), structural.population.to_bits());
+        assert_eq!(
+            blind.source_membership.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            structural.source_membership.iter().map(|v| v.to_bits()).collect::<Vec<_>>()
+        );
+        assert!(blind.spatial_supported.iter().all(|supported| *supported));
+
+        let identical = evidence_model_for(&source, &source, 20, 20);
+        assert!(identical.globally_same_content, "premise: identical frames are structurally supported");
+        let expected = identical.scoped(&source, &ones, &ones);
+        assert_evidence_models_bit_equal(&identical.structure_blind(&source), &expected);
+    }
+
+    #[test]
+    fn differently_sized_evidence_uses_one_aligned_prefix_domain() {
+        let aligned = (0..8)
+            .map(|i| {
+                let value = 0.1 + i as f32 * 0.1;
+                [value, value * 0.9, value * 0.8]
+            })
+            .collect::<Vec<_>>();
+        let extra = [[0.98, 0.02, 0.02]; 4];
+        for (source, target) in [
+            ([aligned.as_slice(), &extra].concat(), aligned.clone()),
+            (aligned.clone(), [aligned.as_slice(), &extra].concat()),
+        ] {
+            let evidence = evidence_model_for(&source, &target, 4, 2);
+            let n = source.len().min(target.len());
+            assert_eq!(evidence.population, n as f32);
+            assert!(evidence.luma.iter().chain(&evidence.hue).all(|range| {
+                range.source_share <= 1.0 && range.target_share <= 1.0
+            }));
+            let ones = vec![1.0; source.len().max(target.len())];
+            let scoped = evidence.scoped(&target, &ones, &ones);
+            assert_evidence_models_bit_equal(&scoped, &evidence);
+        }
+    }
+
+    #[test]
+    fn frame_evidence_shares_match_an_analytic_four_block_golden() {
+        let counts = [(1usize, 10usize), (5, 20), (9, 30), (13, 40)];
+        let source = counts
+            .iter()
+            .flat_map(|&(bin, count)| {
+                let value = (bin as f32 + 0.5) / EVIDENCE_LUMA_BINS as f32;
+                std::iter::repeat_n([value; 3], count)
+            })
+            .collect::<Vec<_>>();
+        let target = [
+            std::iter::repeat_n([0.15; 3], 25).collect::<Vec<_>>(),
+            std::iter::repeat_n([0.35; 3], 25).collect::<Vec<_>>(),
+            std::iter::repeat_n([0.65; 3], 25).collect::<Vec<_>>(),
+            std::iter::repeat_n([0.85; 3], 25).collect::<Vec<_>>(),
+        ]
+        .concat();
+        let evidence = evidence_model_for(&source, &target, 10, 10);
+
+        for &(bin, count) in &counts {
+            let expected = count as f32 / 100.0;
+            assert_eq!(evidence.luma[bin].source_share.to_bits(), expected.to_bits());
+            assert_eq!(evidence.luma[bin].target_share.to_bits(), expected.to_bits());
+        }
+        let occupied = counts.iter().map(|&(bin, _)| bin).collect::<Vec<_>>();
+        for (bin, range) in evidence.luma.iter().enumerate() {
+            if !occupied.contains(&bin) {
+                assert_eq!(range.source_share, 0.0);
+                assert_eq!(range.target_share, 0.0);
+            }
+        }
+    }
+
+    #[test]
+    fn blind_move_veto_counts_soft_membership_mass() {
+        let source = vec![[0.4; 3]; 1_400];
+        let target = source.clone();
+        let frame = evidence_model(&source, &target);
+        let mut zone = vec![1.0; source.len()];
+        zone[1_000..].fill(0.05);
+        let mut evidence = frame.scoped(&target, &zone, &zone);
+        let bin = evidence_luma_bin(0.4);
+        evidence.luma[bin].weight = 0.0;
+        let expected_population = zone.iter().sum::<f32>();
+        assert_eq!(evidence.population.to_bits(), expected_population.to_bits());
+        assert!((evidence.population - 1_020.0).abs() < 0.01);
+
+        let mut feather_move = source.clone();
+        feather_move[1_000..1_060].fill([0.5; 3]);
+        assert!(!moves_unsupported_range(&source, &feather_move, &evidence));
+        assert!(!moves_unsupported_luma_range(&source, &feather_move, &evidence));
+
+        let mut interior_move = source.clone();
+        interior_move[..60].fill([0.5; 3]);
+        assert!(moves_unsupported_range(&source, &interior_move, &evidence));
+        assert!(moves_unsupported_luma_range(&source, &interior_move, &evidence));
+    }
+
+    /// A deterministic texture with structure at scales that survive the
+    /// analysis thumbnail (periods of ~180-380 px, plus a little hash noise),
+    /// spread over many luma bins. `family` picks the wave orientation and
+    /// periods, so two families share a histogram but no structure.
+    fn textured(width: u32, height: u32, family: u32) -> DynamicImage {
+        let (px, py, pd) = if family == 0 { (37.0, 29.0, 61.0) } else { (23.0, 41.0, 53.0) };
+        DynamicImage::ImageRgb8(image::RgbImage::from_fn(width, height, |x, y| {
+            let (fx, fy) = if family == 0 { (x as f32, y as f32) } else { (y as f32, x as f32) };
+            let wave = 70.0 * (fx / px).sin() * (fy / py).cos() + 40.0 * ((fx + 2.0 * fy) / pd).sin();
+            let h = x.wrapping_mul(73_856_093) ^ y.wrapping_mul(19_349_663) ^ family.wrapping_mul(0x9E37_79B9);
+            let noise = ((h >> 8) & 0x1f) as f32 - 16.0;
+            let v = (128.0 + wave + noise).clamp(0.0, 255.0) as u8;
+            image::Rgb([v, v.saturating_add(20), v.saturating_sub(20)])
+        }))
+    }
+
+    /// The bug this pins: a 1600x1067 source thumbnails to 384x256 and a
+    /// 1600x1069 target to 384x257, and every evidence statistic (and the
+    /// frame-wide divergence, which returns `matched` on unequal lengths)
+    /// pairs pixel i with pixel i. One row decided whether the gate existed.
+    #[test]
+    fn analysis_pair_puts_a_one_row_taller_target_in_the_source_geometry() {
+        let src = textured(1600, 1067, 0);
+        let tgt = textured(1600, 1069, 0);
+        assert_eq!(
+            (tgt.thumbnail(ANALYZE_EDGE, ANALYZE_EDGE).height(), src.thumbnail(ANALYZE_EDGE, ANALYZE_EDGE).height()),
+            (257, 256),
+            "premise: independent thumbnails disagree by one row"
+        );
+        let (s, t) = analysis_pair(&src, &tgt);
+        assert_eq!((s.width(), s.height()), (384, 256));
+        assert_eq!((t.width(), t.height()), (384, 256));
+        // The target goes through the source's operator (box filter, rows
+        // forced), not a different resampling kernel: a Lanczos3 arm here
+        // changed a same-scene fit's residual by 1.8x on its own.
+        assert_eq!(t.as_bytes(), tgt.thumbnail_exact(384, 256).as_bytes());
+        assert_ne!(
+            t.as_bytes(),
+            tgt.resize_exact(384, 256, image::imageops::FilterType::Lanczos3).as_bytes(),
+            "premise: the two operators differ on this texture"
+        );
+        // An equal-shape pair is byte-for-byte the two thumbnails it always was.
+        let same = textured(1600, 1067, 1);
+        let (s2, t2) = analysis_pair(&src, &same);
+        assert_eq!(s2.as_bytes(), src.thumbnail(ANALYZE_EDGE, ANALYZE_EDGE).as_bytes());
+        assert_eq!(t2.as_bytes(), same.thumbnail(ANALYZE_EDGE, ANALYZE_EDGE).as_bytes());
+    }
+
+    /// End to end: a target from the other texture family shares the
+    /// source's histogram but none of its structure, so the frame-wide
+    /// same-content verdict must be false and populated luma ranges must be
+    /// withheld -- and one extra target row must not change that verdict
+    /// from the equal-height pair's.
+    #[test]
+    fn one_extra_target_row_does_not_disable_the_structural_gate() {
+        let src = textured(1600, 1067, 0);
+        let rotated = textured(1600, 1067, 1);
+        let taller = textured(1600, 1069, 1);
+        let verdicts = |evidence: &EvidenceModel| {
+            evidence
+                .luma
+                .iter()
+                .map(|r| (r.source_populated, r.target_populated, r.weight > 0.0))
+                .collect::<Vec<_>>()
+        };
+        let equal = fit_recipe(&src, &rotated);
+        let uneven = fit_recipe(&src, &taller);
+        let equal_structural = equal.structural_evidence.as_ref().unwrap_or(&equal.evidence);
+        let uneven_structural = uneven.structural_evidence.as_ref().unwrap_or(&uneven.evidence);
+        assert!(!equal_structural.globally_same_content, "premise: the other family is divergent");
+        assert!(
+            equal_structural.luma.iter().any(|r| r.source_populated && r.weight <= 0.0),
+            "premise: the divergent pair withholds at least one populated range"
+        );
+        assert!(
+            !uneven_structural.globally_same_content,
+            "one extra target row must not turn the same-content verdict on"
+        );
+        assert_eq!(
+            verdicts(uneven_structural),
+            verdicts(equal_structural),
+            "the range verdicts must not depend on a row of rounding"
+        );
+        assert_eq!(
+            uneven_structural.source_pixels.len(),
+            equal_structural.source_pixels.len(),
+            "both pairs are judged in the source's analysis geometry"
+        );
+    }
+
     #[test]
     fn evidence_weighted_objective_sees_spatial_permutation() {
         let mut source = Vec::with_capacity(4096);
@@ -7345,22 +7892,24 @@ mod tests {
             image::Rgb([(v.clamp(0.0, 1.0) * 255.0).round() as u8; 3])
         }));
         let report = fit_recipe(&source, &target);
+        assert_eq!(report.mode, FitMode::Atmosphere, "premise: the checker sky is divergent");
+        let structural = report
+            .structural_evidence
+            .as_ref()
+            .expect("Atmosphere retains the structural ruler for residual and detail work");
         let fitted = render::develop_preview(&source, &report.recipe).to_rgb8();
         let mut no_detail_recipe = report.recipe.clone();
         no_detail_recipe.clarity = 0.0;
         no_detail_recipe.texture = 0.0;
         let without_detail = render::develop_preview(&source, &no_detail_recipe).to_rgb8();
         let original = source.to_rgb8();
-        let source_px = pixels_of(&source);
-        let target_px = pixels_of(&target);
-        let evidence = evidence_model_for(&source_px, &target_px, w, h);
         let mut delta = 0.0f32;
         let mut tone_delta = 0.0f32;
         let mut withheld = 0usize;
         for y in 0..43 {
             for x in 0..w {
                 let i = (y * w + x) as usize;
-                if !source_luma_is_withheld(i, &evidence) {
+                if !source_luma_is_withheld(i, structural) {
                     continue;
                 }
                 delta += (fitted.get_pixel(x, y)[0] as f32
@@ -7378,8 +7927,8 @@ mod tests {
         delta /= withheld as f32;
         tone_delta /= withheld as f32;
         assert!(
-            delta < 0.03,
-            "withheld high-luma range moved by {delta:.4} (tone {tone_delta:.4}): ev={:.2} c={:.1} h={:.1} s={:.1} w={:.1} b={:.1} curve={:?}; {}",
+            tone_delta > 0.05,
+            "the structure-blind Atmosphere tone ruler did not move the population ({delta:.4}, tone {tone_delta:.4}): ev={:.2} c={:.1} h={:.1} s={:.1} w={:.1} b={:.1} curve={:?}; {}",
             report.recipe.exposure_ev,
             report.recipe.contrast,
             report.recipe.highlights,
@@ -7389,13 +7938,24 @@ mod tests {
             report.recipe.tone_curve,
             report.recipe.rationale,
         );
+        assert!(report.evidence.globally_same_content);
+        assert!(report.evidence.spatial_supported.iter().all(|&supported| supported));
         let note = report
             .notes
             .iter()
-            .find(|n| n.key == crate::rationale::keys::FIT_NOTE_EVIDENCE_WITHHELD)
-            .expect("withholding must be disclosed");
-        let divergent = &note.args.iter().find(|(k, _)| *k == "divergent").expect("arg").1;
-        assert!(divergent.contains("luma["), "the withheld luma range must be named: {divergent}");
+            .find(|n| {
+                n.key == crate::rationale::keys::FIT_NOTE_ATMOSPHERE_POPULATION_EVIDENCE
+            })
+            .expect("the population ruler must be disclosed");
+        let named = &note
+            .args
+            .iter()
+            .find(|(k, _)| *k == "luma_ranges")
+            .expect("luma_ranges arg")
+            .1;
+        let (structural_luma, _) = withheld_range_names(structural);
+        assert!(!structural_luma.is_empty());
+        assert_eq!(named, &structural_luma, "the note names the structural ranges excluded from Atmosphere");
     }
 
     #[test]
@@ -7423,6 +7983,7 @@ mod tests {
                     mode: FitMode::Full,
                     divergence: Divergence::matched(),
                     evidence,
+                    structural_evidence: None,
                     defer_disclosure: false,
                 },
                 SolveFacts {
@@ -7624,10 +8185,13 @@ mod tests {
             .expect("calibration fitted.recipe.json");
         let preferred: EditRecipe = serde_json::from_str(&text).expect("saved calibration recipe");
         let rescored = rescore_report(&source, &target, &preferred, conservative.err_before, &[]);
-        let thumb = source.thumbnail(ANALYZE_EDGE, ANALYZE_EDGE);
-        let target_px = pixels_of(&target.thumbnail(ANALYZE_EDGE, ANALYZE_EDGE));
-        let source_px = pixels_of(&thumb);
-        let evidence = evidence_model(&source_px, &target_px);
+        assert_eq!((conservative.mode, rescored.mode), (FitMode::Atmosphere, FitMode::Atmosphere));
+        assert_evidence_models_bit_equal(&rescored.evidence, &conservative.evidence);
+        let (thumb, _) = analysis_pair(&source, &target);
+        let evidence = conservative
+            .structural_evidence
+            .as_ref()
+            .expect("Atmosphere preserves structural diagnostics");
         let conservative_px = pixels_of(&render::develop_preview(&thumb, &conservative.recipe));
         let preferred_px = pixels_of(&render::develop_preview(&thumb, &preferred));
         let motion = |after: &[[f32; 3]]| {
@@ -7646,13 +8210,20 @@ mod tests {
             conservative.recipe.confidence,
             rescored.recipe.confidence,
             rescored.recipe.confidence - conservative.recipe.confidence,
-            movement_identifiability(&conservative_px, &evidence),
-            movement_identifiability(&preferred_px, &evidence),
+            movement_identifiability(&conservative_px, evidence),
+            movement_identifiability(&preferred_px, evidence),
             evidence.identifiability,
         );
         assert!(
-            (rescored.recipe.confidence - conservative.recipe.confidence).abs() >= 0.03,
-            "the evidence-supported and conservative renders must remain separated by at least 0.03"
+            (rescored.recipe.confidence - conservative.recipe.confidence).abs() < 0.01,
+            "confidence must use the same population ruler, independent of structural spend"
         );
+        assert!(
+            movement_identifiability(&preferred_px, evidence)
+                > movement_identifiability(&conservative_px, evidence) + 0.1,
+            "premise: the two recipes remain structurally distinguishable"
+        );
+        assert!(conservative.recipe.confidence <= ATMOSPHERE_CONFIDENCE_CAP);
+        assert!(rescored.recipe.confidence <= ATMOSPHERE_CONFIDENCE_CAP);
     }
 }

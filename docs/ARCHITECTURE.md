@@ -92,9 +92,23 @@
 > experimental generative edits, an optional pixel-**heal** retouch mode (§4.7)
 > the deterministic look **reverse-fit** (§4.8) and the local server's refusal
 > model (§4.9).
-> 980 library + 15 CLI + 145 GUI + 2+2 contract tests are enumerated in the GUI
-> build; the library result is 971 pass + 9 `#[ignore]`d forensic probes
-> (counts refreshed 2026-08-27 after the zone-scoped evidence batch: library 974→980, set diff +6/−0 by name — `a_zone_is_judged_by_its_own_members_not_the_frames_bins`, `a_ground_zone_is_not_vetoed_by_the_sky_it_does_not_touch`, `calibration_land_zone_is_no_longer_withheld_by_the_replaced_sky`, `a_zone_whose_movable_class_already_matches_is_left_alone`, `a_tile_reading_keeps_the_mid_tones_the_frame_withheld`, `a_tile_is_vetoed_over_the_raster_it_moves_not_its_estimator_weights`). THREE suites are ADDITIONAL and
+> 991 library + 15 CLI + 145 GUI + 2+2 contract tests are enumerated in the GUI
+> build; the library result is 982 pass + 9 `#[ignore]`d forensic probes
+> (counts refreshed 2026-08-27 after the shared-geometry + structure-blind Atmosphere
+> batch: library 980→991, set diff +12/−1 by name against the B1 commit — added
+> `analysis_pair_puts_a_one_row_taller_target_in_the_source_geometry`,
+> `one_extra_target_row_does_not_disable_the_structural_gate`,
+> `rank_pairing_uses_a_cumulative_target_quota`,
+> `differently_sized_evidence_uses_one_aligned_prefix_domain`,
+> `frame_evidence_shares_match_an_analytic_four_block_golden`,
+> `blind_move_veto_counts_soft_membership_mass`,
+> `structure_blind_reaggregates_structural_withholding_but_keeps_population_vetoes`,
+> `calibration_atmosphere_report_uses_one_population_ruler`,
+> `calibration_atmosphere_rescore_reproduces_report_ruler`,
+> `p36_full_rescore_round_trip_keeps_structural_evidence_absent`,
+> `full_zone_in_atmosphere_frame_reads_structural_evidence`, and
+> `calibration_land_zone_is_withheld_by_its_own_rerendered_mid_tones`; removed
+> `calibration_land_zone_is_no_longer_withheld_by_the_replaced_sky`). THREE suites are ADDITIONAL and
 > env-gated, so a bare `cargo test` does not include them:
 > `AUTOSHOP_LR_PROBE_FIXTURES` (16 real Lightroom radial sidecars, byte
 > round-trip), `AUTOSHOP_MB_FIXTURES` (the 7-file M-B forensic set — 42 of its
@@ -1683,7 +1697,15 @@ budget) — each veto is a specific real-photo failure recorded at its const
 block. **Atmosphere** mode instead uses bounded robust exposure, white balance,
 a five-point tone curve and saturation, never per-channel curves, and caps the
 reported confidence because develop controls cannot reconstruct the changed
-structure.
+structure. Atmosphere mode is entered because structure diverges; its
+instruments are the budgets (EV ±1, WB gain [0.80, 1.25], saturation ±30,
+curve slope [0.5, 1.5]) and the population facts, not structural survival.
+Its report therefore has one ruler: frame error, harm, confidence and disclosure
+all read a structure-blind re-aggregation that preserves one-sided, sparse and
+minimum-share population vetoes. The structural model is carried separately
+only for Full zones and the detail stage. Every Atmosphere report discloses the
+structurally withheld ranges and explains that they do not constrain its bounded
+atmosphere controls.
 
 The tone stage's evidence prefers NEAR-NEUTRAL pixels (saturated ones carry
 chroma-clipped luma), which rests on an identification assumption — "grey"
@@ -1746,8 +1768,9 @@ gate as a semantic zone. Semantic zones retain their measured `0.02` drift
 insurance; a range band has zero drift tolerance and survives only when the
 composed evidence-weighted frame is neutral or better. Source weights are
 re-derived from the current rendered stack before each fit; overlapping
-estimator ramps are normalized to sum to at
-most one. Ramps span one to two bin widths, and one final value-transition gate
+estimator ramps are normalized to sum to at most one, while the correction's
+movement coverage remains its own raw, pre-normalization range ramp. Ramps span
+one to two bin widths, and one final value-transition gate
 applies a shared direction-preserving bisection shrink against the `0.012` rim
 budget. A native correction uses `MaskRole::Custom`, a deterministic English
 name, and the full-frame sentinel `Linear { zero_x: 0.5, zero_y: -0.8,
@@ -1762,16 +1785,39 @@ bands over one zone's soft memberships: target luma bins are rank-paired
 within the zone's own target members at the source:target mass ratio, and the
 structural-survival gate (`1 - DIVERGENCE_ZONE = 0.35`) and the per-pixel
 spatial confidence are unchanged, so over the whole frame the scoped view is
-the model itself byte for byte (pinned by test). Semantic zones and quadtree
+the model itself byte for byte (pinned by test). `EvidenceModel::structure_blind`
+re-aggregates the frame with structural survival and per-pixel withholding off
+but population facts intact. An Atmosphere report scopes that blind model for
+Atmosphere zones; a Full zone scopes the separately retained structural model,
+and the frame-law judge remains on the report's single blind ruler. Detail is
+the other structural consumer because texture identifiability is a structural
+fact. Every evidence statistic
+pairs source pixel `i` with target pixel `i`, so the two analysis rasters
+share ONE geometry by construction: `fit::analysis_pair` thumbnails the
+source and thumbnails the target into exactly that width and height with
+the same box operator (`thumbnail_exact`; a Lanczos3 target against a
+box-filtered source was measured to move a same-scene fit from 0.019 to
+0.034 by kernel asymmetry alone); an equal-shape pair is therefore
+byte-for-byte the two thumbnails it always was, by construction, and
+every producer (global fit, rescore, semantic zones, luminance ranges, tiles)
+reads the pair through that one helper. Before this, the two images were
+thumbnailed independently and a ONE-ROW rounding difference (1600x1067 ->
+384x256 against 1600x1069 -> 384x257) made `structure_divergence` return
+`matched` on the unequal lengths, the same-content verdict came out true,
+and no evidence range could be withheld -- the structural gate was silently
+off for every such pair, the calibration pair included. The aligned-prefix
+arithmetic inside the model (`0..min(source.len(), target.len())`,
+population and both movement audits over the same mass) is the defensive
+form of that contract. Semantic zones and quadtree
 tiles ask their tone/colour vetoes of the view scoped over the coverage their
 raster moves (`ZoneAttachment.coverage`; a tile's estimator weights are
 evidence-weighted and would hide the withheld pixels its raster still moves),
 tiles derive their per-pixel weights from their own view, and the blind-move
 audit's 5% region line is a share of that population (`EvidenceModel::
 population`) rather than of the frame -- a depth-2 tile is 6% of the frame, so
-under the frame line its blind half could never be a "region". The global fit
-and the frame-wide luminance ranges keep the frame view because the frame is
-what they move. On the calibration
+under the frame line its blind half could never be a "region". Range discovery
+and composed-frame arbitration use the frame model, while each range
+attachment's movement vetoes use the raw ramp of its own `RangeMask`. On the calibration
 pair this ends the collateral veto in which the replaced sky, sharing the
 land's luma bins, withheld the land's tone controls; with colour withheld the
 skip line is now asked of tone alone, so the land (luma residual 0.004, under
@@ -1789,6 +1835,35 @@ are withheld because Blue/Purple are one-sided inside the tile (the old frame
 share let them through): 0.0549 -> 0.0452 -> 0.0369 against 0.0345. A zone
 whose dials come out neutral is still dropped without a note (registered
 follow-up).
+
+Shared analysis geometry and the structure-blind Atmosphere ruler (2026-08-27,
+user-ruled). Every GUI-path figure in the two paragraphs above (0.0175 ->
+0.0180, the +0.10 EV land dial, the 0.0179 -> 0.0193 regression) was measured
+with the structural evidence gate silently OFF: the 1600x1067 neutral
+development thumbnails to 384x256 and the 1600x1069 target to 384x257, and
+`structure_divergence` answered `matched` on unequal lengths. The RAW-path
+figures (0.0549 -> 0.0452 -> 0.0369) had the gate on, which is the whole "3x
+gap" between the two paths. With `fit::analysis_pair` both rasters share one
+geometry and the gate is live everywhere. The calibration pair then reads
+D = 0.49 (Atmosphere); its dark-land ranges survive structurally (0.54-0.57 on
+luma [0.12-0.29], 41% of the frame) while the mid-tones the generator
+re-rendered (0.10-0.33 on [0.29-0.59]) and the replaced sky (0.08-0.18 on
+[0.59-0.82]) do not, and under the old range vetoes every global atmosphere
+move was reset (0.057 -> 0.057; tiles alone reached 0.0362). Under the ruled
+doctrine the report reads its population ruler: neutral -> target gives EV
+-1.00, WB 7100 K / tint +22, saturation 0 (Aqua/Blue one-sided), a five-point
+curve, clarity/texture 0, ruler 0.189 -> 0.096, confidence 0.25; with
+segmentation off one tile attaches (-0.56 EV), with it on the sky zone
+(-0.08 EV); the RAW path gives EV -1.00 and a sky zone at -0.27 EV (0.194 ->
+0.108). On a user-visible pixel ruler (`scripts/pixel_ruler.py`: mean CIE76
+dE of the render against the target at 384 px wide; frame / sky / land) the
+untouched neutral scores 23.5 / 37.0 / 12.4, the gate-on result under the old
+vetoes 22.5 / 37.0 / 10.7, the previously shipped gate-off result 11.9 / 17.5
+/ 7.4, and the ruled result 10.6 / 16.4 / 5.9 (segmentation off) and 12.5 /
+20.6 / 5.9 (on). The Full-mode pairs (p36, viaduct) are byte-identical before
+and after; repeated runs are SHA-identical. A 512 / 768 analysis edge was
+measured and rejected: the same tiles, +4% / +25-50% wall time, and the
+384-calibrated ruler collapses at 768.
 
 The final automatic layer is a frozen-evidence spatial quadtree
 ([`src/fit_zoned/spatial.rs`](../src/fit_zoned/spatial.rs)). It runs after
@@ -1808,6 +1883,11 @@ their story in their own generation); eligible leaf candidates keep a full
 per-node reading, and downstream failures (raster, estimator, boundary) keep
 per-tile notes. The persisted-rationale abuse bound is 16 KiB so this
 disclosure is never what truncation eats.
+
+The tile pass reads the pair through `fit::analysis_pair`, so its coverage
+and estimator vectors are congruent by construction (asserted). Caching
+scoped tile evidence by `TileId` is registered as a performance follow-up; it
+is not implemented here.
 
 Each leaf reuses `attach_one_zone` through `ZoneAttachment { min_share: 0.03,
 frame_regression_tol: 0.0 }`, then passes its own `0.012` boundary-rim and

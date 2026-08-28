@@ -195,6 +195,36 @@
 
 ## 当前状态（已完成，勿重做）
 
+- **🧭 共几何根因 + 氛围结构盲教义已提交（2026-08-27 晚，B1 复审返工 Codex F1–F8 + 共几何/教义主模型亲写 + B″ 实现 Codex
+  gpt-5.6-sol xhigh 至活体步撞额度、主模型接管收口）**：
+  **根因一**＝两侧分析缩略图独立取样，neutral.jpg 1600×1067→384×256 而 target.jpg 1600×1069→384×257，`structure_divergence`
+  遇异长静默 `matched()` → `globally_same_content=true` → 结构证据门对 GUI/neutral 路径**一直关着**（RAW CLI 路径 257 vs 257 门开）
+  ——步 4 起旗舰对 GUI 路径全部数字（0.0175/0.0180、步 8/9/10-B1 活体 A/B）皆门关态，「0.055 vs 0.018 的 3× 差」全由此来。
+  修法＝`fit::analysis_pair`：源 `thumbnail(384,384)`，目标 `thumbnail_exact(源宽,源高)`（同一盒滤波算子；等形对按构造逐字节同），
+  主路径 6 处 + 测试 12 处独立缩略图全部改走该助手；**根因二**（首版踩坑）＝目标用 Lanczos3 重采样、源盒滤波，核不对称单独把 p36
+  同景对从 0.092→0.019/0.677 推到 0.107→0.034/0.537，改盒滤波后 p36/viaduct pin 转绿；死代码几何弃权分支删除。
+  **门活体后的真机制**（旗舰对 D=0.49 氛围模式，秩配对 17 bin 存活：暗地 [0.12-0.29] 0.54-0.57 占帧 41%、地面自身被重绘的中间调
+  [0.29-0.59] 0.10-0.33、天空 [0.59-0.82] 0.08-0.18）＝氛围估计器在存活范围上读出 −1 EV，但全局 EV 必移被扣留 59% →
+  `moves_unsupported_luma_range` 复位 → 空配方 0.057→0.057，步 4 氛围模式按构造失效。三臂原型贴-测-还原（像素尺 ΔE76
+  全帧/天空/地面，identity 23.5/37.0/12.4）：A 门赢 22.5/37.0/10.7、B 全豁免 12.0/20.3/5.3（饱和 +30 顶格）、B″ 结构盲证据
+  12.9/21.5/6.0；门关基线 11.9/17.5/7.4。**用户裁定 B″ + 保持 ANALYZE_EDGE=384**（512 同瓦片 +4% 耗时、768 尺崩 +25-50%）。
+  实现＝`EvidenceModel::structure_blind`（人口事实照样否决：单侧/空范围；结构存活与逐像素扣留关闭）；**每报告一把尺**（Full=
+  结构模型；Atmosphere=盲模型，err/伤害/联合读数/置信/披露/区帧律全在其上，氛围解算自算盲尺 `err_before`）+ 氛围报告另携
+  `FitReport.structural_evidence` 供 Full 分区（`attach_one_zone` 单一模式分支覆盖语义区/范围带/瓦片）与细节级（可辨识度是结构事实）；
+  `rescore_report` 同尺（顺带携带 vouched-bands 注，为 p36 逐字节往返所需）；披露注 `FIT_NOTE_ATMOSPHERE_POPULATION_EVIDENCE`
+  列出结构模型扣留的范围（en/zh）；主审把 `compose_report` 的 `expect` 改 `debug_assert`+`if let`（照片软件不因缺披露 panic）。
+  测试：T1 结构盲保人口事实、T2 旗舰单尺、T3 p36 Full 往返 structural 缺席、T4 四旗舰测试重钉（地面区改名
+  `calibration_land_zone_is_withheld_by_its_own_rerendered_mid_tones`：Full 区按自身成员扣留 [0.29-0.59] 且不含天空亮 bin）、
+  T5 氛围帧内 Full 区读结构模型、T6 rescore 复现同尺；五条旧断言按新契约改写（饱和帽测试改钉顶格、扣留范围移动测试反钉、置信
+  分离测试改钉同尺）。**活体**（新 exe vs 几何基线 exe）：neutral→target EV −1.00/7100K/+22.3/饱和 0/五点曲线，盲尺 0.189→0.096，
+  置信 0.25；分割关附一瓦片 −0.56 EV、开附天空区 −0.08 EV；RAW 路径 EV −1.00 + 天空区 −0.27 EV（0.194→0.108）；像素尺
+  10.6/16.4/5.9（关）12.5/20.6/5.9（开）优于门关基线 11.9/17.5/7.4；p36/viaduct 逐字节同；各两趟 SHA 同（仅蒙版存储路径随趟）。
+  门 982(+9i)/15/145/2+2 双特性、clippy 0+0、i18n 0、字体 843、check_docs；集差 +6/−1 逐名；变异 Codex M1–M7 + 主审亲手
+  MA 盲模型不清空间权重/MB 细节级读盲/MC Full 区读报告尺/MD 披露注省略 全红。Codex 用 Set-Content 把 8 文件写成 LF，收口时归一 CRLF。
+  登记跟进＝CLI RAW 臂只拟合机内预览（main.rs:1230，解算域≠渲染域）、目标函数结构项在低可辨识度对上失活（core<100 px→matched）、
+  ZONE_DROPPED 漂移 `{:+.3}` 披露把决定性漂移打成零、fitlayer/fitrange/fitgrid 三未跟踪目录归步 16；展示图重生成（步 15）触发再累积。
+  材料：r30-materials/task-fit-atmos-blind.md、design-grid-as-analyzer.md §8–§9、task-b2-prequestions-report.md。
+  下步＝B2 任务书 §3 按本批基线重写（上界在共几何、门开、B″ 尺下量；LOCAL_CEILING 不得挂 0.081/0.018）再派。
 - **🔬 步10-B1 已提交 `49a796b`（2026-08-27，主模型亲写——Codex OAuth 额度见顶，按「实在不行就不用 codex」令）**：
   步10 改题「网格作局部场分析仪」（引擎网格判 DEAD：校准对网格 0.0043 但 4 亮度带投影 0.0030 已复现全部增益，
   报告 r30-materials/task-fit-bgrid-recon-report.md、设计 design-grid-as-analyzer.md，用户批准 B1→B2→B3）。

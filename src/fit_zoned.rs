@@ -1440,8 +1440,7 @@ fn attach_zones_with_divergence(
     mask_path: &crate::store::OwnedRaster,
     divergence: ZoneDivergences,
 ) {
-    let s_img = src.thumbnail(fit::ANALYZE_EDGE, fit::ANALYZE_EDGE);
-    let t_img = target.thumbnail(fit::ANALYZE_EDGE, fit::ANALYZE_EDGE);
+    let (s_img, t_img) = fit::analysis_pair(src, target);
     let tgt_px = fit::pixels_of(&t_img);
     let (aw, ah) = {
         let c = render::develop_preview(&s_img, &report.recipe);
@@ -2149,17 +2148,20 @@ fn attach_one_zone(
         }
         m.saturation = next;
     }
-    // Evidence verdicts follow the population a correction MOVES: the global
-    // fit moves the frame and is judged by the frame's bins; this zone moves
-    // its coverage, so its bins are re-aggregated over that. A ground zone
-    // no longer inherits the withheld verdict of a replaced sky that shares
-    // its luma bins (the calibration pair's land fit was vetoed exactly that
-    // way), while a zone whose own members are divergent stays withheld.
+    // Evidence verdicts follow both the population a correction MOVES and its
+    // mode. Atmosphere zones scope the report's one frame ruler (population
+    // evidence in an Atmosphere report). Full zones retain structural survival,
+    // so inside an Atmosphere frame they scope the separately carried structural
+    // model. This single branch covers semantic zones, ranges and tiles.
     let (moved_source, moved_target) = match &attachment.coverage {
         Some(coverage) => (coverage.source.as_slice(), coverage.target.as_slice()),
         None => (sw, tw),
     };
-    let zone_evidence = report.evidence.scoped(tgt_px, moved_source, moved_target);
+    let frame_evidence = match mode {
+        ZoneMode::Atmosphere => &report.evidence,
+        ZoneMode::Full => report.structural_evidence.as_ref().unwrap_or(&report.evidence),
+    };
+    let zone_evidence = frame_evidence.scoped(tgt_px, moved_source, moved_target);
     // Probe the two control classes independently. A one-sided hue band must
     // withhold only chroma movement; supported luminance evidence still earns
     // the zone correction.
@@ -2829,9 +2831,17 @@ mod tests {
         fit::Divergence { correlation: 1.0 - d, energy_error: 0.0, d }
     }
 
+    fn pretend_full_support(evidence: &mut fit::EvidenceModel) {
+        evidence.spatial_weights.fill(1.0);
+        evidence.spatial_divergence.fill(0.0);
+        evidence.spatial_supported.fill(true);
+        evidence.globally_same_content = true;
+        evidence.source_weights.fill(1.0);
+        evidence.target_weights.fill(1.0);
+    }
+
     pub(super) fn neutral_report(src: &DynamicImage, tgt: &DynamicImage) -> fit::FitReport {
-        let s = src.thumbnail(fit::ANALYZE_EDGE, fit::ANALYZE_EDGE);
-        let t = tgt.thumbnail(fit::ANALYZE_EDGE, fit::ANALYZE_EDGE);
+        let (s, t) = fit::analysis_pair(src, tgt);
         let err = fit::look_err(&fit::pixels_of(&s), &fit::pixels_of(&t));
         fit::FitReport {
             correspondence: None,
@@ -2847,7 +2857,106 @@ mod tests {
                 s.width(),
                 s.height(),
             ),
+            structural_evidence: None,
         }
+    }
+
+    #[test]
+    fn full_zone_in_atmosphere_frame_reads_structural_evidence() {
+        let edge = 64u32;
+        let source = DynamicImage::ImageRgb8(RgbImage::from_fn(edge, edge, |x, y| {
+            let value = 0.30 + 0.02 * ((x + y) % 2) as f32;
+            image::Rgb([(value * 255.0).round() as u8; 3])
+        }));
+        let divergent = DynamicImage::ImageRgb8(RgbImage::from_fn(edge, edge, |x, y| {
+            let value = if ((x / 3) + (y / 5)) % 2 == 0 { 0.12f32 } else { 0.88 };
+            image::Rgb([(value * 255.0).round() as u8; 3])
+        }));
+        let carried = fit::fit_recipe(&source, &divergent);
+        assert_eq!(carried.mode, fit::FitMode::Atmosphere, "premise: divergent frame");
+        assert!(
+            carried.structural_evidence.is_some(),
+            "an Atmosphere frame must carry structural evidence for its Full zones"
+        );
+        let target = DynamicImage::ImageRgb8(RgbImage::from_fn(edge, edge, |x, y| {
+            let value = 0.50 + 0.02 * ((x + y) % 2) as f32;
+            image::Rgb([(value * 255.0).round() as u8; 3])
+        }));
+        let (s_img, t_img) = fit::analysis_pair(&source, &target);
+        let (sp, tp) = (fit::pixels_of(&s_img), fit::pixels_of(&t_img));
+        let mut ingredients = fit::evidence_model_for(&sp, &tp, edge, edge);
+        pretend_full_support(&mut ingredients);
+        ingredients.spatial_weights.fill(0.0);
+        ingredients.spatial_divergence.fill(1.0);
+        ingredients.spatial_supported.fill(false);
+        ingredients.globally_same_content = false;
+        let ones = vec![1.0; sp.len()];
+        let structural = ingredients.scoped(&tp, &ones, &ones);
+        assert!(
+            structural
+                .luma
+                .iter()
+                .any(|range| range.source_populated && range.target_populated && range.weight == 0.0),
+            "premise: the synthetic structural model withholds a populated tone range"
+        );
+        let blind = structural.structure_blind(&tp);
+        let frame_err = fit::look_err_with_evidence(&sp, &tp, &blind);
+        let build_report = || {
+            let mut report = neutral_report(&source, &target);
+            report.mode = fit::FitMode::Atmosphere;
+            report.divergence = divergence(0.8);
+            report.err_before = frame_err;
+            report.err_after = frame_err;
+            report.evidence = blind.clone();
+            report.structural_evidence = Some(structural.clone());
+            report
+        };
+        let mask = GrayImage::from_pixel(edge, edge, image::Luma([255u8]));
+        let path = fixture_mask_path("atmosphere-frame-full-zone-structural");
+        mask.save(path.path()).unwrap();
+        let attachment = semantic_attachment(ones.clone(), ones, &path);
+
+        let mut full_report = build_report();
+        let mut full_frame_err = frame_err;
+        let _ = attach_one_zone(
+            &s_img,
+            &tp,
+            &mut full_report,
+            &mut full_frame_err,
+            &attachment,
+            divergence(0.0),
+            None,
+        );
+        assert!(
+            full_report.notes.iter().any(|note| {
+                note.key == crate::rationale::keys::ZONE_EVIDENCE_WITHHELD_TONE
+                    && note.args.iter().any(|(key, value)| {
+                        *key == "label" && value == MaskRole::ZoneSky.tag()
+                    })
+            }),
+            "a Full zone must retain structural withholding: {}",
+            full_report.recipe.rationale
+        );
+
+        let mut atmosphere_report = build_report();
+        let mut atmosphere_frame_err = frame_err;
+        let _ = attach_one_zone(
+            &s_img,
+            &tp,
+            &mut atmosphere_report,
+            &mut atmosphere_frame_err,
+            &attachment,
+            divergence(0.8),
+            None,
+        );
+        assert!(
+            !atmosphere_report.notes.iter().any(|note| {
+                note.key == crate::rationale::keys::ZONE_EVIDENCE_WITHHELD_TONE
+            }),
+            "an Atmosphere zone must read the blind report ruler: {}",
+            atmosphere_report.recipe.rationale
+        );
+        path.remove();
     }
 
     fn legacy_zoned_fit(
@@ -3823,8 +3932,7 @@ mod tests {
         let path = fixture_mask_path("synthetic-zone-survival");
         mask.save(path.path()).unwrap();
         let mut report = neutral_report(&src, &tgt);
-        let s_img = src.thumbnail(fit::ANALYZE_EDGE, fit::ANALYZE_EDGE);
-        let t_img = tgt.thumbnail(fit::ANALYZE_EDGE, fit::ANALYZE_EDGE);
+        let (s_img, t_img) = fit::analysis_pair(&src, &tgt);
         let t_px = fit::pixels_of(&t_img);
         let sw = mask_weights(&mask, s_img.width(), s_img.height());
         let tw = mask_weights(&mask, t_img.width(), t_img.height());
@@ -3908,8 +4016,7 @@ mod tests {
         let path = fixture_mask_path("synthetic-zone-tone-refusal");
         mask.save(path.path()).unwrap();
         let mut report = neutral_report(&src, &tgt);
-        let s_img = src.thumbnail(fit::ANALYZE_EDGE, fit::ANALYZE_EDGE);
-        let t_img = tgt.thumbnail(fit::ANALYZE_EDGE, fit::ANALYZE_EDGE);
+        let (s_img, t_img) = fit::analysis_pair(&src, &tgt);
         let t_px = fit::pixels_of(&t_img);
         let sw = mask_weights(&mask, s_img.width(), s_img.height());
         let tw = mask_weights(&mask, t_img.width(), t_img.height());
@@ -3975,8 +4082,7 @@ mod tests {
             sky_mask.save(mask_path.path()).unwrap();
             let mut report = fit::fit_recipe(&source, &target);
             if let Some(f) = field {
-                let s_img = source.thumbnail(fit::ANALYZE_EDGE, fit::ANALYZE_EDGE);
-                let t_img = target.thumbnail(fit::ANALYZE_EDGE, fit::ANALYZE_EDGE);
+                let (s_img, t_img) = fit::analysis_pair(&source, &target);
                 report.correspondence = Some(fit::correspondence_for_pair(
                     &f,
                     &fit::pixels_of(&t_img),
@@ -4096,8 +4202,7 @@ mod tests {
         let path = fixture_mask_path("poisoned-bin-land");
         sky_mask.save(path.path()).unwrap();
         let mut report = neutral_report(&src, &tgt);
-        let s_img = src.thumbnail(fit::ANALYZE_EDGE, fit::ANALYZE_EDGE);
-        let t_img = tgt.thumbnail(fit::ANALYZE_EDGE, fit::ANALYZE_EDGE);
+        let (s_img, t_img) = fit::analysis_pair(&src, &tgt);
         let t_px = fit::pixels_of(&t_img);
         let sw = mask_weights(&sky_mask, s_img.width(), s_img.height());
         let tw = mask_weights(&sky_mask, t_img.width(), t_img.height());
@@ -4148,12 +4253,12 @@ mod tests {
         path.remove();
     }
 
-    /// The calibration pair's land correction used to be withheld on both
-    /// sides: the replaced sky shares the ground's mid-tone luma bins and the
-    /// frame-wide verdict withheld those bins for everyone. Judged by its own
-    /// members the land zone must attach with a real tone move.
+    /// The calibration land is a Full zone inside an Atmosphere frame. Its own
+    /// rerendered mid-tones retain only 10-33% structural survival, so the Full
+    /// zone must read the carried structural model and withhold those ranges;
+    /// the frame's blind ruler would allow them.
     #[test]
-    fn calibration_land_zone_is_no_longer_withheld_by_the_replaced_sky() {
+    fn calibration_land_zone_is_withheld_by_its_own_rerendered_mid_tones() {
         let Some(root) = fit::calibration_corpus() else { return };
         let source = image::open(root.join("neutral.jpg")).expect("calibration neutral.jpg");
         let target = image::open(root.join("target.jpg")).expect("calibration target.jpg");
@@ -4163,84 +4268,79 @@ mod tests {
         let mask_path = fixture_mask_path("calibration-land-scratch");
         sky_mask.save(mask_path.path()).unwrap();
         let mut report = fit::fit_recipe(&source, &target);
-        let global_err = report.err_after;
-        let global_recipe = report.recipe.clone();
+        assert_eq!(report.mode, fit::FitMode::Atmosphere);
+        assert!(report.structural_evidence.is_some());
         attach_zones(&source, &target, &mut report, &sky_mask, &sky_mask, &mask_path);
         let land_tag = MaskRole::ZoneLand.tag();
-        {
-            let s_img = source.thumbnail(fit::ANALYZE_EDGE, fit::ANALYZE_EDGE);
-            let t_img = target.thumbnail(fit::ANALYZE_EDGE, fit::ANALYZE_EDGE);
-            let tgt_px = fit::pixels_of(&t_img);
-            let developed = render::develop_preview(&s_img, &global_recipe);
-            let land_w: Vec<f32> = mask_weights(&sky_mask, developed.width(), developed.height())
-                .iter()
-                .map(|w| 1.0 - w)
-                .collect();
-            let land_t: Vec<f32> = mask_weights(&sky_mask, t_img.width(), t_img.height())
-                .iter()
-                .map(|w| 1.0 - w)
-                .collect();
-            let mt = zone_moments(&tgt_px, &land_t);
-            let global_px = fit::pixels_of(&developed);
-            let final_px = fit::pixels_of(&render::develop_preview(&s_img, &report.recipe));
-            let mut without_land = report.recipe.clone();
-            without_land.masks.retain(|m| m.role != MaskRole::ZoneLand);
-            let sky_only_px = fit::pixels_of(&render::develop_preview(&s_img, &without_land));
-            eprintln!(
-                "CALIBRATION_LAND frame look_err with the sky zone only {:.5}",
-                fit::look_err_with_evidence(&sky_only_px, &tgt_px, &report.evidence)
-            );
-            eprintln!(
-                "CALIBRATION_LAND luma-only zone residual {:.4} -> {:.4}; full zone residual {:.4} -> {:.4}; frame look_err {:.5} -> {:.5}",
-                zone_luma_err(&zone_moments(&global_px, &land_w), &mt),
-                zone_luma_err(&zone_moments(&final_px, &land_w), &mt),
-                zone_err(&zone_moments(&global_px, &land_w), &mt),
-                zone_err(&zone_moments(&final_px, &land_w), &mt),
-                fit::look_err_with_evidence(&global_px, &tgt_px, &report.evidence),
-                fit::look_err_with_evidence(&final_px, &tgt_px, &report.evidence),
-            );
+        let note = report
+            .notes
+            .iter()
+            .find(|note| {
+                note.key == crate::rationale::keys::ZONE_EVIDENCE_WITHHELD_TONE
+                    && note.args.iter().any(|(key, value)| {
+                        *key == "label" && value == land_tag
+                    })
+            })
+            .expect("the land Full zone must withhold its structurally unsupported tone move");
+        let ranges = note
+            .args
+            .iter()
+            .find(|(key, _)| *key == "luma_ranges")
+            .map(|(_, value)| value.as_str())
+            .expect("land tone note carries luma_ranges");
+        for expected in [
+            "luma[0.29-0.35]",
+            "luma[0.35-0.41]",
+            "luma[0.41-0.47]",
+            "luma[0.47-0.53]",
+            "luma[0.53-0.59]",
+        ] {
+            assert!(ranges.contains(expected), "land note missed {expected}: {ranges}");
         }
-        let vetoed = report.notes.iter().any(|note| {
-            note.key == crate::rationale::keys::ZONE_EVIDENCE_WITHHELD_TONE
-                && note.args.iter().any(|(key, value)| *key == "label" && value == land_tag)
-        });
-        let already_matched = report.notes.iter().any(|note| {
-            note.key == crate::rationale::keys::ZONE_ALREADY_MATCHED
-                && note.args.iter().any(|(key, value)| *key == "label" && value == land_tag)
-        });
-        let land = report.recipe.masks.iter().find(|mask| mask.role == MaskRole::ZoneLand);
-        eprintln!(
-            "CALIBRATION_LAND vetoed={vetoed} already_matched={already_matched} land={:?} err {global_err:.5} -> {:.5} rationale={}",
-            land.map(|m| (
-                m.exposure_ev,
-                m.contrast,
-                m.highlights,
-                m.shadows,
-                m.whites,
-                m.blacks,
-                m.color_gains,
-                m.saturation
-            )),
-            report.err_after,
-            report.recipe.rationale
-        );
-        assert!(!vetoed, "the land zone's tone controls must not be withheld through the sky's bins");
         assert!(
-            land.is_some() || already_matched,
-            "judged by its own members the land zone must attach or be declared matched in tone: {}",
-            report.recipe.rationale
+            !["luma[0.59-0.65]", "luma[0.65-0.71]", "luma[0.71-0.76]", "luma[0.76-0.82]"]
+                .iter()
+                .any(|range| ranges.contains(range)),
+            "the land note inherited the sky's bright bins: {ranges}"
         );
-        if let Some(land) = land {
-            assert!(
-                land.exposure_ev != 0.0
-                    || land.contrast != 0.0
-                    || land.highlights != 0.0
-                    || land.shadows != 0.0
-                    || land.whites != 0.0
-                    || land.blacks != 0.0,
-                "an attached land zone must carry a tone move: {land:?}"
-            );
+
+        let (s_img, t_img) = fit::analysis_pair(&source, &target);
+        let tgt_px = fit::pixels_of(&t_img);
+        let land_source = mask_weights(&sky_mask, s_img.width(), s_img.height())
+            .iter()
+            .map(|weight| 1.0 - weight)
+            .collect::<Vec<_>>();
+        let land_target = mask_weights(&sky_mask, t_img.width(), t_img.height())
+            .iter()
+            .map(|weight| 1.0 - weight)
+            .collect::<Vec<_>>();
+        let blind_land = report.evidence.scoped(&tgt_px, &land_source, &land_target);
+        let structural_land = report
+            .structural_evidence
+            .as_ref()
+            .unwrap()
+            .scoped(&tgt_px, &land_source, &land_target);
+        for label in [
+            "luma[0.29-0.35]",
+            "luma[0.35-0.41]",
+            "luma[0.41-0.47]",
+            "luma[0.47-0.53]",
+            "luma[0.53-0.59]",
+        ] {
+            let blind = blind_land
+                .luma
+                .iter()
+                .find(|range| range.label == label)
+                .unwrap_or_else(|| panic!("unknown land range {label}"));
+            let structural = structural_land
+                .luma
+                .iter()
+                .find(|range| range.label == label)
+                .unwrap();
+            assert!(blind.weight > 0.0, "blind scope would also withhold {label}");
+            assert_eq!(structural.weight, 0.0, "structural scope did not withhold {label}");
         }
+        mask_path.remove();
     }
 
     /// With its colour class withheld a zone is judged on tone alone -- so the
@@ -4265,8 +4365,7 @@ mod tests {
         let path = fixture_mask_path("movable-class-matched");
         sky_mask.save(path.path()).unwrap();
         let mut report = neutral_report(&src, &tgt);
-        let s_img = src.thumbnail(fit::ANALYZE_EDGE, fit::ANALYZE_EDGE);
-        let t_img = tgt.thumbnail(fit::ANALYZE_EDGE, fit::ANALYZE_EDGE);
+        let (s_img, t_img) = fit::analysis_pair(&src, &tgt);
         let t_px = fit::pixels_of(&t_img);
         let sw = mask_weights(&sky_mask, s_img.width(), s_img.height());
         let tw = mask_weights(&sky_mask, t_img.width(), t_img.height());
@@ -4323,6 +4422,7 @@ mod tests {
             .iter()
             .find(|mask| mask.role == MaskRole::ZoneSky)
             .expect("the calibration sky zone must survive");
+        assert!((-0.15..=-0.12).contains(&sky.exposure_ev));
         assert_eq!(sky.color_gains, Some([1.0; 3]));
         assert_eq!(sky.saturation, 0.0);
         let note = report
@@ -4336,7 +4436,29 @@ mod tests {
             sky.exposure_ev, sky.color_gains, sky.saturation, after, report.recipe.rationale
         );
         assert!(after <= ZONE_BOUNDARY_RIM_MAX);
-        assert!(report.notes.iter().any(|note| note.key == crate::rationale::keys::ZONE_EVIDENCE_WITHHELD_COLOUR));
+        let colour_note = report
+            .notes
+            .iter()
+            .find(|note| {
+                note.key == crate::rationale::keys::ZONE_EVIDENCE_WITHHELD_COLOUR
+                    && note.args.iter().any(|(key, value)| {
+                        *key == "label" && value == MaskRole::ZoneSky.tag()
+                    })
+            })
+            .expect("the one-sided calibration sky band must refuse colour");
+        assert!(
+            colour_note
+                .args
+                .iter()
+                .any(|(key, value)| *key == "hue_bands" && value.contains("Aqua"))
+        );
+        assert!(!report.notes.iter().any(|note| {
+            note.key == crate::rationale::keys::ZONE_EVIDENCE_WITHHELD_TONE
+                && note.args.iter().any(|(key, value)| {
+                    *key == "label" && value == MaskRole::ZoneSky.tag()
+                })
+        }));
+        mask_path.remove();
     }
 
     /// The zone stage's verdict is bounded by BOTH stages: it may not raise

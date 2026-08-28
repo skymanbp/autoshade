@@ -443,8 +443,10 @@ pub(super) fn attach_tiles(
     raster_home: &crate::store::OwnedRaster,
     refine: bool,
 ) {
-    let s_img = src.thumbnail(fit::ANALYZE_EDGE, fit::ANALYZE_EDGE);
-    let t_img = target.thumbnail(fit::ANALYZE_EDGE, fit::ANALYZE_EDGE);
+    // One analysis geometry for both rasters (`fit::analysis_pair`), so the
+    // coverage and estimator vectors below are congruent by construction —
+    // the two asserts pin that contract.
+    let (s_img, t_img) = fit::analysis_pair(src, target);
     let tgt_px = fit::pixels_of(&t_img);
     let mut attached = BTreeSet::new();
     let mut refused = BTreeSet::new();
@@ -572,6 +574,8 @@ pub(super) fn attach_tiles(
             source: mask_weights(&mask, s_img.width(), s_img.height()),
             target: mask_weights(&mask, t_img.width(), t_img.height()),
         };
+        assert_eq!(coverage.source.len(), reading.source_weights.len());
+        assert_eq!(coverage.target.len(), reading.target_weights.len());
         let (source_weights, target_weights) = if refined {
             let source = coverage
                 .source
@@ -725,10 +729,11 @@ mod tests {
         (current, target, evidence)
     }
 
-    /// A tile is judged by its own members: its source and target shares are
-    /// the same bin weights over the same geometry, so they agree and an
-    /// unsupported tile is refused on the first share gate. The target-share
-    /// arm stays as the defensive second reading.
+    /// Both share gates own a falsifier. The first case removes support from
+    /// both sides and reaches `source-share`. The second swaps bright/dark
+    /// halves: rank pairing places the bright target members on the right,
+    /// while support exists only on the left, so the bright tile reading
+    /// reaches `target-share`.
     #[test]
     fn tile_requires_source_and_target_evidence_share() {
         let current = flat_pixels(64, 64, 100);
@@ -747,6 +752,40 @@ mod tests {
         assert_eq!(unsupported.source_share, 0.0, "{unsupported:?}");
         assert_eq!(unsupported.target_share, 0.0, "{unsupported:?}");
         assert_eq!(eligible(&unsupported, 0.0), Err("source-share"));
+
+        let width = 64u32;
+        let height = 64u32;
+        let source = (0..width * height)
+            .map(|i| if i % width < width / 2 { [0.8; 3] } else { [0.2; 3] })
+            .collect::<Vec<_>>();
+        let target = (0..width * height)
+            .map(|i| if i % width < width / 2 { [0.2; 3] } else { [0.8; 3] })
+            .collect::<Vec<_>>();
+        let mut evidence = fit::evidence_model_for(&source, &target, width, height);
+        evidence.spatial_weights.iter_mut().enumerate().for_each(|(i, weight)| {
+            *weight = if i % (width as usize) < width as usize / 2 { 1.0 } else { 0.0 };
+        });
+        evidence.spatial_divergence.fill(0.0);
+        evidence.spatial_supported.fill(true);
+        evidence.globally_same_content = true;
+        let frame = vec![1.0; source.len()];
+        let scoped = evidence.scoped(&target, &frame, &frame);
+        let bright = &scoped.luma[fit::evidence_luma_bin(0.8)];
+        assert!(bright.source_evidence_share >= MIN_ZONE_SHARE, "{bright:?}");
+        assert!(bright.target_evidence_share < MIN_ZONE_SHARE, "{bright:?}");
+        let target_missing = TileReading {
+            id: TileId { depth: 0, row: 0, col: 0 },
+            source_weights: Vec::new(),
+            target_weights: Vec::new(),
+            source_share: bright.source_evidence_share,
+            target_share: bright.target_evidence_share,
+            residual: 0.1,
+            ci95: 0.0,
+            divergence: fit::Divergence { correlation: 1.0, energy_error: 0.0, d: 0.0 },
+        };
+        assert!(target_missing.source_share >= MIN_ZONE_SHARE, "{target_missing:?}");
+        assert!(target_missing.target_share < MIN_ZONE_SHARE, "{target_missing:?}");
+        assert_eq!(eligible(&target_missing, 0.0), Err("target-share"));
     }
 
     #[test]
@@ -1209,8 +1248,7 @@ mod tests {
         let recipe: crate::recipe::EditRecipe =
             serde_json::from_slice(&std::fs::read(root.join("fitted.recipe.json")).unwrap())
                 .unwrap();
-        let s_img = source.thumbnail(fit::ANALYZE_EDGE, fit::ANALYZE_EDGE);
-        let t_img = target.thumbnail(fit::ANALYZE_EDGE, fit::ANALYZE_EDGE);
+        let (s_img, t_img) = fit::analysis_pair(&source, &target);
         let original = fit::pixels_of(&s_img);
         let target_pixels = fit::pixels_of(&t_img);
         let evidence = fit::evidence_model_for(

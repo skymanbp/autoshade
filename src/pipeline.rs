@@ -6026,18 +6026,11 @@ mod tests {
         // engine's one-pass path at the fit's own analysis scale and demand
         // equality (the v0.24.0 two-pass mechanism failed this by up to
         // 18.7/255 of pixel drift on saturated content).
-        let s_thumb = src.thumbnail(crate::fit::ANALYZE_EDGE, crate::fit::ANALYZE_EDGE);
-        let t_thumb = target.thumbnail(crate::fit::ANALYZE_EDGE, crate::fit::ANALYZE_EDGE);
-        let source_px = crate::fit::pixels_of(&crate::render::develop_preview(&s_thumb, &base));
+        let (s_thumb, t_thumb) = crate::fit::analysis_pair(&src, &target);
         let target_px = crate::fit::pixels_of(&t_thumb);
         let canvas_px = crate::fit::pixels_of(&crate::render::develop_preview(&s_thumb, &rep.recipe));
-        let evidence = crate::fit::evidence_model_for(
-            &source_px,
-            &target_px,
-            s_thumb.width(),
-            s_thumb.height(),
-        );
-        let canvas_err = crate::fit::look_err_with_evidence(&canvas_px, &target_px, &evidence);
+        let canvas_err =
+            crate::fit::look_err_with_evidence(&canvas_px, &target_px, &rep.evidence);
         assert!(
             (canvas_err - rep.err_after).abs() < 1e-6,
             "the fit's number must describe the canvas render exactly \

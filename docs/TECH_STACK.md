@@ -251,10 +251,12 @@ evidence withholding, share and mismatch checks, step-7b correspondence,
 local-quality gates, and a parameterized composed-frame gate are shared with
 semantic zones. Range bands use zero regression tolerance; semantic zones keep
 their independently calibrated `0.02` drift insurance.
-Before each attempt, `render::range_weight` is evaluated on the current render,
-and overlapping estimator weights are normalized to a total no greater than
-one. One final value-transition gate shrinks every retained differential by
-the same direction-preserving bisection scalar.
+Before each attempt, `render::range_weight` is evaluated on the current render.
+Overlapping estimator weights are normalized to a total no greater than one,
+while each correction keeps the raw, pre-normalization ramp of its own
+`RangeMask` as the coverage it actually moves. One final value-transition gate
+shrinks every retained differential by the same direction-preserving bisection
+scalar.
 
 Native masks use `MaskRole::Custom`, deterministic `Luminance range NN` names,
 and an intersecting `RangeMask::Luminance` on the observed-domain full-frame
@@ -303,17 +305,31 @@ zone's weighted member counts, and the population line, the
 structural-survival gate and the divergence fold are unchanged. Over all-ones
 memberships the scoped view is the frame model byte for byte.
 
+Both analysis rasters share one geometry: `fit::analysis_pair` thumbnails the
+source to the `ANALYZE_EDGE = 384` long edge and thumbnails the target into
+exactly that width and height with the same box operator
+(`thumbnail_exact`, so the two rasters differ by no resampling kernel). Every
+producer reads the pair through it. Independent thumbnails let a one-row
+rounding difference (`1600x1067 -> 384x256` against `1600x1069 -> 384x257`)
+make `structure_divergence` return `matched` on unequal lengths, which turned
+the frame-wide same-content verdict on and disabled every range veto.
+
 `attach_one_zone` asks the tone and colour vetoes of the view scoped over the
-coverage the correction moves: a semantic mask or a luminance ramp is its own
-coverage (`ZoneAttachment.coverage = None`); a tile passes its raster, because
-its estimator weights are evidence-weighted and would hide the withheld pixels
-the raster still moves. `spatial::read_tile` derives a tile's per-pixel weights
-and shares from the view scoped over its geometry, so both shares are one
-population and agree. The blind-move audit's region line is a share of the
-scoped population (`EvidenceModel::population`), not of the frame. The global
-fit and the frame-wide luminance ranges keep the frame view. With colour
-withheld, the skip line is asked of the luma-only residual, the same quantity
-the zone is then accepted on.
+coverage the correction moves. An Atmosphere zone scopes the report ruler; a
+Full zone scopes `structural_evidence` when an Atmosphere frame carries it, or
+the report evidence in an ordinary Full frame. The composed-frame law stays on
+the report ruler. This one branch serves semantic zones, luminance ranges and
+tiles. A semantic mask uses its estimator weights as
+coverage; a luminance-range attachment passes its own raw, pre-partition ramp;
+a tile passes its raster, because its estimator weights are evidence-weighted
+and would hide the withheld pixels the raster still moves.
+`spatial::read_tile` derives a tile's per-pixel weights and shares from the view
+scoped over its geometry. The blind-move audit's region line is a share of the
+scoped population (`EvidenceModel::population`), not of the frame. Range
+discovery (`derive_luminance_bands`) and composed-frame arbitration use the
+frame model; each range attachment's movement vetoes use that band's raw-ramp
+coverage. With colour withheld, the skip line is asked of the luma-only
+residual, the same quantity the zone is then accepted on.
 
 ### Parameters and measurements
 
@@ -340,6 +356,21 @@ the zone is then accepted on.
   `149 s -> 168 s` (RAW): three more borderline tiles become eligible (shares
   are now the tile's own population) and are refused by the attachment share
   gate after refinement and robust reweighting.
+- Shared analysis geometry + structure-blind Atmosphere ruler (2026-08-27).
+  The GUI-path figures in the two bullets above were measured with the
+  structural gate silently off (`384x256` against `384x257` thumbnails made
+  `structure_divergence` answer `matched`); the RAW-path figures had it on.
+  Live with `fit::analysis_pair` and the population ruler: neutral -> target
+  `EV -1.00, 7100 K / tint +22.3, saturation 0, five-point curve`, ruler
+  `0.189 -> 0.096`, confidence `0.25`; segmentation off attaches one tile at
+  `-0.56 EV`, on the sky zone at `-0.08 EV`; RAW path `EV -1.00`, sky zone
+  `-0.27 EV`, `0.194 -> 0.108`. Pixel ruler (`scripts/pixel_ruler.py`, mean
+  CIE76 dE frame / sky / land): neutral `23.5 / 37.0 / 12.4`, gate-on under the
+  old vetoes `22.5 / 37.0 / 10.7`, shipped gate-off `11.9 / 17.5 / 7.4`, ruled
+  `10.6 / 16.4 / 5.9` (off) and `12.5 / 20.6 / 5.9` (on). p36 and viaduct (Full
+  mode) byte-identical across the two executables; runs SHA-identical. Wall
+  time `202 s` / `65 s` (segmentation on / off). `ANALYZE_EDGE` 512 / 768
+  rejected: same tiles, `+4%` / `+25-50%` wall time, ruler collapse at 768.
 - Synthetic poisoned-bin fixture (384x384): two thirds of the frame withheld,
   frame bin 6 populated at zero weight, the ground view keeps bins 5 and 6, the
   sky view withholds bin 6.
@@ -390,7 +421,10 @@ reading.
   (95% CI `0.0010`/`0.0006`), composed frame `0.0549 -> 0.0452 -> 0.0369`
   since the zone-scoped evidence view (r2c0's colour is withheld; the
   pre-view figures were `0.0549 -> 0.0427 -> 0.0345`); every changed-sky node
-  abstains on source share. The semantic-mask refinement
+  abstains on source share (gate-on record under the old vetoes; since the
+  structure-blind Atmosphere ruler the RAW path's global fit carries the frame
+  at `0.194 -> 0.108` with `EV -1.00` and no tile reaches the attachment
+  gate). The semantic-mask refinement
   probe measured guide-edge alignment `0.046444 -> 0.023914`, so it correctly
   abstained and retained the original bytes.
 - Ineligible traversal verdicts aggregate into one typed sweep note per
@@ -630,6 +664,16 @@ fits channel-cast curves; `cast_paints_foreign_hues` vetoes a cast that creates
 a visible colour family at least 45 degrees from every target family over at
 least 5% of the frame; terminal do-no-harm can shrink saturation or reset to
 the caller's base recipe.
+
+Atmosphere mode is entered because structure diverges; its instruments are the
+budgets (EV ±1, WB gain [0.80, 1.25], saturation ±30, curve slope [0.5, 1.5])
+and the population facts, not structural survival. `EvidenceModel::structure_blind`
+keeps one-sided, sparse and minimum-share population vetoes while switching off
+structural survival and per-pixel withholding. One Atmosphere report uses that
+one ruler for frame error, harm, joint readings, confidence and disclosure; it
+carries the structural model separately only for Full zones and detail. A typed
+population-evidence note names the structurally withheld luma/hue ranges and
+states which downstream fits still read them. Full mode is unchanged.
 
 `reimagine` uses the configured `gpt-image-2` Images edit path as an explicitly
 lossy generated target, negotiates a flexible size and its supported fallback,
