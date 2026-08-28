@@ -182,6 +182,11 @@ at `(x+0.5, y+0.5)` through `MASK_SAMPLE_CENTRE`, then optional luminance- or
 colour-range weights refine the geometry; components compose in document order
 as Add, Subtract, or Intersect rather than being flattened to one union.
 
+The ramp itself is centralized in `linear_coverage(t, profile)`. This batch
+ships `LINEAR_FALLOFF = Clamped`, the historical byte-identical ramp. The
+engine also carries a C1 Hermite `Eased` profile, pending the Lightroom probe;
+the measured result decides whether that single constant changes in v1.1.
+
 Lightroom brush strokes may arrive indirectly through a sibling
 `MaskBrushTable`; the importer resolves the MD5-addressed `.acr` member,
 validates its envelope and bounds, Brotli-decompresses it, then parses the

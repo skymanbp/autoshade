@@ -265,8 +265,8 @@ Written down in the plan and the design memos, in delivery order:
   meaning, the embedding switch in the GUI (today the
   `AUTOSHOP_STYLE_EMBED` environment variable), and a prompt-adherence axis
   next to Strength.
-- **Linear-gradient falloff continuity** (C¹ clamp ramp; a rendering change
-  reserved for v1.1) and a **macOS build**.
+- **Linear-gradient falloff continuity** (harness shipped, profile pending the
+  Lightroom measurement) and a **macOS build**.
 
 ## How it works
 

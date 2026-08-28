@@ -1430,6 +1430,13 @@ experiment:
   9.748/7.025/6.336 px RMS and OFF residuals are 12.449/9.943/4.979 px RMS.
   A fitted anisotropic-aspect candidate is diagnostic only and is not shipped.
 
+  Linear coverage has one engine law, `linear_coverage(t, profile)`, applied
+  after the existing H2 handle transport and pixel/aspect projection. The
+  shipped `LINEAR_FALLOFF` is `Clamped`, preserving the historical ramp and
+  every render byte. `Eased` is the C1 Hermite smoothstep profile reserved for
+  the one-constant flip after the Lightroom falloff measurement; it is pending
+  that evidence and is not enabled in this release.
+
   ⚠ `mask_warp_center` and `linear_handle_warp` are two deliberate v1.0.0
   **hard forward schema breaks** inside `LensProfile`: older `deny_unknown_fields`
   readers refuse a recipe carrying either fact instead of silently dropping a
