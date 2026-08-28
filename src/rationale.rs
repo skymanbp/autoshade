@@ -407,6 +407,14 @@ pub mod keys {
          {ceiling}, share {realized}.";
     pub const LOCAL_STOP: &str =
         " Local-field stop after {producer}: skipped [{skipped}], margin {margin}.";
+    pub const FIELD_MASK_PROPOSED: &str =
+        " Field mask {n} proposed: {sign} m={mass} s={share_src}/{share_tgt} D={d} p={pixels}.";
+    pub const FIELD_MASK_ATTACHED: &str =
+        " Field mask {n} attached: {err_before}->{err_after}, rim {rim} (bitmap/XMP loss).";
+    pub const FIELD_MASK_REFUSED: &str =
+        " Field mask component(s) {n} refused: {why}.";
+    pub const FIELD_MASK_NONE: &str =
+        " No field mask qualified: {why}.";
 
     // --- the propose/verify pipeline (pipeline.rs) ----------------------
     pub const REVISION_FAILED: &str =

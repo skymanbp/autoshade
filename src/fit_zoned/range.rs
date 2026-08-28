@@ -1700,7 +1700,9 @@ mod tests {
             &path,
             &crate::recipe::EditRecipe::default(),
             None,
-            ZonedLayerOpts { field: false, spatial: false, refine_masks: false },
+            ZonedLayerOpts {
+                field: false, spatial: false, free_masks: false, refine_masks: false,
+            },
         );
         let calls = RANGE_DERIVATION_CALLS.with(std::cell::Cell::get);
         assert_eq!(calls, 0, "semantic success must not even derive range candidates");
@@ -1744,7 +1746,9 @@ mod tests {
             &path,
             &crate::recipe::EditRecipe::default(),
             None,
-            ZonedLayerOpts { field: false, spatial: false, refine_masks: true },
+            ZonedLayerOpts {
+                field: false, spatial: false, free_masks: false, refine_masks: true,
+            },
         );
         assert_eq!(
             crate::mask_refine::guided_refine_calls(),

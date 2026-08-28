@@ -368,9 +368,14 @@ fn field_band_dispersion_flags_spatially_structured_bins() {
 /// catches either persistence or engine wiring before a schema snapshot can.
 #[test]
 fn the_local_field_never_reaches_the_engine_or_the_recipe_schema() {
-    assert!(!include_str!("../render.rs").contains("fit_field"));
-    assert!(!include_str!("../recipe.rs").contains("fit_field"));
-    assert!(!include_str!("../xmp.rs").contains("fit_field"));
+    for source in [
+        include_str!("../render.rs"),
+        include_str!("../recipe.rs"),
+        include_str!("../xmp.rs"),
+    ] {
+        assert!(!source.contains("fit_field"));
+        assert!(!source.contains("freemask"));
+    }
 }
 
 /// The 96-cell structural support must actually vary on a real pair: synthetic

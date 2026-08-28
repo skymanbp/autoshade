@@ -300,10 +300,10 @@ pub(super) fn push_realized(report: &mut FitReport, field: &LocalField, producer
         ]));
 }
 
-pub(super) fn push_stop(report: &mut FitReport, producer: &str) {
+pub(super) fn push_stop(report: &mut FitReport, producer: &str, skipped: &str) {
     crate::rationale::push_note(&mut report.recipe.rationale, &mut report.notes,
         crate::rationale::Note::new(crate::rationale::keys::LOCAL_STOP, vec![
-            ("producer", producer.into()), ("skipped", "tiles".into()),
+            ("producer", producer.into()), ("skipped", skipped.into()),
             ("margin", format!("{LOCAL_STOP_MARGIN:.3}")),
         ]));
 }

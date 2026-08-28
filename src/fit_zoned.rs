@@ -36,6 +36,7 @@ use crate::render;
 use crate::segment::{segment_file, SegmentOpts};
 
 mod field;
+mod freemask;
 mod range;
 mod spatial;
 
@@ -46,12 +47,14 @@ const MASK_REFINE_EPSILON: f32 = (4.0 / 255.0) * (4.0 / 255.0);
 struct ZonedLayerOpts {
     field: bool,
     spatial: bool,
+    free_masks: bool,
     refine_masks: bool,
 }
 
 const SHIPPED_LAYERS: ZonedLayerOpts = ZonedLayerOpts {
     field: true,
     spatial: true,
+    free_masks: true,
     refine_masks: true,
 };
 
@@ -93,7 +96,7 @@ const ZONE_CLIP_GROWTH: f32 = 0.01;
 /// The calibrated round budget is +0.012; the supervisor's independent RAW
 /// rim metric is the final regression check because it samples a 40px crossing
 /// neighbourhood rather than this analysis-grid statistic.
-const ZONE_BOUNDARY_RIM_MAX: f32 = 0.012;
+pub(super) const ZONE_BOUNDARY_RIM_MAX: f32 = 0.012;
 /// Acceptance: the zone-local error ([`zone_err`]) must fall to ≤ this
 /// fraction of its pre-correction value. The correction is judged on ITS
 /// zone, not on the frame-global `look_err` — measured on the real pair
@@ -391,9 +394,9 @@ const ZONE_BOUNDARY_PERCENTILE: f32 = 0.90;
 const ZONE_BOUNDARY_INTERIOR_MIN: usize = 4;
 
 #[derive(Clone, Copy, Debug)]
-struct BoundaryReading {
-    rim: f32,
-    transitions: usize,
+pub(super) struct BoundaryReading {
+    pub(super) rim: f32,
+    pub(super) transitions: usize,
 }
 
 fn median(mut values: Vec<f32>) -> f32 {
@@ -1270,20 +1273,46 @@ fn fit_recipe_zoned_inner(
     // rebuilt from the (MAX_NOTES-bounded) typed vec.
     if let Some((local, _)) = &field {
         field::push_realized(&mut report, local, first_producer);
-        if field::stop_verdict(local, report.err_after) {
-            field::push_stop(&mut report, first_producer);
+        if layers.free_masks && field::stop_verdict(local, report.err_after) {
+            let skipped = match (layers.spatial, layers.free_masks) {
+                (true, true) => "tiles, free masks",
+                (true, false) => "tiles",
+                (false, true) => "free masks",
+                (false, false) => "none",
+            };
+            field::push_stop(&mut report, first_producer, skipped);
             return report;
         }
     }
+    let mut excluded = field.as_ref()
+        .map(|(local, _)| vec![0.0f32; local.remainder.len()]).unwrap_or_default();
     if layers.spatial {
         let cap = field.as_ref().map(|(_, reading)| reading.effective_tile_cap)
             .unwrap_or(spatial::SPATIAL_MAX_ATTACHMENTS);
-        spatial::attach_tiles(
+        excluded = spatial::attach_tiles(
             src, target, &mut report, mask_path, layers.refine_masks, cap,
         );
         if let Some((local, _)) = &field {
             field::push_realized(&mut report, local, "tiles");
+            if layers.free_masks && field::stop_verdict(local, report.err_after) {
+                field::push_stop(&mut report, "tiles", "free masks");
+                return report;
+            }
         }
+    }
+    if layers.free_masks && let Some((local, _)) = &field {
+        let stage = freemask::attach_free_masks(
+            src,
+            target,
+            &mut report,
+            mask_path,
+            local,
+            &excluded,
+            layers.refine_masks,
+            freemask::FREE_MASK_MAX_ATTACHMENTS,
+        );
+        debug_assert_eq!(stage.components, stage.disclosed);
+        if stage.ran { field::push_realized(&mut report, local, "free masks"); }
     }
     report
 }
@@ -2440,7 +2469,7 @@ fn attach_one_zone(
 /// the render will apply them. R29 C2 moved this and `apply_masks`' own
 /// `weight_at` together; a zone measured on one grid and rendered on another
 /// would put the gains half a pixel off the population they were solved from.
-fn mask_weights(mask: &GrayImage, w: u32, h: u32) -> Vec<f32> {
+pub(super) fn mask_weights(mask: &GrayImage, w: u32, h: u32) -> Vec<f32> {
     // usize-widen BEFORE multiplying: `w * h` is a u32 product and a frame
     // over u32::MAX pixels would overflow the reservation (panic in debug,
     // pathological reallocation in release) while the loops still push w×h.
@@ -3056,7 +3085,9 @@ mod tests {
             reference_point: None,
             prompt_points: None,
         };
-        let layers = ZonedLayerOpts { field: false, spatial: false, refine_masks: false };
+        let layers = ZonedLayerOpts {
+            field: false, spatial: false, free_masks: false, refine_masks: false,
+        };
 
         let semantic_path = fixture_mask_path("layered-disabled-semantic");
         sky.save(semantic_path.path()).unwrap();
@@ -3196,14 +3227,18 @@ mod tests {
             *value.borrow_mut() = Some((sky.clone(), sky.clone())));
         let disabled = fit_recipe_zoned_inner(
             &source, &target, &seg, &path, &crate::recipe::EditRecipe::default(), None,
-            ZonedLayerOpts { field: false, spatial: false, refine_masks: false },
+            ZonedLayerOpts {
+                field: false, spatial: false, free_masks: false, refine_masks: false,
+            },
         );
         SEGMENT_BOTH_OVERRIDE.with(|value|
             *value.borrow_mut() = Some((sky.clone(), sky)));
         field::FIELD_FORCE_NONE.with(|value| value.set(true));
         let refused = fit_recipe_zoned_inner(
             &source, &target, &seg, &path, &crate::recipe::EditRecipe::default(), None,
-            ZonedLayerOpts { field: true, spatial: false, refine_masks: false },
+            ZonedLayerOpts {
+                field: true, spatial: false, free_masks: false, refine_masks: false,
+            },
         );
         assert_eq!(serde_json::to_vec(&disabled.recipe).unwrap(),
             serde_json::to_vec(&refused.recipe).unwrap());
@@ -3234,12 +3269,14 @@ mod tests {
         field::FIELD_CEILING_OVERRIDE.with(|value| value.set(Some(1e-4)));
         let report = fit_recipe_zoned_inner(
             &source, &target, &seg, &path, &crate::recipe::EditRecipe::default(), None,
-            ZonedLayerOpts { field: true, spatial: true, refine_masks: false },
+            ZonedLayerOpts {
+                field: true, spatial: true, free_masks: true, refine_masks: false,
+            },
         );
         let stop = report.notes.iter().position(|note| note.key == crate::rationale::keys::LOCAL_STOP)
             .unwrap_or_else(|| panic!("missing stop: {}", report.recipe.rationale));
         assert!(report.notes[stop].args.iter().any(|(key, value)|
-            *key == "skipped" && value == "tiles"));
+            *key == "skipped" && value == "tiles, free masks"));
         assert!(report.notes.iter().skip(stop + 1).all(|note| !note.key.starts_with(" Spatial")));
         let finished = report.notes.iter().filter(|note| {
             note.key == crate::rationale::keys::FIT_NOTE_UNREPRESENTED
@@ -3264,7 +3301,9 @@ mod tests {
         let head_path = fixture_mask_path("field-calibration-head");
         let head = fit_recipe_zoned_inner(
             &source, &target, &seg, &head_path, &crate::recipe::EditRecipe::default(), None,
-            ZonedLayerOpts { field: false, spatial: true, refine_masks: true },
+            ZonedLayerOpts {
+                field: false, spatial: true, free_masks: false, refine_masks: true,
+            },
         );
         let path = fixture_mask_path("field-calibration");
         let report = fit_recipe_zoned(&source, &target, &seg, &path);

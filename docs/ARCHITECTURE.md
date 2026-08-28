@@ -92,10 +92,13 @@
 > experimental generative edits, an optional pixel-**heal** retouch mode (§4.7)
 > the deterministic look **reverse-fit** (§4.8) and the local server's refusal
 > model (§4.9).
-> 1017 library + 15 CLI + 145 GUI + 2+2 contract tests are enumerated in the GUI
-> build; the library result is 1006 pass + 11 `#[ignore]`d forensic probes
-> (counts refreshed 2026-08-28 after the local-field analyzer batch: library
-> 991→1017, set diff +26/−0 by name against `10e02bb`, no status change — added,
+> 1034 library + 15 CLI + 145 GUI + 2+2 contract tests are enumerated in the GUI
+> build; the library result is 1023 pass + 11 `#[ignore]`d forensic probes
+> (counts refreshed 2026-08-28 after the B3 free-mask batch: library 1017→1034,
+> set diff +17/−0 by name against `d21304a` = the 17 tests in
+> [`src/fit_zoned/freemask/tests.rs`](../src/fit_zoned/freemask/tests.rs); the
+> local-field batch `d21304a` before it went 991→1017, +26/−0 against `10e02bb`,
+> no status change — added,
 > in [`src/fit_field.rs`](../src/fit_field.rs),
 > `field_splat_is_a_partition_of_unity`, `field_adjoint_matches_forward`,
 > `field_infinite_tikhonov_reproduces_the_global_render`,
@@ -1990,7 +1993,9 @@ generation's single typed sweep note (nodes already attached or refused told
 their story in their own generation); eligible leaf candidates keep a full
 per-node reading, and downstream failures (raster, estimator, boundary) keep
 per-tile notes. The persisted-rationale abuse bound is 16 KiB so this
-disclosure is never what truncation eats.
+disclosure is never what truncation eats; the B3 free-mask stage compacts its
+tentative attachment text before that bound, and typed producer readings stay
+the retained disclosure.
 
 The tile pass reads the pair through `fit::analysis_pair`, so its coverage
 and estimator vectors are congruent by construction (asserted). Caching
@@ -2004,6 +2009,24 @@ raster is capped at a 2048-pixel long edge and persists as an existing
 `MaskGeometry::Bitmap`, `MaskRole::Custom` adjustment. Recipe schema era 1 is
 unchanged. Classic XMP deliberately skips the bitmap and returns the existing
 named bitmap loss; no gradient approximation is emitted.
+
+**Free-form remainder masks (B3, 2026-08-28).** After the quadtree tiles,
+`fit_zoned::freemask` consumes only analysis pixels whose local-field remainder
+still exceeds `SPATIAL_RESIDUAL_MIN` and whose accepted-tile alpha is below
+0.5. Deterministic 4-connected components are sign-pure and ranked by
+`sum(abs(remainder) * LocalField.weight)`. Components below the fallback
+64-pixel footprint floor are refused before any render,
+each must clear the shared 3% source/target evidence gate and
+`structure_divergence < DIVERGENCE_ZONE`, with the two-proposal cap disclosing
+all capped or otherwise refused components. Accepted components use the tile
+upsample/refinement arguments and the exact shared frame/rim gate (`0.0` frame
+regression, `0.012` rim). The B3 battery covers proposal, attachment,
+disclosure, connectivity, cap, layer-off identity, ceiling stop, determinism,
+bitmap recipe/XMP losslessness, neutral corpus disclosure, and p36 honest-
+refusal checks. No live arm attached a free mask: downstream candidates were
+refused by the shared gates. Tentative attachment text is compacted while
+refinement and typed refusals remain; the B3 stage stays below 16 KiB (an
+inherited pre-stage transcript can still reach the exact legacy ceiling).
 
 Mask refinement is a production step, never a post-fit edit
 ([`src/mask_refine.rs`](../src/mask_refine.rs)). A dependency-free local-linear

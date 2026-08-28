@@ -658,6 +658,7 @@ class SetClaim(NamedTuple):
 
 ARCH = "docs/ARCHITECTURE.md"
 README = "README.md"
+TECH = "docs/TECH_STACK.md"
 
 CLAIMS: list[Claim | SetClaim] = [
     Claim(
@@ -763,6 +764,13 @@ CLAIMS: list[Claim | SetClaim] = [
         "latest published version — bug template dropdown",
         r"- v(?P<version>\d+\.\d+\.\d+) \(latest release\)",
         latest_published_version,
+    ),
+    Claim(
+        TECH,
+        "test counts - Tech Stack release battery",
+        r"(?P<lib>\d+) library \((?:\d+ pass \+ )?\d+ `#\[ignore\]`d forensic\s+probes\) / "
+        r"(?P<cli>\d+) CLI / (?P<gui>\d+) GUI / (?P<c1>\d+)\+(?P<c2>\d+) contract",
+        battery_test_counts,
     ),
     Claim(
         README,

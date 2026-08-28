@@ -6,9 +6,9 @@ use super::*;
 
 pub(super) const SPATIAL_MAX_DEPTH: u8 = 2;
 pub(super) const SPATIAL_MAX_ATTACHMENTS: usize = 4;
-const SPATIAL_RESIDUAL_MIN: f32 = 2.0 / 255.0;
-const SPATIAL_FRAME_REGRESSION_TOL: f32 = 0.0;
-const TILE_RASTER_EDGE: u32 = 2048;
+pub(super) const SPATIAL_RESIDUAL_MIN: f32 = 2.0 / 255.0;
+pub(super) const SPATIAL_FRAME_REGRESSION_TOL: f32 = 0.0;
+pub(super) const TILE_RASTER_EDGE: u32 = 2048;
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub(super) struct TileId {
@@ -48,6 +48,37 @@ impl TileReading {
     fn score(&self) -> f32 {
         self.residual.abs() * self.source_share.min(self.target_share)
     }
+}
+
+pub(super) struct ScopedMaskEvidence {
+    pub(super) source_weights: Vec<f32>,
+    pub(super) target_weights: Vec<f32>,
+    pub(super) source_share: f32,
+    pub(super) target_share: f32,
+}
+
+/// Re-aggregate the frozen frame evidence over one analysis-grid mask. Tiles
+/// and free-form components share this exact population ruler.
+pub(super) fn scoped_mask_evidence(
+    target: &[[f32; 3]],
+    evidence: &fit::EvidenceModel,
+    geometry: &[f32],
+) -> ScopedMaskEvidence {
+    let n = (evidence.width as usize * evidence.height as usize)
+        .min(target.len())
+        .min(evidence.source_weights.len())
+        .min(evidence.target_weights.len())
+        .min(geometry.len());
+    let scoped = evidence.scoped(target, &geometry[..n], &geometry[..n]);
+    let mut source_weights = scoped.source_weights;
+    let mut target_weights = scoped.target_weights;
+    source_weights.resize(n, 0.0);
+    target_weights.resize(n, 0.0);
+    let source_share = source_weights.iter().map(|v| *v as f64).sum::<f64>() as f32
+        / n.max(1) as f32;
+    let target_share = target_weights.iter().map(|v| *v as f64).sum::<f64>() as f32
+        / n.max(1) as f32;
+    ScopedMaskEvidence { source_weights, target_weights, source_share, target_share }
 }
 
 fn in_tile(id: TileId, x: u32, y: u32, width: u32, height: u32) -> bool {
@@ -116,16 +147,8 @@ fn read_tile(
     // re-aggregated over the tile's own members, so a mid-tone ground tile
     // keeps the evidence that a replaced sky's identical luma bins withheld
     // frame-wide.
-    let scoped = evidence.scoped(target, &geometry, &geometry);
-    let mut source_weights = scoped.source_weights;
-    let mut target_weights = scoped.target_weights;
-    source_weights.resize(n, 0.0);
-    target_weights.resize(n, 0.0);
-    let source_share = source_weights.iter().map(|v| *v as f64).sum::<f64>() as f32
-        / n.max(1) as f32;
-    let target_share = target_weights.iter().map(|v| *v as f64).sum::<f64>() as f32
-        / n.max(1) as f32;
-    let (residual, ci95) = weighted_residual(current, target, &source_weights);
+    let scoped = scoped_mask_evidence(target, evidence, &geometry);
+    let (residual, ci95) = weighted_residual(current, target, &scoped.source_weights);
     let divergence = fit::structure_divergence(
         &evidence.source_pixels[..n.min(evidence.source_pixels.len())],
         &target[..n],
@@ -135,10 +158,10 @@ fn read_tile(
     );
     TileReading {
         id,
-        source_weights,
-        target_weights,
-        source_share,
-        target_share,
+        source_weights: scoped.source_weights,
+        target_weights: scoped.target_weights,
+        source_share: scoped.source_share,
+        target_share: scoped.target_share,
         residual,
         ci95,
         divergence,
@@ -188,7 +211,7 @@ fn tile_mask(src: &DynamicImage, id: TileId) -> (DynamicImage, GrayImage) {
     (guide, mask)
 }
 
-fn push_refinement_note(
+pub(super) fn push_refinement_note(
     report: &mut FitReport,
     label: &str,
     kept: bool,
@@ -342,23 +365,49 @@ fn boundary_args(
     ]
 }
 
-fn enforce_tile_boundary(
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum BitmapBoundaryWhy {
+    Frame,
+    Rim,
+}
+
+pub(super) struct BitmapBoundaryAccepted {
+    pub(super) pixels: Vec<[f32; 3]>,
+    pub(super) reading: BoundaryReading,
+    pub(super) initial: BoundaryReading,
+    pub(super) k: f32,
+}
+
+#[derive(Debug)]
+pub(super) struct BitmapBoundaryRefusal {
+    pub(super) why: BitmapBoundaryWhy,
+    pub(super) initial: BoundaryReading,
+}
+
+pub(super) struct BitmapBoundaryInput<'a> {
+    pub(super) weights: &'a [f32],
+    pub(super) initial_px: Vec<[f32; 3]>,
+    pub(super) frame_before: f32,
+}
+
+/// One bitmap boundary/composed-frame gate shared by tiles and free masks.
+pub(super) fn enforce_bitmap_boundary(
     s_img: &DynamicImage,
     tgt_px: &[[f32; 3]],
     report: &mut FitReport,
-    first_tile: usize,
-    input: TileBoundaryInput<'_>,
-) -> Option<(Vec<[f32; 3]>, BoundaryReading)> {
+    first_mask: usize,
+    input: BitmapBoundaryInput<'_>,
+) -> Result<BitmapBoundaryAccepted, BitmapBoundaryRefusal> {
     let initial = boundary_rim(
         &input.initial_px,
         input.weights,
         s_img.width(),
         s_img.height(),
     );
-    let original = report.recipe.masks[first_tile].clone();
+    let original = report.recipe.masks[first_mask].clone();
     let render_at = |report: &mut FitReport, k: f32| {
         shrink_zone_corrections(
-            &mut report.recipe.masks[first_tile..=first_tile],
+            &mut report.recipe.masks[first_mask..=first_mask],
             std::slice::from_ref(&original),
             &[1.0],
             k,
@@ -368,7 +417,7 @@ fn enforce_tile_boundary(
         let frame = fit::look_err_with_evidence(&pixels, tgt_px, &report.evidence);
         (reading, pixels, frame)
     };
-    let mut kept = if initial.rim <= ZONE_BOUNDARY_RIM_MAX {
+    let kept = if initial.rim <= ZONE_BOUNDARY_RIM_MAX {
         let frame = fit::look_err_with_evidence(&input.initial_px, tgt_px, &report.evidence);
         Some((1.0, initial, input.initial_px, frame))
     } else {
@@ -391,49 +440,21 @@ fn enforce_tile_boundary(
             Some(best)
         }
     };
-    if kept.as_ref().is_some_and(|(_, _, _, frame)| {
-        *frame > input.frame_before + SPATIAL_FRAME_REGRESSION_TOL
-    }) {
-        kept = None;
+    let Some((k, reading, pixels, frame)) = kept else {
+        report.recipe.masks.truncate(first_mask);
+        return Err(BitmapBoundaryRefusal { why: BitmapBoundaryWhy::Rim, initial });
+    };
+    if frame > input.frame_before + SPATIAL_FRAME_REGRESSION_TOL {
+        report.recipe.masks.truncate(first_mask);
+        return Err(BitmapBoundaryRefusal { why: BitmapBoundaryWhy::Frame, initial });
     }
-    match kept {
-        Some((k, reading, pixels, _)) => {
-            shrink_zone_corrections(
-                &mut report.recipe.masks[first_tile..=first_tile],
-                std::slice::from_ref(&original),
-                &[1.0],
-                k,
-            );
-            crate::rationale::push_note(
-                &mut report.recipe.rationale,
-                &mut report.notes,
-                crate::rationale::Note::new(
-                    crate::rationale::keys::TILE_BOUNDARY_PASSED,
-                    boundary_args(input.id, k, initial, reading),
-                ),
-            );
-            Some((pixels, reading))
-        }
-        None => {
-            report.recipe.masks.truncate(first_tile);
-            crate::rationale::push_note(
-                &mut report.recipe.rationale,
-                &mut report.notes,
-                crate::rationale::Note::new(
-                    crate::rationale::keys::TILE_BOUNDARY_REFUSED,
-                    boundary_args(input.id, 0.0, initial, initial),
-                ),
-            );
-            None
-        }
-    }
-}
-
-struct TileBoundaryInput<'a> {
-    weights: &'a [f32],
-    initial_px: Vec<[f32; 3]>,
-    frame_before: f32,
-    id: TileId,
+    shrink_zone_corrections(
+        &mut report.recipe.masks[first_mask..=first_mask],
+        std::slice::from_ref(&original),
+        &[1.0],
+        k,
+    );
+    Ok(BitmapBoundaryAccepted { pixels, reading, initial, k })
 }
 
 pub(super) fn attach_tiles(
@@ -443,7 +464,7 @@ pub(super) fn attach_tiles(
     raster_home: &crate::store::OwnedRaster,
     refine: bool,
     cap: usize,
-) {
+) -> Vec<f32> {
     // One analysis geometry for both rasters (`fit::analysis_pair`), so the
     // coverage and estimator vectors below are congruent by construction —
     // the two asserts pin that contract.
@@ -452,6 +473,7 @@ pub(super) fn attach_tiles(
     let mut attached = BTreeSet::new();
     let mut refused = BTreeSet::new();
     let mut generation = 0usize;
+    let mut excluded = vec![0.0f32; report.evidence.source_weights.len()];
     let corr = report.correspondence.take();
     while attached.len() < cap {
         let current = fit::pixels_of(&render::develop_preview(&s_img, &report.recipe));
@@ -577,6 +599,7 @@ pub(super) fn attach_tiles(
         };
         assert_eq!(coverage.source.len(), reading.source_weights.len());
         assert_eq!(coverage.target.len(), reading.target_weights.len());
+        let accepted_coverage = coverage.source.clone();
         let (source_weights, target_weights) = if refined {
             let source = coverage
                 .source
@@ -620,26 +643,50 @@ pub(super) fn attach_tiles(
             refused.insert(reading.id);
             continue;
         };
-        let boundary = enforce_tile_boundary(
+        let boundary = enforce_bitmap_boundary(
             &s_img,
             &tgt_px,
             report,
             first_tile,
-            TileBoundaryInput {
+            BitmapBoundaryInput {
                 weights: &attachment.source_weights,
                 initial_px: accepted.rendered,
                 frame_before,
-                id: reading.id,
             },
         );
-        let Some((pixels, boundary)) = boundary else {
-            owned.remove();
-            refused.insert(reading.id);
-            continue;
+        let boundary = match boundary {
+            Ok(boundary) => {
+                crate::rationale::push_note(
+                    &mut report.recipe.rationale,
+                    &mut report.notes,
+                    crate::rationale::Note::new(
+                        crate::rationale::keys::TILE_BOUNDARY_PASSED,
+                        boundary_args(reading.id, boundary.k, boundary.initial, boundary.reading),
+                    ),
+                );
+                boundary
+            }
+            Err(refusal) => {
+                crate::rationale::push_note(
+                    &mut report.recipe.rationale,
+                    &mut report.notes,
+                    crate::rationale::Note::new(
+                        crate::rationale::keys::TILE_BOUNDARY_REFUSED,
+                        boundary_args(reading.id, 0.0, refusal.initial, refusal.initial),
+                    ),
+                );
+                owned.remove();
+                refused.insert(reading.id);
+                continue;
+            }
         };
         let target_moments = zone_moments(&tgt_px, &attachment.target_weights);
-        accepted.after = zone_err(&zone_moments(&pixels, &attachment.source_weights), &target_moments);
-        let frame_after = fit::look_err_with_evidence(&pixels, &tgt_px, &report.evidence);
+        accepted.after = zone_err(
+            &zone_moments(&boundary.pixels, &attachment.source_weights),
+            &target_moments,
+        );
+        let frame_after =
+            fit::look_err_with_evidence(&boundary.pixels, &tgt_px, &report.evidence);
         report.err_after = frame_after;
         crate::rationale::push_note(
             &mut report.recipe.rationale,
@@ -652,11 +699,14 @@ pub(super) fn attach_tiles(
                     ("after", format!("{:.5}", accepted.after)),
                     ("frame_before", format!("{frame_before:.5}")),
                     ("frame_after", format!("{frame_after:.5}")),
-                    ("boundary", format!("{:.5}", boundary.rim)),
+                    ("boundary", format!("{:.5}", boundary.reading.rim)),
                 ],
             ),
         );
         let _path = owned.into_path();
+        for (dst, alpha) in excluded.iter_mut().zip(accepted_coverage) {
+            *dst = dst.max(alpha);
+        }
         attached.insert(reading.id);
         generation += 1;
     }
@@ -676,6 +726,7 @@ pub(super) fn attach_tiles(
     let final_px = fit::pixels_of(&render::develop_preview(&s_img, &report.recipe));
     report.err_after = fit::look_err_with_evidence(&final_px, &tgt_px, &report.evidence);
     fit::append_finished_disclosure(report, &final_px, &tgt_px);
+    excluded
 }
 
 #[cfg(test)]
@@ -1180,19 +1231,18 @@ mod tests {
 
         let (source, target, mut report, path, weights, candidate) =
             boundary_fixture(0.01, true, "tile-boundary-budget");
-        let result = enforce_tile_boundary(
+        let result = enforce_bitmap_boundary(
             &source,
             &target,
             &mut report,
             0,
-            TileBoundaryInput {
+            BitmapBoundaryInput {
                 weights: &weights,
                 initial_px: candidate,
                 frame_before: 0.0,
-                id: TileId { depth: 2, row: 2, col: 0 },
             },
         );
-        let (_, reading) = result.expect("a matching, low-rim tile must pass");
+        let reading = result.expect("a matching, low-rim tile must pass").reading;
         assert!(reading.rim <= ZONE_BOUNDARY_RIM_MAX, "{reading:?}");
         path.remove();
     }
@@ -1201,19 +1251,18 @@ mod tests {
     fn refined_mask_is_rechecked_by_rim_and_frame_gates() {
         let (source, target, mut report, path, weights, candidate) =
             boundary_fixture(0.25, false, "tile-refined-recheck");
-        let result = enforce_tile_boundary(
+        let result = enforce_bitmap_boundary(
             &source,
             &target,
             &mut report,
             0,
-            TileBoundaryInput {
+            BitmapBoundaryInput {
                 weights: &weights,
                 initial_px: candidate,
                 frame_before: 0.0,
-                id: TileId { depth: 2, row: 2, col: 0 },
             },
         );
-        assert!(result.is_none(), "a refined alpha cannot bypass composed-frame arbitration");
+        assert!(result.is_err(), "a refined alpha cannot bypass composed-frame arbitration");
         assert!(report.recipe.masks.is_empty(), "the refused correction must be removed");
         path.remove();
     }

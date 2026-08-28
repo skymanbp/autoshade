@@ -188,6 +188,15 @@ zero tolerance. Tiles are ordinary editable engine bitmap masks; recipe JSON
 keeps them losslessly and classic XMP omits each with a named bitmap-mask
 loss rather than inventing an approximate rectangle.
 
+After the tiles, a **free-form remainder pass** reads what the local field
+still owes: 4-connected, sign-pure components of the remaining residual
+(pixels already covered by an accepted tile are excluded), ranked by mass, at
+most two, each through the same evidence, divergence, frame and rim gates as a
+tile, and every proposal, attachment or typed refusal is written into the
+rationale. Accepted masks are ordinary bitmap masks with the same recipe/XMP
+semantics as tiles. On the calibration corpus every proposal was refused
+downstream, so today the pass contributes disclosure, not corrections.
+
 ### 7. A bilateral-grid local field prices every local producer first
 
 Before any local producer runs, a read-only **12×8×8 bilateral grid**
@@ -247,9 +256,6 @@ disguised as a Lightroom adjustment.
 
 Written down in the plan and the design memos, in delivery order:
 
-- **Free-form remainder masks** — the analyzer's fourth producer draws
-  bitmap masks where its remainder says a spatially varying develop is still
-  owed, through the same gates as the tiles (in implementation).
 - **Multi-region semantic calibration** — one OneFormer pass, up to four
   disjoint class regions each choosing Full or Atmosphere on its own,
   confidence taken from the worst accepted region; colour-range regions
@@ -339,7 +345,7 @@ estimate. Sources are the pinned claims in
 
 | What | Measured | Where |
 |---|---|---|
-| Automated test battery | 1017 library / 15 CLI / 145 GUI / 2+2 contract tests; `check_docs` re-derives the pinned release claims | [Tech stack](#tech-stack-algorithms-and-design-philosophy) |
+| Automated test battery | 1034 library / 15 CLI / 145 GUI / 2+2 contract tests; `check_docs` re-derives the pinned release claims | [Tech stack](#tech-stack-algorithms-and-design-philosophy) |
 | RAW coverage | 24 extensions, 725 camera bodies; nine-camera format zoo 9/9 at the last release gate | [Supported formats](#supported-formats) |
 | Lightroom Texture parity | 45 of 45 period/depth anchors within ±0.02 | [Develop pipeline](#develop-pipeline-and-tone-model) |
 | Radial mask closure | 41 of 41 measured vectors within ≤1 px | [Lens correction](#lens-correction-and-lightroom-mask-frame-laws) |
@@ -611,7 +617,7 @@ versions, and a deleted-version registry; SCUNet success requires the typed
 `sidecar_wrote` contract. A 1771 MB reference probe sets the 1800 MB per-photo
 budget, while the 4 GiB RAW gate bounds admission. The [`build`
 workflow](.github/workflows/build.yml) covers default and GUI feature sets on
-Ubuntu and macOS. The current battery is **1017 library (1006 pass + 11 `#[ignore]`d forensic probes) / 15 CLI / 145 GUI / 2+2 contract** tests; the
+Ubuntu and macOS. The current battery is **1034 library (1023 pass + 11 `#[ignore]`d forensic probes) / 15 CLI / 145 GUI / 2+2 contract** tests; the
 [`scripts/check_docs.py`](scripts/check_docs.py) gate re-derives pinned release
 claims. Model weights are not stored in this repository.
 

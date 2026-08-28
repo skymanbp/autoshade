@@ -112,6 +112,13 @@ four tiles to two, and the quadtree stops at a 4x4 grid and that cap.
 Luminance ranges are never spatially refined. There is no additional switch
 and no multi-class semantic segmentation in this release.
 
+The free-form field-mask pass then consumes only the remainder not already
+covered by accepted tiles. It uses the field's frozen per-pixel weight, keeps
+opposite signs in separate 4-connected components, and discloses every
+proposal and typed refusal before or after fitting; the layer is enabled with
+the field by default and is disabled whenever the field layer is disabled; there
+is no separate user-facing switch.
+
 ## 5. Export
 
 Open Export with the toolbar, `Ctrl+Shift+E`, or `Ctrl+E`. Choose JPEG, 8- or
