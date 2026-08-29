@@ -1685,6 +1685,26 @@ nearest past photo as a second `input_image` on the propose call — the prompt
 names the two frames by position, `store:false` covers both, and the extra image
 is disclosed in the tooltip and in the rationale.
 
+**S1 continuation: text and finished-look retrieval.** The RAW index remains
+the v5, 14-dimensional EXIF/histogram retrieval and now may carry additive
+SigLIP 2 image vectors, Direction text vectors, zero-shot vocabulary scores,
+bounded tags, and an optional description vector. Its distance is
+`d14 + W_EMB(1-cos(q_img,e_img)) + W_TXT(1-cos(q_txt,e_img)) + W_DESC(1-cos(q_txt,e_desc))`;
+missing or width-mismatched vectors contribute zero, and zero weights preserve
+the v5 order bit for bit. The vocabulary is a versioned, grouped list of 33
+SigLIP-style photographic phrases; at most one winning phrase per group enters
+the four-tag summary.
+
+Finished baked photos are stored in a separate look-library block with their
+own source directory and no camera features or develop settings. Look retrieval
+uses image/text/description cosine terms only, with `W_LOOK=1.0`; it can guide
+the proposer and optionally supply the reference image, but it never reaches
+`style_targets` or `blend_toward`. With embedding disabled or no query vector,
+the look answer is unreachable and the rationale states that fact. Direction
+adherence is an independent Hint/Direct/Brief prompt tier using the same band
+edges as Strength; the default Direct tier preserves the historical direction
+block byte for byte, while the verifier is told the selected tier.
+
 ### 4.7 Pixel retouch / heal (optional) — V2
 
 A third, opt-in editing mode (`autoshop heal`, or the UI's **修图 · 去瑕疵** panel),

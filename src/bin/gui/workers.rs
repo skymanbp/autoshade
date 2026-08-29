@@ -1879,6 +1879,13 @@ impl AutoshopApp {
                 self.style_src_dir = Some(dir);
                 self.start_style_info();
             }
+            StyleBuildOutcome::LooksSaved { total, dir } => {
+                let t = trf(lang, "Look library built: {n} finished photos from {path}", &[("n", &total.to_string()), ("path", &abs_display(&dir))]);
+                self.status = t.clone();
+                self.toast(ToastKind::Success, t);
+                self.looks_src_dir = Some(dir);
+                self.start_style_info();
+            }
             // The shared guard's refusal, in the shared WORDING (serve.rs says
             // the same thing to the web): the folder, why it yielded nothing,
             // where to point instead, and that the old library still stands.

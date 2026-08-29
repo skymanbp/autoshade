@@ -846,10 +846,33 @@ the structured proposal, not photo pixels—and all Responses requests set
 is adopted only when its rescore is at least the original score.
 
 Style retrieval indexes RAW+XMP exemplars, extracts normalized photographic
-features, z-scores the varying dimensions, and optionally adds a SigLIP 2
-cosine block. The distance is
-`sum_i w_i(q_i−e_i)^2 + W_EMB(1−cos(q_emb,e_emb))`; missing embeddings or
-`W_EMB=0` reproduce the feature-only ranking exactly.
+features, z-scores the varying dimensions, and optionally adds SigLIP 2 image,
+Direction-text, and description-text cosine blocks. The distance is
+`d14 + W_EMB(1−cos(q_img,e_img)) + W_TXT(1−cos(q_txt,e_img)) + W_DESC(1−cos(q_txt,e_desc))`;
+missing or width-mismatched vectors contribute zero and zero weights reproduce
+the feature-only ranking exactly. A separate look-library block uses the image,
+text, and description terms with `W_LOOK=1.0` and never supplies style targets.
+
+#### SigLIP 2 text tower and look metadata
+
+The local sidecar uses the same pinned `google/siglip2-base-patch16-384`
+revision `f775b65a79762255128c981547af89addcfe0f88` for both modalities. Text
+is tokenized with `padding="max_length"`, `max_length=64`, lower-casing enabled,
+`<unk>`, `<pad>`, `<eos>`, and `<bos>` special tokens, and the pinned additional
+`<start_of_turn>`/`<end_of_turn>` tokens; the sidecar sets `add_bos_token=false`
+and `add_eos_token=true`. It loads local files only and disallows remote code.
+
+| Tokenizer file | Bytes | SHA-256 |
+|---|---:|---|
+| `tokenizer.json` | 34,363,039 | `cb9140fae3ac5122c972d37adf83e1248471a38147ad76f8215c8872c6fd8322` |
+| `tokenizer.model` | 4,241,003 | `61a7b147390c64585d6c3543dd6fc636906c9af3865a5548f27f31aee1d4c8e2` |
+| `tokenizer_config.json` | 47,164 | `14afe629fe4959b9e0d51e1852b8d9f7ad074f90a1a7125a4fcdd17f06e78fc8` |
+| `special_tokens_map.json` | 636 | `baec30ea10906f16adb8c18af7a34023002c1746542612b8b41c9f09e1351351` |
+
+Look tags are the top four zero-shot SigLIP captions after a per-group
+argmax over the versioned 33-phrase vocabulary in `src/style.rs`; changing a
+phrase changes every stored score. The bounded `desc` field is reserved for the
+future local description sidecar, with its text vector retained separately.
 
 `match` is inverse rendering rather than pixel copying: it aligns luminance
 CDFs, searches exposure, solves a regularized basis of engine controls, adds a
@@ -906,8 +929,9 @@ and zero-confidence fields are conservation-tested to change nothing.
   (**designed do-no-harm rule**).
 - Style features: 14 dimensions in the persisted normalization block, with
   only dimensions having useful variance z-scored (**designed representation**).
-- SigLIP 2: 768-dimensional optional vectors; `W_EMB = 2.0`
-  (**designed default retained after calibration**).
+- SigLIP 2: 768-dimensional image and text vectors; the corpus harness ships
+  `W_EMB = 4`, `W_TXT = 0`, and `W_DESC = 0`, while `W_LOOK = 1.0` is the
+  look-library default (**calibration-controlled**).
 - Foreign-hue veto: distance `>=45 deg` and newly painted share `>=5%`
   (**calibrated against known cast failures and haze controls**).
 - Reimagine flexible-size budget: dimensions are multiples of 16, aspect ratio
@@ -928,11 +952,16 @@ and zero-confidence fields are conservation-tested to change nothing.
 
 ### Measured results & disclosures
 
-- SigLIP calibration covered `147/147` local 768-D embeddings and scanned
-  `W_EMB = 0/0.5/1/2/4/8`. Overall settings MAE was nearly flat
-  (`0.7368` at 0, `0.7351` best at 8; bootstrap interval
-  `[−0.018,+0.019]`), while curve-habit rank improved `3.44 -> 2.98` at 8.
-  The evidence did not justify retuning the designed default away from `2.0`.
+- The deterministic harness self-test covers `10` synthetic exemplars and
+  `10` leave-one-out queries. Its baseline `(W_EMB,W_TXT,W_DESC)=(0,0,0)` and
+  best grid point both have pooled z-scored settings MAE `0.261116` (no
+  synthetic evidence for a nonzero term).
+- The corpus harness covers `169` exemplars and `156` settings-bearing queries.
+  Baseline MAE is `0.713143`; the best grid point is `(4,0,0)` with MAE
+  `0.695233`, improvement `+0.017910`, and paired bootstrap 95% CI
+  `[+0.006478,+0.034376]`. Text and description terms remain zero because
+  their grid values did not beat baseline with a positive CI. The text query
+  is a documented SHA-256 proxy, not a replacement for a SigLIP text-tower run.
 - The foreign-hue gate is intentionally categorical: a cast that improves an
   aggregate RGB error can still be rejected if it paints a target-absent hue.
 - A streamed `2048x1360` size refusal is attributed to `size` and can negotiate
@@ -952,6 +981,11 @@ and zero-confidence fields are conservation-tested to change nothing.
   (2026-08-26: anonymous 401, authenticated 404); the pinned community
   mirror's fp32 tower digests are byte-identical to an independent
   uploader's, and the sha256 gate is the only door at run time.
+- The S1 calibration implementation is the stdlib-only
+  `scripts/calibrate_style_retrieval.py`; it uses sorted inputs, fixed seeds,
+  `K=4`, and `2,000` paired bootstrap resamples. The synthetic self-test above
+  is the evidence available in this worktree; the corpus run is recorded in
+  `target/style-s1/` when the local sidecar/index build completes.
 - Live zoned A/B on the calibration pair (field on vs unavailable): the recipes' dials are byte-identical (this pair's land-zone corrections are evidence-withheld either way, upstream of where the field composes; only the disclosure differs — field on carries the measured 59% / 0.80 line, field off the unavailable note). Zero regression on the flagship pair; the mechanism's gain is pinned at estimator level by the shift-recovery test (24 px shift, map error < 0.03).
   The correspondence disclosure line carries coverage and median confidence
   either way the run went.
@@ -1014,8 +1048,8 @@ than the pre-call state; model weights remain outside the repository.
   (**measured memory bound**).
 - Batch per-photo budget: 1,800 MB (**rounded designed budget from a measured
   1,771 MB high-water mark**).
-- Style index: 5,000 exemplars, 16 KiB each, 96 MiB file cap
-  (**designed mutually checked bounds**).
+- Style index: 5,000 exemplars, 40 KiB maximal record, 228 MiB file cap
+  (**two-vector S1 bounds checked at compile time and in a serialization test**).
 
 ### Measured results & disclosures
 

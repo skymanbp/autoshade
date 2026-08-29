@@ -500,6 +500,10 @@ pub mod keys {
     pub const STYLE_REF_IMAGE_FAILED: &str =
         " [the reference photo could not be prepared ({e}) — this develop used the text \
          reference only]";
+    pub const STYLE_LOOK_REFERENCE: &str = " [look reference: finished photo {stem} from the photographer's look library; tags: {tags}]";
+    pub const STYLE_LOOK_IMAGE: &str = " [finished look photo {stem} also went to the vision model as IMAGE 2]";
+    pub const STYLE_LOOKS_UNREACHABLE: &str = " [look library unavailable for this develop ({n} finished photos): style embedding was off or no query vector was produced]";
+    pub const ADVISOR_NOTE_DIRECTION_ADHERENCE: &str = " [direction adherence tier: {tier}]";
     pub const MASKS_NOT_PRESERVED: &str =
         "\n⚠ the response did not preserve mask identities (a mask was renamed or \
          duplicated) — your masks were kept unchanged and the model's mask edits were \

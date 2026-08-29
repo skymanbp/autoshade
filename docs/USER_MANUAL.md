@@ -156,13 +156,15 @@ The following commands and flags match the v1.0.0 command definitions in
 
 ```text
 autoshop decode <src> [-o|--out FILE]
-autoshop analyze <src> [-o|--out FILE] [--guidance TEXT] [--style 0..1] [--strength 0..1] [--deep]
+autoshop analyze <src> [-o|--out FILE] [--guidance TEXT] [--style 0..1] [--strength 0..1] [--adherence 0..1] [--embed|--no-embed] [--deep]
 autoshop apply <src> <recipe.json> (-o|--out) FILE [--long-edge N]
-autoshop auto <src> [-o|--out FILE] [--guidance TEXT] [--style 0..1] [--strength 0..1] [--deep] [--denoise] [--denoise-strength 0..1] [--denoise-model NAME] [--long-edge N]
+autoshop auto <src> [-o|--out FILE] [--guidance TEXT] [--style 0..1] [--strength 0..1] [--adherence 0..1] [--embed|--no-embed] [--deep] [--denoise] [--denoise-strength 0..1] [--denoise-model NAME] [--long-edge N]
 autoshop denoise <src> [-o|--out FILE] [--strength 0..1] [--model NAME]
 autoshop batch <dir> [--render] [--limit N] [--include-baked] [--jobs N] [--long-edge N]
 autoshop eval <dir> [--limit N] [--jobs N] [--fresh] [--state FILE]
-autoshop style-index <dir>
+autoshop style-index <dir> [--embed|--no-embed]
+autoshop style-index --looks <dir> [--embed|--no-embed]
+autoshop style-query <photo> [--direction TEXT] [--style 0..1] [--embed]
 autoshop reimagine <src> --prompt TEXT [--fidelity high|low] [--quality low|medium|high|auto] [--fidelity-retry] [-o|--out FILE]
 autoshop match <src> <target> [--render] [--zoned] [--regions 2..4] [--style-prompt] [--ai-judge] [--deep] [-o|--out FILE]
 autoshop correspond <source> <target> [-o|--out FILE]
@@ -179,6 +181,14 @@ is set (avoiding duplicate analysis and billing for RAW+JPEG pairs), and
 defaults to three photos in flight; `--long-edge` on `batch` requires
 `--render`. `eval` defaults to serial work and resumes from its state file.
 Denoise-strength/model overrides require `--denoise` on `auto`.
+
+`style-index --looks` builds the separate finished-photo look library; it never
+adds camera features or develop settings to those records. `style-query` is an
+offline diagnostic that prints the exact retrieval terms and proposer reference
+blocks, including the explicit reason a look library is unreachable when no
+embedding vector is available. `--embed` opts into the local SigLIP 2 sidecar;
+the environment switch remains available for automation and the GUI preference
+controls the same effective setting.
 
 `match` itself is local inverse rendering and needs no key. Its optional
 `--ai-judge` and `--deep` review paths do; `--deep` permits one guided retry.
@@ -221,11 +231,14 @@ cannot become a credential or path override.
   checks the proposal, and normal visual review may attempt one revision;
   `--deep` permits additional bounded rounds. Accepted output remains a normal
   recipe and XMP.
-- **Style match/read:** build the style reference library from Lightroom
-  RAW+XMP pairs with the GUI or `style-index`. The Style control retrieves
-  similar prior edits and applies their settings with `style_pull` (0.18 at
-  the shipped Style 0.3, full at Style 1.0); Strength independently controls
-  the fit budget and confidence cap.
+- **Style match/read:** build the RAW+XMP style reference library with the GUI
+  or `style-index`, and optionally build a separate finished-photo look library
+  with `style-index --looks`. The Style control retrieves similar prior edits
+  and applies their settings with `style_pull` (0.18 at the shipped Style 0.3,
+  full at Style 1.0); look records guide the proposer only. The embedding switch
+  is opt-in and reports how many indexed records carry vectors. Strength
+  independently controls the fit budget and confidence cap; Direction adherence
+  chooses Hint, Direct, or Brief wording when a Direction is present.
 - **Reimagine:** enter a prompt in the AI panel or use `reimagine` to create a
   generated, lower-resolution target. `--fidelity high` (the default, and the
   GUI's mode) tells the model to re-develop the same photograph, not repaint

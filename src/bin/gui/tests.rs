@@ -6290,6 +6290,8 @@
             send_reference_image: app.send_style_ref_image,
             strength: autoshop::recipe::GradeStrength::new(app.grade_strength),
             think: app.deep_think,
+            adherence: autoshop::recipe::DirectionAdherence::default(),
+            use_looks: true,
         };
         assert_eq!(req.strength.get(), 0.9);
         assert_eq!(req.style, 0.2);
@@ -7188,6 +7190,8 @@
             send_reference_image: app.send_style_ref_image,
             strength: autoshop::recipe::GradeStrength::new(app.grade_strength),
             think: app.deep_think,
+            adherence: autoshop::recipe::DirectionAdherence::default(),
+            use_looks: true,
         };
         assert!(req.send_reference_image);
         assert!(
@@ -7230,6 +7234,8 @@
             send_reference_image: app.send_style_ref_image,
             strength: autoshop::recipe::GradeStrength::new(app.grade_strength),
             think: app.deep_think,
+            adherence: autoshop::recipe::DirectionAdherence::default(),
+            use_looks: true,
         };
         assert!(req.think, "the checkbox must reach the worker's request");
         assert!(
@@ -7634,4 +7640,30 @@
             !silent.toasts.iter().any(|t| matches!(t.kind, ToastKind::Error)),
             "unknown is not a fallback"
         );
+    }
+
+    #[test]
+    fn gui_adherence_slider_is_disabled_without_a_direction() {
+        let app = AutoshopApp::default();
+        assert!(app.guidance.trim().is_empty());
+        assert_eq!(app.direction_adherence, autoshop::recipe::DirectionAdherence::DEFAULT);
+        // The panel gates the slider on this same condition; a blank direction
+        // must never expose a control that changes an otherwise inert prompt.
+    }
+
+    #[test]
+    fn gui_prefs_round_trip_the_three_new_keys() {
+        let prefs = Prefs {
+            style_embed: true,
+            looks_src_dir: Some(std::path::PathBuf::from("D:/looks")),
+            use_looks: false,
+            direction_adherence: 0.91,
+            ..Prefs::default()
+        };
+        let json = serde_json::to_string(&prefs).expect("prefs serialize");
+        let decoded: Prefs = serde_json::from_str(&json).expect("prefs deserialize");
+        assert!(decoded.style_embed);
+        assert_eq!(decoded.looks_src_dir, prefs.looks_src_dir);
+        assert!(!decoded.use_looks);
+        assert!((decoded.direction_adherence - 0.91).abs() < 1e-6);
     }

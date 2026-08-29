@@ -104,6 +104,13 @@ MODEL = {
             "sha256": "fb2817d3523ca3b666c859f15320c7138416bc38ffc515e2963f78c868c51c90",
             "bytes": 394,
         },
+        "tokenizer.json": {"sha256": "cb9140fae3ac5122c972d37adf83e1248471a38147ad76f8215c8872c6fd8322", "bytes": 34363039},
+        "tokenizer.model": {"sha256": "61a7b147390c64585d6c3543dd6fc636906c9af3865a5548f27f31aee1d4c8e2", "bytes": 4241003},
+        # These two JSON files are ordinary Git blobs at the pinned revision
+        # (not Xet objects). Their digests are kept here with the byte counts
+        # so a cache filled from another revision cannot pass the gate.
+        "tokenizer_config.json": {"sha256": "14afe629fe4959b9e0d51e1852b8d9f7ad074f90a1a7125a4fcdd17f06e78fc8", "bytes": 47164},
+        "special_tokens_map.json": {"sha256": "baec30ea10906f16adb8c18af7a34023002c1746542612b8b41c9f09e1351351", "bytes": 636},
     },
 }
 
@@ -113,6 +120,31 @@ EXPECT_SIZE = 384
 EXPECT_RESAMPLE = 2
 EXPECT_MEAN = [0.5, 0.5, 0.5]
 EXPECT_STD = [0.5, 0.5, 0.5]
+TEXT_PADDING = "max_length"
+TEXT_MAX_LENGTH = 64
+TEXT_DO_LOWER_CASE = True
+# Named contract: the tokenizer must reproduce the checkpoint's training-time
+# text path. Keeping this beside EXPECT_SIZE makes a pin change fail loudly
+# instead of quietly changing every text cosine in an existing index.
+TEXT_TOKENIZER_CONTRACT = {
+    "padding": TEXT_PADDING,
+    "max_length": TEXT_MAX_LENGTH,
+    "do_lower_case": TEXT_DO_LOWER_CASE,
+    "unk_token": "<unk>",
+    "pad_token": "<pad>",
+    "eos_token": "<eos>",
+    "bos_token": "<bos>",
+    "additional_special_tokens": ("<start_of_turn>", "<end_of_turn>"),
+    "add_bos_token": False,
+    "add_eos_token": True,
+}
+TEXT_SPECIAL_TOKENS = (
+    TEXT_TOKENIZER_CONTRACT["unk_token"],
+    TEXT_TOKENIZER_CONTRACT["pad_token"],
+    TEXT_TOKENIZER_CONTRACT["eos_token"],
+    TEXT_TOKENIZER_CONTRACT["bos_token"],
+    *TEXT_TOKENIZER_CONTRACT["additional_special_tokens"],
+)
 
 
 def model_dir(cache_dir):
@@ -141,6 +173,40 @@ def fetch_model(cache_dir):
             f"the SigLIP 2 '{name}'",
         )
     return d
+
+
+def _tokenizer_config_problems(cfg):
+    problems = []
+    # SigLIP2's tokenizer metadata uses the Transformers sentinel for an
+    # effectively unbounded tokenizer, while the model itself is trained for
+    # 64 positions. The sidecar therefore pins max_length=64 explicitly and
+    # only requires the metadata not to advertise a smaller context.
+    try:
+        model_max_length = int(cfg.get("model_max_length"))
+    except (TypeError, ValueError):
+        model_max_length = 0
+    if model_max_length < TEXT_MAX_LENGTH:
+        problems.append(f"model_max_length {cfg.get('model_max_length')} is below {TEXT_MAX_LENGTH}")
+    if cfg.get("do_lower_case", TEXT_DO_LOWER_CASE) is not TEXT_DO_LOWER_CASE:
+        problems.append("do_lower_case disagrees")
+    for key in ("unk_token", "pad_token", "eos_token", "bos_token"):
+        expected = TEXT_TOKENIZER_CONTRACT[key]
+        if cfg.get(key) != expected:
+            problems.append(f"{key} {cfg.get(key)!r} != {expected!r}")
+    if tuple(cfg.get("additional_special_tokens", ())) != TEXT_TOKENIZER_CONTRACT["additional_special_tokens"]:
+        problems.append("additional_special_tokens disagrees")
+    for key in ("add_bos_token", "add_eos_token"):
+        if cfg.get(key) is not TEXT_TOKENIZER_CONTRACT[key]:
+            problems.append(f"{key} disagrees")
+    return problems
+
+
+def _check_tokenizer_config(d):
+    with open(os.path.join(d, "tokenizer_config.json"), encoding="utf-8") as f:
+        cfg = json.load(f)
+    problems = _tokenizer_config_problems(cfg)
+    if problems:
+        raise SystemExit("refusing to embed text: pinned tokenizer config disagrees (" + "; ".join(problems) + ")")
 
 
 def _check_preprocessing(d):
@@ -187,6 +253,7 @@ def load_model(cache_dir, device, fp16):
         )
     d = fetch_model(cache_dir)
     _check_preprocessing(d)
+    _check_tokenizer_config(d)
     # Determinism knobs BEFORE the load, same reasoning as segment.py: an
     # embedding becomes a number in a saved index that ranks the user's
     # library, so cuDNN autotuning and TF32 picking different kernels run to
@@ -205,6 +272,93 @@ def load_model(cache_dir, device, fp16):
         model.half()
     model.to(device)
     return model
+
+
+def load_tokenizer(d):
+    from transformers import AutoTokenizer
+    # `local_files_only` is the only loading door; AutoTokenizer's default is
+    # to refuse remote code, and the source-level gate below forbids opting in.
+    try:
+        return AutoTokenizer.from_pretrained(d, local_files_only=True)
+    except (AttributeError, ImportError, OSError) as error:
+        # Transformers 5.2 can lack the SigLIP mapping (and the slow tokenizer
+        # needs sentencepiece, which is intentionally optional here). The
+        # pinned tokenizer.json is itself a complete tokenizers graph, so use
+        # its local fast backend with the same explicit 64-token contract.
+        log(f"AutoTokenizer unavailable ({type(error).__name__}); using pinned tokenizer.json")
+        return PinnedFastTokenizer(d)
+
+
+class PinnedFastTokenizer:
+    """Minimal tokenizer.json adapter for environments without sentencepiece."""
+
+    def __init__(self, directory):
+        from tokenizers import Tokenizer
+
+        self._tokenizer = Tokenizer.from_file(os.path.join(directory, "tokenizer.json"))
+        pad_id = self._tokenizer.token_to_id(TEXT_TOKENIZER_CONTRACT["pad_token"])
+        if pad_id is None:
+            raise RuntimeError("pinned tokenizer has no <pad> token")
+        self._tokenizer.enable_truncation(max_length=TEXT_MAX_LENGTH)
+        self._tokenizer.enable_padding(
+            length=TEXT_MAX_LENGTH,
+            pad_id=pad_id,
+            pad_token=TEXT_TOKENIZER_CONTRACT["pad_token"],
+        )
+
+    def __call__(self, texts, padding, max_length, truncation, return_tensors):
+        if padding != TEXT_PADDING or max_length != TEXT_MAX_LENGTH or not truncation:
+            raise ValueError("pinned tokenizer only supports max_length padding at 64 tokens")
+        if return_tensors != "pt":
+            raise ValueError("pinned tokenizer adapter only returns PyTorch tensors")
+        import torch
+
+        encoded = self._tokenizer.encode_batch(list(texts))
+        return {
+            "input_ids": torch.tensor([item.ids for item in encoded], dtype=torch.long),
+            "attention_mask": torch.tensor([item.attention_mask for item in encoded], dtype=torch.long),
+        }
+
+
+def self_test(cache_dir):
+    """Check the cheap, pinned parts without importing torch/transformers.
+
+    The model itself is intentionally optional in CI and on a fresh install;
+    the test reports a clean skip in that case. If the cache exists, all files
+    must be present at their exact pinned sizes and the tokenizer JSON must
+    agree with the text contract above.
+    """
+    import re
+
+    if TEXT_PADDING != "max_length" or TEXT_MAX_LENGTH != 64:
+        raise SystemExit(
+            "text_tower_padding_rule_is_the_pinned_one: sidecar must use "
+            'padding="max_length" and max_length=64'
+        )
+
+    for name, pin in MODEL["files"].items():
+        digest = pin.get("sha256", "")
+        if not re.fullmatch(r"[0-9a-f]{64}", digest):
+            raise SystemExit(f"tokenizer_files_are_pinned_by_digest: {name} has no 64-hex sha256")
+        if not isinstance(pin.get("bytes"), int) or pin["bytes"] <= 0:
+            raise SystemExit(f"tokenizer_files_are_pinned_by_digest: {name} has no byte count")
+    d = model_dir(cache_dir)
+    missing = [name for name in MODEL["files"] if not os.path.exists(os.path.join(d, name))]
+    if missing:
+        print("text_tower_padding_rule_is_the_pinned_one: SKIP (SigLIP 2 cache is absent)")
+        print("tokenizer_files_are_pinned_by_digest: PASS (all pins are 64-hex with byte counts)")
+        return
+    for name, pin in MODEL["files"].items():
+        path = os.path.join(d, name)
+        size = os.path.getsize(path)
+        if size != pin["bytes"]:
+            raise SystemExit(f"tokenizer_files_are_pinned_by_digest: {name} is {size} bytes, expected {pin['bytes']}")
+    with open(os.path.join(d, "tokenizer_config.json"), encoding="utf-8") as f:
+        problems = _tokenizer_config_problems(json.load(f))
+    if problems:
+        raise SystemExit("text_tower_padding_rule_is_the_pinned_one: " + "; ".join(problems))
+    print("text_tower_padding_rule_is_the_pinned_one: PASS (max_length/64, lower-case, and special tokens)")
+    print("tokenizer_files_are_pinned_by_digest: PASS (cached files match size pins)")
 
 
 def preprocess(path, np):
@@ -261,6 +415,25 @@ def embed_batch(model, device, arrays, np):
     return v.cpu().numpy().astype(np.float32)
 
 
+def embed_texts(model, tokenizer, device, texts, np):
+    import torch
+    if not texts:
+        return np.empty((0, MODEL["dim"]), dtype=np.float32)
+    enc = tokenizer(list(texts), padding=TEXT_PADDING, max_length=TEXT_MAX_LENGTH,
+                    truncation=True, return_tensors="pt")
+    enc = {k: v.to(device) for k, v in enc.items()}
+    with torch.no_grad():
+        out = model.text_model(**enc).pooler_output.float()
+        out = out / out.norm(dim=-1, keepdim=True).clamp_min(1e-12)
+    return out.cpu().numpy().astype(np.float32)
+
+
+def cosine_scores(image_vec, text_vecs, np):
+    if text_vecs is None or len(text_vecs) == 0:
+        return []
+    return [float(np.dot(image_vec, row)) for row in text_vecs]
+
+
 def vec_json(np, v):
     """The vector as JSON array text, printed at float32's own shortest
     round-tripping precision.
@@ -303,20 +476,35 @@ def main() -> None:
         "--manifest",
         help="newline-delimited image paths; writes one JSON record per line",
     )
-    ap.add_argument("--output", required=True)
+    ap.add_argument("--manifest-jsonl", help='JSONL manifest of {"path": ..., "text": ...}')
+    ap.add_argument("--text-file", help="UTF-8 file containing one text query")
+    ap.add_argument("--vocab-file", help="UTF-8 phrases, one per line")
+    ap.add_argument("--output")
     ap.add_argument("--batch", type=int, default=8, help="images per forward pass")
     ap.add_argument("--cache", default=os.path.join(os.path.dirname(__file__), "weights"))
     ap.add_argument("--fp16", action="store_true")
     ap.add_argument("--cpu", action="store_true")
+    ap.add_argument("--self-test", action="store_true")
     a = ap.parse_args()
-    if bool(a.input) == bool(a.manifest):
-        die("give exactly one of --input or --manifest")
+    if a.self_test:
+        self_test(a.cache)
+        return
+    if not a.output:
+        die("--output is required")
+    if sum(bool(v) for v in (a.input, a.manifest, a.manifest_jsonl)) != 1:
+        die("give exactly one of --input, --manifest or --manifest-jsonl")
 
     import numpy as np
     import torch
 
     device = "cpu" if a.cpu or not torch.cuda.is_available() else "cuda:0"
     model = load_model(a.cache, device, a.fp16)
+    tokenizer = load_tokenizer(model_dir(a.cache))
+    vocab = []
+    if a.vocab_file:
+        with open(a.vocab_file, encoding="utf-8") as f:
+            vocab = [line.strip() for line in f if line.strip()]
+    vocab_vecs = embed_texts(model, tokenizer, device, vocab, np) if vocab else None
     dtype = "float16" if a.fp16 and device.startswith("cuda") else "float32"
     log(f"device={device} dtype={dtype} model={MODEL['repo']}")
 
@@ -333,12 +521,27 @@ def main() -> None:
                 f"refusing to write a {v.shape[0]}-dim vector: the pinned model is "
                 f"declared {MODEL['dim']}-dim, so the checkpoint is not the one we pinned"
             )
-        publish(a.output, "{" + head + ',"vector":' + vec_json(np, v) + "}\n")
+        rec = "{" + head + ',"vector":' + vec_json(np, v)
+        if a.text_file:
+            with open(a.text_file, encoding="utf-8") as f:
+                value = f.read().strip()
+            if value:
+                rec += ',"text_vector":' + vec_json(np, embed_texts(model, tokenizer, device, [value], np)[0])
+        if vocab_vecs is not None:
+            rec += ',"vocab_scores":' + json.dumps(cosine_scores(v, vocab_vecs, np), separators=(",", ":"))
+        publish(a.output, rec + "}\n")
         log(f"wrote {a.output} ({MODEL['dim']}-dim)")
         return
 
-    with open(a.manifest, encoding="utf-8") as f:
-        paths = [ln.strip() for ln in f if ln.strip()]
+    if a.manifest_jsonl:
+        with open(a.manifest_jsonl, encoding="utf-8") as f:
+            entries = [json.loads(ln) for ln in f if ln.strip()]
+        paths = [str(e.get("path", "")) for e in entries]
+        texts_by_path = {str(e.get("path", "")): e.get("text") for e in entries}
+    else:
+        with open(a.manifest, encoding="utf-8") as f:
+            paths = [ln.strip() for ln in f if ln.strip()]
+        texts_by_path = {}
     if not paths:
         die(f"manifest {a.manifest} lists no paths")
     # FAIL-SOFT PER LINE. The Rust index builder already skips individual
@@ -361,9 +564,13 @@ def main() -> None:
             continue
         vs = embed_batch(model, device, arrays, np)
         for p, v in zip(live, vs):
-            out.append(
-                '{"path":' + json.dumps(p) + "," + head + ',"vector":' + vec_json(np, v) + "}"
-            )
+            rec = '{"path":' + json.dumps(p) + "," + head + ',"vector":' + vec_json(np, v)
+            txt = texts_by_path.get(p)
+            if txt:
+                rec += ',"text_vector":' + vec_json(np, embed_texts(model, tokenizer, device, [txt], np)[0])
+            if vocab_vecs is not None:
+                rec += ',"vocab_scores":' + json.dumps(cosine_scores(v, vocab_vecs, np), separators=(",", ":"))
+            out.append(rec + "}")
         log(f"{min(start + batch, len(paths))} / {len(paths)}")
     publish(a.output, "\n".join(out) + "\n")
     log(f"wrote {a.output} ({len(out)} record(s))")

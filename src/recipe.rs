@@ -2743,6 +2743,44 @@ pub enum StrengthTier {
     Committed,
 }
 
+/// How closely the proposer should follow the photographer's free-text
+/// direction. This is prompt intent only; it never changes render bounds.
+#[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
+pub struct DirectionAdherence(f32);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdherenceTier {
+    Hint,
+    Direct,
+    Brief,
+}
+
+impl DirectionAdherence {
+    pub const DEFAULT: f32 = 0.65;
+    pub const TIER_LOW_MAX: f32 = GradeStrength::TIER_LOW_MAX;
+    pub const TIER_MID_MAX: f32 = GradeStrength::TIER_MID_MAX;
+
+    pub fn new(v: f32) -> Self {
+        Self(if v.is_finite() { v.clamp(0.0, 1.0) } else { Self::DEFAULT })
+    }
+
+    pub fn get(self) -> f32 { self.0 }
+    pub fn pct(self) -> f32 { self.0 * 100.0 }
+    pub fn tier(self) -> AdherenceTier {
+        if self.0 <= Self::TIER_LOW_MAX {
+            AdherenceTier::Hint
+        } else if self.0 <= Self::TIER_MID_MAX {
+            AdherenceTier::Direct
+        } else {
+            AdherenceTier::Brief
+        }
+    }
+}
+
+impl Default for DirectionAdherence {
+    fn default() -> Self { Self(Self::DEFAULT) }
+}
+
 /// How COMMITTED an AI-proposed develop should be — the app's strength axis
 /// (R23-3, feedback #5: "the AI is too timid, and I want a strength slider").
 ///

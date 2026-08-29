@@ -1402,6 +1402,9 @@ struct AnalyzeReq {
     /// gets — the same answer the desktop app's own default gives.
     #[serde(default)]
     grade_strength: Option<f32>,
+    // The web request has no Direction-adherence field yet; keeping this
+    // explicit documents that web analyses use the shared Direct default
+    // rather than silently inventing a second request shape.
     /// DEEP THINKING (R23-4, feedback #13): the proposer returns its structured
     /// working in the same response, its reasoning tier goes up one step, and
     /// the visual judge may converge over more than one round. Absent = `false`,
@@ -1814,6 +1817,8 @@ fn api_analyze(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
             send_reference_image: false,
             strength: grade,
             think: req.deep.unwrap_or(false),
+            adherence: crate::recipe::DirectionAdherence::default(),
+            use_looks: true,
         },
         true,
         // The shipped channel (R29-1). The web surface is one request, one

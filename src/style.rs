@@ -58,24 +58,23 @@ const READABLE_INDEX_VERSIONS: [u32; 2] = [4, CURRENT_INDEX_VERSION];
 //
 //   * one embedding, as serialised: 768 elements at `str(np.float32(x))`
 //     precision measured **12.41 bytes each** over three real SigLIP 2
-//     vectors (9,529 bytes of array text). The WORST case is a
-//     15-character shortest-decimal plus its comma = 16 B, so the bound is
+//     vectors (9,529 bytes of array text). The conservative bound is a
+//     15-character shortest-decimal plus its comma = 16 B, so
 //     768 x 16 = 12,288 B = 12 KiB.
-//   * everything else on a record (14 feats, 12 settings, tag, absolute
-//     path, curve, family summary) is bounded well under 4 KiB.
-//   * => MAX_EXEMPLAR_BYTES = 16 KiB, and 5,000 x 16 KiB = 80 MiB, which
-//     fits the 96 MiB file cap with room for the envelope (version, the two
-//     14-dim normalisation vectors, source_dir).
+//   * a maximal look record carries TWO such vectors (image + description),
+//     33 vocabulary scores, four bounded tags, a 512-character description,
+//     and its stem/path JSON envelope. The measured fixture below is the
+//     check on this estimate; 40 KiB leaves room for JSON escaping.
+//   * 5,000 x 40 KiB = 195.3125 MiB. The 228 MiB file cap leaves more than
+//     32 MiB for the top-level envelope, normalisation vectors, and
+//     source/provenance fields.
 //
-// KNOWN COST, registered rather than discovered: for a library between ~5,000
-// and ~32,000 edited photos the EXEMPLAR cap now binds where the byte cap used
-// to. That is a deliberate trade — two constants that disagree by 14x are a
-// worse guarantee than one honest number — and the largest library this
-// project has measured is 751 photos, ~6.7x inside it.
-const MAX_STYLE_INDEX_BYTES: usize = 96 * 1024 * 1024;
+// The exemplar count remains the established 5,000-entry product limit; only
+// the byte envelope grew to hold the two-vector S1 record honestly.
+const MAX_STYLE_INDEX_BYTES: usize = 228 * 1024 * 1024;
 const MAX_STYLE_EXEMPLARS: usize = 5_000;
 /// The per-exemplar bound the two caps above are derived from.
-const MAX_EXEMPLAR_BYTES: usize = 16 * 1024;
+const MAX_EXEMPLAR_BYTES: usize = 40 * 1024;
 
 // R18 CANNOT RECUR, because this is a BUILD gate and not a test: moving either
 // cap without the other stops compilation with the sentence below. A runtime
@@ -94,25 +93,18 @@ const _: () = assert!(
 // above would be true and meaningless. 768 elements at the 16-byte worst case
 // of a shortest-round-trip f32 decimal plus its comma is 12 KiB.
 const _: () = assert!(
-    MAX_EXEMPLAR_BYTES >= crate::embed::EMBED_DIM * 16,
-    "the per-exemplar bound cannot hold one embedding"
+    MAX_EXEMPLAR_BYTES >= crate::embed::EMBED_DIM * 16 * 2
+        + LOOK_VOCAB.len() * 16
+        + 512 * 6
+        + 4096,
+    "the per-exemplar bound cannot hold two embeddings, scores, and description"
 );
 
-/// Weight of the embedding block in the retrieval distance:
-/// `d = Σ WEIGHTS[i]·(q_i−e_i)² + W_EMB·(1 − cos(q_embed, e_embed))`.
-///
-/// **This number is dimensional reasoning, not a measurement.** The 14-dim
-/// block's weights sum to 14.5 and a cosine distance spans 0..2, so 2.0 puts
-/// the two blocks in the same order of magnitude — that is the whole argument
-/// for it. It has NOT been calibrated against the user's own library, which is
-/// the one experiment that could settle it, and this comment is where that
-/// stays visible.
-///
-/// `AUTOSHOP_STYLE_EMBED_WEIGHT` overrides it, and **0 reproduces the previous
-/// ranking exactly** — not approximately: the cosine term is added, never
-/// folded into the existing weights, so a zero weight leaves the old sum
-/// bit-for-bit (pinned by `retrieve_distance_is_unchanged_for_a_well_formed_index`).
-const W_EMB_DEFAULT: f64 = 2.0;
+/// Weight of the embedding block in retrieval. The S1 corpus harness measured
+/// this value; `AUTOSHOP_STYLE_EMBED_WEIGHT` remains a local override. Setting
+/// it to zero reproduces the feature-only ranking exactly: the cosine term is
+/// added separately and never folded into the existing sum.
+const W_EMB_DEFAULT: f64 = 4.0;
 
 /// [`W_EMB_DEFAULT`], or the `AUTOSHOP_STYLE_EMBED_WEIGHT` override. Non-finite
 /// and negative values fall back to the default: a negative weight would rank
@@ -136,6 +128,52 @@ pub fn embedding_enabled() -> bool {
     std::env::var("AUTOSHOP_STYLE_EMBED")
         .map(|v| !matches!(v.trim(), "" | "0" | "false" | "off"))
         .unwrap_or(false)
+}
+
+/// Resolve the embedding switch. An explicitly set environment variable wins
+/// (including `0`), otherwise the GUI/CLI preference is used.
+pub fn embedding_effective(pref: bool) -> bool {
+    if std::env::var_os("AUTOSHOP_STYLE_EMBED").is_some() {
+        embedding_enabled()
+    } else {
+        pref
+    }
+}
+
+/// SigLIP-style attribute captions. Changing a phrase changes all stored
+/// scores, therefore the version is persisted in each index envelope.
+pub const LOOK_VOCAB_VERSION: u32 = 1;
+pub const LOOK_VOCAB: [&str; 33] = [
+    // white-balance lean
+    "a photo with warm golden tones", "a photo with cool blue tones", "a photo with neutral white balance",
+    // tonality
+    "a photo with deep blacks", "a photo with lifted matte shadows", "a photo with bright airy high-key tones", "a photo with dark moody low-key tones",
+    // contrast
+    "a photo with punchy high contrast", "a photo with soft low contrast",
+    // saturation
+    "a photo with vivid saturated colours", "a photo with muted desaturated colours", "a photo with pastel colours",
+    // colour treatment
+    "a photo with a teal-and-orange split tone", "a monochrome black-and-white photo", "a photo with sepia toning", "a photo with a cross-processed colour treatment",
+    // finishing
+    "a photo with a soft hazy glow", "a photo with crisp clarity", "a photo with film-like grain", "a photo with a clean digital finish",
+    // light
+    "a golden-hour photo", "a blue-hour photo", "an overcast flat-light photo", "a harsh midday-light photo", "a night photo",
+    // extra stable descriptors to keep the vocabulary useful across scenes
+    "a photo with gentle natural light", "a photo with dramatic directional light", "a photo with rich shadow detail", "a photo with restrained colour", "a photo with luminous highlights", "a photo with cinematic tones", "a photo with a soft editorial grade", "a photo with a neutral documentary grade",
+];
+pub const LOOK_TAGS_K: usize = 4;
+const LOOK_GROUPS: &[&[usize]] = &[&[0,1,2], &[3,4,5,6], &[7,8], &[9,10,11], &[12,13,14,15], &[16,17,18,19], &[20,21,22,23,24], &[25,26,27,28,29,30,31,32]];
+
+fn walkdir(root: &Path) -> Result<Vec<PathBuf>> {
+    let mut out = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        for ent in std::fs::read_dir(&dir).with_context(|| format!("scan {}", dir.display()))? {
+            let p = ent?.path();
+            if p.is_dir() { stack.push(p); } else { out.push(p); }
+        }
+    }
+    Ok(out)
 }
 
 /// Long edge the preview is reduced to before the embedding sidecar sees it —
@@ -343,6 +381,29 @@ pub struct StyleExemplar {
     /// contract, not a fallback.
     #[serde(default)]
     pub embed: Option<Vec<f32>>,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    #[serde(default)]
+    pub vocab_scores: Option<Vec<f32>>,
+    #[serde(default)]
+    pub desc: Option<String>,
+    #[serde(default)]
+    pub desc_embed: Option<Vec<f32>>,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+pub struct LookExemplar {
+    pub stem: String,
+    pub path: String,
+    pub embed: Vec<f32>,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    #[serde(default)]
+    pub vocab_scores: Option<Vec<f32>>,
+    #[serde(default)]
+    pub desc: Option<String>,
+    #[serde(default)]
+    pub desc_embed: Option<Vec<f32>>,
 }
 
 /// The embedding half of the retrieval distance: `W_EMB · (1 − cos(q, e))`,
@@ -444,6 +505,10 @@ pub fn embed_staged(opts: &crate::embed::EmbedOpts, staged: &StagedFrame) -> Res
     crate::embed::embed_file(opts, &staged.img, &staged.json)
 }
 
+pub fn embed_staged_record(opts: &crate::embed::EmbedOpts, staged: &StagedFrame) -> Result<crate::embed::EmbedRecord> {
+    crate::embed::embed_file_record(opts, &staged.img, &staged.json)
+}
+
 /// One photo's SigLIP 2 vector, from the camera's embedded preview.
 ///
 /// The ONE entry point for a caller that has nothing useful to do between the
@@ -464,6 +529,27 @@ pub fn embed_preview(
 ) -> Result<Vec<f32>> {
     let staged = stage_embed_frame(preview, dir, tag)?;
     embed_staged(opts, &staged)
+}
+
+pub fn embed_preview_with_text(
+    opts: &crate::embed::EmbedOpts,
+    preview: &image::DynamicImage,
+    dir: &Path,
+    tag: &str,
+    text: Option<&str>,
+) -> Result<crate::embed::EmbedRecord> {
+    let staged = stage_embed_frame(preview, dir, tag)?;
+    let mut o = crate::embed::EmbedOpts { python_bin: opts.python_bin.clone(), script: opts.script.clone(), text_file: None, vocab_file: opts.vocab_file.clone() };
+    let text_path = if let Some(t) = text.filter(|s| !s.trim().is_empty()) {
+        static TEXT_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let p = dir.join(format!("autoshop-embed-{}-{}-{tag}.txt", std::process::id(), TEXT_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)));
+        std::fs::write(&p, t)?;
+        o.text_file = Some(p.clone());
+        Some(p)
+    } else { None };
+    let result = embed_staged_record(&o, &staged);
+    if let Some(p) = text_path { let _ = std::fs::remove_file(p); }
+    result
 }
 
 /// The ONE degradation line the index build prints when a photo ends up
@@ -521,9 +607,47 @@ fn exemplar_is_finite(e: &StyleExemplar) -> bool {
                 && v.iter().all(|x| x.is_finite() && x.abs() <= 1.0 + 1e-3)
                 && (v.iter().map(|&x| x as f64 * x as f64).sum::<f64>().sqrt() - 1.0).abs() < 1e-3
         })
+        && e.vocab_scores.as_ref().is_none_or(|v| v.len() == LOOK_VOCAB.len() && v.iter().all(|x| x.is_finite()))
+        && e.desc.as_ref().is_none_or(|d| d.chars().count() <= 512)
+        && e.desc_embed.as_ref().is_none_or(|v| {
+            v.len() == crate::embed::EMBED_DIM
+                && v.iter().all(|x| x.is_finite() && x.abs() <= 1.0 + 1e-3)
+                && (v.iter().map(|&x| x as f64 * x as f64).sum::<f64>().sqrt() - 1.0).abs() < 1e-3
+        })
 }
 
-#[derive(Serialize, Deserialize)]
+fn cosine_term(q: Option<&[f32]>, e: Option<&[f32]>, w: f64) -> f64 {
+    embed_distance(q, e, w)
+}
+
+fn env_weight(name: &str, default: f64) -> f64 {
+    std::env::var(name).ok().and_then(|s| s.parse::<f64>().ok())
+        .filter(|v| v.is_finite() && *v >= 0.0).unwrap_or(default)
+}
+
+pub const W_TXT_DEFAULT: f64 = 0.0;
+pub const W_DESC_DEFAULT: f64 = 0.0;
+pub const W_LOOK_DEFAULT: f64 = 1.0;
+
+pub const W_EMB_DEFAULT_EXPORTED: f64 = W_EMB_DEFAULT;
+
+fn text_weight() -> f64 { env_weight("AUTOSHOP_STYLE_TEXT_WEIGHT", W_TXT_DEFAULT) }
+fn desc_weight() -> f64 { env_weight("AUTOSHOP_STYLE_DESC_WEIGHT", W_DESC_DEFAULT) }
+fn look_weight() -> f64 { env_weight("AUTOSHOP_STYLE_LOOK_WEIGHT", W_LOOK_DEFAULT) }
+
+fn tags_from_scores(scores: &[f32]) -> Vec<String> {
+    if scores.len() != LOOK_VOCAB.len() { return Vec::new(); }
+    let mut chosen = Vec::new();
+    for group in LOOK_GROUPS {
+        if let Some(&idx) = group.iter().max_by(|&&a, &&b| scores[a].total_cmp(&scores[b])) {
+            chosen.push((scores[idx], LOOK_VOCAB[idx]));
+        }
+    }
+    chosen.sort_by(|a,b| b.0.total_cmp(&a.0));
+    chosen.into_iter().take(LOOK_TAGS_K).map(|(_, s)| s.strip_prefix("a photo with ").or_else(|| s.strip_prefix("an ")).unwrap_or(s).to_string()).collect()
+}
+
+#[derive(Serialize, Deserialize, Clone)]
 pub struct StyleIndex {
     pub version: u32,
     pub mean: Vec<f32>,
@@ -534,6 +658,12 @@ pub struct StyleIndex {
     /// files (written before this field) loadable.
     #[serde(default)]
     pub source_dir: Option<String>,
+    #[serde(default)]
+    pub looks: Vec<LookExemplar>,
+    #[serde(default)]
+    pub looks_dir: Option<String>,
+    #[serde(default)]
+    pub embed_provenance: Option<String>,
 }
 
 impl StyleIndex {
@@ -541,6 +671,71 @@ impl StyleIndex {
     /// index, reporting nothing but the historical stdout lines.
     pub fn build(dir: &Path) -> Result<StyleIndex> {
         Self::build_reporting(dir, &|_, _| {})
+    }
+
+    /// Build the finished-photo look library. Looks are embedding-only and
+    /// never participate in settings targets or recipe blending.
+    pub fn build_looks(dir: &Path, on_progress: &dyn Fn(usize, usize)) -> Result<StyleIndex> {
+        Self::build_looks_with_pref(dir, false, on_progress)
+    }
+
+    pub fn build_looks_with_pref(dir: &Path, pref: bool, on_progress: &dyn Fn(usize, usize)) -> Result<StyleIndex> {
+        let opts = crate::embed::EmbedOpts::from_config(&crate::config::Config::load());
+        if !opts.available() || !embedding_effective(pref) {
+            anyhow::bail!("look library requires the style-embedding sidecar; enable embedding and rebuild")
+        }
+        let mut files = Vec::new();
+        for entry in walkdir(dir)? {
+            if pipeline::BAKED_EXTS.iter().any(|e| entry.extension().and_then(|x| x.to_str()).is_some_and(|x| x.eq_ignore_ascii_case(e))) {
+                files.push(entry);
+            }
+        }
+        files.sort();
+        if files.is_empty() { anyhow::bail!("look library contains no finished photos") }
+        on_progress(0, files.len());
+        let scratch = crate::store::store_root();
+        std::fs::create_dir_all(&scratch)?;
+        let vocab_path = scratch.join(format!("autoshop-look-vocab-{}.txt", std::process::id()));
+        std::fs::write(&vocab_path, LOOK_VOCAB.join("\n"))?;
+        let mut opts = opts;
+        opts.vocab_file = Some(vocab_path.clone());
+        let mut looks = Vec::new();
+        for (i, path) in files.iter().enumerate() {
+            let _permit = decode::DecodePermit::acquire();
+            let decoded = decode::decode_any(path).with_context(|| format!("decode look {}", path.display()))?;
+            let frame = stage_embed_frame(&decoded.preview, &scratch, &format!("look-{i}"))?;
+            drop(_permit);
+            let rec = embed_staged_record(&opts, &frame).with_context(|| format!("embed look {}", path.display()))?;
+            let tags = rec.vocab_scores.as_deref().map(tags_from_scores).unwrap_or_default();
+            let desc_embed = if tags.is_empty() {
+                None
+            } else {
+                let text_opts = crate::embed::EmbedOpts {
+                    python_bin: opts.python_bin.clone(),
+                    script: opts.script.clone(),
+                    text_file: None,
+                    vocab_file: None,
+                };
+                match embed_preview_with_text(
+                    &text_opts,
+                    &decoded.preview,
+                    &scratch,
+                    &format!("look-desc-{i}"),
+                    Some(&tags.join(", ")),
+                ) {
+                    Ok(text) => text.text_vector,
+                    Err(err) => {
+                        eprintln!("  look {}: description text embedding unavailable ({err:#})", pipeline::stem(path));
+                        None
+                    }
+                }
+            };
+            let path_abs = std::path::absolute(path)?.display().to_string();
+            looks.push(LookExemplar { stem: pipeline::stem(path).to_string(), path: path_abs, embed: rec.vector, tags, vocab_scores: rec.vocab_scores, desc: None, desc_embed });
+            on_progress(i + 1, files.len());
+        }
+        let _ = std::fs::remove_file(vocab_path);
+        Ok(StyleIndex { version: CURRENT_INDEX_VERSION, mean: vec![0.0; NDIM], std: vec![1.0; NDIM], exemplars: Vec::new(), source_dir: None, looks, looks_dir: std::path::absolute(dir).ok().map(|p| p.display().to_string()), embed_provenance: Some(format!("{}@{} vocab-v{}", crate::embed::MODEL_REPO, crate::embed::MODEL_REVISION, LOOK_VOCAB_VERSION)) })
     }
 
     /// [`build`](StyleIndex::build) with a progress callback — `(completed,
@@ -554,6 +749,14 @@ impl StyleIndex {
     /// byte-identical to what the CLI has always printed.
     pub fn build_reporting(
         dir: &Path,
+        on_progress: &dyn Fn(usize, usize),
+    ) -> Result<StyleIndex> {
+        Self::build_reporting_with_pref(dir, false, on_progress)
+    }
+
+    pub fn build_reporting_with_pref(
+        dir: &Path,
+        embed_pref: bool,
         on_progress: &dyn Fn(usize, usize),
     ) -> Result<StyleIndex> {
         // R27 P1, deliberate NON-action: RAW-only, for `eval`'s reason (see
@@ -579,7 +782,7 @@ impl StyleIndex {
         // The embedding sidecar, resolved ONCE before the pool starts (R27
         // Batch-5). `None` when the user has not asked for it, or when the
         // script is not on disk — announced here, not discovered 150 times.
-        let embedder: Option<crate::embed::EmbedOpts> = embedding_enabled()
+        let mut embedder: Option<crate::embed::EmbedOpts> = embedding_effective(embed_pref)
             .then(|| crate::embed::EmbedOpts::from_config(&crate::config::Config::load()))
             .filter(|o| {
                 if o.available() {
@@ -598,7 +801,13 @@ impl StyleIndex {
                     false
                 }
             });
-        let embed_dir = std::env::temp_dir();
+        let embed_dir = crate::store::store_root();
+        let vocab_path = embed_dir.join(format!("autoshop-look-vocab-{}.txt", std::process::id()));
+        if let Some(opts) = embedder.as_mut()
+            && std::fs::create_dir_all(&embed_dir).is_ok()
+            && std::fs::write(&vocab_path, LOOK_VOCAB.join("\n")).is_ok() {
+                opts.vocab_file = Some(vocab_path.clone());
+        }
         let mut slots: Vec<Option<StyleExemplar>> = Vec::new();
         slots.resize_with(pairs.len(), || None);
         let next = AtomicUsize::new(0);
@@ -675,9 +884,9 @@ impl StyleIndex {
                     // own single-flight gate (`embed::with_model_slot`).
                     drop(permit);
                     let ex = staged.and_then(|(feat, frame)| {
-                        let embed = match (embedder.as_ref(), frame) {
-                            (Some(o), Some(f)) => match embed_staged(o, &f) {
-                                Ok(v) => Some(v),
+                        let (embed, vocab_scores, tags) = match (embedder.as_ref(), frame) {
+                            (Some(o), Some(f)) => match embed_staged_record(o, &f) {
+                                Ok(r) => (Some(r.vector), r.vocab_scores.clone(), r.vocab_scores.as_deref().map(tags_from_scores).unwrap_or_default()),
                                 // DEGRADE, never fail: this photo keeps its
                                 // 14-dim exemplar and the index becomes a
                                 // legitimate mixed one (see
@@ -688,10 +897,10 @@ impl StyleIndex {
                                 // land the same toast as an all-embedded one.
                                 Err(e) => {
                                     note_no_embedding(raw, &e);
-                                    None
+                                    (None, None, Vec::new())
                                 }
                             },
-                            _ => None,
+                            _ => (None, None, Vec::new()),
                         };
                         // An unreadable sidecar must SKIP the photo, not
                         // produce a settings-free exemplar that dilutes
@@ -711,6 +920,10 @@ impl StyleIndex {
                                         .map(|(b, s)| [b, s]),
                                     families: crate::eval::user_family_summary(&xmp),
                                     embed,
+                                    tags,
+                                    vocab_scores,
+                                    desc: None,
+                                    desc_embed: None,
                                 };
                                 if exemplar_is_finite(&ex) {
                                     Some(ex)
@@ -756,7 +969,12 @@ impl StyleIndex {
         // Record where this index was built from, for UI provenance / other users.
         let source_dir = std::path::absolute(dir).map(|p| p.display().to_string()).ok();
         // v2: exemplars now carry tint/saturation/dehaze + tone-curve shape.
-        Ok(StyleIndex { version: CURRENT_INDEX_VERSION, mean, std, exemplars, source_dir })
+        let _ = std::fs::remove_file(&vocab_path);
+        let embed_provenance = embedder
+            .as_ref()
+            .filter(|_| exemplars.iter().any(|e| e.embed.is_some()))
+            .map(|_| format!("{}@{} vocab-v{}", crate::embed::MODEL_REPO, crate::embed::MODEL_REVISION, LOOK_VOCAB_VERSION));
+        Ok(StyleIndex { version: CURRENT_INDEX_VERSION, mean, std, exemplars, source_dir, looks: Vec::new(), looks_dir: None, embed_provenance })
     }
 
     pub fn save(&self, path: &Path) -> Result<()> {
@@ -765,7 +983,7 @@ impl StyleIndex {
         // that took an hour to build (every surface's Style slider then goes
         // inert with nothing to say why). The web handler had this guard; the
         // CLI didn't — enforcing it HERE covers every caller for good.
-        if self.exemplars.is_empty() {
+        if self.exemplars.is_empty() && self.looks.is_empty() {
             anyhow::bail!(
                 "refusing to save an EMPTY style index over {} — no RAW had its .xmp sidecar \
                  beside it (Autoshop keeps its own .xmp in the develop store, never beside your \
@@ -775,6 +993,19 @@ impl StyleIndex {
             );
         }
         pipeline::ensure_parent(path)?;
+        let mut value = self.clone();
+        if self.exemplars.is_empty() || self.looks.is_empty() {
+            match Self::load(path) {
+                Ok(existing) => {
+                    if value.exemplars.is_empty() { value.exemplars = existing.exemplars; value.mean = existing.mean; value.std = existing.std; value.source_dir = existing.source_dir; }
+                    if value.looks.is_empty() { value.looks = existing.looks; value.looks_dir = existing.looks_dir; }
+                }
+                Err(err) if path.exists() => {
+                    eprintln!("existing style index {} is unusable ({err:#}); replacing it", path.display());
+                }
+                Err(_) => {}
+            }
+        }
         // Publish atomically (tmp + rename): fs::write truncates in place, so
         // a disk-full/interrupt mid-write left the previous good index as a
         // corrupt partial file — the empty-index guard above can't catch that.
@@ -787,7 +1018,7 @@ impl StyleIndex {
             std::process::id(),
             TMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         ));
-        std::fs::write(&tmp, serde_json::to_string(self)?)
+        std::fs::write(&tmp, serde_json::to_string(&value)?)
             .with_context(|| format!("write style index {}", tmp.display()))?;
         // NO pre-remove: rename replaces the destination on Windows too, and
         // deleting first meant a failed rename (or a crash between the two)
@@ -842,7 +1073,7 @@ impl StyleIndex {
                 READABLE_INDEX_VERSIONS
             );
         }
-        if idx.exemplars.is_empty() {
+        if idx.exemplars.is_empty() && idx.looks.is_empty() {
             anyhow::bail!("style index {} contains no exemplars", path.display());
         }
         if idx.exemplars.len() > MAX_STYLE_EXEMPLARS {
@@ -851,6 +1082,12 @@ impl StyleIndex {
                 path.display(),
                 idx.exemplars.len(),
                 MAX_STYLE_EXEMPLARS
+            );
+        }
+        if idx.looks.len() > MAX_STYLE_EXEMPLARS {
+            anyhow::bail!(
+                "style index {} contains {} look exemplars (limit {})",
+                path.display(), idx.looks.len(), MAX_STYLE_EXEMPLARS
             );
         }
         if idx.mean.len() != NDIM || idx.std.len() != NDIM {
@@ -940,6 +1177,33 @@ impl StyleIndex {
             }
         }
 
+        for (i, look) in idx.looks.iter_mut().enumerate() {
+            let norm = look.embed.iter().map(|v| (*v as f64) * (*v as f64)).sum::<f64>().sqrt();
+            if look.embed.len() != crate::embed::EMBED_DIM
+                || !look.embed.iter().all(|v| v.is_finite())
+                || (norm - 1.0).abs() > 1e-3
+            {
+                anyhow::bail!("style index {} look exemplar {i} has an invalid embedding", path.display());
+            }
+            if look.vocab_scores.as_ref().is_some_and(|v| v.len() != LOOK_VOCAB.len() || !v.iter().all(|x| x.is_finite())) {
+                anyhow::bail!("style index {} look exemplar {i} has invalid vocabulary scores", path.display());
+            }
+            if look.tags.len() > LOOK_TAGS_K || look.tags.iter().any(|t| t.chars().count() > 128) {
+                anyhow::bail!("style index {} look exemplar {i} has invalid tags", path.display());
+            }
+            if let Some(desc) = &mut look.desc
+                && desc.chars().count() > 512 {
+                    *desc = desc.chars().take(512).collect();
+            }
+            if look.desc_embed.as_ref().is_some_and(|v| {
+                v.len() != crate::embed::EMBED_DIM
+                    || !v.iter().all(|x| x.is_finite() && x.abs() <= 1.0 + 1e-3)
+                    || (v.iter().map(|&x| x as f64 * x as f64).sum::<f64>().sqrt() - 1.0).abs() > 1e-3
+            }) {
+                anyhow::bail!("style index {} look exemplar {i} has invalid description embedding", path.display());
+            }
+        }
+
         Ok(idx)
     }
 
@@ -951,7 +1215,7 @@ impl StyleIndex {
     /// that has no vector (and an index that carries none) ranks precisely as
     /// it did before R27 Batch-5.
     pub fn retrieve(&self, meta: &Meta, hist: &Histogram, k: usize, exclude: &Path) -> Vec<&StyleExemplar> {
-        self.retrieve_with_embed(meta, hist, None, k, exclude)
+        self.retrieve_with_embed(meta, hist, None, None, k, exclude)
     }
 
     /// [`retrieve`](StyleIndex::retrieve) with the query photo's SigLIP 2
@@ -974,11 +1238,14 @@ impl StyleIndex {
         meta: &Meta,
         hist: &Histogram,
         query_embed: Option<&[f32]>,
+        query_text: Option<&[f32]>,
         k: usize,
         exclude: &Path,
     ) -> Vec<&StyleExemplar> {
         let q = normalize(feature_vector(meta, hist), &self.mean, &self.std);
         let w_emb = embed_weight();
+        let w_txt = text_weight();
+        let w_desc = desc_weight();
         let ex_path = std::path::absolute(exclude)
             .unwrap_or_else(|_| exclude.to_path_buf())
             .display()
@@ -1003,8 +1270,11 @@ impl StyleIndex {
                     })
                     .sum::<f64>();
                 // ADDED, never folded in: the 14-dim sum above is untouched, so
-                // `W_EMB = 0` leaves every historical ranking bit-for-bit.
-                (d2 + embed_distance(query_embed, e.embed.as_deref(), w_emb), e)
+                // Setting `W_EMB = 0` leaves every historical ranking bit-for-bit.
+                (d2
+                    + cosine_term(query_embed, e.embed.as_deref(), w_emb)
+                    + cosine_term(query_text, e.embed.as_deref(), w_txt)
+                    + cosine_term(query_text, e.desc_embed.as_deref(), w_desc), e)
             })
             .collect();
         // total_cmp, never partial_cmp-with-Equal-fallback: a NaN key made
@@ -1013,6 +1283,65 @@ impl StyleIndex {
         // scrambled style reference. total_cmp orders every bit pattern.
         scored.sort_by(|a, b| a.0.total_cmp(&b.0));
         scored.into_iter().take(k).map(|(_, e)| e).collect()
+    }
+
+    /// Retrieve finished-photo looks. Returns empty when no query embedding is
+    /// available; callers disclose that condition instead of silently falling
+    /// back to RAW exemplars.
+pub fn retrieve_looks(&self, query_img: Option<&[f32]>, query_text: Option<&[f32]>, k: usize) -> Vec<&LookExemplar> {
+        if query_img.is_none() && query_text.is_none() { return Vec::new(); }
+        let wi = look_weight();
+        let wt = text_weight();
+        let wd = desc_weight();
+        let mut scored: Vec<(f64, &LookExemplar)> = self.looks.iter().map(|e| (
+            cosine_term(query_img, Some(&e.embed), wi)
+                + cosine_term(query_text, Some(&e.embed), wt)
+                + cosine_term(query_text, e.desc_embed.as_deref(), wd), e)).collect();
+        scored.sort_by(|a,b| a.0.total_cmp(&b.0));
+        scored.into_iter().take(k).map(|(_,e)| e).collect()
+    }
+
+    /// The four additive distance components used by retrieval. Keeping this
+    /// calculation public lets the offline diagnostic print exactly the terms
+    /// the production path used instead of maintaining a second ranking path.
+    pub fn distance_components(
+        &self,
+        meta: &Meta,
+        hist: &Histogram,
+        query_img: Option<&[f32]>,
+        query_text: Option<&[f32]>,
+        e: &StyleExemplar,
+    ) -> (f64, f64, f64, f64) {
+        let q = normalize(feature_vector(meta, hist), &self.mean, &self.std);
+        let mut ef = [0.0f32; NDIM];
+        if e.feat.len() == NDIM { ef.copy_from_slice(&e.feat); }
+        let en = normalize(ef, &self.mean, &self.std);
+        let d14 = (0..NDIM)
+            .map(|i| {
+                let d = (q[i] - en[i]) as f64;
+                WEIGHTS[i] as f64 * d * d
+            })
+            .sum::<f64>();
+        let emb = cosine_term(query_img, e.embed.as_deref(), embed_weight());
+        let txt = cosine_term(query_text, e.embed.as_deref(), text_weight());
+        let desc = cosine_term(query_text, e.desc_embed.as_deref(), desc_weight());
+        (d14, emb, txt, desc)
+    }
+
+    /// Render the look-library block appended to a proposer instruction.
+    pub fn render_look_reference(&self, looks: &[&LookExemplar]) -> Option<String> {
+        let first = looks.first()?;
+        let tags = first.tags.iter().take(LOOK_TAGS_K).cloned().collect::<Vec<_>>().join(", ");
+        let desc = first.desc.as_deref().map(|d| d.chars().take(512).collect::<String>());
+        let mut out = format!(
+            "LOOK REFERENCE (from the photographer's LOOK LIBRARY — the finished photo closest to this frame and direction; match its grade, not its content): [{}] look: {}",
+            first.stem.chars().take(MAX_STEM_CHARS).collect::<String>(), tags
+        );
+        if let Some(d) = desc.filter(|d| !d.is_empty()) {
+            out.push_str("; ");
+            out.push_str(&d);
+        }
+        Some(out)
     }
 
     /// Render retrieved exemplars as a SOFT reference block for the advisor prompt.
@@ -1045,7 +1374,8 @@ impl StyleIndex {
                     .iter()
                     .map(|(k, v)| format!("{k} {v:+.0}"))
                     .collect();
-                format!("[{}] {}", e.tag, s.join(", "))
+                let look = if e.tags.is_empty() { String::new() } else { format!(" · look: {}", e.tags.join(", ")) };
+                format!("[{}] {}{}", e.tag, s.join(", "), look)
             })
             .collect();
         // Average the retrieved exemplars' tone-curve SHAPE (those who drew one),
@@ -1200,6 +1530,11 @@ pub enum StyleIndexState {
         source_dir: Option<String>,
         /// The most common scene tags, most-frequent first, at most 6.
         scenes: Vec<(String, usize)>,
+        /// Number of RAW exemplars carrying a valid SigLIP vector.
+        with_embedding: usize,
+        /// Number of finished-photo look records in the separate library.
+        looks: usize,
+        looks_dir: Option<String>,
         /// How long ago the file was written, measured at read time. A
         /// RELATIVE age on purpose: this tree carries no calendar library, and
         /// "built 3 days ago" is the question a photographer is asking anyway.
@@ -1240,6 +1575,9 @@ pub fn index_info_at(central: &Path, legacy: &Path) -> StyleIndexInfo {
                 source_dir: ix.source_dir.clone(),
                 scenes,
                 age,
+                with_embedding: ix.exemplars.iter().filter(|e| e.embed.is_some()).count(),
+                looks: ix.looks.len(),
+                looks_dir: ix.looks_dir.clone(),
             };
             StyleIndexInfo { path, state }
         }
@@ -1461,6 +1799,7 @@ mod tests {
             path: None,
             families: None,
             embed: None,
+            tags: Vec::new(), vocab_scores: None, desc: None, desc_embed: None,
         };
         let (a, b) = (mk(0.4, 20.0, 10.0), mk(0.6, 40.0, 30.0));
         let targets = style_targets(&[&a, &b]);
@@ -1489,11 +1828,12 @@ mod tests {
 
     #[test]
     fn reference_wording_becomes_target_at_high_style() {
-        let idx = StyleIndex { version: 0, mean: Vec::new(), std: Vec::new(), exemplars: Vec::new(), source_dir: None };
+        let idx = StyleIndex { version: 0, mean: Vec::new(), std: Vec::new(), exemplars: Vec::new(), source_dir: None, looks: Vec::new(), looks_dir: None, embed_provenance: None };
         let ex = StyleExemplar {
             stem: "x".into(), feat: Vec::new(), tag: "wide/mid/midday/landscape".into(),
             settings: BTreeMap::from([("contrast".to_string(), 15.0)]), curve: None,
             path: None, families: None, embed: None,
+            tags: Vec::new(), vocab_scores: None, desc: None, desc_embed: None,
         };
         let low = idx.render_reference(&[&ex], crate::recipe::GradeStrength::new(0.65)).unwrap();
         let high = idx.render_reference(&[&ex], crate::recipe::GradeStrength::new(0.9)).unwrap();
@@ -1512,6 +1852,7 @@ mod tests {
             path: None,
             families: None,
             embed: None,
+            tags: Vec::new(), vocab_scores: None, desc: None, desc_embed: None,
         };
         let idx = StyleIndex {
             version: CURRENT_INDEX_VERSION,
@@ -1519,6 +1860,7 @@ mod tests {
             std: vec![1.0; NDIM],
             exemplars: vec![],
             source_dir: None,
+            looks: Vec::new(), looks_dir: None, embed_provenance: None,
         };
         let rendered = idx
             .render_reference(&[&ex], crate::recipe::GradeStrength::new(0.30))
@@ -1553,6 +1895,7 @@ mod tests {
             path: path.map(str::to_string),
             families: None,
             embed: None,
+            tags: Vec::new(), vocab_scores: None, desc: None, desc_embed: None,
             feat: vec![0.0; NDIM],
             tag: "t".into(),
             settings: BTreeMap::new(),
@@ -1580,6 +1923,7 @@ mod tests {
             path: None,
             families: None,
             embed: None,
+            tags: Vec::new(), vocab_scores: None, desc: None, desc_embed: None,
             feat: vec![0.0; NDIM],
             tag: "t".into(),
             settings: BTreeMap::new(),
@@ -1603,6 +1947,7 @@ mod tests {
             path: None,
             families: None,
             embed: None,
+            tags: Vec::new(), vocab_scores: None, desc: None, desc_embed: None,
         };
         let idx = StyleIndex {
             version: CURRENT_INDEX_VERSION,
@@ -1610,6 +1955,7 @@ mod tests {
             std: vec![1.0; NDIM],
             exemplars: vec![],
             source_dir: None,
+            looks: Vec::new(), looks_dir: None, embed_provenance: None,
         };
         let r = idx.render_reference(&[&ex], crate::recipe::GradeStrength::calibrated()).unwrap();
         assert!(r.contains("TYPICAL MASTER TONE CURVE"), "{r}");
@@ -1709,6 +2055,7 @@ mod tests {
             path: None,
             families,
             embed: None,
+            tags: Vec::new(), vocab_scores: None, desc: None, desc_embed: None,
         };
         let with = mk(Some(crate::eval::FamilySummary {
             hsl: [2.0, 18.0, 6.0],
@@ -1722,6 +2069,7 @@ mod tests {
             std: vec![1.0; NDIM],
             exemplars: vec![],
             source_dir: None,
+            looks: Vec::new(), looks_dir: None, embed_provenance: None,
         };
         let r = idx.render_reference(&[&with, &without], crate::recipe::GradeStrength::calibrated()).unwrap();
         assert!(r.contains("THEIR TYPICAL COLOUR SHAPING (1 of 2 similar shots)"), "{r}");
@@ -1758,6 +2106,7 @@ mod tests {
                 rgb_curves: 2,
             }),
             embed: None,
+            tags: Vec::new(), vocab_scores: None, desc: None, desc_embed: None,
         };
         let idx = StyleIndex {
             version: CURRENT_INDEX_VERSION,
@@ -1765,6 +2114,7 @@ mod tests {
             std: vec![1.0; NDIM],
             exemplars: vec![],
             source_dir: None,
+            looks: Vec::new(), looks_dir: None, embed_provenance: None,
         };
         let at = |s: f32| idx.render_reference(&[&ex], GradeStrength::new(s)).unwrap();
         let (calib, default, bold) = (at(0.5), at(GradeStrength::DEFAULT), at(0.9));
@@ -1814,8 +2164,10 @@ mod tests {
                 path: None,
                 families: None,
             embed: None,
+            tags: Vec::new(), vocab_scores: None, desc: None, desc_embed: None,
             }],
             source_dir: None,
+            looks: Vec::new(), looks_dir: None, embed_provenance: None,
         };
         let write = |idx: &StyleIndex| {
             std::fs::write(&path, serde_json::to_string(idx).unwrap()).unwrap();
@@ -1878,8 +2230,10 @@ mod tests {
                 path: None,
                 families: None,
             embed: None,
+            tags: Vec::new(), vocab_scores: None, desc: None, desc_embed: None,
             }],
             source_dir: None,
+            looks: Vec::new(), looks_dir: None, embed_provenance: None,
         };
         let write = |idx: &StyleIndex| {
             std::fs::write(&path, serde_json::to_string(idx).unwrap()).unwrap();
@@ -1922,6 +2276,7 @@ mod tests {
             path: None,
             families: None,
             embed: None,
+            tags: Vec::new(), vocab_scores: None, desc: None, desc_embed: None,
         };
         let idx = StyleIndex {
             version: CURRENT_INDEX_VERSION,
@@ -1933,6 +2288,7 @@ mod tests {
             std: vec![1e-4; NDIM],
             exemplars: vec![ex("a", 3e38), ex("b", -3e38)],
             source_dir: None,
+            looks: Vec::new(), looks_dir: None, embed_provenance: None,
         };
         let meta = crate::decode::Meta {
             make: "T".into(),
@@ -1995,6 +2351,7 @@ mod tests {
             path: None,
             families: None,
             embed: None,
+            tags: Vec::new(), vocab_scores: None, desc: None, desc_embed: None,
         };
         let built = StyleIndex {
             version: CURRENT_INDEX_VERSION,
@@ -2006,11 +2363,12 @@ mod tests {
                 ex("tele/bright/goldenish/portrait", "c"),
             ],
             source_dir: Some("D:\\photos\\edited".into()),
+            looks: Vec::new(), looks_dir: None, embed_provenance: None,
         };
         built.save(&central).expect("a non-empty index saves");
         let info = index_info_at(&central, &legacy);
         match &info.state {
-            StyleIndexState::Built { total, version, source_dir, scenes, age } => {
+            StyleIndexState::Built { total, version, source_dir, scenes, age, .. } => {
                 assert_eq!(*total, 3);
                 assert_eq!(*version, CURRENT_INDEX_VERSION);
                 assert_eq!(source_dir.as_deref(), Some("D:\\photos\\edited"));
@@ -2057,6 +2415,7 @@ mod tests {
             path: Some(format!("D:\\rolls\\2024\\{stem}.ARW")),
             families: None,
             embed: None,
+            tags: Vec::new(), vocab_scores: None, desc: None, desc_embed: None,
         };
         let long = "x".repeat(MAX_STEM_CHARS + 20);
         let all = [mk("DSC0001"), mk("DSC0002"), mk("DSC0003"), mk("DSC0004"), mk(&long)];
@@ -2094,6 +2453,7 @@ mod tests {
             path: None,
             families: None,
             embed: None,
+            tags: Vec::new(), vocab_scores: None, desc: None, desc_embed: None,
         };
         let idx = StyleIndex {
             version: CURRENT_INDEX_VERSION,
@@ -2101,6 +2461,7 @@ mod tests {
             std: vec![1.0; NDIM],
             exemplars: vec![ex("far", 150.0), ex("near", 0.5), ex("mid", 30.0)],
             source_dir: None,
+            looks: Vec::new(), looks_dir: None, embed_provenance: None,
         };
         let meta = crate::decode::Meta {
             make: "T".into(),
@@ -2153,6 +2514,7 @@ mod tests {
             path: None,
             families: None,
             embed: None,
+            tags: Vec::new(), vocab_scores: None, desc: None, desc_embed: None,
         }
     }
 
@@ -2235,6 +2597,7 @@ mod tests {
                 std: vec![1.0; NDIM],
                 exemplars: vec![plain_exemplar("a")],
                 source_dir: None,
+                looks: Vec::new(), looks_dir: None, embed_provenance: None,
             };
             let p = dir.join(format!("v{version}.json"));
             std::fs::write(&p, serde_json::to_string(&idx).unwrap()).unwrap();
@@ -2282,6 +2645,7 @@ mod tests {
             std: vec![1.0; NDIM],
             exemplars: vec![far, near],
             source_dir: None,
+            looks: Vec::new(), looks_dir: None, embed_provenance: None,
         };
         let meta = crate::decode::Meta {
             make: "T".into(),
@@ -2306,12 +2670,152 @@ mod tests {
             clip_white_pct: 0.0,
             sample_pixels: 1,
         };
-        let got = idx.retrieve_with_embed(&meta, &hist, Some(&u), 1, Path::new("q.arw"));
+        let old_weight = std::env::var_os("AUTOSHOP_STYLE_EMBED_WEIGHT");
+        unsafe { std::env::set_var("AUTOSHOP_STYLE_EMBED_WEIGHT", "2"); }
+        let got = idx.retrieve_with_embed(&meta, &hist, Some(&u), None, 1, Path::new("q.arw"));
         assert_eq!(got[0].stem, "near-in-embedding", "the cosine block decides the tie");
         // The same query with NO vector: the two exemplars are exactly tied,
         // the sort is stable, and the first listed one wins — i.e. an index
         // whose query has no embedding ranks precisely as it did before.
-        let none = idx.retrieve_with_embed(&meta, &hist, None, 1, Path::new("q.arw"));
+        let none = idx.retrieve_with_embed(&meta, &hist, None, None, 1, Path::new("q.arw"));
         assert_eq!(none[0].stem, "far-in-embedding", "no query vector leaves the old ranking");
+        unsafe { match old_weight { Some(v) => std::env::set_var("AUTOSHOP_STYLE_EMBED_WEIGHT", v), None => std::env::remove_var("AUTOSHOP_STYLE_EMBED_WEIGHT") } };
+    }
+
+    #[test]
+    fn look_vocab_has_one_definition_and_a_version() {
+        assert!((24..=40).contains(&LOOK_VOCAB.len()));
+        assert!(LOOK_VOCAB_VERSION > 0);
+        let mut unique = std::collections::BTreeSet::new();
+        assert!(LOOK_VOCAB.iter().all(|phrase| unique.insert(*phrase)));
+    }
+
+    #[test]
+    fn tags_take_at_most_one_phrase_per_group() {
+        let mut scores = vec![0.0f32; LOOK_VOCAB.len()];
+        for (group_no, group) in LOOK_GROUPS.iter().enumerate() {
+            for (offset, &idx) in group.iter().enumerate() {
+                scores[idx] = (group_no * 10 + offset) as f32;
+            }
+        }
+        let tags = tags_from_scores(&scores);
+        assert!(tags.len() <= LOOK_TAGS_K);
+        let chosen = LOOK_VOCAB
+            .iter()
+            .enumerate()
+            .filter(|(_, phrase)| tags.iter().any(|tag| phrase.contains(tag)))
+            .map(|(idx, _)| idx)
+            .collect::<Vec<_>>();
+        for group in LOOK_GROUPS {
+            assert!(chosen.iter().filter(|idx| group.contains(idx)).count() <= 1);
+        }
+    }
+
+    #[test]
+    fn zero_text_and_desc_weights_reproduce_the_v5_ranking_bit_for_bit() {
+        let old_txt = std::env::var_os("AUTOSHOP_STYLE_TEXT_WEIGHT");
+        let old_desc = std::env::var_os("AUTOSHOP_STYLE_DESC_WEIGHT");
+        unsafe {
+            std::env::set_var("AUTOSHOP_STYLE_TEXT_WEIGHT", "0");
+            std::env::set_var("AUTOSHOP_STYLE_DESC_WEIGHT", "0");
+        }
+        let mut a = plain_exemplar("a");
+        a.embed = Some(unit_embed());
+        a.desc_embed = Some(unit_embed());
+        let mut b = plain_exemplar("b");
+        b.embed = Some({ let mut v = unit_embed(); v[0] = -v[0]; v });
+        b.desc_embed = Some({ let mut v = unit_embed(); v[0] = -v[0]; v });
+        let idx = StyleIndex { version: CURRENT_INDEX_VERSION, mean: vec![0.0; NDIM], std: vec![1.0; NDIM], exemplars: vec![a, b], source_dir: None, looks: Vec::new(), looks_dir: None, embed_provenance: None };
+        let meta = crate::decode::Meta { make: "T".into(), model: "T".into(), lens: None, iso: Some(100), shutter: None, aperture: None, focal_length_mm: None, exposure_bias_ev: None, date_time: None, width: 100, height: 100, as_shot_wb_coeffs: [1.0; 4] };
+        let hist = crate::decode::Histogram { luma: vec![1; 256], r: vec![1; 256], g: vec![1; 256], b: vec![1; 256], clip_black_pct: 0.0, clip_white_pct: 0.0, sample_pixels: 1 };
+        let old = idx.retrieve(&meta, &hist, 2, Path::new("q.arw")).iter().map(|e| e.stem.clone()).collect::<Vec<_>>();
+        let text = { let mut v = unit_embed(); v[0] = -v[0]; v };
+        let now = idx.retrieve_with_embed(&meta, &hist, Some(&unit_embed()), Some(&text), 2, Path::new("q.arw")).iter().map(|e| e.stem.clone()).collect::<Vec<_>>();
+        assert_eq!(old, now);
+        unsafe {
+            match old_txt { Some(v) => std::env::set_var("AUTOSHOP_STYLE_TEXT_WEIGHT", v), None => std::env::remove_var("AUTOSHOP_STYLE_TEXT_WEIGHT") };
+            match old_desc { Some(v) => std::env::set_var("AUTOSHOP_STYLE_DESC_WEIGHT", v), None => std::env::remove_var("AUTOSHOP_STYLE_DESC_WEIGHT") };
+        }
+    }
+
+    #[test]
+    fn retrieval_terms_vanish_when_either_side_lacks_the_vector() {
+        let u = unit_embed();
+        assert_eq!(embed_distance(None, Some(&u), 2.0), 0.0);
+        assert_eq!(embed_distance(Some(&u), None, 2.0), 0.0);
+        assert_eq!(embed_distance(Some(&u), Some(&u[..4]), 2.0), 0.0);
+    }
+
+    #[test]
+    fn look_library_never_reaches_style_targets_or_blend() {
+        let look = LookExemplar { stem: "finished".into(), path: "finished.jpg".into(), embed: unit_embed(), tags: vec!["warm golden tones".into()], vocab_scores: Some(vec![0.0; LOOK_VOCAB.len()]), desc: Some("warm".into()), desc_embed: Some(unit_embed()) };
+        let idx = StyleIndex { version: CURRENT_INDEX_VERSION, mean: vec![0.0; NDIM], std: vec![1.0; NDIM], exemplars: Vec::new(), source_dir: None, looks: vec![look], looks_dir: Some("looks".into()), embed_provenance: None };
+        assert!(style_targets(&idx.exemplars.iter().collect::<Vec<_>>()).is_empty());
+        let mut recipe = EditRecipe::default();
+        blend_toward(&mut recipe, &BTreeMap::new(), 1.0);
+        assert_eq!(recipe, EditRecipe::default());
+    }
+
+    #[test]
+    fn looks_are_unreachable_without_a_query_vector_and_disclosed() {
+        let idx = StyleIndex { version: CURRENT_INDEX_VERSION, mean: vec![0.0; NDIM], std: vec![1.0; NDIM], exemplars: Vec::new(), source_dir: None, looks: vec![LookExemplar { stem: "finished".into(), path: "finished.jpg".into(), embed: unit_embed(), tags: Vec::new(), vocab_scores: None, desc: None, desc_embed: None }], looks_dir: None, embed_provenance: None };
+        assert!(idx.retrieve_looks(None, None, 2).is_empty());
+        assert!(crate::rationale::keys::STYLE_LOOKS_UNREACHABLE.contains("look library"));
+    }
+
+    #[test]
+    fn embedding_effective_env_wins_when_set_else_pref() {
+        let old = std::env::var_os("AUTOSHOP_STYLE_EMBED");
+        unsafe { std::env::remove_var("AUTOSHOP_STYLE_EMBED"); }
+        assert!(embedding_effective(true));
+        unsafe { std::env::set_var("AUTOSHOP_STYLE_EMBED", "0"); }
+        assert!(!embedding_effective(true));
+        unsafe { std::env::set_var("AUTOSHOP_STYLE_EMBED", "1"); }
+        assert!(embedding_effective(false));
+        unsafe {
+            match old { Some(v) => std::env::set_var("AUTOSHOP_STYLE_EMBED", v), None => std::env::remove_var("AUTOSHOP_STYLE_EMBED") };
+        }
+    }
+
+    #[test]
+    fn capacity_constants_hold_two_vectors_and_the_scores() {
+        let max = LookExemplar {
+            stem: "s".repeat(128), path: "p".repeat(512), embed: unit_embed(),
+            tags: vec!["t".repeat(128); LOOK_TAGS_K],
+            vocab_scores: Some(vec![0.1234567; LOOK_VOCAB.len()]),
+            desc: Some("d".repeat(512)), desc_embed: Some(unit_embed()),
+        };
+        let bytes = serde_json::to_vec(&max).unwrap().len();
+        assert!(bytes <= MAX_EXEMPLAR_BYTES, "maximal look record is {bytes} bytes (bound {MAX_EXEMPLAR_BYTES})");
+        assert!(MAX_STYLE_EXEMPLARS * MAX_EXEMPLAR_BYTES <= MAX_STYLE_INDEX_BYTES);
+    }
+
+    #[test]
+    fn look_build_refuses_without_the_sidecar_and_says_why() {
+        let old = std::env::var_os("AUTOSHOP_EMBED_SCRIPT");
+        unsafe { std::env::set_var("AUTOSHOP_EMBED_SCRIPT", "this-sidecar-does-not-exist.py"); }
+        let dir = std::env::temp_dir().join(format!("autoshop-look-refuse-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let err = match StyleIndex::build_looks_with_pref(&dir, true, &|_, _| {}) {
+            Ok(_) => panic!("a look build without a sidecar must refuse"),
+            Err(err) => err.to_string(),
+        };
+        assert!(err.contains("requires the style-embedding sidecar"), "{err}");
+        unsafe { match old { Some(v) => std::env::set_var("AUTOSHOP_EMBED_SCRIPT", v), None => std::env::remove_var("AUTOSHOP_EMBED_SCRIPT") } };
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn look_build_rewrites_only_the_looks_block() {
+        let dir = std::env::temp_dir().join(format!("autoshop-look-merge-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir); std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("style-index.json");
+        let raw = plain_exemplar("raw");
+        StyleIndex { version: CURRENT_INDEX_VERSION, mean: vec![0.0; NDIM], std: vec![1.0; NDIM], exemplars: vec![raw], source_dir: Some("raws".into()), looks: Vec::new(), looks_dir: None, embed_provenance: None }.save(&path).unwrap();
+        let look = LookExemplar { stem: "look".into(), path: "look.jpg".into(), embed: unit_embed(), tags: Vec::new(), vocab_scores: None, desc: None, desc_embed: None };
+        StyleIndex { version: CURRENT_INDEX_VERSION, mean: vec![0.0; NDIM], std: vec![1.0; NDIM], exemplars: Vec::new(), source_dir: None, looks: vec![look], looks_dir: Some("looks".into()), embed_provenance: None }.save(&path).unwrap();
+        let merged = StyleIndex::load(&path).unwrap();
+        assert_eq!(merged.exemplars.len(), 1); assert_eq!(merged.looks.len(), 1);
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

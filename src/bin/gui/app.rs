@@ -70,9 +70,13 @@ pub(crate) struct AutoshopApp {
     /// the panel (the checkbox states the call counts), and every unattended
     /// surface (batch, eval) is structurally unable to turn it on.
     pub(crate) deep_think: bool,
+    pub(crate) style_embed: bool,
     /// The folder the style library was last built FROM — prefilled into the
     /// picker so a rebuild does not mean finding it again. Persisted.
     pub(crate) style_src_dir: Option<PathBuf>,
+    pub(crate) looks_src_dir: Option<PathBuf>,
+    pub(crate) use_looks: bool,
+    pub(crate) direction_adherence: f32,
     /// The style library's status as last READ (`autoshop::style::index_info`),
     /// cached: this is a disk read of a file that can reach 32 MB, so it must
     /// never happen per frame. `None` = not read yet.
@@ -1548,7 +1552,11 @@ impl Default for AutoshopApp {
             send_style_ref_image: false,
             // OFF, same rule and a bigger bill (up to 17 calls per analyze).
             deep_think: false,
+            style_embed: false,
             style_src_dir: None,
+            looks_src_dir: None,
+            use_looks: true,
+            direction_adherence: autoshop::recipe::DirectionAdherence::DEFAULT,
             style_info: None,
             style_info_loading: false,
             style_build_inflight: false,
@@ -1948,7 +1956,11 @@ impl eframe::App for AutoshopApp {
                 grade_strength: self.grade_strength,
                 send_style_ref_image: self.send_style_ref_image,
                 deep_think: self.deep_think,
+                style_embed: self.style_embed,
                 style_src_dir: self.style_src_dir.clone(),
+                looks_src_dir: self.looks_src_dir.clone(),
+                use_looks: self.use_looks,
+                direction_adherence: self.direction_adherence,
                 // Both written: exp_format is the truth, save_jpeg keeps a
                 // pre-阶段4 build reading this prefs file sane.
                 save_jpeg: self.exp_format == ExportFormat::Jpeg,

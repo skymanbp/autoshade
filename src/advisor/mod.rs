@@ -27,7 +27,7 @@ pub use openai_verify::OpenAiVerifier;
 pub(crate) use openai::extract_output_text;
 
 use crate::decode::{Histogram, Meta};
-use crate::recipe::{EditRecipe, GradeStrength, StrengthTier};
+use crate::recipe::{DirectionAdherence, EditRecipe, GradeStrength, StrengthTier};
 
 /// JPEG preview bytes handed to a vision advisor.
 pub struct Preview {
@@ -277,6 +277,10 @@ pub struct ProposeContext<'a> {
     /// default: it is a second image on every call of a paid analysis).
     /// `None` = the text reference alone, which is the historical shape.
     pub reference_image: Option<&'a Preview>,
+    /// Finished-photo look-library reference, already bounded and fenced by
+    /// the provider just like the RAW style reference.
+    pub look_reference: Option<&'a str>,
+    pub reference_image_is_look: bool,
     /// The photo's as-shot white balance in ABSOLUTE Kelvin, the anchor
     /// `temperature_k` is measured against (`None` = unknown, the engine's
     /// 5500 K fallback). The prompt states it because the model otherwise has
@@ -301,6 +305,8 @@ pub struct ProposeContext<'a> {
     /// thinking chain riding along would double a 500-photo batch's spend and
     /// stop eval from measuring the bare proposal it calibrates against.
     pub think: bool,
+    /// Direction-following tier. Defaults to the historical direct wording.
+    pub adherence: DirectionAdherence,
 }
 
 /// The proposer's structured WORKING for one call — R23-4's answer to "make it
@@ -455,6 +461,7 @@ pub const TOOL_PLAN_MAX: usize = 16;
 #[derive(Debug, Clone, Copy, Default)]
 pub struct GradeIntent<'a> {
     pub strength: GradeStrength,
+    pub adherence: DirectionAdherence,
     /// The photographer's OWN direction — the raw one, never the Refine
     /// envelope: that envelope embeds a whole EditRecipe JSON, and a reviewer
     /// asked to check "did it honour the intent" needs the intent, not a copy of
@@ -1742,6 +1749,10 @@ pub(crate) fn build_verify_prompt(
 default taste.\n",
         intent.strength.pct()
     );
+    let adherence = format!(
+        "DIRECTION ADHERENCE TIER: {:?}. The proposer must be evaluated against this tier; do not impose generic restraint on a Brief direction.\n",
+        intent.adherence.tier()
+    );
     let direction = match intent.direction.map(str::trim).filter(|d| !d.is_empty()) {
         Some(d) => format!(
             "THEIR DIRECTION for this develop was: \"{}\". A recipe that follows it is doing what \
@@ -1753,7 +1764,7 @@ direction or breaks the image while following it.\n",
     };
     Ok(format!(
         "You are a photo-edit QA verifier. You do NOT see the image — judge ONLY from the data below.\n\
-{strength}{direction}\
+{strength}{adherence}{direction}\
 Decide whether this proposed RAW develop recipe is both SAFE and COMMITTED enough to apply. A \
 finished photograph is the goal, NOT timidity. Check, concretely:\n\
 - every slider is within its documented range (exposure_ev -5..5; most sliders -100..100; sharpening 0..150; confidence 0..1);\n\
@@ -1768,6 +1779,7 @@ PROPOSED RECIPE:\n{recipe_json}\n\n\
 Output ONLY the JSON object: no reasoning, no preamble, no markdown fence. Your entire reply must start with '{{' and end with '}}'. Shape:\n\
 {{\"decision\":\"accept\"|\"revise\"|\"reject\",\"reasons\":[\"short reason\", ...],\"revised_hint\":\"a short instruction for the next attempt if revise/reject, else null\"}}",
         strength = strength,
+        adherence = adherence,
         direction = direction,
         flat = verify_flat_clause(intent.strength.tier()),
         cooked = verify_cooked_clause(intent.strength.tier()),
@@ -2061,7 +2073,7 @@ mod tests {
                 &EditRecipe::default(),
                 &meta,
                 &hist,
-                &GradeIntent { strength: s, direction: None },
+                &GradeIntent { strength: s, adherence: crate::recipe::DirectionAdherence::default(), direction: None },
             )
             .unwrap()
         };
@@ -2089,7 +2101,7 @@ mod tests {
         let judge = |s| {
             super::judge::task_instruction(
                 JudgeTask::Develop,
-                Some(GradeIntent { strength: s, direction: None }),
+                Some(GradeIntent { strength: s, adherence: crate::recipe::DirectionAdherence::default(), direction: None }),
             )
         };
         assert_ne!(judge(calib), judge(bold), "gate 4 (visual judge) is deaf");
@@ -2104,6 +2116,7 @@ mod tests {
             std: Vec::new(),
             exemplars: Vec::new(),
             source_dir: None,
+            looks: Vec::new(), looks_dir: None, embed_provenance: None,
         };
         let ex = crate::style::StyleExemplar {
             stem: "x".into(),
@@ -2114,6 +2127,7 @@ mod tests {
             path: None,
             families: None,
             embed: None,
+            tags: Vec::new(), vocab_scores: None, desc: None, desc_embed: None,
         };
         assert_ne!(
             idx.render_reference(&[&ex], calib),
@@ -2172,7 +2186,7 @@ mod tests {
                 &EditRecipe::default(),
                 &meta,
                 &hist,
-                &GradeIntent { strength: GradeStrength::new(s), direction: d },
+                &GradeIntent { strength: GradeStrength::new(s), adherence: crate::recipe::DirectionAdherence::default(), direction: d },
             )
             .expect("the verify prompt builds")
         };
@@ -3285,5 +3299,15 @@ Final answer: {"decision":"accept","reasons":[]}"#;
             1,
             "a param rejection posts once — a second identical POST buys the same refusal"
         );
+    }
+
+    #[test]
+    fn verify_prompt_states_the_adherence_tier() {
+        let recipe = EditRecipe::default();
+        let meta = Meta { make: "T".into(), model: "T".into(), lens: None, iso: Some(100), shutter: None, aperture: None, focal_length_mm: None, exposure_bias_ev: None, date_time: None, width: 100, height: 100, as_shot_wb_coeffs: [1.0; 4] };
+        let hist = Histogram { luma: vec![1; 256], r: vec![1; 256], g: vec![1; 256], b: vec![1; 256], clip_black_pct: 0.0, clip_white_pct: 0.0, sample_pixels: 1 };
+        let prompt = build_verify_prompt(&recipe, &meta, &hist, &GradeIntent { strength: GradeStrength::default(), adherence: DirectionAdherence::new(0.9), direction: Some("briefly warmer") }).unwrap();
+        assert!(prompt.contains("DIRECTION ADHERENCE TIER: Brief"), "{prompt}");
+        assert!(prompt.contains("briefly warmer"));
     }
 }

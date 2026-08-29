@@ -32,12 +32,16 @@ use crate::config::Config;
 /// so400m tier) would silently produce an index whose exemplars are not
 /// comparable to each other.
 pub const EMBED_DIM: usize = 768;
+pub const MODEL_REPO: &str = "google/siglip2-base-patch16-384";
+pub const MODEL_REVISION: &str = "f775b65a79762255128c981547af89addcfe0f88";
 
 /// Everything one embedding run needs; built from [`Config`] like
 /// [`crate::segment::SegmentOpts`].
 pub struct EmbedOpts {
     pub python_bin: String,
     pub script: PathBuf,
+    pub text_file: Option<PathBuf>,
+    pub vocab_file: Option<PathBuf>,
 }
 
 impl EmbedOpts {
@@ -45,6 +49,8 @@ impl EmbedOpts {
         EmbedOpts {
             python_bin: cfg.python_bin.clone(),
             script: PathBuf::from(&cfg.embed_script),
+            text_file: None,
+            vocab_file: None,
         }
     }
 
@@ -71,8 +77,8 @@ impl EmbedOpts {
 /// invariant `parse_vector` checks moves, including the ±1e-3 norm gate. The
 /// only consumer of the elements themselves is `style::embed_distance`, which
 /// is a ranking: a dot product of two unit vectors, clamped to [-1, 1] and
-/// multiplied by `W_EMB_DEFAULT = 2.0` against a 14-dim block whose weights
-/// sum to 14.5. fp16 carries ~4.9e-4 of relative precision per element
+/// multiplied by the configured embedding weight against a 14-dim block.
+/// fp16 carries ~4.9e-4 of relative precision per element
 /// (10 explicit mantissa bits), and the quantity built from them is an order
 /// COMPARISON, not a measurement.
 ///
@@ -90,7 +96,7 @@ fn fp16_wanted() -> bool {
 /// The sidecar's argv, as a pure function of the four things that decide it —
 /// so the flags this build passes can be pinned by a test instead of being
 /// visible only to a running Python.
-fn sidecar_args(script: &Path, input: &Path, output: &Path, fp16: bool) -> Vec<std::ffi::OsString> {
+fn sidecar_args(script: &Path, input: &Path, output: &Path, fp16: bool, text_file: Option<&Path>, vocab_file: Option<&Path>) -> Vec<std::ffi::OsString> {
     let mut v: Vec<std::ffi::OsString> = vec![
         // `-E`: the second layer against a PYTHON* import hijack (the env
         // allowlist in `dotenv_child_env` is the first).
@@ -104,6 +110,8 @@ fn sidecar_args(script: &Path, input: &Path, output: &Path, fp16: bool) -> Vec<s
     if fp16 {
         v.push("--fp16".into());
     }
+    if let Some(p) = text_file { v.extend(["--text-file".into(), p.into()]); }
+    if let Some(p) = vocab_file { v.extend(["--vocab-file".into(), p.into()]); }
     v
 }
 
@@ -137,6 +145,17 @@ fn sidecar_args(script: &Path, input: &Path, output: &Path, fp16: bool) -> Vec<s
 /// gate: it is disk work, it costs no model, and holding the slot across it
 /// would serialise the cheap half too.
 pub fn embed_file(opts: &EmbedOpts, input: &Path, scratch: &Path) -> Result<Vec<f32>> {
+    Ok(embed_file_record(opts, input, scratch)?.vector)
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct EmbedRecord {
+    pub vector: Vec<f32>,
+    pub text_vector: Option<Vec<f32>>,
+    pub vocab_scores: Option<Vec<f32>>,
+}
+
+pub fn embed_file_record(opts: &EmbedOpts, input: &Path, scratch: &Path) -> Result<EmbedRecord> {
     if !opts.script.exists() {
         bail!(
             "style-embedding sidecar not found at {} — run from the project dir or set \
@@ -147,10 +166,10 @@ pub fn embed_file(opts: &EmbedOpts, input: &Path, scratch: &Path) -> Result<Vec<
     let text = crate::run_model_sidecar(
         "style-embedding sidecar",
         &opts.python_bin,
-        sidecar_args(&opts.script, input, scratch, fp16_wanted()),
+        sidecar_args(&opts.script, input, scratch, fp16_wanted(), opts.text_file.as_deref(), opts.vocab_file.as_deref()),
         scratch,
     )?;
-    let v = parse_vector(&text).with_context(|| {
+    let v = parse_record(&text).with_context(|| {
         format!("style-embedding sidecar wrote an unusable record at {}", scratch.display())
     })?;
     // The scratch file is an INTERMEDIATE, not an artifact: the vector is what
@@ -170,6 +189,10 @@ pub fn embed_file(opts: &EmbedOpts, input: &Path, scratch: &Path) -> Result<Vec<
 /// dot product, so an unnormalised vector would not be *wrong by a little*, it
 /// would silently outweigh every other exemplar.
 pub fn parse_vector(text: &str) -> Result<Vec<f32>> {
+    Ok(parse_record(text)?.vector)
+}
+
+pub fn parse_record(text: &str) -> Result<EmbedRecord> {
     let rec: serde_json::Value = serde_json::from_str(text.trim())
         .context("style-embedding output is not JSON")?;
     if let Some(e) = rec.get("error").and_then(|v| v.as_str()) {
@@ -201,7 +224,26 @@ pub fn parse_vector(text: &str) -> Result<Vec<f32>> {
     if (norm - 1.0).abs() > 1e-3 {
         bail!("style-embedding vector is not L2-normalised (norm {norm:.6})");
     }
-    Ok(v)
+    let parse_vec = |key: &str| -> Result<Option<Vec<f32>>> {
+        let Some(arr) = rec.get(key).and_then(|v| v.as_array()) else { return Ok(None) };
+        if arr.len() != EMBED_DIM { bail!("style-embedding `{key}` has wrong width {}", arr.len()); }
+        let mut out = Vec::with_capacity(arr.len());
+        for x in arr {
+            let f = x.as_f64().context("style-embedding text vector holds a non-number")? as f32;
+            if !f.is_finite() { bail!("style-embedding `{key}` holds a non-finite element"); }
+            out.push(f);
+        }
+        let n = out.iter().map(|&x| (x as f64)*(x as f64)).sum::<f64>().sqrt();
+        if (n - 1.0).abs() > 1e-3 { bail!("style-embedding `{key}` is not L2-normalised (norm {n:.6})"); }
+        Ok(Some(out))
+    };
+    let vocab_scores = rec.get("vocab_scores").and_then(|v| v.as_array()).map(|arr| {
+        if arr.len() != crate::style::LOOK_VOCAB.len() {
+            return Err(anyhow::anyhow!("style-embedding `vocab_scores` has wrong width {} (expected {})", arr.len(), crate::style::LOOK_VOCAB.len()));
+        }
+        arr.iter().map(|x| x.as_f64().map(|v| v as f32).filter(|v| v.is_finite()).context("style-embedding vocab score is not finite")).collect::<Result<Vec<_>>>()
+    }).transpose()?;
+    Ok(EmbedRecord { vector: v, text_vector: parse_vec("text_vector")?, vocab_scores })
 }
 
 #[cfg(test)]
@@ -223,6 +265,27 @@ mod tests {
         assert_eq!(parse_vector(&unit_record(EMBED_DIM)).unwrap().len(), EMBED_DIM);
         let e = parse_vector(&unit_record(512)).unwrap_err().to_string();
         assert!(e.contains("512-dim"), "{e}");
+    }
+
+    #[test]
+    fn vocab_scores_width_is_the_vocab_len() {
+        let vector = unit_record(EMBED_DIM);
+        let scores = (0..crate::style::LOOK_VOCAB.len())
+            .map(|i| format!("{:.1}", i as f32))
+            .collect::<Vec<_>>()
+            .join(",");
+        let text = vector.trim_end_matches('}').to_owned()
+            + &format!(",\"vocab_scores\":[{scores}]}}");
+        let record = parse_record(&text).expect("a full vocabulary score vector parses");
+        assert_eq!(record.vocab_scores.as_ref().map(Vec::len), Some(crate::style::LOOK_VOCAB.len()));
+        let short_scores = (0..crate::style::LOOK_VOCAB.len() - 1)
+            .map(|i| format!("{:.1}", i as f32))
+            .collect::<Vec<_>>()
+            .join(",");
+        let short = vector.trim_end_matches('}').to_owned()
+            + &format!(",\"vocab_scores\":[{short_scores}]}}");
+        let error = parse_record(&short).unwrap_err().to_string();
+        assert!(error.contains("wrong width"), "{error}");
     }
 
     /// MUTATION: drop the norm check and an unnormalised vector is adopted —
@@ -271,7 +334,7 @@ mod tests {
     #[test]
     fn the_sidecar_argv_carries_the_half_precision_flag() {
         let args = |fp16| {
-            sidecar_args(Path::new("embed.py"), Path::new("in.png"), Path::new("out.json"), fp16)
+            sidecar_args(Path::new("embed.py"), Path::new("in.png"), Path::new("out.json"), fp16, None, None)
                 .iter()
                 .map(|a| a.to_string_lossy().into_owned())
                 .collect::<Vec<_>>()

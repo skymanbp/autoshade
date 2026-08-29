@@ -104,6 +104,10 @@ fn zh_map() -> &'static HashMap<&'static str, &'static str> {
 /// (placeholders included), or the lookup silently misses.
 #[rustfmt::skip]
 static ZH_ENTRIES: &[(&str, &str)] = &[
+    (" [look reference: finished photo {stem} from the photographer's look library; tags: {tags}]", " [妫€绱㈠簱瀹屾垚鐓х墖 {stem}锛涙爣绛撅細{tags}]"),
+    (" [finished look photo {stem} also went to the vision model as IMAGE 2]", " [瀹屾垚鐓х墖 {stem} 浣滀负 IMAGE 2 鍙戦€佽瑙夋ā鍨嬪鐞嗭紞"),
+    (" [look library unavailable for this develop ({n} finished photos): style embedding was off or no query vector was produced]", " [鐪嬪浘搴撳鏈寮€鍙戜笉鍙敤锛�{n} 寮犵収鐗囷紝宓屽叆鏈惎鐢ㄦ垨鏃犳煡璇㈠悜閲�]"),
+    (" [direction adherence tier: {tier}]", " [鏂瑰悜閬靛惊绛夌骇锛�{tier}]"),
     (" White balance withheld: it would paint hues the target does not contain.", " 白平衡已保留：目标没有这些色相。"),
     (" White balance was clamped into the strength budget (gain ratio {from} to {to}, rotated share {rotated_share} over {coverage} of the frame); the requested cast exceeded the honest range.", " 白平衡已限制在强度预算内（增益比 {from} 至 {to}，色相旋转份额 {rotated_share}，覆盖画面 {coverage}）；请求色偏超出范围。"),
     (" White balance withheld: rotated share {rotated_share} over {coverage} of the frame exceeded the strength budget.", " 白平衡已保留：色相旋转份额 {rotated_share}（覆盖画面 {coverage}）超出强度预算。"),
@@ -683,7 +687,7 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
         "在建好风格参考库之前，这个滑杆不起作用——下面那一节就是用来建库的。"),
     ("Style reference library", "风格参考库"),
     ("an unrecorded folder", "未记录的文件夹"),
-    ("{n} of your own edits · from {path}", "{n} 条你自己的编辑 · 来自 {path}"),
+    ("{n} finished photos · from {path} · built {age} ago", "{path} · {n} 张完成照片 · {age} 前建库"),
     ("Library file: {path}", "库文件：{path}"),
     ("built {hours}h ago", "{hours} 小时前建库"),
     ("built {days}d ago", "{days} 天前建库"),
@@ -1943,6 +1947,17 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
         " 跨图对应已测量（DIFT）：画面 {cov}% 在目标中有可信对应（中位置信 {med}）；完整区拟合按其为像素对加权，并在对应位置读取被移动的内容。"),
     (" Cross-image correspondence unavailable ({e}) — the content-divergent estimators ran without it.",
         " 跨图对应不可用（{e}）——内容分歧估计器已在没有它的情况下运行。"),
+    ("Adherence", "鏂规悳閬靛畾"),
+    ("How closely the AI follows your direction; disabled until Direction has text", "AI 閬靛畾鎸囧畾鐨勭▼搴︼紱娌℃湁 Direction 鏂囨湰鏃跺仠鐢ㄥ"),
+    ("Look library", "椋庢牸搴�"),
+    ("Use look library", "浣跨敤椋庢牸搴�"),
+    ("Pick look folder…", "閫夋嫨椋庢牸鏂囦欢澶�…"),
+    ("Build look library", "鏋勫缓椋庢牸搴�"),
+    ("Use SigLIP 2 look embedding (downloads 1.5 GB once; index builds and analyses take longer)", "浣跨敤 SigLIP 2 椋庢牸鍚戦噺锛堜笅杞�1.5 GB锛屾寔缁�1.5 GB锛�"),
+    ("Embedding is optional and local. The environment override wins when set; rebuild the index after changing this switch.", "鍚戦噺鏄彲閫夌殑鏈湴鍔熻兘锛氳缃幆澧冩椂浠ュ叾涓哄噯锛涙洿鏀瑰悗璇峰ソ鏂伴噸寤虹储寮�。"),
+    ("Building the look library from {path}", "姝ｅ湪浠�{path} 鏋勫缓椋庢牸搴�"),
+    ("Look library built: {n} finished photos from {path}", "椋庢牸搴撳缓绔嬪畬鎴愶細{path} 鐨�{n} 寮犳垚鍝�"),
+    ("{n} of your own edits · from {path} · embeddings {with_embedding}/{total} · looks {looks}", "{path} · {n} 涓嚜鏈夌紪杈� · 鍚戦噺 {with_embedding}/{total} · 椋庢牸 {looks}"),
 ];
 
 #[cfg(test)]

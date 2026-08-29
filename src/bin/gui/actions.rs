@@ -48,10 +48,14 @@ impl AutoshopApp {
             app.grade_strength = prefs.grade_strength.clamp(0.0, 1.0);
             app.send_style_ref_image = prefs.send_style_ref_image;
             app.deep_think = prefs.deep_think;
+            app.style_embed = prefs.style_embed;
             // Only a folder that still EXISTS is prefilled: a picker opened at
             // a deleted path lands wherever the OS decides (the same rule the
             // gallery restore above follows).
             app.style_src_dir = prefs.style_src_dir.clone().filter(|d| d.is_dir());
+            app.looks_src_dir = prefs.looks_src_dir.clone().filter(|d| d.is_dir());
+            app.use_looks = prefs.use_looks;
+            app.direction_adherence = autoshop::recipe::DirectionAdherence::new(prefs.direction_adherence).get();
             app.exp_format = ExportFormat::from_pref(prefs.exp_format, prefs.save_jpeg);
             app.exp_dest = ExportDest::from_pref(prefs.exp_dest);
             app.last_export_dir = prefs.last_export_dir.clone();
@@ -2860,6 +2864,7 @@ impl AutoshopApp {
         // ONE terminal message, and this build has to report while it runs.
         let tx = self.tx.clone();
         let ctx = self.egui_ctx.clone();
+        let embed_pref = self.style_embed;
         self.spawn_worker(
             move || {
                 let progress = |done: usize, total: usize| {
@@ -2867,7 +2872,7 @@ impl AutoshopApp {
                     // An mpsc send does not wake egui (see `spawn_worker`).
                     ctx.request_repaint();
                 };
-                let index = match autoshop::style::StyleIndex::build_reporting(&dir, &progress) {
+                let index = match autoshop::style::StyleIndex::build_reporting_with_pref(&dir, embed_pref, &progress) {
                     Ok(ix) => ix,
                     Err(e) => {
                         return Msg::StyleBuilt(Box::new(StyleBuildOutcome::Failed {
@@ -2885,7 +2890,7 @@ impl AutoshopApp {
                 // vector" means two opposite things — the user never asked for
                 // the sidecar (nothing to report), or they did and it failed
                 // for every photo (the whole point of reporting).
-                let without_embedding = if autoshop::style::embedding_enabled() {
+                let without_embedding = if autoshop::style::embedding_effective(embed_pref) {
                     index.exemplars.iter().filter(|e| e.embed.is_none()).count()
                 } else {
                     0
@@ -2906,6 +2911,35 @@ impl AutoshopApp {
                     Err(e) => Msg::StyleBuilt(Box::new(StyleBuildOutcome::Failed {
                         err: format!("{e:#}"),
                     })),
+                }
+            },
+            |e| Msg::StyleBuilt(Box::new(StyleBuildOutcome::Failed { err: e.to_string() })),
+        );
+    }
+
+    pub(crate) fn start_looks_build(&mut self, dir: PathBuf) {
+        if self.style_build_inflight { return; }
+        self.style_build_inflight = true;
+        self.style_build_progress = None;
+        self.status = trf(self.lang, "Building the look library from {path}", &[("path", &abs_display(&dir))]);
+        let tx = self.tx.clone();
+        let ctx = self.egui_ctx.clone();
+        let embed_pref = self.style_embed;
+        self.spawn_worker(
+            move || {
+                let progress = |done: usize, total: usize| {
+                    let _ = tx.send(Msg::StyleBuildProgress { done, total });
+                    ctx.request_repaint();
+                };
+                match autoshop::style::StyleIndex::build_looks_with_pref(&dir, embed_pref, &progress) {
+                    Ok(index) => {
+                        let total = index.looks.len();
+                        match index.save(&autoshop::store::style_index_path()) {
+                            Ok(()) => Msg::StyleBuilt(Box::new(StyleBuildOutcome::LooksSaved { total, dir })),
+                            Err(e) => Msg::StyleBuilt(Box::new(StyleBuildOutcome::Failed { err: format!("{e:#}") })),
+                        }
+                    }
+                    Err(e) => Msg::StyleBuilt(Box::new(StyleBuildOutcome::Failed { err: format!("{e:#}") })),
                 }
             },
             |e| Msg::StyleBuilt(Box::new(StyleBuildOutcome::Failed { err: e.to_string() })),
@@ -2942,6 +2976,8 @@ impl AutoshopApp {
             // the same reason — a checkbox flipped mid-call must not change
             // what this call is paying for.
             think: self.deep_think,
+            adherence: autoshop::recipe::DirectionAdherence::new(self.direction_adherence),
+            use_looks: self.use_looks,
         };
         // Free-text direction ("warmer, moodier") steers the proposal; with
         // `refine` (its own button now — no pre-armed checkbox), the AI

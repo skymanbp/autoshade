@@ -13,7 +13,7 @@ use crate::advisor::{
 };
 use crate::config::Config;
 use crate::decode;
-use crate::recipe::{EditRecipe, GradeStrength, StrengthTier};
+use crate::recipe::{DirectionAdherence, EditRecipe, GradeStrength, StrengthTier};
 use crate::xmp;
 
 /// The TASTE dials one develop is asked for — the two independent axes plus the
@@ -60,6 +60,10 @@ pub struct GradeRequest {
     /// against. It is an INTERACTIVE opt-in: the GUI checkbox, `--deep`, the web
     /// body's `deep`.
     pub think: bool,
+    /// How closely to follow the optional direction.
+    pub adherence: DirectionAdherence,
+    /// Whether the separate finished-photo look library may answer retrieval.
+    pub use_looks: bool,
 }
 
 impl GradeRequest {
@@ -86,6 +90,63 @@ struct StyleRetrieval {
     stems: Vec<String>,
     /// Absolute path of the NEAREST shot, when the index recorded one.
     nearest: Option<String>,
+    /// Finished-photo look reference block, if the look library answered.
+    look_reference: Option<String>,
+    /// Nearest look image path, used only when the reference-image opt-in is on.
+    look_nearest: Option<String>,
+    look_stem: Option<String>,
+    look_tags: Vec<String>,
+    looks_unreachable: bool,
+    looks_count: usize,
+}
+
+/// The single retrieval entry point shared by the develop pipeline and the
+/// offline `style-query` diagnostic. Keeping the selection here prevents the
+/// diagnostic from growing a subtly different ranking path.
+pub fn retrieve_style<'a>(
+    ix: &'a crate::style::StyleIndex,
+    meta: &decode::Meta,
+    histogram: &decode::Histogram,
+    query_embed: Option<&[f32]>,
+    query_text: Option<&[f32]>,
+    raw: &Path,
+    use_looks: bool,
+) -> (Vec<&'a crate::style::StyleExemplar>, Vec<&'a crate::style::LookExemplar>) {
+    let exemplars = ix.retrieve_with_embed(
+        meta,
+        histogram,
+        query_embed,
+        query_text,
+        crate::style::RETRIEVE_K,
+        raw,
+    );
+    let looks = if use_looks {
+        ix.retrieve_looks(query_embed, query_text, 2)
+    } else {
+        Vec::new()
+    };
+    (exemplars, looks)
+}
+
+fn reference_image_choice(retrieved: &StyleRetrieval) -> Option<(&str, bool)> {
+    retrieved
+        .look_nearest
+        .as_deref()
+        .map(|path| (path, true))
+        .or_else(|| retrieved.nearest.as_deref().map(|path| (path, false)))
+}
+
+fn direction_adherence_tier(
+    direction: Option<&str>,
+    adherence: DirectionAdherence,
+) -> Option<&'static str> {
+    direction
+        .filter(|text| !text.trim().is_empty())
+        .map(|_| match adherence.tier() {
+            crate::recipe::AdherenceTier::Hint => "hint",
+            crate::recipe::AdherenceTier::Direct => "direct",
+            crate::recipe::AdherenceTier::Brief => "brief",
+        })
 }
 
 /// Encode one past photo as the JPEG preview the vision model receives —
@@ -167,7 +228,7 @@ pub fn produce_recipe(
     let user_direction = guidance;
     // The intent every downstream reviewer in this function shares (R23-3).
     let intent =
-        crate::advisor::GradeIntent { strength: req.strength, direction: user_direction };
+        crate::advisor::GradeIntent { strength: req.strength, adherence: req.adherence, direction: user_direction };
 
     // Refine mode: when `base` (the user's CURRENT edit) is given, fold it into
     // the direction so GPT adjusts that edit rather than proposing from scratch.
@@ -211,17 +272,19 @@ pub fn produce_recipe(
     // develop, spent only when the index it is being compared against has the
     // vectors to spend it on. A failure degrades to the 14-dim retrieval with
     // a stderr line, never an aborted develop.
-    let query_embed: Option<Vec<f32>> = (req.style > 0.0 && crate::style::embedding_enabled())
+    let mut query_text: Option<Vec<f32>> = None;
+    let query_embed: Option<Vec<f32>> = (req.style > 0.0 && crate::style::embedding_effective(false))
         .then(|| crate::embed::EmbedOpts::from_config(cfg))
         .filter(|o| o.available())
         .and_then(|o| {
-            match crate::style::embed_preview(
+            match crate::style::embed_preview_with_text(
                 &o,
                 &decoded.preview,
-                &std::env::temp_dir(),
+                &crate::store::store_root(),
                 "query",
+                user_direction,
             ) {
-                Ok(v) => Some(v),
+                Ok(r) => { query_text = r.text_vector; Some(r.vector) },
                 Err(e) => {
                     // A SIBLING of the four lines the adjudication enumerated,
                     // found by re-walking `eprintln!` in this file at R28 HEAD
@@ -286,13 +349,16 @@ pub fn produce_recipe(
         Some(crate::style::EffectiveIndex::Absent) | None => None,
     };
     let retrieved = style_ix.as_ref().map(|ix| {
-        let ex = ix.retrieve_with_embed(
+        let (ex, looks) = retrieve_style(
+            ix,
             &meta,
             &histogram,
             query_embed.as_deref(),
-            crate::style::RETRIEVE_K,
+            query_text.as_deref(),
             raw,
+            req.use_looks,
         );
+        let look_reference = ix.render_look_reference(&looks);
         StyleRetrieval {
             // GATE 5: the reference block's own "do not exceed it" clauses are
             // templated on the STYLE axis, not on grade strength.
@@ -303,6 +369,12 @@ pub fn produce_recipe(
             // pre-path index records none — that degrades with a note rather
             // than silently sending nothing (see below).
             nearest: ex.first().and_then(|e| e.path.clone()),
+            look_nearest: looks.first().map(|l| l.path.clone()),
+            look_stem: looks.first().map(|l| l.stem.clone()),
+            look_tags: looks.first().map(|l| l.tags.clone()).unwrap_or_default(),
+            look_reference,
+            looks_unreachable: req.use_looks && (query_embed.is_none() && query_text.is_none()) && !ix.looks.is_empty(),
+            looks_count: ix.looks.len(),
         }
     });
     let reference: Option<String> = retrieved.as_ref().and_then(|r| r.reference.clone());
@@ -316,14 +388,16 @@ pub fn produce_recipe(
     // behaviour), never fail a paid analysis — and every degradation says so.
     let mut ref_preview: Option<Preview> = None;
     let mut ref_image_stem: Option<String> = None;
+    let mut ref_image_is_look = false;
     let mut ref_image_err: Option<String> = None;
     if req.send_reference_image
         && let Some(r) = &retrieved
     {
-        match &r.nearest {
-            Some(p) => match reference_preview(Path::new(p)) {
+        match reference_image_choice(r) {
+            Some((p, is_look)) => match reference_preview(Path::new(p)) {
                 Ok(jpeg) => {
                     ref_image_stem = Some(stem(Path::new(p)).to_string());
+                    ref_image_is_look = is_look;
                     ref_preview = Some(Preview { jpeg });
                 }
                 Err(e) => ref_image_err = Some(crate::rationale::error_line(&e)),
@@ -383,6 +457,8 @@ pub fn produce_recipe(
         // struct): a reference the first call saw and the revision did not
         // would make the two rounds answer different questions.
         reference_image: ref_preview.as_ref(),
+        look_reference: retrieved.as_ref().and_then(|r| r.look_reference.as_deref()),
+        reference_image_is_look: ref_image_is_look,
         // GATE 1 (prompt) + GATE 2 (`temper`, inside the provider).
         strength: req.strength,
         // R23-4: the structured working + the deepened tier, on EVERY propose
@@ -390,6 +466,7 @@ pub fn produce_recipe(
         // first call that planned and a revision that did not would answer two
         // different questions, exactly like the reference image above.
         think: req.think,
+        adherence: req.adherence,
     };
     let mut det_notes: Vec<crate::rationale::Note> = Vec::new();
     // The working of the proposal that SURVIVES (R23-4). Every arm that
@@ -1009,6 +1086,51 @@ pub fn produce_recipe(
             crate::rationale::Note::new(
                 crate::rationale::keys::STYLE_REF_IMAGE_FAILED,
                 vec![("e", e.clone())],
+            ),
+        );
+    }
+    if let Some(r) = &retrieved {
+        if let Some(stem) = &r.look_stem {
+            crate::rationale::push_note(
+                &mut recipe.rationale,
+                &mut det_notes,
+                crate::rationale::Note::new(
+                    crate::rationale::keys::STYLE_LOOK_REFERENCE,
+                    vec![
+                        ("stem", stem.clone()),
+                        ("tags", r.look_tags.join(", ")),
+                    ],
+                ),
+            );
+        }
+        if r.looks_unreachable {
+            crate::rationale::push_note(
+                &mut recipe.rationale,
+                &mut det_notes,
+                crate::rationale::Note::new(
+                    crate::rationale::keys::STYLE_LOOKS_UNREACHABLE,
+                    vec![("n", r.looks_count.to_string())],
+                ),
+            );
+        }
+    }
+    if let Some(stem) = &ref_image_stem && ref_image_is_look {
+            crate::rationale::push_note(
+                &mut recipe.rationale,
+                &mut det_notes,
+                crate::rationale::Note::new(
+                    crate::rationale::keys::STYLE_LOOK_IMAGE,
+                    vec![("stem", stem.clone())],
+                ),
+            );
+    }
+    if let Some(tier) = direction_adherence_tier(user_direction, req.adherence) {
+        crate::rationale::push_note(
+            &mut recipe.rationale,
+            &mut det_notes,
+            crate::rationale::Note::new(
+                crate::rationale::keys::ADVISOR_NOTE_DIRECTION_ADHERENCE,
+                vec![("tier", tier.into())],
             ),
         );
     }
@@ -6431,6 +6553,7 @@ mod tests {
             path: Some(format!("D:\\rolls\\{stem}.ARW")),
             families: None,
             embed: None,
+            tags: Vec::new(), vocab_scores: None, desc: None, desc_embed: None,
         };
         let all = [ex("DSC0001"), ex("DSC0002"), ex("DSC0003")];
         let refs: Vec<&StyleExemplar> = all.iter().collect();
@@ -6470,5 +6593,52 @@ mod tests {
             "a file in the parent chain refuses (create_dir_all fails)"
         );
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn look_reference_image_replaces_the_raw_neighbour_and_is_named() {
+        let retrieved = StyleRetrieval {
+            reference: Some("raw reference".into()),
+            targets: std::collections::BTreeMap::new(),
+            stems: vec!["raw-shot".into()],
+            nearest: Some("D:\\raw\\raw-shot.arw".into()),
+            look_reference: Some("finished look reference".into()),
+            look_nearest: Some("D:\\looks\\finished.jpg".into()),
+            look_stem: Some("finished".into()),
+            look_tags: vec!["warm golden tones".into()],
+            looks_unreachable: false,
+            looks_count: 1,
+        };
+        let (path, is_look) = reference_image_choice(&retrieved).expect("look answer");
+        assert_eq!(path, "D:\\looks\\finished.jpg");
+        assert!(is_look, "the selected image is explicitly from the look library");
+        assert!(crate::rationale::keys::STYLE_LOOK_IMAGE.contains("look photo"));
+    }
+
+    #[test]
+    fn adherence_note_rides_only_with_a_direction() {
+        assert_eq!(direction_adherence_tier(None, DirectionAdherence::default()), None);
+        assert_eq!(direction_adherence_tier(Some("   "), DirectionAdherence::default()), None);
+        assert_eq!(
+            direction_adherence_tier(Some("warmer"), DirectionAdherence::new(0.2)),
+            Some("hint")
+        );
+        assert_eq!(
+            direction_adherence_tier(Some("warmer"), DirectionAdherence::default()),
+            Some("direct")
+        );
+        assert_eq!(
+            direction_adherence_tier(Some("warmer"), DirectionAdherence::new(0.9)),
+            Some("brief")
+        );
+    }
+
+    #[test]
+    fn style_query_uses_the_pipeline_retrieval_path() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let main = std::fs::read_to_string(root.join("src/main.rs")).expect("main source");
+        assert!(main.contains("pipeline::retrieve_style("), "style-query must use the shared helper");
+        let pipeline = std::fs::read_to_string(root.join("src/pipeline.rs")).expect("pipeline source");
+        assert!(pipeline.contains("let (ex, looks) = retrieve_style("), "develop must use the shared helper");
     }
 }

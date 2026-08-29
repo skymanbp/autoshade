@@ -51,8 +51,9 @@ tools are separate, opt-in paths and are labelled as such.
   recipe (crop, tone, white balance, curves, HSL, colour grading, texture,
   clarity, dehaze, detail, and parametric or bitmap local masks); a data-only
   verifier checks it against the image statistics; the engine renders it; one
-  bounded visual-review revision may follow. Guidance text steers the proposal
-  and a Strength control bounds how far it may move.
+  bounded visual-review revision may follow. Guidance text steers the proposal;
+  independent Strength and Direction-adherence controls bound commitment and
+  how closely the optional direction is followed.
 - **Feature 2 — A deterministic develop engine.** Exposure, white balance,
   tonal controls, RGB point curves, HSL, colour grading, texture, clarity,
   dehaze, noise reduction, sharpening, vignette, crop, and lens correction, with
@@ -67,8 +68,10 @@ tools are separate, opt-in paths and are labelled as such.
   Lightroom brush dab streams are imported; the beside-RAW export is a
   separate, confirmed action.
 - **Feature 5 — Style read.** Index your own Lightroom RAW+XMP pairs and let
-  the advisor retrieve similar prior edits as soft references; nothing is
-  copied pixel for pixel.
+  the advisor retrieve similar prior edits as soft references; a separate look
+  library can retrieve finished photos through local SigLIP 2 image/text
+  embeddings and zero-shot tags. Embeddings are opt-in (the GUI preference or
+  `--embed`), and nothing is copied pixel for pixel.
 - **Feature 6 — Reverse-fit.** `match` or the GUI's **Reverse-fit** estimates an
   engine recipe from any target look — a generated image, someone else's
   render, a reference frame — measures how far the target's *content* has
@@ -122,17 +125,28 @@ through the same 512-px frame the query goes through, so index and query can
 never disagree.
 
 At develop time the photo retrieves the **4 most similar past shots** with the
-hybrid distance `Σ wᵢ(qᵢ−eᵢ)² + W_EMB·(1−cos(q,e))` (`W_EMB = 2.0`, retained
-after a 147-exemplar calibration that scanned 0…8). Their settings, curve habit
-and colour families reach the advisor as a *soft reference*; the `style_pull`
+hybrid distance `d14 + W_EMB·(1−cos(q_img,e_img)) + W_TXT·(1−cos(q_txt,e_img)) + W_DESC·(1−cos(q_txt,e_desc))`.
+The shipped `W_EMB`, `W_TXT`, and `W_DESC` are the calibration harness winners
+(`4`, `0`, and `0` respectively; the corpus run's image-weight improvement CI
+was positive). Their
+settings, curve habit and colour families reach the advisor as a *soft reference*;
+the `style_pull`
 (0.18 at the shipped Style 0.3, full at Style 1.0) moves the proposal toward your historical means
 without copying one, and the rationale names the shots it leaned on. Strength
 above 0.70 with Style below 0.85 no longer receives the old committed-tier
 FLOOR wording because that floor belongs to the Style axis. It is
-sized like a retrieval system — 5,000 exemplars / 96 MiB, both caps derived
-from the measured 12.41 bytes per serialised embedding element. From the other
+bounded at 5,000 exemplars and a 228 MiB serialized index envelope, derived from
+the two 768-D vectors, vocabulary scores, tags, and bounded description. From the other
 side, `match --style-prompt` extracts a reusable text style brief from a
 source/target pair that `reimagine` accepts as its Direction.
+
+Finished baked photos are indexed separately with `style-index --looks <dir>`;
+they carry only image/text vectors, tags, and optional descriptions, so they can
+guide the proposer but never become recipe targets or blend inputs. A look answer
+is unreachable, and disclosed as such, when embedding is off or no query vector
+was produced. The Direction-adherence slider has Hint, Direct, and Brief tiers;
+the shipped `0.65` Direct tier preserves the historical direction block byte for
+byte, while the other tiers change only its wording.
 
 ### 2. Reverse-fit: inverse rendering from any finished look
 
@@ -377,7 +391,7 @@ estimate. Sources are the pinned claims in
 | Reverse-fit, sunset | look error 0.060 → 0.042, confidence 0.746691 | [docs/SHOWCASE.md](docs/SHOWCASE.md) |
 | Local-field ceiling, calibration pair | global fit 0.0961 against a ceiling of 0.0700; the accepted sky zone realizes 0.134 of the distance | [What is new §7](#7-a-bilateral-grid-local-field-prices-every-local-producer-first) |
 | AI develop, model judge | cat pair 62 → 86; townhouse 84 → 86; balcony 78 → 84; hillside 63 → 87 (automated scores) | [docs/SHOWCASE.md](docs/SHOWCASE.md) |
-| Style retrieval weight | `W_EMB=2.0` retained after a 147-exemplar calibration | [AI advisor](#ai-advisor-and-reverse-fit) |
+| Style retrieval weights | corpus harness: `W_EMB=4`, `W_TXT=0`, `W_DESC=0`; `W_LOOK=1.0` | [AI advisor](#ai-advisor-and-reverse-fit) |
 | Memory budget | 1800 MB per photo from a 1771 MB reference probe; 4 GiB RAW admission gate | [Application](#application-and-infrastructure) |
 
 ## Install and quickstart
@@ -618,8 +632,10 @@ explicit. `LR_MASK_FRAME_SCALE=1.0`, `LocalExposure2012=EV/4`, local Hue is
 `src/advisor/` validates AI proposals into bounded recipes, keeps Responses at
 `store:false`, gives the verifier data rather than pixels, and adopts a guided
 revision only when it does not lower the score. `src/style.rs` retrieves
-z-scored RAW+XMP exemplars with optional SigLIP 2 (`W_EMB=2.0` retained after a
-147-exemplar calibration). `src/fit.rs` performs luminance-CDF, exposure,
+z-scored RAW+XMP exemplars with four optional cosine terms (image, direction text,
+description text, and the separate finished-photo look library); the shipped
+weights are recorded from the calibration harness and remain zero for the three
+terms without corpus-backed evidence. `src/fit.rs` performs luminance-CDF, exposure,
 basis, tone, saturation, and cast inverse stages with a ≥45°/≥5% foreign-hue
 veto; `src/correspond.rs` + `python/correspond.py` measure the DIFT (SD 2.1)
 correspondence field that the reverse-fit consults automatically on
