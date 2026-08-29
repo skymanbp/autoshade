@@ -92,9 +92,13 @@
 > experimental generative edits, an optional pixel-**heal** retouch mode (§4.7)
 > the deterministic look **reverse-fit** (§4.8) and the local server's refusal
 > model (§4.9).
-> 1034 library + 15 CLI + 145 GUI + 2+2 contract tests are enumerated in the GUI
-> build; the library result is 1023 pass + 11 `#[ignore]`d forensic probes
-> (counts refreshed 2026-08-28 after the B3 free-mask batch: library 1017→1034,
+> 1044 library + 15 CLI + 145 GUI + 2+2 contract tests are enumerated in the GUI
+> build; the library result is 1033 pass + 11 `#[ignore]`d forensic probes
+> (counts refreshed 2026-08-28 after the linear-falloff line: library 1034→1041
+> (+7 by name, `56dd690`) → 1044 (+3 by name, the `Eased` flip:
+> `linear_mask_renders_the_eased_ramp`, `shipped_linear_ramp_is_eased_end_to_end`
+> and the radial/bitmap split of the clamped-baseline test); the B3 free-mask
+> batch `662b688` before it went 1017→1034,
 > set diff +17/−0 by name against `d21304a` = the 17 tests in
 > [`src/fit_zoned/freemask/tests.rs`](../src/fit_zoned/freemask/tests.rs); the
 > local-field batch `d21304a` before it went 991→1017, +26/−0 against `10e02bb`,
@@ -1432,10 +1436,13 @@ experiment:
 
   Linear coverage has one engine law, `linear_coverage(t, profile)`, applied
   after the existing H2 handle transport and pixel/aspect projection. The
-  shipped `LINEAR_FALLOFF` is `Clamped`, preserving the historical ramp and
-  every render byte. `Eased` is the C1 Hermite smoothstep profile reserved for
-  the one-constant flip after the Lightroom falloff measurement; it is pending
-  that evidence and is not enabled in this release.
+  shipped `LINEAR_FALLOFF` is `Eased`, the measured C1 Hermite smoothstep:
+  Lightroom turns over at both handles (80/80 rows) and a free-end profile
+  fit (handle rows and profile fitted jointly, so a soft profile cannot hide
+  inside a shrunken span; `scripts/linear_falloff_probe.py --fit`) reaches RMS
+  0.0045 for smoothstep against 0.017 for linear. This is a render hard change
+  for linear
+  masks only; radial and bitmap masks remain byte-identical.
 
   ⚠ `mask_warp_center` and `linear_handle_warp` are two deliberate v1.0.0
   **hard forward schema breaks** inside `LensProfile`: older `deny_unknown_fields`
