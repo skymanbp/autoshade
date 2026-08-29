@@ -644,13 +644,13 @@ mod tests {
         let code_lines = || SEGMENT_SRC.lines().map(str::trim).filter(|l| !l.starts_with('#'));
         assert_eq!(
             code_lines().filter(|l| l.contains("local_files_only=True")).count(),
-            3,
-            "both halves of the sky load and SAM's must refuse to resolve a remote name"
+            5,
+            "both single- and multi-class sky loads and SAM's must refuse to resolve a remote name"
         );
         assert_eq!(
             code_lines().filter(|l| l.contains("from_pretrained(")).count(),
-            3,
-            "a fourth from_pretrained would be a fourth chance to resolve a remote name"
+            5,
+            "an unpinned from_pretrained would be another chance to resolve a remote name"
         );
         assert!(
             SEGMENT_SRC.contains("repo_path=d"),

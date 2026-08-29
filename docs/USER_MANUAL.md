@@ -92,11 +92,18 @@ also pass the foreign-hue veto and a weighted rotation allowance, pinned at
 remains, it is withheld and the recipe stays as-shot with a typed explanation.
 
 With **Zoned fit (sky)** enabled, reverse-fit always solves the global recipe
-first. Successful segmentation adds semantic sky/land bitmap corrections; if
+first. Successful segmentation adds up to four disjoint semantic class bitmap
+corrections; each region selects Full or Atmosphere independently. If
 segmentation is disabled or unavailable, the same entry automatically tries
 evidence-gated native luminance ranges instead, and if no band is accepted the
 global recipe is kept. A range band is retained only when its composed
 evidence-weighted frame is no worse than the running global/banded result.
+The historical two-region route is the default. Enable **Up to four semantic
+regions** in the GUI, or pass `--regions 4` on the CLI, to opt in to the
+expanded route. It performs one OneFormer inference per frame and may take
+longer. The default two-region dials and confidence are byte-identical to
+`662b688`; only the rationale gains one typed `ZONE_ALREADY_MATCHED` note per
+zone whose dials did not move.
 Generated range masks persist as editable **Luminance range** cards with their
 four ordered bounds; their sentinel-hosted range components project to
 Lightroom XMP, while semantic bitmap masks remain engine-only. This release
@@ -119,8 +126,8 @@ to describe them (bins 3 and 4 on the calibration pair, at 29.1/255 and
 actually measured, so an unmeasured region cannot pose as structure; a
 remainder the 4x4 tile means do not explain halves the quadtree's budget from
 four tiles to two, and the quadtree stops at a 4x4 grid and that cap.
-Luminance ranges are never spatially refined. There is no additional switch
-and no multi-class semantic segmentation in this release.
+Luminance ranges are never spatially refined. Colour-range semantic regions are
+not derived.
 
 The free-form field-mask pass then consumes only the remainder not already
 covered by accepted tiles. It uses the field's frozen per-pixel weight, keeps
@@ -157,7 +164,7 @@ autoshop batch <dir> [--render] [--limit N] [--include-baked] [--jobs N] [--long
 autoshop eval <dir> [--limit N] [--jobs N] [--fresh] [--state FILE]
 autoshop style-index <dir>
 autoshop reimagine <src> --prompt TEXT [--fidelity high|low] [--quality low|medium|high|auto] [--fidelity-retry] [-o|--out FILE]
-autoshop match <src> <target> [--render] [--zoned] [--style-prompt] [--ai-judge] [--deep] [-o|--out FILE]
+autoshop match <src> <target> [--render] [--zoned] [--regions 2..4] [--style-prompt] [--ai-judge] [--deep] [-o|--out FILE]
 autoshop correspond <source> <target> [-o|--out FILE]
 autoshop retouch <src> --mask FILE --prompt TEXT [--quality low|medium|high|auto] [--full-res] [-o|--out FILE]
 autoshop heal <src> [--mask FILE] [--no-auto] [--full-res] [-o|--out FILE]

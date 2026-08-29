@@ -37,7 +37,7 @@ use rayon::prelude::*;
 use crate::recipe::{Crop, EditRecipe, MaskGeometry, RangeMask};
 
 const LUT_N: usize = 4096;
-const MASK_RASTER_BUDGET_BYTES: usize = 256 * 1024 * 1024;
+pub(crate) const MASK_RASTER_BUDGET_BYTES: usize = 256 * 1024 * 1024;
 
 /// The linear-gradient profile selected by the Lightroom falloff measurement.
 ///

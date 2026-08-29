@@ -216,6 +216,8 @@ pub(crate) struct Prefs {
     pub(crate) last_export_dir: Option<PathBuf>,
     pub(crate) save_denoise: bool,
     pub(crate) zoned_fit: bool,
+    /// Opt-in expansion from the historical two-region sky/land pass.
+    pub(crate) zoned_four_regions: bool,
     pub(crate) fit_ai_judge: bool,
     /// R23-6: the DEEP reverse-fit (judge before the persist, bounded guided
     /// rounds). `#[serde(default)]` on the struct decodes an older prefs file
@@ -260,6 +262,7 @@ impl Default for Prefs {
             // Zoned sky reverse-fit ON by default: it degrades gracefully to
             // the plain global fit when segmentation is unavailable.
             zoned_fit: true,
+            zoned_four_regions: false,
             // AI review of the fit OFF by default: it is a PAID vision call
             // per fit — spending is the user's opt-in, never a default.
             fit_ai_judge: false,

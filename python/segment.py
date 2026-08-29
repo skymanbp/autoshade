@@ -8,6 +8,8 @@ exits non-zero with a human-readable reason on stderr when it can't.
 Usage:
   python segment.py --input photo.png --output mask.png --target subject|sky|object
       [--reference-point "x y"] [--prompt-file gp1.json]
+  python segment.py --input photo.png --output manifest.json --target sky
+      --multi --regions 4
 
 Backends (weights auto-download on first run — nothing is stored in the repo,
 consistent with .gitignore'ing python/weights):
@@ -716,9 +718,16 @@ def _install_class_table(d):
             f"(expected {SKY_CLASS_TABLE_PIN['sha256']} / {SKY_CLASS_TABLE_PIN['bytes']} B, "
             f"got {got} / {size} B) -> restore it from the repository"
         )
+    dest = os.path.join(d, SKY_CLASS_TABLE_FILE)
+    # A packaged or shared pinned cache may be read-only.  Once the installed
+    # bytes already match the audited source, there is nothing to publish and
+    # no reason to require write access merely to run inference.
+    if os.path.isfile(dest):
+        dest_got, dest_size = _sha256(dest), os.path.getsize(dest)
+        if dest_got == SKY_CLASS_TABLE_PIN["sha256"] and dest_size == SKY_CLASS_TABLE_PIN["bytes"]:
+            return
     # Unique temp per process, then an atomic rename: `load_metadata` opens this
     # path directly, so two sidecars racing must never expose a half-written one.
-    dest = os.path.join(d, SKY_CLASS_TABLE_FILE)
     tmp = f"{dest}.{os.getpid()}.part"
     with open(src, "rb") as f:
         payload = f.read()
@@ -865,6 +874,161 @@ def sky_mask(img_path: str, cache_dir: str):
     m = sky.float().clamp(0.0, 1.0).cpu().numpy()
     m = (m * 255.0).clip(0, 255).astype(np.uint8)
     return Image.fromarray(m, mode="L")
+
+
+def multi_class_masks(img_path: str, cache_dir: str, max_regions: int):
+    """One OneFormer pass returning the sky and strongest ADE20K planes.
+
+    The sky arithmetic intentionally mirrors ``sky_mask`` above.  The Rust
+    bridge compares the sky plane byte-for-byte with a normal single-class
+    call on calibration fixtures, so this function must not use the hard
+    semantic-map argmax or a different resize path.
+    """
+    try:
+        import torch
+        from transformers import OneFormerForUniversalSegmentation, OneFormerProcessor
+    except ImportError:
+        die("multi-class sky segmentation needs transformers + torch -> pip install transformers")
+    import numpy as np
+    from PIL import Image
+
+    d = _sky_cache(cache_dir)
+    processor = OneFormerProcessor.from_pretrained(
+        d, local_files_only=True, use_fast=False, repo_path=d,
+        class_info_file=SKY_CLASS_TABLE_FILE,
+    )
+    model = OneFormerForUniversalSegmentation.from_pretrained(d, local_files_only=True)
+    model.eval()
+    torch.backends.cudnn.benchmark = False
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cuda.matmul.allow_tf32 = False
+    torch.backends.cudnn.allow_tf32 = False
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    model.to(device)
+    labels = {int(i): str(l) for i, l in model.config.id2label.items()}
+    exact = sorted(i for i, l in labels.items() if l.strip().lower() == "sky")
+    loose = sorted(i for i, l in labels.items() if "sky" in l.lower())
+    sky_ids = exact or loose
+    if not sky_ids:
+        die("OneFormer model has no sky class")
+    sky_id = sky_ids[0]
+    img = Image.open(img_path).convert("RGB")
+    with torch.no_grad():
+        inputs = processor(images=img, task_inputs=["semantic"], return_tensors="pt")
+        inputs = {k: (v.to(device) if hasattr(v, "to") else v) for k, v in inputs.items()}
+        out = model(**inputs)
+        cls = out.class_queries_logits.softmax(dim=-1)[..., :-1]
+        masks = out.masks_queries_logits.sigmoid()
+        low_planes = {}
+        for cid in range(cls.shape[-1]):
+            lo = torch.einsum("bq,bqhw->bhw", cls[..., cid], masks).unsqueeze(1)
+            # Preserve the single-sky operation order: interpolation first,
+            # clamp second. Clamping here changed boundary bytes even though
+            # the same query/class contraction was used.
+            low_planes[cid] = lo
+    # Sky is always first. Other classes are ordered by mean plane confidence,
+    # then support, then ADE id; this order is deterministic across dict maps.
+    # Rank on the model-resolution planes, then upsample only the requested
+    # winners. Upsampling all 150 ADE planes at a 2048px input retained over a
+    # gigabyte of float arrays even though at most four can leave the sidecar.
+    candidates = []
+    for cid, plane in low_planes.items():
+        if cid == sky_id:
+            continue
+        mean = float(plane.float().clamp(0.0, 1.0).mean().item())
+        if mean <= 0.0:
+            continue
+        support = float((plane.float() >= 0.5).float().mean().item())
+        candidates.append((cid, mean, support))
+    candidates = rank_candidates(candidates)
+    selected_ids = [sky_id] + [cid for cid, _, _ in candidates[: max(0, max_regions - 1)]]
+    selected = []
+    for cid in selected_ids:
+        up = torch.nn.functional.interpolate(
+            low_planes[cid], size=(img.height, img.width), mode="bilinear", align_corners=False
+        )[0, 0]
+        selected.append((cid, up.float().clamp(0.0, 1.0).cpu().numpy()))
+    return Image, np, labels, img, selected
+
+
+def rank_candidates(candidates):
+    """The product's candidate order: mean plane confidence desc, support
+    desc, ADE class id asc — deterministic across dict maps."""
+    return sorted(candidates, key=lambda x: (-x[1], -x[2], x[0]))
+
+
+def plane_stats(arr8):
+    """(mean_confidence, share) of one plane in [0, 1].
+
+    ``share`` is the frame fraction the plane claims (its mean alpha).
+    ``mean_confidence`` is the alpha's mass-weighted mean — how certain the
+    plane is WHERE it claims pixels — so a small, crisp class outranks a broad,
+    soft one in the Rust overlap policy (higher confidence first, then smaller
+    area). Emitting the share under both names made "confidence" the area,
+    which inverted that policy: the broadest plane won every overlap.
+    """
+    mass = float(arr8.sum())
+    share = float(arr8.mean()) if arr8.size else 0.0
+    confidence = float((arr8 * arr8).sum() / mass) if mass > 0.0 else 0.0
+    return min(max(confidence, 0.0), 1.0), min(max(share, 0.0), 1.0)
+
+
+def _self_test():
+    """Exercise the product's ordering and plane statistics without loading
+    torch or weights — the same functions the sidecar runs, not a copy."""
+    import numpy as np
+    got = [cid for cid, _, _ in rank_candidates([(7, 0.80, 0.25), (2, 0.80, 0.50), (5, 0.90, 0.10)])]
+    expected = [5, 2, 7]
+    if got != expected:
+        raise AssertionError(f"semantic tie-break mismatch: {got} != {expected}")
+    crisp = np.zeros((4, 4), dtype=np.float32)
+    crisp[:2, :] = 1.0
+    soft = np.full((4, 4), 0.5, dtype=np.float32)
+    crisp_conf, crisp_share = plane_stats(crisp)
+    soft_conf, soft_share = plane_stats(soft)
+    if not (abs(crisp_share - 0.5) < 1e-6 and abs(soft_share - 0.5) < 1e-6):
+        raise AssertionError(f"share must be the mean alpha: {crisp_share} {soft_share}")
+    if not (abs(crisp_conf - 1.0) < 1e-6 and abs(soft_conf - 0.5) < 1e-6):
+        raise AssertionError(f"confidence must be mass-weighted certainty: {crisp_conf} {soft_conf}")
+    if crisp_conf <= soft_conf:
+        raise AssertionError("a crisp plane must outrank a soft one of equal area")
+    print("segment.py self-test: semantic tie-break mean, support, class-id OK; plane stats OK")
+
+
+def write_multi_manifest(img_path: str, output: str, cache_dir: str, max_regions: int, mask_size: int, backend: str):
+    Image, np, labels, img, selected = multi_class_masks(img_path, cache_dir, max_regions)
+    from PIL import Image as PILImage
+    import json
+    import os
+    base = os.path.dirname(os.path.abspath(output))
+    stem = os.path.splitext(os.path.basename(output))[0]
+    planes = []
+    for cid, arr in selected:
+        mask = PILImage.fromarray((arr * 255.0).clip(0, 255).astype(np.uint8), mode="L")
+        if mask_size and max(mask.size) > mask_size:
+            scale = mask_size / max(mask.size)
+            mask = mask.resize((max(1, round(mask.width * scale)), max(1, round(mask.height * scale))), resample=PILImage.BILINEAR)
+        name = f"{stem}.class-{cid}.png"
+        path = os.path.join(base, name)
+        tmp = f"{path}.{os.getpid()}.tmp.png"
+        mask.save(tmp)
+        with open(tmp, "rb+") as f:
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+        arr8 = np.asarray(mask, dtype=np.float32) / 255.0
+        mean_confidence, share = plane_stats(arr8)
+        planes.append({
+            "class_id": int(cid), "label": labels.get(cid, f"class-{cid}"),
+            "mean_confidence": mean_confidence, "share": share,
+            "path": name,
+        })
+    manifest = {"version": 1, "width": int(mask.width), "height": int(mask.height), "planes": planes}
+    tmp = f"{output}.{os.getpid()}.tmp.json"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(manifest, f, separators=(",", ":"), sort_keys=True)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, output)
 
 
 # --- OBJECT: SAM 2.1, point-prompted from ReferencePoint + region dabs -------
@@ -1177,7 +1341,8 @@ def main() -> None:
     # explicit check instead of argparse.
     ap.add_argument("--input", help="source image (any PIL-readable format)")
     ap.add_argument("--output", help="mask PNG to write (8-bit grayscale)")
-    ap.add_argument("--target", required=True, choices=["subject", "sky", "object"])
+    ap.add_argument("--target", choices=["subject", "sky", "object"])
+    ap.add_argument("--self-test", action="store_true", help="run dependency-free semantic ordering checks")
     ap.add_argument(
         "--probe-backend",
         action="store_true",
@@ -1204,6 +1369,8 @@ def main() -> None:
         default=4096,
         help="cap the written mask's LONG EDGE (0 = no cap)",
     )
+    ap.add_argument("--multi", action="store_true", help="emit a validated multi-class semantic manifest")
+    ap.add_argument("--regions", type=int, default=4, help="maximum semantic class planes for --multi")
     ap.add_argument(
         "--infer-size",
         type=int,
@@ -1212,6 +1379,12 @@ def main() -> None:
     )
     ap.add_argument("--cache", default=os.path.join(os.path.dirname(__file__), "weights"))
     a = ap.parse_args()
+
+    if a.self_test:
+        _self_test()
+        return
+    if not a.target:
+        die("--target is required unless --self-test is given")
 
     # THE CAPABILITY QUESTION, answered without touching an image or a weight
     # file. Costs one interpreter start plus three imports: measured 4.3 s when
@@ -1236,6 +1409,19 @@ def main() -> None:
     for need in ("input", "output"):
         if not getattr(a, need):
             die(f"--{need} is required unless --probe-backend is given")
+
+    if a.multi:
+        if a.target != "sky":
+            die("--multi is currently supported only for --target sky")
+        # Rust's MAX_SEMANTIC_REGIONS is the authoritative application cap;
+        # retain the sidecar's 1..4 validation so direct Python callers fail
+        # closed before model work.
+        if not (1 <= a.regions <= 4):
+            die("--regions must be between 1 and 4")
+        write_multi_manifest(a.input, a.output, a.cache, a.regions, a.mask_size,
+                             "OneFormer ADE20K Swin-L " + SKY_REVISION[:12])
+        print(f"segment.py: semantic manifest [OneFormer ADE20K Swin-L {SKY_REVISION[:12]}] -> {a.output}")
+        return
 
     # Whether the PRIMARY backend's dependencies were present for THIS run, so
     # the caller's cache can tell "U^2-Net because this machine cannot run

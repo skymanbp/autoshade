@@ -339,6 +339,31 @@ pub mod keys {
          were actually accepted (worst zone residual {worst}), not from the \
          frame-wide residual {frame} — a frame-wide distribution cannot \
          judge a zone whose share of the two frames differs.";
+    pub const REGION_FRAME_REFUSED: &str =
+        " Multi-region semantic corrections refused after the final comparison: \
+         the multi-region frame residual {multi} was no better than the seeded \
+         two-region residual {two}, so the byte-identical two-region result was kept. \
+         Trialled regions: {regions}.";
+    /// The multi-class layer failed (sidecar, manifest, budget, claim). The
+    /// historical sky/land route ran INSTEAD and is what the report describes;
+    /// its own `ZONED_UNAVAILABLE` would narrate a luminance-range fallback
+    /// that did not happen here, hence a key of its own.
+    pub const SEMANTIC_REGIONS_UNAVAILABLE: &str =
+        " Multi-region semantic segmentation unavailable ({e}) — the historical \
+         sky/land pass was used instead.";
+    /// The multi-class layer ran but no class cleared the shared support floor
+    /// on both frames: a typed hand-off to the historical route, which judges
+    /// the sky partition on its own numbers.
+    pub const SEMANTIC_REGIONS_NONE: &str =
+        " No semantic region cleared the shared support floor on both frames \
+         (up to {n} requested) — the historical sky/land pass was used instead.";
+    /// A semantic region's own boundary gate refused it. The shared gate hands
+    /// back only what it measured — the candidate rim and why — so no `after`
+    /// reading or shrink factor is reported for a shrink it never accepted.
+    pub const REGION_BOUNDARY_REFUSED: &str =
+        " The {label} region was refused by its boundary-continuity gate \
+         ({why}): candidate rim {before} luma against budget {max} \
+         ({transitions} measured transitions).";
 
     // --- spatial residual tiles and bitmap-mask refinement -------------
     pub const TILE_ELIGIBLE: &str =

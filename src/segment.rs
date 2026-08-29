@@ -9,11 +9,12 @@
 //! (BiRefNet, OneFormer, SAM 2.1, each behind a sha256 gate) or `~/.u2net` for
 //! the subject fallback tier, which gates its own — no weights in the repo.
 
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use anyhow::{bail, Context, Result};
+use image::GrayImage;
 
 use crate::config::Config;
 
@@ -46,6 +47,154 @@ pub struct SegmentOpts {
     /// every ordered `d x y` from a subtype-0 gesture. `None` preserves the
     /// legacy process contract; `Some` is staged as a bounded JSON sidecar.
     pub prompt_points: Option<Vec<[f32; 2]>>,
+}
+
+/// One validated plane from a multi-class semantic segmentation manifest.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MultiClassPlane {
+    pub class_id: u16,
+    pub label: String,
+    pub mean_confidence: f32,
+    pub share: f32,
+    pub path: PathBuf,
+    pub mask: GrayImage,
+}
+
+/// Validated output of one OneFormer multi-class inference.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MultiClassManifest {
+    pub width: u32,
+    pub height: u32,
+    pub planes: Vec<MultiClassPlane>,
+}
+
+/// Real manifests are a few hundred bytes.  Keep malformed or hostile output
+/// from allocating an unbounded buffer before deserialization.
+pub const MULTI_MANIFEST_MAX_BYTES: u64 = 64 * 1024;
+
+pub fn read_multi_manifest(path: &Path) -> Result<MultiClassManifest> {
+    let len = std::fs::metadata(path)
+        .with_context(|| format!("stat semantic manifest {}", path.display()))?
+        .len();
+    if len > MULTI_MANIFEST_MAX_BYTES {
+        bail!("semantic manifest is too large ({} bytes; cap {} bytes)", len, MULTI_MANIFEST_MAX_BYTES);
+    }
+    let file = std::fs::File::open(path)
+        .with_context(|| format!("open semantic manifest {}", path.display()))?;
+    let mut bytes = Vec::with_capacity(len as usize);
+    file.take(MULTI_MANIFEST_MAX_BYTES + 1).read_to_end(&mut bytes)
+        .with_context(|| format!("read semantic manifest {}", path.display()))?;
+    if bytes.len() as u64 > MULTI_MANIFEST_MAX_BYTES {
+        bail!("semantic manifest exceeded {} bytes", MULTI_MANIFEST_MAX_BYTES);
+    }
+    let text = std::str::from_utf8(&bytes).context("semantic manifest is not UTF-8")?;
+    parse_multi_manifest(text, path.parent().unwrap_or_else(|| Path::new(".")))
+}
+
+/// Parse and validate the small JSON manifest emitted by `segment.py --multi`.
+/// Plane files are resolved relative to `base_dir`; malformed metadata or any
+/// bad raster rejects the complete semantic layer.
+pub fn parse_multi_manifest(text: &str, base_dir: &Path) -> Result<MultiClassManifest> {
+    #[derive(serde::Deserialize)]
+    struct RawManifest { version: u32, width: u32, height: u32, planes: Vec<RawPlane> }
+    #[derive(serde::Deserialize)]
+    struct RawPlane { class_id: u16, label: String, mean_confidence: f32, share: f32, path: String }
+    let raw: RawManifest = serde_json::from_str(text.trim()).context("semantic manifest is not JSON")?;
+    if raw.version != 1 { bail!("semantic manifest version {} is unsupported", raw.version); }
+    if raw.width == 0 || raw.height == 0 || raw.planes.is_empty()
+        || raw.planes.len() > crate::fit_zoned::semantic::MAX_SEMANTIC_REGIONS
+    {
+        bail!("semantic manifest has invalid dimensions or plane count");
+    }
+    let mut planes = Vec::with_capacity(raw.planes.len());
+    let mut ids = std::collections::HashSet::new();
+    for p in raw.planes {
+        if !ids.insert(p.class_id) || p.label.len() > 256 || !p.mean_confidence.is_finite()
+            || !p.share.is_finite() || !(0.0..=1.0).contains(&p.mean_confidence)
+            || !(0.0..=1.0).contains(&p.share) || p.path.is_empty()
+        { bail!("semantic manifest contains an invalid plane"); }
+        let relative = Path::new(&p.path);
+        if relative.components().count() != 1
+            || !matches!(relative.components().next(), Some(std::path::Component::Normal(_)))
+        {
+            bail!("semantic manifest plane path must be one relative file name");
+        }
+        let path = base_dir.join(relative);
+        let metadata = std::fs::symlink_metadata(&path)
+            .with_context(|| format!("stat semantic plane {}", path.display()))?;
+        if !metadata.file_type().is_file() {
+            bail!("semantic plane {} is not a regular file", p.class_id);
+        }
+        let mask = crate::render::open_mask_bounded(&path)
+            .with_context(|| format!("read semantic plane {}", path.display()))?.to_luma8();
+        if mask.dimensions() != (raw.width, raw.height) {
+            bail!("semantic plane {} has size {:?}, expected {}x{}", p.class_id, mask.dimensions(), raw.width, raw.height);
+        }
+        // PNG masks are u8 by construction; this explicit walk keeps the
+        // bridge contract honest if another decoder is introduced later.
+        if mask.pixels().any(|v| !((v.0[0] as f32 / 255.0).is_finite())) {
+            bail!("semantic plane {} contains a non-finite value", p.class_id);
+        }
+        planes.push(MultiClassPlane { class_id: p.class_id, label: p.label, mean_confidence: p.mean_confidence, share: p.share, path, mask });
+    }
+    planes.sort_by_key(|p| p.class_id);
+    Ok(MultiClassManifest { width: raw.width, height: raw.height, planes })
+}
+
+/// Run one OneFormer inference and load its multi-plane manifest.  The sidecar
+/// writes all plane rasters beside `manifest`; a malformed manifest or plane
+/// makes the entire semantic attempt fail-open to the caller.
+pub fn segment_multiclass_file(
+    opts: &SegmentOpts,
+    input: &Path,
+    manifest: &Path,
+    max_regions: usize,
+) -> Result<MultiClassManifest> {
+    if opts.target != "sky" {
+        bail!("multi-class segmentation requires the sky OneFormer target");
+    }
+    // The Python side keeps its own 1..4 CLI validation; Rust owns the cap.
+    let max_regions = max_regions.clamp(1, crate::fit_zoned::semantic::MAX_SEMANTIC_REGIONS);
+    let sidecar = crate::run_model_sidecar_bounded(
+        "multi-class segmentation sidecar",
+        &opts.python_bin,
+        vec![
+            "-E".into(), opts.script.clone().into(),
+            "--input".into(), input.into(), "--output".into(), manifest.into(),
+            "--target".into(), "sky".into(), "--multi".into(),
+            "--regions".into(), max_regions.to_string().into(),
+        ],
+        manifest,
+        Some(MULTI_MANIFEST_MAX_BYTES),
+    );
+    let parsed = sidecar.and_then(|_| read_multi_manifest(manifest));
+    cleanup_manifest_planes(manifest);
+    parsed
+}
+
+/// Remove everything the sidecar wrote beside `manifest` for this call: the
+/// class planes (`<stem>.class-<id>.png`) and any atomic-write temporaries a
+/// killed sidecar left behind (`<manifest>.<pid>.tmp.json`,
+/// `<stem>.class-<id>.png.<pid>.tmp.png`). Only regular files under the
+/// manifest's own directory, never through a link.
+fn cleanup_manifest_planes(manifest: &Path) {
+    let Some(parent) = manifest.parent() else { return };
+    let Some(stem) = manifest.file_stem().and_then(|s| s.to_str()) else { return };
+    let Some(name) = manifest.file_name().and_then(|s| s.to_str()) else { return };
+    let plane_prefix = format!("{stem}.class-");
+    let tmp_prefix = format!("{name}.");
+    let Ok(entries) = std::fs::read_dir(parent) else { return };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let ours = path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .is_some_and(|s| s.starts_with(&plane_prefix) || s.starts_with(&tmp_prefix));
+        let regular = std::fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_file());
+        if ours && regular {
+            let _ = std::fs::remove_file(path);
+        }
+    }
 }
 
 impl SegmentOpts {
@@ -1198,6 +1347,162 @@ fn staging_path(src: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn manifest_fixture(name: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!("autoshop-multi-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let p2 = image::GrayImage::from_pixel(2, 2, image::Luma([64]));
+        let p5 = image::GrayImage::from_pixel(2, 2, image::Luma([192]));
+        p2.save(dir.join("class-2.png")).unwrap();
+        p5.save(dir.join("class-5.png")).unwrap();
+        (dir.clone(), dir.join("manifest.json"))
+    }
+
+    #[test]
+    fn multi_class_planes_are_normalised_and_ordered() {
+        let (dir, manifest) = manifest_fixture("normalised");
+        let text = r#"{"version":1,"width":2,"height":2,"planes":[{"class_id":5,"label":"tree","mean_confidence":0.8,"share":0.75,"path":"class-5.png"},{"class_id":2,"label":"sky","mean_confidence":0.9,"share":0.25,"path":"class-2.png"}]}"#;
+        let parsed = parse_multi_manifest(text, &dir).unwrap();
+        assert_eq!(parsed.planes.iter().map(|p| p.class_id).collect::<Vec<_>>(), vec![2, 5]);
+        assert!(parsed.planes.iter().all(|p| p.mask.pixels().all(|v| (0.0..=1.0).contains(&(v.0[0] as f32 / 255.0)))));
+        let _ = std::fs::remove_dir_all(dir);
+        let _ = manifest;
+    }
+
+    #[test]
+    fn single_class_sky_call_is_unchanged() {
+        let Some(corpus) = crate::fit::calibration_corpus() else {
+            eprintln!("SKIPPED sidecar sky identity test: AUTOSHOP_FIT_CALIBRATION_DIR unset");
+            return;
+        };
+        let cfg = crate::config::Config::load();
+        let mut opts = SegmentOpts::from_config(&cfg, "sky");
+        opts.script = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("python/segment.py");
+        if !opts.script.is_file() {
+            eprintln!(
+                "SKIPPED sidecar sky identity test: segmentation sidecar absent at {}",
+                opts.script.display()
+            );
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!(
+            "autoshop-multi-sky-live-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let input = corpus.join("neutral.jpg");
+        let target_input = corpus.join("target.jpg");
+        let single_path = dir.join("single.png");
+        let single_target_path = dir.join("single-target.png");
+        let manifest_path = dir.join("multi.json");
+        let target_manifest_path = dir.join("multi-target.json");
+        segment_file(&opts, &input, &single_path)
+            .unwrap_or_else(|e| panic!("single-class sky sidecar must run: {e:#}"));
+        let multi = segment_multiclass_file(&opts, &input, &manifest_path, 4)
+            .unwrap_or_else(|e| panic!("multi-class sky sidecar must run: {e:#}"));
+        let single = crate::render::open_mask_bounded(&single_path).unwrap().to_luma8();
+        let sky = multi
+            .planes
+            .iter()
+            .find(|plane| plane.label.trim().eq_ignore_ascii_case("sky"))
+            .expect("multi-class manifest must contain the sky plane");
+        assert_eq!(single.dimensions(), sky.mask.dimensions());
+        let differences = single
+            .as_raw()
+            .iter()
+            .zip(sky.mask.as_raw())
+            .filter(|(a, b)| a != b)
+            .count();
+        assert_eq!(
+            differences, 0,
+            "multi-class sky plane changed {differences} single-class alpha bytes"
+        );
+        segment_file(&opts, &target_input, &single_target_path)
+            .unwrap_or_else(|e| panic!("single-class target sky sidecar must run: {e:#}"));
+        let target_multi = segment_multiclass_file(&opts, &target_input, &target_manifest_path, 4)
+            .unwrap_or_else(|e| panic!("multi-class target sky sidecar must run: {e:#}"));
+        let single_target = crate::render::open_mask_bounded(&single_target_path).unwrap().to_luma8();
+        let target_sky = target_multi
+            .planes
+            .iter()
+            .find(|plane| plane.label.trim().eq_ignore_ascii_case("sky"))
+            .expect("target multi-class manifest must contain the sky plane");
+        assert_eq!(single_target.dimensions(), target_sky.mask.dimensions());
+        let target_differences = single_target
+            .as_raw()
+            .iter()
+            .zip(target_sky.mask.as_raw())
+            .filter(|(a, b)| a != b)
+            .count();
+        assert_eq!(
+            target_differences, 0,
+            "multi-class target sky plane changed {target_differences} single-class alpha bytes"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn malformed_multi_class_manifest_falls_back_as_one_layer() {
+        let (dir, _) = manifest_fixture("bad");
+        let bad = r#"{"version":1,"width":2,"height":2,"planes":[{"class_id":2,"label":"sky","mean_confidence":1.5,"share":0.5,"path":"class-2.png"}]}"#;
+        assert!(parse_multi_manifest(bad, &dir).is_err());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn oversized_multi_manifest_is_refused() {
+        let (dir, manifest) = manifest_fixture("oversized");
+        let payload = format!("{{\"version\":1,\"padding\":\"{}\"}}", "x".repeat(MULTI_MANIFEST_MAX_BYTES as usize));
+        std::fs::write(&manifest, payload).unwrap();
+        let err = read_multi_manifest(&manifest).unwrap_err().to_string();
+        assert!(err.contains("too large"), "unexpected refusal: {err}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn linked_plane_path_is_refused() {
+        let (dir, _manifest) = manifest_fixture("linked");
+        let target = dir.join("class-2.png");
+        let link = dir.join("linked.png");
+        #[cfg(unix)]
+        let linked = std::os::unix::fs::symlink(&target, &link).is_ok();
+        #[cfg(windows)]
+        let linked = std::os::windows::fs::symlink_file(&target, &link).is_ok();
+        if !linked {
+            eprintln!("SKIPPED linked_plane_path_is_refused: platform cannot create symlink");
+            let _ = std::fs::remove_dir_all(dir);
+            return;
+        }
+        let text = r#"{"version":1,"width":2,"height":2,"planes":[{"class_id":2,"label":"sky","mean_confidence":0.9,"share":0.5,"path":"linked.png"}]}"#;
+        let err = parse_multi_manifest(text, &dir).unwrap_err().to_string();
+        assert!(err.contains("regular file"), "unexpected refusal: {err}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn multi_sidecar_plane_files_are_removed() {
+        let (dir, manifest) = manifest_fixture("cleanup");
+        let ours = [
+            "manifest.class-13.png",
+            "manifest.class-13.png.4242.tmp.png",
+            "manifest.json.4242.tmp.json",
+        ]
+        .map(|n| dir.join(n));
+        for p in &ours {
+            std::fs::copy(dir.join("class-2.png"), p).unwrap();
+        }
+        // A neighbour that is not this call's output must survive.
+        let other = dir.join("other-manifest.class-2.png");
+        std::fs::copy(dir.join("class-2.png"), &other).unwrap();
+        cleanup_manifest_planes(&manifest);
+        for p in &ours {
+            assert!(!p.exists(), "sidecar output survived cleanup: {}", p.display());
+        }
+        assert!(other.exists(), "cleanup must stay within this call's outputs");
+        let _ = std::fs::remove_dir_all(dir);
+    }
 
     /// M-S1: the `crate::sidecar_wrote` call removed (or reverted to the old
     /// bare `exists()` guard) — the pre-claimed 0-byte mask file that

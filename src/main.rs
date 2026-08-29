@@ -269,7 +269,7 @@ enum Command {
         /// (./out/<stem>.matched.tif, 16-bit).
         #[arg(long)]
         render: bool,
-        /// Fit globally, then add semantic sky/land bitmap corrections when
+        /// Fit globally, then add semantic bitmap-region corrections when
         /// local segmentation succeeds. If segmentation is disabled or
         /// unavailable, automatically try evidence-gated native luminance
         /// ranges; otherwise retain the global fit. Then automatically try up
@@ -279,6 +279,10 @@ enum Command {
         /// to Lightroom XMP. No network.
         #[arg(long)]
         zoned: bool,
+        /// Maximum accepted semantic class regions for zoned fitting (the
+        /// default is the historical two-region path; four is opt-in).
+        #[arg(long, default_value_t = autoshop::fit_zoned::semantic::DEFAULT_SEMANTIC_REGIONS)]
+        regions: usize,
         /// Also extract a reusable style PROMPT from the pair via the vision
         /// model (./out/<stem>.style.txt; needs OPENAI_API_KEY).
         #[arg(long)]
@@ -437,10 +441,10 @@ fn main() -> Result<()> {
             generative::reimagine(&cfg, &raw, &prompt, &fidelity, &q, fidelity_retry, &out)
                 .map(|_report| ())
         }
-        Command::Match { raw, target, render, zoned, style_prompt, ai_judge, deep, strength, out } => {
+        Command::Match { raw, target, render, zoned, regions, style_prompt, ai_judge, deep, strength, out } => {
             // --deep IS the review, iterated: asking for the loop without the
             // reviewer is not a configuration, it is a typo.
-            match_cmd(&raw, &target, render, zoned, style_prompt, ai_judge || deep, deep, strength, out)
+            match_cmd(&raw, &target, render, zoned, regions, style_prompt, ai_judge || deep, deep, strength, out)
         }
         Command::Correspond { source, target, out } => correspond_cmd(&source, &target, out),
         Command::Retouch { raw, mask, prompt, quality, full_res, out } => {
@@ -1215,12 +1219,20 @@ fn match_cmd(
     target: &Path,
     render_full: bool,
     zoned: bool,
+    regions: usize,
     style_prompt: bool,
     ai_judge: bool,
     deep: bool,
     strength: Option<f32>,
     out: Option<PathBuf>,
 ) -> Result<()> {
+    if !(autoshop::fit_zoned::semantic::DEFAULT_SEMANTIC_REGIONS..=autoshop::fit_zoned::semantic::MAX_SEMANTIC_REGIONS).contains(&regions) {
+        anyhow::bail!(
+            "--regions must be between {} and {}",
+            autoshop::fit_zoned::semantic::DEFAULT_SEMANTIC_REGIONS,
+            autoshop::fit_zoned::semantic::MAX_SEMANTIC_REGIONS,
+        );
+    }
     // BEFORE any fitting/segmentation is paid for: `-o` naming the photo's
     // XMP sidecar wrote the promised recipe JSON there, then the projection
     // below overwrote it — both lines printed success while the named
@@ -1288,15 +1300,16 @@ fn match_cmd(
         let mask = autoshop::store::OwnedRaster::claim(raw, "mask-zone-sky")?;
         pipeline::guard_readonly(mask.path(), raw)?;
         println!(
-            "  zoned: global -> semantic sky/land or native luminance ranges -> spatial tiles"
+            "  zoned: global -> semantic regions or native luminance ranges -> spatial tiles"
         );
-        autoshop::fit_zoned::fit_recipe_zoned_with(
+        autoshop::fit_zoned::fit_recipe_zoned_with_regions(
             &src,
             &tgt,
             &seg,
             &mask,
             &EditRecipe::default(),
             fit_options,
+            regions.min(autoshop::fit_zoned::semantic::MAX_SEMANTIC_REGIONS),
         )
         } else {
             fit::fit_recipe_with(&src, &tgt, fit_options)
@@ -2106,7 +2119,7 @@ mod tests {
 
         let e = format!(
             "{:#}",
-            match_cmd(&src, &target, false, false, false, false, false, None, None)
+            match_cmd(&src, &target, false, false, 4, false, false, false, None, None)
                 .expect_err("an undecodable RAW target must refuse")
         );
         assert!(
