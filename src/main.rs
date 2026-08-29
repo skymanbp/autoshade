@@ -2119,7 +2119,7 @@ mod tests {
     #[test]
     #[cfg(windows)]
     fn same_path_folds_case_of_an_absent_leaf() {
-        let dir = std::env::temp_dir().join("autoshop-cli-same-path-case");
+        let dir = std::env::temp_dir().join(format!("autoshop-cli-same-path-case-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
         // The leaf does NOT exist — only the ancestor chain canonicalizes, so
         // equality must come from the case fold, not from canonicalize.

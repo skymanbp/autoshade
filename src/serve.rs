@@ -3556,7 +3556,7 @@ mod tests {
 
     #[test]
     fn session_masters_are_issued_per_photo_and_per_run() {
-        let dir = std::env::temp_dir().join("autoshop-serve-test-masters");
+        let dir = std::env::temp_dir().join(format!("autoshop-serve-test-masters-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         // Two photos with the SAME stem in different folders — the pre-registry
@@ -3700,7 +3700,7 @@ mod tests {
     /// enforcement; this pins the key set that producer emits.
     #[test]
     fn the_fresh_open_calibration_is_one_key_set_for_both_doors() {
-        let dir = std::env::temp_dir().join("autoshop-serve-freshbase");
+        let dir = std::env::temp_dir().join(format!("autoshop-serve-freshbase-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let baked = dir.join("baked.png");

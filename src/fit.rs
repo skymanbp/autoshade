@@ -1896,7 +1896,7 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure_opts(
                     &mut report.notes,
                     crate::rationale::Note::new(
                         crate::rationale::keys::FIT_CORRESPONDENCE_UNAVAILABLE,
-                        vec![("e", format!("{e:#}"))],
+                        vec![("e", crate::rationale::error_line(&e))],
                     ),
                 );
             }

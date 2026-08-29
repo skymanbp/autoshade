@@ -326,7 +326,7 @@ pub fn produce_recipe(
                     ref_image_stem = Some(stem(Path::new(p)).to_string());
                     ref_preview = Some(Preview { jpeg });
                 }
-                Err(e) => ref_image_err = Some(format!("{e:#}")),
+                Err(e) => ref_image_err = Some(crate::rationale::error_line(&e)),
             },
             // No path recorded, yet exemplars WERE retrieved: a pre-R23 index.
             // (Nothing retrieved at all is the no-reference note's business.)
@@ -434,7 +434,9 @@ pub fn produce_recipe(
                 // Hand the REAL cause to the heuristic: this stderr line is
                 // invisible in the windowed GUI, so the recipe's rationale is
                 // the only place the user can learn why the AI didn't run.
-                let heuristic = HeuristicProposer { fallback_reason: Some(e.to_string()) };
+                let heuristic = HeuristicProposer {
+                    fallback_reason: Some(crate::rationale::error_line(&anyhow::Error::new(e))),
+                };
                 let (r, note) = heuristic.propose_noted(hist, req.strength)?;
                 det_notes.push(note);
                 (r, false)
@@ -510,7 +512,7 @@ pub fn produce_recipe(
                     &mut det_notes,
                     crate::rationale::Note::new(
                         crate::rationale::keys::REVISION_FAILED,
-                        vec![("round", round.to_string()), ("e", e.to_string())],
+                        vec![("round", round.to_string()), ("e", crate::rationale::error_line(&anyhow::Error::new(e)))],
                     ),
                 );
                 break;
@@ -533,7 +535,7 @@ pub fn produce_recipe(
                     &mut det_notes,
                     crate::rationale::Note::new(
                         crate::rationale::keys::REVISION_VERIFY_FAILED,
-                        vec![("round", round.to_string()), ("e", e.to_string())],
+                        vec![("round", round.to_string()), ("e", crate::rationale::error_line(&anyhow::Error::new(e)))],
                     ),
                 );
                 break;
@@ -590,7 +592,7 @@ pub fn produce_recipe(
                         &mut det_notes,
                         crate::rationale::Note::new(
                             crate::rationale::keys::STYLE_REVERIFY_FAILED,
-                            vec![("e", e.to_string())],
+                            vec![("e", crate::rationale::error_line(&anyhow::Error::new(e)))],
                         ),
                     );
                 }
@@ -718,7 +720,7 @@ pub fn produce_recipe(
             Err(e) => {
                 log.push(crate::rationale::Note::new(
                     crate::rationale::keys::JUDGE_UNAVAILABLE,
-                    vec![("e", e.to_string())],
+                    vec![("e", crate::rationale::error_line(&anyhow::Error::new(e)))],
                 ));
             }
             Ok(first) => {
@@ -893,7 +895,7 @@ pub fn produce_recipe(
                                 vec![
                                     ("score", score1),
                                     ("critique", current.critique.clone()),
-                                    ("e", e),
+                                    ("e", crate::rationale::error_line(&anyhow::anyhow!("{}", e))),
                                 ],
                             ));
                             break;
@@ -904,7 +906,7 @@ pub fn produce_recipe(
                                 vec![
                                     ("score", score1),
                                     ("critique", current.critique.clone()),
-                                    ("e", e),
+                                    ("e", crate::rationale::error_line(&anyhow::anyhow!("{}", e))),
                                 ],
                             ));
                             break;
@@ -1114,7 +1116,7 @@ pub(crate) fn style_gap_note(
     Some(match load_err {
         Some(e) => crate::rationale::Note::new(
             crate::rationale::keys::STYLE_UNAVAILABLE,
-            vec![("e", e.to_string())],
+            vec![("e", crate::rationale::error_line(&anyhow::anyhow!("{}", e)))],
         ),
         None => crate::rationale::Note::new(
             crate::rationale::keys::STYLE_NO_REFERENCE,
@@ -3560,7 +3562,7 @@ mod guard_tests {
 
     #[test]
     fn guard_refuses_to_overwrite_a_photo_in_a_sibling_library_folder() {
-        let base = std::env::temp_dir().join("autoshop-guard-sibling");
+        let base = std::env::temp_dir().join(format!("autoshop-guard-sibling-{}", std::process::id()));
         let (a, b) = (base.join("TripA"), base.join("TripB"));
         std::fs::create_dir_all(&a).unwrap();
         std::fs::create_dir_all(&b).unwrap();
@@ -3583,7 +3585,7 @@ mod guard_tests {
 
     #[test]
     fn write_xmp_merges_over_the_lightroom_sidecar_beside_the_raw() {
-        let dir = std::env::temp_dir().join("autoshop-pipe-xmp-merge");
+        let dir = std::env::temp_dir().join(format!("autoshop-pipe-xmp-merge-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let raw = dir.join("_pipe_xmp_merge.arw");
@@ -3621,7 +3623,7 @@ mod guard_tests {
     #[test]
     fn a_save_with_own_masks_reports_the_foreign_mask_block_it_replaced() {
         use crate::recipe::{LocalAdjustment, MaskGeometry};
-        let dir = std::env::temp_dir().join("autoshop-pipe-xmp-maskintent");
+        let dir = std::env::temp_dir().join(format!("autoshop-pipe-xmp-maskintent-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let raw = dir.join("_pipe_maskintent.arw");
@@ -3684,7 +3686,7 @@ mod guard_tests {
     #[test]
     fn the_write_path_hands_back_what_the_projection_could_not_carry() {
         use crate::recipe::{LocalAdjustment, MaskGeometry};
-        let dir = std::env::temp_dir().join("autoshop-pipe-xmp-masklosses");
+        let dir = std::env::temp_dir().join(format!("autoshop-pipe-xmp-masklosses-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let raw = dir.join("_pipe_masklosses.arw");
@@ -3734,7 +3736,7 @@ mod guard_tests {
     #[test]
     fn a_persisted_recipe_cannot_exceed_the_schema_caps() {
         use crate::recipe::{LocalAdjustment, MaskGeometry};
-        let dir = std::env::temp_dir().join("autoshop-pipe-recipe-caps");
+        let dir = std::env::temp_dir().join(format!("autoshop-pipe-recipe-caps-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let raw = dir.join("_pipe_caps.arw");
@@ -3780,7 +3782,7 @@ mod guard_tests {
     /// because the loss only surfaced the next time they opened the catalog.
     #[test]
     fn an_unmergeable_sidecar_is_regenerated_and_says_so() {
-        let dir = std::env::temp_dir().join("autoshop-pipe-xmp-disclose");
+        let dir = std::env::temp_dir().join(format!("autoshop-pipe-xmp-disclose-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let raw = dir.join("_pipe_disclose.arw");
@@ -3839,7 +3841,7 @@ mod guard_tests {
     /// file that was never the problem.
     #[test]
     fn the_merge_note_fires_only_for_a_real_loss_and_names_the_base_file() {
-        let dir = std::env::temp_dir().join("autoshop-pipe-xmp-truthful-note");
+        let dir = std::env::temp_dir().join(format!("autoshop-pipe-xmp-truthful-note-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let r = EditRecipe { exposure_ev: 0.75, ..Default::default() };
@@ -3983,7 +3985,7 @@ mod guard_tests {
     /// round four built was defeated by round five's own size cap.
     #[test]
     fn an_oversized_lightroom_sidecar_is_disclosed_not_silently_skipped() {
-        let dir = std::env::temp_dir().join("autoshop-pipe-xmp-oversized");
+        let dir = std::env::temp_dir().join(format!("autoshop-pipe-xmp-oversized-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let raw = dir.join("_pipe_oversized.arw");
@@ -4694,7 +4696,7 @@ mod tests {
     /// leaves the stored develop in charge.
     #[test]
     fn saved_calibration_resolves_by_newest_intent() {
-        let dir = std::env::temp_dir().join("autoshop-pipeline-test-lr-calib");
+        let dir = std::env::temp_dir().join(format!("autoshop-pipeline-test-lr-calib-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let raw = dir.join("_pipe_lr_calib.arw");
@@ -4987,7 +4989,7 @@ mod tests {
     /// one would race under cargo's parallel test threads.
     #[test]
     fn photo_scan_finds_one_raw_once_without_any_link() {
-        let dir = std::env::temp_dir().join("autoshop-scan-nolink");
+        let dir = std::env::temp_dir().join(format!("autoshop-scan-nolink-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("a.arw"), b"raw").unwrap();
@@ -5126,7 +5128,7 @@ mod tests {
     /// A scratch photo path whose develop dir is wiped clean, so a raster
     /// claim starts from `<prefix>.png` every run.
     fn scratch_photo(tag: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join("autoshop-rotate-tests");
+        let dir = std::env::temp_dir().join(format!("autoshop-rotate-tests-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let raw = dir.join(format!("{tag}.arw"));
         std::fs::write(&raw, b"raw").unwrap();
@@ -5209,7 +5211,7 @@ mod tests {
     /// of it, which is deliberate for every test that does not need one and
     /// useless for the ones that do (R29 C1).
     fn scratch_baked_photo(tag: &str, w: u32, h: u32) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join("autoshop-rotate-tests");
+        let dir = std::env::temp_dir().join(format!("autoshop-rotate-tests-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let p = dir.join(format!("{tag}.png"));
         image::GrayImage::new(w, h).save(&p).unwrap();

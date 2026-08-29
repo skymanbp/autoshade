@@ -92,9 +92,12 @@
 > experimental generative edits, an optional pixel-**heal** retouch mode (§4.7)
 > the deterministic look **reverse-fit** (§4.8) and the local server's refusal
 > model (§4.9).
-> 1055 library + 16 CLI + 146 GUI + 2+2 contract tests are enumerated in the GUI
-> build; the library result is 1044 pass + 11 `#[ignore]`d forensic probes
-> (counts refreshed 2026-08-29 after the F1 strength-axis batch: library
+> 1057 library + 16 CLI + 146 GUI + 2+2 contract tests are enumerated in the GUI
+> build; the library result is 1046 pass + 11 `#[ignore]`d forensic probes
+> (counts refreshed 2026-08-29 after merging the step-17 cleanup batch `9097319`
+> onto the F1 strength-axis batch `302efb1`: library 1034→1057; the cleanup batch
+> adds +2/−0 by name = `rationale::tests::sidecar_failure_disclosure_has_no_traceback_or_home_path`
+> and `fixture_dir_tests::test_fixture_dirs_are_process_unique`; F1 alone went
 > 1034→1055, set diff +22/−0 default and +23/−0 GUI by name against `662b688`
 > = the strength-budget, WB-manifold, rescoring-disclosure and Style-wording
 > tests in `src/fit.rs`, `src/style.rs`, `src/main.rs` and the GUI panel pin; the free-mask batch
@@ -472,7 +475,7 @@
 > the edit to the whole frame).
 >
 > **AI masks are a RECOMPUTATION, and every surface says so.** Lightroom's
-> `crs:What="Mask/Image"` carries no raster and no geometry — 218 real
+> `crs:What="Mask/Image"` carries no raster and no geometry — 105 real
 > instances, 21 attribute names, longest value 55 characters — only the intent
 > (`MaskSubType` + `ReferencePoint` + `MaskName`) and provenance digests. So
 > `segment::resolve_ai_masks` runs OUR segmenter at develop time and caches the
@@ -1170,7 +1173,7 @@ the RAW is READ on open — the newer intent wins — and never overwritten.
 **Import (R25).** Until v0.31.0 that read imported *no* Lightroom mask at all.
 Two gates each dropped a whole correction on sight: the presence of `crs:Angle`
 (LR writes it on every radial, `"0"` included) and a `crs:MaskBlendMode` on a
-file we did not author (all 1048 mask components in the 160-sidecar reference
+file we did not author (all 1081 mask components in the 177-sidecar reference
 library carry one). Both were the same root as five more 「don't recognise it →
 discard the correction, keep an integer count」 gates, while the EXPORT side had
 had a named `MaskLoss{name, reason}` since R22 — the asymmetry WAS the defect.

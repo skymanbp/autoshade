@@ -138,8 +138,7 @@ impl HeuristicProposer {
         ];
         let note = match &self.fallback_reason {
             Some(e) => {
-                let e = super::BoundedUntrustedText::new(e, 512, &[]);
-                args.push(("e", e.into_string()));
+                args.push(("e", crate::rationale::error_line(&anyhow::anyhow!("{}", e))));
                 Note::new(keys::HEURISTIC_UNAVAILABLE, args)
             }
             None => Note::new(keys::HEURISTIC_NO_KEY, args),

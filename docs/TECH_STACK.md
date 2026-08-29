@@ -1008,7 +1008,7 @@ than the pre-call state; model weights remain outside the repository.
 - The 61 MP RAW probe measured `151 MB` peak commit for decode,
   `1771 MB` for calibration/render preparation, and `1766 MB` for the
   full-resolution render tail; the combined process peak remained `1771 MB`.
-- The release battery is **1055 library (1044 pass + 11 `#[ignore]`d forensic
+- The release battery is **1057 library (1046 pass + 11 `#[ignore]`d forensic
   probes) / 16 CLI / 146 GUI / 2+2 contract** tests. Environment-gated real
   Lightroom, brush-table, and RAW-zoo suites are additional and are not
   smuggled into the ordinary count.

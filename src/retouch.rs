@@ -724,7 +724,7 @@ pub fn heal(
                     &mut notes,
                     crate::rationale::Note::new(
                         crate::rationale::keys::HEAL_DETECT_FAILED,
-                        vec![("e", e.to_string())],
+                        vec![("e", crate::rationale::error_line(&e))],
                     ),
                 );
             }
@@ -999,7 +999,7 @@ mod tests {
     fn heal_keeps_bit_depth_and_alpha_and_stages_the_master() {
         // src lives in its own subdir: heal's pre-pay preflight (Codex AL
         // F2) runs guard_readonly, which refuses an out beside the source.
-        let root = std::env::temp_dir().join("autoshop-retouch-depth");
+        let root = std::env::temp_dir().join(format!("autoshop-retouch-depth-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let dir = root.join("library");
         let out_dir = root.join("exports");
