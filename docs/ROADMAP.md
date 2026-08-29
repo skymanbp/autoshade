@@ -195,6 +195,15 @@
 
 ## 当前状态（已完成，勿重做）
 
+- **🎚 步11 F1 自由度轴已提交 `302efb1`（2026-08-29，用户 2026-08-28 裁定强度轴支配反推诚实预算 + style 1.0 拉满；Codex 实现→七路 Codex 只读复审 42 发现主审亲核→修复批三（根因归并 F-A…F-H）→主审亲核再修六处收口）**：
+  `FitBudget::for_strength` 三点线性插值（0.00 / 0.65 默认 / 1.00）：EV ±0.5/±1/±2.5、饱和 ±15/±30/±60、WB 增益 [0.90,1.12]/[0.80,1.25]/[0.50,2.00]、增益比 1.20/1.40/3.0、曲线斜率 [0.7,1.3]/[0.5,1.5]/[0.25,3.0]、Full 色偏比 1.5/2.0/3.0、置信帽 0.50/0.50/0.35（0.85 处 0.414）、WB 旋转份额默认以下 0.05、之上线性开到 1.0（0.85 处 0.593）；≥0.85 否决改披露（`FIT_NOTE_VETO_DISCLOSED` + 置信封顶）。
+  默认 0.65 逐字节不变（WB 含在内：超预算=as-shot），唯一裁定例外＝方向一致的全局色偏在每档强度都可测（`global_cast_is_measured_when_every_band_is_one_sided_and_consistent`）；默认以上 WB 沿拟合的 log-K/线性 tint 流形 λ 二分收缩（采样合法端点保证、恰一次圆整为渲染器 WB），前后渲染须过外来色相否决 + 加权旋转预算，否则 as-shot 并 typed 披露（`FIT_NOTE_WB_WITHHELD_FOREIGN_HUE` / `_ROTATION` / `WB_CLAMPED{from,to,rotated_share,coverage}` / `WB_SEARCH_BOUND{k}` / `CAST_ADMITTED_BY_STRENGTH{ratio,budget}` / `STRENGTH{pct,s}`）；rescoring 回读 `s` 四位小数、各 SolveFacts 皆携 `Some(budget)`。
+  Style 轴：`render_reference_for_style` 在 Style≥0.85 改「TARGET style to reproduce」措辞（非粗体字面量逐字节钉 HEAD）、`style_pull`（0.3→0.18 保持出厂，1.0 拉满）取代 0.6 帽；CLI `match --strength`、GUI 面板 Strength 经 `panel_strength()` 单一读数接入反推。
+  普查停机：书中 F-B「色度不可测像素以亮度权重回退」在六臂重证前被两条既有测试拦下（雾霾对 0.0547→0.0201＝0.367× 未达 <0.35×；真实峡谷色偏在 [Red, Blue] 色相证据下被扣留而非重建）→ 按停机规则撤回，普查保持色相证据单一原语（Full 色偏门与默认以上 WB 门共用），盲区以 `{coverage}` 披露；用户 02:00 AskUserQuestion 答「依旧，优雅、高质量。怎么效果最好怎么来」→主审裁定撤回（两证据皆指回退更差），盲区 {coverage} 披露即交付。
+  主审亲核：六臂（neutral/RAW/p36 × on/off）拨盘+置信+rationale 对真 B3 基线 IDENTICAL（cmp6.py 基名规范化；蒙版栅格 sha 全同，`-4/-5/-6` 为库内 claim 去重后缀）；集差逐名 +22/−0 默认、+23/−0 GUI 对 662b688 转录（BOM 感知解码）；展示三对九档 3000px 渲染 EXIT 0（云南湖船 1.0＝2600 K/tint −91.5/EV −2.5 深蓝对齐重绘目标、康沃尔 1.0 撞 40000 K 搜索上界并披露）。
+  主审揪出并亲修六处：①GUI 测试同义反复→`AutoshopApp::panel_strength()` 单一读数 + include_str 接线钉（变异 M-G1 红）；②`rescore_report` 丢弃高强度否决披露与预算（Full 模式 budget None）→ 每模式 `Some(budget)`、披露按当前配方重推导（严格教义无担保）+ `rescoring_re_derives_the_high_strength_veto_disclosure_and_its_cap`（变异 M-R1 红）；③ARCHITECTURE 计数句自相矛盾（1034→1054 接 B3 +17 尾巴）；④门 5 表行仍写「committed band」；⑤`match --strength` 帮助文本抄自 analyze；⑥WB 搜索域 2000/40000 字面量三处→`WB_SEARCH_K`。Codex 七变异红（fix3-mutations.md）。
+  门 1055=1044 pass+11 ignored(+11i)/16/146/2+2 双特性、clippy 0+0、i18n 0、字体 847/847、check_docs --gates 26P/0F/1S；报告 target/f1-freedom/fix3-report.md、活体 target/f1-live3/、主审门 target/f1-review/。
+  登记＝元根因：无「默认快照黄金测试」让两轮默认漂移只被六臂活体抓到（收口步补）；`AUTOSHOP_*` 别名折叠待收口；src 注释 19 处历史文件名待用户裁定别名化。下步＝四线合并（F1→cleanup-17→linear-falloff→multizone）。
 - **🧮 步10-B3 余量自由蒙版已提交 `662b688`（2026-08-28，Codex 实现→Codex 只读复审 5 MAJOR + 五视角代理复审 wf_ca8c0e99 判 FIX-THEN-SHIP→Codex 修复批（中转）→主审亲核收口；用户令：此后对抗复审 fan-out 改派多路 Codex）**：
   局部场之后、瓦片之后的第四生产者读余量：候选像素＝weight>0 ∧ |remainder|>2/255 ∧ 已接受瓦片 alpha<0.5；4-连通同号分量按 Σ|remainder|×weight 排名（seed 决胜＝确定性），
   64 像素底线→双方 scoped 证据份额≥3%→D<0.65→帽 2；每个分量必有 PROPOSED / ATTACHED / REFUSED{footprint, mass, share, divergence, cap, raster-claim, raster-write, zone-refused, frame, rim} 之一，无候选写 NONE；
@@ -923,6 +932,13 @@
 
 ## v1.1 发版义务清单（进行中）
 
+- **强度轴支配反推预算（步11 `302efb1`）**：release notes 必须说明 v1.1 起 `match --strength` /
+  GUI 面板 Strength 决定反推诚实预算：0.65 默认逐字节同 v1.0.x（超预算 WB 仍 as-shot），
+  唯一默认行为变化＝方向一致的全局色偏在每档强度都被测量（置信/拨盘可变，rationale 有
+  `FIT_NOTE_GLOBAL_CAST`）；默认以上 WB 沿流形收缩并 typed 披露，≥0.85 否决改为披露
+  + 置信封顶（0.414@0.85、0.35@1.0）。Style≥0.85 参考块改「TARGET style」措辞、
+  `style_pull` 取代 0.6 帽（0.3 出厂值 0.18 不变）；strength>0.70 且 Style<0.85 不再收到旧
+  committed 层 FLOOR 措辞。深层路径的 rescoring 现在重推导高强度披露并保留封顶。
 - **自动范围行为**：release notes 必须说明 zoned 入口始终先做全局 fit；
   语义分割成功时保持既有天空/地面位图结果，禁用或不可用时才自动尝试亮度
   范围，无可接受段时保留全局结果。本批没有新 CLI/GUI 范围开关，也不产出
