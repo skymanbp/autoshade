@@ -249,7 +249,7 @@ from the existing 17-bin luminance evidence model. Bands are attempted once in
 ascending luminance order through `attach_one_zone`; robust paired weights,
 evidence withholding, share and mismatch checks, step-7b correspondence,
 local-quality gates, and a parameterized composed-frame gate are shared with
-semantic zones. Range bands use zero regression tolerance; semantic zones keep
+semantic regions. Range bands use zero regression tolerance; semantic regions keep
 their independently calibrated `0.02` drift insurance.
 Before each attempt, `render::range_weight` is evaluated on the current render.
 Overlapping estimator weights are normalized to a total no greater than one,
@@ -286,7 +286,7 @@ exclusive, and this batch emits no color partitions.
 ### Source
 
 - `src/fit.rs` — fixed 17-bin evidence verdict and contiguous-run folding.
-- `src/fit_zoned.rs` — residual runs, generalized weighted attachment, range
+- `src/fit_zoned.rs` — residual runs, multi-region semantic/generalized weighted attachment, range
   boundary gate, disclosures, and conservation tests.
 - `src/render.rs` — sequential range evaluation on current rendered pixels.
 - `src/xmp.rs` — intersected native luminance-range projection.
@@ -539,7 +539,7 @@ recipe/XMP semantics.
 
 ### Method
 
-After the global fit and exactly one local producer (semantic zones or native
+After the global fit and exactly one local producer (semantic regions or native
 luminance ranges), `fit_zoned::spatial` traverses a quadtree over the current
 render. Rectangle geometry intersects the evidence frozen from the original
 pair. Nodes are visited best-first by absolute signed residual times the lesser
@@ -624,6 +624,12 @@ therefore invalidated when the pinned BiRefNet backend later becomes available.
 - BiRefNet weights: `444,473,596 B` (**manifest-measured file size**).
 - OneFormer ADE20K weights: `881,196,376 B`; checked-in class table:
   `7,085 B`, 150 classes (**manifest/source-derived**).
+- Semantic region limits: `MAX_SEMANTIC_REGIONS = 4` and
+  `DEFAULT_SEMANTIC_REGIONS = 2` in `src/fit_zoned/semantic.rs`; four is an
+  explicit opt-in. Multi-class manifests are capped at `64 KiB` before JSON
+  parsing (`segment::MULTI_MANIFEST_MAX_BYTES`).
+- Bitmap mask budget: `MASK_RASTER_BUDGET_BYTES = 256 MiB` in
+  `src/render.rs`, imported by semantic-region accounting.
 - SAM 2.1 weights: `897,897,416 B` (**manifest-measured file size**).
 - Gesture mapping version: `gp1`; every `d x y` token becomes label `1`, with
   order and duplicates preserved (**designed IPC contract from measured XMP
@@ -983,7 +989,7 @@ than the pre-call state; model weights remain outside the repository.
 - The 61 MP RAW probe measured `151 MB` peak commit for decode,
   `1771 MB` for calibration/render preparation, and `1766 MB` for the
   full-resolution render tail; the combined process peak remained `1771 MB`.
-- The release battery is **1034 library (1023 pass + 11 `#[ignore]`d forensic
+- The release battery is **1058 library (1047 pass + 11 `#[ignore]`d forensic
   probes) / 15 CLI / 145 GUI / 2+2 contract** tests. Environment-gated real
   Lightroom, brush-table, and RAW-zoo suites are additional and are not
   smuggled into the ordinary count.

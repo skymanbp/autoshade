@@ -50,6 +50,7 @@ impl AutoshopApp {
             app.last_export_dir = prefs.last_export_dir.clone();
             app.save_denoise = prefs.save_denoise;
             app.zoned_fit = prefs.zoned_fit;
+            app.zoned_four_regions = prefs.zoned_four_regions;
             app.fit_ai_judge = prefs.fit_ai_judge;
             app.fit_deep = prefs.fit_deep;
             app.reimagine_retry = prefs.reimagine_retry;
@@ -3015,6 +3016,11 @@ impl AutoshopApp {
         }
         let src_path = self.src_path.clone();
         let zoned = self.zoned_fit;
+        let zoned_regions = if self.zoned_four_regions {
+            autoshop::fit_zoned::semantic::MAX_SEMANTIC_REGIONS
+        } else {
+            autoshop::fit_zoned::semantic::DEFAULT_SEMANTIC_REGIONS
+        };
         let ai_judge = self.fit_ai_judge;
         // The deep path IS the review, iterated — it cannot run without it,
         // and the checkbox is disabled accordingly, but the worker must not
@@ -3158,8 +3164,9 @@ impl AutoshopApp {
                                     autoshop::segment::SegmentOpts::from_config(&cfg, "sky");
                                 let mask =
                                     autoshop::store::OwnedRaster::claim(p, "mask-zone-sky")?;
-                                let rep = autoshop::fit_zoned::fit_recipe_zoned_with(
+                                let rep = autoshop::fit_zoned::fit_recipe_zoned_with_regions(
                                     &base, &target, &seg, &mask, &fit_base, Some(&corr),
+                                    zoned_regions,
                                 );
                                 (rep, Some(mask.into_path()))
                             }

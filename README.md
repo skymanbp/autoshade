@@ -72,8 +72,11 @@ tools are separate, opt-in paths and are labelled as such.
 - **Feature 6 — Reverse-fit.** `match` or the GUI's **Reverse-fit** estimates an
   engine recipe from any target look — a generated image, someone else's
   render, a reference frame — measures how far the target's *content* has
-  diverged before deciding how much to trust it, then fits global, zoned, and
-  luminance-range corrections behind evidence gates. The recovered recipe
+  diverged before deciding how much to trust it, then fits global, semantic
+  bitmap-region, and luminance-range corrections behind evidence gates. The
+  semantic producer spends one OneFormer pass per frame; the historical
+  sky/land pair is the default, and up to four disjoint class regions are
+  opt-in, each selecting Full or Atmosphere independently. The recovered recipe
   applies deterministically to the original full-resolution RAW.
 - **Feature 7 — Generative and pixel tools, opt-in and labelled.** Reimagine
   (gpt-image-2) creates a lower-resolution target from a prompt; retouch, heal,
@@ -87,7 +90,7 @@ tools are separate, opt-in paths and are labelled as such.
 Out of scope in this release: bit-exact Adobe rendering (parity is measured,
 not identical), an exact X-Trans demosaic (the plane fit is approximate),
 prebuilt Linux and macOS binaries (CI builds and tests them from source), and
-multi-class semantic segmentation.
+colour-range semantic regions.
 
 ## What is new here
 
@@ -168,7 +171,8 @@ change nothing.
 ### 5. Semantic zones and luminance bands, judged on their own population
 
 Local corrections come from mutually exclusive producers: a local OneFormer
-ADE20K pass yields sky/land bitmap zones; when segmentation is off or
+ADE20K pass yields semantic bitmap regions (sky/land by default; up to four
+disjoint class regions opt-in); when segmentation is off or
 unavailable, a pure-Rust pass derives **XMP-native luminance-range bands**
 from rank-paired residuals (sorted target rank slices against the current
 source bin means) under an evidence gate that rejects bins before they are
@@ -256,10 +260,6 @@ disguised as a Lightroom adjustment.
 
 Written down in the plan and the design memos, in delivery order:
 
-- **Multi-region semantic calibration** — one OneFormer pass, up to four
-  disjoint class regions each choosing Full or Atmosphere on its own,
-  confidence taken from the worst accepted region; colour-range regions
-  alongside luminance ranges (design memo complete).
 - **Style retrieval expansion** — ingest finished exports as exemplars (not
   only RAW+XMP pairs), text embeddings so a written style brief retrieves by
   meaning, the embedding switch in the GUI (today the
@@ -345,7 +345,7 @@ estimate. Sources are the pinned claims in
 
 | What | Measured | Where |
 |---|---|---|
-| Automated test battery | 1034 library / 15 CLI / 145 GUI / 2+2 contract tests; `check_docs` re-derives the pinned release claims | [Tech stack](#tech-stack-algorithms-and-design-philosophy) |
+| Automated test battery | 1058 library / 15 CLI / 145 GUI / 2+2 contract tests; `check_docs` re-derives the pinned release claims | [Tech stack](#tech-stack-algorithms-and-design-philosophy) |
 | RAW coverage | 24 extensions, 725 camera bodies; nine-camera format zoo 9/9 at the last release gate | [Supported formats](#supported-formats) |
 | Lightroom Texture parity | 45 of 45 period/depth anchors within ±0.02 | [Develop pipeline](#develop-pipeline-and-tone-model) |
 | Radial mask closure | 41 of 41 measured vectors within ≤1 px | [Lens correction](#lens-correction-and-lightroom-mask-frame-laws) |
@@ -617,7 +617,7 @@ versions, and a deleted-version registry; SCUNet success requires the typed
 `sidecar_wrote` contract. A 1771 MB reference probe sets the 1800 MB per-photo
 budget, while the 4 GiB RAW gate bounds admission. The [`build`
 workflow](.github/workflows/build.yml) covers default and GUI feature sets on
-Ubuntu and macOS. The current battery is **1034 library (1023 pass + 11 `#[ignore]`d forensic probes) / 15 CLI / 145 GUI / 2+2 contract** tests; the
+Ubuntu and macOS. The current battery is **1058 library (1047 pass + 11 `#[ignore]`d forensic probes) / 15 CLI / 145 GUI / 2+2 contract** tests; the
 [`scripts/check_docs.py`](scripts/check_docs.py) gate re-derives pinned release
 claims. Model weights are not stored in this repository.
 

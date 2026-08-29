@@ -773,5 +773,7 @@ impl AutoshopApp {
             lang,
             "On reverse-fit, fit globally first. Sky segmentation and native luminance-range fallback stay exclusive; then frozen-evidence spatial tiles are tried automatically on a 4x4 grid with a four-tile cap and zero frame regression. Conservative guided refinement may keep or abstain before fitting semantic/tile masks, and never changes luminance ranges. Bitmap masks stay engine-only with a named XMP loss; native ranges are written to the Lightroom sidecar. Segmentation needs the python dependencies (transformers + torch), and every fallback or abstention is noted in the rationale.",
         ));
+        ui.checkbox(&mut self.zoned_four_regions, tr(lang, "Up to four semantic regions"))
+            .on_hover_text(tr(lang, "Opt in to semantic regions beyond the historical sky/land pass; this costs one OneFormer pass per frame and may take longer."));
     }
 }

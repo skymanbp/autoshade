@@ -28,7 +28,7 @@
 //! matching the global fit's philosophy.
 
 use anyhow::{Context, Result};
-use image::{DynamicImage, GrayImage};
+use image::{DynamicImage, GenericImageView, GrayImage};
 
 use crate::fit::{self, FitReport};
 use crate::recipe::{LocalAdjustment, MaskGeometry, MaskRole, RangeMask};
@@ -39,6 +39,7 @@ mod field;
 mod freemask;
 mod range;
 mod spatial;
+pub mod semantic;
 
 const MASK_REFINE_RADIUS: u32 = 8;
 const MASK_REFINE_EPSILON: f32 = (4.0 / 255.0) * (4.0 / 255.0);
@@ -1094,7 +1095,36 @@ pub fn fit_recipe_zoned_with(
     base: &crate::recipe::EditRecipe,
     provider: Option<fit::CorrespondenceProvider>,
 ) -> FitReport {
-    fit_recipe_zoned_inner(src, target, seg, mask_path, base, provider, SHIPPED_LAYERS)
+    fit_recipe_zoned_with_regions(
+        src,
+        target,
+        seg,
+        mask_path,
+        base,
+        provider,
+        semantic::DEFAULT_SEMANTIC_REGIONS,
+    )
+}
+
+/// Multi-region entry point shared by the CLI and GUI.  `2` intentionally
+/// routes through the historical sky/land implementation so its recipe bytes
+/// and rationale remain unchanged.
+pub fn fit_recipe_zoned_with_regions(
+    src: &DynamicImage,
+    target: &DynamicImage,
+    seg: &SegmentOpts,
+    mask_path: &crate::store::OwnedRaster,
+    base: &crate::recipe::EditRecipe,
+    provider: Option<fit::CorrespondenceProvider>,
+    regions: usize,
+) -> FitReport {
+    if regions <= semantic::DEFAULT_SEMANTIC_REGIONS {
+        return fit_recipe_zoned_inner(src, target, seg, mask_path, base, provider, SHIPPED_LAYERS);
+    }
+    fit_recipe_zoned_multi_inner(
+        src, target, seg, mask_path, base, provider,
+        regions.min(semantic::MAX_SEMANTIC_REGIONS),
+    )
 }
 
 /// [`fit_recipe_zoned`] with a calibration-only base composed into the
@@ -1121,7 +1151,27 @@ fn fit_recipe_zoned_inner(
     provider: Option<fit::CorrespondenceProvider>,
     layers: ZonedLayerOpts,
 ) -> FitReport {
-    let (mut report, field, first_producer) = match segment_both(src, target, seg, mask_path) {
+    fit_recipe_zoned_inner_seeded(
+        src, target, seg, mask_path, base, provider, layers, None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn fit_recipe_zoned_inner_seeded(
+    src: &DynamicImage,
+    target: &DynamicImage,
+    seg: &SegmentOpts,
+    mask_path: &crate::store::OwnedRaster,
+    base: &crate::recipe::EditRecipe,
+    provider: Option<fit::CorrespondenceProvider>,
+    layers: ZonedLayerOpts,
+    segmented: Option<(GrayImage, GrayImage)>,
+) -> FitReport {
+    let segmented = match segmented {
+        Some(pair) => Ok(pair),
+        None => segment_both(src, target, seg, mask_path),
+    };
+    let (mut report, field, first_producer) = match segmented {
         Ok((mut src_mask, mut tgt_mask)) => {
             let refinements = if layers.refine_masks {
                 let source = crate::mask_refine::guided_refine(
@@ -1266,13 +1316,26 @@ fn fit_recipe_zoned_inner(
             (report, field, "ranges")
         }
     };
-    // The sequencer only reads `report.err_after` and appends notes: every
-    // producer already closed its own stage with the finished disclosure of
-    // ITS final render, so a skipped tile stage leaves exactly the disclosure
-    // the last producer wrote, and the persisted rationale string is never
-    // rebuilt from the (MAX_NOTES-bounded) typed vec.
-    if let Some((local, _)) = &field {
-        field::push_realized(&mut report, local, first_producer);
+    run_local_sequencer(src, target, &mut report, &field, first_producer, mask_path, layers);
+    report
+}
+
+/// The single local producer sequencer shared by the historical two-region
+/// route, the semantic multi-region route, and the range fallback.  Keep the
+/// order and disclosures stable: first producer -> stop -> tiles -> stop ->
+/// free masks.
+#[allow(clippy::too_many_arguments)]
+fn run_local_sequencer(
+    src: &DynamicImage,
+    target: &DynamicImage,
+    report: &mut FitReport,
+    field: &Option<(crate::fit_field::LocalField, field::ShapeReading)>,
+    first_producer: &str,
+    mask_path: &crate::store::OwnedRaster,
+    layers: ZonedLayerOpts,
+) {
+    if let Some((local, _)) = field {
+        field::push_realized(report, local, first_producer);
         if layers.free_masks && field::stop_verdict(local, report.err_after) {
             let skipped = match (layers.spatial, layers.free_masks) {
                 (true, true) => "tiles, free masks",
@@ -1280,31 +1343,33 @@ fn fit_recipe_zoned_inner(
                 (false, true) => "free masks",
                 (false, false) => "none",
             };
-            field::push_stop(&mut report, first_producer, skipped);
-            return report;
+            field::push_stop(report, first_producer, skipped);
+            return;
         }
     }
-    let mut excluded = field.as_ref()
-        .map(|(local, _)| vec![0.0f32; local.remainder.len()]).unwrap_or_default();
+    let mut excluded = field
+        .as_ref()
+        .map(|(local, _)| vec![0.0f32; local.remainder.len()])
+        .unwrap_or_default();
     if layers.spatial {
-        let cap = field.as_ref().map(|(_, reading)| reading.effective_tile_cap)
+        let cap = field
+            .as_ref()
+            .map(|(_, reading)| reading.effective_tile_cap)
             .unwrap_or(spatial::SPATIAL_MAX_ATTACHMENTS);
-        excluded = spatial::attach_tiles(
-            src, target, &mut report, mask_path, layers.refine_masks, cap,
-        );
-        if let Some((local, _)) = &field {
-            field::push_realized(&mut report, local, "tiles");
+        excluded = spatial::attach_tiles(src, target, report, mask_path, layers.refine_masks, cap);
+        if let Some((local, _)) = field {
+            field::push_realized(report, local, "tiles");
             if layers.free_masks && field::stop_verdict(local, report.err_after) {
-                field::push_stop(&mut report, "tiles", "free masks");
-                return report;
+                field::push_stop(report, "tiles", "free masks");
+                return;
             }
         }
     }
-    if layers.free_masks && let Some((local, _)) = &field {
+    if layers.free_masks && let Some((local, _)) = field {
         let stage = freemask::attach_free_masks(
             src,
             target,
-            &mut report,
+            report,
             mask_path,
             local,
             &excluded,
@@ -1312,9 +1377,509 @@ fn fit_recipe_zoned_inner(
             freemask::FREE_MASK_MAX_ATTACHMENTS,
         );
         debug_assert_eq!(stage.components, stage.disclosed);
-        if stage.ran { field::push_realized(&mut report, local, "free masks"); }
+        if stage.ran { field::push_realized(report, local, "free masks"); }
     }
+}
+
+/// Multi-class semantic path.  It intentionally shares the global solve and
+/// downstream field/tile stages with the legacy path, while replacing only the
+/// sky/land producer with one attachment per disjoint class region.
+fn fit_recipe_zoned_multi_inner(
+    src: &DynamicImage,
+    target: &DynamicImage,
+    seg: &SegmentOpts,
+    mask_path: &crate::store::OwnedRaster,
+    base: &crate::recipe::EditRecipe,
+    provider: Option<fit::CorrespondenceProvider>,
+    max_regions: usize,
+) -> FitReport {
+    let semantic = segment_multiclass_both(src, target, seg, mask_path, max_regions);
+    let (regions, rasters, sky_pair, refinements) = match semantic {
+        Ok(pair) => pair,
+        Err(e) => {
+            // A multi-manifest failure is a semantic-layer failure, not a
+            // reason to switch producers. Re-enter the historical two-region
+            // route; it owns its own range fallback and sequencer, and its
+            // result remains the byte-identity reference. Disclosed under its
+            // OWN key: `ZONED_UNAVAILABLE` narrates a luminance-range fallback,
+            // and the route that ran here is the sky/land pass.
+            let mut report = fit_recipe_zoned_inner(
+                src, target, seg, mask_path, base, provider, SHIPPED_LAYERS,
+            );
+            crate::rationale::push_note(
+                &mut report.recipe.rationale,
+                &mut report.notes,
+                crate::rationale::Note::new(
+                    crate::rationale::keys::SEMANTIC_REGIONS_UNAVAILABLE,
+                    vec![("e", format!("{e:#}"))],
+                ),
+            );
+            return report;
+        }
+    };
+    if regions.is_empty() {
+        // No class cleared the shared support floor on both frames. The
+        // historical route is the reference result here too: it judges the
+        // sky partition on its own numbers (and drops its anchor when that
+        // fails) and runs the same sequencer — a typed hand-off, not a fourth
+        // exit that would render bare placeholders and strand the anchor.
+        let mut report = fit_recipe_zoned_inner_seeded(
+            src, target, seg, mask_path, base, provider, SHIPPED_LAYERS, Some(sky_pair),
+        );
+        push_refinement_notes(&mut report, &refinements);
+        crate::rationale::push_note(
+            &mut report.recipe.rationale,
+            &mut report.notes,
+            crate::rationale::Note::new(
+                crate::rationale::keys::SEMANTIC_REGIONS_NONE,
+                vec![("n", max_regions.to_string())],
+            ),
+        );
+        return report;
+    }
+    let (mut report, field, first_producer) = {
+        let (sp, tp, w, h) = fit::divergence_raster(src, target, base);
+        let divergences = regions.iter().map(|r| {
+            let weights = mask_weights(&r.source, w, h);
+            ZoneDivergence { divergence: fit::structure_divergence(&sp, &tp, w, h, &weights), share: weights.iter().sum::<f32>() / weights.len().max(1) as f32 }
+        }).collect::<Vec<_>>();
+        let divergent_cover = divergences.iter().filter(|d| d.divergence.d >= fit::DIVERGENCE_ZONE).map(|d| d.share).sum::<f32>();
+        let mut report = fit::fit_recipe_from_promoted_with_disclosure(src, target, base,
+            divergent_cover >= fit::DIVERGENT_COVER_PROMOTES, true, provider);
+        // The same disclosure the sky/land route makes for ITS refinement.
+        push_refinement_notes(&mut report, &refinements);
+        let field = SHIPPED_LAYERS.field.then(|| field::solve_local_field(src, target, &mut report)).flatten();
+        attach_semantic_regions(src, target, &mut report, &regions, &rasters, &divergences);
+        (report, field, "semantic regions")
+    };
+    run_local_sequencer(src, target, &mut report, &field, first_producer, mask_path, SHIPPED_LAYERS);
+    // The four-region producer may leave pixels to the global fit by design;
+    // the historical two-region producer owns the inverse-sky complement.
+    // Compare against the unchanged legacy sequencer and keep the multi-class
+    // candidate only when it is no worse. This is a strict selection gate,
+    // not extra segmentation and not a tolerance. The multi-class sky plane
+    // remains available for the region producer, but the legacy path is the
+    // byte-identity reference and runs through the seeded sky bridge.
+    let two = fit_recipe_zoned_inner_seeded(
+        src,
+        target,
+        seg,
+        mask_path,
+        base,
+        provider,
+        SHIPPED_LAYERS,
+        Some(sky_pair),
+    );
+    let remove_unselected = |candidate: &FitReport, kept: &FitReport| {
+        release_unselected_rasters(candidate, kept, mask_path)
+    };
+    // One ruler for the comparison. Each report's `err_after` was measured
+    // under ITS OWN evidence model, and the two global solves can land in
+    // different modes — a Full ruler is structural, an Atmosphere ruler
+    // structure-blind — so those numbers are not comparable across reports.
+    // Both finished renders are re-measured under the reference's ruler, and
+    // those are the numbers the refusal discloses.
+    let multi_error = frame_err_under(src, target, &report, &two.evidence);
+    let two_error = frame_err_under(src, target, &two, &two.evidence);
+    if multi_error >= two_error {
+        let verdict_name = |key: &str| match key {
+            crate::rationale::keys::ZONE_ATTACHED => "ZONE_ATTACHED",
+            crate::rationale::keys::ZONE_ALREADY_MATCHED => "ZONE_ALREADY_MATCHED",
+            crate::rationale::keys::ZONE_SHARE_NO_CORRECTION => "ZONE_NO_CORRECTION",
+            crate::rationale::keys::ZONE_TOO_SMALL => "ZONE_TOO_SMALL",
+            crate::rationale::keys::ZONE_SHARE_MISMATCH => "ZONE_SHARE_MISMATCH",
+            crate::rationale::keys::ZONE_BOUNDARY_PASSED => "ZONE_BOUNDARY_PASSED",
+            crate::rationale::keys::REGION_BOUNDARY_REFUSED => "REGION_BOUNDARY_REFUSED",
+            crate::rationale::keys::ZONE_QUALITY_TEXTURE_FAILED => "ZONE_QUALITY_TEXTURE_FAILED",
+            crate::rationale::keys::ZONE_QUALITY_CLIPPING_FAILED => "ZONE_QUALITY_CLIPPING_FAILED",
+            crate::rationale::keys::ZONE_DROPPED => "ZONE_DROPPED",
+            crate::rationale::keys::ZONE_ATMOSPHERE_DROPPED => "ZONE_ATMOSPHERE_DROPPED",
+            crate::rationale::keys::ZONE_MODE_FULL => "ZONE_MODE_FULL",
+            crate::rationale::keys::ZONE_MODE_ATMOSPHERE => "ZONE_MODE_ATMOSPHERE",
+            crate::rationale::keys::ZONE_EVIDENCE_WITHHELD_COLOUR => "ZONE_EVIDENCE_WITHHELD_COLOUR",
+            crate::rationale::keys::ZONE_EVIDENCE_WITHHELD_TONE => "ZONE_EVIDENCE_WITHHELD_TONE",
+            crate::rationale::keys::ZONE_QUALITY_PASSED => "ZONE_QUALITY_PASSED",
+            // An honest "something else", never a verdict the zone did not get.
+            _ => "ZONE_OTHER",
+        };
+        let regions_text = regions.iter().map(|region| {
+            let label = format!("region-{}-{}", region.class_id, region.label);
+            let verdict = report.notes.iter().rev()
+                .find(|note| note.args.iter().any(|(name, value)| *name == "label" && value == &label))
+                .map(|note| note.key)
+                .unwrap_or(crate::rationale::keys::ZONE_SHARE_NO_CORRECTION);
+            format!("{} {}: {}", region.class_id, region.label, verdict_name(verdict))
+        }).collect::<Vec<_>>().join("; ");
+        remove_unselected(&report, &two);
+        let mut chosen = two;
+        let refusal = crate::rationale::Note::new(
+            crate::rationale::keys::REGION_FRAME_REFUSED,
+            vec![
+                ("multi", format!("{multi_error:.6}")),
+                ("two", format!("{two_error:.6}")),
+                ("regions", regions_text),
+            ],
+        );
+        chosen.recipe.rationale.push_str(&crate::rationale::render_one(&refusal));
+        // Keep the truncation sentinel in place.  Appending the arbitration
+        // verdict after it preserves the consumer's raw-English fallback
+        // while still exposing the typed decision to the GUI/test callers.
+        chosen.notes.push(refusal);
+        return chosen;
+    }
+    // Keep the selected semantic candidate and release only the seeded legacy
+    // candidate's unreferenced raster claims.
+    remove_unselected(&two, &report);
     report
+}
+
+/// Claim hygiene after arbitration: every bitmap raster the losing
+/// `candidate` references and the `kept` report does not is released, and so
+/// is the shared anchor when nothing kept references it. Only files inside
+/// the anchor's own directory (the develop store) are touched, so a recipe
+/// that names a raster elsewhere can never make the fit delete it.
+fn release_unselected_rasters(
+    candidate: &FitReport,
+    kept: &FitReport,
+    anchor: &crate::store::OwnedRaster,
+) {
+    let bitmaps = |report: &FitReport| {
+        report
+            .recipe
+            .masks
+            .iter()
+            .filter_map(|mask| match &mask.mask {
+                MaskGeometry::Bitmap { path } => Some(path.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    let keep = bitmaps(kept).into_iter().collect::<std::collections::HashSet<_>>();
+    let parent = anchor.path().parent();
+    for path in bitmaps(candidate) {
+        let file = std::path::Path::new(&path);
+        if !keep.contains(&path) && file.parent() == parent {
+            let _ = std::fs::remove_file(file);
+        }
+    }
+    let anchor_name = anchor.path().to_string_lossy().into_owned();
+    if !keep.contains(&anchor_name) {
+        anchor.remove();
+    }
+}
+
+/// A report's finished render measured under a GIVEN evidence ruler — the
+/// only way two reports that may have solved in different modes can be
+/// compared. Analysis geometry, like every zone gate.
+fn frame_err_under(
+    src: &DynamicImage,
+    target: &DynamicImage,
+    report: &FitReport,
+    evidence: &fit::EvidenceModel,
+) -> f32 {
+    let (s_img, t_img) = fit::analysis_pair(src, target);
+    let tgt_px = fit::pixels_of(&t_img);
+    let px = fit::pixels_of(&render::develop_preview(&s_img, &report.recipe));
+    fit::look_err_with_evidence(&px, &tgt_px, evidence)
+}
+
+/// One guided-refinement reading per class plane, as the bridge took it.
+type PlaneRefinement = (String, bool, crate::mask_refine::RefineReading);
+
+fn push_refinement_notes(report: &mut FitReport, refinements: &[PlaneRefinement]) {
+    for (label, kept, reading) in refinements {
+        crate::rationale::push_note(
+            &mut report.recipe.rationale,
+            &mut report.notes,
+            crate::rationale::Note::new(
+                if *kept {
+                    crate::rationale::keys::MASK_REFINEMENT_KEPT
+                } else {
+                    crate::rationale::keys::MASK_REFINEMENT_ABSTAINED
+                },
+                vec![
+                    ("label", label.clone()),
+                    ("coverage", format!("{:.6}", reading.coverage_delta)),
+                    ("before", format!("{:.6}", reading.edge_before)),
+                    ("after", format!("{:.6}", reading.edge_after)),
+                    ("core", reading.core_changed.to_string()),
+                ],
+            ),
+        );
+    }
+}
+
+/// Run the one-inference-per-frame multi-class sidecar and materialise source
+/// planes as owned rasters for the recipe. Temporary manifests and sidecar
+/// plane files are removed before returning; the recipe owns only the claimed
+/// source rasters it actually receives. The refinement readings ride along so
+/// the caller can disclose them once it has a report to disclose into.
+type MultiClassSegments = (
+    Vec<semantic::SemanticRegion>,
+    Vec<crate::store::OwnedRaster>,
+    (GrayImage, GrayImage),
+    Vec<PlaneRefinement>,
+);
+
+fn segment_multiclass_both(
+    src: &DynamicImage,
+    target: &DynamicImage,
+    seg: &SegmentOpts,
+    mask_path: &crate::store::OwnedRaster,
+    max_regions: usize,
+) -> Result<MultiClassSegments> {
+    let sibling = |suffix: &str| {
+        let mut p = mask_path.path().as_os_str().to_owned();
+        p.push(suffix);
+        std::path::PathBuf::from(p)
+    };
+    let src_in = sibling(".multi-src.png");
+    let tgt_in = sibling(".multi-tgt.png");
+    let src_manifest = sibling(".multi-src.json");
+    let tgt_manifest = sibling(".multi-tgt.json");
+    let run = (|| -> Result<MultiClassSegments> {
+        // The single-class bridge's sizing, through the ONE helper both
+        // bridges share: the seeded legacy run is byte-identical to an
+        // unseeded one only if the sidecar saw identical inputs.
+        let source_input = segmentation_input(src);
+        let target_input = segmentation_input(target);
+        source_input.to_rgb8().save(&src_in).context("write multi-class source input")?;
+        target_input.to_rgb8().save(&tgt_in).context("write multi-class target input")?;
+        let sm = crate::segment::segment_multiclass_file(seg, &src_in, &src_manifest, max_regions)?;
+        let tm = crate::segment::segment_multiclass_file(seg, &tgt_in, &tgt_manifest, max_regions)?;
+        let source_sky = sm
+            .planes
+            .iter()
+            .find(|plane| plane.label.trim().eq_ignore_ascii_case("sky"))
+            .map(|plane| plane.mask.clone())
+            .context("multi-class source manifest has no sky plane")?;
+        let target_sky = tm
+            .planes
+            .iter()
+            .find(|plane| plane.label.trim().eq_ignore_ascii_case("sky"))
+            .map(|plane| plane.mask.clone())
+            .context("multi-class target manifest has no sky plane")?;
+        // Keep the historical anchor valid for the seeded legacy run. The
+        // legacy path may abstain from refinement and still reference this
+        // raster, so it must be materialised before returning the pair.
+        source_sky.save(mask_path.path()).context("save seeded legacy sky mask")?;
+        let source_dims = (sm.width, sm.height);
+        let mut source = sm.planes.into_iter().map(|p| semantic::ClassPlane {
+            class_id: p.class_id, label: p.label, mean_confidence: p.mean_confidence, mask: p.mask,
+        }).collect::<Vec<_>>();
+        let mut target_planes = tm.planes.into_iter().map(|p| semantic::ClassPlane {
+            class_id: p.class_id,
+            label: p.label,
+            mean_confidence: p.mean_confidence,
+            // Segmentation runs independently on each input, so their native
+            // raster sizes can differ by a row/column.  The fit's evidence
+            // geometry is source-owned; resample the target plane into it
+            // before pairing counterparts.
+            mask: if p.mask.dimensions() == source_dims {
+                p.mask
+            } else {
+                image::imageops::resize(&p.mask, source_dims.0, source_dims.1, image::imageops::FilterType::Triangle)
+            },
+        }).collect::<Vec<_>>();
+        // The shipped sky/land producer refines both semantic planes before
+        // fitting. Apply the same bounded guide to every class before overlap
+        // resolution, so the disjoint partition is built from the alphas the
+        // renderer will actually persist rather than from a second, rougher
+        // semantic path.
+        let mut refinements: Vec<PlaneRefinement> = Vec::new();
+        for (side, frame, planes) in [("source", src, &mut source), ("target", target, &mut target_planes)] {
+            for plane in planes.iter_mut() {
+                let label = format!("semantic {side} class {} {}", plane.class_id, plane.label);
+                match crate::mask_refine::guided_refine(
+                    frame,
+                    &plane.mask,
+                    MASK_REFINE_RADIUS,
+                    MASK_REFINE_EPSILON,
+                ) {
+                    crate::mask_refine::RefineOutcome::Kept { mask, reading } => {
+                        plane.mask = mask;
+                        refinements.push((label, true, reading));
+                    }
+                    crate::mask_refine::RefineOutcome::Abstained { reading } => {
+                        refinements.push((label, false, reading));
+                    }
+                }
+            }
+        }
+        let regions = semantic::resolve_regions(&source, &target_planes, max_regions);
+        if let Some(first) = regions.first()
+            && !semantic::bitmap_budget_allows(
+                0,
+                first.source.width(),
+                first.source.height(),
+                regions.len(),
+            )
+        {
+            anyhow::bail!(
+                "semantic region bitmap budget refused {} regions at {}x{}",
+                regions.len(), first.source.width(), first.source.height()
+            );
+        }
+        let mut rasters: Vec<crate::store::OwnedRaster> = Vec::with_capacity(regions.len());
+        for region in &regions {
+            let safe = region.label.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect::<String>();
+            let prefix = format!("mask-region-{}-{}", region.class_id, safe.trim_matches('-'));
+            let raster = match mask_path.claim_sibling(&prefix) {
+                Ok(raster) => raster,
+                Err(e) => {
+                    for claimed in &rasters { claimed.remove(); }
+                    return Err(e).with_context(|| format!("claim semantic region {}", region.class_id));
+                }
+            };
+            if let Err(e) = region.source.save(raster.path()) {
+                rasters.push(raster);
+                for claimed in rasters { claimed.remove(); }
+                return Err(e).with_context(|| format!("write semantic region {}", region.class_id));
+            }
+            rasters.push(raster);
+        }
+        Ok((regions, rasters, (source_sky, target_sky), refinements))
+    })();
+    for p in [&src_in, &tgt_in, &src_manifest, &tgt_manifest] { let _ = std::fs::remove_file(p); }
+    run
+}
+
+fn attach_semantic_regions(
+    src: &DynamicImage,
+    target: &DynamicImage,
+    report: &mut FitReport,
+    regions: &[semantic::SemanticRegion],
+    rasters: &[crate::store::OwnedRaster],
+    divergences: &[ZoneDivergence],
+) {
+    let (s_img, t_img) = fit::analysis_pair(src, target);
+    let tgt_px = fit::pixels_of(&t_img);
+    let preview = render::develop_preview(&s_img, &report.recipe);
+    let (aw, ah) = preview.dimensions();
+    let mut frame_err = report.err_after;
+    let corr = report.correspondence.take();
+    let mut accepted = Vec::new();
+    for ((region, raster), divergence) in regions.iter().zip(rasters).zip(divergences) {
+        let sw = mask_weights(&region.source, aw, ah);
+        let tw = mask_weights(&region.target, t_img.width(), t_img.height());
+        let attachment = ZoneAttachment {
+            source_weights: sw,
+            target_weights: tw,
+            coverage: None,
+            mask: MaskGeometry::Bitmap { path: raster.path().to_string_lossy().into_owned() },
+            range: None,
+            name: format!("region-{}-{}", region.class_id, region.label),
+            role: MaskRole::Custom,
+            inverted: false,
+            label: format!("region-{}-{}", region.class_id, region.label),
+            min_share: MIN_ZONE_SHARE,
+            frame_regression_tol: ZONE_GLOBAL_REGRESSION_TOL,
+        };
+        let frame_before = frame_err;
+        if let Some(mut zone) = attach_one_zone(
+            &s_img,
+            &tgt_px,
+            report,
+            &mut frame_err,
+            &attachment,
+            divergence.divergence,
+            corr.as_ref(),
+        ) {
+            let boundary = spatial::enforce_bitmap_boundary(
+                &s_img,
+                &tgt_px,
+                report,
+                zone.mask_index,
+                spatial::BitmapBoundaryInput {
+                    weights: &zone.source_weights,
+                    initial_px: zone.rendered,
+                    frame_before,
+                },
+            );
+            match boundary {
+                Ok(boundary) => {
+                    let target_moments = zone_moments(&tgt_px, &zone.target_weights);
+                    zone.after = zone_err(
+                        &zone_moments(&boundary.pixels, &zone.source_weights),
+                        &target_moments,
+                    );
+                    zone.rendered = boundary.pixels;
+                    frame_err = fit::look_err_with_evidence(
+                        &zone.rendered,
+                        &tgt_px,
+                        &report.evidence,
+                    );
+                    crate::rationale::push_note(
+                        &mut report.recipe.rationale,
+                        &mut report.notes,
+                        crate::rationale::Note::new(
+                            crate::rationale::keys::ZONE_BOUNDARY_PASSED,
+                            vec![
+                                ("label", attachment.label.clone()),
+                                ("n", "1".to_string()),
+                                ("before", format!("{:.3}", boundary.initial.rim)),
+                                ("after", format!("{:.3}", boundary.reading.rim)),
+                                ("k", format!("{:.3}", boundary.k)),
+                                ("max", format!("{:.3}", ZONE_BOUNDARY_RIM_MAX)),
+                                ("transitions", boundary.reading.transitions.to_string()),
+                            ],
+                        ),
+                    );
+                    accepted.push(zone);
+                }
+                Err(refusal) => {
+                    raster.remove();
+                    // The shared gate hands back only what it measured — the
+                    // candidate's rim and WHY it refused. Nothing is invented
+                    // for a shrink that was never accepted.
+                    let why = match refusal.why {
+                        spatial::BitmapBoundaryWhy::Rim => "no shared shrink met the rim budget",
+                        spatial::BitmapBoundaryWhy::Frame => "the composed frame regressed",
+                    };
+                    crate::rationale::push_note(
+                        &mut report.recipe.rationale,
+                        &mut report.notes,
+                        crate::rationale::Note::new(
+                            crate::rationale::keys::REGION_BOUNDARY_REFUSED,
+                            vec![
+                                ("label", attachment.label.clone()),
+                                ("why", why.to_string()),
+                                ("before", format!("{:.3}", refusal.initial.rim)),
+                                ("max", format!("{:.3}", ZONE_BOUNDARY_RIM_MAX)),
+                                ("transitions", refusal.initial.transitions.to_string()),
+                            ],
+                        ),
+                    );
+                    frame_err = frame_before;
+                }
+            }
+        }
+    }
+    report.correspondence = corr;
+    if accepted.is_empty() {
+        for raster in rasters { raster.remove(); }
+        let finished = fit::pixels_of(&render::develop_preview(&s_img, &report.recipe));
+        fit::append_finished_disclosure(report, &finished, &tgt_px);
+        return;
+    }
+    // A class can pass partition support yet fail its own local quality or
+    // acceptance gate.  Release that unreferenced claim; only masks that made
+    // it into the recipe survive the run.
+    for raster in rasters {
+        let path = raster.path().to_string_lossy();
+        if !report.recipe.masks.iter().any(|m| matches!(&m.mask, MaskGeometry::Bitmap { path: p } if p == path.as_ref())) {
+            raster.remove();
+        }
+    }
+    for zone in &accepted { push_zone_attached_note(report, zone); }
+    report.err_after = frame_err;
+    let worst = semantic::worst_region_residual(&accepted.iter().map(|z| z.after).collect::<Vec<_>>());
+    report.recipe.confidence = report.recipe.confidence.min(fit::clamp_confidence(1.0 - worst * ZONE_CONFIDENCE_SLOPE));
+    crate::rationale::push_note(&mut report.recipe.rationale, &mut report.notes,
+        crate::rationale::Note::new(crate::rationale::keys::ZONE_CONFIDENCE,
+            vec![("n", accepted.len().to_string()), ("worst", format!("{worst:.3}")), ("frame", format!("{frame_err:.3}"))]));
+    let final_px = fit::pixels_of(&render::develop_preview(&s_img, &report.recipe));
+    fit::append_finished_disclosure(report, &final_px, &tgt_px);
 }
 
 #[derive(Clone, Copy)]
@@ -1383,6 +1948,31 @@ fn measure_zone_divergence(
     ZoneDivergences { sky: measured(&sky_weights), land: measured(&land_weights) }
 }
 
+/// The long edge past which a frame is thumbnailed before segmentation.
+const SEGMENTATION_INPUT_EDGE: u32 = 2048;
+
+/// THE input-sizing rule every segmentation bridge hands the sidecar: native
+/// pixels through [`SEGMENTATION_INPUT_EDGE`], otherwise the same thumbnail.
+/// Segmentation reads scene SEMANTICS, not pixels: a ≤2048 input finds the
+/// sky exactly as well as a 61 MP master while skipping a ~180 MB PNG
+/// round-trip per side (the CLI fit hands full-res frames here). The
+/// persisted mask raster is normalised-coordinate data — the engine resamples
+/// it at whatever resolution the develop runs, and the GUI's own reverse-fit
+/// already segments preview-res frames.
+///
+/// One copy on purpose. `image::thumbnail` has no ratio>1 guard, so an
+/// unconditional call UPSCALES a smaller frame; the multi-class bridge once
+/// carried its own unconditional copy and its sky plane differed from the
+/// single-class mask on every ≤2048 frame — which is what the seeded legacy
+/// run's byte identity rests on.
+fn segmentation_input(img: &DynamicImage) -> std::borrow::Cow<'_, DynamicImage> {
+    if img.width().max(img.height()) > SEGMENTATION_INPUT_EDGE {
+        std::borrow::Cow::Owned(img.thumbnail(SEGMENTATION_INPUT_EDGE, SEGMENTATION_INPUT_EDGE))
+    } else {
+        std::borrow::Cow::Borrowed(img)
+    }
+}
+
 /// Run the segmentation sidecar on both images. The source mask persists at
 /// `mask_path` (the recipe references it); the target's inputs/mask are
 /// temporary siblings, removed before returning. Any failure aborts the
@@ -1406,26 +1996,10 @@ fn segment_both(
     let tmp_src = sibling(".src-in.png");
     let tmp_tgt = sibling(".tgt-in.png");
     let tmp_tgt_mask = sibling(".tgt-mask.png");
-    // Segmentation reads scene SEMANTICS, not pixels: a ≤2048 input finds the
-    // sky exactly as well as a 61 MP master while skipping a ~180 MB PNG
-    // round-trip per side (the CLI fit hands full-res frames here). The
-    // persisted mask raster is normalised-coordinate data — the engine
-    // resamples it at whatever resolution the develop runs, and the GUI's own
-    // reverse-fit already segments preview-res frames.
-    let small_src;
-    let src = if src.width().max(src.height()) > 2048 {
-        small_src = src.thumbnail(2048, 2048);
-        &small_src
-    } else {
-        src
-    };
-    let small_tgt;
-    let target = if target.width().max(target.height()) > 2048 {
-        small_tgt = target.thumbnail(2048, 2048);
-        &small_tgt
-    } else {
-        target
-    };
+    // Sizing lives in `segmentation_input` — shared with the multi-class
+    // bridge, which is why the seeded legacy run can be byte-identical.
+    let src = segmentation_input(src);
+    let target = segmentation_input(target);
     let run = || -> Result<(GrayImage, GrayImage)> {
         src.to_rgb8().save(&tmp_src).context("write segmentation input (source)")?;
         target.to_rgb8().save(&tmp_tgt).context("write segmentation input (target)")?;
@@ -1684,7 +2258,7 @@ fn attach_zones_with_divergence(
     // area-weighted: a perfectly matched sky over a wrecked foreground is not
     // a 70%-confident fit, and the zones are few and large enough that the
     // worst one is never a sliver.
-    let worst = accepted.iter().map(|z| z.after).fold(0.0f32, f32::max);
+    let worst = semantic::worst_region_residual(&accepted.iter().map(|z| z.after).collect::<Vec<_>>());
     let zone_conf = fit::clamp_confidence(1.0 - worst * ZONE_CONFIDENCE_SLOPE);
     report.recipe.confidence = report.recipe.confidence.min(zone_conf);
     crate::rationale::push_note(
@@ -2349,6 +2923,14 @@ fn attach_one_zone(
     };
     if neutral_zone {
         report.recipe.masks.pop();
+        crate::rationale::push_note(
+            &mut report.recipe.rationale,
+            &mut report.notes,
+            crate::rationale::Note::new(
+                crate::rationale::keys::ZONE_ALREADY_MATCHED,
+                vec![("label", label.to_string()), ("before", format!("{zone_before:.3}"))],
+            ),
+        );
         return None;
     }
     let zoned_px = fit::pixels_of(&render::develop_preview(s_img, &report.recipe));
@@ -3575,6 +4157,66 @@ mod tests {
             .iter()
             .any(|n| n.key == crate::rationale::keys::ZONE_MODE_FULL));
         mask_path.remove();
+    }
+
+    #[test]
+    fn semantic_regions_select_independent_modes_and_worst_confidence() {
+        let (w, h) = (12u32, 4u32);
+        let source = DynamicImage::ImageRgb8(RgbImage::from_fn(w, h, |x, _| {
+            image::Rgb([80 + (x * 3) as u8, 100, 120])
+        }));
+        let target = DynamicImage::ImageRgb8(RgbImage::from_fn(w, h, |x, _| {
+            image::Rgb([if x < 4 { 180 } else if x < 8 { 60 } else { 130 }, 100, 120])
+        }));
+        let dir = std::env::temp_dir().join(format!("autoshop-semantic-product-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut regions = Vec::new();
+        let mut rasters = Vec::new();
+        for (index, class_id) in [10u16, 20, 30].into_iter().enumerate() {
+            let mask = GrayImage::from_fn(w, h, |x, _| {
+                image::Luma([if x / 4 == index as u32 { 255 } else { 0 }])
+            });
+            let path = crate::store::OwnedRaster::scratch(dir.join(format!("region-{class_id}.png")));
+            mask.save(path.path()).unwrap();
+            regions.push(semantic::SemanticRegion {
+                class_id,
+                label: format!("class-{class_id}"),
+                mean_confidence: 0.9,
+                source: mask.clone(),
+                target: mask,
+                source_share: 1.0 / 3.0,
+                target_share: 1.0 / 3.0,
+            });
+            rasters.push(path);
+        }
+        let mut report = neutral_report(&source, &target);
+        let divergences = [0.1f32, 0.8, 0.2]
+            .into_iter()
+            .map(|d| ZoneDivergence { divergence: divergence(d), share: 1.0 / 3.0 })
+            .collect::<Vec<_>>();
+        let global_confidence = report.recipe.confidence;
+        attach_semantic_regions(&source, &target, &mut report, &regions, &rasters, &divergences);
+        assert!(report.notes.iter().any(|n| n.key == crate::rationale::keys::ZONE_MODE_FULL));
+        assert!(report.notes.iter().any(|n| n.key == crate::rationale::keys::ZONE_MODE_ATMOSPHERE));
+        let residuals = report.notes.iter().filter(|n| n.key == crate::rationale::keys::ZONE_ATTACHED)
+            .filter_map(|n| n.args.iter().find(|(name, _)| *name == "after").and_then(|(_, value)| value.parse::<f32>().ok()))
+            .collect::<Vec<_>>();
+        if !residuals.is_empty() {
+            let worst = semantic::worst_region_residual(&residuals);
+            let expected = global_confidence.min(fit::clamp_confidence(1.0 - worst * ZONE_CONFIDENCE_SLOPE));
+            assert!((report.recipe.confidence - expected).abs() <= 1e-6,
+                "confidence did not use the worst accepted region: got {}, expected {}",
+                report.recipe.confidence, expected);
+            let disclosed = report.notes.iter()
+                .find(|n| n.key == crate::rationale::keys::ZONE_CONFIDENCE)
+                .and_then(|n| n.args.iter().find(|(name, _)| *name == "worst"))
+                .and_then(|(_, value)| value.parse::<f32>().ok())
+                .expect("semantic confidence must disclose the worst accepted region");
+            assert!((disclosed - worst).abs() <= 0.001, "confidence disclosure used {disclosed}, expected worst {worst}");
+        }
+        for raster in rasters { raster.remove(); }
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     fn boundary_fixture_pixels(rim_each_side: f32) -> (Vec<[f32; 3]>, Vec<f32>, u32, u32) {
@@ -4823,6 +5465,10 @@ mod tests {
             "rationale must explain the fallback: {}",
             report.recipe.rationale
         );
+        assert!(
+            report.notes.iter().any(|note| note.key == crate::rationale::keys::ZONED_UNAVAILABLE),
+            "typed fallback verdict must name segmentation unavailability",
+        );
         // The temporary segmentation inputs must not survive the fallback.
         for suffix in [".src-in.png", ".tgt-in.png", ".tgt-mask.png"] {
             let mut p = mask_path.path().as_os_str().to_owned();
@@ -4832,6 +5478,354 @@ mod tests {
                 "temp file {suffix} leaked past the fallback"
             );
         }
+    }
+
+    enum PlaneSource {
+        Input,
+        Black,
+    }
+
+    /// A loopback stand-in for BOTH segmentation bridges. The single-class
+    /// call gets its input copied back as the mask (argv 4 → 6); the
+    /// `--multi` call (argv 9) gets one "sky" plane beside the manifest —
+    /// the input again, or an all-black fixture — and a manifest that names
+    /// it. `width`/`height` are what the test EXPECTS the bridge to have
+    /// handed over: the bridge's own dimension check turns a wrong sizing
+    /// into a refusal instead of a silently different plane.
+    fn loopback_segment_opts(
+        dir: &std::path::Path,
+        plane: PlaneSource,
+        width: u32,
+        height: u32,
+    ) -> SegmentOpts {
+        let black = dir.join("black.png");
+        GrayImage::from_pixel(width, height, image::Luma([0u8])).save(&black).unwrap();
+        let manifest = |name: &str| {
+            format!(
+                "{{\"version\":1,\"width\":{width},\"height\":{height},\"planes\":[{{\"class_id\":2,\
+                 \"label\":\"sky\",\"mean_confidence\":0.5,\"share\":0.5,\"path\":\"{name}\"}}]}}"
+            )
+        };
+        // sh reads the plane name from the manifest path at run time via a
+        // template; batch expands `%~n6` inline.
+        std::fs::write(dir.join("manifest.tmpl"), manifest("PLANE")).unwrap();
+        let (bat_plane, sh_plane) = match plane {
+            PlaneSource::Input => ("%4".to_string(), "$4".to_string()),
+            PlaneSource::Black => ("%~dp0black.png".to_string(), black.display().to_string()),
+        };
+        let bat = format!(
+            "@echo off\r\nif \"%9\"==\"--multi\" (\r\n  copy /y \"{bat_plane}\" \"%~dpn6.class-2.png\" >nul\r\n  \
+             echo {}>\"%6\"\r\n) else (\r\n  copy /y \"%4\" \"%6\" >nul\r\n)\r\nexit /b 0\r\n",
+            manifest("%~n6.class-2.png")
+        );
+        let sh = format!(
+            "if [ \"$9\" = \"--multi\" ]; then\n  stem=$(basename \"$6\" .json)\n  \
+             cp \"{sh_plane}\" \"$(dirname \"$6\")/$stem.class-2.png\"\n  \
+             sed \"s/PLANE/$stem.class-2.png/\" \"{}\" > \"$6\"\nelse\n  cp \"$4\" \"$6\"\nfi\nexit 0\n",
+            dir.join("manifest.tmpl").display()
+        );
+        let python_bin = crate::write_stand_in(dir, "segment-stub", &bat, &sh);
+        // The script must merely exist — the bridge refuses a missing one.
+        let script = dir.join("segment.py");
+        std::fs::write(&script, "# stand-in\n").unwrap();
+        SegmentOpts {
+            python_bin,
+            script,
+            target: "sky".into(),
+            reference_point: None,
+            prompt_points: None,
+        }
+    }
+
+    /// `segmentation_input` is the one sizing rule: borrow through 2048 px on
+    /// the long edge (2048 itself included), thumbnail above it.
+    #[test]
+    fn segmentation_input_downscales_only_above_the_edge() {
+        let frame = |w, h| DynamicImage::ImageRgb8(RgbImage::from_pixel(w, h, image::Rgb([9, 9, 9])));
+        assert!(matches!(segmentation_input(&frame(1600, 1067)), std::borrow::Cow::Borrowed(_)));
+        assert!(matches!(segmentation_input(&frame(2048, 1365)), std::borrow::Cow::Borrowed(_)));
+        let big = frame(2400, 1600);
+        let large = segmentation_input(&big);
+        assert!(matches!(large, std::borrow::Cow::Owned(_)));
+        assert_eq!(large.dimensions(), (2048, 1365));
+    }
+
+    /// The two bridges hand the sidecar identical inputs — the Rust-layer
+    /// falsifier behind the seeded legacy run's byte identity. The
+    /// multi-class bridge used to thumbnail unconditionally, and
+    /// `image::thumbnail` UPSCALES a smaller frame, so on every ≤2048 frame
+    /// (the calibration corpus is 1600 px) its sky plane differed from the
+    /// single-class mask while the Python-layer identity test, which fed both
+    /// modes the same file, stayed green. The stand-ins copy their input back
+    /// as mask/plane, so the bytes each bridge returns ARE what it sent.
+    #[test]
+    fn multi_and_single_class_inputs_are_prepared_identically() {
+        for (tag, w, h, ew, eh) in [
+            ("seg-input-native", 300u32, 200u32, 300u32, 200u32),
+            ("seg-input-large", 2400, 1600, 2048, 1365),
+        ] {
+            let dir = crate::test_dir(tag);
+            let seg = loopback_segment_opts(&dir, PlaneSource::Input, ew, eh);
+            let frame = |seed: u8| {
+                DynamicImage::ImageRgb8(RgbImage::from_fn(w, h, |x, y| {
+                    image::Rgb([
+                        seed.wrapping_add((x % 7) as u8 * 9),
+                        60u8.wrapping_add((y % 11) as u8 * 13),
+                        128,
+                    ])
+                }))
+            };
+            let (src, tgt) = (frame(40), frame(90));
+            let legacy_path = crate::store::OwnedRaster::scratch(dir.join("legacy.png"));
+            let multi_path = crate::store::OwnedRaster::scratch(dir.join("multi.png"));
+            let (sm, tm) = segment_both(&src, &tgt, &seg, &legacy_path)
+                .unwrap_or_else(|e| panic!("{tag}: single-class bridge: {e:#}"));
+            let (regions, rasters, (ms, mt), _refinements) =
+                segment_multiclass_both(&src, &tgt, &seg, &multi_path, 4)
+                    .unwrap_or_else(|e| panic!("{tag}: multi-class bridge: {e:#}"));
+            assert_eq!(sm.dimensions(), (ew, eh), "{tag}: single-class input sizing");
+            assert_eq!(ms.dimensions(), (ew, eh), "{tag}: multi-class input sizing");
+            assert!(
+                sm.as_raw() == ms.as_raw() && tm.as_raw() == mt.as_raw(),
+                "{tag}: the two bridges handed the sidecar different bytes"
+            );
+            assert_eq!(regions.len(), 1, "{tag}: the one plane pairs into one region");
+            for raster in rasters {
+                raster.remove();
+            }
+            legacy_path.remove();
+            multi_path.remove();
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
+    /// The multi-class layer failing is not the sky fit failing. With a broken
+    /// interpreter the multi bridge fails, the historical route (stubbed masks)
+    /// succeeds, and the report is that route's report plus ONE typed
+    /// `SEMANTIC_REGIONS_UNAVAILABLE` note — never `ZONED_UNAVAILABLE`, whose
+    /// text promises a luminance-range fallback that did not run.
+    #[test]
+    fn multi_segmentation_failure_keeps_the_legacy_zones_with_its_own_note() {
+        let (src, tgt, sky) = zoned_pair();
+        let seg = SegmentOpts {
+            python_bin: "autoshop-test-no-such-python".into(),
+            script: "Cargo.toml".into(),
+            target: "sky".into(),
+            reference_point: None,
+            prompt_points: None,
+        };
+        let path = fixture_mask_path("multi-unavailable");
+        sky.save(path.path()).unwrap();
+        let base = crate::recipe::EditRecipe::default();
+        SEGMENT_BOTH_OVERRIDE.with(|v| *v.borrow_mut() = Some((sky.clone(), sky.clone())));
+        let multi = fit_recipe_zoned_with_regions(&src, &tgt, &seg, &path, &base, None, 4);
+        SEGMENT_BOTH_OVERRIDE.with(|v| *v.borrow_mut() = Some((sky.clone(), sky.clone())));
+        let legacy = fit_recipe_zoned_with_regions(&src, &tgt, &seg, &path, &base, None, 2);
+        let own = multi
+            .notes
+            .iter()
+            .filter(|n| n.key == crate::rationale::keys::SEMANTIC_REGIONS_UNAVAILABLE)
+            .collect::<Vec<_>>();
+        assert_eq!(own.len(), 1, "exactly one typed hand-off: {}", multi.recipe.rationale);
+        assert!(
+            !multi.notes.iter().any(|n| n.key == crate::rationale::keys::ZONED_UNAVAILABLE)
+                && !multi.recipe.rationale.contains("luminance-range fallback"),
+            "the sky/land route ran; no range fallback may be narrated: {}",
+            multi.recipe.rationale
+        );
+        // Everything but that one appended sentence IS the historical route.
+        let appended = crate::rationale::render_one(own[0]);
+        assert_eq!(
+            multi.recipe.rationale.strip_suffix(appended.as_str()),
+            Some(legacy.recipe.rationale.as_str()),
+            "the hand-off note is appended to the historical rationale, nothing else changes"
+        );
+        let (mut a, mut b) = (multi.recipe.clone(), legacy.recipe.clone());
+        a.rationale.clear();
+        b.rationale.clear();
+        assert_eq!(serde_json::to_vec(&a).unwrap(), serde_json::to_vec(&b).unwrap());
+        assert_eq!(multi.err_after.to_bits(), legacy.err_after.to_bits());
+        path.remove();
+    }
+
+    /// A manifest whose every plane misses the support floor resolves to NO
+    /// region. That is a hand-off to the SEEDED historical route — which
+    /// judges the sky partition on its own numbers, drops its anchor and runs
+    /// the sequencer — plus one typed `SEMANTIC_REGIONS_NONE` note; not a
+    /// fourth exit that rendered `{s}` placeholders and stranded the anchor.
+    #[test]
+    fn empty_semantic_region_set_hands_off_to_the_seeded_legacy_route() {
+        let dir = crate::test_dir("seg-no-region");
+        let (src, tgt, _) = zoned_pair();
+        let seg = loopback_segment_opts(&dir, PlaneSource::Black, src.width(), src.height());
+        let path = crate::store::OwnedRaster::scratch(dir.join("anchor.png"));
+        let report = fit_recipe_zoned_with_regions(
+            &src, &tgt, &seg, &path, &crate::recipe::EditRecipe::default(), None, 4,
+        );
+        assert!(
+            report.notes.iter().any(|n| n.key == crate::rationale::keys::SEMANTIC_REGIONS_NONE
+                && n.args.iter().any(|(k, v)| *k == "n" && v == "4")),
+            "typed hand-off naming the requested count: {}",
+            report.recipe.rationale
+        );
+        let no_partition = report
+            .notes
+            .iter()
+            .find(|n| n.key == crate::rationale::keys::ZONED_NO_PARTITION)
+            .unwrap_or_else(|| panic!("the historical route judges the partition: {}", report.recipe.rationale));
+        assert!(no_partition.args.iter().any(|(k, _)| *k == "s"));
+        assert!(
+            report.recipe.rationale.contains("sky covers 0% of the source frame")
+                && !report.recipe.rationale.contains("{s}"),
+            "numbers, not placeholders: {}",
+            report.recipe.rationale
+        );
+        assert!(!path.path().exists(), "the anchor raster must not outlive a failed partition");
+        assert!(report.recipe.masks.iter().all(|m| match &m.mask {
+            MaskGeometry::Bitmap { path } => !path.contains("mask-region-"),
+            _ => true,
+        }));
+        let leftovers = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.contains("multi") || n.contains("mask-region"))
+            .collect::<Vec<_>>();
+        assert!(leftovers.is_empty(), "sidecar inputs/planes leaked: {leftovers:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The release rule behind arbitration, on synthetic reports: the loser's
+    /// own rasters go, a raster both reports share stays, the anchor goes
+    /// only when nothing kept references it, and a raster outside the store
+    /// is never touched. The loopback arbitration test below exercises the
+    /// call sites; this pins the rule itself on every branch.
+    #[test]
+    fn release_unselected_rasters_keeps_exactly_what_the_kept_recipe_references() {
+        let dir = crate::test_dir("release-unselected");
+        let outside = crate::test_dir("release-unselected-outside");
+        let file = |d: &std::path::Path, n: &str| {
+            let p = d.join(n);
+            std::fs::write(&p, b"x").unwrap();
+            p.to_string_lossy().into_owned()
+        };
+        let report_with = |paths: &[&str]| {
+            let mut report = neutral_report(
+                &DynamicImage::ImageRgb8(RgbImage::from_pixel(4, 4, image::Rgb([90, 90, 90]))),
+                &DynamicImage::ImageRgb8(RgbImage::from_pixel(4, 4, image::Rgb([110, 110, 110]))),
+            );
+            for p in paths {
+                report.recipe.masks.push(crate::recipe::LocalAdjustment {
+                    mask: MaskGeometry::Bitmap { path: (*p).to_string() },
+                    role: MaskRole::Custom,
+                    ..Default::default()
+                });
+            }
+            report
+        };
+        let anchor = crate::store::OwnedRaster::scratch(dir.join("anchor.png"));
+        std::fs::write(anchor.path(), b"x").unwrap();
+        let (loser_only, shared, foreign) = (
+            file(&dir, "mask-region-2-sky.png"),
+            file(&dir, "mask-zone-tile.png"),
+            file(&outside, "mask-region-9-far.png"),
+        );
+        // Branch 1: the candidate loses, the kept report references the
+        // shared raster and the anchor.
+        let candidate = report_with(&[&loser_only, &shared, &foreign]);
+        let kept = report_with(&[&shared, &anchor.path().to_string_lossy()]);
+        release_unselected_rasters(&candidate, &kept, &anchor);
+        assert!(!std::path::Path::new(&loser_only).exists(), "the loser's own raster is released");
+        assert!(std::path::Path::new(&shared).exists(), "a raster the kept recipe references stays");
+        assert!(anchor.path().exists(), "the anchor stays while the kept recipe references it");
+        assert!(std::path::Path::new(&foreign).exists(), "a raster outside the store is never touched");
+        // Branch 2: nothing kept references the anchor — it goes too.
+        let kept = report_with(&[&shared]);
+        release_unselected_rasters(&candidate, &kept, &anchor);
+        assert!(!anchor.path().exists(), "an unreferenced anchor is released");
+        assert!(std::path::Path::new(&shared).exists());
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&outside);
+    }
+
+    /// The multi arm's arbitration and claim hygiene, deterministically. With
+    /// the loopback sidecar both routes see the SAME sky plane (the frame's
+    /// luma), so the seeded two-region run inside the multi arm is exactly an
+    /// independent unseeded one. A refusal must hand that report back byte
+    /// for byte plus ONE note — never a transplant — with every region
+    /// raster gone; a win must beat it on the shared ruler. Either way no
+    /// claim outlives the recipe that references it and no sidecar file
+    /// survives the run.
+    #[test]
+    fn loopback_multi_run_arbitrates_against_the_seeded_two() {
+        let (src, tgt, _) = zoned_pair();
+        let base = crate::recipe::EditRecipe::default();
+        let run = |tag: &str, regions: usize| {
+            let dir = crate::test_dir(tag);
+            let seg = loopback_segment_opts(&dir, PlaneSource::Input, src.width(), src.height());
+            let anchor = crate::store::OwnedRaster::scratch(dir.join("anchor.png"));
+            let report = fit_recipe_zoned_with_regions(&src, &tgt, &seg, &anchor, &base, None, regions);
+            (dir, report)
+        };
+        let (four_dir, four) = run("seg-arb-four", 4);
+        let (two_dir, two) = run("seg-arb-two", 2);
+        let files = |dir: &std::path::Path| {
+            std::fs::read_dir(dir)
+                .unwrap()
+                .flatten()
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .collect::<Vec<_>>()
+        };
+        let referenced = |report: &FitReport| {
+            report.recipe.masks.iter().filter_map(|m| match &m.mask {
+                MaskGeometry::Bitmap { path } => std::path::Path::new(path)
+                    .file_name().map(|n| n.to_string_lossy().into_owned()),
+                _ => None,
+            }).collect::<std::collections::HashSet<_>>()
+        };
+        // Claim hygiene holds on both branches: every mask raster on disk is
+        // referenced by the recipe, every referenced raster exists, and no
+        // sidecar input/manifest/plane survived the run.
+        let on_disk = files(&four_dir);
+        let refs = referenced(&four);
+        for name in &on_disk {
+            assert!(!name.contains(".multi"), "sidecar file leaked: {name}");
+            if name.starts_with("mask-") || name == "anchor.png" {
+                assert!(refs.contains(name), "orphan claim {name}; recipe references {refs:?}");
+            }
+        }
+        for name in &refs {
+            assert!(on_disk.contains(name), "referenced raster {name} missing from {on_disk:?}");
+        }
+        let refusals = four.notes.iter()
+            .filter(|n| n.key == crate::rationale::keys::REGION_FRAME_REFUSED)
+            .collect::<Vec<_>>();
+        if let [refusal] = refusals[..] {
+            // The reference report, byte for byte, plus exactly the one note.
+            assert_eq!(
+                four.recipe.rationale,
+                format!("{}{}", two.recipe.rationale, crate::rationale::render_one(refusal)),
+                "a refusal appends one note to the reference rationale and transplants nothing"
+            );
+            let normalise = |r: &FitReport, dir: &std::path::Path| {
+                let mut recipe = r.recipe.clone();
+                recipe.rationale.clear();
+                serde_json::to_string(&recipe).unwrap().replace(&dir.to_string_lossy().replace('\\', "\\\\"), "<dir>")
+                    .replace(&dir.to_string_lossy().into_owned(), "<dir>")
+            };
+            assert_eq!(normalise(&four, &four_dir), normalise(&two, &two_dir));
+            assert_eq!(four.err_after.to_bits(), two.err_after.to_bits());
+            assert!(refs.iter().all(|n| !n.starts_with("mask-region-")), "refused regions must not ship: {refs:?}");
+        } else {
+            assert!(refusals.is_empty(), "at most one arbitration note: {}", four.recipe.rationale);
+            let ruler = &two.evidence;
+            assert!(
+                frame_err_under(&src, &tgt, &four, ruler) < frame_err_under(&src, &tgt, &two, ruler),
+                "a kept multi result beats the reference on the reference's own ruler"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&four_dir);
+        let _ = std::fs::remove_dir_all(&two_dir);
     }
 
     // Mutation guard: make `fit::append_finished_disclosure` an unconditional

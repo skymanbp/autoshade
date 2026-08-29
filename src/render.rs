@@ -37,7 +37,7 @@ use rayon::prelude::*;
 use crate::recipe::{Crop, EditRecipe, MaskGeometry, RangeMask};
 
 const LUT_N: usize = 4096;
-const MASK_RASTER_BUDGET_BYTES: usize = 256 * 1024 * 1024;
+pub(crate) const MASK_RASTER_BUDGET_BYTES: usize = 256 * 1024 * 1024;
 
 /// Shared, parameter-free transfer-curve LUTs: `[0]` = sRGB→linear, `[1]` =
 /// linear→sRGB. Built once per process (OnceLock). Dehaze and vignette used to

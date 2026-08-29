@@ -178,6 +178,7 @@ pub(crate) struct AutoshopApp {
     // --- settings / denoise ---
     pub(crate) save_denoise: bool,     // run SCUNet AI denoise before the full-res render
     pub(crate) zoned_fit: bool,        // 反推 adds a sky-to-sky zoned correction (bitmap mask)
+    pub(crate) zoned_four_regions: bool, // opt-in semantic expansion to up to four regions
     pub(crate) fit_ai_judge: bool,     // 反推 then asks the vision model to SCORE the match (paid, opt-in)
     // R23-6 D: 反推 runs the visual judge BEFORE the persist and buys bounded
     // guided rounds off it. Paid and opt-in, like `fit_ai_judge`, and a
@@ -1566,6 +1567,7 @@ impl Default for AutoshopApp {
             redo_stack: Vec::new(),
             save_denoise: false,
             zoned_fit: true,
+            zoned_four_regions: false,
             // Paid opt-in (a vision call per fit) — mirror Prefs::default.
             fit_ai_judge: false,
             // Paid opt-in, and up to three vision calls — mirror Prefs::default.
@@ -1955,6 +1957,7 @@ impl eframe::App for AutoshopApp {
                 last_export_dir: self.last_export_dir.clone(),
                 save_denoise: self.save_denoise,
                 zoned_fit: self.zoned_fit,
+                zoned_four_regions: self.zoned_four_regions,
                 fit_ai_judge: self.fit_ai_judge,
                 // R23-6 D: the deep reverse-fit toggle persists like every
                 // other paid opt-in. `fit_ref` deliberately does NOT — it

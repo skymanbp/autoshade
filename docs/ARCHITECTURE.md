@@ -92,11 +92,13 @@
 > experimental generative edits, an optional pixel-**heal** retouch mode (§4.7)
 > the deterministic look **reverse-fit** (§4.8) and the local server's refusal
 > model (§4.9).
-> 1034 library + 15 CLI + 145 GUI + 2+2 contract tests are enumerated in the GUI
-> build; the library result is 1023 pass + 11 `#[ignore]`d forensic probes
-> (counts refreshed 2026-08-28 after the B3 free-mask batch: library 1017→1034,
-> set diff +17/−0 by name against `d21304a` = the 17 tests in
-> [`src/fit_zoned/freemask/tests.rs`](../src/fit_zoned/freemask/tests.rs); the
+> 1058 library + 15 CLI + 145 GUI + 2+2 contract tests are enumerated in the GUI
+> build; the library result is 1047 pass + 11 `#[ignore]`d forensic probes
+> (counts refreshed 2026-08-29 after the multi-region semantic batch: library
+> 1034→1058, set diff +24/−0 by name against `662b688`, no status change = the
+> 11 partition/limit tests in [`src/fit_zoned/semantic.rs`](../src/fit_zoned/semantic.rs),
+> the 6 multi-class bridge tests in [`src/segment.rs`](../src/segment.rs) and
+> the 7 loopback/hand-off/release tests in [`src/fit_zoned.rs`](../src/fit_zoned.rs); the
 > local-field batch `d21304a` before it went 991→1017, +26/−0 against `10e02bb`,
 > no status change — added,
 > in [`src/fit_field.rs`](../src/fit_field.rs),
@@ -1694,10 +1696,10 @@ source and a *target rendition* of it (a `reimagine` output, an exported JPEG,
 any finished reference of that shot) — solve for the `EditRecipe` that
 reproduces the target through our own engine ([`src/fit.rs`](../src/fit.rs)).
 No target pixels are copied: the answer is global sliders + curves and,
-optionally, semantic bitmap sky/land adjustments or native luminance-range
+optionally, semantic bitmap region adjustments or native luminance-range
 adjustments. It applies at full sensor resolution; classic XMP carries the
-representable global controls and native ranges, while bitmap zones stay
-engine-only. Deterministic and key-free.
+representable global controls and native ranges, while semantic-region bitmaps
+stay engine-only. Deterministic and key-free.
 
 The method is deliberately **distribution-level, not per-pixel regression** — a
 generative target is not pixel-aligned with its source, so only statistics are
@@ -1749,7 +1751,11 @@ and a steep camera base compresses fixed-x samples into 38-u8 gaps whose
 piecewise-linear chords sag ~10/255. `--zoned`
 ([`src/fit_zoned.rs`](../src/fit_zoned.rs)) is one automatic local-fit entry:
 it fits globally first, then uses mutually exclusive producers. Successful
-segmentation adds semantic sky/land bitmap corrections; a disabled or
+segmentation adds up to four disjoint semantic class bitmap corrections (one
+OneFormer inference per frame); each accepted region selects Full or Atmosphere
+independently and confidence is the minimum of global confidence and the worst
+accepted-region confidence. The historical two-region route is the default;
+four regions are opt-in through `--regions 4` or the GUI control. A disabled or
 unavailable sidecar instead runs the pure-Rust luminance-range pass
 ([`src/fit_zoned/range.rs`](../src/fit_zoned/range.rs)); if neither
 producer keeps a correction, the global fit ships unchanged. Segmentation
@@ -1897,7 +1903,7 @@ non-finite; a `None` field — like the disabled layer `ZonedLayerOpts { field:
 false }` — leaves all three producers byte for byte as they were
 (`field_disabled_layer_is_byte_identical`).
 
-The SEQUENCER owns the verdicts. The field is not threaded through
+The single `run_local_sequencer` function owns the local-stage verdicts. The field is not threaded through
 `attach_zones_with_divergence`; only two typed products cross into a producer
 — the band proposals into `range::derive_luminance_bands` and the effective
 attachment cap into `spatial::attach_tiles` — while `fit_recipe_zoned_inner`
@@ -1916,6 +1922,19 @@ final render, so a skipped tile stage leaves exactly one finished disclosure,
 and the persisted rationale string is never rebuilt from the
 `MAX_NOTES`-bounded typed vector (which would truncate it and render the
 truncation sentinel).
+
+When a multi-region trial loses — or ties — arbitration, the two-region `FitReport` remains
+intact and receives one typed `REGION_FRAME_REFUSED` note naming the trialled
+class IDs, labels, and verdict keys. The losing rationale and masks are never
+transplanted onto the winning recipe. The default two-region dials and
+confidence remain byte-identical to `662b688`; the rationale gains one typed
+`ZONE_ALREADY_MATCHED` note per zone whose dials did not move. A multi-class
+layer that is unavailable, or that resolves no region past the support floor,
+hands off to that same historical route under its own typed note
+(`SEMANTIC_REGIONS_UNAVAILABLE`, `SEMANTIC_REGIONS_NONE`); the route's own
+verdicts, anchor handling and sequencer apply unchanged. Both bridges size the
+sidecar input through the one `segmentation_input` rule (native through
+2048 px, thumbnail above), which is what the seeded run's identity rests on.
 
 The verdicts are numbers, not prose. `BAND_DISPERSION_MAX = 15/255` separates a
 luma bin a value band can describe from one that only varies in space: the
@@ -2037,7 +2056,7 @@ outside a `2 * radius` collar are restored byte for byte, whole-frame coverage
 may change by at most `0.002`, and transition-weighted Sobel guide-edge
 alignment may not decrease. Otherwise the original alpha is retained with a
 typed abstention. A kept alpha is fitted from scratch and still crosses the
-ordinary rim and composed-frame gates. Multi-class semantic production remains
+ordinary rim and composed-frame gates. Colour-range semantic regions remain
 out of scope.
 
 **The reference, and the second reading (v0.29.0, R23-6).** The desktop

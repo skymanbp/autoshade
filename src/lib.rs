@@ -219,6 +219,18 @@ pub fn run_model_sidecar(
     args: Vec<std::ffi::OsString>,
     output: &std::path::Path,
 ) -> anyhow::Result<String> {
+    run_model_sidecar_bounded(who, python_bin, args, output, None)
+}
+
+/// Variant used for structured sidecar outputs whose size is part of the
+/// security contract (for example the multi-class manifest).
+pub fn run_model_sidecar_bounded(
+    who: &str,
+    python_bin: &str,
+    args: Vec<std::ffi::OsString>,
+    output: &std::path::Path,
+    max_bytes: Option<u64>,
+) -> anyhow::Result<String> {
     use anyhow::{bail, Context};
     crate::pipeline::ensure_parent(output)?;
     // The output name may already exist (a previous run's leftover, or a
@@ -257,6 +269,18 @@ pub fn run_model_sidecar(
         bail!("{who} exited with {reason}: {}", sidecar_tail(&out.stderr, &out.stdout));
     }
     sidecar_wrote(who, output, before).inspect_err(|_| discard())?;
+    if let Some(cap) = max_bytes {
+        let len = std::fs::metadata(output)
+            .with_context(|| format!("stat {who} output {}", output.display()))?
+            .len();
+        if len > cap {
+            discard();
+            bail!("{who} output is too large ({} bytes; cap {} bytes)", len, cap);
+        }
+        let bytes = std::fs::read(output)
+            .with_context(|| format!("read {who} output {}", output.display()))?;
+        return String::from_utf8(bytes).with_context(|| format!("read {who} output {}", output.display()));
+    }
     std::fs::read_to_string(output).with_context(|| format!("read {who} output {}", output.display()))
 }
 
