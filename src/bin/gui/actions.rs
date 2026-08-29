@@ -27,6 +27,13 @@ struct PersistedCard<'a> {
 }
 
 impl AutoshopApp {
+    /// The panel's Strength dial as the typed axis every consumer reads: the
+    /// develop request (R23-3) and the reverse-fit honesty budget (F1) share
+    /// ONE reading, so the two cannot drift apart.
+    pub(crate) fn panel_strength(&self) -> autoshop::recipe::GradeStrength {
+        autoshop::recipe::GradeStrength::new(self.grade_strength)
+    }
+
     /// Restore persisted prefs (last folder, view mode, export options) and
     /// re-open the library the user was browsing. Window geometry itself is
     /// restored by eframe's own persistence layer.
@@ -2929,7 +2936,7 @@ impl AutoshopApp {
             // R23-3: the OTHER axis — how committed the grade should be. Read
             // here for the same reason, and separate from `style` on purpose
             // (「像不像我」 vs 「下手多重」).
-            strength: autoshop::recipe::GradeStrength::new(self.grade_strength),
+            strength: self.panel_strength(),
             // R23-4: read on the UI thread with the rest of the request, for
             // the same reason — a checkbox flipped mid-call must not change
             // what this call is paying for.
@@ -3014,6 +3021,7 @@ impl AutoshopApp {
             return;
         }
         let src_path = self.src_path.clone();
+        let fit_strength = self.panel_strength();
         let zoned = self.zoned_fit;
         let ai_judge = self.fit_ai_judge;
         // The deep path IS the review, iterated — it cannot run without it,
@@ -3159,13 +3167,27 @@ impl AutoshopApp {
                                 let mask =
                                     autoshop::store::OwnedRaster::claim(p, "mask-zone-sky")?;
                                 let rep = autoshop::fit_zoned::fit_recipe_zoned_with(
-                                    &base, &target, &seg, &mask, &fit_base, Some(&corr),
+                                    &base,
+                                    &target,
+                                    &seg,
+                                    &mask,
+                                    &fit_base,
+                                    autoshop::fit::FitOptions {
+                                        strength: fit_strength,
+                                        provider: Some(&corr),
+                                    },
                                 );
                                 (rep, Some(mask.into_path()))
                             }
                             _ => (
                                 autoshop::fit::fit_recipe_from_with(
-                                    &base, &target, &fit_base, Some(&corr),
+                                    &base,
+                                    &target,
+                                    &fit_base,
+                                    autoshop::fit::FitOptions {
+                                        strength: fit_strength,
+                                        provider: Some(&corr),
+                                    },
                                 ),
                                 None,
                             ),

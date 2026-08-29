@@ -81,7 +81,7 @@ pub mod keys {
          edit.";
     pub const FIT_NOTE_SAT_PEGGED: &str = " Saturation demand exceeded the model cap (±60).";
     pub const FIT_NOTE_ATMOSPHERE_SAT_PEGGED: &str =
-        " Atmosphere-mode saturation demand exceeded its conservative cap (±30).";
+        " Atmosphere-mode saturation demand exceeded its conservative cap (±{cap}).";
     pub const FIT_NOTE_ATMOSPHERE_CONFIDENCE: &str =
         " Atmosphere-mode confidence is capped at {cap} because develop controls cannot \
          recreate the divergent structure.";
@@ -89,6 +89,22 @@ pub mod keys {
         " Atmosphere controls were read on population evidence; structural withholding \
          of luma ranges [{luma_ranges}] and hue bands [{hue_bands}] applies to the \
          residual, zone and detail fits, not to the bounded atmosphere controls.";
+    pub const FIT_NOTE_WB_CLAMPED: &str =
+        " White balance was clamped into the strength budget (gain ratio {from} to {to}, rotated share {rotated_share} over {coverage} of the frame); the requested cast exceeded the honest range.";
+    pub const FIT_NOTE_WB_WITHHELD_FOREIGN_HUE: &str =
+        " White balance withheld: it would paint hues the target does not contain.";
+    pub const FIT_NOTE_WB_WITHHELD_ROTATION: &str =
+        " White balance withheld: rotated share {rotated_share} over {coverage} of the frame exceeded the strength budget.";
+    pub const FIT_NOTE_WB_SEARCH_BOUND: &str =
+        " White balance search reached the {k} K domain bound; the requested colour temperature may lie beyond the fitted range.";
+    pub const FIT_NOTE_CAST_ADMITTED_BY_STRENGTH: &str =
+        " Colour-cast curves were admitted by the strength budget (measured ratio {ratio}, budget {budget}).";
+    pub const FIT_NOTE_GLOBAL_CAST: &str =
+        " Global colour cast measured from consistent hue rotation across the populated frame (rotation {rotation} degrees, chroma ratio {ratio}); white balance and saturation were read from population evidence.";
+    pub const FIT_NOTE_VETO_DISCLOSED: &str =
+        " High-strength fit disclosed unsupported movement in {kind}: {ranges}. The controls were retained, but confidence is capped by the strength budget.";
+    pub const FIT_NOTE_STRENGTH: &str =
+        " Reverse-fit used panel Strength {pct}% to derive its honesty budget.";
     pub const FIT_DEGENERATE: &str = " Fit refused: the source or target frame has no tonal variation (blank or single-tone), so a statistical match would produce a constant tone map — no recipe was fitted.";
     pub const FIT_NOTE_REGRESSED: &str =
         " The full fit rendered farther from the target than the untouched \

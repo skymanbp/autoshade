@@ -1092,9 +1092,9 @@ pub fn fit_recipe_zoned_with(
     seg: &SegmentOpts,
     mask_path: &crate::store::OwnedRaster,
     base: &crate::recipe::EditRecipe,
-    provider: Option<fit::CorrespondenceProvider>,
+    options: fit::FitOptions<'_>,
 ) -> FitReport {
-    fit_recipe_zoned_inner(src, target, seg, mask_path, base, provider, SHIPPED_LAYERS)
+    fit_recipe_zoned_inner_with_options(src, target, seg, mask_path, base, options, SHIPPED_LAYERS)
 }
 
 /// [`fit_recipe_zoned`] with a calibration-only base composed into the
@@ -1119,6 +1119,18 @@ fn fit_recipe_zoned_inner(
     mask_path: &crate::store::OwnedRaster,
     base: &crate::recipe::EditRecipe,
     provider: Option<fit::CorrespondenceProvider>,
+    layers: ZonedLayerOpts,
+) -> FitReport {
+    fit_recipe_zoned_inner_with_options(src, target, seg, mask_path, base, fit::FitOptions { strength: crate::recipe::GradeStrength::default(), provider }, layers)
+}
+
+fn fit_recipe_zoned_inner_with_options(
+    src: &DynamicImage,
+    target: &DynamicImage,
+    seg: &SegmentOpts,
+    mask_path: &crate::store::OwnedRaster,
+    base: &crate::recipe::EditRecipe,
+    options: fit::FitOptions<'_>,
     layers: ZonedLayerOpts,
 ) -> FitReport {
     let (mut report, field, first_producer) = match segment_both(src, target, seg, mask_path) {
@@ -1170,13 +1182,13 @@ fn fit_recipe_zoned_inner(
                     .filter(|zone| zone.divergence.d >= fit::DIVERGENCE_ZONE)
                     .map(|zone| zone.share)
                     .sum::<f32>();
-                let mut report = fit::fit_recipe_from_promoted_with_disclosure(
+                let mut report = fit::fit_recipe_from_promoted_with_disclosure_opts(
                     src,
                     target,
                     base,
                     divergent_cover >= fit::DIVERGENT_COVER_PROMOTES,
                     true,
-                    provider,
+                    options,
                 );
                 for (label, kept, reading) in readings {
                     crate::rationale::push_note(
@@ -1217,13 +1229,13 @@ fn fit_recipe_zoned_inner(
                 .filter(|zone| zone.divergence.d >= fit::DIVERGENCE_ZONE)
                 .map(|zone| zone.share)
                 .sum::<f32>();
-            let mut report = fit::fit_recipe_from_promoted_with_disclosure(
+            let mut report = fit::fit_recipe_from_promoted_with_disclosure_opts(
                 src,
                 target,
                 base,
                 divergent_cover >= fit::DIVERGENT_COVER_PROMOTES,
                 true,
-                provider,
+                options,
             );
             let field = layers.field
                 .then(|| field::solve_local_field(src, target, &mut report)).flatten();
@@ -1242,13 +1254,13 @@ fn fit_recipe_zoned_inner(
         Err(e) => {
             // The provider still rides the fallback: a failed segmentation
             // must not also cost the global fit its correspondence.
-            let mut report = fit::fit_recipe_from_promoted_with_disclosure(
+            let mut report = fit::fit_recipe_from_promoted_with_disclosure_opts(
                 src,
                 target,
                 base,
                 false,
                 true,
-                provider,
+                options,
             );
             crate::rationale::push_note(
                 &mut report.recipe.rationale,

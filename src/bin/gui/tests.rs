@@ -6295,6 +6295,41 @@
         assert_eq!(req.style, 0.2);
     }
 
+    /// F1: the reverse-fit worker derives its honesty budget from the SAME
+    /// panel reading the develop request uses (`panel_strength`), and that
+    /// reading is what the fit block hands `FitOptions`. Pinned textually on
+    /// the worker's source (the same pattern as `config.rs`'s literal pins)
+    /// because the block runs on a worker thread behind a segmentation call.
+    #[test]
+    fn gui_reverse_fit_uses_the_panel_strength() {
+        let app = AutoshopApp { grade_strength: 0.9, ..Default::default() };
+        assert_eq!(app.panel_strength().get(), 0.9);
+        assert_eq!(
+            AutoshopApp::default().panel_strength().get(),
+            autoshop::recipe::GradeStrength::DEFAULT,
+            "the shipped panel value IS the byte-identical default budget"
+        );
+        assert_eq!(
+            autoshop::fit::FitBudget::for_strength(app.panel_strength()).vetoes,
+            autoshop::fit::VetoPolicy::Disclose
+        );
+        let worker = include_str!("actions.rs");
+        assert!(
+            worker.contains("let fit_strength = self.panel_strength();"),
+            "the reverse-fit block must read the panel dial through panel_strength()"
+        );
+        assert_eq!(
+            worker.matches("strength: fit_strength,").count(),
+            2,
+            "both fit entry points (zoned and global) must receive the panel strength"
+        );
+        assert_eq!(
+            worker.matches("GradeStrength::new(self.grade_strength)").count(),
+            1,
+            "exactly one reading of the dial: panel_strength() itself"
+        );
+    }
+
     /// R22 #16d: the Local Masks header's ● was `n_masks > 0` while every ROW
     /// dot below it used the engine's own rule. So a list of muted or parked
     /// masks — no adjustment set, or the eye off — claimed an active local

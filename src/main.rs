@@ -296,6 +296,14 @@ enum Command {
         /// has always evaluated before it writes.
         #[arg(long)]
         deep: bool,
+        /// The reverse-fit HONESTY BUDGET, 0..1 — the GUI panel's Strength.
+        /// At or below the default 0.65 the fit is byte-identical to the
+        /// calibrated path; above it the Atmosphere budget widens, an
+        /// out-of-budget white balance shrinks along its fitted move instead of
+        /// staying as-shot, and from 0.85 unsupported movement is DISCLOSED
+        /// (confidence capped) rather than withheld.
+        #[arg(long, value_parser = unit_interval)]
+        strength: Option<f32>,
         /// Named recipe JSON artifact for `apply` (default:
         /// ./out/<stem>.matched.json). The canonical recipe.json in this
         /// photo's develop store — what the GUI and web restore — is ALWAYS
@@ -429,10 +437,10 @@ fn main() -> Result<()> {
             generative::reimagine(&cfg, &raw, &prompt, &fidelity, &q, fidelity_retry, &out)
                 .map(|_report| ())
         }
-        Command::Match { raw, target, render, zoned, style_prompt, ai_judge, deep, out } => {
+        Command::Match { raw, target, render, zoned, style_prompt, ai_judge, deep, strength, out } => {
             // --deep IS the review, iterated: asking for the loop without the
             // reviewer is not a configuration, it is a typo.
-            match_cmd(&raw, &target, render, zoned, style_prompt, ai_judge || deep, deep, out)
+            match_cmd(&raw, &target, render, zoned, style_prompt, ai_judge || deep, deep, strength, out)
         }
         Command::Correspond { source, target, out } => correspond_cmd(&source, &target, out),
         Command::Retouch { raw, mask, prompt, quality, full_res, out } => {
@@ -1210,6 +1218,7 @@ fn match_cmd(
     style_prompt: bool,
     ai_judge: bool,
     deep: bool,
+    strength: Option<f32>,
     out: Option<PathBuf>,
 ) -> Result<()> {
     // BEFORE any fitting/segmentation is paid for: `-o` naming the photo's
@@ -1257,6 +1266,8 @@ fn match_cmd(
     let corr = autoshop::correspond::fit_provider(
         autoshop::correspond::CorrespondOpts::from_config(&Config::load()),
     );
+    let fit_options = fit::FitOptions { strength: autoshop::recipe::GradeStrength::from_optional(strength), provider: Some(&corr) };
+    println!("  reverse-fit strength: {:.0}%", fit_options.strength.get() * 100.0);
     let run_fit = |seg_on: bool| -> Result<fit::FitReport> {
         Ok(if seg_on {
         // Sky mask lands at the GUI's convention (the photo's develop dir,
@@ -1285,10 +1296,10 @@ fn match_cmd(
             &seg,
             &mask,
             &EditRecipe::default(),
-            Some(&corr),
+            fit_options,
         )
         } else {
-            fit::fit_recipe_with(&src, &tgt, Some(&corr))
+            fit::fit_recipe_with(&src, &tgt, fit_options)
         })
     };
     let mut rep = run_fit(zoned)?;
@@ -2095,7 +2106,7 @@ mod tests {
 
         let e = format!(
             "{:#}",
-            match_cmd(&src, &target, false, false, false, false, false, None)
+            match_cmd(&src, &target, false, false, false, false, false, None, None)
                 .expect_err("an undecodable RAW target must refuse")
         );
         assert!(
@@ -2175,6 +2186,12 @@ mod tests {
             };
             assert_eq!(got, Some(0.9), "{cmd} must carry the value, not drop it");
         }
+        let cli = Cli::try_parse_from(["autoshop", "match", "source.png", "target.png", "--strength", "0.85"])
+            .expect("match --strength must parse");
+        match cli.command {
+            Command::Match { strength, .. } => assert_eq!(strength, Some(0.85)),
+            _ => panic!("match parser returned another command"),
+        }
         // …and the flag actually decides the request `analyze`/`auto` build —
         // the PRODUCTION resolver, shared by both commands.
         let cfg = autoshop::config::Config { style_strength: 0.3, ..cfg_fixture() };
@@ -2203,6 +2220,27 @@ mod tests {
             !analyze_request(Some(1.0), Some(1.0), false, &cfg).think,
             "pushing both dials to the maximum must not buy the thinking envelope"
         );
+    }
+
+    #[test]
+    fn cli_match_strength_reaches_the_budget() {
+        let cli = Cli::try_parse_from([
+            "autoshop",
+            "match",
+            "source.png",
+            "target.png",
+            "--strength",
+            "1.0",
+        ])
+        .expect("match strength parses");
+        let strength = match cli.command {
+            Command::Match { strength, .. } => GradeStrength::from_optional(strength),
+            _ => panic!("match parser returned another subcommand"),
+        };
+        let budget = autoshop::fit::FitBudget::for_strength(strength);
+        assert_eq!(budget.ev, 2.5);
+        assert_eq!(budget.sat, 60.0);
+        assert_eq!(budget.vetoes, autoshop::fit::VetoPolicy::Disclose);
     }
     /// L09#1 ordering: with a nonexistent RAW, a bad `-o` must fail on the
     /// OUTPUT (pre-pay preflight), never on decode or a paid call.

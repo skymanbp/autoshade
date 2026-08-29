@@ -81,6 +81,15 @@ develop. Reverse-fit estimates an engine recipe from that look; copy the fitted
 develop to Original when you want an editable recipe and sidecar for the
 full-resolution source.
 
+Reverse-fit uses the panel's **Strength** value (or `match --strength 0..1`) as
+its honesty budget. At or below the shipped 65% setting the historical path is
+byte-identical, including white balance: a demand outside its budget remains
+as-shot. Above 65%, WB demands outside the widened budget shrink along the
+requested Kelvin/tint direction and are disclosed. The pre/post WB renders must
+also pass the foreign-hue veto and a weighted rotation allowance, pinned at
+0.05 through 65%, about 0.593 at 85%, and 1.0 at full strength. If no legal WB
+remains, it is withheld and the recipe stays as-shot with a typed explanation.
+
 With **Zoned fit (sky)** enabled, reverse-fit always solves the global recipe
 first. Successful segmentation adds semantic sky/land bitmap corrections; if
 segmentation is disabled or unavailable, the same entry automatically tries
@@ -206,8 +215,9 @@ cannot become a credential or path override.
   recipe and XMP.
 - **Style match/read:** build the style reference library from Lightroom
   RAW+XMP pairs with the GUI or `style-index`. The Style control retrieves
-  similar prior edits as soft references; Strength independently controls how
-  strongly the proposal is allowed to move.
+  similar prior edits and applies their settings with `style_pull` (0.18 at
+  the shipped Style 0.3, full at Style 1.0); Strength independently controls
+  the fit budget and confidence cap.
 - **Reimagine:** enter a prompt in the AI panel or use `reimagine` to create a
   generated, lower-resolution target. `--fidelity high` (the default, and the
   GUI's mode) tells the model to re-develop the same photograph, not repaint

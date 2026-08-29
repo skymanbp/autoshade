@@ -104,6 +104,13 @@ fn zh_map() -> &'static HashMap<&'static str, &'static str> {
 /// (placeholders included), or the lookup silently misses.
 #[rustfmt::skip]
 static ZH_ENTRIES: &[(&str, &str)] = &[
+    (" White balance withheld: it would paint hues the target does not contain.", " 白平衡已保留：目标没有这些色相。"),
+    (" White balance was clamped into the strength budget (gain ratio {from} to {to}, rotated share {rotated_share} over {coverage} of the frame); the requested cast exceeded the honest range.", " 白平衡已限制在强度预算内（增益比 {from} 至 {to}，色相旋转份额 {rotated_share}，覆盖画面 {coverage}）；请求色偏超出范围。"),
+    (" White balance withheld: rotated share {rotated_share} over {coverage} of the frame exceeded the strength budget.", " 白平衡已保留：色相旋转份额 {rotated_share}（覆盖画面 {coverage}）超出强度预算。"),
+    (" White balance search reached the {k} K domain bound; the requested colour temperature may lie beyond the fitted range.", " 白平衡达到 {k} K 的域边界；请求的色温可能超出拟合范围。"),
+    (" Colour-cast curves were admitted by the strength budget (measured ratio {ratio}, budget {budget}).", " 色偏曲线已获强度预算准入（测得比值 {ratio}，预算 {budget}）。"),
+    (" Global colour cast measured from consistent hue rotation across the populated frame (rotation {rotation} degrees, chroma ratio {ratio}); white balance and saturation were read from population evidence.", " 已从画面中各色相带一致的色相旋转测得全局色偏（旋转 {rotation} 度，色度比 {ratio}）；白平衡和饱和度取自整体证据。"),
+    (" High-strength fit disclosed unsupported movement in {kind}: {ranges}. The controls were retained, but confidence is capped by the strength budget.", " 高强度拟合显示 {kind} 中没有双侧证据的移动：{ranges}。控制保留，置信度受强度预算限制。"),
     // ── Settings ────────────────────────────────────────────────────────────
     ("Language", "语言"),
     ("Reverse-fit", "反推 / Reverse-fit"),
@@ -215,8 +222,8 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     ("Turn on 「AI review」 first — the deep fit is that review, iterated",
         "请先勾选「AI 打分」——深度反推就是把这次复查反复做几轮"),
     ("🎛 Reverse-fit recipe → sliders/XMP", "🎛 反推配方 → 滑杆/XMP"),
-    ("Statistical fit: reverse the freshly generated look into editable develop params (local, no API cost). Sliders update (undoable), and for RAW a Lightroom XMP goes into this photo's develop store; hit Export to render the full-resolution result.",
-        "统计拟合：把刚生成的观感反解成可编辑的 develop 参数（本地运算，无 API 费）。滑杆会更新（可 undo），RAW 会在该照片的显影库里生成 Lightroom XMP；再点「导出」可出全分辨率成品。"),
+    ("Statistical fit: reverse the freshly generated look into editable develop params (local, no API cost). Sliders update (undoable), and for RAW a Lightroom XMP goes into this photo's develop store; hit Export to render the full-resolution result. Uses the panel's Strength control as the reverse-fit honesty budget.",
+        "统计拟合：把刚生成的观感反解成可编辑的 develop 参数（本地运算，无 API 费）。滑杆会更新（可 undo），RAW 会在该照片的显影库里生成 Lightroom XMP；再点「导出」可出全分辨率成品。使用面板的 Strength 控制作为反推预算。"),
     ("📝 Extract style prompt", "📝 提取风格提示词"),
     ("Compare the original / generated images and have the vision model write a reusable style prompt: auto-fills the Reimagine prompt (ready to restyle other photos) and saves ./out/<stem>.style.txt.",
         "对比 原图/生成图，让 vision 模型写一段可复用的风格 prompt：自动填入 Reimagine 提示词（可直接给别的照片重绘用）并存 ./out/<stem>.style.txt。"),
@@ -1534,8 +1541,8 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
         " 注意：拟合配方的渲染结果仍与目标相距较远（残差 {err_after}）——此风格超出全局滑杆的表达范围；可考虑直接使用 AI 变体或分区编辑。"),
     (" Saturation demand exceeded the model cap (±60).",
         " 饱和度需求超出模型上限（±60）。"),
-    (" Atmosphere-mode saturation demand exceeded its conservative cap (±30).",
-        " 氛围模式的饱和度需求超出其更低上限（±30）。"),
+    (" Atmosphere-mode saturation demand exceeded its conservative cap (±{cap}).",
+        " 氛围模式的饱和度需求超出其更低上限（±{cap}）。"),
     (" Atmosphere-mode confidence is capped at {cap} because develop controls cannot \
       recreate the divergent structure.",
         " 由于显影控制无法重建差异结构，氛围模式的置信度上限为 {cap}。"),
@@ -1543,6 +1550,8 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
       of luma ranges [{luma_ranges}] and hue bands [{hue_bands}] applies to the \
       residual, zone and detail fits, not to the bounded atmosphere controls.",
         " 氛围控制依据整体证据读取；结构性保留的明度范围 [{luma_ranges}] 和色相带 [{hue_bands}] 仅适用于残差、区域和细节拟合，不适用于有界氛围控制。"),
+    (" Reverse-fit used panel Strength {pct}% to derive its honesty budget.",
+        " 反推使用面板 Strength {pct}% 来推导预算。"),
     (" Fit refused: the source or target frame has no tonal variation (blank or single-tone), so a statistical match would produce a constant tone map — no recipe was fitted.",
         " 拟合已拒绝：源图或目标图没有影调变化（空白或单色画面），统计匹配只会产生恒定影调映射——未生成拟合配方。"),
     (" The full fit rendered farther from the target than the untouched \

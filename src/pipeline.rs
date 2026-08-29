@@ -295,9 +295,8 @@ pub fn produce_recipe(
         );
         StyleRetrieval {
             // GATE 5: the reference block's own "do not exceed it" clauses are
-            // templated on the STRENGTH axis, not on the style dial that
-            // retrieved them.
-            reference: ix.render_reference(&ex, req.strength),
+            // templated on the STYLE axis, not on grade strength.
+            reference: ix.render_reference_for_style(&ex, req.style),
             targets: crate::style::style_targets(&ex),
             stems: crate::style::neighbour_stems(&ex),
             // The nearest shot's own file, for the opt-in reference IMAGE. A
@@ -543,22 +542,23 @@ pub fn produce_recipe(
     }
 
     // Distill toward the user's historical style: a gentle, capped pull of the
-    // global sliders toward similar past edits. Capped at 60% so even max
-    // strength never fully overrides the AI's scene-specific proposal.
+    // global sliders toward similar past edits. The Style axis supplies
+    // `style_pull` (0.18 at the shipped 0.3, full at 1.0), so grade strength
+    // never silently changes the historical-style blend.
     //
     // DELIBERATELY NOT on the grade-strength axis (R23-3, GATE 5's other half):
-    // this 0.6 cap bounds MEAN REGRESSION — how far the proposal is dragged
+    // this Style pull bounds MEAN REGRESSION — how far the proposal is dragged
     // toward the arithmetic mean of `style::style_targets` — and its whole job is
     // to keep the AI's scene-specific reading from being averaged away. Coupling
     // it to strength would mean "push harder" silently became "look MORE like my
     // average past edit", which is the opposite direction on the other axis and
-    // exactly the entanglement this round exists to undo. What strength changes
+    // exactly the entanglement this round exists to undo. What grade strength changes
     // is the WORDING the model reads about the reference
     // (`style::render_reference`), never the blend arithmetic; the Style slider
     // keeps sole ownership of that number.
     if let Some(r) = &retrieved {
         let pre_blend = recipe.clone();
-        crate::style::blend_toward(&mut recipe, &r.targets, req.style.clamp(0.0, 1.0) * 0.6);
+        crate::style::blend_toward(&mut recipe, &r.targets, crate::style::style_pull(req.style));
         recipe.clamp();
         // The blend mutates the recipe AFTER the rationale was written and
         // AFTER the verdict above. When it actually changed something (a pull
@@ -575,7 +575,7 @@ pub fn produce_recipe(
                 &mut det_notes,
                 crate::rationale::Note::new(
                     crate::rationale::keys::STYLE_DISTILLED,
-                    vec![("pct", format!("{:.0}", req.style.clamp(0.0, 1.0) * 0.6 * 100.0))],
+                    vec![("pct", format!("{:.0}", crate::style::style_pull(req.style) * 100.0))],
                 ),
             );
             // Degrade like the revision loop above: a transient verifier
@@ -781,7 +781,7 @@ pub fn produce_recipe(
                                 crate::style::blend_toward(
                                     &mut r,
                                     &sr.targets,
-                                    req.style.clamp(0.0, 1.0) * 0.6,
+                                    crate::style::style_pull(req.style),
                                 );
                                 r.clamp();
                                 candidate_distilled = r != pre;
@@ -848,7 +848,7 @@ pub fn produce_recipe(
                                         "pct",
                                         format!(
                                             "{:.0}",
-                                            req.style.clamp(0.0, 1.0) * 0.6 * 100.0
+                                            crate::style::style_pull(req.style) * 100.0
                                         ),
                                     )],
                                 ));

@@ -92,10 +92,13 @@
 > experimental generative edits, an optional pixel-**heal** retouch mode (§4.7)
 > the deterministic look **reverse-fit** (§4.8) and the local server's refusal
 > model (§4.9).
-> 1034 library + 15 CLI + 145 GUI + 2+2 contract tests are enumerated in the GUI
-> build; the library result is 1023 pass + 11 `#[ignore]`d forensic probes
-> (counts refreshed 2026-08-28 after the B3 free-mask batch: library 1017→1034,
-> set diff +17/−0 by name against `d21304a` = the 17 tests in
+> 1055 library + 16 CLI + 146 GUI + 2+2 contract tests are enumerated in the GUI
+> build; the library result is 1044 pass + 11 `#[ignore]`d forensic probes
+> (counts refreshed 2026-08-29 after the F1 strength-axis batch: library
+> 1034→1055, set diff +22/−0 default and +23/−0 GUI by name against `662b688`
+> = the strength-budget, WB-manifold, rescoring-disclosure and Style-wording
+> tests in `src/fit.rs`, `src/style.rs`, `src/main.rs` and the GUI panel pin; the free-mask batch
+> `662b688` before it went 1017→1034, +17/−0 against `d21304a` = the 17 tests in
 > [`src/fit_zoned/freemask/tests.rs`](../src/fit_zoned/freemask/tests.rs); the
 > local-field batch `d21304a` before it went 991→1017, +26/−0 against `10e02bb`,
 > no status change — added,
@@ -125,8 +128,10 @@
 > `src/fit_zoned.rs`, `field_disabled_layer_is_byte_identical`,
 > `field_stop_rule_skips_the_tile_producer_and_names_it` and
 > `calibration_local_field_discloses_ceiling_and_realized_share`; nothing
-> removed). THREE suites are ADDITIONAL and
-> env-gated, so a bare `cargo test` does not include them:
+> removed). THREE suites are ADDITIONAL and env-gated, so a bare `cargo test`
+> does not include them. The F1 release reproof adds +22 default test names
+> and +23 GUI names with no removals or status changes against the B3
+> transcript `target/b3-main/gates-final.txt`.
 > `AUTOSHOP_LR_PROBE_FIXTURES` (16 real Lightroom radial sidecars, byte
 > round-trip), `AUTOSHOP_MB_FIXTURES` (the 7-file M-B forensic set — 42 of its
 > 42 corrections imported, 0 refused) and, since R27, `AUTOSHOP_RAW_ZOO` (the
@@ -650,7 +655,7 @@ back, or `temper` compresses it back). All six read the dial.
 | 2 | `EditRecipe::temper` | [`src/recipe.rs`](../src/recipe.rs) | The four soft-cap knees/ceilings scale by `1 + (s − 0.5)·0.7` — 0.5 is the shipped 50→70 / 30→45 exactly, and full strength asymptotes at 94.5, still inside the ±100 hard `clamp` |
 | 3 | Verifier prompt | `advisor::{verify_flat_clause, verify_cooked_clause}` | The too-FLAT band tightens, the OVER-COOKED band relaxes; the target and the photographer's DIRECTION are stated ABOVE the checklist they modify |
 | 4 | Visual judge rubric | `advisor::judge::intent_rubric` | The Develop rubric gains the target and the direction. FitMatch gains neither — a look MATCH has no strength |
-| 5 | Style reference wording | `style::render_reference` (+ gate 1's reference clause) | Below the committed band the retrieved habit is a CEILING ("not stronger", "do not exceed it"); at it, a FLOOR. The measured NUMBERS never change — a dial must not restate what the photographer actually did |
+| 5 | Style reference wording | `style::render_reference` (+ gate 1's reference clause) | Below Style 0.85 the retrieved habit is a CEILING ("not stronger", "do not exceed it"); at or above it, a FLOOR headed "TARGET style to reproduce". This gate is templated on the STYLE axis, not on this dial: strength above 0.70 with Style below 0.85 no longer receives the old committed-tier FLOOR wording. The measured NUMBERS never change — a dial must not restate what the photographer actually did |
 | 6 | No-AI fallback | `advisor::heuristic` | The baseline's histogram-driven recovery goes through the same `temper` dial, so the fallback cannot taste different from the AI path at one setting |
 
 Bands are coarse (≤ 0.4 restrained / ≤ 0.7 balanced / above committed) because
@@ -663,8 +668,9 @@ Two things the axis must never touch, both measured defects rather than taste:
 mask — `bd3f9d4` fixed a recipe that dragged sea foam to grey), and the prompt's
 matching "recovering highlights must NOT grey out specular whites" rule, which
 stays unconditional at every strength. `clamp`'s hard ranges are a safety bound
-and are not on the axis either. The **Style** slider's `blend_toward` cap (0.6) is
-off the axis on purpose too: that number bounds mean-regression toward the user's
+and are not on the axis either. The **Style** slider's `style_pull` (0.18 at the
+shipped Style 0.3, full at Style 1.0) is off the strength axis on purpose too:
+that number bounds mean-regression toward the user's
 own average edit, so coupling it to strength would turn "push harder" into "look
 more like my average" — the other axis, pointing the other way.
 
@@ -1717,6 +1723,25 @@ reported confidence because develop controls cannot reconstruct the changed
 structure. Atmosphere mode is entered because structure diverges; its
 instruments are the budgets (EV ±1, WB gain [0.80, 1.25], saturation ±30,
 curve slope [0.5, 1.5]) and the population facts, not structural survival.
+The budget is derived from the requested strength: 0.0 uses EV +/-0.5,
+saturation +/-15, WB [0.90, 1.12], ratio 1.20, WB rotation share 0.05, Full
+cast-error ratio 1.5 and slope [0.7, 1.3]; 0.65 keeps the calibrated EV +/-1,
+WB [0.80, 1.25], saturation +/-30, WB rotation share 0.05 and slope [0.5,
+1.5], with the historical Full cast-error ratio 2.0; 1.0 permits EV +/-2.5,
+saturation +/-60, WB [0.50, 2.00], ratio 3.0, WB rotation share 1.0, Full
+cast-error ratio 3.0 and slope [0.25, 3.0]. Between 0.65 and 1.0 the WB
+rotation share opens linearly (about 0.593 at 0.85). The WB gain ratio and the
+Full look-error admission ratio are independent budget dimensions. At or below
+default, an out-of-budget WB remains as-shot exactly as in the pre-F1 path.
+Above default, an out-of-budget WB is scalar-shrunk from as-shot along the
+fitted move (log-space Kelvin and linear tint), then the persisted rounded WB
+is checked again. Its pre/post renders also pass the foreign-hue veto and the
+weighted rotation allowance; a failure restores as-shot and is disclosed with
+a typed note.
+The confidence cap is the measured look-error ladder capped by the strength
+budget: it is 0.50 at strengths 0.00/0.65, 0.414 at 0.85, and 0.35 at full
+strength. Unsupported movement is disclosed from strength 0.85, while coherent global casts remain
+measurable and foreign-hue painting remains vetoed.
 Its report therefore has one ruler: frame error, harm, confidence and disclosure
 all read a structure-blind re-aggregation that preserves one-sided, sparse and
 minimum-share population vetoes. The structural model is carried separately

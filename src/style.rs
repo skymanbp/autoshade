@@ -1017,7 +1017,9 @@ impl StyleIndex {
 
     /// Render retrieved exemplars as a SOFT reference block for the advisor prompt.
     ///
-    /// `strength` is GATE 5 of the strength axis (R23-3): this block's two
+    /// The pipeline passes the Style axis here for GATE 5 (R23-3); the
+    /// historical `strength` parameter name remains for API compatibility.
+    /// This block's two
     /// "…and not stronger / do not exceed it" clauses were the OTHER half of the
     /// binary style gate. Whatever the strength dial said, retrieving a reference
     /// re-imposed a ceiling — so the two sliders were not independent axes, and a
@@ -1034,7 +1036,7 @@ impl StyleIndex {
         if ex.is_empty() {
             return None;
         }
-        let bold = strength.tier() == crate::recipe::StrengthTier::Committed;
+        let bold = strength.get() >= 0.85;
         let lines: Vec<String> = ex
             .iter()
             .map(|e| {
@@ -1096,13 +1098,30 @@ impl StyleIndex {
                 mean(|f| f.rgb_curves as f32),
             )
         };
-        Some(format!(
-            "STYLE REFERENCE — how this user edited SIMILAR past shots (for consistency with their \
-taste; reference, do NOT copy verbatim, the scene differs): {}{}{}",
-            lines.join("  |  "),
-            curve_note,
-            family_note
-        ))
+        if bold {
+            Some(format!(
+                "STYLE REFERENCE — TARGET style to reproduce (the retrieved shots define the settings, curve habit and colour \
+                 families to reproduce; the scene differs): {}{}{}",
+                lines.join("  |  "), curve_note, family_note
+            ))
+        } else {
+            Some(format!(
+                "STYLE REFERENCE — how this user edited SIMILAR past shots (for consistency with their \
+                 taste; reference, do NOT copy verbatim, the scene differs): {}{}{}",
+                lines.join("  |  "), curve_note, family_note
+            ))
+        }
+    }
+
+    /// Style-axis spelling used by the advisor pipeline. Kept separate from
+    /// the historical GradeStrength entry point so existing gate fixtures do
+    /// not change their API while Style >= 0.85 gets target wording.
+    pub fn render_reference_for_style(
+        &self,
+        ex: &[&StyleExemplar],
+        style: f32,
+    ) -> Option<String> {
+        self.render_reference(ex, crate::recipe::GradeStrength::new(style))
     }
 }
 
@@ -1337,6 +1356,13 @@ pub fn blend_toward(recipe: &mut EditRecipe, targets: &BTreeMap<&'static str, f3
     }
 }
 
+/// Style axis pull: preserve the shipped 0.3 default's historical 0.18 pull,
+/// while allowing Style 1.0 to reach the retrieved target fully.
+pub fn style_pull(style: f32) -> f32 {
+    let s = style.clamp(0.0, 1.0);
+    if s >= 0.5 { s } else { s * 0.6 }
+}
+
 fn normalize(mut v: [f32; NDIM], mean: &[f32], std: &[f32]) -> [f32; NDIM] {
     for &d in &ZSCORE_DIMS {
         let s = std.get(d).copied().unwrap_or(1.0).max(1e-4);
@@ -1453,6 +1479,58 @@ mod tests {
         let before = r.clone();
         blend_toward(&mut r, &targets, 0.0); // strength 0 = no-op
         assert_eq!(r, before);
+    }
+
+    #[test]
+    fn style_pull_is_full_at_one_and_unchanged_at_default() {
+        assert_eq!(style_pull(1.0), 1.0);
+        assert_eq!(style_pull(0.3), 0.18);
+    }
+
+    #[test]
+    fn reference_wording_becomes_target_at_high_style() {
+        let idx = StyleIndex { version: 0, mean: Vec::new(), std: Vec::new(), exemplars: Vec::new(), source_dir: None };
+        let ex = StyleExemplar {
+            stem: "x".into(), feat: Vec::new(), tag: "wide/mid/midday/landscape".into(),
+            settings: BTreeMap::from([("contrast".to_string(), 15.0)]), curve: None,
+            path: None, families: None, embed: None,
+        };
+        let low = idx.render_reference(&[&ex], crate::recipe::GradeStrength::new(0.65)).unwrap();
+        let high = idx.render_reference(&[&ex], crate::recipe::GradeStrength::new(0.9)).unwrap();
+        assert!(high.contains("TARGET style to reproduce"));
+        assert!(!low.contains("TARGET style to reproduce"));
+    }
+
+    #[test]
+    fn default_style_reference_is_byte_identical_to_head() {
+        let ex = StyleExemplar {
+            stem: "fixed".into(),
+            feat: vec![0.0; NDIM],
+            tag: "wide/mid/midday/landscape".into(),
+            settings: BTreeMap::from([("contrast".to_string(), 15.0)]),
+            curve: None,
+            path: None,
+            families: None,
+            embed: None,
+        };
+        let idx = StyleIndex {
+            version: CURRENT_INDEX_VERSION,
+            mean: vec![0.0; NDIM],
+            std: vec![1.0; NDIM],
+            exemplars: vec![],
+            source_dir: None,
+        };
+        let rendered = idx
+            .render_reference(&[&ex], crate::recipe::GradeStrength::new(0.30))
+            .unwrap();
+        assert_eq!(
+            rendered,
+            "STYLE REFERENCE — how this user edited SIMILAR past shots (for consistency with their taste; reference, do NOT copy verbatim, the scene differs): [wide/mid/midday/landscape] contrast +15"
+        );
+        let bold = idx
+            .render_reference(&[&ex], crate::recipe::GradeStrength::new(0.90))
+            .unwrap();
+        assert!(bold.contains("TARGET style to reproduce"));
     }
 
     #[test]

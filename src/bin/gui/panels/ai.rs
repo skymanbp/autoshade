@@ -702,7 +702,8 @@ impl AutoshopApp {
                     .on_hover_text(tr(lang,
                         "Statistical fit: reverse the freshly generated look into editable develop params \
                          (local, no API cost). Sliders update (undoable), and for RAW a Lightroom XMP goes \
-                         into this photo's develop store; hit Export to render the full-resolution result.",
+                         into this photo's develop store; hit Export to render the full-resolution result. \
+                         Uses the panel's Strength control as the reverse-fit honesty budget.",
                     ))
                     .clicked()
                 {

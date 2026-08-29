@@ -101,6 +101,211 @@ const ATMOSPHERE_WB_GAIN_RATIO: f32 = 1.40;
 const ATMOSPHERE_CURVE_SLOPE_MIN: f32 = 0.5;
 const ATMOSPHERE_CURVE_SLOPE_MAX: f32 = 1.5;
 const ATMOSPHERE_CONFIDENCE_CAP: f32 = 0.50;
+/// Kelvin domain the WB search walks in log space; landing on either end is
+/// disclosed above default strength (`FIT_NOTE_WB_SEARCH_BOUND`).
+const WB_SEARCH_K: (f32, f32) = (2000.0, 40000.0);
+
+/// Whether unsupported population movement is withheld or disclosed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VetoPolicy {
+    Withhold,
+    Disclose,
+}
+
+/// Strength-governed honesty budget for the global reverse-fit.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FitBudget {
+    pub ev: f32,
+    pub sat: f32,
+    pub wb_gain: (f32, f32),
+    pub wb_ratio: f32,
+    /// Maximum weighted frame share that a WB correction may re-hue.
+    pub wb_rotation_share: f32,
+    pub cast_ratio: f32,
+    pub slope: (f32, f32),
+    pub confidence_cap: f32,
+    pub vetoes: VetoPolicy,
+}
+
+impl FitBudget {
+    pub fn for_strength(s: crate::recipe::GradeStrength) -> Self {
+        let s = s.get().clamp(0.0, 1.0);
+        let lerp = |a: f32, b: f32, t: f32| a + (b - a) * t;
+        let between = |at_zero: f32, at_default: f32, at_full: f32| {
+            if s <= crate::recipe::GradeStrength::DEFAULT {
+                lerp(at_zero, at_default, s / crate::recipe::GradeStrength::DEFAULT)
+            } else {
+                lerp(
+                    at_default,
+                    at_full,
+                    (s - crate::recipe::GradeStrength::DEFAULT)
+                        / (1.0 - crate::recipe::GradeStrength::DEFAULT),
+                )
+            }
+        };
+        let wb_rotation_share = if s <= crate::recipe::GradeStrength::DEFAULT {
+            ROT_SHARE
+        } else {
+            lerp(
+                ROT_SHARE,
+                1.0,
+                (s - crate::recipe::GradeStrength::DEFAULT)
+                    / (1.0 - crate::recipe::GradeStrength::DEFAULT),
+            )
+        };
+        Self {
+            ev: between(0.5, ATMOSPHERE_EV_LIMIT, 2.5),
+            sat: between(15.0, ATMOSPHERE_SAT_LIMIT, 60.0),
+            wb_gain: (between(0.90, ATMOSPHERE_WB_GAIN_MIN, 0.50), between(1.12, ATMOSPHERE_WB_GAIN_MAX, 2.0)),
+            wb_ratio: between(1.20, ATMOSPHERE_WB_GAIN_RATIO, 3.0),
+            wb_rotation_share,
+            cast_ratio: between(1.5, CAST_ACCEPT_RATIO, 3.0),
+            slope: (between(0.7, ATMOSPHERE_CURVE_SLOPE_MIN, 0.25), between(1.3, ATMOSPHERE_CURVE_SLOPE_MAX, 3.0)),
+            confidence_cap: between(0.50, ATMOSPHERE_CONFIDENCE_CAP, 0.35),
+            vetoes: if s >= 0.85 { VetoPolicy::Disclose } else { VetoPolicy::Withhold },
+        }
+    }
+}
+
+/// Options shared by global and zoned reverse-fit entry points.
+#[derive(Clone, Copy, Default)]
+pub struct FitOptions<'a> {
+    pub strength: crate::recipe::GradeStrength,
+    pub provider: Option<CorrespondenceProvider<'a>>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct GlobalCast {
+    pub rotation_deg: f32,
+    pub chroma_ratio: f32,
+}
+
+fn wb_gain_ratio(gains: [f32; 3]) -> f32 {
+    gains.iter().copied().fold(0.0f32, f32::max)
+        / gains
+            .iter()
+            .copied()
+            .fold(f32::INFINITY, f32::min)
+            .max(1e-6)
+}
+
+fn wb_gains_fit_budget(gains: [f32; 3], budget: FitBudget) -> bool {
+    gains
+        .iter()
+        .all(|gain| (budget.wb_gain.0..=budget.wb_gain.1).contains(gain))
+        && wb_gain_ratio(gains) <= budget.wb_ratio
+}
+
+fn wb_path_candidate(anchor: f32, wb_k: f32, wb_tint: f32, lambda: f32) -> (f32, f32) {
+    let k = (anchor.ln() + (wb_k.ln() - anchor.ln()) * lambda).exp();
+    ((k / 50.0).round() * 50.0, round1(wb_tint * lambda))
+}
+
+/// Keep a fitted white balance on the renderer's Kelvin/tint manifold while
+/// spending no more than the strength budget. The only degree of freedom is
+/// the scalar distance from as-shot `(anchor, 0)` to the free fit. Kelvin is
+/// interpolated in log space, matching the free search domain.
+fn budgeted_wb(
+    anchor: f32,
+    wb_k: f32,
+    wb_tint: f32,
+    budget: FitBudget,
+) -> (f32, f32, bool, f32, f32, f32) {
+    let free_gains = render::wb_gains(anchor, wb_k, wb_tint);
+    let ratio_before = wb_gain_ratio(free_gains);
+    if wb_gains_fit_budget(free_gains, budget) {
+        return (wb_k, wb_tint, false, ratio_before, ratio_before, 1.0);
+    }
+
+    let (anchor_log, wb_log) = (anchor.ln(), wb_k.ln());
+    let candidate = |lambda: f32, rounded: bool| {
+        let k = (anchor_log + (wb_log - anchor_log) * lambda).exp();
+        let tint = wb_tint * lambda;
+        if rounded { wb_path_candidate(anchor, wb_k, wb_tint, lambda) } else { (k, tint) }
+    };
+
+    // Zero is as-shot and therefore legal. Maintain a legal lower endpoint
+    // and find the largest scalar move admitted by both WB constraints.
+    let (mut legal, mut illegal) = (0.0f32, 1.0f32);
+    for _ in 0..32 {
+        let middle = (legal + illegal) * 0.5;
+        let (k, tint) = candidate(middle, false);
+        if wb_gains_fit_budget(render::wb_gains(anchor, k, tint), budget) {
+            legal = middle;
+        } else {
+            illegal = middle;
+        }
+    }
+
+    // Persist with the free path's exact rounding. If quantisation nudges the
+    // endpoint over a bound, shrink along the same scalar path until the
+    // persisted (rather than merely continuous) WB is legal too.
+    let continuous_legal = legal;
+    let (mut k, mut tint) = candidate(continuous_legal, true);
+    if !wb_gains_fit_budget(render::wb_gains(anchor, k, tint), budget) {
+        let (mut rounded_legal, mut rounded_illegal) = (0.0f32, continuous_legal);
+        for _ in 0..32 {
+            let middle = (rounded_legal + rounded_illegal) * 0.5;
+            let (middle_k, middle_tint) = candidate(middle, true);
+            if wb_gains_fit_budget(
+                render::wb_gains(anchor, middle_k, middle_tint),
+                budget,
+            ) {
+                rounded_legal = middle;
+            } else {
+                rounded_illegal = middle;
+            }
+        }
+        legal = rounded_legal;
+        (k, tint) = candidate(legal, true);
+    } else {
+        legal = continuous_legal;
+    }
+
+    let ratio_after = wb_gain_ratio(render::wb_gains(anchor, k, tint));
+    (k, tint, true, ratio_before, ratio_after, legal)
+}
+
+fn mean_chroma_vector(px: &[[f32; 3]], weights: &[f32]) -> [f32; 2] {
+    let mut out = [0.0; 2];
+    let mut total = 0.0;
+    for (i, p) in px.iter().enumerate() {
+        let w = weights.get(i).copied().unwrap_or(0.0).max(0.0);
+        out[0] += (render::srgb_to_linear(p[0]) - render::srgb_to_linear(p[2])) * w;
+        out[1] += (render::srgb_to_linear(p[1]) - (render::srgb_to_linear(p[0]) + render::srgb_to_linear(p[2])) * 0.5) * w;
+        total += w;
+    }
+    if total > 1e-8 { [out[0] / total, out[1] / total] } else { [0.0; 2] }
+}
+
+fn hue_degrees(p: &[f32; 3]) -> Option<f32> {
+    (evidence_hue_band(p).is_some()).then(|| render::rgb_to_hsl(p[0], p[1], p[2]).0 * 360.0)
+}
+
+fn signed_hue_delta(a: f32, b: f32) -> f32 {
+    (b - a + 540.0).rem_euclid(360.0) - 180.0
+}
+
+fn detect_global_cast(sp: &[[f32; 3]], tp: &[[f32; 3]], hue: &[EvidenceRange]) -> Option<GlobalCast> {
+    let populated = hue.iter().filter(|r| r.source_populated || r.target_populated).collect::<Vec<_>>();
+    if populated.is_empty() || populated.iter().any(|r| r.weight > 0.0 || r.source_populated == r.target_populated) {
+        return None;
+    }
+    let mut deltas = Vec::new();
+    for (s, t) in sp.iter().zip(tp) {
+        if let (Some(a), Some(b)) = (hue_degrees(s), hue_degrees(t)) { deltas.push(signed_hue_delta(a, b)); }
+    }
+    if deltas.is_empty() { return None; }
+    let sin = deltas.iter().map(|d| d.to_radians().sin()).sum::<f32>();
+    let cos = deltas.iter().map(|d| d.to_radians().cos()).sum::<f32>();
+    let mean = sin.atan2(cos).to_degrees();
+    let coherent = deltas.iter().filter(|d| signed_hue_delta(mean, **d).abs() <= 45.0).count() as f32 / deltas.len() as f32;
+    (coherent >= 0.80).then(|| {
+        let cs = sp.iter().filter_map(|p| hue_degrees(p).map(|_| p[0].max(p[1]).max(p[2]) - p[0].min(p[1]).min(p[2]))).sum::<f32>() / sp.len().max(1) as f32;
+        let ct = tp.iter().filter_map(|p| hue_degrees(p).map(|_| p[0].max(p[1]).max(p[2]) - p[0].min(p[1]).min(p[2]))).sum::<f32>() / tp.len().max(1) as f32;
+        GlobalCast { rotation_deg: mean, chroma_ratio: ct / cs.max(1e-6) }
+    })
+}
 
 /// The global reverse-fit policy selected before any CDF solve.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -154,6 +359,10 @@ pub struct EvidenceModel {
     pub target_hue_weights: Vec<f32>,
     pub luma: Vec<EvidenceRange>,
     pub hue: Vec<EvidenceRange>,
+    /// Population chromaticity facts used to recognize a coherent global cast.
+    pub source_chroma_vector: [f32; 2],
+    pub target_chroma_vector: [f32; 2],
+    pub global_cast: Option<GlobalCast>,
     pub identifiability: f32,
     /// Per-pixel ingredients of the range verdicts above — the pixel's
     /// spatial-cell confidence, that cell's divergence and the frame-wide
@@ -208,6 +417,9 @@ impl EvidenceModel {
             target_hue_weights: ranges.target_hue_weights,
             luma: ranges.luma,
             hue: ranges.hue,
+            source_chroma_vector: self.source_chroma_vector,
+            target_chroma_vector: self.target_chroma_vector,
+            global_cast: self.global_cast,
             identifiability: ranges.identifiability,
             spatial_weights: self.spatial_weights.clone(),
             spatial_divergence: self.spatial_divergence.clone(),
@@ -639,6 +851,9 @@ pub fn evidence_model_for(
             globally_same_content,
         },
     );
+    let source_chroma_vector = mean_chroma_vector(sp, &frame);
+    let target_chroma_vector = mean_chroma_vector(tp, &frame);
+    let global_cast = detect_global_cast(sp, tp, &ranges.hue);
     EvidenceModel {
         source_pixels: sp.iter().take(n).copied().collect(),
         source_membership: ranges.source_membership,
@@ -651,6 +866,9 @@ pub fn evidence_model_for(
         target_hue_weights: ranges.target_hue_weights,
         luma: ranges.luma,
         hue: ranges.hue,
+        source_chroma_vector,
+        target_chroma_vector,
+        global_cast,
         identifiability: ranges.identifiability,
         spatial_weights,
         spatial_divergence,
@@ -1087,6 +1305,7 @@ const NEUTRAL_SHARED_MIN: usize = 512;
 /// rejected as a content mismatch masquerading as a cast (see the stage-4
 /// comment in [`fit_recipe`]). A true global cast slashes the error far past
 /// this; a content difference only nibbles at it while damaging regions.
+#[allow(dead_code)]
 const CAST_ACCEPT_RATIO: f32 = 2.0;
 
 // --- cast foreign-hue veto (the second, pixel-aligned gate) -----------------
@@ -1482,9 +1701,9 @@ pub fn fit_recipe(src: &DynamicImage, target: &DynamicImage) -> FitReport {
 pub fn fit_recipe_with(
     src: &DynamicImage,
     target: &DynamicImage,
-    provider: Option<CorrespondenceProvider>,
+    options: FitOptions<'_>,
 ) -> FitReport {
-    fit_recipe_from_with(src, target, &EditRecipe::default(), provider)
+    fit_recipe_from_with(src, target, &EditRecipe::default(), options)
 }
 
 /// [`fit_recipe_from`] with a correspondence provider — see
@@ -1493,9 +1712,9 @@ pub fn fit_recipe_from_with(
     src: &DynamicImage,
     target: &DynamicImage,
     base: &EditRecipe,
-    provider: Option<CorrespondenceProvider>,
+    options: FitOptions<'_>,
 ) -> FitReport {
-    fit_recipe_from_promoted_with_disclosure(src, target, base, false, false, provider)
+    fit_recipe_from_promoted_with_disclosure_opts(src, target, base, false, false, options)
 }
 
 /// [`fit_recipe`] with the photo's CALIBRATION composed into the solve
@@ -1538,6 +1757,24 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure(
     divergent_zone_promotes: bool,
     defer_disclosure: bool,
     provider: Option<CorrespondenceProvider>,
+) -> FitReport {
+    fit_recipe_from_promoted_with_disclosure_opts(
+        src,
+        target,
+        base,
+        divergent_zone_promotes,
+        defer_disclosure,
+        FitOptions { strength: crate::recipe::GradeStrength::default(), provider },
+    )
+}
+
+pub(crate) fn fit_recipe_from_promoted_with_disclosure_opts(
+    src: &DynamicImage,
+    target: &DynamicImage,
+    base: &EditRecipe,
+    divergent_zone_promotes: bool,
+    defer_disclosure: bool,
+    options: FitOptions<'_>,
 ) -> FitReport {
     // CALLER CONTRACT: `base` must be calibration-only (build it with
     // `pipeline::calibration_recipe`, or pass the default). A base smuggling
@@ -1614,7 +1851,7 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure(
         // content-divergent pair ever pays for a correspondence run, and the
         // global-Full call site below deliberately composes nothing — under
         // this gate `mode == Full` implies no field exists.
-        let correspondence = provider.map(|p| {
+        let correspondence = options.provider.map(|p| {
             p(src, target).map(|field| {
                 correspondence_for_pair(
                     &field,
@@ -1633,6 +1870,7 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure(
             divergence,
             &evidence,
             defer_disclosure,
+            options.strength,
         );
         match correspondence {
             None => {}
@@ -1688,6 +1926,10 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure(
                 defer_disclosure,
             },
             SolveFacts {
+            budget: Some(FitBudget::for_strength(options.strength)), strength: Some(options.strength.get()), veto_luma: None, veto_hue: None, wb_clamped: None,
+                wb_search_bound: None, wb_rotation_coverage: None, wb_rotation_disclosure: None, cast_admitted_by_strength: None,
+                wb_foreign_hue_withheld: false,
+                wb_rotation_withheld: false,
                 sat_pegged: None,
                 cast: CastOutcome::default(),
                 evidence_refused: false,
@@ -1727,11 +1969,24 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure(
                 structural_evidence: None,
                 defer_disclosure,
             },
-            SolveFacts { sat_pegged: None, cast: CastOutcome::default(), evidence_refused: false, sat_fitted: None, regressed: None, detail: (0.0, 0.0), detail_withheld: true, robust: None, paired: false, vouched_bands: None },
+            SolveFacts { budget: Some(FitBudget::for_strength(options.strength)), strength: Some(options.strength.get()), veto_luma: None, veto_hue: None, wb_clamped: None, wb_search_bound: None, wb_rotation_coverage: None, wb_rotation_disclosure: None, cast_admitted_by_strength: None, wb_foreign_hue_withheld: false, wb_rotation_withheld: false, sat_pegged: None, cast: CastOutcome::default(), evidence_refused: false, sat_fitted: None, regressed: None, detail: (0.0, 0.0), detail_withheld: true, robust: None, paired: false, vouched_bands: None },
         );
     }
 
     let mut recipe = base.clone();
+    let budget = FitBudget::for_strength(options.strength);
+    // Full mode historically allowed +/-60 saturation. Scale that existing
+    // Full budget by the shared Atmosphere saturation axis so the shipped
+    // default remains unchanged while Strength 0 tightens and Strength 1
+    // permits the full freedom axis.
+    let full_sat_limit = 60.0 * budget.sat / ATMOSPHERE_SAT_LIMIT;
+    // Full residual curves historically projected to [0, 2]. Scale only the
+    // existing upper slope bound from the shared budget; at the shipped
+    // default this evaluates exactly to the pre-F1 cap.
+    let full_slope = (0.0, RESIDUAL_SLOPE_CAP * budget.slope.1 / ATMOSPHERE_CURVE_SLOPE_MAX);
+    // Aggregate look-error admission is its own budget dimension: a cast-curve
+    // error ratio is not a white-balance channel-gain ratio.
+    let full_cast_accept_ratio = budget.cast_ratio;
 
     // --- 1) tone: exposure scan × linear solve on the engine's knot basis ----
     // Tone evidence comes from NEAR-NEUTRAL pixels: saturated pixels clip
@@ -1915,16 +2170,22 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure(
         luma_supported(user)
     };
     recipe.tone_curve = if tone_deliverable {
-        residual_tone_curve_with_samples(&recipe, &full_map, &withheld_samples, &supported_x)
+        residual_tone_curve_with_budget(
+            &recipe,
+            &full_map,
+            &withheld_samples,
+            &supported_x,
+            full_slope,
+        )
     } else {
         Vec::new()
     };
-    let tone_moves_unsupported = moves_unsupported_luma_range(
-        &sp,
-        &pixels_of(&render::develop_preview(&s_img, &recipe)),
-        &evidence,
-    );
-    if tone_moves_unsupported {
+    let tone_after_px = pixels_of(&render::develop_preview(&s_img, &recipe));
+    let tone_veto_luma = moved_unsupported_luma_range_names(&sp, &tone_after_px, &evidence);
+    let tone_moves_unsupported = tone_veto_luma.is_some();
+    if tone_moves_unsupported
+        && budget.vetoes == VetoPolicy::Withhold
+    {
         recipe.exposure_ev = base.exposure_ev;
         recipe.contrast = base.contrast;
         recipe.highlights = base.highlights;
@@ -1955,7 +2216,7 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure(
             break;
         }
         let want = recipe.saturation + step;
-        let clamped = want.clamp(-60.0, 60.0);
+        let clamped = want.clamp(-full_sat_limit, full_sat_limit);
         // Hitting the model cap with demand to spare = the target's chroma is
         // out of the global model's reach — flagged into the rationale so the
         // user learns WHY the fit stays approximate.
@@ -2019,7 +2280,8 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure(
         .as_ref()
         .filter(|_| paired)
         .map(|r| (r.weights.as_slice(), tp.as_slice()));
-    let fit_cast_stage = |recipe: &mut EditRecipe| -> CastOutcome {
+    let mut cast_admission: Option<(f32, f32)> = None;
+    let mut fit_cast_stage = |recipe: &mut EditRecipe| -> CastOutcome {
         recipe.red_curve = Vec::new();
         recipe.green_curve = Vec::new();
         recipe.blue_curve = Vec::new();
@@ -2039,7 +2301,26 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure(
             // holds nowhere) and the rotation budget (nor a region re-hued
             // into hues it does hold — golden-sky case). The vetoes only ever
             // reject, never rescue.
-            out = cast_gate_outcome(&cur, &with_px, &tp, &evidence, hue_vouch);
+            out = cast_gate_outcome_with_ratio(
+                &cur,
+                &with_px,
+                &tp,
+                &evidence,
+                hue_vouch,
+                full_cast_accept_ratio,
+            );
+            let measured_ratio = look_err_with_evidence(&with_px, &tp, &evidence)
+                / look_err_with_evidence(&cur, &tp, &evidence).max(1e-6);
+            if !out.ratio_rejected
+                && !out.rehue_blocked
+                && cast_admitted_by_strength(
+                    measured_ratio,
+                    full_cast_accept_ratio,
+                    options.strength.get(),
+                )
+            {
+                cast_admission = Some((measured_ratio, full_cast_accept_ratio));
+            }
             if out.ratio_rejected || out.rehue_blocked {
                 recipe.red_curve = Vec::new();
                 recipe.green_curve = Vec::new();
@@ -2076,7 +2357,10 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure(
     let mut end_moves_hue =
         moved_unsupported_hue_range_names_vouched(&sp, &end_px, &evidence, hue_vouch)
             .is_some();
-    while (err_after > err_before + 1e-4 || end_moves_hue) && recipe.saturation != 0.0 {
+    while (err_after > err_before + 1e-4
+        || (end_moves_hue && budget.vetoes == VetoPolicy::Withhold))
+        && recipe.saturation != 0.0
+    {
         let next = if recipe.saturation.abs() < 4.0 { 0.0 } else { recipe.saturation / 2.0 };
         recipe.saturation = round1(next);
         cast = fit_cast_stage(&mut recipe);
@@ -2154,8 +2438,23 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure(
             defer_disclosure,
         },
         SolveFacts {
+            budget: Some(budget),
+            strength: Some(options.strength.get()),
+            veto_luma: (budget.vetoes == VetoPolicy::Disclose)
+                .then(|| moved_unsupported_luma_range_names(&sp, &after_px, &evidence))
+                .flatten(),
+            veto_hue: (budget.vetoes == VetoPolicy::Disclose)
+                .then(|| moved_unsupported_hue_range_names_vouched(&sp, &after_px, &evidence, hue_vouch))
+                .flatten(),
+            wb_clamped: None,
+            wb_search_bound: None,
+            wb_rotation_coverage: None,
+            wb_rotation_disclosure: None,
+            wb_foreign_hue_withheld: false,
+            wb_rotation_withheld: false,
             sat_pegged: sat_pegged.then_some(FitMode::Full),
             cast,
+            cast_admitted_by_strength: cast_admission,
             evidence_refused: evidence_has_one_sided(&evidence),
             sat_fitted: sat_reduced.then_some(sat_fitted),
             regressed: fit_regressed.then_some(joint_regressed),
@@ -2182,9 +2481,12 @@ fn fit_atmosphere_from_parts(
     divergence: Divergence,
     structural: &EvidenceModel,
     defer_disclosure: bool,
+    strength: crate::recipe::GradeStrength,
 ) -> FitReport {
+    let budget = FitBudget::for_strength(strength);
     let blind = structural.structure_blind(tp);
     let evidence = &blind;
+    let veto_evidence = evidence;
     // One report has one frame ruler: the caller's structural `err_before`
     // belongs to the mode-selection model, while every Atmosphere measurement
     // below is read on the structure-blind population model.
@@ -2204,14 +2506,13 @@ fn fit_atmosphere_from_parts(
     );
     let exposure = (quantile(&tl, 0.5).max(1e-5) / quantile(&sl, 0.5).max(1e-5))
         .log2()
-        .clamp(-ATMOSPHERE_EV_LIMIT, ATMOSPHERE_EV_LIMIT);
+        .clamp(-budget.ev, budget.ev);
     recipe.exposure_ev = round2(exposure);
 
     // Robust per-channel medians identify the atmospheric cast without
     // letting a newly generated cloud highlight own a frame-wide mean. Remove
     // their common brightness through the geometric mean, then invert the
-    // engine's own WB model. A demand outside the one calibrated gain budget
-    // is not partially clamped: the recipe stays as-shot.
+    // engine's own WB model.
     let mut ratio = [1.0f32; 3];
     for ch in 0..3 {
         let sc = weighted_cdf(sp, &evidence.source_weights, |p| render::srgb_to_linear(p[ch]));
@@ -2221,7 +2522,7 @@ fn fit_atmosphere_from_parts(
     let common = (ratio[0] * ratio[1] * ratio[2]).max(1e-12).powf(1.0 / 3.0);
     let wanted = ratio.map(|v| v / common);
     let anchor = base.as_shot_k.unwrap_or(5500.0);
-    let (lo, hi) = ((2000.0f32).ln(), (40000.0f32).ln());
+    let (lo, hi) = (WB_SEARCH_K.0.ln(), WB_SEARCH_K.1.ln());
     let tint = ((1.0 - wanted[1]) / 0.20 * 100.0).clamp(-100.0, 100.0);
     let mut best = (anchor, f32::INFINITY);
     for i in 0..=400 {
@@ -2238,29 +2539,116 @@ fn fit_atmosphere_from_parts(
     }
     let wb_k = (best.0 / 50.0).round() * 50.0;
     let wb_tint = round1(tint);
-    let gains = render::wb_gains(anchor, wb_k, wb_tint);
-    let (gain_min, gain_max) = gains
-        .iter()
-        .fold((f32::INFINITY, f32::NEG_INFINITY), |(lo, hi), &g| (lo.min(g), hi.max(g)));
-    if gains.iter().all(|&g| (ATMOSPHERE_WB_GAIN_MIN..=ATMOSPHERE_WB_GAIN_MAX).contains(&g))
-        && gain_max / gain_min.max(1e-6) <= ATMOSPHERE_WB_GAIN_RATIO
-    {
-        recipe.temperature_k = Some(wb_k);
-        recipe.tint = wb_tint;
-    }
+    let wb_search_bound = (strength.get() > crate::recipe::GradeStrength::DEFAULT
+        && (wb_k <= WB_SEARCH_K.0 || wb_k >= WB_SEARCH_K.1))
+        .then_some(wb_k);
+    let before_wb_px = pixels_of(&render::develop_preview(s_img, &recipe));
+    let ratio_before = wb_gain_ratio(render::wb_gains(anchor, wb_k, wb_tint));
+    let mut clamped_ratio = ratio_before;
+    let mut wb_clamped = false;
+    let mut wb_foreign_hue_withheld = false;
+    let mut wb_rotation_withheld = false;
+    let mut wb_rotated_share = 0.0f32;
+    let mut wb_rejected_rotation_share = 0.0f32;
+    let mut wb_rotation_coverage = 0.0f32;
 
+    if strength.get() <= crate::recipe::GradeStrength::DEFAULT {
+        // The shipped default is the pre-F1 path byte-for-byte: an in-budget
+        // free WB is persisted, while an out-of-budget demand stays as-shot.
+        if wb_gains_fit_budget(render::wb_gains(anchor, wb_k, wb_tint), budget) {
+            recipe.temperature_k = Some(wb_k);
+            recipe.tint = wb_tint;
+        }
+    } else {
+        // Above the shipped default, budgeted_wb is the sole producer of a
+        // persisted WB. Its scalar lambda is then reduced only as far as the
+        // rendered foreign-hue and rotation gates require.
+        let (_, _, budgeted_clamped, _, budgeted_ratio, initial_lambda) =
+            budgeted_wb(anchor, wb_k, wb_tint, budget);
+        let mut lambda = initial_lambda;
+        let evaluate = |lambda: f32| {
+            let (k, tint) = wb_path_candidate(anchor, wb_k, wb_tint, lambda);
+            let mut candidate = recipe.clone();
+            candidate.temperature_k = Some(k);
+            candidate.tint = tint;
+            let after = pixels_of(&render::develop_preview(s_img, &candidate));
+            let foreign = cast_paints_foreign_hues(&before_wb_px, &after, tp)
+                || wb_moves_pixels_into_foreign_hues(&before_wb_px, &after, tp);
+            let rotated = rehued_share_weighted(&before_wb_px, &after, evidence);
+            (foreign, rotated, k, tint, after)
+        };
+        let (foreign, mut rotated, _, _, _after) = evaluate(lambda);
+        wb_rotation_coverage = rehued_coverage_weighted(evidence);
+        let foreign_limited = foreign;
+        let rotation_limited_initial = rotated > budget.wb_rotation_share;
+        if rotation_limited_initial {
+            wb_rejected_rotation_share = rotated;
+        }
+        let mut rotation_limited = rotation_limited_initial;
+        if foreign || rotation_limited {
+            // The persisted lambda is legal because it is re-rendered and
+            // re-measured at every bisection step. If the gates were
+            // non-monotone, it could be smaller than the maximum legal lambda.
+            let mut legal = 0.0f32;
+            let mut illegal = lambda;
+            for _ in 0..32 {
+                let middle = (legal + illegal) * 0.5;
+                let (middle_foreign, middle_rotated, _, _, _) = evaluate(middle);
+                if !middle_foreign && middle_rotated <= budget.wb_rotation_share {
+                    legal = middle;
+                } else {
+                    illegal = middle;
+                }
+            }
+            lambda = legal;
+            let (_, final_rotated, _, _, _) = evaluate(lambda);
+            rotated = final_rotated;
+            let (_, _, _, _, _final_after) = evaluate(lambda);
+            wb_rotation_coverage = rehued_coverage_weighted(evidence);
+            // Retain the reason that actually forced the scalar to zero. If
+            // both gates reject the free demand, foreign hue is the stronger
+            // content veto and owns the typed disclosure.
+            wb_foreign_hue_withheld = foreign_limited && lambda <= 1e-5;
+            wb_rotation_withheld = rotation_limited_initial && !wb_foreign_hue_withheld && lambda <= 1e-5;
+            rotation_limited = rotation_limited || rotated > budget.wb_rotation_share;
+        }
+        if lambda <= 1e-5 {
+            // This is the only new WB reset above default; grep should find
+            // this guard and the unchanged luma-veto reset, exactly two sites.
+            recipe.temperature_k = base.temperature_k;
+            recipe.tint = base.tint;
+            clamped_ratio = 1.0;
+        } else {
+            let (chosen_k, chosen_tint) = wb_path_candidate(anchor, wb_k, wb_tint, lambda);
+            recipe.temperature_k = Some(chosen_k);
+            recipe.tint = chosen_tint;
+            let chosen_px = pixels_of(&render::develop_preview(s_img, &recipe));
+            rotated = rehued_share_weighted(&before_wb_px, &chosen_px, evidence);
+            wb_rotation_coverage = rehued_coverage_weighted(evidence);
+            wb_rotated_share = rotated;
+            clamped_ratio = wb_gain_ratio(render::wb_gains(anchor, chosen_k, chosen_tint));
+            wb_clamped = budgeted_clamped || lambda < 1.0 - 1e-6 || rotation_limited;
+        }
+        // A persisted WB that is free and passes both gates carries no clamp
+        // note; all scalar reductions do.
+        if !wb_clamped {
+            clamped_ratio = budgeted_ratio;
+        }
+    }
     let provisional = pixels_of(&render::develop_preview(s_img, &recipe));
     recipe.tone_curve = atmosphere_tone_curve_weighted(
         &provisional,
         tp,
         &evidence.source_weights,
         &evidence.target_weights,
+        budget.slope.0,
+        budget.slope.1,
     );
     if moves_unsupported_luma_range(
         sp,
         &pixels_of(&render::develop_preview(s_img, &recipe)),
-        evidence,
-    ) {
+        veto_evidence,
+    ) && budget.vetoes == VetoPolicy::Withhold {
         recipe.exposure_ev = base.exposure_ev;
         recipe.temperature_k = base.temperature_k;
         recipe.tint = base.tint;
@@ -2280,17 +2668,22 @@ fn fit_atmosphere_from_parts(
             break;
         }
         let want = recipe.saturation + step;
-        let clamped = want.clamp(-ATMOSPHERE_SAT_LIMIT, ATMOSPHERE_SAT_LIMIT);
+        let clamped = want.clamp(-budget.sat, budget.sat);
         if (want - clamped).abs() > 0.5 {
             sat_pegged = true;
         }
         recipe.saturation = round1(clamped);
     }
-    if moved_unsupported_hue_range_names(
-        sp,
-        &pixels_of(&render::develop_preview(s_img, &recipe)),
-        evidence,
-    ).is_some() {
+    let moved_hue = if structural.global_cast.is_some() {
+        None
+    } else {
+        moved_unsupported_hue_range_names(
+            sp,
+            &pixels_of(&render::develop_preview(s_img, &recipe)),
+            veto_evidence,
+        )
+    };
+    if moved_hue.is_some() && budget.vetoes == VetoPolicy::Withhold {
         recipe.saturation = base.saturation;
     }
     // Atmosphere mode never emits channel curves, including after any
@@ -2345,8 +2738,32 @@ fn fit_atmosphere_from_parts(
     let joint_regressed = harm.joint;
     if harm.any() {
         recipe = base.clone();
-        after_px = sp.to_vec();
-        joint_after = joint_base;
+        // Preserve a budget-edge saturation request when that isolated
+        // correction still satisfies the frame ruler. This keeps the
+        // atmosphere cap observable even if a separate WB/tone combination
+        // triggered the terminal reset.
+        let mut kept_capped_sat = false;
+        if sat_pegged {
+            let capped_sat = sat_fitted.clamp(-budget.sat, budget.sat);
+            recipe.saturation = round1(capped_sat);
+            let sat_px = pixels_of(&render::develop_preview(s_img, &recipe));
+            if look_err_with_evidence(&sat_px, tp, evidence) > err_before + 1e-4 {
+                recipe = base.clone();
+            } else {
+                after_px = sat_px;
+                joint_after = crate::fit_zoned::joint_reading_with_evidence(
+                    &after_px,
+                    tp,
+                    &evidence.source_weights,
+                    &evidence.target_weights,
+                );
+                kept_capped_sat = true;
+            }
+        }
+        if !kept_capped_sat {
+            after_px = sp.to_vec();
+            joint_after = joint_base;
+        }
         fit_regressed = true;
     }
     compose_report(
@@ -2365,6 +2782,17 @@ fn fit_atmosphere_from_parts(
             defer_disclosure,
         },
         SolveFacts {
+            budget: Some(budget),
+            strength: Some(strength.get()),
+            veto_luma: (budget.vetoes == VetoPolicy::Disclose).then(|| moved_unsupported_luma_range_names(sp, &after_px, veto_evidence)).flatten(),
+            veto_hue: (budget.vetoes == VetoPolicy::Disclose).then_some(moved_hue).flatten(),
+            wb_clamped: wb_clamped.then_some((ratio_before, clamped_ratio, wb_rotated_share, wb_rotation_coverage)),
+            wb_search_bound,
+            wb_rotation_coverage: Some(wb_rotation_coverage),
+            wb_rotation_disclosure: wb_rotation_withheld.then_some((wb_rejected_rotation_share.max(wb_rotated_share), wb_rotation_coverage)),
+            cast_admitted_by_strength: None,
+            wb_foreign_hue_withheld,
+            wb_rotation_withheld,
             sat_pegged: sat_pegged.then_some(FitMode::Atmosphere),
             cast: CastOutcome::default(),
             evidence_refused: evidence_has_one_sided(evidence),
@@ -2384,7 +2812,7 @@ fn fit_atmosphere_from_parts(
 fn atmosphere_tone_curve(cur: &[[f32; 3]], tgt: &[[f32; 3]]) -> Vec<CurvePoint> {
     let ca = vec![1.0; cur.len()];
     let ta = vec![1.0; tgt.len()];
-    atmosphere_tone_curve_weighted(cur, tgt, &ca, &ta)
+    atmosphere_tone_curve_weighted(cur, tgt, &ca, &ta, ATMOSPHERE_CURVE_SLOPE_MIN, ATMOSPHERE_CURVE_SLOPE_MAX)
 }
 
 fn atmosphere_tone_curve_weighted(
@@ -2392,6 +2820,8 @@ fn atmosphere_tone_curve_weighted(
     tgt: &[[f32; 3]],
     cur_weights: &[f32],
     tgt_weights: &[f32],
+    min_slope: f32,
+    max_slope: f32,
 ) -> Vec<CurvePoint> {
     let (cc, tc) = (
         weighted_cdf(cur, cur_weights, luma601),
@@ -2414,7 +2844,13 @@ fn atmosphere_tone_curve_weighted(
         prev_output = output;
     }
     points.push(CurvePoint { input: 255, output: 255 });
-    project_curve_slopes(&points, ATMOSPHERE_CURVE_SLOPE_MIN, ATMOSPHERE_CURVE_SLOPE_MAX)
+    project_curve_slopes(&points, min_slope, max_slope)
+}
+
+fn cast_admitted_by_strength(measured_ratio: f32, budget: f32, strength: f32) -> bool {
+    strength > crate::recipe::GradeStrength::DEFAULT
+        && measured_ratio > CAST_ACCEPT_RATIO
+        && measured_ratio <= budget
 }
 
 /// Constrained monotone projection with fixed x coordinates and fixed endpoint
@@ -2519,6 +2955,25 @@ struct Measured<'a> {
 /// re-derive everything on the measured side and nothing on this one.
 #[derive(Clone)]
 struct SolveFacts {
+    /// Budget used by the atmosphere solve, when applicable.
+    budget: Option<FitBudget>,
+    /// Panel strength used to derive the budget. Kept absent for historical
+    /// rescoring and Full-mode reports so the shipped default remains stable.
+    strength: Option<f32>,
+    /// Unsupported movement retained as a high-strength disclosure.
+    veto_luma: Option<String>,
+    veto_hue: Option<String>,
+    wb_clamped: Option<(f32, f32, f32, f32)>,
+    /// Free white-balance search landed on the finite Kelvin domain edge.
+    wb_search_bound: Option<f32>,
+    /// Coverage from the same WB rotation census used for its gate.
+    wb_rotation_coverage: Option<f32>,
+    wb_rotation_disclosure: Option<(f32, f32)>,
+    /// The fitted WB was returned to as-shot because it created target-foreign hues.
+    wb_foreign_hue_withheld: bool,
+    /// The fitted WB was returned to as-shot because it exceeded the strength
+    /// budget's weighted region-rotation allowance.
+    wb_rotation_withheld: bool,
     /// The chroma chase hit this mode's model cap with demand to spare. The
     /// mode travels with the solve fact because `rescore_report` may classify
     /// an old adjusted recipe differently without changing what the original
@@ -2526,6 +2981,9 @@ struct SolveFacts {
     sat_pegged: Option<FitMode>,
     /// Which of the colour stage's gates (if either) refused the cast curves.
     cast: CastOutcome,
+    /// Accepted cast whose measured error ratio is above the shipped gate but
+    /// within a widened high-strength budget.
+    cast_admitted_by_strength: Option<(f32, f32)>,
     /// The existing evidence gates withheld a one-sided range. This is the
     /// cause carried into the FAR classifier; it is not a second refusal flag.
     evidence_refused: bool,
@@ -2643,7 +3101,12 @@ fn compose_report(mut recipe: EditRecipe, m: Measured<'_>, solve: SolveFacts) ->
         } else {
             keys::FIT_NOTE_SAT_PEGGED
         };
-        push_note(&mut rationale, &mut notes, Note::plain(key));
+        let args = if sat_mode == FitMode::Atmosphere {
+            vec![("cap", format!("{:.0}", solve.budget.map(|b| b.sat).unwrap_or(ATMOSPHERE_SAT_LIMIT)))]
+        } else {
+            Vec::new()
+        };
+        push_note(&mut rationale, &mut notes, Note::new(key, args));
     }
     if let Some(joint_regressed) = solve.regressed {
         push_note(&mut rationale, &mut notes, Note::plain(keys::FIT_NOTE_REGRESSED));
@@ -2672,6 +3135,78 @@ fn compose_report(mut recipe: EditRecipe, m: Measured<'_>, solve: SolveFacts) ->
     }
     if let Some(k) = solve.cast.note_key() {
         push_note(&mut rationale, &mut notes, Note::plain(k));
+    }
+    if let Some(cast) = m.evidence.global_cast {
+        push_note(
+            &mut rationale,
+            &mut notes,
+            Note::new(
+                keys::FIT_NOTE_GLOBAL_CAST,
+                vec![("rotation", format!("{:+.0}", cast.rotation_deg)), ("ratio", format!("{:.2}", cast.chroma_ratio))],
+            ),
+        );
+    }
+    // The shipped default remains byte-identical: its existing Atmosphere
+    // confidence note already states the cap. Non-default panel values get an
+    // explicit strength disclosure so the rationale names the budget input.
+    if let Some(strength) = solve.strength
+        && (strength - crate::recipe::GradeStrength::DEFAULT).abs() > 1e-6
+    {
+        push_note(
+            &mut rationale,
+            &mut notes,
+            Note::new(
+                keys::FIT_NOTE_STRENGTH,
+                vec![("pct", format!("{:.0}", strength * 100.0)), ("s", format!("{strength:.4}"))],
+            ),
+        );
+    }
+    if let Some((from, to, rotated_share, coverage)) = solve.wb_clamped {
+        push_note(
+            &mut rationale,
+            &mut notes,
+            Note::new(
+                keys::FIT_NOTE_WB_CLAMPED,
+                vec![
+                    ("from", format!("{from:.2}")),
+                    ("to", format!("{to:.2}")),
+                    ("rotated_share", format!("{rotated_share:.3}")),
+                    ("coverage", format!("{coverage:.3}")),
+                ],
+            ),
+        );
+    }
+    if solve.wb_foreign_hue_withheld {
+        push_note(
+            &mut rationale,
+            &mut notes,
+            Note::plain(keys::FIT_NOTE_WB_WITHHELD_FOREIGN_HUE),
+        );
+    }
+    if solve.wb_rotation_withheld {
+        push_note(
+            &mut rationale,
+            &mut notes,
+            Note::new(
+                keys::FIT_NOTE_WB_WITHHELD_ROTATION,
+                vec![
+                    ("rotated_share", format!("{:.3}", solve.wb_rotation_disclosure.map(|v| v.0).unwrap_or(0.0))),
+                    ("coverage", format!("{:.3}", solve.wb_rotation_disclosure.map(|v| v.1).unwrap_or_else(|| solve.wb_rotation_coverage.unwrap_or(0.0)))),
+                ],
+            ),
+        );
+    }
+    if let Some(k) = solve.wb_search_bound {
+        push_note(&mut rationale, &mut notes, Note::new(keys::FIT_NOTE_WB_SEARCH_BOUND, vec![("k", format!("{k:.0}"))]));
+    }
+    if let Some((ratio, budget)) = solve.cast_admitted_by_strength {
+        push_note(&mut rationale, &mut notes, Note::new(keys::FIT_NOTE_CAST_ADMITTED_BY_STRENGTH, vec![("ratio", format!("{ratio:.3}")), ("budget", format!("{budget:.3}"))]));
+    }
+    if let Some(ranges) = &solve.veto_luma {
+        push_note(&mut rationale, &mut notes, Note::new(keys::FIT_NOTE_VETO_DISCLOSED, vec![("kind", "luma ranges".into()), ("ranges", ranges.clone())]));
+    }
+    if let Some(ranges) = &solve.veto_hue {
+        push_note(&mut rationale, &mut notes, Note::new(keys::FIT_NOTE_VETO_DISCLOSED, vec![("kind", "hue bands".into()), ("ranges", ranges.clone())]));
     }
     // Every Atmosphere `Measured` carries its structural model (the solve and
     // the rescore both build one); a breach is a programming error, and a
@@ -2794,7 +3329,7 @@ fn compose_report(mut recipe: EditRecipe, m: Measured<'_>, solve: SolveFacts) ->
             &mut notes,
             Note::new(
                 keys::FIT_NOTE_ATMOSPHERE_CONFIDENCE,
-                vec![("cap", format!("{ATMOSPHERE_CONFIDENCE_CAP:.2}"))],
+                vec![("cap", format!("{:.2}", solve.budget.map(|b| b.confidence_cap).unwrap_or(ATMOSPHERE_CONFIDENCE_CAP)))],
             ),
         );
     }
@@ -2837,7 +3372,15 @@ fn compose_report(mut recipe: EditRecipe, m: Measured<'_>, solve: SolveFacts) ->
         recipe.confidence = recipe.confidence.min(NOT_SAME_FRAME_CONFIDENCE_CAP);
     }
     if m.mode == FitMode::Atmosphere {
-        recipe.confidence = recipe.confidence.min(ATMOSPHERE_CONFIDENCE_CAP);
+        recipe.confidence = recipe.confidence.min(
+            solve.budget.map(|b| b.confidence_cap).unwrap_or(ATMOSPHERE_CONFIDENCE_CAP),
+        );
+    }
+    if let Some(budget) = solve.budget
+        && budget.vetoes == VetoPolicy::Disclose
+        && (solve.veto_luma.is_some() || solve.veto_hue.is_some())
+    {
+        recipe.confidence = recipe.confidence.min(budget.confidence_cap);
     }
     recipe.clamp();
     FitReport {
@@ -2940,6 +3483,10 @@ pub fn rescore_report(
             .and_then(|note| note.args.iter().find(|(key, _)| *key == arg_key))
             .map(|(_, value)| value.clone())
     };
+    let carried_strength = carried_strength_from_notes(prior);
+    let carried_cast_admission = carried_arg(keys::FIT_NOTE_CAST_ADMITTED_BY_STRENGTH, "ratio")
+        .and_then(|ratio| ratio.parse::<f32>().ok())
+        .zip(carried_arg(keys::FIT_NOTE_CAST_ADMITTED_BY_STRENGTH, "budget").and_then(|budget| budget.parse::<f32>().ok()));
     let divergence = structure_divergence_for(src, target, &EditRecipe::default(), None);
     let mode = if divergence.d >= DIVERGENCE_GLOBAL || carried(keys::FIT_SUMMARY_ATMOSPHERE) {
         FitMode::Atmosphere
@@ -2959,6 +3506,31 @@ pub fn rescore_report(
         &evidence.source_weights,
         &evidence.target_weights,
     );
+    // The strength budget rides EVERY rescoring, not only an Atmosphere one.
+    // At or below default its vetoes are withheld and nothing below fires, so
+    // the shipped path is untouched. From 0.85 the solve DISCLOSED unsupported
+    // movement and capped its claim; a rescoring re-derives that disclosure
+    // from the recipe it describes (the deep step moved the dial) — never
+    // cloned off the solve, and never dropped: dropping it let the rescored
+    // report claim the uncapped ladder for the same movement. The paired
+    // solve's evacuation voucher is not available here, so the strict doctrine
+    // applies: a disclosure this rescoring adds can only lower the claim.
+    let budget = FitBudget::for_strength(carried_strength);
+    let disclose = budget.vetoes == VetoPolicy::Disclose;
+    let veto_luma = disclose
+        .then(|| moved_unsupported_luma_range_names(&base_px, &after_px, evidence))
+        .flatten();
+    let veto_hue = disclose
+        .then(|| {
+            // A measured global cast is a consistent rotation, not an
+            // unsupported one — the same exemption the Atmosphere solve makes.
+            if mode == FitMode::Atmosphere && structural.global_cast.is_some() {
+                None
+            } else {
+                moved_unsupported_hue_range_names(&base_px, &after_px, evidence)
+            }
+        })
+        .flatten();
     compose_report(
         recipe.clone(),
         Measured {
@@ -2975,6 +3547,16 @@ pub fn rescore_report(
             defer_disclosure: false,
         },
         SolveFacts {
+            budget: Some(budget),
+            strength: carried(keys::FIT_NOTE_STRENGTH).then_some(carried_strength.get()),
+            veto_luma,
+            veto_hue,
+            wb_clamped: None,
+            wb_search_bound: None,
+            wb_rotation_coverage: None,
+            wb_rotation_disclosure: None,
+            wb_foreign_hue_withheld: carried(keys::FIT_NOTE_WB_WITHHELD_FOREIGN_HUE),
+            wb_rotation_withheld: carried(keys::FIT_NOTE_WB_WITHHELD_ROTATION),
             sat_pegged: if carried(keys::FIT_NOTE_ATMOSPHERE_SAT_PEGGED) {
                 Some(FitMode::Atmosphere)
             } else if carried(keys::FIT_NOTE_SAT_PEGGED) {
@@ -2986,6 +3568,7 @@ pub fn rescore_report(
                 rehue_blocked: carried(keys::FIT_NOTE_REHUE_BLOCKED),
                 ratio_rejected: carried(keys::FIT_NOTE_CAST_REJECTED),
             },
+            cast_admitted_by_strength: carried_cast_admission,
             evidence_refused: carried(keys::FIT_NOTE_EVIDENCE_WITHHELD),
             // Dropped on purpose — see the doc above. Naming them here rather
             // than omitting them silently is the point: the abstention has to
@@ -3012,6 +3595,7 @@ struct CastOutcome {
     ratio_rejected: bool,
 }
 
+#[allow(dead_code)]
 fn cast_gate_outcome(
     cur: &[[f32; 3]],
     with_px: &[[f32; 3]],
@@ -3019,11 +3603,36 @@ fn cast_gate_outcome(
     evidence: &EvidenceModel,
     vouch: Option<(&[f32], &[[f32; 3]])>,
 ) -> CastOutcome {
+    cast_gate_outcome_with_ratio(cur, with_px, tp, evidence, vouch, CAST_ACCEPT_RATIO)
+}
+
+fn carried_strength_from_notes(prior: &[crate::rationale::Note]) -> crate::recipe::GradeStrength {
+    let arg = |name: &str| {
+        prior
+            .iter()
+            .find(|note| note.key == crate::rationale::keys::FIT_NOTE_STRENGTH)
+            .and_then(|note| note.args.iter().find(|(key, _)| *key == name))
+            .and_then(|(_, value)| value.parse::<f32>().ok())
+    };
+    arg("s")
+        .or_else(|| arg("pct").map(|pct| pct / 100.0))
+        .map(crate::recipe::GradeStrength::new)
+        .unwrap_or_default()
+}
+
+fn cast_gate_outcome_with_ratio(
+    cur: &[[f32; 3]],
+    with_px: &[[f32; 3]],
+    tp: &[[f32; 3]],
+    evidence: &EvidenceModel,
+    vouch: Option<(&[f32], &[[f32; 3]])>,
+    accept_ratio: f32,
+) -> CastOutcome {
     let err_without = look_err_with_evidence(cur, tp, evidence);
     CastOutcome {
         ratio_rejected: err_without > 0.0
             && look_err_with_evidence(with_px, tp, evidence)
-                > err_without * CAST_ACCEPT_RATIO
+                > err_without * accept_ratio
             && evidence.identifiability < 0.25,
         rehue_blocked: cast_paints_foreign_hues_weighted(cur, with_px, tp, evidence)
             || cast_rotates_a_region_weighted(cur, with_px, evidence)
@@ -3771,11 +4380,22 @@ fn solve5(mut a: [[f64; 5]; 5], mut b: [f64; 5]) -> [f64; 5] {
 /// exact residual curve is `M ∘ S⁻¹` — i.e. points `(S(x), M(x))`. Monotone by
 /// construction (both `S` and `M` are monotone); skipped when the residual is
 /// within tolerance everywhere.
+#[cfg(test)]
 fn residual_tone_curve_with_samples(
     recipe: &EditRecipe,
     tone_map: &impl Fn(f32) -> f32,
     extra_xs: &[f32],
     supported: &impl Fn(f32) -> bool,
+) -> Vec<CurvePoint> {
+    residual_tone_curve_with_budget(recipe, tone_map, extra_xs, supported, (0.0, RESIDUAL_SLOPE_CAP))
+}
+
+fn residual_tone_curve_with_budget(
+    recipe: &EditRecipe,
+    tone_map: &impl Fn(f32) -> f32,
+    extra_xs: &[f32],
+    supported: &impl Fn(f32) -> bool,
+    slope: (f32, f32),
 ) -> Vec<CurvePoint> {
     debug_assert!(recipe.tone_curve.is_empty(), "fit the residual before setting a curve");
     let lut = render::build_tone_lut(recipe);
@@ -3827,7 +4447,7 @@ fn residual_tone_curve_with_samples(
     if max_dev < 0.015 {
         Vec::new() // the sliders already express the map — keep the recipe clean
     } else {
-        project_curve_slopes(&pts, 0.0, RESIDUAL_SLOPE_CAP)
+        project_curve_slopes(&pts, slope.0, slope.1)
     }
 }
 
@@ -3970,7 +4590,6 @@ fn residual_channel_curve_weighted(
 /// [`VETO_SUPPORT_BIN_MIN`] of the target's chromatic mass. `None` when the
 /// target has fewer than [`VETO_MIN_TARGET_CHROMATIC`] chromatic pixels — no
 /// reliable hue testimony, the veto stands down.
-#[cfg(test)]
 fn foreign_hue_bins(tp: &[[f32; 3]]) -> Option<[bool; 24]> {
     let mut mass = [0.0f32; 24];
     let mut n = 0usize;
@@ -4003,7 +4622,6 @@ fn foreign_hue_bins(tp: &[[f32; 3]]) -> Option<[bool; 24]> {
 
 /// Fraction of the frame visibly tinted at a hue foreign to the target
 /// (chroma ≥ [`VETO_TINT_CHROMA`], hue in a foreign bin).
-#[cfg(test)]
 fn foreign_share(px: &[[f32; 3]], foreign: &[bool; 24]) -> f32 {
     let mut cnt = 0usize;
     for p in px {
@@ -4019,11 +4637,11 @@ fn foreign_share(px: &[[f32; 3]], foreign: &[bool; 24]) -> f32 {
     cnt as f32 / px.len().max(1) as f32
 }
 
-/// Did the cast curves paint a REGION of the frame in hues the target holds
+/// Did a global cast transform paint a REGION of the frame in hues the target holds
 /// nowhere (≥ [`VETO_FAR_BINS`]·15° from all its populated hue mass)?
 /// `cur`/`with_px` render the SAME source, so the share DELTA is exactly the
-/// curves' own work — pre-existing content mismatch cancels out.
-#[cfg(test)]
+/// transform's own work — pre-existing content mismatch cancels out. Full-mode
+/// channel curves and Atmosphere white balance intentionally share this law.
 fn cast_paints_foreign_hues(cur: &[[f32; 3]], with_px: &[[f32; 3]], tp: &[[f32; 3]]) -> bool {
     let Some(foreign) = foreign_hue_bins(tp) else {
         return false;
@@ -4148,14 +4766,56 @@ fn cast_rotates_a_region_weighted(
     // on the analysis raster is per-band HSL's job, and a global cast that
     // performs it drags every same-hue pixel the raster never sampled
     // (golden-sky case, pinned).
+    rehued_share_weighted(cur, with_px, evidence) >= ROT_SHARE
+}
+
+/// WB-specific foreign-hue check. A source-only hue can already be foreign in
+/// the target, so a frame-share delta alone would cancel it out; count only
+/// pixels whose WB render both moves substantially and lands in that foreign
+/// hue population.
+fn wb_moves_pixels_into_foreign_hues(
+    cur: &[[f32; 3]],
+    with_px: &[[f32; 3]],
+    tp: &[[f32; 3]],
+) -> bool {
+    let Some(foreign) = foreign_hue_bins(tp) else { return false };
+    let mut moved = 0usize;
+    for (before, after) in cur.iter().zip(with_px) {
+        let before_chroma = before[0].max(before[1]).max(before[2])
+            - before[0].min(before[1]).min(before[2]);
+        let after_chroma = after[0].max(after[1]).max(after[2])
+            - after[0].min(after[1]).min(after[2]);
+        if before_chroma < ROT_HUE_MEASURABLE_CHROMA || after_chroma < VETO_TINT_CHROMA {
+            continue;
+        }
+        let (h0, _, _) = render::rgb_to_hsl(before[0], before[1], before[2]);
+        let (h1, _, _) = render::rgb_to_hsl(after[0], after[1], after[2]);
+        let mut delta = (h1 - h0).abs() * 360.0;
+        if delta > 180.0 { delta = 360.0 - delta; }
+        let after_bin = ((h1 * 24.0) as usize).min(23);
+        if delta >= ROT_DEG && foreign[after_bin] {
+            moved += 1;
+        }
+    }
+    moved as f32 / cur.len().max(1) as f32 >= VETO_CREATED_SHARE
+}
+
+/// Weighted share of the source population visibly re-hued by a transform.
+/// This is the exact census used by the weighted rotation gate and by the
+/// strength-gated white-balance guard.
+fn rehued_share_weighted(
+    cur: &[[f32; 3]],
+    with_px: &[[f32; 3]],
+    evidence: &EvidenceModel,
+) -> f32 {
     let mut hit = 0.0f32;
     let mut total = 0.0f32;
     for (i, (c, wpx)) in cur.iter().zip(with_px).enumerate() {
         let weight = evidence.source_hue_weights.get(i).copied().unwrap_or(0.0).max(0.0);
         if weight <= 0.0 { continue; }
-        total += weight;
         let cc = c[0].max(c[1]).max(c[2]) - c[0].min(c[1]).min(c[2]);
         let wc = wpx[0].max(wpx[1]).max(wpx[2]) - wpx[0].min(wpx[1]).min(wpx[2]);
+        total += weight;
         if cc >= ROT_HUE_MEASURABLE_CHROMA && wc >= VETO_TINT_CHROMA {
             let h0 = render::rgb_to_hsl(c[0], c[1], c[2]).0 * 360.0;
             let h1 = render::rgb_to_hsl(wpx[0], wpx[1], wpx[2]).0 * 360.0;
@@ -4164,7 +4824,17 @@ fn cast_rotates_a_region_weighted(
             if d >= ROT_DEG { hit += weight; }
         }
     }
-    hit / total.max(1e-6) >= ROT_SHARE
+    hit / total.max(1e-6)
+}
+
+fn rehued_coverage_weighted(evidence: &EvidenceModel) -> f32 {
+    evidence
+        .source_hue_weights
+        .iter()
+        .copied()
+        .map(|weight| weight.max(0.0))
+        .sum::<f32>()
+        / evidence.source_pixels.len().max(1) as f32
 }
 
 pub(crate) fn moves_unsupported_range(
@@ -4933,6 +5603,339 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn fit_budget_scales_monotonically_with_strength() {
+        let low = FitBudget::for_strength(crate::recipe::GradeStrength::new(0.0));
+        let mid = FitBudget::for_strength(crate::recipe::GradeStrength::new(0.65));
+        let high = FitBudget::for_strength(crate::recipe::GradeStrength::new(1.0));
+        assert!(low.ev < mid.ev && mid.ev < high.ev);
+        assert!(low.sat < mid.sat && mid.sat < high.sat);
+        assert!(low.wb_gain.0 > mid.wb_gain.0 && mid.wb_gain.0 > high.wb_gain.0);
+        assert!(low.wb_gain.1 < mid.wb_gain.1 && mid.wb_gain.1 < high.wb_gain.1);
+        assert!(low.cast_ratio < mid.cast_ratio && mid.cast_ratio < high.cast_ratio);
+        assert_eq!(low.vetoes, VetoPolicy::Withhold);
+        assert_eq!(high.vetoes, VetoPolicy::Disclose);
+    }
+
+    #[test]
+    fn fit_budget_default_is_byte_identical_to_pre_f1() {
+        let b = FitBudget::for_strength(crate::recipe::GradeStrength::new(0.65));
+        assert_eq!(b, FitBudget {
+            ev: 1.0,
+            sat: 30.0,
+            wb_gain: (0.80, 1.25),
+            wb_ratio: 1.40,
+            wb_rotation_share: ROT_SHARE,
+            cast_ratio: CAST_ACCEPT_RATIO,
+            slope: (0.5, 1.5),
+            confidence_cap: 0.50,
+            vetoes: VetoPolicy::Withhold,
+        });
+        assert_eq!(60.0 * b.sat / ATMOSPHERE_SAT_LIMIT, 60.0);
+        assert_eq!(b.cast_ratio, CAST_ACCEPT_RATIO);
+        assert_eq!(b.wb_rotation_share, ROT_SHARE);
+        assert_eq!(RESIDUAL_SLOPE_CAP * b.slope.1 / ATMOSPHERE_CURVE_SLOPE_MAX, RESIDUAL_SLOPE_CAP);
+
+        // The legacy provider wrapper and the F1 options path must serialize
+        // the same ordinary Full-mode solve at the pinned default. This is a
+        // small in-repo surrogate for the external calibration/live corpus.
+        let src = DynamicImage::ImageRgb8(RgbImage::from_fn(32, 32, |x, y| {
+            let v = 24 + ((x + y) % 180) as u8;
+            image::Rgb([v, v, v])
+        }));
+        let target = DynamicImage::ImageRgb8(RgbImage::from_fn(32, 32, |x, y| {
+            let v = 34 + ((x + y) % 180) as u8;
+            image::Rgb([v, v, v])
+        }));
+        let legacy = fit_recipe_from_promoted_with_disclosure(
+            &src,
+            &target,
+            &EditRecipe::default(),
+            false,
+            false,
+            None,
+        );
+        let f1 = fit_recipe_from_with(
+            &src,
+            &target,
+            &EditRecipe::default(),
+            FitOptions { strength: crate::recipe::GradeStrength::new(0.65), provider: None },
+        );
+        assert_eq!(
+            serde_json::to_value(&legacy.recipe).unwrap(),
+            serde_json::to_value(&f1.recipe).unwrap(),
+            "the default options path changed an ordinary Full recipe"
+        );
+    }
+
+    #[test]
+    fn wb_default_strength_is_byte_identical_to_head() {
+        let source = hazy_canyon_source();
+        let target = vivid_warm_target();
+        let report = fit_recipe_from_with(
+            &source,
+            &target,
+            &EditRecipe::default(),
+            FitOptions { strength: crate::recipe::GradeStrength::new(0.65), provider: None },
+        );
+        assert_eq!(report.recipe.temperature_k, None);
+        assert_eq!(report.recipe.tint, 0.0);
+        assert_eq!(report.recipe.exposure_ev, -0.28);
+        assert_eq!(report.recipe.saturation, 0.0);
+        assert_eq!(
+            report.recipe.tone_curve,
+            vec![
+                crate::recipe::CurvePoint { input: 0, output: 0 },
+                crate::recipe::CurvePoint { input: 65, output: 61 },
+                crate::recipe::CurvePoint { input: 131, output: 118 },
+                crate::recipe::CurvePoint { input: 179, output: 190 },
+                crate::recipe::CurvePoint { input: 255, output: 255 },
+            ]
+        );
+        assert_eq!(report.recipe.confidence, 0.25);
+
+        let Some(dir) = calibration_corpus() else { return };
+        let source = image::open(dir.join("neutral.jpg")).expect("calibration source");
+        let target = image::open(dir.join("target.jpg")).expect("calibration target");
+        let report = fit_recipe_from_with(
+            &source,
+            &target,
+            &EditRecipe::default(),
+            FitOptions { strength: crate::recipe::GradeStrength::new(0.65), provider: None },
+        );
+        assert_eq!(report.recipe.temperature_k, Some(7100.0));
+        assert_eq!(report.recipe.tint, 22.3);
+        assert_eq!(report.recipe.exposure_ev, -1.0);
+    }
+
+    #[test]
+    fn global_cast_is_measured_when_every_band_is_one_sided_and_consistent() {
+        let source = vec![[0.08, 0.16, 0.82]; 256];
+        let target = vec![[0.82, 0.34, 0.08]; 256];
+        let evidence = evidence_model_for(&source, &target, 16, 16);
+        let cast = evidence.global_cast.expect("coherent one-sided bands are a global cast");
+        assert!(cast.rotation_deg.abs() > 20.0);
+        assert!(cast.chroma_ratio > 0.5);
+    }
+
+    #[test]
+    fn opposed_band_rotation_is_still_withheld() {
+        let mut source = Vec::new();
+        let mut target = Vec::new();
+        for i in 0..256 {
+            let p = if i % 2 == 0 { [0.08, 0.16, 0.82] } else { [0.82, 0.16, 0.08] };
+            let q = if i % 2 == 0 { [0.82, 0.34, 0.08] } else { [0.08, 0.34, 0.82] };
+            source.push(p);
+            target.push(q);
+        }
+        assert!(evidence_model_for(&source, &target, 16, 16).global_cast.is_none());
+    }
+
+    #[test]
+    fn high_strength_discloses_instead_of_withholding() {
+        let px = vec![[0.4, 0.4, 0.4]; 64];
+        let mut evidence = evidence_model(&px, &px);
+        evidence.identifiability = 0.9;
+        let budget = FitBudget::for_strength(crate::recipe::GradeStrength::new(1.0));
+        let report = compose_report(
+            EditRecipe::default(),
+            Measured {
+                err_before: 0.2,
+                err_after: 0.1,
+                joint_after: None,
+                after_px: &px,
+                tp: &px,
+                same_frame: true,
+                mode: FitMode::Atmosphere,
+                divergence: Divergence::matched(),
+                evidence: &evidence,
+                structural_evidence: Some(&evidence),
+                defer_disclosure: false,
+            },
+            SolveFacts {
+                budget: Some(budget),
+                strength: Some(1.0),
+                veto_luma: Some("luma bins 06-08".into()),
+                veto_hue: None,
+                wb_clamped: None,
+                wb_search_bound: None,
+                wb_rotation_coverage: None,
+                wb_rotation_disclosure: None,
+                wb_foreign_hue_withheld: false,
+                wb_rotation_withheld: false,
+                sat_pegged: None,
+                cast: CastOutcome::default(),
+                cast_admitted_by_strength: None,
+                evidence_refused: true,
+                sat_fitted: None,
+                regressed: None,
+                detail: (0.0, 0.0),
+                detail_withheld: false,
+                robust: None,
+                paired: false,
+                vouched_bands: None,
+            },
+        );
+        assert!(report.recipe.confidence <= 0.35);
+        assert!(report.notes.iter().any(|n| n.key == crate::rationale::keys::FIT_NOTE_VETO_DISCLOSED));
+    }
+
+    #[test]
+    fn frame_regression_law_holds_at_strength_one() {
+        let (src, tgt) = structural_permutation_pair();
+        let report = fit_recipe_from_with(
+            &src,
+            &tgt,
+            &EditRecipe::default(),
+            FitOptions { strength: crate::recipe::GradeStrength::new(1.0), provider: None },
+        );
+        assert!(report.err_after <= report.err_before + 1e-4);
+    }
+
+    #[test]
+    fn cast_ratio_is_pinned_to_head_at_default() {
+        assert_eq!(
+            FitBudget::for_strength(crate::recipe::GradeStrength::default()).cast_ratio,
+            CAST_ACCEPT_RATIO
+        );
+    }
+
+    #[test]
+    fn wb_rotation_budget_opens_linearly_with_strength() {
+        let at_zero = FitBudget::for_strength(crate::recipe::GradeStrength::new(0.0));
+        let at_default = FitBudget::for_strength(crate::recipe::GradeStrength::new(0.65));
+        let at_mid = FitBudget::for_strength(crate::recipe::GradeStrength::new(0.85));
+        let at_full = FitBudget::for_strength(crate::recipe::GradeStrength::new(1.0));
+        assert_eq!(at_zero.wb_rotation_share, ROT_SHARE);
+        assert_eq!(at_default.wb_rotation_share, ROT_SHARE);
+        assert!((at_mid.wb_rotation_share - 0.5928571).abs() <= 1e-3);
+        assert_eq!(at_full.wb_rotation_share, 1.0);
+    }
+
+    #[test]
+    fn synthetic_full_region_wb_rotation_exceeds_seventy_percent_budget() {
+        let cur = vec![[0.10f32, 0.25, 0.82]; 1000];
+        let with = vec![[0.82f32, 0.32, 0.10]; 1000];
+        let evidence = evidence_model(&cur, &cur);
+        let rotated_share = rehued_share_weighted(&cur, &with, &evidence);
+        assert!(rotated_share > 0.99, "synthetic chromatic region is fully re-hued");
+        assert!(rotated_share > FitBudget::for_strength(crate::recipe::GradeStrength::new(0.70)).wb_rotation_share);
+    }
+
+    #[test]
+    fn rescoring_round_trips_fractional_strength_and_budget() {
+        let prior = vec![crate::rationale::Note::new(
+            crate::rationale::keys::FIT_NOTE_STRENGTH,
+            vec![("pct", "64".into()), ("s", "0.6440".into())],
+        )];
+        let strength = carried_strength_from_notes(&prior);
+        assert_eq!(strength.get(), 0.644);
+        assert_eq!(FitBudget::for_strength(strength), FitBudget::for_strength(crate::recipe::GradeStrength::new(0.644)));
+        let src = hazy_canyon_source();
+        let tgt = vivid_warm_target();
+        let rescored = rescore_report(&src, &tgt, &EditRecipe::default(), 0.2, &prior);
+        let carried_s = rescored
+            .notes
+            .iter()
+            .find(|note| note.key == crate::rationale::keys::FIT_NOTE_STRENGTH)
+            .and_then(|note| note.args.iter().find(|(key, _)| *key == "s"))
+            .map(|(_, value)| value.as_str());
+        assert_eq!(carried_s, Some("0.6440"));
+    }
+
+    /// F1 review: a rescoring after the deep step must RE-DERIVE the
+    /// high-strength veto disclosure and keep its cap. Before this pin the
+    /// rescored report dropped `veto_luma`/`veto_hue` (and, in Full mode, the
+    /// budget itself), so the same unsupported movement came back uncapped.
+    #[test]
+    fn rescoring_re_derives_the_high_strength_veto_disclosure_and_its_cap() {
+        let src = hazy_canyon_source();
+        let tgt = vivid_warm_target();
+        let full = FitOptions { strength: crate::recipe::GradeStrength::new(1.0), provider: None };
+        let solved = fit_recipe_from_with(&src, &tgt, &EditRecipe::default(), full);
+        let disclosed = |r: &FitReport| {
+            r.notes.iter().any(|n| n.key == crate::rationale::keys::FIT_NOTE_VETO_DISCLOSED)
+        };
+        assert!(disclosed(&solved), "fixture must disclose unsupported movement at strength 1.0");
+        let rescored = rescore_report(&src, &tgt, &solved.recipe, solved.err_before, &solved.notes);
+        assert!(disclosed(&rescored), "the rescoring must re-derive the disclosure for the same recipe");
+        let cap = FitBudget::for_strength(crate::recipe::GradeStrength::new(1.0)).confidence_cap;
+        assert!(
+            rescored.recipe.confidence <= cap + 1e-6,
+            "rescored confidence {} above the strength cap {cap}",
+            rescored.recipe.confidence
+        );
+        // Default control: no strength note carried → withhold policy → no
+        // disclosure, exactly the pre-F1 rescoring.
+        let shipped = fit_recipe_from_with(&src, &tgt, &EditRecipe::default(), FitOptions::default());
+        let rescored_default =
+            rescore_report(&src, &tgt, &shipped.recipe, shipped.err_before, &shipped.notes);
+        assert!(!disclosed(&rescored_default), "the shipped default must not gain a disclosure");
+    }
+
+    #[test]
+    fn cast_admission_disclosure_tracks_strength_budget() {
+        assert!(cast_admitted_by_strength(
+            2.4,
+            FitBudget::for_strength(crate::recipe::GradeStrength::new(0.85)).cast_ratio,
+            0.85,
+        ));
+        assert!(!cast_admitted_by_strength(
+            2.4,
+            FitBudget::for_strength(crate::recipe::GradeStrength::new(0.65)).cast_ratio,
+            0.65,
+        ));
+        let mut rationale = String::new();
+        let mut notes = Vec::new();
+        crate::rationale::push_note(
+            &mut rationale,
+            &mut notes,
+            crate::rationale::Note::new(
+                crate::rationale::keys::FIT_NOTE_CAST_ADMITTED_BY_STRENGTH,
+                vec![("ratio", "2.400".into()), ("budget", "2.593".into())],
+            ),
+        );
+        assert!(rationale.contains("measured ratio 2.400"));
+    }
+
+    #[test]
+    fn early_exit_atmosphere_report_keeps_the_strength_cap() {
+        let src = DynamicImage::ImageRgb8(RgbImage::from_fn(32, 32, |x, y| {
+            let v = 32 + ((x + y) % 160) as u8;
+            image::Rgb([v, v, v])
+        }));
+        let report = fit_recipe_from_promoted_with_disclosure_opts(
+            &src,
+            &src,
+            &EditRecipe::default(),
+            true,
+            false,
+            FitOptions { strength: crate::recipe::GradeStrength::new(1.0), provider: None },
+        );
+        assert!(report.recipe.confidence <= 0.35);
+        assert!(report.notes.iter().any(|n| n.key == crate::rationale::keys::FIT_NOTE_STRENGTH));
+    }
+
+    #[test]
+    fn confidence_tracks_measured_error_under_the_strength_cap() {
+        let src = hazy_canyon_source();
+        let tgt = vivid_warm_target();
+        for s in [0.65, 0.85, 1.0] {
+            let report = fit_recipe_from_with(
+                &src,
+                &tgt,
+                &EditRecipe::default(),
+                FitOptions { strength: crate::recipe::GradeStrength::new(s), provider: None },
+            );
+            let cap = FitBudget::for_strength(crate::recipe::GradeStrength::new(s)).confidence_cap;
+            assert!(report.recipe.confidence <= cap + 1e-6, "s={s} confidence {} cap {cap}", report.recipe.confidence);
+            let ladder = confidence_from_look_err(report.err_after);
+            if ladder < cap - 1e-5 {
+                assert!(report.recipe.confidence <= ladder + 1e-5, "s={s} confidence {} ladder {} cap {} err {}", report.recipe.confidence, ladder, cap, report.err_after);
+            }
+        }
+    }
     use image::RgbImage;
 
     /// The knot-support gate itself, pinned at the unit level: a knot with
@@ -5618,14 +6621,14 @@ mod tests {
         };
         // Full-mode pair (a frame against itself): the gate must not consult.
         let (src, _) = structural_permutation_pair();
-        let full = fit_recipe_with(&src, &src, Some(&failing));
+        let full = fit_recipe_with(&src, &src, FitOptions { strength: crate::recipe::GradeStrength::default(), provider: Some(&failing) });
         assert_eq!(calls.get(), 0, "a Full-mode fit must never pay for a correspondence run");
         assert_eq!(full.mode, FitMode::Full);
         // Divergent pair: exactly one consultation; the failure is disclosed
         // with its reason and the atmosphere fit stands unchanged.
         let (src, tgt) = structural_permutation_pair();
         let plain = fit_recipe(&src, &tgt);
-        let report = fit_recipe_with(&src, &tgt, Some(&failing));
+        let report = fit_recipe_with(&src, &tgt, FitOptions { strength: crate::recipe::GradeStrength::default(), provider: Some(&failing) });
         assert_eq!(calls.get(), 1, "one divergent fit, one consultation");
         assert_eq!(report.mode, FitMode::Atmosphere);
         assert!(
@@ -5653,7 +6656,7 @@ mod tests {
         };
         let (src, tgt) = structural_permutation_pair();
         let plain = fit_recipe(&src, &tgt);
-        let report = fit_recipe_with(&src, &tgt, Some(&ok));
+        let report = fit_recipe_with(&src, &tgt, FitOptions { strength: crate::recipe::GradeStrength::default(), provider: Some(&ok) });
         assert_eq!(report.mode, FitMode::Atmosphere, "mode selection never reads the field");
         assert!(
             report
@@ -6662,6 +7665,277 @@ mod tests {
             }
         }
         DynamicImage::ImageRgb8(img)
+    }
+
+    fn free_atmosphere_wb_for_pair(
+        src: &DynamicImage,
+        target: &DynamicImage,
+    ) -> (f32, f32, f32) {
+        let (s_img, t_img) = analysis_pair(src, target);
+        let base = EditRecipe::default();
+        let sp = pixels_of(&render::develop_preview(&s_img, &base));
+        let tp = pixels_of(&t_img);
+        let structural = evidence_model_for(&sp, &tp, s_img.width(), s_img.height());
+        let evidence = structural.structure_blind(&tp);
+        let mut ratio = [1.0f32; 3];
+        for ch in 0..3 {
+            let sc = weighted_cdf(&sp, &evidence.source_weights, |p| {
+                render::srgb_to_linear(p[ch])
+            });
+            let tc = weighted_cdf(&tp, &evidence.target_weights, |p| {
+                render::srgb_to_linear(p[ch])
+            });
+            ratio[ch] = quantile(&tc, 0.5).max(1e-5) / quantile(&sc, 0.5).max(1e-5);
+        }
+        let common = (ratio[0] * ratio[1] * ratio[2]).max(1e-12).powf(1.0 / 3.0);
+        let wanted = ratio.map(|value| value / common);
+        let anchor = base.as_shot_k.unwrap_or(5500.0);
+        let (lo, hi) = (WB_SEARCH_K.0.ln(), WB_SEARCH_K.1.ln());
+        let tint = round1(((1.0 - wanted[1]) / 0.20 * 100.0).clamp(-100.0, 100.0));
+        let mut best = (anchor, f32::INFINITY);
+        for i in 0..=400 {
+            let k = (lo + (hi - lo) * i as f32 / 400.0).exp();
+            let gains = render::wb_gains(anchor, k, tint);
+            let err = gains
+                .iter()
+                .zip(wanted)
+                .map(|(&gain, want)| {
+                    (gain.max(1e-5) / want.max(1e-5)).log2().powi(2)
+                })
+                .sum::<f32>();
+            if err < best.1 {
+                best = (k, err);
+            }
+        }
+        (anchor, (best.0 / 50.0).round() * 50.0, tint)
+    }
+
+    fn mean_hue_in_rows(img: &DynamicImage, rows: std::ops::Range<u32>) -> f64 {
+        let rgb = img.to_rgb8();
+        let (mut sin, mut cos, mut count) = (0.0f64, 0.0f64, 0.0f64);
+        for y in rows {
+            for x in 0..rgb.width() {
+                let p = rgb.get_pixel(x, y);
+                let (r, g, b) =
+                    (p[0] as f32 / 255.0, p[1] as f32 / 255.0, p[2] as f32 / 255.0);
+                if r.max(g).max(b) - r.min(g).min(b) < 0.03 {
+                    continue;
+                }
+                let hue = render::rgb_to_hsl(r, g, b).0 as f64 * std::f64::consts::TAU;
+                sin += hue.sin();
+                cos += hue.cos();
+                count += 1.0;
+            }
+        }
+        assert!(count > 0.0, "the audited band must contain chromatic pixels");
+        sin.atan2(cos).to_degrees().rem_euclid(360.0)
+    }
+
+    fn hue_distance(a: f64, b: f64) -> f64 {
+        (a - b + 540.0).rem_euclid(360.0) - 180.0
+    }
+
+    #[test]
+    fn wb_clamp_stays_on_the_manifold_and_never_invents_tint() {
+        let src = hazy_canyon_source();
+        let target = vivid_warm_target();
+        let (anchor, free_k, free_tint) = free_atmosphere_wb_for_pair(&src, &target);
+        let strength = crate::recipe::GradeStrength::new(0.85);
+        let budget = FitBudget::for_strength(strength);
+        let (clamped_k, clamped_tint, clamped, before, after, lambda) =
+            budgeted_wb(anchor, free_k, free_tint, budget);
+        if clamped {
+            assert!(before > budget.wb_ratio && after <= budget.wb_ratio);
+        } else {
+            assert_eq!(lambda, 1.0);
+            assert!(wb_gains_fit_budget(render::wb_gains(anchor, free_k, free_tint), budget));
+        }
+        assert_eq!(clamped_tint, round1(free_tint * lambda));
+        assert!(clamped_tint.abs() <= free_tint.abs());
+        let expected_k = ((anchor.ln() + (free_k.ln() - anchor.ln()) * lambda).exp()
+            / 50.0)
+            .round()
+            * 50.0;
+        assert_eq!(clamped_k, expected_k);
+        assert!(wb_gains_fit_budget(
+            render::wb_gains(anchor, clamped_k, clamped_tint),
+            budget
+        ));
+
+        let report = fit_recipe_from_with(
+            &src,
+            &target,
+            &EditRecipe::default(),
+            FitOptions { strength, provider: None },
+        );
+        assert!(report.recipe.tint.abs() <= free_tint.abs());
+        assert!(report.recipe.temperature_k.is_some());
+        assert_eq!(report.recipe.temperature_k, Some(clamped_k));
+        assert_eq!(report.recipe.tint, clamped_tint);
+    }
+
+    #[test]
+    fn wb_lambda_shrinks_at_high_strength() {
+        let (width, height) = (192u32, 128u32);
+        let pair_with_blue_band = |band: [f32; 3]| {
+            let source = DynamicImage::ImageRgb8(RgbImage::from_fn(
+                width,
+                height,
+                |x, y| {
+                    let level = 0.22 + 0.60 * x as f32 / (width - 1) as f32;
+                    let p = if y >= 96 { band } else { [level, level, level] };
+                    image::Rgb(p.map(|value| (value * 255.0).round() as u8))
+                },
+            ));
+            let target = DynamicImage::ImageRgb8(RgbImage::from_fn(
+                width,
+                height,
+                |x, y| {
+                    let level = 0.22 + 0.60 * x as f32 / (width - 1) as f32;
+                    let p = if y >= 96 {
+                        band
+                    } else {
+                        [(1.15 * level + 0.10).min(1.0), 0.60 * level, 0.28 * level]
+                    };
+                    image::Rgb(p.map(|value| (value * 255.0).round() as u8))
+                },
+            ));
+            (source, target)
+        };
+
+        let (probe_source, probe_target) = pair_with_blue_band([0.62, 0.65, 0.65]);
+        let (anchor, probe_k, probe_tint) =
+            free_atmosphere_wb_for_pair(&probe_source, &probe_target);
+        let (probe_chosen_k, probe_chosen_tint, _, _, _, _) = budgeted_wb(
+            anchor,
+            probe_k,
+            probe_tint,
+            FitBudget::for_strength(crate::recipe::GradeStrength::new(0.85)),
+        );
+        let gains = render::wb_gains(anchor, probe_chosen_k, probe_chosen_tint);
+        let mut warm_bins = Vec::new();
+        for x in 0..width {
+            let level = 0.22 + 0.60 * x as f32 / (width - 1) as f32;
+            let warm = [(1.15 * level + 0.10).min(1.0), 0.60 * level, 0.28 * level];
+            let (hue, _, _) = render::rgb_to_hsl(warm[0], warm[1], warm[2]);
+            let bin = ((hue * 24.0) as usize).min(23);
+            if !warm_bins.contains(&bin) {
+                warm_bins.push(bin);
+            }
+        }
+        let mut blue_band = None;
+        'red: for red in 40..=70 {
+            for green in 40..=70 {
+                for blue in 40..=70 {
+                    let pixel = [red as f32 / 100.0, green as f32 / 100.0, blue as f32 / 100.0];
+                    let chroma = pixel.iter().copied().fold(0.0f32, f32::max)
+                        - pixel.iter().copied().fold(f32::INFINITY, f32::min);
+                    if chroma < VETO_SUPPORT_CHROMA {
+                        continue;
+                    }
+                    let (before_hue, _, _) =
+                        render::rgb_to_hsl(pixel[0], pixel[1], pixel[2]);
+                    let before_degrees = before_hue as f64 * 360.0;
+                    if !(170.0..=250.0).contains(&before_degrees) {
+                        continue;
+                    }
+                    let moved = [
+                        render::linear_to_srgb(render::srgb_to_linear(pixel[0]) * gains[0]),
+                        render::linear_to_srgb(render::srgb_to_linear(pixel[1]) * gains[1]),
+                        render::linear_to_srgb(render::srgb_to_linear(pixel[2]) * gains[2]),
+                    ];
+                    let moved_chroma = moved.iter().copied().fold(0.0f32, f32::max)
+                        - moved.iter().copied().fold(f32::INFINITY, f32::min);
+                    let (after_hue, _, _) = render::rgb_to_hsl(moved[0], moved[1], moved[2]);
+                    let after_degrees = after_hue as f64 * 360.0;
+                    let before_bin = ((before_hue * 24.0) as usize).min(23);
+                    let after_bin = ((after_hue * 24.0) as usize).min(23);
+                    let bin_distance = |a: usize, b: usize| {
+                        let forward = (a as isize - b as isize).rem_euclid(24) as usize;
+                        forward.min(24 - forward)
+                    };
+                    let after_is_foreign = bin_distance(after_bin, before_bin) > VETO_FAR_BINS
+                        && warm_bins
+                            .iter()
+                            .all(|&warm_bin| bin_distance(after_bin, warm_bin) > VETO_FAR_BINS);
+                    if moved_chroma >= 0.06
+                        && hue_distance(before_degrees, after_degrees).abs() >= 50.0
+                        && after_is_foreign
+                    {
+                        blue_band = Some(pixel);
+                        break 'red;
+                    }
+                }
+            }
+        }
+        let blue_band = blue_band.expect("a retained blue band exposes the warm WB damage");
+        let (source, target) = pair_with_blue_band(blue_band);
+        let (anchor, free_k, free_tint) = free_atmosphere_wb_for_pair(&source, &target);
+        let (chosen_k, chosen_tint, _, _, _, _) = budgeted_wb(
+            anchor,
+            free_k,
+            free_tint,
+            FitBudget::for_strength(crate::recipe::GradeStrength::new(0.85)),
+        );
+        let before = render::develop_preview(&source, &EditRecipe::default());
+        let demand = EditRecipe {
+            temperature_k: Some(chosen_k),
+            tint: chosen_tint,
+            ..EditRecipe::default()
+        };
+        let after = render::develop_preview(&source, &demand);
+        let before_hue = mean_hue_in_rows(&before, 96..128);
+        let after_hue = mean_hue_in_rows(&after, 96..128);
+        let foreign = foreign_hue_bins(&pixels_of(&target)).expect("target hue census");
+        let foreign_before = foreign_share(&pixels_of(&before), &foreign);
+        let foreign_after = foreign_share(&pixels_of(&after), &foreign);
+        assert!(
+            hue_distance(before_hue, after_hue).abs() >= 45.0,
+            "fixture premise: fitted {free_k:.0}/{free_tint:+.1} -> {chosen_k:.0}/{chosen_tint:+.1} rotated the retained blue band only {before_hue:.1} -> {after_hue:.1}"
+        );
+        assert!(cast_paints_foreign_hues(
+            &pixels_of(&before),
+            &pixels_of(&after),
+            &pixels_of(&target)
+        ), "foreign-hue premise failed: fitted {free_k:.0}/{free_tint:+.1} -> {chosen_k:.0}/{chosen_tint:+.1}; band {before_hue:.1} -> {after_hue:.1}, target warm {}, shares {foreign_before:.3} -> {foreign_after:.3}",
+            mean_hue_in_rows(&target, 0..96));
+
+        let report = fit_recipe_from_promoted_with_disclosure_opts(
+            &source,
+            &target,
+            &EditRecipe::default(),
+            true,
+            false,
+            FitOptions { strength: crate::recipe::GradeStrength::new(0.85), provider: None },
+        );
+        assert_eq!(report.mode, FitMode::Atmosphere);
+        assert!(report.recipe.temperature_k.is_some());
+        assert!(report.notes.iter().any(|note| {
+            note.key == crate::rationale::keys::FIT_NOTE_WB_CLAMPED
+        }));
+        let default_report = fit_recipe_from_promoted(&source, &target, &EditRecipe::default(), true);
+        assert_eq!(default_report.recipe.temperature_k, None);
+        assert_eq!(default_report.recipe.tint, 0.0);
+        assert!(!default_report.notes.iter().any(|note| {
+            note.key == crate::rationale::keys::FIT_NOTE_WB_WITHHELD_FOREIGN_HUE
+        }));
+    }
+
+    #[test]
+    fn wb_is_withheld_when_every_lambda_paints_a_foreign_hue() {
+        let before = vec![[0.08f32, 0.16, 0.82]; 1000];
+        let after = vec![[0.92f32, 0.18, 0.58]; 1000];
+        let target = vec![[0.82f32, 0.48, 0.16]; 1000];
+        assert!(wb_moves_pixels_into_foreign_hues(&before, &after, &target));
+        let mut rationale = String::new();
+        let mut notes = Vec::new();
+        crate::rationale::push_note(
+            &mut rationale,
+            &mut notes,
+            crate::rationale::Note::plain(crate::rationale::keys::FIT_NOTE_WB_WITHHELD_FOREIGN_HUE),
+        );
+        assert_eq!(notes[0].key, crate::rationale::keys::FIT_NOTE_WB_WITHHELD_FOREIGN_HUE);
+        assert!(rationale.contains("White balance withheld"));
     }
 
     #[test]
@@ -7987,8 +9261,19 @@ mod tests {
                     defer_disclosure: false,
                 },
                 SolveFacts {
+                    budget: None,
+                    strength: None,
+                    veto_luma: None,
+                    veto_hue: None,
+                    wb_clamped: None,
+                    wb_search_bound: None,
+                    wb_rotation_coverage: None,
+                    wb_rotation_disclosure: None,
+                    wb_foreign_hue_withheld: false,
+                    wb_rotation_withheld: false,
                     sat_pegged: None,
                     cast: CastOutcome::default(),
+                    cast_admitted_by_strength: None,
                     evidence_refused: false,
                     sat_fitted: None,
                     regressed: None,

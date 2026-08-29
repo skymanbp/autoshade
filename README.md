@@ -75,6 +75,14 @@ tools are separate, opt-in paths and are labelled as such.
   diverged before deciding how much to trust it, then fits global, zoned, and
   luminance-range corrections behind evidence gates. The recovered recipe
   applies deterministically to the original full-resolution RAW.
+  The global Atmosphere honesty budget follows the same `--strength` axis.
+  The shipped 0.65 default is byte-identical to the calibrated path (WB
+  included) except that a direction-consistent global cast is now measured at
+  every strength; below the default the budget narrows toward the zero-strength
+  column; above it, WB may shrink along its fitted log-K/linear-tint manifold.
+  The foreign-hue veto remains active and the weighted rotation budget opens
+  from 0.05 at 0.65 to 1.0 at full strength (about 0.593 at 0.85). A WB that
+  cannot pass those gates is withheld and typed in the rationale.
 - **Feature 7 — Generative and pixel tools, opt-in and labelled.** Reimagine
   (gpt-image-2) creates a lower-resolution target from a prompt; retouch, heal,
   and SCUNet denoise change pixels directly. These are the only paths that can
@@ -113,9 +121,11 @@ never disagree.
 At develop time the photo retrieves the **4 most similar past shots** with the
 hybrid distance `Σ wᵢ(qᵢ−eᵢ)² + W_EMB·(1−cos(q,e))` (`W_EMB = 2.0`, retained
 after a 147-exemplar calibration that scanned 0…8). Their settings, curve habit
-and colour families reach the advisor as a *soft reference*; a capped
-`blend_toward` pull (≤ 0.6) moves the proposal toward your historical means
-without copying one, and the rationale names the shots it leaned on. It is
+and colour families reach the advisor as a *soft reference*; the `style_pull`
+(0.18 at the shipped Style 0.3, full at Style 1.0) moves the proposal toward your historical means
+without copying one, and the rationale names the shots it leaned on. Strength
+above 0.70 with Style below 0.85 no longer receives the old committed-tier
+FLOOR wording because that floor belongs to the Style axis. It is
 sized like a retrieval system — 5,000 exemplars / 96 MiB, both caps derived
 from the measured 12.41 bytes per serialised embedding element. From the other
 side, `match --style-prompt` extracts a reusable text style brief from a
@@ -149,6 +159,13 @@ capped at 0.50 — read on a *structure-blind* ruler that keeps the one-sided,
 sparse and minimum-share population vetoes but stops asking replaced content
 to survive. A sky that gpt-image-2 invented can still hand the original RAW its
 overall tone and colour without the fit chasing clouds that were never there.
+The Strength axis now governs that Atmosphere honesty budget, widening it only
+when the user asks and disclosing unsupported movement at high strength. The
+shipped 0.65 path remains unchanged, including an as-shot result for an
+out-of-budget WB. Above default, a WB outside the gain budget is scalar-shrunk
+on the renderer's Kelvin/tint manifold; its pre/post renders pass the
+foreign-hue veto and a weighted rotation budget that opens linearly from 0.05
+at 0.65 through about 0.593 at 0.85 to 1.0 at full strength.
 
 ### 4. Diffusion features find where the content moved
 
@@ -345,7 +362,7 @@ estimate. Sources are the pinned claims in
 
 | What | Measured | Where |
 |---|---|---|
-| Automated test battery | 1034 library / 15 CLI / 145 GUI / 2+2 contract tests; `check_docs` re-derives the pinned release claims | [Tech stack](#tech-stack-algorithms-and-design-philosophy) |
+| Automated test battery | 1055 library / 16 CLI / 146 GUI / 2+2 contract tests; `check_docs` re-derives the pinned release claims | [Tech stack](#tech-stack-algorithms-and-design-philosophy) |
 | RAW coverage | 24 extensions, 725 camera bodies; nine-camera format zoo 9/9 at the last release gate | [Supported formats](#supported-formats) |
 | Lightroom Texture parity | 45 of 45 period/depth anchors within ±0.02 | [Develop pipeline](#develop-pipeline-and-tone-model) |
 | Radial mask closure | 41 of 41 measured vectors within ≤1 px | [Lens correction](#lens-correction-and-lightroom-mask-frame-laws) |
@@ -617,7 +634,7 @@ versions, and a deleted-version registry; SCUNet success requires the typed
 `sidecar_wrote` contract. A 1771 MB reference probe sets the 1800 MB per-photo
 budget, while the 4 GiB RAW gate bounds admission. The [`build`
 workflow](.github/workflows/build.yml) covers default and GUI feature sets on
-Ubuntu and macOS. The current battery is **1034 library (1023 pass + 11 `#[ignore]`d forensic probes) / 15 CLI / 145 GUI / 2+2 contract** tests; the
+Ubuntu and macOS. The current battery is **1055 library (1044 pass + 11 `#[ignore]`d forensic probes) / 16 CLI / 146 GUI / 2+2 contract** tests; the
 [`scripts/check_docs.py`](scripts/check_docs.py) gate re-derives pinned release
 claims. Model weights are not stored in this repository.
 

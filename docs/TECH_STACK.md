@@ -80,6 +80,31 @@ coercing either to RGB would invent a colour model.
 
 ## Develop pipeline and tone model
 
+### Reverse-fit freedom budget
+
+The global reverse-fit derives one `FitBudget` from `GradeStrength` and
+interpolates linearly between these pinned points:
+
+| Strength | EV | Saturation | WB gain | WB ratio | WB rotation share | Full cast ratio | Curve slope | Confidence cap | Veto |
+|---|---:|---:|---|---:|---:|---:|---|---:|---|
+| 0.00 | +/-0.5 | +/-15 | 0.90..1.12 | 1.20 | 0.05 | 1.50 | 0.7..1.3 | 0.50 | withhold |
+| 0.65 | +/-1.0 | +/-30 | 0.80..1.25 | 1.40 | 0.05 | 2.00 | 0.5..1.5 | 0.50 | withhold |
+| 0.85 | interpolated | interpolated | interpolated | interpolated | 0.593 | interpolated | interpolated | interpolated | disclose |
+| 1.00 | +/-2.5 | +/-60 | 0.50..2.00 | 3.00 | 1.00 | 3.00 | 0.25..3.0 | 0.35 | disclose |
+
+The default-strength exception is deliberate: at or below 0.65 an out-of-budget
+WB request remains as-shot, byte-identical to the pre-F1 path. Above default,
+the request shrinks toward as-shot along the fitted move (log-space Kelvin,
+linear tint), rounds exactly once as a legal renderer WB, and is disclosed when
+clamped. Its pre/post renders pass the foreign-hue veto and the weighted
+rotation allowance; a failure returns the WB to as-shot with a typed note. WB
+gain ratio, WB rotation share, and Full cast look-error ratio are separate
+quantities; the latter retains its historical 2.0 default. A
+direction-consistent all-one-sided cast is measured from population
+chromaticity. The confidence value remains the measured look-error ladder,
+only capped by the strength budget; it is not increased to reward higher
+strength.
+
 ### Method
 
 The shared renderer stores pixels as deterministic `f32` RGB and explicitly
@@ -983,8 +1008,8 @@ than the pre-call state; model weights remain outside the repository.
 - The 61 MP RAW probe measured `151 MB` peak commit for decode,
   `1771 MB` for calibration/render preparation, and `1766 MB` for the
   full-resolution render tail; the combined process peak remained `1771 MB`.
-- The release battery is **1034 library (1023 pass + 11 `#[ignore]`d forensic
-  probes) / 15 CLI / 145 GUI / 2+2 contract** tests. Environment-gated real
+- The release battery is **1055 library (1044 pass + 11 `#[ignore]`d forensic
+  probes) / 16 CLI / 146 GUI / 2+2 contract** tests. Environment-gated real
   Lightroom, brush-table, and RAW-zoo suites are additional and are not
   smuggled into the ordinary count.
 - The build workflow checks default and GUI feature sets on Ubuntu and macOS;
