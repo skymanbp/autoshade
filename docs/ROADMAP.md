@@ -195,6 +195,23 @@
 
 ## 当前状态（已完成，勿重做）
 
+- **📐 步15 线性落差翻转 `LINEAR_FALLOFF = Eased` 已提交 `817fa13`（分支 `linear-falloff`，2026-08-28，Codex 实现（中转、worktree `target/wt-linear`）→主审亲核三处亲改；合并 main 于 `9547f36`）**：
+  **测量（主审第一方，用户手工在 Lightroom 拉同几何渐变导出 16 位 TIFF `probe-lightroom.tif`，行噪声 0）**：`scripts/linear_falloff_probe.py --compare` Autoshop Clamped 两端转折 0/3 行 vs Lightroom 80/80 行；`--fit`（本批新增：手柄行与剖面联合拟合，残差含两侧平台，软剖面无法靠缩短跨度伪装成线性）Lightroom 对 smoothstep rms **0.0045**（sin 0.0044 同族）vs 线性 **0.0169**，手柄回收 697/1678；Clamped 渲染回收线性 0.0003（700/1599）、Eased 渲染回收 smoothstep 0.0002（700/1599）＝两把尺互证。**首版报给用户的 0.029 vs 0.049 是 1%/99% 端点自检下的数字——端点自检在软剖面上会切掉跨度（smoothstep 在 t=0.082/0.918 才过 2%），差距被低估 2×，文档改钉自由端点数字。** 用户 19:05 裁定翻 Eased（v1.1 渲染硬变更，仅线性蒙版；径向/位图逐字节不动；`RELEASE_NOTES` 段落已备于 `target/linear-falloff/flip-report.md`，发版批再入文件）。
+  代码：`src/render.rs:47` 一行翻常量，`linear_coverage` 体/手柄输运/MaskFrame/XMP schema 零改动；六处斜坡派生钉值按同一法则重钉（t=1/3,2/3 → 66/189；t=0.025/0.525/0.975 → 0/137/255；顶行 1/8 → 0.04296875；dehaze 边界列 31 t=1/64 → 7.3e-4 低于 0.001 工作地板故并入不变平台）；`radial_linear_bitmap_masks_match_the_clamped_baseline` 拆三：径向/位图各自逐字节同 Clamped 基线、`linear_mask_renders_the_eased_ramp`（eased 逐字节 + 内部与 Clamped 必异 + 四端点相同）。
+  **主审亲改三处**：①ARCHITECTURE 计数句被 Codex 改史（B3 句头换成 flip、尾巴留 B3）→ 还原为追加式 1034→1041（+7，`56dd690`）→1044（+3）；②`mask_coverage_reports_the_engine_weight` 注释被改成断句 → 重写并说明 Eased 下行 0 不再区分两种采样约定、行 10/19 接任；③端到端证伪 `shipped_linear_ramp_is_eased_end_to_end` Codex 版用 8 位预览+「平台 vs 斜坡平均斜率」当跳变（任何剖面都非零，Codex 变异 (c) 只靠中点比值抓住，报告却称「检查真实一阶差分」）→ 重写在 f32 路径：色调通道 `p·(1−w)+t·w` 使平灰上覆盖度可精确回收 `(base−row)/(base−full_plateau)`，逐行钉**字面** 3t²−2t³（容差 2e-3，预言不引用 `linear_coverage`）、两手柄内 10 行斜率 ≤0.1×中段、中点 1.5×线性；主审变异 M-a（常量回 Clamped）/M-b（Eased 臂返回 t）/M-c（返回 t²）全红，M-c 现由端到端公式钉 :14725 抓住。
+  门（worktree 内 `CARGO_TARGET_DIR`）：默认 1033+11i / 15 / 2+2，GUI 1033+11i / 15 / 145 / 2+2，clippy 0+0；集差对 `target/b3-main/gates-final.txt` +10/−0（56dd690 的 7 之中 5 名存活 + 本批 5 新名；改名去 `shipped_linear_falloff_is_clamped`、`radial_linear_bitmap_masks_match_the_clamped_baseline`）；check_docs 23P/0F/4S、--gates 26P/0F/1S；i18n 0；字体 847/847。
+  文档：README What-is-new 条、ARCHITECTURE §掩模、TECH_STACK、USER_MANUAL 线性渐变句；数字全部来自 `--fit` 转录。Codex 首批遗留仓库根 `target-report/report.md` 移至 `target/linear-falloff/first-batch/`。
+  暂存扫描：`_?DSC[0-9]{4,5}` 0、密钥 0、用户目录路径 0。
+  合并复核（main+linear-falloff 合并树，target/merge-lin）：1067=1056 pass+11 ignored/16/146/2+2 双特性、集差对 cleanup-17 合并 43d3bcb 转录 +10/−0 逐名（render::tests 十条）、clippy 0+0、i18n 0、字体 847/847、check_docs --gates 26P/0F/1S；三处文档计数冲突按追加式解，render.rs 自动合并且 LINEAR_FALLOFF = Eased 保留。
+- **📐 步15 线性落差 C¹ 测量线已提交 `56dd690`（分支 `linear-falloff`，2026-08-28，Codex 实现（中转、worktree `target/wt-linear`）→主审亲核；合并 main 于 `9547f36`）**：
+  单一 `linear_coverage(t, profile)` 取代线性臂三处内联夹紧斜坡（`mask_weight`×1、`mask_weight_metric`×2）；手柄输运/MaskFrame 法则/径向与位图采样/XMP schema 零变化；
+  `LINEAR_FALLOFF = Clamped` 出货（渲染逐字节同 HEAD），`Eased`＝Hermite smoothstep 3t²−2t³ 休眠——翻常量（`src/render.rs:47`）须等 Lightroom 探针测量，属 v1.1 渲染硬变更义务，本批不动、RELEASE_NOTES 不动。
+  测量夹具：`scripts/linear_falloff_probe.py`（自足、16 位、`--compare a.tif b.tif`）+ `probe_fixture_round_trips_through_xmp` 在 `AUTOSHOP_GENERATE_LINEAR_PROBE=1` 下经项目自己的 XMP 写手生成
+  `target/linear-falloff/probe/`（0.18 灰 3000×2000、单竖向渐变 zero y=0.80 / full y=0.35、−2.00 EV）；Autoshop「前」值：斜坡 2.5174e-4/行、两端跳变 2.5174e-4、full 端转折 0 行（硬角）、zero 端 3 行；`操作步骤.md` 已交用户，回「好了」后主审跑 `--compare`。
+  测试 +7/−0（按名对 `target/b3-main/gates-final.txt`）：clamped 位级同 HEAD、eased 两端 C¹、两剖面手柄处一致、单一定义源断言、出货常量钉 Clamped、径向/线性/位图对 clamped 基线逐字节、探针 XMP 往返。
+  **主审揪一缺口**：手工变异 M-L2（删 `[0,1]` 夹紧）首绿——测试用 `as u16` 饱和转换比较，负值与 >1 覆盖都饱和成与 head 斜坡相同的 0/65535 → 改 f32 `to_bits` 精确相等后红（exit 101）；M-L1（Clamped 臂返回 t²）红 ×2；Codex 四变异红。
+  门（worktree 内 `CARGO_TARGET_DIR`）：默认 1030+11i / 15 / 2+2，GUI 145，clippy 0+0，check_docs 23P；首跑 1 红＝`denoise::tests::a_stalled_sidecar_is_killed_and_its_claim_is_released` 的 `elapsed < 5 s` 挂钟断言在四路并行构建下超时（单跑 3× 0.25 s），登记为收口线观察项（计时断言应量机制而非挂钟）。
+  暂存扫描：`_?DSC[0-9]{4,5}` 0、密钥 0、用户目录路径 0。
 - **🧹 步18 收口小批（计划编号按 cc-memory 现行 18 步：15 线性落差 / 16 改名 / 17 展示图 / 18 收口；本台账更早条目里的「步 15 展示图」「步 16 收口」是插入线性与改名两步前的旧编号）（侧车错误披露泄漏 / xmp.rs 注释漂移 / 发布电池 fs 抖动）已提交 `9097319`（分支 `cleanup-17`，2026-08-28，Codex 实现（中转、worktree `target/wt-cleanup`）→主审亲核；合并 main 于 `43d3bcb`）**：
   A. `rationale::error_line(&anyhow::Error)` 单一助手：取顶层错误首行、绝对路径（盘符/Unix）缩为基名且用户目录段（`Users/<x>`、`home/<x>`）整体折成 `[path]`、错误链带退出码时追加 `; exit N`、≤160 字符；`("e", …)` 类披露 14 处全部改道（fit / fit_zoned / pipeline / retouch / advisor::heuristic：correspondence、zoned、revision/verify、style、judge、heuristic、heal），stderr/日志仍保留全文；具名测试 `sidecar_failure_disclosure_has_no_traceback_or_home_path` 覆盖助手 + 12 个 rationale 键渲染；**主审改进**：首行为 `Traceback (most recent call last):` 时披露改取最后一行（异常消息，如 `ValueError: boom`）而非笼统 "operation failed"，并补证伪断言（原分支无测试覆盖，手工变异 M-17-B 首绿→补后红）。
   B. `src/xmp.rs` 注释普查数字对齐钉住的普查行（177 sidecars / 42 Aggregate / 105 Mask/Image / 398 Paint / 1081 Mask/* / 40 Gesture）：218→105、83→40、135/218→65/105（＝105−40，Gesture 是 Mask/Image 唯一可选子元素），ARCHITECTURE 两句同步；主审第一方复核当前库 `D:/Photography/Raw`：174 文件 / 104 Image / 64 自闭合 / 40 Gesture——**登记观察项**：钉住普查相对当前库已漂移 3 文件，v1.1 发版设 `AUTOSHOP_CENSUS_ROOT` 时刷新钉值。
@@ -940,6 +957,14 @@
 
 ## v1.1 发版义务清单（进行中）
 
+- **线性渐变落差剖面硬变更（`817fa13`）**：release notes 必须说明 v1.1 起线性渐变
+  蒙版的覆盖度剖面由夹紧线性斜坡改为 C¹ Hermite smoothstep（3t²−2t³），两手柄
+  处一阶导为零；含线性蒙版的旧配方重渲像素会变（手柄间过渡变软，手柄与两侧
+  平台逐字节不变），径向/位图蒙版逐字节同 v1.0.0（各自具名测试钉住）；XMP
+  schema、手柄输运、MaskFrame 法则零变化。依据：Lightroom 手工渐变探针两端转折
+  80/80 行 vs Clamped 0/3，`scripts/linear_falloff_probe.py --fit` 自由端点拟合
+  smoothstep rms 0.0045 vs 线性 0.0169（用户裁定 2026-08-28）。可粘贴的中英段落
+  在 `target/linear-falloff/flip-report.md`「Ready-to-paste v1.1 release note」。
 - **强度轴支配反推预算（步11 `302efb1`）**：release notes 必须说明 v1.1 起 `match --strength` /
   GUI 面板 Strength 决定反推诚实预算：0.65 默认逐字节同 v1.0.x（超预算 WB 仍 as-shot），
   唯一默认行为变化＝方向一致的全局色偏在每档强度都被测量（置信/拨盘可变，rationale 有
