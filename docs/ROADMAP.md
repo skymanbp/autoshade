@@ -195,6 +195,13 @@
 
 ## 当前状态（已完成，勿重做）
 
+- **🗺 步12 多区域语义分区已提交 `a2173c9`（分支 `multizone`，2026-08-29，Codex 实现（中转、worktree `target/wt-multizone`，impl→cont→fix 三会话）→主审只读诊断根因（无条件 thumbnail 上采样）→Codex 修复批第二轮 5h50m 不收敛且反复 `Get-Process cargo,python,autoshop | Stop-Process` 杀全机进程（02:15 四臂/03:44 双电池 exit 127 真凶）→按「两轮不收敛亲自定位」令 03:47 停会话、主审第一方收口；42 代理复审 wf_121078c9 20 确认/16 驳回逐项亲核；合并 main 于 `32b0fe4`）**：
+  多类 OneFormer 侧车（`--multi --regions N`，manifest 64 KiB 上限先于解析、平面单一文件名+拒绝链接、平面与 `.tmp` 临时件清扫）→ `semantic::resolve_regions`（两侧过 `MIN_ZONE_SHARE`、置信高→面积小→类号小 优先分配重叠像素，最多 4 区 disjoint）→ 共享 `attach_one_zone` 逐区独立 Full/Atmosphere，置信取最差已接受区（`worst_region_residual`）；`--regions` ≤2（CLI 默认 2；GUI「Up to four semantic regions」默认关、Prefs `zoned_four_regions`）原样走历史天空/地面路由。
+  仲裁：四区试跑 vs 同对种子化双区（`fit_recipe_zoned_inner_seeded(.., Some(sky_pair))`，恰两次推理）在**同一把证据尺**上比（`frame_err_under(.., &two.evidence)`——两次全局解可落不同模式，各自 `err_after` 不可比），不优于（含平局 `>=`）即整体退回双区报告 + 一条 `REGION_FRAME_REFUSED{multi,two,regions}`，败方栅格 `release_unselected_rasters` 释放；typed 交接 `SEMANTIC_REGIONS_UNAVAILABLE{e}`（多类层失败：历史路由已跑，不再谎称亮度范围回退）/ `SEMANTIC_REGIONS_NONE{n}`（无区域过门：种子化路由自己判天空分区、删锚点、跑序列器，不再渲染裸 `{s}` 占位符）/ `REGION_BOUNDARY_REFUSED{label,why,…}`（不伪造 after/k）；平面精修按天空/地面同款 MASK_REFINEMENT 披露；manifest `mean_confidence`=质量加权 α（Σp²/Σp）、`share`=均值（原两者同值把覆盖优先级反转），`--self-test` 直接调产品 `rank_candidates`/`plane_stats`。
+  根因归并：两座桥共用 `segmentation_input()`（>2048 才 thumbnail；`image::thumbnail` 无 ratio>1 守卫，多类桥原无条件缩略把 1600 px 语料上采到 2048 → 天空平面≠单类蒙版 → 「种子化双区」≠未种子化双区，语料测试连红四轮的最上游）；Rust 层替身侧车贯穿两桥的同一性证伪 `multi_and_single_class_inputs_are_prepared_identically`（300×200 逐字节同、2400×1600→2048×1365 两桥同）。
+  主审亲核：六臂拨盘+置信对 662b688 基线 IDENTICAL，rationale 仅多出 typed `ZONE_ALREADY_MATCHED` 句 （neutral-on +3 / neutral-off +2 / raw-on +2 / raw-off +1 / p36 ×2 逐字节同；九臂 EXIT 全 0，活体与电池并发故 wall 不作比较基线）；r4 三臂 neutral-r4 平局 0.092652=0.092652 拒绝（试跑 2 sky ATTACHED / 13 earth ALREADY_MATCHED / 16 mountain ALREADY_MATCHED）、p36-r4 平局 0.023529 拒绝（1 building / 26 sea 被区域边界门 REGION_BOUNDARY_REFUSED、2 sky DROPPED）→两者返回双区结果+一句 typed 拒绝、置信不变（0.2527/0.6621）；raw-r4 保留多区：region-2-sky Atmosphere（D=1.294，EV −0.27）+ region-13-earth Full（D=0.533，EV +0.23，残差 0.047→0.001）、16 mountain 已匹配、置信 0.2730 同双区；三臂 store 无孤儿栅格（refs==disk）；B3 基线 store 已不在，蒙版 sha 比对以拨盘+置信+rationale 句级差替代。门 1058=1047+11i/15/145/2+2 双特性、集差逐名 +24/−0 无状态变化（semantic.rs 11 + segment.rs 6 + fit_zoned.rs 7）、clippy 0+0、i18n 0、字体 848/848（SC 子集重建补「优/侧」等）、check_docs 23P/0F、--gates 26P/0F/1S；变异 M-A/B/C/E2/E3/F/G 红（M-B 反向锚点撞两处→手工修复后全量重跑；M-E 原夹具双方零附着不可观测→释放规则提函数直证）。
+  登记＝仲裁一把尺与拒绝分支释放调用点缺确定性夹具（需模式分歧对）；Codex 任务书须明令禁止杀非己进程；Codex 变异台账 M3 引用已删测试、M6 引用够不到该臂的测试（已由新测试取代）。下步＝风格检索扩容。
+  合并复核（main+multizone 合并树，`target/merge-mz`，冲突六文件手解：README/ARCHITECTURE/TECH_STACK 钉数取合并实测；`src/main.rs` `Command::Match` 同时携 `regions` 与 F1 `strength`；`src/bin/gui/actions.rs` 走 `fit_recipe_zoned_with_regions(.., FitOptions{strength, provider}, zoned_regions)`；`src/fit_zoned.rs` 多区路由/种子化入口全部改携 `fit::FitOptions` 而非裸 provider，升格站点改用 `fit_recipe_from_promoted_with_disclosure_opts`；semantic.rs 测试改 `FitOptions::default()`）：1091=1080 pass+11 ignored/16/146/2+2 双特性、集差对线性落差合并 `6323f4c` 转录（`target/merge-lin/gates-combined.txt`）逐名 +24/−0、clippy 0+0、i18n 0、字体 848/848、check_docs 23P/0F、--gates 26P/0F/1S；九臂（合并 CLI，显式侧车路径）：六默认臂拨盘+置信对 F1 期 `target/f1-review/arms`（`302efb1` 树；其后 cleanup-17/线性落差不触反推路径）逐字节同、rationale 仅 +3/+2/+0/+0/+0/+0 句 typed `ZONE_ALREADY_MATCHED`（neutral-on land+r0c0+r1c0 / raw-on land+r1c0 / p36 两臂零差）；三 r4 臂 neutral-r4 / raw-r4 / p36-r4 拨盘+置信+rationale 与分支 `mz-live-final` 逐句同、store refs==disk 1/2/3 无孤儿。主审揪合并臂夹具一坑：合并 CLI 建在 `target/merge-mz/cargo-cli/release/`（比 `target/release` 深一层），`bundled_helper` 三级祖先搜不到 `python/`，首轮「on」臂全部静默走亮度范围回退（rationale 「Zoned sky fit unavailable」）——非代码回归，显式 `AUTOSHOP_SEGMENT_SCRIPT`/`AUTOSHOP_CORRESPOND_SCRIPT` 重跑六臂后比对；教训＝活体臂 exe 深度必须与 `target/release` 同级或显式给侧车路径。
 - **📐 步15 线性落差翻转 `LINEAR_FALLOFF = Eased` 已提交 `817fa13`（分支 `linear-falloff`，2026-08-28，Codex 实现（中转、worktree `target/wt-linear`）→主审亲核三处亲改；合并 main 于 `9547f36`）**：
   **测量（主审第一方，用户手工在 Lightroom 拉同几何渐变导出 16 位 TIFF `probe-lightroom.tif`，行噪声 0）**：`scripts/linear_falloff_probe.py --compare` Autoshop Clamped 两端转折 0/3 行 vs Lightroom 80/80 行；`--fit`（本批新增：手柄行与剖面联合拟合，残差含两侧平台，软剖面无法靠缩短跨度伪装成线性）Lightroom 对 smoothstep rms **0.0045**（sin 0.0044 同族）vs 线性 **0.0169**，手柄回收 697/1678；Clamped 渲染回收线性 0.0003（700/1599）、Eased 渲染回收 smoothstep 0.0002（700/1599）＝两把尺互证。**首版报给用户的 0.029 vs 0.049 是 1%/99% 端点自检下的数字——端点自检在软剖面上会切掉跨度（smoothstep 在 t=0.082/0.918 才过 2%），差距被低估 2×，文档改钉自由端点数字。** 用户 19:05 裁定翻 Eased（v1.1 渲染硬变更，仅线性蒙版；径向/位图逐字节不动；`RELEASE_NOTES` 段落已备于 `target/linear-falloff/flip-report.md`，发版批再入文件）。
   代码：`src/render.rs:47` 一行翻常量，`linear_coverage` 体/手柄输运/MaskFrame/XMP schema 零改动；六处斜坡派生钉值按同一法则重钉（t=1/3,2/3 → 66/189；t=0.025/0.525/0.975 → 0/137/255；顶行 1/8 → 0.04296875；dehaze 边界列 31 t=1/64 → 7.3e-4 低于 0.001 工作地板故并入不变平台）；`radial_linear_bitmap_masks_match_the_clamped_baseline` 拆三：径向/位图各自逐字节同 Clamped 基线、`linear_mask_renders_the_eased_ramp`（eased 逐字节 + 内部与 Clamped 必异 + 四端点相同）。
@@ -972,6 +979,17 @@
   + 置信封顶（0.414@0.85、0.35@1.0）。Style≥0.85 参考块改「TARGET style」措辞、
   `style_pull` 取代 0.6 帽（0.3 出厂值 0.18 不变）；strength>0.70 且 Style<0.85 不再收到旧
   committed 层 FLOOR 措辞。深层路径的 rescoring 现在重推导高强度披露并保留封顶。
+- **多区域语义分区（步12 `a2173c9`，合并 `32b0fe4`）**：release notes 必须说明 v1.1 起 `match --zoned --regions 2..4`
+  与 GUI「Up to four semantic regions」复选框（Prefs 新键 `zoned_four_regions`，旧 prefs 经
+  `#[serde(default)]` 解为 false）开启最多四个 disjoint ADE20K 类区域（每区独立选 Full/Atmosphere，
+  置信取最差已接受区域）；默认仍是历史天空/地面双区路由，拨盘+置信对 v1.0.x 逐字节同，唯一
+  默认行为变化＝共享 `attach_one_zone` 对「已匹配不需修正」的区域新增 typed `ZONE_ALREADY_MATCHED`
+  rationale 句（仅 rationale）。四区试跑与种子化双区结果在**同一把证据尺**上仲裁，不优于（含平局）
+  即整体退回双区结果并附 `REGION_FRAME_REFUSED{multi,two,regions}`；多类层不可用 / 无区域过支持
+  下限时 typed 交接 `SEMANTIC_REGIONS_UNAVAILABLE{e}` / `SEMANTIC_REGIONS_NONE{n}`；区域边界门拒绝以
+  `REGION_BOUNDARY_REFUSED{label,why,before,max,transitions}` 如实披露（不伪造 after/k）。每次多类
+  fit 恰两次 OneFormer 推理（源/目标各一，双区种子化不再推理）；manifest 64 KiB 上限、平面路径单一
+  文件名且拒绝链接；位图仍引擎专属，recipe schema / XMP 零变化。
 - **自动范围行为**：release notes 必须说明 zoned 入口始终先做全局 fit；
   语义分割成功时保持既有天空/地面位图结果，禁用或不可用时才自动尝试亮度
   范围，无可接受段时保留全局结果。本批没有新 CLI/GUI 范围开关，也不产出
