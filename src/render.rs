@@ -39,6 +39,30 @@ use crate::recipe::{Crop, EditRecipe, MaskGeometry, RangeMask};
 const LUT_N: usize = 4096;
 const MASK_RASTER_BUDGET_BYTES: usize = 256 * 1024 * 1024;
 
+/// The linear-gradient profile selected by the Lightroom falloff measurement.
+///
+/// `Eased` is shipped after the Lightroom probe measured C1-softened handles.
+const LINEAR_FALLOFF: LinearFalloff = LinearFalloff::Eased;
+
+#[allow(dead_code)] // Clamped remains pinned by the historical-ramp test.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LinearFalloff {
+    /// The historical piecewise-linear ramp.
+    Clamped,
+    /// C1 Hermite smoothstep, with zero slope at both handles.
+    Eased,
+}
+
+/// Reshape the existing handle-axis parameter without changing handle
+/// transport, coordinate frames, or geometry metrics.
+fn linear_coverage(t: f32, profile: LinearFalloff) -> f32 {
+    let t = t.clamp(0.0, 1.0);
+    match profile {
+        LinearFalloff::Clamped => t,
+        LinearFalloff::Eased => t * t * (3.0 - 2.0 * t),
+    }
+}
+
 /// Shared, parameter-free transfer-curve LUTs: `[0]` = sRGB→linear, `[1]` =
 /// linear→sRGB. Built once per process (OnceLock). Dehaze and vignette used to
 /// evaluate both `powf` curves for every pixel — the identical 6-powf/px
@@ -3545,13 +3569,16 @@ fn mask_weight_metric(
             }
             let (w, h) = dims;
             if vx == 0.0 || vy == 0.0 || w == h || !(w > 0.0 && h > 0.0) {
-                return (((nx - zero_x) * vx + (ny - zero_y) * vy) / len2).clamp(0.0, 1.0);
+                return linear_coverage(
+                    ((nx - zero_x) * vx + (ny - zero_y) * vy) / len2,
+                    LINEAR_FALLOFF,
+                );
             }
             let dx = (nx - zero_x) * w;
             let dy = (ny - zero_y) * h;
             let px = vx * w;
             let py = vy * h;
-            ((dx * px + dy * py) / (px * px + py * py)).clamp(0.0, 1.0)
+            linear_coverage((dx * px + dy * py) / (px * px + py * py), LINEAR_FALLOFF)
         }
         _ => mask_weight(g, nx, ny, bmp),
     }
@@ -3566,7 +3593,10 @@ fn mask_weight(g: &MaskGeometry, nx: f32, ny: f32, bmp: Option<&image::GrayImage
             if len2 < 1e-9 {
                 return 1.0;
             }
-            (((nx - zero_x) * vx + (ny - zero_y) * vy) / len2).clamp(0.0, 1.0)
+            linear_coverage(
+                ((nx - zero_x) * vx + (ny - zero_y) * vy) / len2,
+                LINEAR_FALLOFF,
+            )
         }
         // `roundness` is carried but deliberately NOT rendered — pure ellipse,
         // see `MaskGeometry::Radial` in recipe.rs. Its DOMAIN is known
@@ -9188,8 +9218,8 @@ mod tests {
         // Zero end on row 0's centre (ny = 0.125), full end on row 3's centre
         // (ny = 0.875). vy = 0.75, len2 = 0.5625, so the weights are
         // (ny − 0.125)·0.75/0.5625 = 0, 1/3, 2/3, 1 — every operand dyadic, and
-        // the last one EXACTLY 1. Bytes: 0, round(85.0) = 85, round(170.0) =
-        // 170, 255.
+        // the last one EXACTLY 1. Eased bytes: 0, round(66.0) = 66,
+        // round(189.0) = 189, 255.
         let ramp = LocalAdjustment {
             mask: MaskGeometry::Linear {
                 zero_x: 0.5, zero_y: 0.125, full_x: 0.5, full_y: 0.875,
@@ -9198,7 +9228,7 @@ mod tests {
         };
         let lcov = mask_coverage(&ramp, &flat(4), MaskFrame::AsRendered);
         let column: Vec<u8> = (0..4).map(|y| lcov.get_pixel(2, y)[0]).collect();
-        assert_eq!(column, vec![0, 85, 170, 255], "the ramp must span its ends exactly");
+        assert_eq!(column, vec![0, 66, 189, 255], "the eased ramp must span its ends exactly");
 
         // --- (c) BITMAP -----------------------------------------------------
         // A 2-wide raster [0, 255] read by a 4-wide frame. Texel centres sit at
@@ -9726,14 +9756,16 @@ mod tests {
         // The four rows sample at their CENTRES, ny = (y + 0.5)/4, so the
         // weights are exactly 1/8, 3/8, 5/8, 7/8 — the top row is no longer
         // AT the gradient's zero end, it is an eighth of the way past it, and
-        // it darkens accordingly (R29 C2's half-pixel move, visible here).
-        // Pinned EXACTLY rather than bounded: a degenerate linear (zero ==
-        // full) renders weight 1 everywhere, so `amount = 0.125` puts the
-        // identical 0.125 through `weight_at` and every stage below it.
+        // it darkens according to the shipped eased profile (R29 C2's
+        // half-pixel move, visible here). Pinned EXACTLY rather than bounded:
+        // a degenerate linear (zero == full) renders weight 1 everywhere, so
+        // this comparison carries the identical eased weight through every
+        // stage below it.
+        let top_weight = linear_coverage(0.125, LinearFalloff::Eased);
         let eighth = EditRecipe {
             masks: vec![LocalAdjustment {
                 mask: MaskGeometry::Linear { zero_x: 0.5, zero_y: 0.5, full_x: 0.5, full_y: 0.5 },
-                amount: 0.125,
+                amount: top_weight,
                 exposure_ev: -4.0,
                 ..Default::default()
             }],
@@ -9741,7 +9773,7 @@ mod tests {
         };
         let mut eighth_px = vec![[0.6_f32, 0.6, 0.6]; 1];
         apply_develop_anon(&mut eighth_px, 1, 1, &eighth);
-        assert_eq!(data[0], eighth_px[0], "top row carries exactly its 1/8 coverage");
+        assert_eq!(data[0], eighth_px[0], "top row carries exactly its eased coverage");
         assert!(data[0][0] < 0.6, "…which is a real darkening: {}", data[0][0]);
         assert!(data[3][0] < 0.5, "bottom should darken: {}", data[3][0]);
         // The interior rows carry the actual gradient — the endpoint checks
@@ -12783,8 +12815,9 @@ mod tests {
     #[test]
     fn mask_components_compose_add_subtract_intersect() {
         use crate::recipe::{LocalAdjustment, MaskCombine, MaskComponent, MaskGeometry};
-        // Two orthogonal linear gradients give exact hand-computable weights:
-        // base = nx (horizontal ramp), component = ny (vertical ramp). The
+        // Two orthogonal linear gradients give exact hand-computable weights
+        // after the shipped profile: base = Eased(nx) (horizontal ramp),
+        // component = Eased(ny) (vertical ramp). The
         // algebra is the MaskCombine doc contract — union without a seam,
         // subtract carves, intersect restricts.
         let with = |mode| LocalAdjustment {
@@ -12803,7 +12836,10 @@ mod tests {
         for i in 0..=4 {
             for j in 0..=4 {
                 let (nx, ny) = (i as f32 / 4.0, j as f32 / 4.0);
-                let (b, c) = (nx, ny);
+                let (b, c) = (
+                    linear_coverage(nx, LinearFalloff::Eased),
+                    linear_coverage(ny, LinearFalloff::Eased),
+                );
                 for (mode, want) in [
                     (MaskCombine::Add, 1.0 - (1.0 - b) * (1.0 - c)),
                     (MaskCombine::Subtract, b * (1.0 - c)),
@@ -12822,7 +12858,10 @@ mod tests {
             mask: MaskGeometry::Linear { zero_x: 0.0, zero_y: 0.5, full_x: 1.0, full_y: 0.5 },
             ..Default::default()
         };
-        assert_eq!(combined_mask_weight(&plain, 0.3, 0.9, None, &[], None, (1.0, 1.0)), 0.3);
+        assert_eq!(
+            combined_mask_weight(&plain, 0.3, 0.9, None, &[], None, (1.0, 1.0)),
+            linear_coverage(0.3, LinearFalloff::Eased)
+        );
         // Components fold IN LIST ORDER: subtract-then-add differs from
         // add-then-subtract, so a reorder is a real semantic change.
         let vertical = MaskGeometry::Linear { zero_x: 0.5, zero_y: 0.0, full_x: 0.5, full_y: 1.0 };
@@ -12836,8 +12875,10 @@ mod tests {
         };
         let (nx, ny) = (0.5, 0.75);
         let want = {
-            let w = nx * (1.0 - ny);
-            1.0 - (1.0 - w) * (1.0 - ny)
+            let b = linear_coverage(nx, LinearFalloff::Eased);
+            let c = linear_coverage(ny, LinearFalloff::Eased);
+            let w = b * (1.0 - c);
+            1.0 - (1.0 - w) * (1.0 - c)
         };
         let got = combined_mask_weight(&sub_then_add, nx, ny, None, &[None, None], None, (1.0, 1.0));
         assert!((got - want).abs() < 1e-6, "sequential fold: got {got}, want {want}");
@@ -14404,15 +14445,18 @@ mod tests {
         };
         let cov = mask_coverage(&grad, &grey, MaskFrame::AsRendered);
         // Rows sample at their CENTRES, ny = (y + 0.5)/20, so this 0→1
-        // gradient reads 0.025 / 0.525 / 0.975 at rows 0 / 10 / 19 and the map
-        // quantises to `round(w · 255)` = 6 / 134 / 249. Pinned EXACTLY, both
-        // because the arithmetic is exact and because these three numbers are
-        // what separate the conventions: `y/h` gives 0.0 / 0.5 / 0.95 → 0 /
-        // 128 / 242, and the old `assert_eq!(…, 0)` on row 0 was the whole
-        // reason this test caught R29 C2 rather than sleeping through it.
-        assert_eq!(cov.get_pixel(10, 0)[0], 6, "zero end = half a row in, not on the edge");
-        assert_eq!(cov.get_pixel(10, 19)[0], 249, "full end = half a row short of it");
-        assert_eq!(cov.get_pixel(10, 10)[0], 134, "midpoint sits half a row past centre");
+        // gradient reads t = 0.025 / 0.525 / 0.975 at rows 0 / 10 / 19; the
+        // shipped Eased profile maps those to 0.0018 / 0.5375 / 0.9982 and the
+        // map quantises to `round(w · 255)` = 0 / 137 / 255 (Clamped gave
+        // 6 / 134 / 249). Pinned EXACTLY, both because the arithmetic is exact
+        // and because rows 10 and 19 still separate the conventions: `y/h`
+        // gives t = 0.0 / 0.5 / 0.95 → 0 / 128 / 253. Under Clamped the old
+        // `assert_eq!(…, 0)` on row 0 was the whole reason this test caught
+        // R29 C2 rather than sleeping through it; under Eased row 0 rounds to
+        // 0 either way, so rows 10 and 19 carry that duty now.
+        assert_eq!(cov.get_pixel(10, 0)[0], 0, "eased zero end is flat at the handle");
+        assert_eq!(cov.get_pixel(10, 19)[0], 255, "eased full end reaches the plateau");
+        assert_eq!(cov.get_pixel(10, 10)[0], 137, "eased midpoint sits past the linear centre");
 
         // (b) amount halves the whole map; inversion flips its direction.
         let half = LocalAdjustment { amount: 0.5, ..grad.clone() };
@@ -14457,7 +14501,7 @@ mod tests {
         for (nx, ny) in [(0.30, 0.25), (0.55, 0.50), (0.75, 0.65)] {
             let dx = (nx - zx) * w;
             let dy = (ny - zy) * h;
-            let want = ((dx * px + dy * py) / den).clamp(0.0, 1.0);
+            let want = linear_coverage((dx * px + dy * py) / den, LinearFalloff::Eased);
             let got = mask_weight_in(&g, nx, ny, None, None, (w, h));
             assert!((got - want).abs() < 1e-6, "({nx},{ny}): got {got}, want {want}");
             let normalized = mask_weight(&g, nx, ny, None);
@@ -14488,6 +14532,242 @@ mod tests {
             *px = image::Luma([(weight * 255.0).round() as u8]);
         }
         assert_eq!(got.as_raw(), want.as_raw(), "axis-aligned coverage changed byte-for-byte");
+    }
+
+    #[test]
+    fn linear_coverage_clamped_is_byte_identical_to_head() {
+        // Keep the pre-refactor ramp expression in the test itself. This is a
+        // code snapshot, rather than a file fixture that could be regenerated
+        // with the new implementation by mistake.
+        for i in 0..=4096u32 {
+            let t = (i as f32 - 512.0) / 3072.0;
+            let head = t.clamp(0.0, 1.0);
+            let got = linear_coverage(t, LinearFalloff::Clamped);
+            // Exact f32 identity on purpose: the 16-bit form of this check
+            // went green under hand mutation M-L2 (2026-08-28, the [0,1] clamp
+            // removed) because a saturating integer cast turns negative and
+            // above-one coverage into the same 0 / 65535 the head ramp gives.
+            assert_eq!(got.to_bits(), head.to_bits(), "clamped coverage changed at t={t}");
+        }
+    }
+
+    #[test]
+    fn linear_coverage_eased_is_c1_at_both_ends() {
+        let n = 2000usize;
+        let values: Vec<u16> = (0..n)
+            .map(|i| {
+                let t = i as f32 / (n - 1) as f32;
+                (linear_coverage(t, LinearFalloff::Eased) * 65535.0).round() as u16
+            })
+            .collect();
+        let slopes: Vec<i32> = values.windows(2).map(|p| p[1] as i32 - p[0] as i32).collect();
+        let through: f32 = slopes[400..1600].iter().map(|&v| v as f32).sum::<f32>() / 1200.0;
+        assert!(through > 1.0, "the 16-bit ramp must have a measurable slope");
+        let turnover = |part: &[i32]| {
+            part.iter()
+                .take(80)
+                .take_while(|&&s| (s as f32 - through).abs() >= 0.25 * through)
+                .count()
+        };
+        let max_edge_jump = |part: &[i32]| {
+            part.windows(2).take(80).map(|p| (p[1] - p[0]).abs()).max().unwrap_or(0)
+        };
+        assert!(max_edge_jump(&slopes) <= 2, "eased full-end first difference is discontinuous");
+        assert!(max_edge_jump(&slopes[slopes.len() - 81..]) <= 2, "eased zero-end first difference is discontinuous");
+        assert!(turnover(&slopes) > 2, "eased full end turns over in one row");
+        assert!(turnover(&slopes[slopes.len() - 80..]) > 2, "eased zero end turns over in one row");
+        assert_eq!(linear_coverage(0.0, LinearFalloff::Eased), 0.0);
+        assert_eq!(linear_coverage(1.0, LinearFalloff::Eased), 1.0);
+    }
+
+    #[test]
+    fn linear_coverage_profiles_agree_at_the_handles() {
+        for &t in &[0.0, 1.0] {
+            assert_eq!(linear_coverage(t, LinearFalloff::Clamped), linear_coverage(t, LinearFalloff::Eased));
+        }
+    }
+
+    #[test]
+    fn shipped_linear_falloff_is_eased() {
+        assert_eq!(LINEAR_FALLOFF, LinearFalloff::Eased);
+    }
+
+    #[test]
+    fn linear_ramp_has_a_single_definition() {
+        let src = include_str!("render.rs");
+        let metric = &src[src.find("fn mask_weight_metric").unwrap()..src.find("/// Mask coverage").unwrap()];
+        let weight = &src[src.find("fn mask_weight(g:").unwrap()..src.find("fn combined_mask_weight").unwrap()];
+        let metric_linear = &metric[metric.find("MaskGeometry::Linear").unwrap()..metric.find("_ => mask_weight").unwrap()];
+        let weight_linear = &weight[weight.find("MaskGeometry::Linear").unwrap()..weight.find("// `roundness`").unwrap()];
+        assert_eq!(metric_linear.matches("linear_coverage(").count(), 2, "metric has a second ramp definition");
+        assert_eq!(weight_linear.matches("linear_coverage(").count(), 1, "weight has a second ramp definition");
+        assert!(!metric_linear.contains(".clamp(0.0, 1.0)"), "metric keeps an inline linear clamp");
+        assert!(!weight_linear.contains(".clamp(0.0, 1.0)"), "weight keeps an inline linear clamp");
+    }
+
+    #[test]
+    fn radial_mask_renders_byte_identical_to_the_clamped_baseline() {
+        let (w, h) = (48u32, 32u32);
+        let src = DynamicImage::ImageRgb8(RgbImage::from_fn(w, h, |x, y| {
+            image::Rgb([(x * 3 + y * 2) as u8, (x * 5) as u8, (y * 7) as u8])
+        }));
+        let mask = crate::recipe::LocalAdjustment {
+            mask: MaskGeometry::Radial { top: 0.1, left: 0.1, bottom: 0.9, right: 0.9, feather: 0.4, roundness: 0.0, flipped: false, angle: 0.0, midpoint: 50.0, mask_version: 2 },
+            ..Default::default()
+        };
+        let got = mask_coverage(&mask, &src, MaskFrame::AsRendered);
+        let want = image::GrayImage::from_fn(w, h, |x, y| {
+            let nx = (x as f32 + MASK_SAMPLE_CENTRE) / w as f32;
+            let ny = (y as f32 + MASK_SAMPLE_CENTRE) / h as f32;
+            let mut weight = mask_weight(&mask.mask, nx, ny, None);
+            if mask.inverted {
+                weight = 1.0 - weight;
+            }
+            image::Luma([(weight * 255.0).round() as u8])
+        });
+        assert_eq!(got.as_raw(), want.as_raw(), "mask coverage changed from the clamped baseline");
+    }
+
+    #[test]
+    fn bitmap_mask_renders_byte_identical_to_the_clamped_baseline() {
+        let (w, h) = (48u32, 32u32);
+        let src = DynamicImage::ImageRgb8(RgbImage::from_fn(w, h, |x, y| {
+            image::Rgb([(x * 3 + y * 2) as u8, (x * 5) as u8, (y * 7) as u8])
+        }));
+        let raster_path = std::env::temp_dir().join(format!("autoshop-linear-baseline-{}.png", std::process::id()));
+        let raster = image::GrayImage::from_fn(7, 5, |x, y| image::Luma([((x + y) * 20) as u8]));
+        raster.save(&raster_path).unwrap();
+        let mask = crate::recipe::LocalAdjustment {
+            mask: MaskGeometry::Bitmap { path: raster_path.to_string_lossy().into_owned() },
+            ..Default::default()
+        };
+        let got = mask_coverage(&mask, &src, MaskFrame::AsRendered);
+        let bmp = load_mask_bitmap(&mask.mask, &crate::diag::dropped());
+        let want = image::GrayImage::from_fn(w, h, |x, y| {
+            let nx = (x as f32 + MASK_SAMPLE_CENTRE) / w as f32;
+            let ny = (y as f32 + MASK_SAMPLE_CENTRE) / h as f32;
+            let mut weight = mask_weight(&mask.mask, nx, ny, bmp.as_deref());
+            if mask.inverted {
+                weight = 1.0 - weight;
+            }
+            image::Luma([(weight * 255.0).round() as u8])
+        });
+        assert_eq!(got.as_raw(), want.as_raw(), "mask coverage changed from the clamped baseline");
+        let _ = std::fs::remove_file(raster_path);
+    }
+
+    #[test]
+    fn linear_mask_renders_the_eased_ramp() {
+        let (w, h) = (48u32, 32u32);
+        let src = DynamicImage::ImageRgb8(RgbImage::from_fn(w, h, |x, y| {
+            image::Rgb([(x * 3 + y * 2) as u8, (x * 5) as u8, (y * 7) as u8])
+        }));
+        let mask = crate::recipe::LocalAdjustment {
+            mask: MaskGeometry::Linear { zero_x: 0.5, zero_y: 1.0, full_x: 0.5, full_y: 0.0 },
+            ..Default::default()
+        };
+        let got = mask_coverage(&mask, &src, MaskFrame::AsRendered);
+        let want = image::GrayImage::from_fn(w, h, |x, y| {
+            let nx = (x as f32 + MASK_SAMPLE_CENTRE) / w as f32;
+            let ny = (y as f32 + MASK_SAMPLE_CENTRE) / h as f32;
+            let (zero_x, zero_y, full_x, full_y) = (0.5, 1.0, 0.5, 0.0);
+            let t = (((nx - zero_x) * (full_x - zero_x) + (ny - zero_y) * (full_y - zero_y))
+                / ((full_x - zero_x).powi(2) + (full_y - zero_y).powi(2)))
+                .clamp(0.0, 1.0);
+            image::Luma([(linear_coverage(t, LinearFalloff::Eased) * 255.0).round() as u8])
+        });
+        assert_eq!(got.as_raw(), want.as_raw(), "linear mask coverage did not use the eased ramp");
+
+        let byte = |value: f32| (value * 255.0).round() as u8;
+        assert_eq!(linear_coverage(0.25, LinearFalloff::Eased), 0.15625);
+        assert_eq!(linear_coverage(0.25, LinearFalloff::Clamped), 0.25);
+        assert_ne!(byte(linear_coverage(0.25, LinearFalloff::Eased)), byte(linear_coverage(0.25, LinearFalloff::Clamped)));
+        for t in [-1.0, 0.0, 1.0, 2.0] {
+            assert_eq!(linear_coverage(t, LinearFalloff::Eased), linear_coverage(t, LinearFalloff::Clamped));
+        }
+    }
+
+    #[test]
+    fn shipped_linear_ramp_is_eased_end_to_end() {
+        // The probe geometry (vertical gradient, zero at 0.80, full at 0.35,
+        // −2 EV) through the public f32 develop path. The tone pass blends
+        // `p·(1 − w) + t·w`, so on a flat grey the mask weight is recovered
+        // EXACTLY as `(base − row) / (base − full_plateau)` — no assumption
+        // about the exposure model, and no 8-bit quantisation. The expected
+        // profile is the LITERAL Hermite smoothstep, not `linear_coverage`,
+        // so a mutation of the Eased arm cannot rewrite its own oracle.
+        let (w, h) = (4usize, 1000usize);
+        let base = 0.5_f32;
+        let recipe = EditRecipe {
+            masks: vec![crate::recipe::LocalAdjustment {
+                mask: MaskGeometry::Linear { zero_x: 0.5, zero_y: 0.80, full_x: 0.5, full_y: 0.35 },
+                exposure_ev: -2.0,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let mut px = vec![[base; 3]; w * h];
+        apply_develop_anon(&mut px, w, h, &recipe);
+        let rows: Vec<f32> = (0..h).map(|y| px[y * w + w / 2][1]).collect();
+        let full_plateau = rows[100];
+        assert!(full_plateau < base - 0.2, "full end must darken by −2 EV: {full_plateau}");
+        assert_eq!(rows[950].to_bits(), base.to_bits(), "zero end must be untouched");
+        let coverage: Vec<f32> = rows.iter().map(|r| (base - r) / (base - full_plateau)).collect();
+        let t_of = |y: usize| {
+            let ny = (y as f32 + MASK_SAMPLE_CENTRE) / h as f32;
+            ((0.80 - ny) / (0.80 - 0.35)).clamp(0.0, 1.0)
+        };
+        // (a) every row IS the literal smoothstep of its projected t (the
+        // 0.001 work floor and the tone LUT leave ≤ 2e-3 of slack).
+        for (y, &got) in coverage.iter().enumerate() {
+            let t = t_of(y);
+            let want = t * t * (3.0 - 2.0 * t);
+            assert!((got - want).abs() < 2e-3, "row {y}: t {t:.4} rendered {got:.5}, smoothstep {want:.5}");
+        }
+        // (b) C1 at BOTH handles: the coverage slope over the ten rows just
+        // inside each handle is ≤ 0.1 of the mid-ramp slope (Clamped: ≈ 1.0;
+        // `t²`: ≈ 0.0 at the zero end but ≈ 2.0 at the full end).
+        let full_row = (0.35 * h as f32) as usize;
+        let zero_row = (0.80 * h as f32) as usize;
+        let mid = (full_row + zero_row) / 2;
+        let slope = |a: usize, b: usize| ((coverage[b] - coverage[a]) / (b - a) as f32).abs();
+        let mid_slope = slope(mid - 5, mid + 5);
+        let full_end = slope(full_row + 1, full_row + 11);
+        let zero_end = slope(zero_row - 11, zero_row - 1);
+        assert!(full_end < 0.1 * mid_slope, "full-end slope {full_end:.2e} is not eased vs mid {mid_slope:.2e}");
+        assert!(zero_end < 0.1 * mid_slope, "zero-end slope {zero_end:.2e} is not eased vs mid {mid_slope:.2e}");
+        // (c) the eased midpoint is 1.5× the linear slope of the same span.
+        let linear_slope = 1.0 / (zero_row - full_row) as f32;
+        let ratio = mid_slope / linear_slope;
+        assert!((1.45..=1.55).contains(&ratio), "mid-ramp slope ratio {ratio:.4} is not ~1.5");
+    }
+
+    #[test]
+    fn probe_fixture_round_trips_through_xmp() {
+        let recipe = EditRecipe {
+            masks: vec![crate::recipe::LocalAdjustment {
+                mask: MaskGeometry::Linear { zero_x: 0.5, zero_y: 0.80, full_x: 0.5, full_y: 0.35 },
+                exposure_ev: -2.0,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let xmp = crate::xmp::recipe_to_xmp(&recipe);
+        let back = crate::xmp::xmp_to_recipe(&xmp);
+        assert_eq!(back.masks.len(), 1);
+        let MaskGeometry::Linear { zero_x, zero_y, full_x, full_y } = back.masks[0].mask else { panic!("probe mask was not linear") };
+        assert!((zero_x - 0.5).abs() < 1e-6 && (zero_y - 0.80).abs() < 1e-6);
+        assert!((full_x - 0.5).abs() < 1e-6 && (full_y - 0.35).abs() < 1e-6);
+        assert_eq!(back.masks[0].exposure_ev, -2.0);
+        if std::env::var_os("AUTOSHOP_GENERATE_LINEAR_PROBE").is_some() {
+            let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target/linear-falloff/probe");
+            std::fs::create_dir_all(&dir).unwrap();
+            let encoded = (linear_to_srgb(0.18) * 65535.0).round() as u16;
+            let image = image::ImageBuffer::<image::Rgb<u16>, Vec<u16>>::from_pixel(3000, 2000, image::Rgb([encoded; 3]));
+            image::DynamicImage::ImageRgb16(image).save(dir.join("probe.tif")).unwrap();
+            std::fs::write(dir.join("probe.xmp"), xmp.as_bytes()).unwrap();
+            std::fs::write(dir.join("probe-recipe.json"), serde_json::to_vec_pretty(&back).unwrap()).unwrap();
+        }
     }
 
     #[test]
@@ -15699,7 +15979,11 @@ mod tests {
             for x in 0..w {
                 let i = y * w + x;
                 let changed = (0..3).any(|c| out[i][c].to_bits() != base[i][c].to_bits());
-                if x >= w / 2 {
+                // The eased handle is below the existing 0.001 work floor at
+                // the first pixel next to the zero edge (t = 1/64,
+                // smoothstep(t) < 0.001), so column 31 is intentionally part
+                // of the unchanged plateau under the shipped profile.
+                if x >= w / 2 - 1 {
                     assert!(
                         !changed,
                         "uncovered column {x} moved: {:?} → {:?}",

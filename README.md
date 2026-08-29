@@ -282,8 +282,12 @@ Written down in the plan and the design memos, in delivery order:
   meaning, the embedding switch in the GUI (today the
   `AUTOSHOP_STYLE_EMBED` environment variable), and a prompt-adherence axis
   next to Strength.
-- **Linear-gradient falloff continuity** (C¹ clamp ramp; a rendering change
-  reserved for v1.1) and a **macOS build**.
+- **Linear-gradient falloff continuity** is shipped in v1.1 as the measured C1
+  Hermite smoothstep (Lightroom turns over at both handles, 80/80 rows, and a
+  free-end profile fit (`scripts/linear_falloff_probe.py --fit`) reaches RMS
+  0.0045 for smoothstep against 0.017 for linear; the hard render change is
+  limited to linear masks, with radial and bitmap masks unchanged); a
+  **macOS build** remains on the roadmap.
 
 ## How it works
 
@@ -362,7 +366,7 @@ estimate. Sources are the pinned claims in
 
 | What | Measured | Where |
 |---|---|---|
-| Automated test battery | 1057 library / 16 CLI / 146 GUI / 2+2 contract tests; `check_docs` re-derives the pinned release claims | [Tech stack](#tech-stack-algorithms-and-design-philosophy) |
+| Automated test battery | 1067 library / 16 CLI / 146 GUI / 2+2 contract tests; `check_docs` re-derives the pinned release claims | [Tech stack](#tech-stack-algorithms-and-design-philosophy) |
 | RAW coverage | 24 extensions, 725 camera bodies; nine-camera format zoo 9/9 at the last release gate | [Supported formats](#supported-formats) |
 | Lightroom Texture parity | 45 of 45 period/depth anchors within ±0.02 | [Develop pipeline](#develop-pipeline-and-tone-model) |
 | Radial mask closure | 41 of 41 measured vectors within ≤1 px | [Lens correction](#lens-correction-and-lightroom-mask-frame-laws) |
@@ -634,7 +638,7 @@ versions, and a deleted-version registry; SCUNet success requires the typed
 `sidecar_wrote` contract. A 1771 MB reference probe sets the 1800 MB per-photo
 budget, while the 4 GiB RAW gate bounds admission. The [`build`
 workflow](.github/workflows/build.yml) covers default and GUI feature sets on
-Ubuntu and macOS. The current battery is **1057 library (1046 pass + 11 `#[ignore]`d forensic probes) / 16 CLI / 146 GUI / 2+2 contract** tests; the
+Ubuntu and macOS. The current battery is **1067 library (1056 pass + 11 `#[ignore]`d forensic probes) / 16 CLI / 146 GUI / 2+2 contract** tests; the
 [`scripts/check_docs.py`](scripts/check_docs.py) gate re-derives pinned release
 claims. Model weights are not stored in this repository.
 

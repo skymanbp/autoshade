@@ -207,6 +207,14 @@ at `(x+0.5, y+0.5)` through `MASK_SAMPLE_CENTRE`, then optional luminance- or
 colour-range weights refine the geometry; components compose in document order
 as Add, Subtract, or Intersect rather than being flattened to one union.
 
+The ramp itself is centralized in `linear_coverage(t, profile)`. This batch
+ships `LINEAR_FALLOFF = Eased`, the measured C1 Hermite smoothstep. Lightroom
+turns over at both handles (80/80 rows), and a free-end profile fit
+(`scripts/linear_falloff_probe.py --fit`) reaches RMS 0.0045 for smoothstep
+against 0.017 for linear. This is a render hard
+change for linear masks only; radial
+and bitmap masks remain byte-identical.
+
 Lightroom brush strokes may arrive indirectly through a sibling
 `MaskBrushTable`; the importer resolves the MD5-addressed `.acr` member,
 validates its envelope and bounds, Brotli-decompresses it, then parses the
@@ -1008,7 +1016,7 @@ than the pre-call state; model weights remain outside the repository.
 - The 61 MP RAW probe measured `151 MB` peak commit for decode,
   `1771 MB` for calibration/render preparation, and `1766 MB` for the
   full-resolution render tail; the combined process peak remained `1771 MB`.
-- The release battery is **1057 library (1046 pass + 11 `#[ignore]`d forensic
+- The release battery is **1067 library (1056 pass + 11 `#[ignore]`d forensic
   probes) / 16 CLI / 146 GUI / 2+2 contract** tests. Environment-gated real
   Lightroom, brush-table, and RAW-zoo suites are additional and are not
   smuggled into the ordinary count.

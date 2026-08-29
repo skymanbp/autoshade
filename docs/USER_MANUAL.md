@@ -47,7 +47,8 @@ Shapes can be combined with Add, Subtract, or Intersect and can carry luminance
 or color range restrictions.
 
 - **Linear gradient:** choose **＋ Linear gradient**, then drag from the fully
-  affected side toward the unaffected side. Hold `Shift` to lock an axis.
+  affected side toward the unaffected side; the shipped falloff eases softly at
+  both handles. Hold `Shift` to lock an axis.
 - **Radial gradient:** choose **＋ Radial gradient**, drag the ellipse, then
   position, rotate, and feather it.
 - **Brush:** choose **🖌 Brush** and paint. Use Erase to subtract, `[` and `]`

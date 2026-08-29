@@ -92,12 +92,15 @@
 > experimental generative edits, an optional pixel-**heal** retouch mode (§4.7)
 > the deterministic look **reverse-fit** (§4.8) and the local server's refusal
 > model (§4.9).
-> 1057 library + 16 CLI + 146 GUI + 2+2 contract tests are enumerated in the GUI
-> build; the library result is 1046 pass + 11 `#[ignore]`d forensic probes
-> (counts refreshed 2026-08-29 after merging the step-17 cleanup batch `9097319`
-> onto the F1 strength-axis batch `302efb1`: library 1034→1057; the cleanup batch
-> adds +2/−0 by name = `rationale::tests::sidecar_failure_disclosure_has_no_traceback_or_home_path`
-> and `fixture_dir_tests::test_fixture_dirs_are_process_unique`; F1 alone went
+> 1067 library + 16 CLI + 146 GUI + 2+2 contract tests are enumerated in the GUI
+> build; the library result is 1056 pass + 11 `#[ignore]`d forensic probes
+> (counts refreshed 2026-08-29 after merging the linear-falloff line `817fa13`
+> (+10 by name against `662b688`: the C¹ ramp harness `56dd690` and the `Eased`
+> flip — `linear_mask_renders_the_eased_ramp`, `shipped_linear_ramp_is_eased_end_to_end`,
+> the radial/bitmap split of the clamped-baseline test) and the step-17 cleanup
+> batch `9097319` (+2 by name = `rationale::tests::sidecar_failure_disclosure_has_no_traceback_or_home_path`
+> and `fixture_dir_tests::test_fixture_dirs_are_process_unique`) onto the F1
+> strength-axis batch `302efb1`: library 1034→1067; F1 alone went
 > 1034→1055, set diff +22/−0 default and +23/−0 GUI by name against `662b688`
 > = the strength-budget, WB-manifold, rescoring-disclosure and Style-wording
 > tests in `src/fit.rs`, `src/style.rs`, `src/main.rs` and the GUI panel pin; the free-mask batch
@@ -1438,6 +1441,16 @@ experiment:
   LINEAR H2 is intentionally not described as 1 px-closed: ON residuals are
   9.748/7.025/6.336 px RMS and OFF residuals are 12.449/9.943/4.979 px RMS.
   A fitted anisotropic-aspect candidate is diagnostic only and is not shipped.
+
+  Linear coverage has one engine law, `linear_coverage(t, profile)`, applied
+  after the existing H2 handle transport and pixel/aspect projection. The
+  shipped `LINEAR_FALLOFF` is `Eased`, the measured C1 Hermite smoothstep:
+  Lightroom turns over at both handles (80/80 rows) and a free-end profile
+  fit (handle rows and profile fitted jointly, so a soft profile cannot hide
+  inside a shrunken span; `scripts/linear_falloff_probe.py --fit`) reaches RMS
+  0.0045 for smoothstep against 0.017 for linear. This is a render hard change
+  for linear
+  masks only; radial and bitmap masks remain byte-identical.
 
   ⚠ `mask_warp_center` and `linear_handle_warp` are two deliberate v1.0.0
   **hard forward schema breaks** inside `LensProfile`: older `deny_unknown_fields`
