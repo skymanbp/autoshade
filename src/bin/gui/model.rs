@@ -206,6 +206,12 @@ pub(crate) struct Prefs {
     /// Use SigLIP look embeddings when building and querying the style index.
     #[serde(default)]
     pub(crate) style_embed: bool,
+    /// Step 14 / S2: also write a short LOCAL prose description of each
+    /// record's grade with Qwen3-VL. `#[serde(default)]` on the struct decodes
+    /// an older prefs file as `false` — the same answer [`Prefs::default`]
+    /// gives, so an upgrade never silently starts a 4.3 GB download.
+    #[serde(default)]
+    pub(crate) style_describe: bool,
     /// The folder the style library was last built from (R23-2), so a rebuild
     /// starts where the last build did.
     pub(crate) style_src_dir: Option<PathBuf>,
@@ -266,6 +272,7 @@ impl Default for Prefs {
             send_style_ref_image: false,
             deep_think: false,
             style_embed: false,
+            style_describe: false,
             style_src_dir: None,
             looks_src_dir: None,
             use_looks: true,
@@ -601,7 +608,7 @@ pub(crate) enum Msg {
     /// The running style-library build advanced: `done` of `total` photos
     /// decoded. Typed counts, worded at landing (L12#4) — same shape as
     /// [`Msg::BatchProgress`].
-    StyleBuildProgress { done: usize, total: usize },
+    StyleBuildProgress { stage: autoshop::style::BuildStage, done: usize, total: usize },
     /// A style-library build finished — see [`StyleBuildOutcome`].
     StyleBuilt(Box<StyleBuildOutcome>),
 }
@@ -626,9 +633,15 @@ pub(crate) enum StyleBuildOutcome {
     /// identical success toast as one where none did: the release GUI is
     /// `windows_subsystem = "windows"`, so the per-photo `eprintln!` the CLI
     /// shows goes to a console that does not exist (adjudication F3).
-    Saved { total: usize, dir: PathBuf, without_embedding: usize },
+    ///
+    /// `described` is the S2 sibling of the same idea, from the other
+    /// direction: how many exemplars the OPTIONAL local description pass
+    /// actually covered. 0 both when the switch was off and when the pass
+    /// reached nothing — and the note only renders above 0, so the two
+    /// silent cases stay silent.
+    Saved { total: usize, dir: PathBuf, without_embedding: usize, described: usize },
     /// Finished-photo look library published into the shared index.
-    LooksSaved { total: usize, dir: PathBuf },
+    LooksSaved { total: usize, dir: PathBuf, described: usize },
     /// The folder held no RAW with its `.xmp` sidecar beside it, so
     /// `StyleIndex::save` REFUSED (the one empty-index guard, shared by the
     /// CLI, the web handler and this button — writing an empty index would

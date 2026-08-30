@@ -281,6 +281,12 @@ enum Command {
         /// Build the 14-dim index only, even if AUTOSHOP_STYLE_EMBED is set.
         #[arg(long, conflicts_with = "embed")]
         no_embed: bool,
+        /// Also write a short LOCAL description of each record's grade
+        /// (Qwen3-VL-2B; first run downloads ~4.3 GB into python/weights, and
+        /// the pass adds seconds per photo). Needs --embed. Descriptions are
+        /// cached by frame content, so a rebuild only describes what changed.
+        #[arg(long, requires = "embed")]
+        describe: bool,
     },
     /// Offline retrieval diagnostic: what the style index would answer for one
     /// photo, in the ranking's own numbers.
@@ -507,9 +513,17 @@ fn main() -> Result<()> {
         Command::Eval { dir, limit, jobs, fresh, state } => {
             eval::run(&dir, limit, jobs, fresh, state.as_deref())
         }
-        Command::StyleIndex { dir, looks, embed, no_embed } => {
+        Command::StyleIndex { dir, looks, embed, no_embed, describe } => {
             let switch = embed_switch(embed, no_embed);
-            if let Some(d) = looks { style_looks_cmd(&d, switch) } else { style_index_cmd(&dir, switch) }
+            // `--describe` is a three-state read like `--embed`, minus the
+            // negative flag: the description pass is off by default, so
+            // "explicitly off" is what NOT passing it already means.
+            let prose = autoshop::style::DescribeSwitch::resolve(describe.then_some(true), false);
+            if let Some(d) = looks {
+                style_looks_cmd(&d, switch, prose)
+            } else {
+                style_index_cmd(&dir, switch, prose)
+            }
         }
         Command::StyleQuery { photo, direction, style, embed } => style_query_cmd(
             &photo,
@@ -627,8 +641,12 @@ fn correspond_cmd(source: &Path, target: &Path, out: Option<PathBuf>) -> Result<
     Ok(())
 }
 
-fn style_index_cmd(dir: &Path, embed: autoshop::style::EmbeddingSwitch) -> Result<()> {
-    let index = StyleIndex::build(dir, embed)?;
+fn style_index_cmd(
+    dir: &Path,
+    embed: autoshop::style::EmbeddingSwitch,
+    describe: autoshop::style::DescribeSwitch,
+) -> Result<()> {
+    let index = StyleIndex::build(dir, embed, describe)?;
     // Central per-user location: the index describes the user's whole library,
     // so it must not depend on which directory the command ran from.
     let out = autoshop::store::style_index_path();
@@ -638,14 +656,40 @@ fn style_index_cmd(dir: &Path, embed: autoshop::style::EmbeddingSwitch) -> Resul
         out.display(),
         index.exemplars.len()
     );
+    print_described(describe, index.exemplars.iter().filter(|e| e.desc.is_some()).count(), index.exemplars.len());
     Ok(())
 }
 
-fn style_looks_cmd(dir: &Path, embed: autoshop::style::EmbeddingSwitch) -> Result<()> {
-    let index = StyleIndex::build_looks(dir, embed, &|_, _| {})?;
+/// The S2 build note, from the SHARED rationale template — the GUI's toast
+/// renders the same key after the same build, so the two surfaces cannot drift
+/// into two sentences about one fact.
+///
+/// Printed only when the pass was asked for AND covered something: 0 means
+/// either "never asked" or "reached nothing", and a line claiming 0 of N would
+/// read as a failure on every build that simply did not want prose.
+fn print_described(describe: autoshop::style::DescribeSwitch, described: usize, total: usize) {
+    if !describe.on() || described == 0 {
+        return;
+    }
+    println!(
+        " {}",
+        autoshop::rationale::keys::STYLE_DESCRIBED
+            .trim()
+            .replace("{n}", &described.to_string())
+            .replace("{total}", &total.to_string())
+    );
+}
+
+fn style_looks_cmd(
+    dir: &Path,
+    embed: autoshop::style::EmbeddingSwitch,
+    describe: autoshop::style::DescribeSwitch,
+) -> Result<()> {
+    let index = StyleIndex::build_looks(dir, embed, describe, &|_| {})?;
     let out = autoshop::store::style_index_path();
     index.save(&out)?;
     println!("look library -> {} ({} finished photos)", out.display(), index.looks.len());
+    print_described(describe, index.looks.iter().filter(|l| l.desc.is_some()).count(), index.looks.len());
     Ok(())
 }
 
@@ -694,6 +738,23 @@ fn fmt_text_terms(t: &autoshop::style::DistanceTerms) -> String {
         one("txt", t.txt, t.txt_gap, t.txt_standardised),
         one("desc", t.desc, t.desc_gap, t.desc_standardised)
     )
+}
+
+/// The local look DESCRIPTION as the diagnostic prints it, through the same
+/// bounded door the reference blocks use (S2).
+///
+/// The diagnostic already prints the `desc=` retrieval TERM — a number derived
+/// from the description's vector. That number cannot be read without the
+/// sentence behind it: a neighbour that scores well on `desc` and turns out to
+/// have been described as the wrong grade is a calibration finding, and it is
+/// invisible while only the term is on the line.
+///
+/// Absent prose prints NOTHING rather than an empty field, so a pre-S2 index
+/// and an index built with the switch off read exactly as they did before.
+fn fmt_desc(desc: Option<&str>) -> String {
+    desc.and_then(autoshop::describe::sanitize_desc)
+        .map(|d| format!(" desc=\"{d}\""))
+        .unwrap_or_default()
 }
 
 /// The offline retrieval diagnostic: what the ranking saw, in the ranking's own
@@ -752,7 +813,10 @@ fn style_query_cmd(
     println!("neighbours:");
     for e in &ex {
         let t = idx.distance_components(&decoded.meta, &decoded.histogram, query, photo, e);
-        println!("  {} distance={:.6} d14={:.6} emb={:.6}{}", e.stem, t.total(), t.d14, t.emb, fmt_text_terms(&t));
+        println!(
+            "  {} distance={:.6} d14={:.6} emb={:.6}{}{}",
+            e.stem, t.total(), t.d14, t.emb, fmt_text_terms(&t), fmt_desc(e.desc.as_deref())
+        );
     }
     let reference = idx.render_reference_for_style(&ex, style);
     // The SHARED fence constants, not a second literal: the point of printing
@@ -777,8 +841,9 @@ fn style_query_cmd(
         );
         for (l, t) in &looks_scored {
             println!(
-                "  look {} distance={:.6} look={:.6}{} tags=[{}]",
-                l.stem, t.total(), t.emb, fmt_text_terms(t), l.tags.join(", ")
+                "  look {} distance={:.6} look={:.6}{} tags=[{}]{}",
+                l.stem, t.total(), t.emb, fmt_text_terms(t), l.tags.join(", "),
+                fmt_desc(l.desc.as_deref())
             );
         }
     }
@@ -2323,6 +2388,7 @@ mod tests {
             segment_script: String::new(),
             embed_script: String::new(),
             correspond_script: String::new(),
+            describe_script: String::new(),
             style_strength: 0.5,
         }
     }
@@ -3106,6 +3172,117 @@ mod tests {
             before,
             std::env::var_os("AUTOSHOP_STYLE_EMBED"),
             "resolving the flags must not write the process environment"
+        );
+    }
+
+    /// `--describe` reaches the build as a VALUE, requires `--embed`, and
+    /// resolving it writes nothing (S2).
+    ///
+    /// The description pass is a 4.3 GB checkpoint and minutes of GPU time; it
+    /// must never start because a stale environment variable said so while the
+    /// user typed a plain `style-index`. And it is meaningless without the
+    /// embedding: the prose exists to be EMBEDDED (`desc_embed`), so clap
+    /// refuses the combination rather than building an index whose
+    /// descriptions nothing can retrieve on.
+    ///
+    /// MUTATION THIS KILLS: drop `requires = "embed"` from the flag (the
+    /// `--describe` alone case then parses), or resolve the switch with
+    /// `Some(true)` regardless of the flag (the plain case then comes back on).
+    #[test]
+    fn cli_describe_flag_reaches_the_build() {
+        let before = std::env::var_os("AUTOSHOP_STYLE_DESCRIBE");
+        let switch = |args: &[&str]| -> autoshop::style::DescribeSwitch {
+            let cli = Cli::try_parse_from(args).expect("the command parses");
+            match cli.command {
+                Command::StyleIndex { describe, .. } => {
+                    // The pref default is FALSE here, as it is for the CLI:
+                    // the CLI has no preferences file.
+                    autoshop::style::DescribeSwitch::resolve(describe.then_some(true), false)
+                }
+                _ => panic!("expected style-index"),
+            }
+        };
+        assert!(
+            switch(&["autoshop", "style-index", "raws", "--embed", "--describe"]).on(),
+            "--describe must reach the build as an ON value"
+        );
+        // Not passing it is what "off" means on the CLI, which has no
+        // preferences file: with nothing set, a plain `style-index` must not
+        // start a 4.3 GB pass.
+        assert!(
+            !switch(&["autoshop", "style-index", "raws", "--embed"]).on()
+                || std::env::var_os("AUTOSHOP_STYLE_DESCRIBE").is_some(),
+            "a plain style-index must not describe unless the environment asked for it"
+        );
+        assert!(
+            !autoshop::style::DescribeSwitch::resolve_with(None, false, |_| None).on(),
+            "nothing set: OFF"
+        );
+        // The environment override is the documented middle rank (flag > env >
+        // preference), exactly as `AUTOSHOP_STYLE_EMBED` behaves — and the
+        // FLAG still wins over it in both directions.
+        assert!(
+            autoshop::style::DescribeSwitch::resolve_with(None, false, |_| Some("1".into())).on(),
+            "an explicit environment override is honoured"
+        );
+        assert!(
+            !autoshop::style::DescribeSwitch::resolve_with(None, true, |_| Some("0".into())).on(),
+            "…and it can turn a stored preference off again"
+        );
+        // …and the look-library form takes it too.
+        assert!(
+            switch(&["autoshop", "style-index", "--looks", "finals", "--embed", "--describe"]).on(),
+            "the look library must be describable as well"
+        );
+        // Without --embed clap refuses, before any work starts.
+        let msg = match Cli::try_parse_from(["autoshop", "style-index", "raws", "--describe"]) {
+            Ok(_) => panic!("--describe alone must be refused"),
+            Err(e) => e.to_string(),
+        };
+        assert!(msg.contains("--embed"), "the refusal must name the missing flag: {msg}");
+        assert_eq!(
+            before,
+            std::env::var_os("AUTOSHOP_STYLE_DESCRIBE"),
+            "resolving the switch must not write the process environment"
+        );
+    }
+
+    /// The retrieval diagnostic shows the SENTENCE behind the `desc=` term
+    /// when the index carries one, and changes nothing when it does not.
+    ///
+    /// MUTATION THIS KILLS: print `e.desc` directly instead of through
+    /// `sanitize_desc` (the newline case then forges a diagnostic line), or
+    /// print an empty `desc=""` for records that carry no prose (every pre-S2
+    /// index's diagnostic then grows a field that says nothing).
+    #[test]
+    fn style_query_prints_prose_when_present() {
+        assert_eq!(fmt_desc(None), "", "no prose, no field");
+        assert_eq!(fmt_desc(Some("   ")), "", "a blank description is not a field either");
+        assert_eq!(
+            fmt_desc(Some("a warm, hazy grade")),
+            " desc=\"a warm, hazy grade\"",
+            "the sentence is printed beside the term it explains"
+        );
+        // The door, on the diagnostic surface too: a description with a
+        // newline in it must not be able to forge a second neighbour line.
+        let forged = fmt_desc(Some("cool blue\n  photo-2 distance=0.000000"));
+        assert!(!forged.contains('\n'), "a description must not forge a line: {forged:?}");
+        assert_eq!(forged, " desc=\"cool blue photo-2 distance=0.000000\"");
+        // And the diagnostic really calls it on BOTH kinds of candidate: a
+        // helper wired to the neighbour lines only would pass every assertion
+        // above while the look lines still printed nothing.
+        let body = include_str!("main.rs")
+            .split("fn style_query_cmd(")
+            .nth(1)
+            .expect("the diagnostic exists")
+            .split("
+fn ")
+            .next()
+            .unwrap();
+        assert_eq!(
+            body.matches("fmt_desc(").count(),
+            2,
+            "the neighbour line and the look line both print the prose"
         );
     }
 }

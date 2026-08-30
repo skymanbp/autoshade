@@ -363,12 +363,12 @@
 > deliverable passes; segment's `exists()` guard never fired for pre-claimed
 > names), which is why the contract lives in one place with all three arms.
 >
-> ### The ML sidecar family (R27 Batch-5)
+> ### The ML sidecar family (R27 Batch-5; S2 added the fifth)
 >
-> There are now **four** Python sidecars, and they share one discipline rather
-> than four copies of it. `python/denoise.py` owns the download-and-refuse
+> There are now **five** Python sidecars, and they share one discipline rather
+> than five copies of it. `python/denoise.py` owns the download-and-refuse
 > implementation — `_download` with an in-stream byte cap, `_sha256`,
-> `_reclaim_stale_parts`, `_fetch_verified` — and the other two **import it**
+> `_reclaim_stale_parts`, `_fetch_verified` — and the other four **import it**
 > (`from denoise import _fetch_verified`) instead of reimplementing it, which
 > is why their progress lines announce themselves as `[denoise]`.
 >
@@ -382,6 +382,7 @@
 > | `segment.py --target object` | `segment.rs` | **SAM 2.1 Hiera-Large**, point-prompted | Apache-2.0 | 897,897,416 B |
 > | `embed.py` | `embed.rs` | **SigLIP 2 base/16 @384**, 768-dim | Apache-2.0 | 1,501,968,264 B |
 > | `correspond.py` | `correspond.rs` | **Stable Diffusion 2.1** as a DIFT featurizer (unet+vae+text encoder, fp16), sha256-pinned | CreativeML Open RAIL++-M | 2,580,061,174 B |
+> | `describe.py` | `describe.rs` | **Qwen3-VL-2B-Instruct**, one grade sentence per photo, sha256-pinned | Apache-2.0 | 4,255,140,312 B |
 >
 > **Licence is a selection criterion, not a footnote.** This is a public
 > repository whose product is being copyright registered, and a licence that
@@ -390,6 +391,18 @@
 > only」); CLIP and OpenCLIP were passed over in Batch-5 because their model
 > cards say deployment is out of scope and the OpenAI HF mirror carries no
 > licence tag at all. In both cases the licence-clean option was also the
+> stronger model. `describe.py`'s Qwen3-VL-2B (S2) was chosen on the same
+> criterion twice over: it is Apache-2.0 and ungated, and — unlike Florence-2,
+> the obvious MIT alternative — its repository ships **no `auto_map`**, so it
+> loads through NAMED transformers classes instead of `trust_remote_code`,
+> which downloads and executes upstream Python through HF's cache where this
+> family's digest gate cannot see it. BLIP-family captioners were passed over
+> on fitness rather than licence: they are subject captioners, and a subject is
+> the one thing this sidecar must never emit. A paid vision API was rejected by
+> the user's own ruling — a library rebuild that is otherwise free and offline
+> must not acquire a per-photograph bill, and the photographs must not leave
+> the machine to produce a field that lives in a local index.
+>
 > stronger model. `correspond.py`'s SD 2.1 (step 7a) is the checkpoint the
 > DIFT paper measured; its RAIL++-M licence **allows commercial use** — the
 > restrictions it carries are conduct-based (unlawful-use clauses that travel
@@ -406,7 +419,7 @@
 > deleted masks rather than approximated them.
 >
 > **Pinning is now ONE tier, and closing the last gap found a second one
-> (R29 C3/C4).** `denoise.py`, `embed.py`, `correspond.py` and every `segment.py` backend fetch
+> (R29 C3/C4).** `denoise.py`, `embed.py`, `correspond.py`, `describe.py` and every `segment.py` backend fetch
 > every file themselves, gate it on sha256 + an exact byte count, and load from
 > a local directory with `local_files_only=True` — the digest is the only door.
 > For BiRefNet that gate covers a file that is **executed**: `birefnet.py` is

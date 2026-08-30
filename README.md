@@ -122,16 +122,26 @@ temperature, tint, saturation, dehaze) with your tone-curve shape (black-lift
 and S-strength) and a colour-family summary; and optionally a 768-dimensional
 **SigLIP 2** image embedding (`base/16 @384`) computed by a local sidecar
 through the same 512-px frame the query goes through, so index and query can
-never disagree.
+never disagree. With `--describe` a second local model
+(**Qwen3-VL-2B-Instruct**) also writes ONE short sentence per photo about its
+*grade* — white balance lean, tonality, contrast, colour treatment, finishing,
+mood, never the subject — and that sentence, not the fixed attribute tags, is
+what the text tower embeds. Nothing leaves the machine and nothing is billed;
+descriptions are cached by frame content, so a rebuild only describes what
+changed.
 
 At develop time the photo retrieves the **4 most similar past shots** with the
 hybrid distance `d14 + W_EMB·(1−cos(q_img,e_img)) + W_TXT·(1−cos(q_txt,e_img)) + W_DESC·(1−cos(q_txt,e_desc))`.
-The shipped `W_EMB`, `W_TXT` and `W_DESC` are the calibration harness's
-winners over 196 grid rows on the real corpus (see the pinned-claims table).
+The shipped `W_EMB = 4`, `W_TXT = 4` and `W_DESC = 0.5` are the calibration
+harness's winners over 196 grid rows per query-text proxy on the real corpus
+(see the pinned-claims table). The harness sweeps **two** proxies — each
+held-out photo's own local description, and its attribute tag string — and the
+answer is that the prose earns the text terms and the tag string does not.
 A **z-scored variant** of the two text terms is built and tested — raw SigLIP
 image-to-text cosines are tiny and tightly clustered, which is a real reason to
-suspect the raw term — but the harness measured both variants and the raw one
-won, so the raw one ships and standardisation stays one flag away. `W_LOOK =
+suspect the raw term. It is now the one that ships: with real descriptions the
+standardised variant wins and its text terms beat having none at all, while the
+raw variant's cannot be told apart from zero. `W_LOOK =
 1.0` is a normalisation rather than a measured number: the look library carries
 no develop settings, so the harness's settings objective cannot see it, and
 nothing else ranks looks against each other, so its scale cannot change their
@@ -401,7 +411,7 @@ estimate. Sources are the pinned claims in
 | Reverse-fit, sunset | look error 0.060 → 0.042, confidence 0.746691 | [docs/SHOWCASE.md](docs/SHOWCASE.md) |
 | Local-field ceiling, calibration pair | global fit 0.0961 against a ceiling of 0.0700; the accepted sky zone realizes 0.134 of the distance | [What is new §7](#7-a-bilateral-grid-local-field-prices-every-local-producer-first) |
 | AI develop, model judge | cat pair 62 → 86; townhouse 84 → 86; balcony 78 → 84; hillside 63 → 87 (automated scores) | [docs/SHOWCASE.md](docs/SHOWCASE.md) |
-| Style retrieval weights | corpus harness (169 exemplars, 156 queries, 196 grid rows): `W_EMB=4`, `W_TXT=0`, `W_DESC=4`, raw variant — MAE 0.687031 vs baseline 0.713143, +0.026112, CI [+0.014466, +0.043656]; `W_LOOK=1.0` is a normalisation the harness cannot see | [AI advisor](#ai-advisor-and-reverse-fit) |
+| Style retrieval weights | corpus harness (169 described exemplars, 156 queries, 196 grid rows per query-text proxy): `W_EMB=4`, `W_TXT=4`, `W_DESC=0.5`, standardised variant — MAE 0.664818 vs baseline 0.713143, +0.048325, CI [+0.024290, +0.078587] under the prose proxy; under the tag-string proxy nothing beats the text-free row; `W_LOOK=1.0` is a normalisation the harness cannot see | [AI advisor](#ai-advisor-and-reverse-fit) |
 | Memory budget | 1800 MB per photo from a 1771 MB reference probe; 4 GiB RAW admission gate | [Application](#application-and-infrastructure) |
 
 ## Install and quickstart
@@ -738,6 +748,7 @@ the property of their authors; none are redistributed in this repository.
 | OneFormer ADE20K | Sky segmentation | MIT |
 | SAM 2.1 | Point-prompted object masks | Apache-2.0 |
 | SigLIP 2 | Optional style embeddings | Apache-2.0 |
+| Qwen3-VL-2B-Instruct | Optional local look descriptions | Apache-2.0 |
 
 The project acknowledges the rawler, image, qcms, rayon, clap, serde, ureq,
 egui/eframe, tiny_http, and local-model communities whose work makes these

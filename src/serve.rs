@@ -1350,11 +1350,12 @@ fn api_style_build(request: &mut Request) -> Result<ResponseBox> {
     if !p.is_dir() {
         return Ok(status_response(400, &format!("not a folder: {cleaned}")));
     }
-    // The web surface has no `--embed` flag, so the switch is what the
-    // environment says with the preference off — exactly what `build` used to
-    // read for itself before the switch became a value.
+    // The web surface has no `--embed` / `--describe` flag, so both switches
+    // are what the environment says with the preference off — exactly what
+    // `build` used to read for itself before they became values.
     let embed = crate::style::EmbeddingSwitch::resolve(None, false);
-    let index = match crate::style::StyleIndex::build(&p, embed) {
+    let describe = crate::style::DescribeSwitch::resolve(None, false);
+    let index = match crate::style::StyleIndex::build(&p, embed, describe) {
         Ok(ix) => ix,
         Err(e) => return Ok(status_response(500, &format!("build failed: {e}"))),
     };

@@ -902,12 +902,68 @@ phrase changes every stored score.
 `desc_embed` is the SigLIP **text** vector of the record's description when it
 has one, and of its tag string (`"warm golden tones, deep blacks"`) when it does
 not; a record with neither carries no vector and contributes no description
-term. Both builders fill it in **one** sidecar process per build: the whole
+term. Since S2 that description can be real prose from `describe.py` rather
+than a re-spelling of the tags, and prose wins whenever both exist — the tag
+string is the fallback, not the preference. Both builders fill it in **one** sidecar process per build: the whole
 build's texts go out as a single `--text-manifest` JSONL and come back in
 record order. The look build used to re-invoke the sidecar — a fresh 1.5 GB
 model load and a second image forward pass — once per photograph, and the RAW
 build did not compute the vector at all, which made `W_DESC` structurally dead
 on every RAW index.
+
+#### Qwen3-VL-2B look descriptions (S2)
+
+`python/describe.py` is the fifth sidecar and the second model in the style
+path. It writes ONE sentence per photograph about its **grade** — white balance
+lean, tonality, contrast, saturation and colour treatment, finishing, mood —
+and is fenced against naming the subject. The point is coverage the fixed
+vocabulary cannot have: `embed.py --vocab-file` can only score a photograph
+against 33 designed phrases, while a sentence can say something none of them
+spells.
+
+| Property | Value |
+|---|---|
+| Repository | `Qwen/Qwen3-VL-2B-Instruct` |
+| Revision | `89644892e4d85e24eaac8bacfd4f463576704203` (40-hex commit) |
+| Licence | Apache-2.0, ungated, no remote code |
+| Files pinned | `10`, each on sha256 + exact byte count |
+| Download | `4,255,140,312 B` weights + `11,499,164 B` of config/tokenizer = `4.27 GB` |
+| Precision | bfloat16 on CUDA (`--bf16`), fp32 on CPU |
+| Peak VRAM | `4.03 GiB` allocated / `4.07 GiB` reserved, measured on an RTX 4060 Ti 8 GB |
+| Decoding | greedy — `do_sample=False`, `num_beams=1`, `max_new_tokens=80`, seed `0` |
+| Input | the SAME staged 512-px frame the SigLIP image tower reads; RAWs are never decoded twice |
+
+**Why this model.** Licence is a selection criterion here as everywhere else in
+the tree, and it disqualified the obvious alternative on a second ground as
+well. Florence-2 is MIT, but its repositories ship an `auto_map`, so it can only
+be loaded by enabling `trust_remote_code` — which downloads and executes
+upstream Python through Hugging Face's cache, where this family's digest gate
+cannot see it. BLIP and BLIP-2 are natively supported and licence-clean but are
+*subject* captioners ("a man standing on a beach"), and a subject is the one
+thing this sidecar must never emit. A paid vision API was rejected by the
+user's ruling of 2026-08-29: a library rebuild is otherwise free and offline,
+and a per-photograph call would both put a bill behind it and send the
+photographs to a third party to produce a field that lives in a local index.
+Qwen3-VL declares `architectures = ["Qwen3VLForConditionalGeneration"]` with no
+`auto_map` and is implemented natively by transformers 5.2.0, so the checkpoint
+loads through NAMED classes (`Qwen3VLForConditionalGeneration`,
+`Qwen3VLProcessor`) with `local_files_only=True`.
+
+**The prompt is a versioned constant.** One English sentence, 293 characters,
+carried in every record the sidecar emits together with the repo and revision,
+because those four facts are the description cache's key. Editing a character
+without bumping `PROMPT_VERSION` would serve the old prompt's answers for ever;
+a Rust test pins the version and the prompt's three load-bearing clauses
+against the sidecar's own source.
+
+**Descriptions are cached by CONTENT.** `style-descriptions.json` beside the
+index maps the sha256 of the staged frame's bytes to `{desc, model, revision,
+prompt_version}`, capped at `20,000` entries under a re-derived file bound, so a
+rebuild describes only what changed and a corrupt cache is rebuilt rather than
+trusted. The model's output is UNTRUSTED text: it is bounded to one line of at
+most `512` characters at the door in both languages, invisible format characters
+stripped, and every surface that renders it — the two proposer reference blocks
+and the `style-query` diagnostic — passes it through that same door again.
 
 The two populations have separate caps because one file holds both: 5,000 RAW
 exemplars and **500 looks**, against a 40 KiB per-record bound and a 228 MiB
@@ -971,9 +1027,9 @@ and zero-confidence fields are conservation-tested to change nothing.
   (**designed do-no-harm rule**).
 - Style features: 14 dimensions in the persisted normalization block, with
   only dimensions having useful variance z-scored (**designed representation**).
-- SigLIP 2: 768-dimensional image and text vectors. `W_EMB = 4`, `W_TXT = 0`,
-  `W_DESC = 4` are the corpus harness's winners (**calibration-controlled**;
-  see *Measured results*). `W_LOOK = 1.0` is a **normalisation, not a
+- SigLIP 2: 768-dimensional image and text vectors. `W_EMB = 4`, `W_TXT = 4`,
+  `W_DESC = 0.5` are the corpus harness's winners after the S2 recalibration on
+  the described index (**calibration-controlled**; see *Measured results*). `W_LOOK = 1.0` is a **normalisation, not a
   calibrated number**: the look library carries no develop settings, so the
   harness's leave-one-out settings objective cannot see it at all, and no other
   term ranks looks against each other, so the scale cannot change their order —
@@ -982,20 +1038,26 @@ and zero-confidence fields are conservation-tested to change nothing.
   computed against every candidate first, z-scored over that candidate set, and
   only then weighted) because raw SigLIP image↔text cosines are tiny and
   tightly clustered, so a raw term barely reorders anything and a grid over it
-  can find 0 for the wrong reason. The harness evaluated BOTH variants over the
-  whole grid and the raw one won (best raw 0.687031 against best standardised
-  0.694064), so `STANDARDISE_TEXT_TERMS = false` ships and the standardising
-  path stays one flag away, tested. Below three comparable candidates, or with
-  a degenerate spread, the standardised variant falls back to the raw gap and
-  discloses it (**measured variant choice, mutation-tested**).
+  can find 0 for the wrong reason. S1 evaluated both variants and the raw one
+  won — on a grid whose query text and `desc_embed` vectors were both the
+  exemplar's tag string, because no exemplar had a description yet. S2's
+  recalibration on the described index reverses it: best standardised
+  `(4, 4, 0.5)` = 0.664818 against best raw `(4, 2, 0)` = 0.693811, and only
+  the standardised variant's text terms beat their own variant's text-free row
+  with a paired CI excluding 0. `STANDARDISE_TEXT_TERMS = true` therefore ships
+  and the raw path stays one flag away, tested. Below three comparable
+  candidates, or with a degenerate spread, the standardised variant falls back
+  to the raw gap and discloses it (**measured variant choice,
+  mutation-tested**).
 - Four environment overrides, each read in exactly one place and never again:
   `AUTOSHOP_STYLE_EMBED_WEIGHT`, `AUTOSHOP_STYLE_TEXT_WEIGHT`,
   `AUTOSHOP_STYLE_DESC_WEIGHT`, `AUTOSHOP_STYLE_LOOK_WEIGHT`. All four parse the
   same way — trimmed, finite, non-negative, otherwise the shipped default (a
-  negative weight would rank the *least* similar photo first). The sidecar
-  switch `AUTOSHOP_STYLE_EMBED` is likewise resolved once, as a value:
-  `--embed`/`--no-embed` and the GUI preference travel on the develop request,
-  and nothing writes the process environment to express a flag.
+  negative weight would rank the *least* similar photo first). The two sidecar
+  switches `AUTOSHOP_STYLE_EMBED` and `AUTOSHOP_STYLE_DESCRIBE` are likewise
+  resolved once, as values: `--embed`/`--no-embed`, `--describe` and the GUI
+  preferences travel on the request, and nothing writes the process environment
+  to express a flag.
 - Foreign-hue veto: distance `>=45 deg` and newly painted share `>=5%`
   (**calibrated against known cast failures and haze controls**).
 - Reimagine flexible-size budget: dimensions are multiples of 16, aspect ratio
@@ -1021,16 +1083,40 @@ and zero-confidence fields are conservation-tested to change nothing.
   best grid point both have pooled z-scored settings MAE `0.261116` (no
   synthetic evidence for a nonzero term).
 - The corpus harness covers `169` exemplars and `156` settings-bearing queries
-  over `196` grid rows, with the query text proxy produced by the pinned SigLIP
-  2 text tower in ONE `--text-manifest` batch (`169` vectors), not by a hash.
-  Baseline `(0,0,0)` MAE is `0.713143`; the winner is `(4,0,4)` in the RAW
-  variant with MAE `0.687031`, improvement `+0.026112`, and seeded paired
-  bootstrap 95% CI `[+0.014466,+0.043656]` (seed `20260829`, 2000 resamples).
-  The best standardised row is `(4,0,1)` at `0.694064`. `W_TXT` ships at 0
-  because no row with a non-zero `W_TXT` beat the best `W_TXT = 0` row. The
-  leave-one-out observations are CORRELATED (every exemplar appears in other
-  queries' neighbourhoods), so the interval describes this corpus and is not a
-  population confidence interval.
+  over `196` grid rows **per proxy**, with the query text produced by the
+  pinned SigLIP 2 text tower in ONE `--text-manifest` batch (`338` vectors —
+  `169` prose and `169` tag strings), not by a hash. Since S2 it sweeps TWO
+  query-text proxies, because the index now holds two kinds of text and they
+  are not interchangeable: the held-out exemplar's own local DESCRIPTION, and
+  its attribute TAG STRING (which is what S1 measured whenever a record had no
+  description — i.e. always).
+  - Baseline `(0,0,0)` MAE is `0.713143`. Under the **prose** proxy the winner
+    is `(4,4,0.5)` STANDARDISED at `0.664818`, improvement `+0.048325`, seeded
+    paired bootstrap 95% CI `[+0.024290,+0.078587]` (seed `20260829`, 2000
+    resamples). Under the **tags** proxy the best row is `(4,2,0.5)` raw at
+    `0.692801`.
+  - The text terms are judged against their own variant's best TEXT-FREE row,
+    not only against the 14-dim baseline — every row carrying a `W_EMB` block
+    beats that baseline whether or not it has text terms. Prose + standardised
+    beats text-free `(4,0,0)` with paired CI `[+0.001589,+0.055436]`; prose +
+    raw does not (`[-0.001834,+0.004821]`); and under the tags proxy neither
+    variant does. **The prose, not the vocabulary, is what earns the text
+    terms.**
+  - `W_DESC` moved from `4` to `0.5` because S1's `4` was measured with the tag
+    string on BOTH sides. With real prose the old point `(4,0,4)` scores
+    `0.698491` — worse than the text-free `(4,0,0)` at `0.695233` — so the
+    previous number could not be left in place.
+  - DISCLOSED, twice over: (a) the variant head-to-head is NOT significant —
+    paired (raw-best − standardised-best) 95% CI `[-0.000205,+0.054341]`
+    includes 0, barely — so the variant choice rests on which won and on which
+    variant's text terms earn their keep, not on a significant gap between the
+    two best rows; and (b) the query-text proxy is the held-out exemplar's own
+    description, i.e. a text that describes the query photograph perfectly,
+    while a user's typed Direction is not that. Both text weights are therefore
+    calibrated on a friendlier query than they will see.
+  - The leave-one-out observations are CORRELATED (every exemplar appears in
+    other queries' neighbourhoods), so every interval describes this corpus and
+    is not a population confidence interval.
 - The foreign-hue gate is intentionally categorical: a cast that improves an
   aggregate RGB error can still be rejected if it paints a target-absent hue.
 - A streamed `2048x1360` size refusal is attributed to `size` and can negotiate

@@ -11,15 +11,29 @@ dividing by each key's spread (so a Kelvin and a contrast slider count the
 same).  Lower is better; a WEIGHT is worth shipping only if it lowers this AND
 its paired bootstrap CI against the 14-dim baseline excludes 0.
 
-The query TEXT proxy is REAL
-----------------------------
-Until this batch the "text proxy" was a SHA-256-seeded vector, so W_TXT and
-W_DESC were never calibrated at all: the harness measured the geometry of a
-hash.  The proxy is now the held-out exemplar's own description text through
-the pinned SigLIP 2 text tower, produced by ONE ``python/embed.py
---text-manifest`` batch over the whole index and cached
-(``--proxies``/``--build-proxies``), so the 1.5 GB checkpoint is loaded once
-per corpus and never during a grid sweep.
+The query TEXT proxy is REAL, and there are TWO of them
+------------------------------------------------------
+Until S1 the "text proxy" was a SHA-256-seeded vector, so W_TXT and W_DESC were
+never calibrated at all: the harness measured the geometry of a hash.  The
+proxy is now the held-out exemplar's own text through the pinned SigLIP 2 text
+tower, produced by ONE ``python/embed.py --text-manifest`` batch over the whole
+index and cached (``--proxies``/``--build-proxies``), so the 1.5 GB checkpoint
+is loaded once per corpus and never during a grid sweep.
+
+S2 splits that into TWO proxies, because there are now two kinds of text in the
+index and they are not interchangeable:
+
+  * ``prose``  - the held-out exemplar's own local DESCRIPTION (describe.py).
+  * ``tags``   - its attribute tag string, which is what S1 measured whenever
+                 an exemplar had no description.
+
+Both grids are swept and both tables printed.  This is the question S2 has to
+answer honestly: a description weight calibrated on the tag string would ship
+a W_DESC that the prose never earned, and a description weight that only ever
+sees prose cannot say whether the prose beats the tags it replaced.  The
+recommendation at the bottom is the best point across BOTH proxies, and it
+still has to beat the 14-dim baseline with a paired bootstrap CI excluding 0 —
+otherwise the weight ships at 0.
 
 Raw vs standardised
 -------------------
@@ -67,6 +81,11 @@ GRID_DESC = (0.0, 0.5, 1.0, 2.0, 4.0)
 MIN_STANDARDISATION_CANDIDATES = 3
 # Mirrors `style::MAX_DESC_CHARS`.
 MAX_DESC_CHARS = 512
+# The proxy cache layout. S1 wrote ONE text set at the top level; S2 writes
+# one block per proxy kind, and a cache without this key is refused rather
+# than half-read — the old file cannot be split into prose and tags after
+# the fact, and reading it as either would silently mis-attribute a weight.
+PROXY_CACHE_FORMAT = "two-proxy/1"
 
 
 # ---------------------------------------------------------------- index I/O
@@ -179,28 +198,54 @@ def synthetic_records():
 # -------------------------------------------------------------- text proxies
 
 
-def proxy_texts(data):
-    """The string whose SigLIP text vector stands in for each query's direction."""
-    return [desc_text(r.get("desc"), r["tags"]) for r in data["exemplars"]]
+PROXY_KINDS = ("prose", "tags")
+
+
+def proxy_texts(data, kind):
+    """The string whose SigLIP text vector stands in for each query's direction.
+
+    Two kinds, never blended: `prose` is the exemplar's own local description
+    and is None where there is none, `tags` is its attribute tag string. S1's
+    single proxy was `desc or tags`, which silently measured whichever the
+    record happened to carry — so a corpus that was half described produced one
+    number for two different experiments.
+    """
+    if kind not in PROXY_KINDS:
+        raise ValueError(f"unknown proxy kind {kind!r}")
+    out = []
+    for r in data["exemplars"]:
+        if kind == "prose":
+            desc = r.get("desc")
+            out.append(desc.strip()[:MAX_DESC_CHARS] if isinstance(desc, str) and desc.strip() else None)
+        else:
+            out.append(", ".join(r["tags"]) if r["tags"] else None)
+    return out
 
 
 def build_proxies(data, out_path, python_bin, script):
-    """ONE `--text-manifest` batch over the whole index.
+    """ONE `--text-manifest` batch over BOTH proxy sets for the whole index.
 
-    A proxy per exemplar, in index order, cached with the provenance of the run
-    that made it — the checkpoint, the tokenizer door and the exact texts —
-    because a cache built through the OTHER tokenizer door (this batch's F-11)
-    is not comparable and must not look identical.
+    One batch, not two: the checkpoint is 1.5 GB and the manifest door already
+    takes N texts, so the prose and the tag strings go out together and are
+    split apart again by the offsets recorded here.
+
+    Cached with the provenance of the run that made it — the checkpoint, the
+    tokenizer door and the exact texts — because a cache built through the
+    OTHER tokenizer door (S1's F-11) is not comparable and must not look
+    identical.
     """
-    texts = proxy_texts(data)
-    live = [i for i, t in enumerate(texts) if t]
-    if not live:
+    kinds = {kind: proxy_texts(data, kind) for kind in PROXY_KINDS}
+    live = {kind: [i for i, t in enumerate(texts) if t] for kind, texts in kinds.items()}
+    flat = []
+    for kind in PROXY_KINDS:
+        flat.extend(kinds[kind][i] for i in live[kind])
+    if not flat:
         raise SystemExit("no exemplar carries a description or tags, so there is no proxy to build")
     with tempfile.TemporaryDirectory() as tmp:
         manifest = Path(tmp) / "proxies.jsonl"
         result = Path(tmp) / "proxies.json"
         manifest.write_text(
-            "\n".join(json.dumps({"text": texts[i]}, ensure_ascii=False) for i in live) + "\n",
+            "\n".join(json.dumps({"text": t}, ensure_ascii=False) for t in flat) + "\n",
             encoding="utf-8",
         )
         cmd = [python_bin, "-E", str(script), "--text-manifest", str(manifest), "--output", str(result)]
@@ -208,37 +253,62 @@ def build_proxies(data, out_path, python_bin, script):
         subprocess.run(cmd, check=True)
         payload = json.loads(result.read_text(encoding="utf-8"))
     vectors = payload["text_vectors"]
-    if len(vectors) != len(live):
-        raise SystemExit(f"sidecar returned {len(vectors)} vectors for {len(live)} texts")
+    if len(vectors) != len(flat):
+        raise SystemExit(f"sidecar returned {len(vectors)} vectors for {len(flat)} texts")
     out = {
+        "format": PROXY_CACHE_FORMAT,
         "model": payload.get("model"),
         "revision": payload.get("revision"),
         "tokenizer": "GemmaTokenizer",
         "index_provenance": data.get("provenance"),
-        "count": len(live),
-        "order": live,
-        "texts": [texts[i] for i in live],
-        "vectors": vectors,
+        "kinds": {},
     }
+    at = 0
+    for kind in PROXY_KINDS:
+        order = live[kind]
+        out["kinds"][kind] = {
+            "count": len(order),
+            "order": order,
+            "texts": [kinds[kind][i] for i in order],
+            "vectors": vectors[at : at + len(order)],
+        }
+        at += len(order)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(json.dumps(out), encoding="utf-8")
-    print(f"wrote {out_path} ({len(live)} proxy vectors)")
+    print(
+        "wrote {} ({})".format(
+            out_path,
+            ", ".join(f"{k}: {out['kinds'][k]['count']} proxy vectors" for k in PROXY_KINDS),
+        )
+    )
     return out
 
 
 def load_proxies(data, path):
     """The cached proxies, checked against the index they claim to describe."""
     cached = json.loads(path.read_text(encoding="utf-8"))
-    texts = proxy_texts(data)
-    live = [i for i, t in enumerate(texts) if t]
-    if cached.get("order") != live or cached.get("texts") != [texts[i] for i in live]:
+    if cached.get("format") != PROXY_CACHE_FORMAT:
         raise SystemExit(
-            f"{path} was built for a different index (different texts or order) — rebuild it "
-            "with --build-proxies"
+            f"{path} is a pre-S2 single-proxy cache (format "
+            f"{cached.get('format')!r}, expected {PROXY_CACHE_FORMAT!r}) — its one text set cannot "
+            "be split into prose and tags after the fact; rebuild it with --build-proxies"
         )
-    out = [None] * len(texts)
-    for slot, vec in zip(cached["order"], cached["vectors"]):
-        out[slot] = np.asarray(vec, dtype=np.float64)
+    out = {}
+    for kind in PROXY_KINDS:
+        texts = proxy_texts(data, kind)
+        live = [i for i, t in enumerate(texts) if t]
+        block = cached.get("kinds", {}).get(kind)
+        if not isinstance(block, dict):
+            raise SystemExit(f"{path} has no {kind!r} proxy set — rebuild it with --build-proxies")
+        if block.get("order") != live or block.get("texts") != [texts[i] for i in live]:
+            raise SystemExit(
+                f"{path} was built for a different index ({kind}: different texts or order) — "
+                "rebuild it with --build-proxies"
+            )
+        vectors = [None] * len(texts)
+        for slot, vec in zip(block["order"], block["vectors"]):
+            vectors[slot] = np.asarray(vec, dtype=np.float64)
+        out[kind] = vectors
     return out, cached
 
 
@@ -418,6 +488,65 @@ def report(data, label, proxies, proxy_note, out=sys.stdout):
             file=out,
         )
 
+    # THE VARIANT CHOICE, evidenced against ITSELF. Every CI above is against
+    # the 14-dim baseline, which cannot decide between two rows that both beat
+    # it — and the raw/standardised choice is exactly such a pair. So the two
+    # variants' best rows are compared to each other, paired, on the
+    # observations they share.
+    best_of = {}
+    for mae, key, _gain, _ci in table:
+        std = key[3]
+        if std not in best_of or mae < best_of[std][0]:
+            best_of[std] = (mae, key)
+    if False in best_of and True in best_of:
+        raw_mae, raw_key = best_of[False]
+        std_mae, std_key = best_of[True]
+        raw_err, std_err = rows[raw_key], rows[std_key]
+        shared = sorted(raw_err.keys() & std_err.keys())
+        h2h = bootstrap_ci(np.array([raw_err[k] - std_err[k] for k in shared]))
+        print(file=out)
+        print(
+            f"variant head-to-head: best raw {raw_key[:3]} MAE {raw_mae:.6f} vs best standardised "
+            f"{std_key[:3]} MAE {std_mae:.6f}; paired (raw - standardised) 95% CI "
+            f"[{h2h[0]:+.6f}, {h2h[1]:+.6f}] — a CI excluding 0 is what makes the variant choice "
+            "measured rather than assumed",
+            file=out,
+        )
+
+    # THE TEXT TERMS, evidenced against the SAME variant without them. The
+    # baseline CI cannot answer "is W_TXT/W_DESC worth anything?" either: every
+    # row that carries a W_EMB block beats the 14-dim baseline, text terms or
+    # not, so the comparison that decides a text weight is against the best row
+    # of the same variant whose text weights are BOTH zero.
+    for std in (False, True):
+        same = [r for r in table if r[1][3] == std]
+        if not same:
+            continue
+        # With both text weights at 0 the two variants are the SAME point, and
+        # `sweep` stores it once under the raw key — so the standardised
+        # variant borrows it rather than having none.
+        quiet = [r for r in table if r[1][1] == 0.0 and r[1][2] == 0.0]
+        if not quiet:
+            continue
+        best_all = min(same, key=lambda r: r[0])
+        best_quiet = min(quiet, key=lambda r: r[0])
+        if best_all[1] == best_quiet[1]:
+            print(
+                f"text terms ({'standardised' if std else 'raw'}): the best row already has both "
+                "text weights at 0 — nothing to compare, they ship at 0",
+                file=out,
+            )
+            continue
+        a, b = rows[best_quiet[1]], rows[best_all[1]]
+        shared = sorted(a.keys() & b.keys())
+        ci = bootstrap_ci(np.array([a[k] - b[k] for k in shared]))
+        print(
+            f"text terms ({'standardised' if std else 'raw'}): best row {best_all[1][:3]} MAE "
+            f"{best_all[0]:.6f} vs best text-free row {best_quiet[1][:3]} MAE {best_quiet[0]:.6f}; "
+            f"paired (text-free - with-text) 95% CI [{ci[0]:+.6f}, {ci[1]:+.6f}]",
+            file=out,
+        )
+
     # SHIPPABLE = beats the baseline with a CI that excludes 0. Anything else
     # ships at the baseline's own value, which for the text terms is 0.
     shippable = [r for r in table if r[3] is not None and r[3][0] > 0.0 and r[2] > 0.0]
@@ -521,6 +650,16 @@ def self_test():
     assert "<- baseline" in text
     assert n == 10
 
+    # The two proxies really are two experiments: swapping the query vectors
+    # for a different set moves the table. (Here the stand-in is the IMAGE
+    # vector, which is a different geometry from the description one.)
+    other = [r["embed"] for r in data["exemplars"]]
+    buf2 = _io.StringIO()
+    table2, _ = report(data, "synthetic self-test", other, "synthetic fixture vectors", out=buf2)
+    assert [row[0] for row in table] != [row[0] for row in table2], (
+        "the harness must be able to tell two proxies apart"
+    )
+
     print(f"calibrate_style_retrieval self-test: PASS ({expected} grid rows, {len(base)} observations)")
 
 
@@ -552,18 +691,41 @@ def main():
     if args.build_proxies:
         build_proxies(data, proxy_path, args.python, args.script)
         return
-    if proxy_path.exists():
-        proxies, cached = load_proxies(data, proxy_path)
-        note = (
-            f"SigLIP 2 text tower, {cached.get('model')}@{str(cached.get('revision'))[:12]} "
-            f"tokenizer={cached.get('tokenizer')}, {cached.get('count')} vectors, cached at {proxy_path}"
-        )
-    else:
+    if not proxy_path.exists():
         raise SystemExit(
             f"no text proxies at {proxy_path} — run with --build-proxies first (ONE sidecar batch), "
             "or the text terms would be measured against nothing"
         )
-    report(data, str(path), proxies, note)
+    proxies, cached = load_proxies(data, proxy_path)
+    tower = (
+        f"SigLIP 2 text tower, {cached.get('model')}@{str(cached.get('revision'))[:12]} "
+        f"tokenizer={cached.get('tokenizer')}, cached at {proxy_path}"
+    )
+    best = None
+    for kind in PROXY_KINDS:
+        block = cached["kinds"][kind]
+        note = f"{kind} ({block['count']} vectors) — {tower}"
+        print()
+        _, shippable = report(data, f"{path} [proxy={kind}]", proxies[kind], note)
+        if shippable and (best is None or shippable[0][0] < best[1][0]):
+            best = (kind, shippable[0])
+
+    # THE ANSWER, across both proxies. A weight ships only if the point that
+    # earned it beat the 14-dim baseline with a CI excluding 0 — otherwise the
+    # text terms ship at the baseline's own value, which is 0.
+    print()
+    if best is None:
+        print(
+            "SHIPPED WEIGHTS: W_EMB=0, W_TXT=0, W_DESC=0 — no grid point under either proxy beat "
+            "the 14-dim baseline with a CI excluding 0"
+        )
+        return
+    kind, (mae, key, gain, ci) = best
+    print(
+        f"SHIPPED WEIGHTS (winner across both proxies, proxy={kind}): W_EMB={key[0]:g}, "
+        f"W_TXT={key[1]:g}, W_DESC={key[2]:g}, variant={'standardised' if key[3] else 'raw'} "
+        f"(MAE {mae:.6f}, {gain:+.6f} vs baseline, CI [{ci[0]:+.6f}, {ci[1]:+.6f}])"
+    )
 
 
 if __name__ == "__main__":

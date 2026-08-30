@@ -212,6 +212,128 @@ fn parse_unit_vector(arr: &[serde_json::Value], key: &str) -> Result<Vec<f32>> {
     Ok(out)
 }
 
+/// One line of `embed.py --manifest-jsonl`'s JSONL answer: the frame, and
+/// either its record or the sidecar's own reason for declining it.
+#[derive(Debug, Clone)]
+pub struct EmbedBatchRecord {
+    pub path: String,
+    pub record: Option<EmbedRecord>,
+    pub error: Option<String>,
+}
+
+/// The BATCH IMAGE door's argv — N frames in one process, one model load.
+///
+/// It exists for the same reason the batch TEXT door does, one step later:
+/// until S2 `StyleIndex::build` called this sidecar once PER PHOTOGRAPH on the
+/// image side too, so a 169-photo library re-loaded 1.50 GB of weights 169
+/// times — 5,618 s measured on the photographer's own corpus. `embed.py` has
+/// implemented `--manifest-jsonl` since R27 Batch-5; nothing was wired to it.
+fn image_batch_args(
+    script: &Path,
+    manifest: &Path,
+    output: &Path,
+    fp16: bool,
+    vocab_file: Option<&Path>,
+) -> Vec<std::ffi::OsString> {
+    let mut v: Vec<std::ffi::OsString> = vec![
+        // `-E`: the second layer against a PYTHON* import hijack (the env
+        // allowlist in `dotenv_child_env` is the first).
+        "-E".into(),
+        script.into(),
+        "--manifest-jsonl".into(),
+        manifest.into(),
+        "--output".into(),
+        output.into(),
+    ];
+    if fp16 {
+        v.push("--fp16".into());
+    }
+    if let Some(p) = vocab_file {
+        v.extend(["--vocab-file".into(), p.into()]);
+    }
+    v
+}
+
+/// Run the sidecar over a JSONL manifest of IMAGE paths and return one record
+/// per line, in the sidecar's own order.
+///
+/// The caller maps them back by PATH, never by position: `embed.py` reports a
+/// malformed manifest line as soon as it reads it and the rest in batch order,
+/// so a positional zip would attach one photograph's vector to another's
+/// exemplar — the failure [`parse_text_vectors`] refuses a short batch to
+/// avoid.
+pub fn embed_image_batch(
+    opts: &EmbedOpts,
+    manifest: &Path,
+    scratch: &Path,
+) -> Result<Vec<EmbedBatchRecord>> {
+    if !opts.script.exists() {
+        bail!(
+            "style-embedding sidecar not found at {} — run from the project dir or set \
+             AUTOSHOP_EMBED_SCRIPT.",
+            opts.script.display()
+        );
+    }
+    let text = crate::run_model_sidecar(
+        "style-embedding sidecar",
+        &opts.python_bin,
+        image_batch_args(
+            &opts.script,
+            manifest,
+            scratch,
+            fp16_wanted(),
+            opts.vocab_file.as_deref(),
+        ),
+        scratch,
+    )?;
+    let out = parse_batch_records(&text).with_context(|| {
+        format!("style-embedding sidecar wrote an unusable image batch at {}", scratch.display())
+    })?;
+    let _ = std::fs::remove_file(scratch);
+    Ok(out)
+}
+
+/// The sidecar's JSONL → records, each vector through the same width /
+/// finiteness / unit-norm gate a single record goes through.
+///
+/// A line that is not JSON fails the WHOLE batch: every line the sidecar
+/// writes it composed itself, and text it did not compose means the file is
+/// not the answer it claims to be. A line carrying `error` is one
+/// photograph's failure and is kept as one — the fail-soft contract.
+pub fn parse_batch_records(text: &str) -> Result<Vec<EmbedBatchRecord>> {
+    let mut out = Vec::new();
+    for (i, line) in text.lines().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let value: serde_json::Value = serde_json::from_str(line.trim())
+            .with_context(|| format!("style-embedding batch line {} is not JSON", i + 1))?;
+        let path = value
+            .get("path")
+            .and_then(|v| v.as_str())
+            .with_context(|| format!("style-embedding batch line {} names no path", i + 1))?
+            .to_string();
+        if let Some(e) = value.get("error").and_then(|v| v.as_str()) {
+            out.push(EmbedBatchRecord { path, record: None, error: Some(e.to_string()) });
+            continue;
+        }
+        match parse_record(line.trim()) {
+            Ok(record) => out.push(EmbedBatchRecord { path, record: Some(record), error: None }),
+            // A record that fails the DOOR (wrong width, unnormalised, a
+            // non-finite element) is this photograph's failure, not the
+            // batch's: the index is allowed to be a mixed one, and refusing
+            // 168 good vectors over one bad line would be the opposite of the
+            // contract the per-line `error` arm keeps.
+            Err(e) => out.push(EmbedBatchRecord {
+                path,
+                record: None,
+                error: Some(format!("{e:#}")),
+            }),
+        }
+    }
+    Ok(out)
+}
+
 /// The sidecar's argv, as a pure function of the four things that decide it —
 /// so the flags this build passes can be pinned by a test instead of being
 /// visible only to a running Python.
@@ -514,13 +636,19 @@ mod tests {
         include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/python/segment.py"));
     const CORRESPOND_SRC: &str =
         include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/python/correspond.py"));
+    const DESCRIBE_SRC: &str =
+        include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/python/describe.py"));
 
-    /// The family roster, in one place: a fifth sidecar that fails to enrol
-    /// here escapes all four shared contracts below.
-    const SIDECARS: [(&str, &str); 3] = [
+    /// The family roster, in one place: a sidecar that fails to enrol here
+    /// escapes all four shared contracts below. `describe.py` (S2) is the
+    /// fifth member of the family and the fourth on this roster —
+    /// `denoise.py` holds the `_fetch_verified` gate itself and is pinned by
+    /// its own module's tests.
+    const SIDECARS: [(&str, &str); 4] = [
         ("embed.py", EMBED_SRC),
         ("segment.py", SEGMENT_SRC),
         ("correspond.py", CORRESPOND_SRC),
+        ("describe.py", DESCRIBE_SRC),
     ];
 
     /// Every pinned model file carries BOTH a sha256 and a byte count, in both

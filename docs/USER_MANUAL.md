@@ -162,8 +162,8 @@ autoshop auto <src> [-o|--out FILE] [--guidance TEXT] [--style 0..1] [--strength
 autoshop denoise <src> [-o|--out FILE] [--strength 0..1] [--model NAME]
 autoshop batch <dir> [--render] [--limit N] [--include-baked] [--jobs N] [--long-edge N]
 autoshop eval <dir> [--limit N] [--jobs N] [--fresh] [--state FILE]
-autoshop style-index <dir> [--embed|--no-embed]
-autoshop style-index --looks <dir> [--embed|--no-embed]
+autoshop style-index <dir> [--embed|--no-embed] [--describe]
+autoshop style-index --looks <dir> [--embed|--no-embed] [--describe]
 autoshop style-query <photo> [--direction TEXT] [--style 0..1] [--embed]
 autoshop reimagine <src> --prompt TEXT [--fidelity high|low] [--quality low|medium|high|auto] [--fidelity-retry] [-o|--out FILE]
 autoshop match <src> <target> [--render] [--zoned] [--regions 2..4] [--style-prompt] [--ai-judge] [--deep] [-o|--out FILE]
@@ -194,20 +194,41 @@ embedding vector is available.
 
 `--embed` opts into the local SigLIP 2 sidecar for that run and `--no-embed`
 refuses it; either flag wins over the environment, and neither writes to it.
+
+`--describe` adds the local **look-description** pass to an index build. A
+second local model (Qwen3-VL-2B-Instruct, Apache-2.0) writes ONE short sentence
+per photo about its *grade* — white balance lean, tonality, contrast,
+saturation and colour treatment, finishing, mood — and never about the subject.
+That sentence is what the SigLIP text tower embeds for that record, in place of
+the fixed attribute tags, and it is what `style-query` prints beside the
+`desc=` term and what the proposer's reference blocks carry after the tags.
+
+The pass needs `--embed` (the prose only reaches the ranking through the text
+tower), and the **first run downloads about 4.3 GB** of weights into
+`python/weights/` — every file pinned to a 40-hex Hugging Face commit and gated
+on its own sha256 and exact byte count. It is off by default on both front
+ends. Nothing leaves this machine and nothing is billed. Descriptions are
+cached by frame CONTENT in `style-descriptions.json` beside the index, so a
+rebuild only describes the photographs that actually changed; editing the
+prompt bumps a version that invalidates the cache rather than serving the old
+prompt's answers for ever. In the desktop app the same switch is the *Describe
+looks with the local vision model* checkbox, which stays greyed out until the
+embedding checkbox above it is on.
 `--adherence 0..1` picks the prompt tier the proposer and verifier are told:
 `<=0.40` Hint, `0.40..0.70` Direct, above `0.70` Brief, default `0.65`
 (Direct). It is prompt intent only — it never moves a render bound — and it
 does nothing without a `--guidance` direction, which is why the desktop app
 greys the slider out until Direction has text.
 
-Five environment overrides steer retrieval, each read in exactly one place:
+Six environment overrides steer retrieval, each read in exactly one place:
 
 | Variable | Effect |
 |---|---|
 | `AUTOSHOP_STYLE_EMBED` | `1`/`0` — use the SigLIP sidecar. Set (any value) beats the GUI preference; `--embed`/`--no-embed` beats both. |
+| `AUTOSHOP_STYLE_DESCRIBE` | `1`/`0` — run the local look-description pass during an index build. Set (any value) beats the GUI preference; `--describe` beats both. It never turns the embedding on by itself. |
 | `AUTOSHOP_STYLE_EMBED_WEIGHT` | `W_EMB`, the query-image ↔ exemplar-image cosine block. `0` reproduces the 14-dimension ranking exactly. |
-| `AUTOSHOP_STYLE_TEXT_WEIGHT` | `W_TXT`, the Direction-text ↔ exemplar-image term. Ships at `0`: no grid row with a non-zero `W_TXT` beat the best `W_TXT = 0` row. |
-| `AUTOSHOP_STYLE_DESC_WEIGHT` | `W_DESC`, the Direction-text ↔ exemplar-description term. Ships at `4` — the calibration winner, worth `+0.026112` settings MAE against the 14-dimension baseline. |
+| `AUTOSHOP_STYLE_TEXT_WEIGHT` | `W_TXT`, the Direction-text ↔ exemplar-image term. Ships at `4` since the S2 recalibration on an index with real descriptions; it shipped at `0` while the only query text available to the harness was a tag string. |
+| `AUTOSHOP_STYLE_DESC_WEIGHT` | `W_DESC`, the Direction-text ↔ exemplar-description term. Ships at `0.5`. It shipped at `4` when both sides of the term were tag strings; with real prose that point measures *worse* than switching the term off, so it was re-fitted. |
 | `AUTOSHOP_STYLE_LOOK_WEIGHT` | `W_LOOK`, the look-library image term. |
 
 All four weights parse the same way: trimmed, and taken only if finite and

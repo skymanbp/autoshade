@@ -461,12 +461,20 @@ impl AutoshopApp {
                     build = have;
                 }
             });
-            if let Some((done, total)) = self.style_build_progress {
+            if let Some((stage, done, total)) = self.style_build_progress {
+                // The STAGE is named (S2): the build is four phases over the
+                // whole library and only the first reports per record, so a
+                // bare pair would sweep 0..N three times with nothing to say
+                // which sweep this is.
                 ui.label(
                     egui::RichText::new(trf(
                         lang,
-                        "{done} / {total} photos",
-                        &[("done", &done.to_string()), ("total", &total.to_string())],
+                        "{stage}: {done} / {total} photos",
+                        &[
+                            ("stage", tr(lang, stage.label())),
+                            ("done", &done.to_string()),
+                            ("total", &total.to_string()),
+                        ],
                     ))
                     .weak()
                     .small(),
@@ -515,6 +523,17 @@ impl AutoshopApp {
         });
         ui.checkbox(&mut self.style_embed, tr(lang, "Use SigLIP 2 look embedding (downloads 1.5 GB once; index builds and analyses take longer)"))
             .on_hover_text(tr(lang, "Embedding is optional and local. The environment override wins when set; rebuild the index after changing this switch."));
+        // The description pass needs the embedding pass: it runs over the same
+        // staged frames, and its prose only reaches the ranking through the
+        // SigLIP text tower.
+        ui.add_enabled_ui(self.style_embed, |ui| {
+            ui.checkbox(&mut self.style_describe, tr(lang, "Describe looks with the local vision model (downloads 4.3 GB once; slower builds)"))
+                .on_hover_text(if self.style_embed {
+                    tr(lang, "Writes ONE short sentence per photo about its GRADE — white balance, tonality, contrast, colour, finishing — with a local model (Qwen3-VL-2B). Nothing leaves this machine and nothing is billed. Descriptions are cached by frame content, so a rebuild only describes what changed. Off = the fixed attribute tags alone.")
+                } else {
+                    tr(lang, "Turn on the look embedding first — the description pass runs over the same frames")
+                });
+        });
         ui.separator();
         group_caption(ui, tr(lang, "Look library"));
         if let Some(info) = &self.style_info

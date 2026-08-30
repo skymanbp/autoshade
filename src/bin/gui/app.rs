@@ -71,6 +71,10 @@ pub(crate) struct AutoshopApp {
     /// surface (batch, eval) is structurally unable to turn it on.
     pub(crate) deep_think: bool,
     pub(crate) style_embed: bool,
+    /// Step 14 / S2: also write a LOCAL prose description of each record's
+    /// grade. Persisted, OFF by default — it downloads 4.3 GB once and makes
+    /// every build slower, which is not a cost an upgrade may take unasked.
+    pub(crate) style_describe: bool,
     /// The folder the style library was last built FROM — prefilled into the
     /// picker so a rebuild does not mean finding it again. Persisted.
     pub(crate) style_src_dir: Option<PathBuf>,
@@ -88,9 +92,12 @@ pub(crate) struct AutoshopApp {
     /// the whole app for that would be worse than the missing entry point this
     /// closes. Only the build button gates on it.
     pub(crate) style_build_inflight: bool,
-    /// `(completed, total)` of the running build — typed facts, worded at draw
-    /// time (L12#4).
-    pub(crate) style_build_progress: Option<(usize, usize)>,
+    /// The running build's `(stage, completed, total)` — typed facts, worded
+    /// at draw time (L12#4). The STAGE joined the pair in S2, when the build
+    /// became four phases over the whole library and only the first of them
+    /// can report per record: a bare pair would have swept 0..N three times
+    /// with nothing to say which sweep the user was looking at.
+    pub(crate) style_build_progress: Option<(autoshop::style::BuildStage, usize, usize)>,
     pub(crate) hsl_tab: usize, // Color Mixer property tab: 0=Hue 1=Saturation 2=Luminance
     pub(crate) grade_region: usize,
     pub(crate) guidance: String, // free-text direction for the AI ("warmer, moodier")
@@ -1560,6 +1567,7 @@ impl Default for AutoshopApp {
             // OFF, same rule and a bigger bill (up to 17 calls per analyze).
             deep_think: false,
             style_embed: false,
+            style_describe: false,
             style_src_dir: None,
             looks_src_dir: None,
             use_looks: true,
@@ -1966,6 +1974,7 @@ impl eframe::App for AutoshopApp {
                 send_style_ref_image: self.send_style_ref_image,
                 deep_think: self.deep_think,
                 style_embed: self.style_embed,
+                style_describe: self.style_describe,
                 style_src_dir: self.style_src_dir.clone(),
                 looks_src_dir: self.looks_src_dir.clone(),
                 use_looks: self.use_looks,

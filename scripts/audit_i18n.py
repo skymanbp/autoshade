@@ -62,6 +62,7 @@ I18N = (_GUI_DIR / "i18n.rs").read_text(encoding="utf-8")
 RECIPE = (REPO / "src" / "recipe.rs").read_text(encoding="utf-8")
 ADVISOR = (REPO / "src" / "advisor" / "mod.rs").read_text(encoding="utf-8")
 RATIONALE = (REPO / "src" / "rationale.rs").read_text(encoding="utf-8")
+STYLE = (REPO / "src" / "style.rs").read_text(encoding="utf-8")
 
 # ── Dynamic-key registry ────────────────────────────────────────────────────
 # Every `tr(lang, <non-literal>)` call site must match one of these argument
@@ -76,6 +77,9 @@ DYNAMIC_SITES = [
     (r"^(?:self\.variants\[self\.active\]\.|v\.)?kind\.label\(\)", "VariantKind::label"),
     (r"^(?:self\.theme|t)\.label\(\)", "ThemePref::label"),
     (r"^(?:self\.exp_format|f)\.label\(\)", "ExportFormat::label"),
+    # S2: the index build's phase names (`style::BuildStage::label`), rendered
+    # by the AI panel's progress line and the status bar.
+    (r"^stage\.label\(\)", "BuildStage::label"),
     # R22-7 export DESTINATION labels. `ExportDest::Ask.label()` is the export
     # summary naming the ask-state through the same table rather than owning a
     # second spelling of it, so it belongs on this pattern too.
@@ -93,6 +97,11 @@ DYNAMIC_SITES = [
     # (heal-tail notes at landing) both interpolate rationale Note templates
     # (L12#2B) — the key set itself is extracted from rationale::keys above.
     (r"^(?:n|note)[.]key", "rationale Note keys"),
+    # …and the same templates named DIRECTLY by their constant, which is what
+    # a surface does when it renders one note rather than a report's whole
+    # note list (S2: `described_note` in workers.rs). Same key set, same
+    # extraction — `("impl_fn", "rationale", "pub mod keys", "mod keys")`.
+    (r"^(?:autoshop::)?rationale::keys::", "rationale::keys constants"),
     (r"^\[", "inline literal array"),
 ]
 
@@ -119,6 +128,9 @@ DYNAMIC_SOURCES = [
     # without a zh pair fails the gate the same way.
     ("impl_fn", "gui", "impl ExportDest", "fn label"),
     ("impl_fn", "recipe", "impl MaskRole", "fn en_name"),
+    # S2 index-build phase names; a fifth stage without a zh pair fails the
+    # gate the same way a fourth export destination does.
+    ("impl_fn", "style", "impl BuildStage", "fn label"),
     # decision_key is a free fn; the "impl_fn" extractor only needs the fn's
     # body braces, so anchoring on the pub declaration works the same way.
     ("impl_fn", "advisor", "pub fn decision_key", "fn decision_key"),
@@ -160,7 +172,7 @@ ALLOWED_BYPASS = {
     "Esc",        # keyboard key name (house style, like the shortcut combos)
 }
 
-SRC = {"gui": GUI, "recipe": RECIPE, "advisor": ADVISOR, "rationale": RATIONALE}
+SRC = {"gui": GUI, "recipe": RECIPE, "advisor": ADVISOR, "rationale": RATIONALE, "style": STYLE}
 
 
 def parse_literal(src: str, i: int) -> tuple[str, int]:

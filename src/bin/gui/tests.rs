@@ -4809,6 +4809,7 @@
             segment_script: String::new(),
             embed_script: String::new(),
             correspond_script: String::new(),
+            describe_script: String::new(),
             style_strength: 0.5,
         };
         // First open: no credential — nothing to probe, and the VISIT itself
@@ -7328,7 +7329,7 @@
         // counts.
         let mut app = AutoshopApp {
             style_build_inflight: true,
-            style_build_progress: Some((7, 9)),
+            style_build_progress: Some((autoshop::style::BuildStage::Frames, 7, 9)),
             ..Default::default()
         };
         app.tx
@@ -7336,6 +7337,7 @@
                 total: 412,
                 dir: dir.clone(),
                 without_embedding: 0,
+                described: 0,
             })))
             .unwrap();
         app.poll_workers(&ctx);
@@ -7388,6 +7390,7 @@
                     total: 412,
                     dir: dir.clone(),
                     without_embedding: 400,
+                    described: 0,
                 })))
                 .unwrap();
             app.poll_workers(&ctx);
@@ -7437,9 +7440,18 @@
 
         // Progress ticks land as counts, not as a worker-built sentence.
         let mut app = AutoshopApp { style_build_inflight: true, ..Default::default() };
-        app.tx.send(Msg::StyleBuildProgress { done: 40, total: 300 }).unwrap();
+        app.tx
+            .send(Msg::StyleBuildProgress {
+                stage: autoshop::style::BuildStage::Frames,
+                done: 40,
+                total: 300,
+            })
+            .unwrap();
         app.poll_workers(&ctx);
-        assert_eq!(app.style_build_progress, Some((40, 300)));
+        assert_eq!(
+            app.style_build_progress,
+            Some((autoshop::style::BuildStage::Frames, 40, 300))
+        );
         assert!(app.status.contains("40") && app.status.contains("300"), "{}", app.status);
     }
 
@@ -7773,6 +7785,81 @@
         for tier in ["Hint", "Direct", "Brief"] {
             assert!(tip.contains(tier), "the tooltip must name the {tier} tier: {tip}");
         }
+    }
+
+    /// S2: the description preference survives a restart, defaults OFF in
+    /// BOTH defaults, is what both build workers read, and cannot be reached
+    /// while the embedding it depends on is off.
+    ///
+    /// OFF in both defaults is the load-bearing half. The pass downloads a
+    /// 4.3 GB checkpoint and adds GPU minutes to every library build; a user
+    /// who never asked for it must never pay for it, and a preferences file
+    /// written before this key existed must decode to the same answer as a
+    /// fresh install rather than to `true`.
+    ///
+    /// MUTATION THIS KILLS: default the key to `true` in either `Prefs` or
+    /// `AutoshopApp`, drop it from the saved preferences (the round trip then
+    /// loses it), or wire one of the two build workers to a literal switch
+    /// instead of the preference.
+    #[test]
+    fn gui_describe_pref_round_trips() {
+        assert!(
+            !Prefs::default().style_describe,
+            "a prefs file written before this key existed must decode to OFF"
+        );
+        assert!(
+            !AutoshopApp::default().style_describe,
+            "a fresh app must not start a 4.3 GB download"
+        );
+        // A pre-S2 preferences file really is such a file: it has no key at all.
+        let old: Prefs = serde_json::from_str("{}").expect("an empty prefs file decodes");
+        assert!(!old.style_describe, "a missing key must not read as ON");
+
+        let prefs = Prefs { style_embed: true, style_describe: true, ..Prefs::default() };
+        let json = serde_json::to_string(&prefs).expect("prefs serialize");
+        assert!(json.contains("style_describe"), "the key must be written, not skipped: {json}");
+        let decoded: Prefs = serde_json::from_str(&json).expect("prefs deserialize");
+        assert!(decoded.style_describe, "the preference must survive a restart");
+
+        // The preference is what the workers resolve, and the resolver answers
+        // a VALUE — no test and no build writes the process environment.
+        let on = AutoshopApp { style_describe: true, ..Default::default() };
+        let off = AutoshopApp { style_describe: false, ..Default::default() };
+        let unset = |_: &str| None;
+        assert!(autoshop::style::DescribeSwitch::resolve_with(None, on.style_describe, unset).on());
+        assert!(!autoshop::style::DescribeSwitch::resolve_with(None, off.style_describe, unset).on());
+
+        let actions = include_str!("actions.rs");
+        assert_eq!(
+            actions.matches("DescribeSwitch::resolve(None, self.style_describe)").count(),
+            2,
+            "the RAW build and the look build both read the preference"
+        );
+        assert!(
+            actions.contains("app.style_describe = prefs.style_describe;"),
+            "the saved preference must be restored at start-up"
+        );
+        assert!(
+            include_str!("app.rs").contains("style_describe: self.style_describe,"),
+            "…and written back when preferences are saved"
+        );
+        // The checkbox is unreachable while the embedding is off: the prose
+        // only enters the ranking through the SigLIP text tower, so a
+        // description-only build would produce a field nothing can retrieve on.
+        let panel = include_str!("panels/ai.rs");
+        let gated = panel
+            .split("ui.add_enabled_ui(self.style_embed, |ui| {")
+            .nth(1)
+            .expect("the describe checkbox sits behind an enablement gate");
+        // NB the needle is spelled without its leading `ui.`: a literal that
+        // reads as a widget constructor makes `scripts/audit_i18n.py`'s
+        // bypass scanner start parsing THIS test as GUI code and desynchronise
+        // for the rest of the file (109 phantom findings, measured).
+        let first = gated.lines().find(|l| l.contains("checkbox(")).unwrap_or("");
+        assert!(
+            first.contains("&mut self.style_describe"),
+            "the gated block must be the describe checkbox itself: {first}"
+        );
     }
 
     #[test]

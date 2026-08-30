@@ -88,7 +88,7 @@ const MAX_LOOK_EXEMPLARS: usize = 500;
 /// The per-record bound both caps above are derived from.
 const MAX_EXEMPLAR_BYTES: usize = 40 * 1024;
 /// Longest description a record may carry, at the door and in the prompt.
-const MAX_DESC_CHARS: usize = 512;
+pub const MAX_DESC_CHARS: usize = 512;
 
 // R18 CANNOT RECUR, because this is a BUILD gate and not a test: moving either
 // cap without the other stops compilation with the sentence below. A runtime
@@ -117,10 +117,11 @@ const _: () = assert!(
     "the per-record bound cannot hold two embeddings, scores, and description"
 );
 
-/// The five environment overrides, spelled once.
+/// The six environment overrides, spelled once.
 ///
-/// Each is read in EXACTLY ONE place ([`EmbeddingSwitch::resolve`] and
-/// [`RetrievalWeights::from_env`]) and never again: everything downstream takes
+/// Each is read in EXACTLY ONE place ([`EmbeddingSwitch::resolve`],
+/// [`DescribeSwitch::resolve`] and [`RetrievalWeights::from_env`]) and never
+/// again: everything downstream takes
 /// the resolved VALUE. That is not tidiness. `cargo test` runs tests on
 /// parallel threads in one process, so a retrieval that read the process
 /// environment could be reconfigured mid-run by an unrelated test — which is
@@ -129,35 +130,52 @@ const _: () = assert!(
 /// (`--no-embed` wrote `AUTOSHOP_STYLE_EMBED=0` into the process), so a CLI
 /// flag was a global side effect rather than an argument.
 const ENV_EMBED: &str = "AUTOSHOP_STYLE_EMBED";
+const ENV_DESCRIBE: &str = "AUTOSHOP_STYLE_DESCRIBE";
 const ENV_EMBED_WEIGHT: &str = "AUTOSHOP_STYLE_EMBED_WEIGHT";
 const ENV_TEXT_WEIGHT: &str = "AUTOSHOP_STYLE_TEXT_WEIGHT";
 const ENV_DESC_WEIGHT: &str = "AUTOSHOP_STYLE_DESC_WEIGHT";
 const ENV_LOOK_WEIGHT: &str = "AUTOSHOP_STYLE_LOOK_WEIGHT";
 
-/// Weight of the image-embedding block in retrieval — the S1-fix corpus
-/// harness's winner (`scripts/calibrate_style_retrieval.py`, real SigLIP text
-/// proxies over 169 exemplars: −0.017910 pooled settings-MAE against the
-/// 14-dim baseline, paired bootstrap 95 % CI [+0.006554, +0.034373]).
+/// Weight of the image-embedding block in retrieval — re-confirmed by the S2
+/// recalibration on the described index (`scripts/calibrate_style_retrieval.py`,
+/// 169 exemplars / 156 settings-bearing queries, 196 grid rows per proxy).
+/// It is the whole of the text-free improvement: `(4, 0, 0)` scores 0.695233
+/// against the 14-dim baseline's 0.713143, CI [+0.006902, +0.034956].
 /// Setting it to zero reproduces the feature-only ranking exactly: the cosine
 /// term is added separately and never folded into the existing sum.
 pub const W_EMB_DEFAULT: f64 = 4.0;
-/// Weight of the direction-text ↔ exemplar-IMAGE term. **0 = the term does not
-/// ship**: on the real proxies no grid point with a non-zero `W_TXT` beat the
-/// best `W_TXT = 0` row, in either variant. A weight nobody measured is not a
-/// default, so this is a measurement, not a guess.
-pub const W_TXT_DEFAULT: f64 = 0.0;
-/// Weight of the direction-text ↔ exemplar-DESCRIPTION term, and the winner of
-/// the real calibration (`scripts/calibrate_style_retrieval.py`, 169 exemplars
-/// / 156 settings-bearing queries, 196 grid rows): `(4, 0, 4)` raw scores MAE
-/// 0.687031 against the 14-dim baseline's 0.713143 — an improvement of
-/// +0.026112 with paired bootstrap 95 % CI [+0.014466, +0.043656].
+/// Weight of the direction-text ↔ exemplar-IMAGE term.
 ///
-/// It shipped at 0 until this batch for a reason that was not a measurement:
-/// `StyleIndex::build` never wrote `desc_embed`, so the term was structurally
-/// dead and the harness measured a hash. With F-12 populating it and F-11
-/// fixing the tokenizer door, the description term is the strongest single
-/// addition to the ranking.
-pub const W_DESC_DEFAULT: f64 = 4.0;
+/// S1 shipped this at 0 because no grid point with a non-zero `W_TXT` beat the
+/// best `W_TXT = 0` row — measured with a proxy that was the exemplar's TAG
+/// STRING, because no exemplar had a description to be the query text. S2 gave
+/// every exemplar real prose and re-ran the grid under BOTH proxies, and the
+/// answer changed: with prose as the query text the standardised text terms
+/// beat the same variant's text-free row `(4, 0, 0)` with a paired 95 % CI of
+/// [+0.001589, +0.055436], and 4.0 is the winning weight. Under the TAG-string
+/// proxy nothing beats the text-free row in either variant — so it is the
+/// prose, not the vocabulary, that earns this term.
+///
+/// DISCLOSED LIMITATION: the query-text proxy is the held-out exemplar's OWN
+/// description, i.e. a text that describes the query photograph perfectly. A
+/// user's typed Direction is not that, so this weight is calibrated on a
+/// friendlier query than it will see.
+pub const W_TXT_DEFAULT: f64 = 4.0;
+/// Weight of the direction-text ↔ exemplar-DESCRIPTION term.
+///
+/// S1 shipped 4.0 on a grid whose `desc_embed` vectors — on BOTH sides — were
+/// the TAG STRING, because no exemplar had a description yet. S2 gave every
+/// exemplar real prose from `describe.py` and re-ran the grid, and that number
+/// did not survive contact with the data it was supposed to describe: under
+/// the shipped-until-now raw variant `(4, 0, 4)` now scores 0.698491, which is
+/// WORSE than the text-free `(4, 0, 0)` at 0.695233. Leaving it at 4 was
+/// therefore not an option either way.
+///
+/// 0.5 is the winning weight of the winning row, `(4, 4, 0.5)` standardised,
+/// MAE 0.664818 against the 14-dim baseline's 0.713143 — improvement
+/// +0.048325, paired bootstrap 95 % CI [+0.024290, +0.078587]. Most of that
+/// gain is `W_TXT`; this term adds the last +0.015 on top of `(4, 4, 0)`.
+pub const W_DESC_DEFAULT: f64 = 0.5;
 /// Weight of the look-library image term. It is the ONLY term that ranks looks
 /// against EACH OTHER (the description term reranks them, but through the same
 /// candidate set), so its SCALE cannot change their order — pinned by
@@ -171,15 +189,24 @@ pub const W_LOOK_DEFAULT: f64 = 1.0;
 ///
 /// F-14 built the standardised variant because SigLIP image↔text cosines are
 /// tiny and tightly clustered, so a raw term barely reorders anything and a
-/// grid over it can "find" 0 for the wrong reason. The harness then measured
-/// BOTH variants over the whole grid, and the raw one won: best raw
-/// `(4, 0, 4)` = 0.687031 against best standardised `(4, 0, 1)` = 0.694064,
-/// both with CIs excluding 0. So the standardising machinery ships, tested and
-/// one flag away, and the DEFAULT is the variant that measured better —
-/// not the one the design argument preferred.
+/// grid over it can "find" 0 for the wrong reason. S1 measured both variants
+/// and the raw one won — on a grid whose query text was the exemplar's tag
+/// string. S2's recalibration, with real prose on both sides, reverses it:
+/// best standardised `(4, 4, 0.5)` = 0.664818 against best raw `(4, 2, 0)` =
+/// 0.693811, and the raw variant's own text terms are indistinguishable from
+/// having none (paired CI against `(4, 0, 0)` = [−0.001834, +0.004821]) while
+/// the standardised variant's are not ([+0.001589, +0.055436]).
+///
+/// DISCLOSED LIMITATION: the variant head-to-head itself is NOT significant —
+/// paired (raw-best − standardised-best) 95 % CI [−0.000205, +0.054341]
+/// includes 0, barely. The choice therefore rests on which variant won and on
+/// which variant's text terms earn their keep, not on a significant difference
+/// between the two best rows. `scripts/calibrate_style_retrieval.py` prints
+/// both comparisons on every run, so re-deciding it is a re-read, not a
+/// re-derivation.
 ///
 /// Pinned by `the_shipped_text_variant_is_the_measured_one`.
-pub const STANDARDISE_TEXT_TERMS: bool = false;
+pub const STANDARDISE_TEXT_TERMS: bool = true;
 
 /// The four retrieval weights as ONE value, resolved once at the top of a run
 /// and passed down.
@@ -281,6 +308,56 @@ impl EmbeddingSwitch {
         match get(ENV_EMBED) {
             Some(v) => EmbeddingSwitch(!matches!(v.trim(), "" | "0" | "false" | "off")),
             None => EmbeddingSwitch(pref),
+        }
+    }
+}
+
+/// Is the LOCAL description model wanted for this build? A VALUE, resolved
+/// once from flag > environment > preference and then carried as an argument —
+/// the same shape as [`EmbeddingSwitch`], and for the same reason (a switch
+/// implemented by writing the process environment is a shared mutable global
+/// that `cargo test`'s parallel threads can reconfigure under each other).
+///
+/// Opt-in because the first run downloads **4.3 GB** of Qwen3-VL weights and
+/// the pass costs seconds per photograph on top of the embedding. An index
+/// built with it off is a perfectly good v5 index — `desc` is simply absent
+/// and `desc_embed` falls back to the tag string, which is exactly what S1
+/// shipped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DescribeSwitch(bool);
+
+impl DescribeSwitch {
+    pub const ON: Self = DescribeSwitch(true);
+    pub const OFF: Self = DescribeSwitch(false);
+
+    pub fn on(self) -> bool {
+        self.0
+    }
+
+    /// flag > environment > preference, reading the process environment once.
+    ///
+    /// `flag` is the CLI's `--describe` (`None` when it was not given). An
+    /// environment variable that is SET wins over the preference whatever its
+    /// value, including `0` — that is what makes it an override.
+    pub fn resolve(flag: Option<bool>, pref: bool) -> Self {
+        Self::resolve_with(flag, pref, |k| {
+            std::env::var_os(k).map(|v| v.to_string_lossy().into_owned())
+        })
+    }
+
+    /// [`resolve`](Self::resolve) over an explicit environment — the tested
+    /// seam.
+    pub fn resolve_with(
+        flag: Option<bool>,
+        pref: bool,
+        get: impl Fn(&str) -> Option<String>,
+    ) -> Self {
+        if let Some(f) = flag {
+            return DescribeSwitch(f);
+        }
+        match get(ENV_DESCRIBE) {
+            Some(v) => DescribeSwitch(!matches!(v.trim(), "" | "0" | "false" | "off")),
+            None => DescribeSwitch(pref),
         }
     }
 }
@@ -665,6 +742,21 @@ pub struct StagedFrame {
     json: PathBuf,
 }
 
+impl StagedFrame {
+    /// The staged PNG a sidecar reads. Exposed since S2, when the model calls
+    /// moved OUT of the per-photo loop: a batch door takes a manifest of
+    /// paths, so the frame has to outlive the worker that staged it.
+    pub fn image(&self) -> &Path {
+        &self.img
+    }
+
+    /// …and the same path as the string a JSONL manifest carries. One
+    /// spelling, because the answer is mapped back by this exact text.
+    pub fn image_path(&self) -> String {
+        self.img.display().to_string()
+    }
+}
+
 impl Drop for StagedFrame {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.img);
@@ -881,6 +973,318 @@ fn attach_desc_embeddings<R: DescribedRecord>(
              term stays inert for this index"
         ),
     }
+}
+
+/// The three things an index build needs from OUTSIDE itself: the two model
+/// sidecars, and the directory it may write in.
+///
+/// A struct rather than three parameters because the SCRATCH DIRECTORY is the
+/// load-bearing one and it used to be read from a global. `cargo test` runs
+/// with `AUTOSHOP_DATA_DIR` pointing at a real store (and, without it, at
+/// `%LOCALAPPDATA%/autoshop`), so a build driven by a test wrote its staged
+/// frames — and, once S2 added one, its DESCRIPTION CACHE — into the user's
+/// own store, where a later live build would have served the stub sentences
+/// back. Observed, not theorised: a test run on 2026-08-30 left 16 entries of
+/// `"a stubbed grade sentence"` in `%LOCALAPPDATA%/autoshop/style-descriptions.json`.
+pub struct BuildSidecars {
+    pub embed: crate::embed::EmbedOpts,
+    pub describe: crate::describe::DescribeOpts,
+    /// Where staged frames and the description cache live. Production passes
+    /// [`crate::store::store_root`]; a test passes its own directory.
+    pub scratch: PathBuf,
+}
+
+impl BuildSidecars {
+    /// What the production callers use: both sidecars from [`Config`], and the
+    /// per-user store as the scratch root.
+    pub fn from_config(cfg: &crate::config::Config) -> Self {
+        BuildSidecars {
+            embed: crate::embed::EmbedOpts::from_config(cfg),
+            describe: crate::describe::DescribeOpts::from_config(cfg),
+            scratch: crate::store::store_root(),
+        }
+    }
+}
+
+/// Which phase of an index build a [`BuildProgress`] belongs to.
+///
+/// The build used to be one loop with one counter, because every model call
+/// happened inside it. Since S2 it is four phases over the WHOLE library, and
+/// only the first of them has per-record granularity — the other three are one
+/// sidecar process each, and this process genuinely cannot see inside them. A
+/// bare `(done, total)` would have had to either lie about that or reset to
+/// zero three times with nothing to say why; the stage is what makes the pair
+/// readable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BuildStage {
+    /// Decode every source and stage its 512-px frame — the only phase this
+    /// process runs itself, and the only one that reports per record.
+    Frames,
+    /// ONE SigLIP call over every staged frame (image vector + vocabulary
+    /// scores).
+    Embed,
+    /// ONE Qwen call over the frames this machine has not already described.
+    /// `done` at entry is the number the cache already answered.
+    Describe,
+    /// ONE SigLIP text call over every description-or-tag string.
+    Text,
+}
+
+impl BuildStage {
+    /// The stage's name for a UI, in English — the GUI puts it through `tr()`
+    /// like every other string it shows.
+    pub fn label(self) -> &'static str {
+        match self {
+            BuildStage::Frames => "decoding",
+            BuildStage::Embed => "embedding",
+            BuildStage::Describe => "describing",
+            BuildStage::Text => "text vectors",
+        }
+    }
+}
+
+/// One progress report from an index build: which phase, and how far into it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BuildProgress {
+    pub stage: BuildStage,
+    pub done: usize,
+    pub total: usize,
+}
+
+fn report(on_progress: &dyn Fn(BuildProgress), stage: BuildStage, done: usize, total: usize) {
+    on_progress(BuildProgress { stage, done, total });
+}
+
+/// ONE SigLIP image call for a whole build: N staged frames in, N records out,
+/// in order.
+///
+/// `frames[i] == None` (this record's staging failed) contributes no manifest
+/// line and gets `None` back, exactly like [`embed_desc_texts`]'s text arm.
+/// The answer is mapped back by PATH rather than by position, because
+/// `embed.py`'s batch door reports a malformed manifest line as soon as it
+/// reads it and the rest in loop order — a positional zip would attach one
+/// photograph's vector to another's exemplar.
+fn embed_frames(
+    opts: &crate::embed::EmbedOpts,
+    dir: &Path,
+    frames: &[Option<StagedFrame>],
+    what: &str,
+) -> Result<Vec<Option<crate::embed::EmbedRecord>>> {
+    let mut out: Vec<Option<crate::embed::EmbedRecord>> = (0..frames.len()).map(|_| None).collect();
+    let live: Vec<(usize, &StagedFrame)> =
+        frames.iter().enumerate().filter_map(|(i, f)| f.as_ref().map(|f| (i, f))).collect();
+    if live.is_empty() {
+        return Ok(out);
+    }
+    std::fs::create_dir_all(dir)?;
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let stem = format!(
+        "autoshop-embed-frames-{}-{}",
+        std::process::id(),
+        SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    );
+    let manifest = dir.join(format!("{stem}.jsonl"));
+    let scratch = dir.join(format!("{stem}.out.jsonl"));
+    let body: String = live
+        .iter()
+        .map(|(_, f)| serde_json::json!({ "path": f.image_path() }).to_string())
+        .collect::<Vec<_>>()
+        .join("\n");
+    std::fs::write(&manifest, body + "\n")
+        .with_context(|| format!("write {what} embedding manifest {}", manifest.display()))?;
+    let answered = crate::embed::embed_image_batch(opts, &manifest, &scratch);
+    let _ = std::fs::remove_file(&manifest);
+    let answered = answered?;
+    let by_path: std::collections::HashMap<&str, &crate::embed::EmbedBatchRecord> =
+        answered.iter().map(|r| (r.path.as_str(), r)).collect();
+    let mut ok = 0usize;
+    for (slot, frame) in live {
+        let key = frame.image_path();
+        match by_path.get(key.as_str()) {
+            Some(rec) => match &rec.record {
+                Some(record) => {
+                    out[slot] = Some(record.clone());
+                    ok += 1;
+                }
+                None => eprintln!(
+                    "  {what}: no style embedding for one frame ({}) — indexed on the 14-dim \
+                     feature alone",
+                    rec.error.as_deref().unwrap_or("the sidecar gave no reason")
+                ),
+            },
+            None => eprintln!(
+                "  {what}: the embedding sidecar answered nothing for one staged frame — that \
+                 record is indexed on the 14-dim feature alone"
+            ),
+        }
+    }
+    println!("  {what}: {ok} image vector(s) in one sidecar call");
+    Ok(out)
+}
+
+/// The two record shapes that carry a DESCRIPTION, behind one door — so the
+/// RAW builder and the look builder cannot drift into two rules about what
+/// `desc` holds. Sibling of [`DescribedRecord`], which owns the vector.
+trait DescribableRecord {
+    fn set_desc(&mut self, desc: Option<String>);
+    fn has_desc(&self) -> bool;
+}
+
+impl DescribableRecord for StyleExemplar {
+    fn set_desc(&mut self, desc: Option<String>) { self.desc = desc; }
+    fn has_desc(&self) -> bool { self.desc.is_some() }
+}
+
+impl DescribableRecord for LookExemplar {
+    fn set_desc(&mut self, desc: Option<String>) { self.desc = desc; }
+    fn has_desc(&self) -> bool { self.desc.is_some() }
+}
+
+/// STAGE 3 of a build: fill `desc` for every record whose frame this machine
+/// can describe, in ONE sidecar call.
+///
+/// DEGRADES, never fails, at every step — the same contract the embedding arm
+/// has kept since R27 Batch-5, and for the same reason: an hour-long index
+/// build must not be lost to an optional field. A missing switch, a missing
+/// script, an unreadable frame, a sidecar that refused: each leaves `desc`
+/// absent for the records it touched, prints one sentence saying so, and the
+/// build carries on with the tags.
+///
+/// The CACHE is content-keyed ([`crate::describe::frame_digest`]), so a
+/// library that gained one photograph describes one photograph. It is written
+/// once, at the end, with the keys this build used — never per record, which
+/// would publish a 78 MiB-capped file 169 times.
+#[allow(clippy::too_many_arguments)] // one stage's whole input; see BuildSidecars
+fn attach_descriptions<R: DescribableRecord>(
+    opts: &crate::describe::DescribeOpts,
+    describe: DescribeSwitch,
+    dir: &Path,
+    cache_path: &Path,
+    frames: &[Option<StagedFrame>],
+    records: &mut [R],
+    what: &str,
+    on_progress: &dyn Fn(BuildProgress),
+) {
+    if !describe.on() || records.is_empty() {
+        return;
+    }
+    let total = records.len();
+    if !opts.available() {
+        eprintln!(
+            "  look descriptions requested but the sidecar is not at {} — the index carries \
+             attribute tags only (set AUTOSHOP_DESCRIBE_SCRIPT, or run from the project dir)",
+            opts.script.display()
+        );
+        return;
+    }
+    println!(
+        "  look descriptions ON ({}) — first run downloads ~4.3 GB of Qwen3-VL weights",
+        opts.script.display()
+    );
+    let mut cache = crate::describe::DescriptionCache::load(cache_path);
+    // The digest of every frame this build can describe, and the description
+    // the cache already holds for it.
+    let mut digests: Vec<Option<String>> = Vec::with_capacity(total);
+    let mut hits = 0usize;
+    for frame in frames.iter() {
+        let Some(frame) = frame else {
+            digests.push(None);
+            continue;
+        };
+        match crate::describe::frame_digest(frame.image()) {
+            Ok(d) => digests.push(Some(d)),
+            Err(e) => {
+                eprintln!("  {what}: one frame could not be hashed ({e:#}) — it is not described");
+                digests.push(None);
+            }
+        }
+    }
+    for (record, digest) in records.iter_mut().zip(&digests) {
+        if let Some(desc) = digest.as_deref().and_then(|d| cache.get(d)) {
+            record.set_desc(Some(desc.to_string()));
+            hits += 1;
+        }
+    }
+    report(on_progress, BuildStage::Describe, hits, total);
+    // The MISSES, in record order. A frame the cache already answered is not
+    // sent again — that is the whole reason the cache exists.
+    let misses: Vec<(usize, &StagedFrame)> = frames
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| digests[*i].is_some() && !records[*i].has_desc())
+        .filter_map(|(i, f)| f.as_ref().map(|f| (i, f)))
+        .collect();
+    let mut keep: std::collections::BTreeSet<String> =
+        digests.iter().flatten().cloned().collect();
+    if misses.is_empty() {
+        println!("  {what}: {hits} description(s), all from the content cache");
+        report(on_progress, BuildStage::Describe, total, total);
+        // Still republished: the cache's retention set is what this build
+        // used, so a build that hit 100 % keeps those entries alive.
+        if let Err(e) = cache.save(cache_path, &keep) {
+            eprintln!("  {what}: the description cache could not be published ({e:#})");
+        }
+        return;
+    }
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let stem = format!(
+        "autoshop-describe-{}-{}",
+        std::process::id(),
+        SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    );
+    let manifest = dir.join(format!("{stem}.jsonl"));
+    let scratch = dir.join(format!("{stem}.out.jsonl"));
+    let body: String = misses
+        .iter()
+        .map(|(_, f)| serde_json::json!({ "path": f.image_path() }).to_string())
+        .collect::<Vec<_>>()
+        .join("\n");
+    if let Err(e) = std::fs::create_dir_all(dir).and_then(|()| std::fs::write(&manifest, body + "\n")) {
+        eprintln!("  {what}: the description manifest could not be written ({e}) — no prose this build");
+        return;
+    }
+    let answered = crate::describe::describe_manifest(opts, &manifest, &scratch);
+    let _ = std::fs::remove_file(&manifest);
+    let answered = match answered {
+        Ok(a) => a,
+        Err(e) => {
+            eprintln!(
+                "  {what}: look descriptions unavailable ({e:#}) — the index carries attribute \
+                 tags only"
+            );
+            report(on_progress, BuildStage::Describe, total, total);
+            return;
+        }
+    };
+    let by_path: std::collections::HashMap<&str, &crate::describe::DescribeRecord> =
+        answered.iter().map(|r| (r.path.as_str(), r)).collect();
+    let mut fresh = 0usize;
+    let mut refused = 0usize;
+    for (slot, frame) in misses {
+        let key = frame.image_path();
+        match by_path.get(key.as_str()).and_then(|r| r.desc.clone()) {
+            Some(desc) => {
+                if let Some(d) = digests[slot].clone() {
+                    cache.insert(d.clone(), desc.clone());
+                    keep.insert(d);
+                }
+                records[slot].set_desc(Some(desc));
+                fresh += 1;
+            }
+            None => refused += 1,
+        }
+    }
+    if refused > 0 {
+        eprintln!(
+            "  {what}: {refused} frame(s) got no description — those exemplars carry their \
+             attribute tags alone"
+        );
+    }
+    println!("  {what}: {fresh} new description(s) in one sidecar call, {hits} from the cache");
+    if let Err(e) = cache.save(cache_path, &keep) {
+        eprintln!("  {what}: the description cache could not be published ({e:#})");
+    }
+    report(on_progress, BuildStage::Describe, total, total);
 }
 
 pub fn embed_preview_with_text(
@@ -1105,8 +1509,8 @@ pub struct StyleIndex {
 impl StyleIndex {
     /// Scan a folder for RAW+.xmp pairs (the user's own edits) and build the
     /// index, reporting nothing but the historical stdout lines.
-    pub fn build(dir: &Path, embed: EmbeddingSwitch) -> Result<StyleIndex> {
-        Self::build_reporting(dir, embed, &|_, _| {})
+    pub fn build(dir: &Path, embed: EmbeddingSwitch, describe: DescribeSwitch) -> Result<StyleIndex> {
+        Self::build_reporting(dir, embed, describe, &|_| {})
     }
 
     /// Build the finished-photo look library. Looks are embedding-only and
@@ -1114,12 +1518,14 @@ impl StyleIndex {
     pub fn build_looks(
         dir: &Path,
         embed: EmbeddingSwitch,
-        on_progress: &dyn Fn(usize, usize),
+        describe: DescribeSwitch,
+        on_progress: &dyn Fn(BuildProgress),
     ) -> Result<StyleIndex> {
         Self::build_looks_with(
-            crate::embed::EmbedOpts::from_config(&crate::config::Config::load()),
+            BuildSidecars::from_config(&crate::config::Config::load()),
             dir,
             embed,
+            describe,
             on_progress,
         )
     }
@@ -1133,11 +1539,13 @@ impl StyleIndex {
     /// other test's idea of where the sidecar lives was wrong. Same rule as the
     /// switch and the weights: pass the value.
     pub fn build_looks_with(
-        opts: crate::embed::EmbedOpts,
+        sidecars: BuildSidecars,
         dir: &Path,
         embed: EmbeddingSwitch,
-        on_progress: &dyn Fn(usize, usize),
+        describe: DescribeSwitch,
+        on_progress: &dyn Fn(BuildProgress),
     ) -> Result<StyleIndex> {
+        let BuildSidecars { embed: opts, describe: describe_opts, scratch } = sidecars;
         if !opts.available() || !embed.on() {
             anyhow::bail!("look library requires the style-embedding sidecar; enable embedding and rebuild")
         }
@@ -1159,44 +1567,97 @@ impl StyleIndex {
                 dir.display(), files.len(), MAX_LOOK_EXEMPLARS
             )
         }
-        on_progress(0, files.len());
-        let scratch = crate::store::store_root();
+        let total = files.len();
+        report(on_progress, BuildStage::Frames, 0, total);
         std::fs::create_dir_all(&scratch)?;
         let vocab_path = vocab_scratch_path(&scratch, "looks");
         std::fs::write(&vocab_path, LOOK_VOCAB.join("\n"))?;
         let mut opts = opts;
         opts.vocab_file = Some(vocab_path.clone());
+        // STAGE 1 — decode every finished photo and stage its frame. Nothing
+        // else: the model stages below each run ONCE for the whole library.
         let mut looks = Vec::new();
+        let mut frames: Vec<Option<StagedFrame>> = Vec::new();
         for (i, path) in files.iter().enumerate() {
             let _permit = decode::DecodePermit::acquire();
             let decoded = decode::decode_any(path).with_context(|| format!("decode look {}", path.display()))?;
             let frame = stage_embed_frame(&decoded.preview, &scratch, &format!("look-{i}"))?;
             drop(_permit);
-            let rec = embed_staged_record(&opts, &frame).with_context(|| format!("embed look {}", path.display()))?;
-            let tags = rec.vocab_scores.as_deref().map(tags_from_scores).unwrap_or_default();
             let path_abs = std::path::absolute(path)?.display().to_string();
-            looks.push(LookExemplar { stem: pipeline::stem(path).to_string(), path: path_abs, embed: rec.vector, tags, vocab_scores: rec.vocab_scores, desc: None, desc_embed: None });
-            on_progress(i + 1, files.len());
+            looks.push(LookExemplar {
+                stem: pipeline::stem(path).to_string(),
+                path: path_abs,
+                embed: Vec::new(),
+                tags: Vec::new(),
+                vocab_scores: None,
+                desc: None,
+                desc_embed: None,
+            });
+            frames.push(Some(frame));
+            report(on_progress, BuildStage::Frames, i + 1, total);
         }
+        // STAGE 2 — ONE SigLIP image call for the whole library. A look
+        // WITHOUT a vector is not a look (the library is embedding-only), so
+        // unlike the RAW build this one fails the record rather than degrading
+        // it.
+        report(on_progress, BuildStage::Embed, 0, total);
+        let vectors = embed_frames(&opts, &scratch, &frames, "look library")?;
         let _ = std::fs::remove_file(vocab_path);
-        // ONE text call for the whole library — see `embed_desc_texts`.
+        for (i, (look, record)) in looks.iter_mut().zip(&vectors).enumerate() {
+            let record = record.as_ref().ok_or_else(|| {
+                anyhow::anyhow!("embed look {}: the sidecar returned no vector", files[i].display())
+            })?;
+            look.embed = record.vector.clone();
+            look.tags = record.vocab_scores.as_deref().map(tags_from_scores).unwrap_or_default();
+            look.vocab_scores = record.vocab_scores.clone();
+        }
+        report(on_progress, BuildStage::Embed, total, total);
+        // STAGE 3 — ONE Qwen call over the frames that are not already
+        // described, then STAGE 4, ONE SigLIP text call over the whole set.
+        attach_descriptions(
+            &describe_opts,
+            describe,
+            &scratch,
+            &crate::describe::cache_path_in(&scratch),
+            &frames,
+            &mut looks,
+            "look library",
+            on_progress,
+        );
+        drop(frames);
+        report(on_progress, BuildStage::Text, 0, total);
         attach_desc_embeddings(&opts, &scratch, &mut looks, "look library");
+        report(on_progress, BuildStage::Text, total, total);
         Ok(StyleIndex { version: CURRENT_INDEX_VERSION, mean: vec![0.0; NDIM], std: vec![1.0; NDIM], exemplars: Vec::new(), source_dir: None, looks, looks_dir: std::path::absolute(dir).ok().map(|p| p.display().to_string()), embed_provenance: Some(embed_provenance_string()) })
     }
 
-    /// [`build`](StyleIndex::build) with a progress callback — `(completed,
-    /// total)` after every photo, plus one `(0, total)` before the first
-    /// decode so a UI can show the size of the job it just started.
+    /// [`build`](StyleIndex::build) with a progress callback — one
+    /// [`BuildProgress`] per record inside the decode stage, and one at each
+    /// end of every model stage.
     ///
     /// Called on the CALLER's thread (from the result-collector loop), not
     /// from a decode worker: that keeps the callback free of `Send + Sync`
     /// bounds, which matters because the GUI's callback carries an mpsc
     /// `Sender` (`Send`, NOT `Sync`). The stdout lines stay in the workers,
     /// byte-identical to what the CLI has always printed.
+    ///
+    /// **STAGES, not per-photo model calls (step 14 / S2).** Until this batch
+    /// the image half of the embedding ran ONE SIDECAR PROCESS PER PHOTOGRAPH:
+    /// 169 loads of a 1.50 GB checkpoint for the photographer's own library,
+    /// measured at 5,618 s. `embed.py --manifest-jsonl` has always embedded N
+    /// images in one process (the TEXT half already went out as one batch in
+    /// S1-fix F-12), so the build is now four phases over the WHOLE library —
+    /// decode+stage every frame, ONE SigLIP image call, ONE Qwen description
+    /// call, ONE SigLIP text call. One process per model per build; the model
+    /// slot ([`crate::with_model_slot`]) still guarantees one resident model at
+    /// a time, and the per-record fail-soft contract is unchanged: a
+    /// photograph whose frame or vector failed keeps its 14-dim exemplar and
+    /// says why.
     pub fn build_reporting(
         dir: &Path,
         embed: EmbeddingSwitch,
-        on_progress: &dyn Fn(usize, usize),
+        describe: DescribeSwitch,
+        on_progress: &dyn Fn(BuildProgress),
     ) -> Result<StyleIndex> {
         // R27 P1, deliberate NON-action: RAW-only, for `eval`'s reason (see
         // that call site) plus one of its own. The index learns the user's
@@ -1218,12 +1679,13 @@ impl StyleIndex {
         // atomic counter hands out indices, and each result lands in its own
         // slot so the exemplar ORDER stays identical to the serial version.
         use std::sync::atomic::{AtomicUsize, Ordering};
-        // The embedding sidecar, resolved ONCE before the pool starts (R27
-        // Batch-5). `None` when the user has not asked for it, or when the
-        // script is not on disk — announced here, not discovered 150 times.
+        let cfg = crate::config::Config::load();
+        // The two sidecars, resolved ONCE before the pool starts. `None` when
+        // the user has not asked for one, or when its script is not on disk —
+        // announced here, not discovered 169 times.
         let mut embedder: Option<crate::embed::EmbedOpts> = embed
             .on()
-            .then(|| crate::embed::EmbedOpts::from_config(&crate::config::Config::load()))
+            .then(|| crate::embed::EmbedOpts::from_config(&cfg))
             .filter(|o| {
                 if o.available() {
                     println!(
@@ -1241,6 +1703,7 @@ impl StyleIndex {
                     false
                 }
             });
+        let describer = crate::describe::DescribeOpts::from_config(&cfg);
         let embed_dir = crate::store::store_root();
         let vocab_path = vocab_scratch_path(&embed_dir, "raw");
         if let Some(opts) = embedder.as_mut()
@@ -1248,12 +1711,13 @@ impl StyleIndex {
             && std::fs::write(&vocab_path, LOOK_VOCAB.join("\n")).is_ok() {
                 opts.vocab_file = Some(vocab_path.clone());
         }
-        let mut slots: Vec<Option<StyleExemplar>> = Vec::new();
-        slots.resize_with(pairs.len(), || None);
+        let total = pairs.len();
+        let mut slots: Vec<Option<(StyleExemplar, Option<StagedFrame>)>> = Vec::new();
+        slots.resize_with(total, || None);
         let next = AtomicUsize::new(0);
         let done = AtomicUsize::new(0);
-        let workers = pairs.len().clamp(1, decode::MAX_CONCURRENT_DECODES);
-        on_progress(0, pairs.len());
+        let workers = total.clamp(1, decode::MAX_CONCURRENT_DECODES);
+        report(on_progress, BuildStage::Frames, 0, total);
         std::thread::scope(|s| {
             let (tx, rx) = std::sync::mpsc::channel();
             for _ in 0..workers {
@@ -1269,7 +1733,8 @@ impl StyleIndex {
                     // this scope from what it used to be — it ran to the end of
                     // the photo, so a non-decode process (the sidecar, seconds
                     // of model load) sat inside the DECODE budget and the
-                    // ~181 MB preview stayed alive underneath it.
+                    // ~181 MB preview stayed alive underneath it. Since S2 no
+                    // sidecar runs in this loop at all.
                     //
                     // The staging stays INSIDE, deliberately: it reads the
                     // preview, so releasing first would let this worker hold
@@ -1296,8 +1761,8 @@ impl StyleIndex {
                     ) {
                         Ok(decode::Decoded { meta, histogram, preview, .. }) => {
                             let feat = feature_vector(&meta, &histogram);
-                            // 181 MB in, 200 KB out: after this the sidecar
-                            // needs a PATH, not the buffer.
+                            // 181 MB in, 200 KB out: after this the sidecars
+                            // need a PATH, not the buffer.
                             let frame = embedder.as_ref().and_then(|_| {
                                 match stage_embed_frame(&preview, embed_dir, &format!("idx-{i}")) {
                                     Ok(f) => Some(f),
@@ -1319,29 +1784,11 @@ impl StyleIndex {
                             None
                         }
                     };
-                    // --- OUT of the decode budget. Everything below is either
-                    // a small file read or the Python sidecar, which has its
-                    // own single-flight gate (`embed::with_model_slot`).
+                    // --- OUT of the decode budget. Everything below is a
+                    // small file read; the model sidecars run once each, after
+                    // the pool has finished.
                     drop(permit);
                     let ex = staged.and_then(|(feat, frame)| {
-                        let (embed, vocab_scores, tags) = match (embedder.as_ref(), frame) {
-                            (Some(o), Some(f)) => match embed_staged_record(o, &f) {
-                                Ok(r) => (Some(r.vector), r.vocab_scores.clone(), r.vocab_scores.as_deref().map(tags_from_scores).unwrap_or_default()),
-                                // DEGRADE, never fail: this photo keeps its
-                                // 14-dim exemplar and the index becomes a
-                                // legitimate mixed one (see
-                                // `retrieve_with_embed`). A sidecar that could
-                                // abort an hour-long build over one frame would
-                                // be worse than no sidecar. The GUI now COUNTS
-                                // these (R28 4b) — an all-failed build used to
-                                // land the same toast as an all-embedded one.
-                                Err(e) => {
-                                    note_no_embedding(raw, &e);
-                                    (None, None, Vec::new())
-                                }
-                            },
-                            _ => (None, None, Vec::new()),
-                        };
                         // An unreadable sidecar must SKIP the photo, not
                         // produce a settings-free exemplar that dilutes
                         // retrieval (the pair scan guaranteed the .xmp
@@ -1359,14 +1806,14 @@ impl StyleIndex {
                                     curve: crate::eval::user_curve_shape(&xmp)
                                         .map(|(b, s)| [b, s]),
                                     families: crate::eval::user_family_summary(&xmp),
-                                    embed,
-                                    tags,
-                                    vocab_scores,
+                                    embed: None,
+                                    tags: Vec::new(),
+                                    vocab_scores: None,
                                     desc: None,
                                     desc_embed: None,
                                 };
                                 if exemplar_is_finite(&ex) {
-                                    Some(ex)
+                                    Some((ex, frame))
                                 } else {
                                     eprintln!(
                                         "  skip {}: non-finite or out-of-band metadata/settings \
@@ -1389,7 +1836,7 @@ impl StyleIndex {
                     // from index order under parallelism) so it stays monotonic.
                     let n = done.fetch_add(1, Ordering::Relaxed) + 1;
                     if n % 20 == 0 {
-                        println!("  {} / {}", n, pairs.len());
+                        println!("  {} / {}", n, total);
                     }
                     let _ = tx.send((i, ex));
                 });
@@ -1399,18 +1846,57 @@ impl StyleIndex {
             for (i, ex) in rx {
                 slots[i] = ex;
                 received += 1;
-                on_progress(received, pairs.len());
+                report(on_progress, BuildStage::Frames, received, total);
             }
         });
         // Failed decodes left None slots — drop them in order, like the serial
         // `continue` did.
-        let mut exemplars: Vec<StyleExemplar> = slots.into_iter().flatten().collect();
-        // ONE text call for the whole library — see `embed_desc_texts`. It runs
-        // AFTER the worker pool because the tags it embeds are what the pool
-        // just produced, and because one call is the entire point.
+        let (mut exemplars, frames): (Vec<StyleExemplar>, Vec<Option<StagedFrame>>) =
+            slots.into_iter().flatten().unzip();
+        let live = exemplars.len();
         if let Some(opts) = embedder.as_ref() {
+            // STAGE 2 — ONE SigLIP image call for the whole library.
+            report(on_progress, BuildStage::Embed, 0, live);
+            match embed_frames(opts, &embed_dir, &frames, "style index") {
+                Ok(records) => {
+                    for (ex, record) in exemplars.iter_mut().zip(records) {
+                        // DEGRADE, never fail: a photo without a vector keeps
+                        // its 14-dim exemplar and the index becomes a
+                        // legitimate mixed one (see `retrieve_with_embed`). The
+                        // GUI COUNTS these (R28 4b) — an all-failed build used
+                        // to land the same toast as an all-embedded one.
+                        let Some(record) = record else { continue };
+                        ex.tags = record.vocab_scores.as_deref().map(tags_from_scores).unwrap_or_default();
+                        ex.vocab_scores = record.vocab_scores;
+                        ex.embed = Some(record.vector);
+                    }
+                }
+                Err(e) => eprintln!(
+                    "  style index: no style embeddings ({e:#}) — every exemplar is indexed on \
+                     the 14-dim feature alone"
+                ),
+            }
+            report(on_progress, BuildStage::Embed, live, live);
+            // STAGE 3 — ONE Qwen call over the frames that are not already
+            // described.
+            attach_descriptions(
+                &describer,
+                describe,
+                &embed_dir,
+                &crate::describe::cache_path_in(&embed_dir),
+                &frames,
+                &mut exemplars,
+                "style index",
+                on_progress,
+            );
+            // STAGE 4 — ONE SigLIP text call for the whole library. It runs
+            // AFTER the two above because the text it embeds is what they just
+            // produced, and because one call is the entire point.
+            report(on_progress, BuildStage::Text, 0, live);
             attach_desc_embeddings(opts, &embed_dir, &mut exemplars, "style index");
+            report(on_progress, BuildStage::Text, live, live);
         }
+        drop(frames);
         let (mean, std) = compute_norm(&exemplars);
         // Record where this index was built from, for UI provenance / other users.
         let source_dir = std::path::absolute(dir).map(|p| p.display().to_string()).ok();
@@ -1885,7 +2371,10 @@ impl StyleIndex {
     pub fn render_look_reference(&self, looks: &[&LookExemplar], by_direction: bool) -> Option<String> {
         let first = looks.first()?;
         let tags = first.tags.iter().take(LOOK_TAGS_K).cloned().collect::<Vec<_>>().join(", ");
-        let desc = first.desc.as_deref().map(|d| d.chars().take(MAX_DESC_CHARS).collect::<String>());
+        // Through the SAME door the reference block uses (S2): a bare
+        // `take(MAX_DESC_CHARS)` bounded the LENGTH and nothing else, so a
+        // description carrying a newline could forge a line of this block.
+        let desc = first.desc.as_deref().and_then(crate::describe::sanitize_desc);
         let mut out = format!(
             "LOOK REFERENCE (from the photographer's LOOK LIBRARY — the finished photo closest to this frame{}; match its grade, not its content): [{}] look: {}",
             if by_direction { " and direction" } else { "" },
@@ -1928,7 +2417,20 @@ impl StyleIndex {
                     .iter()
                     .map(|(k, v)| format!("{k} {v:+.0}"))
                     .collect();
-                let look = if e.tags.is_empty() { String::new() } else { format!(" · look: {}", e.tags.join(", ")) };
+                // `look: <tags> — <desc>` (S2): the tags stay FIRST because
+                // they are a bounded vocabulary the proposer has seen in every
+                // other block, and the prose is appended only when the
+                // exemplar carries one. Both halves go through the same
+                // bounds the index door applied — the description is model
+                // output about the user's photograph, i.e. untrusted text
+                // reaching a prompt, and a second door costs nothing.
+                let desc = e.desc.as_deref().and_then(crate::describe::sanitize_desc);
+                let look = match (e.tags.is_empty(), desc) {
+                    (true, None) => String::new(),
+                    (true, Some(d)) => format!(" · look: {d}"),
+                    (false, None) => format!(" · look: {}", e.tags.join(", ")),
+                    (false, Some(d)) => format!(" · look: {} — {d}", e.tags.join(", ")),
+                };
                 format!("[{}] {}{}", e.tag, s.join(", "), look)
             })
             .collect();
@@ -3527,15 +4029,23 @@ mod tests {
     /// The shipped weights and the shipped text VARIANT are the ones the
     /// harness measured, and the two halves of the file agree about them.
     ///
-    /// S1 shipped `W_EMB = 4` off a two-row table that never evaluated 2.0, and
-    /// `W_TXT = W_DESC = 0` off a SHA-256 hash standing in for a text vector —
-    /// a number that could not have been anything else. The real run
-    /// (`scripts/calibrate_style_retrieval.py --index <store>/style-index.json`,
-    /// 169 exemplars / 156 settings-bearing queries, 196 grid rows, seeded
-    /// paired bootstrap) recommends `W_EMB=4, W_TXT=0, W_DESC=4, variant=raw`:
-    /// MAE 0.687031 against the 14-dim baseline 0.713143, improvement
-    /// +0.026112, CI [+0.014466, +0.043656]. The best STANDARDISED row was
-    /// `(4, 0, 1)` at 0.694064, so the raw variant ships.
+    /// S1 shipped `W_EMB = 4, W_TXT = 0, W_DESC = 4` in the RAW variant, off a
+    /// grid whose query-text proxy and `desc_embed` vectors were both the
+    /// exemplar's TAG STRING — no exemplar had a description to be either.
+    /// S2's recalibration (`scripts/calibrate_style_retrieval.py --index
+    /// <store>/style-index.json`, 169 described exemplars / 156
+    /// settings-bearing queries, 196 grid rows per proxy, seeded paired
+    /// bootstrap) sweeps BOTH proxies — the exemplar's own prose, and its tag
+    /// string — and recommends `W_EMB=4, W_TXT=4, W_DESC=0.5,
+    /// variant=standardised` under the PROSE proxy: MAE 0.664818 against the
+    /// 14-dim baseline 0.713143, improvement +0.048325, CI
+    /// [+0.024290, +0.078587]. Under the TAG proxy nothing beats the text-free
+    /// row in either variant, which is the answer to S2's own question: it is
+    /// the prose, not the vocabulary, that earns the text terms.
+    ///
+    /// The old `(4, 0, 4)` raw point is now 0.698491 — WORSE than the
+    /// text-free `(4, 0, 0)` at 0.695233 — so the previous numbers could not
+    /// simply be left in place.
     ///
     /// MUTATION: flip `STANDARDISE_TEXT_TERMS`, or move any of the three
     /// weights, and this fails — which is the point: the numbers in
@@ -3543,8 +4053,8 @@ mod tests {
     #[test]
     fn the_shipped_text_variant_is_the_measured_one() {
         assert_eq!(W_EMB_DEFAULT, 4.0);
-        assert_eq!(W_TXT_DEFAULT, 0.0);
-        assert_eq!(W_DESC_DEFAULT, 4.0);
+        assert_eq!(W_TXT_DEFAULT, 4.0);
+        assert_eq!(W_DESC_DEFAULT, 0.5);
         assert_eq!(RetrievalWeights::SHIPPED.emb, W_EMB_DEFAULT);
         assert_eq!(RetrievalWeights::SHIPPED.txt, W_TXT_DEFAULT);
         assert_eq!(RetrievalWeights::SHIPPED.desc, W_DESC_DEFAULT);
@@ -3552,21 +4062,21 @@ mod tests {
 
         // The VARIANT is stated behaviourally, never as `assert!(CONST)`:
         // a constant assertion is the vacuous falsifier this batch removed
-        // elsewhere (and clippy refuses it). The shipped door must weight
-        // the raw gap and say it did not standardise.
+        // elsewhere (and clippy refuses it). The shipped door must Z-SCORE the
+        // gaps over the candidate set and say that it did.
         let gaps = [Some(0.10), Some(0.20), Some(0.60)];
         let shipped = text_term(&gaps, 2.0);
-        assert!(!shipped.standardised, "the shipped variant must not standardise");
-        assert_eq!(shipped.terms, vec![0.2, 0.4, 1.2]);
-        // The other variant is not dead code — it is one flag away, and it
-        // still does what F-14 built it to do.
-        let other = standardise(&gaps, 2.0);
-        assert!(other.standardised);
+        assert!(shipped.standardised, "the shipped variant must standardise");
         assert!(
-            (other.terms.iter().sum::<f64>()).abs() < 1e-12,
+            (shipped.terms.iter().sum::<f64>()).abs() < 1e-12,
             "a z-scored term is centred on the candidate set: {:?}",
-            other.terms
+            shipped.terms
         );
+        // The other variant is not dead code — it is one flag away, and it
+        // still weights the raw gap.
+        let other = raw_term(&gaps, 2.0);
+        assert!(!other.standardised);
+        assert_eq!(other.terms, vec![0.2, 0.4, 1.2]);
         // A non-zero W_DESC is what makes the look block's "and direction"
         // wording true, so the shipped defaults must license it.
         let q = StyleQuery::new(None, Some(&[1.0]), RetrievalWeights::SHIPPED);
@@ -4151,7 +4661,11 @@ mod tests {
         // …and the reads themselves are single-sited here.
         let me = production_source();
         assert_eq!(me.matches("std::env::var(k).ok()").count(), 1, "one weight read");
-        assert_eq!(me.matches("std::env::var_os(k)").count(), 1, "one switch read");
+        // TWO switch reads since S2, and exactly two: `EmbeddingSwitch::resolve`
+        // and `DescribeSwitch::resolve`, one site each. A third would mean a
+        // surface had grown its own read of a switch that is supposed to be a
+        // VALUE passed down from the command's door.
+        assert_eq!(me.matches("std::env::var_os(k)").count(), 2, "one read per switch");
     }
 
     /// The weights come from the environment in ONE place, and a value that
@@ -4247,16 +4761,25 @@ mod tests {
     fn look_build_refuses_without_the_sidecar_and_says_why() {
         let dir = std::env::temp_dir().join(format!("autoshop-look-refuse-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
+        let absent_describer = || crate::describe::DescribeOpts {
+            python_bin: "python".into(),
+            script: "this-sidecar-does-not-exist.py".into(),
+        };
         let err = match StyleIndex::build_looks_with(
-            crate::embed::EmbedOpts {
-                python_bin: "python".into(),
-                script: "this-sidecar-does-not-exist.py".into(),
-                text_file: None,
-                vocab_file: None,
+            BuildSidecars {
+                embed: crate::embed::EmbedOpts {
+                    python_bin: "python".into(),
+                    script: "this-sidecar-does-not-exist.py".into(),
+                    text_file: None,
+                    vocab_file: None,
+                },
+                describe: absent_describer(),
+                scratch: dir.join("scratch"),
             },
             &dir,
             EmbeddingSwitch::ON,
-            &|_, _| {},
+            DescribeSwitch::OFF,
+            &|_| {},
         ) {
             Ok(_) => panic!("a look build without a sidecar must refuse"),
             Err(err) => err.to_string(),
@@ -4271,7 +4794,13 @@ mod tests {
             vocab_file: None,
         };
         assert!(present.available(), "premise: this script exists");
-        let off = match StyleIndex::build_looks_with(present, &dir, EmbeddingSwitch::OFF, &|_, _| {}) {
+        let off = match StyleIndex::build_looks_with(
+            BuildSidecars { embed: present, describe: absent_describer(), scratch: dir.join("scratch") },
+            &dir,
+            EmbeddingSwitch::OFF,
+            DescribeSwitch::OFF,
+            &|_| {},
+        ) {
             Ok(_) => panic!("a look build with the switch off must refuse"),
             Err(err) => err.to_string(),
         };
@@ -4291,5 +4820,380 @@ mod tests {
         let merged = StyleIndex::load(&path).unwrap();
         assert_eq!(merged.exemplars.len(), 1); assert_eq!(merged.looks.len(), 1);
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    // --- S2: the staged build, and the description pass ----------------------
+
+    /// The IMAGE and TEXT doors of `embed.py`, stubbed in one script — the two
+    /// are one process's two modes, and a stub per mode could not observe that
+    /// a build called each of them exactly once.
+    ///
+    /// It ECHOES the manifest back: the answer is mapped by PATH, and the
+    /// staged frame names carry a pid and a sequence number, so a fixed
+    /// pre-written answer could not name them.
+    fn image_text_stub(dir: &Path, texts: usize) -> crate::embed::EmbedOpts {
+        std::fs::create_dir_all(dir).unwrap();
+        let e = format!("{:.10}", 1.0f32 / (crate::embed::EMBED_DIM as f32).sqrt());
+        let vector = vec![e; crate::embed::EMBED_DIM].join(",");
+        let scores = vec!["0.5".to_string(); LOOK_VOCAB.len()].join(",");
+        // No trailing newline: the stub `type`s this and then echoes the
+        // manifest line's own `"path":...}` tail onto the SAME line.
+        std::fs::write(
+            dir.join("prefix.txt"),
+            format!("{{\"dim\":{},\"norm\":\"l2\",\"vector\":[{vector}],\"vocab_scores\":[{scores}],",
+                    crate::embed::EMBED_DIM),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("vectors.json"),
+            format!(
+                "{{\"model\":\"stub\",\"dim\":{},\"norm\":\"l2\",\"text_vectors\":[{}]}}\n",
+                crate::embed::EMBED_DIM,
+                vec![format!("[{vector}]"); texts].join(",")
+            ),
+        )
+        .unwrap();
+        let script = dir.join("embed.py");
+        std::fs::write(&script, "# stand-in\n").unwrap();
+        let python_bin = crate::write_stand_in(
+            dir,
+            "embed-stub",
+            "@echo off\r\n\
+             setlocal enabledelayedexpansion\r\n\
+             echo %~3>>\"%~dp0calls.log\"\r\n\
+             copy /y \"%~4\" \"%~dp0manifest.seen\" >nul\r\n\
+             if \"%~3\"==\"--text-manifest\" (\r\n\
+             copy /y \"%~dp0vectors.json\" \"%~6\" >nul\r\n\
+             exit /b 0\r\n\
+             )\r\n\
+             if exist \"%~6\" del \"%~6\"\r\n\
+             for /f \"usebackq delims=\" %%L in (\"%~4\") do (\r\n\
+             set \"L=%%L\"\r\n\
+             type \"%~dp0prefix.txt\" >>\"%~6\"\r\n\
+             echo !L:~1!>>\"%~6\"\r\n\
+             )\r\n\
+             exit /b 0\r\n",
+            &format!(
+                "D=\"{d}\"\n\
+                 echo \"$3\" >> \"$D/calls.log\"\n\
+                 cp \"$4\" \"$D/manifest.seen\"\n\
+                 if [ \"$3\" = \"--text-manifest\" ]; then cp \"$D/vectors.json\" \"$6\"; exit 0; fi\n\
+                 : > \"$6\"\n\
+                 while IFS= read -r L; do\n\
+                 [ -n \"$L\" ] || continue\n\
+                 TAIL=${{L#?}}\n\
+                 printf '%s' \"$(cat \"$D/prefix.txt\")\" >> \"$6\"\n\
+                 printf '%s\\n' \"$TAIL\" >> \"$6\"\n\
+                 done < \"$4\"\n\
+                 exit 0\n",
+                d = dir.display()
+            ),
+        );
+        crate::embed::EmbedOpts { python_bin, script, text_file: None, vocab_file: None }
+    }
+
+    /// `describe.py`, stubbed the same way: it echoes each manifest path back
+    /// with a fixed sentence, so the caller's path mapping is exercised rather
+    /// than bypassed.
+    fn describe_stub(dir: &Path, desc: &str) -> crate::describe::DescribeOpts {
+        std::fs::create_dir_all(dir).unwrap();
+        std::fs::write(
+            dir.join("prefix.txt"),
+            format!(
+                "{{\"model\":\"{}\",\"revision\":\"{}\",\"prompt_version\":{},\"desc\":\"{desc}\",",
+                crate::describe::MODEL_REPO,
+                crate::describe::MODEL_REVISION,
+                crate::describe::PROMPT_VERSION
+            ),
+        )
+        .unwrap();
+        let script = dir.join("describe.py");
+        std::fs::write(&script, "# stand-in\n").unwrap();
+        let python_bin = crate::write_stand_in(
+            dir,
+            "describe-stub",
+            "@echo off\r\n\
+             setlocal enabledelayedexpansion\r\n\
+             echo call>>\"%~dp0calls.log\"\r\n\
+             copy /y \"%~4\" \"%~dp0manifest.seen\" >nul\r\n\
+             if exist \"%~6\" del \"%~6\"\r\n\
+             for /f \"usebackq delims=\" %%L in (\"%~4\") do (\r\n\
+             set \"L=%%L\"\r\n\
+             type \"%~dp0prefix.txt\" >>\"%~6\"\r\n\
+             echo !L:~1!>>\"%~6\"\r\n\
+             )\r\n\
+             exit /b 0\r\n",
+            &format!(
+                "D=\"{d}\"\n\
+                 echo call >> \"$D/calls.log\"\n\
+                 cp \"$4\" \"$D/manifest.seen\"\n\
+                 : > \"$6\"\n\
+                 while IFS= read -r L; do\n\
+                 [ -n \"$L\" ] || continue\n\
+                 TAIL=${{L#?}}\n\
+                 printf '%s' \"$(cat \"$D/prefix.txt\")\" >> \"$6\"\n\
+                 printf '%s\\n' \"$TAIL\" >> \"$6\"\n\
+                 done < \"$4\"\n\
+                 exit 0\n",
+                d = dir.display()
+            ),
+        );
+        crate::describe::DescribeOpts { python_bin, script }
+    }
+
+    /// Three tiny PNGs, distinct pixel by pixel so their frame digests differ.
+    fn baked_corpus(dir: &Path, n: usize) -> Vec<PathBuf> {
+        std::fs::create_dir_all(dir).unwrap();
+        (0..n)
+            .map(|i| {
+                let p = dir.join(format!("look-{i}.png"));
+                let mut img = image::RgbImage::new(48, 32);
+                for (x, y, px) in img.enumerate_pixels_mut() {
+                    *px = image::Rgb([
+                        ((x * 5 + i as u32 * 40) % 256) as u8,
+                        ((y * 7 + i as u32 * 11) % 256) as u8,
+                        ((x + y + i as u32 * 3) % 256) as u8,
+                    ]);
+                }
+                img.save(&p).unwrap();
+                p
+            })
+            .collect()
+    }
+
+    /// A build's three sidecars, scratch included. The scratch directory is
+    /// the test's OWN: the description cache lives in it, and a test that let
+    /// it default to the store root would both collide with every other test
+    /// (identical fixtures hash identically) and write the user's live store.
+    fn staged(
+        embed: crate::embed::EmbedOpts,
+        describe: crate::describe::DescribeOpts,
+        scratch: &Path,
+    ) -> BuildSidecars {
+        BuildSidecars { embed, describe, scratch: scratch.to_path_buf() }
+    }
+
+    fn calls_at(dir: &Path) -> Vec<String> {
+        std::fs::read_to_string(dir.join("calls.log"))
+            .unwrap_or_default()
+            .lines()
+            .map(|l| l.trim().to_string())
+            .filter(|l| !l.is_empty())
+            .collect()
+    }
+
+    /// THE COST CONTRACT (S2, supervisor's ruling 2026-08-30): a build runs
+    /// ONE process per model, not one per photograph.
+    ///
+    /// Until this batch the IMAGE half of the embedding was a sidecar call per
+    /// record — 169 loads of a 1.50 GB checkpoint for the photographer's own
+    /// library, 5,618 s measured (S1 report §3). The text half was already
+    /// batched (S1-fix F-12) and `embed.py --manifest-jsonl` had always
+    /// existed; nothing was wired to it.
+    ///
+    /// MUTATION THIS KILLS: move `embed_frames` (or `attach_descriptions`)
+    /// back inside the per-photo loop and the counts below become 3.
+    #[test]
+    fn build_invokes_each_sidecar_once_per_build() {
+        let root = crate::test_dir("style-stage-once");
+        let photos = baked_corpus(&root.join("photos"), 3);
+        assert_eq!(photos.len(), 3, "premise: three finished photos");
+        let embed_dir = root.join("embed");
+        let describe_dir = root.join("describe");
+        let index = StyleIndex::build_looks_with(
+            staged(
+                image_text_stub(&embed_dir, 3),
+                describe_stub(&describe_dir, "a stubbed grade sentence"),
+                &root.join("scratch"),
+            ),
+            &root.join("photos"),
+            EmbeddingSwitch::ON,
+            DescribeSwitch::ON,
+            &|_| {},
+        )
+        .expect("the staged look build succeeds against the stubs");
+
+        assert_eq!(
+            calls_at(&embed_dir),
+            vec!["--manifest-jsonl".to_string(), "--text-manifest".to_string()],
+            "three photos: ONE image call and ONE text call, in that order"
+        );
+        assert_eq!(calls_at(&describe_dir).len(), 1, "three photos, ONE describe call");
+        assert_eq!(index.looks.len(), 3);
+        assert!(index.looks.iter().all(|l| l.embed.len() == crate::embed::EMBED_DIM));
+        assert!(index.looks.iter().all(|l| l.desc.as_deref() == Some("a stubbed grade sentence")));
+        assert!(index.looks.iter().all(|l| l.desc_embed.is_some()));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The SWITCH is the only thing that starts the description pass — not the
+    /// script being on disk, not the embedding being on.
+    ///
+    /// MUTATION THIS KILLS: drop the `!describe.on()` guard at the top of
+    /// `attach_descriptions` (the stub is then invoked and the count is 1), or
+    /// make `DescribeSwitch::resolve` default to ON.
+    #[test]
+    fn describe_never_runs_without_the_switch() {
+        let root = crate::test_dir("style-describe-gate");
+        baked_corpus(&root.join("photos"), 2);
+        let embed_dir = root.join("embed");
+        let describe_dir = root.join("describe");
+        let index = StyleIndex::build_looks_with(
+            staged(
+                image_text_stub(&embed_dir, 2),
+                describe_stub(&describe_dir, "never written"),
+                &root.join("scratch"),
+            ),
+            &root.join("photos"),
+            EmbeddingSwitch::ON,
+            DescribeSwitch::OFF,
+            &|_| {},
+        )
+        .expect("a build with the description pass off still succeeds");
+        assert!(calls_at(&describe_dir).is_empty(), "the sidecar was never invoked");
+        assert!(index.looks.iter().all(|l| l.desc.is_none()), "no record carries prose");
+        // …and the vectors still landed: OFF removes the prose, not the build.
+        assert!(index.looks.iter().all(|l| l.desc_embed.is_some()));
+        // The resolver's own rule, on an explicit environment so no test has
+        // to write the process's.
+        let unset = |_: &str| None;
+        assert!(!DescribeSwitch::resolve_with(None, false, unset).on());
+        assert!(DescribeSwitch::resolve_with(None, true, unset).on());
+        assert!(!DescribeSwitch::resolve_with(None, true, |_| Some("0".into())).on());
+        assert!(DescribeSwitch::resolve_with(None, false, |_| Some("1".into())).on());
+        assert!(DescribeSwitch::resolve_with(Some(true), false, |_| Some("0".into())).on());
+        assert!(!DescribeSwitch::resolve_with(Some(false), true, |_| Some("1".into())).on());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// S2's half of the F-12 rule: when a record has PROSE, that is what the
+    /// text tower embeds — the tag string only stands in when there is none.
+    ///
+    /// Asserted on the manifest the batch text door actually received, from a
+    /// REAL staged build, so it covers the wiring as well as `desc_text`.
+    ///
+    /// MUTATION THIS KILLS: make `desc_text` prefer the tags (the manifest
+    /// then carries the vocabulary phrases), or stop writing `desc` in
+    /// `attach_descriptions` (same symptom, one stage earlier).
+    #[test]
+    fn desc_embed_prefers_prose_over_tags() {
+        let root = crate::test_dir("style-prose-over-tags");
+        baked_corpus(&root.join("photos"), 2);
+        let embed_dir = root.join("embed");
+        let described = StyleIndex::build_looks_with(
+            staged(
+                image_text_stub(&embed_dir, 2),
+                describe_stub(&root.join("describe"), "a warm hazy grade"),
+                &root.join("scratch"),
+            ),
+            &root.join("photos"),
+            EmbeddingSwitch::ON,
+            DescribeSwitch::ON,
+            &|_| {},
+        )
+        .unwrap();
+        // The LAST manifest the embed stub saw is the text one.
+        let seen = stub_manifest(&embed_dir);
+        assert_eq!(seen, vec!["a warm hazy grade".to_string(); 2], "the prose is what is embedded");
+        assert!(described.looks.iter().all(|l| !l.tags.is_empty()), "premise: the tags exist too");
+
+        // Same corpus, description pass off: now the TAG STRING stands in.
+        let root2 = crate::test_dir("style-prose-over-tags-off");
+        baked_corpus(&root2.join("photos"), 2);
+        let embed_dir2 = root2.join("embed");
+        let plain = StyleIndex::build_looks_with(
+            staged(
+                image_text_stub(&embed_dir2, 2),
+                describe_stub(&root2.join("describe"), "never written"),
+                &root2.join("scratch"),
+            ),
+            &root2.join("photos"),
+            EmbeddingSwitch::ON,
+            DescribeSwitch::OFF,
+            &|_| {},
+        )
+        .unwrap();
+        let seen2 = stub_manifest(&embed_dir2);
+        assert!(!seen2.is_empty() && seen2.iter().all(|t| *t == plain.looks[0].tags.join(", ")),
+                "with no prose the tag string is embedded: {seen2:?}");
+        assert_ne!(seen, seen2, "the two builds embedded different text");
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&root2);
+    }
+
+    /// The reference blocks carry the prose AFTER the tags, through the same
+    /// bounded door the index used.
+    ///
+    /// The description is model output about the user's own photograph and it
+    /// is going into a proposer prompt, so the block must not be the place
+    /// that trusts it: a newline in a description would forge a line of the
+    /// block, and `sanitize_desc` is what stops that on both surfaces.
+    ///
+    /// MUTATION THIS KILLS: append the prose BEFORE the tags, drop the ` — `
+    /// join, or render `e.desc` directly instead of through the door.
+    #[test]
+    fn reference_block_carries_prose_after_tags() {
+        let mut ex = plain_exemplar("shot");
+        ex.tags = vec!["warm golden tones".into(), "deep blacks".into()];
+        ex.desc = Some("a warm, hazy grade\nwith lifted shadows".into());
+        let idx = StyleIndex {
+            version: CURRENT_INDEX_VERSION, mean: vec![0.0; NDIM], std: vec![1.0; NDIM],
+            exemplars: Vec::new(), source_dir: None, looks: Vec::new(), looks_dir: None,
+            embed_provenance: None,
+        };
+        let block = idx
+            .render_reference(&[&ex], crate::recipe::GradeStrength::new(0.5))
+            .expect("a reference block renders");
+        assert!(
+            block.contains("look: warm golden tones, deep blacks — a warm, hazy grade with lifted shadows"),
+            "tags first, then the prose, on ONE line: {block}"
+        );
+        assert!(!block.contains("grade\nwith"), "the newline must not survive into the block");
+        // …and with no prose the suffix is exactly what S1 shipped.
+        let mut tags_only = ex.clone();
+        tags_only.desc = None;
+        let plain = idx
+            .render_reference(&[&tags_only], crate::recipe::GradeStrength::new(0.5))
+            .unwrap();
+        // The SUFFIX, not the whole block: the block's own prose carries an
+        // em dash of its own ("— the look their edits tend toward"), so a bare
+        // search for one would pass on any input.
+        //
+        // The suffix ENDS at the first run of two spaces, which is how
+        // `render_reference` joins its trailing notes onto the exemplar lines
+        // — and a run of two spaces cannot occur inside the suffix itself,
+        // because `sanitize_desc` collapses every whitespace run to one space
+        // before the description is allowed near the block.
+        let suffix = |b: &str| {
+            b.lines()
+                .find(|l| l.contains("· look:"))
+                .map(|l| {
+                    l.split("· look:")
+                        .nth(1)
+                        .unwrap()
+                        .split("  ")
+                        .next()
+                        .unwrap()
+                        .trim()
+                        .to_string()
+                })
+                .expect("the reference line carries a look suffix")
+        };
+        assert_eq!(suffix(&plain), "warm golden tones, deep blacks", "{plain}");
+        assert_eq!(
+            suffix(&block),
+            "warm golden tones, deep blacks — a warm, hazy grade with lifted shadows",
+            "{block}"
+        );
+
+        // The LOOK block, same rule.
+        let look = LookExemplar {
+            stem: "finished".into(), path: "f.jpg".into(), embed: unit_embed(),
+            tags: vec!["vivid saturated colours".into()], vocab_scores: None,
+            desc: Some("a punchy\tcool grade".into()), desc_embed: None,
+        };
+        let idx2 = StyleIndex { looks: vec![look], ..idx };
+        let lb = idx2.render_look_reference(&[&idx2.looks[0]], false).unwrap();
+        assert!(lb.contains("look: vivid saturated colours; a punchy cool grade"), "{lb}");
     }
 }

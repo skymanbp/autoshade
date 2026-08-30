@@ -49,6 +49,7 @@ impl AutoshopApp {
             app.send_style_ref_image = prefs.send_style_ref_image;
             app.deep_think = prefs.deep_think;
             app.style_embed = prefs.style_embed;
+            app.style_describe = prefs.style_describe;
             // Only a folder that still EXISTS is prefilled: a picker opened at
             // a deleted path lands wherever the OS decides (the same rule the
             // gallery restore above follows).
@@ -2868,14 +2869,19 @@ impl AutoshopApp {
         // worker will carry: the switch is a value, and a preference flipped
         // mid-build must not change what this build is doing.
         let embed = autoshop::style::EmbeddingSwitch::resolve(None, self.style_embed);
+        let describe = autoshop::style::DescribeSwitch::resolve(None, self.style_describe);
         self.spawn_worker(
             move || {
-                let progress = |done: usize, total: usize| {
-                    let _ = tx.send(Msg::StyleBuildProgress { done, total });
+                let progress = |p: autoshop::style::BuildProgress| {
+                    let _ = tx.send(Msg::StyleBuildProgress {
+                        stage: p.stage,
+                        done: p.done,
+                        total: p.total,
+                    });
                     // An mpsc send does not wake egui (see `spawn_worker`).
                     ctx.request_repaint();
                 };
-                let index = match autoshop::style::StyleIndex::build_reporting(&dir, embed, &progress) {
+                let index = match autoshop::style::StyleIndex::build_reporting(&dir, embed, describe, &progress) {
                     Ok(ix) => ix,
                     Err(e) => {
                         return Msg::StyleBuilt(Box::new(StyleBuildOutcome::Failed {
@@ -2898,6 +2904,15 @@ impl AutoshopApp {
                 } else {
                     0
                 };
+                // The S2 sibling, gated the same way and for the same reason:
+                // "no exemplar carries prose" means two opposite things — the
+                // user never asked for the pass, or they did and it reached
+                // nothing.
+                let described = if describe.on() {
+                    index.exemplars.iter().filter(|e| e.desc.is_some()).count()
+                } else {
+                    0
+                };
                 // The empty-index refusal is NOT re-implemented here: `save`
                 // owns it for every caller (an empty write truncates a good
                 // index in place). The count only decides WHICH sentence the
@@ -2907,6 +2922,7 @@ impl AutoshopApp {
                         total,
                         dir,
                         without_embedding,
+                        described,
                     })),
                     Err(_) if total == 0 => {
                         Msg::StyleBuilt(Box::new(StyleBuildOutcome::NothingIndexed { dir }))
@@ -2928,17 +2944,27 @@ impl AutoshopApp {
         let tx = self.tx.clone();
         let ctx = self.egui_ctx.clone();
         let embed = autoshop::style::EmbeddingSwitch::resolve(None, self.style_embed);
+        let describe = autoshop::style::DescribeSwitch::resolve(None, self.style_describe);
         self.spawn_worker(
             move || {
-                let progress = |done: usize, total: usize| {
-                    let _ = tx.send(Msg::StyleBuildProgress { done, total });
+                let progress = |p: autoshop::style::BuildProgress| {
+                    let _ = tx.send(Msg::StyleBuildProgress {
+                        stage: p.stage,
+                        done: p.done,
+                        total: p.total,
+                    });
                     ctx.request_repaint();
                 };
-                match autoshop::style::StyleIndex::build_looks(&dir, embed, &progress) {
+                match autoshop::style::StyleIndex::build_looks(&dir, embed, describe, &progress) {
                     Ok(index) => {
                         let total = index.looks.len();
+                        let described = if describe.on() {
+                            index.looks.iter().filter(|l| l.desc.is_some()).count()
+                        } else {
+                            0
+                        };
                         match index.save(&autoshop::store::style_index_path()) {
-                            Ok(()) => Msg::StyleBuilt(Box::new(StyleBuildOutcome::LooksSaved { total, dir })),
+                            Ok(()) => Msg::StyleBuilt(Box::new(StyleBuildOutcome::LooksSaved { total, dir, described })),
                             Err(e) => Msg::StyleBuilt(Box::new(StyleBuildOutcome::Failed { err: format!("{e:#}") })),
                         }
                     }

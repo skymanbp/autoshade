@@ -518,15 +518,19 @@ impl AutoshopApp {
                     self.style_info_loading = false;
                     self.style_info = Some(*info);
                 }
-                Msg::StyleBuildProgress { done, total } => {
-                    self.style_build_progress = Some((done, total));
+                Msg::StyleBuildProgress { stage, done, total } => {
+                    self.style_build_progress = Some((stage, done, total));
                     // The panel's own line renders these counts; the status bar
                     // gets them too, because a minutes-long job must be visible
                     // from wherever the user is looking.
                     self.status = trf(
                         lang,
-                        "Building the style library… {done} / {total} photos",
-                        &[("done", &done.to_string()), ("total", &total.to_string())],
+                        "Building the style library… {stage}: {done} / {total} photos",
+                        &[
+                            ("stage", tr(lang, stage.label())),
+                            ("done", &done.to_string()),
+                            ("total", &total.to_string()),
+                        ],
                     );
                 }
                 Msg::StyleBuilt(outcome) => self.on_style_built(lang, *outcome),
@@ -1844,11 +1848,15 @@ impl AutoshopApp {
     /// in the language live NOW (L12#4), the button re-arms, and a successful
     /// build both remembers its folder (so a rebuild starts there) and triggers
     /// a fresh status read — the panel must not keep showing the OLD counts.
+    ///
+    /// The description note is APPENDED rather than woven into the sentence:
+    /// it renders only above 0, so an ordinary build (or one with the pass off)
+    /// reads exactly as it did before S2.
     fn on_style_built(&mut self, lang: Lang, outcome: StyleBuildOutcome) {
         self.style_build_inflight = false;
         self.style_build_progress = None;
         match outcome {
-            StyleBuildOutcome::Saved { total, dir, without_embedding } => {
+            StyleBuildOutcome::Saved { total, dir, without_embedding, described } => {
                 // TWO sentences, not one with an "(0 without …)" tail: the
                 // degraded case is the exception and an always-on clause would
                 // read as noise on every ordinary build. The count is what
@@ -1874,13 +1882,15 @@ impl AutoshopApp {
                         &[("n", &total.to_string()), ("path", &abs_display(&dir))],
                     )
                 };
+                let t = t + &described_note(lang, described, total);
                 self.status = t.clone();
                 self.toast(ToastKind::Success, t);
                 self.style_src_dir = Some(dir);
                 self.start_style_info();
             }
-            StyleBuildOutcome::LooksSaved { total, dir } => {
-                let t = trf(lang, "Look library built: {n} finished photos from {path}", &[("n", &total.to_string()), ("path", &abs_display(&dir))]);
+            StyleBuildOutcome::LooksSaved { total, dir, described } => {
+                let t = trf(lang, "Look library built: {n} finished photos from {path}", &[("n", &total.to_string()), ("path", &abs_display(&dir))])
+                    + &described_note(lang, described, total);
                 self.status = t.clone();
                 self.toast(ToastKind::Success, t);
                 self.looks_src_dir = Some(dir);
@@ -2752,4 +2762,21 @@ impl AutoshopApp {
         }
     }
 
+}
+
+/// The S2 build note, rendered from the SHARED rationale template rather than
+/// a second spelling of it: the CLI prints the same key after the same build,
+/// so a user comparing the two surfaces sees one sentence.
+///
+/// Empty below 1, which is what makes the toast identical to its pre-S2 self
+/// whenever the description pass was off or reached nothing.
+fn described_note(lang: Lang, described: usize, total: usize) -> String {
+    if described == 0 {
+        return String::new();
+    }
+    trf(
+        lang,
+        autoshop::rationale::keys::STYLE_DESCRIBED,
+        &[("n", &described.to_string()), ("total", &total.to_string())],
+    )
 }
