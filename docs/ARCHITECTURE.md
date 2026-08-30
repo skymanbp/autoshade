@@ -92,13 +92,13 @@
 > experimental generative edits, an optional pixel-**heal** retouch mode (§4.7)
 > the deterministic look **reverse-fit** (§4.8) and the local server's refusal
 > model (§4.9).
-> 1137 library + 20 CLI + 151 GUI + 2+2 contract tests are enumerated in the GUI
-> build; the library result is 1126 pass + 11 `#[ignore]`d forensic probes
+> 1191 library + 22 CLI + 151 GUI + 2+2 contract tests are enumerated in the GUI
+> build; the library result is 1180 pass + 11 `#[ignore]`d forensic probes
 > (counts refreshed 2026-08-30 after merging the style-retrieval expansion
 > `style-s2` (+55 by name against the `32b0fe4` merge transcript: 46 library —
 > 26 `style`, 9 `describe`, 4 `pipeline`, 3 `embed`, 3 `advisor`, 1 `recipe` —
 > 4 CLI and 5 GUI; the gui trip now runs the GUI bin only, the `gui` feature
-> adding dependencies alone): library 1091→1137, CLI 16→20, GUI 146→151;
+> adding dependencies alone): library 1091→1137→1191, CLI 16→20→22, GUI 146→151;
 > before it the multi-region batch `a2173c9`
 > (+24 by name against `6323f4c`: the 11 `fit_zoned::semantic` tests, the 7
 > `fit_zoned` routing / arbitration / raster-release tests and the 6 `segment`
@@ -1722,7 +1722,9 @@ imported recipe AND from the import's own `ForeignRangeMask` refusals, because a
 Range Mask this engine cannot honour is dropped on the way in — twelve are
 refused and none carried on the calibration library), and per USE
 (`sky` / `subject` / `ground` / `range` / `other`) a count plus the
-amount-weighted mean of eight local sliders. The use is decided by one pure
+amount-weighted mean of ten local sliders (in-mask temperature and tint
+included) plus the share of uses carrying a local point curve. The use is
+decided by one pure
 function, `bucket_of` — an AI selection answers from its own `MaskSubType`, a
 linear gradient from which end of the y-down frame its `full` handle covers
 (XORed with `MaskInverted`, which reverses the covered end), a radial from
@@ -1837,28 +1839,35 @@ stay engine-only. Deterministic and key-free.
 The method is deliberately **distribution-level, not per-pixel regression** — a
 generative target is not pixel-aligned with its source, so only statistics are
 trustworthy. A rank/gradient/pyramid structural-divergence reading selects the
-global policy before any CDF solve. **Full** mode keeps three stages, in this
+global policy before any CDF solve. **Full** mode keeps four stages, in this
 order: luminance-CDF tone matching (sampled
 at the engine's own tone knots and least-squares solved against the engine's own
 slider basis, with a ridge + penalised model-selection prior so numerically
 equivalent but semantically ruinous slider combos lose); then saturation by
 mean-chroma ratio, secant-refined through real renders and closed with a
-do-no-harm check; then per-channel CDF residuals as red/green/blue curves,
+do-no-harm check; then the per-band colour mixer — `hsl.saturation` and
+`hsl.luminance` solved one ACR band at a time from that band's own population
+statistics (weighted mean chroma, weighted mean Rec.601 luma, never paired
+pixels), admitted by the same two-sided population gate the rest of the module
+reads, with refusals typed and named and `hsl.hue` never solved; it is judged
+twice, once where it is fitted and once after the cast curves against its own
+absence on the finished frame; then per-channel CDF residuals as red/green/blue curves,
 admitted only through three vetoes (aggregate error, foreign-hue, rotation
 budget) — each veto is a specific real-photo failure recorded at its const
 block. **Atmosphere** mode instead uses bounded robust exposure, white balance,
-a five-point tone curve and saturation, never per-channel curves, and caps the
+a five-point tone curve, saturation and the same evidence-gated per-band
+colour mixer, never per-channel curves, and caps the
 reported confidence because develop controls cannot reconstruct the changed
 structure. Atmosphere mode is entered because structure diverges; its
 instruments are the budgets (EV ±1, WB gain [0.80, 1.25], saturation ±30,
 curve slope [0.5, 1.5]) and the population facts, not structural survival.
 The budget is derived from the requested strength: 0.0 uses EV +/-0.5,
-saturation +/-15, WB [0.90, 1.12], ratio 1.20, WB rotation share 0.05, Full
+saturation +/-15, per-band +/-6, WB [0.90, 1.12], ratio 1.20, WB rotation share 0.05, Full
 cast-error ratio 1.5 and slope [0.7, 1.3]; 0.65 keeps the calibrated EV +/-1,
-WB [0.80, 1.25], saturation +/-30, WB rotation share 0.05 and slope [0.5,
-1.5], with the historical Full cast-error ratio 2.0; 1.0 permits EV +/-2.5,
-saturation +/-60, WB [0.50, 2.00], ratio 3.0, WB rotation share 1.0, Full
-cast-error ratio 3.0 and slope [0.25, 3.0]. Between 0.65 and 1.0 the WB
+WB [0.80, 1.25], saturation +/-30, per-band +/-18, WB rotation share 0.05 and
+slope [0.5, 1.5], with the historical Full cast-error ratio 2.0; 1.0 permits EV +/-2.5,
+saturation +/-60, per-band +/-45, WB [0.50, 2.00], ratio 3.0, WB rotation
+share 1.0, Full cast-error ratio 3.0 and slope [0.25, 3.0]. Between 0.65 and 1.0 the WB
 rotation share opens linearly (about 0.593 at 0.85). The WB gain ratio and the
 Full look-error admission ratio are independent budget dimensions. At or below
 default, an out-of-budget WB remains as-shot exactly as in the pre-F1 path.
@@ -2035,8 +2044,10 @@ dE of the render against the target at 384 px wide; frame / sky / land) the
 untouched neutral scores 23.5 / 37.0 / 12.4, the gate-on result under the old
 vetoes 22.5 / 37.0 / 10.7, the previously shipped gate-off result 11.9 / 17.5
 / 7.4, and the ruled result 10.6 / 16.4 / 5.9 (segmentation off) and 12.5 /
-20.6 / 5.9 (on). The Full-mode pairs (p36, viaduct) are byte-identical before
-and after; repeated runs are SHA-identical. A 512 / 768 analysis edge was
+20.6 / 5.9 (on). The Full-mode pairs (p36, viaduct) were byte-identical across that batch; the
+per-band colour mixer has since moved both (p36 finished error
+0.032592 -> 0.031792, viaduct look error 0.052060 -> 0.030419 with the
+post-cast arbiter load-bearing). Repeated runs are SHA-identical. A 512 / 768 analysis edge was
 measured and rejected: the same tiles, +4% / +25-50% wall time, and the
 384-calibrated ruler collapses at 768.
 

@@ -6787,7 +6787,7 @@ mod tests {
     }
 
     #[test]
-    fn content_divergence_does_not_fire_on_showcase_same_content() {
+    fn content_divergence_is_calibrated_on_every_shipped_showcase_asset() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/images");
         let expected = [0.075f32, 0.168, 0.095];
         for (index, &want) in expected.iter().enumerate() {
@@ -6807,9 +6807,16 @@ mod tests {
                 index + 1
             );
         }
-        for (file, want) in [
-            ("showcase-viaduct-reimagine-fit-triptych.jpg", 0.070f32),
-            ("showcase-sunset-reimagine-fit-triptych.jpg", 0.226f32),
+        // The shipped reimagine triptychs, each pinned on the side of the
+        // threshold its own page claims.  Two generators stayed on the input's
+        // structure; the island one was asked to clear the haze and invented its
+        // way through it, so `under` is false there and the docs describe an
+        // Atmosphere-mode fit.  Pinning only the same-content assets would leave
+        // the one asset whose divergence actually fires uncalibrated.
+        for (file, want, under) in [
+            ("showcase-viaduct-reimagine-fit-triptych.jpg", 0.126f32, true),
+            ("showcase-sunset-reimagine-fit-triptych.jpg", 0.226f32, true),
+            ("showcase-island-reimagine-fit-triptych.jpg", 0.700f32, false),
         ] {
             let triptych = image::open(root.join(file)).unwrap();
             let source = triptych.crop_imm(0, 136, 532, 356);
@@ -6820,8 +6827,13 @@ mod tests {
                 &EditRecipe::default(),
                 None,
             );
+            assert_eq!(
+                measured.d < DIVERGENCE_GLOBAL,
+                under,
+                "{file} crossed the wrong side of the threshold: {measured:?}"
+            );
             assert!(
-                measured.d < DIVERGENCE_GLOBAL && (measured.d - want).abs() <= 0.05,
+                (measured.d - want).abs() <= 0.05,
                 "{file} calibration drifted: {measured:?}, expected {want:.3}"
             );
         }

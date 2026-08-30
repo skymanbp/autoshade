@@ -112,6 +112,11 @@ the last subsection lists what is designed but not yet shipped.
 
 ### 1. Style reference is retrieval over your whole catalogue, not a preset
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/pillar-analysis-dark.svg" />
+  <img src="docs/images/pillar-analysis-light.svg" alt="Pillar 1: a Lightroom RAW+XMP library becomes exemplars carrying a 14-dimension feature, a SigLIP 2 image vector, a Qwen3-VL sentence and a local-work habit; a query retrieves its four nearest past shots by the hybrid distance, and their habits reach the proposer behind an untrusted-data fence before a capped pull moves the proposal toward the photographer's own means" />
+</picture>
+
 `autoshop style-index <dir>` (or the GUI's **Style reference library**) turns
 *every finished edit you ever made* — each Lightroom RAW+XMP pair — into an
 exemplar ([`src/style.rs`](src/style.rs)): a 14-dimensional feature vector
@@ -131,17 +136,26 @@ descriptions are cached by frame content, so a rebuild only describes what
 changed. Each exemplar also carries a **local-work habit** — how many masks you
 enabled on that frame, put to which use (sky / subject / foreground / range /
 other, decided by the AI selection's own subtype and by which end of the frame
-a gradient covers), and the amount-weighted mean of eight local sliders per
-use. Summary statistics only: no mask geometry is ever averaged across photos,
+a gradient covers), the amount-weighted mean of ten local sliders per use
+(colour temperature and tint inside the mask included), and the share of uses
+that carry their own local point curve. Summary statistics only: no mask
+geometry is ever averaged across photos,
 because a gradient is a fact about one horizon.
 
 At develop time the photo retrieves the **4 most similar past shots** with the
 hybrid distance `d14 + W_EMB·(1−cos(q_img,e_img)) + W_TXT·(1−cos(q_txt,e_img)) + W_DESC·(1−cos(q_txt,e_desc))`.
-The shipped `W_EMB = 4`, `W_TXT = 4` and `W_DESC = 0.5` are the calibration
-harness's winners over 196 grid rows per query-text proxy on the real corpus
-(see the pinned-claims table). The harness sweeps **two** proxies — each
-held-out photo's own local description, and its attribute tag string — and the
-answer is that the prose earns the text terms and the tag string does not.
+The shipped `W_EMB = 4`, `W_TXT = 0.5` and `W_DESC = 0.5` are the calibration
+harness's winners on the real corpus after each candidate's **text hubness**
+(its mean stored vocab cosine — some exemplars score high against EVERY
+direction) is subtracted before the z-score; without that correction one
+exemplar took 68% of a direction's top-4s over 169 different photographs.
+`W_TXT` shipped at `4` for one batch; the corrected re-measurement showed that
+point's MAE advantage was partly regression to the corpus mean, and at `0.5`
+opposite directions share a top-1 only 44.7% of the time (71% with no text
+term at all) while 149 of 169 exemplars are actually retrieved (52 before).
+The harness sweeps **two** query-text proxies — each held-out photo's own
+local description, and its attribute tag string — and the answer is still
+that the prose earns the text terms and the tag string does not.
 A **z-scored variant** of the two text terms is built and tested — raw SigLIP
 image-to-text cosines are tiny and tightly clustered, which is a real reason to
 suspect the raw term. It is now the one that ships: with real descriptions the
@@ -179,6 +193,11 @@ byte, while the other tiers change only its wording.
 
 ### 2. Reverse-fit: inverse rendering from any finished look
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/pillar-reimagine-fit-dark.svg" />
+  <img src="docs/images/pillar-reimagine-fit-light.svg" alt="Pillar 2: a generated or finished target is measured against the input by the structural-divergence statistic D, which selects a full solve or a bounded atmosphere mode; a robust tone regression and gated local stages produce a recipe, and only the recipe reaches the full-resolution render" />
+</picture>
+
 `match` recovers an editable recipe from any finished rendition of the same
 frame — a generated image, an export, someone else's grade — without copying
 a pixel ([`src/fit.rs`](src/fit.rs)). Because a generated target is not
@@ -189,7 +208,7 @@ ridge and a model-selection prior (so numerically equivalent but semantically
 ruinous slider combinations lose); saturation closes by mean-chroma ratio,
 secant-refined through real renders; the per-channel CDF residual becomes
 red/green/blue curves admitted only through three vetoes, one of which refuses
-any cast that paints a hue ≥ 45° from every target family over ≥ 5 % of the
+any cast that paints a hue more than 45° from every target family over ≥ 5 % of the
 frame. The residual tone curve places its knots uniformly in the LUT's *output*
 domain, which keeps a steep camera base curve from sagging the chords by
 ~10/255.
@@ -294,6 +313,11 @@ new model's result.
 
 ### 9. Lightroom parity is measured, and the residuals are published
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/pillar-lightroom-math-dark.svg" />
+  <img src="docs/images/pillar-lightroom-math-light.svg" alt="Pillar 3: sidecar and recipe read and write both ways into the engine over four measured laws — mask frames, lens geometry, tone and falloff, and the brush kernel — each published with its own residual" />
+</picture>
+
 The tone LUT, the two-arm Texture model (`A1 = 0.172443`, `A2 = 0.304888`;
 45 of 45 Lightroom anchors within ±0.02), the 290×11 radial feather LUT,
 the brush law `(1 − ρ^m)^n` with the measured flow constant `κ = 0.1284`
@@ -320,17 +344,24 @@ disguised as a Lightroom adjustment.
 
 Written down in the plan and the design memos, in delivery order:
 
-- **Style retrieval expansion** — ingest finished exports as exemplars (not
-  only RAW+XMP pairs), text embeddings so a written style brief retrieves by
-  meaning, the embedding switch in the GUI (today the
-  `AUTOSHOP_STYLE_EMBED` environment variable), and a prompt-adherence axis
-  next to Strength.
-- **Linear-gradient falloff continuity** is shipped in v1.1 as the measured C1
-  Hermite smoothstep (Lightroom turns over at both handles, 80/80 rows, and a
-  free-end profile fit (`scripts/linear_falloff_probe.py --fit`) reaches RMS
-  0.0045 for smoothstep against 0.017 for linear; the hard render change is
-  limited to linear masks, with radial and bitmap masks unchanged); a
-  **macOS build** remains on the roadmap.
+- **Colour-range semantic regions.** Reverse-fit partitions a frame by
+  semantic class or by luminance band; a colour-range producer is designed and
+  not built. Until it is, a look that differs only by hue over a spatially
+  scattered region is fitted globally or not at all.
+- **A macOS build.** The release workflow builds and tests a universal
+  (arm64 + x86_64) macOS binary on every tag, but no macOS binary has been
+  published yet and the desktop app has open platform work behind it —
+  ⌘Q handling, the bundled sidecars' location inside a `.app`, and the
+  storage root under `~/Library`.
+- **A published Linux binary.** Linux is built and tested in CI from source on
+  every push; the release workflow does not produce a Linux asset.
+
+Everything that used to sit here has shipped: the style-retrieval expansion
+(finished exports as a look library, the SigLIP 2 text tower, local Qwen3-VL
+descriptions, the GUI embedding switch and the Direction-adherence axis) landed
+across steps 14 and S1–S3, and the eased linear-gradient falloff — the measured
+C1 Hermite smoothstep, RMS 0.0045 against 0.017 for a straight ramp — is on
+`main` awaiting the next release.
 
 ## How it works
 
@@ -339,7 +370,7 @@ Written down in the plan and the design memos, in delivery order:
   <img src="docs/images/architecture-light.png" alt="Autoshop architecture: three front ends over one Rust library with the style index, reverse-fit, local producers and the local-field analyzer; local Python sidecars for embeddings, correspondence and segmentation; opt-in external AI services" />
 </picture>
 
-<sub>Architecture with the ideas inside it: the style index, reverse-fit, its local producers, the bilateral-grid analyzer, and the three local sidecars are drawn as the components they are. The interactive version is
+<sub>Architecture with the ideas inside it: the style index, reverse-fit, its local producers, the bilateral-grid analyzer, and the local sidecars are drawn as the components they are. The diagram predates the fourth and fifth sidecars (`correspond.py`, `describe.py`) and draws three; the sidecar family is enumerated in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). The interactive version is
 [docs/architecture/autoshop.architecture.html](docs/architecture/autoshop.architecture.html),
 generated from [autoshop.architecture.json](docs/architecture/autoshop.architecture.json)
 with [archify](https://github.com/tt-a1i/archify).</sub>
@@ -376,29 +407,44 @@ is rendered by Autoshop's engine from a recipe; the neutral frame is
 Autoshop's own conversion, not the camera JPEG. Model-judge scores are
 automated review, not human aesthetic approval.
 
+Both batches are the SAME photograph — a hazy lakeside island town — so that
+what changes between them is the capability and not the subject. They were
+re-run end to end on the current build (2026-08-30), and the AI develops were
+asked for a committed grade (`--strength 0.9`) rather than the conservative
+shipped default, because a showcase should show what the axis is for. Every
+number below was read from that run.
+
 ### Batch 1 — original · AI analysis · AI analysis with a style reference
 
 <table>
 <tr>
-<td width="33%"><img src="docs/images/showcase-lake-neutral.jpg" alt="Lake and boat: neutral engine conversion" /><br /><sub><b>Original.</b> Neutral engine conversion of the RAW.</sub></td>
-<td width="33%"><img src="docs/images/showcase-lake-ai.jpg" alt="Lake and boat: AI develop with style read disabled" /><br /><sub><b>AI analysis.</b> The vision advisor's develop with style influence disabled. This run rendered under a Revise verdict and therefore has no saved recipe/XMP; it is kept as a transparent comparison.</sub></td>
-<td width="33%"><img src="docs/images/showcase-lake-ai-style.jpg" alt="Lake and boat: AI develop with four retrieved style references" /><br /><sub><b>AI analysis + style reference.</b> The same advisor, now handed four similar edits retrieved from the indexed Lightroom library as soft references; accepted and saved as a normal recipe and XMP. Nothing is copied pixel for pixel.</sub></td>
+<td width="33%"><img src="docs/images/showcase-island-neutral.jpg" alt="Lakeside island town: neutral engine conversion" /><br /><sub><b>Original.</b> Neutral engine conversion of the RAW — flat, and hazy, because that is what the sensor recorded.</sub></td>
+<td width="33%"><img src="docs/images/showcase-island-ai.jpg" alt="Lakeside island town: AI develop with the style read disabled" /><br /><sub><b>AI analysis.</b> The vision advisor's develop with the style read <i>disabled</i> (<code>--style 0 --strength 0.9</code>), including its own crop. The visual judge scored the first proposal 80/100, bought a guided revision and adopted it at 84/100, then bought a second that came back at 83 and was discarded. Final verdict Accept.</sub></td>
+<td width="33%"><img src="docs/images/showcase-island-ai-style.jpg" alt="Lakeside island town: AI develop with four retrieved style references" /><br /><sub><b>AI analysis + style reference.</b> The same advisor at the same strength with <code>--style 1.0</code>, handed the four most similar edits from a 169-photo index of the photographer's own Lightroom library as soft references. Judged 84/100, then 84 and 91 across two adopted revisions — and the run still ended on a <i>Revise</i> verdict, because the judge's target was not reached. The only difference between this pane and the last is whether those four neighbours reached the model; nothing is copied pixel for pixel.</sub></td>
 </tr>
 </table>
+
+### One photograph, three looks — the direction text drives the retrieval
+
+<img src="docs/images/showcase-island-three-looks.jpg" alt="Lakeside island town: straight conversion and three AI develops driven by three different direction texts" />
+
+<sub>The same frame, the same <code>--style 1.0 --strength 0.9</code>, the same 169-exemplar library — only the <b>direction text</b> changes, and the retrieval hears it (post text-hubness correction): each run pulled a <i>different</i> finished look from the photographer's own 94-photo look library (tags <i>dark moody low-key / muted desaturated / cross-processed</i>; <i>cinematic, warm golden tones, soft low contrast</i>; <i>cool blue tones, punchy high contrast, cross-processed</i>), and the grades measurably diverge — mean saturation 63 / 18 / 75 against the conversion's 45. Judged 92; 86 → 91 with one guided revision adopted; 84 with its revision re-scored 73 and discarded (do-no-harm). All three closed on <i>Revise</i> against the direct-tier target, so none auto-saved.</sub>
 
 ### Batch 2 — original · AI full-image generation · AI reverse-fit
 
 <table>
 <tr>
-<td width="33%"><img src="docs/images/showcase-viaduct-neutral.jpg" alt="Stone viaduct: neutral engine conversion" /><br /><sub><b>Original.</b> Neutral engine conversion of the RAW.</sub></td>
-<td width="33%"><img src="docs/images/showcase-viaduct-reimagine.jpg" alt="Stone viaduct: AI-generated 3520×2352 target" /><br /><sub><b>AI full-image generation</b> (<i>generated</i>). A 3520×2352 target from a configured <code>gpt-image-2</code>; it may invent content, and its structural divergence from the input is measured and disclosed before anything is fitted to it.</sub></td>
-<td width="33%"><img src="docs/images/showcase-viaduct-fit.jpg" alt="Stone viaduct: reverse-fitted recipe rendered on the original RAW at 9504×6336" /><br /><sub><b>AI reverse-fit.</b> The recipe recovered from that look, rendered on the original RAW at 9504×6336 — editable, deterministic, and unable to invent detail. Look error 0.057 → 0.019 at fit confidence 0.678264; the colour-cast stage was rejected by the fit's own do-no-harm review, so the recipe carries tone and saturation only.</sub></td>
+<td width="33%"><img src="docs/images/showcase-island-neutral.jpg" alt="Lakeside island town: neutral engine conversion" /><br /><sub><b>Original.</b> The same neutral conversion as Batch 1.</sub></td>
+<td width="33%"><img src="docs/images/showcase-island-reimagine.jpg" alt="Lakeside island town: AI-generated 3520×2352 target with the haze removed" /><br /><sub><b>AI full-image generation</b> (<i>generated</i>). A 3520×2352 target from a configured <code>gpt-image-2</code>, asked for the same scene on a clear day. It invented its way through the haze, and both stages measured exactly that: <code>reimagine</code> reported <b>D = 0.732</b> against the frame it sent, and the fit re-measured <b>D = 0.731</b> against the neutral render — more than twice the 0.35 threshold either way.</sub></td>
+<td width="33%"><img src="docs/images/showcase-island-fit.jpg" alt="Lakeside island town: reverse-fitted recipe rendered on the original RAW at 9504×6336" /><br /><sub><b>AI reverse-fit.</b> Because D crossed the threshold, the fit refused the full solve and ran the bounded <b>atmosphere</b> mode: exposure within ±1 EV, white-balance gains in [0.80, 1.25], saturation within ±30, no per-channel curves, confidence capped. Look error 0.207 → 0.093 at confidence 0.440. The per-band colour mixer proposed a move here and gave it back: the Orange and Yellow bands are one-sided on this pair (the generation replaced their population), and unmeasurable is not equal. It is visibly better than the original and visibly short of the generated frame — which is the honest answer, because the haze is <i>in</i> the photograph and no develop control can remove what was never recorded.</sub></td>
 </tr>
 </table>
 
-More examples — the cat `analyze` pair, three further pairs including two
-documented failure modes, the style-read triptychs, and the sunset
-reimagine — are in [docs/SHOWCASE.md](docs/SHOWCASE.md).
+More examples — the shoreline `analyze` pair, a second style triptych, the
+stone-viaduct reverse-fit (D = 0.126, look error 0.048 → 0.015 at confidence
+0.662411, per-band HSL on three bands, four spatial tiles, and one visible tile seam this project is not
+hiding), and three earlier pairs including two documented failure modes — are
+in [docs/SHOWCASE.md](docs/SHOWCASE.md).
 
 ## Measured numbers
 
@@ -409,18 +455,18 @@ estimate. Sources are the pinned claims in
 
 | What | Measured | Where |
 |---|---|---|
-| Automated test battery | 1137 library / 20 CLI / 151 GUI / 2+2 contract tests; `check_docs` re-derives the pinned release claims | [Tech stack](#tech-stack-algorithms-and-design-philosophy) |
+| Automated test battery | 1191 library / 22 CLI / 151 GUI / 2+2 contract tests; `check_docs` re-derives the pinned release claims | [Tech stack](#tech-stack-algorithms-and-design-philosophy) |
 | RAW coverage | 24 extensions, 725 camera bodies; nine-camera format zoo 9/9 at the last release gate | [Supported formats](#supported-formats) |
 | Lightroom Texture parity | 45 of 45 period/depth anchors within ±0.02 | [Develop pipeline](#develop-pipeline-and-tone-model) |
 | Radial mask closure | 41 of 41 measured vectors within ≤1 px | [Lens correction](#lens-correction-and-lightroom-mask-frame-laws) |
 | Linear mask closure (openly not pixel-closed) | RMS 9.748 / 7.025 / 6.336 px with lens correction on, 12.449 / 9.943 / 4.979 px off | [Lens correction](#lens-correction-and-lightroom-mask-frame-laws) |
 | Brush geometry | D1 error 874 px → 9.8 px after pixel-centre sampling and the pixel/aspect metric | [Masks](#masks) |
 | X-Trans demosaic (approximate) | X-S10 G/R ratio 1.5503 → 0.9476 | [RAW decode](#raw-decode-and-cfa) |
-| Reverse-fit, stone viaduct | look error 0.057 → 0.019, confidence 0.678264 | [Results](#results-two-batches-six-frames) |
-| Reverse-fit, sunset | look error 0.060 → 0.042, confidence 0.746691 | [docs/SHOWCASE.md](docs/SHOWCASE.md) |
+| Reverse-fit, island town (atmosphere mode) | look error 0.207 → 0.093, confidence 0.440221, generated-target divergence D = 0.731 (0.732 as `reimagine` measured it) | [Results](#results-two-batches-six-frames) |
+| Reverse-fit, stone viaduct (full solve) | look error 0.048 → 0.015 (0.019 global with the per-band mixer solving Orange −18, Yellow −18, Blue +18 saturation; four spatial tiles and one field mask bought the rest), confidence 0.662411, D = 0.126 | [docs/SHOWCASE.md](docs/SHOWCASE.md) |
 | Local-field ceiling, calibration pair | global fit 0.0961 against a ceiling of 0.0700; the accepted sky zone realizes 0.134 of the distance | [What is new §7](#7-a-bilateral-grid-local-field-prices-every-local-producer-first) |
-| AI develop, model judge | cat pair 62 → 86; townhouse 84 → 86; balcony 78 → 84; hillside 63 → 87 (automated scores) | [docs/SHOWCASE.md](docs/SHOWCASE.md) |
-| Style retrieval weights | corpus harness (169 described exemplars, 156 queries, 196 grid rows per query-text proxy): `W_EMB=4`, `W_TXT=4`, `W_DESC=0.5`, standardised variant — MAE 0.664818 vs baseline 0.713143, +0.048325, CI [+0.024290, +0.078587] under the prose proxy; under the tag-string proxy nothing beats the text-free row; `W_LOOK=1.0` is a normalisation the harness cannot see | [AI advisor](#ai-advisor-and-reverse-fit) |
+| AI develop, model judge | 2026-08-30 batch at `--strength 0.9`, style off / style 1.0: island 80 → 84 / 84 → 91; river 63 → 69 / 68 → 78; shoreline 68 → 84 / 61 → 72. Earlier pairs (townhouse 84 → 86, balcony 78 → 84, hillside 63 → 87) are the v0.33.0 batch and are labelled as such | [docs/SHOWCASE.md](docs/SHOWCASE.md) |
+| Style retrieval weights | corpus harness (169 described exemplars, 156 queries): `W_EMB=4`, `W_TXT=0.5`, `W_DESC=0.5`, standardised variant with the text-hubness correction — MAE 0.688864 vs baseline 0.713143, +0.024280, CI [+0.005837, +0.041111] under the prose proxy; the corrected point at the old `W_TXT=4` regresses with CI [−0.069654, −0.005140], which is why the weight moved; under the tag-string proxy nothing beats the text-free row; `W_LOOK=1.0` is a normalisation the harness cannot see | [AI advisor](#ai-advisor-and-reverse-fit) |
 | Memory budget | 1800 MB per photo from a 1771 MB reference probe; 4 GiB RAW admission gate | [Application](#application-and-infrastructure) |
 
 ## Install and quickstart
@@ -586,7 +632,8 @@ named per-file error, so one malformed file does not terminate a batch run.
 - **Non-destructive, interoperable, local first.** The source library stays
   read-only, develops live in a per-user store, sidecars are merged so a
   Lightroom catalogue survives the round trip, and segmentation, denoise,
-  correspondence, and style embeddings run as local sidecars; pixels leave the
+  correspondence, look descriptions and style embeddings run as five local
+  sidecars; pixels leave the
   machine only for an AI operation the user asks for, and the verifier never
   receives them.
 - **Generated pixels are labelled.** Reimagine, retouch, heal, and denoise are
@@ -665,7 +712,7 @@ z-scored RAW+XMP exemplars with four optional cosine terms (image, direction tex
 description text, and the separate finished-photo look library); the shipped
 weights are recorded from the calibration harness and remain zero for the three
 terms without corpus-backed evidence. `src/fit.rs` performs luminance-CDF, exposure,
-basis, tone, saturation, and cast inverse stages with a ≥45°/≥5% foreign-hue
+basis, tone, saturation, and cast inverse stages with a >45°/≥5% foreign-hue
 veto; `src/correspond.rs` + `python/correspond.py` measure the DIFT (SD 2.1)
 correspondence field that the reverse-fit consults automatically on
 content-divergent pairs (`correspond` is the standalone diagnostic door);
@@ -683,7 +730,7 @@ versions, and a deleted-version registry; SCUNet success requires the typed
 `sidecar_wrote` contract. A 1771 MB reference probe sets the 1800 MB per-photo
 budget, while the 4 GiB RAW gate bounds admission. The [`build`
 workflow](.github/workflows/build.yml) covers default and GUI feature sets on
-Ubuntu and macOS. The current battery is **1137 library (1126 pass + 11 `#[ignore]`d forensic probes) / 20 CLI / 151 GUI / 2+2 contract** tests; the
+Ubuntu and macOS. The current battery is **1191 library (1180 pass + 11 `#[ignore]`d forensic probes) / 22 CLI / 151 GUI / 2+2 contract** tests; the
 [`scripts/check_docs.py`](scripts/check_docs.py) gate re-derives pinned release
 claims. Model weights are not stored in this repository.
 

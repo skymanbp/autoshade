@@ -156,9 +156,9 @@ The following commands and flags match the v1.0.0 command definitions in
 
 ```text
 autoshop decode <src> [-o|--out FILE]
-autoshop analyze <src> [-o|--out FILE] [--guidance TEXT] [--style 0..1] [--strength 0..1] [--adherence 0..1] [--embed|--no-embed] [--deep]
+autoshop analyze <src> [-o|--out FILE] [--guidance TEXT] [--style 0..1] [--strength 0..1] [--adherence 0..1] [--embed|--no-embed] [--deep] [--reference-image]
 autoshop apply <src> <recipe.json> (-o|--out) FILE [--long-edge N]
-autoshop auto <src> [-o|--out FILE] [--guidance TEXT] [--style 0..1] [--strength 0..1] [--adherence 0..1] [--embed|--no-embed] [--deep] [--denoise] [--denoise-strength 0..1] [--denoise-model NAME] [--long-edge N]
+autoshop auto <src> [-o|--out FILE] [--guidance TEXT] [--style 0..1] [--strength 0..1] [--adherence 0..1] [--embed|--no-embed] [--deep] [--reference-image] [--denoise] [--denoise-strength 0..1] [--denoise-model NAME] [--long-edge N]
 autoshop denoise <src> [-o|--out FILE] [--strength 0..1] [--model NAME]
 autoshop batch <dir> [--render] [--limit N] [--include-baked] [--jobs N] [--long-edge N]
 autoshop eval <dir> [--limit N] [--jobs N] [--fresh] [--state FILE]
@@ -196,7 +196,8 @@ embedding vector is available.
 A RAW index build also reads the **masks** in each sidecar, and summarises them
 as a habit: how many you enabled, how many carry a Range Mask, and per use —
 sky, subject, foreground, range, other — a count and the average strength of
-eight local sliders. It reaches the proposer as one sentence ("3 of 4 mask the
+ten local sliders (in-mask temperature and tint included), plus whether the
+mask carries its own local curve. It reaches the proposer as one sentence ("3 of 4 mask the
 sky (linear from the top: exposure -0.6 EV, highlights -25) …"), so the AI
 places its own masks the way you place yours. **No mask shape is copied or
 averaged**: geometry belongs to one frame, and only counts and slider averages
@@ -244,9 +245,10 @@ Six environment overrides steer retrieval, each read in exactly one place:
 | `AUTOSHOP_STYLE_EMBED` | `1`/`0` — use the SigLIP sidecar. Set (any value) beats the GUI preference; `--embed`/`--no-embed` beats both. |
 | `AUTOSHOP_STYLE_DESCRIBE` | `1`/`0` — run the local look-description pass during an index build. Set (any value) beats the GUI preference; `--describe` beats both. It never turns the embedding on by itself. |
 | `AUTOSHOP_STYLE_EMBED_WEIGHT` | `W_EMB`, the query-image ↔ exemplar-image cosine block. `0` reproduces the 14-dimension ranking exactly. |
-| `AUTOSHOP_STYLE_TEXT_WEIGHT` | `W_TXT`, the Direction-text ↔ exemplar-image term. Ships at `4` since the S2 recalibration on an index with real descriptions; it shipped at `0` while the only query text available to the harness was a tag string. |
+| `AUTOSHOP_STYLE_TEXT_WEIGHT` | `W_TXT`, the Direction-text ↔ exemplar-image term, scored after each exemplar's text hubness is subtracted. Ships at `0.5`: it spent one batch at `4`, where the corrected re-measurement showed the ranking collapsing onto a few hub exemplars; it shipped at `0` while the only query text available to the harness was a tag string. |
 | `AUTOSHOP_STYLE_DESC_WEIGHT` | `W_DESC`, the Direction-text ↔ exemplar-description term. Ships at `0.5`. It shipped at `4` when both sides of the term were tag strings; with real prose that point measures *worse* than switching the term off, so it was re-fitted. |
 | `AUTOSHOP_STYLE_LOOK_WEIGHT` | `W_LOOK`, the look-library image term. |
+| `AUTOSHOP_SEND_REFERENCE_IMAGE` | `1`/`0` — also send the retrieved reference photo itself (not just its text) with `analyze`/`auto` proposals; `--reference-image` turns it on per run. Destination-trust: only your own environment or user-level settings can set it — a downloaded photo pack's `.env` cannot, because it decides whether your photograph goes on the wire. `batch` never sends one. |
 
 All four weights parse the same way: trimmed, and taken only if finite and
 non-negative — anything else falls back to the shipped default, because a

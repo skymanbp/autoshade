@@ -54,3 +54,6 @@ desktop.ini
 /dist/
 .secret*
 .wrangler/
+
+# cc-memory project state (tool-local, never content)
+.ccm/

@@ -85,12 +85,12 @@ coercing either to RGB would invent a colour model.
 The global reverse-fit derives one `FitBudget` from `GradeStrength` and
 interpolates linearly between these pinned points:
 
-| Strength | EV | Saturation | WB gain | WB ratio | WB rotation share | Full cast ratio | Curve slope | Confidence cap | Veto |
-|---|---:|---:|---|---:|---:|---:|---|---:|---|
-| 0.00 | +/-0.5 | +/-15 | 0.90..1.12 | 1.20 | 0.05 | 1.50 | 0.7..1.3 | 0.50 | withhold |
-| 0.65 | +/-1.0 | +/-30 | 0.80..1.25 | 1.40 | 0.05 | 2.00 | 0.5..1.5 | 0.50 | withhold |
-| 0.85 | interpolated | interpolated | interpolated | interpolated | 0.593 | interpolated | interpolated | interpolated | disclose |
-| 1.00 | +/-2.5 | +/-60 | 0.50..2.00 | 3.00 | 1.00 | 3.00 | 0.25..3.0 | 0.35 | disclose |
+| Strength | EV | Saturation | Per-band HSL | WB gain | WB ratio | WB rotation share | Full cast ratio | Curve slope | Confidence cap | Veto |
+|---|---:|---:|---:|---|---:|---:|---:|---|---:|---|
+| 0.00 | +/-0.5 | +/-15 | +/-6 | 0.90..1.12 | 1.20 | 0.05 | 1.50 | 0.7..1.3 | 0.50 | withhold |
+| 0.65 | +/-1.0 | +/-30 | +/-18 | 0.80..1.25 | 1.40 | 0.05 | 2.00 | 0.5..1.5 | 0.50 | withhold |
+| 0.85 | interpolated | interpolated | interpolated | interpolated | interpolated | 0.593 | interpolated | interpolated | interpolated | disclose |
+| 1.00 | +/-2.5 | +/-60 | +/-45 | 0.50..2.00 | 3.00 | 1.00 | 3.00 | 0.25..3.0 | 0.35 | disclose |
 
 The default-strength exception is deliberate: at or below 0.65 an out-of-budget
 WB request remains as-shot, byte-identical to the pre-F1 path. Above default,
@@ -989,8 +989,15 @@ cannot honour is counted the way the develop path would actually see it.
 
 **What it holds.** The number of masks ENABLED with a non-zero amount; how many
 carry a Range Mask refinement; and, per use, a count plus the amount-weighted
-mean of the eight local sliders in `HABIT_SLIDERS` (`exposure`, `highlights`,
-`shadows`, `whites`, `blacks`, `clarity`, `dehaze`, `saturation`). The refined
+mean of the ten local sliders in `HABIT_SLIDERS` (`exposure`, `highlights`,
+`shadows`, `whites`, `blacks`, `clarity`, `dehaze`, `saturation`,
+`temperature`, `tint`), and `curved` — the share of uses that carry their own
+local point curve (a curve is a point list, not a slider, so it is a fact
+beside the mean rather than a column of it). A v5 index written from this
+batch on stores the 10-wide mean; an older build refuses it with
+`invalid length 10` and must rebuild, while this build still reads the 8-wide
+S3 shape (missing columns zero-filled) so the version gate's actionable
+message stays reachable. The refined
 count is taken from the imported recipe AND from the importer's own
 `MaskImportReason::ForeignRangeMask` refusals, because a Range Mask this engine
 cannot honour is dropped on the way in: on the 169-sidecar calibration library
@@ -1325,8 +1332,8 @@ than the pre-call state; model weights remain outside the repository.
 - The 61 MP RAW probe measured `151 MB` peak commit for decode,
   `1771 MB` for calibration/render preparation, and `1766 MB` for the
   full-resolution render tail; the combined process peak remained `1771 MB`.
-- The release battery is **1137 library (1126 pass + 11 `#[ignore]`d forensic
-  probes) / 20 CLI / 151 GUI / 2+2 contract** tests. Environment-gated real
+- The release battery is **1191 library (1180 pass + 11 `#[ignore]`d forensic
+  probes) / 22 CLI / 151 GUI / 2+2 contract** tests. Environment-gated real
   Lightroom, brush-table, and RAW-zoo suites are additional and are not
   smuggled into the ordinary count.
 - The build workflow checks default and GUI feature sets on Ubuntu and macOS;
