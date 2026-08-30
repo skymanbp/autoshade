@@ -35,6 +35,11 @@
 
 use crate::*;
 
+fn style_age_hours(age: Option<std::time::Duration>) -> String {
+    age.map(|d| format!("{:.1}h", d.as_secs_f64() / 3600.0))
+        .unwrap_or_else(|| "?".into())
+}
+
 impl AutoshopApp {
     /// The AI area — one first-level section, three sub-areas.
     ///
@@ -306,6 +311,24 @@ impl AutoshopApp {
                 "How hard the AI pushes the grade — a different axis from Style: Style asks how close to your own past edits, Strength asks how committed the result should be. 50% is where every AI guardrail NUMBER was calibrated: the ±50/±35 pair and the soft caps are bit-for-bit the ones earlier releases used, but the restraint WORDING those releases sent is now the 40%-and-below prose, so no single setting brings an old release back whole. From 41% up the AI must decide EACH colour control explicitly instead of leaving it neutral by default; the default 65% (double-click to reset) leans a little further than the calibration point. Above 70% it is additionally told to use the controls it wants at a strength a viewer can see, and the visual review may then run up to 3 rounds — the same ceiling 「Deep thinking」 raises it to, and either one ALONE is enough to make the worst case 17 API calls (10 carrying images). The clipping and white-point safeguards never widen with it.",
             ),
         );
+        let has_direction = !self.guidance.trim().is_empty();
+        ui.add_enabled_ui(has_direction, |ui| {
+            #[cfg(test)]
+            {
+                // The gate's own witness (same seam as `ai_gate_enabled`): a
+                // comment cannot keep the wrapper here.
+                self.adherence_gate_enabled = Some(ui.is_enabled());
+            }
+            Self::slider_pct_hinted(
+                ui,
+                lang,
+                tr(lang, "Adherence"),
+                &mut self.direction_adherence,
+                1.0,
+                autoshop::recipe::DirectionAdherence::DEFAULT,
+                tr(lang, "How closely the AI follows your direction; disabled until Direction has text: <=40% Hint, 40-70% Direct, above 70% Brief. Prompt intent only - it never moves a render limit."),
+            );
+        });
         // R23-4 (feedback #13): the THIRD analysis-side control, under the two
         // dials it modifies — the target score and round budget it unlocks are
         // read off the Strength band directly above it.
@@ -340,13 +363,13 @@ impl AutoshopApp {
         group_caption(ui, tr(lang, "Style reference library"));
         // ── the status line: which library, how big, how old, and where.
         match self.style_info.as_ref().map(|i| (i.path.clone(), i.state.clone())) {
-            Some((path, autoshop::style::StyleIndexState::Built { total, source_dir, age, .. })) => {
+            Some((path, autoshop::style::StyleIndexState::Built { total, source_dir, age, with_embedding, looks, .. })) => {
                 let from = source_dir.unwrap_or_else(|| tr(lang, "an unrecorded folder").to_string());
                 ui.label(
                     egui::RichText::new(trf(
                         lang,
-                        "{n} of your own edits · from {path}",
-                        &[("n", &total.to_string()), ("path", &from)],
+                        "{n} of your own edits · from {path} · embeddings {with_embedding}/{total} · looks {looks}",
+                        &[("n", &total.to_string()), ("path", &from), ("with_embedding", &with_embedding.to_string()), ("total", &total.to_string()), ("looks", &looks.to_string())],
                     ))
                     .small(),
                 )
@@ -438,12 +461,20 @@ impl AutoshopApp {
                     build = have;
                 }
             });
-            if let Some((done, total)) = self.style_build_progress {
+            if let Some((stage, done, total)) = self.style_build_progress {
+                // The STAGE is named (S2): the build is four phases over the
+                // whole library and only the first reports per record, so a
+                // bare pair would sweep 0..N three times with nothing to say
+                // which sweep this is.
                 ui.label(
                     egui::RichText::new(trf(
                         lang,
-                        "{done} / {total} photos",
-                        &[("done", &done.to_string()), ("total", &total.to_string())],
+                        "{stage}: {done} / {total} photos",
+                        &[
+                            ("stage", tr(lang, stage.label())),
+                            ("done", &done.to_string()),
+                            ("total", &total.to_string()),
+                        ],
                     ))
                     .weak()
                     .small(),
@@ -489,6 +520,47 @@ impl AutoshopApp {
             } else {
                 tr(lang, "Build a style library first — there is no reference photo to send")
             });
+        });
+        ui.checkbox(&mut self.style_embed, tr(lang, "Use SigLIP 2 look embedding (downloads 1.5 GB once; index builds and analyses take longer)"))
+            .on_hover_text(tr(lang, "Embedding is optional and local. The environment override wins when set; rebuild the index after changing this switch."));
+        // The description pass needs the embedding pass: it runs over the same
+        // staged frames, and its prose only reaches the ranking through the
+        // SigLIP text tower.
+        ui.add_enabled_ui(self.style_embed, |ui| {
+            ui.checkbox(&mut self.style_describe, tr(lang, "Describe looks with the local vision model (downloads 4.3 GB once; slower builds)"))
+                .on_hover_text(if self.style_embed {
+                    tr(lang, "Writes ONE short sentence per photo about its GRADE — white balance, tonality, contrast, colour, finishing — with a local model (Qwen3-VL-2B). Nothing leaves this machine and nothing is billed. Descriptions are cached by frame content, so a rebuild only describes what changed. Off = the fixed attribute tags alone.")
+                } else {
+                    tr(lang, "Turn on the look embedding first — the description pass runs over the same frames")
+                });
+        });
+        ui.separator();
+        group_caption(ui, tr(lang, "Look library"));
+        if let Some(info) = &self.style_info
+            && let autoshop::style::StyleIndexState::Built { looks, looks_dir, age, .. } = &info.state {
+                let from = looks_dir.clone().unwrap_or_else(|| tr(lang, "an unrecorded folder").to_string());
+                let age = style_age_hours(*age);
+                ui.label(egui::RichText::new(trf(lang, "{n} finished photos · from {path} · built {age} ago", &[("n", &looks.to_string()), ("path", &from), ("age", &age)])).small());
+        }
+        ui.horizontal_wrapped(|ui| {
+            let building = self.style_build_inflight;
+            let mut pick = false;
+            let mut build: Option<PathBuf> = None;
+            ui.add_enabled_ui(!building, |ui| {
+                if ui.button(tr(lang, "Pick look folder…")).clicked() { pick = true; }
+                let have = self.looks_src_dir.clone().filter(|d| d.is_dir());
+                if ui.add_enabled(have.is_some(), egui::Button::new(tr(lang, "Build look library"))).clicked() { build = have; }
+            });
+            if pick {
+                let mut dialog = rfd::FileDialog::new();
+                if let Some(d) = self.looks_src_dir.clone().filter(|d| d.is_dir()) { dialog = dialog.set_directory(d); }
+                if let Some(dir) = dialog.pick_folder() { self.looks_src_dir = Some(dir.clone()); self.start_looks_build(dir); }
+            }
+            if let Some(dir) = build { self.start_looks_build(dir); }
+        });
+        let has_looks = matches!(self.style_info.as_ref().map(|i| &i.state), Some(autoshop::style::StyleIndexState::Built { looks, .. }) if *looks > 0);
+        ui.add_enabled_ui(has_looks, |ui| {
+            ui.checkbox(&mut self.use_looks, tr(lang, "Use look library"));
         });
     }
 

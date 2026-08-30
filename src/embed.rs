@@ -32,12 +32,27 @@ use crate::config::Config;
 /// so400m tier) would silently produce an index whose exemplars are not
 /// comparable to each other.
 pub const EMBED_DIM: usize = 768;
+pub const MODEL_REPO: &str = "google/siglip2-base-patch16-384";
+pub const MODEL_REVISION: &str = "f775b65a79762255128c981547af89addcfe0f88";
+/// The ONE tokenizer class `python/embed.py` instantiates, and the class the
+/// pinned `tokenizer_config.json` names.
+///
+/// Spelled on this side because it goes into the stored index provenance
+/// ([`crate::style::embed_provenance_string`]): the checkpoint alone did not
+/// distinguish two indices whose text vectors came from different doors, and
+/// this batch's own root cause was exactly two doors on one checkpoint
+/// answering vectors at cosine 0.72-0.78 of each other.
+/// `the_embedding_sidecar_has_exactly_one_tokenizer_door` pins it against the
+/// sidecar's own constant.
+pub const TEXT_TOKENIZER_CLASS: &str = "GemmaTokenizer";
 
 /// Everything one embedding run needs; built from [`Config`] like
 /// [`crate::segment::SegmentOpts`].
 pub struct EmbedOpts {
     pub python_bin: String,
     pub script: PathBuf,
+    pub text_file: Option<PathBuf>,
+    pub vocab_file: Option<PathBuf>,
 }
 
 impl EmbedOpts {
@@ -45,6 +60,8 @@ impl EmbedOpts {
         EmbedOpts {
             python_bin: cfg.python_bin.clone(),
             script: PathBuf::from(&cfg.embed_script),
+            text_file: None,
+            vocab_file: None,
         }
     }
 
@@ -71,8 +88,8 @@ impl EmbedOpts {
 /// invariant `parse_vector` checks moves, including the ±1e-3 norm gate. The
 /// only consumer of the elements themselves is `style::embed_distance`, which
 /// is a ranking: a dot product of two unit vectors, clamped to [-1, 1] and
-/// multiplied by `W_EMB_DEFAULT = 2.0` against a 14-dim block whose weights
-/// sum to 14.5. fp16 carries ~4.9e-4 of relative precision per element
+/// multiplied by the configured embedding weight against a 14-dim block.
+/// fp16 carries ~4.9e-4 of relative precision per element
 /// (10 explicit mantissa bits), and the quantity built from them is an order
 /// COMPARISON, not a measurement.
 ///
@@ -87,10 +104,240 @@ fn fp16_wanted() -> bool {
         .unwrap_or(false)
 }
 
+/// The BATCH TEXT door's argv — N strings in one process, no image.
+///
+/// It exists because the two index builders each need one text vector per
+/// record, and the alternative was one sidecar PROCESS per record: the look
+/// build used to re-invoke `embed.py` — a 1.5 GB model load — once per
+/// photograph purely to embed that photograph's own tag string, and the RAW
+/// build did not compute the vector at all. One manifest, one load, N vectors,
+/// in order.
+fn text_sidecar_args(
+    script: &Path,
+    manifest: &Path,
+    output: &Path,
+    fp16: bool,
+) -> Vec<std::ffi::OsString> {
+    let mut v: Vec<std::ffi::OsString> = vec![
+        "-E".into(),
+        script.into(),
+        "--text-manifest".into(),
+        manifest.into(),
+        "--output".into(),
+        output.into(),
+    ];
+    if fp16 {
+        v.push("--fp16".into());
+    }
+    v
+}
+
+/// Run the sidecar over a JSONL text manifest and return the vectors IN ORDER.
+///
+/// `expect` is the number of lines the caller wrote: a short or long answer is
+/// refused rather than zipped, because a text vector that landed on the wrong
+/// record is a silently wrong ranking and nothing else.
+pub fn embed_text_batch(
+    opts: &EmbedOpts,
+    manifest: &Path,
+    scratch: &Path,
+    expect: usize,
+) -> Result<Vec<Vec<f32>>> {
+    if !opts.script.exists() {
+        bail!(
+            "style-embedding sidecar not found at {} — run from the project dir or set \
+             AUTOSHOP_EMBED_SCRIPT.",
+            opts.script.display()
+        );
+    }
+    let text = crate::run_model_sidecar(
+        "style-embedding sidecar",
+        &opts.python_bin,
+        text_sidecar_args(&opts.script, manifest, scratch, fp16_wanted()),
+        scratch,
+    )?;
+    let out = parse_text_vectors(&text, expect).with_context(|| {
+        format!("style-embedding sidecar wrote an unusable text batch at {}", scratch.display())
+    })?;
+    let _ = std::fs::remove_file(scratch);
+    Ok(out)
+}
+
+/// One `{"text_vectors": [...]}` record → the vectors, each through the same
+/// width / finiteness / unit-norm gate a single vector goes through.
+pub fn parse_text_vectors(text: &str, expect: usize) -> Result<Vec<Vec<f32>>> {
+    let rec: serde_json::Value =
+        serde_json::from_str(text.trim()).context("style-embedding text output is not JSON")?;
+    if let Some(e) = rec.get("error").and_then(|v| v.as_str()) {
+        bail!("style-embedding sidecar declined this text batch: {e}");
+    }
+    let rows = rec
+        .get("text_vectors")
+        .and_then(|v| v.as_array())
+        .context("style-embedding text output has no `text_vectors` array")?;
+    if rows.len() != expect {
+        bail!(
+            "style-embedding sidecar answered {} text vectors for {expect} texts — a batch that \
+             does not line up would attach a vector to the wrong record",
+            rows.len()
+        );
+    }
+    rows.iter()
+        .map(|row| {
+            let arr = row.as_array().context("`text_vectors` holds a non-array")?;
+            parse_unit_vector(arr, "text_vectors")
+        })
+        .collect()
+}
+
+/// One JSON array → a checked unit vector of [`EMBED_DIM`] elements. The ONE
+/// place the three vector-bearing keys (`vector`, `text_vector`,
+/// `text_vectors`) agree about width, finiteness and norm.
+fn parse_unit_vector(arr: &[serde_json::Value], key: &str) -> Result<Vec<f32>> {
+    if arr.len() != EMBED_DIM {
+        bail!("style-embedding `{key}` has wrong width {}", arr.len());
+    }
+    let mut out = Vec::with_capacity(arr.len());
+    for x in arr {
+        let f = x.as_f64().context("style-embedding vector holds a non-number")? as f32;
+        if !f.is_finite() {
+            bail!("style-embedding `{key}` holds a non-finite element");
+        }
+        out.push(f);
+    }
+    let n = out.iter().map(|&x| (x as f64) * (x as f64)).sum::<f64>().sqrt();
+    if (n - 1.0).abs() > 1e-3 {
+        bail!("style-embedding `{key}` is not L2-normalised (norm {n:.6})");
+    }
+    Ok(out)
+}
+
+/// One line of `embed.py --manifest-jsonl`'s JSONL answer: the frame, and
+/// either its record or the sidecar's own reason for declining it.
+#[derive(Debug, Clone)]
+pub struct EmbedBatchRecord {
+    pub path: String,
+    pub record: Option<EmbedRecord>,
+    pub error: Option<String>,
+}
+
+/// The BATCH IMAGE door's argv — N frames in one process, one model load.
+///
+/// It exists for the same reason the batch TEXT door does, one step later:
+/// until S2 `StyleIndex::build` called this sidecar once PER PHOTOGRAPH on the
+/// image side too, so a 169-photo library re-loaded 1.50 GB of weights 169
+/// times — 5,618 s measured on the photographer's own corpus. `embed.py` has
+/// implemented `--manifest-jsonl` since R27 Batch-5; nothing was wired to it.
+fn image_batch_args(
+    script: &Path,
+    manifest: &Path,
+    output: &Path,
+    fp16: bool,
+    vocab_file: Option<&Path>,
+) -> Vec<std::ffi::OsString> {
+    let mut v: Vec<std::ffi::OsString> = vec![
+        // `-E`: the second layer against a PYTHON* import hijack (the env
+        // allowlist in `dotenv_child_env` is the first).
+        "-E".into(),
+        script.into(),
+        "--manifest-jsonl".into(),
+        manifest.into(),
+        "--output".into(),
+        output.into(),
+    ];
+    if fp16 {
+        v.push("--fp16".into());
+    }
+    if let Some(p) = vocab_file {
+        v.extend(["--vocab-file".into(), p.into()]);
+    }
+    v
+}
+
+/// Run the sidecar over a JSONL manifest of IMAGE paths and return one record
+/// per line, in the sidecar's own order.
+///
+/// The caller maps them back by PATH, never by position: `embed.py` reports a
+/// malformed manifest line as soon as it reads it and the rest in batch order,
+/// so a positional zip would attach one photograph's vector to another's
+/// exemplar — the failure [`parse_text_vectors`] refuses a short batch to
+/// avoid.
+pub fn embed_image_batch(
+    opts: &EmbedOpts,
+    manifest: &Path,
+    scratch: &Path,
+) -> Result<Vec<EmbedBatchRecord>> {
+    if !opts.script.exists() {
+        bail!(
+            "style-embedding sidecar not found at {} — run from the project dir or set \
+             AUTOSHOP_EMBED_SCRIPT.",
+            opts.script.display()
+        );
+    }
+    let text = crate::run_model_sidecar(
+        "style-embedding sidecar",
+        &opts.python_bin,
+        image_batch_args(
+            &opts.script,
+            manifest,
+            scratch,
+            fp16_wanted(),
+            opts.vocab_file.as_deref(),
+        ),
+        scratch,
+    )?;
+    let out = parse_batch_records(&text).with_context(|| {
+        format!("style-embedding sidecar wrote an unusable image batch at {}", scratch.display())
+    })?;
+    let _ = std::fs::remove_file(scratch);
+    Ok(out)
+}
+
+/// The sidecar's JSONL → records, each vector through the same width /
+/// finiteness / unit-norm gate a single record goes through.
+///
+/// A line that is not JSON fails the WHOLE batch: every line the sidecar
+/// writes it composed itself, and text it did not compose means the file is
+/// not the answer it claims to be. A line carrying `error` is one
+/// photograph's failure and is kept as one — the fail-soft contract.
+pub fn parse_batch_records(text: &str) -> Result<Vec<EmbedBatchRecord>> {
+    let mut out = Vec::new();
+    for (i, line) in text.lines().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let value: serde_json::Value = serde_json::from_str(line.trim())
+            .with_context(|| format!("style-embedding batch line {} is not JSON", i + 1))?;
+        let path = value
+            .get("path")
+            .and_then(|v| v.as_str())
+            .with_context(|| format!("style-embedding batch line {} names no path", i + 1))?
+            .to_string();
+        if let Some(e) = value.get("error").and_then(|v| v.as_str()) {
+            out.push(EmbedBatchRecord { path, record: None, error: Some(e.to_string()) });
+            continue;
+        }
+        match parse_record(line.trim()) {
+            Ok(record) => out.push(EmbedBatchRecord { path, record: Some(record), error: None }),
+            // A record that fails the DOOR (wrong width, unnormalised, a
+            // non-finite element) is this photograph's failure, not the
+            // batch's: the index is allowed to be a mixed one, and refusing
+            // 168 good vectors over one bad line would be the opposite of the
+            // contract the per-line `error` arm keeps.
+            Err(e) => out.push(EmbedBatchRecord {
+                path,
+                record: None,
+                error: Some(format!("{e:#}")),
+            }),
+        }
+    }
+    Ok(out)
+}
+
 /// The sidecar's argv, as a pure function of the four things that decide it —
 /// so the flags this build passes can be pinned by a test instead of being
 /// visible only to a running Python.
-fn sidecar_args(script: &Path, input: &Path, output: &Path, fp16: bool) -> Vec<std::ffi::OsString> {
+fn sidecar_args(script: &Path, input: &Path, output: &Path, fp16: bool, text_file: Option<&Path>, vocab_file: Option<&Path>) -> Vec<std::ffi::OsString> {
     let mut v: Vec<std::ffi::OsString> = vec![
         // `-E`: the second layer against a PYTHON* import hijack (the env
         // allowlist in `dotenv_child_env` is the first).
@@ -104,6 +351,8 @@ fn sidecar_args(script: &Path, input: &Path, output: &Path, fp16: bool) -> Vec<s
     if fp16 {
         v.push("--fp16".into());
     }
+    if let Some(p) = text_file { v.extend(["--text-file".into(), p.into()]); }
+    if let Some(p) = vocab_file { v.extend(["--vocab-file".into(), p.into()]); }
     v
 }
 
@@ -137,6 +386,17 @@ fn sidecar_args(script: &Path, input: &Path, output: &Path, fp16: bool) -> Vec<s
 /// gate: it is disk work, it costs no model, and holding the slot across it
 /// would serialise the cheap half too.
 pub fn embed_file(opts: &EmbedOpts, input: &Path, scratch: &Path) -> Result<Vec<f32>> {
+    Ok(embed_file_record(opts, input, scratch)?.vector)
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct EmbedRecord {
+    pub vector: Vec<f32>,
+    pub text_vector: Option<Vec<f32>>,
+    pub vocab_scores: Option<Vec<f32>>,
+}
+
+pub fn embed_file_record(opts: &EmbedOpts, input: &Path, scratch: &Path) -> Result<EmbedRecord> {
     if !opts.script.exists() {
         bail!(
             "style-embedding sidecar not found at {} — run from the project dir or set \
@@ -147,10 +407,10 @@ pub fn embed_file(opts: &EmbedOpts, input: &Path, scratch: &Path) -> Result<Vec<
     let text = crate::run_model_sidecar(
         "style-embedding sidecar",
         &opts.python_bin,
-        sidecar_args(&opts.script, input, scratch, fp16_wanted()),
+        sidecar_args(&opts.script, input, scratch, fp16_wanted(), opts.text_file.as_deref(), opts.vocab_file.as_deref()),
         scratch,
     )?;
-    let v = parse_vector(&text).with_context(|| {
+    let v = parse_record(&text).with_context(|| {
         format!("style-embedding sidecar wrote an unusable record at {}", scratch.display())
     })?;
     // The scratch file is an INTERMEDIATE, not an artifact: the vector is what
@@ -170,6 +430,10 @@ pub fn embed_file(opts: &EmbedOpts, input: &Path, scratch: &Path) -> Result<Vec<
 /// dot product, so an unnormalised vector would not be *wrong by a little*, it
 /// would silently outweigh every other exemplar.
 pub fn parse_vector(text: &str) -> Result<Vec<f32>> {
+    Ok(parse_record(text)?.vector)
+}
+
+pub fn parse_record(text: &str) -> Result<EmbedRecord> {
     let rec: serde_json::Value = serde_json::from_str(text.trim())
         .context("style-embedding output is not JSON")?;
     if let Some(e) = rec.get("error").and_then(|v| v.as_str()) {
@@ -201,7 +465,17 @@ pub fn parse_vector(text: &str) -> Result<Vec<f32>> {
     if (norm - 1.0).abs() > 1e-3 {
         bail!("style-embedding vector is not L2-normalised (norm {norm:.6})");
     }
-    Ok(v)
+    let parse_vec = |key: &str| -> Result<Option<Vec<f32>>> {
+        let Some(arr) = rec.get(key).and_then(|v| v.as_array()) else { return Ok(None) };
+        parse_unit_vector(arr, key).map(Some)
+    };
+    let vocab_scores = rec.get("vocab_scores").and_then(|v| v.as_array()).map(|arr| {
+        if arr.len() != crate::style::LOOK_VOCAB.len() {
+            return Err(anyhow::anyhow!("style-embedding `vocab_scores` has wrong width {} (expected {})", arr.len(), crate::style::LOOK_VOCAB.len()));
+        }
+        arr.iter().map(|x| x.as_f64().map(|v| v as f32).filter(|v| v.is_finite()).context("style-embedding vocab score is not finite")).collect::<Result<Vec<_>>>()
+    }).transpose()?;
+    Ok(EmbedRecord { vector: v, text_vector: parse_vec("text_vector")?, vocab_scores })
 }
 
 #[cfg(test)]
@@ -223,6 +497,27 @@ mod tests {
         assert_eq!(parse_vector(&unit_record(EMBED_DIM)).unwrap().len(), EMBED_DIM);
         let e = parse_vector(&unit_record(512)).unwrap_err().to_string();
         assert!(e.contains("512-dim"), "{e}");
+    }
+
+    #[test]
+    fn vocab_scores_width_is_the_vocab_len() {
+        let vector = unit_record(EMBED_DIM);
+        let scores = (0..crate::style::LOOK_VOCAB.len())
+            .map(|i| format!("{:.1}", i as f32))
+            .collect::<Vec<_>>()
+            .join(",");
+        let text = vector.trim_end_matches('}').to_owned()
+            + &format!(",\"vocab_scores\":[{scores}]}}");
+        let record = parse_record(&text).expect("a full vocabulary score vector parses");
+        assert_eq!(record.vocab_scores.as_ref().map(Vec::len), Some(crate::style::LOOK_VOCAB.len()));
+        let short_scores = (0..crate::style::LOOK_VOCAB.len() - 1)
+            .map(|i| format!("{:.1}", i as f32))
+            .collect::<Vec<_>>()
+            .join(",");
+        let short = vector.trim_end_matches('}').to_owned()
+            + &format!(",\"vocab_scores\":[{short_scores}]}}");
+        let error = parse_record(&short).unwrap_err().to_string();
+        assert!(error.contains("wrong width"), "{error}");
     }
 
     /// MUTATION: drop the norm check and an unnormalised vector is adopted —
@@ -271,7 +566,7 @@ mod tests {
     #[test]
     fn the_sidecar_argv_carries_the_half_precision_flag() {
         let args = |fp16| {
-            sidecar_args(Path::new("embed.py"), Path::new("in.png"), Path::new("out.json"), fp16)
+            sidecar_args(Path::new("embed.py"), Path::new("in.png"), Path::new("out.json"), fp16, None, None)
                 .iter()
                 .map(|a| a.to_string_lossy().into_owned())
                 .collect::<Vec<_>>()
@@ -341,13 +636,19 @@ mod tests {
         include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/python/segment.py"));
     const CORRESPOND_SRC: &str =
         include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/python/correspond.py"));
+    const DESCRIBE_SRC: &str =
+        include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/python/describe.py"));
 
-    /// The family roster, in one place: a fifth sidecar that fails to enrol
-    /// here escapes all four shared contracts below.
-    const SIDECARS: [(&str, &str); 3] = [
+    /// The family roster, in one place: a sidecar that fails to enrol here
+    /// escapes all four shared contracts below. `describe.py` (S2) is the
+    /// fifth member of the family and the fourth on this roster —
+    /// `denoise.py` holds the `_fetch_verified` gate itself and is pinned by
+    /// its own module's tests.
+    const SIDECARS: [(&str, &str); 4] = [
         ("embed.py", EMBED_SRC),
         ("segment.py", SEGMENT_SRC),
         ("correspond.py", CORRESPOND_SRC),
+        ("describe.py", DESCRIBE_SRC),
     ];
 
     /// Every pinned model file carries BOTH a sha256 and a byte count, in both
@@ -427,6 +728,120 @@ mod tests {
         for (what, src) in SIDECARS {
             assert!(src.contains("_fetch_verified("), "{what} must fetch through the gate");
         }
+    }
+
+    /// ONE tokenizer door, and no padding mask anywhere near the text tower.
+    ///
+    /// The sidecar used to try the `Auto*` tokenizer factory and fall back to a
+    /// hand-written adapter over `tokenizer.json`. On transformers 5.2.0 the
+    /// factory always raised (its SigLIP mapping resolves to `None`), so the
+    /// fallback always ran — and the fallback returned a padding mask that
+    /// `embed_texts` forwarded into the tower. Same ids, different pooled
+    /// vectors (cosine 0.73 / 0.76 / 0.73 / 0.78 / 0.72 over five phrases): two
+    /// doors are two vector spaces in one index, and a cosine cannot survive
+    /// that. The three banned spellings are the three ways the second door
+    /// comes back.
+    ///
+    /// MUTATION: re-add the factory import, the adapter class, or a mask tensor
+    /// to `embed.py` and this fails.
+    #[test]
+    fn the_embedding_sidecar_has_exactly_one_tokenizer_door() {
+        for banned in ["AutoTokenizer", "attention_mask", "PinnedFastTokenizer"] {
+            assert!(
+                !EMBED_SRC.contains(banned),
+                "embed.py must not carry `{banned}` — the text tower takes input_ids alone"
+            );
+        }
+        assert_eq!(
+            EMBED_SRC.matches("GemmaTokenizerFast.from_pretrained(").count(),
+            1,
+            "there must be exactly ONE tokenizer construction in embed.py"
+        );
+        // The mask exclusion lives in the PIN, and the pin is checked at load.
+        assert!(
+            EMBED_SRC.contains("TEXT_MODEL_INPUT_NAMES = [\"input_ids\"]"),
+            "the one input tensor must be a named constant"
+        );
+        assert!(
+            EMBED_SRC.contains("\"model_input_names\": TEXT_MODEL_INPUT_NAMES"),
+            "the pinned tokenizer config must be REFUSED when it stops saying input_ids only"
+        );
+        // …and the tower is called by name, never splatted.
+        assert!(
+            EMBED_SRC.contains("model.text_model(input_ids=ids)"),
+            "the text tower must be fed input_ids by name"
+        );
+        assert!(
+            EMBED_SRC.contains("TEXT_GOLDEN_IDS = {"),
+            "the tokenizer's own output must be pinned, not just its config"
+        );
+        // The class name is stamped into every index's provenance, so the two
+        // spellings of it must agree or an index would claim a door it did not
+        // use.
+        assert!(
+            EMBED_SRC.contains(&format!("TEXT_TOKENIZER_CLASS = \"{TEXT_TOKENIZER_CLASS}\"")),
+            "the sidecar's tokenizer class must be the one the provenance records"
+        );
+        // `do_lower_case` is a config value this door does not act on. The
+        // sidecar states that by ENCODING both cases and requiring different
+        // ids; a constant that merely restated the pinned file could not be
+        // wrong and so could not be a check.
+        assert!(
+            !EMBED_SRC.contains("TEXT_DO_LOWER_CASE"),
+            "the lower-case RECEIPT is gone; the behaviour is asserted instead"
+        );
+        assert!(
+            EMBED_SRC.contains("def _case_is_preserved_self_test("),
+            "the real behaviour behind do_lower_case must be self-tested"
+        );
+        // …and the self-test must reach the tower, not stop at the tokenizer.
+        assert!(
+            EMBED_SRC.contains("def _text_forward_pass_self_test("),
+            "--self-test must run one text forward pass, not two file reads"
+        );
+    }
+
+    /// The four SigLIP tokenizer files are pinned by digest AND byte count,
+    /// like every other file this repo lets a sidecar download.
+    ///
+    /// The image half of this checkpoint was already gated
+    /// (`model.safetensors`, `config.json`, `preprocessor_config.json`); the
+    /// tokenizer tree arrived with S1 and had no Rust-side invariant at all, so
+    /// a re-pin could have moved the text vectors of every index in the field
+    /// with nothing in this crate noticing. These are the digests
+    /// `python/embed.py` verifies each download against.
+    ///
+    /// MUTATION: drop any of the four digests (or the `_fetch_verified` call
+    /// that uses them) from `embed.py` and this fails.
+    #[test]
+    fn the_siglip_tokenizer_files_are_digest_gated() {
+        for (what, digest) in [
+            ("tokenizer.json",
+             "cb9140fae3ac5122c972d37adf83e1248471a38147ad76f8215c8872c6fd8322"),
+            ("tokenizer.model",
+             "61a7b147390c64585d6c3543dd6fc636906c9af3865a5548f27f31aee1d4c8e2"),
+            ("tokenizer_config.json",
+             "14afe629fe4959b9e0d51e1852b8d9f7ad074f90a1a7125a4fcdd17f06e78fc8"),
+            ("special_tokens_map.json",
+             "baec30ea10906f16adb8c18af7a34023002c1746542612b8b41c9f09e1351351"),
+        ] {
+            assert!(
+                EMBED_SRC.contains(digest),
+                "the pinned sha256 for the SigLIP 2 tokenizer file '{what}' is not the one \
+                 S1 verified — a re-pin moves every text vector in every index"
+            );
+            assert!(
+                EMBED_SRC.contains(&format!("\"{what}\"")),
+                "'{what}' must stay in the pinned file list"
+            );
+        }
+        // Digests are only a gate if something checks them: the whole pinned
+        // set goes through the shared verified-fetch door.
+        assert!(
+            EMBED_SRC.contains("for name, pin in MODEL[\"files\"].items():")
+                && EMBED_SRC.contains("pin[\"sha256\"],"),
+            "every pinned file must be fetched through _fetch_verified with its digest"
+        );
     }
 
     /// R1 / R2, pinned so they cannot come back: the NON-COMMERCIAL SegFormer

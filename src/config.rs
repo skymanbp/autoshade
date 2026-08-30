@@ -616,7 +616,7 @@ pub struct Config {
 
     // --- AI denoise sidecar ---------------------------------------------------
     /// Python interpreter for the AI sidecars (`python/denoise.py`,
-    /// `segment.py`, `embed.py`, `correspond.py`).
+    /// `segment.py`, `embed.py`, `correspond.py`, `describe.py`).
     pub python_bin: String,
     /// SCUNet weight set (color_real_psnr default; see python/denoise.py).
     pub denoise_model: String,
@@ -632,6 +632,10 @@ pub struct Config {
     /// fields for content-divergent reverse-fits (step 7). Same trust class:
     /// a program's argv, so env-only and Destination-trusted.
     pub correspond_script: String,
+    /// Look-description sidecar (`python/describe.py`) — Qwen3-VL prose about
+    /// each exemplar's grade for the style index (step 14 / S2). Same trust
+    /// class again: a program's argv, so env-only and Destination-trusted.
+    pub describe_script: String,
 
     /// How strongly to lean on the user's historical edit style, 0.0..1.0.
     pub style_strength: f32,
@@ -766,6 +770,7 @@ pub(crate) const SETTINGS: &[Setting] = &[
     env_only("AUTOSHOP_SEGMENT_SCRIPT", Trust::Destination),
     env_only("AUTOSHOP_EMBED_SCRIPT", Trust::Destination),
     env_only("AUTOSHOP_CORRESPOND_SCRIPT", Trust::Destination),
+    env_only("AUTOSHOP_DESCRIBE_SCRIPT", Trust::Destination),
     // A redirected weight cache is a poisoned-model path.
     env_only("AUTOSHOP_DENOISE_CACHE", Trust::Destination),
     env_only("AUTOSHOP_DENOISE_MODEL", Trust::Preference),
@@ -1170,6 +1175,8 @@ impl Config {
             env_val("AUTOSHOP_EMBED_SCRIPT").unwrap_or_else(|| bundled_helper("python/embed.py"));
         let correspond_script = env_val("AUTOSHOP_CORRESPOND_SCRIPT")
             .unwrap_or_else(|| bundled_helper("python/correspond.py"));
+        let describe_script = env_val("AUTOSHOP_DESCRIBE_SCRIPT")
+            .unwrap_or_else(|| bundled_helper("python/describe.py"));
         Config {
             openai_api_key: header_safe_key(
                 pick_opt(
@@ -1245,6 +1252,7 @@ impl Config {
             segment_script,
             embed_script,
             correspond_script,
+            describe_script,
             style_strength: env_val("AUTOSHOP_STYLE_STRENGTH")
                 .and_then(|s| s.parse::<f32>().ok())
                 // "NaN" parses as a valid f32 and SURVIVES clamp (clamp keeps
@@ -1457,6 +1465,7 @@ mod tests {
             "AUTOSHOP_SEGMENT_SCRIPT",
             "AUTOSHOP_EMBED_SCRIPT",
             "AUTOSHOP_CORRESPOND_SCRIPT",
+            "AUTOSHOP_DESCRIBE_SCRIPT",
             "AUTOSHOP_DENOISE_CACHE",
             "AUTOSHOP_DATA_DIR",
             "PATH",

@@ -440,26 +440,42 @@ def check_tech_stack(_args: argparse.Namespace) -> tuple[str, list[str]]:
 # ── Release-battery transcript (test counts) ────────────────────────────────
 
 _BLOCK = re.compile(r"^=== (?P<name>.+?) ===\s*$")
+_TARGET = re.compile(r"^\s+(?P<kind>Running (?:unittests )?|Doc-tests )(?P<target>\S+)")
 _RESULT = re.compile(
     r"^test result: (?P<status>\w+)\. (?P<passed>\d+) passed; "
     r"(?P<failed>\d+) failed; (?P<ignored>\d+) ignored;"
 )
 
 
-def _battery_blocks(path: Path) -> dict[str, list[tuple[str, int, int, int]]]:
-    blocks: dict[str, list[tuple[str, int, int, int]]] = {}
+def _battery_blocks(path: Path) -> dict[str, list[tuple[str, str, int, int, int]]]:
+    """Per block: (target, status, passed, failed, ignored) in cargo's order.
+
+    `target` is the path cargo names in its `Running ...` header, normalised
+    to forward slashes (`src/lib.rs`, `src/bin/gui/main.rs`, `tests/x.rs`);
+    a Doc-tests suite is named `doc-tests:<crate>` so it can never be mistaken
+    for a claimable count.
+    """
+    blocks: dict[str, list[tuple[str, str, int, int, int]]] = {}
     cur: str | None = None
+    target = "?"
     raw = path.read_text(encoding="utf-8").replace("\r\n", "\n").replace("\r", "\n")
     for line in raw.split("\n"):
         b = _BLOCK.match(line)
         if b:
             cur = b.group("name")
             blocks.setdefault(cur, [])
+            target = "?"
+            continue
+        t = _TARGET.match(line)
+        if t:
+            name = t.group("target").replace("\\", "/")
+            target = f"doc-tests:{name}" if t.group("kind").startswith("Doc") else name
             continue
         r = _RESULT.match(line)
         if r and cur is not None:
             blocks[cur].append(
                 (
+                    target,
                     r.group("status"),
                     int(r.group("passed")),
                     int(r.group("failed")),
@@ -473,12 +489,14 @@ def battery_test_counts(args: argparse.Namespace) -> Truth | Skip:
     """library / CLI / GUI / contract counts from a release-battery transcript.
 
     Only the battery can prove these, so without --gates the row SKIPS rather
-    than inventing a number. The mapping follows cargo's own target order in
-    each block: lib unittests, then the `autoshop` bin, then (gui build only)
-    the `autoshop-gui` bin, then the integration-test binaries. The GUI count
-    is taken as the DIFFERENCE between the two configurations — that is what
-    "GUI tests" means here (the tests the `gui` feature adds), and it survives
-    a reordering of the targets that positional indexing would not.
+    than inventing a number. Suites are read BY NAME from cargo's own
+    `Running` headers: library = `src/lib.rs`, CLI = `src/main.rs` and the
+    contract pair = `tests/*.rs`, all from the default block; GUI = the
+    `src/bin/gui/main.rs` bin from the gui block. The `gui` feature only adds
+    dependencies (Cargo.toml [features]; no `cfg(feature = "gui")` outside
+    src/bin/gui), so the gui trip need not repeat the other suites — and when
+    it does, every suite both trips ran must agree, count for count, or the
+    transcript is refused: that equality is what licenses the shorter trip.
     """
     if not args.gates:
         return Skip("no --gates transcript: test counts are only provable by "
@@ -490,34 +508,43 @@ def battery_test_counts(args: argparse.Namespace) -> Truth | Skip:
             raise LookupError(f"{path.name}: no '=== {want} ===' block")
     # A red battery cannot vouch for anything.
     for name in ("test default", "test gui"):
-        bad = [r for r in blocks[name] if r[0] != "ok"]
+        bad = [r for r in blocks[name] if r[1] != "ok"]
         if bad:
             raise LookupError(f"{path.name}: '{name}' has a non-ok result: {bad[0]}")
 
-    def suites(name: str) -> list[int]:
-        rows = blocks[name]
-        # Drop trailing EMPTY suites (0 passed / 0 failed / 0 ignored) — cargo's
-        # Doc-tests line for a crate with no doctests. An empty suite is not a
-        # claimable count, and its presence depends on which targets the
-        # battery invoked.
-        while rows and rows[-1][1:] == (0, 0, 0):
-            rows = rows[:-1]
-        if len(rows) < 3:
-            raise LookupError(f"{path.name}: '{name}' has only {len(rows)} suites")
-        return [passed + ignored for _, passed, _, ignored in rows]
+    def counts(name: str) -> dict[str, int]:
+        # passed + ignored per named suite; a Doc-tests suite is not a count.
+        out: dict[str, int] = {}
+        for target, _, passed, _, ignored in blocks[name]:
+            if target.startswith("doc-tests:"):
+                continue
+            if target in out:
+                raise LookupError(f"{path.name}: '{name}' ran {target} twice")
+            out[target] = passed + ignored
+        return out
 
-    default, gui = suites("test default"), suites("test gui")
-    lib, cli = default[0], default[1]
-    gui_only = sum(gui) - sum(default)
-    contract = default[2:]
-    if gui_only <= 0:
-        raise LookupError(f"{path.name}: gui build adds {gui_only} tests")
+    default, gui = counts("test default"), counts("test gui")
+    for target in sorted(default.keys() & gui.keys()):
+        if default[target] != gui[target]:
+            raise LookupError(
+                f"{path.name}: {target} counts {default[target]} (default) vs "
+                f"{gui[target]} (gui) — the gui feature must not change it"
+            )
+    for target in ("src/lib.rs", "src/main.rs"):
+        if target not in default:
+            raise LookupError(f"{path.name}: default block never ran {target}")
+    if "src/bin/gui/main.rs" not in gui:
+        raise LookupError(f"{path.name}: gui block never ran src/bin/gui/main.rs")
+    contract = [n for t, n in default.items() if t.startswith("tests/")]
     if len(contract) != 2:
         raise LookupError(
             f"{path.name}: {len(contract)} contract suites, the doc claims a pair"
         )
-    value = (str(lib), str(cli), str(gui_only), str(contract[0]), str(contract[1]))
-    return Truth(value, f"{path.name} (=== test default === / === test gui ===)")
+    value = (
+        str(default["src/lib.rs"]), str(default["src/main.rs"]),
+        str(gui["src/bin/gui/main.rs"]), str(contract[0]), str(contract[1]),
+    )
+    return Truth(value, f"{path.name} (=== test default === / === test gui ===, by suite name)")
 
 
 # ── Toolchain ───────────────────────────────────────────────────────────────

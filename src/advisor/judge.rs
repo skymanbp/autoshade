@@ -426,6 +426,7 @@ mod tests {
             segment_script: String::new(),
             embed_script: String::new(),
             correspond_script: String::new(),
+            describe_script: String::new(),
             style_strength: 0.5,
         }
     }
@@ -571,6 +572,7 @@ mod tests {
                 JudgeTask::Develop,
                 Some(GradeIntent {
                     strength: crate::recipe::GradeStrength::new(s),
+                    adherence: crate::recipe::DirectionAdherence::default(),
                     direction: d,
                 }),
             )
@@ -612,6 +614,7 @@ mod tests {
             None,
             Some(GradeIntent {
                 strength: crate::recipe::GradeStrength::new(0.9),
+                adherence: crate::recipe::DirectionAdherence::default(),
                 direction: Some("much moodier"),
             }),
         )

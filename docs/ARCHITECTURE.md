@@ -92,9 +92,14 @@
 > experimental generative edits, an optional pixel-**heal** retouch mode (§4.7)
 > the deterministic look **reverse-fit** (§4.8) and the local server's refusal
 > model (§4.9).
-> 1091 library + 16 CLI + 146 GUI + 2+2 contract tests are enumerated in the GUI
-> build; the library result is 1080 pass + 11 `#[ignore]`d forensic probes
-> (counts refreshed 2026-08-29 after merging the multi-region batch `a2173c9`
+> 1137 library + 20 CLI + 151 GUI + 2+2 contract tests are enumerated in the GUI
+> build; the library result is 1126 pass + 11 `#[ignore]`d forensic probes
+> (counts refreshed 2026-08-30 after merging the style-retrieval expansion
+> `style-s2` (+55 by name against the `32b0fe4` merge transcript: 46 library —
+> 26 `style`, 9 `describe`, 4 `pipeline`, 3 `embed`, 3 `advisor`, 1 `recipe` —
+> 4 CLI and 5 GUI; the gui trip now runs the GUI bin only, the `gui` feature
+> adding dependencies alone): library 1091→1137, CLI 16→20, GUI 146→151;
+> before it the multi-region batch `a2173c9`
 > (+24 by name against `6323f4c`: the 11 `fit_zoned::semantic` tests, the 7
 > `fit_zoned` routing / arbitration / raster-release tests and the 6 `segment`
 > multi-class manifest tests) onto the linear-falloff merge: library 1067→1091;
@@ -363,12 +368,12 @@
 > deliverable passes; segment's `exists()` guard never fired for pre-claimed
 > names), which is why the contract lives in one place with all three arms.
 >
-> ### The ML sidecar family (R27 Batch-5)
+> ### The ML sidecar family (R27 Batch-5; S2 added the fifth)
 >
-> There are now **four** Python sidecars, and they share one discipline rather
-> than four copies of it. `python/denoise.py` owns the download-and-refuse
+> There are now **five** Python sidecars, and they share one discipline rather
+> than five copies of it. `python/denoise.py` owns the download-and-refuse
 > implementation — `_download` with an in-stream byte cap, `_sha256`,
-> `_reclaim_stale_parts`, `_fetch_verified` — and the other two **import it**
+> `_reclaim_stale_parts`, `_fetch_verified` — and the other four **import it**
 > (`from denoise import _fetch_verified`) instead of reimplementing it, which
 > is why their progress lines announce themselves as `[denoise]`.
 >
@@ -382,6 +387,7 @@
 > | `segment.py --target object` | `segment.rs` | **SAM 2.1 Hiera-Large**, point-prompted | Apache-2.0 | 897,897,416 B |
 > | `embed.py` | `embed.rs` | **SigLIP 2 base/16 @384**, 768-dim | Apache-2.0 | 1,501,968,264 B |
 > | `correspond.py` | `correspond.rs` | **Stable Diffusion 2.1** as a DIFT featurizer (unet+vae+text encoder, fp16), sha256-pinned | CreativeML Open RAIL++-M | 2,580,061,174 B |
+> | `describe.py` | `describe.rs` | **Qwen3-VL-2B-Instruct**, one grade sentence per photo, sha256-pinned | Apache-2.0 | 4,255,140,312 B |
 >
 > **Licence is a selection criterion, not a footnote.** This is a public
 > repository whose product is being copyright registered, and a licence that
@@ -390,6 +396,18 @@
 > only」); CLIP and OpenCLIP were passed over in Batch-5 because their model
 > cards say deployment is out of scope and the OpenAI HF mirror carries no
 > licence tag at all. In both cases the licence-clean option was also the
+> stronger model. `describe.py`'s Qwen3-VL-2B (S2) was chosen on the same
+> criterion twice over: it is Apache-2.0 and ungated, and — unlike Florence-2,
+> the obvious MIT alternative — its repository ships **no `auto_map`**, so it
+> loads through NAMED transformers classes instead of `trust_remote_code`,
+> which downloads and executes upstream Python through HF's cache where this
+> family's digest gate cannot see it. BLIP-family captioners were passed over
+> on fitness rather than licence: they are subject captioners, and a subject is
+> the one thing this sidecar must never emit. A paid vision API was rejected by
+> the user's own ruling — a library rebuild that is otherwise free and offline
+> must not acquire a per-photograph bill, and the photographs must not leave
+> the machine to produce a field that lives in a local index.
+>
 > stronger model. `correspond.py`'s SD 2.1 (step 7a) is the checkpoint the
 > DIFT paper measured; its RAIL++-M licence **allows commercial use** — the
 > restrictions it carries are conduct-based (unlawful-use clauses that travel
@@ -406,7 +424,7 @@
 > deleted masks rather than approximated them.
 >
 > **Pinning is now ONE tier, and closing the last gap found a second one
-> (R29 C3/C4).** `denoise.py`, `embed.py`, `correspond.py` and every `segment.py` backend fetch
+> (R29 C3/C4).** `denoise.py`, `embed.py`, `correspond.py`, `describe.py` and every `segment.py` backend fetch
 > every file themselves, gate it on sha256 + an exact byte count, and load from
 > a local directory with `local_files_only=True` — the digest is the only door.
 > For BiRefNet that gate covers a file that is **executed**: `birefnet.py` is
@@ -1684,6 +1702,44 @@ reference-**image** switch (GUI only, off by default) additionally sends the
 nearest past photo as a second `input_image` on the propose call — the prompt
 names the two frames by position, `store:false` covers both, and the extra image
 is disclosed in the tooltip and in the rationale.
+
+**S1 continuation: text and finished-look retrieval.** The RAW index remains
+the v5, 14-dimensional EXIF/histogram retrieval and now may carry additive
+SigLIP 2 image vectors, Direction text vectors, zero-shot vocabulary scores,
+bounded tags, and an optional description vector. Its distance is
+`d14 + W_EMB(1-cos(q_img,e_img)) + W_TXT(1-cos(q_txt,e_img)) + W_DESC(1-cos(q_txt,e_desc))`;
+missing or width-mismatched vectors contribute zero, and zero weights preserve
+the v5 order bit for bit. The vocabulary is a versioned, grouped list of 33
+SigLIP-style photographic phrases; at most one winning phrase per group enters
+the four-tag summary.
+
+The two direction-text terms carry a **standardised variant** (z-score over the
+candidate set, with a disclosed raw fallback below three comparable candidates
+or a degenerate spread), built because raw SigLIP image↔text cosines are tightly
+clustered. The calibration harness measured both variants over the whole grid
+and the raw one won, so `STANDARDISE_TEXT_TERMS = false` ships and the
+standardising path stays one flag away rather than being deleted or shipped
+unmeasured. The switch and the
+four weights are resolved once, as values (`EmbeddingSwitch`,
+`RetrievalWeights`), and travel on the develop request; nothing writes the
+process environment to express a flag, and `retrieve_with_embed`,
+`distance_components` and `retrieve_looks` all read one scoring helper, so the
+diagnostic prints the numbers the ranking used rather than a second
+implementation of them.
+
+Finished baked photos are stored in a separate look-library block with their
+own source directory and no camera features or develop settings, capped at 500
+records (the file holds both populations, so both are capped against one
+envelope). Look retrieval uses image/text/description cosine terms only, with
+`W_LOOK=1.0`; it can guide the proposer and optionally supply the reference
+image, but it never reaches `style_targets` or `blend_toward`. A look image
+that fails to load falls back to the RAW neighbour and discloses both. With
+embedding disabled or no query vector, the look answer is unreachable and the
+rationale states that fact. The look block and the IMAGE 2 sentence claim the
+direction helped choose the look only when a text weight is actually non-zero.
+Direction adherence is an independent Hint/Direct/Brief prompt tier using the
+same band edges as Strength; the verifier is told the selected tier, and only
+when a direction exists.
 
 ### 4.7 Pixel retouch / heal (optional) — V2
 

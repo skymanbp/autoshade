@@ -4809,6 +4809,7 @@
             segment_script: String::new(),
             embed_script: String::new(),
             correspond_script: String::new(),
+            describe_script: String::new(),
             style_strength: 0.5,
         };
         // First open: no credential — nothing to probe, and the VISIT itself
@@ -6290,6 +6291,10 @@
             send_reference_image: app.send_style_ref_image,
             strength: autoshop::recipe::GradeStrength::new(app.grade_strength),
             think: app.deep_think,
+            adherence: autoshop::recipe::DirectionAdherence::default(),
+            use_looks: true,
+            embed: autoshop::style::EmbeddingSwitch::resolve(None, app.style_embed),
+            weights: autoshop::style::RetrievalWeights::from_env(),
         };
         assert_eq!(req.strength.get(), 0.9);
         assert_eq!(req.style, 0.2);
@@ -7008,6 +7013,12 @@
                 version: 3,
                 source_dir: Some("D:/photos/edited".into()),
                 scenes: vec![("wide/mid/midday/landscape".into(), 12)],
+                // The v5 half of the state, which the AI panel prints beside
+                // the count ("embeddings 300/412 - looks 7"). This fixture
+                // predates those fields and had stopped compiling.
+                with_embedding: 300,
+                looks: 7,
+                looks_dir: Some("D:/photos/finished".into()),
                 age: Some(std::time::Duration::from_secs(5 * 3600)),
             }),
             ..Default::default()
@@ -7188,11 +7199,74 @@
             send_reference_image: app.send_style_ref_image,
             strength: autoshop::recipe::GradeStrength::new(app.grade_strength),
             think: app.deep_think,
+            adherence: autoshop::recipe::DirectionAdherence::default(),
+            use_looks: true,
+            embed: autoshop::style::EmbeddingSwitch::resolve(None, app.style_embed),
+            weights: autoshop::style::RetrievalWeights::from_env(),
         };
         assert!(req.send_reference_image);
         assert!(
             !autoshop::pipeline::GradeRequest::with_style(0.65).send_reference_image,
             "every non-GUI surface stays on the text reference"
+        );
+    }
+
+    /// W2-2: the panel's 「style embedding」 checkbox reaches the DEVELOP, not
+    /// only the index build.
+    ///
+    /// `produce_recipe` used to resolve the switch itself, with the preference
+    /// hard-coded to `false` (`style::embedding_effective(false)`), so the
+    /// checkbox governed `Build style library` and nothing else: from the
+    /// desktop app the look library and every embedding term were dead unless
+    /// the user happened to set AUTOSHOP_STYLE_EMBED in their environment. The
+    /// switch is now a value on the request, read on the UI thread with the
+    /// rest of it.
+    ///
+    /// MUTATION: build the request with `EmbeddingSwitch::OFF`, or make
+    /// `produce_recipe` resolve the switch again instead of reading
+    /// `req.embed`, and this fails.
+    #[test]
+    fn gui_embedding_pref_reaches_the_develop_query() {
+        // The environment is NOT set here, and is not touched: the preference
+        // alone must be enough.
+        let on = AutoshopApp { style_embed: true, ..Default::default() };
+        let off = AutoshopApp { style_embed: false, ..Default::default() };
+        let request_from = |app: &AutoshopApp| autoshop::pipeline::GradeRequest {
+            style: app.style_strength,
+            send_reference_image: app.send_style_ref_image,
+            strength: autoshop::recipe::GradeStrength::new(app.grade_strength),
+            think: app.deep_think,
+            adherence: autoshop::recipe::DirectionAdherence::default(),
+            use_looks: app.use_looks,
+            embed: autoshop::style::EmbeddingSwitch::resolve_with(
+                None, app.style_embed, |_| None,
+            ),
+            weights: autoshop::style::RetrievalWeights::SHIPPED,
+        };
+        assert!(request_from(&on).embed.on(), "the checkbox must reach the develop's request");
+        assert!(!request_from(&off).embed.on(), "…and un-checking it must too");
+
+        // …and the pipeline READS the request instead of resolving its own.
+        // A behavioural assertion is out of reach here (the develop path is a
+        // paid network chain), so the invariant is that the old door is gone
+        // and the new one is the only read.
+        let pipeline = include_str!("../../pipeline.rs");
+        assert!(
+            !pipeline.contains("embedding_effective"),
+            "the pipeline must not resolve the switch itself"
+        );
+        assert_eq!(
+            pipeline.matches("req.embed.on()").count(),
+            1,
+            "exactly one read of the request's switch"
+        );
+        // The two GUI workers build their switch from the SAME preference, so
+        // an index built with it and a develop querying it cannot disagree.
+        let actions = include_str!("actions.rs");
+        assert_eq!(
+            actions.matches("EmbeddingSwitch::resolve(None, self.style_embed)").count(),
+            3,
+            "the RAW build, the look build and the develop request all read the preference"
         );
     }
 
@@ -7230,6 +7304,10 @@
             send_reference_image: app.send_style_ref_image,
             strength: autoshop::recipe::GradeStrength::new(app.grade_strength),
             think: app.deep_think,
+            adherence: autoshop::recipe::DirectionAdherence::default(),
+            use_looks: true,
+            embed: autoshop::style::EmbeddingSwitch::resolve(None, app.style_embed),
+            weights: autoshop::style::RetrievalWeights::from_env(),
         };
         assert!(req.think, "the checkbox must reach the worker's request");
         assert!(
@@ -7251,7 +7329,7 @@
         // counts.
         let mut app = AutoshopApp {
             style_build_inflight: true,
-            style_build_progress: Some((7, 9)),
+            style_build_progress: Some((autoshop::style::BuildStage::Frames, 7, 9)),
             ..Default::default()
         };
         app.tx
@@ -7259,6 +7337,7 @@
                 total: 412,
                 dir: dir.clone(),
                 without_embedding: 0,
+                described: 0,
             })))
             .unwrap();
         app.poll_workers(&ctx);
@@ -7311,6 +7390,7 @@
                     total: 412,
                     dir: dir.clone(),
                     without_embedding: 400,
+                    described: 0,
                 })))
                 .unwrap();
             app.poll_workers(&ctx);
@@ -7360,9 +7440,18 @@
 
         // Progress ticks land as counts, not as a worker-built sentence.
         let mut app = AutoshopApp { style_build_inflight: true, ..Default::default() };
-        app.tx.send(Msg::StyleBuildProgress { done: 40, total: 300 }).unwrap();
+        app.tx
+            .send(Msg::StyleBuildProgress {
+                stage: autoshop::style::BuildStage::Frames,
+                done: 40,
+                total: 300,
+            })
+            .unwrap();
         app.poll_workers(&ctx);
-        assert_eq!(app.style_build_progress, Some((40, 300)));
+        assert_eq!(
+            app.style_build_progress,
+            Some((autoshop::style::BuildStage::Frames, 40, 300))
+        );
         assert!(app.status.contains("40") && app.status.contains("300"), "{}", app.status);
     }
 
@@ -7634,4 +7723,158 @@
             !silent.toasts.iter().any(|t| matches!(t.kind, ToastKind::Error)),
             "unknown is not a fallback"
         );
+    }
+
+    /// The Adherence slider is INERT without a direction, and the tier the dial
+    /// picks is the one the develop's request carries.
+    ///
+    /// The old spelling of this test asserted that a default app has an empty
+    /// direction and the shipped adherence default - two facts about
+    /// `Default`, both true whether or not the slider is gated at all. It named
+    /// the disabling and checked none of it.
+    ///
+    /// MUTATION: delete the `add_enabled_ui(has_direction, ...)` wrapper in
+    /// panels/ai.rs and phase (2) fails.
+    #[test]
+    fn gui_adherence_slider_is_disabled_without_a_direction() {
+        let ctx = egui::Context::default();
+        crate::theme::install_theme(&ctx, crate::theme::ThemePref::Dark);
+        let frame = |app: &mut AutoshopApp| -> Option<bool> {
+            app.adherence_gate_enabled = None; // this frame's evidence only
+            let _ = ctx.run(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(1000.0, 900.0),
+                    )),
+                    ..Default::default()
+                },
+                |ctx| {
+                    egui::SidePanel::left("controls").default_width(320.0).show(ctx, |ui| {
+                        app.ai_panel(ui);
+                    });
+                },
+            );
+            app.adherence_gate_enabled
+        };
+        // (1) no direction: the dial exists but cannot be moved.
+        let mut app = AutoshopApp::default();
+        assert!(app.guidance.trim().is_empty(), "premise: the default app has no direction");
+        assert_eq!(frame(&mut app), Some(false), "a blank direction must leave the slider inert");
+        // (2) whitespace is still blank - the gate trims.
+        app.guidance = "   \n\t ".into();
+        assert_eq!(frame(&mut app), Some(false), "whitespace is not a direction");
+        // (3) a real direction: live.
+        app.guidance = "warmer, moodier".into();
+        assert_eq!(frame(&mut app), Some(true), "with a direction the dial must be usable");
+        // …and the DIAL reaches the request as a tier, which is the only thing
+        // the value is for.
+        app.direction_adherence = 0.1;
+        let hint = autoshop::recipe::DirectionAdherence::new(app.direction_adherence);
+        assert_eq!(hint.tier(), autoshop::recipe::AdherenceTier::Hint);
+        app.direction_adherence = 0.95;
+        let brief = autoshop::recipe::DirectionAdherence::new(app.direction_adherence);
+        assert_eq!(brief.tier(), autoshop::recipe::AdherenceTier::Brief);
+        assert_ne!(hint.tier(), brief.tier(), "the dial must be able to change the tier");
+        // …and the tooltip NAMES the tiers, which is what a user needs to know
+        // the dial is not a magnitude.
+        let tip = tr(
+            Lang::En,
+            "How closely the AI follows your direction; disabled until Direction has text: <=40% Hint, 40-70% Direct, above 70% Brief. Prompt intent only - it never moves a render limit.",
+        );
+        for tier in ["Hint", "Direct", "Brief"] {
+            assert!(tip.contains(tier), "the tooltip must name the {tier} tier: {tip}");
+        }
+    }
+
+    /// S2: the description preference survives a restart, defaults OFF in
+    /// BOTH defaults, is what both build workers read, and cannot be reached
+    /// while the embedding it depends on is off.
+    ///
+    /// OFF in both defaults is the load-bearing half. The pass downloads a
+    /// 4.3 GB checkpoint and adds GPU minutes to every library build; a user
+    /// who never asked for it must never pay for it, and a preferences file
+    /// written before this key existed must decode to the same answer as a
+    /// fresh install rather than to `true`.
+    ///
+    /// MUTATION THIS KILLS: default the key to `true` in either `Prefs` or
+    /// `AutoshopApp`, drop it from the saved preferences (the round trip then
+    /// loses it), or wire one of the two build workers to a literal switch
+    /// instead of the preference.
+    #[test]
+    fn gui_describe_pref_round_trips() {
+        assert!(
+            !Prefs::default().style_describe,
+            "a prefs file written before this key existed must decode to OFF"
+        );
+        assert!(
+            !AutoshopApp::default().style_describe,
+            "a fresh app must not start a 4.3 GB download"
+        );
+        // A pre-S2 preferences file really is such a file: it has no key at all.
+        let old: Prefs = serde_json::from_str("{}").expect("an empty prefs file decodes");
+        assert!(!old.style_describe, "a missing key must not read as ON");
+
+        let prefs = Prefs { style_embed: true, style_describe: true, ..Prefs::default() };
+        let json = serde_json::to_string(&prefs).expect("prefs serialize");
+        assert!(json.contains("style_describe"), "the key must be written, not skipped: {json}");
+        let decoded: Prefs = serde_json::from_str(&json).expect("prefs deserialize");
+        assert!(decoded.style_describe, "the preference must survive a restart");
+
+        // The preference is what the workers resolve, and the resolver answers
+        // a VALUE — no test and no build writes the process environment.
+        let on = AutoshopApp { style_describe: true, ..Default::default() };
+        let off = AutoshopApp { style_describe: false, ..Default::default() };
+        let unset = |_: &str| None;
+        assert!(autoshop::style::DescribeSwitch::resolve_with(None, on.style_describe, unset).on());
+        assert!(!autoshop::style::DescribeSwitch::resolve_with(None, off.style_describe, unset).on());
+
+        let actions = include_str!("actions.rs");
+        assert_eq!(
+            actions.matches("DescribeSwitch::resolve(None, self.style_describe)").count(),
+            2,
+            "the RAW build and the look build both read the preference"
+        );
+        assert!(
+            actions.contains("app.style_describe = prefs.style_describe;"),
+            "the saved preference must be restored at start-up"
+        );
+        assert!(
+            include_str!("app.rs").contains("style_describe: self.style_describe,"),
+            "…and written back when preferences are saved"
+        );
+        // The checkbox is unreachable while the embedding is off: the prose
+        // only enters the ranking through the SigLIP text tower, so a
+        // description-only build would produce a field nothing can retrieve on.
+        let panel = include_str!("panels/ai.rs");
+        let gated = panel
+            .split("ui.add_enabled_ui(self.style_embed, |ui| {")
+            .nth(1)
+            .expect("the describe checkbox sits behind an enablement gate");
+        // NB the needle is spelled without its leading `ui.`: a literal that
+        // reads as a widget constructor makes `scripts/audit_i18n.py`'s
+        // bypass scanner start parsing THIS test as GUI code and desynchronise
+        // for the rest of the file (109 phantom findings, measured).
+        let first = gated.lines().find(|l| l.contains("checkbox(")).unwrap_or("");
+        assert!(
+            first.contains("&mut self.style_describe"),
+            "the gated block must be the describe checkbox itself: {first}"
+        );
+    }
+
+    #[test]
+    fn gui_prefs_round_trip_the_three_new_keys() {
+        let prefs = Prefs {
+            style_embed: true,
+            looks_src_dir: Some(std::path::PathBuf::from("D:/looks")),
+            use_looks: false,
+            direction_adherence: 0.91,
+            ..Prefs::default()
+        };
+        let json = serde_json::to_string(&prefs).expect("prefs serialize");
+        let decoded: Prefs = serde_json::from_str(&json).expect("prefs deserialize");
+        assert!(decoded.style_embed);
+        assert_eq!(decoded.looks_src_dir, prefs.looks_src_dir);
+        assert!(!decoded.use_looks);
+        assert!((decoded.direction_adherence - 0.91).abs() < 1e-6);
     }

@@ -21,7 +21,7 @@ use autoshop::pipeline::{
     default_out, ensure_parent, find_raws, produce_recipe, stem, write_recipe, write_xmp,
     GradeRequest,
 };
-use autoshop::recipe::{EditRecipe, GradeStrength};
+use autoshop::recipe::{DirectionAdherence, EditRecipe, GradeStrength};
 use autoshop::style::StyleIndex;
 
 #[derive(Parser)]
@@ -77,6 +77,24 @@ enum Command {
         /// told to commit; the clipping/white-point safeguards never move.
         #[arg(long, value_parser = unit_interval)]
         strength: Option<f32>,
+        /// How closely to follow `--guidance`, 0..1. The value picks a TIER,
+        /// and the TIER NAME is what the proposer and the verifier are told:
+        /// <=0.40 Hint, 0.40..0.70 Direct, >0.70 Brief. Omitted = 0.65, i.e.
+        /// Direct. Prompt intent only — it never moves a render bound — and it
+        /// does nothing at all without a direction.
+        #[arg(long, value_parser = unit_interval)]
+        adherence: Option<f32>,
+        /// Let the local SigLIP 2 sidecar answer the style query, so the look
+        /// library and the embedding terms can rank. First run downloads
+        /// ~1.5 GB of weights into python/weights and every call re-loads them.
+        /// Overrides AUTOSHOP_STYLE_EMBED for this run.
+        #[arg(long, conflicts_with = "no_embed")]
+        embed: bool,
+        /// Refuse the embedding sidecar for this run even if
+        /// AUTOSHOP_STYLE_EMBED is set: the 14-dim ranking only, and no look
+        /// library.
+        #[arg(long, conflicts_with = "embed")]
+        no_embed: bool,
         /// DEEP THINKING: the proposer first states the scene, decides each tool
         /// family explicitly and names the look it is going for, then critiques
         /// its own answer (printed here in full); its reasoning tier goes up one
@@ -125,6 +143,24 @@ enum Command {
         /// default 0.65, and 0.5 is the calibrated baseline.
         #[arg(long, value_parser = unit_interval)]
         strength: Option<f32>,
+        /// How closely to follow `--guidance`, 0..1. The value picks a TIER,
+        /// and the TIER NAME is what the proposer and the verifier are told:
+        /// <=0.40 Hint, 0.40..0.70 Direct, >0.70 Brief. Omitted = 0.65, i.e.
+        /// Direct. Prompt intent only — it never moves a render bound — and it
+        /// does nothing at all without a direction.
+        #[arg(long, value_parser = unit_interval)]
+        adherence: Option<f32>,
+        /// Let the local SigLIP 2 sidecar answer the style query, so the look
+        /// library and the embedding terms can rank. First run downloads
+        /// ~1.5 GB of weights into python/weights and every call re-loads them.
+        /// Overrides AUTOSHOP_STYLE_EMBED for this run.
+        #[arg(long, conflicts_with = "no_embed")]
+        embed: bool,
+        /// Refuse the embedding sidecar for this run even if
+        /// AUTOSHOP_STYLE_EMBED is set: the 14-dim ranking only, and no look
+        /// library.
+        #[arg(long, conflicts_with = "embed")]
+        no_embed: bool,
         /// DEEP THINKING (see `analyze --deep`): structured working + a raised
         /// reasoning tier + a multi-round visual judge. Costs more per photo.
         #[arg(long)]
@@ -228,7 +264,57 @@ enum Command {
     /// advisor then references your edits on similar shots. Run once / on update.
     StyleIndex {
         /// Folder to scan recursively for RAW + .xmp pairs (your edits).
+        #[arg(default_value = ".")]
         dir: PathBuf,
+        /// Build the LOOK LIBRARY instead: a folder of FINISHED photos
+        /// (JPEG/TIFF exports) whose grade the advisor may point at. Looks are
+        /// embedding-only — they carry no settings and never enter the recipe
+        /// blend — so this needs --embed, and it replaces only the look block
+        /// of the stored index, never your RAW exemplars.
+        #[arg(long)]
+        looks: Option<PathBuf>,
+        /// Compute a SigLIP 2 vector per record as well as the 14-dim feature.
+        /// First run downloads ~1.5 GB of weights into python/weights.
+        /// Overrides AUTOSHOP_STYLE_EMBED for this run.
+        #[arg(long, conflicts_with = "no_embed")]
+        embed: bool,
+        /// Build the 14-dim index only, even if AUTOSHOP_STYLE_EMBED is set.
+        #[arg(long, conflicts_with = "embed")]
+        no_embed: bool,
+        /// Also write a short LOCAL description of each record's grade
+        /// (Qwen3-VL-2B; first run downloads ~4.3 GB into python/weights, and
+        /// the pass adds seconds per photo). Needs --embed. Descriptions are
+        /// cached by frame content, so a rebuild only describes what changed.
+        #[arg(long, requires = "embed")]
+        describe: bool,
+    },
+    /// Offline retrieval diagnostic: what the style index would answer for one
+    /// photo, in the ranking's own numbers.
+    ///
+    /// Prints the weights in force, then every retrieved neighbour with its
+    /// distance broken into the terms that produced it (the 14-dim block, the
+    /// image-embedding term, and the two direction-text terms beside the raw
+    /// cosines behind them), the reference block the proposer would be
+    /// given, the look-library block, and the disclosure notes the develop
+    /// would emit. No advisor call, no network, no spend.
+    StyleQuery {
+        /// The photo to query with (RAW or a baked image).
+        photo: PathBuf,
+        /// Optional free-text direction, embedded with the text tower so the
+        /// direction terms and the look library have something to rank
+        /// against. Needs --embed.
+        #[arg(long)]
+        direction: Option<String>,
+        /// The Style axis used to render the reference block, 0..1 (default
+        /// 0.3). At >=0.85 the block states the retrieved habits as a TARGET
+        /// rather than a ceiling.
+        #[arg(long, value_parser = unit_interval)]
+        style: Option<f32>,
+        /// Ask the SigLIP 2 sidecar for the query vectors. Without it the
+        /// diagnostic shows the 14-dim ranking and says the look library is
+        /// unreachable.
+        #[arg(long)]
+        embed: bool,
     },
     /// EXPERIMENTAL: full-frame generative restyle via OpenAI Images (low-res,
     /// lossy re-render — NOT a master; the XMP/render path is the real workflow).
@@ -394,8 +480,8 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
         Command::Decode { raw, out } => decode_cmd(&raw, out),
-        Command::Analyze { raw, out, guidance, style, strength, deep } => {
-            analyze_cmd(&raw, out, guidance, style, strength, deep)
+        Command::Analyze { raw, out, guidance, style, strength, adherence, embed, no_embed, deep } => {
+            analyze_cmd(&raw, out, guidance, style, strength, adherence, deep, embed_switch(embed, no_embed))
         }
         Command::Apply { raw, recipe, out, long_edge } => {
             apply_cmd(&raw, &recipe, &out, long_edge)
@@ -406,6 +492,9 @@ fn main() -> Result<()> {
             guidance,
             style,
             strength,
+            adherence,
+            embed,
+            no_embed,
             deep,
             denoise,
             denoise_strength,
@@ -413,8 +502,8 @@ fn main() -> Result<()> {
             long_edge,
         } => {
             auto_cmd(
-                &raw, out, guidance, style, strength, deep, denoise, denoise_strength,
-                denoise_model, long_edge,
+                &raw, out, guidance, style, strength, adherence, deep, denoise, denoise_strength,
+                denoise_model, long_edge, embed_switch(embed, no_embed),
             )
         }
         Command::Denoise { input, out, strength, model } => denoise_cmd(&input, out, strength, model),
@@ -424,7 +513,24 @@ fn main() -> Result<()> {
         Command::Eval { dir, limit, jobs, fresh, state } => {
             eval::run(&dir, limit, jobs, fresh, state.as_deref())
         }
-        Command::StyleIndex { dir } => style_index_cmd(&dir),
+        Command::StyleIndex { dir, looks, embed, no_embed, describe } => {
+            let switch = embed_switch(embed, no_embed);
+            // `--describe` is a three-state read like `--embed`, minus the
+            // negative flag: the description pass is off by default, so
+            // "explicitly off" is what NOT passing it already means.
+            let prose = autoshop::style::DescribeSwitch::resolve(describe.then_some(true), false);
+            if let Some(d) = looks {
+                style_looks_cmd(&d, switch, prose)
+            } else {
+                style_index_cmd(&dir, switch, prose)
+            }
+        }
+        Command::StyleQuery { photo, direction, style, embed } => style_query_cmd(
+            &photo,
+            direction.as_deref(),
+            style.unwrap_or(0.3),
+            embed_switch(embed, false),
+        ),
         Command::Reimagine { raw, prompt, fidelity, quality, fidelity_retry, out } => {
             let cfg = Config::load();
             let out = out.unwrap_or_else(|| default_out(&raw, "reimagine", "png"));
@@ -535,8 +641,12 @@ fn correspond_cmd(source: &Path, target: &Path, out: Option<PathBuf>) -> Result<
     Ok(())
 }
 
-fn style_index_cmd(dir: &Path) -> Result<()> {
-    let index = StyleIndex::build(dir)?;
+fn style_index_cmd(
+    dir: &Path,
+    embed: autoshop::style::EmbeddingSwitch,
+    describe: autoshop::style::DescribeSwitch,
+) -> Result<()> {
+    let index = StyleIndex::build(dir, embed, describe)?;
     // Central per-user location: the index describes the user's whole library,
     // so it must not depend on which directory the command ran from.
     let out = autoshop::store::style_index_path();
@@ -546,6 +656,231 @@ fn style_index_cmd(dir: &Path) -> Result<()> {
         out.display(),
         index.exemplars.len()
     );
+    print_described(describe, index.exemplars.iter().filter(|e| e.desc.is_some()).count(), index.exemplars.len());
+    Ok(())
+}
+
+/// The S2 build note, from the SHARED rationale template — the GUI's toast
+/// renders the same key after the same build, so the two surfaces cannot drift
+/// into two sentences about one fact.
+///
+/// Printed only when the pass was asked for AND covered something: 0 means
+/// either "never asked" or "reached nothing", and a line claiming 0 of N would
+/// read as a failure on every build that simply did not want prose.
+fn print_described(describe: autoshop::style::DescribeSwitch, described: usize, total: usize) {
+    if !describe.on() || described == 0 {
+        return;
+    }
+    println!(
+        " {}",
+        autoshop::rationale::keys::STYLE_DESCRIBED
+            .trim()
+            .replace("{n}", &described.to_string())
+            .replace("{total}", &total.to_string())
+    );
+}
+
+fn style_looks_cmd(
+    dir: &Path,
+    embed: autoshop::style::EmbeddingSwitch,
+    describe: autoshop::style::DescribeSwitch,
+) -> Result<()> {
+    let index = StyleIndex::build_looks(dir, embed, describe, &|_| {})?;
+    let out = autoshop::store::style_index_path();
+    index.save(&out)?;
+    println!("look library -> {} ({} finished photos)", out.display(), index.looks.len());
+    print_described(describe, index.looks.iter().filter(|l| l.desc.is_some()).count(), index.looks.len());
+    Ok(())
+}
+
+/// `--embed` / `--no-embed` as a VALUE, resolved once at the command's door.
+///
+/// It used to be an `unsafe` write of `AUTOSHOP_STYLE_EMBED` into the process
+/// environment at three sites: a CLI flag implemented as a global side effect,
+/// read back several call frames later. `cargo test` runs tests on parallel
+/// threads in one process, so that made the switch a shared mutable global the
+/// retrieval happened to read — see `style::EmbeddingSwitch`.
+fn embed_switch(embed: bool, no_embed: bool) -> autoshop::style::EmbeddingSwitch {
+    // clap already refuses both at once (`conflicts_with`), so this is a
+    // three-state read, not a precedence decision.
+    let flag = embed.then_some(true).or(no_embed.then_some(false));
+    autoshop::style::EmbeddingSwitch::resolve(flag, false)
+}
+
+/// The two standardised text terms as the diagnostic prints them: the term that
+/// entered the sum, the raw `1−cos` it came from, and whether the candidate set
+/// was large enough to standardise at all.
+///
+/// `raw=–` marks a pair that had no comparable vectors (no direction text, or an
+/// exemplar with no description embedding); such a candidate scores 0 — not a
+/// penalty and not a bonus, and under the standardised variant that is exactly
+/// the candidate-set mean. `,z` marks a term the standardised variant really
+/// z-scored and `,raw-fallback` its disclosed give-up (fewer than three
+/// comparable candidates, or a degenerate spread); the shipped RAW variant
+/// prints neither, because for it the weighted gap is not a fallback.
+fn fmt_text_terms(t: &autoshop::style::DistanceTerms) -> String {
+    let one = |label: &str, term: f64, gap: Option<f64>, standardised: bool| -> String {
+        let raw = gap.map(|g| format!("{g:.6}")).unwrap_or_else(|| "–".into());
+        // `z` marks a term the ranking z-scored; nothing marks the raw
+        // variant, which is what ships. `raw-fallback` is reserved for the
+        // STANDARDISED variant giving up on a candidate set it could not
+        // standardise — printing it on every line of a raw-variant run would
+        // report a degradation that did not happen.
+        let mark = match (autoshop::style::STANDARDISE_TEXT_TERMS, standardised) {
+            (true, true) => ",z",
+            (true, false) => ",raw-fallback",
+            (false, _) => "",
+        };
+        format!(" {label}={term:.6}(raw={raw}{mark})")
+    };
+    format!(
+        "{}{}",
+        one("txt", t.txt, t.txt_gap, t.txt_standardised),
+        one("desc", t.desc, t.desc_gap, t.desc_standardised)
+    )
+}
+
+/// The local look DESCRIPTION as the diagnostic prints it, through the same
+/// bounded door the reference blocks use (S2).
+///
+/// The diagnostic already prints the `desc=` retrieval TERM — a number derived
+/// from the description's vector. That number cannot be read without the
+/// sentence behind it: a neighbour that scores well on `desc` and turns out to
+/// have been described as the wrong grade is a calibration finding, and it is
+/// invisible while only the term is on the line.
+///
+/// Absent prose prints NOTHING rather than an empty field, so a pre-S2 index
+/// and an index built with the switch off read exactly as they did before.
+fn fmt_desc(desc: Option<&str>) -> String {
+    desc.and_then(autoshop::describe::sanitize_desc)
+        .map(|d| format!(" desc=\"{d}\""))
+        .unwrap_or_default()
+}
+
+/// The offline retrieval diagnostic: what the ranking saw, in the ranking's own
+/// numbers.
+///
+/// It re-derives NOTHING. The neighbour lines print `DistanceTerms` straight
+/// out of `distance_components`, and the look lines out of
+/// `retrieve_looks_with_terms` — the same call `retrieve_looks` makes. Both the
+/// standardised term and the raw `1−cos` behind it are shown, because a
+/// standardised term is only readable next to the weights that produced it, so
+/// those are the header.
+fn style_query_cmd(
+    photo: &Path,
+    direction: Option<&str>,
+    style: f32,
+    embed: autoshop::style::EmbeddingSwitch,
+) -> Result<()> {
+    let decoded = decode::decode_any(photo)?;
+    let idx = match autoshop::style::load_effective() {
+        autoshop::style::EffectiveIndex::Loaded(ix, _) => ix,
+        autoshop::style::EffectiveIndex::Absent => anyhow::bail!("style index is absent"),
+        autoshop::style::EffectiveIndex::Unusable { err, .. } => anyhow::bail!("style index unusable: {err}"),
+    };
+    // Resolved ONCE, printed, then passed to every scorer below: the diagnostic
+    // cannot be read against weights it did not state.
+    let weights = autoshop::style::RetrievalWeights::from_env();
+    println!(
+        "weights: W_EMB={:.6} W_TXT={:.6} W_DESC={:.6} W_LOOK={:.6}  text-term variant: {}",
+        weights.emb, weights.txt, weights.desc, weights.look,
+        if autoshop::style::STANDARDISE_TEXT_TERMS { "standardised (z-scored per query)" } else { "raw (the calibrated winner)" }
+    );
+    let (mut qi, mut qt) = (None, None);
+    let mut embedding_status = "disabled (embedding switch is off)".to_string();
+    if embed.on() {
+        let opts = autoshop::embed::EmbedOpts::from_config(&Config::load());
+        if !opts.available() {
+            embedding_status = "unavailable (style-embedding sidecar is not present)".into();
+        } else {
+            match autoshop::style::embed_preview_with_text(&opts, &decoded.preview, &std::env::temp_dir(), "style-query", direction) {
+                Ok(r) => {
+                    qi = Some(r.vector);
+                    qt = r.text_vector;
+                    embedding_status = "ready (image vector plus optional direction text vector)".into();
+                }
+                Err(e) => embedding_status = format!("unavailable ({e:#}); using 14-D retrieval"),
+            }
+        }
+    }
+    println!("embedding: {embedding_status}");
+    let query = autoshop::style::StyleQuery::new(qi.as_deref(), qt.as_deref(), weights);
+    let (ex, looks_scored) = (
+        pipeline::retrieve_style(&idx, &decoded.meta, &decoded.histogram, query, photo, true).0,
+        idx.retrieve_looks_with_terms(query, 2),
+    );
+    let looks: Vec<_> = looks_scored.iter().map(|(e, _)| *e).collect();
+    println!("neighbours:");
+    for e in &ex {
+        let t = idx.distance_components(&decoded.meta, &decoded.histogram, query, photo, e);
+        println!(
+            "  {} distance={:.6} d14={:.6} emb={:.6}{}{}",
+            e.stem, t.total(), t.d14, t.emb, fmt_text_terms(&t), fmt_desc(e.desc.as_deref())
+        );
+    }
+    let reference = idx.render_reference_for_style(&ex, style);
+    // The SHARED fence constants, not a second literal: the point of printing
+    // the proposer's block is that it is the proposer's block.
+    println!("reference (proposer block):\n{}", reference.as_deref()
+        .map(|r| format!("{}{r}", autoshop::advisor::FENCE_STYLE_REFERENCE))
+        .unwrap_or_else(|| "(none)".into()));
+    if looks.is_empty() {
+        if idx.looks.is_empty() {
+            println!("looks: unreachable (look library is empty)");
+        } else {
+            println!("looks: unreachable (style embedding is off or no query vector was produced; {} finished photos)", idx.looks.len());
+        }
+    } else {
+        // …and the block is worded from the WEIGHTS, like the develop's:
+        // "and direction" appears only when a text weight is non-zero.
+        let by_direction = autoshop::style::StyleIndex::look_ranked_by_direction(query);
+        println!(
+            "look reference (proposer block):\n{}{}",
+            autoshop::advisor::FENCE_LOOK_REFERENCE,
+            idx.render_look_reference(&looks, by_direction).unwrap_or_default()
+        );
+        for (l, t) in &looks_scored {
+            println!(
+                "  look {} distance={:.6} look={:.6}{} tags=[{}]{}",
+                l.stem, t.total(), t.emb, fmt_text_terms(t), l.tags.join(", "),
+                fmt_desc(l.desc.as_deref())
+            );
+        }
+    }
+    println!("disclosure notes:");
+    if !ex.is_empty() {
+        println!("  {}", autoshop::rationale::keys::STYLE_NEIGHBOURS
+            .replace("{files}", &autoshop::style::neighbour_stems(&ex).join(", "))
+            .replace("{n}", &ex.len().to_string()));
+    }
+    if let Some(first) = looks.first() {
+        println!("  {}", autoshop::rationale::keys::STYLE_LOOK_REFERENCE
+            .replace("{stem}", &first.stem)
+            .replace("{tags}", &first.tags.join(", ")));
+        // The develop emits this one only when the look ALSO went to the vision
+        // model as a second image, which is an opt-in this diagnostic does not
+        // have (and never pays for). Printed with its condition stated, so the
+        // line is a forecast and not a claim about this run.
+        println!(
+            "  (with the reference-image option on) {}",
+            autoshop::rationale::keys::STYLE_LOOK_IMAGE.replace("{stem}", &first.stem)
+        );
+    } else if !idx.looks.is_empty() {
+        println!("  {}", autoshop::rationale::keys::STYLE_LOOKS_UNREACHABLE
+            .replace("{n}", &idx.looks.len().to_string()));
+    }
+    // DERIVED, through the pipeline's own mapping. It used to print the literal
+    // "direct" whatever the dial said — a diagnostic that reported a tier the
+    // develop would not have used. `style-query` has no `--adherence` flag, so
+    // the dial is the shipped default and the line says which that is.
+    let adherence = autoshop::recipe::DirectionAdherence::default();
+    if let Some(tier) = pipeline::direction_adherence_tier(direction, adherence) {
+        println!(
+            "  {}   (from the DEFAULT adherence dial {:.2}; `analyze --adherence` moves it)",
+            autoshop::rationale::keys::ADVISOR_NOTE_DIRECTION_ADHERENCE.replace("{tier}", tier),
+            adherence.get()
+        );
+    }
     Ok(())
 }
 
@@ -734,13 +1069,22 @@ fn require_choice(flag: &str, value: &str, allowed: &[&str]) -> Result<()> {
 fn analyze_request(
     style: Option<f32>,
     strength: Option<f32>,
+    adherence: Option<f32>,
     deep: bool,
+    embed: autoshop::style::EmbeddingSwitch,
     cfg: &Config,
 ) -> GradeRequest {
     GradeRequest {
         style: style.unwrap_or(cfg.style_strength),
         send_reference_image: false,
         strength: GradeStrength::from_optional(strength),
+        adherence: adherence.map(DirectionAdherence::new).unwrap_or_default(),
+        use_looks: true,
+        // The sidecar switch and the retrieval weights travel WITH the request
+        // instead of being read back out of the process environment several
+        // frames down (see `style::EmbeddingSwitch`).
+        embed,
+        weights: autoshop::style::RetrievalWeights::from_env(),
         // R23-4: opt-in per invocation, and per invocation only — `batch`
         // builds its request through `GradeRequest::with_style`, which has no
         // way to reach this flag.
@@ -748,13 +1092,16 @@ fn analyze_request(
     }
 }
 
+#[allow(clippy::too_many_arguments)] // one clap subcommand's own flag set, like `auto_cmd`
 fn analyze_cmd(
     raw: &Path,
     out: Option<PathBuf>,
     guidance: Option<String>,
     style: Option<f32>,
     strength: Option<f32>,
+    adherence: Option<f32>,
     deep: bool,
+    embed: autoshop::style::EmbeddingSwitch,
 ) -> Result<()> {
     let cfg = Config::load();
     if let Some(o) = &out {
@@ -768,7 +1115,7 @@ fn analyze_cmd(
     // "adjust current edit" path is a web-UI affordance. judge = true: an
     // explicitly invoked single-photo analyze gets the visual closed loop
     // (batch passes false — spend never multiplies silently).
-    let req = analyze_request(style, strength, deep, &cfg);
+    let req = analyze_request(style, strength, adherence, deep, embed, &cfg);
     let (recipe, verdict, _notes) =
         produce_recipe(raw, &cfg, true, guidance.as_deref(), None, req, true, autoshop::diag::stderr())?;
     // Remember whether -o redirected the recipe: the XMP has to follow it (below)
@@ -1010,11 +1357,13 @@ fn auto_cmd(
     guidance: Option<String>,
     style: Option<f32>,
     strength: Option<f32>,
+    adherence: Option<f32>,
     deep: bool,
     denoise: bool,
     denoise_strength: Option<f32>,
     denoise_model: Option<String>,
     long_edge: Option<u32>,
+    embed: autoshop::style::EmbeddingSwitch,
 ) -> Result<()> {
     let cfg = Config::load();
     // Validate the render target BEFORE the PAID AI call (and before touching
@@ -1034,7 +1383,7 @@ fn auto_cmd(
     // Resolved BEFORE the paid call so the banner below can say what is coming
     // (it also costs nothing and cannot fail).
     let export = export_opts(long_edge);
-    let req = analyze_request(style, strength, deep, &cfg);
+    let req = analyze_request(style, strength, adherence, deep, embed, &cfg);
     // judge = true: `auto` is the explicit one-shot develop of ONE photo —
     // same interactive class as analyze (batch passes false).
     let (recipe, verdict, _notes) =
@@ -2039,6 +2388,7 @@ mod tests {
             segment_script: String::new(),
             embed_script: String::new(),
             correspond_script: String::new(),
+            describe_script: String::new(),
             style_strength: 0.5,
         }
     }
@@ -2208,7 +2558,10 @@ mod tests {
         // …and the flag actually decides the request `analyze`/`auto` build —
         // the PRODUCTION resolver, shared by both commands.
         let cfg = autoshop::config::Config { style_strength: 0.3, ..cfg_fixture() };
-        let plain = analyze_request(None, None, false, &cfg);
+        // The switch is a VALUE these dial assertions are indifferent to, so it
+        // is spelled once rather than resolved from the environment per call.
+        const OFF: autoshop::style::EmbeddingSwitch = autoshop::style::EmbeddingSwitch::OFF;
+        let plain = analyze_request(None, None, None, false, OFF, &cfg);
         assert_eq!(plain.style, 0.3, "omitted --style keeps AUTOSHOP_STYLE_STRENGTH");
         assert_eq!(
             plain.strength.get(),
@@ -2216,21 +2569,21 @@ mod tests {
             "omitted --strength is the SHIPPED default (0.65) — the CLI and a double-clicked \
              GUI must develop the same photo the same way when neither is told otherwise"
         );
-        let dialled = analyze_request(Some(0.1), Some(0.9), false, &cfg);
+        let dialled = analyze_request(Some(0.1), Some(0.9), None, false, OFF, &cfg);
         assert_eq!((dialled.style, dialled.strength.get()), (0.1, 0.9), "no axis swap");
         assert!(!dialled.send_reference_image, "every non-GUI surface stays on the text reference");
         // 0.5 is the calibration point, one flag away.
         assert_eq!(
-            analyze_request(None, Some(0.5), false, &cfg).strength,
+            analyze_request(None, Some(0.5), None, false, OFF, &cfg).strength,
             GradeStrength::calibrated()
         );
         // R23-4: `--deep` is the ONLY way this resolver's thinking flag turns
         // on, and it is a THIRD axis — it must not be confusable with either
         // dial (`batch` never reaches this function at all).
         assert!(!plain.think, "omitted --deep is off, like every paid opt-in");
-        assert!(analyze_request(None, None, true, &cfg).think, "--deep must reach the request");
+        assert!(analyze_request(None, None, None, true, OFF, &cfg).think, "--deep must reach the request");
         assert!(
-            !analyze_request(Some(1.0), Some(1.0), false, &cfg).think,
+            !analyze_request(Some(1.0), Some(1.0), None, false, OFF, &cfg).think,
             "pushing both dials to the maximum must not buy the thinking envelope"
         );
     }
@@ -2262,7 +2615,8 @@ mod tests {
         let dir = std::env::temp_dir()
             .join(format!("autoshop-prepay-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let e = analyze_cmd(Path::new("no-such.arw"), Some(dir.clone()), None, None, None, false)
+        let off = autoshop::style::EmbeddingSwitch::OFF;
+        let e = analyze_cmd(Path::new("no-such.arw"), Some(dir.clone()), None, None, None, None, false, off)
             .unwrap_err()
             .to_string();
         assert!(e.contains("is a directory"), "analyze: {e}");
@@ -2272,11 +2626,13 @@ mod tests {
             None,
             None,
             None,
+            None,
             false,
             false,
             None,
             None,
             None,
+            off,
         )
         .unwrap_err()
         .to_string();
@@ -2706,5 +3062,227 @@ mod tests {
         assert!(note.contains("144 string byte(s)"), "400 - 256 = 144: {note}");
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Every flag S1 added carries `--help` text, and `style-query` carries a
+    /// description.
+    ///
+    /// clap prints a bare `--adherence <ADHERENCE>` for an undocumented flag,
+    /// which is indistinguishable from a flag that does nothing. The tiers in
+    /// particular cannot be guessed from a 0..1 number: the value picks a NAME
+    /// the prompt is told, and the name is not monotone in the way a user would
+    /// assume, so the help has to say the bands.
+    ///
+    /// MUTATION: delete any one of the doc comments on those clap fields and
+    /// this fails, naming it.
+    #[test]
+    fn the_new_cli_surface_documents_itself() {
+        use clap::CommandFactory;
+        let render = |name: &str| -> String {
+            let mut cmd = Cli::command();
+            let sub = cmd
+                .find_subcommand_mut(name)
+                .unwrap_or_else(|| panic!("no `{name}` subcommand"));
+            sub.render_long_help().to_string()
+        };
+        let analyze = render("analyze");
+        for (flag, phrase) in [
+            ("--adherence", "Hint"),
+            ("--adherence", "Direct"),
+            ("--adherence", "Brief"),
+            ("--embed", "SigLIP 2 sidecar"),
+            ("--no-embed", "14-dim ranking"),
+        ] {
+            assert!(analyze.contains(flag), "analyze must offer {flag}");
+            assert!(analyze.contains(phrase), "analyze --help must explain {flag}: missing {phrase:?}");
+        }
+        // `auto` carries the same three flags and must explain them too.
+        let auto = render("auto");
+        for phrase in ["Hint", "Direct", "Brief", "SigLIP 2 sidecar"] {
+            assert!(auto.contains(phrase), "auto --help must explain the flag: missing {phrase:?}");
+        }
+        // `style-index --looks` says what a look library IS, since it is not
+        // the same thing as the RAW library the same command builds.
+        let index = render("style-index");
+        assert!(index.contains("FINISHED photos"), "{index}");
+        assert!(index.contains("--looks"), "{index}");
+        // …and `style-query` says what it prints and that it spends nothing.
+        let query = render("style-query");
+        for phrase in ["weights in force", "No advisor call", "--direction", "--embed"] {
+            assert!(query.contains(phrase), "style-query --help must say {phrase:?}: {query}");
+        }
+        // No flag on any of the three may ship with an empty help line.
+        for name in ["analyze", "auto", "style-index", "style-query"] {
+            let mut cmd = Cli::command();
+            let sub = cmd.find_subcommand_mut(name).unwrap();
+            for arg in sub.get_arguments() {
+                assert!(
+                    arg.get_help().is_some() || arg.get_long_help().is_some(),
+                    "`{name} --{}` has no help text",
+                    arg.get_id()
+                );
+            }
+        }
+    }
+
+    /// The flags reach the REQUEST, as values.
+    ///
+    /// `--embed` used to be implemented by writing `AUTOSHOP_STYLE_EMBED` into
+    /// the process and letting `produce_recipe` read it back, so the flag was a
+    /// global side effect and the develop's switch was whatever the last
+    /// command (or a parallel test) had written. Now the resolver answers a
+    /// value, the request carries it, and the environment is not written at
+    /// all — which is what the snapshot below states.
+    ///
+    /// MUTATION: make `embed_switch` ignore its flag arguments and the
+    /// `--no-embed` assertion fails.
+    #[test]
+    fn cli_adherence_and_embed_flags_reach_the_request() {
+        let before = std::env::var_os("AUTOSHOP_STYLE_EMBED");
+        let cli = Cli::try_parse_from([
+            "autoshop", "analyze", "photo.arw", "--guidance", "warmer",
+            "--adherence", "0.2", "--embed",
+        ]).expect("the new flags parse");
+        match cli.command {
+            Command::Analyze { adherence, embed, no_embed, .. } => {
+                assert_eq!(adherence, Some(0.2));
+                assert!(embed && !no_embed);
+                let req = analyze_request(
+                    None, None, adherence, false, embed_switch(embed, no_embed), &Config::load(),
+                );
+                assert_eq!(req.adherence.tier(), autoshop::recipe::AdherenceTier::Hint);
+                assert!(req.embed.on(), "--embed must reach the request as a value");
+            }
+            _ => panic!("expected analyze command"),
+        }
+        // The opposite flag, and the one that used to WRITE the variable.
+        let cli = Cli::try_parse_from(["autoshop", "auto", "photo.arw", "--no-embed"])
+            .expect("--no-embed parses");
+        match cli.command {
+            Command::Auto { embed, no_embed, .. } => {
+                assert!(!embed && no_embed);
+                assert!(
+                    !embed_switch(embed, no_embed).on(),
+                    "--no-embed must win over whatever the environment says"
+                );
+            }
+            _ => panic!("expected auto command"),
+        }
+        assert_eq!(
+            before,
+            std::env::var_os("AUTOSHOP_STYLE_EMBED"),
+            "resolving the flags must not write the process environment"
+        );
+    }
+
+    /// `--describe` reaches the build as a VALUE, requires `--embed`, and
+    /// resolving it writes nothing (S2).
+    ///
+    /// The description pass is a 4.3 GB checkpoint and minutes of GPU time; it
+    /// must never start because a stale environment variable said so while the
+    /// user typed a plain `style-index`. And it is meaningless without the
+    /// embedding: the prose exists to be EMBEDDED (`desc_embed`), so clap
+    /// refuses the combination rather than building an index whose
+    /// descriptions nothing can retrieve on.
+    ///
+    /// MUTATION THIS KILLS: drop `requires = "embed"` from the flag (the
+    /// `--describe` alone case then parses), or resolve the switch with
+    /// `Some(true)` regardless of the flag (the plain case then comes back on).
+    #[test]
+    fn cli_describe_flag_reaches_the_build() {
+        let before = std::env::var_os("AUTOSHOP_STYLE_DESCRIBE");
+        let switch = |args: &[&str]| -> autoshop::style::DescribeSwitch {
+            let cli = Cli::try_parse_from(args).expect("the command parses");
+            match cli.command {
+                Command::StyleIndex { describe, .. } => {
+                    // The pref default is FALSE here, as it is for the CLI:
+                    // the CLI has no preferences file.
+                    autoshop::style::DescribeSwitch::resolve(describe.then_some(true), false)
+                }
+                _ => panic!("expected style-index"),
+            }
+        };
+        assert!(
+            switch(&["autoshop", "style-index", "raws", "--embed", "--describe"]).on(),
+            "--describe must reach the build as an ON value"
+        );
+        // Not passing it is what "off" means on the CLI, which has no
+        // preferences file: with nothing set, a plain `style-index` must not
+        // start a 4.3 GB pass.
+        assert!(
+            !switch(&["autoshop", "style-index", "raws", "--embed"]).on()
+                || std::env::var_os("AUTOSHOP_STYLE_DESCRIBE").is_some(),
+            "a plain style-index must not describe unless the environment asked for it"
+        );
+        assert!(
+            !autoshop::style::DescribeSwitch::resolve_with(None, false, |_| None).on(),
+            "nothing set: OFF"
+        );
+        // The environment override is the documented middle rank (flag > env >
+        // preference), exactly as `AUTOSHOP_STYLE_EMBED` behaves — and the
+        // FLAG still wins over it in both directions.
+        assert!(
+            autoshop::style::DescribeSwitch::resolve_with(None, false, |_| Some("1".into())).on(),
+            "an explicit environment override is honoured"
+        );
+        assert!(
+            !autoshop::style::DescribeSwitch::resolve_with(None, true, |_| Some("0".into())).on(),
+            "…and it can turn a stored preference off again"
+        );
+        // …and the look-library form takes it too.
+        assert!(
+            switch(&["autoshop", "style-index", "--looks", "finals", "--embed", "--describe"]).on(),
+            "the look library must be describable as well"
+        );
+        // Without --embed clap refuses, before any work starts.
+        let msg = match Cli::try_parse_from(["autoshop", "style-index", "raws", "--describe"]) {
+            Ok(_) => panic!("--describe alone must be refused"),
+            Err(e) => e.to_string(),
+        };
+        assert!(msg.contains("--embed"), "the refusal must name the missing flag: {msg}");
+        assert_eq!(
+            before,
+            std::env::var_os("AUTOSHOP_STYLE_DESCRIBE"),
+            "resolving the switch must not write the process environment"
+        );
+    }
+
+    /// The retrieval diagnostic shows the SENTENCE behind the `desc=` term
+    /// when the index carries one, and changes nothing when it does not.
+    ///
+    /// MUTATION THIS KILLS: print `e.desc` directly instead of through
+    /// `sanitize_desc` (the newline case then forges a diagnostic line), or
+    /// print an empty `desc=""` for records that carry no prose (every pre-S2
+    /// index's diagnostic then grows a field that says nothing).
+    #[test]
+    fn style_query_prints_prose_when_present() {
+        assert_eq!(fmt_desc(None), "", "no prose, no field");
+        assert_eq!(fmt_desc(Some("   ")), "", "a blank description is not a field either");
+        assert_eq!(
+            fmt_desc(Some("a warm, hazy grade")),
+            " desc=\"a warm, hazy grade\"",
+            "the sentence is printed beside the term it explains"
+        );
+        // The door, on the diagnostic surface too: a description with a
+        // newline in it must not be able to forge a second neighbour line.
+        let forged = fmt_desc(Some("cool blue\n  photo-2 distance=0.000000"));
+        assert!(!forged.contains('\n'), "a description must not forge a line: {forged:?}");
+        assert_eq!(forged, " desc=\"cool blue photo-2 distance=0.000000\"");
+        // And the diagnostic really calls it on BOTH kinds of candidate: a
+        // helper wired to the neighbour lines only would pass every assertion
+        // above while the look lines still printed nothing.
+        let body = include_str!("main.rs")
+            .split("fn style_query_cmd(")
+            .nth(1)
+            .expect("the diagnostic exists")
+            .split("
+fn ")
+            .next()
+            .unwrap();
+        assert_eq!(
+            body.matches("fmt_desc(").count(),
+            2,
+            "the neighbour line and the look line both print the prose"
+        );
     }
 }

@@ -203,9 +203,27 @@ pub(crate) struct Prefs {
     /// prefs file as `false` — the same answer [`Prefs::default`] gives, so an
     /// upgrade never silently starts paying for a deeper (and longer) analyze.
     pub(crate) deep_think: bool,
+    /// Use SigLIP look embeddings when building and querying the style index.
+    #[serde(default)]
+    pub(crate) style_embed: bool,
+    /// Step 14 / S2: also write a short LOCAL prose description of each
+    /// record's grade with Qwen3-VL. `#[serde(default)]` on the struct decodes
+    /// an older prefs file as `false` — the same answer [`Prefs::default`]
+    /// gives, so an upgrade never silently starts a 4.3 GB download.
+    #[serde(default)]
+    pub(crate) style_describe: bool,
     /// The folder the style library was last built from (R23-2), so a rebuild
     /// starts where the last build did.
     pub(crate) style_src_dir: Option<PathBuf>,
+    /// Folder of finished photos used by the separate look library.
+    #[serde(default)]
+    pub(crate) looks_src_dir: Option<PathBuf>,
+    /// Whether look-library retrieval is enabled for analyses.
+    #[serde(default = "default_true")]
+    pub(crate) use_looks: bool,
+    /// Direction adherence axis, persisted independently of style strength.
+    #[serde(default = "default_adherence")]
+    pub(crate) direction_adherence: f32,
     pub(crate) save_jpeg: bool,
     /// [`ExportFormat::pref_code`]; 0 defers to `save_jpeg` (migration).
     pub(crate) exp_format: u8,
@@ -253,7 +271,12 @@ impl Default for Prefs {
             // OFF, like every other paid opt-in here (see `fit_ai_judge`).
             send_style_ref_image: false,
             deep_think: false,
+            style_embed: false,
+            style_describe: false,
             style_src_dir: None,
+            looks_src_dir: None,
+            use_looks: true,
+            direction_adherence: autoshop::recipe::DirectionAdherence::DEFAULT,
             save_jpeg: false,
             exp_format: 0,
             exp_dest: 0, // ./out — the CLI/batch shape, unchanged for old prefs
@@ -291,6 +314,9 @@ impl Default for Prefs {
 /// "the user moved it" was a statement no predicate could make without adding a
 /// third copy to drift from the other two.
 pub(crate) const STYLE_STRENGTH_DEFAULT: f32 = 0.30;
+
+fn default_true() -> bool { true }
+fn default_adherence() -> f32 { autoshop::recipe::DirectionAdherence::DEFAULT }
 
 /// Where the GRADE strength starts, and what its slider's double-click /
 /// right-click reset lands on (R23-3; user decision 2026-08-17 ⑦ = 0.65).
@@ -582,7 +608,7 @@ pub(crate) enum Msg {
     /// The running style-library build advanced: `done` of `total` photos
     /// decoded. Typed counts, worded at landing (L12#4) — same shape as
     /// [`Msg::BatchProgress`].
-    StyleBuildProgress { done: usize, total: usize },
+    StyleBuildProgress { stage: autoshop::style::BuildStage, done: usize, total: usize },
     /// A style-library build finished — see [`StyleBuildOutcome`].
     StyleBuilt(Box<StyleBuildOutcome>),
 }
@@ -607,7 +633,15 @@ pub(crate) enum StyleBuildOutcome {
     /// identical success toast as one where none did: the release GUI is
     /// `windows_subsystem = "windows"`, so the per-photo `eprintln!` the CLI
     /// shows goes to a console that does not exist (adjudication F3).
-    Saved { total: usize, dir: PathBuf, without_embedding: usize },
+    ///
+    /// `described` is the S2 sibling of the same idea, from the other
+    /// direction: how many exemplars the OPTIONAL local description pass
+    /// actually covered. 0 both when the switch was off and when the pass
+    /// reached nothing — and the note only renders above 0, so the two
+    /// silent cases stay silent.
+    Saved { total: usize, dir: PathBuf, without_embedding: usize, described: usize },
+    /// Finished-photo look library published into the shared index.
+    LooksSaved { total: usize, dir: PathBuf, described: usize },
     /// The folder held no RAW with its `.xmp` sidecar beside it, so
     /// `StyleIndex::save` REFUSED (the one empty-index guard, shared by the
     /// CLI, the web handler and this button — writing an empty index would

@@ -156,13 +156,15 @@ The following commands and flags match the v1.0.0 command definitions in
 
 ```text
 autoshop decode <src> [-o|--out FILE]
-autoshop analyze <src> [-o|--out FILE] [--guidance TEXT] [--style 0..1] [--strength 0..1] [--deep]
+autoshop analyze <src> [-o|--out FILE] [--guidance TEXT] [--style 0..1] [--strength 0..1] [--adherence 0..1] [--embed|--no-embed] [--deep]
 autoshop apply <src> <recipe.json> (-o|--out) FILE [--long-edge N]
-autoshop auto <src> [-o|--out FILE] [--guidance TEXT] [--style 0..1] [--strength 0..1] [--deep] [--denoise] [--denoise-strength 0..1] [--denoise-model NAME] [--long-edge N]
+autoshop auto <src> [-o|--out FILE] [--guidance TEXT] [--style 0..1] [--strength 0..1] [--adherence 0..1] [--embed|--no-embed] [--deep] [--denoise] [--denoise-strength 0..1] [--denoise-model NAME] [--long-edge N]
 autoshop denoise <src> [-o|--out FILE] [--strength 0..1] [--model NAME]
 autoshop batch <dir> [--render] [--limit N] [--include-baked] [--jobs N] [--long-edge N]
 autoshop eval <dir> [--limit N] [--jobs N] [--fresh] [--state FILE]
-autoshop style-index <dir>
+autoshop style-index <dir> [--embed|--no-embed] [--describe]
+autoshop style-index --looks <dir> [--embed|--no-embed] [--describe]
+autoshop style-query <photo> [--direction TEXT] [--style 0..1] [--embed]
 autoshop reimagine <src> --prompt TEXT [--fidelity high|low] [--quality low|medium|high|auto] [--fidelity-retry] [-o|--out FILE]
 autoshop match <src> <target> [--render] [--zoned] [--regions 2..4] [--style-prompt] [--ai-judge] [--deep] [-o|--out FILE]
 autoshop correspond <source> <target> [-o|--out FILE]
@@ -179,6 +181,59 @@ is set (avoiding duplicate analysis and billing for RAW+JPEG pairs), and
 defaults to three photos in flight; `--long-edge` on `batch` requires
 `--render`. `eval` defaults to serial work and resumes from its state file.
 Denoise-strength/model overrides require `--denoise` on `auto`.
+
+`style-index --looks` builds the separate finished-photo look library; it never
+adds camera features or develop settings to those records, and it is capped at
+**500** finished photos (a curated set of reference grades, not an archive —
+the RAW half's 5,000-exemplar cap and this one share a 228 MiB index envelope).
+`style-query` is an offline diagnostic that prints the weights in force, the
+exact retrieval terms behind every ranked neighbour and look — each weighted
+term beside the raw cosine it came from — and the proposer reference
+blocks, including the explicit reason a look library is unreachable when no
+embedding vector is available.
+
+`--embed` opts into the local SigLIP 2 sidecar for that run and `--no-embed`
+refuses it; either flag wins over the environment, and neither writes to it.
+
+`--describe` adds the local **look-description** pass to an index build. A
+second local model (Qwen3-VL-2B-Instruct, Apache-2.0) writes ONE short sentence
+per photo about its *grade* — white balance lean, tonality, contrast,
+saturation and colour treatment, finishing, mood — and never about the subject.
+That sentence is what the SigLIP text tower embeds for that record, in place of
+the fixed attribute tags, and it is what `style-query` prints beside the
+`desc=` term and what the proposer's reference blocks carry after the tags.
+
+The pass needs `--embed` (the prose only reaches the ranking through the text
+tower), and the **first run downloads about 4.3 GB** of weights into
+`python/weights/` — every file pinned to a 40-hex Hugging Face commit and gated
+on its own sha256 and exact byte count. It is off by default on both front
+ends. Nothing leaves this machine and nothing is billed. Descriptions are
+cached by frame CONTENT in `style-descriptions.json` beside the index, so a
+rebuild only describes the photographs that actually changed; editing the
+prompt bumps a version that invalidates the cache rather than serving the old
+prompt's answers for ever. In the desktop app the same switch is the *Describe
+looks with the local vision model* checkbox, which stays greyed out until the
+embedding checkbox above it is on.
+`--adherence 0..1` picks the prompt tier the proposer and verifier are told:
+`<=0.40` Hint, `0.40..0.70` Direct, above `0.70` Brief, default `0.65`
+(Direct). It is prompt intent only — it never moves a render bound — and it
+does nothing without a `--guidance` direction, which is why the desktop app
+greys the slider out until Direction has text.
+
+Six environment overrides steer retrieval, each read in exactly one place:
+
+| Variable | Effect |
+|---|---|
+| `AUTOSHOP_STYLE_EMBED` | `1`/`0` — use the SigLIP sidecar. Set (any value) beats the GUI preference; `--embed`/`--no-embed` beats both. |
+| `AUTOSHOP_STYLE_DESCRIBE` | `1`/`0` — run the local look-description pass during an index build. Set (any value) beats the GUI preference; `--describe` beats both. It never turns the embedding on by itself. |
+| `AUTOSHOP_STYLE_EMBED_WEIGHT` | `W_EMB`, the query-image ↔ exemplar-image cosine block. `0` reproduces the 14-dimension ranking exactly. |
+| `AUTOSHOP_STYLE_TEXT_WEIGHT` | `W_TXT`, the Direction-text ↔ exemplar-image term. Ships at `4` since the S2 recalibration on an index with real descriptions; it shipped at `0` while the only query text available to the harness was a tag string. |
+| `AUTOSHOP_STYLE_DESC_WEIGHT` | `W_DESC`, the Direction-text ↔ exemplar-description term. Ships at `0.5`. It shipped at `4` when both sides of the term were tag strings; with real prose that point measures *worse* than switching the term off, so it was re-fitted. |
+| `AUTOSHOP_STYLE_LOOK_WEIGHT` | `W_LOOK`, the look-library image term. |
+
+All four weights parse the same way: trimmed, and taken only if finite and
+non-negative — anything else falls back to the shipped default, because a
+negative weight would rank the *least* similar photo first.
 
 `match` itself is local inverse rendering and needs no key. Its optional
 `--ai-judge` and `--deep` review paths do; `--deep` permits one guided retry.
@@ -221,11 +276,14 @@ cannot become a credential or path override.
   checks the proposal, and normal visual review may attempt one revision;
   `--deep` permits additional bounded rounds. Accepted output remains a normal
   recipe and XMP.
-- **Style match/read:** build the style reference library from Lightroom
-  RAW+XMP pairs with the GUI or `style-index`. The Style control retrieves
-  similar prior edits and applies their settings with `style_pull` (0.18 at
-  the shipped Style 0.3, full at Style 1.0); Strength independently controls
-  the fit budget and confidence cap.
+- **Style match/read:** build the RAW+XMP style reference library with the GUI
+  or `style-index`, and optionally build a separate finished-photo look library
+  with `style-index --looks`. The Style control retrieves similar prior edits
+  and applies their settings with `style_pull` (0.18 at the shipped Style 0.3,
+  full at Style 1.0); look records guide the proposer only. The embedding switch
+  is opt-in and reports how many indexed records carry vectors. Strength
+  independently controls the fit budget and confidence cap; Direction adherence
+  chooses Hint, Direct, or Brief wording when a Direction is present.
 - **Reimagine:** enter a prompt in the AI panel or use `reimagine` to create a
   generated, lower-resolution target. `--fidelity high` (the default, and the
   GUI's mode) tells the model to re-develop the same photograph, not repaint

@@ -42,5 +42,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: cargo test (default features)
         run: cargo test --locked
+      # The gui feature only adds dependencies (Cargo.toml [features]; no
+      # cfg(feature = "gui") outside src/bin/gui), so this trip runs the GUI
+      # bin's own tests only — lib/CLI/contract suites are the default trip's.
       - name: cargo test (gui feature)
-        run: cargo test --locked --features gui
+        run: cargo test --locked --features gui --bin autoshop-gui

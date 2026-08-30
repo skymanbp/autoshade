@@ -1350,7 +1350,12 @@ fn api_style_build(request: &mut Request) -> Result<ResponseBox> {
     if !p.is_dir() {
         return Ok(status_response(400, &format!("not a folder: {cleaned}")));
     }
-    let index = match crate::style::StyleIndex::build(&p) {
+    // The web surface has no `--embed` / `--describe` flag, so both switches
+    // are what the environment says with the preference off — exactly what
+    // `build` used to read for itself before they became values.
+    let embed = crate::style::EmbeddingSwitch::resolve(None, false);
+    let describe = crate::style::DescribeSwitch::resolve(None, false);
+    let index = match crate::style::StyleIndex::build(&p, embed, describe) {
         Ok(ix) => ix,
         Err(e) => return Ok(status_response(500, &format!("build failed: {e}"))),
     };
@@ -1402,6 +1407,9 @@ struct AnalyzeReq {
     /// gets — the same answer the desktop app's own default gives.
     #[serde(default)]
     grade_strength: Option<f32>,
+    // The web request has no Direction-adherence field yet; keeping this
+    // explicit documents that web analyses use the shared Direct default
+    // rather than silently inventing a second request shape.
     /// DEEP THINKING (R23-4, feedback #13): the proposer returns its structured
     /// working in the same response, its reasoning tier goes up one step, and
     /// the visual judge may converge over more than one round. Absent = `false`,
@@ -1814,6 +1822,12 @@ fn api_analyze(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
             send_reference_image: false,
             strength: grade,
             think: req.deep.unwrap_or(false),
+            adherence: crate::recipe::DirectionAdherence::default(),
+            use_looks: true,
+            // `..default()` for the two resolved-once fields: the browser has
+            // no way to set them, and spelling them out here would be a second
+            // place that has to agree with `GradeRequest::default`.
+            ..Default::default()
         },
         true,
         // The shipped channel (R29-1). The web surface is one request, one

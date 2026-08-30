@@ -51,8 +51,9 @@ tools are separate, opt-in paths and are labelled as such.
   recipe (crop, tone, white balance, curves, HSL, colour grading, texture,
   clarity, dehaze, detail, and parametric or bitmap local masks); a data-only
   verifier checks it against the image statistics; the engine renders it; one
-  bounded visual-review revision may follow. Guidance text steers the proposal
-  and a Strength control bounds how far it may move.
+  bounded visual-review revision may follow. Guidance text steers the proposal;
+  independent Strength and Direction-adherence controls bound commitment and
+  how closely the optional direction is followed.
 - **Feature 2 — A deterministic develop engine.** Exposure, white balance,
   tonal controls, RGB point curves, HSL, colour grading, texture, clarity,
   dehaze, noise reduction, sharpening, vignette, crop, and lens correction, with
@@ -67,8 +68,10 @@ tools are separate, opt-in paths and are labelled as such.
   Lightroom brush dab streams are imported; the beside-RAW export is a
   separate, confirmed action.
 - **Feature 5 — Style read.** Index your own Lightroom RAW+XMP pairs and let
-  the advisor retrieve similar prior edits as soft references; nothing is
-  copied pixel for pixel.
+  the advisor retrieve similar prior edits as soft references; a separate look
+  library can retrieve finished photos through local SigLIP 2 image/text
+  embeddings and zero-shot tags. Embeddings are opt-in (the GUI preference or
+  `--embed`), and nothing is copied pixel for pixel.
 - **Feature 6 — Reverse-fit.** `match` or the GUI's **Reverse-fit** estimates an
   engine recipe from any target look — a generated image, someone else's
   render, a reference frame — measures how far the target's *content* has
@@ -119,20 +122,51 @@ temperature, tint, saturation, dehaze) with your tone-curve shape (black-lift
 and S-strength) and a colour-family summary; and optionally a 768-dimensional
 **SigLIP 2** image embedding (`base/16 @384`) computed by a local sidecar
 through the same 512-px frame the query goes through, so index and query can
-never disagree.
+never disagree. With `--describe` a second local model
+(**Qwen3-VL-2B-Instruct**) also writes ONE short sentence per photo about its
+*grade* — white balance lean, tonality, contrast, colour treatment, finishing,
+mood, never the subject — and that sentence, not the fixed attribute tags, is
+what the text tower embeds. Nothing leaves the machine and nothing is billed;
+descriptions are cached by frame content, so a rebuild only describes what
+changed.
 
 At develop time the photo retrieves the **4 most similar past shots** with the
-hybrid distance `Σ wᵢ(qᵢ−eᵢ)² + W_EMB·(1−cos(q,e))` (`W_EMB = 2.0`, retained
-after a 147-exemplar calibration that scanned 0…8). Their settings, curve habit
-and colour families reach the advisor as a *soft reference*; the `style_pull`
+hybrid distance `d14 + W_EMB·(1−cos(q_img,e_img)) + W_TXT·(1−cos(q_txt,e_img)) + W_DESC·(1−cos(q_txt,e_desc))`.
+The shipped `W_EMB = 4`, `W_TXT = 4` and `W_DESC = 0.5` are the calibration
+harness's winners over 196 grid rows per query-text proxy on the real corpus
+(see the pinned-claims table). The harness sweeps **two** proxies — each
+held-out photo's own local description, and its attribute tag string — and the
+answer is that the prose earns the text terms and the tag string does not.
+A **z-scored variant** of the two text terms is built and tested — raw SigLIP
+image-to-text cosines are tiny and tightly clustered, which is a real reason to
+suspect the raw term. It is now the one that ships: with real descriptions the
+standardised variant wins and its text terms beat having none at all, while the
+raw variant's cannot be told apart from zero. `W_LOOK =
+1.0` is a normalisation rather than a measured number: the look library carries
+no develop settings, so the harness's settings objective cannot see it, and
+nothing else ranks looks against each other, so its scale cannot change their
+order. Their
+settings, curve habit and colour families reach the advisor as a *soft reference*;
+the `style_pull`
 (0.18 at the shipped Style 0.3, full at Style 1.0) moves the proposal toward your historical means
 without copying one, and the rationale names the shots it leaned on. Strength
 above 0.70 with Style below 0.85 no longer receives the old committed-tier
 FLOOR wording because that floor belongs to the Style axis. It is
-sized like a retrieval system — 5,000 exemplars / 96 MiB, both caps derived
-from the measured 12.41 bytes per serialised embedding element. From the other
+bounded at 5,000 RAW exemplars **and 500 looks** against one 228 MiB serialized
+index envelope (5,500 x 40 KiB = 214.84 MiB), the per-record bound being derived
+from the two 768-D vectors, vocabulary scores, tags, and bounded description and
+measured against a maximal record of each kind. A look library is a curated set
+of reference grades, not an archive. From the other
 side, `match --style-prompt` extracts a reusable text style brief from a
 source/target pair that `reimagine` accepts as its Direction.
+
+Finished baked photos are indexed separately with `style-index --looks <dir>`;
+they carry only image/text vectors, tags, and optional descriptions, so they can
+guide the proposer but never become recipe targets or blend inputs. A look answer
+is unreachable, and disclosed as such, when embedding is off or no query vector
+was produced. The Direction-adherence slider has Hint, Direct, and Brief tiers;
+the shipped `0.65` Direct tier preserves the historical direction block byte for
+byte, while the other tiers change only its wording.
 
 ### 2. Reverse-fit: inverse rendering from any finished look
 
@@ -366,7 +400,7 @@ estimate. Sources are the pinned claims in
 
 | What | Measured | Where |
 |---|---|---|
-| Automated test battery | 1091 library / 16 CLI / 146 GUI / 2+2 contract tests; `check_docs` re-derives the pinned release claims | [Tech stack](#tech-stack-algorithms-and-design-philosophy) |
+| Automated test battery | 1137 library / 20 CLI / 151 GUI / 2+2 contract tests; `check_docs` re-derives the pinned release claims | [Tech stack](#tech-stack-algorithms-and-design-philosophy) |
 | RAW coverage | 24 extensions, 725 camera bodies; nine-camera format zoo 9/9 at the last release gate | [Supported formats](#supported-formats) |
 | Lightroom Texture parity | 45 of 45 period/depth anchors within ±0.02 | [Develop pipeline](#develop-pipeline-and-tone-model) |
 | Radial mask closure | 41 of 41 measured vectors within ≤1 px | [Lens correction](#lens-correction-and-lightroom-mask-frame-laws) |
@@ -377,7 +411,7 @@ estimate. Sources are the pinned claims in
 | Reverse-fit, sunset | look error 0.060 → 0.042, confidence 0.746691 | [docs/SHOWCASE.md](docs/SHOWCASE.md) |
 | Local-field ceiling, calibration pair | global fit 0.0961 against a ceiling of 0.0700; the accepted sky zone realizes 0.134 of the distance | [What is new §7](#7-a-bilateral-grid-local-field-prices-every-local-producer-first) |
 | AI develop, model judge | cat pair 62 → 86; townhouse 84 → 86; balcony 78 → 84; hillside 63 → 87 (automated scores) | [docs/SHOWCASE.md](docs/SHOWCASE.md) |
-| Style retrieval weight | `W_EMB=2.0` retained after a 147-exemplar calibration | [AI advisor](#ai-advisor-and-reverse-fit) |
+| Style retrieval weights | corpus harness (169 described exemplars, 156 queries, 196 grid rows per query-text proxy): `W_EMB=4`, `W_TXT=4`, `W_DESC=0.5`, standardised variant — MAE 0.664818 vs baseline 0.713143, +0.048325, CI [+0.024290, +0.078587] under the prose proxy; under the tag-string proxy nothing beats the text-free row; `W_LOOK=1.0` is a normalisation the harness cannot see | [AI advisor](#ai-advisor-and-reverse-fit) |
 | Memory budget | 1800 MB per photo from a 1771 MB reference probe; 4 GiB RAW admission gate | [Application](#application-and-infrastructure) |
 
 ## Install and quickstart
@@ -618,8 +652,10 @@ explicit. `LR_MASK_FRAME_SCALE=1.0`, `LocalExposure2012=EV/4`, local Hue is
 `src/advisor/` validates AI proposals into bounded recipes, keeps Responses at
 `store:false`, gives the verifier data rather than pixels, and adopts a guided
 revision only when it does not lower the score. `src/style.rs` retrieves
-z-scored RAW+XMP exemplars with optional SigLIP 2 (`W_EMB=2.0` retained after a
-147-exemplar calibration). `src/fit.rs` performs luminance-CDF, exposure,
+z-scored RAW+XMP exemplars with four optional cosine terms (image, direction text,
+description text, and the separate finished-photo look library); the shipped
+weights are recorded from the calibration harness and remain zero for the three
+terms without corpus-backed evidence. `src/fit.rs` performs luminance-CDF, exposure,
 basis, tone, saturation, and cast inverse stages with a ≥45°/≥5% foreign-hue
 veto; `src/correspond.rs` + `python/correspond.py` measure the DIFT (SD 2.1)
 correspondence field that the reverse-fit consults automatically on
@@ -638,7 +674,7 @@ versions, and a deleted-version registry; SCUNet success requires the typed
 `sidecar_wrote` contract. A 1771 MB reference probe sets the 1800 MB per-photo
 budget, while the 4 GiB RAW gate bounds admission. The [`build`
 workflow](.github/workflows/build.yml) covers default and GUI feature sets on
-Ubuntu and macOS. The current battery is **1091 library (1080 pass + 11 `#[ignore]`d forensic probes) / 16 CLI / 146 GUI / 2+2 contract** tests; the
+Ubuntu and macOS. The current battery is **1137 library (1126 pass + 11 `#[ignore]`d forensic probes) / 20 CLI / 151 GUI / 2+2 contract** tests; the
 [`scripts/check_docs.py`](scripts/check_docs.py) gate re-derives pinned release
 claims. Model weights are not stored in this repository.
 
@@ -712,6 +748,7 @@ the property of their authors; none are redistributed in this repository.
 | OneFormer ADE20K | Sky segmentation | MIT |
 | SAM 2.1 | Point-prompted object masks | Apache-2.0 |
 | SigLIP 2 | Optional style embeddings | Apache-2.0 |
+| Qwen3-VL-2B-Instruct | Optional local look descriptions | Apache-2.0 |
 
 The project acknowledges the rawler, image, qcms, rayon, clap, serde, ureq,
 egui/eframe, tiny_http, and local-model communities whose work makes these

@@ -13,6 +13,7 @@ pub mod config;
 pub mod correspond;
 pub mod decode;
 pub mod denoise;
+pub mod describe;
 pub mod diag;
 pub mod embed;
 pub mod eval;
