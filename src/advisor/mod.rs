@@ -626,8 +626,20 @@ pub(crate) fn into_json_capped_at(
     r: ureq::Response,
     cap: u64,
 ) -> std::io::Result<serde_json::Value> {
-    use std::io::Read as _;
-    serde_json::from_reader(r.into_reader().take(cap)).map_err(|e| {
+    json_from_reader_capped(r.into_reader(), cap)
+}
+
+/// [`into_json_capped_at`] over an already-taken reader.
+///
+/// Split out so a caller that had to LOOK at the first bytes before deciding
+/// how to parse (see `generative::read_image_reply`, which sniffs a body whose
+/// `Content-Type` claims to be an event stream) reads the body through the same
+/// cap and the same error mapping instead of growing a second copy of both.
+pub(crate) fn json_from_reader_capped(
+    r: impl std::io::Read,
+    cap: u64,
+) -> std::io::Result<serde_json::Value> {
+    serde_json::from_reader(r.take(cap)).map_err(|e| {
         // PRESERVE the transport kind. ureq 2.12.1 deliberately keeps
         // `TimedOut` and maps only everything else to `InvalidData`
         // (`response.rs`), and `post_ai_json` branches on exactly that to
