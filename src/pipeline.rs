@@ -6897,14 +6897,18 @@ mod tests {
         );
         // The PRODUCTION half only: this test spells the patterns it counts, so
         // reading its own module would count them twice (it did).
+        // Line endings follow the checkout (LF on CI, CRLF under
+        // autocrlf), so normalize before matching or the wrapped-call
+        // pattern below is Windows-only.
         let pipeline = std::fs::read_to_string(root.join("src/pipeline.rs"))
             .expect("pipeline source")
+            .replace("\r\n", "\n")
             .split("mod tests {")
             .next()
             .expect("pipeline production half")
             .to_string();
         assert!(
-            pipeline.contains("let (ex, looks) =\r\n            retrieve_style(")
+            pipeline.contains("let (ex, looks) =\n            retrieve_style(")
                 || pipeline.contains("let (ex, looks) = retrieve_style("),
             "develop must use the shared helper"
         );

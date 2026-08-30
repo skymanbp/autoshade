@@ -905,12 +905,15 @@ mod tests {
     /// works, and two checkpoints become co-resident.
     #[test]
     fn the_description_sidecar_runs_inside_the_shared_model_slot() {
-        let me = include_str!("describe.rs");
+        // include_str! carries the checkout's line endings (LF on CI,
+        // CRLF under autocrlf); normalize or the trimming split silently
+        // returns the whole tail.
+        let me = include_str!("describe.rs").replace("\r\n", "\n");
         let body = me
             .split("pub fn describe_manifest(")
             .nth(1)
             .expect("the bridge exists")
-            .split("\r\npub fn ")
+            .split("\npub fn ")
             .next()
             .unwrap();
         assert!(
@@ -921,12 +924,12 @@ mod tests {
             assert!(!body.contains(direct), "the bridge must not spawn {direct} itself");
         }
         // …and the shared executor really is what holds the slot.
-        let lib = include_str!("lib.rs");
+        let lib = include_str!("lib.rs").replace("\r\n", "\n");
         let exec = lib
             .split("pub fn run_model_sidecar_bounded(")
             .nth(1)
             .expect("the shared executor exists")
-            .split("\r\npub fn ")
+            .split("\npub fn ")
             .next()
             .unwrap();
         assert!(
