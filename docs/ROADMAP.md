@@ -1036,8 +1036,10 @@
   `candidate rim 0.312 … 492 measured transitions` 并正确拒绝；渲染出来右上角天空
   留下肉眼可见的矩形接缝。既有测试 `tile_boundary_shrink_preserves_direction_and_budget`
   （`spatial.rs:1209-1246`）同因空过——它的 `boundary_fixture` 也是 0/255 硬蒙版。
-  **这道门从未拦过任何东西。** 真修需要一把「跨边界台阶」的度量（设计变更），
-  不在本批范围；README 与 docs/SHOWCASE.md 已把这条作为诚实瑕疵写在图旁。
+  **这道门从未拦过任何东西。** 2026-08-31 用户令「有肉眼可见的影响，就加上根修步骤」——
+  **根修步已排（紧接当前、收口清账之前）**：跨边界台阶（差分中的差分）一把尺量软/硬两族蒙版，
+  验收含石桥接缝以 `scripts/rim_overshoot.py`（无蒙版尺）实测消失或该瓦被拒；任务书
+  `r30-materials/task-fit-tile-boundary.md`。修成后本条从「如实披露」改「已修」。
 
 - **风格检索扩容 S1+S2（步14，合并 `74a1e93`）**：release notes 必须说明 v1.1 起风格参考多了三把可选的相似度尺——
   SigLIP 2 图像向量（`--embed` / GUI「Use image embeddings」偏好，默认关）、Direction 文本对候选图像（W_TXT=4）与
