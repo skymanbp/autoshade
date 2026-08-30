@@ -1756,7 +1756,18 @@ is 3,565 B with the note, a realistic one 2,517 B
 The two direction-text terms carry a **standardised variant** (z-score over the
 candidate set, with a disclosed raw fallback below three comparable candidates
 or a degenerate spread), built because raw SigLIP image↔text cosines are tightly
-clustered. S2's calibration harness measured both variants over the whole grid
+clustered. Since the retrieval-rank batch that standardisation is TWO centrings:
+the direction-text ↔ exemplar-IMAGE term first has each candidate's **text
+hubness** removed — its mean cosine against the whole 33-phrase vocabulary, which
+every embedded record already stores as `vocab_scores`. Centring over the
+candidate set only takes out the level the PHRASE sits at; the photographs that
+score high against *every* sentence survived it, and on the user's 169-exemplar
+index that per-candidate constant is 21.7 % of the cosine's variance against
+25.3 % for the direction × candidate interaction that is the only part able to
+tell two directions apart. It is ALL-OR-NOTHING over the candidate set (a
+corrected candidate must never be ranked against an uncorrected one) and the
+terms disclose which happened; the description term keeps no correction, because
+the only available bank made antonym pairs agree *more*. S2's calibration harness measured both variants over the whole grid
 under BOTH query-text proxies: under the tag-string proxy the raw variant
 wins and neither text term can be told apart from zero, while under the
 real-prose proxy the standardised variant beats its own text-free row with a

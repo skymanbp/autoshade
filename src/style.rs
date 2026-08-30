@@ -225,21 +225,45 @@ const ENV_LOOK_WEIGHT: &str = "AUTOSHOP_STYLE_LOOK_WEIGHT";
 pub const W_EMB_DEFAULT: f64 = 4.0;
 /// Weight of the direction-text ↔ exemplar-IMAGE term.
 ///
-/// S1 shipped this at 0 because no grid point with a non-zero `W_TXT` beat the
-/// best `W_TXT = 0` row — measured with a proxy that was the exemplar's TAG
-/// STRING, because no exemplar had a description to be the query text. S2 gave
-/// every exemplar real prose and re-ran the grid under BOTH proxies, and the
-/// answer changed: with prose as the query text the standardised text terms
-/// beat the same variant's text-free row `(4, 0, 0)` with a paired 95 % CI of
-/// [+0.001589, +0.055436], and 4.0 is the winning weight. Under the TAG-string
-/// proxy nothing beats the text-free row in either variant — so it is the
-/// prose, not the vocabulary, that earns this term.
+/// S1 shipped 0, S2 shipped 4.0, and this batch ships 0.5 — three numbers from
+/// three measurements, because only this one put a DIRECTION in the query
+/// slot. S1's grid used the exemplar's TAG STRING as the query text (no
+/// exemplar had a description yet) and found nothing beat `W_TXT = 0`. S2 gave
+/// every exemplar real prose and 4.0 won. The ROADMAP entry that shipped 4.0
+/// registered the re-measurement this batch performs, in the same sentence
+/// that recorded the ruling: the proxy is a perfect description of the query
+/// photograph, and a real Direction is shorter and rougher.
 ///
-/// DISCLOSED LIMITATION: the query-text proxy is the held-out exemplar's OWN
-/// description, i.e. a text that describes the query photograph perfectly. A
-/// user's typed Direction is not that, so this weight is calibrated on a
-/// friendlier query than it will see.
-pub const W_TXT_DEFAULT: f64 = 4.0;
+/// It does not survive that. Measured on the user's 169-exemplar index with
+/// twelve real direction texts, ONE direction over 169 DIFFERENT photographs
+/// put the same exemplar in the top-4 of 59.9 % of them, and only 52 of the
+/// 169 exemplars ever appeared in any top-4 at all. The mechanism is the
+/// standardisation itself: a z-score has unit variance BY CONSTRUCTION, so
+/// this term's spread across the candidate set is exactly `W_TXT` whatever the
+/// sentence says — against a measured 5.87 for the 14-dim block and 0.27 for
+/// the image-to-image cosine block. At 4.0 one sentence outweighs the
+/// photograph, and "the 4 most similar shots" stop being about the frame.
+///
+/// 0.5 is the winning weight of the CORRECTED variant's own grid, re-run with
+/// `scripts/calibrate_style_retrieval.py` over the same 169 exemplars and 156
+/// settings-bearing queries: `(4, 0.5, 0.5)` MAE 0.688864 against the 14-dim
+/// baseline 0.713143, improvement +0.024280, paired bootstrap 95 % CI
+/// [+0.005837, +0.041111] — the only row with a live text term whose CI
+/// excludes 0 once [`text_hubness`] is removed first. It also un-collapses the
+/// corpus: 149 of 169 exemplars appear, the most-retrieved one in 13.5 % of
+/// queries instead of 59.9 %.
+///
+/// THE COST, stated rather than buried: two opposite directions retrieve the
+/// same top-1 for 44.7 % of the 169 queries at 0.5, against 6.3 % at 4.0 —
+/// and 71.0 % with no text term at all. The direction is still heard; it no
+/// longer shouts down the photograph.
+///
+/// DISCLOSED LIMITATION, unchanged: the harness's query-text proxy is the
+/// held-out exemplar's OWN description, a text that describes the query
+/// photograph perfectly, and a user's typed Direction is not that. It is why
+/// the collapse and antonym numbers above are measured with real direction
+/// texts and reported BESIDE the MAE rather than in place of it.
+pub const W_TXT_DEFAULT: f64 = 0.5;
 /// Weight of the direction-text ↔ exemplar-DESCRIPTION term.
 ///
 /// S1 shipped 4.0 on a grid whose `desc_embed` vectors — on BOTH sides — were
@@ -250,10 +274,16 @@ pub const W_TXT_DEFAULT: f64 = 4.0;
 /// WORSE than the text-free `(4, 0, 0)` at 0.695233. Leaving it at 4 was
 /// therefore not an option either way.
 ///
-/// 0.5 is the winning weight of the winning row, `(4, 4, 0.5)` standardised,
+/// 0.5 was the winning weight of S2's winning row, `(4, 4, 0.5)` standardised,
 /// MAE 0.664818 against the 14-dim baseline's 0.713143 — improvement
 /// +0.048325, paired bootstrap 95 % CI [+0.024290, +0.078587]. Most of that
-/// gain is `W_TXT`; this term adds the last +0.015 on top of `(4, 4, 0)`.
+/// gain was `W_TXT`; this term added the last +0.015 on top of `(4, 4, 0)`.
+///
+/// UNCHANGED by this batch's recalibration, which moved `W_TXT` and not this:
+/// the corrected variant's winning row is `(4, 0.5, 0.5)`, MAE 0.688864, CI
+/// [+0.005837, +0.041111]. The hubness correction applies to the IMAGE-side
+/// term only ([`standardise`] says why), so this term is measured exactly as
+/// it was.
 pub const W_DESC_DEFAULT: f64 = 0.5;
 /// Weight of the look-library image term. It is the ONLY term that ranks looks
 /// against EACH OTHER (the description term reranks them, but through the same
@@ -283,6 +313,21 @@ pub const W_LOOK_DEFAULT: f64 = 1.0;
 /// between the two best rows. `scripts/calibrate_style_retrieval.py` prints
 /// both comparisons on every run, so re-deciding it is a re-read, not a
 /// re-derivation.
+///
+/// SINCE THIS BATCH the standardisation does one more thing before the
+/// z-score: it removes each candidate's TEXT HUBNESS ([`text_hubness`]).
+/// Centring over the candidate set takes out the level the PHRASE sits at and
+/// nothing else, so the photographs that score high against every sentence
+/// kept scoring high — 21.7 % of the cosine's variance on the user's index,
+/// against 25.3 % for the only part that can tell two directions apart.
+///
+/// Re-running the harness with the correction in force moves the winning row
+/// from `(4, 4, 0.5)` MAE 0.664818 to `(4, 0.5, 0.5)` MAE 0.688864. The
+/// correction COSTS MAE at a large `W_TXT` — corrected `(4, 4, 0.5)` is
+/// 0.752993, a regression against the 14-dim baseline whose CI excludes 0 —
+/// because under this proxy the query text describes the query photograph, so
+/// a candidate's general affinity to grade prose is partly signal. Against a
+/// real Direction it is not; see [`W_TXT_DEFAULT`] for that measurement.
 ///
 /// Pinned by `the_shipped_text_variant_is_the_measured_one`.
 pub const STANDARDISE_TEXT_TERMS: bool = true;
@@ -1522,6 +1567,47 @@ const MIN_STANDARDISATION_CANDIDATES: usize = 3;
 struct StandardisedTerm {
     terms: Vec<f64>,
     standardised: bool,
+    hub_corrected: bool,
+}
+
+/// How much a candidate resembles ANY sentence about a grade: its mean cosine
+/// against the whole of [`LOOK_VOCAB`], which every embedded record already
+/// stores as `vocab_scores`.
+///
+/// This is the per-CANDIDATE main effect of a text cosine, and it is the one
+/// thing a per-query z-score cannot remove. [`standardise`] centres a
+/// direction's gaps over the candidate set, which takes out the level the
+/// PHRASE sits at; what survives is `cos(t, e)`'s dependence on `e` alone —
+/// some photographs simply score high against every sentence. Measured on the
+/// user's 169-exemplar index against twelve direction texts, that candidate
+/// main effect is 21.7 % of the cosine's total variance, against 25.3 % for
+/// the direction x candidate interaction that is the only part able to tell
+/// two directions apart. Six ANTONYM pairs ranked the corpus with a mean
+/// Spearman of +0.27 BETWEEN the two members of a pair — opposite wishes
+/// agreeing about which photographs to show — and −0.17 once this quantity is
+/// removed first.
+///
+/// `None` when the record carries no profile, or one of another width: the
+/// mean of a vocabulary this build cannot name is not this quantity.
+fn text_hubness(vocab_scores: Option<&[f32]>) -> Option<f64> {
+    let v = vocab_scores?;
+    if v.len() != LOOK_VOCAB.len() {
+        return None;
+    }
+    Some(v.iter().map(|&s| s as f64).sum::<f64>() / v.len() as f64)
+}
+
+/// The candidate set's hubness, or `None` when ANY candidate is missing it.
+///
+/// All-or-nothing on purpose. The correction is applied to a gap BEFORE the
+/// set is standardised, so correcting some candidates and not others would
+/// rank them on two different scales and quietly favour the uncorrected ones —
+/// the same asymmetry [`embed_distance`] refuses to invent for a missing
+/// vector. An index built before the vocabulary existed therefore keeps its
+/// previous ranking exactly, and the report says which happened
+/// ([`DistanceTerms::txt_hub_corrected`]).
+fn hubness_profile<'a>(scores: impl Iterator<Item = Option<&'a [f32]>>) -> Option<Vec<f64>> {
+    scores.map(text_hubness).collect()
 }
 
 /// The weighted RAW gaps — `w · (1 − cos)`, and an exact zero where the pair
@@ -1530,25 +1616,51 @@ fn raw_term(raw: &[Option<f64>], w: f64) -> StandardisedTerm {
     // A zero weight is the term's ABSENCE, bit for bit — never `0.0 * z`,
     // which would be a signed zero riding on the sum.
     if w == 0.0 {
-        return StandardisedTerm { terms: vec![0.0; raw.len()], standardised: false };
+        return StandardisedTerm { terms: vec![0.0; raw.len()], standardised: false, hub_corrected: false };
     }
-    StandardisedTerm { terms: raw.iter().map(|r| r.map_or(0.0, |v| w * v)).collect(), standardised: false }
+    StandardisedTerm { terms: raw.iter().map(|r| r.map_or(0.0, |v| w * v)).collect(), standardised: false, hub_corrected: false }
 }
 
 /// The term the RANKING uses: [`standardise`] or [`raw_term`], per
 /// [`STANDARDISE_TEXT_TERMS`]. One door, so the diagnostic and the pipeline
 /// cannot disagree about which variant is in force.
-fn text_term(raw: &[Option<f64>], w: f64) -> StandardisedTerm {
-    if STANDARDISE_TEXT_TERMS { standardise(raw, w) } else { raw_term(raw, w) }
+fn text_term(raw: &[Option<f64>], hub: Option<&[f64]>, w: f64) -> StandardisedTerm {
+    if STANDARDISE_TEXT_TERMS { standardise(raw, hub, w) } else { raw_term(raw, w) }
 }
 
 /// `raw[i] = Some(1 − cos)` when the pair is comparable, `None` when it is not.
-fn standardise(raw: &[Option<f64>], w: f64) -> StandardisedTerm {
+///
+/// Standardising is TWO centrings, and only the second one used to be here.
+/// Subtracting the candidate set's MEAN takes out the level a phrase sits at —
+/// a per-direction constant, which is why the z-score is per query. It leaves
+/// the per-CANDIDATE constant untouched: the photographs that score high
+/// against every sentence keep scoring high, on a term the z-score has just
+/// rescaled to unit spread — whatever `W_TXT` then multiplies it by. `hub`
+/// is the candidate set's [`hubness_profile`], and removing it first is what
+/// makes the surviving order a statement about THIS direction.
+///
+/// One-sided, and measured that way: the correction is applied to the term
+/// scored against the exemplars' IMAGE vectors, where `vocab_scores` is the
+/// matching quantity (that image against grade prose). The DESCRIPTION term is
+/// text against text and has no stored bank of its own; the best available
+/// stand-in — each description's cosine with the mean description of the
+/// corpus — made the six antonym pairs agree MORE, not less (mean Spearman
+/// +0.339 -> +0.377), so that term is left alone and `hub` is `None` for it.
+fn standardise(raw: &[Option<f64>], hub: Option<&[f64]>, w: f64) -> StandardisedTerm {
     if w == 0.0 {
         return raw_term(raw, w);
     }
     let plain = || raw_term(raw, w);
-    let live: Vec<f64> = raw.iter().flatten().copied().collect();
+    // A profile of the wrong length is not this candidate set's profile.
+    let hub = hub.filter(|h| h.len() == raw.len());
+    // `gap = 1 − cos`, so REMOVING a candidate's hubness from its cosine is
+    // ADDING it to its gap. A candidate with no vector stays `None`: a
+    // correction is not evidence either.
+    let corrected: Vec<Option<f64>> = match hub {
+        Some(h) => raw.iter().zip(h).map(|(g, b)| g.map(|g| g + b)).collect(),
+        None => raw.to_vec(),
+    };
+    let live: Vec<f64> = corrected.iter().flatten().copied().collect();
     if live.len() < MIN_STANDARDISATION_CANDIDATES {
         return plain();
     }
@@ -1562,8 +1674,9 @@ fn standardise(raw: &[Option<f64>], w: f64) -> StandardisedTerm {
         return plain();
     }
     StandardisedTerm {
-        terms: raw.iter().map(|r| r.map_or(0.0, |v| w * (v - mean) / sd)).collect(),
+        terms: corrected.iter().map(|r| r.map_or(0.0, |v| w * (v - mean) / sd)).collect(),
         standardised: true,
+        hub_corrected: hub.is_some(),
     }
 }
 
@@ -1589,6 +1702,16 @@ pub struct DistanceTerms {
     /// standardise and the raw gap was used — disclosed, never silent.
     pub txt_standardised: bool,
     pub desc_standardised: bool,
+    /// This candidate's TEXT HUBNESS ([`text_hubness`]), removed from
+    /// [`Self::txt_gap`] before the set was standardised. `None` when the
+    /// correction was not in force, or when this pair had no cosine at all.
+    pub txt_hub: Option<f64>,
+    /// Did the txt term's standardisation remove the candidates' hubness?
+    ///
+    /// False on an index whose records carry no `vocab_scores` — where the
+    /// ranking is bit for bit what it was before this correction existed, and
+    /// a reader of the terms is told so rather than left to assume.
+    pub txt_hub_corrected: bool,
 }
 
 impl DistanceTerms {
@@ -2446,8 +2569,12 @@ impl StyleIndex {
             candidates.iter().map(|e| cosine_gap(query_text, e.embed.as_deref())).collect();
         let desc_gaps: Vec<Option<f64>> =
             candidates.iter().map(|e| cosine_gap(query_text, e.desc_embed.as_deref())).collect();
-        let txt = text_term(&txt_gaps, weights.txt);
-        let desc = text_term(&desc_gaps, weights.desc);
+        // The exemplars' IMAGE vectors carry the hubness this corrects, and
+        // `vocab_scores` is the stored measurement of it. The DESCRIPTION term
+        // gets `None` — see `standardise`.
+        let hubs = hubness_profile(candidates.iter().map(|e| e.vocab_scores.as_deref()));
+        let txt = text_term(&txt_gaps, hubs.as_deref(), weights.txt);
+        let desc = text_term(&desc_gaps, None, weights.desc);
         candidates
             .iter()
             .enumerate()
@@ -2478,6 +2605,8 @@ impl StyleIndex {
                         desc_gap: desc_gaps[i],
                         txt_standardised: txt.standardised,
                         desc_standardised: desc.standardised,
+                        txt_hub: if txt.hub_corrected { hubs.as_ref().map(|h| h[i]) } else { None },
+                        txt_hub_corrected: txt.hub_corrected,
                     },
                 )
             })
@@ -2509,8 +2638,9 @@ impl StyleIndex {
             self.looks.iter().map(|e| cosine_gap(query_text, Some(&e.embed))).collect();
         let desc_gaps: Vec<Option<f64>> =
             self.looks.iter().map(|e| cosine_gap(query_text, e.desc_embed.as_deref())).collect();
-        let txt = text_term(&txt_gaps, weights.txt);
-        let desc = text_term(&desc_gaps, weights.desc);
+        let hubs = hubness_profile(self.looks.iter().map(|e| e.vocab_scores.as_deref()));
+        let txt = text_term(&txt_gaps, hubs.as_deref(), weights.txt);
+        let desc = text_term(&desc_gaps, None, weights.desc);
         let mut scored: Vec<(&LookExemplar, DistanceTerms)> = self
             .looks
             .iter()
@@ -2529,6 +2659,8 @@ impl StyleIndex {
                         desc_gap: desc_gaps[i],
                         txt_standardised: txt.standardised,
                         desc_standardised: desc.standardised,
+                        txt_hub: if txt.hub_corrected { hubs.as_ref().map(|h| h[i]) } else { None },
+                        txt_hub_corrected: txt.hub_corrected,
                     },
                 )
             })
@@ -3825,6 +3957,26 @@ mod tests {
         vec![e; crate::embed::EMBED_DIM]
     }
 
+    /// A unit vector with the named coordinates and zeros everywhere else —
+    /// an orthonormal frame to place text and image vectors in by hand.
+    fn embed_axes(coeffs: &[(usize, f32)]) -> Vec<f32> {
+        let mut v = vec![0.0f32; crate::embed::EMBED_DIM];
+        for &(i, c) in coeffs {
+            v[i] = c;
+        }
+        let n = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+        for x in v.iter_mut() {
+            *x /= n;
+        }
+        v
+    }
+
+    /// A `vocab_scores` profile that scores `s` against every phrase, so its
+    /// [`text_hubness`] is exactly `s` and nothing else about it matters.
+    fn flat_profile(s: f32) -> Vec<f32> {
+        vec![s; LOOK_VOCAB.len()]
+    }
+
     /// This file's PRODUCTION half.
     ///
     /// A source-invariant test that counts a pattern must not count the string
@@ -4271,7 +4423,7 @@ mod tests {
     /// <store>/style-index.json`, 169 described exemplars / 156
     /// settings-bearing queries, 196 grid rows per proxy, seeded paired
     /// bootstrap) sweeps BOTH proxies — the exemplar's own prose, and its tag
-    /// string — and recommends `W_EMB=4, W_TXT=4, W_DESC=0.5,
+    /// string — and recommended `W_EMB=4, W_TXT=4, W_DESC=0.5,
     /// variant=standardised` under the PROSE proxy: MAE 0.664818 against the
     /// 14-dim baseline 0.713143, improvement +0.048325, CI
     /// [+0.024290, +0.078587]. Under the TAG proxy nothing beats the text-free
@@ -4282,13 +4434,21 @@ mod tests {
     /// text-free `(4, 0, 0)` at 0.695233 — so the previous numbers could not
     /// simply be left in place.
     ///
+    /// THIS BATCH re-ran the same harness with the hubness correction the
+    /// standardisation now applies, and the recommendation moved with it:
+    /// `W_EMB=4, W_TXT=0.5, W_DESC=0.5, variant=standardised`, MAE 0.688864,
+    /// improvement +0.024280, CI [+0.005837, +0.041111] — the only row with a
+    /// live text term whose CI still excludes 0. `W_TXT = 4` under the
+    /// correction is 0.752993, a regression the CI does NOT straddle, so
+    /// keeping 4.0 was not an option once the correction shipped.
+    ///
     /// MUTATION: flip `STANDARDISE_TEXT_TERMS`, or move any of the three
     /// weights, and this fails — which is the point: the numbers in
     /// TECH_STACK and README are then stale too.
     #[test]
     fn the_shipped_text_variant_is_the_measured_one() {
         assert_eq!(W_EMB_DEFAULT, 4.0);
-        assert_eq!(W_TXT_DEFAULT, 4.0);
+        assert_eq!(W_TXT_DEFAULT, 0.5);
         assert_eq!(W_DESC_DEFAULT, 0.5);
         assert_eq!(RetrievalWeights::SHIPPED.emb, W_EMB_DEFAULT);
         assert_eq!(RetrievalWeights::SHIPPED.txt, W_TXT_DEFAULT);
@@ -4300,7 +4460,7 @@ mod tests {
         // elsewhere (and clippy refuses it). The shipped door must Z-SCORE the
         // gaps over the candidate set and say that it did.
         let gaps = [Some(0.10), Some(0.20), Some(0.60)];
-        let shipped = text_term(&gaps, 2.0);
+        let shipped = text_term(&gaps, None, 2.0);
         assert!(shipped.standardised, "the shipped variant must standardise");
         assert!(
             (shipped.terms.iter().sum::<f64>()).abs() < 1e-12,
@@ -4398,7 +4558,7 @@ mod tests {
         // Standardising THESE gaps — the ones the ranking really produced, not
         // a toy triple — gives z-scores: mean 0, unit spread, and a spread the
         // ranking can act on (~2 instead of ~0.03).
-        let z = standardise(&raw.iter().copied().map(Some).collect::<Vec<_>>(), 1.0);
+        let z = standardise(&raw.iter().copied().map(Some).collect::<Vec<_>>(), None, 1.0);
         let mean = z.terms.iter().sum::<f64>() / z.terms.len() as f64;
         let sd = (z.terms.iter().map(|v| (v - mean) * (v - mean)).sum::<f64>() / z.terms.len() as f64).sqrt();
         assert!(mean.abs() < 1e-9, "the standardised term is centred: {mean}");
@@ -4421,6 +4581,11 @@ mod tests {
         }
         // The ORDER is unchanged - standardisation is affine within a query,
         // which is the point: it rescales the term, it does not invent one.
+        // True HERE because these exemplars carry no `vocab_scores`, so the
+        // hubness correction does not apply; where it does it is deliberately
+        // NOT affine, and `opposite_directions_retrieve_a_different_top_1`
+        // pins that half.
+        assert!(scored.iter().all(|(_, t)| !t.txt_hub_corrected), "premise: no profiles here");
         let by_gap: Vec<&str> = {
             let mut v: Vec<_> = scored.iter().collect();
             v.sort_by(|a, b| a.1.txt_gap.unwrap().total_cmp(&b.1.txt_gap.unwrap()));
@@ -4443,15 +4608,15 @@ mod tests {
     #[test]
     fn standardisation_falls_back_to_raw_below_three_candidates_and_discloses() {
         // Two live gaps: below the floor.
-        let two = standardise(&[Some(0.10), Some(0.20), None], 2.0);
+        let two = standardise(&[Some(0.10), Some(0.20), None], None, 2.0);
         assert!(!two.standardised, "two candidates cannot define a spread");
         assert_eq!(two.terms, vec![0.2, 0.4, 0.0], "the RAW gap, weighted");
         // Three, but all identical: a zero spread is the other degenerate case.
-        let flat = standardise(&[Some(0.3), Some(0.3), Some(0.3)], 2.0);
+        let flat = standardise(&[Some(0.3), Some(0.3), Some(0.3)], None, 2.0);
         assert!(!flat.standardised);
         assert_eq!(flat.terms, vec![0.6, 0.6, 0.6]);
         // Three distinct: standardised.
-        let ok = standardise(&[Some(0.1), Some(0.2), Some(0.4)], 1.0);
+        let ok = standardise(&[Some(0.1), Some(0.2), Some(0.4)], None, 1.0);
         assert!(ok.standardised);
         // A zero weight is the term's ABSENCE in every arm, with no signed zero.
         for raw in [
@@ -4459,7 +4624,7 @@ mod tests {
             vec![Some(0.1), Some(0.2), Some(0.4)],
             vec![None, None, None],
         ] {
-            let off = standardise(&raw, 0.0);
+            let off = standardise(&raw, None, 0.0);
             assert!(!off.standardised);
             assert!(off.terms.iter().all(|v| v.to_bits() == 0.0f64.to_bits()));
         }
@@ -4483,6 +4648,195 @@ mod tests {
         assert_eq!(scored.len(), 2);
         assert!(scored.iter().all(|(_, t)| !t.txt_standardised), "two candidates: disclosed as raw");
         assert!(scored.iter().all(|(_, t)| t.txt_gap.is_some()), "…and the raw gap is carried");
+    }
+
+    /// Three exemplars and two OPPOSITE directions, in an orthonormal frame:
+    /// `hub` sits on the axis the two direction texts SHARE, `a` and `b` each
+    /// on one direction's own axis.
+    ///
+    /// Built to scale rather than borrowed from a library, because the failure
+    /// is a scale fact: SigLIP's image and text towers occupy different cones,
+    /// so every image-to-text cosine carries a large shared component and only
+    /// a small one that separates two sentences. On the user's 169-exemplar
+    /// index against twelve direction texts the candidate main effect is
+    /// 21.7 % of the cosine's variance against 25.3 % for the direction x
+    /// candidate interaction, and six antonym PAIRS ranked the corpus with a
+    /// mean Spearman of +0.27 between the two members of the pair.
+    fn opposite_direction_fixture() -> (Vec<f32>, Vec<f32>, StyleIndex) {
+        // (u + a)/sqrt2 and (u + b)/sqrt2: everything they have in common is u.
+        let text_a = embed_axes(&[(0, 1.0), (1, 1.0)]);
+        let text_b = embed_axes(&[(0, 1.0), (2, 1.0)]);
+        // cos(text_a, hub) = cos(text_b, hub) = 0.707, which beats both of the
+        // matches below on the RAW cosine — the hub wins whatever is asked.
+        let mut hub = plain_exemplar("hub");
+        hub.embed = Some(embed_axes(&[(0, 1.0)]));
+        hub.vocab_scores = Some(flat_profile(0.70));
+        // cos(text_a, a) = 0.297, cos(text_b, a) = 0.074: a real but small
+        // preference, which is what a real direction produces.
+        let mut a = plain_exemplar("a");
+        a.embed = Some(embed_axes(&[(0, 0.1), (1, 0.3), (3, 0.9)]));
+        a.vocab_scores = Some(flat_profile(0.10));
+        let mut b = plain_exemplar("b");
+        b.embed = Some(embed_axes(&[(0, 0.1), (2, 0.3), (4, 0.9)]));
+        b.vocab_scores = Some(flat_profile(0.10));
+        let idx = StyleIndex {
+            version: CURRENT_INDEX_VERSION, mean: vec![0.0; NDIM], std: vec![1.0; NDIM],
+            exemplars: vec![hub, a, b], source_dir: None,
+            looks: Vec::new(), looks_dir: None, embed_provenance: None,
+        };
+        (text_a, text_b, idx)
+    }
+
+    /// THE BATCH'S CLAIM: two semantically opposite directions retrieve a
+    /// DIFFERENT nearest exemplar.
+    ///
+    /// Without the correction they do not — the fixture's `hub` wins both,
+    /// which is the shipped behaviour, asserted here as the premise so the
+    /// test cannot pass by ranking a corpus that never had the problem.
+    ///
+    /// MUTATION: pass `None` instead of `hubs.as_deref()` in
+    /// `score_candidates` and the premise becomes the verdict: both
+    /// directions retrieve `hub` and the last assertion fails.
+    #[test]
+    fn opposite_directions_retrieve_a_different_top_1() {
+        let (text_a, text_b, idx) = opposite_direction_fixture();
+        // The SHIPPED weights, not a convenient triple: the query carries no
+        // image vector and the exemplars no description, so `W_EMB` and
+        // `W_DESC` weigh nothing here and the claim is made at the weight the
+        // app really ranks with.
+        let w = RetrievalWeights::SHIPPED;
+        let (meta, hist) = (fixture_meta(), fixture_histogram());
+        let top = |t: &[f32]| -> String {
+            idx.retrieve_with_embed(&meta, &hist, StyleQuery::new(None, Some(t), w), 1, Path::new("q.arw"))
+                .first()
+                .expect("a candidate")
+                .stem
+                .clone()
+        };
+        // PREMISE, from the terms the ranking itself produced: on the RAW
+        // cosine the hub is nearest for BOTH directions.
+        for text in [&text_a, &text_b] {
+            let scored = idx.score_candidates(
+                &meta, &hist, StyleQuery::new(None, Some(text), w), Path::new("q.arw"),
+            );
+            let nearest_raw = scored
+                .iter()
+                .min_by(|x, y| x.1.txt_gap.unwrap().total_cmp(&y.1.txt_gap.unwrap()))
+                .map(|(e, _)| e.stem.as_str())
+                .unwrap();
+            assert_eq!(nearest_raw, "hub", "premise: the raw cosine puts the hub first for every direction");
+            // …and the correction really is the thing being measured.
+            assert!(scored.iter().all(|(_, d)| d.txt_hub_corrected), "the correction is in force");
+            assert_eq!(
+                scored.iter().find(|(e, _)| e.stem == "hub").and_then(|(_, d)| d.txt_hub),
+                Some(0.70_f32 as f64),
+                "…and the hub's own hubness is the number removed"
+            );
+        }
+        // THE CLAIM.
+        assert_eq!(top(&text_a), "a");
+        assert_eq!(top(&text_b), "b");
+        assert_ne!(top(&text_a), top(&text_b), "opposite directions must not retrieve the same photograph");
+    }
+
+    /// The same claim on the LOOK library, which is where a direction has the
+    /// most to say: a look carries no 14-dim block at all, so the text terms
+    /// and the image term are the whole distance.
+    ///
+    /// MUTATION: pass `None` instead of `hubs.as_deref()` in
+    /// `retrieve_looks_with_terms` and both directions return the same look.
+    #[test]
+    fn opposite_directions_retrieve_a_different_top_look() {
+        let (text_a, text_b, base) = opposite_direction_fixture();
+        // …and the look path too, at the shipped weights.
+        let looks: Vec<LookExemplar> = base
+            .exemplars
+            .iter()
+            .map(|e| LookExemplar {
+                stem: e.stem.clone(),
+                path: format!("{}.jpg", e.stem),
+                embed: e.embed.clone().unwrap(),
+                tags: Vec::new(),
+                vocab_scores: e.vocab_scores.clone(),
+                desc: None,
+                desc_embed: None,
+            })
+            .collect();
+        let idx = StyleIndex { looks, ..base };
+        let w = RetrievalWeights::SHIPPED;
+        let top = |t: &[f32]| -> String {
+            idx.retrieve_looks(StyleQuery::new(None, Some(t), w), 1)
+                .first()
+                .expect("a look")
+                .stem
+                .clone()
+        };
+        assert_eq!(top(&text_a), "a");
+        assert_eq!(top(&text_b), "b");
+        assert_ne!(top(&text_a), top(&text_b), "opposite directions must not retrieve the same look");
+    }
+
+    /// The correction is ALL-OR-NOTHING over the candidate set, and the
+    /// terms say which happened.
+    ///
+    /// One exemplar without a profile takes the correction off the whole
+    /// query — because a corrected candidate and an uncorrected one are on two
+    /// different scales, and mixing them would quietly favour whichever half
+    /// was left alone. An index built before the vocabulary existed therefore
+    /// ranks exactly as it did, which is the same "no evidence does not push a
+    /// candidate down" rule `embed_distance` follows.
+    ///
+    /// MUTATION: have `hubness_profile` substitute `0.0` for a missing profile
+    /// instead of returning `None`, and the disclosure assertions fail while
+    /// the ranking silently mixes two scales.
+    #[test]
+    fn the_hubness_correction_is_all_or_nothing_and_disclosed() {
+        let (text_a, text_b, mut idx) = opposite_direction_fixture();
+        // The hub keeps its vector; only its PROFILE goes away.
+        idx.exemplars[0].vocab_scores = None;
+        let w = RetrievalWeights::SHIPPED;
+        let (meta, hist) = (fixture_meta(), fixture_histogram());
+        let scored = idx.score_candidates(
+            &meta, &hist, StyleQuery::new(None, Some(&text_a), w), Path::new("q.arw"),
+        );
+        assert!(scored.iter().all(|(_, t)| !t.txt_hub_corrected), "one gap in the profiles takes the correction off");
+        assert!(scored.iter().all(|(_, t)| t.txt_hub.is_none()), "…and nothing claims a correction it did not get");
+        assert!(scored.iter().all(|(_, t)| t.txt_standardised), "…while the z-score itself is untouched");
+        let top = |t: &[f32]| -> String {
+            idx.retrieve_with_embed(&meta, &hist, StyleQuery::new(None, Some(t), w), 1, Path::new("q.arw"))
+                .first()
+                .unwrap()
+                .stem
+                .clone()
+        };
+        assert_eq!(top(&text_a), "hub", "the previous ranking, bit for bit");
+        assert_eq!(top(&text_b), "hub");
+    }
+
+    /// [`text_hubness`] reads a profile of THIS vocabulary or nothing.
+    ///
+    /// A profile of another width is a mean over phrases this build cannot
+    /// name, and a mean over the wrong phrases is not a hubness — it is a
+    /// number of the right type, which is the dangerous kind.
+    ///
+    /// MUTATION: drop the `v.len() != LOOK_VOCAB.len()` guard and the
+    /// short-profile case answers `Some(0.9)`.
+    #[test]
+    fn text_hubness_reads_only_a_profile_of_this_vocabulary() {
+        assert_eq!(text_hubness(None), None);
+        assert_eq!(text_hubness(Some(&[])), None, "an empty profile is not a measurement");
+        assert_eq!(text_hubness(Some(&[0.9, 0.9, 0.9])), None, "…nor one of another vocabulary");
+        let flat = flat_profile(0.25);
+        assert_eq!(text_hubness(Some(&flat)), Some(0.25_f32 as f64));
+        // The MEAN, not the first score or the maximum: a photograph that
+        // matches one phrase strongly is not a hub, and a hub is what this
+        // measures.
+        let mut spiky = vec![0.0f32; LOOK_VOCAB.len()];
+        spiky[0] = LOOK_VOCAB.len() as f32 * 0.25;
+        assert_eq!(text_hubness(Some(&spiky)), text_hubness(Some(&flat)));
+        // …and a whole set of them is refused if ANY member is missing.
+        assert_eq!(hubness_profile([Some(&flat[..]), Some(&flat[..])].into_iter()), Some(vec![0.25_f32 as f64; 2]));
+        assert_eq!(hubness_profile([Some(&flat[..]), None].into_iter()), None);
     }
 
     /// W_LOOK's SCALE cannot change which look wins, because no other term

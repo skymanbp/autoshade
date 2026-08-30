@@ -35,6 +35,14 @@ recommendation at the bottom is the best point across BOTH proxies, and it
 still has to beat the 14-dim baseline with a paired bootstrap CI excluding 0 —
 otherwise the weight ships at 0.
 
+The standardisation is the one that SHIPS
+-----------------------------------------
+Since the retrieval-rank batch ``style::standardise`` removes each candidate's
+TEXT HUBNESS -- its mean cosine against the whole ``LOOK_VOCAB``, which the
+index stores as ``vocab_scores`` -- before the z-score, ALL-OR-NOTHING over the
+candidate set.  This harness does the same, or the weight it recommends would
+be the winner of a ranking nobody runs.
+
 Raw vs standardised
 -------------------
 SigLIP image-to-text cosines are tiny and tightly clustered, so the raw
@@ -65,6 +73,9 @@ FEATURE_WEIGHTS = np.array(
     (1.5, 1.0, 1.0, 0.5, 0.5, 1.5, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.5), dtype=np.float64
 )
 ZSCORE_DIMS = (0, 1, 2, 10)
+# Mirrors `style::LOOK_VOCAB.len()`: a profile of another width is a mean over
+# phrases this build cannot name, which is not a hubness.
+VOCAB_WIDTH = 33
 K = 4
 EMBED_DIM = 768
 BOOTSTRAP_REPEATS = 2000
@@ -139,6 +150,7 @@ def load_index(path):
                 "tags": [str(t) for t in tags],
                 "desc": raw.get("desc"),
                 "desc_embed": _vec(raw.get("desc_embed")),
+                "vocab_scores": raw.get("vocab_scores"),
             }
         )
     return {
@@ -356,6 +368,11 @@ def prepare(data, proxies):
 
     img, img_present = stack("embed")
     desc, desc_present = stack("desc_embed")
+    # `style::hubness_profile`: every candidate or none, so a corrected
+    # candidate is never ranked against an uncorrected one.
+    profiles = [r.get("vocab_scores") for r in records]
+    usable = all(isinstance(v, list) and len(v) == VOCAB_WIDTH and all(finite(x) for x in v) for v in profiles)
+    hub = np.array([sum(v) / len(v) for v in profiles]) if usable else None
 
     queries = [i for i, r in enumerate(records) if r["settings"]]
     stats = {}
@@ -375,7 +392,9 @@ def prepare(data, proxies):
         qt = proxies[qi] if proxies else None
         txt = cosine_gaps(qt, img[others], img_present[others])
         dsc = cosine_gaps(qt, desc[others], desc_present[others])
-        components[qi] = (others, d14, np.nan_to_num(emb, nan=0.0), txt, dsc)
+        # `gap = 1 - cos`, so removing the hubness from the cosine adds it here.
+        corrected = txt if hub is None else txt + hub[others]
+        components[qi] = (others, d14, np.nan_to_num(emb, nan=0.0), txt, corrected, dsc)
     return records, queries, centers, components
 
 
@@ -405,8 +424,9 @@ def evaluate(prepared, weights, standardised):
     w_emb, w_txt, w_desc = weights
     errors = {}
     for qi in queries:
-        others, d14, emb, txt, dsc = components[qi]
-        score = d14 + w_emb * emb + apply_term(txt, w_txt, standardised) + apply_term(dsc, w_desc, standardised)
+        others, d14, emb, txt, corrected, dsc = components[qi]
+        gaps = corrected if standardised else txt
+        score = d14 + w_emb * emb + apply_term(gaps, w_txt, standardised) + apply_term(dsc, w_desc, standardised)
         order = np.lexsort((others, score))[:K]
         neighbours = others[order]
         for key, actual in records[qi]["settings"].items():
@@ -610,8 +630,20 @@ def self_test():
     flat = np.array([0.3, 0.3, 0.3, 0.3])
     assert np.allclose(apply_term(flat, 2.0, True), np.full(4, 0.6))
 
-    # The metric moves with the weights, and the baseline is reproducible.
+    # The hubness correction is ALL-OR-NOTHING and reaches the standardised
+    # term only: the synthetic fixture carries no `vocab_scores`, so `prepare`
+    # must hand back the raw gaps unchanged, and one full set must move them.
     proxies = [r["desc_embed"] for r in data["exemplars"]]
+    bare = prepare(data, proxies)[3]
+    assert all(np.array_equal(c[3], c[4], equal_nan=True) for c in bare.values()), "no profiles: no correction"
+    for r in data["exemplars"]:
+        r["vocab_scores"] = [0.1 * (r["feat"][0] + 1)] * VOCAB_WIDTH
+    full = prepare(data, proxies)[3]
+    assert not any(np.array_equal(c[3], c[4], equal_nan=True) for c in full.values()), "profiles: corrected"
+    for r in data["exemplars"]:
+        r.pop("vocab_scores")
+
+    # The metric moves with the weights, and the baseline is reproducible.
     prepared = prepare(data, proxies)
     base = evaluate(prepared, (0.0, 0.0, 0.0), False)
     again = evaluate(prepared, (0.0, 0.0, 0.0), False)
