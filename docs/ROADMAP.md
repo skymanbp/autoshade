@@ -1006,6 +1006,23 @@
 
 ## v1.1 发版义务清单（进行中）
 
+- **反推逐带 HSL（步14 收官批 `ab01520`）——硬渲染变更**：release notes 必须说明 v1.1 起反推在默认强度就会写
+  `hsl.saturation`/`hsl.luminance`（`hsl.hue` 恒 0），同一 (源,目标) 对产出的配方与渲染不同于 v1.0.x；持久化
+  schema 不变（`hsl` 为既有字段，recipe.json/XMP 往返不受影响），旧配方读入行为逐字节同。实测：p36 成品误差
+  0.032592→0.031792（置信 0.6657→0.6752）；校准对经既有 1e-4 容差发出 Red/Orange +9 sat/+9 lum（用户裁定保持容差）；
+  石桥 0.030419。四条摘要串收窄为「local masks and per-band hue rotation are not recovered」+ unrepresented 解空间
+  列表加该阶段=持久化 rationale 文本变化。NumPy 场天花板钉按文档三步重推 0.0700225→0.0677020。
+- **风格索引 v5 蒙版习惯 10 宽（步14 收官批 `f03b08a`）——前向不兼容**：新构建写出的索引 `masks.*.mean` 为 10 宽
+  （加蒙版内 temperature/tint）+ `curved` 字段；旧构建读新索引报 `invalid length 10` 须重建；新构建仍读 8 宽 S3 形
+  （缺列补零）故版本门的可操作报错可达。`--reference-image`/`AUTOSHOP_SEND_REFERENCE_IMAGE`（Destination 信任）为
+  新可选开关，默认关=行为不变。
+- **检索权重重标定（步14 收官批 `13c262e`）**：release notes 必须说明 W_TXT 4→0.5 且文本项改为先减去每候选
+  hubness 再 z-score（MAE 0.688864、CI [+0.005837,+0.041111]；反义 top-1 71%→44.7%、检出 52→149/169）；
+  `AUTOSHOP_STYLE_TEXT_WEIGHT` 语义随之更新；零权重路 bit-for-bit v5。
+- **GUI OAuth 图像模式修复（步14 收官批 `a6e5a03`）**：release notes 必须说明已发布的 OAuth（Codex bridge）图像开关
+  下 Reimagine 此前根本跑不完（桥把 JSON 正文标成 SSE）+ 订阅档封顶尺寸被拒；v1.1 起嗅探正文、承认同纵横比封顶
+  （长边≥1024、容差 0.5%）并在终端/GUI 双面披露实收尺寸。
+
 - **空间瓦片的边界连续性门是空的（已确诊缺陷，随 v1.1 如实披露，勿包装成通过）**：
   `boundary_line_rims`（`src/fit_zoned.rs:421`）只从蒙版权重落在
   `[ZONE_BOUNDARY_LOW=0.05, ZONE_BOUNDARY_HIGH=0.95)` 的像素取读数；而空间瓦片的
