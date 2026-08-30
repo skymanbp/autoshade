@@ -8022,13 +8022,12 @@ mod tests {
     /// `identity_of` resolves every fixture photo to a spelling the lexical
     /// key never sees. Any test whose subject is "canonical == lexical here"
     /// must build its photos under THIS base, or it is measuring the runner's
-    /// temp dir. That is what failed
-    /// `a_canonical_session_finishes_an_alias_sessions_crashed_adoption` on
-    /// the macOS leg of CI run 32398395462 while ubuntu (`/tmp`, no symlink)
-    /// passed.
+    /// temp dir — that failed `a_canonical_session_finishes_an_alias_sessions_crashed_adoption`
+    /// on the macOS CI leg (run 32398395462; ubuntu's `/tmp` has no symlink). Per-PROCESS (`-{pid}`)
+    /// like this file's other fixture roots: two batteries side by side raced ONE path (S1-fix §4).
     fn canonical_temp(tag: &str) -> PathBuf {
         let base = std::fs::canonicalize(std::env::temp_dir()).unwrap();
-        let base = strip_verbatim(&base).join(format!("autoshop-store-test-{tag}"));
+        let base = strip_verbatim(&base).join(format!("autoshop-store-test-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
         std::fs::create_dir_all(&base).unwrap();
         base
