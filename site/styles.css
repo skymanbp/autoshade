@@ -543,6 +543,22 @@ h4 {
   margin: 0 0 2.2rem;
 }
 
+/* The pillar diagrams are SVG line art, not photographs: they carry their own
+   background and their own theme, so they take the frame the photo figures take
+   but none of the surface fill behind it. */
+.pillar-figure {
+  margin: 0 0 1.6rem;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+}
+
+.pillar-figure img {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
 .part-b {
   width: 100%;
   max-width: none;

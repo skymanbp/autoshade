@@ -18,8 +18,8 @@ body:
            separately after removing sensitive path components.
 
         If what you hit is already written down as a known limit —
-        [privacy and trust](https://github.com/skymanbp/autoshop#privacy-trust-and-paid-feature-boundary),
-        [status and roadmap](https://github.com/skymanbp/autoshop#status-and-roadmap),
+        [privacy and trust](https://github.com/skymanbp/autoshop/blob/main/docs/USER_MANUAL.md#privacy-trust-and-paid-feature-boundary),
+        [status and roadmap](https://github.com/skymanbp/autoshop#status-roadmap-and-known-limitations),
         [supported formats](https://github.com/skymanbp/autoshop#supported-formats) — an
         issue is still welcome if the *documented* behaviour is wrong or the
         wording misleads. Say which line you are reading against.
@@ -54,7 +54,7 @@ body:
         develop window moving by (32, 20) px at v0.32.0, and the white-balance
         gains when the blackbody curve was repaired. Knowing which side of those
         you are on matters; they are all listed under
-        [privacy and trust](https://github.com/skymanbp/autoshop#privacy-trust-and-paid-feature-boundary).
+        [privacy and trust](https://github.com/skymanbp/autoshop/blob/main/docs/USER_MANUAL.md#privacy-trust-and-paid-feature-boundary).
       placeholder: "v0.31.2 — or: built from main at abc1234"
 
   - type: dropdown

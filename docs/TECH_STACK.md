@@ -156,8 +156,11 @@ supposed to remove.
   (**calibrated against the −50/−100 depth ratio**).
 - Sharpening sigma: `clamp(0.0008·short_edge, 0.7, 2.0)` pixels, implemented
   with three box passes (**designed**, not Lightroom-measured).
-- Luma noise reduction: a separable blur plus edge range weight, with
-  `sigma = 0.5 + 1.5·t` and `range = 0.05` (**designed approximation**).
+- Luma noise reduction: a separable BOX blur plus an edge range weight, with
+  `radius = round(1 + 2·t)` pixels (floored at 1) and `range = 0.05`
+  (**designed approximation**). It is a box radius, not a Gaussian sigma; the
+  earlier `sigma = 0.5 + 1.5·t` in this line described an operator this repo
+  has never shipped.
 
 ### Measured results & disclosures
 
@@ -185,6 +188,8 @@ supposed to remove.
   `tone_knot_weights`, Texture arms, clarity, NR, and sharpening.
 - `src/recipe.rs` — bounded global and local adjustment domains.
 - `docs/V2_PLAN.md` — white-balance, tone, detail-model calibration ledger.
+  Kept outside the public tree (`.gitignore`), like the other planning memos;
+  the numbers it justifies are reproduced here and in `docs/ARCHITECTURE.md`.
 - `docs/ROADMAP-archive.md` — negative-Texture model selection and 45-anchor
   acceptance record.
 
@@ -508,7 +513,8 @@ name.
   global `0.107764`.
 - The analyzer moved no dial on any of those four arms: with the rationale
   dropped and the per-run store path normalised, the dials and `confidence`
-  hash identically to the pre-batch executable's (`compare_recipes.py`), and
+  hash identically to the pre-batch executable's (a structured JSON compare,
+  not a byte compare of the rendered files), and
   the two seg-on runs differ only by that store path. The recipe JSON itself is
   not byte-identical — what changed inside it is the disclosure (`+544`
   rationale bytes on the semantic arm, `10331 -> 10875`, against a
@@ -655,7 +661,8 @@ therefore invalidated when the pinned BiRefNet backend later becomes available.
   preprocessing README, and weights.
 - BiRefNet input edge: `1024` pixels (**upstream/model configuration pin**).
 - BiRefNet weights: `444,473,596 B` (**manifest-measured file size**).
-- OneFormer ADE20K weights: `881,196,376 B`; checked-in class table:
+- OneFormer ADE20K weights + config, seven pinned files (the weights file
+  alone is `879,517,517 B`): `881,196,376 B`; checked-in class table:
   `7,085 B`, 150 classes (**manifest/source-derived**).
 - Semantic region limits: `MAX_SEMANTIC_REGIONS = 4` and
   `DEFAULT_SEMANTIC_REGIONS = 2` in `src/fit_zoned/semantic.rs`; four is an
@@ -927,7 +934,7 @@ spells.
 | Revision | `89644892e4d85e24eaac8bacfd4f463576704203` (40-hex commit) |
 | Licence | Apache-2.0, ungated, no remote code |
 | Files pinned | `10`, each on sha256 + exact byte count |
-| Download | `4,255,140,312 B` weights + `11,499,164 B` of config/tokenizer = `4.27 GB` |
+| Download | `4,255,140,312 B` weights + `11,499,994 B` of config/tokenizer = `4.27 GB` |
 | Precision | bfloat16 on CUDA (`--bf16`), fp32 on CPU |
 | Peak VRAM | `4.03 GiB` allocated / `4.07 GiB` reserved, measured on an RTX 4060 Ti 8 GB |
 | Decoding | greedy — `do_sample=False`, `num_beams=1`, `max_new_tokens=80`, seed `0` |
@@ -1042,7 +1049,7 @@ realistic one `2,517 B`
 CDFs, searches exposure, solves a regularized basis of engine controls, adds a
 residual monotone tone curve, closes saturation in a render/measure loop, and
 fits channel-cast curves; `cast_paints_foreign_hues` vetoes a cast that creates
-a visible colour family at least 45 degrees from every target family over at
+a visible colour family more than 45 degrees from every target family over at
 least 5% of the frame; terminal do-no-harm can shrink saturation or reset to
 the caller's base recipe.
 
@@ -1124,7 +1131,7 @@ and zero-confidence fields are conservation-tested to change nothing.
   resolved once, as values: `--embed`/`--no-embed`, `--describe` and the GUI
   preferences travel on the request, and nothing writes the process environment
   to express a flag.
-- Foreign-hue veto: distance `>=45 deg` and newly painted share `>=5%`
+- Foreign-hue veto: distance `>45 deg` (four 15° bins) and newly painted share `>=5%`
   (**calibrated against known cast failures and haze controls**).
 - Reimagine flexible-size budget: dimensions are multiples of 16, aspect ratio
   at most `3:1`, and at most `8,294,400` pixels (**current gpt-image-2 contract
@@ -1202,11 +1209,13 @@ and zero-confidence fields are conservation-tested to change nothing.
   (2026-08-26: anonymous 401, authenticated 404); the pinned community
   mirror's fp32 tower digests are byte-identical to an independent
   uploader's, and the sha256 gate is the only door at run time.
-- The S1 calibration implementation is the stdlib-only
+- The S1 calibration implementation is `numpy`-only (no other third-party
+  dependency)
   `scripts/calibrate_style_retrieval.py`; it uses sorted inputs, fixed seeds,
   `K=4`, and `2,000` paired bootstrap resamples. The synthetic self-test above
   is the evidence available in this worktree; the corpus run is recorded in
-  `target/style-s1/` when the local sidecar/index build completes.
+  the measured-results block above; the raw transcripts live outside the
+  public tree.
 - Live zoned A/B on the calibration pair (field on vs unavailable): the recipes' dials are byte-identical (this pair's land-zone corrections are evidence-withheld either way, upstream of where the field composes; only the disclosure differs — field on carries the measured 59% / 0.80 line, field off the unavailable note). Zero regression on the flagship pair; the mechanism's gain is pinned at estimator level by the shift-recovery test (24 px shift, map error < 0.03).
   The correspondence disclosure line carries coverage and median confidence
   either way the run went.
@@ -1293,14 +1302,15 @@ than the pre-call state; model weights remain outside the repository.
 ### Source
 
 - `src/lib.rs` and `src/main.rs` — shared library and CLI boundary.
-- `src/gui.rs`, `src/gui/`, `src/store.rs`, and `src/pixel_source.rs` — egui,
+- `src/bin/gui/` and `src/store.rs` (which owns the pixel source) — egui,
   variants, versions, and deleted-version identity registry.
 - `src/serve.rs` and `src/web/` — embedded web UI and loopback defenses.
 - `src/denoise.rs` and `python/denoise.py` — SCUNet sidecar and
   `sidecar_wrote` contract.
 - `src/jobs.rs` and `src/decode.rs` — memory probes, concurrency budget, and
   RAW admission.
-- `.github/workflows/build.yml` and `scripts/check_docs.py` — CI and document
+- `.github/workflows/build.yml`, `.github/workflows/release.yml` and
+  `scripts/check_docs.py` — CI and document
   drift gates.
 - `docs/ARCHITECTURE.md` and `docs/ROADMAP.md` — release battery and operational
   boundaries.

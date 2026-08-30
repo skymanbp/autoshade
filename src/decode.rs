@@ -2816,8 +2816,10 @@ mod tests {
         let p = std::path::Path::new("big.iiq");
         // 60.2 MP, the measured corpus frame: admitted, with room to spare.
         assert!(refuse_raw_develop_over_ceiling(p, 60_217_344).is_ok());
-        // The BOUNDARY, both sides of it. 4 GiB / 31 B/px = 138,547,332 px is
-        // the first pixel count at or over the ceiling.
+        // The BOUNDARY, both sides of it. 31 B/px x 138,547,332 px is
+        // 4,294,967,292 B, still UNDER 4 GiB, so the first count at or over the
+        // ceiling is `MAX_ALLOC.div_ceil(31)` = 138,547,333 — which is what the
+        // line below computes, and what both docs already say.
         let at = MAX_ALLOC.div_ceil(RAW_DEVELOP_BYTES_PER_PIXEL);
         assert!(refuse_raw_develop_over_ceiling(p, at - 1).is_ok(), "just under must develop");
         let e = refuse_raw_develop_over_ceiling(p, at).unwrap_err().to_string();
