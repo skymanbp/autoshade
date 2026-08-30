@@ -1713,13 +1713,55 @@ the v5 order bit for bit. The vocabulary is a versioned, grouped list of 33
 SigLIP-style photographic phrases; at most one winning phrase per group enters
 the four-tag summary.
 
+**S3: the local-work habit.** A v5 exemplar may additionally carry a
+`MaskHabit` (`src/mask_habit.rs`) read from the same sidecar the settings come
+from, through the develop chain's own path-aware importer
+(`xmp::xmp_to_recipe_for_photo`): the number of masks the photographer ENABLED
+with a non-zero amount, how many carry a Range Mask refinement (counted from the
+imported recipe AND from the import's own `ForeignRangeMask` refusals, because a
+Range Mask this engine cannot honour is dropped on the way in — twelve are
+refused and none carried on the calibration library), and per USE
+(`sky` / `subject` / `ground` / `range` / `other`) a count plus the
+amount-weighted mean of eight local sliders. The use is decided by one pure
+function, `bucket_of` — an AI selection answers from its own `MaskSubType`, a
+linear gradient from which end of the y-down frame its `full` handle covers
+(XORed with `MaskInverted`, which reverses the covered end), a radial from
+whether it is inverted, and a Range Mask only when the geometry says nothing,
+so a refined sky gradient stays a sky gradient. **No geometry is ever averaged**:
+a mask's coordinates are a fact about one frame, so the block carries counts,
+slider means and English, never a coordinate. Retrieval, `style_targets` and
+`blend_toward` do not read the field at all, which is why it ships WITHOUT an
+index-version bump on `families`' precedent — `#[serde(default)]` in both
+directions, so a pre-S3 index loads with the field absent (a different fact
+from a measured zero) and a pre-S3 build ignores the new key. The build prints
+one aggregate line for what it learned and one for the mask content
+`xmp::import_losses` says it could not carry whole; `style-query` prints the
+per-neighbour counts.
+
+**The block's own budget.** Everything an index carries is bounded for STORAGE
+(`MAX_DESC_CHARS` 512 per description, 128 per tag), and a prompt block is a
+different budget: `advisor::REFERENCE_BUDGET_BYTES` (4,096) with
+`BoundedUntrustedText` cutting whatever overflows. Four neighbours at their
+storage bounds measured 5,920 B — 45 % over — so the tail was being cut, and
+since S3 that tail is the local-work note. The block now has its own door
+(user ruling 2026-08-30): `REFERENCE_DESC_CHARS` 200 per description,
+`REFERENCE_TAG_PHRASE_CHARS` 48 per tag phrase and `REFERENCE_TAGS_CHARS` 128
+per joined tag list, applied at all three tag consumers (the per-exemplar look
+note, the shared-tag note and the look-reference block). The index, the text
+tower and `style-query` still see the whole sentence; only the block is cut,
+and it says so with an ellipsis. Measured: the widest block this app can build
+is 3,565 B with the note, a realistic one 2,517 B
+(`style::tests::the_local_work_note_fits_the_proposers_budget` prints both).
+
 The two direction-text terms carry a **standardised variant** (z-score over the
 candidate set, with a disclosed raw fallback below three comparable candidates
 or a degenerate spread), built because raw SigLIP image↔text cosines are tightly
-clustered. The calibration harness measured both variants over the whole grid
-and the raw one won, so `STANDARDISE_TEXT_TERMS = false` ships and the
-standardising path stays one flag away rather than being deleted or shipped
-unmeasured. The switch and the
+clustered. S2's calibration harness measured both variants over the whole grid
+under BOTH query-text proxies: under the tag-string proxy the raw variant
+wins and neither text term can be told apart from zero, while under the
+real-prose proxy the standardised variant beats its own text-free row with a
+paired CI excluding 0. So `STANDARDISE_TEXT_TERMS = true` ships and the raw
+path stays one flag away rather than being deleted or shipped unmeasured. The switch and the
 four weights are resolved once, as values (`EmbeddingSwitch`,
 `RetrievalWeights`), and travel on the develop request; nothing writes the
 process environment to express a flag, and `retrieve_with_embed`,

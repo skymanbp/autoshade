@@ -90,6 +90,85 @@ const MAX_EXEMPLAR_BYTES: usize = 40 * 1024;
 /// Longest description a record may carry, at the door and in the prompt.
 pub const MAX_DESC_CHARS: usize = 512;
 
+/// How much of a description reaches a PROMPT BLOCK, as opposed to the index.
+///
+/// Two different budgets were spending one number. The index stores up to
+/// [`MAX_DESC_CHARS`] (512) and the diagnostic and the text tower use the whole
+/// sentence — that is right, the sentence is the vector's input. A BLOCK is
+/// bounded by `advisor::REFERENCE_BUDGET_BYTES` (4,096) instead, and four
+/// neighbours at 512 characters is 2,048 characters of description alone: a
+/// maximal block measured 5,920 B before S3 and lost its TAIL to
+/// `BoundedUntrustedText` — since S3 that tail is the local-work note, the
+/// sentence most useful exactly when the neighbours carry the most. Capping the
+/// description INSIDE the block (user ruling 2026-08-30) keeps every note in the
+/// budget without changing what the index stores, what it embeds, or how it
+/// ranks.
+pub const REFERENCE_DESC_CHARS: usize = 200;
+
+/// How many characters of an exemplar's TAG STRING a block carries.
+///
+/// The other half of the same defect as [`REFERENCE_DESC_CHARS`]: the index
+/// door admits up to 128 characters per tag, four of them, so a hand-edited
+/// index could spend 500+ characters of the block's 4,096-byte budget on ONE
+/// neighbour's tags. Real tags are `LOOK_VOCAB` phrases with their prefixes
+/// stripped — the longest is 41 characters before stripping — so four of them
+/// join to roughly 120 characters and this never bites a real library; it
+/// bounds the adversarial one.
+pub const REFERENCE_TAGS_CHARS: usize = 128;
+
+/// How many characters of ONE tag phrase a block carries.
+///
+/// The index door admits 128 per tag; the vocabulary's longest phrase is 41
+/// characters BEFORE `LOOK_VOCAB`'s prefixes are stripped, so this never cuts a
+/// real tag. It exists because the block has THREE tag consumers — the
+/// per-exemplar look note, the shared-tag note and the look-reference block —
+/// and bounding only the joins would leave the third one spending the budget a
+/// phrase at a time.
+pub const REFERENCE_TAG_PHRASE_CHARS: usize = 48;
+
+/// One tag phrase as a block carries it.
+fn block_tag_phrase(tag: &str) -> String {
+    if tag.chars().count() <= REFERENCE_TAG_PHRASE_CHARS {
+        return tag.to_string();
+    }
+    let mut out: String = tag.chars().take(REFERENCE_TAG_PHRASE_CHARS - 1).collect();
+    out.push('\u{2026}');
+    out
+}
+
+/// The tags as a block carries them: at most [`LOOK_TAGS_K`], each phrase
+/// bounded, joined, and the join itself bounded to [`REFERENCE_TAGS_CHARS`].
+fn block_tags(tags: &[String]) -> String {
+    let joined =
+        tags.iter().take(LOOK_TAGS_K).map(|t| block_tag_phrase(t)).collect::<Vec<_>>().join(", ");
+    if joined.chars().count() <= REFERENCE_TAGS_CHARS {
+        return joined;
+    }
+    let mut out: String = joined.chars().take(REFERENCE_TAGS_CHARS - 1).collect();
+    out.push('\u{2026}');
+    out
+}
+
+/// One exemplar's description as a block carries it: through the sanitising
+/// door, then bounded to [`REFERENCE_DESC_CHARS`] CHARACTERS (never bytes — a
+/// byte slice would split a codepoint).
+///
+/// THE one door for both blocks. Two call sites applied `sanitize_desc` and
+/// nothing else; a cap added at one of them would have left the other spending
+/// the old budget, which is the shape of defect this codebase fixes at the seam
+/// rather than at the sites.
+fn block_desc(desc: Option<&str>) -> Option<String> {
+    let d = crate::describe::sanitize_desc(desc?)?;
+    if d.chars().count() <= REFERENCE_DESC_CHARS {
+        return Some(d);
+    }
+    // The ellipsis is INSIDE the bound, and it is there so the proposer can see
+    // that the sentence was cut rather than reading a clause that stops.
+    let mut out: String = d.chars().take(REFERENCE_DESC_CHARS - 1).collect();
+    out.push('\u{2026}');
+    Some(out)
+}
+
 // R18 CANNOT RECUR, because this is a BUILD gate and not a test: moving either
 // cap without the other stops compilation with the sentence below. A runtime
 // test would have been the weaker choice — clippy's own `assertions_on_constants`
@@ -674,6 +753,46 @@ pub struct StyleExemplar {
     pub desc: Option<String>,
     #[serde(default)]
     pub desc_embed: Option<Vec<f32>>,
+    /// What this photographer's LOCAL work looks like on this shot — how many
+    /// masks, put to which use, and the amount-weighted mean of eight sliders
+    /// per use (S3). Summary statistics, never geometry: see
+    /// [`crate::mask_habit`] for why no coordinate is ever averaged.
+    ///
+    /// `Option`, optional in BOTH directions like [`StyleExemplar::families`]
+    /// before it: a pre-S3 index has none, and the
+    /// reference block then renders exactly as it did
+    /// (`reference_local_work_note_is_absent_when_no_neighbour_carries_masks`).
+    /// `None` means NOT MEASURED, which is a different fact from a measured
+    /// `count: 0` — see [`crate::mask_habit::MaskHabit`].
+    ///
+    /// KNOWN BOUNDARY, inherited rather than introduced: a sidecar whose `crs`
+    /// prefix is bound to a foreign namespace imports as FULLY NEUTRAL
+    /// (`xmp::xmp_to_recipe_clamped_impl` refuses it outright), so such a
+    /// document lands here as a measured `count: 0`. It lands in
+    /// [`StyleExemplar::settings`] as an EMPTY map for exactly the same reason
+    /// — `read_settings` reads through the same hijacked prefix — so the two
+    /// halves of the exemplar agree, and the reference block shows a neighbour
+    /// with no sliders at all rather than a plausible one.
+    ///
+    /// The index version deliberately does NOT bump for this, on
+    /// [`StyleExemplar::families`]' own precedent and for its reason: the
+    /// version gate exists for a change in what the FOURTEEN FEATURES mean or
+    /// in how candidates are RANKED (`CURRENT_INDEX_VERSION`), and this field
+    /// touches neither — nothing here is read by `score_candidates`,
+    /// `style_targets` or `blend_toward`
+    /// (`retrieval_and_style_targets_do_not_read_mask_habits`). A bump would
+    /// force every user to rebuild an hour-long index for a field that
+    /// degrades to "no local-work line".
+    ///
+    /// The `#[serde(default)]` below is CONSISTENCY with the eleven optional
+    /// fields above it, not the load-bearing part: serde reads a missing
+    /// `Option` field as `None` with or without it (measured — M-S3-M removed
+    /// the attribute and `a_pre_s3_index_reads_with_no_mask_habit` stayed
+    /// green). What keeps the two states apart is that nothing ever writes a
+    /// default INTO the field: `load` clamps a habit that is there and
+    /// fabricates none that is not.
+    #[serde(default)]
+    pub masks: Option<crate::mask_habit::MaskHabit>,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -1370,6 +1489,9 @@ fn exemplar_is_finite(e: &StyleExemplar) -> bool {
                 && v.iter().all(|x| x.is_finite() && x.abs() <= 1.0 + 1e-3)
                 && (v.iter().map(|&x| x as f64 * x as f64).sum::<f64>().sqrt() - 1.0).abs() < 1e-3
         })
+        // A NaN mean serialises as `null` and makes the whole index unloadable
+        // — the same reason the family summary is checked here (S3).
+        && e.masks.is_none_or(|m| m.is_finite())
 }
 
 /// How many comparable candidates a query needs before its text terms are
@@ -1678,7 +1800,7 @@ impl StyleIndex {
         // instead of stacking to ~1.4 GB, while a single build never blocks. An
         // atomic counter hands out indices, and each result lands in its own
         // slot so the exemplar ORDER stays identical to the serial version.
-        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
         let cfg = crate::config::Config::load();
         // The two sidecars, resolved ONCE before the pool starts. `None` when
         // the user has not asked for one, or when its script is not on disk —
@@ -1712,6 +1834,12 @@ impl StyleIndex {
                 opts.vocab_file = Some(vocab_path.clone());
         }
         let total = pairs.len();
+        // What this library's mask content COST on the way in, by named reason
+        // (S3). An atomic per reason rather than a channel field: the losses
+        // are a property of the BUILD, not of any one exemplar, and the two
+        // producers (`build_reporting`'s pool) only ever add.
+        let loss_counts: [AtomicU32; crate::xmp::MaskImportReason::ALL.len()] =
+            std::array::from_fn(|_| AtomicU32::new(0));
         let mut slots: Vec<Option<(StyleExemplar, Option<StagedFrame>)>> = Vec::new();
         slots.resize_with(total, || None);
         let next = AtomicUsize::new(0);
@@ -1724,6 +1852,7 @@ impl StyleIndex {
                 let tx = tx.clone();
                 let (pairs, next, done) = (&pairs, &next, &done);
                 let (embedder, embed_dir) = (&embedder, &embed_dir);
+                let loss_counts = &loss_counts;
                 s.spawn(move || loop {
                     let i = next.fetch_add(1, Ordering::Relaxed);
                     let Some(&raw) = pairs.get(i) else { break };
@@ -1795,6 +1924,40 @@ impl StyleIndex {
                         // exists — a read failure here is a real error).
                         match crate::store::read_sidecar(&raw.with_extension("xmp")) {
                             Some(xmp) => {
+                                // The photographer's LOCAL work, read through
+                                // the SAME importer the develop chain uses
+                                // (S3). Path-aware, so a brush group whose
+                                // strokes live in a sibling `.acr` is readable;
+                                // SILENT, because a 169-photo build discloses
+                                // what it could not read ONCE, in aggregate,
+                                // after the pool — not 169 times inside it.
+                                let losses = crate::xmp::import_losses_for_photo(&xmp, raw);
+                                // A Range Mask this engine cannot honour is
+                                // DROPPED by the importer, so the surviving
+                                // recipe under-reports the photographer's
+                                // refinements — the loss channel is where that
+                                // fact still exists (see
+                                // `MaskHabit::of_with_refused_ranges`).
+                                let refused_ranges = losses
+                                    .iter()
+                                    .filter(|l| {
+                                        l.reason.same_kind(
+                                            crate::xmp::MaskImportReason::ForeignRangeMask,
+                                        )
+                                    })
+                                    .count();
+                                let habit = crate::mask_habit::MaskHabit::of_with_refused_ranges(
+                                    &crate::xmp::xmp_to_recipe_for_photo(&xmp, raw).masks,
+                                    refused_ranges,
+                                );
+                                for l in &losses {
+                                    if let Some(k) = crate::xmp::MaskImportReason::ALL
+                                        .iter()
+                                        .position(|r| r.same_kind(l.reason))
+                                    {
+                                        loss_counts[k].fetch_add(1, Ordering::Relaxed);
+                                    }
+                                }
                                 let ex = StyleExemplar {
                                     stem: pipeline::stem(raw).to_string(),
                                     path: std::path::absolute(raw)
@@ -1811,6 +1974,7 @@ impl StyleIndex {
                                     vocab_scores: None,
                                     desc: None,
                                     desc_embed: None,
+                                    masks: Some(habit),
                                 };
                                 if exemplar_is_finite(&ex) {
                                     Some((ex, frame))
@@ -1854,6 +2018,46 @@ impl StyleIndex {
         let (mut exemplars, frames): (Vec<StyleExemplar>, Vec<Option<StagedFrame>>) =
             slots.into_iter().flatten().unzip();
         let live = exemplars.len();
+        // What the index LEARNED about this library's local work, and what it
+        // could not read, in one line each (S3). The second line is the honest
+        // half: a habit summarised from masks the importer refused is a
+        // partial claim, and the build says so instead of the user finding out
+        // from a reference block that under-counts.
+        {
+            use crate::mask_habit::Bucket;
+            let carried = exemplars.iter().filter(|e| e.masks.is_some()).count();
+            let habits: Vec<crate::mask_habit::MaskHabit> =
+                exemplars.iter().filter_map(|e| e.masks).collect();
+            let worked = habits.iter().filter(|h| h.count > 0).count();
+            let masks: u32 = habits.iter().map(|h| h.count as u32).sum();
+            let refined: u32 = habits.iter().map(|h| h.refined as u32).sum();
+            let per = |b| habits.iter().map(|h| h.bucket(b).n as u32).sum::<u32>();
+            println!(
+                "  style index: {worked} of {carried} exemplar(s) carry local mask work \
+                 ({masks} mask(s): sky {}, subject {}, ground {}, range {}, other {}; \
+                 {refined} refined by a range mask)",
+                per(Bucket::Sky),
+                per(Bucket::Subject),
+                per(Bucket::Ground),
+                per(Bucket::Range),
+                per(Bucket::Other),
+            );
+            let unread: Vec<String> = crate::xmp::MaskImportReason::ALL
+                .iter()
+                .zip(loss_counts.iter())
+                .filter_map(|(r, n)| {
+                    let n = n.load(Ordering::Relaxed);
+                    (n > 0).then(|| format!("{} x{n}", r.en()))
+                })
+                .collect();
+            if !unread.is_empty() {
+                println!(
+                    "  style index: mask content this build could not carry whole — {} \
+                     (the local-work habit is summarised from what it could read)",
+                    unread.join(", ")
+                );
+            }
+        }
         if let Some(opts) = embedder.as_ref() {
             // STAGE 2 — ONE SigLIP image call for the whole library.
             report(on_progress, BuildStage::Embed, 0, live);
@@ -2129,6 +2333,11 @@ impl StyleIndex {
             if let Some(families) = &mut exemplar.families {
                 families.clamp();
             }
+            // …and the local-work habit, on the same rule: it reaches the same
+            // prompt through the same block, so it takes the same door (S3).
+            if let Some(masks) = &mut exemplar.masks {
+                masks.clamp();
+            }
         }
 
         for (i, look) in idx.looks.iter_mut().enumerate() {
@@ -2370,11 +2579,11 @@ impl StyleIndex {
     /// anything to do with the choice.
     pub fn render_look_reference(&self, looks: &[&LookExemplar], by_direction: bool) -> Option<String> {
         let first = looks.first()?;
-        let tags = first.tags.iter().take(LOOK_TAGS_K).cloned().collect::<Vec<_>>().join(", ");
+        let tags = block_tags(&first.tags);
         // Through the SAME door the reference block uses (S2): a bare
         // `take(MAX_DESC_CHARS)` bounded the LENGTH and nothing else, so a
         // description carrying a newline could forge a line of this block.
-        let desc = first.desc.as_deref().and_then(crate::describe::sanitize_desc);
+        let desc = block_desc(first.desc.as_deref());
         let mut out = format!(
             "LOOK REFERENCE (from the photographer's LOOK LIBRARY — the finished photo closest to this frame{}; match its grade, not its content): [{}] look: {}",
             if by_direction { " and direction" } else { "" },
@@ -2424,12 +2633,13 @@ impl StyleIndex {
                 // bounds the index door applied — the description is model
                 // output about the user's photograph, i.e. untrusted text
                 // reaching a prompt, and a second door costs nothing.
-                let desc = e.desc.as_deref().and_then(crate::describe::sanitize_desc);
-                let look = match (e.tags.is_empty(), desc) {
+                let desc = block_desc(e.desc.as_deref());
+                let tags = block_tags(&e.tags);
+                let look = match (tags.is_empty(), desc) {
                     (true, None) => String::new(),
                     (true, Some(d)) => format!(" · look: {d}"),
-                    (false, None) => format!(" · look: {}", e.tags.join(", ")),
-                    (false, Some(d)) => format!(" · look: {} — {d}", e.tags.join(", ")),
+                    (false, None) => format!(" · look: {tags}"),
+                    (false, Some(d)) => format!(" · look: {tags} — {d}"),
                 };
                 format!("[{}] {}{}", e.tag, s.join(", "), look)
             })
@@ -2505,7 +2715,7 @@ impl StyleIndex {
                 let shared: Vec<String> = ranked
                     .iter()
                     .take(LOOK_TAGS_K)
-                    .map(|(tag, n)| format!("{tag} ({n}/{})", ex.len()))
+                    .map(|(tag, n)| format!("{} ({n}/{})", block_tag_phrase(tag), ex.len()))
                     .collect();
                 let aim = if bold {
                     "— REPRODUCE this look; it is the target, and you may push past it."
@@ -2515,17 +2725,27 @@ impl StyleIndex {
                 format!("  THEIR SHARED LOOK across these shots: {} {aim}", shared.join(", "))
             }
         };
+        // …and how they work LOCALLY, as the same kind of averaged habit (S3).
+        // Over the neighbours that were MEASURED only: a pre-S3 exemplar
+        // carries no habit, and counting it as "no masks" would invent a
+        // restraint — exactly the distinction `MaskHabit`'s three states exist
+        // to keep. When none was measured this is the empty string and the
+        // block is byte-identical to the one S2 shipped.
+        let local_work_note = crate::mask_habit::local_work_note(
+            &ex.iter().map(|e| e.masks).collect::<Vec<_>>(),
+            bold,
+        );
         if bold {
             Some(format!(
                 "STYLE REFERENCE — TARGET style to reproduce (the retrieved shots define the settings, curve habit, colour \
-                 families and LOOK to reproduce; the scene differs): {}{}{}{}",
-                lines.join("  |  "), curve_note, family_note, look_note
+                 families and LOOK to reproduce; the scene differs): {}{}{}{}{}",
+                lines.join("  |  "), curve_note, family_note, look_note, local_work_note
             ))
         } else {
             Some(format!(
                 "STYLE REFERENCE — how this user edited SIMILAR past shots (for consistency with their \
-                 taste; reference, do NOT copy verbatim, the scene differs): {}{}{}{}",
-                lines.join("  |  "), curve_note, family_note, look_note
+                 taste; reference, do NOT copy verbatim, the scene differs): {}{}{}{}{}",
+                lines.join("  |  "), curve_note, family_note, look_note, local_work_note
             ))
         }
     }
@@ -2887,6 +3107,7 @@ mod tests {
             families: None,
             embed: None,
             tags: Vec::new(), vocab_scores: None, desc: None, desc_embed: None,
+            masks: None,
         };
         let (a, b) = (mk(0.4, 20.0, 10.0), mk(0.6, 40.0, 30.0));
         let targets = style_targets(&[&a, &b]);
@@ -2921,6 +3142,7 @@ mod tests {
             settings: BTreeMap::from([("contrast".to_string(), 15.0)]), curve: None,
             path: None, families: None, embed: None,
             tags: Vec::new(), vocab_scores: None, desc: None, desc_embed: None,
+            masks: None,
         };
         let low = idx.render_reference(&[&ex], crate::recipe::GradeStrength::new(0.65)).unwrap();
         let high = idx.render_reference(&[&ex], crate::recipe::GradeStrength::new(0.9)).unwrap();
@@ -2940,6 +3162,7 @@ mod tests {
             families: None,
             embed: None,
             tags: Vec::new(), vocab_scores: None, desc: None, desc_embed: None,
+            masks: None,
         };
         let idx = StyleIndex {
             version: CURRENT_INDEX_VERSION,
@@ -2987,6 +3210,7 @@ mod tests {
             tag: "t".into(),
             settings: BTreeMap::new(),
             curve: None,
+            masks: None,
         };
         let q_path = "D:\\roll-a\\DSC1.ARW";
         // Path identity: the same file, case-flipped, is SELF on Windows.
@@ -3015,6 +3239,7 @@ mod tests {
             tag: "t".into(),
             settings: BTreeMap::new(),
             curve: Some([f32::NAN, 0.0]),
+            masks: None,
         };
         assert!(!exemplar_is_finite(&e), "NaN curve shape refused");
         e.curve = None;
@@ -3035,6 +3260,7 @@ mod tests {
             families: None,
             embed: None,
             tags: Vec::new(), vocab_scores: None, desc: None, desc_embed: None,
+            masks: None,
         };
         let idx = StyleIndex {
             version: CURRENT_INDEX_VERSION,
@@ -3143,6 +3369,7 @@ mod tests {
             families,
             embed: None,
             tags: Vec::new(), vocab_scores: None, desc: None, desc_embed: None,
+            masks: None,
         };
         let with = mk(Some(crate::eval::FamilySummary {
             hsl: [2.0, 18.0, 6.0],
@@ -3194,6 +3421,7 @@ mod tests {
             }),
             embed: None,
             tags: Vec::new(), vocab_scores: None, desc: None, desc_embed: None,
+            masks: None,
         };
         let idx = StyleIndex {
             version: CURRENT_INDEX_VERSION,
@@ -3252,6 +3480,7 @@ mod tests {
                 families: None,
             embed: None,
             tags: Vec::new(), vocab_scores: None, desc: None, desc_embed: None,
+                masks: None,
             }],
             source_dir: None,
             looks: Vec::new(), looks_dir: None, embed_provenance: None,
@@ -3318,6 +3547,7 @@ mod tests {
                 families: None,
             embed: None,
             tags: Vec::new(), vocab_scores: None, desc: None, desc_embed: None,
+                masks: None,
             }],
             source_dir: None,
             looks: Vec::new(), looks_dir: None, embed_provenance: None,
@@ -3364,6 +3594,7 @@ mod tests {
             families: None,
             embed: None,
             tags: Vec::new(), vocab_scores: None, desc: None, desc_embed: None,
+            masks: None,
         };
         let idx = StyleIndex {
             version: CURRENT_INDEX_VERSION,
@@ -3439,6 +3670,7 @@ mod tests {
             families: None,
             embed: None,
             tags: Vec::new(), vocab_scores: None, desc: None, desc_embed: None,
+            masks: None,
         };
         let built = StyleIndex {
             version: CURRENT_INDEX_VERSION,
@@ -3503,6 +3735,7 @@ mod tests {
             families: None,
             embed: None,
             tags: Vec::new(), vocab_scores: None, desc: None, desc_embed: None,
+            masks: None,
         };
         let long = "x".repeat(MAX_STEM_CHARS + 20);
         let all = [mk("DSC0001"), mk("DSC0002"), mk("DSC0003"), mk("DSC0004"), mk(&long)];
@@ -3541,6 +3774,7 @@ mod tests {
             families: None,
             embed: None,
             tags: Vec::new(), vocab_scores: None, desc: None, desc_embed: None,
+            masks: None,
         };
         let idx = StyleIndex {
             version: CURRENT_INDEX_VERSION,
@@ -3629,6 +3863,7 @@ mod tests {
             families: None,
             embed: None,
             tags: Vec::new(), vocab_scores: None, desc: None, desc_embed: None,
+            masks: None,
         }
     }
 
@@ -4741,6 +4976,7 @@ mod tests {
             vocab_scores: Some(vec![-1.234_567_8e-38; LOOK_VOCAB.len()]),
             desc: Some("d".repeat(MAX_DESC_CHARS)),
             desc_embed: Some(worst),
+            masks: None,
         };
         let look_bytes = serde_json::to_vec(&max_look).unwrap().len();
         let raw_bytes = serde_json::to_vec(&max_raw).unwrap().len();
@@ -5195,5 +5431,511 @@ mod tests {
         let idx2 = StyleIndex { looks: vec![look], ..idx };
         let lb = idx2.render_look_reference(&[&idx2.looks[0]], false).unwrap();
         assert!(lb.contains("look: vivid saturated colours; a punchy cool grade"), "{lb}");
+    }
+
+    // ---- S3: the local-work habit in the index and in the block -------------
+
+    /// One exemplar carrying `masks`, otherwise the plain fixture.
+    fn habit_exemplar(stem: &str, masks: Option<crate::mask_habit::MaskHabit>) -> StyleExemplar {
+        StyleExemplar { masks, ..plain_exemplar(stem) }
+    }
+
+    /// A habit with one sky gradient and one radial on the subject.
+    fn two_mask_habit() -> crate::mask_habit::MaskHabit {
+        use crate::recipe::{LocalAdjustment, MaskGeometry};
+        crate::mask_habit::MaskHabit::of(&[
+            LocalAdjustment {
+                mask: MaskGeometry::Linear { zero_x: 0.5, zero_y: 0.8, full_x: 0.5, full_y: 0.0 },
+                exposure_ev: -0.6,
+                highlights: -25.0,
+                ..Default::default()
+            },
+            LocalAdjustment {
+                mask: MaskGeometry::Radial {
+                    top: 0.3, left: 0.3, bottom: 0.7, right: 0.7, feather: 0.5,
+                    roundness: 0.0, flipped: false, angle: 0.0, midpoint: 50.0,
+                    mask_version: 2,
+                },
+                exposure_ev: 0.4,
+                shadows: 20.0,
+                ..Default::default()
+            },
+        ])
+    }
+
+    /// An index written before S3 has no `masks` key at all, and must load —
+    /// with the field ABSENT, not defaulted to a measured zero. A user whose
+    /// hour-long RAW build predates this batch keeps their Style panel; their
+    /// reference block simply says nothing about local work.
+    ///
+    /// MUTATION THIS KILLS: normalising the field at the door — an
+    /// `exemplar.masks.get_or_insert_with(Default::default)` in `load` — which
+    /// turns "nobody looked" into "measured, and they work globally" for every
+    /// index written before this batch.
+    ///
+    /// It is NOT killed by dropping `#[serde(default)]` from the field, and
+    /// that was measured, not assumed: M-S3-M did exactly that and the test
+    /// stayed GREEN (`target/style-s3/mutations.txt`). Serde deserialises a
+    /// missing `Option` field as `None` with or without the attribute, so the
+    /// attribute here is consistency with the eleven optional fields beside it,
+    /// not the mechanism. The mechanism is that nothing ever writes a default
+    /// INTO the field.
+    #[test]
+    fn a_pre_s3_index_reads_with_no_mask_habit() {
+        // The exemplar shape S2 shipped, spelled out — no `masks` key.
+        let pre_s3 = format!(
+            "{{\"version\":5,\"mean\":{m},\"std\":{s},\"exemplars\":[{{\
+               \"stem\":\"a\",\"feat\":{f},\"tag\":\"wide/mid/midday/landscape\",\
+               \"settings\":{{\"contrast\":15.0}},\"curve\":null,\"path\":null,\
+               \"families\":null,\"embed\":null,\"tags\":[],\"vocab_scores\":null,\
+               \"desc\":null,\"desc_embed\":null}}],\"source_dir\":\"raws\"}}",
+            m = serde_json::to_string(&vec![0.0f32; NDIM]).unwrap(),
+            s = serde_json::to_string(&vec![1.0f32; NDIM]).unwrap(),
+            f = serde_json::to_string(&vec![0.0f32; NDIM]).unwrap(),
+        );
+        let dir = std::env::temp_dir().join(format!("autoshop-s3-old-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        let path = dir.join("style-index.json");
+        std::fs::write(&path, &pre_s3).expect("write");
+        let idx = StyleIndex::load(&path).expect("a pre-S3 index must still load");
+        assert_eq!(idx.exemplars.len(), 1);
+        assert!(
+            idx.exemplars[0].masks.is_none(),
+            "absent means NOT MEASURED — a defaulted `count: 0` would claim this \
+             photographer works globally when nobody looked"
+        );
+        // …and the block it renders is the S2 block, byte for byte.
+        let rendered = idx
+            .render_reference(&[&idx.exemplars[0]], crate::recipe::GradeStrength::new(0.30))
+            .unwrap();
+        assert_eq!(
+            rendered,
+            "STYLE REFERENCE — how this user edited SIMILAR past shots (for consistency with their taste; reference, do NOT copy verbatim, the scene differs): [wide/mid/midday/landscape] contrast +15"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// …and the other direction: an index this build writes must stay readable
+    /// by a build that has never heard of `masks`. That is what makes shipping
+    /// this WITHOUT a version bump honest — a v5 file is still a v5 file to
+    /// `main`, and the new key is one it ignores.
+    ///
+    /// MUTATION THIS KILLS: bumping `CURRENT_INDEX_VERSION` for an additive
+    /// field (every pre-S3 build then refuses the file outright), or giving
+    /// `StyleExemplar` a `deny_unknown_fields` that would make the reverse true.
+    #[test]
+    fn an_s3_index_reads_on_a_pre_s3_build() {
+        // main's `StyleExemplar`, field for field as of ba13091 (S1+S2 merged).
+        #[derive(serde::Deserialize)]
+        struct PreS3Exemplar {
+            stem: String,
+            feat: Vec<f32>,
+            tag: String,
+            settings: BTreeMap<String, f32>,
+            #[serde(default)]
+            curve: Option<[f32; 2]>,
+            #[serde(default)]
+            path: Option<String>,
+            #[serde(default)]
+            desc: Option<String>,
+        }
+        #[derive(serde::Deserialize)]
+        struct PreS3Index {
+            version: u32,
+            mean: Vec<f32>,
+            std: Vec<f32>,
+            exemplars: Vec<PreS3Exemplar>,
+        }
+        let idx = StyleIndex {
+            version: CURRENT_INDEX_VERSION,
+            mean: vec![0.0; NDIM],
+            std: vec![1.0; NDIM],
+            exemplars: vec![StyleExemplar {
+                settings: BTreeMap::from([("contrast".to_string(), 15.0)]),
+                ..habit_exemplar("a", Some(two_mask_habit()))
+            }],
+            source_dir: None,
+            looks: Vec::new(),
+            looks_dir: None,
+            embed_provenance: None,
+        };
+        let json = serde_json::to_string(&idx).expect("serialise");
+        assert!(json.contains("\"masks\""), "premise: the file really carries the new block");
+        let old: PreS3Index =
+            serde_json::from_str(&json).expect("a pre-S3 build must still parse this index");
+        assert!(
+            matches!(old.version, 4 | 5),
+            "version {} is outside the set main reads — an additive field may not ride a bump",
+            old.version
+        );
+        assert_eq!(old.exemplars.len(), 1);
+        assert_eq!(old.exemplars[0].stem, "a");
+        assert_eq!(old.exemplars[0].feat.len(), NDIM);
+        assert_eq!(old.exemplars[0].tag, "wide/mid/midday/landscape");
+        assert_eq!(
+            old.exemplars[0].settings.get("contrast"),
+            Some(&15.0),
+            "the settings map a pre-S3 build reads is the same map it always read"
+        );
+        assert!(old.exemplars[0].curve.is_none() && old.exemplars[0].path.is_none());
+        assert!(old.exemplars[0].desc.is_none());
+        assert!(old.mean.len() == NDIM && old.std.len() == NDIM);
+        // …and this build's own door accepts what it wrote, habit and all.
+        let back: StyleIndex = serde_json::from_str(&json).expect("round trip");
+        assert_eq!(back.exemplars[0].masks, Some(two_mask_habit()));
+    }
+
+    /// The guard rail: with no neighbour carrying a habit the block is the one
+    /// S2 shipped, BYTE FOR BYTE. An old index must not grow an empty section,
+    /// and a photographer whose neighbours predate this batch must not be told
+    /// anything about their local work.
+    ///
+    /// MUTATION THIS KILLS: rendering the note unconditionally, which appends a
+    /// header (and a "none use range masks" that was never measured) to every
+    /// pre-S3 block.
+    #[test]
+    fn reference_local_work_note_is_absent_when_no_neighbour_carries_masks() {
+        let idx = StyleIndex {
+            version: CURRENT_INDEX_VERSION,
+            mean: vec![0.0; NDIM],
+            std: vec![1.0; NDIM],
+            exemplars: Vec::new(),
+            source_dir: None,
+            looks: Vec::new(),
+            looks_dir: None,
+            embed_provenance: None,
+        };
+        let bare = StyleExemplar {
+            stem: "fixed".into(),
+            feat: vec![0.0; NDIM],
+            tag: "wide/mid/midday/landscape".into(),
+            settings: BTreeMap::from([("contrast".to_string(), 15.0)]),
+            curve: None,
+            path: None,
+            families: None,
+            embed: None,
+            tags: Vec::new(),
+            vocab_scores: None,
+            desc: None,
+            desc_embed: None,
+            masks: None,
+        };
+        for strength in [0.30f32, 0.90] {
+            let got = idx
+                .render_reference(&[&bare], crate::recipe::GradeStrength::new(strength))
+                .unwrap();
+            assert!(
+                !got.contains("LOCAL WORK"),
+                "an unmeasured neighbour contributes no section: {got}"
+            );
+        }
+        // The exact S2 bytes at the shipped default strength.
+        assert_eq!(
+            idx.render_reference(&[&bare], crate::recipe::GradeStrength::new(0.30)).unwrap(),
+            "STYLE REFERENCE — how this user edited SIMILAR past shots (for consistency with their taste; reference, do NOT copy verbatim, the scene differs): [wide/mid/midday/landscape] contrast +15"
+        );
+        // …and the section DOES appear the moment one neighbour was measured,
+        // so the assertions above are about absence and not about a dead call.
+        let measured = StyleExemplar { masks: Some(two_mask_habit()), ..bare.clone() };
+        let with = idx
+            .render_reference(&[&bare, &measured], crate::recipe::GradeStrength::new(0.30))
+            .unwrap();
+        assert!(with.contains("THEIR TYPICAL LOCAL WORK"), "{with}");
+        assert!(with.contains("1 of 1 mask the sky"), "the unmeasured one is in no denominator: {with}");
+    }
+
+    /// RETRIEVAL IS UNTOUCHED. The habit changes the WORDS in the block and
+    /// nothing about which neighbours are chosen, in what order, or where
+    /// `blend_toward` pulls — the whole reason it could ship without a version
+    /// bump. Behavioural: two indexes identical but for the habit, one query.
+    ///
+    /// MUTATION THIS KILLS: any term reading `masks` inside `score_candidates`,
+    /// or a `style_targets` that weighted a neighbour by its mask count.
+    #[test]
+    fn retrieval_and_style_targets_do_not_read_mask_habits() {
+        use crate::mask_habit::MaskHabit;
+        let mk = |stem: &str, f0: f32, masks: Option<MaskHabit>| StyleExemplar {
+            stem: stem.into(),
+            feat: {
+                let mut f = vec![0.1f32; NDIM];
+                f[0] = f0;
+                f
+            },
+            tag: "wide/mid/midday/landscape".into(),
+            settings: BTreeMap::from([
+                ("exposure".to_string(), if stem == "a" { 0.5 } else { -0.5 }),
+                ("contrast".to_string(), 12.0),
+            ]),
+            curve: None,
+            path: None,
+            families: None,
+            embed: None,
+            tags: Vec::new(),
+            vocab_scores: None,
+            desc: None,
+            desc_embed: None,
+            masks,
+        };
+        let index_with = |masks: [Option<MaskHabit>; 3]| StyleIndex {
+            version: CURRENT_INDEX_VERSION,
+            mean: vec![0.0; NDIM],
+            std: vec![1.0; NDIM],
+            exemplars: vec![
+                mk("a", 0.05, masks[0]),
+                mk("b", 0.30, masks[1]),
+                mk("c", 0.90, masks[2]),
+            ],
+            source_dir: None,
+            looks: Vec::new(),
+            looks_dir: None,
+            embed_provenance: None,
+        };
+        let none = index_with([None, None, None]);
+        // A LOPSIDED habit set: if anything read it, the ranking would move.
+        let heavy = MaskHabit { count: 60, ..two_mask_habit() };
+        let some = index_with([Some(MaskHabit::default()), Some(heavy), Some(two_mask_habit())]);
+        let (meta, hist) = (fixture_meta(), fixture_histogram());
+        let probe = std::path::Path::new("not-in-the-index.arw");
+        let weights = RetrievalWeights::default();
+        let query = StyleQuery::new(None, None, weights);
+        let order = |idx: &StyleIndex| -> Vec<String> {
+            idx.retrieve_with_embed(&meta, &hist, query, 3, probe)
+                .iter()
+                .map(|e| e.stem.clone())
+                .collect()
+        };
+        let distances = |idx: &StyleIndex| -> Vec<String> {
+            idx.exemplars
+                .iter()
+                .map(|e| {
+                    let t = idx.distance_components(&meta, &hist, query, probe, e);
+                    format!("{}:{:.17}", e.stem, t.total())
+                })
+                .collect()
+        };
+        assert_eq!(order(&none), order(&some), "the neighbour ORDER may not move");
+        assert_eq!(distances(&none), distances(&some), "…nor any distance, to the last bit");
+        // `style_targets` and the blend it drives, byte for byte.
+        let targets = |idx: &StyleIndex| {
+            let ex: Vec<&StyleExemplar> = idx.exemplars.iter().collect();
+            style_targets(&ex)
+        };
+        assert_eq!(
+            serde_json::to_string(&targets(&none)).unwrap(),
+            serde_json::to_string(&targets(&some)).unwrap(),
+            "style_targets may not read the habit"
+        );
+        let blended = |idx: &StyleIndex| {
+            let mut r = EditRecipe::default();
+            blend_toward(&mut r, &targets(idx), 0.7);
+            serde_json::to_string(&r).unwrap()
+        };
+        assert_eq!(blended(&none), blended(&some), "blend_toward may not read the habit");
+    }
+
+    /// THE PROMPT BUDGET. `advisor::REFERENCE_BUDGET_BYTES` is what
+    /// `BoundedUntrustedText` cuts the style block at, and S3 gives that block a
+    /// fifth note. This measures the WIDEST block this app can build — four
+    /// maximal neighbours — with and without the note, and pins the note's own
+    /// increment.
+    ///
+    /// It deliberately does NOT assert the absolute total: a maximal block was
+    /// already over the budget before this batch (four `MAX_DESC_CHARS`
+    /// descriptions alone are 2,048 characters), and that is a pre-existing
+    /// property of the description block, not something this note introduced.
+    /// What this batch owes is that its own contribution is small and bounded.
+    #[test]
+    fn a_block_bounds_a_description_the_index_keeps_whole() {
+        // The index's bound is the STORAGE one; a block's is smaller, and the
+        // two are different budgets rather than one number spent twice.
+        let long = "w".repeat(MAX_DESC_CHARS);
+        let ex = StyleExemplar {
+            desc: Some(long.clone()),
+            tags: vec!["warm golden tones".into()],
+            ..plain_exemplar("roll-01")
+        };
+        let idx = StyleIndex {
+            version: CURRENT_INDEX_VERSION,
+            mean: vec![0.0; NDIM],
+            std: vec![1.0; NDIM],
+            exemplars: vec![ex.clone()],
+            source_dir: None,
+            looks: Vec::new(),
+            looks_dir: None,
+            embed_provenance: None,
+        };
+        let block = idx
+            .render_reference(&[&ex], crate::recipe::GradeStrength::new(0.50))
+            .expect("one exemplar renders a block");
+        let cut: String =
+            long.chars().take(REFERENCE_DESC_CHARS - 1).chain(std::iter::once('\u{2026}')).collect();
+        assert!(block.contains(&cut), "the block carries the cut description: {block}");
+        assert!(
+            !block.contains(&"w".repeat(REFERENCE_DESC_CHARS + 1)),
+            "the block carried more than {REFERENCE_DESC_CHARS} characters of description"
+        );
+        // …and NOTHING about the stored sentence changed: the index, the text
+        // tower's input and the diagnostic all still see the whole thing.
+        assert_eq!(idx.exemplars[0].desc.as_deref(), Some(long.as_str()));
+        // A description that already fits is carried verbatim, ellipsis-free.
+        let short = StyleExemplar { desc: Some("a warm, hazy evening grade".into()), ..ex };
+        let short_block = idx
+            .render_reference(&[&short], crate::recipe::GradeStrength::new(0.50))
+            .expect("block");
+        assert!(
+            short_block.contains("a warm, hazy evening grade")
+                && !short_block.contains('\u{2026}'),
+            "a short description must not be touched: {short_block}"
+        );
+        // The tag string takes the same door, and it takes it TWICE: one bound
+        // per phrase, one on the join. Both are asserted, because neither probe
+        // can see the other's bound — with phrases bounded no run can exceed 48
+        // whatever the join does, and with the join bounded the length is capped
+        // whatever one phrase does. Asserting only the run is how M-S3-R
+        // survived a first-party mutation run (2026-08-30).
+        //
+        // The JOIN bound is asserted on `block_tags` rather than on the rendered
+        // block, because tags reach a block through TWO consumers — the
+        // per-exemplar look note and the shared-tag note, and with one exemplar
+        // every tag is shared 1/1 — so a total-over-the-block count measures
+        // two spends against a one-spend bound (measured: 168 `q` for a bound of
+        // 128). The run check below stays end-to-end: it is what proves the
+        // phrase door is wired into every consumer and not just into one.
+        // `q` so runs are countable in the rendered block.
+        let tagged = StyleExemplar {
+            desc: None,
+            tags: vec!["q".repeat(128); LOOK_TAGS_K],
+            ..short
+        };
+        let tag_block = idx
+            .render_reference(&[&tagged], crate::recipe::GradeStrength::new(0.50))
+            .expect("block");
+        let longest_run = tag_block
+            .split(|c| c != 'q')
+            .map(|r| r.chars().count())
+            .max()
+            .unwrap_or(0);
+        assert!(
+            longest_run <= REFERENCE_TAG_PHRASE_CHARS,
+            "a tag phrase reached the block at {longest_run} characters, over the {REFERENCE_TAG_PHRASE_CHARS}-character bound"
+        );
+        let joined = block_tags(&tagged.tags).chars().count();
+        assert!(
+            joined <= REFERENCE_TAGS_CHARS,
+            "one exemplar's tag string reached {joined} characters, over the {REFERENCE_TAGS_CHARS}-character bound"
+        );
+        // …and a tag string that already fits is joined verbatim.
+        let small = vec!["warm golden tones".to_string(), "hazy".to_string()];
+        assert_eq!(block_tags(&small), "warm golden tones, hazy");
+    }
+
+    #[test]
+    fn the_local_work_note_fits_the_proposers_budget() {
+        let maximal = |masks| StyleExemplar {
+            stem: "s".repeat(255),
+            feat: vec![0.0; NDIM],
+            tag: "ultrawide/bright/goldenish/landscape".into(),
+            settings: [
+                "exposure", "temperature_K", "contrast", "highlights", "shadows", "whites",
+                "blacks", "vibrance", "clarity", "tint", "saturation", "dehaze",
+            ]
+            .iter()
+            .map(|k| ((*k).to_string(), -99.5f32))
+            .collect(),
+            curve: Some([255.0, -382.0]),
+            path: None,
+            families: Some(crate::eval::FamilySummary {
+                hsl: [100.0; 3],
+                grade: [100.0; 2],
+                rgb_curves: 3,
+            }),
+            embed: None,
+            tags: vec!["t".repeat(128); LOOK_TAGS_K],
+            vocab_scores: None,
+            desc: Some("d".repeat(MAX_DESC_CHARS)),
+            desc_embed: None,
+            masks,
+        };
+        let idx = StyleIndex {
+            version: CURRENT_INDEX_VERSION,
+            mean: vec![0.0; NDIM],
+            std: vec![1.0; NDIM],
+            exemplars: Vec::new(),
+            source_dir: None,
+            looks: Vec::new(),
+            looks_dir: None,
+            embed_provenance: None,
+        };
+        // Every bucket populated on every neighbour, every slider at its
+        // clamped extreme — the widest note `local_work_note` can produce.
+        let extreme = crate::mask_habit::BucketHabit {
+            n: u8::MAX,
+            w: 1.0,
+            mean: [-5.0, -100.0, -100.0, -100.0, -100.0, -100.0, -100.0, -100.0],
+        };
+        let worst = crate::mask_habit::MaskHabit {
+            count: u8::MAX,
+            refined: u8::MAX,
+            sky: extreme,
+            subject: extreme,
+            ground: extreme,
+            range: extreme,
+            other: extreme,
+        };
+        let without: Vec<StyleExemplar> = (0..RETRIEVE_K).map(|_| maximal(None)).collect();
+        let with: Vec<StyleExemplar> = (0..RETRIEVE_K).map(|_| maximal(Some(worst))).collect();
+        let render = |ex: &[StyleExemplar]| {
+            let refs: Vec<&StyleExemplar> = ex.iter().collect();
+            idx.render_reference(&refs, crate::recipe::GradeStrength::new(0.90)).unwrap()
+        };
+        let (a, b) = (render(&without), render(&with));
+        let delta = b.len() - a.len();
+        println!(
+            "maximal style reference: {} B without the local-work note, {} B with it \
+             (delta {delta} B); the proposer's budget is {} B",
+            a.len(),
+            b.len(),
+            crate::advisor::REFERENCE_BUDGET_BYTES
+        );
+        assert!(
+            delta <= crate::mask_habit::MAX_LOCAL_WORK_CHARS,
+            "the note added {delta} B, over its own {}-char bound",
+            crate::mask_habit::MAX_LOCAL_WORK_CHARS
+        );
+        // …and the increment is a small fraction of the budget, which is the
+        // claim the batch is allowed to make about it.
+        assert!(
+            delta * 6 <= crate::advisor::REFERENCE_BUDGET_BYTES,
+            "the note is {delta} B of a {} B budget",
+            crate::advisor::REFERENCE_BUDGET_BYTES
+        );
+        // The WIDEST block this app can build now clears the budget, note and
+        // all. Before `REFERENCE_DESC_CHARS` it was 5,920 B — S2's four maximal
+        // descriptions, not this note — and `BoundedUntrustedText` cut the tail.
+        assert!(
+            b.len() <= crate::advisor::REFERENCE_BUDGET_BYTES,
+            "a maximal block is {} B, over the {} B budget",
+            b.len(),
+            crate::advisor::REFERENCE_BUDGET_BYTES
+        );
+        // A REALISTIC block — the shape a real library produces — must still
+        // clear the budget with the note attached.
+        let real = |masks| StyleExemplar {
+            desc: Some("a warm, golden-hour white-balance lean with high contrast, deep blacks \
+                        and a gentle haze".into()),
+            tags: vec!["warm golden tones".into(), "deep blacks".into()],
+            stem: "roll-01".into(),
+            ..maximal(masks)
+        };
+        let realistic: Vec<StyleExemplar> =
+            (0..RETRIEVE_K).map(|_| real(Some(two_mask_habit()))).collect();
+        let r = render(&realistic);
+        println!("realistic style reference with the note: {} B", r.len());
+        assert!(
+            r.len() <= crate::advisor::REFERENCE_BUDGET_BYTES,
+            "a realistic block is {} B, over the {} B budget",
+            r.len(),
+            crate::advisor::REFERENCE_BUDGET_BYTES
+        );
     }
 }

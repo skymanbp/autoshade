@@ -1424,7 +1424,12 @@ fn fit_recipe_zoned_multi_inner(
                 &mut report.notes,
                 crate::rationale::Note::new(
                     crate::rationale::keys::SEMANTIC_REGIONS_UNAVAILABLE,
-                    vec![("e", format!("{e:#}"))],
+                    // THE door, like every other `{e}` note: one line, absolute
+                    // paths reduced to a basename (`[path]` inside a home
+                    // directory), 160 characters. `{e:#}` flattened the whole
+                    // anyhow chain and carried the sidecar's paths into a
+                    // rationale that travels into XMP and into bug reports.
+                    vec![("e", crate::rationale::error_line(&e))],
                 ),
             );
             return report;
@@ -5620,8 +5625,17 @@ mod tests {
     #[test]
     fn multi_segmentation_failure_keeps_the_legacy_zones_with_its_own_note() {
         let (src, tgt, sky) = zoned_pair();
+        // An ABSOLUTE interpreter path, because that is the real shape: the
+        // bundled helper resolves one, and `AUTOSHOP_PYTHON` is one. A bare
+        // name produces a sidecar error with no path in it, and a disclosure
+        // test written against that fixture cannot fail — which is how the
+        // first version of the guard below passed against its own mutation.
+        // Derived from `temp_dir`, never written as a literal.
+        let missing = std::env::temp_dir()
+            .join("autoshop-e-leak-probe")
+            .join("no-such-python");
         let seg = SegmentOpts {
-            python_bin: "autoshop-test-no-such-python".into(),
+            python_bin: missing.to_string_lossy().into_owned(),
             script: "Cargo.toml".into(),
             target: "sky".into(),
             reference_point: None,
@@ -5640,6 +5654,25 @@ mod tests {
             .filter(|n| n.key == crate::rationale::keys::SEMANTIC_REGIONS_UNAVAILABLE)
             .collect::<Vec<_>>();
         assert_eq!(own.len(), 1, "exactly one typed hand-off: {}", multi.recipe.rationale);
+        // …and the hand-off's reason went through the disclosure door. The
+        // sidecar's own error names paths; a rationale is user-visible and is
+        // pasted into bug reports, so neither an absolute path nor an unbounded
+        // traceback may reach it.
+        let reason = own[0].args.iter().find(|(k, _)| *k == "e").map(|(_, v)| v.as_str());
+        let reason = reason.expect("the hand-off note carries its reason");
+        assert!(
+            !reason.contains("autoshop-e-leak-probe") && !reason.contains('\n'),
+            "the hand-off reason leaked this machine's layout or a multi-line trace: {reason}"
+        );
+        assert!(
+            reason.contains("no-such-python"),
+            "…while still SAYING which program could not be launched: {reason}"
+        );
+        assert!(
+            reason.chars().count() <= 160,
+            "the hand-off reason is unbounded ({} chars): {reason}",
+            reason.chars().count()
+        );
         assert!(
             !multi.notes.iter().any(|n| n.key == crate::rationale::keys::ZONED_UNAVAILABLE)
                 && !multi.recipe.rationale.contains("luminance-range fallback"),

@@ -128,7 +128,12 @@ never disagree. With `--describe` a second local model
 mood, never the subject — and that sentence, not the fixed attribute tags, is
 what the text tower embeds. Nothing leaves the machine and nothing is billed;
 descriptions are cached by frame content, so a rebuild only describes what
-changed.
+changed. Each exemplar also carries a **local-work habit** — how many masks you
+enabled on that frame, put to which use (sky / subject / foreground / range /
+other, decided by the AI selection's own subtype and by which end of the frame
+a gradient covers), and the amount-weighted mean of eight local sliders per
+use. Summary statistics only: no mask geometry is ever averaged across photos,
+because a gradient is a fact about one horizon.
 
 At develop time the photo retrieves the **4 most similar past shots** with the
 hybrid distance `d14 + W_EMB·(1−cos(q_img,e_img)) + W_TXT·(1−cos(q_txt,e_img)) + W_DESC·(1−cos(q_txt,e_desc))`.
@@ -146,7 +151,11 @@ raw variant's cannot be told apart from zero. `W_LOOK =
 no develop settings, so the harness's settings objective cannot see it, and
 nothing else ranks looks against each other, so its scale cannot change their
 order. Their
-settings, curve habit and colour families reach the advisor as a *soft reference*;
+settings, curve habit, colour families and local-work habit reach the advisor as
+a *soft reference* — the last of these as one sentence saying how many of the
+retrieved shots masked the sky, lifted the subject or worked the foreground and
+with roughly what strength, so the proposer places its own masks the way you
+place yours instead of following the generic "add 1-2 masks" advice alone;
 the `style_pull`
 (0.18 at the shipped Style 0.3, full at Style 1.0) moves the proposal toward your historical means
 without copying one, and the rationale names the shots it leaned on. Strength
