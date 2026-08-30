@@ -126,17 +126,27 @@ never disagree.
 
 At develop time the photo retrieves the **4 most similar past shots** with the
 hybrid distance `d14 + W_EMB·(1−cos(q_img,e_img)) + W_TXT·(1−cos(q_txt,e_img)) + W_DESC·(1−cos(q_txt,e_desc))`.
-The shipped `W_EMB`, `W_TXT`, and `W_DESC` are the calibration harness winners
-(`4`, `0`, and `0` respectively; the corpus run's image-weight improvement CI
-was positive). Their
+The shipped `W_EMB`, `W_TXT` and `W_DESC` are the calibration harness's
+winners over 196 grid rows on the real corpus (see the pinned-claims table).
+A **z-scored variant** of the two text terms is built and tested — raw SigLIP
+image-to-text cosines are tiny and tightly clustered, which is a real reason to
+suspect the raw term — but the harness measured both variants and the raw one
+won, so the raw one ships and standardisation stays one flag away. `W_LOOK =
+1.0` is a normalisation rather than a measured number: the look library carries
+no develop settings, so the harness's settings objective cannot see it, and
+nothing else ranks looks against each other, so its scale cannot change their
+order. Their
 settings, curve habit and colour families reach the advisor as a *soft reference*;
 the `style_pull`
 (0.18 at the shipped Style 0.3, full at Style 1.0) moves the proposal toward your historical means
 without copying one, and the rationale names the shots it leaned on. Strength
 above 0.70 with Style below 0.85 no longer receives the old committed-tier
 FLOOR wording because that floor belongs to the Style axis. It is
-bounded at 5,000 exemplars and a 228 MiB serialized index envelope, derived from
-the two 768-D vectors, vocabulary scores, tags, and bounded description. From the other
+bounded at 5,000 RAW exemplars **and 500 looks** against one 228 MiB serialized
+index envelope (5,500 x 40 KiB = 214.84 MiB), the per-record bound being derived
+from the two 768-D vectors, vocabulary scores, tags, and bounded description and
+measured against a maximal record of each kind. A look library is a curated set
+of reference grades, not an archive. From the other
 side, `match --style-prompt` extracts a reusable text style brief from a
 source/target pair that `reimagine` accepts as its Direction.
 
@@ -391,7 +401,7 @@ estimate. Sources are the pinned claims in
 | Reverse-fit, sunset | look error 0.060 → 0.042, confidence 0.746691 | [docs/SHOWCASE.md](docs/SHOWCASE.md) |
 | Local-field ceiling, calibration pair | global fit 0.0961 against a ceiling of 0.0700; the accepted sky zone realizes 0.134 of the distance | [What is new §7](#7-a-bilateral-grid-local-field-prices-every-local-producer-first) |
 | AI develop, model judge | cat pair 62 → 86; townhouse 84 → 86; balcony 78 → 84; hillside 63 → 87 (automated scores) | [docs/SHOWCASE.md](docs/SHOWCASE.md) |
-| Style retrieval weights | corpus harness: `W_EMB=4`, `W_TXT=0`, `W_DESC=0`; `W_LOOK=1.0` | [AI advisor](#ai-advisor-and-reverse-fit) |
+| Style retrieval weights | corpus harness (169 exemplars, 156 queries, 196 grid rows): `W_EMB=4`, `W_TXT=0`, `W_DESC=4`, raw variant — MAE 0.687031 vs baseline 0.713143, +0.026112, CI [+0.014466, +0.043656]; `W_LOOK=1.0` is a normalisation the harness cannot see | [AI advisor](#ai-advisor-and-reverse-fit) |
 | Memory budget | 1800 MB per photo from a 1771 MB reference probe; 4 GiB RAW admission gate | [Application](#application-and-infrastructure) |
 
 ## Install and quickstart

@@ -856,11 +856,37 @@ text, and description terms with `W_LOOK=1.0` and never supplies style targets.
 #### SigLIP 2 text tower and look metadata
 
 The local sidecar uses the same pinned `google/siglip2-base-patch16-384`
-revision `f775b65a79762255128c981547af89addcfe0f88` for both modalities. Text
-is tokenized with `padding="max_length"`, `max_length=64`, lower-casing enabled,
-`<unk>`, `<pad>`, `<eos>`, and `<bos>` special tokens, and the pinned additional
-`<start_of_turn>`/`<end_of_turn>` tokens; the sidecar sets `add_bos_token=false`
-and `add_eos_token=true`. It loads local files only and disallows remote code.
+revision `f775b65a79762255128c981547af89addcfe0f88` for both modalities.
+
+**One tokenizer door.** `python/embed.py` constructs exactly one tokenizer,
+`GemmaTokenizerFast.from_pretrained(dir, local_files_only=True)` — the class the
+pinned `tokenizer_config.json` names. It reads `tokenizer.json` directly, so it
+needs `tokenizers` and never `sentencepiece`. The text tower is called as
+`model.text_model(input_ids=ids)`, by name and never splatted, and **no padding
+mask is ever produced or passed**: the pinned config declares
+`"model_input_names": ["input_ids"]`, the sidecar refuses a config that stops
+saying so, and `tokenize()` asserts the encoding's key set and its `(N, 64)`
+shape. This is a contract, not a convenience — feeding the tower a mask moves
+the pooled vector (measured cosine 0.72–0.78 against the unmasked one over five
+phrases), so two indices built through two doors are not comparable at all.
+Until this batch there *were* two doors (an `Auto*` factory that always raised
+on transformers 5.2.0, and a hand-written fallback that returned a mask), and
+which one ran depended on whether `sentencepiece` happened to be installed.
+
+Text is tokenized with `padding="max_length"`, `max_length=64`, and the
+`<unk>`/`<pad>`/`<eos>`/`<bos>` special tokens plus the pinned additional
+`<start_of_turn>`/`<end_of_turn>`; `add_bos_token=false`, `add_eos_token=true`.
+The pinned config also carries `do_lower_case: true`, which this door **does
+not act on**: `--self-test` encodes an upper-case string and its lower-case twin
+and requires the ids to differ, so the claim is checked against the tokenizer
+rather than restated from its metadata. `--self-test` additionally pins the ids
+of five golden strings and runs one real text forward pass. It loads local files
+only and disallows remote code.
+
+Every index records the door as well as the checkpoint —
+`<repo>@<revision> tokenizer=GemmaTokenizer@<revision12> vocab-v<N>` — so two
+incomparable indices cannot look identical, and the loader drops the look block
+(keeping the RAW half) when the stored `vocab-v` disagrees with this build.
 
 | Tokenizer file | Bytes | SHA-256 |
 |---|---:|---|
@@ -871,8 +897,24 @@ and `add_eos_token=true`. It loads local files only and disallows remote code.
 
 Look tags are the top four zero-shot SigLIP captions after a per-group
 argmax over the versioned 33-phrase vocabulary in `src/style.rs`; changing a
-phrase changes every stored score. The bounded `desc` field is reserved for the
-future local description sidecar, with its text vector retained separately.
+phrase changes every stored score.
+
+`desc_embed` is the SigLIP **text** vector of the record's description when it
+has one, and of its tag string (`"warm golden tones, deep blacks"`) when it does
+not; a record with neither carries no vector and contributes no description
+term. Both builders fill it in **one** sidecar process per build: the whole
+build's texts go out as a single `--text-manifest` JSONL and come back in
+record order. The look build used to re-invoke the sidecar — a fresh 1.5 GB
+model load and a second image forward pass — once per photograph, and the RAW
+build did not compute the vector at all, which made `W_DESC` structurally dead
+on every RAW index.
+
+The two populations have separate caps because one file holds both: 5,000 RAW
+exemplars and **500 looks**, against a 40 KiB per-record bound and a 228 MiB
+file envelope (5,500 × 40 KiB = 214.84 MiB). A look library is a curated set of
+reference grades, not an archive; both caps are refused at the build door and at
+load, and `capacity_constants_hold_two_vectors_and_the_scores` measures a
+maximal record of each kind against the bound.
 
 `match` is inverse rendering rather than pixel copying: it aligns luminance
 CDFs, searches exposure, solves a regularized basis of engine controls, adds a
@@ -929,9 +971,31 @@ and zero-confidence fields are conservation-tested to change nothing.
   (**designed do-no-harm rule**).
 - Style features: 14 dimensions in the persisted normalization block, with
   only dimensions having useful variance z-scored (**designed representation**).
-- SigLIP 2: 768-dimensional image and text vectors; the corpus harness ships
-  `W_EMB = 4`, `W_TXT = 0`, and `W_DESC = 0`, while `W_LOOK = 1.0` is the
-  look-library default (**calibration-controlled**).
+- SigLIP 2: 768-dimensional image and text vectors. `W_EMB = 4`, `W_TXT = 0`,
+  `W_DESC = 4` are the corpus harness's winners (**calibration-controlled**;
+  see *Measured results*). `W_LOOK = 1.0` is a **normalisation, not a
+  calibrated number**: the look library carries no develop settings, so the
+  harness's leave-one-out settings objective cannot see it at all, and no other
+  term ranks looks against each other, so the scale cannot change their order —
+  pinned by `look_weight_scale_does_not_change_look_order`.
+- The two direction-text terms have a **standardised variant** (cosines
+  computed against every candidate first, z-scored over that candidate set, and
+  only then weighted) because raw SigLIP image↔text cosines are tiny and
+  tightly clustered, so a raw term barely reorders anything and a grid over it
+  can find 0 for the wrong reason. The harness evaluated BOTH variants over the
+  whole grid and the raw one won (best raw 0.687031 against best standardised
+  0.694064), so `STANDARDISE_TEXT_TERMS = false` ships and the standardising
+  path stays one flag away, tested. Below three comparable candidates, or with
+  a degenerate spread, the standardised variant falls back to the raw gap and
+  discloses it (**measured variant choice, mutation-tested**).
+- Four environment overrides, each read in exactly one place and never again:
+  `AUTOSHOP_STYLE_EMBED_WEIGHT`, `AUTOSHOP_STYLE_TEXT_WEIGHT`,
+  `AUTOSHOP_STYLE_DESC_WEIGHT`, `AUTOSHOP_STYLE_LOOK_WEIGHT`. All four parse the
+  same way — trimmed, finite, non-negative, otherwise the shipped default (a
+  negative weight would rank the *least* similar photo first). The sidecar
+  switch `AUTOSHOP_STYLE_EMBED` is likewise resolved once, as a value:
+  `--embed`/`--no-embed` and the GUI preference travel on the develop request,
+  and nothing writes the process environment to express a flag.
 - Foreign-hue veto: distance `>=45 deg` and newly painted share `>=5%`
   (**calibrated against known cast failures and haze controls**).
 - Reimagine flexible-size budget: dimensions are multiples of 16, aspect ratio
@@ -956,12 +1020,17 @@ and zero-confidence fields are conservation-tested to change nothing.
   `10` leave-one-out queries. Its baseline `(W_EMB,W_TXT,W_DESC)=(0,0,0)` and
   best grid point both have pooled z-scored settings MAE `0.261116` (no
   synthetic evidence for a nonzero term).
-- The corpus harness covers `169` exemplars and `156` settings-bearing queries.
-  Baseline MAE is `0.713143`; the best grid point is `(4,0,0)` with MAE
-  `0.695233`, improvement `+0.017910`, and paired bootstrap 95% CI
-  `[+0.006478,+0.034376]`. Text and description terms remain zero because
-  their grid values did not beat baseline with a positive CI. The text query
-  is a documented SHA-256 proxy, not a replacement for a SigLIP text-tower run.
+- The corpus harness covers `169` exemplars and `156` settings-bearing queries
+  over `196` grid rows, with the query text proxy produced by the pinned SigLIP
+  2 text tower in ONE `--text-manifest` batch (`169` vectors), not by a hash.
+  Baseline `(0,0,0)` MAE is `0.713143`; the winner is `(4,0,4)` in the RAW
+  variant with MAE `0.687031`, improvement `+0.026112`, and seeded paired
+  bootstrap 95% CI `[+0.014466,+0.043656]` (seed `20260829`, 2000 resamples).
+  The best standardised row is `(4,0,1)` at `0.694064`. `W_TXT` ships at 0
+  because no row with a non-zero `W_TXT` beat the best `W_TXT = 0` row. The
+  leave-one-out observations are CORRELATED (every exemplar appears in other
+  queries' neighbourhoods), so the interval describes this corpus and is not a
+  population confidence interval.
 - The foreign-hue gate is intentionally categorical: a cast that improves an
   aggregate RGB error can still be rejected if it paints a target-absent hue.
 - A streamed `2048x1360` size refusal is attributed to `size` and can negotiate

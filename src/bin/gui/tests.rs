@@ -6292,6 +6292,8 @@
             think: app.deep_think,
             adherence: autoshop::recipe::DirectionAdherence::default(),
             use_looks: true,
+            embed: autoshop::style::EmbeddingSwitch::resolve(None, app.style_embed),
+            weights: autoshop::style::RetrievalWeights::from_env(),
         };
         assert_eq!(req.strength.get(), 0.9);
         assert_eq!(req.style, 0.2);
@@ -7010,6 +7012,12 @@
                 version: 3,
                 source_dir: Some("D:/photos/edited".into()),
                 scenes: vec![("wide/mid/midday/landscape".into(), 12)],
+                // The v5 half of the state, which the AI panel prints beside
+                // the count ("embeddings 300/412 - looks 7"). This fixture
+                // predates those fields and had stopped compiling.
+                with_embedding: 300,
+                looks: 7,
+                looks_dir: Some("D:/photos/finished".into()),
                 age: Some(std::time::Duration::from_secs(5 * 3600)),
             }),
             ..Default::default()
@@ -7192,11 +7200,72 @@
             think: app.deep_think,
             adherence: autoshop::recipe::DirectionAdherence::default(),
             use_looks: true,
+            embed: autoshop::style::EmbeddingSwitch::resolve(None, app.style_embed),
+            weights: autoshop::style::RetrievalWeights::from_env(),
         };
         assert!(req.send_reference_image);
         assert!(
             !autoshop::pipeline::GradeRequest::with_style(0.65).send_reference_image,
             "every non-GUI surface stays on the text reference"
+        );
+    }
+
+    /// W2-2: the panel's 「style embedding」 checkbox reaches the DEVELOP, not
+    /// only the index build.
+    ///
+    /// `produce_recipe` used to resolve the switch itself, with the preference
+    /// hard-coded to `false` (`style::embedding_effective(false)`), so the
+    /// checkbox governed `Build style library` and nothing else: from the
+    /// desktop app the look library and every embedding term were dead unless
+    /// the user happened to set AUTOSHOP_STYLE_EMBED in their environment. The
+    /// switch is now a value on the request, read on the UI thread with the
+    /// rest of it.
+    ///
+    /// MUTATION: build the request with `EmbeddingSwitch::OFF`, or make
+    /// `produce_recipe` resolve the switch again instead of reading
+    /// `req.embed`, and this fails.
+    #[test]
+    fn gui_embedding_pref_reaches_the_develop_query() {
+        // The environment is NOT set here, and is not touched: the preference
+        // alone must be enough.
+        let on = AutoshopApp { style_embed: true, ..Default::default() };
+        let off = AutoshopApp { style_embed: false, ..Default::default() };
+        let request_from = |app: &AutoshopApp| autoshop::pipeline::GradeRequest {
+            style: app.style_strength,
+            send_reference_image: app.send_style_ref_image,
+            strength: autoshop::recipe::GradeStrength::new(app.grade_strength),
+            think: app.deep_think,
+            adherence: autoshop::recipe::DirectionAdherence::default(),
+            use_looks: app.use_looks,
+            embed: autoshop::style::EmbeddingSwitch::resolve_with(
+                None, app.style_embed, |_| None,
+            ),
+            weights: autoshop::style::RetrievalWeights::SHIPPED,
+        };
+        assert!(request_from(&on).embed.on(), "the checkbox must reach the develop's request");
+        assert!(!request_from(&off).embed.on(), "…and un-checking it must too");
+
+        // …and the pipeline READS the request instead of resolving its own.
+        // A behavioural assertion is out of reach here (the develop path is a
+        // paid network chain), so the invariant is that the old door is gone
+        // and the new one is the only read.
+        let pipeline = include_str!("../../pipeline.rs");
+        assert!(
+            !pipeline.contains("embedding_effective"),
+            "the pipeline must not resolve the switch itself"
+        );
+        assert_eq!(
+            pipeline.matches("req.embed.on()").count(),
+            1,
+            "exactly one read of the request's switch"
+        );
+        // The two GUI workers build their switch from the SAME preference, so
+        // an index built with it and a develop querying it cannot disagree.
+        let actions = include_str!("actions.rs");
+        assert_eq!(
+            actions.matches("EmbeddingSwitch::resolve(None, self.style_embed)").count(),
+            3,
+            "the RAW build, the look build and the develop request all read the preference"
         );
     }
 
@@ -7236,6 +7305,8 @@
             think: app.deep_think,
             adherence: autoshop::recipe::DirectionAdherence::default(),
             use_looks: true,
+            embed: autoshop::style::EmbeddingSwitch::resolve(None, app.style_embed),
+            weights: autoshop::style::RetrievalWeights::from_env(),
         };
         assert!(req.think, "the checkbox must reach the worker's request");
         assert!(
@@ -7642,13 +7713,66 @@
         );
     }
 
+    /// The Adherence slider is INERT without a direction, and the tier the dial
+    /// picks is the one the develop's request carries.
+    ///
+    /// The old spelling of this test asserted that a default app has an empty
+    /// direction and the shipped adherence default - two facts about
+    /// `Default`, both true whether or not the slider is gated at all. It named
+    /// the disabling and checked none of it.
+    ///
+    /// MUTATION: delete the `add_enabled_ui(has_direction, ...)` wrapper in
+    /// panels/ai.rs and phase (2) fails.
     #[test]
     fn gui_adherence_slider_is_disabled_without_a_direction() {
-        let app = AutoshopApp::default();
-        assert!(app.guidance.trim().is_empty());
-        assert_eq!(app.direction_adherence, autoshop::recipe::DirectionAdherence::DEFAULT);
-        // The panel gates the slider on this same condition; a blank direction
-        // must never expose a control that changes an otherwise inert prompt.
+        let ctx = egui::Context::default();
+        crate::theme::install_theme(&ctx, crate::theme::ThemePref::Dark);
+        let frame = |app: &mut AutoshopApp| -> Option<bool> {
+            app.adherence_gate_enabled = None; // this frame's evidence only
+            let _ = ctx.run(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(1000.0, 900.0),
+                    )),
+                    ..Default::default()
+                },
+                |ctx| {
+                    egui::SidePanel::left("controls").default_width(320.0).show(ctx, |ui| {
+                        app.ai_panel(ui);
+                    });
+                },
+            );
+            app.adherence_gate_enabled
+        };
+        // (1) no direction: the dial exists but cannot be moved.
+        let mut app = AutoshopApp::default();
+        assert!(app.guidance.trim().is_empty(), "premise: the default app has no direction");
+        assert_eq!(frame(&mut app), Some(false), "a blank direction must leave the slider inert");
+        // (2) whitespace is still blank - the gate trims.
+        app.guidance = "   \n\t ".into();
+        assert_eq!(frame(&mut app), Some(false), "whitespace is not a direction");
+        // (3) a real direction: live.
+        app.guidance = "warmer, moodier".into();
+        assert_eq!(frame(&mut app), Some(true), "with a direction the dial must be usable");
+        // …and the DIAL reaches the request as a tier, which is the only thing
+        // the value is for.
+        app.direction_adherence = 0.1;
+        let hint = autoshop::recipe::DirectionAdherence::new(app.direction_adherence);
+        assert_eq!(hint.tier(), autoshop::recipe::AdherenceTier::Hint);
+        app.direction_adherence = 0.95;
+        let brief = autoshop::recipe::DirectionAdherence::new(app.direction_adherence);
+        assert_eq!(brief.tier(), autoshop::recipe::AdherenceTier::Brief);
+        assert_ne!(hint.tier(), brief.tier(), "the dial must be able to change the tier");
+        // …and the tooltip NAMES the tiers, which is what a user needs to know
+        // the dial is not a magnitude.
+        let tip = tr(
+            Lang::En,
+            "How closely the AI follows your direction; disabled until Direction has text: <=40% Hint, 40-70% Direct, above 70% Brief. Prompt intent only - it never moves a render limit.",
+        );
+        for tier in ["Hint", "Direct", "Brief"] {
+            assert!(tip.contains(tier), "the tooltip must name the {tier} tier: {tip}");
+        }
     }
 
     #[test]

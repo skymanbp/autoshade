@@ -2864,7 +2864,10 @@ impl AutoshopApp {
         // ONE terminal message, and this build has to report while it runs.
         let tx = self.tx.clone();
         let ctx = self.egui_ctx.clone();
-        let embed_pref = self.style_embed;
+        // Resolved HERE, on the UI thread, with the rest of the request the
+        // worker will carry: the switch is a value, and a preference flipped
+        // mid-build must not change what this build is doing.
+        let embed = autoshop::style::EmbeddingSwitch::resolve(None, self.style_embed);
         self.spawn_worker(
             move || {
                 let progress = |done: usize, total: usize| {
@@ -2872,7 +2875,7 @@ impl AutoshopApp {
                     // An mpsc send does not wake egui (see `spawn_worker`).
                     ctx.request_repaint();
                 };
-                let index = match autoshop::style::StyleIndex::build_reporting_with_pref(&dir, embed_pref, &progress) {
+                let index = match autoshop::style::StyleIndex::build_reporting(&dir, embed, &progress) {
                     Ok(ix) => ix,
                     Err(e) => {
                         return Msg::StyleBuilt(Box::new(StyleBuildOutcome::Failed {
@@ -2886,11 +2889,11 @@ impl AutoshopApp {
                 // index: adding a field to it would be a file-format change for
                 // a fact that is about this RUN, not about the library.
                 //
-                // Gated on `embedding_enabled`, because "no exemplar has a
-                // vector" means two opposite things — the user never asked for
-                // the sidecar (nothing to report), or they did and it failed
-                // for every photo (the whole point of reporting).
-                let without_embedding = if autoshop::style::embedding_effective(embed_pref) {
+                // Gated on the switch, because "no exemplar has a vector"
+                // means two opposite things — the user never asked for the
+                // sidecar (nothing to report), or they did and it failed for
+                // every photo (the whole point of reporting).
+                let without_embedding = if embed.on() {
                     index.exemplars.iter().filter(|e| e.embed.is_none()).count()
                 } else {
                     0
@@ -2924,14 +2927,14 @@ impl AutoshopApp {
         self.status = trf(self.lang, "Building the look library from {path}", &[("path", &abs_display(&dir))]);
         let tx = self.tx.clone();
         let ctx = self.egui_ctx.clone();
-        let embed_pref = self.style_embed;
+        let embed = autoshop::style::EmbeddingSwitch::resolve(None, self.style_embed);
         self.spawn_worker(
             move || {
                 let progress = |done: usize, total: usize| {
                     let _ = tx.send(Msg::StyleBuildProgress { done, total });
                     ctx.request_repaint();
                 };
-                match autoshop::style::StyleIndex::build_looks_with_pref(&dir, embed_pref, &progress) {
+                match autoshop::style::StyleIndex::build_looks(&dir, embed, &progress) {
                     Ok(index) => {
                         let total = index.looks.len();
                         match index.save(&autoshop::store::style_index_path()) {
@@ -2978,6 +2981,13 @@ impl AutoshopApp {
             think: self.deep_think,
             adherence: autoshop::recipe::DirectionAdherence::new(self.direction_adherence),
             use_looks: self.use_looks,
+            // The GUI's own 「style embedding」 preference, read on the UI
+            // thread like every other field above. Until this batch the
+            // develop path resolved the switch itself with the preference
+            // hard-coded to `false`, so this checkbox reached the index BUILD
+            // and never the develop — the two could disagree with nothing said.
+            embed: autoshop::style::EmbeddingSwitch::resolve(None, self.style_embed),
+            weights: autoshop::style::RetrievalWeights::from_env(),
         };
         // Free-text direction ("warmer, moodier") steers the proposal; with
         // `refine` (its own button now — no pre-armed checkbox), the AI

@@ -285,6 +285,49 @@ def zh_pairs(src: str) -> list[tuple[str, str]]:
 PLACEHOLDER = re.compile(r"\{([^{}]*)\}")
 
 
+# Codepages a Windows console picks by default in the two places this project
+# is edited from.  A translation that was WRITTEN through one of them is not
+# corrupt in a way any Rust gate can see: the bytes are still valid UTF-8, they
+# just spell unrelated hanzi.
+MOJIBAKE_CODEPAGES = ("gbk", "big5", "cp1252", "latin-1")
+
+
+def mojibake_values(pairs: list[tuple[str, str]]) -> list[str]:
+    """zh values that are UTF-8 text ENCODED THROUGH a legacy codepage.
+
+    S1 shipped 16 of these (a GBK console): every one compiled, rendered and
+    passed the placeholder and coverage gates, because mojibake of Chinese IS
+    Chinese - just the wrong Chinese.  Two carried U+FFFD, which the Rust-side
+    catalogue test now refuses; the other 14 were invisible to every gate in
+    the repository.
+
+    The test is a round trip, and it is nearly one-way: take the value, encode
+    it back to the codepage, and read the bytes as UTF-8.  Mangled text returns
+    the original sentence.  Genuine Chinese almost never does - its codepage
+    bytes have to happen to form a valid UTF-8 sequence AND decode to CJK - so
+    a false positive needs a coincidence, while a true positive is the exact
+    accident this guards.
+    """
+    bad = []
+    for en, zh in pairs:
+        if not any(ord(c) > 127 for c in zh):
+            continue
+        for cp in MOJIBAKE_CODEPAGES:
+            try:
+                back = zh.encode(cp).decode("utf-8")
+            except (UnicodeEncodeError, UnicodeDecodeError):
+                continue
+            # It only counts as a recovery if what comes back is text of the
+            # same kind: a value that round-trips into ASCII noise is a
+            # coincidence, not a mangled sentence.
+            if back != zh and any("\u4e00" <= c <= "\u9fff" for c in back):
+                bad.append(f"{en!r} -> {zh!r} is {cp}-mangled UTF-8 of {back!r}")
+                break
+        if "\ufffd" in zh:
+            bad.append(f"{en!r} -> {zh!r} carries U+FFFD (irrecoverable mangling)")
+    return bad
+
+
 def placeholder_mismatches(pairs: list[tuple[str, str]]) -> list[str]:
     """zh values whose {placeholder} MULTISET differs from their en key's.
     A dropped placeholder renders a bare sentence, a renamed one prints
@@ -499,6 +542,7 @@ def main() -> int:
     missing = sorted(k for k in wanted if k not in zh_set)
     dead = sorted(k for k in zh_set if k not in wanted)
     bypass = literal_bypasses(GUI)
+    moji = mojibake_values(pairs)
     dead_allow = sorted(a for a in ALLOWED_BYPASS if a not in GUI)
 
     print(f"{len(keys)} literal keys + {len(dynamic_keys)} dynamic keys "
@@ -511,7 +555,9 @@ def main() -> int:
                          ("dynamic-source registry problems", source_problems),
                          ("dead ALLOWED_BYPASS entries", dead_allow),
                          ("zh values whose {placeholder} multiset differs",
-                          ph_bad)]:
+                          ph_bad),
+                         ("zh values that are legacy-codepage MOJIBAKE",
+                          moji)]:
         print(f"\n== {len(items)} {title} ==")
         for k in items:
             print("  " + repr(str(k)[:100]))
@@ -526,7 +572,7 @@ def main() -> int:
     for line, snippet in worker_tr:
         print(f"  gui.rs:{line}: {snippet}")
     bad = (dupes or missing or dead or source_problems or dead_allow
-           or unregistered or bypass or ph_bad or worker_tr)
+           or unregistered or bypass or ph_bad or worker_tr or moji)
     return 1 if bad else 0
 
 

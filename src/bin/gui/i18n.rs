@@ -104,10 +104,10 @@ fn zh_map() -> &'static HashMap<&'static str, &'static str> {
 /// (placeholders included), or the lookup silently misses.
 #[rustfmt::skip]
 static ZH_ENTRIES: &[(&str, &str)] = &[
-    (" [look reference: finished photo {stem} from the photographer's look library; tags: {tags}]", " [妫€绱㈠簱瀹屾垚鐓х墖 {stem}锛涙爣绛撅細{tags}]"),
-    (" [finished look photo {stem} also went to the vision model as IMAGE 2]", " [瀹屾垚鐓х墖 {stem} 浣滀负 IMAGE 2 鍙戦€佽瑙夋ā鍨嬪鐞嗭紞"),
-    (" [look library unavailable for this develop ({n} finished photos): style embedding was off or no query vector was produced]", " [鐪嬪浘搴撳鏈寮€鍙戜笉鍙敤锛�{n} 寮犵収鐗囷紝宓屽叆鏈惎鐢ㄦ垨鏃犳煡璇㈠悜閲�]"),
-    (" [direction adherence tier: {tier}]", " [鏂瑰悜閬靛惊绛夌骇锛�{tier}]"),
+    (" [look reference: finished photo {stem} from the photographer's look library; tags: {tags}]", " [外观参考：来自你的成片外观库的照片 {stem}；标签：{tags}]"),
+    (" [finished look photo {stem} also went to the vision model as IMAGE 2]", " [成片 {stem} 同时作为 IMAGE 2 发给了视觉模型]"),
+    (" [look library unavailable for this develop ({n} finished photos): style embedding was off or no query vector was produced]", " [本次显影用不到外观库（库中有 {n} 张成片）：风格嵌入未开启，或没有生成查询向量]"),
+    (" [direction adherence tier: {tier}]", " [方向遵循档位：{tier}]"),
     (" White balance withheld: it would paint hues the target does not contain.", " 白平衡已保留：目标没有这些色相。"),
     (" White balance was clamped into the strength budget (gain ratio {from} to {to}, rotated share {rotated_share} over {coverage} of the frame); the requested cast exceeded the honest range.", " 白平衡已限制在强度预算内（增益比 {from} 至 {to}，色相旋转份额 {rotated_share}，覆盖画面 {coverage}）；请求色偏超出范围。"),
     (" White balance withheld: rotated share {rotated_share} over {coverage} of the frame exceeded the strength budget.", " 白平衡已保留：色相旋转份额 {rotated_share}（覆盖画面 {coverage}）超出强度预算。"),
@@ -687,7 +687,7 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
         "在建好风格参考库之前，这个滑杆不起作用——下面那一节就是用来建库的。"),
     ("Style reference library", "风格参考库"),
     ("an unrecorded folder", "未记录的文件夹"),
-    ("{n} finished photos · from {path} · built {age} ago", "{path} · {n} 张完成照片 · {age} 前建库"),
+    ("{n} finished photos · from {path} · built {age} ago", "{n} 张成片 · 来自 {path} · {age} 前建库"),
     ("Library file: {path}", "库文件：{path}"),
     ("built {hours}h ago", "{hours} 小时前建库"),
     ("built {days}d ago", "{days} 天前建库"),
@@ -1947,17 +1947,17 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
         " 跨图对应已测量（DIFT）：画面 {cov}% 在目标中有可信对应（中位置信 {med}）；完整区拟合按其为像素对加权，并在对应位置读取被移动的内容。"),
     (" Cross-image correspondence unavailable ({e}) — the content-divergent estimators ran without it.",
         " 跨图对应不可用（{e}）——内容分歧估计器已在没有它的情况下运行。"),
-    ("Adherence", "鏂规悳閬靛畾"),
-    ("How closely the AI follows your direction; disabled until Direction has text", "AI 閬靛畾鎸囧畾鐨勭▼搴︼紱娌℃湁 Direction 鏂囨湰鏃跺仠鐢ㄥ"),
-    ("Look library", "椋庢牸搴�"),
-    ("Use look library", "浣跨敤椋庢牸搴�"),
-    ("Pick look folder…", "閫夋嫨椋庢牸鏂囦欢澶�…"),
-    ("Build look library", "鏋勫缓椋庢牸搴�"),
-    ("Use SigLIP 2 look embedding (downloads 1.5 GB once; index builds and analyses take longer)", "浣跨敤 SigLIP 2 椋庢牸鍚戦噺锛堜笅杞�1.5 GB锛屾寔缁�1.5 GB锛�"),
-    ("Embedding is optional and local. The environment override wins when set; rebuild the index after changing this switch.", "鍚戦噺鏄彲閫夌殑鏈湴鍔熻兘锛氳缃幆澧冩椂浠ュ叾涓哄噯锛涙洿鏀瑰悗璇峰ソ鏂伴噸寤虹储寮�。"),
-    ("Building the look library from {path}", "姝ｅ湪浠�{path} 鏋勫缓椋庢牸搴�"),
-    ("Look library built: {n} finished photos from {path}", "椋庢牸搴撳缓绔嬪畬鎴愶細{path} 鐨�{n} 寮犳垚鍝�"),
-    ("{n} of your own edits · from {path} · embeddings {with_embedding}/{total} · looks {looks}", "{path} · {n} 涓嚜鏈夌紪杈� · 鍚戦噺 {with_embedding}/{total} · 椋庢牸 {looks}"),
+    ("Adherence", "遵循度"),
+    ("How closely the AI follows your direction; disabled until Direction has text: <=40% Hint, 40-70% Direct, above 70% Brief. Prompt intent only - it never moves a render limit.", "AI 对你所写方向的遵循程度；Direction 为空时不可用：≤ 40% Hint，40-70% Direct，高于 70% Brief。仅影响提示词意图，不会改变任何渲染限制。"),
+    ("Look library", "外观库"),
+    ("Use look library", "使用外观库"),
+    ("Pick look folder…", "选择成片文件夹…"),
+    ("Build look library", "构建外观库"),
+    ("Use SigLIP 2 look embedding (downloads 1.5 GB once; index builds and analyses take longer)", "使用 SigLIP 2 外观嵌入（首次下载 1.5 GB；建库与分析都会变慢）"),
+    ("Embedding is optional and local. The environment override wins when set; rebuild the index after changing this switch.", "嵌入是可选的本地功能。环境变量一经设置即优先于此开关；改动后请重建索引。"),
+    ("Building the look library from {path}", "正在从 {path} 构建外观库"),
+    ("Look library built: {n} finished photos from {path}", "外观库构建完成：来自 {path} 的 {n} 张成片"),
+    ("{n} of your own edits · from {path} · embeddings {with_embedding}/{total} · looks {looks}", "{n} 条你自己的编辑 · 来自 {path} · 嵌入 {with_embedding}/{total} · 外观 {looks}"),
 ];
 
 #[cfg(test)]
@@ -1988,5 +1988,60 @@ mod tests {
     fn repeated_placeholders_all_expand() {
         let s = trf(Lang::En, "{n} of {n}", &[("n", "2")]);
         assert_eq!(s, "2 of 2");
+    }
+
+    /// Every Chinese value is real Chinese, in the character classes this file
+    /// already uses.
+    ///
+    /// S1 shipped 16 values that were UTF-8 Chinese bytes DECODED AS GBK: the
+    /// text was still valid UTF-8 (so nothing failed to compile, and nothing
+    /// failed to render) but it read as unrelated hanzi, two values carried
+    /// U+FFFD where a byte pair had no GBK mapping at all, and the shipped SC
+    /// font subset then grew 47 KB carrying the garbage glyphs. A console
+    /// encoding accident is invisible to every other gate in this repo, so it
+    /// gets its own.
+    ///
+    /// The allowed set is DERIVED from the catalogue, not hand-listed: CJK, plus
+    /// exactly the non-ASCII symbols the ENGLISH keys already carry. So a
+    /// translation may introduce hanzi and nothing else, and the list cannot
+    /// drift away from what the UI actually renders.
+    ///
+    /// MUTATION: put any single mojibake value back and this fails, naming it.
+    #[test]
+    fn every_chinese_value_is_real_chinese_and_not_a_console_encoding_accident() {
+        // U+FFFD is the unambiguous half: a byte sequence that had no mapping
+        // at all in the codepage it was mangled through.
+        for (en, zh) in ZH_ENTRIES {
+            assert!(
+                !zh.contains('\u{FFFD}'),
+                "the Chinese for {en:?} carries U+FFFD - it was written through a non-UTF-8 \
+                 console; rewrite it with an explicit UTF-8 write"
+            );
+        }
+        // ...and the rest by character class, DERIVED from the catalogue rather
+        // than hand-listed: a Chinese value may introduce CJK, and every other
+        // non-ASCII character in it must already appear on the ENGLISH side.
+        // The English keys are authored in Rust source that no console
+        // re-encoded, so they are the trustworthy half, and every symbol the UI
+        // renders in a translation (the middot, the ellipsis, the arrows, the
+        // toolbar emoji) reaches it from there.
+        let symbols: std::collections::BTreeSet<char> =
+            ZH_ENTRIES.iter().flat_map(|(en, _)| en.chars()).filter(|c| !c.is_ascii()).collect();
+        // The same ranges `scripts/subset_gui_fonts.py` embeds.
+        let is_cjk = |c: char| matches!(c as u32, 0x2E80..=0x9FFF | 0xF900..=0xFAFF | 0xFF00..=0xFFEF);
+        for (en, zh) in ZH_ENTRIES {
+            if let Some(bad) =
+                zh.chars().find(|c| !c.is_ascii() && !is_cjk(*c) && !symbols.contains(c))
+            {
+                panic!(
+                    "the Chinese for {en:?} contains U+{:04X} {bad:?}, which is neither CJK nor \
+                     a symbol any English key uses",
+                    bad as u32
+                );
+            }
+        }
+        // DELIBERATE NON-CHECK: an all-ASCII value is not an error. "AI" is
+        // "AI" in the Chinese UI, and a rule demanding a hanzi in every value
+        // would force a worse translation of an acronym.
     }
 }

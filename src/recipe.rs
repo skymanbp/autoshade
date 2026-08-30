@@ -3291,6 +3291,45 @@ mod tests {
     /// baseline", "double-click resets to 65%"), so they are pinned here rather
     /// than only in the GUI: the CLI's omitted `--strength`, the web body's
     /// absent field and the desktop default all resolve through these.
+    /// The adherence dial's door obeys the SAME clamp/NaN rule as the strength
+    /// dial's, and its tier bands sit where the help text and the prompt say.
+    ///
+    /// The rule was implemented correctly and pinned nowhere: `GradeStrength`
+    /// has this exact test one screen up, and the sibling axis shipped with the
+    /// guarantee unfalsified. A NaN preference (a corrupt prefs file, a slider
+    /// read before it is initialised) must land on the DEFAULT and never on
+    /// 0.0 — on this axis 0.0 means "treat the direction as a hint", i.e. the
+    /// setting most likely to ignore what the user just typed.
+    ///
+    /// MUTATION: replace `Self::DEFAULT` with `0.0` in `DirectionAdherence::new`,
+    /// or move either band edge, and this fails.
+    #[test]
+    fn adherence_door_clamps_and_a_non_finite_dial_is_the_default() {
+        assert_eq!(DirectionAdherence::new(-1.0).get(), 0.0);
+        assert_eq!(DirectionAdherence::new(4.0).get(), 1.0);
+        assert_eq!(DirectionAdherence::new(f32::NAN).get(), DirectionAdherence::DEFAULT);
+        assert_eq!(DirectionAdherence::new(f32::INFINITY).get(), DirectionAdherence::DEFAULT);
+        assert_eq!(DirectionAdherence::new(f32::NEG_INFINITY).get(), DirectionAdherence::DEFAULT);
+        assert_eq!(DirectionAdherence::default().get(), DirectionAdherence::DEFAULT);
+        // The bands, at the edges — behaviourally, not by re-reading the two
+        // constants they alias.
+        for (v, want) in [
+            (0.0, AdherenceTier::Hint),
+            (0.4, AdherenceTier::Hint),
+            (0.401, AdherenceTier::Direct),
+            (0.65, AdherenceTier::Direct),
+            (0.7, AdherenceTier::Direct),
+            (0.701, AdherenceTier::Brief),
+            (1.0, AdherenceTier::Brief),
+        ] {
+            assert_eq!(DirectionAdherence::new(v).tier(), want, "band edge moved at {v}");
+        }
+        // The default sits in the middle band, which is what the GUI tooltip
+        // and the CLI help both tell the user.
+        assert_eq!(DirectionAdherence::default().tier(), AdherenceTier::Direct);
+        assert!((DirectionAdherence::new(0.5).pct() - 50.0).abs() < 1e-4);
+    }
+
     #[test]
     fn the_strength_axis_has_two_named_points_three_bands_and_one_door() {
         use super::*;

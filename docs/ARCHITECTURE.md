@@ -1695,15 +1695,33 @@ the v5 order bit for bit. The vocabulary is a versioned, grouped list of 33
 SigLIP-style photographic phrases; at most one winning phrase per group enters
 the four-tag summary.
 
+The two direction-text terms carry a **standardised variant** (z-score over the
+candidate set, with a disclosed raw fallback below three comparable candidates
+or a degenerate spread), built because raw SigLIP image↔text cosines are tightly
+clustered. The calibration harness measured both variants over the whole grid
+and the raw one won, so `STANDARDISE_TEXT_TERMS = false` ships and the
+standardising path stays one flag away rather than being deleted or shipped
+unmeasured. The switch and the
+four weights are resolved once, as values (`EmbeddingSwitch`,
+`RetrievalWeights`), and travel on the develop request; nothing writes the
+process environment to express a flag, and `retrieve_with_embed`,
+`distance_components` and `retrieve_looks` all read one scoring helper, so the
+diagnostic prints the numbers the ranking used rather than a second
+implementation of them.
+
 Finished baked photos are stored in a separate look-library block with their
-own source directory and no camera features or develop settings. Look retrieval
-uses image/text/description cosine terms only, with `W_LOOK=1.0`; it can guide
-the proposer and optionally supply the reference image, but it never reaches
-`style_targets` or `blend_toward`. With embedding disabled or no query vector,
-the look answer is unreachable and the rationale states that fact. Direction
-adherence is an independent Hint/Direct/Brief prompt tier using the same band
-edges as Strength; the default Direct tier preserves the historical direction
-block byte for byte, while the verifier is told the selected tier.
+own source directory and no camera features or develop settings, capped at 500
+records (the file holds both populations, so both are capped against one
+envelope). Look retrieval uses image/text/description cosine terms only, with
+`W_LOOK=1.0`; it can guide the proposer and optionally supply the reference
+image, but it never reaches `style_targets` or `blend_toward`. A look image
+that fails to load falls back to the RAW neighbour and discloses both. With
+embedding disabled or no query vector, the look answer is unreachable and the
+rationale states that fact. The look block and the IMAGE 2 sentence claim the
+direction helped choose the look only when a text weight is actually non-zero.
+Direction adherence is an independent Hint/Direct/Brief prompt tier using the
+same band edges as Strength; the verifier is told the selected tier, and only
+when a direction exists.
 
 ### 4.7 Pixel retouch / heal (optional) — V2
 

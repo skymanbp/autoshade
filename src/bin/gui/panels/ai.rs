@@ -313,6 +313,12 @@ impl AutoshopApp {
         );
         let has_direction = !self.guidance.trim().is_empty();
         ui.add_enabled_ui(has_direction, |ui| {
+            #[cfg(test)]
+            {
+                // The gate's own witness (same seam as `ai_gate_enabled`): a
+                // comment cannot keep the wrapper here.
+                self.adherence_gate_enabled = Some(ui.is_enabled());
+            }
             Self::slider_pct_hinted(
                 ui,
                 lang,
@@ -320,7 +326,7 @@ impl AutoshopApp {
                 &mut self.direction_adherence,
                 1.0,
                 autoshop::recipe::DirectionAdherence::DEFAULT,
-                tr(lang, "How closely the AI follows your direction; disabled until Direction has text"),
+                tr(lang, "How closely the AI follows your direction; disabled until Direction has text: <=40% Hint, 40-70% Direct, above 70% Brief. Prompt intent only - it never moves a render limit."),
             );
         });
         // R23-4 (feedback #13): the THIRD analysis-side control, under the two

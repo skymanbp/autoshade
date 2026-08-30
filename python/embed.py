@@ -10,6 +10,8 @@ Usage:
   python embed.py --input photo.png  --output vec.json        # one vector
   python embed.py --manifest paths.txt --output index.jsonl   # batch, one
                                                               # record per line
+  python embed.py --text-manifest tags.jsonl --output txt.json  # N texts ->
+                                                              # N text vectors
 
 The vector joins the style index beside the 14-dim hand feature
 (`src/style.rs`) — it does not replace it. An index built WITHOUT this sidecar
@@ -29,12 +31,12 @@ and dense-prediction tasks" — so the licence-clean pick costs nothing here.
 Full comparison table: ~/.claude/plans/r27-materials/D1-ml-sidecar-design.md
 section 2.2.
 
-THE HONEST COST of base/384: of its 375.5 M parameters, the TEXT tower's token
-embedding alone is 256,000 x 768 ~ 197 M — over half the file. This sidecar
-uses the VISION tower only, so roughly 1.1 GB of the 1.50 GB download is dead
-weight today. It is not separable: upstream publishes one monolithic
-`model.safetensors`, and range-reading selected tensors out of it would defeat
-whole-file digest pinning. Stated here rather than discovered later.
+THE COST of base/384: of its 375.5 M parameters, the TEXT tower's token
+embedding alone is 256,000 x 768 ~ 197 M — over half the file. Since the style
+retrieval gained its text terms both towers are used, so the 1.50 GB is no
+longer half dead weight; it was never separable in any case (upstream publishes
+one monolithic `model.safetensors`, and range-reading selected tensors out of it
+would defeat whole-file digest pinning).
 
 PINNING — the discipline is `denoise.py`'s, reused rather than reimplemented:
 this module imports `_fetch_verified` from it, so there is exactly ONE
@@ -122,14 +124,42 @@ EXPECT_MEAN = [0.5, 0.5, 0.5]
 EXPECT_STD = [0.5, 0.5, 0.5]
 TEXT_PADDING = "max_length"
 TEXT_MAX_LENGTH = 64
-TEXT_DO_LOWER_CASE = True
+# A pinned CONFIG VALUE, named as one. The tokenizer does not lowercase; the
+# behaviour is asserted directly by `_case_is_preserved_self_test`, so this
+# constant is only ever compared against the file it came from.
+TEXT_CONFIG_DO_LOWER_CASE = True
+# The ONLY tensor the text tower is fed. SigLIP is trained with a fixed
+# 64-position context and NO padding mask — the pinned `tokenizer_config.json`
+# says so itself (`"model_input_names": ["input_ids"]`, verified 2026-08-29
+# against the cached file), which is why the loaded tokenizer emits one tensor
+# even though its Gemma class declares two by default. This is a CONTRACT, not
+# a convenience: feeding the tower a mask changes the pooled vector (measured
+# cosine 0.72-0.78 against the unmasked one over five phrases), so two indexes
+# built through two different doors are not comparable at all.
+TEXT_MODEL_INPUT_NAMES = ["input_ids"]
+# The one tokenizer class the pin names. The `Auto*` tokenizer factory is NOT a
+# second door: on transformers 5.2.0 its SigLIP mapping resolves to None and the
+# factory raises, and the hand-written fallback that used to sit beside it was
+# how this sidecar grew two vector spaces in the first place.
+TEXT_TOKENIZER_CLASS = "GemmaTokenizer"
 # Named contract: the tokenizer must reproduce the checkpoint's training-time
 # text path. Keeping this beside EXPECT_SIZE makes a pin change fail loudly
 # instead of quietly changing every text cosine in an existing index.
+#
+# `do_lower_case` is a CONFIG VALUE this sidecar does not act on: the pinned
+# config carries it (inherited Gemma metadata) and the fast tokenizer does not
+# apply it. That is not asserted from the file — `--self-test` encodes an
+# upper-case string and its lower-case twin and requires the ids to DIFFER, so
+# the claim is checked against the tokenizer instead of restated from its
+# metadata. SigLIP 2's own processor performs no canonicalisation either
+# (`transformers/models/siglip2/processing_siglip2.py:25,27` sets only
+# `padding="max_length"`, `max_length=64`).
 TEXT_TOKENIZER_CONTRACT = {
     "padding": TEXT_PADDING,
     "max_length": TEXT_MAX_LENGTH,
-    "do_lower_case": TEXT_DO_LOWER_CASE,
+    "do_lower_case": TEXT_CONFIG_DO_LOWER_CASE,
+    "model_input_names": TEXT_MODEL_INPUT_NAMES,
+    "tokenizer_class": TEXT_TOKENIZER_CLASS,
     "unk_token": "<unk>",
     "pad_token": "<pad>",
     "eos_token": "<eos>",
@@ -138,6 +168,22 @@ TEXT_TOKENIZER_CONTRACT = {
     "add_bos_token": False,
     "add_eos_token": True,
 }
+# Five golden strings and the ids the pinned tokenizer really produced
+# (revision f775b65a79762255128c981547af89addcfe0f88, `tokenizer.json`
+# sha256 cb9140fa…, read back 2026-08-29). Each list is the encoding up to and
+# including the EOS id; everything after it is pad id 0 out to 64. A tokenizer
+# swap that kept the file names but changed the graph moves these ids, and
+# `--self-test` fails instead of the index quietly re-ranking.
+TEXT_GOLDEN_IDS = {
+    "a photo with warm golden tones": [235250, 2686, 675, 8056, 13658, 38622, 1],
+    "a monochrome black-and-white photo": [235250, 103304, 2656, 235290, 639, 235290, 7384, 2686, 1],
+    "a golden-hour photo": [235250, 13658, 235290, 14420, 2686, 1],
+    "warmer, moodier, deeper blacks": [3216, 977, 235269, 35298, 11153, 235269, 22583, 61001, 1],
+    "": [1],
+}
+TEXT_EOS_ID = 1
+TEXT_PAD_ID = 0
+TEXT_BOS_ID = 2
 TEXT_SPECIAL_TOKENS = (
     TEXT_TOKENIZER_CONTRACT["unk_token"],
     TEXT_TOKENIZER_CONTRACT["pad_token"],
@@ -187,8 +233,14 @@ def _tokenizer_config_problems(cfg):
         model_max_length = 0
     if model_max_length < TEXT_MAX_LENGTH:
         problems.append(f"model_max_length {cfg.get('model_max_length')} is below {TEXT_MAX_LENGTH}")
-    if cfg.get("do_lower_case", TEXT_DO_LOWER_CASE) is not TEXT_DO_LOWER_CASE:
+    if cfg.get("do_lower_case", TEXT_CONFIG_DO_LOWER_CASE) is not TEXT_CONFIG_DO_LOWER_CASE:
         problems.append("do_lower_case disagrees")
+    # The mask exclusion lives in the PIN, not in our call: this is the line
+    # that makes the loaded tokenizer emit one tensor instead of two.
+    if list(cfg.get("model_input_names", [])) != TEXT_MODEL_INPUT_NAMES:
+        problems.append(f"model_input_names {cfg.get('model_input_names')!r} != {TEXT_MODEL_INPUT_NAMES!r}")
+    if cfg.get("tokenizer_class") != TEXT_TOKENIZER_CLASS:
+        problems.append(f"tokenizer_class {cfg.get('tokenizer_class')!r} != {TEXT_TOKENIZER_CLASS!r}")
     for key in ("unk_token", "pad_token", "eos_token", "bos_token"):
         expected = TEXT_TOKENIZER_CONTRACT[key]
         if cfg.get(key) != expected:
@@ -275,49 +327,27 @@ def load_model(cache_dir, device, fp16):
 
 
 def load_tokenizer(d):
-    from transformers import AutoTokenizer
-    # `local_files_only` is the only loading door; AutoTokenizer's default is
-    # to refuse remote code, and the source-level gate below forbids opting in.
-    try:
-        return AutoTokenizer.from_pretrained(d, local_files_only=True)
-    except (AttributeError, ImportError, OSError) as error:
-        # Transformers 5.2 can lack the SigLIP mapping (and the slow tokenizer
-        # needs sentencepiece, which is intentionally optional here). The
-        # pinned tokenizer.json is itself a complete tokenizers graph, so use
-        # its local fast backend with the same explicit 64-token contract.
-        log(f"AutoTokenizer unavailable ({type(error).__name__}); using pinned tokenizer.json")
-        return PinnedFastTokenizer(d)
+    """THE tokenizer door — one class, one call, no fallback.
 
+    `GemmaTokenizerFast` is the class the pinned `tokenizer_config.json` names
+    (`"tokenizer_class": "GemmaTokenizer"`; on transformers 5.2.0 the two
+    spellings are the same object). It reads the pinned `tokenizer.json`
+    directly, so it needs `tokenizers` and never `sentencepiece`, and
+    `local_files_only` keeps the digest gate the only door.
 
-class PinnedFastTokenizer:
-    """Minimal tokenizer.json adapter for environments without sentencepiece."""
+    THERE WAS A SECOND DOOR AND IT WAS NOT EQUIVALENT. Until this batch the
+    sidecar tried the `Auto*` factory first and fell back to a hand-written
+    adapter over `tokenizer.json` on `AttributeError/ImportError/OSError`. On
+    this machine (transformers 5.2.0, no sentencepiece) the factory raises
+    `AttributeError` — its SigLIP mapping resolves to `None` — so the fallback
+    always ran, and the fallback returned a padding mask that `embed_texts`
+    forwarded into the tower. Same ids, DIFFERENT pooled vectors: cosine
+    0.73 / 0.76 / 0.73 / 0.78 / 0.72 over five phrases. Two doors meant two
+    vector spaces in one index, which is the one thing a cosine cannot survive.
+    """
+    from transformers import GemmaTokenizerFast
 
-    def __init__(self, directory):
-        from tokenizers import Tokenizer
-
-        self._tokenizer = Tokenizer.from_file(os.path.join(directory, "tokenizer.json"))
-        pad_id = self._tokenizer.token_to_id(TEXT_TOKENIZER_CONTRACT["pad_token"])
-        if pad_id is None:
-            raise RuntimeError("pinned tokenizer has no <pad> token")
-        self._tokenizer.enable_truncation(max_length=TEXT_MAX_LENGTH)
-        self._tokenizer.enable_padding(
-            length=TEXT_MAX_LENGTH,
-            pad_id=pad_id,
-            pad_token=TEXT_TOKENIZER_CONTRACT["pad_token"],
-        )
-
-    def __call__(self, texts, padding, max_length, truncation, return_tensors):
-        if padding != TEXT_PADDING or max_length != TEXT_MAX_LENGTH or not truncation:
-            raise ValueError("pinned tokenizer only supports max_length padding at 64 tokens")
-        if return_tensors != "pt":
-            raise ValueError("pinned tokenizer adapter only returns PyTorch tensors")
-        import torch
-
-        encoded = self._tokenizer.encode_batch(list(texts))
-        return {
-            "input_ids": torch.tensor([item.ids for item in encoded], dtype=torch.long),
-            "attention_mask": torch.tensor([item.attention_mask for item in encoded], dtype=torch.long),
-        }
+    return GemmaTokenizerFast.from_pretrained(d, local_files_only=True)
 
 
 def self_test(cache_dir):
@@ -357,8 +387,96 @@ def self_test(cache_dir):
         problems = _tokenizer_config_problems(json.load(f))
     if problems:
         raise SystemExit("text_tower_padding_rule_is_the_pinned_one: " + "; ".join(problems))
-    print("text_tower_padding_rule_is_the_pinned_one: PASS (max_length/64, lower-case, and special tokens)")
+    print(
+        "text_tower_padding_rule_is_the_pinned_one: PASS (max_length/64, one input tensor, "
+        "and the special tokens)"
+    )
     print("tokenizer_files_are_pinned_by_digest: PASS (cached files match size pins)")
+    tokenizer = _golden_ids_self_test(d)
+    if tokenizer is not None:
+        _case_is_preserved_self_test(tokenizer)
+        _text_forward_pass_self_test(cache_dir, d, tokenizer)
+
+
+def _golden_ids_self_test(d):
+    """The tokenizer's OWN output against pinned ids — the half a config read
+    cannot cover.
+
+    `tokenizer_config.json` says what the graph should do; only running it says
+    what it does. Skips (loudly) when `transformers` is not installed, because
+    the model half of this sidecar is optional in CI by construction.
+    """
+    try:
+        tokenizer = load_tokenizer(d)
+    except ImportError as error:
+        print(f"the_text_door_is_the_pinned_tokenizer: SKIP (transformers absent: {error})")
+        return None
+    texts = list(TEXT_GOLDEN_IDS)
+    ids = tokenize(tokenizer, texts).tolist()
+    for text, row in zip(texts, ids):
+        want = TEXT_GOLDEN_IDS[text]
+        if row[: len(want)] != want:
+            raise SystemExit(
+                f"the_text_door_is_the_pinned_tokenizer: {text!r} tokenised to "
+                f"{row[: len(want) + 2]}, pinned {want}"
+            )
+        if any(v != TEXT_PAD_ID for v in row[len(want):]):
+            raise SystemExit(f"the_text_door_is_the_pinned_tokenizer: {text!r} is not pad-filled to {TEXT_MAX_LENGTH}")
+        if row[len(want) - 1] != TEXT_EOS_ID:
+            raise SystemExit(f"the_text_door_is_the_pinned_tokenizer: {text!r} has no EOS after the last token")
+        if row[0] == TEXT_BOS_ID:
+            raise SystemExit(f"the_text_door_is_the_pinned_tokenizer: {text!r} gained a BOS the pin forbids")
+    print(
+        f"the_text_door_is_the_pinned_tokenizer: PASS ({len(texts)} golden strings, "
+        f"no BOS, EOS {TEXT_EOS_ID} after the last token, pad {TEXT_PAD_ID} to {TEXT_MAX_LENGTH})"
+    )
+    return tokenizer
+
+
+def _case_is_preserved_self_test(tokenizer):
+    """`do_lower_case` in the pinned config is not something this door does.
+
+    Asserted against the TOKENIZER, not against its metadata: a receipt read
+    back out of the same file it was copied from cannot be wrong, which is
+    exactly why it was not worth having. If a re-pin ever did start
+    canonicalising case, every text vector in every existing index would move
+    and this is the line that says so.
+    """
+    upper, lower = "A PHOTO WITH DEEP BLACKS", "a photo with deep blacks"
+    ids = tokenize(tokenizer, [upper, lower]).tolist()
+    if ids[0] == ids[1]:
+        raise SystemExit(
+            "the_text_door_does_not_canonicalise_case: the tokenizer folded case, so "
+            "do_lower_case is now BEHAVIOUR and every stored text vector moved"
+        )
+    print("the_text_door_does_not_canonicalise_case: PASS (case-distinct ids; do_lower_case is a config value only)")
+
+
+def _text_forward_pass_self_test(cache_dir, d, tokenizer):
+    """One real text vector out of the pinned tower.
+
+    The checks above all stop at the tokenizer. This one loads the checkpoint
+    and runs `text_model(input_ids=...)` once, so "the text half works" is a
+    measurement rather than an inference from two file reads. Skips loudly
+    without torch/transformers, like every other model-dependent check here.
+    """
+    try:
+        import numpy as np
+        import torch
+    except ImportError as error:
+        print(f"the_text_tower_answers_a_unit_vector: SKIP (torch/numpy absent: {error})")
+        return
+    del d
+    model = load_model(cache_dir, "cpu", False)
+    probe = next(iter(TEXT_GOLDEN_IDS))
+    vecs = embed_texts(model, tokenizer, "cpu", [probe], np)
+    if vecs.shape != (1, MODEL["dim"]):
+        raise SystemExit(f"the_text_tower_answers_a_unit_vector: shape {vecs.shape}, expected (1, {MODEL['dim']})")
+    norm = float(np.linalg.norm(vecs[0]))
+    if abs(norm - 1.0) > 1e-4:
+        raise SystemExit(f"the_text_tower_answers_a_unit_vector: |v| = {norm}, expected 1")
+    del torch
+    print(f"the_text_tower_answers_a_unit_vector: PASS ({MODEL['dim']}-dim, |v| = {norm:.6f})")
 
 
 def preprocess(path, np):
@@ -415,15 +533,40 @@ def embed_batch(model, device, arrays, np):
     return v.cpu().numpy().astype(np.float32)
 
 
+def tokenize(tokenizer, texts):
+    """N strings -> the ONE tensor the text tower takes, shape (N, 64).
+
+    The shape and the key set are asserted rather than assumed: an encoding
+    that grew a second tensor would mean the pinned `model_input_names` moved,
+    and the vectors this process writes would silently stop being comparable
+    with every vector already in the user's index.
+    """
+    enc = tokenizer(list(texts), padding=TEXT_PADDING, max_length=TEXT_MAX_LENGTH,
+                    truncation=True, return_tensors="pt")
+    keys = set(enc.keys())
+    if keys != set(TEXT_MODEL_INPUT_NAMES):
+        raise SystemExit(
+            f"refusing to embed text: the tokenizer returned {sorted(keys)}, and this "
+            f"checkpoint's text tower takes exactly {TEXT_MODEL_INPUT_NAMES}"
+        )
+    ids = enc["input_ids"]
+    if tuple(ids.shape) != (len(texts), TEXT_MAX_LENGTH):
+        raise SystemExit(
+            f"refusing to embed text: ids are {tuple(ids.shape)}, expected "
+            f"({len(texts)}, {TEXT_MAX_LENGTH})"
+        )
+    return ids
+
+
 def embed_texts(model, tokenizer, device, texts, np):
     import torch
     if not texts:
         return np.empty((0, MODEL["dim"]), dtype=np.float32)
-    enc = tokenizer(list(texts), padding=TEXT_PADDING, max_length=TEXT_MAX_LENGTH,
-                    truncation=True, return_tensors="pt")
-    enc = {k: v.to(device) for k, v in enc.items()}
+    ids = tokenize(tokenizer, texts).to(device)
     with torch.no_grad():
-        out = model.text_model(**enc).pooler_output.float()
+        # `input_ids=` by NAME and nothing else — never `**enc`, which is how a
+        # padding mask reached the tower and moved every text vector.
+        out = model.text_model(input_ids=ids).pooler_output.float()
         out = out / out.norm(dim=-1, keepdim=True).clamp_min(1e-12)
     return out.cpu().numpy().astype(np.float32)
 
@@ -478,6 +621,11 @@ def main() -> None:
     )
     ap.add_argument("--manifest-jsonl", help='JSONL manifest of {"path": ..., "text": ...}')
     ap.add_argument("--text-file", help="UTF-8 file containing one text query")
+    ap.add_argument(
+        "--text-manifest",
+        help='JSONL manifest of {"text": ...} — N strings in, N text vectors out, in the '
+        "same order, from ONE process",
+    )
     ap.add_argument("--vocab-file", help="UTF-8 phrases, one per line")
     ap.add_argument("--output")
     ap.add_argument("--batch", type=int, default=8, help="images per forward pass")
@@ -491,8 +639,14 @@ def main() -> None:
         return
     if not a.output:
         die("--output is required")
-    if sum(bool(v) for v in (a.input, a.manifest, a.manifest_jsonl)) != 1:
-        die("give exactly one of --input, --manifest or --manifest-jsonl")
+    if sum(bool(v) for v in (a.input, a.manifest, a.manifest_jsonl, a.text_manifest)) != 1:
+        die("give exactly one of --input, --manifest, --manifest-jsonl or --text-manifest")
+    # REFUSED, not ignored. `--text-file` is one query for one image; in the
+    # batch modes the per-record text comes from the manifest (or, for a pure
+    # text batch, IS the manifest), and silently dropping the flag meant a
+    # caller could ask for a text vector, get a clean exit and no text vector.
+    if a.text_file and not a.input:
+        die("--text-file applies to --input only; the batch modes carry their text in the manifest")
 
     import numpy as np
     import torch
@@ -514,6 +668,28 @@ def main() -> None:
         f'"dim":{MODEL["dim"]},"norm":"l2","dtype":"{dtype}"'
     )
 
+    if a.text_manifest:
+        # THE BATCH TEXT DOOR. It exists because the index builders need one
+        # text vector per record and the alternative was one PROCESS per
+        # record: the look build used to re-invoke this sidecar — 1.5 GB of
+        # weights, re-loaded — once per photograph purely to embed its own tag
+        # string. N strings, one load, one answer, in order.
+        with open(a.text_manifest, encoding="utf-8") as f:
+            texts = [str(json.loads(ln)["text"]) for ln in f if ln.strip()]
+        if not texts:
+            die(f"text manifest {a.text_manifest} lists no texts")
+        rows = []
+        # Chunked for the same reason the image path is: a manifest is
+        # unbounded input, and a 5,000-string forward pass is not a budget
+        # anyone signed off. 64 tokens x 8 x batch is small either way.
+        chunk = max(1, int(a.batch)) * 8
+        for start in range(0, len(texts), chunk):
+            for v in embed_texts(model, tokenizer, device, texts[start : start + chunk], np):
+                rows.append(vec_json(np, v))
+        publish(a.output, "{" + head + ',"text_vectors":[' + ",".join(rows) + "]}\n")
+        log(f"wrote {a.output} ({len(rows)} text vector(s))")
+        return
+
     if a.input:
         v = embed_batch(model, device, [preprocess(a.input, np)], np)[0]
         if v.shape[0] != MODEL["dim"]:
@@ -533,23 +709,35 @@ def main() -> None:
         log(f"wrote {a.output} ({MODEL['dim']}-dim)")
         return
 
+    out = []
     if a.manifest_jsonl:
+        # FAIL-SOFT PER LINE, here too. `[json.loads(ln) for ln in f]` aborted
+        # the whole rebuild on one malformed line, which is the opposite of the
+        # contract the image loop below states and keeps.
+        paths, texts_by_path = [], {}
         with open(a.manifest_jsonl, encoding="utf-8") as f:
-            entries = [json.loads(ln) for ln in f if ln.strip()]
-        paths = [str(e.get("path", "")) for e in entries]
-        texts_by_path = {str(e.get("path", "")): e.get("text") for e in entries}
+            for lineno, ln in enumerate(f, 1):
+                if not ln.strip():
+                    continue
+                try:
+                    entry = json.loads(ln)
+                    path = str(entry["path"])
+                except (ValueError, KeyError, TypeError) as e:  # noqa: BLE001 - per-line failure IS the contract
+                    out.append(json.dumps({"path": f"<line {lineno}>", "error": f"{type(e).__name__}: {e}"}))
+                    continue
+                paths.append(path)
+                texts_by_path[path] = entry.get("text")
     else:
         with open(a.manifest, encoding="utf-8") as f:
             paths = [ln.strip() for ln in f if ln.strip()]
         texts_by_path = {}
-    if not paths:
-        die(f"manifest {a.manifest} lists no paths")
+    if not paths and not out:
+        die(f"manifest {a.manifest or a.manifest_jsonl} lists no paths")
     # FAIL-SOFT PER LINE. The Rust index builder already skips individual
     # photos on decode/sidecar failure and keeps the run going; a batch mode
     # that aborted a 150-photo rebuild on one unreadable file would be a
     # regression against that. A refused DOWNLOAD is still fatal — that is a
     # property of the run, not of one photo.
-    out = []
     batch = max(1, int(a.batch))
     for start in range(0, len(paths), batch):
         chunk = paths[start : start + batch]

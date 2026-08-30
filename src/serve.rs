@@ -1350,7 +1350,11 @@ fn api_style_build(request: &mut Request) -> Result<ResponseBox> {
     if !p.is_dir() {
         return Ok(status_response(400, &format!("not a folder: {cleaned}")));
     }
-    let index = match crate::style::StyleIndex::build(&p) {
+    // The web surface has no `--embed` flag, so the switch is what the
+    // environment says with the preference off — exactly what `build` used to
+    // read for itself before the switch became a value.
+    let embed = crate::style::EmbeddingSwitch::resolve(None, false);
+    let index = match crate::style::StyleIndex::build(&p, embed) {
         Ok(ix) => ix,
         Err(e) => return Ok(status_response(500, &format!("build failed: {e}"))),
     };
@@ -1819,6 +1823,10 @@ fn api_analyze(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
             think: req.deep.unwrap_or(false),
             adherence: crate::recipe::DirectionAdherence::default(),
             use_looks: true,
+            // `..default()` for the two resolved-once fields: the browser has
+            // no way to set them, and spelling them out here would be a second
+            // place that has to agree with `GradeRequest::default`.
+            ..Default::default()
         },
         true,
         // The shipped channel (R29-1). The web surface is one request, one

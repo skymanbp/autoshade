@@ -16,6 +16,10 @@ mod claude;
 mod heuristic;
 mod judge;
 mod openai;
+// The two prompt-injection fences, re-exported: `style-query` prints the SAME
+// blocks the proposer receives, and a second literal there could drift from
+// these without anything failing.
+pub use openai::{FENCE_LOOK_REFERENCE, FENCE_STYLE_REFERENCE};
 mod openai_verify;
 
 pub use claude::ClaudeProvider;
@@ -281,6 +285,10 @@ pub struct ProposeContext<'a> {
     /// the provider just like the RAW style reference.
     pub look_reference: Option<&'a str>,
     pub reference_image_is_look: bool,
+    /// Did the DIRECTION take part in choosing that look? False at the shipped
+    /// weights, where the look is ranked by its image vector alone — see
+    /// [`crate::style::StyleIndex::look_ranked_by_direction`].
+    pub look_ranked_by_direction: bool,
     /// The photo's as-shot white balance in ABSOLUTE Kelvin, the anchor
     /// `temperature_k` is measured against (`None` = unknown, the engine's
     /// 5500 K fallback). The prompt states it because the model otherwise has
@@ -1749,10 +1757,19 @@ pub(crate) fn build_verify_prompt(
 default taste.\n",
         intent.strength.pct()
     );
-    let adherence = format!(
-        "DIRECTION ADHERENCE TIER: {:?}. The proposer must be evaluated against this tier; do not impose generic restraint on a Brief direction.\n",
-        intent.adherence.tier()
-    );
+    // ONLY when there IS a direction. The tier says how closely to follow one,
+    // so on a develop with no direction this named a tier for a thing that did
+    // not exist and told the verifier not to "impose generic restraint" on it -
+    // a sentence about nothing, emitted on every single develop.
+    let has_direction = intent.direction.map(str::trim).is_some_and(|d| !d.is_empty());
+    let adherence = if has_direction {
+        format!(
+            "DIRECTION ADHERENCE TIER: {:?}. The proposer must be evaluated against this tier; do not impose generic restraint on a Brief direction.\n",
+            intent.adherence.tier()
+        )
+    } else {
+        String::new()
+    };
     let direction = match intent.direction.map(str::trim).filter(|d| !d.is_empty()) {
         Some(d) => format!(
             "THEIR DIRECTION for this develop was: \"{}\". A recipe that follows it is doing what \
@@ -3301,13 +3318,43 @@ Final answer: {"decision":"accept","reasons":[]}"#;
         );
     }
 
+    /// The tier clause rides with a DIRECTION and with nothing else.
+    ///
+    /// It used to be emitted unconditionally, so a develop with no direction at
+    /// all still told the verifier a tier for a thing that did not exist - and
+    /// told it not to "impose generic restraint on a Brief direction" when
+    /// there was no direction to be restrained about. On the CLI and the web
+    /// surface, where a direction is optional, that was most develops.
+    ///
+    /// MUTATION: drop the `has_direction` guard in `build_verify_prompt` and
+    /// the second half fails.
     #[test]
     fn verify_prompt_states_the_adherence_tier() {
         let recipe = EditRecipe::default();
         let meta = Meta { make: "T".into(), model: "T".into(), lens: None, iso: Some(100), shutter: None, aperture: None, focal_length_mm: None, exposure_bias_ev: None, date_time: None, width: 100, height: 100, as_shot_wb_coeffs: [1.0; 4] };
         let hist = Histogram { luma: vec![1; 256], r: vec![1; 256], g: vec![1; 256], b: vec![1; 256], clip_black_pct: 0.0, clip_white_pct: 0.0, sample_pixels: 1 };
-        let prompt = build_verify_prompt(&recipe, &meta, &hist, &GradeIntent { strength: GradeStrength::default(), adherence: DirectionAdherence::new(0.9), direction: Some("briefly warmer") }).unwrap();
-        assert!(prompt.contains("DIRECTION ADHERENCE TIER: Brief"), "{prompt}");
-        assert!(prompt.contains("briefly warmer"));
+        let prompt = |direction: Option<&'static str>| {
+            build_verify_prompt(&recipe, &meta, &hist, &GradeIntent {
+                strength: GradeStrength::default(),
+                adherence: DirectionAdherence::new(0.9),
+                direction,
+            })
+            .unwrap()
+        };
+        let with = prompt(Some("briefly warmer"));
+        assert!(with.contains("DIRECTION ADHERENCE TIER: Brief"), "{with}");
+        assert!(with.contains("briefly warmer"));
+        // No direction, and whitespace-only: no tier clause at all.
+        for none in [None, Some("   ")] {
+            let p = prompt(none);
+            assert!(
+                !p.contains("DIRECTION ADHERENCE TIER"),
+                "a develop with no direction must not be told a tier: {p}"
+            );
+            assert!(!p.contains("Brief direction"), "{p}");
+        }
+        // …and the STRENGTH clause, which is about the develop and not the
+        // direction, still rides on every one of them.
+        assert!(prompt(None).contains("TARGET STRENGTH"));
     }
 }

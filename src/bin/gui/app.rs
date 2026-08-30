@@ -383,6 +383,13 @@ pub(crate) struct AutoshopApp {
     /// can tell a rebuilt gate from a comment about one.
     #[cfg(test)]
     pub(crate) ai_gate_enabled: Option<bool>,
+    /// Test seam: was the ADHERENCE slider enabled this frame? Same reason as
+    /// the gate above — the slider is wrapped in `add_enabled_ui(has_direction,
+    /// ...)`, and the falsifier named after that gate used to assert only that
+    /// a default app has an empty direction, which is true whether the wrapper
+    /// is there or not.
+    #[cfg(test)]
+    pub(crate) adherence_gate_enabled: Option<bool>,
     // --- batch recipe copy / paste ---
     pub(crate) multi_sel: HashSet<usize>,             // Ctrl+click gallery multi-selection
     pub(crate) copied: Option<EditRecipe>,            // the recipe "clipboard" (in-app only)
@@ -1692,6 +1699,8 @@ impl Default for AutoshopApp {
             prompt_rects: Vec::new(),
             #[cfg(test)]
             ai_gate_enabled: None,
+            #[cfg(test)]
+            adherence_gate_enabled: None,
             multi_sel: HashSet::new(),
             copied: None,
             copied_from: None,
