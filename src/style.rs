@@ -149,6 +149,24 @@ fn block_tags(tags: &[String]) -> String {
     out
 }
 
+/// The tag phrases the retrieved exemplars SHARE, most-shared first and ties
+/// broken by phrase so the order is stable, at most [`LOOK_TAGS_K`] of them,
+/// each already through the block's own phrase door.
+///
+/// ONE ranking, TWO consumers: the reference block's `THEIR SHARED LOOK`
+/// clause and [`StyleIndex::look_summary`], which is what the visual judge is
+/// told the photographer asked for (B2). A second hand-written ranking is how
+/// the block and the rubric would come to describe different looks.
+fn shared_look_tags(ex: &[&StyleExemplar]) -> Vec<(String, usize)> {
+    let mut freq: BTreeMap<&str, usize> = BTreeMap::new();
+    for tag in ex.iter().flat_map(|e| e.tags.iter()) {
+        *freq.entry(tag.as_str()).or_default() += 1;
+    }
+    let mut ranked: Vec<(&str, usize)> = freq.into_iter().collect();
+    ranked.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(b.0)));
+    ranked.into_iter().take(LOOK_TAGS_K).map(|(t, n)| (block_tag_phrase(t), n)).collect()
+}
+
 /// One exemplar's description as a block carries it: through the sanitising
 /// door, then bounded to [`REFERENCE_DESC_CHARS`] CHARACTERS (never bytes — a
 /// byte slice would split a codepoint).
@@ -571,6 +589,36 @@ pub const LOOK_VOCAB: [&str; 33] = [
     "a photo with gentle natural light", "a photo with dramatic directional light", "a photo with rich shadow detail", "a photo with restrained colour", "a photo with luminous highlights", "a photo with cinematic tones", "a photo with a soft editorial grade", "a photo with a neutral documentary grade",
 ];
 pub const LOOK_TAGS_K: usize = 4;
+
+/// The smallest colour-shaping magnitude that can honestly be called a FLOOR
+/// (B4, user ruling 2026-08-30 — "色彩下限等于没有下限").
+///
+/// The reference block used to promise `treat this LEVEL of colour shaping as
+/// your FLOOR` over whatever the retrieved neighbours measured, and a real
+/// library measured `HSL mixer mean |hue| 2, |sat| 2, |lum| 0 … strongest wheel
+/// saturation 0`: a floor of zero, i.e. no floor, printed in capitals. Five is
+/// the app's own smallest visible colour move — the proposer prompt already
+/// tells the model that `small saturations (~5..25) read as a tasteful
+/// split-tone` (`advisor::openai::propose_instruction`) — so below it the
+/// neighbours did not shape colour and the sentence must say so instead of
+/// dressing a zero up as a target.
+pub const COLOUR_HABIT_FLOOR: f32 = 5.0;
+
+/// The colour floor the STYLE DIAL itself supplies when the neighbours' own
+/// habit is too near zero to be one, as `(hsl band ±, colour-grade wheel
+/// saturation)`.
+///
+/// The measurement is never rewritten — that is the rule the whole block is
+/// built on — so the floor has to come from somewhere else, and the only
+/// honest other source is the dial the photographer just turned up. Linear in
+/// the dial and strictly increasing, so "more personal style" cannot buy a
+/// smaller allowance; the numbers land inside the ~5..25 split-tone band the
+/// proposer prompt already names, at its committed end.
+fn style_colour_floor(style: f32) -> (f32, f32) {
+    let s = style.clamp(0.0, 1.0);
+    ((10.0 + 20.0 * s).round(), (8.0 + 17.0 * s).round())
+}
+
 const LOOK_GROUPS: &[&[usize]] = &[&[0,1,2], &[3,4,5,6], &[7,8], &[9,10,11], &[12,13,14,15], &[16,17,18,19], &[20,21,22,23,24], &[25,26,27,28,29,30,31,32]];
 
 fn walkdir(root: &Path) -> Result<Vec<PathBuf>> {
@@ -2728,6 +2776,46 @@ impl StyleIndex {
         Some(out)
     }
 
+    /// The LOOK this retrieval is asking for, in ONE short line, for the
+    /// DOWNSTREAM REVIEWERS (B2).
+    ///
+    /// The reference block itself is kilobytes of numbers and prose and it goes
+    /// to the PROPOSER alone. The visual judge never saw any of it, so a
+    /// deliberate look — the warm golden lean, the teal-and-orange split tone —
+    /// reached the judge as an unexplained colour cast and was marked down as a
+    /// flaw; six showcase runs came back with revision hints that were pure
+    /// subtraction ("reduce aqua/blue saturation ~15", "lower green
+    /// saturation") and the final global saturation landed at +2/-2. This is
+    /// the smallest thing a reviewer needs in order to tell a look from a
+    /// defect: the phrases, and nothing else.
+    ///
+    /// UNTRUSTED, like every other tag and description that reaches a prompt —
+    /// the phrases come from the index, which is disk input. It is bounded here
+    /// by construction (`block_tags` and `shared_look_tags` both go through the
+    /// block's own doors) and fenced again at the consumer
+    /// (`judge::intent_rubric`), for the same reason `block_desc` exists: two
+    /// doors cost nothing and one of them is always the one that was forgotten.
+    pub fn look_summary(looks: &[&LookExemplar], ex: &[&StyleExemplar]) -> Option<String> {
+        let library = looks.first().map(|l| block_tags(&l.tags)).filter(|t| !t.is_empty());
+        let ranked = shared_look_tags(ex);
+        let shared = (!ranked.is_empty())
+            .then(|| ranked.iter().map(|(t, _)| t.as_str()).collect::<Vec<_>>().join(", "));
+        // The COUNTS stay out: "3/4" is the reference block's evidence for the
+        // proposer, and a reviewer asked "is this look delivered?" would only
+        // be invited to score the evidence instead of the photograph.
+        match (library, shared) {
+            (Some(l), Some(s)) => Some(format!(
+                "{l} (the finished photo they picked out of their own look library); their \
+similar past edits share: {s}"
+            )),
+            (Some(l), None) => Some(format!(
+                "{l} (the finished photo they picked out of their own look library)"
+            )),
+            (None, Some(s)) => Some(format!("{s} (shared across their similar past edits)")),
+            (None, None) => None,
+        }
+    }
+
     /// Render retrieved exemplars as a SOFT reference block for the advisor prompt.
     ///
     /// The pipeline passes the Style axis here for GATE 5 (R23-3); the
@@ -2807,10 +2895,40 @@ impl StyleIndex {
             let mean = |f: fn(&crate::eval::FamilySummary) -> f32| {
                 fams.iter().map(f).sum::<f32>() / n
             };
-            let aim = if bold {
+            // The five shaping magnitudes, read ONCE: the sentence prints them
+            // and the floor decision below reads them, so the block can never
+            // promise a floor its own numbers do not support (B4).
+            let (hue, sat, lum) = (mean(|f| f.hsl[0]), mean(|f| f.hsl[1]), mean(|f| f.hsl[2]));
+            let (wheel_sat, wheel_lum) = (mean(|f| f.grade[0]), mean(|f| f.grade[1]));
+            let shaped =
+                [hue, sat, lum, wheel_sat, wheel_lum].iter().fold(0.0f32, |m, v| m.max(v.abs()));
+            let aim = if !bold {
+                "match this LEVEL of colour shaping, do not exceed it.".to_string()
+            } else if shaped >= COLOUR_HABIT_FLOOR {
                 "treat this LEVEL of colour shaping as your FLOOR — you may go beyond it."
+                    .to_string()
             } else {
-                "match this LEVEL of colour shaping, do not exceed it."
+                // B4: the same dial, the same measurement, and NO false floor.
+                // These neighbours barely touched colour, so their habit cannot
+                // be the floor the committed band promises — and rewriting the
+                // numbers to make one is the fabrication this block exists to
+                // refuse. The floor comes from the dial instead, stated as an
+                // allowance the model may exceed.
+                let (hsl_pm, grade_pm) = style_colour_floor(strength.get());
+                // TIGHT ON PURPOSE. This arm renders the WIDEST block this
+                // app can build, and the first draft of it put an adversarial
+                // maximal block 12 B over `advisor::REFERENCE_BUDGET_BYTES`
+                // (measured by `the_local_work_note_fits_the_proposers_budget`,
+                // which is exactly what that test is for). The prose that
+                // overflowed the door is this batch's own, so this batch's prose
+                // is what pays — not S2's `REFERENCE_DESC_CHARS`, which would
+                // have shortened the description every real library shows.
+                format!(
+                    "that is their HABIT, too near zero to BE a floor — do not read it as one. \
+Your floor comes from the STYLE dial instead: at least ±{hsl_pm:.0} on whichever `hsl` \
+saturation or luminance band this photo calls for, and at least {grade_pm:.0} of \
+`color_grade` wheel saturation; you may go beyond that."
+                )
             };
             format!(
                 "  THEIR TYPICAL COLOUR SHAPING ({} of {} similar shots): HSL mixer mean |hue| \
@@ -2818,11 +2936,11 @@ impl StyleIndex {
 {:.0}, mean |wheel lum| {:.0}; per-channel RGB curves on {:.1} of 3 channels — {aim}",
                 fams.len(),
                 ex.len(),
-                mean(|f| f.hsl[0]),
-                mean(|f| f.hsl[1]),
-                mean(|f| f.hsl[2]),
-                mean(|f| f.grade[0]),
-                mean(|f| f.grade[1]),
+                hue,
+                sat,
+                lum,
+                wheel_sat,
+                wheel_lum,
                 mean(|f| f.rgb_curves as f32),
             )
         };
@@ -2834,20 +2952,15 @@ impl StyleIndex {
         // colour families and left the vocabulary tags as decoration on lines
         // the model was told not to copy.
         let look_note = {
-            let mut freq: BTreeMap<&str, usize> = BTreeMap::new();
-            for tag in ex.iter().flat_map(|e| e.tags.iter()) {
-                *freq.entry(tag.as_str()).or_default() += 1;
-            }
-            if freq.is_empty() {
+            // Most shared first, ties by phrase — `shared_look_tags`, the very
+            // ranking `look_summary` hands the visual judge (B2).
+            let ranked = shared_look_tags(ex);
+            if ranked.is_empty() {
                 String::new()
             } else {
-                let mut ranked: Vec<(&str, usize)> = freq.into_iter().collect();
-                // Most shared first; ties by phrase, so the block is stable.
-                ranked.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(b.0)));
                 let shared: Vec<String> = ranked
                     .iter()
-                    .take(LOOK_TAGS_K)
-                    .map(|(tag, n)| format!("{} ({n}/{})", block_tag_phrase(tag), ex.len()))
+                    .map(|(tag, n)| format!("{tag} ({n}/{})", ex.len()))
                     .collect();
                 let aim = if bold {
                     "— REPRODUCE this look; it is the target, and you may push past it."
@@ -5817,6 +5930,22 @@ mod tests {
         ])
     }
 
+    /// A photographer who cools the sky through the mask and shapes it with a
+    /// local curve — the habit B5 exists to carry.
+    fn wb_and_curve_habit() -> crate::mask_habit::MaskHabit {
+        use crate::recipe::{CurvePoint, LocalAdjustment, MaskGeometry};
+        crate::mask_habit::MaskHabit::of(&[
+            LocalAdjustment {
+                mask: MaskGeometry::Linear { zero_x: 0.5, zero_y: 0.8, full_x: 0.5, full_y: 0.0 },
+                exposure_ev: -0.4,
+                temperature: -30.0,
+                tint: 8.0,
+                main_curve: vec![CurvePoint { input: 0, output: 12 }],
+                ..Default::default()
+            },
+        ])
+    }
+
     /// An index written before S3 has no `masks` key at all, and must load —
     /// with the field ABSENT, not defaulted to a measured zero. A user whose
     /// hour-long RAW build predates this batch keeps their Style panel; their
@@ -6183,6 +6312,183 @@ mod tests {
         assert_eq!(block_tags(&small), "warm golden tones, hazy");
     }
 
+    /// B4: a colour habit that rounds to nothing must stop calling itself a
+    /// FLOOR, and the STYLE dial must supply a real one in its place.
+    ///
+    /// The measured defect, from the user's own library (2026-08-30): the
+    /// committed band printed `HSL mixer mean |hue| 2, |sat| 2, |lum| 0 …
+    /// colour-grade strongest wheel saturation 0, mean |wheel lum| 0 — treat
+    /// this LEVEL of colour shaping as your FLOOR`. The floor was zero. Turning
+    /// the style dial up bought the word FLOOR and no colour.
+    ///
+    /// The NUMBERS still never move — that is the rule the whole block rests on
+    /// and this batch does not touch it. What changes is the sentence after
+    /// them, and where the floor comes from when the measurement cannot be one.
+    ///
+    /// MUTATION: set `COLOUR_HABIT_FLOOR` to 0.0 (the near-zero library goes
+    /// back to claiming a FLOOR), or make `style_colour_floor` return a
+    /// constant (the monotonicity assertion fails), or drop the `!bold` arm
+    /// (the ceiling band starts quoting an allowance).
+    #[test]
+    fn a_near_zero_colour_habit_stops_claiming_to_be_a_floor() {
+        use crate::recipe::GradeStrength;
+        let idx = StyleIndex {
+            version: CURRENT_INDEX_VERSION,
+            mean: vec![0.0; NDIM],
+            std: vec![1.0; NDIM],
+            exemplars: vec![],
+            source_dir: None,
+            looks: Vec::new(),
+            looks_dir: None,
+            embed_provenance: None,
+        };
+        // The user's own library, to the digit.
+        let flat = StyleExemplar {
+            families: Some(crate::eval::FamilySummary {
+                hsl: [2.0, 2.0, 0.0],
+                grade: [0.0, 0.0],
+                rgb_curves: 0,
+            }),
+            ..plain_exemplar("flat")
+        };
+        let at = |s: f32| idx.render_reference(&[&flat], GradeStrength::new(s)).unwrap();
+        let (bold, ceiling) = (at(0.9), at(0.5));
+
+        // The measurement is still stated, verbatim and unrounded-away.
+        assert!(bold.contains("|hue| 2, |sat| 2, |lum| 0"), "{bold}");
+        assert!(bold.contains("strongest wheel saturation 0, mean |wheel lum| 0"), "{bold}");
+        // …but it is no longer called a floor.
+        assert!(
+            !bold.contains("FLOOR"),
+            "a habit of 2/2/0/0/0 is not a floor and must not be called one: {bold}"
+        );
+        assert!(bold.contains("too near zero to BE a floor"), "{bold}");
+        // …and a REAL, non-zero floor arrives from the dial instead.
+        assert!(bold.contains("Your floor comes from the STYLE dial instead"), "{bold}");
+
+        // A library that DID shape colour keeps the shipped floor sentence —
+        // this batch narrows the claim, it does not remove it.
+        let shaped = StyleExemplar {
+            families: Some(crate::eval::FamilySummary {
+                hsl: [2.0, 18.0, 6.0],
+                grade: [20.0, 4.0],
+                rgb_curves: 2,
+            }),
+            ..plain_exemplar("shaped")
+        };
+        let real = idx.render_reference(&[&shaped], GradeStrength::new(0.9)).unwrap();
+        assert!(real.contains("treat this LEVEL of colour shaping as your FLOOR"), "{real}");
+        assert!(!real.contains("comes from the STYLE dial"), "{real}");
+
+        // Below the committed band nothing moved at all: the ceiling wording is
+        // the shipped one, with or without a habit worth the name.
+        for (name, text) in [("flat", &ceiling), ("shaped", &idx.render_reference(&[&shaped], GradeStrength::new(0.5)).unwrap())] {
+            assert!(text.contains("match this LEVEL of colour shaping, do not exceed it."), "{name}: {text}");
+            assert!(!text.contains("STYLE dial"), "{name}: a ceiling quotes no allowance: {text}");
+        }
+
+        // The allowance GROWS with the dial, strictly, across the band that can
+        // see it and across the whole axis underneath.
+        let mut last = (0.0f32, 0.0f32);
+        for s in [0.0, 0.25, 0.5, 0.85, 0.9, 1.0] {
+            let (h, g) = style_colour_floor(s);
+            assert!(h > 0.0 && g > 0.0, "the dial's floor is never zero: {s} -> {h}/{g}");
+            assert!(h > last.0 && g > last.1, "the allowance must grow with the dial: {s} -> {h}/{g} after {last:?}");
+            last = (h, g);
+        }
+        // …and the block quotes the dial it was given, not a fixed pair.
+        let (h85, g85) = style_colour_floor(0.85);
+        let (h100, g100) = style_colour_floor(1.0);
+        assert!(at(0.85).contains(&format!("±{h85:.0}")), "{}", at(0.85));
+        assert!(at(1.0).contains(&format!("±{h100:.0}")), "{}", at(1.0));
+        assert!(at(0.85).contains(&format!("{g85:.0} of")), "{}", at(0.85));
+        assert!(at(1.0).contains(&format!("{g100:.0} of")), "{}", at(1.0));
+    }
+
+    /// B2: what the DOWNSTREAM REVIEWERS are told the photographer asked for.
+    ///
+    /// The reference block goes to the proposer alone, so a deliberate look
+    /// reached the visual judge as an unexplained cast — and the judge BUYS
+    /// revisions, so it spent them flattening the look back out. This is the
+    /// smallest thing a reviewer needs, and it is the SAME ranking the block's
+    /// own `THEIR SHARED LOOK` clause uses (`shared_look_tags`), so the two can
+    /// never describe different looks.
+    ///
+    /// MUTATION: return `None` unconditionally (every assert fails), drop the
+    /// look-library half (the first assert fails), or bypass `block_tags` (the
+    /// bound assert fails).
+    #[test]
+    fn the_look_summary_carries_the_phrases_and_stays_bounded() {
+        let look = |tags: Vec<String>| LookExemplar {
+            stem: "finished".into(),
+            path: "finished.jpg".into(),
+            embed: Vec::new(),
+            tags,
+            vocab_scores: None,
+            desc: None,
+            desc_embed: None,
+        };
+        let ex = |stem: &str, tags: &[&str]| StyleExemplar {
+            tags: tags.iter().map(|t| (*t).to_string()).collect(),
+            ..plain_exemplar(stem)
+        };
+        let (a, b) = (
+            ex("r1", &["warm golden tones", "deep blacks"]),
+            ex("r2", &["warm golden tones", "crisp clarity"]),
+        );
+        let l = look(vec!["teal-and-orange split tone".into(), "deep blacks".into()]);
+
+        let both = StyleIndex::look_summary(&[&l], &[&a, &b]).expect("a look and neighbours");
+        assert!(both.starts_with("teal-and-orange split tone, deep blacks"), "{both}");
+        assert!(both.contains("look library"), "the source of the phrases is named: {both}");
+        // The shared half is the block's own ranking: most-shared first.
+        assert!(both.contains("their similar past edits share: warm golden tones"), "{both}");
+        // …and the COUNTS stay out: "3/4" is the proposer's evidence, and a
+        // reviewer asked "was this look delivered?" must judge the photograph.
+        assert!(!both.contains("(2/2)") && !both.contains("/2)"), "{both}");
+
+        // Either half alone still answers.
+        assert!(StyleIndex::look_summary(&[], &[&a, &b]).expect("shared only")
+            .contains("shared across their similar past edits"));
+        assert!(StyleIndex::look_summary(&[&l], &[]).expect("library only").contains("look library"));
+        // Nothing tagged anywhere is None, not an empty sentence — a pre-S1
+        // index and an untagged one share that state.
+        assert_eq!(StyleIndex::look_summary(&[&look(Vec::new())], &[&plain_exemplar("x")]), None);
+
+        // UNTRUSTED, and bounded by the block's own doors on both halves.
+        let long = "q".repeat(400);
+        let wide = StyleIndex::look_summary(
+            &[&look(vec![long.clone(); LOOK_TAGS_K])],
+            &[&ex("r3", &[long.as_str()])],
+        )
+        .expect("bounded");
+        let run = wide.split(|c| c != 'q').map(|r| r.chars().count()).max().unwrap_or(0);
+        assert!(
+            run <= REFERENCE_TAG_PHRASE_CHARS,
+            "one tag phrase reached the summary at {run} characters, over the \
+             {REFERENCE_TAG_PHRASE_CHARS}-character bound: {wide}"
+        );
+
+        // The reference block and the summary rank the same tags the same way —
+        // ONE `shared_look_tags`, so a reader of either sees one look.
+        let idx = StyleIndex {
+            version: CURRENT_INDEX_VERSION,
+            mean: vec![0.0; NDIM],
+            std: vec![1.0; NDIM],
+            exemplars: vec![],
+            source_dir: None,
+            looks: Vec::new(),
+            looks_dir: None,
+            embed_provenance: None,
+        };
+        let block = idx
+            .render_reference(&[&a, &b], crate::recipe::GradeStrength::new(0.9))
+            .expect("block");
+        assert!(block.contains("THEIR SHARED LOOK across these shots: warm golden tones (2/2)"), "{block}");
+        let summary = StyleIndex::look_summary(&[], &[&a, &b]).expect("shared");
+        assert!(summary.starts_with("warm golden tones, "), "same ranking, no counts: {summary}");
+    }
+
     #[test]
     fn the_local_work_note_fits_the_proposers_budget() {
         let maximal = |masks| StyleExemplar {
@@ -6222,14 +6528,18 @@ mod tests {
         };
         // Every bucket populated on every neighbour, every slider at its
         // clamped extreme — the widest note `local_work_note` can produce.
+        // The three LONGEST slider names, which is the widest clause
+        // `mask_habit::slider_phrase` can emit now that `temperature` is in the
+        // set — see `mask_habit::local_work_note_fits_its_bound`.
         let extreme = crate::mask_habit::BucketHabit {
             n: u8::MAX,
             w: 1.0,
-            mean: [-5.0, -100.0, -100.0, -100.0, -100.0, -100.0, -100.0, -100.0],
+            mean: [0.0, -100.0, 0.0, 0.0, 0.0, 0.0, 0.0, -100.0, -100.0, 0.0],
         };
         let worst = crate::mask_habit::MaskHabit {
             count: u8::MAX,
             refined: u8::MAX,
+            curved: u8::MAX,
             sky: extreme,
             subject: extreme,
             ground: extreme,
@@ -6242,6 +6552,37 @@ mod tests {
             let refs: Vec<&StyleExemplar> = ex.iter().collect();
             idx.render_reference(&refs, crate::recipe::GradeStrength::new(0.90)).unwrap()
         };
+        // B4 widened the OTHER axis of this measurement. A near-zero colour
+        // habit no longer claims to be a floor; it quotes the dial's own
+        // allowance instead, and that sentence is longer than the FLOOR one it
+        // replaces — so the widest block is the maximum over BOTH arms, and
+        // measuring only the shaped one would leave the door untested exactly
+        // where this batch pushed on it.
+        let flat = |masks| StyleExemplar {
+            families: Some(crate::eval::FamilySummary {
+                hsl: [2.0, 2.0, 0.0],
+                grade: [0.0, 0.0],
+                rgb_curves: 0,
+            }),
+            ..maximal(masks)
+        };
+        let flattest: Vec<StyleExemplar> = (0..RETRIEVE_K).map(|_| flat(Some(worst))).collect();
+        let f = render(&flattest);
+        println!(
+            "maximal style reference, near-zero colour habit (the B4 dial-allowance arm): {} B",
+            f.len()
+        );
+        assert!(
+            f.contains("Your floor comes from the STYLE dial instead"),
+            "this fixture must exercise the LONGER aim arm: {f}"
+        );
+        assert!(
+            f.len() <= crate::advisor::REFERENCE_BUDGET_BYTES,
+            "the widest block on B4's dial-allowance arm is {} B, over the {} B budget",
+            f.len(),
+            crate::advisor::REFERENCE_BUDGET_BYTES
+        );
+
         let (a, b) = (render(&without), render(&with));
         let delta = b.len() - a.len();
         println!(
@@ -6256,10 +6597,16 @@ mod tests {
             "the note added {delta} B, over its own {}-char bound",
             crate::mask_habit::MAX_LOCAL_WORK_CHARS
         );
-        // …and the increment is a small fraction of the budget, which is the
-        // claim the batch is allowed to make about it.
+        // …and the increment stays a small fraction of the budget. RE-DERIVED
+        // in B5, which was ORDERED to make this note carry more: a curve clause
+        // and the in-mask pointer put the worst case at 685 B, past S3's
+        // one-sixth claim (682 B). The prose paid what it honestly could
+        // (`mask_habit`'s pointer lost 27 B in the same batch); cutting further to
+        // clear a proportion by a fraction of a byte would be gaming the number,
+        // so the CLAIM moves to one fifth and says why. The doors that actually
+        // truncate are the two whole-block assertions either side of this one.
         assert!(
-            delta * 6 <= crate::advisor::REFERENCE_BUDGET_BYTES,
+            delta * 5 <= crate::advisor::REFERENCE_BUDGET_BYTES,
             "the note is {delta} B of a {} B budget",
             crate::advisor::REFERENCE_BUDGET_BYTES
         );
@@ -6285,6 +6632,19 @@ mod tests {
             (0..RETRIEVE_K).map(|_| real(Some(two_mask_habit()))).collect();
         let r = render(&realistic);
         println!("realistic style reference with the note: {} B", r.len());
+        // B5, end to end: a habit that shifts white balance and draws a curve
+        // inside its masks must reach the BLOCK — the note is the mechanism,
+        // the block is what the proposer actually reads.
+        let wb = render(&(0..RETRIEVE_K).map(|_| real(Some(wb_and_curve_habit()))).collect::<Vec<_>>());
+        assert!(wb.contains("temperature -30"), "the measured WB habit reaches the block: {wb}");
+        assert!(wb.contains("draw a tone curve INSIDE the mask"), "{wb}");
+        assert!(wb.contains("They work COLOUR and TONE inside the mask"), "{wb}");
+        assert!(
+            wb.len() <= crate::advisor::REFERENCE_BUDGET_BYTES,
+            "a realistic in-mask-colour block is {} B, over the {} B budget",
+            wb.len(),
+            crate::advisor::REFERENCE_BUDGET_BYTES
+        );
         assert!(
             r.len() <= crate::advisor::REFERENCE_BUDGET_BYTES,
             "a realistic block is {} B, over the {} B budget",

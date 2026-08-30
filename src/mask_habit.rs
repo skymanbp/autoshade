@@ -31,17 +31,34 @@ use serde::{Deserialize, Serialize};
 
 use crate::recipe::{LocalAdjustment, MaskGeometry};
 
-/// The eight sliders a habit is summarised over, in canonical order, spelled
+/// The ten sliders a habit is summarised over, in canonical order, spelled
 /// with the labels `style::REF_KEYS` already uses for the global half of the
 /// block — so "shadows" means one thing in both sentences.
 ///
 /// A curated subset, like `REF_KEYS` and for the same reason: these are the
 /// moves a photographer makes HABITUALLY through a mask. The rest of
-/// [`LocalAdjustment`]'s twenty-odd knobs (texture, sharpness, hue, the local
-/// curves, noise reduction) are per-photo repairs, and a mean over four
-/// neighbours would be mush.
-pub const HABIT_SLIDERS: [&str; 8] = [
+/// [`LocalAdjustment`]'s twenty-odd knobs (texture, sharpness, hue, noise
+/// reduction) are per-photo repairs, and a mean over four neighbours would be
+/// mush.
+///
+/// `temperature` and `tint` joined in B5 (user ruling 2026-08-30: *感觉还是要更加
+/// 高效的使用蒙版吧？包括色温色调和曲线，都要学会使用*). They were in the
+/// "per-photo repair" bucket by assumption and the assumption was wrong: a
+/// photographer who cools a sky and leaves the foreground warm is doing it
+/// through the mask, every time, and it is exactly the move the proposer never
+/// made because nothing in the block or the prompt had ever named it. NOTE the
+/// spelling: the LOCAL `temperature` is a RELATIVE ±100 shift, not the global
+/// `temperature_K`'s absolute Kelvin — same word, different quantity, and this
+/// is the one row where the "same label means the same thing" rule above had to
+/// give way to the engine's own field name (`recipe::LocalAdjustment`).
+///
+/// A local tone CURVE is the third thing the ruling names and it is NOT here,
+/// because it is not a slider: a curve is a point list, and the mean of four
+/// photographs' curves is a curve none of them drew (the module header's rule).
+/// It is counted instead — [`MaskHabit::curved`].
+pub const HABIT_SLIDERS: [&str; 10] = [
     "exposure", "highlights", "shadows", "whites", "blacks", "clarity", "dehaze", "saturation",
+    "temperature", "tint",
 ];
 
 /// Width of [`BucketHabit::mean`], spelled once.
@@ -64,7 +81,20 @@ pub const HABIT_SLIDERS_SHOWN: usize = 3;
 /// bounded by construction. `local_work_note_fits_its_bound` builds the worst
 /// case and measures it, which is the check a runtime truncation would only
 /// hide.
-pub const MAX_LOCAL_WORK_CHARS: usize = 640;
+///
+/// Re-derived in B5, which added THREE things to the note: two longer slider
+/// names (`temperature`, `tint` — and the worst case is now the clause that
+/// shows the three LONGEST names, not merely three names), a curve clause, and
+/// the in-mask colour pointer. `local_work_note_fits_its_bound` measures the
+/// widest note this can build at 679 characters (the longest-named clause;
+/// the every-axis-moved one is 655). The bound goes 640 → 768 — 12 x 64,
+/// the same 64-character grid 640 sat on — leaving 89 characters of
+/// headroom: enough that rewording a clause is not silently a budget change,
+/// small enough that growing the note again forces the measurement to be
+/// re-run. It is spent against the same 4,096-byte
+/// `advisor::REFERENCE_BUDGET_BYTES` the block as a whole must clear
+/// (`style::the_local_work_note_fits_the_proposers_budget`).
+pub const MAX_LOCAL_WORK_CHARS: usize = 768;
 
 /// Below this a slider's mean does not survive its own rounding, and printing
 /// it would claim a habit of `+0`.
@@ -172,10 +202,42 @@ pub struct BucketHabit {
     pub w: f32,
     /// Amount-weighted mean of [`HABIT_SLIDERS`], over the masks in this bucket
     /// that moved at least one of them. `w == 0.0` means the bucket has masks
-    /// but none of them is described by these eight sliders, and the note then
+    /// but none of them is described by these ten sliders, and the note then
     /// states the placement without numbers rather than claiming zeros.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "habit_mean")]
     pub mean: [f32; N_HABIT_SLIDERS],
+}
+
+/// [`BucketHabit::mean`] read from an index written before [`HABIT_SLIDERS`]
+/// last grew.
+///
+/// The array is fixed-width in the type and a plain JSON array on disk, so
+/// widening the slider set changes the WIRE SHAPE of every stored habit — and
+/// `style::StyleIndex::load` parses the whole file BEFORE it reaches the
+/// version gate, so a bare `[f32; N]` would turn every S3-era index into
+/// `parse style index …: invalid length 8` instead of the actionable "rebuild
+/// it" the gate exists to print. That is a worse failure than the one the gate
+/// was designed for, and it would arrive without anyone deciding to ship it.
+///
+/// A SHORT array zero-fills, and zero-filling claims nothing: `local_work_note`
+/// prints a slider only when its magnitude clears [`SLIDER_FLOOR`], so an axis
+/// that index never measured stays silent rather than reporting a habit of 0.
+/// A LONG array is REFUSED — that is an index from a newer build, and silently
+/// dropping its tail would be reading the wrong columns.
+fn habit_mean<'de, D>(d: D) -> Result<[f32; N_HABIT_SLIDERS], D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let v = Vec::<f32>::deserialize(d)?;
+    if v.len() > N_HABIT_SLIDERS {
+        return Err(serde::de::Error::invalid_length(
+            v.len(),
+            &"at most one value per HABIT_SLIDERS entry — this index was written by a newer build",
+        ));
+    }
+    let mut out = [0.0f32; N_HABIT_SLIDERS];
+    out[..v.len()].copy_from_slice(&v);
+    Ok(out)
 }
 
 impl BucketHabit {
@@ -216,6 +278,26 @@ pub struct MaskHabit {
     /// [`MaskHabit::of_with_refused_ranges`].
     #[serde(default)]
     pub refined: u8,
+    /// How many of the counted masks draw a CURVE inside themselves — any of
+    /// `main_curve` / `red_curve` / `green_curve` / `blue_curve`
+    /// (`recipe::LocalAdjustment`), whatever bucket they landed in.
+    ///
+    /// A COUNT and not a mean, for the reason the module header states: a
+    /// curve is a point list and the average of four photographs' curves is a
+    /// shape none of them drew. What the proposer can act on is that this
+    /// photographer reaches for a curve inside a mask at all — the free-form
+    /// tonal shape the local Highlights/Shadows sliders cannot draw — which is
+    /// the third of the three tools the B5 ruling named.
+    ///
+    /// Counted from the SURVIVING recipe alone, and that is not the oversight
+    /// [`MaskHabit::refined`] had to fix: a local curve ROUND-TRIPS through the
+    /// importer (`xmp::xmp_to_recipe` parses all four, `xmp::local_curve_elem`
+    /// writes them), so there is no loss channel to consult. The one exception
+    /// is a curve whose points fall outside 0..=255, which the importer drops
+    /// with a disclosure of its own — that under-states this count, which is
+    /// the same conservative direction [`MaskHabit::clamp`] already takes.
+    #[serde(default)]
+    pub curved: u8,
     #[serde(default, skip_serializing_if = "BucketHabit::is_empty")]
     pub sky: BucketHabit,
     #[serde(default, skip_serializing_if = "BucketHabit::is_empty")]
@@ -267,6 +349,13 @@ impl MaskHabit {
             h.count = h.count.saturating_add(1);
             if m.range.is_some() {
                 h.refined = h.refined.saturating_add(1);
+            }
+            if !m.main_curve.is_empty()
+                || !m.red_curve.is_empty()
+                || !m.green_curve.is_empty()
+                || !m.blue_curve.is_empty()
+            {
+                h.curved = h.curved.saturating_add(1);
             }
             let b = bucket_of(m);
             let slot = Bucket::ALL.iter().position(|x| *x == b).expect("ALL covers every bucket");
@@ -335,6 +424,7 @@ impl MaskHabit {
     pub fn clamp(&mut self) {
         let cap = self.count;
         self.refined = self.refined.min(cap);
+        self.curved = self.curved.min(cap);
         for b in Bucket::ALL {
             let x = self.bucket_mut(b);
             x.n = x.n.min(cap);
@@ -354,7 +444,7 @@ impl MaskHabit {
     }
 }
 
-/// The eight tracked sliders of one adjustment, in [`HABIT_SLIDERS`] order.
+/// The ten tracked sliders of one adjustment, in [`HABIT_SLIDERS`] order.
 fn sliders_of(a: &LocalAdjustment) -> [f32; N_HABIT_SLIDERS] {
     [
         a.exposure_ev,
@@ -365,8 +455,14 @@ fn sliders_of(a: &LocalAdjustment) -> [f32; N_HABIT_SLIDERS] {
         a.clarity,
         a.dehaze,
         a.saturation,
+        a.temperature,
+        a.tint,
     ]
 }
+
+/// Index of `temperature` in [`HABIT_SLIDERS`]; `tint` is the one after it.
+/// Named so the in-mask colour pointer below and the array cannot drift apart.
+const I_TEMPERATURE: usize = 8;
 
 /// How each bucket is DESCRIBED to the proposer: the placement it should make,
 /// and the verb for what that placement does. Constants, never a file name and
@@ -476,6 +572,13 @@ pub fn local_work_note(habits: &[Option<MaskHabit>], bold: bool) -> String {
     } else {
         format!("{refined} of {m} refine a mask with a range mask")
     });
+    // B5's third tool. Stated only when it happened — "none draw a curve" is a
+    // sentence about a photographer who may simply have had no reason to, and
+    // the block already spends its budget on things the proposer can act on.
+    let curved = measured.iter().filter(|h| h.curved > 0).count();
+    if curved > 0 {
+        clauses.push(format!("{curved} of {m} draw a tone curve INSIDE the mask"));
+    }
     // Stated only when it is the MAJORITY reading: a single global neighbour
     // among four is not "they mostly work globally".
     let global = if (m - worked) * 2 > m {
@@ -483,8 +586,41 @@ pub fn local_work_note(habits: &[Option<MaskHabit>], bold: bool) -> String {
     } else {
         ""
     };
+    // B5: when this photographer's own masks carry COLOUR or a curve, say so as
+    // an instruction and not only as a number. The measured mean already prints
+    // `temperature -18` when it is among the strongest three, but a number is
+    // evidence and this is the guidance — and the whole point of the ruling is
+    // that the proposer had never been told these live inside a mask at all.
+    let shapes_colour = Bucket::ALL.iter().any(|b| {
+        measured.iter().any(|h| {
+            let x = h.bucket(*b);
+            x.w > 0.0
+                && x.mean[I_TEMPERATURE..].iter().any(|v| v.abs() >= SLIDER_FLOOR)
+        })
+    });
+    // A POINTER, not a tutorial. What these controls ARE and how they
+    // behave is `advisor::openai::mask_colour_clause`, which the proposer
+    // reads unconditionally and at length. Saying it twice spent the
+    // block's 4,096-byte budget on a duplicate, and it showed: with this
+    // sentence at its first length an adversarial maximal block cleared
+    // `advisor::REFERENCE_BUDGET_BYTES` by nothing. This states the one
+    // thing only the HABIT knows, which is that this photographer does it.
+    let inside = match (shapes_colour, curved > 0) {
+        (false, false) => "",
+        (true, false) => {
+            " They work COLOUR inside the mask, not just brightness — use its own \
+`temperature` / `tint`."
+        }
+        (false, true) => {
+            " They shape TONE inside the mask with its own `main_curve`, not sliders alone."
+        }
+        (true, true) => {
+            " They work COLOUR and TONE inside the mask, not just brightness — use its own \
+`temperature` / `tint` and `main_curve`."
+        }
+    };
     format!(
-        "  THEIR TYPICAL LOCAL WORK ({worked} of {m} similar shots carry masks): {} — {aim}{global}",
+        "  THEIR TYPICAL LOCAL WORK ({worked} of {m} similar shots carry masks): {} — {aim}{global}{inside}",
         clauses.join("; ")
     )
 }
@@ -897,6 +1033,118 @@ mod tests {
         assert!(!json.contains("ROLL-0042"), "{json}");
     }
 
+    /// B5: the note reports the two things the ruling named and the block had
+    /// never carried — white balance INSIDE a mask, and a curve inside a mask.
+    ///
+    /// User ruling 2026-08-30: *感觉还是要更加高效的使用蒙版吧？包括色温色调和曲线，
+    /// 都要学会使用*. Before this batch `HABIT_SLIDERS` held eight tonal
+    /// sliders and nothing else, so a photographer who cools every sky through
+    /// the mask produced a note that said only "3 of 4 mask the sky (exposure
+    /// -0.6 EV, highlights -25)" — and the proposer, reading a prompt that
+    /// talked only about dodging and burning, never set a local `temperature`
+    /// in its life.
+    ///
+    /// MUTATION: remove `a.temperature`/`a.tint` from `sliders_of` (the WB
+    /// assertions fail), stop counting `curved` (the curve clause vanishes), or
+    /// make the in-mask pointer unconditional (the tonal-only case fails).
+    #[test]
+    fn the_local_work_note_names_the_colour_and_curve_tools_inside_a_mask() {
+        use crate::recipe::CurvePoint;
+        let sky = |a: LocalAdjustment| LocalAdjustment { mask: gradient(0.8, 0.0), ..a };
+        // A photographer who cools the sky and shapes it with a curve.
+        let colour_and_curve = MaskHabit::of(&[sky(LocalAdjustment {
+            exposure_ev: -0.4,
+            temperature: -30.0,
+            tint: 8.0,
+            main_curve: vec![CurvePoint { input: 0, output: 12 }],
+            amount: 1.0,
+            enabled: true,
+            ..Default::default()
+        })]);
+        assert_eq!(colour_and_curve.curved, 1, "the local curve is counted");
+        let note = local_work_note(&[Some(colour_and_curve)], true);
+        // The MEASUREMENT: `temperature` is now one of the sliders a bucket's
+        // mean is taken over, and it is the strongest one here.
+        assert!(note.contains("temperature -30"), "{note}");
+        // The CURVE, as a count — a curve is a point list and a mean of four
+        // photographs' curves is a shape none of them drew.
+        assert!(note.contains("1 of 1 draw a tone curve INSIDE the mask"), "{note}");
+        // …and the GUIDANCE, which is the half a number cannot carry.
+        assert!(note.contains("They work COLOUR and TONE inside the mask"), "{note}");
+        assert!(note.contains("`temperature` / `tint`"), "{note}");
+        assert!(note.contains("`main_curve`"), "{note}");
+
+        // COLOUR alone, and TONE alone, say only what is true.
+        let colour_only = MaskHabit::of(&[sky(LocalAdjustment {
+            temperature: -30.0,
+            amount: 1.0,
+            enabled: true,
+            ..Default::default()
+        })]);
+        let n = local_work_note(&[Some(colour_only)], true);
+        assert!(n.contains("They work COLOUR inside the mask"), "{n}");
+        assert!(!n.contains("draw a tone curve"), "no curve was measured: {n}");
+        let curve_only = MaskHabit::of(&[sky(LocalAdjustment {
+            exposure_ev: -0.4,
+            main_curve: vec![CurvePoint { input: 0, output: 12 }],
+            amount: 1.0,
+            enabled: true,
+            ..Default::default()
+        })]);
+        let n = local_work_note(&[Some(curve_only)], true);
+        assert!(n.contains("They shape TONE inside the mask with its own `main_curve`"), "{n}");
+        assert!(!n.contains("They work COLOUR"), "no WB was measured: {n}");
+
+        // A purely TONAL habit is the pre-B5 sentence, with no pointer at all —
+        // the note states what was measured and invents no habit.
+        let tonal = MaskHabit::of(&[sky(LocalAdjustment {
+            exposure_ev: -0.6,
+            highlights: -25.0,
+            amount: 1.0,
+            enabled: true,
+            ..Default::default()
+        })]);
+        let n = local_work_note(&[Some(tonal)], true);
+        assert!(!n.contains("inside the mask"), "nothing measured, nothing claimed: {n}");
+        assert!(!n.contains("temperature"), "{n}");
+        assert_eq!(MaskHabit::of(&[]).curved, 0, "no masks, no curves");
+    }
+
+    /// An index written before `HABIT_SLIDERS` grew must still LOAD.
+    ///
+    /// `style::StyleIndex::load` parses the whole file before it reaches the
+    /// version gate, so a bare `[f32; N]` would turn every S3-era index into
+    /// `invalid length 8` — a parse error, not the actionable "rebuild it" the
+    /// gate prints. The short array zero-fills, and zero claims nothing: the
+    /// note prints a slider only above `SLIDER_FLOOR`, so an axis that index
+    /// never measured stays silent instead of reporting a habit of 0.
+    ///
+    /// MUTATION: drop `deserialize_with = "habit_mean"` and the 8-wide record
+    /// fails to deserialize; make `habit_mean` accept a LONG array and the last
+    /// assertion fails.
+    #[test]
+    fn a_pre_widening_habit_loads_and_claims_no_white_balance() {
+        let json = r#"{"count":2,"refined":0,"sky":{"n":2,"w":1.5,
+            "mean":[-0.6,-25.0,0.0,0.0,0.0,0.0,0.0,0.0]}}"#;
+        let h: MaskHabit = serde_json::from_str(json).expect("an S3-era habit still loads");
+        assert_eq!(h.count, 2);
+        assert_eq!(h.curved, 0, "a pre-B5 record measured no curves and claims none");
+        assert_eq!(h.sky.mean[I_TEMPERATURE], 0.0, "the unmeasured axes zero-fill");
+        assert_eq!(h.sky.mean[0], -0.6, "and the measured ones keep their column");
+        let note = local_work_note(&[Some(h)], true);
+        assert!(note.contains("exposure -0.6 EV"), "{note}");
+        assert!(!note.contains("temperature"), "an unmeasured axis is silent: {note}");
+        assert!(!note.contains("inside the mask"), "{note}");
+
+        // A record from a NEWER build is refused rather than read short: the
+        // columns would not line up, and reading the wrong ones silently is
+        // worse than saying so.
+        let wide = r#"{"count":1,"sky":{"n":1,"w":1.0,
+            "mean":[0,0,0,0,0,0,0,0,0,0,0]}}"#;
+        let e = serde_json::from_str::<MaskHabit>(wide).unwrap_err().to_string();
+        assert!(e.contains("newer build"), "{e}");
+    }
+
     /// The BUDGET. `advisor::BoundedUntrustedText` truncates the whole style
     /// reference at 4,096 bytes, and it already carries four neighbour lines
     /// each with up to `style::MAX_DESC_CHARS` of prose. This measures the
@@ -908,29 +1156,55 @@ mod tests {
         let extreme = BucketHabit {
             n: u8::MAX,
             w: 1.0,
-            // The widest each field prints: -5.0 EV, and -100 for the seven.
-            mean: [-5.0, -100.0, -100.0, -100.0, -100.0, -100.0, -100.0, -100.0],
+            // The widest each field prints: -5.0 EV, and -100 for the nine.
+            // The three the clause SHOWS are picked by magnitude with ties
+            // keeping canonical order, so with every non-exposure axis tied at
+            // -100 the winners are `highlights, shadows, whites` — which is NOT
+            // the widest sentence this can build now that `temperature` (11
+            // characters) is in the set. `widest` below is the fixture that
+            // actually maximises the clause; `extreme` stays as the
+            // every-axis-moved case, because the two answer different questions
+            // and only measuring one of them is how the bound drifts.
+            mean: [-5.0, -100.0, -100.0, -100.0, -100.0, -100.0, -100.0, -100.0, -100.0, -100.0],
         };
-        let worst = MaskHabit {
+        // The LONGEST-NAMED three, forced into the clause by giving only them a
+        // magnitude: `highlights` (10) + `saturation` (10) + `temperature` (11)
+        // is the widest slider phrase `slider_phrase` can emit. This is the
+        // fixture the bound is actually derived from.
+        let widest = BucketHabit {
+            n: u8::MAX,
+            w: 1.0,
+            mean: [0.0, -100.0, 0.0, 0.0, 0.0, 0.0, 0.0, -100.0, -100.0, 0.0],
+        };
+        let build = |b: BucketHabit| MaskHabit {
             count: u8::MAX,
             refined: u8::MAX,
-            sky: extreme,
-            subject: extreme,
-            ground: extreme,
-            range: extreme,
-            other: extreme,
+            curved: u8::MAX,
+            sky: b,
+            subject: b,
+            ground: b,
+            range: b,
+            other: b,
         };
-        let habits = vec![Some(worst); crate::style::RETRIEVE_K];
-        let note = local_work_note(&habits, true);
-        println!("worst-case local-work note: {} chars, bound {MAX_LOCAL_WORK_CHARS}", note.chars().count());
-        assert!(
-            note.chars().count() <= MAX_LOCAL_WORK_CHARS,
-            "the note is {} chars, over its {MAX_LOCAL_WORK_CHARS}-char bound:\n{note}",
-            note.chars().count()
-        );
-        // At most three sliders per clause is what makes that bound hold — an
-        // eight-slider clause would be ~2.4x this.
+        for (name, note) in [
+            ("every axis moved", local_work_note(&vec![Some(build(extreme)); crate::style::RETRIEVE_K], true)),
+            ("longest names", local_work_note(&vec![Some(build(widest)); crate::style::RETRIEVE_K], true)),
+        ] {
+            println!("{name} local-work note: {} chars, bound {MAX_LOCAL_WORK_CHARS}", note.chars().count());
+            assert!(
+                note.chars().count() <= MAX_LOCAL_WORK_CHARS,
+                "the {name} note is {} chars, over its {MAX_LOCAL_WORK_CHARS}-char bound:\n{note}",
+                note.chars().count()
+            );
+        }
+        let note = local_work_note(&vec![Some(build(widest)); crate::style::RETRIEVE_K], true);
+        // At most three sliders per clause is what makes that bound hold — a
+        // ten-slider clause would be ~3x this.
         assert_eq!(HABIT_SLIDERS_SHOWN, 3);
-        assert!(note.matches("exposure").count() <= 3, "one clause per placement bucket: {note}");
+        assert!(note.contains("temperature -100"), "the WB pair reaches the clause: {note}");
+        assert!(
+            note.matches("saturation").count() <= 3,
+            "one clause per placement bucket: {note}"
+        );
     }
 }

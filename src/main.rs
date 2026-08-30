@@ -105,6 +105,15 @@ enum Command {
         /// output tokens per proposal. `batch` never does this.
         #[arg(long)]
         deep: bool,
+        /// SHOW the model the retrieved reference photo, not just its numbers:
+        /// the nearest finished photo from your look library (or, failing that,
+        /// the nearest RAW neighbour) rides the analysis as IMAGE 2. OFF by
+        /// default — it puts one of YOUR OWN photographs on a paid vision call,
+        /// and costs one extra image on every call of the run. The rationale
+        /// names the file that went. `AUTOSHOP_SEND_REFERENCE_IMAGE=1` makes it
+        /// the standing answer.
+        #[arg(long)]
+        reference_image: bool,
     },
     /// Render an existing EditRecipe onto a RAW and save the developed image.
     Apply {
@@ -165,6 +174,15 @@ enum Command {
         /// reasoning tier + a multi-round visual judge. Costs more per photo.
         #[arg(long)]
         deep: bool,
+        /// SHOW the model the retrieved reference photo, not just its numbers:
+        /// the nearest finished photo from your look library (or, failing that,
+        /// the nearest RAW neighbour) rides the analysis as IMAGE 2. OFF by
+        /// default — it puts one of YOUR OWN photographs on a paid vision call,
+        /// and costs one extra image on every call of the run. The rationale
+        /// names the file that went. `AUTOSHOP_SEND_REFERENCE_IMAGE=1` makes it
+        /// the standing answer.
+        #[arg(long)]
+        reference_image: bool,
         /// Run AI denoise (SCUNet, GPU) before developing — for high-ISO/astro.
         #[arg(long)]
         denoise: bool,
@@ -480,8 +498,8 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
         Command::Decode { raw, out } => decode_cmd(&raw, out),
-        Command::Analyze { raw, out, guidance, style, strength, adherence, embed, no_embed, deep } => {
-            analyze_cmd(&raw, out, guidance, style, strength, adherence, deep, embed_switch(embed, no_embed))
+        Command::Analyze { raw, out, guidance, style, strength, adherence, embed, no_embed, deep, reference_image } => {
+            analyze_cmd(&raw, out, guidance, style, strength, adherence, deep, reference_image, embed_switch(embed, no_embed))
         }
         Command::Apply { raw, recipe, out, long_edge } => {
             apply_cmd(&raw, &recipe, &out, long_edge)
@@ -496,14 +514,15 @@ fn main() -> Result<()> {
             embed,
             no_embed,
             deep,
+            reference_image,
             denoise,
             denoise_strength,
             denoise_model,
             long_edge,
         } => {
             auto_cmd(
-                &raw, out, guidance, style, strength, adherence, deep, denoise, denoise_strength,
-                denoise_model, long_edge, embed_switch(embed, no_embed),
+                &raw, out, guidance, style, strength, adherence, deep, reference_image, denoise,
+                denoise_strength, denoise_model, long_edge, embed_switch(embed, no_embed),
             )
         }
         Command::Denoise { input, out, strength, model } => denoise_cmd(&input, out, strength, model),
@@ -774,7 +793,7 @@ fn fmt_masks(masks: Option<&autoshop::mask_habit::MaskHabit>) -> String {
     masks
         .map(|h| {
             format!(
-                " masks={} sky={} subject={} ground={} range={} other={} refined={}",
+                " masks={} sky={} subject={} ground={} range={} other={} refined={} curved={}",
                 h.count,
                 h.bucket(Bucket::Sky).n,
                 h.bucket(Bucket::Subject).n,
@@ -782,6 +801,7 @@ fn fmt_masks(masks: Option<&autoshop::mask_habit::MaskHabit>) -> String {
                 h.bucket(Bucket::Range).n,
                 h.bucket(Bucket::Other).n,
                 h.refined,
+                h.curved,
             )
         })
         .unwrap_or_default()
@@ -1107,12 +1127,20 @@ fn analyze_request(
     strength: Option<f32>,
     adherence: Option<f32>,
     deep: bool,
+    reference_image: bool,
     embed: autoshop::style::EmbeddingSwitch,
     cfg: &Config,
 ) -> GradeRequest {
     GradeRequest {
         style: style.unwrap_or(cfg.style_strength),
-        send_reference_image: false,
+        // B1: the reference PHOTO is opt-in on every surface, and this is the
+        // non-GUI half of that opt-in (the GUI has had its checkbox since
+        // R23-2). Flag OR standing preference — either is the user asking, and
+        // neither is a default: with both absent this is `false`, which is what
+        // keeps the CLI byte-for-byte the text-reference path it has always
+        // been. What the rewritten test below still protects is the rule that
+        // matters: a photograph is never sent because nobody said not to.
+        send_reference_image: reference_image || cfg.send_reference_image,
         strength: GradeStrength::from_optional(strength),
         adherence: adherence.map(DirectionAdherence::new).unwrap_or_default(),
         use_looks: true,
@@ -1137,6 +1165,7 @@ fn analyze_cmd(
     strength: Option<f32>,
     adherence: Option<f32>,
     deep: bool,
+    reference_image: bool,
     embed: autoshop::style::EmbeddingSwitch,
 ) -> Result<()> {
     let cfg = Config::load();
@@ -1151,7 +1180,7 @@ fn analyze_cmd(
     // "adjust current edit" path is a web-UI affordance. judge = true: an
     // explicitly invoked single-photo analyze gets the visual closed loop
     // (batch passes false — spend never multiplies silently).
-    let req = analyze_request(style, strength, adherence, deep, embed, &cfg);
+    let req = analyze_request(style, strength, adherence, deep, reference_image, embed, &cfg);
     let (recipe, verdict, _notes) =
         produce_recipe(raw, &cfg, true, guidance.as_deref(), None, req, true, autoshop::diag::stderr())?;
     // Remember whether -o redirected the recipe: the XMP has to follow it (below)
@@ -1395,6 +1424,7 @@ fn auto_cmd(
     strength: Option<f32>,
     adherence: Option<f32>,
     deep: bool,
+    reference_image: bool,
     denoise: bool,
     denoise_strength: Option<f32>,
     denoise_model: Option<String>,
@@ -1419,7 +1449,7 @@ fn auto_cmd(
     // Resolved BEFORE the paid call so the banner below can say what is coming
     // (it also costs nothing and cannot fail).
     let export = export_opts(long_edge);
-    let req = analyze_request(style, strength, adherence, deep, embed, &cfg);
+    let req = analyze_request(style, strength, adherence, deep, reference_image, embed, &cfg);
     // judge = true: `auto` is the explicit one-shot develop of ONE photo —
     // same interactive class as analyze (batch passes false).
     let (recipe, verdict, _notes) =
@@ -2426,6 +2456,7 @@ mod tests {
             correspond_script: String::new(),
             describe_script: String::new(),
             style_strength: 0.5,
+            send_reference_image: false,
         }
     }
 
@@ -2597,7 +2628,7 @@ mod tests {
         // The switch is a VALUE these dial assertions are indifferent to, so it
         // is spelled once rather than resolved from the environment per call.
         const OFF: autoshop::style::EmbeddingSwitch = autoshop::style::EmbeddingSwitch::OFF;
-        let plain = analyze_request(None, None, None, false, OFF, &cfg);
+        let plain = analyze_request(None, None, None, false, false, OFF, &cfg);
         assert_eq!(plain.style, 0.3, "omitted --style keeps AUTOSHOP_STYLE_STRENGTH");
         assert_eq!(
             plain.strength.get(),
@@ -2605,22 +2636,113 @@ mod tests {
             "omitted --strength is the SHIPPED default (0.65) — the CLI and a double-clicked \
              GUI must develop the same photo the same way when neither is told otherwise"
         );
-        let dialled = analyze_request(Some(0.1), Some(0.9), None, false, OFF, &cfg);
+        let dialled = analyze_request(Some(0.1), Some(0.9), None, false, false, OFF, &cfg);
         assert_eq!((dialled.style, dialled.strength.get()), (0.1, 0.9), "no axis swap");
-        assert!(!dialled.send_reference_image, "every non-GUI surface stays on the text reference");
         // 0.5 is the calibration point, one flag away.
         assert_eq!(
-            analyze_request(None, Some(0.5), None, false, OFF, &cfg).strength,
+            analyze_request(None, Some(0.5), None, false, false, OFF, &cfg).strength,
             GradeStrength::calibrated()
         );
         // R23-4: `--deep` is the ONLY way this resolver's thinking flag turns
         // on, and it is a THIRD axis — it must not be confusable with either
         // dial (`batch` never reaches this function at all).
         assert!(!plain.think, "omitted --deep is off, like every paid opt-in");
-        assert!(analyze_request(None, None, None, true, OFF, &cfg).think, "--deep must reach the request");
+        assert!(analyze_request(None, None, None, true, false, OFF, &cfg).think, "--deep must reach the request");
         assert!(
-            !analyze_request(Some(1.0), Some(1.0), None, false, OFF, &cfg).think,
+            !analyze_request(Some(1.0), Some(1.0), None, false, false, OFF, &cfg).think,
             "pushing both dials to the maximum must not buy the thinking envelope"
+        );
+    }
+
+    /// B1: the reference PHOTO is OPT-IN on the non-GUI surfaces too — and
+    /// opt-in is the whole assertion.
+    ///
+    /// This replaces `every non-GUI surface stays on the text reference`, which
+    /// was the same rule expressed as "there is no way to ask". The rule it was
+    /// really protecting is that one of the photographer's own finished
+    /// photographs is never put on a paid vision call because nobody said not
+    /// to — and that rule survives an opt-in unchanged. Three states, and the
+    /// first is the shipped one:
+    ///   * nothing asked        -> text reference, byte-for-byte the old path;
+    ///   * `--reference-image`  -> on, for this run;
+    ///   * `AUTOSHOP_SEND_REFERENCE_IMAGE` -> on, as the standing answer.
+    ///
+    /// MUTATION: make `analyze_request` hard-code `send_reference_image: true`
+    /// (the default arm fails), or `false` (both opt-in arms fail), or drop
+    /// either half of the `||` (one arm fails).
+    #[test]
+    fn the_reference_photo_is_opt_in_on_every_non_gui_surface() {
+        const OFF: autoshop::style::EmbeddingSwitch = autoshop::style::EmbeddingSwitch::OFF;
+        let quiet = autoshop::config::Config { send_reference_image: false, ..cfg_fixture() };
+        assert!(
+            !analyze_request(None, None, None, false, false, OFF, &quiet).send_reference_image,
+            "with nothing asked, a CLI develop must stay on the TEXT reference — a photograph is \
+             never sent because nobody said not to"
+        );
+        assert!(
+            analyze_request(None, None, None, false, true, OFF, &quiet).send_reference_image,
+            "--reference-image must reach the request"
+        );
+        // …and the standing preference, for a user who always wants it. It is
+        // read through `Config`, which is where the trust table refuses an
+        // ambient photo-pack `.env` the chance to set it.
+        let standing = autoshop::config::Config { send_reference_image: true, ..cfg_fixture() };
+        assert!(
+            analyze_request(None, None, None, false, false, OFF, &standing).send_reference_image,
+            "AUTOSHOP_SEND_REFERENCE_IMAGE must reach the request without a flag"
+        );
+        // The flag never turns it OFF against the standing preference: both are
+        // the user asking, and neither is a veto over the other.
+        assert!(
+            analyze_request(None, None, None, false, true, OFF, &standing).send_reference_image
+        );
+        // The dial resolver is untouched by it — one axis, one argument.
+        let dialled = analyze_request(Some(0.1), Some(0.9), None, false, true, OFF, &quiet);
+        assert_eq!((dialled.style, dialled.strength.get()), (0.1, 0.9), "no axis swap");
+
+        // The flag exists on BOTH single-photo commands and nowhere else: the
+        // surfaces that must never pay for a second image (`batch`, `eval`,
+        // the web handler) build their request through `GradeRequest`'s own
+        // constructors, which have no way to reach it.
+        for cmd in ["analyze", "auto"] {
+            let cli = Cli::try_parse_from(["autoshop", cmd, "p.arw", "--reference-image"])
+                .unwrap_or_else(|e| panic!("{cmd} --reference-image must parse: {e}"));
+            let got = match cli.command {
+                Command::Analyze { reference_image, .. } | Command::Auto { reference_image, .. } => {
+                    reference_image
+                }
+                _ => panic!("`{cmd} --reference-image` parsed as some other subcommand"),
+            };
+            assert!(got, "{cmd} must carry the flag, not drop it");
+            let plain = Cli::try_parse_from(["autoshop", cmd, "p.arw"]).expect("plain parses");
+            let off = match plain.command {
+                Command::Analyze { reference_image, .. } | Command::Auto { reference_image, .. } => {
+                    reference_image
+                }
+                _ => panic!("`{cmd}` parsed as some other subcommand"),
+            };
+            assert!(!off, "{cmd} without the flag must be off");
+        }
+        assert!(
+            Cli::try_parse_from(["autoshop", "batch", ".", "--reference-image"]).is_err(),
+            "`batch` must have no way to buy a second image per photo"
+        );
+
+        // DISCLOSURE. Sending one of the photographer's own photographs is the
+        // kind of thing that must never be silent: the rationale names the FILE
+        // that went and the extra cost it bought, on every surface that renders
+        // a rationale, and `style-query`'s forecast line quotes the same key.
+        let note = autoshop::rationale::keys::STYLE_REF_IMAGE.replace("{file}", "golden-hour-01");
+        assert!(note.contains("golden-hour-01"), "the note must NAME the photo: {note}");
+        assert!(note.contains("reference IMAGE"), "{note}");
+        assert!(note.contains("one extra image on each call"), "the cost is disclosed: {note}");
+        assert!(!note.contains("{file}"), "every placeholder must be filled: {note}");
+        // …and the failure arm says the develop fell back to text rather than
+        // leaving the user to assume a photo went.
+        assert!(
+            autoshop::rationale::keys::STYLE_REF_IMAGE_FAILED.contains("used the text reference only"),
+            "{}",
+            autoshop::rationale::keys::STYLE_REF_IMAGE_FAILED
         );
     }
 
@@ -2652,7 +2774,7 @@ mod tests {
             .join(format!("autoshop-prepay-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let off = autoshop::style::EmbeddingSwitch::OFF;
-        let e = analyze_cmd(Path::new("no-such.arw"), Some(dir.clone()), None, None, None, None, false, off)
+        let e = analyze_cmd(Path::new("no-such.arw"), Some(dir.clone()), None, None, None, None, false, false, off)
             .unwrap_err()
             .to_string();
         assert!(e.contains("is a directory"), "analyze: {e}");
@@ -2663,6 +2785,7 @@ mod tests {
             None,
             None,
             None,
+            false,
             false,
             false,
             None,
@@ -3184,7 +3307,8 @@ mod tests {
                 assert_eq!(adherence, Some(0.2));
                 assert!(embed && !no_embed);
                 let req = analyze_request(
-                    None, None, adherence, false, embed_switch(embed, no_embed), &Config::load(),
+                    None, None, adherence, false, false, embed_switch(embed, no_embed),
+                    &Config::load(),
                 );
                 assert_eq!(req.adherence.tier(), autoshop::recipe::AdherenceTier::Hint);
                 assert!(req.embed.on(), "--embed must reach the request as a value");
@@ -3340,7 +3464,7 @@ fn ")
         let measured_but_global = MaskHabit::of(&[]);
         assert_eq!(
             fmt_masks(Some(&measured_but_global)),
-            " masks=0 sky=0 subject=0 ground=0 range=0 other=0 refined=0",
+            " masks=0 sky=0 subject=0 ground=0 range=0 other=0 refined=0 curved=0",
             "a MEASURED zero is printed — it is a finding, not an absence"
         );
         let habit = MaskHabit::of(&[
@@ -3364,8 +3488,21 @@ fn ")
         ]);
         assert_eq!(
             fmt_masks(Some(&habit)),
-            " masks=2 sky=1 subject=1 ground=0 range=0 other=0 refined=1",
+            " masks=2 sky=1 subject=1 ground=0 range=0 other=0 refined=1 curved=0",
             "every bucket is named, and the refinement count beside them"
+        );
+        // B5: the CURVE count is a column of its own, and it counts a mask
+        // that draws one — `refined` and `curved` are different questions.
+        let curved = MaskHabit::of(&[LocalAdjustment {
+            mask: MaskGeometry::Linear { zero_x: 0.5, zero_y: 0.8, full_x: 0.5, full_y: 0.0 },
+            exposure_ev: -0.6,
+            main_curve: vec![autoshop::recipe::CurvePoint { input: 0, output: 12 }],
+            ..Default::default()
+        }]);
+        assert_eq!(
+            fmt_masks(Some(&curved)),
+            " masks=1 sky=1 subject=0 ground=0 range=0 other=0 refined=0 curved=1",
+            "a local curve is counted and printed, and it is not a range refinement"
         );
         // A count must not be able to forge a second neighbour line, the way
         // the description door already guards prose.

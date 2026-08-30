@@ -125,8 +125,34 @@ struct StyleRetrieval {
     look_nearest: Option<String>,
     look_stem: Option<String>,
     look_tags: Vec<String>,
+    /// The LOOK this retrieval is asking for, as phrases, for the DOWNSTREAM
+    /// REVIEWERS (B2) — `style::StyleIndex::look_summary`. `None` when the
+    /// library carried no tags at all, which is the state a pre-S1 index and an
+    /// undescribed one share.
+    look_summary: Option<String>,
     looks_unreachable: bool,
     looks_count: usize,
+}
+
+/// The intent every downstream reviewer of one analysis shares (R23-3, B2).
+///
+/// A FUNCTION and not four inline literals: `produce_recipe` hands this to the
+/// verifier, to the first judgement, and to the re-judge inside every
+/// hint-guided revision round, and a second construction site is exactly how
+/// the revision round would come to judge against a different brief than the
+/// round it is revising — which is the mechanism that flattened the look in the
+/// first place (six showcase runs, revision hints that were pure subtraction).
+fn grade_intent<'a>(
+    req: &GradeRequest,
+    direction: Option<&'a str>,
+    style_look: Option<&'a str>,
+) -> crate::advisor::GradeIntent<'a> {
+    crate::advisor::GradeIntent {
+        strength: req.strength,
+        adherence: req.adherence,
+        direction,
+        style_look,
+    }
 }
 
 /// The single retrieval entry point shared by the develop pipeline and the
@@ -255,9 +281,6 @@ pub fn produce_recipe(
     // shadows `guidance` with a whole EditRecipe JSON. Gates 3 and 4 (verifier,
     // visual judge) want the intent, not the recipe they are already reading.
     let user_direction = guidance;
-    // The intent every downstream reviewer in this function shares (R23-3).
-    let intent =
-        crate::advisor::GradeIntent { strength: req.strength, adherence: req.adherence, direction: user_direction };
 
     // Refine mode: when `base` (the user's CURRENT edit) is given, fold it into
     // the direction so GPT adjusts that edit rather than proposing from scratch.
@@ -401,6 +424,7 @@ pub fn produce_recipe(
             look_nearest: looks.first().map(|l| l.path.clone()),
             look_stem: looks.first().map(|l| l.stem.clone()),
             look_tags: looks.first().map(|l| l.tags.clone()).unwrap_or_default(),
+            look_summary: crate::style::StyleIndex::look_summary(&looks, &ex),
             look_reference,
             looks_unreachable: req.use_looks && (query_embed.is_none() && query_text.is_none()) && !ix.looks.is_empty(),
             looks_count: ix.looks.len(),
@@ -408,6 +432,12 @@ pub fn produce_recipe(
     });
     let reference: Option<String> = retrieved.as_ref().and_then(|r| r.reference.clone());
     let ref_str = reference.as_deref();
+    // B2: the intent every downstream reviewer in this function shares (R23-3),
+    // built HERE rather than above the retrieval because it now carries what
+    // the retrieval found. ONE value, spread into the verifier, the first
+    // judgement and every hint-guided re-judge below.
+    let style_look = retrieved.as_ref().and_then(|r| r.look_summary.as_deref());
+    let intent = grade_intent(&req, user_direction, style_look);
     if verbose && ref_str.is_some() {
         println!("style    : reference from similar past edits (strength {:.0}%)", req.style * 100.0);
     }
@@ -469,6 +499,18 @@ pub fn produce_recipe(
             None => {}
         }
     }
+    if verbose
+        && let Some(file) = &ref_image_stem
+    {
+        println!(
+            "style    : {file} is going to the vision model as IMAGE 2 (the reference-image \
+             option is on) — one extra image on each call of this analysis"
+        );
+    }
+    if verbose
+        && let Some(e) = &ref_image_err {
+            println!("style    : no reference image ({e}) — the text reference only");
+        }
     if verbose
         && let Some(g) = guidance {
             println!("direction: {g}");
@@ -6523,6 +6565,7 @@ mod tests {
             correspond_script: String::new(),
             describe_script: String::new(),
             style_strength: 0.5,
+            send_reference_image: false,
         };
         let e = produce_recipe(
             Path::new("this-file-does-not-exist.arw"),
@@ -6664,6 +6707,7 @@ mod tests {
             look_nearest: Some("D:\\looks\\finished.jpg".into()),
             look_stem: Some("finished".into()),
             look_tags: vec!["warm golden tones".into()],
+            look_summary: None,
             looks_unreachable: false,
             looks_count: 1,
         };
@@ -6671,6 +6715,101 @@ mod tests {
         assert_eq!(path, "D:\\looks\\finished.jpg");
         assert!(is_look, "the selected image is explicitly from the look library");
         assert!(crate::rationale::keys::STYLE_LOOK_IMAGE.contains("look photo"));
+    }
+
+    /// B2: the style-look summary reaches EVERY reviewer of one analysis —
+    /// the verifier, the first judgement, and the re-judge inside every
+    /// hint-guided revision round.
+    ///
+    /// The last of those is the load-bearing one. The judge can BUY a revision,
+    /// so a re-judge that did not know the look would spend the revision
+    /// removing it — which is the observed behaviour this batch exists to fix.
+    /// `produce_recipe` builds ONE `GradeIntent` through `grade_intent` and
+    /// every reviewer closure closes over that one value, so the rounds cannot
+    /// disagree; the second half of this test is what keeps it that way.
+    ///
+    /// MUTATION: drop the `style_look` argument from `grade_intent`'s
+    /// initializer (the first assert fails), or hand the hint round a freshly
+    /// built `GradeIntent` of its own (the source guard fails).
+    #[test]
+    fn the_style_look_summary_reaches_every_reviewer_including_the_revision_round() {
+        let req = GradeRequest {
+            strength: crate::recipe::GradeStrength::new(0.9),
+            adherence: DirectionAdherence::new(0.2),
+            ..GradeRequest::with_style(0.7)
+        };
+        let intent = grade_intent(&req, Some("moodier"), Some("warm golden tones"));
+        assert_eq!(intent.style_look, Some("warm golden tones"), "the look must reach the intent");
+        assert_eq!(intent.direction, Some("moodier"), "and it must not displace the direction");
+        assert_eq!(intent.strength.get(), 0.9);
+        assert_eq!(intent.adherence.get(), 0.2);
+        // No library, no claim: the reviewers are told nothing rather than an
+        // empty look.
+        assert_eq!(grade_intent(&req, None, None).style_look, None);
+
+        // …and there is exactly ONE place in this file that builds one. A
+        // second literal is how the revision round would come to judge against
+        // a different brief than the round it is revising — the needle is
+        // assembled so this assertion cannot match itself.
+        let needle = concat!("GradeIntent", " {");
+        assert_eq!(
+            include_str!("pipeline.rs").matches(needle).count(),
+            1,
+            "every reviewer in this file must share `grade_intent`'s one construction"
+        );
+    }
+
+    /// B2, the retrieval half: a develop with a look library hands the
+    /// reviewers the phrases, and one without hands them nothing.
+    ///
+    /// MUTATION: make the `look_summary` field of `StyleRetrieval` always
+    /// `None` in `produce_recipe`'s retrieval closure and the first assert
+    /// fails (it is the same `style::StyleIndex::look_summary` call).
+    #[test]
+    fn the_retrieval_carries_the_look_summary_the_reviewers_are_given() {
+        let look = crate::style::LookExemplar {
+            stem: "finished".into(),
+            path: "D:\\looks\\finished.jpg".into(),
+            embed: Vec::new(),
+            tags: vec!["warm golden tones".into()],
+            vocab_scores: None,
+            desc: None,
+            desc_embed: None,
+        };
+        let summary = crate::style::StyleIndex::look_summary(&[&look], &[]);
+        assert!(
+            summary.as_deref().is_some_and(|s| s.starts_with("warm golden tones")),
+            "{summary:?}"
+        );
+        let retrieved = StyleRetrieval {
+            reference: None,
+            targets: Default::default(),
+            stems: Vec::new(),
+            nearest: None,
+            look_reference: None,
+            look_nearest: None,
+            look_stem: None,
+            look_tags: Vec::new(),
+            look_summary: summary.clone(),
+            looks_unreachable: false,
+            looks_count: 1,
+        };
+        let req = GradeRequest::with_style(0.7);
+        let intent = grade_intent(&req, None, retrieved.look_summary.as_deref());
+        assert_eq!(intent.style_look, summary.as_deref());
+        // An empty library answers None, and the reviewers are told nothing.
+        assert_eq!(crate::style::StyleIndex::look_summary(&[], &[]), None);
+
+        // …and `produce_recipe`'s retrieval closure is what FILLS that field.
+        // A unit test cannot drive that closure — it needs a built index and a
+        // real RAW — so the wiring is asserted at the source, the same way the
+        // one-intent rule above is. Without this the field could be pinned to
+        // `None` in production and every assertion above would stay green.
+        let src = include_str!("pipeline.rs");
+        assert!(
+            src.contains(concat!("look_summary: crate::style::StyleIndex::", "look_summary(&looks, &ex)")),
+            "the retrieval closure must fill `look_summary` from `style::StyleIndex::look_summary`"
+        );
     }
 
     #[test]
@@ -6712,6 +6851,7 @@ mod tests {
             look_nearest: Some("D:\\looks\\gone.jpg".into()),
             look_stem: Some("gone".into()),
             look_tags: Vec::new(),
+            look_summary: None,
             looks_unreachable: false,
             looks_count: 1,
         };

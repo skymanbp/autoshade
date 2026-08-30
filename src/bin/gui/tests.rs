@@ -4811,6 +4811,7 @@
             correspond_script: String::new(),
             describe_script: String::new(),
             style_strength: 0.5,
+            send_reference_image: false,
         };
         // First open: no credential — nothing to probe, and the VISIT itself
         // must not spend the session's opportunity.

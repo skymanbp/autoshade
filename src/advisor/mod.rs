@@ -475,6 +475,20 @@ pub struct GradeIntent<'a> {
     /// asked to check "did it honour the intent" needs the intent, not a copy of
     /// the recipe it is already reading.
     pub direction: Option<&'a str>,
+    /// The LOOK the retrieval asked for, as phrases — B2, and the same shape of
+    /// defect as `direction` one gate further on.
+    ///
+    /// `direction` fixed "the reviewer punished a develop for obeying the
+    /// photographer's WORDS". This fixes "the reviewer punished a develop for
+    /// obeying the photographer's LIBRARY": the whole style reference goes to
+    /// the proposer and nowhere else, so a warm golden lean the photographer
+    /// asked for reached the judge as an unexplained cast, and the judge —
+    /// which BUYS revisions — spent them flattening it back out.
+    ///
+    /// The SUMMARY, never the block. The block is kilobytes and it is untrusted
+    /// index text; this is [`crate::style::StyleIndex::look_summary`], the
+    /// phrases alone, fenced at the consumer exactly like `direction`.
+    pub style_look: Option<&'a str>,
 }
 
 /// One AI advisor. A provider implements the role(s) it serves; the unserved
@@ -2090,7 +2104,7 @@ mod tests {
                 &EditRecipe::default(),
                 &meta,
                 &hist,
-                &GradeIntent { strength: s, adherence: crate::recipe::DirectionAdherence::default(), direction: None },
+                &GradeIntent { strength: s, adherence: crate::recipe::DirectionAdherence::default(), direction: None, style_look: None },
             )
             .unwrap()
         };
@@ -2118,7 +2132,7 @@ mod tests {
         let judge = |s| {
             super::judge::task_instruction(
                 JudgeTask::Develop,
-                Some(GradeIntent { strength: s, adherence: crate::recipe::DirectionAdherence::default(), direction: None }),
+                Some(GradeIntent { strength: s, adherence: crate::recipe::DirectionAdherence::default(), direction: None, style_look: None }),
             )
         };
         assert_ne!(judge(calib), judge(bold), "gate 4 (visual judge) is deaf");
@@ -2204,7 +2218,7 @@ mod tests {
                 &EditRecipe::default(),
                 &meta,
                 &hist,
-                &GradeIntent { strength: GradeStrength::new(s), adherence: crate::recipe::DirectionAdherence::default(), direction: d },
+                &GradeIntent { strength: GradeStrength::new(s), adherence: crate::recipe::DirectionAdherence::default(), direction: d, style_look: None },
             )
             .expect("the verify prompt builds")
         };
@@ -3339,6 +3353,7 @@ Final answer: {"decision":"accept","reasons":[]}"#;
                 strength: GradeStrength::default(),
                 adherence: DirectionAdherence::new(0.9),
                 direction,
+                style_look: None,
             })
             .unwrap()
         };
