@@ -1100,9 +1100,11 @@ and zero-confidence fields are conservation-tested to change nothing.
   (**designed do-no-harm rule**).
 - Style features: 14 dimensions in the persisted normalization block, with
   only dimensions having useful variance z-scored (**designed representation**).
-- SigLIP 2: 768-dimensional image and text vectors. `W_EMB = 4`, `W_TXT = 4`,
-  `W_DESC = 0.5` are the corpus harness's winners after the S2 recalibration on
-  the described index (**calibration-controlled**; see *Measured results*). `W_LOOK = 1.0` is a **normalisation, not a
+- SigLIP 2: 768-dimensional image and text vectors. `W_EMB = 4`, `W_TXT = 0.5`,
+  `W_DESC = 0.5` are the corpus harness's winners after the retrieval-rank
+  recalibration on the described index, which re-ran S2's grid with the hubness
+  correction the standardisation now applies (**calibration-controlled**; see
+  *Measured results*). `W_LOOK = 1.0` is a **normalisation, not a
   calibrated number**: the look library carries no develop settings, so the
   harness's leave-one-out settings objective cannot see it at all, and no other
   term ranks looks against each other, so the scale cannot change their order —
@@ -1122,6 +1124,23 @@ and zero-confidence fields are conservation-tested to change nothing.
   candidates, or with a degenerate spread, the standardised variant falls back
   to the raw gap and discloses it (**measured variant choice,
   mutation-tested**).
+- The standardisation additionally removes each candidate's **text hubness**
+  from the direction-text ↔ exemplar-IMAGE term before the z-score — the mean
+  of its stored `vocab_scores`, i.e. how much that photograph resembles *any*
+  sentence about a grade. A per-query z-score centres the level the PHRASE sits
+  at and nothing else, so the per-CANDIDATE constant survived it: 21.7 % of the
+  cosine's variance on the user's index, against 25.3 % for the direction ×
+  candidate interaction. Twelve real direction texts forming six ANTONYM pairs
+  ranked the corpus with a mean Spearman of **+0.27 between the two members of
+  a pair** — opposite wishes agreeing about which photographs to show — and
+  **−0.17** with the hubness removed first. Two independent estimates put the
+  coefficient at 1, so full subtraction carries no free parameter: the mean OLS
+  slope of the cosine on hubness is 0.942 (per-direction range 0.247–2.000),
+  and the antonym-pair Spearman is minimised at coefficient 1.00. The
+  correction is ALL-OR-NOTHING over the candidate set and disclosed
+  (`txt_hub_corrected`); the description term is left alone, because the only
+  bank available to it made antonym pairs agree MORE (+0.339 → +0.377)
+  (**measured, mutation-tested**).
 - Four environment overrides, each read in exactly one place and never again:
   `AUTOSHOP_STYLE_EMBED_WEIGHT`, `AUTOSHOP_STYLE_TEXT_WEIGHT`,
   `AUTOSHOP_STYLE_DESC_WEIGHT`, `AUTOSHOP_STYLE_LOOK_WEIGHT`. All four parse the
@@ -1163,11 +1182,29 @@ and zero-confidence fields are conservation-tested to change nothing.
   are not interchangeable: the held-out exemplar's own local DESCRIPTION, and
   its attribute TAG STRING (which is what S1 measured whenever a record had no
   description — i.e. always).
-  - Baseline `(0,0,0)` MAE is `0.713143`. Under the **prose** proxy the winner
-    is `(4,4,0.5)` STANDARDISED at `0.664818`, improvement `+0.048325`, seeded
-    paired bootstrap 95% CI `[+0.024290,+0.078587]` (seed `20260829`, 2000
-    resamples). Under the **tags** proxy the best row is `(4,2,0.5)` raw at
-    `0.692801`.
+  - Baseline `(0,0,0)` MAE is `0.713143`. Before the hubness correction, the
+    **prose** proxy's winner was `(4,4,0.5)` STANDARDISED at `0.664818`,
+    improvement `+0.048325`, seeded paired bootstrap 95% CI
+    `[+0.024290,+0.078587]` (seed `20260829`, 2000 resamples). Under the
+    **tags** proxy the best row is `(4,2,0.5)` raw at `0.692801`.
+  - WITH the correction the harness now applies, the prose winner is
+    `(4,0.5,0.5)` STANDARDISED at `0.688864`, improvement `+0.024280`, CI
+    `[+0.005837,+0.041111]` — the only row with a live text term whose CI still
+    excludes 0. `W_TXT = 4` under the correction is `0.752993`, a regression
+    against the 14-dim baseline whose CI (`[-0.069654,-0.005140]`) does NOT
+    straddle 0, so `W_TXT` could not stay at 4 once the correction shipped.
+    The correction costs MAE at a large `W_TXT` because THIS proxy's query text
+    describes the query photograph, so a candidate's general affinity to grade
+    prose is partly signal; against a real Direction it is not.
+  - Why the objective cannot arbitrate this alone, measured: with one real
+    direction over 169 different photographs, `(4,4,0.5)` put the same exemplar
+    in the top-4 of `59.9 %` of them and only `52` of `169` exemplars ever
+    appeared in any top-4; at `(4,0.5,0.5)` corrected it is `13.5 %` and `149`.
+    Under the harness's own prose proxy, `(4,4,0.5)`'s 4-neighbour settings
+    PREDICTION sits at mean `|z| = 0.3557` against `0.4445` for the text-free
+    row and `0.6819` for the held-out photographs' own settings — i.e. part of
+    its MAE win is regression to the corpus mean, which a pooled MAE rewards
+    and a photographer does not.
   - The text terms are judged against their own variant's best TEXT-FREE row,
     not only against the 14-dim baseline — every row carrying a `W_EMB` block
     beats that baseline whether or not it has text terms. Prose + standardised
@@ -1186,7 +1223,9 @@ and zero-confidence fields are conservation-tested to change nothing.
     two best rows; and (b) the query-text proxy is the held-out exemplar's own
     description, i.e. a text that describes the query photograph perfectly,
     while a user's typed Direction is not that. Both text weights are therefore
-    calibrated on a friendlier query than they will see.
+    calibrated on a friendlier query than they will see — the re-measurement
+    with real direction texts that the S2 ROADMAP entry registered is what moved
+    `W_TXT` from `4` to `0.5`.
   - The leave-one-out observations are CORRELATED (every exemplar appears in
     other queries' neighbourhoods), so every interval describes this corpus and
     is not a population confidence interval.
