@@ -1,0 +1,191 @@
+# Release chain (Mac port M0 — design book `task-mac-port.md`, user ruling
+# 2026-08-29: the release workflow lands in the close-out step).
+#
+# `build.yml` stays the per-push sentinel; this is what a TAG runs, and it exists
+# to make every published asset reproducible from the tag. That is the promise
+# made on issue #2 after Windows Defender flagged a locally built exe: a binary
+# anyone can rebuild from a public runner is a claim a reporter can check, and a
+# binary built on one laptop is not.
+#
+# Runner images are pinned, never `-latest`: `macos-latest` moves between major
+# macOS versions, and a release whose build host changes underneath it is not
+# reproducible in the sense this file is here to provide.
+name: release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to build (e.g. 1.1.0) — must match Cargo.toml'
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Resolve the version
+        id: ver
+        shell: bash
+        run: |
+          v="${{ github.event.inputs.version }}"
+          if [ -z "$v" ]; then v="${GITHUB_REF_NAME#v}"; fi
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+      - name: cargo build (default features)
+        shell: bash
+        run: cargo build --release --locked 2>&1 | tee build-cli.log
+      - name: cargo build (gui feature)
+        shell: bash
+        run: cargo build --release --locked --bins --features gui 2>&1 | tee build-gui.log
+      # build.rs turns an icon-embedding failure into a `cargo:warning`, not an
+      # error, so a runner missing the resource toolchain would ship an
+      # icon-less exe in silence. The local chain never needed this check
+      # because the toolchain was always there; a hosted runner is not a
+      # machine anyone inspects afterwards.
+      - name: The icon really was embedded
+        shell: bash
+        run: |
+          if grep -i "cargo:warning" build-cli.log build-gui.log; then
+            echo "::error::the build warned — the icon may not be embedded"; exit 1
+          fi
+      - name: Stage dist/
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp target/release/autoshop.exe dist/
+          cp target/release/autoshop-gui.exe dist/
+          ./dist/autoshop.exe --version
+      - name: Install Inno Setup
+        run: choco install innosetup -y --no-progress
+      - name: Build the installer
+        shell: pwsh
+        run: ./scripts/build_installer.ps1 -ExpectedVersion '${{ steps.ver.outputs.version }}'
+      - name: Build the portable archive
+        shell: pwsh
+        run: ./scripts/build_portable.ps1 -Version '${{ steps.ver.outputs.version }}'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: |
+            dist/autoshop.exe
+            dist/autoshop-gui.exe
+            dist/autoshop-*-windows-x64.zip
+            target/installer/Autoshop-Setup-*.exe
+          if-no-files-found: error
+
+  macos:
+    runs-on: macos-15
+    env:
+      # Must stay equal to the .app's LSMinimumSystemVersion when M3 lands.
+      MACOSX_DEPLOYMENT_TARGET: '12.0'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Resolve the version
+        id: ver
+        run: |
+          v="${{ github.event.inputs.version }}"
+          if [ -z "$v" ]; then v="${GITHUB_REF_NAME#v}"; fi
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+      - run: rustup target add x86_64-apple-darwin
+      - name: Build both architectures
+        run: |
+          for t in aarch64-apple-darwin x86_64-apple-darwin; do
+            cargo build --release --locked --target "$t"
+            cargo build --release --locked --bins --features gui --target "$t"
+          done
+      - name: Universal binaries
+        run: |
+          mkdir -p dist
+          for b in autoshop autoshop-gui; do
+            lipo -create -output "dist/$b" \
+              "target/aarch64-apple-darwin/release/$b" \
+              "target/x86_64-apple-darwin/release/$b"
+            # lipo output carries no signature, and Apple Silicon refuses to run
+            # an unsigned binary at all. Ad-hoc signing is what makes the smoke
+            # test below possible; it is not notarisation and is not claimed to be.
+            codesign --force --sign - "dist/$b"
+            lipo -info "dist/$b"
+          done
+      - name: Smoke test — arm64 slice
+        run: ./dist/autoshop --version
+      # Rosetta is not installed on the hosted runners. Reporting that the Intel
+      # slice was BUILT BUT NOT EXECUTED is the honest line; silently skipping it
+      # would let a broken slice ship as a tested one.
+      - name: Smoke test — Intel slice, if Rosetta is present
+        run: |
+          if arch -x86_64 /usr/bin/true 2>/dev/null; then
+            arch -x86_64 ./dist/autoshop --version
+          else
+            echo "INTEL SLICE BUILT BUT NOT EXECUTED — no Rosetta on this runner"
+          fi
+      - name: Batteries
+        run: |
+          cargo test --locked
+          cargo test --locked --features gui --bin autoshop-gui
+      - name: Stage the sidecars beside the binaries
+        run: |
+          cp LICENSE README.md dist/
+          rsync -a --exclude 'weights/' --exclude '__pycache__/' \
+                --exclude 'test_*.py' --exclude '*.pyc' python/ dist/python/
+          cp -R assets dist/assets
+      - name: Archive
+        # ditto, not zip: it preserves the extended attributes a bundle needs,
+        # and M3 archives a real .app through this same step.
+        run: |
+          ditto -c -k --keepParent dist \
+            "autoshop-${{ steps.ver.outputs.version }}-macos-universal.zip"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos
+          path: autoshop-*-macos-universal.zip
+          if-no-files-found: error
+
+  publish:
+    needs: [windows, macos]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: assets
+      - name: Flatten, checksum, and print the asset table
+        run: |
+          find assets -type f -exec mv -t assets/ {} +
+          find assets -mindepth 1 -type d -empty -delete
+          cd assets
+          : > checksums.txt
+          echo "| File | Size | SHA-256 |" > table.md
+          echo "|---|---:|---|" >> table.md
+          for f in $(ls | grep -v '^checksums.txt$' | grep -v '^table.md$' | sort); do
+            sha=$(sha256sum "$f" | cut -d' ' -f1)
+            size=$(stat -c%s "$f")
+            printf '%s  %s\n' "$sha" "$f" >> checksums.txt
+            printf '| `%s` | %s bytes | `%s` |\n' "$f" "$size" "$sha" >> table.md
+          done
+          cat checksums.txt
+          echo "--- paste these rows into README.md and the release notes ---"
+          cat table.md
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          v="${{ github.event.inputs.version }}"
+          if [ -z "$v" ]; then v="${GITHUB_REF_NAME#v}"; fi
+          run_url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          rm -f assets/table.md
+          {
+            echo "Built by GitHub Actions from \`${{ github.sha }}\`."
+            echo
+            echo "Every asset below is reproducible from this tag: $run_url"
+            echo
+            echo "\`checksums.txt\` carries the SHA-256 of each file."
+          } > notes.md
+          gh release create "v$v" --title "v$v" --notes-file notes.md assets/* \
+            || gh release upload "v$v" assets/* --clobber
