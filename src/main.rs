@@ -757,6 +757,36 @@ fn fmt_desc(desc: Option<&str>) -> String {
         .unwrap_or_default()
 }
 
+/// The neighbour's LOCAL-WORK habit as the diagnostic prints it (S3).
+///
+/// The reference block below states this as prose ("3 of 4 mask the sky …"),
+/// and prose is not a thing a bucket rule can be debugged against: the
+/// per-neighbour counts are what says WHICH exemplar contributed which use, and
+/// they are the only place a mis-bucketed mask is visible before it becomes a
+/// sentence in a paid prompt.
+///
+/// An unmeasured neighbour (a pre-S3 index) prints NOTHING rather than
+/// `masks=0`, which would claim a photographer works globally when the truth is
+/// that nobody looked — the same distinction [`autoshop::mask_habit::MaskHabit`]
+/// keeps in its three states.
+fn fmt_masks(masks: Option<&autoshop::mask_habit::MaskHabit>) -> String {
+    use autoshop::mask_habit::Bucket;
+    masks
+        .map(|h| {
+            format!(
+                " masks={} sky={} subject={} ground={} range={} other={} refined={}",
+                h.count,
+                h.bucket(Bucket::Sky).n,
+                h.bucket(Bucket::Subject).n,
+                h.bucket(Bucket::Ground).n,
+                h.bucket(Bucket::Range).n,
+                h.bucket(Bucket::Other).n,
+                h.refined,
+            )
+        })
+        .unwrap_or_default()
+}
+
 /// The offline retrieval diagnostic: what the ranking saw, in the ranking's own
 /// numbers.
 ///
@@ -814,8 +844,14 @@ fn style_query_cmd(
     for e in &ex {
         let t = idx.distance_components(&decoded.meta, &decoded.histogram, query, photo, e);
         println!(
-            "  {} distance={:.6} d14={:.6} emb={:.6}{}{}",
-            e.stem, t.total(), t.d14, t.emb, fmt_text_terms(&t), fmt_desc(e.desc.as_deref())
+            "  {} distance={:.6} d14={:.6} emb={:.6}{}{}{}",
+            e.stem,
+            t.total(),
+            t.d14,
+            t.emb,
+            fmt_text_terms(&t),
+            fmt_masks(e.masks.as_ref()),
+            fmt_desc(e.desc.as_deref())
         );
     }
     let reference = idx.render_reference_for_style(&ex, style);
@@ -3283,6 +3319,71 @@ fn ")
             body.matches("fmt_desc(").count(),
             2,
             "the neighbour line and the look line both print the prose"
+        );
+    }
+
+    /// The offline diagnostic prints each neighbour's mask counts beside the
+    /// terms, so a mis-bucketed mask is visible as a NUMBER before it becomes a
+    /// sentence in a paid prompt (S3).
+    ///
+    /// An unmeasured neighbour prints nothing at all — a `masks=0` there would
+    /// read as "this photographer works globally" when the truth is that a
+    /// pre-S3 index never looked.
+    ///
+    /// MUTATION THIS KILLS: dropping `fmt_masks` from the neighbour line, or
+    /// making it answer `masks=0` for an absent habit.
+    #[test]
+    fn style_query_prints_mask_counts() {
+        use autoshop::mask_habit::MaskHabit;
+        use autoshop::recipe::{LocalAdjustment, MaskGeometry};
+        assert_eq!(fmt_masks(None), "", "no habit, no field");
+        let measured_but_global = MaskHabit::of(&[]);
+        assert_eq!(
+            fmt_masks(Some(&measured_but_global)),
+            " masks=0 sky=0 subject=0 ground=0 range=0 other=0 refined=0",
+            "a MEASURED zero is printed — it is a finding, not an absence"
+        );
+        let habit = MaskHabit::of(&[
+            LocalAdjustment {
+                mask: MaskGeometry::Linear { zero_x: 0.5, zero_y: 0.8, full_x: 0.5, full_y: 0.0 },
+                exposure_ev: -0.6,
+                ..Default::default()
+            },
+            LocalAdjustment {
+                mask: MaskGeometry::Radial {
+                    top: 0.3, left: 0.3, bottom: 0.7, right: 0.7, feather: 0.5,
+                    roundness: 0.0, flipped: false, angle: 0.0, midpoint: 50.0,
+                    mask_version: 2,
+                },
+                exposure_ev: 0.4,
+                range: Some(autoshop::recipe::RangeMask::Luminance {
+                    lo_outer: 0.4, lo: 0.6, hi: 1.0, hi_outer: 1.0,
+                }),
+                ..Default::default()
+            },
+        ]);
+        assert_eq!(
+            fmt_masks(Some(&habit)),
+            " masks=2 sky=1 subject=1 ground=0 range=0 other=0 refined=1",
+            "every bucket is named, and the refinement count beside them"
+        );
+        // A count must not be able to forge a second neighbour line, the way
+        // the description door already guards prose.
+        assert!(!fmt_masks(Some(&habit)).contains('\n'));
+        // …and the diagnostic really calls it, on the neighbour lines: a helper
+        // nothing invokes would pass every assertion above.
+        let body = include_str!("main.rs")
+            .split("fn style_query_cmd(")
+            .nth(1)
+            .expect("the diagnostic exists")
+            .split("
+fn ")
+            .next()
+            .unwrap();
+        assert_eq!(
+            body.matches("fmt_masks(").count(),
+            1,
+            "the neighbour line prints the counts"
         );
     }
 }

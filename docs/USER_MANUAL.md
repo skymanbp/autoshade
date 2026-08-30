@@ -188,9 +188,26 @@ adds camera features or develop settings to those records, and it is capped at
 the RAW half's 5,000-exemplar cap and this one share a 228 MiB index envelope).
 `style-query` is an offline diagnostic that prints the weights in force, the
 exact retrieval terms behind every ranked neighbour and look — each weighted
-term beside the raw cosine it came from — and the proposer reference
+term beside the raw cosine it came from — each neighbour's local-work counts
+(`masks=… sky=… subject=…`), and the proposer reference
 blocks, including the explicit reason a look library is unreachable when no
 embedding vector is available.
+
+A RAW index build also reads the **masks** in each sidecar, and summarises them
+as a habit: how many you enabled, how many carry a Range Mask, and per use —
+sky, subject, foreground, range, other — a count and the average strength of
+eight local sliders. It reaches the proposer as one sentence ("3 of 4 mask the
+sky (linear from the top: exposure -0.6 EV, highlights -25) …"), so the AI
+places its own masks the way you place yours. **No mask shape is copied or
+averaged**: geometry belongs to one frame, and only counts and slider averages
+cross between photographs. The Range Mask count is taken from both the imported
+recipe and the import's own refusal notes, because a Range Mask in an encoding
+this engine does not model is dropped on the way in — counting only what
+survived would report "none use range masks" about a library that plainly does. The build prints what it learned and, separately,
+any mask content it could not read whole (an unresolvable AI mask, a brush
+table it refuses) so the summary is never mistaken for a complete one. An index
+built before this feature keeps working; its reference block simply says
+nothing about local work, and nothing needs rebuilding to keep using it.
 
 `--embed` opts into the local SigLIP 2 sidecar for that run and `--no-embed`
 refuses it; either flag wins over the environment, and neither writes to it.

@@ -19,7 +19,7 @@ mod openai;
 // The two prompt-injection fences, re-exported: `style-query` prints the SAME
 // blocks the proposer receives, and a second literal there could drift from
 // these without anything failing.
-pub use openai::{FENCE_LOOK_REFERENCE, FENCE_STYLE_REFERENCE};
+pub use openai::{FENCE_LOOK_REFERENCE, FENCE_STYLE_REFERENCE, REFERENCE_BUDGET_BYTES};
 mod openai_verify;
 
 pub use claude::ClaudeProvider;
@@ -2145,6 +2145,7 @@ mod tests {
             families: None,
             embed: None,
             tags: Vec::new(), vocab_scores: None, desc: None, desc_embed: None,
+            masks: None,
         };
         assert_ne!(
             idx.render_reference(&[&ex], calib),

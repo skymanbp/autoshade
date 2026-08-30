@@ -972,6 +972,72 @@ reference grades, not an archive; both caps are refused at the build door and at
 load, and `capacity_constants_hold_two_vectors_and_the_scores` measures a
 maximal record of each kind against the bound.
 
+#### Mask habits (S3)
+
+A v5 exemplar may additionally carry a `MaskHabit` (`src/mask_habit.rs`) — what
+the photographer did LOCALLY on that frame, as summary statistics. It is read
+from the same sidecar the settings come from, through the develop chain's own
+path-aware importer (`xmp::xmp_to_recipe_for_photo`), so a mask this engine
+cannot honour is counted the way the develop path would actually see it.
+
+**What it holds.** The number of masks ENABLED with a non-zero amount; how many
+carry a Range Mask refinement; and, per use, a count plus the amount-weighted
+mean of the eight local sliders in `HABIT_SLIDERS` (`exposure`, `highlights`,
+`shadows`, `whites`, `blacks`, `clarity`, `dehaze`, `saturation`). The refined
+count is taken from the imported recipe AND from the importer's own
+`MaskImportReason::ForeignRangeMask` refusals, because a Range Mask this engine
+cannot honour is dropped on the way in: on the 169-sidecar calibration library
+all `12` non-inverted Range Masks are refused and none is carried, so a count
+read from the recipe alone would report zero refinement for a library that uses
+it fourteen times.
+
+**Which use, from one pure function.** `bucket_of` maps one adjustment to
+`Sky`, `Subject`, `Ground`, `Range` or `Other` in a fixed order. An AI mask
+answers from its own `MaskSubType` (`2` Sky, `1` Subject; `0` is
+*Object OR Background*, which the sidecar does not separate, so it falls
+through to `Other`). A linear gradient is read by which END of the frame it
+covers — `mask_weight` is 0 at `zero` and 1 at `full` and the normalised frame
+is y-DOWN, so a `full` end above its `zero` end is a sky — XORed with
+`MaskInverted`, which reverses the covered end (`8` of the library's `192`
+gradients set it). A radial is a subject when it covers its own ellipse and a
+surround when inverted (`41` of `186`). A Range Mask is considered LAST, and
+that is the one ordering decision worth stating: Lightroom's Range Mask is a
+refinement intersected with a geometry (`LocalAdjustment::range` sits beside
+`mask`, it does not replace it), so ranking it first would move the library's
+most carefully refined corrections out of `sky`/`subject`/`ground` into a
+bucket that says nothing about WHERE they were placed.
+
+**What it never holds: geometry.** A mask's coordinates are a fact about one
+frame, so nothing spatial is averaged across photos. The block carries counts,
+slider means and English — `local_work_note` renders one sentence naming at
+most `HABIT_SLIDERS_SHOWN = 3` sliders per clause, and its worst case is proved
+against `MAX_LOCAL_WORK_CHARS = 640` by construction rather than truncated at
+runtime.
+
+**It does not rank.** Retrieval, `style_targets` and `blend_toward` do not read
+the field at all; it reaches only the proposer's reference block. That is why it
+ships WITHOUT an index-version bump, on `families`' precedent:
+`#[serde(default)]` in both directions, so a pre-S3 index loads with the field
+ABSENT — a different fact from a measured zero — and a pre-S3 build ignores the
+new key.
+
+**The block's own budget.** Storage bounds and prompt bounds are two different
+budgets, and until S3 one number was spending both. An index record may carry
+`MAX_DESC_CHARS = 512` of description and `128` characters per tag; a reference
+block is bounded by `advisor::REFERENCE_BUDGET_BYTES = 4,096`, with
+`BoundedUntrustedText` cutting whatever overflows. Four neighbours at their
+storage bounds measured `5,920 B` — 45 % over — so the TAIL was being cut, and
+since S3 that tail is the local-work note. The block now has its own door (user
+ruling 2026-08-30): `REFERENCE_DESC_CHARS = 200` per description,
+`REFERENCE_TAG_PHRASE_CHARS = 48` per tag phrase and
+`REFERENCE_TAGS_CHARS = 128` per joined tag list, applied at all three of the
+block's tag consumers — the per-exemplar look note, the shared-tag note and the
+look-reference block. The index, the text tower and `style-query` still see the
+whole sentence; only the block is cut, and it says so with an ellipsis. The
+widest block this app can build now measures `3,565 B` with the note and a
+realistic one `2,517 B`
+(`style::tests::the_local_work_note_fits_the_proposers_budget` prints both).
+
 `match` is inverse rendering rather than pixel copying: it aligns luminance
 CDFs, searches exposure, solves a regularized basis of engine controls, adds a
 residual monotone tone curve, closes saturation in a render/measure loop, and
