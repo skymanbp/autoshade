@@ -1333,7 +1333,7 @@ pub enum MaskGeometry {
     /// behaviour and now name the approximation rather than the absence
     /// (`MaskImportReason::BrushRendered` / `MaskLossReason::BrushRendered`).
     ///
-    /// **The encoding, as re-derived** (current corpus: 177 sidecars of
+    /// **The encoding, as re-derived** (the 2026-08 census snapshot: 177 sidecars of
     /// the user's own library, real XML parser, 0 parse failures; 42
     /// `Mask/Aggregate` and 398 `Mask/Paint` instances):
     ///

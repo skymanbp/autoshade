@@ -1188,20 +1188,21 @@ crs:Midpoint=\"{midpoint}\" crs:Version=\"{mask_version}\"",
 /// emits only names from this list — so a hand-edited `recipe.json` cannot
 /// smuggle a novel attribute, or markup, into a sidecar.
 ///
-/// Current corpus re-derivation: 177 sidecars; 42 Mask/Aggregate; 105
-/// Mask/Image; 398 Mask/Paint; 1081 Mask/*; 40 crs:Gesture (recursive `*.xmp`
+/// Current corpus re-derivation: 174 sidecars; 40 Mask/Aggregate; 104
+/// Mask/Image; 391 Mask/Paint; 1037 Mask/*; 40 crs:Gesture (recursive `*.xmp`
 /// census over the operator-supplied corpus root (env `AUTOSHOP_CENSUS_ROOT`),
-/// real XML parser, 0 parse failures). Measured
-/// over this corpus: 105 `Mask/Image` instances,
+/// real XML parser, 0 parse failures; refreshed at the v1.1 release). Measured
+/// over this corpus: 104 `Mask/Image` instances,
 /// 21 distinct attribute names, of which 7 are modelled fields
 /// ([`MaskGeometry::AiMask`]) plus `crs:What` and `crs:MaskActive` (an
-/// invariant, `"true"` on 105/105) and `crs:MaskSyncID` (re-minted by this
+/// invariant, `"true"` on 104/104) and `crs:MaskSyncID` (re-minted by this
 /// writer like every other component's). These eleven are the rest.
 ///
 /// The counts above are the current scoped measurements; the invariants are
-/// enforced independently by the vocabulary and parser tests. Read
-/// Historical F2 figures elsewhere in this file and in recipe.rs are retained
-/// only as provenance; the active counts above are the re-derived values.
+/// enforced independently by the vocabulary and parser tests.
+/// Historical figures elsewhere in this file and in recipe.rs — the F2 era and
+/// the 177-sidecar 2026-08 snapshot both — are retained only as provenance;
+/// the active counts above are the re-derived values.
 /// A commanded XML census over the operator-supplied corpus root
 /// (`AUTOSHOP_CENSUS_ROOT`) and its recursive `*.xmp` files
 /// found 177 sidecars, 42 `Mask/Aggregate`, 105 `Mask/Image`, 398 `Mask/Paint`,
@@ -1308,7 +1309,7 @@ crs:MaskSubType=\"{subtype}\"\n\
         id = guid(sync_seed),
     );
     Some(if painted.is_empty() {
-        // Self-closing when there is no gesture — 65 of 105 current instances.
+        // Self-closing when there is no gesture — 64 of 104 current instances.
         format!("         <rdf:li>\n{head}/>\n         </rdf:li>\n")
     } else {
         format!(
