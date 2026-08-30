@@ -195,6 +195,14 @@
 
 ## 当前状态（已完成，勿重做）
 
+- **🎨 步14 风格检索扩容 S1+S2 已合并 main 于 `74a1e93`（分支 `style-s2`：S1 快照 `2633058`（Codex，中转余额耗尽后冻结）→ S1 修复批 `fc04414`（Opus，task-style-s1-fix.md F-5/6/10/11/12/13/14）→ S2 `ac93b4f`（Opus，task-style-s2.md）→ 夹具 pid `a903068` → 电池去冗 `87f6c04`；2026-08-29/30；用户令 13:00 起 Codex 退役、重读写交 Opus 子代理、主模型监督亲审）**：
+  **S1（成片摄入 / 文字嵌入 / 嵌入开关 / 遵循度轴）**：SigLIP 2 图像向量（W_EMB）+ 33 词 LOOK_VOCAB 标签 + 文本塔（`--text-manifest` 批量门；单一 tokenizer 门 `GemmaTokenizerFast.from_pretrained(local_files_only=True)`、`model.text_model(input_ids)`、golden ids + 前向自测）；`EmbeddingSwitch`/`DescribeSwitch`（flag > env > 偏好，**值**而非环境写入）；`score_candidates` 单一评分器 + `DistanceTerms`（`standardise`/`raw_term`/`text_term`）；成片外观库（`MAX_LOOK_EXEMPLARS=500`，只进提示词/参考图，永不进 `style_targets`/`blend_toward`）；遵循度三档 Hint/Direct/Brief 进 verifier；GUI 偏好经 `GradeRequest.embed` 贯通；i18n 乱码根治 + `every_chinese_value_is_real_chinese_and_not_a_console_encoding_accident`。
+  **S2（本地描述侧车）**：第五侧车 `python/describe.py`（Qwen/Qwen3-VL-2B-Instruct@89644892，十文件 sha256+字节数经家族单一 `_fetch_verified`；贪心确定性解码；bf16 CUDA 4.05 GiB / ≈1.8 s 每图；提示词 v1 随记录版本化）+ `src/describe.rs`（`parse_records` 拒外来 checkpoint/prompt 版本；`sanitize_desc` 单一门：控制字符/Cf 块按码点、按**字符**截 512；`DescriptionCache` 以帧字节 SHA-256 为键、20,000 条 / 82 MB 上限、原子发布、确定性驱逐；手写 SHA-256 钉 FIPS 180-4 四向量）；建库四阶段各**一次**侧车进程（帧→图像 manifest→描述缓存未命中→文本 manifest）：169 张 RAW **386 s**（S1 逐张重载 5,618 s）、二次 81 s 全命中；`desc_text` 优先散文、标签串回退；参考块 ` · look: <tags> — <desc>`。
+  **重标定**（两查询代理，338 向量一批，`target/style-s2/calibration-two-proxy.txt`）：S1 的 (4,0,4) raw 在真散文下 0.698491 劣于无文本 0.695233 → 发布 **W_EMB=4 / W_TXT=4 / W_DESC=0.5 / STANDARDISE_TEXT_TERMS=true**（prose 代理 MAE 0.664818 vs 基线 0.713143，CI [+0.024290,+0.078587]；文本项对本变体无文本行 CI [+0.001589,+0.055436] 排零；变体对决 CI [−0.000205,+0.054341] 险含零；代理＝完美描述，真实 Direction 更短更糙——**用户裁定 2026-08-30 发布实验室赢家，登记「真实短 Direction 复测」小批**）。
+  **主审亲核**：S1 修复批报告 708 行逐项（clippy 0/0、定向 232/0/2i、GUI bin 150、CLI 18、M-W21b RED 复证）；S2 报告（定向 245/0/2i、CLI 20、GUI bin 151、clippy 0/0、describe 自测 6/6、八变异复跑 RED→IDENTICAL→GREEN、A/B 索引去描述字段后逐字节同、style-query 六转录 EXIT=0 照片名 0）；`%LOCALAPPDATA%/autoshop` 无残留；`src/fit*.rs` 零 diff。
+  **并行电池六红根因**（`a903068`）＝`store.rs` `canonical_temp` 夹具根无 pid，双电池争抢同一 junction 路径 → 加 `-{pid}`，三进程并发 7/0 实证。**电池去冗**（`87f6c04`，用户令「后续电池任务记得优化加速，比如并行、去冗」）＝`gui` 特性只加依赖（`cfg(feature="gui")` 在 bin/gui 外 0 命中）→ gui 趟只跑 `--bin autoshop-gui`；`check_docs --gates` 改按 `Running` 头**按套件名**取数且两趟共跑套件必须相等（五转录形状验证）；CI gui 步同改；clippy 在 cargo 放锁后与测试执行重叠（探针 77 s 藏在 713 s 内）。
+  门（合并树 `target/style-final`，release、并行去冗）：**1137=1126 pass+11 ignored / 20 / 151 / 2+2**，clippy 0+0，i18n 0，字体 856/856，check_docs 23P/0F/4S、--gates 26P/0F/1S；集差对 multizone 合并转录 `target/merge-mz/gates-combined.txt` 逐名 **+55/−0**（gui 趟去冗后 lib/CLI/契约套件不在 gui 块重跑，`setdiff-vs-main.txt` 标 NOT RUN；46 lib＝26 style/9 describe/4 pipeline/3 embed/3 advisor/1 recipe，4 CLI，5 GUI）。
+  CE 冗余扫（`target/style-final/ce-{dedup,clone}{,-main}.txt`，main vs 合并树）：T1/T2 块 4399→4656、T3 近似对 1406→1599，新增对几乎全为 `(anonymous)` 测试体/闭包（style.rs 内 140 对）+ 侧车家族样板（describe.py↔embed.py/correspond.py 的 die/model_dir/fetch_model/publish）+ `describe.rs`/`embed.rs` `available` 同形 + SHA256_K 常量表——登记为冗余清理批。登记跟进（v1.1 义务条见下）：侧车家族样板重复（CodeEraser 17 区，家族级重构）；描述缓存跨库不 GC；`W_LOOK` 归一化不可测；四个重名 stem；`AUTOSHOP_CENSUS_ROOT` SKIP；`store.rs` 8906 / `check_docs.py` 955 / `i18n.rs` / `ARCHITECTURE.md` 超 CE 750 行门（本批两处根因修以 python 逐字节落地并披露）；staged frames 累积；侧车 `{e}` 路径泄漏；AdherenceTier 命名。下步＝**S3 蒙版习惯**（用户裁定紧接本批，task-style-s3-masks.md）→ 展示图重渲 + 三支柱文档。
 - **🗺 步12 多区域语义分区已提交 `a2173c9`（分支 `multizone`，2026-08-29，Codex 实现（中转、worktree `target/wt-multizone`，impl→cont→fix 三会话）→主审只读诊断根因（无条件 thumbnail 上采样）→Codex 修复批第二轮 5h50m 不收敛且反复 `Get-Process cargo,python,autoshop | Stop-Process` 杀全机进程（02:15 四臂/03:44 双电池 exit 127 真凶）→按「两轮不收敛亲自定位」令 03:47 停会话、主审第一方收口；42 代理复审 wf_121078c9 20 确认/16 驳回逐项亲核；合并 main 于 `32b0fe4`）**：
   多类 OneFormer 侧车（`--multi --regions N`，manifest 64 KiB 上限先于解析、平面单一文件名+拒绝链接、平面与 `.tmp` 临时件清扫）→ `semantic::resolve_regions`（两侧过 `MIN_ZONE_SHARE`、置信高→面积小→类号小 优先分配重叠像素，最多 4 区 disjoint）→ 共享 `attach_one_zone` 逐区独立 Full/Atmosphere，置信取最差已接受区（`worst_region_residual`）；`--regions` ≤2（CLI 默认 2；GUI「Up to four semantic regions」默认关、Prefs `zoned_four_regions`）原样走历史天空/地面路由。
   仲裁：四区试跑 vs 同对种子化双区（`fit_recipe_zoned_inner_seeded(.., Some(sky_pair))`，恰两次推理）在**同一把证据尺**上比（`frame_err_under(.., &two.evidence)`——两次全局解可落不同模式，各自 `err_after` 不可比），不优于（含平局 `>=`）即整体退回双区报告 + 一条 `REGION_FRAME_REFUSED{multi,two,regions}`，败方栅格 `release_unselected_rasters` 释放；typed 交接 `SEMANTIC_REGIONS_UNAVAILABLE{e}`（多类层失败：历史路由已跑，不再谎称亮度范围回退）/ `SEMANTIC_REGIONS_NONE{n}`（无区域过门：种子化路由自己判天空分区、删锚点、跑序列器，不再渲染裸 `{s}` 占位符）/ `REGION_BOUNDARY_REFUSED{label,why,…}`（不伪造 after/k）；平面精修按天空/地面同款 MASK_REFINEMENT 披露；manifest `mean_confidence`=质量加权 α（Σp²/Σp）、`share`=均值（原两者同值把覆盖优先级反转），`--self-test` 直接调产品 `rank_candidates`/`plane_stats`。
@@ -964,6 +972,15 @@
 
 ## v1.1 发版义务清单（进行中）
 
+- **风格检索扩容 S1+S2（步14，合并 `74a1e93`）**：release notes 必须说明 v1.1 起风格参考多了三把可选的相似度尺——
+  SigLIP 2 图像向量（`--embed` / GUI「Use image embeddings」偏好，默认关）、Direction 文本对候选图像（W_TXT=4）与
+  本地描述互比（W_DESC=0.5，`--describe` 需同时 `--embed`，Qwen3-VL-2B 本地侧车，首次下载 4.3 GB 权重、CUDA bf16 约 4 GiB 显存）；
+  开关全关时检索/参考块/配方对 v1.0.x **逐字节同**（具名测试 `default_style_reference_is_byte_identical_to_head`），
+  唯一默认可见变化＝建库进度改按四阶段汇报（帧→图像→描述→文本）。成片外观库（`looks`，≤500 张 JPEG）只进提示词与参考图，
+  永不进 `style_targets`/`blend_toward`；Style≥0.85 参考块「TARGET」措辞不变。索引文件新增可选字段（`embed`/`tags`/`desc`/
+  `desc_embed`/`looks`），旧索引照常读、新索引被旧构建读时按具名测试行为。描述缓存 `style-descriptions.json` 落在用户存储根，
+  键＝帧字节 SHA-256+模型+提示词版本，20,000 条上限。发版链：CI gui 测试步改为 `--bin autoshop-gui`（gui 特性只加依赖），
+  `check_docs --gates` 按套件名取数。权重常量由 `the_shipped_text_variant_is_the_measured_one` 钉住，重标定转录随批归档。
 - **线性渐变落差剖面硬变更（`817fa13`）**：release notes 必须说明 v1.1 起线性渐变
   蒙版的覆盖度剖面由夹紧线性斜坡改为 C¹ Hermite smoothstep（3t²−2t³），两手柄
   处一阶导为零；含线性蒙版的旧配方重渲像素会变（手柄间过渡变软，手柄与两侧
