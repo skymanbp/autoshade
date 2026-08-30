@@ -61,14 +61,14 @@ pub mod keys {
     // --- reverse fit (fit.rs) -------------------------------------------
     pub const FIT_SUMMARY_WITH_CURVE: &str =
         "Reverse-fit from a target rendition (statistical match; the target is not \
-         pixel-aligned, so local masks and per-band HSL are not recovered): luma-CDF \
-         → tone sliders + residual tone curve, chroma → saturation, per-channel cast \
-         curves. Residual look error {err_before} → {err_after}.";
+         pixel-aligned, so local masks and per-band hue rotation are not recovered): luma-CDF \
+         → tone sliders + residual tone curve, chroma → saturation, per-band colour mixer, \
+         per-channel cast curves. Residual look error {err_before} → {err_after}.";
     pub const FIT_SUMMARY_NO_CURVE: &str =
         "Reverse-fit from a target rendition (statistical match; the target is not \
-         pixel-aligned, so local masks and per-band HSL are not recovered): luma-CDF \
-         → tone sliders (no residual curve), chroma → saturation, per-channel cast \
-         curves. Residual look error {err_before} → {err_after}.";
+         pixel-aligned, so local masks and per-band hue rotation are not recovered): luma-CDF \
+         → tone sliders (no residual curve), chroma → saturation, per-band colour mixer, \
+         per-channel cast curves. Residual look error {err_before} → {err_after}.";
     pub const FIT_SUMMARY_ATMOSPHERE: &str =
         "Reverse-fit Atmosphere mode (structural divergence D={d}): the target's \
          structure cannot be reconstructed by develop controls, so only its atmosphere \
@@ -173,12 +173,14 @@ pub mod keys {
         " This target's look appears to use {controls}, which the reverse-fit \
          never solves for (its solution space is exposure/contrast/\
          highlights/shadows/whites/blacks, a tone curve, one global \
-         saturation, clarity/texture and the three channel curves) — that part of the look \
+         saturation, clarity/texture, an evidence-gated per-band colour mixer that never \
+         rotates hue, and the three channel curves) — that part of the look \
          cannot arrive through this route.";
     pub const FIT_NOTE_ATMOSPHERE_UNREPRESENTED: &str =
         " This target's remaining look appears to need {controls}; Atmosphere mode only \
          solves bounded exposure, white balance, a robust five-point tone curve, \
-         saturation and evidence-gated clarity/texture, so that part cannot arrive through this route.";
+         saturation, an evidence-gated per-band colour mixer that never rotates hue, \
+         and evidence-gated clarity/texture, so that part cannot arrive through this route.";
     /// R23-6 D: the deep reverse-fit adopted a guided retry. The persisted
     /// record has to say the shipped recipe is not the plain solve — the
     /// status line is transient, the rationale is what reopening the photo
@@ -209,14 +211,14 @@ pub mod keys {
     /// alignment the solve just used.
     pub const FIT_SUMMARY_WITH_CURVE_PAIRED: &str =
         "Reverse-fit from a target rendition (paired robust match on corresponding \
-         pixels; local masks and per-band HSL are still not solved): robust paired \
+         pixels; local masks and per-band hue rotation are still not solved): robust paired \
          luma regression → tone sliders + residual tone curve, chroma → saturation, \
-         per-channel cast curves. Residual look error {err_before} → {err_after}.";
+         per-band colour mixer, per-channel cast curves. Residual look error {err_before} → {err_after}.";
     pub const FIT_SUMMARY_NO_CURVE_PAIRED: &str =
         "Reverse-fit from a target rendition (paired robust match on corresponding \
-         pixels; local masks and per-band HSL are still not solved): robust paired \
+         pixels; local masks and per-band hue rotation are still not solved): robust paired \
          luma regression → tone sliders (no residual curve), chroma → saturation, \
-         per-channel cast curves. Residual look error {err_before} → {err_after}.";
+         per-band colour mixer, per-channel cast curves. Residual look error {err_before} → {err_after}.";
     pub const FIT_NOTE_ROBUST_REJECTED: &str =
         " Paired robust fit: {pct}% of the comparable pixels disagreed with any \
          single global develop of this source (concentrated in [{ranges}]) and \
@@ -240,6 +242,16 @@ pub mod keys {
         " Detail evidence fitted clarity {clarity} and texture {texture} within the +/-20 budget; their high-frequency reading used only identifiable pixels.";
     pub const FIT_NOTE_DETAIL_WITHHELD: &str =
         " Detail controls were withheld: two-sided structural and luma-range evidence did not support a safe global detail move, so clarity and texture were not moved.";
+
+    /// Stage 4a: the per-band colour mixer solved from population statistics.
+    /// Both halves matter — what moved, and which bands were left alone
+    /// because neither frame's population could speak for them.
+    pub const FIT_NOTE_HSL_BANDS: &str =
+        " Per-band colour mixer, solved from each band's own population: [{moved}]. Hue rotation is never solved, so every band's hue stays 0. Bands left neutral for want of two-sided population evidence: [{refused}].";
+    pub const FIT_NOTE_HSL_WITHDRAWN_ERROR: &str =
+        " The per-band colour move was given back: applying it did not leave the frame closer to the target, so every band returned to neutral.";
+    pub const FIT_NOTE_HSL_WITHDRAWN_BLIND: &str =
+        " The per-band colour move was given back: it would have carried pixels through hue bands no two-sided evidence covers, and blind movement is vetoed rather than shipped.";
 
     /// Step 7b: a content-divergent fit obtained a cross-image correspondence
     /// field (local DIFT sidecar) and the zone estimators use it.
@@ -798,9 +810,9 @@ mod tests {
             )),
             format!(
                 "Reverse-fit from a target rendition (statistical match; the target is not \
-                 pixel-aligned, so local masks and per-band HSL are not recovered): luma-CDF \
-                 → tone sliders {}, chroma → saturation, per-channel cast curves. Residual \
-                 look error {err_before:.3} → {err_after:.3}.",
+                 pixel-aligned, so local masks and per-band hue rotation are not recovered): luma-CDF \
+                 → tone sliders {}, chroma → saturation, per-band colour mixer, per-channel cast \
+                 curves. Residual look error {err_before:.3} → {err_after:.3}.",
                 "(no residual curve)",
             ),
         );
