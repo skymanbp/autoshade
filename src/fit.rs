@@ -51,11 +51,20 @@
 //!   4. **Detail** — coarse and fine local-luma energy drive `clarity` and
 //!      `texture`, each capped at ±20 and enabled only when enough shared
 //!      structural and luma-range evidence survives.
+//!   5. **Per-band colour mixer** — `hsl.saturation` and `hsl.luminance`,
+//!      one ACR band at a time, from that band's OWN population statistics
+//!      (mean chroma and mean Rec.601 luma), admitted only by the same
+//!      two-sided population gate the rest of the module reads, budgeted by
+//!      strength, and required to earn its place against its own absence on
+//!      the finished frame. Fitted between the saturation chase and the
+//!      channel curves — stage "4a" in the code comments, listed last here
+//!      because it is the newest.
 //!
-//! There is deliberately NO per-band HSL stage — per-band statistics against
-//! a non-pixel-aligned generative target conflate content with style and are
-//! unidentifiable (see the note in [`fit_recipe`]; it caused the 2026-07-07
-//! purple-sky failure).
+//! `hsl.hue` is deliberately NEVER solved: rotating a band re-populates it,
+//! so its evidence is circular, and a plausible in-gate centroid delta
+//! applied as a whole-band rotation is what caused the 2026-07-07 purple-sky
+//! failure. A band's mean chroma and mean luma are ordinary marginal
+//! statistics of a sub-population and carry no such trap.
 //!
 //! Every stage fits the RESIDUAL against a fresh render of the current recipe,
 //! so stage interactions are absorbed instead of compounding; the report carries
@@ -101,6 +110,17 @@ const ATMOSPHERE_WB_GAIN_RATIO: f32 = 1.40;
 const ATMOSPHERE_CURVE_SLOPE_MIN: f32 = 0.5;
 const ATMOSPHERE_CURVE_SLOPE_MAX: f32 = 1.5;
 const ATMOSPHERE_CONFIDENCE_CAP: f32 = 0.50;
+/// Per-band colour-mixer ceiling on the recipe's own +/-100 axis, at Strength
+/// 0 / the shipped default / Strength 1. Deliberately far below the global
+/// saturation budget: a band move is applied to a SUB-population that the
+/// frame statistics can only see through eight coarse bins, so the default is
+/// the size of a correction a user would call "the blues are a bit flat"
+/// rather than a re-grade. The engine halves the luminance axis on its way in
+/// (`render::apply_hsl`), so that axis is the gentler of the two by
+/// construction and needs no second number.
+const HSL_BAND_LIMIT_MIN: f32 = 6.0;
+const HSL_BAND_LIMIT_DEFAULT: f32 = 18.0;
+const HSL_BAND_LIMIT_MAX: f32 = 45.0;
 /// Kelvin domain the WB search walks in log space; landing on either end is
 /// disclosed above default strength (`FIT_NOTE_WB_SEARCH_BOUND`).
 const WB_SEARCH_K: (f32, f32) = (2000.0, 40000.0);
@@ -124,6 +144,10 @@ pub struct FitBudget {
     pub cast_ratio: f32,
     pub slope: (f32, f32),
     pub confidence_cap: f32,
+    /// Ceiling for ONE band of the per-band colour mixer, on the recipe's
+    /// +/-100 axis. The strength dial has to be able to turn this stage, so
+    /// it interpolates like every other budget dimension.
+    pub hsl_band: f32,
     pub vetoes: VetoPolicy,
 }
 
@@ -162,6 +186,7 @@ impl FitBudget {
             cast_ratio: between(1.5, CAST_ACCEPT_RATIO, 3.0),
             slope: (between(0.7, ATMOSPHERE_CURVE_SLOPE_MIN, 0.25), between(1.3, ATMOSPHERE_CURVE_SLOPE_MAX, 3.0)),
             confidence_cap: between(0.50, ATMOSPHERE_CONFIDENCE_CAP, 0.35),
+            hsl_band: between(HSL_BAND_LIMIT_MIN, HSL_BAND_LIMIT_DEFAULT, HSL_BAND_LIMIT_MAX),
             vetoes: if s >= 0.85 { VetoPolicy::Disclose } else { VetoPolicy::Withhold },
         }
     }
@@ -1940,6 +1965,7 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure_opts(
                 robust: None,
                 paired: false,
                 vouched_bands: None,
+                hsl: HslStageFacts::default(),
             },
         );
     }
@@ -1969,7 +1995,7 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure_opts(
                 structural_evidence: None,
                 defer_disclosure,
             },
-            SolveFacts { budget: Some(FitBudget::for_strength(options.strength)), strength: Some(options.strength.get()), veto_luma: None, veto_hue: None, wb_clamped: None, wb_search_bound: None, wb_rotation_coverage: None, wb_rotation_disclosure: None, cast_admitted_by_strength: None, wb_foreign_hue_withheld: false, wb_rotation_withheld: false, sat_pegged: None, cast: CastOutcome::default(), evidence_refused: false, sat_fitted: None, regressed: None, detail: (0.0, 0.0), detail_withheld: true, robust: None, paired: false, vouched_bands: None },
+            SolveFacts { budget: Some(FitBudget::for_strength(options.strength)), strength: Some(options.strength.get()), veto_luma: None, veto_hue: None, wb_clamped: None, wb_search_bound: None, wb_rotation_coverage: None, wb_rotation_disclosure: None, cast_admitted_by_strength: None, wb_foreign_hue_withheld: false, wb_rotation_withheld: false, sat_pegged: None, cast: CastOutcome::default(), evidence_refused: false, sat_fitted: None, regressed: None, detail: (0.0, 0.0), detail_withheld: true, robust: None, paired: false, vouched_bands: None, hsl: HslStageFacts::default() },
         );
     }
 
@@ -2263,15 +2289,16 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure_opts(
     // hue damage the metric's hue term partially sees. Marginal gain does
     // not earn regional risk: keep the recipe clean instead.
     //
-    // Deliberately NO per-band HSL fitting. It was tried (centroid hue
-    // deltas + sat/luma ratios per ACR band, correspondence-gated) and it is
-    // what wrecked the real-photo fit (2026-07-07): against a generative,
-    // non-pixel-aligned target, a band's centroid delta conflates CONTENT
-    // difference with style, and an honest-looking 13° in-gate delta applied
-    // as a whole-band rotation turns brown rock olive and a pale sky
-    // lavender. Per-band intent is statistically unidentifiable here — like
-    // local masks, it belongs to the AI style-prompt path, not to
-    // distribution matching.
+    // Per-band HSL is fitted in stage 4a above — but only its SATURATION and
+    // LUMINANCE axes, and only on bands the two-sided population gate can
+    // measure. The 2026-07-07 failure this comment used to record was the
+    // HUE axis: a band's centroid hue delta conflates CONTENT difference with
+    // style, and an honest-looking 13° in-gate delta applied as a whole-band
+    // rotation turns brown rock olive and a pale sky lavender. That axis is
+    // still never solved (`fit_hsl_stage` never writes `hsl.hue`, pinned by a
+    // named test); a band's mean chroma and mean lightness are ordinary
+    // population statistics, identifiable exactly as far as the same evidence
+    // gate says the band is.
     let (detail, detail_supported) = fit_detail_stage(&s_img, &tp, &evidence, &mut recipe);
     // The paired voucher every hue-damage guard consults (see
     // converges_toward): robust per-pixel weights plus each pixel's own
@@ -2280,6 +2307,17 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure_opts(
         .as_ref()
         .filter(|_| paired)
         .map(|r| (r.weights.as_slice(), tp.as_slice()));
+
+    // --- 4a) per-band colour mixer, BEFORE the cast curves ------------------
+    // Ordering follows the stage-3 argument one level down: the mixer is the
+    // SPECIFIC colour move (one band at a time, from that band's own
+    // population), the channel curves are the catch-all, and the catch-all
+    // must close its loop on everything the specific stages already did. The
+    // engine agrees — it runs the mixer before saturation and the RGB curves
+    // before the mixer — which is exactly why both colour stages measure
+    // their demand on a re-render rather than on an algebraic composition.
+    let mut hsl_facts = fit_hsl_stage(&s_img, &sp, &tp, &evidence, hue_vouch, budget, &mut recipe);
+    let hsl_fitted = recipe.hsl.clone();
     let mut cast_admission: Option<(f32, f32)> = None;
     let mut fit_cast_stage = |recipe: &mut EditRecipe| -> CastOutcome {
         recipe.red_curve = Vec::new();
@@ -2331,6 +2369,42 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure_opts(
     };
     let mut cast = fit_cast_stage(&mut recipe);
 
+    // --- 4a') the mixer must EARN its place against its own ABSENCE ----------
+    // Stage 4a judged itself on a render the catch-all had not yet touched,
+    // and "do no harm" is a promise about the FINISHED frame — so the verdict
+    // is taken again here, against the comparison a user would actually make:
+    // this recipe, versus the same recipe with the mixer given back and the
+    // channel curves refitted on THAT state. Measured on real renders, halved
+    // until the mixer stops costing the finished frame anything; zero is
+    // always reachable. Judging 4a only where it is fitted was tried first
+    // and it shipped a ceiling-pegged three-band move on the viaduct pair
+    // that the cast stage could then no longer clean up (look 0.026 -> 0.035).
+    if !recipe.hsl.is_neutral() {
+        let finished_err = |candidate: &EditRecipe| {
+            look_err_with_evidence(
+                &pixels_of(&render::develop_preview(&s_img, candidate)),
+                &tp,
+                &evidence,
+            )
+        };
+        let mut neutral = recipe.clone();
+        neutral.hsl = crate::recipe::Hsl::default();
+        fit_cast_stage(&mut neutral);
+        let neutral_err = finished_err(&neutral);
+        while finished_err(&recipe) > neutral_err + 1e-4 {
+            let shrunk = halved_hsl(&recipe.hsl);
+            recipe.hsl = shrunk;
+            if recipe.hsl.is_neutral() {
+                hsl_facts.withdrawn = Some(HslWithdrawal::Error);
+                break;
+            }
+            fit_cast_stage(&mut recipe);
+        }
+        // Re-derive so `cast` and the strength-admission fact describe the
+        // recipe that SHIPS, never the neutral probe taken along the way.
+        cast = fit_cast_stage(&mut recipe);
+    }
+
     // --- 4b) do-no-harm — the pipeline-END check ------------------------------
     // Goal: don't hand back a recipe that renders FARTHER from the target
     // than the untouched source. Saturation is the one dial fitted by
@@ -2357,12 +2431,20 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure_opts(
     let mut end_moves_hue =
         moved_unsupported_hue_range_names_vouched(&sp, &end_px, &evidence, hue_vouch)
             .is_some();
+    // The per-band mixer joins global saturation as a shrinkable dial here:
+    // it is the second colour move judged only at the composed end state, and
+    // leaving it out would let the guard exhaust saturation at zero while the
+    // move that actually carried pixels through an unmeasured band rode out.
+    // Halving a neutral mixer is neutral, so a run where the stage attached
+    // nothing is byte-identical to the pre-4a loop.
     while (err_after > err_before + 1e-4
         || (end_moves_hue && budget.vetoes == VetoPolicy::Withhold))
-        && recipe.saturation != 0.0
+        && (recipe.saturation != 0.0 || !recipe.hsl.is_neutral())
     {
         let next = if recipe.saturation.abs() < 4.0 { 0.0 } else { recipe.saturation / 2.0 };
         recipe.saturation = round1(next);
+        let shrunk = halved_hsl(&recipe.hsl);
+        recipe.hsl = shrunk;
         cast = fit_cast_stage(&mut recipe);
         end_px = pixels_of(&render::develop_preview(&s_img, &recipe));
         err_after = look_err_with_evidence(&end_px, &tp, &evidence);
@@ -2371,6 +2453,15 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure_opts(
                 .is_some();
     }
     let sat_reduced = recipe.saturation != sat_fitted;
+    // The end-state guard owns the withdrawal sentence when IT is the loop
+    // that zeroed the mixer; the stage's own do-no-harm keeps its verdict.
+    if !hsl_fitted.is_neutral() && recipe.hsl.is_neutral() && hsl_facts.withdrawn.is_none() {
+        hsl_facts.withdrawn = Some(if end_moves_hue {
+            HslWithdrawal::Blind
+        } else {
+            HslWithdrawal::Error
+        });
+    }
     let vouched_bands = vouched_hue_band_names(&sp, &end_px, &evidence, hue_vouch);
     // TERMINAL do-no-harm: saturation is the loop's only shrinkable dial, so
     // it can exhaust at zero with the finished recipe STILL rendering farther
@@ -2463,6 +2554,7 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure_opts(
             robust: robust_facts,
             paired,
             vouched_bands,
+            hsl: hsl_facts,
         },
     )
 }
@@ -2697,12 +2789,27 @@ fn fit_atmosphere_from_parts(
     // ruler's two frame errors; each term stays on its own stated model.
     let (detail, detail_supported) = fit_detail_stage(s_img, tp, structural, &mut recipe);
 
+    // Per-band colour, on the same population argument that lets this mode
+    // fit a global saturation and a white balance at all: the target's pixels
+    // do not correspond, so every control here is solved from distributions
+    // — and a band's mean chroma is a distribution. No voucher exists on this
+    // path (nothing is paired), so the strict blind-move doctrine applies.
+    let mut hsl_facts = fit_hsl_stage(s_img, sp, tp, evidence, None, budget, &mut recipe);
+    let hsl_fitted = recipe.hsl.clone();
+
     let sat_fitted = recipe.saturation;
     let mut err_after = look_err_with_evidence(&pixels_of(&render::develop_preview(s_img, &recipe)), tp, evidence);
-    while err_after > err_before + 1e-4 && recipe.saturation != 0.0 {
+    while err_after > err_before + 1e-4
+        && (recipe.saturation != 0.0 || !recipe.hsl.is_neutral())
+    {
         let next = if recipe.saturation.abs() < 4.0 { 0.0 } else { recipe.saturation / 2.0 };
         recipe.saturation = round1(next);
+        let shrunk = halved_hsl(&recipe.hsl);
+        recipe.hsl = shrunk;
         err_after = look_err_with_evidence(&pixels_of(&render::develop_preview(s_img, &recipe)), tp, evidence);
+    }
+    if !hsl_fitted.is_neutral() && recipe.hsl.is_neutral() && hsl_facts.withdrawn.is_none() {
+        hsl_facts.withdrawn = Some(HslWithdrawal::Error);
     }
     let sat_reduced = recipe.saturation != sat_fitted;
     let joint_base = crate::fit_zoned::joint_reading_with_evidence(
@@ -2803,6 +2910,7 @@ fn fit_atmosphere_from_parts(
             robust: None,
             paired: false,
             vouched_bands: None,
+            hsl: hsl_facts,
         },
     )
 }
@@ -2929,6 +3037,243 @@ fn project_curve_slopes(points: &[CurvePoint], min_slope: f32, max_slope: f32) -
     out
 }
 
+// --------------------------------------------------------------------------
+// per-band colour mixer (stage 4a)
+// --------------------------------------------------------------------------
+
+/// Why one colour band was left neutral. Typed, because "this band could not
+/// be measured" and "this band already matched" are different claims and must
+/// never reach the user as the same sentence — the standing evidence rule
+/// (one-sided is UNMEASURABLE, not equal).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HslBandRefusal {
+    /// Populated on exactly one side.
+    OneSided,
+    /// Under the population line on both sides: nothing to measure.
+    Sparse,
+    /// Populated on both sides, but the structural evidence did not survive,
+    /// so the two populations are not testimony about the same content.
+    Divergent,
+}
+
+impl HslBandRefusal {
+    fn label(self) -> &'static str {
+        match self {
+            HslBandRefusal::OneSided => "one-sided",
+            HslBandRefusal::Sparse => "sparse on both sides",
+            HslBandRefusal::Divergent => "structurally divergent",
+        }
+    }
+}
+
+/// The per-band stage gave back everything it fitted, and why.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HslWithdrawal {
+    /// The composed frame did not end closer to the target.
+    Error,
+    /// It would have carried pixels through hue bands no evidence covers.
+    Blind,
+}
+
+/// What the per-band stage decided, for the disclosure. What it MOVED is not
+/// here on purpose: that is a property of the recipe [`compose_report`] is
+/// holding, so it is read off the recipe there and cannot go stale when a
+/// later do-no-harm loop shrinks the mixer (or resets the whole recipe).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct HslStageFacts {
+    /// Bands the two-sided population gate refused, each with its reason.
+    refused: String,
+    withdrawn: Option<HslWithdrawal>,
+}
+
+/// Largest single-iteration step of the per-band chase, mirroring the global
+/// chroma chase's own cap: the ratio is read through a chroma-gated renderer,
+/// so one iteration must not be allowed to swing a band across the axis.
+const HSL_BAND_STEP: f32 = 40.0;
+/// A band mean below this carries no usable ratio — dividing by it turns
+/// renderer rounding into a full-scale demand.
+const HSL_BAND_MIN_MEAN: f64 = 0.02;
+
+/// One shrink step of the mixer: halve every axis, and snap a band under one
+/// unit to neutral so the shrink always REACHES zero instead of approaching
+/// it (the same "below 4, go to zero" device the saturation loop uses).
+fn halved_hsl(hsl: &crate::recipe::Hsl) -> crate::recipe::Hsl {
+    let axis = |values: &[f32; 8]| -> [f32; 8] {
+        std::array::from_fn(|i| {
+            let v = round1(values[i] * 0.5);
+            if v.abs() < 1.0 { 0.0 } else { v }
+        })
+    };
+    crate::recipe::Hsl {
+        hue: hsl.hue,
+        saturation: axis(&hsl.saturation),
+        luminance: axis(&hsl.luminance),
+    }
+}
+
+/// Solve `hsl.saturation` and `hsl.luminance` from POPULATION statistics, one
+/// ACR band at a time.
+///
+/// WHY this is legitimate where a per-band HUE rotation is not, and why it is
+/// legitimate against a target whose pixels do not correspond: it is the
+/// per-band form of the argument that already lets Atmosphere mode fit one
+/// global saturation and one white balance. A band's mean chroma and mean
+/// lightness are marginal statistics of a sub-population; matching them needs
+/// no pixel pairing, only the claim that both frames' members of that band
+/// are measurements of the same subject. That claim is exactly what the
+/// evidence model already adjudicates — so this stage asks it, and asks it
+/// with the SAME criterion the unrepresented-controls disclosure reads
+/// (`evidence.hue[band].weight > 0` plus a two-sided [`EVIDENCE_MIN_SHARE`]
+/// of the chromatic mass). One gate, two consumers; a band either side cannot
+/// see is left at zero and NAMED, never silently read as "equal".
+///
+/// `hsl.hue` is never written. Rotating a band re-populates it, so its own
+/// evidence is circular (project memory: "the hue evidence is circular"), and
+/// it is the axis that turned brown rock olive in the 2026-07-07 failure.
+///
+/// The chase is closed-loop through the real engine for the same reason the
+/// global chroma chase is: `apply_hsl` runs before saturation, the wheels and
+/// clarity, blends two bands per pixel through a partition of unity and fades
+/// itself out below chroma 0.22 — so the open-loop ratio is a first step, not
+/// an answer. Two iterations, then a do-no-harm that shrinks to zero.
+#[allow(clippy::too_many_arguments)]
+fn fit_hsl_stage(
+    s_img: &DynamicImage,
+    sp: &[[f32; 3]],
+    tp: &[[f32; 3]],
+    evidence: &EvidenceModel,
+    vouch: Option<(&[f32], &[[f32; 3]])>,
+    budget: FitBudget,
+    recipe: &mut EditRecipe,
+) -> HslStageFacts {
+    let mut facts = HslStageFacts::default();
+    let restore = recipe.hsl.clone();
+    let before_px = pixels_of(&render::develop_preview(s_img, recipe));
+    let err_before = look_err_with_evidence(&before_px, tp, evidence);
+    // Whether the recipe ALREADY moved pixels through unmeasured bands is not
+    // this stage's fault and not this stage's to fix (the pipeline-end loop
+    // owns that case); only movement this stage ADDS is its own.
+    let blind_before =
+        moved_unsupported_hue_range_names_vouched(sp, &before_px, evidence, vouch).is_some();
+
+    // --- admission --------------------------------------------------------
+    let (sa, ta) = band_stats_weighted(&before_px, &evidence.source_hue_weights);
+    let (sb, tb) = band_stats_weighted(tp, &evidence.target_hue_weights);
+    let mut admitted = [false; EVIDENCE_HUE_BANDS];
+    let mut refused: Vec<String> = Vec::new();
+    for band in 0..EVIDENCE_HUE_BANDS {
+        let Some(range) = evidence.hue.get(band) else { continue };
+        let verdict = if !range.source_populated && !range.target_populated {
+            Some(HslBandRefusal::Sparse)
+        } else if !range.source_populated || !range.target_populated {
+            Some(HslBandRefusal::OneSided)
+        } else if range.weight <= 0.0 {
+            Some(HslBandRefusal::Divergent)
+        } else if ta < 1.0 || tb < 1.0 {
+            Some(HslBandRefusal::Sparse)
+        } else {
+            let source_ok = sa[band].w / ta >= EVIDENCE_MIN_SHARE as f64;
+            let target_ok = sb[band].w / tb >= EVIDENCE_MIN_SHARE as f64;
+            match (source_ok, target_ok) {
+                (true, true) => None,
+                (false, false) => Some(HslBandRefusal::Sparse),
+                _ => Some(HslBandRefusal::OneSided),
+            }
+        };
+        match verdict {
+            None => admitted[band] = true,
+            Some(reason) => {
+                // Only bands the PICTURE actually holds are worth naming: a
+                // band absent from both frames is not a refusal anyone can
+                // act on, and listing all eight on a grey frame would bury
+                // the ones that mean something.
+                if range.source_populated || range.target_populated {
+                    refused.push(format!("{} ({})", range.label, reason.label()));
+                }
+            }
+        }
+    }
+    facts.refused = refused.join(", ");
+    if !admitted.iter().any(|&band| band) {
+        return facts;
+    }
+
+    // --- the chase, closed-loop through the real engine --------------------
+    for _ in 0..2 {
+        let cur = pixels_of(&render::develop_preview(s_img, recipe));
+        let (cs, _) = band_stats_weighted(&cur, &evidence.source_hue_weights);
+        let mut moved_any = false;
+        for band in 0..EVIDENCE_HUE_BANDS {
+            if !admitted[band] || cs[band].w <= 0.0 || sb[band].w <= 0.0 {
+                continue;
+            }
+            // The engine reads `new_s = s * (1 + sat/100)` and
+            // `new_l = l * (1 + 0.5 * lum/100)`, and chroma is proportional to
+            // `s` and luma to `l` at fixed hue, so a band's mean-chroma ratio
+            // IS the saturation demand and its mean-luma ratio is the
+            // luminance demand at half the sensitivity.
+            let axes = [
+                (cs[band].c / cs[band].w, sb[band].c / sb[band].w, 100.0f32),
+                (cs[band].y / cs[band].w, sb[band].y / sb[band].w, 200.0f32),
+            ];
+            for (axis, (now, want, scale)) in axes.into_iter().enumerate() {
+                if now < HSL_BAND_MIN_MEAN {
+                    continue;
+                }
+                let step = (((want / now) - 1.0) as f32 * scale)
+                    .clamp(-HSL_BAND_STEP, HSL_BAND_STEP);
+                if step.abs() < 1.0 {
+                    continue;
+                }
+                let slot = if axis == 0 {
+                    &mut recipe.hsl.saturation[band]
+                } else {
+                    &mut recipe.hsl.luminance[band]
+                };
+                let next = round1((*slot + step).clamp(-budget.hsl_band, budget.hsl_band));
+                if next != *slot {
+                    moved_any = true;
+                }
+                *slot = next;
+            }
+        }
+        if !moved_any {
+            break;
+        }
+    }
+    let fitted = recipe.hsl.clone();
+    if fitted == restore {
+        return facts;
+    }
+
+    // --- do-no-harm, the stage's own --------------------------------------
+    // The same err_before/err_after discipline the saturation pull-back
+    // answers to, applied where the move is generated instead of three stages
+    // later: halve the whole vector until the frame's look error stops
+    // objecting AND the finished render stops carrying pixels through hue
+    // bands this stage's own gate never measured. Zero is always reachable.
+    let mut reason: Option<HslWithdrawal> = None;
+    let mut candidate = fitted;
+    loop {
+        if candidate.is_neutral() {
+            recipe.hsl = restore;
+            facts.withdrawn = reason.or(Some(HslWithdrawal::Error));
+            return facts;
+        }
+        recipe.hsl = candidate.clone();
+        let px = pixels_of(&render::develop_preview(s_img, recipe));
+        let regressed = look_err_with_evidence(&px, tp, evidence) > err_before + 1e-4;
+        let blind_new = budget.vetoes == VetoPolicy::Withhold
+            && !blind_before
+            && moved_unsupported_hue_range_names_vouched(sp, &px, evidence, vouch).is_some();
+        if !regressed && !blind_new {
+            return facts;
+        }
+        reason = Some(if blind_new { HslWithdrawal::Blind } else { HslWithdrawal::Error });
+        candidate = halved_hsl(&candidate);
+    }
+}
+
 /// What a [`FitReport`]'s notes need that only a MEASUREMENT can supply — all
 /// of it re-derivable from a (source, target, recipe) triple at any later time.
 struct Measured<'a> {
@@ -3009,6 +3354,9 @@ struct SolveFacts {
     /// on the finished render — disclosed so the withheld-note's "vetoed
     /// movement" claim is never silently contradicted.
     vouched_bands: Option<String>,
+    /// The per-band colour mixer's own verdicts: which bands it could not
+    /// measure, and whether it gave back what it fitted.
+    hsl: HslStageFacts,
 }
 
 /// Build the rationale, the typed notes and the confidence of ONE fit report.
@@ -3312,6 +3660,55 @@ fn compose_report(mut recipe: EditRecipe, m: Measured<'_>, solve: SolveFacts) ->
             ),
         );
     }
+    // The per-band colour mixer. What it MOVED is read off the recipe this
+    // report describes rather than carried from the stage, so the numbers
+    // cannot drift from what shipped when a later do-no-harm loop shrinks the
+    // mixer or resets the whole recipe; the refusals and the withdrawal
+    // verdict are solve facts no re-measurement could recover.
+    let hsl_moved = (0..EVIDENCE_HUE_BANDS)
+        .filter(|&band| {
+            recipe.hsl.saturation[band] != 0.0 || recipe.hsl.luminance[band] != 0.0
+        })
+        .map(|band| {
+            format!(
+                "{} sat {:+.0} lum {:+.0}",
+                crate::recipe::HSL_BANDS[band],
+                recipe.hsl.saturation[band],
+                recipe.hsl.luminance[band]
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    if !hsl_moved.is_empty() || !solve.hsl.refused.is_empty() {
+        push_note(
+            &mut rationale,
+            &mut notes,
+            Note::new(
+                keys::FIT_NOTE_HSL_BANDS,
+                vec![
+                    ("moved", if hsl_moved.is_empty() { "none".into() } else { hsl_moved }),
+                    (
+                        "refused",
+                        if solve.hsl.refused.is_empty() {
+                            "none".into()
+                        } else {
+                            solve.hsl.refused.clone()
+                        },
+                    ),
+                ],
+            ),
+        );
+    }
+    if let Some(withdrawal) = solve.hsl.withdrawn {
+        push_note(
+            &mut rationale,
+            &mut notes,
+            Note::plain(match withdrawal {
+                HslWithdrawal::Error => keys::FIT_NOTE_HSL_WITHDRAWN_ERROR,
+                HslWithdrawal::Blind => keys::FIT_NOTE_HSL_WITHDRAWN_BLIND,
+            }),
+        );
+    }
     // Which controls this target's look may need that the solver has no way
     // to reach — SPECIFIC to this pair, not the blanket sentence the summary
     // already carries (R23-6 A-5).
@@ -3581,6 +3978,23 @@ pub fn rescore_report(
             paired: carried(keys::FIT_SUMMARY_WITH_CURVE_PAIRED)
                 || carried(keys::FIT_SUMMARY_NO_CURVE_PAIRED),
             vouched_bands: carried_arg(keys::FIT_NOTE_VOUCHED_CONVERGENCE, "bands"),
+            // The mixer's evidence verdicts cross over for the same reason
+            // the cast gates do: the deep step moves global dials, it never
+            // re-runs the per-band population gate. What the mixer MOVED is
+            // deliberately NOT carried — `compose_report` reads that straight
+            // off the recipe in front of it, which here is the adjusted one.
+            hsl: HslStageFacts {
+                refused: carried_arg(keys::FIT_NOTE_HSL_BANDS, "refused")
+                    .filter(|refused| refused != "none")
+                    .unwrap_or_default(),
+                withdrawn: if carried(keys::FIT_NOTE_HSL_WITHDRAWN_BLIND) {
+                    Some(HslWithdrawal::Blind)
+                } else if carried(keys::FIT_NOTE_HSL_WITHDRAWN_ERROR) {
+                    Some(HslWithdrawal::Error)
+                } else {
+                    None
+                },
+            },
         },
     )
 }
@@ -3725,47 +4139,50 @@ impl CastOutcome {
 /// Name the develop controls THIS pair's residual points at that the fit has
 /// no way to solve for (R23-6 A-5).
 ///
-/// The summary note already says "local masks and per-band HSL are not
-/// recovered" on every fit ever produced, which is true and useless: it does
-/// not say whether THIS target needed them. The solve domain is a fact about
-/// the code — the global arm writes exposure/contrast/highlights/shadows/
-/// whites/blacks, a tone curve, one saturation and three channel curves, and
-/// NOTHING in `advisor::catalogue::RECIPE_CONTROLS` else — so the honest
-/// disclosure is the intersection of "the model can express it", "we never
-/// solve it" and "the residual has evidence pointing at it".
+/// The summary note already says "local masks and per-band hue rotation are
+/// not recovered" on every fit ever produced, which is true and useless: it
+/// does not say whether THIS target needed them. The solve domain is a fact
+/// about the code — the global arm writes exposure/contrast/highlights/
+/// shadows/whites/blacks, a tone curve, one saturation, the per-band mixer's
+/// saturation/luminance axes and three channel curves, and NOTHING in
+/// `advisor::catalogue::RECIPE_CONTROLS` else — so the honest disclosure is
+/// the intersection of "the model can express it", "we never solve it" and
+/// "the residual has evidence pointing at it".
 ///
 /// The evidence tests are deliberately coarse and stated as SUSPICION, never
 /// as measurement: the residual decomposition can say a gap is chromatic
 /// rather than tonal, and it cannot say which control would close it. Naming
 /// a control the residual gives no sign of would be inventing a diagnosis.
 ///
-/// `after_px` is the FINISHED render — the residual is what the fit could
-/// not close, so the evidence has to be read there and not on the base.
-fn unrepresented_note(
-    recipe: &EditRecipe,
+/// Does what is LEFT look like a PER-BAND COLOUR job?
+///
+/// Named and shared rather than left inline because stage 4a is now held to
+/// it from the other side: once the mixer has closed a band's colour gap this
+/// predicate must stop saying yes, and [`unrepresented_note`] must stop
+/// naming `hsl`. One derivation, two consumers — a second copy in the test
+/// would be a claim about a claim.
+///
+/// Route one asks whether the residual is a colour difference CONDITIONED ON
+/// brightness — exactly the question the joint family answers, and exactly
+/// the shape `hsl` / `color_grade` have. Reading the CHROMATIC buckets
+/// against the NEUTRAL ones at the same brightness separates "the coloured
+/// pixels disagree" (a colour move) from "everything disagrees" (a tone or
+/// exposure gap the fit does solve for) — a distinction no single global
+/// statistic can make, which is why route two cannot carry this on its own:
+/// a target that moves a whole region to a hue the source has NOWHERE leaves
+/// both bands under the 1.5% two-sided weight gate and is invisible to it
+/// (the cross-band blindness `look_err`'s own hue term documents).
+///
+/// Route two is the classic evidence for the same conclusion: a populated
+/// band whose centroid hue is far off. Kept as a SECOND route because it
+/// fires where the residual is a rotation rather than a magnitude — the axis
+/// stage 4a deliberately never solves — and the two routes miss different
+/// things.
+fn residual_is_colour_shaped(
     after_px: &[[f32; 3]],
     tp: &[[f32; 3]],
-    err_after: f32,
-    mode: FitMode,
     evidence: &EvidenceModel,
-) -> Option<crate::rationale::Note> {
-    // Nothing left to explain.
-    if err_after <= FIT_QUANT_CLEAN {
-        return None;
-    }
-    let mut names: Vec<&str> = Vec::new();
-
-    // --- is what is LEFT a colour difference, and is it conditioned on
-    // brightness? That is exactly the question the joint family answers, and
-    // exactly the shape `hsl` / `color_grade` have. Reading the CHROMATIC
-    // buckets against the NEUTRAL ones at the same brightness separates "the
-    // coloured pixels disagree" (a colour move) from "everything disagrees"
-    // (a tone or exposure gap the fit does solve for) — a distinction no
-    // single global statistic can make, which is why the band-centroid test
-    // below cannot carry this on its own: a target that moves a whole region
-    // to a hue the source has NOWHERE leaves both bands under the 1.5%
-    // two-sided weight gate and is invisible to it (the cross-band blindness
-    // `look_err`'s own hue term documents).
+) -> bool {
     let buckets = crate::fit_zoned::joint_buckets_with_evidence(
         after_px,
         tp,
@@ -3780,13 +4197,11 @@ fn unrepresented_note(
             .fold(0.0f32, f32::max)
     };
     let (chromatic_worst, neutral_worst) = (worst_of(true), worst_of(false));
-    let colour_shaped = chromatic_worst >= UNREPRESENTED_CHROMATIC_ERR
-        && chromatic_worst >= neutral_worst + UNREPRESENTED_CHROMATIC_LEAD;
-
-    // …and the classic evidence for the same conclusion: a populated band
-    // whose centroid hue is far off. Kept as a SECOND route because it fires
-    // on frames where the residual is a rotation rather than a magnitude,
-    // and the two routes miss different things.
+    if chromatic_worst >= UNREPRESENTED_CHROMATIC_ERR
+        && chromatic_worst >= neutral_worst + UNREPRESENTED_CHROMATIC_LEAD
+    {
+        return true;
+    }
     let (sa, ta) = band_stats_weighted(after_px, &evidence.source_hue_weights);
     let (sb, tb) = band_stats_weighted(tp, &evidence.target_hue_weights);
     let mut worst_band = 0.0f32;
@@ -3809,13 +4224,37 @@ fn unrepresented_note(
             worst_band = worst_band.max(d.abs() as f32);
         }
     }
-    if colour_shaped || worst_band >= UNREPRESENTED_HUE_DEG {
-        // `hsl` is the per-band colour mixer the solver bans outright (see
-        // the stage-4 comment); `color_grade` is the tone-conditioned
-        // version of the same move. Name the second only when the channel
-        // curves — our one lever with that shape — are absent, which is
-        // both the honest condition and the common one (they are refused by
-        // the three gates far more often than they are kept).
+    worst_band >= UNREPRESENTED_HUE_DEG
+}
+
+/// `after_px` is the FINISHED render — the residual is what the fit could
+/// not close, so the evidence has to be read there and not on the base.
+fn unrepresented_note(
+    recipe: &EditRecipe,
+    after_px: &[[f32; 3]],
+    tp: &[[f32; 3]],
+    err_after: f32,
+    mode: FitMode,
+    evidence: &EvidenceModel,
+) -> Option<crate::rationale::Note> {
+    // Nothing left to explain.
+    if err_after <= FIT_QUANT_CLEAN {
+        return None;
+    }
+    let mut names: Vec<&str> = Vec::new();
+
+    if residual_is_colour_shaped(after_px, tp, evidence) {
+        // `hsl` here means the axis stage 4a does NOT solve: it fits a
+        // band's saturation and luminance from that band's own population,
+        // and this note is read on the residual those moves left behind, so
+        // a per-band gap the mixer closed never reaches this line. What
+        // survives it is a per-band HUE rotation (the one axis the solver
+        // bans outright) or a demand the mixer's evidence gate refused.
+        // `color_grade` is the tone-conditioned version of the same move.
+        // Name the second only when the channel curves — our one lever with
+        // that shape — are absent, which is both the honest condition and the
+        // common one (they are refused by the three gates far more often than
+        // they are kept).
         names.push("hsl");
         if recipe.red_curve.is_empty()
             && recipe.green_curve.is_empty()
@@ -4460,14 +4899,26 @@ fn residual_tone_curve(recipe: &EditRecipe, tone_map: &impl Fn(f32) -> f32) -> V
 // colour residuals
 // --------------------------------------------------------------------------
 
-/// Per-band accumulator: weight, circular hue (sin/cos), HSL sat + luma.
+/// Per-band accumulator: weight, circular hue (sin/cos), and the two
+/// magnitudes the per-band mixer actually steers — CHROMA (max-min, exactly
+/// what `apply_hsl`'s saturation axis scales: at fixed HSL lightness the
+/// reconstructed chroma is 2*l*s below mid-grey and 2*s*(1-l) above it, so it
+/// is proportional to `s` on both sides) and Rec.601 LUMA.
+///
+/// Deliberately NOT HSL's own `s` and `l`. `s` is ill-conditioned near white
+/// and black — the renderer gates the whole mixer on chroma for that very
+/// reason — and `l` = (max+min)/2 RISES when chroma alone rises, so reading
+/// the luminance axis off it lets a band's saturation gap masquerade as a
+/// brightness gap: measured on the four-family fixture, a target whose blue
+/// quarter is 1.64x more chromatic at identical Rec.601 luma asked for
+/// +22 luminance, which is a demand about colour wearing brightness's clothes.
 #[derive(Clone, Copy, Default)]
 struct BandStat {
     w: f64,
     sin: f64,
     cos: f64,
-    s: f64,
-    l: f64,
+    c: f64,
+    y: f64,
 }
 
 /// Accumulate chroma-gated band statistics with the SAME partition of unity the
@@ -4482,16 +4933,17 @@ fn band_stats(px: &[[f32; 3]]) -> ([BandStat; 8], f64) {
         if chroma < 0.06 {
             continue; // matches the renderer's chroma gate: near-grey carries no hue evidence
         }
-        let (h, s, l) = render::rgb_to_hsl(p[0], p[1], p[2]);
+        let (h, _, _) = render::rgb_to_hsl(p[0], p[1], p[2]);
         let (b0, b1, w1) = render::bracket_bands(h * 360.0, &render::HSL_CENTERS);
         let ang = (h * std::f32::consts::TAU) as f64;
+        let luma = luma601(p) as f64;
         for (bi, w) in [(b0, 1.0 - w1 as f64), (b1, w1 as f64)] {
             let b = &mut bands[bi];
             b.w += w;
             b.sin += w * ang.sin();
             b.cos += w * ang.cos();
-            b.s += w * s as f64;
-            b.l += w * l as f64;
+            b.c += w * chroma as f64;
+            b.y += w * luma;
         }
         total += 1.0;
     }
@@ -4510,17 +4962,18 @@ fn band_stats_weighted(px: &[[f32; 3]], weights: &[f32]) -> ([BandStat; 8], f64)
         if chroma < 0.06 {
             continue;
         }
-        let (h, s, l) = render::rgb_to_hsl(p[0], p[1], p[2]);
+        let (h, _, _) = render::rgb_to_hsl(p[0], p[1], p[2]);
         let (b0, b1, w1) = render::bracket_bands(h * 360.0, &render::HSL_CENTERS);
         let ang = (h * std::f32::consts::TAU) as f64;
+        let luma = luma601(p) as f64;
         for (bi, w) in [(b0, 1.0 - w1 as f64), (b1, w1 as f64)] {
             let w = w * weight;
             let b = &mut bands[bi];
             b.w += w;
             b.sin += w * ang.sin();
             b.cos += w * ang.cos();
-            b.s += w * s as f64;
-            b.l += w * l as f64;
+            b.c += w * chroma as f64;
+            b.y += w * luma;
         }
         total += weight;
     }
@@ -4763,7 +5216,8 @@ fn cast_rotates_a_region_weighted(
     // Deliberately NO paired-convergence exemption here (unlike the
     // zero-evidence-band guard): rotating a region is a TOOL-CAPABILITY
     // policy, not a measurability question — even a rotation that converges
-    // on the analysis raster is per-band HSL's job, and a global cast that
+    // on the analysis raster is the HUE axis's job (which nothing solves:
+    // stage 4a fits saturation and luminance only), and a global cast that
     // performs it drags every same-hue pixel the raster never sampled
     // (golden-sky case, pinned).
     rehued_share_weighted(cur, with_px, evidence) >= ROT_SHARE
@@ -5630,6 +6084,7 @@ mod tests {
             cast_ratio: CAST_ACCEPT_RATIO,
             slope: (0.5, 1.5),
             confidence_cap: 0.50,
+            hsl_band: HSL_BAND_LIMIT_DEFAULT,
             vetoes: VetoPolicy::Withhold,
         });
         assert_eq!(60.0 * b.sat / ATMOSPHERE_SAT_LIMIT, 60.0);
@@ -5775,6 +6230,7 @@ mod tests {
                 robust: None,
                 paired: false,
                 vouched_bands: None,
+                hsl: HslStageFacts::default(),
             },
         );
         assert!(report.recipe.confidence <= 0.35);
@@ -9282,6 +9738,7 @@ mod tests {
                     robust: None,
                     paired: false,
                     vouched_bands: None,
+                    hsl: HslStageFacts::default(),
                 },
             )
         };
@@ -9510,5 +9967,353 @@ mod tests {
         );
         assert!(conservative.recipe.confidence <= ATMOSPHERE_CONFIDENCE_CAP);
         assert!(rescored.recipe.confidence <= ATMOSPHERE_CONFIDENCE_CAP);
+    }
+
+    // ---------------------------------------------------------------------
+    // stage 4a — the per-band colour mixer
+    // ---------------------------------------------------------------------
+
+    /// RGB directions whose hue lands on an ACR band centre (red 0°,
+    /// green 120°, blue 240°, yellow 60°, magenta 300°), each ORTHOGONAL to
+    /// Rec.601 luma and normalised to unit chroma. Scaling a family's chroma
+    /// therefore leaves its luma distribution untouched, so a fixture built
+    /// from them isolates the colour question from the tone one.
+    const BAND_DIRECTIONS: [[f32; 3]; 5] = [
+        [0.70100, -0.29900, -0.29900],
+        [-0.58700, 0.41300, -0.58700],
+        [-0.11400, -0.11400, 0.88600],
+        [0.11400, 0.11400, -0.88600],
+        [0.58700, -0.41300, 0.58700],
+    ];
+
+    /// One colour family per horizontal quarter, all four riding the same
+    /// luminance ramp, each family's chroma scaled independently.
+    fn band_frame(families: [usize; 4], chroma: [f32; 4]) -> DynamicImage {
+        let (w, h) = (384u32, 256u32);
+        DynamicImage::ImageRgb8(RgbImage::from_fn(w, h, |x, y| {
+            let xf = x as f32 / (w - 1) as f32;
+            let quarter = (y * 4 / h) as usize;
+            let l = 0.26 + 0.26 * xf + 0.04 * (xf * 41.0).sin();
+            let u = BAND_DIRECTIONS[families[quarter]];
+            let p = [0usize, 1, 2].map(|c| (l * (1.0 + chroma[quarter] * u[c])).clamp(0.0, 1.0));
+            image::Rgb(p.map(|v| (v * 255.0).round() as u8))
+        }))
+    }
+
+    /// `source` developed through the REAL engine with a mixer-only recipe.
+    fn developed(source: &DynamicImage, edit: impl FnOnce(&mut crate::recipe::Hsl)) -> DynamicImage {
+        let mut recipe = EditRecipe::default();
+        edit(&mut recipe.hsl);
+        render::develop_preview(source, &recipe)
+    }
+
+    /// The canonical inverse problem for this stage: the target IS the source
+    /// carrying a KNOWN per-band edit, -`edit` Green / +`edit` Blue saturation.
+    /// Frame-mean chroma barely moves, so the ONE global saturation number has
+    /// nothing useful to say — only a per-band control can express this.
+    fn engine_hsl_pair(edit: f32) -> (DynamicImage, DynamicImage) {
+        let source = band_frame([0, 1, 2, 4], [0.55; 4]);
+        let target = developed(&source, |hsl| {
+            hsl.saturation[3] = -edit;
+            hsl.saturation[5] = edit;
+        });
+        (source, target)
+    }
+
+    /// The same edit over TWO half-frame families, which gives each band a
+    /// population big enough to move the joint chromatic buckets the
+    /// unrepresented-controls disclosure reads.
+    fn two_family_hsl_pair(edit: f32) -> (DynamicImage, DynamicImage) {
+        let source = band_frame([2, 2, 1, 1], [0.55; 4]);
+        let target = developed(&source, |hsl| {
+            hsl.saturation[3] = -edit;
+            hsl.saturation[5] = edit;
+        });
+        (source, target)
+    }
+
+    /// A demand far past the per-band ceiling: the blue quarter is 1.64x more
+    /// chromatic than the source's, which +18 can only partly close.
+    fn over_cap_band_pair() -> (DynamicImage, DynamicImage) {
+        (
+            band_frame([0, 1, 2, 4], [0.55; 4]),
+            band_frame([0, 1, 2, 4], [0.55, 0.55, 0.90, 0.55]),
+        )
+    }
+
+    /// The target repaints the green quarter yellow: Green exists only in the
+    /// source, Yellow only in the target. Nothing else moves.
+    fn one_sided_band_pair() -> (DynamicImage, DynamicImage) {
+        (
+            band_frame([0, 1, 2, 4], [0.55; 4]),
+            band_frame([0, 3, 2, 4], [0.55; 4]),
+        )
+    }
+
+    fn hsl_note<'a>(report: &'a FitReport, key: &str) -> Option<&'a crate::rationale::Note> {
+        report.notes.iter().find(|n| n.key == key)
+    }
+
+    fn note_arg(report: &FitReport, key: &str, arg: &str) -> String {
+        hsl_note(report, key)
+            .and_then(|n| n.args.iter().find(|(k, _)| *k == arg))
+            .map(|(_, v)| v.clone())
+            .unwrap_or_default()
+    }
+
+    fn names_hsl(report: &FitReport) -> bool {
+        report
+            .notes
+            .iter()
+            .any(|n| n.args.iter().any(|(k, v)| *k == "controls" && v.contains("hsl")))
+    }
+
+    /// (a) A band both frames can speak for is SOLVED, and the one global
+    /// saturation number demonstrably could not have carried it.
+    #[test]
+    fn per_band_colour_is_solved_from_two_sided_population_evidence() {
+        let (src, tgt) = engine_hsl_pair(15.0);
+        let report = fit_recipe(&src, &tgt);
+        let budget = FitBudget::for_strength(crate::recipe::GradeStrength::default()).hsl_band;
+        assert_eq!(report.mode, FitMode::Full, "premise: the fixture is a same-content pair");
+        let hsl = &report.recipe.hsl;
+        assert!(
+            hsl.saturation[5] >= 10.0 && hsl.saturation[5] <= budget,
+            "Blue must recover most of its +15: {:?}",
+            hsl.saturation
+        );
+        assert!(
+            hsl.saturation[3] <= -10.0 && hsl.saturation[3] >= -budget,
+            "…and Green most of its -15: {:?}",
+            hsl.saturation
+        );
+        // THE point of the stage: the target's frame-mean chroma is almost
+        // unchanged, so the single global dial has nothing to say and the
+        // recovery cannot be credited to it.
+        assert!(
+            report.recipe.saturation.abs() <= 5.0,
+            "one global saturation cannot express opposed bands: {}",
+            report.recipe.saturation
+        );
+        assert!(
+            report.err_after < report.err_before,
+            "the composed fit must end closer: {} -> {}",
+            report.err_before,
+            report.err_after
+        );
+        let moved = note_arg(&report, crate::rationale::keys::FIT_NOTE_HSL_BANDS, "moved");
+        assert!(
+            moved.contains("Green sat -") && moved.contains("Blue sat +"),
+            "the disclosure names what moved and by how much: {moved:?}"
+        );
+    }
+
+    /// (b) A band only ONE frame can speak for is refused BY NAME. One-sided
+    /// is unmeasurable, never silently read as "these already match".
+    #[test]
+    fn a_one_sided_band_is_refused_by_name_never_read_as_equal() {
+        let (src, tgt) = one_sided_band_pair();
+        let report = fit_recipe(&src, &tgt);
+        // Premise, straight off the shared evidence model: Green is in the
+        // source alone and Yellow in the target alone.
+        assert!(
+            report.evidence.hue[3].source_populated && !report.evidence.hue[3].target_populated,
+            "premise: Green is source-only"
+        );
+        assert!(
+            !report.evidence.hue[2].source_populated && report.evidence.hue[2].target_populated,
+            "premise: Yellow is target-only"
+        );
+        for band in [2usize, 3] {
+            assert_eq!(report.recipe.hsl.saturation[band], 0.0, "band {band} must not move");
+            assert_eq!(report.recipe.hsl.luminance[band], 0.0, "band {band} must not move");
+        }
+        let refused = note_arg(&report, crate::rationale::keys::FIT_NOTE_HSL_BANDS, "refused");
+        assert!(
+            refused.contains("Green (one-sided)") && refused.contains("Yellow (one-sided)"),
+            "the refusal is typed and named, not silence: {refused:?}"
+        );
+    }
+
+    /// (c) The hue axis is never written, on any pair, at any strength —
+    /// including a target whose only edit IS a band rotation, where the
+    /// temptation to rotate back is greatest.
+    #[test]
+    fn the_per_band_mixer_never_rotates_a_hue_band() {
+        let rotated_source = band_frame([0, 1, 2, 4], [0.55; 4]);
+        let rotated = developed(&rotated_source, |hsl| {
+            hsl.hue[3] = -60.0;
+            hsl.hue[5] = 60.0;
+        });
+        let mut pairs: Vec<(&str, DynamicImage, DynamicImage)> = vec![
+            ("hue-rotated", rotated_source.clone(), rotated),
+            ("solved", engine_hsl_pair(15.0).0, engine_hsl_pair(15.0).1),
+            ("over-cap", over_cap_band_pair().0, over_cap_band_pair().1),
+            ("one-sided", one_sided_band_pair().0, one_sided_band_pair().1),
+        ];
+        let (cloud_src, cloud_tgt) = flat_sky_to_cloud_deck();
+        pairs.push(("cloud-deck", cloud_src, cloud_tgt));
+        let (perm_src, perm_tgt) = structural_permutation_pair();
+        pairs.push(("permutation", perm_src, perm_tgt));
+        for (name, src, tgt) in &pairs {
+            for strength in [0.0f32, 0.65, 1.0] {
+                let report = fit_recipe_from_with(
+                    src,
+                    tgt,
+                    &EditRecipe::default(),
+                    FitOptions {
+                        strength: crate::recipe::GradeStrength::new(strength),
+                        provider: None,
+                    },
+                );
+                assert_eq!(
+                    report.recipe.hsl.hue,
+                    [0.0f32; 8],
+                    "{name} at strength {strength} rotated a band: {:?}",
+                    report.recipe.hsl.hue
+                );
+            }
+        }
+    }
+
+    /// (d) A move the frame ruler will not pay for is given back to zero and
+    /// DISCLOSED.
+    ///
+    /// The cloud-deck pair is the honest fixture for this claim, and the
+    /// synthetic over-cap pair is not: on that one the whole fit terminally
+    /// resets, so a neutral mixer proves nothing about the mixer (measured —
+    /// disabling BOTH of 4a's do-no-harm arms left that test green). Here the
+    /// fit SUCCEEDS (the frame ends closer, no terminal reset) and the gate
+    /// ADMITS bands, so zero can only be 4a giving its own move back.
+    #[test]
+    fn a_per_band_move_the_frame_ruler_refuses_shrinks_to_zero_and_says_so() {
+        let (src, tgt) = flat_sky_to_cloud_deck();
+        let report = fit_recipe(&src, &tgt);
+        assert!(
+            report.err_after < report.err_before,
+            "premise: the fit itself succeeds here ({:.4} -> {:.4})",
+            report.err_before,
+            report.err_after
+        );
+        assert!(
+            !report.notes.iter().any(|n| n.key == crate::rationale::keys::FIT_NOTE_REGRESSED),
+            "premise: no terminal do-no-harm reset stands behind the neutral mixer"
+        );
+        let refused = note_arg(&report, crate::rationale::keys::FIT_NOTE_HSL_BANDS, "refused");
+        let admitted = (0..EVIDENCE_HUE_BANDS)
+            .filter(|&band| {
+                let range = &report.evidence.hue[band];
+                (range.source_populated || range.target_populated)
+                    && !refused.contains(range.label.as_str())
+            })
+            .count();
+        assert!(admitted > 0, "premise: the population gate admitted a band: refused={refused:?}");
+        assert!(
+            report.recipe.hsl.is_neutral(),
+            "the refused move must return to neutral: {:?}",
+            report.recipe.hsl
+        );
+        assert!(
+            hsl_note(&report, crate::rationale::keys::FIT_NOTE_HSL_WITHDRAWN_ERROR).is_some(),
+            "…and say so: {}",
+            report.recipe.rationale
+        );
+    }
+
+    /// (e) The strength dial really turns this stage: the ceiling is monotone
+    /// across the three stops AND it binds at each of them.
+    #[test]
+    fn hsl_band_budget_is_monotone_across_the_three_strength_stops() {
+        let cap = |s: f32| FitBudget::for_strength(crate::recipe::GradeStrength::new(s)).hsl_band;
+        assert_eq!(cap(0.0), HSL_BAND_LIMIT_MIN);
+        assert_eq!(cap(0.65), HSL_BAND_LIMIT_DEFAULT);
+        assert_eq!(cap(1.0), HSL_BAND_LIMIT_MAX);
+        assert!(cap(0.0) < cap(0.65) && cap(0.65) < cap(1.0));
+        // …and it is a real constraint, not a number nothing reads: one pair
+        // whose demand (+/-25) sits between the default ceiling and the full
+        // one, solved at all three stops.
+        let (src, tgt) = engine_hsl_pair(25.0);
+        let solved = |s: f32| {
+            fit_recipe_from_with(
+                &src,
+                &tgt,
+                &EditRecipe::default(),
+                FitOptions { strength: crate::recipe::GradeStrength::new(s), provider: None },
+            )
+            .recipe
+            .hsl
+            .saturation[5]
+        };
+        let (low, mid, high) = (solved(0.0), solved(0.65), solved(1.0));
+        assert!(low <= cap(0.0) + 1e-3, "strength 0 must not exceed its ceiling: {low}");
+        assert!(
+            mid > cap(0.0) && mid <= cap(0.65) + 1e-3,
+            "the default stop spends past the tight ceiling and stops at its own: {mid}"
+        );
+        assert!(high > cap(0.65), "strength 1 spends past the default ceiling: {high}");
+    }
+
+    /// (f) Once the mixer has closed a band gap, the residual the
+    /// unrepresented-controls disclosure reads no longer has the shape of a
+    /// per-band colour job — and while the gap is only PARTLY closed it still
+    /// does, and the disclosure still names `hsl`. Both halves on one pair,
+    /// separated only by the budget.
+    #[test]
+    fn solving_the_bands_takes_the_colour_shape_out_of_the_residual() {
+        let (src, tgt) = two_family_hsl_pair(50.0);
+        let (s_img, t_img) = analysis_pair(&src, &tgt);
+        let base = EditRecipe::default();
+        let sp = pixels_of(&render::develop_preview(&s_img, &base));
+        let tp = pixels_of(&t_img);
+        let evidence = evidence_model_for(&sp, &tp, s_img.width(), s_img.height());
+        let fit = |s: f32| {
+            fit_recipe_from_with(
+                &src,
+                &tgt,
+                &base,
+                FitOptions { strength: crate::recipe::GradeStrength::new(s), provider: None },
+            )
+        };
+
+        // Default budget: +/-18 against a +/-50 demand. The residual is still
+        // a per-band colour job, and the disclosure says so.
+        let partial = fit(0.65);
+        let partial_px = pixels_of(&render::develop_preview(&s_img, &partial.recipe));
+        assert!(!partial.recipe.hsl.is_neutral(), "premise: the mixer did attach here");
+        assert!(
+            residual_is_colour_shaped(&partial_px, &tp, &evidence),
+            "a HALF-closed band gap is still a per-band colour residual"
+        );
+        assert!(names_hsl(&partial), "…so the disclosure must still name it: {}", partial.recipe.rationale);
+
+        // Strength 1: the ceiling now covers the demand. The counterfactual is
+        // the SAME finished recipe with the mixer zeroed, so the flip is
+        // attributable to this stage and to nothing else in the pipeline.
+        let full = fit(1.0);
+        let full_px = pixels_of(&render::develop_preview(&s_img, &full.recipe));
+        let mut without = full.recipe.clone();
+        without.hsl = crate::recipe::Hsl::default();
+        let without_px = pixels_of(&render::develop_preview(&s_img, &without));
+        assert!(
+            residual_is_colour_shaped(&without_px, &tp, &evidence),
+            "premise: without the mixer this fit still leaves a per-band colour residual"
+        );
+        assert!(
+            !residual_is_colour_shaped(&full_px, &tp, &evidence),
+            "…and the mixer is what takes that shape out of it"
+        );
+        assert!(!names_hsl(&full), "…so `hsl` is no longer named: {}", full.recipe.rationale);
+    }
+
+    /// …and the other half of the same contract, on a pair whose colour
+    /// residual is a per-band HUE rotation: that axis is never solved, so the
+    /// disclosure must go on naming `hsl`. Closing the saturation gap must
+    /// never be allowed to launder a rotation into silence.
+    #[test]
+    fn a_residual_the_mixer_cannot_reach_is_still_named() {
+        let (src, tgt) = flat_sky_to_cloud_deck();
+        let report = fit_recipe(&src, &tgt);
+        assert_eq!(report.mode, FitMode::Atmosphere, "premise: the cloud deck is content-divergent");
+        assert!(names_hsl(&report), "the unreachable residual stays disclosed: {}", report.recipe.rationale);
     }
 }
