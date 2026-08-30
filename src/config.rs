@@ -639,6 +639,16 @@ pub struct Config {
 
     /// How strongly to lean on the user's historical edit style, 0.0..1.0.
     pub style_strength: f32,
+
+    /// SHOW the model the retrieved reference photo, not just its numbers —
+    /// the non-GUI half of the R23-2 opt-in (B1).
+    ///
+    /// OFF by default, and the default is the whole point: turning it on puts
+    /// one of the photographer's own finished photographs on a paid vision
+    /// call as IMAGE 2. `analyze --reference-image` / `auto --reference-image`
+    /// turn it on for one run; this makes it the standing answer for a user who
+    /// always wants it, the way `AUTOSHOP_STYLE_STRENGTH` does for the dial.
+    pub send_reference_image: bool,
 }
 
 // --- the capability table ---------------------------------------------------
@@ -779,6 +789,16 @@ pub(crate) const SETTINGS: &[Setting] = &[
     // read from — the root of the whole trust story.
     env_only("AUTOSHOP_DATA_DIR", Trust::Destination),
     env_only("AUTOSHOP_STYLE_STRENGTH", Trust::Preference),
+    // DESTINATION, not Preference, and this is the one place in this table
+    // where that call is worth stating. It carries no key and no address, so
+    // the letter of `Preference` fits — but what it decides is whether one of
+    // the user's own finished PHOTOGRAPHS is put on the wire at all, and the
+    // threat model this table exists for is an ambient `.env` arriving inside
+    // an unzipped photo pack. A planted `AUTOSHOP_ANALYSIS_PROVIDER` picks a
+    // model; a planted one of these uploads the photographer's work. The live
+    // environment and the trusted central settings file may set it; a photo
+    // pack may not.
+    env_only("AUTOSHOP_SEND_REFERENCE_IMAGE", Trust::Destination),
     env_only("AUTOSHOP_HTTP_TIMEOUT_SECS", Trust::Preference),
     env_only("AUTOSHOP_SIDECAR_TIMEOUT_SECS", Trust::Preference),
     // Names a directory to READ pre-v0.13 sidecars from during an explicitly
@@ -1261,6 +1281,11 @@ impl Config {
                 .filter(|v| v.is_finite())
                 .unwrap_or(0.3)
                 .clamp(0.0, 1.0),
+            // The truthiness spelling `style::EmbeddingSwitch::resolve_with`
+            // already uses for the sidecar switch, so "0"/"false"/"off"/empty
+            // mean the same thing on every Autoshop boolean.
+            send_reference_image: env_val("AUTOSHOP_SEND_REFERENCE_IMAGE")
+                .is_some_and(|v| !matches!(v.trim(), "" | "0" | "false" | "off")),
         }
     }
 

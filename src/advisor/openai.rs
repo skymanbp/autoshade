@@ -158,6 +158,58 @@ reference's own level where the photo calls for it, stopping short of over-satur
     }
 }
 
+/// B5a: local work is not optional decoration.
+///
+/// User ruling 2026-08-30 — *感觉还是要更加高效的使用蒙版吧？* The shipped prose
+/// asked for "1-2 local masks" and then handed the model an unconditional way
+/// out ("If a global edit alone achieves the look, leave masks empty"), which
+/// is the sentence a restraint-tuned model takes every time. The escape stays,
+/// because a frame with nothing to work locally is real — but it stops being
+/// the DEFAULT answer, and when the style reference states this photographer's
+/// own local-work habit that habit becomes the number to answer to.
+///
+/// `has_reference` gates only the sentence that POINTS at the block: with no
+/// style reference retrieved there is no LOCAL WORK line, and a prompt telling
+/// the model to match a line that is not there is a dangling reference it would
+/// have to invent an answer for.
+pub(crate) fn local_work_clause(has_reference: bool) -> &'static str {
+    if has_reference {
+        "Local work is NOT optional decoration, and it is not a fallback for a global edit that \
+fell short: a finished print is dodged and burned. The STYLE REFERENCE below carries this \
+photographer's own LOCAL WORK — how many of their similar shots carry a mask, WHERE those masks go \
+(sky / subject / foreground), what those masks MOVE, and whether they refine one with a range mask. \
+Answer to it: place masks of those KINDS on this frame at the level that line asks for, and name in \
+the rationale which habit each mask answers. Leave `masks` empty only when this frame genuinely has \
+nothing to work locally — never as the default. "
+    } else {
+        "Local work is NOT optional decoration, and it is not a fallback for a global edit that \
+fell short: a finished print is dodged and burned. Place the masks this frame wants — a held-back \
+sky, a lifted subject, a foreground worked from below — and name in the rationale what each is for. \
+Leave `masks` empty only when this frame genuinely has nothing to work locally — never as the \
+default. "
+    }
+}
+
+/// B5b: the colour and tonal tools that live INSIDE a mask.
+///
+/// The same ruling's second half — *包括色温色调和曲线，都要学会使用*. Every
+/// control named here has been in the CONTROL CATALOGUE since R23-1b
+/// (`advisor::catalogue::LOCAL_CONTROLS`), so this buys no new capability; what
+/// it fixes is that the mask paragraph only ever talked about dodging and
+/// burning, so the model reached for local exposure and contrast and nothing
+/// else. UNCONDITIONAL, because it describes what a mask IS rather than what
+/// this photographer happens to do — the habit half is the reference block's
+/// `THEIR TYPICAL LOCAL WORK` line (`mask_habit::local_work_note`).
+pub(crate) fn mask_colour_clause() -> &'static str {
+    "A mask is not only a brightness tool. Inside one you also have `temperature` and `tint` — a \
+RELATIVE warm/cool and green/magenta shift for that region alone, not Kelvin — and the mask's OWN \
+tone curves, `main_curve` plus `red_curve` / `green_curve` / `blue_curve`, in the same 0..255 point \
+form as the global curve. Reach for them whenever a region needs a different COLOUR or a different \
+tonal SHAPE rather than simply more or less light: cool a sky while the foreground stays warm, pull \
+a green cast out of foliage alone, lift the toe of a subject's curve without touching the sky's. \
+`saturation` and `hue` are local too. "
+}
+
 fn direction_block(g: &str, adherence: DirectionAdherence) -> String {
     let mut out = String::from("USER DIRECTION (a specific request from the photographer — follow it closely): ");
     out.push_str(g);
@@ -258,9 +310,8 @@ wheels at 0 (blending 50), curves empty. ",
         "Use the `masks` array PROACTIVELY to dodge and burn like a darkroom print: even with NO explicit \
 user request, add 1-2 local masks to lift the subject, hold back a hot sky, or deepen distracting \
 corners when it makes the photo read better. Masks are tonal/colour adjustments through gradient \
-masks — never painting, generating, or adding content. If a global edit alone achieves the look, \
-leave masks empty. Prefer a linear gradient for skies/horizons/foregrounds; radial for \
-subjects/vignettes. \
+masks — never painting, generating, or adding content. Prefer a linear gradient for \
+skies/horizons/foregrounds; radial for subjects/vignettes. \
 When the USER DIRECTION names a SPECIFIC AREA (e.g. 'that corner', 'the sky', 'the subject', \
 'top-left', 'this part is too noisy', 'brighten her face') translate it into a mask placed over \
 THAT area and set the relevant local sliders — including local `noise_reduction` for a noisy \
@@ -274,6 +325,11 @@ given — the name is that mask's identity: a renamed mask cannot be merged with
 state (components, toggles, colour gains) the schema does not carry, and your mask edits are then \
 discarded wholesale in favour of the original masks.  ",
     );
+    // GATE B5: how MUCH local work, and WHICH tools inside it. Placed with the
+    // rest of the mask paragraph and before the catalogue, so the model reads
+    // "these are the controls" already knowing it is expected to use them.
+    instruction.push_str(local_work_clause(ctx.reference.is_some()));
+    instruction.push_str(mask_colour_clause());
     instruction.push_str(&catalogue::prompt_catalogue());
     // R23-1b: the three manual lens controls entered the catalogue above, and
     // they are the one group where the NEUTRAL value is not the safe answer.
@@ -897,6 +953,78 @@ mod tests {
         assert!(plain.contains("the as-shot Kelvin could not be read"), "{plain}");
     }
 
+    /// B5: the prompt stops treating local work as optional decoration, and it
+    /// names the colour and curve tools that live INSIDE a mask.
+    ///
+    /// User ruling 2026-08-30: *感觉还是要更加高效的使用蒙版吧？包括色温色调和曲线，
+    /// 都要学会使用*. Two defects, one paragraph. The shipped prose asked for
+    /// "1-2 local masks" and then offered an unconditional way out ("If a
+    /// global edit alone achieves the look, leave masks empty") — the sentence
+    /// a restraint-tuned model takes every time. And the whole paragraph talked
+    /// only about dodging and burning, so `temperature`, `tint` and the local
+    /// curves sat in the CONTROL CATALOGUE unmentioned and unused.
+    ///
+    /// Asserted on the ASSEMBLED prompt: a live propose is a paid call.
+    ///
+    /// MUTATION: put the old unconditional escape sentence back (the "never as
+    /// the default" assert fails), drop `mask_colour_clause` from the assembly
+    /// (the tool assertions fail), or make `local_work_clause` ignore its
+    /// argument (the two-arm assertion fails).
+    #[test]
+    fn the_prompt_asks_for_local_work_and_names_the_tools_inside_a_mask() {
+        let with_ref = propose_instruction("{}", "hist", &ProposeContext {
+            reference: Some("STYLE REFERENCE — …  THEIR TYPICAL LOCAL WORK (3 of 4 …)"),
+            ..Default::default()
+        });
+        let no_ref = propose_instruction("{}", "hist", &ProposeContext::default());
+
+        // (a) not optional, and the escape hatch is no longer the default.
+        for (name, text) in [("with reference", &with_ref), ("no reference", &no_ref)] {
+            assert!(text.contains("Local work is NOT optional decoration"), "{name}: {text}");
+            assert!(
+                text.contains("never as the default"),
+                "{name}: the escape must be the exception, not the default: {text}"
+            );
+            assert!(
+                !text.contains("If a global edit alone achieves the look, leave masks empty"),
+                "{name}: the unconditional escape sentence must be gone: {text}"
+            );
+            // The rest of the shipped mask paragraph is untouched.
+            assert!(text.contains("dodge and burn like a darkroom print"), "{name}");
+            assert!(text.contains("Prefer a linear gradient for skies/horizons/foregrounds"), "{name}");
+            assert!(text.contains("keep each existing mask's `name` EXACTLY as given"), "{name}");
+        }
+        // …and only the prompt that HAS a style reference points at its
+        // LOCAL WORK line: a pointer to a line that is not there is a dangling
+        // reference the model would have to invent an answer for.
+        assert!(with_ref.contains("The STYLE REFERENCE below carries this photographer's own LOCAL WORK"), "{with_ref}");
+        assert!(!no_ref.contains("The STYLE REFERENCE below carries"), "{no_ref}");
+        assert!(no_ref.contains("Place the masks this frame wants"), "{no_ref}");
+
+        // (b) the tools inside a mask, unconditionally — this describes what a
+        // mask IS, not what this photographer happens to do.
+        for text in [&with_ref, &no_ref] {
+            assert!(text.contains("A mask is not only a brightness tool"), "{text}");
+            assert!(text.contains("`temperature` and `tint`"), "{text}");
+            assert!(text.contains("not Kelvin"), "the local pair is RELATIVE: {text}");
+            assert!(
+                text.contains("`main_curve` plus `red_curve` / `green_curve` / `blue_curve`"),
+                "{text}"
+            );
+        }
+        // Every control named is one the CONTROL CATALOGUE actually documents —
+        // the prompt may not invent a knob (R23-1b's rule).
+        let cat = catalogue::prompt_catalogue();
+        for knob in ["temperature", "tint", "main_curve", "red_curve", "green_curve", "blue_curve"] {
+            assert!(cat.contains(knob), "the prompt names `{knob}`, which the catalogue must carry");
+        }
+        // The two clauses land in the MASK paragraph, before the catalogue.
+        let masks = with_ref.find("Use the `masks` array").expect("the mask paragraph");
+        let clause = with_ref.find("Local work is NOT optional").expect("the B5 clause");
+        let cat_at = with_ref.find("CONTROL CATALOGUE").expect("the catalogue");
+        assert!(masks < clause && clause < cat_at, "the clause belongs to the mask paragraph");
+    }
+
     /// GATE 1 of the six the strength axis must pass (R23-3, feedback #5 — "the
     /// AI is too timid, and the prompt barely moves it").
     ///
@@ -1015,6 +1143,7 @@ mod tests {
             correspond_script: String::new(),
             describe_script: String::new(),
             style_strength: 0.5,
+            send_reference_image: false,
         }
     }
 

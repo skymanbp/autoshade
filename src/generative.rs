@@ -1698,6 +1698,7 @@ mod tests {
             correspond_script: String::new(),
             describe_script: String::new(),
             style_strength: 0.5,
+            send_reference_image: false,
         };
         let src = encode_png(&DynamicImage::ImageRgba8(RgbaImage::new(8, 8))).unwrap();
         let sizes = SizePlan { flexible: Some("1600x912".into()), enum_size: "1024x1024" };
@@ -1803,6 +1804,7 @@ mod tests {
             correspond_script: String::new(),
             describe_script: String::new(),
             style_strength: 0.5,
+            send_reference_image: false,
         };
         let src = encode_png(&DynamicImage::ImageRgba8(RgbaImage::new(8, 8))).unwrap();
         let sizes = SizePlan { flexible: None, enum_size: "1024x1024" };
@@ -1912,6 +1914,7 @@ mod tests {
             correspond_script: String::new(),
             describe_script: String::new(),
             style_strength: 0.5,
+            send_reference_image: false,
         }
     }
 
@@ -2088,6 +2091,7 @@ mod tests {
             correspond_script: String::new(),
             describe_script: String::new(),
             style_strength: 0.0,
+            send_reference_image: false,
         };
         let e = reimagine(&cfg, Path::new("no-such-input.arw"), "p", "high", "auto", false, &dir)
             .unwrap_err()
