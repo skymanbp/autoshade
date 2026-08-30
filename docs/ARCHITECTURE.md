@@ -92,9 +92,14 @@
 > experimental generative edits, an optional pixel-**heal** retouch mode (§4.7)
 > the deterministic look **reverse-fit** (§4.8) and the local server's refusal
 > model (§4.9).
-> 1091 library + 16 CLI + 146 GUI + 2+2 contract tests are enumerated in the GUI
-> build; the library result is 1080 pass + 11 `#[ignore]`d forensic probes
-> (counts refreshed 2026-08-29 after merging the multi-region batch `a2173c9`
+> 1137 library + 20 CLI + 151 GUI + 2+2 contract tests are enumerated in the GUI
+> build; the library result is 1126 pass + 11 `#[ignore]`d forensic probes
+> (counts refreshed 2026-08-30 after merging the style-retrieval expansion
+> `style-s2` (+55 by name against the `32b0fe4` merge transcript: 46 library —
+> 26 `style`, 9 `describe`, 4 `pipeline`, 3 `embed`, 3 `advisor`, 1 `recipe` —
+> 4 CLI and 5 GUI; the gui trip now runs the GUI bin only, the `gui` feature
+> adding dependencies alone): library 1091→1137, CLI 16→20, GUI 146→151;
+> before it the multi-region batch `a2173c9`
 > (+24 by name against `6323f4c`: the 11 `fit_zoned::semantic` tests, the 7
 > `fit_zoned` routing / arbitration / raster-release tests and the 6 `segment`
 > multi-class manifest tests) onto the linear-falloff merge: library 1067→1091;
