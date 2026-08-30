@@ -258,7 +258,7 @@ pub fn reimagine(
         }
         Ok((png.clone(), None))
     };
-    let (mut result, mut used) =
+    let GeneratedImage { bytes: mut result, requested: used, accepted: mut on_disk } =
         call_images_edit(cfg, &mut provide, &wire_prompt, fidelity, &sizes, quality)?;
     if cancelled() {
         // The epoch already discards the UI-side result — writing the
@@ -315,9 +315,10 @@ pub fn reimagine(
         );
         println!("{line}");
         gui_progress(&line);
-        let (second, used2) =
+        let second =
             call_images_edit(cfg, &mut provide, &wire_prompt, fidelity, &sizes, quality)?;
-        let d2 = generation_divergence(sent_for(&used2), &second)?;
+        // Measured against what the SECOND call was sent, not the first.
+        let d2 = generation_divergence(sent_for(&second.requested), &second.bytes)?;
         let line = format!(
             "  fidelity retry measured D={:.3} (first attempt D={:.3})",
             d2.d, divergence.d
@@ -326,8 +327,8 @@ pub fn reimagine(
         gui_progress(&line);
         if d2.d < divergence.d {
             first_divergence = Some(divergence.d);
-            result = second;
-            used = used2;
+            result = second.bytes;
+            on_disk = second.accepted;
             divergence = d2;
         } else {
             first_divergence = Some(d2.d);
@@ -358,7 +359,8 @@ pub fn reimagine(
         let _ = std::fs::remove_file(&tmp);
         return Err(e).with_context(|| format!("publish {}", out.display()));
     }
-    println!("generative -> {} ({used}, generative re-render)", out.display());
+    // The size on disk, which is not the requested size when the endpoint capped.
+    println!("generative -> {} ({on_disk}, generative re-render)", out.display());
     Ok(ReimagineReport { divergence, first_divergence })
 }
 
@@ -444,7 +446,9 @@ pub fn retouch(
         sizes.try_first(),
         if full_res && raw { "full-res" } else { "preview" }
     );
-    let (result, _used) = call_images_edit(
+    // The composite resizes the tile onto the base either way, so a capped
+    // return needs no size bookkeeping here — only the note the call itself prints.
+    let result = call_images_edit(
         cfg,
         &mut |size| {
             if size != primary_size
@@ -458,7 +462,8 @@ pub fn retouch(
         "high",
         &sizes,
         quality,
-    )?;
+    )?
+    .bytes;
     if cancelled() {
         // The user gave up while the model ran; skip the (full-res) composite
         // — at 61 MP it is real work whose result would be discarded anyway.
@@ -768,7 +773,46 @@ fn encode_png(img: &DynamicImage) -> Result<Vec<u8>> {
     Ok(buf)
 }
 
-fn canonical_generated_png(bytes: &[u8], expected_size: &str) -> Result<Vec<u8>> {
+/// Is `declared` this endpoint's CAP on `expected` rather than a different
+/// picture?
+///
+/// A subscription-tier endpoint (the local Codex bridge the GUI's OAuth mode
+/// installs) honours the requested aspect and clamps the pixel count: 3520x2352
+/// comes back as 1534x1025 — 1.4966:1 against 1.4966:1, measured 2026-08-30.
+/// Smaller in BOTH axes at the same aspect is a resolution loss, which is what
+/// that mode documents; anything else (a different aspect, a LARGER frame) is a
+/// different picture and still refused, because the caller writes these bytes
+/// out as the master.
+const MIN_CAPPED_LONG_EDGE: u32 = 1024;
+
+fn size_is_an_endpoint_cap(declared: (u32, u32), expected: (u32, u32)) -> bool {
+    if declared.0 == 0 || declared.1 == 0 || expected.1 == 0 {
+        return false;
+    }
+    if declared.0 >= expected.0 || declared.1 >= expected.1 {
+        return false;
+    }
+    // A cap still has to be a usable picture. Without this floor the rule
+    // admits ANY smaller frame at the same aspect — the existing contract test
+    // caught it by handing 1x1 for a requested 1024x1024, which is not a tier
+    // limit but a broken response. 1024 is the smallest edge the image models
+    // document, so a genuine cap never falls below it.
+    if declared.0.max(declared.1) < MIN_CAPPED_LONG_EDGE {
+        return false;
+    }
+    let (a, b) = (
+        f64::from(declared.0) / f64::from(declared.1),
+        f64::from(expected.0) / f64::from(expected.1),
+    );
+    // Half a percent: enough for the rounding an integer clamp introduces
+    // (1534/1025 vs 3520/2352 differ by 0.02%), far too tight to admit a
+    // neighbouring aspect (3:2 vs 4:3 differ by 12%).
+    (a - b).abs() <= b * 0.005
+}
+
+/// Returns the canonical PNG and the dimensions it ACTUALLY carries, which may
+/// be an endpoint cap below `expected_size` (see [`size_is_an_endpoint_cap`]).
+fn canonical_generated_png(bytes: &[u8], expected_size: &str) -> Result<(Vec<u8>, (u32, u32))> {
     let format = image::guess_format(bytes).context("identify generated image")?;
     if format != image::ImageFormat::Png {
         return Err(anyhow!(
@@ -786,7 +830,7 @@ fn canonical_generated_png(bytes: &[u8], expected_size: &str) -> Result<Vec<u8>>
     )
     .into_dimensions()
     .context("read generated PNG header")?;
-    if declared != expected {
+    if declared != expected && !size_is_an_endpoint_cap(declared, expected) {
         return Err(anyhow!(
             "image API returned {}x{} for requested {}x{}",
             declared.0,
@@ -795,9 +839,13 @@ fn canonical_generated_png(bytes: &[u8], expected_size: &str) -> Result<Vec<u8>>
             expected.1
         ));
     }
+    let accepted = declared;
     let image = image::load_from_memory_with_format(bytes, image::ImageFormat::Png)
         .context("fully decode generated PNG")?;
-    if image.dimensions() != expected {
+    // The header is not authority over the pixels: re-check the DECODED size
+    // against what the header declared, so a frame that lies about itself is
+    // refused even when the declared value passed the cap test above.
+    if image.dimensions() != accepted {
         return Err(anyhow!(
             "image API returned {}x{} for requested {}x{}",
             image.width(),
@@ -815,7 +863,7 @@ fn canonical_generated_png(bytes: &[u8], expected_size: &str) -> Result<Vec<u8>>
             image.color()
         ));
     }
-    encode_png(&image)
+    Ok((encode_png(&image)?, accepted))
 }
 
 /// RFC 2046 §5.1.1: the sender must pick a boundary that does not occur in
@@ -906,11 +954,30 @@ fn part_file(buf: &mut Vec<u8>, boundary: &str, name: &str, filename: &str, byte
 ///   * the FLEXIBLE `size` — a gpt-image-2 capability; older models reject a
 ///     non-enum size, so we retry with the fixed enum size from the [`SizePlan`].
 ///
-/// Returns the image bytes and the size actually accepted. `inputs` builds
+/// Returns the image bytes and BOTH sizes (see [`GeneratedImage`]). `inputs` builds
 /// the image (+ optional mask) PNG pair FOR a requested size string — called
 /// once per size the negotiation attempts (memoize in the provider if
 /// rebuilding is expensive).
 type SizedInputs = (Vec<u8>, Option<Vec<u8>>);
+
+/// One billed images/edits call's result.
+///
+/// The two sizes are DIFFERENT facts and are named apart because they were once
+/// a single string, which is how a capped generation came to be measured against
+/// pixels it was never sent:
+///   * `requested` — the size the negotiation settled on. It selects which input
+///     PNG went up the wire, so anything comparing the result to its INPUT must
+///     use this one.
+///   * `accepted` — the size the endpoint actually returned, which a
+///     subscription tier can cap below the request. This is the size of the file
+///     on disk, so anything reporting the result uses this one.
+///
+/// They are equal in the ordinary case.
+struct GeneratedImage {
+    bytes: Vec<u8>,
+    requested: String,
+    accepted: String,
+}
 fn call_images_edit(
     cfg: &Config,
     inputs: &mut dyn FnMut(&str) -> Result<SizedInputs>,
@@ -918,7 +985,7 @@ fn call_images_edit(
     fidelity: &str,
     sizes: &SizePlan,
     quality: &str,
-) -> Result<(Vec<u8>, String)> {
+) -> Result<GeneratedImage> {
     let key = cfg
         .openai_api_key
         .as_ref()
@@ -1004,29 +1071,20 @@ fn call_images_edit(
         match resp {
             Ok(r) => {
                 // A server may accept `stream` yet answer with plain JSON —
-                // dispatch on what actually came back, not on what was asked.
-                let read = if r.content_type().eq_ignore_ascii_case("text/event-stream") {
-                    // Same number the socket's stall timeout was armed with:
-                    // the gate turns "byte-alive but eventless" (keep-alive
-                    // comments) into the same stall the socket calls silence.
-                    read_sse_image(
-                        r.into_reader(),
-                        Some(std::time::Duration::from_secs(
-                            crate::advisor::effective_stall_secs(IMAGES_EDIT_STALL_SECS),
-                        )),
-                    )
-                } else {
-                    // Capped like the SSE arm beside it — with the SAME
-                    // number: `into_json` reads until the server stops, and an
-                    // allocation failure aborts the process rather than
-                    // raising an error. The advisor's own 64 MiB is a
-                    // TEXT-response budget; one full-size base64 image frame
-                    // is about that on its own, so borrowing it here threw
-                    // away already-billed generations.
-                    crate::advisor::into_json_capped_at(r, STREAM_CAP)
-                        .map_err(anyhow::Error::from)
-                        .context("parse image API response")
-                };
+                // dispatch on what actually came back, not on what was asked,
+                // and when the header and the body disagree believe the BODY
+                // (`read_image_reply`).
+                let declared_sse = r.content_type().eq_ignore_ascii_case("text/event-stream");
+                // Same number the socket's stall timeout was armed with: the
+                // gate turns "byte-alive but eventless" (keep-alive comments)
+                // into the same stall the socket calls silence.
+                let read = read_image_reply(
+                    declared_sse,
+                    r.into_reader(),
+                    Some(std::time::Duration::from_secs(
+                        crate::advisor::effective_stall_secs(IMAGES_EDIT_STALL_SECS),
+                    )),
+                );
                 match read {
                     Ok(v) => break (v, size.to_string()),
                     Err(e) => {
@@ -1199,8 +1257,20 @@ fn call_images_edit(
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(b64)
         .context("decode b64_json")?;
-    let bytes = canonical_generated_png(&bytes, &used_size)?;
-    Ok((bytes, used_size))
+    let (bytes, accepted) = canonical_generated_png(&bytes, &used_size)?;
+    let accepted_size = format!("{}x{}", accepted.0, accepted.1);
+    if accepted_size != used_size {
+        // Say it once, plainly: the file on disk is this size, not the one that
+        // was asked for. Reporting the REQUESTED size here would put a wrong
+        // number in the terminal line and in the caller's own record.
+        let line = format!(
+            "  note: {} capped this generation at {accepted_size} (asked for {used_size})",
+            cfg.openai_image_model
+        );
+        eprintln!("{line}");
+        gui_progress(line.trim());
+    }
+    Ok(GeneratedImage { bytes, requested: used_size, accepted: accepted_size })
 }
 
 /// The image payload lives at `data[0].b64_json` in a blocking JSON response
@@ -1235,6 +1305,89 @@ fn streamed_refusal_blames(top: &str, param: &str) -> bool {
 /// `image_generation.*` families parse. Framing (multi-line `data:` payloads,
 /// event boundaries, EOF flush, `[DONE]`) lives in the shared
 /// `advisor::for_each_sse_json` — one SSE implementation for every stream.
+/// How far into the body the lead-byte sniff may scan before giving up and
+/// letting the SSE reader have it. An event stream legitimately opens with a
+/// blank line or a `:` comment; nothing legitimate opens with kilobytes of
+/// whitespace, and the scan must not become a second way to hang.
+const LEAD_SNIFF_LIMIT: usize = 64;
+
+/// Read one images/edits reply, believing the BODY over the `Content-Type`.
+///
+/// `declared_sse` is what the header claimed. A proxy or subscription bridge in
+/// front of the API may claim `text/event-stream` and then send the ordinary
+/// JSON reply (measured against the local Codex bridge the GUI's OAuth mode
+/// installs). Trusting the header there fails the call with "ended without a
+/// completed event" on a generation the server already produced — and the
+/// no-re-POST-past-2xx rule means it cannot be recovered. `{` never opens an
+/// SSE frame (those start with a field name or a `:` comment), so one sniffed
+/// byte separates the two without weakening the stream path: a real event
+/// stream still goes to [`read_sse_image`], keeping partial-frame progress and
+/// the in-stream refusal negotiation that reads its error spelling.
+fn read_image_reply(
+    declared_sse: bool,
+    r: impl std::io::Read,
+    progress_budget: Option<std::time::Duration>,
+) -> Result<serde_json::Value> {
+    if !declared_sse {
+        return image_reply_as_json(r);
+    }
+    let (lead, r) = sniff_lead_byte(r)?;
+    if lead == Some(b'{') {
+        return image_reply_as_json(r);
+    }
+    read_sse_image(r, progress_budget)
+}
+
+/// The whole body as one JSON value.
+///
+/// Capped like the SSE arm beside it — with the SAME number: an uncapped read
+/// runs until the server stops, and an allocation failure aborts the process
+/// rather than raising an error. The advisor's own 64 MiB is a TEXT-response
+/// budget; one full-size base64 image frame is about that on its own, so
+/// borrowing it here threw away already-billed generations.
+///
+/// A generic fn rather than a closure inside [`read_image_reply`]: the two call
+/// sites pass different reader types (the raw body, and the body with its
+/// sniffed lead bytes chained back on), and a closure would be monomorphised on
+/// whichever came first.
+fn image_reply_as_json(r: impl std::io::Read) -> Result<serde_json::Value> {
+    crate::advisor::json_from_reader_capped(r, STREAM_CAP)
+        .map_err(anyhow::Error::from)
+        .context("parse image API response")
+}
+
+/// A reader with the bytes examined by [`sniff_lead_byte`] chained back in front.
+type SniffedReader<R> = std::io::Chain<std::io::Cursor<Vec<u8>>, R>;
+
+/// The first non-whitespace byte of `r`, and a reader that still yields it.
+///
+/// Nothing is consumed from the caller's point of view: the bytes read while
+/// looking are chained back in front of the remainder.
+fn sniff_lead_byte<R: std::io::Read>(
+    mut r: R,
+) -> Result<(Option<u8>, SniffedReader<R>)> {
+    // `Cursor<Vec<u8>>` is a concrete type, so unlike a generic parameter with
+    // a `Read` bound it needs the trait in scope — without this, `.chain`
+    // resolves to `Iterator::chain` and the file does not compile.
+    use std::io::Read as _;
+    let mut seen: Vec<u8> = Vec::new();
+    let mut byte = [0u8; 1];
+    while seen.len() < LEAD_SNIFF_LIMIT {
+        match r.read(&mut byte) {
+            Ok(0) => break,
+            Ok(_) => {
+                seen.push(byte[0]);
+                if !byte[0].is_ascii_whitespace() {
+                    break;
+                }
+            }
+            Err(e) => return Err(anyhow::Error::from(e)).context("read image reply"),
+        }
+    }
+    let lead = seen.iter().copied().find(|b| !b.is_ascii_whitespace());
+    Ok((lead, std::io::Cursor::new(seen).chain(r)))
+}
+
 fn read_sse_image(
     r: impl std::io::Read,
     progress_budget: Option<std::time::Duration>,
@@ -1294,6 +1447,159 @@ fn read_sse_image(
 mod tests {
     use super::*;
     use image::{Rgba, RgbaImage};
+
+    /// M-S5: the endpoint-cap rule widens, and a DIFFERENT picture starts being
+    /// accepted as the master. It must admit exactly one shape — smaller in both
+    /// axes, same aspect, still a usable frame — because `reimagine` writes these
+    /// bytes straight out as the output file.
+    #[test]
+    fn only_a_same_aspect_usable_shrink_counts_as_an_endpoint_cap() {
+        // Measured live 2026-08-30 against the local Codex bridge the GUI's
+        // OAuth mode installs: 3520x2352 asked, 1534x1025 returned.
+        assert!(size_is_an_endpoint_cap((1534, 1025), (3520, 2352)));
+        // The square tier answer to a square request is the same story.
+        assert!(size_is_an_endpoint_cap((1254, 1254), (2048, 2048)));
+
+        // A different aspect is a different picture, however much smaller.
+        assert!(!size_is_an_endpoint_cap((1536, 1152), (3520, 2352)), "4:3 for a 3:2 request");
+        // Larger in either axis is never a cap.
+        assert!(!size_is_an_endpoint_cap((3520, 2352), (3520, 2352)), "equal is not a cap");
+        assert!(!size_is_an_endpoint_cap((4096, 2737), (3520, 2352)), "larger");
+        assert!(!size_is_an_endpoint_cap((1534, 2352), (3520, 2352)), "one axis only");
+        // Degenerate frames are refused, not treated as an extreme cap.
+        assert!(!size_is_an_endpoint_cap((1, 1), (1024, 1024)), "1x1 is a broken reply");
+        assert!(!size_is_an_endpoint_cap((0, 0), (1024, 1024)), "zero");
+        // …and the floor is exactly where it says it is.
+        let long = MIN_CAPPED_LONG_EDGE;
+        assert!(size_is_an_endpoint_cap((long, long), (long * 2, long * 2)), "at the floor");
+        assert!(
+            !size_is_an_endpoint_cap((long - 1, long - 1), (long * 2, long * 2)),
+            "one below the floor"
+        );
+    }
+
+    /// M-S6: `requested` and `accepted` are different facts. Swapping them
+    /// compiles, reads plausibly, and silently measures a capped generation
+    /// against an input the model never received — the defect this batch's
+    /// first cut shipped. Driven over the real loopback transport so both
+    /// fields come out of one billed call.
+    #[test]
+    fn a_capped_return_keeps_the_requested_and_the_delivered_size_apart() {
+        // Same aspect as the request (2048/1168 == 1024/584) with its long edge
+        // at the usable floor: the shape a subscription tier actually returns.
+        let capped = encode_png(&DynamicImage::ImageRgba8(RgbaImage::new(1024, 584))).unwrap();
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&capped);
+        let (url, _seen, handle) = stub_endpoint(vec![(
+            200,
+            "application/json",
+            format!(r#"{{"data":[{{"b64_json":"{b64}"}}]}}"#),
+        )]);
+        let cfg = stub_cfg(url);
+        let src = encode_png(&DynamicImage::ImageRgba8(RgbaImage::new(8, 8))).unwrap();
+        let sizes = SizePlan { flexible: Some("2048x1168".into()), enum_size: "1024x1024" };
+        let mut asked: Vec<String> = Vec::new();
+        let got = call_images_edit(
+            &cfg,
+            &mut |size| {
+                asked.push(size.to_string());
+                Ok((src.clone(), None))
+            },
+            "brighten the sky",
+            "high",
+            &sizes,
+            "auto",
+        )
+        .expect("a same-aspect cap is accepted, not refused as a wrong picture");
+        // The FLEXIBLE input is what went up the wire, so the fidelity reading
+        // must compare against those bytes: `requested` may not carry the cap.
+        assert_eq!(asked, vec!["2048x1168".to_string()], "the cap is not a size refusal");
+        assert_eq!(got.requested, "2048x1168", "the size the model was sent");
+        assert_eq!(got.accepted, "1024x584", "the size that came back — the file on disk");
+
+        let grace = std::time::Instant::now();
+        while !handle.is_finished() && grace.elapsed() < std::time::Duration::from_secs(2) {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let _ = handle.join();
+    }
+
+    /// M-S1: the header is trusted alone again, or the lead-byte sniff is
+    /// weakened — a body that is plain JSON must parse even when the
+    /// `Content-Type` claims an event stream. Captured live 2026-08-30 from the
+    /// local Codex bridge the GUI's OAuth mode installs: it labels the response
+    /// `text/event-stream` and then sends the ordinary reply, with zero `event:`
+    /// lines. Trusting the label failed the call on a generation the
+    /// subscription had already been charged for, and the no-re-POST-past-2xx
+    /// rule meant it could not be recovered.
+    #[test]
+    fn a_json_body_mislabelled_as_an_event_stream_is_still_read() {
+        let body = br#"{"created":1788118129,"background":"opaque","data":[{"b64_json":"QUJD"}]}"#;
+        let v = read_image_reply(true, &body[..], None).expect("a JSON body must parse");
+        assert_eq!(v["data"][0]["b64_json"], "QUJD");
+
+        // Leading whitespace is not a disguise: the sniff skips it.
+        let padded = [b"\r\n\r\n  ".as_slice(), body].concat();
+        let v = read_image_reply(true, padded.as_slice(), None).expect("leading blank lines");
+        assert_eq!(v["data"][0]["b64_json"], "QUJD");
+
+        // And the honest label keeps working.
+        let v = read_image_reply(false, &body[..], None).expect("declared JSON");
+        assert_eq!(v["data"][0]["b64_json"], "QUJD");
+    }
+
+    /// M-S2: the sniff swallows a REAL stream — an event stream must still go
+    /// to the SSE reader, keeping its completed event. Guards the fix from
+    /// buying the JSON case by breaking the streaming case.
+    #[test]
+    fn a_real_event_stream_still_reaches_the_streaming_reader() {
+        let sse = b"event: image_edit.completed\n\
+                    data: {\"type\":\"image_edit.completed\",\"b64_json\":\"QUJD\"}\n\n";
+        let v = read_image_reply(true, &sse[..], None).expect("a real stream must complete");
+        assert_eq!(v["b64_json"], "QUJD");
+
+        // A stream that opens with a comment line still is not JSON.
+        let commented = b": keep-alive\n\
+                          event: image_edit.completed\n\
+                          data: {\"type\":\"image_edit.completed\",\"b64_json\":\"WFla\"}\n\n";
+        let v = read_image_reply(true, &commented[..], None).expect("comment-led stream");
+        assert_eq!(v["b64_json"], "WFla");
+    }
+
+    /// M-S3: the in-stream refusal spelling is the one `streamed_refusal_blames`
+    /// negotiates on, and the sniff must not change it. If this drifts, a
+    /// flexible-size refusal stops falling back in streaming mode while the
+    /// blocking mode still does — the asymmetry the prefix rule exists to
+    /// prevent — or worse, a BILLED generation gets re-POSTed.
+    #[test]
+    fn a_streamed_refusal_keeps_its_negotiable_spelling_through_the_sniff() {
+        let refusal = b"event: error\n\
+                        data: {\"type\":\"error\",\"error\":{\"param\":\"size\",\
+                        \"message\":\"Invalid size '2048x1360'.\"}}\n\n";
+        let e = read_image_reply(true, &refusal[..], None).expect_err("a refusal must fail");
+        let top = e.to_string();
+        assert!(streamed_refusal_blames(&top, "size"), "not negotiable: {top}");
+        assert!(!top.contains("partial(s):"), "zero partials must not read as billed: {top}");
+    }
+
+    /// M-S4: the sniff must never become a way to hang or to eat a body. It
+    /// gives up after `LEAD_SNIFF_LIMIT` bytes, and every byte it looked at is
+    /// handed back to whichever reader wins.
+    #[test]
+    fn the_lead_sniff_is_bounded_and_puts_back_every_byte_it_read() {
+        let whitespace = vec![b' '; LEAD_SNIFF_LIMIT * 4];
+        let (lead, mut r) = sniff_lead_byte(whitespace.as_slice()).expect("bounded scan");
+        assert_eq!(lead, None, "all-whitespace has no lead byte");
+        let mut back = Vec::new();
+        std::io::Read::read_to_end(&mut r, &mut back).expect("readable");
+        assert_eq!(back.len(), whitespace.len(), "the sniff must not eat bytes");
+
+        let body = b"   {\"a\":1}";
+        let (lead, mut r) = sniff_lead_byte(&body[..]).expect("sniff");
+        assert_eq!(lead, Some(b'{'));
+        let mut back = Vec::new();
+        std::io::Read::read_to_end(&mut r, &mut back).expect("readable");
+        assert_eq!(back, body, "the chained reader must reproduce the body exactly");
+    }
 
     /// M-G1: `streamed_refusal_blames` prefix check dropped or attribution
     /// weakened — the negotiation must fire on a STREAMED structured size
@@ -1582,8 +1888,9 @@ mod tests {
             .to_string();
         assert!(err.contains("returned 1x1"), "{err}");
 
-        let canonical = canonical_generated_png(&png, "1x1").unwrap();
+        let (canonical, accepted) = canonical_generated_png(&png, "1x1").unwrap();
         assert_eq!(image::guess_format(&canonical).unwrap(), image::ImageFormat::Png);
+        assert_eq!(accepted, (1, 1), "an exact match reports its own size");
     }
 
     /// Local copy of the advisor tests' scripted loopback endpoint (test
@@ -1703,7 +2010,7 @@ mod tests {
         let src = encode_png(&DynamicImage::ImageRgba8(RgbaImage::new(8, 8))).unwrap();
         let sizes = SizePlan { flexible: Some("1600x912".into()), enum_size: "1024x1024" };
         let mut asked: Vec<String> = Vec::new();
-        let (_bytes, used) = call_images_edit(
+        let got = call_images_edit(
             &cfg,
             &mut |size| {
                 asked.push(size.to_string());
@@ -1715,7 +2022,7 @@ mod tests {
             "auto",
         )
         .expect("the enum retry succeeds");
-        assert_eq!(used, "1024x1024");
+        assert_eq!(got.requested, "1024x1024");
         assert!(
             asked.contains(&"1600x912".to_string()) && asked.contains(&"1024x1024".to_string()),
             "each attempted size asked for its own input: {asked:?}"
@@ -1808,11 +2115,11 @@ mod tests {
         };
         let src = encode_png(&DynamicImage::ImageRgba8(RgbaImage::new(8, 8))).unwrap();
         let sizes = SizePlan { flexible: None, enum_size: "1024x1024" };
-        let (bytes, used) =
+        let got =
             call_images_edit(&cfg, &mut |_| Ok((src.clone(), None)), "brighten the sky", "high", &sizes, "auto")
                 .expect("the blocking retry succeeds");
-        assert_eq!(used, "1024x1024");
-        assert!(!bytes.is_empty(), "the accepted retry returns the image");
+        assert_eq!(got.requested, "1024x1024");
+        assert!(!got.bytes.is_empty(), "the accepted retry returns the image");
 
         // Fully-consumed script, bounded wait (the join_bounded philosophy).
         let grace = std::time::Instant::now();
@@ -2030,7 +2337,7 @@ mod tests {
             "the kept result measures closer: {:.3} vs {first:.3}",
             report.divergence.d
         );
-        let expected = canonical_generated_png(&echo, "1024x1024").unwrap();
+        let (expected, _) = canonical_generated_png(&echo, "1024x1024").unwrap();
         assert_eq!(
             std::fs::read(&out).unwrap(),
             expected,
