@@ -166,12 +166,16 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
-          path: assets
+          # NOT `assets`: the checkout above brings the repo's own assets/
+          # (fonts, ICC, icons) and the first live run flattened those onto
+          # themselves and died. A name the repo does not use, and the
+          # flatten reaches only INTO the per-artifact subdirectories.
+          path: release-assets
       - name: Flatten, checksum, and print the asset table
         run: |
-          find assets -type f -exec mv -t assets/ {} +
-          find assets -mindepth 1 -type d -empty -delete
-          cd assets
+          find release-assets -mindepth 2 -type f -exec mv -t release-assets/ {} +
+          find release-assets -mindepth 1 -type d -empty -delete
+          cd release-assets
           : > checksums.txt
           echo "| File | Size | SHA-256 |" > table.md
           echo "|---|---:|---|" >> table.md
@@ -191,7 +195,7 @@ jobs:
           v="${{ github.event.inputs.version }}"
           if [ -z "$v" ]; then v="${GITHUB_REF_NAME#v}"; fi
           run_url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-          rm -f assets/table.md
+          rm -f release-assets/table.md
           {
             echo "Built by GitHub Actions from \`${{ github.sha }}\`."
             echo
@@ -199,5 +203,5 @@ jobs:
             echo
             echo "\`checksums.txt\` carries the SHA-256 of each file."
           } > notes.md
-          gh release create "v$v" --title "v$v" --notes-file notes.md assets/* \
-            || gh release upload "v$v" assets/* --clobber
+          gh release create "v$v" --title "v$v" --notes-file notes.md release-assets/* \
+            || gh release upload "v$v" release-assets/* --clobber
