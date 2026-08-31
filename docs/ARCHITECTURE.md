@@ -92,9 +92,14 @@
 > experimental generative edits, an optional pixel-**heal** retouch mode (§4.7)
 > the deterministic look **reverse-fit** (§4.8) and the local server's refusal
 > model (§4.9).
-> 1193 library + 22 CLI + 151 GUI + 2+2 contract tests are enumerated in the GUI
-> build; the library result is 1182 pass + 11 `#[ignore]`d forensic probes
-> (counts refreshed 2026-08-30: the tile-boundary root fix added its two named
+> 1207 library + 22 CLI + 151 GUI + 2+2 contract tests are enumerated in the GUI
+> build; the library result is 1196 pass + 11 `#[ignore]`d forensic probes
+> (counts refreshed 2026-08-31: the AutoShade rename added 14 named tests by
+> name against `e33206b` — 6 for the environment alias door, 5 for the
+> pre-rename develop-store adoption, 3 for the pre-rename on-disk XMP tokens —
+> and renamed one (`xmp::tests::legacy_autoshop_sidecar_…` →
+> `legacy_autoshade_sidecar_…`), so library 1193→1207 with CLI, GUI and
+> contract unchanged; before it, the tile-boundary root fix added its two named
 > gate tests — library 1191→1193; before it, the style-retrieval expansion
 > `style-s2` (+55 by name against the `32b0fe4` merge transcript: 46 library —
 > 26 `style`, 9 `describe`, 4 `pipeline`, 3 `embed`, 3 `advisor`, 1 `recipe` —
