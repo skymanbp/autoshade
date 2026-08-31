@@ -402,6 +402,85 @@ pub enum RootTrust {
     SharedFallback,
 }
 
+/// The directory this app keeps its develop store in, and the one it kept it
+/// in up to v1.1.0, when it was called Autoshop.
+pub(crate) const STORE_DIR_NAME: &str = "autoshade";
+pub(crate) const LEGACY_STORE_DIR_NAME: &str = "autoshop";
+
+/// What became of a pre-rename store directory sitting beside the new one.
+///
+/// Every outcome is disclosed, including the boring one — a develop store is
+/// where every edit the user has ever made lives, so "which folder am I
+/// actually writing to" is never allowed to be a guess.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum RootAdoption {
+    /// No pre-rename directory: nothing to adopt, nothing to say.
+    Nothing,
+    /// It was renamed onto the current name. One `rename`, same volume, so
+    /// every develop, snapshot, mask raster and lock moved together or not at
+    /// all — a copy could half-succeed and leave two divergent stores.
+    Migrated,
+    /// BOTH names exist. The current one is used and the old one is left
+    /// exactly where it is: merging two stores is a decision about the user's
+    /// edits, and this code does not get to make it silently.
+    KeptBoth,
+    /// The rename failed (a file open in another process, a permission, a
+    /// junction across volumes). The PRE-RENAME directory stays in use, so the
+    /// user's existing edits keep working; the next launch tries again.
+    FellBack,
+}
+
+/// Where the store lives under `parent`, adopting a pre-rename directory when
+/// there is one.
+///
+/// `act` gates BOTH the rename attempt and the disclosure, and the caller
+/// passes it exactly once per process ([`store_root_with_trust`] holds the
+/// latch). That is what keeps a failed rename from being retried on every one
+/// of the hundreds of `store_root()` calls a session makes, and keeps the
+/// disclosure to one line. With `act` false the answer is still correct: the
+/// three exists-checks alone say which directory is in use.
+pub(crate) fn adopt_pre_rename_root(parent: &Path, act: bool) -> (PathBuf, RootAdoption) {
+    let current = parent.join(STORE_DIR_NAME);
+    let legacy = parent.join(LEGACY_STORE_DIR_NAME);
+    if !legacy.is_dir() {
+        return (current, RootAdoption::Nothing);
+    }
+    if current.exists() {
+        if act {
+            eprintln!(
+                "note: a pre-rename {LEGACY_STORE_DIR_NAME} folder sits beside the \
+                 {STORE_DIR_NAME} one this version uses. Nothing was moved or merged — \
+                 {STORE_DIR_NAME} is in use, and any develops still in the old folder \
+                 are reachable by moving them across yourself."
+            );
+        }
+        return (current, RootAdoption::KeptBoth);
+    }
+    if !act {
+        // A rename was already attempted this process and did not happen —
+        // otherwise `legacy` would be gone or `current` would exist.
+        return (legacy, RootAdoption::FellBack);
+    }
+    match std::fs::rename(&legacy, &current) {
+        Ok(()) => {
+            eprintln!(
+                "note: your develop store moved from {LEGACY_STORE_DIR_NAME} to \
+                 {STORE_DIR_NAME} (the app was renamed). Every develop, version and \
+                 mask came with it; nothing was copied or duplicated."
+            );
+            (current, RootAdoption::Migrated)
+        }
+        Err(e) => {
+            eprintln!(
+                "warning: could not move your develop store from {LEGACY_STORE_DIR_NAME} \
+                 to {STORE_DIR_NAME} ({e}). Still using the old folder, so nothing is \
+                 lost; the next launch tries again."
+            );
+            (legacy, RootAdoption::FellBack)
+        }
+    }
+}
+
 /// Per-user store root and its trust label. Resolution order:
 /// `AUTOSHADE_DATA_DIR` (env override for tests / portable setups) → the
 /// platform's own per-account data directory → `<temp>/autoshade`. Absolute, so
@@ -413,11 +492,29 @@ pub enum RootTrust {
 /// authority, keys and base URLs included, on a directory any local account can
 /// write first. Each platform now names its own directory, and the shared
 /// fallback is LABELLED rather than trusted (the loader downgrades it).
+///
+/// An explicit `AUTOSHADE_DATA_DIR` names the directory outright and is never
+/// second-guessed — it is how tests and portable setups site the store, and
+/// adopting some sibling of it would be an ambush. The two DERIVED roots go
+/// through [`adopt_pre_rename_root`], which is where an existing Autoshop
+/// install becomes an AutoShade one.
 pub fn store_root_with_trust() -> (PathBuf, RootTrust) {
+    // First caller of the process gets to rename and to disclose; every later
+    // one reads the result off the filesystem.
+    static ADOPTED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    let latch = || ADOPTED.set(()).is_ok();
     let (root, trust) = crate::config::live_env_os("AUTOSHADE_DATA_DIR")
         .map(|d| (PathBuf::from(d), RootTrust::PerUser))
-        .or_else(|| per_user_data_dir().map(|d| (d.join("autoshade"), RootTrust::PerUser)))
-        .unwrap_or_else(|| (std::env::temp_dir().join("autoshade"), RootTrust::SharedFallback));
+        .or_else(|| {
+            per_user_data_dir()
+                .map(|d| (adopt_pre_rename_root(&d, latch()).0, RootTrust::PerUser))
+        })
+        .unwrap_or_else(|| {
+            (
+                adopt_pre_rename_root(&std::env::temp_dir(), latch()).0,
+                RootTrust::SharedFallback,
+            )
+        });
     (std::path::absolute(&root).unwrap_or(root), trust)
 }
 
@@ -3049,7 +3146,7 @@ pub fn style_index_path() -> PathBuf {
 
 /// UI-written local settings (used to be a cwd-relative `autoshade.local.json`).
 pub fn settings_path() -> PathBuf {
-    store_root().join("autoshade.local.json")
+    store_root().join(crate::config::SETTINGS_FILE)
 }
 
 /// Candidate legacy ./out roots, most-specific first. Pre-store sidecars were
@@ -5802,6 +5899,142 @@ mod ownership_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A scratch parent directory nobody else shares, for the adoption tests.
+    /// Never `%LOCALAPPDATA%`: these tests MOVE directories, and a test that
+    /// can move the real develop store is a test that can lose the user's work.
+    fn adoption_scratch(tag: &str) -> PathBuf {
+        let p = std::env::temp_dir().join(format!(
+            "autoshade-adopt-{tag}-{}-{}",
+            std::process::id(),
+            next_tmp_seq()
+        ));
+        std::fs::create_dir_all(&p).unwrap();
+        p
+    }
+
+    /// Branch 1 of 3 — the upgrade everyone actually takes: an Autoshop store,
+    /// no AutoShade store, so the folder is RENAMED and every develop inside it
+    /// arrives intact.
+    ///
+    /// The move has to be `rename`, not copy-then-delete: a develop store runs
+    /// to gigabytes of mask rasters and pixel masters, and a copy that dies
+    /// half-way leaves two divergent stores with no way to tell which is the
+    /// real one.
+    ///
+    /// MUTATION: implement the move as a copy (or a copy-then-remove) and the
+    /// "the old name is gone" assertion fails.
+    #[test]
+    fn a_pre_rename_store_is_adopted_by_moving_it_whole() {
+        let parent = adoption_scratch("migrate");
+        let legacy = parent.join(LEGACY_STORE_DIR_NAME);
+        std::fs::create_dir_all(legacy.join("develops").join("photo-0123456789abcdef")).unwrap();
+        std::fs::write(legacy.join("develops/photo-0123456789abcdef/recipe.json"), b"{}").unwrap();
+        std::fs::write(legacy.join(crate::config::LEGACY_SETTINGS_FILE), b"{}").unwrap();
+
+        let (root, outcome) = adopt_pre_rename_root(&parent, true);
+
+        assert_eq!(outcome, RootAdoption::Migrated);
+        assert_eq!(root, parent.join(STORE_DIR_NAME), "the current name is the one in use");
+        assert!(!legacy.exists(), "a MOVE leaves no second copy of the user's edits behind");
+        assert_eq!(
+            std::fs::read(root.join("develops/photo-0123456789abcdef/recipe.json")).unwrap(),
+            b"{}",
+            "a develop did not survive the move"
+        );
+        assert!(root.join(crate::config::LEGACY_SETTINGS_FILE).is_file());
+
+        // Idempotent: a second launch finds nothing to adopt and says nothing.
+        assert_eq!(adopt_pre_rename_root(&parent, true).1, RootAdoption::Nothing);
+
+        let _ = std::fs::remove_dir_all(&parent);
+    }
+
+    /// Branch 2 of 3 — both folders exist. Use the current one, touch neither.
+    ///
+    /// Merging two stores is a decision about which of two develops of the same
+    /// photo the user meant to keep, and nothing here is entitled to make it
+    /// silently.
+    ///
+    /// MUTATION: let the adoption overwrite or merge into an existing store and
+    /// the "the old folder is untouched" assertion fails.
+    #[test]
+    fn two_stores_side_by_side_are_never_merged() {
+        let parent = adoption_scratch("keepboth");
+        let legacy = parent.join(LEGACY_STORE_DIR_NAME);
+        let current = parent.join(STORE_DIR_NAME);
+        std::fs::create_dir_all(&legacy).unwrap();
+        std::fs::create_dir_all(&current).unwrap();
+        std::fs::write(legacy.join("mark.txt"), b"old").unwrap();
+        std::fs::write(current.join("mark.txt"), b"new").unwrap();
+
+        let (root, outcome) = adopt_pre_rename_root(&parent, true);
+
+        assert_eq!(outcome, RootAdoption::KeptBoth);
+        assert_eq!(root, current, "the current store is the one in use");
+        assert_eq!(std::fs::read(legacy.join("mark.txt")).unwrap(), b"old", "the old store moved");
+        assert_eq!(std::fs::read(current.join("mark.txt")).unwrap(), b"new", "the new store moved");
+
+        let _ = std::fs::remove_dir_all(&parent);
+    }
+
+    /// Branch 3 of 3 — the move could not happen. Keep using the OLD folder.
+    ///
+    /// Modelled by the same state the process reaches after a failed rename:
+    /// the pre-rename folder is still there, the current name is not, and the
+    /// one attempt this process gets has been spent (`act` false). Answering
+    /// with the current name here would silently start a second, empty store
+    /// and the user's whole develop history would look deleted.
+    ///
+    /// MUTATION: return the current name (or delete the old folder) on failure
+    /// and the "still using the folder that holds the edits" assertion fails.
+    #[test]
+    fn a_store_that_could_not_be_moved_keeps_being_used() {
+        let parent = adoption_scratch("fellback");
+        let legacy = parent.join(LEGACY_STORE_DIR_NAME);
+        std::fs::create_dir_all(&legacy).unwrap();
+        std::fs::write(legacy.join("mark.txt"), b"the user's edits").unwrap();
+
+        let (root, outcome) = adopt_pre_rename_root(&parent, false);
+
+        assert_eq!(outcome, RootAdoption::FellBack);
+        assert_eq!(root, legacy, "the store that holds the edits must stay the one in use");
+        assert_eq!(std::fs::read(legacy.join("mark.txt")).unwrap(), b"the user's edits");
+        assert!(!parent.join(STORE_DIR_NAME).exists(), "a failed move must not mint a new store");
+
+        let _ = std::fs::remove_dir_all(&parent);
+    }
+
+    /// The fourth case, which is the common one: a clean machine. No folder of
+    /// either name, so the current name is the answer and nothing is said.
+    #[test]
+    fn a_first_run_adopts_nothing_and_says_nothing() {
+        let parent = adoption_scratch("nothing");
+        let (root, outcome) = adopt_pre_rename_root(&parent, true);
+        assert_eq!(outcome, RootAdoption::Nothing);
+        assert_eq!(root, parent.join(STORE_DIR_NAME));
+        assert!(!root.exists(), "resolving a root must not CREATE it");
+        let _ = std::fs::remove_dir_all(&parent);
+    }
+
+    /// An explicit `AUTOSHADE_DATA_DIR` names the store outright — adopting
+    /// some sibling of it would be an ambush, and every test in this binary
+    /// runs under exactly that override.
+    #[test]
+    fn an_explicit_store_root_is_never_second_guessed() {
+        let src = include_str!("store.rs");
+        let non_test = src.split("#[cfg(test)]").next().unwrap();
+        let body = non_test
+            .split("pub fn store_root_with_trust()")
+            .nth(1)
+            .expect("store_root_with_trust is gone");
+        let env_arm = body.split(".or_else(").next().unwrap();
+        assert!(
+            !env_arm.contains("adopt_pre_rename_root"),
+            "the explicit AUTOSHADE_DATA_DIR override went through adoption"
+        );
+    }
+
     // MaskGeometry left the module-level imports when the raster-path walks
     // moved to `LocalAdjustment::bitmap_paths_mut`; the fixtures here still
     // construct geometries directly.

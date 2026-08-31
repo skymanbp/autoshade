@@ -1091,7 +1091,14 @@ library is read-only, so the projection lands in the per-user develop store
 $HOME/.local/share/autoshade>/develops/<stem>-<hash of the absolute
 path>/<stem>.xmp` — see `store::store_root_with_trust`, and the trust bullet in
 §3 for why the shared-temp last resort is labelled rather than
-trusted), alongside `recipe.json` (the authoritative develop
+trusted; and `store::adopt_pre_rename_root` for the one-time adoption of a
+pre-rename `autoshop` store — a single same-volume `rename`, never a copy,
+because a copy that dies half-way through gigabytes of mask rasters leaves two
+divergent stores with no way to tell which is real. Both names present means
+the current one is used and the old one is left untouched: merging two stores
+decides which of two develops of the same photo the user meant to keep. A
+failed rename keeps the OLD folder in use, so the edits stay reachable),
+alongside `recipe.json` (the authoritative develop
 state), version snapshots (a deleted snapshot registers its number + content
 fingerprints in the develop's permanent `.deleted-versions.json`: the number
 is never re-issued and the backup gate stops auto-preserving the discarded

@@ -34,7 +34,13 @@ sharpening, vignette, crop, and lens-related settings, rendered through the
 same engine as `autoshade apply`.
 
 **Save develop** (`Ctrl+S`) persists the recipe and, for a RAW, its XMP
-projection in the per-user develop store. A neighboring Lightroom/ACR `.xmp` is
+projection in the per-user develop store (`%LOCALAPPDATA%\autoshade` on
+Windows). Upgrading from Autoshop v1.1.0 or earlier moves the old
+`%LOCALAPPDATA%\autoshop` folder there on first launch, in one step, and says
+so; if a folder of the new name already exists nothing is moved or merged and
+the app says that instead. A settings file still named `autoshop.local.json`
+keeps being read until the next time settings are saved.
+A neighboring Lightroom/ACR `.xmp` is
 read only as the merge base; Save does not overwrite it. A baked image keeps an
 AutoShade recipe but does not receive a RAW XMP. To deliver the stored
 projection where Lightroom reads it, choose **Export .xmp beside the photo**;

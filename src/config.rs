@@ -74,6 +74,10 @@ pub fn local_settings_path() -> PathBuf {
     crate::store::settings_path()
 }
 
+/// The settings file's name, and the one it had up to v1.1.0.
+pub(crate) const SETTINGS_FILE: &str = "autoshade.local.json";
+pub(crate) const LEGACY_SETTINGS_FILE: &str = "autoshop.local.json";
+
 /// Where a [`LocalSettings`] came from. This is a TRUST label, not a
 /// breadcrumb: the sources do not deserve the same authority.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -284,7 +288,7 @@ fn file_label(p: &Path, origin: SettingsOrigin) -> String {
     let name = p
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "autoshade.local.json".to_string());
+        .unwrap_or_else(|| SETTINGS_FILE.to_string());
     let place = match origin {
         SettingsOrigin::Central => "in your AutoShade data folder",
         SettingsOrigin::SharedRoot => "in the shared temp AutoShade folder",
@@ -305,9 +309,16 @@ pub fn load_local_settings_from() -> (LocalSettings, SettingsOrigin) {
         crate::store::RootTrust::SharedFallback => SettingsOrigin::SharedRoot,
     };
     debug_assert!(local_settings_path().starts_with(&root));
+    // Current name first at each location, then the pre-rename one: a store
+    // adopted from an Autoshop install still holds `autoshop.local.json`, and
+    // the first save writes the current name, so this fallback retires itself.
+    // Location precedence is unchanged — central still beats the working
+    // directory, whichever spelling either of them uses.
     for (p, origin) in [
         (local_settings_path(), central),
-        (PathBuf::from("autoshade.local.json"), SettingsOrigin::WorkingDir),
+        (root.join(LEGACY_SETTINGS_FILE), central),
+        (PathBuf::from(SETTINGS_FILE), SettingsOrigin::WorkingDir),
+        (PathBuf::from(LEGACY_SETTINGS_FILE), SettingsOrigin::WorkingDir),
     ] {
         // These warnings go to stderr — into logs, screenshots and pasted bug
         // reports — so they name the FILE and the FOLDER ROLE, never the full
@@ -327,7 +338,16 @@ pub fn load_local_settings_from() -> (LocalSettings, SettingsOrigin) {
             }
         };
         match serde_json::from_str::<LocalSettings>(&s) {
-            Ok(v) => return (v, origin),
+            Ok(v) => {
+                if p.file_name().is_some_and(|n| n == LEGACY_SETTINGS_FILE) {
+                    eprintln!(
+                        "note: read your settings from {LEGACY_SETTINGS_FILE} — the \
+                         pre-rename name. Saving settings writes {SETTINGS_FILE} \
+                         instead, and the next release stops reading the old one."
+                    );
+                }
+                return (v, origin);
+            }
             Err(e) => {
                 // Keep the bytes: they hold the user's API keys, and a save is
                 // about to overwrite this path. Best-effort and once — a
