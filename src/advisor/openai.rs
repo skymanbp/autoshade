@@ -65,6 +65,78 @@ pub(crate) fn guardrail_pair(strength: GradeStrength) -> (f32, f32) {
     (50.0 + 25.0 * t, 35.0 + 20.0 * t)
 }
 
+/// The numeric COLOUR guardrail, as a function of strength — the same shape as
+/// [`guardrail_pair`] and, since G2, quoted in the same "Concretely …"
+/// sentence.
+///
+/// The diagnosis's root cause (§1.4 RC-D) is that colour had no DIMENSION
+/// anywhere in the chain: the strength axis produced tonal numbers only, so
+/// every colour instruction in the prompt was an adjective. An adjective can
+/// nudge a control the model already uses — the measured effect of the
+/// 2026-08-30 `mask_colour_clause` was to double a local `temperature` median
+/// from 3 to 6 — and it moves a control the model has NEVER used by exactly
+/// nothing (`hue` 0 of 42 masks before and after, local curves 0 of 42).
+///
+/// Returned as a pair of BANDS — `(hsl single band, four-wheel saturation
+/// total)` — not baked into a sentence, so the numbers are assertable without
+/// matching prose.
+///
+/// # Where the numbers come from
+///
+/// Measured, not invented. Over 17 accepted AI develops the corpus shows an
+/// `hsl` single band at median 18 / peak 42, and the four `color_grade` wheels'
+/// saturations totalling median 25 / peak 78. So at FULL strength the pair is
+/// (±20-40, 40-80): the band's floor is the observed MEDIAN and its ceiling the
+/// observed PEAK, i.e. "a committed frame sits where this app's own best
+/// accepted frames already sit". One ramp carries the rest of the axis — the
+/// pair HALVES to (±10-20, 20-40) at the calibration point and interpolates
+/// linearly in [`GradeStrength::above_calibration`], so like `guardrail_pair`
+/// it is one-sided: nothing below the calibration point tightens further, and
+/// only the bold half of the dial is new information.
+pub(crate) fn colour_guardrail_pair(strength: GradeStrength) -> ((f32, f32), (f32, f32)) {
+    let k = 1.0 + strength.above_calibration();
+    ((10.0 * k, 20.0 * k), (20.0 * k, 40.0 * k))
+}
+
+/// The tone curve's freedom, as a function of strength (G3).
+///
+/// Every one of the 17 corpus curves has EXACTLY five points and a largest
+/// departure from the straight line of median 13/255 — a 2 % use of a control
+/// whose engine limit is the `MAX_CURVE_POINTS = 256` clamp local to
+/// `EditRecipe::clamp` and whose truncation
+/// counter has never once fired. The prompt is the whole cause: it asked for
+/// "a 3-5 point `tone_curve` forming a gentle S", so the model read the top of
+/// the range as the target shape and `gentle` as the amplitude.
+///
+/// `points` opens 3-5 → 7-9, `main_dev` 8-15 → 15-30 of 255, `channel_dev`
+/// 4-8 → 8-15 of 255, all linear in [`GradeStrength::above_calibration`] and
+/// all one-sided in `guardrail_pair`'s sense. The depth bands are the observed
+/// distribution pushed ONE notch up (main median 13, per-channel red 6 / blue 6
+/// / green 2), which is calibrated and reversible rather than a guess.
+///
+/// The engine gains no new licence from any of this: `MAX_CURVE_POINTS` is
+/// unchanged, no clamp is touched, and the aesthetic risk of a many-point curve
+/// (ripples, reversals) is answered by a MONOTONICITY requirement in the prompt
+/// and a matching check item in the verifier — never by a new clamp.
+pub(crate) struct CurveGuardrail {
+    /// Point-count band for the primary `tone_curve`.
+    pub points: (u32, u32),
+    /// Largest departure of the main curve from the straight line, in 0..255.
+    pub main_dev: (u32, u32),
+    /// The same, for a per-channel `red_curve` / `green_curve` / `blue_curve`.
+    pub channel_dev: (u32, u32),
+}
+
+pub(crate) fn curve_guardrail(strength: GradeStrength) -> CurveGuardrail {
+    let t = strength.above_calibration();
+    let lerp = |a: f32, b: f32| (a + (b - a) * t).round() as u32;
+    CurveGuardrail {
+        points: (lerp(3.0, 7.0), lerp(5.0, 9.0)),
+        main_dev: (lerp(8.0, 15.0), lerp(15.0, 30.0)),
+        channel_dev: (lerp(4.0, 8.0), lerp(8.0, 15.0)),
+    }
+}
+
 /// GATE 1b: the restraint prose that used to be the model's LAST and only word
 /// on how hard to push (openai.rs's unconditional "CALIBRATE THE STRENGTH …
 /// tasteful, restrained" paragraph, f944ef3).
@@ -133,6 +205,42 @@ rationale — \"this photo does not need it\" is a valid answer, \"I did not con
 and the per-channel curves, decide explicitly whether this photo wants it, USE the ones it wants at \
 a strength a viewer can see, and say what you chose and why in the rationale — \"this photo does not \
 need it\" is a valid answer, \"I did not consider it\" is not. "
+        }
+    }
+}
+
+/// GATE 1e: the colour-control ESCAPE HATCH, on the strength axis (G2).
+///
+/// The diagnosis (§1.3 table 2-B) found this sentence was the ONLY clause in
+/// the colour half of the prompt that did not move with strength — and that it
+/// sat immediately in front of [`look_coverage_clause`], which above the
+/// restrained band says the opposite ("do not leave the colour controls neutral
+/// by DEFAULT"). Two adjacent sentences, one an unconditional permission and
+/// one a conditional prohibition; a restraint-tuned model takes the permission
+/// every time, and the corpus shows it did.
+///
+/// The escape STAYS at every tier, because a frame with no colour to shape is
+/// real and deleting it would buy a cast on a grey day. What changes is whether
+/// taking it is FREE: above the restrained band it costs a stated reason in the
+/// `rationale`, exactly the shape [`local_work_clause`] already uses for an
+/// empty `masks` array.
+pub(crate) fn colour_neutral_clause(tier: StrengthTier) -> &'static str {
+    match tier {
+        // Verbatim the shipped sentence, so the restrained band is provably
+        // "the old behaviour and no more".
+        StrengthTier::Restrained => {
+            "Leave any of these NEUTRAL when the photo does not call for them — `hsl` all zeros, \
+`color_grade` wheels at 0 (blending 50), curves empty. "
+        }
+        // Balanced and Committed share one arm on purpose: the DEFAULT (0.65)
+        // and the calibration point (0.5) are both here, and the thing this
+        // clause decides — whether neutral needs a reason — is not a matter of
+        // degree. How hard to push, once the decision is made, is
+        // `look_coverage_clause`'s and `colour_guardrail_pair`'s job.
+        StrengthTier::Balanced | StrengthTier::Committed => {
+            "Leave any of these NEUTRAL — `hsl` all zeros, `color_grade` wheels at 0 (blending 50), \
+curves empty — ONLY when the scene genuinely has no colour to shape, and say WHY in the `rationale` \
+when you do. Neutral is an answer you defend, not a default you fall back on. "
         }
     }
 }
@@ -207,7 +315,11 @@ tone curves, `main_curve` plus `red_curve` / `green_curve` / `blue_curve`, in th
 form as the global curve. Reach for them whenever a region needs a different COLOUR or a different \
 tonal SHAPE rather than simply more or less light: cool a sky while the foreground stays warm, pull \
 a green cast out of foliage alone, lift the toe of a subject's curve without touching the sky's. \
-`saturation` and `hue` are local too. "
+`saturation` and `hue` are local too — local `hue` ROTATES every colour inside the mask, ±100 = \
+±30°. All of these are ±100 axes and they need a SIZE to be worth setting: ±4 on a ±100 axis is a \
+rounding error, a local colour move a viewer can actually read is roughly ±8-20, and a mask curve \
+that does anything departs from the straight line by 10-25 of 255. A control left at 0 because it \
+was never considered is the one answer that is always wrong. "
 }
 
 fn direction_block(g: &str, adherence: DirectionAdherence) -> String {
@@ -265,14 +377,26 @@ pub(super) fn propose_instruction(meta_json: &str, hist: &str, ctx: &ProposeCont
     // subordinate to the very guardrails it was meant to override), and the
     // control CATALOGUE is generated from the registry instead of described by
     // hand (feedback #12).
-    let mut instruction = String::from(
+    // G3: the curve's point count and its DEPTH are on the strength axis now.
+    // `a 3-5 point tone_curve forming a gentle S` produced 17 corpus curves of
+    // exactly five points each — the model read the top of the range as the
+    // target shape — and `gentle` is an adjective where every other guardrail
+    // in this paragraph is a number.
+    let curve = curve_guardrail(ctx.strength);
+    let mut instruction = format!(
         "You are a master photo-edit colourist. Look at this RAW preview and its \
 metadata/histogram and return an EditRecipe that develops it into a FINISHED \
 photograph — a 成片 — not a flat, 'safe' tweak, but also NOT an over-cooked one. A finished \
 develop COMMITS to a clear look: set ONE primary tonal anchor — EITHER a moderate Contrast slider \
-OR a 3-5 point `tone_curve` forming a gentle S (placed black point, bright shoulder), NOT both at \
+OR a {cp_lo}-{cp_hi} point `tone_curve` forming an S (placed black point, bright shoulder) whose \
+largest departure from the straight line is about {cd_lo}-{cd_hi} of 255, NOT both at \
 full strength (if the tone_curve already makes an S, keep Contrast modest, and vice versa) — then \
-place the white and black points and shape colour toward what the scene wants. ",
+place the white and black points and shape colour toward what the scene wants. A curve must stay \
+MONOTONIC: more points buy a more precise shape, never a ripple or a reversal. ",
+        cp_lo = curve.points.0,
+        cp_hi = curve.points.1,
+        cd_lo = curve.main_dev.0,
+        cd_hi = curve.main_dev.1,
     );
     if let Some(g) = ctx.guidance {
         instruction.push_str(&direction_block(g, ctx.adherence));
@@ -284,9 +408,22 @@ place the white and black points and shape colour toward what the scene wants. "
     // unconditional beside the ones that do.
     instruction.push_str(&strength_clause(ctx.strength));
     let (tone_pm, point_pm) = guardrail_pair(ctx.strength);
+    // G2: the colour half of the SAME sentence. Before this the axis emitted
+    // tonal numbers only, so "shape colour with conviction" was the whole of
+    // the guidance and the model supplied its own scale — a global `saturation`
+    // whose corpus median is 2.0 out of ±100.
+    let ((hsl_lo, hsl_hi), (wheel_lo, wheel_hi)) = colour_guardrail_pair(ctx.strength);
     instruction.push_str(&format!(
         "Concretely keep Highlights and Shadows within about ±{tone_pm:.0} and Whites/Blacks within \
-±{point_pm:.0}; reserve larger moves only for a genuinely blown or blocked histogram. "
+±{point_pm:.0}; reserve larger moves only for a genuinely blown or blocked histogram; and COLOUR takes \
+the same kind of number, not just an adjective: an `hsl` band you decide to move belongs around \
+±{hsl_lo:.0}-{hsl_hi:.0} (a ±3 band is a rounding error, not a decision), the four `color_grade` \
+wheels' saturations should TOTAL about {wheel_lo:.0}-{wheel_hi:.0} when you use them, and a \
+per-channel curve's largest departure from the straight line is about {ch_lo}-{ch_hi} of 255. Those \
+are the levels a finished, accepted develop actually carries — a floor to reach, not a ceiling to \
+avoid. ",
+        ch_lo = curve.channel_dev.0,
+        ch_hi = curve.channel_dev.1,
     ));
     instruction.push_str(
         // UNCONDITIONAL at every strength: bd3f9d4 fixed a measured defect here
@@ -301,10 +438,9 @@ Whites enough to keep the white point bright. ",
     instruction.push_str(
         "For `hsl`, each axis MUST be an array of EXACTLY 8 numbers in the documented band order (e.g. drop \
 blue+aqua luminance to deepen a sky; lift/shift orange for skin). For `color_grade`, keep \
-`blending` at 50 unless you have reason; small saturations (~5..25) read as a tasteful split-tone. \
-Leave any of these NEUTRAL when the photo does not call for them — `hsl` all zeros, `color_grade` \
-wheels at 0 (blending 50), curves empty. ",
+`blending` at 50 unless you have reason; small saturations (~5..25) read as a tasteful split-tone. ",
     );
+    instruction.push_str(colour_neutral_clause(ctx.strength.tier()));
     instruction.push_str(look_coverage_clause(ctx.strength.tier()));
     instruction.push_str(
         "Use the `masks` array PROACTIVELY to dodge and burn like a darkroom print: even with NO explicit \
@@ -926,6 +1062,236 @@ mod tests {
         assert!(repair_hsl_axis_lengths(&mut fine).is_empty());
     }
 
+    /// G2: the strength axis has a COLOUR dimension now, and it is quoted.
+    ///
+    /// RC-D of the diagnosis: every colour instruction in the prompt was an
+    /// adjective, so the model supplied its own scale and picked the timid one
+    /// (global `saturation` median 2.0 of ±100, five of seventeen develops
+    /// exactly 0). The band is MEASURED — `hsl` single band median 18 / peak
+    /// 42, four-wheel saturation total median 25 / peak 78 — so the committed
+    /// end of the axis quotes where this app's own accepted frames already sit.
+    ///
+    /// MUTATION: delete the `colour_guardrail_pair` call from
+    /// `propose_instruction` (the prompt assertions fail); make the ramp
+    /// two-sided so a timid dial TIGHTENS the band below the corpus median (the
+    /// monotonicity and calibration assertions fail).
+    #[test]
+    fn the_colour_guardrail_pair_is_measured_and_opens_with_strength() {
+        assert_eq!(
+            colour_guardrail_pair(GradeStrength::calibrated()),
+            ((10.0, 20.0), (20.0, 40.0)),
+            "the calibration point is the corpus band, halved"
+        );
+        assert_eq!(
+            colour_guardrail_pair(GradeStrength::new(1.0)),
+            ((20.0, 40.0), (40.0, 80.0)),
+            "full strength is the measured median-to-peak band"
+        );
+        assert_eq!(
+            colour_guardrail_pair(GradeStrength::new(0.0)),
+            colour_guardrail_pair(GradeStrength::calibrated()),
+            "one-sided: nothing below the calibration point tightens colour further"
+        );
+        let bands: Vec<((f32, f32), (f32, f32))> = [0.0, 0.4, 0.5, 0.65, 0.8, 1.0]
+            .iter()
+            .map(|&s| colour_guardrail_pair(GradeStrength::new(s)))
+            .collect();
+        for w in bands.windows(2) {
+            assert!(
+                w[1].0 .0 >= w[0].0 .0 && w[1].0 .1 >= w[0].0 .1,
+                "the hsl band must not tighten: {bands:?}"
+            );
+            assert!(
+                w[1].1 .0 >= w[0].1 .0 && w[1].1 .1 >= w[0].1 .1,
+                "the wheel total must not tighten: {bands:?}"
+            );
+        }
+        // …and the prompt QUOTES them, in the same sentence as the tonal pair.
+        let at = |s: f32| {
+            propose_instruction(
+                "{}",
+                "hist",
+                &ProposeContext { strength: GradeStrength::new(s), ..Default::default() },
+            )
+        };
+        let (calib, bold) = (at(0.5), at(1.0));
+        assert!(calib.contains("±10-20") && calib.contains("TOTAL about 20-40"), "{calib}");
+        assert!(bold.contains("±20-40") && bold.contains("TOTAL about 40-80"), "{bold}");
+        for text in [&calib, &bold] {
+            // ONE sentence, which is the task's own wording: the colour band is
+            // not a footnote after the tonal one, it is the same instruction.
+            // Proved by there being no sentence end between them.
+            let concretely = text.find("Concretely keep Highlights").expect("the tonal pair");
+            let colour = text.find("COLOUR takes the same kind of number").expect("the colour pair");
+            assert!(concretely < colour, "{text}");
+            assert!(
+                !text[concretely..colour].contains(". "),
+                "the tonal and colour guardrails must be ONE sentence: {}",
+                &text[concretely..colour]
+            );
+        }
+    }
+
+    /// G2: the colour-control escape hatch is on the strength axis.
+    ///
+    /// It was the only clause in the colour half of the prompt that never
+    /// moved, and it sat directly in front of `look_coverage_clause`, which at
+    /// the two upper tiers tells the model NOT to leave the colour controls
+    /// neutral by default. The escape stays — a grey day has no colour to
+    /// shape — but above the restrained band it costs a reason.
+    ///
+    /// MUTATION: make `colour_neutral_clause` return the Restrained arm
+    /// unconditionally (the contradiction assertion fails); delete the call
+    /// from `propose_instruction` (every arm fails).
+    #[test]
+    fn the_colour_neutral_escape_hatch_is_templated_on_strength() {
+        const SHIPPED: &str = "Leave any of these NEUTRAL when the photo does not call for them — \
+`hsl` all zeros, `color_grade` wheels at 0 (blending 50), curves empty. ";
+        assert_eq!(
+            colour_neutral_clause(StrengthTier::Restrained),
+            SHIPPED,
+            "the restrained band is the shipped sentence, byte for byte"
+        );
+        assert_eq!(
+            colour_neutral_clause(StrengthTier::Balanced),
+            colour_neutral_clause(StrengthTier::Committed),
+            "whether neutral needs a reason is not a matter of degree"
+        );
+        assert_ne!(
+            colour_neutral_clause(StrengthTier::Restrained),
+            colour_neutral_clause(StrengthTier::Committed),
+            "gate 1e (the colour escape hatch) is deaf"
+        );
+        let at = |s: f32| {
+            propose_instruction(
+                "{}",
+                "hist",
+                &ProposeContext { strength: GradeStrength::new(s), ..Default::default() },
+            )
+        };
+        let (timid, bold) = (at(0.2), at(0.9));
+        assert!(timid.contains(SHIPPED.trim()), "{timid}");
+        assert!(
+            !timid.contains("Do not leave the colour controls neutral by DEFAULT"),
+            "no contradiction at the restrained tier either: {timid}"
+        );
+        // The defect the diagnosis named: an unconditional permission two
+        // sentences ahead of a conditional prohibition.
+        assert!(
+            !bold.contains("NEUTRAL when the photo does not call for them"),
+            "the unconditional permission must be gone above the restrained band: {bold}"
+        );
+        assert!(bold.contains("ONLY when the scene genuinely has no colour to shape"), "{bold}");
+        assert!(bold.contains("say WHY in the `rationale`"), "{bold}");
+        assert!(bold.contains("Do not leave the colour controls neutral by DEFAULT"), "{bold}");
+    }
+
+    /// G3: the tone curve's point count and depth are addressed, and the mask
+    /// paragraph states a SIZE.
+    ///
+    /// All 17 corpus curves have exactly five points and a median largest
+    /// departure of 13/255, against an engine limit of 256 points that has
+    /// never once truncated. `a 3-5 point tone_curve forming a gentle S` is the
+    /// whole cause. The engine gains nothing here: no clamp moves, and the
+    /// ripple risk of a many-point curve is answered by a MONOTONICITY
+    /// requirement in prose plus a verifier check item.
+    ///
+    /// MUTATION: freeze `curve_guardrail` at its calibrated value (the bold
+    /// assertions fail); drop the monotonicity sentence (its assertion fails);
+    /// take the numbers back out of `mask_colour_clause` (the last block fails).
+    #[test]
+    fn the_curve_and_mask_colour_freedoms_are_numbers_not_adjectives() {
+        let c = curve_guardrail(GradeStrength::calibrated());
+        assert_eq!(c.points, (3, 5), "the calibration point is the shipped band");
+        assert_eq!((c.main_dev, c.channel_dev), ((8, 15), (4, 8)));
+        let c = curve_guardrail(GradeStrength::new(1.0));
+        assert_eq!(c.points, (7, 9), "committed buys a curve that can actually shape");
+        assert_eq!((c.main_dev, c.channel_dev), ((15, 30), (8, 15)));
+        assert_eq!(
+            curve_guardrail(GradeStrength::new(0.0)).points,
+            (3, 5),
+            "one-sided, like every other band on this axis"
+        );
+        let at = |s: f32| {
+            propose_instruction(
+                "{}",
+                "hist",
+                &ProposeContext { strength: GradeStrength::new(s), ..Default::default() },
+            )
+        };
+        let (calib, bold) = (at(0.5), at(1.0));
+        assert!(calib.contains("3-5 point `tone_curve`"), "{calib}");
+        assert!(bold.contains("7-9 point `tone_curve`"), "{bold}");
+        assert!(bold.contains("about 15-30 of 255"), "the depth is a number: {bold}");
+        assert!(bold.contains("about 8-15 of 255"), "so is the per-channel depth: {bold}");
+        for text in [&calib, &bold] {
+            assert!(!text.contains("gentle S"), "`gentle` is the adjective this replaces: {text}");
+            assert!(text.contains("must stay MONOTONIC"), "{text}");
+        }
+        // The mask paragraph: a SIZE, because prose alone was measured moving a
+        // control the model already used and not moving one it never had.
+        let m = mask_colour_clause();
+        assert!(m.contains("±100 = ±30°"), "the hue axis states its own scale: {m}");
+        assert!(m.contains("±4 on a ±100 axis is a rounding error"), "{m}");
+        assert!(m.contains("roughly ±8-20"), "{m}");
+        assert!(m.contains("10-25 of 255"), "{m}");
+        assert!(calib.contains(m), "the clause is in the assembled prompt");
+    }
+
+    /// The THREE bands, side by side — the batch-3 acceptance gate's
+    /// prompt-level check, which costs no API call.
+    ///
+    /// Asserts the mapping from band to numbers in ONE place (the per-gate
+    /// tests above each assert their own clause), and PRINTS all three prompts
+    /// so a reviewer can read what actually changed:
+    ///
+    /// ```text
+    /// cargo test --lib the_three_bands_render_three_prompts -- --nocapture
+    /// ```
+    ///
+    /// MUTATION: freeze any one of the four bands and the matching row fails.
+    #[test]
+    fn the_three_bands_render_three_prompts() {
+        let at = |s: f32| {
+            propose_instruction(
+                "{}",
+                "hist",
+                &ProposeContext { strength: GradeStrength::new(s), ..Default::default() },
+            )
+        };
+        // 0.2 Restrained / 0.5 Balanced-at-calibration / 1.0 Committed-at-full.
+        let bands = [(0.2f32, "RESTRAINED"), (0.5, "BALANCED (calibration point)"), (1.0, "COMMITTED (full)")];
+        let texts: Vec<(f32, &str, String)> =
+            bands.iter().map(|&(s, n)| (s, n, at(s))).collect();
+        for (s, name, text) in &texts {
+            let g = GradeStrength::new(*s);
+            let (tone, point) = guardrail_pair(g);
+            let ((h0, h1), (w0, w1)) = colour_guardrail_pair(g);
+            let c = curve_guardrail(g);
+            assert!(
+                text.contains(&format!("within about ±{tone:.0} and Whites/Blacks within ±{point:.0}")),
+                "{name}: tonal pair"
+            );
+            assert!(text.contains(&format!("±{h0:.0}-{h1:.0}")), "{name}: hsl band");
+            assert!(text.contains(&format!("TOTAL about {w0:.0}-{w1:.0}")), "{name}: wheel total");
+            assert!(
+                text.contains(&format!("{}-{} point `tone_curve`", c.points.0, c.points.1)),
+                "{name}: curve points"
+            );
+            assert!(
+                text.contains(&format!("about {}-{} of 255", c.main_dev.0, c.main_dev.1)),
+                "{name}: main curve depth"
+            );
+            println!("\n================ {name} (strength {s}) ================\n{text}");
+        }
+        // The three are genuinely three, not one string with a number swapped:
+        // the escape hatch and the coverage clause change WORDS between bands.
+        assert!(texts[0].2.contains("NEUTRAL when the photo does not call for them"));
+        assert!(!texts[1].2.contains("NEUTRAL when the photo does not call for them"));
+        assert!(!texts[2].2.contains("NEUTRAL when the photo does not call for them"));
+        assert!(texts[2].2.contains("at a strength a viewer can see"));
+    }
+
     /// The prompt's own contract, asserted on the assembled text: the
     /// photographer's direction must come BEFORE the restraint prose it
     /// overrides (feedback #5), the WB pair must name the photo's real anchor
@@ -1092,12 +1458,28 @@ mod tests {
             GradeStrength::default().tier(),
             "0.5 and 0.65 are meant to share a prose band"
         );
+        // The number-bearing fragments are built FROM the guardrail functions
+        // rather than written out, so G2/G3's four new continuous bands do not
+        // turn this into an unmaintainable replace-chain — and, more to the
+        // point, a NEW un-templated difference still fails it.
+        let normalise = |s: &str, at: GradeStrength| {
+            let (tone, point) = guardrail_pair(at);
+            let ((h0, h1), (w0, w1)) = colour_guardrail_pair(at);
+            let c = curve_guardrail(at);
+            s.replace(
+                &format!("within about ±{tone:.0} and Whites/Blacks within ±{point:.0}"),
+                "<TONE>",
+            )
+            .replace(&format!("±{h0:.0}-{h1:.0}"), "<HSL>")
+            .replace(&format!("TOTAL about {w0:.0}-{w1:.0}"), "<WHEELS>")
+            .replace(&format!("about {}-{} of 255", c.main_dev.0, c.main_dev.1), "<MAIN>")
+            .replace(&format!("about {}-{} of 255", c.channel_dev.0, c.channel_dev.1), "<CHANNEL>")
+            .replace(&format!("{}-{} point", c.points.0, c.points.1), "<POINTS>")
+            .replace(&format!("dial to {:.0}% of full", at.pct()), "<DIAL>")
+        };
         assert_eq!(
-            default
-                .replace("±58", "±50")
-                .replace("±41", "±35")
-                .replace("dial to 65% of full", "dial to 50% of full"),
-            calib,
+            normalise(&default, GradeStrength::default()),
+            normalise(&calib, GradeStrength::calibrated()),
             "0.5 and 0.65 must differ ONLY in the guardrail numbers and the quoted dial position"
         );
 

@@ -6534,7 +6534,7 @@ mod tests {
         let extreme = crate::mask_habit::BucketHabit {
             n: u8::MAX,
             w: 1.0,
-            mean: [0.0, -100.0, 0.0, 0.0, 0.0, 0.0, 0.0, -100.0, -100.0, 0.0],
+            mean: [0.0, -100.0, 0.0, 0.0, 0.0, 0.0, 0.0, -100.0, -100.0, 0.0, 0.0],
         };
         let worst = crate::mask_habit::MaskHabit {
             count: u8::MAX,

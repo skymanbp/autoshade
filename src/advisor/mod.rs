@@ -1814,6 +1814,8 @@ finished photograph is the goal, NOT timidity. Check, concretely:\n\
 - adjustments are consistent with the metadata + histogram:\n\
   * do NOT push exposure/whites further INTO already-clipping highlights, and do NOT crush detail already sitting at the floor — but a few percent of intentional highlight/shadow clipping is normal and fine for a finished look;\n\
   * large, decisive moves are GOOD when the histogram supports them (a flat, low-contrast histogram wants real contrast or an S-curve; a muddy image wants a committed black point). Do NOT penalise a move just for being large;\n\
+- COLOUR is part of the develop, not decoration. `hsl`, `color_grade` and the per-channel curves ALL left at zero is a colour decision the recipe never made — name that gap and name the control that would close it; that is a COMPLETENESS check, not a demand for more saturation. Symmetrically, a designed palette is not a fault: revise colour only when it is BROKEN (a cast the scene cannot support, skin gone orange, a hue shift that breaks a memory colour), never merely for being visible;\n\
+- every tone curve must be MONOTONIC — each point's output at or above the previous point's, so the curve never dips back down. A curve with MORE points is fine and often better; a rippling or reversing one is a solarisation artifact, not a look, and earns a revision naming the offending points;\n\
 {flat}{cooked}\
 - the rationale matches the numbers and confidence is adequate to auto-apply.\n\n\
 METADATA: {meta_json}\n\
@@ -2008,6 +2010,80 @@ pub(crate) fn parse_verdict(
 mod tests {
     use super::*;
 
+    /// G2/G3: the verifier's CHECKLIST names colour and curve monotonicity.
+    ///
+    /// The diagnosis measured a verifier pushing in the RIGHT direction ("use
+    /// it a bit harder", "take the global contrast to about 14" — four of four
+    /// revisions) with a checklist that is 100 % tonal: exposure, white point,
+    /// clipping, contrast, S-curve, black point. So the one role in the chain
+    /// that asks for MORE could only ever ask for more TONE.
+    ///
+    /// The curve item is G3's answer to the ripple risk of a 7-9 point curve.
+    /// It is deliberately a CHECK and not a new clamp — the engine's
+    /// `MAX_CURVE_POINTS` is unchanged and `temper` gains nothing here, exactly
+    /// as the fit side's `project_curve_slopes` shapes a proposal rather than
+    /// bounding the renderer.
+    ///
+    /// MUTATION: delete either bullet from `build_verify_prompt` and its block
+    /// fails; make the colour bullet one-sided (drop the "designed palette is
+    /// not a fault" half) and the symmetry assertion fails.
+    #[test]
+    fn the_verifier_checklist_names_colour_and_curve_monotonicity() {
+        let recipe = EditRecipe::default();
+        let meta = Meta {
+            make: "T".into(),
+            model: "T".into(),
+            lens: None,
+            iso: Some(100),
+            shutter: None,
+            aperture: None,
+            focal_length_mm: None,
+            exposure_bias_ev: None,
+            date_time: None,
+            width: 10,
+            height: 10,
+            as_shot_wb_coeffs: [1.0; 4],
+        };
+        let hist = Histogram {
+            luma: vec![1; 256],
+            r: vec![1; 256],
+            g: vec![1; 256],
+            b: vec![1; 256],
+            clip_black_pct: 0.0,
+            clip_white_pct: 0.0,
+            sample_pixels: 256,
+        };
+        for s in [0.2f32, 0.5, 0.9] {
+            let intent = GradeIntent {
+                strength: GradeStrength::new(s),
+                adherence: DirectionAdherence::new(DirectionAdherence::DEFAULT),
+                direction: None,
+                style_look: None,
+            };
+            let p = build_verify_prompt(&recipe, &meta, &hist, &intent).expect("verify prompt");
+            assert!(p.contains("COLOUR is part of the develop, not decoration"), "{s}: {p}");
+            assert!(
+                p.contains("a colour decision the recipe never made"),
+                "the check is completeness, not saturation: {s}"
+            );
+            // SYMMETRY — the bullet must not be a one-way push.
+            assert!(
+                p.contains("a designed palette is not a fault"),
+                "{s}: the colour bullet must cut both ways"
+            );
+            assert!(p.contains("every tone curve must be MONOTONIC"), "{s}: {p}");
+            assert!(
+                p.contains("A curve with MORE points is fine"),
+                "{s}: the curve item must not read as a point-count clamp"
+            );
+            // …and the over-cooked FAULTS list is untouched at every tier.
+            assert!(
+                p.contains("vibrance+saturation+clarity piled together into a cartoonish look"),
+                "{s}: the cartoonish fault stays in all three bands"
+            );
+        }
+    }
+
     /// The strength axis's INTEGRATION contract (R23-3, feedback #5): all SIX
     /// gates read the axis, checked from one place.
     ///
@@ -2071,6 +2147,7 @@ mod tests {
                 super::openai::strength_clause(s),
                 super::openai::look_coverage_clause(s.tier()).to_string(),
                 super::openai::mixer_restraint_clause(s.tier()).to_string(),
+                super::openai::colour_neutral_clause(s.tier()).to_string(),
             ] {
                 assert!(
                     text.contains(clause.trim()),
@@ -2099,6 +2176,29 @@ mod tests {
             super::openai::guardrail_pair(bold),
             "gate 1d (numeric guardrails) is deaf"
         );
+        // G2/G3 put a COLOUR dimension on the same axis. Same reason as the
+        // four above: five bolder gates and one frozen colour band produce a
+        // develop whose colour is exactly as timid as before.
+        assert_ne!(
+            super::openai::colour_guardrail_pair(calib),
+            super::openai::colour_guardrail_pair(bold),
+            "gate 1e (colour guardrails) is deaf"
+        );
+        // This clause's band edge is RESTRAINED vs above, not calibrated vs
+        // bold: `Balanced` and `Committed` share one arm on purpose (whether
+        // leaving a control neutral needs a stated reason is not a matter of
+        // degree), so contrasting `calib` with `bold` here would assert
+        // something the design says is false.
+        assert_ne!(
+            super::openai::colour_neutral_clause(GradeStrength::new(0.2).tier()),
+            super::openai::colour_neutral_clause(bold.tier()),
+            "gate 1e (the colour escape hatch) is deaf"
+        );
+        let curves = |s: GradeStrength| {
+            let c = super::openai::curve_guardrail(s);
+            (c.points, c.main_dev, c.channel_dev)
+        };
+        assert_ne!(curves(calib), curves(bold), "gate 1f (curve freedom) is deaf");
 
         // GATE 2 — `EditRecipe::temper`'s soft caps.
         let tempered = |s| {
