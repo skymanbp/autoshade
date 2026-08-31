@@ -24,14 +24,14 @@ use crate::config::Config;
 const SIDECAR_DEFAULT_TIMEOUT_SECS: u64 = 30 * 60;
 const SIDECAR_OUTPUT_CAP: usize = 1024 * 1024;
 
-/// The sidecar budget is its OWN variable, not `AUTOSHOP_HTTP_TIMEOUT_SECS`:
+/// The sidecar budget is its OWN variable, not `AUTOSHADE_HTTP_TIMEOUT_SECS`:
 /// that one tunes API latency, while a sidecar's first run legitimately spends
 /// many minutes downloading a model — a user shortening API timeouts must not
 /// silently cap the model download at the same number.
 pub(crate) fn sidecar_timeout() -> std::time::Duration {
     // env_or_dotenv: .env-set sidecar budgets kept working when the
     // dotenv stopped writing the process environment (L16#3).
-    let seconds = crate::config::env_or_dotenv("AUTOSHOP_SIDECAR_TIMEOUT_SECS")
+    let seconds = crate::config::env_or_dotenv("AUTOSHADE_SIDECAR_TIMEOUT_SECS")
         .and_then(|s| s.parse().ok())
         .filter(|s: &u64| *s > 0)
         .unwrap_or(SIDECAR_DEFAULT_TIMEOUT_SECS);
@@ -44,8 +44,8 @@ pub(crate) fn sidecar_timeout() -> std::time::Duration {
 /// preserves the traceback line `sidecar_tail` reports.
 ///
 /// `budget_env` names the env var the timeout message tells the user to
-/// raise — hard-coding AUTOSHOP_SIDECAR_TIMEOUT_SECS here sent the claude
-/// verifier's users to the wrong knob (it reads AUTOSHOP_HTTP_TIMEOUT_SECS).
+/// raise — hard-coding AUTOSHADE_SIDECAR_TIMEOUT_SECS here sent the claude
+/// verifier's users to the wrong knob (it reads AUTOSHADE_HTTP_TIMEOUT_SECS).
 /// `group` is the child's [`crate::KillGroup`]: on the kill paths the WHOLE
 /// tree dies (before the reaping `wait`, the unix pgid rule), and on every
 /// path the group drops here — on Windows that close reaps any straggler
@@ -269,8 +269,8 @@ pub fn denoise_buffer(opts: &DenoiseOpts, data: &mut [[f32; 3]], w: usize, h: us
     if opts.strength <= 0.0 {
         return Ok(());
     }
-    let tmp_in = temp_path("autoshop_dn_in")?;
-    let tmp_out = match temp_path("autoshop_dn_out") {
+    let tmp_in = temp_path("autoshade_dn_in")?;
+    let tmp_out = match temp_path("autoshade_dn_out") {
         Ok(path) => path,
         Err(error) => {
             let _ = std::fs::remove_file(&tmp_in);
@@ -430,7 +430,7 @@ pub fn denoise_active(
     // because cv2 ignores EXIF orientation (and imwrite drops the tag), so a
     // portrait phone JPEG came back as a permanently sideways master.
     let img = crate::render::source_pixels(input, (!full_res).then_some(2048))?;
-    let tmp = temp_path("autoshop_denoise_base")?;
+    let tmp = temp_path("autoshade_denoise_base")?;
     if let Err(e) = img.save(&tmp) {
         // A failed save can still have created a partial file — don't leak it
         // into the temp dir.
@@ -456,7 +456,7 @@ fn run_sidecar_carrying(
     if !opts.script.exists() {
         bail!(
             "denoise sidecar not found at {} — run from the project dir or set \
-             AUTOSHOP_DENOISE_SCRIPT.",
+             AUTOSHADE_DENOISE_SCRIPT.",
             opts.script.display()
         );
     }
@@ -509,7 +509,7 @@ fn run_sidecar_carrying(
     let run = (|| -> Result<std::process::Output> {
         let child = cmd.spawn().with_context(|| {
             format!(
-                "launch denoise sidecar ({} {}) — is Python on PATH / AUTOSHOP_PYTHON set?",
+                "launch denoise sidecar ({} {}) — is Python on PATH / AUTOSHADE_PYTHON set?",
                 opts.python_bin,
                 opts.script.display()
             )
@@ -519,7 +519,7 @@ fn run_sidecar_carrying(
             child,
             "denoise sidecar",
             budget,
-            "AUTOSHOP_SIDECAR_TIMEOUT_SECS",
+            "AUTOSHADE_SIDECAR_TIMEOUT_SECS",
             group,
         )
     })();
@@ -763,7 +763,7 @@ mod tests {
     #[test]
     fn a_truncated_denoise_product_is_refused() {
         let dir = std::env::temp_dir()
-            .join(format!("autoshop-denoise-trunc-{}", std::process::id()));
+            .join(format!("autoshade-denoise-trunc-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         // A real 8×8 PNG, cut 20 bytes short: the header (and its declared
@@ -862,7 +862,7 @@ mod tests {
     fn the_denoise_product_carries_the_inputs_icc_profile() {
         use image::ImageEncoder as _;
         let dir =
-            std::env::temp_dir().join(format!("autoshop-denoise-icc-{}", std::process::id()));
+            std::env::temp_dir().join(format!("autoshade-denoise-icc-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         // The stand-in's product: same dims, NO profile (the sidecar's own
@@ -1157,7 +1157,7 @@ mod tests {
 
     #[test]
     fn denoise_temp_paths_are_atomically_claimed() {
-        let path = temp_path("autoshop-dn-test-claim").unwrap();
+        let path = temp_path("autoshade-dn-test-claim").unwrap();
         assert!(path.exists(), "temp_path must return an already-owned claim");
         let error = std::fs::OpenOptions::new()
             .write(true)

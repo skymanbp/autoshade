@@ -51,7 +51,7 @@ be licensed for the use we are instructing. Both backends were re-checked
     and metadata, not trained models, weights or outputs (canonical dataset page:
     https://ai.meta.com/datasets/segment-anything/; clause text checked in the
     secondary mirror at https://huggingface.co/datasets/xiuqhou/SA-Det-100k/blob/main/LICENSE).
-    Autoshop downloads and executes only the separately licensed model files,
+    AutoShade downloads and executes only the separately licensed model files,
     never either training set. The ADE20K class table shipped here is our own,
     rebuilt from MIT model metadata and cross-checked against MIT OneFormer
     source as documented below; it is not an ADE20K annotation download.
@@ -64,7 +64,7 @@ be licensed for the use we are instructing. Both backends were re-checked
     license that requires a paid agreement for commercial use", and warns that
     "Model weights carry their own licenses, independent of rembg's MIT
     license". So `pip install -U rembg` on any user's machine could silently
-    swap a pay-to-use model in with zero change to Autoshop's source. The
+    swap a pay-to-use model in with zero change to AutoShade's source. The
     session is named explicitly below so the licence we checked is the licence
     that runs.
 
@@ -314,7 +314,7 @@ def _load_birefnet_module(weights_dir):
     import types
 
     _kornia_shim()
-    pkg_name = "autoshop_birefnet"
+    pkg_name = "autoshade_birefnet"
     pkg = types.ModuleType(pkg_name)
     pkg.__path__ = [weights_dir]
     sys.modules[pkg_name] = pkg

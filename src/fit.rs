@@ -6002,7 +6002,7 @@ fn round2(v: f32) -> f32 {
 }
 
 /// The OPTIONAL structural-divergence calibration corpus, located exactly the
-/// way `scripts/check_docs.py` locates the XMP census (`AUTOSHOP_CENSUS_ROOT`):
+/// way `scripts/check_docs.py` locates the XMP census (`AUTOSHADE_CENSUS_ROOT`):
 /// through an environment variable, never a source literal. The corpus is a
 /// photographer's own RAW and its generative rendition, so it cannot live in
 /// this public repository — and a machine-specific path baked into a test would
@@ -6019,7 +6019,7 @@ fn round2(v: f32) -> f32 {
 /// * `source.arw` — optional; the RAW behind `neutral.jpg`.
 #[cfg(test)]
 pub(crate) fn calibration_corpus() -> Option<std::path::PathBuf> {
-    let dir = std::path::PathBuf::from(std::env::var_os("AUTOSHOP_FIT_CALIBRATION_DIR")?);
+    let dir = std::path::PathBuf::from(std::env::var_os("AUTOSHADE_FIT_CALIBRATION_DIR")?);
     let required = ["neutral.jpg", "target.jpg", "fitted.recipe.json", "sky-mask.png"];
     if !dir.is_dir() || required.iter().any(|name| !dir.join(name).is_file()) {
         eprintln!(
@@ -8630,7 +8630,7 @@ mod tests {
     ///   hazy canyon → vivid warm     0.5874 → 0.5813
     ///
     /// Measured on SIX REAL (RAW, finished JPEG) pairs off the user's library,
-    /// 2026-08-17, EXIF-timestamp-confirmed same frame, through `autoshop
+    /// 2026-08-17, EXIF-timestamp-confirmed same frame, through `autoshade
     /// match` (finished reading, `look_err` before → after, reported
     /// confidence). These are what retired the "provisional" label:
     ///   A1 astro composite     0.141   0.156 → 0.061   the nonsense pair
@@ -8759,7 +8759,7 @@ mod tests {
         eprintln!("JOINT_REFUSAL_MEASURED worst={refusal_max:.4}; reached={reached_max:.4}");
         // THE REAL-PAIR ANCHORS, recorded as literals because the photographs
         // cannot ship (RAW + finished JPEG off the user's library, measured
-        // through `autoshop match` on 2026-08-17 — the table in this test's
+        // through `autoshade match` on 2026-08-17 — the table in this test's
         // doc). These are retained as real-pair diagnostics, not as a way to
         // widen or backfill the policy line.
         // from above, and without them the constant could drift back to any

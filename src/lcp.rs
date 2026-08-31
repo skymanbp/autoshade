@@ -561,7 +561,7 @@ pub fn parse(xml: &str) -> Result<LensProfileFile, Refusal> {
 /// drive letter (a machine whose `%ProgramData%` is not on `C:` is ordinary,
 /// and a hard-coded path would degrade there while claiming to have looked).
 ///
-/// `%AUTOSHOP_LCP_DIR%` is consulted FIRST when set: it is how the acceptance
+/// `%AUTOSHADE_LCP_DIR%` is consulted FIRST when set: it is how the acceptance
 /// tests point at a fixture without an Adobe install, and how a user with
 /// profiles somewhere else names that place.
 ///
@@ -569,7 +569,7 @@ pub fn parse(xml: &str) -> Result<LensProfileFile, Refusal> {
 /// and every caller degrades through [`Refusal::NoRoots`].
 pub fn roots() -> Vec<PathBuf> {
     let mut out = Vec::new();
-    if let Ok(dir) = std::env::var("AUTOSHOP_LCP_DIR")
+    if let Ok(dir) = std::env::var("AUTOSHADE_LCP_DIR")
         && !dir.is_empty()
     {
         out.push(PathBuf::from(dir));
@@ -697,7 +697,7 @@ pub fn solve_mask_warp(
 ) -> Result<Vec<f32>, Refusal> {
     let path = locate(filename, make, lens)?;
     // BOUNDED read (the R28 B2 rule): the pool directory is not this app's to
-    // trust — `AUTOSHOP_LCP_DIR` and `%APPDATA%` are user-writable, so a file
+    // trust — `AUTOSHADE_LCP_DIR` and `%APPDATA%` are user-writable, so a file
     // there can be anything. The largest of the 3,576 profiles in the local
     // Adobe pool measures 4.3 MiB; 16 MiB is the same ceiling every
     // sidecar-class read in this codebase carries, and an over-cap file is an

@@ -2,7 +2,7 @@
 
 use super::*;
 
-pub(crate) struct AutoshopApp {
+pub(crate) struct AutoShadeApp {
     pub(crate) src_path: Option<PathBuf>,
     // The ACTIVE variant's base pixels — shared with the preview worker by Arc,
     // so dispatching a 4096px develop is O(1), not a 50+ MB UI-thread deep copy.
@@ -40,7 +40,7 @@ pub(crate) struct AutoshopApp {
     pub(crate) egui_ctx: egui::Context,
     // TYPED, not a baked string: the decision word + reasons are rendered
     // (and translated) at draw time, so a language switch re-renders them.
-    pub(crate) verdict: Option<(autoshop::advisor::Decision, Vec<String>)>,
+    pub(crate) verdict: Option<(autoshade::advisor::Decision, Vec<String>)>,
     /// Scripts already disclosed as undrawable this session (L12#3) — the
     /// tofu warning fires once per script, not once per folder or frame.
     pub(crate) disclosed_scripts: HashSet<&'static str>,
@@ -50,7 +50,7 @@ pub(crate) struct AutoshopApp {
     /// draws the notes localized; on any mismatch (or when empty — a
     /// develop restored from disk carries none) the raw English rationale
     /// shows instead. Cleared wherever `rationale` is reloaded from disk.
-    pub(crate) rationale_notes: Vec<autoshop::rationale::Note>,
+    pub(crate) rationale_notes: Vec<autoshade::rationale::Note>,
     pub(crate) style_strength: f32,
     /// R23-3, feedback #5 ("the AI is too timid"): how COMMITTED the grade
     /// should be, 0..1. A SEPARATE axis from `style_strength` — that one asks
@@ -81,10 +81,10 @@ pub(crate) struct AutoshopApp {
     pub(crate) looks_src_dir: Option<PathBuf>,
     pub(crate) use_looks: bool,
     pub(crate) direction_adherence: f32,
-    /// The style library's status as last READ (`autoshop::style::index_info`),
+    /// The style library's status as last READ (`autoshade::style::index_info`),
     /// cached: this is a disk read of a file that can reach 32 MB, so it must
     /// never happen per frame. `None` = not read yet.
-    pub(crate) style_info: Option<autoshop::style::StyleIndexInfo>,
+    pub(crate) style_info: Option<autoshade::style::StyleIndexInfo>,
     /// A status read is on a worker thread (keeps the first draw off the disk).
     pub(crate) style_info_loading: bool,
     /// A library BUILD is running. Its own flag, never the global `busy`:
@@ -97,7 +97,7 @@ pub(crate) struct AutoshopApp {
     /// became four phases over the whole library and only the first of them
     /// can report per record: a bare pair would have swept 0..N three times
     /// with nothing to say which sweep the user was looking at.
-    pub(crate) style_build_progress: Option<(autoshop::style::BuildStage, usize, usize)>,
+    pub(crate) style_build_progress: Option<(autoshade::style::BuildStage, usize, usize)>,
     pub(crate) hsl_tab: usize, // Color Mixer property tab: 0=Hue 1=Saturation 2=Luminance
     pub(crate) grade_region: usize,
     pub(crate) guidance: String, // free-text direction for the AI ("warmer, moodier")
@@ -140,7 +140,7 @@ pub(crate) struct AutoshopApp {
     /// variants against the ACTIVE canvas's `saved_recipe`/`pixels_on_disk`
     /// instead (the pre-v0.22 rule) made any two-origin strip permanently
     /// "unsaved" — the quit dialog then re-armed forever.
-    pub(crate) saved_strip: Option<autoshop::store::VariantsRecord>,
+    pub(crate) saved_strip: Option<autoshade::store::VariantsRecord>,
     pub(crate) nav_stash: HashMap<PathBuf, StashEntry>,
     /// Master decodes in flight, keyed (photo, origin): repeat clicks into a
     /// still-decoding cold card must coalesce, not stack a fresh full-res
@@ -153,7 +153,7 @@ pub(crate) struct AutoshopApp {
     /// old one.
     pub(crate) master_cache: Vec<((PathBuf, u32, FileStamp), Arc<image::DynamicImage>)>,
     /// The open could not READ the saved develop (damaged file, or busy in
-    /// another Autoshop process): the canvas baseline is not that save, so
+    /// another AutoShade process): the canvas baseline is not that save, so
     /// the next explicit save must version what it overwrites (save_xmp runs
     /// the backup gate while this stands).
     pub(crate) open_unresolved: bool,
@@ -167,7 +167,7 @@ pub(crate) struct AutoshopApp {
     pub(crate) photo_knots: Vec<[f32; 2]>,
     // This photo's in-camera lens profile (open worker) — the twin of
     // photo_knots: Reset re-stamps it, legacy toggles re-enable from it.
-    pub(crate) photo_lens: autoshop::recipe::LensProfile,
+    pub(crate) photo_lens: autoshade::recipe::LensProfile,
     // This photo's as-shot WB anchor (open worker) — the third calibration
     // half: Reset re-stamps it, the Temp slider and eyedropper anchor on it.
     pub(crate) photo_as_shot: Option<(f32, f32)>,
@@ -333,7 +333,7 @@ pub(crate) struct AutoshopApp {
     /// `None` = the base geometry. Reset whenever the mask selection moves.
     pub(crate) sel_component: Option<usize>,
     /// The combine mode the panel's "add shape" buttons will arm next.
-    pub(crate) component_mode: autoshop::recipe::MaskCombine,
+    pub(crate) component_mode: autoshade::recipe::MaskCombine,
     pub(crate) place_start: Option<(f32, f32)>,       // placement drag origin, full-frame normalized
     // --- tone-curve editor ---
     pub(crate) curve_channel: usize,                  // CURVE_CHANNELS index: 0=master 1=R 2=G 3=B
@@ -462,7 +462,7 @@ pub(crate) struct AutoshopApp {
     /// Advisory names + provenance for `versions`, keyed by number (R24-2).
     /// Refreshed with the list; a number with no entry is simply unnamed —
     /// `.version-meta.json` is not required to exist.
-    pub(crate) version_meta: HashMap<u32, autoshop::store::VersionMetaEntry>,
+    pub(crate) version_meta: HashMap<u32, autoshade::store::VersionMetaEntry>,
     /// A version rename in flight: (the photo it belongs to, the number, the
     /// name as seeded, the edit buffer). Keyed by the NUMBER — versions are
     /// never re-numbered and a deleted number is never re-issued, so unlike
@@ -488,7 +488,7 @@ pub(crate) struct AutoshopApp {
     pub(crate) variant_delete_confirm: Option<usize>,
 }
 
-impl AutoshopApp {
+impl AutoShadeApp {
     /// One update() phase — body extracted verbatim from the eframe
     /// update loop (round-12 decomposition).
     // pub(crate): the zoom-keys test drives a real headless frame through it.
@@ -733,7 +733,7 @@ impl AutoshopApp {
                 let (w, h) = (c0[2] - c0[0], c0[3] - c0[1]);
                 let nl = (c0[0] + crop_nudge.0 * 0.005).clamp(0.0, 1.0 - w);
                 let nt = (c0[1] + crop_nudge.1 * 0.005).clamp(0.0, 1.0 - h);
-                let next = Some(autoshop::recipe::Crop {
+                let next = Some(autoshade::recipe::Crop {
                     left: nl,
                     top: nt,
                     right: nl + w,
@@ -953,10 +953,10 @@ impl AutoshopApp {
         // Window title mirrors the open photo (send only on change).
         let title = match &self.src_path {
             Some(p) => format!(
-                "{} — Autoshop",
+                "{} — AutoShade",
                 p.file_name().and_then(|s| s.to_str()).unwrap_or("photo")
             ),
-            None => "Autoshop".to_string(),
+            None => "AutoShade".to_string(),
         };
         if title != self.last_title {
             ctx.send_viewport_cmd(egui::ViewportCommand::Title(title.clone()));
@@ -1060,7 +1060,7 @@ impl AutoshopApp {
                 // button to the left, and ↺/↻ are already 「reset all」/
                 // 「Clear」/「↻ Redraw」 in the panels. ⭯/⭮ (U+2B6F/U+2B6E) are
                 // unused anywhere in the tree and both ship in
-                // NotoSansSymbols2-autoshop.ttf, so no subset regeneration.
+                // NotoSansSymbols2-autoshade.ttf, so no subset regeneration.
                 let can_rotate = self.can_rotate();
                 // Disabled buttons state their reason (the pixel-state rule):
                 // a control that greys out in silence reads as a broken app.
@@ -1343,7 +1343,7 @@ impl AutoshopApp {
             if self.src_path.is_none() {
                 ui.vertical_centered(|ui| {
                     ui.add_space(ui.available_height() * 0.32);
-                    ui.heading("Autoshop");
+                    ui.heading("AutoShade");
                     ui.label(egui::RichText::new(tr(self.lang, "AI auto-develop · RAW develop")).weak());
                     ui.add_space(SPACE_LG);
                     ui.horizontal(|ui| {
@@ -1529,7 +1529,7 @@ impl AutoshopApp {
     }
 }
 
-impl Default for AutoshopApp {
+impl Default for AutoShadeApp {
     fn default() -> Self {
         let (tx, rx) = std::sync::mpsc::channel();
         Self {
@@ -1571,7 +1571,7 @@ impl Default for AutoshopApp {
             style_src_dir: None,
             looks_src_dir: None,
             use_looks: true,
-            direction_adherence: autoshop::recipe::DirectionAdherence::DEFAULT,
+            direction_adherence: autoshade::recipe::DirectionAdherence::DEFAULT,
             style_info: None,
             style_info_loading: false,
             style_build_inflight: false,
@@ -1671,7 +1671,7 @@ impl Default for AutoshopApp {
             sel_mask: None,
             placing_mask: None,
             sel_component: None,
-            component_mode: autoshop::recipe::MaskCombine::Add,
+            component_mode: autoshade::recipe::MaskCombine::Add,
             mask_brush: None,
             mask_brush_gray: None,
             place_start: None,
@@ -1755,7 +1755,7 @@ impl Default for AutoshopApp {
     }
 }
 
-impl eframe::App for AutoshopApp {
+impl eframe::App for AutoShadeApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // First frame: re-issue the OS-titlebar theme. install_theme sends it
         // from the creation closure, but viewport commands sent before the
@@ -1962,7 +1962,7 @@ impl eframe::App for AutoshopApp {
     }
 
     /// Persist the prefs (last folder, view mode, export options) — restored by
-    /// [`AutoshopApp::new`]. Window geometry is saved by eframe itself.
+    /// [`AutoShadeApp::new`]. Window geometry is saved by eframe itself.
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         eframe::set_value(
             storage,

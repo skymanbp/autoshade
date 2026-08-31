@@ -1,8 +1,8 @@
-//! Autoshop engine library — the shared core behind both front-ends.
+//! AutoShade engine library — the shared core behind both front-ends.
 //!
 //! The AI advisor looks at a RAW preview + metadata and emits a
 //! [`recipe::EditRecipe`]; the deterministic [`render`] engine applies it.
-//! Both the CLI (`bin/autoshop`, i.e. `main.rs`) and the native GUI
+//! Both the CLI (`bin/autoshade`, i.e. `main.rs`) and the native GUI
 //! (`bin/gui.rs`) link this library and call the engine directly — the GUI has
 //! NO HTTP server; it invokes `render`/`pipeline`/`decode` in-process.
 //!
@@ -250,14 +250,14 @@ pub fn run_model_sidecar_bounded(
     let discard = || crate::denoise::discard_failed_output(output, before);
     let out = with_model_slot(|| -> anyhow::Result<std::process::Output> {
         let child = cmd.spawn().with_context(|| {
-            format!("launch {who} ({python_bin}) — is Python on PATH / AUTOSHOP_PYTHON set?")
+            format!("launch {who} ({python_bin}) — is Python on PATH / AUTOSHADE_PYTHON set?")
         })?;
         let group = assign_kill_group(&child);
         crate::denoise::bounded_child_output(
             child,
             who,
             crate::denoise::sidecar_timeout(),
-            "AUTOSHOP_SIDECAR_TIMEOUT_SECS",
+            "AUTOSHADE_SIDECAR_TIMEOUT_SECS",
             group,
         )
     })
@@ -396,7 +396,7 @@ mod fixture_dir_tests {
         for file in files {
             let text = std::fs::read_to_string(&file).unwrap();
             for (index, line) in text.lines().enumerate() {
-                if line.contains("temp_dir()") && line.contains(concat!(".join(", "\"autoshop-")) {
+                if line.contains("temp_dir()") && line.contains(concat!(".join(", "\"autoshade-")) {
                     offenders.push(format!("{}:{}", file.display(), index + 1));
                 }
             }
@@ -408,7 +408,7 @@ mod fixture_dir_tests {
 #[cfg(test)]
 pub(crate) fn test_dir(tag: &str) -> std::path::PathBuf {
     use std::{env, fs, process};
-    let dir = env::temp_dir().join(format!("autoshop-{tag}-{}", process::id()));
+    let dir = env::temp_dir().join(format!("autoshade-{tag}-{}", process::id()));
     fs::remove_dir_all(&dir).ok();
     fs::create_dir_all(&dir).unwrap();
     dir
@@ -458,7 +458,7 @@ mod tests {
     #[test]
     fn a_sidecar_result_must_be_this_runs_own_nonempty_write() {
         let dir = std::env::temp_dir()
-            .join(format!("autoshop-lib-test-wrote-{}-{}", std::process::id(), line!()));
+            .join(format!("autoshade-lib-test-wrote-{}-{}", std::process::id(), line!()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
 

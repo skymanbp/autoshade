@@ -584,7 +584,7 @@ def self_test(cache_dir):
 
 def main() -> None:
     ap = argparse.ArgumentParser(
-        description="Autoshop look description (Qwen3-VL-2B-Instruct)"
+        description="AutoShade look description (Qwen3-VL-2B-Instruct)"
     )
     ap.add_argument("--input", help="one image (any PIL-readable format)")
     ap.add_argument(

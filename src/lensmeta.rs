@@ -408,13 +408,13 @@ mod tests {
         }
     }
 
-    /// Real-machine probe (ignored in CI): AUTOSHOP_PROBE_RAW=<file.arw>
+    /// Real-machine probe (ignored in CI): AUTOSHADE_PROBE_RAW=<file.arw>
     /// cargo test --release probe_real_lens_metadata -- --ignored --nocapture
     #[test]
     #[ignore]
     fn probe_real_lens_metadata() {
-        let Ok(path) = std::env::var("AUTOSHOP_PROBE_RAW") else {
-            eprintln!("AUTOSHOP_PROBE_RAW unset — skipping");
+        let Ok(path) = std::env::var("AUTOSHADE_PROBE_RAW") else {
+            eprintln!("AUTOSHADE_PROBE_RAW unset — skipping");
             return;
         };
         let p = read(Path::new(&path));

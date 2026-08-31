@@ -2,7 +2,7 @@
 
 use super::*;
 
-impl AutoshopApp {
+impl AutoShadeApp {
     /// Run the AI segmentation sidecar on the ORIGINAL-frame preview and attach
     /// the resulting raster as a Bitmap local mask (gap batch A②). The AI only
     /// picks WHERE — every actual edit stays a deterministic recipe slider.
@@ -27,13 +27,13 @@ impl AutoshopApp {
         self.spawn_worker(
             move || {
                 let res = (|| -> anyhow::Result<(String, PathBuf, String)> {
-                    let cfg = autoshop::config::Config::load();
-                    let opts = autoshop::segment::SegmentOpts::from_config(&cfg, target);
+                    let cfg = autoshade::config::Config::load();
+                    let opts = autoshade::segment::SegmentOpts::from_config(&cfg, target);
                     // The sidecar sees the ORIGINAL-frame preview — the space recipe
                     // masks live in. Preview resolution is enough: the engine samples
                     // the raster bilinearly in normalised coords at any render size.
                     let mut tmp = std::env::temp_dir();
-                    tmp.push(format!("autoshop_seg_{}_{target}.png", std::process::id()));
+                    tmp.push(format!("autoshade_seg_{}_{target}.png", std::process::id()));
                     base.to_rgb8()
                         .save(&tmp)
                         .map_err(|e| anyhow::anyhow!("write segmentation input {}: {e}", tmp.display()))?;
@@ -43,8 +43,8 @@ impl AutoshopApp {
                     // class the zoned-fit raster had. The Segmented handler
                     // re-points the existing mask entry by name FAMILY, so a
                     // rerun still refreshes instead of stacking.
-                    let mask = autoshop::store::claim_raster(&src, &format!("mask-{target}"))?;
-                    let run = autoshop::segment::segment_file(&opts, &tmp, &mask);
+                    let mask = autoshade::store::claim_raster(&src, &format!("mask-{target}"))?;
+                    let run = autoshade::segment::segment_file(&opts, &tmp, &mask);
                     let _ = std::fs::remove_file(&tmp);
                     let report = match run {
                         Ok(r) => r,
@@ -131,7 +131,7 @@ impl AutoshopApp {
         if let Some(i) = target
             && let Some(MaskGeometry::Bitmap { path }) = self.recipe.masks.get(i).map(|m| &m.mask)
         {
-            match autoshop::render::open_mask_bounded(std::path::Path::new(path)) {
+            match autoshade::render::open_mask_bounded(std::path::Path::new(path)) {
                 Ok(img) => {
                     let g = image::imageops::resize(
                         &img.to_luma8(),
@@ -191,7 +191,7 @@ impl AutoshopApp {
                 return;
             }
         }
-        let written = autoshop::store::claim_raster(&src, "mask-brush")
+        let written = autoshade::store::claim_raster(&src, "mask-brush")
             .map_err(anyhow::Error::from)
             .and_then(|p| {
                 gray.save(&p)?;
@@ -199,7 +199,7 @@ impl AutoshopApp {
                 // commits through fsync, and a raster still in the page
                 // cache leaves a saved develop pointing at pixels a power
                 // cut never wrote.
-                autoshop::store::durable_adopt(&p)?;
+                autoshade::store::durable_adopt(&p)?;
                 Ok(p)
             });
         match written {
@@ -213,7 +213,7 @@ impl AutoshopApp {
                     }
                     _ => {
                         let n = self.recipe.masks.len();
-                        self.recipe.masks.push(autoshop::recipe::LocalAdjustment {
+                        self.recipe.masks.push(autoshade::recipe::LocalAdjustment {
                             mask: MaskGeometry::Bitmap { path: path_s },
                             name: trf(lang, "Brush {n}", &[("n", &(n + 1).to_string())]),
                             ..Default::default()
@@ -254,13 +254,13 @@ impl AutoshopApp {
             return;
         };
         let lang = self.lang;
-        let done = autoshop::render::open_mask_bounded(std::path::Path::new(&path))
+        let done = autoshade::render::open_mask_bounded(std::path::Path::new(&path))
             .map(|img| op(&img.to_luma8()))
             .and_then(|g| {
-                let p = autoshop::store::claim_raster(&src, tag).map_err(anyhow::Error::from)?;
+                let p = autoshade::store::claim_raster(&src, tag).map_err(anyhow::Error::from)?;
                 g.save(&p).map_err(anyhow::Error::from)?;
                 // Same L03 rule as the brush writer: payload durable first.
-                autoshop::store::durable_adopt(&p)?;
+                autoshade::store::durable_adopt(&p)?;
                 Ok(p)
             });
         match done {
@@ -329,7 +329,7 @@ impl AutoshopApp {
                 // every taker of both follows (budget.rs).
                 let _mem = crate::budget::heavy_permit(crate::budget::estimate_mb(Some(&guide_src)));
                 let res = (|| -> anyhow::Result<MaskRefineOutcome> {
-                    let mask = autoshop::render::open_mask_bounded(std::path::Path::new(&path))
+                    let mask = autoshade::render::open_mask_bounded(std::path::Path::new(&path))
                         .map_err(|e| anyhow::anyhow!("load mask raster {path}: {e}"))?
                         .to_luma8();
                     // The same process-wide permit the master/thumb decodes
@@ -337,7 +337,7 @@ impl AutoshopApp {
                     // definition (no cap — full-resolution edges are the whole
                     // point of refining), so it always counts as a big one.
                     let _big_permit = big_decode_gate().lock().unwrap_or_else(|p| p.into_inner());
-                    let full = autoshop::render::source_pixels(&guide_src, None)?;
+                    let full = autoshade::render::source_pixels(&guide_src, None)?;
                     // BEFORE the filter and before any claim: a refined raster
                     // is written at the GUIDE's resolution, and one past the
                     // mask budget could never be read back — the mask would go
@@ -352,7 +352,7 @@ impl AutoshopApp {
                     // "does this raster fit alone?" passed a second 61 MP
                     // refine and then blew the 256 MB aggregate — hard bail at
                     // export, silent skip in the preview.
-                    if !autoshop::render::mask_raster_write_fits_budget(
+                    if !autoshade::render::mask_raster_write_fits_budget(
                         &recipe_at_spawn,
                         Some(stored_ref.as_str()),
                         full.width(),
@@ -364,16 +364,16 @@ impl AutoshopApp {
                         });
                     }
                     let long = full.width().max(full.height());
-                    let refined = autoshop::render::refine_mask_guided(
+                    let refined = autoshade::render::refine_mask_guided(
                         &mask,
                         &full,
                         (long / 500).max(4) as usize,
                         1e-4,
                     );
-                    let out = autoshop::store::claim_raster(&src, "mask-refined")?;
+                    let out = autoshade::store::claim_raster(&src, "mask-refined")?;
                     refined.save(&out)?;
                     // Same L03 rule as the brush writer: durable first.
-                    autoshop::store::durable_adopt(&out)?;
+                    autoshade::store::durable_adopt(&out)?;
                     Ok(MaskRefineOutcome::Refined(i, stored_ref, out))
                 })();
                 Msg::MaskRefined(res)

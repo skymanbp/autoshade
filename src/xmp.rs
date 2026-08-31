@@ -979,7 +979,7 @@ pub fn crop_import_note(xmp: &str) -> Option<String> {
     }
     let scope = crs_own_scope(xmp);
     let frame = FrameAspect::from_xmp(xmp);
-    match read_crop(Scope::new(scope.as_ref()), frame, is_autoshop_sidecar(xmp)) {
+    match read_crop(Scope::new(scope.as_ref()), frame, is_autoshade_sidecar(xmp)) {
         CropDecode::Read { overshoot_frac, .. } if overshoot_frac > 0.0 => {
             // In pixels of the frame the document declares, when it declares
             // one — a fraction means nothing to a photographer.
@@ -1190,7 +1190,7 @@ crs:Midpoint=\"{midpoint}\" crs:Version=\"{mask_version}\"",
 ///
 /// Current corpus re-derivation: 174 sidecars; 40 Mask/Aggregate; 104
 /// Mask/Image; 391 Mask/Paint; 1037 Mask/*; 40 crs:Gesture (recursive `*.xmp`
-/// census over the operator-supplied corpus root (env `AUTOSHOP_CENSUS_ROOT`),
+/// census over the operator-supplied corpus root (env `AUTOSHADE_CENSUS_ROOT`),
 /// real XML parser, 0 parse failures; refreshed at the v1.1 release). Measured
 /// over this corpus: 104 `Mask/Image` instances,
 /// 21 distinct attribute names, of which 7 are modelled fields
@@ -1204,7 +1204,7 @@ crs:Midpoint=\"{midpoint}\" crs:Version=\"{mask_version}\"",
 /// the 177-sidecar 2026-08 snapshot both — are retained only as provenance;
 /// the active counts above are the re-derived values.
 /// A commanded XML census over the operator-supplied corpus root
-/// (`AUTOSHOP_CENSUS_ROOT`) and its recursive `*.xmp` files
+/// (`AUTOSHADE_CENSUS_ROOT`) and its recursive `*.xmp` files
 /// found 177 sidecars, 42 `Mask/Aggregate`, 105 `Mask/Image`, 398 `Mask/Paint`,
 /// 1081 `Mask/*` and 40 `crs:Gesture` blocks — none of the older totals came
 /// back, and the R28 MANIFEST reported the same divergence independently. The
@@ -1488,7 +1488,7 @@ pub enum MaskLossReason {
     /// [`BrushRendered`]: MaskLossReason::BrushRendered
     ComponentsFlattened,
     /// A brush group (`Mask/Aggregate` + its `Mask/Paint` strokes) rides out
-    /// into the sidecar COMPLETE — and the pixels Autoshop showed for it were
+    /// into the sidecar COMPLETE — and the pixels AutoShade showed for it were
     /// drawn by **our** rasteriser from a measured model of Lightroom's brush,
     /// not by Adobe's. The XMP is exact; the alpha is an approximation.
     ///
@@ -1518,7 +1518,7 @@ pub enum MaskLossReason {
     BrushRendered,
     /// An AI mask (`Mask/Image`) rides out into the sidecar COMPLETE — and the
     /// alpha this engine rendered was **recomputed by our own segmenter**, not
-    /// Adobe's, so the XMP Lightroom reads and the pixels Autoshop showed do
+    /// Adobe's, so the XMP Lightroom reads and the pixels AutoShade showed do
     /// not describe the same coverage.
     ///
     /// The second member of [`BrushRendered`]'s odd-one-out class, and the one
@@ -1595,7 +1595,7 @@ impl MaskLossReason {
             MaskLossReason::Disabled => "muted mask(s) skipped",
             MaskLossReason::ComponentsFlattened => "extra shape component(s) flattened",
             MaskLossReason::BrushRendered => {
-                "brush mask(s) drawn from Autoshop's measured model of Lightroom's brush - \
+                "brush mask(s) drawn from AutoShade's measured model of Lightroom's brush - \
                  not Adobe's own rasteriser"
             }
             MaskLossReason::AiMaskRecomputed => {
@@ -1613,7 +1613,7 @@ impl MaskLossReason {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MaskLoss {
     /// The name the sidecar uses for this correction (`crs:CorrectionName`):
-    /// the user's own label when set, else the generated `Autoshop <n>`.
+    /// the user's own label when set, else the generated `AutoShade <n>`.
     pub name: String,
     pub reason: MaskLossReason,
 }
@@ -1837,7 +1837,7 @@ impl MaskImportReason {
             MaskImportReason::BlendMode => "non-default blend mode(s) ignored",
             MaskImportReason::MultiComponent => "extra shape component(s) dropped",
             MaskImportReason::BrushRendered => {
-                "brush mask(s) drawn from Autoshop's measured model of Lightroom's brush - \
+                "brush mask(s) drawn from AutoShade's measured model of Lightroom's brush - \
                  not Adobe's own rasteriser"
             }
             MaskImportReason::AiMaskRecomputed => {
@@ -1874,12 +1874,12 @@ pub fn import_losses(xmp: &str) -> Vec<MaskImportLoss> {
     if xmp.len() > MAX_XMP_BYTES {
         return Vec::new();
     }
-    let authored_by_autoshop = is_autoshop_sidecar(xmp);
+    let authored_by_autoshade = is_autoshade_sidecar(xmp);
     let scope = crs_own_scope(xmp);
     // The FRAME is read off the whole document — `tiff:` properties live
     // outside the crs Description's own scope in principle, and the decode
     // needs them (see `FrameAspect`).
-    mask_summary(scope.as_ref(), authored_by_autoshop, FrameAspect::from_xmp(xmp)).losses
+    mask_summary(scope.as_ref(), authored_by_autoshade, FrameAspect::from_xmp(xmp)).losses
 }
 
 /// [`import_losses`] with the photo identity needed to resolve a sibling ACR
@@ -1889,11 +1889,11 @@ pub fn import_losses_for_photo(xmp: &str, photo: &std::path::Path) -> Vec<MaskIm
     if xmp.len() > MAX_XMP_BYTES {
         return Vec::new();
     }
-    let authored_by_autoshop = is_autoshop_sidecar(xmp);
+    let authored_by_autoshade = is_autoshade_sidecar(xmp);
     let scope = crs_own_scope(xmp);
     mask_summary_with_source(
         scope.as_ref(),
-        authored_by_autoshop,
+        authored_by_autoshade,
         FrameAspect::from_xmp(xmp),
         Some(photo),
         None,
@@ -1912,7 +1912,7 @@ pub fn import_losses_for_photo(xmp: &str, photo: &std::path::Path) -> Vec<MaskIm
 /// where that distinction is recorded, and
 /// [`crate::pipeline::fresh_lens_profile_for_sidecar`] is what applies it.
 ///
-/// This does NOT touch what this engine renders. Autoshop's own geometry stage
+/// This does NOT touch what this engine renders. AutoShade's own geometry stage
 /// is driven by the photographer's `lens_profile` toggles, which are theirs to
 /// set; reading Lightroom's switch as an instruction would silently overwrite
 /// them from a file they may have imported only for its masks.
@@ -2046,7 +2046,7 @@ pub fn describe_mask_losses(losses: &[MaskLoss]) -> Option<String> {
 /// The mask half of this story has existed since M6a ([`MaskLoss`]); the
 /// global half never did, so a photo whose look depends on its camera base
 /// curve or its lens-profile correction exported a sidecar that renders
-/// visibly differently in Lightroom, silently. Reopened in Autoshop it is
+/// visibly differently in Lightroom, silently. Reopened in AutoShade it is
 /// fine — recipe.json keeps everything — which is exactly why the loss went
 /// unnoticed.
 ///
@@ -2121,7 +2121,7 @@ pub fn global_render_gaps(r: &EditRecipe) -> Vec<&'static str> {
 }
 
 /// **Import-side disclosure, GLOBAL half** (R24-5 M0): the `crs:` properties
-/// this sidecar carries on its own `rdf:Description` that Autoshop does not
+/// this sidecar carries on its own `rdf:Description` that AutoShade does not
 /// model at all — PointColor, the camera Look, `CameraProfileDigest`,
 /// `UprightTransform`. (Global Texture and Grain headed that list until R25
 /// B2 modelled them, the whole Defringe block left it in B3, and the
@@ -2379,7 +2379,7 @@ fn masks_xml(r: &EditRecipe, frame: Option<FrameAspect>) -> (String, Vec<MaskLos
     for (i, m) in r.masks.iter().enumerate() {
         // The name goes first: it identifies this mask in the loss list even
         // on the arms that never reach the emit below.
-        let name = if m.name.is_empty() { format!("Autoshop {}", i + 1) } else { m.name.clone() };
+        let name = if m.name.is_empty() { format!("AutoShade {}", i + 1) } else { m.name.clone() };
         // The eye toggle: a disabled mask applies nothing, so projecting it
         // as an active correction would make Lightroom render an edit the
         // app does not. Skipped like a Bitmap mask (lossy projection —
@@ -2474,7 +2474,7 @@ fn masks_xml(r: &EditRecipe, frame: Option<FrameAspect>) -> (String, Vec<MaskLos
         }
         // The AI mask's own direction of loss, and it is the sharper one: the
         // sidecar gets the INTENT whole (so Lightroom will reproduce its own
-        // mask exactly), while the pixels Autoshop showed came from OUR
+        // mask exactly), while the pixels AutoShade showed came from OUR
         // segmenter. The two will not agree at the edges and can disagree
         // badly on a hard scene. Raised once per mask that carries one
         // anywhere, base or component — a fact about the mask, not a count.
@@ -2592,7 +2592,7 @@ fn masks_xml(r: &EditRecipe, frame: Option<FrameAspect>) -> (String, Vec<MaskLos
 }
 
 /// Every crs ATTRIBUTE the writer owns, rendered for `r` — the
-/// `\n    crs:K="v"` block. One authority for what Autoshop owns in a
+/// `\n    crs:K="v"` block. One authority for what AutoShade owns in a
 /// sidecar, shared by the fresh-document writer and the merge path
 /// ([`merge_recipe_into_xmp`]); the REMOVAL universe lives in
 /// [`owned_attr_keys`] and must cover every key this can ever emit.
@@ -2973,7 +2973,7 @@ fn safe_rationale(r: &EditRecipe) -> String {
 
 /// Render `recipe` as a complete, FRESH `.xmp` sidecar document. When a
 /// previous document exists, prefer [`merge_recipe_into_xmp`] —
-/// regeneration discards everything Autoshop does not model (A11).
+/// regeneration discards everything AutoShade does not model (A11).
 ///
 /// A WRITER that also has to disclose what the projection cost should take
 /// [`recipe_to_xmp_with_losses`] instead: the verdicts fall out of the same pass
@@ -3007,8 +3007,8 @@ pub fn recipe_to_xmp_with_losses(r: &EditRecipe) -> (String, Vec<MaskLoss>) {
 /// The document skeleton around one `rdf:Description`.
 fn xmp_document(r: &EditRecipe, desc: &str) -> String {
     format!(
-        "<x:xmpmeta xmlns:x=\"adobe:ns:meta/\" x:xmptk=\"Autoshop 2\">\n\
- <!-- Generated by Autoshop. AI rationale: {rationale} (confidence {conf:.2}) -->\n\
+        "<x:xmpmeta xmlns:x=\"adobe:ns:meta/\" x:xmptk=\"AutoShade 2\">\n\
+ <!-- Generated by AutoShade. AI rationale: {rationale} (confidence {conf:.2}) -->\n\
  <rdf:RDF xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\">\n\
   {desc}\n\
  </rdf:RDF>\n\
@@ -3047,7 +3047,7 @@ fn crs_description(r: &EditRecipe, frame: Option<FrameAspect>) -> (String, Vec<M
 /// Empty when the frame is unknown, which is also when nothing above needed it.
 ///
 /// **Why a writer declares this at all** (R27, closing `C-rotation-skeleton.md`'s
-/// round-trip hole). Until now Autoshop's own fresh sidecars declared no frame,
+/// round-trip hole). Until now AutoShade's own fresh sidecars declared no frame,
 /// so re-importing one could not decode its own rotated radial — the reader
 /// needs `W/H` to fold a pixel-frame tilt into the engine's normalised one, and
 /// a document with no declaration hands it nothing. Every real Lightroom
@@ -3745,10 +3745,10 @@ fn find_matching_close(doc: &str, mut from: usize) -> Option<usize> {
     }
 }
 
-/// Re-stamp the Autoshop rationale comment (older saves embedded it) so a
+/// Re-stamp the AutoShade rationale comment (older saves embedded it) so a
 /// merged document never carries a STALE rationale for a new recipe.
 fn refresh_rationale_comment(doc: String, r: &EditRecipe) -> String {
-    const MARK: &str = "<!-- Generated by Autoshop. AI rationale: ";
+    const MARK: &str = "<!-- Generated by AutoShade. AI rationale: ";
     let Some(start) = doc.find(MARK) else { return doc };
     let Some(end) = doc[start..].find("-->") else { return doc };
     format!(
@@ -4215,7 +4215,7 @@ pub(crate) fn crs_own_scope(xmp: &str) -> std::borrow::Cow<'_, str> {
 
 
 /// Graft `r`'s owned settings INTO an existing sidecar document, preserving
-/// every property Autoshop does not model — Lightroom-only globals
+/// every property AutoShade does not model — Lightroom-only globals
 /// (Texture), the camera profile / creative Look, Lightroom's lens-profile
 /// block, foreign namespaces, the xpacket wrapper. Save XMP used to
 /// REGENERATE the whole document, so copying it beside the RAW wiped all of
@@ -4494,7 +4494,7 @@ pub fn merge_recipe_into_xmp_in_frame_for_photo(
     let mask_scope = crs_own_scope(existing);
     let summary = mask_summary_with_source(
         mask_scope.as_ref(),
-        is_autoshop_sidecar(existing),
+        is_autoshade_sidecar(existing),
         frame,
         photo,
         None,
@@ -4611,14 +4611,14 @@ pub fn merge_recipe_into_xmp_in_frame_for_photo(
 // don't come back — the app-internal recipe.json is the lossless sidecar; this
 // reader is the recovery path when only an XMP exists.
 
-/// Autoshop provenance: an ATTRIBUTE-shaped `x:xmptk = "Autoshop"` /
-/// `x:xmptk='Autoshop'` match (either quote style, optional whitespace
+/// AutoShade provenance: an ATTRIBUTE-shaped `x:xmptk = "AutoShade"` /
+/// `x:xmptk='AutoShade'` match (either quote style, optional whitespace
 /// around `=`), searched ONLY inside the `<x:xmpmeta …>` start tag — where
 /// the attribute actually lives. The old raw-substring test both missed
 /// semantically identical XML spellings and matched the literal anywhere in
 /// the document (a foreign sidecar's comment could claim our provenance) —
 /// and this boolean decides whether an As-Shot tint imports as a real edit.
-fn is_autoshop_sidecar(xmp: &str) -> bool {
+fn is_autoshade_sidecar(xmp: &str) -> bool {
     // COMMENT-AWARE scan for the first real `<x:xmpmeta` start tag: a plain
     // find lost to a forged tag in a LEADING comment, rfind to one in a
     // TRAILING comment. One pass skipping `<!-- … -->` spans settles both
@@ -4644,7 +4644,7 @@ fn is_autoshop_sidecar(xmp: &str) -> bool {
         {
             // Name-boundary check: without it a preceding wrapper whose
             // element name merely STARTS with x:xmpmeta (`<x:xmpmetadata
-            // x:xmptk="Autoshop">`) was accepted as the document tag.
+            // x:xmptk="AutoShade">`) was accepted as the document tag.
             tag_start = Some(i);
             break;
         } else {
@@ -4664,9 +4664,9 @@ fn is_autoshop_sidecar(xmp: &str) -> bool {
         if let Some(v) = after.strip_prefix('=') {
             let v = v.trim_start();
             if v.strip_prefix('"')
-                .is_some_and(|r| r.starts_with("Autoshop\"") || r.starts_with("Autoshop 2\""))
+                .is_some_and(|r| r.starts_with("AutoShade\"") || r.starts_with("AutoShade 2\""))
                 || v.strip_prefix('\'')
-                    .is_some_and(|r| r.starts_with("Autoshop'") || r.starts_with("Autoshop 2'"))
+                    .is_some_and(|r| r.starts_with("AutoShade'") || r.starts_with("AutoShade 2'"))
             {
                 return true;
             }
@@ -4676,26 +4676,26 @@ fn is_autoshop_sidecar(xmp: &str) -> bool {
     false
 }
 
-/// Absolute-Kelvin era marker (`x:xmptk="Autoshop 2"`): documents whose
+/// Absolute-Kelvin era marker (`x:xmptk="AutoShade 2"`): documents whose
 /// Temperature is ABSOLUTE (written by the anchored engine). We only ever
 /// serialise the fixed form below, so an exact scan suffices; a hand-edited
 /// whitespace variant merely misses the marker and falls back to the
 /// old-era 5500 pin — the fail-safe direction (renders as the old engine
 /// did) — never to a wrong absolute reinterpretation.
-fn is_autoshop_era2(xmp: &str) -> bool {
-    xmp.contains(r#"x:xmptk="Autoshop 2""#) || xmp.contains("x:xmptk='Autoshop 2'")
+fn is_autoshade_era2(xmp: &str) -> bool {
+    xmp.contains(r#"x:xmptk="AutoShade 2""#) || xmp.contains("x:xmptk='AutoShade 2'")
 }
 
-/// Upgrade an old Autoshop era marker on a MERGED document: the merge just
+/// Upgrade an old AutoShade era marker on a MERGED document: the merge just
 /// rewrote every owned WB attribute in absolute-Kelvin semantics, so leaving
-/// `x:xmptk="Autoshop"` in place would make the next import pin the 5500
+/// `x:xmptk="AutoShade"` in place would make the next import pin the 5500
 /// anchor onto absolute values. Foreign (Adobe) markers are untouched —
 /// foreign import semantics are already absolute.
 fn upgrade_era_marker(doc: String) -> String {
     // The closing quote is part of the pattern, so an already-upgraded
-    // "Autoshop 2" value can never prefix-match and double-upgrade.
-    doc.replacen(r#"x:xmptk="Autoshop""#, r#"x:xmptk="Autoshop 2""#, 1)
-        .replacen(r#"x:xmptk='Autoshop'"#, r#"x:xmptk='Autoshop 2'"#, 1)
+    // "AutoShade 2" value can never prefix-match and double-upgrade.
+    doc.replacen(r#"x:xmptk="AutoShade""#, r#"x:xmptk="AutoShade 2""#, 1)
+        .replacen(r#"x:xmptk='AutoShade'"#, r#"x:xmptk='AutoShade 2'"#, 1)
 }
 
 /// **The scope a `crs:` read is allowed to see — as a TYPE** (R28 Batch-5 5d,
@@ -5138,7 +5138,7 @@ fn parse_curve(xmp: &str, tag: &str) -> Vec<CurvePoint> {
 /// because the sidecar carries no pixels for them to be read from).
 fn parse_masks_with_source(
     xmp: &str,
-    authored_by_autoshop: bool,
+    authored_by_autoshade: bool,
     frame: Option<FrameAspect>,
     photo: Option<&std::path::Path>,
     diag: Option<&crate::diag::Diag<'_>>,
@@ -5149,7 +5149,7 @@ fn parse_masks_with_source(
         return Vec::new();
     };
     let mut brush_reader = MaskBrushReader::new(photo, diag);
-    mask_summary_from_block(block, authored_by_autoshop, frame, &mut brush_reader).supported
+    mask_summary_from_block(block, authored_by_autoshade, frame, &mut brush_reader).supported
 }
 
 /// How many corrections in this sidecar produced NO mask at all — AI / depth
@@ -5171,20 +5171,20 @@ pub fn unsupported_corrections(xmp: &str) -> usize {
     if xmp.len() > MAX_XMP_BYTES {
         return 0;
     }
-    let authored_by_autoshop = is_autoshop_sidecar(xmp);
+    let authored_by_autoshade = is_autoshade_sidecar(xmp);
     let scope = crs_own_scope(xmp);
-    mask_summary(scope.as_ref(), authored_by_autoshop, FrameAspect::from_xmp(xmp)).dropped
+    mask_summary(scope.as_ref(), authored_by_autoshade, FrameAspect::from_xmp(xmp)).dropped
 }
 
 pub fn unsupported_corrections_for_photo(xmp: &str, photo: &std::path::Path) -> usize {
     if xmp.len() > MAX_XMP_BYTES {
         return 0;
     }
-    let authored_by_autoshop = is_autoshop_sidecar(xmp);
+    let authored_by_autoshade = is_autoshade_sidecar(xmp);
     let scope = crs_own_scope(xmp);
     mask_summary_with_source(
         scope.as_ref(),
-        authored_by_autoshop,
+        authored_by_autoshade,
         FrameAspect::from_xmp(xmp),
         Some(photo),
         None,
@@ -5266,15 +5266,15 @@ impl MaskSummary {
 
 fn mask_summary(
     xmp: &str,
-    authored_by_autoshop: bool,
+    authored_by_autoshade: bool,
     frame: Option<FrameAspect>,
 ) -> MaskSummary {
-    mask_summary_with_source(xmp, authored_by_autoshop, frame, None, None)
+    mask_summary_with_source(xmp, authored_by_autoshade, frame, None, None)
 }
 
 fn mask_summary_with_source(
     xmp: &str,
-    authored_by_autoshop: bool,
+    authored_by_autoshade: bool,
     frame: Option<FrameAspect>,
     photo: Option<&std::path::Path>,
     diag: Option<&crate::diag::Diag<'_>>,
@@ -5282,7 +5282,7 @@ fn mask_summary_with_source(
     match owned_element_body(xmp, "crs:MaskGroupBasedCorrections") {
         Ok(Some(block)) => {
             let mut brush_reader = MaskBrushReader::new(photo, diag);
-            mask_summary_from_block(block, authored_by_autoshop, frame, &mut brush_reader)
+            mask_summary_from_block(block, authored_by_autoshade, frame, &mut brush_reader)
         }
         Ok(None) => MaskSummary::default(),
         // The group OPENS but never closes: whatever corrections it holds
@@ -5319,7 +5319,7 @@ fn correction_name(own: Scope<'_>, position: usize) -> String {
 
 fn mask_summary_from_block(
     block: &str,
-    authored_by_autoshop: bool,
+    authored_by_autoshade: bool,
     frame: Option<FrameAspect>,
     brush_reader: &mut MaskBrushReader<'_, '_>,
 ) -> MaskSummary {
@@ -5359,7 +5359,7 @@ fn mask_summary_from_block(
         let own = correction_own_scope(seg);
         let own = Scope::new(own.as_ref());
         let name = correction_name(own, seen);
-        match classify_correction(seg, own, authored_by_autoshop, frame, brush_reader) {
+        match classify_correction(seg, own, authored_by_autoshade, frame, brush_reader) {
             MaskCorrectionParse::Supported(mask, reasons)
                 if summary.supported.len() < MAX_MASKS_FROM_XMP =>
             {
@@ -5602,7 +5602,7 @@ fn correction_value_reasons(own: Scope<'_>) -> Result<Vec<MaskImportReason>, Mas
 fn component_import_reasons(
     tag: Tag<'_>,
     what: &str,
-    authored_by_autoshop: bool,
+    authored_by_autoshade: bool,
     frame: Option<FrameAspect>,
 ) -> Result<Vec<MaskImportReason>, ()> {
     let expected_mode = if what == "Mask/RangeMask" { "1" } else { "0" };
@@ -5777,7 +5777,7 @@ fn component_import_reasons(
         // is a reason to leave the RANGE behind, not the mask (R25 P1). The
         // caller turns this `Err` into a `ForeignRangeMask` note.
         "Mask/RangeMask" => {
-            if authored_by_autoshop
+            if authored_by_autoshade
                 && matches!(tag.crs_str("MaskInverted").as_deref(), None | Some("true"))
             {
                 Ok(reasons)
@@ -6862,7 +6862,7 @@ fn range_values_are_supported(range: &RangeMask) -> bool {
 fn classify_correction(
     seg: &str,
     own: Scope<'_>,
-    authored_by_autoshop: bool,
+    authored_by_autoshade: bool,
     frame: Option<FrameAspect>,
     brush_reader: &mut MaskBrushReader<'_, '_>,
 ) -> MaskCorrectionParse {
@@ -6906,7 +6906,7 @@ fn classify_correction(
         {
             let (tag, what) = (component.tag, &component.what);
             let verdict =
-                component_import_reasons(Tag::new(tag), what.as_ref(), authored_by_autoshop, frame);
+                component_import_reasons(Tag::new(tag), what.as_ref(), authored_by_autoshade, frame);
             match what.as_ref() {
                 "Mask/Gradient" | "Mask/CircularGradient" => {
                     geometry_count += 1;
@@ -7343,7 +7343,7 @@ fn parse_one_correction_with_reader(
                 bottom: g.crs_f32("Bottom")? as f64,
                 right: g.crs_f32("Right")? as f64,
                 // Absent = unrotated. Lightroom writes the attribute on every
-                // radial, but an Autoshop sidecar written before v0.32.0 does
+                // radial, but an AutoShade sidecar written before v0.32.0 does
                 // not, and its box IS the axis-aligned ellipse.
                 angle_deg: geom_tag.crs_f32("Angle").unwrap_or(0.0) as f64,
             },
@@ -7373,7 +7373,7 @@ fn parse_one_correction_with_reader(
                 // false`, 7 the mirror). Reading BOTH into our two flags XORed
                 // a value with its own complement, so the net came out `true`
                 // for EVERY imported Lightroom radial regardless of what the
-                // file said — Autoshop inverted masks Lightroom does not.
+                // file said — AutoShade inverted masks Lightroom does not.
                 // Measured cost on `DSC09568`, tone-matched RMS against the
                 // real Lightroom export: 0.1099 as imported → 0.0751 with this
                 // fixed, and 0.1901 → 0.0869 in blue (E1-verdict §6 defect 2).
@@ -7504,7 +7504,7 @@ fn parse_one_correction_with_reader(
     Some(LocalAdjustment {
         mask,
         range,
-        // Our own writer synthesises "Autoshop <n>" for unnamed masks (the
+        // Our own writer synthesises "AutoShade <n>" for unnamed masks (the
         // block above needs SOME CorrectionName) — importing that back as a
         // user-given name froze the placeholder and hid the localised
         // role/label. Round-trip it back to "unnamed".
@@ -7512,7 +7512,7 @@ fn parse_one_correction_with_reader(
             .crs_str("CorrectionName")
             .map(|v| v.into_owned())
             .filter(|n| {
-                n.strip_prefix("Autoshop ").is_none_or(|rest| rest.parse::<u32>().is_err())
+                n.strip_prefix("AutoShade ").is_none_or(|rest| rest.parse::<u32>().is_err())
             })
             .unwrap_or_default(),
         amount: own.crs_f32("CorrectionAmount").unwrap_or(1.0),
@@ -7597,7 +7597,7 @@ fn parse_one_correction_with_reader(
 ///     sidecar records the CAMERA's Kelvin, which is not an edit, and importing
 ///     it would visibly shift the render.
 ///   * Same for `Tint`, except sidecars we wrote ourselves (marked
-///     `x:xmptk="Autoshop"`), whose Tint is always a real edit.
+///     `x:xmptk="AutoShade"`), whose Tint is always a real edit.
 ///
 /// The returned recipe is clamped before it crosses the parser boundary, using
 /// the same ranges and size caps as every other untrusted recipe input.
@@ -7661,14 +7661,14 @@ fn xmp_to_recipe_clamped_impl(
     if xmlns_conflict(xmp).is_some() {
         return (EditRecipe::default(), crate::recipe::ClampSummary::default());
     }
-    let ours = is_autoshop_sidecar(xmp);
+    let ours = is_autoshade_sidecar(xmp);
 
 
     // EVERY setting below is read from this Description's OWN scope, never
     // the raw document: a nested creative Look carries owned-LOOKING crs
     // properties, and the flat scanners answered from them whenever the top
     // level omitted the key (see `crs_own_scope`). The provenance reads
-    // (`is_autoshop_sidecar` above, the rationale comment below) deliberately
+    // (`is_autoshade_sidecar` above, the rationale comment below) deliberately
     // stay on the whole document — they live OUTSIDE the Description.
     let scope = crs_own_scope(xmp);
     // …and that scope is a TYPE now (R28 Batch-5 5d): `Scope` says "subtree,
@@ -7854,7 +7854,7 @@ fn xmp_to_recipe_clamped_impl(
         ..Default::default()
     };
     // PROVENANCE RULE 3 (WB-anchor era): a sidecar WE wrote before the
-    // absolute-Kelvin engine (x:xmptk="Autoshop", no era-2 marker) carries a
+    // absolute-Kelvin engine (x:xmptk="AutoShade", no era-2 marker) carries a
     // Temperature that was tuned RELATIVE to the historical 5500 K anchor.
     // Pin the engine anchor there — the honest encoding of that provenance —
     // so every stamp-if-None call site leaves it alone and the develop
@@ -7863,7 +7863,7 @@ fn xmp_to_recipe_clamped_impl(
     // stamps the camera's real anchor. The pin deliberately leaves
     // as_shot_tint None — "anchor known, camera unknown" — which is also what
     // gates the as-shot caption off for these photos.
-    if ours && !is_autoshop_era2(xmp) && r.temperature_k.is_some() {
+    if ours && !is_autoshade_era2(xmp) && r.temperature_k.is_some() {
         r.as_shot_k = Some(5500.0);
     }
     // SOURCE FRAME → DISPLAY FRAME (R27 A7, `P1-portrait-mask-frame.md` §5).
@@ -8003,7 +8003,7 @@ mod tests {
         );
     }
 
-    /// R24-5 M0, IMPORT direction: a Lightroom sidecar's globals that Autoshop
+    /// R24-5 M0, IMPORT direction: a Lightroom sidecar's globals that AutoShade
     /// does not model. The merge keeps them; this is the sentence that says
     /// they are there — the global counterpart of the mask-side
     /// `unsupported_corrections`, which had no partner until now.
@@ -9678,7 +9678,7 @@ mod tests {
             // than printing a plausible wrong number in the window.
             ("gold".to_string(), MaskLossReason::Rotation(-12)),
             ("gold".to_string(), MaskLossReason::Recolour),
-            ("Autoshop 6".to_string(), MaskLossReason::Bitmap),
+            ("AutoShade 6".to_string(), MaskLossReason::Bitmap),
         ];
         want.sort();
         assert_eq!(got, want, "the loss set must name mask AND reason exactly once each");
@@ -9686,7 +9686,7 @@ mod tests {
         // counts them; "combo" flattened TWO components but is ONE loss.
         let line = describe_mask_losses(&mask_export_losses(&r)).expect("losses ⇒ a line");
         for expect in [
-            "2 bitmap mask(s) skipped (sky, Autoshop 6)",
+            "2 bitmap mask(s) skipped (sky, AutoShade 6)",
             "1 muted mask(s) skipped (parked)",
             "1 extra shape component(s) flattened (combo)",
             "1 radial rotation dropped (gold)",
@@ -9990,7 +9990,7 @@ mod tests {
     /// `crs:Midpoint` and `crs:Version` sit on EVERY Lightroom radial, and
     /// until this batch on neither side of this engine: not read, therefore
     /// not kept, therefore deleted from the photographer's own sidecar the
-    /// first time Autoshop rewrote it. Both directions in one test, because
+    /// first time AutoShade rewrote it. Both directions in one test, because
     /// a read without a write is the worse half — it looks like it works.
     ///
     /// The values are deliberately NON-default (37 / 3): 50 / 2 are what a
@@ -10098,7 +10098,7 @@ mod tests {
     // and `.../lr-experiment/extract.txt`. No photograph and no export is in
     // the repository — the RENDERED measurements those exports produced are
     // quoted in the assertions, and the fixtures that reproduce them from the
-    // real files live behind `AUTOSHOP_LR_PROBE_FIXTURES` (see
+    // real files live behind `AUTOSHADE_LR_PROBE_FIXTURES` (see
     // `the_probe_sidecars_decode_to_their_measured_ellipses`).
 
     /// A radial component with arbitrary corners, otherwise byte-shaped like
@@ -11015,7 +11015,7 @@ mod tests {
     /// The REAL probe sidecars, when they are on the machine. Twelve controlled
     /// Lightroom exports live at
     /// `~/.claude/plans/r25-materials/lr-experiment/`; point
-    /// `AUTOSHOP_LR_PROBE_FIXTURES` at that directory and this walks every
+    /// `AUTOSHADE_LR_PROBE_FIXTURES` at that directory and this walks every
     /// `.xmp` in it (and its `probe*/` subdirectories), asserting that every
     /// radial imports and round-trips its corners byte-for-byte.
     ///
@@ -11025,7 +11025,7 @@ mod tests {
     /// numbers; this is what proves the transcription.
     #[test]
     fn the_probe_sidecars_decode_to_their_measured_ellipses() {
-        let Ok(dir) = std::env::var("AUTOSHOP_LR_PROBE_FIXTURES") else { return };
+        let Ok(dir) = std::env::var("AUTOSHADE_LR_PROBE_FIXTURES") else { return };
         let mut checked = 0usize;
         let mut roots = vec![std::path::PathBuf::from(dir)];
         let mut files: Vec<std::path::PathBuf> = Vec::new();
@@ -11097,8 +11097,8 @@ mod tests {
             }
             checked += 1;
         }
-        assert!(checked > 0, "AUTOSHOP_LR_PROBE_FIXTURES held no radial sidecar");
-        eprintln!("AUTOSHOP_LR_PROBE_FIXTURES: {checked} radial sidecar(s) round-tripped");
+        assert!(checked > 0, "AUTOSHADE_LR_PROBE_FIXTURES held no radial sidecar");
+        eprintln!("AUTOSHADE_LR_PROBE_FIXTURES: {checked} radial sidecar(s) round-tripped");
     }
 
     /// R25 P5: both rotation verdicts CARRY the angle, so a disclosure can
@@ -13105,7 +13105,7 @@ mod tests {
     /// prove the RULES and not the FILES — and §0 of this round was a defect
     /// nobody's synthetic fixture had caught in four releases.
     ///
-    /// Point `AUTOSHOP_MB_FIXTURES` at a directory of `.xmp` / `.xmp.txt`
+    /// Point `AUTOSHADE_MB_FIXTURES` at a directory of `.xmp` / `.xmp.txt`
     /// sidecars and this asserts, per file, that every `crs:What="Correction"`
     /// is accounted for (imported + refused) and that the parametric ones
     /// really do arrive — which is 0 on every one of them before this batch.
@@ -13113,11 +13113,11 @@ mod tests {
     /// are not in this repository, and no path to them appears in this test.
     #[test]
     fn real_lightroom_sidecars_import_their_parametric_masks() {
-        let Ok(dir) = std::env::var("AUTOSHOP_MB_FIXTURES") else {
+        let Ok(dir) = std::env::var("AUTOSHADE_MB_FIXTURES") else {
             return;
         };
         let Ok(entries) = std::fs::read_dir(&dir) else {
-            panic!("AUTOSHOP_MB_FIXTURES is set but unreadable: {dir}");
+            panic!("AUTOSHADE_MB_FIXTURES is set but unreadable: {dir}");
         };
         let mut files = 0usize;
         let mut total_imported = 0usize;
@@ -13235,7 +13235,7 @@ mod tests {
             );
             total_imported += imported;
         }
-        assert!(files > 0, "AUTOSHOP_MB_FIXTURES held no sidecars: {dir}");
+        assert!(files > 0, "AUTOSHADE_MB_FIXTURES held no sidecars: {dir}");
         eprintln!("{files} sidecar(s), {total_imported} mask(s) imported in total");
     }
 
@@ -13256,15 +13256,15 @@ mod tests {
     ///     (asserted below as the anti-regression: `!net_before == net_now`
     ///     would have to hold for the 16, which it does not).
     ///  3. Our writer hands the file its own pair back, attribute for
-    ///     attribute — so a Lightroom → Autoshop → Lightroom trip renders the
+    ///     attribute — so a Lightroom → AutoShade → Lightroom trip renders the
     ///     same mask at both ends.
     #[test]
     fn real_lightroom_radials_carry_one_inversion_bit_spelled_twice() {
-        let Ok(dir) = std::env::var("AUTOSHOP_MB_FIXTURES") else {
+        let Ok(dir) = std::env::var("AUTOSHADE_MB_FIXTURES") else {
             return;
         };
         let Ok(entries) = std::fs::read_dir(&dir) else {
-            panic!("AUTOSHOP_MB_FIXTURES is set but unreadable: {dir}");
+            panic!("AUTOSHADE_MB_FIXTURES is set but unreadable: {dir}");
         };
         let (mut files, mut radials) = (0usize, 0usize);
         let (mut flip_true, mut flip_false) = (0usize, 0usize);
@@ -13334,7 +13334,7 @@ mod tests {
                 "{name}: {per_file} radial(s) in the file, {seen} imported, all anti-correlated"
             );
         }
-        assert!(files > 0, "AUTOSHOP_MB_FIXTURES held no sidecars: {dir}");
+        assert!(files > 0, "AUTOSHADE_MB_FIXTURES held no sidecars: {dir}");
         assert!(radials > 0, "no radial reached the census: {dir}");
         // The anti-regression, stated as the arithmetic that made the defect
         // visible: XORing the two flags gives `true` on EVERY radial here,
@@ -13363,11 +13363,11 @@ mod tests {
     /// photo simply rendered differently from Lightroom.
     #[test]
     fn real_lightroom_sidecars_import_their_global_effects() {
-        let Ok(dir) = std::env::var("AUTOSHOP_MB_FIXTURES") else {
+        let Ok(dir) = std::env::var("AUTOSHADE_MB_FIXTURES") else {
             return;
         };
         let Ok(entries) = std::fs::read_dir(&dir) else {
-            panic!("AUTOSHOP_MB_FIXTURES is set but unreadable: {dir}");
+            panic!("AUTOSHADE_MB_FIXTURES is set but unreadable: {dir}");
         };
         let mut seen_texture = 0usize;
         let mut seen_effects = 0usize;
@@ -13509,11 +13509,11 @@ mod tests {
     /// them silently, with an empty note list.
     #[test]
     fn real_lightroom_sidecars_survive_a_v0_30_recipe() {
-        let Ok(dir) = std::env::var("AUTOSHOP_MB_FIXTURES") else {
+        let Ok(dir) = std::env::var("AUTOSHADE_MB_FIXTURES") else {
             return;
         };
         let Ok(entries) = std::fs::read_dir(&dir) else {
-            panic!("AUTOSHOP_MB_FIXTURES is set but unreadable: {dir}");
+            panic!("AUTOSHADE_MB_FIXTURES is set but unreadable: {dir}");
         };
         let (mut files, mut masks_held, mut keys_held) = (0usize, 0usize, 0usize);
         for e in entries.flatten() {
@@ -13567,7 +13567,7 @@ mod tests {
             // 3) …and none of it is a silent success by way of an empty file.
             assert!(out.notes.is_empty(), "{name}: nothing was replaced: {:?}", out.notes);
         }
-        assert!(files > 0, "AUTOSHOP_MB_FIXTURES held no sidecars: {dir}");
+        assert!(files > 0, "AUTOSHADE_MB_FIXTURES held no sidecars: {dir}");
         eprintln!(
             "{files} sidecar(s): {masks_held} correction(s) and {keys_held} R25 key(s) held \
              through a v0.30-shaped save"
@@ -13586,11 +13586,11 @@ mod tests {
     /// stay absent instead of being invented at some neutral we chose.
     #[test]
     fn real_lightroom_sidecars_pass_their_transform_blocks_through() {
-        let Ok(dir) = std::env::var("AUTOSHOP_MB_FIXTURES") else {
+        let Ok(dir) = std::env::var("AUTOSHADE_MB_FIXTURES") else {
             return;
         };
         let Ok(entries) = std::fs::read_dir(&dir) else {
-            panic!("AUTOSHOP_MB_FIXTURES is set but unreadable: {dir}");
+            panic!("AUTOSHADE_MB_FIXTURES is set but unreadable: {dir}");
         };
         let mut files = 0usize;
         let mut seen_profile = 0usize;
@@ -13653,7 +13653,7 @@ mod tests {
                 );
             }
         }
-        assert!(files > 0, "AUTOSHOP_MB_FIXTURES held no sidecars: {dir}");
+        assert!(files > 0, "AUTOSHADE_MB_FIXTURES held no sidecars: {dir}");
         assert_eq!(seen_profile, files, "every reference sidecar carries crs:CameraProfile");
         assert_eq!(seen_upright, files, "…and the whole Perspective block");
     }
@@ -13821,12 +13821,12 @@ mod tests {
     }
 
     #[test]
-    fn legacy_autoshop_sidecar_kelvin_stays_relative_via_the_anchor_pin() {
+    fn legacy_autoshade_sidecar_kelvin_stays_relative_via_the_anchor_pin() {
         // A sidecar WE wrote before the absolute-Kelvin engine: its
         // Temperature was tuned against the 5500 K anchor. The import pins
         // the anchor there, so every stamp-if-None caller leaves it alone
         // and the develop renders exactly as tuned.
-        let old = r#"<x:xmpmeta xmlns:x="adobe:ns:meta/" x:xmptk="Autoshop">
+        let old = r#"<x:xmpmeta xmlns:x="adobe:ns:meta/" x:xmptk="AutoShade">
  <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
   <rdf:Description rdf:about=""
     xmlns:crs="http://ns.adobe.com/camera-raw-settings/1.0/"
@@ -13844,12 +13844,12 @@ mod tests {
         // Temperature is absolute and the caller stamps the real camera K.
         let new =
             recipe_to_xmp(&EditRecipe { temperature_k: Some(5000.0), ..Default::default() });
-        assert!(new.contains(r#"x:xmptk="Autoshop 2""#), "{new}");
+        assert!(new.contains(r#"x:xmptk="AutoShade 2""#), "{new}");
         let r2 = xmp_to_recipe(&new);
         assert_eq!(r2.temperature_k, Some(5000.0));
         assert_eq!(r2.as_shot_k, None, "era-2 Kelvin is absolute — no pin");
         // Foreign (Lightroom) sidecars are never pinned either.
-        let lr = old.replace("Autoshop", "Adobe XMP Core 7.0-c000");
+        let lr = old.replace("AutoShade", "Adobe XMP Core 7.0-c000");
         assert_eq!(xmp_to_recipe(&lr).as_shot_k, None, "foreign Kelvin is absolute");
         // A6 disclosure scanner: corrupt numbers are NAMED; parsable and
         // string-typed keys never flag; our own writer round-trips clean.
@@ -13871,15 +13871,15 @@ mod tests {
             ..Default::default()
         });
         assert!(unparsable_crs_numbers(&clean).is_empty());
-        // A MERGE into an old Autoshop document rewrites the WB attributes in
+        // A MERGE into an old AutoShade document rewrites the WB attributes in
         // absolute semantics — the era marker must upgrade with them.
         let merged = merged_doc(
             old,
             &EditRecipe { temperature_k: Some(6200.0), ..Default::default() },
         )
         .expect("mergeable");
-        assert!(merged.contains(r#"x:xmptk="Autoshop 2""#), "{merged}");
-        assert!(!merged.contains(r#"x:xmptk="Autoshop""#) || merged.contains("Autoshop 2"));
+        assert!(merged.contains(r#"x:xmptk="AutoShade 2""#), "{merged}");
+        assert!(!merged.contains(r#"x:xmptk="AutoShade""#) || merged.contains("AutoShade 2"));
         assert_eq!(xmp_to_recipe(&merged).as_shot_k, None, "upgraded doc is not pinned");
     }
 
@@ -14086,7 +14086,7 @@ mod tests {
             ..Default::default()
         };
         let merged = merged_doc(lr, &r).expect("a plain LR sidecar is mergeable");
-        // Everything Autoshop does not model survives. (The sample used to be
+        // Everything AutoShade does not model survives. (The sample used to be
         // `crs:Texture`; R25 B2 models it, so it is no longer an example of an
         // unmodelled global — it is an example of an owned one, which
         // `a_cleared_texture_disappears_from_a_merged_document` covers.)
@@ -14372,7 +14372,7 @@ mod tests {
 
     #[test]
     fn as_shot_tint_round_trips_only_for_our_own_sidecars() {
-        // Our writer emits a non-neutral Tint even under "As Shot"; the Autoshop
+        // Our writer emits a non-neutral Tint even under "As Shot"; the AutoShade
         // marker tells the reader it is a real edit.
         let r = EditRecipe { tint: 3.0, ..Default::default() };
         assert_eq!(xmp_to_recipe(&recipe_to_xmp(&r)).tint, 3.0);
@@ -14492,7 +14492,7 @@ mod tests {
 
     #[test]
     fn foreign_as_shot_sidecar_imports_no_wb_and_drops_identity_curves() {
-        // A Lightroom-style sidecar (no Autoshop marker): "As Shot" Temperature
+        // A Lightroom-style sidecar (no AutoShade marker): "As Shot" Temperature
         // and Tint are the CAMERA's values, not edits — they must NOT import.
         // LR also always writes the master curve; the 2-point identity means
         // "no curve" and must collapse to empty.
@@ -15287,14 +15287,14 @@ mod tests {
     /// the point of A is a correction that OMITS a slider, and the Lightroom
     /// fixture writes every one of them.
     ///
-    /// Authored by US (`x:xmptk="Autoshop 2"`), which matters for exactly one
+    /// Authored by US (`x:xmptk="AutoShade 2"`), which matters for exactly one
     /// thing: `component_import_reasons` accepts a `Mask/RangeMask` only on our
     /// own documents (someone else's range encoding is not ours to interpret).
     /// A Lightroom-authored fixture would drop the range for THAT reason and
     /// the B control below could not tell the two refusals apart.
     fn scope_bleed_doc(extra: &str, stray: &str) -> String {
         format!(
-            "<x:xmpmeta xmlns:x=\"adobe:ns:meta/\" x:xmptk=\"Autoshop 2\">\n\
+            "<x:xmpmeta xmlns:x=\"adobe:ns:meta/\" x:xmptk=\"AutoShade 2\">\n\
              <rdf:RDF xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\">\n\
              <rdf:Description rdf:about=\"\"\n\
              \x20 xmlns:crs=\"http://ns.adobe.com/camera-raw-settings/1.0/\"\n\
@@ -15723,7 +15723,7 @@ mod tests {
 
     fn mb_temp(tag: &str) -> (std::path::PathBuf, std::path::PathBuf) {
         let dir = std::env::temp_dir().join(format!(
-            "autoshop-mask-brush-{tag}-{}",
+            "autoshade-mask-brush-{tag}-{}",
             std::process::id()
         ));
         let _ = std::fs::remove_dir_all(&dir);
@@ -16117,8 +16117,8 @@ mod tests {
 
     #[test]
     fn env_mask_brush_sample_matches_stage_three_ground_truth() {
-        let Ok(root) = std::env::var("AUTOSHOP_MB_SAMPLE_ROOT") else {
-            eprintln!("SKIP env_mask_brush_sample_matches_stage_three_ground_truth: AUTOSHOP_MB_SAMPLE_ROOT unset");
+        let Ok(root) = std::env::var("AUTOSHADE_MB_SAMPLE_ROOT") else {
+            eprintln!("SKIP env_mask_brush_sample_matches_stage_three_ground_truth: AUTOSHADE_MB_SAMPLE_ROOT unset");
             return;
         };
         let root = std::path::Path::new(&root);

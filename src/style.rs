@@ -224,14 +224,14 @@ const _: () = assert!(
 /// environment could be reconfigured mid-run by an unrelated test — which is
 /// exactly what the S1 tests did, with 14 unsafe environment writes between them.
 /// The switch used to be *implemented* by mutating the environment too
-/// (`--no-embed` wrote `AUTOSHOP_STYLE_EMBED=0` into the process), so a CLI
+/// (`--no-embed` wrote `AUTOSHADE_STYLE_EMBED=0` into the process), so a CLI
 /// flag was a global side effect rather than an argument.
-const ENV_EMBED: &str = "AUTOSHOP_STYLE_EMBED";
-const ENV_DESCRIBE: &str = "AUTOSHOP_STYLE_DESCRIBE";
-const ENV_EMBED_WEIGHT: &str = "AUTOSHOP_STYLE_EMBED_WEIGHT";
-const ENV_TEXT_WEIGHT: &str = "AUTOSHOP_STYLE_TEXT_WEIGHT";
-const ENV_DESC_WEIGHT: &str = "AUTOSHOP_STYLE_DESC_WEIGHT";
-const ENV_LOOK_WEIGHT: &str = "AUTOSHOP_STYLE_LOOK_WEIGHT";
+const ENV_EMBED: &str = "AUTOSHADE_STYLE_EMBED";
+const ENV_DESCRIBE: &str = "AUTOSHADE_STYLE_DESCRIBE";
+const ENV_EMBED_WEIGHT: &str = "AUTOSHADE_STYLE_EMBED_WEIGHT";
+const ENV_TEXT_WEIGHT: &str = "AUTOSHADE_STYLE_TEXT_WEIGHT";
+const ENV_DESC_WEIGHT: &str = "AUTOSHADE_STYLE_DESC_WEIGHT";
+const ENV_LOOK_WEIGHT: &str = "AUTOSHADE_STYLE_LOOK_WEIGHT";
 
 /// Weight of the image-embedding block in retrieval — re-confirmed by the S2
 /// recalibration on the described index (`scripts/calibrate_style_retrieval.py`,
@@ -996,7 +996,7 @@ pub fn stage_embed_frame(
     // the constant tag "query" for every photo, so the moment two develops ran
     // concurrently in one process (the batch pool, which has shipped at three
     // workers since R26; the web server's request threads) they staged into the
-    // same `autoshop-embed-<pid>-query.png` and the same `.json`: one worker
+    // same `autoshade-embed-<pid>-query.png` and the same `.json`: one worker
     // embedded the other's frame and got a style vector for the wrong
     // photograph, and either one's cleanup deleted the other's file mid-run.
     // The seq belongs HERE rather than at the call site — that is the fix that
@@ -1004,7 +1004,7 @@ pub fn stage_embed_frame(
     // already passed a unique `idx-{i}` and was never affected).
     static TMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let stem = format!(
-        "autoshop-embed-{}-{}-{}",
+        "autoshade-embed-{}-{}-{}",
         std::process::id(),
         TMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
         tag
@@ -1064,14 +1064,14 @@ pub fn embed_preview(
 /// The phrase-list scratch file for ONE builder in ONE process.
 ///
 /// Named by `who` as well as the pid because both builders wrote
-/// `autoshop-look-vocab-<pid>.txt` and both DELETED it when finished: two
+/// `autoshade-look-vocab-<pid>.txt` and both DELETED it when finished: two
 /// builds in one process (the web server's request threads) shared a path, and
 /// whichever finished first took the other's vocabulary out from under it. A
 /// sequence number covers the same builder running twice.
 fn vocab_scratch_path(dir: &Path, who: &str) -> PathBuf {
     static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     dir.join(format!(
-        "autoshop-look-vocab-{who}-{}-{}.txt",
+        "autoshade-look-vocab-{who}-{}-{}.txt",
         std::process::id(),
         SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     ))
@@ -1111,7 +1111,7 @@ fn embed_desc_texts(
     std::fs::create_dir_all(dir)?;
     static TEXT_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let stem = format!(
-        "autoshop-embed-desc-{}-{}",
+        "autoshade-embed-desc-{}-{}",
         std::process::id(),
         TEXT_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     );
@@ -1192,12 +1192,12 @@ fn attach_desc_embeddings<R: DescribedRecord>(
 ///
 /// A struct rather than three parameters because the SCRATCH DIRECTORY is the
 /// load-bearing one and it used to be read from a global. `cargo test` runs
-/// with `AUTOSHOP_DATA_DIR` pointing at a real store (and, without it, at
-/// `%LOCALAPPDATA%/autoshop`), so a build driven by a test wrote its staged
+/// with `AUTOSHADE_DATA_DIR` pointing at a real store (and, without it, at
+/// `%LOCALAPPDATA%/autoshade`), so a build driven by a test wrote its staged
 /// frames — and, once S2 added one, its DESCRIPTION CACHE — into the user's
 /// own store, where a later live build would have served the stub sentences
 /// back. Observed, not theorised: a test run on 2026-08-30 left 16 entries of
-/// `"a stubbed grade sentence"` in `%LOCALAPPDATA%/autoshop/style-descriptions.json`.
+/// `"a stubbed grade sentence"` in `%LOCALAPPDATA%/autoshade/style-descriptions.json`.
 pub struct BuildSidecars {
     pub embed: crate::embed::EmbedOpts,
     pub describe: crate::describe::DescribeOpts,
@@ -1291,7 +1291,7 @@ fn embed_frames(
     std::fs::create_dir_all(dir)?;
     static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let stem = format!(
-        "autoshop-embed-frames-{}-{}",
+        "autoshade-embed-frames-{}-{}",
         std::process::id(),
         SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     );
@@ -1384,7 +1384,7 @@ fn attach_descriptions<R: DescribableRecord>(
     if !opts.available() {
         eprintln!(
             "  look descriptions requested but the sidecar is not at {} — the index carries \
-             attribute tags only (set AUTOSHOP_DESCRIBE_SCRIPT, or run from the project dir)",
+             attribute tags only (set AUTOSHADE_DESCRIBE_SCRIPT, or run from the project dir)",
             opts.script.display()
         );
         return;
@@ -1440,7 +1440,7 @@ fn attach_descriptions<R: DescribableRecord>(
     }
     static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let stem = format!(
-        "autoshop-describe-{}-{}",
+        "autoshade-describe-{}-{}",
         std::process::id(),
         SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     );
@@ -1510,7 +1510,7 @@ pub fn embed_preview_with_text(
     let mut o = crate::embed::EmbedOpts { python_bin: opts.python_bin.clone(), script: opts.script.clone(), text_file: None, vocab_file: opts.vocab_file.clone() };
     let text_path = if let Some(t) = text.filter(|s| !s.trim().is_empty()) {
         static TEXT_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let p = dir.join(format!("autoshop-embed-{}-{}-{tag}.txt", std::process::id(), TEXT_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)));
+        let p = dir.join(format!("autoshade-embed-{}-{}-{tag}.txt", std::process::id(), TEXT_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)));
         std::fs::write(&p, t)?;
         o.text_file = Some(p.clone());
         Some(p)
@@ -1826,7 +1826,7 @@ impl StyleIndex {
     /// [`build_looks`](Self::build_looks) over an explicit sidecar
     /// configuration — the seam its refusal test drives.
     ///
-    /// The test used to point `AUTOSHOP_EMBED_SCRIPT` at a nonexistent file
+    /// The test used to point `AUTOSHADE_EMBED_SCRIPT` at a nonexistent file
     /// with an unsafe environment write and put it back afterwards. `cargo test` runs on
     /// parallel threads in one process, so for the duration of that test EVERY
     /// other test's idea of where the sidecar lives was wrong. Same rule as the
@@ -1990,7 +1990,7 @@ impl StyleIndex {
                 } else {
                     eprintln!(
                         "  style embedding requested but the sidecar is not at {} — building the \
-                         14-dim index only (set AUTOSHOP_EMBED_SCRIPT, or run from the project dir)",
+                         14-dim index only (set AUTOSHADE_EMBED_SCRIPT, or run from the project dir)",
                         o.script.display()
                     );
                     false
@@ -2293,8 +2293,8 @@ impl StyleIndex {
         if self.exemplars.is_empty() && self.looks.is_empty() {
             anyhow::bail!(
                 "refusing to save an EMPTY style index over {} — no RAW had its .xmp sidecar \
-                 beside it (Autoshop keeps its own .xmp in the develop store, never beside your \
-                 RAWs, so an Autoshop output folder always yields 0). Point the build at your \
+                 beside it (AutoShade keeps its own .xmp in the develop store, never beside your \
+                 RAWs, so an AutoShade output folder always yields 0). Point the build at your \
                  Lightroom-edited folder; the existing index was left untouched.",
                 path.display()
             );
@@ -2374,7 +2374,7 @@ impl StyleIndex {
         if !READABLE_INDEX_VERSIONS.contains(&idx.version) {
             anyhow::bail!(
                 "style index {} is version {} (this build reads {:?}) — rebuild it: \
-                 autoshop style-index <dir>",
+                 autoshade style-index <dir>",
                 path.display(),
                 idx.version,
                 READABLE_INDEX_VERSIONS
@@ -2412,7 +2412,7 @@ impl StyleIndex {
             && !idx.looks.is_empty()
         {
             eprintln!(
-                "style index {} was built with look vocabulary v{stored} and this build speaks                  v{LOOK_VOCAB_VERSION} — its {} look record(s) are being ignored; rebuild the                  look library (autoshop style-index --looks <dir> --embed) to use them again",
+                "style index {} was built with look vocabulary v{stored} and this build speaks                  v{LOOK_VOCAB_VERSION} — its {} look record(s) are being ignored; rebuild the                  look library (autoshade style-index --looks <dir> --embed) to use them again",
                 path.display(),
                 idx.looks.len()
             );
@@ -3298,7 +3298,7 @@ mod tests {
     /// happy path only.
     #[test]
     fn a_staged_embedding_frame_is_reduced_and_cleans_up_after_itself() {
-        let dir = std::env::temp_dir().join(format!("autoshop-stage-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("autoshade-stage-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("scratch dir");
         // Deliberately larger than the embedding frame, and not square, so a
@@ -3571,7 +3571,7 @@ mod tests {
     #[test]
     fn family_summaries_are_optional_bounded_and_surfaced() {
         let path =
-            std::env::temp_dir().join(format!("autoshop-style-fam-{}.json", std::process::id()));
+            std::env::temp_dir().join(format!("autoshade-style-fam-{}.json", std::process::id()));
         // A LEGACY index file, written verbatim without the new key.
         let legacy = format!(
             "{{\"version\":{CURRENT_INDEX_VERSION},\"mean\":{m},\"std\":{s},\"exemplars\":[{{\
@@ -3710,7 +3710,7 @@ mod tests {
     #[test]
     fn load_validates_index_shape_and_bounds_prompt_values() {
         let path =
-            std::env::temp_dir().join(format!("autoshop-style-load-{}.json", std::process::id()));
+            std::env::temp_dir().join(format!("autoshade-style-load-{}.json", std::process::id()));
         let make = || StyleIndex {
             version: CURRENT_INDEX_VERSION,
             mean: vec![0.0; NDIM],
@@ -3777,7 +3777,7 @@ mod tests {
     #[test]
     fn load_rejects_out_of_band_feature_magnitudes() {
         let path = std::env::temp_dir()
-            .join(format!("autoshop-style-band-{}.json", std::process::id()));
+            .join(format!("autoshade-style-band-{}.json", std::process::id()));
         let make = || StyleIndex {
             version: CURRENT_INDEX_VERSION,
             mean: vec![0.0; NDIM],
@@ -3891,7 +3891,7 @@ mod tests {
     #[test]
     fn the_shared_status_read_reports_absent_built_and_unusable() {
         let dir = std::env::temp_dir()
-            .join(format!("autoshop-style-info-{}-{:?}", std::process::id(), std::thread::current().id()));
+            .join(format!("autoshade-style-info-{}-{:?}", std::process::id(), std::thread::current().id()));
         std::fs::create_dir_all(&dir).unwrap();
         let central = dir.join("style-index.json");
         let legacy = dir.join("legacy-style-index.json");
@@ -4201,7 +4201,7 @@ mod tests {
     /// old `!= CURRENT_INDEX_VERSION` and the v4 arm fails.
     #[test]
     fn a_v4_index_still_loads_and_a_v3_one_still_does_not() {
-        let dir = std::env::temp_dir().join(format!("autoshop-style-v5-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("autoshade-style-v5-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let write = |version: u32| {
@@ -4596,7 +4596,7 @@ mod tests {
 
     /// The two builders' vocabulary scratch files cannot collide.
     ///
-    /// Both wrote `autoshop-look-vocab-<pid>.txt` and both DELETED it when
+    /// Both wrote `autoshade-look-vocab-<pid>.txt` and both DELETED it when
     /// finished, so two builds in one process (the web server's request
     /// threads) shared one path and whichever finished first took the other's
     /// phrase list away mid-run.
@@ -4614,7 +4614,7 @@ mod tests {
         for p in [&a, &b, &c] {
             let name = p.file_name().unwrap().to_string_lossy().into_owned();
             assert!(name.contains(&std::process::id().to_string()), "{name}");
-            assert!(name.starts_with("autoshop-look-vocab-"), "{name}");
+            assert!(name.starts_with("autoshade-look-vocab-"), "{name}");
         }
     }
 
@@ -5462,7 +5462,7 @@ mod tests {
 
     #[test]
     fn look_build_refuses_without_the_sidecar_and_says_why() {
-        let dir = std::env::temp_dir().join(format!("autoshop-look-refuse-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("autoshade-look-refuse-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let absent_describer = || crate::describe::DescribeOpts {
             python_bin: "python".into(),
@@ -5513,7 +5513,7 @@ mod tests {
 
     #[test]
     fn look_build_rewrites_only_the_looks_block() {
-        let dir = std::env::temp_dir().join(format!("autoshop-look-merge-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("autoshade-look-merge-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir); std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("style-index.json");
         let raw = plain_exemplar("raw");
@@ -5976,7 +5976,7 @@ mod tests {
             s = serde_json::to_string(&vec![1.0f32; NDIM]).unwrap(),
             f = serde_json::to_string(&vec![0.0f32; NDIM]).unwrap(),
         );
-        let dir = std::env::temp_dir().join(format!("autoshop-s3-old-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("autoshade-s3-old-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("scratch dir");
         let path = dir.join("style-index.json");
         std::fs::write(&path, &pre_s3).expect("write");

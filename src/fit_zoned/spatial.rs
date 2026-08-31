@@ -1000,7 +1000,7 @@ mod tests {
             Rgb([value, value, value])
         }));
         let dir = std::env::temp_dir().join(format!(
-            "autoshop-tile-{tag}-{}",
+            "autoshade-tile-{tag}-{}",
             std::process::id(),
         ));
         std::fs::create_dir_all(&dir).unwrap();

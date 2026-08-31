@@ -1,4 +1,4 @@
-//! Autoshop — AI-assisted automatic development of RAW photographs.
+//! AutoShade — AI-assisted automatic development of RAW photographs.
 //!
 //! Architecture in one line: the AI advisor looks at a RAW preview + metadata
 //! and emits an [`recipe::EditRecipe`]; a deterministic render engine applies
@@ -12,21 +12,21 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use image::GenericImageView;
 
-// The engine modules now live in the `autoshop` library crate (src/lib.rs),
+// The engine modules now live in the `autoshade` library crate (src/lib.rs),
 // shared with the native GUI binary (src/bin/gui/main.rs and its module tree).
-use autoshop::{correspond, decode, denoise, eval, fit, generative, pipeline, render, retouch, serve};
-use autoshop::advisor::Verdict;
-use autoshop::config::Config;
-use autoshop::pipeline::{
+use autoshade::{correspond, decode, denoise, eval, fit, generative, pipeline, render, retouch, serve};
+use autoshade::advisor::Verdict;
+use autoshade::config::Config;
+use autoshade::pipeline::{
     default_out, ensure_parent, find_raws, produce_recipe, stem, write_recipe, write_xmp,
     GradeRequest,
 };
-use autoshop::recipe::{DirectionAdherence, EditRecipe, GradeStrength};
-use autoshop::style::StyleIndex;
+use autoshade::recipe::{DirectionAdherence, EditRecipe, GradeStrength};
+use autoshade::style::StyleIndex;
 
 #[derive(Parser)]
 #[command(
-    name = "autoshop",
+    name = "autoshade",
     version,
     about = "AI-assisted automatic development of RAW photographs",
     long_about = None
@@ -68,7 +68,7 @@ enum Command {
         #[arg(long)]
         guidance: Option<String>,
         /// How strongly to follow your historical edit style, 0..1 (needs a built
-        /// `style-index`). Omit to use AUTOSHOP_STYLE_STRENGTH (default 0.3).
+        /// `style-index`). Omit to use AUTOSHADE_STYLE_STRENGTH (default 0.3).
         #[arg(long, value_parser = unit_interval)]
         style: Option<f32>,
         /// How COMMITTED the grade should be, 0..1 — a different axis from
@@ -87,11 +87,11 @@ enum Command {
         /// Let the local SigLIP 2 sidecar answer the style query, so the look
         /// library and the embedding terms can rank. First run downloads
         /// ~1.5 GB of weights into python/weights and every call re-loads them.
-        /// Overrides AUTOSHOP_STYLE_EMBED for this run.
+        /// Overrides AUTOSHADE_STYLE_EMBED for this run.
         #[arg(long, conflicts_with = "no_embed")]
         embed: bool,
         /// Refuse the embedding sidecar for this run even if
-        /// AUTOSHOP_STYLE_EMBED is set: the 14-dim ranking only, and no look
+        /// AUTOSHADE_STYLE_EMBED is set: the 14-dim ranking only, and no look
         /// library.
         #[arg(long, conflicts_with = "embed")]
         no_embed: bool,
@@ -110,7 +110,7 @@ enum Command {
         /// the nearest RAW neighbour) rides the analysis as IMAGE 2. OFF by
         /// default — it puts one of YOUR OWN photographs on a paid vision call,
         /// and costs one extra image on every call of the run. The rationale
-        /// names the file that went. `AUTOSHOP_SEND_REFERENCE_IMAGE=1` makes it
+        /// names the file that went. `AUTOSHADE_SEND_REFERENCE_IMAGE=1` makes it
         /// the standing answer.
         #[arg(long)]
         reference_image: bool,
@@ -145,7 +145,7 @@ enum Command {
         #[arg(long)]
         guidance: Option<String>,
         /// How strongly to follow your historical edit style, 0..1 (needs a built
-        /// `style-index`). Omit for AUTOSHOP_STYLE_STRENGTH (default 0.3).
+        /// `style-index`). Omit for AUTOSHADE_STYLE_STRENGTH (default 0.3).
         #[arg(long, value_parser = unit_interval)]
         style: Option<f32>,
         /// How COMMITTED the grade should be, 0..1 (see `analyze --strength`);
@@ -162,11 +162,11 @@ enum Command {
         /// Let the local SigLIP 2 sidecar answer the style query, so the look
         /// library and the embedding terms can rank. First run downloads
         /// ~1.5 GB of weights into python/weights and every call re-loads them.
-        /// Overrides AUTOSHOP_STYLE_EMBED for this run.
+        /// Overrides AUTOSHADE_STYLE_EMBED for this run.
         #[arg(long, conflicts_with = "no_embed")]
         embed: bool,
         /// Refuse the embedding sidecar for this run even if
-        /// AUTOSHOP_STYLE_EMBED is set: the 14-dim ranking only, and no look
+        /// AUTOSHADE_STYLE_EMBED is set: the 14-dim ranking only, and no look
         /// library.
         #[arg(long, conflicts_with = "embed")]
         no_embed: bool,
@@ -179,7 +179,7 @@ enum Command {
         /// the nearest RAW neighbour) rides the analysis as IMAGE 2. OFF by
         /// default — it puts one of YOUR OWN photographs on a paid vision call,
         /// and costs one extra image on every call of the run. The rationale
-        /// names the file that went. `AUTOSHOP_SEND_REFERENCE_IMAGE=1` makes it
+        /// names the file that went. `AUTOSHADE_SEND_REFERENCE_IMAGE=1` makes it
         /// the standing answer.
         #[arg(long)]
         reference_image: bool,
@@ -293,10 +293,10 @@ enum Command {
         looks: Option<PathBuf>,
         /// Compute a SigLIP 2 vector per record as well as the 14-dim feature.
         /// First run downloads ~1.5 GB of weights into python/weights.
-        /// Overrides AUTOSHOP_STYLE_EMBED for this run.
+        /// Overrides AUTOSHADE_STYLE_EMBED for this run.
         #[arg(long, conflicts_with = "no_embed")]
         embed: bool,
-        /// Build the 14-dim index only, even if AUTOSHOP_STYLE_EMBED is set.
+        /// Build the 14-dim index only, even if AUTOSHADE_STYLE_EMBED is set.
         #[arg(long, conflicts_with = "embed")]
         no_embed: bool,
         /// Also write a short LOCAL description of each record's grade
@@ -346,7 +346,7 @@ enum Command {
         #[arg(long, default_value = "high")]
         fidelity: String,
         /// Output quality tier: low | medium | high | auto (higher = more detail,
-        /// higher cost). Defaults to AUTOSHOP_IMAGE_QUALITY (config default: high).
+        /// higher cost). Defaults to AUTOSHADE_IMAGE_QUALITY (config default: high).
         #[arg(long)]
         quality: Option<String>,
         /// Opt-in: when the result's structural divergence D reaches the
@@ -385,7 +385,7 @@ enum Command {
         zoned: bool,
         /// Maximum accepted semantic class regions for zoned fitting (the
         /// default is the historical two-region path; four is opt-in).
-        #[arg(long, default_value_t = autoshop::fit_zoned::semantic::DEFAULT_SEMANTIC_REGIONS)]
+        #[arg(long, default_value_t = autoshade::fit_zoned::semantic::DEFAULT_SEMANTIC_REGIONS)]
         regions: usize,
         /// Also extract a reusable style PROMPT from the pair via the vision
         /// model (./out/<stem>.style.txt; needs OPENAI_API_KEY).
@@ -446,7 +446,7 @@ enum Command {
         #[arg(long)]
         prompt: String,
         /// Output quality tier: low | medium | high | auto (higher = more detail,
-        /// higher cost). Defaults to AUTOSHOP_IMAGE_QUALITY (config default: high).
+        /// higher cost). Defaults to AUTOSHADE_IMAGE_QUALITY (config default: high).
         #[arg(long)]
         quality: Option<String>,
         /// Composite onto the full-sensor develop (e.g. 61 MP) instead of a
@@ -537,7 +537,7 @@ fn main() -> Result<()> {
             // `--describe` is a three-state read like `--embed`, minus the
             // negative flag: the description pass is off by default, so
             // "explicitly off" is what NOT passing it already means.
-            let prose = autoshop::style::DescribeSwitch::resolve(describe.then_some(true), false);
+            let prose = autoshade::style::DescribeSwitch::resolve(describe.then_some(true), false);
             if let Some(d) = looks {
                 style_looks_cmd(&d, switch, prose)
             } else {
@@ -608,7 +608,7 @@ fn correspond_cmd(source: &Path, target: &Path, out: Option<PathBuf>) -> Result<
     if !opts.available() {
         anyhow::bail!(
             "correspondence sidecar not found at {} — run from the project dir or set \
-             AUTOSHOP_CORRESPOND_SCRIPT",
+             AUTOSHADE_CORRESPOND_SCRIPT",
             opts.script.display()
         );
     }
@@ -617,7 +617,7 @@ fn correspond_cmd(source: &Path, target: &Path, out: Option<PathBuf>) -> Result<
     // downsizes to 768 px anyway — and a baked image is decoded the same way.
     let staged = |p: &Path, tag: &str| -> Result<PathBuf> {
         let dst = std::env::temp_dir()
-            .join(format!("autoshop-correspond-{}-{tag}.png", std::process::id()));
+            .join(format!("autoshade-correspond-{}-{tag}.png", std::process::id()));
         decode::preview_only(p)?
             .save(&dst)
             .with_context(|| format!("stage {} for the correspondence sidecar", p.display()))?;
@@ -662,13 +662,13 @@ fn correspond_cmd(source: &Path, target: &Path, out: Option<PathBuf>) -> Result<
 
 fn style_index_cmd(
     dir: &Path,
-    embed: autoshop::style::EmbeddingSwitch,
-    describe: autoshop::style::DescribeSwitch,
+    embed: autoshade::style::EmbeddingSwitch,
+    describe: autoshade::style::DescribeSwitch,
 ) -> Result<()> {
     let index = StyleIndex::build(dir, embed, describe)?;
     // Central per-user location: the index describes the user's whole library,
     // so it must not depend on which directory the command ran from.
-    let out = autoshop::store::style_index_path();
+    let out = autoshade::store::style_index_path();
     index.save(&out)?;
     println!(
         "style index → {} ({} exemplars). The advisor will now reference your edits on similar shots.",
@@ -686,13 +686,13 @@ fn style_index_cmd(
 /// Printed only when the pass was asked for AND covered something: 0 means
 /// either "never asked" or "reached nothing", and a line claiming 0 of N would
 /// read as a failure on every build that simply did not want prose.
-fn print_described(describe: autoshop::style::DescribeSwitch, described: usize, total: usize) {
+fn print_described(describe: autoshade::style::DescribeSwitch, described: usize, total: usize) {
     if !describe.on() || described == 0 {
         return;
     }
     println!(
         " {}",
-        autoshop::rationale::keys::STYLE_DESCRIBED
+        autoshade::rationale::keys::STYLE_DESCRIBED
             .trim()
             .replace("{n}", &described.to_string())
             .replace("{total}", &total.to_string())
@@ -701,11 +701,11 @@ fn print_described(describe: autoshop::style::DescribeSwitch, described: usize, 
 
 fn style_looks_cmd(
     dir: &Path,
-    embed: autoshop::style::EmbeddingSwitch,
-    describe: autoshop::style::DescribeSwitch,
+    embed: autoshade::style::EmbeddingSwitch,
+    describe: autoshade::style::DescribeSwitch,
 ) -> Result<()> {
     let index = StyleIndex::build_looks(dir, embed, describe, &|_| {})?;
-    let out = autoshop::store::style_index_path();
+    let out = autoshade::store::style_index_path();
     index.save(&out)?;
     println!("look library -> {} ({} finished photos)", out.display(), index.looks.len());
     print_described(describe, index.looks.iter().filter(|l| l.desc.is_some()).count(), index.looks.len());
@@ -714,16 +714,16 @@ fn style_looks_cmd(
 
 /// `--embed` / `--no-embed` as a VALUE, resolved once at the command's door.
 ///
-/// It used to be an `unsafe` write of `AUTOSHOP_STYLE_EMBED` into the process
+/// It used to be an `unsafe` write of `AUTOSHADE_STYLE_EMBED` into the process
 /// environment at three sites: a CLI flag implemented as a global side effect,
 /// read back several call frames later. `cargo test` runs tests on parallel
 /// threads in one process, so that made the switch a shared mutable global the
 /// retrieval happened to read — see `style::EmbeddingSwitch`.
-fn embed_switch(embed: bool, no_embed: bool) -> autoshop::style::EmbeddingSwitch {
+fn embed_switch(embed: bool, no_embed: bool) -> autoshade::style::EmbeddingSwitch {
     // clap already refuses both at once (`conflicts_with`), so this is a
     // three-state read, not a precedence decision.
     let flag = embed.then_some(true).or(no_embed.then_some(false));
-    autoshop::style::EmbeddingSwitch::resolve(flag, false)
+    autoshade::style::EmbeddingSwitch::resolve(flag, false)
 }
 
 /// The two standardised text terms as the diagnostic prints them: the term that
@@ -737,7 +737,7 @@ fn embed_switch(embed: bool, no_embed: bool) -> autoshop::style::EmbeddingSwitch
 /// z-scored and `,raw-fallback` its disclosed give-up (fewer than three
 /// comparable candidates, or a degenerate spread); the shipped RAW variant
 /// prints neither, because for it the weighted gap is not a fallback.
-fn fmt_text_terms(t: &autoshop::style::DistanceTerms) -> String {
+fn fmt_text_terms(t: &autoshade::style::DistanceTerms) -> String {
     let one = |label: &str, term: f64, gap: Option<f64>, standardised: bool| -> String {
         let raw = gap.map(|g| format!("{g:.6}")).unwrap_or_else(|| "–".into());
         // `z` marks a term the ranking z-scored; nothing marks the raw
@@ -745,7 +745,7 @@ fn fmt_text_terms(t: &autoshop::style::DistanceTerms) -> String {
         // STANDARDISED variant giving up on a candidate set it could not
         // standardise — printing it on every line of a raw-variant run would
         // report a degradation that did not happen.
-        let mark = match (autoshop::style::STANDARDISE_TEXT_TERMS, standardised) {
+        let mark = match (autoshade::style::STANDARDISE_TEXT_TERMS, standardised) {
             (true, true) => ",z",
             (true, false) => ",raw-fallback",
             (false, _) => "",
@@ -771,7 +771,7 @@ fn fmt_text_terms(t: &autoshop::style::DistanceTerms) -> String {
 /// Absent prose prints NOTHING rather than an empty field, so a pre-S2 index
 /// and an index built with the switch off read exactly as they did before.
 fn fmt_desc(desc: Option<&str>) -> String {
-    desc.and_then(autoshop::describe::sanitize_desc)
+    desc.and_then(autoshade::describe::sanitize_desc)
         .map(|d| format!(" desc=\"{d}\""))
         .unwrap_or_default()
 }
@@ -786,10 +786,10 @@ fn fmt_desc(desc: Option<&str>) -> String {
 ///
 /// An unmeasured neighbour (a pre-S3 index) prints NOTHING rather than
 /// `masks=0`, which would claim a photographer works globally when the truth is
-/// that nobody looked — the same distinction [`autoshop::mask_habit::MaskHabit`]
+/// that nobody looked — the same distinction [`autoshade::mask_habit::MaskHabit`]
 /// keeps in its three states.
-fn fmt_masks(masks: Option<&autoshop::mask_habit::MaskHabit>) -> String {
-    use autoshop::mask_habit::Bucket;
+fn fmt_masks(masks: Option<&autoshade::mask_habit::MaskHabit>) -> String {
+    use autoshade::mask_habit::Bucket;
     masks
         .map(|h| {
             format!(
@@ -820,30 +820,30 @@ fn style_query_cmd(
     photo: &Path,
     direction: Option<&str>,
     style: f32,
-    embed: autoshop::style::EmbeddingSwitch,
+    embed: autoshade::style::EmbeddingSwitch,
 ) -> Result<()> {
     let decoded = decode::decode_any(photo)?;
-    let idx = match autoshop::style::load_effective() {
-        autoshop::style::EffectiveIndex::Loaded(ix, _) => ix,
-        autoshop::style::EffectiveIndex::Absent => anyhow::bail!("style index is absent"),
-        autoshop::style::EffectiveIndex::Unusable { err, .. } => anyhow::bail!("style index unusable: {err}"),
+    let idx = match autoshade::style::load_effective() {
+        autoshade::style::EffectiveIndex::Loaded(ix, _) => ix,
+        autoshade::style::EffectiveIndex::Absent => anyhow::bail!("style index is absent"),
+        autoshade::style::EffectiveIndex::Unusable { err, .. } => anyhow::bail!("style index unusable: {err}"),
     };
     // Resolved ONCE, printed, then passed to every scorer below: the diagnostic
     // cannot be read against weights it did not state.
-    let weights = autoshop::style::RetrievalWeights::from_env();
+    let weights = autoshade::style::RetrievalWeights::from_env();
     println!(
         "weights: W_EMB={:.6} W_TXT={:.6} W_DESC={:.6} W_LOOK={:.6}  text-term variant: {}",
         weights.emb, weights.txt, weights.desc, weights.look,
-        if autoshop::style::STANDARDISE_TEXT_TERMS { "standardised (z-scored per query)" } else { "raw (the calibrated winner)" }
+        if autoshade::style::STANDARDISE_TEXT_TERMS { "standardised (z-scored per query)" } else { "raw (the calibrated winner)" }
     );
     let (mut qi, mut qt) = (None, None);
     let mut embedding_status = "disabled (embedding switch is off)".to_string();
     if embed.on() {
-        let opts = autoshop::embed::EmbedOpts::from_config(&Config::load());
+        let opts = autoshade::embed::EmbedOpts::from_config(&Config::load());
         if !opts.available() {
             embedding_status = "unavailable (style-embedding sidecar is not present)".into();
         } else {
-            match autoshop::style::embed_preview_with_text(&opts, &decoded.preview, &std::env::temp_dir(), "style-query", direction) {
+            match autoshade::style::embed_preview_with_text(&opts, &decoded.preview, &std::env::temp_dir(), "style-query", direction) {
                 Ok(r) => {
                     qi = Some(r.vector);
                     qt = r.text_vector;
@@ -854,7 +854,7 @@ fn style_query_cmd(
         }
     }
     println!("embedding: {embedding_status}");
-    let query = autoshop::style::StyleQuery::new(qi.as_deref(), qt.as_deref(), weights);
+    let query = autoshade::style::StyleQuery::new(qi.as_deref(), qt.as_deref(), weights);
     let (ex, looks_scored) = (
         pipeline::retrieve_style(&idx, &decoded.meta, &decoded.histogram, query, photo, true).0,
         idx.retrieve_looks_with_terms(query, 2),
@@ -878,7 +878,7 @@ fn style_query_cmd(
     // The SHARED fence constants, not a second literal: the point of printing
     // the proposer's block is that it is the proposer's block.
     println!("reference (proposer block):\n{}", reference.as_deref()
-        .map(|r| format!("{}{r}", autoshop::advisor::FENCE_STYLE_REFERENCE))
+        .map(|r| format!("{}{r}", autoshade::advisor::FENCE_STYLE_REFERENCE))
         .unwrap_or_else(|| "(none)".into()));
     if looks.is_empty() {
         if idx.looks.is_empty() {
@@ -889,10 +889,10 @@ fn style_query_cmd(
     } else {
         // …and the block is worded from the WEIGHTS, like the develop's:
         // "and direction" appears only when a text weight is non-zero.
-        let by_direction = autoshop::style::StyleIndex::look_ranked_by_direction(query);
+        let by_direction = autoshade::style::StyleIndex::look_ranked_by_direction(query);
         println!(
             "look reference (proposer block):\n{}{}",
-            autoshop::advisor::FENCE_LOOK_REFERENCE,
+            autoshade::advisor::FENCE_LOOK_REFERENCE,
             idx.render_look_reference(&looks, by_direction).unwrap_or_default()
         );
         for (l, t) in &looks_scored {
@@ -905,12 +905,12 @@ fn style_query_cmd(
     }
     println!("disclosure notes:");
     if !ex.is_empty() {
-        println!("  {}", autoshop::rationale::keys::STYLE_NEIGHBOURS
-            .replace("{files}", &autoshop::style::neighbour_stems(&ex).join(", "))
+        println!("  {}", autoshade::rationale::keys::STYLE_NEIGHBOURS
+            .replace("{files}", &autoshade::style::neighbour_stems(&ex).join(", "))
             .replace("{n}", &ex.len().to_string()));
     }
     if let Some(first) = looks.first() {
-        println!("  {}", autoshop::rationale::keys::STYLE_LOOK_REFERENCE
+        println!("  {}", autoshade::rationale::keys::STYLE_LOOK_REFERENCE
             .replace("{stem}", &first.stem)
             .replace("{tags}", &first.tags.join(", ")));
         // The develop emits this one only when the look ALSO went to the vision
@@ -919,21 +919,21 @@ fn style_query_cmd(
         // line is a forecast and not a claim about this run.
         println!(
             "  (with the reference-image option on) {}",
-            autoshop::rationale::keys::STYLE_LOOK_IMAGE.replace("{stem}", &first.stem)
+            autoshade::rationale::keys::STYLE_LOOK_IMAGE.replace("{stem}", &first.stem)
         );
     } else if !idx.looks.is_empty() {
-        println!("  {}", autoshop::rationale::keys::STYLE_LOOKS_UNREACHABLE
+        println!("  {}", autoshade::rationale::keys::STYLE_LOOKS_UNREACHABLE
             .replace("{n}", &idx.looks.len().to_string()));
     }
     // DERIVED, through the pipeline's own mapping. It used to print the literal
     // "direct" whatever the dial said — a diagnostic that reported a tier the
     // develop would not have used. `style-query` has no `--adherence` flag, so
     // the dial is the shipped default and the line says which that is.
-    let adherence = autoshop::recipe::DirectionAdherence::default();
+    let adherence = autoshade::recipe::DirectionAdherence::default();
     if let Some(tier) = pipeline::direction_adherence_tier(direction, adherence) {
         println!(
             "  {}   (from the DEFAULT adherence dial {:.2}; `analyze --adherence` moves it)",
-            autoshop::rationale::keys::ADVISOR_NOTE_DIRECTION_ADHERENCE.replace("{tier}", tier),
+            autoshade::rationale::keys::ADVISOR_NOTE_DIRECTION_ADHERENCE.replace("{tier}", tier),
             adherence.get()
         );
     }
@@ -1062,17 +1062,17 @@ fn lightroom_import_note(raw: &Path) -> Option<String> {
         return None;
     }
     let lr = raw.with_extension("xmp");
-    let autoshop::store::SidecarRead::Ok(text) = autoshop::store::read_sidecar_checked(&lr) else {
+    let autoshade::store::SidecarRead::Ok(text) = autoshade::store::read_sidecar_checked(&lr) else {
         return None;
     };
-    let losses = autoshop::xmp::import_losses_for_photo(&text, raw);
+    let losses = autoshade::xmp::import_losses_for_photo(&text, raw);
     // The count the reader WOULD carry — the same number the GUI's open path
     // passes (`bin/gui/export.rs`), so the two surfaces cannot report the same
     // file differently. Taken through the CLAMPED door (R28 2b) because the
     // third sentence below needs what the size caps cut, and re-parsing the
     // document to learn it would be a second producer of one fact.
-    let diag = autoshop::diag::photo(raw);
-    let (parsed, clamped) = autoshop::xmp::xmp_to_recipe_clamped_with_diag(&text, &diag);
+    let diag = autoshade::diag::photo(raw);
+    let (parsed, clamped) = autoshade::xmp::xmp_to_recipe_clamped_with_diag(&text, &diag);
     let imported = parsed.masks.len();
     // The mask sentence and the CROP sentence (R27) ride together: a file can
     // lose either, both or neither, and a `?` on the first would have swallowed
@@ -1082,8 +1082,8 @@ fn lightroom_import_note(raw: &Path) -> Option<String> {
     // a 393 KB dab stream truncated to 256 KiB is a real change to the mask
     // this photo will render, and it used to be said nowhere at all.
     let line = [
-        autoshop::xmp::describe_import_losses(imported, &losses),
-        autoshop::xmp::crop_import_note(&text),
+        autoshade::xmp::describe_import_losses(imported, &losses),
+        autoshade::xmp::crop_import_note(&text),
         (!clamped.is_empty())
             .then(|| format!("recipe limits then discarded {}", clamped.describe())),
     ]
@@ -1118,9 +1118,9 @@ fn require_choice(flag: &str, value: &str, allowed: &[&str]) -> Result<()> {
 /// The two TASTE dials, resolved from `analyze`/`auto`'s flags — ONE place, so
 /// the two single-photo commands can never diverge (R23-3).
 ///
-/// `--style` omitted falls back to the configured `AUTOSHOP_STYLE_STRENGTH`, as
+/// `--style` omitted falls back to the configured `AUTOSHADE_STYLE_STRENGTH`, as
 /// it always has. `--strength` omitted is the SHIPPED default (0.65), not the
-/// calibration point: `autoshop analyze` and a double-clicked GUI must develop
+/// calibration point: `autoshade analyze` and a double-clicked GUI must develop
 /// the same photo the same way when neither is told otherwise.
 fn analyze_request(
     style: Option<f32>,
@@ -1128,7 +1128,7 @@ fn analyze_request(
     adherence: Option<f32>,
     deep: bool,
     reference_image: bool,
-    embed: autoshop::style::EmbeddingSwitch,
+    embed: autoshade::style::EmbeddingSwitch,
     cfg: &Config,
 ) -> GradeRequest {
     GradeRequest {
@@ -1148,7 +1148,7 @@ fn analyze_request(
         // instead of being read back out of the process environment several
         // frames down (see `style::EmbeddingSwitch`).
         embed,
-        weights: autoshop::style::RetrievalWeights::from_env(),
+        weights: autoshade::style::RetrievalWeights::from_env(),
         // R23-4: opt-in per invocation, and per invocation only — `batch`
         // builds its request through `GradeRequest::with_style`, which has no
         // way to reach this flag.
@@ -1166,7 +1166,7 @@ fn analyze_cmd(
     adherence: Option<f32>,
     deep: bool,
     reference_image: bool,
-    embed: autoshop::style::EmbeddingSwitch,
+    embed: autoshade::style::EmbeddingSwitch,
 ) -> Result<()> {
     let cfg = Config::load();
     if let Some(o) = &out {
@@ -1182,14 +1182,14 @@ fn analyze_cmd(
     // (batch passes false — spend never multiplies silently).
     let req = analyze_request(style, strength, adherence, deep, reference_image, embed, &cfg);
     let (recipe, verdict, _notes) =
-        produce_recipe(raw, &cfg, true, guidance.as_deref(), None, req, true, autoshop::diag::stderr())?;
+        produce_recipe(raw, &cfg, true, guidance.as_deref(), None, req, true, autoshade::diag::stderr())?;
     // Remember whether -o redirected the recipe: the XMP has to follow it (below)
     // so one develop never splits across two folders. `-o` POINTING AT the
     // canonical path IS a canonical write — out.is_some() alone let that
     // spelling skip the backup gate and drop the XMP beside it as
     // recipe.xmp instead of the canonical <stem>.xmp.
     let redirected =
-        out.as_ref().is_some_and(|o| !same_path(o, &autoshop::store::recipe_target(raw)));
+        out.as_ref().is_some_and(|o| !same_path(o, &autoshade::store::recipe_target(raw)));
 
     println!("\n--- proposed recipe ---");
     println!("{}", serde_json::to_string_pretty(&recipe)?);
@@ -1201,9 +1201,9 @@ fn analyze_cmd(
     // itself judged the result not ready, so the canonical develop stays
     // untouched. A redirected -o is an explicit destination that never
     // touches the develop — it still writes, whatever the verdict.
-    if !redirected && verdict.decision != autoshop::advisor::Decision::Accept {
+    if !redirected && verdict.decision != autoshade::advisor::Decision::Accept {
         println!("\nNOT saved: verdict {:?} — a non-Accept verdict never auto-saves.", verdict.decision);
-        println!("  keep it anyway: save the JSON above to a file and render it via  autoshop apply,");
+        println!("  keep it anyway: save the JSON above to a file and render it via  autoshade apply,");
         println!("  or steer with  --guidance \"…\"  and re-run analyze.");
         return Ok(());
     }
@@ -1214,11 +1214,11 @@ fn analyze_cmd(
     // canonical develop untouched and needs no gate.
     let save = || -> Result<()> {
     if !redirected
-        && let Err(e) = autoshop::store::backup_saved_develop(raw, Some(&recipe))
+        && let Err(e) = autoshade::store::backup_saved_develop(raw, Some(&recipe))
     {
         anyhow::bail!("refusing to overwrite the saved develop: backing it up failed ({e})");
     }
-    let recipe_path = write_recipe(raw, &recipe, out, autoshop::diag::stderr())?;
+    let recipe_path = write_recipe(raw, &recipe, out, autoshade::diag::stderr())?;
     println!("\nrecipe -> {}", recipe_path.display());
     // XMP only for a RAW; a baked source (PNG/TIFF) gets the recipe JSON only.
     if decode::is_raw(raw) {
@@ -1242,10 +1242,10 @@ fn analyze_cmd(
                     recipe_path.display()
                 ))
             } else {
-                pipeline::write_xmp_at(side, &recipe, &autoshop::diag::photo(raw))
+                pipeline::write_xmp_at(side, &recipe, &autoshade::diag::photo(raw))
             }
         } else {
-            write_xmp(raw, &recipe, autoshop::diag::stderr())
+            write_xmp(raw, &recipe, autoshade::diag::stderr())
         };
         match projected {
             // The merge note AND the mask-projection loss line (if any)
@@ -1266,11 +1266,11 @@ fn analyze_cmd(
             println!("  (written beside the -o recipe so the pair stays together; the GUI/web restore from");
             println!(
                 "   {} — copy both files there to make them see it)",
-                autoshop::store::develop_dir(raw).display()
+                autoshade::store::develop_dir(raw).display()
             );
         }
         // R27 A3: this line used to end in a literal ".ARW", so
-        // `autoshop analyze shot.CR3` told the photographer to put the sidecar
+        // `autoshade analyze shot.CR3` told the photographer to put the sidecar
         // next to a "shot.ARW" that does not exist. The source's OWN file name
         // is the only correct answer — and a sidecar's name must match the
         // photo it belongs to for Lightroom to find it at all.
@@ -1288,9 +1288,9 @@ fn analyze_cmd(
     if redirected {
         save()
     } else {
-        autoshop::store::with_develop_lock(
+        autoshade::store::with_develop_lock(
             raw,
-            autoshop::store::DevelopLockMode::Wait,
+            autoshade::store::DevelopLockMode::Wait,
             save,
         )
     }
@@ -1328,14 +1328,14 @@ fn export_opts(long_edge: Option<u32>) -> Option<render::ExportOpts> {
 }
 
 fn apply_cmd(raw: &Path, recipe_path: &Path, out: &Path, long_edge: Option<u32>) -> Result<()> {
-    let text = autoshop::store::read_text_capped(recipe_path, autoshop::store::MAX_STORE_JSON)
+    let text = autoshade::store::read_text_capped(recipe_path, autoshade::store::MAX_STORE_JSON)
         .with_context(|| format!("read recipe {}", recipe_path.display()))?;
     let mut recipe: EditRecipe =
         serde_json::from_str(&text).with_context(|| format!("parse recipe {}", recipe_path.display()))?;
     // Store-written recipes reference their rasters by bare file name — anchor
     // them to the recipe's own directory (legacy cwd-relative refs untouched).
     if let Some(base) = recipe_path.parent() {
-        autoshop::store::resolve_mask_paths(&mut recipe, base);
+        autoshade::store::resolve_mask_paths(&mut recipe, base);
     }
     // A recipe FILE may predate the coordinate-frame era, so its crop and
     // masks may be drawn against the sensor frame of a rotated RAW. Migrated
@@ -1375,7 +1375,7 @@ fn apply_cmd(raw: &Path, recipe_path: &Path, out: &Path, long_edge: Option<u32>)
     // exactly when a repaired curve reaches pixels — the advisory peek this
     // replaces re-ran read_pixel_source for the same answer, doubling its
     // stderr warnings and its .bak recovery on the very path that refuses.
-    let (src, relook) = autoshop::store::render_source_checked(raw, &mut recipe)
+    let (src, relook) = autoshade::store::render_source_checked(raw, &mut recipe)
         .map_err(|m| anyhow::anyhow!(m))?;
     if let Some(note) = relook {
         println!("note: {note}");
@@ -1399,7 +1399,7 @@ fn apply_cmd(raw: &Path, recipe_path: &Path, out: &Path, long_edge: Option<u32>)
     // recorded. This site used to pass `src` for both, so a photo with a saved
     // master keyed its alpha on the master's path and looked for the cache in a
     // develop directory belonging to no photo.
-    let ai = autoshop::segment::resolve_ai_masks(&Config::load(), raw, &src, &mut recipe);
+    let ai = autoshade::segment::resolve_ai_masks(&Config::load(), raw, &src, &mut recipe);
     if let Some(line) = ai.describe() {
         println!("ai mask : {line}");
     }
@@ -1410,7 +1410,7 @@ fn apply_cmd(raw: &Path, recipe_path: &Path, out: &Path, long_edge: Option<u32>)
     // different file size.
     let export = export_opts(long_edge);
     let (w, h) =
-        render::render_to_file(&src, &recipe, out, None, export.as_ref(), autoshop::diag::stderr())?;
+        render::render_to_file(&src, &recipe, out, None, export.as_ref(), autoshade::diag::stderr())?;
     println!("render -> {} ({} x {})", out.display(), w, h);
     Ok(())
 }
@@ -1429,7 +1429,7 @@ fn auto_cmd(
     denoise_strength: Option<f32>,
     denoise_model: Option<String>,
     long_edge: Option<u32>,
-    embed: autoshop::style::EmbeddingSwitch,
+    embed: autoshade::style::EmbeddingSwitch,
 ) -> Result<()> {
     let cfg = Config::load();
     // Validate the render target BEFORE the PAID AI call (and before touching
@@ -1453,8 +1453,8 @@ fn auto_cmd(
     // judge = true: `auto` is the explicit one-shot develop of ONE photo —
     // same interactive class as analyze (batch passes false).
     let (recipe, verdict, _notes) =
-        produce_recipe(raw, &cfg, true, guidance.as_deref(), None, req, true, autoshop::diag::stderr())?;
-    let accepted = verdict.decision == autoshop::advisor::Decision::Accept;
+        produce_recipe(raw, &cfg, true, guidance.as_deref(), None, req, true, autoshade::diag::stderr())?;
+    let accepted = verdict.decision == autoshade::advisor::Decision::Accept;
     // Opt-in AI denoise runs inside the render, before tone/sharpen.
     let dn = denoise
         .then(|| denoise::DenoiseOpts::from_config(&cfg, denoise_model, denoise_strength.unwrap_or(1.0)));
@@ -1505,24 +1505,24 @@ fn auto_cmd(
     // order as before.
     // DELIVERABLE: a recorded master that cannot be honoured refuses with the
     // remedy instead of silently rendering the un-retouched RAW (A6).
-    let (src, relook, xmp_result) = autoshop::store::with_develop_lock(
+    let (src, relook, xmp_result) = autoshade::store::with_develop_lock(
         raw,
-        autoshop::store::DevelopLockMode::Wait,
+        autoshade::store::DevelopLockMode::Wait,
         || -> Result<_> {
             if accepted {
                 // Same backup gate as analyze: `auto` is a programmatic
                 // canonical writer.
-                if let Err(e) = autoshop::store::backup_saved_develop(raw, Some(&recipe)) {
+                if let Err(e) = autoshade::store::backup_saved_develop(raw, Some(&recipe)) {
                     anyhow::bail!(
                         "refusing to overwrite the saved develop: backing it up failed ({e})"
                     );
                 }
-                write_recipe(raw, &recipe, None, autoshop::diag::stderr())?;
+                write_recipe(raw, &recipe, None, autoshade::diag::stderr())?;
             }
-            let (src, relook) = autoshop::store::render_source_checked(raw, &mut render_recipe)
+            let (src, relook) = autoshade::store::render_source_checked(raw, &mut render_recipe)
                 .map_err(|m| anyhow::anyhow!(m))?;
             let xmp_result =
-                (accepted && decode::is_raw(raw)).then(|| write_xmp(raw, &recipe, autoshop::diag::stderr()));
+                (accepted && decode::is_raw(raw)).then(|| write_xmp(raw, &recipe, autoshade::diag::stderr()));
             Ok((src, relook, xmp_result))
         },
     )?;
@@ -1540,7 +1540,7 @@ fn auto_cmd(
     // resolved raster paths never reach the saved recipe from here — the cache
     // is keyed by the photo, the intent and the frame, so the next develop
     // finds the same file anyway.
-    let ai = autoshop::segment::resolve_ai_masks(&cfg, raw, &src, &mut render_recipe);
+    let ai = autoshade::segment::resolve_ai_masks(&cfg, raw, &src, &mut render_recipe);
     if let Some(line) = ai.describe() {
         println!("ai mask : {line}");
     }
@@ -1550,7 +1550,7 @@ fn auto_cmd(
         &out,
         dn.as_ref(),
         export.as_ref(),
-        autoshop::diag::stderr(),
+        autoshade::diag::stderr(),
     )?;
     println!("render -> {} ({} x {})", out.display(), w, h);
     // XMP only for a RAW (Lightroom reads it beside the RAW); a baked source
@@ -1561,7 +1561,7 @@ fn auto_cmd(
         // above is this command's explicit deliverable, but the develop and
         // its XMP stay untouched. Print the recipe so nothing is lost.
         println!("develop NOT saved: verdict {:?} — a non-Accept verdict never auto-saves.", verdict.decision);
-        println!("--- proposed recipe (render it again via  autoshop apply) ---");
+        println!("--- proposed recipe (render it again via  autoshade apply) ---");
         println!("{}", serde_json::to_string_pretty(&recipe)?);
     } else {
         // Written under the lock above; only SAID here, in the old order.
@@ -1611,7 +1611,7 @@ fn denoise_cmd(
     if decode::is_raw(input) {
         println!("denoising RAW {} (neutral develop) ...", input.display());
         let (w, h) =
-            render::render_to_file(input, &EditRecipe::default(), &out, Some(&opts), None, autoshop::diag::stderr())?;
+            render::render_to_file(input, &EditRecipe::default(), &out, Some(&opts), None, autoshade::diag::stderr())?;
         println!("denoised -> {} ({} x {})", out.display(), w, h);
     } else {
         println!("denoising image {} ...", input.display());
@@ -1641,11 +1641,11 @@ fn match_cmd(
     strength: Option<f32>,
     out: Option<PathBuf>,
 ) -> Result<()> {
-    if !(autoshop::fit_zoned::semantic::DEFAULT_SEMANTIC_REGIONS..=autoshop::fit_zoned::semantic::MAX_SEMANTIC_REGIONS).contains(&regions) {
+    if !(autoshade::fit_zoned::semantic::DEFAULT_SEMANTIC_REGIONS..=autoshade::fit_zoned::semantic::MAX_SEMANTIC_REGIONS).contains(&regions) {
         anyhow::bail!(
             "--regions must be between {} and {}",
-            autoshop::fit_zoned::semantic::DEFAULT_SEMANTIC_REGIONS,
-            autoshop::fit_zoned::semantic::MAX_SEMANTIC_REGIONS,
+            autoshade::fit_zoned::semantic::DEFAULT_SEMANTIC_REGIONS,
+            autoshade::fit_zoned::semantic::MAX_SEMANTIC_REGIONS,
         );
     }
     // BEFORE any fitting/segmentation is paid for: `-o` naming the photo's
@@ -1672,7 +1672,7 @@ fn match_cmd(
     // consumers (the fit analyses at 384, the judge at 1024) and preserves
     // aspect, which the same-frame check reads.
     const MATCH_REF_EDGE: u32 = 2048;
-    let tgt = autoshop::render::source_pixels(target, Some(MATCH_REF_EDGE))?;
+    let tgt = autoshade::render::source_pixels(target, Some(MATCH_REF_EDGE))?;
     if decode::is_raw(target) {
         // Said out loud, because it is the one way this entry can mislead: a
         // RAW carries no look of its own here. `source_pixels` develops it
@@ -1690,10 +1690,10 @@ fn match_cmd(
     // sidecar — the fit's own D gate decides IF (content-divergent pairs
     // only), first-run weight download included. Failures degrade into the
     // rationale, never fail the fit.
-    let corr = autoshop::correspond::fit_provider(
-        autoshop::correspond::CorrespondOpts::from_config(&Config::load()),
+    let corr = autoshade::correspond::fit_provider(
+        autoshade::correspond::CorrespondOpts::from_config(&Config::load()),
     );
-    let fit_options = fit::FitOptions { strength: autoshop::recipe::GradeStrength::from_optional(strength), provider: Some(&corr) };
+    let fit_options = fit::FitOptions { strength: autoshade::recipe::GradeStrength::from_optional(strength), provider: Some(&corr) };
     println!("  reverse-fit strength: {:.0}%", fit_options.strength.get() * 100.0);
     let run_fit = |seg_on: bool| -> Result<fit::FitReport> {
         Ok(if seg_on {
@@ -1706,25 +1706,25 @@ fn match_cmd(
         // attached by reference, never found by filename), so the two must
         // be written together.
         let cfg = Config::load();
-        let seg = autoshop::segment::SegmentOpts::from_config(&cfg, "sky");
+        let seg = autoshade::segment::SegmentOpts::from_config(&cfg, "sky");
         // No pre-fit snapshot anymore: claimed unique rasters mean the fit
         // touches nothing the saved develop references, and gating MINUTES
         // before the write left a race window — a save landing during the
         // segmentation was then overwritten unversioned. The canonical write
         // below gates for the zoned path too, immediately before writing.
-        let mask = autoshop::store::OwnedRaster::claim(raw, "mask-zone-sky")?;
+        let mask = autoshade::store::OwnedRaster::claim(raw, "mask-zone-sky")?;
         pipeline::guard_readonly(mask.path(), raw)?;
         println!(
             "  zoned: global -> semantic regions or native luminance ranges -> spatial tiles"
         );
-        autoshop::fit_zoned::fit_recipe_zoned_with_regions(
+        autoshade::fit_zoned::fit_recipe_zoned_with_regions(
             &src,
             &tgt,
             &seg,
             &mask,
             &EditRecipe::default(),
             fit_options,
-            regions.min(autoshop::fit_zoned::semantic::MAX_SEMANTIC_REGIONS),
+            regions.min(autoshade::fit_zoned::semantic::MAX_SEMANTIC_REGIONS),
         )
         } else {
             fit::fit_recipe_with(&src, &tgt, fit_options)
@@ -1750,7 +1750,7 @@ fn match_cmd(
     // after the calibration stamp below the same render would apply the base
     // curve a second time. Informational: a failure warns, never errs.
     const JUDGE_EDGE: u32 = 1024; // detail:high tiles at 512 px — 4 tiles read a grade
-    let judge_of = |recipe: &EditRecipe| -> Result<autoshop::advisor::Judgement> {
+    let judge_of = |recipe: &EditRecipe| -> Result<autoshade::advisor::Judgement> {
         let cfg = Config::load();
         let enc = |img: &image::DynamicImage| -> Result<Vec<u8>> {
             let mut j = Vec::new();
@@ -1758,13 +1758,13 @@ fn match_cmd(
             Ok(j)
         };
         let fitted =
-            autoshop::render::develop_preview(&src.thumbnail(JUDGE_EDGE, JUDGE_EDGE), recipe);
+            autoshade::render::develop_preview(&src.thumbnail(JUDGE_EDGE, JUDGE_EDGE), recipe);
         let t = enc(&tgt.thumbnail(JUDGE_EDGE, JUDGE_EDGE))?;
         let f = enc(&fitted)?;
-        Ok(autoshop::advisor::judge_pair(
+        Ok(autoshade::advisor::judge_pair(
             &cfg,
-            autoshop::advisor::JudgeImages { reference: &t, candidate: &f },
-            autoshop::advisor::JudgeTask::FitMatch,
+            autoshade::advisor::JudgeImages { reference: &t, candidate: &f },
+            autoshade::advisor::JudgeTask::FitMatch,
             None,
             // No grade intent: FitMatch scores how closely two renders
             // MATCH, a question the strength axis cannot change (R23-3).
@@ -1782,7 +1782,7 @@ fn match_cmd(
             // nothing short-circuits before a second call is bought, and every
             // failure keeps the plain solve.
             Ok(first) if deep => {
-                let action = autoshop::advisor::hint_action(
+                let action = autoshade::advisor::hint_action(
                     first.hint.as_deref().unwrap_or(""),
                     !rep.recipe.masks.is_empty(),
                     !zoned,
@@ -1793,8 +1793,8 @@ fn match_cmd(
                     action.tag()
                 );
                 let candidate = match action {
-                    autoshop::advisor::FitAction::Zoned => run_fit(true).ok(),
-                    autoshop::advisor::FitAction::Saturation(d) => {
+                    autoshade::advisor::FitAction::Zoned => run_fit(true).ok(),
+                    autoshade::advisor::FitAction::Saturation(d) => {
                         let mut r = rep.recipe.clone();
                         r.saturation += d;
                         r.clamp();
@@ -1806,16 +1806,16 @@ fn match_cmd(
                         (r.saturation != rep.recipe.saturation)
                             .then(|| fit::rescore_report(&src, &tgt, &r, rep.err_before, &rep.notes))
                     }
-                    autoshop::advisor::FitAction::None => None,
+                    autoshade::advisor::FitAction::None => None,
                 };
                 match candidate {
                     Some(mut cand) => match judge_of(&cand.recipe) {
                         Ok(second) if second.score >= first.score => {
-                            autoshop::rationale::push_note(
+                            autoshade::rationale::push_note(
                                 &mut cand.recipe.rationale,
                                 &mut cand.notes,
-                                autoshop::rationale::Note::new(
-                                    autoshop::rationale::keys::FIT_NOTE_DEEP_ADOPTED,
+                                autoshade::rationale::Note::new(
+                                    autoshade::rationale::keys::FIT_NOTE_DEEP_ADOPTED,
                                     vec![
                                         ("score1", format!("{:.0}", first.score)),
                                         ("score2", format!("{:.0}", second.score)),
@@ -1877,12 +1877,12 @@ fn match_cmd(
     // but separately, so another process's save could land between a gate and
     // its write and be overwritten unversioned — or leave recipe, master link
     // and sidecar written around a foreign writer's output.
-    autoshop::store::with_develop_lock(raw, autoshop::store::DevelopLockMode::Wait, || -> Result<()> {
+    autoshade::store::with_develop_lock(raw, autoshade::store::DevelopLockMode::Wait, || -> Result<()> {
     // `-o` spelled AS the canonical path is a canonical overwrite: the
     // canonical branch below then SKIPS (recipe_path == canonical), so its
     // gate must run HERE, before the first write destroys the save.
-    if same_path(&out, &autoshop::store::recipe_target(raw))
-        && let Err(e) = autoshop::store::backup_saved_develop(raw, Some(&rep.recipe))
+    if same_path(&out, &autoshade::store::recipe_target(raw))
+        && let Err(e) = autoshade::store::backup_saved_develop(raw, Some(&rep.recipe))
     {
         anyhow::bail!("refusing to overwrite the saved develop: backing it up failed ({e})");
     }
@@ -1893,33 +1893,33 @@ fn match_cmd(
     // kill between the two writes made every later open apply the new look
     // ON TOP of pixels it was never fitted to (16-lane scan L09/L13).
     let commit_canonical = || -> Result<()> {
-        autoshop::store::commit_develop(
+        autoshade::store::commit_develop(
             raw,
-            autoshop::store::DevelopCommit {
-                recipe: Some(pipeline::recipe_store_bytes(raw, &rep.recipe, autoshop::diag::stderr())?),
-                pixels: autoshop::store::CommitMember::Clear,
+            autoshade::store::DevelopCommit {
+                recipe: Some(pipeline::recipe_store_bytes(raw, &rep.recipe, autoshade::diag::stderr())?),
+                pixels: autoshade::store::CommitMember::Clear,
                 // R24-4: `match` publishes a REVERSE-FIT into the active
                 // slot, so a strip record left saying 「original」 would
                 // reopen the fit in the GUI as 「▣ 原片」. The CLI owns no
                 // strip — the shared primitive restates the one fact this
                 // write knows and leaves the card's id/name/position alone
                 // (and stays `Keep` when the photo has no strip record).
-                variants: autoshop::store::variants_member(
+                variants: autoshade::store::variants_member(
                     raw,
-                    autoshop::store::ActiveWrite::Kind("fitted"),
+                    autoshade::store::ActiveWrite::Kind("fitted"),
                 )?,
             },
         )?;
         Ok(())
     };
-    let canonical = autoshop::store::recipe_target(raw);
+    let canonical = autoshade::store::recipe_target(raw);
     let recipe_path = if same_path(&out, &canonical) {
         // `-o` spelled AS the canonical path: the gate above already ran, and
         // the commit below IS the canonical write.
         commit_canonical()?;
         canonical.clone()
     } else {
-        write_recipe(raw, &rep.recipe, Some(out), autoshop::diag::stderr())?
+        write_recipe(raw, &rep.recipe, Some(out), autoshade::diag::stderr())?
     };
     println!("recipe -> {}", recipe_path.display());
     // ALSO write the canonical sidecar. The store's recipe.json is the ONLY
@@ -1936,7 +1936,7 @@ fn match_cmd(
         // BOTH fit flavours gate here, immediately before the write — the
         // old pre-fit zoned snapshot left the entire segmentation as a race
         // window for a concurrent save.
-        if let Err(e) = autoshop::store::backup_saved_develop(raw, Some(&rep.recipe)) {
+        if let Err(e) = autoshade::store::backup_saved_develop(raw, Some(&rep.recipe)) {
             anyhow::bail!("refusing to overwrite the saved develop: backing it up failed ({e})");
         }
         commit_canonical()?;
@@ -1947,7 +1947,7 @@ fn match_cmd(
     }
     if decode::is_raw(raw) {
         // Warning, not failure: the recipe above already committed.
-        match write_xmp(raw, &rep.recipe, autoshop::diag::stderr()) {
+        match write_xmp(raw, &rep.recipe, autoshade::diag::stderr()) {
             // Notes + mask-loss line: stderr, from write_xmp_doc (as above).
             Ok((xmp_path, _, _)) => {
                 let s = stem(raw);
@@ -1967,7 +1967,7 @@ fn match_cmd(
         pipeline::guard_readonly(&img_out, raw)?;
         ensure_parent(&img_out)?;
         println!("rendering the fitted recipe at full resolution …");
-        let (w, h) = render::render_to_file(raw, &rep.recipe, &img_out, None, None, autoshop::diag::stderr())?;
+        let (w, h) = render::render_to_file(raw, &rep.recipe, &img_out, None, None, autoshade::diag::stderr())?;
         println!("render -> {} ({w} x {h})", img_out.display());
     }
     if style_prompt {
@@ -1984,7 +1984,7 @@ fn match_cmd(
             Ok(buf)
         };
         println!("extracting a reusable style prompt ({}) …", cfg.openai_model);
-        let prompt = autoshop::advisor::describe_style(&cfg, &jpg(&src)?, &jpg(&tgt)?)?;
+        let prompt = autoshade::advisor::describe_style(&cfg, &jpg(&src)?, &jpg(&tgt)?)?;
         render::stage_and_publish(&p_out, |staged| {
             std::fs::write(staged, &prompt)
                 .with_context(|| format!("write {}", p_out.display()))
@@ -2019,7 +2019,7 @@ fn heal_cmd(
     // will be decoded anyway; paying its bounded decode up front converts a
     // certain post-pay failure into a free refusal.
     if let Some(m) = &mask {
-        autoshop::render::open_mask_bounded(m).with_context(|| {
+        autoshade::render::open_mask_bounded(m).with_context(|| {
             format!("--mask {} cannot be used — checked before the paid auto-detect", m.display())
         })?;
     }
@@ -2068,7 +2068,7 @@ fn batch_cmd(
     // is a paid analysis. `eval` and `style-index` do NOT get this flag — see
     // their own call sites.
     let raws = if include_baked {
-        autoshop::pipeline::find_sources(dir)?
+        autoshade::pipeline::find_sources(dir)?
     } else {
         find_raws(dir)?
     };
@@ -2081,7 +2081,7 @@ fn batch_cmd(
     if !include_baked {
         // Say what was NOT scanned, rather than leaving a folder of exports
         // looking empty (the failure mode the format-support map filed as B1).
-        let all = autoshop::pipeline::find_sources(dir).map(|v| v.len()).unwrap_or(raws.len());
+        let all = autoshade::pipeline::find_sources(dir).map(|v| v.len()).unwrap_or(raws.len());
         if all > raws.len() {
             println!(
                 "  ({} already-baked photo(s) skipped — pass --include-baked to develop them too)",
@@ -2096,7 +2096,7 @@ fn batch_cmd(
     // on it and then wrote recipe.json over the user's Lightroom work) — so
     // an analyzed library is not silently re-analyzed (and re-billed).
     let pending: Vec<&PathBuf> =
-        raws.iter().filter(|r| !autoshop::store::has_develop_or_sidecar(r)).collect();
+        raws.iter().filter(|r| !autoshade::store::has_develop_or_sidecar(r)).collect();
     let todo = pending.len();
     let n = todo.min(limit);
     println!("{todo} pending; processing {n} this run (--limit {limit}).");
@@ -2147,7 +2147,7 @@ fn batch_cmd(
     // deterministic regardless of worker scheduling, and disclose the
     // deviations BEFORE the batch runs instead of after a file was destroyed.
     let outs: Vec<Option<PathBuf>> = {
-        let mut names = autoshop::pipeline::BatchNames::default();
+        let mut names = autoshade::pipeline::BatchNames::default();
         let outs: Vec<Option<PathBuf>> = work
             .iter()
             .map(|r| if render { Some(names.claim(r, "developed", "tif")) } else { None })
@@ -2177,7 +2177,7 @@ fn batch_cmd(
     // exports on this list, and a native-resolution 16-bit TIFF can peak far
     // past the corpus constant on its own (R28 Batch-4 4a). Their headers are
     // free to read, so the budget asks them.
-    let plan = autoshop::jobs::plan_for(jobs, &work);
+    let plan = autoshade::jobs::plan_for(jobs, &work);
     if let Some(note) = &plan.note {
         println!("{note}");
     }
@@ -2195,17 +2195,17 @@ fn batch_cmd(
     // so `[7/50]` could print before `[3/50]` and a re-run of the same folder
     // produced a differently-ordered transcript. A failed photo still reports
     // its error and the batch still continues, exactly as before.
-    let results = autoshop::jobs::for_each_indexed(plan.jobs, n, |i, block| {
+    let results = autoshade::jobs::for_each_indexed(plan.jobs, n, |i, block| {
         use std::fmt::Write;
         let raw = work[i];
         // THIS photo's diagnostics channel (R29-1). One collector per worker is
         // what makes the lines separable at all: a shared sink would hand back
         // three photos' warnings in completion order again, only inside a
         // Vec instead of on a stream.
-        let diags = autoshop::diag::Collector::new();
+        let diags = autoshade::diag::Collector::new();
         let res = process_one(raw, &cfg, outs[i].as_deref(), export.as_ref(), &diags);
         let outcome = match &res {
-            Ok((v, _)) if v.decision == autoshop::advisor::Decision::Accept => {
+            Ok((v, _)) if v.decision == autoshade::advisor::Decision::Accept => {
                 let _ = writeln!(block, "[{}/{n}] {} ... {:?}", i + 1, stem(raw), v.decision);
                 Outcome::Saved
             }
@@ -2235,7 +2235,7 @@ fn batch_cmd(
         if let Ok((_, notes)) = &res
             && !notes.is_empty()
         {
-            let text = autoshop::rationale::render_en(notes);
+            let text = autoshade::rationale::render_en(notes);
             let text = text.trim();
             if !text.is_empty() {
                 let _ = writeln!(block, "       {text}");
@@ -2246,7 +2246,7 @@ fn batch_cmd(
         // events: a note is the rationale fragment the recipe carries, a
         // diagnostic is the raw failure that produced it, and dropping either
         // would leave a surface with less than it has today.
-        autoshop::diag::write_into_block(block, "       ", &diags.take());
+        autoshade::diag::write_into_block(block, "       ", &diags.take());
         outcome
     });
     let ok = results.iter().filter(|r| **r == Some(Outcome::Saved)).count();
@@ -2262,7 +2262,7 @@ fn batch_cmd(
     // The SAME predicate as the up-front filter, or the summary contradicts
     // the selection it reports on.
     let still_pending =
-        pending.iter().filter(|p| !autoshop::store::has_develop_or_sidecar(p.as_path())).count();
+        pending.iter().filter(|p| !autoshade::store::has_develop_or_sidecar(p.as_path())).count();
     // The remedy note keys on the photos that NEED it, counted directly: a
     // FAILED photo whose develop persisted is exactly what `apply` finishes.
     // The old proxy (`still_pending < fail`) compared the library-wide
@@ -2270,7 +2270,7 @@ fn batch_cmd(
     // left pending — the default outcome of a cautious verdict — masked the
     // note for the failure sitting right next to it.
     let failed_developed = (0..results.len())
-        .filter(|&i| results[i] == Some(Outcome::Failed) && autoshop::store::has_develop(work[i]))
+        .filter(|&i| results[i] == Some(Outcome::Failed) && autoshade::store::has_develop(work[i]))
         .count();
     println!(
         "\nbatch done: {ok} saved, {skipped} not saved (non-Accept), {fail} failed, {still_pending} still pending.",
@@ -2278,7 +2278,7 @@ fn batch_cmd(
     if failed_developed > 0 {
         println!(
             "  note: a photo whose RENDER failed keeps the develop it already paid for, so it is \
-             no longer pending — re-run `autoshop apply` for its deliverable."
+             no longer pending — re-run `autoshade apply` for its deliverable."
         );
     }
     // The summary printed FIRST (it names every photo); the exit code then
@@ -2309,9 +2309,9 @@ fn process_one(
     cfg: &Config,
     render_to: Option<&Path>,
     export: Option<&render::ExportOpts>,
-    sink: &dyn autoshop::diag::Sink,
-) -> Result<(Verdict, Vec<autoshop::rationale::Note>)> {
-    // Batch uses the configured style strength (AUTOSHOP_STYLE_STRENGTH).
+    sink: &dyn autoshade::diag::Sink,
+) -> Result<(Verdict, Vec<autoshade::rationale::Note>)> {
+    // Batch uses the configured style strength (AUTOSHADE_STYLE_STRENGTH).
     // judge = false: a library-sized batch must never silently multiply the
     // paid vision calls — the closed loop is for the interactive surfaces
     // (review R20-M2).
@@ -2329,7 +2329,7 @@ fn process_one(
     // batch that means NO sidecars and NO deliverable: the photo stays
     // pending, the caller's summary names it, and a re-run re-attempts it —
     // the same consequence a failed photo already has.
-    if verdict.decision != autoshop::advisor::Decision::Accept {
+    if verdict.decision != autoshade::advisor::Decision::Accept {
         return Ok((verdict, notes));
     }
     // Every fallible product BEFORE the completion markers: `has_develop`
@@ -2344,14 +2344,14 @@ fn process_one(
     // Sidecar persistence, shared by the success path and the failed-render
     // path below: once the verdict is Accept, the PAID analysis must land.
     let persist = |recipe: &EditRecipe| -> Result<()> {
-        autoshop::store::with_develop_lock(
+        autoshade::store::with_develop_lock(
             raw,
-            autoshop::store::DevelopLockMode::Wait,
+            autoshade::store::DevelopLockMode::Wait,
             || {
         // Backup gate, same as every surface: cheap Ok(None) in the batch's
         // usual no-develop-yet case, and a save created mid-batch by another
         // process can no longer be silently destroyed.
-        if let Err(e) = autoshop::store::backup_saved_develop(raw, Some(recipe)) {
+        if let Err(e) = autoshade::store::backup_saved_develop(raw, Some(recipe)) {
             anyhow::bail!("refusing to overwrite the saved develop: backing it up failed ({e})");
         }
         write_recipe(raw, recipe, None, sink)?;
@@ -2367,8 +2367,8 @@ fn process_one(
             // goes to the caller's channel, which puts it in this photo's
             // block. `WarnNested` keeps the "  ⚠ " the CLI's XMP-failure
             // family has always worn.
-            autoshop::diag::Diag::about(sink, raw).emit(
-                autoshop::diag::Mark::WarnNested,
+            autoshade::diag::Diag::about(sink, raw).emit(
+                autoshade::diag::Mark::WarnNested,
                 format!("recipe saved, but the Lightroom XMP failed: {e}"),
             );
         }
@@ -2388,12 +2388,12 @@ fn process_one(
             // with sidecars-last ordering the photo stayed pending and a
             // re-run RE-BILLED it. Persist the develop first — it is
             // independent of the render — then fail the photo loudly; the
-            // deliverable re-renders FREE via `autoshop apply`. (A crash
+            // deliverable re-renders FREE via `autoshade apply`. (A crash
             // mid-render still re-attempts everything: nothing landed.)
             return match persist(&recipe) {
                 Ok(()) => Err(e).context(
                     "render failed — the develop WAS saved; re-render it free with \
-                     `autoshop apply` (this photo is no longer pending)",
+                     `autoshade apply` (this photo is no longer pending)",
                 ),
                 Err(pe) => Err(e).context(format!(
                     "render failed, and saving the develop also failed ({pe:#}) — \
@@ -2431,8 +2431,8 @@ mod tests {
     /// A keyless, endpoint-less Config — the shape the preflight tests and the
     /// flag-resolution test both need (no key, so nothing here can reach a
     /// network or bill anything).
-    fn cfg_fixture() -> autoshop::config::Config {
-        autoshop::config::Config {
+    fn cfg_fixture() -> autoshade::config::Config {
+        autoshade::config::Config {
             openai_api_key: None,
             openai_model: "m".into(),
             openai_base_url: "http://127.0.0.1:1".into(),
@@ -2483,7 +2483,7 @@ mod tests {
     #[test]
     fn heal_refuses_mask_problems_before_the_paid_auto_detect() {
         let root =
-            std::env::temp_dir().join(format!("autoshop-heal-preflight-{}", std::process::id()));
+            std::env::temp_dir().join(format!("autoshade-heal-preflight-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
         let src = root.join("library").join("missing.arw");
@@ -2524,7 +2524,7 @@ mod tests {
     /// was wrong with it, before anything is written.
     #[test]
     fn match_names_the_file_when_a_raw_target_cannot_be_decoded() {
-        let dir = std::env::temp_dir().join(format!("autoshop-match-rawtgt-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("autoshade-match-rawtgt-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         // The SOURCE is a baked photo so the run reaches the target load at
@@ -2549,7 +2549,7 @@ mod tests {
     #[test]
     #[cfg(windows)]
     fn same_path_folds_case_of_an_absent_leaf() {
-        let dir = std::env::temp_dir().join(format!("autoshop-cli-same-path-case-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("autoshade-cli-same-path-case-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
         // The leaf does NOT exist — only the ancestor chain canonicalizes, so
         // equality must come from the case fold, not from canonicalize.
@@ -2562,8 +2562,8 @@ mod tests {
     #[test]
     fn auto_denoise_operands_are_refused_without_the_denoise_flag() {
         for args in [
-            vec!["autoshop", "auto", "photo.arw", "--denoise-strength", "0.5"],
-            vec!["autoshop", "auto", "photo.arw", "--denoise-model", "color_real_gan"],
+            vec!["autoshade", "auto", "photo.arw", "--denoise-strength", "0.5"],
+            vec!["autoshade", "auto", "photo.arw", "--denoise-model", "color_real_gan"],
         ] {
             let Err(error) = Cli::try_parse_from(args) else {
                 panic!("a denoise operand without --denoise must be refused");
@@ -2580,18 +2580,18 @@ mod tests {
     fn strength_flags_refuse_non_finite_and_out_of_domain_values() {
         for bad in ["NaN", "inf", "2", "-0.1"] {
             assert!(
-                Cli::try_parse_from(["autoshop", "analyze", "p.arw", "--style", bad]).is_err(),
+                Cli::try_parse_from(["autoshade", "analyze", "p.arw", "--style", bad]).is_err(),
                 "--style {bad} must be refused"
             );
             assert!(
-                Cli::try_parse_from(["autoshop", "denoise", "p.png", "--strength", bad]).is_err(),
+                Cli::try_parse_from(["autoshade", "denoise", "p.png", "--strength", bad]).is_err(),
                 "--strength {bad} must be refused"
             );
         }
-        assert!(Cli::try_parse_from(["autoshop", "analyze", "p.arw", "--style", "0.7"]).is_ok());
+        assert!(Cli::try_parse_from(["autoshade", "analyze", "p.arw", "--style", "0.7"]).is_ok());
         assert!(
             Cli::try_parse_from([
-                "autoshop", "auto", "p.arw", "--denoise", "--denoise-strength", "1"
+                "autoshade", "auto", "p.arw", "--denoise", "--denoise-strength", "1"
             ])
             .is_ok()
         );
@@ -2602,13 +2602,13 @@ mod tests {
         for bad in ["NaN", "inf", "2", "-0.1"] {
             for cmd in ["analyze", "auto"] {
                 assert!(
-                    Cli::try_parse_from(["autoshop", cmd, "p.arw", "--strength", bad]).is_err(),
+                    Cli::try_parse_from(["autoshade", cmd, "p.arw", "--strength", bad]).is_err(),
                     "{cmd} --strength {bad} must be refused"
                 );
             }
         }
         for cmd in ["analyze", "auto"] {
-            let cli = Cli::try_parse_from(["autoshop", cmd, "p.arw", "--strength", "0.9"])
+            let cli = Cli::try_parse_from(["autoshade", cmd, "p.arw", "--strength", "0.9"])
                 .unwrap_or_else(|e| panic!("{cmd} --strength 0.9 must parse: {e}"));
             let got = match cli.command {
                 Command::Analyze { strength, .. } | Command::Auto { strength, .. } => strength,
@@ -2616,7 +2616,7 @@ mod tests {
             };
             assert_eq!(got, Some(0.9), "{cmd} must carry the value, not drop it");
         }
-        let cli = Cli::try_parse_from(["autoshop", "match", "source.png", "target.png", "--strength", "0.85"])
+        let cli = Cli::try_parse_from(["autoshade", "match", "source.png", "target.png", "--strength", "0.85"])
             .expect("match --strength must parse");
         match cli.command {
             Command::Match { strength, .. } => assert_eq!(strength, Some(0.85)),
@@ -2624,12 +2624,12 @@ mod tests {
         }
         // …and the flag actually decides the request `analyze`/`auto` build —
         // the PRODUCTION resolver, shared by both commands.
-        let cfg = autoshop::config::Config { style_strength: 0.3, ..cfg_fixture() };
+        let cfg = autoshade::config::Config { style_strength: 0.3, ..cfg_fixture() };
         // The switch is a VALUE these dial assertions are indifferent to, so it
         // is spelled once rather than resolved from the environment per call.
-        const OFF: autoshop::style::EmbeddingSwitch = autoshop::style::EmbeddingSwitch::OFF;
+        const OFF: autoshade::style::EmbeddingSwitch = autoshade::style::EmbeddingSwitch::OFF;
         let plain = analyze_request(None, None, None, false, false, OFF, &cfg);
-        assert_eq!(plain.style, 0.3, "omitted --style keeps AUTOSHOP_STYLE_STRENGTH");
+        assert_eq!(plain.style, 0.3, "omitted --style keeps AUTOSHADE_STYLE_STRENGTH");
         assert_eq!(
             plain.strength.get(),
             GradeStrength::DEFAULT,
@@ -2665,15 +2665,15 @@ mod tests {
     /// first is the shipped one:
     ///   * nothing asked        -> text reference, byte-for-byte the old path;
     ///   * `--reference-image`  -> on, for this run;
-    ///   * `AUTOSHOP_SEND_REFERENCE_IMAGE` -> on, as the standing answer.
+    ///   * `AUTOSHADE_SEND_REFERENCE_IMAGE` -> on, as the standing answer.
     ///
     /// MUTATION: make `analyze_request` hard-code `send_reference_image: true`
     /// (the default arm fails), or `false` (both opt-in arms fail), or drop
     /// either half of the `||` (one arm fails).
     #[test]
     fn the_reference_photo_is_opt_in_on_every_non_gui_surface() {
-        const OFF: autoshop::style::EmbeddingSwitch = autoshop::style::EmbeddingSwitch::OFF;
-        let quiet = autoshop::config::Config { send_reference_image: false, ..cfg_fixture() };
+        const OFF: autoshade::style::EmbeddingSwitch = autoshade::style::EmbeddingSwitch::OFF;
+        let quiet = autoshade::config::Config { send_reference_image: false, ..cfg_fixture() };
         assert!(
             !analyze_request(None, None, None, false, false, OFF, &quiet).send_reference_image,
             "with nothing asked, a CLI develop must stay on the TEXT reference — a photograph is \
@@ -2686,10 +2686,10 @@ mod tests {
         // …and the standing preference, for a user who always wants it. It is
         // read through `Config`, which is where the trust table refuses an
         // ambient photo-pack `.env` the chance to set it.
-        let standing = autoshop::config::Config { send_reference_image: true, ..cfg_fixture() };
+        let standing = autoshade::config::Config { send_reference_image: true, ..cfg_fixture() };
         assert!(
             analyze_request(None, None, None, false, false, OFF, &standing).send_reference_image,
-            "AUTOSHOP_SEND_REFERENCE_IMAGE must reach the request without a flag"
+            "AUTOSHADE_SEND_REFERENCE_IMAGE must reach the request without a flag"
         );
         // The flag never turns it OFF against the standing preference: both are
         // the user asking, and neither is a veto over the other.
@@ -2705,7 +2705,7 @@ mod tests {
         // the web handler) build their request through `GradeRequest`'s own
         // constructors, which have no way to reach it.
         for cmd in ["analyze", "auto"] {
-            let cli = Cli::try_parse_from(["autoshop", cmd, "p.arw", "--reference-image"])
+            let cli = Cli::try_parse_from(["autoshade", cmd, "p.arw", "--reference-image"])
                 .unwrap_or_else(|e| panic!("{cmd} --reference-image must parse: {e}"));
             let got = match cli.command {
                 Command::Analyze { reference_image, .. } | Command::Auto { reference_image, .. } => {
@@ -2714,7 +2714,7 @@ mod tests {
                 _ => panic!("`{cmd} --reference-image` parsed as some other subcommand"),
             };
             assert!(got, "{cmd} must carry the flag, not drop it");
-            let plain = Cli::try_parse_from(["autoshop", cmd, "p.arw"]).expect("plain parses");
+            let plain = Cli::try_parse_from(["autoshade", cmd, "p.arw"]).expect("plain parses");
             let off = match plain.command {
                 Command::Analyze { reference_image, .. } | Command::Auto { reference_image, .. } => {
                     reference_image
@@ -2724,7 +2724,7 @@ mod tests {
             assert!(!off, "{cmd} without the flag must be off");
         }
         assert!(
-            Cli::try_parse_from(["autoshop", "batch", ".", "--reference-image"]).is_err(),
+            Cli::try_parse_from(["autoshade", "batch", ".", "--reference-image"]).is_err(),
             "`batch` must have no way to buy a second image per photo"
         );
 
@@ -2732,7 +2732,7 @@ mod tests {
         // kind of thing that must never be silent: the rationale names the FILE
         // that went and the extra cost it bought, on every surface that renders
         // a rationale, and `style-query`'s forecast line quotes the same key.
-        let note = autoshop::rationale::keys::STYLE_REF_IMAGE.replace("{file}", "golden-hour-01");
+        let note = autoshade::rationale::keys::STYLE_REF_IMAGE.replace("{file}", "golden-hour-01");
         assert!(note.contains("golden-hour-01"), "the note must NAME the photo: {note}");
         assert!(note.contains("reference IMAGE"), "{note}");
         assert!(note.contains("one extra image on each call"), "the cost is disclosed: {note}");
@@ -2740,16 +2740,16 @@ mod tests {
         // …and the failure arm says the develop fell back to text rather than
         // leaving the user to assume a photo went.
         assert!(
-            autoshop::rationale::keys::STYLE_REF_IMAGE_FAILED.contains("used the text reference only"),
+            autoshade::rationale::keys::STYLE_REF_IMAGE_FAILED.contains("used the text reference only"),
             "{}",
-            autoshop::rationale::keys::STYLE_REF_IMAGE_FAILED
+            autoshade::rationale::keys::STYLE_REF_IMAGE_FAILED
         );
     }
 
     #[test]
     fn cli_match_strength_reaches_the_budget() {
         let cli = Cli::try_parse_from([
-            "autoshop",
+            "autoshade",
             "match",
             "source.png",
             "target.png",
@@ -2761,19 +2761,19 @@ mod tests {
             Command::Match { strength, .. } => GradeStrength::from_optional(strength),
             _ => panic!("match parser returned another subcommand"),
         };
-        let budget = autoshop::fit::FitBudget::for_strength(strength);
+        let budget = autoshade::fit::FitBudget::for_strength(strength);
         assert_eq!(budget.ev, 2.5);
         assert_eq!(budget.sat, 60.0);
-        assert_eq!(budget.vetoes, autoshop::fit::VetoPolicy::Disclose);
+        assert_eq!(budget.vetoes, autoshade::fit::VetoPolicy::Disclose);
     }
     /// L09#1 ordering: with a nonexistent RAW, a bad `-o` must fail on the
     /// OUTPUT (pre-pay preflight), never on decode or a paid call.
     #[test]
     fn analyze_and_auto_refuse_a_bad_output_before_the_paid_call() {
         let dir = std::env::temp_dir()
-            .join(format!("autoshop-prepay-{}", std::process::id()));
+            .join(format!("autoshade-prepay-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let off = autoshop::style::EmbeddingSwitch::OFF;
+        let off = autoshade::style::EmbeddingSwitch::OFF;
         let e = analyze_cmd(Path::new("no-such.arw"), Some(dir.clone()), None, None, None, None, false, false, off)
             .unwrap_err()
             .to_string();
@@ -2805,7 +2805,7 @@ mod tests {
     #[test]
     fn correspond_refuses_a_bad_output_before_any_decode() {
         let dir = std::env::temp_dir()
-            .join(format!("autoshop-corr-prepay-{}", std::process::id()));
+            .join(format!("autoshade-corr-prepay-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let e = correspond_cmd(
             Path::new("no-such.arw"),
@@ -2838,11 +2838,11 @@ mod tests {
             Command::Batch { jobs, .. } | Command::Eval { jobs, .. } => jobs,
             _ => panic!("{args:?} parsed as some other subcommand"),
         };
-        assert_eq!(jobs_of(["autoshop", "batch", "dir"]), 3, "batch keeps its R26 pool");
-        assert_eq!(jobs_of(["autoshop", "eval", "dir"]), 1, "eval stays serial unless asked");
+        assert_eq!(jobs_of(["autoshade", "batch", "dir"]), 3, "batch keeps its R26 pool");
+        assert_eq!(jobs_of(["autoshade", "eval", "dir"]), 1, "eval stays serial unless asked");
         // …and the flag is actually wired, on both.
         for cmd in ["batch", "eval"] {
-            let cli = Cli::try_parse_from(["autoshop", cmd, "dir", "--jobs", "6"])
+            let cli = Cli::try_parse_from(["autoshade", cmd, "dir", "--jobs", "6"])
                 .unwrap_or_else(|e| panic!("{cmd} --jobs 6 must parse: {e}"));
             let got = match cli.command {
                 Command::Batch { jobs, .. } | Command::Eval { jobs, .. } => jobs,
@@ -2853,7 +2853,7 @@ mod tests {
         // 0 is a typo, not "no workers": the planner floors it at one rather
         // than the parser refusing, so a script that computes the value from
         // `nproc - 1` on a single-core box still runs.
-        assert_eq!(autoshop::jobs::plan_with(0, 10, None).jobs, 1);
+        assert_eq!(autoshade::jobs::plan_with(0, 10, None).jobs, 1);
     }
 
     /// R29 Batch-2: `--long-edge` is on every command that DELIVERS an image,
@@ -2890,24 +2890,24 @@ mod tests {
         };
         // Carried, not dropped, on all three.
         assert_eq!(
-            parsed(&["autoshop", "apply", "p.arw", "r.json", "-o", "x.jpg", "--long-edge", "2048"]),
+            parsed(&["autoshade", "apply", "p.arw", "r.json", "-o", "x.jpg", "--long-edge", "2048"]),
             Some(2048)
         );
-        assert_eq!(parsed(&["autoshop", "auto", "p.arw", "--long-edge", "1600"]), Some(1600));
+        assert_eq!(parsed(&["autoshade", "auto", "p.arw", "--long-edge", "1600"]), Some(1600));
         assert_eq!(
-            parsed(&["autoshop", "batch", "dir", "--render", "--long-edge", "1024"]),
+            parsed(&["autoshade", "batch", "dir", "--render", "--long-edge", "1024"]),
             Some(1024)
         );
         // Omitted stays omitted — an unflagged run is byte-for-byte the run the
         // release before this one made.
-        assert_eq!(parsed(&["autoshop", "apply", "p.arw", "r.json", "-o", "x.jpg"]), None);
-        assert_eq!(parsed(&["autoshop", "auto", "p.arw"]), None);
-        assert_eq!(parsed(&["autoshop", "batch", "dir", "--render"]), None);
+        assert_eq!(parsed(&["autoshade", "apply", "p.arw", "r.json", "-o", "x.jpg"]), None);
+        assert_eq!(parsed(&["autoshade", "auto", "p.arw"]), None);
+        assert_eq!(parsed(&["autoshade", "batch", "dir", "--render"]), None);
 
         // `batch --long-edge` without `--render` writes no pixels at all, so a
         // size for it is a typo rather than a setting: refused at the parser,
         // the same door `--denoise-strength` without `--denoise` uses.
-        let Err(e) = Cli::try_parse_from(["autoshop", "batch", "dir", "--long-edge", "1024"])
+        let Err(e) = Cli::try_parse_from(["autoshade", "batch", "dir", "--long-edge", "1024"])
         else {
             panic!("a delivery size with no deliverable must be refused");
         };
@@ -2916,12 +2916,12 @@ mod tests {
 
         // NOT on `denoise` — see `denoise_cmd`'s doc for the two reasons.
         assert!(
-            Cli::try_parse_from(["autoshop", "denoise", "p.arw", "--long-edge", "1024"]).is_err(),
+            Cli::try_parse_from(["autoshade", "denoise", "p.arw", "--long-edge", "1024"]).is_err(),
             "denoise delivers a master, not a sized deliverable"
         );
 
         // A negative size is not a size (u32 at the parser, not a late clamp).
-        assert!(Cli::try_parse_from(["autoshop", "auto", "p.arw", "--long-edge", "-1"]).is_err());
+        assert!(Cli::try_parse_from(["autoshade", "auto", "p.arw", "--long-edge", "-1"]).is_err());
 
         // …and the RESOLUTION of the flag into delivery options, which is the
         // half a parse test cannot see.
@@ -2958,7 +2958,7 @@ mod tests {
     #[test]
     fn apply_delivers_at_the_size_it_was_asked_for() {
         let root =
-            std::env::temp_dir().join(format!("autoshop-long-edge-wire-{}", std::process::id()));
+            std::env::temp_dir().join(format!("autoshade-long-edge-wire-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let library = root.join("library");
         std::fs::create_dir_all(&library).unwrap();
@@ -2997,7 +2997,7 @@ mod tests {
 
         // The store-test pattern: this photo hashes to its own develop dir, and
         // nothing here is entitled to leave one behind.
-        let _ = std::fs::remove_dir_all(autoshop::store::develop_dir(&src));
+        let _ = std::fs::remove_dir_all(autoshade::store::develop_dir(&src));
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -3060,7 +3060,7 @@ mod tests {
     #[test]
     fn a_lossy_lightroom_sidecar_is_disclosed_on_the_cli() {
         let root = std::env::temp_dir()
-            .join(format!("autoshop-cli-import-note-{}", std::process::id()));
+            .join(format!("autoshade-cli-import-note-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
 
@@ -3161,7 +3161,7 @@ mod tests {
     #[test]
     fn an_import_truncated_by_the_recipe_caps_is_disclosed_on_the_cli() {
         let root = std::env::temp_dir()
-            .join(format!("autoshop-cli-clamp-note-{}", std::process::id()));
+            .join(format!("autoshade-cli-clamp-note-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
 
@@ -3212,9 +3212,9 @@ mod tests {
         // Premise: nothing about this document is a NAMED import loss, so a
         // sentence here can only come from the clamp.
         assert!(
-            autoshop::xmp::import_losses(&doc).is_empty(),
+            autoshade::xmp::import_losses(&doc).is_empty(),
             "premise: the gradient imports whole — {:?}",
-            autoshop::xmp::import_losses(&doc)
+            autoshade::xmp::import_losses(&doc)
         );
         let note = lightroom_import_note(&raw).expect("a truncated import must not be silent");
         assert!(note.contains("recipe limits then discarded"), "{note}");
@@ -3286,7 +3286,7 @@ mod tests {
 
     /// The flags reach the REQUEST, as values.
     ///
-    /// `--embed` used to be implemented by writing `AUTOSHOP_STYLE_EMBED` into
+    /// `--embed` used to be implemented by writing `AUTOSHADE_STYLE_EMBED` into
     /// the process and letting `produce_recipe` read it back, so the flag was a
     /// global side effect and the develop's switch was whatever the last
     /// command (or a parallel test) had written. Now the resolver answers a
@@ -3297,9 +3297,9 @@ mod tests {
     /// `--no-embed` assertion fails.
     #[test]
     fn cli_adherence_and_embed_flags_reach_the_request() {
-        let before = std::env::var_os("AUTOSHOP_STYLE_EMBED");
+        let before = std::env::var_os("AUTOSHADE_STYLE_EMBED");
         let cli = Cli::try_parse_from([
-            "autoshop", "analyze", "photo.arw", "--guidance", "warmer",
+            "autoshade", "analyze", "photo.arw", "--guidance", "warmer",
             "--adherence", "0.2", "--embed",
         ]).expect("the new flags parse");
         match cli.command {
@@ -3310,13 +3310,13 @@ mod tests {
                     None, None, adherence, false, false, embed_switch(embed, no_embed),
                     &Config::load(),
                 );
-                assert_eq!(req.adherence.tier(), autoshop::recipe::AdherenceTier::Hint);
+                assert_eq!(req.adherence.tier(), autoshade::recipe::AdherenceTier::Hint);
                 assert!(req.embed.on(), "--embed must reach the request as a value");
             }
             _ => panic!("expected analyze command"),
         }
         // The opposite flag, and the one that used to WRITE the variable.
-        let cli = Cli::try_parse_from(["autoshop", "auto", "photo.arw", "--no-embed"])
+        let cli = Cli::try_parse_from(["autoshade", "auto", "photo.arw", "--no-embed"])
             .expect("--no-embed parses");
         match cli.command {
             Command::Auto { embed, no_embed, .. } => {
@@ -3330,7 +3330,7 @@ mod tests {
         }
         assert_eq!(
             before,
-            std::env::var_os("AUTOSHOP_STYLE_EMBED"),
+            std::env::var_os("AUTOSHADE_STYLE_EMBED"),
             "resolving the flags must not write the process environment"
         );
     }
@@ -3350,59 +3350,59 @@ mod tests {
     /// `Some(true)` regardless of the flag (the plain case then comes back on).
     #[test]
     fn cli_describe_flag_reaches_the_build() {
-        let before = std::env::var_os("AUTOSHOP_STYLE_DESCRIBE");
-        let switch = |args: &[&str]| -> autoshop::style::DescribeSwitch {
+        let before = std::env::var_os("AUTOSHADE_STYLE_DESCRIBE");
+        let switch = |args: &[&str]| -> autoshade::style::DescribeSwitch {
             let cli = Cli::try_parse_from(args).expect("the command parses");
             match cli.command {
                 Command::StyleIndex { describe, .. } => {
                     // The pref default is FALSE here, as it is for the CLI:
                     // the CLI has no preferences file.
-                    autoshop::style::DescribeSwitch::resolve(describe.then_some(true), false)
+                    autoshade::style::DescribeSwitch::resolve(describe.then_some(true), false)
                 }
                 _ => panic!("expected style-index"),
             }
         };
         assert!(
-            switch(&["autoshop", "style-index", "raws", "--embed", "--describe"]).on(),
+            switch(&["autoshade", "style-index", "raws", "--embed", "--describe"]).on(),
             "--describe must reach the build as an ON value"
         );
         // Not passing it is what "off" means on the CLI, which has no
         // preferences file: with nothing set, a plain `style-index` must not
         // start a 4.3 GB pass.
         assert!(
-            !switch(&["autoshop", "style-index", "raws", "--embed"]).on()
-                || std::env::var_os("AUTOSHOP_STYLE_DESCRIBE").is_some(),
+            !switch(&["autoshade", "style-index", "raws", "--embed"]).on()
+                || std::env::var_os("AUTOSHADE_STYLE_DESCRIBE").is_some(),
             "a plain style-index must not describe unless the environment asked for it"
         );
         assert!(
-            !autoshop::style::DescribeSwitch::resolve_with(None, false, |_| None).on(),
+            !autoshade::style::DescribeSwitch::resolve_with(None, false, |_| None).on(),
             "nothing set: OFF"
         );
         // The environment override is the documented middle rank (flag > env >
-        // preference), exactly as `AUTOSHOP_STYLE_EMBED` behaves — and the
+        // preference), exactly as `AUTOSHADE_STYLE_EMBED` behaves — and the
         // FLAG still wins over it in both directions.
         assert!(
-            autoshop::style::DescribeSwitch::resolve_with(None, false, |_| Some("1".into())).on(),
+            autoshade::style::DescribeSwitch::resolve_with(None, false, |_| Some("1".into())).on(),
             "an explicit environment override is honoured"
         );
         assert!(
-            !autoshop::style::DescribeSwitch::resolve_with(None, true, |_| Some("0".into())).on(),
+            !autoshade::style::DescribeSwitch::resolve_with(None, true, |_| Some("0".into())).on(),
             "…and it can turn a stored preference off again"
         );
         // …and the look-library form takes it too.
         assert!(
-            switch(&["autoshop", "style-index", "--looks", "finals", "--embed", "--describe"]).on(),
+            switch(&["autoshade", "style-index", "--looks", "finals", "--embed", "--describe"]).on(),
             "the look library must be describable as well"
         );
         // Without --embed clap refuses, before any work starts.
-        let msg = match Cli::try_parse_from(["autoshop", "style-index", "raws", "--describe"]) {
+        let msg = match Cli::try_parse_from(["autoshade", "style-index", "raws", "--describe"]) {
             Ok(_) => panic!("--describe alone must be refused"),
             Err(e) => e.to_string(),
         };
         assert!(msg.contains("--embed"), "the refusal must name the missing flag: {msg}");
         assert_eq!(
             before,
-            std::env::var_os("AUTOSHOP_STYLE_DESCRIBE"),
+            std::env::var_os("AUTOSHADE_STYLE_DESCRIBE"),
             "resolving the switch must not write the process environment"
         );
     }
@@ -3458,8 +3458,8 @@ fn ")
     /// making it answer `masks=0` for an absent habit.
     #[test]
     fn style_query_prints_mask_counts() {
-        use autoshop::mask_habit::MaskHabit;
-        use autoshop::recipe::{LocalAdjustment, MaskGeometry};
+        use autoshade::mask_habit::MaskHabit;
+        use autoshade::recipe::{LocalAdjustment, MaskGeometry};
         assert_eq!(fmt_masks(None), "", "no habit, no field");
         let measured_but_global = MaskHabit::of(&[]);
         assert_eq!(
@@ -3480,7 +3480,7 @@ fn ")
                     mask_version: 2,
                 },
                 exposure_ev: 0.4,
-                range: Some(autoshop::recipe::RangeMask::Luminance {
+                range: Some(autoshade::recipe::RangeMask::Luminance {
                     lo_outer: 0.4, lo: 0.6, hi: 1.0, hi_outer: 1.0,
                 }),
                 ..Default::default()
@@ -3496,7 +3496,7 @@ fn ")
         let curved = MaskHabit::of(&[LocalAdjustment {
             mask: MaskGeometry::Linear { zero_x: 0.5, zero_y: 0.8, full_x: 0.5, full_y: 0.0 },
             exposure_ev: -0.6,
-            main_curve: vec![autoshop::recipe::CurvePoint { input: 0, output: 12 }],
+            main_curve: vec![autoshade::recipe::CurvePoint { input: 0, output: 12 }],
             ..Default::default()
         }]);
         assert_eq!(

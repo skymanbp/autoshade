@@ -28,8 +28,8 @@
 # the same secret the bare name does.
 .env
 .env.*
-autoshop.local.toml
-autoshop.local.json
+autoshade.local.toml
+autoshade.local.json
 
 # Development ledgers (user ruling 2026-08-20): working process records, kept
 # ON DISK at their long-standing paths (code comments cite them) but off the

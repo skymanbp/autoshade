@@ -1734,7 +1734,7 @@ mod tests {
 
         let (source, target) = compact_rank_wave_fixture();
         let seg = SegmentOpts {
-            python_bin: "autoshop-test-no-such-python".into(),
+            python_bin: "autoshade-test-no-such-python".into(),
             script: "Cargo.toml".into(),
             target: "sky".into(),
             reference_point: None,

@@ -604,7 +604,7 @@ fn load_image_gated(path: &Path, develop: bool) -> Result<DynamicImage> {
     {
         anyhow::bail!(
             "{} is named .tif but is really a camera RAW ({kind}) — rename it to its real \
-             extension (e.g. .dng) so Autoshop develops the sensor instead of reading the \
+             extension (e.g. .dng) so AutoShade develops the sensor instead of reading the \
              thumbnail the `image` crate would find first",
             path.display()
         );
@@ -1204,13 +1204,13 @@ fn default_crop(raw: &rawler::RawImage) -> rawler::imgop::Rect {
 /// [`CropAlignment`] — which of the three outcomes happened — and DISCLOSES
 /// the refusal on stderr (A5).
 ///
-/// **The defect this closes.** Block registration of eight Autoshop renders
+/// **The defect this closes.** Block registration of eight AutoShade renders
 /// against their Lightroom exports put every one of them
 /// `(+31 ± 6, +20 ± 1)` full-resolution pixels off, a pure translation with no
 /// scale component (`PROBE2-VERDICT.md` §9, re-confirmed at `(+34.4, +19.9)`
 /// in `PROBE4-FINAL.md` §3). The ARWs carry
 /// `DefaultCropOrigin = (32, 20)`, `DefaultCropSize = (9504, 6336)` inside a
-/// `9600 × 6376` raw frame: Autoshop emitted the right SIZE from the wrong
+/// `9600 × 6376` raw frame: AutoShade emitted the right SIZE from the wrong
 /// ORIGIN, so recipe coordinates and Lightroom coordinates disagreed by 0.34 %
 /// of the width at the edges — and every mask this batch teaches the importer
 /// to place correctly would have landed 32 px right of where Lightroom draws
@@ -1266,7 +1266,7 @@ pub fn align_default_crop(raw: &mut rawler::RawImage) -> CropAlignment {
 /// What [`align_default_crop`] decided. Three outcomes, not two: "moved" and
 /// "nothing to move" are both normal, and "the tags run off the sensor" is a
 /// fact about the FILE that a photographer chasing a misplaced mask needs to
-/// hear (A5). Carried as a value as well as printed so the `AUTOSHOP_RAW_ZOO`
+/// hear (A5). Carried as a value as well as printed so the `AUTOSHADE_RAW_ZOO`
 /// probe can record a verdict per make without scraping stderr.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CropAlignment {
@@ -1575,14 +1575,14 @@ pub(crate) fn guard_tiff_chain(path: &Path) -> Result<()> {
 }
 
 /// The one sentence that turns "your camera is not supported" into something a
-/// photographer can DO (A8, the DNG on-ramp). Every body Autoshop cannot read
+/// photographer can DO (A8, the DNG on-ramp). Every body AutoShade cannot read
 /// natively has this route, and it is not a downgrade: rawler's DNG decoder
 /// builds its whole `Camera` — colour matrices included — from the file's own
 /// tags (`decoders/dng.rs:270-289`), so a converted file needs no entry in the
 /// 725-model camera database at all. Kept as ONE constant so the CLI, the GUI
 /// toast and the web error body cannot drift into three different offers.
 pub const DNG_ONRAMP: &str = "Adobe DNG Converter (free, from Adobe) rewrites it as a .dng, \
-                              which Autoshop develops from the file's own colour tags — that \
+                              which AutoShade develops from the file's own colour tags — that \
                               route works for any body";
 
 /// Turn rawler's `get_decoder` refusal into a sentence that names WHICH of the
@@ -1649,7 +1649,7 @@ pub(crate) fn decoder_for<'a>(
 /// The GUI has had this since v0.22 — every worker body runs inside
 /// `catch_unwind` (`src/bin/gui/workers.rs:29-38`) — and the CLI had nothing:
 /// the same malformed file that showed a toast in the app killed
-/// `autoshop batch` mid-library, losing the run. Widening [`RAW_EXTS`] to 24
+/// `autoshade batch` mid-library, losing the run. Widening [`RAW_EXTS`] to 24
 /// formats widens the surface exactly where the parsers are least exercised,
 /// so the guard goes in at the same time as the extensions.
 ///
@@ -1741,7 +1741,7 @@ const NEUTRAL_PREVIEW_EDGE: u32 = 2048;
 fn neutral_rendition(path: &Path, quarter_turns: u8) -> Result<DynamicImage> {
     eprintln!(
         "⚠ {} carries no embedded preview or thumbnail (its format does not store one), so \
-         Autoshop is showing its own neutral develop instead of the camera's rendering",
+         AutoShade is showing its own neutral develop instead of the camera's rendering",
         path.display()
     );
     crate::render::render_to_image(
@@ -2227,7 +2227,7 @@ mod tests {
     /// is what makes a user think the app is broken in a way they caused.
     #[test]
     fn load_image_refuses_a_camera_raw_by_name() { // not-a-consumer-call: the gate's own test
-        let dir = std::env::temp_dir().join(format!("autoshop-load-raw-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("autoshade-load-raw-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         // Every RAW extension the app claims, upper and lower case — one
@@ -2275,7 +2275,7 @@ mod tests {
     /// neither had a test — this module is the first in `decode.rs`.
     #[test]
     fn the_two_camera_rendition_callers_differ_only_where_they_must() {
-        let dir = std::env::temp_dir().join(format!("autoshop-decode-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("autoshade-decode-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
 
@@ -2378,7 +2378,7 @@ mod tests {
         use image::ImageEncoder as _;
 
         let dir =
-            std::env::temp_dir().join(format!("autoshop-decode-icc-{}", std::process::id()));
+            std::env::temp_dir().join(format!("autoshade-decode-icc-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
 
@@ -2434,7 +2434,7 @@ mod tests {
     #[test]
     fn a_profiled_tiff_reaches_the_transform_despite_the_limits_bug() {
         let dir =
-            std::env::temp_dir().join(format!("autoshop-decode-icctiff-{}", std::process::id()));
+            std::env::temp_dir().join(format!("autoshade-decode-icctiff-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
 
@@ -2477,7 +2477,7 @@ mod tests {
     #[test]
     fn a_profiled_16bit_image_transforms_and_keeps_its_depth() {
         let dir = std::env::temp_dir()
-            .join(format!("autoshop-decode-icc16-{}", std::process::id()));
+            .join(format!("autoshade-decode-icc16-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
 
@@ -2560,7 +2560,7 @@ mod tests {
             }
             b
         }
-        let dir = std::env::temp_dir().join(format!("autoshop-tiff-guard-test-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("autoshade-tiff-guard-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let selfloop = dir.join("selfloop.tif");
         std::fs::write(&selfloop, tiff(&[(8, 8)])).unwrap();
@@ -2635,7 +2635,7 @@ mod tests {
         const STD: &[u8] = b"http://ns.adobe.com/xap/1.0/\0";
         const EXT: &[u8] = b"http://ns.adobe.com/xmp/extension/\0";
         const GUID: &[u8; 32] = b"5CA1AB1E5CA1AB1E5CA1AB1E5CA1AB1E";
-        let dir = std::env::temp_dir().join(format!("autoshop-jpeg-xmp-test-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("autoshade-jpeg-xmp-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let standard = {
             let mut v = STD.to_vec();
@@ -2694,7 +2694,7 @@ mod tests {
     /// different develop), and a non-text packet is an error, never "absent".
     #[test]
     fn an_embedded_xmp_packet_is_read_from_the_tiff_tag() {
-        let dir = std::env::temp_dir().join(format!("autoshop-embedded-xmp-test-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("autoshade-embedded-xmp-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let doc = crate::xmp::recipe_to_xmp(&crate::recipe::EditRecipe {
             exposure_ev: 0.8,
@@ -2919,7 +2919,7 @@ mod tests {
         // the thing that fails a run.
         assert_eq!(cheap_develop_peak_mb(std::path::Path::new("nope.png")), None);
 
-        let dir = std::env::temp_dir().join(format!("autoshop-peak-est-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("autoshade-peak-est-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("scratch dir");
         let png = dir.join("small.png");
@@ -2987,17 +2987,17 @@ mod tests {
         assert_eq!(orientation_transposes(Unknown), orientation_transposes(Normal), "dims");
     }
 
-    /// Real-machine probe, never run in CI: point AUTOSHOP_ORIENT_PROBE_RAW at
+    /// Real-machine probe, never run in CI: point AUTOSHADE_ORIENT_PROBE_RAW at
     /// a RAW whose IFD0 tag 0x0112 is 8 (a portrait Sony ARW) and this asserts
     /// the WHOLE chain — the accessor answers `Rotate270`, and `decode_raw`
     /// hands back a PORTRAIT frame (height > width). The two constant tests
     /// above hand-feed the enum and so cannot see a broken link between the
     /// file and the pipeline; this is the one that can.
     #[test]
-    #[ignore = "real-machine probe: set AUTOSHOP_ORIENT_PROBE_RAW to a portrait RAW"]
+    #[ignore = "real-machine probe: set AUTOSHADE_ORIENT_PROBE_RAW to a portrait RAW"]
     fn portrait_raw_reaches_the_pipeline_as_rotate270() {
-        let Ok(path) = std::env::var("AUTOSHOP_ORIENT_PROBE_RAW") else {
-            panic!("set AUTOSHOP_ORIENT_PROBE_RAW to a RAW with EXIF orientation 8");
+        let Ok(path) = std::env::var("AUTOSHADE_ORIENT_PROBE_RAW") else {
+            panic!("set AUTOSHADE_ORIENT_PROBE_RAW to a RAW with EXIF orientation 8");
         };
         let p = std::path::Path::new(&path);
         assert_eq!(
@@ -3200,7 +3200,7 @@ mod tests {
         let block = exif_block_fixture();
 
         // --- TIFF: the block IS the file's header.
-        let dir = std::env::temp_dir().join(format!("autoshop_baked_exif_{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("autoshade_baked_exif_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("temp dir");
         let tif = dir.join("export.tif");
@@ -3271,7 +3271,7 @@ mod tests {
     /// user discovering it by dropping a photo on the window.
     #[test]
     fn every_baked_extension_has_a_working_codec() {
-        let dir = std::env::temp_dir().join(format!("autoshop_codecs_{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("autoshade_codecs_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("temp dir");
         // A gradient, not a flat fill: GIF quantises to 256 colours and BMP/
@@ -3314,7 +3314,7 @@ mod tests {
     /// about a sensor plane.
     #[test]
     fn a_raw_named_tif_is_refused_by_name() {
-        let dir = std::env::temp_dir().join(format!("autoshop_tif_raw_{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("autoshade_tif_raw_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("temp dir");
 
@@ -3431,7 +3431,7 @@ mod tests {
     }
 
     /// FORENSIC PROBE across MAKES, run against a directory of real camera
-    /// files — the R27 counterpart to `xmp.rs`'s `AUTOSHOP_MB_FIXTURES`, and
+    /// files — the R27 counterpart to `xmp.rs`'s `AUTOSHADE_MB_FIXTURES`, and
     /// written to the same discipline for the same reason: the committed
     /// fixtures above are synthetic by policy, so they prove the RULES and not
     /// the FILES, and until this batch **not one non-Sony RAW had ever been
@@ -3440,7 +3440,7 @@ mod tests {
     /// `.ARW`). Widening `RAW_EXTS` from 9 extensions to 24 without running a
     /// file from each make would have been a claim, not a feature.
     ///
-    /// Point `AUTOSHOP_RAW_ZOO` at a directory (searched recursively) holding
+    /// Point `AUTOSHADE_RAW_ZOO` at a directory (searched recursively) holding
     /// one RAW per make. For every file whose extension [`is_raw`] accepts it
     /// asserts:
     ///
@@ -3474,12 +3474,12 @@ mod tests {
     /// file reports a landscape frame.
     #[test]
     fn every_make_in_the_raw_zoo_decodes_and_agrees_with_itself() {
-        let Ok(dir) = std::env::var("AUTOSHOP_RAW_ZOO") else {
+        let Ok(dir) = std::env::var("AUTOSHADE_RAW_ZOO") else {
             return;
         };
         fn walk(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
             let Ok(rd) = std::fs::read_dir(dir) else {
-                panic!("AUTOSHOP_RAW_ZOO holds an unreadable directory: {}", dir.display());
+                panic!("AUTOSHADE_RAW_ZOO holds an unreadable directory: {}", dir.display());
             };
             for e in rd.flatten() {
                 let p = e.path();
@@ -3491,13 +3491,13 @@ mod tests {
             }
         }
         let root = Path::new(&dir);
-        assert!(root.is_dir(), "AUTOSHOP_RAW_ZOO is set but is not a directory: {dir}");
+        assert!(root.is_dir(), "AUTOSHADE_RAW_ZOO is set but is not a directory: {dir}");
         let mut files = Vec::new();
         walk(root, &mut files);
         files.sort();
         assert!(
             !files.is_empty(),
-            "AUTOSHOP_RAW_ZOO ({dir}) holds no file this build calls a RAW — either the fixtures \
+            "AUTOSHADE_RAW_ZOO ({dir}) holds no file this build calls a RAW — either the fixtures \
              went missing or RAW_EXTS no longer covers them"
         );
 
@@ -3640,7 +3640,7 @@ mod tests {
         }
         // Printed, not asserted: the per-file table IS the deliverable of this
         // probe, and `cargo test -- --nocapture` is how it is read.
-        println!("AUTOSHOP_RAW_ZOO — {} file(s)\n{}", files.len(), report.join("\n"));
+        println!("AUTOSHADE_RAW_ZOO — {} file(s)\n{}", files.len(), report.join("\n"));
     }
 
     /// R27 tier-1 fixture: the SHAPE of `(active_area, crop_area)` that each
@@ -3651,7 +3651,7 @@ mod tests {
     /// for a make nobody owns a camera from is to pin the arithmetic.
     ///
     /// Rows 2-9 are MEASURED, not guessed: they are the `(sensor, active,
-    /// crop)` triples the `AUTOSHOP_RAW_ZOO` probe printed for nine real CC0
+    /// crop)` triples the `AUTOSHADE_RAW_ZOO` probe printed for nine real CC0
     /// files — one per FORMAT, eight makes, Canon covering both CR2 and CR3 —
     /// on 2026-08-19. That is why this test can exist in
     /// a public repository without the photographs — the numbers are the

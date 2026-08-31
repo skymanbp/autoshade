@@ -531,7 +531,7 @@ pub trait Advisor {
 /// and the client killed a HEALTHY request mid-generation (the analyze path
 /// then fell back to "Heuristic baseline (AI vision unavailable: … timed out
 /// reading response)"). Same failure class as the images/edits 300→600 s
-/// recalibration in generative.rs. `AUTOSHOP_HTTP_TIMEOUT_SECS` still
+/// recalibration in generative.rs. `AUTOSHADE_HTTP_TIMEOUT_SECS` still
 /// overrides every one of these (see [`post_with_timeout`]).
 pub(crate) const PROPOSE_TIMEOUT_SECS: u64 = 360; // high-detail image + strict schema — slowest text call
 pub(crate) const STYLE_TIMEOUT_SECS: u64 = 240; // two low-detail images, short prose out
@@ -548,7 +548,7 @@ pub(crate) fn transport_error(t: &ureq::Transport, default_secs: u64) -> Advisor
         msg.push_str(&format!(
             " (hit the HTTP deadline, default {default_secs}s for this call — \
              reasoning-class models can legitimately run longer; raise \
-             AUTOSHOP_HTTP_TIMEOUT_SECS to extend every AI call's deadline)"
+             AUTOSHADE_HTTP_TIMEOUT_SECS to extend every AI call's deadline)"
         ));
     }
     AdvisorError::Transport(msg)
@@ -559,13 +559,13 @@ pub(crate) fn transport_error(t: &ureq::Transport, default_secs: u64) -> Advisor
 /// then never responds (a dead local bridge, a stalled proxy) blocks the
 /// worker thread FOREVER — and every GUI action gates on that worker's `busy`
 /// flag, so the whole app soft-locks. Per-call budgets reflect each
-/// endpoint's real latency class (the consts above); `AUTOSHOP_HTTP_TIMEOUT_SECS`
+/// endpoint's real latency class (the consts above); `AUTOSHADE_HTTP_TIMEOUT_SECS`
 /// overrides all of them for outlier deployments.
 pub(crate) fn post_with_timeout(url: &str, overall: std::time::Duration) -> ureq::Request {
     // env_or_dotenv, not env::var: the .env carries this knob for some
     // users, and the owned-map dotenv (L16#3) no longer writes the process
     // environment - a direct read here would silently stop honouring it.
-    let overall = crate::config::env_or_dotenv("AUTOSHOP_HTTP_TIMEOUT_SECS")
+    let overall = crate::config::env_or_dotenv("AUTOSHADE_HTTP_TIMEOUT_SECS")
         .and_then(|s| s.parse().ok())
         // 0 would arm an instant deadline and kill every call on arrival —
         // same guard as the stall builder below.
@@ -579,14 +579,14 @@ pub(crate) fn post_with_timeout(url: &str, overall: std::time::Duration) -> ureq
         .post(url)
 }
 
-/// The effective inactivity budget after the `AUTOSHOP_HTTP_TIMEOUT_SECS`
+/// The effective inactivity budget after the `AUTOSHADE_HTTP_TIMEOUT_SECS`
 /// override — factored out so error messages report the SAME number the
 /// socket was actually armed with (the old messages printed the pre-override
 /// default, misdiagnosing which side gave up). 0 is refused: it would arm an
 /// instant read timeout and kill every call on arrival — an explicit low
 /// override is the user's call, zero is not.
 pub(crate) fn effective_stall_secs(default_secs: u64) -> u64 {
-    crate::config::env_or_dotenv("AUTOSHOP_HTTP_TIMEOUT_SECS")
+    crate::config::env_or_dotenv("AUTOSHADE_HTTP_TIMEOUT_SECS")
         .and_then(|s| s.parse().ok())
         .filter(|s: &u64| *s > 0)
         .unwrap_or(default_secs)
@@ -602,7 +602,7 @@ pub(crate) fn effective_stall_secs(default_secs: u64) -> u64 {
 /// a stream that keeps sending can run indefinitely. Verified against the
 /// ureq 2.12.1 sources: with no overall deadline set, the header wait uses
 /// `timeout_read` (stream.rs:436) and body reads re-arm it (response.rs:364)
-/// until the connection returns to the pool. `AUTOSHOP_HTTP_TIMEOUT_SECS`
+/// until the connection returns to the pool. `AUTOSHADE_HTTP_TIMEOUT_SECS`
 /// overrides this too — one knob for every AI deadline; on a streaming call it
 /// bounds SILENCE, not total duration.
 pub(crate) fn post_with_stall_timeout(url: &str, stall: std::time::Duration) -> ureq::Request {
@@ -712,7 +712,7 @@ pub(crate) fn stall_transport_error(
             msg.push_str(&format!(
                 " (no stream activity for ~{elapsed_secs}s — the server or a proxy stopped \
                  sending; healthy calls stream events and are not time-capped. Raise \
-                 AUTOSHOP_HTTP_TIMEOUT_SECS if a proxy buffers server-sent events)"
+                 AUTOSHADE_HTTP_TIMEOUT_SECS if a proxy buffers server-sent events)"
             ));
         }
     }
@@ -771,7 +771,7 @@ pub(crate) fn for_each_sse_json(
                     format!(
                         "no stream content for over {}s — the connection kept sending \
                          keep-alive comments, so this cannot be told apart from a server or \
-                         proxy that has stopped working; raise AUTOSHOP_HTTP_TIMEOUT_SECS if \
+                         proxy that has stopped working; raise AUTOSHADE_HTTP_TIMEOUT_SECS if \
                          this service really queues that long",
                         b.as_secs()
                     ),
@@ -888,7 +888,7 @@ pub(crate) enum SseFamily {
 /// are quiet before their first token. The silence budget must cover the
 /// longest healthy quiet phase, not just network jitter, so per-call budgets
 /// below this floor bound only the blocking fallback (the 600 s number is the
-/// images/edits stall precedent). `AUTOSHOP_HTTP_TIMEOUT_SECS` overrides.
+/// images/edits stall precedent). `AUTOSHADE_HTTP_TIMEOUT_SECS` overrides.
 pub(crate) const STREAM_STALL_FLOOR_SECS: u64 = 600;
 
 /// The endpoint's STRUCTURED blame, when it gave one: `error.param` as a

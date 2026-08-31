@@ -24,7 +24,7 @@
 //! feedback #13), which sits under both dials because it reads them: the visual
 //! judge's round budget comes off the Strength band directly above it.
 //!
-//! R23-2 landed the third of those: [`AutoshopApp::ai_style_library`] — the
+//! R23-2 landed the third of those: [`AutoShadeApp::ai_style_library`] — the
 //! desktop app's FIRST production-side entry for the style reference library
 //! (building existed only on the CLI and in the web panel, so the Style slider
 //! shipped permanently inert for anyone who double-clicks the exe), plus the
@@ -40,7 +40,7 @@ fn style_age_hours(age: Option<std::time::Duration>) -> String {
         .unwrap_or_else(|| "?".into())
 }
 
-impl AutoshopApp {
+impl AutoShadeApp {
     /// The AI area — one first-level section, three sub-areas.
     ///
     /// The editable gate is REBUILT here (L15-2). While a decode is in flight
@@ -129,7 +129,7 @@ impl AutoshopApp {
             // spelling — the old `starts_with("Accept")` sniff
             // would have flipped every verdict to warn the moment
             // the word was translated.
-            let col = if matches!(d, autoshop::advisor::Decision::Accept) {
+            let col = if matches!(d, autoshade::advisor::Decision::Accept) {
                 ui.visuals().strong_text_color()
             } else {
                 ui.visuals().warn_fg_color
@@ -138,7 +138,7 @@ impl AutoshopApp {
                 lang,
                 "{decision} — {reasons}",
                 &[
-                    ("decision", tr(lang, autoshop::advisor::decision_key(d))),
+                    ("decision", tr(lang, autoshade::advisor::decision_key(d))),
                     ("reasons", &reasons.join("; ")),
                 ],
             );
@@ -154,7 +154,7 @@ impl AutoshopApp {
                 let det: String = self
                     .rationale_notes
                     .iter()
-                    .map(autoshop::rationale::render_one)
+                    .map(autoshade::rationale::render_one)
                     .collect();
                 self.rationale.strip_suffix(det.as_str()).map(|prose| {
                     let mut s = String::from(prose);
@@ -281,8 +281,8 @@ impl AutoshopApp {
             if matches!(
                 self.style_info.as_ref().map(|i| &i.state),
                 Some(
-                    autoshop::style::StyleIndexState::Absent
-                        | autoshop::style::StyleIndexState::Unusable { .. }
+                    autoshade::style::StyleIndexState::Absent
+                        | autoshade::style::StyleIndexState::Unusable { .. }
                 )
             ) {
                 ui.label(
@@ -325,7 +325,7 @@ impl AutoshopApp {
                 tr(lang, "Adherence"),
                 &mut self.direction_adherence,
                 1.0,
-                autoshop::recipe::DirectionAdherence::DEFAULT,
+                autoshade::recipe::DirectionAdherence::DEFAULT,
                 tr(lang, "How closely the AI follows your direction; disabled until Direction has text: <=40% Hint, 40-70% Direct, above 70% Brief. Prompt intent only - it never moves a render limit."),
             );
         });
@@ -363,7 +363,7 @@ impl AutoshopApp {
         group_caption(ui, tr(lang, "Style reference library"));
         // ── the status line: which library, how big, how old, and where.
         match self.style_info.as_ref().map(|i| (i.path.clone(), i.state.clone())) {
-            Some((path, autoshop::style::StyleIndexState::Built { total, source_dir, age, with_embedding, looks, .. })) => {
+            Some((path, autoshade::style::StyleIndexState::Built { total, source_dir, age, with_embedding, looks, .. })) => {
                 let from = source_dir.unwrap_or_else(|| tr(lang, "an unrecorded folder").to_string());
                 ui.label(
                     egui::RichText::new(trf(
@@ -392,7 +392,7 @@ impl AutoshopApp {
                     ui.label(egui::RichText::new(line).weak().small());
                 }
             }
-            Some((_, autoshop::style::StyleIndexState::Unusable { err })) => {
+            Some((_, autoshade::style::StyleIndexState::Unusable { err })) => {
                 ui.label(
                     egui::RichText::new(trf(
                         lang,
@@ -403,15 +403,15 @@ impl AutoshopApp {
                     .small(),
                 );
             }
-            Some((_, autoshop::style::StyleIndexState::Absent)) => {
+            Some((_, autoshade::style::StyleIndexState::Absent)) => {
                 // The shared refusal's own wording (the CLI's `StyleIndex::save`
-                // and the web handler say the same): an Autoshop OUTPUT folder
-                // always yields nothing, because Autoshop's own .xmp lives in
+                // and the web handler say the same): an AutoShade OUTPUT folder
+                // always yields nothing, because AutoShade's own .xmp lives in
                 // the develop store — that is the mistake this sentence exists
                 // to pre-empt, and it must not be reworded per surface.
                 ui.label(
                     egui::RichText::new(tr(lang,
-                        "No library built yet — the Style slider above has nothing to lean on. Point this at the folder you edit in Lightroom (each RAW with its .xmp sidecar beside it); Autoshop keeps its own .xmp in the develop store, never beside your RAWs, so its output folder always yields nothing.",
+                        "No library built yet — the Style slider above has nothing to lean on. Point this at the folder you edit in Lightroom (each RAW with its .xmp sidecar beside it); AutoShade keeps its own .xmp in the develop store, never beside your RAWs, so its output folder always yields nothing.",
                     ))
                     .small(),
                 );
@@ -433,7 +433,7 @@ impl AutoshopApp {
                     // embedded font subset covers it already (📂 is not in it).
                     .button(tr(lang, "🗂 Pick folder…"))
                     .on_hover_text(tr(lang,
-                        "Choose the folder of your OWN edited RAWs — the ones with a Lightroom .xmp sidecar beside them. Each pair teaches Autoshop one of your finished looks. Indexing starts as soon as you choose.",
+                        "Choose the folder of your OWN edited RAWs — the ones with a Lightroom .xmp sidecar beside them. Each pair teaches AutoShade one of your finished looks. Indexing starts as soon as you choose.",
                     ))
                     .clicked()
                 {
@@ -506,7 +506,7 @@ impl AutoshopApp {
         // index AND an actual picture).
         let built = matches!(
             self.style_info.as_ref().map(|i| &i.state),
-            Some(autoshop::style::StyleIndexState::Built { .. })
+            Some(autoshade::style::StyleIndexState::Built { .. })
         );
         ui.add_enabled_ui(built, |ui| {
             ui.checkbox(
@@ -537,7 +537,7 @@ impl AutoshopApp {
         ui.separator();
         group_caption(ui, tr(lang, "Look library"));
         if let Some(info) = &self.style_info
-            && let autoshop::style::StyleIndexState::Built { looks, looks_dir, age, .. } = &info.state {
+            && let autoshade::style::StyleIndexState::Built { looks, looks_dir, age, .. } = &info.state {
                 let from = looks_dir.clone().unwrap_or_else(|| tr(lang, "an unrecorded folder").to_string());
                 let age = style_age_hours(*age);
                 ui.label(egui::RichText::new(trf(lang, "{n} finished photos · from {path} · built {age} ago", &[("n", &looks.to_string()), ("path", &from), ("age", &age)])).small());
@@ -558,7 +558,7 @@ impl AutoshopApp {
             }
             if let Some(dir) = build { self.start_looks_build(dir); }
         });
-        let has_looks = matches!(self.style_info.as_ref().map(|i| &i.state), Some(autoshop::style::StyleIndexState::Built { looks, .. }) if *looks > 0);
+        let has_looks = matches!(self.style_info.as_ref().map(|i| &i.state), Some(autoshade::style::StyleIndexState::Built { looks, .. }) if *looks > 0);
         ui.add_enabled_ui(has_looks, |ui| {
             ui.checkbox(&mut self.use_looks, tr(lang, "Use look library"));
         });
@@ -681,7 +681,7 @@ impl AutoshopApp {
                      If D ≥ {limit} (the reverse-fit's atmosphere threshold), buy ONE more \
                      generation — a second paid image — and keep the closer result. \
                      Off = never spend extra.",
-                    &[("limit", &format!("{:.2}", autoshop::fit::DIVERGENCE_GLOBAL))],
+                    &[("limit", &format!("{:.2}", autoshade::fit::DIVERGENCE_GLOBAL))],
                 ));
                 ui.label(
                     egui::RichText::new(tr(lang,

@@ -701,10 +701,10 @@ def self_test():
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--self-test", action="store_true", help="assert the harness's own invariants; needs no corpus")
-    ap.add_argument("--index", type=Path, help="style-index.json (default: $AUTOSHOP_STYLE_INDEX)")
+    ap.add_argument("--index", type=Path, help="style-index.json (default: $AUTOSHADE_STYLE_INDEX)")
     ap.add_argument("--proxies", type=Path, help="cached SigLIP text proxies (default: <index dir>/text-proxies.json)")
     ap.add_argument("--build-proxies", action="store_true", help="run ONE sidecar text batch and write the proxy cache")
-    ap.add_argument("--python", default=os.environ.get("AUTOSHOP_PYTHON", sys.executable))
+    ap.add_argument("--python", default=os.environ.get("AUTOSHADE_PYTHON", sys.executable))
     ap.add_argument("--script", type=Path, default=Path(__file__).resolve().parent.parent / "python" / "embed.py")
     args = ap.parse_args()
 
@@ -712,9 +712,9 @@ def main():
         self_test()
         return
 
-    path = args.index or (Path(os.environ["AUTOSHOP_STYLE_INDEX"]) if os.environ.get("AUTOSHOP_STYLE_INDEX") else None)
+    path = args.index or (Path(os.environ["AUTOSHADE_STYLE_INDEX"]) if os.environ.get("AUTOSHADE_STYLE_INDEX") else None)
     if path is None:
-        raise SystemExit("set AUTOSHOP_STYLE_INDEX or pass --index (or use --self-test)")
+        raise SystemExit("set AUTOSHADE_STYLE_INDEX or pass --index (or use --self-test)")
     if not path.exists():
         raise SystemExit(f"style index not found: {path}")
     data = load_index(path)

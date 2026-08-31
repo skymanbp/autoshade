@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Autoshop</title>
+<title>AutoShade</title>
 <style>
   :root { --bg:#141518; --panel:#1e2023; --panel2:#26292d; --line:#33373b; --fg:#e9e9ea; --muted:#9aa0a6; --accent:#4c8bf5; --accent2:#2b5fb8; }
   * { box-sizing: border-box; }
@@ -130,7 +130,7 @@
 </head>
 <body>
 <header>
-  <h1>Autoshop</h1>
+  <h1>AutoShade</h1>
   <div class="toolbar">
     <input class="path" id="import-path" placeholder="Import: paste a RAW/PNG/TIFF file or a folder path…" />
     <button id="import-btn">＋ Import</button>
@@ -276,7 +276,7 @@
 <div class="modal-bg" id="settings-modal" hidden>
   <div class="modal-card">
     <h2>Settings <button class="modal-x" id="settings-close" title="Close">✕</button></h2>
-    <p class="modal-note">Saved locally to <code id="settings-file">autoshop.local.json</code> in your per-user Autoshop folder (never in a repo). Keys stay on this machine — the server is 127.0.0.1 only. Applies to the next AI call (Analyze / Generative Fill).</p>
+    <p class="modal-note">Saved locally to <code id="settings-file">autoshade.local.json</code> in your per-user AutoShade folder (never in a repo). Keys stay on this machine — the server is 127.0.0.1 only. Applies to the next AI call (Analyze / Generative Fill).</p>
 
     <section class="settings-sec">
       <h3>Analysis — the verifier</h3>
@@ -461,16 +461,16 @@ function hasUnsavedEdits() {
 // against the new folder's table and save onto an unrelated photo; the server
 // answers 409 for id-bearing mutations that carry a stale (or no) stamp.
 // A wrapper instead of 16 call-site edits: one place, impossible to forget.
-const SESSION_TOKEN = "__AUTOSHOP_SESSION_TOKEN__";
+const SESSION_TOKEN = "__AUTOSHADE_SESSION_TOKEN__";
 let serverGen = null;
 const rawFetch = window.fetch.bind(window);
 window.fetch = (input, init) => {
   const url = typeof input === "string" ? input : (input && input.url) || "";
   if (url.startsWith("/api/")) {
     init = Object.assign({}, init || {});
-    init.headers = Object.assign({}, init.headers || {}, { "X-Autoshop-Token": SESSION_TOKEN });
+    init.headers = Object.assign({}, init.headers || {}, { "X-AutoShade-Token": SESSION_TOKEN });
     if (serverGen !== null) {
-      init.headers["X-Autoshop-Gen"] = String(serverGen);
+      init.headers["X-AutoShade-Gen"] = String(serverGen);
     }
   }
   return rawFetch(input, init);
@@ -1120,7 +1120,7 @@ async function selectPhoto(id, stem, el) {
           <input class="sinput sb-dir" placeholder="Your library folder (RAW + .xmp pairs)…" style="font-size:11px" />
           <button class="sb-build" type="button" style="white-space:nowrap">Build index</button>
         </div>
-        <div class="scenes" style="margin-top:6px">Other users: point this at YOUR own folder of edited RAWs (each RAW with its Lightroom <code>.xmp</code> beside it) and Build — the Style slider then leans the AI toward how YOU edit (0% ignores it). Equivalent CLI: <code>autoshop style-index &lt;dir&gt;</code>.</div>`;
+        <div class="scenes" style="margin-top:6px">Other users: point this at YOUR own folder of edited RAWs (each RAW with its Lightroom <code>.xmp</code> beside it) and Build — the Style slider then leans the AI toward how YOU edit (0% ignores it). Equivalent CLI: <code>autoshade style-index &lt;dir&gt;</code>.</div>`;
       const sbDir = pop.querySelector(".sb-dir"), sbBuild = pop.querySelector(".sb-build");
       sbDir.value = s.source_dir || d.working_dir || "";
       sbBuild.onclick = async () => {
@@ -1683,7 +1683,7 @@ async function openSettings() {
     const d = await (await fetch("/api/settings")).json();
     if (seq !== settingsSeq) return; // a newer open owns the form
     $("#settings-status").textContent = "";
-    $("#settings-file").textContent = d.settings_file || "autoshop.local.json";
+    $("#settings-file").textContent = d.settings_file || "autoshade.local.json";
     const ap = d.analysis.provider === "api" ? "api" : "oauth";
     document.querySelector(`input[name="an-provider"][value="${ap}"]`).checked = true;
     anApiVisible(ap === "api");

@@ -75,7 +75,7 @@ const HINT_MAX_BYTES: usize = 1024;
 /// if the re-judge agrees it helped.
 ///
 /// Lives HERE, beside the reply it reads, because both binaries consume it
-/// (the desktop 「deep」 checkbox and `autoshop match --deep`) and two copies
+/// (the desktop 「deep」 checkbox and `autoshade match --deep`) and two copies
 /// of "what does this hint mean" would be two behaviours under one name.
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum FitAction {

@@ -459,8 +459,8 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     // the two had the same Chinese name, which pointed the user at the wrong
     // panel to go looking for either.
     ("Camera profile", "相机配置文件"),
-    ("Carried through to the sidecar unchanged; Autoshop never interprets these",
-        "原样带出到边车文件；Autoshop 从不解读这些值"),
+    ("Carried through to the sidecar unchanged; AutoShade never interprets these",
+        "原样带出到边车文件；AutoShade 从不解读这些值"),
 
     // ── Develop · Local Masks (add + AI segmentation) ────────────────────────
     ("Local Masks ({n})", "局部蒙版 ({n})"),
@@ -488,8 +488,8 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     // acts on before clicking, so the tooltip has to carry the real one.
     ("OneFormer-ADE20K sky segmentation → bitmap mask (python sidecar: pip install transformers; first run auto-downloads a ~880MB model)",
         "OneFormer-ADE20K 天空分割 → 位图蒙版（python sidecar：pip install transformers；首次运行自动下载约 880MB 模型）"),
-    ("this build did not ship the python sidecar — run Autoshop from the project directory, or point AUTOSHOP_SEGMENT_SCRIPT at python/segment.py",
-        "本版本未随发布包分发 python 边车——请从项目目录运行 Autoshop，或用 AUTOSHOP_SEGMENT_SCRIPT 指向 python/segment.py"),
+    ("this build did not ship the python sidecar — run AutoShade from the project directory, or point AUTOSHADE_SEGMENT_SCRIPT at python/segment.py",
+        "本版本未随发布包分发 python 边车——请从项目目录运行 AutoShade，或用 AUTOSHADE_SEGMENT_SCRIPT 指向 python/segment.py"),
 
     // ── Develop · selected-mask controls ─────────────────────────────────────
     ("Name", "名称"),
@@ -694,11 +694,11 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     ("built {days}d ago", "{days} 天前建库"),
     ("The style library could not be read ({err}) — rebuild it below.",
         "风格参考库读取失败（{err}）——请在下面重建。"),
-    ("No library built yet — the Style slider above has nothing to lean on. Point this at the folder you edit in Lightroom (each RAW with its .xmp sidecar beside it); Autoshop keeps its own .xmp in the develop store, never beside your RAWs, so its output folder always yields nothing.",
-        "还没有建库——上面的风格滑杆没有可依据的记录。请指向你在 Lightroom 里编辑的文件夹（每个 RAW 旁边都有它的 .xmp）；Autoshop 自己的 .xmp 放在显影库里、从不放在 RAW 旁边，所以它的输出目录永远一张也入不了库。"),
+    ("No library built yet — the Style slider above has nothing to lean on. Point this at the folder you edit in Lightroom (each RAW with its .xmp sidecar beside it); AutoShade keeps its own .xmp in the develop store, never beside your RAWs, so its output folder always yields nothing.",
+        "还没有建库——上面的风格滑杆没有可依据的记录。请指向你在 Lightroom 里编辑的文件夹（每个 RAW 旁边都有它的 .xmp）；AutoShade 自己的 .xmp 放在显影库里、从不放在 RAW 旁边，所以它的输出目录永远一张也入不了库。"),
     ("reading the style library…", "正在读取风格参考库…"),
     ("🗂 Pick folder…", "🗂 选择文件夹…"),
-    ("Choose the folder of your OWN edited RAWs — the ones with a Lightroom .xmp sidecar beside them. Each pair teaches Autoshop one of your finished looks. Indexing starts as soon as you choose.",
+    ("Choose the folder of your OWN edited RAWs — the ones with a Lightroom .xmp sidecar beside them. Each pair teaches AutoShade one of your finished looks. Indexing starts as soon as you choose.",
         "选择放着你自己编辑过的 RAW 的文件夹——也就是旁边带 Lightroom .xmp 的那些。每一对都是你的一个成片风格样本。选好后立刻开始入库。"),
     ("building…", "构建中…"),
     ("🔄 Build / rebuild", "🔄 构建 / 重建"),
@@ -718,8 +718,8 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
         "风格参考库已建成：来自 {path} 的 {n} 条你自己的编辑"),
     ("Style library built: {n} of your own edits from {path} ({m} of them without a style embedding)",
         "风格参考库已建成：来自 {path} 的 {n} 条你自己的编辑（其中 {m} 条没有嵌入向量）"),
-    ("Nothing to index in {path} — no RAW there has its .xmp sidecar beside it (Autoshop keeps its own .xmp in the develop store, never beside the RAW, so point this at the folder you edit in Lightroom). Your existing style library was left untouched.",
-        "{path} 里没有可入库的照片——那里没有一个 RAW 旁边带着它的 .xmp（Autoshop 自己的 .xmp 放在显影库里、从不放在 RAW 旁边，所以请指向你在 Lightroom 里编辑的文件夹）。你原有的风格参考库保持不动。"),
+    ("Nothing to index in {path} — no RAW there has its .xmp sidecar beside it (AutoShade keeps its own .xmp in the develop store, never beside the RAW, so point this at the folder you edit in Lightroom). Your existing style library was left untouched.",
+        "{path} 里没有可入库的照片——那里没有一个 RAW 旁边带着它的 .xmp（AutoShade 自己的 .xmp 放在显影库里、从不放在 RAW 旁边，所以请指向你在 Lightroom 里编辑的文件夹）。你原有的风格参考库保持不动。"),
     ("Building the style library failed: {err}", "风格参考库构建失败：{err}"),
     ("Before/After side by side", "原图/成片并排"),
     ("⬛ Single", "⬛ 单图"),
@@ -767,8 +767,8 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     // subset, and neither are 拦 / 防 / 规), so both sentences say the thing
     // itself — the folder stops being 「只读」 — which is also the plainer
     // wording. Every glyph checked against assets/fonts before writing.
-    ("Pointing it inside your photo library removes that folder's read-only protection: Autoshop refuses to write beside your originals, but never into its own delivery folder.",
-        "把它指向照片库里的文件夹，就等于让那个文件夹不再「只读」：Autoshop 不会在你的原片旁边写文件，但从不拒绝写进自己的成片文件夹。"),
+    ("Pointing it inside your photo library removes that folder's read-only protection: AutoShade refuses to write beside your originals, but never into its own delivery folder.",
+        "把它指向照片库里的文件夹，就等于让那个文件夹不再「只读」：AutoShade 不会在你的原片旁边写文件，但从不拒绝写进自己的成片文件夹。"),
     ("⚠ This folder and the open photo's folder are inside one another — the photo's folder is no longer protected as read-only, so a render can land beside your originals.",
         "⚠ 这个文件夹和当前打开照片所在的文件夹互相包含 —— 那个文件夹不再「只读」，渲染出来的文件会写在你的原片旁边。"),
     ("Browse…", "浏览…"),
@@ -812,7 +812,7 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     // has to say so — a photographer looking at a sky selection that looks
     // right must not be left assuming it is Adobe's. Every CJK glyph here is
     // already in the shipped subset (verified against
-    // assets/fonts/NotoSansSC-autoshop.ttf): 「本」「机」「重」「算」「非」
+    // assets/fonts/NotoSansSC-autoshade.ttf): 「本」「机」「重」「算」「非」
     // 「原」「栅」「格」「尚」「由」 all occur elsewhere in this table's font.
     ("▨ AI mask (re-derived locally, not Adobe's raster)",
         "▨ AI 蒙版（本机重算，非 Adobe 原栅格）"),
@@ -965,8 +965,8 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     ("this Lightroom sidecar carries {n} global setting(s) the engine does not render (a save keeps them untouched): {list}",
         "这份 Lightroom sidecar 里有 {n} 项本引擎不渲染的全局设置（保存时会原样保留）：{list}"),
     ("could not clear the saved edits: {err}", "无法清除已保存的编辑：{err}"),
-    ("save postponed: this photo is being changed by another Autoshop process ({err}); your canvas remains unsaved — retry",
-        "保存已推迟：另一个 Autoshop 进程正在修改这张照片（{err}）；画布上的编辑尚未保存 — 请稍后重试"),
+    ("save postponed: this photo is being changed by another AutoShade process ({err}); your canvas remains unsaved — retry",
+        "保存已推迟：另一个 AutoShade 进程正在修改这张照片（{err}）；画布上的编辑尚未保存 — 请稍后重试"),
     ("{n} Lightroom XMP projection(s) failed (those develops ARE saved): {detail}",
         "{n} 个 Lightroom XMP 投影写入失败（显影本身已保存）：{detail}"),
     ("{n} clear(s) could not be marked: {detail} — a sidecar beside the RAW may restore those edits on the next open",
@@ -1027,8 +1027,8 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
         "AI 显影已应用 — 但未保存：备份你已有的保存失败（{err}）；Ctrl+S 可显式覆盖"),
     (" · NOT persisted: backing up your existing save failed ({err}) — Ctrl+S to save explicitly",
         " · 未持久化：备份你已有的保存失败（{err}）— Ctrl+S 可显式保存"),
-    ("AI develop applied — but NOT saved: this photo is being changed by another Autoshop process ({err}); Ctrl+S retries",
-        "AI 显影已应用 — 但未保存：另一个 Autoshop 进程正在修改这张照片（{err}）；Ctrl+S 可重试"),
+    ("AI develop applied — but NOT saved: this photo is being changed by another AutoShade process ({err}); Ctrl+S retries",
+        "AI 显影已应用 — 但未保存：另一个 AutoShade 进程正在修改这张照片（{err}）；Ctrl+S 可重试"),
     (" · NOT persisted: the develop store could not be locked ({err}) — Ctrl+S to save explicitly",
         " · 未持久化：显影库无法加锁（{err}）— Ctrl+S 可显式保存"),
     ("Open a photo, or open a folder to browse your library.",
@@ -1048,8 +1048,8 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     ("AI segmenting {what}… (first run auto-downloads the model; failures are reported here)",
         "AI 分割{what}中…（首次运行自动下载模型；失败会在此报告）"),
     ("Reset to its default", "重置为默认值"),
-    ("Language & Theme apply immediately. The provider sections below persist via 「Save settings」 to autoshop.local.json in your per-user Autoshop folder (never in a repo) and apply to the next AI call (Analyze / Fill / Reimagine).",
-        "「语言」与「主题」立即生效。下方的提供商设置经「保存设置」写入你 Autoshop 个人目录下的 autoshop.local.json（不在仓库里），对下一次 AI 调用生效（分析 / 填充 / 重绘）。"),
+    ("Language & Theme apply immediately. The provider sections below persist via 「Save settings」 to autoshade.local.json in your per-user AutoShade folder (never in a repo) and apply to the next AI call (Analyze / Fill / Reimagine).",
+        "「语言」与「主题」立即生效。下方的提供商设置经「保存设置」写入你 AutoShade 个人目录下的 autoshade.local.json（不在仓库里），对下一次 AI 调用生效（分析 / 填充 / 重绘）。"),
 
     // ── Status bar · WB / range pick + manual mask placement ─────────────────
     ("WB eyedropper: {k} K · tint {tint} — fine-tune in the Tone section",
@@ -1095,8 +1095,8 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     // word-for-word the same situation — a release package ships neither
     // helper — and two wordings for one condition is how a user concludes they
     // are two different problems.
-    ("this build did not ship the python sidecar — run Autoshop from the project directory, or point AUTOSHOP_DENOISE_SCRIPT at python/denoise.py",
-        "本版本未随发布包分发 python 边车——请从项目目录运行 Autoshop，或用 AUTOSHOP_DENOISE_SCRIPT 指向 python/denoise.py"),
+    ("this build did not ship the python sidecar — run AutoShade from the project directory, or point AUTOSHADE_DENOISE_SCRIPT at python/denoise.py",
+        "本版本未随发布包分发 python 边车——请从项目目录运行 AutoShade，或用 AUTOSHADE_DENOISE_SCRIPT 指向 python/denoise.py"),
     ("Denoise at full resolution (the full-sensor develop for a RAW, the image itself for a baked source; slow) — off = a ≤2048px working copy for a quick on-canvas result",
         "全分辨率去噪（RAW 用全画幅显影，烘焙图像用原图；慢）——关闭 = 用 ≤2048px 工作副本快速出画布结果"),
     ("AI denoise (full-res)… (GPU sidecar, can take minutes; first run downloads the model)",
@@ -1218,8 +1218,8 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     ("Segmentation sidecar", "分割边车"),
     ("This path can only be set by environment variable, because it is executed",
         "此路径只能用环境变量设置，因为它会被当作程序启动"),
-    ("Where saved develops live: recipes, Lightroom XMP, version snapshots and mask rasters — one folder per photo, keyed by its absolute path. Override the location with the AUTOSHOP_DATA_DIR environment variable.",
-        "已保存显影的存放地：配方、Lightroom XMP、版本快照与蒙版栅格 — 每张照片一个文件夹，按其绝对路径键控。可用 AUTOSHOP_DATA_DIR 环境变量改存放位置。"),
+    ("Where saved develops live: recipes, Lightroom XMP, version snapshots and mask rasters — one folder per photo, keyed by its absolute path. Override the location with the AUTOSHADE_DATA_DIR environment variable.",
+        "已保存显影的存放地：配方、Lightroom XMP、版本快照与蒙版栅格 — 每张照片一个文件夹，按其绝对路径键控。可用 AUTOSHADE_DATA_DIR 环境变量改存放位置。"),
     // R22-8 · SF8-C: the row shows the OPEN photo's hash subdirectory, so it
     // needs a way in — the folder name is a hash nobody can retype.
     ("🗂 Show in file manager", "🗂 在文件管理器中打开"),
@@ -1499,7 +1499,7 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     ("Light", "浅色"),
 
     // ── Round-12 L12#2B: deterministic-rationale note templates ──────────────
-    // Each en key is BYTE-IDENTICAL to its `autoshop::rationale::keys` const
+    // Each en key is BYTE-IDENTICAL to its `autoshade::rationale::keys` const
     // (the audit extracts that module and this table must cover it). The zh
     // value must keep the exact {placeholder} multiset — the placeholder gate
     // checks it.
@@ -1812,8 +1812,8 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
       above describes the PRE-distillation recipe]",
         " [风格蒸馏后的复验失败（{e}）——上方判词描述的是蒸馏前的配方]"),
     (" [style reference unavailable ({e}) — the Style slider had no effect on this \
-      develop; rebuild it with: autoshop style-index <folder>]",
-        " [风格参考不可用（{e}）——本次显影中风格滑杆未起作用；用 autoshop style-index <文件夹> 重建]"),
+      develop; rebuild it with: autoshade style-index <folder>]",
+        " [风格参考不可用（{e}）——本次显影中风格滑杆未起作用；用 autoshade style-index <文件夹> 重建]"),
     (" [no style reference was available for this photo — the Style slider ({pct}%) had \
       no effect on this develop. Build your style library in the AI panel → Style \
       reference library: a folder of your own RAWs with their Lightroom .xmp sidecars \
@@ -1866,8 +1866,8 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     ("JPEG", "JPEG"),
 
     // ── Round-13 easter eggs (user request: 讽刺 Adobe 的拉跨技术和昂贵定价) ──
-    ("skymanbp's AS — the “As” stands for Autoshop, not an Adobe subscription. Rent paid to date: $0.00.",
-        "skymanbp's AS——「As」是 Autoshop，不是 Adobe 订阅。迄今已缴月租：$0.00。"),
+    ("skymanbp's AS — the “As” stands for AutoShade, not an Adobe subscription. Rent paid to date: $0.00.",
+        "skymanbp's AS——「As」是 AutoShade，不是 Adobe 订阅。迄今已缴月租：$0.00。"),
     ("Fun fact: this empty state finished loading while Photoshop's splash screen would still be painting its clouds.",
         "冷知识：这个空页面加载完的时候，Photoshop 的启动画面还没画完那朵云。"),
     ("Every shortcut above ships free — no Creative tier, no Cloud, no monthly ransom.",

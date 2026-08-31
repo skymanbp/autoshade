@@ -21,7 +21,7 @@
         let mut src = EditRecipe {
             exposure_ev: 0.75,
             straighten_deg: 3.0,
-            crop: Some(autoshop::recipe::Crop {
+            crop: Some(autoshade::recipe::Crop {
                 top: 0.1,
                 left: 0.1,
                 bottom: 0.9,
@@ -33,8 +33,8 @@
             .into_iter()
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect();
-        src.masks.push(autoshop::recipe::LocalAdjustment {
-            mask: autoshop::recipe::MaskGeometry::Bitmap { path: "sky.png".into() },
+        src.masks.push(autoshade::recipe::LocalAdjustment {
+            mask: autoshade::recipe::MaskGeometry::Bitmap { path: "sky.png".into() },
             ..Default::default()
         });
 
@@ -62,13 +62,13 @@
     #[test]
     fn the_batch_resolver_discloses_what_the_open_path_would() {
         let dir = std::env::temp_dir()
-            .join(format!("autoshop-batch-warns-{}", std::process::id()));
+            .join(format!("autoshade-batch-warns-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let src = dir.join("photo.arw");
         std::fs::write(&src, b"raw").unwrap();
         let xmp = r#"<rdf:Description rdf:about="" xmlns:crs="http://ns.adobe.com/camera-raw-settings/1.0/" crs:Exposure2012="+1.00" crs:Contrast2012="bogus"/>"#;
-        let snap = autoshop::store::DevelopSnapshot {
+        let snap = autoshade::store::DevelopSnapshot {
             recipe: None,
             recipe_err: None,
             lr_xmp: Some((xmp.to_string(), "Lightroom sidecar")),
@@ -96,7 +96,7 @@
     /// could previously be deleted with every GUI test green.
     #[test]
     fn export_opts_carries_every_dial_to_the_renderer() {
-        let app = AutoshopApp {
+        let app = AutoShadeApp {
             exp_long_edge: 2560,
             exp_sharpen: 35.0,
             exp_quality: 88.0,
@@ -109,8 +109,8 @@
         assert!((o.sharpen - 35.0).abs() < 1e-6);
         assert_eq!(o.jpeg_quality, 88);
         assert!(o.eight_bit, "Png8 is 8-bit");
-        assert!(matches!(o.color_space, autoshop::render::ExportColorSpace::DisplayP3));
-        let flat = AutoshopApp { exp_long_edge: 0, ..Default::default() };
+        assert!(matches!(o.color_space, autoshade::render::ExportColorSpace::DisplayP3));
+        let flat = AutoShadeApp { exp_long_edge: 0, ..Default::default() };
         assert_eq!(flat.export_opts().long_edge, None, "0 = no resize");
     }
 
@@ -119,7 +119,7 @@
     #[test]
     fn the_zoom_glide_seam_moves_toward_the_target() {
         let ctx = egui::Context::default();
-        let mut app = AutoshopApp { zoom: 1.0, zoom_target: 4.0, ..Default::default() };
+        let mut app = AutoShadeApp { zoom: 1.0, zoom_target: 4.0, ..Default::default() };
         let _ = ctx.run(egui::RawInput::default(), |ctx| app.apply_zoom_glide(ctx));
         assert!(
             app.zoom > 1.0 && app.zoom < 4.0,
@@ -142,7 +142,7 @@
         };
         // Positive control first: with NO transient up, R arms the crop —
         // proving this harness actually reaches the tool tier.
-        let mut app = AutoshopApp {
+        let mut app = AutoShadeApp {
             src_path: Some(std::path::PathBuf::from("D:/library/x.arw")),
             ..Default::default()
         };
@@ -152,7 +152,7 @@
         assert!(app.crop_mode, "positive control: R arms the crop tool");
 
         // The negative: a transient (Settings) swallows the tool tier…
-        let mut app = AutoshopApp {
+        let mut app = AutoShadeApp {
             src_path: Some(std::path::PathBuf::from("D:/library/x.arw")),
             show_settings: true,
             ..Default::default()
@@ -174,12 +174,12 @@
     #[test]
     fn a_version_load_resyncs_the_display_state() {
         let dir = std::env::temp_dir()
-            .join(format!("autoshop-version-resync-{}", std::process::id()));
+            .join(format!("autoshade-version-resync-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let src = dir.join("photo.arw");
         std::fs::write(&src, b"raw").unwrap();
-        let dev = autoshop::store::develop_dir(&src);
+        let dev = autoshade::store::develop_dir(&src);
         let _ = std::fs::remove_dir_all(&dev);
         std::fs::create_dir_all(&dev).unwrap();
         let versioned = EditRecipe {
@@ -188,12 +188,12 @@
             ..Default::default()
         };
         std::fs::write(
-            autoshop::store::version_target(&src, 1),
+            autoshade::store::version_target(&src, 1),
             serde_json::to_string(&versioned).unwrap(),
         )
         .unwrap();
 
-        let mut app = AutoshopApp {
+        let mut app = AutoShadeApp {
             src_path: Some(src.clone()),
             sel_mask: Some(3), // stale index into the OLD mask list
             rationale: "stale rationale".into(),
@@ -226,7 +226,7 @@
             origin: None,
             thumb: None,
         };
-        let mut app = AutoshopApp {
+        let mut app = AutoShadeApp {
             variants: vec![
                 mk(VariantKind::Original, "card-a", Some("base")),
                 mk(VariantKind::Fitted, "card-b", Some("偏暖")),
@@ -248,14 +248,14 @@
         // A LEGACY record (no ids — every strip written before R24-2) is
         // minted one on the way in, or the versions taken from that card
         // could never be attributed again.
-        let legacy = autoshop::store::VariantsRecord {
+        let legacy = autoshade::store::VariantsRecord {
             extra: Default::default(),
             v: 1,
             active_kind: "original".into(),
             active_pos: 0,
             active_id: None,
             active_name: None,
-            others: vec![autoshop::store::VariantEntry {
+            others: vec![autoshade::store::VariantEntry {
                 extra: Default::default(),
                 kind: "generated".into(),
                 recipe: EditRecipe::default(),
@@ -364,7 +364,7 @@
             origin: None,
             thumb: None,
         };
-        let mut app = AutoshopApp {
+        let mut app = AutoShadeApp {
             variants: vec![negative, fitted],
             active: 1,
             recipe: EditRecipe { contrast: 44.0, exposure_ev: 0.5, ..Default::default() },
@@ -395,7 +395,7 @@
 
         // A PIXEL-STATE source is refused with the reverse-fit remedy — its
         // look is in its raster, and the recipe over it is stripped bare.
-        let mut app = AutoshopApp {
+        let mut app = AutoShadeApp {
             variants: vec![
                 Variant {
                     kind: VariantKind::Original,
@@ -447,7 +447,7 @@
         };
         let ctx = egui::Context::default();
         crate::theme::install_theme(&ctx, crate::theme::ThemePref::Dark);
-        let mut app = AutoshopApp {
+        let mut app = AutoShadeApp {
             variants: vec![
                 mk(VariantKind::Original, crate::model::ORIGINAL_VARIANT_ID),
                 mk(VariantKind::Generated, "card-gen"),
@@ -519,7 +519,7 @@
         ] {
             let ctx = egui::Context::default();
             crate::theme::install_theme(&ctx, crate::theme::ThemePref::Dark);
-            let mut app = AutoshopApp {
+            let mut app = AutoShadeApp {
                 variants: vec![
                     mk(VariantKind::Original, crate::model::ORIGINAL_VARIANT_ID),
                     mk(VariantKind::Generated, "card-gen"),
@@ -561,7 +561,7 @@
         // one edit state.)
         let ctx = egui::Context::default();
         crate::theme::install_theme(&ctx, crate::theme::ThemePref::Dark);
-        let mut app = AutoshopApp {
+        let mut app = AutoShadeApp {
             variants: vec![mk(VariantKind::Original, crate::model::ORIGINAL_VARIANT_ID)],
             active: 0,
             ..Default::default()
@@ -613,7 +613,7 @@
         {
             let ctx = egui::Context::default();
             crate::theme::install_theme(&ctx, crate::theme::ThemePref::Dark);
-            let mut app = AutoshopApp {
+            let mut app = AutoShadeApp {
                 src_path: Some(photo.clone()),
                 variants: vec![
                     mk(VariantKind::Original, crate::model::ORIGINAL_VARIANT_ID),
@@ -624,7 +624,7 @@
             };
             let _ = ctx.run(input(), |ctx| {
                 egui::TopBottomPanel::bottom("variants")
-                    .exact_height(AutoshopApp::VARIANT_STRIP_H)
+                    .exact_height(AutoShadeApp::VARIANT_STRIP_H)
                     .show(ctx, |ui| app.variant_strip(ui));
             });
             let (rect, enabled) = app
@@ -646,7 +646,7 @@
             app.strip_name_rect = None;
             let _ = ctx.run(input(), |ctx| {
                 egui::TopBottomPanel::bottom("variants")
-                    .exact_height(AutoshopApp::VARIANT_STRIP_H)
+                    .exact_height(AutoShadeApp::VARIANT_STRIP_H)
                     .show(ctx, |ui| app.variant_strip(ui));
             });
             assert!(
@@ -673,7 +673,7 @@
             thumb: None,
         };
         let photo = PathBuf::from("D:/library/_rename_card.ARW");
-        let mut app = AutoshopApp {
+        let mut app = AutoShadeApp {
             src_path: Some(photo.clone()),
             variants: vec![
                 mk(VariantKind::Original, crate::model::ORIGINAL_VARIANT_ID),
@@ -716,7 +716,7 @@
     #[test]
     fn a_snapshot_off_a_generated_card_gets_the_negatives_calibration_back() {
         let knots = vec![[0.0, 0.0], [0.5, 0.6], [1.0, 1.0]];
-        let lens = autoshop::recipe::LensProfile {
+        let lens = autoshade::recipe::LensProfile {
             distortion: vec![0.02, 0.0, 0.0],
             distortion_on: true,
             ..Default::default()
@@ -755,7 +755,7 @@
         };
         assert!(!crate::persist::reconcile_snapshot_calibration(&mut onto_pixels, true, cal));
         assert!(onto_pixels.base_curve.is_empty(), "baked pixels carry the look already");
-        assert_eq!(onto_pixels.lens_profile, autoshop::recipe::LensProfile::default());
+        assert_eq!(onto_pixels.lens_profile, autoshade::recipe::LensProfile::default());
         assert_eq!(onto_pixels.as_shot_k, None, "…and a baked white balance");
 
         // R24 round-end NIT-4: the era stamp rides WITH the curve, the same
@@ -768,11 +768,11 @@
         assert!(crate::persist::reconcile_snapshot_calibration(&mut legacy, false, cal));
         assert_eq!(
             legacy.version,
-            autoshop::recipe::CALIB_ERA,
+            autoshade::recipe::CALIB_ERA,
             "a freshly estimated curve carries this build's era"
         );
         assert!(
-            !autoshop::pipeline::base_curve_looks_pre_era(legacy.version, &legacy.base_curve),
+            !autoshade::pipeline::base_curve_looks_pre_era(legacy.version, &legacy.base_curve),
             "…so the pre-era repair declines it instead of announcing a re-estimate"
         );
         // A calibration that produced NO knots stamps no curve, so it makes no
@@ -780,7 +780,7 @@
         let mut none = EditRecipe { version: 1, ..Default::default() };
         assert!(!crate::persist::reconcile_snapshot_calibration(&mut none, false, || (
             Vec::new(),
-            autoshop::recipe::LensProfile::default(),
+            autoshade::recipe::LensProfile::default(),
             None
         )));
         assert_eq!(none.version, 1, "no curve stamped, no era restated");
@@ -793,12 +793,12 @@
     #[test]
     fn saving_a_version_off_a_generated_variant_is_refused_not_emptied() {
         let dir = std::env::temp_dir()
-            .join(format!("autoshop-genversion-{}", std::process::id()));
+            .join(format!("autoshade-genversion-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let src = dir.join("photo.arw");
         std::fs::write(&src, b"raw").unwrap();
-        let dev = autoshop::store::develop_dir(&src);
+        let dev = autoshade::store::develop_dir(&src);
         let _ = std::fs::remove_dir_all(&dev);
         std::fs::create_dir_all(&dev).unwrap();
 
@@ -811,14 +811,14 @@
             origin: Some(dir.join("master.png")),
             thumb: None,
         };
-        let mut app = AutoshopApp {
+        let mut app = AutoShadeApp {
             src_path: Some(src.clone()),
             variants: vec![mk(crate::model::VariantKind::Generated)],
             ..Default::default()
         };
         app.save_version();
         assert!(
-            autoshop::store::list_versions(&src).is_empty(),
+            autoshade::store::list_versions(&src).is_empty(),
             "a generated card must not mint an empty snapshot"
         );
         assert!(
@@ -834,11 +834,11 @@
             ..mk(crate::model::VariantKind::Fitted)
         }];
         app.save_version();
-        assert_eq!(autoshop::store::list_versions(&src), vec![1]);
-        let meta = autoshop::store::read_version_meta(&src);
+        assert_eq!(autoshade::store::list_versions(&src), vec![1]);
+        let meta = autoshade::store::read_version_meta(&src);
         assert_eq!(meta[0].from_kind.as_deref(), Some("fitted"));
         assert_eq!(meta[0].from_id.as_deref(), Some("card-fit"));
-        assert_eq!(meta[0].origin.as_deref(), Some(autoshop::store::VERSION_ORIGIN_USER));
+        assert_eq!(meta[0].origin.as_deref(), Some(autoshade::store::VERSION_ORIGIN_USER));
 
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_dir_all(&dev);
@@ -861,13 +861,13 @@
             }
             shapes.iter().for_each(|c| walk(&c.shape, out));
         }
-        let dir = std::env::temp_dir().join(format!("autoshop-verrow-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("autoshade-verrow-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let src = dir.join("photo.arw");
         std::fs::write(&src, b"raw").unwrap();
 
-        let mut app = AutoshopApp {
+        let mut app = AutoShadeApp {
             src_path: Some(src.clone()),
             variants: vec![crate::model::Variant {
                 kind: crate::model::VariantKind::Fitted,
@@ -883,26 +883,26 @@
         };
         app.version_meta.insert(
             1,
-            autoshop::store::VersionMetaEntry {
+            autoshade::store::VersionMetaEntry {
                 n: 1,
                 name: Some("偏暖".into()),
                 from_kind: Some("fitted".into()),
                 from_id: Some("card-fit".into()),
-                origin: Some(autoshop::store::VERSION_ORIGIN_USER.into()),
+                origin: Some(autoshade::store::VERSION_ORIGIN_USER.into()),
             },
         );
         app.version_meta.insert(
             2,
-            autoshop::store::VersionMetaEntry {
+            autoshade::store::VersionMetaEntry {
                 n: 2,
-                origin: Some(autoshop::store::VERSION_ORIGIN_AUTO.into()),
+                origin: Some(autoshade::store::VERSION_ORIGIN_AUTO.into()),
                 ..Default::default()
             },
         );
 
         let ctx = egui::Context::default();
         crate::theme::install_theme(&ctx, crate::theme::ThemePref::Dark);
-        let frame = |app: &mut AutoshopApp| -> Vec<String> {
+        let frame = |app: &mut AutoShadeApp| -> Vec<String> {
             let mut seen = Vec::new();
             let out = ctx.run(
                 egui::RawInput {
@@ -958,16 +958,16 @@
     /// by calling the committer directly.
     #[test]
     fn a_pending_version_rename_survives_a_commit_boundary() {
-        let dir = std::env::temp_dir().join(format!("autoshop-verrename-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("autoshade-verrename-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let src = dir.join("photo.arw");
         std::fs::write(&src, b"raw").unwrap();
-        let dev = autoshop::store::develop_dir(&src);
+        let dev = autoshade::store::develop_dir(&src);
         let _ = std::fs::remove_dir_all(&dev);
         std::fs::create_dir_all(&dev).unwrap();
         std::fs::write(
-            autoshop::store::version_target(&src, 1),
+            autoshade::store::version_target(&src, 1),
             serde_json::to_string(&EditRecipe::default()).unwrap(),
         )
         .unwrap();
@@ -981,7 +981,7 @@
             origin: None,
             thumb: None,
         };
-        let mut app = AutoshopApp {
+        let mut app = AutoShadeApp {
             src_path: Some(src.clone()),
             variants: vec![
                 mk(crate::model::VariantKind::Original),
@@ -997,7 +997,7 @@
         let ctx = egui::Context::default();
         app.switch_variant(1, &ctx);
         assert_eq!(
-            autoshop::store::read_version_meta(&src)
+            autoshade::store::read_version_meta(&src)
                 .into_iter()
                 .find(|e| e.n == 1)
                 .and_then(|e| e.name)
@@ -1034,7 +1034,7 @@
             origin: None,
             thumb: None,
         };
-        let mut app = AutoshopApp {
+        let mut app = AutoShadeApp {
             variants: vec![
                 mk(crate::model::VariantKind::Original),
                 mk(crate::model::VariantKind::Fitted),
@@ -1055,7 +1055,7 @@
             },
             |ctx| {
                 egui::TopBottomPanel::bottom("variants")
-                    .exact_height(AutoshopApp::VARIANT_STRIP_H)
+                    .exact_height(AutoShadeApp::VARIANT_STRIP_H)
                     .show(ctx, |ui| app.variant_strip(ui));
             },
         );
@@ -1075,7 +1075,7 @@
     fn the_version_filter_matches_by_id_then_kind_and_never_by_hope() {
         use crate::model::VariantKind;
         let meta = |from_id: Option<&str>, from_kind: Option<&str>| {
-            autoshop::store::VersionMetaEntry {
+            autoshade::store::VersionMetaEntry {
                 n: 1,
                 name: None,
                 from_kind: from_kind.map(str::to_string),
@@ -1084,24 +1084,24 @@
             }
         };
         let m = meta(Some("card-a"), Some("original"));
-        assert!(AutoshopApp::version_is_from(Some(&m), "card-a", Some(VariantKind::Original)));
+        assert!(AutoShadeApp::version_is_from(Some(&m), "card-a", Some(VariantKind::Original)));
         assert!(
-            !AutoshopApp::version_is_from(Some(&m), "card-b", Some(VariantKind::Original)),
+            !AutoShadeApp::version_is_from(Some(&m), "card-b", Some(VariantKind::Original)),
             "a matching KIND must not smuggle in another card's history"
         );
         // Same card, re-kinded since the snapshot (R24-3's「应用到原图」 will
         // do exactly that): the id still speaks for it.
-        assert!(AutoshopApp::version_is_from(Some(&m), "card-a", Some(VariantKind::Fitted)));
+        assert!(AutoShadeApp::version_is_from(Some(&m), "card-a", Some(VariantKind::Fitted)));
 
         let old = meta(None, Some("fitted"));
-        assert!(AutoshopApp::version_is_from(Some(&old), "card-a", Some(VariantKind::Fitted)));
-        assert!(!AutoshopApp::version_is_from(Some(&old), "card-a", Some(VariantKind::Original)));
+        assert!(AutoShadeApp::version_is_from(Some(&old), "card-a", Some(VariantKind::Fitted)));
+        assert!(!AutoShadeApp::version_is_from(Some(&old), "card-a", Some(VariantKind::Original)));
 
         // A card with no id of its own falls back to kind too.
-        assert!(AutoshopApp::version_is_from(Some(&m), "", Some(VariantKind::Original)));
+        assert!(AutoShadeApp::version_is_from(Some(&m), "", Some(VariantKind::Original)));
 
-        assert!(!AutoshopApp::version_is_from(Some(&meta(None, None)), "card-a", Some(VariantKind::Original)));
-        assert!(!AutoshopApp::version_is_from(None, "card-a", Some(VariantKind::Original)));
+        assert!(!AutoShadeApp::version_is_from(Some(&meta(None, None)), "card-a", Some(VariantKind::Original)));
+        assert!(!AutoShadeApp::version_is_from(None, "card-a", Some(VariantKind::Original)));
     }
 
     /// L15-8: Clear must clear what Apply BAKES (the greyscale weight
@@ -1109,7 +1109,7 @@
     /// is "bakes exactly what it shows".
     #[test]
     fn clearing_the_brush_clears_what_apply_would_bake() {
-        let mut app = AutoshopApp {
+        let mut app = AutoShadeApp {
             mask_paint: Some(image::RgbaImage::from_pixel(4, 4, image::Rgba([255, 64, 64, 160]))),
             mask_brush_gray: Some(image::GrayImage::from_pixel(4, 4, image::Luma([255]))),
             ..Default::default()
@@ -1149,9 +1149,9 @@
     /// crop-mode flip must rebase the value — not reinterpret it.
     #[test]
     fn entering_crop_mode_rebases_the_pan_it_reinterprets() {
-        let mut app = AutoshopApp::default();
+        let mut app = AutoShadeApp::default();
         app.recipe.crop =
-            Some(autoshop::recipe::Crop { left: 0.5, top: 0.5, right: 1.0, bottom: 1.0 });
+            Some(autoshade::recipe::Crop { left: 0.5, top: 0.5, right: 1.0, bottom: 1.0 });
         app.pan = egui::vec2(0.5, 0.5); // centre of the CROP window
         app.set_crop_mode(true);
         assert!(
@@ -1173,7 +1173,7 @@
     #[test]
     fn a_cancelled_retouchs_late_artifact_is_discarded_from_disk() {
         let dir = std::env::temp_dir()
-            .join(format!("autoshop-gui-late-artifact-{}", std::process::id()));
+            .join(format!("autoshade-gui-late-artifact-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let artifact = dir.join("late.retouch.png");
@@ -1181,7 +1181,7 @@
 
         let ctx = egui::Context::default();
         // The cancel already bumped past this task's epoch 6.
-        let mut app = AutoshopApp { gen_epoch: 7, ..Default::default() };
+        let mut app = AutoShadeApp { gen_epoch: 7, ..Default::default() };
         app.on_retouched(
             &ctx,
             Lang::En,
@@ -1203,7 +1203,7 @@
     #[test]
     fn a_master_rewritten_during_decode_misses_the_cache() {
         let dir = std::env::temp_dir()
-            .join(format!("autoshop-gui-master-stamp-{}", std::process::id()));
+            .join(format!("autoshade-gui-master-stamp-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let p = dir.join("master.png");
@@ -1213,7 +1213,7 @@
         // content — the stamp's length half moves even on coarse mtime).
         std::fs::write(&p, b"generation B, longer bytes").unwrap();
 
-        let mut app = AutoshopApp::default();
+        let mut app = AutoShadeApp::default();
         let pixels = std::sync::Arc::new(image::DynamicImage::ImageRgba8(image::RgbaImage::new(2, 2)));
         app.remember_master(&p, 1280, spawn_stamp, pixels);
         assert!(
@@ -1259,8 +1259,8 @@
         // (The default itself — "unset ⇒ ./out" — is pinned as a pure
         // function in `config::the_delivery_root_defaults_to_the_out_folder_it_replaced`;
         // asserting it again HERE would make this test fail for a developer
-        // who has AUTOSHOP_OUT_DIR set, which is not what it is about.)
-        let root = autoshop::config::delivery_root();
+        // who has AUTOSHADE_OUT_DIR set, which is not what it is about.)
+        let root = autoshade::config::delivery_root();
         assert_eq!(
             crate::export::export_dest_dir(ExportDest::OutFolder, None),
             Some(root.clone()),
@@ -1302,7 +1302,7 @@
     fn the_ask_destination_routes_to_the_dialog_instead_of_writing() {
         use std::path::PathBuf;
         let src = PathBuf::from("D:/library/DSC00042.ARW");
-        let asking = AutoshopApp {
+        let asking = AutoShadeApp {
             src_path: Some(src.clone()),
             exp_dest: ExportDest::Ask,
             exp_format: ExportFormat::Jpeg,
@@ -1321,7 +1321,7 @@
         // The same app with the default destination DOES resolve to a file —
         // without this half the assertion above could pass on a broken route
         // that never renders anything at all.
-        let direct = AutoshopApp {
+        let direct = AutoShadeApp {
             src_path: Some(src),
             exp_dest: ExportDest::OutFolder,
             exp_format: ExportFormat::Jpeg,
@@ -1338,7 +1338,7 @@
     fn a_finished_export_names_an_absolute_path() {
         use std::path::PathBuf;
         let ctx = egui::Context::default();
-        let mut app = AutoshopApp { busy: true, ..Default::default() };
+        let mut app = AutoShadeApp { busy: true, ..Default::default() };
         let rel = PathBuf::from("out").join("_r22_abs.developed.tif");
         let abs = std::path::absolute(&rel).unwrap();
         assert_ne!(abs, rel, "fixture: the path must actually be relative");
@@ -1369,7 +1369,7 @@
         let ctx = egui::Context::default();
         let kept = PathBuf::from("D:/deliver/tripA");
         let refused = PathBuf::from("D:/library/2026-08");
-        let mut app = AutoshopApp {
+        let mut app = AutoShadeApp {
             busy: true,
             last_export_dir: Some(kept.clone()),
             ..Default::default()
@@ -1394,7 +1394,7 @@
         // The other half, or the assertion above would pass on a build that
         // never remembers anything: a batch that DID deliver seeds the memory.
         let landed = PathBuf::from("D:/deliver/tripB");
-        let mut ok_app = AutoshopApp { busy: true, ..Default::default() };
+        let mut ok_app = AutoShadeApp { busy: true, ..Default::default() };
         ok_app
             .tx
             .send(Msg::Exported(Ok(ExportOutcome::Batch {
@@ -1421,18 +1421,18 @@
     #[test]
     fn handing_the_sidecar_to_lightroom_never_overwrites_in_silence() {
         let dir = std::env::temp_dir()
-            .join(format!("autoshop-gui-xmp-beside-{}", std::process::id()));
+            .join(format!("autoshade-gui-xmp-beside-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let raw = dir.join("_r22_handoff.arw");
         std::fs::write(&raw, b"raw").unwrap();
-        let dev = autoshop::store::develop_dir(&raw);
+        let dev = autoshade::store::develop_dir(&raw);
         let _ = std::fs::remove_dir_all(&dev);
         std::fs::create_dir_all(&dev).unwrap();
-        std::fs::write(autoshop::store::xmp_target(&raw), b"<x:xmpmeta>ours</x:xmpmeta>").unwrap();
+        std::fs::write(autoshade::store::xmp_target(&raw), b"<x:xmpmeta>ours</x:xmpmeta>").unwrap();
         let beside = raw.with_extension("xmp");
 
-        let mut app = AutoshopApp { src_path: Some(raw.clone()), ..Default::default() };
+        let mut app = AutoShadeApp { src_path: Some(raw.clone()), ..Default::default() };
         assert!(app.can_export_xmp_beside(), "a RAW can hand its sidecar over");
 
         // First delivery: nothing in the way, so it lands with no confirmation.
@@ -1467,13 +1467,13 @@
         // A non-RAW cannot: its neighbouring .xmp is another program's file.
         let baked = dir.join("_r22_handoff.png");
         std::fs::write(&baked, b"png").unwrap();
-        let baked_app = AutoshopApp { src_path: Some(baked), ..Default::default() };
+        let baked_app = AutoShadeApp { src_path: Some(baked), ..Default::default() };
         assert!(
             !baked_app.can_export_xmp_beside(),
             "only a RAW has the Lightroom sidecar convention"
         );
         assert!(
-            !AutoshopApp::default().can_export_xmp_beside(),
+            !AutoShadeApp::default().can_export_xmp_beside(),
             "…and with no photo open there is nothing to hand over"
         );
 
@@ -1859,7 +1859,7 @@
         // dangerous mutant is the loosest one: dropping the length check turns
         // "give the reserved NAME back" into "delete the user's partial
         // result". A non-empty file is evidence and must survive.
-        let dir = std::env::temp_dir().join(format!("autoshop-claim-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("autoshade-claim-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let empty = dir.join("claimed.png");
@@ -1956,7 +1956,7 @@
         assert_eq!(view_norm_to_orig(0.31, 0.77, dims, 0.0, &off), (0.31, 0.77));
         // A real-shaped in-camera profile joins the sweep: the composed map
         // must round-trip exactly like the manual-only one.
-        let profile = autoshop::recipe::LensProfile {
+        let profile = autoshade::recipe::LensProfile {
             distortion: (0..16).map(|i| 1.0008 - 0.053 * (i as f32 / 15.0).powi(2)).collect(),
             distortion_on: true,
             ..Default::default()
@@ -2005,7 +2005,7 @@
         // never enters curve_editor (the driven test below does, U10).
         // Empty = identity; an anchored lift keeps the ends and raises the
         // anchored midpoint.
-        let id = autoshop::render::curve_lut(&[]);
+        let id = autoshade::render::curve_lut(&[]);
         assert!(id[0].abs() < 1e-6 && (id[255] - 1.0).abs() < 1e-6);
         assert!((id[128] - 128.0 / 255.0).abs() < 1e-3);
 
@@ -2014,7 +2014,7 @@
         insert_curve_point(pts, 0, 0);
         insert_curve_point(pts, 255, 255);
         insert_curve_point(pts, 64, 96); // classic shadow lift between pinned ends
-        let lut = autoshop::render::curve_lut(pts);
+        let lut = autoshade::render::curve_lut(pts);
         assert!(lut[0].abs() < 1e-6 && (lut[255] - 1.0).abs() < 1e-6);
         assert!((lut[64] - 96.0 / 255.0).abs() < 1e-3, "anchored point maps exactly");
         // The channel selector reaches the right recipe field (master only here).
@@ -2035,9 +2035,9 @@
         // presses; pass 3 releases → egui reports the click (which pass
         // reports the change depends on egui's drag-vs-click bookkeeping,
         // so the two are OR-ed).
-        let mut app = AutoshopApp { curve_channel: 2, ..Default::default() };
+        let mut app = AutoShadeApp { curve_channel: 2, ..Default::default() };
         let ctx = egui::Context::default();
-        let run_pass = |app: &mut AutoshopApp, events: Vec<egui::Event>| -> bool {
+        let run_pass = |app: &mut AutoShadeApp, events: Vec<egui::Event>| -> bool {
             let mut changed = false;
             let input = egui::RawInput {
                 screen_rect: Some(egui::Rect::from_min_size(
@@ -2095,7 +2095,7 @@
     /// assert cannot leave it behind. Handing the guard back (rather than
     /// trusting a trailing `remove_file`) is what makes it impossible for the
     /// next caller to forget — five of them had.
-    fn app_with_masked_photo(tag: &str) -> (AutoshopApp, Scrub) {
+    fn app_with_masked_photo(tag: &str) -> (AutoShadeApp, Scrub) {
         let (w, h) = (24u32, 16u32);
         let base = Arc::new(image::DynamicImage::ImageRgb8(image::RgbImage::from_fn(
             w,
@@ -2108,7 +2108,7 @@
             .save(&mask_path)
             .unwrap();
         let recipe = EditRecipe {
-            masks: vec![autoshop::recipe::LocalAdjustment {
+            masks: vec![autoshade::recipe::LocalAdjustment {
                 mask: MaskGeometry::Bitmap { path: mask_path.to_string_lossy().into_owned() },
                 exposure_ev: 0.4,
                 color_gains: Some([1.2, 0.95, 0.7]),
@@ -2117,7 +2117,7 @@
             ..Default::default()
         };
         let scrub = Scrub(vec![mask_path.clone()]);
-        let app = AutoshopApp {
+        let app = AutoShadeApp {
             source_preview: Some(base.clone()),
             base_preview: Some(base),
             variants: vec![Variant {
@@ -2131,7 +2131,7 @@
             }],
             recipe,
             sel_mask: Some(0),
-            ..AutoshopApp::default()
+            ..AutoShadeApp::default()
         };
         (app, scrub)
     }
@@ -2238,11 +2238,11 @@
         app.saved_recipe = app.recipe.clone(); // this canvas is clean
         app.variants[0].origin = None;
         app.pixels_on_disk = None;
-        let clean = PathBuf::from("D:/__autoshop_chain__/clean.ARW");
+        let clean = PathBuf::from("D:/__autoshade_chain__/clean.ARW");
         app.src_path = Some(clean.clone());
         // ANOTHER photo's stash holds a dirty background variant.
         app.nav_stash.insert(
-            PathBuf::from("D:/__autoshop_chain__/other.ARW"),
+            PathBuf::from("D:/__autoshade_chain__/other.ARW"),
             StashEntry {
                 id: String::new(),
                 name: None,
@@ -2266,7 +2266,7 @@
             app.inactive_dirty_variants() > 0,
             "the quit surfaces still see the other photo's work"
         );
-        app.open_path(PathBuf::from("D:/__autoshop_chain__/next.ARW"));
+        app.open_path(PathBuf::from("D:/__autoshade_chain__/next.ARW"));
         assert!(
             !app.nav_stash.contains_key(&clean),
             "a clean photo must not be stashed for another photo's background work"
@@ -2297,11 +2297,11 @@
         // cwd ./out legacy sidecars by stem (see the keep-fact test). The
         // nav target's own rename is defence-in-depth — its decode fails
         // into the Err arm, which never reads a sidecar.
-        let old = PathBuf::from("D:/__autoshop_h4__/__autoshop_h4_a__.ARW");
+        let old = PathBuf::from("D:/__autoshade_h4__/__autoshade_h4_a__.ARW");
         app.src_path = Some(old.clone());
         assert_eq!(app.inactive_dirty_variants(), 1, "premise: background dirty");
         // Navigate away — the stash snapshot is written synchronously.
-        app.open_path(PathBuf::from("D:/__autoshop_h4__/__autoshop_h4_b__.ARW"));
+        app.open_path(PathBuf::from("D:/__autoshade_h4__/__autoshade_h4_b__.ARW"));
         {
             let st = app.nav_stash.get(&old).expect("background work must stash the strip");
             assert_eq!(st.others.len(), 1);
@@ -2428,13 +2428,13 @@
         // so parallel tests can't race; the whole develop dir is scrubbed
         // before and after (its key is derived from this fake path only).
         let src = std::path::Path::new("D:/library/_sidecar_prio_test.ARW"); // never touched
-        let dev = autoshop::store::develop_dir(src);
+        let dev = autoshade::store::develop_dir(src);
         let _ = std::fs::remove_dir_all(&dev); // a crashed earlier run may have left files
         std::fs::create_dir_all(&dev).unwrap();
         std::fs::create_dir_all("out").unwrap();
-        let rj = autoshop::store::recipe_target(src);
-        let xp = autoshop::pipeline::xmp_target(src);
-        let legacy_rj = autoshop::store::legacy_recipe(src);
+        let rj = autoshade::store::recipe_target(src);
+        let xp = autoshade::pipeline::xmp_target(src);
+        let legacy_rj = autoshade::store::legacy_recipe(src);
         let _ = std::fs::remove_file(&legacy_rj);
         // Scrub on DROP: a failing assert is exactly the regression case, and
         // the tail cleanup never runs then — leaving fixtures in the real
@@ -2447,7 +2447,7 @@
         );
 
         // A NEUTRAL XMP (foreign file, or ours with nothing set) restores nothing.
-        std::fs::write(&xp, autoshop::xmp::recipe_to_xmp(&EditRecipe::default())).unwrap();
+        std::fs::write(&xp, autoshade::xmp::recipe_to_xmp(&EditRecipe::default())).unwrap();
         assert!(
             matches!(read_saved_develop(src).saved, SavedDevelop::NoopOnly),
             "a no-op XMP must not claim a restore"
@@ -2456,7 +2456,7 @@
         // A sidecar whose ONLY edit is CORRUPT imports as a no-op — the
         // disclosure list must still surface, or a later save silently
         // overwrites the corrupt original (Codex batch-32 #1).
-        let doc = autoshop::xmp::recipe_to_xmp(&EditRecipe::default())
+        let doc = autoshade::xmp::recipe_to_xmp(&EditRecipe::default())
             .replace("crs:Exposure2012=\"0.00\"", "crs:Exposure2012=\"broken\"");
         assert!(doc.contains("broken"), "fixture: the corrupt attribute must exist");
         std::fs::write(&xp, &doc).unwrap();
@@ -2466,7 +2466,7 @@
 
         // XMP with real edits → imported through the reverse crs mapping.
         let edited = EditRecipe { contrast: 22.0, ..Default::default() };
-        std::fs::write(&xp, autoshop::xmp::recipe_to_xmp(&edited)).unwrap();
+        std::fs::write(&xp, autoshade::xmp::recipe_to_xmp(&edited)).unwrap();
         let SavedDevelop::Restored(r, kind) = read_saved_develop(src).saved else {
             panic!("an edited XMP restores");
         };
@@ -2497,7 +2497,7 @@
         // process, so `src` (already touched above with nothing legacy) would
         // correctly skip the scan — the production contract, not a test bug.
         let src2 = std::path::Path::new("D:/library/_sidecar_prio_test_legacy.ARW");
-        let dev2 = autoshop::store::develop_dir(src2);
+        let dev2 = autoshade::store::develop_dir(src2);
         let _ = std::fs::remove_dir_all(&dev2);
         let legacy_rj2 =
             PathBuf::from("out").join("_sidecar_prio_test_legacy.recipe.json");
@@ -2514,7 +2514,7 @@
              photo with the same stem may still need it"
         );
         assert!(
-            autoshop::store::recipe_target(src2).exists(),
+            autoshade::store::recipe_target(src2).exists(),
             "…and now lives in the central store"
         );
     }
@@ -2528,11 +2528,11 @@
     #[test]
     fn a_neutral_active_card_does_not_deny_strip_or_pixel_work() {
         let src = std::path::Path::new("D:/library/_noop_note_scope_test.ARW"); // never touched
-        let dev = autoshop::store::develop_dir(src);
+        let dev = autoshade::store::develop_dir(src);
         let _ = std::fs::remove_dir_all(&dev);
         std::fs::create_dir_all(&dev).unwrap();
         let _scrub = Scrub(vec![dev.clone()]);
-        let rj = autoshop::store::recipe_target(src);
+        let rj = autoshade::store::recipe_target(src);
         std::fs::write(&rj, serde_json::to_string(&EditRecipe::default()).unwrap()).unwrap();
         let recipe_bytes = std::fs::read(&rj).unwrap();
         assert!(
@@ -2550,11 +2550,11 @@
 
         // A background card with a real edit: the same reopen used to deny
         // the work. The note must now say WHERE the edits live instead.
-        let strip = autoshop::store::VariantsRecord {
+        let strip = autoshade::store::VariantsRecord {
             v: 1,
             active_kind: "original".into(),
             active_pos: 0,
-            others: vec![autoshop::store::VariantEntry {
+            others: vec![autoshade::store::VariantEntry {
                 kind: "fitted".into(),
                 recipe: EditRecipe { exposure_ev: 1.0, ..Default::default() },
                 origin: None,
@@ -2566,7 +2566,7 @@
             active_name: None,
             extra: Default::default(),
         };
-        autoshop::store::write_variants(src, &strip).unwrap();
+        autoshade::store::write_variants(src, &strip).unwrap();
         let noted = resolve_saved_develop(Lang::En, SavedDevelop::NoopOnly, true, Some(src));
         let note = noted.open_note.as_deref().expect("the strip work must be named");
         assert!(note.contains("1 background variant"), "{note}");
@@ -2574,8 +2574,8 @@
 
         // A strip whose background cards are themselves neutral holds no
         // work — the plain sentence returns.
-        let neutral_strip = autoshop::store::VariantsRecord {
-            others: vec![autoshop::store::VariantEntry {
+        let neutral_strip = autoshade::store::VariantsRecord {
+            others: vec![autoshade::store::VariantEntry {
                 kind: "original".into(),
                 recipe: EditRecipe::default(),
                 origin: None,
@@ -2585,7 +2585,7 @@
             }],
             ..strip.clone()
         };
-        autoshop::store::write_variants(src, &neutral_strip).unwrap();
+        autoshade::store::write_variants(src, &neutral_strip).unwrap();
         let plain2 = resolve_saved_develop(Lang::En, SavedDevelop::NoopOnly, true, Some(src));
         assert_eq!(
             plain2.open_note.as_deref(),
@@ -2595,7 +2595,7 @@
 
         // A recorded baked pixel master: the canvas shows the work, so
         // there is no neutral-looking open to explain — no note at all.
-        std::fs::write(autoshop::store::pixel_source_path(src), "{}").unwrap();
+        std::fs::write(autoshade::store::pixel_source_path(src), "{}").unwrap();
         let silent = resolve_saved_develop(Lang::En, SavedDevelop::NoopOnly, true, Some(src));
         assert_eq!(silent.open_note, None, "{:?}", silent.open_note);
 
@@ -2606,19 +2606,19 @@
 
     #[test]
     fn read_saved_develop_lets_a_newer_lightroom_sidecar_win() {
-        let dir = std::env::temp_dir().join(format!("autoshop-gui-lr-sidecar-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("autoshade-gui-lr-sidecar-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let src = dir.join("_gui_lr_probe.ARW");
         std::fs::write(&src, b"raw").unwrap();
-        let dev = autoshop::store::develop_dir(&src);
+        let dev = autoshade::store::develop_dir(&src);
         let _ = std::fs::remove_dir_all(&dev);
         std::fs::create_dir_all(&dev).unwrap();
         let _scrub = Scrub(vec![dir.clone(), dev.clone()]); // …even if an assert fires
         // The stored develop (older).
         let saved = EditRecipe { exposure_ev: 0.5, ..Default::default() };
         std::fs::write(
-            autoshop::store::recipe_target(&src),
+            autoshade::store::recipe_target(&src),
             serde_json::to_string(&saved).unwrap(),
         )
         .unwrap();
@@ -2627,7 +2627,7 @@
         let lr = dir.join("_gui_lr_probe.xmp");
         std::fs::write(
             &lr,
-            autoshop::xmp::recipe_to_xmp(&EditRecipe { contrast: 33.0, ..Default::default() }),
+            autoshade::xmp::recipe_to_xmp(&EditRecipe { contrast: 33.0, ..Default::default() }),
         )
         .unwrap();
         std::fs::OpenOptions::new()
@@ -2644,7 +2644,7 @@
         assert!(kind.contains("Lightroom"), "the source is disclosed: {kind}");
         // The store copy is untouched — only an explicit save adopts it.
         let kept: EditRecipe = serde_json::from_str(
-            &std::fs::read_to_string(autoshop::store::recipe_target(&src)).unwrap(),
+            &std::fs::read_to_string(autoshade::store::recipe_target(&src)).unwrap(),
         )
         .unwrap();
         assert_eq!(kept.exposure_ev, 0.5);
@@ -2657,21 +2657,21 @@
     /// it (stamp_calibration) before comparing.
     #[test]
     fn batch_export_resolves_the_same_develop_the_open_path_restores() {
-        let dir = std::env::temp_dir().join(format!("autoshop-gui-batch-antidrift-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("autoshade-gui-batch-antidrift-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let src = dir.join("_gui_batch_drift.ARW");
         std::fs::write(&src, b"raw").unwrap();
-        let dev = autoshop::store::develop_dir(&src);
+        let dev = autoshade::store::develop_dir(&src);
         let _ = std::fs::remove_dir_all(&dev);
         std::fs::create_dir_all(&dev).unwrap();
         let _scrub = Scrub(vec![dir.clone(), dev.clone()]);
         let stamp_like_open = |mut r: EditRecipe| {
-            let (ask, ast) = autoshop::pipeline::fresh_as_shot_wb(&src);
+            let (ask, ast) = autoshade::pipeline::fresh_as_shot_wb(&src);
             stamp_calibration(
                 &mut r,
-                &autoshop::pipeline::photo_base_knots(&src),
-                &autoshop::pipeline::fresh_lens_profile(&src),
+                &autoshade::pipeline::photo_base_knots(&src),
+                &autoshade::pipeline::fresh_lens_profile(&src),
                 ask.zip(ast),
             );
             r
@@ -2679,11 +2679,11 @@
 
         // Phase 1: an XMP-ONLY develop (the store projection).
         std::fs::write(
-            autoshop::store::xmp_target(&src),
-            autoshop::xmp::recipe_to_xmp(&EditRecipe { contrast: 21.0, ..Default::default() }),
+            autoshade::store::xmp_target(&src),
+            autoshade::xmp::recipe_to_xmp(&EditRecipe { contrast: 21.0, ..Default::default() }),
         )
         .unwrap();
-        let snap = autoshop::store::read_develop_snapshot(&src).unwrap();
+        let snap = autoshade::store::read_develop_snapshot(&src).unwrap();
         let (batch, batch_kind) = crate::export::resolve_snapshot_develop(&src, &snap, &mut Vec::new())
             .unwrap()
             .expect("an XMP-only develop must resolve for the batch");
@@ -2697,7 +2697,7 @@
 
         // Phase 2: recipe.json exists but a NEWER Lightroom sidecar wins.
         std::fs::write(
-            autoshop::store::recipe_target(&src),
+            autoshade::store::recipe_target(&src),
             serde_json::to_string(&EditRecipe { exposure_ev: 0.5, ..Default::default() })
                 .unwrap(),
         )
@@ -2705,7 +2705,7 @@
         let lr = src.with_extension("xmp");
         std::fs::write(
             &lr,
-            autoshop::xmp::recipe_to_xmp(&EditRecipe { contrast: 33.0, ..Default::default() }),
+            autoshade::xmp::recipe_to_xmp(&EditRecipe { contrast: 33.0, ..Default::default() }),
         )
         .unwrap();
         std::fs::OpenOptions::new()
@@ -2714,7 +2714,7 @@
             .unwrap()
             .set_modified(std::time::SystemTime::now() + std::time::Duration::from_secs(3600))
             .unwrap();
-        let snap = autoshop::store::read_develop_snapshot(&src).unwrap();
+        let snap = autoshade::store::read_develop_snapshot(&src).unwrap();
         let (batch, batch_kind) = crate::export::resolve_snapshot_develop(&src, &snap, &mut Vec::new())
             .unwrap()
             .expect("the Lightroom develop must resolve for the batch");
@@ -2761,16 +2761,16 @@
     /// L13 rule: the surfaces answer one develop).
     #[test]
     fn an_embedded_raw_xmp_packet_restores_when_nothing_else_answers() {
-        let dir = std::env::temp_dir().join(format!("autoshop-gui-packet-restore-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("autoshade-gui-packet-restore-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let src = dir.join("_gui_packet.dng");
-        let doc = autoshop::xmp::recipe_to_xmp(&EditRecipe {
+        let doc = autoshade::xmp::recipe_to_xmp(&EditRecipe {
             exposure_ev: 0.8,
             ..Default::default()
         });
         std::fs::write(&src, tiff_with_xmp(doc.as_bytes())).unwrap();
-        let dev = autoshop::store::develop_dir(&src);
+        let dev = autoshade::store::develop_dir(&src);
         let _ = std::fs::remove_dir_all(&dev);
         let _scrub = Scrub(vec![dir.clone(), dev.clone()]);
 
@@ -2783,7 +2783,7 @@
         assert!(restored.packet_unreadable.is_none());
 
         // The batch snapshot answers the same develop (anti-drift).
-        let snap = autoshop::store::read_develop_snapshot(&src).unwrap();
+        let snap = autoshade::store::read_develop_snapshot(&src).unwrap();
         let (batch, batch_kind) = crate::export::resolve_snapshot_develop(&src, &snap, &mut Vec::new())
             .unwrap()
             .expect("the batch resolves the packet too");
@@ -2798,23 +2798,23 @@
     /// into absence.
     #[test]
     fn an_embedded_packet_never_outranks_the_store_or_a_clear() {
-        let dir = std::env::temp_dir().join(format!("autoshop-gui-packet-rank-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("autoshade-gui-packet-rank-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let src = dir.join("_gui_packet_rank.dng");
-        let doc = autoshop::xmp::recipe_to_xmp(&EditRecipe {
+        let doc = autoshade::xmp::recipe_to_xmp(&EditRecipe {
             exposure_ev: 0.8,
             ..Default::default()
         });
         std::fs::write(&src, tiff_with_xmp(doc.as_bytes())).unwrap();
-        let dev = autoshop::store::develop_dir(&src);
+        let dev = autoshade::store::develop_dir(&src);
         let _ = std::fs::remove_dir_all(&dev);
         std::fs::create_dir_all(&dev).unwrap();
         let _scrub = Scrub(vec![dir.clone(), dev.clone()]);
 
         // (a) A stored develop outranks the packet.
         std::fs::write(
-            autoshop::store::recipe_target(&src),
+            autoshade::store::recipe_target(&src),
             serde_json::to_string(&EditRecipe { exposure_ev: 0.5, ..Default::default() })
                 .unwrap(),
         )
@@ -2831,7 +2831,7 @@
         // out-answer it on the next open), on the open path AND the batch
         // snapshot alike.
         std::fs::write(
-            autoshop::store::recipe_target(&src),
+            autoshade::store::recipe_target(&src),
             serde_json::to_string(&EditRecipe::default()).unwrap(),
         )
         .unwrap();
@@ -2839,7 +2839,7 @@
             matches!(read_saved_develop(&src).saved, SavedDevelop::NoopOnly),
             "a neutral store file bars the packet"
         );
-        let snap = autoshop::store::read_develop_snapshot(&src).unwrap();
+        let snap = autoshade::store::read_develop_snapshot(&src).unwrap();
         assert!(
             crate::export::resolve_snapshot_develop(&src, &snap, &mut Vec::new()).unwrap().is_none(),
             "the batch answers the same: neutral store, no packet"
@@ -2847,7 +2847,7 @@
 
         // (b) An explicit clear sticks: marker present, no store files — the
         // packet must NOT resurrect the cleared develop.
-        std::fs::remove_file(autoshop::store::recipe_target(&src)).unwrap();
+        std::fs::remove_file(autoshade::store::recipe_target(&src)).unwrap();
         std::fs::write(dev.join("cleared.txt"), b"cleared").unwrap();
         assert!(
             matches!(read_saved_develop(&src).saved, SavedDevelop::Nothing),
@@ -2871,9 +2871,9 @@
     /// another row. A NewMask placement and the non-mask tools are spared.
     #[test]
     fn a_selection_switch_disarms_index_armed_tools() {
-        let mut app = AutoshopApp::default();
+        let mut app = AutoShadeApp::default();
         app.recipe.masks =
-            vec![autoshop::recipe::LocalAdjustment::default(), Default::default()];
+            vec![autoshade::recipe::LocalAdjustment::default(), Default::default()];
 
         app.placing_mask = Some((MaskKind::Linear, PlaceTarget::Redraw(0)));
         app.place_start = Some((0.5, 0.5));
@@ -2883,7 +2883,7 @@
 
         app.placing_mask = Some((
             MaskKind::Radial,
-            PlaceTarget::Component(0, autoshop::recipe::MaskCombine::Add),
+            PlaceTarget::Component(0, autoshade::recipe::MaskCombine::Add),
         ));
         app.disarm_selection_bound_tools(None); // same-row deselect
         assert!(app.placing_mask.is_none(), "deselecting disarms too");
@@ -2910,7 +2910,7 @@
     /// session survives.
     #[test]
     fn a_plate_replacement_ends_the_mask_brush_session() {
-        let mut app = AutoshopApp {
+        let mut app = AutoShadeApp {
             base_preview: Some(std::sync::Arc::new(image::DynamicImage::new_rgba8(8, 8))),
             ..Default::default()
         };
@@ -2928,7 +2928,7 @@
         assert_eq!((m.width(), m.height()), (16, 16));
 
         app.recipe.masks =
-            vec![autoshop::recipe::LocalAdjustment::default(), Default::default()];
+            vec![autoshade::recipe::LocalAdjustment::default(), Default::default()];
         app.start_mask_brush(Some(0));
         assert!(
             app.disarm_selection_bound_tools(Some(1)),
@@ -2951,10 +2951,10 @@
     #[test]
     fn an_over_budget_refine_refuses_with_the_dimensions_and_keeps_the_mask() {
         let ctx = egui::Context::default();
-        let mut app = AutoshopApp {
+        let mut app = AutoShadeApp {
             busy: true,
             recipe: EditRecipe {
-                masks: vec![autoshop::recipe::LocalAdjustment {
+                masks: vec![autoshade::recipe::LocalAdjustment {
                     mask: MaskGeometry::Bitmap { path: "mask-1.png".into() },
                     ..Default::default()
                 }],
@@ -2970,7 +2970,7 @@
         // beside the recipe's other rasters) is pinned in render.rs's
         // `a_second_full_resolution_refine_is_refused_by_the_aggregate_budget`.
         assert!(
-            !autoshop::render::mask_raster_write_fits_budget(
+            !autoshade::render::mask_raster_write_fits_budget(
                 &EditRecipe::default(),
                 None,
                 12_000,
@@ -3006,7 +3006,7 @@
     #[test]
     fn a_retouch_landing_does_not_fold_a_mid_flight_recipe_edit_into_the_pixel_step() {
         let ctx = egui::Context::default();
-        let mut app = AutoshopApp::default();
+        let mut app = AutoShadeApp::default();
         let b0 = std::sync::Arc::new(image::DynamicImage::new_rgba8(4, 4));
         app.variants = vec![Variant {
             id: String::new(),
@@ -3063,7 +3063,7 @@
     #[test]
     fn a_variant_switch_drops_a_card_whose_frame_never_landed() {
         let ctx = egui::Context::default();
-        let mut app = AutoshopApp::default();
+        let mut app = AutoShadeApp::default();
         let tex = ctx.load_texture(
             "l06_thumb",
             egui::ColorImage::example(),
@@ -3113,7 +3113,7 @@
         // grafted the outgoing photo's whole strip onto the incoming one.
         // Deleting `&& self.open_same_path` at the KEEP arm turns phase 1
         // into a graft and fails its assert.
-        let mut app = AutoshopApp::default();
+        let mut app = AutoShadeApp::default();
         let ctx = egui::Context::default();
         let mk = || Variant {
             id: String::new(),
@@ -3132,7 +3132,7 @@
         // ("b") could relocate a real user's legacy sidecars into an
         // unreachable key.
         app.src_path =
-            Some(PathBuf::from("D:/__autoshop_keepfact__/__autoshop_keepfact__.ARW"));
+            Some(PathBuf::from("D:/__autoshade_keepfact__/__autoshade_keepfact__.ARW"));
         app.keep_recipe = true;
         app.open_same_path = false; // stale request, cross-photo fact
         let base = Arc::new(image::DynamicImage::new_rgb8(8, 6));
@@ -3201,15 +3201,15 @@
         // estimating, so a primed answer makes the gate's verdict visible
         // as the era stamp. Deleting `&& self.keep_recipe` at the
         // apply_step gate repairs phase 1's install and fails its assert.
-        let mut app = AutoshopApp::default();
+        let mut app = AutoShadeApp::default();
         let ctx = egui::Context::default();
-        let p = PathBuf::from("D:/__autoshop_histgate__/__autoshop_histgate__.ARW");
+        let p = PathBuf::from("D:/__autoshade_histgate__/__autoshade_histgate__.ARW");
         // Pre-era fingerprint: version 1, interior x >= 0.5, darkens > 0.05.
         let washy = vec![[0.0, 0.0], [0.6, 0.4], [1.0, 1.0]];
         let primed = vec![[0.0, 0.0], [0.5, 0.62], [1.0, 1.0]];
-        autoshop::pipeline::prime_curve_memo(
+        autoshade::pipeline::prime_curve_memo(
             &p,
-            autoshop::pipeline::curve_ident(&p),
+            autoshade::pipeline::curve_ident(&p),
             primed.clone(),
         );
         let pre_era =
@@ -3240,7 +3240,7 @@
         app.redo(&ctx);
         assert_eq!(
             app.recipe.version,
-            autoshop::recipe::CALIB_ERA,
+            autoshade::recipe::CALIB_ERA,
             "keep-flight: the reinstalled pre-era pair is repaired"
         );
         assert_eq!(app.recipe.base_curve, primed, "…with the primed answer, not a re-estimate");
@@ -3270,9 +3270,9 @@
         // read it (a heal in that window installs a new-edge raster under an
         // old-edge canvas). Three outcomes, three asserts.
         let ctx = egui::Context::default();
-        let armed = |base: Option<Arc<image::DynamicImage>>, origin: Option<PathBuf>| AutoshopApp {
+        let armed = |base: Option<Arc<image::DynamicImage>>, origin: Option<PathBuf>| AutoShadeApp {
             src_path: Some(PathBuf::from(
-                "D:/__autoshop_edgeflight__/__autoshop_edgeflight__.ARW",
+                "D:/__autoshade_edgeflight__/__autoshade_edgeflight__.ARW",
             )),
             variants: vec![Variant {
                 id: String::new(),
@@ -3310,7 +3310,7 @@
         // remedy, and without a live file the missing-master arm would answer
         // instead — leaving the record-less arm unpinned (a mutant that always
         // emits the other message used to survive the whole suite).
-        let master = PathBuf::from("out/__autoshop_edgeflight__.heal.png");
+        let master = PathBuf::from("out/__autoshade_edgeflight__.heal.png");
         std::fs::create_dir_all("out").unwrap();
         let _scrub = Scrub(vec![master.clone()]);
         std::fs::write(&master, b"png").unwrap();
@@ -3397,10 +3397,10 @@
         }
     }
 
-    fn persisted_two_card_fixture() -> AutoshopApp {
+    fn persisted_two_card_fixture() -> AutoShadeApp {
         let original_recipe = EditRecipe { exposure_ev: 0.4, ..Default::default() };
         let fitted_recipe = EditRecipe { contrast: 18.0, ..Default::default() };
-        AutoshopApp {
+        AutoShadeApp {
             src_path: Some(PathBuf::from("D:/library/__variant-baseline__.ARW")),
             recipe: original_recipe.clone(),
             saved_recipe: original_recipe.clone(),
@@ -3426,13 +3426,13 @@
                 },
             ],
             active: 0,
-            saved_strip: Some(autoshop::store::VariantsRecord {
+            saved_strip: Some(autoshade::store::VariantsRecord {
                 v: 1,
                 active_kind: "original".into(),
                 active_pos: 0,
                 active_id: Some("card-x".into()),
                 active_name: Some("negative".into()),
-                others: vec![autoshop::store::VariantEntry {
+                others: vec![autoshade::store::VariantEntry {
                     kind: "fitted".into(),
                     recipe: fitted_recipe,
                     origin: None,
@@ -3627,14 +3627,14 @@
         // armed on the way out, its restore re-lit the ● on the way back, and
         // the quit dialog listed a photo with nothing to save.
         // Unique stem + full scrub: this writes into the real central store.
-        let src = std::path::Path::new("D:/library/__autoshop_masterid__.ARW");
-        let dev = autoshop::store::develop_dir(src);
+        let src = std::path::Path::new("D:/library/__autoshade_masterid__.ARW");
+        let dev = autoshade::store::develop_dir(src);
         let _ = std::fs::remove_dir_all(&dev);
         std::fs::create_dir_all("out").unwrap();
-        let master = PathBuf::from("out/__autoshop_masterid__.heal.png");
+        let master = PathBuf::from("out/__autoshade_masterid__.heal.png");
         let _scrub = Scrub(vec![master.clone(), dev.clone()]);
         std::fs::write(&master, b"png").unwrap();
-        autoshop::store::write_pixel_source(src, &master, false).unwrap();
+        autoshade::store::write_pixel_source(src, &master, false).unwrap();
         let mk = |origin: PathBuf| Variant {
             id: String::new(),
             name: None,
@@ -3644,7 +3644,7 @@
             origin: Some(origin),
             thumb: None,
         };
-        let mut app = AutoshopApp {
+        let mut app = AutoShadeApp {
             src_path: Some(src.to_path_buf()),
             // The RELATIVE spelling, exactly as the retouch handler records it.
             variants: vec![mk(master.clone()), mk(master.clone())],
@@ -3658,14 +3658,14 @@
         // relative ./out spelling — same_master_opt must bridge them, or a
         // fully saved strip re-reports as unsaved (the original regression,
         // re-expressed against the v0.22 mirror).
-        app.saved_strip = Some(autoshop::store::VariantsRecord {
+        app.saved_strip = Some(autoshade::store::VariantsRecord {
             extra: Default::default(),
             active_id: None,
             active_name: None,
             v: 1,
             active_kind: VariantKind::Original.store_str().to_string(),
             active_pos: 0,
-            others: vec![autoshop::store::VariantEntry {
+            others: vec![autoshade::store::VariantEntry {
                 extra: Default::default(),
                 id: None,
                 name: None,
@@ -3684,7 +3684,7 @@
         // this half of the test pins the PIXELS spelling comparison in the
         // stash gate, not strip dirtiness.
         app.saved_strip = None;
-        app.open_path(PathBuf::from("D:/library/__autoshop_masterid_next__.ARW"));
+        app.open_path(PathBuf::from("D:/library/__autoshade_masterid_next__.ARW"));
         assert!(
             !app.nav_stash.contains_key(src),
             "a saved retouch must not stash as unsaved just because the store spells its master absolutely"
@@ -3698,7 +3698,7 @@
         // came back from navigation as 「▣ 原片」. The three-valued kind must
         // round-trip through the stash write verbatim.
         let (mut app, _scrub) = app_with_masked_photo("stashkind");
-        let src = PathBuf::from("D:/library/__autoshop_stashkind__.ARW");
+        let src = PathBuf::from("D:/library/__autoshade_stashkind__.ARW");
         app.src_path = Some(src.clone());
         app.variants.push(Variant {
             id: String::new(),
@@ -3711,7 +3711,7 @@
         });
         app.active = 1;
         app.recipe = EditRecipe { contrast: 21.0, ..Default::default() };
-        app.open_path(PathBuf::from("D:/library/__autoshop_stashkind_next__.ARW"));
+        app.open_path(PathBuf::from("D:/library/__autoshade_stashkind_next__.ARW"));
         let st = app.nav_stash.get(&src).expect("a dirty strip stashes on nav-away");
         assert_eq!(
             st.kind,
@@ -3730,14 +3730,14 @@
         // mirror, and persisting the strip is what Ctrl+S / Save-all now do —
         // after it, the guard's `inactive_dirty_variants() > 0` term is 0 and
         // the close goes through.
-        let src = std::path::Path::new("D:/library/__autoshop_striprec__.ARW");
-        let dev = autoshop::store::develop_dir(src);
+        let src = std::path::Path::new("D:/library/__autoshade_striprec__.ARW");
+        let dev = autoshade::store::develop_dir(src);
         let _ = std::fs::remove_dir_all(&dev);
         std::fs::create_dir_all(&dev).unwrap();
         let _scrub = Scrub(vec![dev.clone()]);
         let master = dev.join("reimagine-1.png");
         std::fs::write(&master, b"png").unwrap();
-        let mut app = AutoshopApp {
+        let mut app = AutoShadeApp {
             src_path: Some(src.to_path_buf()),
             variants: vec![
                 Variant {
@@ -3784,7 +3784,7 @@
             "after a save the close guard must let the window go"
         );
         // The record really is on disk and restores the three-valued kinds.
-        let rec = autoshop::store::read_variants(src).expect("record on disk");
+        let rec = autoshade::store::read_variants(src).expect("record on disk");
         assert_eq!(rec.active_kind, "fitted");
         assert_eq!(rec.others.len(), 2);
         assert_eq!(rec.others[0].kind, "original");
@@ -3820,7 +3820,7 @@
         // the five call sites that use it — the bake starters spawn network
         // workers and cannot run headless, so reverting one of those
         // single-expression uses would not fail here. Reviewed by reading.
-        let mut app = AutoshopApp { preview_edge: 4096, ..Default::default() };
+        let mut app = AutoShadeApp { preview_edge: 4096, ..Default::default() };
         assert_eq!(app.canvas_edge(), 4096, "no canvas yet: the preference is all there is");
         app.base_preview = Some(Arc::new(image::DynamicImage::new_rgb8(1280, 853)));
         assert_eq!(app.canvas_edge(), 1280, "a baked canvas bakes at its OWN resolution");
@@ -3834,18 +3834,18 @@
         // unreadable) is not cured by saving — saving re-records the same
         // broken link and the refusal repeats forever. The two causes must
         // get different words.
-        let src = std::path::Path::new("D:/library/__autoshop_gonemaster__.ARW");
-        let dev = autoshop::store::develop_dir(src);
+        let src = std::path::Path::new("D:/library/__autoshade_gonemaster__.ARW");
+        let dev = autoshade::store::develop_dir(src);
         let _ = std::fs::remove_dir_all(&dev);
         std::fs::create_dir_all(&dev).unwrap();
         let _scrub = Scrub(vec![dev.clone()]);
         let gone = dev.join("gone-master.png");
         std::fs::write(&gone, b"png").unwrap();
-        autoshop::store::write_pixel_source(src, &gone, false).unwrap();
+        autoshade::store::write_pixel_source(src, &gone, false).unwrap();
         std::fs::remove_file(&gone).unwrap(); // recorded, and now unresolvable
-        assert!(autoshop::store::has_pixel_source(src), "premise: a record survives");
+        assert!(autoshade::store::has_pixel_source(src), "premise: a record survives");
         let ctx = egui::Context::default();
-        let mut app = AutoshopApp {
+        let mut app = AutoShadeApp {
             src_path: Some(src.to_path_buf()),
             variants: vec![Variant {
                 id: String::new(),
@@ -3890,7 +3890,7 @@
         // a generated variant outright, so that remedy is unreachable for it.
         let present = dev.join("present-master.png");
         std::fs::write(&present, b"png").unwrap();
-        let mut app = AutoshopApp {
+        let mut app = AutoShadeApp {
             src_path: Some(src.to_path_buf()),
             variants: vec![Variant {
                 id: String::new(),
@@ -3949,7 +3949,7 @@
             thumb: None,
         };
         // (1) source-based canvas, sensor below the preference: no disclosure.
-        let mut app = AutoshopApp {
+        let mut app = AutoShadeApp {
             preview_edge: 1280,
             source_preview: Some(Arc::new(image::DynamicImage::new_rgb8(800, 600))),
             variants: vec![src(None), src(None)],
@@ -3963,7 +3963,7 @@
             app.status
         );
         // (2) the same size gap, but the canvas really is a baked raster.
-        let mut app = AutoshopApp {
+        let mut app = AutoShadeApp {
             preview_edge: 1280,
             source_preview: Some(Arc::new(image::DynamicImage::new_rgb8(800, 600))),
             variants: vec![
@@ -3981,7 +3981,7 @@
         // (3) a baked canvas at the resolution the source DELIVERS — a
         // sub-preference sensor, freshly healed. Measured against the raw
         // preference this fresh bake was called a stale one.
-        let mut app = AutoshopApp {
+        let mut app = AutoShadeApp {
             preview_edge: 1280,
             source_preview: Some(Arc::new(image::DynamicImage::new_rgb8(800, 600))),
             variants: vec![
@@ -4001,7 +4001,7 @@
         // exactly the preference. Measured against the delivered edge alone,
         // this said "stays at 1280px … not the preview preference" while the
         // preference was 1280.
-        let mut app = AutoshopApp {
+        let mut app = AutoShadeApp {
             preview_edge: 1280,
             source_preview: Some(Arc::new(image::DynamicImage::new_rgb8(800, 600))),
             variants: vec![
@@ -4038,7 +4038,7 @@
             base: Some(base.clone()),
             origin: Some(PathBuf::from(format!("out/_{tag}.png"))),
         };
-        let mut app = AutoshopApp {
+        let mut app = AutoShadeApp {
             preview_edge: 1280,
             // A REAL source: without it the ruler took its `unwrap_or`
             // fallback and never the delivered-edge path this test covers.
@@ -4100,7 +4100,7 @@
             origin: Some(PathBuf::from(format!("out/_{tag}.png"))),
             thumb: None,
         };
-        let mut app = AutoshopApp {
+        let mut app = AutoShadeApp {
             preview_edge: 1280,
             source_preview: Some(Arc::new(image::DynamicImage::new_rgb8(1280, 853))),
             variants: vec![baked(640, 480, "keep"), baked(1280, 853, "drop")],
@@ -4126,7 +4126,7 @@
             app.status
         );
         // ...and landing on a canvas the preference DOES reach says so plainly.
-        let mut app = AutoshopApp {
+        let mut app = AutoShadeApp {
             preview_edge: 1280,
             source_preview: Some(Arc::new(image::DynamicImage::new_rgb8(1280, 853))),
             variants: vec![
@@ -4184,9 +4184,9 @@
         // only `busy`. Gating the key is the guard; clearing the stack is the
         // reason there is nothing to guard. (The photo's unsaved work is not
         // lost: open_path stashed it before the flight.)
-        let mut app = AutoshopApp::default();
+        let mut app = AutoShadeApp::default();
         let ctx = egui::Context::default();
-        app.src_path = Some(PathBuf::from("D:/__autoshop_deadopen__/__autoshop_deadopen__.ARW"));
+        app.src_path = Some(PathBuf::from("D:/__autoshade_deadopen__/__autoshade_deadopen__.ARW"));
         app.variants = vec![Variant {
             id: String::new(),
             name: None,
@@ -4222,15 +4222,15 @@
     fn decoded_base_lru_hits_by_key_and_evicts_least_recent() {
         // Nonexistent paths give mtime None on both sides, which must match
         // itself (the cache still works where metadata is unavailable).
-        let mut app = AutoshopApp::default();
+        let mut app = AutoShadeApp::default();
         let base = Arc::new(image::DynamicImage::new_rgb8(4, 3));
         let knots: Vec<[f32; 2]> = vec![[0.0, 0.0], [0.5, 0.7], [1.0, 1.0]];
-        let lens = autoshop::recipe::LensProfile {
+        let lens = autoshade::recipe::LensProfile {
             vignette: vec![1.0, 1.2],
             vignette_on: true,
             ..Default::default()
         };
-        let p = std::path::Path::new("D:/__autoshop_nonexistent__/x.ARW");
+        let p = std::path::Path::new("D:/__autoshade_nonexistent__/x.ARW");
         // The entry's edge (2560) deliberately DIFFERS from app.preview_edge
         // (1280): the key must come from the worker's pre-read ident riding
         // OpenedBase — a body that re-derives the EDGE from app state files
@@ -4262,7 +4262,7 @@
         );
         // Filling past the cap evicts the least-recently-used entry.
         let others: Vec<std::path::PathBuf> = (0..BASE_CACHE_CAP)
-            .map(|i| std::path::PathBuf::from(format!("D:/__autoshop_nonexistent__/{i}.ARW")))
+            .map(|i| std::path::PathBuf::from(format!("D:/__autoshade_nonexistent__/{i}.ARW")))
             .collect();
         for o in &others {
             app.remember_base(
@@ -4281,9 +4281,9 @@
     /// paths give stamp None on both sides, which matches itself.
     #[test]
     fn cold_master_lru_hits_by_key_and_evicts_least_recent() {
-        let mut app = AutoshopApp::default();
+        let mut app = AutoShadeApp::default();
         let master = Arc::new(image::DynamicImage::new_rgb8(6, 4));
-        let p = std::path::Path::new("D:/__autoshop_nonexistent__/master.tif");
+        let p = std::path::Path::new("D:/__autoshade_nonexistent__/master.tif");
         app.remember_master(p, 1280, file_stamp(p), master.clone());
         let hit = app.cached_master(p, 1280).expect("same path + edge hits");
         assert_eq!(hit.dimensions(), (6, 4), "the decoded pixels ride the entry");
@@ -4295,7 +4295,7 @@
         app.remember_master(p, 1280, file_stamp(p), master.clone());
         assert_eq!(app.master_cache.len(), 1, "same key replaces its entry");
         let others: Vec<std::path::PathBuf> = (0..MASTER_CACHE_CAP)
-            .map(|i| std::path::PathBuf::from(format!("D:/__autoshop_nonexistent__/m{i}.tif")))
+            .map(|i| std::path::PathBuf::from(format!("D:/__autoshade_nonexistent__/m{i}.tif")))
             .collect();
         for o in &others {
             app.remember_master(o, 1280, file_stamp(o), master.clone());
@@ -4307,7 +4307,7 @@
 
     #[test]
     fn the_mask_brush_session_follows_index_remaps() {
-        let mut app = AutoshopApp::default();
+        let mut app = AutoShadeApp::default();
         app.recipe.masks =
             vec![Default::default(), Default::default(), Default::default()];
         // Session open on mask 2, deleting mask 0 shifts it to 1 — the stroke
@@ -4344,8 +4344,8 @@
 
     #[test]
     fn an_async_variant_push_commits_a_typed_mask_rename_first() {
-        let mut app = AutoshopApp::default();
-        app.recipe.masks = vec![autoshop::recipe::LocalAdjustment {
+        let mut app = AutoShadeApp::default();
+        app.recipe.masks = vec![autoshade::recipe::LocalAdjustment {
             name: "old".into(),
             ..Default::default()
         }];
@@ -4390,7 +4390,7 @@
     /// be the only witness. This is the runtime half of that gate.
     #[test]
     fn a_verdict_names_its_decision_in_the_current_language() {
-        use autoshop::advisor::{decision_key, Decision};
+        use autoshade::advisor::{decision_key, Decision};
         // One authority: the typed decision maps to exactly these keys…
         assert_eq!(decision_key(&Decision::Accept), "Accept");
         assert_eq!(decision_key(&Decision::Revise), "Revise");
@@ -4420,10 +4420,10 @@
     /// install them AFTER the resync.
     #[test]
     fn a_recipe_swap_clears_stale_rationale_notes() {
-        let mut app = AutoshopApp::default();
+        let mut app = AutoShadeApp::default();
         app.recipe.rationale = "old english tail".into();
-        app.rationale_notes = vec![autoshop::rationale::Note::plain(
-            autoshop::rationale::keys::FIT_NOTE_SAT_PEGGED,
+        app.rationale_notes = vec![autoshade::rationale::Note::plain(
+            autoshade::rationale::keys::FIT_NOTE_SAT_PEGGED,
         )];
         app.recipe = EditRecipe { rationale: "a different develop".into(), ..Default::default() };
         app.resync_recipe_display();
@@ -4487,7 +4487,7 @@
     #[test]
     fn a_fallback_font_past_the_byte_cap_is_skipped_and_disclosed_once() {
         // The cap logic, against on-disk fixtures with a tiny budget.
-        let dir = std::env::temp_dir().join(format!("autoshop-fontcap-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("autoshade-fontcap-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let small = dir.join("small.ttf");
@@ -4509,7 +4509,7 @@
         // Disclosure-once: two folder opens with Thai names disclose once.
         // (Constructed chars — see undrawable_scripts_names_the_char…)
         let thai = char::from_u32(0x0E1F).expect("probe codepoint");
-        let mut app = AutoshopApp {
+        let mut app = AutoShadeApp {
             gallery: vec![std::path::PathBuf::from(format!("DSC_{thai}_01.arw"))],
             ..Default::default()
         };
@@ -4611,7 +4611,7 @@
             repeat: false,
             modifiers: egui::Modifiers::NONE,
         };
-        let mut app = AutoshopApp {
+        let mut app = AutoShadeApp {
             src_path: Some(PathBuf::from("x.png")),
             zoom_one_to_one: 4.0, // what the canvas computed last frame
             zoom: 2.0,
@@ -4621,7 +4621,7 @@
         };
 
         let ctx = egui::Context::default();
-        let run_key = |app: &mut AutoshopApp, k: egui::Key| {
+        let run_key = |app: &mut AutoShadeApp, k: egui::Key| {
             let mut input = egui::RawInput::default();
             input.events.push(key(k));
             let _ = ctx.run(input, |ctx| app.upd_shortcuts(ctx));
@@ -4711,13 +4711,13 @@
     /// pass through untouched for egui's own selected-label copy.
     #[test]
     fn recipe_copy_rides_the_shift_chord_not_the_bare_copy_event() {
-        let mut app = AutoshopApp {
+        let mut app = AutoShadeApp {
             src_path: Some(PathBuf::from("x.png")),
             ..Default::default()
         };
         app.recipe.exposure_ev = 1.5;
         let ctx = egui::Context::default();
-        let run_copy = |app: &mut AutoshopApp, shift: bool| {
+        let run_copy = |app: &mut AutoShadeApp, shift: bool| {
             let input = egui::RawInput {
                 modifiers: egui::Modifiers {
                     command: true,
@@ -4750,7 +4750,7 @@
     /// completion must still match it to install.
     #[test]
     fn a_completion_from_a_superseded_fetch_is_discarded_not_installed() {
-        let mut app = AutoshopApp::default();
+        let mut app = AutoShadeApp::default();
         // A typed loopback base + typed token keep the real worker's probe
         // off the network entirely (connection refused before any header).
         app.settings.image_base_url = "http://127.0.0.1:9/v1".into();
@@ -4782,12 +4782,12 @@
     /// later open. The guard is per role and consumed at DISPATCH.
     #[test]
     fn the_autofetch_opportunity_survives_until_a_role_is_actually_eligible() {
-        let mut app = AutoshopApp::default();
+        let mut app = AutoShadeApp::default();
         // Any dispatch stays strictly on loopback: a typed form base wins
         // over the machine's saved config, and the saved-key rule withholds
         // any real credential from an endpoint it was not saved for.
         app.settings.image_base_url = "http://127.0.0.1:9/v1".into();
-        let mut cfg = autoshop::config::Config {
+        let mut cfg = autoshade::config::Config {
             openai_api_key: None,
             openai_model: "test-chat".into(),
             openai_base_url: "http://127.0.0.1:9/v1".into(),
@@ -4859,7 +4859,7 @@
     /// now request a repaint from inside `spawn_worker`.
     #[test]
     fn worker_spawn_and_completion_both_wake_the_event_loop() {
-        let app = AutoshopApp::default();
+        let app = AutoShadeApp::default();
         // Drain the fresh context's startup frames (egui schedules a couple
         // on its own) until it reports quiet.
         for _ in 0..8 {
@@ -4921,7 +4921,7 @@
     #[test]
     fn the_generate_button_stays_one_line_and_the_panel_stays_put() {
         for lang in [crate::i18n::Lang::En, crate::i18n::Lang::Zh] {
-            let mut app = AutoshopApp { lang, ..Default::default() };
+            let mut app = AutoShadeApp { lang, ..Default::default() };
             let ctx = egui::Context::default();
             crate::theme::install_theme(&ctx, crate::theme::ThemePref::Dark);
             let input = || egui::RawInput {
@@ -4976,7 +4976,7 @@
     fn the_ai_panel_freezes_only_while_a_photo_is_opening() {
         let ctx = egui::Context::default();
         crate::theme::install_theme(&ctx, crate::theme::ThemePref::Dark);
-        let frame = |app: &mut AutoshopApp| -> Option<bool> {
+        let frame = |app: &mut AutoShadeApp| -> Option<bool> {
             app.ai_gate_enabled = None; // this frame's evidence only
             let _ = ctx.run(
                 egui::RawInput {
@@ -4995,7 +4995,7 @@
             app.ai_gate_enabled
         };
         // ① settled: live.
-        let mut app = AutoshopApp::default();
+        let mut app = AutoShadeApp::default();
         assert_eq!(frame(&mut app), Some(true), "a settled panel must be editable");
         // ② mid-open: frozen.
         app.open_in_flight = true;
@@ -5027,7 +5027,7 @@
     #[test]
     fn a_prompt_field_never_grows_past_its_readable_width() {
         for lang in [crate::i18n::Lang::En, crate::i18n::Lang::Zh] {
-            let mut app = AutoshopApp { lang, ..Default::default() };
+            let mut app = AutoShadeApp { lang, ..Default::default() };
             // Text long enough that a field free to grow would want to: the
             // singleline clip keeps this from mattering, the cap is about the
             // BOX, and a filled buffer also exercises the hover-tooltip arm.
@@ -5119,7 +5119,7 @@
             ),
         ];
         for (label, variants) in scenarios {
-            let mut app = AutoshopApp { variants, ..Default::default() };
+            let mut app = AutoShadeApp { variants, ..Default::default() };
             let ctx = egui::Context::default();
             crate::theme::install_theme(&ctx, crate::theme::ThemePref::Dark);
             let input = egui::RawInput {
@@ -5131,7 +5131,7 @@
             };
             let _ = ctx.run(input, |ctx| {
                 egui::TopBottomPanel::bottom("variants")
-                    .exact_height(AutoshopApp::VARIANT_STRIP_H)
+                    .exact_height(AutoShadeApp::VARIANT_STRIP_H)
                     .show(ctx, |ui| app.variant_strip(ui));
             });
             let row = app.strip_row_rect.expect("the strip records its row (test seam)");
@@ -5184,7 +5184,7 @@
         for (tw, th, tag) in [(40u32, 60u32, "portrait 2:3"), (60, 40, "landscape 3:2")] {
             let ctx = egui::Context::default();
             crate::theme::install_theme(&ctx, crate::theme::ThemePref::Dark);
-            let mut app = AutoshopApp::default();
+            let mut app = AutoShadeApp::default();
             let tex = ctx.load_texture(
                 "r22_thumb",
                 egui::ColorImage::new([tw as usize, th as usize], egui::Color32::GRAY),
@@ -5256,7 +5256,7 @@
         for lang in [crate::i18n::Lang::En, crate::i18n::Lang::Zh] {
             let ctx = egui::Context::default();
             crate::theme::install_theme(&ctx, crate::theme::ThemePref::Dark);
-            let mut app = AutoshopApp { lang, ..Default::default() };
+            let mut app = AutoShadeApp { lang, ..Default::default() };
             // A plate is what start_mask_brush sizes its buffers against.
             app.base_preview = Some(std::sync::Arc::new(image::DynamicImage::new_rgb8(64, 96)));
             app.start_mask_brush(None);
@@ -5312,7 +5312,7 @@
     #[test]
     fn un_ticking_paint_mask_ends_the_brush_session_instead_of_orphaning_it() {
         // Phase 1: ticking still sweeps the other canvas tools and stays armed.
-        let mut app = AutoshopApp {
+        let mut app = AutoShadeApp {
             base_preview: Some(std::sync::Arc::new(image::DynamicImage::new_rgb8(32, 48))),
             crop_mode: true,
             clone_mode: true,
@@ -5347,7 +5347,7 @@
     /// NOTHING (an unconditional line would train the user to ignore it).
     #[test]
     fn the_save_line_names_every_projection_loss_and_stays_quiet_otherwise() {
-        use autoshop::xmp::{MaskLoss, MaskLossReason as R};
+        use autoshade::xmp::{MaskLoss, MaskLossReason as R};
         let loss = |name: &str, reason: R| MaskLoss { name: name.into(), reason };
         let losses = vec![
             loss("sky", R::Bitmap),
@@ -5457,7 +5457,7 @@
     /// path must never leak into the line.
     #[test]
     fn the_import_banner_names_what_it_lost() {
-        use autoshop::xmp::{MaskImportLoss, MaskImportReason as R};
+        use autoshade::xmp::{MaskImportLoss, MaskImportReason as R};
         let loss = |name: &str, reason: R| MaskImportLoss { name: name.into(), reason };
         let losses = vec![
             loss("brushed", R::Unrepresentable),
@@ -5559,7 +5559,7 @@
     /// placeholder `0`, vanish from the sentence entirely).
     #[test]
     fn the_rotation_warning_says_why() {
-        use autoshop::xmp::{
+        use autoshade::xmp::{
             MaskImportLoss, MaskImportReason as I, MaskLoss, MaskLossReason as E,
         };
         for lang in [crate::i18n::Lang::En, crate::i18n::Lang::Zh] {
@@ -5669,7 +5669,7 @@
              </rdf:Seq></crs:MaskGroupBasedCorrections>\n\
              </rdf:Description></rdf:RDF></x:xmpmeta>";
         let mut app =
-            AutoshopApp { recipe: autoshop::xmp::xmp_to_recipe(doc), ..Default::default() };
+            AutoShadeApp { recipe: autoshade::xmp::xmp_to_recipe(doc), ..Default::default() };
         assert_eq!(
             app.recipe.masks.len(),
             2,
@@ -5712,8 +5712,8 @@
     /// the engine's own per-photo measurement vs something the user chose.
     #[test]
     fn engine_calibration_losses_are_disclosed_without_interrupting_the_save() {
-        use autoshop::advisor::catalogue::{Tier, RECIPE_CONTROLS};
-        use autoshop::xmp::{MaskLoss, MaskLossReason as R};
+        use autoshade::advisor::catalogue::{Tier, RECIPE_CONTROLS};
+        use autoshade::xmp::{MaskLoss, MaskLossReason as R};
 
         // Premise, from the registry rather than from memory: every global
         // the export can lose today IS engine calibration.
@@ -5785,7 +5785,7 @@
     #[test]
     fn a_delivery_root_that_overlaps_the_open_photos_folder_is_warned_about() {
         // Constructed paths only — the predicate must never touch the disk.
-        let lib = std::env::temp_dir().join(format!("autoshop-lowr3-library-{}", std::process::id()));
+        let lib = std::env::temp_dir().join(format!("autoshade-lowr3-library-{}", std::process::id()));
         let trip = lib.join("TripA");
         let photo = trip.join("DSC1.ARW");
         let p = Some(photo.as_path());
@@ -5803,7 +5803,7 @@
 
         assert!(!delivery_root_shadows_photo(&lib.join("TripB"), p), "a sibling folder is fine");
         assert!(
-            !delivery_root_shadows_photo(&std::env::temp_dir().join(format!("autoshop-lowr3-out-{}", std::process::id())), p),
+            !delivery_root_shadows_photo(&std::env::temp_dir().join(format!("autoshade-lowr3-out-{}", std::process::id())), p),
             "a folder outside the library is the normal case and must stay quiet"
         );
         assert!(!delivery_root_shadows_photo(&trip, None), "no photo open, nothing to say");
@@ -5833,7 +5833,7 @@
     /// until it has a row.
     #[test]
     fn the_gui_only_offers_controls_the_engine_renders() {
-        use autoshop::advisor::catalogue::{
+        use autoshade::advisor::catalogue::{
             Tier, CARRIED_ONLY_GLOBAL, CARRIED_ONLY_LOCAL, LOCAL_CONTROLS, RECIPE_CONTROLS,
         };
         fn walk_rs(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
@@ -5965,10 +5965,10 @@
         ] {
             let ctx = egui::Context::default();
             crate::theme::install_theme(&ctx, crate::theme::ThemePref::Dark);
-            let mut app = AutoshopApp { lang, ..Default::default() };
+            let mut app = AutoShadeApp { lang, ..Default::default() };
             app.recipe.masks = vec![
-                autoshop::recipe::LocalAdjustment {
-                    mask: autoshop::recipe::MaskGeometry::Radial {
+                autoshade::recipe::LocalAdjustment {
+                    mask: autoshade::recipe::MaskGeometry::Radial {
                         top: 0.2, left: 0.2, bottom: 0.8, right: 0.8,
                         feather: 0.5, roundness: 0.0, flipped: false, angle: 15.0,
                         midpoint: 50.0, mask_version: 2,
@@ -5977,7 +5977,7 @@
                     name: "gold".into(),
                     ..Default::default()
                 },
-                autoshop::recipe::LocalAdjustment { name: "grad".into(), ..Default::default() },
+                autoshade::recipe::LocalAdjustment { name: "grad".into(), ..Default::default() },
             ];
             // TALL on purpose: egui culls shapes outside the visible clip
             // rect, and Local Masks sits below a full screen of sections — a
@@ -5989,7 +5989,7 @@
                 )),
                 ..Default::default()
             };
-            let frame = |app: &mut AutoshopApp| -> Vec<String> {
+            let frame = |app: &mut AutoShadeApp| -> Vec<String> {
                 let mut seen = Vec::new();
                 let out = ctx.run(input(), |ctx| {
                     ctx.memory_mut(|m| m.set_everything_is_visible(true));
@@ -6054,9 +6054,9 @@
         for (lang, caption) in
             [(crate::i18n::Lang::En, "Curve"), (crate::i18n::Lang::Zh, "曲线")]
         {
-            let mut app = AutoshopApp { lang, ..Default::default() };
+            let mut app = AutoShadeApp { lang, ..Default::default() };
             app.recipe.masks =
-                vec![autoshop::recipe::LocalAdjustment { name: "sky".into(), ..Default::default() }];
+                vec![autoshade::recipe::LocalAdjustment { name: "sky".into(), ..Default::default() }];
             // ① selected → the fourth group caption is drawn.
             app.sel_mask = Some(0);
             let seen = tall_frame(&mut app, |a, ui| {
@@ -6080,11 +6080,11 @@
         }
 
         // ③ the driven half: a click in the MASK editor lands in the mask.
-        let mut app = AutoshopApp::default();
+        let mut app = AutoShadeApp::default();
         app.recipe.masks =
-            vec![autoshop::recipe::LocalAdjustment { name: "sky".into(), ..Default::default() }];
+            vec![autoshade::recipe::LocalAdjustment { name: "sky".into(), ..Default::default() }];
         let ctx = egui::Context::default();
-        let run_pass = |app: &mut AutoshopApp, events: Vec<egui::Event>| -> bool {
+        let run_pass = |app: &mut AutoShadeApp, events: Vec<egui::Event>| -> bool {
             let mut changed = false;
             let input = egui::RawInput {
                 screen_rect: Some(egui::Rect::from_min_size(
@@ -6154,7 +6154,7 @@
 
     /// A tall frame: egui culls shapes outside the visible clip rect, and the
     /// lower sections sit below a full screen of siblings.
-    fn tall_frame(app: &mut AutoshopApp, f: impl Fn(&mut AutoshopApp, &mut egui::Ui)) -> Vec<String> {
+    fn tall_frame(app: &mut AutoShadeApp, f: impl Fn(&mut AutoShadeApp, &mut egui::Ui)) -> Vec<String> {
         let ctx = egui::Context::default();
         crate::theme::install_theme(&ctx, crate::theme::ThemePref::Dark);
         let input = egui::RawInput {
@@ -6185,7 +6185,7 @@
     #[test]
     fn the_ai_section_dot_follows_the_style_strength_it_used_to_miss() {
         assert_eq!(
-            AutoshopApp::default().style_strength, STYLE_STRENGTH_DEFAULT,
+            AutoShadeApp::default().style_strength, STYLE_STRENGTH_DEFAULT,
             "the app must start at the shared default"
         );
         assert_eq!(
@@ -6193,7 +6193,7 @@
             "a pref key missing from an older save must degrade to the SAME number \
              — otherwise every upgraded install starts with a lit dot"
         );
-        let mut app = AutoshopApp::default();
+        let mut app = AutoShadeApp::default();
         assert!(!app.ai_section_active(), "a fresh AI area has no state to flag");
         app.style_strength = 0.85;
         assert!(app.ai_section_active(), "a moved Style slider IS AI state");
@@ -6203,10 +6203,10 @@
         app.guidance = "warmer and moodier".into();
         assert!(app.ai_section_active(), "a typed Direction still flags");
         app.guidance.clear();
-        app.verdict = Some((autoshop::advisor::Decision::Accept, vec!["ok".into()]));
+        app.verdict = Some((autoshade::advisor::Decision::Accept, vec!["ok".into()]));
         assert!(app.ai_section_active(), "a verdict still flags");
         // …and the header really carries it.
-        let mut app = AutoshopApp::default();
+        let mut app = AutoShadeApp::default();
         let seen = tall_frame(&mut app, |a, ui| a.ai_panel(ui));
         assert!(
             seen.iter().any(|t| t == "AI"),
@@ -6236,7 +6236,7 @@
     fn the_grade_strength_slider_sits_beside_style_and_rides_the_analyze_request() {
         // One definition, three consumers (app default / pref default / the
         // slider's reset target) — the R22 #16 rule, applied to the new dial.
-        assert_eq!(AutoshopApp::default().grade_strength, GRADE_STRENGTH_DEFAULT);
+        assert_eq!(AutoShadeApp::default().grade_strength, GRADE_STRENGTH_DEFAULT);
         assert_eq!(
             Prefs::default().grade_strength, GRADE_STRENGTH_DEFAULT,
             "a prefs file written before this key existed must decode to the SAME number — \
@@ -6245,7 +6245,7 @@
         );
         assert_eq!(
             GRADE_STRENGTH_DEFAULT,
-            autoshop::recipe::GradeStrength::DEFAULT,
+            autoshade::recipe::GradeStrength::DEFAULT,
             "the GUI must not own a second copy of this number — the CLI and the web body \
              default through the lib's constant"
         );
@@ -6258,7 +6258,7 @@
         // "30" with the word "Style" itself off-panel, and a second dial there
         // was invisible outright. Assert the LABELS, not just the values: the
         // label is the half that was being clipped.
-        let mut app = AutoshopApp::default();
+        let mut app = AutoShadeApp::default();
         let seen = tall_frame(&mut app, |a, ui| a.ai_panel(ui));
         for label in ["Style", "Strength", "30", "65"] {
             assert!(
@@ -6270,7 +6270,7 @@
         // The ● follows it — including a move DOWN to the calibration point,
         // which is still a move away from the shipped default.
         assert!(!app.ai_section_active(), "a fresh AI area has no state to flag");
-        app.grade_strength = autoshop::recipe::GradeStrength::CALIBRATED;
+        app.grade_strength = autoshade::recipe::GradeStrength::CALIBRATED;
         assert!(
             app.ai_section_active(),
             "0.50 is the calibration point, not the default — moving there IS AI state"
@@ -6286,16 +6286,16 @@
         // …and it reaches the worker's request, on its OWN axis (the two dials
         // must not be able to swap: `style` is a bare fraction, `strength` a
         // `GradeStrength`, so a transposed pair would not compile).
-        let app = AutoshopApp { grade_strength: 0.9, style_strength: 0.2, ..Default::default() };
-        let req = autoshop::pipeline::GradeRequest {
+        let app = AutoShadeApp { grade_strength: 0.9, style_strength: 0.2, ..Default::default() };
+        let req = autoshade::pipeline::GradeRequest {
             style: app.style_strength,
             send_reference_image: app.send_style_ref_image,
-            strength: autoshop::recipe::GradeStrength::new(app.grade_strength),
+            strength: autoshade::recipe::GradeStrength::new(app.grade_strength),
             think: app.deep_think,
-            adherence: autoshop::recipe::DirectionAdherence::default(),
+            adherence: autoshade::recipe::DirectionAdherence::default(),
             use_looks: true,
-            embed: autoshop::style::EmbeddingSwitch::resolve(None, app.style_embed),
-            weights: autoshop::style::RetrievalWeights::from_env(),
+            embed: autoshade::style::EmbeddingSwitch::resolve(None, app.style_embed),
+            weights: autoshade::style::RetrievalWeights::from_env(),
         };
         assert_eq!(req.strength.get(), 0.9);
         assert_eq!(req.style, 0.2);
@@ -6308,16 +6308,16 @@
     /// because the block runs on a worker thread behind a segmentation call.
     #[test]
     fn gui_reverse_fit_uses_the_panel_strength() {
-        let app = AutoshopApp { grade_strength: 0.9, ..Default::default() };
+        let app = AutoShadeApp { grade_strength: 0.9, ..Default::default() };
         assert_eq!(app.panel_strength().get(), 0.9);
         assert_eq!(
-            AutoshopApp::default().panel_strength().get(),
-            autoshop::recipe::GradeStrength::DEFAULT,
+            AutoShadeApp::default().panel_strength().get(),
+            autoshade::recipe::GradeStrength::DEFAULT,
             "the shipped panel value IS the byte-identical default budget"
         );
         assert_eq!(
-            autoshop::fit::FitBudget::for_strength(app.panel_strength()).vetoes,
-            autoshop::fit::VetoPolicy::Disclose
+            autoshade::fit::FitBudget::for_strength(app.panel_strength()).vetoes,
+            autoshade::fit::VetoPolicy::Disclose
         );
         let worker = include_str!("actions.rs");
         assert!(
@@ -6343,8 +6343,8 @@
     /// header already prints. Both now read `util::mask_active`.
     #[test]
     fn the_local_masks_dot_matches_its_row_dots() {
-        let parked = |name: &str| autoshop::recipe::LocalAdjustment {
-            mask: autoshop::recipe::MaskGeometry::Radial {
+        let parked = |name: &str| autoshade::recipe::LocalAdjustment {
+            mask: autoshade::recipe::MaskGeometry::Radial {
                 top: 0.2, left: 0.2, bottom: 0.8, right: 0.8,
                 feather: 0.5, roundness: 0.0, flipped: false, angle: 0.0,
                 midpoint: 50.0, mask_version: 2,
@@ -6352,7 +6352,7 @@
             name: name.into(),
             ..Default::default()
         };
-        let mut app = AutoshopApp::default();
+        let mut app = AutoShadeApp::default();
         app.recipe.masks = vec![parked("one"), parked("two")];
         assert!(
             !app.masks_section_active(),
@@ -6402,16 +6402,16 @@
     /// either.
     #[test]
     fn section_dots_follow_the_registry_families() {
-        use autoshop::advisor::catalogue::{family_is_active, CONTROL_FAMILIES};
+        use autoshade::advisor::catalogue::{family_is_active, CONTROL_FAMILIES};
         /// (family, the header the panel draws for it, a move inside it)
-        type Case = (&'static str, &'static str, fn(&mut autoshop::recipe::EditRecipe));
+        type Case = (&'static str, &'static str, fn(&mut autoshade::recipe::EditRecipe));
         let cases: [Case; 5] = [
             ("presence", "Presence", |r| r.dehaze = 40.0),
             ("detail", "Detail", |r| r.noise_reduction = 25.0),
             ("hsl", "Color Mixer (HSL)", |r| r.hsl.saturation[3] = -30.0),
             ("color_grade", "Color Grading", |r| r.color_grade.highlight_sat = 20.0),
             ("curves", "Curves", |r| {
-                r.green_curve = vec![autoshop::recipe::CurvePoint { input: 128, output: 140 }]
+                r.green_curve = vec![autoshade::recipe::CurvePoint { input: 128, output: 140 }]
             }),
         ];
         for (family, header, mutate) in cases {
@@ -6419,7 +6419,7 @@
                 .iter()
                 .find(|f| f.name == family)
                 .unwrap_or_else(|| panic!("{family} is not a declared family"));
-            let mut app = AutoshopApp::default();
+            let mut app = AutoShadeApp::default();
             assert!(!family_is_active(f, &app.recipe), "{family}: a fresh recipe is neutral");
             let seen = tall_frame(&mut app, |a, ui| a.develop_panel(ui));
             assert!(
@@ -6449,7 +6449,7 @@
     /// is the batch where a section's dot changed meaning.
     #[test]
     fn texture_lights_the_presence_dot() {
-        let mut app = AutoshopApp::default();
+        let mut app = AutoShadeApp::default();
         assert_eq!(app.recipe.texture, 0.0, "premise: a fresh recipe is neutral");
         let seen = tall_frame(&mut app, |a, ui| a.develop_panel(ui));
         assert!(
@@ -6519,7 +6519,7 @@
                 ],
             ),
         ] {
-            let mut app = AutoshopApp { lang, ..Default::default() };
+            let mut app = AutoShadeApp { lang, ..Default::default() };
             let seen = tall_frame(&mut app, |a, ui| a.develop_panel(ui));
             assert!(
                 seen.iter().any(|t| t == header),
@@ -6570,7 +6570,7 @@
             (crate::i18n::Lang::En, "Lens vignetting", "Vignette", "Post-crop vignetting"),
             (crate::i18n::Lang::Zh, "镜头暗角", "暗角", "裁剪后暗角"),
         ] {
-            let mut app = AutoshopApp { lang, ..Default::default() };
+            let mut app = AutoShadeApp { lang, ..Default::default() };
             let seen = tall_frame(&mut app, |a, ui| a.develop_panel(ui));
             assert!(
                 seen.iter().any(|t| t == renamed),
@@ -6651,7 +6651,7 @@
                 ],
             ),
         ] {
-            let mut app = AutoshopApp { lang, ..Default::default() };
+            let mut app = AutoShadeApp { lang, ..Default::default() };
             let seen = tall_frame(&mut app, |a, ui| a.develop_panel(ui));
             for row in rows {
                 assert!(
@@ -6662,7 +6662,7 @@
         }
         // …and the eight carried detail axes light the Detail ● (the section
         // holds two families since B3, and its dot is the OR of them).
-        let mut app = AutoshopApp::default();
+        let mut app = AutoShadeApp::default();
         let seen = tall_frame(&mut app, |a, ui| a.develop_panel(ui));
         assert!(seen.iter().any(|t| t == "Detail"), "premise: the header is drawn: {seen:?}");
         assert!(!seen.iter().any(|t| t == "Detail  ●"), "premise: a rest recipe lights nothing");
@@ -6673,7 +6673,7 @@
             "a carried detail axis must not be an invisible adjustment: {seen:?}"
         );
         // The same for the Lens section and the de-fringe half of its family.
-        let mut app = AutoshopApp::default();
+        let mut app = AutoShadeApp::default();
         app.recipe.defringe_purple = 3.0;
         let seen = tall_frame(&mut app, |a, ui| a.develop_panel(ui));
         assert!(
@@ -6704,7 +6704,7 @@
             // Transform panel and its Calibration panel, and half a name sends
             // someone looking for their camera profile in the wrong place.
             let header = format!("{} / {}", tr(lang, "Transform"), tr(lang, "Calibration"));
-            let mut app = AutoshopApp { lang, ..Default::default() };
+            let mut app = AutoShadeApp { lang, ..Default::default() };
             let seen = tall_frame(&mut app, |a, ui| a.develop_panel(ui));
             assert!(
                 !seen.contains(&header),
@@ -6729,7 +6729,7 @@
                 tr(lang, "Perspective correction"),
                 tr(lang, "Camera calibration"),
                 tr(lang, "Camera profile"),
-                tr(lang, "Carried through to the sidecar unchanged; Autoshop never interprets these"),
+                tr(lang, "Carried through to the sidecar unchanged; AutoShade never interprets these"),
             ] {
                 assert!(seen.iter().any(|t| t == want), "{lang:?}: {want:?} missing: {seen:?}");
             }
@@ -6764,7 +6764,7 @@
     /// canvas is. It never interrupts, because nothing was lost.
     #[test]
     fn the_render_gap_line_appears_only_when_something_is_carried() {
-        use autoshop::xmp::global_render_gaps;
+        use autoshade::xmp::global_render_gaps;
         // A default develop says NOTHING — and this is the assertion that
         // matters most, because the de-fringe block's neutral is Adobe's own
         // 30/70/40/60: a "non-zero" test would fire on every photo ever
@@ -6778,7 +6778,7 @@
 
             // One carried effect, named by its SECTION — the word the
             // photographer already has on screen, never `post_crop_vignette`.
-            let grain = autoshop::recipe::EditRecipe { grain: 30.0, ..Default::default() };
+            let grain = autoshade::recipe::EditRecipe { grain: 30.0, ..Default::default() };
             let line = render_gap_line(lang, &global_render_gaps(&grain))
                 .unwrap_or_else(|| panic!("{lang:?}: an imported grain is a gap"));
             assert!(line.contains(tr(lang, "Effects")), "{lang:?}: {line}");
@@ -6786,7 +6786,7 @@
 
             // Every section, once each — the three carried families,
             // deduplicated (nine carried effects are one 「Effects」).
-            let all = autoshop::recipe::EditRecipe {
+            let all = autoshade::recipe::EditRecipe {
                 grain: 30.0,
                 grain_size: 25.0,
                 color_nr: 25.0,
@@ -6842,7 +6842,7 @@
             (crate::i18n::Lang::En, "Segmentation sidecar", "Browse…"),
             (crate::i18n::Lang::Zh, "分割边车", "浏览…"),
         ] {
-            let mut app = AutoshopApp { lang, ..Default::default() };
+            let mut app = AutoShadeApp { lang, ..Default::default() };
             let seen = tall_frame(&mut app, |a, ui| a.settings_ui(ui));
             let at = seen.iter().position(|t| t == heading).unwrap_or_else(|| {
                 panic!("{lang:?}: the sidecar heading was not drawn: {seen:?}")
@@ -6878,7 +6878,7 @@
             (crate::i18n::Lang::En, "De-fringe in a later batch"),
             (crate::i18n::Lang::Zh, "去紫边留待后续批次"),
         ] {
-            let mut app = AutoshopApp { lang, ..Default::default() };
+            let mut app = AutoShadeApp { lang, ..Default::default() };
             let seen = tall_frame(&mut app, |a, ui| a.develop_panel(ui));
             let lens_header = if lang == crate::i18n::Lang::En { "Lens" } else { "镜头 · Lens" };
             assert!(
@@ -6903,7 +6903,7 @@
     /// silently started lighting it.
     #[test]
     fn lens_midpoint_alone_still_lights_no_dot() {
-        let mut app = AutoshopApp::default();
+        let mut app = AutoShadeApp::default();
         app.recipe.lens_vignette_mid = 90.0;
         assert_eq!(app.recipe.lens_vignette, 0.0, "premise: the amount is at rest");
         let seen = tall_frame(&mut app, |a, ui| a.develop_panel(ui));
@@ -6932,7 +6932,7 @@
     #[test]
     fn an_identical_toast_refreshes_instead_of_stacking() {
         let loss = "the Lightroom sidecar dropped 2 bitmap masks";
-        let mut app = AutoshopApp::default();
+        let mut app = AutoShadeApp::default();
         app.toast(ToastKind::Error, loss);
         for i in 0..4 {
             app.toast(ToastKind::Success, format!("saved {i}"));
@@ -6975,7 +6975,7 @@
     /// developer's own store for an answer.
     #[test]
     fn the_ai_panel_says_which_style_library_it_is_referencing() {
-        use autoshop::style::{StyleIndexInfo, StyleIndexState};
+        use autoshade::style::{StyleIndexInfo, StyleIndexState};
         let info =
             |state| Some(StyleIndexInfo { path: "C:/store/style-index.json".into(), state });
 
@@ -6983,7 +6983,7 @@
         // slider's own warning — the defect was a slider showing 30% with
         // nothing behind it and no way in the app to build one.
         let mut app =
-            AutoshopApp { style_info: info(StyleIndexState::Absent), ..Default::default() };
+            AutoShadeApp { style_info: info(StyleIndexState::Absent), ..Default::default() };
         let seen = tall_frame(&mut app, |a, ui| a.ai_panel(ui));
         assert!(
             seen.iter().any(|t| t == "Style reference library"),
@@ -6995,7 +6995,7 @@
         );
         assert!(
             seen.iter().any(|t| t.contains("folder you edit in Lightroom")),
-            "…and where to point it (an Autoshop output folder yields nothing): {seen:?}"
+            "…and where to point it (an AutoShade output folder yields nothing): {seen:?}"
         );
         assert!(
             seen.iter().any(|t| t.contains("no library")),
@@ -7008,7 +7008,7 @@
 
         // ── Built: WHICH library, how big, how old. This is the answer to the
         // user's "I have no idea which library it is referencing".
-        let mut app = AutoshopApp {
+        let mut app = AutoShadeApp {
             style_info: info(StyleIndexState::Built {
                 total: 412,
                 version: 3,
@@ -7041,7 +7041,7 @@
         // ── Unusable: the loader's reason, not silence (this arm always spoke
         // in the rationale; now the panel says it before an analysis is paid
         // for).
-        let mut app = AutoshopApp {
+        let mut app = AutoShadeApp {
             style_info: info(StyleIndexState::Unusable {
                 err: "is version 2 (current 3)".into(),
             }),
@@ -7075,7 +7075,7 @@
     fn a_chosen_reference_is_a_reverse_fit_target_without_any_generated_variant() {
         let reference = std::path::PathBuf::from("D:/exports/_DSC9621-lightroom.tif");
         // A stock app: ONE Original variant, nothing generated.
-        let mut app = AutoshopApp::default();
+        let mut app = AutoShadeApp::default();
         assert_eq!(app.fit_target(), None, "premise: nothing to fit against yet");
         app.fit_ref = Some(reference.clone());
         assert_eq!(
@@ -7107,7 +7107,7 @@
     /// empty state has to stop naming only the generative path.
     #[test]
     fn the_reverse_fit_area_offers_the_reference_picker() {
-        let mut app = AutoshopApp::default();
+        let mut app = AutoShadeApp::default();
         let seen = tall_frame(&mut app, |a, ui| a.ai_panel(ui));
         assert!(
             seen.iter().any(|t| t.contains("Choose reference")),
@@ -7134,12 +7134,12 @@
     /// ME (the default flipped on) goes red here.
     #[test]
     fn the_reimagine_fidelity_retry_is_off_in_both_defaults() {
-        assert!(!AutoshopApp::default().reimagine_retry, "spending is opt-in");
+        assert!(!AutoShadeApp::default().reimagine_retry, "spending is opt-in");
         assert!(
             !Prefs::default().reimagine_retry,
             "an older prefs file must decode to the same answer"
         );
-        let mut app = AutoshopApp::default();
+        let mut app = AutoShadeApp::default();
         let seen = tall_frame(&mut app, |a, ui| a.ai_panel(ui));
         assert!(
             seen.iter().any(|t| t.contains("auto-retry")),
@@ -7154,12 +7154,12 @@
     /// reachable without the review it iterates.
     #[test]
     fn the_deep_reverse_fit_is_off_by_default_and_gated_on_the_review() {
-        assert!(!AutoshopApp::default().fit_deep, "spending is opt-in");
+        assert!(!AutoShadeApp::default().fit_deep, "spending is opt-in");
         assert!(
             !Prefs::default().fit_deep,
             "an older prefs file must decode to the same answer"
         );
-        let mut app = AutoshopApp::default();
+        let mut app = AutoShadeApp::default();
         let seen = tall_frame(&mut app, |a, ui| a.ai_panel(ui));
         assert!(
             seen.iter().any(|t| t == "deep"),
@@ -7184,7 +7184,7 @@
     #[test]
     fn the_style_reference_photo_switch_is_off_in_both_defaults() {
         assert!(
-            !AutoshopApp::default().send_style_ref_image,
+            !AutoShadeApp::default().send_style_ref_image,
             "spending is opt-in — a fresh app must not send a second image"
         );
         assert!(
@@ -7194,20 +7194,20 @@
         assert_eq!(Prefs::default().style_src_dir, None);
         // …and the request the analyze worker builds carries the flag, so the
         // checkbox cannot become decoration.
-        let app = AutoshopApp { send_style_ref_image: true, ..Default::default() };
-        let req = autoshop::pipeline::GradeRequest {
+        let app = AutoShadeApp { send_style_ref_image: true, ..Default::default() };
+        let req = autoshade::pipeline::GradeRequest {
             style: app.style_strength,
             send_reference_image: app.send_style_ref_image,
-            strength: autoshop::recipe::GradeStrength::new(app.grade_strength),
+            strength: autoshade::recipe::GradeStrength::new(app.grade_strength),
             think: app.deep_think,
-            adherence: autoshop::recipe::DirectionAdherence::default(),
+            adherence: autoshade::recipe::DirectionAdherence::default(),
             use_looks: true,
-            embed: autoshop::style::EmbeddingSwitch::resolve(None, app.style_embed),
-            weights: autoshop::style::RetrievalWeights::from_env(),
+            embed: autoshade::style::EmbeddingSwitch::resolve(None, app.style_embed),
+            weights: autoshade::style::RetrievalWeights::from_env(),
         };
         assert!(req.send_reference_image);
         assert!(
-            !autoshop::pipeline::GradeRequest::with_style(0.65).send_reference_image,
+            !autoshade::pipeline::GradeRequest::with_style(0.65).send_reference_image,
             "every non-GUI surface stays on the text reference"
         );
     }
@@ -7219,7 +7219,7 @@
     /// hard-coded to `false` (`style::embedding_effective(false)`), so the
     /// checkbox governed `Build style library` and nothing else: from the
     /// desktop app the look library and every embedding term were dead unless
-    /// the user happened to set AUTOSHOP_STYLE_EMBED in their environment. The
+    /// the user happened to set AUTOSHADE_STYLE_EMBED in their environment. The
     /// switch is now a value on the request, read on the UI thread with the
     /// rest of it.
     ///
@@ -7230,19 +7230,19 @@
     fn gui_embedding_pref_reaches_the_develop_query() {
         // The environment is NOT set here, and is not touched: the preference
         // alone must be enough.
-        let on = AutoshopApp { style_embed: true, ..Default::default() };
-        let off = AutoshopApp { style_embed: false, ..Default::default() };
-        let request_from = |app: &AutoshopApp| autoshop::pipeline::GradeRequest {
+        let on = AutoShadeApp { style_embed: true, ..Default::default() };
+        let off = AutoShadeApp { style_embed: false, ..Default::default() };
+        let request_from = |app: &AutoShadeApp| autoshade::pipeline::GradeRequest {
             style: app.style_strength,
             send_reference_image: app.send_style_ref_image,
-            strength: autoshop::recipe::GradeStrength::new(app.grade_strength),
+            strength: autoshade::recipe::GradeStrength::new(app.grade_strength),
             think: app.deep_think,
-            adherence: autoshop::recipe::DirectionAdherence::default(),
+            adherence: autoshade::recipe::DirectionAdherence::default(),
             use_looks: app.use_looks,
-            embed: autoshop::style::EmbeddingSwitch::resolve_with(
+            embed: autoshade::style::EmbeddingSwitch::resolve_with(
                 None, app.style_embed, |_| None,
             ),
-            weights: autoshop::style::RetrievalWeights::SHIPPED,
+            weights: autoshade::style::RetrievalWeights::SHIPPED,
         };
         assert!(request_from(&on).embed.on(), "the checkbox must reach the develop's request");
         assert!(!request_from(&off).embed.on(), "…and un-checking it must too");
@@ -7281,14 +7281,14 @@
     #[test]
     fn the_deep_thinking_switch_is_off_by_default_and_rides_the_request() {
         assert!(
-            !AutoshopApp::default().deep_think,
+            !AutoShadeApp::default().deep_think,
             "a fresh app must not start paying for a deeper analyze"
         );
         assert!(
             !Prefs::default().deep_think,
             "a prefs file written before this key existed must decode to the SAME answer"
         );
-        let mut app = AutoshopApp::default();
+        let mut app = AutoShadeApp::default();
         let seen = tall_frame(&mut app, |a, ui| a.ai_panel(ui));
         assert!(
             seen.iter().any(|t| t == "Deep thinking"),
@@ -7299,20 +7299,20 @@
         app.deep_think = true;
         assert!(!app.ai_section_active(), "a preference must not light the section ●");
 
-        let app = AutoshopApp { deep_think: true, ..Default::default() };
-        let req = autoshop::pipeline::GradeRequest {
+        let app = AutoShadeApp { deep_think: true, ..Default::default() };
+        let req = autoshade::pipeline::GradeRequest {
             style: app.style_strength,
             send_reference_image: app.send_style_ref_image,
-            strength: autoshop::recipe::GradeStrength::new(app.grade_strength),
+            strength: autoshade::recipe::GradeStrength::new(app.grade_strength),
             think: app.deep_think,
-            adherence: autoshop::recipe::DirectionAdherence::default(),
+            adherence: autoshade::recipe::DirectionAdherence::default(),
             use_looks: true,
-            embed: autoshop::style::EmbeddingSwitch::resolve(None, app.style_embed),
-            weights: autoshop::style::RetrievalWeights::from_env(),
+            embed: autoshade::style::EmbeddingSwitch::resolve(None, app.style_embed),
+            weights: autoshade::style::RetrievalWeights::from_env(),
         };
         assert!(req.think, "the checkbox must reach the worker's request");
         assert!(
-            !autoshop::pipeline::GradeRequest::with_style(0.65).think,
+            !autoshade::pipeline::GradeRequest::with_style(0.65).think,
             "every unattended surface stays out of thinking mode"
         );
     }
@@ -7328,9 +7328,9 @@
         // Saved: success toast, folder remembered (so a rebuild starts there),
         // and a fresh status read armed — the panel must not keep the OLD
         // counts.
-        let mut app = AutoshopApp {
+        let mut app = AutoShadeApp {
             style_build_inflight: true,
-            style_build_progress: Some((autoshop::style::BuildStage::Frames, 7, 9)),
+            style_build_progress: Some((autoshade::style::BuildStage::Frames, 7, 9)),
             ..Default::default()
         };
         app.tx
@@ -7381,7 +7381,7 @@
         // this assertion fails. It is the same status in BOTH languages, so it
         // is asserted in both.
         for (lang, needle) in [(Lang::En, "without a style embedding"), (Lang::Zh, "没有嵌入向量")] {
-            let mut app = AutoshopApp {
+            let mut app = AutoShadeApp {
                 style_build_inflight: true,
                 lang,
                 ..Default::default()
@@ -7409,7 +7409,7 @@
         // Nothing indexed: the SHARED refusal wording (the CLI and the web say
         // the same), an ERROR toast, and NOTHING remembered — the folder was
         // the wrong kind of folder.
-        let mut app = AutoshopApp { style_build_inflight: true, ..Default::default() };
+        let mut app = AutoShadeApp { style_build_inflight: true, ..Default::default() };
         app.tx
             .send(Msg::StyleBuilt(Box::new(StyleBuildOutcome::NothingIndexed {
                 dir: dir.clone(),
@@ -7428,7 +7428,7 @@
         assert!(!app.style_info_loading, "a refused build changed nothing to re-read");
 
         // Failed: the cause, an error toast, button re-armed.
-        let mut app = AutoshopApp { style_build_inflight: true, ..Default::default() };
+        let mut app = AutoShadeApp { style_build_inflight: true, ..Default::default() };
         app.tx
             .send(Msg::StyleBuilt(Box::new(StyleBuildOutcome::Failed {
                 err: "read the folder: access denied".into(),
@@ -7440,10 +7440,10 @@
         assert!(app.toasts.iter().any(|t| matches!(t.kind, ToastKind::Error)));
 
         // Progress ticks land as counts, not as a worker-built sentence.
-        let mut app = AutoshopApp { style_build_inflight: true, ..Default::default() };
+        let mut app = AutoShadeApp { style_build_inflight: true, ..Default::default() };
         app.tx
             .send(Msg::StyleBuildProgress {
-                stage: autoshop::style::BuildStage::Frames,
+                stage: autoshade::style::BuildStage::Frames,
                 done: 40,
                 total: 300,
             })
@@ -7451,7 +7451,7 @@
         app.poll_workers(&ctx);
         assert_eq!(
             app.style_build_progress,
-            Some((autoshop::style::BuildStage::Frames, 40, 300))
+            Some((autoshade::style::BuildStage::Frames, 40, 300))
         );
         assert!(app.status.contains("40") && app.status.contains("300"), "{}", app.status);
     }
@@ -7468,7 +7468,7 @@
     fn a_deep_fit_that_could_not_run_its_action_does_not_claim_the_review_was_empty() {
         for lang in [Lang::En, Lang::Zh] {
             let render = |outcome| {
-                AutoshopApp::render_fit_note(
+                AutoShadeApp::render_fit_note(
                     lang,
                     &FitNote::DeepFit { action: "zoned sky/land pass", outcome },
                 )
@@ -7548,8 +7548,8 @@
         use std::path::PathBuf;
         let q = |s: &str| crate::util::explorer_quoted_arg(&PathBuf::from(s));
         assert_eq!(
-            q(r"C:\Users\me\autoshop\a,b.arw"),
-            Some(r#""C:\Users\me\autoshop\a,b.arw""#.to_string()),
+            q(r"C:\Users\me\autoshade\a,b.arw"),
+            Some(r#""C:\Users\me\autoshade\a,b.arw""#.to_string()),
             "the comma has to sit INSIDE the quotes"
         );
         // Ordinary paths take the same route — one rule, not a comma special
@@ -7584,7 +7584,7 @@
         app.base_preview = Some(plate.clone());
         app.source_preview = Some(plate);
         app.base_turns = 0;
-        let src = std::env::temp_dir().join(format!("autoshop-rotate-plate-{}.arw", std::process::id()));
+        let src = std::env::temp_dir().join(format!("autoshade-rotate-plate-{}.arw", std::process::id()));
         std::fs::write(&src, b"raw").unwrap();
         app.src_path = Some(src);
 
@@ -7650,7 +7650,7 @@
         let ctx = egui::Context::default();
 
         // THE PINNED MODEL: named in the status, and no alarm raised.
-        let mut ok = AutoshopApp { busy: true, ..Default::default() };
+        let mut ok = AutoShadeApp { busy: true, ..Default::default() };
         ok.tx
             .send(Msg::Segmented(Ok((
                 "Subject".into(),
@@ -7673,7 +7673,7 @@
         // THE FALLBACK TIER: named in the status AND escalated to an error
         // toast, because a status line nobody is looking at is not a
         // disclosure. The remedy travels with it.
-        let mut degraded = AutoshopApp { busy: true, ..Default::default() };
+        let mut degraded = AutoShadeApp { busy: true, ..Default::default() };
         degraded
             .tx
             .send(Msg::Segmented(Ok((
@@ -7705,7 +7705,7 @@
 
         // A sidecar too old to print the line says nothing, and the landing
         // must not invent a model name for it.
-        let mut silent = AutoshopApp { busy: true, ..Default::default() };
+        let mut silent = AutoShadeApp { busy: true, ..Default::default() };
         silent
             .tx
             .send(Msg::Segmented(Ok((
@@ -7740,7 +7740,7 @@
     fn gui_adherence_slider_is_disabled_without_a_direction() {
         let ctx = egui::Context::default();
         crate::theme::install_theme(&ctx, crate::theme::ThemePref::Dark);
-        let frame = |app: &mut AutoshopApp| -> Option<bool> {
+        let frame = |app: &mut AutoShadeApp| -> Option<bool> {
             app.adherence_gate_enabled = None; // this frame's evidence only
             let _ = ctx.run(
                 egui::RawInput {
@@ -7759,7 +7759,7 @@
             app.adherence_gate_enabled
         };
         // (1) no direction: the dial exists but cannot be moved.
-        let mut app = AutoshopApp::default();
+        let mut app = AutoShadeApp::default();
         assert!(app.guidance.trim().is_empty(), "premise: the default app has no direction");
         assert_eq!(frame(&mut app), Some(false), "a blank direction must leave the slider inert");
         // (2) whitespace is still blank - the gate trims.
@@ -7771,11 +7771,11 @@
         // …and the DIAL reaches the request as a tier, which is the only thing
         // the value is for.
         app.direction_adherence = 0.1;
-        let hint = autoshop::recipe::DirectionAdherence::new(app.direction_adherence);
-        assert_eq!(hint.tier(), autoshop::recipe::AdherenceTier::Hint);
+        let hint = autoshade::recipe::DirectionAdherence::new(app.direction_adherence);
+        assert_eq!(hint.tier(), autoshade::recipe::AdherenceTier::Hint);
         app.direction_adherence = 0.95;
-        let brief = autoshop::recipe::DirectionAdherence::new(app.direction_adherence);
-        assert_eq!(brief.tier(), autoshop::recipe::AdherenceTier::Brief);
+        let brief = autoshade::recipe::DirectionAdherence::new(app.direction_adherence);
+        assert_eq!(brief.tier(), autoshade::recipe::AdherenceTier::Brief);
         assert_ne!(hint.tier(), brief.tier(), "the dial must be able to change the tier");
         // …and the tooltip NAMES the tiers, which is what a user needs to know
         // the dial is not a magnitude.
@@ -7799,7 +7799,7 @@
     /// fresh install rather than to `true`.
     ///
     /// MUTATION THIS KILLS: default the key to `true` in either `Prefs` or
-    /// `AutoshopApp`, drop it from the saved preferences (the round trip then
+    /// `AutoShadeApp`, drop it from the saved preferences (the round trip then
     /// loses it), or wire one of the two build workers to a literal switch
     /// instead of the preference.
     #[test]
@@ -7809,7 +7809,7 @@
             "a prefs file written before this key existed must decode to OFF"
         );
         assert!(
-            !AutoshopApp::default().style_describe,
+            !AutoShadeApp::default().style_describe,
             "a fresh app must not start a 4.3 GB download"
         );
         // A pre-S2 preferences file really is such a file: it has no key at all.
@@ -7824,11 +7824,11 @@
 
         // The preference is what the workers resolve, and the resolver answers
         // a VALUE — no test and no build writes the process environment.
-        let on = AutoshopApp { style_describe: true, ..Default::default() };
-        let off = AutoshopApp { style_describe: false, ..Default::default() };
+        let on = AutoShadeApp { style_describe: true, ..Default::default() };
+        let off = AutoShadeApp { style_describe: false, ..Default::default() };
         let unset = |_: &str| None;
-        assert!(autoshop::style::DescribeSwitch::resolve_with(None, on.style_describe, unset).on());
-        assert!(!autoshop::style::DescribeSwitch::resolve_with(None, off.style_describe, unset).on());
+        assert!(autoshade::style::DescribeSwitch::resolve_with(None, on.style_describe, unset).on());
+        assert!(!autoshade::style::DescribeSwitch::resolve_with(None, off.style_describe, unset).on());
 
         let actions = include_str!("actions.rs");
         assert_eq!(

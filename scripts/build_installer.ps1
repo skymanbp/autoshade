@@ -51,9 +51,9 @@ function Find-Iscc {
 $scriptDirectory = Split-Path -Parent $MyInvocation.MyCommand.Path
 $repoRoot = Split-Path -Parent $scriptDirectory
 $cargoTomlPath = Join-Path $repoRoot 'Cargo.toml'
-$installerScriptPath = Join-Path $repoRoot 'installer\autoshop.iss'
-$cliPath = Join-Path $repoRoot 'dist\autoshop.exe'
-$guiPath = Join-Path $repoRoot 'dist\autoshop-gui.exe'
+$installerScriptPath = Join-Path $repoRoot 'installer\autoshade.iss'
+$cliPath = Join-Path $repoRoot 'dist\autoshade.exe'
+$guiPath = Join-Path $repoRoot 'dist\autoshade-gui.exe'
 $outputDirectory = Join-Path $repoRoot 'target\installer'
 
 foreach ($requiredPath in @($cargoTomlPath, $installerScriptPath, $cliPath, $guiPath)) {
@@ -85,7 +85,7 @@ if (-not [string]::IsNullOrWhiteSpace($ExpectedVersion)) {
 }
 
 [IO.Directory]::CreateDirectory($outputDirectory) | Out-Null
-$outputPath = Join-Path $outputDirectory "Autoshop-Setup-$buildVersion.exe"
+$outputPath = Join-Path $outputDirectory "AutoShade-Setup-$buildVersion.exe"
 $logPath = Join-Path $outputDirectory "build-$buildVersion.log"
 $logLines = New-Object System.Collections.Generic.List[string]
 $utf8NoBom = New-Object -TypeName System.Text.UTF8Encoding -ArgumentList $false
@@ -122,13 +122,13 @@ $versionOutput = (($versionOutputLines | ForEach-Object { $_.ToString() }) -join
 if ($versionExitCode -ne 0) {
     throw "Version probe failed with exit code $versionExitCode`: $versionOutput"
 }
-$requiredVersionOutput = "autoshop $buildVersion"
+$requiredVersionOutput = "autoshade $buildVersion"
 if ($versionOutput -ne $requiredVersionOutput) {
-    throw ("dist\autoshop.exe version mismatch. Expected exactly '{0}', got '{1}'. " +
+    throw ("dist\autoshade.exe version mismatch. Expected exactly '{0}', got '{1}'. " +
         'Rebuild/copy the matching release binaries, or use -ExpectedVersion only for an intentional pipeline validation.') -f
         $requiredVersionOutput, $versionOutput
 }
-Write-LogLine "Verified dist\autoshop.exe: $versionOutput"
+Write-LogLine "Verified dist\autoshade.exe: $versionOutput"
 
 $isccPath = Find-Iscc
 Write-LogLine "ISCC: $isccPath"

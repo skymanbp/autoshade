@@ -7,11 +7,11 @@ for ⧉ ⊖ ◭ ▭ ◯ ◌ ✓ ✕ 🖌 without these).
 
 | file | upstream (github.com/google/fonts, `ofl/` tree) | role |
 |---|---|---|
-| `NotoSansSymbols2-autoshop.ttf` | `notosanssymbols2/NotoSansSymbols2-Regular.ttf` | geometric shapes, technical, dingbats |
-| `NotoSansSymbols-autoshop.ttf` | `notosanssymbols/NotoSansSymbols[wght].ttf` (instanced wght=400) | enclosed alphanumerics, ⎘ |
-| `NotoSansMath-autoshop.ttf` | `notosansmath/NotoSansMath-Regular.ttf` | math operators, curved/paired arrows |
-| `NotoEmoji-autoshop.ttf` | `notoemoji/NotoEmoji[wght].ttf` (instanced wght=400) | monochrome emoji missing from egui's subset |
-| `NotoSansSC-autoshop.ttf` | `notosanssc/NotoSansSC[wght].ttf` (instanced wght=400) | the hanzi the Chinese UI itself renders |
+| `NotoSansSymbols2-autoshade.ttf` | `notosanssymbols2/NotoSansSymbols2-Regular.ttf` | geometric shapes, technical, dingbats |
+| `NotoSansSymbols-autoshade.ttf` | `notosanssymbols/NotoSansSymbols[wght].ttf` (instanced wght=400) | enclosed alphanumerics, ⎘ |
+| `NotoSansMath-autoshade.ttf` | `notosansmath/NotoSansMath-Regular.ttf` | math operators, curved/paired arrows |
+| `NotoEmoji-autoshade.ttf` | `notoemoji/NotoEmoji[wght].ttf` (instanced wght=400) | monochrome emoji missing from egui's subset |
+| `NotoSansSC-autoshade.ttf` | `notosanssc/NotoSansSC[wght].ttf` (instanced wght=400) | the hanzi the Chinese UI itself renders |
 
 The CJK face carries only the codepoints the translations use — the checker
 reports 68 symbols + 736 CJK codepoints, all embedded (`subset_gui_fonts.py

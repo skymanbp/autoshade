@@ -241,7 +241,7 @@ pub struct EditRecipe {
 
     // --- Effects: CARRIED to Lightroom, rendered by nothing here (R25 B2) ----
     // Nine Adobe-only operators under the SF4-C policy: we round-trip them
-    // through their own `crs:` keys so a Lightroom edit survives an Autoshop
+    // through their own `crs:` keys so a Lightroom edit survives an AutoShade
     // save, and we deliberately do NOT approximate them. Each carries its
     // reason in `advisor::catalogue::CARRIED_ONLY_GLOBAL`, and
     // `Tier::CarriedOnly` is what makes the omission a declared fact rather

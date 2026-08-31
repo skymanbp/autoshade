@@ -2,7 +2,7 @@
 
 use crate::*;
 
-impl AutoshopApp {
+impl AutoShadeApp {
     /// Left-most panel: the working-folder thumbnail gallery. Only visible rows
     /// are laid out (show_rows) and only their thumbnails are queued to decode.
     pub(crate) fn gallery_panel(&mut self, ui: &mut egui::Ui) {
@@ -209,7 +209,7 @@ impl AutoshopApp {
                                     to_request.push(i);
                                 }
                                 ui.vertical(|ui| {
-                                    let mut name = egui::RichText::new(autoshop::pipeline::stem(path)).small();
+                                    let mut name = egui::RichText::new(autoshade::pipeline::stem(path)).small();
                                     if is_sel {
                                         name = name.strong().color(colors.accent_text);
                                     }
@@ -229,9 +229,9 @@ impl AutoshopApp {
                                         // OR Lightroom's own sidecar (L13#2:
                                         // an LR-edited photo showed no badge
                                         // yet opened with its LR develop).
-                                        autoshop::store::has_develop_or_sidecar(path)
+                                        autoshade::store::has_develop_or_sidecar(path)
                                     });
-                                    let baked = !autoshop::decode::is_raw(path);
+                                    let baked = !autoshade::decode::is_raw(path);
                                     ui.horizontal(|ui| {
                                         if is_multi {
                                             ui.label(egui::RichText::new(tr(lang, "✓ selected")).color(colors.accent_text).small());

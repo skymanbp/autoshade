@@ -4,7 +4,7 @@ use super::*;
 
 /// The batch renderer's develop resolution — the OPEN path's precedence
 /// (`persist::read_saved_develop_locked`), mirrored onto a
-/// [`autoshop::store::DevelopSnapshot`] so the two surfaces answer alike
+/// [`autoshade::store::DevelopSnapshot`] so the two surfaces answer alike
 /// (L13#1: the batch read recipe.json only — an LR-only or XMP-only photo
 /// exported neutral, and an older recipe out-ranked a newer Lightroom
 /// edit). Order: Lightroom's own sidecar when newest → recipe.json (a
@@ -17,7 +17,7 @@ use super::*;
 /// `Ok(None)` = no saved develop (the caller's neutral + base-look fallback).
 pub(crate) fn resolve_snapshot_develop(
     p: &std::path::Path,
-    snap: &autoshop::store::DevelopSnapshot,
+    snap: &autoshade::store::DevelopSnapshot,
     warns: &mut Vec<String>,
 ) -> anyhow::Result<Option<(EditRecipe, &'static str)>> {
     // `warns` (L16-2): the disclosures the OPEN path surfaces for the same
@@ -60,15 +60,15 @@ pub(crate) fn resolve_snapshot_develop(
         // Rasters re-anchor to whichever dir the recipe was read from
         // (central store first, else a legacy ./out sidecar).
         if let Some(base) = from.parent() {
-            autoshop::store::resolve_mask_paths(&mut r, base);
+            autoshade::store::resolve_mask_paths(&mut r, base);
         }
         // The batch twin of the open path's coordinate-frame migration: this
         // is the only place a batch export reads a recipe FILE, and without it
         // a portrait RAW exported with its crop and masks on the wrong axis
         // while the interactive open showed them correctly — the exact
         // cross-surface divergence `warns` exists to close.
-        if let Some(c) = autoshop::pipeline::migrate_recipe_coord_frame(p, &mut r) {
-            warns.push(autoshop::pipeline::coord_migration_note(c));
+        if let Some(c) = autoshade::pipeline::migrate_recipe_coord_frame(p, &mut r) {
+            warns.push(autoshade::pipeline::coord_migration_note(c));
         }
         return Ok(Some((r, "recipe.json")));
     }
@@ -102,13 +102,13 @@ fn xmp_arm(
     // Clamped door (R28 2b): what the recipe's SIZE caps cut on the way in is
     // loss `import_losses` below cannot see — it reads the document, this
     // reads the recipe the document produced.
-    let diag = autoshop::diag::photo(p);
-    let (mut r, imported_clamp) = autoshop::xmp::xmp_to_recipe_clamped_with_diag(text, &diag);
+    let diag = autoshade::diag::photo(p);
+    let (mut r, imported_clamp) = autoshade::xmp::xmp_to_recipe_clamped_with_diag(text, &diag);
     // Collected for EVERY consulted file — a no-op import included (the
     // persist.rs rule, Codex 32-#1 + review R12-11): a sidecar whose ONLY
     // edit is corrupt restores nothing, and the next save overwrites it in
     // silence unless the corruption is named here.
-    let bad = autoshop::xmp::unparsable_crs_numbers(text);
+    let bad = autoshade::xmp::unparsable_crs_numbers(text);
     if !bad.is_empty() {
         warns.push(format!(
             "{} numeric XMP setting(s) unreadable ({}) — restored as neutral",
@@ -128,9 +128,9 @@ fn xmp_arm(
     // entry in this batch channel; the window's own localized twin is
     // `util::xmp_import_line`.
     if let Some(line) =
-        autoshop::xmp::describe_import_losses(
+        autoshade::xmp::describe_import_losses(
             r.masks.len(),
-            &autoshop::xmp::import_losses_for_photo(text, p),
+            &autoshade::xmp::import_losses_for_photo(text, p),
         )
     {
         warns.push(line);
@@ -138,7 +138,7 @@ fn xmp_arm(
     // R24-5 M0: and the GLOBAL half of that same disclosure, which this path
     // never had — the sidecar's own crs: properties the engine does not model.
     // Preserved by the merge, invisible in the render, and until now unsaid.
-    let carried = autoshop::xmp::unmodelled_global_crs(text);
+    let carried = autoshade::xmp::unmodelled_global_crs(text);
     if !carried.is_empty() {
         let shown = carried.len().min(4);
         let more = carried.len() - shown;
@@ -153,7 +153,7 @@ fn xmp_arm(
         return None;
     }
     clamp_disclosed(&mut r, imported_clamp, warns);
-    let knots = autoshop::pipeline::photo_base_knots(p);
+    let knots = autoshade::pipeline::photo_base_knots(p);
     if !knots.is_empty() {
         r.base_curve = knots;
     }
@@ -163,9 +163,9 @@ fn xmp_arm(
     // "no warp because nobody could solve one". The other stamp sites reach
     // `fresh_lens_profile` with no document in hand and correctly say the
     // second thing.
-    r.lens_profile = autoshop::pipeline::fresh_lens_profile_for_sidecar(p, Some(text));
+    r.lens_profile = autoshade::pipeline::fresh_lens_profile_for_sidecar(p, Some(text));
     if r.as_shot_k.is_none() {
-        let (ask, ast) = autoshop::pipeline::fresh_as_shot_wb(p);
+        let (ask, ast) = autoshade::pipeline::fresh_as_shot_wb(p);
         r.as_shot_k = ask;
         r.as_shot_tint = ast;
     }
@@ -182,7 +182,7 @@ fn xmp_arm(
 /// count, since the second clamp is idempotent over the first.
 fn clamp_disclosed(
     r: &mut EditRecipe,
-    already: autoshop::recipe::ClampSummary,
+    already: autoshade::recipe::ClampSummary,
     warns: &mut Vec<String>,
 ) {
     let mut dropped = already;
@@ -222,7 +222,7 @@ pub(crate) fn export_dest_dir(dest: ExportDest, last: Option<&std::path::Path>) 
         // The DELIVERY ROOT (M8), not a literal `./out`: this destination and
         // the CLI / web / batch surfaces name one place, and Settings can move
         // it. Unset, it resolves to the same `./out` this arm always returned.
-        ExportDest::OutFolder => Some(autoshop::config::delivery_root()),
+        ExportDest::OutFolder => Some(autoshade::config::delivery_root()),
         ExportDest::LastUsed => last.map(|d| d.to_path_buf()),
         ExportDest::Ask => None,
     }
@@ -263,9 +263,9 @@ pub(crate) fn paste_payload(src: EditRecipe, paste_geometry: bool) -> PastePaylo
     let bitmap_masks = foreign
         .masks
         .iter()
-        .filter(|m| matches!(m.mask, autoshop::recipe::MaskGeometry::Bitmap { .. }))
+        .filter(|m| matches!(m.mask, autoshade::recipe::MaskGeometry::Bitmap { .. }))
         .count();
-    foreign.masks.retain(|m| !matches!(m.mask, autoshop::recipe::MaskGeometry::Bitmap { .. }));
+    foreign.masks.retain(|m| !matches!(m.mask, autoshade::recipe::MaskGeometry::Bitmap { .. }));
     // The R25 B4 PASS-THROUGH map is PER-DOCUMENT state, not a setting (R25
     // P8). Nothing in this app can author it — it is filled by reading one
     // photo's sidecar and by nothing else — so carrying it to another photo
@@ -280,7 +280,7 @@ pub(crate) fn paste_payload(src: EditRecipe, paste_geometry: bool) -> PastePaylo
     PastePayload { own, foreign, bitmap_masks }
 }
 
-impl AutoshopApp {
+impl AutoShadeApp {
     /// One-line echo of the current delivery settings for the Export hover —
     /// e.g. "JPEG · 2560 px · q95 · sRGB (universal) · → D:\deliver" — so the
     /// state stays glanceable now that the settings live in the Export section
@@ -375,7 +375,7 @@ impl AutoshopApp {
             anchors.push(orig);
         }
         for a in &anchors {
-            if let Err(e) = autoshop::pipeline::guard_readonly(&out, a) {
+            if let Err(e) = autoshade::pipeline::guard_readonly(&out, a) {
                 let t = e.to_string();
                 self.status = t.clone();
                 self.toast(ToastKind::Error, t);
@@ -426,14 +426,14 @@ impl AutoshopApp {
                     let relook = src_photo
                         .as_deref()
                         .and_then(|p| {
-                            autoshop::pipeline::repair_pre_era_base_curve(p, &mut recipe)
+                            autoshade::pipeline::repair_pre_era_base_curve(p, &mut recipe)
                         })
                         .is_some();
                     // SCUNet AI denoise (python sidecar) runs before the develop when on.
                     let opts = denoise.then(|| {
-                        autoshop::denoise::DenoiseOpts::from_config(&autoshop::config::Config::load(), None, 1.0)
+                        autoshade::denoise::DenoiseOpts::from_config(&autoshade::config::Config::load(), None, 1.0)
                     });
-                    autoshop::render::render_to_file(&path, &recipe, &out, opts.as_ref(), Some(&export), autoshop::diag::stderr())?;
+                    autoshade::render::render_to_file(&path, &recipe, &out, opts.as_ref(), Some(&export), autoshade::diag::stderr())?;
                     // FACTS (L12#4): the landing renders the relook note in
                     // the landing-time language.
                     Ok::<ExportOutcome, anyhow::Error>(ExportOutcome::Single {
@@ -451,16 +451,16 @@ impl AutoshopApp {
     /// The delivery options the export UI currently dials in (gap batch F) —
     /// shared by the single export, the one-off "Export to…" path and the
     /// batch render.
-    pub(crate) fn export_opts(&self) -> autoshop::render::ExportOpts {
-        autoshop::render::ExportOpts {
+    pub(crate) fn export_opts(&self) -> autoshade::render::ExportOpts {
+        autoshade::render::ExportOpts {
             long_edge: (self.exp_long_edge > 0).then_some(self.exp_long_edge),
             sharpen: self.exp_sharpen.clamp(0.0, 100.0),
             jpeg_quality: self.exp_quality.round().clamp(1.0, 100.0) as u8,
             eight_bit: self.exp_format.eight_bit(),
             color_space: match self.exp_space {
-                1 => autoshop::render::ExportColorSpace::DisplayP3,
-                2 => autoshop::render::ExportColorSpace::AdobeRgb,
-                _ => autoshop::render::ExportColorSpace::Srgb,
+                1 => autoshade::render::ExportColorSpace::DisplayP3,
+                2 => autoshade::render::ExportColorSpace::AdobeRgb,
+                _ => autoshade::render::ExportColorSpace::Srgb,
             },
         }
     }
@@ -574,7 +574,7 @@ impl AutoshopApp {
                     // name. Single exports stay stem-keyed (re-export
                     // replaces in place) — the dedup is batch-level by
                     // decision.
-                    let mut names = autoshop::pipeline::BatchNames::rooted(dest);
+                    let mut names = autoshade::pipeline::BatchNames::rooted(dest);
                     // Disclosure counter, like `names.renamed`: this worker
                     // was the one reader that repaired with nobody watching.
                     let mut relooked = 0usize;
@@ -605,7 +605,7 @@ impl AutoshopApp {
                             let (recipe, pix) = if let Some((lr, pix)) = overrides.get(p) {
                                 (lr.clone(), pix.clone())
                             } else {
-                                let snap = autoshop::store::read_develop_snapshot(p)?;
+                                let snap = autoshade::store::read_develop_snapshot(p)?;
                                 if let Some(why) = &snap.lr_unreadable {
                                     // Unreadable is not absent (L08): stderr
                                     // for the log AND the batch outcome for
@@ -613,7 +613,7 @@ impl AutoshopApp {
                                     // has no console).
                                     eprintln!(
                                         "⚠ {}: a Lightroom sidecar sits beside this photo but could not be read ({why}) — the stored develop decides",
-                                        autoshop::pipeline::stem(p)
+                                        autoshade::pipeline::stem(p)
                                     );
                                     photo_warns
                                         .push(format!("Lightroom sidecar unreadable ({why})"));
@@ -622,7 +622,7 @@ impl AutoshopApp {
                                     // Same rule for the packet INSIDE the RAW.
                                     eprintln!(
                                         "⚠ {}: this RAW carries an embedded XMP develop that could not be read ({why}) — it is NOT reflected",
-                                        autoshop::pipeline::stem(p)
+                                        autoshade::pipeline::stem(p)
                                     );
                                     photo_warns.push(format!("embedded XMP unreadable ({why})"));
                                 }
@@ -636,8 +636,8 @@ impl AutoshopApp {
                                     // while its open canvas shows the bright
                                     // one).
                                     None => EditRecipe {
-                                        base_curve: autoshop::pipeline::photo_base_knots(p),
-                                        lens_profile: autoshop::pipeline::fresh_lens_profile(p),
+                                        base_curve: autoshade::pipeline::photo_base_knots(p),
+                                        lens_profile: autoshade::pipeline::fresh_lens_profile(p),
                                         ..Default::default()
                                     },
                                 };
@@ -664,8 +664,8 @@ impl AutoshopApp {
                             // — that is the library folder being protected; a
                             // baked master's own home is ./out, never a
                             // library.
-                            autoshop::pipeline::guard_readonly(&out, p)?;
-                            autoshop::pipeline::ensure_parent(&out)?;
+                            autoshade::pipeline::guard_readonly(&out, p)?;
+                            autoshade::pipeline::ensure_parent(&out)?;
                             let mut recipe = recipe;
                             if pix.as_ref().is_some_and(|(_, generated)| *generated) {
                                 // A GENERATED master's look (camera curve AND
@@ -692,12 +692,12 @@ impl AutoshopApp {
                             // (render_to_file does not go through
                             // store::render_source_checked — batch 60 put the
                             // repair there and this path never saw it.)
-                            let repaired = autoshop::pipeline::repair_pre_era_base_curve(
+                            let repaired = autoshade::pipeline::repair_pre_era_base_curve(
                                 p, &mut recipe,
                             )
                             .is_some();
                             let src = pix.map(|(m, _)| m).unwrap_or_else(|| p.clone());
-                            autoshop::render::render_to_file(&src, &recipe, &out, None, Some(&export), autoshop::diag::stderr())?;
+                            autoshade::render::render_to_file(&src, &recipe, &out, None, Some(&export), autoshade::diag::stderr())?;
                             if repaired {
                                 relooked += 1;
                             }
@@ -705,12 +705,12 @@ impl AutoshopApp {
                         })();
                         match one {
                             Ok(()) => okn += 1,
-                            Err(e) => errs.push(format!("{}: {e}", autoshop::pipeline::stem(p))),
+                            Err(e) => errs.push(format!("{}: {e}", autoshade::pipeline::stem(p))),
                         }
                         if !photo_warns.is_empty() {
                             warns.push(format!(
                                 "{}: {}",
-                                autoshop::pipeline::stem(p),
+                                autoshade::pipeline::stem(p),
                                 photo_warns.join("; ")
                             ));
                         }
@@ -789,7 +789,7 @@ impl AutoshopApp {
     /// click (the store's own NotFound message says exactly that) than a button
     /// that is greyed out for a reason nothing explains.
     pub(crate) fn can_export_xmp_beside(&self) -> bool {
-        self.src_path.as_deref().is_some_and(autoshop::decode::is_raw)
+        self.src_path.as_deref().is_some_and(autoshade::decode::is_raw)
     }
 
     /// SF8-A: hand the stored Lightroom sidecar over to Lightroom — copy this
@@ -806,7 +806,7 @@ impl AutoshopApp {
         let lang = self.lang;
         let Some(path) = self.src_path.clone() else { return };
         let overwrite = self.xmp_beside_confirm;
-        match autoshop::store::export_xmp_beside(&path, overwrite) {
+        match autoshade::store::export_xmp_beside(&path, overwrite) {
             Ok(to) => {
                 self.xmp_beside_confirm = false;
                 // A file just landed in the user's PHOTO folder — the one place
@@ -825,7 +825,7 @@ impl AutoshopApp {
                 // do; the button says it too (develop.rs) so the armed state is
                 // visible even after the status line has moved on.
                 self.xmp_beside_confirm = true;
-                let there = autoshop::store::xmp_beside_target(&path)
+                let there = autoshade::store::xmp_beside_target(&path)
                     .map(|p| abs_display(&p))
                     .unwrap_or_default();
                 let t = trf(
@@ -897,10 +897,10 @@ impl AutoshopApp {
             // NoWait wrapper: clear_develop locks internally, but with Wait —
             // on this UI thread a develop held by another process must fail
             // into the error arm below, not freeze the window.
-            match autoshop::store::with_develop_lock(
+            match autoshade::store::with_develop_lock(
                 &path,
-                autoshop::store::DevelopLockMode::NoWait,
-                || autoshop::store::clear_develop(&path),
+                autoshade::store::DevelopLockMode::NoWait,
+                || autoshade::store::clear_develop(&path),
             ) {
                 Ok(o) => {
                     self.edited_badge.clear();
@@ -948,7 +948,7 @@ impl AutoshopApp {
         // projection on top. The recipe write ALONE decides the saved state:
         // once it lands, reopening restores it regardless of the XMP — so the
         // ● baseline must follow it even when the XMP half fails.
-        let raw = autoshop::decode::is_raw(&path);
+        let raw = autoshade::decode::is_raw(&path);
         // The WRITER's rule (api_xmp, produce_recipe, match, Save-all): a
         // washed pre-era curve must not be re-persisted verbatim. The canvas
         // normally arrives repaired at open, but an open-time INABILITY (a
@@ -967,7 +967,7 @@ impl AutoshopApp {
         // deliverable stayed repaired.
         let before = (self.recipe.version, self.recipe.base_curve.clone());
         let relooked =
-            autoshop::pipeline::repair_pre_era_base_curve(&path, &mut self.recipe).is_some();
+            autoshade::pipeline::repair_pre_era_base_curve(&path, &mut self.recipe).is_some();
         if relooked {
             let (after_ver, after_curve) =
                 (self.recipe.version, self.recipe.base_curve.clone());
@@ -996,7 +996,7 @@ impl AutoshopApp {
             for (i, v) in self.variants.iter_mut().enumerate() {
                 if i != active
                     && v.kind.is_parametric()
-                    && autoshop::pipeline::repair_pre_era_base_curve(&path, &mut v.recipe)
+                    && autoshade::pipeline::repair_pre_era_base_curve(&path, &mut v.recipe)
                         .is_some()
                 {
                     v.thumb = None;
@@ -1009,16 +1009,16 @@ impl AutoshopApp {
         // as a unit, so another process cannot interleave between the halves.
         // NoWait — a busy develop postpones the save, ● stays lit, the canvas
         // loses nothing, and Ctrl+S retries.
-        let locked_save = autoshop::store::with_develop_lock(
+        let locked_save = autoshade::store::with_develop_lock(
             &path,
-            autoshop::store::DevelopLockMode::NoWait,
+            autoshade::store::DevelopLockMode::NoWait,
             || -> std::io::Result<()> {
         if self.open_unresolved {
             // The baseline came from an open that could not READ the saved
             // develop — snapshot whatever is on disk before overwriting it
             // (v<N> copy). Refusing on a failed snapshot beats destroying a
             // save nobody ever looked at.
-            if let Err(e) = autoshop::store::backup_saved_develop(&path, Some(&self.recipe)) {
+            if let Err(e) = autoshade::store::backup_saved_develop(&path, Some(&self.recipe)) {
                 return Err(std::io::Error::other(format!(
                     "the unread develop could not be backed up ({e}) — nothing was overwritten"
                 )));
@@ -1036,38 +1036,38 @@ impl AutoshopApp {
         let strip_rec = self.current_strip_record();
         let generated = self.active_is_generated();
         let committed: anyhow::Result<()> = (|| {
-            let recipe_bytes = autoshop::pipeline::recipe_store_bytes(&path, &self.recipe, autoshop::diag::stderr())?;
+            let recipe_bytes = autoshade::pipeline::recipe_store_bytes(&path, &self.recipe, autoshade::diag::stderr())?;
             let pixels = match &origin {
                 // An in-place heal/clone/fill bakes pixels into the variant's
                 // origin raster; parametric recipe/XMP cannot carry them, so
                 // the store records the master's path and reopening restores
                 // the retouched canvas.
-                Some(o) => autoshop::store::CommitMember::Write(
-                    autoshop::store::pixel_source_record_bytes(&path, o, generated)?,
+                Some(o) => autoshade::store::CommitMember::Write(
+                    autoshade::store::pixel_source_record_bytes(&path, o, generated)?,
                 ),
                 // A parametric-only save CLEARS any stale record — a
                 // surviving one would resurrect an obsolete retouched canvas
                 // on the next open.
-                None => autoshop::store::CommitMember::Clear,
+                None => autoshade::store::CommitMember::Clear,
             };
             // The strip half through the ONE owner (R24-4
             // `store::variants_member`): Ctrl+S is the writer that OWNS the
             // whole strip, so it hands the live record over verbatim — and
             // a trivial strip still clears the record, exactly as before.
-            let variants = autoshop::store::variants_member(
+            let variants = autoshade::store::variants_member(
                 &path,
-                autoshop::store::ActiveWrite::Strip(strip_rec.as_ref()),
+                autoshade::store::ActiveWrite::Strip(strip_rec.as_ref()),
             )?;
-            autoshop::store::commit_develop(
+            autoshade::store::commit_develop(
                 &path,
-                autoshop::store::DevelopCommit { recipe: Some(recipe_bytes), pixels, variants },
+                autoshade::store::DevelopCommit { recipe: Some(recipe_bytes), pixels, variants },
             )?;
             Ok(())
         })();
         match committed {
             Ok(()) => {
                 self.open_unresolved = false;
-                let rp = autoshop::store::recipe_target(&path);
+                let rp = autoshade::store::recipe_target(&path);
                 let pixel_note: Option<String> = origin.is_some().then(|| {
                     tr(
                         lang,
@@ -1084,7 +1084,7 @@ impl AutoshopApp {
                 self.nav_stash.remove(&path);
                 self.pixels_on_disk = origin;
                 let mut s = if raw {
-                    match autoshop::pipeline::write_xmp(&path, &self.recipe, autoshop::diag::stderr()) {
+                    match autoshade::pipeline::write_xmp(&path, &self.recipe, autoshade::diag::stderr()) {
                         Ok((p, merge_note, losses)) => {
                             // A sidecar we could not MERGE was regenerated, and
                             // that drops the user's Lightroom-only properties.
@@ -1109,7 +1109,7 @@ impl AutoshopApp {
                             // act on, and an error toast on every single
                             // Ctrl+S is how the mask half — which they CAN act
                             // on — stopped being read.
-                            let globals = autoshop::xmp::global_export_losses(&self.recipe);
+                            let globals = autoshade::xmp::global_export_losses(&self.recipe);
                             let interrupts = xmp_loss_interrupts(&losses, &globals);
                             let mask_note = xmp_loss_line(lang, &losses, &globals);
                             if let Some(m) = &mask_note
@@ -1145,7 +1145,7 @@ impl AutoshopApp {
                             // the two renders starts to matter.
                             if let Some(m) = render_gap_line(
                                 lang,
-                                &autoshop::xmp::global_render_gaps(&self.recipe),
+                                &autoshade::xmp::global_render_gaps(&self.recipe),
                             ) {
                                 s.push_str(&format!(" · {m}"));
                             }
@@ -1208,7 +1208,7 @@ impl AutoshopApp {
         if let Err(e) = locked_save {
             self.persist_postponed(
                 &e,
-                "save postponed: this photo is being changed by another Autoshop process ({err}); your canvas remains unsaved — retry",
+                "save postponed: this photo is being changed by another AutoShade process ({err}); your canvas remains unsaved — retry",
                 &[],
             );
         }
@@ -1309,9 +1309,9 @@ impl AutoshopApp {
                             // process holds this target's develop, exactly
                             // like the CLI. ONE lock across gate → recipe →
                             // XMP so the pasted pair publishes as a unit.
-                            autoshop::store::with_develop_lock(
+                            autoshade::store::with_develop_lock(
                                 path,
-                                autoshop::store::DevelopLockMode::Wait,
+                                autoshade::store::DevelopLockMode::Wait,
                                 || {
                             // Per-target base-look resolution (paste_recipe_for):
                             // paste copies the user edit, never the source
@@ -1324,7 +1324,7 @@ impl AutoshopApp {
                             // serve / the CLI: one click overwrites MANY saved
                             // develops the user is not even looking at — a
                             // failed snapshot refuses that target.
-                            autoshop::store::backup_saved_develop(path, Some(&r))
+                            autoshade::store::backup_saved_develop(path, Some(&r))
                                 .map_err(|e| anyhow::anyhow!(
                                     "refusing to overwrite the saved develop: backing it up failed ({e})"
                                 ))?;
@@ -1344,21 +1344,21 @@ impl AutoshopApp {
                             // anything about that card, and it must not claim
                             // the base negative's slot (a second Original
                             // card can never be deleted again).
-                            autoshop::store::commit_develop(
+                            autoshade::store::commit_develop(
                                 path,
-                                autoshop::store::DevelopCommit {
-                                    recipe: Some(autoshop::pipeline::recipe_store_bytes(
+                                autoshade::store::DevelopCommit {
+                                    recipe: Some(autoshade::pipeline::recipe_store_bytes(
                                         path, &r,
-                                        autoshop::diag::stderr(),
+                                        autoshade::diag::stderr(),
                                     )?),
-                                    pixels: autoshop::store::CommitMember::Keep,
-                                    variants: autoshop::store::variants_member(
+                                    pixels: autoshade::store::CommitMember::Keep,
+                                    variants: autoshade::store::variants_member(
                                         path,
-                                        autoshop::store::ActiveWrite::Unknown,
+                                        autoshade::store::ActiveWrite::Unknown,
                                     )?,
                                 },
                             )?;
-                            if autoshop::decode::is_raw(path) {
+                            if autoshade::decode::is_raw(path) {
                                 // Recipe-write-decides: an XMP failure after
                                 // the recipe landed is a partial success —
                                 // reopening restores the paste regardless.
@@ -1374,7 +1374,7 @@ impl AutoshopApp {
                                 // per-target UI list of them needs its own
                                 // PasteOutcome member — R23 work, not a
                                 // mislabelled fold into this one.
-                                match autoshop::pipeline::write_xmp(path, &r, autoshop::diag::stderr()) {
+                                match autoshade::pipeline::write_xmp(path, &r, autoshade::diag::stderr()) {
                                     Ok((_, None, _)) => {}
                                     // Regenerated-not-merged loses LR-only
                                     // properties — collected for the paste
@@ -1382,16 +1382,16 @@ impl AutoshopApp {
                                     // write_xmp_doc).
                                     Ok((_, Some(m), _)) => xmp_notes.push(format!(
                                         "{}: {m}",
-                                        autoshop::pipeline::stem(path)
+                                        autoshade::pipeline::stem(path)
                                     )),
                                     Err(e) => {
                                         eprintln!(
                                             "⚠ {}: recipe pasted, but the Lightroom XMP failed: {e}",
-                                            autoshop::pipeline::stem(path)
+                                            autoshade::pipeline::stem(path)
                                         );
                                         xmp_fails.push(format!(
                                             "{}: {e}",
-                                            autoshop::pipeline::stem(path)
+                                            autoshade::pipeline::stem(path)
                                         ));
                                         return Ok(false);
                                     }
@@ -1407,7 +1407,7 @@ impl AutoshopApp {
                                 okn += 1;
                                 xmpn += usize::from(wrote_xmp);
                             }
-                            Err(e) => errs.push(format!("{}: {e}", autoshop::pipeline::stem(path))),
+                            Err(e) => errs.push(format!("{}: {e}", autoshade::pipeline::stem(path))),
                         }
                     }
                     // FACTS (L12#4): counts and detail lists render at the

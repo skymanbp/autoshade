@@ -155,11 +155,11 @@ impl ThemePref {
 /// a full CJK face (~16 MB): the runtime fallback below still handles text
 /// this static extraction cannot know, like a user's own file names.
 pub(crate) const EMBEDDED_SYMBOL_FONTS: &[(&str, &[u8])] = &[
-    ("symbols2", include_bytes!("../../../assets/fonts/NotoSansSymbols2-autoshop.ttf")),
-    ("symbols", include_bytes!("../../../assets/fonts/NotoSansSymbols-autoshop.ttf")),
-    ("math", include_bytes!("../../../assets/fonts/NotoSansMath-autoshop.ttf")),
-    ("emoji-extra", include_bytes!("../../../assets/fonts/NotoEmoji-autoshop.ttf")),
-    ("cjk-ui", include_bytes!("../../../assets/fonts/NotoSansSC-autoshop.ttf")),
+    ("symbols2", include_bytes!("../../../assets/fonts/NotoSansSymbols2-autoshade.ttf")),
+    ("symbols", include_bytes!("../../../assets/fonts/NotoSansSymbols-autoshade.ttf")),
+    ("math", include_bytes!("../../../assets/fonts/NotoSansMath-autoshade.ttf")),
+    ("emoji-extra", include_bytes!("../../../assets/fonts/NotoEmoji-autoshade.ttf")),
+    ("cjk-ui", include_bytes!("../../../assets/fonts/NotoSansSC-autoshade.ttf")),
 ];
 
 /// Per-face byte budget for a RUNTIME system font (L12#3): the old path

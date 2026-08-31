@@ -252,7 +252,7 @@ def check_readme_no_preview_membership(
     """README's no-preview names must equal decode.rs's no-rendition set."""
     doc = text("README.md")
     m = re.search(
-        r"\*\*No embedded\s+preview:\*\*.*?They are (?P<items>.*?); Autoshop",
+        r"\*\*No embedded\s+preview:\*\*.*?They are (?P<items>.*?); AutoShade",
         doc,
         re.S,
     )
@@ -625,15 +625,15 @@ def census_counts(_args: argparse.Namespace) -> Truth | Skip:
 
     The corpus is user data, not a repository fixture, so the default gate
     reports SKIP rather than pretending the machine-local count is universal.
-    CI/release runs that have the corpus set `AUTOSHOP_CENSUS_ROOT` and get a
+    CI/release runs that have the corpus set `AUTOSHADE_CENSUS_ROOT` and get a
     first-party count check against the source-of-truth comment.
     """
-    raw = os.environ.get("AUTOSHOP_CENSUS_ROOT")
+    raw = os.environ.get("AUTOSHADE_CENSUS_ROOT")
     if not raw:
-        return Skip("AUTOSHOP_CENSUS_ROOT is unset: the census corpus is outside the repo")
+        return Skip("AUTOSHADE_CENSUS_ROOT is unset: the census corpus is outside the repo")
     root = Path(raw)
     if not root.is_dir():
-        raise LookupError(f"AUTOSHOP_CENSUS_ROOT is not a directory: {root}")
+        raise LookupError(f"AUTOSHADE_CENSUS_ROOT is not a directory: {root}")
     files = list(root.rglob("*.xmp"))
     counts = {"Mask/Aggregate": 0, "Mask/Image": 0, "Mask/Paint": 0, "Mask/*": 0, "Gesture": 0}
     for path in files:

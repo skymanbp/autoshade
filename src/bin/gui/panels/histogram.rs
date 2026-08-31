@@ -2,7 +2,7 @@
 
 use crate::*;
 
-impl AutoshopApp {
+impl AutoShadeApp {
     /// Draw the live histogram (R/G/B filled, luma outline; one bin per 8-bit
     /// code value on ONE shared vertical scale) — the tone readout a photo
     /// editor is expected to have. Sqrt-scaled so shadow detail reads.
@@ -255,7 +255,7 @@ impl AutoshopApp {
 
         // --- interaction (mutates the active channel's control points) --------
         const HIT: f32 = 10.0; // grab radius around a point, screen px
-        let lut_before = autoshop::render::curve_lut(
+        let lut_before = autoshade::render::curve_lut(
             curve_points(&self.recipe, target, self.curve_channel)
                 .expect("the target was validated on entry"),
         );
@@ -315,7 +315,7 @@ impl AutoshopApp {
         }
 
         // Engine-faithful curve line: all 256 samples straight from the shared LUT.
-        let lut = autoshop::render::curve_lut(pts);
+        let lut = autoshade::render::curve_lut(pts);
         let line: Vec<egui::Pos2> = lut
             .iter()
             .enumerate()

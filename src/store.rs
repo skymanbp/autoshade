@@ -19,8 +19,8 @@
 //!     source.txt           breadcrumb: which photo this dir belongs to
 //! ```
 //!
-//! The root resolves at runtime (never hardcoded): `AUTOSHOP_DATA_DIR` env
-//! override → `%LOCALAPPDATA%/autoshop` (the thumb cache already lives there)
+//! The root resolves at runtime (never hardcoded): `AUTOSHADE_DATA_DIR` env
+//! override → `%LOCALAPPDATA%/autoshade` (the thumb cache already lives there)
 //! → the system temp dir. EXPORTS (developed/retouch/heal/… images) are user
 //! deliverables and deliberately STAY in ./out.
 //!
@@ -196,7 +196,7 @@ where
 /// the corrupt-file rescue — under a cross-process kernel lock
 /// (`.settings.lock` in the store root). serve's old in-process
 /// `SETTINGS_LOCK` Mutex serialized only its own threads: the GUI process and
-/// the serve process each load-merge-save the same `autoshop.local.json`, so
+/// the serve process each load-merge-save the same `autoshade.local.json`, so
 /// one process's save landing between the other's load and rename was
 /// silently erased — and the file carries the API keys (L01). Kernel-owned
 /// like the develop lock: a crash releases it, so no stale-lock cleanup
@@ -346,7 +346,7 @@ mod os_develop_lock {
         if mode == DevelopLockMode::NoWait && e.raw_os_error() == Some(ERROR_LOCK_VIOLATION) {
             return Err(io::Error::new(
                 io::ErrorKind::WouldBlock,
-                "this photo is being saved by another Autoshop process",
+                "this photo is being saved by another AutoShade process",
             ));
         }
         Err(e)
@@ -388,36 +388,36 @@ mod os_develop_lock {
 /// This is a TRUST label with teeth, not a breadcrumb. The settings file lives
 /// under the root ([`settings_path`]), and a settings file the loader considers
 /// CENTRAL may supply an API key *and* the endpoint that key is sent to
-/// (`config::SettingsOrigin`). `<temp>/autoshop` is writable by every account
+/// (`config::SettingsOrigin`). `<temp>/autoshade` is writable by every account
 /// on the machine, so a file pre-planted there inherited exactly that
-/// authority — the same "extract a shared archive, run Autoshop" attack the
+/// authority — the same "extract a shared archive, run AutoShade" attack the
 /// ambient guards close for the working directory, through a world-writable
 /// directory instead. A shared root therefore carries AMBIENT authority.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum RootTrust {
-    /// `AUTOSHOP_DATA_DIR` (from the user's own environment), `%LOCALAPPDATA%`,
+    /// `AUTOSHADE_DATA_DIR` (from the user's own environment), `%LOCALAPPDATA%`,
     /// `$XDG_DATA_HOME`, or `$HOME/.local/share` — per-account.
     PerUser,
-    /// `<temp>/autoshop`: nothing better answered. Shared with every account.
+    /// `<temp>/autoshade`: nothing better answered. Shared with every account.
     SharedFallback,
 }
 
 /// Per-user store root and its trust label. Resolution order:
-/// `AUTOSHOP_DATA_DIR` (env override for tests / portable setups) → the
-/// platform's own per-account data directory → `<temp>/autoshop`. Absolute, so
+/// `AUTOSHADE_DATA_DIR` (env override for tests / portable setups) → the
+/// platform's own per-account data directory → `<temp>/autoshade`. Absolute, so
 /// keys and targets never depend on the process cwd.
 ///
 /// The per-account step used to be `%LOCALAPPDATA%` on EVERY platform — a
 /// variable Unix does not set. So every Linux/macOS build fell through to
-/// `/tmp/autoshop` and then handed the settings file found there full central
+/// `/tmp/autoshade` and then handed the settings file found there full central
 /// authority, keys and base URLs included, on a directory any local account can
 /// write first. Each platform now names its own directory, and the shared
 /// fallback is LABELLED rather than trusted (the loader downgrades it).
 pub fn store_root_with_trust() -> (PathBuf, RootTrust) {
-    let (root, trust) = std::env::var_os("AUTOSHOP_DATA_DIR")
+    let (root, trust) = std::env::var_os("AUTOSHADE_DATA_DIR")
         .map(|d| (PathBuf::from(d), RootTrust::PerUser))
-        .or_else(|| per_user_data_dir().map(|d| (d.join("autoshop"), RootTrust::PerUser)))
-        .unwrap_or_else(|| (std::env::temp_dir().join("autoshop"), RootTrust::SharedFallback));
+        .or_else(|| per_user_data_dir().map(|d| (d.join("autoshade"), RootTrust::PerUser)))
+        .unwrap_or_else(|| (std::env::temp_dir().join("autoshade"), RootTrust::SharedFallback));
     (std::path::absolute(&root).unwrap_or(root), trust)
 }
 
@@ -645,7 +645,7 @@ fn the_stem_fold_never_invents_a_name_ntfs_cannot_resolve() {
 /// the develop-lock path all assume it), and canonicalize is a per-call
 /// filesystem probe whose answer can flip transiently (AV holding the file,
 /// a link retargeted mid-session). Consequence, documented: a link
-/// retargeted while Autoshop runs keeps this session on the identity it
+/// retargeted while AutoShade runs keeps this session on the identity it
 /// opened with.
 fn identity_of(src: &Path) -> PathBuf {
     use std::sync::{Mutex, OnceLock};
@@ -921,7 +921,7 @@ fn resume_orphan_adoption_once(root: &Path, ck: &str) {
 /// 128 KiB of UTF-8; 64 KiB is past any spelling a filesystem will actually
 /// hand back and still refuses a planted gigabyte. Bounded for the same reason
 /// every other read in this module is (R28 2a, adjudication F7's sibling): the
-/// `<temp>/autoshop` fallback root is world-writable, so the file this reads
+/// `<temp>/autoshade` fallback root is world-writable, so the file this reads
 /// is not always one this app wrote.
 const MAX_ADOPTION_MARKER: u64 = 64 * 1024;
 
@@ -1349,7 +1349,7 @@ pub fn xmp_beside_target(src: &Path) -> Option<PathBuf> {
 
 /// How long a staging file must have sat untouched before [`sweep_stale_sidecar_stages`]
 /// treats it as an orphan. A real publish stages, fsyncs and renames a few KB of
-/// XML in milliseconds, so a minute is far past "another Autoshop is mid-write"
+/// XML in milliseconds, so a minute is far past "another AutoShade is mid-write"
 /// while still reclaiming litter on the very next click.
 const SIDECAR_STAGE_GRACE: std::time::Duration = std::time::Duration::from_secs(60);
 
@@ -1367,7 +1367,7 @@ const SIDECAR_STAGE_GRACE: std::time::Duration = std::time::Duration::from_secs(
 /// * only names matching this target's own stage pattern, `<file name>.tmp.` +
 ///   two decimal fields, exactly what [`sibling_tmp`] mints;
 /// * only after `grace` has elapsed since the last write, because a younger
-///   stage may belong to another Autoshop publishing right now (deleting it
+///   stage may belong to another AutoShade publishing right now (deleting it
 ///   would fail that delivery);
 /// * every error — unreadable directory, unstat-able entry, refused delete — is
 ///   ignored: a hand-off must not fail because litter could not be collected.
@@ -1426,11 +1426,11 @@ fn sweep_stale_sidecar_stages(to: &Path, grace: std::time::Duration) {
 /// written. A reader sees the previous complete sidecar or the next one. The
 /// write half touches nothing inside the develop directory at all. Taking the
 /// lock would therefore only add a way for the hand-off to fail while another
-/// Autoshop happens to be saving.
+/// AutoShade happens to be saving.
 pub fn export_xmp_beside(src: &Path, overwrite: bool) -> std::io::Result<PathBuf> {
     let stored = xmp_target(src);
     // Bounded like every other read in this module (R28 2a): the projection
-    // lives in the develop dir, which under the `<temp>/autoshop` fallback
+    // lives in the develop dir, which under the `<temp>/autoshade` fallback
     // root is world-writable. `NotFound` passes through `read_bytes_capped`
     // untouched, so the workflow-state message below keeps its trigger.
     let bytes = read_bytes_capped(&stored, MAX_STORE_JSON).map_err(|e| {
@@ -1643,7 +1643,7 @@ impl OwnedRaster {
 ///
 /// Split out of [`is_calibration_corpus`] so it can be pinned by a test that
 /// does not mutate a process-global environment variable: a guard whose only
-/// test rewrites `AUTOSHOP_FIT_CALIBRATION_DIR` races every other test in the
+/// test rewrites `AUTOSHADE_FIT_CALIBRATION_DIR` races every other test in the
 /// binary and passes for reasons that have nothing to do with the guard.
 fn is_within(p: &Path, dir: &Path) -> bool {
     match (p.canonicalize(), dir.canonicalize()) {
@@ -1652,9 +1652,9 @@ fn is_within(p: &Path, dir: &Path) -> bool {
     }
 }
 
-/// True when `p` lies inside the corpus named by `AUTOSHOP_FIT_CALIBRATION_DIR`.
+/// True when `p` lies inside the corpus named by `AUTOSHADE_FIT_CALIBRATION_DIR`.
 fn is_calibration_corpus(p: &Path) -> bool {
-    std::env::var("AUTOSHOP_FIT_CALIBRATION_DIR")
+    std::env::var("AUTOSHADE_FIT_CALIBRATION_DIR")
         .is_ok_and(|dir| is_within(p, Path::new(&dir)))
 }
 
@@ -3047,23 +3047,23 @@ pub fn style_index_path() -> PathBuf {
     store_root().join("style-index.json")
 }
 
-/// UI-written local settings (used to be a cwd-relative `autoshop.local.json`).
+/// UI-written local settings (used to be a cwd-relative `autoshade.local.json`).
 pub fn settings_path() -> PathBuf {
-    store_root().join("autoshop.local.json")
+    store_root().join("autoshade.local.json")
 }
 
 /// Candidate legacy ./out roots, most-specific first. Pre-store sidecars were
 /// CWD-relative, so where they sit depends on how the app used to be launched:
 /// a terminal launch put them under the project dir (= today's cwd when
 /// launched the same way), a double-click put them beside the exe. An
-/// `AUTOSHOP_LEGACY_OUT` env override covers any other history. Without the
+/// `AUTOSHADE_LEGACY_OUT` env override covers any other history. Without the
 /// exe-dir probe, upgrading users who start the exe from a NEW directory would
 /// see every pre-store develop silently vanish.
 fn legacy_out_roots() -> Vec<PathBuf> {
     let mut roots = Vec::new();
     // env_or_dotenv (L16#3): a .env-set legacy root kept working when the
     // dotenv stopped writing the process environment.
-    if let Some(o) = crate::config::env_or_dotenv("AUTOSHOP_LEGACY_OUT") {
+    if let Some(o) = crate::config::env_or_dotenv("AUTOSHADE_LEGACY_OUT") {
         roots.push(PathBuf::from(o));
     }
     roots.push(PathBuf::from("out"));
@@ -3221,7 +3221,7 @@ pub fn has_develop_or_sidecar(src: &Path) -> bool {
 ///   * no stored develop at all → the sidecar IS the develop (`Only`);
 ///   * modified after every stored develop file → Lightroom's edit is the
 ///     newest intent (`NewerThanStore`);
-///   * otherwise the store is newer — the user's Autoshop work outranks the
+///   * otherwise the store is newer — the user's AutoShade work outranks the
 ///     older Lightroom pass (`OlderThanStore`).
 ///
 /// Read-only: the store copy is never touched here — only an explicit save
@@ -4190,7 +4190,7 @@ fn snapshot_xmp_text(src: &Path, text: String) -> std::io::Result<Option<u32>> {
     derived.lens_profile = crate::pipeline::fresh_lens_profile(src);
     // Third calibration half: a foreign (Lightroom) Temperature is ABSOLUTE
     // — anchoring the derived recipe at the camera's real as-shot renders it
-    // closer to Lightroom's intent. Stamp-if-None: an old-era AUTOSHOP
+    // closer to Lightroom's intent. Stamp-if-None: an old-era AUTOSHADE
     // projection arrives with the 5500 anchor PINNED by xmp_to_recipe (its
     // Kelvin was tuned relative) and must keep rendering as tuned.
     if derived.as_shot_k.is_none() {
@@ -5764,17 +5764,17 @@ mod ownership_tests {
     /// through [`OwnedRaster`], and no corpus path can become one.
     #[test]
     fn a_calibration_corpus_path_can_never_become_an_owned_raster() {
-        let dir = std::env::temp_dir().join(format!("autoshop-ownership-guard-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("autoshade-ownership-guard-{}", std::process::id()));
         assert!(is_within(&dir.join("sky-mask.png"), &dir), "a file inside the corpus is inside it");
         assert!(is_within(&dir.join("sub").join("m.png"), &dir), "containment is not depth-limited");
-        let sibling = dir.with_file_name("autoshop-ownership-guard-other");
+        let sibling = dir.with_file_name("autoshade-ownership-guard-other");
         assert!(
             !is_within(&sibling.join("sky-mask.png"), &dir),
             "a sibling directory sharing a name PREFIX is not inside the corpus"
         );
 
         // And against the real corpus, when one is configured for this run.
-        let Ok(root) = std::env::var("AUTOSHOP_FIT_CALIBRATION_DIR") else { return };
+        let Ok(root) = std::env::var("AUTOSHADE_FIT_CALIBRATION_DIR") else { return };
         let mask = PathBuf::from(&root).join("sky-mask.png");
         if !mask.exists() {
             return;
@@ -5790,7 +5790,7 @@ mod ownership_tests {
     #[test]
     fn owned_raster_remove_deletes_only_what_it_owns() {
         let scratch = std::env::temp_dir()
-            .join(format!("autoshop-owned-remove-{}.png", std::process::id()));
+            .join(format!("autoshade-owned-remove-{}.png", std::process::id()));
         std::fs::write(&scratch, b"x").unwrap();
         let owned = OwnedRaster::scratch(scratch.clone());
         assert_eq!(owned.path(), scratch.as_path());
@@ -5810,7 +5810,7 @@ mod tests {
     #[test]
     fn owned_raster_siblings_are_atomic_and_independently_releasable() {
         let dir = std::env::temp_dir().join(format!(
-            "autoshop-owned-raster-sibling-{}",
+            "autoshade-owned-raster-sibling-{}",
             std::process::id(),
         ));
         std::fs::create_dir_all(&dir).unwrap();
@@ -5948,7 +5948,7 @@ mod tests {
     /// version.
     #[test]
     fn a_killed_version_delete_resumes_and_its_number_stays_burned() {
-        let dir = std::env::temp_dir().join(format!("autoshop-store-test-vdel-marker-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("autoshade-store-test-vdel-marker-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let raw = dir.join("_store_vdel.arw");
@@ -5988,7 +5988,7 @@ mod tests {
     /// the sweep (the pending marker is checked first).
     #[test]
     fn a_pending_clear_completes_on_the_next_touch() {
-        let dir = std::env::temp_dir().join(format!("autoshop-store-test-pending-clear-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("autoshade-store-test-pending-clear-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let raw = dir.join("_store_pending_clear.arw");
@@ -6026,7 +6026,7 @@ mod tests {
     #[test]
     fn the_develop_revision_folds_in_a_ranked_sidecar() {
         use std::time::{Duration, SystemTime};
-        let dir = std::env::temp_dir().join(format!("autoshop-store-test-revision-fold-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("autoshade-store-test-revision-fold-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let raw = dir.join("_rev_fold.arw"); // never read — only its neighbours are
@@ -6080,7 +6080,7 @@ mod tests {
     /// only real survivor.
     #[test]
     fn a_zero_byte_live_claim_yields_to_the_surviving_bak() {
-        let dir = std::env::temp_dir().join(format!("autoshop-store-test-zerobyte-live-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("autoshade-store-test-zerobyte-live-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let raw = dir.join("_store_zerobyte.arw");
@@ -6111,7 +6111,7 @@ mod tests {
     /// crashed attempt is REPLACED, not kept by no-clobber.
     #[test]
     fn a_resumed_adoption_copies_from_the_marker_recorded_source() {
-        let root = std::env::temp_dir().join(format!("autoshop-store-test-adopt-resume-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("autoshade-store-test-adopt-resume-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let cd = root.join("develops").join("photo-ck");
         let ld = root.join("develops").join("photo-lk");
@@ -6191,9 +6191,9 @@ mod tests {
     /// re-resolve) rather than run its body against the frozen backup.
     #[test]
     fn a_develop_dir_marked_superseded_refuses_the_locked_touch() {
-        let root = std::env::temp_dir().join(format!("autoshop-store-test-superseded-probe-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("autoshade-store-test-superseded-probe-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
-        let dir = std::env::temp_dir().join(format!("autoshop-store-test-superseded-photos-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("autoshade-store-test-superseded-photos-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let raw = dir.join("_superseded_probe.arw");
@@ -6219,9 +6219,9 @@ mod tests {
     /// runs, instead of serving the half-copied dir.
     #[test]
     fn a_locked_touch_finishes_a_pending_adoption_first() {
-        let root = std::env::temp_dir().join(format!("autoshop-store-test-fence-gate-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("autoshade-store-test-fence-gate-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
-        let dir = std::env::temp_dir().join(format!("autoshop-store-test-fence-gate-photos-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("autoshade-store-test-fence-gate-photos-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let raw = dir.join("_fence_gate.arw");
@@ -6336,7 +6336,7 @@ mod tests {
     #[cfg(windows)]
     fn a_clear_marker_that_cannot_be_consumed_fails_the_resolution() {
         use std::os::windows::fs::OpenOptionsExt as _;
-        let dir = std::env::temp_dir().join(format!("autoshop-store-test-clear-consume-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("autoshade-store-test-clear-consume-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let raw = dir.join("_store_clear_consume.arw");
@@ -6367,7 +6367,7 @@ mod tests {
     /// One temp-dir photo + develop-dir fixture for the commit tests, with a
     /// non-empty master raster and helpers to build staged generations.
     fn commit_fixture(tag: &str) -> (PathBuf, PathBuf, PathBuf) {
-        let dir = std::env::temp_dir().join(format!("autoshop-store-test-{tag}"));
+        let dir = std::env::temp_dir().join(format!("autoshade-store-test-{tag}"));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let raw = dir.join(format!("_store_{}.arw", tag.replace('-', "_")));
@@ -6926,7 +6926,7 @@ mod tests {
     #[test]
     fn a_pending_clear_outranks_the_sidecar_beside_the_photo() {
         use std::time::{Duration, SystemTime};
-        let dir = std::env::temp_dir().join(format!("autoshop-store-test-pending-rank-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("autoshade-store-test-pending-rank-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let raw = dir.join("_store_pending_rank.arw");
@@ -6962,7 +6962,7 @@ mod tests {
     /// deliverables instead of silently rendering the un-retouched source).
     #[test]
     fn an_empty_master_claim_is_refused_not_restored() {
-        let dir = std::env::temp_dir().join(format!("autoshop-store-test-empty-master-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("autoshade-store-test-empty-master-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let raw = dir.join("_store_empty_master.arw");
@@ -6991,7 +6991,7 @@ mod tests {
     /// read_text_capped_enforces_its_limit + the serve-side gate test.)
     #[test]
     fn a_recipe_revision_names_the_bytes_and_absence_is_a_real_tag() {
-        let dir = std::env::temp_dir().join(format!("autoshop-store-test-revision-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("autoshade-store-test-revision-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let p = dir.join("recipe.json");
@@ -7016,7 +7016,7 @@ mod tests {
     /// recovered one.
     #[test]
     fn a_develop_snapshot_recovers_the_bak_before_choosing_a_recipe() {
-        let dir = std::env::temp_dir().join(format!("autoshop-store-test-snapshot-bak-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("autoshade-store-test-snapshot-bak-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let raw = dir.join("_store_snapshot_probe.arw");
@@ -7046,7 +7046,7 @@ mod tests {
     #[test]
     fn lightroom_sidecar_newest_intent_wins() {
         use std::time::{Duration, SystemTime};
-        let dir = std::env::temp_dir().join(format!("autoshop-store-test-lr-sidecar-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("autoshade-store-test-lr-sidecar-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let raw = dir.join("_store_lr_probe.arw"); // never read — only its neighbours are
@@ -7090,7 +7090,7 @@ mod tests {
         set(&lr, now - Duration::from_secs(7200));
         assert!(
             matches!(lightroom_sidecar(&raw), LrSidecar::OlderThanStore),
-            "the store is newer — Autoshop work outranks the older Lightroom pass"
+            "the store is newer — AutoShade work outranks the older Lightroom pass"
         );
 
         // …and NEWER than the store → Lightroom's edit is the newest intent.
@@ -7112,7 +7112,7 @@ mod tests {
         // read. An identity that cannot match what is on disk models a
         // sidecar swapped right after the read.
         let dir = std::env::temp_dir().join(format!(
-            "autoshop-sidecar-swap-{}-{}",
+            "autoshade-sidecar-swap-{}-{}",
             std::process::id(),
             next_tmp_seq()
         ));
@@ -7150,7 +7150,7 @@ mod tests {
 
     #[test]
     fn lightroom_sidecar_unreadable_is_disclosed_not_absent() {
-        let dir = std::env::temp_dir().join(format!("autoshop-store-test-lr-unreadable-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("autoshade-store-test-lr-unreadable-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let raw = dir.join("_probe.arw"); // never read — only its neighbour is
@@ -7169,7 +7169,7 @@ mod tests {
     #[test]
     fn the_lightroom_hand_off_lands_beside_the_photo_and_never_clobbers_in_silence() {
         let dir = std::env::temp_dir()
-            .join(format!("autoshop-store-test-xmp-beside-{}", std::process::id()));
+            .join(format!("autoshade-store-test-xmp-beside-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let raw = dir.join("_r22_beside.arw");
@@ -7219,7 +7219,7 @@ mod tests {
     /// limit, at the cap passes, NotFound passes through untouched.
     #[test]
     fn read_text_capped_enforces_its_limit() {
-        let dir = std::env::temp_dir().join(format!("autoshop-store-test-capped-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("autoshade-store-test-capped-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let p = dir.join("capped.json");
         std::fs::write(&p, b"12345678").unwrap();
@@ -7238,7 +7238,7 @@ mod tests {
 
     #[test]
     fn detach_rasters_frees_a_loaded_version_from_its_snapshot() {
-        let base = std::env::temp_dir().join(format!("autoshop-store-test-detach-{}", std::process::id()));
+        let base = std::env::temp_dir().join(format!("autoshade-store-test-detach-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
         std::fs::create_dir_all(&base).unwrap();
         let photo = base.join("DSC_DETACH.ARW");
@@ -7269,7 +7269,7 @@ mod tests {
     fn orphan_bak_is_restored_on_read() {
         // The crashed-publish window: recipe.json gone, recipe.json.bak holds
         // the develop. A reader must see the develop, not "unedited".
-        let base = std::env::temp_dir().join(format!("autoshop-store-test-orphanbak-{}", std::process::id()));
+        let base = std::env::temp_dir().join(format!("autoshade-store-test-orphanbak-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
         let photo = base.join("DSC_ORPHAN.ARW");
         std::fs::create_dir_all(&base).unwrap();
@@ -7304,7 +7304,7 @@ mod tests {
     #[test]
     fn a_cleared_develop_outranks_the_stale_copied_projection() {
         use std::time::{Duration, SystemTime};
-        let dir = std::env::temp_dir().join(format!("autoshop-store-test-cleared-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("autoshade-store-test-cleared-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let raw = dir.join("_store_cleared_probe.arw");
@@ -7353,7 +7353,7 @@ mod tests {
         // publish — cannot be staged single-threaded. The primitive itself is
         // covered directly by `publish_no_clobber_never_replaces_an_owner`
         // and `publish_no_clobber_lands_on_a_fresh_destination`.
-        let base = std::env::temp_dir().join(format!("autoshop-store-test-noclobber-{}", std::process::id()));
+        let base = std::env::temp_dir().join(format!("autoshade-store-test-noclobber-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
         std::fs::create_dir_all(&base).unwrap();
         let photo = base.join("DSC_NOCLOBBER.ARW");
@@ -7384,7 +7384,7 @@ mod tests {
         // surfaces now go through: every home gone, the retired master gone
         // with it (a `.bak` the next open would have republished), and the
         // newest-intent marker stamped.
-        let base = std::env::temp_dir().join(format!("autoshop-store-test-cleardev-{}", std::process::id()));
+        let base = std::env::temp_dir().join(format!("autoshade-store-test-cleardev-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
         std::fs::create_dir_all(&base).unwrap();
         let photo = base.join("DSC_CLEARDEV.ARW");
@@ -7446,7 +7446,7 @@ mod tests {
 
     #[test]
     fn variants_record_round_trips_relocatable_and_recovers_its_bak() {
-        let base = std::env::temp_dir().join(format!("autoshop-store-test-variants-{}", std::process::id()));
+        let base = std::env::temp_dir().join(format!("autoshade-store-test-variants-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
         std::fs::create_dir_all(&base).unwrap();
         let photo = base.join("DSC_VARS.ARW");
@@ -7534,7 +7534,7 @@ mod tests {
     /// primitives now refuse while the record is unresolved.
     #[test]
     fn an_unresolved_strip_refuses_save_and_clear_but_not_reads() {
-        let base = std::env::temp_dir().join(format!("autoshop-store-test-varunres-{}", std::process::id()));
+        let base = std::env::temp_dir().join(format!("autoshade-store-test-varunres-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
         std::fs::create_dir_all(&base).unwrap();
         let photo = base.join("DSC_VARUNRES.ARW");
@@ -7615,7 +7615,7 @@ mod tests {
     /// and the old build restores the strip complete, minus the names. This
     /// test pins that by parsing a record with fields NO build has, which is
     /// exactly the shape today's build is to a future one. The day someone
-    /// adds `deny_unknown_fields` here, a strip written by a newer Autoshop
+    /// adds `deny_unknown_fields` here, a strip written by a newer AutoShade
     /// would go `Unresolved` and every background variant would vanish from
     /// the older one — this red test is the warning.
     ///
@@ -7625,7 +7625,7 @@ mod tests {
     /// on disk for strips that use neither.
     #[test]
     fn variant_ids_and_names_are_additive_in_both_directions() {
-        let base = std::env::temp_dir().join(format!("autoshop-store-test-varnames-{}", std::process::id()));
+        let base = std::env::temp_dir().join(format!("autoshade-store-test-varnames-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
         std::fs::create_dir_all(&base).unwrap();
         let photo = base.join("DSC_VARNAMES.ARW");
@@ -7734,7 +7734,7 @@ mod tests {
         assert!(!remote_or_device_path(Path::new(r"C:\photos\master.png")));
         assert!(!remote_or_device_path(Path::new("master.png")));
 
-        let base = std::env::temp_dir().join(format!("autoshop-store-test-uncorigin-{}", std::process::id()));
+        let base = std::env::temp_dir().join(format!("autoshade-store-test-uncorigin-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
         std::fs::create_dir_all(&base).unwrap();
         let photo = base.join("DSC_UNC.ARW");
@@ -7780,7 +7780,7 @@ mod tests {
         // .bak), then a parametric-only save clears the linkage. Without the
         // .bak removal, the next open's recover_orphan_baks resurrected
         // master A — a state the user explicitly left.
-        let base = std::env::temp_dir().join(format!("autoshop-store-test-clearbak-{}", std::process::id()));
+        let base = std::env::temp_dir().join(format!("autoshade-store-test-clearbak-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
         std::fs::create_dir_all(&base).unwrap();
         let photo = base.join("DSC_CLEAR.ARW");
@@ -7816,7 +7816,7 @@ mod tests {
 
     #[test]
     fn publish_no_clobber_never_replaces_an_owner() {
-        let dir = std::env::temp_dir().join(format!("autoshop-store-test-pnc-owner-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("autoshade-store-test-pnc-owner-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let to = dir.join("recipe.json");
@@ -7831,7 +7831,7 @@ mod tests {
 
     #[test]
     fn publish_no_clobber_lands_on_a_fresh_destination() {
-        let dir = std::env::temp_dir().join(format!("autoshop-store-test-pnc-fresh-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("autoshade-store-test-pnc-fresh-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let to = dir.join("recipe.json");
@@ -7845,7 +7845,7 @@ mod tests {
 
     #[test]
     fn move_no_clobber_adopts_owner_and_keeps_the_source() {
-        let dir = std::env::temp_dir().join(format!("autoshop-store-test-mnc-adopt-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("autoshade-store-test-mnc-adopt-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let from = dir.join("legacy.xmp");
@@ -7860,7 +7860,7 @@ mod tests {
 
     #[test]
     fn migrate_gate_treats_a_nondirectory_as_empty_not_failure() {
-        let dir = std::env::temp_dir().join(format!("autoshop-store-test-gate-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("autoshade-store-test-gate-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let not_a_dir = dir.join("out"); // exists, but is a FILE
@@ -7906,7 +7906,7 @@ mod tests {
 
     #[test]
     fn resolve_and_relativize_round_trip() {
-        let base = std::env::temp_dir().join(format!("autoshop-store-test-roundtrip-{}", std::process::id()));
+        let base = std::env::temp_dir().join(format!("autoshade-store-test-roundtrip-{}", std::process::id()));
         std::fs::create_dir_all(&base).unwrap();
         let raster = base.join("mask-sky.png");
         std::fs::write(&raster, b"png").unwrap();
@@ -7940,7 +7940,7 @@ mod tests {
         // no process-global env mutation.
         let stem = "_store_mig_photo";
         let src = PathBuf::from(format!("D:/nowhere/{stem}.ARW"));
-        let root = std::env::temp_dir().join(format!("autoshop-store-test-migrate-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("autoshade-store-test-migrate-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all("out").unwrap();
 
@@ -8027,7 +8027,7 @@ mod tests {
     /// like this file's other fixture roots: two batteries side by side raced ONE path (S1-fix §4).
     fn canonical_temp(tag: &str) -> PathBuf {
         let base = std::fs::canonicalize(std::env::temp_dir()).unwrap();
-        let base = strip_verbatim(&base).join(format!("autoshop-store-test-{tag}-{}", std::process::id()));
+        let base = strip_verbatim(&base).join(format!("autoshade-store-test-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
         std::fs::create_dir_all(&base).unwrap();
         base
@@ -8233,7 +8233,7 @@ mod tests {
     /// paid analyze on it.
     #[test]
     fn has_develop_or_sidecar_counts_a_lightroom_sidecar_beside_the_raw() {
-        let dir = std::env::temp_dir().join(format!("autoshop-store-test-lr-badge-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("autoshade-store-test-lr-badge-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let raw = dir.join("_store_lr_badge.arw");
@@ -8277,7 +8277,7 @@ mod tests {
     /// renderer can answer exactly what opening the photo would show.
     #[test]
     fn a_develop_snapshot_carries_the_xmp_layers_the_open_path_reads() {
-        let dir = std::env::temp_dir().join(format!("autoshop-store-test-snap-xmp-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("autoshade-store-test-snap-xmp-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let raw = dir.join("_store_snap_xmp.arw");
@@ -8331,7 +8331,7 @@ mod tests {
     /// a save.
     #[test]
     fn a_newer_lightroom_sidecar_is_snapshotted_before_a_programmatic_write() {
-        let dir = std::env::temp_dir().join(format!("autoshop-store-test-lr-backup-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("autoshade-store-test-lr-backup-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let raw = dir.join("_store_lr_backup.arw");
@@ -8387,7 +8387,7 @@ mod tests {
     /// still is not a save.
     #[test]
     fn a_sidecar_only_develop_is_snapshotted_instead_of_reported_as_nothing() {
-        let dir = std::env::temp_dir().join(format!("autoshop-store-test-lr-only-backup-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("autoshade-store-test-lr-only-backup-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let raw = dir.join("_store_lr_only.arw");
@@ -8483,7 +8483,7 @@ mod tests {
 
         #[test]
         fn the_no_hard_link_publish_fallback_never_replaces_an_owner() {
-            let dir = std::env::temp_dir().join(format!("autoshop-store-test-pnc-fallback-{}", std::process::id()));
+            let dir = std::env::temp_dir().join(format!("autoshade-store-test-pnc-fallback-{}", std::process::id()));
             let _ = std::fs::remove_dir_all(&dir);
             std::fs::create_dir_all(&dir).unwrap();
 
@@ -8514,7 +8514,7 @@ mod tests {
 
         #[test]
         fn a_nonblocking_develop_lock_reports_contention_and_recovers_after_drop() {
-            let root = std::env::temp_dir().join(format!("autoshop-store-test-lock-{}", std::process::id()));
+            let root = std::env::temp_dir().join(format!("autoshade-store-test-lock-{}", std::process::id()));
             let _ = std::fs::remove_dir_all(&root);
             let photo = Path::new("D:/photos/LOCK.ARW");
 
@@ -8549,7 +8549,7 @@ mod tests {
         /// NoWait-refusing while held.
         #[test]
         fn a_settings_lock_serializes_writers_and_reenters_on_its_thread() {
-            let root = std::env::temp_dir().join(format!("autoshop-store-test-settings-lock-{}", std::process::id()));
+            let root = std::env::temp_dir().join(format!("autoshade-store-test-settings-lock-{}", std::process::id()));
             let _ = std::fs::remove_dir_all(&root);
 
             let nested = with_settings_lock_in(&root, DevelopLockMode::Wait, || {
@@ -8588,7 +8588,7 @@ mod tests {
         /// file's mode travels with the rename (the 0600 settings claim).
         #[test]
         fn durable_replace_lands_complete_bytes_and_consumes_its_stage() {
-            let dir = std::env::temp_dir().join(format!("autoshop-store-test-durable-replace-{}", std::process::id()));
+            let dir = std::env::temp_dir().join(format!("autoshade-store-test-durable-replace-{}", std::process::id()));
             let _ = std::fs::remove_dir_all(&dir);
             std::fs::create_dir_all(&dir).unwrap();
             let live = dir.join("settings.json");
@@ -8605,7 +8605,7 @@ mod tests {
 
         #[test]
         fn durable_write_replaces_complete_bytes_and_consumes_its_stage() {
-            let dir = std::env::temp_dir().join(format!("autoshop-store-test-durable-write-{}", std::process::id()));
+            let dir = std::env::temp_dir().join(format!("autoshade-store-test-durable-write-{}", std::process::id()));
             let _ = std::fs::remove_dir_all(&dir);
             std::fs::create_dir_all(&dir).unwrap();
             let target = dir.join("recipe.json");
@@ -8634,7 +8634,7 @@ mod tests {
         /// look-alike that is not our pattern, the photo itself) stays.
         #[test]
         fn a_stale_sidecar_stage_is_reclaimed_and_nothing_else_is_touched() {
-            let dir = std::env::temp_dir().join(format!("autoshop-store-test-sidecar-sweep-{}", std::process::id()));
+            let dir = std::env::temp_dir().join(format!("autoshade-store-test-sidecar-sweep-{}", std::process::id()));
             let _ = std::fs::remove_dir_all(&dir);
             std::fs::create_dir_all(&dir).unwrap();
             let to = dir.join("DSC00042.xmp");
@@ -8682,7 +8682,7 @@ mod tests {
         /// Err)`.
         #[test]
         fn a_durable_write_reports_whether_the_bytes_reached_the_live_name() {
-            let dir = std::env::temp_dir().join(format!("autoshop-store-test-durable-tracked-{}", std::process::id()));
+            let dir = std::env::temp_dir().join(format!("autoshade-store-test-durable-tracked-{}", std::process::id()));
             let _ = std::fs::remove_dir_all(&dir);
             std::fs::create_dir_all(&dir).unwrap();
 
@@ -8730,7 +8730,7 @@ mod tests {
 
         #[test]
         fn clearing_one_same_stem_photo_suppresses_but_never_unlinks_legacy_bytes() {
-            let base = std::env::temp_dir().join(format!("autoshop-store-test-legacy-tombstone-{}", std::process::id()));
+            let base = std::env::temp_dir().join(format!("autoshade-store-test-legacy-tombstone-{}", std::process::id()));
             let _ = std::fs::remove_dir_all(&base);
             std::fs::create_dir_all(&base).unwrap();
 
@@ -8781,7 +8781,7 @@ mod tests {
         /// the first `assert`, fails this.
         #[test]
         fn the_tombstone_fixture_cleans_up_through_a_panic() {
-            let base = std::env::temp_dir().join(format!("autoshop-store-test-tombstone-fixture-{}", std::process::id()));
+            let base = std::env::temp_dir().join(format!("autoshade-store-test-tombstone-fixture-{}", std::process::id()));
             let _ = std::fs::remove_dir_all(&base);
             std::fs::create_dir_all(&base).unwrap();
             let legacy = base.join("stand-in.recipe.json");
@@ -8809,7 +8809,7 @@ mod tests {
 
         #[test]
         fn unknown_store_kinds_are_refused_without_rewriting_the_newer_record() {
-            let base = std::env::temp_dir().join(format!("autoshop-store-test-unknown-kind-{}", std::process::id()));
+            let base = std::env::temp_dir().join(format!("autoshade-store-test-unknown-kind-{}", std::process::id()));
             let _ = std::fs::remove_dir_all(&base);
             std::fs::create_dir_all(&base).unwrap();
             let photo = base.join("UNKNOWN.ARW");
@@ -8874,7 +8874,7 @@ mod tests {
 
         #[test]
         fn parsed_relative_store_paths_cannot_escape_the_develop_directory() {
-            let base = std::env::temp_dir().join(format!("autoshop-store-test-contained-paths-{}", std::process::id()));
+            let base = std::env::temp_dir().join(format!("autoshade-store-test-contained-paths-{}", std::process::id()));
             let _ = std::fs::remove_dir_all(&base);
             let dev = base.join("develop");
             std::fs::create_dir_all(&dev).unwrap();
