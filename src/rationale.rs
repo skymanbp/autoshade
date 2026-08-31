@@ -475,10 +475,15 @@ pub mod keys {
     pub const REVISION_VERIFY_FAILED: &str =
         " [verification of revision round {round} failed ({e}) — keeping the previous \
          verified proposal]";
+    /// NAMES THE FIELDS (batch 2). The percentage alone said that something had
+    /// been pulled and left "toward what, and what moved?" unanswered on a note
+    /// that is persisted, re-rendered in three UIs, and sits beside a
+    /// derivation it can contradict. `style::distilled_fields` measures the
+    /// list from the two recipes and bounds it.
     pub const STYLE_DISTILLED: &str =
-        " [style distillation then pulled the global sliders toward this user's past \
-         edits (effective strength {pct}%) — final values can differ from the \
-         derivation above]";
+        " [style distillation then pulled this recipe toward this user's past \
+         edits (effective strength {pct}%; moved: {fields}) — final values can \
+         differ from the derivation above]";
     pub const STYLE_REVERIFY_FAILED: &str =
         " [re-verification after style distillation failed ({e}) — the verdict \
          above describes the PRE-distillation recipe]";
@@ -790,13 +795,17 @@ mod tests {
         assert_eq!(
             render_one(&Note::new(
                 keys::STYLE_DISTILLED,
-                vec![("pct", format!("{:.0}", strength * 0.6 * 100.0))],
+                vec![
+                    ("pct", format!("{:.0}", strength * 0.6 * 100.0)),
+                    ("fields", "vibrance, hsl.saturation.blue".to_string()),
+                ],
             )),
             format!(
-                " [style distillation then pulled the global sliders toward this user's past \
-                 edits (effective strength {:.0}%) — final values can differ from the \
-                 derivation above]",
-                strength * 0.6 * 100.0
+                " [style distillation then pulled this recipe toward this user's past \
+                 edits (effective strength {:.0}%; moved: {}) — final values can \
+                 differ from the derivation above]",
+                strength * 0.6 * 100.0,
+                "vibrance, hsl.saturation.blue",
             ),
         );
         let (err_before, err_after) = (0.2013_f32, 0.0567_f32);

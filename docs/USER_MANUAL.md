@@ -309,8 +309,15 @@ cannot become a credential or path override.
 - **Style match/read:** build the RAW+XMP style reference library with the GUI
   or `style-index`, and optionally build a separate finished-photo look library
   with `style-index --looks`. The Style control retrieves similar prior edits
-  and applies their settings with `style_pull` (0.18 at the shipped Style 0.3,
-  full at Style 1.0); look records guide the proposer only. The embedding switch
+  and pulls the proposal toward them with `style_pull` (0.18 at the shipped
+  Style 0.3, full at Style 1.0 — at 1.0 a control that has a target ends ON it).
+  It pulls the twelve global sliders, the 8-band mixer's saturation and
+  luminance, the colour-grade wheels, the master tone curve's shape and each
+  mask's slider amounts — never a mask's position or size. A control is pulled
+  only where your past edits AGREE on a direction; where they cancel out, or
+  where you never touched that control, the AI's own choice for this photograph
+  is kept. The rationale names every field that moved. Look records guide the
+  proposer only. The embedding switch
   is opt-in and reports how many indexed records carry vectors. Strength
   independently controls the fit budget and confidence cap; Direction adherence
   chooses Hint, Direct, or Brief wording when a Direction is present.

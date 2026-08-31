@@ -114,7 +114,7 @@ const ADVISOR_PREVIEW_EDGE: u32 = 1568;
 struct StyleRetrieval {
     /// The soft text reference block, or `None` when nothing was retrieved.
     reference: Option<String>,
-    targets: std::collections::BTreeMap<&'static str, f32>,
+    targets: crate::style::StyleTargets,
     /// File names of the shots used, bounded (`style::neighbour_stems`).
     stems: Vec<String>,
     /// Absolute path of the NEAREST shot, when the index recorded one.
@@ -718,10 +718,11 @@ pub fn produce_recipe(
         }
     }
 
-    // Distill toward the user's historical style: a gentle, capped pull of the
-    // global sliders toward similar past edits. The Style axis supplies
-    // `style_pull` (0.18 at the shipped 0.3, full at 1.0), so grade strength
-    // never silently changes the historical-style blend.
+    // Distill toward the user's historical style: pull the proposal toward what
+    // similar past edits agreed this photographer does. The Style axis supplies
+    // `style_pull` (0.18 at the shipped 0.3, FULL at 1.0 — `blend_toward` says
+    // what "full" means and why it is not capped), so grade strength never
+    // silently changes the historical-style blend.
     //
     // DELIBERATELY NOT on the grade-strength axis (R23-3, GATE 5's other half):
     // this Style pull bounds MEAN REGRESSION — how far the proposal is dragged
@@ -747,12 +748,18 @@ pub fn produce_recipe(
         // -0.06EV/-20/+4 values) — then re-verify the FINAL recipe so the
         // returned verdict honestly reflects what will actually be applied.
         if recipe != pre_blend {
+            // Measured BEFORE the note borrows the rationale out of the very
+            // recipe it describes.
+            let fields = crate::style::distilled_fields(&pre_blend, &recipe);
             crate::rationale::push_note(
                 &mut recipe.rationale,
                 &mut det_notes,
                 crate::rationale::Note::new(
                     crate::rationale::keys::STYLE_DISTILLED,
-                    vec![("pct", format!("{:.0}", crate::style::style_pull(req.style) * 100.0))],
+                    vec![
+                        ("pct", format!("{:.0}", crate::style::style_pull(req.style) * 100.0)),
+                        ("fields", fields),
+                    ],
                 ),
             );
             // Degrade like the revision loop above: a transient verifier
@@ -931,7 +938,10 @@ pub fn produce_recipe(
                             rounds_done + 1
                         );
                     }
-                    let mut candidate_distilled = false;
+                    // The FIELD LIST, not a flag: the note this feeds names what
+                    // moved, and the candidate's pull is a different pull from
+                    // the one above (a different proposal went into it).
+                    let mut candidate_distilled: Option<String> = None;
                     let mut candidate_thinking: Option<crate::advisor::Thinking> = None;
                     let outcome = visual_review_round(
                         &h,
@@ -961,7 +971,8 @@ pub fn produce_recipe(
                                     crate::style::style_pull(req.style),
                                 );
                                 r.clamp();
-                                candidate_distilled = r != pre;
+                                candidate_distilled =
+                                    (r != pre).then(|| crate::style::distilled_fields(&pre, &r));
                             }
                             Ok(r)
                         },
@@ -1018,16 +1029,19 @@ pub fn produce_recipe(
                                     ]
                                 },
                             ));
-                            if candidate_distilled {
+                            if let Some(fields) = candidate_distilled.clone() {
                                 log.push(crate::rationale::Note::new(
                                     crate::rationale::keys::STYLE_DISTILLED,
-                                    vec![(
-                                        "pct",
-                                        format!(
-                                            "{:.0}",
-                                            crate::style::style_pull(req.style) * 100.0
+                                    vec![
+                                        (
+                                            "pct",
+                                            format!(
+                                                "{:.0}",
+                                                crate::style::style_pull(req.style) * 100.0
+                                            ),
                                         ),
-                                    )],
+                                        ("fields", fields),
+                                    ],
                                 ));
                             }
                             if !more {
@@ -6700,7 +6714,7 @@ mod tests {
     fn look_reference_image_replaces_the_raw_neighbour_and_is_named() {
         let retrieved = StyleRetrieval {
             reference: Some("raw reference".into()),
-            targets: std::collections::BTreeMap::new(),
+            targets: Default::default(),
             stems: vec!["raw-shot".into()],
             nearest: Some("D:\\raw\\raw-shot.arw".into()),
             look_reference: Some("finished look reference".into()),

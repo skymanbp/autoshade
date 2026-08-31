@@ -1804,10 +1804,10 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     (" [it also suggests the pixel tools (nothing was run — these are for you to \
       choose): {tools}]",
         " [它还建议用这些像素工具（未运行任何操作——是否使用由你决定）：{tools}]"),
-    (" [style distillation then pulled the global sliders toward this user's past \
-      edits (effective strength {pct}%) — final values can differ from the \
-      derivation above]",
-        " [风格蒸馏随后将全局滑杆拉向该用户的历史编辑（有效强度 {pct}%）——最终数值可能与上文推导不同]"),
+    (" [style distillation then pulled this recipe toward this user's past \
+      edits (effective strength {pct}%; moved: {fields}) — final values can \
+      differ from the derivation above]",
+        " [风格蒸馏随后将本配方拉向该用户的历史编辑（有效强度 {pct}%；被拉动的项：{fields}）——最终数值可能与上文推导不同]"),
     (" [re-verification after style distillation failed ({e}) — the verdict \
       above describes the PRE-distillation recipe]",
         " [风格蒸馏后的复验失败（{e}）——上方判词描述的是蒸馏前的配方]"),

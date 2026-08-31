@@ -1031,12 +1031,69 @@ most `HABIT_SLIDERS_SHOWN = 3` sliders per clause, and its worst case is proved
 against `MAX_LOCAL_WORK_CHARS = 640` by construction rather than truncated at
 runtime.
 
-**It does not rank.** Retrieval, `style_targets` and `blend_toward` do not read
-the field at all; it reaches only the proposer's reference block. That is why it
+**It does not rank.** Retrieval does not read the field at all. That is why it
 ships WITHOUT an index-version bump, on `families`' precedent:
 `#[serde(default)]` in both directions, so a pre-S3 index loads with the field
 ABSENT — a different fact from a measured zero — and a pre-S3 build ignores the
-new key.
+new key. `blend_toward` DOES read it, as one of the five distillation channels
+below, and moves a mask's slider amplitudes only.
+
+#### The Style axis: what distillation pulls
+
+`style_pull(style)` is `0.18` at the shipped Style `0.3` and `1.0` at Style
+`1.0`, and `blend_toward` is a plain `lerp`, so **Style 100 % reaches the
+target**: a channel that has one ends on it. There is no cap, and until this
+batch two doc comments claimed there was.
+
+What keeps that from meaning "delete the colour" is the VOCABULARY and the
+GATE, not a cap. Distillation used to pull twelve flat sliders and nothing else,
+so at Style 1.0 a proposal's `vibrance` and `saturation` were replaced by the
+library's means while the mixer, the wheels, the curve and the masks — where a
+photographer's colour actually lives — carried no target at all. Colour could
+only be subtracted. Five channels now, one mechanism (`lerp` toward a retrieved
+mean):
+
+| Channel | Target | Gated |
+|---|---|---|
+| 12 flat globals | mean over the neighbours that carry the key | no — shipped behaviour |
+| 8-band HSL saturation + luminance | per band | yes |
+| 8-band HSL hue | ingested, never distilled | — |
+| Grade wheels `_sat` / `_lum` | per wheel | yes |
+| Grade wheel `_hue` | saturation-weighted CIRCULAR mean, and only for a wheel whose own intensity is a habit | yes |
+| Master tone curve | `[black_lift, s_strength]`, written back through points that pin inputs 0/64/191/255 | yes, per component |
+| Mask sliders, per `bucket_of` use | `mask_habit` bucket mean, amplitudes only | yes |
+
+**The gate** is `rho = |mean| / mean(|v|) >= 0.75`. `rho = 1` is unanimity
+(zeros included — a neighbour who left an axis alone is not opposing it) and
+`rho = 0` is exact cancellation; an axis the neighbours never exercised has
+`rho` UNDEFINED and gets no target, because a target of `0` at Style 1.0 would
+delete the proposal's whole mixer. `0.75` is calibrated against the four real
+four-neighbour sets the colour diagnosis measured, whose defined ratios fall in
+two groups — `0.037, 0.465, 0.587` and `0.942, 1.000` — with `0.75` inside the
+gap. It sits high because the errors are asymmetric: a refusal leaves the
+proposal's own decision standing and is disclosed, while a false target replaces
+a scene-specific colour decision with a number that cancelled to near zero.
+
+**`blending` and `balance` are excluded** — `ColorGrade::is_neutral` already
+states that they do nothing without a saturated or lifted wheel, and
+`blending`'s library mean is ACR's own default on 157 of 157 measured sidecars.
+
+**The mixer's hue axis is ingested and never distilled**, because it changes
+WHICH colour a band is on whatever content occupies it in this photograph, and
+the corpus shows that is scene-bound: the Orange band's hue mean is `-3.75` on
+one neighbour set and `+16.0` on another, Yellow inside one set is
+`[-17, 0, +83, -29]` and Green inside another is `[-24, -12, +19, 0]` — the sign
+flips between neighbourhoods and inside them. Wheel hue is the opposite case — a
+tint applied to a tonal range, stable at 201–229 degrees across the same
+neighbourhoods — and is distilled.
+
+The distillation vocabulary rides in the same `settings` map, so the reference
+block filters back to `REF_KEYS`: an index built with it renders the proposer's
+block byte for byte like one built without it, and an index built without it
+degrades to the twelve, which is why this too ships with no version bump. The
+`STYLE_DISTILLED` rationale note names every field that actually moved, measured
+from the two recipes and bounded at `MAX_DISTILLED_FIELDS_CHARS = 384` with a
+`+N more` tail.
 
 **The block's own budget.** Storage bounds and prompt bounds are two different
 budgets, and until S3 one number was spending both. An index record may carry
