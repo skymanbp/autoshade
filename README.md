@@ -8,7 +8,7 @@
 An AI decides *what to change*. A deterministic Rust engine *does* it.
 **In the recipe-development path, the AI never touches a pixel.**
 
-[Download v1.1.0](https://github.com/skymanbp/autoshop/releases/tag/v1.1.0) ·
+[Download v1.1.0](https://github.com/skymanbp/autoshade/releases/tag/v1.1.0) ·
 [Architecture](docs/ARCHITECTURE.md) ·
 [Roadmap](docs/ROADMAP.md) ·
 [MIT](LICENSE)
@@ -489,7 +489,7 @@ on the release page carries the SHA-256 of every asset.
 | `autoshop-1.1.0-macos-universal.zip` (macOS universal CLI) | 36,894,209 bytes | `898eace14399aae800e653336cf6c789fb76d52f75edafeffc99cb1e4558b272` |
 
 Download from the
-[v1.1.0 release page](https://github.com/skymanbp/autoshop/releases/tag/v1.1.0):
+[v1.1.0 release page](https://github.com/skymanbp/autoshade/releases/tag/v1.1.0):
 
 - **Installer (recommended):** run `Autoshop-Setup-1.1.0.exe`. It installs for
   the current user without administrator access, adds Start Menu shortcuts,

@@ -4,7 +4,7 @@ version = "1.1.0"
 edition = "2024"
 description = "AI-assisted automatic development of RAW photographs (EditRecipe + deterministic Rust render, XMP sidecar, AI denoise)"
 license = "MIT"
-repository = "https://github.com/skymanbp/autoshop"
+repository = "https://github.com/skymanbp/autoshade"
 readme = "README.md"
 # Both binaries are declared explicitly below, so disable auto-discovery of
 # src/main.rs + src/bin/*.rs. The GUI is a module tree rooted at

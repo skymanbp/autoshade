@@ -1,0 +1,11 @@
+{
+  "analysis_provider": "oauth",
+  "analysis_model": "opus",
+  "analysis_api_key": null,
+  "analysis_base_url": "https://api.openai.com/v1",
+  "image_api_key": null,
+  "image_model": "gpt-5.6-sol",
+  "image_base_url": "https://api.openai.com/v1",
+  "image_gen_model": "gpt-image-2",
+  "image_provider": "api"
+}

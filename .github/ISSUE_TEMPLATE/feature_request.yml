@@ -12,9 +12,9 @@ body:
 
         Worth a look before you write: several things that read as missing are
         *deliberately* missing and say so —
-        [Honest scope](https://github.com/skymanbp/autoshop#honest-scope) lists
+        [Honest scope](https://github.com/skymanbp/autoshade#honest-scope) lists
         the known limits, and
-        [the honesty model](https://github.com/skymanbp/autoshop#the-honesty-model-is-a-feature)
+        [the honesty model](https://github.com/skymanbp/autoshade#the-honesty-model-is-a-feature)
         explains why some controls are **carried, not rendered**: the operator
         behind them is unpublished, and approximating it would mean putting an
         operator *we invented* between you and your picture. "Render this

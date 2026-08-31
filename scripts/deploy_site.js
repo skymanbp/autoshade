@@ -17,7 +17,7 @@ const API = "https://api.cloudflare.com/client/v4";
 // Account id is not a credential (it is in every dashboard URL); the project is
 // created once with `POST /accounts/{id}/pages/projects` and then reused.
 const ACCOUNT = "ef6ce0a8b2c4ba8529b41aa6fd5b4f45";
-const PROJECT = "autoshop";
+const PROJECT = "autoshade";
 
 async function cf(method, route, bearer, body) {
   const res = await fetch(API + route, {

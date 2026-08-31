@@ -5,9 +5,9 @@
   "status": "fail",
   "visualReview": "pending",
   "artifact": {
-    "path": "D:\\Projects\\Autoshop\\docs\\architecture\\autoshop.architecture.html",
-    "sha256": "2f80042bdb0b633db98bf5fc42f9315939540047bd06fdf968ace14c561885a6",
-    "bytes": 752974
+    "path": "D:\\Projects\\Autoshop\\docs\\architecture\\autoshade.architecture.html",
+    "sha256": "c20605918f463a091707736b3e4b30581e5395f8fb581875594979eac91cf9e7",
+    "bytes": 753001
   },
   "state": {
     "detail": "read",
@@ -23,7 +23,7 @@
       "severity": "error",
       "message": "The rendered artifact overflows the 1440x900 light viewport.",
       "subject": {
-        "artifact": "D:\\Projects\\Autoshop\\docs\\architecture\\autoshop.architecture.html",
+        "artifact": "D:\\Projects\\Autoshop\\docs\\architecture\\autoshade.architecture.html",
         "viewport": {
           "width": 1440,
           "height": 900,
@@ -47,7 +47,7 @@
       "severity": "error",
       "message": "The rendered artifact overflows the 1600x1000 light viewport.",
       "subject": {
-        "artifact": "D:\\Projects\\Autoshop\\docs\\architecture\\autoshop.architecture.html",
+        "artifact": "D:\\Projects\\Autoshop\\docs\\architecture\\autoshade.architecture.html",
         "viewport": {
           "width": 1600,
           "height": 1000,
@@ -71,7 +71,7 @@
       "severity": "error",
       "message": "The rendered artifact overflows the 1920x1080 light viewport.",
       "subject": {
-        "artifact": "D:\\Projects\\Autoshop\\docs\\architecture\\autoshop.architecture.html",
+        "artifact": "D:\\Projects\\Autoshop\\docs\\architecture\\autoshade.architecture.html",
         "viewport": {
           "width": 1920,
           "height": 1080,
@@ -95,7 +95,7 @@
       "severity": "error",
       "message": "The rendered artifact overflows the 2048x1320 light viewport.",
       "subject": {
-        "artifact": "D:\\Projects\\Autoshop\\docs\\architecture\\autoshop.architecture.html",
+        "artifact": "D:\\Projects\\Autoshop\\docs\\architecture\\autoshade.architecture.html",
         "viewport": {
           "width": 2048,
           "height": 1320,
@@ -119,7 +119,7 @@
       "severity": "error",
       "message": "The rendered artifact overflows the 1440x900 dark viewport.",
       "subject": {
-        "artifact": "D:\\Projects\\Autoshop\\docs\\architecture\\autoshop.architecture.html",
+        "artifact": "D:\\Projects\\Autoshop\\docs\\architecture\\autoshade.architecture.html",
         "viewport": {
           "width": 1440,
           "height": 900,
@@ -143,7 +143,7 @@
       "severity": "error",
       "message": "The rendered artifact overflows the 2048x1320 dark viewport.",
       "subject": {
-        "artifact": "D:\\Projects\\Autoshop\\docs\\architecture\\autoshop.architecture.html",
+        "artifact": "D:\\Projects\\Autoshop\\docs\\architecture\\autoshade.architecture.html",
         "viewport": {
           "width": 2048,
           "height": 1320,
@@ -584,7 +584,7 @@
         "viewerChromeActive": true,
         "viewerChromeOk": true,
         "resolvedTheme": "light",
-        "file": "autoshop.architecture.visual-check.1440x900.light.png"
+        "file": "autoshade.architecture.visual-check.1440x900.light.png"
       },
       {
         "width": 1440,
@@ -616,7 +616,7 @@
         "viewerChromeActive": true,
         "viewerChromeOk": true,
         "resolvedTheme": "dark",
-        "file": "autoshop.architecture.visual-check.1440x900.dark.png"
+        "file": "autoshade.architecture.visual-check.1440x900.dark.png"
       },
       {
         "width": 2048,
@@ -648,7 +648,7 @@
         "viewerChromeActive": true,
         "viewerChromeOk": true,
         "resolvedTheme": "light",
-        "file": "autoshop.architecture.visual-check.2048x1320.light.png"
+        "file": "autoshade.architecture.visual-check.2048x1320.light.png"
       },
       {
         "width": 2048,
@@ -680,13 +680,13 @@
         "viewerChromeActive": true,
         "viewerChromeOk": true,
         "resolvedTheme": "dark",
-        "file": "autoshop.architecture.visual-check.2048x1320.dark.png"
+        "file": "autoshade.architecture.visual-check.2048x1320.dark.png"
       }
     ],
-    "contactSheet": "autoshop.architecture.visual-check.html"
+    "contactSheet": "autoshade.architecture.visual-check.html"
   },
   "sidecars": {
-    "receipt": "autoshop.architecture.visual-check.json",
-    "contactSheet": "autoshop.architecture.visual-check.html"
+    "receipt": "autoshade.architecture.visual-check.json",
+    "contactSheet": "autoshade.architecture.visual-check.html"
   }
 }

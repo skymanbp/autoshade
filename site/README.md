@@ -20,8 +20,8 @@ Deployment is a manual step (there is no GitHub integration; pushing `main` does
 node scripts/deploy_site.js
 ```
 
-The script reads the master token from the git-ignored `.secret` file, mints a one-hour token scoped to Cloudflare Pages, runs `wrangler pages deploy site --project-name autoshop`, and deletes the temporary token afterwards. No token value is printed or written anywhere. The production alias is `autoshop-d7w.pages.dev`; each deployment also gets its own preview URL. After deploying, verify every published file byte-for-byte against `site/` before calling it live.
+The script reads the master token from the git-ignored `.secret` file, mints a one-hour token scoped to Cloudflare Pages, runs `wrangler pages deploy site --project-name autoshade`, and deletes the temporary token afterwards. No token value is printed or written anywhere. The production alias is `autoshop-d7w.pages.dev` (the pages.dev subdomain is sticky across the project rename and kept as a legacy alias); each deployment also gets its own preview URL. After deploying, verify every published file byte-for-byte against `site/` before calling it live.
 
-The custom domain `skymanbp-autoshop.dev` (and `www.`) is attached to the `autoshop` Pages project: the zone lives in the same account and both names are proxied CNAME records pointing at `autoshop-d7w.pages.dev`, with certificates issued by Pages. Re-attaching after a project rebuild is done through the Pages project's **Custom domains** page or the Pages domains API.
+The custom domain `autoshade.dev` (and `www.`) is attached to the `autoshade` Pages project (renamed in place from `autoshop`, deployments preserved): the zone lives in the same account and both names are proxied CNAME records pointing at `autoshop-d7w.pages.dev`, with certificates issued by Pages. Re-attaching after a project rebuild is done through the Pages project's **Custom domains** page or the Pages domains API.
 
 Do not store deployment credentials in this directory or commit them to the repository.

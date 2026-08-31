@@ -4,7 +4,7 @@
 
 #define AppName "AutoShade"
 #define AppPublisher "skymanbp"
-#define AppURL "https://github.com/skymanbp/autoshop"
+#define AppURL "https://github.com/skymanbp/autoshade"
 
 [Setup]
 AppId={{B2C8B506-4DD8-4F06-B25D-7A3FBE9A742C}
