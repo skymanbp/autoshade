@@ -234,7 +234,67 @@ pub fn free_memory_mb() -> Option<u64> {
         }
         Some((pages as u64).saturating_mul(size as u64) / (1024 * 1024))
     }
-    #[cfg(all(unix, not(target_os = "linux")))]
+    #[cfg(target_os = "macos")]
+    {
+        // Two questions, two APIs. `hw.memsize` is the machine's physical RAM
+        // — the ceiling, the same role `ullAvailPhys` bounds on Windows — and
+        // `host_statistics64` reports what is actually reclaimable.
+        //
+        // free + INACTIVE, not free alone, and that is the whole subtlety of
+        // this platform: macOS parks clean file-backed pages in `inactive` and
+        // evicts them on demand, so a healthy Mac reports almost nothing free
+        // by design. Counting only `free_count` would cap `--jobs` at 1 on a
+        // 64 GB machine whose memory is doing exactly what it should. This is
+        // also why `_SC_AVPHYS_PAGES` is not used here even though Darwin
+        // defines the name: it reports that same under-count.
+        let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+        if page <= 0 {
+            return None;
+        }
+        let mut total: u64 = 0;
+        let mut len = size_of::<u64>();
+        // SAFETY: `hw.memsize` is a u64 sysctl; `len` describes the buffer
+        // handed in, and a non-zero return is treated as "no answer" below
+        // rather than trusting whatever `total` holds.
+        let got_total = unsafe {
+            libc::sysctlbyname(
+                c"hw.memsize".as_ptr(),
+                (&raw mut total).cast(),
+                &raw mut len,
+                std::ptr::null_mut(),
+                0,
+            )
+        } == 0;
+        if !got_total || total == 0 {
+            return None;
+        }
+        // `libc::mach_host_self` is deprecated in favour of the `mach2`
+        // crate. This is the same one symbol out of libSystem, which every
+        // macOS process links already — the house raw-link pattern (see the
+        // GUI's crash dialog), not a new dependency bought for one call.
+        unsafe extern "C" {
+            fn mach_host_self() -> libc::mach_port_t;
+        }
+        let mut vm: libc::vm_statistics64 = unsafe { std::mem::zeroed() };
+        let mut count = libc::HOST_VM_INFO64_COUNT;
+        // SAFETY: flavour, buffer and count agree — `HOST_VM_INFO64_COUNT` is
+        // libc's own element count for exactly this struct.
+        let kr = unsafe {
+            libc::host_statistics64(
+                mach_host_self(),
+                libc::HOST_VM_INFO64,
+                (&raw mut vm).cast(),
+                &raw mut count,
+            )
+        };
+        if kr != 0 {
+            return None;
+        }
+        let pages = u64::from(vm.free_count).saturating_add(u64::from(vm.inactive_count));
+        let avail = pages.saturating_mul(page as u64);
+        Some(avail.min(total) / (1024 * 1024))
+    }
+    #[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
     {
         None
     }

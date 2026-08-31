@@ -531,6 +531,10 @@ fn append_segment_args(
     if let Some(path) = prompt_file {
         cmd.arg("--prompt-file").arg(path);
     }
+    // Where the model weights live. Inside a macOS `.app` the script's own
+    // directory is signed and read-only, so the sidecar's script-relative
+    // default cannot be the answer there (see `config::default_weights_dir`).
+    cmd.args(crate::config::Config::load().weights_args());
 }
 
 /// Run the sidecar: `input` (any image file) → `output` (8-bit grayscale PNG).
@@ -561,6 +565,7 @@ pub fn segment_file(opts: &SegmentOpts, input: &Path, output: &Path) -> Result<S
     // env_clear, so the child still inherits it. `-E` below is the second
     // layer for PYTHON* specifically.
     cmd.envs(crate::config::dotenv_child_env());
+    cmd.envs(crate::config::Config::sidecar_child_env());
     // `-E`: ignore PYTHON* environment variables — same import-hijack
     // guard as the denoise sidecar (config.rs protects them too).
     append_segment_args(
@@ -709,11 +714,13 @@ fn birefnet_deps_available(opts: &SegmentOpts) -> Option<bool> {
         // inherited console, and a kill group so a wedged probe cannot outlive
         // the develop.
         cmd.envs(crate::config::dotenv_child_env());
+        cmd.envs(crate::config::Config::sidecar_child_env());
         cmd.arg("-E")
             .arg(&opts.script)
             .arg("--target")
             .arg("subject")
             .arg("--probe-backend")
+            .args(crate::config::Config::load().weights_args())
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -1620,6 +1627,11 @@ mod tests {
         // A REAL 1×1 grey PNG, because `segment_file` decodes before adopting.
         let png = dir.join("seed.png");
         image::GrayImage::from_pixel(1, 1, image::Luma([128u8])).save(&png).unwrap();
+        // Windows-only: the batch stub below copies through `%~6`, and a
+        // forward slash there is a switch, not a separator. The POSIX stub
+        // uses `png` directly, so binding this unconditionally left an
+        // unused local on every non-Windows build.
+        #[cfg(windows)]
         let png_arg = png.to_string_lossy().replace('/', "\\");
 
         // Copies the seed PNG over the --output argument, prints the two

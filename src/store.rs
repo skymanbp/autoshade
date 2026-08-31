@@ -404,8 +404,34 @@ pub enum RootTrust {
 
 /// The directory this app keeps its develop store in, and the one it kept it
 /// in up to v1.1.0, when it was called Autoshop.
+///
+/// Cased per platform, because the parent's convention differs.
+/// `%LOCALAPPDATA%` and the XDG data directory hold lowercase folder names;
+/// `Library/Application Support` holds applications' DISPLAY names, and a
+/// lowercase `autoshade` sitting among them reads as debris. This is the FIRST
+/// macOS release, so there is no existing spelling to preserve there — and it
+/// must be settled before one ships, since the directory under it is named by
+/// a hash of an absolute path and a later change orphans every develop.
+#[cfg(target_os = "macos")]
+pub(crate) const STORE_DIR_NAME: &str = "AutoShade";
+#[cfg(not(target_os = "macos"))]
 pub(crate) const STORE_DIR_NAME: &str = "autoshade";
 pub(crate) const LEGACY_STORE_DIR_NAME: &str = "autoshop";
+
+/// Whether a pre-rename directory sitting beside the current one is OURS.
+///
+/// False on macOS, and that is a data-safety rule rather than tidiness. This
+/// app's first macOS release is already called AutoShade — there has never
+/// been an Autoshop on a Mac — so a folder of that name in the Mac's
+/// application-support directory belongs to someone else. APFS is also
+/// case-insensitive by default, so the `is_dir()` probe would match
+/// `Autoshop` as readily as `autoshop`, and [`adopt_pre_rename_root`] does not
+/// merely read what it finds: it RENAMES it. Nothing to gain, a stranger's
+/// directory to lose.
+///
+/// A plain `const` so Windows and Linux constant-fold it away and keep the
+/// adoption path byte-for-byte as it was.
+const ADOPT_PRE_RENAME: bool = !cfg!(target_os = "macos");
 
 /// What became of a pre-rename store directory sitting beside the new one.
 ///
@@ -441,6 +467,9 @@ pub enum RootAdoption {
 /// three exists-checks alone say which directory is in use.
 pub(crate) fn adopt_pre_rename_root(parent: &Path, act: bool) -> (PathBuf, RootAdoption) {
     let current = parent.join(STORE_DIR_NAME);
+    if !ADOPT_PRE_RENAME {
+        return (current, RootAdoption::Nothing);
+    }
     let legacy = parent.join(LEGACY_STORE_DIR_NAME);
     if !legacy.is_dir() {
         return (current, RootAdoption::Nothing);
@@ -531,7 +560,29 @@ fn per_user_data_dir() -> Option<PathBuf> {
     std::env::var_os("LOCALAPPDATA").map(PathBuf::from)
 }
 
-#[cfg(not(windows))]
+/// macOS keeps per-application state under `Library/Application Support` in
+/// the user's home.
+///
+/// XDG is a Linux convention and nothing on a Mac sets `XDG_DATA_HOME`, so the
+/// generic Unix arm below fell through to the HOME-relative `.local/share`: a
+/// hidden directory no Mac user looks in, and not where eframe already writes
+/// this app's window preferences. Sharing one application-support folder with
+/// those preferences IS the platform's layout — they occupy different subpaths
+/// (`data/app.ron` beside `develops/`), and nothing in this file enumerates or
+/// prunes the root's children.
+///
+/// `XDG_DATA_HOME` is deliberately not consulted: it is not a variable a Mac
+/// user sets for this app, and honouring it would let one moved by some
+/// unrelated tool relocate a photographer's whole edit history.
+#[cfg(target_os = "macos")]
+fn per_user_data_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute())
+        .map(|h| h.join("Library").join("Application Support"))
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
 fn per_user_data_dir() -> Option<PathBuf> {
     // XDG first (the spec's own override), then the HOME-relative default it
     // documents. A RELATIVE `XDG_DATA_HOME` is ignored per the spec — and
@@ -3854,12 +3905,34 @@ fn contained_join(base: &Path, relative: &Path) -> Option<PathBuf> {
 fn remote_or_device_path(p: &Path) -> bool {
     use std::path::{Component, Prefix};
     match p.components().next() {
+        // Windows: the platform parser classifies, and its judgement is the one
+        // this has always used — unchanged to the byte. The verbatim-LOCAL
+        // prefix is deliberately absent from this list, because
+        // `std::fs::canonicalize` hands those out by the dozen (see
+        // [`strip_verbatim`]) and refusing one would disable a real raster.
         Some(Component::Prefix(pre)) => matches!(
             pre.kind(),
             Prefix::UNC(..) | Prefix::VerbatimUNC(..) | Prefix::DeviceNS(_)
         ),
-        _ => false,
+        // Everywhere else `Component::Prefix` is never produced at all — it is
+        // a Windows-parser construct — so the arm above was dead code and the
+        // whole refusal with it: a recipe written on Windows and opened on a
+        // Mac had its network mask reference treated as an ordinary relative
+        // file name. Same classes, decided on the spelling.
+        _ => unc_or_device_spelling(p),
     }
+}
+
+/// A UNC or device path by SPELLING: two leading separators, either slash.
+///
+/// Not equivalent to the prefix match above, and not claimed to be — it also
+/// catches the verbatim-local form, which Windows correctly treats as local.
+/// That is the right answer off Windows, where such a string cannot name a
+/// local file at all, and it never decides anything ON Windows, because the
+/// parser answers first for every path that has a prefix.
+fn unc_or_device_spelling(p: &Path) -> bool {
+    let b = p.as_os_str().as_encoded_bytes();
+    b.starts_with(br"\\") || b.starts_with(b"//")
 }
 
 pub fn resolve_mask_paths(r: &mut EditRecipe, base: &Path) {
@@ -6022,8 +6095,7 @@ mod tests {
     /// runs under exactly that override.
     #[test]
     fn an_explicit_store_root_is_never_second_guessed() {
-        let src = include_str!("store.rs");
-        let non_test = src.split("#[cfg(test)]").next().unwrap();
+        let non_test = crate::source_before_tests(include_str!("store.rs"));
         let body = non_test
             .split("pub fn store_root_with_trust()")
             .nth(1)
@@ -6491,7 +6563,6 @@ mod tests {
     /// a concurrent process adopted away drops the stale entry inside the
     /// lock and re-resolves onto the canonical dir — instead of writing the
     /// whole session's edits into the frozen backup.
-    #[cfg(windows)]
     #[test]
     fn a_superseded_memo_entry_is_dropped_and_the_touch_lands_canonically() {
         let dir = canonical_temp("superseded-heal");
@@ -8266,18 +8337,112 @@ mod tests {
         base
     }
 
-    /// A directory junction (no privilege needed, unlike symlinks). The
-    /// fixture must build LOUDLY or the test is vacuous (the L14#5 lesson:
-    /// a fixture that cannot build must never silently pass green).
-    #[cfg(windows)]
+    /// The network/device refusal must not be Windows-only.
+    ///
+    /// `Component::Prefix` is produced by the WINDOWS path parser and nothing
+    /// else, so off Windows the match had nothing to match: a recipe written
+    /// on Windows and opened on a Mac had its network mask reference taken for
+    /// an ordinary relative name and joined to the develop dir.
+    #[test]
+    fn a_network_or_device_mask_reference_is_refused_on_every_platform() {
+        for p in [r"\\nas\share\mask.png", "//nas/share/mask.png", r"\\.\COM1", r"\\?\UNC\nas\s\m.png"] {
+            assert!(remote_or_device_path(Path::new(p)), "{p} must be refused everywhere");
+        }
+        for p in ["mask.png", "sub/mask.png", "/pictures/mask.png", "/tmp/m.png"] {
+            assert!(!remote_or_device_path(Path::new(p)), "{p} is an ordinary path");
+        }
+        // A LOCAL drive-letter absolute stays honoured: the pixel-source writer
+        // records them for masters that live outside the develop dir.
+        assert!(!remote_or_device_path(Path::new(r"C:\photos\mask.png")));
+    }
+
+    /// The spelling test and the Windows parser are NOT one predicate, and the
+    /// difference is deliberate rather than an oversight.
+    ///
+    /// The verbatim-LOCAL form starts with two separators but names a local
+    /// file, and `std::fs::canonicalize` hands those out by the dozen — so on
+    /// Windows the parser has to win, or a real raster would be disabled. Off
+    /// Windows that spelling cannot name a local file at all, so refusing it
+    /// there is the right answer rather than a compromise.
+    #[test]
+    fn the_verbatim_local_spelling_is_local_on_windows_and_refused_elsewhere() {
+        let verbatim = Path::new(r"\\?\C:\photos\mask.png");
+        assert!(unc_or_device_spelling(verbatim), "it does start with two separators");
+        assert_eq!(
+            remote_or_device_path(verbatim),
+            !cfg!(windows),
+            "Windows keeps it (canonicalize produces it); elsewhere it names nothing local"
+        );
+        // On Windows every path in these tests HAS a prefix, so the parser arm
+        // answers them all and the non-Windows arm is unreachable here. Assert
+        // it exists instead: deleting it is invisible on this platform and is
+        // the whole refusal on the other.
+        assert!(
+            crate::source_before_tests(include_str!("store.rs"))
+                .contains("_ => unc_or_device_spelling(p),"),
+            "the arm that carries the refusal off Windows"
+        );
+    }
+
+    /// The store's directory NAME and the pre-rename adoption are one decision
+    /// per platform, and both had to be settled before the first Mac build
+    /// shipped: the directory under this name is keyed by a hash of an
+    /// absolute path, so changing it afterwards orphans every develop.
+    #[test]
+    fn the_store_directory_name_and_the_rename_adoption_agree_per_platform() {
+        // One assertion over the PAIR, not four over the halves: the name and
+        // the adoption are a single decision per platform, and saying it that
+        // way also keeps `assert!` off a constant (clippy's
+        // `assertions_on_constants`, which a `#[cfg]`-selected const trips).
+        assert_eq!(
+            (STORE_DIR_NAME, ADOPT_PRE_RENAME),
+            if cfg!(target_os = "macos") {
+                // That directory holds applications' DISPLAY names, and no Mac
+                // ever ran the pre-rename spelling, so there is nothing to adopt
+                // — on a case-insensitive volume an adoption could only rename
+                // some other program's folder.
+                ("AutoShade", false)
+            } else {
+                // Lowercase, and still adopting: these roots hold existing
+                // users' develops, keyed by a hash of an absolute path.
+                ("autoshade", true)
+            },
+            "the store directory name and the rename adoption are one decision"
+        );
+        // Windows cannot execute the macOS arms, so it asserts they EXIST:
+        // deleting one is a silent no-op here, and on a Mac it is either an
+        // orphaned store or the rename of a stranger's directory. The needles
+        // below are spelled in THIS test, so the test module has to come off
+        // first or every assertion matches its own text (it did).
+        let src = crate::source_before_tests(include_str!("store.rs"));
+        assert!(src.contains(r#"STORE_DIR_NAME: &str = "AutoShade""#), "the macOS store name");
+        assert!(src.contains(r#".join("Library").join("Application Support")"#), "the macOS root");
+        assert!(
+            src.contains(r#"const ADOPT_PRE_RENAME: bool = !cfg!(target_os = "macos");"#),
+            "the adoption opt-out"
+        );
+    }
+
+    /// A directory ALIAS: a junction on Windows (no privilege needed, unlike
+    /// a Windows symlink), a symlink everywhere else. The fixture must build
+    /// LOUDLY or the test is vacuous (the L14#5 lesson: a fixture that cannot
+    /// build must never silently pass green).
+    ///
+    /// The alias family used to be Windows-only, which left the canonical
+    /// identity rules — one photo through two spellings is one develop —
+    /// untested on the platform where an aliased library is ordinary (an
+    /// external drive under `/Volumes`, moved between machines).
     fn make_junction(link: &Path, target: &Path) {
+        #[cfg(windows)]
         let ok = std::process::Command::new("cmd")
             .args(["/c", "mklink", "/J"])
             .arg(link)
             .arg(target)
             .output()
             .is_ok_and(|o| o.status.success());
-        assert!(ok, "junction fixture could not be built: {} -> {}", link.display(), target.display());
+        #[cfg(unix)]
+        let ok = std::os::unix::fs::symlink(target, link).is_ok();
+        assert!(ok, "directory-alias fixture could not be built: {} -> {}", link.display(), target.display());
     }
 
     /// C1/F10: for a photo already spelled canonically on a plain local
@@ -8306,7 +8471,6 @@ mod tests {
 
     /// C1/F10: a junction alias and its target are ONE photo — one key, one
     /// develop dir, one develop lock.
-    #[cfg(windows)]
     #[test]
     fn a_directory_junction_and_its_target_share_one_develop() {
         let dir = canonical_temp("c1-junction");
@@ -8330,7 +8494,6 @@ mod tests {
     /// spelling is ADOPTED into the canonical dir — copied source-wins into
     /// the fresh canonical dir, the alias dir left intact with a superseded
     /// pointer, the note surfaced.
-    #[cfg(windows)]
     #[test]
     fn an_alias_develop_dir_is_adopted_without_clobbering() {
         let dir = canonical_temp("c1-adopt");
@@ -8381,7 +8544,6 @@ mod tests {
     /// develop, the canonical one wins, the alias is left untouched, and
     /// the fact is disclosed durably + to the GUI — never merged, never
     /// guessed by mtime.
-    #[cfg(windows)]
     #[test]
     fn two_spellings_with_two_develops_keep_both_and_disclose() {
         let dir = canonical_temp("c1-collide");
@@ -8430,7 +8592,6 @@ mod tests {
     /// C1/F10: unsettled transaction state under the alias spelling defers
     /// adoption — this session keys lexically (the pre-upgrade behaviour),
     /// the residue settles in place, the NEXT session adopts.
-    #[cfg(windows)]
     #[test]
     fn a_pending_transaction_defers_adoption() {
         let dir = canonical_temp("c1-defer");

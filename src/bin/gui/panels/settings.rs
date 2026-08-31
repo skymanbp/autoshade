@@ -14,6 +14,9 @@ impl AutoShadeApp {
         // carry the per-role auto-fetch guards and generation stamps.
         let image_models = std::mem::take(&mut self.settings.image_models);
         let analysis_models = std::mem::take(&mut self.settings.analysis_models);
+        // ONE read of the settings file for the two fields below that show the
+        // file's own spelling rather than the resolved value.
+        let local = autoshade::config::load_local_settings();
         self.settings = SettingsForm {
             analysis_provider_api: cfg.analysis_is_api(),
             image_provider_oauth: cfg.image_is_oauth(),
@@ -33,7 +36,12 @@ impl AutoShadeApp {
             // would silently turn "use the default" into a pinned folder on
             // the next save. `load_local_settings` (not the raw file) so an
             // ambient working-directory copy cannot pre-fill it either.
-            out_dir: autoshade::config::load_local_settings().out_dir.unwrap_or_default(),
+            out_dir: local.out_dir.unwrap_or_default(),
+            // Same rule for the interpreter (M1-3): showing the RESOLVED
+            // program here would turn "use the default" into a pinned path on
+            // the next save, and `load_local_settings` is what keeps an
+            // ambient working-directory copy from pre-filling either field.
+            python_bin: local.python_bin.unwrap_or_default(),
             status: String::new(),
             image_models,
             analysis_models,
@@ -114,6 +122,10 @@ impl AutoShadeApp {
             // it could never take effect. `update_local_settings` drops the
             // memo, so the next export claim reads this value.
             cur.out_dir = Some(form.out_dir.trim().to_string());
+            // The interpreter (M1-3), same explicit-blank rule: an emptied
+            // field is the real choice "use the platform default", and only a
+            // STORED blank can undo a path saved earlier.
+            cur.python_bin = Some(form.python_bin.trim().to_string());
             // Secrets: only overwrite when a non-empty value was actually
             // typed — and a typed key is FOR the endpoint on screen beside
             // it, so record that home (`config::file_key_for` enforces it at
@@ -405,6 +417,76 @@ impl AutoShadeApp {
                 .weak(),
             );
         }
+        // --- the PYTHON INTERPRETER (M1-3) -----------------------------------
+        // WRITABLE here, unlike the sidecar path below, and that is not the
+        // same ruling softened. `AUTOSHADE_PYTHON` stays `Trust::Destination`
+        // — no `.env`, no working-directory `autoshade.local.json` beside
+        // someone's photos may supply it — and this field writes ONLY the
+        // trusted per-user file, which is the authority the environment
+        // variable already had. What changed is REACHABILITY: a
+        // Finder-launched `.app` inherits launchd's environment, not a
+        // shell's, so on macOS an env-only setting is one no user of the
+        // shipped app can set at all.
+        //
+        // The button probes FIXED ABSOLUTE candidates
+        // (`config::PYTHON_CANDIDATES`) — never a file dialog, never a `PATH`
+        // scan — so a value the user did not type by hand can still only be an
+        // installer-owned location.
+        ui.separator();
+        // One resolved config for this row and the sidecar row below; the
+        // panel used to load it once per row.
+        let cfg_now = autoshade::config::Config::load();
+        ui.heading(tr(lang, "Python interpreter"));
+        {
+            let f = &mut self.settings;
+            ui.horizontal(|ui| {
+                ui.add(
+                    egui::TextEdit::singleline(&mut f.python_bin)
+                        .desired_width(FIELD_W_MAX.min(ui.available_width() - 90.0).max(80.0))
+                        .hint_text(autoshade::config::default_python_bin()),
+                )
+                .on_hover_text(tr(
+                    lang,
+                    "Which Python runs the AI sidecars (segmentation, denoise, style). Blank = the platform default. It can only be set here or by the AUTOSHADE_PYTHON environment variable — never by a file that arrives beside your photos.",
+                ));
+                if ui
+                    .button(tr(lang, "Detect"))
+                    .on_hover_text(tr(
+                        lang,
+                        "Look in the standard install locations for a working Python 3",
+                    ))
+                    .clicked()
+                {
+                    // `probe_python_bin` RUNS each candidate (`--version`)
+                    // before offering it: on a Mac without developer tools
+                    // `/usr/bin/python3` exists and does not work, so an
+                    // existence check alone would fill this field with a stub
+                    // whose only behaviour is an install prompt.
+                    match autoshade::config::probe_python_bin() {
+                        Some(bin) => {
+                            f.status = trf(lang, "found {bin}", &[("bin", &bin)]);
+                            f.python_bin = bin;
+                        }
+                        // A real answer, said as one: "we looked in the
+                        // standard places and found nothing" is actionable,
+                        // a silently unchanged field is a button that did
+                        // nothing.
+                        None => {
+                            f.status = tr(
+                                lang,
+                                "no Python found in the standard install locations — type the full path above",
+                            )
+                            .into();
+                        }
+                    }
+                }
+            });
+        }
+        // What the app will ACTUALLY run. The field above holds the FILE's
+        // spelling and an `AUTOSHADE_PYTHON` in the environment outranks it,
+        // so a user whose environment already answers would otherwise be
+        // looking at an empty box.
+        ui.label(egui::RichText::new(cfg_now.python_bin.clone()).small().weak());
         // --- the SEGMENTATION SIDECAR path (R25, closing R22-1) --------------
         // R22 left "a settings row for the sidecar path" to R23; R23 and R24
         // did not do it, and this is why. `AUTOSHADE_SEGMENT_SCRIPT` names a
@@ -413,7 +495,12 @@ impl AutoShadeApp {
         // nor an ambient `autoshade.local.json` beside someone's photos may
         // supply it. Adding a picker here would write it into the trusted
         // settings file and hand every later launch a program chosen in a
-        // dialog — the opposite of that ruling.
+        // dialog — the opposite of that ruling. The interpreter row ABOVE is
+        // not a counter-example to it: that one offers a fixed candidate list
+        // rather than a dialog, and it exists because a Finder-launched app
+        // has no environment to read it from. This path is different on the
+        // fact that decides it — it already has a working default inside the
+        // app's own tree, so nobody needs a picker to make the app run.
         //
         // So this is READ-ONLY on purpose, and it says why. The two facts a
         // user actually needs are which file is resolved and whether it is
@@ -422,7 +509,7 @@ impl AutoShadeApp {
         // so the missing arm is not a second wording of the same thing.
         ui.separator();
         ui.heading(tr(lang, "Segmentation sidecar"));
-        let seg = autoshade::config::Config::load().segment_script;
+        let seg = cfg_now.segment_script;
         let seg_path = std::path::PathBuf::from(&seg);
         ui.label(egui::RichText::new(abs_display(&seg_path)).small().weak()).on_hover_text(tr(
             lang,

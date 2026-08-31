@@ -95,7 +95,44 @@ impl AutoShadeApp {
                 app.open_folder(dir);
             }
         }
+        // The quit guard's two process-wide hooks (see `quit.rs`): the repaint
+        // handle a vetoed quit wakes the UI with, and — on macOS — the
+        // delegate method that does the vetoing. Both need a live event loop,
+        // and this creation closure is the first moment there is one.
+        crate::quit::set_ctx(&cc.egui_ctx);
+        #[cfg(target_os = "macos")]
+        if let Err(why) = crate::macos::install_quit_guard() {
+            // Not fatal, and not silent: without that method ⌘Q behaves the
+            // way it did before this batch, and the user is owed the fact.
+            eprintln!(
+                "warning: ⌘Q and Dock Quit will NOT ask about unsaved work — {why}. \
+                 Close the window with its red button instead, which does ask."
+            );
+        }
         app
+    }
+
+    /// What quitting RIGHT NOW would cost, in the terms `quit.rs` publishes.
+    ///
+    /// Built from the same predicates as the close guard in `app.rs`, plus the
+    /// one thing that guard reaches by MUTATING: a typed but uncommitted mask,
+    /// card or version name. The guard may call `commit_pending_names` because
+    /// it runs on the way out; a per-frame reading may not write, so it counts
+    /// an uncommitted name as unsaved work directly. Leaving that out would be
+    /// the U10 loss over again — an otherwise clean recipe whose pending
+    /// rename dies with the process.
+    ///
+    /// The `||` chain is ordered by cost: `inactive_dirty_variants` walks the
+    /// strip deep-comparing recipes, so it is asked last.
+    pub(crate) fn quit_state(&self) -> crate::quit::QuitState {
+        crate::quit::QuitState::from_app(self.busy, self.discard_requested, || {
+            self.mask_name_buf.is_some()
+                || self.version_name_buf.is_some()
+                || self.variant_name_buf.is_some()
+                || !self.nav_stash.is_empty()
+                || self.quit_guard_open_dirty()
+                || self.inactive_dirty_variants() > 0
+        })
     }
 
     /// L12#3: disclose gallery names whose script no installed font can

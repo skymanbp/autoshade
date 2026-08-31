@@ -9,6 +9,14 @@
 # copy match what the test expects, on any platform.
 *.py text eol=lf
 
+# Shell scripts, for the plainest version of the same reason: a `.sh` checked
+# out with CRLF does not run at all on the platform it exists for — every line
+# ends in a stray carriage return and the interpreter reports a command it was
+# never asked to run. `scripts/build_app_bundle.sh` is executed by the macOS
+# release job, where that failure would surface as a broken release rather than
+# as a diff.
+*.sh text eol=lf
+
 # The sidecar's data files are held to the same rule, and for a HARDER reason:
 # `python/ade20k_class_table.json` is gated on its own sha256 at run time
 # (`segment.py`'s `SKY_CLASS_TABLE_PIN`), so a checkout that rewrote its

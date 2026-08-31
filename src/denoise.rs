@@ -479,6 +479,7 @@ fn run_sidecar_carrying(
     // filters PYTHON*, so it was never the guard for that class. The user's
     // OWN environment still reaches the child: nothing calls env_clear.
     cmd.envs(crate::config::dotenv_child_env());
+    cmd.envs(crate::config::Config::sidecar_child_env());
     // `-E`: ignore PYTHON* environment variables — a cwd .env's
     // `PYTHONPATH=.` beside a hostile `numpy.py` is code execution at
     // import time (config.rs also protects those vars; two layers).

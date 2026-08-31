@@ -574,6 +574,25 @@ pub fn roots() -> Vec<PathBuf> {
     {
         out.push(PathBuf::from(dir));
     }
+    // macOS: Camera Raw keeps the same three-level layout, machine-wide and
+    // per-user. Both are spelled out as absolute literals BECAUSE macOS has no
+    // `ProgramData`/`APPDATA` analogue to derive them from — they are fixed OS
+    // locations, identical on every Mac, and `retain(is_dir)` below means an
+    // install without Camera Raw simply contributes nothing.
+    #[cfg(target_os = "macos")]
+    {
+        out.push(PathBuf::from("/Library/Application Support/Adobe/CameraRaw/LensProfiles"));
+        if let Some(home) = std::env::var_os("HOME") {
+            out.push(
+                Path::new(&home)
+                    .join("Library")
+                    .join("Application Support")
+                    .join("Adobe")
+                    .join("CameraRaw")
+                    .join("LensProfiles"),
+            );
+        }
+    }
     for var in ["ProgramData", "APPDATA"] {
         if let Ok(base) = std::env::var(var)
             && !base.is_empty()

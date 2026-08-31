@@ -65,6 +65,16 @@ pub struct LocalSettings {
     /// i.e. the historical cwd-relative `./out` — so an upgrade changes
     /// nothing. See [`delivery_root`] for what it does and does NOT cover.
     pub out_dir: Option<String>,
+    /// The Python interpreter the sidecars are launched with. Absent / blank ⇒
+    /// the platform default (see [`default_python_bin`]).
+    ///
+    /// `Trust::Destination` like every other program name, so a `.env` and an
+    /// ambient working-directory file still cannot supply it — the boundary
+    /// does not move. What changes is that the CENTRAL settings file can, and
+    /// that is the whole point: an app bundle launched from Finder inherits no
+    /// shell environment at all, so `AUTOSHADE_PYTHON` was unreachable for
+    /// exactly the users who need it (user ruling 2026-08-29, Q3).
+    pub python_bin: Option<String>,
 }
 
 /// Path to the local settings file — the per-user store root, so the SAME
@@ -795,13 +805,18 @@ pub(crate) const SETTINGS: &[Setting] = &[
     env_only("AUTOSHADE_CLAUDE_MODEL", Trust::Preference), // legacy alias for ANALYSIS_MODEL
     env_only("AUTOSHADE_CLAUDE_BIN", Trust::Destination),  // Command::new
     // --- python sidecars ------------------------------------------------------
-    env_only("AUTOSHADE_PYTHON", Trust::Destination), // Command::new
+    // Destination, and SETTABLE — from the central per-user settings file only
+    // (`Source::Trusted`), which is what `bound` means here. See the field's
+    // own doc on `LocalSettings`.
+    bound("AUTOSHADE_PYTHON", Trust::Destination, |s| &mut s.python_bin), // Command::new
     env_only("AUTOSHADE_DENOISE_SCRIPT", Trust::Destination), // that command's argv
     env_only("AUTOSHADE_SEGMENT_SCRIPT", Trust::Destination),
     env_only("AUTOSHADE_EMBED_SCRIPT", Trust::Destination),
     env_only("AUTOSHADE_CORRESPOND_SCRIPT", Trust::Destination),
     env_only("AUTOSHADE_DESCRIBE_SCRIPT", Trust::Destination),
     // A redirected weight cache is a poisoned-model path.
+    env_only("AUTOSHADE_WEIGHTS_DIR", Trust::Destination),
+    // The pre-M2 name for the line above, when it covered denoise alone.
     env_only("AUTOSHADE_DENOISE_CACHE", Trust::Destination),
     env_only("AUTOSHADE_DENOISE_MODEL", Trust::Preference),
     // --- store, tuning knobs ---------------------------------------------------
@@ -1308,12 +1323,23 @@ impl Config {
         // the exe.
         let denoise_script =
             env_val("AUTOSHADE_DENOISE_SCRIPT").unwrap_or_else(|| bundled_helper("python/denoise.py"));
-        let denoise_cache = env_val("AUTOSHADE_DENOISE_CACHE").unwrap_or_else(|| {
-            Path::new(&denoise_script)
-                .parent()
-                .map(|d| d.join("weights").to_string_lossy().into_owned())
-                .unwrap_or_else(|| bundled_helper("python/weights"))
-        });
+        // The weight cache is now ONE directory for every sidecar, not just
+        // denoise's (see `default_weights_dir`). `AUTOSHADE_DENOISE_CACHE`
+        // still answers, once, out loud: it is in shipped documentation, and a
+        // user who set it meant "keep the models here".
+        let denoise_cache = env_val("AUTOSHADE_WEIGHTS_DIR")
+            .or_else(|| {
+                env_val("AUTOSHADE_DENOISE_CACHE").inspect(|_| {
+                    if first_sighting_of("AUTOSHADE_DENOISE_CACHE") {
+                        eprintln!(
+                            "warning: AUTOSHADE_DENOISE_CACHE still works, but every sidecar \
+                             shares one weight cache now and the next release removes the old \
+                             name — rename it to AUTOSHADE_WEIGHTS_DIR."
+                        );
+                    }
+                })
+            })
+            .unwrap_or_else(|| default_weights_dir(&denoise_script));
         let segment_script =
             env_val("AUTOSHADE_SEGMENT_SCRIPT").unwrap_or_else(|| bundled_helper("python/segment.py"));
         let embed_script =
@@ -1389,7 +1415,11 @@ impl Config {
             ),
             analysis_base_url: analysis_base,
 
-            python_bin: env_val("AUTOSHADE_PYTHON").unwrap_or_else(|| "python".to_string()),
+            python_bin: pick(
+                &local.python_bin,
+                env_val("AUTOSHADE_PYTHON"),
+                default_python_bin(),
+            ),
             denoise_model: env_val("AUTOSHADE_DENOISE_MODEL")
                 .unwrap_or_else(|| "color_real_psnr".to_string()),
             denoise_script,
@@ -1419,11 +1449,230 @@ impl Config {
         self.analysis_provider.eq_ignore_ascii_case("api")
     }
 
+    /// Where every sidecar's model weights live — see [`default_weights_dir`].
+    ///
+    /// The FIELD still spells the pre-M2 name because renaming it reaches into
+    /// three files this batch does not own (`pipeline.rs`, `advisor/judge.rs`,
+    /// `advisor/openai.rs` each construct a `Config` literal naming it). The
+    /// rename is registered as a follow-up; this is the name every caller
+    /// added from M2 onwards uses, so the follow-up is a field rename and not
+    /// a hunt through call sites.
+    pub fn weights_dir(&self) -> &str {
+        &self.denoise_cache
+    }
+
+    /// `["--cache", <the shared weight cache>]` — the argv flag every sidecar
+    /// takes, resolved once from [`Config::weights_dir`] — or NOTHING.
+    ///
+    /// Appended at the three SPAWN points rather than hand-copied into the six
+    /// per-bridge argv builders, and that is a deliberate departure from this
+    /// module's usual "argv is built by the caller" shape. Where the weights
+    /// live is ONE policy that applies to every sidecar identically; carrying
+    /// it the other way would mean the same two arguments in six builders and
+    /// a new field in forty-nine option literals, which is the drift shape
+    /// this codebase keeps removing rather than adding.
+    ///
+    /// EMPTY when it would only restate what the sidecar already assumes. All
+    /// five scripts default `--cache` to `<their own dir>/weights`, so on an
+    /// unconfigured Windows install (or repo checkout) the flag would carry
+    /// the sidecar's own answer back to it: no behaviour change, but every
+    /// spawned argv on the platform this app already ships on would differ
+    /// from the one that shipped. The flag appears exactly when somebody has
+    /// actually chosen elsewhere — `AUTOSHADE_WEIGHTS_DIR`, or the `.app`
+    /// bundle rule in [`default_weights_dir`] — which is also the only case
+    /// where it changes anything.
+    pub fn weights_args(&self) -> Vec<std::ffi::OsString> {
+        if self.weights_dir() == script_relative_weights(&self.denoise_script) {
+            return Vec::new();
+        }
+        vec!["--cache".into(), self.weights_dir().into()]
+    }
+
+    /// Environment the PYTHON sidecars' children need beyond what they inherit.
+    ///
+    /// macOS only, one variable. BiRefNet routes through
+    /// `torchvision.ops.deform_conv2d`, torchvision ships no Metal kernel for
+    /// it, and without this torch RAISES on that operator instead of running
+    /// that one step on the CPU.
+    ///
+    /// Set on the child's own block and deliberately NOT added to the `.env`
+    /// pass-through allowlist: a `.env` arriving inside a photo pack has no
+    /// business deciding how a model executes, and the allowlist's membership
+    /// rule (compute behaviour only, nothing that loads code) is not the
+    /// question here — the question is who gets to answer it.
+    ///
+    /// UNVERIFIED, and disclosed as such in the README: whether this fallback
+    /// actually covers torchvision's own operator is a question only Apple
+    /// hardware answers. If it does not, `segment.py` already degrades to
+    /// U²-Net / CPU and says so rather than failing silently.
+    pub fn sidecar_child_env() -> Vec<(&'static str, &'static str)> {
+        if cfg!(target_os = "macos") {
+            vec![("PYTORCH_ENABLE_MPS_FALLBACK", "1")]
+        } else {
+            Vec::new()
+        }
+    }
+
     /// True when the image role points at a ChatGPT-subscription Codex bridge
     /// (OAuth preset) rather than a real OpenAI-compatible key (API preset).
     pub fn image_is_oauth(&self) -> bool {
         self.image_provider.eq_ignore_ascii_case("oauth")
     }
+}
+
+/// `<App>.app/Contents`, when `exe` sits at `…/Contents/MacOS/<exe>`.
+///
+/// Recognised by SHAPE rather than by `target_os`, so the two rules that
+/// depend on it — where sidecars are searched for, and where model weights are
+/// cached — can be pinned by test on a machine that has no `.app`. Both
+/// callers apply it only where it means something.
+fn app_bundle_contents(exe: &Path) -> Option<&Path> {
+    let dir = exe.parent()?;
+    if dir.file_name() != Some(std::ffi::OsStr::new("MacOS")) {
+        return None;
+    }
+    let contents = dir.parent()?;
+    (contents.file_name() == Some(std::ffi::OsStr::new("Contents"))).then_some(contents)
+}
+
+/// Where every sidecar keeps its downloaded model weights.
+///
+/// ONE answer for all five. The Python side has always defaulted `--cache` to
+/// `<script dir>/weights` and only `denoise.rs` ever overrode it, which was
+/// harmless right up until the script dir became read-only.
+///
+/// Inside a macOS `.app` the scripts live in `Contents/Resources/python/`, and
+/// that is the wrong place for roughly 1.5 GB of downloaded model: the bundle
+/// is code-signed, so writing into it invalidates the signature and Gatekeeper
+/// refuses the NEXT launch — an app that breaks itself the first time the user
+/// presses an AI button. It is also what a user drags to the Trash. The store
+/// root is the writable, per-user, survives-an-upgrade place this app already
+/// owns.
+///
+/// Everywhere else the answer is unchanged, deliberately: an existing Windows
+/// install or repo checkout keeps the cache it already downloaded.
+fn default_weights_dir(script: &str) -> String {
+    let bundled = cfg!(target_os = "macos")
+        && env::current_exe().is_ok_and(|e| app_bundle_contents(&e).is_some());
+    if bundled {
+        return crate::store::store_root().join("weights").to_string_lossy().into_owned();
+    }
+    script_relative_weights(script)
+}
+
+/// `<script dir>/weights` — the default the five Python sidecars apply to
+/// `--cache` themselves when the argv carries no such flag.
+///
+/// Spelled here so [`Config::weights_args`] can recognise its own answer and
+/// stay silent, which is what keeps an unconfigured install's argv exactly as
+/// it was before the weight cache became one shared policy.
+fn script_relative_weights(script: &str) -> String {
+    Path::new(script)
+        .parent()
+        .map(|d| d.join("weights").to_string_lossy().into_owned())
+        .unwrap_or_else(|| bundled_helper("python/weights"))
+}
+
+/// The interpreter name used when nothing names one.
+///
+/// Windows keeps `python` — the launcher every Windows install ships, and the
+/// spelling every existing setup already works with. Everywhere else it is
+/// `python3`: macOS removed `/usr/bin/python` in 12.3 and most Linux
+/// distributions dropped the unversioned name years earlier, so the old
+/// constant could only ever fail there.
+pub fn default_python_bin() -> &'static str {
+    if cfg!(windows) { "python" } else { "python3" }
+}
+
+/// Fixed, absolute locations a Python 3 is installed at, in priority order.
+///
+/// NOT a `PATH` search, and deliberately so. This list exists BECAUSE a
+/// Finder-launched bundle has no useful `PATH`, and reading the one it does
+/// have — or the working directory — would reintroduce the ambient-input
+/// problem the whole trust table is built around. Every entry is a system or
+/// package-manager location an installer owns; a user whose interpreter lives
+/// somewhere else types the path, which is what the field is for.
+#[cfg(target_os = "macos")]
+pub const PYTHON_CANDIDATES: &[&str] = &[
+    "/opt/homebrew/bin/python3",                                     // Homebrew, Apple silicon
+    "/usr/local/bin/python3",                                        // Homebrew, Intel
+    "/Library/Frameworks/Python.framework/Versions/Current/bin/python3", // python.org installer
+    // LAST on purpose: on a Mac with no developer tools this is a stub that
+    // asks to install them rather than running. Reached only when nothing
+    // above answered, which is a machine that needs that prompt anyway.
+    "/usr/bin/python3",
+];
+
+/// Nothing to probe: Windows resolves `python` through its own launcher, and a
+/// Linux `python3` is on `PATH` by construction.
+#[cfg(not(target_os = "macos"))]
+pub const PYTHON_CANDIDATES: &[&str] = &[];
+
+/// Does `bin` actually run? Asked by executing `--version`, because "the file
+/// is there" is not the question a user pressing an AI button is asking — the
+/// macOS developer-tools stub exists, and does not work.
+///
+/// Never inherits this process's stdio: the windowed build has no console, and
+/// a sidecar probe writing to one is how a GUI ends up with a stray terminal.
+pub fn python_runs(bin: &str) -> bool {
+    if bin.trim().is_empty() {
+        return false;
+    }
+    std::process::Command::new(bin)
+        .arg("--version")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success())
+}
+
+/// The first [`PYTHON_CANDIDATES`] entry that exists AND runs, or `None`.
+///
+/// `None` is a real answer the caller must show as one — "we looked in the
+/// standard places and found nothing" is actionable, a silently unchanged
+/// field is not.
+pub fn probe_python_bin() -> Option<String> {
+    PYTHON_CANDIDATES
+        .iter()
+        .find(|c| Path::new(c).exists() && python_runs(c))
+        .map(|c| (*c).to_string())
+}
+
+/// The directories [`bundled_helper`] searches, for an executable at `exe`.
+///
+/// Split out as a pure function over an explicit `app_bundles` flag — the same
+/// shape `store::key_from_spelling` uses for its platform rule — so the macOS
+/// behaviour can be pinned by test on a machine that has no `.app`, and so the
+/// Windows walk can be pinned as unchanged in the same breath.
+///
+/// Inside a macOS application bundle the search STOPS AT THE BUNDLE. The
+/// executable sits at `<App>.app/Contents/MacOS/<app>`, so the third ancestor
+/// of its directory is whatever folder the `.app` was dragged into — ~/Downloads,
+/// beside the zip it came out of — and a `python/segment.py` dropped there
+/// satisfies `exists()`. That is precisely the planted-script hole
+/// [`bundled_helper`]'s own doc says it closed, reopened by a directory layout
+/// that postdates it. `Contents/Resources` is added instead: where the bundle
+/// keeps its own sidecars.
+fn bundled_helper_roots_for(exe: &Path, app_bundles: bool) -> Vec<PathBuf> {
+    let Some(dir) = exe.parent() else { return Vec::new() };
+    if app_bundles
+        && let Some(contents) = app_bundle_contents(exe)
+    {
+        return vec![dir.to_path_buf(), contents.join("Resources")];
+    }
+    let mut roots = vec![dir.to_path_buf()];
+    let mut up = dir;
+    for _ in 0..3 {
+        match up.parent() {
+            Some(p) => {
+                roots.push(p.to_path_buf());
+                up = p;
+            }
+            None => break,
+        }
+    }
+    roots
 }
 
 /// Resolve a bundled helper (sidecar script / weight cache) against the
@@ -1437,22 +1686,9 @@ impl Config {
 /// "not found at <path>" error stays actionable — and never names a path an
 /// untrusted pack could satisfy.
 fn bundled_helper(rel: &str) -> String {
-    let mut roots: Vec<PathBuf> = Vec::new();
-    if let Ok(exe) = env::current_exe()
-        && let Some(dir) = exe.parent()
-    {
-        roots.push(dir.to_path_buf());
-        let mut up = dir;
-        for _ in 0..3 {
-            match up.parent() {
-                Some(p) => {
-                    roots.push(p.to_path_buf());
-                    up = p;
-                }
-                None => break,
-            }
-        }
-    }
+    let roots = env::current_exe()
+        .map(|exe| bundled_helper_roots_for(&exe, cfg!(target_os = "macos")))
+        .unwrap_or_default();
     for root in &roots {
         let cand = root.join(rel);
         if cand.exists() {
@@ -1513,6 +1749,11 @@ mod tests {
             // every export and every pixel master is WRITTEN to. Destination,
             // so it is stripped with the endpoints.
             out_dir: Some("D:/attacker-drop".into()),
+            // The THIRD thing, and the one this batch made writable at all: the
+            // interpreter every sidecar is launched with. Destination, so an
+            // ambient file loses it exactly like the endpoints above — becoming
+            // settable from the CENTRAL file must not make it settable here.
+            python_bin: Some("D:/attacker-drop/python.exe".into()),
         };
         assert!(
             planted.names_beyond(Source::WorkingDirFile),
@@ -1525,6 +1766,7 @@ mod tests {
         assert_eq!(safe.image_api_key, None, "an ambient file supplied the image key");
         assert_eq!(safe.analysis_api_key, None, "an ambient file supplied the analysis key");
         assert_eq!(safe.out_dir, None, "an ambient file chose where the photos are written");
+        assert_eq!(safe.python_bin, None, "an ambient file chose which program is executed");
 
         // …and it is a scalpel, not a reset: everything else still applies, so
         // the pre-store cwd file keeps working as the migration affordance it
@@ -1595,8 +1837,11 @@ mod tests {
     /// verbatim (`advisor/claude.rs`, `denoise.rs`, `segment.rs`) and the two
     /// script variables become that command's argv — so the very scenario the
     /// comment describes, a `.env` inside a shared archive of photos, still
-    /// yielded arbitrary process execution. `.env` is the only route to these
-    /// (`LocalSettings` has no such field), so this list is the whole guard.
+    /// yielded arbitrary process execution. A `.env` is still refused every one
+    /// of them; `AUTOSHADE_PYTHON` is the one that also has a `LocalSettings`
+    /// field, and that field is reachable only from the CENTRAL settings file
+    /// (`Source::Trusted`) — which is what the two `may_supply` assertions
+    /// below actually check, ambient source by ambient source.
     ///
     /// Now stated as POLICY against the table rather than as a copy of it:
     /// the old version re-derived its list from the constant it was guarding,
@@ -1654,12 +1899,222 @@ mod tests {
         // And the positional read is gone. `pre(i)` indexed the protected
         // array, so removing one name shifted every later index onto the wrong
         // variable — the exact edit this round had to make.
-        let src = include_str!("config.rs");
-        let non_test = src.split("#[cfg(test)]").next().unwrap();
+        let non_test = crate::source_before_tests(include_str!("config.rs"));
         assert!(
             !non_test.contains("pre(0)") && !non_test.contains("AMBIENT_UNSAFE_VARS["),
             "config resolution regained a positional read of the protected list"
         );
+    }
+
+    /// A sidecar search inside a macOS app bundle must never reach the folder
+    /// the bundle was dragged INTO.
+    ///
+    /// The executable sits at `<App>.app/Contents/MacOS/<app>`, so the third
+    /// ancestor of its directory is the download folder — beside the zip the
+    /// app came out of, and beside anything else that arrived the same way. A
+    /// `python/segment.py` dropped there satisfied `exists()`: the planted
+    /// script hole [`bundled_helper`]'s own doc says it closed, reopened by a
+    /// directory layout that postdates it.
+    #[test]
+    fn the_sidecar_search_never_leaves_a_mac_app_bundle() {
+        let dropped_in = "/dl"; // synthetic fixture root; nothing on disk is read
+        let exe = PathBuf::from(dropped_in).join("AutoShade.app/Contents/MacOS/autoshade");
+        let roots = bundled_helper_roots_for(&exe, true);
+        assert_eq!(
+            roots,
+            vec![
+                PathBuf::from(dropped_in).join("AutoShade.app/Contents/MacOS"),
+                PathBuf::from(dropped_in).join("AutoShade.app/Contents/Resources"),
+            ],
+            "inside a bundle the search is the bundle's own two directories"
+        );
+        assert!(
+            !roots.iter().any(|r| r == Path::new(dropped_in)),
+            "the folder the .app was dragged into is exactly where an untrusted pack lands"
+        );
+    }
+
+    /// …and OFF macOS the walk is the one it has always been: the executable's
+    /// directory plus three ancestors, which is what reaches the repo root
+    /// from `target/release` and from `target/debug/deps`.
+    #[test]
+    fn the_sidecar_search_outside_a_bundle_still_climbs_three_ancestors() {
+        // Synthetic fixture paths; nothing on disk is read.
+        assert_eq!(
+            bundled_helper_roots_for(Path::new("/a/b/c/d/e/app"), false),
+            vec![
+                PathBuf::from("/a/b/c/d/e"),
+                PathBuf::from("/a/b/c/d"),
+                PathBuf::from("/a/b/c"),
+                PathBuf::from("/a/b"),
+            ]
+        );
+        // With the bundle rule off, even a bundle-SHAPED path walks out: no
+        // platform but macOS may change what this function answers.
+        assert!(
+            bundled_helper_roots_for(Path::new("/x/App.app/Contents/MacOS/app"), false)
+                .contains(&PathBuf::from("/x"))
+        );
+    }
+
+    /// The interpreter became SETTABLE this batch. It must not have become
+    /// settable from anywhere new.
+    ///
+    /// `bound` adds exactly one source — the central per-user settings file,
+    /// which is `Source::Trusted` — and the point of the assertions below is
+    /// that the two AMBIENT sources still lose it. A photo pack's `.env`, and
+    /// a settings file sitting in a working directory beside someone's photos,
+    /// choose no program this app runs.
+    #[test]
+    fn the_python_interpreter_is_settable_only_from_the_trusted_settings_file() {
+        assert_eq!(trust_of("AUTOSHADE_PYTHON"), Trust::Destination);
+        assert!(Source::Trusted.may_supply(Trust::Destination));
+        assert!(!Source::DotEnv.may_supply(Trust::Destination));
+        assert!(!Source::WorkingDirFile.may_supply(Trust::Destination));
+        // …and the binding really reaches the FIELD, so a restricted load
+        // strips it rather than merely declining to read it later.
+        let planted =
+            LocalSettings { python_bin: Some("planted-interpreter".into()), ..Default::default() };
+        assert_eq!(planted.clone().restricted_to(Source::DotEnv).python_bin, None);
+        assert_eq!(planted.clone().restricted_to(Source::WorkingDirFile).python_bin, None);
+        assert_eq!(
+            planted.clone().restricted_to(Source::Trusted).python_bin,
+            Some("planted-interpreter".into()),
+            "the app's own Settings panel writes that file — which is the whole feature"
+        );
+        // The warning and the stripping are one answer (see `names_beyond`).
+        assert!(planted.names_beyond(Source::DotEnv));
+    }
+
+    /// The default interpreter, and the fixed list that stands in for a `PATH`.
+    #[test]
+    fn the_default_interpreter_is_the_one_the_platform_actually_ships() {
+        assert_eq!(default_python_bin(), if cfg!(windows) { "python" } else { "python3" });
+        // Absolute-only, always: the list exists BECAUSE a Finder-launched
+        // bundle has no useful `PATH`, so reading one — or the working
+        // directory — would reintroduce the ambient input it replaces.
+        assert!(PYTHON_CANDIDATES.iter().all(|c| Path::new(c).is_absolute()));
+        assert_eq!(
+            PYTHON_CANDIDATES.is_empty(),
+            !cfg!(target_os = "macos"),
+            "only macOS needs the probe: Windows has its launcher, Linux has python3 on PATH"
+        );
+        // Windows cannot execute the macOS arm, so it asserts the arm EXISTS —
+        // deleting it is a silent no-op here and a dead probe there. The test
+        // module comes off first: both needles appear in the assertions below,
+        // so searching the whole file would match this test rather than the
+        // candidate list it is about.
+        let src = crate::source_before_tests(include_str!("config.rs"));
+        assert!(src.contains("homebrew"), "the Apple-silicon Homebrew candidate");
+        assert!(src.contains("Python.framework"), "the python.org installer candidate");
+    }
+
+    /// One weight cache, reached the same way by every sidecar — and named on
+    /// the argv only when it is not the one the sidecar would have picked.
+    #[test]
+    fn the_weight_cache_is_named_only_when_it_is_not_the_sidecars_own_default() {
+        let mut cfg = Config::load();
+        // Unconfigured: the resolved cache IS `<script dir>/weights`, so the
+        // spawned argv must be the pre-M2 argv, flag and all absent.
+        cfg.denoise_cache = script_relative_weights(&cfg.denoise_script);
+        assert!(
+            cfg.weights_args().is_empty(),
+            "restating the sidecar's own default would change every existing install's argv"
+        );
+        // Chosen elsewhere (env var, or the .app bundle rule): now it is the
+        // only way the sidecar could learn where to write.
+        cfg.denoise_cache = "/elsewhere/weights".into();
+        let args = cfg.weights_args();
+        assert_eq!(args.len(), 2);
+        assert_eq!(args[0], std::ffi::OsString::from("--cache"));
+        assert_eq!(args[1], std::ffi::OsString::from(cfg.weights_dir()));
+        // The new name is classified; the old one still is too, because it
+        // still resolves for one more version.
+        assert_eq!(trust_of("AUTOSHADE_WEIGHTS_DIR"), Trust::Destination);
+        assert_eq!(trust_of("AUTOSHADE_DENOISE_CACHE"), Trust::Destination);
+    }
+
+    /// The bundle rule that makes the flag above worth passing at all.
+    ///
+    /// Inside a `.app` the scripts sit in a code-signed `Contents/Resources`,
+    /// so the sidecars' own script-relative default would write ~1.5 GB into a
+    /// signed bundle: the signature breaks, and Gatekeeper refuses the NEXT
+    /// launch. An app that bricks itself the first time an AI button is
+    /// pressed is not a degraded feature, it is a broken install.
+    #[test]
+    fn a_signed_bundle_never_becomes_the_weight_cache() {
+        // Synthetic fixture paths; nothing on disk is read.
+        assert!(
+            app_bundle_contents(Path::new("/x/AutoShade.app/Contents/MacOS/autoshade")).is_some()
+        );
+        for plain in [
+            "/x/target/release/autoshade",
+            "/x/Contents/autoshade",
+            "/x/MacOS/autoshade",
+            "/x/autoshade",
+        ] {
+            assert!(
+                app_bundle_contents(Path::new(plain)).is_none(),
+                "{plain} is not a bundle and must keep the beside-the-script cache"
+            );
+        }
+        // …and the two rules that read it agree about what a bundle is.
+        assert_eq!(
+            bundled_helper_roots_for(Path::new("/x/AutoShade.app/Contents/MacOS/autoshade"), true)
+                .len(),
+            2,
+            "a bundle contributes its own two directories and no ancestor"
+        );
+    }
+
+    /// The Metal fallback is macOS-only, and a `.env` may not set it.
+    ///
+    /// BiRefNet routes through torchvision's `deform_conv2d`, which has no
+    /// Metal kernel — without the fallback torch raises rather than running
+    /// that one operator on the CPU. It reaches the child on the child's own
+    /// block, never through the `.env` pass-through allowlist: a `.env`
+    /// arriving inside a photo pack does not decide how a model executes.
+    #[test]
+    fn the_metal_fallback_is_set_by_this_app_and_never_by_an_env_file() {
+        let env = Config::sidecar_child_env();
+        assert_eq!(env.len(), usize::from(cfg!(target_os = "macos")));
+        if cfg!(target_os = "macos") {
+            assert_eq!(env[0], ("PYTORCH_ENABLE_MPS_FALLBACK", "1"));
+        }
+        assert!(
+            !CHILD_ENV_PASSTHROUGH.contains(&"PYTORCH_ENABLE_MPS_FALLBACK"),
+            "a photo pack's .env must not be able to turn this off or on"
+        );
+    }
+
+    /// Six device decisions, one rule — checked in the sidecars' own source.
+    ///
+    /// Each of these used to spell `"cuda" if torch.cuda.is_available() else
+    /// "cpu"` by hand, which is exactly how five scripts end up disagreeing
+    /// about a platform the sixth already learned about. This is the pin that
+    /// keeps a new sidecar (or a revert) from quietly re-adding the seventh
+    /// copy, and it is checked from Rust because Rust is what the battery runs.
+    #[test]
+    fn no_sidecar_picks_its_device_by_hand_any_more() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("python");
+        for name in ["segment.py", "embed.py", "denoise.py", "correspond.py", "describe.py"] {
+            let src = std::fs::read_to_string(dir.join(name))
+                .unwrap_or_else(|e| panic!("{name} must ship beside the others: {e}"));
+            assert!(
+                src.contains("from _device import pick_device"),
+                "{name} must use the shared device rule"
+            );
+            assert!(
+                !src.contains("torch.cuda.is_available()"),
+                "{name} still decides its own device — the drift _device.py exists to end"
+            );
+            assert!(src.contains(r#""--cache""#), "{name} must accept the shared weight cache");
+            assert!(src.contains(r#""--cpu""#), "{name} must accept a forced CPU run");
+        }
+        // The shared rule itself must actually try Metal, or routing six sites
+        // through it bought nothing.
+        let shared = std::fs::read_to_string(dir.join("_device.py")).unwrap();
+        assert!(shared.contains("mps.is_available()"), "cuda -> mps -> cpu is the order");
     }
 
     /// The table is only a single source of truth if nothing resolves around
@@ -1668,8 +2123,7 @@ mod tests {
     /// `Preference` and a `.env` can set it.
     #[test]
     fn the_capability_table_classifies_every_variable_this_file_resolves() {
-        let src = include_str!("config.rs");
-        let non_test = src.split("#[cfg(test)]").next().unwrap();
+        let non_test = crate::source_before_tests(include_str!("config.rs"));
         let mut unclassified: Vec<&str> = Vec::new();
         let mut rest = non_test;
         while let Some(i) = rest.find("\"AUTOSHADE_") {

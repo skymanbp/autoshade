@@ -33,6 +33,18 @@ use i18n::{tr, trf, Lang};
 
 mod model;
 mod persist;
+// The PORTABLE half of the quit guard: its state machine, and the
+// process-wide slots the delegate method reads through. Compiled and tested on
+// every platform on purpose — the Windows battery is what gates this decision
+// — but its non-test caller is `macos.rs`, so off macOS the entry points are
+// genuinely uncalled and the compiler is right to say so. The allow is scoped
+// to exactly that case: on macOS real dead code here is still caught.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+mod quit;
+// The Objective-C half of the quit guard. `quit.rs` above is its portable
+// state machine and is compiled (and tested) on every platform.
+#[cfg(target_os = "macos")]
+mod macos;
 mod theme;
 mod util;
 mod actions;
@@ -56,6 +68,10 @@ use app::*;
 /// and (Windows) a native message box points the user at it.
 fn install_panic_reporter() {
     let default = std::panic::take_hook();
+    // Captured HERE, where this is provably the main thread: `main()` calls
+    // this before anything else. The macOS dialog below is main-thread-only.
+    #[cfg(target_os = "macos")]
+    let main_thread = std::thread::current().id();
     std::panic::set_hook(Box::new(move |info| {
         // The claim must match the outcome (review R12-10): on a first
         // launch the store root may not exist yet, and a failed write must
@@ -64,8 +80,9 @@ fn install_panic_reporter() {
         let _ = std::fs::create_dir_all(&root);
         let log = root.join("panic.log");
         let wrote = std::fs::write(&log, format!("AutoShade crashed: {info}\n").as_bytes()).is_ok();
-        #[cfg(windows)]
-        message_box(&if wrote {
+        // Built once, shown by whichever dialog this platform has. The claim
+        // still has to match the outcome, which is what `wrote` decides.
+        let msg = if wrote {
             format!(
                 "AutoShade hit an internal error and must close.\n\n{info}\n\nA report was written to:\n{}",
                 log.display()
@@ -75,9 +92,29 @@ fn install_panic_reporter() {
                 "AutoShade hit an internal error and must close.\n\n{info}\n\n(a report could NOT be written to {})",
                 log.display()
             )
-        });
-        #[cfg(not(windows))]
-        let _ = wrote;
+        };
+        #[cfg(windows)]
+        message_box(&msg);
+        // macOS has exactly the problem Windows has — a release build is
+        // windowed, so the panic's stderr reaches nobody and the window simply
+        // vanishes — and rfd is already in the tree for the file pickers, so
+        // this costs no new dependency.
+        //
+        // MAIN THREAD ONLY. rfd's macOS backend dispatches onto the main queue
+        // and blocks for the answer, so raising it from a worker while the main
+        // thread is itself unwinding would hang a process that was merely
+        // crashing. A worker panic still writes `panic.log` and still reaches
+        // the default hook — it just does not get a dialog.
+        #[cfg(target_os = "macos")]
+        if std::thread::current().id() == main_thread {
+            let _ = rfd::MessageDialog::new()
+                .set_level(rfd::MessageLevel::Error)
+                .set_title("AutoShade")
+                .set_description(&msg)
+                .show();
+        }
+        #[cfg(not(any(windows, target_os = "macos")))]
+        let _ = &msg;
         default(info);
     }));
 }
@@ -97,6 +134,31 @@ fn message_box(text: &str) {
     // SAFETY: NUL-terminated buffers, live across the synchronous call.
     unsafe { message_box_w(0, wide.as_ptr(), title.as_ptr(), MB_OK_ICONERROR) };
 }
+
+/// The eframe STORAGE KEY — not a display name; the window title is set on the
+/// viewport. With `persistence_path` unset (every real launch) eframe derives
+/// the prefs file from THIS string: `%APPDATA%\<key>\data\app.ron` on Windows
+/// (eframe 0.29 glow_integration.rs:200 -> file_storage.rs:37).
+///
+/// Windows keeps the pre-rename spelling. Renaming it would silently abandon
+/// every existing user's window geometry, last library, view mode, export
+/// options and theme, with nothing to say so — the same class of loss the
+/// develop-store adoption exists to prevent, and the same reason the installer
+/// keeps its AppId. Moving those prefs is a follow-up with its own migration;
+/// renaming the key on its own is only a reset.
+///
+/// macOS is the exception, and only because it has nothing to lose: this is its
+/// first release, so there are no prefs to abandon — while KEEPING the old
+/// spelling there would cost something real. eframe derives
+/// `Library/Application Support/<key>/data/app.ron`, so "Autoshop" would put a
+/// folder of that name beside the develop store: the very name
+/// `store::ADOPT_PRE_RENAME` refuses to touch, and on case-insensitive APFS
+/// indistinguishable from the pre-rename store directory. One name, chosen
+/// once, before any Mac user has either.
+#[cfg(target_os = "macos")]
+const STORAGE_KEY: &str = "AutoShade";
+#[cfg(not(target_os = "macos"))]
+const STORAGE_KEY: &str = "Autoshop";
 
 fn app_icon() -> egui::IconData {
     let img = image::load_from_memory(include_bytes!("../../../assets/icon_256.png"))
@@ -134,18 +196,9 @@ fn main() -> eframe::Result<()> {
         ..Default::default()
     };
     eframe::run_native(
-        // A STORAGE KEY, not a display name — the window title is set above,
-        // on the viewport. With `persistence_path` unset (every real launch;
-        // it is only set under the sandbox variable) eframe derives the prefs
-        // file from THIS string: `%APPDATA%\<name>\data\app.ron`
-        // (eframe 0.29 glow_integration.rs:200 -> file_storage.rs:37). Renaming
-        // it would silently abandon every existing user's window geometry, last
-        // library, view mode, export options and theme, with nothing to say so
-        // — the same class of loss the develop-store adoption exists to
-        // prevent, and the same reason the installer keeps its AppId. Moving
-        // those prefs is a follow-up with its own migration; renaming the key
-        // on its own is only a reset.
-        "Autoshop",
+        // See [`STORAGE_KEY`]: a storage key, not a display name, and why it
+        // keeps the pre-rename spelling everywhere it has users.
+        STORAGE_KEY,
         opts,
         Box::new(|cc| {
             install_fonts(&cc.egui_ctx); // embedded symbol subsets + system CJK

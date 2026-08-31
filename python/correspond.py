@@ -72,6 +72,12 @@ import json
 import os
 import sys
 
+# The shared device rule. `_device.py` ships beside this script in `python/`,
+# the same way `segment.py` requires its ADE20K class table to; `sys.path[0]`
+# is the running script's own directory, which the Rust side resolves against
+# the program's tree and never the working directory.
+from _device import pick_device
+
 # The download/verify half of the sidecar contract, imported rather than
 # copied - same rule as embed.py: a relocated correspond.py without
 # denoise.py beside it fails HERE with a sentence.
@@ -391,7 +397,7 @@ def main() -> None:
     import numpy as np
     import torch
 
-    device = "cpu" if a.cpu or not torch.cuda.is_available() else "cuda:0"
+    device = pick_device(a.cpu, "cuda:0")
     unet, vae, text_encoder, tokenizer, sched = load_models(a.cache, device)
     log(f"device={device} model={MODEL['repo']} t={TIMESTEP} ensemble={a.ensemble}")
 

@@ -1335,12 +1335,17 @@ than the pre-call state; model weights remain outside the repository.
 - The 61 MP RAW probe measured `151 MB` peak commit for decode,
   `1771 MB` for calibration/render preparation, and `1766 MB` for the
   full-resolution render tail; the combined process peak remained `1771 MB`.
-- The release battery is **1207 library (1196 pass + 11 `#[ignore]`d forensic
-  probes) / 22 CLI / 151 GUI / 2+2 contract** tests. Environment-gated real
+- The release battery is **1219 library (1208 pass + 11 `#[ignore]`d forensic
+  probes) / 22 CLI / 157 GUI / 2+2 contract** tests. Environment-gated real
   Lightroom, brush-table, and RAW-zoo suites are additional and are not
   smuggled into the ordinary count.
-- The build workflow checks default and GUI feature sets on Ubuntu and macOS;
-  the published v1.0.0 binary artifacts are Windows builds.
+- The build workflow checks default and GUI feature sets on Ubuntu and macOS.
+  The published binary artifacts are Windows builds plus a universal macOS CLI
+  archive; the macOS `.app` bundle is built, linted and verified on every tag
+  but has not been published in a release yet.
+- Apple-silicon GPU inference (Metal/MPS) is selected by `python/_device.py`
+  and is **unmeasured**: no Mac has run this build, so no timing, no memory
+  ceiling, and no `PYTORCH_ENABLE_MPS_FALLBACK` coverage claim is made for it.
 - `scripts/check_docs.py` re-derives version, extension, camera, dependency,
   toolchain, and test-battery claims from the tree. A moved claim is a failure,
   not a silent skip.
@@ -1358,6 +1363,12 @@ than the pre-call state; model weights remain outside the repository.
   `sidecar_wrote` contract.
 - `src/jobs.rs` and `src/decode.rs` — memory probes, concurrency budget, and
   RAW admission.
+- `src/bin/gui/quit.rs`, `src/bin/gui/macos.rs` and
+  `scripts/build_app_bundle.sh` — the ⌘Q state machine, its AppKit delivery,
+  and the ad-hoc signed application bundle.
+- `python/_device.py` and `python/requirements-{common,cuda,macos}.txt` — the
+  one cuda/mps/cpu ladder every sidecar reads, and the per-platform dependency
+  sets.
 - `.github/workflows/build.yml`, `.github/workflows/release.yml` and
   `scripts/check_docs.py` — CI and document
   drift gates.

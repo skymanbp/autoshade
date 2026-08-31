@@ -1,0 +1,31 @@
+# Sidecar dependencies that are the same on every platform.
+#
+# Install this WITH one of its siblings, never on its own — `torch` and
+# `torchvision` are deliberately absent here because the wheel you need depends
+# on the machine, and that is the one choice a shared file must not make:
+#
+#   Windows / Linux with an NVIDIA card:  pip install -r requirements-cuda.txt
+#   macOS (Apple silicon or Intel):       pip install -r requirements-macos.txt
+#
+# Versions are unpinned, matching what README.md has always documented. The
+# sidecars pin what actually has to be reproducible — the MODEL WEIGHTS, by
+# sha256 and byte count, at their point of download.
+
+# SCUNet denoise (python/denoise.py)
+opencv-python
+numpy
+einops
+requests
+
+# BiRefNet subject masks (python/segment.py); torchvision is per-platform
+timm
+
+# OneFormer sky masks, SAM 2.1 object masks, SigLIP 2 embeddings, Qwen3-VL
+# descriptions (segment.py / embed.py / describe.py)
+transformers
+
+# Cross-image correspondence, Stable Diffusion 2.1 features (python/correspond.py)
+diffusers
+
+# U^2-Net, the subject fallback tier when the BiRefNet stack is unavailable
+rembg

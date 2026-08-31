@@ -92,9 +92,16 @@
 > experimental generative edits, an optional pixel-**heal** retouch mode (§4.7)
 > the deterministic look **reverse-fit** (§4.8) and the local server's refusal
 > model (§4.9).
-> 1207 library + 22 CLI + 151 GUI + 2+2 contract tests are enumerated in the GUI
-> build; the library result is 1196 pass + 11 `#[ignore]`d forensic probes
-> (counts refreshed 2026-08-31: the AutoShade rename added 14 named tests by
+> 1219 library + 22 CLI + 157 GUI + 2+2 contract tests are enumerated in the GUI
+> build; the library result is 1208 pass + 11 `#[ignore]`d forensic probes
+> (counts refreshed 2026-08-31: the macOS port M1-M3 added 18 named tests by
+> name against `df62554` — 12 library (8 `config` for the interpreter, the
+> bundle boundary and the weight cache, 3 `store` for the per-platform store
+> name and the off-Windows device-path refusal, 1 `lib` for the source-cut
+> rule those platform assertions depend on) and 6 GUI (5 `quit` for the ⌘Q
+> state machine, 1 `i18n` for the platform modifier label) — so library
+> 1207→1219 and GUI 151→157, with CLI and contract unchanged;
+> before it, the AutoShade rename added 14 named tests by
 > name against `e33206b` — 6 for the environment alias door, 5 for the
 > pre-rename develop-store adoption, 3 for the pre-rename on-disk XMP tokens —
 > and renamed one (`xmp::tests::legacy_autoshop_sidecar_…` →
@@ -1092,7 +1099,8 @@ nudge the last 10%" workflow.
 
 Since v0.13.0 AutoShade does **not** write it next to the photo: the source
 library is read-only, so the projection lands in the per-user develop store
-(`<AUTOSHADE_DATA_DIR | %LOCALAPPDATA%/autoshade | $XDG_DATA_HOME/autoshade |
+(`<AUTOSHADE_DATA_DIR | %LOCALAPPDATA%/autoshade |
+$HOME/Library/Application Support/AutoShade | $XDG_DATA_HOME/autoshade |
 $HOME/.local/share/autoshade>/develops/<stem>-<hash of the absolute
 path>/<stem>.xmp` — see `store::store_root_with_trust`, and the trust bullet in
 §3 for why the shared-temp last resort is labelled rather than
@@ -2438,6 +2446,59 @@ setting cannot retroactively change). `guard_readonly` keeps the literal `./out`
 as an output area alongside the configured root, so repointing the root does not
 make a `match` on an older export suddenly refused.
 
+### 4.11 macOS: the bundle, the quit guard, and two spellings of one store
+
+Three facts about a Mac break assumptions this app was built on, and each is
+answered in one place rather than sprinkled through the call sites.
+
+**⌘Q is not a window close.** AppKit terminates the process without ever
+asking the window, so the unsaved-work prompt every other exit path goes
+through was simply never reached. The guard installs
+`applicationShouldTerminate:` on the delegate winit already owns, answers
+`NSTerminateCancel` when the app is busy or dirty, and then asks the app to
+run its ordinary close path — the SAME prompt, not a second one. The decision
+itself is `quit::QuitState`, a pure function of three inputs (busy, the
+user's already-given answer, unsaved work) with the expensive walk of the
+variant strip behind a closure, so the two cheap inputs decide without paying
+for it. It is compiled and unit-tested on every platform; only
+`class_addMethod` is `#[cfg(target_os = "macos")]`.
+
+**A signed bundle is read-only.** Inside `<App>.app/Contents/` the sidecars
+ship at `Resources/python/`, so `config::bundled_helper` stops its ancestor
+walk AT the bundle instead of climbing out of it into `/Applications`. Model
+weights must NOT land there: writing into a signed bundle invalidates the
+signature and Gatekeeper refuses the NEXT launch, so `default_weights_dir`
+sends them to the develop store instead. That override travels as one
+`--cache` argument appended at the three spawn points, and it is appended only
+when it DISAGREES with the sidecar's own script-relative default — an
+unconfigured Windows install spawns the argv it always did, byte for byte.
+
+**The store root is spelled differently per platform, on purpose.** The
+develop store is `Library/Application Support/AutoShade` on macOS, because
+that directory holds applications' display names, and lowercase `autoshade`
+elsewhere, because those roots hold existing users' data and renaming a
+directory named by a hash of an absolute path orphans every develop under it.
+For the same reason the one-time adoption of a pre-rename `autoshop` store is
+DISABLED on macOS: no Mac ever ran the old name, APFS is case-insensitive by
+default, and an adoption firing there could only rename a directory belonging
+to somebody else's program. Both spellings, and the opt-out, are pinned by a
+test that asserts the arms it cannot execute still EXIST in the source —
+deleting the macOS arm is otherwise a silent no-op on the machine the battery
+runs on.
+
+The GUI's own preferences (window size, theme, language) keep the eframe
+storage key `Autoshop` on Windows — it names an existing roaming-profile
+folder, and changing it would silently reset every current user's window — and
+use `AutoShade` on macOS, where there is nothing to preserve.
+
+`scripts/build_app_bundle.sh` assembles the bundle: both binaries, the
+sidecars, an `.icns` rendered from the shipped PNG, a hand-written
+`Info.plist` (`plutil`-linted, its minimum system version checked against the
+deployment target the binaries were actually built for), and an inside-out
+ad-hoc `codesign`. Ad-hoc signing is a real limitation and is documented as
+one in the README: it costs the user one 「Open Anyway」, and notarisation is
+not scheduled.
+
 ## 5. Why Rust — and the whole stack, named
 
 Cross-platform, no GC pauses on large-image pipelines, first-class image crates,
@@ -2489,7 +2550,16 @@ reading R27's `--jobs` cap divides by its measured per-photo peak. On unix,
 `libc` 0.2 does the two same jobs (`killpg` for the kill-group, `sysconf`
 `_SC_AVPHYS_PAGES` for free memory). Both crates were already in `Cargo.lock`
 transitively, so promoting them added no download and no new supply-chain
-surface. Build-time: `winresource` 0.1 embeds the Windows app icon
+surface. macOS adds NO crate at all: free memory is `libc`'s
+`sysctlbyname("hw.memsize")` plus `host_statistics64`, and the ⌘Q guard
+([`src/bin/gui/macos.rs`](../src/bin/gui/macos.rs)) reaches AppKit by linking
+`libobjc` directly and installing `applicationShouldTerminate:` on winit's
+existing delegate at run time — the same raw-`#[link]` shape the Windows
+message box already used, chosen over an `objc2`/`cocoa` dependency because
+the port needs exactly one selector. The decision that guard reports is a
+portable state machine compiled and tested on every platform
+([`src/bin/gui/quit.rs`](../src/bin/gui/quit.rs)); only its delivery is
+Darwin-only. Build-time: `winresource` 0.1 embeds the Windows app icon
 ([`build.rs`](../build.rs)), best-effort — no resource compiler still builds.
 
 **Dev-only.** `tiff` 0.11 — the same version `image` already locks — and, on
@@ -2502,11 +2572,20 @@ tag reads back `None`), so the ICC regression tests write their fixture through
 the `tiff` crate directly, the way Lightroom-style writers produce real profiled
 TIFFs.
 
-**The Python sidecar stack** is deliberately NOT in `Cargo.toml`: three scripts
+**The Python sidecar stack** is deliberately NOT in `Cargo.toml`: five scripts
 under `python/`, shelled out to with `-E`, each doing one job and each failing
 loudly rather than degrading silently (`lib.rs::sidecar_wrote`). They need
 Python 3 + PyTorch (CUDA where the box has it), plus `transformers` on the sky
-and object paths and `rembg` on the subject path. The five models they load,
+and object paths and `rembg` on the subject path. Which device each one runs on
+is one shared answer rather than five:
+[`python/_device.py`](../python/_device.py) resolves `cuda` -> `mps` -> `cpu`,
+so an Apple-silicon Mac reaches the GPU through Metal without any script
+deciding for itself. The CUDA spelling is a PARAMETER of that helper precisely
+so the CUDA argv it produces is unchanged from before it existed. The
+dependency sets that differ per platform are split into
+`python/requirements-{common,cuda,macos}.txt` — the CUDA file is the only one
+carrying an extra index URL, and the macOS file installs plain PyPI wheels
+because Metal support ships in the default build. The five models they load,
 their licences and their pinned byte counts are the 「ML sidecar family」 table
 at the top of this document — not repeated here, so there is one place to
 correct. Weights are never in this repository: they are fetched on first use
