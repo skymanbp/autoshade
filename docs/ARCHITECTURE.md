@@ -92,9 +92,13 @@
 > experimental generative edits, an optional pixel-**heal** retouch mode (§4.7)
 > the deterministic look **reverse-fit** (§4.8) and the local server's refusal
 > model (§4.9).
-> 1207 library + 22 CLI + 151 GUI + 2+2 contract tests are enumerated in the GUI
-> build; the library result is 1196 pass + 11 `#[ignore]`d forensic probes
-> (counts refreshed 2026-08-31: the AutoShade rename added 14 named tests by
+> 1216 library + 22 CLI + 151 GUI + 2+2 contract tests are enumerated in the GUI
+> build; the library result is 1205 pass + 11 `#[ignore]`d forensic probes
+> (counts refreshed 2026-08-31: R30 batch 1 added 8 named tests against
+> `52fb38c` — 5 `fit_zoned` for the strictly-better arm, 3 `fit` for the
+> R2-lite reference-population disclosure — and the supervising merge added
+> its Atmosphere do-no-harm pin, so library 1207→1216 with CLI, GUI and
+> contract unchanged; before it, the AutoShade rename added 14 named tests by
 > name against `e33206b` — 6 for the environment alias door, 5 for the
 > pre-rename develop-store adoption, 3 for the pre-rename on-disk XMP tokens —
 > and renamed one (`xmp::tests::legacy_autoshop_sidecar_…` →

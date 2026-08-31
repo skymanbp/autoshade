@@ -4926,6 +4926,7 @@ mod tests {
         sat: f32,
         ev: f32,
         warm: f32,
+        atmosphere: bool,
     ) -> (Option<AcceptedZone>, fit::FitReport, f32, f32) {
         let (w, h) = (96u32, 96u32);
         let src = strictly_better_fixture(sat, ev, warm, false);
@@ -4948,9 +4949,15 @@ mod tests {
             &mut report,
             &mut frame_err,
             &attachment,
-            measure_zone_divergence(&src, &tgt, &crate::recipe::EditRecipe::default(), &mask)
-                .sky
-                .divergence,
+            if atmosphere {
+                // Forced past DIVERGENCE_ZONE so the SAME pair is judged by the
+                // Atmosphere match arm — the mode split itself is under test.
+                fit::Divergence { correlation: 0.0, energy_error: 1.0, d: 1.0 }
+            } else {
+                measure_zone_divergence(&src, &tgt, &crate::recipe::EditRecipe::default(), &mask)
+                    .sky
+                    .divergence
+            },
             None,
         );
         path.remove();
@@ -4966,7 +4973,7 @@ mod tests {
     #[test]
     fn a_strictly_better_zone_attaches_and_publishes_its_own_arm() {
         let (accepted, report, frame_before, frame_after) =
-            run_strictly_better_zone("strictly-better-attach", 4.0, 8.0, 1.0);
+            run_strictly_better_zone("strictly-better-attach", 4.0, 8.0, 1.0, false);
         let zone = accepted.unwrap_or_else(|| {
             panic!("the absolute arm must attach this zone: {}", report.recipe.rationale)
         });
@@ -5005,6 +5012,37 @@ mod tests {
         assert!(!report.recipe.masks.is_empty(), "an accepted zone leaves its mask attached");
     }
 
+    /// R30 batch 1, the MERGE-TIME pin: an ATMOSPHERE zone is judged by its
+    /// own do-no-harm arm and never by the three-arm Full predicate. The
+    /// supervising review's hand mutation — routing `ZoneMode::Atmosphere`
+    /// through `zone_accepts` — left every existing test green, because an
+    /// improving zone attached either way and the named atmosphere test only
+    /// proves both modes refuse a worsening zone. This pins the observable
+    /// differences: the SAME pair the absolute arm buys in Full mode must,
+    /// as an atmosphere zone, attach WITHOUT the strictly-better disclosure
+    /// (under the mutation the Full arm claims it and the note fires), and
+    /// its report must name the Atmosphere mode.
+    #[test]
+    fn an_improving_atmosphere_zone_keeps_do_no_harm_and_never_the_absolute_arm() {
+        let (accepted, report, _frame_before, _frame_after) =
+            run_strictly_better_zone("atmos-do-no-harm", 4.0, 8.0, 1.0, true);
+        assert!(
+            accepted.is_some(),
+            "an improving atmosphere zone attaches by do-no-harm: {}",
+            report.recipe.rationale
+        );
+        assert!(
+            report.notes.iter().all(|n| n.key != crate::rationale::keys::ZONE_STRICTLY_BETTER),
+            "the absolute arm's disclosure must never fire for an atmosphere zone: {}",
+            report.recipe.rationale
+        );
+        assert!(
+            report.notes.iter().any(|n| n.key == crate::rationale::keys::ZONE_MODE_ATMOSPHERE),
+            "the zone must say it was fitted as atmosphere: {}",
+            report.recipe.rationale
+        );
+    }
+
     /// …and the price. This pair improves its zone by a LARGE absolute margin
     /// (well past the floor) and the two ratio arms still refuse it — but the
     /// frame gets worse, by an amount that sits comfortably INSIDE the
@@ -5015,7 +5053,7 @@ mod tests {
     #[test]
     fn a_strictly_better_zone_is_refused_when_the_frame_pays() {
         let (accepted, report, frame_before, _) =
-            run_strictly_better_zone("strictly-better-frame-cost", 2.0, 4.0, 1.8);
+            run_strictly_better_zone("strictly-better-frame-cost", 2.0, 4.0, 1.8, false);
         assert!(
             accepted.is_none(),
             "a zone whose gain costs the frame must be dropped: {}",
