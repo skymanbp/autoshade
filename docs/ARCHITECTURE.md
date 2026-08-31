@@ -1,6 +1,6 @@
 # Autoshop — Architecture
 
-> Status: **implemented** (v1.0.0 — the first major). The reverse-fit's
+> Status: **implemented** (v1.1.0 — the layered reverse-fit release). The reverse-fit's
 > in-range estimator is now a PAIRED ROBUST REGRESSION (2026-08-26): on
 > same-frame pairs the tone map is estimated from corresponding pixels
 > (per-bin Tukey-IRLS means, median start, robust weight × evidence weight),
@@ -92,13 +92,14 @@
 > experimental generative edits, an optional pixel-**heal** retouch mode (§4.7)
 > the deterministic look **reverse-fit** (§4.8) and the local server's refusal
 > model (§4.9).
-> 1191 library + 22 CLI + 151 GUI + 2+2 contract tests are enumerated in the GUI
-> build; the library result is 1180 pass + 11 `#[ignore]`d forensic probes
-> (counts refreshed 2026-08-30 after merging the style-retrieval expansion
+> 1193 library + 22 CLI + 151 GUI + 2+2 contract tests are enumerated in the GUI
+> build; the library result is 1182 pass + 11 `#[ignore]`d forensic probes
+> (counts refreshed 2026-08-30: the tile-boundary root fix added its two named
+> gate tests — library 1191→1193; before it, the style-retrieval expansion
 > `style-s2` (+55 by name against the `32b0fe4` merge transcript: 46 library —
 > 26 `style`, 9 `describe`, 4 `pipeline`, 3 `embed`, 3 `advisor`, 1 `recipe` —
 > 4 CLI and 5 GUI; the gui trip now runs the GUI bin only, the `gui` feature
-> adding dependencies alone): library 1091→1137→1191, CLI 16→20→22, GUI 146→151;
+> adding dependencies alone): library 1091→1137→1191→1193, CLI 16→20→22, GUI 146→151;
 > before it the multi-region batch `a2173c9`
 > (+24 by name against `6323f4c`: the 11 `fit_zoned::semantic` tests, the 7
 > `fit_zoned` routing / arbitration / raster-release tests and the 6 `segment`

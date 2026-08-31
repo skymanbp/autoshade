@@ -1,6 +1,6 @@
 [package]
 name = "autoshop"
-version = "1.0.0"
+version = "1.1.0"
 edition = "2024"
 description = "AI-assisted automatic development of RAW photographs (EditRecipe + deterministic Rust render, XMP sidecar, AI denoise)"
 license = "MIT"

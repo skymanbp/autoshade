@@ -8,7 +8,7 @@
 An AI decides *what to change*. A deterministic Rust engine *does* it.
 **In the recipe-development path, the AI never touches a pixel.**
 
-[Download v1.0.0](https://github.com/skymanbp/autoshop/releases/tag/v1.0.0) ·
+[Download v1.1.0](https://github.com/skymanbp/autoshop/releases/tag/v1.1.0) ·
 [Architecture](docs/ARCHITECTURE.md) ·
 [Roadmap](docs/ROADMAP.md) ·
 [MIT](LICENSE)
@@ -441,9 +441,11 @@ number below was read from that run.
 </table>
 
 More examples — the shoreline `analyze` pair, a second style triptych, the
-stone-viaduct reverse-fit (D = 0.126, look error 0.048 → 0.015 at confidence
-0.662411, per-band HSL on three bands, four spatial tiles, and one visible tile seam this project is not
-hiding), and three earlier pairs including two documented failure modes — are
+stone-viaduct reverse-fit (D = 0.126, look error 0.048 → 0.017 at confidence
+0.662411, per-band HSL on three bands, three boundary-gated spatial tiles and
+two field masks — the tile seam v1.0.x shipped and disclosed is root-fixed,
+measured gone on the mask-free ruler), and three earlier pairs including two
+documented failure modes — are
 in [docs/SHOWCASE.md](docs/SHOWCASE.md).
 
 ## Measured numbers
@@ -473,24 +475,22 @@ estimate. Sources are the pinned claims in
 
 ### Download a release
 
-The v1.0.0 release provides both Windows front ends. Linux and macOS are built
-and tested in CI, but no prebuilt binaries are published for them yet.
-
-| File | Size | SHA-256 |
-|---|---:|---|
-| `autoshop.exe` (CLI) | 31,180,152 bytes | `116a38410a810b1b27602c97daa4db614241b89fffbb80c6691a275fc7f168c0` |
-| `autoshop-gui.exe` (desktop app) | 40,810,704 bytes | `847f42c4b35c09ab5dd040fdf8e90f99d597c66624ef131ac02d93071bcb58ce` |
-| `Autoshop-Setup-1.0.0.exe` (installer) | 19,768,387 bytes | `28c4acd37089e78bf02182cd8b20a214a63cababb1b02971209be3fdf33d4750` |
-| `autoshop-1.0.0-windows-x64.zip` (portable archive) | 27,131,443 bytes | `47389ed42f80798ead96980d69ce10f5063ece606e0f0d548482c58aef9f717e` |
+The v1.1.0 release is built by GitHub Actions from the tag and provides the
+Windows front ends plus a first macOS universal (arm64 + x86_64) CLI archive;
+Linux is built and tested in CI with no prebuilt binaries yet. The release
+assets are `autoshop.exe` (CLI), `autoshop-gui.exe` (desktop app),
+`Autoshop-Setup-1.1.0.exe` (installer), `autoshop-1.1.0-windows-x64.zip`
+(portable archive), `autoshop-1.1.0-macos-universal.zip`, and `checksums.txt`,
+which carries the SHA-256 of every file above.
 
 Download from the
-[v1.0.0 release page](https://github.com/skymanbp/autoshop/releases/tag/v1.0.0):
+[v1.1.0 release page](https://github.com/skymanbp/autoshop/releases/tag/v1.1.0):
 
-- **Installer (recommended):** run `Autoshop-Setup-1.0.0.exe`. It installs for
+- **Installer (recommended):** run `Autoshop-Setup-1.1.0.exe`. It installs for
   the current user without administrator access, adds Start Menu shortcuts,
   offers optional desktop and user `PATH` tasks, and removes its own files on
   uninstall while keeping the develop store in `%LOCALAPPDATA%\autoshop`.
-- **Portable archive:** extract `autoshop-1.0.0-windows-x64.zip` to a directory
+- **Portable archive:** extract `autoshop-1.1.0-windows-x64.zip` to a directory
   you can keep intact and run either executable from there, beside the bundled
   `assets/` and `python/` sidecars.
 
@@ -730,7 +730,7 @@ versions, and a deleted-version registry; SCUNet success requires the typed
 `sidecar_wrote` contract. A 1771 MB reference probe sets the 1800 MB per-photo
 budget, while the 4 GiB RAW gate bounds admission. The [`build`
 workflow](.github/workflows/build.yml) covers default and GUI feature sets on
-Ubuntu and macOS. The current battery is **1191 library (1180 pass + 11 `#[ignore]`d forensic probes) / 22 CLI / 151 GUI / 2+2 contract** tests; the
+Ubuntu and macOS. The current battery is **1193 library (1182 pass + 11 `#[ignore]`d forensic probes) / 22 CLI / 151 GUI / 2+2 contract** tests; the
 [`scripts/check_docs.py`](scripts/check_docs.py) gate re-derives pinned release
 claims. Model weights are not stored in this repository.
 

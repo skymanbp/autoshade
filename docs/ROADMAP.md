@@ -195,6 +195,10 @@
 
 ## 当前状态（已完成，勿重做）
 
+- **🚢 v1.1.0 收口发版（2026-08-30，用户令「全自动完成所有剩余任务→网页+文档+readme→推送+发布 release」）**：
+  **瓦片边界根修批 `0ecc2e0` 合并 `7328228`**（Opus 子代理实现+主模型亲审，任务书 task-fit-tile-boundary.md）：根因＝rim 尺只读 [0.05,0.95) 权重而硬 0/255 栅格无过渡带→门空过（石桥四瓦全报 0.000/0 transitions，同帧语义门 0.312/492 正常拒）。修＝typed 双尺：软族（语义分割羽化栅格）保原 rim 尺原向量逐字节不变（软族十读数实测 4–745 transitions 非空转、两尺 3/10 翻判 0.40–2.9×＝不可互换，主审裁定不混批）；硬族（瓦片+自由蒙版）改跨边界台阶＝50% 等值线两侧 ±1.5px 配对采样的差分中的差分（对无校正参照帧差分→景物自身边缘抵消）、幅值排序 p90、预算 0.012 不变、零可测穿越即 typed 拒绝（Unmeasured，自由蒙版披露循环补进变量表否则静默丢）；重建守卫双前提+羽化坡对照钉配对采样（一侧化即红），M-A/B/C 三变异红（M-B 主审亲手复红）；校准跨配置守卫由恰好换 2e-4 上界（实测 9.6e-5＝分析仪 cap 4→2 自身代价，此前被空转门下自由蒙版偶然掩盖，推导入注，分析仪 cap 疑点登记 v1.2）；石桥臂 grep unavailable=0、渲染与主树复跑逐字节同一（TIF SHA 432a4cc6 两侧同）
+  石桥接缝（无蒙版尺 scripts/rim_overshoot.py）：r0c3 水平 p90 0.0250→0.0052（max 0.0335→0.0106）、最差边 r3c0 垂直 0.0506→0.0176（主审亲测复刻代理数字全同）；look 0.015131→0.017227 在 0.019 全局天花板内、conf 0.6624111 不变；附着 4 瓦+1 场→3 瓦（r0c3 k=0.372@160 穿越、r3c0 k=0.330、r1c2 k=0.773）+2 场。
+  **收口件**：xmp 普查钉值按义务刷新 174/40/104/391/1037/40（src/xmp.rs 普查行+邻句 104/104、64/104，recipe.rs 加快照限定语；AUTOSHOP_CENSUS_ROOT 下门 24P/0F/3S）；发版阻断级 CI 红根修 `b10873e`（三处扫源断言写死 CRLF——本机 autocrlf 检出 CRLF、CI 检出 LF（blob 0 CRLF），ubuntu+macos 同挂 style_query 测试且 describe 截断 split 静默失效；统一修＝匹配前归一化，全类 grep 扫过，协议 CRLF 不属此类；本机绿+LF 复刻逐断言真）；docs/RELEASE_NOTES_v1.1.0.md 落地（两硬变更+15 义务条全覆盖，20 引用哈希逐一 merge-base 亲验）；版本 1.0.0→1.1.0（Cargo.toml+lock+README+ARCHITECTURE+bug 模板，门点名后 24P/0F）；合并树统一电池 1193(1182+11i)/22/151/2+2（五道并行）、集差 +2/−0（对 735c959 逐名＝两条边界门测试，主审亲提）；石桥展示图按根修后渲染重拍+重注。发版链=tag v1.1.0→GH Actions（187f361）→六资产回下载 checksums 比对→README/官网资产表实数→issue #2 回帖→官网部署（字节校验走 pages.dev）。收口提交 `随本提交`。
 - **🎭 步14 S3 蒙版习惯 + 块预算 + `{e}` 披露门已合并 main 于 `c05c35b`（分支 `style-s3`：S3 `b1d94a5` → `{e}` 门 `b2253aa`；2026-08-30，Opus 子代理实现、主模型亲审收口）**，随后 **发版链 `187f361`**（`.github/workflows/release.yml` 钉 windows-2022 + macos-15、图标告警检查、`scripts/build_portable.ps1` 逐条镜像 `installer/autoshop.iss` 的 [Files]、lipo 通用二进制 + `codesign --force --sign -`、Rosetta 缺席时如实打 `INTEL SLICE BUILT BUT NOT EXECUTED`、发布步产出 `checksums.txt` + 资产表；本机验 30 条目 / 27,745,065 B，兑现 issue #2 的「下版 GH Actions 构建」）与 **三支柱文档 `431c7fb`**（`scripts/pillar_diagrams.py` 手写 SVG 明暗两版、官网 `#pillars` 段、TECH_STACK 新增 `Mask habits (S3)` 小节 + 九处漂移修正）。
   **S3**：`src/mask_habit.rs` 纯函数 `bucket_of()`（AI 子类 2→Sky / 1→Subject / 0→Other；线性渐变按 y-DOWN 哪一端被 `full` 覆盖 XOR `inverted` 定向；径向正立→Subject、反转→Ground；Range Mask 最后判）；`HABIT_SLIDERS[8]` / `HABIT_SLIDERS_SHOWN=3` / `MAX_LOCAL_WORK_CHARS=640`；精修计数同时读配方与 `xmp::MaskImportReason::ForeignRangeMask` 拒绝（169 张 sidecar 库实测 12 拒 / 0 携带）。
   **块预算门**：`advisor::REFERENCE_BUDGET_BYTES=4096` 之下三个消费者（每例看相注、共享标签注、look-reference 块）各自设界——`REFERENCE_DESC_CHARS=200` / `REFERENCE_TAG_PHRASE_CHARS=48` / `REFERENCE_TAGS_CHARS=128`；实测最坏 3,565 B、现实 2,517 B。**主审揪一处假绿**：变异 M-S3-R 首轮活下来，根因是我自己删掉了 join 界断言——块总长探针把两个消费者一起量（实测 168 对上限 128），改成直接对 `block_tags()` 断言后变红。
@@ -1023,7 +1027,7 @@
   下 Reimagine 此前根本跑不完（桥把 JSON 正文标成 SSE）+ 订阅档封顶尺寸被拒；v1.1 起嗅探正文、承认同纵横比封顶
   （长边≥1024、容差 0.5%）并在终端/GUI 双面披露实收尺寸。
 
-- **空间瓦片的边界连续性门是空的（已确诊缺陷，随 v1.1 如实披露，勿包装成通过）**：
+- **空间瓦片的边界连续性门（v1.0.x 确诊空转，v1.1 已根修 `0ecc2e0`——硬族改跨边界台阶差分中的差分、软族保原 rim 尺（typed 双尺，实测两尺 3/10 翻判不可互换），零可测过渡=拒绝非通过；石桥接缝实测见台账）**。原确诊记录如下，保留为证据：
   `boundary_line_rims`（`src/fit_zoned.rs:421`）只从蒙版权重落在
   `[ZONE_BOUNDARY_LOW=0.05, ZONE_BOUNDARY_HIGH=0.95)` 的像素取读数；而空间瓦片的
   `attachment.source_weights` 是被**硬矩形谓词** `in_tile` 框出来的冻结证据
@@ -1098,3 +1102,14 @@
   kept from abstained semantic/tile refinement, state that the normal rim/frame
   gates rerun after refinement, and state that luminance ranges are never
   refined. Multi-class semantic masks remain explicitly out of scope.
+
+### v1.1 收口裁定（2026-08-30，主审记录在案）
+
+- **色彩范围区**：判 v1.2。逐带 HSL（4a）已覆盖「按色带选人口改色彩」的主面；独立 color-range 蒙版生产者是新特性非缺陷，发版窗口不再开渲染面。
+- **CE 冗余清理批 + 超预算文件拆分**（store.rs 8906 / check_docs.py 955 / i18n.rs / ARCHITECTURE.md / calibrate_style_retrieval.py 764）：判 v1.2。纯结构搬迁，收口窗口动它回归风险大于收益。
+- **4a′ 合成 Full 钉 + `UNREPRESENTED_HUE_DEG` 带质心路测试**（fit-hsl 登记）：判 v1.2 测试补强批。
+- **逐方向 β**（OLS 斜率 0.247–2.000）：不拟合——12 个文本上的自由参数，登记保持。
+- **`style-query` 未打印 `txt_hub_corrected` 披露位**：判 v1.2 小批。
+- **描述缓存跨库 GC**、**侧车家族样板重构**、**AdherenceTier 命名**、**staged frames 累积**、**四重名 stem**：判 v1.2。
+- **`W_LOOK` 归一化不可测**：登记保持（谐波在校准尺外，无法上尺）。
+- **xmp 普查钉值刷新**：本收口已完成（见台账条）。

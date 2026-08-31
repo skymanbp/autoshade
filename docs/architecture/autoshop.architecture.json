@@ -453,7 +453,7 @@
       "title": "Local corrections, gated on frozen evidence",
       "items": [
         "Semantic sky/land zones or XMP-native luminance bands from rank-paired residuals; verdicts follow the population a correction moves",
-        "Quadtree tiles: strongest nodes first, 4x4 stop, both frames >= 3% evidence, CI excludes zero, rim <= 0.012, zero-tolerance frame law",
+        "Quadtree tiles: strongest nodes first, 4x4 stop, both frames >= 3% evidence, CI excludes zero, cross-boundary step <= 0.012, zero-tolerance frame law",
         "12x8x8 bilateral-grid analyzer prices the ceiling first (calibration pair: global 0.0961, ceiling 0.0700) and halves the tile budget when the remainder is not tile-shaped",
         "Designed next: free-form remainder masks, multi-region semantic calibration, colour-range regions"
       ]

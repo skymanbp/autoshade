@@ -150,19 +150,23 @@ deterministically to the original full-resolution RAW.
 </tr>
 </table>
 
-<sub><b>Stone viaduct, Sony α7R IVA 61 MP <code>.ARW</code></b> (2026-08-30 batch). The same three stages on a frame the generator stayed close to: <b>D = 0.126</b>, under the 0.35 threshold, so the full solve ran. Look error 0.048 → 0.015 at fit confidence 0.662411 — the global stage reached 0.019, with the per-band colour mixer solving three bands from their own populations (Orange sat −18, Yellow sat −18 lum −18, Blue sat +18); four frozen-evidence spatial tiles (<code>r0c1</code>, <code>r0c3</code>, <code>r1c3</code>, <code>r3c0</code>) and one evidence-derived field mask bought the rest.</sub>
+<sub><b>Stone viaduct, Sony α7R IVA 61 MP <code>.ARW</code></b> (2026-08-30 batch). The same three stages on a frame the generator stayed close to: <b>D = 0.126</b>, under the 0.35 threshold, so the full solve ran. Look error 0.048 → 0.017 at fit confidence 0.662411 — the global stage reached 0.019, with the per-band colour mixer solving three bands from their own populations (Orange sat −18 lum +4, Yellow sat −18 lum −18, Blue sat +18 lum −3); three frozen-evidence spatial tiles (<code>r0c3</code>, <code>r3c0</code>, <code>r1c2</code>) and two evidence-derived field masks bought the rest, every one negotiated by the boundary gate — the seam tile shrunk to k=0.372 over 160 measured crossings.</sub>
 
-**Honest blemish, and an open defect.** The top-right tile leaves a visible
-rectangular seam in the sky of the third pane — a vertical step about three
-quarters of the way across, running down from the top edge. Its boundary-continuity gate reported `signed rim
-0.000 -> 0.000 after direction-preserving shrink k=1.000 (budget 0.012, 0
-measured transitions)` and passed it — a pass with nothing measured behind it.
-A spatial tile's frozen evidence is scoped by a hard rectangular predicate, so
-its weights are 255 or 0 with no transition band, and the rim reading only
-samples weights strictly between 0.05 and 0.95. On the same frame the semantic
-zone gate read `candidate rim 0.312 ... 492 measured transitions` and correctly
-refused. The tile rim gate is therefore vacuous as written; it is filed as a
-v1.1 obligation rather than captioned as a success.
+**A blemish v1.0.x disclosed, root-fixed in v1.1.0.** Earlier renders of this
+frame carried a visible rectangular seam in the sky: the boundary gate read
+only soft transition pixels (mask weights strictly between 0.05 and 0.95),
+which a hard 0/255 spatial tile does not have, so every tile scored `signed
+rim 0.000 (0 measured transitions)` and passed vacuously while the semantic
+zone gate on the same frame read `candidate rim 0.312 ... 492 measured
+transitions` and correctly refused. v1.1.0 measures hard-edged masks by the
+correction's own cross-boundary step (paired samples across the 50% contour,
+differenced against the render without the correction), and zero measurable
+crossings now refuses instead of passing. On this frame the seam tile reads
+`cross-boundary step 0.0350 -> 0.0118` at k=0.372 over 160 crossings, and the
+seam falls p90 0.0250 -> 0.0052 on the mask-free ruler
+(`scripts/rim_overshoot.py`); the fit pays look error 0.015 -> 0.017 for it,
+inside the 0.019 global-only ceiling — part of that gain had been bought by
+stepping across the tiles' own borders.
 
 #### Earlier reimagine batch (v0.35.0)
 
