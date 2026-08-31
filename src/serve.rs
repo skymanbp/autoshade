@@ -2048,6 +2048,18 @@ fn export_slot_path(
     out_dir.join(format!("{named_stem}.{kind}.{ext}"))
 }
 
+/// The registry directory's name, kept at its PRE-RENAME spelling.
+///
+/// This is an on-disk identity namespace, not a label: it is what keeps one
+/// photo exporting to the same deliverable filename run after run, and the
+/// claim below is the only thing that stops two server processes assigning one
+/// suffix to two photos. Renaming the directory would abandon every existing
+/// claim and start reassigning suffixes from 1 -- "a re-key would silently
+/// change deliverable filenames", which is the exact harm this registry
+/// exists to prevent. Same call as the installer's AppId. Moving it wants a
+/// migration of its own, not a rename.
+const EXPORT_REGISTRY_DIR: &str = ".autoshop-export-registry";
+
 /// Assign one persistent output slot to this lexical `photo_key`. Registry
 /// entries are atomically claimed, so parallel server processes cannot assign
 /// the same suffix to different photos.
@@ -2061,7 +2073,7 @@ fn registered_export_out(
     let registry_stem =
         if cfg!(windows) { stem.to_ascii_lowercase() } else { stem.to_string() };
     let group = out_dir
-        .join(".autoshade-export-registry")
+        .join(EXPORT_REGISTRY_DIR)
         .join(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(registry_stem.as_bytes()));
     std::fs::create_dir_all(&group)
         .with_context(|| format!("create export registry {}", group.display()))?;
@@ -3458,13 +3470,20 @@ mod tests {
             (crate::store::photo_key(&via_alias), crate::store::photo_key_lexical(&via_alias));
         assert_ne!(ck, lk, "premise: the two keys differ through the junction");
 
+        // The registry namespace is on-disk identity: a blanket rename that
+        // moved it would abandon every existing claim and start reassigning
+        // deliverable suffixes from 1.
+        assert_eq!(
+            EXPORT_REGISTRY_DIR, ".autoshop-export-registry",
+            "the export registry namespace must keep the spelling users already have on disk"
+        );
         let out_dir = base.join("out");
         std::fs::create_dir_all(&out_dir).unwrap();
         let stem = pipeline::stem(&via_alias);
         let registry_stem =
             if cfg!(windows) { stem.to_ascii_lowercase() } else { stem.to_string() };
         let group = out_dir
-            .join(".autoshade-export-registry")
+            .join(EXPORT_REGISTRY_DIR)
             .join(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(registry_stem.as_bytes()));
         std::fs::create_dir_all(&group).unwrap();
         // An older build claimed slot 1 under the lexical key.

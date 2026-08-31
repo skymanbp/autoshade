@@ -134,7 +134,18 @@ fn main() -> eframe::Result<()> {
         ..Default::default()
     };
     eframe::run_native(
-        "AutoShade",
+        // A STORAGE KEY, not a display name — the window title is set above,
+        // on the viewport. With `persistence_path` unset (every real launch;
+        // it is only set under the sandbox variable) eframe derives the prefs
+        // file from THIS string: `%APPDATA%\<name>\data\app.ron`
+        // (eframe 0.29 glow_integration.rs:200 -> file_storage.rs:37). Renaming
+        // it would silently abandon every existing user's window geometry, last
+        // library, view mode, export options and theme, with nothing to say so
+        // — the same class of loss the develop-store adoption exists to
+        // prevent, and the same reason the installer keeps its AppId. Moving
+        // those prefs is a follow-up with its own migration; renaming the key
+        // on its own is only a reset.
+        "Autoshop",
         opts,
         Box::new(|cc| {
             install_fonts(&cc.egui_ctx); // embedded symbol subsets + system CJK
