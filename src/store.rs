@@ -414,7 +414,7 @@ pub enum RootTrust {
 /// write first. Each platform now names its own directory, and the shared
 /// fallback is LABELLED rather than trusted (the loader downgrades it).
 pub fn store_root_with_trust() -> (PathBuf, RootTrust) {
-    let (root, trust) = std::env::var_os("AUTOSHADE_DATA_DIR")
+    let (root, trust) = crate::config::live_env_os("AUTOSHADE_DATA_DIR")
         .map(|d| (PathBuf::from(d), RootTrust::PerUser))
         .or_else(|| per_user_data_dir().map(|d| (d.join("autoshade"), RootTrust::PerUser)))
         .unwrap_or_else(|| (std::env::temp_dir().join("autoshade"), RootTrust::SharedFallback));
@@ -1654,8 +1654,8 @@ fn is_within(p: &Path, dir: &Path) -> bool {
 
 /// True when `p` lies inside the corpus named by `AUTOSHADE_FIT_CALIBRATION_DIR`.
 fn is_calibration_corpus(p: &Path) -> bool {
-    std::env::var("AUTOSHADE_FIT_CALIBRATION_DIR")
-        .is_ok_and(|dir| is_within(p, Path::new(&dir)))
+    crate::config::live_env("AUTOSHADE_FIT_CALIBRATION_DIR")
+        .is_some_and(|dir| is_within(p, Path::new(&dir)))
 }
 
 /// Give every bitmap mask in `r` its own LIVE raster copy, claimed under
@@ -5774,7 +5774,7 @@ mod ownership_tests {
         );
 
         // And against the real corpus, when one is configured for this run.
-        let Ok(root) = std::env::var("AUTOSHADE_FIT_CALIBRATION_DIR") else { return };
+        let Some(root) = crate::config::live_env("AUTOSHADE_FIT_CALIBRATION_DIR") else { return };
         let mask = PathBuf::from(&root).join("sky-mask.png");
         if !mask.exists() {
             return;

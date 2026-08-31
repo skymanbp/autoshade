@@ -413,7 +413,7 @@ mod tests {
     #[test]
     #[ignore]
     fn probe_real_lens_metadata() {
-        let Ok(path) = std::env::var("AUTOSHADE_PROBE_RAW") else {
+        let Some(path) = crate::config::live_env("AUTOSHADE_PROBE_RAW") else {
             eprintln!("AUTOSHADE_PROBE_RAW unset — skipping");
             return;
         };

@@ -8940,7 +8940,7 @@ mod tests {
     #[test]
     #[ignore = "real-machine probe: set AUTOSHADE_PROBE_RAW to an ARW path"]
     fn probe_real_raw_base_look() {
-        let Ok(raw) = std::env::var("AUTOSHADE_PROBE_RAW") else {
+        let Some(raw) = crate::config::live_env("AUTOSHADE_PROBE_RAW") else {
             panic!("set AUTOSHADE_PROBE_RAW to a RAW path");
         };
         let raw = std::path::PathBuf::from(raw);
@@ -14759,7 +14759,7 @@ mod tests {
         assert!((zero_x - 0.5).abs() < 1e-6 && (zero_y - 0.80).abs() < 1e-6);
         assert!((full_x - 0.5).abs() < 1e-6 && (full_y - 0.35).abs() < 1e-6);
         assert_eq!(back.masks[0].exposure_ev, -2.0);
-        if std::env::var_os("AUTOSHADE_GENERATE_LINEAR_PROBE").is_some() {
+        if crate::config::live_env_os("AUTOSHADE_GENERATE_LINEAR_PROBE").is_some() {
             let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target/linear-falloff/probe");
             std::fs::create_dir_all(&dir).unwrap();
             let encoded = (linear_to_srgb(0.18) * 65535.0).round() as u16;

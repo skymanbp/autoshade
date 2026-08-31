@@ -129,7 +129,7 @@ fn main() -> eframe::Result<()> {
         // sandboxed E2E launch read — and on exit rewrote — the REAL user's
         // prefs, and its window opened onto their actual photo library. One
         // sandbox variable must mean the whole app is sandboxed.
-        persistence_path: std::env::var_os("AUTOSHADE_DATA_DIR")
+        persistence_path: autoshade::config::live_env_os("AUTOSHADE_DATA_DIR")
             .map(|d| std::path::PathBuf::from(d).join("gui-prefs.ron")),
         ..Default::default()
     };

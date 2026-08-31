@@ -833,11 +833,85 @@ pub(crate) const SETTINGS: &[Setting] = &[
 ];
 
 /// What `name` decides. Unlisted ⇒ [`Trust::Preference`] (see [`SETTINGS`]).
+///
+/// A pre-rename `AUTOSHOP_*` spelling is normalised FIRST, so the table carries
+/// exactly one row per setting and an old name can never resolve to a weaker
+/// policy than its current one. A second row per name would BE the bug the
+/// alias invites: it would look classified while a `.env` set it anyway.
 pub(crate) fn trust_of(name: &str) -> Trust {
+    let name = canonical_env_name(name);
     SETTINGS
         .iter()
-        .find(|s| s.env == name)
+        .find(|s| s.env == name.as_ref())
         .map_or(Trust::Preference, |s| s.trust)
+}
+
+/// The current variable prefix, and the one this app used up to v1.1.0.
+///
+/// Autoshop became AutoShade after v1.1.0. Every setting answers to BOTH
+/// spellings for one more version; the release notes of the version that drops
+/// the old one say so, and [`warn_legacy_env`] says so on the way past.
+const ENV_PREFIX: &str = "AUTOSHADE_";
+const LEGACY_ENV_PREFIX: &str = "AUTOSHOP_";
+
+/// The CURRENT spelling of `name`. Borrows unless a rewrite is needed, so the
+/// overwhelmingly common path allocates nothing.
+fn canonical_env_name(name: &str) -> std::borrow::Cow<'_, str> {
+    match name.strip_prefix(LEGACY_ENV_PREFIX) {
+        Some(rest) => std::borrow::Cow::Owned(format!("{ENV_PREFIX}{rest}")),
+        None => std::borrow::Cow::Borrowed(name),
+    }
+}
+
+/// The pre-rename spelling of `name`, or `None` when it has none.
+fn legacy_env_name(name: &str) -> Option<String> {
+    name.strip_prefix(ENV_PREFIX).map(|rest| format!("{LEGACY_ENV_PREFIX}{rest}"))
+}
+
+/// THE alias policy, over an injected lookup: ask for the current name, and
+/// only when that says nothing ask for the pre-rename one — through the SAME
+/// lookup, so the old spelling can never reach a source the new one could not.
+///
+/// One function, three doors ([`resolve_env`], [`live_env`], [`live_env_os`]),
+/// because 68 variables changed name at once and a policy written out three
+/// times is a policy that drifts twice. Being generic over the value also makes
+/// it testable against a plain map — the alternative was writing the process
+/// environment from a test, which is `unsafe` in edition 2024 and races every
+/// other test in the binary.
+fn with_legacy_alias<T>(name: &str, get: impl Fn(&str) -> Option<T>) -> Option<T> {
+    if let Some(v) = get(name) {
+        return Some(v);
+    }
+    let legacy = legacy_env_name(name)?;
+    let v = get(&legacy)?;
+    warn_legacy_env(&legacy, name);
+    Some(v)
+}
+
+/// Say, ONCE per stale name, that the pre-rename spelling was what answered.
+fn warn_legacy_env(legacy: &str, current: &str) {
+    if first_sighting_of(legacy) {
+        eprintln!(
+            "warning: {legacy} still works, but it is the pre-rename name and the next release removes it — rename it to {current}."
+        );
+    }
+}
+
+/// True the FIRST time this process is asked about `legacy`, false ever after.
+///
+/// Per NAME, not per process: a setup carrying three stale names would
+/// otherwise hear about one and keep the other two, which is the silent
+/// half-migration the warning exists to prevent. And never per READ —
+/// `resolve_env` runs on every `Config::load`, so a per-read warning would be
+/// noise the user learns to scroll past.
+fn first_sighting_of(legacy: &str) -> bool {
+    static SAID: std::sync::OnceLock<std::sync::Mutex<std::collections::BTreeSet<String>>> =
+        std::sync::OnceLock::new();
+    // A poisoned mutex must not cost the caller its VALUE: the warning is
+    // advisory, the setting is not. Recover the set and carry on.
+    let mut said =
+        SAID.get_or_init(Default::default).lock().unwrap_or_else(|e| e.into_inner());
+    said.insert(legacy.to_string())
 }
 
 /// The `.env`, parsed ONCE per process into an OWNED map (L16#3): the
@@ -914,7 +988,16 @@ pub fn env_or_dotenv(key: &str) -> Option<String> {
 /// names, and a `pre(i)` closure that indexed the protected array
 /// POSITIONALLY), which is how moving a name between the two policies could
 /// silently repoint an unrelated config field at the wrong variable.
+///
+/// Both spellings resolve here, through [`with_legacy_alias`]: environment and
+/// `.env` alike, each under that name's own trust policy, with the current name
+/// winning whenever it has anything to say.
 pub(crate) fn resolve_env(name: &str) -> Option<String> {
+    with_legacy_alias(name, resolve_exact)
+}
+
+/// [`resolve_env`] for ONE spelling: no alias, no warning.
+fn resolve_exact(name: &str) -> Option<String> {
     let live = env::var(name).ok();
     if Source::DotEnv.may_supply(trust_of(name)) {
         dotenv_map().get(name).cloned().or(live)
@@ -922,6 +1005,28 @@ pub(crate) fn resolve_env(name: &str) -> Option<String> {
         live
     }
     .filter(|s| !s.trim().is_empty())
+}
+
+/// The LIVE environment only, with the same alias policy — the door for names
+/// a `.env` has never been able to supply and must not start supplying now.
+///
+/// The rename found 34 direct `std::env::var` reads of pre-rename names
+/// scattered across the crate: fixture roots, probe outputs, the guard on
+/// deleting from the calibration corpus, two sidecar precision switches.
+/// Collecting them onto [`resolve_env`] would have handed a planted `.env`
+/// control of every one of them — a trust change smuggled in on a rename.
+/// This door keeps their semantics EXACTLY as they were (the process
+/// environment, nothing else) and adds only what the rename owes them: the
+/// pre-rename name still answers, once, out loud.
+pub fn live_env(name: &str) -> Option<String> {
+    with_legacy_alias(name, |n| env::var(n).ok())
+}
+
+/// [`live_env`] for values that are PATHS: a store root or a corpus directory
+/// may be any sequence the platform accepts, and `env::var` silently drops the
+/// ones that are not UTF-8.
+pub fn live_env_os(name: &str) -> Option<std::ffi::OsString> {
+    with_legacy_alias(name, |n: &str| env::var_os(n))
 }
 
 /// Foreign environment names a `.env` may push INTO a child process.
@@ -1551,7 +1656,12 @@ mod tests {
             rest = &rest[i + 1..];
             let Some(end) = rest.find('"') else { break };
             let name = &rest[..end];
-            if !SETTINGS.iter().any(|s| s.env == name) && !unclassified.contains(&name) {
+            // `ENV_PREFIX` itself is not a variable — it is the string the
+            // alias layer builds variables OUT of. Anything longer is one.
+            if name.len() > ENV_PREFIX.len()
+                && !SETTINGS.iter().any(|s| s.env == name)
+                && !unclassified.contains(&name)
+            {
                 unclassified.push(name);
             }
         }
@@ -1575,6 +1685,211 @@ mod tests {
                 s.env
             );
         }
+    }
+
+    /// The current name wins; the pre-rename one answers only into silence.
+    ///
+    /// Driven through [`with_legacy_alias`] over a plain map rather than the
+    /// process environment: `set_var` is `unsafe` in edition 2024 and would
+    /// race every other test in this binary, which is the same reasoning that
+    /// removed the `.env` override in the first place.
+    ///
+    /// MUTATION: delete the fallback arm of `with_legacy_alias` and the
+    /// pre-rename lookup below fails.
+    #[test]
+    fn the_pre_rename_name_answers_only_when_the_current_one_is_silent() {
+        let table = |pairs: &'static [(&'static str, &'static str)]| {
+            move |n: &str| pairs.iter().find(|(k, _)| *k == n).map(|(_, v)| v.to_string())
+        };
+
+        assert_eq!(
+            with_legacy_alias("AUTOSHADE_OPENAI_MODEL", table(&[("AUTOSHOP_OPENAI_MODEL", "old")])),
+            Some("old".to_string()),
+            "a setup that has not been renamed yet must keep working"
+        );
+        assert_eq!(
+            with_legacy_alias(
+                "AUTOSHADE_OPENAI_MODEL",
+                table(&[("AUTOSHADE_OPENAI_MODEL", "new"), ("AUTOSHOP_OPENAI_MODEL", "old")]),
+            ),
+            Some("new".to_string()),
+            "the current spelling outranks the one it replaced"
+        );
+        assert_eq!(
+            with_legacy_alias("AUTOSHADE_OPENAI_MODEL", table(&[])),
+            None,
+            "neither spelling set means unset"
+        );
+        assert_eq!(
+            with_legacy_alias("PATH", table(&[("AUTOSHOP_PATH", "planted")])),
+            None,
+            "a foreign name has no pre-rename spelling to invent"
+        );
+        assert_eq!(canonical_env_name("AUTOSHOP_DATA_DIR"), "AUTOSHADE_DATA_DIR");
+        assert_eq!(canonical_env_name("PATH"), "PATH");
+        assert_eq!(legacy_env_name("AUTOSHADE_DATA_DIR").as_deref(), Some("AUTOSHOP_DATA_DIR"));
+        assert_eq!(legacy_env_name("PATH"), None);
+    }
+
+    /// Each stale name is announced once — and every stale name is announced.
+    #[test]
+    fn each_pre_rename_name_is_announced_exactly_once() {
+        let a = "AUTOSHOP_ANNOUNCE_PROBE_A";
+        let b = "AUTOSHOP_ANNOUNCE_PROBE_B";
+        assert!(first_sighting_of(a), "the first sighting must speak");
+        assert!(!first_sighting_of(a), "the second sighting must stay quiet");
+        assert!(first_sighting_of(b), "a DIFFERENT stale name is its own first sighting");
+        assert!(!first_sighting_of(b));
+    }
+
+    /// The warning has to be worth the interruption: it names the variable the
+    /// user actually set, the one to set instead, and the deadline.
+    ///
+    /// Pinned against the source because stderr cannot be captured in-process,
+    /// and a warning that silently stops being printed is exactly the
+    /// regression this batch owes the user (the alias is a ONE-version grace).
+    ///
+    /// MUTATION: delete the `eprintln!` from `warn_legacy_env` and this fails.
+    #[test]
+    fn the_pre_rename_warning_names_both_spellings_and_the_deadline() {
+        let src = include_str!("config.rs");
+        let body = src
+            .split("fn warn_legacy_env(")
+            .nth(1)
+            .expect("warn_legacy_env is gone")
+            .split("\nfn ")
+            .next()
+            .unwrap();
+        assert!(body.contains("eprintln!"), "the warning stopped being printed");
+        assert!(body.contains("{legacy}"), "the warning does not name the stale variable");
+        assert!(body.contains("{current}"), "the warning does not name the replacement");
+        assert!(body.contains("next release removes it"), "the grace period is not stated");
+        assert!(
+            body.contains("first_sighting_of(legacy)"),
+            "the warning lost its once-per-name gate and now repeats on every read"
+        );
+    }
+
+    /// The alias may not buy a name any authority its current spelling lacks.
+    ///
+    /// MUTATION: drop the `canonical_env_name` call from `trust_of`, or add a
+    /// second `AUTOSHOP_*` row to SETTINGS, and this fails.
+    #[test]
+    fn a_pre_rename_name_carries_exactly_its_current_spellings_trust() {
+        for s in SETTINGS {
+            let Some(legacy) = legacy_env_name(s.env) else { continue };
+            assert_eq!(
+                trust_of(&legacy),
+                s.trust,
+                "{legacy} resolves under a different policy from {}",
+                s.env
+            );
+            assert_eq!(
+                Source::DotEnv.may_supply(trust_of(&legacy)),
+                Source::DotEnv.may_supply(s.trust),
+                "{legacy} opened a source {} is closed to",
+                s.env
+            );
+        }
+        assert_eq!(
+            trust_of("AUTOSHOP_OPENAI_BASE_URL"),
+            Trust::Destination,
+            "the pre-rename endpoint name must still be ambient-unsafe"
+        );
+        // ONE row per setting: a pre-rename row would be dead policy that
+        // reads as live, and `trust_of` takes the first match.
+        for s in SETTINGS {
+            assert!(
+                !s.env.starts_with(LEGACY_ENV_PREFIX),
+                "{} is a pre-rename row; the table normalises instead",
+                s.env
+            );
+        }
+    }
+
+    /// All three doors are the same policy — checked at the source, because a
+    /// fourth reader that forgot the alias is the way this decays.
+    #[test]
+    fn every_environment_door_shares_the_one_alias_policy() {
+        let src = include_str!("config.rs");
+        let non_test = src.split("#[cfg(test)]").next().unwrap();
+        for door in [
+            "pub(crate) fn resolve_env(name: &str) -> Option<String> {\r\n    with_legacy_alias(",
+            "pub fn live_env(name: &str) -> Option<String> {\r\n    with_legacy_alias(",
+            "pub fn live_env_os(name: &str) -> Option<std::ffi::OsString> {\r\n    with_legacy_alias(",
+        ] {
+            let door = door.replace("\r\n", "\n");
+            assert!(
+                non_test.replace("\r\n", "\n").contains(&door),
+                "a door stopped going through the alias policy: {door}"
+            );
+        }
+    }
+
+    /// A `.env` written before the rename still supplies its names.
+    ///
+    /// The one end-to-end proof: a real `.env` in a real child process, with
+    /// one name that exists only under the pre-rename spelling and one that
+    /// exists under both. Same harness as the owned-map test above.
+    #[test]
+    fn a_dotenv_still_answers_to_a_pre_rename_key() {
+        const CHILD: &str = "AUTOSHADE_DOTENV_LEGACY_ALIAS_TEST_CHILD";
+        if env::var_os(CHILD).is_some() {
+            assert_eq!(
+                super::env_or_dotenv("AUTOSHADE_LEGACY_OUT").as_deref(),
+                Some("from-the-old-key"),
+                "a .env key written before the rename stopped being read"
+            );
+            assert_eq!(
+                super::env_or_dotenv("AUTOSHADE_SIDECAR_TIMEOUT_SECS").as_deref(),
+                Some("123"),
+                "the current spelling must outrank the one it replaced"
+            );
+            assert_eq!(
+                super::env_or_dotenv("AUTOSHADE_OPENAI_BASE_URL"),
+                None,
+                "a Destination name must stay closed to a .env under EITHER spelling"
+            );
+            return;
+        }
+
+        let dir = env::temp_dir().join(format!(
+            "autoshade-dotenv-legacy-alias-{}-{}",
+            std::process::id(),
+            crate::store::next_tmp_seq()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join(".env"),
+            "AUTOSHOP_LEGACY_OUT=from-the-old-key\n\
+             AUTOSHOP_SIDECAR_TIMEOUT_SECS=456\n\
+             AUTOSHADE_SIDECAR_TIMEOUT_SECS=123\n\
+             AUTOSHOP_OPENAI_BASE_URL=http://attacker.example/v1\n",
+        )
+        .unwrap();
+        let output = std::process::Command::new(env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "config::tests::a_dotenv_still_answers_to_a_pre_rename_key",
+                "--nocapture",
+            ])
+            .current_dir(&dir)
+            .env(CHILD, "1")
+            .env_remove("AUTOSHADE_LEGACY_OUT")
+            .env_remove("AUTOSHOP_LEGACY_OUT")
+            .env_remove("AUTOSHADE_SIDECAR_TIMEOUT_SECS")
+            .env_remove("AUTOSHOP_SIDECAR_TIMEOUT_SECS")
+            .env_remove("AUTOSHADE_OPENAI_BASE_URL")
+            .env_remove("AUTOSHOP_OPENAI_BASE_URL")
+            .output()
+            .unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            output.status.success(),
+            "child failed:\nstdout={}\nstderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     /// A key that cannot go in an HTTP header is refused AT THE BOUNDARY.

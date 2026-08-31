@@ -6322,9 +6322,9 @@ mod tests {
     #[test]
     #[ignore = "real-photo repro: needs AUTOSHADE_FIT_REPRO_RAW/_TARGET"]
     fn r16_composed_fit_on_a_real_pair() {
-        let (Ok(raw), Ok(tgt)) = (
-            std::env::var("AUTOSHADE_FIT_REPRO_RAW"),
-            std::env::var("AUTOSHADE_FIT_REPRO_TARGET"),
+        let (Some(raw), Some(tgt)) = (
+            crate::config::live_env("AUTOSHADE_FIT_REPRO_RAW"),
+            crate::config::live_env("AUTOSHADE_FIT_REPRO_TARGET"),
         ) else {
             panic!("set AUTOSHADE_FIT_REPRO_RAW and AUTOSHADE_FIT_REPRO_TARGET");
         };
@@ -6373,7 +6373,7 @@ mod tests {
         // pair — the eyes keep finding what the scalar cannot). Written
         // BEFORE the comparison assert: the artifact is diagnostics, not a
         // prize for passing.
-        if let Ok(out) = std::env::var("AUTOSHADE_FIT_REPRO_OUT") {
+        if let Some(out) = crate::config::live_env("AUTOSHADE_FIT_REPRO_OUT") {
             std::fs::write(&out, serde_json::to_string_pretty(&new.recipe).unwrap())
                 .expect("write repro recipe");
             eprintln!("repro recipe -> {out}");
@@ -6481,7 +6481,7 @@ mod tests {
                 b.weighted,
                 a.weighted
             );
-            if let Ok(max) = std::env::var("AUTOSHADE_FIT_REPRO_JOINT_MAX") {
+            if let Some(max) = crate::config::live_env("AUTOSHADE_FIT_REPRO_JOINT_MAX") {
                 let max: f32 = max.trim().parse().expect("AUTOSHADE_FIT_REPRO_JOINT_MAX");
                 for bucket in crate::fit_zoned::joint_buckets(&fit_px, &tgt_px) {
                     assert!(

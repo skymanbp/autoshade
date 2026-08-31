@@ -383,7 +383,7 @@ impl RetrievalWeights {
     /// The shipped weights with the environment's overrides applied — the ONE
     /// place this process reads those variables.
     pub fn from_env() -> Self {
-        Self::resolve(|k| std::env::var(k).ok())
+        Self::resolve(crate::config::live_env)
     }
 
     /// [`from_env`](Self::from_env) over an explicit environment — the seam the
@@ -433,7 +433,7 @@ impl EmbeddingSwitch {
     /// whatever its value, including `0` — that is what makes it an override.
     pub fn resolve(flag: Option<bool>, pref: bool) -> Self {
         Self::resolve_with(flag, pref, |k| {
-            std::env::var_os(k).map(|v| v.to_string_lossy().into_owned())
+            crate::config::live_env_os(k).map(|v| v.to_string_lossy().into_owned())
         })
     }
 
@@ -483,7 +483,7 @@ impl DescribeSwitch {
     /// value, including `0` — that is what makes it an override.
     pub fn resolve(flag: Option<bool>, pref: bool) -> Self {
         Self::resolve_with(flag, pref, |k| {
-            std::env::var_os(k).map(|v| v.to_string_lossy().into_owned())
+            crate::config::live_env_os(k).map(|v| v.to_string_lossy().into_owned())
         })
     }
 
@@ -5362,12 +5362,12 @@ mod tests {
         }
         // …and the reads themselves are single-sited here.
         let me = production_source();
-        assert_eq!(me.matches("std::env::var(k).ok()").count(), 1, "one weight read");
+        assert_eq!(me.matches("Self::resolve(crate::config::live_env)").count(), 1, "one weight read");
         // TWO switch reads since S2, and exactly two: `EmbeddingSwitch::resolve`
         // and `DescribeSwitch::resolve`, one site each. A third would mean a
         // surface had grown its own read of a switch that is supposed to be a
         // VALUE passed down from the command's door.
-        assert_eq!(me.matches("std::env::var_os(k)").count(), 2, "one read per switch");
+        assert_eq!(me.matches("live_env_os(k)").count(), 2, "one read per switch");
     }
 
     /// The weights come from the environment in ONE place, and a value that

@@ -238,6 +238,11 @@ embedding checkbox above it is on.
 does nothing without a `--guidance` direction, which is why the desktop app
 greys the slider out until Direction has text.
 
+Every setting below is named `AUTOSHADE_*`. Up to v1.1.0 the app was called
+Autoshop and these variables were named `AUTOSHOP_*`; the old spelling still
+works everywhere, warns once naming its replacement, and is removed in the
+release after this one. Where both are set, the `AUTOSHADE_*` one wins.
+
 Six environment overrides steer retrieval, each read in exactly one place:
 
 | Variable | Effect |

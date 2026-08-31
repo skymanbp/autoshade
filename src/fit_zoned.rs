@@ -1168,8 +1168,8 @@ fn joint_family_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| {
         !matches!(
-            std::env::var("AUTOSHADE_FIT_JOINT").as_deref().map(str::trim),
-            Ok("off") | Ok("0") | Ok("false")
+            crate::config::live_env("AUTOSHADE_FIT_JOINT").as_deref().map(str::trim),
+            Some("off") | Some("0") | Some("false")
         )
     })
 }
@@ -3874,9 +3874,9 @@ mod tests {
         assert_eq!(disabled_range.err_after.to_bits(), legacy_range.err_after.to_bits());
         range_path.remove();
 
-        let (Ok(head_semantic), Ok(head_range)) = (
-            std::env::var("AUTOSHADE_LAYERED_HEAD_SEMANTIC"),
-            std::env::var("AUTOSHADE_LAYERED_HEAD_RANGE"),
+        let (Some(head_semantic), Some(head_range)) = (
+            crate::config::live_env("AUTOSHADE_LAYERED_HEAD_SEMANTIC"),
+            crate::config::live_env("AUTOSHADE_LAYERED_HEAD_RANGE"),
         ) else {
             return;
         };

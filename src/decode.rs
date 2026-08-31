@@ -2996,7 +2996,7 @@ mod tests {
     #[test]
     #[ignore = "real-machine probe: set AUTOSHADE_ORIENT_PROBE_RAW to a portrait RAW"]
     fn portrait_raw_reaches_the_pipeline_as_rotate270() {
-        let Ok(path) = std::env::var("AUTOSHADE_ORIENT_PROBE_RAW") else {
+        let Some(path) = crate::config::live_env("AUTOSHADE_ORIENT_PROBE_RAW") else {
             panic!("set AUTOSHADE_ORIENT_PROBE_RAW to a RAW with EXIF orientation 8");
         };
         let p = std::path::Path::new(&path);
@@ -3474,7 +3474,7 @@ mod tests {
     /// file reports a landscape frame.
     #[test]
     fn every_make_in_the_raw_zoo_decodes_and_agrees_with_itself() {
-        let Ok(dir) = std::env::var("AUTOSHADE_RAW_ZOO") else {
+        let Some(dir) = crate::config::live_env("AUTOSHADE_RAW_ZOO") else {
             return;
         };
         fn walk(dir: &Path, out: &mut Vec<std::path::PathBuf>) {

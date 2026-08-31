@@ -11025,7 +11025,7 @@ mod tests {
     /// numbers; this is what proves the transcription.
     #[test]
     fn the_probe_sidecars_decode_to_their_measured_ellipses() {
-        let Ok(dir) = std::env::var("AUTOSHADE_LR_PROBE_FIXTURES") else { return };
+        let Some(dir) = crate::config::live_env("AUTOSHADE_LR_PROBE_FIXTURES") else { return };
         let mut checked = 0usize;
         let mut roots = vec![std::path::PathBuf::from(dir)];
         let mut files: Vec<std::path::PathBuf> = Vec::new();
@@ -13113,7 +13113,7 @@ mod tests {
     /// are not in this repository, and no path to them appears in this test.
     #[test]
     fn real_lightroom_sidecars_import_their_parametric_masks() {
-        let Ok(dir) = std::env::var("AUTOSHADE_MB_FIXTURES") else {
+        let Some(dir) = crate::config::live_env("AUTOSHADE_MB_FIXTURES") else {
             return;
         };
         let Ok(entries) = std::fs::read_dir(&dir) else {
@@ -13260,7 +13260,7 @@ mod tests {
     ///     same mask at both ends.
     #[test]
     fn real_lightroom_radials_carry_one_inversion_bit_spelled_twice() {
-        let Ok(dir) = std::env::var("AUTOSHADE_MB_FIXTURES") else {
+        let Some(dir) = crate::config::live_env("AUTOSHADE_MB_FIXTURES") else {
             return;
         };
         let Ok(entries) = std::fs::read_dir(&dir) else {
@@ -13363,7 +13363,7 @@ mod tests {
     /// photo simply rendered differently from Lightroom.
     #[test]
     fn real_lightroom_sidecars_import_their_global_effects() {
-        let Ok(dir) = std::env::var("AUTOSHADE_MB_FIXTURES") else {
+        let Some(dir) = crate::config::live_env("AUTOSHADE_MB_FIXTURES") else {
             return;
         };
         let Ok(entries) = std::fs::read_dir(&dir) else {
@@ -13509,7 +13509,7 @@ mod tests {
     /// them silently, with an empty note list.
     #[test]
     fn real_lightroom_sidecars_survive_a_v0_30_recipe() {
-        let Ok(dir) = std::env::var("AUTOSHADE_MB_FIXTURES") else {
+        let Some(dir) = crate::config::live_env("AUTOSHADE_MB_FIXTURES") else {
             return;
         };
         let Ok(entries) = std::fs::read_dir(&dir) else {
@@ -13586,7 +13586,7 @@ mod tests {
     /// stay absent instead of being invented at some neutral we chose.
     #[test]
     fn real_lightroom_sidecars_pass_their_transform_blocks_through() {
-        let Ok(dir) = std::env::var("AUTOSHADE_MB_FIXTURES") else {
+        let Some(dir) = crate::config::live_env("AUTOSHADE_MB_FIXTURES") else {
             return;
         };
         let Ok(entries) = std::fs::read_dir(&dir) else {
@@ -16117,7 +16117,7 @@ mod tests {
 
     #[test]
     fn env_mask_brush_sample_matches_stage_three_ground_truth() {
-        let Ok(root) = std::env::var("AUTOSHADE_MB_SAMPLE_ROOT") else {
+        let Some(root) = crate::config::live_env("AUTOSHADE_MB_SAMPLE_ROOT") else {
             eprintln!("SKIP env_mask_brush_sample_matches_stage_three_ground_truth: AUTOSHADE_MB_SAMPLE_ROOT unset");
             return;
         };

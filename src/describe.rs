@@ -104,7 +104,7 @@ impl DescribeOpts {
 /// GPU disagrees with bf16 — and on CPU the sidecar ignores the flag by its
 /// own construction (`describe.py`: `bf16 and device.startswith("cuda")`).
 fn bf16_wanted() -> bool {
-    !std::env::var("AUTOSHADE_DESCRIBE_FP32")
+    !crate::config::live_env("AUTOSHADE_DESCRIBE_FP32")
         .map(|v| !matches!(v.trim(), "" | "0" | "false" | "off"))
         .unwrap_or(false)
 }

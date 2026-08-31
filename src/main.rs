@@ -3371,7 +3371,7 @@ mod tests {
         // start a 4.3 GB pass.
         assert!(
             !switch(&["autoshade", "style-index", "raws", "--embed"]).on()
-                || std::env::var_os("AUTOSHADE_STYLE_DESCRIBE").is_some(),
+                || autoshade::config::live_env_os("AUTOSHADE_STYLE_DESCRIBE").is_some(),
             "a plain style-index must not describe unless the environment asked for it"
         );
         assert!(

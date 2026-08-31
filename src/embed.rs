@@ -99,7 +99,7 @@ impl EmbedOpts {
 /// an index built before this change can be queried in exactly the arithmetic
 /// it was built with.
 fn fp16_wanted() -> bool {
-    !std::env::var("AUTOSHADE_EMBED_FP32")
+    !crate::config::live_env("AUTOSHADE_EMBED_FP32")
         .map(|v| !matches!(v.trim(), "" | "0" | "false" | "off"))
         .unwrap_or(false)
 }

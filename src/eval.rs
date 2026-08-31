@@ -1785,7 +1785,7 @@ mod tests {
     #[test]
     #[ignore = "forensic probe: needs AUTOSHADE_ESTIMATOR_PROBE=<dir of RAW+.xmp pairs>; decodes every pair (minutes)"]
     fn estimators_against_the_photographers_own_sliders() {
-        let Ok(dir) = std::env::var("AUTOSHADE_ESTIMATOR_PROBE") else {
+        let Some(dir) = crate::config::live_env("AUTOSHADE_ESTIMATOR_PROBE") else {
             panic!(
                 "set AUTOSHADE_ESTIMATOR_PROBE to a folder of RAW files with sibling .xmp \
                  sidecars (the eval corpus)"
@@ -1793,8 +1793,7 @@ mod tests {
         };
         let root = std::path::PathBuf::from(&dir);
         assert!(root.is_dir(), "AUTOSHADE_ESTIMATOR_PROBE is not a directory: {dir}");
-        let limit: usize = std::env::var("AUTOSHADE_ESTIMATOR_PROBE_LIMIT")
-            .ok()
+        let limit: usize = crate::config::live_env("AUTOSHADE_ESTIMATOR_PROBE_LIMIT")
             .and_then(|s| s.parse().ok())
             .unwrap_or(usize::MAX);
         let raws = pipeline::find_raws(&root).expect("scan the probe directory");

@@ -6019,7 +6019,8 @@ fn round2(v: f32) -> f32 {
 /// * `source.arw` — optional; the RAW behind `neutral.jpg`.
 #[cfg(test)]
 pub(crate) fn calibration_corpus() -> Option<std::path::PathBuf> {
-    let dir = std::path::PathBuf::from(std::env::var_os("AUTOSHADE_FIT_CALIBRATION_DIR")?);
+    let dir =
+        std::path::PathBuf::from(crate::config::live_env_os("AUTOSHADE_FIT_CALIBRATION_DIR")?);
     let required = ["neutral.jpg", "target.jpg", "fitted.recipe.json", "sky-mask.png"];
     if !dir.is_dir() || required.iter().any(|name| !dir.join(name).is_file()) {
         eprintln!(

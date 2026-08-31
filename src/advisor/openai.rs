@@ -1557,16 +1557,17 @@ mod tests {
     #[test]
     #[ignore = "live probe: needs AUTOSHADE_THINK_PROBE_KEY and spends one paid vision call"]
     fn think_envelope_field_order_probe() {
-        let Ok(key) = std::env::var("AUTOSHADE_THINK_PROBE_KEY") else {
+        let Some(key) = crate::config::live_env("AUTOSHADE_THINK_PROBE_KEY") else {
             panic!("set AUTOSHADE_THINK_PROBE_KEY to the image-role API key");
         };
         let mut cfg = cfg_for(
-            &std::env::var("AUTOSHADE_THINK_PROBE_BASE")
-                .unwrap_or_else(|_| "https://api.openai.com/v1".to_string()),
+            &crate::config::live_env("AUTOSHADE_THINK_PROBE_BASE")
+                .unwrap_or_else(|| "https://api.openai.com/v1".to_string()),
         );
         cfg.openai_api_key = Some(key.clone());
         cfg.openai_model =
-            std::env::var("AUTOSHADE_THINK_PROBE_MODEL").unwrap_or_else(|_| "gpt-5".to_string());
+            crate::config::live_env("AUTOSHADE_THINK_PROBE_MODEL")
+                .unwrap_or_else(|| "gpt-5".to_string());
         let p = OpenAiProvider::new(&cfg);
 
         // A tiny synthetic frame: this measures FIELD ORDER, not photography.

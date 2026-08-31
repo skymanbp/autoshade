@@ -2386,7 +2386,7 @@ mod tests {
     /// alphas must be soft/nonconstant and they must differ.
     #[test]
     fn seg_probe_object_backend_produces_a_usable_soft_mask() {
-        let Ok(gate_input) = std::env::var("AUTOSHADE_SEG_PROBE") else { return };
+        let Some(gate_input) = crate::config::live_env("AUTOSHADE_SEG_PROBE") else { return };
         let gate_input = std::path::PathBuf::from(&gate_input);
         assert!(
             gate_input.is_file(),
@@ -2484,7 +2484,7 @@ mod tests {
     /// byte-identical, so no cached alpha changes and none needs re-deriving.
     #[test]
     fn seg_probe_sky_backend_produces_a_usable_soft_mask() {
-        let Ok(input) = std::env::var("AUTOSHADE_SEG_PROBE") else { return };
+        let Some(input) = crate::config::live_env("AUTOSHADE_SEG_PROBE") else { return };
         let input = std::path::PathBuf::from(&input);
         assert!(input.is_file(), "AUTOSHADE_SEG_PROBE is set but is not a file: {}", input.display());
         let cfg = Config::load();
@@ -2540,7 +2540,7 @@ mod tests {
     /// (forwarded by `segment_file`) is what tells the two runs apart.
     #[test]
     fn seg_probe_subject_backend_produces_a_usable_soft_mask() {
-        let Ok(input) = std::env::var("AUTOSHADE_SEG_PROBE") else { return };
+        let Some(input) = crate::config::live_env("AUTOSHADE_SEG_PROBE") else { return };
         let input = std::path::PathBuf::from(&input);
         assert!(input.is_file(), "AUTOSHADE_SEG_PROBE is set but is not a file: {}", input.display());
         let cfg = Config::load();

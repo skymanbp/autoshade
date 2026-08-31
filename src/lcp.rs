@@ -569,7 +569,7 @@ pub fn parse(xml: &str) -> Result<LensProfileFile, Refusal> {
 /// and every caller degrades through [`Refusal::NoRoots`].
 pub fn roots() -> Vec<PathBuf> {
     let mut out = Vec::new();
-    if let Ok(dir) = std::env::var("AUTOSHADE_LCP_DIR")
+    if let Some(dir) = crate::config::live_env("AUTOSHADE_LCP_DIR")
         && !dir.is_empty()
     {
         out.push(PathBuf::from(dir));
