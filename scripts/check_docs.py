@@ -627,13 +627,29 @@ def census_counts(_args: argparse.Namespace) -> Truth | Skip:
     reports SKIP rather than pretending the machine-local count is universal.
     CI/release runs that have the corpus set `AUTOSHADE_CENSUS_ROOT` and get a
     first-party count check against the source-of-truth comment.
+
+    The pre-rename `AUTOSHOP_CENSUS_ROOT` still answers, the same way the app
+    answers to every other pre-rename variable (`config::with_legacy_alias`).
+    A gate that quietly SKIPPED because the operator's shell still spells it the
+    old way is worse than no gate: it reports PASS-with-SKIP and nothing is
+    checked.
     """
-    raw = os.environ.get("AUTOSHADE_CENSUS_ROOT")
+    name = "AUTOSHADE_CENSUS_ROOT"
+    raw = os.environ.get(name)
+    if not raw:
+        name = "AUTOSHOP_CENSUS_ROOT"
+        raw = os.environ.get(name)
+        if raw:
+            print(
+                f"warning: {name} still works, but it is the pre-rename name and the"
+                " next release removes it; rename it to AUTOSHADE_CENSUS_ROOT.",
+                file=sys.stderr,
+            )
     if not raw:
         return Skip("AUTOSHADE_CENSUS_ROOT is unset: the census corpus is outside the repo")
     root = Path(raw)
     if not root.is_dir():
-        raise LookupError(f"AUTOSHADE_CENSUS_ROOT is not a directory: {root}")
+        raise LookupError(f"{name} is not a directory: {root}")
     files = list(root.rglob("*.xmp"))
     counts = {"Mask/Aggregate": 0, "Mask/Image": 0, "Mask/Paint": 0, "Mask/*": 0, "Gesture": 0}
     for path in files:
