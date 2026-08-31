@@ -92,9 +92,15 @@
 > experimental generative edits, an optional pixel-**heal** retouch mode (§4.7)
 > the deterministic look **reverse-fit** (§4.8) and the local server's refusal
 > model (§4.9).
-> 1228 library + 22 CLI + 157 GUI + 2+2 contract tests are enumerated in the GUI
-> build; the library result is 1217 pass + 11 `#[ignore]`d forensic probes
-> (counts refreshed 2026-08-31: the macOS port M1-M3 added 18 named tests by
+> 1245 library + 22 CLI + 157 GUI + 2+2 contract tests are enumerated in the GUI
+> build; the library result is 1233 pass + 12 `#[ignore]`d forensic probes
+> (counts refreshed 2026-08-31: R30 batch 2 added 18 named tests against
+> `a31eb2f` — 15 `style` for the vocabulary-complete distillation (one of
+> them the env-gated `#[ignore]` calibration harness) and 3
+> `advisor::catalogue` for the mutable accessors — and renamed one whose
+> promise the batch narrowed (`retrieval_and_style_targets_do_not_read_
+> mask_habits` → `retrieval_does_not_read_mask_habits`), so library
+> 1228→1245; before it, the macOS port M1-M3 added 18 named tests by
 > name against `df62554` — 12 library (8 `config` for the interpreter, the
 > bundle boundary and the weight cache, 3 `store` for the per-platform store
 > name and the off-Windows device-path refusal, 1 `lib` for the source-cut
