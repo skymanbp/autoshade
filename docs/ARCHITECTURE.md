@@ -1898,7 +1898,17 @@ all read a structure-blind re-aggregation that preserves one-sided, sparse and
 minimum-share population vetoes. The structural model is carried separately
 only for Full zones and the detail stage. Every Atmosphere report discloses the
 structurally withheld ranges and explains that they do not constrain its bounded
-atmosphere controls.
+atmosphere controls. Since R30 batch 1 it also states the POPULATION those
+controls were read over: white balance and exposure come from WHOLE-FRAME
+per-channel weighted medians of both sides, which pairs the two frames as
+distributions and so presumes both describe the same content — the presumption
+selecting Atmosphere denies. Where a cross-image correspondence field exists,
+the report adds how much of the TARGET has no confident counterpart in the
+source (grid resolution, the sidecar's 48×48 cells, threshold 0.5) and states
+that this share helped define those two controls; with no field the share reads
+as NOT MEASURED rather than as zero. This is disclosure only — no weight and no
+solve changes — and it is the precondition data for the deferred decision on
+whether that reference population should be re-weighted at all.
 
 The tone stage's evidence prefers NEAR-NEUTRAL pixels (saturated ones carry
 chroma-clipped luma), which rests on an identification assumption — "grey"
@@ -1952,12 +1962,22 @@ what makes a subject edge lying under the mask border cancel, so only the
 discontinuity the correction itself introduced is budgeted. For that family a
 reading of ZERO measured crossings is a refusal, never a pass — until 2026-08-30
 the rim ruler returned `0.000` from an empty transition band for every hard
-raster ever gated, and the gate read that as comfortably inside budget. A Full-zone correction then uses the two-arm gate
-(v0.26.1): halve the zone error, or land it at/below an absolute matched
-floor (0.02 of linear-mean error, brightness within a quarter stop — the
-floor lives in scale-dependent linear light, so the EV companion rides
-both absolute yardsticks) with a real ≥20% gain; an Atmosphere zone uses
-zone-local do-no-harm instead. A zone already inside the
+raster ever gated, and the gate read that as comfortably inside budget. A Full-zone correction then uses the three-arm gate
+(v0.26.1, third arm R30 batch 1): halve the zone error, land it at/below an
+absolute matched floor (0.02 of linear-mean error, brightness within a quarter
+stop — the floor lives in scale-dependent linear light, so the EV companion
+rides both absolute yardsticks) with a real ≥20% gain, or be STRICTLY BETTER —
+an absolute zone gain over `ZONE_MIN_ABS_GAIN = 0.012` while the frame-global
+reading does not regress at all. The third arm exists because the first two are
+ratio yardsticks with nothing absolute in them: the calibration land zone
+improved 0.078 → 0.054 with the frame moving −0.00004 and every quality gate
+clear, and was dropped for landing at 69% of its start rather than 50%. It pays
+for that relaxation on the frame side, where zero regression is stricter than
+the semantic route's own `0.02` drift insurance and equal to what the spatial,
+range and free-mask routes already demand; a correction admitted by it carries
+its own typed disclosure naming both readings and naming `ZONE_TEXTURE_MIN` as
+the one safety gate known NOT to discriminate. An Atmosphere zone uses
+zone-local do-no-harm instead, and the absolute arm never reaches it. A zone already inside the
 observed matched DOMAIN (≤0.012, same EV companion) is left alone with an
 honest "already matches" note instead of being dialled, regressed, and
 reported as a dropped improvement; zones between the two yardsticks are
