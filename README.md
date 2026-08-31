@@ -477,11 +477,16 @@ estimate. Sources are the pinned claims in
 
 The v1.1.0 release is built by GitHub Actions from the tag and provides the
 Windows front ends plus a first macOS universal (arm64 + x86_64) CLI archive;
-Linux is built and tested in CI with no prebuilt binaries yet. The release
-assets are `autoshop.exe` (CLI), `autoshop-gui.exe` (desktop app),
-`Autoshop-Setup-1.1.0.exe` (installer), `autoshop-1.1.0-windows-x64.zip`
-(portable archive), `autoshop-1.1.0-macos-universal.zip`, and `checksums.txt`,
-which carries the SHA-256 of every file above.
+Linux is built and tested in CI with no prebuilt binaries yet. `checksums.txt`
+on the release page carries the SHA-256 of every asset.
+
+| File | Size | SHA-256 |
+|---|---:|---|
+| `autoshop.exe` (CLI) | 19,963,904 bytes | `64730aca96adb80350a3484e32e1e6dad57060d9575deb1eb125ca8380ad6d78` |
+| `autoshop-gui.exe` (desktop app) | 26,249,728 bytes | `e2d51f846c7bffb32ec96355274f9c7d914234b3de5f85dea185098700943b68` |
+| `Autoshop-Setup-1.1.0.exe` (installer) | 13,923,181 bytes | `9fcf9a542e554368ed9e83a6697d33ef9848b79baf9f1e7c728f38d770a6f4da` |
+| `autoshop-1.1.0-windows-x64.zip` (portable archive) | 18,696,286 bytes | `9efcd97dc491a9bb9e0eabbc0943f2bf443850699f76716b777ae22c3bd92b41` |
+| `autoshop-1.1.0-macos-universal.zip` (macOS universal CLI) | 36,894,209 bytes | `898eace14399aae800e653336cf6c789fb76d52f75edafeffc99cb1e4558b272` |
 
 Download from the
 [v1.1.0 release page](https://github.com/skymanbp/autoshop/releases/tag/v1.1.0):
