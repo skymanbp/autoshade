@@ -31,6 +31,12 @@ jobs:
         run: cargo build --release --locked
       - name: cargo build (gui feature)
         run: cargo build --release --locked --bins --features gui
+  # Release profile: the canonical battery mode — what every local gate runs
+  # and what ships. The debug-mode trip these jobs used to run took the
+  # renderer's arithmetic-heavy suites to 2h26m on a 4-vCPU runner (run
+  # 33294497854) while the same release-mode suite finishes in minutes; it
+  # also tested a binary in a profile nothing ever ships. debug_assert!
+  # coverage lives in the dedicated job below instead.
   test:
     strategy:
       fail-fast: false
@@ -40,10 +46,24 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
       - name: cargo test (default features)
-        run: cargo test --locked
+        run: cargo test --locked --release
       # The gui feature only adds dependencies (Cargo.toml [features]; no
       # cfg(feature = "gui") outside src/bin/gui), so this trip runs the GUI
       # bin's own tests only — lib/CLI/contract suites are the default trip's.
       - name: cargo test (gui feature)
-        run: cargo test --locked --features gui --bin autoshop-gui
+        run: cargo test --locked --release --features gui --bin autoshop-gui
+
+  # fit/render carry debug_assert!s that only fire in the debug profile — a
+  # debug lib trip caught four such reds at step 10-B1 — so one debug trip on
+  # the cheapest runner keeps that class covered per push while the jobs
+  # above stay in the profile that ships.
+  debug-asserts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo test (lib, debug profile)
+        run: cargo test --locked --lib

@@ -125,10 +125,6 @@ jobs:
           else
             echo "INTEL SLICE BUILT BUT NOT EXECUTED — no Rosetta on this runner"
           fi
-      - name: Batteries
-        run: |
-          cargo test --locked
-          cargo test --locked --features gui --bin autoshop-gui
       - name: Stage the sidecars beside the binaries
         run: |
           cp LICENSE README.md dist/
@@ -147,8 +143,24 @@ jobs:
           path: autoshop-*-macos-universal.zip
           if-no-files-found: error
 
+  # The battery runs BESIDE the build on its own runner, not after it inside
+  # the build job: the serial form recompiled the whole crate from scratch in
+  # the debug profile (the dist build is --release --target <triple>, so
+  # nothing was reused) and doubled the macOS wall time. Release profile —
+  # the canonical battery mode, and the profile the assets above ship in.
+  macos-battery:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Batteries
+        run: |
+          cargo test --locked --release
+          cargo test --locked --release --features gui --bin autoshop-gui
+
   publish:
-    needs: [windows, macos]
+    needs: [windows, macos, macos-battery]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
