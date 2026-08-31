@@ -92,9 +92,14 @@
 > experimental generative edits, an optional pixel-**heal** retouch mode (§4.7)
 > the deterministic look **reverse-fit** (§4.8) and the local server's refusal
 > model (§4.9).
-> 1245 library + 22 CLI + 157 GUI + 2+2 contract tests are enumerated in the GUI
-> build; the library result is 1233 pass + 12 `#[ignore]`d forensic probes
-> (counts refreshed 2026-08-31: R30 batch 2 added 18 named tests against
+> 1254 library + 22 CLI + 157 GUI + 2+2 contract tests are enumerated in the GUI
+> build; the library result is 1242 pass + 12 `#[ignore]`d forensic probes
+> (counts refreshed 2026-08-31: R30 batch 3 added 9 named tests against
+> `2a415a5` — 5 `advisor` for the colour guardrail pair, the templated
+> neutral hatch, the numeric curve/mask freedoms, the three-band snapshot
+> and the judge's palette item, 1 `advisor::mod` for the verifier checklist,
+> 3 `mask_habit` for the hue habit dimension — so library 1245→1254;
+> before it, R30 batch 2 added 18 named tests against
 > `a31eb2f` — 15 `style` for the vocabulary-complete distillation (one of
 > them the env-gated `#[ignore]` calibration harness) and 3
 > `advisor::catalogue` for the mutable accessors — and renamed one whose
