@@ -7894,6 +7894,74 @@ mod tests {
         );
     }
 
+    /// R30 R2, added at adjudication: the retention floor is TWO-SIDED, and
+    /// the target's mask is the ANSWERED bitmap rather than the source's
+    /// confidence. The batch's own fixtures keep the two sides' retention
+    /// equal, so neither rule was being measured.
+    ///
+    /// A field can be fully confident and still answer for almost none of the
+    /// target: every source cell landing in one corner is what "the target is
+    /// mostly generated" looks like at the limit — the island pair's 24% and
+    /// `p37`'s 93% pushed all the way. There the source keeps ALL of its
+    /// evidence while the target keeps a sliver, and the two rules diverge:
+    ///
+    ///   * a floor that accepted EITHER side would read the two medians over
+    ///     a whole source and a corner of a target — a louder version of the
+    ///     mismatched pairing this batch exists to repair, not a repair;
+    ///   * a target mask taken from `conf` would call the target fully
+    ///     retained, because every SOURCE cell is confident, and restrict on
+    ///     a population it never measured.
+    ///
+    /// Adjudicator mutations ADJ-1 (`readable()` on `||`) and ADJ-2 (the
+    /// target side masked by `conf`) both go red here; both were green
+    /// against the eight tests the batch shipped with.
+    #[test]
+    fn a_confident_field_answering_only_a_corner_is_thin_on_the_target_side() {
+        let g = crate::correspond::GRID;
+        // Every cell confident, every cell landing in the same 4x4 corner:
+        // 16 of the grid's cells are answered for, and the rest of the
+        // target is content no source cell speaks for.
+        let corner = |_: &DynamicImage,
+                      _: &DynamicImage|
+         -> anyhow::Result<crate::correspond::CorrespondenceField> {
+            Ok(crate::correspond::CorrespondenceField {
+                confidence: vec![1.0; g * g],
+                map_x: (0..g * g).map(|c| (c % 4) as f32).collect(),
+                map_y: (0..g * g).map(|c| ((c / g) % 4) as f32).collect(),
+                ..identity_field()
+            })
+        };
+        let (src, tgt) = invented_half_pair();
+        let bare = atmosphere_fit(&src, &tgt, None);
+        let skewed = atmosphere_fit(&src, &tgt, Some(&corner));
+        match skewed.atmosphere_reference {
+            AtmosphereReference::Thin { source, target } => {
+                // The premise: this fixture SEPARATES the two sides. Without
+                // that separation the test would pass against both mutants
+                // for the same reason the batch's fixtures did.
+                assert!(
+                    source >= SHARED_POPULATION_MIN_RETENTION,
+                    "premise: the source side must stay fat, got {source}"
+                );
+                assert!(
+                    target < SHARED_POPULATION_MIN_RETENTION,
+                    "premise: the target side must fall under the floor, got {target}"
+                );
+            }
+            other => panic!(
+                "a fat source and a cornered target must refuse, got {other:?}"
+            ),
+        }
+        let has = |r: &FitReport, k: &str| r.notes.iter().any(|n| n.key == k);
+        assert!(has(&skewed, crate::rationale::keys::FIT_ATMOSPHERE_REFERENCE_THIN));
+        assert!(!has(&skewed, crate::rationale::keys::FIT_ATMOSPHERE_REFERENCE_SHARED));
+        assert_eq!(
+            (skewed.recipe.exposure_ev, skewed.recipe.temperature_k, skewed.recipe.tint),
+            (bare.recipe.exposure_ev, bare.recipe.temperature_k, bare.recipe.tint),
+            "a refused restriction must leave the solve exactly as it was"
+        );
+    }
+
     /// R30 R2: the rationale says which of the three things happened, and
     /// never two of them. The whole-frame sentence keeps its exact old
     /// meaning, so it must be ABSENT the moment the medians came from
