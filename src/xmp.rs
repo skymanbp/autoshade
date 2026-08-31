@@ -4626,8 +4626,9 @@ pub fn merge_recipe_into_xmp_in_frame_for_photo(
 /// decision (era-1 Temperature is relative to the 5500 K anchor, era-2 is
 /// absolute). Teaching the reader only the new spelling would have re-read
 /// every existing era-2 sidecar as era-1 and silently shifted its white
-/// balance. The writer stamps the current spelling; the readers accept both,
-/// for the same one-version grace the environment names get.
+/// balance. The writer stamps the current spelling; the readers accept both
+/// spellings PERMANENTLY: sidecars on user disks never upgrade themselves, so
+/// unlike the environment-name aliases this acceptance has no removal deadline.
 const XMPTK_ERA1: &str = "AutoShade";
 const XMPTK_ERA2: &str = "AutoShade 2";
 const XMPTK_ERA1_PRE_RENAME: &str = "Autoshop";
