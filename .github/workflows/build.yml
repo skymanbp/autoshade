@@ -53,7 +53,7 @@ jobs:
       # cfg(feature = "gui") outside src/bin/gui), so this trip runs the GUI
       # bin's own tests only — lib/CLI/contract suites are the default trip's.
       - name: cargo test (gui feature)
-        run: cargo test --locked --release --features gui --bin autoshop-gui
+        run: cargo test --locked --release --features gui --bin autoshade-gui
 
   # fit/render carry debug_assert!s that only fire in the debug profile — a
   # debug lib trip caught four such reds at step 10-B1 — so one debug trip on

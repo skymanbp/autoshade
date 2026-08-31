@@ -29,9 +29,9 @@ configuration and broken on the other.
       library and the two contract suites must also pass under the `gui`
       feature, and the `--bins` form cannot even express that)
 - [ ] **Touched decode / XMP / masks?** Run whichever env-gated fixture suites
-      you have — `AUTOSHOP_RAW_ZOO` (full test name
+      you have — `AUTOSHADE_RAW_ZOO` (full test name
       `every_make_in_the_raw_zoo_decodes_and_agrees_with_itself`),
-      `AUTOSHOP_LR_PROBE_FIXTURES`, `AUTOSHOP_MB_FIXTURES` — and say in the PR
+      `AUTOSHADE_LR_PROBE_FIXTURES`, `AUTOSHADE_MB_FIXTURES` — and say in the PR
       which ones you could not run. Unset, they skip silently.
 - [ ] **Docs changed?** `python scripts/check_docs.py` prints **PASS** on every
       row it can derive. That gate re-derives the hard numbers in the docs from
@@ -50,7 +50,7 @@ configuration and broken on the other.
 
 ## If this touches a degradation
 
-Autoshop's rule is that nothing degrades quietly: every loss has a name, and
+AutoShade's rule is that nothing degrades quietly: every loss has a name, and
 that name reaches the CLI's stderr, the desktop app's banner and the web reply.
 
 - [ ] Anything now carried-but-not-rendered, approximated, or refused is

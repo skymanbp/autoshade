@@ -58,9 +58,9 @@ jobs:
         shell: bash
         run: |
           mkdir -p dist
-          cp target/release/autoshop.exe dist/
-          cp target/release/autoshop-gui.exe dist/
-          ./dist/autoshop.exe --version
+          cp target/release/autoshade.exe dist/
+          cp target/release/autoshade-gui.exe dist/
+          ./dist/autoshade.exe --version
       - name: Install Inno Setup
         run: choco install innosetup -y --no-progress
       - name: Build the installer
@@ -73,10 +73,10 @@ jobs:
         with:
           name: windows
           path: |
-            dist/autoshop.exe
-            dist/autoshop-gui.exe
-            dist/autoshop-*-windows-x64.zip
-            target/installer/Autoshop-Setup-*.exe
+            dist/autoshade.exe
+            dist/autoshade-gui.exe
+            dist/autoshade-*-windows-x64.zip
+            target/installer/AutoShade-Setup-*.exe
           if-no-files-found: error
 
   macos:
@@ -103,7 +103,7 @@ jobs:
       - name: Universal binaries
         run: |
           mkdir -p dist
-          for b in autoshop autoshop-gui; do
+          for b in autoshade autoshade-gui; do
             lipo -create -output "dist/$b" \
               "target/aarch64-apple-darwin/release/$b" \
               "target/x86_64-apple-darwin/release/$b"
@@ -114,14 +114,14 @@ jobs:
             lipo -info "dist/$b"
           done
       - name: Smoke test — arm64 slice
-        run: ./dist/autoshop --version
+        run: ./dist/autoshade --version
       # Rosetta is not installed on the hosted runners. Reporting that the Intel
       # slice was BUILT BUT NOT EXECUTED is the honest line; silently skipping it
       # would let a broken slice ship as a tested one.
       - name: Smoke test — Intel slice, if Rosetta is present
         run: |
           if arch -x86_64 /usr/bin/true 2>/dev/null; then
-            arch -x86_64 ./dist/autoshop --version
+            arch -x86_64 ./dist/autoshade --version
           else
             echo "INTEL SLICE BUILT BUT NOT EXECUTED — no Rosetta on this runner"
           fi
@@ -136,11 +136,11 @@ jobs:
         # and M3 archives a real .app through this same step.
         run: |
           ditto -c -k --keepParent dist \
-            "autoshop-${{ steps.ver.outputs.version }}-macos-universal.zip"
+            "autoshade-${{ steps.ver.outputs.version }}-macos-universal.zip"
       - uses: actions/upload-artifact@v4
         with:
           name: macos
-          path: autoshop-*-macos-universal.zip
+          path: autoshade-*-macos-universal.zip
           if-no-files-found: error
 
   # The battery runs BESIDE the build on its own runner, not after it inside
@@ -157,7 +157,7 @@ jobs:
       - name: Batteries
         run: |
           cargo test --locked --release
-          cargo test --locked --release --features gui --bin autoshop-gui
+          cargo test --locked --release --features gui --bin autoshade-gui
 
   publish:
     needs: [windows, macos, macos-battery]
