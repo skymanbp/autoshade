@@ -1631,6 +1631,12 @@ pub struct FitReport {
     /// caller supplied a provider and the D gate consulted it (step 7b).
     /// In-process only, never serialized — the zoned passes read it.
     pub(crate) correspondence: Option<PairCorrespondence>,
+    /// R30 R2: which population this report's Atmosphere white balance and
+    /// exposure were read over. In-process only, never serialized; the
+    /// consultation site reads it to tell R2-lite's unpaired share from an
+    /// EXCLUDED one. Always [`AtmosphereReference::WholeFrame`] in Full mode,
+    /// where the two controls do not exist.
+    pub(crate) atmosphere_reference: AtmosphereReference,
 }
 
 /// What one correspondence field means FOR THIS PAIR's rasters: for every
@@ -1654,6 +1660,15 @@ pub(crate) struct PairCorrespondence {
     /// this one is what the Atmosphere global solve's whole-frame target
     /// median is exposed to. Grid resolution, never pixel resolution.
     pub(crate) target_unpaired: f32,
+    /// R30 R2: the same fact as [`Self::target_unpaired`], kept as the MASK
+    /// it was counted from and not only as its share — one derivation, two
+    /// consumers (the disclosure's number and the Atmosphere solve's
+    /// reference population, which must never be able to disagree). `1.0`
+    /// where some confident source cell maps ONTO the target grid cell
+    /// holding this analysis pixel, `0.0` where none does. Indexed like
+    /// [`Self::conf`]: the two analysis rasters share one geometry
+    /// ([`analysis_pair`]), so one index names the same rectangle on both.
+    pub(crate) target_answered: Vec<f32>,
     /// The sidecar grid the two shares above were counted on, so the
     /// disclosure can state its own resolution.
     pub(crate) grid: (usize, usize),
@@ -1745,7 +1760,154 @@ pub(crate) fn correspondence_for_pair(
     } else {
         1.0 - answered.iter().filter(|a| **a).count() as f32 / cells as f32
     };
-    PairCorrespondence { conf, tp: out, coverage, median, target_unpaired, grid: (gw, gh) }
+    // R30 R2: project that same bitmap onto the analysis raster by the
+    // identical nearest-cell rule the loop above uses, so the population the
+    // solve drops and the share the rationale prints are ONE fact.
+    let mut target_answered = vec![0.0f32; n];
+    for y in 0..sh {
+        for x in 0..sw {
+            let u = (x as f32 + 0.5) / sw as f32;
+            let v = (y as f32 + 0.5) / sh as f32;
+            let cx = ((u * gw as f32) as usize).min(gw - 1);
+            let cy = ((v * gh as f32) as usize).min(gh - 1);
+            if answered[cy * gw + cx] {
+                target_answered[(y * sw + x) as usize] = 1.0;
+            }
+        }
+    }
+    PairCorrespondence {
+        conf,
+        tp: out,
+        coverage,
+        median,
+        target_unpaired,
+        target_answered,
+        grid: (gw, gh),
+    }
+}
+
+/// R30 R2: the least of its OWN evidence mass either side's shared-content
+/// population may retain before the Atmosphere global solve refuses to read
+/// its two robust controls there and keeps the whole-frame reading — with a
+/// sentence saying it had to.
+///
+/// Not a new number, and deliberately not a copy of one: this IS
+/// [`EVIDENCE_RANGE_SURVIVAL_MIN`], the retention floor the evidence model
+/// already applies to every luma range and hue band ("a population must keep
+/// at least the support left at `DIVERGENCE_ZONE`"), pointed at the one
+/// population that had never been asked the question. If the evidence
+/// doctrine ever moves that line, this moves with it.
+pub(crate) const SHARED_POPULATION_MIN_RETENTION: f32 = EVIDENCE_RANGE_SURVIVAL_MIN;
+
+/// R30 R2: WHICH population an Atmosphere report's white balance and exposure
+/// were actually read over. A solve fact — no later re-measurement of the
+/// finished recipe can recover it — and the thing the rationale states.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub(crate) enum AtmosphereReference {
+    /// No usable correspondence field for this pair: the whole frame, with
+    /// the distribution-pairing assumption R2-lite disclosed and nothing
+    /// available to qualify it.
+    WholeFrame,
+    /// A field existed and the shared-content sub-population kept enough of
+    /// BOTH sides' evidence mass to be read: the two medians came from it.
+    /// The numbers are the retained shares of source and target evidence mass.
+    SharedContent { source: f32, target: f32 },
+    /// A field existed but one of the two sides retains less than
+    /// [`SHARED_POPULATION_MIN_RETENTION`] of its own evidence mass — too
+    /// little to be read as a population. The whole-frame medians stand and
+    /// the report says why they had to.
+    Thin { source: f32, target: f32 },
+}
+
+/// The two restricted weight vectors plus what each side kept.
+pub(crate) struct SharedPopulation {
+    source: Vec<f32>,
+    target: Vec<f32>,
+    source_retained: f32,
+    target_retained: f32,
+}
+
+impl SharedPopulation {
+    /// Both sides kept enough of their own evidence mass to be read as a
+    /// population rather than as a corner of one.
+    fn readable(&self) -> bool {
+        self.source_retained >= SHARED_POPULATION_MIN_RETENTION
+            && self.target_retained >= SHARED_POPULATION_MIN_RETENTION
+    }
+}
+
+/// R30 R2: restrict the Atmosphere global solve's two reference populations
+/// to the content the two frames actually SHARE.
+///
+/// `median(target) / median(source)` is a distribution-level pairing, and a
+/// distribution-level pairing is only meaningful when the two distributions
+/// describe the same content — precisely what selecting Atmosphere denies.
+/// The correspondence field is the instrument that says which pixels do:
+///
+///   * TARGET side — a pixel some confident source cell maps ONTO is a
+///     rendition of this frame. A pixel no cell answers for is not a rendition
+///     of anything in it: it is generated content, and it cannot say what THIS
+///     frame would look like developed differently. That is the population
+///     R2-lite measured at 24% of the island pair's target and 93% of `p37`'s,
+///     and the one its sentence says "defined those two controls all the same".
+///   * SOURCE side — the mirror image, and NOT optional. Restricting only the
+///     target moves one marginal onto a sub-population while the other stays
+///     on the whole frame, and a ratio of medians read over two different
+///     compositions is not a repair of the mismatched pairing, only a
+///     different mismatch. Measured on a synthetic pair whose invented region
+///     is the brighter 60% of the frame and therefore owns every whole-frame
+///     median: the true cast is EV 0.00 / `gr/gb` 1.256, the whole-frame solve
+///     answers +0.69 / 0.911, the target-only cut answers **−2.87 / 1.945**,
+///     and the symmetric cut answers +0.03 / 1.216. The target-only failure is
+///     larger than the defect it was meant to repair.
+///
+/// The cut is BINARY at [`CONFIDENT_MATCH`] rather than a confidence-
+/// proportional down-weight, for a reason about what the number means: the
+/// sidecar's confidence measures TRUST, not mass. Multiplying mass by trust
+/// lets a large barely-trusted population outvote a small certain one (0.49
+/// over 60% of a frame beats 1.00 over 20% of it) — the failure being
+/// repaired, in a quieter form. Cutting at the line R2-lite already publishes
+/// also keeps the disclosed share and the excluded population ONE fact.
+///
+/// Retention is measured on EVIDENCE MASS, not on pixel count: a pixel the
+/// evidence model already weighted 0 was never in the reference population,
+/// so it can neither be kept nor dropped from it.
+///
+/// `None` only when there is no evidence mass at all to restrict.
+fn shared_content_population(
+    evidence: &EvidenceModel,
+    c: &PairCorrespondence,
+) -> Option<SharedPopulation> {
+    let n = evidence
+        .source_weights
+        .len()
+        .min(evidence.target_weights.len())
+        .min(c.conf.len())
+        .min(c.target_answered.len());
+    let mut source = vec![0.0f32; n];
+    let mut target = vec![0.0f32; n];
+    let (mut kept_s, mut kept_t) = (0.0f64, 0.0f64);
+    let (mut all_s, mut all_t) = (0.0f64, 0.0f64);
+    for i in 0..n {
+        let (ws, wt) =
+            (evidence.source_weights[i].max(0.0), evidence.target_weights[i].max(0.0));
+        all_s += ws as f64;
+        all_t += wt as f64;
+        if c.conf[i] >= CONFIDENT_MATCH {
+            source[i] = evidence.source_weights[i];
+            kept_s += ws as f64;
+        }
+        if c.target_answered[i] > 0.0 {
+            target[i] = evidence.target_weights[i];
+            kept_t += wt as f64;
+        }
+    }
+    (all_s > 0.0 && all_t > 0.0).then(|| SharedPopulation {
+        source,
+        target,
+        source_retained: (kept_s / all_s) as f32,
+        target_retained: (kept_t / all_t) as f32,
+    })
 }
 
 /// Fit an [`EditRecipe`] mapping `src` (untouched preview) onto the look of
@@ -1902,6 +2064,7 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure_opts(
             evidence: report_evidence,
             structural_evidence,
             correspondence: None,
+            atmosphere_reference: AtmosphereReference::WholeFrame,
         };
     }
 
@@ -1920,6 +2083,15 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure_opts(
                 )
             })
         });
+        // R30 R2: the field is now an INPUT to the solve, not only a note
+        // appended after it — the Atmosphere global white balance and
+        // exposure read their medians over the shared-content population it
+        // identifies. Borrowed here and moved into the report below, so
+        // there is still exactly one field per pair.
+        let paired = match &correspondence {
+            Some(Ok(c)) => Some(c),
+            _ => None,
+        };
         let mut report = fit_atmosphere_from_parts(
             &s_img,
             &sp,
@@ -1930,6 +2102,7 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure_opts(
             &evidence,
             defer_disclosure,
             options.strength,
+            paired,
         );
         match correspondence {
             None => {}
@@ -1947,12 +2120,24 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure_opts(
                 );
                 // R2-lite's second half: how much of the population the
                 // WB/EV medians were read over had nothing to be paired
-                // with. Disclosure only — no weight, no solve, changes.
+                // with. R2 turned that share from a passenger into an
+                // exclusion, so the sentence has to change with it: the
+                // original key still says "and defined those two controls
+                // all the same", which stops being true the moment the
+                // shared-content population is the one that was read.
+                let excluded = matches!(
+                    report.atmosphere_reference,
+                    AtmosphereReference::SharedContent { .. }
+                );
                 crate::rationale::push_note(
                     &mut report.recipe.rationale,
                     &mut report.notes,
                     crate::rationale::Note::new(
-                        crate::rationale::keys::FIT_ATMOSPHERE_REFERENCE_UNPAIRED,
+                        if excluded {
+                            crate::rationale::keys::FIT_ATMOSPHERE_REFERENCE_EXCLUDED
+                        } else {
+                            crate::rationale::keys::FIT_ATMOSPHERE_REFERENCE_UNPAIRED
+                        },
                         vec![
                             ("share", format!("{:.0}", c.target_unpaired * 100.0)),
                             ("tau", format!("{CONFIDENT_MATCH:.2}")),
@@ -2028,6 +2213,7 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure_opts(
                 paired: false,
                 vouched_bands: None,
                 hsl: HslStageFacts::default(),
+                atmosphere_reference: AtmosphereReference::WholeFrame,
             },
         );
     }
@@ -2057,7 +2243,7 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure_opts(
                 structural_evidence: None,
                 defer_disclosure,
             },
-            SolveFacts { budget: Some(FitBudget::for_strength(options.strength)), strength: Some(options.strength.get()), veto_luma: None, veto_hue: None, wb_clamped: None, wb_search_bound: None, wb_rotation_coverage: None, wb_rotation_disclosure: None, cast_admitted_by_strength: None, wb_foreign_hue_withheld: false, wb_rotation_withheld: false, sat_pegged: None, cast: CastOutcome::default(), evidence_refused: false, sat_fitted: None, regressed: None, detail: (0.0, 0.0), detail_withheld: true, robust: None, paired: false, vouched_bands: None, hsl: HslStageFacts::default() },
+            SolveFacts { budget: Some(FitBudget::for_strength(options.strength)), strength: Some(options.strength.get()), veto_luma: None, veto_hue: None, wb_clamped: None, wb_search_bound: None, wb_rotation_coverage: None, wb_rotation_disclosure: None, cast_admitted_by_strength: None, wb_foreign_hue_withheld: false, wb_rotation_withheld: false, sat_pegged: None, cast: CastOutcome::default(), evidence_refused: false, sat_fitted: None, regressed: None, detail: (0.0, 0.0), detail_withheld: true, robust: None, paired: false, vouched_bands: None, hsl: HslStageFacts::default(), atmosphere_reference: AtmosphereReference::WholeFrame },
         );
     }
 
@@ -2617,6 +2803,7 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure_opts(
             paired,
             vouched_bands,
             hsl: hsl_facts,
+            atmosphere_reference: AtmosphereReference::WholeFrame,
         },
     )
 }
@@ -2636,11 +2823,36 @@ fn fit_atmosphere_from_parts(
     structural: &EvidenceModel,
     defer_disclosure: bool,
     strength: crate::recipe::GradeStrength,
+    correspondence: Option<&PairCorrespondence>,
 ) -> FitReport {
     let budget = FitBudget::for_strength(strength);
     let blind = structural.structure_blind(tp);
     let evidence = &blind;
     let veto_evidence = evidence;
+    // R30 R2: the reference population for the two ROBUST GLOBAL CONTROLS
+    // only. The tone curve, the saturation chase, the per-band mixer, every
+    // `look_err` reading, the confidence cap and mode selection all keep the
+    // frame ruler they already had — this restriction moves the population
+    // the white balance and the exposure are solved FROM, and nothing else.
+    let shared = correspondence.and_then(|c| shared_content_population(evidence, c));
+    let atmosphere_reference = match &shared {
+        Some(p) if p.readable() => AtmosphereReference::SharedContent {
+            source: p.source_retained,
+            target: p.target_retained,
+        },
+        Some(p) => AtmosphereReference::Thin {
+            source: p.source_retained,
+            target: p.target_retained,
+        },
+        None => AtmosphereReference::WholeFrame,
+    };
+    // Borrowed, never cloned, on the unrestricted path: with no field the two
+    // solves below read the very slices they always read, so a pair without a
+    // correspondence field is byte-identical by construction rather than by
+    // arithmetic luck.
+    let readable = shared.as_ref().filter(|p| p.readable());
+    let ref_source = readable.map_or(evidence.source_weights.as_slice(), |p| p.source.as_slice());
+    let ref_target = readable.map_or(evidence.target_weights.as_slice(), |p| p.target.as_slice());
     // One report has one frame ruler: the caller's structural `err_before`
     // belongs to the mode-selection model, while every Atmosphere measurement
     // below is read on the structure-blind population model.
@@ -2654,10 +2866,7 @@ fn fit_atmosphere_from_parts(
                 + 0.114 * render::srgb_to_linear(p[2])
         })
     };
-    let (sl, tl) = (
-        linear_luma_cdf(sp, &evidence.source_weights),
-        linear_luma_cdf(tp, &evidence.target_weights),
-    );
+    let (sl, tl) = (linear_luma_cdf(sp, ref_source), linear_luma_cdf(tp, ref_target));
     let exposure = (quantile(&tl, 0.5).max(1e-5) / quantile(&sl, 0.5).max(1e-5))
         .log2()
         .clamp(-budget.ev, budget.ev);
@@ -2669,8 +2878,8 @@ fn fit_atmosphere_from_parts(
     // engine's own WB model.
     let mut ratio = [1.0f32; 3];
     for ch in 0..3 {
-        let sc = weighted_cdf(sp, &evidence.source_weights, |p| render::srgb_to_linear(p[ch]));
-        let tc = weighted_cdf(tp, &evidence.target_weights, |p| render::srgb_to_linear(p[ch]));
+        let sc = weighted_cdf(sp, ref_source, |p| render::srgb_to_linear(p[ch]));
+        let tc = weighted_cdf(tp, ref_target, |p| render::srgb_to_linear(p[ch]));
         ratio[ch] = quantile(&tc, 0.5).max(1e-5) / quantile(&sc, 0.5).max(1e-5);
     }
     let common = (ratio[0] * ratio[1] * ratio[2]).max(1e-12).powf(1.0 / 3.0);
@@ -2973,6 +3182,7 @@ fn fit_atmosphere_from_parts(
             paired: false,
             vouched_bands: None,
             hsl: hsl_facts,
+            atmosphere_reference,
         },
     )
 }
@@ -3419,6 +3629,11 @@ struct SolveFacts {
     /// The per-band colour mixer's own verdicts: which bands it could not
     /// measure, and whether it gave back what it fitted.
     hsl: HslStageFacts,
+    /// R30 R2: which population the Atmosphere white balance and exposure
+    /// were read over. Only the solve knows — a re-measurement of the
+    /// finished recipe cannot tell a whole-frame median from a shared-content
+    /// one — which is why it rides here and not on [`Measured`].
+    atmosphere_reference: AtmosphereReference,
 }
 
 /// Build the rationale, the typed notes and the confidence of ONE fit report.
@@ -3652,11 +3867,55 @@ fn compose_report(mut recipe: EditRecipe, m: Measured<'_>, solve: SolveFacts) ->
         // the same content — which is exactly what selecting Atmosphere
         // denies. The assumption was always in the code; only now is it in
         // the rationale.
-        push_note(
-            &mut rationale,
-            &mut notes,
-            Note::plain(keys::FIT_ATMOSPHERE_REFERENCE_POPULATION),
-        );
+        // R30 R2: the whole-frame sentence is now the statement of ONE of
+        // three cases, not of the only case. Its key and its wording are
+        // untouched — it still says exactly what it always said, and it is
+        // still what an unrestricted solve deserves.
+        match solve.atmosphere_reference {
+            AtmosphereReference::WholeFrame => {
+                push_note(
+                    &mut rationale,
+                    &mut notes,
+                    Note::plain(keys::FIT_ATMOSPHERE_REFERENCE_POPULATION),
+                );
+            }
+            AtmosphereReference::Thin { source, target } => {
+                push_note(
+                    &mut rationale,
+                    &mut notes,
+                    Note::plain(keys::FIT_ATMOSPHERE_REFERENCE_POPULATION),
+                );
+                push_note(
+                    &mut rationale,
+                    &mut notes,
+                    Note::new(
+                        keys::FIT_ATMOSPHERE_REFERENCE_THIN,
+                        vec![
+                            ("src", format!("{:.0}", source * 100.0)),
+                            ("tgt", format!("{:.0}", target * 100.0)),
+                            (
+                                "floor",
+                                format!("{:.0}", SHARED_POPULATION_MIN_RETENTION * 100.0),
+                            ),
+                        ],
+                    ),
+                );
+            }
+            AtmosphereReference::SharedContent { source, target } => {
+                push_note(
+                    &mut rationale,
+                    &mut notes,
+                    Note::new(
+                        keys::FIT_ATMOSPHERE_REFERENCE_SHARED,
+                        vec![
+                            ("tau", format!("{CONFIDENT_MATCH:.2}")),
+                            ("src", format!("{:.0}", source * 100.0)),
+                            ("tgt", format!("{:.0}", target * 100.0)),
+                        ],
+                    ),
+                );
+            }
+        }
     }
     let (withheld_luma, withheld_hue) = withheld_range_names(m.evidence);
     let all_ranges = m.evidence.luma.iter().chain(&m.evidence.hue);
@@ -3865,6 +4124,7 @@ fn compose_report(mut recipe: EditRecipe, m: Measured<'_>, solve: SolveFacts) ->
         evidence: m.evidence.clone(),
         structural_evidence: m.structural_evidence.cloned(),
         correspondence: None,
+        atmosphere_reference: solve.atmosphere_reference,
     }
 }
 
@@ -4070,6 +4330,13 @@ pub fn rescore_report(
                     None
                 },
             },
+            // R30 R2: WholeFrame on purpose, and NOT carried from the notes.
+            // `rescore_report` re-measures a recipe someone ADJUSTED after
+            // the solve, and which population that solve read its two robust
+            // controls over is exactly the kind of fact this split says a
+            // later re-measurement cannot recover. Re-asserting it from a
+            // sentence would be claiming a provenance nothing here checked.
+            atmosphere_reference: AtmosphereReference::WholeFrame,
         },
     )
 }
@@ -6307,6 +6574,7 @@ mod tests {
                 paired: false,
                 vouched_bands: None,
                 hsl: HslStageFacts::default(),
+                atmosphere_reference: AtmosphereReference::WholeFrame,
             },
         );
         assert!(report.recipe.confidence <= 0.35);
@@ -7265,7 +7533,11 @@ mod tests {
                 provider: Some(&ok),
             },
         );
-        assert!(has(&measured, crate::rationale::keys::FIT_ATMOSPHERE_REFERENCE_UNPAIRED));
+        // R30 R2: an identity field answers for every target cell, so the
+        // restriction it authorises is the empty one — but the SHARE is now
+        // an exclusion, and the sentence that reports it changed with it.
+        assert!(has(&measured, crate::rationale::keys::FIT_ATMOSPHERE_REFERENCE_EXCLUDED));
+        assert!(!has(&measured, crate::rationale::keys::FIT_ATMOSPHERE_REFERENCE_UNPAIRED));
         assert!(!has(&measured, crate::rationale::keys::FIT_ATMOSPHERE_REFERENCE_UNMEASURED));
         // …and it must be a DIALLESS change: same recipe as the bare fit.
         assert_eq!(
@@ -7282,6 +7554,571 @@ mod tests {
                 bare.recipe.saturation,
             ),
             "R2-lite is disclosure only"
+        );
+    }
+
+    /// R30 R2 fixture: RC-A's shape, reduced to something a unit test can
+    /// assert on, and deliberately sharper than the calibration pair.
+    ///
+    /// Rows `[0, INVENTED_ROWS)` are INVENTED — the target replaced them with
+    /// content of its own texture — and are strictly BRIGHTER than the rest in
+    /// every channel, so they span percentiles 40-100 and therefore own every
+    /// whole-frame per-channel median by construction. Rows
+    /// `[INVENTED_ROWS, h)` CORRESPOND, and carry the one thing the fit is
+    /// supposed to find: a warm cast of `(1.060, 1.000, 0.955)` that sits
+    /// inside the Atmosphere white-balance budget.
+    ///
+    /// The invented block is also 1.25x brighter than its own source, so a
+    /// whole-frame exposure reads +0.69 EV where the truth is 0.00 — the
+    /// fixture separates BOTH of the two controls this batch moves.
+    const INVENTED_ROWS: u32 = 58; // 29 of the sidecar's 48 cell rows
+    fn invented_half_pair() -> (DynamicImage, DynamicImage) {
+        let (w, h) = (96u32, 96u32);
+        let tex = |x: u32, y: u32, salt: u32| -> f32 {
+            let v = (x.wrapping_mul(2_654_435_761) ^ y.wrapping_mul(40_503) ^ salt.wrapping_mul(97))
+                >> 9;
+            (v & 0xff) as f32 / 255.0
+        };
+        let mut s = image::RgbImage::new(w, h);
+        let mut t = image::RgbImage::new(w, h);
+        let put = |img: &mut image::RgbImage, x: u32, y: u32, p: [f32; 3]| {
+            img.put_pixel(
+                x,
+                y,
+                image::Rgb([
+                    (p[0].clamp(0.0, 1.0) * 255.0).round() as u8,
+                    (p[1].clamp(0.0, 1.0) * 255.0).round() as u8,
+                    (p[2].clamp(0.0, 1.0) * 255.0).round() as u8,
+                ]),
+            )
+        };
+        for y in 0..h {
+            for x in 0..w {
+                let n = tex(x, y, 0);
+                if y < INVENTED_ROWS {
+                    let m = tex(x, y, 7);
+                    put(&mut s, x, y, [0.40 + 0.22 * n, 0.44 + 0.22 * n, 0.50 + 0.22 * n]);
+                    put(&mut t, x, y, [0.49 + 0.27 * m, 0.55 + 0.27 * m, 0.64 + 0.27 * m]);
+                } else {
+                    let sp = [0.12 + 0.16 * n, 0.11 + 0.16 * n, 0.10 + 0.16 * n];
+                    put(&mut s, x, y, sp);
+                    put(&mut t, x, y, [sp[0] * 1.060, sp[1] * 1.000, sp[2] * 0.955]);
+                }
+            }
+        }
+        (DynamicImage::ImageRgb8(s), DynamicImage::ImageRgb8(t))
+    }
+
+    /// The white balance the corresponding region of [`invented_half_pair`]
+    /// actually carries, read as the ratio of that region's LINEAR per-channel
+    /// MEANS — a statistic with no bimodality to trip over, so it is the
+    /// truth the restricted solve is measured against rather than another
+    /// median. Measured: 1.2181.
+    const CORRESPONDING_TRUE_WB: f32 = 1.2181;
+    /// …and its true exposure: the corresponding region's target is its source
+    /// times a cast whose luma is 1.00, so a correct solve reads 0 EV.
+    const CORRESPONDING_TRUE_EV: f32 = 0.0;
+
+    /// Atmosphere mode on demand, through the route the zoned pass itself
+    /// uses (`divergent_zone_promotes`). These tests are about what the
+    /// Atmosphere solve READS, not about where a synthetic texture happens to
+    /// land relative to `DIVERGENCE_GLOBAL`; promoting explicitly keeps the
+    /// two questions apart, and keeps a fixture tweak from silently moving a
+    /// test onto the Full path where the restriction does not exist.
+    fn atmosphere_fit(
+        src: &DynamicImage,
+        tgt: &DynamicImage,
+        provider: Option<CorrespondenceProvider<'_>>,
+    ) -> FitReport {
+        fit_recipe_from_promoted_with_disclosure_opts(
+            src,
+            tgt,
+            &EditRecipe::default(),
+            true,
+            false,
+            FitOptions { strength: crate::recipe::GradeStrength::default(), provider },
+        )
+    }
+
+    /// A field confident only where [`invented_half_pair`] corresponds.
+    fn corresponding_field() -> crate::correspond::CorrespondenceField {
+        let g = crate::correspond::GRID;
+        let split = (INVENTED_ROWS as usize * g) / 96;
+        crate::correspond::CorrespondenceField {
+            confidence: (0..g * g).map(|c| if c / g >= split { 1.0 } else { 0.0 }).collect(),
+            ..identity_field()
+        }
+    }
+
+    /// The white-balance ratio a recipe's persisted dials actually apply —
+    /// `gr/gb`, the one number "warm or cold" means.
+    fn wb_ratio(r: &EditRecipe) -> f32 {
+        let g = render::wb_gains(
+            r.as_shot_k.unwrap_or(5500.0),
+            r.temperature_k.unwrap_or(5500.0),
+            r.tint,
+        );
+        g[0] / g[2]
+    }
+
+    /// R30 R2, the directional law: when a correspondence field says a slab of
+    /// the target has no counterpart in the source, the Atmosphere global
+    /// white balance and exposure must be solved from the part that DOES —
+    /// not from a whole-frame median that the invented slab helped define.
+    ///
+    /// Both dials are asserted, in the direction the fixture makes true by
+    /// construction: the invented half is bluer and brighter than the half
+    /// that corresponds, so dropping it must move the white balance WARMER
+    /// and the exposure DOWN. Supervisor mutations M-R2-A (restriction
+    /// removed), M-R2-C (the cut kept everything) and M-R2-F (`target_answered`
+    /// always 1) all go red on the first assertion.
+    #[test]
+    fn the_atmosphere_solve_drops_target_content_no_source_answers_for() {
+        let (src, tgt) = invented_half_pair();
+        let field = |_: &DynamicImage,
+                     _: &DynamicImage|
+         -> anyhow::Result<crate::correspond::CorrespondenceField> {
+            Ok(corresponding_field())
+        };
+        let whole = atmosphere_fit(&src, &tgt, None);
+        let paired = atmosphere_fit(&src, &tgt, Some(&field));
+        assert_eq!(whole.mode, FitMode::Atmosphere, "premise: both arms are the Atmosphere solve");
+        assert_eq!(paired.mode, FitMode::Atmosphere, "the field never moves mode selection");
+        match paired.atmosphere_reference {
+            AtmosphereReference::SharedContent { .. } => {}
+            other => panic!("the restriction must be in force, got {other:?}"),
+        }
+        // The whole-frame solve is defined by the invented block and lands on
+        // the wrong side of neutral; the restricted one recovers the cast the
+        // corresponding region actually carries.
+        assert!(
+            wb_ratio(&whole.recipe) < 1.0,
+            "premise: the invented block owns the whole-frame median and pulls it cool: {:.4}",
+            wb_ratio(&whole.recipe)
+        );
+        assert!(
+            (wb_ratio(&paired.recipe) - CORRESPONDING_TRUE_WB).abs() < 0.06,
+            "the restricted solve must recover the corresponding region's white balance \
+             {CORRESPONDING_TRUE_WB:.4}: whole {:.4}, paired {:.4}",
+            wb_ratio(&whole.recipe),
+            wb_ratio(&paired.recipe)
+        );
+        assert!(
+            whole.recipe.exposure_ev > 0.5,
+            "premise: the invented block is brighter and owns the whole-frame exposure: {}",
+            whole.recipe.exposure_ev
+        );
+        assert!(
+            (paired.recipe.exposure_ev - CORRESPONDING_TRUE_EV).abs() < 0.20,
+            "the restricted solve must recover the corresponding region's exposure \
+             {CORRESPONDING_TRUE_EV:.2}: whole {}, paired {}",
+            whole.recipe.exposure_ev,
+            paired.recipe.exposure_ev
+        );
+    }
+
+    /// R30 R2: the restriction is applied to BOTH marginals, and this is the
+    /// test that says why it has to be. `median(target)/median(source)` is a
+    /// ratio of two populations; moving one of them onto the shared content
+    /// while the other stays on the whole frame does not repair the
+    /// mismatched pairing, it exchanges it for a louder one. On this fixture
+    /// the truth is `gr/gb` 1.2181 at 0.00 EV, and a one-sided cut answers:
+    ///
+    /// | reference population | `gr/gb` | EV     |
+    /// |----------------------|---------|--------|
+    /// | whole frame          | 0.911   | +0.694 |
+    /// | TARGET side only     | 1.945   | −2.867 |
+    /// | SOURCE side only     | 0.512   | +3.593 |
+    /// | both (shipped)       | 1.216   | +0.032 |
+    ///
+    /// Supervisor mutations M-R2-I (source restriction dropped) and M-R2-J
+    /// (target restriction dropped) each go red on the exposure bound, which
+    /// no one-sided cut can satisfy — both overshoot the ±1 EV budget and peg.
+    #[test]
+    fn the_reference_restriction_moves_both_marginals_together() {
+        let (src, tgt) = invented_half_pair();
+        let field = |_: &DynamicImage,
+                     _: &DynamicImage|
+         -> anyhow::Result<crate::correspond::CorrespondenceField> {
+            Ok(corresponding_field())
+        };
+        let paired = atmosphere_fit(&src, &tgt, Some(&field));
+        // A one-sided cut cannot land here: each of them overshoots the EV
+        // budget in opposite directions and pegs at ±1.00.
+        assert!(
+            paired.recipe.exposure_ev.abs() < 0.20,
+            "a two-sided restriction reads the corresponding region's own exposure: {}",
+            paired.recipe.exposure_ev
+        );
+        assert!(
+            (wb_ratio(&paired.recipe) - CORRESPONDING_TRUE_WB).abs() < 0.06,
+            "…and its own white balance: {:.4}",
+            wb_ratio(&paired.recipe)
+        );
+        // The disclosure states both retained shares, because both were cut.
+        let note = paired
+            .notes
+            .iter()
+            .find(|n| n.key == crate::rationale::keys::FIT_ATMOSPHERE_REFERENCE_SHARED)
+            .expect("the shared-content sentence is present");
+        assert!(note.args.iter().any(|(k, _)| *k == "src"));
+        assert!(note.args.iter().any(|(k, _)| *k == "tgt"));
+    }
+
+    /// R30 R2, the conservation law: a pair with NO usable field is
+    /// byte-for-byte the fit it always was — the restriction is reachable only
+    /// through a field, and the unrestricted path reads the very slices it
+    /// always read. Both silences are covered: no provider at all, and a
+    /// provider that failed.
+    ///
+    /// What this test does NOT pin, deliberately: that the no-field path reads
+    /// the EVIDENCE's own weights. Both arms here are no-field arms, so a
+    /// defect in that path moves them together and stays invisible. That half
+    /// is pinned by `a_field_that_drops_nothing_moves_nothing` (an identity
+    /// field takes the restricted path and must land on the same dials) and by
+    /// the pre-existing `wb_default_strength_is_byte_identical_to_head`.
+    /// Measured, not assumed: a mutation replacing the no-field reference with
+    /// a flat population goes red in four tests including those two.
+    #[test]
+    fn no_correspondence_field_leaves_the_atmosphere_dials_untouched() {
+        let (src, tgt) = invented_half_pair();
+        let bare = atmosphere_fit(&src, &tgt, None);
+        let failing = |_: &DynamicImage,
+                       _: &DynamicImage|
+         -> anyhow::Result<crate::correspond::CorrespondenceField> {
+            Err(anyhow::anyhow!("no GPU on this machine"))
+        };
+        let failed = atmosphere_fit(&src, &tgt, Some(&failing));
+        let r = &failed.recipe;
+        assert_eq!(
+            (r.exposure_ev, r.temperature_k, r.tint, r.saturation, r.contrast),
+            (
+                bare.recipe.exposure_ev,
+                bare.recipe.temperature_k,
+                bare.recipe.tint,
+                bare.recipe.saturation,
+                bare.recipe.contrast
+            ),
+            "a failed provider must change no dial against the no-provider fit"
+        );
+        assert_eq!(r.tone_curve, bare.recipe.tone_curve, "nor the tone curve");
+        // Both silences reach the same verdict, and neither is the restricted
+        // one: an absent field and a broken one are the same epistemic state.
+        assert_eq!(bare.atmosphere_reference, AtmosphereReference::WholeFrame);
+        assert_eq!(failed.atmosphere_reference, AtmosphereReference::WholeFrame);
+    }
+
+    /// R30 R2, the other conservation law: a field that answers for EVERY
+    /// target cell authorises the empty restriction, and the empty restriction
+    /// must move nothing. This is the law that keeps the mechanism honest —
+    /// a restriction that changed dials when it dropped nothing would be
+    /// changing the estimator, not its population.
+    #[test]
+    fn a_field_that_drops_nothing_moves_nothing() {
+        let (src, tgt) = invented_half_pair();
+        let ok = |_: &DynamicImage,
+                  _: &DynamicImage|
+         -> anyhow::Result<crate::correspond::CorrespondenceField> {
+            Ok(identity_field())
+        };
+        let bare = atmosphere_fit(&src, &tgt, None);
+        let full = atmosphere_fit(&src, &tgt, Some(&ok));
+        match full.atmosphere_reference {
+            AtmosphereReference::SharedContent { source, target } => assert!(
+                (source - 1.0).abs() < 1e-6 && (target - 1.0).abs() < 1e-6,
+                "an identity field retains both sides whole: {source} / {target}"
+            ),
+            other => panic!("expected the restriction in force, got {other:?}"),
+        }
+        assert_eq!(
+            (
+                full.recipe.exposure_ev,
+                full.recipe.temperature_k,
+                full.recipe.tint,
+                full.recipe.saturation
+            ),
+            (
+                bare.recipe.exposure_ev,
+                bare.recipe.temperature_k,
+                bare.recipe.tint,
+                bare.recipe.saturation
+            ),
+            "a restriction that drops nothing must move nothing"
+        );
+        assert_eq!(full.recipe.tone_curve, bare.recipe.tone_curve);
+    }
+
+    /// R30 R2: a paired target too thin to be READ as a population does not
+    /// get read. The whole-frame medians stand, the whole-frame sentence
+    /// stands with them, and a second sentence says why it had to — the
+    /// alternative (solving a global control on a corner of the frame and
+    /// calling it global) is the failure this batch exists to stop, in a
+    /// different costume. Supervisor mutation M-R2-B (the retention floor
+    /// removed) goes red here.
+    #[test]
+    fn a_thin_paired_target_keeps_the_whole_frame_reading_and_says_so() {
+        let g = crate::correspond::GRID;
+        // Confident only on the last four rows of cells: ~8% of the target is
+        // answered, far under the retention floor.
+        let sliver = |_: &DynamicImage,
+                      _: &DynamicImage|
+         -> anyhow::Result<crate::correspond::CorrespondenceField> {
+            Ok(crate::correspond::CorrespondenceField {
+                confidence: (0..g * g)
+                    .map(|c| if c / g >= g - 4 { 1.0 } else { 0.0 })
+                    .collect(),
+                ..identity_field()
+            })
+        };
+        let (src, tgt) = invented_half_pair();
+        let bare = atmosphere_fit(&src, &tgt, None);
+        let thin = atmosphere_fit(&src, &tgt, Some(&sliver));
+        match thin.atmosphere_reference {
+            AtmosphereReference::Thin { source, target } => assert!(
+                source < SHARED_POPULATION_MIN_RETENTION
+                    || target < SHARED_POPULATION_MIN_RETENTION,
+                "the fixture must put a side under the floor: {source} / {target}"
+            ),
+            other => panic!("expected a thin verdict, got {other:?}"),
+        }
+        let has = |r: &FitReport, k: &str| r.notes.iter().any(|n| n.key == k);
+        assert!(has(&thin, crate::rationale::keys::FIT_ATMOSPHERE_REFERENCE_POPULATION));
+        assert!(has(&thin, crate::rationale::keys::FIT_ATMOSPHERE_REFERENCE_THIN));
+        assert!(!has(&thin, crate::rationale::keys::FIT_ATMOSPHERE_REFERENCE_SHARED));
+        assert!(has(&thin, crate::rationale::keys::FIT_ATMOSPHERE_REFERENCE_UNPAIRED));
+        assert!(!has(&thin, crate::rationale::keys::FIT_ATMOSPHERE_REFERENCE_EXCLUDED));
+        assert_eq!(
+            (thin.recipe.exposure_ev, thin.recipe.temperature_k, thin.recipe.tint),
+            (bare.recipe.exposure_ev, bare.recipe.temperature_k, bare.recipe.tint),
+            "a refused restriction must leave the solve exactly as it was"
+        );
+    }
+
+    /// R30 R2, added at adjudication: the retention floor is TWO-SIDED, and
+    /// the target's mask is the ANSWERED bitmap rather than the source's
+    /// confidence. The batch's own fixtures keep the two sides' retention
+    /// equal, so neither rule was being measured.
+    ///
+    /// A field can be fully confident and still answer for almost none of the
+    /// target: every source cell landing in one corner is what "the target is
+    /// mostly generated" looks like at the limit — the island pair's 24% and
+    /// `p37`'s 93% pushed all the way. There the source keeps ALL of its
+    /// evidence while the target keeps a sliver, and the two rules diverge:
+    ///
+    ///   * a floor that accepted EITHER side would read the two medians over
+    ///     a whole source and a corner of a target — a louder version of the
+    ///     mismatched pairing this batch exists to repair, not a repair;
+    ///   * a target mask taken from `conf` would call the target fully
+    ///     retained, because every SOURCE cell is confident, and restrict on
+    ///     a population it never measured.
+    ///
+    /// Adjudicator mutations ADJ-1 (`readable()` on `||`) and ADJ-2 (the
+    /// target side masked by `conf`) both go red here; both were green
+    /// against the eight tests the batch shipped with.
+    #[test]
+    fn a_confident_field_answering_only_a_corner_is_thin_on_the_target_side() {
+        let g = crate::correspond::GRID;
+        // Every cell confident, every cell landing in the same 4x4 corner:
+        // 16 of the grid's cells are answered for, and the rest of the
+        // target is content no source cell speaks for.
+        let corner = |_: &DynamicImage,
+                      _: &DynamicImage|
+         -> anyhow::Result<crate::correspond::CorrespondenceField> {
+            Ok(crate::correspond::CorrespondenceField {
+                confidence: vec![1.0; g * g],
+                map_x: (0..g * g).map(|c| (c % 4) as f32).collect(),
+                map_y: (0..g * g).map(|c| ((c / g) % 4) as f32).collect(),
+                ..identity_field()
+            })
+        };
+        let (src, tgt) = invented_half_pair();
+        let bare = atmosphere_fit(&src, &tgt, None);
+        let skewed = atmosphere_fit(&src, &tgt, Some(&corner));
+        match skewed.atmosphere_reference {
+            AtmosphereReference::Thin { source, target } => {
+                // The premise: this fixture SEPARATES the two sides. Without
+                // that separation the test would pass against both mutants
+                // for the same reason the batch's fixtures did.
+                assert!(
+                    source >= SHARED_POPULATION_MIN_RETENTION,
+                    "premise: the source side must stay fat, got {source}"
+                );
+                assert!(
+                    target < SHARED_POPULATION_MIN_RETENTION,
+                    "premise: the target side must fall under the floor, got {target}"
+                );
+            }
+            other => panic!(
+                "a fat source and a cornered target must refuse, got {other:?}"
+            ),
+        }
+        let has = |r: &FitReport, k: &str| r.notes.iter().any(|n| n.key == k);
+        assert!(has(&skewed, crate::rationale::keys::FIT_ATMOSPHERE_REFERENCE_THIN));
+        assert!(!has(&skewed, crate::rationale::keys::FIT_ATMOSPHERE_REFERENCE_SHARED));
+        assert_eq!(
+            (skewed.recipe.exposure_ev, skewed.recipe.temperature_k, skewed.recipe.tint),
+            (bare.recipe.exposure_ev, bare.recipe.temperature_k, bare.recipe.tint),
+            "a refused restriction must leave the solve exactly as it was"
+        );
+    }
+
+    /// R30 R2: the rationale says which of the three things happened, and
+    /// never two of them. The whole-frame sentence keeps its exact old
+    /// meaning, so it must be ABSENT the moment the medians came from
+    /// somewhere else — and R2-lite's "defined those two controls all the
+    /// same" must be absent with it, because it is then false. Supervisor
+    /// mutations M-R2-D (the shared sentence pushed unconditionally) and
+    /// M-R2-E (the old unpaired key kept while restricted) go red here.
+    #[test]
+    fn the_reference_disclosure_names_exactly_one_population() {
+        let (src, tgt) = invented_half_pair();
+        let field = |_: &DynamicImage,
+                     _: &DynamicImage|
+         -> anyhow::Result<crate::correspond::CorrespondenceField> {
+            Ok(corresponding_field())
+        };
+        let paired = atmosphere_fit(&src, &tgt, Some(&field));
+        let has = |r: &FitReport, k: &str| r.notes.iter().any(|n| n.key == k);
+        assert!(has(&paired, crate::rationale::keys::FIT_ATMOSPHERE_REFERENCE_SHARED));
+        assert!(
+            !has(&paired, crate::rationale::keys::FIT_ATMOSPHERE_REFERENCE_POPULATION),
+            "the whole-frame claim must not survive a restricted solve: {}",
+            paired.recipe.rationale
+        );
+        assert!(!has(&paired, crate::rationale::keys::FIT_ATMOSPHERE_REFERENCE_THIN));
+        assert!(has(&paired, crate::rationale::keys::FIT_ATMOSPHERE_REFERENCE_EXCLUDED));
+        assert!(!has(&paired, crate::rationale::keys::FIT_ATMOSPHERE_REFERENCE_UNPAIRED));
+        // The share it prints is the share it dropped, to the printed
+        // precision — the disclosure and the population are one fact.
+        let retained = match paired.atmosphere_reference {
+            AtmosphereReference::SharedContent { target, .. } => target,
+            other => panic!("expected the restriction in force, got {other:?}"),
+        };
+        let printed = paired
+            .notes
+            .iter()
+            .find(|n| n.key == crate::rationale::keys::FIT_ATMOSPHERE_REFERENCE_SHARED)
+            .and_then(|n| n.args.iter().find(|(k, _)| *k == "tgt").map(|(_, v)| v.clone()))
+            .expect("the shared sentence carries its retained share");
+        assert_eq!(printed, format!("{:.0}", retained * 100.0));
+        // A whole-frame report is the mirror image, with no leakage either way.
+        let whole = atmosphere_fit(&src, &tgt, None);
+        assert!(has(&whole, crate::rationale::keys::FIT_ATMOSPHERE_REFERENCE_POPULATION));
+        assert!(!has(&whole, crate::rationale::keys::FIT_ATMOSPHERE_REFERENCE_SHARED));
+        assert!(!has(&whole, crate::rationale::keys::FIT_ATMOSPHERE_REFERENCE_THIN));
+    }
+
+    /// R30 R2: the retained share the sentence prints is read off the SAME
+    /// mask the solve drops, weighed on the EVIDENCE MASS the solve actually
+    /// carries — not off a pixel count, and not off `target_unpaired`'s
+    /// grid-resolution twin. One derivation, two consumers.
+    ///
+    /// The evidence model here is built from a real pair and then given
+    /// deliberately NON-UNIFORM weights, because a derived model cannot
+    /// separate the two readings: `evidence_range` sets a range's weight to
+    /// its own `two_sided_share`, so the per-pixel weight is
+    /// `weight / target_evidence_share` ~ 1 wherever a range is two-sided and
+    /// the mass share equals the pixel share by construction. The first
+    /// version of this test used a derived model, the two shares coincided
+    /// (0.494 against 0.500), and supervisor mutation M-R2-H — the share
+    /// counted on pixels — survived it GREEN. With the weights below the two
+    /// readings are 0.90 and 0.50, and M-R2-H goes red.
+    #[test]
+    fn the_retained_share_is_the_evidence_mass_the_mask_keeps() {
+        let (w, h) = (96u32, 64u32);
+        let n = (w * h) as usize;
+        let sp: Vec<[f32; 3]> = (0..n)
+            .map(|i| {
+                let v = 0.1 + 0.8 * ((i % 251) as f32 / 251.0);
+                [v, v, v]
+            })
+            .collect();
+        let tp: Vec<[f32; 3]> = sp.iter().map(|p| [p[0] * 0.9, p[1] * 0.9, p[2] * 0.9]).collect();
+        let mut evidence = evidence_model_for(&sp, &tp, w, h);
+        // Ten times the weight on the bottom half of the frame, on both
+        // sides. The field below keeps exactly that half.
+        let heavy = |i: usize| if i / w as usize >= (h / 2) as usize { 1.0 } else { 0.1 };
+        for (i, weight) in evidence.source_weights.iter_mut().enumerate() {
+            *weight = heavy(i);
+        }
+        for (i, weight) in evidence.target_weights.iter_mut().enumerate() {
+            *weight = heavy(i);
+        }
+        let g = crate::correspond::GRID;
+        let field = crate::correspond::CorrespondenceField {
+            confidence: (0..g * g).map(|c| if c / g >= g / 2 { 1.0 } else { 0.0 }).collect(),
+            ..identity_field()
+        };
+        let pc = correspondence_for_pair(&field, &tp, (w, h), (w, h));
+        let pop = shared_content_population(&evidence, &pc).expect("a populated pair restricts");
+        // The premise the test rests on: on this model the mass share and the
+        // pixel share are DIFFERENT numbers, so an implementation counting the
+        // wrong one cannot pass by coincidence.
+        let kept_pixels = pc.target_answered[..pop.target.len()]
+            .iter()
+            .filter(|a| **a > 0.0)
+            .count() as f32
+            / pop.target.len() as f32;
+        assert!(
+            (pop.target_retained - kept_pixels).abs() > 0.15,
+            "premise: mass share {} must be far from the pixel share {kept_pixels}",
+            pop.target_retained
+        );
+        for (kept_v, all_v, retained, label) in [
+            (&pop.source, &evidence.source_weights, pop.source_retained, "source"),
+            (&pop.target, &evidence.target_weights, pop.target_retained, "target"),
+        ] {
+            let kept: f64 = kept_v.iter().map(|w| w.max(0.0) as f64).sum();
+            let all: f64 = all_v[..kept_v.len()].iter().map(|w| w.max(0.0) as f64).sum();
+            assert!(all > 0.0, "premise: the fixture carries {label} evidence");
+            assert!(
+                (retained as f64 - kept / all).abs() < 1e-5,
+                "the {label} retained share must be the kept evidence mass: {retained} vs {}",
+                kept / all
+            );
+            // …and every kept weight is the evidence's own, never a rescaled one.
+            for i in 0..kept_v.len() {
+                let w = all_v[i];
+                assert!(
+                    kept_v[i] == w || kept_v[i] == 0.0,
+                    "a kept {label} weight must be the evidence's own: {} vs {w}",
+                    kept_v[i]
+                );
+            }
+        }
+    }
+
+    /// R30 R2: the restriction moves the reference population and NOTHING
+    /// else the Atmosphere contract promises — the confidence cap, the
+    /// structure-blind ruler and the absence of channel curves all survive it.
+    #[test]
+    fn the_atmosphere_contract_survives_the_reference_restriction() {
+        let (src, tgt) = invented_half_pair();
+        let field = |_: &DynamicImage,
+                     _: &DynamicImage|
+         -> anyhow::Result<crate::correspond::CorrespondenceField> {
+            Ok(corresponding_field())
+        };
+        let paired = atmosphere_fit(&src, &tgt, Some(&field));
+        assert!(
+            paired.recipe.confidence <= ATMOSPHERE_CONFIDENCE_CAP,
+            "the atmosphere cap is not negotiable: {}",
+            paired.recipe.confidence
+        );
+        assert!(
+            paired.recipe.red_curve.is_empty()
+                && paired.recipe.green_curve.is_empty()
+                && paired.recipe.blue_curve.is_empty(),
+            "Atmosphere mode never emits channel curves"
+        );
+        assert!(
+            paired.structural_evidence.is_some(),
+            "the structural model still travels beside the blind ruler"
+        );
+        let bare = atmosphere_fit(&src, &tgt, None);
+        assert_eq!(
+            paired.evidence.spatial_weights, bare.evidence.spatial_weights,
+            "the structure-blind ruler is untouched by the restriction"
         );
     }
 
@@ -9970,6 +10807,7 @@ mod tests {
                     paired: false,
                     vouched_bands: None,
                     hsl: HslStageFacts::default(),
+                    atmosphere_reference: AtmosphereReference::WholeFrame,
                 },
             )
         };

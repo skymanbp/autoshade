@@ -2020,6 +2020,33 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
       cell grid, so this is a coarse share) — and defined those two controls all the same.",
         " 在该参照人口中，目标画面有 {share}% 在源图中没有可信对应（跨图对应低于 {tau}，\
          读自侧车的 {grid} 网格，故为粗粒度占比）——它们同样参与了上面两项控件的定义。"),
+    (" Of the whole-frame reference population, {share}% of the target has no confident \
+      counterpart in the source (cross-image correspondence below {tau}, read on the \
+      sidecar's {grid} cell grid, so this is a coarse share) — and was EXCLUDED from \
+      those two controls rather than left to define them.",
+        " 在整帧参照人口中，目标画面有 {share}% 在源图中没有可信对应（跨图对应低于 {tau}，\
+         读自侧车的 {grid} 网格，故为粗粒度占比）——这部分已被排除在上面两项控件之外，\
+         而不是任其参与定义。"),
+    (" Atmosphere white balance and exposure were solved from the SHARED-CONTENT \
+      population of the two frames rather than from the whole frame: target pixels no \
+      confident source pixel answers for are generated content that is not a rendition \
+      of this frame, and source pixels whose content the target replaced have nothing \
+      left to be compared with (cross-image correspondence below {tau} on either side), \
+      so both were dropped before the per-channel weighted medians were read. That left \
+      {src}% of the source's evidence mass and {tgt}% of the target's, and the two \
+      distributions being paired now describe the same content.",
+        " 氛围模式的白平衡与曝光解自两帧的「共有内容」人口，而非整帧：目标中没有任何可信源\
+         像素为之作答的像素是生成内容，并非本帧的一种呈现；源中被目标替换掉的像素则已无物\
+         可比（任一侧跨图对应低于 {tau}）——两者都在读取逐通道加权中位数之前被剔除。余下源\
+         证据质量的 {src}% 与目标证据质量的 {tgt}%，被配对的这两个分布现在描述的是同一批\
+         内容。"),
+    (" The shared-content population that would have replaced it retains only {src}% of \
+      the source's evidence mass and {tgt}% of the target's, under the {floor}% a \
+      population must keep to be read as one — so the whole-frame medians above stand, \
+      and so does their pairing assumption.",
+        " 本可取而代之的共有内容人口只保留了源证据质量的 {src}% 与目标证据质量的 {tgt}%，\
+         低于一个人口要被当作人口来读所需的 {floor}%——因此上面的整帧中位数继续成立，\
+         其配对假设亦然。"),
     (" How much of that reference population has no counterpart in the source was not \
       measured: no cross-image correspondence field was available for this pair.",
         " 该参照人口中有多少在源图中没有对应，本次未测量：这一对没有可用的跨图对应场。"),

@@ -92,9 +92,12 @@
 > experimental generative edits, an optional pixel-**heal** retouch mode (§4.7)
 > the deterministic look **reverse-fit** (§4.8) and the local server's refusal
 > model (§4.9).
-> 1256 library + 23 CLI + 159 GUI + 2+2 contract tests are enumerated in the GUI
-> build; the library result is 1244 pass + 12 `#[ignore]`d forensic probes
-> (counts refreshed 2026-08-31: the clearing dedup batch is net +1 — it added
+> 1265 library + 23 CLI + 159 GUI + 2+2 contract tests are enumerated in the GUI
+> build; the library result is 1253 pass + 12 `#[ignore]`d forensic probes
+> (counts refreshed 2026-08-31: R30 R2 added 8 named tests for the
+> shared-content reference population and adjudication added a ninth, closing
+> the two-sided retention floor and the target mask's provenance, so library
+> 1256→1265; before it, the clearing dedup batch was net +1 — it added
 > the adherence-tier prompt pin and moved the SHA-256 known-answer test into
 > the hash's own module, retiring `eval`'s duplicate vector test and narrowing
 > what stays there to the avalanche property its stale-sidecar guard rests on,
@@ -1965,16 +1968,61 @@ minimum-share population vetoes. The structural model is carried separately
 only for Full zones and the detail stage. Every Atmosphere report discloses the
 structurally withheld ranges and explains that they do not constrain its bounded
 atmosphere controls. Since R30 batch 1 it also states the POPULATION those
-controls were read over: white balance and exposure come from WHOLE-FRAME
-per-channel weighted medians of both sides, which pairs the two frames as
-distributions and so presumes both describe the same content — the presumption
-selecting Atmosphere denies. Where a cross-image correspondence field exists,
-the report adds how much of the TARGET has no confident counterpart in the
-source (grid resolution, the sidecar's 48×48 cells, threshold 0.5) and states
-that this share helped define those two controls; with no field the share reads
-as NOT MEASURED rather than as zero. This is disclosure only — no weight and no
-solve changes — and it is the precondition data for the deferred decision on
-whether that reference population should be re-weighted at all.
+controls were read over, and since R30 R2 that population is no longer always
+the whole frame. With NO usable cross-image correspondence field the solve is
+unchanged and the report says so: white balance and exposure come from
+WHOLE-FRAME per-channel weighted medians of both sides, which pairs the two
+frames as distributions and so presumes both describe the same content — the
+presumption selecting Atmosphere denies — and how much of that population has
+no counterpart reads as NOT MEASURED rather than as zero. WITH a field, the
+SHARED-CONTENT population replaces the whole frame on BOTH sides: target
+pixels no confident source cell maps onto (generated content that is not a
+rendition of this frame) and source pixels whose content the target replaced
+(evidence with nothing left to compare against) are dropped before the two
+medians are read, and the report states the evidence mass each side kept.
+Both sides, because `median(target)/median(source)` is a ratio of two
+populations and moving one of them onto the shared content while the other
+stays whole exchanges the mismatched pairing for a louder one — measured on a
+synthetic pair whose invented region is the brighter 60% of the frame and
+therefore owns every whole-frame median, where the truth is `gr/gb` 1.2181 at
+0.00 EV: whole-frame answers 0.911 at +0.694, TARGET-side only answers 1.945
+at −2.867, SOURCE-side only answers 0.512 at +3.593, and the shipped
+two-sided cut answers 1.216 at +0.032.
+The cut is BINARY at the same 0.5 the disclosure publishes, because the
+sidecar's confidence measures trust rather than mass and a confidence-weighted
+average would let a large barely-trusted population outvote a small certain
+one. The mask is the very bitmap the unpaired share is counted from, projected
+onto the analysis raster by the same nearest-cell rule, so the sentence and
+the population can never disagree. When either side retains less than
+`SHARED_POPULATION_MIN_RETENTION` of its own evidence mass — the evidence
+model's own range-survival floor, 1 − `DIVERGENCE_ZONE` = 0.35 — the
+restriction is REFUSED, the whole-frame medians stand, and a second sentence
+says why: solving a global control on a corner of the frame is the same
+failure in a different costume. Measured on the seven-pair corpus: three pairs
+never reach the solve at all (Full mode consults no field), the island pair
+retains 84%/76% and restricts, the calibration pair 58%/50% and restricts, and
+`p37` retains 11%/7% and refuses.
+The restriction moves the reference population of those two controls and
+nothing else — the structure-blind ruler, mode selection, the 0.50 confidence
+cap, the tone curve, the saturation chase and the per-band mixer are untouched,
+and a pair with no field is byte-identical by construction rather than by
+arithmetic.
+It is also a PARTIAL repair on real pairs, and the size of what it leaves is
+measured rather than assumed. On the island pair it moves the white balance
+4400 K/−20.6 to 4350 K/−33.1 and the bottom third's closures by less than
+three points in mixed directions: linear R/B −72.93% → −75.64%, chroma
++40.28% → +40.59%, linear luma +48.08% → +48.64%. The reason is that DIFT's
+confidence does not isolate that pair's replaced sky — the cells it drops are
+61–69% sky against a 46–47% frame-wide base rate — and even an ORACLE
+population with the sky removed by segmentation, which no shipped instrument
+can identify, only reaches −35.05%. No choice of reference population in this
+estimator closes that gap, because the residue is not a population defect: the
+pair's whole-frame per-channel MEAN R/B ratio is 0.9991 — the target's white
+balance IS the source's — while the per-channel MEDIAN ratio is 0.8293,
+because on a bimodal frame the three channels' independent medians are drawn
+from different sub-populations and their ratio is no pixel's colour. That is a
+defect in the robust STATISTIC rather than in its population, out of R2's
+scope and registered for R3.
 
 The tone stage's evidence prefers NEAR-NEUTRAL pixels (saturated ones carry
 chroma-clipped luma), which rests on an identification assumption — "grey"

@@ -267,6 +267,37 @@ pub mod keys {
         " Of that reference population, {share}% of the target has no confident counterpart \
          in the source (cross-image correspondence below {tau}, read on the sidecar's {grid} \
          cell grid, so this is a coarse share) — and defined those two controls all the same.";
+    /// R30 R2: …and once that unpaired share is EXCLUDED from the two
+    /// controls rather than left to define them, the sentence above stops
+    /// being true and this one takes its place. Same measurement, opposite
+    /// consequence — which is why it is a second key and not an edit to the
+    /// first (a persisted rationale must never change meaning under its own
+    /// spelling).
+    pub const FIT_ATMOSPHERE_REFERENCE_EXCLUDED: &str =
+        " Of the whole-frame reference population, {share}% of the target has no confident \
+         counterpart in the source (cross-image correspondence below {tau}, read on the \
+         sidecar's {grid} cell grid, so this is a coarse share) — and was EXCLUDED from \
+         those two controls rather than left to define them.";
+    /// R30 R2: the whole-frame sentence's replacement, for the case where a
+    /// correspondence field let the solve read those two controls over the
+    /// content the two frames actually share.
+    pub const FIT_ATMOSPHERE_REFERENCE_SHARED: &str =
+        " Atmosphere white balance and exposure were solved from the SHARED-CONTENT \
+         population of the two frames rather than from the whole frame: target pixels no \
+         confident source pixel answers for are generated content that is not a rendition \
+         of this frame, and source pixels whose content the target replaced have nothing \
+         left to be compared with (cross-image correspondence below {tau} on either side), \
+         so both were dropped before the per-channel weighted medians were read. That left \
+         {src}% of the source's evidence mass and {tgt}% of the target's, and the two \
+         distributions being paired now describe the same content.";
+    /// R30 R2: …and when the shared population is too small to be read as a
+    /// population, the whole-frame sentence stands and this one says why it
+    /// had to.
+    pub const FIT_ATMOSPHERE_REFERENCE_THIN: &str =
+        " The shared-content population that would have replaced it retains only {src}% of \
+         the source's evidence mass and {tgt}% of the target's, under the {floor}% a \
+         population must keep to be read as one — so the whole-frame medians above stand, \
+         and so does their pairing assumption.";
     /// …and when there is no field, the share is UNKNOWN, not zero.
     pub const FIT_ATMOSPHERE_REFERENCE_UNMEASURED: &str =
         " How much of that reference population has no counterpart in the source was not \

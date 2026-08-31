@@ -3769,6 +3769,7 @@ mod tests {
                 s.height(),
             ),
             structural_evidence: None,
+            atmosphere_reference: fit::AtmosphereReference::WholeFrame,
         }
     }
 
