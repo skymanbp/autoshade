@@ -1,6 +1,6 @@
 //! Falsifiers for the local-field analyzer.  The synthetic pairs are built with a
 //! deterministic LCG (never `rand`) so every figure below is reproducible; the
-//! corpus tests skip cleanly when `AUTOSHOP_FIT_CALIBRATION_DIR` is unset, exactly
+//! corpus tests skip cleanly when `AUTOSHADE_FIT_CALIBRATION_DIR` is unset, exactly
 //! like `fit::calibration_corpus`.
 
 use std::path::{Path, PathBuf};

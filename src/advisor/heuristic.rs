@@ -65,7 +65,7 @@ impl HeuristicProposer {
     /// Split out as an ASSOCIATED function (the type is already re-exported,
     /// so this needs no new module visibility) purely so the estimator can be
     /// MEASURED against real photographs instead of only being observed
-    /// through the recipe it feeds — `eval`'s `AUTOSHOP_ESTIMATOR_PROBE`.
+    /// through the recipe it feeds — `eval`'s `AUTOSHADE_ESTIMATOR_PROBE`.
     /// `propose_noted` is its only production caller and gets exactly the
     /// number it used to compute inline.
     pub(crate) fn ev_offset_estimate(hist: &Histogram) -> f32 {

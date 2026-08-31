@@ -43,7 +43,7 @@ async function mint(master) {
   const now = Date.now();
   const expires = stamp(new Date(now + 60 * 60 * 1000));
   const made = await cf("POST", "/user/tokens", master, {
-    name: `autoshop-site-deploy-${stamp(new Date(now)).replace(/[-:]/g, "")}`,
+    name: `autoshade-site-deploy-${stamp(new Date(now)).replace(/[-:]/g, "")}`,
     policies: [{
       effect: "allow",
       resources: { [`com.cloudflare.api.account.${ACCOUNT}`]: "*" },

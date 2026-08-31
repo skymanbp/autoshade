@@ -2,7 +2,7 @@
 
 use crate::*;
 
-impl AutoshopApp {
+impl AutoShadeApp {
     /// Brush-paint into the mask while dragging on the After image. The canvas
     /// is full-frame at preview resolution; pointer→canvas goes through the
     /// view transform so painting stays accurate at any zoom, and the brush
@@ -235,7 +235,7 @@ impl AutoshopApp {
             move || {
                 // Progress heartbeats → status bar; the cancel flag stops the
                 // stream between events. Installed on THIS worker thread only.
-                autoshop::generative::set_worker_hooks(Some(autoshop::generative::WorkerHooks {
+                autoshade::generative::set_worker_hooks(Some(autoshade::generative::WorkerHooks {
                     progress: Box::new(move |m| {
                         let _ = ptx.send(Msg::Progress(epoch, m));
                     }),
@@ -243,14 +243,14 @@ impl AutoshopApp {
                 }));
                 let _mem = crate::budget::heavy_permit(crate::budget::estimate_mb(Some(&path))); // full-frame commit budget (budget.rs)
                 let res = (|| -> RetouchDone {
-                    let cfg = autoshop::config::Config::load();
+                    let cfg = autoshade::config::Config::load();
                     let mask_tmp = gui_tmp_png("fill");
                     std::fs::write(&mask_tmp, &mask_png)?;
-                    let r = autoshop::generative::retouch(&cfg, &path, &mask_tmp, &prompt, &quality, full_res, &out);
+                    let r = autoshade::generative::retouch(&cfg, &path, &mask_tmp, &prompt, &quality, full_res, &out);
                     let _ = std::fs::remove_file(&mask_tmp);
                     r?;
                     // baked-by-construction: the ./out master this job just wrote.
-                    let img = autoshop::decode::load_image(&out)?.thumbnail(edge, edge);
+                    let img = autoshade::decode::load_image(&out)?.thumbnail(edge, edge);
                     // InPlace: refine the current rendition — bake into the active
                     // variant's base AND repoint its origin at this saved artifact
                     // so export / reverse-fit / next retouch follow the fill.
@@ -312,7 +312,7 @@ impl AutoshopApp {
             move || {
                 let _mem = crate::budget::heavy_permit(crate::budget::estimate_mb(Some(&path))); // full-frame commit budget (budget.rs)
                 let res = (|| -> RetouchDone {
-                    let cfg = autoshop::config::Config::load();
+                    let cfg = autoshade::config::Config::load();
                     let mask_tmp = match mask_png {
                         Some(bytes) => {
                             let t = gui_tmp_png("heal");
@@ -321,19 +321,19 @@ impl AutoshopApp {
                         }
                         None => None,
                     };
-                    let rep = autoshop::retouch::heal(&cfg, &path, mask_tmp.as_deref(), !use_mask, full_res, &out);
+                    let rep = autoshade::retouch::heal(&cfg, &path, mask_tmp.as_deref(), !use_mask, full_res, &out);
                     if let Some(t) = &mask_tmp {
                         let _ = std::fs::remove_file(t);
                     }
                     let rep = rep?;
                     // baked-by-construction: the ./out master this job just wrote.
-                    let img = autoshop::decode::load_image(&out)?.thumbnail(edge, edge);
+                    let img = autoshade::decode::load_image(&out)?.thumbnail(edge, edge);
                     // The report's rationale (AI-detect fallback, budget
                     // skips) must reach the status — stderr is invisible in
                     // the windowed GUI (L08 rule). Split per the L12#2B
                     // suffix contract: typed notes render localized at the
                     // landing; on a mismatch the whole string rides as prose.
-                    let det = autoshop::rationale::render_en(&rep.notes);
+                    let det = autoshade::rationale::render_en(&rep.notes);
                     let (ai_prose, notes) = match rep.rationale.strip_suffix(det.as_str()) {
                         Some(p) => (p.to_string(), rep.notes),
                         None => (rep.rationale.clone(), Vec::new()),
@@ -392,12 +392,12 @@ impl AutoshopApp {
             move || {
                 let _mem = crate::budget::heavy_permit(crate::budget::estimate_mb(Some(&path))); // full-frame commit budget (budget.rs)
                 let res = (|| -> RetouchDone {
-                    let cfg = autoshop::config::Config::load();
+                    let cfg = autoshade::config::Config::load();
                     let opts =
-                        autoshop::denoise::DenoiseOpts::from_config(&cfg, None, 1.0);
-                    autoshop::denoise::denoise_active(&opts, &path, full_res, &out)?;
+                        autoshade::denoise::DenoiseOpts::from_config(&cfg, None, 1.0);
+                    autoshade::denoise::denoise_active(&opts, &path, full_res, &out)?;
                     // baked-by-construction: the ./out master this job just wrote.
-                    let img = autoshop::decode::load_image(&out)?.thumbnail(edge, edge);
+                    let img = autoshade::decode::load_image(&out)?.thumbnail(edge, edge);
                     // InPlace: bake into the active variant's base + repoint origin.
                     Ok((img, RetouchNote::Denoised(out.clone()), out, RetouchKind::InPlace))
                 })();
@@ -450,11 +450,11 @@ impl AutoshopApp {
                 let res = (|| -> RetouchDone {
                     let mask_tmp = gui_tmp_png("clone");
                     std::fs::write(&mask_tmp, &mask_png)?;
-                    let rep = autoshop::retouch::clone_stamp(&path, &mask_tmp, src_pt, full_res, &out);
+                    let rep = autoshade::retouch::clone_stamp(&path, &mask_tmp, src_pt, full_res, &out);
                     let _ = std::fs::remove_file(&mask_tmp);
                     let rep = rep?;
                     // baked-by-construction: the ./out master this job just wrote.
-                    let img = autoshop::decode::load_image(&out)?.thumbnail(edge, edge);
+                    let img = autoshade::decode::load_image(&out)?.thumbnail(edge, edge);
                     // InPlace: a pixel transplant of the current rendition — bake it
                     // into the active variant's base + repoint origin at the artifact.
                     Ok((
@@ -537,7 +537,7 @@ impl AutoshopApp {
             move || {
                 // Progress heartbeats → status bar; the cancel flag stops the
                 // stream between events. Installed on THIS worker thread only.
-                autoshop::generative::set_worker_hooks(Some(autoshop::generative::WorkerHooks {
+                autoshade::generative::set_worker_hooks(Some(autoshade::generative::WorkerHooks {
                     progress: Box::new(move |m| {
                         let _ = ptx.send(Msg::Progress(epoch, m));
                     }),
@@ -545,14 +545,14 @@ impl AutoshopApp {
                 }));
                 let _mem = crate::budget::heavy_permit(crate::budget::estimate_mb(Some(&path))); // full-frame commit budget (budget.rs)
                 let res = (|| -> RetouchDone {
-                    let cfg = autoshop::config::Config::load();
+                    let cfg = autoshade::config::Config::load();
                     // fidelity "high": the library composes the faithfulness
                     // scaffold onto the prompt and measures D afterwards.
-                    let report = autoshop::generative::reimagine(
+                    let report = autoshade::generative::reimagine(
                         &cfg, &path, &prompt, "high", &cfg.openai_image_quality, retry, &out,
                     )?;
                     // baked-by-construction: the ./out master this job just wrote.
-                    let img = autoshop::decode::load_image(&out)?.thumbnail(edge, edge);
+                    let img = autoshade::decode::load_image(&out)?.thumbnail(edge, edge);
                     // NewGenerated: a whole-frame rendition → a new Generated variant.
                     Ok((
                         img,
@@ -598,7 +598,7 @@ impl AutoshopApp {
         self.spawn_worker(
             move || {
                 let res = (|| -> anyhow::Result<(String, StyleNote)> {
-                    let cfg = autoshop::config::Config::load();
+                    let cfg = autoshade::config::Config::load();
                     let jpg = |img: &image::DynamicImage| -> anyhow::Result<Vec<u8>> {
                         let mut buf = Vec::new();
                         image::DynamicImage::ImageRgb8(img.thumbnail(768, 768).to_rgb8())
@@ -606,23 +606,23 @@ impl AutoshopApp {
                         Ok(buf)
                     };
                     // baked-by-construction: fit_target is a Generated variant's ./out raster.
-                    let target = autoshop::decode::load_image(&tgt)?;
-                    let prompt = autoshop::advisor::describe_style(&cfg, &jpg(&base)?, &jpg(&target)?)?;
+                    let target = autoshade::decode::load_image(&tgt)?;
+                    let prompt = autoshade::advisor::describe_style(&cfg, &jpg(&base)?, &jpg(&target)?)?;
                     // The side-file is a convenience copy — its write failing
                     // must not discard the vision result the user paid for.
                     // The note tells the truth either way (the old fixed
                     // message claimed the file was saved unconditionally).
                     let note = match &src_path {
                         Some(p) => {
-                            let out = autoshop::pipeline::default_out(p, "style", "txt");
+                            let out = autoshade::pipeline::default_out(p, "style", "txt");
                             // Same protocol as every deliverable (W33): the
                             // library guard, then stage + rename — a direct
                             // fs::write truncated the previous prompt in
                             // place and followed a leaf symlink.
-                            match autoshop::pipeline::guard_readonly(&out, p)
-                                .and_then(|()| autoshop::pipeline::ensure_parent(&out))
+                            match autoshade::pipeline::guard_readonly(&out, p)
+                                .and_then(|()| autoshade::pipeline::ensure_parent(&out))
                                 .and_then(|()| {
-                                    autoshop::render::stage_and_publish(&out, |staged| {
+                                    autoshade::render::stage_and_publish(&out, |staged| {
                                         Ok(std::fs::write(staged, &prompt)?)
                                     })
                                 })
@@ -752,7 +752,7 @@ impl AutoshopApp {
                         .on_hover_text(tr(lang, "gpt-image render quality — higher looks better and costs more per image"));
                     let src_is_raw = self
                         .active_source_path()
-                        .is_some_and(|p| autoshop::decode::is_raw(&p));
+                        .is_some_and(|p| autoshade::decode::is_raw(&p));
                     // Each 「Full-res」 names its verb (R22 #16): fill / heal /
                     // clone / denoise had four identically-labelled checkboxes
                     // across three panels, and this is the only one still gated

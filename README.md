@@ -1,7 +1,7 @@
 <div align="center">
-<img src="assets/icon.png" width="104" alt="Autoshop icon" />
+<img src="assets/icon.png" width="104" alt="AutoShade icon" />
 
-# Autoshop
+# AutoShade
 
 **AI-assisted automatic development of RAW photographs.**
 
@@ -17,9 +17,9 @@ An AI decides *what to change*. A deterministic Rust engine *does* it.
 
 ---
 
-## What Autoshop is
+## What AutoShade is
 
-Autoshop is a non-destructive developer for RAW and baked images. Its main
+AutoShade is a non-destructive developer for RAW and baked images. Its main
 workflow turns an AI proposal into a small, inspectable `EditRecipe` — bounded
 controls, a written rationale, and a confidence — and applies it with the same
 local Rust renderer behind the desktop app, the CLI, and the embedded web UI.
@@ -31,7 +31,7 @@ tools are separate, opt-in paths and are labelled as such.
 
 ## Contents
 
-- [What Autoshop is](#what-autoshop-is)
+- [What AutoShade is](#what-autoshade-is)
 - [What it does](#what-it-does)
 - [What is new here](#what-is-new-here)
 - [How it works](#how-it-works)
@@ -117,7 +117,7 @@ the last subsection lists what is designed but not yet shipped.
   <img src="docs/images/pillar-analysis-light.svg" alt="Pillar 1: a Lightroom RAW+XMP library becomes exemplars carrying a 14-dimension feature, a SigLIP 2 image vector, a Qwen3-VL sentence and a local-work habit; a query retrieves its four nearest past shots by the hybrid distance, and their habits reach the proposer behind an untrusted-data fence before a capped pull moves the proposal toward the photographer's own means" />
 </picture>
 
-`autoshop style-index <dir>` (or the GUI's **Style reference library**) turns
+`autoshade style-index <dir>` (or the GUI's **Style reference library**) turns
 *every finished edit you ever made* — each Lightroom RAW+XMP pair — into an
 exemplar ([`src/style.rs`](src/style.rs)): a 14-dimensional feature vector
 from EXIF and the histogram (log/ratio dimensions z-scored, scene-type
@@ -367,12 +367,12 @@ C1 Hermite smoothstep, RMS 0.0045 against 0.017 for a straight ramp — is on
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/architecture-dark.png" />
-  <img src="docs/images/architecture-light.png" alt="Autoshop architecture: three front ends over one Rust library with the style index, reverse-fit, local producers and the local-field analyzer; local Python sidecars for embeddings, correspondence and segmentation; opt-in external AI services" />
+  <img src="docs/images/architecture-light.png" alt="AutoShade architecture: three front ends over one Rust library with the style index, reverse-fit, local producers and the local-field analyzer; local Python sidecars for embeddings, correspondence and segmentation; opt-in external AI services" />
 </picture>
 
 <sub>Architecture with the ideas inside it: the style index, reverse-fit, its local producers, the bilateral-grid analyzer, and the local sidecars are drawn as the components they are. The diagram predates the fourth and fifth sidecars (`correspond.py`, `describe.py`) and draws three; the sidecar family is enumerated in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). The interactive version is
-[docs/architecture/autoshop.architecture.html](docs/architecture/autoshop.architecture.html),
-generated from [autoshop.architecture.json](docs/architecture/autoshop.architecture.json)
+[docs/architecture/autoshade.architecture.html](docs/architecture/autoshade.architecture.html),
+generated from [autoshade.architecture.json](docs/architecture/autoshade.architecture.json)
 with [archify](https://github.com/tt-a1i/archify).</sub>
 
 The primary path is short. [`src/decode.rs`](src/decode.rs) decodes the RAW
@@ -403,8 +403,8 @@ Three properties hold it together:
 ## Results: two batches, six frames
 
 Each row is one Sony α7R IVA 61 MP `.ARW`. Every frame not marked *generated*
-is rendered by Autoshop's engine from a recipe; the neutral frame is
-Autoshop's own conversion, not the camera JPEG. Model-judge scores are
+is rendered by AutoShade's engine from a recipe; the neutral frame is
+AutoShade's own conversion, not the camera JPEG. Model-judge scores are
 automated review, not human aesthetic approval.
 
 Both batches are the SAME photograph — a hazy lakeside island town — so that
@@ -501,11 +501,11 @@ Download from the
 
 ### Build from source
 
-Autoshop uses Rust edition 2024 and rustc/cargo 1.94.
+AutoShade uses Rust edition 2024 and rustc/cargo 1.94.
 
 ```bash
 cargo build --release
-cargo build --release --features gui --bin autoshop-gui
+cargo build --release --features gui --bin autoshade-gui
 ```
 
 The first command builds the CLI; the second builds the desktop app, whose
@@ -528,7 +528,7 @@ Python packages (weights download on first use and are not committed):
 
 ### First run: desktop app
 
-1. Start `autoshop-gui`.
+1. Start `autoshade-gui`.
 2. Choose **Open photo…** or press `Ctrl+O`, then select a supported photo. You
    can also drag a photo into the window or use **Open folder…** for the library
    view.
@@ -541,14 +541,14 @@ Python packages (weights download on first use and are not committed):
 Decode a preview and metadata, then make a manual recipe render:
 
 ```text
-autoshop decode "photo.ARW" -o "preview.jpg"
-autoshop apply "photo.ARW" "recipe.json" -o "developed.tif"
+autoshade decode "photo.ARW" -o "preview.jpg"
+autoshade apply "photo.ARW" "recipe.json" -o "developed.tif"
 ```
 
 With the image/vision role configured, an end-to-end AI develop is:
 
 ```text
-autoshop auto "photo.ARW" --guidance "natural color; protect highlights" -o "developed.tif"
+autoshade auto "photo.ARW" --guidance "natural color; protect highlights" -o "developed.tif"
 ```
 
 ## User manual
@@ -568,8 +568,8 @@ boundary. The essentials:
   key. Vision-backed `analyze`/`auto`, `match --style-prompt`/`--ai-judge`/
   `--deep`, `reimagine`/`retouch`, and automatic `heal` detection use the
   configured API role; the verifier receives data, never pixels.
-- **Settings** or `OPENAI_API_KEY` / `AUTOSHOP_ANALYSIS_API_KEY` configure the
-  roles. A `./autoshop.local.json` in the working directory may only select
+- **Settings** or `OPENAI_API_KEY` / `AUTOSHADE_ANALYSIS_API_KEY` configure the
+  roles. A `./autoshade.local.json` in the working directory may only select
   model/provider preferences — never credentials, endpoints, or paths.
 
 ## Supported formats
@@ -607,7 +607,7 @@ fff, iiq, mef, mos, erf, kdc, dcr, dcs, crw, nrw, mrw, ari
 
 Decoding is rawler 0.7.2, which carries **725 camera models**. **No embedded
 preview:** 12 of the 24 formats store none. They are `orf`, `srw`, `nrw`, `mef`,
-`mos`, `kdc`, `dcr`, `dcs`, `erf`, `iiq`, `crw`, and `ari`; Autoshop shows its
+`mos`, `kdc`, `dcr`, `dcs`, `erf`, `iiq`, `crw`, and `ari`; AutoShade shows its
 own neutral rendition instead and says so.
 
 **Baked rasters — 8 extensions:** `jpg`, `jpeg`, `png`, `tif`, `tiff`, `bmp`,
@@ -735,7 +735,7 @@ versions, and a deleted-version registry; SCUNet success requires the typed
 `sidecar_wrote` contract. A 1771 MB reference probe sets the 1800 MB per-photo
 budget, while the 4 GiB RAW gate bounds admission. The [`build`
 workflow](.github/workflows/build.yml) covers default and GUI feature sets on
-Ubuntu and macOS. The current battery is **1193 library (1182 pass + 11 `#[ignore]`d forensic probes) / 22 CLI / 151 GUI / 2+2 contract** tests; the
+Ubuntu and macOS. The current battery is **1207 library (1196 pass + 11 `#[ignore]`d forensic probes) / 22 CLI / 151 GUI / 2+2 contract** tests; the
 [`scripts/check_docs.py`](scripts/check_docs.py) gate re-derives pinned release
 claims. Model weights are not stored in this repository.
 
@@ -766,7 +766,7 @@ dependency rationale.
 
 ## License and acknowledgements
 
-**Autoshop is MIT-licensed** — see [LICENSE](LICENSE).
+**AutoShade is MIT-licensed** — see [LICENSE](LICENSE).
 
 ### RAW format samples
 
@@ -790,7 +790,7 @@ that index before use.
 ### Showcase photographs
 
 The showcase photographs are the author's own Sony α7R IVA frames — © 2026
-skymanbp, all rights reserved. They document Autoshop's output and are not
+skymanbp, all rights reserved. They document AutoShade's output and are not
 covered by the software's MIT license. The three established before/after
 pairs retain their visible watermarks and embedded copyright metadata; the
 newer composed cat/style/reimagine JPEGs omit EXIF and add no watermark.

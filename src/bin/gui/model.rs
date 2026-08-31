@@ -126,7 +126,7 @@ pub(crate) enum ExportDest {
     /// The DELIVERY ROOT — what the CLI, the web surface and the batch
     /// renderer all use, and still the default. `./out` beside the working
     /// directory until Settings moves it (R24-5 M8,
-    /// [`autoshop::config::delivery_root`]); the label therefore names the
+    /// [`autoshade::config::delivery_root`]); the label therefore names the
     /// ROLE, and the resolved absolute path is echoed beside it.
     #[default]
     OutFolder,
@@ -262,7 +262,7 @@ pub(crate) struct Prefs {
 
 impl Default for Prefs {
     fn default() -> Self {
-        // Mirror AutoshopApp's own defaults (see its Default impl) so a pref
+        // Mirror AutoShadeApp's own defaults (see its Default impl) so a pref
         // key missing from an older save degrades to exactly the app default.
         Self {
             gallery_dir: None,
@@ -276,7 +276,7 @@ impl Default for Prefs {
             style_src_dir: None,
             looks_src_dir: None,
             use_looks: true,
-            direction_adherence: autoshop::recipe::DirectionAdherence::DEFAULT,
+            direction_adherence: autoshade::recipe::DirectionAdherence::DEFAULT,
             save_jpeg: false,
             exp_format: 0,
             exp_dest: 0, // ./out — the CLI/batch shape, unchanged for old prefs
@@ -309,14 +309,14 @@ impl Default for Prefs {
 
 /// Where the personal-style strength starts, what its slider's double-click /
 /// right-click reset lands on, and the baseline the AI section's ● compares
-/// against ([`AutoshopApp::ai_section_active`]). ONE definition on purpose
+/// against ([`AutoShadeApp::ai_section_active`]). ONE definition on purpose
 /// (R22 #16): the number was a bare `0.30` in BOTH `Default` impls, so
 /// "the user moved it" was a statement no predicate could make without adding a
 /// third copy to drift from the other two.
 pub(crate) const STYLE_STRENGTH_DEFAULT: f32 = 0.30;
 
 fn default_true() -> bool { true }
-fn default_adherence() -> f32 { autoshop::recipe::DirectionAdherence::DEFAULT }
+fn default_adherence() -> f32 { autoshade::recipe::DirectionAdherence::DEFAULT }
 
 /// Where the GRADE strength starts, and what its slider's double-click /
 /// right-click reset lands on (R23-3; user decision 2026-08-17 ⑦ = 0.65).
@@ -324,12 +324,12 @@ fn default_adherence() -> f32 { autoshop::recipe::DirectionAdherence::DEFAULT }
 /// An ALIAS of the library's own constant, never a second literal: the lib uses
 /// it for the CLI's omitted `--strength`, the web body's absent field and
 /// `GradeStrength::default()`, so a GUI copy would let the desktop app develop a
-/// photo differently from `autoshop analyze` on the same untouched settings.
+/// photo differently from `autoshade analyze` on the same untouched settings.
 /// `GradeStrength::CALIBRATED` (0.50) is the other named point on this dial —
 /// the calibrated guardrail NUMBERS, one drag away. Not the whole pre-R23
 /// request: that release's restraint wording is the ≤ 0.40 band's prose (see
 /// `GradeStrength::CALIBRATED`).
-pub(crate) const GRADE_STRENGTH_DEFAULT: f32 = autoshop::recipe::GradeStrength::DEFAULT;
+pub(crate) const GRADE_STRENGTH_DEFAULT: f32 = autoshade::recipe::GradeStrength::DEFAULT;
 
 pub(crate) const PREVIEW_EDGE: u32 = 1280; // working preview size for fast live develop
 
@@ -352,7 +352,7 @@ pub(crate) const MAX_THUMB_INFLIGHT: usize = 6; // cap concurrent thumbnail deco
 // ONE band table (L16-7): the GUI indexes the recipe's HSL arrays with
 // this order, so it must BE the recipe's order — a literal copy could be
 // reordered on either side and silently mislabel every band.
-pub(crate) use autoshop::recipe::HSL_BANDS;
+pub(crate) use autoshade::recipe::HSL_BANDS;
 
 // Representative swatch per HSL band (row markers in the mixer — approximate
 // band-centre hues, display-only; the engine's band maths lives in render.rs).
@@ -393,7 +393,7 @@ pub(crate) enum RetouchNote {
         n: usize,
         out: PathBuf,
         ai_prose: String,
-        notes: Vec<autoshop::rationale::Note>,
+        notes: Vec<autoshade::rationale::Note>,
     },
     /// AI denoise baked into the active variant.
     Denoised(PathBuf),
@@ -487,7 +487,7 @@ pub(crate) struct OverlayKey {
     // Coverage inputs the combined weight adds (v0.22): the component list
     // (each geometry + mode) and the eye toggle — without them an added /
     // re-moded / muted shape reused the stale wash.
-    pub(crate) components: Vec<autoshop::recipe::MaskComponent>,
+    pub(crate) components: Vec<autoshade::recipe::MaskComponent>,
     pub(crate) enabled: bool,
     pub(crate) range: Option<RangeMask>,
     pub(crate) amount: f32,
@@ -534,8 +534,8 @@ pub(crate) enum Msg {
         Box<
             anyhow::Result<(
                 EditRecipe,
-                autoshop::advisor::Verdict,
-                Vec<autoshop::rationale::Note>,
+                autoshade::advisor::Verdict,
+                Vec<autoshade::rationale::Note>,
             )>,
         >,
     ),
@@ -604,11 +604,11 @@ pub(crate) enum Msg {
     Pasted(anyhow::Result<PasteOutcome>),
     /// A style-library STATUS read finished (R23-2). Boxed like every other
     /// large payload — `StyleIndexInfo` carries the scene histogram.
-    StyleInfo(Box<autoshop::style::StyleIndexInfo>),
+    StyleInfo(Box<autoshade::style::StyleIndexInfo>),
     /// The running style-library build advanced: `done` of `total` photos
     /// decoded. Typed counts, worded at landing (L12#4) — same shape as
     /// [`Msg::BatchProgress`].
-    StyleBuildProgress { stage: autoshop::style::BuildStage, done: usize, total: usize },
+    StyleBuildProgress { stage: autoshade::style::BuildStage, done: usize, total: usize },
     /// A style-library build finished — see [`StyleBuildOutcome`].
     StyleBuilt(Box<StyleBuildOutcome>),
 }
@@ -621,7 +621,7 @@ pub(crate) enum StyleBuildOutcome {
     /// how many of them ended up WITHOUT a style embedding.
     ///
     /// `without_embedding` is 0 both when every photo got a vector and when the
-    /// embedding was never asked for (`AUTOSHOP_STYLE_EMBED` unset), which are
+    /// embedding was never asked for (`AUTOSHADE_STYLE_EMBED` unset), which are
     /// the two cases with nothing to disclose. Anything above 0 is a real
     /// degradation: the sidecar was wanted and did not deliver for that many
     /// photos, and the index is a legitimate but weaker mixed one.
@@ -788,7 +788,7 @@ pub(crate) struct FitOutcome {
     pub(crate) recipe: EditRecipe,
     pub(crate) err_before: f32,
     pub(crate) err_after: f32,
-    pub(crate) rationale_notes: Vec<autoshop::rationale::Note>,
+    pub(crate) rationale_notes: Vec<autoshade::rationale::Note>,
     pub(crate) status: Vec<FitNote>,
     pub(crate) persisted: bool,
 }
@@ -905,7 +905,7 @@ pub(crate) struct SettingsForm {
     pub(crate) image_effort: String,
     /// The DELIVERY ROOT as the settings FILE spells it (R24-5 M8) — blank
     /// means "the default `./out`", which is also how a blank SAVES (an
-    /// explicitly emptied field silences an `AUTOSHOP_OUT_DIR` in the
+    /// explicitly emptied field silences an `AUTOSHADE_OUT_DIR` in the
     /// environment, the same rule the two effort fields follow). The panel
     /// echoes the RESOLVED absolute path beside it, since that is the fact a
     /// relative root leaves unanswered.
@@ -920,7 +920,7 @@ pub(crate) struct SettingsForm {
 }
 
 /// One deferred action on a variant CARD (R24-5), performed by the single
-/// owner `AutoshopApp::dispatch_variant_action`.
+/// owner `AutoShadeApp::dispatch_variant_action`.
 ///
 /// Every one of these mutates the app while the drawing closures still borrow
 /// it, so the widget code returns a value and the caller acts after the
@@ -965,7 +965,7 @@ pub(crate) const HANDLE_HIT: f32 = 12.0;
 pub(crate) enum PlaceTarget {
     NewMask,
     Redraw(usize),
-    Component(usize, autoshop::recipe::MaskCombine),
+    Component(usize, autoshade::recipe::MaskCombine),
 }
 
 /// Curve-editor channels: label + PLOT draw colour, indexed by `curve_channel`
@@ -1007,7 +1007,7 @@ pub(crate) enum CurveTarget {
 /// develop tick.
 #[derive(Clone, Default)]
 pub(crate) struct LensArg {
-    pub(crate) profile: autoshop::recipe::LensProfile,
+    pub(crate) profile: autoshade::recipe::LensProfile,
     pub(crate) amount: f32,
 }
 
@@ -1065,7 +1065,7 @@ pub(crate) struct PendingSave {
     pub(crate) pixels: Option<(PathBuf, bool)>,
     /// The photo's strip record (background variants + active kind/position)
     /// when the strip is non-trivial — Save-all persists the WHOLE strip.
-    pub(crate) strip: Option<autoshop::store::VariantsRecord>,
+    pub(crate) strip: Option<autoshade::store::VariantsRecord>,
 }
 
 /// The canvas snapshot navigation stashes for a photo with unsaved work:
@@ -1133,12 +1133,12 @@ pub(crate) struct Variant {
     /// an edit to every one of them.
     pub(crate) name: Option<String>,
     /// This variant's develop. The ACTIVE variant's recipe is mirrored in
-    /// `AutoshopApp::recipe` (the live working copy the sliders edit); it is
+    /// `AutoShadeApp::recipe` (the live working copy the sliders edit); it is
     /// saved back here when you switch away.
     pub(crate) recipe: EditRecipe,
     /// Base pixels this variant develops from. Arc makes variant switches and
     /// background preview dispatch O(1); pixels remain immutable.
-    /// `None` ⇒ the shared source neutral (`AutoshopApp::source_preview`).
+    /// `None` ⇒ the shared source neutral (`AutoShadeApp::source_preview`).
     pub(crate) base: Option<Arc<image::DynamicImage>>,
     /// The ./out artifact behind a raster variant (the reimagine PNG) — the
     /// reverse-fit target and the full-res export source. `None` for
@@ -1279,7 +1279,7 @@ pub(crate) fn variant_id_or_mint(id: Option<&String>) -> String {
 /// Mint an opaque variant id, unique across processes and calls: pid,
 /// wall-clock nanos and a process-local counter. Opaque on purpose — nothing
 /// parses it back, so the shape can change without a format bump. (Two
-/// Autoshop processes editing the same photo mint from different pids; two
+/// AutoShade processes editing the same photo mint from different pids; two
 /// cards in one process differ in the counter even inside one nanosecond.)
 pub(crate) fn new_variant_id() -> String {
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -1395,7 +1395,7 @@ pub(crate) type BakedBase = (Arc<image::DynamicImage>, PathBuf, bool);
 pub(crate) type OpenedBase = (
     Arc<image::DynamicImage>,
     Vec<[f32; 2]>,
-    autoshop::recipe::LensProfile,
+    autoshade::recipe::LensProfile,
     Option<(f32, f32)>,
     Option<BakedBase>,
     (u32, FileStamp, PixelIdentity),

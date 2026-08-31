@@ -1,6 +1,6 @@
 @echo off
 REM ==========================================================================
-REM  Autoshop web UI launcher (portable - resolves paths from this file's
+REM  AutoShade web UI launcher (portable - resolves paths from this file's
 REM  own folder, so it works wherever the repo is cloned).
 REM  - Double-click             -> serves %USERPROFILE%\Pictures
 REM  - Drag a folder onto this  -> serves just that folder (faster).
@@ -13,16 +13,16 @@ cd /d "%~dp0"
 set "DIR=%~1"
 if "%DIR%"=="" set "DIR=%USERPROFILE%\Pictures"
 
-set "EXE=%~dp0target\release\autoshop.exe"
+set "EXE=%~dp0target\release\autoshade.exe"
 if not exist "%EXE%" (
-  echo   autoshop.exe not found. Build it first:  cargo build --release
+  echo   autoshade.exe not found. Build it first:  cargo build --release
   echo   ^(expected at: %EXE%^)
   pause
   exit /b 1
 )
 
 echo.
-echo   Autoshop UI  -  serving: %DIR%
+echo   AutoShade UI  -  serving: %DIR%
 echo   Browser will open at http://127.0.0.1:8080 in ~2s.
 echo   Close this window to stop the server.
 echo.

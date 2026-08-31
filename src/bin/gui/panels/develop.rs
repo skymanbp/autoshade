@@ -4,9 +4,9 @@ use crate::*;
 
 // The section ● predicate and the table it reads (R25 P0) — see
 // `develop_panel` and `dev_lens`.
-use autoshop::advisor::catalogue::{family_is_active, CONTROL_FAMILIES};
+use autoshade::advisor::catalogue::{family_is_active, CONTROL_FAMILIES};
 
-impl AutoshopApp {
+impl AutoShadeApp {
     /// One labelled slider; double-click resets to `default` (the Lightroom
     /// gesture), hover + ↑/↓ nudges by a domain-appropriate step (Shift ×10 —
     /// LR's arrow grammar; ←/→ stay library navigation). Returns true if the
@@ -970,7 +970,7 @@ impl AutoshopApp {
                     let has_helper = denoise_helper_available();
                     let ready = self.src_path.is_some() && !self.busy && has_helper;
                     let missing = tr(lang,
-                        "this build did not ship the python sidecar — run Autoshop from the project directory, or point AUTOSHOP_DENOISE_SCRIPT at python/denoise.py",
+                        "this build did not ship the python sidecar — run AutoShade from the project directory, or point AUTOSHADE_DENOISE_SCRIPT at python/denoise.py",
                     );
                     if ui
                         .add_enabled(ready, egui::Button::new(tr(lang, "🤖 AI Denoise now")))
@@ -1015,7 +1015,7 @@ impl AutoshopApp {
     /// `ARCHITECTURE.md` calls the worst kind of bug there is — so each one
     /// says so in its own tooltip, on the head line, before the drag grammar.
     /// The values are real and they are not decoration: they round-trip
-    /// through the sidecar, so a Lightroom edit survives an Autoshop save
+    /// through the sidecar, so a Lightroom edit survives an AutoShade save
     /// instead of being stripped by the merge.
     fn dev_effects(&mut self, ui: &mut egui::Ui, effects_active: bool) -> bool {
         let lang = self.lang;
@@ -1138,7 +1138,7 @@ impl AutoshopApp {
                         changed = true;
                     }
                     ui.separator();
-                } else if self.src_path.as_deref().is_some_and(autoshop::decode::is_raw) {
+                } else if self.src_path.as_deref().is_some_and(autoshade::decode::is_raw) {
                     ui.label(
                         egui::RichText::new(tr(lang, "No in-camera lens correction data in this file"))
                             .weak()
@@ -1277,7 +1277,7 @@ impl AutoshopApp {
                 // Partitioned by the KEY, not by a hard-coded midpoint: the
                 // two groups are complements, so a seventeenth key lands in
                 // one of them instead of falling off the end of a `split_at`.
-                let keys = autoshop::xmp::PASSTHROUGH_CRS;
+                let keys = autoshade::xmp::PASSTHROUGH_CRS;
                 let perspective: Vec<&str> =
                     keys.iter().copied().filter(|k| k.starts_with("Perspective")).collect();
                 let calibration: Vec<&str> =
@@ -1288,7 +1288,7 @@ impl AutoshopApp {
                 ui.label(
                     egui::RichText::new(tr(
                         lang,
-                        "Carried through to the sidecar unchanged; Autoshop never interprets these",
+                        "Carried through to the sidecar unchanged; AutoShade never interprets these",
                     ))
                     .weak()
                     .small(),
@@ -1478,7 +1478,7 @@ impl AutoshopApp {
                 let has_helper = segment_helper_available();
                 let can_seg = !self.busy && self.base_preview.is_some() && has_helper;
                 let missing = tr(lang,
-                    "this build did not ship the python sidecar — run Autoshop from the project directory, or point AUTOSHOP_SEGMENT_SCRIPT at python/segment.py",
+                    "this build did not ship the python sidecar — run AutoShade from the project directory, or point AUTOSHADE_SEGMENT_SCRIPT at python/segment.py",
                 );
                 // 🤖 on BOTH (#4): one prefix marks every AI verb app-wide, and
                 // 「☁ AI select sky」 was the lone exception — a weather glyph
@@ -1586,7 +1586,7 @@ impl AutoshopApp {
                         // read "enabled" — the ⚠ puts the fact on the row.
                         // Muted/parked masks skip the probe: nothing renders.
                         let dead = if active {
-                            autoshop::render::dead_bitmap_rasters(m)
+                            autoshade::render::dead_bitmap_rasters(m)
                         } else {
                             Vec::new()
                         };
@@ -1859,7 +1859,7 @@ impl AutoshopApp {
                             let mut clone = self.recipe.masks[i].clone();
                             if let Some(p) = self.src_path.as_deref() {
                                 let mut tmp = EditRecipe { masks: vec![clone], ..Default::default() };
-                                autoshop::store::detach_rasters(p, &mut tmp, "mask-dup");
+                                autoshade::store::detach_rasters(p, &mut tmp, "mask-dup");
                                 clone = tmp.masks.remove(0);
                             }
                             if !clone.name.is_empty() {
@@ -1957,7 +1957,7 @@ impl AutoshopApp {
                                 i,
                                 |g| {
                                     let s = (g.width().max(g.height()) as f32 / 400.0).max(1.0);
-                                    autoshop::render::feather_mask(g, s)
+                                    autoshade::render::feather_mask(g, s)
                                 },
                                 "mask-edit",
                             );
@@ -1971,7 +1971,7 @@ impl AutoshopApp {
                                 i,
                                 |g| {
                                     let r = (g.width().max(g.height()) / 500).max(2) as i32;
-                                    autoshop::render::morph_mask(g, r)
+                                    autoshade::render::morph_mask(g, r)
                                 },
                                 "mask-edit",
                             );
@@ -1985,7 +1985,7 @@ impl AutoshopApp {
                                 i,
                                 |g| {
                                     let r = (g.width().max(g.height()) / 500).max(2) as i32;
-                                    autoshop::render::morph_mask(g, -r)
+                                    autoshade::render::morph_mask(g, -r)
                                 },
                                 "mask-edit",
                             );
@@ -2006,19 +2006,19 @@ impl AutoshopApp {
                 {
                     ui.horizontal(|ui| {
                         ui.label(tr(lang, "Shapes"));
-                        let mode_label = |m: autoshop::recipe::MaskCombine| match m {
-                            autoshop::recipe::MaskCombine::Add => tr(lang, "＋ Add"),
-                            autoshop::recipe::MaskCombine::Subtract => tr(lang, "－ Subtract"),
-                            autoshop::recipe::MaskCombine::Intersect => tr(lang, "∩ Intersect"),
+                        let mode_label = |m: autoshade::recipe::MaskCombine| match m {
+                            autoshade::recipe::MaskCombine::Add => tr(lang, "＋ Add"),
+                            autoshade::recipe::MaskCombine::Subtract => tr(lang, "－ Subtract"),
+                            autoshade::recipe::MaskCombine::Intersect => tr(lang, "∩ Intersect"),
                         };
                         egui::ComboBox::from_id_salt("comp_mode")
                             .selected_text(mode_label(self.component_mode))
                             .width(96.0)
                             .show_ui(ui, |ui| {
                                 for m in [
-                                    autoshop::recipe::MaskCombine::Add,
-                                    autoshop::recipe::MaskCombine::Subtract,
-                                    autoshop::recipe::MaskCombine::Intersect,
+                                    autoshade::recipe::MaskCombine::Add,
+                                    autoshade::recipe::MaskCombine::Subtract,
+                                    autoshade::recipe::MaskCombine::Intersect,
                                 ] {
                                     ui.selectable_value(&mut self.component_mode, m, mode_label(m));
                                 }
@@ -2063,9 +2063,9 @@ impl AutoshopApp {
                         ui.horizontal(|ui| {
                             let comp = &self.recipe.masks[i].components[c];
                             let icon = match comp.mode {
-                                autoshop::recipe::MaskCombine::Add => "＋",
-                                autoshop::recipe::MaskCombine::Subtract => "－",
-                                autoshop::recipe::MaskCombine::Intersect => "∩",
+                                autoshade::recipe::MaskCombine::Add => "＋",
+                                autoshade::recipe::MaskCombine::Subtract => "－",
+                                autoshade::recipe::MaskCombine::Intersect => "∩",
                             };
                             let kind = match comp.geometry {
                                 MaskGeometry::Linear { .. } => tr(lang, "Linear"),
@@ -2085,15 +2085,15 @@ impl AutoshopApp {
                             let mut mode = comp.mode;
                             egui::ComboBox::from_id_salt(("comp_row_mode", c))
                                 .selected_text(match mode {
-                                    autoshop::recipe::MaskCombine::Add => tr(lang, "Add"),
-                                    autoshop::recipe::MaskCombine::Subtract => tr(lang, "Subtract"),
-                                    autoshop::recipe::MaskCombine::Intersect => tr(lang, "Intersect"),
+                                    autoshade::recipe::MaskCombine::Add => tr(lang, "Add"),
+                                    autoshade::recipe::MaskCombine::Subtract => tr(lang, "Subtract"),
+                                    autoshade::recipe::MaskCombine::Intersect => tr(lang, "Intersect"),
                                 })
                                 .width(88.0)
                                 .show_ui(ui, |ui| {
-                                    ui.selectable_value(&mut mode, autoshop::recipe::MaskCombine::Add, tr(lang, "Add"));
-                                    ui.selectable_value(&mut mode, autoshop::recipe::MaskCombine::Subtract, tr(lang, "Subtract"));
-                                    ui.selectable_value(&mut mode, autoshop::recipe::MaskCombine::Intersect, tr(lang, "Intersect"));
+                                    ui.selectable_value(&mut mode, autoshade::recipe::MaskCombine::Add, tr(lang, "Add"));
+                                    ui.selectable_value(&mut mode, autoshade::recipe::MaskCombine::Subtract, tr(lang, "Subtract"));
+                                    ui.selectable_value(&mut mode, autoshade::recipe::MaskCombine::Intersect, tr(lang, "Intersect"));
                                 });
                             if mode != comp.mode {
                                 self.recipe.masks[i].components[c].mode = mode;
@@ -2305,7 +2305,7 @@ impl AutoshopApp {
                 // value currently on the slider.
                 let temp_k = format!(
                     "{:.0}",
-                    autoshop::render::local_temp_to_kelvin(m.temperature)
+                    autoshade::render::local_temp_to_kelvin(m.temperature)
                 );
                 let temp_hint = trf(
                     lang,
@@ -2653,7 +2653,7 @@ impl AutoshopApp {
                                     "· from {kind}",
                                     &[("kind", tr(lang, kind.label()))],
                                 )),
-                                (None, Some(autoshop::store::VERSION_ORIGIN_AUTO)) => {
+                                (None, Some(autoshade::store::VERSION_ORIGIN_AUTO)) => {
                                     Some(tr(lang, "· auto-archived").to_string())
                                 }
                                 _ => None,
@@ -2717,10 +2717,10 @@ impl AutoshopApp {
                     // NoWait wrapper: delete_version locks internally with
                     // Wait — a foreground 🗑 click must fail into the error
                     // arm when another process holds the develop, not hang.
-                    match autoshop::store::with_develop_lock(
+                    match autoshade::store::with_develop_lock(
                         &src,
-                        autoshop::store::DevelopLockMode::NoWait,
-                        || autoshop::store::delete_version(&src, n),
+                        autoshade::store::DevelopLockMode::NoWait,
+                        || autoshade::store::delete_version(&src, n),
                     ) {
                         Ok(()) => {
                             self.refresh_versions();

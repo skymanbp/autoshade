@@ -84,7 +84,7 @@ fn free_mask_proposes_the_blob_the_tiles_cannot_box() {
     let target = with_delta(&current, &truth, -26);
     let field = field_from(&truth, -0.1);
     let (source_px, target_px, evidence) = proposal_inputs(&current, &target);
-    let dir = std::env::temp_dir().join(format!("autoshop-free-disc-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("autoshade-free-disc-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let home = crate::store::OwnedRaster::scratch(dir.join("mask-semantic.png"));
     let mut report = super::super::tests::neutral_report(&source, &target);
@@ -187,7 +187,7 @@ fn free_mask_refuses_replaced_content() {
     report.evidence = evidence;
     let masks = report.recipe.masks.len();
     let home = crate::store::OwnedRaster::scratch(
-        std::env::temp_dir().join(format!("autoshop-free-replaced-{}.png", std::process::id())),
+        std::env::temp_dir().join(format!("autoshade-free-replaced-{}.png", std::process::id())),
     );
     attach_free_masks(&source, &target, &mut report, &home, &field, &vec![0.0; region.len()], false, 2);
     assert_eq!(report.recipe.masks.len(), masks);
@@ -199,7 +199,7 @@ fn free_masks_eat_only_what_tiles_left() {
     let truth = disc(221, 167, 72);
     let source = textured_image();
     let mut base = crate::recipe::EditRecipe::default();
-    let dir = std::env::temp_dir().join(format!("autoshop-free-tile-exclusion-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("autoshade-free-tile-exclusion-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let prior = crate::store::OwnedRaster::scratch(dir.join("prior.png"));
     let prior_mask = image::GrayImage::from_fn(EDGE, EDGE, |x, y| {
@@ -309,7 +309,7 @@ fn free_mask_refusal_keeps_refinement_and_typed_reason() {
     let field = field_from(&truth, -0.1);
     let mut report = super::super::tests::neutral_report(&source, &target);
     report.evidence = full_evidence(&current, &target);
-    let dir = std::env::temp_dir().join(format!("autoshop-free-refusal-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("autoshade-free-refusal-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let home = crate::store::OwnedRaster::scratch(dir.join("mask-zone-field.png"));
     let excluded = vec![0.0; truth.len()];
@@ -335,7 +335,7 @@ fn free_mask_attachment_emits_typed_note_with_improvement() {
     let (source_px, target_px, evidence) = proposal_inputs(&current, &target);
     let mut report = super::super::tests::neutral_report(&source, &target);
     report.evidence = evidence;
-    let dir = std::env::temp_dir().join(format!("autoshop-free-attached-note-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("autoshade-free-attached-note-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let home = crate::store::OwnedRaster::scratch(dir.join("mask-zone-field.png"));
     let excluded = vec![0.0; truth.len()];
@@ -377,7 +377,7 @@ fn free_mask_layer_off_is_byte_identical() {
     ));
     let (source, target) = (image(&current), image(&target));
     let seg = crate::segment::SegmentOpts {
-        python_bin: "autoshop-test-no-such-python".into(),
+        python_bin: "autoshade-test-no-such-python".into(),
         script: "target/b3-no-segment.py".into(),
         target: "sky".into(),
         reference_point: None,
@@ -440,7 +440,7 @@ fn free_masks_are_skipped_when_the_ceiling_is_met() {
     }
     let target = DynamicImage::ImageRgb8(target);
     let seg = crate::segment::SegmentOpts {
-        python_bin: "autoshop-test-no-such-python".into(),
+        python_bin: "autoshade-test-no-such-python".into(),
         script: "target/b3-no-segment.py".into(),
         target: "sky".into(),
         reference_point: None,
@@ -469,7 +469,7 @@ fn free_masks_are_skipped_when_the_ceiling_is_met() {
 
 fn corpus_segment_off() -> crate::segment::SegmentOpts {
     crate::segment::SegmentOpts {
-        python_bin: "autoshop-test-no-such-python".into(),
+        python_bin: "autoshade-test-no-such-python".into(),
         script: "target/b3-no-segment.py".into(),
         target: "sky".into(),
         reference_point: None,
@@ -628,7 +628,7 @@ fn free_mask_real_zone_refusal_is_typed() {
     let (_, _, evidence) = proposal_inputs(&source, &source);
     let mut report = super::super::tests::neutral_report(&source, &source);
     report.evidence = evidence;
-    let dir = std::env::temp_dir().join(format!("autoshop-free-real-refusal-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("autoshade-free-real-refusal-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let home = crate::store::OwnedRaster::scratch(dir.join("mask-zone-field.png"));
     let masks = report.recipe.masks.len();

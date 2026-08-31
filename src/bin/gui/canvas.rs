@@ -2,7 +2,7 @@
 
 use super::*;
 
-impl AutoshopApp {
+impl AutoShadeApp {
     /// The edge a BAKE renders at: the canvas's own resolution, not the
     /// global preference.
     ///
@@ -148,7 +148,7 @@ impl AutoshopApp {
         let img = if curve.is_empty() {
             to_color_image(base)
         } else {
-            to_color_image(&autoshop::render::develop_preview(
+            to_color_image(&autoshade::render::develop_preview(
                 base,
                 &EditRecipe { base_curve: curve.to_vec(), ..Default::default() },
             ))
@@ -271,11 +271,11 @@ impl AutoshopApp {
                 // No downstream geometry, explicitly: this reference exists to
                 // be SAMPLED for pixel values. The profile still matters for
                 // LINEAR's handle-only raw-frame rule; RADIAL remains stored.
-                let img = autoshop::render::develop_preview_framed(
+                let img = autoshade::render::develop_preview_framed(
                     base,
                     &pre,
-                    &autoshop::diag::pixels(),
-                    autoshop::render::MaskFrame::without_downstream(&pre.lens_profile),
+                    &autoshade::diag::pixels(),
+                    autoshade::render::MaskFrame::without_downstream(&pre.lens_profile),
                 );
                 self.overlay_ref = Some((pre, img));
             }
@@ -302,24 +302,24 @@ impl AutoshopApp {
         // stored in Lightroom's post-correction frame and the render now puts
         // it back there; an overlay that skipped the adaptation would advertise
         // coverage the render does not apply, by the whole field.
-        let cov_geom = autoshop::render::geometry_profile(&self.recipe);
+        let cov_geom = autoshade::render::geometry_profile(&self.recipe);
         let cov_frame =
-            autoshop::render::MaskFrame::downstream(&cov_geom, self.recipe.lens_distortion);
-        let mut cov = image::DynamicImage::ImageLuma8(autoshop::render::mask_coverage(
+            autoshade::render::MaskFrame::downstream(&cov_geom, self.recipe.lens_distortion);
+        let mut cov = image::DynamicImage::ImageLuma8(autoshade::render::mask_coverage(
             &mask, cov_ref, cov_frame,
         ));
         if cov_frame.warps() {
             // The coverage overlay must follow the SAME geometric chain as the
             // rendered pixels — profile distortion included, or the red wash
             // drifts off its mask near the frame edges.
-            cov = autoshop::render::apply_lens_geometry(
+            cov = autoshade::render::apply_lens_geometry(
                 &cov,
                 &cov_geom,
                 self.recipe.lens_distortion,
             );
         }
         if self.recipe.straighten_deg != 0.0 {
-            cov = autoshop::render::rotate_straighten(&cov, self.recipe.straighten_deg);
+            cov = autoshade::render::rotate_straighten(&cov, self.recipe.straighten_deg);
         }
         let g = cov.to_luma8();
         let (w, h) = (g.width() as usize, g.height() as usize);
@@ -358,7 +358,7 @@ impl AutoshopApp {
                 // COMPOSED (R25 B3): every interaction map downstream of this
                 // bundle must see the same profile the pixels went through,
                 // manual CA included.
-                profile: autoshop::render::geometry_profile(&self.recipe).into_owned(),
+                profile: autoshade::render::geometry_profile(&self.recipe).into_owned(),
                 amount: self.recipe.lens_distortion,
             },
         )
@@ -767,7 +767,7 @@ impl AutoshopApp {
             // Includes the CA composite fill (Codex AL F1): the true
             // outline must warp whenever the pixels do.
             let geom_active =
-                autoshop::render::geometry_moves_frame(&dist.profile, dist.amount);
+                autoshade::render::geometry_moves_frame(&dist.profile, dist.amount);
             if let MaskGeometry::Radial { top, left, bottom, right, flipped, angle, .. } = target
                 && (deg != 0.0 || geom_active)
             {
@@ -838,7 +838,7 @@ impl AutoshopApp {
             let Some(px) = sample_5x5_mean(base, nx, ny) else { return };
             px
         };
-        let (k, tint) = autoshop::render::solve_wb_from_neutral(
+        let (k, tint) = autoshade::render::solve_wb_from_neutral(
             px,
             self.recipe.as_shot_k.unwrap_or(5500.0),
         );
@@ -891,11 +891,11 @@ impl AutoshopApp {
             if !matches!(&self.overlay_ref, Some((r, _)) if *r == pre) {
                 // The explicit no-downstream frame for the same reason as the
                 // overlay build above, and it must MATCH it — they share cache.
-                let img = autoshop::render::develop_preview_framed(
+                let img = autoshade::render::develop_preview_framed(
                     &base,
                     &pre,
-                    &autoshop::diag::pixels(),
-                    autoshop::render::MaskFrame::without_downstream(&pre.lens_profile),
+                    &autoshade::diag::pixels(),
+                    autoshade::render::MaskFrame::without_downstream(&pre.lens_profile),
                 );
                 self.overlay_ref = Some((pre, img));
             }
@@ -1170,7 +1170,7 @@ impl AutoshopApp {
         xf: ViewXform,
         tex_size: egui::Vec2,
     ) {
-        use autoshop::recipe::Crop;
+        use autoshade::recipe::Crop;
         // Pixel aspect ratio (w/h) requested by the preset; "原始" resolves here.
         // `tex_size` is the CURRENT after texture: right after a straighten
         // change with the develop still in flight it can be one frame stale,
@@ -1574,7 +1574,7 @@ impl AutoshopApp {
                 // the release (D13): press = full side, release = zero side.
                 let s = view_norm_to_orig(sv.0, sv.1, dims, deg, &dist);
                 let e = view_norm_to_orig(ev.0, ev.1, dims, deg, &dist);
-                autoshop::recipe::MaskGeometry::Linear {
+                autoshade::recipe::MaskGeometry::Linear {
                     zero_x: e.0,
                     zero_y: e.1,
                     full_x: s.0,
@@ -1613,7 +1613,7 @@ impl AutoshopApp {
                     t = c - MIN_SIZE * 0.5;
                     b = c + MIN_SIZE * 0.5;
                 }
-                autoshop::recipe::MaskGeometry::Radial {
+                autoshade::recipe::MaskGeometry::Radial {
                     top: t,
                     left: l,
                     bottom: b,
@@ -1642,10 +1642,10 @@ impl AutoshopApp {
                     // no surface to notice it on (R25 P5).
                     let mut geom = geom;
                     if let (
-                        autoshop::recipe::MaskGeometry::Radial {
+                        autoshade::recipe::MaskGeometry::Radial {
                             feather, roundness, flipped, angle, midpoint, mask_version, ..
                         },
-                        autoshop::recipe::MaskGeometry::Radial {
+                        autoshade::recipe::MaskGeometry::Radial {
                             feather: kept_f,
                             roundness: kept_r,
                             flipped: kept_fl,
@@ -1671,7 +1671,7 @@ impl AutoshopApp {
                 }
                 PlaceTarget::Component(i, mode) if i < self.recipe.masks.len() => {
                     let m = &mut self.recipe.masks[i];
-                    m.components.push(autoshop::recipe::MaskComponent { geometry: geom, mode });
+                    m.components.push(autoshade::recipe::MaskComponent { geometry: geom, mode });
                     self.sel_mask = Some(i);
                     self.sel_component = Some(m.components.len() - 1);
                     tr(self.lang, "shape added to this mask — drag its knobs to adjust; the shape list is under the mask's row").into()
@@ -1683,7 +1683,7 @@ impl AutoshopApp {
                 _ => {
                     let n = self.recipe.masks.len();
                     let name = trf(self.lang, "Manual {n}", &[("n", &(n + 1).to_string())]);
-                    self.recipe.masks.push(autoshop::recipe::LocalAdjustment {
+                    self.recipe.masks.push(autoshade::recipe::LocalAdjustment {
                         mask: geom,
                         name,
                         ..Default::default()
@@ -1791,14 +1791,14 @@ impl AutoshopApp {
                         || profile_geom != (false, false)
                         || xform_now.3 != (0.0, 0.0)
                     {
-                        img = autoshop::render::apply_lens_geometry_rgba(
+                        img = autoshade::render::apply_lens_geometry_rgba(
                             &img,
-                            &autoshop::render::geometry_profile(&self.recipe),
+                            &autoshade::render::geometry_profile(&self.recipe),
                             xform_now.1,
                         );
                     }
                     if xform_now.0 != 0.0 {
-                        img = autoshop::render::rotate_straighten_rgba(&img, xform_now.0);
+                        img = autoshade::render::rotate_straighten_rgba(&img, xform_now.0);
                     }
                     let rgba = img;
                     egui::ColorImage::from_rgba_unmultiplied(

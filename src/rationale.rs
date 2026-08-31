@@ -484,7 +484,7 @@ pub mod keys {
          above describes the PRE-distillation recipe]";
     pub const STYLE_UNAVAILABLE: &str =
         " [style reference unavailable ({e}) — the Style slider had no effect on this \
-         develop; rebuild it with: autoshop style-index <folder>]";
+         develop; rebuild it with: autoshade style-index <folder>]";
     /// R23-2, feedback #6: the OTHER two silent arms. `STYLE_UNAVAILABLE`
     /// above only ever fired when an index FILE existed and failed to load, so
     /// a fresh install (no library at all) and a retrieval that matched

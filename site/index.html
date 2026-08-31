@@ -3,16 +3,16 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Autoshop — AI-assisted RAW development</title>
-  <meta name="description" content="Autoshop is a non-destructive photo developer where AI proposes inspectable edits and a deterministic Rust engine renders them.">
+  <title>AutoShade — AI-assisted RAW development</title>
+  <meta name="description" content="AutoShade is a non-destructive photo developer where AI proposes inspectable edits and a deterministic Rust engine renders them.">
   <link rel="canonical" href="https://skymanbp-autoshop.dev/">
   <meta property="og:type" content="website">
-  <meta property="og:site_name" content="Autoshop">
-  <meta property="og:title" content="Autoshop — AI-assisted RAW development">
+  <meta property="og:site_name" content="AutoShade">
+  <meta property="og:title" content="AutoShade — AI-assisted RAW development">
   <meta property="og:description" content="AI decides what to change. A deterministic Rust engine does it.">
   <meta property="og:url" content="https://skymanbp-autoshop.dev/">
   <meta property="og:image" content="https://skymanbp-autoshop.dev/images/showcase-cat-analyze-pair.jpg">
-  <meta property="og:image:alt" content="A neutral Sony α7R IVA cat photo beside its AI-proposed Autoshop develop">
+  <meta property="og:image:alt" content="A neutral Sony α7R IVA cat photo beside its AI-proposed AutoShade develop">
   <meta name="theme-color" content="#f5f1e9" media="(prefers-color-scheme: light)">
   <meta name="theme-color" content="#101817" media="(prefers-color-scheme: dark)">
   <link rel="icon" type="image/png" href="favicon.png">
@@ -23,9 +23,9 @@
 
   <header class="site-header">
     <div class="header-inner">
-      <a class="brand" href="#top" aria-label="Autoshop home">
-        <img src="favicon.png" width="40" height="40" alt="Autoshop icon">
-        <span>Autoshop</span>
+      <a class="brand" href="#top" aria-label="AutoShade home">
+        <img src="favicon.png" width="40" height="40" alt="AutoShade icon">
+        <span>AutoShade</span>
       </a>
       <nav aria-label="Primary navigation">
         <a href="#overview">Overview</a>
@@ -74,7 +74,7 @@
     <section class="section prose-intro" id="overview" aria-labelledby="overview-title">
       <p class="section-kicker">What it is</p>
       <h2 id="overview-title">A small recipe between the model and your photograph.</h2>
-      <p class="section-lede">Autoshop is a non-destructive photo developer for RAW and baked images. Its main workflow turns an AI proposal into a small, inspectable <code>EditRecipe</code>, then applies that recipe with the same local Rust renderer used by the desktop app, CLI, and embedded web UI.</p>
+      <p class="section-lede">AutoShade is a non-destructive photo developer for RAW and baked images. Its main workflow turns an AI proposal into a small, inspectable <code>EditRecipe</code>, then applies that recipe with the same local Rust renderer used by the desktop app, CLI, and embedded web UI.</p>
 
       <div class="feature-grid">
         <article>
@@ -91,7 +91,7 @@
         </article>
         <article>
           <h3>Sidecars both ways</h3>
-          <p>Lightroom/ACR sidecars round-trip with conservative merge behavior for fields Autoshop does not model.</p>
+          <p>Lightroom/ACR sidecars round-trip with conservative merge behavior for fields AutoShade does not model.</p>
         </article>
         <article>
           <h3>Versions and variants</h3>
@@ -128,16 +128,16 @@
         <h3 id="quickstart-title">Quickstart</h3>
         <h4>Desktop</h4>
         <ol>
-          <li>Start <code>autoshop-gui</code>.</li>
+          <li>Start <code>autoshade-gui</code>.</li>
           <li>Choose <strong>Open photo…</strong>, press <kbd>Ctrl</kbd>+<kbd>O</kbd>, or drag in a supported photo.</li>
           <li>Move a Develop slider and compare it with the neutral conversion.</li>
           <li>Press <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>E</kbd> to export a copy. The original remains untouched.</li>
         </ol>
         <h4>CLI</h4>
-        <pre><code>autoshop decode "photo.ARW" -o "preview.jpg"
-autoshop apply "photo.ARW" "recipe.json" -o "developed.tif"</code></pre>
+        <pre><code>autoshade decode "photo.ARW" -o "preview.jpg"
+autoshade apply "photo.ARW" "recipe.json" -o "developed.tif"</code></pre>
         <p>With the image/vision role configured:</p>
-        <pre><code>autoshop auto "photo.ARW" --guidance "natural color; protect highlights" -o "developed.tif"</code></pre>
+        <pre><code>autoshade auto "photo.ARW" --guidance "natural color; protect highlights" -o "developed.tif"</code></pre>
         <p class="source-link"><a href="https://github.com/skymanbp/autoshop/blob/main/README.md#install-and-quickstart">Build and setup details in the README →</a></p>
       </div>
     </section>
@@ -146,7 +146,7 @@ autoshop apply "photo.ARW" "recipe.json" -o "developed.tif"</code></pre>
       <p class="section-kicker">Showcase · Part A</p>
       <h2 id="showcase-a-title">AI analysis and style transfer</h2>
       <p class="section-lede">The cat comparison above is the first <code>analyze</code> example: a Sony α7R IVA 61 MP <code>.ARW</code>, shown as straight conversion and AI develop. The AI chose the crop and a restrained global develop plus radial and linear parametric masks; it did not use an AI bitmap segmentation mask.</p>
-      <p>The three established pairs below show different decisions and two current failure modes. Each before is Autoshop's neutral conversion of the same Sony α7R IVA <code>.ARW</code>; each after is an AI-proposed engine render, not a generated image. The faint watermark is identical on both halves of these three older pairs.</p>
+      <p>The three established pairs below show different decisions and two current failure modes. Each before is AutoShade's neutral conversion of the same Sony α7R IVA <code>.ARW</code>; each after is an AI-proposed engine render, not a generated image. The faint watermark is identical on both halves of these three older pairs.</p>
 
       <article class="case-study">
         <header>
@@ -254,7 +254,7 @@ autoshop apply "photo.ARW" "recipe.json" -o "developed.tif"</code></pre>
     <section class="section" id="formats" aria-labelledby="formats-title">
       <p class="section-kicker">Supported formats</p>
       <h2 id="formats-title">A nine-camera RAW zoo, backed by 24 RAW extensions.</h2>
-      <p class="section-lede">Every tile below is a neutral Autoshop render of one real CC0 file—not an embedded preview. The environment-gated release suite last recorded 9/9.</p>
+      <p class="section-lede">Every tile below is a neutral AutoShade render of one real CC0 file—not an embedded preview. The environment-gated release suite last recorded 9/9.</p>
 
       <div class="format-grid">
         <figure>
@@ -299,7 +299,7 @@ autoshop apply "photo.ARW" "recipe.json" -o "developed.tif"</code></pre>
         <article>
           <h3>Camera RAW · 24 extensions</h3>
           <p><code>arw, dng, raw, raf, nef, cr2, cr3, orf, rw2, pef, srw, 3fr, fff, iiq, mef, mos, erf, kdc, dcr, dcs, crw, nrw, mrw, ari</code></p>
-          <p>Decoding uses rawler, whose database covers 725 camera models. Twelve formats carry no embedded preview; Autoshop shows its own neutral rendition instead and says so.</p>
+          <p>Decoding uses rawler, whose database covers 725 camera models. Twelve formats carry no embedded preview; AutoShade shows its own neutral rendition instead and says so.</p>
         </article>
         <article>
           <h3>Baked rasters · 8 extensions</h3>
@@ -475,8 +475,8 @@ autoshop apply "photo.ARW" "recipe.json" -o "developed.tif"</code></pre>
   <footer class="site-footer">
     <div>
       <a class="brand footer-brand" href="#top">
-        <img src="favicon.png" width="36" height="36" alt="Autoshop icon">
-        <span>Autoshop</span>
+        <img src="favicon.png" width="36" height="36" alt="AutoShade icon">
+        <span>AutoShade</span>
       </a>
       <p>AI-assisted automatic development of RAW photographs.</p>
     </div>

@@ -203,7 +203,7 @@ impl ClaudeProvider {
         // is killed and the error says exactly what happened.
         // env_or_dotenv: same .env-honouring rule as the HTTP builders
         // (the owned-map dotenv never touches the process environment).
-        let budget = crate::config::env_or_dotenv("AUTOSHOP_HTTP_TIMEOUT_SECS")
+        let budget = crate::config::env_or_dotenv("AUTOSHADE_HTTP_TIMEOUT_SECS")
             .and_then(|s| s.parse().ok())
             // 0 would kill the child on arrival — same guard as the HTTP
             // builders' zero filter.
@@ -244,7 +244,7 @@ impl ClaudeProvider {
             child,
             "claude verifier",
             std::time::Duration::from_secs(budget),
-            "AUTOSHOP_HTTP_TIMEOUT_SECS",
+            "AUTOSHADE_HTTP_TIMEOUT_SECS",
             group,
         );
         // Joined on BOTH paths (Codex L11-1: the `?` used to skip the join on

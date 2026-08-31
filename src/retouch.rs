@@ -575,7 +575,7 @@ If the photo is clean, return an empty list.";
     // deadline at all: a stalled endpoint parked the retouch worker forever,
     // and `busy` gates every GUI action. Streaming-first via the shared
     // helper: the propose budget bounds SILENCE, not healthy generation time,
-    // and AUTOSHOP_HTTP_TIMEOUT_SECS still overrides.
+    // and AUTOSHADE_HTTP_TIMEOUT_SECS still overrides.
     //
     // This is the IMAGE role (a vision call on the image key and base URL), so
     // it takes the image role's reasoning-effort tier — not the analysis one.
@@ -964,7 +964,7 @@ mod tests {
     #[test]
     fn clone_stamp_refuses_a_library_output_before_any_work() {
         let dir = std::env::temp_dir()
-            .join(format!("autoshop-clonestamp-preflight-{}", std::process::id()));
+            .join(format!("autoshade-clonestamp-preflight-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let lib = dir.join("library");
         std::fs::create_dir_all(&lib).unwrap();
@@ -999,7 +999,7 @@ mod tests {
     fn heal_keeps_bit_depth_and_alpha_and_stages_the_master() {
         // src lives in its own subdir: heal's pre-pay preflight (Codex AL
         // F2) runs guard_readonly, which refuses an out beside the source.
-        let root = std::env::temp_dir().join(format!("autoshop-retouch-depth-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("autoshade-retouch-depth-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let dir = root.join("library");
         let out_dir = root.join("exports");
@@ -1218,7 +1218,7 @@ mod tests {
         // src in its own subdir — heal's pre-pay preflight (Codex AL F2)
         // refuses an out beside the source.
         let root = std::env::temp_dir()
-            .join(format!("autoshop-heal-fullres-{}", std::process::id()));
+            .join(format!("autoshade-heal-fullres-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let dir = root.join("library");
         let out_dir = root.join("exports");

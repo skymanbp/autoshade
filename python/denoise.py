@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Autoshop AI-denoise sidecar.
+"""AutoShade AI-denoise sidecar.
 
 Real-photo denoiser for high-ISO / astro / low-light frames, in the spirit of
 ACR/Lightroom "Denoise". Uses SCUNet (cszn/SCUNet) `color_real` weights — a
@@ -191,7 +191,7 @@ def _sha256(path):
 # 30-minute budget is TerminateProcess — the `finally` never runs) orphans a
 # ~72 MB temp beside the cache. Well past 2x the default sidecar budget, so a
 # live peer's in-flight transfer can never be swept; do not tune down without
-# re-deriving from AUTOSHOP_SIDECAR_TIMEOUT_SECS.
+# re-deriving from AUTOSHADE_SIDECAR_TIMEOUT_SECS.
 STALE_PART_SECS = 24 * 3600
 
 
@@ -369,7 +369,7 @@ class _nullctx:
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Autoshop AI denoise (SCUNet)")
+    ap = argparse.ArgumentParser(description="AutoShade AI denoise (SCUNet)")
     ap.add_argument("--input", required=True)
     ap.add_argument("--output", required=True)
     ap.add_argument("--model", default="color_real_psnr", choices=list(WEIGHT_URLS))

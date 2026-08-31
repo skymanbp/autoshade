@@ -68,7 +68,7 @@ pub struct GradeRequest {
     /// a process-environment read: the CLI resolves it from `--embed` /
     /// `--no-embed`, the GUI from its own preference, and both go through
     /// [`crate::style::EmbeddingSwitch::resolve`]. Until this batch the CLI
-    /// flag was implemented by WRITING `AUTOSHOP_STYLE_EMBED` into the process
+    /// flag was implemented by WRITING `AUTOSHADE_STYLE_EMBED` into the process
     /// and the pipeline read it back — a flag as a global side effect, and a
     /// GUI preference that could never reach the develop at all (the read was
     /// hard-coded `pref = false`).
@@ -269,7 +269,7 @@ pub fn produce_recipe(
         anyhow::bail!(
             "the analysis provider is 'api' but no analysis API key is configured — the \
              verify step would fail AFTER the paid proposal; set the key in Settings (or \
-             AUTOSHOP_ANALYSIS_API_KEY), or switch the analysis provider to oauth"
+             AUTOSHADE_ANALYSIS_API_KEY), or switch the analysis provider to oauth"
         );
     }
     // This call's diagnostics channel, bound to the photograph it is about.
@@ -2736,7 +2736,7 @@ pub fn write_xmp(
             // loss worth naming.
             SidecarRead::Unreadable(why) => notes.push(format!(
                 "the Lightroom sidecar at {} could not be read ({why}), so this save was \
-                 merged against Autoshop's own previous version instead — anything changed \
+                 merged against AutoShade's own previous version instead — anything changed \
                  in that sidecar since is not in the new file; the sidecar itself is untouched",
                 lr.display()
             )),
@@ -2985,7 +2985,7 @@ pub fn xmp_target(raw: &Path) -> PathBuf {
     crate::store::xmp_target(raw)
 }
 
-/// By default, Autoshop keeps the source library read-only. If the configured
+/// By default, AutoShade keeps the source library read-only. If the configured
 /// Delivery folder is inside or above a photo’s folder, that delivery subtree is
 /// intentionally writable; Settings warns when this removes the folder’s
 /// protection. “Export .xmp beside the photo” is the separate, confirmed
@@ -3782,7 +3782,7 @@ mod guard_tests {
 
     #[test]
     fn guard_refuses_to_overwrite_a_photo_in_a_sibling_library_folder() {
-        let base = std::env::temp_dir().join(format!("autoshop-guard-sibling-{}", std::process::id()));
+        let base = std::env::temp_dir().join(format!("autoshade-guard-sibling-{}", std::process::id()));
         let (a, b) = (base.join("TripA"), base.join("TripB"));
         std::fs::create_dir_all(&a).unwrap();
         std::fs::create_dir_all(&b).unwrap();
@@ -3805,7 +3805,7 @@ mod guard_tests {
 
     #[test]
     fn write_xmp_merges_over_the_lightroom_sidecar_beside_the_raw() {
-        let dir = std::env::temp_dir().join(format!("autoshop-pipe-xmp-merge-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("autoshade-pipe-xmp-merge-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let raw = dir.join("_pipe_xmp_merge.arw");
@@ -3843,7 +3843,7 @@ mod guard_tests {
     #[test]
     fn a_save_with_own_masks_reports_the_foreign_mask_block_it_replaced() {
         use crate::recipe::{LocalAdjustment, MaskGeometry};
-        let dir = std::env::temp_dir().join(format!("autoshop-pipe-xmp-maskintent-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("autoshade-pipe-xmp-maskintent-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let raw = dir.join("_pipe_maskintent.arw");
@@ -3906,7 +3906,7 @@ mod guard_tests {
     #[test]
     fn the_write_path_hands_back_what_the_projection_could_not_carry() {
         use crate::recipe::{LocalAdjustment, MaskGeometry};
-        let dir = std::env::temp_dir().join(format!("autoshop-pipe-xmp-masklosses-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("autoshade-pipe-xmp-masklosses-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let raw = dir.join("_pipe_masklosses.arw");
@@ -3956,7 +3956,7 @@ mod guard_tests {
     #[test]
     fn a_persisted_recipe_cannot_exceed_the_schema_caps() {
         use crate::recipe::{LocalAdjustment, MaskGeometry};
-        let dir = std::env::temp_dir().join(format!("autoshop-pipe-recipe-caps-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("autoshade-pipe-recipe-caps-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let raw = dir.join("_pipe_caps.arw");
@@ -4002,7 +4002,7 @@ mod guard_tests {
     /// because the loss only surfaced the next time they opened the catalog.
     #[test]
     fn an_unmergeable_sidecar_is_regenerated_and_says_so() {
-        let dir = std::env::temp_dir().join(format!("autoshop-pipe-xmp-disclose-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("autoshade-pipe-xmp-disclose-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let raw = dir.join("_pipe_disclose.arw");
@@ -4061,7 +4061,7 @@ mod guard_tests {
     /// file that was never the problem.
     #[test]
     fn the_merge_note_fires_only_for_a_real_loss_and_names_the_base_file() {
-        let dir = std::env::temp_dir().join(format!("autoshop-pipe-xmp-truthful-note-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("autoshade-pipe-xmp-truthful-note-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let r = EditRecipe { exposure_ev: 0.75, ..Default::default() };
@@ -4205,7 +4205,7 @@ mod guard_tests {
     /// round four built was defeated by round five's own size cap.
     #[test]
     fn an_oversized_lightroom_sidecar_is_disclosed_not_silently_skipped() {
-        let dir = std::env::temp_dir().join(format!("autoshop-pipe-xmp-oversized-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("autoshade-pipe-xmp-oversized-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let raw = dir.join("_pipe_oversized.arw");
@@ -4388,7 +4388,7 @@ pub fn ensure_parent(path: &Path) -> Result<()> {
 /// The output-path preflight every PAID command runs BEFORE its first API
 /// call (L09#1): the read-only-library guard, a directory-target refusal,
 /// and the parent directory. An `-o` mistake used to surface only AFTER
-/// the analysis / image call had been billed — `autoshop analyze x.arw -o
+/// the analysis / image call had been billed — `autoshade analyze x.arw -o
 /// <existing dir>` paid for propose+verify, then write_recipe bailed with
 /// nothing saved. Trade-off, stated on purpose: creating the parent
 /// up-front can leave an empty directory behind if the paid call then
@@ -4426,7 +4426,7 @@ pub fn preflight_out(out: &Path, src: &Path) -> Result<()> {
     // removed immediately; the refusal names the directory.
     if let Some(parent) = out.parent().filter(|p| !p.as_os_str().is_empty()) {
         let probe = parent.join(format!(
-            ".autoshop-write-probe.{}.{}",
+            ".autoshade-write-probe.{}.{}",
             std::process::id(),
             crate::store::next_tmp_seq()
         ));
@@ -4916,7 +4916,7 @@ mod tests {
     /// leaves the stored develop in charge.
     #[test]
     fn saved_calibration_resolves_by_newest_intent() {
-        let dir = std::env::temp_dir().join(format!("autoshop-pipeline-test-lr-calib-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("autoshade-pipeline-test-lr-calib-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let raw = dir.join("_pipe_lr_calib.arw");
@@ -5045,7 +5045,7 @@ mod tests {
     /// up by name.
     #[test]
     fn find_raws_accepts_every_raw_format_the_app_can_decode() {
-        let dir = std::env::temp_dir().join(format!("autoshop_find_raws_{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("autoshade_find_raws_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("sub")).expect("temp dir");
         // One file per RAW extension, alternating case so a case-sensitive
@@ -5209,7 +5209,7 @@ mod tests {
     /// one would race under cargo's parallel test threads.
     #[test]
     fn photo_scan_finds_one_raw_once_without_any_link() {
-        let dir = std::env::temp_dir().join(format!("autoshop-scan-nolink-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("autoshade-scan-nolink-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("a.arw"), b"raw").unwrap();
@@ -5348,7 +5348,7 @@ mod tests {
     /// A scratch photo path whose develop dir is wiped clean, so a raster
     /// claim starts from `<prefix>.png` every run.
     fn scratch_photo(tag: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("autoshop-rotate-tests-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("autoshade-rotate-tests-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let raw = dir.join(format!("{tag}.arw"));
         std::fs::write(&raw, b"raw").unwrap();
@@ -5431,7 +5431,7 @@ mod tests {
     /// of it, which is deliberate for every test that does not need one and
     /// useless for the ones that do (R29 C1).
     fn scratch_baked_photo(tag: &str, w: u32, h: u32) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("autoshop-rotate-tests-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("autoshade-rotate-tests-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let p = dir.join(format!("{tag}.png"));
         image::GrayImage::new(w, h).save(&p).unwrap();
@@ -5868,7 +5868,7 @@ mod tests {
         // and a shared fixture path lets one process delete the other's probe
         // mid-test — the exact race a round-5 fixture caught.
         let dir = std::env::temp_dir()
-            .join(format!("autoshop-pipeline-test-rsc-funnel-{}", std::process::id()));
+            .join(format!("autoshade-pipeline-test-rsc-funnel-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let raw = dir.join("_rsc_funnel_probe.arw");
@@ -6291,8 +6291,8 @@ mod tests {
         );
     }
 
-    /// R16 real-pair harness (ignored): set AUTOSHOP_FIT_REPRO_RAW and
-    /// AUTOSHOP_FIT_REPRO_TARGET to a photo and a rendition of it, then run
+    /// R16 real-pair harness (ignored): set AUTOSHADE_FIT_REPRO_RAW and
+    /// AUTOSHADE_FIT_REPRO_TARGET to a photo and a rendition of it, then run
     /// with `-- --ignored r16 --nocapture`. Prints the OLD neutral-source
     /// fit next to the NEW composed-calibration fit. Pure lib calls — the
     /// develop store is read (calibration authority) but never written.
@@ -6308,7 +6308,7 @@ mod tests {
     /// TWO findings that belong with the numbers, because the next person to
     /// run this harness will otherwise re-derive them the hard way:
     ///   * The reading is DOMAIN-DEPENDENT, and this harness's domain is not
-    ///     the CLI's. `autoshop match` solves on the embedded preview and
+    ///     the CLI's. `autoshade match` solves on the embedded preview and
     ///     stamps the calibration afterwards; this solves with the
     ///     calibration COMPOSED in. On A1 the composed solve is genuinely the
     ///     better fit (look error 0.032 vs the CLI's 0.061), and its joint
@@ -6320,13 +6320,13 @@ mod tests {
     ///     [`crate::fit_zoned::JOINT_DRIFT_TOL`], so no real pair has yet
     ///     come at that guard from the wrong side.
     #[test]
-    #[ignore = "real-photo repro: needs AUTOSHOP_FIT_REPRO_RAW/_TARGET"]
+    #[ignore = "real-photo repro: needs AUTOSHADE_FIT_REPRO_RAW/_TARGET"]
     fn r16_composed_fit_on_a_real_pair() {
-        let (Ok(raw), Ok(tgt)) = (
-            std::env::var("AUTOSHOP_FIT_REPRO_RAW"),
-            std::env::var("AUTOSHOP_FIT_REPRO_TARGET"),
+        let (Some(raw), Some(tgt)) = (
+            crate::config::live_env("AUTOSHADE_FIT_REPRO_RAW"),
+            crate::config::live_env("AUTOSHADE_FIT_REPRO_TARGET"),
         ) else {
-            panic!("set AUTOSHOP_FIT_REPRO_RAW and AUTOSHOP_FIT_REPRO_TARGET");
+            panic!("set AUTOSHADE_FIT_REPRO_RAW and AUTOSHADE_FIT_REPRO_TARGET");
         };
         let raw = std::path::PathBuf::from(raw);
         let neutral =
@@ -6369,11 +6369,11 @@ mod tests {
             new.recipe.base_curve.len(),
         );
         // Optional artifact for visual verification: the composed recipe as
-        // JSON, renderable via `autoshop apply` (third repro round on this
+        // JSON, renderable via `autoshade apply` (third repro round on this
         // pair — the eyes keep finding what the scalar cannot). Written
         // BEFORE the comparison assert: the artifact is diagnostics, not a
         // prize for passing.
-        if let Ok(out) = std::env::var("AUTOSHOP_FIT_REPRO_OUT") {
+        if let Some(out) = crate::config::live_env("AUTOSHADE_FIT_REPRO_OUT") {
             std::fs::write(&out, serde_json::to_string_pretty(&new.recipe).unwrap())
                 .expect("write repro recipe");
             eprintln!("repro recipe -> {out}");
@@ -6426,7 +6426,7 @@ mod tests {
         // level), and assert the same bounded-drift rule the fit itself
         // applies. The per-bucket ASSERTION stays opt-in until real failure
         // pairs exist to calibrate a per-bucket ceiling against
-        // (AUTOSHOP_FIT_REPRO_JOINT_MAX=<f32>) — a number invented here
+        // (AUTOSHADE_FIT_REPRO_JOINT_MAX=<f32>) — a number invented here
         // would be a guess wearing a test's clothes.
         let src_px = crate::fit::pixels_of(&crate::render::develop_preview(
             &neutral.thumbnail(edge, edge),
@@ -6481,8 +6481,8 @@ mod tests {
                 b.weighted,
                 a.weighted
             );
-            if let Ok(max) = std::env::var("AUTOSHOP_FIT_REPRO_JOINT_MAX") {
-                let max: f32 = max.trim().parse().expect("AUTOSHOP_FIT_REPRO_JOINT_MAX");
+            if let Some(max) = crate::config::live_env("AUTOSHADE_FIT_REPRO_JOINT_MAX") {
+                let max: f32 = max.trim().parse().expect("AUTOSHADE_FIT_REPRO_JOINT_MAX");
                 for bucket in crate::fit_zoned::joint_buckets(&fit_px, &tgt_px) {
                     assert!(
                         bucket.err <= max,
@@ -6501,7 +6501,7 @@ mod tests {
     #[test]
     fn preflight_out_refuses_a_directory_target() {
         let root =
-            std::env::temp_dir().join(format!("autoshop-preflight-dir-{}", std::process::id()));
+            std::env::temp_dir().join(format!("autoshade-preflight-dir-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         // The raw lives in its OWN folder: targeting the raw's folder trips
         // the read-only-library guard first, which is correct but not what
@@ -6521,7 +6521,7 @@ mod tests {
     #[test]
     fn preflight_out_leaves_no_probe_residue() {
         let root =
-            std::env::temp_dir().join(format!("autoshop-preflight-probe-{}", std::process::id()));
+            std::env::temp_dir().join(format!("autoshade-preflight-probe-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let raw_dir = root.join("library");
         std::fs::create_dir_all(&raw_dir).unwrap();
@@ -6677,7 +6677,7 @@ mod tests {
     #[test]
     fn preflight_out_creates_a_missing_parent_and_refuses_a_file_parent() {
         let root =
-            std::env::temp_dir().join(format!("autoshop-preflight-par-{}", std::process::id()));
+            std::env::temp_dir().join(format!("autoshade-preflight-par-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         // Separate library dir — a target under the raw's own folder is the
         // guard's case, not this test's (see the directory-target test).

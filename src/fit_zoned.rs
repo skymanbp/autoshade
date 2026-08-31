@@ -828,7 +828,7 @@ const JOINT_MIN_SHARE: f32 = 0.02;
 // ("wants a real-pair review before anyone treats a number here as measured
 // truth"). Six real (RAW, finished JPEG) pairs off the user's own library —
 // EXIF-timestamp-confirmed same frame — have since been measured through
-// `autoshop match`, and they provided independent review evidence. The table is
+// `autoshade match`, and they provided independent review evidence. The table is
 // `fit::tests::joint_family_is_calibrated_on_the_fixture_set`'s doc; the
 // The fixture and real-pair values are retained as regression evidence; they
 // do not widen the boundary when a refusal happens to read farther away.
@@ -1136,7 +1136,7 @@ fn joint_reading_from_buckets(buckets: &[JointBucket]) -> Option<JointReading> {
     })
 }
 
-/// The comparison path (R23-6 E-15): `AUTOSHOP_FIT_JOINT=off` takes the
+/// The comparison path (R23-6 E-15): `AUTOSHADE_FIT_JOINT=off` takes the
 /// whole family out of the fit, so the R17-R19 baseline numbers can be
 /// reproduced against the same binary instead of against a memory. Read
 /// ONCE per process — the fit's "deterministic" contract is about its
@@ -1168,8 +1168,8 @@ fn joint_family_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| {
         !matches!(
-            std::env::var("AUTOSHOP_FIT_JOINT").as_deref().map(str::trim),
-            Ok("off") | Ok("0") | Ok("false")
+            crate::config::live_env("AUTOSHADE_FIT_JOINT").as_deref().map(str::trim),
+            Some("off") | Some("0") | Some("false")
         )
     })
 }
@@ -3594,7 +3594,7 @@ mod tests {
     /// Process-unique, in the temp dir, and no ./out litter left behind.
     pub(super) fn fixture_mask_path(name: &str) -> crate::store::OwnedRaster {
         crate::store::OwnedRaster::scratch(
-            std::env::temp_dir().join(format!("autoshop-{name}-{}.png", std::process::id())),
+            std::env::temp_dir().join(format!("autoshade-{name}-{}.png", std::process::id())),
         )
     }
 
@@ -3811,7 +3811,7 @@ mod tests {
     fn layered_disabled_is_byte_identical_to_current_zoned_fit() {
         let (source, target, sky) = zoned_pair();
         let seg = SegmentOpts {
-            python_bin: "autoshop-test-no-such-python".into(),
+            python_bin: "autoshade-test-no-such-python".into(),
             script: "Cargo.toml".into(),
             target: "sky".into(),
             reference_point: None,
@@ -3874,9 +3874,9 @@ mod tests {
         assert_eq!(disabled_range.err_after.to_bits(), legacy_range.err_after.to_bits());
         range_path.remove();
 
-        let (Ok(head_semantic), Ok(head_range)) = (
-            std::env::var("AUTOSHOP_LAYERED_HEAD_SEMANTIC"),
-            std::env::var("AUTOSHOP_LAYERED_HEAD_RANGE"),
+        let (Some(head_semantic), Some(head_range)) = (
+            crate::config::live_env("AUTOSHADE_LAYERED_HEAD_SEMANTIC"),
+            crate::config::live_env("AUTOSHADE_LAYERED_HEAD_RANGE"),
         ) else {
             return;
         };
@@ -3988,7 +3988,7 @@ mod tests {
         ));
         let (source, target) = (image(&current), image(&target));
         let seg = SegmentOpts {
-            python_bin: "autoshop-test-no-such-python".into(),
+            python_bin: "autoshade-test-no-such-python".into(),
             script: "target/b2-no-segment.py".into(),
             target: "sky".into(),
             reference_point: None,
@@ -4024,7 +4024,7 @@ mod tests {
         let source = image::open(root.join("neutral.jpg")).unwrap();
         let target = image::open(root.join("target.jpg")).unwrap();
         let seg = SegmentOpts {
-            python_bin: "autoshop-test-no-such-python".into(),
+            python_bin: "autoshade-test-no-such-python".into(),
             script: "target/b2-no-segment.py".into(),
             target: "sky".into(),
             reference_point: None,
@@ -4334,7 +4334,7 @@ mod tests {
         let target = DynamicImage::ImageRgb8(RgbImage::from_fn(w, h, |x, _| {
             image::Rgb([if x < 4 { 180 } else if x < 8 { 60 } else { 130 }, 100, 120])
         }));
-        let dir = std::env::temp_dir().join(format!("autoshop-semantic-product-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("autoshade-semantic-product-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let mut regions = Vec::new();
@@ -5615,7 +5615,7 @@ mod tests {
         // honest note — never an error (the graceful-fallback contract).
         let (src, tgt, _) = zoned_pair();
         let seg = SegmentOpts {
-            python_bin: "autoshop-test-no-such-python".into(),
+            python_bin: "autoshade-test-no-such-python".into(),
             // Must EXIST so the failure exercised is the launch, not the
             // script check.
             script: "Cargo.toml".into(),
@@ -5774,13 +5774,13 @@ mod tests {
     fn multi_segmentation_failure_keeps_the_legacy_zones_with_its_own_note() {
         let (src, tgt, sky) = zoned_pair();
         // An ABSOLUTE interpreter path, because that is the real shape: the
-        // bundled helper resolves one, and `AUTOSHOP_PYTHON` is one. A bare
+        // bundled helper resolves one, and `AUTOSHADE_PYTHON` is one. A bare
         // name produces a sidecar error with no path in it, and a disclosure
         // test written against that fixture cannot fail — which is how the
         // first version of the guard below passed against its own mutation.
         // Derived from `temp_dir`, never written as a literal.
         let missing = std::env::temp_dir()
-            .join("autoshop-e-leak-probe")
+            .join("autoshade-e-leak-probe")
             .join("no-such-python");
         let seg = SegmentOpts {
             python_bin: missing.to_string_lossy().into_owned(),
@@ -5809,7 +5809,7 @@ mod tests {
         let reason = own[0].args.iter().find(|(k, _)| *k == "e").map(|(_, v)| v.as_str());
         let reason = reason.expect("the hand-off note carries its reason");
         assert!(
-            !reason.contains("autoshop-e-leak-probe") && !reason.contains('\n'),
+            !reason.contains("autoshade-e-leak-probe") && !reason.contains('\n'),
             "the hand-off reason leaked this machine's layout or a multi-line trace: {reason}"
         );
         assert!(

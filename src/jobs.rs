@@ -88,7 +88,7 @@
 //!
 //! There is NO rate limiter here. `N` workers means up to `N` proposer calls in
 //! flight, and that is the whole of the throttling — each call keeps the retry
-//! and timeout budget it already had (`AUTOSHOP_HTTP_TIMEOUT_SECS`), and nothing
+//! and timeout budget it already had (`AUTOSHADE_HTTP_TIMEOUT_SECS`), and nothing
 //! coordinates between them. The endpoint these calls now reach is a relay whose
 //! requests-per-minute ceiling is unknown to this codebase, so a global limiter
 //! would have to invent a number; the honest bound is the worker count the user
@@ -657,7 +657,7 @@ mod tests {
     /// `produce_recipe` runs BETWEEN its API calls, and stage 3 is the render
     /// `process_one` runs after the verdict lands. No key, no billing.
     ///
-    /// `AUTOSHOP_PEAK_PROBE_STAGE` selects `decode` / `cal` / `render` / `all`
+    /// `AUTOSHADE_PEAK_PROBE_STAGE` selects `decode` / `cal` / `render` / `all`
     /// (default). ONE STAGE PER PROCESS is the honest way to read a stage's own
     /// peak: the counter never falls back, and a freed buffer stays COMMITTED
     /// while the allocator holds the pages — so in an `all` run every later row
@@ -666,27 +666,28 @@ mod tests {
     /// runs give which stage owns it.
     ///
     /// ```text
-    /// set AUTOSHOP_PEAK_PROBE_RAW=C:\…\a-61MP.ARW
-    /// set AUTOSHOP_PEAK_PROBE_STAGE=render
+    /// set AUTOSHADE_PEAK_PROBE_RAW=C:\…\a-61MP.ARW
+    /// set AUTOSHADE_PEAK_PROBE_STAGE=render
     /// cargo test --release --lib -- --ignored --nocapture --test-threads=1 \
     ///     jobs::tests::probe_per_photo_peak_commit
     /// ```
     #[cfg(windows)]
     #[test]
-    #[ignore = "real-machine probe: set AUTOSHOP_PEAK_PROBE_RAW to a big RAW (writes one TIFF)"]
+    #[ignore = "real-machine probe: set AUTOSHADE_PEAK_PROBE_RAW to a big RAW (writes one TIFF)"]
     fn probe_per_photo_peak_commit() {
-        let Ok(raw) = std::env::var("AUTOSHOP_PEAK_PROBE_RAW") else {
-            panic!("set AUTOSHOP_PEAK_PROBE_RAW to a RAW path");
+        let Some(raw) = crate::config::live_env("AUTOSHADE_PEAK_PROBE_RAW") else {
+            panic!("set AUTOSHADE_PEAK_PROBE_RAW to a RAW path");
         };
         let raw = std::path::PathBuf::from(raw);
-        let out_dir = std::env::var("AUTOSHOP_PEAK_PROBE_OUT")
+        let out_dir = crate::config::live_env("AUTOSHADE_PEAK_PROBE_OUT")
             .map(std::path::PathBuf::from)
-            .unwrap_or_else(|_| std::env::temp_dir());
-        let stage = std::env::var("AUTOSHOP_PEAK_PROBE_STAGE").unwrap_or_else(|_| "all".into());
+            .unwrap_or_else(std::env::temp_dir);
+        let stage =
+            crate::config::live_env("AUTOSHADE_PEAK_PROBE_STAGE").unwrap_or_else(|| "all".into());
         let want = |s: &str| stage == "all" || stage == s;
         assert!(
             ["all", "decode", "cal", "render"].contains(&stage.as_str()),
-            "AUTOSHOP_PEAK_PROBE_STAGE must be all|decode|cal|render, got {stage:?}"
+            "AUTOSHADE_PEAK_PROBE_STAGE must be all|decode|cal|render, got {stage:?}"
         );
         // `frame_size` is an UPPER BOUND on what the per-file RAW ceiling
         // costs at the develop door: it opens the file, maps it, builds a
@@ -736,7 +737,7 @@ mod tests {
                 noise_reduction: 25.0,
                 ..Default::default()
             };
-            let out = out_dir.join("autoshop-peak-probe.tif");
+            let out = out_dir.join("autoshade-peak-probe.tif");
             let dims =
                 crate::render::render_to_file(&raw, &recipe, &out, None, None, crate::diag::stderr())
                     .expect("render");

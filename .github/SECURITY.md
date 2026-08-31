@@ -21,7 +21,7 @@ exact steps. A proof of concept is welcome and never required.
 
 ## Scope
 
-By default, Autoshop keeps the source library read-only. If the configured Delivery folder is inside or above a photo’s folder, that delivery subtree is intentionally writable; Settings warns when this removes the folder’s protection. “Export .xmp beside the photo” is the separate, confirmed per-photo sidecar exception.
+By default, AutoShade keeps the source library read-only. If the configured Delivery folder is inside or above a photo’s folder, that delivery subtree is intentionally writable; Settings warns when this removes the folder’s protection. “Export .xmp beside the photo” is the separate, confirmed per-photo sidecar exception.
 
 The parts with a real attacker are the ones that take input from somewhere else: the
 **local web server** (`serve`), the **settings and key-resolution rules**, the

@@ -305,7 +305,7 @@ def rim_metric(
             scale_size, Image.Resampling.BILINEAR
         ).save(base_up)
     if pair == "pair-0":
-        corpus = Path(os.environ["AUTOSHOP_FIT_CALIBRATION_DIR"])
+        corpus = Path(os.environ["AUTOSHADE_FIT_CALIBRATION_DIR"])
         supplied = list(corpus.glob("*.png"))
         if len(supplied) != 1:
             raise SystemExit("expected exactly one supplied calibration locator PNG")
@@ -400,7 +400,7 @@ def pair_paths(index: int) -> tuple[Path, Path, Path]:
 
 
 def main() -> None:
-    for required in ("AUTOSHOP_DATA_DIR", "AUTOSHOP_FIT_CALIBRATION_DIR"):
+    for required in ("AUTOSHADE_DATA_DIR", "AUTOSHADE_FIT_CALIBRATION_DIR"):
         if not os.environ.get(required):
             raise SystemExit(f"{required} is required")
     GRID_OUT.mkdir(parents=True, exist_ok=True)

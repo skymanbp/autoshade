@@ -461,7 +461,7 @@ fn parse_reference_point_text(text: &str) -> Option<[f32; 2]> {
 fn prompt_staging_path(input: &Path) -> PathBuf {
     static TMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     std::env::temp_dir().join(format!(
-        "autoshop-ai-prompt-{}-{}-{}.json",
+        "autoshade-ai-prompt-{}-{}-{}.json",
         std::process::id(),
         TMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
         crate::pipeline::stem(input)
@@ -540,7 +540,7 @@ pub fn segment_file(opts: &SegmentOpts, input: &Path, output: &Path) -> Result<S
     if !opts.script.exists() {
         bail!(
             "segmentation sidecar not found at {} — run from the project dir or set \
-             AUTOSHOP_SEGMENT_SCRIPT.",
+             AUTOSHADE_SEGMENT_SCRIPT.",
             opts.script.display()
         );
     }
@@ -585,7 +585,7 @@ pub fn segment_file(opts: &SegmentOpts, input: &Path, output: &Path) -> Result<S
     let run = (|| -> Result<std::process::Output> {
         let child = cmd.spawn().with_context(|| {
             format!(
-                "launch segmentation sidecar ({} {}) — is Python on PATH / AUTOSHOP_PYTHON set?",
+                "launch segmentation sidecar ({} {}) — is Python on PATH / AUTOSHADE_PYTHON set?",
                 opts.python_bin,
                 opts.script.display()
             )
@@ -595,7 +595,7 @@ pub fn segment_file(opts: &SegmentOpts, input: &Path, output: &Path) -> Result<S
             child,
             "segmentation sidecar",
             crate::denoise::sidecar_timeout(),
-            "AUTOSHOP_SIDECAR_TIMEOUT_SECS",
+            "AUTOSHADE_SIDECAR_TIMEOUT_SECS",
             group,
         )
     })();
@@ -725,7 +725,7 @@ fn birefnet_deps_available(opts: &SegmentOpts) -> Option<bool> {
             child,
             "segmentation backend probe",
             crate::denoise::sidecar_timeout(),
-            "AUTOSHOP_SIDECAR_TIMEOUT_SECS",
+            "AUTOSHADE_SIDECAR_TIMEOUT_SECS",
             group,
         )
         .ok()?;
@@ -754,7 +754,7 @@ fn birefnet_deps_available(opts: &SegmentOpts) -> Option<bool> {
 /// small store record in this tree carries:
 ///
 /// ```text
-/// autoshop-ai-mask-backend v1
+/// autoshade-ai-mask-backend v1
 /// backend=U^2-Net (FALLBACK - BiRefNet did not run)
 /// birefnet-deps=missing
 /// ```
@@ -766,7 +766,7 @@ struct BackendMarker {
     birefnet_deps: Option<bool>,
 }
 
-const BACKEND_MARKER_HEADER: &str = "autoshop-ai-mask-backend v1";
+const BACKEND_MARKER_HEADER: &str = "autoshade-ai-mask-backend v1";
 
 /// A marker is three short lines; anything larger is not one. Bounded for the
 /// reason every read in the store module is (R28 2a): the develop dir is not
@@ -1337,7 +1337,7 @@ fn stage_source_frame(src: &Path, quarter_turns: u8) -> Option<PathBuf> {
 fn staging_path(src: &Path) -> PathBuf {
     static TMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     std::env::temp_dir().join(format!(
-        "autoshop-ai-src-{}-{}-{}.png",
+        "autoshade-ai-src-{}-{}-{}.png",
         std::process::id(),
         TMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
         crate::pipeline::stem(src)
@@ -1349,7 +1349,7 @@ mod tests {
     use super::*;
 
     fn manifest_fixture(name: &str) -> (std::path::PathBuf, std::path::PathBuf) {
-        let dir = std::env::temp_dir().join(format!("autoshop-multi-{name}-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("autoshade-multi-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let p2 = image::GrayImage::from_pixel(2, 2, image::Luma([64]));
@@ -1373,7 +1373,7 @@ mod tests {
     #[test]
     fn single_class_sky_call_is_unchanged() {
         let Some(corpus) = crate::fit::calibration_corpus() else {
-            eprintln!("SKIPPED sidecar sky identity test: AUTOSHOP_FIT_CALIBRATION_DIR unset");
+            eprintln!("SKIPPED sidecar sky identity test: AUTOSHADE_FIT_CALIBRATION_DIR unset");
             return;
         };
         let cfg = crate::config::Config::load();
@@ -1387,7 +1387,7 @@ mod tests {
             return;
         }
         let dir = std::env::temp_dir().join(format!(
-            "autoshop-multi-sky-live-{}",
+            "autoshade-multi-sky-live-{}",
             std::process::id()
         ));
         let _ = std::fs::remove_dir_all(&dir);
@@ -1511,7 +1511,7 @@ mod tests {
     #[test]
     fn a_preclaimed_empty_mask_the_sidecar_never_fills_is_refused() {
         let dir = std::env::temp_dir()
-            .join(format!("autoshop-seg-test-claimed-{}", std::process::id()));
+            .join(format!("autoshade-seg-test-claimed-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
 
@@ -1613,7 +1613,7 @@ mod tests {
     #[test]
     fn a_successful_run_hands_the_backend_label_back() {
         let dir = std::env::temp_dir()
-            .join(format!("autoshop-seg-test-label-{}", std::process::id()));
+            .join(format!("autoshade-seg-test-label-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
 
@@ -1753,7 +1753,7 @@ mod tests {
     #[test]
     fn an_unmarked_cached_alpha_is_left_alone() {
         let dir = std::env::temp_dir()
-            .join(format!("autoshop-seg-test-unmarked-{}", std::process::id()));
+            .join(format!("autoshade-seg-test-unmarked-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let alpha = dir.join("ai-mask-0123456789abcdef.png");
@@ -1761,7 +1761,7 @@ mod tests {
         let opts = SegmentOpts {
             // A python_bin that cannot exist, so a probe that DID run would be
             // visible as a hang or a panic rather than passing by accident.
-            python_bin: "autoshop-no-such-interpreter".into(),
+            python_bin: "autoshade-no-such-interpreter".into(),
             script: dir.join("does-not-exist.py"),
             target: "subject".into(),
             reference_point: None,
@@ -1776,7 +1776,7 @@ mod tests {
     #[test]
     fn a_garbage_mask_from_the_sidecar_is_refused() {
         let dir = std::env::temp_dir()
-            .join(format!("autoshop-seg-test-garbage-{}", std::process::id()));
+            .join(format!("autoshade-seg-test-garbage-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
 
@@ -2134,7 +2134,7 @@ mod tests {
     #[test]
     fn prompt_file_payload_is_structured_and_cleaned_after_success() {
         let dir = std::env::temp_dir().join(format!(
-            "autoshop-seg-test-prompt-success-{}",
+            "autoshade-seg-test-prompt-success-{}",
             std::process::id()
         ));
         let _ = std::fs::remove_dir_all(&dir);
@@ -2172,7 +2172,7 @@ mod tests {
     #[test]
     fn prompt_file_is_cleaned_and_sidecar_reason_disclosed_after_failure() {
         let dir = std::env::temp_dir().join(format!(
-            "autoshop-seg-test-prompt-failure-{}",
+            "autoshade-seg-test-prompt-failure-{}",
             std::process::id()
         ));
         let _ = std::fs::remove_dir_all(&dir);
@@ -2310,7 +2310,7 @@ mod tests {
         // addition to the identity, not a replacement for it.
         for path in [&a, &b] {
             let name = path.file_name().unwrap().to_string_lossy().into_owned();
-            assert!(name.starts_with(&format!("autoshop-ai-src-{}-", std::process::id())), "{name}");
+            assert!(name.starts_with(&format!("autoshade-ai-src-{}-", std::process::id())), "{name}");
             assert!(name.ends_with("-DSC0001.png"), "{name}");
         }
     }
@@ -2376,21 +2376,21 @@ mod tests {
     }
 
     /// Tier-3 probe: the REAL SAM 2.1 backend, behind an environment gate like
-    /// `AUTOSHOP_RAW_ZOO` / `AUTOSHOP_MB_FIXTURES`. Silent when unset (a bare
+    /// `AUTOSHADE_RAW_ZOO` / `AUTOSHADE_MB_FIXTURES`. Silent when unset (a bare
     /// `cargo test` must not download 898 MB of weights); LOUD when set and the
     /// backend does not deliver.
     ///
-    /// Point `AUTOSHOP_SEG_PROBE` at an image file (the sibling subject/sky
+    /// Point `AUTOSHADE_SEG_PROBE` at an image file (the sibling subject/sky
     /// probes use it). This object arm creates its own synthetic fixture and
     /// runs it twice: legacy ReferencePoint-only, then gp1 multi-point. Both
     /// alphas must be soft/nonconstant and they must differ.
     #[test]
     fn seg_probe_object_backend_produces_a_usable_soft_mask() {
-        let Ok(gate_input) = std::env::var("AUTOSHOP_SEG_PROBE") else { return };
+        let Some(gate_input) = crate::config::live_env("AUTOSHADE_SEG_PROBE") else { return };
         let gate_input = std::path::PathBuf::from(&gate_input);
         assert!(
             gate_input.is_file(),
-            "AUTOSHOP_SEG_PROBE is set but is not a file: {}",
+            "AUTOSHADE_SEG_PROBE is set but is not a file: {}",
             gate_input.display()
         );
         let cfg = Config::load();
@@ -2398,14 +2398,14 @@ mod tests {
             .expect("subtype 0 must route to a backend");
         assert!(
             single.script.exists(),
-            "AUTOSHOP_SEG_PROBE is set but the sidecar is not at {} — set AUTOSHOP_SEGMENT_SCRIPT",
+            "AUTOSHADE_SEG_PROBE is set but the sidecar is not at {} — set AUTOSHADE_SEGMENT_SCRIPT",
             single.script.display()
         );
         let temp = std::env::temp_dir();
-        let input = temp.join(format!("autoshop-seg-probe-synthetic-{}.png", std::process::id()));
+        let input = temp.join(format!("autoshade-seg-probe-synthetic-{}.png", std::process::id()));
         let single_out =
-            temp.join(format!("autoshop-seg-probe-single-{}.png", std::process::id()));
-        let multi_out = temp.join(format!("autoshop-seg-probe-multi-{}.png", std::process::id()));
+            temp.join(format!("autoshade-seg-probe-single-{}.png", std::process::id()));
+        let multi_out = temp.join(format!("autoshade-seg-probe-multi-{}.png", std::process::id()));
         for path in [&input, &single_out, &multi_out] {
             let _ = std::fs::remove_file(path);
         }
@@ -2447,7 +2447,7 @@ mod tests {
             }
             let soft = img.pixels().any(|p| (1..=254).contains(&p.0[0]));
             println!(
-                "AUTOSHOP_SEG_PROBE object {name} synthetic [{}] -> {}x{} range={lo}..{hi} soft={soft}",
+                "AUTOSHADE_SEG_PROBE object {name} synthetic [{}] -> {}x{} range={lo}..{hi} soft={soft}",
                 single_report.backend,
                 img.width(),
                 img.height()
@@ -2463,7 +2463,7 @@ mod tests {
     }
 
     /// Tier-3 probe, R29 C3/C4: the REAL sky backend end to end, through the
-    /// digest gate this batch put in front of it. Same `AUTOSHOP_SEG_PROBE`
+    /// digest gate this batch put in front of it. Same `AUTOSHADE_SEG_PROBE`
     /// gate and the same silence when unset — a bare `cargo test` must not
     /// fetch 881 MB.
     ///
@@ -2484,20 +2484,20 @@ mod tests {
     /// byte-identical, so no cached alpha changes and none needs re-deriving.
     #[test]
     fn seg_probe_sky_backend_produces_a_usable_soft_mask() {
-        let Ok(input) = std::env::var("AUTOSHOP_SEG_PROBE") else { return };
+        let Some(input) = crate::config::live_env("AUTOSHADE_SEG_PROBE") else { return };
         let input = std::path::PathBuf::from(&input);
-        assert!(input.is_file(), "AUTOSHOP_SEG_PROBE is set but is not a file: {}", input.display());
+        assert!(input.is_file(), "AUTOSHADE_SEG_PROBE is set but is not a file: {}", input.display());
         let cfg = Config::load();
         let opts = SegmentOpts::for_ai_mask(&cfg, 2, 0.5, 0.5)
             .expect("subtype 2 must route to a backend");
         assert_eq!(opts.target, "sky", "subtype 2 is Sky");
         assert!(
             opts.script.exists(),
-            "AUTOSHOP_SEG_PROBE is set but the sidecar is not at {} — set AUTOSHOP_SEGMENT_SCRIPT",
+            "AUTOSHADE_SEG_PROBE is set but the sidecar is not at {} — set AUTOSHADE_SEGMENT_SCRIPT",
             opts.script.display()
         );
         let out =
-            std::env::temp_dir().join(format!("autoshop-seg-probe-sky-{}.png", std::process::id()));
+            std::env::temp_dir().join(format!("autoshade-seg-probe-sky-{}.png", std::process::id()));
         let _ = std::fs::remove_file(&out);
         let report = segment_file(&opts, &input, &out).expect("the sky backend must produce a mask");
         assert!(
@@ -2514,7 +2514,7 @@ mod tests {
         let coverage = sum as f64 / (n as f64 * 255.0);
         let soft = img.pixels().any(|p| (1..=254).contains(&p.0[0]));
         println!(
-            "AUTOSHOP_SEG_PROBE sky — {} -> {}x{} coverage={coverage:.4} soft={soft} [{}]",
+            "AUTOSHADE_SEG_PROBE sky — {} -> {}x{} coverage={coverage:.4} soft={soft} [{}]",
             input.display(),
             img.width(),
             img.height(),
@@ -2526,11 +2526,11 @@ mod tests {
     }
 
     /// Tier-3 probe, R29 B4: the REAL subject backend end to end through the
-    /// bridge. Same gate as the object probe (`AUTOSHOP_SEG_PROBE`), same
+    /// bridge. Same gate as the object probe (`AUTOSHADE_SEG_PROBE`), same
     /// silence when it is unset — a bare `cargo test` must not fetch 444 MB.
     ///
-    /// This is the arm the batch's live fire ran: point `AUTOSHOP_SEG_PROBE` at
-    /// a photograph with a subject in it and `AUTOSHOP_PYTHON` at an
+    /// This is the arm the batch's live fire ran: point `AUTOSHADE_SEG_PROBE` at
+    /// a photograph with a subject in it and `AUTOSHADE_PYTHON` at an
     /// interpreter that has torchvision + timm + einops, and the assertions
     /// below are the contract the render depends on — an 8-bit grey raster,
     /// decodable through the mask budget gate, soft-edged (a hard 0/1 mask
@@ -2540,9 +2540,9 @@ mod tests {
     /// (forwarded by `segment_file`) is what tells the two runs apart.
     #[test]
     fn seg_probe_subject_backend_produces_a_usable_soft_mask() {
-        let Ok(input) = std::env::var("AUTOSHOP_SEG_PROBE") else { return };
+        let Some(input) = crate::config::live_env("AUTOSHADE_SEG_PROBE") else { return };
         let input = std::path::PathBuf::from(&input);
-        assert!(input.is_file(), "AUTOSHOP_SEG_PROBE is set but is not a file: {}", input.display());
+        assert!(input.is_file(), "AUTOSHADE_SEG_PROBE is set but is not a file: {}", input.display());
         let cfg = Config::load();
         // Through `for_ai_mask`, not a hand-built `SegmentOpts`: the route from
         // `MaskSubType = 1` to `--target subject` is half of what this proves.
@@ -2551,11 +2551,11 @@ mod tests {
         assert_eq!(opts.target, "subject", "subtype 1 is Subject");
         assert!(
             opts.script.exists(),
-            "AUTOSHOP_SEG_PROBE is set but the sidecar is not at {} — set AUTOSHOP_SEGMENT_SCRIPT",
+            "AUTOSHADE_SEG_PROBE is set but the sidecar is not at {} — set AUTOSHADE_SEGMENT_SCRIPT",
             opts.script.display()
         );
         let out = std::env::temp_dir()
-            .join(format!("autoshop-seg-probe-subject-{}.png", std::process::id()));
+            .join(format!("autoshade-seg-probe-subject-{}.png", std::process::id()));
         let _ = std::fs::remove_file(&out);
         segment_file(&opts, &input, &out).expect("the subject backend must produce a mask");
         let img = crate::render::open_mask_bounded(&out)
@@ -2566,7 +2566,7 @@ mod tests {
         let coverage = sum as f64 / (n as f64 * 255.0);
         let soft = img.pixels().any(|p| (1..=254).contains(&p.0[0]));
         println!(
-            "AUTOSHOP_SEG_PROBE subject — {} -> {}x{} coverage={coverage:.4} soft={soft}",
+            "AUTOSHADE_SEG_PROBE subject — {} -> {}x{} coverage={coverage:.4} soft={soft}",
             input.display(),
             img.width(),
             img.height()

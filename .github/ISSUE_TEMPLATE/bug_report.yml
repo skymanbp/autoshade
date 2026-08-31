@@ -1,5 +1,5 @@
 name: Bug report
-description: Autoshop did something it should not have, or refused something it should have done.
+description: AutoShade did something it should not have, or refused something it should have done.
 title: "[bug] "
 labels: ["bug"]
 body:
@@ -9,7 +9,7 @@ body:
         Thanks for filing. Two things make a report from this project unusually
         cheap to diagnose, so please spend a minute on them:
 
-        1. **The disclosure lines.** Autoshop names its own degradations out
+        1. **The disclosure lines.** AutoShade names its own degradations out
            loud rather than hiding them. Pasting those lines is often half the
            answer — there is a field for them below.
         2. **The `recipe.json`.** The recipe reproduces parameter-only renders
@@ -36,7 +36,7 @@ body:
     id: version
     attributes:
       label: Version
-      description: "`autoshop --version`, or the title bar of the desktop app."
+      description: "`autoshade --version`, or the title bar of the desktop app."
       options:
         - v1.1.0 (latest release)
         - v1.0.0
@@ -67,9 +67,9 @@ body:
         everywhere — but the disclosure surfaces differ, and so do the bugs that
         live in them.
       options:
-        - CLI (autoshop.exe)
-        - Desktop app (autoshop-gui.exe)
-        - Local web UI (autoshop serve / Autoshop-UI.bat)
+        - CLI (autoshade.exe)
+        - Desktop app (autoshade-gui.exe)
+        - Local web UI (autoshade serve / AutoShade-UI.bat)
         - More than one of them
         - Not sure
     validations:
@@ -101,7 +101,7 @@ body:
         no decoder are three different failures), and the exact wording says
         which one you hit.
       placeholder: |
-        autoshop auto "D:\photos\photo.ARW" --guidance "warm, lift shadows"
+        autoshade auto "D:\photos\photo.ARW" --guidance "warm, lift shadows"
 
         ...and the highlights came out clipped flat, where the recipe says
         Highlights -38.
@@ -125,19 +125,19 @@ body:
     attributes:
       label: What did the disclosure lines say?
       description: |
-        This is the field this project earns. Autoshop announces every
+        This is the field this project earns. AutoShade announces every
         degradation by name, on whichever surface you are using:
 
         - **CLI** — lines beginning `⚠` on **stderr**, printed beside the
           `xmp    -> …` line by `analyze`, `auto` and `match`. If you redirected
           output to a file, stderr may not be in it — use
-          `autoshop auto photo.ARW 2> log.txt` to capture it.
+          `autoshade auto photo.ARW 2> log.txt` to capture it.
         - **Desktop app** — the banner shown when the photo is opened, naming
           what its Lightroom sidecar cost on the way in.
         - **Local web UI** — the same sentence in the reply text.
         - **The save side** — what the written `.xmp` could not carry, and why.
 
-        Lines such as `brush mask(s) drawn from Autoshop's measured model of
+        Lines such as `brush mask(s) drawn from AutoShade's measured model of
         Lightroom's brush - not Adobe's own rasteriser`, `AI mask(s) re-derived by the local segmenter - not Adobe's own
         raster`, `radial rotation(s) read as 0`, `local point curve(s)
         unreadable`, `unmodelled local slider(s)` or the X-Trans note are
@@ -148,7 +148,7 @@ body:
         real data point: it means the engine believes it rendered your edit
         whole, which narrows the bug considerably.
       placeholder: |
-        ⚠ imported 12 Lightroom mask(s); 2 brush mask(s) drawn from Autoshop's measured model of Lightroom's brush - not Adobe's own rasteriser (Sky brush, Skin brush); 1 radial rotation(s) read as 0 (Lift porch) — the sidecar itself is not modified
+        ⚠ imported 12 Lightroom mask(s); 2 brush mask(s) drawn from AutoShade's measured model of Lightroom's brush - not Adobe's own rasteriser (Sky brush, Skin brush); 1 radial rotation(s) read as 0 (Lift porch) — the sidecar itself is not modified
     validations:
       required: true
 
@@ -172,5 +172,5 @@ body:
       description: >-
         OS, GPU if this is about AI denoise or segmentation, which AI endpoint
         was configured, whether the photo has a Lightroom `.xmp` beside it, a
-        screenshot of a visual defect. **Never paste an API key** — Autoshop
+        screenshot of a visual defect. **Never paste an API key** — AutoShade
         does not print one, and neither should an issue.

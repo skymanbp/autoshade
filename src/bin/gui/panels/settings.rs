@@ -2,11 +2,11 @@
 
 use crate::*;
 
-impl AutoshopApp {
+impl AutoShadeApp {
     /// Populate the Settings form from the resolved config (keys are shown only as
     /// "present", never revealed). Called when the window opens.
     pub(crate) fn load_settings_form(&mut self) {
-        let cfg = autoshop::config::Config::load();
+        let cfg = autoshade::config::Config::load();
         // Keep any model lists already fetched this session so reopening Settings
         // doesn't force a re-fetch — and keep an in-flight fetch's flag alive:
         // zeroing it mid-fetch stopped the repaint pump AND re-armed the fetch
@@ -33,7 +33,7 @@ impl AutoshopApp {
             // would silently turn "use the default" into a pinned folder on
             // the next save. `load_local_settings` (not the raw file) so an
             // ambient working-directory copy cannot pre-fill it either.
-            out_dir: autoshop::config::load_local_settings().out_dir.unwrap_or_default(),
+            out_dir: autoshade::config::load_local_settings().out_dir.unwrap_or_default(),
             status: String::new(),
             image_models,
             analysis_models,
@@ -71,7 +71,7 @@ impl AutoshopApp {
     /// visit before any key existed spent the whole session's opportunity, so
     /// the role that became eligible five minutes later — key saved, provider
     /// flipped to `api` — was never probed on any later open.
-    pub(crate) fn autofetch_models_once(&mut self, cfg: &autoshop::config::Config) {
+    pub(crate) fn autofetch_models_once(&mut self, cfg: &autoshade::config::Config) {
         if cfg.openai_api_key.is_some() && !self.settings.image_models.autofetched {
             self.fetch_models(ModelRole::Image);
         }
@@ -85,7 +85,7 @@ impl AutoshopApp {
         }
     }
 
-    /// Persist the Settings form to autoshop.local.json (gitignored). A blank key
+    /// Persist the Settings form to autoshade.local.json (gitignored). A blank key
     /// keeps the stored one. The next Analyze/Export reloads Config, so it applies.
     pub(crate) fn save_settings_form(&mut self) {
         // The whole load-merge-save runs under the cross-process settings
@@ -93,7 +93,7 @@ impl AutoshopApp {
         // process merge onto the same file, and the old unlocked cycle here
         // let a save that landed between its load and its rename be erased.
         let form = &self.settings;
-        let saved = autoshop::config::update_local_settings(|cur| {
+        let saved = autoshade::config::update_local_settings(|cur| {
             cur.analysis_provider =
                 Some(if form.analysis_provider_api { "api" } else { "oauth" }.to_string());
             cur.image_provider =
@@ -143,7 +143,7 @@ impl AutoshopApp {
                 // Presence reflects the RESOLVED config (file merged with env) —
                 // deriving it from the file alone told a user whose key lives in
                 // OPENAI_API_KEY that no key was set right after saving.
-                let cfg = autoshop::config::Config::load();
+                let cfg = autoshade::config::Config::load();
                 self.settings.analysis_key_present = cfg.analysis_api_key.is_some();
                 self.settings.image_key_present = cfg.openai_api_key.is_some();
                 // A key that cannot appear in an HTTP header is REFUSED by
@@ -187,7 +187,7 @@ impl AutoshopApp {
                 self.settings.analysis_base_url.trim().to_string(),
             ),
         };
-        let cfg = autoshop::config::Config::load();
+        let cfg = autoshade::config::Config::load();
         let (cfg_base, cfg_key) = match role {
             ModelRole::Image => (cfg.openai_base_url, cfg.openai_api_key),
             ModelRole::Analysis => (cfg.analysis_base_url, cfg.analysis_api_key),
@@ -202,7 +202,7 @@ impl AutoshopApp {
         // the accurate instruction.
         let key = if !form_key.is_empty() {
             form_key
-        } else if autoshop::config::same_endpoint(&base, &cfg_base) {
+        } else if autoshade::config::same_endpoint(&base, &cfg_base) {
             cfg_key.unwrap_or_default()
         } else {
             String::new()
@@ -228,7 +228,7 @@ impl AutoshopApp {
         // (this site used to hand-roll a Drop guard for exactly that; the
         // helper now covers every worker uniformly).
         self.spawn_worker(
-            move || Msg::Models(role, generation, autoshop::openai_models::list_models(&base, &key)),
+            move || Msg::Models(role, generation, autoshade::openai_models::list_models(&base, &key)),
             move |e| Msg::Models(role, generation, Err(e)),
         );
     }
@@ -252,7 +252,7 @@ impl AutoshopApp {
             // Theme is the other control here that applies without a save.
             egui::RichText::new(tr(
                 lang,
-                "Language & Theme apply immediately. The provider sections below persist via 「Save settings」 to autoshop.local.json in your per-user Autoshop folder (never in a repo) and apply to the next AI call (Analyze / Fill / Reimagine).",
+                "Language & Theme apply immediately. The provider sections below persist via 「Save settings」 to autoshade.local.json in your per-user AutoShade folder (never in a repo) and apply to the next AI call (Analyze / Fill / Reimagine).",
             ))
             .weak()
             .small(),
@@ -298,12 +298,12 @@ impl AutoshopApp {
         // answer. Falls back to the root when no photo is open, which is all
         // there is to say then.
         let shown = match self.src_path.as_deref() {
-            Some(p) => autoshop::store::develop_dir(p),
-            None => autoshop::store::store_root(),
+            Some(p) => autoshade::store::develop_dir(p),
+            None => autoshade::store::store_root(),
         };
         ui.label(egui::RichText::new(abs_display(&shown)).small().weak()).on_hover_text(tr(
             lang,
-            "Where saved develops live: recipes, Lightroom XMP, version snapshots and mask rasters — one folder per photo, keyed by its absolute path. Override the location with the AUTOSHOP_DATA_DIR environment variable.",
+            "Where saved develops live: recipes, Lightroom XMP, version snapshots and mask rasters — one folder per photo, keyed by its absolute path. Override the location with the AUTOSHADE_DATA_DIR environment variable.",
         ));
         // Enabled only when the folder EXISTS: an unsaved photo has no develop
         // directory yet, and a file manager pointed at a missing path silently
@@ -348,14 +348,14 @@ impl AutoshopApp {
         // go" had no answer but "wherever you launched the app from".
         ui.separator();
         ui.heading(tr(lang, "Delivery folder"));
-        let resolved = autoshop::config::delivery_root();
+        let resolved = autoshade::config::delivery_root();
         {
             let f = &mut self.settings;
             ui.horizontal(|ui| {
                 ui.add(
                     egui::TextEdit::singleline(&mut f.out_dir)
                         .desired_width(FIELD_W_MAX.min(ui.available_width() - 90.0).max(80.0))
-                        .hint_text(autoshop::config::DEFAULT_DELIVERY_ROOT),
+                        .hint_text(autoshade::config::DEFAULT_DELIVERY_ROOT),
                 )
                 .on_hover_text(format!(
                     "{}\n\n{}",
@@ -369,7 +369,7 @@ impl AutoshopApp {
                     // refuses the RAW's own folder), and nothing said so.
                     tr(
                         lang,
-                        "Pointing it inside your photo library removes that folder's read-only protection: Autoshop refuses to write beside your originals, but never into its own delivery folder.",
+                        "Pointing it inside your photo library removes that folder's read-only protection: AutoShade refuses to write beside your originals, but never into its own delivery folder.",
                     ),
                 ));
                 if ui
@@ -407,10 +407,10 @@ impl AutoshopApp {
         }
         // --- the SEGMENTATION SIDECAR path (R25, closing R22-1) --------------
         // R22 left "a settings row for the sidecar path" to R23; R23 and R24
-        // did not do it, and this is why. `AUTOSHOP_SEGMENT_SCRIPT` names a
+        // did not do it, and this is why. `AUTOSHADE_SEGMENT_SCRIPT` names a
         // file that goes straight into `Command::new`, so `config.rs`
         // registers it `env_only(..., Trust::Destination)`: neither a `.env`
-        // nor an ambient `autoshop.local.json` beside someone's photos may
+        // nor an ambient `autoshade.local.json` beside someone's photos may
         // supply it. Adding a picker here would write it into the trusted
         // settings file and hand every later launch a program chosen in a
         // dialog — the opposite of that ruling.
@@ -422,7 +422,7 @@ impl AutoshopApp {
         // so the missing arm is not a second wording of the same thing.
         ui.separator();
         ui.heading(tr(lang, "Segmentation sidecar"));
-        let seg = autoshop::config::Config::load().segment_script;
+        let seg = autoshade::config::Config::load().segment_script;
         let seg_path = std::path::PathBuf::from(&seg);
         ui.label(egui::RichText::new(abs_display(&seg_path)).small().weak()).on_hover_text(tr(
             lang,
@@ -434,7 +434,7 @@ impl AutoshopApp {
         if !segment_helper_available() {
             ui.label(
                 egui::RichText::new(tr(lang,
-                    "this build did not ship the python sidecar — run Autoshop from the project directory, or point AUTOSHOP_SEGMENT_SCRIPT at python/segment.py",
+                    "this build did not ship the python sidecar — run AutoShade from the project directory, or point AUTOSHADE_SEGMENT_SCRIPT at python/segment.py",
                 ))
                 .small()
                 .weak(),
@@ -660,7 +660,7 @@ impl AutoshopApp {
         ui.label(
             egui::RichText::new(tr(
                 lang,
-                "skymanbp's AS — the “As” stands for Autoshop, not an Adobe subscription. Rent paid to date: $0.00.",
+                "skymanbp's AS — the “As” stands for AutoShade, not an Adobe subscription. Rent paid to date: $0.00.",
             ))
             .weak()
             .small(),

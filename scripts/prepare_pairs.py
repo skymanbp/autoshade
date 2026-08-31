@@ -1,6 +1,6 @@
 """Prepare anonymous, registered analysis pairs and current-path baselines.
 
-All inputs are discovered inside AUTOSHOP_FIT_CALIBRATION_DIR.  Output labels
+All inputs are discovered inside AUTOSHADE_FIT_CALIBRATION_DIR.  Output labels
 are pair-0 (the calibration pair) and pair-1..pair-4 (the numbered corpus), so
 the resulting artifacts never retain a library photo name.
 """
@@ -53,7 +53,7 @@ def discover_pairs(corpus: Path) -> list[tuple[Path, Path]]:
 
 
 def run_cli(args: list[str]) -> str:
-    exe = ROOT / "target" / "release" / "autoshop.exe"
+    exe = ROOT / "target" / "release" / "autoshade.exe"
     proc = subprocess.run(
         [str(exe), *map(str, args)],
         cwd=ROOT,
@@ -90,8 +90,8 @@ def rationale_measure(recipe: Path) -> dict[str, object]:
 
 
 def main() -> None:
-    corpus = required_env("AUTOSHOP_FIT_CALIBRATION_DIR")
-    required_env("AUTOSHOP_DATA_DIR")
+    corpus = required_env("AUTOSHADE_FIT_CALIBRATION_DIR")
+    required_env("AUTOSHADE_DATA_DIR")
     ANALYSIS.mkdir(parents=True, exist_ok=True)
     RECIPES.mkdir(parents=True, exist_ok=True)
     summary: dict[str, object] = {"analysis_size": list(EDGE), "pairs": {}}
@@ -99,8 +99,8 @@ def main() -> None:
     # Same registered raster is consumed by both fits.  Deliberately disable
     # semantic and correspondence sidecars: this is the shipped deterministic
     # range/tile fallback, and avoids importing a model into the phase-1 probe.
-    os.environ["AUTOSHOP_SEGMENT_SCRIPT"] = "D:/no-such-dir/none.py"
-    os.environ["AUTOSHOP_CORRESPOND_SCRIPT"] = "D:/no-such-dir/none.py"
+    os.environ["AUTOSHADE_SEGMENT_SCRIPT"] = "D:/no-such-dir/none.py"
+    os.environ["AUTOSHADE_CORRESPOND_SCRIPT"] = "D:/no-such-dir/none.py"
 
     for index, (raw, target) in enumerate(discover_pairs(corpus)):
         label = f"pair-{index}"

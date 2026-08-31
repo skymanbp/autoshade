@@ -1,4 +1,4 @@
-//! Local web UI server. `autoshop serve <dir>` starts a tiny HTTP server; open
+//! Local web UI server. `autoshade serve <dir>` starts a tiny HTTP server; open
 //! the printed URL in a browser. Photos are addressed by their index in the
 //! in-memory source list (`?id=N`) so we never URL-encode Windows paths. The list
 //! is mutable (behind a lock) so the UI can **import** more files/folders at
@@ -44,12 +44,12 @@ fn session_token() -> Result<String> {
 
 /// Put the run's capability on the two URLs browsers load as images, and in
 /// the page's fetch wrapper, which stamps it onto every state-changing
-/// request (`X-Autoshop-Token` — the POST guard in `handle`).
+/// request (`X-AutoShade-Token` — the POST guard in `handle`).
 fn tokenized_index(token: &str) -> String {
     INDEX_HTML
         .replace("/api/thumb?id=", &format!("/api/thumb?token={token}&id="))
         .replace("/api/preview?id=", &format!("/api/preview?token={token}&id="))
-        .replace("__AUTOSHOP_SESSION_TOKEN__", token)
+        .replace("__AUTOSHADE_SESSION_TOKEN__", token)
 }
 
 /// Browsers with Fetch Metadata identify a request initiated by another site.
@@ -107,7 +107,7 @@ impl AppState {
     }
     /// Resolve `id` for an id-bound MUTATION: the generation check and the
     /// index lookup happen under ONE read guard, so a folder switch can
-    /// never slip between them (`stamp` = the client's X-Autoshop-Gen
+    /// never slip between them (`stamp` = the client's X-AutoShade-Gen
     /// value). Needed in ADDITION to the pre-dispatch
     /// `stale_generation` bail — that one runs before the request BODY is
     /// read, and a body can take seconds (a full-res mask), long enough for
@@ -152,7 +152,7 @@ pub fn serve(dir: &Path, port: u16) -> Result<()> {
     // Reclaim download/mask temp files a previous run failed to unlink —
     // Windows has no automatic %TEMP% cleaner, so nobody else ever would.
     sweep_stale_temp_files();
-    println!("Autoshop UI: {n} source(s) under {}", dir.display());
+    println!("AutoShade UI: {n} source(s) under {}", dir.display());
     println!("  open  →  http://{addr}");
     if state.config().openai_api_key.is_none() {
         println!("  note: no image API key set — Analyze will use the heuristic baseline.");
@@ -239,10 +239,10 @@ fn req_header(request: &Request, name: &'static str) -> Option<String> {
         .map(|h| h.value.as_str().to_string())
 }
 
-/// The client's `X-Autoshop-Gen` stamp (the listing generation its photo
+/// The client's `X-AutoShade-Gen` stamp (the listing generation its photo
 /// ids came from), if present and numeric.
 fn request_gen(request: &Request) -> Option<u64> {
-    req_header(request, "X-Autoshop-Gen").and_then(|v| v.trim().parse::<u64>().ok())
+    req_header(request, "X-AutoShade-Gen").and_then(|v| v.trim().parse::<u64>().ok())
 }
 
 /// Is this `Host`/`Origin` authority OUR loopback authority? Module-level and
@@ -328,7 +328,7 @@ fn foreign_origin(request: &Request, port: u16) -> Option<ResponseBox> {
         if !ok {
             return Some(status_response(
                 403,
-                "refused: cross-origin requests are not accepted by the local Autoshop server",
+                "refused: cross-origin requests are not accepted by the local AutoShade server",
             ));
         }
     }
@@ -353,7 +353,7 @@ fn id_bound_mutation(path: &str) -> bool {
 
 /// Refuse an id-bearing mutation built for a DIFFERENT folder listing. The
 /// client stamps every /api request with the generation its ids came from
-/// (`X-Autoshop-Gen`, see index.html); a mismatch means the gallery moved
+/// (`X-AutoShade-Gen`, see index.html); a mismatch means the gallery moved
 /// under it and the id now points at another photo.
 /// EARLY bail only — it runs before the request body is read; the
 /// authoritative re-check happens at id-resolution time under the listing
@@ -382,8 +382,8 @@ fn handle(mut request: Request, state: &AppState, image_token: &str) -> Result<(
         return request
             .respond(status_response(
                 403,
-                "this image link belongs to another Autoshop server session; reopen the printed \
-                 Autoshop UI URL to refresh the page and its image links",
+                "this image link belongs to another AutoShade server session; reopen the printed \
+                 AutoShade UI URL to refresh the page and its image links",
             ))
             .map_err(Into::into);
     }
@@ -392,12 +392,12 @@ fn handle(mut request: Request, state: &AppState, image_token: &str) -> Result<(
     // a client that sends none of those headers used to reach
     // /api/settings & friends unauthenticated (16-lane scan L10). The page's
     // fetch wrapper stamps the header; anything else gets 403.
-    if is_post && req_header(&request, "X-Autoshop-Token").as_deref() != Some(image_token) {
+    if is_post && req_header(&request, "X-AutoShade-Token").as_deref() != Some(image_token) {
         return request
             .respond(status_response(
                 403,
-                "this request carries no valid Autoshop session token; reopen the printed \
-                 Autoshop UI URL and retry from that page",
+                "this request carries no valid AutoShade session token; reopen the printed \
+                 AutoShade UI URL and retry from that page",
             ))
             .map_err(Into::into);
     }
@@ -941,7 +941,7 @@ fn api_recipe(request: &Request, state: &AppState) -> Result<ResponseBox> {
                 // this file over its own profile-corrected base.
                 r.base_curve = fresh_base_knots(raw);
                 r.lens_profile = pipeline::fresh_lens_profile(raw);
-                // Stamp-if-None: an old-era Autoshop projection arrives with
+                // Stamp-if-None: an old-era AutoShade projection arrives with
                 // the 5500 anchor PINNED by xmp_to_recipe (its Kelvin was
                 // tuned relative) — overwriting the pin would reinterpret it.
                 if r.as_shot_k.is_none() {
@@ -1341,7 +1341,7 @@ struct StyleBuildReq {
 
 /// Build the style reference index from a folder of the user's RAW+.xmp pairs, so
 /// non-CLI users can point the app at THEIR OWN library from the info panel. Writes
-/// the central store's style-index.json (same as `autoshop style-index <dir>`).
+/// the central store's style-index.json (same as `autoshade style-index <dir>`).
 /// Decodes every RAW, so it can take minutes on a large library.
 fn api_style_build(request: &mut Request) -> Result<ResponseBox> {
     let req: StyleBuildReq = read_json(request)?;
@@ -1364,7 +1364,7 @@ fn api_style_build(request: &mut Request) -> Result<ResponseBox> {
     // place, so writing it would silently replace a good index (and every
     // surface's Style slider goes inert with nothing to say why). A folder
     // yields 0 whenever no RAW has its Lightroom .xmp SITTING BESIDE IT — and
-    // Autoshop never puts one there: its own XMP projection lives in the
+    // AutoShade never puts one there: its own XMP projection lives in the
     // per-user develop store. Point this at the folder you edit in LIGHTROOM.
     // Refuse, and leave the previous index alone.
     if total == 0 {
@@ -1372,7 +1372,7 @@ fn api_style_build(request: &mut Request) -> Result<ResponseBox> {
             400,
             &format!(
                 "nothing indexed in {} — found no RAW with its .xmp sidecar beside it \
-                 (Autoshop keeps its own .xmp in the develop store, never beside the \
+                 (AutoShade keeps its own .xmp in the develop store, never beside the \
                  RAW, so point this at the folder you edit in Lightroom). The existing \
                  style index was left untouched.",
                 p.display()
@@ -2048,6 +2048,18 @@ fn export_slot_path(
     out_dir.join(format!("{named_stem}.{kind}.{ext}"))
 }
 
+/// The registry directory's name, kept at its PRE-RENAME spelling.
+///
+/// This is an on-disk identity namespace, not a label: it is what keeps one
+/// photo exporting to the same deliverable filename run after run, and the
+/// claim below is the only thing that stops two server processes assigning one
+/// suffix to two photos. Renaming the directory would abandon every existing
+/// claim and start reassigning suffixes from 1 -- "a re-key would silently
+/// change deliverable filenames", which is the exact harm this registry
+/// exists to prevent. Same call as the installer's AppId. Moving it wants a
+/// migration of its own, not a rename.
+const EXPORT_REGISTRY_DIR: &str = ".autoshop-export-registry";
+
 /// Assign one persistent output slot to this lexical `photo_key`. Registry
 /// entries are atomically claimed, so parallel server processes cannot assign
 /// the same suffix to different photos.
@@ -2061,7 +2073,7 @@ fn registered_export_out(
     let registry_stem =
         if cfg!(windows) { stem.to_ascii_lowercase() } else { stem.to_string() };
     let group = out_dir
-        .join(".autoshop-export-registry")
+        .join(EXPORT_REGISTRY_DIR)
         .join(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(registry_stem.as_bytes()));
     std::fs::create_dir_all(&group)
         .with_context(|| format!("create export registry {}", group.display()))?;
@@ -2293,7 +2305,7 @@ fn api_download(request: &mut Request, state: &AppState) -> Result<ResponseBox> 
     let cfg = state.config().clone();
     let ext = fmt_ext(&req);
     let tmp = std::env::temp_dir().join(format!(
-        "autoshop_dl_{}_{}.{ext}",
+        "autoshade_dl_{}_{}.{ext}",
         std::process::id(),
         DL_SEQ.fetch_add(1, Ordering::Relaxed)
     ));
@@ -2362,7 +2374,7 @@ fn api_download(request: &mut Request, state: &AppState) -> Result<ResponseBox> 
 
 static DL_SEQ: AtomicU64 = AtomicU64::new(0);
 
-/// Best-effort sweep of leftover `autoshop_dl_*` / `autoshop_mask_*` temp
+/// Best-effort sweep of leftover `autoshade_dl_*` / `autoshade_mask_*` temp
 /// files from previous runs (crash before unlink, or an unlink refused by a
 /// scanner's non-sharing handle). Age-gated at one hour so an in-flight
 /// download owned by a parallel server instance is never touched.
@@ -2372,9 +2384,9 @@ fn sweep_stale_temp_files() {
     for e in rd.flatten() {
         let name = e.file_name();
         let Some(name) = name.to_str() else { continue };
-        if !(name.starts_with("autoshop_dl_")
-            || name.starts_with("autoshop_mask_")
-            || name.starts_with("autoshop_heal_"))
+        if !(name.starts_with("autoshade_dl_")
+            || name.starts_with("autoshade_mask_")
+            || name.starts_with("autoshade_heal_"))
         {
             continue;
         }
@@ -2672,7 +2684,7 @@ fn api_retouch(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
             .unwrap_or(mask_bytes);
     // generative::retouch takes a mask FILE path, so stage the PNG in a temp file.
     let mask_tmp = std::env::temp_dir().join(format!(
-        "autoshop_mask_{}_{}.png",
+        "autoshade_mask_{}_{}.png",
         std::process::id(),
         DL_SEQ.fetch_add(1, Ordering::Relaxed)
     ));
@@ -2782,7 +2794,7 @@ fn api_heal(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
                     )
                     .unwrap_or(bytes);
                     let t = std::env::temp_dir().join(format!(
-                        "autoshop_heal_{}_{}.png",
+                        "autoshade_heal_{}_{}.png",
                         std::process::id(),
                         DL_SEQ.fetch_add(1, Ordering::Relaxed)
                     ));
@@ -3438,7 +3450,7 @@ mod tests {
     fn an_export_slot_claimed_under_the_lexical_key_still_matches_its_photo() {
         let base = std::fs::canonicalize(std::env::temp_dir())
             .unwrap()
-            .join("autoshop-serve-test-c1-registry");
+            .join("autoshade-serve-test-c1-registry");
         let _ = std::fs::remove_dir_all(&base);
         std::fs::create_dir_all(&base).unwrap();
         let target = base.join("real");
@@ -3458,13 +3470,20 @@ mod tests {
             (crate::store::photo_key(&via_alias), crate::store::photo_key_lexical(&via_alias));
         assert_ne!(ck, lk, "premise: the two keys differ through the junction");
 
+        // The registry namespace is on-disk identity: a blanket rename that
+        // moved it would abandon every existing claim and start reassigning
+        // deliverable suffixes from 1.
+        assert_eq!(
+            EXPORT_REGISTRY_DIR, ".autoshop-export-registry",
+            "the export registry namespace must keep the spelling users already have on disk"
+        );
         let out_dir = base.join("out");
         std::fs::create_dir_all(&out_dir).unwrap();
         let stem = pipeline::stem(&via_alias);
         let registry_stem =
             if cfg!(windows) { stem.to_ascii_lowercase() } else { stem.to_string() };
         let group = out_dir
-            .join(".autoshop-export-registry")
+            .join(EXPORT_REGISTRY_DIR)
             .join(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(registry_stem.as_bytes()));
         std::fs::create_dir_all(&group).unwrap();
         // An older build claimed slot 1 under the lexical key.
@@ -3570,7 +3589,7 @@ mod tests {
 
     #[test]
     fn session_masters_are_issued_per_photo_and_per_run() {
-        let dir = std::env::temp_dir().join(format!("autoshop-serve-test-masters-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("autoshade-serve-test-masters-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         // Two photos with the SAME stem in different folders — the pre-registry
@@ -3714,7 +3733,7 @@ mod tests {
     /// enforcement; this pins the key set that producer emits.
     #[test]
     fn the_fresh_open_calibration_is_one_key_set_for_both_doors() {
-        let dir = std::env::temp_dir().join(format!("autoshop-serve-freshbase-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("autoshade-serve-freshbase-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let baked = dir.join("baked.png");
@@ -3742,7 +3761,7 @@ mod tests {
     /// merged into `deliverable_source`.
     #[test]
     fn a_deliverable_refuses_a_broken_master_instead_of_lying() {
-        let dir = std::env::temp_dir().join(format!("autoshop-serve-deliv-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("autoshade-serve-deliv-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let raw = dir.join("DSC_DELIV.ARW");
@@ -3851,7 +3870,7 @@ mod tests {
         #[test]
         fn same_stem_exports_keep_their_persistent_slots_and_preserve_unknown_artifacts() {
             let dir = std::env::temp_dir().join(format!(
-                "autoshop-serve-export-registry-{}-{}",
+                "autoshade-serve-export-registry-{}-{}",
                 std::process::id(),
                 line!()
             ));

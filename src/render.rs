@@ -484,7 +484,7 @@ fn refuse_unsupported_sensor(raw: &rawler::RawImage, path: &Path) -> Result<()> 
         (n, _) => format!("{n} components per pixel, which no develop in this build handles"),
     };
     bail!(
-        "{} comes from {kind}, and Autoshop's develop engine produces three-channel colour only. \
+        "{} comes from {kind}, and AutoShade's develop engine produces three-channel colour only. \
          Nothing was rendered. {}",
         path.display(),
         crate::decode::DNG_ONRAMP
@@ -8579,7 +8579,7 @@ mod tests {
     /// arm, which is exactly the v0.22 mask-refine bug.
     #[test]
     fn the_source_dispatch_sends_each_kind_down_its_own_arm() {
-        let dir = std::env::temp_dir().join(format!("autoshop-source-px-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("autoshade-source-px-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
 
@@ -8933,15 +8933,15 @@ mod tests {
         );
     }
 
-    /// Real-machine probe, never run in CI: point AUTOSHOP_PROBE_RAW at an
+    /// Real-machine probe, never run in CI: point AUTOSHADE_PROBE_RAW at an
     /// ARW and run with `--ignored` to check the whole base-look chain on a
     /// real photo — estimator knots + the luma median of the base-curved
     /// render vs the camera's own preview (they must land close).
     #[test]
-    #[ignore = "real-machine probe: set AUTOSHOP_PROBE_RAW to an ARW path"]
+    #[ignore = "real-machine probe: set AUTOSHADE_PROBE_RAW to an ARW path"]
     fn probe_real_raw_base_look() {
-        let Ok(raw) = std::env::var("AUTOSHOP_PROBE_RAW") else {
-            panic!("set AUTOSHOP_PROBE_RAW to a RAW path");
+        let Some(raw) = crate::config::live_env("AUTOSHADE_PROBE_RAW") else {
+            panic!("set AUTOSHADE_PROBE_RAW to a RAW path");
         };
         let raw = std::path::PathBuf::from(raw);
         let cam_probe = crate::decode::embedded_preview(&raw);
@@ -9011,7 +9011,7 @@ mod tests {
         // dispatches a non-RAW source to `render_baked_to_image`): the
         // deliverable's dimensions must equal what the helper predicts, or the
         // shared rule is not the rule the export actually applies.
-        let dir = std::env::temp_dir().join(format!("autoshop-crop-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("autoshade-crop-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let src = dir.join("src.png");
@@ -9026,7 +9026,7 @@ mod tests {
 
     #[test]
     fn export_publishes_atomically_and_leaves_no_staging_file() {
-        let dir = std::env::temp_dir().join(format!("autoshop-export-atomic-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("autoshade-export-atomic-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let src = dir.join("src.png");
@@ -10760,7 +10760,7 @@ mod tests {
     #[test]
     fn export_refuses_a_recipe_whose_mask_raster_is_unreadable() {
         use crate::recipe::LocalAdjustment;
-        let dir = std::env::temp_dir().join(format!("autoshop_maskgate_{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("autoshade_maskgate_{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let src = dir.join("base.png");
         image::DynamicImage::new_rgb8(8, 8).save(&src).unwrap();
@@ -12952,7 +12952,7 @@ mod tests {
             mask: MaskGeometry::Linear { zero_x: 0.0, zero_y: 0.5, full_x: 1.0, full_y: 0.5 },
             components: vec![MaskComponent {
                 geometry: MaskGeometry::Bitmap {
-                    path: "Z:/__autoshop_definitely_missing__/raster.png".into(),
+                    path: "Z:/__autoshade_definitely_missing__/raster.png".into(),
                 },
                 mode: MaskCombine::Subtract,
             }],
@@ -12978,11 +12978,11 @@ mod tests {
     #[test]
     fn dead_bitmap_rasters_reports_only_unloadable_geometries() {
         use crate::recipe::{LocalAdjustment, MaskCombine, MaskComponent, MaskGeometry};
-        let dir = std::env::temp_dir().join(format!("autoshop-dead-raster-probe-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("autoshade-dead-raster-probe-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let good = dir.join("good-raster.png");
         image::GrayImage::from_pixel(4, 4, image::Luma([200])).save(&good).unwrap();
-        let missing = "Z:/__autoshop_definitely_missing__/raster.png";
+        let missing = "Z:/__autoshade_definitely_missing__/raster.png";
         let m = LocalAdjustment {
             exposure_ev: 1.0,
             mask: MaskGeometry::Bitmap { path: good.to_string_lossy().into_owned() },
@@ -13010,7 +13010,7 @@ mod tests {
     /// the difference). A real small raster passes.
     #[test]
     fn open_mask_bounded_refuses_oversized_headers() {
-        let dir = std::env::temp_dir().join(format!("autoshop-mask-bounded-test-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("autoshade-mask-bounded-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let good = dir.join("small.png");
         image::GrayImage::from_pixel(4, 4, image::Luma([1])).save(&good).unwrap();
@@ -14634,7 +14634,7 @@ mod tests {
         let src = DynamicImage::ImageRgb8(RgbImage::from_fn(w, h, |x, y| {
             image::Rgb([(x * 3 + y * 2) as u8, (x * 5) as u8, (y * 7) as u8])
         }));
-        let raster_path = std::env::temp_dir().join(format!("autoshop-linear-baseline-{}.png", std::process::id()));
+        let raster_path = std::env::temp_dir().join(format!("autoshade-linear-baseline-{}.png", std::process::id()));
         let raster = image::GrayImage::from_fn(7, 5, |x, y| image::Luma([((x + y) * 20) as u8]));
         raster.save(&raster_path).unwrap();
         let mask = crate::recipe::LocalAdjustment {
@@ -14759,7 +14759,7 @@ mod tests {
         assert!((zero_x - 0.5).abs() < 1e-6 && (zero_y - 0.80).abs() < 1e-6);
         assert!((full_x - 0.5).abs() < 1e-6 && (full_y - 0.35).abs() < 1e-6);
         assert_eq!(back.masks[0].exposure_ev, -2.0);
-        if std::env::var_os("AUTOSHOP_GENERATE_LINEAR_PROBE").is_some() {
+        if crate::config::live_env_os("AUTOSHADE_GENERATE_LINEAR_PROBE").is_some() {
             let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target/linear-falloff/probe");
             std::fs::create_dir_all(&dir).unwrap();
             let encoded = (linear_to_srgb(0.18) * 65535.0).round() as u16;
@@ -16452,7 +16452,7 @@ mod tests {
         // fixture_mask_path): a concurrent `cargo test` deleted this mask
         // mid-run, turning the zone inert and the measurement meaningless.
         let mask_path =
-            std::env::temp_dir().join(format!("autoshop-preview-perf-mask-{}.png", std::process::id()));
+            std::env::temp_dir().join(format!("autoshade-preview-perf-mask-{}.png", std::process::id()));
         image::GrayImage::from_fn(w / 4, h / 4, |x, _| {
             image::Luma([((x as f32 / (w / 4 - 1) as f32) * 255.0).round() as u8])
         })
@@ -16528,7 +16528,7 @@ mod tests {
         use crate::recipe::MaskGeometry;
 
         let dir = std::env::temp_dir().join(format!(
-            "autoshop-render-clamp-{}-{}",
+            "autoshade-render-clamp-{}-{}",
             std::process::id(),
             crate::store::next_tmp_seq()
         ));
@@ -16621,7 +16621,7 @@ mod tests {
         use crate::recipe::MaskGeometry;
 
         let dir = std::env::temp_dir().join(format!(
-            "autoshop-refine-budget-{}-{}",
+            "autoshade-refine-budget-{}-{}",
             std::process::id(),
             crate::store::next_tmp_seq()
         ));
@@ -16703,7 +16703,7 @@ mod tests {
         use crate::recipe::MaskGeometry;
 
         let dir = std::env::temp_dir().join(format!(
-            "autoshop-raster-budget-{}-{}",
+            "autoshade-raster-budget-{}-{}",
             std::process::id(),
             crate::store::next_tmp_seq()
         ));
@@ -16744,7 +16744,7 @@ mod tests {
         use crate::recipe::MaskGeometry;
 
         let dir = std::env::temp_dir().join(format!(
-            "autoshop-raster-snapshot-{}-{}",
+            "autoshade-raster-snapshot-{}-{}",
             std::process::id(),
             crate::store::next_tmp_seq()
         ));
@@ -16774,7 +16774,7 @@ mod tests {
     #[test]
     fn a_failed_staged_encode_leaves_the_existing_target_intact() {
         let dir = std::env::temp_dir().join(format!(
-            "autoshop-staged-failure-{}-{}",
+            "autoshade-staged-failure-{}-{}",
             std::process::id(),
             crate::store::next_tmp_seq()
         ));
@@ -17334,7 +17334,7 @@ mod tests {
     #[test]
     fn export_depth_follows_the_option_not_the_extension() {
         let dir = std::env::temp_dir().join(format!(
-            "autoshop-export-depth-{}",
+            "autoshade-export-depth-{}",
             std::process::id()
         ));
         let _ = std::fs::remove_dir_all(&dir);
@@ -17429,7 +17429,7 @@ mod tests {
         }
 
         // And once an alpha EXISTS the geometry samples it like any raster.
-        let dir = std::env::temp_dir().join(format!("autoshop-ai-render-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("autoshade-ai-render-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let p = dir.join("alpha.png");
@@ -17505,7 +17505,7 @@ mod tests {
     /// `XTransLayout` (0x0131) record rather than from rawler's camera DB —
     /// the RAF decoder prefers the file's copy (`decoders/raf.rs:257-263`),
     /// and for this body the two turned out identical (measured 2026-08-20,
-    /// `AUTOSHOP_RAW_ZOO` probe, alongside `active_area = 6252×4176 @ (0,5)`
+    /// `AUTOSHADE_RAW_ZOO` probe, alongside `active_area = 6252×4176 @ (0,5)`
     /// and `crop_area = 6240×4160 @ (6,13)`).
     const XTRANS_XS10: &str = "GGRGGBGGBGGRBRGRBGGGBGGRGGRGGBRBGBRG";
 

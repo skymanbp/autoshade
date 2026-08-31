@@ -99,12 +99,12 @@ impl DescribeOpts {
 /// the checkpoint's own `config.json` declares (`"dtype": "bfloat16"`), i.e.
 /// what it was trained and released in.
 ///
-/// The escape hatch is real rather than decorative: `AUTOSHOP_DESCRIBE_FP32`
+/// The escape hatch is real rather than decorative: `AUTOSHADE_DESCRIBE_FP32`
 /// forces the fp32 load, which is the only way to describe on a machine whose
 /// GPU disagrees with bf16 — and on CPU the sidecar ignores the flag by its
 /// own construction (`describe.py`: `bf16 and device.startswith("cuda")`).
 fn bf16_wanted() -> bool {
-    !std::env::var("AUTOSHOP_DESCRIBE_FP32")
+    !crate::config::live_env("AUTOSHADE_DESCRIBE_FP32")
         .map(|v| !matches!(v.trim(), "" | "0" | "false" | "off"))
         .unwrap_or(false)
 }
@@ -163,7 +163,7 @@ pub fn describe_manifest(
     if !opts.script.exists() {
         bail!(
             "look-description sidecar not found at {} — run from the project dir or set \
-             AUTOSHOP_DESCRIBE_SCRIPT.",
+             AUTOSHADE_DESCRIBE_SCRIPT.",
             opts.script.display()
         );
     }
@@ -495,7 +495,7 @@ pub const CACHE_FILE: &str = "style-descriptions.json";
 /// The cache inside a NAMED directory.
 ///
 /// A parameter rather than a global read, for the reason every other seam in
-/// this tree is: `cargo test` runs with `AUTOSHOP_DATA_DIR` pointing at a real
+/// this tree is: `cargo test` runs with `AUTOSHADE_DATA_DIR` pointing at a real
 /// store, so a build driven by a test would otherwise write stub descriptions
 /// into the user's own cache and a later live build would serve them.
 pub fn cache_path_in(dir: &Path) -> PathBuf {
@@ -976,7 +976,7 @@ mod tests {
     /// MUTATION THIS KILLS: dropping the `--bf16` push (every description
     /// would then load 8.5 GB of fp32 weights, which does not fit the 8 GB
     /// card this was measured on), or wiring the env var the wrong way round
-    /// so `AUTOSHOP_DESCRIBE_FP32` turned bf16 ON.
+    /// so `AUTOSHADE_DESCRIBE_FP32` turned bf16 ON.
     #[test]
     fn the_describe_argv_carries_the_precision_flag_and_the_manifest_door() {
         let args = |bf16| {

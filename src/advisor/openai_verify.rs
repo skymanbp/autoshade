@@ -45,7 +45,7 @@ impl Advisor for OpenAiVerifier {
     ) -> Result<Verdict, AdvisorError> {
         let key = self.api_key.as_ref().ok_or_else(|| {
             AdvisorError::Missing(
-                "analysis API key (set it in Settings, or AUTOSHOP_ANALYSIS_API_KEY)".into(),
+                "analysis API key (set it in Settings, or AUTOSHADE_ANALYSIS_API_KEY)".into(),
             )
         })?;
         let prompt = build_verify_prompt(recipe, meta, hist, intent)?;

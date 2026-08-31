@@ -36,7 +36,7 @@ use image::{DynamicImage, GenericImageView, RgbImage, Rgba, RgbaImage};
 use crate::config::Config;
 use crate::{decode, pipeline};
 
-const BOUNDARY: &str = "----autoshopBoundaryX7MA4YWxkTrZu0gW";
+const BOUNDARY: &str = "----autoshadeBoundaryX7MA4YWxkTrZu0gW";
 
 /// The faithfulness scaffold every `fidelity = "high"` reimagine prompt is
 /// composed onto. The REQUEST parameter that used to carry this intent
@@ -108,7 +108,7 @@ fn generation_divergence(sent_png: &[u8], generated_png: &[u8]) -> Result<crate:
 /// gpt-image-1 era) fired mid-generation on real requests, and a real
 /// quality=high request then outran 600 s too — which is why the PRIMARY path
 /// is now streaming under a stall deadline (below) instead of a third
-/// recalibration. `AUTOSHOP_HTTP_TIMEOUT_SECS` still overrides
+/// recalibration. `AUTOSHADE_HTTP_TIMEOUT_SECS` still overrides
 /// (see `advisor::post_with_timeout`).
 const IMAGES_EDIT_TIMEOUT_SECS: u64 = 600;
 
@@ -120,7 +120,7 @@ const IMAGES_EDIT_TIMEOUT_SECS: u64 = 600;
 /// longest silent gap in a healthy run is ~total/4: a 600 s stall budget
 /// admits ~40-minute generations, while a dead endpoint still fails within
 /// the same 600 s the old TOTAL deadline gave (GUI soft-lock protection is
-/// unchanged). `AUTOSHOP_HTTP_TIMEOUT_SECS` overrides
+/// unchanged). `AUTOSHADE_HTTP_TIMEOUT_SECS` overrides
 /// (see `advisor::post_with_stall_timeout`).
 const IMAGES_EDIT_STALL_SECS: u64 = 600;
 
@@ -1227,16 +1227,16 @@ fn call_images_edit(
                         msg.push_str(&format!(
                             " (no stream activity for ~{elapsed}s — the server or a \
                              proxy stopped sending; healthy generations stream partial images and \
-                             are not time-capped. Raise AUTOSHOP_HTTP_TIMEOUT_SECS if a proxy \
-                             buffers server-sent events, or lower AUTOSHOP_IMAGE_QUALITY / \
-                             AUTOSHOP_IMAGE_MAX_PX)"
+                             are not time-capped. Raise AUTOSHADE_HTTP_TIMEOUT_SECS if a proxy \
+                             buffers server-sent events, or lower AUTOSHADE_IMAGE_QUALITY / \
+                             AUTOSHADE_IMAGE_MAX_PX)"
                         ));
                     } else {
                         msg.push_str(&format!(
                             " (hit the HTTP deadline, default {IMAGES_EDIT_TIMEOUT_SECS}s — \
                              large/high-quality generations can run longer; raise \
-                             AUTOSHOP_HTTP_TIMEOUT_SECS, or lower AUTOSHOP_IMAGE_QUALITY / \
-                             AUTOSHOP_IMAGE_MAX_PX to speed the call up)"
+                             AUTOSHADE_HTTP_TIMEOUT_SECS, or lower AUTOSHADE_IMAGE_QUALITY / \
+                             AUTOSHADE_IMAGE_MAX_PX to speed the call up)"
                         ));
                     }
                 }
@@ -2255,7 +2255,7 @@ mod tests {
     /// second POST is bought without the opt-in.
     #[test]
     fn a_reimagine_hardens_the_prompt_and_measures_its_result() {
-        let dir = std::env::temp_dir().join(format!("autoshop-s6-wire-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("autoshade-s6-wire-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         // The library layout the read-only guard expects: the source in its
         // OWN folder, outputs in a sibling (see pipeline's preflight tests).
@@ -2306,7 +2306,7 @@ mod tests {
     /// the byte-for-byte artifact pin).
     #[test]
     fn the_divergence_retry_is_opt_in_bounded_and_keeps_the_closer_result() {
-        let dir = std::env::temp_dir().join(format!("autoshop-s6-retry-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("autoshade-s6-retry-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::create_dir_all(dir.join("library")).unwrap();
         let input = dir.join("library").join("input.png");
@@ -2372,7 +2372,7 @@ mod tests {
     #[test]
     fn reimagine_refuses_a_directory_output_before_touching_the_source() {
         let dir = std::env::temp_dir()
-            .join(format!("autoshop-reimagine-dir-{}", std::process::id()));
+            .join(format!("autoshade-reimagine-dir-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let cfg = Config {
             openai_api_key: None,

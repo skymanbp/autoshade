@@ -1,5 +1,5 @@
 [package]
-name = "autoshop"
+name = "autoshade"
 version = "1.1.0"
 edition = "2024"
 description = "AI-assisted automatic development of RAW photographs (EditRecipe + deterministic Rust render, XMP sidecar, AI denoise)"
@@ -15,19 +15,19 @@ autobins = false
 
 # Shared engine library — linked by both front-ends.
 [lib]
-name = "autoshop"
+name = "autoshade"
 path = "src/lib.rs"
 
 # CLI front-end (the original binary).
 [[bin]]
-name = "autoshop"
+name = "autoshade"
 path = "src/main.rs"
 
 # Native desktop GUI (egui/eframe). Behind the `gui` feature so a plain
 # `cargo build` / `cargo test` does NOT pull in eframe + winit + the GL stack;
-# build it with `cargo run --features gui --bin autoshop-gui`.
+# build it with `cargo run --features gui --bin autoshade-gui`.
 [[bin]]
-name = "autoshop-gui"
+name = "autoshade-gui"
 path = "src/bin/gui/main.rs"
 required-features = ["gui"]
 

@@ -127,7 +127,7 @@ pub fn correspond_file(
     if !opts.script.exists() {
         bail!(
             "correspondence sidecar not found at {} — run from the project dir or set \
-             AUTOSHOP_CORRESPOND_SCRIPT.",
+             AUTOSHADE_CORRESPOND_SCRIPT.",
             opts.script.display()
         );
     }
@@ -161,9 +161,9 @@ pub fn fit_provider(
     move |src, target| {
         let dir = std::env::temp_dir();
         let pid = std::process::id();
-        let s = dir.join(format!("autoshop-corr-fit-src-{pid}.png"));
-        let t = dir.join(format!("autoshop-corr-fit-tgt-{pid}.png"));
-        let out = dir.join(format!("autoshop-corr-fit-field-{pid}.json"));
+        let s = dir.join(format!("autoshade-corr-fit-src-{pid}.png"));
+        let t = dir.join(format!("autoshade-corr-fit-tgt-{pid}.png"));
+        let out = dir.join(format!("autoshade-corr-fit-field-{pid}.json"));
         // 1024 px is comfortably above the sidecar's own 768² working size;
         // staging the full frame would spend more on the PNG encode than on
         // the model.

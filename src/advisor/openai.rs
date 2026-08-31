@@ -1551,22 +1551,23 @@ mod tests {
     /// offset of `"scene"` in the RAW response text must precede `"recipe"`.
     ///
     /// Run it deliberately (it costs one paid vision call):
-    ///   AUTOSHOP_THINK_PROBE_KEY=sk-… cargo test --lib -- --ignored think_envelope_field_order
-    /// `AUTOSHOP_THINK_PROBE_MODEL` / `AUTOSHOP_THINK_PROBE_BASE` override the
+    ///   AUTOSHADE_THINK_PROBE_KEY=sk-… cargo test --lib -- --ignored think_envelope_field_order
+    /// `AUTOSHADE_THINK_PROBE_MODEL` / `AUTOSHADE_THINK_PROBE_BASE` override the
     /// model (default `gpt-5`) and the endpoint (default the OpenAI API).
     #[test]
-    #[ignore = "live probe: needs AUTOSHOP_THINK_PROBE_KEY and spends one paid vision call"]
+    #[ignore = "live probe: needs AUTOSHADE_THINK_PROBE_KEY and spends one paid vision call"]
     fn think_envelope_field_order_probe() {
-        let Ok(key) = std::env::var("AUTOSHOP_THINK_PROBE_KEY") else {
-            panic!("set AUTOSHOP_THINK_PROBE_KEY to the image-role API key");
+        let Some(key) = crate::config::live_env("AUTOSHADE_THINK_PROBE_KEY") else {
+            panic!("set AUTOSHADE_THINK_PROBE_KEY to the image-role API key");
         };
         let mut cfg = cfg_for(
-            &std::env::var("AUTOSHOP_THINK_PROBE_BASE")
-                .unwrap_or_else(|_| "https://api.openai.com/v1".to_string()),
+            &crate::config::live_env("AUTOSHADE_THINK_PROBE_BASE")
+                .unwrap_or_else(|| "https://api.openai.com/v1".to_string()),
         );
         cfg.openai_api_key = Some(key.clone());
         cfg.openai_model =
-            std::env::var("AUTOSHOP_THINK_PROBE_MODEL").unwrap_or_else(|_| "gpt-5".to_string());
+            crate::config::live_env("AUTOSHADE_THINK_PROBE_MODEL")
+                .unwrap_or_else(|| "gpt-5".to_string());
         let p = OpenAiProvider::new(&cfg);
 
         // A tiny synthetic frame: this measures FIELD ORDER, not photography.

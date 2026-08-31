@@ -2,8 +2,8 @@
 
 use super::*;
 
-use autoshop::advisor::{hint_action, FitAction};
-use autoshop::recipe::MaskRole;
+use autoshade::advisor::{hint_action, FitAction};
+use autoshade::recipe::MaskRole;
 
 /// The persisted develop state belonging to the card that is on the canvas.
 ///
@@ -26,12 +26,12 @@ struct PersistedCard<'a> {
     origin: Option<&'a std::path::Path>,
 }
 
-impl AutoshopApp {
+impl AutoShadeApp {
     /// The panel's Strength dial as the typed axis every consumer reads: the
     /// develop request (R23-3) and the reverse-fit honesty budget (F1) share
     /// ONE reading, so the two cannot drift apart.
-    pub(crate) fn panel_strength(&self) -> autoshop::recipe::GradeStrength {
-        autoshop::recipe::GradeStrength::new(self.grade_strength)
+    pub(crate) fn panel_strength(&self) -> autoshade::recipe::GradeStrength {
+        autoshade::recipe::GradeStrength::new(self.grade_strength)
     }
 
     /// Restore persisted prefs (last folder, view mode, export options) and
@@ -56,7 +56,7 @@ impl AutoshopApp {
             app.style_src_dir = prefs.style_src_dir.clone().filter(|d| d.is_dir());
             app.looks_src_dir = prefs.looks_src_dir.clone().filter(|d| d.is_dir());
             app.use_looks = prefs.use_looks;
-            app.direction_adherence = autoshop::recipe::DirectionAdherence::new(prefs.direction_adherence).get();
+            app.direction_adherence = autoshade::recipe::DirectionAdherence::new(prefs.direction_adherence).get();
             app.exp_format = ExportFormat::from_pref(prefs.exp_format, prefs.save_jpeg);
             app.exp_dest = ExportDest::from_pref(prefs.exp_dest);
             app.last_export_dir = prefs.last_export_dir.clone();
@@ -106,7 +106,7 @@ impl AutoshopApp {
         let stems: Vec<String> = self
             .gallery
             .iter()
-            .map(|p| autoshop::pipeline::stem(p).to_string())
+            .map(|p| autoshade::pipeline::stem(p).to_string())
             .collect();
         for stem in &stems {
             for (script, sample) in undrawable_scripts(stem, installed) {
@@ -351,19 +351,19 @@ impl AutoshopApp {
                     // pixels and knots under its own key, and a popup-driven
                     // px change mid-flight mislabelled the edge.
                     let src_ident = (edge, file_stamp(&path), pixel_identity(&path));
-                    let (thumb, knots, lens, as_shot) = if autoshop::decode::is_raw(&path) {
+                    let (thumb, knots, lens, as_shot) = if autoshade::decode::is_raw(&path) {
                         // Identity BEFORE the read: the primed answer below
                         // is filed under the content it was computed FROM —
                         // stat'ing after the multi-second develop filed a
                         // mid-open replacement's NEW identity with the OLD
                         // content's answer.
-                        let ident = autoshop::pipeline::curve_ident(&path);
+                        let ident = autoshade::pipeline::curve_ident(&path);
                         // Developed AT the working edge (the cap runs before
                         // tone/geometry): opening a 61 MP RAW no longer keeps
                         // a full-resolution develop resident just to be
                         // thumbnailed — the knots estimate below is CDF
                         // statistics and reads the same at working res.
-                        let full = autoshop::render::render_to_image(
+                        let full = autoshade::render::render_to_image(
                             &path,
                             &EditRecipe::default(),
                             None,
@@ -371,11 +371,11 @@ impl AutoshopApp {
                         )?;
                         // In-camera lens profile (Sony 0x70xx): one cheap TIFF
                         // parse, stamped all-available-on (the user default).
-                        let lens = autoshop::pipeline::fresh_lens_profile(&path);
+                        let lens = autoshade::pipeline::fresh_lens_profile(&path);
                         // As-shot WB anchor: one metadata-only decode (no
                         // demosaic) — the Temp slider then speaks absolute
                         // Kelvin for this photo.
-                        let as_shot = autoshop::render::as_shot_wb(&path);
+                        let as_shot = autoshade::render::as_shot_wb(&path);
                         // Camera-matched base look: CDF-match the neutral
                         // develop against the camera's own rendition — with
                         // the profile VIGNETTE applied first: the camera JPEG
@@ -385,10 +385,10 @@ impl AutoshopApp {
                         // pixels, not their histogram — skipped on purpose.
                         // A RAW with no embedded preview (or a decode hiccup)
                         // just opens without a base look — never a failure.
-                        let knots = match autoshop::decode::embedded_preview(&path) {
+                        let knots = match autoshade::decode::embedded_preview(&path) {
                             Ok(Some(cam)) => {
-                                let est = autoshop::render::estimation_base(&full, &lens);
-                                match autoshop::render::camera_base_knots(&est, &cam) {
+                                let est = autoshade::render::estimation_base(&full, &lens);
+                                match autoshade::render::camera_base_knots(&est, &cam) {
                                     // The ANSWER primes the repair memo: the
                                     // open already paid this develop, and
                                     // discarding the result made every later
@@ -398,7 +398,7 @@ impl AutoshopApp {
                                     // inability stays uncached so the next
                                     // reader retries.
                                     Some(k) => {
-                                        autoshop::pipeline::prime_curve_memo(
+                                        autoshade::pipeline::prime_curve_memo(
                                             &path,
                                             ident,
                                             k.clone(),
@@ -429,7 +429,7 @@ impl AutoshopApp {
                     } else {
                         (
                             // baked-by-construction: the !is_raw arm of the open (branch above).
-                            autoshop::decode::load_image(&path)?.thumbnail(edge, edge),
+                            autoshade::decode::load_image(&path)?.thumbnail(edge, edge),
                             Vec::new(),
                             Default::default(),
                             None,
@@ -441,10 +441,10 @@ impl AutoshopApp {
                     // loads a 61 MP PNG. A missing/unreadable master degrades
                     // to the plain source open, never a failure.
                     let mut baked_note = None;
-                    let baked = autoshop::store::read_pixel_source(&path).and_then(
+                    let baked = autoshade::store::read_pixel_source(&path).and_then(
                         |(origin, generated)| {
                             // baked-by-construction: the store's baked pixel master (a PNG we wrote).
-                            let img = match autoshop::decode::load_image(&origin) {
+                            let img = match autoshade::decode::load_image(&origin) {
                                 Ok(i) => i,
                                 Err(e) => {
                                     // Disclosed at LANDING too, not only in a
@@ -766,7 +766,7 @@ impl AutoshopApp {
     /// sidecar noise). Since R24-3 a lone Original card that carries a NAME or
     /// a minted identity is no longer trivial: the record is the only home
     /// either of those has.
-    pub(crate) fn current_strip_record(&self) -> Option<autoshop::store::VariantsRecord> {
+    pub(crate) fn current_strip_record(&self) -> Option<autoshade::store::VariantsRecord> {
         let ak = self.active_variant().map_or(VariantKind::Original, |v| v.kind);
         if crate::model::strip_is_trivial(
             ak,
@@ -776,7 +776,7 @@ impl AutoshopApp {
         ) {
             return None;
         }
-        Some(autoshop::store::VariantsRecord {
+        Some(autoshade::store::VariantsRecord {
             extra: Default::default(),
             v: 1,
             active_kind: ak.store_str().to_string(),
@@ -786,7 +786,7 @@ impl AutoshopApp {
                 .iter()
                 .enumerate()
                 .filter(|(i, _)| *i != self.active)
-                .map(|(_, v)| autoshop::store::VariantEntry {
+                .map(|(_, v)| autoshade::store::VariantEntry {
                     extra: Default::default(),
                     kind: v.kind.store_str().to_string(),
                     recipe: v.recipe.clone(),
@@ -807,18 +807,18 @@ impl AutoshopApp {
     /// advance the mirror. Trivial strip ⇒ clear (no noise file). An error
     /// leaves the mirror untouched, so the unsaved protection stays armed.
     /// Test-only since the single-generation commit (L03): production saves
-    /// stage the strip INTO [`autoshop::store::commit_develop`] and advance
+    /// stage the strip INTO [`autoshade::store::commit_develop`] and advance
     /// the mirror on the commit's success — this remains the strip-half
     /// primitive the guard tests drive in isolation.
     #[cfg(test)]
     pub(crate) fn persist_strip(&mut self, path: &std::path::Path) -> std::io::Result<()> {
         match self.current_strip_record() {
             Some(rec) => {
-                autoshop::store::write_variants(path, &rec)?;
+                autoshade::store::write_variants(path, &rec)?;
                 self.saved_strip = Some(rec);
             }
             None => {
-                autoshop::store::clear_variants(path)?;
+                autoshade::store::clear_variants(path)?;
                 self.saved_strip = None;
             }
         }
@@ -861,7 +861,7 @@ impl AutoshopApp {
     /// Uniform failure disclosure for a foreground persist compound — the
     /// single mapper the NoWait develop-lock wrappers report through
     /// (arch item b: five hand-rolled copies had already drifted into
-    /// wording bugs). TYPED: `WouldBlock` really is "another Autoshop
+    /// wording bugs). TYPED: `WouldBlock` really is "another AutoShade
     /// process owns this develop right now", so it gets the caller's busy
     /// wording with its retry hint; any other error is real I/O and must
     /// not wear the busy costume — a full disk used to read as "another
@@ -937,7 +937,7 @@ impl AutoshopApp {
             // scenario.
             && (!self.open_in_flight || (self.open_same_path && self.keep_recipe))
             && let Some(p) = self.src_path.clone()
-            && autoshop::pipeline::repair_pre_era_base_curve(&p, &mut self.recipe).is_some()
+            && autoshade::pipeline::repair_pre_era_base_curve(&p, &mut self.recipe).is_some()
         {
             // The strip entry follows the healed canvas (the Ctrl+S rule),
             // and the user is told BY TOAST: the dominant callers
@@ -1296,7 +1296,7 @@ impl AutoshopApp {
         // own saved record for good — a photo permanently counted as unsaved
         // work. Popped char by char so the cut lands on a boundary.
         let mut named = buf.trim().to_string();
-        while named.len() > autoshop::store::MAX_STORE_NAME {
+        while named.len() > autoshade::store::MAX_STORE_NAME {
             named.pop();
         }
         let named = Some(named).filter(|s| !s.is_empty());
@@ -1402,7 +1402,7 @@ impl AutoshopApp {
     /// parametric versions, never touching the library or the working
     /// `recipe.json`).
     pub(crate) fn version_path(src: &std::path::Path, n: u32) -> PathBuf {
-        autoshop::store::version_target(src, n)
+        autoshade::store::version_target(src, n)
     }
 
     /// Re-point every stored mask index (selection, colour-range sampler,
@@ -1481,14 +1481,14 @@ impl AutoshopApp {
         // have not been saved yet), and an editor must never renumber its own
         // cards from a stale record. For every non-GUI surface that half IS
         // the list.
-        for e in autoshop::store::list_edits(src) {
-            if let autoshop::store::EditStateKind::Version { n, from_kind, from_id, source } =
+        for e in autoshade::store::list_edits(src) {
+            if let autoshade::store::EditStateKind::Version { n, from_kind, from_id, source } =
                 e.state
             {
                 self.versions.push(n);
                 self.version_meta.insert(
                     n,
-                    autoshop::store::VersionMetaEntry {
+                    autoshade::store::VersionMetaEntry {
                         n,
                         name: e.name,
                         from_kind,
@@ -1509,7 +1509,7 @@ impl AutoshopApp {
     /// is "only this variant", and quietly including everything unknown
     /// would make it a checkbox that does not filter.
     pub(crate) fn version_is_from(
-        m: Option<&autoshop::store::VersionMetaEntry>,
+        m: Option<&autoshade::store::VersionMetaEntry>,
         active_id: &str,
         active_kind: Option<VariantKind>,
     ) -> bool {
@@ -1541,10 +1541,10 @@ impl AutoshopApp {
         // NoWait wrapper around the store's own Wait lock (the delete_version
         // rule): a develop held by another process must report here, never
         // freeze the UI thread on a name.
-        match autoshop::store::with_develop_lock(
+        match autoshade::store::with_develop_lock(
             &photo,
-            autoshop::store::DevelopLockMode::NoWait,
-            || autoshop::store::set_version_name(&photo, n, Some(buf.as_str())),
+            autoshade::store::DevelopLockMode::NoWait,
+            || autoshade::store::set_version_name(&photo, n, Some(buf.as_str())),
         ) {
             Ok(()) => {
                 let named = Some(buf.trim().to_string()).filter(|s| !s.is_empty());
@@ -1555,7 +1555,7 @@ impl AutoshopApp {
                 if self.src_path.as_deref() == Some(photo.as_path()) {
                     self.version_meta
                         .entry(n)
-                        .or_insert_with(|| autoshop::store::VersionMetaEntry {
+                        .or_insert_with(|| autoshade::store::VersionMetaEntry {
                             n,
                             ..Default::default()
                         })
@@ -1598,14 +1598,14 @@ impl AutoshopApp {
         // another process's delete_version sweeping the just-claimed slot
         // mid-snapshot is a real interleave — and this is a foreground
         // button, so busy must report, not hang the UI.
-        let locked = autoshop::store::with_develop_lock(
+        let locked = autoshade::store::with_develop_lock(
             &src,
-            autoshop::store::DevelopLockMode::NoWait,
+            autoshade::store::DevelopLockMode::NoWait,
             || -> std::io::Result<()> {
         // ATOMICALLY reserved number (store::claim_version): disk-list+1
         // raced the auto-backup (and the web/CLI) to the same N — the later
         // publish silently replaced the earlier snapshot.
-        let (n, vpath) = match autoshop::store::claim_version(&src) {
+        let (n, vpath) = match autoshade::store::claim_version(&src) {
             Ok(v) => v,
             Err(e) => {
                 let t = trf(lang, "Save version failed: {err}", &[("err", &e.to_string())]);
@@ -1617,20 +1617,20 @@ impl AutoshopApp {
         // Freeze referenced rasters under THIS version (the backup gate's
         // pair): a version whose recipe pointed at another version's frozen
         // raster (load v3 → save as v4) broke the moment v3 was deleted.
-        let dev = autoshop::store::develop_dir(&src);
+        let dev = autoshade::store::develop_dir(&src);
         let mut snap = self.recipe.clone();
-        if let Err(e) = autoshop::store::snapshot_rasters(&mut snap, &dev, n) {
+        if let Err(e) = autoshade::store::snapshot_rasters(&mut snap, &dev, n) {
             let _ = std::fs::remove_file(&vpath); // release the claim
             let t = trf(lang, "Save version failed: {err}", &[("err", &e.to_string())]);
             self.status = t.clone();
             self.toast(ToastKind::Error, t);
             return Ok(());
         }
-        let res = autoshop::pipeline::write_recipe(&src, &snap, Some(vpath.clone()), autoshop::diag::stderr());
+        let res = autoshade::pipeline::write_recipe(&src, &snap, Some(vpath.clone()), autoshade::diag::stderr());
         if res.is_err() {
             // Release the claimed slot AND this call's frozen rasters — an
             // empty version must not pollute the list after a failed write.
-            autoshop::store::rollback_frozen_rasters(&dev, n);
+            autoshade::store::rollback_frozen_rasters(&dev, n);
             let _ = std::fs::remove_file(&vpath);
         }
         match res {
@@ -1641,14 +1641,14 @@ impl AutoshopApp {
                 // could not be written must not turn a successful save into a
                 // failure, it only leaves the version unattributed. The
                 // develop lock is already held (reentrant).
-                let _ = autoshop::store::record_version_meta(
+                let _ = autoshade::store::record_version_meta(
                     &src,
-                    &autoshop::store::VersionMetaEntry {
+                    &autoshade::store::VersionMetaEntry {
                         n,
                         name: None,
                         from_kind: from_kind.clone(),
                         from_id: from_id.clone(),
-                        origin: Some(autoshop::store::VERSION_ORIGIN_USER.to_string()),
+                        origin: Some(autoshade::store::VERSION_ORIGIN_USER.to_string()),
                     },
                 );
                 self.refresh_versions();
@@ -1687,24 +1687,24 @@ impl AutoshopApp {
         // toast and the pre-era repair (a seconds-long RAW decode) run
         // OUTSIDE the lock — the read-under-lock / decide-outside split
         // read_saved_develop already draws.
-        let locked = autoshop::store::with_develop_lock(
+        let locked = autoshade::store::with_develop_lock(
             &src,
-            autoshop::store::DevelopLockMode::NoWait,
-            || -> std::io::Result<anyhow::Result<(EditRecipe, autoshop::recipe::ClampSummary)>> {
+            autoshade::store::DevelopLockMode::NoWait,
+            || -> std::io::Result<anyhow::Result<(EditRecipe, autoshade::recipe::ClampSummary)>> {
                 Ok((|| {
                     // A stale UI row can still name a half-deleted version:
                     // complete pending recovery (killed deletes included)
                     // under OUR lock before reading — reentrant, so this
                     // costs no second kernel acquisition (L03).
-                    let _ = autoshop::store::recover_orphan_baks(&src);
+                    let _ = autoshade::store::recover_orphan_baks(&src);
                     let s =
-                        autoshop::store::read_text_capped(&p, autoshop::store::MAX_STORE_JSON)?;
+                        autoshade::store::read_text_capped(&p, autoshade::store::MAX_STORE_JSON)?;
                     let mut r = serde_json::from_str::<EditRecipe>(&s)?;
                     let dropped = r.clamp();
                     // Snapshots name their rasters by bare file name, like
                     // the working recipe — re-anchor them to the develop dir.
                     if let Some(base) = p.parent() {
-                        autoshop::store::resolve_mask_paths(&mut r, base);
+                        autoshade::store::resolve_mask_paths(&mut r, base);
                     }
                     // Then DETACH from the snapshot: the frozen v<N>.*.png
                     // files belong to that version and `delete_version`
@@ -1712,7 +1712,7 @@ impl AutoshopApp {
                     // masks the moment the user deleted the version it was
                     // loaded from — and the next save persisted the dangling
                     // path. The loaded state gets its own claimed copies.
-                    autoshop::store::detach_rasters(&src, &mut r, "mask-restored");
+                    autoshade::store::detach_rasters(&src, &mut r, "mask-restored");
                     Ok((r, dropped))
                 })())
             },
@@ -1761,10 +1761,10 @@ impl AutoshopApp {
                     &mut r,
                     self.active_is_generated(),
                     || {
-                        let (k, t) = autoshop::pipeline::fresh_as_shot_wb(&src);
+                        let (k, t) = autoshade::pipeline::fresh_as_shot_wb(&src);
                         (
-                            autoshop::pipeline::photo_base_knots(&src),
-                            autoshop::pipeline::fresh_lens_profile(&src),
+                            autoshade::pipeline::photo_base_knots(&src),
+                            autoshade::pipeline::fresh_lens_profile(&src),
                             k.zip(t),
                         )
                     },
@@ -1781,14 +1781,14 @@ impl AutoshopApp {
                 // one statement later, so the promised disclosure never
                 // survived to a single rendered frame.
                 let relook =
-                    autoshop::pipeline::repair_pre_era_base_curve(&src, &mut r).is_some();
+                    autoshade::pipeline::repair_pre_era_base_curve(&src, &mut r).is_some();
                 // …and the coordinate frame, for the same reason and from the
                 // same file: a `v<N>.recipe.json` written before v0.30.0 holds
                 // its crop and masks in the SENSOR frame of a rotated RAW.
                 // Ungated by the generated strip above (a pixel-state card
                 // still has geometry) and toasted rather than folded into the
                 // status line, so the raster caveat has room.
-                let reframe = autoshop::pipeline::migrate_recipe_coord_frame(&src, &mut r);
+                let reframe = autoshade::pipeline::migrate_recipe_coord_frame(&src, &mut r);
                 self.recipe = r;
                 self.resync_recipe_display();
                 self.dirty = true;
@@ -1858,7 +1858,7 @@ impl AutoshopApp {
         self.status = trf(lang, "scanning {path} …", &[("path", &dir.display().to_string())]);
         self.spawn_worker(
             move || {
-                let res = autoshop::pipeline::find_sources_counted(&dir)
+                let res = autoshade::pipeline::find_sources_counted(&dir)
                     .map(|(list, skipped)| (dir, list, skipped));
                 Msg::Folder(Box::new(res))
             },
@@ -2116,7 +2116,7 @@ impl AutoshopApp {
         if (!self.open_in_flight || (self.open_same_path && self.keep_recipe))
             && self.variants.get(self.active).is_none_or(|v| v.kind.is_parametric())
             && let Some(p) = self.src_path.clone()
-            && autoshop::pipeline::repair_pre_era_base_curve(&p, &mut self.recipe).is_some()
+            && autoshade::pipeline::repair_pre_era_base_curve(&p, &mut self.recipe).is_some()
         {
             self.committed.recipe = self.recipe.clone();
             if let Some(v) = self.variants.get_mut(self.active) {
@@ -2227,7 +2227,7 @@ impl AutoshopApp {
     }
 
     /// Turn the open photo by `delta` clockwise quarter turns — ONE undo step,
-    /// the whole develop moving together ([`autoshop::pipeline::rotate_recipe`]
+    /// the whole develop moving together ([`autoshade::pipeline::rotate_recipe`]
     /// owns geometry + raster masks + the turn count).
     ///
     /// The plates are NOT turned here: `sync_base_turns` sees the changed
@@ -2243,7 +2243,7 @@ impl AutoshopApp {
         // The step BEFORE the turn, so one Ctrl+Z puts it back (7.7).
         self.commit_now();
         let mut next = self.recipe.clone();
-        match autoshop::pipeline::rotate_recipe(&mut next, &src, delta) {
+        match autoshade::pipeline::rotate_recipe(&mut next, &src, delta) {
             Ok(_) => {
                 self.recipe = next;
                 self.dirty = true;
@@ -2300,7 +2300,7 @@ impl AutoshopApp {
             return;
         }
         let turn = |p: &Arc<image::DynamicImage>| {
-            Arc::new(autoshop::render::turn_image((**p).clone(), delta))
+            Arc::new(autoshade::render::turn_image((**p).clone(), delta))
         };
         self.source_preview = self.source_preview.as_ref().map(&turn);
         self.base_preview = self.base_preview.as_ref().map(&turn);
@@ -2457,7 +2457,7 @@ impl AutoshopApp {
                         ui.label(
                             egui::RichText::new(format!(
                                 "{folder}/{}",
-                                autoshop::pipeline::stem(p)
+                                autoshade::pipeline::stem(p)
                             ))
                             .small()
                             .weak(),
@@ -2509,9 +2509,9 @@ impl AutoshopApp {
                 // (the Ctrl+S pairing). A develop busy in another process
                 // fails THIS photo — the quit bounces and reports below —
                 // instead of freezing the dialog behind an unbounded Wait.
-                let locked: std::io::Result<()> = autoshop::store::with_develop_lock(
+                let locked: std::io::Result<()> = autoshade::store::with_develop_lock(
                     p,
-                    autoshop::store::DevelopLockMode::NoWait,
+                    autoshade::store::DevelopLockMode::NoWait,
                     || {
                 // Neutral + no pixel identity + trivial strip = Ctrl+S's
                 // "clear my edits": WRITING neutral files here pinned the
@@ -2522,7 +2522,7 @@ impl AutoshopApp {
                     // The store's ONE clear primitive (both surfaces): it takes
                     // the retired pixels.json.bak with it, which a bare unlink
                     // left behind for the next open to republish.
-                    match autoshop::store::clear_develop(p) {
+                    match autoshade::store::clear_develop(p) {
                         Ok(o) => {
                             // clear_develop took variants.json with it — the
                             // open photo's mirror must follow, or the guard's
@@ -2535,11 +2535,11 @@ impl AutoshopApp {
                             // half: quitting silently would let a projection
                             // copied beside the RAW undo this clear unannounced.
                             if let Some(w) = o.marker_warning {
-                                clear_warns.push(format!("{}: {w}", autoshop::pipeline::stem(p)));
+                                clear_warns.push(format!("{}: {w}", autoshade::pipeline::stem(p)));
                             }
                         }
                         Err(e) => {
-                            failed = Some(format!("{}: {e}", autoshop::pipeline::stem(p)));
+                            failed = Some(format!("{}: {e}", autoshade::pipeline::stem(p)));
                         }
                     }
                     return Ok(());
@@ -2558,7 +2558,7 @@ impl AutoshopApp {
                     // curve (the paste rule): this WRITES recipe.json, and a
                     // canvas-era stamp over a saved era-1 curve would launder
                     // it past every repair.
-                    let cal = autoshop::pipeline::photo_calibration(p);
+                    let cal = autoshade::pipeline::photo_calibration(p);
                     disk.version = cal.version;
                     disk.base_curve = cal.base_curve;
                     disk.lens_profile = cal.lens_profile;
@@ -2577,29 +2577,29 @@ impl AutoshopApp {
                 // published the re-estimated curve, and dropping the note
                 // then hid a mutation that IS on disk (the Ctrl+S rule: the
                 // disclosure travels with the mutation).
-                let relook_note = autoshop::pipeline::repair_pre_era_base_curve(p, &mut disk);
+                let relook_note = autoshade::pipeline::repair_pre_era_base_curve(p, &mut disk);
                 let generated = pix.as_ref().is_some_and(|(_, g)| *g);
                 // ONE single-generation commit per photo (the Ctrl+S rule,
                 // L03): recipe + baked-pixels link + strip record land whole
                 // or not at all — the background variants this dialog just
                 // listed cannot outlive a save that tore between members.
                 let res: anyhow::Result<()> = (|| {
-                    let recipe_bytes = autoshop::pipeline::recipe_store_bytes(p, &disk, autoshop::diag::stderr())?;
+                    let recipe_bytes = autoshade::pipeline::recipe_store_bytes(p, &disk, autoshade::diag::stderr())?;
                     let pixels = match pix {
-                        Some((o, g)) => autoshop::store::CommitMember::Write(
-                            autoshop::store::pixel_source_record_bytes(p, o, *g)?,
+                        Some((o, g)) => autoshade::store::CommitMember::Write(
+                            autoshade::store::pixel_source_record_bytes(p, o, *g)?,
                         ),
-                        None => autoshop::store::CommitMember::Clear,
+                        None => autoshade::store::CommitMember::Clear,
                     };
                     let variants = match strip {
-                        Some(rec) => autoshop::store::CommitMember::Write(
-                            autoshop::store::variants_record_bytes(p, rec)?,
+                        Some(rec) => autoshade::store::CommitMember::Write(
+                            autoshade::store::variants_record_bytes(p, rec)?,
                         ),
-                        None => autoshop::store::CommitMember::Clear,
+                        None => autoshade::store::CommitMember::Clear,
                     };
-                    autoshop::store::commit_develop(
+                    autoshade::store::commit_develop(
                         p,
-                        autoshop::store::DevelopCommit {
+                        autoshade::store::DevelopCommit {
                             recipe: Some(recipe_bytes),
                             pixels,
                             variants,
@@ -2613,7 +2613,7 @@ impl AutoshopApp {
                         // Ctrl+S rule): the commit landed whole, so the
                         // re-estimated curve IS on disk.
                         if let Some(note) = relook_note.as_deref() {
-                            eprintln!("⚠ {}: {note}", autoshop::pipeline::stem(p));
+                            eprintln!("⚠ {}: {note}", autoshade::pipeline::stem(p));
                         }
                         if self.src_path.as_deref() == Some(p.as_path()) {
                             self.saved_strip = strip.clone();
@@ -2627,7 +2627,7 @@ impl AutoshopApp {
                         }
                     }
                     Err(e) => {
-                        failed = Some(format!("{}: {e}", autoshop::pipeline::stem(p)));
+                        failed = Some(format!("{}: {e}", autoshade::pipeline::stem(p)));
                         return Ok(());
                     }
                 }
@@ -2641,22 +2641,22 @@ impl AutoshopApp {
                 // saved state (cross-surface rule), so a failed XMP projection
                 // must not abort the remaining photos or refuse to quit over a
                 // develop that IS durably saved.
-                if autoshop::decode::is_raw(p) && !generated {
+                if autoshade::decode::is_raw(p) && !generated {
                     // The M6a mask-loss list is dropped HERE for the same
                     // reason as in the batch paste: `xmp_warns` renders under
                     // one fixed "projection(s) failed" sentence, which a
                     // lossy-but-successful projection is not. stderr carries
                     // the per-photo line from write_xmp_doc.
-                    match autoshop::pipeline::write_xmp(p, &disk, autoshop::diag::stderr()) {
+                    match autoshade::pipeline::write_xmp(p, &disk, autoshade::diag::stderr()) {
                         Ok((_, None, _)) => {}
                         // A regenerated (unmerged) sidecar loses LR-only
                         // properties — Save-all's warning list is exactly
                         // where that belongs (round-12 disclosure threading).
                         Ok((_, Some(n), _)) => {
-                            xmp_warns.push(format!("{}: {n}", autoshop::pipeline::stem(p)));
+                            xmp_warns.push(format!("{}: {n}", autoshade::pipeline::stem(p)));
                         }
                         Err(e) => {
-                            xmp_warns.push(format!("{}: {e}", autoshop::pipeline::stem(p)));
+                            xmp_warns.push(format!("{}: {e}", autoshade::pipeline::stem(p)));
                         }
                     }
                 }
@@ -2665,8 +2665,8 @@ impl AutoshopApp {
                 );
                 if let Err(e) = locked {
                     failed = Some(format!(
-                        "{}: the photo is being changed by another Autoshop process ({e})",
-                        autoshop::pipeline::stem(p)
+                        "{}: the photo is being changed by another AutoShade process ({e})",
+                        autoshade::pipeline::stem(p)
                     ));
                 }
                 if failed.is_some() {
@@ -2800,7 +2800,7 @@ impl AutoshopApp {
                 // migrate_legacy_from re-scanned the (possibly huge) legacy
                 // folder once per photo, making import O(photos × entries).
                 // FACTS out (L12#4): the landing renders the summary.
-                let n = autoshop::store::migrate_legacy_from_many(&dir, &photos);
+                let n = autoshade::store::migrate_legacy_from_many(&dir, &photos);
                 Msg::LegacyImported(Ok((n, dir)))
             },
             |e| Msg::LegacyImported(Err(e)),
@@ -2820,14 +2820,14 @@ impl AutoshopApp {
         }
         self.style_info_loading = true;
         self.spawn_worker(
-            || Msg::StyleInfo(Box::new(autoshop::style::index_info())),
+            || Msg::StyleInfo(Box::new(autoshade::style::index_info())),
             // A read that PANICS must still clear the flag, or the status line
             // says "reading…" for the rest of the session. Absent is the
             // honest fallback: no usable library was read.
             |_e| {
-                Msg::StyleInfo(Box::new(autoshop::style::StyleIndexInfo {
-                    path: autoshop::store::style_index_path(),
-                    state: autoshop::style::StyleIndexState::Absent,
+                Msg::StyleInfo(Box::new(autoshade::style::StyleIndexInfo {
+                    path: autoshade::store::style_index_path(),
+                    state: autoshade::style::StyleIndexState::Absent,
                 }))
             },
         );
@@ -2868,11 +2868,11 @@ impl AutoshopApp {
         // Resolved HERE, on the UI thread, with the rest of the request the
         // worker will carry: the switch is a value, and a preference flipped
         // mid-build must not change what this build is doing.
-        let embed = autoshop::style::EmbeddingSwitch::resolve(None, self.style_embed);
-        let describe = autoshop::style::DescribeSwitch::resolve(None, self.style_describe);
+        let embed = autoshade::style::EmbeddingSwitch::resolve(None, self.style_embed);
+        let describe = autoshade::style::DescribeSwitch::resolve(None, self.style_describe);
         self.spawn_worker(
             move || {
-                let progress = |p: autoshop::style::BuildProgress| {
+                let progress = |p: autoshade::style::BuildProgress| {
                     let _ = tx.send(Msg::StyleBuildProgress {
                         stage: p.stage,
                         done: p.done,
@@ -2881,7 +2881,7 @@ impl AutoshopApp {
                     // An mpsc send does not wake egui (see `spawn_worker`).
                     ctx.request_repaint();
                 };
-                let index = match autoshop::style::StyleIndex::build_reporting(&dir, embed, describe, &progress) {
+                let index = match autoshade::style::StyleIndex::build_reporting(&dir, embed, describe, &progress) {
                     Ok(ix) => ix,
                     Err(e) => {
                         return Msg::StyleBuilt(Box::new(StyleBuildOutcome::Failed {
@@ -2917,7 +2917,7 @@ impl AutoshopApp {
                 // owns it for every caller (an empty write truncates a good
                 // index in place). The count only decides WHICH sentence the
                 // landing shows for the refusal it hands back.
-                match index.save(&autoshop::store::style_index_path()) {
+                match index.save(&autoshade::store::style_index_path()) {
                     Ok(()) => Msg::StyleBuilt(Box::new(StyleBuildOutcome::Saved {
                         total,
                         dir,
@@ -2943,11 +2943,11 @@ impl AutoshopApp {
         self.status = trf(self.lang, "Building the look library from {path}", &[("path", &abs_display(&dir))]);
         let tx = self.tx.clone();
         let ctx = self.egui_ctx.clone();
-        let embed = autoshop::style::EmbeddingSwitch::resolve(None, self.style_embed);
-        let describe = autoshop::style::DescribeSwitch::resolve(None, self.style_describe);
+        let embed = autoshade::style::EmbeddingSwitch::resolve(None, self.style_embed);
+        let describe = autoshade::style::DescribeSwitch::resolve(None, self.style_describe);
         self.spawn_worker(
             move || {
-                let progress = |p: autoshop::style::BuildProgress| {
+                let progress = |p: autoshade::style::BuildProgress| {
                     let _ = tx.send(Msg::StyleBuildProgress {
                         stage: p.stage,
                         done: p.done,
@@ -2955,7 +2955,7 @@ impl AutoshopApp {
                     });
                     ctx.request_repaint();
                 };
-                match autoshop::style::StyleIndex::build_looks(&dir, embed, describe, &progress) {
+                match autoshade::style::StyleIndex::build_looks(&dir, embed, describe, &progress) {
                     Ok(index) => {
                         let total = index.looks.len();
                         let described = if describe.on() {
@@ -2963,7 +2963,7 @@ impl AutoshopApp {
                         } else {
                             0
                         };
-                        match index.save(&autoshop::store::style_index_path()) {
+                        match index.save(&autoshade::store::style_index_path()) {
                             Ok(()) => Msg::StyleBuilt(Box::new(StyleBuildOutcome::LooksSaved { total, dir, described })),
                             Err(e) => Msg::StyleBuilt(Box::new(StyleBuildOutcome::Failed { err: format!("{e:#}") })),
                         }
@@ -2994,7 +2994,7 @@ impl AutoshopApp {
         // whether the nearest past photo goes along as a second image. Read
         // HERE, on the UI thread, so the worker cannot pick up a toggle the
         // user flipped after starting the call.
-        let req = autoshop::pipeline::GradeRequest {
+        let req = autoshade::pipeline::GradeRequest {
             style: self.style_strength,
             send_reference_image: self.send_style_ref_image,
             // R23-3: the OTHER axis — how committed the grade should be. Read
@@ -3005,15 +3005,15 @@ impl AutoshopApp {
             // the same reason — a checkbox flipped mid-call must not change
             // what this call is paying for.
             think: self.deep_think,
-            adherence: autoshop::recipe::DirectionAdherence::new(self.direction_adherence),
+            adherence: autoshade::recipe::DirectionAdherence::new(self.direction_adherence),
             use_looks: self.use_looks,
             // The GUI's own 「style embedding」 preference, read on the UI
             // thread like every other field above. Until this batch the
             // develop path resolved the switch itself with the preference
             // hard-coded to `false`, so this checkbox reached the index BUILD
             // and never the develop — the two could disagree with nothing said.
-            embed: autoshop::style::EmbeddingSwitch::resolve(None, self.style_embed),
-            weights: autoshop::style::RetrievalWeights::from_env(),
+            embed: autoshade::style::EmbeddingSwitch::resolve(None, self.style_embed),
+            weights: autoshade::style::RetrievalWeights::from_env(),
         };
         // Free-text direction ("warmer, moodier") steers the proposal; with
         // `refine` (its own button now — no pre-armed checkbox), the AI
@@ -3054,8 +3054,8 @@ impl AutoshopApp {
             move || {
                 let _mem = crate::budget::heavy_permit(crate::budget::estimate_mb(Some(&path))); // full-frame commit budget (budget.rs)
                 // Config is reloaded in-thread (cheap) so we don't need it to be Clone.
-                let cfg = autoshop::config::Config::load();
-                let res = autoshop::pipeline::produce_recipe(
+                let cfg = autoshade::config::Config::load();
+                let res = autoshade::pipeline::produce_recipe(
                     &path,
                     &cfg,
                     false,
@@ -3066,7 +3066,7 @@ impl AutoshopApp {
                     // loop IS the R20 strengthening (cost disclosed in the
                     // button's hover text; batch surfaces pass false).
                     true,
-                    autoshop::diag::stderr(),
+                    autoshade::diag::stderr(),
                 );
                 Msg::Analyzed(epoch, Box::new(res))
             },
@@ -3097,9 +3097,9 @@ impl AutoshopApp {
         let fit_strength = self.panel_strength();
         let zoned = self.zoned_fit;
         let zoned_regions = if self.zoned_four_regions {
-            autoshop::fit_zoned::semantic::MAX_SEMANTIC_REGIONS
+            autoshade::fit_zoned::semantic::MAX_SEMANTIC_REGIONS
         } else {
-            autoshop::fit_zoned::semantic::DEFAULT_SEMANTIC_REGIONS
+            autoshade::fit_zoned::semantic::DEFAULT_SEMANTIC_REGIONS
         };
         let ai_judge = self.fit_ai_judge;
         // The deep path IS the review, iterated — it cannot run without it,
@@ -3136,7 +3136,7 @@ impl AutoshopApp {
                     // at 1024) and preserves aspect, which the same-frame
                     // check reads.
                     const FIT_REF_EDGE: u32 = 2048;
-                    let target = autoshop::render::source_pixels(&tgt, Some(FIT_REF_EDGE))?;
+                    let target = autoshade::render::source_pixels(&tgt, Some(FIT_REF_EDGE))?;
                     // The gate runs at PERSIST time (below), not up front:
                     // a pre-fit snapshot left the whole multi-minute
                     // segmentation as a race window — an explicit save
@@ -3175,8 +3175,8 @@ impl AutoshopApp {
                     let fit_base = src_path
                         .as_deref()
                         .map(|p| {
-                            autoshop::pipeline::calibration_recipe(
-                                autoshop::pipeline::fit_calibration(p),
+                            autoshade::pipeline::calibration_recipe(
+                                autoshade::pipeline::fit_calibration(p),
                             )
                         })
                         .unwrap_or_default();
@@ -3191,9 +3191,9 @@ impl AutoshopApp {
                     // render against the target is the pair the fit's own
                     // residual measures.
                     const JUDGE_EDGE: u32 = 1024; // detail:high tiles at 512 px — 4 tiles read a grade
-                    let judge_of = |recipe: &autoshop::recipe::EditRecipe|
-                     -> anyhow::Result<autoshop::advisor::Judgement> {
-                        let cfg = autoshop::config::Config::load();
+                    let judge_of = |recipe: &autoshade::recipe::EditRecipe|
+                     -> anyhow::Result<autoshade::advisor::Judgement> {
+                        let cfg = autoshade::config::Config::load();
                         let enc = |img: &image::DynamicImage| -> anyhow::Result<Vec<u8>> {
                             let mut j = Vec::new();
                             img.write_to(
@@ -3202,19 +3202,19 @@ impl AutoshopApp {
                             )?;
                             Ok(j)
                         };
-                        let fitted = autoshop::render::develop_preview(
+                        let fitted = autoshade::render::develop_preview(
                             &base.thumbnail(JUDGE_EDGE, JUDGE_EDGE),
                             recipe,
                         );
                         let t_jpeg = enc(&target.thumbnail(JUDGE_EDGE, JUDGE_EDGE))?;
                         let f_jpeg = enc(&fitted)?;
-                        Ok(autoshop::advisor::judge_pair(
+                        Ok(autoshade::advisor::judge_pair(
                             &cfg,
-                            autoshop::advisor::JudgeImages {
+                            autoshade::advisor::JudgeImages {
                                 reference: &t_jpeg,
                                 candidate: &f_jpeg,
                             },
-                            autoshop::advisor::JudgeTask::FitMatch,
+                            autoshade::advisor::JudgeTask::FitMatch,
                             None,
                             // FitMatch scores a MATCH between two renders —
                             // the strength axis has no bearing on it (R23-3).
@@ -3230,27 +3230,27 @@ impl AutoshopApp {
                     // 完全自动 (user ruling 2026-08-26): the fit's D gate may
                     // consult the local DIFT sidecar on content-divergent
                     // pairs; failures degrade into the rationale.
-                    let corr = autoshop::correspond::fit_provider(
-                        autoshop::correspond::CorrespondOpts::from_config(
-                            &autoshop::config::Config::load(),
+                    let corr = autoshade::correspond::fit_provider(
+                        autoshade::correspond::CorrespondOpts::from_config(
+                            &autoshade::config::Config::load(),
                         ),
                     );
                     let run_zoned = |seg_on: bool|
-                     -> anyhow::Result<(autoshop::fit::FitReport, Option<std::path::PathBuf>)> {
+                     -> anyhow::Result<(autoshade::fit::FitReport, Option<std::path::PathBuf>)> {
                         Ok(match (seg_on, &src_path) {
                             (true, Some(p)) => {
-                                let cfg = autoshop::config::Config::load();
+                                let cfg = autoshade::config::Config::load();
                                 let seg =
-                                    autoshop::segment::SegmentOpts::from_config(&cfg, "sky");
+                                    autoshade::segment::SegmentOpts::from_config(&cfg, "sky");
                                 let mask =
-                                    autoshop::store::OwnedRaster::claim(p, "mask-zone-sky")?;
-                                let rep = autoshop::fit_zoned::fit_recipe_zoned_with_regions(
+                                    autoshade::store::OwnedRaster::claim(p, "mask-zone-sky")?;
+                                let rep = autoshade::fit_zoned::fit_recipe_zoned_with_regions(
                                     &base,
                                     &target,
                                     &seg,
                                     &mask,
                                     &fit_base,
-                                    autoshop::fit::FitOptions {
+                                    autoshade::fit::FitOptions {
                                         strength: fit_strength,
                                         provider: Some(&corr),
                                     },
@@ -3259,11 +3259,11 @@ impl AutoshopApp {
                                 (rep, Some(mask.into_path()))
                             }
                             _ => (
-                                autoshop::fit::fit_recipe_from_with(
+                                autoshade::fit::fit_recipe_from_with(
                                     &base,
                                     &target,
                                     &fit_base,
-                                    autoshop::fit::FitOptions {
+                                    autoshade::fit::FitOptions {
                                         strength: fit_strength,
                                         provider: Some(&corr),
                                     },
@@ -3303,7 +3303,7 @@ impl AutoshopApp {
                     // informational block below bought a THIRD network attempt
                     // after two had already failed — past the two-paid-calls
                     // ceiling its own tooltip states (R23 review LOW-6).
-                    let mut judged: Option<anyhow::Result<autoshop::advisor::Judgement>> = None;
+                    let mut judged: Option<anyhow::Result<autoshade::advisor::Judgement>> = None;
                     if deep {
                         match judge_of(&rep.recipe) {
                             Ok(first) => {
@@ -3336,7 +3336,7 @@ impl AutoshopApp {
                                             // this recipe is not the one the
                                             // solver reported on.
                                             (
-                                                autoshop::fit::rescore_report(
+                                                autoshade::fit::rescore_report(
                                                     &base,
                                                     &target,
                                                     &r,
@@ -3373,11 +3373,11 @@ impl AutoshopApp {
                                         }
                                         match verdict {
                                             Ok(second) if keep => {
-                                                autoshop::rationale::push_note(
+                                                autoshade::rationale::push_note(
                                                     &mut cand.recipe.rationale,
                                                     &mut cand.notes,
-                                                    autoshop::rationale::Note::new(
-                                                        autoshop::rationale::keys::FIT_NOTE_DEEP_ADOPTED,
+                                                    autoshade::rationale::Note::new(
+                                                        autoshade::rationale::keys::FIT_NOTE_DEEP_ADOPTED,
                                                         vec![
                                                             ("score1", format!("{:.0}", first.score)),
                                                             ("score2", format!("{:.0}", second.score)),
@@ -3440,7 +3440,7 @@ impl AutoshopApp {
                     let tiles = rep
                         .notes
                         .iter()
-                        .filter(|note| note.key == autoshop::rationale::keys::TILE_ATTACHED)
+                        .filter(|note| note.key == autoshade::rationale::keys::TILE_ATTACHED)
                         .count();
                     if tiles > 0 {
                         status.push(FitNote::IncludesSpatialTiles(tiles));
@@ -3449,14 +3449,14 @@ impl AutoshopApp {
                         .notes
                         .iter()
                         .filter(|note| {
-                            note.key == autoshop::rationale::keys::MASK_REFINEMENT_KEPT
+                            note.key == autoshade::rationale::keys::MASK_REFINEMENT_KEPT
                         })
                         .count();
                     let refinement_abstained = rep
                         .notes
                         .iter()
                         .filter(|note| {
-                            note.key == autoshop::rationale::keys::MASK_REFINEMENT_ABSTAINED
+                            note.key == autoshade::rationale::keys::MASK_REFINEMENT_ABSTAINED
                         })
                         .count();
                     if refinement_kept + refinement_abstained > 0 {
@@ -3468,14 +3468,14 @@ impl AutoshopApp {
                     // R23-6 A-3: the terminal do-no-harm reset is "the
                     // reverse-fit did nothing", and a line inside a rationale
                     // block is not where a user finds that out.
-                    if rep.notes.iter().any(|n| n.key == autoshop::rationale::keys::FIT_NOTE_REGRESSED)
+                    if rep.notes.iter().any(|n| n.key == autoshade::rationale::keys::FIT_NOTE_REGRESSED)
                     {
                         status.push(FitNote::FitReset);
                     }
                     if rep
                         .notes
                         .iter()
-                        .any(|n| n.key == autoshop::rationale::keys::FIT_NOTE_NOT_SAME_FRAME)
+                        .any(|n| n.key == autoshade::rationale::keys::FIT_NOTE_NOT_SAME_FRAME)
                     {
                         status.push(FitNote::ReferenceNotSameFrame);
                     }
@@ -3487,11 +3487,11 @@ impl AutoshopApp {
                         // interleaving between the halves. The
                         // identical-content skip keeps the gate from
                         // spamming versions on repeated fits.
-                        let persist = autoshop::store::with_develop_lock(
+                        let persist = autoshade::store::with_develop_lock(
                             p,
-                            autoshop::store::DevelopLockMode::Wait,
+                            autoshade::store::DevelopLockMode::Wait,
                             || -> std::io::Result<()> {
-                        let backed = autoshop::store::backup_saved_develop(p, Some(&rep.recipe));
+                        let backed = autoshade::store::backup_saved_develop(p, Some(&rep.recipe));
                         // Persist the fit losslessly: recipe.json carries the
                         // bitmap zone masks + recolour gains the XMP cannot,
                         // so reopening the photo restores the whole fit. The
@@ -3509,15 +3509,15 @@ impl AutoshopApp {
                               // write made a reopen render the fit on baked
                               // pixels it was never computed against.
                               let commit_res: anyhow::Result<()> = (|| {
-                                  autoshop::store::commit_develop(
+                                  autoshade::store::commit_develop(
                                       p,
-                                      autoshop::store::DevelopCommit {
-                                          recipe: Some(autoshop::pipeline::recipe_store_bytes(
+                                      autoshade::store::DevelopCommit {
+                                          recipe: Some(autoshade::pipeline::recipe_store_bytes(
                                               p,
                                               &rep.recipe,
-                                              autoshop::diag::stderr(),
+                                              autoshade::diag::stderr(),
                                           )?),
-                                          pixels: autoshop::store::CommitMember::Clear,
+                                          pixels: autoshade::store::CommitMember::Clear,
                                           // R24-4: this worker publishes a
                                           // REVERSE-FIT into the active slot,
                                           // and the strip record's active
@@ -3529,9 +3529,9 @@ impl AutoshopApp {
                                           // the shared primitive restates the
                                           // one fact this writer owns (the
                                           // card's id/name/position stand).
-                                          variants: autoshop::store::variants_member(
+                                          variants: autoshade::store::variants_member(
                                               p,
-                                              autoshop::store::ActiveWrite::Kind("fitted"),
+                                              autoshade::store::ActiveWrite::Kind("fitted"),
                                           )?,
                                       },
                                   )?;
@@ -3548,7 +3548,7 @@ impl AutoshopApp {
                               }
                               Ok(()) => {
                                 persisted = true;
-                                if autoshop::decode::is_raw(p) {
+                                if autoshade::decode::is_raw(p) {
                                     // The recipe write ALONE decides the saved
                                     // state (same rule as Ctrl+S / Analyze):
                                     // an XMP failure must not collapse an
@@ -3561,7 +3561,7 @@ impl AutoshopApp {
                                     // Lightroom sidecar cannot carry (the
                                     // ZONE_ATTACHED note), so a second copy
                                     // would say it twice for the same masks.
-                                    match autoshop::pipeline::write_xmp(p, &rep.recipe, autoshop::diag::stderr()) {
+                                    match autoshade::pipeline::write_xmp(p, &rep.recipe, autoshade::diag::stderr()) {
                                         Ok((x, merge_note, _)) => {
                                             status.push(FitNote::XmpWritten(x));
                                             // Regenerated-not-merged: same

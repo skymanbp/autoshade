@@ -377,7 +377,7 @@ def publish(path, text):
 
 def main() -> None:
     ap = argparse.ArgumentParser(
-        description="Autoshop cross-image correspondence (DIFT / SD 2.1)"
+        description="AutoShade cross-image correspondence (DIFT / SD 2.1)"
     )
     ap.add_argument("--source", required=True, help="the source rendition (any PIL-readable)")
     ap.add_argument("--target", required=True, help="the target rendition of the same frame")

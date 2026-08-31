@@ -1,6 +1,6 @@
 # Tech stack and algorithms
 
-Autoshop's core is a Rust image engine with a deterministic `f32` processing
+AutoShade's core is a Rust image engine with a deterministic `f32` processing
 pipeline. AI is kept outside the pixel math: it proposes bounded, serializable
 recipes that the same renderer, CLI, desktop GUI, and local web UI can inspect,
 revise, and replay. This page records the implemented methods, where their
@@ -10,7 +10,7 @@ Provenance labels used below are deliberate:
 
 - **Measured** means fitted or checked against controlled Lightroom/Camera Raw
   exports, the project's camera corpus, or a named runtime probe.
-- **Designed** means an Autoshop engineering choice or a standard numerical
+- **Designed** means an AutoShade engineering choice or a standard numerical
   method, not a claim about Adobe's implementation.
 - **Calibrated** means a designed family whose constants were selected by an
   explicit held-out measurement.
@@ -24,7 +24,7 @@ Provenance labels used below are deliberate:
 `decode_any` dispatches 24 camera-RAW extensions to rawler and eight baked
 raster extensions to `image`; embedded ICC profiles on baked images are
 converted with qcms. Bayer data uses rawler's normal demosaic path, while a
-non-2×2 three-colour CFA takes Autoshop's geometry-driven X-Trans path: for
+non-2×2 three-colour CFA takes AutoShade's geometry-driven X-Trans path: for
 each missing colour at a pixel it fits a plane to matching photosites in a
 5×5 neighbourhood, then evaluates that plane at the target while retaining
 the sensor's measured channel exactly. `orient_f32` applies EXIF orientation
@@ -244,7 +244,7 @@ validates its envelope and bounds, Brotli-decompresses it, then parses the
   landmark; the fitted landmark is `0.2974`, and stored `Radius` is derived
   from that mapping (**measured**).
 - Brush dab spacing: Lightroom's recorded stream is already densified at
-  `0.2000·radius`, so Autoshop adds no synthetic interpolation (**measured**).
+  `0.2000·radius`, so AutoShade adds no synthetic interpolation (**measured**).
 - Coordinate sampling: `MASK_SAMPLE_CENTRE = 0.5` (**measured convention**).
 
 ### Measured results & disclosures
@@ -686,7 +686,7 @@ therefore invalidated when the pinned BiRefNet backend later becomes available.
 - The OneFormer table identifies ADE20K class `2` as sky; class `48` is
   skyscraper. Keeping the table in-tree prevents that name/number confusion.
 - Subject, sky, and object alphas are local model outputs, not Adobe's computed
-  masks. XMP preserves selection intent, but Autoshop re-derives proprietary
+  masks. XMP preserves selection intent, but AutoShade re-derives proprietary
   alpha and says so.
 - Fallback provenance remains visible: an alpha made by U²-Net is not silently
   relabeled as a BiRefNet result.
@@ -786,7 +786,7 @@ frame.
 The sidecar reader does not search a whole XML document for familiar local
 names. `crs_own_scope` selects Camera Raw's own Description scope—including
 the nested `Look` exception—and typed `Tag`/`Scope` wrappers make a whole-tree
-read an explicit operation at the call site. On write, Autoshop replaces the
+read an explicit operation at the call site. On write, AutoShade replaces the
 fields it owns and merges the edited tree back into the original document so
 unknown namespaces, attributes, and unmodeled corrections survive.
 
@@ -832,7 +832,7 @@ through the strict binary path described above.
   `MaskInverted` alone; the recorded image RMS improved from `0.1099` to
   `0.0751`, and the blue-channel RMS from `0.1901` to `0.0869`.
 - Conservative merge means “round trip” is structural preservation, not a
-  promise that every Lightroom correction is rendered by Autoshop. Unsupported
+  promise that every Lightroom correction is rendered by AutoShade. Unsupported
   or carried-only fields remain disclosed.
 
 ### Source
@@ -1152,11 +1152,11 @@ and zero-confidence fields are conservation-tested to change nothing.
   bank available to it made antonym pairs agree MORE (+0.339 → +0.377)
   (**measured, mutation-tested**).
 - Four environment overrides, each read in exactly one place and never again:
-  `AUTOSHOP_STYLE_EMBED_WEIGHT`, `AUTOSHOP_STYLE_TEXT_WEIGHT`,
-  `AUTOSHOP_STYLE_DESC_WEIGHT`, `AUTOSHOP_STYLE_LOOK_WEIGHT`. All four parse the
+  `AUTOSHADE_STYLE_EMBED_WEIGHT`, `AUTOSHADE_STYLE_TEXT_WEIGHT`,
+  `AUTOSHADE_STYLE_DESC_WEIGHT`, `AUTOSHADE_STYLE_LOOK_WEIGHT`. All four parse the
   same way — trimmed, finite, non-negative, otherwise the shipped default (a
   negative weight would rank the *least* similar photo first). The two sidecar
-  switches `AUTOSHOP_STYLE_EMBED` and `AUTOSHOP_STYLE_DESCRIBE` are likewise
+  switches `AUTOSHADE_STYLE_EMBED` and `AUTOSHADE_STYLE_DESCRIBE` are likewise
   resolved once, as values: `--embed`/`--no-embed`, `--describe` and the GUI
   preferences travel on the request, and nothing writes the process environment
   to express a flag.
@@ -1302,7 +1302,7 @@ version identities are written to a deleted-versions registry so a later save
 cannot silently reuse an identity that may still exist in an export or log.
 
 The local server binds loopback and issues a fresh 32-byte capability token.
-State-changing requests require `X-Autoshop-Token`; Host and Origin must name a
+State-changing requests require `X-AutoShade-Token`; Host and Origin must name a
 literal loopback authority on the actual bound port, API responses are
 `no-store`, and framing is denied; request concurrency and per-photo work are
 bounded instead of allowing browsers or batch jobs to multiply full-resolution
@@ -1335,7 +1335,7 @@ than the pre-call state; model weights remain outside the repository.
 - The 61 MP RAW probe measured `151 MB` peak commit for decode,
   `1771 MB` for calibration/render preparation, and `1766 MB` for the
   full-resolution render tail; the combined process peak remained `1771 MB`.
-- The release battery is **1193 library (1182 pass + 11 `#[ignore]`d forensic
+- The release battery is **1207 library (1196 pass + 11 `#[ignore]`d forensic
   probes) / 22 CLI / 151 GUI / 2+2 contract** tests. Environment-gated real
   Lightroom, brush-table, and RAW-zoo suites are additional and are not
   smuggled into the ordinary count.

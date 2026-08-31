@@ -266,17 +266,17 @@ mod tests {
         let source = image::DynamicImage::ImageRgb8(RgbImage::from_pixel(8, 8, Rgb([64, 80, 96])));
         let target = image::DynamicImage::ImageRgb8(RgbImage::from_pixel(8, 8, Rgb([72, 88, 104])));
         let seg = crate::segment::SegmentOpts {
-            python_bin: "autoshop-test-no-such-python".into(),
+            python_bin: "autoshade-test-no-such-python".into(),
             script: "Cargo.toml".into(),
             target: "sky".into(),
             reference_point: None,
             prompt_points: None,
         };
         let routed_path = crate::store::OwnedRaster::scratch(
-            std::env::temp_dir().join(format!("autoshop-two-route-{}-routed.png", std::process::id())),
+            std::env::temp_dir().join(format!("autoshade-two-route-{}-routed.png", std::process::id())),
         );
         let legacy_path = crate::store::OwnedRaster::scratch(
-            std::env::temp_dir().join(format!("autoshop-two-route-{}-legacy.png", std::process::id())),
+            std::env::temp_dir().join(format!("autoshade-two-route-{}-legacy.png", std::process::id())),
         );
         let routed = super::super::fit_recipe_zoned_with_regions(
             &source, &target, &seg, &routed_path, &crate::recipe::EditRecipe::default(),
@@ -325,7 +325,7 @@ mod tests {
     #[test]
     fn fit_calibration_four_regions_has_typed_verdicts_when_corpus_is_available() {
         let Some(corpus) = crate::fit::calibration_corpus() else {
-            eprintln!("SKIPPED four-region calibration test: AUTOSHOP_FIT_CALIBRATION_DIR unset");
+            eprintln!("SKIPPED four-region calibration test: AUTOSHADE_FIT_CALIBRATION_DIR unset");
             return;
         };
         let cfg = crate::config::Config::load();
@@ -342,7 +342,7 @@ mod tests {
         let source = image::open(corpus.join("neutral.jpg")).unwrap();
         let target = image::open(corpus.join("target.jpg")).unwrap();
         let scratch = std::env::temp_dir().join(format!(
-            "autoshop-four-region-calibration-{}",
+            "autoshade-four-region-calibration-{}",
             std::process::id()
         ));
         let _ = std::fs::remove_dir_all(&scratch);

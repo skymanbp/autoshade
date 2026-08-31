@@ -613,7 +613,7 @@ def publish(path, text):
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description="Autoshop style embedding (SigLIP 2)")
+    ap = argparse.ArgumentParser(description="AutoShade style embedding (SigLIP 2)")
     ap.add_argument("--input", help="one image (any PIL-readable format)")
     ap.add_argument(
         "--manifest",

@@ -1758,7 +1758,7 @@ pub const CONTROL_FAMILIES: [Family; 13] = [
         // family whose every member is engine-only is a GROUPING, not a tool
         // the model can plan with.
         name: "effects",
-        covers: "the post-crop vignette and the film grain — Adobe-only operators Autoshop \
+        covers: "the post-crop vignette and the film grain — Adobe-only operators AutoShade \
                  carries through the sidecar without rendering",
         members: &[
             "post_crop_vignette",
@@ -1781,7 +1781,7 @@ pub const CONTROL_FAMILIES: [Family; 13] = [
         // holds both halves, so its dot has to.
         name: "detail_effects",
         covers: "the sharpening radius / detail / edge-mask triple and the noise-reduction \
-                 shaping axes — Adobe-only operators Autoshop carries through the sidecar \
+                 shaping axes — Adobe-only operators AutoShade carries through the sidecar \
                  without rendering",
         members: &[
             "sharpen_radius",
@@ -1909,7 +1909,7 @@ fn value_is_active(live: GlobalValue<'_>, neutral: GlobalValue<'_>) -> bool {
 /// now: renaming the thinking fields to sort ahead of `recipe`
 /// alphabetically would force the order via the measured mechanism — a
 /// second probe should confirm the mechanism before any rename trades on it.
-/// The probe stays `#[ignore]`d + env-gated (`AUTOSHOP_THINK_PROBE_KEY`) and
+/// The probe stays `#[ignore]`d + env-gated (`AUTOSHADE_THINK_PROBE_KEY`) and
 /// FAILS LOUDLY by design when the order is not generated, so re-running it
 /// is the mechanism check.
 pub fn think_envelope_schema() -> Value {

@@ -665,7 +665,7 @@ struct PhotoStats {
 /// baseline.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct StateHeader {
-    autoshop_version: String,
+    autoshade_version: String,
     /// The vision proposer's model id (`Config::openai_model`).
     proposer_model: String,
     /// The verifier's model id (`Config::analysis_model`).
@@ -810,20 +810,20 @@ fn load_state(path: &Path, want: &StateHeader) -> Result<Vec<StateRow>> {
             path.display()
         );
     };
-    if head.autoshop_version != want.autoshop_version
+    if head.autoshade_version != want.autoshade_version
         || head.proposer_model != want.proposer_model
         || head.analysis_model != want.analysis_model
     {
         anyhow::bail!(
-            "the saved eval progress at {p} was measured under autoshop {hv} (proposer {hp}, \
-             analysis {ha}); this run is autoshop {wv} (proposer {wp}, analysis {wa}). Folding \
+            "the saved eval progress at {p} was measured under autoshade {hv} (proposer {hp}, \
+             analysis {ha}); this run is autoshade {wv} (proposer {wp}, analysis {wa}). Folding \
              them into one table would report a gap score measured by two different things — \
              re-run with --fresh to start over, or --state <path> to keep both.",
             p = path.display(),
-            hv = head.autoshop_version,
+            hv = head.autoshade_version,
             hp = head.proposer_model,
             ha = head.analysis_model,
-            wv = want.autoshop_version,
+            wv = want.autoshade_version,
             wp = want.proposer_model,
             wa = want.analysis_model,
         );
@@ -1116,7 +1116,7 @@ pub fn run(
         None => default_state_path(dir, limit),
     };
     let header = StateHeader {
-        autoshop_version: env!("CARGO_PKG_VERSION").to_string(),
+        autoshade_version: env!("CARGO_PKG_VERSION").to_string(),
         proposer_model: cfg.openai_model.clone(),
         analysis_model: cfg.analysis_model.clone(),
         limit,
@@ -1748,15 +1748,15 @@ mod tests {
     /// **M1_PLAN §8 #12** — measure the three no-model estimators against the
     /// photographer's own sliders over a real RAW + `.xmp` library.
     ///
-    /// Point `AUTOSHOP_ESTIMATOR_PROBE` at a folder scanned recursively for
+    /// Point `AUTOSHADE_ESTIMATOR_PROBE` at a folder scanned recursively for
     /// RAW files with a sibling `.xmp` (the same pair rule [`run`] uses, via
     /// the same `pipeline::find_raws`), and run:
     ///
     /// ```text
-    /// AUTOSHOP_ESTIMATOR_PROBE=<dir> cargo test --lib -- --ignored --nocapture estimator
+    /// AUTOSHADE_ESTIMATOR_PROBE=<dir> cargo test --lib -- --ignored --nocapture estimator
     /// ```
     ///
-    /// `AUTOSHOP_ESTIMATOR_PROBE_LIMIT` caps the pair count for a quick pass.
+    /// `AUTOSHADE_ESTIMATOR_PROBE_LIMIT` caps the pair count for a quick pass.
     ///
     /// It costs NO API call and writes nothing — it decodes each RAW and
     /// reads each sidecar, both read-only. It is `#[ignore]`d rather than
@@ -1783,18 +1783,17 @@ mod tests {
     /// is scored as the photographer's own, exactly the defect that scoping
     /// exists to prevent.
     #[test]
-    #[ignore = "forensic probe: needs AUTOSHOP_ESTIMATOR_PROBE=<dir of RAW+.xmp pairs>; decodes every pair (minutes)"]
+    #[ignore = "forensic probe: needs AUTOSHADE_ESTIMATOR_PROBE=<dir of RAW+.xmp pairs>; decodes every pair (minutes)"]
     fn estimators_against_the_photographers_own_sliders() {
-        let Ok(dir) = std::env::var("AUTOSHOP_ESTIMATOR_PROBE") else {
+        let Some(dir) = crate::config::live_env("AUTOSHADE_ESTIMATOR_PROBE") else {
             panic!(
-                "set AUTOSHOP_ESTIMATOR_PROBE to a folder of RAW files with sibling .xmp \
+                "set AUTOSHADE_ESTIMATOR_PROBE to a folder of RAW files with sibling .xmp \
                  sidecars (the eval corpus)"
             );
         };
         let root = std::path::PathBuf::from(&dir);
-        assert!(root.is_dir(), "AUTOSHOP_ESTIMATOR_PROBE is not a directory: {dir}");
-        let limit: usize = std::env::var("AUTOSHOP_ESTIMATOR_PROBE_LIMIT")
-            .ok()
+        assert!(root.is_dir(), "AUTOSHADE_ESTIMATOR_PROBE is not a directory: {dir}");
+        let limit: usize = crate::config::live_env("AUTOSHADE_ESTIMATOR_PROBE_LIMIT")
             .and_then(|s| s.parse().ok())
             .unwrap_or(usize::MAX);
         let raws = pipeline::find_raws(&root).expect("scan the probe directory");
@@ -1805,7 +1804,7 @@ mod tests {
             .collect();
         assert!(
             !pairs.is_empty(),
-            "AUTOSHOP_ESTIMATOR_PROBE ({dir}) holds no RAW with a sibling .xmp"
+            "AUTOSHADE_ESTIMATOR_PROBE ({dir}) holds no RAW with a sibling .xmp"
         );
 
         let (mut ev, mut wb_k, mut wb_t) = (Scatter::default(), Scatter::default(), Scatter::default());
@@ -2175,7 +2174,7 @@ mod tests {
     /// A scratch folder of this test's own, removed on the way out.
     fn scratch(name: &str) -> PathBuf {
         let d = std::env::temp_dir()
-            .join(format!("autoshop-eval-{name}-{}", std::process::id()));
+            .join(format!("autoshade-eval-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).expect("scratch dir");
         d
@@ -2365,7 +2364,7 @@ mod tests {
         let dir = scratch("resume-header");
         let path = dir.join("state.jsonl");
         let want = StateHeader {
-            autoshop_version: "0.34.0".into(),
+            autoshade_version: "0.34.0".into(),
             proposer_model: "gpt-image-2".into(),
             analysis_model: "opus".into(),
             limit: 147,
@@ -2398,7 +2397,7 @@ mod tests {
             e
         };
         let mut other = want.clone();
-        other.autoshop_version = "0.33.0".into();
+        other.autoshade_version = "0.33.0".into();
         let e = refusal(&other, "0.33.0");
         assert!(e.contains("0.34.0"), "…and this run's value beside it: {e}");
         let mut other = want.clone();
@@ -2434,7 +2433,7 @@ mod tests {
         let dir = scratch("resume-fallback");
         let path = dir.join("state.jsonl");
         let header = StateHeader {
-            autoshop_version: "0.34.0".into(),
+            autoshade_version: "0.34.0".into(),
             proposer_model: "gpt-image-2".into(),
             analysis_model: "opus".into(),
             limit: 3,

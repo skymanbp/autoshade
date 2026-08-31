@@ -27,11 +27,11 @@ pub(crate) fn model_opts(fetched: &[String], fallback: &[&str], current: &str) -
 /// the scanners and the web server ask — so the dialog literally cannot offer
 /// a different set from the one that opens.
 pub(crate) fn photo_exts() -> Vec<&'static str> {
-    autoshop::pipeline::photo_exts()
+    autoshade::pipeline::photo_exts()
 }
 
 pub(crate) fn is_photo_path(p: &std::path::Path) -> bool {
-    autoshop::pipeline::is_source(p)
+    autoshade::pipeline::is_source(p)
 }
 
 pub(crate) fn photo_file_dialog() -> Option<PathBuf> {
@@ -297,7 +297,7 @@ pub(crate) fn prompt_field(ui: &mut egui::Ui, buf: &mut String, hint: &str) -> e
 /// The `active` predicates themselves live beside the sections they describe
 /// (`panels/develop.rs`, `panels/ai.rs`) so each one can be read against the
 /// field set it covers; two of them are named methods
-/// ([`AutoshopApp::ai_section_active`], [`AutoshopApp::masks_section_active`])
+/// ([`AutoShadeApp::ai_section_active`], [`AutoShadeApp::masks_section_active`])
 /// because a header and something else must agree on the answer.
 pub(crate) fn section_title(base: &str, active: bool) -> String {
     if active {
@@ -315,8 +315,8 @@ pub(crate) fn section_title(base: &str, active: bool) -> String {
 /// activity for a list of parked or muted masks, and only ever repeated the
 /// count the header already prints. Two hand-written predicates for one question
 /// is the drift; this is the deduplication.
-pub(crate) fn mask_active(m: &autoshop::recipe::LocalAdjustment) -> bool {
-    m.enabled && autoshop::render::engine_active(m)
+pub(crate) fn mask_active(m: &autoshade::recipe::LocalAdjustment) -> bool {
+    m.enabled && autoshade::render::engine_active(m)
 }
 
 /// The angles a rotation disclosure can NAME, as one comma list — distinct
@@ -372,10 +372,10 @@ fn rotation_degrees(lang: Lang, degs: impl Iterator<Item = i32>) -> Option<Strin
 /// function's: the sentence is the same either way.
 pub(crate) fn xmp_loss_line(
     lang: Lang,
-    losses: &[autoshop::xmp::MaskLoss],
+    losses: &[autoshade::xmp::MaskLoss],
     globals: &[&'static str],
 ) -> Option<String> {
-    use autoshop::xmp::MaskLossReason as R;
+    use autoshade::xmp::MaskLossReason as R;
     if losses.is_empty() && globals.is_empty() {
         return None;
     }
@@ -383,7 +383,7 @@ pub(crate) fn xmp_loss_line(
     /// an unreadable line, so the count stays the fact and the first few names
     /// are the pointer (the same 4/「+N more」 shape `describe_mask_losses`
     /// uses for the CLI).
-    fn named(lang: Lang, losses: &[autoshop::xmp::MaskLoss], reason: R) -> String {
+    fn named(lang: Lang, losses: &[autoshade::xmp::MaskLoss], reason: R) -> String {
         let names: Vec<&str> =
             losses.iter().filter(|l| l.reason.same_kind(reason)).map(|l| l.name.as_str()).collect();
         let shown = names.len().min(4);
@@ -503,7 +503,7 @@ pub(crate) fn xmp_loss_line(
 ///
 /// MASK losses always interrupt: every one of them is a mask the user made.
 pub(crate) fn xmp_loss_interrupts(
-    losses: &[autoshop::xmp::MaskLoss],
+    losses: &[autoshade::xmp::MaskLoss],
     globals: &[&'static str],
 ) -> bool {
     !losses.is_empty()
@@ -511,7 +511,7 @@ pub(crate) fn xmp_loss_interrupts(
             // A name with no registry row is not something this can vouch for
             // as engine calibration — treat the unknown as the user's, which
             // is the interrupting side.
-            autoshop::advisor::catalogue::global_control(g).is_none_or(|c| !c.engine_only)
+            autoshade::advisor::catalogue::global_control(g).is_none_or(|c| !c.engine_only)
         })
 }
 
@@ -543,7 +543,7 @@ pub(crate) fn xmp_loss_interrupts(
 /// name themselves on every Lightroom photo. They disclose through the
 /// develop panel's own read-only Transform / Calibration section instead.
 pub(crate) fn render_gap_line(lang: Lang, gaps: &[&'static str]) -> Option<String> {
-    use autoshop::advisor::catalogue::CONTROL_FAMILIES;
+    use autoshade::advisor::catalogue::CONTROL_FAMILIES;
     if gaps.is_empty() {
         return None;
     }
@@ -585,9 +585,9 @@ pub(crate) fn render_gap_line(lang: Lang, gaps: &[&'static str]) -> Option<Strin
 pub(crate) fn xmp_import_line(
     lang: Lang,
     imported: usize,
-    losses: &[autoshop::xmp::MaskImportLoss],
+    losses: &[autoshade::xmp::MaskImportLoss],
 ) -> Option<String> {
-    use autoshop::xmp::MaskImportReason as R;
+    use autoshade::xmp::MaskImportReason as R;
     if losses.is_empty() {
         return None;
     }
@@ -820,13 +820,13 @@ pub(crate) fn reorder_move(from: usize, insert: usize) -> (usize, impl Fn(usize)
 /// the web server routes analyze region boxes through the SAME function, so
 /// the two surfaces cannot drift.
 pub(crate) fn view_norm_to_orig(nx: f32, ny: f32, dims: (f32, f32), deg: f32, dist: &LensArg) -> (f32, f32) {
-    autoshop::render::view_to_original_norm(nx, ny, dims, deg, &dist.profile, dist.amount)
+    autoshade::render::view_to_original_norm(nx, ny, dims, deg, &dist.profile, dist.amount)
 }
 
 /// Original-frame normalized point → view normalized point (engine-shared;
 /// NOT clamped — the painter clips overlays to the image rect anyway).
 pub(crate) fn orig_norm_to_view(nx: f32, ny: f32, dims: (f32, f32), deg: f32, dist: &LensArg) -> (f32, f32) {
-    autoshop::render::original_to_view_norm(nx, ny, dims, deg, &dist.profile, dist.amount)
+    autoshade::render::original_to_view_norm(nx, ny, dims, deg, &dist.profile, dist.amount)
 }
 
 /// A mask geometry mapped from the ORIGINAL frame into the view for on-screen
@@ -838,7 +838,7 @@ pub(crate) fn geom_to_view(geom: &MaskGeometry, dims: (f32, f32), deg: f32, dist
     // Off = the composed map moves nothing, INCLUDING the CA composite
     // fill (L04-2/Codex AL F1): a CA-only overshoot zooms the frame, so
     // an identity early-out here desynced mask anchors from the pixels.
-    let geom_off = !autoshop::render::geometry_moves_frame(&dist.profile, dist.amount);
+    let geom_off = !autoshade::render::geometry_moves_frame(&dist.profile, dist.amount);
     if deg == 0.0 && geom_off {
         return geom.clone();
     }
@@ -903,7 +903,7 @@ pub(crate) fn geom_to_view(geom: &MaskGeometry, dims: (f32, f32), deg: f32, dist
 /// definition — the pick-list invalidation here and `config`'s key-home gate
 /// must never disagree about what "same" means.
 pub(crate) fn same_base(a: &str, b: &str) -> bool {
-    autoshop::config::same_endpoint(a, b)
+    autoshade::config::same_endpoint(a, b)
 }
 
 /// The FORMAT dropdown owns the export container; a typed save-path only
@@ -1025,7 +1025,7 @@ pub(crate) fn effort_picker(
 /// under the delivery root FIRST. Pointing the root into the library therefore
 /// SILENTLY retires that protection for the overlap: an ancestor root retires
 /// it for the whole photo folder, a root nested inside the photo's folder for
-/// that subtree. A planted root cannot do this (`AUTOSHOP_OUT_DIR` is
+/// that subtree. A planted root cannot do this (`AUTOSHADE_OUT_DIR` is
 /// `Trust::Destination`, so neither a `.env` nor an ambient settings file may
 /// supply it) — but the user choosing it in Settings had nothing on screen
 /// saying what it costs.
@@ -1042,7 +1042,7 @@ pub(crate) fn delivery_root_shadows_photo(
 ) -> bool {
     let Some(dir) = photo.and_then(std::path::Path::parent) else { return false };
     let lexical = |p: &std::path::Path| {
-        std::path::absolute(p).ok().map(|a| autoshop::pipeline::normalize_lexical(&a))
+        std::path::absolute(p).ok().map(|a| autoshade::pipeline::normalize_lexical(&a))
     };
     let (Some(root), Some(dir)) = (lexical(root), lexical(dir)) else { return false };
     root.starts_with(&dir) || dir.starts_with(&root)
@@ -1051,14 +1051,14 @@ pub(crate) fn delivery_root_shadows_photo(
 /// A [`StashEntry`]'s strip as a persistable record — the quit dialog's
 /// Save-all writes one per stashed photo so background variants survive the
 /// quit (before v0.22 they were "unsavable" and pinned the dialog forever).
-pub(crate) fn stash_strip_record(st: &StashEntry) -> Option<autoshop::store::VariantsRecord> {
+pub(crate) fn stash_strip_record(st: &StashEntry) -> Option<autoshade::store::VariantsRecord> {
     // The ONE triviality judgement (R24-3), shared with the live strip's
     // `current_strip_record`: a lone base negative needs no sidecar UNLESS
     // it carries a name or a minted identity, which nothing else stores.
     if crate::model::strip_is_trivial(st.kind, &st.id, st.name.as_deref(), st.others.len()) {
         return None;
     }
-    Some(autoshop::store::VariantsRecord {
+    Some(autoshade::store::VariantsRecord {
         extra: Default::default(),
         v: 1,
         active_kind: st.kind.store_str().to_string(),
@@ -1066,7 +1066,7 @@ pub(crate) fn stash_strip_record(st: &StashEntry) -> Option<autoshop::store::Var
         others: st
             .others
             .iter()
-            .map(|sv| autoshop::store::VariantEntry {
+            .map(|sv| autoshade::store::VariantEntry {
                 extra: Default::default(),
                 kind: sv.kind.store_str().to_string(),
                 recipe: sv.recipe.clone(),
@@ -1087,7 +1087,7 @@ pub(crate) fn stash_strip_record(st: &StashEntry) -> Option<autoshop::store::Var
 /// (`pipeline::unique_out`, also used by the web fill/heal handlers so the
 /// two surfaces can never hand out colliding master names).
 pub(crate) fn unique_out(path: &std::path::Path, tag: &str) -> Option<PathBuf> {
-    autoshop::pipeline::unique_out(path, tag)
+    autoshade::pipeline::unique_out(path, tag)
 }
 
 /// Mean of the 5×5 neighbourhood around a normalised point, as 0..1 sRGB;
@@ -1196,7 +1196,7 @@ pub(crate) fn abs_display(p: &std::path::Path) -> String {
 /// Success is judged by SPAWN, not by exit status: `explorer.exe` returns a
 /// non-zero code even when it opens the window, so waiting on it would report a
 /// failure that did not happen. Stated cost of not waiting: on Unix the
-/// `xdg-open`/`open` child is not reaped until Autoshop exits (one defunct entry
+/// `xdg-open`/`open` child is not reaped until AutoShade exits (one defunct entry
 /// per click of a button nobody clicks in a loop). Waiting instead would block
 /// the UI thread on a helper whose runtime we do not control.
 ///
@@ -1222,7 +1222,7 @@ pub(crate) fn reveal_folder(dir: &std::path::Path) -> std::io::Result<()> {
         // ABSOLUTE `explorer.exe`, never the bare name. Rust's own program
         // resolution on Windows (`resolve_exe`) mirrors CreateProcess: the
         // executable's directory, then THE CURRENT DIRECTORY, then PATH — so an
-        // `explorer.exe` sitting in the folder Autoshop was launched from would
+        // `explorer.exe` sitting in the folder AutoShade was launched from would
         // run instead of Windows'. That is the v0.18.0 threat model exactly
         // (unpack someone else's photo bundle, run the app there, and their
         // files must not execute). `SystemRoot` / `windir` are SYSTEM
@@ -1286,7 +1286,7 @@ pub(crate) static GUI_TMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic:
 
 pub(crate) fn gui_tmp_png(kind: &str) -> PathBuf {
     std::env::temp_dir().join(format!(
-        "autoshop_gui_{kind}_{}_{}.png",
+        "autoshade_gui_{kind}_{}_{}.png",
         std::process::id(),
         GUI_TMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     ))
@@ -1367,7 +1367,7 @@ pub(crate) fn clipping_overlay_rgb(rgb: &image::RgbImage) -> egui::ColorImage {
 /// worker's layer within one session (L18).
 pub(crate) fn clipping_overlay_for(
     rgb: &image::RgbImage,
-    crop: Option<autoshop::recipe::Crop>,
+    crop: Option<autoshade::recipe::Crop>,
 ) -> egui::ColorImage {
     let mut overlay = clipping_overlay_rgb(rgb);
     let Some(c) = crop else { return overlay };
@@ -1393,7 +1393,7 @@ pub(crate) fn build_preview(
     recipe: EditRecipe,
     show_clipping: bool,
 ) -> PreviewDone {
-    let mut after = autoshop::render::develop_preview(&base, &recipe);
+    let mut after = autoshade::render::develop_preview(&base, &recipe);
     {
         // The COMPOSED profile (R25 B3): the manual CA pair folds onto the
         // same per-channel radius knots, so reading the raw profile here
@@ -1401,13 +1401,13 @@ pub(crate) fn build_preview(
         // Scoped, because the Cow borrows `recipe` and `recipe` is MOVED into
         // the result below (a borrow held by a value with a destructor lives
         // to the end of its scope).
-        let geom = autoshop::render::geometry_profile(&recipe);
+        let geom = autoshade::render::geometry_profile(&recipe);
         if geom.geometry_active() || recipe.lens_distortion != 0.0 {
-            after = autoshop::render::apply_lens_geometry(&after, &geom, recipe.lens_distortion);
+            after = autoshade::render::apply_lens_geometry(&after, &geom, recipe.lens_distortion);
         }
     }
     if recipe.straighten_deg != 0.0 {
-        after = autoshop::render::rotate_straighten(&after, recipe.straighten_deg);
+        after = autoshade::render::rotate_straighten(&after, recipe.straighten_deg);
     }
     // into_rgb8 MOVES the buffer in the common no-geometry case (develop_preview
     // returns ImageRgb8) — to_rgb8() deep-copied ~3.3 MB per tick at 1280.
@@ -1542,7 +1542,7 @@ pub(crate) fn big_decode_gate() -> &'static std::sync::Mutex<()> {
 pub(crate) fn segment_helper_available() -> bool {
     static OK: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *OK.get_or_init(|| {
-        let cfg = autoshop::config::Config::load();
+        let cfg = autoshade::config::Config::load();
         std::path::Path::new(&cfg.segment_script).exists()
     })
 }
@@ -1562,7 +1562,7 @@ pub(crate) fn segment_helper_available() -> bool {
 pub(crate) fn denoise_helper_available() -> bool {
     static OK: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *OK.get_or_init(|| {
-        let cfg = autoshop::config::Config::load();
+        let cfg = autoshade::config::Config::load();
         std::path::Path::new(&cfg.denoise_script).exists()
     })
 }
@@ -1570,7 +1570,7 @@ pub(crate) fn denoise_helper_available() -> bool {
 /// Where the persistent 160px thumbnail for `src` lives, or `None` when the
 /// source can't be stat'ed (no stable key → no caching). Rooted at the same
 /// per-user store as develops/settings (`store_root()` honours the
-/// AUTOSHOP_DATA_DIR override — a portable setup must not split its data
+/// AUTOSHADE_DATA_DIR override — a portable setup must not split its data
 /// across two roots) and keyed by absolute path + mtime + size, so an
 /// edited/replaced source misses. DefaultHasher is fine HERE (unlike the
 /// develop keys): a hash that drifts across Rust releases only costs a
@@ -1578,7 +1578,7 @@ pub(crate) fn denoise_helper_available() -> bool {
 pub(crate) fn thumb_cache_file(src: &std::path::Path) -> Option<PathBuf> {
     use std::hash::{Hash, Hasher};
     let meta = std::fs::metadata(src).ok()?;
-    let dir = autoshop::store::store_root().join("thumbs");
+    let dir = autoshade::store::store_root().join("thumbs");
     let mut h = std::collections::hash_map::DefaultHasher::new();
     // Decoder-generation salt: bump when decode semantics change what a
     // thumb LOOKS like (v2 = EXIF orientation applied to baked images;
@@ -1596,7 +1596,7 @@ pub(crate) fn thumb_cache_file(src: &std::path::Path) -> Option<PathBuf> {
     // entry forever. This is the one part of the key that comes from the
     // develop store rather than the photo (`store::saved_quarter_turns` —
     // cheap, side-effect-free, fails toward "no turn").
-    let turns = autoshop::store::saved_quarter_turns(src);
+    let turns = autoshade::store::saved_quarter_turns(src);
     turns.hash(&mut h);
     Some(dir.join(format!("{:016x}.jpg", h.finish())))
 }
@@ -1645,7 +1645,7 @@ pub(crate) fn file_stamp(path: &std::path::Path) -> FileStamp {
 /// The develop's current baked-pixel identity (see [`BaseCacheKey`]). The
 /// master's own stamp is included so RE-BAKING to the same path still misses.
 pub(crate) fn pixel_identity(path: &std::path::Path) -> PixelIdentity {
-    let (master, generated) = autoshop::store::read_pixel_source(path)?;
+    let (master, generated) = autoshade::store::read_pixel_source(path)?;
     let stamp = file_stamp(&master);
     Some((master, generated, stamp))
 }

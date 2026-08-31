@@ -1,7 +1,7 @@
 //! Runtime configuration for the AI providers.
 //!
 //! Resolution order (later wins): built-in defaults → environment (a gitignored
-//! `.env` via `dotenvy`) → the UI-written local file `autoshop.local.json`
+//! `.env` via `dotenvy`) → the UI-written local file `autoshade.local.json`
 //! (also gitignored). Secrets (API keys) come only from `.env` or that local
 //! file, never from a committed source and never logged.
 //!
@@ -69,10 +69,14 @@ pub struct LocalSettings {
 
 /// Path to the local settings file — the per-user store root, so the SAME
 /// settings load no matter which directory the app was launched from (this
-/// used to be a cwd-relative `autoshop.local.json`).
+/// used to be a cwd-relative `autoshade.local.json`).
 pub fn local_settings_path() -> PathBuf {
     crate::store::settings_path()
 }
+
+/// The settings file's name, and the one it had up to v1.1.0.
+pub(crate) const SETTINGS_FILE: &str = "autoshade.local.json";
+pub(crate) const LEGACY_SETTINGS_FILE: &str = "autoshop.local.json";
 
 /// Where a [`LocalSettings`] came from. This is a TRUST label, not a
 /// breadcrumb: the sources do not deserve the same authority.
@@ -80,12 +84,12 @@ pub fn local_settings_path() -> PathBuf {
 pub enum SettingsOrigin {
     /// [`local_settings_path`] under a PER-USER store root. The user's own.
     Central,
-    /// [`local_settings_path`] under the shared `<temp>/autoshop` fallback
+    /// [`local_settings_path`] under the shared `<temp>/autoshade` fallback
     /// ([`crate::store::RootTrust::SharedFallback`]) — the right PATH, but a
     /// directory every account on the machine can write, so whoever created
     /// the file first is not necessarily this user. Treated as ambient.
     SharedRoot,
-    /// A cwd-relative `autoshop.local.json`. AMBIENT: whatever directory the
+    /// A cwd-relative `autoshade.local.json`. AMBIENT: whatever directory the
     /// app happens to be launched from supplies it.
     WorkingDir,
     /// No file was read.
@@ -112,9 +116,9 @@ impl LocalSettings {
     /// base URL at the attacker and the next Analyze would hand over the
     /// user's API key". The FILESYSTEM route to that same outcome was open:
     /// resolution is per FIELD, not per file, so a planted
-    /// `autoshop.local.json` carrying only `image_base_url` redirected the
+    /// `autoshade.local.json` carrying only `image_base_url` redirected the
     /// endpoint while the real key still came from `.env` / the environment.
-    /// Extracting a shared archive and running Autoshop inside it was enough.
+    /// Extracting a shared archive and running AutoShade inside it was enough.
     ///
     /// WHICH fields survive is no longer restated here: it is read off
     /// [`SETTINGS`], the one table that also decides what a `.env` may set and
@@ -284,10 +288,10 @@ fn file_label(p: &Path, origin: SettingsOrigin) -> String {
     let name = p
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "autoshop.local.json".to_string());
+        .unwrap_or_else(|| SETTINGS_FILE.to_string());
     let place = match origin {
-        SettingsOrigin::Central => "in your Autoshop data folder",
-        SettingsOrigin::SharedRoot => "in the shared temp Autoshop folder",
+        SettingsOrigin::Central => "in your AutoShade data folder",
+        SettingsOrigin::SharedRoot => "in the shared temp AutoShade folder",
         SettingsOrigin::WorkingDir => "in the current working directory",
         SettingsOrigin::None => "",
     };
@@ -296,7 +300,7 @@ fn file_label(p: &Path, origin: SettingsOrigin) -> String {
 
 pub fn load_local_settings_from() -> (LocalSettings, SettingsOrigin) {
     // The central path is only CENTRAL when the root it sits under is
-    // per-account. `<temp>/autoshop` is the last-resort root and is writable
+    // per-account. `<temp>/autoshade` is the last-resort root and is writable
     // by every local account, so a settings file found there gets ambient
     // authority — the same treatment as one found in the working directory.
     let (root, trust) = crate::store::store_root_with_trust();
@@ -305,13 +309,20 @@ pub fn load_local_settings_from() -> (LocalSettings, SettingsOrigin) {
         crate::store::RootTrust::SharedFallback => SettingsOrigin::SharedRoot,
     };
     debug_assert!(local_settings_path().starts_with(&root));
+    // Current name first at each location, then the pre-rename one: a store
+    // adopted from an Autoshop install still holds `autoshop.local.json`, and
+    // the first save writes the current name, so this fallback retires itself.
+    // Location precedence is unchanged — central still beats the working
+    // directory, whichever spelling either of them uses.
     for (p, origin) in [
         (local_settings_path(), central),
-        (PathBuf::from("autoshop.local.json"), SettingsOrigin::WorkingDir),
+        (root.join(LEGACY_SETTINGS_FILE), central),
+        (PathBuf::from(SETTINGS_FILE), SettingsOrigin::WorkingDir),
+        (PathBuf::from(LEGACY_SETTINGS_FILE), SettingsOrigin::WorkingDir),
     ] {
         // These warnings go to stderr — into logs, screenshots and pasted bug
         // reports — so they name the FILE and the FOLDER ROLE, never the full
-        // path: `%LOCALAPPDATA%\autoshop\…` spells out the account name and
+        // path: `%LOCALAPPDATA%\autoshade\…` spells out the account name and
         // the profile layout. Anyone who needs the real location has it on
         // screen: the Settings panel prints the store root.
         let file = file_label(&p, origin);
@@ -327,7 +338,16 @@ pub fn load_local_settings_from() -> (LocalSettings, SettingsOrigin) {
             }
         };
         match serde_json::from_str::<LocalSettings>(&s) {
-            Ok(v) => return (v, origin),
+            Ok(v) => {
+                if p.file_name().is_some_and(|n| n == LEGACY_SETTINGS_FILE) {
+                    eprintln!(
+                        "note: read your settings from {LEGACY_SETTINGS_FILE} — the \
+                         pre-rename name. Saving settings writes {SETTINGS_FILE} \
+                         instead, and the next release stops reading the old one."
+                    );
+                }
+                return (v, origin);
+            }
             Err(e) => {
                 // Keep the bytes: they hold the user's API keys, and a save is
                 // about to overwrite this path. Best-effort and once — a
@@ -486,18 +506,18 @@ pub const DEFAULT_DELIVERY_ROOT: &str = "out";
 /// deliverable (`<stem>.developed.{tif,jpg}`), the reimagine / retouch / heal
 /// / clone pixel masters (`pipeline::unique_out`), the extracted style prompt
 /// (`<stem>.style.txt`), the `match` report and preview. All of those are
-/// "the files Autoshop produces FROM a photo", one semantic, one root.
+/// "the files AutoShade produces FROM a photo", one semantic, one root.
 ///
 /// WHAT IT DOES NOT COVER, deliberately — each of these is a DIFFERENT
 /// semantic that merely used to share the same folder name:
 ///   * the develop store (recipes / XMP / versions / masks) — already
 ///     per-user under [`crate::store::store_root`] since v0.13, and moving it
-///     is [`crate::store::store_root`]'s own setting (`AUTOSHOP_DATA_DIR`).
+///     is [`crate::store::store_root`]'s own setting (`AUTOSHADE_DATA_DIR`).
 ///   * `out/imported` — where the WEB surface parks an uploaded SOURCE photo.
 ///     That is library INPUT, not a deliverable; filing a stranger's upload
 ///     under the user's delivery folder would mix the two.
 ///   * the pre-v0.13 legacy `./out` migration roots
-///     (`store::legacy_out_roots`, `AUTOSHOP_LEGACY_OUT`) — a READ-only
+///     (`store::legacy_out_roots`, `AUTOSHADE_LEGACY_OUT`) — a READ-only
 ///     archaeology path pinned to where old builds actually wrote, which a
 ///     new setting cannot retroactively change.
 ///
@@ -524,7 +544,7 @@ pub fn delivery_root() -> PathBuf {
     let resolve = || {
         choose_delivery_root(
             load_local_settings().out_dir.as_deref(),
-            resolve_env("AUTOSHOP_OUT_DIR"),
+            resolve_env("AUTOSHADE_OUT_DIR"),
         )
     };
     // A poisoned memo resolves WITHOUT memoising rather than pinning a root
@@ -647,7 +667,7 @@ pub struct Config {
     /// one of the photographer's own finished photographs on a paid vision
     /// call as IMAGE 2. `analyze --reference-image` / `auto --reference-image`
     /// turn it on for one run; this makes it the standing answer for a user who
-    /// always wants it, the way `AUTOSHOP_STYLE_STRENGTH` does for the dial.
+    /// always wants it, the way `AUTOSHADE_STYLE_STRENGTH` does for the dial.
     pub send_reference_image: bool,
 }
 
@@ -661,20 +681,20 @@ pub struct Config {
 // The three lists it replaces drifted, provably: the guard's own test carried
 // a copied 14-name array while the constant had grown to 17, so PYTHONPATH,
 // PYTHONHOME and the weight cache went unchecked. Worse, `Config::load` read
-// that array BY INDEX (`pre(11)` was AUTOSHOP_OPENAI_MODEL), so inserting or
+// that array BY INDEX (`pre(11)` was AUTOSHADE_OPENAI_MODEL), so inserting or
 // removing a single name silently repointed unrelated config fields at the
 // wrong variable — which is exactly what narrowing the list required.
 
 /// What a setting DECIDES. This, and only this, determines who may set it.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum Trust {
-    /// Authenticates and bills the user for Autoshop's OWN calls. A planted
+    /// Authenticates and bills the user for AutoShade's OWN calls. A planted
     /// one spends a stranger's money on the user's work.
     Secret,
     /// Names WHERE bytes are sent, WHICH account pays, or WHAT program runs:
     /// endpoints, executables, script paths, search paths, the store root, a
     /// child's credentials. A planted one is exfiltration or code execution,
-    /// not a preference. `AUTOSHOP_CLAUDE_BIN` and `AUTOSHOP_PYTHON` reach
+    /// not a preference. `AUTOSHADE_CLAUDE_BIN` and `AUTOSHADE_PYTHON` reach
     /// `Command::new` verbatim (`advisor/claude.rs`, `denoise.rs`,
     /// `segment.rs`) and the script variables become that command's argv.
     Destination,
@@ -715,7 +735,7 @@ impl Source {
             // (user decision, 2026-08-11), which restores what README and
             // ARCHITECTURE §3 have always promised. Note the boundary this
             // draws: a photo pack's `.env` can now flip
-            // `AUTOSHOP_ANALYSIS_PROVIDER` from `oauth` to `api` — but the
+            // `AUTOSHADE_ANALYSIS_PROVIDER` from `oauth` to `api` — but the
             // base URL and the key it would need stay Destination/…, so the
             // call still goes to the user's own endpoint with the user's own
             // key. That is a model choice, not endpoint redirection.
@@ -754,67 +774,67 @@ const fn bound(
 /// A name absent from this table is `Preference` by default — that is the
 /// pass-through third-party knobs depend on (HF_HOME, CUDA_VISIBLE_DEVICES,
 /// proxy variables) and it preserves the `.env` contract for anything not
-/// listed. New Autoshop settings must be added here; the tests below fail if
-/// this file names an `AUTOSHOP_*` variable the table does not classify.
+/// listed. New AutoShade settings must be added here; the tests below fail if
+/// this file names an `AUTOSHADE_*` variable the table does not classify.
 pub(crate) const SETTINGS: &[Setting] = &[
     // --- image role: the vision proposer + generative edits ------------------
     bound("OPENAI_API_KEY", Trust::Secret, |s| &mut s.image_api_key),
-    bound("AUTOSHOP_OPENAI_BASE_URL", Trust::Destination, |s| &mut s.image_base_url),
-    bound("AUTOSHOP_OPENAI_MODEL", Trust::Preference, |s| &mut s.image_model),
-    bound("AUTOSHOP_OPENAI_IMAGE_MODEL", Trust::Preference, |s| &mut s.image_gen_model),
-    bound("AUTOSHOP_IMAGE_PROVIDER", Trust::Preference, |s| &mut s.image_provider),
-    bound("AUTOSHOP_IMAGE_EFFORT", Trust::Preference, |s| &mut s.image_effort),
-    env_only("AUTOSHOP_IMAGE_QUALITY", Trust::Preference),
-    env_only("AUTOSHOP_IMAGE_MAX_PX", Trust::Preference),
+    bound("AUTOSHADE_OPENAI_BASE_URL", Trust::Destination, |s| &mut s.image_base_url),
+    bound("AUTOSHADE_OPENAI_MODEL", Trust::Preference, |s| &mut s.image_model),
+    bound("AUTOSHADE_OPENAI_IMAGE_MODEL", Trust::Preference, |s| &mut s.image_gen_model),
+    bound("AUTOSHADE_IMAGE_PROVIDER", Trust::Preference, |s| &mut s.image_provider),
+    bound("AUTOSHADE_IMAGE_EFFORT", Trust::Preference, |s| &mut s.image_effort),
+    env_only("AUTOSHADE_IMAGE_QUALITY", Trust::Preference),
+    env_only("AUTOSHADE_IMAGE_MAX_PX", Trust::Preference),
     // --- analysis role: the verifier -----------------------------------------
-    bound("AUTOSHOP_ANALYSIS_API_KEY", Trust::Secret, |s| &mut s.analysis_api_key),
-    bound("AUTOSHOP_ANALYSIS_BASE_URL", Trust::Destination, |s| &mut s.analysis_base_url),
-    bound("AUTOSHOP_ANALYSIS_PROVIDER", Trust::Preference, |s| &mut s.analysis_provider),
-    bound("AUTOSHOP_ANALYSIS_MODEL", Trust::Preference, |s| &mut s.analysis_model),
-    bound("AUTOSHOP_ANALYSIS_EFFORT", Trust::Preference, |s| &mut s.analysis_effort),
-    env_only("AUTOSHOP_CLAUDE_MODEL", Trust::Preference), // legacy alias for ANALYSIS_MODEL
-    env_only("AUTOSHOP_CLAUDE_BIN", Trust::Destination),  // Command::new
+    bound("AUTOSHADE_ANALYSIS_API_KEY", Trust::Secret, |s| &mut s.analysis_api_key),
+    bound("AUTOSHADE_ANALYSIS_BASE_URL", Trust::Destination, |s| &mut s.analysis_base_url),
+    bound("AUTOSHADE_ANALYSIS_PROVIDER", Trust::Preference, |s| &mut s.analysis_provider),
+    bound("AUTOSHADE_ANALYSIS_MODEL", Trust::Preference, |s| &mut s.analysis_model),
+    bound("AUTOSHADE_ANALYSIS_EFFORT", Trust::Preference, |s| &mut s.analysis_effort),
+    env_only("AUTOSHADE_CLAUDE_MODEL", Trust::Preference), // legacy alias for ANALYSIS_MODEL
+    env_only("AUTOSHADE_CLAUDE_BIN", Trust::Destination),  // Command::new
     // --- python sidecars ------------------------------------------------------
-    env_only("AUTOSHOP_PYTHON", Trust::Destination), // Command::new
-    env_only("AUTOSHOP_DENOISE_SCRIPT", Trust::Destination), // that command's argv
-    env_only("AUTOSHOP_SEGMENT_SCRIPT", Trust::Destination),
-    env_only("AUTOSHOP_EMBED_SCRIPT", Trust::Destination),
-    env_only("AUTOSHOP_CORRESPOND_SCRIPT", Trust::Destination),
-    env_only("AUTOSHOP_DESCRIBE_SCRIPT", Trust::Destination),
+    env_only("AUTOSHADE_PYTHON", Trust::Destination), // Command::new
+    env_only("AUTOSHADE_DENOISE_SCRIPT", Trust::Destination), // that command's argv
+    env_only("AUTOSHADE_SEGMENT_SCRIPT", Trust::Destination),
+    env_only("AUTOSHADE_EMBED_SCRIPT", Trust::Destination),
+    env_only("AUTOSHADE_CORRESPOND_SCRIPT", Trust::Destination),
+    env_only("AUTOSHADE_DESCRIBE_SCRIPT", Trust::Destination),
     // A redirected weight cache is a poisoned-model path.
-    env_only("AUTOSHOP_DENOISE_CACHE", Trust::Destination),
-    env_only("AUTOSHOP_DENOISE_MODEL", Trust::Preference),
+    env_only("AUTOSHADE_DENOISE_CACHE", Trust::Destination),
+    env_only("AUTOSHADE_DENOISE_MODEL", Trust::Preference),
     // --- store, tuning knobs ---------------------------------------------------
     // Sites the TRUSTED settings file itself, so it decides where the key is
     // read from — the root of the whole trust story.
-    env_only("AUTOSHOP_DATA_DIR", Trust::Destination),
-    env_only("AUTOSHOP_STYLE_STRENGTH", Trust::Preference),
+    env_only("AUTOSHADE_DATA_DIR", Trust::Destination),
+    env_only("AUTOSHADE_STYLE_STRENGTH", Trust::Preference),
     // DESTINATION, not Preference, and this is the one place in this table
     // where that call is worth stating. It carries no key and no address, so
     // the letter of `Preference` fits — but what it decides is whether one of
     // the user's own finished PHOTOGRAPHS is put on the wire at all, and the
     // threat model this table exists for is an ambient `.env` arriving inside
-    // an unzipped photo pack. A planted `AUTOSHOP_ANALYSIS_PROVIDER` picks a
+    // an unzipped photo pack. A planted `AUTOSHADE_ANALYSIS_PROVIDER` picks a
     // model; a planted one of these uploads the photographer's work. The live
     // environment and the trusted central settings file may set it; a photo
     // pack may not.
-    env_only("AUTOSHOP_SEND_REFERENCE_IMAGE", Trust::Destination),
-    env_only("AUTOSHOP_HTTP_TIMEOUT_SECS", Trust::Preference),
-    env_only("AUTOSHOP_SIDECAR_TIMEOUT_SECS", Trust::Preference),
+    env_only("AUTOSHADE_SEND_REFERENCE_IMAGE", Trust::Destination),
+    env_only("AUTOSHADE_HTTP_TIMEOUT_SECS", Trust::Preference),
+    env_only("AUTOSHADE_SIDECAR_TIMEOUT_SECS", Trust::Preference),
     // Names a directory to READ pre-v0.13 sidecars from during an explicitly
     // user-started import. It writes nothing and runs nothing, so it stays a
     // preference — the strictest reading would make it Destination, but that
     // would silently break the documented `.env` migration knob.
-    env_only("AUTOSHOP_LEGACY_OUT", Trust::Preference),
+    env_only("AUTOSHADE_LEGACY_OUT", Trust::Preference),
     // The DELIVERY ROOT (M8) is the exact opposite case, and lands on the
     // other side of the same line: it names a directory every export and
     // every pixel master is WRITTEN to. A planted one does not merely choose
     // a folder — it decides where a stranger's developed photos are filed,
     // and (via `guard_readonly`'s own-output allowance) which directory stops
     // counting as the read-only photo library. "Names WHERE bytes are sent",
-    // so Destination: neither a `.env` nor an ambient `autoshop.local.json`
+    // so Destination: neither a `.env` nor an ambient `autoshade.local.json`
     // may supply it.
-    bound("AUTOSHOP_OUT_DIR", Trust::Destination, |s| &mut s.out_dir),
+    bound("AUTOSHADE_OUT_DIR", Trust::Destination, |s| &mut s.out_dir),
     // --- foreign names this process or its children obey ------------------------
     env_only("PATH", Trust::Destination),
     // Both Python sidecars inherit the environment, and a `.env`'s
@@ -833,11 +853,85 @@ pub(crate) const SETTINGS: &[Setting] = &[
 ];
 
 /// What `name` decides. Unlisted ⇒ [`Trust::Preference`] (see [`SETTINGS`]).
+///
+/// A pre-rename `AUTOSHOP_*` spelling is normalised FIRST, so the table carries
+/// exactly one row per setting and an old name can never resolve to a weaker
+/// policy than its current one. A second row per name would BE the bug the
+/// alias invites: it would look classified while a `.env` set it anyway.
 pub(crate) fn trust_of(name: &str) -> Trust {
+    let name = canonical_env_name(name);
     SETTINGS
         .iter()
-        .find(|s| s.env == name)
+        .find(|s| s.env == name.as_ref())
         .map_or(Trust::Preference, |s| s.trust)
+}
+
+/// The current variable prefix, and the one this app used up to v1.1.0.
+///
+/// Autoshop became AutoShade after v1.1.0. Every setting answers to BOTH
+/// spellings for one more version; the release notes of the version that drops
+/// the old one say so, and [`warn_legacy_env`] says so on the way past.
+const ENV_PREFIX: &str = "AUTOSHADE_";
+const LEGACY_ENV_PREFIX: &str = "AUTOSHOP_";
+
+/// The CURRENT spelling of `name`. Borrows unless a rewrite is needed, so the
+/// overwhelmingly common path allocates nothing.
+fn canonical_env_name(name: &str) -> std::borrow::Cow<'_, str> {
+    match name.strip_prefix(LEGACY_ENV_PREFIX) {
+        Some(rest) => std::borrow::Cow::Owned(format!("{ENV_PREFIX}{rest}")),
+        None => std::borrow::Cow::Borrowed(name),
+    }
+}
+
+/// The pre-rename spelling of `name`, or `None` when it has none.
+fn legacy_env_name(name: &str) -> Option<String> {
+    name.strip_prefix(ENV_PREFIX).map(|rest| format!("{LEGACY_ENV_PREFIX}{rest}"))
+}
+
+/// THE alias policy, over an injected lookup: ask for the current name, and
+/// only when that says nothing ask for the pre-rename one — through the SAME
+/// lookup, so the old spelling can never reach a source the new one could not.
+///
+/// One function, three doors ([`resolve_env`], [`live_env`], [`live_env_os`]),
+/// because 68 variables changed name at once and a policy written out three
+/// times is a policy that drifts twice. Being generic over the value also makes
+/// it testable against a plain map — the alternative was writing the process
+/// environment from a test, which is `unsafe` in edition 2024 and races every
+/// other test in the binary.
+fn with_legacy_alias<T>(name: &str, get: impl Fn(&str) -> Option<T>) -> Option<T> {
+    if let Some(v) = get(name) {
+        return Some(v);
+    }
+    let legacy = legacy_env_name(name)?;
+    let v = get(&legacy)?;
+    warn_legacy_env(&legacy, name);
+    Some(v)
+}
+
+/// Say, ONCE per stale name, that the pre-rename spelling was what answered.
+fn warn_legacy_env(legacy: &str, current: &str) {
+    if first_sighting_of(legacy) {
+        eprintln!(
+            "warning: {legacy} still works, but it is the pre-rename name and the next release removes it — rename it to {current}."
+        );
+    }
+}
+
+/// True the FIRST time this process is asked about `legacy`, false ever after.
+///
+/// Per NAME, not per process: a setup carrying three stale names would
+/// otherwise hear about one and keep the other two, which is the silent
+/// half-migration the warning exists to prevent. And never per READ —
+/// `resolve_env` runs on every `Config::load`, so a per-read warning would be
+/// noise the user learns to scroll past.
+fn first_sighting_of(legacy: &str) -> bool {
+    static SAID: std::sync::OnceLock<std::sync::Mutex<std::collections::BTreeSet<String>>> =
+        std::sync::OnceLock::new();
+    // A poisoned mutex must not cost the caller its VALUE: the warning is
+    // advisory, the setting is not. Recover the set and carry on.
+    let mut said =
+        SAID.get_or_init(Default::default).lock().unwrap_or_else(|e| e.into_inner());
+    said.insert(legacy.to_string())
 }
 
 /// The `.env`, parsed ONCE per process into an OWNED map (L16#3): the
@@ -914,7 +1008,16 @@ pub fn env_or_dotenv(key: &str) -> Option<String> {
 /// names, and a `pre(i)` closure that indexed the protected array
 /// POSITIONALLY), which is how moving a name between the two policies could
 /// silently repoint an unrelated config field at the wrong variable.
+///
+/// Both spellings resolve here, through [`with_legacy_alias`]: environment and
+/// `.env` alike, each under that name's own trust policy, with the current name
+/// winning whenever it has anything to say.
 pub(crate) fn resolve_env(name: &str) -> Option<String> {
+    with_legacy_alias(name, resolve_exact)
+}
+
+/// [`resolve_env`] for ONE spelling: no alias, no warning.
+fn resolve_exact(name: &str) -> Option<String> {
     let live = env::var(name).ok();
     if Source::DotEnv.may_supply(trust_of(name)) {
         dotenv_map().get(name).cloned().or(live)
@@ -924,9 +1027,31 @@ pub(crate) fn resolve_env(name: &str) -> Option<String> {
     .filter(|s| !s.trim().is_empty())
 }
 
+/// The LIVE environment only, with the same alias policy — the door for names
+/// a `.env` has never been able to supply and must not start supplying now.
+///
+/// The rename found 34 direct `std::env::var` reads of pre-rename names
+/// scattered across the crate: fixture roots, probe outputs, the guard on
+/// deleting from the calibration corpus, two sidecar precision switches.
+/// Collecting them onto [`resolve_env`] would have handed a planted `.env`
+/// control of every one of them — a trust change smuggled in on a rename.
+/// This door keeps their semantics EXACTLY as they were (the process
+/// environment, nothing else) and adds only what the rename owes them: the
+/// pre-rename name still answers, once, out loud.
+pub fn live_env(name: &str) -> Option<String> {
+    with_legacy_alias(name, |n| env::var(n).ok())
+}
+
+/// [`live_env`] for values that are PATHS: a store root or a corpus directory
+/// may be any sequence the platform accepts, and `env::var` silently drops the
+/// ones that are not UTF-8.
+pub fn live_env_os(name: &str) -> Option<std::ffi::OsString> {
+    with_legacy_alias(name, |n: &str| env::var_os(n))
+}
+
 /// Foreign environment names a `.env` may push INTO a child process.
 ///
-/// An ALLOWLIST, and it has to be one. [`Trust`] classifies AUTOSHOP's own
+/// An ALLOWLIST, and it has to be one. [`Trust`] classifies AUTOSHADE's own
 /// settings — a CLOSED set, where "not in the table" means "not a setting of
 /// ours", so defaulting to `Preference` is safe. A child's environment is an
 /// OPEN set, where "not in the table" includes every loader and interpreter
@@ -944,7 +1069,7 @@ pub(crate) fn resolve_env(name: &str) -> Option<String> {
 /// no path, no endpoint, no credential, nothing that loads code. That
 /// deliberately excludes the cache knobs the old comment advertised
 /// (`HF_HOME`, `TORCH_HOME`): a redirected cache is a poisoned-model path,
-/// which is exactly why `AUTOSHOP_DENOISE_CACHE` is `Destination`. It equally
+/// which is exactly why `AUTOSHADE_DENOISE_CACHE` is `Destination`. It equally
 /// excludes the proxy variables: a proxy decides where bytes go.
 ///
 /// The reach this costs is small and recoverable, because a child INHERITS the
@@ -1025,7 +1150,7 @@ pub fn same_endpoint(a: &str, b: &str) -> bool {
 ///
 /// Both Settings surfaces store a cleared effort field as `""` — "let the
 /// provider decide" — but the generic `pick_opt` filters empties out before
-/// consulting the environment, so with `AUTOSHOP_*_EFFORT` set the one choice
+/// consulting the environment, so with `AUTOSHADE_*_EFFORT` set the one choice
 /// the field exists to express was the one choice it could not make: the
 /// blank fell through, the env tier came back, and Settings showed the tier
 /// the user had just cleared. Absent (the field was never saved) still defers
@@ -1142,12 +1267,12 @@ impl Config {
                 "in a settings file under the SHARED temp folder (this machine has no per-user \
                  data directory, so every account can write there)"
             } else {
-                "in ./autoshop.local.json — a settings file found in the WORKING DIRECTORY"
+                "in ./autoshade.local.json — a settings file found in the WORKING DIRECTORY"
             };
             eprintln!(
                 "warning: ignoring the API key and base-URL fields {where_}: it is not trusted \
                  to choose where your API key is sent. Save your settings in the app, or set \
-                 AUTOSHOP_DATA_DIR to a folder only you can write."
+                 AUTOSHADE_DATA_DIR to a folder only you can write."
             );
         }
         let local = local.restricted_to(src);
@@ -1171,9 +1296,9 @@ impl Config {
         // it was saved for (`file_key_for`), so the key pick needs the
         // resolved base in hand.
         let image_base =
-            pick(&local.image_base_url, env_val("AUTOSHOP_OPENAI_BASE_URL"), default_base);
+            pick(&local.image_base_url, env_val("AUTOSHADE_OPENAI_BASE_URL"), default_base);
         let analysis_base =
-            pick(&local.analysis_base_url, env_val("AUTOSHOP_ANALYSIS_BASE_URL"), default_base);
+            pick(&local.analysis_base_url, env_val("AUTOSHADE_ANALYSIS_BASE_URL"), default_base);
         // Bundled sidecar helpers resolve against the PROGRAM's own tree,
         // never the cwd (see `bundled_helper`): a photo pack carrying
         // `python/denoise.py` used to have that file executed as the user
@@ -1182,20 +1307,20 @@ impl Config {
         // builds keep the repo cache and a packaged install stays beside
         // the exe.
         let denoise_script =
-            env_val("AUTOSHOP_DENOISE_SCRIPT").unwrap_or_else(|| bundled_helper("python/denoise.py"));
-        let denoise_cache = env_val("AUTOSHOP_DENOISE_CACHE").unwrap_or_else(|| {
+            env_val("AUTOSHADE_DENOISE_SCRIPT").unwrap_or_else(|| bundled_helper("python/denoise.py"));
+        let denoise_cache = env_val("AUTOSHADE_DENOISE_CACHE").unwrap_or_else(|| {
             Path::new(&denoise_script)
                 .parent()
                 .map(|d| d.join("weights").to_string_lossy().into_owned())
                 .unwrap_or_else(|| bundled_helper("python/weights"))
         });
         let segment_script =
-            env_val("AUTOSHOP_SEGMENT_SCRIPT").unwrap_or_else(|| bundled_helper("python/segment.py"));
+            env_val("AUTOSHADE_SEGMENT_SCRIPT").unwrap_or_else(|| bundled_helper("python/segment.py"));
         let embed_script =
-            env_val("AUTOSHOP_EMBED_SCRIPT").unwrap_or_else(|| bundled_helper("python/embed.py"));
-        let correspond_script = env_val("AUTOSHOP_CORRESPOND_SCRIPT")
+            env_val("AUTOSHADE_EMBED_SCRIPT").unwrap_or_else(|| bundled_helper("python/embed.py"));
+        let correspond_script = env_val("AUTOSHADE_CORRESPOND_SCRIPT")
             .unwrap_or_else(|| bundled_helper("python/correspond.py"));
-        let describe_script = env_val("AUTOSHOP_DESCRIBE_SCRIPT")
+        let describe_script = env_val("AUTOSHADE_DESCRIBE_SCRIPT")
             .unwrap_or_else(|| bundled_helper("python/describe.py"));
         Config {
             openai_api_key: header_safe_key(
@@ -1210,46 +1335,46 @@ impl Config {
                 ),
                 "the image API key",
             ),
-            openai_model: pick(&local.image_model, env_val("AUTOSHOP_OPENAI_MODEL"), "gpt-5.5"),
+            openai_model: pick(&local.image_model, env_val("AUTOSHADE_OPENAI_MODEL"), "gpt-5.5"),
             openai_base_url: image_base,
             openai_image_model: pick(
                 &local.image_gen_model,
-                env_val("AUTOSHOP_OPENAI_IMAGE_MODEL"),
+                env_val("AUTOSHADE_OPENAI_IMAGE_MODEL"),
                 "gpt-image-1.5",
             ),
-            openai_image_quality: env_val("AUTOSHOP_IMAGE_QUALITY")
+            openai_image_quality: env_val("AUTOSHADE_IMAGE_QUALITY")
                 .unwrap_or_else(|| "high".to_string()),
-            openai_image_max_px: env_val("AUTOSHOP_IMAGE_MAX_PX")
+            openai_image_max_px: env_val("AUTOSHADE_IMAGE_MAX_PX")
                 .and_then(|s| s.parse::<u32>().ok())
                 .unwrap_or(8_294_400),
             image_provider: pick(
                 &local.image_provider,
-                env_val("AUTOSHOP_IMAGE_PROVIDER"),
+                env_val("AUTOSHADE_IMAGE_PROVIDER"),
                 "api",
             ),
             // `explicit_or_env`, not `pick_opt`: a saved `""` is the explicit
             // choice "send no effort parameter" and must silence an env tier.
             image_effort: effort(explicit_or_env(
                 &local.image_effort,
-                env_val("AUTOSHOP_IMAGE_EFFORT"),
+                env_val("AUTOSHADE_IMAGE_EFFORT"),
             )),
 
             analysis_provider: pick(
                 &local.analysis_provider,
-                env_val("AUTOSHOP_ANALYSIS_PROVIDER"),
+                env_val("AUTOSHADE_ANALYSIS_PROVIDER"),
                 "oauth",
             ),
             analysis_model: pick(
                 &local.analysis_model,
-                env_val("AUTOSHOP_ANALYSIS_MODEL")
-                    .or_else(|| env_val("AUTOSHOP_CLAUDE_MODEL")),
+                env_val("AUTOSHADE_ANALYSIS_MODEL")
+                    .or_else(|| env_val("AUTOSHADE_CLAUDE_MODEL")),
                 "opus",
             ),
             analysis_effort: effort(explicit_or_env(
                 &local.analysis_effort,
-                env_val("AUTOSHOP_ANALYSIS_EFFORT"),
+                env_val("AUTOSHADE_ANALYSIS_EFFORT"),
             )),
-            claude_bin: env_val("AUTOSHOP_CLAUDE_BIN").unwrap_or_else(|| "claude".to_string()),
+            claude_bin: env_val("AUTOSHADE_CLAUDE_BIN").unwrap_or_else(|| "claude".to_string()),
             analysis_api_key: header_safe_key(
                 pick_opt(
                     &file_key_for(
@@ -1258,14 +1383,14 @@ impl Config {
                         &analysis_base,
                         "the analysis API key",
                     ),
-                    env_val("AUTOSHOP_ANALYSIS_API_KEY"),
+                    env_val("AUTOSHADE_ANALYSIS_API_KEY"),
                 ),
                 "the analysis API key",
             ),
             analysis_base_url: analysis_base,
 
-            python_bin: env_val("AUTOSHOP_PYTHON").unwrap_or_else(|| "python".to_string()),
-            denoise_model: env_val("AUTOSHOP_DENOISE_MODEL")
+            python_bin: env_val("AUTOSHADE_PYTHON").unwrap_or_else(|| "python".to_string()),
+            denoise_model: env_val("AUTOSHADE_DENOISE_MODEL")
                 .unwrap_or_else(|| "color_real_psnr".to_string()),
             denoise_script,
             denoise_cache,
@@ -1273,7 +1398,7 @@ impl Config {
             embed_script,
             correspond_script,
             describe_script,
-            style_strength: env_val("AUTOSHOP_STYLE_STRENGTH")
+            style_strength: env_val("AUTOSHADE_STYLE_STRENGTH")
                 .and_then(|s| s.parse::<f32>().ok())
                 // "NaN" parses as a valid f32 and SURVIVES clamp (clamp keeps
                 // NaN) — a non-finite blend strength would poison the style
@@ -1283,8 +1408,8 @@ impl Config {
                 .clamp(0.0, 1.0),
             // The truthiness spelling `style::EmbeddingSwitch::resolve_with`
             // already uses for the sidecar switch, so "0"/"false"/"off"/empty
-            // mean the same thing on every Autoshop boolean.
-            send_reference_image: env_val("AUTOSHOP_SEND_REFERENCE_IMAGE")
+            // mean the same thing on every AutoShade boolean.
+            send_reference_image: env_val("AUTOSHADE_SEND_REFERENCE_IMAGE")
                 .is_some_and(|v| !matches!(v.trim(), "" | "0" | "false" | "off")),
         }
     }
@@ -1354,11 +1479,11 @@ mod tests {
     /// API key goes.
     ///
     /// The exfiltration this closes needs no exotic setup, because resolution
-    /// is per FIELD rather than per file: an ambient `autoshop.local.json`
+    /// is per FIELD rather than per file: an ambient `autoshade.local.json`
     /// that carries ONLY `image_base_url` redirects the endpoint while the
     /// real key still resolves from `.env` / the environment, so the next
     /// Analyze posts `Authorization: Bearer <real key>` to the planted host.
-    /// Extract a shared archive of photos, run Autoshop in it, done.
+    /// Extract a shared archive of photos, run AutoShade in it, done.
     /// `serve.rs` already refuses to let a web page make this exact change;
     /// the filesystem route to it was open.
     #[test]
@@ -1416,7 +1541,7 @@ mod tests {
         assert!(!benign.names_beyond(Source::WorkingDirFile));
 
         // The SHARED-root origin is the same capability as the cwd file — the
-        // whole point of labelling `<temp>/autoshop` rather than trusting it.
+        // whole point of labelling `<temp>/autoshade` rather than trusting it.
         assert_eq!(SettingsOrigin::SharedRoot.source(), Source::WorkingDirFile);
         assert_eq!(SettingsOrigin::Central.source(), Source::Trusted);
     }
@@ -1455,7 +1580,7 @@ mod tests {
             delivery_root(),
             choose_delivery_root(
                 load_local_settings().out_dir.as_deref(),
-                resolve_env("AUTOSHOP_OUT_DIR")
+                resolve_env("AUTOSHADE_OUT_DIR")
             ),
             "delivery_root() must be choose_delivery_root() over the real sources"
         );
@@ -1466,7 +1591,7 @@ mod tests {
     ///
     /// The first version of it named the two base URLs and stopped there,
     /// which left the strictly WORSE half of its own stated threat model open:
-    /// `AUTOSHOP_CLAUDE_BIN` and `AUTOSHOP_PYTHON` reach `Command::new`
+    /// `AUTOSHADE_CLAUDE_BIN` and `AUTOSHADE_PYTHON` reach `Command::new`
     /// verbatim (`advisor/claude.rs`, `denoise.rs`, `segment.rs`) and the two
     /// script variables become that command's argv — so the very scenario the
     /// comment describes, a `.env` inside a shared archive of photos, still
@@ -1482,17 +1607,17 @@ mod tests {
     #[test]
     fn every_variable_that_names_a_program_or_an_endpoint_is_ambient_unsafe() {
         for name in [
-            "AUTOSHOP_OPENAI_BASE_URL",
-            "AUTOSHOP_ANALYSIS_BASE_URL",
-            "AUTOSHOP_CLAUDE_BIN",
-            "AUTOSHOP_PYTHON",
-            "AUTOSHOP_DENOISE_SCRIPT",
-            "AUTOSHOP_SEGMENT_SCRIPT",
-            "AUTOSHOP_EMBED_SCRIPT",
-            "AUTOSHOP_CORRESPOND_SCRIPT",
-            "AUTOSHOP_DESCRIBE_SCRIPT",
-            "AUTOSHOP_DENOISE_CACHE",
-            "AUTOSHOP_DATA_DIR",
+            "AUTOSHADE_OPENAI_BASE_URL",
+            "AUTOSHADE_ANALYSIS_BASE_URL",
+            "AUTOSHADE_CLAUDE_BIN",
+            "AUTOSHADE_PYTHON",
+            "AUTOSHADE_DENOISE_SCRIPT",
+            "AUTOSHADE_SEGMENT_SCRIPT",
+            "AUTOSHADE_EMBED_SCRIPT",
+            "AUTOSHADE_CORRESPOND_SCRIPT",
+            "AUTOSHADE_DESCRIBE_SCRIPT",
+            "AUTOSHADE_DENOISE_CACHE",
+            "AUTOSHADE_DATA_DIR",
             "PATH",
             "PYTHONPATH",
             "PYTHONHOME",
@@ -1509,12 +1634,12 @@ mod tests {
         // models and providers again, exactly as README and ARCHITECTURE §3
         // have always documented. The endpoint and the key stay above.
         for name in [
-            "AUTOSHOP_ANALYSIS_PROVIDER",
-            "AUTOSHOP_ANALYSIS_MODEL",
-            "AUTOSHOP_CLAUDE_MODEL",
-            "AUTOSHOP_OPENAI_MODEL",
-            "AUTOSHOP_OPENAI_IMAGE_MODEL",
-            "AUTOSHOP_IMAGE_PROVIDER",
+            "AUTOSHADE_ANALYSIS_PROVIDER",
+            "AUTOSHADE_ANALYSIS_MODEL",
+            "AUTOSHADE_CLAUDE_MODEL",
+            "AUTOSHADE_OPENAI_MODEL",
+            "AUTOSHADE_OPENAI_IMAGE_MODEL",
+            "AUTOSHADE_IMAGE_PROVIDER",
         ] {
             let t = trust_of(name);
             assert_eq!(t, Trust::Preference, "{name} is a model/provider choice");
@@ -1538,7 +1663,7 @@ mod tests {
     }
 
     /// The table is only a single source of truth if nothing resolves around
-    /// it. Every `AUTOSHOP_*` variable named in this file's non-test code must
+    /// it. Every `AUTOSHADE_*` variable named in this file's non-test code must
     /// be classified — otherwise a new setting silently defaults to
     /// `Preference` and a `.env` can set it.
     #[test]
@@ -1547,11 +1672,16 @@ mod tests {
         let non_test = src.split("#[cfg(test)]").next().unwrap();
         let mut unclassified: Vec<&str> = Vec::new();
         let mut rest = non_test;
-        while let Some(i) = rest.find("\"AUTOSHOP_") {
+        while let Some(i) = rest.find("\"AUTOSHADE_") {
             rest = &rest[i + 1..];
             let Some(end) = rest.find('"') else { break };
             let name = &rest[..end];
-            if !SETTINGS.iter().any(|s| s.env == name) && !unclassified.contains(&name) {
+            // `ENV_PREFIX` itself is not a variable — it is the string the
+            // alias layer builds variables OUT of. Anything longer is one.
+            if name.len() > ENV_PREFIX.len()
+                && !SETTINGS.iter().any(|s| s.env == name)
+                && !unclassified.contains(&name)
+            {
                 unclassified.push(name);
             }
         }
@@ -1562,7 +1692,7 @@ mod tests {
         // The out-of-crate consumers resolve through `env_or_dotenv`, which
         // also consults the table — so their knobs must be in it too.
         for knob in
-            ["AUTOSHOP_HTTP_TIMEOUT_SECS", "AUTOSHOP_SIDECAR_TIMEOUT_SECS", "AUTOSHOP_LEGACY_OUT"]
+            ["AUTOSHADE_HTTP_TIMEOUT_SECS", "AUTOSHADE_SIDECAR_TIMEOUT_SECS", "AUTOSHADE_LEGACY_OUT"]
         {
             assert!(SETTINGS.iter().any(|s| s.env == knob), "{knob} is unclassified");
         }
@@ -1575,6 +1705,211 @@ mod tests {
                 s.env
             );
         }
+    }
+
+    /// The current name wins; the pre-rename one answers only into silence.
+    ///
+    /// Driven through [`with_legacy_alias`] over a plain map rather than the
+    /// process environment: `set_var` is `unsafe` in edition 2024 and would
+    /// race every other test in this binary, which is the same reasoning that
+    /// removed the `.env` override in the first place.
+    ///
+    /// MUTATION: delete the fallback arm of `with_legacy_alias` and the
+    /// pre-rename lookup below fails.
+    #[test]
+    fn the_pre_rename_name_answers_only_when_the_current_one_is_silent() {
+        let table = |pairs: &'static [(&'static str, &'static str)]| {
+            move |n: &str| pairs.iter().find(|(k, _)| *k == n).map(|(_, v)| v.to_string())
+        };
+
+        assert_eq!(
+            with_legacy_alias("AUTOSHADE_OPENAI_MODEL", table(&[("AUTOSHOP_OPENAI_MODEL", "old")])),
+            Some("old".to_string()),
+            "a setup that has not been renamed yet must keep working"
+        );
+        assert_eq!(
+            with_legacy_alias(
+                "AUTOSHADE_OPENAI_MODEL",
+                table(&[("AUTOSHADE_OPENAI_MODEL", "new"), ("AUTOSHOP_OPENAI_MODEL", "old")]),
+            ),
+            Some("new".to_string()),
+            "the current spelling outranks the one it replaced"
+        );
+        assert_eq!(
+            with_legacy_alias("AUTOSHADE_OPENAI_MODEL", table(&[])),
+            None,
+            "neither spelling set means unset"
+        );
+        assert_eq!(
+            with_legacy_alias("PATH", table(&[("AUTOSHOP_PATH", "planted")])),
+            None,
+            "a foreign name has no pre-rename spelling to invent"
+        );
+        assert_eq!(canonical_env_name("AUTOSHOP_DATA_DIR"), "AUTOSHADE_DATA_DIR");
+        assert_eq!(canonical_env_name("PATH"), "PATH");
+        assert_eq!(legacy_env_name("AUTOSHADE_DATA_DIR").as_deref(), Some("AUTOSHOP_DATA_DIR"));
+        assert_eq!(legacy_env_name("PATH"), None);
+    }
+
+    /// Each stale name is announced once — and every stale name is announced.
+    #[test]
+    fn each_pre_rename_name_is_announced_exactly_once() {
+        let a = "AUTOSHOP_ANNOUNCE_PROBE_A";
+        let b = "AUTOSHOP_ANNOUNCE_PROBE_B";
+        assert!(first_sighting_of(a), "the first sighting must speak");
+        assert!(!first_sighting_of(a), "the second sighting must stay quiet");
+        assert!(first_sighting_of(b), "a DIFFERENT stale name is its own first sighting");
+        assert!(!first_sighting_of(b));
+    }
+
+    /// The warning has to be worth the interruption: it names the variable the
+    /// user actually set, the one to set instead, and the deadline.
+    ///
+    /// Pinned against the source because stderr cannot be captured in-process,
+    /// and a warning that silently stops being printed is exactly the
+    /// regression this batch owes the user (the alias is a ONE-version grace).
+    ///
+    /// MUTATION: delete the `eprintln!` from `warn_legacy_env` and this fails.
+    #[test]
+    fn the_pre_rename_warning_names_both_spellings_and_the_deadline() {
+        let src = include_str!("config.rs");
+        let body = src
+            .split("fn warn_legacy_env(")
+            .nth(1)
+            .expect("warn_legacy_env is gone")
+            .split("\nfn ")
+            .next()
+            .unwrap();
+        assert!(body.contains("eprintln!"), "the warning stopped being printed");
+        assert!(body.contains("{legacy}"), "the warning does not name the stale variable");
+        assert!(body.contains("{current}"), "the warning does not name the replacement");
+        assert!(body.contains("next release removes it"), "the grace period is not stated");
+        assert!(
+            body.contains("first_sighting_of(legacy)"),
+            "the warning lost its once-per-name gate and now repeats on every read"
+        );
+    }
+
+    /// The alias may not buy a name any authority its current spelling lacks.
+    ///
+    /// MUTATION: drop the `canonical_env_name` call from `trust_of`, or add a
+    /// second `AUTOSHOP_*` row to SETTINGS, and this fails.
+    #[test]
+    fn a_pre_rename_name_carries_exactly_its_current_spellings_trust() {
+        for s in SETTINGS {
+            let Some(legacy) = legacy_env_name(s.env) else { continue };
+            assert_eq!(
+                trust_of(&legacy),
+                s.trust,
+                "{legacy} resolves under a different policy from {}",
+                s.env
+            );
+            assert_eq!(
+                Source::DotEnv.may_supply(trust_of(&legacy)),
+                Source::DotEnv.may_supply(s.trust),
+                "{legacy} opened a source {} is closed to",
+                s.env
+            );
+        }
+        assert_eq!(
+            trust_of("AUTOSHOP_OPENAI_BASE_URL"),
+            Trust::Destination,
+            "the pre-rename endpoint name must still be ambient-unsafe"
+        );
+        // ONE row per setting: a pre-rename row would be dead policy that
+        // reads as live, and `trust_of` takes the first match.
+        for s in SETTINGS {
+            assert!(
+                !s.env.starts_with(LEGACY_ENV_PREFIX),
+                "{} is a pre-rename row; the table normalises instead",
+                s.env
+            );
+        }
+    }
+
+    /// All three doors are the same policy — checked at the source, because a
+    /// fourth reader that forgot the alias is the way this decays.
+    #[test]
+    fn every_environment_door_shares_the_one_alias_policy() {
+        let src = include_str!("config.rs");
+        let non_test = src.split("#[cfg(test)]").next().unwrap();
+        for door in [
+            "pub(crate) fn resolve_env(name: &str) -> Option<String> {\r\n    with_legacy_alias(",
+            "pub fn live_env(name: &str) -> Option<String> {\r\n    with_legacy_alias(",
+            "pub fn live_env_os(name: &str) -> Option<std::ffi::OsString> {\r\n    with_legacy_alias(",
+        ] {
+            let door = door.replace("\r\n", "\n");
+            assert!(
+                non_test.replace("\r\n", "\n").contains(&door),
+                "a door stopped going through the alias policy: {door}"
+            );
+        }
+    }
+
+    /// A `.env` written before the rename still supplies its names.
+    ///
+    /// The one end-to-end proof: a real `.env` in a real child process, with
+    /// one name that exists only under the pre-rename spelling and one that
+    /// exists under both. Same harness as the owned-map test above.
+    #[test]
+    fn a_dotenv_still_answers_to_a_pre_rename_key() {
+        const CHILD: &str = "AUTOSHADE_DOTENV_LEGACY_ALIAS_TEST_CHILD";
+        if env::var_os(CHILD).is_some() {
+            assert_eq!(
+                super::env_or_dotenv("AUTOSHADE_LEGACY_OUT").as_deref(),
+                Some("from-the-old-key"),
+                "a .env key written before the rename stopped being read"
+            );
+            assert_eq!(
+                super::env_or_dotenv("AUTOSHADE_SIDECAR_TIMEOUT_SECS").as_deref(),
+                Some("123"),
+                "the current spelling must outrank the one it replaced"
+            );
+            assert_eq!(
+                super::env_or_dotenv("AUTOSHADE_OPENAI_BASE_URL"),
+                None,
+                "a Destination name must stay closed to a .env under EITHER spelling"
+            );
+            return;
+        }
+
+        let dir = env::temp_dir().join(format!(
+            "autoshade-dotenv-legacy-alias-{}-{}",
+            std::process::id(),
+            crate::store::next_tmp_seq()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join(".env"),
+            "AUTOSHOP_LEGACY_OUT=from-the-old-key\n\
+             AUTOSHOP_SIDECAR_TIMEOUT_SECS=456\n\
+             AUTOSHADE_SIDECAR_TIMEOUT_SECS=123\n\
+             AUTOSHOP_OPENAI_BASE_URL=http://attacker.example/v1\n",
+        )
+        .unwrap();
+        let output = std::process::Command::new(env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "config::tests::a_dotenv_still_answers_to_a_pre_rename_key",
+                "--nocapture",
+            ])
+            .current_dir(&dir)
+            .env(CHILD, "1")
+            .env_remove("AUTOSHADE_LEGACY_OUT")
+            .env_remove("AUTOSHOP_LEGACY_OUT")
+            .env_remove("AUTOSHADE_SIDECAR_TIMEOUT_SECS")
+            .env_remove("AUTOSHOP_SIDECAR_TIMEOUT_SECS")
+            .env_remove("AUTOSHADE_OPENAI_BASE_URL")
+            .env_remove("AUTOSHOP_OPENAI_BASE_URL")
+            .output()
+            .unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            output.status.success(),
+            "child failed:\nstdout={}\nstderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     /// A key that cannot go in an HTTP header is refused AT THE BOUNDARY.
@@ -1622,7 +1957,7 @@ mod tests {
     /// GUI review 2026-08-12 F2: both Settings surfaces persist a cleared
     /// effort field as `""` — the explicit choice "send no effort parameter".
     /// The generic `pick_opt` filtered that empty out and fell through to the
-    /// environment, so with `AUTOSHOP_IMAGE_EFFORT=high` set, selecting
+    /// environment, so with `AUTOSHADE_IMAGE_EFFORT=high` set, selecting
     /// "provider default" saved, reopened as `high`, and kept sending `high`:
     /// the one choice the field exists to express was the one it could not
     /// make.
@@ -1733,10 +2068,10 @@ mod tests {
     #[test]
     fn out_of_config_consumers_still_honour_a_dotenv_knob() {
         let consumers: [(&str, &str, &str); 4] = [
-            ("advisor/mod.rs", include_str!("advisor/mod.rs"), "AUTOSHOP_HTTP_TIMEOUT_SECS"),
-            ("advisor/claude.rs", include_str!("advisor/claude.rs"), "AUTOSHOP_HTTP_TIMEOUT_SECS"),
-            ("denoise.rs", include_str!("denoise.rs"), "AUTOSHOP_SIDECAR_TIMEOUT_SECS"),
-            ("store.rs", include_str!("store.rs"), "AUTOSHOP_LEGACY_OUT"),
+            ("advisor/mod.rs", include_str!("advisor/mod.rs"), "AUTOSHADE_HTTP_TIMEOUT_SECS"),
+            ("advisor/claude.rs", include_str!("advisor/claude.rs"), "AUTOSHADE_HTTP_TIMEOUT_SECS"),
+            ("denoise.rs", include_str!("denoise.rs"), "AUTOSHADE_SIDECAR_TIMEOUT_SECS"),
+            ("store.rs", include_str!("store.rs"), "AUTOSHADE_LEGACY_OUT"),
         ];
         for (file, src, knob) in consumers {
             assert!(
@@ -1838,16 +2173,16 @@ mod tests {
 
         #[test]
         fn a_dotenv_cannot_rewrite_process_search_data_or_billing_authority() {
-            const CHILD: &str = "AUTOSHOP_DOTENV_AUTHORITY_TEST_CHILD";
+            const CHILD: &str = "AUTOSHADE_DOTENV_AUTHORITY_TEST_CHILD";
             if env::var_os(CHILD).is_some() {
                 let path_before = env::var_os("PATH");
-                let data_before = env::var_os("AUTOSHOP_DATA_DIR");
+                let data_before = env::var_os("AUTOSHADE_DATA_DIR");
                 let pythonpath_before = env::var_os("PYTHONPATH");
                 let cfg = Config::load();
 
                 assert_eq!(env::var_os("PATH"), path_before, "dotenv rewrote executable search");
                 assert_eq!(
-                    env::var_os("AUTOSHOP_DATA_DIR"),
+                    env::var_os("AUTOSHADE_DATA_DIR"),
                     data_before,
                     "dotenv redirected the trusted settings root"
                 );
@@ -1886,7 +2221,7 @@ mod tests {
             }
 
             let dir = env::temp_dir().join(format!(
-                "autoshop-dotenv-authority-{}-{}",
+                "autoshade-dotenv-authority-{}-{}",
                 std::process::id(),
                 crate::store::next_tmp_seq()
             ));
@@ -1894,10 +2229,10 @@ mod tests {
             std::fs::write(
                 dir.join(".env"),
                 "PATH=.\n\
-                 AUTOSHOP_DATA_DIR=.\n\
+                 AUTOSHADE_DATA_DIR=.\n\
                  PYTHONPATH=.\n\
-                 AUTOSHOP_ANALYSIS_PROVIDER=api\n\
-                 AUTOSHOP_ANALYSIS_API_KEY=dotenv-key\n",
+                 AUTOSHADE_ANALYSIS_PROVIDER=api\n\
+                 AUTOSHADE_ANALYSIS_API_KEY=dotenv-key\n",
             )
             .unwrap();
             let trusted_data = dir.join("trusted-data");
@@ -1910,9 +2245,9 @@ mod tests {
                 .current_dir(&dir)
                 .env(CHILD, "1")
                 .env("PATH", "trusted-search-path")
-                .env("AUTOSHOP_DATA_DIR", &trusted_data)
-                .env_remove("AUTOSHOP_ANALYSIS_PROVIDER")
-                .env_remove("AUTOSHOP_ANALYSIS_API_KEY")
+                .env("AUTOSHADE_DATA_DIR", &trusted_data)
+                .env_remove("AUTOSHADE_ANALYSIS_PROVIDER")
+                .env_remove("AUTOSHADE_ANALYSIS_API_KEY")
                 .output()
                 .unwrap();
             let _ = std::fs::remove_dir_all(&dir);
@@ -1933,12 +2268,12 @@ mod tests {
         /// consumers.
         #[test]
         fn dotenv_parsing_never_mutates_the_process_environment() {
-            const CHILD: &str = "AUTOSHOP_DOTENV_OWNEDMAP_TEST_CHILD";
+            const CHILD: &str = "AUTOSHADE_DOTENV_OWNEDMAP_TEST_CHILD";
             if env::var_os(CHILD).is_some() {
                 let cfg = Config::load();
                 // (a) The unprotected .env name is in the MAP, not the env.
                 assert_eq!(
-                    env::var_os("AUTOSHOP_DENOISE_MODEL"),
+                    env::var_os("AUTOSHADE_DENOISE_MODEL"),
                     Some("env-model".into()),
                     "parsing the .env mutated an UNPROTECTED process variable"
                 );
@@ -1949,7 +2284,7 @@ mod tests {
                 // (c) out-of-config consumers see the map through the shared
                 // resolver, protected names never.
                 assert_eq!(
-                    super::env_or_dotenv("AUTOSHOP_SIDECAR_TIMEOUT_SECS").as_deref(),
+                    super::env_or_dotenv("AUTOSHADE_SIDECAR_TIMEOUT_SECS").as_deref(),
                     Some("123"),
                     "env_or_dotenv lost the .env value"
                 );
@@ -1981,20 +2316,20 @@ mod tests {
                 );
                 // Not an allowlist of everything harmless-looking: a knob the
                 // PARENT reads has no business in the child's block either.
-                assert!(!has("AUTOSHOP_SIDECAR_TIMEOUT_SECS"), "parent-side knob pushed at a child");
+                assert!(!has("AUTOSHADE_SIDECAR_TIMEOUT_SECS"), "parent-side knob pushed at a child");
                 return;
             }
 
             let dir = env::temp_dir().join(format!(
-                "autoshop-dotenv-ownedmap-{}-{}",
+                "autoshade-dotenv-ownedmap-{}-{}",
                 std::process::id(),
                 crate::store::next_tmp_seq()
             ));
             std::fs::create_dir_all(&dir).unwrap();
             std::fs::write(
                 dir.join(".env"),
-                "AUTOSHOP_DENOISE_MODEL=dotenv-model\n\
-                 AUTOSHOP_SIDECAR_TIMEOUT_SECS=123\n\
+                "AUTOSHADE_DENOISE_MODEL=dotenv-model\n\
+                 AUTOSHADE_SIDECAR_TIMEOUT_SECS=123\n\
                  PATH=.\n\
                  CUDA_VISIBLE_DEVICES=1\n\
                  LD_PRELOAD=./evil.so\n\
@@ -2012,8 +2347,8 @@ mod tests {
                 .env(CHILD, "1")
                 // A process-set UNPROTECTED var the .env must beat — and
                 // whose value must survive in the environment untouched.
-                .env("AUTOSHOP_DENOISE_MODEL", "env-model")
-                .env_remove("AUTOSHOP_SIDECAR_TIMEOUT_SECS")
+                .env("AUTOSHADE_DENOISE_MODEL", "env-model")
+                .env_remove("AUTOSHADE_SIDECAR_TIMEOUT_SECS")
                 .output()
                 .unwrap();
             let _ = std::fs::remove_dir_all(&dir);
@@ -2028,12 +2363,12 @@ mod tests {
         #[test]
         fn repeated_corrupt_settings_incidents_get_distinct_rescue_files() {
             let dir = env::temp_dir().join(format!(
-                "autoshop-corrupt-settings-{}-{}",
+                "autoshade-corrupt-settings-{}-{}",
                 std::process::id(),
                 crate::store::next_tmp_seq()
             ));
             std::fs::create_dir_all(&dir).unwrap();
-            let path = dir.join("autoshop.local.json");
+            let path = dir.join("autoshade.local.json");
 
             // The live file carries the corrupt bytes each time — the
             // rescue re-verifies before it removes (the race test below).
@@ -2057,12 +2392,12 @@ mod tests {
         #[test]
         fn a_replaced_settings_file_survives_a_stale_rescuer() {
             let dir = env::temp_dir().join(format!(
-                "autoshop-corrupt-settings-race-{}-{}",
+                "autoshade-corrupt-settings-race-{}-{}",
                 std::process::id(),
                 crate::store::next_tmp_seq()
             ));
             std::fs::create_dir_all(&dir).unwrap();
-            let path = dir.join("autoshop.local.json");
+            let path = dir.join("autoshade.local.json");
             std::fs::write(&path, b"{\"analysis_model\":\"good\"}").unwrap();
 
             let res = rescue_if_unchanged(&path, b"{corrupt bytes read earlier");

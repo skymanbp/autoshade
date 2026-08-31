@@ -1,12 +1,12 @@
-//! GUI-side memory & thread budget — `autoshop::jobs`' discipline applied to
+//! GUI-side memory & thread budget — `autoshade::jobs`' discipline applied to
 //! the desktop app's own workers.
 //!
 //! # Why (user report ③, 2026-08-25: "AS makes the whole machine unusable")
 //!
 //! One full-frame pipeline pass peaks at ~1.77 GB of COMMIT charge (measured;
-//! see [`autoshop::jobs::PER_PHOTO_PEAK_COMMIT_MB`]'s provenance tables), and
+//! see [`autoshade::jobs::PER_PHOTO_PEAK_COMMIT_MB`]'s provenance tables), and
 //! the reporting machine sat at 26.7 GB committed of 31.2 GB with ~4.4 GB of
-//! commit headroom BEFORE Autoshop started. The GUI's workers were each
+//! commit headroom BEFORE AutoShade started. The GUI's workers were each
 //! bounded within their own class (`busy` gates user commands, the
 //! `big_decode_gate` mutex serialises large thumbnail decodes) but nothing
 //! bounded the PROCESS-WIDE SUM: an open's demosaic, a variant master load, a
@@ -14,7 +14,7 @@
 //! once, and the engine's row-parallel stages ran on rayon's default pool
 //! (one worker per logical core). On a machine with no headroom that
 //! over-commit evicts every other process's working set — which is exactly
-//! "the whole machine is unusable", and closing Autoshop only starts the slow
+//! "the whole machine is unusable", and closing AutoShade only starts the slow
 //! fault-back-in.
 //!
 //! # The budget
@@ -24,7 +24,7 @@
 //!   the expensive call; the permit is admitted immediately when it is the
 //!   only heavy work, and otherwise only while the machine's CURRENT free
 //!   memory (min of free physical and free commit —
-//!   [`autoshop::jobs::free_memory_mb`]) still covers the estimate plus
+//!   [`autoshade::jobs::free_memory_mb`]) still covers the estimate plus
 //!   [`RESERVED_HEADROOM_MB`] for the rest of the machine. Work that cannot
 //!   be admitted WAITS on the worker thread it already owns — queued, never
 //!   refused, never downscaled: output bytes are identical either way, later.
@@ -51,7 +51,7 @@ use std::sync::{Condvar, Mutex};
 /// The commit-charge floor, in MB, budgeted for ONE full-frame pass — the
 /// measured corpus constant the CLI planner divides by, shared so the two
 /// budgets cannot drift apart.
-pub(crate) const HEAVY_PEAK_COMMIT_MB: u64 = autoshop::jobs::PER_PHOTO_PEAK_COMMIT_MB;
+pub(crate) const HEAVY_PEAK_COMMIT_MB: u64 = autoshade::jobs::PER_PHOTO_PEAK_COMMIT_MB;
 
 /// Free memory kept for the REST of the machine before a second heavy job is
 /// admitted: the browser, the editor, and Windows itself. The CLI expresses
@@ -107,14 +107,14 @@ pub(crate) fn admit(inflight_mb: u64, estimate_mb: u64, free_mb: Option<u64>) ->
 pub(crate) fn heavy_permit(estimate_mb: u64) -> HeavyPermit {
     let mut held = INFLIGHT.lock().unwrap_or_else(|p| p.into_inner());
     loop {
-        if admit(*held, estimate_mb, autoshop::jobs::free_memory_mb()) {
+        if admit(*held, estimate_mb, autoshade::jobs::free_memory_mb()) {
             *held = held.saturating_add(estimate_mb);
             return HeavyPermit(estimate_mb);
         }
         eprintln!(
             "memory budget: ~{estimate_mb} MB pass queued behind {held} MB in flight \
              (free {} MB, reserve {RESERVED_HEADROOM_MB} MB)",
-            autoshop::jobs::free_memory_mb().unwrap_or(0)
+            autoshade::jobs::free_memory_mb().unwrap_or(0)
         );
         // Timed, not indefinite: the machine's free memory moves for reasons
         // no permit-drop announces (another app exiting), so a waiter
@@ -132,7 +132,7 @@ pub(crate) fn heavy_permit(estimate_mb: u64) -> HeavyPermit {
 /// `jobs::survey_peak_mb`'s divisor. RAW headers answer `None` there and get
 /// the floor.
 pub(crate) fn estimate_mb(src: Option<&std::path::Path>) -> u64 {
-    src.and_then(autoshop::decode::cheap_develop_peak_mb)
+    src.and_then(autoshade::decode::cheap_develop_peak_mb)
         .unwrap_or(0)
         .max(HEAVY_PEAK_COMMIT_MB)
 }
@@ -157,7 +157,7 @@ pub(crate) fn render_threads(cores: usize, free_mb: Option<u64>) -> usize {
 /// fails the app.
 pub(crate) fn clamp_global_rayon() {
     let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
-    let threads = render_threads(cores, autoshop::jobs::free_memory_mb());
+    let threads = render_threads(cores, autoshade::jobs::free_memory_mb());
     if threads < cores {
         eprintln!("memory budget: rayon pool clamped to {threads} of {cores} threads");
         let _ = rayon::ThreadPoolBuilder::new().num_threads(threads).build_global();

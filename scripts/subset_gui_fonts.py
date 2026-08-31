@@ -62,17 +62,17 @@ CJK_RANGES = [(0x2E80, 0x9FFF), (0xF900, 0xFAFF), (0xFF00, 0xFFEF)]
 
 # (output name, donor file, variable?, margin blocks)
 DONORS = [
-    ("NotoSansSymbols2-autoshop.ttf", "NotoSansSymbols2-Regular.ttf", False,
+    ("NotoSansSymbols2-autoshade.ttf", "NotoSansSymbols2-Regular.ttf", False,
      [(0x2190, 0x21FF), (0x2300, 0x23FF), (0x25A0, 0x25FF), (0x2600, 0x26FF),
       (0x2700, 0x27BF), (0x29C0, 0x29FF), (0x2B00, 0x2BFF)]),
-    ("NotoSansSymbols-autoshop.ttf", "NotoSansSymbols[wght].ttf", True,
+    ("NotoSansSymbols-autoshade.ttf", "NotoSansSymbols[wght].ttf", True,
      [(0x2300, 0x23FF), (0x2460, 0x24FF)]),
-    ("NotoSansMath-autoshop.ttf", "NotoSansMath-Regular.ttf", False,
+    ("NotoSansMath-autoshade.ttf", "NotoSansMath-Regular.ttf", False,
      [(0x2190, 0x21FF), (0x2200, 0x22FF), (0x2980, 0x29FF), (0x2A00, 0x2AFF)]),
-    ("NotoEmoji-autoshop.ttf", "NotoEmoji[wght].ttf", True, []),
+    ("NotoEmoji-autoshade.ttf", "NotoEmoji[wght].ttf", True, []),
     # Last: the symbol donors above claim the shared punctuation first, so a
     # glyph the UI already renders identically everywhere keeps doing so.
-    ("NotoSansSC-autoshop.ttf", "NotoSansSC[wght].ttf", True, []),
+    ("NotoSansSC-autoshade.ttf", "NotoSansSC[wght].ttf", True, []),
 ]
 
 

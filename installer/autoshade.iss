@@ -1,8 +1,8 @@
 #ifndef AppVersion
-  #error "AppVersion is required. Compile with ISCC.exe /DAppVersion=x.y.z installer\autoshop.iss"
+  #error "AppVersion is required. Compile with ISCC.exe /DAppVersion=x.y.z installer\autoshade.iss"
 #endif
 
-#define AppName "Autoshop"
+#define AppName "AutoShade"
 #define AppPublisher "skymanbp"
 #define AppURL "https://github.com/skymanbp/autoshop"
 
@@ -14,16 +14,16 @@ AppPublisher={#AppPublisher}
 AppPublisherURL={#AppURL}
 AppSupportURL={#AppURL}
 AppUpdatesURL={#AppURL}/releases
-DefaultDirName={autopf}\Autoshop
-DefaultGroupName=Autoshop
+DefaultDirName={autopf}\AutoShade
+DefaultGroupName=AutoShade
 PrivilegesRequired=lowest
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 LicenseFile=..\LICENSE
 OutputDir=..\target\installer
-OutputBaseFilename=Autoshop-Setup-{#AppVersion}
-SetupIconFile=autoshop.ico
-UninstallDisplayIcon={app}\autoshop-gui.exe
+OutputBaseFilename=AutoShade-Setup-{#AppVersion}
+SetupIconFile=autoshade.ico
+UninstallDisplayIcon={app}\autoshade-gui.exe
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
@@ -33,7 +33,7 @@ CloseApplications=yes
 RestartApplications=no
 
 ; User data intentionally survives uninstall. The per-user develop store is
-; %LOCALAPPDATA%\autoshop\, outside {app}, and no [UninstallDelete] entry targets it.
+; %LOCALAPPDATA%\autoshade\, outside {app}, and no [UninstallDelete] entry targets it.
 ; Downloaded model weights are not installer payloads either; the sidecars fetch
 ; them on first use into python\weights.
 
@@ -44,11 +44,11 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 Name: "desktopicon"; Description: "Create a &desktop shortcut"; GroupDescription: "Additional shortcuts:"; Flags: unchecked
 ; This updates only HKCU\Environment\Path, so it never needs elevation. Existing
 ; processes retain their old environment block; start a new terminal after setup.
-Name: "addtopath"; Description: "Add the Autoshop CLI to my user &PATH (new terminals only)"; GroupDescription: "Command-line integration:"; Flags: unchecked
+Name: "addtopath"; Description: "Add the AutoShade CLI to my user &PATH (new terminals only)"; GroupDescription: "Command-line integration:"; Flags: unchecked
 
 [Files]
-Source: "..\dist\autoshop.exe"; DestDir: "{app}"; Flags: ignoreversion
-Source: "..\dist\autoshop-gui.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\dist\autoshade.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\dist\autoshade-gui.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\assets\*"; DestDir: "{app}\assets"; Flags: ignoreversion recursesubdirs createallsubdirs
 ; Runtime sidecars are copied recursively for forward-compatible additions, while
@@ -56,10 +56,10 @@ Source: "..\assets\*"; DestDir: "{app}\assets"; Flags: ignoreversion recursesubd
 Source: "..\python\*"; DestDir: "{app}\python"; Excludes: "weights\*,__pycache__\*,test_*.py,*.pyc"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
-Name: "{group}\Autoshop"; Filename: "{app}\autoshop-gui.exe"; WorkingDir: "{app}"; Comment: "Autoshop desktop application"
-Name: "{group}\Autoshop CLI"; Filename: "{app}\autoshop.exe"; WorkingDir: "{app}"; Comment: "Autoshop command-line interface (opens a console window)"
-Name: "{group}\Uninstall Autoshop"; Filename: "{uninstallexe}"
-Name: "{autodesktop}\Autoshop"; Filename: "{app}\autoshop-gui.exe"; WorkingDir: "{app}"; Tasks: desktopicon
+Name: "{group}\AutoShade"; Filename: "{app}\autoshade-gui.exe"; WorkingDir: "{app}"; Comment: "AutoShade desktop application"
+Name: "{group}\AutoShade CLI"; Filename: "{app}\autoshade.exe"; WorkingDir: "{app}"; Comment: "AutoShade command-line interface (opens a console window)"
+Name: "{group}\Uninstall AutoShade"; Filename: "{uninstallexe}"
+Name: "{autodesktop}\AutoShade"; Filename: "{app}\autoshade-gui.exe"; WorkingDir: "{app}"; Tasks: desktopicon
 
 [Run]
 ; Deliberately no post-install launch: packaging validation must never start the GUI.
@@ -67,6 +67,12 @@ Name: "{autodesktop}\Autoshop"; Filename: "{app}\autoshop-gui.exe"; WorkingDir: 
 [Code]
 const
   UserEnvironmentKey = 'Environment';
+  // INSTALL STATE, not a display name — so it keeps the pre-rename spelling
+  // for the same reason AppId does. This key records that THIS install put its
+  // directory on the user's PATH, and the uninstaller removes that entry only
+  // when it finds the marker. Renaming the key would hide the marker an
+  // earlier Autoshop install wrote — same AppId, so setup upgrades in place —
+  // and its uninstall would leave a dead directory on the user's PATH.
   InstallerStateKey = 'Software\Autoshop\Installer';
   PathMarkerName = 'PathAddedByInstaller';
 

@@ -95,11 +95,11 @@ impl EmbedOpts {
 ///
 /// **Registered as unverified**: the resulting cosine drift is argued, not
 /// measured — this batch ran no GPU sidecar. The escape hatch is therefore
-/// real rather than decorative: `AUTOSHOP_EMBED_FP32` forces the old load, so
+/// real rather than decorative: `AUTOSHADE_EMBED_FP32` forces the old load, so
 /// an index built before this change can be queried in exactly the arithmetic
 /// it was built with.
 fn fp16_wanted() -> bool {
-    !std::env::var("AUTOSHOP_EMBED_FP32")
+    !crate::config::live_env("AUTOSHADE_EMBED_FP32")
         .map(|v| !matches!(v.trim(), "" | "0" | "false" | "off"))
         .unwrap_or(false)
 }
@@ -146,7 +146,7 @@ pub fn embed_text_batch(
     if !opts.script.exists() {
         bail!(
             "style-embedding sidecar not found at {} — run from the project dir or set \
-             AUTOSHOP_EMBED_SCRIPT.",
+             AUTOSHADE_EMBED_SCRIPT.",
             opts.script.display()
         );
     }
@@ -270,7 +270,7 @@ pub fn embed_image_batch(
     if !opts.script.exists() {
         bail!(
             "style-embedding sidecar not found at {} — run from the project dir or set \
-             AUTOSHOP_EMBED_SCRIPT.",
+             AUTOSHADE_EMBED_SCRIPT.",
             opts.script.display()
         );
     }
@@ -400,7 +400,7 @@ pub fn embed_file_record(opts: &EmbedOpts, input: &Path, scratch: &Path) -> Resu
     if !opts.script.exists() {
         bail!(
             "style-embedding sidecar not found at {} — run from the project dir or set \
-             AUTOSHOP_EMBED_SCRIPT.",
+             AUTOSHADE_EMBED_SCRIPT.",
             opts.script.display()
         );
     }
@@ -562,7 +562,7 @@ mod tests {
     /// MUTATION THIS KILLS: dropping the `--fp16` push (the state this batch
     /// found the tree in — every call loading 1.50 GB of fp32 weights when
     /// 0.75 GB would do), or wiring the env var the wrong way round so
-    /// `AUTOSHOP_EMBED_FP32` turned fp16 ON.
+    /// `AUTOSHADE_EMBED_FP32` turned fp16 ON.
     #[test]
     fn the_sidecar_argv_carries_the_half_precision_flag() {
         let args = |fp16| {

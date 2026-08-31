@@ -21,7 +21,7 @@ pub(crate) enum SavedDevelop {
     Nothing,
 }
 
-/// The photo's saved develop from the central store (see `autoshop::store`):
+/// The photo's saved develop from the central store (see `autoshade::store`):
 /// the app-internal `recipe.json` first (lossless — bitmap masks, recolour
 /// gains, roles all round-trip), else the Lightroom-compatible `<stem>.xmp`
 /// re-imported through the reverse crs mapping (globals, curves, crop,
@@ -44,7 +44,7 @@ pub(crate) struct RestoredDevelop {
     /// "unreadable numeric setting(s)", a warning about something else.
     /// Empty whenever the restore came from recipe.json (nothing was
     /// imported from a sidecar) or the import was faithful.
-    pub(crate) mask_import: Vec<autoshop::xmp::MaskImportLoss>,
+    pub(crate) mask_import: Vec<autoshade::xmp::MaskImportLoss>,
     /// How many masks that same import DID bring in — the other half of the
     /// sentence, and until R25 P1 it was always zero on a Lightroom file.
     pub(crate) imported_masks: usize,
@@ -59,13 +59,13 @@ pub(crate) struct RestoredDevelop {
     pub(crate) carried_globals: Vec<String>,
     /// What the restore-time clamps DISCARDED (W20: sanitisation must not
     /// be silent loss) — the Opened handler's disclosure channel.
-    pub(crate) clamp: autoshop::recipe::ClampSummary,
+    pub(crate) clamp: autoshade::recipe::ClampSummary,
     /// A Lightroom sidecar sits beside the RAW but could not be read (the
-    /// reason, verbatim from [`autoshop::store::SidecarRead`]) — whatever it
+    /// reason, verbatim from [`autoshade::store::SidecarRead`]) — whatever it
     /// holds is NOT in `saved`, and the user must hear that (L08).
     pub(crate) lr_unreadable: Option<&'static str>,
     /// The RAW carries an embedded XMP packet that could not be read
-    /// (`autoshop::store::embedded_packet_for_restore`'s `Err`) — same
+    /// (`autoshade::store::embedded_packet_for_restore`'s `Err`) — same
     /// unreadable-is-not-absent rule as `lr_unreadable`, its own channel.
     pub(crate) packet_unreadable: Option<String>,
 }
@@ -91,16 +91,16 @@ pub(crate) fn read_saved_develop(src: &std::path::Path) -> RestoredDevelop {
     // save cannot hand back half-old, half-new answers. NoWait: this runs on
     // photo open (UI thread); a busy develop must report, not freeze the
     // window behind a lock with no cancel.
-    match autoshop::store::with_develop_lock(
+    match autoshade::store::with_develop_lock(
         src,
-        autoshop::store::DevelopLockMode::NoWait,
+        autoshade::store::DevelopLockMode::NoWait,
         || Ok::<_, std::io::Error>(read_saved_develop_locked(src)),
     ) {
         Ok(answer) => answer,
         Err(e) => RestoredDevelop {
             saved: SavedDevelop::Unreadable {
                 err: format!(
-                    "the develop is busy in another Autoshop process ({e}); retry opening the photo"
+                    "the develop is busy in another AutoShade process ({e}); retry opening the photo"
                 ),
                 fallback: None,
             },
@@ -110,26 +110,26 @@ pub(crate) fn read_saved_develop(src: &std::path::Path) -> RestoredDevelop {
 }
 
 pub(crate) fn read_saved_develop_locked(src: &std::path::Path) -> RestoredDevelop {
-    let mut clamp_dropped = autoshop::recipe::ClampSummary::default();
-    autoshop::store::migrate_legacy(src);
+    let mut clamp_dropped = autoshade::recipe::ClampSummary::default();
+    autoshade::store::migrate_legacy(src);
     // The sidecar BESIDE the RAW is the one file Lightroom itself writes.
     // Newest intent wins (store::lightroom_sidecar): a sidecar Lightroom
     // touched after our last save outranks the stored develop — it used to
     // be ignored entirely, so Lightroom edits silently lost to older
-    // Autoshop saves. Our own copied projection is recognised and skipped;
+    // AutoShade saves. Our own copied projection is recognised and skipped;
     // the store copy stays untouched until the user actually saves.
     let mut lr_unreadable: Option<&'static str> = None;
-    let lr = match autoshop::store::lightroom_sidecar(src) {
-        autoshop::store::LrSidecar::NewerThanStore(t) => {
+    let lr = match autoshade::store::lightroom_sidecar(src) {
+        autoshade::store::LrSidecar::NewerThanStore(t) => {
             Some((t, "XMP (Lightroom sidecar — newer than the saved develop; Ctrl+S adopts it)"))
         }
-        autoshop::store::LrSidecar::Only(t) => {
+        autoshade::store::LrSidecar::Only(t) => {
             Some((t, "XMP (Lightroom sidecar beside the RAW)"))
         }
         // The file EXISTS but cannot answer — the old fold into "absent"
         // opened neutral in silence while Lightroom work might sit right
         // there (L08). The store still answers below; the note rides along.
-        autoshop::store::LrSidecar::Unreadable(why) => {
+        autoshade::store::LrSidecar::Unreadable(why) => {
             lr_unreadable = Some(why);
             None
         }
@@ -147,23 +147,23 @@ pub(crate) fn read_saved_develop_locked(src: &std::path::Path) -> RestoredDevelo
         // summary — a sidecar whose brush dabs were truncated on import
         // toasted nothing. Both halves are absorbed, and they cannot double
         // count: the second clamp is idempotent over the first.
-        let diag = autoshop::diag::photo(src);
+        let diag = autoshade::diag::photo(src);
         let (mut r, imported_clamp) =
-            autoshop::xmp::xmp_to_recipe_clamped_with_diag(&text, &diag);
-        xmp_bad = autoshop::xmp::unparsable_crs_numbers(&text);
+            autoshade::xmp::xmp_to_recipe_clamped_with_diag(&text, &diag);
+        xmp_bad = autoshade::xmp::unparsable_crs_numbers(&text);
         // Neutral / foreign content restores nothing — the store answers
         // exactly as before.
         if !r.is_noop() {
             clamp_dropped.absorb(imported_clamp);
             clamp_dropped.absorb(r.clamp());
-            let mask_import = autoshop::xmp::import_losses_for_photo(&text, src);
+            let mask_import = autoshade::xmp::import_losses_for_photo(&text, src);
             let imported_masks = r.masks.len();
             return RestoredDevelop {
                 saved: SavedDevelop::Restored(r, kind),
                 xmp_bad,
                 mask_import,
                 imported_masks,
-                carried_globals: autoshop::xmp::unmodelled_global_crs(&text),
+                carried_globals: autoshade::xmp::unmodelled_global_crs(&text),
                 clamp: clamp_dropped,
                 lr_unreadable,
                 packet_unreadable: None,
@@ -174,15 +174,15 @@ pub(crate) fn read_saved_develop_locked(src: &std::path::Path) -> RestoredDevelo
     let mut parse_err: Option<String> = None;
     let mut restored: Option<(EditRecipe, &'static str)> = None;
     for (rj, kind) in [
-        (autoshop::store::recipe_target(src), "recipe.json"),
-        (autoshop::store::legacy_recipe(src), "recipe.json (legacy ./out)"),
+        (autoshade::store::recipe_target(src), "recipe.json"),
+        (autoshade::store::legacy_recipe(src), "recipe.json (legacy ./out)"),
     ] {
         // Only ABSENCE falls through to the next source. Any other read error
         // (permissions, transient I/O, invalid UTF-8) means the central file
         // EXISTS but can't answer — reporting it as Unreadable keeps the
         // stated precedence: a stale legacy recipe (or the lossy XMP) must
         // never silently replace an unreadable central one.
-        let text = match autoshop::store::read_text_capped(&rj, autoshop::store::MAX_STORE_JSON) {
+        let text = match autoshade::store::read_text_capped(&rj, autoshade::store::MAX_STORE_JSON) {
             Ok(t) => t,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
             Err(e) => {
@@ -199,7 +199,7 @@ pub(crate) fn read_saved_develop_locked(src: &std::path::Path) -> RestoredDevelo
                     // Store recipes reference rasters by bare file name —
                     // anchor them to the file they were loaded beside.
                     if let Some(base) = rj.parent() {
-                        autoshop::store::resolve_mask_paths(&mut r, base);
+                        autoshade::store::resolve_mask_paths(&mut r, base);
                     }
                     restored = Some((r, kind));
                 }
@@ -224,16 +224,16 @@ pub(crate) fn read_saved_develop_locked(src: &std::path::Path) -> RestoredDevelo
         };
     }
     let mut fallback = None;
-    let mut mask_import: Vec<autoshop::xmp::MaskImportLoss> = Vec::new();
+    let mut mask_import: Vec<autoshade::xmp::MaskImportLoss> = Vec::new();
     let mut imported_masks = 0usize;
     let mut carried_globals: Vec<String> = Vec::new();
     for (xp, kind) in [
-        (autoshop::pipeline::xmp_target(src), "XMP"),
-        (autoshop::store::legacy_xmp(src), "XMP (legacy ./out)"),
+        (autoshade::pipeline::xmp_target(src), "XMP"),
+        (autoshade::store::legacy_xmp(src), "XMP (legacy ./out)"),
     ] {
         // Same rule as the recipe loop: only NotFound falls through — an
         // unreadable central XMP must not let a stale legacy one answer.
-        let text = match autoshop::store::read_text_capped(&xp, autoshop::store::MAX_STORE_JSON) {
+        let text = match autoshade::store::read_text_capped(&xp, autoshade::store::MAX_STORE_JSON) {
             Ok(t) => t,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
             Err(_) => {
@@ -243,12 +243,12 @@ pub(crate) fn read_saved_develop_locked(src: &std::path::Path) -> RestoredDevelo
         };
         any = true;
         // Clamped door, same reason as the Lightroom branch above (R28 2b).
-        let diag = autoshop::diag::photo(src);
+        let diag = autoshade::diag::photo(src);
         let (mut r, imported_clamp) =
-            autoshop::xmp::xmp_to_recipe_clamped_with_diag(&text, &diag);
+            autoshade::xmp::xmp_to_recipe_clamped_with_diag(&text, &diag);
         // Accumulated regardless of noop-ness (dedup vs the LR sidecar's
         // list) — see the accumulator's contract above.
-        for k in autoshop::xmp::unparsable_crs_numbers(&text) {
+        for k in autoshade::xmp::unparsable_crs_numbers(&text) {
             if !xmp_bad.contains(&k) {
                 xmp_bad.push(k);
             }
@@ -258,9 +258,9 @@ pub(crate) fn read_saved_develop_locked(src: &std::path::Path) -> RestoredDevelo
         if !r.is_noop() {
             clamp_dropped.absorb(imported_clamp);
             clamp_dropped.absorb(r.clamp());
-            mask_import = autoshop::xmp::import_losses_for_photo(&text, src);
+            mask_import = autoshade::xmp::import_losses_for_photo(&text, src);
             imported_masks = r.masks.len();
-            carried_globals = autoshop::xmp::unmodelled_global_crs(&text);
+            carried_globals = autoshade::xmp::unmodelled_global_crs(&text);
             fallback = Some((r, kind));
         }
         break; // same rule: the file that answered decides
@@ -275,13 +275,13 @@ pub(crate) fn read_saved_develop_locked(src: &std::path::Path) -> RestoredDevelo
     // therefore pays no TIFF walk.
     let mut packet_unreadable: Option<String> = None;
     if fallback.is_none() && !any {
-        match autoshop::store::embedded_packet_for_restore(src) {
+        match autoshade::store::embedded_packet_for_restore(src) {
             Ok(Some(text)) => {
                 // Clamped door (R28 2b), like both branches above.
-                let diag = autoshop::diag::photo(src);
+                let diag = autoshade::diag::photo(src);
                 let (mut r, imported_clamp) =
-                    autoshop::xmp::xmp_to_recipe_clamped_with_diag(&text, &diag);
-                for k in autoshop::xmp::unparsable_crs_numbers(&text) {
+                    autoshade::xmp::xmp_to_recipe_clamped_with_diag(&text, &diag);
+                for k in autoshade::xmp::unparsable_crs_numbers(&text) {
                     if !xmp_bad.contains(&k) {
                         xmp_bad.push(k);
                     }
@@ -289,9 +289,9 @@ pub(crate) fn read_saved_develop_locked(src: &std::path::Path) -> RestoredDevelo
                 if !r.is_noop() {
                     clamp_dropped.absorb(imported_clamp);
                     clamp_dropped.absorb(r.clamp());
-                    mask_import = autoshop::xmp::import_losses_for_photo(&text, src);
+                    mask_import = autoshade::xmp::import_losses_for_photo(&text, src);
                     imported_masks = r.masks.len();
-                    carried_globals = autoshop::xmp::unmodelled_global_crs(&text);
+                    carried_globals = autoshade::xmp::unmodelled_global_crs(&text);
                     fallback = Some((r, "XMP (embedded in the RAW)"));
                 }
             }
@@ -343,7 +343,7 @@ pub(crate) fn read_saved_develop_locked(src: &std::path::Path) -> RestoredDevelo
 
 
 // The programmatic-overwrite backup gate lives in the LIB now
-// (autoshop::store::backup_saved_develop) so the web and CLI enforce the same
+// (autoshade::store::backup_saved_develop) so the web and CLI enforce the same
 // "never destroy an explicit save without a v<N> snapshot" contract — copy
 // semantics + frozen rasters; see store.rs for the full contract.
 
@@ -375,7 +375,7 @@ pub(crate) fn read_saved_develop_locked(src: &std::path::Path) -> RestoredDevelo
 /// paste would then rewrite the old values back over the new ones.
 pub(crate) fn paste_recipe_for(target: &std::path::Path, pasted: &EditRecipe) -> EditRecipe {
     let mut r = pasted.clone();
-    if !autoshop::decode::is_raw(target) {
+    if !autoshade::decode::is_raw(target) {
         r.base_curve = Vec::new();
         r.lens_profile = Default::default();
         // A baked image carries no camera WB metadata to anchor on.
@@ -384,10 +384,10 @@ pub(crate) fn paste_recipe_for(target: &std::path::Path, pasted: &EditRecipe) ->
         return r;
     }
     for p in [
-        autoshop::store::recipe_target(target),
-        autoshop::store::legacy_recipe(target),
+        autoshade::store::recipe_target(target),
+        autoshade::store::legacy_recipe(target),
     ] {
-        match autoshop::store::read_text_capped(&p, autoshop::store::MAX_STORE_JSON) {
+        match autoshade::store::read_text_capped(&p, autoshade::store::MAX_STORE_JSON) {
             Ok(text) => {
                 if let Ok(mut saved) = serde_json::from_str::<EditRecipe>(&text) {
                     // Repair BEFORE adopting, and carry the era stamp WITH the
@@ -407,7 +407,7 @@ pub(crate) fn paste_recipe_for(target: &std::path::Path, pasted: &EditRecipe) ->
                     // mask-list hover's reference develop set the precedent
                     // for paying a bounded develop where correctness needs
                     // it.
-                    let _ = autoshop::pipeline::repair_pre_era_base_curve(target, &mut saved);
+                    let _ = autoshade::pipeline::repair_pre_era_base_curve(target, &mut saved);
                     r.version = saved.version;
                     r.base_curve = saved.base_curve;
                     // A saved develop owns its profile verbatim — including any
@@ -432,8 +432,8 @@ pub(crate) fn paste_recipe_for(target: &std::path::Path, pasted: &EditRecipe) ->
     // No saved develop: the SOURCE photo's correction data is meaningless on
     // a different lens/focal — re-derive the target's own, stamped default-on
     // (paste transfers EDITS; the profile is per-photo calibration).
-    r.lens_profile = autoshop::pipeline::fresh_lens_profile(target);
-    let (ask, ast) = autoshop::pipeline::fresh_as_shot_wb(target);
+    r.lens_profile = autoshade::pipeline::fresh_lens_profile(target);
+    let (ask, ast) = autoshade::pipeline::fresh_as_shot_wb(target);
     r.as_shot_k = ask;
     r.as_shot_tint = ast;
     r
@@ -491,7 +491,7 @@ pub(crate) struct ResolvedSaved {
 /// two caller-side reasons not to pay the repair decode (a GENERATED canvas
 /// strips its calibration later, and a session nav-stash about to override
 /// the canvas wholesale discards the repair); the repair itself reads the
-/// photo through [`autoshop::pipeline::repair_pre_era_base_curve`].
+/// photo through [`autoshade::pipeline::repair_pre_era_base_curve`].
 pub(crate) fn resolve_saved_develop(
     lang: Lang,
     saved: SavedDevelop,
@@ -517,7 +517,7 @@ pub(crate) fn resolve_saved_develop(
             if !stamp
                 && !skip_repair
                 && src.is_some_and(|p| {
-                    autoshop::pipeline::repair_pre_era_base_curve(p, &mut recipe).is_some()
+                    autoshade::pipeline::repair_pre_era_base_curve(p, &mut recipe).is_some()
                 })
             {
                 // The GUI's OWN sentence, localized — every other open-note
@@ -564,7 +564,7 @@ pub(crate) fn resolve_saved_develop(
     //     Lightroom reads tag 0x0112 itself) is a no-op here by construction;
     //   * the `Unreadable` fallback arm carries a real restored recipe too.
     if let Some(c) =
-        src.and_then(|p| autoshop::pipeline::migrate_recipe_coord_frame(p, &mut recipe))
+        src.and_then(|p| autoshade::pipeline::migrate_recipe_coord_frame(p, &mut recipe))
     {
         open_note = merge_note(open_note, coord_migration_sentence(lang, c));
     }
@@ -583,11 +583,11 @@ pub(crate) fn resolve_saved_develop(
 fn noop_only_note(lang: Lang, src: Option<&std::path::Path>) -> Option<String> {
     // A recorded pixel master IS saved work, and the canvas shows it —
     // there is no neutral-looking open to explain.
-    if src.is_some_and(autoshop::store::has_pixel_source) {
+    if src.is_some_and(autoshade::store::has_pixel_source) {
         return None;
     }
-    match src.map(autoshop::store::read_variants_checked) {
-        Some(autoshop::store::VariantsRead::Strip(rec)) => {
+    match src.map(autoshade::store::read_variants_checked) {
+        Some(autoshade::store::VariantsRead::Strip(rec)) => {
             // A background card holds work when its recipe edits or when it
             // rides its own baked raster (whose recipe may be neutral).
             let with_work =
@@ -602,20 +602,20 @@ fn noop_only_note(lang: Lang, src: Option<&std::path::Path>) -> Option<String> {
         }
         // The strip file exists but cannot be read: unknown is not "no
         // edits", and the Opened handler toasts that state in its own words.
-        Some(autoshop::store::VariantsRead::Unresolved) => return None,
+        Some(autoshade::store::VariantsRead::Unresolved) => return None,
         _ => {}
     }
     Some(tr(lang, "a saved develop exists but holds no effective edits").into())
 }
 
 /// The GUI's OWN localized sentence for a coordinate-frame migration — the
-/// engine's [`autoshop::pipeline::coord_migration_note`] is for the CLI/HTTP
+/// engine's [`autoshade::pipeline::coord_migration_note`] is for the CLI/HTTP
 /// surfaces, exactly like the base-curve pair. Two sentences, not one with a
 /// conditional clause: the raster half is a DIFFERENT fact (work the migration
 /// could not do) and must not be buried inside the success line.
 pub(crate) fn coord_migration_sentence(
     lang: Lang,
-    c: autoshop::pipeline::CoordMigration,
+    c: autoshade::pipeline::CoordMigration,
 ) -> String {
     let mut s: String = tr(
         lang,
@@ -634,13 +634,13 @@ pub(crate) fn coord_migration_sentence(
 
 /// Stamp the photo's camera-matched calibration onto the canvas recipe:
 /// base curve, in-camera lens profile, and — only when unpinned — the
-/// as-shot WB anchor (an old-era Autoshop XMP restore arrives with the
+/// as-shot WB anchor (an old-era AutoShade XMP restore arrives with the
 /// 5500 anchor PINNED by xmp_to_recipe; overwriting the pin would
 /// reinterpret the saved look).
 pub(crate) fn stamp_calibration(
     recipe: &mut EditRecipe,
     knots: &[[f32; 2]],
-    lens: &autoshop::recipe::LensProfile,
+    lens: &autoshade::recipe::LensProfile,
     as_shot: Option<(f32, f32)>,
 ) {
     if !knots.is_empty() {
@@ -678,7 +678,7 @@ pub(crate) fn stamp_calibration(
 pub(crate) fn reconcile_snapshot_calibration(
     r: &mut EditRecipe,
     onto_pixel_state: bool,
-    calibration: impl FnOnce() -> (Vec<[f32; 2]>, autoshop::recipe::LensProfile, Option<(f32, f32)>),
+    calibration: impl FnOnce() -> (Vec<[f32; 2]>, autoshade::recipe::LensProfile, Option<(f32, f32)>),
 ) -> bool {
     if onto_pixel_state {
         r.base_curve = Vec::new();
@@ -711,7 +711,7 @@ pub(crate) fn reconcile_snapshot_calibration(
         // `repair_pre_era_base_curve` re-estimate it (memo-cheap, and it
         // returns the same knots — so no double estimate was ever observed)
         // and then announce a re-estimate that had not happened.
-        r.version = autoshop::recipe::CALIB_ERA;
+        r.version = autoshade::recipe::CALIB_ERA;
     }
     stamped
 }
@@ -725,7 +725,7 @@ pub(crate) fn reconcile_snapshot_calibration(
 /// entries carry empty curves by invariant and are skipped
 /// ([`VariantKind::is_parametric`]).
 pub(crate) fn strip_from_record(
-    rec: &autoshop::store::VariantsRecord,
+    rec: &autoshade::store::VariantsRecord,
     src: Option<&std::path::Path>,
 ) -> Vec<Variant> {
     let mut strip: Vec<Variant> = rec
@@ -754,7 +754,7 @@ pub(crate) fn strip_from_record(
     if let Some(p) = src {
         for v in strip.iter_mut() {
             if v.kind.is_parametric() {
-                let _ = autoshop::pipeline::repair_pre_era_base_curve(p, &mut v.recipe);
+                let _ = autoshade::pipeline::repair_pre_era_base_curve(p, &mut v.recipe);
             }
             // The coordinate frame, for EVERY card including the pixel-state
             // ones: a generated variant carries no base curve (hence the
@@ -764,7 +764,7 @@ pub(crate) fn strip_from_record(
             // the frame is a property of the PHOTO, and the open path's own
             // migration says it once for all of them (N identical toasts for
             // one fact was the noise the strip's other corrections avoid).
-            let _ = autoshop::pipeline::migrate_recipe_coord_frame(p, &mut v.recipe);
+            let _ = autoshade::pipeline::migrate_recipe_coord_frame(p, &mut v.recipe);
         }
     }
     strip

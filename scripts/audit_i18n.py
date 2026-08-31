@@ -92,7 +92,7 @@ DYNAMIC_SITES = [
     (r"^label\b", "AI segmentation labels"),
     (r"^en\b", "MaskRole::en_name"),
     (r"^busy_key\b", "persist_postponed keys"),
-    (r"^(?:autoshop::)?advisor::decision_key\(", "advisor Decision keys"),
+    (r"^(?:autoshade::)?advisor::decision_key\(", "advisor Decision keys"),
     # develop.rs (draw-time notes render) and workers.rs render_retouch_note
     # (heal-tail notes at landing) both interpolate rationale Note templates
     # (L12#2B) — the key set itself is extracted from rationale::keys above.
@@ -101,7 +101,7 @@ DYNAMIC_SITES = [
     # a surface does when it renders one note rather than a report's whole
     # note list (S2: `described_note` in workers.rs). Same key set, same
     # extraction — `("impl_fn", "rationale", "pub mod keys", "mod keys")`.
-    (r"^(?:autoshop::)?rationale::keys::", "rationale::keys constants"),
+    (r"^(?:autoshade::)?rationale::keys::", "rationale::keys constants"),
     (r"^\[", "inline literal array"),
 ]
 
@@ -165,7 +165,7 @@ DECLARED_DYNAMIC = [
 # flagged below needs `tr(lang, ...)` + a ZH_ENTRIES pair. A listed literal
 # that no longer occurs anywhere is reported as dead so the list cannot rot.
 ALLOWED_BYPASS = {
-    "Autoshop",   # product name, never translated
+    "AutoShade",   # product name, never translated
     "PNG/TIFF",   # file-format jargon, identical in both languages
     "JPEG",       # file-format jargon
     "2560px",     # pixel-size option; its lettered siblings ARE translated

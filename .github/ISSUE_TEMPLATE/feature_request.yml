@@ -34,11 +34,11 @@ body:
     attributes:
       label: The problem
       description: >-
-        What are you trying to do, and where does Autoshop stop you? Describe
+        What are you trying to do, and where does AutoShade stop you? Describe
         the actual photograph or workflow if you can — how often it comes up,
         and what you do instead today. Do not describe a solution yet.
       placeholder: >-
-        I develop 200-frame event sets and cull in Lightroom afterwards. Autoshop
+        I develop 200-frame event sets and cull in Lightroom afterwards. AutoShade
         writes the sidecar next to the recipe, so I have to copy each .xmp beside
         its RAW by hand before Lightroom sees any of it.
     validations:
