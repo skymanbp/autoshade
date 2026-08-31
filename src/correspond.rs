@@ -58,7 +58,7 @@ impl CorrespondOpts {
     /// so a machine without it degrades once, with a sentence, instead of
     /// erroring per pair.
     pub fn available(&self) -> bool {
-        !self.script.as_os_str().is_empty() && self.script.exists()
+        crate::sidecar_script_present(&self.script)
     }
 }
 

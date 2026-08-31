@@ -712,79 +712,14 @@ struct StateRow {
     xmp_sha256: String,
     stats: PhotoStats,
 }
-
-/// SHA-256, lowercase hex.
+/// SHA-256, lowercase hex — the shared implementation.
 ///
-/// In tree rather than as a dependency: this hash names a state file and
-/// decides whether a saved measurement still describes the sidecar it was taken
-/// from, and `Cargo.toml` carries no crypto crate to borrow one from (adding
-/// one for a drift check would be a supply-chain decision this change has no
-/// business making). Pinned by known-answer tests against the published
-/// vectors, so a mistyped constant cannot pass.
-fn sha256_hex(bytes: &[u8]) -> String {
-    const K: [u32; 64] = [
-        0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
-        0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
-        0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
-        0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
-        0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
-        0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
-        0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
-        0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
-    ];
-    let mut hash: [u32; 8] = [
-        0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
-        0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
-    ];
-    let mut msg = bytes.to_vec();
-    let bit_len = (bytes.len() as u64).wrapping_mul(8);
-    msg.push(0x80);
-    while msg.len() % 64 != 56 {
-        msg.push(0);
-    }
-    msg.extend_from_slice(&bit_len.to_be_bytes());
-    for block in msg.chunks_exact(64) {
-        let mut sched = [0u32; 64];
-        for (word, bs) in sched.iter_mut().zip(block.chunks_exact(4)) {
-            *word = u32::from_be_bytes([bs[0], bs[1], bs[2], bs[3]]);
-        }
-        for i in 16..64 {
-            let s0 = sched[i - 15].rotate_right(7)
-                ^ sched[i - 15].rotate_right(18)
-                ^ (sched[i - 15] >> 3);
-            let s1 = sched[i - 2].rotate_right(17)
-                ^ sched[i - 2].rotate_right(19)
-                ^ (sched[i - 2] >> 10);
-            sched[i] = sched[i - 16]
-                .wrapping_add(s0)
-                .wrapping_add(sched[i - 7])
-                .wrapping_add(s1);
-        }
-        // The eight working registers a..h, as a rotating array: the round's
-        // shift-down (h←g, g←f, … b←a) IS a rotate, and naming them
-        // individually costs eight single-letter bindings for nothing.
-        let mut r = hash;
-        for (kc, wc) in K.iter().zip(sched.iter()) {
-            let s1 = r[4].rotate_right(6) ^ r[4].rotate_right(11) ^ r[4].rotate_right(25);
-            let ch = (r[4] & r[5]) ^ (!r[4] & r[6]);
-            let t1 = r[7]
-                .wrapping_add(s1)
-                .wrapping_add(ch)
-                .wrapping_add(*kc)
-                .wrapping_add(*wc);
-            let s0 = r[0].rotate_right(2) ^ r[0].rotate_right(13) ^ r[0].rotate_right(22);
-            let maj = (r[0] & r[1]) ^ (r[0] & r[2]) ^ (r[1] & r[2]);
-            let t2 = s0.wrapping_add(maj);
-            r.rotate_right(1);
-            r[4] = r[4].wrapping_add(t1);
-            r[0] = t1.wrapping_add(t2);
-        }
-        for (h, v) in hash.iter_mut().zip(r) {
-            *h = h.wrapping_add(v);
-        }
-    }
-    hash.iter().map(|v| format!("{v:08x}")).collect()
-}
+/// This module and `describe` each wrote their own until the two were folded
+/// into [`crate::sha256`]: same digest, one known-answer test, one place a
+/// mistyped constant can hide. The digest names a state file and decides
+/// whether a saved measurement still describes the sidecar it was taken from,
+/// so it must stay a fixed function of the bytes for ever.
+use crate::sha256::sha256_hex;
 
 /// A photograph's identity INSIDE the eval folder — see [`StateRow::rel`].
 fn photo_rel(dir: &Path, raw: &Path) -> String {
@@ -2198,31 +2133,25 @@ mod tests {
         d
     }
 
-    /// The published FIPS 180-4 vectors, including one that crosses the
-    /// padding boundary into a SECOND block — a one-block implementation gets
-    /// the first two right by accident.
+    /// The premise of the stale-sidecar guard, asserted where the guard lives.
     ///
-    /// MUTATION THIS CATCHES: any mistyped round constant, a wrong rotation
-    /// amount, dropping the second block, or padding the length in
-    /// little-endian. Every one of those still returns 64 plausible hex
-    /// characters, and a hash that is merely *stable* would pass a
-    /// self-comparison test while agreeing with nothing on earth.
+    /// The published FIPS 180-4 vectors moved to `crate::sha256` with the
+    /// implementation — one known-answer test for one hash. What is eval's own
+    /// is the property those vectors do not state: that the digest DISCRIMINATES,
+    /// so a saved measurement stops matching the moment its sidecar changes by
+    /// one byte.
+    ///
+    /// MUTATION THIS CATCHES: a digest that ignores its input (a constant, or a
+    /// length-only hash) — which would leave every stale measurement looking
+    /// current for ever, while `sha256_matches_the_fips_180_4_vectors` in the
+    /// hash's own module catches the mistyped-constant class.
     #[test]
-    fn sha256_matches_the_published_vectors() {
-        assert_eq!(
-            sha256_hex(b""),
-            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
-        );
-        assert_eq!(
-            sha256_hex(b"abc"),
-            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
-        );
-        assert_eq!(
-            sha256_hex(b"abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq"),
-            "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1"
-        );
-        // A one-byte edit changes it — the property the stale-sidecar guard
-        // actually rests on.
+    fn a_one_byte_edit_changes_the_state_files_digest() {
+        // The published vectors moved with the implementation to
+        // `crate::sha256`; what stays here is the property THIS module's
+        // stale-sidecar guard actually rests on — that a one-byte edit
+        // produces a different digest, so a saved measurement stops matching
+        // the sidecar it was taken from the moment that sidecar changes.
         assert_ne!(sha256_hex(b"abc"), sha256_hex(b"abd"));
     }
 

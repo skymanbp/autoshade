@@ -8321,50 +8321,19 @@ pub fn lr_mask_unwarp_norm(
     dims: (f32, f32),
     profile: &crate::recipe::LensProfile,
 ) -> (f32, f32) {
-    if profile.mask_warp.is_empty() {
-        return (nx, ny);
-    }
-    let (w, h) = dims;
-    let rr = (0.5 * (w * w + h * h).sqrt()).max(1e-6);
-    let [cx, cy] = lr_mask_center_px(dims, profile);
-    let (dx, dy) = (nx * w - cx, ny * h - cy);
-    let rho = (dx * dx + dy * dy).sqrt() / rr;
-    if rho < 1e-6 {
-        return (nx, ny);
-    }
-    let fwd = |rn: f32| rn * mask_warp_factor(&profile.mask_warp, rn);
-    let mut hi = 2.0f32;
-    let mut peak = 0.0f32;
-    for i in 1..=256 {
-        let rn = 2.0 * i as f32 / 256.0;
-        let v = fwd(rn);
-        if v < peak {
-            hi = 2.0 * (i - 1) as f32 / 256.0;
-            break;
-        }
-        peak = v;
-    }
-    if fwd(hi) <= rho {
-        let f = hi / rho;
-        return ((dx * f + cx) / w.max(1e-6), (dy * f + cy) / h.max(1e-6));
-    }
-    let mut lo = 0.0f32;
-    for _ in 0..40 {
-        let mid = 0.5 * (lo + hi);
-        if fwd(mid) < rho {
-            lo = mid;
-        } else {
-            hi = mid;
-        }
-    }
-    let f = 0.5 * (lo + hi) / rho;
-    ((dx * f + cx) / w.max(1e-6), (dy * f + cy) / h.max(1e-6))
+    unwarp_norm_over(nx, ny, dims, profile, &profile.mask_warp)
 }
 
-/// LINEAR handle-only numeric inverse over the retained camera spline. This is
-/// deliberately separate from the byte-for-byte settled RADIAL primitive
-/// above while retaining its centre, radius, fold guard and bisection law.
-fn linear_handle_unwarp_norm(
+/// The numeric inverse itself, over WHICHEVER spline the caller names.
+///
+/// The radial and LINEAR arms are the same 45 lines — same centre, same fold
+/// guard, same 40-step bisection law — differing only in where the knots come
+/// from, so the knots are the parameter. They were a copy while the linear arm
+/// was being settled (D2's handle-transport rule could not take a second knot
+/// source without touching the byte-for-byte settled radial path); the copy
+/// outlived that reason, and a fold guard that exists twice is a fold guard
+/// that can be fixed once.
+fn unwarp_norm_over(
     nx: f32,
     ny: f32,
     dims: (f32, f32),
@@ -8409,6 +8378,22 @@ fn linear_handle_unwarp_norm(
     }
     let f = 0.5 * (lo + hi) / rho;
     ((dx * f + cx) / w.max(1e-6), (dy * f + cy) / h.max(1e-6))
+}
+
+/// LINEAR handle-only numeric inverse over the RETAINED camera spline.
+///
+/// Separate from the radial arm by its knot SOURCE, not by a copy: both go
+/// through [`unwarp_norm_over`], so centre, radius, fold guard and bisection
+/// law cannot drift apart. What stays distinct is which spline a handle is
+/// transported over — the whole point of D2's H2 rule.
+fn linear_handle_unwarp_norm(
+    nx: f32,
+    ny: f32,
+    dims: (f32, f32),
+    profile: &crate::recipe::LensProfile,
+    knots: &[f32],
+) -> (f32, f32) {
+    unwarp_norm_over(nx, ny, dims, profile, knots)
 }
 
 /// Lightroom's full-raw centre in the dimensions currently being rendered.

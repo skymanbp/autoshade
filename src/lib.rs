@@ -33,6 +33,7 @@ pub mod recipe;
 pub mod render;
 pub mod retouch;
 pub mod segment;
+pub mod sha256;
 pub mod serve;
 pub mod store;
 pub mod style;
@@ -191,6 +192,20 @@ pub fn with_model_slot<T>(body: impl FnOnce() -> T) -> T {
     static SLOT: std::sync::Mutex<()> = std::sync::Mutex::new(());
     let _guard = SLOT.lock().unwrap_or_else(|p| p.into_inner());
     body()
+}
+
+/// A configured sidecar script path that actually NAMES a file.
+///
+/// Empty is the "not configured" sentinel, so this is two questions in one:
+/// was a path set, and is it still there. The three sidecars with a script
+/// (describe, embed, correspond) each asked it before doing expensive work —
+/// before staging pixels, before the index build's first frame, before the
+/// worker pool starts — and each answered it locally until this seam existed.
+///
+/// It does NOT ask whether Python runs: that is a separate door, and the GUI
+/// owns it (`bin/gui/util.rs`).
+pub fn sidecar_script_present(script: &std::path::Path) -> bool {
+    !script.as_os_str().is_empty() && script.exists()
 }
 
 /// Shared executor for the single-artifact MODEL sidecars (`embed.rs`,

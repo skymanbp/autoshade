@@ -1789,9 +1789,15 @@ default taste.\n",
     // a sentence about nothing, emitted on every single develop.
     let has_direction = intent.direction.map(str::trim).is_some_and(|d| !d.is_empty());
     let adherence = if has_direction {
+        // The trailing clause names THIS develop's tier. It was the constant
+        // "a Brief direction" on every tier, so a Hint develop — the tier that
+        // asks for the LEAST adherence — was told not to impose restraint on a
+        // Brief direction, a sentence about a develop that was not happening.
+        let tier = intent.adherence.tier();
         format!(
-            "DIRECTION ADHERENCE TIER: {:?}. The proposer must be evaluated against this tier; do not impose generic restraint on a Brief direction.\n",
-            intent.adherence.tier()
+            "DIRECTION ADHERENCE TIER: {}. The proposer must be evaluated against this tier; do not impose generic restraint on a {} direction.\n",
+            tier.prompt_name(),
+            tier.prompt_name()
         )
     } else {
         String::new()
@@ -3443,6 +3449,52 @@ Final answer: {"decision":"accept","reasons":[]}"#;
             1,
             "a param rejection posts once — a second identical POST buys the same refusal"
         );
+    }
+
+    /// The tier clause names THIS develop's tier in BOTH halves (clearing A12).
+    ///
+    /// The trailing half was the constant "a Brief direction", so a Hint
+    /// develop — the tier asking for the least adherence — was told not to
+    /// impose restraint on a Brief direction: an instruction about a develop
+    /// that was not happening, sent to a paid model on every Hint and Direct
+    /// run.
+    ///
+    /// MUTATION THIS KILLS: putting any tier back as a literal in either half.
+    #[test]
+    fn the_verify_prompts_tier_clause_names_only_this_develops_tier() {
+        let recipe = EditRecipe::default();
+        let meta = Meta { make: "T".into(), model: "T".into(), lens: None, iso: Some(100), shutter: None, aperture: None, focal_length_mm: None, exposure_bias_ev: None, date_time: None, width: 100, height: 100, as_shot_wb_coeffs: [1.0; 4] };
+        let hist = Histogram { luma: vec![1; 256], r: vec![1; 256], g: vec![1; 256], b: vec![1; 256], clip_black_pct: 0.0, clip_white_pct: 0.0, sample_pixels: 1 };
+        let prompt = |adherence: f32| {
+            build_verify_prompt(&recipe, &meta, &hist, &GradeIntent {
+                strength: GradeStrength::default(),
+                adherence: DirectionAdherence::new(adherence),
+                direction: Some("warmer"),
+                style_look: None,
+            })
+            .unwrap()
+        };
+        for (dial, tier, others) in [
+            (0.2, "Hint", ["Direct", "Brief"]),
+            (0.5, "Direct", ["Hint", "Brief"]),
+            (0.9, "Brief", ["Hint", "Direct"]),
+        ] {
+            let p = prompt(dial);
+            assert!(
+                p.contains(&format!("DIRECTION ADHERENCE TIER: {tier}.")),
+                "the tier is named: {p}"
+            );
+            assert!(
+                p.contains(&format!("restraint on a {tier} direction")),
+                "the trailing clause names the SAME tier: {p}"
+            );
+            for other in others {
+                assert!(
+                    !p.contains(&format!("restraint on a {other} direction")),
+                    "a {tier} develop must not be told about a {other} direction: {p}"
+                );
+            }
+        }
     }
 
     /// The tier clause rides with a DIRECTION and with nothing else.

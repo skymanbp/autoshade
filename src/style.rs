@@ -126,14 +126,26 @@ pub const REFERENCE_TAGS_CHARS: usize = 128;
 /// phrase at a time.
 pub const REFERENCE_TAG_PHRASE_CHARS: usize = 48;
 
-/// One tag phrase as a block carries it.
-fn block_tag_phrase(tag: &str) -> String {
-    if tag.chars().count() <= REFERENCE_TAG_PHRASE_CHARS {
-        return tag.to_string();
+/// Cut a string to `cap` CHARACTERS, ellipsis included in the bound.
+///
+/// The three doors below each bound a different thing for a different reason
+/// (a tag phrase, the joined tag list, a description) and each wrote this tail
+/// out by hand. The cut itself is one rule and belongs in one place: the bound
+/// is in characters, never bytes — a byte slice would split a codepoint — and
+/// the ellipsis sits INSIDE the budget so a reader of the block can tell a cut
+/// sentence from one that merely stops.
+fn bounded_chars(s: String, cap: usize) -> String {
+    if s.chars().count() <= cap {
+        return s;
     }
-    let mut out: String = tag.chars().take(REFERENCE_TAG_PHRASE_CHARS - 1).collect();
+    let mut out: String = s.chars().take(cap - 1).collect();
     out.push('\u{2026}');
     out
+}
+
+/// One tag phrase as a block carries it.
+fn block_tag_phrase(tag: &str) -> String {
+    bounded_chars(tag.to_string(), REFERENCE_TAG_PHRASE_CHARS)
 }
 
 /// The tags as a block carries them: at most [`LOOK_TAGS_K`], each phrase
@@ -141,12 +153,7 @@ fn block_tag_phrase(tag: &str) -> String {
 fn block_tags(tags: &[String]) -> String {
     let joined =
         tags.iter().take(LOOK_TAGS_K).map(|t| block_tag_phrase(t)).collect::<Vec<_>>().join(", ");
-    if joined.chars().count() <= REFERENCE_TAGS_CHARS {
-        return joined;
-    }
-    let mut out: String = joined.chars().take(REFERENCE_TAGS_CHARS - 1).collect();
-    out.push('\u{2026}');
-    out
+    bounded_chars(joined, REFERENCE_TAGS_CHARS)
 }
 
 /// The tag phrases the retrieved exemplars SHARE, most-shared first and ties
@@ -177,14 +184,7 @@ fn shared_look_tags(ex: &[&StyleExemplar]) -> Vec<(String, usize)> {
 /// rather than at the sites.
 fn block_desc(desc: Option<&str>) -> Option<String> {
     let d = crate::describe::sanitize_desc(desc?)?;
-    if d.chars().count() <= REFERENCE_DESC_CHARS {
-        return Some(d);
-    }
-    // The ellipsis is INSIDE the bound, and it is there so the proposer can see
-    // that the sentence was cut rather than reading a clause that stops.
-    let mut out: String = d.chars().take(REFERENCE_DESC_CHARS - 1).collect();
-    out.push('\u{2026}');
-    Some(out)
+    Some(bounded_chars(d, REFERENCE_DESC_CHARS))
 }
 
 // R18 CANNOT RECUR, because this is a BUILD gate and not a test: moving either

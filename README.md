@@ -776,7 +776,7 @@ versions, and a deleted-version registry; SCUNet success requires the typed
 `sidecar_wrote` contract. A 1771 MB reference probe sets the 1800 MB per-photo
 budget, while the 4 GiB RAW gate bounds admission. The [`build`
 workflow](.github/workflows/build.yml) covers default and GUI feature sets on
-Ubuntu and macOS. The current battery is **1255 library (1243 pass + 12 `#[ignore]`d forensic probes) / 23 CLI / 159 GUI / 2+2 contract** tests; the
+Ubuntu and macOS. The current battery is **1256 library (1244 pass + 12 `#[ignore]`d forensic probes) / 23 CLI / 159 GUI / 2+2 contract** tests; the
 [`scripts/check_docs.py`](scripts/check_docs.py) gate re-derives pinned release
 claims. Model weights are not stored in this repository.
 

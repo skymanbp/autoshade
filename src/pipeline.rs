@@ -197,11 +197,7 @@ pub fn direction_adherence_tier(
 ) -> Option<&'static str> {
     direction
         .filter(|text| !text.trim().is_empty())
-        .map(|_| match adherence.tier() {
-            crate::recipe::AdherenceTier::Hint => "hint",
-            crate::recipe::AdherenceTier::Direct => "direct",
-            crate::recipe::AdherenceTier::Brief => "brief",
-        })
+        .map(|_| adherence.tier().as_str())
 }
 
 /// Encode one past photo as the JPEG preview the vision model receives —

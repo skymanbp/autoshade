@@ -69,7 +69,7 @@ impl EmbedOpts {
     /// worker pool starts, so a build without the script says so once instead
     /// of failing 150 times.
     pub fn available(&self) -> bool {
-        !self.script.as_os_str().is_empty() && self.script.exists()
+        crate::sidecar_script_present(&self.script)
     }
 }
 

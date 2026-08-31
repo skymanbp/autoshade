@@ -2755,6 +2755,35 @@ pub enum AdherenceTier {
     Brief,
 }
 
+impl AdherenceTier {
+    /// The tier's WIRE spelling — one place, because it is written into two
+    /// different outward things: the deliverable's `adherence` field and the
+    /// verifier's prompt. Those used to spell it independently (a `match` in
+    /// `pipeline` and a `{:?}` in `advisor`), which meant renaming a variant
+    /// silently rewrote a paid model prompt while the sibling literal beside
+    /// it stayed behind.
+    ///
+    /// The lowercase forms are the deliverable's; `Debug` is what the prompt
+    /// carried, so [`Self::prompt_name`] keeps that capitalisation byte for
+    /// byte rather than changing what a model reads.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Hint => "hint",
+            Self::Direct => "direct",
+            Self::Brief => "brief",
+        }
+    }
+
+    /// The tier as the verifier's prompt names it (capitalised, as `{:?}` was).
+    pub fn prompt_name(self) -> &'static str {
+        match self {
+            Self::Hint => "Hint",
+            Self::Direct => "Direct",
+            Self::Brief => "Brief",
+        }
+    }
+}
+
 impl DirectionAdherence {
     pub const DEFAULT: f32 = 0.65;
     pub const TIER_LOW_MAX: f32 = GradeStrength::TIER_LOW_MAX;
