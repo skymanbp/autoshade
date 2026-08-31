@@ -401,13 +401,13 @@ pub mod keys {
         " Spatial traversal stopped at depth {depth} with a {cap}-tile attachment \
          cap; {attached} tile(s) attached.";
     pub const TILE_BOUNDARY_PASSED: &str =
-        " Spatial tile {id} passed the boundary gate: signed rim {before} -> \
-         {after} after direction-preserving shrink k={k} (budget {max}, \
-         {transitions} measured transitions).";
+        " Spatial tile {id} passed the boundary gate: cross-boundary step \
+         {before} -> {after} luma after direction-preserving shrink k={k} \
+         (budget {max}, {transitions} measured crossings).";
     pub const TILE_BOUNDARY_REFUSED: &str =
         " Spatial tile {id} refused by its boundary/composed-frame gate: \
-         candidate rim {before}, final reading {after}, budget {max} \
-         ({transitions} measured transitions, k={k}).";
+         candidate step {before}, final reading {after}, budget {max} \
+         ({transitions} measured crossings, k={k}).";
     pub const MASK_REFINEMENT_KEPT: &str =
         " Guided mask refinement kept for {label}: coverage delta {coverage}, \
          guide-edge alignment {before} -> {after}, core pixels changed {core}.";
@@ -463,7 +463,7 @@ pub mod keys {
     pub const FIELD_MASK_PROPOSED: &str =
         " Field mask {n} proposed: {sign} m={mass} s={share_src}/{share_tgt} D={d} p={pixels}.";
     pub const FIELD_MASK_ATTACHED: &str =
-        " Field mask {n} attached: {err_before}->{err_after}, rim {rim} (bitmap/XMP loss).";
+        " Field mask {n} attached: {err_before}->{err_after}, cross-boundary step {step} (bitmap/XMP loss).";
     pub const FIELD_MASK_REFUSED: &str =
         " Field mask component(s) {n} refused: {why}.";
     pub const FIELD_MASK_NONE: &str =
