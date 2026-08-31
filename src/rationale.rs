@@ -253,6 +253,25 @@ pub mod keys {
     pub const FIT_NOTE_HSL_WITHDRAWN_BLIND: &str =
         " The per-band colour move was given back: it would have carried pixels through hue bands no two-sided evidence covers, and blind movement is vetoed rather than shipped.";
 
+    /// R30 batch 1 (R2-lite): what the Atmosphere global solve's two robust
+    /// controls are actually READ FROM. Zero behaviour change — the
+    /// assumption was always there, and was never stated.
+    pub const FIT_ATMOSPHERE_REFERENCE_POPULATION: &str =
+        " Atmosphere white balance and exposure were solved from WHOLE-FRAME per-channel \
+         weighted medians of both sides. That pairs the two frames as distributions, which \
+         assumes both describe the same content — the assumption this mode is selected \
+         precisely because it does not hold.";
+    /// …and, when a correspondence field exists, HOW MUCH of that reference
+    /// population had no counterpart to be paired with.
+    pub const FIT_ATMOSPHERE_REFERENCE_UNPAIRED: &str =
+        " Of that reference population, {share}% of the target has no confident counterpart \
+         in the source (cross-image correspondence below {tau}, read on the sidecar's {grid} \
+         cell grid, so this is a coarse share) — and defined those two controls all the same.";
+    /// …and when there is no field, the share is UNKNOWN, not zero.
+    pub const FIT_ATMOSPHERE_REFERENCE_UNMEASURED: &str =
+        " How much of that reference population has no counterpart in the source was not \
+         measured: no cross-image correspondence field was available for this pair.";
+
     /// Step 7b: a content-divergent fit obtained a cross-image correspondence
     /// field (local DIFT sidecar) and the zone estimators use it.
     pub const FIT_CORRESPONDENCE: &str =
@@ -336,6 +355,17 @@ pub mod keys {
         " Zoned {label} atmosphere correction dropped: zone residual {before} → \
          {after} did not satisfy do-no-harm, or frame-global drift {drift} exceeded \
          tolerance {tol}.";
+    /// R30 batch 1 (R1): the third acceptance arm is the one that changes
+    /// what ships, so a correction admitted by it says so — with both
+    /// readings it was decided on, and with the ONE safety gate that is
+    /// known not to discriminate named rather than counted.
+    pub const ZONE_STRICTLY_BETTER: &str =
+        " Zoned {label} correction kept by the strictly-better arm: zone residual {before} \
+         → {after}, an absolute gain past the {gain} floor that the halve-or-land arms \
+         would have dropped, at no cost to the frame ({frame_before} → {frame_after}). \
+         Local quality read texture ratio {texture}; that texture floor is calibrated but \
+         known not to separate every case, so this correction rests on the clipping gate, \
+         the zero-regression frame reading and the boundary gate.";
     pub const ZONE_ALREADY_MATCHED: &str =
         " The {label} zone already matches the target (zone residual \
          {before}) — no correction needed.";

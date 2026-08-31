@@ -1645,11 +1645,24 @@ pub(crate) struct PairCorrespondence {
     /// source index — same-index pairing against this array is
     /// correspondence-aware pairing against the original.
     pub(crate) tp: Vec<[f32; 3]>,
-    /// Share of the frame with a confident counterpart (conf >= 0.5).
+    /// Share of the frame with a confident counterpart (conf >= [`CONFIDENT_MATCH`]).
     pub(crate) coverage: f32,
     /// Median per-cell confidence, for the disclosure.
     pub(crate) median: f32,
+    /// R2-lite: the share of the TARGET grid no confident source cell maps
+    /// onto. [`Self::coverage`] is the mirror-image, SOURCE-side reading;
+    /// this one is what the Atmosphere global solve's whole-frame target
+    /// median is exposed to. Grid resolution, never pixel resolution.
+    pub(crate) target_unpaired: f32,
+    /// The sidecar grid the two shares above were counted on, so the
+    /// disclosure can state its own resolution.
+    pub(crate) grid: (usize, usize),
 }
+
+/// The confidence at which a correspondence cell counts as a real match.
+/// Named because two shares are now read off it and they must agree on where
+/// the line is.
+pub(crate) const CONFIDENT_MATCH: f32 = 0.5;
 
 /// A caller-supplied way to obtain a correspondence field for one pair —
 /// the CLI and GUI hand in a closure that runs the local DIFT sidecar
@@ -1706,12 +1719,33 @@ pub(crate) fn correspondence_for_pair(
     let coverage = if conf.is_empty() {
         0.0
     } else {
-        conf.iter().filter(|&&c| c >= 0.5).count() as f32 / conf.len() as f32
+        conf.iter().filter(|&&c| c >= CONFIDENT_MATCH).count() as f32 / conf.len() as f32
     };
     let mut sorted = conf.clone();
     sorted.sort_by(f32::total_cmp);
     let median = sorted.get(sorted.len() / 2).copied().unwrap_or(0.0);
-    PairCorrespondence { conf, tp: out, coverage, median }
+    // R2-lite: the same field read from the OTHER side. `coverage` says how
+    // much of the SOURCE has a counterpart; the Atmosphere solve's unstated
+    // assumption runs the other way, because both its medians are read over
+    // the whole TARGET. So count the target cells that some confident source
+    // cell actually maps onto — a target cell no source cell answers for is a
+    // population the ratio `median(target)/median(source)` has no partner
+    // for. Grid resolution by construction; the disclosure states the grid.
+    let cells = gw * gh;
+    let mut answered = vec![false; cells];
+    for c in 0..cells.min(field.confidence.len()) {
+        if field.confidence[c] >= CONFIDENT_MATCH {
+            let tx = (field.map_x[c].max(0.0) as usize).min(gw - 1);
+            let ty = (field.map_y[c].max(0.0) as usize).min(gh - 1);
+            answered[ty * gw + tx] = true;
+        }
+    }
+    let target_unpaired = if cells == 0 {
+        0.0
+    } else {
+        1.0 - answered.iter().filter(|a| **a).count() as f32 / cells as f32
+    };
+    PairCorrespondence { conf, tp: out, coverage, median, target_unpaired, grid: (gw, gh) }
 }
 
 /// Fit an [`EditRecipe`] mapping `src` (untouched preview) onto the look of
@@ -1911,6 +1945,21 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure_opts(
                         ],
                     ),
                 );
+                // R2-lite's second half: how much of the population the
+                // WB/EV medians were read over had nothing to be paired
+                // with. Disclosure only — no weight, no solve, changes.
+                crate::rationale::push_note(
+                    &mut report.recipe.rationale,
+                    &mut report.notes,
+                    crate::rationale::Note::new(
+                        crate::rationale::keys::FIT_ATMOSPHERE_REFERENCE_UNPAIRED,
+                        vec![
+                            ("share", format!("{:.0}", c.target_unpaired * 100.0)),
+                            ("tau", format!("{CONFIDENT_MATCH:.2}")),
+                            ("grid", format!("{}x{}", c.grid.0, c.grid.1)),
+                        ],
+                    ),
+                );
                 report.correspondence = Some(c);
             }
             // The sidecar failing (or missing) must degrade with a sentence,
@@ -1925,6 +1974,19 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure_opts(
                     ),
                 );
             }
+        }
+        // R2-lite: with no field the unpaired share of the reference
+        // population is UNKNOWN, and an absent number must read as unknown
+        // rather than as zero. Both the no-provider and the failed-provider
+        // routes land here; the failure's own reason rode the note above.
+        if report.correspondence.is_none() {
+            crate::rationale::push_note(
+                &mut report.recipe.rationale,
+                &mut report.notes,
+                crate::rationale::Note::plain(
+                    crate::rationale::keys::FIT_ATMOSPHERE_REFERENCE_UNMEASURED,
+                ),
+            );
         }
         return report;
     }
@@ -3581,6 +3643,19 @@ fn compose_report(mut recipe: EditRecipe, m: Measured<'_>, solve: SolveFacts) ->
                     ),
                 ],
             ),
+        );
+        // R30 batch 1 (R2-lite), zero behaviour change: the sentence above
+        // says which EVIDENCE this mode read; this one says which POPULATION
+        // its two robust controls were read OVER. `median(target) /
+        // median(source)` is a distribution-level pairing, and a
+        // distribution-level pairing presumes the two distributions describe
+        // the same content — which is exactly what selecting Atmosphere
+        // denies. The assumption was always in the code; only now is it in
+        // the rationale.
+        push_note(
+            &mut rationale,
+            &mut notes,
+            Note::plain(keys::FIT_ATMOSPHERE_REFERENCE_POPULATION),
         );
     }
     let (withheld_luma, withheld_hue) = withheld_range_names(m.evidence);
@@ -7109,6 +7184,149 @@ mod tests {
             (report.recipe.exposure_ev, report.recipe.tint, report.recipe.saturation),
             (plain.recipe.exposure_ev, plain.recipe.tint, plain.recipe.saturation),
             "a failing provider must leave the fit exactly as it was"
+        );
+    }
+
+    /// R30 batch 1 (R2-lite): every Atmosphere report states which
+    /// POPULATION its white balance and exposure were read over — a
+    /// whole-frame per-channel median on both sides, i.e. a distribution
+    /// pairing whose premise is exactly what Atmosphere mode denies. Zero
+    /// behaviour change, so the assertion is on the note, and the dials are
+    /// pinned against the same fit before the disclosure existed.
+    #[test]
+    fn an_atmosphere_report_states_the_population_its_white_balance_came_from() {
+        let (src, tgt) = structural_permutation_pair();
+        let report = fit_recipe(&src, &tgt);
+        assert_eq!(report.mode, FitMode::Atmosphere);
+        assert!(
+            report
+                .notes
+                .iter()
+                .any(|n| n.key == crate::rationale::keys::FIT_ATMOSPHERE_REFERENCE_POPULATION),
+            "the reference population must be disclosed: {}",
+            report.recipe.rationale
+        );
+        // A Full-mode report must NOT carry it — the sentence is a claim
+        // about the Atmosphere solve, and Full solves on paired evidence.
+        let full = fit_recipe(&src, &src);
+        assert_eq!(full.mode, FitMode::Full);
+        assert!(
+            !full
+                .notes
+                .iter()
+                .any(|n| n.key == crate::rationale::keys::FIT_ATMOSPHERE_REFERENCE_POPULATION),
+            "a Full report must not claim an Atmosphere population"
+        );
+    }
+
+    /// R30 batch 1 (R2-lite): with no correspondence field the unpaired share
+    /// of that population is UNKNOWN, and an absent number must read as
+    /// unknown rather than as zero. With a field it is stated, with its
+    /// threshold and its grid resolution.
+    #[test]
+    fn the_unpaired_share_reads_as_unmeasured_when_there_is_no_field() {
+        let (src, tgt) = structural_permutation_pair();
+        let bare = fit_recipe(&src, &tgt);
+        let has = |r: &FitReport, k: &str| r.notes.iter().any(|n| n.key == k);
+        assert!(
+            has(&bare, crate::rationale::keys::FIT_ATMOSPHERE_REFERENCE_UNMEASURED),
+            "no provider: the share is unmeasured, not zero: {}",
+            bare.recipe.rationale
+        );
+        assert!(!has(&bare, crate::rationale::keys::FIT_ATMOSPHERE_REFERENCE_UNPAIRED));
+        // A failing provider is the same epistemic position, and its own
+        // reason still rides the step-7b sentence.
+        let failing = |_: &DynamicImage,
+                       _: &DynamicImage|
+         -> anyhow::Result<crate::correspond::CorrespondenceField> {
+            Err(anyhow::anyhow!("no GPU on this machine"))
+        };
+        let failed = fit_recipe_with(
+            &src,
+            &tgt,
+            FitOptions {
+                strength: crate::recipe::GradeStrength::default(),
+                provider: Some(&failing),
+            },
+        );
+        assert!(has(&failed, crate::rationale::keys::FIT_ATMOSPHERE_REFERENCE_UNMEASURED));
+        assert!(has(&failed, crate::rationale::keys::FIT_CORRESPONDENCE_UNAVAILABLE));
+        // A measured field replaces "unmeasured" with the number.
+        let ok = |_: &DynamicImage,
+                  _: &DynamicImage|
+         -> anyhow::Result<crate::correspond::CorrespondenceField> {
+            Ok(identity_field())
+        };
+        let measured = fit_recipe_with(
+            &src,
+            &tgt,
+            FitOptions {
+                strength: crate::recipe::GradeStrength::default(),
+                provider: Some(&ok),
+            },
+        );
+        assert!(has(&measured, crate::rationale::keys::FIT_ATMOSPHERE_REFERENCE_UNPAIRED));
+        assert!(!has(&measured, crate::rationale::keys::FIT_ATMOSPHERE_REFERENCE_UNMEASURED));
+        // …and it must be a DIALLESS change: same recipe as the bare fit.
+        assert_eq!(
+            (
+                measured.recipe.exposure_ev,
+                measured.recipe.temperature_k,
+                measured.recipe.tint,
+                measured.recipe.saturation,
+            ),
+            (
+                bare.recipe.exposure_ev,
+                bare.recipe.temperature_k,
+                bare.recipe.tint,
+                bare.recipe.saturation,
+            ),
+            "R2-lite is disclosure only"
+        );
+    }
+
+    /// R30 batch 1 (R2-lite): the unpaired share is a TARGET-side reading,
+    /// not the source-side `coverage` under another name. An identity field
+    /// answers for every target cell, so the share is zero; a field where
+    /// only the top half of the source is confident (and maps into the top
+    /// half of the target) leaves the bottom half of the target unanswered.
+    #[test]
+    fn the_unpaired_share_is_read_from_the_targets_side() {
+        let g = crate::correspond::GRID;
+        let (w, h) = (96u32, 64u32);
+        let tp: Vec<[f32; 3]> = vec![[0.5; 3]; (w * h) as usize];
+        let identity = correspondence_for_pair(&identity_field(), &tp, (w, h), (w, h));
+        assert!(
+            identity.target_unpaired.abs() < 1e-6,
+            "an identity field answers for every target cell: {}",
+            identity.target_unpaired
+        );
+        assert_eq!(identity.grid, (g, g));
+        // Confidence only in the top half. Coverage (source side) and the
+        // unpaired share (target side) must BOTH read a half — the same
+        // number here, by construction, but from opposite sides.
+        let half = crate::correspond::CorrespondenceField {
+            confidence: (0..g * g).map(|c| if c / g < g / 2 { 1.0 } else { 0.0 }).collect(),
+            ..identity_field()
+        };
+        let pc = correspondence_for_pair(&half, &tp, (w, h), (w, h));
+        assert!((pc.coverage - 0.5).abs() < 1e-6, "coverage {}", pc.coverage);
+        assert!((pc.target_unpaired - 0.5).abs() < 1e-6, "unpaired {}", pc.target_unpaired);
+        // And now the case that separates them: EVERY source cell is
+        // confident, but they all map onto the top half of the target. The
+        // source-side coverage says 100%; the target-side share says half the
+        // target had no partner — which is the reading R2-lite exists to
+        // publish, and the one `coverage` cannot give.
+        let piled = crate::correspond::CorrespondenceField {
+            map_y: (0..g * g).map(|c| ((c / g) / 2) as f32).collect(),
+            ..identity_field()
+        };
+        let pc = correspondence_for_pair(&piled, &tp, (w, h), (w, h));
+        assert!((pc.coverage - 1.0).abs() < 1e-6, "coverage {}", pc.coverage);
+        assert!(
+            (pc.target_unpaired - 0.5).abs() < 1e-6,
+            "a fully confident field can still leave half the target unpaired: {}",
+            pc.target_unpaired
         );
     }
 

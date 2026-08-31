@@ -1951,6 +1951,30 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     (" · guided mask refinement: {kept} kept, {abstained} abstained",
         " · 引导蒙版细化：保留 {kept} 个，放弃 {abstained} 个"),
 
+    (" Atmosphere white balance and exposure were solved from WHOLE-FRAME per-channel \
+      weighted medians of both sides. That pairs the two frames as distributions, which \
+      assumes both describe the same content — the assumption this mode is selected \
+      precisely because it does not hold.",
+        " 氛围模式的白平衡与曝光解自两侧的整帧逐通道加权中位数。这是把两张画面当作分布来配对，\
+         其前提是两侧描述同一批内容——而正是因为该前提不成立，才选用了这个模式。"),
+    (" Of that reference population, {share}% of the target has no confident counterpart \
+      in the source (cross-image correspondence below {tau}, read on the sidecar's {grid} \
+      cell grid, so this is a coarse share) — and defined those two controls all the same.",
+        " 在该参照人口中，目标画面有 {share}% 在源图中没有可信对应（跨图对应低于 {tau}，\
+         读自侧车的 {grid} 网格，故为粗粒度占比）——它们同样参与了上面两项控件的定义。"),
+    (" How much of that reference population has no counterpart in the source was not \
+      measured: no cross-image correspondence field was available for this pair.",
+        " 该参照人口中有多少在源图中没有对应，本次未测量：这一对没有可用的跨图对应场。"),
+    (" Zoned {label} correction kept by the strictly-better arm: zone residual {before} \
+      → {after}, an absolute gain past the {gain} floor that the halve-or-land arms \
+      would have dropped, at no cost to the frame ({frame_before} → {frame_after}). \
+      Local quality read texture ratio {texture}; that texture floor is calibrated but \
+      known not to separate every case, so this correction rests on the clipping gate, \
+      the zero-regression frame reading and the boundary gate.",
+        " {label} 区校正由「严格更优」臂保留：区内残差 {before} → {after}，绝对收益越过 {gain} 下限，\
+         而「减半或落位」两臂本会丢弃它；帧上没有付出代价（{frame_before} → {frame_after}）。\
+         局部质量读数为纹理比 {texture}；该纹理下限虽经标定，但已知无法区分所有情形，\
+         故此校正实际依托的是裁切门、零回归的帧读数与边界门。"),
     (" Cross-image correspondence measured (DIFT): {cov}% of the frame has a confident counterpart in the target (median confidence {med}); full zone fits weight pairs by it and read shifted content at its corresponded position.",
         " 跨图对应已测量（DIFT）：画面 {cov}% 在目标中有可信对应（中位置信 {med}）；完整区拟合按其为像素对加权，并在对应位置读取被移动的内容。"),
     (" Cross-image correspondence unavailable ({e}) — the content-divergent estimators ran without it.",
