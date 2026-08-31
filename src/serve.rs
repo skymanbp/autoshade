@@ -3815,7 +3815,7 @@ mod tests {
         // The whole point: whatever goes into a header value is pure ASCII, so
         // `Header::from_bytes` can never reject it (that rejection + `.unwrap()`
         // is what killed Download / Fill / Heal on non-ASCII photo names).
-        for s in ["DSC09528.developed.tif", "测试照片.developed.tif", "a b%c.jpg", "D:\\照片\\x.png"] {
+        for s in ["P52.developed.tif", "测试照片.developed.tif", "a b%c.jpg", "D:\\照片\\x.png"] {
             let enc = percent_encode(s);
             assert!(enc.is_ascii(), "{enc} is not ASCII");
             assert_eq!(percent_decode(&enc), s, "round trip failed for {s}");
@@ -3826,7 +3826,7 @@ mod tests {
 
     #[test]
     fn percent_decode_unicode_and_literals() {
-        assert_eq!(percent_decode("DSC09528.ARW"), "DSC09528.ARW"); // ASCII untouched
+        assert_eq!(percent_decode("P52.ARW"), "P52.ARW"); // ASCII untouched
         // encodeURIComponent("测试照片.png")
         assert_eq!(percent_decode("%E6%B5%8B%E8%AF%95%E7%85%A7%E7%89%87.png"), "测试照片.png");
         assert_eq!(percent_decode("a%20b.jpg"), "a b.jpg"); // %20 = space

@@ -338,7 +338,7 @@ mod tests {
     /// facts must come out in the bytes the CLI shipped.
     #[test]
     fn the_default_rendering_is_the_shipped_spelling() {
-        let photo = p("DSC09568.ARW");
+        let photo = p("P34.ARW");
         assert_eq!(
             Line {
                 subject: Subject::Photo(photo.clone()),
@@ -346,7 +346,7 @@ mod tests {
                 text: "GPT proposer failed (boom)".into(),
             }
             .shipped(),
-            "⚠ DSC09568: GPT proposer failed (boom)"
+            "⚠ P34: GPT proposer failed (boom)"
         );
         // No photograph = no stamp, which is what both of these printed before.
         assert_eq!(

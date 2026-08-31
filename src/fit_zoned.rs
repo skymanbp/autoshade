@@ -101,7 +101,7 @@ pub(super) const ZONE_BOUNDARY_RIM_MAX: f32 = 0.012;
 /// Acceptance: the zone-local error ([`zone_err`]) must fall to ≤ this
 /// fraction of its pre-correction value. The correction is judged on ITS
 /// zone, not on the frame-global `look_err` — measured on the real pair
-/// (2026-07-09, _DSC9621 × reimagine-5): the sky correction landed the zone
+/// (2026-07-09, P21 × reimagine-5): the sky correction landed the zone
 /// moments almost exactly on the target's (zone error 0.507 → 0.015) while
 /// the FRAME-global metric moved 0.1768 → 0.1792, because the generative
 /// target holds ~3× more sky area than the source (the composition differs —
@@ -3550,7 +3550,7 @@ mod tests {
 
     #[test]
     fn zone_dials_turn_a_pale_sky_golden_through_the_engine() {
-        // The acceptance geometry of the real failure (_DSC9621 ×
+        // The acceptance geometry of the real failure (P21 ×
         // reimagine-5, batch #2): hazy pale-BLUE sky, vivid GOLD target sky
         // (the fixtures fit.rs's rotation-gate tests pin). The zoned dials,
         // applied through the engine's bitmap-mask recolour stage, must land

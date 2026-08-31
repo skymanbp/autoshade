@@ -1291,18 +1291,18 @@ pub(crate) const P_CLIP: f32 = 0.002;
 /// the live pairs (each fires HARDER on the haze pair than on the pair that
 /// actually shipped a murky fit), so the gate is judged by the harm itself:
 /// how far its map misses the pixels it claims to identify, in luma units.
-/// Anchors, all measured. Fall-back side: _DSC9608 × reimagine reads 0.021
+/// Anchors, all measured. Fall-back side: P20 × reimagine reads 0.021
 /// (the pale sky, luma q50 ≈ 197/255, re-hued vivid blue out of the class;
 /// share ratio 1.29× sailed under the 1.75× gate; the shipped map missed
 /// the shared class by −22/255 right in the murk band); the archived
-/// _DSC9621 pairs read 0.074 (× reimagine, the golden sky — share 2.65×,
+/// P21 pairs read 0.074 (× reimagine, the golden sky — share 2.65×,
 /// both gates fire), 0.034 (× reimagine-4 — share 1.51×, UNDER the share
 /// gate: this detector is the only defence) and 0.024 (× reimagine-2,
 /// share 1.92×); the haze fixture reads 0.126 (its blue cast tints the
 /// clean side's dark greys out of the class — under the R17 dense residual
 /// knots the gated solve faithfully implements that broken map and
 /// collapses to a do-no-harm reset, while the fallback lands
-/// 0.0892 → 0.0229). Keep side: _DSC9621 × reimagine-3 — a REAL benign
+/// 0.0892 → 0.0229). Keep side: P21 × reimagine-3 — a REAL benign
 /// pair — reads 0.0050 (share 1.12×), the identity / canyon fixtures read
 /// ≈ 0 (matched members) and the synthetic uniform-inflation fixture reads
 /// < 0.0075. The 0.015 ceiling thus has real pairs on BOTH flanks: 3.0×
@@ -1312,7 +1312,7 @@ pub(crate) const P_CLIP: f32 = 0.002;
 /// composed-calibration domain was measured separately for all five real
 /// pairs (R19, the repro test prints it per pair) and each verdict lands
 /// on the same side of the ceiling in both domains — composed readings:
-/// _DSC9608 × re2 0.024, _DSC9621 × re 0.043, × re2 0.033, × re4 0.036
+/// P20 × re2 0.024, P21 × re 0.043, × re2 0.033, × re4 0.036
 /// (fall-back side), × re3 0.0131 (keep side, a 1.15× margin against the
 /// preview domain's 3.0×). The haze fixture is a recipe-render pair with
 /// no RAW, so a composed domain does not exist for it.
@@ -1365,7 +1365,7 @@ const CAST_ACCEPT_RATIO: f32 = 2.0;
 // A cast that rotates a region into a hue the target DOES contain elsewhere
 // (sky turned rock-gold) passes this veto BY DESIGN — that failure class is
 // covered by the rotation budget below, added when it materialised on a real
-// pair (2026-07-09 #2, _DSC9621 × reimagine-5: the hazy pale-blue sky was
+// pair (2026-07-09 #2, P21 × reimagine-5: the hazy pale-blue sky was
 // re-hued ~170° into the target's own vivid orange; both earlier gates
 // passed — the destination hue was target-native and the frame-dominant win
 // carried the aggregate).
@@ -1574,7 +1574,7 @@ pub(crate) fn analysis_pair(src: &DynamicImage, target: &DynamicImage) -> (Dynam
 /// the user believes the number.
 ///
 /// The 0.83 is real — measured on the cropped real pair of 2026-08-17
-/// (`_DSC9422`, a portrait frame the user cropped to 1.294) — and so is the
+/// (`P43`, a portrait frame the user cropped to 1.294) — and so is the
 /// blindness behind it: the joint reading handed that pair one of its BEST
 /// scores (0.035), because value-range buckets correspond by value and simply
 /// do not notice that the two populations came from different rectangles.
@@ -4920,7 +4920,7 @@ fn residual_tone_curve_with_budget(
     // 38-u8 input gap right across the band holding the frame's tonal mass,
     // and the curve's PIECEWISE-LINEAR rendering (`render::curve_lut` →
     // `interp` — not the monotone cubic the knot spline uses) chords
-    // ~10/255 below the concave desired map inside it (measured, _DSC9608
+    // ~10/255 below the concave desired map inside it (measured, P20
     // × reimagine). 13 output levels bound the inter-knot input gap to
     // ~21 u8 wherever the LUT moves; where it is flat the levels collapse
     // onto one x and the `prev_in` dedup keeps the point list minimal —
@@ -5604,7 +5604,7 @@ fn is_neutralish(p: &[f32; 3]) -> bool {
 /// vivid gold one is not (≈ 0.37), and an asymmetric gate mapped the sky's
 /// luma cluster across a ramp it doesn't belong to, distorting the whole
 /// tone solve; or the shares stay COMPARABLE while a luma-CONCENTRATED band
-/// churns out of one side's class — _DSC9608 × reimagine, 2026-08-12: the
+/// churns out of one side's class — P20 × reimagine, 2026-08-12: the
 /// target re-hued 24% of the base's neutral class (the pale sky, base-luma
 /// q50 ≈ 197/255, → vivid blue), the share ratio read a passing 1.29×, and
 /// the base's bright grey ranks paired against target ranks the sky no
@@ -5623,7 +5623,7 @@ fn is_neutralish(p: &[f32; 3]) -> bool {
 /// on the archive): the share ratio is alignment-free — it still works
 /// when misregistration slides the misprediction metric toward 0 (its
 /// fail-open direction) — while the misprediction gate catches membership
-/// churn the ratio cannot see (_DSC9621 × reimagine-4: share 1.51×,
+/// churn the ratio cannot see (P21 × reimagine-4: share 1.51×,
 /// misprediction 0.034 — only this gate fires). A >1.75× share asymmetry
 /// falls back UNCONDITIONALLY, by design: a low misprediction reading must
 /// never override it, because misregistration fakes exactly that reading
@@ -7832,7 +7832,7 @@ mod tests {
         DynamicImage::ImageRgb8(img)
     }
 
-    /// R17: the _DSC9608 × reimagine murk, distilled — the target re-hues a
+    /// R17: the P20 × reimagine murk, distilled — the target re-hues a
     /// luma-CONCENTRATED bright band out of the source's neutral class. The
     /// share ratio stays under 1.75× (the old gate passed and the murky fit
     /// shipped), but the leavers bend the source evidence CDF far past the
@@ -7978,7 +7978,7 @@ mod tests {
     /// camera base the old fixed-x placement left a 38-u8 input gap right
     /// across the band holding a real frame's tonal mass, and the curve's
     /// piecewise-linear rendering chorded ~10/255 below the promised map
-    /// inside it. The base curve here is the _DSC9608 camera calibration
+    /// inside it. The base curve here is the P20 camera calibration
     /// verbatim.
     #[test]
     fn residual_knots_stay_dense_in_the_curve_input_space() {
@@ -8242,7 +8242,7 @@ mod tests {
         DynamicImage::ImageRgb8(img)
     }
 
-    /// POLICY regression for real-machine failure #2 (2026-07-09, _DSC9621 ×
+    /// POLICY regression for real-machine failure #2 (2026-07-09, P21 ×
     /// reimagine-5): when the target's statistics demand rotating a large
     /// coherent chromatic region into a hue the target DOES populate (blue
     /// hazy sky → vivid target-native orange, ~170°), both existing gates
@@ -8298,7 +8298,7 @@ mod tests {
         );
     }
 
-    /// The REAL-pair geometry (2026-07-09 #2, _DSC9621 × reimagine-5), where
+    /// The REAL-pair geometry (2026-07-09 #2, P21 × reimagine-5), where
     /// the rotation gate is the UNIQUE rejector — measured on this fixture:
     /// stage-4 ratio 0.450 (aggregate gate PASSES: crushing blue genuinely
     /// fixes the channel means frame-wide), foreign-hue veto false (the

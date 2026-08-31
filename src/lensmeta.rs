@@ -351,7 +351,7 @@ mod tests {
         ];
         for (name, native, expected) in [
             ("wall", &WALL_DISTORTION[..], EXPECTED[0]),
-            ("DSC08276", &DSC_DISTORTION[..], EXPECTED[1]),
+            ("P26", &DSC_DISTORTION[..], EXPECTED[1]),
         ] {
             let dense = resample_sony_distortion(native, SONY_DISTORTION_CANONICAL_KNOTS);
             assert_eq!(dense.len(), SONY_DISTORTION_CANONICAL_KNOTS);
@@ -382,7 +382,7 @@ mod tests {
 
     #[test]
     fn conversion_matches_the_real_a7riv_vectors() {
-        // Ground truth: DSC08276.ARW (A7RIV + FE 24-105mm F4 G OSS @ 24mm),
+        // Ground truth: P26.ARW (A7RIV + FE 24-105mm F4 G OSS @ 24mm),
         // dumped with rawler on this machine. Centre knots must be exact
         // identity; corner knots match independently computed values.
         assert!((vignette_gain(0) - 1.0).abs() < 1e-6, "centre vignette gain is exactly 1");

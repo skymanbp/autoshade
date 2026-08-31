@@ -3,7 +3,7 @@
 //! adjustable develop sliders in the user's catalog.
 //!
 //! Key names, value conventions, and structure were verified against a real ACR
-//! sidecar from the user's own library (`DSC08724.xmp`): `ProcessVersion=15.4`,
+//! sidecar from the user's own library (`P28.xmp`): `ProcessVersion=15.4`,
 //! signed-integer sliders, `Sharpness` on 0..150, tone curve as an `rdf:Seq` of
 //! `"x, y"` strings (see `docs/M1_PLAN.md` §5 and §9). We emit only the keys we
 //! set; Lightroom fills the rest from defaults.
@@ -102,9 +102,9 @@ fn local_fmt(v: f32) -> String {
 /// coordinates and the frame it draws them in: `x_px = W·(k·n − (k−1)/2)`, i.e.
 /// the mask lives in a frame `k`× the export, CONCENTRIC with it.
 ///
-/// **MEASURED**, not assumed. `_DSC9687` (`Feather="0"`, so the rendered edge
+/// **MEASURED**, not assumed. `P48` (`Feather="0"`, so the rendered edge
 /// IS the ellipse) puts the semi-axis scale at 1.0326 ± 0.0004 by three
-/// independent methods (`PROBE2-VERDICT.md` §3.1); `_DSC9681` — a hard-edged
+/// independent methods (`PROBE2-VERDICT.md` §3.1); `P47` — a hard-edged
 /// mask whose centre sits 2799 px from the frame centre, which is what
 /// separates "scale the axes" from "scale the frame" — puts the map at
 /// 1.0315 ± 0.0005 and lands on this value to **3 px on a 2799 px lever**
@@ -205,7 +205,7 @@ const LR_MASK_FRAME_SCALE: f64 = 1.0;
 ///   byte-identical across a crop change, a matched-filter limit of 0.09 % on
 ///   any crop-frame coupling against a 6.1 DN positive control). Feeding the
 ///   exported dimensions of a cropped render into the decode displaces
-///   `DSC09401_16.9.JPG`'s five radials by **834–1384 px**.
+///   `P32_16.9.JPG`'s five radials by **834–1384 px**.
 /// * **Portrait** (`P1-portrait-mask-frame.md` §1, HIGH). For a
 ///   `tiff:Orientation` 5–8 capture the source frame is the un-rotated SENSOR
 ///   array (9504 × 6336), and the export is already upright with **no**
@@ -305,7 +305,7 @@ impl FrameAspect {
     /// the transposing orientations — `F3-REPORT.md`'s public census is 72/72
     /// that a sidecar's `tiff:ImageWidth/ImageLength` are always the sensor
     /// (landscape) frame, and `P1-portrait-mask-frame.md` §3 confirms it on the
-    /// user's own library (`_DSC9312.xmp`: `tiff:Orientation="8"` beside the
+    /// user's own library (`P42.xmp`: `tiff:Orientation="8"` beside the
     /// ARW's `DefaultCropSize = (9504, 6336)`, against a 6336 × 9504 export).
     /// The pre-R27 comment here called that swap "unmeasured"; it is measured
     /// now, and the swap is the DECODER's job (see [`turn`](Self::turn)), not a
@@ -543,7 +543,7 @@ fn canonical_lr_angle(deg: f64) -> (f64, bool) {
 /// prediction with no free parameters (`Left > Right` forces `Angle > 0`,
 /// `Top > Bottom` forces `Angle < 0`, both at once is impossible) which the
 /// library confirms 16/16 at p = 2.5 × 10⁻⁵, and the two rendered subjects
-/// `_DSC9689` (8.3 : 1 at +24.35°) and `_DSC9685` (1 : 2 at +29.51°, decoded
+/// `P24` (8.3 : 1 at +24.35°) and `P22` (1 : 2 at +29.51°, decoded
 /// tilt −60.486° against a measured −60.5°) land on it at the pixel
 /// (`PROBE2-VERDICT.md` §1, §5).
 ///
@@ -612,7 +612,7 @@ fn lr_to_engine(lr: LrRadial, frame: Option<FrameAspect>) -> RadialDecode {
     // …and fold the PIXEL-frame rotation into the engine's NORMALISED-frame one
     // (`ANGLE-MODEL.md` §6.1). The two differ by up to 11.2° of rendered tilt
     // over the library's `|angle| ≤ 44°` range (§3.5), measured 28.554° against
-    // a normalised-frame prediction of 19.692° on `_DSC9600` (§3.2).
+    // a normalised-frame prediction of 19.692° on `P19` (§3.2).
     let m = [rx * cos, -ry * sin / s, rx * s * sin, ry * cos];
     let (s1, s2, tu) = svd2(m);
     RadialDecode::Exact(boxed(s1.abs(), s2.abs(), tu.to_degrees()))
@@ -786,7 +786,7 @@ fn inscribed_norm(s: f64, straighten_deg: f64) -> (f64, f64) {
 /// CENTRED, so a Lightroom crop pushed against the edge of the rotated frame
 /// can reach outside it even when it is smaller. Over P3's seven measured
 /// specimens the overshoot is 0.00 px, 0.16 px, 0.94 px, 0.95 px, 5.32 px,
-/// 5.89 px and 46.77 px (0.85 % of one edge, `_DSC9443_1`) — so the conversion
+/// 5.89 px and 46.77 px (0.85 % of one edge, `P44_1`) — so the conversion
 /// is exact or sub-pixel on six of seven, and the seventh loses less than one
 /// percent of one edge. The rectangle is CLAMPED (never sorted — see below)
 /// and the amount is reported, because `EditRecipe::clamp` would otherwise do
@@ -1329,7 +1329,7 @@ crs:MaskSubType=\"{subtype}\"\n\
 /// `Mask/Paint` per stroke and each stroke's `crs:Dabs` token stream.
 ///
 /// **Byte-faithful to the measured shape** (F2 §1.1 / §2, verified against
-/// `_DSC9583` Mask 7 → Brush 1): the Aggregate's seven attributes in
+/// `P12` Mask 7 → Brush 1): the Aggregate's seven attributes in
 /// Lightroom's own order, the Paint's nine in Lightroom's own order, one
 /// `<rdf:li>` per dab token. Three of those attributes are LITERALS because
 /// they are invariants rather than data — `MaskActive="true"` on both,
@@ -1408,7 +1408,7 @@ crs:MaskSyncID=\"{id}\"\n\
 /// A `Mask/RangeMask` component `<rdf:li>` intersected with the correction's
 /// geometric mask (empty string when the adjustment has no range). Component
 /// structure and attribute values verified against the user's own Lightroom
-/// sidecars (`_DSC9245.xmp` luminance, `_DSC9303.xmp` colour): the intersect
+/// sidecars (`P07.xmp` luminance, `P09.xmp` colour): the intersect
 /// encoding is `MaskBlendMode="1" + MaskInverted="true" + MaskValue="0"` —
 /// i.e. "paint 0 wherever the range does NOT match", which erases everything
 /// outside geometry ∩ range. Luminance uses the attribute form
@@ -2330,7 +2330,7 @@ pub(crate) const OWNED_ELEMENT_ONLY: [&str; 5] = [
 ///
 /// **This is deliberately NOT the global `curve_elem`** in [`owned_children`],
 /// and the difference is not cosmetic. Three things separate the two spellings,
-/// all read off the user's own sidecars (`DSC09642`, `DSC08761`):
+/// all read off the user's own sidecars (`P51`, `P50`):
 ///
 ///   * the KEY is the bare name — `crs:MainCurve` / `RedCurve` / `GreenCurve` /
 ///     `BlueCurve`, with no `PV2012` suffix, where the globals are
@@ -3051,7 +3051,7 @@ fn crs_description(r: &EditRecipe, frame: Option<FrameAspect>) -> (String, Vec<M
 /// so re-importing one could not decode its own rotated radial — the reader
 /// needs `W/H` to fold a pixel-frame tilt into the engine's normalised one, and
 /// a document with no declaration hands it nothing. Every real Lightroom
-/// sidecar carries these (`_DSC9600.xmp`: `tiff:ImageWidth="9504"
+/// sidecar carries these (`P19.xmp`: `tiff:ImageWidth="9504"
 /// tiff:ImageLength="6336"`); ours now do too, and a portrait sidecar's
 /// `tiff:Orientation` is what tells the reader the numbers are sensor-frame.
 fn frame_declaration(frame: Option<FrameAspect>) -> String {
@@ -6948,7 +6948,7 @@ fn classify_correction(
                         // R25 P9: `Rotation` is a claim ABOUT THE SHAPE THAT
                         // ARRIVED — "radial rotation(s) read as 0" — so it may
                         // only come from the component that arrived. It used to
-                        // come from all of them: `DSC08960` told the user about
+                        // come from all of them: `P29` told the user about
                         // four rotations, and three of the four described
                         // radials that never entered the recipe at all (蒙版 5
                         // contributed two on its own). What covers a DROPPED
@@ -7139,12 +7139,12 @@ fn classify_correction(
 /// R25 P9 — it used to take the wrong one, twice over:
 ///  * the choice was made by KIND. `parse_one_correction` tried
 ///    `Mask/Gradient` before `Mask/CircularGradient`, so ANY linear anywhere in
-///    the correction beat EVERY radial regardless of position. `DSC08960`
+///    the correction beat EVERY radial regardless of position. `P29`
 ///    蒙版 5 is `[CircularGradient, CircularGradient, Gradient]` — a plain
 ///    3-shape union, every component at the default blend mode — and imported
 ///    as the TRAILING linear with both radials gone.
-///  * and it ignored `crs:MaskBlendMode`, which is the worse half. `DSC08960`
-///    蒙版 3 and `_DSC9583` Mask 9 are both `[CircularGradient(base),
+///  * and it ignored `crs:MaskBlendMode`, which is the worse half. `P29`
+///    蒙版 3 and `P12` Mask 9 are both `[CircularGradient(base),
 ///    Gradient(MaskBlendMode="1" MaskValue="0")]`: the importer kept the
 ///    SUBTRACT shape and dropped the base, i.e. it rendered the region
 ///    Lightroom uses to carve away from the mask as the ENTIRE mask. That is
@@ -7408,7 +7408,7 @@ fn parse_one_correction_with_reader(
                 // a value with its own complement, so the net came out `true`
                 // for EVERY imported Lightroom radial regardless of what the
                 // file said — AutoShade inverted masks Lightroom does not.
-                // Measured cost on `DSC09568`, tone-matched RMS against the
+                // Measured cost on `P34`, tone-matched RMS against the
                 // real Lightroom export: 0.1099 as imported → 0.0751 with this
                 // fixed, and 0.1901 → 0.0869 in blue (E1-verdict §6 defect 2).
                 //
@@ -7431,7 +7431,7 @@ fn parse_one_correction_with_reader(
                 // because its sign and pivot were unverified; both are
                 // measured — positive is CLOCKWISE on a y-down screen (three
                 // independent determinations, `PROBE2-VERDICT.md` §5's
-                // `_DSC9685` decoded −60.486° against a measured −60.5°), the
+                // `P22` decoded −60.486° against a measured −60.5°), the
                 // pivot is the ellipse centre (25 px against 218 px for the
                 // frame centre, `ANGLE-MODEL.md` §3.4), and the rotation
                 // happens in PIXEL space (28.554° measured against 19.692°
@@ -7565,7 +7565,7 @@ fn parse_one_correction_with_reader(
         // Adobe-anchored pairs that no library file supplies: Adobe's own
         // shipped Soften Skin local preset (UI Sharpness +25 -> `0.25`) and
         // MIDI2LR's all-sliders-at-maximum dump (+100 -> `1`). The one wobble
-        // on record — the controlled session's `_DSC9594.xmp` reading
+        // on record — the controlled session's `P14.xmp` reading
         // `crs:LocalSharpness="0.803738"` against a requested +80, briefly
         // read as a falsification when the user recalled TYPING the value —
         // resolves the other way: the divisor a typed 80 would need (99.535)
@@ -7581,7 +7581,7 @@ fn parse_one_correction_with_reader(
         // NOT `q100` — `crs:LocalHue` is the ONE local key measured off its
         // slider on a different scale (v0.32.0). The user's controlled
         // Lightroom export put the mask Hue slider at +50 and the sidecar came
-        // back `crs:LocalHue="0.277778"` (`_DSC9594.xmp`, verbatim), and
+        // back `crs:LocalHue="0.277778"` (`P14.xmp`, verbatim), and
         // 0.277778 × 180 = 50.00004 — no other simple scale lands on it (÷100
         // would read 27.8, ÷360 would read 100). The recipe's own domain is
         // unchanged at ±100 (`LocalAdjustment::hue`), so this is a boundary
@@ -9094,7 +9094,7 @@ mod tests {
         ] {
             assert!(neutral.contains(want), "{want} missing — the block is unconditional: {neutral}");
         }
-        // The real shape, verbatim from the user's library (DSC08761 line 139
+        // The real shape, verbatim from the user's library (P50 line 139
         // onward), on an otherwise empty document.
         let real = "<rdf:Description rdf:about=\"\" \
                     xmlns:crs=\"http://ns.adobe.com/camera-raw-settings/1.0/\" \
@@ -9517,7 +9517,7 @@ mod tests {
     /// alongside a non-zero amount.
     #[test]
     fn carried_effects_round_trip_and_render_nothing() {
-        // The shape a real Lightroom sidecar takes (DSC09568 / _DSC9082):
+        // The shape a real Lightroom sidecar takes (P34 / P05):
         // an amount plus its five companions, grain likewise.
         let r = EditRecipe {
             post_crop_vignette: -17.0,
@@ -9799,7 +9799,7 @@ mod tests {
     // are the user's own photographs, so no line of them is copied in. Every
     // inline fixture below is SYNTHESISED: the attribute set, the value
     // shapes, the attribute order and the element nesting are reproduced
-    // exactly as `DSC08761.xmp` / `DSC09642.xmp` write them, and every
+    // exactly as `P50.xmp` / `P51.xmp` write them, and every
     // personal identifier (`crs:CorrectionName`, `crs:MaskName`, the sync
     // GUIDs) carries a neutral test value instead. The real files are
     // exercised by `real_lightroom_sidecars_import_their_parametric_masks`,
@@ -9875,7 +9875,7 @@ mod tests {
     /// One local point curve as Lightroom writes it inside a Correction: a
     /// BARE key (`MainCurve`, not `ToneCurvePV2012`) and points spelled `x,y`
     /// with NO space after the comma — structurally verbatim from
-    /// `DSC09642.xmp`'s `<crs:RedCurve>` block, with test values.
+    /// `P51.xmp`'s `<crs:RedCurve>` block, with test values.
     fn lr_curve(tag: &str, points: &[(u8, u8)]) -> String {
         let pts: String = points
             .iter()
@@ -10149,7 +10149,7 @@ mod tests {
     /// does NOT — that keeps every older test on the no-frame arm, which is a
     /// real arm and has to stay covered — so the tests that need the aspect
     /// add it here. Every real Lightroom sidecar carries these two
-    /// (`_DSC9600.xmp`: `tiff:ImageWidth="9504" tiff:ImageLength="6336"`,
+    /// (`P19.xmp`: `tiff:ImageWidth="9504" tiff:ImageLength="6336"`,
     /// which is the ARW's own `DefaultCropSize`).
     fn in_frame(doc: &str, w: u32, h: u32) -> String {
         doc.replace(
@@ -10187,8 +10187,8 @@ mod tests {
     ///
     /// | probe | file | `crs:Angle` | naive `a/b` | corner `a/b` | measured |
     /// |---|---|---|---|---|---|
-    /// | #4 | `_DSC9689` | +24.348422 | **1.652** | **8.332** | 6.3–9.8, scan optimum 7.92 |
-    /// | #8 | `_DSC9685` | +29.513785 | **−0.032** (impossible) | **0.524** | 1.84–2.09, scan optimum 1.907 |
+    /// | #4 | `P24` | +24.348422 | **1.652** | **8.332** | 6.3–9.8, scan optimum 7.92 |
+    /// | #8 | `P22` | +29.513785 | **−0.032** (impossible) | **0.524** | 1.84–2.09, scan optimum 1.907 |
     ///
     /// and `#8`'s decoded MAJOR axis is `b`, so its predicted screen tilt is
     /// `θ + 90 = −60.486°` against a measured **−60.5° ± 0.9** (mean over the
@@ -10200,7 +10200,7 @@ mod tests {
     #[test]
     fn a_rotated_lightroom_radial_decodes_to_the_measured_ellipse() {
         let (w, h) = (9504.0, 6336.0);
-        // probe #4 — `_DSC9689`, an 8:1 sliver rotated +24.35°.
+        // probe #4 — `P24`, an 8:1 sliver rotated +24.35°.
         let doc = in_frame(
             &lr_doc(&lr_correction(
                 "R",
@@ -10221,7 +10221,7 @@ mod tests {
         assert!((a / b - 8.332).abs() < 0.01, "axis ratio {} — the naive read is 1.652", a / b);
         assert!((tilt - 24.348422).abs() < 1e-3, "screen tilt {tilt}°, declared +24.348422");
 
-        // probe #8 — `_DSC9685`, TALL (1:2) and rotated past the inversion
+        // probe #8 — `P22`, TALL (1:2) and rotated past the inversion
         // point, so Lightroom wrote `Left > Right`. The naive read makes
         // `X = −122 px` and the shape a sliver on the wrong axis.
         let doc = in_frame(
@@ -10259,7 +10259,7 @@ mod tests {
         for (t, l, b, r, angle) in [
             ("-0.045582", "-0.056408", "0.9708", "1.062771", "24.348422"),
             ("-0.088191", "0.520214", "1.113528", "0.494492", "29.513785"),
-            // `_DSC9600`, the subject the whole angle model was measured on.
+            // `P19`, the subject the whole angle model was measured on.
             ("-0.082402", "-0.008723", "1.109604", "1.090228", "28.229232"),
             // …and an UNROTATED one, which must not acquire an angle.
             ("0.069396", "-0.059577", "0.855822", "1.06594", "0"),
@@ -10351,7 +10351,7 @@ mod tests {
     /// distortion polynomial, not a scale). The recipe carries the sidecar's
     /// STORED geometry verbatim.
     ///
-    /// The history this test used to pin, kept legible: `_DSC9681`
+    /// The history this test used to pin, kept legible: `P47`
     /// (`Feather="0"`, centre 2799 px off frame-centre) RENDERS its centre at
     /// **(2571.0, 5060.0)** px (`PROBE4-FINAL.md` §2, 2880-ray edge fit) —
     /// ~88 px from the stored (2638.4, 5002.8), because THAT frame's warp is
@@ -10390,7 +10390,7 @@ mod tests {
         // known, disclosed, unmodelled lens warp of that frame.
         assert!(
             (2571.0f64 - cx).hypot(5060.0 - cy) > 80.0,
-            "the warp residual on _DSC9681 is real and unmodelled: ({cx}, {cy})"
+            "the warp residual on P47 is real and unmodelled: ({cx}, {cy})"
         );
     }
 
@@ -10433,7 +10433,7 @@ mod tests {
     /// `crs:LocalHue` rides a 180 scale, not the ÷100 every other local key
     /// uses. MEASURED, 2026-08-18: the user's controlled export put the mask
     /// Hue slider at **+50** and Lightroom wrote **`crs:LocalHue="0.277778"`**
-    /// (`_DSC9594.xmp`, verbatim). 0.277778 × 180 = 50.00004; ÷100 would read
+    /// (`P14.xmp`, verbatim). 0.277778 × 180 = 50.00004; ÷100 would read
     /// 27.8 and ÷360 would read 100.
     ///
     /// The gate moves with the reader: at the old 100 scale a slider past
@@ -10504,13 +10504,13 @@ mod tests {
     //  away)`.
     type P3Crop = (&'static str, f64, f64, f64, f64, f64, f64, f64, f64, f64, f64, f64);
     const P3_CROPS: [P3Crop; 7] = [
-        ("_DSC9558", 9504.0, 6336.0, 0.119389, 0.003478, 0.994441, 0.991209, -0.132584, 8302.0, 6277.0, 0.000, 0.000),
-        ("DSC09024_1", 9504.0, 6336.0, 0.00219, 0.007883, 0.99781, 0.992117, -0.303486, 9429.0, 6286.0, 0.000, 0.216),
-        ("_DSC9493", 9504.0, 6336.0, 0.013441, 0.0, 0.986559, 1.0, 0.724343, 9328.0, 6219.0, 0.000, 1.243),
-        ("_DSC1216_hdr", 9438.0, 6265.0, 0.005237, 0.018724, 0.994763, 0.981276, -0.725680, 9262.0, 6148.0, 0.000, 1.251),
-        ("_DSC9138", 9504.0, 6336.0, 0.031274, 0.0, 0.968726, 1.0, 1.728388, 9097.0, 6065.0, 0.000, 6.909),
-        ("_DSC9443_1", 9504.0, 6336.0, 0.094153, 0.135618, 0.978448, 0.955195, -1.979145, 8220.0, 5480.0, 0.000, 30.260),
-        ("_DSC9298", 9504.0, 6336.0, 0.09115, 0.100566, 1.0, 0.900897, -3.274380, 8334.0, 5556.0, 5.895, 0.000),
+        ("P11", 9504.0, 6336.0, 0.119389, 0.003478, 0.994441, 0.991209, -0.132584, 8302.0, 6277.0, 0.000, 0.000),
+        ("P30_1", 9504.0, 6336.0, 0.00219, 0.007883, 0.99781, 0.992117, -0.303486, 9429.0, 6286.0, 0.000, 0.216),
+        ("P45", 9504.0, 6336.0, 0.013441, 0.0, 0.986559, 1.0, 0.724343, 9328.0, 6219.0, 0.000, 1.243),
+        ("P40_hdr", 9438.0, 6265.0, 0.005237, 0.018724, 0.994763, 0.981276, -0.725680, 9262.0, 6148.0, 0.000, 1.251),
+        ("P41", 9504.0, 6336.0, 0.031274, 0.0, 0.968726, 1.0, 1.728388, 9097.0, 6065.0, 0.000, 6.909),
+        ("P44_1", 9504.0, 6336.0, 0.094153, 0.135618, 0.978448, 0.955195, -1.979145, 8220.0, 5480.0, 0.000, 30.260),
+        ("P08", 9504.0, 6336.0, 0.09115, 0.100566, 1.0, 0.900897, -3.274380, 8334.0, 5556.0, 5.895, 0.000),
     ];
 
     /// §0 OF R27 BATCH-3, the crop half. `crs:Crop{Left,Top,Right,Bottom}` are
@@ -10563,11 +10563,11 @@ mod tests {
             let out_h = (c.bottom - c.top) as f64 * hi + lost_h;
             // Half a pixel — `W_out = round(2p)` per axis — on the six
             // specimens whose crop block and pixels come out of the SAME file.
-            // `_DSC9138` is the one paired to a SIDECAR, so its block may have
+            // `P41` is the one paired to a SIDECAR, so its block may have
             // moved since the export; `P3-cropangle-model.md` §6.5 registers
             // its −0.61 px height as exactly that (and notes 9097/1.5 =
             // 6064.67, which is what an aspect lock would give).
-            let tol = if name == "_DSC9138" { 0.65 } else { 0.5 };
+            let tol = if name == "P41" { 0.65 } else { 0.5 };
             assert!(
                 (out_w - ow).abs() < tol && (out_h - oh).abs() < tol,
                 "{name}: model says {out_w:.1} × {out_h:.1}, Lightroom exported {ow} × {oh}"
@@ -10674,7 +10674,7 @@ mod tests {
     /// The whole document round trip on a tilted crop, through the reader and
     /// the writer the app actually calls — including the `{:.6}` `CropAngle`
     /// that replaced `{:.1}` (`P3-cropangle-model.md` §6.4: importing
-    /// `_DSC9298` and saving it back emitted `-3.3`, a 0.0256° drift = 4.3 px
+    /// `P08` and saving it back emitted `-3.3`, a 0.0256° drift = 4.3 px
     /// of edge-to-edge tilt across a 9504 px frame).
     ///
     /// MUTATION THIS CATCHES: put `{:.1}` back and the angle assertion fails
@@ -10783,7 +10783,7 @@ mod tests {
     /// `LuminanceSmoothing > 0` carry the Detail companion and 0 of 207 with
     /// it at 0 do; `SharpenEdgeMasking="0"` rides on 159 files whose
     /// `Sharpness` is set. This writer gated each companion on its OWN value,
-    /// so `DSC09533.JPG`'s shape — `LuminanceSmoothing="50"`,
+    /// so `P33.JPG`'s shape — `LuminanceSmoothing="50"`,
     /// `…Detail="50"`, `…Contrast="0"` — came out with the Contrast key
     /// missing, which no Lightroom file has.
     ///
@@ -10797,7 +10797,7 @@ mod tests {
     /// a radius Lightroom would render at.
     #[test]
     fn the_detail_companions_ride_on_their_amount_the_way_lightroom_writes_them() {
-        // `DSC09533.JPG`, verbatim (P2 §4.1).
+        // `P33.JPG`, verbatim (P2 §4.1).
         let r = EditRecipe {
             noise_reduction: 50.0,
             nr_detail: 50.0,
@@ -10839,7 +10839,7 @@ mod tests {
     /// (`P1-portrait-mask-frame.md` §1, HIGH; 7/7 files pick their true frame
     /// by `dSS`, four landscape controls recover the known answer).
     ///
-    /// The fixture is `_DSC9527-已增强-NR.JPG`'s Mask 8 (P1 §4.2), verbatim:
+    /// The fixture is `P46-已增强-NR.JPG`'s Mask 8 (P1 §4.2), verbatim:
     /// a single `Mask/CircularGradient` at `Angle="0"` declaring +1.6 EV, whose
     /// `|b|` far exceeds the frame so it renders as a BAND — and the two
     /// readings put that band on perpendicular axes, 12 628 px apart. P1
@@ -11217,7 +11217,7 @@ mod tests {
     /// weight loop, render.rs), and importing both halves of Lightroom's
     /// redundant pair XORed a value with its own complement: the net came out
     /// `true` for EVERY imported Lightroom radial whatever the file said.
-    /// Measured on `DSC09568` against the real Lightroom export, tone-matched
+    /// Measured on `P34` against the real Lightroom export, tone-matched
     /// RMS 0.1099 → 0.0751 (blue 0.1901 → 0.0869) once the flip was dropped
     /// (E1-verdict §6 defect 2).
     ///
@@ -11698,8 +11698,8 @@ mod tests {
     }
 
     /// **THE R25 P8 TRAP, mask half** (data-destruction class), and the exact
-    /// scenario measured on the reference library: DSC09034 lost four
-    /// corrections and DSC09642 lost eight, with an empty note list.
+    /// scenario measured on the reference library: P31 lost four
+    /// corrections and P51 lost eight, with an empty note list.
     ///
     /// P1 made Lightroom's own masks import CLEANLY, and the merge's preserve
     /// arm was keyed on a `MaskSummary::preserve_original` flag that only a
@@ -12016,9 +12016,9 @@ mod tests {
     /// linear beat a leading radial and the imported mask was a shape the
     /// correction merely happened to also contain.
     ///
-    /// Measured on the user's library, not invented: `DSC08960` 蒙版 5 is
+    /// Measured on the user's library, not invented: `P29` 蒙版 5 is
     /// `[CircularGradient, CircularGradient, Gradient]` and imported as that
-    /// trailing LINEAR with both radials gone; `_DSC9583` Mask 9 is
+    /// trailing LINEAR with both radials gone; `P12` Mask 9 is
     /// `[CircularGradient, Gradient]` and did the same. The loss was DISCLOSED
     /// throughout (`MultiComponent`, and the dropped radials' own
     /// `Rotation(…)` notes) — so this was never the silent drop it looked
@@ -12038,12 +12038,12 @@ mod tests {
         let radial = || lr_radial("0", "0");
         for (label, comps, want_radial) in [
             // Kind order used to decide: a TRAILING linear beat a leading
-            // radial. `DSC08960` 蒙版 5's real structure, all three at the
+            // radial. `P29` 蒙版 5's real structure, all three at the
             // default blend mode — a plain union.
             ("radial, radial, linear (union)", vec![radial(), radial(), lr_gradient("0")], true),
             ("linear, radial (union)", vec![lr_gradient("0"), radial()], false),
-            // Blend mode decides over document order: `DSC08960` 蒙版 3 and
-            // `_DSC9583` Mask 9 are both a base radial + a SUBTRACT linear, and
+            // Blend mode decides over document order: `P29` 蒙版 3 and
+            // `P12` Mask 9 are both a base radial + a SUBTRACT linear, and
             // the importer kept the shape Lightroom carves away WITH.
             ("radial base, linear subtract", vec![radial(), subtract(lr_gradient("1"))], true),
             ("linear subtract, radial base", vec![subtract(lr_gradient("1")), radial()], true),
@@ -12077,7 +12077,7 @@ mod tests {
     /// R25 P9, Fix B — the disclosure has to describe the shape that ARRIVED.
     /// `Rotation` says "radial rotation(s) read as 0", and
     /// `classify_correction` collected it from EVERY geometry component: on
-    /// `DSC08960` three of the four rotation notes named radials that never
+    /// `P29` three of the four rotation notes named radials that never
     /// entered the recipe (蒙版 5 contributed two by itself). What covers a
     /// dropped shape is `MultiComponent`, which says exactly that.
     ///
@@ -12212,7 +12212,7 @@ mod tests {
     // ── R25 P6: the four LOCAL point curves ──────────────────────────────
 
     /// The round trip, in both directions, over all four keys and their
-    /// SPARSENESS. The fixture reproduces `DSC09642.xmp`'s own shape: Red and
+    /// SPARSENESS. The fixture reproduces `P51.xmp`'s own shape: Red and
     /// Green present, Main and Blue absent.
     #[test]
     fn local_curves_round_trip() {
@@ -12399,9 +12399,9 @@ mod tests {
 
     // ── R27 Batch-4 (L-08): the brush arm ────────────────────────────────────
 
-    /// One `Mask/Paint` stroke. Attribute VALUES are `_DSC9583` Mask 7 →
+    /// One `Mask/Paint` stroke. Attribute VALUES are `P12` Mask 7 →
     /// Aggregate "Brush 1" verbatim (the F2 anatomy's reference specimen,
-    /// `D:/Photography/Raw/2024/24-12-New York-Raw/_DSC9583.xmp`, 75,935 B);
+    /// `P12.xmp` in the user's library, 75,935 B);
     /// the indentation is not, because whitespace between attributes is
     /// insignificant and a fixture whose mutations depend on counting spaces
     /// is a fixture that tests the spaces.
@@ -12424,7 +12424,7 @@ mod tests {
         )
     }
 
-    /// Stroke 1 of `_DSC9583` Mask 7 → Brush 1: `MaskValue="0.439815"`,
+    /// Stroke 1 of `P12` Mask 7 → Brush 1: `MaskValue="0.439815"`,
     /// `Radius="0.582157"`, and the eight dab tokens §1.1 of the anatomy
     /// prints as its worked example.
     fn lr_paint_specimen() -> String {
@@ -12475,7 +12475,7 @@ mod tests {
         )
     }
 
-    /// The `_DSC9583` Mask 7 shape — a linear gradient plus the brush group —
+    /// The `P12` Mask 7 shape — a linear gradient plus the brush group —
     /// imports WHOLE, where before R27 Batch-4 the whole correction was thrown
     /// away and the gradient with it. That is the L-08 registration's own
     /// complaint: 14 already-drawable parametric shapes across the reference
@@ -12723,7 +12723,7 @@ mod tests {
         // BOTH slots the group can occupy, because the writer reaches them
         // through different code: as the correction's BASE (a brush-only
         // correction) and as an extra COMPONENT beside a parametric shape
-        // (`_DSC9583` Mask 7's own shape). A round-trip test that only ever
+        // (`P12` Mask 7's own shape). A round-trip test that only ever
         // saw the base would stay green while the component arm dropped the
         // group on the floor.
         for components in [
@@ -13391,7 +13391,7 @@ mod tests {
     /// this one are synthetic by policy, so they prove the RULES and not the
     /// FILES).
     ///
-    /// `DSC09568.xmp` is the strongest case in the user's library: global
+    /// `P34.xmp` is the strongest case in the user's library: global
     /// Texture +26 — the largest of the seven — beside a real post-crop
     /// vignette. Before B2 every one of those values imported as zero and the
     /// photo simply rendered differently from Lightroom.
@@ -13479,15 +13479,15 @@ mod tests {
                 "{name}: the real de-fringe hue windows must import as themselves"
             );
             // Two named forensic cases from the first-hand scan of these
-            // files: every one writes `SharpenRadius="+1.0"`, and DSC09034 is
+            // files: every one writes `SharpenRadius="+1.0"`, and P31 is
             // the only one whose auto-CA switch is on.
             assert_eq!(r.sharpen_radius, 1.0, "{name}: crs:SharpenRadius=\"+1.0\" must import as 1.0");
-            if name.starts_with("DSC09034") {
+            if name.starts_with("P31") {
                 assert!(r.auto_lateral_ca, "{name}: crs:AutoLateralCA=\"1\" must import as on");
                 seen_auto_ca += 1;
             }
             // The named case, asserted exactly.
-            if name.starts_with("DSC09568") {
+            if name.starts_with("P34") {
                 assert_eq!(r.texture, 26.0, "{name}: crs:Texture=\"+26\" must import as 26");
                 assert_eq!(r.post_crop_vignette, -17.0, "{name}: its post-crop vignette too");
                 assert_eq!(r.post_crop_vignette_style, 1.0, "{name}: Highlight Priority");
@@ -13521,11 +13521,11 @@ mod tests {
         }
         assert!(
             seen_texture > 0,
-            "DSC09568.xmp was not in {dir} — the named forensic case never ran"
+            "P34.xmp was not in {dir} — the named forensic case never ran"
         );
         assert!(
             seen_auto_ca > 0,
-            "DSC09034.xmp was not in {dir} — the B3 auto-CA forensic case never ran"
+            "P31.xmp was not in {dir} — the B3 auto-CA forensic case never ran"
         );
         eprintln!("{seen_effects} sidecar(s) carried a non-neutral B2 effect");
     }
@@ -13538,7 +13538,7 @@ mod tests {
     ///
     /// Same directory and same silent-skip rule as the probes above. This is
     /// where the numbers in the round report come from: before the fix, four
-    /// corrections were destroyed on DSC09034, eight on DSC09642, and nine
+    /// corrections were destroyed on P31, eight on P51, and nine
     /// global keys on each of the three files that carry them — every one of
     /// them silently, with an empty note list.
     #[test]
@@ -16250,9 +16250,9 @@ mod tests {
             return;
         };
         let root = std::path::Path::new(&root);
-        let xmp_path = root.join("_DSC8904-rewritten-brushtable.xmp");
-        let photo = root.join("_DSC8904-rewritten.arw");
-        let text = std::fs::read_to_string(&xmp_path).expect("read rewritten _DSC8904 XMP");
+        let xmp_path = root.join("P04-rewritten-brushtable.xmp");
+        let photo = root.join("P04-rewritten.arw");
+        let text = std::fs::read_to_string(&xmp_path).expect("read rewritten P04 XMP");
         let collector = crate::diag::Collector::new();
         let diag = crate::diag::Diag::about(&collector, &photo);
         let recipe = xmp_to_recipe_with_diag(&text, &diag);

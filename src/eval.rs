@@ -7,7 +7,7 @@
 //! tuning signal: e.g. "AI contrast runs +8 hotter than you" → nudge the prompt.
 //!
 //! XMP is parsed by plain text scan of `crs:Key="value"` (the values are
-//! attributes on rdf:Description; verified against the user's real DSC08724.xmp).
+//! attributes on rdf:Description; verified against the user's real P28.xmp).
 //! No exiftool needed.
 //!
 //! **The ruler widened in R23-1** (feedback #12): the comparison table is now
@@ -1952,7 +1952,7 @@ mod tests {
         }
     }
 
-    // Values copied from the user's real DSC08724.xmp (read this session).
+    // Values copied from the user's real P28.xmp (read this session).
     const SAMPLE: &str = r#"<rdf:Description
         crs:Temperature="5650" crs:Tint="+13" crs:Exposure2012="0.00"
         crs:Contrast2012="+22" crs:Highlights2012="+7" crs:Shadows2012="-6"
@@ -2253,8 +2253,8 @@ mod tests {
         fresh.masks = Some((2, 1, 0));
 
         let row = StateRow {
-            stem: "DSC08724".into(),
-            rel: "shoot/DSC08724.ARW".into(),
+            stem: "P28".into(),
+            rel: "shoot/P28.ARW".into(),
             xmp_sha256: sha256_hex(b"<x/>"),
             stats: fresh.clone(),
         };

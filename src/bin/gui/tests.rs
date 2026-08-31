@@ -6712,7 +6712,7 @@
             );
 
             // …and one that did shows every key it carried. The values are
-            // the real spellings from the reference sidecars (DSC09642 is the
+            // the real spellings from the reference sidecars (P51 is the
             // one file in the library with a non-zero Upright).
             app.recipe.passthrough = [
                 ("PerspectiveVertical", "-35"),
@@ -7073,7 +7073,7 @@
     /// to go and generate an image.
     #[test]
     fn a_chosen_reference_is_a_reverse_fit_target_without_any_generated_variant() {
-        let reference = std::path::PathBuf::from("D:/exports/_DSC9621-lightroom.tif");
+        let reference = std::path::PathBuf::from("D:/exports/P21-lightroom.tif");
         // A stock app: ONE Original variant, nothing generated.
         let mut app = AutoShadeApp::default();
         assert_eq!(app.fit_target(), None, "premise: nothing to fit against yet");
@@ -7085,7 +7085,7 @@
         );
         // …and it OUTRANKS a generated variant: an explicit choice must not
         // be shadowed by whichever card happens to be active.
-        let generated = std::path::PathBuf::from("./out/_DSC9621.reimagine.png");
+        let generated = std::path::PathBuf::from("./out/P21.reimagine.png");
         app.variants.push(Variant {
             id: String::new(),
             name: None,
@@ -7119,10 +7119,10 @@
         );
         // The chosen file is shown, so "what am I fitting against" is
         // answerable without opening a dialog again.
-        app.fit_ref = Some(std::path::PathBuf::from("D:/exports/_DSC9621-lightroom.tif"));
+        app.fit_ref = Some(std::path::PathBuf::from("D:/exports/P21-lightroom.tif"));
         let seen = tall_frame(&mut app, |a, ui| a.ai_panel(ui));
         assert!(
-            seen.iter().any(|t| t.contains("_DSC9621-lightroom.tif")),
+            seen.iter().any(|t| t.contains("P21-lightroom.tif")),
             "the chosen reference must be named on the panel: {seen:?}"
         );
     }

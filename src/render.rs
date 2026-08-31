@@ -7021,7 +7021,7 @@ impl CoordFrame {
 
 /// Lightroom's own precision for a brush number: six decimal places, FIXED.
 ///
-/// Measured on the user's library rather than assumed — `DSC08731.xmp` writes
+/// Measured on the user's library rather than assumed — `P49.xmp` writes
 /// `r 0.218584`, `d 0.067120 0.096097` and `crs:Radius="0.216487"`, trailing
 /// zeros included, and every token in the 22,966-token census has that shape.
 /// Re-emitting a TURNED stream in the same form is what keeps the rewrite
@@ -10934,7 +10934,7 @@ mod tests {
     #[test]
     fn lens_profile_vignette_lifts_corners_only_and_geometry_roundtrips() {
         use crate::recipe::LensProfile;
-        // Real A7RIV-shaped data (DSC08276 conversions): rising corner gains,
+        // Real A7RIV-shaped data (P26 conversions): rising corner gains,
         // falling distortion factors (barrel), near-unity CA.
         let profile = LensProfile {
             vignette: (0..16).map(|i| 1.0 + 0.42 * (i as f32 / 15.0).powi(2)).collect(),
@@ -11568,7 +11568,7 @@ mod tests {
             assert!((rms - expected_rms).abs() < 0.02, "{label}: rms {rms}, max {worst}");
         };
         check("wall", &WALL_NATIVE, &WALL, 0.568);
-        check("DSC08276", &DSC_NATIVE, &DSC, 0.243);
+        check("P26", &DSC_NATIVE, &DSC, 0.243);
     }
 
     #[test]
@@ -12704,7 +12704,7 @@ mod tests {
     /// and both were measured on real exports: `crs:Flipped="true"` +
     /// `crs:MaskInverted="false"` darkens the ellipse INTERIOR (8 frames,
     /// `#6` at +4.4 stops inside), `crs:Flipped="false"` +
-    /// `crs:MaskInverted="true"` darkens the EXTERIOR (`_DSC9688`, +3.40 stops
+    /// `crs:MaskInverted="true"` darkens the EXTERIOR (`P23`, +3.40 stops
     /// exterior-minus-interior, with the level sets GROWING as the threshold
     /// rises). `PROBE2-VERDICT.md` §6.
     ///
@@ -12737,7 +12737,7 @@ mod tests {
             // Lightroom's `Flipped="true" MaskInverted="false"`, as the
             // importer reads it (the bit comes from MaskInverted alone).
             (false, false, true),
-            // Lightroom's `Flipped="false" MaskInverted="true"` — `_DSC9688`.
+            // Lightroom's `Flipped="false" MaskInverted="true"` — `P23`.
             (false, true, false),
             // Engine-only, from this app's own Flip checkbox.
             (true, false, false),
@@ -13584,7 +13584,7 @@ mod tests {
     ///    `bmp` slot `None`, which fails the same「paints」asserts.
     #[test]
     fn a_carried_brush_group_draws_its_dabs() {
-        // `_DSC9583` Mask 7 -> Brush 1, stroke 1: two dabs near the bottom-left
+        // `P12` Mask 7 -> Brush 1, stroke 1: two dabs near the bottom-left
         // corner, radius 0.5818 in WIDTH units, density 0.4398.
         let g = probe_brush(&[(
             0.439815,

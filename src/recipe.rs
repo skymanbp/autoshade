@@ -1361,7 +1361,7 @@ pub enum MaskGeometry {
     /// Lightroom 18.4 can replace text `Mask/Paint` children with a
     /// `MaskBrushTable` reference on the Aggregate. Before R30 B2, the two
     /// rewritten specimens failed loudly as `OutOfModel` (one owning
-    /// correction in `_DSC9206`, two in `_DSC8904`); their table strokes did
+    /// correction in `P06`, two in `P04`); their table strokes did
     /// not render. The path-aware XMP reader now imports the adjudicated ACR
     /// grammar under strict bounds and reports one of nine named refusal
     /// classes when any unestablished form is encountered. Within an
@@ -1987,8 +1987,8 @@ impl LocalAdjustment {
 /// geometry (final weight = geometry × range), so a sky gradient can affect only
 /// the bright pixels, or only the blues. Serialised to XMP as a second
 /// `Mask/RangeMask` component inside `crs:CorrectionMasks` — structure verified
-/// against the user's own Lightroom sidecars (e.g. `_DSC9245.xmp` LumRange,
-/// `_DSC9303.xmp` PointModels).
+/// against the user's own Lightroom sidecars (e.g. `P07.xmp` LumRange,
+/// `P09.xmp` PointModels).
 // Denies unknown fields for the same reason [`MaskGeometry`] does, and in the
 // same breath: the two are this crate's only internally-tagged enums, so a
 // fix that covered one of them would have left the identical silent-drop hole

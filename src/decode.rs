@@ -901,7 +901,7 @@ fn jpeg_exif_block(file: &mut std::fs::File) -> Result<Option<Vec<u8>>> {
 /// **Why the second half is not optional** (R27, `P5-cropped-mask-frame.md`
 /// §8). A JPEG APP1 segment holds at most 65533 payload bytes, and a Lightroom
 /// develop block with masks routinely exceeds that: **13 exports in the user's
-/// own library** are split this way, including `DSC09024_1.jpg` — one of the
+/// own library** are split this way, including `P30_1.jpg` — one of the
 /// seven photographs P3's crop model rests on. The continuation lives in
 /// further APP1 segments introduced by `http://ns.adobe.com/xmp/extension/\0`,
 /// each carrying the 32-hex GUID of the extension it belongs to, the total
@@ -2619,7 +2619,7 @@ mod tests {
     /// R27 T3, `P5-cropped-mask-frame.md` §8. A JPEG's XMP rides in APP1, and
     /// a develop block with masks routinely exceeds the 65533-byte segment
     /// limit — **13 exports in the user's own library** are split into
-    /// GUID-keyed ExtendedXMP chunks, `DSC09024_1.jpg` (one of P3's seven crop
+    /// GUID-keyed ExtendedXMP chunks, `P30_1.jpg` (one of P3's seven crop
     /// specimens) among them. Before R27 a JPEG fell into the TIFF arm,
     /// `GenericTiffReader` failed on the `FFD8` header, and the packet came
     /// back as ABSENT — the silent absence this reader's contract forbids
