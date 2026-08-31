@@ -408,9 +408,26 @@
 > There are now **five** Python sidecars, and they share one discipline rather
 > than five copies of it. `python/denoise.py` owns the download-and-refuse
 > implementation — `_download` with an in-stream byte cap, `_sha256`,
-> `_reclaim_stale_parts`, `_fetch_verified` — and the other four **import it**
-> (`from denoise import _fetch_verified`) instead of reimplementing it, which
-> is why their progress lines announce themselves as `[denoise]`.
+> `_reclaim_stale_parts`, `_fetch_verified` — and the other four reach it
+> instead of reimplementing it, which is why their progress lines announce
+> themselves as `[denoise]`.
+>
+> That discipline lives in **three** shared modules, not in each script.
+> [`python/_device.py`](../python/_device.py) is the one `cuda` -> `mps` ->
+> `cpu` ladder (M2). [`python/_sidecar.py`](../python/_sidecar.py) is what the
+> three single-artifact sidecars — `describe.py`, `embed.py`, `correspond.py` —
+> had each written out for themselves: the progress line, the refusing exit
+> (always 2, so a refusal is distinguishable from a crash), the
+> pinned-revision directory, the fetch across the pin table, and the
+> `tmp`+`fsync`+`replace` publish. It imports `_fetch_verified` from
+> `denoise.py` on their behalf, so the paragraph above still says where that
+> implementation is. What stays per-script is which MODEL and which name to
+> say, which is all each one now binds — every call site kept its spelling.
+> Two copies deliberately remain outside: `denoise.log`, because `_sidecar`
+> imports denoise and the reverse would be a cycle, and `segment.die`, because
+> segment.py loads no heavy module at import time and `_sidecar` pulls in
+> numpy — a two-line saving is not worth putting that on every
+> `segment.py --help`.
 >
 > | sidecar | bridge | model(s) | licence | size |
 > |---|---|---|---|---|
@@ -2650,7 +2667,10 @@ is one shared answer rather than five:
 [`python/_device.py`](../python/_device.py) resolves `cuda` -> `mps` -> `cpu`,
 so an Apple-silicon Mac reaches the GPU through Metal without any script
 deciding for itself. The CUDA spelling is a PARAMETER of that helper precisely
-so the CUDA argv it produces is unchanged from before it existed. The
+so the CUDA argv it produces is unchanged from before it existed. The rest of
+what being a sidecar means — logging, refusing, the pinned checkout, the
+verified fetch, the atomic publish — is likewise one answer rather than three,
+in [`python/_sidecar.py`](../python/_sidecar.py). The
 dependency sets that differ per platform are split into
 `python/requirements-{common,cuda,macos}.txt` — the CUDA file is the only one
 carrying an extra index URL, and the macOS file installs plain PyPI wheels

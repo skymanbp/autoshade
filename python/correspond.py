@@ -82,23 +82,38 @@ from _device import pick_device
 # copied - same rule as embed.py: a relocated correspond.py without
 # denoise.py beside it fails HERE with a sentence.
 try:
-    from denoise import _fetch_verified
+    import _sidecar
 except ImportError as e:  # pragma: no cover - environment shape, not logic
     print(
-        f"correspond.py: cannot import the shared sidecar downloader from "
-        f"denoise.py ({e}) - correspond.py must sit beside denoise.py in python/.",
+        f"correspond.py: cannot import the shared sidecar plumbing from "
+        f"_sidecar.py ({e}) - correspond.py must sit beside _sidecar.py in python/.",
         file=sys.stderr,
     )
     sys.exit(2)
 
 
+# The sidecar plumbing itself — logging, refusal, the pinned checkout's
+# directory, the verified fetch and the atomic publish — is shared with the
+# other two model sidecars (`_sidecar.py`). All that is per-script is WHICH
+# model and WHICH name to say, so that is all that is bound here; every call
+# site below keeps its own spelling.
+from _sidecar import publish  # noqa: F401  (same signature; re-exported for the call sites)
+
+
 def log(msg):
-    print(f"[correspond] {msg}", file=sys.stderr, flush=True)
+    _sidecar.log('correspond', msg)
 
 
-def die(msg: str) -> None:
-    print(f"correspond.py: {msg}", file=sys.stderr)
-    sys.exit(2)
+def die(msg):
+    _sidecar.die('correspond', msg)
+
+
+def model_dir(cache_dir):
+    return _sidecar.model_dir(MODEL, cache_dir)
+
+
+def fetch_model(cache_dir):
+    return _sidecar.fetch_model(MODEL, cache_dir, 'SD 2.1')
 
 
 # The DIFT recipe constants, from the paper's SD featurizer: input edge,
@@ -169,31 +184,6 @@ MODEL = {
         },
     },
 }
-
-
-def model_dir(cache_dir):
-    """One directory per pinned (repo, revision) - same rule as embed.py."""
-    slug = MODEL["repo"].replace("/", "--")
-    return os.path.join(cache_dir, f"{slug}@{MODEL['revision'][:12]}")
-
-
-def fetch_model(cache_dir):
-    d = model_dir(cache_dir)
-    for name, pin in MODEL["files"].items():
-        dest = os.path.join(d, name)
-        os.makedirs(os.path.dirname(dest), exist_ok=True)
-        url = (
-            f"https://huggingface.co/{MODEL['repo']}/resolve/"
-            f"{MODEL['revision']}/{name}"
-        )
-        _fetch_verified(
-            url,
-            dest,
-            pin["sha256"],
-            pin["bytes"] + 4096,
-            f"the SD 2.1 '{name}'",
-        )
-    return d
 
 
 def load_models(cache_dir, device):
@@ -359,26 +349,6 @@ def arr_json(np, v):
     embed.py's vec_json rule, same reason (a doubled float costs ~20 bytes to
     say nothing extra)."""
     return "[" + ",".join(str(np.float32(x)) for x in v) + "]"
-
-
-def publish(path, text):
-    """tmp + fsync + os.replace, like all three existing sidecars (L03)."""
-    tmp = f"{path}.{os.getpid()}.tmp"
-    try:
-        with open(tmp, "w", encoding="utf-8") as f:
-            f.write(text)
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(tmp, path)
-    finally:
-        if os.path.exists(tmp):
-            try:
-                os.remove(tmp)
-            except OSError:
-                # Best-effort cleanup on the error path - an unremovable temp
-                # (an AV lock, on Windows) must not become the reported fault.
-                # why: the original write exception is already propagating.
-                pass
 
 
 def main() -> None:

@@ -625,10 +625,11 @@ mod tests {
 
     // --- SIDECAR SOURCE CONTRACTS (D1 section 8) -----------------------------
     //
-    // The fixes live in Python and this repo has no Python test runner, so the
-    // gate is the established source-invariant idiom (`include_str!` plus
-    // non-vacuity assertions) that `denoise.rs` already uses for its own
-    // sidecar: a regression edit to either script fails a Rust test.
+    // The fixes live in Python, and while `python/test_*.py` suites exist they
+    // are not what CI runs — the Rust battery is. So the gate is the
+    // established source-invariant idiom (`include_str!` plus non-vacuity
+    // assertions) that `denoise.rs` already uses for its own sidecar: a
+    // regression edit to any of those scripts fails a Rust test.
 
     const EMBED_SRC: &str =
         include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/python/embed.py"));
@@ -638,6 +639,18 @@ mod tests {
         include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/python/correspond.py"));
     const DESCRIBE_SRC: &str =
         include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/python/describe.py"));
+    /// The plumbing `describe.py`, `embed.py` and `correspond.py` bind instead
+    /// of copying: the progress line, the refusing exit, the pinned-revision
+    /// directory, the walk across the pin table, and the durable publish.
+    ///
+    /// Deliberately NOT on the roster below. Every roster contract asks a
+    /// question about a MODEL — at least three digests, a full-length revision
+    /// hash — and this file pins nothing; it is the door those pins travel
+    /// through. It is named separately because three of the contracts below
+    /// are now about text that lives HERE, and a guard still reading the old
+    /// file would pass vacuously rather than fail loudly.
+    const SIDECAR_SHARED_SRC: &str =
+        include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/python/_sidecar.py"));
 
     /// The family roster, in one place: a sidecar that fails to enrol here
     /// escapes all four shared contracts below. `describe.py` (S2) is the
@@ -716,7 +729,10 @@ mod tests {
     /// fails.
     #[test]
     fn the_sidecars_never_execute_unpinned_upstream_code() {
-        for (what, src) in SIDECARS {
+        // The shared module is swept too: it is where three of the family now
+        // do their downloading, so a hazard planted there would reach all three
+        // at once.
+        for (what, src) in SIDECARS.iter().chain([&("_sidecar.py", SIDECAR_SHARED_SRC)]) {
             // The CALL, not the word: the docstrings name `trust_remote_code`
             // to explain why it is never used, and a test that banned the
             // token would push that explanation out of the file.
@@ -724,9 +740,20 @@ mod tests {
                 assert!(!src.contains(banned), "{what} must not use {banned}");
             }
         }
-        // And the fetch itself goes through the ONE verified downloader.
+        // And the fetch itself goes through the ONE verified downloader —
+        // either called here, or reached through the shared module that calls
+        // it. Both spellings are checked, so a sidecar cannot satisfy this by
+        // dropping its import and growing an unverified download of its own.
+        assert!(
+            SIDECAR_SHARED_SRC.contains("_fetch_verified("),
+            "_sidecar.py must fetch through the gate"
+        );
         for (what, src) in SIDECARS {
-            assert!(src.contains("_fetch_verified("), "{what} must fetch through the gate");
+            assert!(
+                src.contains("_fetch_verified(")
+                    || (src.contains("import _sidecar") && src.contains("_sidecar.fetch_model(")),
+                "{what} must fetch through the gate, directly or through _sidecar"
+            );
         }
     }
 
@@ -836,10 +863,17 @@ mod tests {
             );
         }
         // Digests are only a gate if something checks them: the whole pinned
-        // set goes through the shared verified-fetch door.
+        // set goes through the shared verified-fetch door. The table is
+        // embed.py's; the walk across it is `_sidecar.fetch_model`, which is
+        // where this assertion has to look now, and the binding is what ties
+        // the two together.
         assert!(
-            EMBED_SRC.contains("for name, pin in MODEL[\"files\"].items():")
-                && EMBED_SRC.contains("pin[\"sha256\"],"),
+            EMBED_SRC.contains("_sidecar.fetch_model(MODEL, cache_dir,"),
+            "embed.py must hand its own MODEL table to the shared fetch"
+        );
+        assert!(
+            SIDECAR_SHARED_SRC.contains("for name, pin in model[\"files\"].items():")
+                && SIDECAR_SHARED_SRC.contains("pin[\"sha256\"],"),
             "every pinned file must be fetched through _fetch_verified with its digest"
         );
     }
@@ -1186,7 +1220,20 @@ mod tests {
     /// with the page cache.
     #[test]
     fn the_sidecars_publish_durably() {
-        for (what, src) in SIDECARS {
+        for (what, own) in SIDECARS {
+            // Whichever source actually OWNS this sidecar's publish: its own,
+            // or the shared module it binds. The order check has to run inside
+            // ONE file — concatenating two would compare positions across a
+            // seam that means nothing.
+            let src = if own.contains("os.fsync(") {
+                own
+            } else {
+                assert!(
+                    own.contains("from _sidecar import publish"),
+                    "{what} neither publishes durably nor binds the shared publish"
+                );
+                SIDECAR_SHARED_SRC
+            };
             assert!(src.contains("os.fsync("), "{what} must fsync before publishing");
             assert!(src.contains("os.replace("), "{what} must publish atomically");
             let fsync = src.find("os.fsync(").unwrap();

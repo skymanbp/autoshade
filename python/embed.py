@@ -67,23 +67,38 @@ from _device import pick_device
 # relocated embed.py without denoise.py beside it fails HERE with a sentence
 # instead of somewhere inside the fetch.
 try:
-    from denoise import _fetch_verified
+    import _sidecar
 except ImportError as e:  # pragma: no cover - environment shape, not logic
     print(
-        f"embed.py: cannot import the shared sidecar downloader from denoise.py "
-        f"({e}) — embed.py must sit beside denoise.py in python/.",
+        f"embed.py: cannot import the shared sidecar plumbing from _sidecar.py "
+        f"({e}) — embed.py must sit beside _sidecar.py in python/.",
         file=sys.stderr,
     )
     sys.exit(2)
 
 
+# The sidecar plumbing itself — logging, refusal, the pinned checkout's
+# directory, the verified fetch and the atomic publish — is shared with the
+# other two model sidecars (`_sidecar.py`). All that is per-script is WHICH
+# model and WHICH name to say, so that is all that is bound here; every call
+# site below keeps its own spelling.
+from _sidecar import publish  # noqa: F401  (same signature; re-exported for the call sites)
+
+
 def log(msg):
-    print(f"[embed] {msg}", file=sys.stderr, flush=True)
+    _sidecar.log('embed', msg)
 
 
-def die(msg: str) -> None:
-    print(f"embed.py: {msg}", file=sys.stderr)
-    sys.exit(2)
+def die(msg):
+    _sidecar.die('embed', msg)
+
+
+def model_dir(cache_dir):
+    return _sidecar.model_dir(MODEL, cache_dir)
+
+
+def fetch_model(cache_dir):
+    return _sidecar.fetch_model(MODEL, cache_dir, 'SigLIP 2')
 
 
 # The HF repo, its pinned commit, and every file we fetch from it with the
@@ -197,34 +212,6 @@ TEXT_SPECIAL_TOKENS = (
     TEXT_TOKENIZER_CONTRACT["bos_token"],
     *TEXT_TOKENIZER_CONTRACT["additional_special_tokens"],
 )
-
-
-def model_dir(cache_dir):
-    """One directory per pinned (repo, revision) — a re-pin never reuses a
-    cache filled at the old revision, and the digest gate never has to be the
-    thing that catches it."""
-    slug = MODEL["repo"].replace("/", "--")
-    return os.path.join(cache_dir, f"{slug}@{MODEL['revision'][:12]}")
-
-
-def fetch_model(cache_dir):
-    d = model_dir(cache_dir)
-    os.makedirs(d, exist_ok=True)
-    for name, pin in MODEL["files"].items():
-        url = (
-            f"https://huggingface.co/{MODEL['repo']}/resolve/"
-            f"{MODEL['revision']}/{name}"
-        )
-        # Same small slack denoise.py leaves on its cap: an overshoot message
-        # should be about the ENDPOINT, not an off-by-one.
-        _fetch_verified(
-            url,
-            os.path.join(d, name),
-            pin["sha256"],
-            pin["bytes"] + 4096,
-            f"the SigLIP 2 '{name}'",
-        )
-    return d
 
 
 def _tokenizer_config_problems(cfg):
@@ -594,28 +581,6 @@ def vec_json(np, v):
     same float32, which is exactly what the Rust side parses it into.
     """
     return "[" + ",".join(str(np.float32(x)) for x in v) + "]"
-
-
-def publish(path, text):
-    """tmp + fsync + os.replace, like both existing sidecars (L03): the caller
-    stages this file and a recipe/index may reference it, so a payload still in
-    the page cache must not vanish under a power cut."""
-    tmp = f"{path}.{os.getpid()}.tmp"
-    try:
-        with open(tmp, "w", encoding="utf-8") as f:
-            f.write(text)
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(tmp, path)
-    finally:
-        if os.path.exists(tmp):
-            try:
-                os.remove(tmp)
-            except OSError:
-                # Best-effort cleanup on the error path — an unremovable temp
-                # (an AV lock, on Windows) must not become the reported fault.
-                # why: the original write exception is already propagating.
-                pass
 
 
 def main() -> None:

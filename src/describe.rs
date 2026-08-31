@@ -536,6 +536,10 @@ mod tests {
 
     const DESCRIBE_SRC: &str =
         include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/python/describe.py"));
+    /// The shared plumbing describe.py binds rather than copies — including
+    /// the walk across the pin table this module's own contract below checks.
+    const SIDECAR_SHARED_SRC: &str =
+        include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/python/_sidecar.py"));
 
     /// MUTATION: weaken any one rule in `sanitize_desc` and this fails. The
     /// description reaches a proposer prompt, so each rule is a real boundary
@@ -676,16 +680,26 @@ mod tests {
         assert_eq!(pinned, table.matches("\"bytes\":").count(), "a pin without a byte count");
 
         // Every walk is over the table ITSELF — a hand-kept subset is how a
-        // pinned file quietly stops being checked.
+        // pinned file quietly stops being checked. The FETCH's walk moved into
+        // `_sidecar.fetch_model` when the three single-artifact sidecars
+        // stopped each keeping a copy, so it is checked there, over the table
+        // describe.py hands it; the self-test's two walks are still its own.
         let walk = "for name, pin in MODEL[\"files\"].items():";
-        let fetch = DESCRIBE_SRC
+        let fetch = SIDECAR_SHARED_SRC
             .split("def fetch_model(")
             .nth(1)
-            .expect("describe.py has a fetch")
+            .expect("_sidecar.py has a fetch")
             .split("\ndef ")
             .next()
             .unwrap();
-        assert!(fetch.contains(walk), "the fetch must walk the pin table, not a subset");
+        assert!(
+            fetch.contains("for name, pin in model[\"files\"].items():"),
+            "the fetch must walk the pin table, not a subset"
+        );
+        assert!(
+            DESCRIBE_SRC.contains("_sidecar.fetch_model(MODEL, cache_dir,"),
+            "describe.py must hand its own MODEL table to that fetch"
+        );
         let selftest = DESCRIBE_SRC
             .split("def self_test(")
             .nth(1)
@@ -719,7 +733,18 @@ mod tests {
         // The fetch goes through the ONE verified downloader, with the repo
         // and revision this build pins. (`SIDECARS` in `embed.rs` holds the
         // family-wide half of this; here it is named for the fifth member.)
-        assert!(DESCRIBE_SRC.contains("_fetch_verified("), "the fetch must go through the gate");
+        // Reached through `_sidecar`, which is the only caller left that
+        // names it — so both halves are checked: this script binds that fetch,
+        // and that fetch is the verified one.
+        assert!(
+            DESCRIBE_SRC.contains("import _sidecar")
+                && DESCRIBE_SRC.contains("_sidecar.fetch_model(MODEL, cache_dir,"),
+            "the fetch must go through the gate"
+        );
+        assert!(
+            SIDECAR_SHARED_SRC.contains("_fetch_verified("),
+            "…and the shared fetch must be the verified one"
+        );
         assert!(
             DESCRIBE_SRC.contains("local_files_only=True"),
             "loading must never reach the network behind the gate"

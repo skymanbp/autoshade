@@ -1433,9 +1433,10 @@ than the pre-call state; model weights remain outside the repository.
 - `src/bin/gui/quit.rs`, `src/bin/gui/macos.rs` and
   `scripts/build_app_bundle.sh` — the ⌘Q state machine, its AppKit delivery,
   and the ad-hoc signed application bundle.
-- `python/_device.py` and `python/requirements-{common,cuda,macos}.txt` — the
-  one cuda/mps/cpu ladder every sidecar reads, and the per-platform dependency
-  sets.
+- `python/_device.py`, `python/_sidecar.py` and
+  `python/requirements-{common,cuda,macos}.txt` — the one cuda/mps/cpu ladder
+  every sidecar reads, the shared sidecar plumbing the three single-artifact
+  ones bind rather than copy, and the per-platform dependency sets.
 - `.github/workflows/build.yml`, `.github/workflows/release.yml` and
   `scripts/check_docs.py` — CI and document
   drift gates.
