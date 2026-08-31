@@ -992,15 +992,19 @@ cannot honour is counted the way the develop path would actually see it.
 
 **What it holds.** The number of masks ENABLED with a non-zero amount; how many
 carry a Range Mask refinement; and, per use, a count plus the amount-weighted
-mean of the ten local sliders in `HABIT_SLIDERS` (`exposure`, `highlights`,
+mean of the eleven local sliders in `HABIT_SLIDERS` (`exposure`, `highlights`,
 `shadows`, `whites`, `blacks`, `clarity`, `dehaze`, `saturation`,
-`temperature`, `tint`), and `curved` — the share of uses that carry their own
-local point curve (a curve is a point list, not a slider, so it is a fact
-beside the mean rather than a column of it). A v5 index written from this
-batch on stores the 10-wide mean; an older build refuses it with
-`invalid length 10` and must rebuild, while this build still reads the 8-wide
-S3 shape (missing columns zero-filled) so the version gate's actionable
-message stays reachable. The refined
+`temperature`, `tint`, `hue`), and `curved` — the share of uses that carry their
+own local point curve (a curve is a point list, not a slider, so it is a fact
+beside the mean rather than a column of it). `hue` joined in G3, APPENDED so no
+existing column moves: it was measured at `0` on all 42 corpus masks, and an
+axis the index never measures can never become a habit the reference block can
+name. A v5 index written from this
+batch on stores the 11-wide mean; an older build refuses it with
+`invalid length 11` and must rebuild, while this build still reads the 8-wide
+S3 and 10-wide B5 shapes (missing columns zero-filled, and a zero-filled column
+prints nothing because it is below the slider floor) so the version gate's
+actionable message stays reachable and no data migration is needed. The refined
 count is taken from the imported recipe AND from the importer's own
 `MaskImportReason::ForeignRangeMask` refusals, because a Range Mask this engine
 cannot honour is dropped on the way in: on the 169-sidecar calibration library
@@ -1028,8 +1032,14 @@ bucket that says nothing about WHERE they were placed.
 frame, so nothing spatial is averaged across photos. The block carries counts,
 slider means and English — `local_work_note` renders one sentence naming at
 most `HABIT_SLIDERS_SHOWN = 3` sliders per clause, and its worst case is proved
-against `MAX_LOCAL_WORK_CHARS = 640` by construction rather than truncated at
-runtime.
+against `MAX_LOCAL_WORK_CHARS = 768` by construction rather than truncated at
+runtime. Since G3 one of those three slots is RESERVED: whenever any colour axis
+(`saturation`, `temperature`, `tint`, `hue`) clears its floor, at least one of
+the three named is a colour axis. Ranking by magnitude alone is a tonal
+photographer's ranking — a dodge-and-burn library moves exposure and the two
+tone ends by tens and its colour axis by a five — so a colour habit the
+photographer really has never once reached the note. The COUNT is unchanged,
+which is why the character bound does not move.
 
 **It does not rank.** Retrieval does not read the field at all. That is why it
 ships WITHOUT an index-version bump, on `families`' precedent:

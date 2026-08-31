@@ -7843,7 +7843,7 @@ old ({flat_old:+.2}, {mix_old:.2}, {wheel_old:.2})  new ({flat_new:+.2}, {mix_ne
         let extreme = crate::mask_habit::BucketHabit {
             n: u8::MAX,
             w: 1.0,
-            mean: [0.0, -100.0, 0.0, 0.0, 0.0, 0.0, 0.0, -100.0, -100.0, 0.0],
+            mean: [0.0, -100.0, 0.0, 0.0, 0.0, 0.0, 0.0, -100.0, -100.0, 0.0, 0.0],
         };
         let worst = crate::mask_habit::MaskHabit {
             count: u8::MAX,

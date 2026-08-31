@@ -39,13 +39,13 @@ use serde::{Deserialize, Serialize};
 
 use crate::recipe::{LocalAdjustment, MaskGeometry};
 
-/// The ten sliders a habit is summarised over, in canonical order, spelled
+/// The eleven sliders a habit is summarised over, in canonical order, spelled
 /// with the labels `style::REF_KEYS` already uses for the global half of the
 /// block — so "shadows" means one thing in both sentences.
 ///
 /// A curated subset, like `REF_KEYS` and for the same reason: these are the
 /// moves a photographer makes HABITUALLY through a mask. The rest of
-/// [`LocalAdjustment`]'s twenty-odd knobs (texture, sharpness, hue, noise
+/// [`LocalAdjustment`]'s twenty-odd knobs (texture, sharpness, noise
 /// reduction) are per-photo repairs, and a mean over four neighbours would be
 /// mush.
 ///
@@ -64,9 +64,25 @@ use crate::recipe::{LocalAdjustment, MaskGeometry};
 /// because it is not a slider: a curve is a point list, and the mean of four
 /// photographs' curves is a curve none of them drew (the module header's rule).
 /// It is counted instead — [`MaskHabit::curved`].
-pub const HABIT_SLIDERS: [&str; 10] = [
+/// `hue` joined in G3 (batch 3), APPENDED so that no existing column moves.
+/// The diagnosis measured 0 of 42 AI masks carrying a non-zero local `hue` —
+/// forty-two deliberate writes of `0.0` — and one cause is structural rather
+/// than a matter of taste: this array is the only thing that decides which
+/// axes a habit can be MEASURED on. An axis the index never measures can never
+/// become a habit, so it can never reach the reference block, so the proposer
+/// is never shown a photographer who uses it. `hue` is a colour control a mask
+/// really has (`advisor::catalogue`'s local `hue`, ±100 = ±30°) and it belongs
+/// beside `temperature` / `tint` / `saturation`, not in the per-photo repairs.
+///
+/// WIRE COMPATIBILITY of the widening is [`habit_mean`]'s job and was designed
+/// for exactly this: an index written before this batch is 10 wide, zero-fills
+/// its last column and stays SILENT, because a slider prints only above
+/// [`SLIDER_FLOOR`]. So no data migration and no index-version bump — the
+/// habit reaches WORDS only, never retrieval or `style::blend_toward`
+/// (`style::retrieval_and_style_targets_do_not_read_mask_habits`).
+pub const HABIT_SLIDERS: [&str; 11] = [
     "exposure", "highlights", "shadows", "whites", "blacks", "clarity", "dehaze", "saturation",
-    "temperature", "tint",
+    "temperature", "tint", "hue",
 ];
 
 /// Width of [`BucketHabit::mean`], spelled once.
@@ -81,6 +97,15 @@ pub const N_HABIT_SLIDERS: usize = HABIT_SLIDERS.len();
 /// and the two tone ends it was made with"); eight would triple the clause for
 /// the two least-moved values in it. `local_work_note_fits_its_bound` measures
 /// the worst case this produces.
+///
+/// The three slots are filled by MAGNITUDE, and G3's diagnosis is what that
+/// costs: a dodge-and-burn photographer's exposure / highlights / shadows means
+/// are TENS while the `saturation` or `temperature` they move through every
+/// single mask is a FIVE, so a colour habit they really have never once reached
+/// the note. Since G3 the count is unchanged but one slot is RESERVED — if any
+/// colour axis clears its floor, at least one of the three named is a colour
+/// axis ([`slider_phrase`]). Reserving a slot cannot widen the clause, which is
+/// what keeps [`MAX_LOCAL_WORK_CHARS`] where it is.
 pub const HABIT_SLIDERS_SHOWN: usize = 3;
 
 /// Hard bound on the note this module contributes to the reference block,
@@ -99,7 +124,17 @@ pub const HABIT_SLIDERS_SHOWN: usize = 3;
 /// the same 64-character grid 640 sat on — leaving 89 characters of
 /// headroom: enough that rewording a clause is not silently a budget change,
 /// small enough that growing the note again forces the measurement to be
-/// re-run. It is spent against the same 4,096-byte
+/// re-run.
+///
+/// G3 re-ran it and the bound does NOT move. Two things grew the note: the
+/// colour pointer now names `saturation` and `hue` as well, and a colour axis
+/// is guaranteed one of the three slots. Neither can produce a wider worst
+/// case than the one already measured — the widest clause is the three LONGEST
+/// names (`temperature` 11, `highlights` 10, `saturation` 10), the reserved
+/// slot can only reach that combination and never exceed it (`hue` and `tint`
+/// are the two SHORTEST names in the set), and the pointer's growth is a
+/// constant that `local_work_note_fits_its_bound` measures. It is spent against
+/// the same 4,096-byte
 /// `advisor::REFERENCE_BUDGET_BYTES` the block as a whole must clear
 /// (`style::the_local_work_note_fits_the_proposers_budget`).
 pub const MAX_LOCAL_WORK_CHARS: usize = 768;
@@ -210,7 +245,7 @@ pub struct BucketHabit {
     pub w: f32,
     /// Amount-weighted mean of [`HABIT_SLIDERS`], over the masks in this bucket
     /// that moved at least one of them. `w == 0.0` means the bucket has masks
-    /// but none of them is described by these ten sliders, and the note then
+    /// but none of them is described by these eleven sliders, and the note then
     /// states the placement without numbers rather than claiming zeros.
     #[serde(default, deserialize_with = "habit_mean")]
     pub mean: [f32; N_HABIT_SLIDERS],
@@ -327,7 +362,7 @@ impl MaskHabit {
     ///   photographer APPLIED (`enabled && amount != 0`), whatever they move —
     ///   a mask that only softens noise is still a mask on the sky.
     /// * `w` and `mean` are taken over the subset that moved one of
-    ///   [`HABIT_SLIDERS`], weighted by `amount`. A mask at all eight zeros
+    ///   [`HABIT_SLIDERS`], weighted by `amount`. A mask at all eleven zeros
     ///   would otherwise drag every mean toward 0 and report a restraint we
     ///   never measured — the same rule `eval::user_family_summary` follows
     ///   when it answers `None` for a photographer who shaped no colour.
@@ -452,7 +487,7 @@ impl MaskHabit {
     }
 }
 
-/// The ten tracked sliders of one adjustment, in [`HABIT_SLIDERS`] order.
+/// The eleven tracked sliders of one adjustment, in [`HABIT_SLIDERS`] order.
 fn sliders_of(a: &LocalAdjustment) -> [f32; N_HABIT_SLIDERS] {
     [
         a.exposure_ev,
@@ -465,12 +500,24 @@ fn sliders_of(a: &LocalAdjustment) -> [f32; N_HABIT_SLIDERS] {
         a.saturation,
         a.temperature,
         a.tint,
+        a.hue,
     ]
 }
 
-/// Index of `temperature` in [`HABIT_SLIDERS`]; `tint` is the one after it.
-/// Named so the in-mask colour pointer below and the array cannot drift apart.
+/// The COLOUR axes of [`HABIT_SLIDERS`], by index. Named so the in-mask colour
+/// pointer and the reserved slider slot below cannot drift apart from the
+/// array; `a_local_hue_habit_is_measured_and_named` pins each index to its own
+/// label.
+///
+/// `saturation` is in this set since G3. Before it the pointer read
+/// `mean[I_TEMPERATURE..]`, so a photographer whose masks do nothing but
+/// saturate a region got no colour pointer at all: the axis was inside the
+/// measured set and outside the only thing that reads it.
+const I_SATURATION: usize = 7;
 const I_TEMPERATURE: usize = 8;
+const I_TINT: usize = 9;
+const I_HUE: usize = 10;
+const COLOUR_SLIDERS: [usize; 4] = [I_SATURATION, I_TEMPERATURE, I_TINT, I_HUE];
 
 /// How each bucket is DESCRIBED to the proposer: the placement it should make,
 /// and the verb for what that placement does. Constants, never a file name and
@@ -490,15 +537,38 @@ fn phrasing(b: Bucket) -> Option<(&'static str, &'static str)> {
 }
 
 /// The strongest sliders of an aggregate mean, as the note prints them.
+///
+/// At most [`HABIT_SLIDERS_SHOWN`], ranked by magnitude — with ONE slot
+/// reserved for colour whenever a colour axis clears its floor (G3). See the
+/// constant for why: magnitude alone is a TONAL photographer's ranking, and it
+/// silenced the colour habit of every dodge-and-burn library in the corpus.
 fn slider_phrase(mean: &[f32; N_HABIT_SLIDERS]) -> String {
-    let mut shown: Vec<usize> = (0..N_HABIT_SLIDERS)
-        .filter(|&i| mean[i].abs() >= if i == 0 { EXPOSURE_FLOOR } else { SLIDER_FLOOR })
-        .collect();
+    let floor = |i: usize| if i == 0 { EXPOSURE_FLOOR } else { SLIDER_FLOOR };
+    let mut shown: Vec<usize> =
+        (0..N_HABIT_SLIDERS).filter(|&i| mean[i].abs() >= floor(i)).collect();
     // Strongest first, ties keeping the canonical order (`sort_by` is stable),
     // then back into canonical order so the sentence reads the same way every
     // time regardless of which three survived.
     shown.sort_by(|a, b| mean[*b].abs().total_cmp(&mean[*a].abs()).then_with(|| a.cmp(b)));
     shown.truncate(HABIT_SLIDERS_SHOWN);
+    // The RESERVED slot. A colour axis that cleared its floor was in `shown`
+    // before the truncate, so reaching here with one still qualifying means the
+    // list is full and magnitude cut it. It displaces the WEAKEST kept slider,
+    // never the strongest, so the clause still leads with what this
+    // photographer most obviously does — and the COUNT does not change, which
+    // is what keeps `MAX_LOCAL_WORK_CHARS` where it is.
+    let has_colour = shown.iter().any(|i| COLOUR_SLIDERS.contains(i));
+    let strongest_colour = COLOUR_SLIDERS
+        .iter()
+        .copied()
+        .filter(|&i| mean[i].abs() >= floor(i))
+        // `max_by` returns the LAST maximum, so the tie-break is REVERSED
+        // (`b.cmp(a)`) to keep the canonical order's FIRST axis on a tie.
+        .max_by(|a, b| mean[*a].abs().total_cmp(&mean[*b].abs()).then_with(|| b.cmp(a)));
+    if let Some(c) = strongest_colour.filter(|_| !has_colour) {
+        shown.pop();
+        shown.push(c);
+    }
     shown.sort_unstable();
     shown
         .iter()
@@ -603,7 +673,7 @@ pub fn local_work_note(habits: &[Option<MaskHabit>], bold: bool) -> String {
         measured.iter().any(|h| {
             let x = h.bucket(*b);
             x.w > 0.0
-                && x.mean[I_TEMPERATURE..].iter().any(|v| v.abs() >= SLIDER_FLOOR)
+                && COLOUR_SLIDERS.iter().any(|&i| x.mean[i].abs() >= SLIDER_FLOOR)
         })
     });
     // A POINTER, not a tutorial. What these controls ARE and how they
@@ -617,14 +687,14 @@ pub fn local_work_note(habits: &[Option<MaskHabit>], bold: bool) -> String {
         (false, false) => "",
         (true, false) => {
             " They work COLOUR inside the mask, not just brightness — use its own \
-`temperature` / `tint`."
+`temperature` / `tint`, `saturation` and `hue`."
         }
         (false, true) => {
             " They shape TONE inside the mask with its own `main_curve`, not sliders alone."
         }
         (true, true) => {
             " They work COLOUR and TONE inside the mask, not just brightness — use its own \
-`temperature` / `tint` and `main_curve`."
+`temperature` / `tint`, `saturation` / `hue` and `main_curve`."
         }
     };
     format!(
@@ -1146,11 +1216,135 @@ mod tests {
 
         // A record from a NEWER build is refused rather than read short: the
         // columns would not line up, and reading the wrong ones silently is
-        // worse than saying so.
-        let wide = r#"{"count":1,"sky":{"n":1,"w":1.0,
-            "mean":[0,0,0,0,0,0,0,0,0,0,0]}}"#;
-        let e = serde_json::from_str::<MaskHabit>(wide).unwrap_err().to_string();
+        // worse than saying so. BUILT from `N_HABIT_SLIDERS` rather than
+        // written out: as a literal it was 11 wide, and G3's widening to 11
+        // would have turned this fixture into a VALID record, retiring the
+        // assertion without a single test going red.
+        let cols = ["0"; N_HABIT_SLIDERS + 1].join(",");
+        let wide = format!("{{\"count\":1,\"sky\":{{\"n\":1,\"w\":1.0,\"mean\":[{cols}]}}}}");
+        let e = serde_json::from_str::<MaskHabit>(&wide).unwrap_err().to_string();
         assert!(e.contains("newer build"), "{e}");
+    }
+
+    /// G3: `hue` is a MEASURED axis now, and a pre-G3 index still reads clean.
+    ///
+    /// The diagnosis measured 0 of 42 AI masks carrying a non-zero local `hue`.
+    /// One cause is structural: `HABIT_SLIDERS` decides which axes a habit can
+    /// be measured on at all, `hue` was not in it, so no photographer could
+    /// EVER be reported as one who rotates a region's colour — and the proposer
+    /// never saw the move named as a habit it had to answer to.
+    ///
+    /// The second half is the wire question the design memo told this batch to
+    /// settle before touching the array: widening changes the on-disk shape of
+    /// every stored habit, and `habit_mean` already zero-fills a SHORT array,
+    /// so a 10-wide index loads and stays silent. That is the whole migration.
+    ///
+    /// MUTATION: drop `"hue"` from `HABIT_SLIDERS` (or `a.hue` from
+    /// `sliders_of`) and the note stops naming it; drop
+    /// `deserialize_with = "habit_mean"` and the 10-wide record stops loading.
+    #[test]
+    fn a_local_hue_habit_is_measured_and_named() {
+        assert_eq!(N_HABIT_SLIDERS, 11, "hue is APPENDED; no existing column moves");
+        assert_eq!(HABIT_SLIDERS[I_SATURATION], "saturation");
+        assert_eq!(HABIT_SLIDERS[I_TEMPERATURE], "temperature");
+        assert_eq!(HABIT_SLIDERS[I_TINT], "tint");
+        assert_eq!(HABIT_SLIDERS[I_HUE], "hue");
+
+        let h = MaskHabit::of(&[LocalAdjustment {
+            mask: gradient(0.8, 0.0),
+            hue: -22.0,
+            amount: 1.0,
+            enabled: true,
+            ..Default::default()
+        }]);
+        assert_eq!(h.sky.mean[I_HUE], -22.0, "the hue column carries the move");
+        let note = local_work_note(&[Some(h)], true);
+        assert!(note.contains("hue -22"), "{note}");
+        assert!(note.contains("They work COLOUR inside the mask"), "{note}");
+        assert!(note.contains("`hue`"), "the pointer names the axis: {note}");
+
+        // An index written BEFORE the widening loads, and claims no hue habit:
+        // the short array zero-fills and zero is below the floor.
+        let json = r#"{"count":1,"sky":{"n":1,"w":1.0,
+            "mean":[-0.6,-25.0,0,0,0,0,0,0,0,0]}}"#;
+        let old: MaskHabit = serde_json::from_str(json).expect("a pre-G3 habit still loads");
+        assert_eq!(old.sky.mean[I_HUE], 0.0, "the new column zero-fills");
+        assert_eq!(old.sky.mean[0], -0.6, "and every old column keeps its place");
+        let n = local_work_note(&[Some(old)], true);
+        assert!(!n.contains("hue"), "an unmeasured axis is silent: {n}");
+    }
+
+    /// G3: the in-mask colour POINTER reads every colour axis, not only the WB
+    /// pair it was born with.
+    ///
+    /// Before this batch it read `mean[I_TEMPERATURE..]`, so a photographer
+    /// whose masks do nothing but saturate a region got no colour pointer at
+    /// all — `saturation` was inside the measured set and outside the only
+    /// thing that reads it.
+    ///
+    /// MUTATION: take `I_SATURATION` (or `I_HUE`) back out of `COLOUR_SLIDERS`
+    /// and the matching arm of the loop fails.
+    #[test]
+    fn the_in_mask_colour_pointer_counts_saturation_and_hue() {
+        let note_for = |a: LocalAdjustment| {
+            let h = MaskHabit::of(&[LocalAdjustment {
+                mask: gradient(0.8, 0.0),
+                amount: 1.0,
+                enabled: true,
+                ..a
+            }]);
+            local_work_note(&[Some(h)], true)
+        };
+        for (axis, a) in [
+            ("saturation", LocalAdjustment { saturation: 14.0, ..Default::default() }),
+            ("hue", LocalAdjustment { hue: -14.0, ..Default::default() }),
+            ("temperature", LocalAdjustment { temperature: 14.0, ..Default::default() }),
+            ("tint", LocalAdjustment { tint: 14.0, ..Default::default() }),
+        ] {
+            let n = note_for(a);
+            assert!(n.contains("They work COLOUR inside the mask"), "{axis}: {n}");
+        }
+        // A purely TONAL habit still claims nothing — the pointer states what
+        // was measured and invents no habit.
+        let n = note_for(LocalAdjustment { exposure_ev: -0.9, clarity: 20.0, ..Default::default() });
+        assert!(!n.contains("inside the mask"), "{n}");
+    }
+
+    /// G3: one of the three named slots is RESERVED for colour.
+    ///
+    /// The corpus shape this fixes: a dodge-and-burn library moves exposure and
+    /// the two tone ends by tens and its colour axis by a five, so ranking the
+    /// slots by magnitude alone silenced a colour habit the photographer really
+    /// does have, every single time. The COUNT stays three, which is what keeps
+    /// `MAX_LOCAL_WORK_CHARS` where it is.
+    ///
+    /// MUTATION: delete the reserved-slot block in `slider_phrase` and the
+    /// first assertion fails; make it displace the STRONGEST kept slider
+    /// instead of the weakest and the `highlights` assertion fails.
+    #[test]
+    fn a_colour_axis_keeps_one_of_the_three_named_slots() {
+        let mut mean = [0.0f32; N_HABIT_SLIDERS];
+        mean[0] = -1.2;
+        mean[1] = -40.0;
+        mean[2] = 30.0;
+        mean[3] = -20.0;
+        mean[I_SATURATION] = 5.0;
+        let phrase = slider_phrase(&mean);
+        assert!(phrase.contains("saturation +5"), "the colour axis is named: {phrase}");
+        assert!(phrase.contains("highlights -40"), "the strongest is still kept: {phrase}");
+        assert!(!phrase.contains("whites"), "the WEAKEST kept slider is the one displaced: {phrase}");
+        assert_eq!(phrase.matches(',').count(), 2, "still exactly three slots: {phrase}");
+
+        // The STRONGEST qualifying colour axis wins the reserved slot.
+        mean[I_HUE] = 9.0;
+        let phrase = slider_phrase(&mean);
+        assert!(phrase.contains("hue +9") && !phrase.contains("saturation"), "{phrase}");
+
+        // No colour axis above its floor => nothing is reserved, and the phrase
+        // is byte for byte the pre-G3 one.
+        mean[I_SATURATION] = 0.0;
+        mean[I_HUE] = 0.2;
+        assert_eq!(slider_phrase(&mean), "highlights -40, shadows +30, whites -20");
     }
 
     /// The BUDGET. `advisor::BoundedUntrustedText` truncates the whole style
@@ -1164,25 +1358,30 @@ mod tests {
         let extreme = BucketHabit {
             n: u8::MAX,
             w: 1.0,
-            // The widest each field prints: -5.0 EV, and -100 for the nine.
+            // The widest each field prints: -5.0 EV, and -100 for the ten.
             // The three the clause SHOWS are picked by magnitude with ties
             // keeping canonical order, so with every non-exposure axis tied at
-            // -100 the winners are `highlights, shadows, whites` — which is NOT
-            // the widest sentence this can build now that `temperature` (11
-            // characters) is in the set. `widest` below is the fixture that
-            // actually maximises the clause; `extreme` stays as the
-            // every-axis-moved case, because the two answer different questions
-            // and only measuring one of them is how the bound drifts.
-            mean: [-5.0, -100.0, -100.0, -100.0, -100.0, -100.0, -100.0, -100.0, -100.0, -100.0],
+            // -100 magnitude alone would pick `highlights, shadows, whites` and
+            // G3's reserved slot then swaps the weakest of those for the
+            // strongest qualifying colour axis (`saturation`, first of the four
+            // at the tie) — which is still NOT the widest sentence this can
+            // build now that `temperature` (11 characters) is in the set.
+            // `widest` below is the fixture that actually maximises the clause;
+            // `extreme` stays as the every-axis-moved case, because the two
+            // answer different questions and only measuring one of them is how
+            // the bound drifts.
+            mean: [-5.0, -100.0, -100.0, -100.0, -100.0, -100.0, -100.0, -100.0, -100.0, -100.0, -100.0],
         };
         // The LONGEST-NAMED three, forced into the clause by giving only them a
         // magnitude: `highlights` (10) + `saturation` (10) + `temperature` (11)
         // is the widest slider phrase `slider_phrase` can emit. This is the
-        // fixture the bound is actually derived from.
+        // fixture the bound is actually derived from — and G3's reserved slot
+        // cannot beat it, because two of these three ARE colour axes, so the
+        // quota is already satisfied and nothing is displaced.
         let widest = BucketHabit {
             n: u8::MAX,
             w: 1.0,
-            mean: [0.0, -100.0, 0.0, 0.0, 0.0, 0.0, 0.0, -100.0, -100.0, 0.0],
+            mean: [0.0, -100.0, 0.0, 0.0, 0.0, 0.0, 0.0, -100.0, -100.0, 0.0, 0.0],
         };
         let build = |b: BucketHabit| MaskHabit {
             count: u8::MAX,
@@ -1210,8 +1409,13 @@ mod tests {
         // ten-slider clause would be ~3x this.
         assert_eq!(HABIT_SLIDERS_SHOWN, 3);
         assert!(note.contains("temperature -100"), "the WB pair reaches the clause: {note}");
+        // Counts the slider-phrase form, which only a CLAUSE can emit: G3's
+        // trailing colour pointer names `saturation` in backticks without a
+        // magnitude, so the bare word appears once more than there are clauses.
+        // Widening this to 4 would let a genuine duplicate clause hide behind
+        // the pointer, so it is narrowed to the phrase instead.
         assert!(
-            note.matches("saturation").count() <= 3,
+            note.matches("saturation -100").count() <= 3,
             "one clause per placement bucket: {note}"
         );
     }

@@ -702,7 +702,7 @@ back, or `temper` compresses it back). All six read the dial.
 
 | # | Gate | Where | What the dial changes |
 |---|------|-------|-----------------------|
-| 1 | Proposer prompt | `advisor::openai::{strength_clause, guardrail_pair, look_coverage_clause, mixer_restraint_clause}` | Three banded restraint templates; the quoted ±Highlights/Shadows and ±Whites/Blacks pair opens from the measured ±50/±35 up to ±75/±55; "most photos need only a couple of HSL bands" becomes an explicit per-control decision |
+| 1 | Proposer prompt | `advisor::openai::{strength_clause, guardrail_pair, colour_guardrail_pair, curve_guardrail, look_coverage_clause, colour_neutral_clause, mixer_restraint_clause}` | Three banded restraint templates; the quoted ±Highlights/Shadows and ±Whites/Blacks pair opens from the measured ±50/±35 up to ±75/±55; since G2/G3 **colour carries numbers on the same axis** — an `hsl` band ±10–20 → ±20–40, the four colour-grade wheels' saturation TOTAL 20–40 → 40–80, the tone curve 3–5 → 7–9 points at a depth of 8–15 → 15–30 of 255 and a per-channel curve 4–8 → 8–15 — and the colour-neutral escape hatch stops being unconditional above the restrained band; "most photos need only a couple of HSL bands" becomes an explicit per-control decision |
 | 2 | `EditRecipe::temper` | [`src/recipe.rs`](../src/recipe.rs) | The four soft-cap knees/ceilings scale by `1 + (s − 0.5)·0.7` — 0.5 is the shipped 50→70 / 30→45 exactly, and full strength asymptotes at 94.5, still inside the ±100 hard `clamp` |
 | 3 | Verifier prompt | `advisor::{verify_flat_clause, verify_cooked_clause}` | The too-FLAT band tightens, the OVER-COOKED band relaxes; the target and the photographer's DIRECTION are stated ABOVE the checklist they modify |
 | 4 | Visual judge rubric | `advisor::judge::intent_rubric` | The Develop rubric gains the target and the direction. FitMatch gains neither — a look MATCH has no strength |
@@ -713,6 +713,22 @@ Bands are coarse (≤ 0.4 restrained / ≤ 0.7 balanced / above committed) becau
 prose cannot be interpolated; every NUMBER on the axis is continuous. One
 consequence worth knowing: 0.50 and 0.65 share the balanced band, so they differ
 in the guardrail numbers and `temper`'s knees, not in the adjectives.
+
+Two colour changes from the same round are deliberately **not** on the dial,
+because neither is a question of how hard to push. The visual judge's BASE
+`Develop` rubric gained a POSITIVE colour item beside its existing `colour
+health` fault item ("a deliberately designed palette is a strength; judge
+whether the colour decisions are coherent, never whether they are small") — the
+one-sided rubric asked 30 guided revisions for less colour 17 times and for more
+0 times, and a rubric where the only rewardable colour move is not making one is
+broken at every strength. The data-only verifier's checklist gained a colour
+COMPLETENESS item and a curve MONOTONICITY item for the same reason: its four
+measured revisions all pushed in the right direction ("commit harder") through a
+checklist that was 100 % tonal. The monotonicity item is a CHECK, not a clamp —
+the `MAX_CURVE_POINTS = 256` clamp local to `EditRecipe::clamp` is unchanged
+and `temper` gains nothing, exactly as
+the fit side's `project_curve_slopes` shapes a proposal rather than bounding the
+renderer.
 
 Two things the axis must never touch, both measured defects rather than taste:
 `temper`'s **white-point coupling** (`whites ← −highlights·0.3`, global and per

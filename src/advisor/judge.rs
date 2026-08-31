@@ -265,7 +265,10 @@ pub(super) fn task_instruction(task: JudgeTask, intent: Option<GradeIntent<'_>>)
              (the recipe JSON is attached below as data). Judge IMAGE 2 as a finished \
              photograph: exposure and tonal anchor (committed but not slammed), highlight and \
              shadow integrity (no greyed-out speculars, no crushed or milky blacks), colour \
-             health (casts, skin, sky, over/under-saturation), and processing artifacts \
+             health (casts, skin, sky, over/under-saturation), colour DESIGN — a deliberately \
+             designed palette is a STRENGTH: judge whether the colour decisions are COHERENT \
+             with each other and with the scene, never whether they are small, and do not \
+             credit a frame merely for leaving colour alone — and processing artifacts \
              (banding, halos, a washed-out or over-cooked look). Score 0-100: 90+ ship as-is; \
              75-89 good with minor polish left; 50-74 clearly improvable; below 50 the develop \
              misses the photograph. decision: 'accept' when only taste-level polish remains, \
@@ -295,6 +298,60 @@ pub(super) fn task_instruction(task: JudgeTask, intent: Option<GradeIntent<'_>>)
         }
     };
     format!("{base}{}", intent_rubric(intent))
+}
+
+#[cfg(test)]
+mod colour_rubric_tests {
+    use super::*;
+    use crate::recipe::{DirectionAdherence, GradeStrength};
+
+    /// G2: colour appears in the BASE rubric as something a develop can do
+    /// WELL, not only as a way for it to be broken.
+    ///
+    /// The diagnosis measured what the one-sided rubric produced: over 30
+    /// guided revisions the judge asked for LESS colour 17 times and for more
+    /// 0 times, and 19 of those were adopted. `colour health (casts, skin, sky,
+    /// over/under-saturation)` was the only colour clause in the base rubric,
+    /// and every item on that list is a FAULT — so the only colour move the
+    /// judge could reward was not making one.
+    ///
+    /// The fault half stays exactly where it was, and so does the strength
+    /// axis's own `Committed` line about over-cooking. A positive item and a
+    /// fault item in the same sentence is what makes the rubric symmetric; a
+    /// rubric that only rewards is how "accept" inflates.
+    ///
+    /// MUTATION: delete the `colour DESIGN` clause and the first block fails;
+    /// delete the `colour health` fault clause and the symmetry block fails.
+    #[test]
+    fn the_develop_rubric_scores_a_designed_palette_as_a_strength() {
+        let develop = task_instruction(JudgeTask::Develop, None);
+        assert!(develop.contains("colour DESIGN"), "{develop}");
+        assert!(
+            develop.contains("a deliberately designed palette is a STRENGTH"),
+            "{develop}"
+        );
+        assert!(develop.contains("never whether they are small"), "{develop}");
+        assert!(develop.contains("credit a frame merely for leaving colour alone"), "{develop}");
+        // SYMMETRY: the fault half is untouched, at every tier.
+        assert!(develop.contains("colour health (casts, skin, sky, over/under-saturation)"), "{develop}");
+        for s in [0.2f32, 0.5, 0.9] {
+            let r = task_instruction(
+                JudgeTask::Develop,
+                Some(GradeIntent {
+                    strength: GradeStrength::new(s),
+                    adherence: DirectionAdherence::new(DirectionAdherence::DEFAULT),
+                    direction: None,
+                    style_look: None,
+                }),
+            );
+            assert!(r.contains("colour DESIGN"), "the positive item is UNCONDITIONAL: {r}");
+            assert!(r.contains("colour health (casts"), "so is the fault item: {r}");
+        }
+        // The MATCH task is a different question (how close are these two
+        // renders) and gains nothing from a palette-design item.
+        let fit = task_instruction(JudgeTask::FitMatch, None);
+        assert!(!fit.contains("colour DESIGN"), "{fit}");
+    }
 }
 
 /// The two frames of one judgement, NAMED — a positional (reference,
