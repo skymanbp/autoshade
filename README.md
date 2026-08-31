@@ -100,8 +100,9 @@ tools are separate, opt-in paths and are labelled as such.
 
 Out of scope in this release: bit-exact Adobe rendering (parity is measured,
 not identical), an exact X-Trans demosaic (the plane fit is approximate),
-prebuilt Linux and macOS binaries (CI builds and tests them from source), and
-colour-range semantic regions.
+prebuilt Linux binaries (CI builds and tests them from source), a signed or
+notarised macOS build (the app bundle is ad-hoc signed, so the first launch
+needs an explicit 「Open Anyway」), and colour-range semantic regions.
 
 ## What is new here
 
@@ -348,11 +349,17 @@ Written down in the plan and the design memos, in delivery order:
   semantic class or by luminance band; a colour-range producer is designed and
   not built. Until it is, a look that differs only by hue over a spatially
   scattered region is fitted globally or not at all.
-- **A macOS build.** The release workflow builds and tests a universal
-  (arm64 + x86_64) macOS binary on every tag, but no macOS binary has been
-  published yet and the desktop app has open platform work behind it —
-  ⌘Q handling, the bundled sidecars' location inside a `.app`, and the
-  storage root under `~/Library`.
+- **A published macOS desktop app.** The three platform gaps behind it are
+  closed in the tree — ⌘Q now asks before discarding unsaved work, the
+  bundled sidecars are found inside `<App>.app/Contents/Resources`, and the
+  develop store lives under the user's `Library/Application Support` — and the
+  release workflow builds, lints and verifies an ad-hoc signed `AutoShade.app`
+  on every tag. What has not happened is a release that publishes it: the
+  first macOS desktop asset appears with the next tag, and the bundle is
+  ad-hoc signed rather than notarised, so Gatekeeper needs one explicit
+  「Open Anyway」 per machine. Apple-silicon GPU inference (Metal/MPS) is
+  wired and **unmeasured** — no Mac has run this build, so its speed and its
+  memory ceiling are reported by testers, not claimed here.
 - **A published Linux binary.** Linux is built and tested in CI from source on
   every push; the release workflow does not produce a Linux asset.
 
@@ -499,6 +506,35 @@ Download from the
   you can keep intact and run either executable from there, beside the bundled
   `assets/` and `python/` sidecars.
 
+#### macOS
+
+The macOS archive is universal (Apple silicon and Intel in one file). Unzip it
+and move `AutoShade.app` to `/Applications`. The command-line binary travels
+inside the same bundle — `AutoShade.app/Contents/MacOS/autoshade` — so a
+terminal user needs no second download; symlink it onto your `PATH` if you want
+a short name.
+
+The bundle is **ad-hoc signed, not notarised**, so the first launch is refused:
+macOS reports that the developer cannot be verified. That refusal is expected,
+and clearing it is per machine rather than per launch — open **System Settings
+→ Privacy & Security**, scroll to the message naming AutoShade, and press
+**Open Anyway**; or right-click the app in Finder, choose **Open**, and
+confirm. Both routes record the same decision, and a later version installed
+over it inherits that decision.
+
+Two things the app needs from the system, neither of them bundled:
+
+- **Python 3**, for the AI sidecars only — decode, develop, render and XMP all
+  run without it. An app launched from Finder inherits no shell environment, so
+  `PATH` cannot answer this question: Settings carries a **Python interpreter**
+  field with a **Detect** button that looks in the standard install locations
+  (Homebrew on either architecture, the python.org framework, then
+  `/usr/bin/python3`), and you can type a full path instead.
+- **Model weights**, downloaded on first use. They are NOT written inside the
+  bundle — writing there would break its signature and Gatekeeper would refuse
+  the next launch — but into the per-user develop store, which survives
+  replacing the app.
+
 ### Build from source
 
 AutoShade uses Rust edition 2024 and rustc/cargo 1.94.
@@ -571,6 +607,11 @@ boundary. The essentials:
 - **Settings** or `OPENAI_API_KEY` / `AUTOSHADE_ANALYSIS_API_KEY` configure the
   roles. A `./autoshade.local.json` in the working directory may only select
   model/provider preferences — never credentials, endpoints, or paths.
+- **`AUTOSHADE_PYTHON`** names the interpreter the sidecars run under and
+  **`AUTOSHADE_WEIGHTS_DIR`** moves the model-weight cache all five of them
+  share. Both may come only from the environment or the per-user settings
+  file, never from a file that arrives beside your photos; the interpreter is
+  also the Settings field described above.
 
 ## Supported formats
 
@@ -735,7 +776,7 @@ versions, and a deleted-version registry; SCUNet success requires the typed
 `sidecar_wrote` contract. A 1771 MB reference probe sets the 1800 MB per-photo
 budget, while the 4 GiB RAW gate bounds admission. The [`build`
 workflow](.github/workflows/build.yml) covers default and GUI feature sets on
-Ubuntu and macOS. The current battery is **1216 library (1205 pass + 11 `#[ignore]`d forensic probes) / 22 CLI / 151 GUI / 2+2 contract** tests; the
+Ubuntu and macOS. The current battery is **1228 library (1217 pass + 11 `#[ignore]`d forensic probes) / 22 CLI / 157 GUI / 2+2 contract** tests; the
 [`scripts/check_docs.py`](scripts/check_docs.py) gate re-derives pinned release
 claims. Model weights are not stored in this repository.
 

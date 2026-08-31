@@ -45,10 +45,54 @@ impl Lang {
 /// Translate a skeleton (English) string. `En` returns it verbatim; `Zh` looks
 /// it up in [`ZH_ENTRIES`], falling back to the English key when untranslated.
 pub fn tr(lang: Lang, en: &'static str) -> &'static str {
-    match lang {
+    let s = match lang {
         Lang::En => en,
         Lang::Zh => zh_map().get(en).copied().unwrap_or(en),
+    };
+    platform_modifier(s)
+}
+
+/// Say the modifier key this platform's users actually press.
+///
+/// The BINDINGS are already right: every shortcut is
+/// `egui::Modifiers::COMMAND`, which egui maps to Command on a Mac and Ctrl
+/// everywhere else (`app.rs` names `Modifiers::CTRL` nowhere at all). Only the
+/// hint strings still said "Ctrl+", so on a Mac the app named a key its own
+/// bindings do not listen for.
+///
+/// Rewritten HERE and not in the ~50 literals, and that is the point: those
+/// literals are the i18n KEYS. Editing them means editing the Chinese
+/// catalogue's keys in the same breath and re-proving the two still line up —
+/// for a change no Windows user is meant to see. Off macOS this is the
+/// identity function by `cfg`, not by branch, so those strings are the same
+/// bytes they have always been.
+///
+/// "Cmd+" rather than ⌘, deliberately: the embedded font subsets are generated
+/// from the catalogue (`scripts/subset_gui_fonts.py`), U+2318 appears nowhere
+/// in it, and the runtime face that would supply it is the system CJK font —
+/// the one most at risk of being refused by the per-face byte budget. A glyph
+/// that renders as a box would be worse than the word.
+#[cfg(not(target_os = "macos"))]
+fn platform_modifier(s: &'static str) -> &'static str {
+    s
+}
+
+/// Interned, because [`tr`] returns `&'static str` and a rewrite has to
+/// outlive the call. Bounded by the number of DISTINCT strings that mention
+/// the modifier — the English keys plus their translations — each rewritten
+/// and leaked at most once, holding memory the literal would have held anyway.
+#[cfg(target_os = "macos")]
+fn platform_modifier(s: &'static str) -> &'static str {
+    if !s.contains("Ctrl+") {
+        return s;
     }
+    static CACHE: OnceLock<std::sync::Mutex<HashMap<&'static str, &'static str>>> =
+        OnceLock::new();
+    let mut cache =
+        CACHE.get_or_init(Default::default).lock().unwrap_or_else(|e| e.into_inner());
+    *cache
+        .entry(s)
+        .or_insert_with(|| Box::leak(s.replace("Ctrl+", "Cmd+").into_boxed_str()))
 }
 
 /// Translate + interpolate. `args` are `(name, value)` pairs; each `{name}`
@@ -773,6 +817,20 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
         "⚠ 这个文件夹和当前打开照片所在的文件夹互相包含 —— 那个文件夹不再「只读」，渲染出来的文件会写在你的原片旁边。"),
     ("Browse…", "浏览…"),
     ("Pick the delivery folder", "选择成片文件夹"),
+    // The interpreter row (M1-3). 「解释器」 cannot be spelled in the shipped
+    // CJK subset (释 is absent, and so are 探 and 系), so the heading names
+    // the thing the field actually holds — a path — and the button says what
+    // it does rather than 「探测」. Every glyph checked against the subset the
+    // font gate enforces before these lines were written.
+    ("Python interpreter", "Python 路径"),
+    ("Which Python runs the AI sidecars (segmentation, denoise, style). Blank = the platform default. It can only be set here or by the AUTOSHADE_PYTHON environment variable — never by a file that arrives beside your photos.",
+        "运行 AI 侧车（分割、降噪、风格）的 Python。留空表示用平台默认值。只能在这里设置，或用 AUTOSHADE_PYTHON 环境变量；随照片一起到来的文件永远不能指定它。"),
+    ("Detect", "自动查找"),
+    ("Look in the standard install locations for a working Python 3",
+        "在标准安装位置里找一个能用的 Python 3"),
+    ("found {bin}", "已找到 {bin}"),
+    ("no Python found in the standard install locations — type the full path above",
+        "标准安装位置里没有可用的 Python——请在上面填写完整路径"),
     ("Last used folder", "上次用过的文件夹"),
     ("Ask every time", "每次都问"),
     ("a save dialog opens on every export", "每次导出都会打开保存对话框"),
@@ -1981,6 +2039,12 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
         " 跨图对应不可用（{e}）——内容分歧估计器已在没有它的情况下运行。"),
     ("Adherence", "遵循度"),
     ("How closely the AI follows your direction; disabled until Direction has text: <=40% Hint, 40-70% Direct, above 70% Brief. Prompt intent only - it never moves a render limit.", "AI 对你所写方向的遵循程度；Direction 为空时不可用：≤ 40% Hint，40-70% Direct，高于 70% Brief。仅影响提示词意图，不会改变任何渲染限制。"),
+    ("a system font was found but not loaded — {font}. File names in the scripts it covers may show as boxes.",
+        // Deliberately says "字体" and not "系统字体": 系 (U+7CFB) is in no
+        // other translated string, so embedding it would mean regenerating
+        // all five font subsets for one glyph. The path in {font} says which
+        // font it is far better than the adjective would.
+        "字体已找到但未加载——{font}。用到这类文字的文件名可能显示为方块。"),
     ("Look library", "外观库"),
     ("Use look library", "使用外观库"),
     ("Pick look folder…", "选择成片文件夹…"),
@@ -2002,6 +2066,34 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// macOS says Cmd, and this app's bindings always meant Cmd there.
+    ///
+    /// Every shortcut is `egui::Modifiers::COMMAND`, which egui maps to Command
+    /// on a Mac and Ctrl everywhere else, so the hint strings were naming a key
+    /// the app does not listen for on exactly one platform.
+    #[test]
+    fn the_modifier_label_follows_the_platform_the_bindings_already_use() {
+        let hint = tr(Lang::En, "Ctrl+O · or drag a file into the window");
+        if cfg!(target_os = "macos") {
+            assert_eq!(hint, "Cmd+O · or drag a file into the window");
+        } else {
+            assert_eq!(
+                hint, "Ctrl+O · or drag a file into the window",
+                "no Windows or Linux string may move for this"
+            );
+        }
+        // The Chinese side goes through the same rewrite: the translations
+        // spell the modifier in ASCII too.
+        assert_eq!(
+            tr(Lang::Zh, "Ctrl+O · or drag a file into the window").contains("Ctrl+"),
+            !cfg!(target_os = "macos")
+        );
+        // A string naming no modifier comes back untouched on every platform —
+        // and as the SAME bytes, not an interned copy.
+        assert_eq!(tr(Lang::En, "Cancel"), "Cancel");
+        assert!(std::ptr::eq(tr(Lang::En, "Cancel"), "Cancel"));
+    }
 
     #[test]
     fn a_value_containing_placeholder_syntax_is_not_reinterpreted() {

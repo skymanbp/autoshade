@@ -1,0 +1,15 @@
+# Sidecar dependencies for a machine with an NVIDIA card (Windows or Linux).
+#
+#   pip install -r python/requirements-cuda.txt
+#
+# The index URL is the whole point of this file: `pip install torch` from PyPI
+# gets a build that will not use the card, and the resulting "why is this
+# taking minutes" is not a question the sidecars can answer for you. cu128 is
+# the CUDA runtime AutoShade's own setup was measured on; if your driver needs
+# a different one, change the two lines below and nothing else.
+
+-r requirements-common.txt
+
+--extra-index-url https://download.pytorch.org/whl/cu128
+torch
+torchvision

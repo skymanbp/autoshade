@@ -910,6 +910,15 @@ pub(crate) struct SettingsForm {
     /// echoes the RESOLVED absolute path beside it, since that is the fact a
     /// relative root leaves unanswered.
     pub(crate) out_dir: String,
+    /// The PYTHON INTERPRETER as the settings FILE spells it (M1-3) — blank
+    /// means "the platform default" (`config::default_python_bin`), and a
+    /// blank SAVES as blank for the same reason the delivery root does: only
+    /// an explicitly stored empty value can undo a path saved earlier.
+    ///
+    /// The panel echoes the RESOLVED spelling beside it, because an
+    /// `AUTOSHADE_PYTHON` in the environment outranks this file and a user
+    /// whose environment already answers would otherwise see an empty box.
+    pub(crate) python_bin: String,
     pub(crate) status: String,
     /// Live pick-lists, one per endpoint (see [`ModelCatalogue`]). Each
     /// carries its own once-per-session auto-fetch guard: one global boolean

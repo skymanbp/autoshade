@@ -1766,8 +1766,36 @@ impl eframe::App for AutoShadeApp {
                 ThemePref::Dark => egui::SystemTheme::Dark,
                 ThemePref::Light => egui::SystemTheme::Light,
             }));
+            // …and say which system faces the font chain turned away.
+            // `install_fonts` runs before this app exists and can only reach
+            // stderr, which a windowed build does not have — so the first
+            // frame is the earliest moment a user can be told at all. A
+            // refusal is a decision this build made about a font that IS
+            // installed, which is a different fact from the tofu warning the
+            // gallery raises about names it cannot draw.
+            for font in refused_system_fonts() {
+                let t = trf(
+                    self.lang,
+                    "a system font was found but not loaded — {font}. File names in the scripts it covers may show as boxes.",
+                    &[("font", font)],
+                );
+                self.toast(ToastKind::Error, t);
+            }
         }
         self.poll_workers(ctx);
+        // What quitting would cost, published for the one caller that cannot
+        // reach `self`: macOS's `applicationShouldTerminate:`, which AppKit
+        // invokes from outside this loop for ⌘Q, the App menu's Quit, the
+        // Dock's Quit and log-out (see `quit.rs`). On every other platform
+        // this is a cheap store nothing reads — the state machine is compiled
+        // and tested everywhere so the Windows battery gates it.
+        crate::quit::publish(self.quit_state());
+        // A vetoed quit becomes an ordinary close request, so ⌘Q lands in the
+        // SAME guard below as the title-bar ✕ rather than a parallel dialog
+        // that would have to be kept in step with it.
+        if crate::quit::take_close_request() {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
         // Window-close guard: the unsaved-edit protection (● + nav_stash)
         // used to stop at photo switching — the title-bar ✕ dropped the open
         // photo's uncommitted develop AND every stashed one with no prompt.

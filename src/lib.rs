@@ -241,7 +241,11 @@ pub fn run_model_sidecar_bounded(
     let before = artifact_state(output);
     let mut cmd = std::process::Command::new(python_bin);
     cmd.envs(crate::config::dotenv_child_env());
+    cmd.envs(crate::config::Config::sidecar_child_env());
     cmd.args(args)
+        // Where the model weights live — one policy, appended here so all
+        // three sidecars this function launches agree (see `weights_args`).
+        .args(crate::config::Config::load().weights_args())
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
@@ -363,6 +367,40 @@ pub fn sidecar_tail(stderr: &[u8], stdout: &[u8]) -> String {
     }
 }
 
+/// TEST-ONLY: a source file with its test module cut off.
+///
+/// Several tests pin an arm they cannot EXECUTE — a `cfg(target_os)` branch
+/// for another platform — by asserting the arm still exists in the source
+/// (`include_str!`). Written naively that assertion is VACUOUS: the needle is
+/// spelled inside the assertion, the assertion is inside the file, so the file
+/// contains the needle whether or not the arm survives. The macOS store-name
+/// mutation passed a green test that way before this existed.
+///
+/// Cutting the test code off is what makes such a check able to fail, and the
+/// cut is made at the first test MODULE rather than at the first `#[cfg(test)]`
+/// of any kind. That distinction is not pedantry: `store.rs` carries test-only
+/// free functions from line 739 onwards, thousands of lines above its test
+/// modules, so cutting at the first attribute threw away most of the
+/// production source — and an assertion about an arm defined below that point
+/// then failed no matter what the arm said, which is a red that proves nothing.
+///
+/// It is deliberately the WHOLE rule in one place: the two hand-rolled copies
+/// this replaced were correct only because what they searched for happened to
+/// sit above every `#[cfg(test)]` in their file.
+#[cfg(test)]
+pub(crate) fn source_before_tests(src: &str) -> &str {
+    const ATTR: &str = "#[cfg(test)]";
+    let mut at = 0;
+    while let Some(i) = src[at..].find(ATTR) {
+        let start = at + i;
+        at = start + ATTR.len();
+        if src[at..].trim_start().starts_with("mod ") {
+            return &src[..start];
+        }
+    }
+    src
+}
+
 /// TEST-ONLY: a unique-per-test fixture dir. Fixed names let two concurrent
 /// test processes (nextest, a second worktree) delete each other's fixtures
 /// mid-run, and a leftover output from an aborted run flips assertions — so
@@ -450,7 +488,34 @@ pub(crate) fn write_stand_in(
 
 #[cfg(test)]
 mod tests {
-    use super::{artifact_state, sidecar_tail, sidecar_wrote};
+    use super::{artifact_state, sidecar_tail, sidecar_wrote, source_before_tests};
+
+    /// The cut is at the first test MODULE, not the first `#[cfg(test)]`.
+    ///
+    /// This test exists because the first version cut at the attribute and was
+    /// WRONG in the one file that matters: `store.rs` defines test-only free
+    /// functions thousands of lines above its test modules, so the cut threw
+    /// away most of the production source and an assertion about an arm below
+    /// it failed whatever the arm said. A source assertion that cannot pass and
+    /// one that cannot fail are the same defect wearing different colours.
+    #[test]
+    fn the_source_cut_keeps_test_only_helpers_and_drops_only_the_test_modules() {
+        let src = concat!(
+            "fn production() {}\n",
+            "#[cfg(test)]\n",
+            "fn a_test_only_helper() { NEEDLE }\n",
+            "fn more_production() { ARM }\n",
+            "#[cfg(test)]\n",
+            "mod tests { assert!(src.contains(\"ARM\")); }\n",
+        );
+        let kept = source_before_tests(src);
+        assert!(kept.contains("ARM"), "production below a test-only fn must survive the cut");
+        assert!(kept.contains("NEEDLE"), "the cut is not at the attribute");
+        assert!(!kept.contains("mod tests"), "the test module itself must be gone");
+        // And a file with no test module at all is returned whole, rather than
+        // silently becoming empty.
+        assert_eq!(source_before_tests("fn only_production() {}"), "fn only_production() {}");
+    }
 
     /// M-D2: the `len == 0` refusal weakened; M-D3: the `before` comparison
     /// dropped. All four arms of the contract, each on its own unique dir so

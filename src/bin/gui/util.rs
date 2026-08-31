@@ -1543,7 +1543,26 @@ pub(crate) fn segment_helper_available() -> bool {
     static OK: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *OK.get_or_init(|| {
         let cfg = autoshade::config::Config::load();
-        std::path::Path::new(&cfg.segment_script).exists()
+        std::path::Path::new(&cfg.segment_script).exists() && python_available()
+    })
+}
+
+/// Does the configured Python actually run?
+///
+/// One probe per PROCESS, shared by every sidecar: they all launch the same
+/// binary, so asking once per helper would be one process per button for one
+/// answer.
+///
+/// The script half alone WAS the whole test, and it is the half that is wrong
+/// on a Mac. Inside an app bundle `python/segment.py` is present on every
+/// install, while the interpreter is whatever the user has — and a bundle
+/// launched from Finder inherits no shell `PATH` to find one with. The button
+/// would have looked available on every Mac and spent the click on a failure
+/// that had nothing to do with the sidecar being "not found".
+fn python_available() -> bool {
+    static OK: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *OK.get_or_init(|| {
+        autoshade::config::python_runs(&autoshade::config::Config::load().python_bin)
     })
 }
 
@@ -1563,7 +1582,7 @@ pub(crate) fn denoise_helper_available() -> bool {
     static OK: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *OK.get_or_init(|| {
         let cfg = autoshade::config::Config::load();
-        std::path::Path::new(&cfg.denoise_script).exists()
+        std::path::Path::new(&cfg.denoise_script).exists() && python_available()
     })
 }
 

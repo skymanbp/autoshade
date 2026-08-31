@@ -115,6 +115,12 @@ jobs:
           done
       - name: Smoke test — arm64 slice
         run: ./dist/autoshade --version
+      # The sidecars' own dependency-free self-test, on the interpreter the
+      # runner has. It touches no weights and no network, so it is the one
+      # piece of the AI path that CAN be proved here — and it is the piece the
+      # Mac port changed (the shared `pick_device`).
+      - name: Sidecar self-test
+        run: python3 python/segment.py --self-test
       # Rosetta is not installed on the hosted runners. Reporting that the Intel
       # slice was BUILT BUT NOT EXECUTED is the honest line; silently skipping it
       # would let a broken slice ship as a tested one.
@@ -125,22 +131,43 @@ jobs:
           else
             echo "INTEL SLICE BUILT BUT NOT EXECUTED — no Rosetta on this runner"
           fi
-      - name: Stage the sidecars beside the binaries
+      # The payload — binaries, sidecars, icon, licence — is assembled by the
+      # script, not here, for the reason `build_portable.ps1` exists on the
+      # Windows side: a layout written inline in a workflow drifts the first
+      # time a runtime file moves, and it drifts silently.
+      - name: Build AutoShade.app
+        run: ./scripts/build_app_bundle.sh '${{ steps.ver.outputs.version }}'
+      # The GUI cannot be launched on a runner, but the bundle can be
+      # INSPECTED, and these three are the claims a broken bundle fails:
+      # the plist parses, the executable it names is really there and runs, and
+      # the deployment target the binaries were built for is the one the plist
+      # advertises (claiming a system the binary cannot run on is the one way a
+      # bundle fails AFTER Gatekeeper has let it through).
+      - name: The bundle says what it is
         run: |
-          cp LICENSE README.md dist/
-          rsync -a --exclude 'weights/' --exclude '__pycache__/' \
-                --exclude 'test_*.py' --exclude '*.pyc' python/ dist/python/
-          cp -R assets dist/assets
+          plutil -lint dist/AutoShade.app/Contents/Info.plist
+          exe=$(plutil -extract CFBundleExecutable raw dist/AutoShade.app/Contents/Info.plist)
+          test -x "dist/AutoShade.app/Contents/MacOS/$exe"
+          "dist/AutoShade.app/Contents/MacOS/autoshade" --version
+          test -f dist/AutoShade.app/Contents/Resources/AutoShade.icns
+          test -f dist/AutoShade.app/Contents/Resources/python/segment.py
+          test ! -e dist/AutoShade.app/Contents/Resources/python/weights
+          plist_min=$(plutil -extract LSMinimumSystemVersion raw dist/AutoShade.app/Contents/Info.plist)
+          if [ "$plist_min" != "$MACOSX_DEPLOYMENT_TARGET" ]; then
+            echo "::error::Info.plist says $plist_min but the build targeted $MACOSX_DEPLOYMENT_TARGET"
+            exit 1
+          fi
       - name: Archive
-        # ditto, not zip: it preserves the extended attributes a bundle needs,
-        # and M3 archives a real .app through this same step.
+        # ditto, not zip: a plain zip drops the extended attributes and the
+        # symlink layout a bundle needs, and the copy that comes back out is a
+        # directory that no longer launches.
         run: |
-          ditto -c -k --keepParent dist \
-            "autoshade-${{ steps.ver.outputs.version }}-macos-universal.zip"
+          ditto -c -k --keepParent dist/AutoShade.app \
+            "AutoShade-${{ steps.ver.outputs.version }}-macos-universal.zip"
       - uses: actions/upload-artifact@v4
         with:
           name: macos
-          path: autoshade-*-macos-universal.zip
+          path: AutoShade-*-macos-universal.zip
           if-no-files-found: error
 
   # The battery runs BESIDE the build on its own runner, not after it inside

@@ -179,6 +179,21 @@ pub(crate) fn installed_scripts() -> &'static [&'static str] {
     INSTALLED_SCRIPTS.get().map(Vec::as_slice).unwrap_or(&[])
 }
 
+/// System faces that WERE there and were refused for size, with the numbers.
+///
+/// A refusal is a decision this app made, and it is not the same fact as "no
+/// such font is installed" — only the first is something a user can act on.
+/// Both used to reach `eprintln!` alone, which in a windowed build reaches
+/// nobody. macOS is where this stops being theoretical: its system CJK
+/// collection is far larger than any Windows candidate the budget was
+/// calibrated against, so the honest answer there is a disclosure and the
+/// existing tofu warning, not silence.
+static REFUSED_FONTS: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+
+pub(crate) fn refused_system_fonts() -> &'static [String] {
+    REFUSED_FONTS.get().map(Vec::as_slice).unwrap_or(&[])
+}
+
 /// The writing-script of one char, for the ranges the fallback chain knows
 /// about. `None` = Latin/symbols/etc — covered by egui's bundle + the
 /// embedded subsets, never disclosed.
@@ -286,8 +301,23 @@ pub(crate) fn install_fonts(ctx: &egui::Context) {
     const SCRIPT_FALLBACKS: &[(&str, &[&str])] = &[];
 
     let mut total: u64 = 0;
+    let mut refused: Vec<String> = Vec::new();
     let mut load = |p: &str| -> Option<Vec<u8>> {
-        let b = read_font_capped(p, MAX_FALLBACK_FONT_BYTES)?;
+        let Some(b) = read_font_capped(p, MAX_FALLBACK_FONT_BYTES) else {
+            // Tell "over budget" from "not installed": one extra stat per
+            // candidate, once, at startup. Only a face that EXISTS and was
+            // turned away is worth telling the user about.
+            if let Ok(m) = std::fs::metadata(p)
+                && m.len() > MAX_FALLBACK_FONT_BYTES
+            {
+                refused.push(format!(
+                    "{p} ({} MB — past this build's {} MB per-face budget)",
+                    m.len() / (1024 * 1024),
+                    MAX_FALLBACK_FONT_BYTES / (1024 * 1024)
+                ));
+            }
+            return None;
+        };
         if total + b.len() as u64 > MAX_FALLBACK_TOTAL_BYTES {
             eprintln!("⚠ system font {p} would exceed the total runtime-font budget, skipped");
             return None;
@@ -323,6 +353,7 @@ pub(crate) fn install_fonts(ctx: &egui::Context) {
         installed.push("kana");
     }
     let _ = INSTALLED_SCRIPTS.set(installed);
+    let _ = REFUSED_FONTS.set(refused);
 
     let mut fonts = egui::FontDefinitions::default();
     for (name, bytes) in EMBEDDED_SYMBOL_FONTS {

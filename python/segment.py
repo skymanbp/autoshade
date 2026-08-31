@@ -164,6 +164,12 @@ import math
 import os
 import sys
 
+# The shared device rule. `_device.py` ships beside this script in `python/`,
+# the same way `segment.py` requires its ADE20K class table to; `sys.path[0]`
+# is the running script's own directory, which the Rust side resolves against
+# the program's tree and never the working directory.
+from _device import pick_device
+
 
 def die(msg: str) -> None:
     print(f"segment.py: {msg}", file=sys.stderr)
@@ -355,7 +361,7 @@ def birefnet_deps_error():
     return None
 
 
-def _birefnet_subject_mask(img_path: str, cache_dir: str, edge: int):
+def _birefnet_subject_mask(img_path: str, cache_dir: str, edge: int, prefer_cpu: bool = False):
     """Salient-subject alpha from the pinned general BiRefNet checkpoint."""
     # THE DEPENDENCY PROBE COMES FIRST, before the fetch, and finding that out
     # AFTER `_birefnet_cache` has hashed 444 MB costs ~20 s per mask on exactly
@@ -418,15 +424,16 @@ def _birefnet_subject_mask(img_path: str, cache_dir: str, edge: int):
     torch.backends.cudnn.deterministic = True
     torch.backends.cuda.matmul.allow_tf32 = False
     torch.backends.cudnn.allow_tf32 = False
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    device = pick_device(prefer_cpu)
     # fp16 on CUDA — the checkpoint is stored F16 and that is the configuration
-    # R29 B4 measured. A CPU box gets fp32 and it is SLOW (the Swin-L backbone
-    # at 1024^2); saying so beats discovering it, exactly as sky_mask argues.
+    # R29 B4 measured. Every other device gets fp32: on the CPU it is SLOW (the
+    # Swin-L backbone at 1024^2), and on Metal fp32 is simply the only
+    # precision this checkpoint has been measured in.
     dtype = torch.float16 if device == "cuda" else torch.float32
-    if device == "cpu":
+    if device != "cuda":
         print(
-            "segment.py: no CUDA device - running BiRefNet on the CPU in fp32. "
-            "This is minutes, not seconds, per mask.",
+            f"segment.py: no CUDA device - running BiRefNet on {device} in fp32. "
+            "Expect minutes, not seconds, per mask.",
             file=sys.stderr,
         )
     model.to(device, dtype=dtype)
@@ -463,7 +470,7 @@ def _birefnet_subject_mask(img_path: str, cache_dir: str, edge: int):
     return Image.fromarray(m, mode="L")
 
 
-def subject_mask(img_path: str, cache_dir: str, edge: int):
+def subject_mask(img_path: str, cache_dir: str, edge: int, prefer_cpu: bool = False):
     """Subject alpha, and the NAME of the backend that produced it.
 
     Two tiers, and the caller is told which one ran. BiRefNet is the model the
@@ -482,7 +489,7 @@ def subject_mask(img_path: str, cache_dir: str, edge: int):
     whole adjustment (`segment::resolve_ai_masks`).
     """
     try:
-        return _birefnet_subject_mask(img_path, cache_dir, edge), BIREFNET_LABEL
+        return _birefnet_subject_mask(img_path, cache_dir, edge, prefer_cpu), BIREFNET_LABEL
     except (Exception, SystemExit) as e:
         print(
             f"segment.py: WARNING - the BiRefNet subject backend did not run ({type(e).__name__}: {e}); "
@@ -766,7 +773,7 @@ def _sky_cache(cache_dir):
     return d
 
 
-def sky_mask(img_path: str, cache_dir: str):
+def sky_mask(img_path: str, cache_dir: str, prefer_cpu: bool = False):
     """ADE20K semantic segmentation, sky-class probability as the mask."""
     try:
         import torch
@@ -823,9 +830,9 @@ def sky_mask(img_path: str, cache_dir: str):
     torch.backends.cuda.matmul.allow_tf32 = False
     torch.backends.cudnn.allow_tf32 = False
     # Swin-L is ~60x the parameters of the B0 this replaced, so CPU-only would
-    # turn a ~1 s call into a minute. Use the GPU when there is one; the CPU
-    # path still works, it is just slow, and saying so beats discovering it.
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    # turn a ~1 s call into a minute. Use the accelerator when there is one; the
+    # CPU path still works, it is just slow, and saying so beats discovering it.
+    device = pick_device(prefer_cpu)
     model.to(device)
 
     # Resolve the sky class from the model's own label table instead of
@@ -876,7 +883,7 @@ def sky_mask(img_path: str, cache_dir: str):
     return Image.fromarray(m, mode="L")
 
 
-def multi_class_masks(img_path: str, cache_dir: str, max_regions: int):
+def multi_class_masks(img_path: str, cache_dir: str, max_regions: int, prefer_cpu: bool = False):
     """One OneFormer pass returning the sky and strongest ADE20K planes.
 
     The sky arithmetic intentionally mirrors ``sky_mask`` above.  The Rust
@@ -903,7 +910,7 @@ def multi_class_masks(img_path: str, cache_dir: str, max_regions: int):
     torch.backends.cudnn.deterministic = True
     torch.backends.cuda.matmul.allow_tf32 = False
     torch.backends.cudnn.allow_tf32 = False
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    device = pick_device(prefer_cpu)
     model.to(device)
     labels = {int(i): str(l) for i, l in model.config.id2label.items()}
     exact = sorted(i for i, l in labels.items() if l.strip().lower() == "sky")
@@ -995,7 +1002,7 @@ def _self_test():
     print("segment.py self-test: semantic tie-break mean, support, class-id OK; plane stats OK")
 
 
-def write_multi_manifest(img_path: str, output: str, cache_dir: str, max_regions: int, mask_size: int, backend: str):
+def write_multi_manifest(img_path: str, output: str, cache_dir: str, max_regions: int, mask_size: int, backend: str, prefer_cpu: bool = False):
     Image, np, labels, img, selected = multi_class_masks(img_path, cache_dir, max_regions)
     from PIL import Image as PILImage
     import json
@@ -1190,7 +1197,7 @@ def require_multi_point_capability(model, point_count):
         die(f"multi-point SAM prompts need {capability}; upgrade transformers")
 
 
-def object_mask(img_path: str, points, cache_dir: str, min_iou: float):
+def object_mask(img_path: str, points, cache_dir: str, min_iou: float, prefer_cpu: bool = False):
     """Soft alpha for the object under ordered positive normalised points."""
     try:
         import torch
@@ -1214,7 +1221,7 @@ def object_mask(img_path: str, points, cache_dir: str, min_iou: float):
     torch.backends.cudnn.deterministic = True
     torch.backends.cuda.matmul.allow_tf32 = False
     torch.backends.cudnn.allow_tf32 = False
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    device = pick_device(prefer_cpu)
     model.to(device)
 
     img = Image.open(img_path).convert("RGB")
@@ -1378,6 +1385,11 @@ def main() -> None:
         help="BiRefNet's square inference edge (--target subject; 1024 measured, 1536 fits)",
     )
     ap.add_argument("--cache", default=os.path.join(os.path.dirname(__file__), "weights"))
+    # The other four sidecars have had this since they were written; segment.py
+    # never did, so there was no way to ask for the CPU path on a machine that
+    # HAS an accelerator — which is exactly what a reproducibility check, and a
+    # first run on an untested backend, needs to be able to do.
+    ap.add_argument("--cpu", action="store_true", help="stay on the CPU even if an accelerator is available")
     a = ap.parse_args()
 
     if a.self_test:
@@ -1419,7 +1431,7 @@ def main() -> None:
         if not (1 <= a.regions <= 4):
             die("--regions must be between 1 and 4")
         write_multi_manifest(a.input, a.output, a.cache, a.regions, a.mask_size,
-                             "OneFormer ADE20K Swin-L " + SKY_REVISION[:12])
+                             "OneFormer ADE20K Swin-L " + SKY_REVISION[:12], a.cpu)
         print(f"segment.py: semantic manifest [OneFormer ADE20K Swin-L {SKY_REVISION[:12]}] -> {a.output}")
         return
 
@@ -1437,7 +1449,7 @@ def main() -> None:
             if a.prompt_file
             else [reference_point]
         )
-        mask = object_mask(a.input, points, a.cache, a.min_iou)
+        mask = object_mask(a.input, points, a.cache, a.min_iou, a.cpu)
         backend = "SAM 2.1 Hiera-Large " + SAM["revision"][:12]
     elif a.target == "subject":
         if a.prompt_file:
@@ -1448,11 +1460,11 @@ def main() -> None:
         # on the way to BiRefNet, so asking afterwards would answer "ok" for a
         # run that had already fallen back for a different reason.
         deps_missing = birefnet_deps_error()
-        mask, backend = subject_mask(a.input, a.cache, a.infer_size)
+        mask, backend = subject_mask(a.input, a.cache, a.infer_size, a.cpu)
     else:
         if a.prompt_file:
             die("--prompt-file applies only to --target object")
-        mask = sky_mask(a.input, a.cache)
+        mask = sky_mask(a.input, a.cache, a.cpu)
         backend = "OneFormer ADE20K Swin-L " + SKY_REVISION[:12]
     mask = mask.convert("L")
     # LONG-EDGE CAP. The render engine charges every mask raster w*h*4 against a

@@ -3445,7 +3445,6 @@ mod tests {
     /// re-key silently changes deliverable filenames. Junction fixture so
     /// the two keys genuinely differ; it must build LOUDLY (the L14#5
     /// lesson: a fixture that cannot build must never silently pass green).
-    #[cfg(windows)]
     #[test]
     fn an_export_slot_claimed_under_the_lexical_key_still_matches_its_photo() {
         let base = std::fs::canonicalize(std::env::temp_dir())
@@ -3456,13 +3455,16 @@ mod tests {
         let target = base.join("real");
         std::fs::create_dir_all(&target).unwrap();
         let link = base.join("alias");
+        #[cfg(windows)]
         let ok = std::process::Command::new("cmd")
             .args(["/c", "mklink", "/J"])
             .arg(&link)
             .arg(&target)
             .output()
             .is_ok_and(|o| o.status.success());
-        assert!(ok, "junction fixture could not be built");
+        #[cfg(unix)]
+        let ok = std::os::unix::fs::symlink(&target, &link).is_ok();
+        assert!(ok, "directory-alias fixture could not be built");
         let photo = target.join("_c1_registry.arw");
         std::fs::write(&photo, b"raw").unwrap();
         let via_alias = link.join("_c1_registry.arw");

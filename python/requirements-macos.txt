@@ -1,0 +1,19 @@
+# Sidecar dependencies on macOS.
+#
+#   pip3 install -r python/requirements-macos.txt
+#
+# NO index URL, and that is the difference: the wheels PyPI ships for macOS
+# already carry Apple's Metal (MPS) backend, so the CUDA index the Windows
+# instructions pin is not merely unnecessary here — it has no macOS wheel to
+# give you. Copying that line was the one instruction a Mac user could not
+# follow, which is why these files exist instead of one paragraph of prose.
+#
+# The sidecars choose the device themselves — CUDA, then MPS, then CPU
+# (`python/_device.py`) — so nothing here needs configuring afterwards. What
+# MPS costs in seconds and memory on real hardware is UNMEASURED; see the macOS
+# notes in README.md.
+
+-r requirements-common.txt
+
+torch
+torchvision

@@ -32,6 +32,12 @@ import sys
 import types
 import warnings
 
+# The shared device rule. `_device.py` ships beside this script in `python/`,
+# the same way `segment.py` requires its ADE20K class table to; `sys.path[0]`
+# is the running script's own directory, which the Rust side resolves against
+# the program's tree and never the working directory.
+from _device import pick_device
+
 warnings.filterwarnings("ignore")  # silence requests/urllib3 version warnings only
 
 import numpy as np
@@ -384,7 +390,7 @@ def main():
     import cv2
     import torch
 
-    device = "cpu" if args.cpu or not torch.cuda.is_available() else "cuda:0"
+    device = pick_device(args.cpu, "cuda:0")
     log(f"device={device} model={args.model} strength={args.strength}")
 
     raw = cv2.imread(args.input, cv2.IMREAD_UNCHANGED)

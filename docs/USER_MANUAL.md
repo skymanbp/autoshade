@@ -301,6 +301,29 @@ model/provider preferences but cannot supply API credentials, endpoints,
 executable/script paths, or output destinations, so an opened photo folder
 cannot become a credential or path override.
 
+**Python interpreter.** The AI sidecars run under a Python 3 that AutoShade
+does not bundle. Settings carries a **Python interpreter** field with a
+**Detect** button beside it; Detect looks in the standard install locations and
+fills the field with the first one that actually RUNS — it executes
+`--version` rather than trusting that a file exists, because a Mac without
+developer tools has a `/usr/bin/python3` whose only behaviour is to offer to
+install them. Finding none is reported as such rather than leaving the field
+silently unchanged. Blank means the platform default: `python` on Windows,
+`python3` elsewhere.
+
+The field matters most on macOS, where an app launched from Finder inherits no
+shell environment and the variable below therefore cannot be set for it at all.
+
+| Variable | Effect |
+|---|---|
+| `AUTOSHADE_PYTHON` | The interpreter the sidecars are launched with. The same setting as the Settings field; the environment wins where both are set. |
+| `AUTOSHADE_WEIGHTS_DIR` | Where all five sidecars keep downloaded model weights. Defaults to `weights/` beside the scripts — except inside a macOS `.app`, where it defaults into the develop store, because the bundle is signed and read-only. |
+
+Both are *destination* settings — they name a program to execute and a
+directory to write into — so neither may come from a `./autoshade.local.json`
+sitting in the working directory. Only the environment or the per-user
+settings file can supply them.
+
 - **Analyze:** choose **Analyze** in the AI panel or run `autoshade analyze`.
   The vision advisor proposes bounded sliders and masks, a data-only verifier
   checks the proposal, and normal visual review may attempt one revision;
