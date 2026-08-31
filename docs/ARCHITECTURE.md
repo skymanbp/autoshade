@@ -1756,11 +1756,14 @@ linear gradient from which end of the y-down frame its `full` handle covers
 whether it is inverted, and a Range Mask only when the geometry says nothing,
 so a refined sky gradient stays a sky gradient. **No geometry is ever averaged**:
 a mask's coordinates are a fact about one frame, so the block carries counts,
-slider means and English, never a coordinate. Retrieval, `style_targets` and
-`blend_toward` do not read the field at all, which is why it ships WITHOUT an
-index-version bump on `families`' precedent — `#[serde(default)]` in both
-directions, so a pre-S3 index loads with the field absent (a different fact
-from a measured zero) and a pre-S3 build ignores the new key. The build prints
+slider means and English, never a coordinate. Retrieval does not read the field
+at all, which is why it ships WITHOUT an index-version bump on `families`'
+precedent — `#[serde(default)]` in both directions, so a pre-S3 index loads with
+the field absent (a different fact from a measured zero) and a pre-S3 build
+ignores the new key. `style_targets`/`blend_toward` DO read it: a mask's slider
+AMPLITUDES are one of the five distillation channels, gated per (bucket, slider)
+by the same consistency rule as every other channel, and nothing spatial is read
+or written — the proposer still places every mask itself. The build prints
 one aggregate line for what it learned and one for the mask content
 `xmp::import_losses` says it could not carry whole; `style-query` prints the
 per-neighbour counts.

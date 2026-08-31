@@ -695,6 +695,58 @@ const REF_KEYS: [(&str, &str); 12] = [
     ("Dehaze", "dehaze"),
 ];
 
+/// The `settings` label prefix for a `catalogue::COLOR_GRADE_CRS` field. One
+/// spelling, because [`distil_keys`] writes it and [`style_targets`] reads it
+/// back.
+const COLOR_GRADE_LABEL: &str = "color_grade.";
+
+/// The distillation vocabulary the reference BLOCK does not show: the 8-band
+/// mixer and the four grade wheels, as `(crs attribute, settings label)`.
+///
+/// [`REF_KEYS`] above is what the prompt PRINTS. This is the rest of what a
+/// photographer's style is made of, read into the same
+/// [`StyleExemplar::settings`] map so [`style_targets`] can distil it, and
+/// deliberately NOT printed — see the filter in `StyleIndex::render_reference`
+/// for why, and for the property that filter buys: an index built WITH this
+/// vocabulary renders the same block, byte for byte, as one built without it.
+///
+/// Why it exists at all (batch 2, the user's ruling of 2026-08-31: *他全局饱和度、
+/// 蒙版调色、色温色调、曲线调色，等等，这些都能被考虑到*): distillation used to
+/// pull TWELVE flat sliders and nothing else, so at Style 1.0 a proposal's
+/// `vibrance` and `saturation` were replaced by the library's means — while the
+/// mixer, the wheels, the curve and the masks, which is where this
+/// photographer's colour actually lives, carried no target at all. That is not
+/// a gentle pull, it is an ASYMMETRY: colour was subtracted in the one channel
+/// the library was read through and could not be added back in any of the four
+/// it was blind to. The fix is not a cap on the pull; it is giving the pull the
+/// rest of the vocabulary.
+///
+/// DERIVED, never hand-kept, which is the difference from `REF_KEYS` (whose
+/// spellings a registry-consistency test has to pin one by one): the crs
+/// attributes come from `catalogue::hsl_expansion` and
+/// `catalogue::COLOR_GRADE_CRS` — the same two tables the eval ruler measures
+/// with and the XMP writer writes — and the label is the metric name those
+/// tables already carry. A renamed control moves here with them.
+///
+/// `settings` is a `BTreeMap`, so ADDING keys is backward compatible in both
+/// directions: an index built before batch 2 simply has none of them, every
+/// target that would have come from them degrades to "no target", and the
+/// distillation is the twelve it always was
+/// (`an_index_without_the_new_vocabulary_distils_exactly_the_twelve`). That is
+/// why this needs no index-version bump — `CURRENT_INDEX_VERSION` gates a
+/// change in what the fourteen FEATURES mean or in how candidates are RANKED,
+/// and this touches neither.
+fn distil_keys() -> Vec<(String, String)> {
+    let mut out = Vec::with_capacity(38);
+    for f in crate::advisor::catalogue::hsl_expansion() {
+        out.push((f.crs, f.metric));
+    }
+    for (field, key) in crate::advisor::catalogue::COLOR_GRADE_CRS {
+        out.push((key.to_string(), format!("{COLOR_GRADE_LABEL}{field}")));
+    }
+    out
+}
+
 /// 14-dim feature vector from capture metadata + histogram.
 pub fn feature_vector(meta: &Meta, hist: &Histogram) -> [f32; NDIM] {
     let lnpos = |v: f32| if v > 0.0 { v.ln() } else { 0.0 };
@@ -767,10 +819,16 @@ fn read_settings(xmp: &str) -> BTreeMap<String, f32> {
     // a whole-sidecar read means, and the type is what says so now.
     let xmp = crate::xmp::Scope::new(xmp.as_ref());
     let user_wb = xmp.crs_str("WhiteBalance").as_deref() != Some("As Shot");
+    // The printed twelve and the distillation vocabulary go into ONE map,
+    // through ONE reader, under ONE provenance rule (batch 2). Two readers
+    // would be two chances for the as-shot rule above to be applied to half a
+    // sidecar.
     REF_KEYS
         .iter()
-        .filter(|(k, _)| user_wb || !matches!(*k, "Temperature" | "Tint"))
-        .filter_map(|(k, label)| xmp.crs_f32(k).map(|v| (label.to_string(), v)))
+        .map(|(k, label)| ((*k).to_string(), (*label).to_string()))
+        .chain(distil_keys())
+        .filter(|(k, _)| user_wb || !matches!(k.as_str(), "Temperature" | "Tint"))
+        .filter_map(|(k, label)| xmp.crs_f32(&k).map(|v| (label, v)))
         .collect()
 }
 
@@ -871,11 +929,18 @@ pub struct StyleExemplar {
     /// [`StyleExemplar::families`]' own precedent and for its reason: the
     /// version gate exists for a change in what the FOURTEEN FEATURES mean or
     /// in how candidates are RANKED (`CURRENT_INDEX_VERSION`), and this field
-    /// touches neither — nothing here is read by `score_candidates`,
-    /// `style_targets` or `blend_toward`
-    /// (`retrieval_and_style_targets_do_not_read_mask_habits`). A bump would
-    /// force every user to rebuild an hour-long index for a field that
-    /// degrades to "no local-work line".
+    /// touches neither — nothing here is read by `score_candidates`
+    /// (`retrieval_does_not_read_mask_habits`). A bump would force every user
+    /// to rebuild an hour-long index for a field that degrades to "no
+    /// local-work line".
+    ///
+    /// SINCE BATCH 2 it is also read by [`style_targets`], which distils a
+    /// mask's SLIDER AMPLITUDES toward this photographer's per-use habit. That
+    /// does not disturb the paragraph above — the ranking is still blind to it
+    /// — and an index without the field still degrades to "no target", but it
+    /// does mean the old claim that `blend_toward` never reads a habit is no
+    /// longer true, and a comment that says so would be the kind of lie this
+    /// batch was opened to remove.
     ///
     /// The `#[serde(default)]` below is CONSISTENCY with the eleven optional
     /// fields above it, not the load-bearing part: serde reads a missing
@@ -2841,9 +2906,21 @@ similar past edits share: {s}"
         let lines: Vec<String> = ex
             .iter()
             .map(|e| {
+                // The block shows the TWELVE (`REF_KEYS`) and no more. Since
+                // batch 2 the settings map ALSO carries the distillation
+                // vocabulary — thirty-eight mixer and wheel keys read by
+                // `style_targets` — and printing those would spend the block's
+                // `advisor::REFERENCE_BUDGET_BYTES` on `key +0` pairs for bands
+                // nobody touched, crowding out the descriptions, to tell the
+                // model about colour families it is already told about as
+                // summary statistics below. Filtering HERE rather than not
+                // ingesting is also what makes an index built with the new
+                // vocabulary render this block byte for byte like one built
+                // without it (`the_reference_block_shows_only_the_printed_twelve`).
                 let s: Vec<String> = e
                     .settings
                     .iter()
+                    .filter(|(k, _)| REF_KEYS.iter().any(|(_, label)| *label == k.as_str()))
                     .map(|(k, v)| format!("{k} {v:+.0}"))
                     .collect();
                 // `look: <tags> — <desc>` (S2): the tags stay FIRST because
@@ -3186,31 +3263,408 @@ const fn style_targets_map() -> [(&'static str, &'static str); 12] {
     ]
 }
 
-/// Mean of the retrieved exemplars' slider settings, keyed by the matching
-/// [`EditRecipe`] field name. This is the "distill toward my historical style"
-/// target — applied as a *gentle, capped* pull by [`blend_toward`], never a full
-/// override (per the user's "use as reference, not a target" decision).
-pub fn style_targets(ex: &[&StyleExemplar]) -> BTreeMap<&'static str, f32> {
-    let mut out = BTreeMap::new();
+/// How much of a retrieved population's magnitude must point the SAME WAY
+/// before its mean counts as a HABIT rather than an artefact of cancellation.
+///
+/// The statistic is `rho = |mean| / mean(|v|)`. `rho == 1` is unanimity —
+/// zeros included, because a neighbour who left an axis alone is not OPPOSING
+/// it — and `rho == 0` is exact cancellation. In terms of opposing mass,
+/// `rho >= k` means the minority side carries at most `(1 - k) / 2` of the
+/// total; at 0.75 the majority outweighs it 7:1.
+///
+/// CALIBRATED, not picked (batch 2; the derivation and the per-band table are
+/// in `r30-materials/quality/batch2-report.md`). Over the four real
+/// four-neighbour sets the diagnosis measured, the DEFINED ratios of the
+/// candidate keys are 0.037, 0.465, 0.587 | 0.942, 1.000: a gap between 0.587
+/// and 0.942 whose midpoint is 0.765, and 0.75 is the round number inside it.
+///
+/// It sits high rather than in the middle of `[0, 1]` because the two errors
+/// are not symmetric. Refusing a target leaves the proposal's own decision
+/// standing and the rationale says which fields moved, so the cost is a style
+/// pull that did less than it could. ACCEPTING a false one replaces a
+/// scene-specific colour decision with a number that cancelled to near zero —
+/// which is the failure this batch was opened for, one channel deeper.
+pub const TARGET_CONSISTENCY: f32 = 0.75;
+
+/// The two colour-grade fields that are MIXING parameters rather than colour
+/// decisions.
+///
+/// `recipe::ColorGrade::is_neutral` states the rule this follows in its own
+/// words — *blending/balance alone do nothing without a saturated or lifted
+/// wheel* — so distilling them would move a control that changes nothing by
+/// itself. `blending` also has no habit to learn: its library mean is ACR's own
+/// default, present on 157 of 157 measured sidecars, i.e. a number nobody
+/// chose.
+const GRADE_NOT_A_DECISION: [&str; 2] = ["blending", "balance"];
+
+/// The weighted mean of a population, or `None` when that mean is not a habit.
+///
+/// Two ways to answer `None`, and they are one rule — *do not claim a habit we
+/// did not measure*:
+///
+/// * The population never exercised the axis (`mean(|v|) == 0`). `rho` is
+///   `0 / 0` there: UNDEFINED, which is not the same as passing. Returning the
+///   mean anyway would give every untouched band a target of `0`, and at Style
+///   1.0 a target of `0` DELETES whatever the proposal decided. The twelve-slider
+///   version of exactly that is why this batch exists; reproducing it
+///   thirty-eight times over would have been the cure making the disease.
+/// * The population contradicts itself (`|mean| < TARGET_CONSISTENCY * mean(|v|)`).
+///   The mean of `+20` and `-18` is `+1`, and pulling a proposal onto `+1` is
+///   not "distil my habit", it is erasing a decision and calling the wreckage a
+///   style.
+///
+/// Weights are `amount`-style masses (1.0 for a plain per-exemplar value, the
+/// bucket weight for a mask habit), so the mask half is the exact
+/// `sum(w*mean)/sum(w)` that `mask_habit::BucketHabit::w` exists to make
+/// possible rather than a mean of means. Non-finite and non-positive weights
+/// are dropped at the door, like every other number that reaches a render.
+fn consistent_mean(vals: impl IntoIterator<Item = (f32, f32)>) -> Option<f32> {
+    let (mut wsum, mut sum, mut abs) = (0.0f64, 0.0f64, 0.0f64);
+    for (w, v) in vals {
+        if !w.is_finite() || !v.is_finite() || w <= 0.0 {
+            continue;
+        }
+        wsum += w as f64;
+        sum += w as f64 * v as f64;
+        abs += w as f64 * (v as f64).abs();
+    }
+    if wsum <= 0.0 || abs <= 0.0 {
+        return None;
+    }
+    let (mean, mabs) = (sum / wsum, abs / wsum);
+    (mean.abs() >= TARGET_CONSISTENCY as f64 * mabs).then_some(mean as f32)
+}
+
+/// [`consistent_mean`] for an ANGLE: the weighted circular mean of a set of
+/// degrees, or `None` when they do not agree on a direction.
+///
+/// A colour-grade wheel's hue is a point on a circle, and a wheel's hue is only
+/// a CHOICE when that wheel carries saturation — an unsaturated wheel's `0` is
+/// an untouched control, not a decision to tint red. Both facts are why this
+/// cannot be `consistent_mean`, and the corpus shows the size of the error: on
+/// one real neighbour set the shadow hues are `[0, 0, 229, 0]` with saturations
+/// `[0, 0, 20, 0]`, so the arithmetic mean is 57° — a yellow-orange nobody
+/// chose — where the saturation-weighted circular mean is the 229° blue the one
+/// photograph that split-toned actually used.
+///
+/// The consistency statistic is the resultant length `R = |sum w*e^(i*theta)| /
+/// sum w`, which is the circular analogue of `rho` and lands on the same scale:
+/// `1` for identical angles, `0` for opposite ones. So the SAME
+/// [`TARGET_CONSISTENCY`] applies, and does not need calibrating twice.
+fn consistent_angle(vals: impl IntoIterator<Item = (f32, f32)>) -> Option<f32> {
+    let (mut w, mut x, mut y) = (0.0f64, 0.0f64, 0.0f64);
+    for (weight, deg) in vals {
+        if !weight.is_finite() || !deg.is_finite() || weight <= 0.0 {
+            continue;
+        }
+        let r = (deg as f64).to_radians();
+        w += weight as f64;
+        x += weight as f64 * r.cos();
+        y += weight as f64 * r.sin();
+    }
+    if w <= 0.0 {
+        return None;
+    }
+    if x.hypot(y) / w < TARGET_CONSISTENCY as f64 {
+        return None;
+    }
+    let deg = y.atan2(x).to_degrees();
+    Some(if deg < 0.0 { deg + 360.0 } else { deg } as f32)
+}
+
+/// Interpolate along the SHORTER arc, so a pull from 350° toward 10° passes
+/// through 0° and not through 180°.
+fn lerp_angle(a: f32, b: f32, t: f32) -> f32 {
+    let d = ((b - a) % 360.0 + 540.0) % 360.0 - 180.0;
+    let v = (a + d * t) % 360.0;
+    if v < 0.0 { v + 360.0 } else { v }
+}
+
+/// Everything one retrieval says about how this photographer FINISHES a
+/// photograph — the targets [`blend_toward`] pulls a proposal toward.
+///
+/// One mechanism, five channels. The mechanism has not changed since R23: a
+/// target is the retrieved neighbours' mean, and the pull is `lerp(t)` with
+/// `t = style_pull(style)`. What batch 2 changed is that the channels are no
+/// longer just the flat twelve — see [`distil_keys`] for the ruling and the
+/// asymmetry it fixes.
+///
+/// The channels, and what makes each one its own field rather than another row
+/// in [`StyleTargets::sliders`]:
+///
+/// * [`sliders`] — the twelve flat globals. UNGATED, because they are the
+///   shipped behaviour on an already-shipped release and nearly every sidecar
+///   in a real library exercises them.
+/// * [`hsl`] — the 8-band mixer by `(axis, band)`, gated. The `hue` axis is
+///   INGESTED and never distilled; [`style_targets`] says why.
+/// * [`grade`] — the wheels by `catalogue::COLOR_GRADE_CRS` field name, gated.
+///   Angles live here too, and [`blend_toward`] tells them apart by name
+///   because a wheel hue interpolates on a circle.
+/// * [`curve`] — `[black_lift, s_strength]`, the shape
+///   `eval::user_curve_shape` learns, gated per component. A SHAPE and never a
+///   point list: the mean of four photographs' curves is a curve none of them
+///   drew.
+/// * [`masks`] — per `mask_habit::Bucket` (keyed by its index in
+///   `Bucket::ALL`), one slot per `mask_habit::HABIT_SLIDERS` entry, gated.
+///   AMPLITUDES ONLY. No coordinate is ever averaged, read or written; the
+///   proposer places its own masks and this changes how hard they push.
+///
+/// `Option` per cell everywhere, and that is the load-bearing part: `None` is
+/// "no habit measured, the proposal keeps its own decision", which is a
+/// different fact from a measured `0.0`, and it is what an index built before
+/// this vocabulary existed degrades to.
+///
+/// [`sliders`]: StyleTargets::sliders
+/// [`hsl`]: StyleTargets::hsl
+/// [`grade`]: StyleTargets::grade
+/// [`curve`]: StyleTargets::curve
+/// [`masks`]: StyleTargets::masks
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct StyleTargets {
+    /// The twelve flat globals, keyed by `EditRecipe` field name.
+    pub sliders: BTreeMap<&'static str, f32>,
+    /// `[axis][band]`, indexed as `catalogue::hsl_expansion` indexes them.
+    pub hsl: [[Option<f32>; 8]; 3],
+    /// Keyed by `catalogue::COLOR_GRADE_CRS` field name.
+    pub grade: BTreeMap<&'static str, f32>,
+    /// `[black_lift, s_strength]`, each gated on its own.
+    pub curve: [Option<f32>; 2],
+    /// Keyed by the bucket's index in `mask_habit::Bucket::ALL`; the vector is
+    /// `mask_habit::HABIT_SLIDERS`-wide, READ FROM THE CONSTANT so a batch that
+    /// grows that list does not have to come back here.
+    pub masks: BTreeMap<usize, Vec<Option<f32>>>,
+}
+
+impl StyleTargets {
+    /// Nothing to pull toward — the early return [`blend_toward`] takes.
+    pub fn is_empty(&self) -> bool {
+        self.sliders.is_empty()
+            && self.grade.is_empty()
+            && self.masks.is_empty()
+            && self.curve.iter().all(Option::is_none)
+            && self.hsl.iter().flatten().all(Option::is_none)
+    }
+}
+
+/// What the retrieved exemplars agree this photographer does — the
+/// "distil toward my historical style" target.
+///
+/// The twelve flat sliders are a plain mean, as they have been since R23. Every
+/// OTHER channel goes through [`consistent_mean`] (or [`consistent_angle`]), so
+/// a band the library contradicts itself on produces no target and the
+/// proposal keeps its own decision there. Per key, independently: a
+/// photographer can be unanimous about blues and undecided about greens, and
+/// one summary number for "the mixer" would lose that.
+///
+/// **The `hue` axis of the 8-band mixer is ingested and never distilled.** Not
+/// doctrine borrowed from the reverse-fit side, which does not govern the
+/// generative path — a measured distinction. Mixer saturation and luminance
+/// change how strongly a colour READS; mixer hue changes WHICH COLOUR IT IS, on
+/// whatever content happens to occupy that band in THIS photograph. And the
+/// corpus says that is scene-bound rather than habitual. Over the four real
+/// neighbour sets the diagnosis measured, read through this module's own
+/// reader: the Orange band's hue mean is `-3.75` on one set and `+16.0` on
+/// another; Yellow inside ONE set is `[-17, 0, +83, -29]`; Green inside another
+/// is `[-24, -12, +19, 0]`. The sign flips between neighbourhoods of the same
+/// photographer and inside one of them, which is what tracking subject matter
+/// looks like — and the last two would be refused by the gate anyway (rho 0.287
+/// and 0.309).
+///
+/// The wheels are the opposite case and ARE distilled: a split-tone angle is
+/// applied to a tonal RANGE with no content to re-identify, and the same corpus
+/// puts it at a stable 201–229° across neighbourhoods. One line in the loop
+/// below turns mixer hue on if a later batch measures otherwise.
+pub fn style_targets(ex: &[&StyleExemplar]) -> StyleTargets {
+    use crate::advisor::catalogue;
+    let mut out = StyleTargets::default();
     for (label, field) in style_targets_map() {
         let vals: Vec<f32> = ex.iter().filter_map(|e| e.settings.get(label).copied()).collect();
         if !vals.is_empty() {
-            out.insert(field, vals.iter().sum::<f32>() / vals.len() as f32);
+            out.sliders.insert(field, vals.iter().sum::<f32>() / vals.len() as f32);
+        }
+    }
+    let read = |label: &str| -> Vec<f32> {
+        ex.iter().filter_map(|e| e.settings.get(label).copied()).collect()
+    };
+    for f in catalogue::hsl_expansion() {
+        if f.axis == catalogue::HSL_AXIS_HUE {
+            continue;
+        }
+        if let Some(cell) = out.hsl.get_mut(f.axis).and_then(|a| a.get_mut(f.band)) {
+            *cell = consistent_mean(read(&f.metric).into_iter().map(|v| (1.0, v)));
+        }
+    }
+    // The wheels' INTENSITIES first: an angle is only learned for a wheel whose
+    // intensity is itself a habit (the loop below reads this map back).
+    for (field, _) in catalogue::COLOR_GRADE_CRS {
+        if GRADE_NOT_A_DECISION.contains(&field) || catalogue::wheel_saturation_of(field).is_some()
+        {
+            continue;
+        }
+        let label = format!("{COLOR_GRADE_LABEL}{field}");
+        if let Some(m) = consistent_mean(read(&label).into_iter().map(|v| (1.0, v))) {
+            out.grade.insert(field, m);
+        }
+    }
+    for (field, _) in catalogue::COLOR_GRADE_CRS {
+        let Some(sat) = catalogue::wheel_saturation_of(field) else { continue };
+        if !out.grade.contains_key(sat) {
+            continue;
+        }
+        let (hue_label, sat_label) =
+            (format!("{COLOR_GRADE_LABEL}{field}"), format!("{COLOR_GRADE_LABEL}{sat}"));
+        let weighted = ex.iter().filter_map(|e| {
+            Some((*e.settings.get(&sat_label)?, *e.settings.get(&hue_label)?))
+        });
+        if let Some(angle) = consistent_angle(weighted) {
+            out.grade.insert(field, angle);
+        }
+    }
+    let curves: Vec<[f32; 2]> = ex.iter().filter_map(|e| e.curve).collect();
+    for (i, slot) in out.curve.iter_mut().enumerate() {
+        *slot = consistent_mean(curves.iter().filter_map(|c| c.get(i).map(|v| (1.0, *v))));
+    }
+    for (slot, b) in crate::mask_habit::Bucket::ALL.iter().enumerate() {
+        let per: Vec<Option<f32>> = (0..crate::mask_habit::N_HABIT_SLIDERS)
+            .map(|i| {
+                let weighted: Vec<(f32, f32)> = ex
+                    .iter()
+                    .filter_map(|e| e.masks.as_ref())
+                    .map(|h| h.bucket(*b))
+                    .filter(|h| h.w > 0.0)
+                    .filter_map(|h| h.mean.get(i).map(|v| (h.w, *v)))
+                    .collect();
+                consistent_mean(weighted)
+            })
+            .collect();
+        if per.iter().any(Option::is_some) {
+            out.masks.insert(slot, per);
         }
     }
     out
 }
 
-/// Pull `recipe`'s global sliders a fraction `t` (0..1) toward `targets` (your
-/// historical style means). `t = 0` is a no-op; the caller caps `t` so even
-/// "100% style" never fully overrides the AI's scene-specific proposal.
-pub fn blend_toward(recipe: &mut EditRecipe, targets: &BTreeMap<&'static str, f32>, t: f32) {
+/// One [`crate::mask_habit::HABIT_SLIDERS`] entry as a place on a
+/// [`crate::recipe::LocalAdjustment`], or `None` when this build does not know
+/// the name.
+///
+/// BY NAME, not by position, and that is the point. `HABIT_SLIDERS` is a
+/// curated list that GROWS — it went from eight entries to ten in S3-B5, and
+/// the advisor batch running beside this one adds `hue` — so a distillation
+/// that indexed into it positionally would quietly start pulling the wrong
+/// slider the day the list changed shape.
+/// `every_habit_slider_is_addressable_on_a_local_adjustment` pins the other
+/// half: that no name in the list is silently skipped here.
+fn local_slider_mut<'a>(
+    m: &'a mut crate::recipe::LocalAdjustment,
+    name: &str,
+) -> Option<&'a mut f32> {
+    Some(match name {
+        "exposure" => &mut m.exposure_ev,
+        "highlights" => &mut m.highlights,
+        "shadows" => &mut m.shadows,
+        "whites" => &mut m.whites,
+        "blacks" => &mut m.blacks,
+        "clarity" => &mut m.clarity,
+        "dehaze" => &mut m.dehaze,
+        "saturation" => &mut m.saturation,
+        "temperature" => &mut m.temperature,
+        "tint" => &mut m.tint,
+        "hue" => &mut m.hue,
+        _ => return None,
+    })
+}
+
+/// Pull a proposal's master tone curve toward the library's curve HABIT.
+///
+/// The habit is a SHAPE — `[black_lift, s_strength]`, the pair
+/// `eval::user_curve_shape` learns from a sidecar — and never a point list, for
+/// the reason `eval` gives where it learns it: the mean of four photographs'
+/// curves is a curve none of them drew. So the pull is applied to the shape and
+/// written back THROUGH the points.
+///
+/// How the three promises are kept:
+///
+/// * **The domain.** Points at inputs 0, 64, 191 and 255 are ensured first, at
+///   the values the curve already has there. Inserting a point ON a
+///   piecewise-linear segment is an exact no-op, so this changes nothing yet —
+///   it is what makes the black end movable and the two measurement points
+///   FIXED.
+/// * **Exactness.** `black_lift` is `lut[0]` and `s_strength` is
+///   `(lut[191] - 191) - (lut[64] - 64)`. With 64 and 191 pinned as points,
+///   moving output(0) cannot disturb either, and moving output(191) by `+d`
+///   and output(64) by `-d` moves `s_strength` by exactly `2d`. So the shape
+///   lands on the lerped target rather than near it.
+/// * **Monotonicity, and the white end.** Every moved output is clamped
+///   between its neighbours', so a pull can flatten a segment and can never
+///   invert one; input 255 is measured by neither statistic and is never
+///   written.
+///
+/// A pull smaller than the curve's own 1/255 resolution is dropped whole rather
+/// than rewriting the point list to say the same thing — the same rule the
+/// caller applies when it declines to disclose a distillation that changed
+/// nothing.
+fn blend_curve(recipe: &mut EditRecipe, target: [Option<f32>; 2], t: f32) {
+    if target.iter().all(Option::is_none) {
+        return;
+    }
+    let lut = crate::eval::recipe_curve_lut(recipe);
+    let (black0, s0) = crate::eval::curve_shape(&lut);
+    let lerp = |a: f32, b: f32| a + (b - a) * t;
+    let black = target[0].map_or(black0, |b| lerp(black0, b));
+    let s = target[1].map_or(s0, |b| lerp(s0, b));
+    if (black - black0).abs() < 0.5 && (s - s0).abs() < 0.5 {
+        return;
+    }
+    // FIRST wins on a duplicated input — the rule `eval::curve_lut` and
+    // `render::curve_lut` both follow, so the points this rebuilds from are the
+    // points the engine would have rendered.
+    let mut pts: BTreeMap<u8, f32> = BTreeMap::new();
+    for p in &recipe.tone_curve {
+        pts.entry(p.input).or_insert(p.output as f32);
+    }
+    for anchor in [0usize, 64, 191, 255] {
+        pts.entry(anchor as u8).or_insert(lut[anchor]);
+    }
+    let half = (s - s0) / 2.0;
+    if let Some(v) = pts.get_mut(&0) {
+        *v = black;
+    }
+    if let Some(v) = pts.get_mut(&64) {
+        *v -= half;
+    }
+    if let Some(v) = pts.get_mut(&191) {
+        *v += half;
+    }
+    let mut floor = 0.0f32;
+    let mut curve: Vec<crate::recipe::CurvePoint> = Vec::with_capacity(pts.len());
+    for (input, output) in pts {
+        let v = output.clamp(floor, 255.0);
+        floor = v;
+        curve.push(crate::recipe::CurvePoint { input, output: v.round() as u8 });
+    }
+    recipe.tone_curve = curve;
+}
+
+/// Pull `recipe` a fraction `t` (0..1) toward `targets` — this photographer's
+/// measured habits. `t = 0` is a no-op.
+///
+/// **`t = 1` reaches the target.** `style_pull(1.0) == 1.0` and this is a
+/// plain `lerp`, so at Style 100% a channel WITH a target ends on that target
+/// and the proposal's own value for it is gone. That is the F1 ruling — the
+/// dial goes all the way up — and it used to be contradicted by this very
+/// doc comment, which promised a cap no caller applies. What keeps 100% from
+/// meaning "delete the colour" is not a cap: it is that the vocabulary is now
+/// symmetric (see [`distil_keys`]) and that a channel only HAS a target when
+/// the library agreed on one (see [`consistent_mean`]). Everything that moves
+/// is named in the rationale (`rationale::keys::STYLE_DISTILLED`).
+pub fn blend_toward(recipe: &mut EditRecipe, targets: &StyleTargets, t: f32) {
     let t = t.clamp(0.0, 1.0);
     if t <= 0.0 || targets.is_empty() {
         return;
     }
     let lerp = |a: f32, b: f32| a + (b - a) * t;
-    for (field, &target) in targets {
+    for (field, &target) in &targets.sliders {
         match *field {
             "exposure_ev" => recipe.exposure_ev = lerp(recipe.exposure_ev, target),
             "contrast" => recipe.contrast = lerp(recipe.contrast, target),
@@ -3244,7 +3698,160 @@ pub fn blend_toward(recipe: &mut EditRecipe, targets: &BTreeMap<&'static str, f3
             _ => {}
         }
     }
+    // The 8-band mixer, reached by (axis, band) through the registry rather
+    // than by a private copy of the axis order.
+    for (axis, bands) in targets.hsl.iter().enumerate() {
+        for (band, target) in bands.iter().enumerate() {
+            let (Some(target), Some(cur)) =
+                (*target, crate::advisor::catalogue::hsl_value(&recipe.hsl, axis, band))
+            else {
+                continue;
+            };
+            if let Some(slot) = crate::advisor::catalogue::hsl_value_mut(&mut recipe.hsl, axis, band)
+            {
+                *slot = lerp(cur, target);
+            }
+        }
+    }
+    // The grade wheels. A `*_hue` field is an ANGLE and is told apart by the
+    // registry, not by a name test written here.
+    for (field, &target) in &targets.grade {
+        let Some(cur) = crate::advisor::catalogue::color_grade_value(&recipe.color_grade, field)
+        else {
+            continue;
+        };
+        let next = match crate::advisor::catalogue::wheel_saturation_of(field) {
+            None => lerp(cur, target),
+            Some(sat) => {
+                let intensity =
+                    crate::advisor::catalogue::color_grade_value(&recipe.color_grade, sat)
+                        .unwrap_or(0.0);
+                if intensity == 0.0 {
+                    // Nothing to lerp FROM: an unsaturated wheel has no tint,
+                    // so its hue is an untouched control and not a decision
+                    // this would be averaging with. The same rule the
+                    // `temperature_k` arm above applies to an as-shot recipe,
+                    // one control deeper — and it is also what keeps a
+                    // half-strength pull from passing through a colour neither
+                    // side asked for on its way to the target.
+                    target
+                } else {
+                    lerp_angle(cur, target, t)
+                }
+            }
+        };
+        if let Some(slot) =
+            crate::advisor::catalogue::color_grade_value_mut(&mut recipe.color_grade, field)
+        {
+            *slot = next;
+        }
+    }
+    blend_curve(recipe, targets.curve, t);
+    // The masks: AMPLITUDES ONLY. Nothing here reads or writes a coordinate,
+    // a component, an amount or an enabled flag — `mask_habit`'s own rule, and
+    // `distillation_never_moves_mask_geometry` is what holds it.
+    if !targets.masks.is_empty() {
+        for m in recipe.masks.iter_mut() {
+            let bucket = crate::mask_habit::bucket_of(m);
+            let Some(slot) = crate::mask_habit::Bucket::ALL.iter().position(|b| *b == bucket) else {
+                continue;
+            };
+            let Some(per) = targets.masks.get(&slot) else { continue };
+            for (i, name) in crate::mask_habit::HABIT_SLIDERS.iter().enumerate() {
+                let Some(target) = per.get(i).copied().flatten() else { continue };
+                let Some(cur) = local_slider_mut(m, name) else { continue };
+                *cur = lerp(*cur, target);
+            }
+        }
+    }
 }
+
+/// Every field [`blend_toward`] actually MOVED, as names a photographer can
+/// look up on their own panel — bounded, and in a fixed order.
+///
+/// Measured from the two recipes rather than from the target map, which is the
+/// honest direction: a target the proposal already sat on moved nothing, and a
+/// note that listed it would be claiming a pull that did not happen. This is
+/// the disclosure half of batch 2 — the note used to carry one percentage and
+/// no answer at all to "toward what?".
+///
+/// Bounded at [`MAX_DISTILLED_FIELDS_CHARS`] with a `+N more` tail, for the
+/// reason every other disclosure here is bounded: the rationale is persisted,
+/// re-rendered in three UIs, and shares a 16 KiB ceiling with every other note.
+/// A recipe with many masks can move a hundred fields.
+pub fn distilled_fields(pre: &EditRecipe, post: &EditRecipe) -> String {
+    use crate::advisor::catalogue;
+    let mut names: Vec<String> = Vec::new();
+    for (_, field) in style_targets_map() {
+        let moved = match field {
+            "exposure_ev" => pre.exposure_ev != post.exposure_ev,
+            "contrast" => pre.contrast != post.contrast,
+            "highlights" => pre.highlights != post.highlights,
+            "shadows" => pre.shadows != post.shadows,
+            "whites" => pre.whites != post.whites,
+            "blacks" => pre.blacks != post.blacks,
+            "vibrance" => pre.vibrance != post.vibrance,
+            "clarity" => pre.clarity != post.clarity,
+            "temperature_k" => pre.temperature_k != post.temperature_k,
+            "tint" => pre.tint != post.tint,
+            "saturation" => pre.saturation != post.saturation,
+            "dehaze" => pre.dehaze != post.dehaze,
+            _ => false,
+        };
+        if moved {
+            names.push(field.to_string());
+        }
+    }
+    for f in catalogue::hsl_expansion() {
+        if catalogue::hsl_value(&pre.hsl, f.axis, f.band)
+            != catalogue::hsl_value(&post.hsl, f.axis, f.band)
+        {
+            names.push(f.metric);
+        }
+    }
+    for (field, _) in catalogue::COLOR_GRADE_CRS {
+        if catalogue::color_grade_value(&pre.color_grade, field)
+            != catalogue::color_grade_value(&post.color_grade, field)
+        {
+            names.push(format!("{COLOR_GRADE_LABEL}{field}"));
+        }
+    }
+    if pre.tone_curve != post.tone_curve {
+        names.push("tone_curve".to_string());
+    }
+    // Masks by POSITION, never by name: a mask's name is user text and this
+    // string is persisted and shown (`autoshade-no-photo-filenames`).
+    for (i, (a, b)) in pre.masks.iter().zip(&post.masks).enumerate() {
+        for name in crate::mask_habit::HABIT_SLIDERS {
+            let mut a = a.clone();
+            let mut b = b.clone();
+            let (Some(x), Some(y)) = (local_slider_mut(&mut a, name), local_slider_mut(&mut b, name))
+            else {
+                continue;
+            };
+            if x != y {
+                names.push(format!("mask {} {name}", i + 1));
+            }
+        }
+    }
+    let mut out = String::new();
+    for (i, n) in names.iter().enumerate() {
+        let sep = if out.is_empty() { "" } else { ", " };
+        if out.chars().count() + sep.len() + n.chars().count() > MAX_DISTILLED_FIELDS_CHARS {
+            out.push_str(&format!("{sep}+{} more", names.len() - i));
+            break;
+        }
+        out.push_str(sep);
+        out.push_str(n);
+    }
+    out
+}
+
+/// The bound on [`distilled_fields`]. 384 characters is six 64-character rows
+/// — about thirty field names, which covers every global channel plus a few
+/// mask sliders before the `+N more` tail takes over — spent against the same
+/// `rationale::MAX_RATIONALE` ceiling every other note is spent against.
+pub const MAX_DISTILLED_FIELDS_CHARS: usize = 384;
 
 /// Style axis pull: preserve the shipped 0.3 default's historical 0.18 pull,
 /// while allowing Style 1.0 to reach the retrieved target fully.
@@ -3356,10 +3963,10 @@ mod tests {
         };
         let (a, b) = (mk(0.4, 20.0, 10.0), mk(0.6, 40.0, 30.0));
         let targets = style_targets(&[&a, &b]);
-        assert_eq!(targets.get("exposure_ev").copied(), Some(0.5)); // mean(0.4,0.6)
-        assert_eq!(targets.get("contrast").copied(), Some(30.0)); // mean(20,40)
-        assert_eq!(targets.get("saturation").copied(), Some(20.0)); // mean(10,30) — v2 field
-        assert_eq!(targets.get("dehaze").copied(), Some(8.0)); // v2 field
+        assert_eq!(targets.sliders.get("exposure_ev").copied(), Some(0.5)); // mean(0.4,0.6)
+        assert_eq!(targets.sliders.get("contrast").copied(), Some(30.0)); // mean(20,40)
+        assert_eq!(targets.sliders.get("saturation").copied(), Some(20.0)); // mean(10,30) — v2 field
+        assert_eq!(targets.sliders.get("dehaze").copied(), Some(8.0)); // v2 field
 
         let mut r = EditRecipe::default();
         blend_toward(&mut r, &targets, 0.5); // pull halfway from 0
@@ -3432,7 +4039,10 @@ mod tests {
 
     #[test]
     fn tint_never_lands_alone_on_an_as_shot_recipe() {
-        let targets = BTreeMap::from([("tint", 20.0f32), ("temperature_k", 6000.0f32)]);
+        let targets = StyleTargets {
+            sliders: BTreeMap::from([("tint", 20.0f32), ("temperature_k", 6000.0f32)]),
+            ..Default::default()
+        };
         let mut as_shot = EditRecipe::default(); // temperature_k = None
         blend_toward(&mut as_shot, &targets, 0.5);
         assert_eq!(as_shot.temperature_k, None, "as-shot stays as-shot");
@@ -5260,8 +5870,12 @@ mod tests {
         assert_eq!(looks.len(), 1, "the look must be retrieved - else this proves nothing");
         // The targets come from the RAW side and only from it.
         let targets = style_targets(&ex);
-        assert_eq!(targets.get("contrast"), Some(&20.0), "the RAW exemplar's own setting");
-        assert_eq!(targets.len(), 1, "a look carries no settings and must add none: {targets:?}");
+        assert_eq!(targets.sliders.get("contrast"), Some(&20.0), "the RAW exemplar's own setting");
+        assert_eq!(
+            targets.sliders.len(),
+            1,
+            "a look carries no settings and must add none: {targets:?}"
+        );
         // …and the blend moves exactly that one field.
         let mut recipe = EditRecipe::default();
         let before = recipe.clone();
@@ -6127,15 +6741,25 @@ mod tests {
         assert!(with.contains("1 of 1 mask the sky"), "the unmeasured one is in no denominator: {with}");
     }
 
-    /// RETRIEVAL IS UNTOUCHED. The habit changes the WORDS in the block and
-    /// nothing about which neighbours are chosen, in what order, or where
-    /// `blend_toward` pulls — the whole reason it could ship without a version
-    /// bump. Behavioural: two indexes identical but for the habit, one query.
+    /// RETRIEVAL IS UNTOUCHED. The habit changes nothing about which
+    /// neighbours are chosen or in what order — the whole reason it could ship
+    /// without an index-version bump. Behavioural: two indexes identical but
+    /// for the habit, one query.
     ///
-    /// MUTATION THIS KILLS: any term reading `masks` inside `score_candidates`,
-    /// or a `style_targets` that weighted a neighbour by its mask count.
+    /// RENAMED IN BATCH 2, because half of what it used to assert is now false
+    /// ON PURPOSE. It read `retrieval_and_style_targets_do_not_read_mask_habits`
+    /// and pinned `blend_toward` as blind to the habit; symmetric distillation
+    /// makes a mask's SLIDER AMPLITUDES a distillation channel, so that half is
+    /// inverted below and stated as the positive claim it now is. The rename is
+    /// the point: a test whose name still promised blindness while its body no
+    /// longer checked it would be the same kind of lie as the doc comments this
+    /// batch removed.
+    ///
+    /// MUTATION THIS KILLS: any term reading `masks` inside `score_candidates`;
+    /// a `style_targets` that weighted a neighbour by its mask count; and a
+    /// mask habit that leaks into a GLOBAL target.
     #[test]
-    fn retrieval_and_style_targets_do_not_read_mask_habits() {
+    fn retrieval_does_not_read_mask_habits() {
         use crate::mask_habit::MaskHabit;
         let mk = |stem: &str, f0: f32, masks: Option<MaskHabit>| StyleExemplar {
             stem: stem.into(),
@@ -6198,22 +6822,707 @@ mod tests {
         };
         assert_eq!(order(&none), order(&some), "the neighbour ORDER may not move");
         assert_eq!(distances(&none), distances(&some), "…nor any distance, to the last bit");
-        // `style_targets` and the blend it drives, byte for byte.
+        // The GLOBAL half of the distillation, byte for byte.
         let targets = |idx: &StyleIndex| {
             let ex: Vec<&StyleExemplar> = idx.exemplars.iter().collect();
             style_targets(&ex)
         };
+        let globals =
+            |t: &StyleTargets| serde_json::to_string(&(&t.sliders, t.hsl, &t.grade, t.curve)).unwrap();
         assert_eq!(
-            serde_json::to_string(&targets(&none)).unwrap(),
-            serde_json::to_string(&targets(&some)).unwrap(),
-            "style_targets may not read the habit"
+            globals(&targets(&none)),
+            globals(&targets(&some)),
+            "a mask habit may not move a GLOBAL target"
         );
         let blended = |idx: &StyleIndex| {
             let mut r = EditRecipe::default();
             blend_toward(&mut r, &targets(idx), 0.7);
             serde_json::to_string(&r).unwrap()
         };
-        assert_eq!(blended(&none), blended(&some), "blend_toward may not read the habit");
+        assert_eq!(
+            blended(&none),
+            blended(&some),
+            "…and a recipe carrying no masks cannot be moved by a mask habit"
+        );
+        // …while the MASK targets are exactly where the habit lands. This is
+        // the inverted half: batch 2's whole mask channel is dead if it stays
+        // empty here.
+        assert!(targets(&none).masks.is_empty(), "no habit measured, no mask target");
+        assert!(!targets(&some).masks.is_empty(), "a measured habit MUST reach the mask targets");
+    }
+
+    /// A neighbour set with the batch-2 vocabulary in its `settings`.
+    fn vocab_ex(settings: &[(&str, f32)]) -> StyleExemplar {
+        StyleExemplar {
+            stem: "n".into(),
+            feat: vec![0.0; NDIM],
+            tag: "wide/mid/midday/landscape".into(),
+            settings: settings.iter().map(|(k, v)| ((*k).to_string(), *v)).collect(),
+            curve: None,
+            path: None,
+            families: None,
+            embed: None,
+            tags: Vec::new(),
+            vocab_scores: None,
+            desc: None,
+            desc_embed: None,
+            masks: None,
+        }
+    }
+
+    /// THE GATE, on the side that refuses. A band the neighbours contradict has
+    /// no habit to distil, so it gets no target and the proposal keeps its own
+    /// decision — which at Style 1.0 is the difference between "your blues" and
+    /// "no blues at all".
+    ///
+    /// The three cases bracket `TARGET_CONSISTENCY` from both sides with real
+    /// arithmetic rather than a repeat of the constant: `+20/-18` is rho 0.05,
+    /// `+20/-4` is rho 0.67 (still refused at 0.75), `+20/-2` is rho 0.82.
+    ///
+    /// MUTATION THIS KILLS: dropping the ratio test from `consistent_mean`.
+    #[test]
+    fn style_targets_refuse_a_band_the_neighbours_contradict() {
+        let pair = |a: f32, b: f32| {
+            let (x, y) = (vocab_ex(&[("hsl.saturation.blue", a)]), vocab_ex(&[("hsl.saturation.blue", b)]));
+            style_targets(&[&x, &y]).hsl[1][5]
+        };
+        assert_eq!(pair(20.0, -18.0), None, "rho 0.05 is not a habit");
+        assert_eq!(pair(20.0, -4.0), None, "rho 0.67 is still under the bar");
+        let agreed = pair(20.0, -2.0).expect("rho 0.82 clears the bar");
+        assert!((agreed - 9.0).abs() < 1e-4, "{agreed}");
+        let unanimous = pair(20.0, 18.0).expect("one sign is unanimity");
+        assert!((unanimous - 19.0).abs() < 1e-4, "{unanimous}");
+    }
+
+    /// THE OTHER WAY TO REFUSE, and the one that matters most. Four neighbours
+    /// who all left a band alone have `mean(|v|) == 0`: rho is `0/0`, which is
+    /// UNDEFINED and not the same as agreeing on zero. Emitting the mean anyway
+    /// would hand every untouched band a target of `0` and, at Style 1.0,
+    /// delete the proposal's whole mixer — the twelve-slider failure this batch
+    /// exists to end, reproduced sixteen times over.
+    ///
+    /// MUTATION THIS KILLS: `if wsum <= 0.0` in place of `if wsum <= 0.0 ||
+    /// abs <= 0.0`.
+    #[test]
+    fn style_targets_refuse_an_axis_the_neighbours_never_exercised() {
+        let (a, b) = (vocab_ex(&[("hsl.saturation.blue", 0.0)]), vocab_ex(&[("hsl.saturation.blue", 0.0)]));
+        let targets = style_targets(&[&a, &b]);
+        assert_eq!(targets.hsl[1][5], None, "an untouched axis is not a habit of zero");
+        let mut r = EditRecipe::default();
+        r.hsl.saturation[5] = 30.0;
+        blend_toward(&mut r, &targets, 1.0);
+        assert_eq!(r.hsl.saturation[5], 30.0, "the proposal's own decision survives at Style 100%");
+    }
+
+    /// BACKWARD COMPATIBILITY, one direction: an index built before batch 2
+    /// carries only the twelve printed labels, so every new channel degrades to
+    /// "no target" and the distillation is exactly the twelve it always was.
+    /// Behavioural — the recipe's mixer, wheels, curve and masks come out of a
+    /// FULL-strength pull byte for byte unchanged.
+    ///
+    /// MUTATION THIS KILLS: a target that defaults to `0.0` instead of `None`
+    /// when the vocabulary is absent.
+    #[test]
+    fn an_index_without_the_new_vocabulary_distils_exactly_the_twelve() {
+        let old = vocab_ex(&[("contrast", 30.0), ("vibrance", 10.0)]);
+        let targets = style_targets(&[&old, &old]);
+        assert!(targets.hsl.iter().flatten().all(Option::is_none), "{:?}", targets.hsl);
+        assert!(targets.grade.is_empty() && targets.masks.is_empty());
+        assert!(targets.curve.iter().all(Option::is_none));
+        let mut r = EditRecipe::default();
+        r.hsl.saturation[5] = 25.0;
+        r.color_grade.highlight_sat = 30.0;
+        r.color_grade.highlight_hue = 40.0;
+        r.tone_curve = vec![
+            crate::recipe::CurvePoint { input: 0, output: 0 },
+            crate::recipe::CurvePoint { input: 255, output: 255 },
+        ];
+        r.masks = vec![crate::recipe::LocalAdjustment { exposure_ev: 0.5, ..Default::default() }];
+        let before = r.clone();
+        blend_toward(&mut r, &targets, 1.0);
+        assert_eq!(r.contrast, 30.0, "the twelve still move");
+        assert_eq!(r.vibrance, 10.0);
+        assert_eq!(r.hsl, before.hsl, "no vocabulary, no mixer pull");
+        assert_eq!(r.color_grade, before.color_grade);
+        assert_eq!(r.tone_curve, before.tone_curve);
+        assert_eq!(r.masks, before.masks);
+    }
+
+    /// BACKWARD COMPATIBILITY, the other direction: a NEW index at Style 0
+    /// leaves the proposal alone to the last bit, whatever it learned.
+    #[test]
+    fn style_zero_is_a_no_op_with_the_full_vocabulary() {
+        let ex = vocab_ex(&[
+            ("contrast", 30.0),
+            ("hsl.saturation.blue", 20.0),
+            ("color_grade.highlight_sat", 25.0),
+            ("color_grade.highlight_hue", 212.0),
+        ]);
+        let mut with_curve = ex.clone();
+        with_curve.curve = Some([6.0, 20.0]);
+        with_curve.masks = Some(two_mask_habit());
+        let targets = style_targets(&[&with_curve, &with_curve]);
+        assert!(!targets.is_empty(), "the premise: this set DID learn something");
+        let mut r = EditRecipe {
+            masks: vec![crate::recipe::LocalAdjustment::default()],
+            ..Default::default()
+        };
+        r.hsl.saturation[5] = 25.0;
+        let before = r.clone();
+        blend_toward(&mut r, &targets, style_pull(0.0));
+        assert_eq!(r, before, "Style 0 is a no-op");
+    }
+
+    /// THE PROMPT IS UNCHANGED. The distillation vocabulary rides in the same
+    /// `settings` map the block prints from, so the block filters back to
+    /// `REF_KEYS` — and an index built with the new vocabulary must render the
+    /// SAME bytes as one built without it, or batch 2 silently rewrote every
+    /// paid prompt.
+    ///
+    /// MUTATION THIS KILLS: deleting the `REF_KEYS` filter in
+    /// `render_reference`.
+    #[test]
+    fn the_reference_block_shows_only_the_printed_twelve() {
+        let twelve: Vec<(&str, f32)> = vec![("contrast", 22.0), ("vibrance", 5.0)];
+        let mut wide = twelve.clone();
+        wide.extend([
+            ("hsl.saturation.blue", -20.0),
+            ("hsl.luminance.green", 15.0),
+            ("color_grade.highlight_sat", 25.0),
+            ("color_grade.blending", 50.0),
+        ]);
+        let idx = StyleIndex {
+            version: CURRENT_INDEX_VERSION,
+            mean: vec![0.0; NDIM],
+            std: vec![1.0; NDIM],
+            exemplars: Vec::new(),
+            source_dir: None,
+            looks: Vec::new(),
+            looks_dir: None,
+            embed_provenance: None,
+        };
+        let render = |s: &[(&str, f32)]| {
+            let e = vocab_ex(s);
+            idx.render_reference(&[&e], crate::recipe::GradeStrength::new(0.30)).unwrap()
+        };
+        assert_eq!(render(&twelve), render(&wide), "the block may not grow with the vocabulary");
+    }
+
+    /// A WHEEL HUE IS AN ANGLE, and an unsaturated wheel's hue is not a choice.
+    /// The real corpus case, verbatim: shadow hues `[0, 229]` with shadow
+    /// saturations `[0, 20]`. The arithmetic mean is 114.5° — a green nobody
+    /// picked — and the saturation-weighted circular mean is the 229° blue the
+    /// one photograph that split-toned actually used.
+    ///
+    /// MUTATION THIS KILLS: routing a `*_hue` field through `consistent_mean`.
+    #[test]
+    fn a_wheel_hue_is_a_saturation_weighted_circular_mean() {
+        let quiet = vocab_ex(&[("color_grade.shadow_hue", 0.0), ("color_grade.shadow_sat", 0.0)]);
+        let toned = vocab_ex(&[("color_grade.shadow_hue", 229.0), ("color_grade.shadow_sat", 20.0)]);
+        let targets = style_targets(&[&quiet, &toned]);
+        let hue = *targets.grade.get("shadow_hue").expect("the one toned neighbour answers");
+        assert!((hue - 229.0).abs() < 0.5, "want the toned neighbour's angle, got {hue}");
+        assert!((hue - 114.5).abs() > 1.0, "an arithmetic mean of angles is the bug: {hue}");
+        let sat = *targets.grade.get("shadow_sat").expect("intensity is a plain mean");
+        assert!((sat - 10.0).abs() < 1e-4, "{sat}");
+
+        // WRAPPING, which the case above does not exercise: with one saturated
+        // neighbour the weighting alone reaches the right answer, and a
+        // weighted ARITHMETIC mean would pass. Two saturated wheels at 350 and
+        // 10 degrees are ten degrees apart; their arithmetic mean is 180 — the
+        // opposite colour.
+        let wrap = |a: f32, b: f32| {
+            let (x, y) = (
+                vocab_ex(&[("color_grade.shadow_hue", a), ("color_grade.shadow_sat", 20.0)]),
+                vocab_ex(&[("color_grade.shadow_hue", b), ("color_grade.shadow_sat", 20.0)]),
+            );
+            style_targets(&[&x, &y]).grade.get("shadow_hue").copied()
+        };
+        let near_zero = wrap(350.0, 10.0).expect("ten degrees apart is agreement");
+        assert!(
+            !(0.5..=359.5).contains(&near_zero),
+            "350 and 10 average to 0, not to 180: {near_zero}"
+        );
+        // …and OPPOSITE angles are not a habit at all. The arithmetic mean of
+        // 0 and 180 is a confident 90 with a perfect one-sided rho, because a
+        // hue is measured on a circle and rho cannot see that.
+        assert_eq!(wrap(0.0, 180.0), None, "opposite tints do not average to a tint");
+    }
+
+    /// A TINT ANGLE IS NOT LEARNED WITHOUT ITS INTENSITY. The wheel is one
+    /// decision; an angle whose strength the library could not agree on is an
+    /// angle with nothing to apply it at.
+    ///
+    /// MUTATION THIS KILLS: dropping the `out.grade.contains_key(sat)` guard.
+    #[test]
+    fn a_wheel_hue_is_not_learned_without_its_own_intensity() {
+        let a = vocab_ex(&[("color_grade.shadow_hue", 229.0), ("color_grade.shadow_sat", 20.0)]);
+        let b = vocab_ex(&[("color_grade.shadow_hue", 229.0), ("color_grade.shadow_sat", -20.0)]);
+        let targets = style_targets(&[&a, &b]);
+        assert_eq!(targets.grade.get("shadow_sat"), None, "the premise: intensity cancels");
+        assert_eq!(targets.grade.get("shadow_hue"), None, "so the angle is not learned either");
+    }
+
+    /// AN UNSATURATED WHEEL HAS NOTHING TO LERP FROM — the same rule the
+    /// `temperature_k` arm applies to an as-shot recipe, one control deeper.
+    /// Half-way between "no tint" and "a blue tint" is not a half-strength blue
+    /// if you interpolate the ANGLE: it is a colour on the other side of the
+    /// wheel, at half strength.
+    #[test]
+    fn an_unsaturated_wheel_adopts_the_target_hue_outright() {
+        let targets = StyleTargets {
+            grade: BTreeMap::from([("shadow_hue", 229.0f32), ("shadow_sat", 10.0f32)]),
+            ..Default::default()
+        };
+        let mut untinted = EditRecipe::default(); // shadow_sat = 0
+        untinted.color_grade.shadow_hue = 10.0;
+        blend_toward(&mut untinted, &targets, 0.5);
+        assert_eq!(untinted.color_grade.shadow_hue, 229.0, "adopted, not interpolated");
+        assert!((untinted.color_grade.shadow_sat - 5.0).abs() < 1e-4);
+        let mut tinted = EditRecipe::default();
+        tinted.color_grade.shadow_hue = 10.0;
+        tinted.color_grade.shadow_sat = 40.0;
+        blend_toward(&mut tinted, &targets, 0.5);
+        // The SHORT way round: 10 -> 229 is 141 degrees backwards, not 219
+        // forwards, so half of it lands at 299.5 and not at 119.5.
+        assert!(
+            (tinted.color_grade.shadow_hue - 299.5).abs() < 0.5,
+            "{}",
+            tinted.color_grade.shadow_hue
+        );
+    }
+
+    /// THE CURVE LANDS ON THE SHAPE. `black_lift` is `lut[0]` and `s_strength`
+    /// is measured at inputs 64 and 191, so pinning those two as points is what
+    /// makes the pull exact rather than approximate — and the result is still a
+    /// curve: monotone, spanning 0..255, white end untouched.
+    ///
+    /// MUTATION THIS KILLS: dropping the anchor insertion, which leaves
+    /// `black_lift` bending the segment that `s_strength` is measured on.
+    #[test]
+    fn the_curve_pull_lands_on_the_shape_and_stays_monotone() {
+        let targets = StyleTargets { curve: [Some(6.0), Some(20.0)], ..Default::default() };
+        let mut r = EditRecipe::default(); // no curve at all = the identity
+        blend_toward(&mut r, &targets, 1.0);
+        let (black, s) = crate::eval::curve_shape(&crate::eval::recipe_curve_lut(&r));
+        assert!((black - 6.0).abs() <= 1.0, "black lift {black}");
+        assert!((s - 20.0).abs() <= 1.0, "s strength {s}");
+        let pts = &r.tone_curve;
+        assert_eq!(pts.first().map(|p| p.input), Some(0), "{pts:?}");
+        assert_eq!(pts.last().map(|p| (p.input, p.output)), Some((255, 255)), "white end untouched");
+        assert!(
+            pts.windows(2).all(|w| w[0].input < w[1].input && w[0].output <= w[1].output),
+            "a pull may flatten a segment and may never invert one: {pts:?}"
+        );
+        // Half strength is half the shape, not half a rewrite.
+        let mut half = EditRecipe::default();
+        blend_toward(&mut half, &targets, 0.5);
+        let (hb, hs) = crate::eval::curve_shape(&crate::eval::recipe_curve_lut(&half));
+        assert!((hb - 3.0).abs() <= 1.0 && (hs - 10.0).abs() <= 1.0, "{hb} {hs}");
+    }
+
+    /// THE MIXER'S HUE AXIS IS INGESTED AND NEVER DISTILLED. Saturation and
+    /// luminance change how strongly a colour READS; hue changes WHICH COLOUR
+    /// IT IS, on whatever content occupies that band in this photograph — and
+    /// the corpus says that is scene-bound (`style_targets` carries the
+    /// measurement). The ingestion still happens, so a later batch that
+    /// measures otherwise turns it on by deleting one `continue`.
+    ///
+    /// MUTATION THIS KILLS: removing the `HSL_AXIS_HUE` skip.
+    #[test]
+    fn mixer_hue_is_ingested_and_never_distilled() {
+        let ex = vocab_ex(&[("hsl.hue.blue", 30.0), ("hsl.saturation.blue", 30.0)]);
+        assert!(ex.settings.contains_key("hsl.hue.blue"), "ingested, so a later batch has the data");
+        let targets = style_targets(&[&ex, &ex]);
+        assert!(
+            targets.hsl[crate::advisor::catalogue::HSL_AXIS_HUE].iter().all(Option::is_none),
+            "no hue band may carry a target: {:?}",
+            targets.hsl[crate::advisor::catalogue::HSL_AXIS_HUE]
+        );
+        assert!(targets.hsl[1][5].is_some(), "…while saturation on the same band does");
+        let mut r = EditRecipe::default();
+        r.hsl.hue[5] = 5.0;
+        blend_toward(&mut r, &targets, 1.0);
+        assert_eq!(r.hsl.hue[5], 5.0, "the proposal's per-band hue is its own");
+    }
+
+    /// THE WIDTH-AGNOSTIC CONTRACT. `HABIT_SLIDERS` grows — eight to ten in
+    /// S3-B5, and the advisor batch beside this one adds `hue` — so the
+    /// distillation addresses it BY NAME and this pins that no name in the list
+    /// is silently skipped. It is meant to go red at a merge, loudly, rather
+    /// than let a widened list distil the wrong slider.
+    #[test]
+    fn every_habit_slider_is_addressable_on_a_local_adjustment() {
+        let mut m = crate::recipe::LocalAdjustment::default();
+        for name in crate::mask_habit::HABIT_SLIDERS {
+            assert!(
+                local_slider_mut(&mut m, name).is_some(),
+                "HABIT_SLIDERS has {name:?} and the distillation cannot reach it"
+            );
+        }
+        assert_eq!(local_slider_mut(&mut m, "not-a-slider"), None);
+    }
+
+    /// AMPLITUDES ONLY. `mask_habit`'s rule is that no coordinate is ever
+    /// averaged; this holds it from the writing side. Everything but the habit
+    /// sliders is compared with those sliders scrubbed to zero on both copies,
+    /// so the check covers the geometry, the components, the amount, the
+    /// enabled flag, the range refinement, the four local curves and the role —
+    /// and keeps covering them when `HABIT_SLIDERS` grows.
+    ///
+    /// MUTATION THIS KILLS: any write to a mask's geometry, amount or enabled
+    /// flag inside the distillation loop.
+    #[test]
+    fn distillation_never_moves_mask_geometry() {
+        use crate::recipe::{LocalAdjustment, MaskGeometry};
+        let mut ex = vocab_ex(&[]);
+        ex.masks = Some(two_mask_habit());
+        let targets = style_targets(&[&ex, &ex]);
+        assert!(!targets.masks.is_empty(), "the premise: there IS a mask habit to apply");
+        let mut r = EditRecipe {
+            masks: vec![
+                LocalAdjustment {
+                    mask: MaskGeometry::Linear {
+                        zero_x: 0.5,
+                        zero_y: 0.9,
+                        full_x: 0.5,
+                        full_y: 0.1,
+                    },
+                    name: "sky".into(),
+                    amount: 0.75,
+                    exposure_ev: 1.5,
+                    ..Default::default()
+                },
+                LocalAdjustment {
+                    mask: MaskGeometry::Radial {
+                        top: 0.2,
+                        left: 0.2,
+                        bottom: 0.8,
+                        right: 0.8,
+                        feather: 0.5,
+                        roundness: 0.0,
+                        flipped: false,
+                        angle: 0.0,
+                        midpoint: 50.0,
+                        mask_version: 2,
+                    },
+                    amount: 0.5,
+                    shadows: 5.0,
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        let before = r.clone();
+        blend_toward(&mut r, &targets, 1.0);
+        let scrub = |m: &LocalAdjustment| {
+            let mut m = m.clone();
+            for name in crate::mask_habit::HABIT_SLIDERS {
+                if let Some(v) = local_slider_mut(&mut m, name) {
+                    *v = 0.0;
+                }
+            }
+            m
+        };
+        assert_eq!(
+            before.masks.iter().map(scrub).collect::<Vec<_>>(),
+            r.masks.iter().map(scrub).collect::<Vec<_>>(),
+            "nothing but the habit sliders may move"
+        );
+        assert_ne!(before.masks, r.masks, "…and the habit sliders DID move");
+        // The sky habit is exposure -0.6; the subject habit is +0.4. At full
+        // strength each mask lands on the habit of ITS OWN bucket.
+        assert!((r.masks[0].exposure_ev + 0.6).abs() < 1e-4, "{}", r.masks[0].exposure_ev);
+        assert!((r.masks[1].exposure_ev - 0.4).abs() < 1e-4, "{}", r.masks[1].exposure_ev);
+    }
+
+    /// THE DISCLOSURE NAMES WHAT MOVED. The note used to carry a percentage and
+    /// no answer to "toward what?"; it is persisted, re-rendered in three UIs
+    /// and sits beside a derivation it can contradict.
+    ///
+    /// Measured from the two recipes rather than from the target map, so a
+    /// target the proposal already sat on is not claimed as a pull. Masks are
+    /// named by POSITION and never by their `name` field — that is user text
+    /// and can carry a photo's file name.
+    ///
+    /// MUTATION THIS KILLS: reverting the note to the percentage alone.
+    #[test]
+    fn the_distilled_field_list_names_what_moved_and_fits_its_bound() {
+        let mut pre = EditRecipe {
+            masks: vec![crate::recipe::LocalAdjustment {
+                // A sentinel standing in for whatever the user typed into the
+                // mask's name box — which on a real library is very often the
+                // photograph's file name.
+                name: "user-typed-mask-name".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        pre.vibrance = 20.0;
+        pre.hsl.saturation[5] = 10.0;
+        let mut post = pre.clone();
+        post.vibrance = 5.0;
+        post.hsl.saturation[5] = -20.0;
+        post.color_grade.highlight_sat = 25.0;
+        post.masks[0].exposure_ev = -0.6;
+        let note = distilled_fields(&pre, &post);
+        for want in ["vibrance", "hsl.saturation.blue", "color_grade.highlight_sat", "mask 1 exposure"] {
+            assert!(note.contains(want), "{want:?} missing from {note:?}");
+        }
+        assert!(!note.contains("contrast"), "a field that did not move is not claimed: {note}");
+        assert!(
+            !note.contains("user-typed"),
+            "a mask's user text may not reach a persisted note: {note}"
+        );
+        // The bound, on the widest list this can build: every global channel
+        // plus every slider of many masks.
+        let mut wide_pre = EditRecipe {
+            masks: vec![crate::recipe::LocalAdjustment::default(); 40],
+            ..Default::default()
+        };
+        let mut wide_post = wide_pre.clone();
+        for m in wide_post.masks.iter_mut() {
+            for name in crate::mask_habit::HABIT_SLIDERS {
+                if let Some(v) = local_slider_mut(m, name) {
+                    *v = 1.0;
+                }
+            }
+        }
+        wide_pre.hsl.saturation = [1.0; 8];
+        wide_post.hsl.luminance = [1.0; 8];
+        let wide = distilled_fields(&wide_pre, &wide_post);
+        assert!(wide.ends_with(" more"), "the tail must say what was cut: {wide}");
+        assert!(
+            wide.chars().count() <= MAX_DISTILLED_FIELDS_CHARS + 16,
+            "{} chars",
+            wide.chars().count()
+        );
+    }
+
+    /// THE CALIBRATION HARNESS — batch 2's numbers, measured on the real
+    /// library rather than argued from it.
+    ///
+    /// `#[ignore]` and env-gated, on the `AUTOSHOP_FIT_CALIBRATION_DIR`
+    /// precedent and for its reason: the corpus is one photographer's RAWs and
+    /// sidecars, it cannot live in a public repository, and a machine-absolute
+    /// path baked into a test is the mistake that pattern exists to avoid.
+    ///
+    /// `AUTOSHADE_STYLE_CALIBRATION_DIR` holds, under these canonical names:
+    ///
+    /// * `style-index.json` — a built index, for the neighbours' `curve` and
+    ///   `masks` (which only an index build can produce)
+    /// * `neighbours.txt` — the retrieved stems, one per line, in rank order,
+    ///   as a develop's own `STYLE_NEIGHBOURS` disclosure names them
+    /// * `sidecars/<stem>.xmp` — those neighbours' sidecars, re-read HERE
+    ///   through `read_settings`, which is what makes the run answer "what
+    ///   would a REBUILT index do?" without an hour-long rebuild
+    /// * `proposal.recipe.json` — the recipe to distil (a Style-0 develop of
+    ///   the same photograph is the honest stand-in for the proposal)
+    ///
+    /// Run:
+    /// `cargo test --lib -- --ignored --nocapture style_distillation_calibration`
+    ///
+    /// It also CHECKS rather than merely printing: the consistency ratio it
+    /// tabulates is recomputed here, and every row asserts that the ratio and
+    /// the production gate agree about that key. A table that disagreed with
+    /// the shipped `consistent_mean` would be a report about nothing.
+    #[test]
+    #[ignore = "needs AUTOSHADE_STYLE_CALIBRATION_DIR (a private photo library)"]
+    fn style_distillation_calibration() {
+        let Some(dir) = std::env::var_os("AUTOSHADE_STYLE_CALIBRATION_DIR") else {
+            panic!("set AUTOSHADE_STYLE_CALIBRATION_DIR — see this test's doc comment");
+        };
+        let dir = PathBuf::from(dir);
+        let idx = StyleIndex::load(&dir.join("style-index.json")).expect("index");
+        let names: Vec<String> = std::fs::read_to_string(dir.join("neighbours.txt"))
+            .expect("neighbours.txt")
+            .lines()
+            .map(|l| l.trim().to_string())
+            .filter(|l| !l.is_empty())
+            .collect();
+        // Rebuild each neighbour's `settings` from its sidecar through the
+        // PRODUCTION reader, leaving `curve` and `masks` as the index built
+        // them. Nothing else about the exemplar is touched.
+        let rebuilt: Vec<StyleExemplar> = names
+            .iter()
+            .map(|stem| {
+                let mut e = idx
+                    .exemplars
+                    .iter()
+                    .find(|e| e.stem == *stem)
+                    .unwrap_or_else(|| panic!("{stem} is not in the index"))
+                    .clone();
+                let xmp = std::fs::read_to_string(dir.join("sidecars").join(format!("{stem}.xmp")))
+                    .unwrap_or_else(|e| panic!("{stem}.xmp: {e}"));
+                e.settings = read_settings(&xmp);
+                e
+            })
+            .collect();
+        let wide: Vec<&StyleExemplar> = rebuilt.iter().collect();
+        // The same neighbours as a PRE-batch-2 index saw them: the printed
+        // twelve and nothing else.
+        let narrowed: Vec<StyleExemplar> = rebuilt
+            .iter()
+            .map(|e| {
+                let mut e = e.clone();
+                e.settings.retain(|k, _| REF_KEYS.iter().any(|(_, l)| *l == k.as_str()));
+                e
+            })
+            .collect();
+        let narrow: Vec<&StyleExemplar> = narrowed.iter().collect();
+
+        println!("== neighbours: {}", names.join(", "));
+        let targets = style_targets(&wide);
+        // The PRE-batch-2 arm is the twelve flat sliders and nothing else — not
+        // merely a narrowed `settings` map. The curve and the mask habit were
+        // already IN the index before this batch; what they were not was
+        // distillation channels, and an arm that let them pull would flatter
+        // the comparison by crediting the old behaviour with batch 2's own
+        // work.
+        let old_targets =
+            StyleTargets { sliders: style_targets(&narrow).sliders, ..Default::default() };
+
+        // ---- the gate, key by key, cross-checked against the production one
+        let rho = |vals: &[f32]| -> Option<f64> {
+            let n = vals.len() as f64;
+            if n == 0.0 {
+                return None;
+            }
+            let abs: f64 = vals.iter().map(|v| v.abs() as f64).sum::<f64>() / n;
+            (abs > 0.0).then(|| (vals.iter().map(|v| *v as f64).sum::<f64>() / n).abs() / abs)
+        };
+        println!("== consistency gate (kappa = {TARGET_CONSISTENCY})");
+        for f in crate::advisor::catalogue::hsl_expansion() {
+            let vals: Vec<f32> =
+                wide.iter().filter_map(|e| e.settings.get(&f.metric).copied()).collect();
+            let got = targets.hsl[f.axis][f.band];
+            let r = rho(&vals);
+            println!(
+                "  {:<26} vals={:?} rho={} -> {}",
+                f.metric,
+                vals,
+                r.map(|v| format!("{v:.3}")).unwrap_or_else(|| "undefined".into()),
+                got.map(|v| format!("{v:+.3}")).unwrap_or_else(|| "(no target)".into()),
+            );
+            if f.axis != crate::advisor::catalogue::HSL_AXIS_HUE {
+                let want = r.is_some_and(|v| v >= TARGET_CONSISTENCY as f64);
+                assert_eq!(want, got.is_some(), "the table and the gate disagree on {}", f.metric);
+            } else {
+                assert!(got.is_none(), "mixer hue is never distilled: {}", f.metric);
+            }
+        }
+        for (field, _) in crate::advisor::catalogue::COLOR_GRADE_CRS {
+            let label = format!("{COLOR_GRADE_LABEL}{field}");
+            let vals: Vec<f32> =
+                wide.iter().filter_map(|e| e.settings.get(&label).copied()).collect();
+            println!(
+                "  {label:<26} vals={vals:?} -> {}",
+                targets
+                    .grade
+                    .get(field)
+                    .map(|v| format!("{v:+.3}"))
+                    .unwrap_or_else(|| "(no target)".into())
+            );
+        }
+        println!("  curve                      {:?}", targets.curve);
+        for (slot, b) in crate::mask_habit::Bucket::ALL.iter().enumerate() {
+            if let Some(per) = targets.masks.get(&slot) {
+                let named: Vec<String> = crate::mask_habit::HABIT_SLIDERS
+                    .iter()
+                    .zip(per)
+                    .filter_map(|(n, v)| v.map(|v| format!("{n} {v:+.2}")))
+                    .collect();
+                println!("  mask bucket {b:?}: {}", named.join(", "));
+            }
+        }
+
+        // ---- the same photograph at Style 0% and Style 100%, old vs new
+        let proposal: EditRecipe = serde_json::from_str(
+            &std::fs::read_to_string(dir.join("proposal.recipe.json")).expect("proposal"),
+        )
+        .expect("proposal parses");
+        let run = |t: &StyleTargets, pull: f32| {
+            let mut r = proposal.clone();
+            blend_toward(&mut r, t, pull);
+            r.clamp();
+            r
+        };
+        let energy = |r: &EditRecipe| -> (f32, f32, f32) {
+            let mixer: f32 = r.hsl.saturation.iter().chain(&r.hsl.luminance).map(|v| v.abs()).sum();
+            let wheels: f32 = crate::advisor::catalogue::COLOR_GRADE_CRS
+                .iter()
+                .filter(|(f, _)| f.ends_with("_sat") || f.ends_with("_lum"))
+                .filter_map(|(f, _)| {
+                    crate::advisor::catalogue::color_grade_value(&r.color_grade, f)
+                })
+                .map(|v| v.abs())
+                .sum();
+            (r.vibrance + r.saturation, mixer, wheels)
+        };
+        for (label, t) in [("PRE-batch-2 vocabulary", &old_targets), ("batch 2", &targets)] {
+            for pull in [0.0f32, 1.0] {
+                let r = run(t, style_pull(pull));
+                let (flat, mixer, wheels) = energy(&r);
+                println!(
+                    "  [{label}] style {:>3.0}%  vibrance {:+7.2}  saturation {:+7.2}  \
+flat-colour {:+7.2}  mixer|sum| {mixer:7.2}  wheels|sum| {wheels:7.2}  curve pts {}",
+                    pull * 100.0,
+                    r.vibrance,
+                    r.saturation,
+                    flat,
+                    r.tone_curve.len(),
+                );
+                if pull > 0.0 {
+                    println!("    moved: {}", distilled_fields(&proposal, &r));
+                }
+            }
+        }
+        // The property the batch owes, measured rather than asserted in prose —
+        // and it is NOT "colour goes up". That would be a promise about the
+        // photographer's taste, and this corpus refutes it twice over: on one
+        // neighbour set the library's split-tone is gentler than the proposal's
+        // wheels, and on another the whole neighbourhood barely touches the
+        // mixer, so distilling toward it at full strength LOWERS the mixer.
+        // Distilling toward a habit that is quieter is the feature working, and
+        // a harness that asserted otherwise would be measuring a wish.
+        //
+        // What the batch owes is that the colour channels are no longer
+        // one-way. Under the pre-batch-2 vocabulary the mixer and the wheels
+        // cannot move AT ALL — they carry no target — so the only colour that
+        // can move is the flat `vibrance`/`saturation` pair, and whatever it
+        // loses is simply lost. That asymmetry is the defect; the assertions
+        // below pin the premise (the old arm is immovable) and the fix (a
+        // learned colour habit reaches the recipe), and the direction is
+        // printed rather than claimed.
+        let (flat_old, mix_old, wheel_old) = energy(&run(&old_targets, 1.0));
+        let (flat_new, mix_new, wheel_new) = energy(&run(&targets, 1.0));
+        let (flat_0, mix_0, wheel_0) = energy(&proposal);
+        println!(
+            "== net colour  proposal ({flat_0:+.2}, {mix_0:.2}, {wheel_0:.2})  \
+old ({flat_old:+.2}, {mix_old:.2}, {wheel_old:.2})  new ({flat_new:+.2}, {mix_new:.2}, {wheel_new:.2})"
+        );
+        assert_eq!(
+            (mix_old, wheel_old),
+            (mix_0, wheel_0),
+            "the premise: the pre-batch-2 vocabulary cannot move the mixer or the wheels AT ALL"
+        );
+        let (total_old, total_new) =
+            (flat_old.abs() + mix_old + wheel_old, flat_new.abs() + mix_new + wheel_new);
+        println!(
+            "== total colour energy  old {total_old:.2} -> new {total_new:.2}  \
+(mixer {:+.2}, wheels {:+.2})",
+            mix_new - mix_0,
+            wheel_new - wheel_0
+        );
+        let learned_colour =
+            targets.hsl.iter().flatten().any(Option::is_some) || !targets.grade.is_empty();
+        if learned_colour {
+            assert_ne!(
+                (mix_new, wheel_new),
+                (mix_old, wheel_old),
+                "a colour habit the gate accepted must actually reach the recipe"
+            );
+        }
     }
 
     /// THE PROMPT BUDGET. `advisor::REFERENCE_BUDGET_BYTES` is what

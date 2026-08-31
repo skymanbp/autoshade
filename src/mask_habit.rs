@@ -22,10 +22,18 @@
 //! use, a weighted MEAN of eight sliders, and English. The proposer places its
 //! own masks on the frame in front of it.
 //!
-//! Retrieval never reads any of it either — see
-//! `retrieval_and_style_targets_do_not_read_mask_habits`. A habit changes the
-//! WORDS in the reference block and nothing about which neighbours are chosen
-//! or where `style::blend_toward` pulls.
+//! Retrieval never reads any of it — see
+//! `retrieval_does_not_read_mask_habits`. A habit changes nothing about which
+//! neighbours are chosen, which is why it could ship without an index-version
+//! bump.
+//!
+//! What it DOES change is two things: the WORDS in the reference block, and —
+//! since batch 2 — where `style::blend_toward` pulls a mask's SLIDERS. The
+//! amplitudes only. The rule at the top of this file is unchanged and is
+//! enforced from the other side too
+//! (`style::distillation_never_moves_mask_geometry`): no coordinate is
+//! averaged, read or written, and no mask is created, deleted, muted or
+//! re-weighted. The proposer still places every mask itself.
 
 use serde::{Deserialize, Serialize};
 

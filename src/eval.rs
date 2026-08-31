@@ -417,6 +417,24 @@ pub(crate) fn user_curve_shape(xmp: &str) -> Option<(f32, f32)> {
     Some((curve_black_lift(&lut), curve_s_strength(&lut)))
 }
 
+/// The 256-entry LUT of a RECIPE's own master tone curve.
+///
+/// Exposed (batch 2) because the style distillation pulls a proposal's curve
+/// toward the library's curve habit, and it has to measure "before" with the
+/// ruler that measured the library — [`user_curve_shape`] above. An empty
+/// curve is the identity, which `curve_lut` already answers, so there is no
+/// special case here.
+pub(crate) fn recipe_curve_lut(r: &EditRecipe) -> [f32; 256] {
+    curve_lut(&ai_tone_curve_points(r))
+}
+
+/// `(black_lift, s_strength)` off a LUT — the same pair
+/// [`user_curve_shape`] learns from a sidecar, so "the library's habit" and
+/// "this proposal's curve" are quantities on one scale.
+pub(crate) fn curve_shape(lut: &[f32; 256]) -> (f32, f32) {
+    (curve_black_lift(lut), curve_s_strength(lut))
+}
+
 /// Family SUMMARY statistics for one user sidecar — the colour-shaping
 /// aggregates the style index stores beside its flat slider map (R23-1 / B6).
 ///

@@ -2358,6 +2358,13 @@ pub fn hsl_expansion() -> Vec<HslField> {
     out
 }
 
+/// Index of the `hue` axis in [`HSL_AXES`], named so the one policy that
+/// treats it differently from saturation and luminance — `style::style_targets`
+/// ingests the eight hue bands and distils none of them — can say WHICH axis it
+/// means without a bare `0`. Pinned to the table by
+/// `hsl_axis_hue_is_the_first_axis`.
+pub const HSL_AXIS_HUE: usize = 0;
+
 /// One HSL cell by (axis, band) index — the exhaustive-destructure tripwire
 /// for `recipe::Hsl` (a fourth axis stops the build here).
 pub fn hsl_value(h: &Hsl, axis: usize, band: usize) -> Option<f32> {
@@ -2369,6 +2376,41 @@ pub fn hsl_value(h: &Hsl, axis: usize, band: usize) -> Option<f32> {
         _ => return None,
     };
     arr.get(band).copied()
+}
+
+/// The same cell to WRITE — the mutable mirror of [`hsl_value`], destructured
+/// the same way so a fourth axis stops the build in both.
+///
+/// It exists because the style distillation pulls the mixer toward the
+/// photographer's own per-band habit (`style::blend_toward`), and a loop that
+/// reaches a band by `(axis, band)` through this registry is a loop that cannot
+/// carry its own private copy of the axis order.
+pub fn hsl_value_mut(h: &mut Hsl, axis: usize, band: usize) -> Option<&mut f32> {
+    let Hsl { hue, saturation, luminance } = h;
+    let arr = match axis {
+        0 => hue,
+        1 => saturation,
+        2 => luminance,
+        _ => return None,
+    };
+    arr.get_mut(band)
+}
+
+/// The colour-grade SATURATION field that belongs to the same wheel as a
+/// `*_hue` field — derived from [`COLOR_GRADE_CRS`] rather than written down a
+/// second time.
+///
+/// A wheel's hue is an ANGLE and its saturation is how much of that angle is
+/// applied, so the two are one decision: `style::style_targets` will not learn
+/// a tint angle whose intensity it did not also learn, and it weights the
+/// angles by exactly this field (an unsaturated wheel's hue is not a choice,
+/// it is an untouched control).
+pub fn wheel_saturation_of(hue_field: &str) -> Option<&'static str> {
+    let stem = hue_field.strip_suffix("_hue")?;
+    COLOR_GRADE_CRS
+        .iter()
+        .map(|(f, _)| *f)
+        .find(|f| f.strip_suffix("_sat") == Some(stem))
 }
 
 /// The 14 colour-grade fields paired with their ACR attributes. ACR's own
@@ -2430,6 +2472,47 @@ pub fn color_grade_value(cg: &ColorGrade, field: &str) -> Option<f32> {
     })
 }
 
+/// The same wheel field to WRITE — the mutable mirror of
+/// [`color_grade_value`], destructured the same way so a fifth wheel stops the
+/// build in both. Added for the same reason [`hsl_value_mut`] was: the style
+/// distillation reaches a wheel by NAME through this registry rather than
+/// keeping its own copy of the field list.
+pub fn color_grade_value_mut<'a>(cg: &'a mut ColorGrade, field: &str) -> Option<&'a mut f32> {
+    let ColorGrade {
+        shadow_hue,
+        shadow_sat,
+        shadow_lum,
+        midtone_hue,
+        midtone_sat,
+        midtone_lum,
+        highlight_hue,
+        highlight_sat,
+        highlight_lum,
+        global_hue,
+        global_sat,
+        global_lum,
+        blending,
+        balance,
+    } = cg;
+    Some(match field {
+        "shadow_hue" => shadow_hue,
+        "shadow_sat" => shadow_sat,
+        "shadow_lum" => shadow_lum,
+        "midtone_hue" => midtone_hue,
+        "midtone_sat" => midtone_sat,
+        "midtone_lum" => midtone_lum,
+        "highlight_hue" => highlight_hue,
+        "highlight_sat" => highlight_sat,
+        "highlight_lum" => highlight_lum,
+        "global_hue" => global_hue,
+        "global_sat" => global_sat,
+        "global_lum" => global_lum,
+        "blending" => blending,
+        "balance" => balance,
+        _ => return None,
+    })
+}
+
 /// The registry row for a global control name.
 pub fn global_control(name: &str) -> Option<&'static Control> {
     RECIPE_CONTROLS.iter().find(|c| c.name == name)
@@ -2439,6 +2522,73 @@ pub fn global_control(name: &str) -> Option<&'static Control> {
 mod tests {
     use super::*;
     use std::collections::BTreeSet;
+
+    /// `HSL_AXIS_HUE` names an index into `HSL_AXES`, and an index that drifted
+    /// would silently move the one policy that reads it — `style::style_targets`
+    /// ingests the eight hue bands and distils none of them — onto saturation.
+    #[test]
+    fn hsl_axis_hue_is_the_first_axis() {
+        assert_eq!(HSL_AXES[HSL_AXIS_HUE].0, "hue");
+        assert_eq!(HSL_AXES[HSL_AXIS_HUE].1, "HueAdjustment");
+    }
+
+    /// The two mutable mirrors answer for exactly the cells their readers do.
+    /// They are separate `match`es over the same destructure, which is two
+    /// places a new axis or wheel has to be added — so this is the tripwire
+    /// that says they agree TODAY, beside the destructures that stop the build
+    /// tomorrow.
+    #[test]
+    fn the_mutable_accessors_mirror_their_readers() {
+        let mut hsl = Hsl::default();
+        for (axis, _) in HSL_AXES.iter().enumerate() {
+            for band in 0..crate::recipe::HSL_BANDS.len() {
+                assert_eq!(
+                    hsl_value(&hsl, axis, band).is_some(),
+                    hsl_value_mut(&mut hsl, axis, band).is_some(),
+                    "hsl ({axis}, {band})"
+                );
+            }
+        }
+        assert!(hsl_value_mut(&mut hsl, HSL_AXES.len(), 0).is_none(), "no fourth axis");
+        assert!(hsl_value_mut(&mut hsl, 0, crate::recipe::HSL_BANDS.len()).is_none(), "no ninth band");
+        let mut cg = ColorGrade::default();
+        for (field, _) in COLOR_GRADE_CRS {
+            assert_eq!(
+                color_grade_value(&cg, field).is_some(),
+                color_grade_value_mut(&mut cg, field).is_some(),
+                "colour grade {field}"
+            );
+        }
+        assert!(color_grade_value_mut(&mut cg, "not-a-wheel").is_none());
+        // …and writing through the mirror is what the reader then reads.
+        *hsl_value_mut(&mut hsl, 1, 5).unwrap() = 12.0;
+        assert_eq!(hsl_value(&hsl, 1, 5), Some(12.0));
+        *color_grade_value_mut(&mut cg, "shadow_sat").unwrap() = 7.0;
+        assert_eq!(color_grade_value(&cg, "shadow_sat"), Some(7.0));
+    }
+
+    /// Every wheel that has a hue has a saturation, found through the table and
+    /// not through a second list — and nothing else claims one.
+    #[test]
+    fn every_wheel_hue_is_paired_with_its_saturation() {
+        let mut paired = 0;
+        for (field, _) in COLOR_GRADE_CRS {
+            match wheel_saturation_of(field) {
+                Some(sat) => {
+                    paired += 1;
+                    assert!(field.ends_with("_hue"), "{field} is not a hue field");
+                    assert_eq!(sat.strip_suffix("_sat"), field.strip_suffix("_hue"));
+                    assert!(
+                        COLOR_GRADE_CRS.iter().any(|(f, _)| *f == sat),
+                        "{sat} is not a colour-grade field"
+                    );
+                }
+                None => assert!(!field.ends_with("_hue"), "{field} has no saturation"),
+            }
+        }
+        assert_eq!(paired, 4, "four wheels, four hue/saturation pairs");
+    }
+
 
     /// Serialised top-level keys of a value, as a set.
     fn serde_keys(v: &Value) -> BTreeSet<String> {
