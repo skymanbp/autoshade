@@ -569,7 +569,7 @@ minimum footprint. The pre-render gates are shared source/target evidence
 `>= 0.03`,
 `structure_divergence < 0.65`, then cap 2. Attachment reuses the 2048-pixel
 raster, radius-8 guided refinement with `(4/255)^2`, zero frame-regression
-tolerance and the 0.012 rim budget. Stage timings are measured by the external
+tolerance and the 0.012 cross-boundary-step budget. Stage timings are measured by the external
 live harness and recorded in the release report; all proposals and verdicts are
 persisted as rationale disclosures while accepted masks retain ordinary bitmap
 recipe/XMP semantics.
@@ -603,8 +603,11 @@ reading.
 - Both frozen evidence shares must be at least `0.03`; original `D` must be
   below `0.65`; the weighted 95% interval must exclude zero and the child must
   differ from its parent by at least `2/255`.
-- `SPATIAL_FRAME_REGRESSION_TOL = 0.0` and the shared boundary rim ceiling is
-  `0.012`.
+- `SPATIAL_FRAME_REGRESSION_TOL = 0.0` and the shared boundary ceiling is
+  `0.012`, read for these hard 0/255 rasters as a CROSS-BOUNDARY STEP
+  (`ZONE_STEP_OFFSET = 2` px paired samples across the 50% contour,
+  differenced against the render without the correction). Zero measured
+  crossings refuses the correction instead of passing it.
 - Tile rasters use normalized source coordinates with a 2048-pixel long-edge
   cap. JSON is lossless; classic XMP reports the existing named bitmap loss.
 - Guided refinement uses radius `8`, epsilon `(4/255)^2`, a `2 * radius`

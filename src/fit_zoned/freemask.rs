@@ -38,6 +38,7 @@ pub(super) enum FreeMaskWhy {
     ZoneRefused,
     Frame,
     Rim,
+    Unmeasured,
 }
 
 impl FreeMaskWhy {
@@ -53,7 +54,8 @@ impl FreeMaskWhy {
             Self::RasterWrite => "raster-write",
             Self::ZoneRefused => "zone-refused",
             Self::Frame => "frame",
-            Self::Rim => "rim",
+            Self::Rim => "boundary-step",
+            Self::Unmeasured => "boundary-unmeasurable",
         }
     }
 }

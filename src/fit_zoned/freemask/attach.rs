@@ -21,7 +21,7 @@ fn push_refusal(report: &mut FitReport, refusals: &[FreeMaskRefusal]) {
         FreeMaskWhy::Share, FreeMaskWhy::Divergence, FreeMaskWhy::Cap,
         FreeMaskWhy::Footprint, FreeMaskWhy::Mass, FreeMaskWhy::RasterClaim,
         FreeMaskWhy::RasterWrite, FreeMaskWhy::ZoneRefused,
-        FreeMaskWhy::Frame, FreeMaskWhy::Rim,
+        FreeMaskWhy::Frame, FreeMaskWhy::Rim, FreeMaskWhy::Unmeasured,
     ] {
         let numbers = refusals.iter().filter(|r| r.why == why).map(|r| r.n).collect::<Vec<_>>();
         if numbers.is_empty() { continue; }
@@ -143,6 +143,9 @@ pub(in crate::fit_zoned) fn attach_free_masks(
             source: mask_weights(&mask, s_img.width(), s_img.height()),
             target: mask_weights(&mask, t_img.width(), t_img.height()),
         };
+        // The boundary gate reads the mask's own alpha, not the evidence-scoped
+        // estimator weights below; kept before `coverage` is moved.
+        let boundary_geometry = coverage.source.clone();
         let raw_geometry = proposal.mask.as_raw().iter()
             .map(|v| *v as f32 / 255.0).collect::<Vec<_>>();
         let scoped = spatial::scoped_mask_evidence(&target_px, &report.evidence, &raw_geometry);
@@ -178,7 +181,10 @@ pub(in crate::fit_zoned) fn attach_free_masks(
         let boundary = spatial::enforce_bitmap_boundary(
             &s_img, &target_px, report, first_mask,
             spatial::BitmapBoundaryInput {
-                weights: &attachment.source_weights,
+                ruler: spatial::BoundaryRuler::CrossBoundaryStep {
+                    geometry: &boundary_geometry,
+                    reference: &before_px,
+                },
                 initial_px: accepted.rendered,
                 frame_before,
             },
@@ -193,6 +199,7 @@ pub(in crate::fit_zoned) fn attach_free_masks(
                 let why = match refusal.why {
                     spatial::BitmapBoundaryWhy::Frame => FreeMaskWhy::Frame,
                     spatial::BitmapBoundaryWhy::Rim => FreeMaskWhy::Rim,
+                    spatial::BitmapBoundaryWhy::Unmeasured => FreeMaskWhy::Unmeasured,
                 };
                 push_refusal(report, &[FreeMaskRefusal { n: number, why }]);
                 disclosed += 1;
@@ -206,7 +213,7 @@ pub(in crate::fit_zoned) fn attach_free_masks(
             crate::rationale::Note::new(crate::rationale::keys::FIELD_MASK_ATTACHED, vec![
                 ("n", number.to_string()), ("err_before", format!("{frame_before:.6}")),
                 ("err_after", format!("{frame_after:.6}")),
-                ("rim", format!("{:.5}", boundary.reading.rim)),
+                ("step", format!("{:.5}", boundary.reading.rim)),
             ]),
         );
         disclosed += 1;

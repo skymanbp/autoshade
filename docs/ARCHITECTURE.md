@@ -1928,7 +1928,18 @@ gate that reads the signed luma bow only in the mask's 5%-95% transition band
 against settled sky and land on the same rows/columns, then applies the largest
 shared, direction-preserving differential shrink `k` inside its calibrated
 budget (dropping the zones with a named note only when even `k=0`, no local
-correction, fails). A Full-zone correction then uses the two-arm gate
+correction, fails). That ruler needs a transition band to read, so it serves
+the FEATHERED segmentation masks only. Every hard-edged raster — spatial tiles
+and free masks, written 0/255 — is measured instead by the CROSS-BOUNDARY STEP:
+paired samples 1.5 px either side of the mask's 50% contour, `(inside minus
+outside)` on the corrected render minus the same difference on the render
+WITHOUT the correction, ranked by magnitude at the same 90th percentile and
+held to the same `0.012` budget. Differencing against the uncorrected render is
+what makes a subject edge lying under the mask border cancel, so only the
+discontinuity the correction itself introduced is budgeted. For that family a
+reading of ZERO measured crossings is a refusal, never a pass — until 2026-08-30
+the rim ruler returned `0.000` from an empty transition band for every hard
+raster ever gated, and the gate read that as comfortably inside budget. A Full-zone correction then uses the two-arm gate
 (v0.26.1): halve the zone error, or land it at/below an absolute matched
 floor (0.02 of linear-mean error, brightness within a quarter stop — the
 floor lives in scale-dependent linear light, so the EV companion rides
@@ -2185,8 +2196,8 @@ scoped tile evidence by `TileId` is registered as a performance follow-up; it
 is not implemented here.
 
 Each leaf reuses `attach_one_zone` through `ZoneAttachment { min_share: 0.03,
-frame_regression_tol: 0.0 }`, then passes its own `0.012` boundary-rim and
-zero-regression composed-frame gates. Its deterministic normalized-source
+frame_regression_tol: 0.0 }`, then passes its own `0.012` cross-boundary-step
+and zero-regression composed-frame gates. Its deterministic normalized-source
 raster is capped at a 2048-pixel long edge and persists as an existing
 `MaskGeometry::Bitmap`, `MaskRole::Custom` adjustment. Recipe schema era 1 is
 unchanged. Classic XMP deliberately skips the bitmap and returns the existing
@@ -2201,8 +2212,8 @@ still exceeds `SPATIAL_RESIDUAL_MIN` and whose accepted-tile alpha is below
 each must clear the shared 3% source/target evidence gate and
 `structure_divergence < DIVERGENCE_ZONE`, with the two-proposal cap disclosing
 all capped or otherwise refused components. Accepted components use the tile
-upsample/refinement arguments and the exact shared frame/rim gate (`0.0` frame
-regression, `0.012` rim). The B3 battery covers proposal, attachment,
+upsample/refinement arguments and the exact shared frame/boundary gate (`0.0`
+frame regression, `0.012` cross-boundary step). The B3 battery covers proposal, attachment,
 disclosure, connectivity, cap, layer-off identity, ceiling stop, determinism,
 bitmap recipe/XMP losslessness, neutral corpus disclosure, and p36 honest-
 refusal checks. No live arm attached a free mask: downstream candidates were
