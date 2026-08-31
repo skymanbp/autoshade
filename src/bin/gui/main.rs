@@ -12,7 +12,7 @@
 //! Build/run: `cargo run --release --features gui --bin autoshade-gui`
 
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -140,25 +140,92 @@ fn message_box(text: &str) {
 /// the prefs file from THIS string: `%APPDATA%\<key>\data\app.ron` on Windows
 /// (eframe 0.29 glow_integration.rs:200 -> file_storage.rs:37).
 ///
-/// Windows keeps the pre-rename spelling. Renaming it would silently abandon
-/// every existing user's window geometry, last library, view mode, export
-/// options and theme, with nothing to say so — the same class of loss the
-/// develop-store adoption exists to prevent, and the same reason the installer
-/// keeps its AppId. Moving those prefs is a follow-up with its own migration;
-/// renaming the key on its own is only a reset.
-///
-/// macOS is the exception, and only because it has nothing to lose: this is its
-/// first release, so there are no prefs to abandon — while KEEPING the old
-/// spelling there would cost something real. eframe derives
-/// `Library/Application Support/<key>/data/app.ron`, so "Autoshop" would put a
-/// folder of that name beside the develop store: the very name
-/// `store::ADOPT_PRE_RENAME` refuses to touch, and on case-insensitive APFS
-/// indistinguishable from the pre-rename store directory. One name, chosen
-/// once, before any Mac user has either.
-#[cfg(target_os = "macos")]
+/// One spelling everywhere since the C2 ruling (2026-08-31: migrate, do not
+/// accept the old name). Renaming the key ALONE would silently abandon every
+/// existing user's window geometry, last library, view mode, export options
+/// and theme — so [`adopt_pre_rename_prefs`] moves the pre-rename directory
+/// first, on the develop store's own rename-or-fall-back doctrine
+/// (`store::adopt_pre_rename_root`).
 const STORAGE_KEY: &str = "AutoShade";
-#[cfg(not(target_os = "macos"))]
-const STORAGE_KEY: &str = "Autoshop";
+/// The spelling every pre-rename install wrote its prefs under; read (and
+/// renamed away) by [`adopt_pre_rename_prefs`], never written again.
+const LEGACY_STORAGE_KEY: &str = "Autoshop";
+/// macOS opts out for `store::ADOPT_PRE_RENAME`'s reason: `Application
+/// Support` holds every program's folders under DISPLAY names, no Mac ever ran
+/// the pre-rename spelling, and on case-insensitive APFS an adoption could
+/// only rename a stranger's directory.
+const ADOPT_PRE_RENAME_PREFS: bool = !cfg!(target_os = "macos");
+
+/// Outcome of [`adopt_prefs_between`] — `store::RootAdoption`'s shape, for the
+/// prefs directory.
+#[derive(Debug, PartialEq, Eq)]
+enum PrefsAdoption {
+    /// No pre-rename directory (or the platform opts out): nothing to move.
+    Nothing,
+    /// Both spellings exist: the new one wins and the old is not touched.
+    KeptBoth,
+    /// The pre-rename directory was renamed to the new spelling, prefs inside.
+    Migrated,
+    /// The rename failed. The caller keeps the LEGACY key for this session —
+    /// the prefs keep working, nothing is reset — and the next launch retries.
+    FellBack,
+}
+
+/// The migration core, on explicit paths so the battery drives it with temp
+/// directories: rename `legacy` to `current` when only `legacy` exists.
+fn adopt_prefs_between(current: &Path, legacy: &Path, adopt: bool) -> PrefsAdoption {
+    if !adopt || !legacy.is_dir() {
+        return PrefsAdoption::Nothing;
+    }
+    if current.exists() {
+        return PrefsAdoption::KeptBoth;
+    }
+    match std::fs::rename(legacy, current) {
+        Ok(()) => PrefsAdoption::Migrated,
+        Err(_) => PrefsAdoption::FellBack,
+    }
+}
+
+/// Resolve the storage key for THIS launch, adopting the pre-rename prefs
+/// directory on the way. Sandboxed runs (`AUTOSHADE_DATA_DIR`) never touch the
+/// real per-user directories — `persistence_path` overrides storage wholesale,
+/// so there is nothing to migrate and nothing real to disturb.
+fn adopt_pre_rename_prefs() -> &'static str {
+    if autoshade::config::live_env_os("AUTOSHADE_DATA_DIR").is_some() {
+        return STORAGE_KEY;
+    }
+    let (Some(current), Some(legacy)) =
+        (eframe::storage_dir(STORAGE_KEY), eframe::storage_dir(LEGACY_STORAGE_KEY))
+    else {
+        return STORAGE_KEY;
+    };
+    match adopt_prefs_between(&current, &legacy, ADOPT_PRE_RENAME_PREFS) {
+        PrefsAdoption::Nothing => STORAGE_KEY,
+        PrefsAdoption::Migrated => {
+            eprintln!(
+                "note: your window/library preferences moved from {LEGACY_STORAGE_KEY} to \
+                 {STORAGE_KEY} (the app was renamed). Nothing was copied or duplicated."
+            );
+            STORAGE_KEY
+        }
+        PrefsAdoption::KeptBoth => {
+            eprintln!(
+                "note: a pre-rename {LEGACY_STORAGE_KEY} preferences folder sits beside the \
+                 {STORAGE_KEY} one this version uses. Nothing was moved or merged — \
+                 {STORAGE_KEY} is in use."
+            );
+            STORAGE_KEY
+        }
+        PrefsAdoption::FellBack => {
+            eprintln!(
+                "warning: could not move your preferences from {LEGACY_STORAGE_KEY} to \
+                 {STORAGE_KEY}. Still using the old folder, so nothing is lost; the next \
+                 launch tries again."
+            );
+            LEGACY_STORAGE_KEY
+        }
+    }
+}
 
 fn app_icon() -> egui::IconData {
     let img = image::load_from_memory(include_bytes!("../../../assets/icon_256.png"))
@@ -196,9 +263,10 @@ fn main() -> eframe::Result<()> {
         ..Default::default()
     };
     eframe::run_native(
-        // See [`STORAGE_KEY`]: a storage key, not a display name, and why it
-        // keeps the pre-rename spelling everywhere it has users.
-        STORAGE_KEY,
+        // See [`STORAGE_KEY`]: a storage key, not a display name. The
+        // adoption resolves which spelling answers THIS launch — the new one,
+        // unless a failed migration keeps the legacy directory in use.
+        adopt_pre_rename_prefs(),
         opts,
         Box::new(|cc| {
             install_fonts(&cc.egui_ctx); // embedded symbol subsets + system CJK

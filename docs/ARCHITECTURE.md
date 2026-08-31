@@ -92,9 +92,12 @@
 > experimental generative edits, an optional pixel-**heal** retouch mode (§4.7)
 > the deterministic look **reverse-fit** (§4.8) and the local server's refusal
 > model (§4.9).
-> 1254 library + 22 CLI + 157 GUI + 2+2 contract tests are enumerated in the GUI
-> build; the library result is 1242 pass + 12 `#[ignore]`d forensic probes
-> (counts refreshed 2026-08-31: R30 batch 3 added 9 named tests against
+> 1255 library + 22 CLI + 159 GUI + 2+2 contract tests are enumerated in the GUI
+> build; the library result is 1243 pass + 12 `#[ignore]`d forensic probes
+> (counts refreshed 2026-08-31: the C2 storage-name migration added 3 named
+> tests — 1 `serve` for the export-registry adoption, 2 GUI for the prefs
+> adoption and the per-platform key decision — so library 1254→1255 and
+> GUI 157→159; before it, R30 batch 3 added 9 named tests against
 > `2a415a5` — 5 `advisor` for the colour guardrail pair, the templated
 > neutral hatch, the numeric curve/mask freedoms, the three-band snapshot
 > and the judge's palette item, 1 `advisor::mod` for the verifier checklist,
@@ -2540,10 +2543,18 @@ test that asserts the arms it cannot execute still EXIST in the source —
 deleting the macOS arm is otherwise a silent no-op on the machine the battery
 runs on.
 
-The GUI's own preferences (window size, theme, language) keep the eframe
-storage key `Autoshop` on Windows — it names an existing roaming-profile
-folder, and changing it would silently reset every current user's window — and
-use `AutoShade` on macOS, where there is nothing to preserve.
+The GUI's own preferences (window size, theme, language) use the eframe
+storage key `AutoShade` on every platform. The pre-rename `Autoshop`
+roaming-profile folder is adopted at launch on the store's own doctrine
+(rename wholesale; on failure keep the LEGACY key for the session so nothing
+resets, and retry next launch; both-exist keeps both and uses the new one) —
+changing the key alone would have silently reset every current user's window.
+The same C2 ruling moved the per-output export registry from
+`.autoshop-export-registry` to `.autoshade-export-registry`: the directory is
+renamed wholesale on first use, so every claimed deliverable suffix survives,
+and a failed rename falls back to the legacy namespace rather than
+reassigning filenames. macOS opts out of the prefs adoption for the store's
+reason (no Mac ever ran the old name; case-insensitive APFS).
 
 `scripts/build_app_bundle.sh` assembles the bundle: both binaries, the
 sidecars, an `.icns` rendered from the shipped PNG, a hand-written

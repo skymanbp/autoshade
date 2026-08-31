@@ -7879,3 +7879,51 @@
         assert!(!decoded.use_looks);
         assert!((decoded.direction_adherence - 0.91).abs() < 1e-6);
     }
+
+    /// C2 migration (user ruling 2026-08-31: migrate, do not accept the old
+    /// name): the eframe prefs directory follows the rename. The core runs on
+    /// explicit paths — the resolver half only names the two directories via
+    /// `eframe::storage_dir` and is exercised by every real launch.
+    #[test]
+    fn pre_rename_prefs_are_adopted_renamed_kept_or_fallen_back() {
+        let base = std::env::temp_dir()
+            .join(format!("autoshade-c2-prefs-adopt-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        let legacy = base.join("Autoshop");
+        let current = base.join("AutoShade");
+        // Nothing to adopt.
+        assert_eq!(adopt_prefs_between(&current, &legacy, true), PrefsAdoption::Nothing);
+        // The real thing: the directory moves wholesale, prefs file included.
+        std::fs::create_dir_all(legacy.join("data")).unwrap();
+        std::fs::write(legacy.join("data").join("app.ron"), "(prefs)").unwrap();
+        assert_eq!(adopt_prefs_between(&current, &legacy, true), PrefsAdoption::Migrated);
+        assert!(current.join("data").join("app.ron").is_file(), "the prefs came along");
+        assert!(!legacy.exists(), "moved, not copied");
+        // Both spellings present: the new one wins and the old is untouched.
+        std::fs::create_dir_all(&legacy).unwrap();
+        assert_eq!(adopt_prefs_between(&current, &legacy, true), PrefsAdoption::KeptBoth);
+        assert!(legacy.exists(), "kept, not merged or deleted");
+        // A refused rename (destination parent missing) falls back to the
+        // legacy key for the session instead of resetting anyone's prefs.
+        let orphan = base.join("missing-parent").join("AutoShade");
+        std::fs::remove_dir_all(&current).unwrap();
+        assert_eq!(adopt_prefs_between(&orphan, &legacy, true), PrefsAdoption::FellBack);
+        assert!(legacy.exists(), "nothing lost on the failed arm");
+        // The macOS opt-out arm: adopt=false answers Nothing even with a
+        // legacy directory present.
+        assert_eq!(adopt_prefs_between(&current, &legacy, false), PrefsAdoption::Nothing);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// The key pair and the platform gate are one decision (the shape of
+    /// store.rs's per-platform test): one spelling everywhere, adoption off
+    /// only where `Application Support` could hold a stranger's directory.
+    #[test]
+    fn the_storage_key_and_its_adoption_are_one_decision_per_platform() {
+        assert_eq!(
+            (STORAGE_KEY, LEGACY_STORAGE_KEY, ADOPT_PRE_RENAME_PREFS),
+            ("AutoShade", "Autoshop", !cfg!(target_os = "macos")),
+            "the eframe key, the adopted spelling, and the macOS opt-out"
+        );
+    }

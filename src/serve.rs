@@ -2048,17 +2048,50 @@ fn export_slot_path(
     out_dir.join(format!("{named_stem}.{kind}.{ext}"))
 }
 
-/// The registry directory's name, kept at its PRE-RENAME spelling.
+/// The registry directory's name — the post-rename spelling, with the
+/// pre-rename namespace ADOPTED rather than abandoned (C2 ruling 2026-08-31:
+/// migrate, do not accept the old name).
 ///
 /// This is an on-disk identity namespace, not a label: it is what keeps one
 /// photo exporting to the same deliverable filename run after run, and the
 /// claim below is the only thing that stops two server processes assigning one
-/// suffix to two photos. Renaming the directory would abandon every existing
-/// claim and start reassigning suffixes from 1 -- "a re-key would silently
-/// change deliverable filenames", which is the exact harm this registry
-/// exists to prevent. Same call as the installer's AppId. Moving it wants a
-/// migration of its own, not a rename.
-const EXPORT_REGISTRY_DIR: &str = ".autoshop-export-registry";
+/// suffix to two photos. A blanket re-key would abandon every existing claim
+/// and start reassigning suffixes from 1 — "a re-key would silently change
+/// deliverable filenames", the exact harm this registry exists to prevent —
+/// so [`adopted_export_registry_root`] MOVES the old directory wholesale:
+/// every claim file comes along byte-for-byte under the same group key.
+const EXPORT_REGISTRY_DIR: &str = ".autoshade-export-registry";
+/// What every pre-rename build called it; read (and renamed away) on first
+/// use, never created again.
+const LEGACY_EXPORT_REGISTRY_DIR: &str = ".autoshop-export-registry";
+
+/// Where the registry lives under `out_dir`, adopting a pre-rename directory
+/// when there is one. The rename is atomic: a sibling process racing this
+/// either wins (this call then uses the directory it produced) or loses (its
+/// claims were moved wholesale and still match). If the rename fails and the
+/// new directory still does not exist, the LEGACY namespace answers this call
+/// — existing claims outrank the new spelling — and the next call retries.
+fn adopted_export_registry_root(out_dir: &Path) -> PathBuf {
+    let current = out_dir.join(EXPORT_REGISTRY_DIR);
+    let legacy = out_dir.join(LEGACY_EXPORT_REGISTRY_DIR);
+    if current.exists() || !legacy.is_dir() {
+        return current;
+    }
+    match std::fs::rename(&legacy, &current) {
+        Ok(()) => {
+            // Self-limiting disclosure: after the move the legacy directory
+            // is gone, so this line prints once per output directory ever.
+            eprintln!(
+                "note: the export registry moved from {LEGACY_EXPORT_REGISTRY_DIR} to \
+                 {EXPORT_REGISTRY_DIR} (the app was renamed); every claimed deliverable \
+                 filename came with it."
+            );
+            current
+        }
+        Err(_) if current.exists() => current,
+        Err(_) => legacy,
+    }
+}
 
 /// Assign one persistent output slot to this lexical `photo_key`. Registry
 /// entries are atomically claimed, so parallel server processes cannot assign
@@ -2072,8 +2105,7 @@ fn registered_export_out(
     let stem = pipeline::stem(raw);
     let registry_stem =
         if cfg!(windows) { stem.to_ascii_lowercase() } else { stem.to_string() };
-    let group = out_dir
-        .join(EXPORT_REGISTRY_DIR)
+    let group = adopted_export_registry_root(out_dir)
         .join(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(registry_stem.as_bytes()));
     std::fs::create_dir_all(&group)
         .with_context(|| format!("create export registry {}", group.display()))?;
@@ -3472,12 +3504,13 @@ mod tests {
             (crate::store::photo_key(&via_alias), crate::store::photo_key_lexical(&via_alias));
         assert_ne!(ck, lk, "premise: the two keys differ through the junction");
 
-        // The registry namespace is on-disk identity: a blanket rename that
-        // moved it would abandon every existing claim and start reassigning
-        // deliverable suffixes from 1.
+        // The registry namespace is on-disk identity: the C2 migration MOVES
+        // it (abandoning it would reassign deliverable suffixes from 1), and
+        // the adoption reads the exact spelling users already have on disk.
         assert_eq!(
-            EXPORT_REGISTRY_DIR, ".autoshop-export-registry",
-            "the export registry namespace must keep the spelling users already have on disk"
+            (EXPORT_REGISTRY_DIR, LEGACY_EXPORT_REGISTRY_DIR),
+            (".autoshade-export-registry", ".autoshop-export-registry"),
+            "the post-rename namespace and the adopted pre-rename spelling"
         );
         let out_dir = base.join("out");
         std::fs::create_dir_all(&out_dir).unwrap();
@@ -3499,6 +3532,49 @@ mod tests {
         );
         assert!(!group.join("2.owner").exists(), "no fresh claim was minted");
 
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// C2 migration: a registry claimed under the PRE-RENAME spelling keeps
+    /// answering with the same deliverable slots — the adoption renames the
+    /// directory wholesale, so the claim files never change and the old
+    /// namespace is gone afterwards, not copied.
+    #[test]
+    fn a_pre_rename_export_registry_is_adopted_with_its_claims() {
+        let base = std::env::temp_dir()
+            .join(format!("autoshade-c2-registry-adopt-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let out_dir = base.join("out");
+        std::fs::create_dir_all(&out_dir).unwrap();
+        let photo = base.join("photo.arw");
+        std::fs::write(&photo, b"raw").unwrap();
+        let stem = pipeline::stem(&photo);
+        let registry_stem =
+            if cfg!(windows) { stem.to_ascii_lowercase() } else { stem.to_string() };
+        let encoded =
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(registry_stem.as_bytes());
+        // An older build claimed slots 1 and 2, this photo owning slot 2 —
+        // the suffix that proves adoption (a fresh registry would answer 1).
+        let old_group = out_dir.join(LEGACY_EXPORT_REGISTRY_DIR).join(&encoded);
+        std::fs::create_dir_all(&old_group).unwrap();
+        let key = crate::store::photo_key(&photo);
+        std::fs::write(old_group.join("1.owner"), "someone-else\nbreadcrumb\n").unwrap();
+        std::fs::write(old_group.join("2.owner"), format!("{key}\nbreadcrumb\n")).unwrap();
+
+        let slot = registered_export_out(&photo, "developed", "jpg", &out_dir).unwrap();
+        assert_eq!(
+            slot,
+            export_slot_path(&out_dir, stem, 2, "developed", "jpg"),
+            "the pre-rename claim answers, at its pre-rename suffix"
+        );
+        assert!(
+            out_dir.join(EXPORT_REGISTRY_DIR).join(&encoded).join("2.owner").is_file(),
+            "the claims moved under the new spelling"
+        );
+        assert!(
+            !out_dir.join(LEGACY_EXPORT_REGISTRY_DIR).exists(),
+            "the old namespace is gone, not copied"
+        );
         let _ = std::fs::remove_dir_all(&base);
     }
 
