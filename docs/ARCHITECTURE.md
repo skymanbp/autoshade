@@ -1,4 +1,4 @@
-# Autoshop — Architecture
+# AutoShade — Architecture
 
 > Status: **implemented** (v1.1.0 — the layered reverse-fit release). The reverse-fit's
 > in-range estimator is now a PAIRED ROBUST REGRESSION (2026-08-26): on
@@ -85,7 +85,7 @@
 > describe exactly what the user sees (pinned to 1e-6 by a unit test)).
 > The full decode →
 > advise → verify → render
-> pipeline ships across three front ends — a native desktop GUI (`autoshop-gui`,
+> pipeline ships across three front ends — a native desktop GUI (`autoshade-gui`,
 > egui/eframe, which links this library in-process), the local web UI (`serve`),
 > and the CLI — plus AI denoise (SCUNet sidecar), the PNG/TIFF
 > baked-source mode, style retrieval, XMP sidecars (global + local masks),
@@ -148,9 +148,9 @@
 > does not include them. The F1 release reproof adds +22 default test names
 > and +23 GUI names with no removals or status changes against the B3
 > transcript `target/b3-main/gates-final.txt`.
-> `AUTOSHOP_LR_PROBE_FIXTURES` (16 real Lightroom radial sidecars, byte
-> round-trip), `AUTOSHOP_MB_FIXTURES` (the 7-file M-B forensic set — 42 of its
-> 42 corrections imported, 0 refused) and, since R27, `AUTOSHOP_RAW_ZOO` (the
+> `AUTOSHADE_LR_PROBE_FIXTURES` (16 real Lightroom radial sidecars, byte
+> round-trip), `AUTOSHADE_MB_FIXTURES` (the 7-file M-B forensic set — 42 of its
+> 42 corrections imported, 0 refused) and, since R27, `AUTOSHADE_RAW_ZOO` (the
 > CC0 nine-camera zoo, one RAW per format —
 > `every_make_in_the_raw_zoo_decodes_and_agrees_with_itself` in
 > [`src/decode.rs`](../src/decode.rs), 9/9 at the last release). Every release
@@ -208,7 +208,7 @@
 > v0.20.0 added the first RUNTIME end-to-end pass (real CLI processes over a
 > real 61 MP ARW, a live `serve` hit with 25 HTTP assertions, the ambient
 > `.env`/settings guards exercised as real processes against a recording mock
-> endpoint, all sandboxed via `AUTOSHOP_DATA_DIR`); v0.21.0 extended it to the
+> endpoint, all sandboxed via `AUTOSHADE_DATA_DIR`); v0.21.0 extended it to the
 > paid and sidecar paths — batch/eval/heal live, the whole serve API surface,
 > and real SCUNet GPU inference. v0.22.0 (user-feedback round) persisted the
 > GUI's variant strip (`variants.json` — fixes the quit-dialog livelock and
@@ -263,7 +263,7 @@
 >   warnings fire are all derived from that table.
 >
 >   **A child process's environment is the one thing NOT derived from it**, and
->   that distinction is the point. `Trust` classifies Autoshop's own settings —
+>   that distinction is the point. `Trust` classifies AutoShade's own settings —
 >   a CLOSED set, where "not in the table" means "not a setting of ours", so
 >   defaulting an unlisted name to `Preference` is safe. A child's environment
 >   is an OPEN set, where "not in the table" includes every loader and
@@ -277,7 +277,7 @@
 >   names that select COMPUTE BEHAVIOUR — no path, no endpoint, no credential,
 >   nothing that loads code — which deliberately excludes the cache knobs
 >   (`HF_HOME`, `TORCH_HOME`: a redirected cache is a poisoned-model path, the
->   same reason `AUTOSHOP_DENOISE_CACHE` is `Destination`) and the proxy
+>   same reason `AUTOSHADE_DENOISE_CACHE` is `Destination`) and the proxy
 >   variables (a proxy decides where bytes go). The reach this costs is small
 >   and recoverable: a child INHERITS the parent's environment — nothing calls
 >   `env_clear` — so a user's own `HF_HOME` or `HTTPS_PROXY` still arrives
@@ -287,26 +287,26 @@
 >   It replaced three hand-kept lists that had provably drifted: the guard's
 >   own test carried a copied 14-name array while the constant had grown to
 >   17, and `Config::load` read that array BY INDEX (`pre(11)` meant
->   `AUTOSHOP_OPENAI_MODEL`), so adding or removing one name silently
+>   `AUTOSHADE_OPENAI_MODEL`), so adding or removing one name silently
 >   repointed unrelated config fields at the wrong variable. The `Destination`
->   half is the one that matters most: `AUTOSHOP_CLAUDE_BIN` and
->   `AUTOSHOP_PYTHON` reach `Command::new` verbatim and the script variables
+>   half is the one that matters most: `AUTOSHADE_CLAUDE_BIN` and
+>   `AUTOSHADE_PYTHON` reach `Command::new` verbatim and the script variables
 >   become that command's argv, so guarding only the base URLs left the
 >   strictly worse outcome open on the same file. `ANTHROPIC_API_KEY` /
 >   `_AUTH_TOKEN` / `_BASE_URL` are `Destination` too — for the `claude` child
 >   the credential IS the routing decision.
 >
->   Resolution is per FIELD, so a planted `autoshop.local.json` carrying only
+>   Resolution is per FIELD, so a planted `autoshade.local.json` carrying only
 >   `image_base_url` used to redirect the endpoint while the real key still
 >   came from the environment — the filesystem twin of the cross-origin hole
->   §4.9 describes, and it needed nothing but running Autoshop inside an
+>   §4.9 describes, and it needed nothing but running AutoShade inside an
 >   extracted archive. Four routes to that outcome are closed: the read path
 >   (v0.18.0), the settings-SAVE path — which read-merge-wrote ambient values
 >   into the trusted central file, where nothing strips them again — `.env`,
 >   which `dotenvy` searches for from the working directory upward, and the
 >   STORE ROOT itself (v0.23.2): the per-user directory used to be
 >   `%LOCALAPPDATA%` on every platform, a variable Unix does not set, so every
->   Linux/macOS build fell through to `/tmp/autoshop` and granted the settings
+>   Linux/macOS build fell through to `/tmp/autoshade` and granted the settings
 >   file found there full central authority. Each platform now names its own
 >   per-account directory (`$XDG_DATA_HOME`, `$HOME/.local/share`), and a
 >   shared-temp fallback is LABELLED (`store::RootTrust::SharedFallback`) so
@@ -314,7 +314,7 @@
 >
 >   A `.env` keeps `Secret` on purpose — it is where this project's own key
 >   lives, a documented contract — which is also why a `.env` picking
->   `AUTOSHOP_ANALYSIS_PROVIDER` is not an escalation: supplying
+>   `AUTOSHADE_ANALYSIS_PROVIDER` is not an escalation: supplying
 >   `OPENAI_API_KEY` already routes the image proposer, and that call carries
 >   the PHOTO.
 > * **A key that cannot ride an HTTP header is refused at the boundary**
@@ -333,7 +333,7 @@
 >   neighbouring `.xmp`, or a foreign ratings/keywords file, which is now
 >   spliced into rather than regenerated over (`xmp::insert_crs_description`).
 >   A sidecar too large to read is itself disclosed: silently falling back to
->   Autoshop's own earlier projection made a REAL loss produce no note at all.
+>   AutoShade's own earlier projection made a REAL loss produce no note at all.
 >
 > Confirmed by the user (2026-06-25): Sony `.ARW`; output = XMP sidecar **and**
 > rendered file (XMP-first); two AI roles behind one unified provider framework —
@@ -726,11 +726,11 @@ trait Advisor {                      // one trait, many providers
 // verify:  ClaudeProvider (claude CLI -p OAuth) |  OpenAiVerifier (HTTP chat, OpenAI-compatible)
 ```
 
-Provider/model/key selection lives in `autoshop.local.json` (written by the
+Provider/model/key selection lives in `autoshade.local.json` (written by the
 Settings panel) and/or `.env` — both gitignored; the local file overrides env.
 That file lives in the per-user store root, not beside the checkout, so settings
 do not depend on which directory the app was launched from (a cwd-relative
-`autoshop.local.json` is still read as a legacy fallback).
+`autoshade.local.json` is still read as a legacy fallback).
 The OAuth analysis path reuses Claude Code OAuth — **no API key needed**; the
 image path and the API analysis path each need an OpenAI-compatible key.
 
@@ -745,7 +745,7 @@ image path and the API analysis path each need an OpenAI-compatible key.
 | M2 | Deterministic render engine | `image`, custom tone/colour/WB/clarity/NR/sharpen ops | **done** |
 | M2 | XMP sidecar writer (ACR `crs:`, global + local masks) | hand-rolled XML | **done** |
 | M3 | `auto` end-to-end + batch | batch fixes its work list up front, then runs it through a bounded pool — `--jobs N` since R27, default 3 for `batch` and 1 for `eval` (their pre-R27 concurrency), capped by the memory budget in [`src/jobs.rs`](../src/jobs.rs) and index-ordered on output; since v0.34.0 that budget is per-FILE where the header is free to read (`jobs::survey_peak_mb` — a native-resolution 16-bit TIFF from LR's "Edit in…" can need more than the corpus constant on its own, and says so before the run starts); "pending" = no develop in the store (recipe.json or `<stem>.xmp`, central or legacy) | **done** |
-| M4 | Style retrieval + eval harness (your edits as ground truth) | k-NN over EXIF+histogram, plus an optional SigLIP 2 cosine term (`AUTOSHOP_STYLE_EMBED`, off by default); per-field MAE/bias | **done** |
+| M4 | Style retrieval + eval harness (your edits as ground truth) | k-NN over EXIF+histogram, plus an optional SigLIP 2 cosine term (`AUTOSHADE_STYLE_EMBED`, off by default); per-field MAE/bias | **done** |
 | M5 | Local web UI | `tiny_http` + vanilla JS (gallery, live before/after) | **done** |
 | V2 | AI denoise (high-ISO/astro) | Python sidecar → **SCUNet** on GPU, called from Rust | **done** |
 | V2 | Baked-source mode (edit exported PNG/TIFF) | extension dispatch; develop runs on loaded pixels | **done** |
@@ -843,11 +843,11 @@ with that reason on the button rather than turning the canvas out from under
 it.
 
 **And WHERE the frame starts comes from the DefaultCrop rectangle, not from the
-sensor corner (v0.32.0).** Block registration of eight Autoshop renders against
+sensor corner (v0.32.0).** Block registration of eight AutoShade renders against
 their Lightroom exports put every one of them **(+31 ± 6, +20 ± 1)**
 full-resolution pixels off, a pure translation with no scale component. The
 ARWs carry `DefaultCropOrigin = (32, 20)`, `DefaultCropSize = (9504, 6336)`
-inside a `9600 × 6376` raw frame: Autoshop emitted the right SIZE from the
+inside a `9600 × 6376` raw frame: AutoShade emitted the right SIZE from the
 wrong ORIGIN, so recipe coordinates and Lightroom coordinates disagreed by
 0.34 % of the width at the frame edge. Two facts in the dependency compose to
 produce it, neither wrong on its own — rawler builds the ARW's `active_area`
@@ -1085,10 +1085,10 @@ The recipe written as an ACR/Lightroom `.xmp` sidecar (`crs:` keys like
 edit appears as fully-adjustable sliders in Lightroom — the "AI does 90%, I
 nudge the last 10%" workflow.
 
-Since v0.13.0 Autoshop does **not** write it next to the photo: the source
+Since v0.13.0 AutoShade does **not** write it next to the photo: the source
 library is read-only, so the projection lands in the per-user develop store
-(`<AUTOSHOP_DATA_DIR | %LOCALAPPDATA%/autoshop | $XDG_DATA_HOME/autoshop |
-$HOME/.local/share/autoshop>/develops/<stem>-<hash of the absolute
+(`<AUTOSHADE_DATA_DIR | %LOCALAPPDATA%/autoshade | $XDG_DATA_HOME/autoshade |
+$HOME/.local/share/autoshade>/develops/<stem>-<hash of the absolute
 path>/<stem>.xmp` — see `store::store_root_with_trust`, and the trust bullet in
 §3 for why the shared-temp last resort is labelled rather than
 trusted), alongside `recipe.json` (the authoritative develop
@@ -1214,7 +1214,7 @@ saying 「imported with N features unmodelled」 cannot be told about a correcti
 that was not imported at all. The banner names what it could not model instead
 of counting it. Measured on the reference library: 0 masks imported before, 31 of
 its 42 corrections after, with `imported + refused == corrections` holding file
-by file. (Re-measured through the `AUTOSHOP_MB_FIXTURES` probe as the round went
+by file. (Re-measured through the `AUTOSHADE_MB_FIXTURES` probe as the round went
 on: **33 of 42** once v0.31.2's multi-component base-geometry fix stopped a
 Correction whose base shape sat behind a Subtract component from being read as
 the subtracted shape, then **42 of 42 with 0 refused** at the v0.33.0 release
@@ -1245,7 +1245,7 @@ and `render::mask_weight` samples it exactly as it samples a `Bitmap` mask.
 literal `=> 0.0`, so every recipe holding a brush mask renders differently now.
 Both disclosure channels moved with it and are named
 `MaskImportReason::BrushRendered` / `MaskLossReason::BrushRendered`
-(「brush mask(s) drawn from Autoshop's measured model of Lightroom's brush -
+(「brush mask(s) drawn from AutoShade's measured model of Lightroom's brush -
 not Adobe's own rasteriser」), because the edges are ours and not Adobe's — the
 same shape of statement the AI-mask arm makes, one notch weaker because ours
 came from a measurement of Adobe's own output. Measured on the specimen
@@ -1354,7 +1354,7 @@ keys still sitting at their untouched default, and the pass-through map's
 absence is likewise not a clear. All three are per KEY, not per file: drag one
 of those sliders on a legacy photo and it writes, because THAT is a statement.
 The accepted cost is stated where the rule lives — deleting every mask inside
-Autoshop no longer propagates the deletion to the sidecar (delete them on the
+AutoShade no longer propagates the deletion to the sidecar (delete them on the
 Lightroom side), and republishing a mask block you HAVE edited recasts
 `MaskName`/`MaskSyncID` deterministically from our writer. The user re-examined
 both on 2026-08-19 and confirmed them as settled (ROADMAP L-19), so they are a
@@ -1680,7 +1680,7 @@ which is the control that carries the decision. Every other row is untouched.
 
 **Three surfaces, one loader (R23-2).** The library
 ([`src/style.rs`](../src/style.rs)) is built from RAW+`.xmp` pairs by
-`autoshop style-index <dir>`, by the web info panel, and — since R23-2 — by the
+`autoshade style-index <dir>`, by the web info panel, and — since R23-2 — by the
 GUI's **AI panel › Style reference library** (folder picker → background worker
 with per-photo progress; no cancel, because `StyleIndex::build` has no
 cancellation checkpoints, so the button simply stays disabled until it lands).
@@ -1799,7 +1799,7 @@ when a direction exists.
 
 ### 4.7 Pixel retouch / heal (optional) — V2
 
-A third, opt-in editing mode (`autoshop heal`, or the UI's **修图 · 去瑕疵** panel),
+A third, opt-in editing mode (`autoshade heal`, or the UI's **修图 · 去瑕疵** panel),
 distinct from BOTH the parametric path (which never touches pixels) and the
 generative path (which *synthesises* them). It does traditional **spot-healing**:
 small defects (dust, sensor spots, blemishes, specks) are removed by sampling
@@ -2258,7 +2258,7 @@ members to a neighbour, so a per-stage worst-bucket comparison rejects the one
 correct cast in the set and admits both wrecks
 (`fit::tests::the_worst_bucket_cannot_gate_a_stage`). It is never mixed into
 `look_err`'s weighted sum — R17-R19's constants were each calibrated against a
-real failure pair. `AUTOSHOP_FIT_JOINT=off` removes the whole family for
+real failure pair. `AUTOSHADE_FIT_JOINT=off` removes the whole family for
 baseline comparison. A zoned fit's **confidence** now comes from the zones it
 actually accepted rather than the frame-global number this module's own
 acceptance doc proves cannot judge a zone; `err_after` keeps its contract
@@ -2392,7 +2392,7 @@ the user's own browser*, and the guarantees are:
 
 Two folders, two jobs, and only one of them used to be a setting. The **develop
 store** (§4.5) holds the state — recipes, XMP, versions, mask rasters — under a
-per-user root that `AUTOSHOP_DATA_DIR` can move. The **delivery root** holds the
+per-user root that `AUTOSHADE_DATA_DIR` can move. The **delivery root** holds the
 finished files, and before R24-5 it was not a setting at all: `./out`, spelled
 literally in five places (the CLI deliverable name, the batch renderer's dedup
 spelling, the pixel masters, the extracted style prompt, the web download
@@ -2401,7 +2401,7 @@ which is precisely why "where did my export go" had no good answer.
 
 `config::delivery_root()` is now the one reader, and `pipeline::default_out` the
 one funnel every deliverable name is claimed through. It resolves the settings
-file's `out_dir` over `AUTOSHOP_OUT_DIR` over the default `out`, memoised
+file's `out_dir` over `AUTOSHADE_OUT_DIR` over the default `out`, memoised
 (`unique_out` probes it up to 999 times per claim) and dropped by
 `update_local_settings`, the one writer. An explicitly blank field is a real
 choice — "the default" — and silences the environment variable too, the same
@@ -2411,16 +2411,16 @@ develop store, echoing the RESOLVED absolute path, and its export destination's
 surface and a batch render name one place.
 
 It is `Trust::Destination` in `config::SETTINGS`, unlike the read-only
-`AUTOSHOP_LEGACY_OUT` beside it: a planted value does not merely choose a
+`AUTOSHADE_LEGACY_OUT` beside it: a planted value does not merely choose a
 folder, it decides where a stranger's developed photos are filed and (via
 `guard_readonly`'s own-output allowance) which directory stops counting as the
 read-only photo library. Neither a `.env` nor an ambient working-directory
-`autoshop.local.json` may supply it.
+`autoshade.local.json` may supply it.
 
 Three things deliberately did NOT move with it, because they only ever shared
 the folder NAME: the develop store (its own setting since v0.13), `out/imported`
 where the web surface parks an uploaded SOURCE photo (library input, not a
-deliverable), and `store::legacy_out_roots` / `AUTOSHOP_LEGACY_OUT` (a read-only
+deliverable), and `store::legacy_out_roots` / `AUTOSHADE_LEGACY_OUT` (a read-only
 archaeology path pinned to where pre-v0.13 builds actually wrote, which a new
 setting cannot retroactively change). `guard_readonly` keeps the literal `./out`
 as an output area alongside the configured root, so repointing the root does not
@@ -2527,7 +2527,7 @@ that.
 | # | Question | Status |
 |---|----------|--------|
 | 1 | **Image library path** (originals + finished edits) | resolved: passed per invocation (`batch <dir>`, `serve --dir`, `style-index <dir>`, the GUI folder picker) — no configured library root; develop state is keyed by each photo's absolute path in the per-user store. One exception since R23-2: the STYLE library's source folder is remembered in the GUI prefs (`style_src_dir`) so a rebuild need not re-find it — a convenience, not a library root; the index records the folder it was built from as well |
-| 2 | Camera / RAW format | ~~resolved: Sony `.ARW`~~ **← R27 (2026-08-19) widened**: 24 RAW extensions (`decode::RAW_EXTS`) + 8 baked (`pipeline::BAKED_EXTS`), one predicate app-wide; 9 cameras (one per format) verified end to end on CC0 samples, and the zoo is a release gate (`AUTOSHOP_RAW_ZOO`, 9/9 at v0.33.0); Adobe DNG Converter is the documented on-ramp for the rest. Refusals are named per cause (unknown make / unknown model / no decoder); monochrome and 4-colour sensors are refused before the develop; X-Trans develops approximately and says so |
+| 2 | Camera / RAW format | ~~resolved: Sony `.ARW`~~ **← R27 (2026-08-19) widened**: 24 RAW extensions (`decode::RAW_EXTS`) + 8 baked (`pipeline::BAKED_EXTS`), one predicate app-wide; 9 cameras (one per format) verified end to end on CC0 samples, and the zoo is a release gate (`AUTOSHADE_RAW_ZOO`, 9/9 at v0.33.0); Adobe DNG Converter is the documented on-ramp for the rest. Refusals are named per cause (unknown make / unknown model / no decoder); monochrome and 4-colour sensors are refused before the develop; X-Trans develops approximately and says so |
 | 3 | Output target | resolved: XMP sidecar **+** rendered, XMP-first |
 | 4 | AI roles | resolved: GPT=image, Claude=non-image+verify, unified framework |
 | 5 | Exact meaning of Claude's "收货验证" (data-level vs pixel-level) | resolved: **data-level**. The verifier is never sent pixels — it judges the recipe against EXIF/histogram/clipping stats and the advisor's rationale (§3, §4.3, [`src/advisor/claude.rs`](../src/advisor/claude.rs)) |

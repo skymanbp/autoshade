@@ -1,4 +1,4 @@
-# Autoshop static site
+# AutoShade static site
 
 This directory is a build-free, self-contained Cloudflare Pages site. Its HTML, CSS, headers, and local images can be published as-is; no package install or asset compilation is required.
 

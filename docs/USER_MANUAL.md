@@ -1,6 +1,6 @@
-# Autoshop user manual
+# AutoShade user manual
 
-The operating manual for Autoshop v1.0.0 — the desktop app, the CLI, and the
+The operating manual for AutoShade v1.0.0 — the desktop app, the CLI, and the
 embedded web UI. Installation and the first run are in the README's
 [Install and quickstart](../README.md#install-and-quickstart); what the program
 is, what is new in it, and how it works are the README's opening sections;
@@ -20,9 +20,9 @@ algorithms in [TECH_STACK.md](TECH_STACK.md).
 ## 1. Open and inspect a photo
 
 Use **Open photo…** (`Ctrl+O`), drag and drop, or **Open folder…**. The library
-is read-only: Autoshop stores develop state separately and never rewrites the
+is read-only: AutoShade stores develop state separately and never rewrites the
 source RAW. The viewer applies EXIF orientation before crop and mask geometry,
-so every tool works in the displayed frame. The neutral view is Autoshop's own
+so every tool works in the displayed frame. The neutral view is AutoShade's own
 conversion, not the camera JPEG; histogram and clipping information are
 computed from the decoded image and also feed the AI verifier.
 
@@ -31,12 +31,12 @@ computed from the decoded image and also feed the AI verifier.
 The Develop panel exposes white balance, exposure and tonal controls, RGB point
 curves, HSL, color grading, texture, clarity, dehaze, noise reduction,
 sharpening, vignette, crop, and lens-related settings, rendered through the
-same engine as `autoshop apply`.
+same engine as `autoshade apply`.
 
 **Save develop** (`Ctrl+S`) persists the recipe and, for a RAW, its XMP
 projection in the per-user develop store. A neighboring Lightroom/ACR `.xmp` is
 read only as the merge base; Save does not overwrite it. A baked image keeps an
-Autoshop recipe but does not receive a RAW XMP. To deliver the stored
+AutoShade recipe but does not receive a RAW XMP. To deliver the stored
 projection where Lightroom reads it, choose **Export .xmp beside the photo**;
 replacing an existing neighboring sidecar requires confirmation.
 
@@ -155,23 +155,23 @@ The following commands and flags match the v1.0.0 command definitions in
 `src/main.rs`:
 
 ```text
-autoshop decode <src> [-o|--out FILE]
-autoshop analyze <src> [-o|--out FILE] [--guidance TEXT] [--style 0..1] [--strength 0..1] [--adherence 0..1] [--embed|--no-embed] [--deep] [--reference-image]
-autoshop apply <src> <recipe.json> (-o|--out) FILE [--long-edge N]
-autoshop auto <src> [-o|--out FILE] [--guidance TEXT] [--style 0..1] [--strength 0..1] [--adherence 0..1] [--embed|--no-embed] [--deep] [--reference-image] [--denoise] [--denoise-strength 0..1] [--denoise-model NAME] [--long-edge N]
-autoshop denoise <src> [-o|--out FILE] [--strength 0..1] [--model NAME]
-autoshop batch <dir> [--render] [--limit N] [--include-baked] [--jobs N] [--long-edge N]
-autoshop eval <dir> [--limit N] [--jobs N] [--fresh] [--state FILE]
-autoshop style-index <dir> [--embed|--no-embed] [--describe]
-autoshop style-index --looks <dir> [--embed|--no-embed] [--describe]
-autoshop style-query <photo> [--direction TEXT] [--style 0..1] [--embed]
-autoshop reimagine <src> --prompt TEXT [--fidelity high|low] [--quality low|medium|high|auto] [--fidelity-retry] [-o|--out FILE]
-autoshop match <src> <target> [--render] [--zoned] [--regions 2..4] [--strength 0..1] [--style-prompt] [--ai-judge] [--deep] [-o|--out FILE]
-autoshop correspond <source> <target> [-o|--out FILE]
-autoshop retouch <src> --mask FILE --prompt TEXT [--quality low|medium|high|auto] [--full-res] [-o|--out FILE]
-autoshop heal <src> [--mask FILE] [--no-auto] [--full-res] [-o|--out FILE]
-autoshop serve <dir> [-p|--port N]
-autoshop recipe-schema
+autoshade decode <src> [-o|--out FILE]
+autoshade analyze <src> [-o|--out FILE] [--guidance TEXT] [--style 0..1] [--strength 0..1] [--adherence 0..1] [--embed|--no-embed] [--deep] [--reference-image]
+autoshade apply <src> <recipe.json> (-o|--out) FILE [--long-edge N]
+autoshade auto <src> [-o|--out FILE] [--guidance TEXT] [--style 0..1] [--strength 0..1] [--adherence 0..1] [--embed|--no-embed] [--deep] [--reference-image] [--denoise] [--denoise-strength 0..1] [--denoise-model NAME] [--long-edge N]
+autoshade denoise <src> [-o|--out FILE] [--strength 0..1] [--model NAME]
+autoshade batch <dir> [--render] [--limit N] [--include-baked] [--jobs N] [--long-edge N]
+autoshade eval <dir> [--limit N] [--jobs N] [--fresh] [--state FILE]
+autoshade style-index <dir> [--embed|--no-embed] [--describe]
+autoshade style-index --looks <dir> [--embed|--no-embed] [--describe]
+autoshade style-query <photo> [--direction TEXT] [--style 0..1] [--embed]
+autoshade reimagine <src> --prompt TEXT [--fidelity high|low] [--quality low|medium|high|auto] [--fidelity-retry] [-o|--out FILE]
+autoshade match <src> <target> [--render] [--zoned] [--regions 2..4] [--strength 0..1] [--style-prompt] [--ai-judge] [--deep] [-o|--out FILE]
+autoshade correspond <source> <target> [-o|--out FILE]
+autoshade retouch <src> --mask FILE --prompt TEXT [--quality low|medium|high|auto] [--full-res] [-o|--out FILE]
+autoshade heal <src> [--mask FILE] [--no-auto] [--full-res] [-o|--out FILE]
+autoshade serve <dir> [-p|--port N]
+autoshade recipe-schema
 ```
 
 `<src>` is a RAW or baked image. For commands that save develop state, baked
@@ -242,13 +242,13 @@ Six environment overrides steer retrieval, each read in exactly one place:
 
 | Variable | Effect |
 |---|---|
-| `AUTOSHOP_STYLE_EMBED` | `1`/`0` — use the SigLIP sidecar. Set (any value) beats the GUI preference; `--embed`/`--no-embed` beats both. |
-| `AUTOSHOP_STYLE_DESCRIBE` | `1`/`0` — run the local look-description pass during an index build. Set (any value) beats the GUI preference; `--describe` beats both. It never turns the embedding on by itself. |
-| `AUTOSHOP_STYLE_EMBED_WEIGHT` | `W_EMB`, the query-image ↔ exemplar-image cosine block. `0` reproduces the 14-dimension ranking exactly. |
-| `AUTOSHOP_STYLE_TEXT_WEIGHT` | `W_TXT`, the Direction-text ↔ exemplar-image term, scored after each exemplar's text hubness is subtracted. Ships at `0.5`: it spent one batch at `4`, where the corrected re-measurement showed the ranking collapsing onto a few hub exemplars; it shipped at `0` while the only query text available to the harness was a tag string. |
-| `AUTOSHOP_STYLE_DESC_WEIGHT` | `W_DESC`, the Direction-text ↔ exemplar-description term. Ships at `0.5`. It shipped at `4` when both sides of the term were tag strings; with real prose that point measures *worse* than switching the term off, so it was re-fitted. |
-| `AUTOSHOP_STYLE_LOOK_WEIGHT` | `W_LOOK`, the look-library image term. |
-| `AUTOSHOP_SEND_REFERENCE_IMAGE` | `1`/`0` — also send the retrieved reference photo itself (not just its text) with `analyze`/`auto` proposals; `--reference-image` turns it on per run. Destination-trust: only your own environment or user-level settings can set it — a downloaded photo pack's `.env` cannot, because it decides whether your photograph goes on the wire. `batch` never sends one. |
+| `AUTOSHADE_STYLE_EMBED` | `1`/`0` — use the SigLIP sidecar. Set (any value) beats the GUI preference; `--embed`/`--no-embed` beats both. |
+| `AUTOSHADE_STYLE_DESCRIBE` | `1`/`0` — run the local look-description pass during an index build. Set (any value) beats the GUI preference; `--describe` beats both. It never turns the embedding on by itself. |
+| `AUTOSHADE_STYLE_EMBED_WEIGHT` | `W_EMB`, the query-image ↔ exemplar-image cosine block. `0` reproduces the 14-dimension ranking exactly. |
+| `AUTOSHADE_STYLE_TEXT_WEIGHT` | `W_TXT`, the Direction-text ↔ exemplar-image term, scored after each exemplar's text hubness is subtracted. Ships at `0.5`: it spent one batch at `4`, where the corrected re-measurement showed the ranking collapsing onto a few hub exemplars; it shipped at `0` while the only query text available to the harness was a tag string. |
+| `AUTOSHADE_STYLE_DESC_WEIGHT` | `W_DESC`, the Direction-text ↔ exemplar-description term. Ships at `0.5`. It shipped at `4` when both sides of the term were tag strings; with real prose that point measures *worse* than switching the term off, so it was re-fitted. |
+| `AUTOSHADE_STYLE_LOOK_WEIGHT` | `W_LOOK`, the look-library image term. |
+| `AUTOSHADE_SEND_REFERENCE_IMAGE` | `1`/`0` — also send the retrieved reference photo itself (not just its text) with `analyze`/`auto` proposals; `--reference-image` turns it on per run. Destination-trust: only your own environment or user-level settings can set it — a downloaded photo pack's `.env` cannot, because it decides whether your photograph goes on the wire. `batch` never sends one. |
 
 All four weights parse the same way: trimmed, and taken only if finite and
 non-negative — anything else falls back to the shipped default, because a
@@ -261,15 +261,15 @@ vision role.
 
 ## Lightroom and XMP interoperability
 
-Autoshop reads and writes sidecar XMP for global settings, point curves, HSL,
+AutoShade reads and writes sidecar XMP for global settings, point curves, HSL,
 crop, and supported local corrections; the writer merges owned fields into the
 existing document and preserves unmodeled content byte-for-byte instead of
 round-tripping the whole file through a general XML serializer. Linear and
 radial masks round-trip as editable geometry. Lightroom brush dab streams are
 imported from the sibling `MaskBrushTable`, validated and Brotli decoded, then
-rendered with Autoshop's measured brush model. Classic XMP does not contain
+rendered with AutoShade's measured brush model. Classic XMP does not contain
 Lightroom's computed subject/sky/object alpha or arbitrary bitmap alpha, so
-Autoshop preserves the selection intent and clearly re-derives the mask with
+AutoShade preserves the selection intent and clearly re-derives the mask with
 its own local model; generated image variants remain generated pixels until
 reverse-fit produces an editable recipe.
 
@@ -282,15 +282,15 @@ OAuth, receives statistics and recipe data rather than image pixels, and can
 instead use an API provider.
 
 The same roles can be configured from the environment: `OPENAI_API_KEY` serves
-the image/vision and generative role; `AUTOSHOP_ANALYSIS_API_KEY` is used only
+the image/vision and generative role; `AUTOSHADE_ANALYSIS_API_KEY` is used only
 when the verifier is set to API mode. Settings are saved in the per-user
-`autoshop.local.json`; do not put real credentials in the repository. A
-`./autoshop.local.json` in the current working directory may select
+`autoshade.local.json`; do not put real credentials in the repository. A
+`./autoshade.local.json` in the current working directory may select
 model/provider preferences but cannot supply API credentials, endpoints,
 executable/script paths, or output destinations, so an opened photo folder
 cannot become a credential or path override.
 
-- **Analyze:** choose **Analyze** in the AI panel or run `autoshop analyze`.
+- **Analyze:** choose **Analyze** in the AI panel or run `autoshade analyze`.
   The vision advisor proposes bounded sliders and masks, a data-only verifier
   checks the proposal, and normal visual review may attempt one revision;
   `--deep` permits additional bounded rounds. Accepted output remains a normal
@@ -338,7 +338,7 @@ configured provider. The verifier receives recipe, EXIF, histogram, clipping,
 and rationale data—not pixels—and Responses request bodies set `store:false`.
 The local web UI binds to loopback only, checks Host/Origin and cross-site
 requests, requires a fresh per-run session token for state changes, disables API
-caching, and denies framing. By default, Autoshop keeps the source library
+caching, and denies framing. By default, AutoShade keeps the source library
 read-only. If the configured Delivery folder is inside or above a photo's
 folder, that delivery subtree is intentionally writable; Settings warns when
 this removes the folder's protection. "Export .xmp beside the photo" is the

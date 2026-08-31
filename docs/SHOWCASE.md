@@ -1,11 +1,11 @@
-# Autoshop showcase
+# AutoShade showcase
 
 Further examples behind the frames in the
 [README's results section](../README.md#results-two-batches-six-frames): the
 current 2026-08-30 style-read and reimagine triptychs, the three established
 `analyze` pairs — including two documented failure modes — and the earlier
 batches, kept and labelled rather than quietly replaced. Image paths are
-relative to this file's directory; every before is Autoshop's neutral
+relative to this file's directory; every before is AutoShade's neutral
 conversion of the same Sony α7R IVA `.ARW`.
 
 Captions name the batch that produced them. Model-judge scores are automated
@@ -43,7 +43,7 @@ develop. The AI chose the crop, a committed global grade at `--strength 0.9`,
 and two parametric masks including a lift on the cat.
 
 The three established pairs below remain because they show different decisions
-and, importantly, two current failure modes. Each before is Autoshop's neutral
+and, importantly, two current failure modes. Each before is AutoShade's neutral
 conversion of the same Sony α7R IVA `.ARW`; each after is an AI-proposed engine
 render, not a generated image. The faint watermark is identical on both halves
 of these three older pairs.
@@ -172,7 +172,7 @@ stepping across the tiles' own borders.
 
 <img src="images/showcase-sunset-reimagine-fit-triptych.jpg" alt="Sunset scene: neutral conversion, AI-generated target, and reverse-fitted full-resolution engine render" />
 
-<sub><b>Sunset, Sony α7R IVA 61 MP <code>.ARW</code></b> (v0.35.0 batch). Left: neutral engine conversion. Center: a 3520×2352 full-image target generated with a configured <code>gpt-image-2</code>. Right: the recovered recipe rendered by Autoshop on the original RAW at 9504×6336. The statistical look error moved from 0.060 to 0.042 at fit confidence 0.746691; this is a deterministic tonal/color approximation, not a pixel-aligned reconstruction of generated detail.</sub>
+<sub><b>Sunset, Sony α7R IVA 61 MP <code>.ARW</code></b> (v0.35.0 batch). Left: neutral engine conversion. Center: a 3520×2352 full-image target generated with a configured <code>gpt-image-2</code>. Right: the recovered recipe rendered by AutoShade on the original RAW at 9504×6336. The statistical look error moved from 0.060 to 0.042 at fit confidence 0.746691; this is a deterministic tonal/color approximation, not a pixel-aligned reconstruction of generated detail.</sub>
 
 Reverse-fit measures structural divergence first: same-content targets keep the
 full tone, saturation, and guarded-cast solve, while structurally changed

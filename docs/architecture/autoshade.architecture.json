@@ -2,7 +2,7 @@
   "schema_version": 1,
   "diagram_type": "architecture",
   "meta": {
-    "title": "Autoshop — architecture and the ideas inside it",
+    "title": "AutoShade — architecture and the ideas inside it",
     "locale": "en",
     "quality_profile": "showcase"
   },
@@ -40,7 +40,7 @@
       "id": "desktop-gui",
       "type": "frontend",
       "label": "Desktop GUI",
-      "sublabel": "autoshop-gui · eframe 0.29",
+      "sublabel": "autoshade-gui · eframe 0.29",
       "pos": [
         40,
         220
@@ -54,7 +54,7 @@
       "id": "cli",
       "type": "frontend",
       "label": "CLI",
-      "sublabel": "autoshop · clap 4.6",
+      "sublabel": "autoshade · clap 4.6",
       "pos": [
         40,
         316
