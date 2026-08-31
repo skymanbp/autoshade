@@ -1137,7 +1137,18 @@ mod tests {
         .to_string();
 
         assert!(error.contains("timed out"), "{error}");
-        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+        // Mechanism, not wall clock (clearing A3): the old `elapsed < 5 s`
+        // ceiling measured the scheduler — spawn plus the two 2 s drain
+        // graces left ~1 s of headroom and false-redded loaded batteries.
+        // The kill itself is structural (kill_tree + kill + wait before the
+        // bail) and is proven here by the refusal text and the released
+        // claim; what IS deterministic is the lower bound — an instant
+        // error would mean the 100 ms deadline never armed.
+        assert!(
+            started.elapsed() >= std::time::Duration::from_millis(100),
+            "the deadline must actually elapse before the kill ({:?})",
+            started.elapsed()
+        );
         assert!(
             !output.exists(),
             "a killed run must release its unreferenced output claim"

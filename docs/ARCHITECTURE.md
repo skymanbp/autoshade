@@ -92,7 +92,7 @@
 > experimental generative edits, an optional pixel-**heal** retouch mode (§4.7)
 > the deterministic look **reverse-fit** (§4.8) and the local server's refusal
 > model (§4.9).
-> 1255 library + 22 CLI + 159 GUI + 2+2 contract tests are enumerated in the GUI
+> 1255 library + 23 CLI + 159 GUI + 2+2 contract tests are enumerated in the GUI
 > build; the library result is 1243 pass + 12 `#[ignore]`d forensic probes
 > (counts refreshed 2026-08-31: the C2 storage-name migration added 3 named
 > tests — 1 `serve` for the export-registry adoption, 2 GUI for the prefs

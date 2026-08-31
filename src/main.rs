@@ -752,9 +752,25 @@ fn fmt_text_terms(t: &autoshade::style::DistanceTerms) -> String {
         };
         format!(" {label}={term:.6}(raw={raw}{mark})")
     };
+    // The hubness disclosure (clearing A8): `txt_hub_corrected`'s doc promises
+    // a reader of the terms is TOLD when the candidates' hubness was removed,
+    // and this line is where terms are read. `,hub=<mean>` names the value
+    // subtracted; bare `,hub` is a correction in force over a pair with no
+    // cosine; nothing marks a pre-vocabulary index, whose ranking — and line
+    // — are bit for bit what they were before the correction existed.
+    let hub = match (t.txt_hub_corrected, t.txt_hub) {
+        (true, Some(v)) => format!(",hub={v:.6}"),
+        (true, None) => ",hub".into(),
+        (false, _) => String::new(),
+    };
+    let txt = one("txt", t.txt, t.txt_gap, t.txt_standardised);
+    let txt = match txt.strip_suffix(')') {
+        Some(head) => format!("{head}{hub})"),
+        None => txt,
+    };
     format!(
         "{}{}",
-        one("txt", t.txt, t.txt_gap, t.txt_standardised),
+        txt,
         one("desc", t.desc, t.desc_gap, t.desc_standardised)
     )
 }
@@ -3443,6 +3459,48 @@ fn ")
             body.matches("fmt_desc(").count(),
             2,
             "the neighbour line and the look line both print the prose"
+        );
+    }
+
+    /// The hubness disclosure on the terms line (clearing A8):
+    /// `txt_hub_corrected`'s doc promises the reader of the terms is TOLD
+    /// when the candidates' hubness was removed — `,hub=<mean>` with the
+    /// subtracted value, bare `,hub` for a correction in force over a pair
+    /// with no cosine, and NOTHING on a pre-vocabulary index whose line must
+    /// read bit for bit as it did before the correction existed.
+    ///
+    /// MUTATION THIS KILLS: dropping the `hub` suffix from the txt term, or
+    /// printing it on an uncorrected index.
+    #[test]
+    fn style_query_terms_disclose_the_hub_correction() {
+        let mut t = autoshade::style::DistanceTerms {
+            txt: 0.25,
+            txt_gap: Some(0.5),
+            txt_hub: Some(0.125),
+            txt_standardised: true,
+            desc_standardised: true,
+            txt_hub_corrected: true,
+            ..Default::default()
+        };
+        let line = fmt_text_terms(&t);
+        assert!(
+            line.contains("txt=0.250000(raw=0.500000,z,hub=0.125000)"),
+            "the subtracted mean is named on the txt term: {line}"
+        );
+        let desc_part = line.split("desc=").nth(1).unwrap();
+        assert!(!desc_part.contains("hub"), "desc never wears the mark: {line}");
+        t.txt_hub = None;
+        let line = fmt_text_terms(&t);
+        assert!(
+            line.contains("txt=0.250000(raw=0.500000,z,hub)"),
+            "a correction in force with no cosine still tells the reader: {line}"
+        );
+        t.txt_hub_corrected = false;
+        t.txt_hub = Some(0.125);
+        let line = fmt_text_terms(&t);
+        assert!(
+            !line.contains("hub"),
+            "a pre-vocabulary index reads exactly as before the correction: {line}"
         );
     }
 
