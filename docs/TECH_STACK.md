@@ -1389,8 +1389,11 @@ than the pre-call state; model weights remain outside the repository.
 
 ### Parameters
 
-- Core toolchain: Rust edition 2024, rustc/cargo `1.94`
-  (**release toolchain pin**).
+- Core toolchain: Rust edition 2024; `1.94` is the version the shipped
+  binaries were built with, **not a pin**. The repo carries no
+  `rust-toolchain*` file and no `.cargo` config, and all six CI steps use
+  `dtolnay/rust-toolchain@stable` with no version, so a later stable compiles
+  this tree too. Edition 2024 is the only floor the manifest states.
 - Desktop UI: `eframe`/`egui 0.29` (**dependency pin**).
 - HTTP implementation: `tiny_http`; embedded HTML/CSS/JS via `include_str!`
   (**designed self-contained UI**).

@@ -1,6 +1,6 @@
 # AutoShade — Architecture
 
-> Status: **implemented** (v1.1.0 — the layered reverse-fit release). The reverse-fit's
+> Status: **implemented** (v1.2.0 — the honest-disclosure release). The reverse-fit's
 > in-range estimator is now a PAIRED ROBUST REGRESSION (2026-08-26): on
 > same-frame pairs the tone map is estimated from corresponding pixels
 > (per-bin Tukey-IRLS means, median start, robust weight × evidence weight),
@@ -595,7 +595,10 @@ preview image + metadata and returns an [`EditRecipe`](../src/recipe.rs) — a
 bounded set of Lightroom/ACR-style develop controls. A deterministic Rust engine
 renders from the original RAW using that recipe. Key benefits:
 
-- **Reproducibility** — same recipe + same RAW ⇒ byte-identical output.
+- **Reproducibility** — same recipe + same RAW + the same build ⇒
+  byte-identical output, on every run. Across builds the dial layer is stable
+  but the pixels are not promised: no toolchain is pinned (see TECH_STACK
+  §Parameters), so a different compiler may round differently.
 - **Non-destructiveness** — the recipe is a tiny JSON; originals are never modified.
 - **Auditability** — every recipe carries a `rationale` + `confidence`.
 - **Lightroom interop** — the recipe serialises to an XMP sidecar, so the edit

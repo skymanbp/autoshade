@@ -408,9 +408,45 @@ pub mod keys {
          Local quality read texture ratio {texture}; that texture floor is calibrated but \
          known not to separate every case, so this correction rests on the clipping gate, \
          the zero-regression frame reading and the boundary gate.";
+    /// Which frame the residual above was measured on.
+    ///
+    /// The AI-proposal path solves and scores over the camera's EMBEDDED
+    /// rendition -- deliberately, because the base look and the lens
+    /// corrections are already in those pixels (pipeline.rs `produce_recipe`'s
+    /// header) and the confidence ladder is calibrated on exactly those
+    /// numbers. The photo's calibration is then stamped onto the finished
+    /// recipe, so the delivered render is `user(base(x))`: a different frame,
+    /// differing in chroma by construction because `camera_base_knots` matches
+    /// luma only. Without this note the reader compares a printed residual
+    /// against a picture it was never measured on.
+    ///
+    /// Emitted ONLY when the stamp actually introduces that difference. A
+    /// source with no camera rendition and no lens profile is already the
+    /// delivered frame, and claiming otherwise would be its own false note.
+    pub const FIT_RESIDUAL_PRE_CALIBRATION: &str =
+        " The residual above was measured on this camera's embedded rendition, \
+         which is the frame the fit and the review both saw. The delivered \
+         render additionally applies this photo's own calibration ({what}), so \
+         it is a different frame — closer to the target in luma, and differing \
+         in chroma, because the camera curve is matched on luma alone.";
     pub const ZONE_ALREADY_MATCHED: &str =
         " The {label} zone already matches the target (zone residual \
          {before}) — no correction needed.";
+    /// The neutral-solution exit attaches NO zone, and it is NOT
+    /// [`ZONE_ALREADY_MATCHED`]. That sentence claims the zone matches the
+    /// target; this exit is reached when every dial the estimator produced
+    /// came back within 1e-4 of neutral, which is a statement about the
+    /// SOLUTION -- the evidence and quality gates left nothing they were
+    /// willing to move. The two are independent: a zone can be far from its
+    /// target and still solve to neutral, and the borrowed sentence then
+    /// printed the contradicting residual inside its own claim ("already
+    /// matches the target (zone residual 0.143)" against a 0.012 ceiling).
+    /// Same rule, same fix as [`ZONE_SHARE_NO_CORRECTION`]: a terminal exit
+    /// states its own reason.
+    pub const ZONE_NO_MOVEMENT_SURVIVED: &str =
+        " No zoned {label} correction attached: every control that survived \
+         the evidence and quality gates solved to neutral, so the zone \
+         residual {before} is left uncorrected.";
     /// R23-6 A-4: what the reported confidence of a ZONED fit now means.
     /// Before this round the zone stage overwrote both `err_after` and
     /// `confidence` with the frame-global look error of the zoned render —

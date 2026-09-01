@@ -1871,8 +1871,18 @@ fn match_cmd(
     };
     let cal = pipeline::fit_calibration(raw);
     pipeline::stamp_fit_calibration(&mut rep.recipe, cal);
+    // The residual above was read before that stamp existed, so it describes
+    // the embedded rendition rather than the file this command writes. Say so
+    // in BOTH places the number appears -- the console line the user is
+    // reading right now, and the rationale that ships with the recipe.
+    let shift = pipeline::post_stamp_domain_shift(&rep.recipe);
+    let domain = match shift.as_deref() {
+        Some(what) => format!("; measured on the camera's embedded rendition, before {what}"),
+        None => String::new(),
+    };
+    pipeline::note_post_stamp_domain(&mut rep.recipe.rationale, &mut rep.notes, shift);
     println!(
-        "  look error {:.3} → {:.3}  (0 = identical distributions; masks/local edits are not recoverable)",
+        "  look error {:.3} → {:.3}  (0 = identical distributions; masks/local edits are not recoverable{domain})",
         rep.err_before, rep.err_after
     );
     match judged {

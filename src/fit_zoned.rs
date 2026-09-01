@@ -1816,6 +1816,7 @@ fn fit_recipe_zoned_multi_inner(
         let verdict_name = |key: &str| match key {
             crate::rationale::keys::ZONE_ATTACHED => "ZONE_ATTACHED",
             crate::rationale::keys::ZONE_ALREADY_MATCHED => "ZONE_ALREADY_MATCHED",
+            crate::rationale::keys::ZONE_NO_MOVEMENT_SURVIVED => "ZONE_NO_MOVEMENT_SURVIVED",
             crate::rationale::keys::ZONE_SHARE_NO_CORRECTION => "ZONE_NO_CORRECTION",
             crate::rationale::keys::ZONE_TOO_SMALL => "ZONE_TOO_SMALL",
             crate::rationale::keys::ZONE_SHARE_MISMATCH => "ZONE_SHARE_MISMATCH",
@@ -3334,7 +3335,11 @@ fn attach_one_zone(
             &mut report.recipe.rationale,
             &mut report.notes,
             crate::rationale::Note::new(
-                crate::rationale::keys::ZONE_ALREADY_MATCHED,
+                // NOT ZONE_ALREADY_MATCHED. That sentence is correct at the two
+                // `zone_skips` exits above, where the residual really is under
+                // the skip threshold. HERE the only thing established is that
+                // the SOLUTION came out neutral -- see the key's own doc.
+                crate::rationale::keys::ZONE_NO_MOVEMENT_SURVIVED,
                 vec![("label", label.to_string()), ("before", format!("{zone_before:.3}"))],
             ),
         );
@@ -6478,6 +6483,66 @@ mod tests {
             assert_eq!(structural.weight, 0.0, "structural scope did not withhold {label}");
         }
         mask_path.remove();
+    }
+
+    /// The neutral-solution exit does not borrow the "already matches" claim.
+    ///
+    /// `neutral_zone` (below `local_quality`) fires when every dial the
+    /// estimator produced came back within 1e-4 of neutral -- a fact about the
+    /// SOLUTION, typically because the evidence gates withheld every class. It
+    /// is independent of how far the zone is from its target, and it used to
+    /// borrow `ZONE_ALREADY_MATCHED`, whose sentence asserts the opposite and
+    /// prints the contradicting residual inside its own claim. Same rule and
+    /// same fix as `ZONE_SHARE_NO_CORRECTION` (rationale.rs:354-360).
+    ///
+    /// WHAT THIS TEST DOES NOT COVER, stated rather than implied: the exit is
+    /// not reachable from a flat synthetic pair. Reaching it needs a zone
+    /// whose movable class solves to neutral WHILE its residual stays large,
+    /// and on 16x16 block fixtures those two conditions exclude each other --
+    /// every attempt either attaches a correction or lands on the legitimate
+    /// `zone_skips` exit with a genuinely small residual (0.008 measured).
+    /// The exit's live behaviour is evidenced only by the six-arm runs. So
+    /// this test pins the two things that ARE decidable here: the sentences
+    /// are different, and the new one makes no claim about matching.
+    ///
+    /// MUTATION: give `ZONE_NO_MOVEMENT_SURVIVED` the text of
+    /// `ZONE_ALREADY_MATCHED` and both assertions below fail.
+    #[test]
+    fn the_neutral_solution_note_makes_no_claim_about_matching() {
+        let rendered = crate::rationale::render_one(&crate::rationale::Note::new(
+            crate::rationale::keys::ZONE_NO_MOVEMENT_SURVIVED,
+            vec![("label", "sky".to_string()), ("before", "0.143".to_string())],
+        ));
+        assert!(
+            !rendered.contains("already matches"),
+            "the neutral-solution exit must not claim a match: {rendered}"
+        );
+        assert!(
+            rendered.contains("0.143") && rendered.contains("uncorrected"),
+            "it must still disclose the residual it is leaving behind: {rendered}"
+        );
+        let matched = crate::rationale::render_one(&crate::rationale::Note::new(
+            crate::rationale::keys::ZONE_ALREADY_MATCHED,
+            vec![("label", "sky".to_string()), ("before", "0.143".to_string())],
+        ));
+        assert_ne!(rendered, matched, "a terminal exit must not borrow another's sentence");
+
+        // And the wiring, since no synthetic fixture can reach that exit (see
+        // the doc above). A SOURCE-level pin, stated as one: it reads the
+        // `neutral_zone` block and checks which key it emits. Precedent is
+        // `pipeline.rs`'s own source-counting test. It cannot tell whether the
+        // block is reachable -- only that, when reached, it says this.
+        let src = include_str!("fit_zoned.rs");
+        let at = src.find("    if neutral_zone {").expect("the neutral-solution exit moved");
+        let block = &src[at..at + 900];
+        assert!(
+            block.contains("ZONE_NO_MOVEMENT_SURVIVED"),
+            "the neutral-solution exit no longer emits its own key"
+        );
+        assert!(
+            !block.contains("keys::ZONE_ALREADY_MATCHED"),
+            "the neutral-solution exit went back to borrowing the match claim"
+        );
     }
 
     /// With its colour class withheld a zone is judged on tone alone -- so the

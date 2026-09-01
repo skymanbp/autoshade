@@ -1285,6 +1285,11 @@ pub fn produce_recipe(
     // the anchor it was scored on and the anchor delivered are all one).
     recipe.as_shot_k = anchor_k;
     recipe.as_shot_tint = anchor_tint;
+    // The stamp is complete, and every number this call produced -- the fit's
+    // residual and the judge's score alike -- was read before it existed. Same
+    // disclosure as CLI `match`, from the other production stamper.
+    let shift = post_stamp_domain_shift(&recipe);
+    note_post_stamp_domain(&mut recipe.rationale, &mut det_notes, shift);
     // REFINE means "adjust MY edit", so it must not delete work the model was
     // never able to return. The strict response schema
     // (advisor::catalogue::edit_recipe_schema) can express only LINEAR and RADIAL
@@ -2414,6 +2419,46 @@ pub fn stamp_fit_calibration(recipe: &mut crate::recipe::EditRecipe, cal: PhotoC
     recipe.lens_profile = cal.lens_profile;
     recipe.as_shot_k = cal.as_shot_k;
     recipe.as_shot_tint = cal.as_shot_tint;
+}
+
+/// What a post-stamp calibration adds to the delivered render, as a phrase --
+/// or `None` when it adds nothing and the two frames are already one.
+///
+/// The two production stampers are [`stamp_fit_calibration`] (CLI `match`) and
+/// the inline saved-first stamp inside [`produce_recipe`] (analyze / batch /
+/// web). Both leave a recipe whose residual and review score were read BEFORE
+/// the calibration existed, so both ask this the same question.
+pub fn post_stamp_domain_shift(recipe: &crate::recipe::EditRecipe) -> Option<String> {
+    let curve = !recipe.base_curve.is_empty();
+    // "Enabled" is the three switches, not the presence of knots: a profile
+    // whose arrays are populated but all switched off changes no pixel.
+    let lp = &recipe.lens_profile;
+    let lens = lp.vignette_on || lp.distortion_on || lp.ca_on;
+    match (curve, lens) {
+        (true, true) => Some("its camera curve and its lens profile".into()),
+        (true, false) => Some("its camera curve".into()),
+        (false, true) => Some("its lens profile".into()),
+        (false, false) => None,
+    }
+}
+
+/// Takes the PHRASE rather than the recipe: both callers already hold a mutable
+/// borrow of the recipe's own rationale when they push.
+pub fn note_post_stamp_domain(
+    rationale: &mut String,
+    notes: &mut Vec<crate::rationale::Note>,
+    shift: Option<String>,
+) {
+    if let Some(what) = shift {
+        crate::rationale::push_note(
+            rationale,
+            notes,
+            crate::rationale::Note::new(
+                crate::rationale::keys::FIT_RESIDUAL_PRE_CALIBRATION,
+                vec![("what", what)],
+            ),
+        );
+    }
 }
 
 /// A calibration-only [`EditRecipe`] — the `base` the R16 fit composes
@@ -6138,6 +6183,74 @@ mod tests {
     /// R15: the fit calibration stamp copies ALL FIVE fields — era, curve,
     /// lens profile, both as-shot anchors. A partial stamp re-opens the
     /// dark-base disagreement the stamp exists to close.
+    /// A residual that names the frame it was measured on.
+    ///
+    /// The AI-proposal path solves and scores over the camera's embedded
+    /// rendition and stamps the photo's calibration on afterwards, so the
+    /// delivered render is a different frame -- differing in chroma by
+    /// construction, since `camera_base_knots` matches luma only. The domain
+    /// is deliberate (the confidence ladder is calibrated on those numbers);
+    /// what was missing was any statement of it, so a reader compared a
+    /// printed residual against a picture it never saw.
+    ///
+    /// Both production stampers ask the same question through
+    /// `post_stamp_domain_shift`: CLI `match` (main.rs, via
+    /// `stamp_fit_calibration`) and `produce_recipe` (analyze / batch / web,
+    /// via its own saved-first stamp).
+    ///
+    /// MUTATION: make `post_stamp_domain_shift` return `Some` unconditionally
+    /// and the no-shift arm fails; make it return `None` unconditionally and
+    /// all three positive arms fail.
+    #[test]
+    fn a_stamped_calibration_says_the_residual_was_read_on_another_frame() {
+        let phrase = |r: &EditRecipe| post_stamp_domain_shift(r);
+
+        // Nothing stamped: the fit already saw the delivered frame, and a note
+        // here would be its own false claim.
+        let bare = EditRecipe::default();
+        assert_eq!(phrase(&bare), None, "an unstamped recipe has no domain shift");
+
+        // A camera curve alone.
+        let curve_only = EditRecipe {
+            base_curve: vec![[0.0, 0.0], [0.4, 0.6], [1.0, 1.0]],
+            ..Default::default()
+        };
+        assert_eq!(phrase(&curve_only).as_deref(), Some("its camera curve"));
+
+        // A lens profile alone -- and only when a switch is actually ON, since
+        // populated arrays with every switch off change no pixel.
+        let lens_off = EditRecipe {
+            lens_profile: crate::recipe::LensProfile {
+                vignette: vec![1.0, 1.1],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert_eq!(phrase(&lens_off), None, "arrays without a switch move nothing");
+        let mut lens_on = lens_off.clone();
+        lens_on.lens_profile.vignette_on = true;
+        assert_eq!(phrase(&lens_on).as_deref(), Some("its lens profile"));
+
+        let mut both = curve_only.clone();
+        both.lens_profile.distortion_on = true;
+        assert_eq!(phrase(&both).as_deref(), Some("its camera curve and its lens profile"));
+
+        // And the note actually renders that phrase, without claiming the two
+        // frames are the same.
+        let mut rationale = String::new();
+        let mut notes: Vec<crate::rationale::Note> = Vec::new();
+        note_post_stamp_domain(&mut rationale, &mut notes, phrase(&both));
+        assert_eq!(notes.len(), 1, "one stamp, one disclosure");
+        assert!(rationale.contains("camera curve and its lens profile"), "{rationale}");
+        assert!(rationale.contains("embedded rendition"), "{rationale}");
+
+        // Negative arm: no shift, no note.
+        let mut quiet = String::new();
+        let mut quiet_notes: Vec<crate::rationale::Note> = Vec::new();
+        note_post_stamp_domain(&mut quiet, &mut quiet_notes, phrase(&bare));
+        assert!(quiet.is_empty() && quiet_notes.is_empty(), "a no-op stamp must stay silent");
+    }
+
     #[test]
     fn the_fit_stamp_carries_the_whole_calibration() {
         let cal = PhotoCalibration {
