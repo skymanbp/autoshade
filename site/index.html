@@ -66,8 +66,8 @@
         </dl>
       </div>
       <figure class="hero-figure">
-        <img src="images/showcase-cat-analyze-pair.jpg?v=1.2.0" width="1600" height="594" alt="Sony α7R IVA ARW: neutral cat photo beside its AI analyze develop">
-        <figcaption><strong>AI analyze develop.</strong> Sony α7R IVA <code>.ARW</code>, 61 MP: neutral engine conversion at left; at right the AI's own develop at <code>--strength 0.9</code> with the style read disabled — its proposed crop (5607×3738 out of the sensor's 9504×6336), a global grade, and two local masks including a lift on the cat. The visual judge scored the first proposal 68/100, adopted two guided revisions at 78 and 84, discarded a third that came back at 78, and closed on Accept. That score is automated review, not human aesthetic approval.</figcaption>
+        <img src="images/showcase-cat-analyze-pair.jpg?v=1.2.1" width="1600" height="594" alt="Sony α7R IVA ARW: neutral cat photo beside its AI analyze develop">
+        <figcaption><strong>AI analyze develop.</strong> Sony α7R IVA <code>.ARW</code>, 61 MP: neutral engine conversion at left; at right the AI's own develop at <code>--strength 0.9</code>, style read disabled — its own crop (5607×3738 of the sensor's 9504×6336), a global grade, and two local masks. The visual judge scored 68/100, adopted two revisions at 78 and 84, and closed on Accept. That is automated review, not human aesthetic approval.</figcaption>
       </figure>
     </section>
 
@@ -112,18 +112,18 @@
     <section class="section split-section" id="download" aria-labelledby="download-title">
       <div>
         <p class="section-kicker">Download</p>
-        <h2 id="download-title">Download v1.2.0.</h2>
+        <h2 id="download-title">Download v1.2.1.</h2>
         <p>The published release has 7 assets — the 6 files below plus <code>checksums.txt</code>, which carries the SHA-256 of each:</p>
         <ul>
           <li><code>autoshade.exe</code> — 20,110,336 bytes (CLI)</li>
           <li><code>autoshade-gui.exe</code> — 26,425,856 bytes (desktop app)</li>
-          <li><code>AutoShade-Setup-1.2.0.exe</code> — 14,217,455 bytes (installer)</li>
-          <li><code>autoshade-1.2.0-windows-x64.zip</code> — 18,790,699 bytes (portable archive)</li>
-          <li><code>AutoShade-1.2.0-macos-universal.zip</code> — 37,369,887 bytes (macOS app bundle)</li>
-          <li><code>AutoShade-1.2.0-macos-cli.zip</code> — 16,120,927 bytes (macOS command line only)</li>
+          <li><code>AutoShade-Setup-1.2.1.exe</code> — 14,217,455 bytes (installer)</li>
+          <li><code>autoshade-1.2.1-windows-x64.zip</code> — 18,790,699 bytes (portable archive)</li>
+          <li><code>AutoShade-1.2.1-macos-universal.zip</code> — 37,369,887 bytes (macOS app bundle)</li>
+          <li><code>AutoShade-1.2.1-macos-cli.zip</code> — 16,120,927 bytes (macOS command line only)</li>
         </ul>
         <p>Choose the <strong>installer</strong> for the recommended current-user setup with no administrator access, or the <strong>portable ZIP</strong> to extract and keep the executables beside their bundled assets and Python sidecars. macOS gets a desktop app for the first time in this release: the universal (arm64 + x86_64) <code>AutoShade.app</code>, ad-hoc signed rather than notarised, so the first launch needs one explicit <em>Open Anyway</em> per machine — with the command line inside the same bundle, or as its own smaller archive. Linux is built and tested in CI with no prebuilt binaries yet.</p>
-        <p><a class="button button-primary" href="https://github.com/skymanbp/autoshade/releases/tag/v1.2.0">Open the v1.2.0 release</a></p>
+        <p><a class="button button-primary" href="https://github.com/skymanbp/autoshade/releases/tag/v1.2.1">Open the v1.2.1 release</a></p>
       </div>
       <div class="quickstart" aria-labelledby="quickstart-title">
         <h3 id="quickstart-title">Quickstart</h3>
@@ -147,63 +147,20 @@ autoshade apply "photo.ARW" "recipe.json" -o "developed.tif"</code></pre>
       <p class="section-kicker">Showcase · Part A</p>
       <h2 id="showcase-a-title">AI analysis and style transfer</h2>
       <p class="section-lede">The cat comparison above is the first <code>analyze</code> example: a Sony α7R IVA 61 MP <code>.ARW</code>, shown as straight conversion and AI develop. The AI chose the crop and a restrained global develop plus radial and linear parametric masks; it did not use an AI bitmap segmentation mask.</p>
-      <p>The three established pairs below show different decisions and two current failure modes. Each before is AutoShade's neutral conversion of the same Sony α7R IVA <code>.ARW</code>; each after is an AI-proposed engine render, not a generated image. The faint watermark is identical on both halves of these three older pairs.</p>
+      <p>The pair below is one established example, kept for the failure it discloses rather than the win. Its before is AutoShade's neutral conversion of a Sony α7R IVA <code>.ARW</code>; its after is an AI-proposed engine render, not a generated image, and the faint watermark is identical on both halves. Two further pairs from the same batch, and every earlier one, are in the <a href="https://github.com/skymanbp/autoshade/blob/main/docs/SHOWCASE.md">full showcase gallery</a>.</p>
 
       <article class="case-study">
         <header>
-          <p class="case-number">01</p>
-          <div>
-            <h3>Townhouse and pond: tonal range</h3>
-            <p>The proposal protected white brick while opening the porch and black wall. Its model judge moved from 84 to 86 after a bounded revision. These are model-judge scores recorded when the pair was produced (v0.33.0 showcase batch). <strong>Honest blemish:</strong> the linear sky mask leaves a faint lighter band near the top-left corner.</p>
-          </div>
+          <h3>Hillside neighborhood: establishing scene</h3>
+          <p>Automated visual model review rejected the first acidic-green proposal at 63 and retained a revision scored 87 — model-judge scores recorded when the pair was produced, in the v0.33.0 showcase batch. The landscape gains separation, but the sky is again paler and milkier than the neutral conversion; that known behavior is not captioned as an improvement.</p>
         </header>
         <div class="image-pair">
           <figure>
-            <img src="images/showcase-1-before.jpg?v=1.2.0" width="1200" height="768" alt="Sony α7R IVA ARW, townhouse and pond: neutral develop" loading="lazy">
+            <img src="images/showcase-3-before.jpg?v=1.2.1" width="1200" height="800" alt="Sony α7R IVA ARW, hillside neighborhood: neutral develop" loading="lazy">
             <figcaption><strong>Before:</strong> neutral engine conversion.</figcaption>
           </figure>
           <figure>
-            <img src="images/showcase-1-after.jpg?v=1.2.0" width="1200" height="768" alt="Sony α7R IVA ARW, townhouse and pond: AI develop" loading="lazy">
-            <figcaption><strong>After:</strong> AI tone, white balance, crop, a linear sky hold, and a radial house lift.</figcaption>
-          </figure>
-        </div>
-      </article>
-
-      <article class="case-study">
-        <header>
-          <p class="case-number">02</p>
-          <div>
-            <h3>Balcony view: detail and texture</h3>
-            <p>The siding and shaded structure gain separation; the model judge moved from 78 to 84. These are model-judge scores recorded when the pair was produced (v0.33.0 showcase batch). <strong>Counter-example:</strong> the sky is paler than the neutral base even though the local mask asks for more sky depth.</p>
-          </div>
-        </header>
-        <div class="image-pair portrait-pair">
-          <figure>
-            <img src="images/showcase-2-before.jpg?v=1.2.0" width="800" height="1200" alt="Sony α7R IVA ARW, balcony view: neutral develop" loading="lazy">
-            <figcaption><strong>Before:</strong> neutral engine conversion.</figcaption>
-          </figure>
-          <figure>
-            <img src="images/showcase-2-after.jpg?v=1.2.0" width="800" height="1200" alt="Sony α7R IVA ARW, balcony view: AI develop" loading="lazy">
-            <figcaption><strong>After:</strong> AI texture, clarity, dehaze, tonal changes, and two linear masks.</figcaption>
-          </figure>
-        </div>
-      </article>
-
-      <article class="case-study">
-        <header>
-          <p class="case-number">03</p>
-          <div>
-            <h3>Hillside neighborhood: establishing scene</h3>
-            <p>Automated visual model review rejected the first acidic-green proposal at 63 and retained a revision scored 87. These are model-judge scores recorded when the pair was produced (v0.33.0 showcase batch). The landscape gains separation, but the sky is again paler and milkier than the neutral conversion; that known behavior is not captioned as an improvement.</p>
-          </div>
-        </header>
-        <div class="image-pair">
-          <figure>
-            <img src="images/showcase-3-before.jpg?v=1.2.0" width="1200" height="800" alt="Sony α7R IVA ARW, hillside neighborhood: neutral develop" loading="lazy">
-            <figcaption><strong>Before:</strong> neutral engine conversion.</figcaption>
-          </figure>
-          <figure>
-            <img src="images/showcase-3-after.jpg?v=1.2.0" width="1200" height="800" alt="Sony α7R IVA ARW, hillside neighborhood: AI develop" loading="lazy">
+            <img src="images/showcase-3-after.jpg?v=1.2.1" width="1200" height="800" alt="Sony α7R IVA ARW, hillside neighborhood: AI develop" loading="lazy">
             <figcaption><strong>After:</strong> AI global contrast, restrained color, and green/aqua HSL reductions.</figcaption>
           </figure>
         </div>
@@ -212,22 +169,17 @@ autoshade apply "photo.ARW" "recipe.json" -o "developed.tif"</code></pre>
       <div class="subsection-heading">
         <p class="section-kicker">Style read</p>
         <h3>Neutral, AI develop, and AI develop with references</h3>
-        <p>These triptychs show three states of the same Sony α7R IVA 61 MP <code>.ARW</code>: straight conversion, an AI develop with style influence disabled, and an AI develop that read similar edits from the local style library. Both develops ran at <code>--strength 0.9</code>, so the only variable between the second and third panel is whether the retrieved neighbours reached the model. They demonstrate the style retrieval path, not a pixel-copy or generative transfer.</p>
+        <p>The triptych below shows three states of one Sony α7R IVA 61 MP <code>.ARW</code>: straight conversion, an AI develop with style influence disabled, and an AI develop that read similar edits from the local style library. Both develops ran at <code>--strength 0.9</code>, so the only variable between the second and third panel is whether the retrieved neighbours reached the model. It demonstrates the style retrieval path, not a pixel-copy or generative transfer.</p>
       </div>
 
       <figure class="wide-figure">
-        <img src="images/showcase-island-style-triptych.jpg?v=1.2.0" width="1600" height="564" alt="Lakeside island town: straight conversion, AI develop, and AI develop with style read" loading="lazy">
-        <figcaption><strong>Lakeside island town.</strong> Style off (center): judged 80/100, one guided revision adopted at 84, a second discarded at 83, verdict <em>Accept</em>. Style on (right): the run referenced the four most similar edits from the 169-photo index, was judged 84, and adopted two revisions at 84 and 91 — yet closed on <em>Revise</em>, because the judge's bar was never cleared, so no style-read recipe/XMP was saved. The right-hand panel is retained as a transparent comparison.</figcaption>
+        <img src="images/showcase-island-style-triptych.jpg?v=1.2.1" width="1600" height="564" alt="Lakeside island town: straight conversion, AI develop, and AI develop with style read" loading="lazy">
+        <figcaption><strong>Lakeside island town.</strong> Style off (centre): judged 80/100, one guided revision adopted at 84, verdict <em>Accept</em>. Style on (right): the run referenced the four most similar edits from the 169-photo index, was judged 84, and adopted two revisions at 84 and 91 — yet closed on <em>Revise</em>, so no style-read recipe or XMP was saved. The right panel is kept as a transparent comparison, not a shipped result.</figcaption>
       </figure>
 
       <figure class="wide-figure">
-        <img src="images/showcase-river-style-triptych.jpg?v=1.2.0" width="1600" height="564" alt="River bend: straight conversion, AI develop, and AI develop with style read" loading="lazy">
-        <figcaption><strong>River bend.</strong> Style off: 63 → 69 adopted, a second revision discarded at 68, verdict <em>Accept</em>. Style on: 68 → 72 → 78 adopted, a third discarded at 72, and still <em>Revise</em>. The style read carried this frame further in every round and still did not satisfy the judge; the verdict is reported as it landed, not rounded up.</figcaption>
-      </figure>
-
-      <figure class="wide-figure">
-        <img src="images/showcase-island-three-looks.jpg?v=1.2.0" width="1600" height="1112" alt="Lakeside island town: straight conversion and three AI develops driven by three different direction texts" loading="lazy">
-        <figcaption><strong>One photograph, three looks.</strong> The same frame, the same <code>--style 1.0 --strength 0.9</code>, the same 169-exemplar library — only the direction text changes, and the retrieval hears it: each run pulled a <em>different</em> finished look from the photographer's own 94-photo look library (tagged <em>dark moody low-key / muted desaturated / cross-processed</em>; <em>cinematic, warm golden tones, soft low contrast</em>; <em>cool blue tones, punchy high contrast, cross-processed</em>) and the grades genuinely diverge. Judged 92, 86 → 91 (one guided revision adopted), and 84 (its revision re-scored 73 and was discarded — do-no-harm); all three closed on <em>Revise</em> against the direct-tier target, so none auto-saved.</figcaption>
+        <img src="images/showcase-island-three-looks.jpg?v=1.2.1" width="1600" height="1112" alt="Lakeside island town: straight conversion and three AI develops driven by three different direction texts" loading="lazy">
+        <figcaption><strong>One photograph, three looks.</strong> Same frame, same <code>--style 1.0 --strength 0.9</code>, same 169-exemplar library — only the direction text changes, and the retrieval hears it: each run pulled a <em>different</em> finished look from the photographer's 94-photo look library, and the grades measurably diverge (mean saturation 63 / 18 / 75 against the conversion's 45). Judged 92; 86 → 91; and 84, whose revision re-scored 73 and was discarded — do-no-harm. All three closed on <em>Revise</em>, so none auto-saved.</figcaption>
       </figure>
     </section>
 
@@ -237,13 +189,13 @@ autoshade apply "photo.ARW" "recipe.json" -o "developed.tif"</code></pre>
       <p class="section-lede">Generate a complete visual target, then fit an ordinary engine recipe to its look. The generated target can invent content; the fitted render cannot. The recovered recipe is editable and can be applied deterministically to the original full-resolution RAW.</p>
 
       <figure class="wide-figure">
-        <img src="images/showcase-island-reimagine-fit-triptych.jpg?v=1.2.0" width="1600" height="564" alt="Lakeside island town: neutral conversion, AI-generated target, and reverse-fitted full-resolution engine render" loading="lazy">
-        <figcaption><strong>Lakeside island town, Sony α7R IVA 61 MP <code>.ARW</code>.</strong> Left: neutral engine conversion of a hazy frame. Center: a 3520×2352 target generated with a configured <code>gpt-image-2</code>, asked for the same scene on a clear day — it invented its way through the haze. Right: the recovered recipe rendered on the original RAW at 9504×6336. <code>reimagine</code> measured structural divergence <strong>D = 0.732</strong> against the frame it sent and the fit re-measured <strong>D = 0.731</strong> against the neutral render, so the fit refused the full solve and ran the bounded <strong>atmosphere</strong> mode: exposure within ±1 EV, white-balance gains in [0.80, 1.25], saturation within ±30, no per-channel curves, confidence capped at 0.50. Look error 0.207 → 0.093 at confidence 0.440221, and not one local zone survived its own quality gate — the recovered recipe carries zero masks. The per-band colour mixer proposed a move and gave it back: Orange and Yellow are one-sided on this pair (the generation replaced their population), and the fit treats unmeasurable as unmeasurable, never as equal. It is visibly better than the original and visibly short of the generated frame, which is the honest answer: the haze is <em>in</em> the photograph, and no develop control recovers what was never recorded. <strong>These numbers were measured on the v1.1.0 fit, which is what the three frames show.</strong> v1.2.0 changes this pair deliberately: the Atmosphere white balance is now one weighted median of the per-pixel log-ratio rather than three independent per-channel medians, and exposure and white balance are read over the shared-content population (this pair restricts to 84&nbsp;% / 76&nbsp;%), so the recipe it produces today is not the one rendered here.</figcaption>
+        <img src="images/showcase-island-reimagine-fit-triptych.jpg?v=1.2.1" width="1600" height="564" alt="Lakeside island town: neutral conversion, AI-generated target, and reverse-fitted full-resolution engine render" loading="lazy">
+        <figcaption><strong>Lakeside island town — where the fit refuses.</strong> Neutral conversion of a hazy frame, a 3520×2352 <code>gpt-image-2</code> target asked for the same scene on a clear day, then the recovered recipe rendered on the original RAW. <code>reimagine</code> measured <strong>D = 0.732</strong> and the fit re-measured 0.731, so the full solve was refused and the bounded Atmosphere mode ran: look error 0.207 → 0.093 at confidence 0.440221, and not one local zone survived its gate — the recipe carries zero masks. Orange and Yellow are one-sided here, and the fit treats unmeasurable as unmeasurable, never as equal. Visibly better than the original, visibly short of the generated frame: the haze is <em>in</em> the photograph. <strong>These numbers are the v1.1.0 fit, which is what the frames show; v1.2.0's joint white-balance solve and shared-content population (84&nbsp;% / 76&nbsp;%) produce a different recipe today.</strong> <a href="https://github.com/skymanbp/autoshade/blob/main/docs/SHOWCASE.md">Full measurements →</a></figcaption>
       </figure>
 
       <figure class="wide-figure">
-        <img src="images/showcase-viaduct-reimagine-fit-triptych.jpg?v=1.2.0" width="1600" height="564" alt="Stone viaduct scene: neutral conversion, AI-generated target, and reverse-fitted full-resolution engine render" loading="lazy">
-        <figcaption><strong>Stone viaduct, Sony α7R IVA 61 MP <code>.ARW</code>.</strong> The same three stages on a frame the generator stayed close to: <strong>D = 0.126</strong>, under the 0.35 threshold, so the full solve ran. Look error 0.048 → 0.017 at fit confidence 0.662411 — the global stage reached 0.019, with the per-band colour mixer solving three bands from their own populations (Orange sat −18 lum +4, Yellow sat −18 lum −18, Blue sat +18 lum −3); three frozen-evidence spatial tiles and two evidence-derived field masks bought the rest, each negotiated by the boundary gate. <strong>A blemish v1.0.x disclosed, root-fixed in v1.1.0:</strong> this sky used to carry a visible rectangular seam — the boundary gate read only soft transition pixels a hard-edged tile does not have, reported <code>signed rim 0.000 (0 measured transitions)</code> and passed with nothing measured behind it. The gate now measures the correction's own cross-boundary step across the mask contour (<code>0.0350 -&gt; 0.0118</code> at k=0.372, 160 crossings), zero measurable crossings refuses instead of passing, and the seam reads p90 0.0250 → 0.0052 on the mask-free ruler. <strong>These numbers were measured on the v1.1.0 fit, which is what the three frames show.</strong> v1.2.0’s third zone-acceptance arm — an absolute zone gain clearing the floor with no frame-global regression — admits one further zone on this frame (r1c1, 0.045 → 0.023), so the recipe it produces today is not the one rendered here.</figcaption>
+        <img src="images/showcase-viaduct-reimagine-fit-triptych.jpg?v=1.2.1" width="1600" height="564" alt="Stone viaduct scene: neutral conversion, AI-generated target, and reverse-fitted full-resolution engine render" loading="lazy">
+        <figcaption><strong>Stone viaduct — where the full solve runs.</strong> The same three stages on a frame the generator stayed close to: <strong>D = 0.126</strong>, under the 0.35 threshold. Look error 0.048 → 0.017 at confidence 0.662411; the global stage reached 0.019, and three frozen-evidence tiles plus two field masks bought the rest. <strong>A blemish v1.0.x disclosed, root-fixed in v1.1.0:</strong> this sky carried a visible rectangular seam, because the gate read only the soft transition pixels a hard-edged tile does not have and passed with nothing measured behind it. It now measures the correction's own cross-boundary step, refuses zero measurable crossings instead of passing, and the seam reads p90 0.0250 → 0.0052. <strong>These numbers are the v1.1.0 fit, which is what the frames show; v1.2.0's third zone-acceptance arm admits one further zone (r1c1, 0.045 → 0.023), so today's recipe differs.</strong> <a href="https://github.com/skymanbp/autoshade/blob/main/docs/SHOWCASE.md">Full measurements →</a></figcaption>
       </figure>
 
       <aside class="honesty" aria-label="Reverse-fit limitation">
@@ -259,39 +211,39 @@ autoshade apply "photo.ARW" "recipe.json" -o "developed.tif"</code></pre>
 
       <div class="format-grid">
         <figure>
-          <img src="images/formats/cr2.jpg?v=1.2.0" width="600" height="400" alt="Canon CR2 develop" loading="lazy">
+          <img src="images/formats/cr2.jpg?v=1.2.1" width="600" height="400" alt="Canon CR2 develop" loading="lazy">
           <figcaption><strong>.cr2</strong><span>Canon EOS 40D</span></figcaption>
         </figure>
         <figure>
-          <img src="images/formats/cr3.jpg?v=1.2.0" width="600" height="400" alt="Canon CR3 develop" loading="lazy">
+          <img src="images/formats/cr3.jpg?v=1.2.1" width="600" height="400" alt="Canon CR3 develop" loading="lazy">
           <figcaption><strong>.cr3</strong><span>Canon EOS R6</span></figcaption>
         </figure>
         <figure>
-          <img src="images/formats/nef.jpg?v=1.2.0" width="600" height="399" alt="Nikon NEF develop" loading="lazy">
+          <img src="images/formats/nef.jpg?v=1.2.1" width="600" height="399" alt="Nikon NEF develop" loading="lazy">
           <figcaption><strong>.nef</strong><span>Nikon D700</span></figcaption>
         </figure>
         <figure>
-          <img src="images/formats/arw.jpg?v=1.2.0" width="600" height="400" alt="Sony ARW develop" loading="lazy">
+          <img src="images/formats/arw.jpg?v=1.2.1" width="600" height="400" alt="Sony ARW develop" loading="lazy">
           <figcaption><strong>.arw</strong><span>Sony α7 III</span></figcaption>
         </figure>
         <figure>
-          <img src="images/formats/orf.jpg?v=1.2.0" width="600" height="450" alt="Olympus ORF develop" loading="lazy">
+          <img src="images/formats/orf.jpg?v=1.2.1" width="600" height="450" alt="Olympus ORF develop" loading="lazy">
           <figcaption><strong>.orf</strong><span>Olympus E-M5</span></figcaption>
         </figure>
         <figure>
-          <img src="images/formats/rw2.jpg?v=1.2.0" width="600" height="451" alt="Panasonic RW2 develop" loading="lazy">
+          <img src="images/formats/rw2.jpg?v=1.2.1" width="600" height="451" alt="Panasonic RW2 develop" loading="lazy">
           <figcaption><strong>.rw2</strong><span>Panasonic DMC-GX85</span></figcaption>
         </figure>
         <figure>
-          <img src="images/formats/pef.jpg?v=1.2.0" width="600" height="397" alt="Pentax PEF develop" loading="lazy">
+          <img src="images/formats/pef.jpg?v=1.2.1" width="600" height="397" alt="Pentax PEF develop" loading="lazy">
           <figcaption><strong>.pef</strong><span>Pentax K-5</span></figcaption>
         </figure>
         <figure>
-          <img src="images/formats/dng.jpg?v=1.2.0" width="600" height="398" alt="Ricoh DNG develop" loading="lazy">
+          <img src="images/formats/dng.jpg?v=1.2.1" width="600" height="398" alt="Ricoh DNG develop" loading="lazy">
           <figcaption><strong>.dng</strong><span>Ricoh GR II</span></figcaption>
         </figure>
         <figure>
-          <img src="images/formats/raf.jpg?v=1.2.0" width="600" height="400" alt="Fujifilm RAF X-Trans develop" loading="lazy">
+          <img src="images/formats/raf.jpg?v=1.2.1" width="600" height="400" alt="Fujifilm RAF X-Trans develop" loading="lazy">
           <figcaption><strong>.raf</strong><span>Fujifilm X-S10 · X-Trans, approximate</span></figcaption>
         </figure>
       </div>
@@ -315,7 +267,7 @@ autoshade apply "photo.ARW" "recipe.json" -o "developed.tif"</code></pre>
       <p class="section-kicker">Three pillars</p>
       <h2 id="pillars-title">Three things this does that a RAW developer does not.</h2>
       <p class="section-lede">Everything below the fold is one of these three, or infrastructure for one of these three. Each pillar states its own mathematics and its own measured result; the eight implementation areas that follow are where those results were taken.</p>
-      <p class="section-lede"><strong>These describe v1.2.0 — the download above.</strong> The local description model, the correspondence sidecar, the spatial-tile and free-mask fit stages and the recalibrated retrieval weights all ship in it, and v1.2.0 adds the joint white-balance solve, the shared-content reference population, and a third zone-acceptance arm that buys a correction on an absolute gain.</p>
+      <p class="section-lede"><strong>These describe v1.2.1 — the download above.</strong> The local description model, the correspondence sidecar, the spatial-tile and free-mask fit stages and the recalibrated retrieval weights all ship in it, and v1.2.0 adds the joint white-balance solve, the shared-content reference population, and a third zone-acceptance arm that buys a correction on an absolute gain.</p>
 
       <div class="tech-list">
         <article id="pillar-analysis">
@@ -324,8 +276,8 @@ autoshade apply "photo.ARW" "recipe.json" -o "developed.tif"</code></pre>
             <h3>AI analysis develop</h3>
             <figure class="pillar-figure">
               <picture>
-                <source media="(prefers-color-scheme: dark)" srcset="images/pillar-analysis-dark.svg?v=1.2.0">
-                <img src="images/pillar-analysis-light.svg?v=1.2.0" width="1200" height="470" alt="Diagram: a RAW plus XMP library becomes exemplars carrying a 14-dimension feature, SigLIP 2 image vectors and Qwen3-VL sentences; a query retrieves four neighbours by the hybrid distance; their habits reach the proposer behind an untrusted-data fence and a capped pull moves the result toward the photographer's means" loading="lazy">
+                <source media="(prefers-color-scheme: dark)" srcset="images/pillar-analysis-dark.svg?v=1.2.1">
+                <img src="images/pillar-analysis-light.svg?v=1.2.1" width="1200" height="470" alt="Diagram: a RAW plus XMP library becomes exemplars carrying a 14-dimension feature, SigLIP 2 image vectors and Qwen3-VL sentences; a query retrieves four neighbours by the hybrid distance; their habits reach the proposer behind an untrusted-data fence and a capped pull moves the result toward the photographer's means" loading="lazy">
               </picture>
             </figure>
             <p>Your own catalogue is the style reference. Every Lightroom RAW+XMP pair becomes an exemplar carrying a <strong>14-dimension</strong> EXIF+histogram feature, the twelve sliders you moved, your tone-curve shape, a colour-family summary and a local-work habit — how many masks you enabled, to which use, at what average strength, never a coordinate. Two local models that bill nothing add a <strong>768-D</strong> SigLIP 2 image vector and one Qwen3-VL-2B sentence about the grade. A develop retrieves its <strong>4</strong> nearest past shots by <code>d14 + W_EMB(1−cos) + W_TXT·z(1−cos−hub) + W_DESC·z(1−cos)</code>, where <code>hub</code> subtracts each exemplar's mean vocabulary cosine so a photo that scores high against <em>every</em> direction stops hoarding the top-4; <code>W_EMB=4</code>, <code>W_TXT=0.5</code>, <code>W_DESC=0.5</code> are the leave-one-out winners over the real corpus after that correction, MAE <strong>0.713143 → 0.688864</strong> with a paired 95% CI of <code>[+0.005837, +0.041111]</code> — and opposite direction texts now retrieve different photographs (antonym top-1 overlap <strong>71% → 44.7%</strong>, 149 of 169 exemplars reachable). Their habits reach the model behind an untrusted-data fence, and a capped pull — <strong>0.18</strong> at the shipped Style 0.3, full at 1.0 — moves the proposal toward your means without copying one.</p>
@@ -339,8 +291,8 @@ autoshade apply "photo.ARW" "recipe.json" -o "developed.tif"</code></pre>
             <h3>AI full-image generation, recovered as an editable recipe</h3>
             <figure class="pillar-figure">
               <picture>
-                <source media="(prefers-color-scheme: dark)" srcset="images/pillar-reimagine-fit-dark.svg?v=1.2.0">
-                <img src="images/pillar-reimagine-fit-light.svg?v=1.2.0" width="1200" height="470" alt="Diagram: a generated target is measured against the input by the structural-divergence statistic D, which selects either a full solve or a bounded atmosphere mode; a Tukey-biweight tone regression and gated local stages produce a recipe, and only the recipe reaches the full-resolution render" loading="lazy">
+                <source media="(prefers-color-scheme: dark)" srcset="images/pillar-reimagine-fit-dark.svg?v=1.2.1">
+                <img src="images/pillar-reimagine-fit-light.svg?v=1.2.1" width="1200" height="470" alt="Diagram: a generated target is measured against the input by the structural-divergence statistic D, which selects either a full solve or a bounded atmosphere mode; a Tukey-biweight tone regression and gated local stages produce a recipe, and only the recipe reaches the full-resolution render" loading="lazy">
               </picture>
             </figure>
             <p><code>reimagine</code> composes every prompt onto an unconditional faithfulness scaffold, because <code>input_fidelity</code> is negotiated away by <code>gpt-image-2</code>, then measures its own result with the same statistic the fit uses: <code>D = sqrt((1−rho_grad)² + E_pyr²)</code> over a shared <strong>384×256</strong> raster. Below <code>D = 0.35</code> the full solve runs; at or above it a bounded Atmosphere mode caps EV at <strong>±1</strong>, WB gains to <code>[0.80, 1.25]</code>, saturation to <strong>±30</strong> and curve slope to <code>[0.5, 1.5]</code>. The global tone map is a <strong>64-bin</strong> Tukey-biweight IRLS regression (<code>c = 4.685</code>, three rounds from a weighted median), so invented content loses weight by the estimator's own influence function; a per-band colour mixer then solves saturation and luminance one hue band at a time from that band's own population — hue rotation never — and is judged twice against its own absence. Local work attaches in one fixed order — semantic regions or luminance bands, a frozen-evidence quadtree to <strong>4×4</strong>, then at most two free-form remainder masks — each through the same <strong>3%</strong> two-sided evidence, <code>D &lt; 0.65</code>, CI-excludes-zero and <strong>0.012</strong> rim gates, and a frame-regression budget that is deliberately not uniform — <strong>0.02</strong> for a semantic region, <strong>zero</strong> for a luminance band, a tile or a free mask. What you get back is a recipe you can edit and export, never the generated pixels.</p>
@@ -354,8 +306,8 @@ autoshade apply "photo.ARW" "recipe.json" -o "developed.tif"</code></pre>
             <h3>The mathematics of matching Lightroom</h3>
             <figure class="pillar-figure">
               <picture>
-                <source media="(prefers-color-scheme: dark)" srcset="images/pillar-lightroom-math-dark.svg?v=1.2.0">
-                <img src="images/pillar-lightroom-math-light.svg?v=1.2.0" width="1200" height="470" alt="Diagram: a Lightroom sidecar is read by a scoped XML layer, its slider domains are measured rather than assumed, mask coordinates cross measured frame laws, and each result is published with its residual" loading="lazy">
+                <source media="(prefers-color-scheme: dark)" srcset="images/pillar-lightroom-math-dark.svg?v=1.2.1">
+                <img src="images/pillar-lightroom-math-light.svg?v=1.2.1" width="1200" height="470" alt="Diagram: a Lightroom sidecar is read by a scoped XML layer, its slider domains are measured rather than assumed, mask coordinates cross measured frame laws, and each result is published with its residual" loading="lazy">
               </picture>
             </figure>
             <p>Camera Raw's own scope is read and written by a hand-rolled XML layer, so unknown namespaces survive a merge and sixteen real radial sidecars round-trip their four corners <strong>byte for byte</strong>; measured domains include <code>LocalExposure2012 = EV/4</code>, local Hue <code>/180</code> and global Sharpness <strong>1:1</strong>, and a raster mask is reported as a named bitmap loss rather than approximated. The pixel side is fitted the same way: a monotone Fritsch–Carlson tone LUT, a two-arm Texture model (<code>A1=0.172443</code>, <code>A2=0.304888</code>, all <strong>45 of 45</strong> Lightroom anchors within ±0.02), a measured <strong>290×11</strong> radial feather table, and the brush law <code>k(rho;h) = (1 − rho<sup>m(h)</sup>)<sup>n(h)</sup></code> with a one-parameter flow law <code>kappa = 0.1284</code> (held-out RMS <strong>0.0109</strong>). Mask coordinates follow measured frame laws: radials cross <code>m_lr<sup>−1</sup> ∘ T_engine</code> exactly once on a zero-parameter centre <code>raw_full_dims/2 − DefaultCropOrigin</code> and close <strong>41/41</strong> vectors to ≤1 px, while linear handles are transported to keep the line straight and are openly reported as <em>not</em> pixel-closed at <strong>9.748/7.025/6.336 px</strong> RMS. The falloff is the C1 smoothstep <code>t²(3−2t)</code>: a free-end fit reads RMS <strong>0.0045</strong> against <strong>0.017</strong> for a straight ramp.</p>
@@ -458,6 +410,11 @@ autoshade apply "photo.ARW" "recipe.json" -o "developed.tif"</code></pre>
           <span>Go deeper</span>
           <strong>Architecture</strong>
           <small>Subsystem boundaries and dependency rationale.</small>
+        </a>
+        <a href="https://github.com/skymanbp/autoshade/blob/main/docs/SHOWCASE.md">
+          <span>See more</span>
+          <strong>Full showcase gallery</strong>
+          <small>Every pair and triptych this page has shown, kept and labelled with the batch that produced it rather than quietly replaced.</small>
         </a>
         <a href="https://github.com/skymanbp/autoshade/blob/main/docs/ROADMAP.md">
           <span>What is next</span>

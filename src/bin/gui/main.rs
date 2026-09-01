@@ -172,13 +172,27 @@ enum PrefsAdoption {
 }
 
 /// The migration core, on explicit paths so the battery drives it with temp
-/// directories: rename `legacy` to `current` when only `legacy` exists.
+/// directories: rename `legacy` to `current` when only `legacy` exists,
+/// making `current`'s parent first because on Windows it is not there yet.
 fn adopt_prefs_between(current: &Path, legacy: &Path, adopt: bool) -> PrefsAdoption {
     if !adopt || !legacy.is_dir() {
         return PrefsAdoption::Nothing;
     }
     if current.exists() {
         return PrefsAdoption::KeptBoth;
+    }
+    // `eframe::storage_dir` is TWO levels deep on Windows —
+    // `%APPDATA%\<key>\data` — so `current`'s parent is the app's own folder
+    // under the NEW spelling, which a machine that never ran the new name does
+    // not have. Renaming into it fails ERROR_PATH_NOT_FOUND and the retry the
+    // FellBack arm promises fails identically on every later launch. The two
+    // sibling adoptions (`store::adopt_pre_rename_root`,
+    // `serve::adopted_export_registry_root`) rename WITHIN a directory that
+    // already exists, which is why only this one needs the parent made first.
+    if let Some(parent) = current.parent() {
+        if !parent.as_os_str().is_empty() && std::fs::create_dir_all(parent).is_err() {
+            return PrefsAdoption::FellBack;
+        }
     }
     match std::fs::rename(legacy, current) {
         Ok(()) => PrefsAdoption::Migrated,

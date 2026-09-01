@@ -7884,31 +7884,47 @@
     /// name): the eframe prefs directory follows the rename. The core runs on
     /// explicit paths — the resolver half only names the two directories via
     /// `eframe::storage_dir` and is exercised by every real launch.
+    ///
+    /// The paths here are the ones production actually passes:
+    /// `eframe::storage_dir(key)` is `<roaming>/<key>/data` on Windows, so the
+    /// two directories are TWO levels deep and `<roaming>/AutoShade` does not
+    /// exist on a machine that never ran the new name. An earlier version of
+    /// this test renamed siblings under one existing base — a shape Windows
+    /// never produces — and asserted that a missing destination parent SHOULD
+    /// fall back, which pinned the shipped defect as correct behaviour.
     #[test]
     fn pre_rename_prefs_are_adopted_renamed_kept_or_fallen_back() {
         let base = std::env::temp_dir()
             .join(format!("autoshade-c2-prefs-adopt-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
         std::fs::create_dir_all(&base).unwrap();
-        let legacy = base.join("Autoshop");
-        let current = base.join("AutoShade");
+        // `eframe::storage_dir` shape: <base>/<key>/data, two levels deep.
+        let storage_dir = |key: &str| base.join(key).join("data");
+        let legacy = storage_dir("Autoshop");
+        let current = storage_dir("AutoShade");
         // Nothing to adopt.
         assert_eq!(adopt_prefs_between(&current, &legacy, true), PrefsAdoption::Nothing);
-        // The real thing: the directory moves wholesale, prefs file included.
-        std::fs::create_dir_all(legacy.join("data")).unwrap();
-        std::fs::write(legacy.join("data").join("app.ron"), "(prefs)").unwrap();
+        // The real thing: the directory moves wholesale, prefs file included —
+        // and `base/AutoShade` is deliberately absent, exactly as on a machine
+        // upgrading from a pre-rename build.
+        std::fs::create_dir_all(&legacy).unwrap();
+        std::fs::write(legacy.join("app.ron"), "(prefs)").unwrap();
+        assert!(!base.join("AutoShade").exists(), "the destination parent is absent");
         assert_eq!(adopt_prefs_between(&current, &legacy, true), PrefsAdoption::Migrated);
-        assert!(current.join("data").join("app.ron").is_file(), "the prefs came along");
+        assert!(current.join("app.ron").is_file(), "the prefs came along");
         assert!(!legacy.exists(), "moved, not copied");
         // Both spellings present: the new one wins and the old is untouched.
         std::fs::create_dir_all(&legacy).unwrap();
         assert_eq!(adopt_prefs_between(&current, &legacy, true), PrefsAdoption::KeptBoth);
         assert!(legacy.exists(), "kept, not merged or deleted");
-        // A refused rename (destination parent missing) falls back to the
-        // legacy key for the session instead of resetting anyone's prefs.
-        let orphan = base.join("missing-parent").join("AutoShade");
-        std::fs::remove_dir_all(&current).unwrap();
-        assert_eq!(adopt_prefs_between(&orphan, &legacy, true), PrefsAdoption::FellBack);
+        // A rename that CANNOT be rescued by making the parent: a regular file
+        // sits where the destination's parent directory would go, so
+        // `create_dir_all` fails and the session keeps the legacy key rather
+        // than resetting anyone's prefs.
+        let blocked_parent = base.join("blocked");
+        std::fs::write(&blocked_parent, "not a directory").unwrap();
+        let blocked = blocked_parent.join("AutoShade").join("data");
+        assert_eq!(adopt_prefs_between(&blocked, &legacy, true), PrefsAdoption::FellBack);
         assert!(legacy.exists(), "nothing lost on the failed arm");
         // The macOS opt-out arm: adopt=false answers Nothing even with a
         // legacy directory present.

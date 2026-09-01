@@ -1,7 +1,8 @@
 # AutoShade — Architecture
 
-> Status: **implemented** (v1.2.0 — the AutoShade rename and the
-> honest-disclosure release). The reverse-fit's
+> Status: **implemented** (v1.2.1 — the AutoShade rename, the
+> honest-disclosure release, and a Windows preferences migration that
+> could never have succeeded). The reverse-fit's
 > in-range estimator is now a PAIRED ROBUST REGRESSION (2026-08-26): on
 > same-frame pairs the tone map is estimated from corresponding pixels
 > (per-bin Tukey-IRLS means, median start, robust weight × evidence weight),

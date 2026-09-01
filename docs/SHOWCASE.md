@@ -1,7 +1,11 @@
 # AutoShade showcase
 
-Further examples behind the frames in the
-[README's results section](../README.md#results-two-batches-six-frames): the
+Further examples behind the frames on
+[autoshade.dev](https://autoshade.dev/#showcase-a) and in the
+[README's results section](../README.md#results-two-batches-six-frames). The
+site shows the seven frames that each carry a claim no other frame makes; this
+page is the whole set, including the three it links here rather than displays:
+the
 current 2026-08-30 style-read and reimagine triptychs, the three established
 `analyze` pairs — including two documented failure modes — and the earlier
 batches, kept and labelled rather than quietly replaced. Image paths are

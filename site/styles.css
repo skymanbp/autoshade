@@ -17,6 +17,20 @@
   --radius-md: 1rem;
   --radius-lg: 1.5rem;
   --measure: 74rem;
+  /* Total inline gutter for every full-width rail. Redefined once in the
+     40rem query so `.section`, `.header-inner`, `.site-footer` and the
+     `.part-b` separator narrow together instead of one at a time. */
+  --gutter: 2rem;
+  /* One reading measure for every prose block on the page. 51rem is the
+     value six of the seven `.section-lede` elements already resolved to
+     via the `.prose-intro/.showcase/.technology > p` rule below; the
+     seventh (#formats, the only content section with no prose class) was
+     the odd one out at 48rem. */
+  --measure-text: 51rem;
+  /* The numbered-item rail, declared once so `.tech-list` cannot drift
+     from any future user of the same idiom the way `.case-study` did. */
+  --rail: 3rem;
+  --rail-gap: 1.5rem;
   --font-sans: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   --font-mono: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
 }
@@ -193,7 +207,7 @@ h4 {
 .header-inner {
   display: flex;
   align-items: center;
-  width: min(calc(100% - 2rem), var(--measure));
+  width: min(calc(100% - var(--gutter)), var(--measure));
   min-height: 4.4rem;
   margin: 0 auto;
   gap: 1.6rem;
@@ -242,7 +256,7 @@ h4 {
 }
 
 .section {
-  width: min(calc(100% - 2rem), var(--measure));
+  width: min(calc(100% - var(--gutter)), var(--measure));
   margin: 0 auto;
   padding: clamp(5rem, 10vw, 9rem) 0;
   border-bottom: 1px solid var(--line);
@@ -259,7 +273,7 @@ h4 {
 }
 
 .section-lede {
-  max-width: 48rem;
+  max-width: var(--measure-text);
   margin-bottom: 2.2rem;
   color: var(--ink-soft);
   font-size: clamp(1.12rem, 1.8vw, 1.35rem);
@@ -368,6 +382,24 @@ h4 {
   font-weight: 680;
 }
 
+/* The UA stylesheet sets `figure { margin: 1em 40px }`. The h1..p reset above
+   zeroes only margin-top and `.image-pair figure` zeroed only margin-bottom, so
+   40px INLINE margins survived on `.hero-figure` and on every before/after
+   frame: the page's largest image and all six case-study frames sat 40px inside
+   the column `.wide-figure` and `.pillar-figure` fill, and `.image-pair`'s
+   declared `gap: 1rem` rendered as a 96px gutter (40 + 16 + 40). Every figure
+   idiom sets its own margin here, so no UA default can reach any of them. */
+.hero-figure,
+.wide-figure,
+.pillar-figure {
+  margin: 0 0 2.2rem;
+}
+
+.image-pair figure,
+.format-grid figure {
+  margin: 0;
+}
+
 .hero-figure,
 .wide-figure,
 .image-pair figure,
@@ -376,6 +408,13 @@ h4 {
   border: 1px solid var(--line);
   border-radius: var(--radius-md);
   background: var(--surface);
+}
+
+/* The tile grid deliberately sits flat; it used to be granted the shadow above
+   and revoke it 200 lines later, which is a cascade collision, not a choice. */
+.hero-figure,
+.wide-figure,
+.image-pair figure {
   box-shadow: var(--shadow);
 }
 
@@ -401,10 +440,12 @@ h4 {
   color: var(--ink);
 }
 
+/* Higher specificity than `.section-lede`, so this is what six of the seven
+   ledes actually resolved to. Same token now, so the two cannot diverge. */
 .prose-intro > p:not(.section-kicker),
 .showcase > p:not(.section-kicker),
 .technology > p:not(.section-kicker) {
-  max-width: 51rem;
+  max-width: var(--measure-text);
 }
 
 .feature-grid {
@@ -471,7 +512,8 @@ h4 {
   box-shadow: var(--shadow);
 }
 
-.quickstart ol {
+.quickstart ol,
+.split-section ul {
   padding-left: 1.4rem;
 }
 
@@ -491,11 +533,13 @@ h4 {
   border-top: 1px solid var(--line);
 }
 
+/* A plain block on the section's own left edge, not a second numbered rail:
+   the showcase keeps one before/after pair, so an index column would render a
+   lone number, and two rail geometries (this one indented 4.5rem, `.tech-list`
+   6rem) were the page's most visible disagreement about where text starts. */
 .case-study header {
-  display: grid;
-  grid-template-columns: 3rem minmax(0, 42rem);
+  max-width: var(--measure-text);
   margin-bottom: 1.8rem;
-  gap: 1.5rem;
 }
 
 .case-study header p:last-child {
@@ -503,7 +547,6 @@ h4 {
   color: var(--ink-soft);
 }
 
-.case-number,
 .tech-index {
   color: var(--warm);
   font-family: var(--font-mono);
@@ -518,16 +561,11 @@ h4 {
   gap: 1rem;
 }
 
-.image-pair figure {
-  margin-bottom: 0;
-}
-
-.portrait-pair {
-  max-width: 54rem;
-}
-
+/* `.portrait-pair { max-width: 54rem }` retired with the portrait pair it
+   capped: it was the only figure block on the page narrower than the column,
+   and its single user is now in docs/SHOWCASE.md. */
 .subsection-heading {
-  max-width: 48rem;
+  max-width: var(--measure-text);
   margin: 1rem 0 2rem;
 }
 
@@ -539,18 +577,22 @@ h4 {
   color: var(--ink-soft);
 }
 
-.wide-figure {
-  margin: 0 0 2.2rem;
-}
-
 /* The pillar diagrams are SVG line art, not photographs: they carry their own
    background and their own theme, so they take the frame the photo figures take
    but none of the surface fill behind it. */
 .pillar-figure {
-  margin: 0 0 1.6rem;
   overflow: hidden;
   border: 1px solid var(--line);
   border-radius: var(--radius-md);
+}
+
+/* A diagram belongs to its numbered item but is not prose, so it reclaims the
+   rail and spans the same column every showcase figure fills. Without this the
+   page renders figures at two widths and two left edges: 56rem indented 6rem
+   here, 74rem flush everywhere else. */
+.tech-list .pillar-figure {
+  width: calc(100% + var(--rail) + var(--rail-gap));
+  margin-left: calc(-1 * (var(--rail) + var(--rail-gap)));
 }
 
 .pillar-figure img {
@@ -559,12 +601,23 @@ h4 {
   height: auto;
 }
 
+/* The content box here already matches `.section` exactly -- the padding
+   formula resolves to min(100% - 2rem, var(--measure)) branch for branch -- but
+   the element itself is the viewport wide, so the `border-bottom` inherited
+   from `.section` painted edge to edge while all seven sibling separators
+   stopped at the measure. The band stays full-bleed; the line does not.
+   `max-width: none` is gone with it: `.section` never sets max-width, so it
+   only ever restated the initial value. */
 .part-b {
   width: 100%;
-  max-width: none;
-  padding-right: max(1rem, calc((100% - var(--measure)) / 2));
-  padding-left: max(1rem, calc((100% - var(--measure)) / 2));
+  padding-right: max(calc(var(--gutter) / 2), calc((100% - var(--measure)) / 2));
+  padding-left: max(calc(var(--gutter) / 2), calc((100% - var(--measure)) / 2));
+  border-bottom: 0;
   background: var(--page-raised);
+  background-image: linear-gradient(var(--line), var(--line));
+  background-repeat: no-repeat;
+  background-size: min(calc(100% - var(--gutter)), var(--measure)) 1px;
+  background-position: bottom center;
 }
 
 .part-b .wide-figure {
@@ -578,10 +631,6 @@ h4 {
   gap: 1rem;
 }
 
-.format-grid figure {
-  margin: 0;
-  box-shadow: none;
-}
 
 .format-grid img {
   aspect-ratio: 3 / 2;
@@ -647,14 +696,27 @@ h4 {
 
 .tech-list article {
   display: grid;
-  grid-template-columns: 3rem minmax(0, 1fr);
+  grid-template-columns: var(--rail) minmax(0, 1fr);
   padding: clamp(2.5rem, 5vw, 4.5rem) 0;
   border-bottom: 1px solid var(--line);
-  gap: clamp(1rem, 4vw, 3rem);
+  gap: var(--rail-gap);
 }
 
+/* The column is the full remaining width so the diagrams can fill it; the
+   prose inside it is capped at the one reading measure, which is what the
+   retired 56rem cap was really for. */
 .tech-list article > div:last-child {
-  max-width: 56rem;
+  max-width: none;
+}
+
+.tech-list article > div:last-child > p {
+  max-width: var(--measure-text);
+}
+
+/* The section already draws its own rule 128px below; a second identical line
+   under the last article read as a doubled separator. */
+.tech-list article:last-child {
+  border-bottom: 0;
 }
 
 .tech-list h3 {
@@ -728,7 +790,7 @@ h4 {
 .site-footer {
   display: flex;
   justify-content: space-between;
-  width: min(calc(100% - 2rem), var(--measure));
+  width: min(calc(100% - var(--gutter)), var(--measure));
   margin: 0 auto;
   padding: 3.2rem 0 4rem;
   border-top: 1px solid var(--line);
@@ -811,8 +873,12 @@ h4 {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
+  /* `1fr` is `minmax(auto, 1fr)`, so the track's floor is the grid item's
+     min-content -- and `.quickstart` holds a <pre> whose longest line is wider
+     than the viewport, which gave the whole document horizontal overflow below
+     717px. `minmax(0, 1fr)` lets `pre`'s own `overflow-x: auto` do its job. */
   .split-section {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
   }
 
   .split-section > div:first-child {
@@ -829,13 +895,8 @@ h4 {
     font-size: 0.96rem;
   }
 
-  .section {
-    width: min(calc(100% - 1.25rem), var(--measure));
-  }
-
-  .header-inner,
-  .site-footer {
-    width: calc(100% - 1.25rem);
+  :root {
+    --gutter: 1.25rem;
   }
 
   .hero-facts {
@@ -870,15 +931,14 @@ h4 {
     gap: 0.5rem;
   }
 
-  .case-study header,
-  .tech-list article {
-    grid-template-columns: 2rem minmax(0, 1fr);
-    gap: 0.6rem;
-  }
-
-  .part-b {
-    padding-right: 0.625rem;
-    padding-left: 0.625rem;
+  /* Redefine the tokens rather than the grid: `.tech-list article` and the
+     `.pillar-figure` breakout both derive from them, so a hardcoded override
+     here would move the rail without moving the figure that reclaims it --
+     which is exactly what it did, overhanging the section's left edge by
+     1.9rem. `.case-study header` is a plain block now and needs no rail. */
+  .tech-list {
+    --rail: 2rem;
+    --rail-gap: 0.6rem;
   }
 
   .format-grid figcaption {

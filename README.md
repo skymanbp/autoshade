@@ -8,7 +8,7 @@
 An AI decides *what to change*. A deterministic Rust engine *does* it.
 **In the recipe-development path, the AI never touches a pixel.**
 
-[Download v1.2.0](https://github.com/skymanbp/autoshade/releases/tag/v1.2.0) ·
+[Download v1.2.1](https://github.com/skymanbp/autoshade/releases/tag/v1.2.1) ·
 [Architecture](docs/ARCHITECTURE.md) ·
 [Roadmap](docs/ROADMAP.md) ·
 [MIT](LICENSE)
@@ -455,7 +455,7 @@ estimate. Sources are the pinned claims in
 
 | What | Measured | Where |
 |---|---|---|
-| Automated test battery | 1275 library / 23 CLI / 159 GUI / 2+2 contract tests; `check_docs` re-derives the pinned release claims | [Tech stack](#tech-stack-algorithms-and-design-philosophy) |
+| Automated test battery | 1280 library / 23 CLI / 159 GUI / 2+2 contract tests; `check_docs` re-derives the pinned release claims | [Tech stack](#tech-stack-algorithms-and-design-philosophy) |
 | RAW coverage | 24 extensions, 725 camera bodies; nine-camera format zoo 9/9 at the last release gate | [Supported formats](#supported-formats) |
 | Lightroom Texture parity | 45 of 45 period/depth anchors within ±0.02 | [Develop pipeline](#develop-pipeline-and-tone-model) |
 | Radial mask closure | 41 of 41 measured vectors within ≤1 px | [Lens correction](#lens-correction-and-lightroom-mask-frame-laws) |
@@ -463,7 +463,7 @@ estimate. Sources are the pinned claims in
 | Brush geometry | D1 error 874 px → 9.8 px after pixel-centre sampling and the pixel/aspect metric | [Masks](#masks) |
 | X-Trans demosaic (approximate) | X-S10 G/R ratio 1.5503 → 0.9476 | [RAW decode](#raw-decode-and-cfa) |
 | Reverse-fit, island town (atmosphere mode) | look error 0.207 → 0.093, confidence 0.440221, generated-target divergence D = 0.731 (0.732 as `reimagine` measured it) | [Results](#results-two-batches-six-frames) |
-| Reverse-fit, stone viaduct (full solve) | look error 0.048 → 0.015 (0.019 global with the per-band mixer solving Orange −18, Yellow −18, Blue +18 saturation; four spatial tiles and one field mask bought the rest), confidence 0.662411, D = 0.126 | [docs/SHOWCASE.md](docs/SHOWCASE.md) |
+| Reverse-fit, stone viaduct (full solve) | look error 0.048 → 0.017 (0.019 global with the per-band mixer solving Orange −18, Yellow −18, Blue +18 saturation; three spatial tiles and two field masks bought the rest), confidence 0.662411, D = 0.126 | [docs/SHOWCASE.md](docs/SHOWCASE.md) |
 | Local-field ceiling, calibration pair | global fit 0.0961 against a ceiling of 0.0700; the accepted sky zone realizes 0.134 of the distance | [What is new §7](#7-a-bilateral-grid-local-field-prices-every-local-producer-first) |
 | AI develop, model judge | 2026-08-30 batch at `--strength 0.9`, style off / style 1.0: island 80 → 84 / 84 → 91; river 63 → 69 / 68 → 78; shoreline 68 → 84 / 61 → 72. Earlier pairs (townhouse 84 → 86, balcony 78 → 84, hillside 63 → 87) are the v0.33.0 batch and are labelled as such | [docs/SHOWCASE.md](docs/SHOWCASE.md) |
 | Style retrieval weights | corpus harness (169 described exemplars, 156 queries): `W_EMB=4`, `W_TXT=0.5`, `W_DESC=0.5`, standardised variant with the text-hubness correction — MAE 0.688864 vs baseline 0.713143, +0.024280, CI [+0.005837, +0.041111] under the prose proxy; the corrected point at the old `W_TXT=4` regresses with CI [−0.069654, −0.005140], which is why the weight moved; under the tag-string proxy nothing beats the text-free row; `W_LOOK=1.0` is unmeasured (the harness cannot see the look library) and its scale is a real ratio against the direction terms — it ships inside a stable band, order unchanged to 2x and first moving at 4x | [AI advisor](#ai-advisor-and-reverse-fit) |
@@ -473,7 +473,7 @@ estimate. Sources are the pinned claims in
 
 ### Download a release
 
-The v1.2.0 release is built by GitHub Actions from the tag and provides the
+The v1.2.1 release is built by GitHub Actions from the tag and provides the
 Windows front ends plus a first macOS universal (arm64 + x86_64) CLI archive;
 Linux is built and tested in CI with no prebuilt binaries yet. `checksums.txt`
 on the release page carries the SHA-256 of every asset.
@@ -482,21 +482,21 @@ on the release page carries the SHA-256 of every asset.
 |---|---:|---|
 | `autoshade.exe` (CLI) | 20,110,336 bytes | `2e0b1cf90837010c657bff5db2229fb73f145a5322397faaa72155207c7dbbc5` |
 | `autoshade-gui.exe` (desktop app) | 26,425,856 bytes | `ade218e804dab995bd79c47608f22198a0a2ceecf932d6045467865b71289919` |
-| `AutoShade-Setup-1.2.0.exe` (installer) | 14,217,455 bytes | `9a36788d78f6557d013cb0cbee71f34bae150918f3b806a42441fbd049685ffd` |
-| `autoshade-1.2.0-windows-x64.zip` (portable archive) | 18,790,699 bytes | `b03bb5aec0335ab22514afe7117530bf36883fa1460697fd1382e7e1d974d8ea` |
-| `AutoShade-1.2.0-macos-universal.zip` (macOS app bundle) | 37,369,887 bytes | `b42df0055af99780e3e71939fa481e790cc6ce846cbd50ee2414f3a7dda16533` |
-| `AutoShade-1.2.0-macos-cli.zip` (macOS command line only) | 16,120,927 bytes | `8f04523db95c25f8b8b71824b82512f0e3e69c572e1ccd96bcf68125029232cb` |
+| `AutoShade-Setup-1.2.1.exe` (installer) | 14,217,455 bytes | `9a36788d78f6557d013cb0cbee71f34bae150918f3b806a42441fbd049685ffd` |
+| `autoshade-1.2.1-windows-x64.zip` (portable archive) | 18,790,699 bytes | `b03bb5aec0335ab22514afe7117530bf36883fa1460697fd1382e7e1d974d8ea` |
+| `AutoShade-1.2.1-macos-universal.zip` (macOS app bundle) | 37,369,887 bytes | `b42df0055af99780e3e71939fa481e790cc6ce846cbd50ee2414f3a7dda16533` |
+| `AutoShade-1.2.1-macos-cli.zip` (macOS command line only) | 16,120,927 bytes | `8f04523db95c25f8b8b71824b82512f0e3e69c572e1ccd96bcf68125029232cb` |
 
 Download from the
-[v1.2.0 release page](https://github.com/skymanbp/autoshade/releases/tag/v1.2.0):
+[v1.2.1 release page](https://github.com/skymanbp/autoshade/releases/tag/v1.2.1):
 
-- **Installer (recommended):** run `AutoShade-Setup-1.2.0.exe`. It installs for
+- **Installer (recommended):** run `AutoShade-Setup-1.2.1.exe`. It installs for
   the current user without administrator access, adds Start Menu shortcuts,
   offers optional desktop and user `PATH` tasks, and removes its own files on
   uninstall while keeping the develop store in `%LOCALAPPDATA%\autoshade`.
   Upgrading over a pre-rename install also deletes the executables, icon and
   fonts that carried the old name.
-- **Portable archive:** extract `autoshade-1.2.0-windows-x64.zip` to a directory
+- **Portable archive:** extract `autoshade-1.2.1-windows-x64.zip` to a directory
   you can keep intact and run either executable from there, beside the bundled
   `assets/` and `python/` sidecars.
 
@@ -505,12 +505,12 @@ Download from the
 Two macOS archives ship, both universal (Apple silicon and Intel in one
 binary):
 
-- `AutoShade-1.2.0-macos-universal.zip` is the app. Unzip it and move
+- `AutoShade-1.2.1-macos-universal.zip` is the app. Unzip it and move
   `AutoShade.app` to `/Applications`. The command-line binary travels inside
   the same bundle — `AutoShade.app/Contents/MacOS/autoshade` — so this download
   alone is enough for a terminal user too; symlink it onto your `PATH` if you
   want a short name.
-- `AutoShade-1.2.0-macos-cli.zip` is the command line on its own, with the same
+- `AutoShade-1.2.1-macos-cli.zip` is the command line on its own, with the same
   sidecars and assets beside it, for anyone who does not want a GUI bundle.
 
 Unpack either with Finder or `ditto -x -k <zip> <dir>`.
@@ -783,7 +783,7 @@ claims. Model weights are not stored in this repository.
 
 ## Status, roadmap, and known limitations
 
-Release gates for v1.2.0 cover the CLI, desktop GUI, sidecar contracts, format
+Release gates for v1.2.1 cover the CLI, desktop GUI, sidecar contracts, format
 fixtures, and deterministic renderer; the built artifacts' sizes and hashes
 are listed above. macOS ships prebuilt binaries and a desktop app for the
 first time in this release, and nobody has used them interactively: CI builds
