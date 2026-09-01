@@ -121,16 +121,17 @@ the last subsection lists what is designed but not yet shipped.
 
 <sub><b>One photograph, four looks.</b> The straight conversion of a hazy
 lakeside frame and three AI develops of the same RAW at the same
-<code>--style 1.0 --strength 0.9</code> against the same 169-exemplar
-index of the photographer's own Lightroom edits — only the <b>direction
-text</b> changes. Each run retrieves the four most similar of the
-photographer's own edits and states their habits to the model as the target,
-so the direction moves the result within that anchor rather than to three
-unrelated grades (mean saturation 23 % / 12 % / 19 % for moody / golden / vivid against the conversion's
-18 %; all three runs ended on the verifier's <i>Revise</i> and are
-rendered from their unsaved proposals).
-Judge trails and prompts in [docs/SHOWCASE.md](docs/SHOWCASE.md); model-judge
-scores are automated review, not human aesthetic approval.</sub>
+<code>--strength 0.9</code> — only the <b>direction text</b> changes. The
+index behind them held the photographer's 94-photo finished-look library and
+no RAW+XMP exemplars, so each run took one finished photo, chosen by the
+direction text, as an image reference, and the direction led: mean saturation
+34 % / 12 % / 29 % for moody / golden / vivid against the conversion's 17 %,
+mean brightness 38 % / 61 % / 65 % against 47 %. With the photographer's own
+169 edits indexed at <code>--style 1.0</code> the same three directions
+stayed inside those edits' cool, hazy register (23 % / 11 % / 18 %) — that is
+what the Style axis is for, and a direction-led tier is registered for
+v1.2.3. Judge trails and prompts in [docs/SHOWCASE.md](docs/SHOWCASE.md);
+model-judge scores are automated review, not human aesthetic approval.</sub>
 
 `autoshade style-index <dir>` (or the GUI's **Style reference library**) turns
 *every finished edit you ever made* — each Lightroom RAW+XMP pair — into an
@@ -464,7 +465,7 @@ estimate. Sources are the pinned claims in
 | Reverse-fit, stone viaduct (full solve) | look error 0.161 → 0.050 at confidence 0.25 (a global solve, the per-band mixer on Orange/Yellow/Aqua/Blue, two semantic zones, four boundary-gated tiles and two field masks), D = 0.180; the sky tile's seam 0.0278 → 0.0042 (k 0.121), delivered +3.15 → +0.92 codes | [What is new §2](#2-reverse-fit-inverse-rendering-from-any-finished-look) |
 | Reverse-fit, Cornwall islet (full solve, composed calibration) | look error 0.137 → 0.027 at confidence 0.65, D = 0.136 sized from the sensor frame (0.304 from the cropped preview) | [docs/SHOWCASE.md](docs/SHOWCASE.md) |
 | Local-field ceiling, calibration pair | global fit 0.0961 against a ceiling of 0.0700; the accepted sky zone realizes 0.134 of the distance | [What is new §7](#7-a-bilateral-grid-local-field-prices-every-local-producer-first) |
-| AI develop, model judge | 2026-09-01 four-looks batch at `--style 1.0 --strength 0.9`: moody 87 → 89 (revision adopted); golden 81 (revision 78 discarded; the proposer never set the grain the direction asked for); vivid 72 → 82 (adopted) → 73 (discarded). All three runs ended on the verifier's Revise, so none auto-saved; the figure renders their final proposals | [docs/SHOWCASE.md](docs/SHOWCASE.md) |
+| AI develop, model judge | 2026-09-01 four-looks batch, finished-look library only, `--strength 0.9`: moody 71 (guided revision 64 discarded), verdict Accept; golden 84 → 92 (adopted) after the verifier twice sent the proposal back for the grain it never set, verdict Revise — unsaved, the figure renders the proposal; vivid 64 → 72 → 84 (adopted) → 73 (discarded), verdict Accept. The same directions on the full 169 + 94 index at `--style 1.0`: 87 → 89, 81, 72 → 82 → 73, all three Revise | [docs/SHOWCASE.md](docs/SHOWCASE.md) |
 | Style retrieval weights | corpus harness (169 described exemplars, 156 queries): `W_EMB=4`, `W_TXT=0.5`, `W_DESC=0.5`, standardised variant with the text-hubness correction — MAE 0.688864 vs baseline 0.713143, +0.024280, CI [+0.005837, +0.041111] under the prose proxy; the corrected point at the old `W_TXT=4` regresses with CI [−0.069654, −0.005140], which is why the weight moved; under the tag-string proxy nothing beats the text-free row; `W_LOOK=1.0` is unmeasured (the harness cannot see the look library) and its scale is a real ratio against the direction terms — it ships inside a stable band, order unchanged to 2x and first moving at 4x | [AI advisor](#ai-advisor-and-reverse-fit) |
 | Memory budget | 1800 MB per photo from a 1771 MB reference probe; 4 GiB RAW admission gate | [Application](#application-and-infrastructure) |
 
@@ -479,12 +480,12 @@ on the release page carries the SHA-256 of every asset.
 
 | File | Size | SHA-256 |
 |---|---:|---|
-| `autoshade.exe` (CLI) | 20,110,336 bytes | `1691fd41d76efd60efbd5ae444a1dc9d4ee74db83d1746b66580fb8ec0ed8636` |
-| `autoshade-gui.exe` (desktop app) | 26,424,832 bytes | `f32b867e5adb44bc36b99d33e229684c10ef3e0b18090d60500404304715a260` |
-| `AutoShade-Setup-1.2.2.exe` (installer) | 14,212,337 bytes | `c147396ab2243ce6f8993631511838b9af580213f1589c379e33a675b827a742` |
-| `autoshade-1.2.2-windows-x64.zip` (portable archive) | 18,790,752 bytes | `2f0f8be598f6e5401a4d5a6d7f3b70f88c18052216bc6fc105444e7e3fbf3929` |
-| `AutoShade-1.2.2-macos-universal.zip` (macOS app bundle) | 37,368,504 bytes | `73618c2abda8dfe25f46d9199fef55e1f53813eb558ceadd184d2fef7d263def` |
-| `AutoShade-1.2.2-macos-cli.zip` (macOS command line only) | 16,121,719 bytes | `51558b8ed0e8a2d46d2189d6fe23fc408f871fe29ef724ad89359642cf1eb93b` |
+| `autoshade.exe` (CLI) | 20,207,104 bytes | `2da324a9e877908e38eacac79028e0e4dd8665fb5b11a4a6c3a2329f49dca242` |
+| `autoshade-gui.exe` (desktop app) | 26,497,024 bytes | `46fe35d7dea1f60b3bda9df37c5b807a83eadacac42371e0b706616781330c4f` |
+| `AutoShade-Setup-1.2.2.exe` (installer) | 14,221,824 bytes | `fbe812176eceba7c7413d60a29e7b28028cefd2bcf6639b8440d415d94229306` |
+| `autoshade-1.2.2-windows-x64.zip` (portable archive) | 18,884,742 bytes | `fda462e21efc2413d4636f13d5482626349fb4b3e8964b3278ec84008bcf4b5b` |
+| `AutoShade-1.2.2-macos-universal.zip` (macOS app bundle) | 37,523,500 bytes | `433a35267f50100b9282a9cfb1d6c7e4fefda890a9c10f33670bb33a91755999` |
+| `AutoShade-1.2.2-macos-cli.zip` (macOS command line only) | 16,197,828 bytes | `32f7b8679c7ee2364ae2295731774c3ac2c7ee1056db531af90d8d5941150188` |
 
 Download from the
 [v1.2.2 release page](https://github.com/skymanbp/autoshade/releases/tag/v1.2.2):

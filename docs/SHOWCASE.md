@@ -3,7 +3,8 @@
 The three figures behind the README's pillars and the frames on
 [autoshade.dev](https://autoshade.dev/#showcase-a), with every number the
 captions quote and the prompts that bought the generated targets. All three
-were produced on the v1.2.2 build on 2026-09-01; every frame not marked
+were produced on 2026-09-01 — Part B on the v1.2.2 build, Part A on the
+pre-release tree as its caption says; every frame not marked
 *generated* is rendered by AutoShade's engine from a recipe, and every
 "straight conversion" is AutoShade's own neutral develop of the RAW, not the
 camera JPEG. Model-judge scores are automated review, not human aesthetic
@@ -20,32 +21,42 @@ defects v1.2.2 fixes on the way to this page (see
 
 <sub><b>Lakeside island town.</b> Top left, the straight conversion of a hazy
 frame. The other three are AI develops of the same RAW at the same
-<code>--style 1.0 --strength 0.9</code> against the same style index — a
-169-exemplar library built from the photographer's own Lightroom
-RAW+XMP pairs (SigLIP 2 image vectors + Qwen3-VL descriptions) and a
-94-photo finished-look library — and the only thing that changes
-between them is the <b>direction text</b>. Each run retrieves the four most
-similar of the photographer's own edits and the two nearest finished photos,
-states the edits' habits to the model as the target (that is what
-<code>--style 1.0</code> means) and shows it the nearest finished photo as an
-image; the visual judge then closes the loop. So the direction moves the
-result <i>within</i> the photographer's own cool, hazy register rather than to
-three unrelated grades: mean saturation 23 % / 12 % / 19 % (moody / golden / vivid) against the
-conversion's 18 %, mean brightness 53 % / 56 % / 53 % against
-46 %. Direction and judge trail, per panel: <i>dark moody low-key
-tones, a cross-processed colour treatment, a teal-and-orange split tone</i> —
-visual judge 87/100 Revise, its guided revision re-scored 89 and was adopted, the verifier's word on the adopted recipe was Revise; <i>warm golden tones, film-like grain, lifted matte
-shadows</i> — the verifier held Revise through two text revisions because the proposer never set the grain the direction asked for (grain stayed 0), the visual judge scored 81 and its guided revision 78 was discarded; <i>vivid saturated colours, punchy high
-contrast, crisp clarity</i> — visual judge 72/100 Revise, a first guided revision re-scored 82 and was adopted, a second 73 and was discarded, the verifier's word on the adopted recipe was Revise. All three runs ended on the
-data verifier's <i>Revise</i>, which never auto-saves, so each panel is the
-run's final proposal rendered with <code>--out</code>. For contrast: on the
-finished-look library alone — the state v1.2.2's Defect 3 had left every
-index built on v1.2.0/v1.2.1 in — the same three directions on this frame
-separated to 35 % / 12 % / 31 % saturation and read as three unrelated
-pictures, because nothing anchored them to the photographer's own edits.
-Nothing is copied pixel for pixel: the references reach the model as numbers,
-prose and one image, and what comes back is a recipe the engine
-renders.</sub>
+<code>--style 1.0 --strength 0.9</code> against the same index, and the only
+thing that changes between them is the <b>direction text</b>. That index held
+the photographer's 94-photo finished-look library and <i>no</i> RAW+XMP
+exemplars — the state v1.2.2's Defect 3 had left every index built on
+v1.2.0/v1.2.1 in, and the state this library was in when the panel was
+rendered, on the pre-release tree before the loader fix landed (the v1.2.2
+binary reads the same index file to the same state: 0 exemplars, 94 finished
+photos). So the Style axis had nothing to act on — each run's rationale says
+so in as many words — and what the model received was the direction text and
+one finished photo, chosen from the look library by that text, as an image.
+The direction led: mean saturation 34 % / 12 % / 29 % (moody / golden /
+vivid) against the conversion's 17 %, mean brightness 38 % / 61 % / 65 %
+against 47 %, measured on the panel's cells. Direction and judge trail, per
+panel: <i>dark moody low-key tones, a cross-processed colour treatment, a
+teal-and-orange split tone</i> — visual judge 71/100 Revise (the village
+crushed toward black, the orange counterpoint too weak), its guided revision
+re-scored 64 and was discarded, verdict Accept; <i>warm golden tones,
+film-like grain, lifted matte shadows</i> — the verifier sent the proposal
+back twice because it never set the grain the direction asked for, the visual
+judge scored 84 and its guided revision 92 was adopted, and the verifier's
+word on the adopted recipe was Revise, so this panel is the unsaved proposal
+rendered with <code>--out</code> (the proposal also crops 3 % off the top and
+5 % off the bottom); <i>vivid saturated colours, punchy high contrast, crisp
+clarity</i> — visual judge 64/100 Revise, guided revisions re-scored 72 and 84
+and were adopted, a third 73 was discarded, verdict Accept. For contrast: with
+the photographer's own 169 Lightroom RAW+XMP pairs indexed beside the look
+library (SigLIP 2 image vectors + Qwen3-VL descriptions), the same three
+directions at the same settings came back at 23 % / 11 % / 18 % saturation
+and 54 % / 58 % / 55 % brightness — inside the photographer's own cool, hazy
+register, because <code>--style 1.0</code> states the four nearest edits'
+habits to the model as the target and the direction then moves within that
+anchor. That is what the Style axis is for; a tier in which a given direction
+leads and the photographer's edits become background is registered for
+v1.2.3. Nothing is copied pixel for pixel: the reference reaches the model as
+one image and the direction as text, and what comes back is a recipe the
+engine renders.</sub>
 
 ## Part B — Reimagine → reverse-fit: the recipe carries the look, the RAW carries the detail
 
@@ -105,6 +116,7 @@ Reverse-fit recovers global tone, saturation and guarded colour casts, and
 bounded local corrections behind evidence and boundary gates. It does not
 claim to recover generated objects or detail, per-band hue rotation, or a
 target's local masks; every recipe's rationale names what the target appears
-to use that the solve cannot reach. The style read carries a mood — the
-advisor sees four neighbours as numbers and prose and one finished photo as an
-image — not a pixel-level look transfer, and a run that ends on a *Revise* verdict saves no recipe.
+to use that the solve cannot reach. The style read carries a mood — with the
+photographer's own edits indexed the advisor sees the four nearest as numbers
+and prose, and in either case one finished photo as an image — not a
+pixel-level look transfer, and a run that ends on a *Revise* verdict saves no recipe.

@@ -67,7 +67,7 @@
       </div>
       <figure class="hero-figure">
         <img src="images/showcase-island-four-looks.jpg?v=1.2.2" width="1600" height="1112" alt="Lakeside island town: straight conversion and three AI develops driven by three different direction texts">
-        <figcaption><strong>One photograph, four looks.</strong> Sony α7R IVA <code>.ARW</code>, 61 MP: the straight conversion of a hazy lakeside frame, then three AI develops of the same RAW at the same <code>--style 1.0 --strength 0.9</code> against the same 169-exemplar index of the photographer's own Lightroom edits — only the direction text changes. Each run retrieves the four most similar of the photographer's own edits and states their habits to the model as the target, so the direction moves the result within that anchor rather than to three unrelated grades (mean saturation 23 % / 12 % / 19 % for moody / golden / vivid against the conversion's 18 %). Judge trail 87 → 89 · 81 · 72 → 82 → 73 — automated review, not human aesthetic approval.</figcaption>
+        <figcaption><strong>One photograph, four looks.</strong> Sony α7R IVA <code>.ARW</code>, 61 MP: the straight conversion of a hazy lakeside frame, then three AI develops of the same RAW at the same <code>--strength 0.9</code> — only the direction text changes. The index behind them held the photographer's 94-photo finished-look library and no RAW+XMP exemplars, so each run took one finished photo, chosen by the direction text, as an image reference, and the direction led (mean saturation 34 % / 12 % / 29 % for moody / golden / vivid against the conversion's 17 %). With the photographer's own 169 edits indexed at <code>--style 1.0</code> the same directions stayed inside those edits' cool, hazy register (23 % / 11 % / 18 %). Judge trail 71 · 84 → 92 · 64 → 72 → 84 → 73 — automated review, not human aesthetic approval.</figcaption>
       </figure>
     </section>
 
@@ -115,12 +115,12 @@
         <h2 id="download-title">Download v1.2.2.</h2>
         <p>The published release has 7 assets — the 6 files below plus <code>checksums.txt</code>, which carries the SHA-256 of each:</p>
         <ul>
-          <li><code>autoshade.exe</code> — 20,110,336 bytes (CLI)</li>
-          <li><code>autoshade-gui.exe</code> — 26,424,832 bytes (desktop app)</li>
-          <li><code>AutoShade-Setup-1.2.2.exe</code> — 14,212,337 bytes (installer)</li>
-          <li><code>autoshade-1.2.2-windows-x64.zip</code> — 18,790,752 bytes (portable archive)</li>
-          <li><code>AutoShade-1.2.2-macos-universal.zip</code> — 37,368,504 bytes (macOS app bundle)</li>
-          <li><code>AutoShade-1.2.2-macos-cli.zip</code> — 16,121,719 bytes (macOS command line only)</li>
+          <li><code>autoshade.exe</code> — 20,207,104 bytes (CLI)</li>
+          <li><code>autoshade-gui.exe</code> — 26,497,024 bytes (desktop app)</li>
+          <li><code>AutoShade-Setup-1.2.2.exe</code> — 14,221,824 bytes (installer)</li>
+          <li><code>autoshade-1.2.2-windows-x64.zip</code> — 18,884,742 bytes (portable archive)</li>
+          <li><code>AutoShade-1.2.2-macos-universal.zip</code> — 37,523,500 bytes (macOS app bundle)</li>
+          <li><code>AutoShade-1.2.2-macos-cli.zip</code> — 16,197,828 bytes (macOS command line only)</li>
         </ul>
         <p>Choose the <strong>installer</strong> for the recommended current-user setup with no administrator access, or the <strong>portable ZIP</strong> to extract and keep the executables beside their bundled assets and Python sidecars. macOS gets a desktop app for the first time in this release: the universal (arm64 + x86_64) <code>AutoShade.app</code>, ad-hoc signed rather than notarised, so the first launch needs one explicit <em>Open Anyway</em> per machine — with the command line inside the same bundle, or as its own smaller archive. Linux is built and tested in CI with no prebuilt binaries yet.</p>
         <p><a class="button button-primary" href="https://github.com/skymanbp/autoshade/releases/tag/v1.2.2">Open the v1.2.2 release</a></p>
@@ -146,7 +146,7 @@ autoshade apply "photo.ARW" "recipe.json" -o "developed.tif"</code></pre>
     <section class="section showcase" id="showcase-a" aria-labelledby="showcase-a-title">
       <p class="section-kicker">Showcase · Part A</p>
       <h2 id="showcase-a-title">AI analysis and style transfer</h2>
-      <p class="section-lede">The four-look figure at the top of this page is Part A. One Sony α7R IVA 61 MP <code>.ARW</code>, one style index built from the photographer's own Lightroom RAW+XMP pairs (169 exemplars with SigLIP 2 image vectors and Qwen3-VL descriptions) plus a 94-photo finished-look library, and three direction texts. Nothing is copied pixel for pixel: the four nearest edits reach the model as numbers and prose and the nearest finished photo as one image, the visual judge closes the loop, and what comes back is a recipe the engine renders at full resolution.</p>
+      <p class="section-lede">The four-look figure at the top of this page is Part A. One Sony α7R IVA 61 MP <code>.ARW</code>, one index holding the photographer's 94-photo finished-look library (SigLIP 2 image vectors, ranked by the direction text) and, for that panel, none of the RAW+XMP exemplars, and three direction texts. Nothing is copied pixel for pixel: one finished photo reaches the model as an image and the direction as text, the visual judge closes the loop, and what comes back is a recipe the engine renders at full resolution. With the photographer's own 169 Lightroom edits indexed, the same directions stay inside those edits' register — the showcase page shows both.</p>
       <p>Directions, retrieved references and judge trails per panel, with every number, are in the <a href="https://github.com/skymanbp/autoshade/blob/main/docs/SHOWCASE.md">showcase page</a>.</p>
     </section>
 

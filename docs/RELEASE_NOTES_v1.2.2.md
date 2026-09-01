@@ -171,9 +171,14 @@ refused.
   The build reports `reused N, recomputed M, removed K`. On the showcase
   library the second build of 169 pairs reused every one and produced a
   byte-identical index.
-- **The showcase is re-rendered on this build** — one four-looks panel for
-  the AI-analysis pillar and two 3 × 2 reverse-fit panels for the
+- **The showcase is re-rendered for this release** — one four-looks panel
+  for the AI-analysis pillar and two 3 × 2 reverse-fit panels for the
   reimagine → fit pillar, with every number in [docs/SHOWCASE.md](SHOWCASE.md).
+  The four-looks panel is the run against the finished-look library alone —
+  the index state Defect 3 produced — because with the photographer's own
+  edits indexed at `--style 1.0` the three directions stayed inside those
+  edits' register; the showcase page reports both runs, and a direction-led
+  Style tier is registered for v1.2.3.
   The Cornwall panel is shown as fitted: its global stage admitted
   per-channel cast curves that pass the re-hue gate yet tint the delivered
   sky toward violet against the target's blue. That is the fit's current
