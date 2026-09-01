@@ -186,9 +186,12 @@ fn free_mask_refuses_replaced_content() {
     let mut report = super::super::tests::neutral_report(&source, &target);
     report.evidence = evidence;
     let masks = report.recipe.masks.len();
-    let home = crate::store::OwnedRaster::scratch(
-        std::env::temp_dir().join(format!("autoshade-free-replaced-{}.png", std::process::id())),
-    );
+    // Own directory, not the bare temp root: `claim_sibling` writes beside
+    // this mask (see `fixture_mask_path`).
+    let home_dir =
+        std::env::temp_dir().join(format!("autoshade-free-replaced-{}", std::process::id()));
+    std::fs::create_dir_all(&home_dir).unwrap();
+    let home = crate::store::OwnedRaster::scratch(home_dir.join("mask.png"));
     attach_free_masks(&source, &target, &mut report, &home, &field, &vec![0.0; region.len()], false, 2);
     assert_eq!(report.recipe.masks.len(), masks);
     assert!(report.notes.iter().all(|note| note.key != crate::rationale::keys::FIELD_MASK_ATTACHED));

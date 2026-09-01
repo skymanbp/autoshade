@@ -272,12 +272,12 @@ mod tests {
             reference_point: None,
             prompt_points: None,
         };
-        let routed_path = crate::store::OwnedRaster::scratch(
-            std::env::temp_dir().join(format!("autoshade-two-route-{}-routed.png", std::process::id())),
-        );
-        let legacy_path = crate::store::OwnedRaster::scratch(
-            std::env::temp_dir().join(format!("autoshade-two-route-{}-legacy.png", std::process::id())),
-        );
+        // Own directory, not the bare temp root (see `fixture_mask_path`).
+        let route_dir =
+            std::env::temp_dir().join(format!("autoshade-two-route-{}", std::process::id()));
+        std::fs::create_dir_all(&route_dir).unwrap();
+        let routed_path = crate::store::OwnedRaster::scratch(route_dir.join("routed.png"));
+        let legacy_path = crate::store::OwnedRaster::scratch(route_dir.join("legacy.png"));
         let routed = super::super::fit_recipe_zoned_with_regions(
             &source, &target, &seg, &routed_path, &crate::recipe::EditRecipe::default(),
             crate::fit::FitOptions::default(), 2,

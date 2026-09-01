@@ -14619,7 +14619,11 @@ mod tests {
         let src = DynamicImage::ImageRgb8(RgbImage::from_fn(w, h, |x, y| {
             image::Rgb([(x * 3 + y * 2) as u8, (x * 5) as u8, (y * 7) as u8])
         }));
-        let raster_path = std::env::temp_dir().join(format!("autoshade-linear-baseline-{}.png", std::process::id()));
+        // Own directory, not the bare temp root (see `fixture_mask_path`).
+        let raster_dir =
+            std::env::temp_dir().join(format!("autoshade-linear-baseline-{}", std::process::id()));
+        std::fs::create_dir_all(&raster_dir).unwrap();
+        let raster_path = raster_dir.join("mask.png");
         let raster = image::GrayImage::from_fn(7, 5, |x, y| image::Luma([((x + y) * 20) as u8]));
         raster.save(&raster_path).unwrap();
         let mask = crate::recipe::LocalAdjustment {
@@ -16437,7 +16441,13 @@ mod tests {
         // fixture_mask_path): a concurrent `cargo test` deleted this mask
         // mid-run, turning the zone inert and the measurement meaningless.
         let mask_path =
-            std::env::temp_dir().join(format!("autoshade-preview-perf-mask-{}.png", std::process::id()));
+            {
+                // Own directory, not the bare temp root (see `fixture_mask_path`).
+                let d = std::env::temp_dir()
+                    .join(format!("autoshade-preview-perf-mask-{}", std::process::id()));
+                std::fs::create_dir_all(&d).unwrap();
+                d.join("mask.png")
+            };
         image::GrayImage::from_fn(w / 4, h / 4, |x, _| {
             image::Luma([((x as f32 / (w / 4 - 1) as f32) * 255.0).round() as u8])
         })

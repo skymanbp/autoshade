@@ -2509,7 +2509,13 @@ mod tests {
             opts.script.display()
         );
         let out =
-            std::env::temp_dir().join(format!("autoshade-seg-probe-sky-{}.png", std::process::id()));
+            {
+                // Own directory, not the bare temp root (see `fixture_mask_path`).
+                let d = std::env::temp_dir()
+                    .join(format!("autoshade-seg-probe-sky-{}", std::process::id()));
+                std::fs::create_dir_all(&d).unwrap();
+                d.join("mask.png")
+            };
         let _ = std::fs::remove_file(&out);
         let report = segment_file(&opts, &input, &out).expect("the sky backend must produce a mask");
         assert!(

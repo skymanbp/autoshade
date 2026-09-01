@@ -3884,10 +3884,20 @@ mod tests {
     /// the same checkout shared, so one run's cleanup made another run's mask
     /// inert (the zone then "failed to attach" nowhere near its own code).
     /// Process-unique, in the temp dir, and no ./out litter left behind.
+    ///
+    /// Process-unique in its DIRECTORY, not merely in its file name. Scoping
+    /// only the name left the mask's PARENT as the shared system temp root,
+    /// and [`crate::store::OwnedRaster::claim_sibling`] writes BESIDE the
+    /// mask: every run added one more `mask-zone-tile-N.png` to that root.
+    /// Past 999 the claim could no longer succeed, so every spatial tile
+    /// abstained with `raster-claim` and tests nowhere near that code began
+    /// failing -- on a machine whose only distinguishing property was that the
+    /// suite had been run often enough. A per-process directory makes the
+    /// siblings as scoped as the mask.
     pub(super) fn fixture_mask_path(name: &str) -> crate::store::OwnedRaster {
-        crate::store::OwnedRaster::scratch(
-            std::env::temp_dir().join(format!("autoshade-{name}-{}.png", std::process::id())),
-        )
+        let dir = std::env::temp_dir().join(format!("autoshade-{name}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("fixture mask directory");
+        crate::store::OwnedRaster::scratch(dir.join(format!("{name}.png")))
     }
 
     fn semantic_attachment(
