@@ -54,6 +54,7 @@ impl AutoShadeApp {
             // a deleted path lands wherever the OS decides (the same rule the
             // gallery restore above follows).
             app.style_src_dir = prefs.style_src_dir.clone().filter(|d| d.is_dir());
+            app.style_xmp_dir = prefs.style_xmp_dir.clone().filter(|d| d.is_dir());
             app.looks_src_dir = prefs.looks_src_dir.clone().filter(|d| d.is_dir());
             app.use_looks = prefs.use_looks;
             app.direction_adherence = autoshade::recipe::DirectionAdherence::new(prefs.direction_adherence).get();
@@ -2907,6 +2908,10 @@ impl AutoShadeApp {
         // mid-build must not change what this build is doing.
         let embed = autoshade::style::EmbeddingSwitch::resolve(None, self.style_embed);
         let describe = autoshade::style::DescribeSwitch::resolve(None, self.style_describe);
+        // Read here with the rest of the request, for the reason the two
+        // switches above are: a folder the user re-picks mid-build must not
+        // change which sidecars THIS build is pairing against.
+        let xmp_dir = self.style_xmp_dir.clone();
         self.spawn_worker(
             move || {
                 let progress = |p: autoshade::style::BuildProgress| {
@@ -2918,7 +2923,7 @@ impl AutoShadeApp {
                     // An mpsc send does not wake egui (see `spawn_worker`).
                     ctx.request_repaint();
                 };
-                let index = match autoshade::style::StyleIndex::build_reporting(&dir, embed, describe, &progress) {
+                let index = match autoshade::style::StyleIndex::build_reporting(&dir, xmp_dir.as_deref(), embed, describe, &progress) {
                     Ok(ix) => ix,
                     Err(e) => {
                         return Msg::StyleBuilt(Box::new(StyleBuildOutcome::Failed {

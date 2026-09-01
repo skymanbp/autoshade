@@ -256,6 +256,14 @@ enum Command {
     Eval {
         /// Folder to scan recursively for RAW + .xmp pairs.
         dir: PathBuf,
+        /// Folder holding the .xmp sidecars, when they are NOT beside the
+        /// RAWs (an exported catalogue, a read-only photo volume). Searched
+        /// as a MIRROR of the library tree first
+        /// (<xmp-dir>/<subfolder>/<name>.xmp), then flat
+        /// (<xmp-dir>/<name>.xmp), then beside the RAW as before. The
+        /// extension matches in any case (.xmp / .XMP) on every platform.
+        #[arg(long)]
+        xmp_dir: Option<PathBuf>,
         /// Max photos to evaluate (cost guard; each one runs the AI).
         #[arg(long, default_value_t = 10)]
         limit: usize,
@@ -284,6 +292,14 @@ enum Command {
         /// Folder to scan recursively for RAW + .xmp pairs (your edits).
         #[arg(default_value = ".")]
         dir: PathBuf,
+        /// Folder holding the .xmp sidecars, when they are NOT beside the
+        /// RAWs (an exported catalogue, a read-only photo volume). Searched
+        /// as a MIRROR of the library tree first
+        /// (<xmp-dir>/<subfolder>/<name>.xmp), then flat
+        /// (<xmp-dir>/<name>.xmp), then beside the RAW as before. The
+        /// extension matches in any case (.xmp / .XMP) on every platform.
+        #[arg(long)]
+        xmp_dir: Option<PathBuf>,
         /// Build the LOOK LIBRARY instead: a folder of FINISHED photos
         /// (JPEG/TIFF exports) whose grade the advisor may point at. Looks are
         /// embedding-only — they carry no settings and never enter the recipe
@@ -529,10 +545,10 @@ fn main() -> Result<()> {
         Command::Batch { dir, render, limit, include_baked, jobs, long_edge } => {
             batch_cmd(&dir, render, limit, include_baked, jobs, long_edge)
         }
-        Command::Eval { dir, limit, jobs, fresh, state } => {
-            eval::run(&dir, limit, jobs, fresh, state.as_deref())
+        Command::Eval { dir, xmp_dir, limit, jobs, fresh, state } => {
+            eval::run(&dir, xmp_dir.as_deref(), limit, jobs, fresh, state.as_deref())
         }
-        Command::StyleIndex { dir, looks, embed, no_embed, describe } => {
+        Command::StyleIndex { dir, xmp_dir, looks, embed, no_embed, describe } => {
             let switch = embed_switch(embed, no_embed);
             // `--describe` is a three-state read like `--embed`, minus the
             // negative flag: the description pass is off by default, so
@@ -541,7 +557,7 @@ fn main() -> Result<()> {
             if let Some(d) = looks {
                 style_looks_cmd(&d, switch, prose)
             } else {
-                style_index_cmd(&dir, switch, prose)
+                style_index_cmd(&dir, xmp_dir.as_deref(), switch, prose)
             }
         }
         Command::StyleQuery { photo, direction, style, embed } => style_query_cmd(
@@ -662,10 +678,11 @@ fn correspond_cmd(source: &Path, target: &Path, out: Option<PathBuf>) -> Result<
 
 fn style_index_cmd(
     dir: &Path,
+    xmp_dir: Option<&Path>,
     embed: autoshade::style::EmbeddingSwitch,
     describe: autoshade::style::DescribeSwitch,
 ) -> Result<()> {
-    let index = StyleIndex::build(dir, embed, describe)?;
+    let index = StyleIndex::build(dir, xmp_dir, embed, describe)?;
     // Central per-user location: the index describes the user's whole library,
     // so it must not depend on which directory the command ran from.
     let out = autoshade::store::style_index_path();
@@ -1077,7 +1094,14 @@ fn lightroom_import_note(raw: &Path) -> Option<String> {
     if !decode::is_raw(raw) {
         return None;
     }
-    let lr = raw.with_extension("xmp");
+    // The ONE pairing rule (`xmp_pair`), so a `.XMP` sidecar is the same
+    // sidecar on the shipped Mac build as it is on Windows. No `--xmp-dir`
+    // here, deliberately: this file is also `pipeline::write_xmp`'s MERGE
+    // BASE (the two are ONE producer of one fact, see the paragraph above),
+    // and that base is beside-the-RAW by the settled develop-chain rule —
+    // a note that read one file while the save merged another would be worse
+    // than the silence it replaced.
+    let lr = autoshade::xmp_pair::XmpPairing::beside().find(raw)?;
     let autoshade::store::SidecarRead::Ok(text) = autoshade::store::read_sidecar_checked(&lr) else {
         return None;
     };

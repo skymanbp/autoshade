@@ -1792,6 +1792,73 @@ pipeline, the web handler and the GUI status line alike. The empty-index refusal
 lives in `StyleIndex::save`, so no caller can truncate a good index with a
 failed build.
 
+**ONE RAW/XMP pairing rule ([`src/xmp_pair.rs`](../src/xmp_pair.rs)).** The rule
+used to be open-coded as `raw.with_extension("xmp")` at six sites — the
+style-index pair scan and its sidecar read, `eval`'s pair scan, its per-photo
+read and its resume hash, and the CLI's Lightroom import note — with two
+consequences. Sidecars kept in a SEPARATE tree could not enter the index at
+all; and `with_extension` writes a lowercase `.xmp`, which `Path::exists` folds
+on Windows but not on macOS or Linux, so the same library produced different
+pair counts on the Windows and Mac builds and said nothing about it.
+`XmpPairing::find` is now the only definition: given the library root and an
+optional `--xmp-dir`, it looks in the mirror of the library tree
+(`<xmp-dir>/<relative folder>/<stem>.xmp`), then the flat mirror
+(`<xmp-dir>/<stem>.xmp`), then beside the RAW, and it matches the EXTENSION
+case-insensitively on every platform by LISTING the folder rather than probing
+spellings. The STEM is matched exactly: every writer of a sidecar reproduces the
+photograph's name byte for byte, and folding it would let one RAW claim
+another's edit on a case-sensitive volume. Listings are memoised per folder, so
+a 2,000-photograph library pays one `read_dir` per folder rather than per
+photograph. The module is READ-ONLY by contract — nothing is ever written to a
+path it returns — which is why the develop chain's own beside-the-RAW sites that
+are also a WRITE target (`store::xmp_beside_target`, and the restore ranking
+around it) deliberately stay on the old spelling; `pipeline::write_xmp`'s merge
+base, which only reads, moved with the note that discloses it. The build now
+also discloses the RAWs it could not pair (count, first ten stems), so "you
+pointed me at the wrong folder" no longer reads as "you have edited 40
+photographs".
+
+**Incremental builds: one content-keyed cache mechanism, two caches.** Every
+build used to redo the decode, the 14-dim feature, the SigLIP image vector, the
+vocabulary scores and the SigLIP text vector for every photograph; only the Qwen
+description survived, in `describe::DescriptionCache`. The file mechanics of a
+content-keyed cache — the byte cap, the four degradations (absent / over-cap /
+not UTF-8 / unparseable ⇒ an EMPTY cache and one sentence, never an error), the
+`tmp` + `durable_replace` publish, the 64-hex key rule — now live once in
+[`src/content_cache.rs`](../src/content_cache.rs), and
+[`src/style_cache.rs`](../src/style_cache.rs) is the second user:
+`<store>/style-exemplars.json`, keyed by the **SHA-256 of the staged frame**
+(`describe::frame_digest`), the same key shape the description cache has always
+used. Each entry also records a `SourceStamp` — absolute path (case-folded on
+Windows), length, mtime and the photographer's saved quarter-turns — because
+the frame digest cannot be known without the decode that produces the frame, and
+the 14 features are a function of the FILE (EXIF + histogram + rotation) rather
+than of the frame. A build that finds an exact stamp match may reuse the entry
+whole and never open the RAW; anything else decodes, stages, hashes, and still
+reuses the model answers under the digest. That fast path is ALL-OR-NOTHING
+against the passes the build asked for (`cache_answers_everything`): a record
+that skipped its decode has no staged frame and so could never afterwards be
+embedded or described. Entries are gated per field — the index feature version,
+`embed_provenance_string()` for the vectors, and
+`describe::CachedDescription::is_current()` for the prose — and admitted at load
+only inside the INDEX door's own bands (`CACHE_BANDS`, from
+`exemplar_is_finite`), because a bit-rotted vector served into a published index
+would make that index refuse to load. What is never cached is the
+NORMALISATION: `compute_norm` takes the mean and σ over the whole exemplar set,
+so one photograph joining or leaving legitimately moves every z-scored
+dimension, and both are recomputed from the merged set on every build. The
+`.xmp` is re-read every build too — sliders, curve, colour families and mask
+habit are properties of the sidecar, not of the pixels. `CURRENT_INDEX_VERSION`
+does NOT bump for this: no field is added to the serialised index, nothing about
+the fourteen features or the ranking changes, an old index loads exactly as
+before, and the version that gates reuse is stamped inside each CACHE entry, so
+a future bump silently invalidates the cache instead of misreading it. Each
+build prints `style index cache: reused N, recomputed M, removed K,
+skipped-for-sidecar S`; a full-hit rebuild loads neither model checkpoint. The
+LOOK library keeps the description cache and nothing more — its records carry no
+14-dim feature for an entry to be about, it is capped at 500 curated finished
+photos, and it is rebuilt only when that folder is re-curated.
+
 Two disclosure rules follow from those states. A develop that ASKED for style
 and ended with no reference always says so in the rationale — the condition is
 "strength > 0 and the final reference is `None`", which covers a missing

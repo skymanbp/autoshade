@@ -1355,7 +1355,9 @@ fn api_style_build(request: &mut Request) -> Result<ResponseBox> {
     // `build` used to read for itself before they became values.
     let embed = crate::style::EmbeddingSwitch::resolve(None, false);
     let describe = crate::style::DescribeSwitch::resolve(None, false);
-    let index = match crate::style::StyleIndex::build(&p, embed, describe) {
+    // `None`: the web panel takes a library folder and nothing else, so the
+    // sidecars are the beside-the-RAW ones. `--xmp-dir` is a CLI/GUI control.
+    let index = match crate::style::StyleIndex::build(&p, None, embed, describe) {
         Ok(ix) => ix,
         Err(e) => return Ok(status_response(500, &format!("build failed: {e}"))),
     };

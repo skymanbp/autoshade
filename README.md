@@ -133,8 +133,15 @@ never disagree. With `--describe` a second local model
 *grade* — white balance lean, tonality, contrast, colour treatment, finishing,
 mood, never the subject — and that sentence, not the fixed attribute tags, is
 what the text tower embeds. Nothing leaves the machine and nothing is billed;
-descriptions are cached by frame content, so a rebuild only describes what
-changed. Each exemplar also carries a **local-work habit** — how many masks you
+every measurement is cached by frame content, so a rebuild only decodes,
+embeds and describes what actually changed — a rebuild whose photographs are
+all unchanged loads neither model. Each build says so in one line
+(`reused N, recomputed M, removed K, skipped-for-sidecar S`), and names the
+RAWs it had to skip for want of a sidecar. If your `.xmp` files do not sit
+beside the RAWs, `--xmp-dir <dir>` points at the folder that holds them (a
+mirror of your library tree, or one flat folder); `.xmp` and `.XMP` are the
+same sidecar on every platform. Each exemplar also carries a **local-work
+habit** — how many masks you
 enabled on that frame, put to which use (sky / subject / foreground / range /
 other, decided by the AI selection's own subtype and by which end of the frame
 a gradient covers), the amount-weighted mean of ten local sliders per use

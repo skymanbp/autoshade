@@ -10,6 +10,7 @@
 
 pub mod advisor;
 pub mod config;
+pub mod content_cache;
 pub mod correspond;
 pub mod decode;
 pub mod denoise;
@@ -37,7 +38,9 @@ pub mod sha256;
 pub mod serve;
 pub mod store;
 pub mod style;
+pub mod style_cache;
 pub mod xmp;
+pub mod xmp_pair;
 
 /// Stop a spawned **console** child (the `claude` CLI, the python denoise sidecar)
 /// from popping its own console window when the parent is the windowed desktop GUI

@@ -215,6 +215,13 @@ pub(crate) struct Prefs {
     /// The folder the style library was last built from (R23-2), so a rebuild
     /// starts where the last build did.
     pub(crate) style_src_dir: Option<PathBuf>,
+    /// The folder of `.xmp` sidecars that library pairs against, when they are
+    /// not beside the RAWs (`style-index --xmp-dir`). `#[serde(default)]`
+    /// decodes an older prefs file as `None`, which is the beside-the-RAW
+    /// convention that file was written under — so an upgrade never changes
+    /// which sidecars an existing library would rebuild from.
+    #[serde(default)]
+    pub(crate) style_xmp_dir: Option<PathBuf>,
     /// Folder of finished photos used by the separate look library.
     #[serde(default)]
     pub(crate) looks_src_dir: Option<PathBuf>,
@@ -274,6 +281,7 @@ impl Default for Prefs {
             style_embed: false,
             style_describe: false,
             style_src_dir: None,
+            style_xmp_dir: None,
             looks_src_dir: None,
             use_looks: true,
             direction_adherence: autoshade::recipe::DirectionAdherence::DEFAULT,

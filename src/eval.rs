@@ -798,7 +798,7 @@ fn load_state(path: &Path, want: &StateHeader) -> Result<Vec<StateRow>> {
 /// (`store::read_sidecar`), so the hash covers exactly the text that was read.
 fn resume_plan(
     dir: &Path,
-    work: &[&Path],
+    work: &[(&Path, &Path)],
     rows: Vec<StateRow>,
 ) -> (Vec<Option<Box<PhotoStats>>>, Vec<String>) {
     // Last row wins: a photograph re-measured after a stale row was discarded
@@ -809,13 +809,12 @@ fn resume_plan(
     }
     let mut restored = Vec::with_capacity(work.len());
     let mut stale = Vec::new();
-    for raw in work {
+    for (raw, sidecar) in work {
         let Some(row) = by_rel.remove(&photo_rel(dir, raw)) else {
             restored.push(None);
             continue;
         };
-        let now = crate::store::read_sidecar(&raw.with_extension("xmp"))
-            .map(|t| sha256_hex(t.as_bytes()));
+        let now = crate::store::read_sidecar(sidecar).map(|t| sha256_hex(t.as_bytes()));
         if now.as_deref() == Some(row.xmp_sha256.as_str()) {
             restored.push(Some(Box::new(row.stats)));
         } else {
@@ -1022,6 +1021,7 @@ where
 
 pub fn run(
     dir: &Path,
+    xmp_dir: Option<&Path>,
     limit: usize,
     jobs: usize,
     fresh: bool,
@@ -1038,18 +1038,26 @@ pub fn run(
     // that decision through the back door, and would score the AI against a
     // sidecar written by some other program about some other image.
     let raws = pipeline::find_raws(dir)?;
-    let pairs: Vec<_> = raws
+    // The SAME pairing rule the style index builds with ([`crate::xmp_pair`]),
+    // resolved once here: `run` and `resume_plan` must agree about which file a
+    // measurement was taken against, and two derivations of one name is exactly
+    // how they would stop agreeing.
+    let pairing = crate::xmp_pair::XmpPairing::new(dir, xmp_dir);
+    let pairs: Vec<(&Path, PathBuf)> = raws
         .iter()
-        .filter(|r| r.with_extension("xmp").exists())
+        .filter_map(|r| pairing.find(r).map(|x| (r.as_path(), x)))
         .collect();
     println!(
-        "found {} RAW(s); {} have a sibling .xmp (your edits). Evaluating {}.",
+        "found {} RAW(s); {} have an .xmp sidecar (your edits). Evaluating {}.",
         raws.len(),
         pairs.len(),
         pairs.len().min(limit)
     );
     if pairs.is_empty() {
-        println!("Nothing to evaluate — no .xmp sidecars next to the RAWs in this folder.");
+        println!(
+            "Nothing to evaluate — no .xmp sidecars were found beside these RAWs or under \
+             --xmp-dir."
+        );
         return Ok(());
     }
 
@@ -1060,7 +1068,8 @@ pub fn run(
     // sequential `.take(limit)` selected — then a bounded, memory-budgeted pool
     // works through it (R27 Batch-7). At `--jobs 1` this is the serial loop it
     // replaces, line for line and sum for sum.
-    let work: Vec<&Path> = pairs.iter().take(limit).map(|p| p.as_path()).collect();
+    let work: Vec<(&Path, &Path)> =
+        pairs.iter().take(limit).map(|(r, x)| (*r, x.as_path())).collect();
     let n = work.len();
 
     // ── resumable progress ───────────────────────────────────────────────
@@ -1113,7 +1122,8 @@ pub fn run(
     // though `eval`'s work list is RAW+.xmp pairs by construction and the
     // survey therefore finds nothing to raise: the door a caller takes should
     // not depend on a filter two functions away staying RAW-only.
-    let plan = crate::jobs::plan_for(jobs, &work);
+    let photos: Vec<&Path> = work.iter().map(|(r, _)| *r).collect();
+    let plan = crate::jobs::plan_for(jobs, &photos);
     if let Some(note) = &plan.note {
         println!("{note}");
     }
@@ -1152,10 +1162,10 @@ pub fn run(
         if aborted.load(std::sync::atomic::Ordering::Relaxed) {
             return PhotoOutcome::Skipped;
         }
-        let raw: &Path = work[i];
+        let (raw, sidecar) = work[i];
         emit(live, block, &format!("[{}/{}] {} ... ", i + 1, n, pipeline::stem(raw)));
         restore_or_measure(live, block, restored[i].is_some(), |block| {
-            let Some(xmp_text) = crate::store::read_sidecar(&raw.with_extension("xmp")) else {
+            let Some(xmp_text) = crate::store::read_sidecar(sidecar) else {
                 aborted.store(true, std::sync::atomic::Ordering::Relaxed);
                 emit(live, block, "FAILED\n");
                 return PhotoOutcome::Aborted(format!("read user xmp for {}", raw.display()));
@@ -1750,9 +1760,10 @@ mod tests {
             .and_then(|s| s.parse().ok())
             .unwrap_or(usize::MAX);
         let raws = pipeline::find_raws(&root).expect("scan the probe directory");
-        let pairs: Vec<_> = raws
+        let pairing = crate::xmp_pair::XmpPairing::new(&root, None);
+        let pairs: Vec<(&std::path::PathBuf, std::path::PathBuf)> = raws
             .iter()
-            .filter(|r| r.with_extension("xmp").exists())
+            .filter_map(|r| pairing.find(r).map(|x| (r, x)))
             .take(limit)
             .collect();
         assert!(
@@ -1765,9 +1776,9 @@ mod tests {
         let (mut gw_k_custom, mut gw_t_custom) = (Scatter::default(), Scatter::default());
         let (mut as_shot_photos, mut custom_wb_photos, mut no_anchor) = (0u32, 0u32, 0u32);
 
-        for raw in &pairs {
+        for (raw, sidecar) in &pairs {
             let stem = pipeline::stem(raw);
-            let xmp_text = crate::store::read_sidecar(&raw.with_extension("xmp"))
+            let xmp_text = crate::store::read_sidecar(sidecar)
                 .unwrap_or_else(|| panic!("sidecar for {stem} is missing or unreadable"));
             // The Description's OWN scope — the same rule `run` applies, and
             // for the same reason: a creative Look bakes its own crs values.
@@ -2234,7 +2245,9 @@ mod tests {
             .unwrap();
         }
         let raws = [dir.join("a.arw"), dir.join("b.arw")];
-        let work: Vec<&Path> = raws.iter().map(|p| p.as_path()).collect();
+        let xmps = [dir.join("a.xmp"), dir.join("b.xmp")];
+        let work: Vec<(&Path, &Path)> =
+            raws.iter().zip(&xmps).map(|(r, x)| (r.as_path(), x.as_path())).collect();
         let mut stats = PhotoStats::default();
         stats.acc.insert("contrast".into(), Acc { sum_abs: 7.0, sum_signed: 7.0, n: 1, omit: 0 });
         let saved = StateRow {
@@ -2278,7 +2291,8 @@ mod tests {
         let xmp = dir.join("a.xmp");
         std::fs::write(&xmp, "<rdf:Description crs:Contrast2012=\"+10\">").unwrap();
         let raws = [dir.join("a.arw")];
-        let work: Vec<&Path> = raws.iter().map(|p| p.as_path()).collect();
+        let work: Vec<(&Path, &Path)> =
+            raws.iter().map(|p| (p.as_path(), xmp.as_path())).collect();
         let row = StateRow {
             stem: "a".into(),
             rel: "a.arw".into(),
