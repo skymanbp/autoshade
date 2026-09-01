@@ -359,9 +359,20 @@ pub mod keys {
     pub const ZONE_SHARE_NO_CORRECTION: &str =
         " No zoned correction attached: the source and target zone shares differ by more than 2:1, so neither population is a comparable measurement of the same subject.";
     pub const ZONE_BOUNDARY_PASSED: &str =
-        " Boundary-continuity gate kept {n} zoned correction(s): signed transition \
+        " Boundary-continuity gate kept {n} zoned correction(s): introduced transition \
          rim {before} to {after} luma after shared differential shrink k={k} \
          (budget {max}, {transitions} measured transitions).";
+    /// Step 9. Distinct from [`ZONE_BOUNDARY_DROPPED`], which says the k=0
+    /// render was itself over budget (an engine invariant failure). THIS one
+    /// says the gate found a shrink inside the budget and that shrink moves
+    /// no pixel at all, so there is nothing to attach.
+    pub const ZONE_BOUNDARY_INERT: &str =
+        " Zoned {n} correction(s) dropped by the boundary-continuity gate: \
+         candidate introduced rim {before} luma, and the largest shrink inside \
+         budget {max} was k={k}, whose render is byte-identical to the frame \
+         without it — reading {after} over {transitions} measured transitions. \
+         An inert attachment would occupy the correction budget and disclose a \
+         change it did not make.";
     pub const ZONE_BOUNDARY_DROPPED: &str =
         " Zoned corrections dropped by the boundary-continuity gate: candidate \
          rim {before} luma, and even shared shrink k=0 left {after} \

@@ -39,6 +39,7 @@ pub(super) enum FreeMaskWhy {
     Frame,
     Rim,
     Unmeasured,
+    Inert,
 }
 
 impl FreeMaskWhy {
@@ -56,6 +57,7 @@ impl FreeMaskWhy {
             Self::Frame => "frame",
             Self::Rim => "boundary-step",
             Self::Unmeasured => "boundary-unmeasurable",
+            Self::Inert => "boundary-inert",
         }
     }
 }

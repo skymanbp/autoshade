@@ -92,9 +92,18 @@
 > experimental generative edits, an optional pixel-**heal** retouch mode (§4.7)
 > the deterministic look **reverse-fit** (§4.8) and the local server's refusal
 > model (§4.9).
-> 1265 library + 23 CLI + 159 GUI + 2+2 contract tests are enumerated in the GUI
-> build; the library result is 1253 pass + 12 `#[ignore]`d forensic probes
-> (counts refreshed 2026-08-31: R30 R2 added 8 named tests for the
+> 1275 library + 23 CLI + 159 GUI + 2+2 contract tests are enumerated in the GUI
+> build; the library result is 1263 pass + 12 `#[ignore]`d forensic probes
+> (counts refreshed 2026-08-31: step 9 is net +10 — it added 11 named tests
+> (2 `fit` for the per-pixel white-balance statistic and for a readable
+> correspondence field choosing the PAIRING as well as the population, 7
+> `fit_zoned` for the introduced-rim boundary arms and the k=0 render
+> invariant, 2 for the inert-attachment refusal on each of the two boundary
+> gates) and RENAMED one, `a_rim_that_cannot_be_shrunk_is_dropped_with_its_own_note`
+> becoming `a_zero_dialled_mask_that_is_not_a_render_no_op_is_dropped_with_its_own_note`
+> because the differential rim makes the old premise (a scene rim the
+> correction did not make) a case the gate must now KEEP; before it, R30 R2
+> added 8 named tests for the
 > shared-content reference population and adjudication added a ninth, closing
 > the two-sided retention floor and the target mask's provenance, so library
 > 1256→1265; before it, the clearing dedup batch was net +1 — it added
@@ -1969,12 +1978,22 @@ only for Full zones and the detail stage. Every Atmosphere report discloses the
 structurally withheld ranges and explains that they do not constrain its bounded
 atmosphere controls. Since R30 batch 1 it also states the POPULATION those
 controls were read over, and since R30 R2 that population is no longer always
-the whole frame. With NO usable cross-image correspondence field the solve is
-unchanged and the report says so: white balance and exposure come from
-WHOLE-FRAME per-channel weighted medians of both sides, which pairs the two
-frames as distributions and so presumes both describe the same content — the
-presumption selecting Atmosphere denies — and how much of that population has
-no counterpart reads as NOT MEASURED rather than as zero. WITH a field, the
+the whole frame. With NO usable cross-image correspondence field the population is
+unrestricted and the report says so: both controls are read WHOLE-FRAME, and
+how much of that population has no counterpart reads as NOT MEASURED rather
+than as zero. The two controls read it differently, and since step 9 they read
+it with different statistics. EXPOSURE is a ratio of two whole-frame weighted
+luma medians, which pairs the two frames as DISTRIBUTIONS and so presumes both
+describe the same content — the presumption selecting Atmosphere denies.
+WHITE BALANCE no longer does: it is a weighted median of the PER-PIXEL log
+ratio, one cloud of per-pixel colour changes rather than a ratio of two
+marginals, because three independent per-channel medians on a bimodal frame
+draw their halfway points from different sub-populations and their ratio is no
+pixel's colour. On the crate's own `flat_sky_to_cloud_deck` fixture, where the
+land half is byte-identical between the two frames and the sky keeps its exact
+chromaticity vector with only its luminance redrawn — so no pixel changed
+colour at all — the marginal form read K 4400 / tint +55.2 and the per-pixel
+form reads the anchor back. WITH a field, the
 SHARED-CONTENT population replaces the whole frame on BOTH sides: target
 pixels no confident source cell maps onto (generated content that is not a
 rendition of this frame) and source pixels whose content the target replaced
@@ -2021,8 +2040,18 @@ pair's whole-frame per-channel MEAN R/B ratio is 0.9991 — the target's white
 balance IS the source's — while the per-channel MEDIAN ratio is 0.8293,
 because on a bimodal frame the three channels' independent medians are drawn
 from different sub-populations and their ratio is no pixel's colour. That is a
-defect in the robust STATISTIC rather than in its population, out of R2's
-scope and registered for R3.
+defect in the robust STATISTIC rather than in its population; R2 registered it
+and STEP 9 discharged it. The estimator is now a weighted median of the
+per-pixel log ratio over ONE population, and when the correspondence field is
+readable it reads the target through that field's own remap rather than by
+raw index — the same field that decided WHICH pixels are shared also decides
+WHICH target pixel each source pixel is paired with, because taking the
+population without the pairing is what lets a RECOMPOSED pair (the same
+content, moved in frame) be read as a colour cast. What step 9 does NOT claim
+is that this closes the island's bottom third: the target's white-balance
+demand there is spatially OPPOSITE to its demand over the top two thirds, so
+no single global gain can serve both halves, and the honest contribution is
+removing a wrong-way error rather than supplying a right-way one.
 
 The tone stage's evidence prefers NEAR-NEUTRAL pixels (saturated ones carry
 chroma-clipped luma), which rests on an identification assumption — "grey"
@@ -2061,19 +2090,43 @@ success does not derive range bands. The same structural statistic independently
 **Atmosphere** policy for each zone; structural divergence never drops a zone
 by itself. Every candidate must preserve mask-weighted texture energy and
 clipped-luma share; the same analysis render also feeds a boundary-continuity
-gate that reads the signed luma bow only in the mask's 5%-95% transition band
-against settled sky and land on the same rows/columns, then applies the largest
-shared, direction-preserving differential shrink `k` inside its calibrated
-budget (dropping the zones with a named note only when even `k=0`, no local
-correction, fails). That ruler needs a transition band to read, so it serves
-the FEATHERED segmentation masks only. Every hard-edged raster — spatial tiles
+gate that reads the luma bow only in the mask's 5%-95% transition band, then
+applies the largest shared, direction-preserving differential shrink `k`
+inside its calibrated budget. Since step 9 that bow is the bow the correction
+INTRODUCED: the same band on the render WITHOUT the correction is subtracted
+first, and it is TRANSPORTED through the settled sky's own linear multiplier
+before it is — `encode(M · decode(L))` with `M` the settled sky's linear
+ratio — because every zone dial is multiplicative in linear light, so a band
+pixel carrying a content rim above the settled sky moves MORE in absolute luma
+under the same multiplier and a plain difference of differences would charge
+that to the correction. On a hazy 12x4 probe under ONE multiply applied to the
+whole frame, where no seam exists by construction, the plain difference reads
++0.0201 at a +1 EV dial (1.68x the budget) and the transported difference
+reads exactly 0.0000. The reading is ranked by MAGNITUDE at the 90th
+percentile, exactly as the cross-boundary step already ranks its own samples
+and for the same reason: a correction that darkens its side of a border is as
+visible a seam as one that brightens it. Before step 9 the rim was ABSOLUTE —
+measured against the settled sky alone with no reference at all — so a bow the
+scene already carried under the feather was charged to whatever correction
+happened to be under test; on the island pair that dropped BOTH zones for a
++0.060 reading of which `k=0`, no local correction, still left +0.058.
+Consequently the drop branch (`k=0` still over budget) is now an INVARIANT
+rather than a policy branch — `k=0` zeroes every additive dial and drops every
+gain, so the `k=0` render must reproduce the reference exactly — and it is
+kept, and asserted, because a deleted branch cannot catch the engine bug it
+now names. That ruler needs a transition band to read, so it serves the
+FEATHERED segmentation masks only. Every hard-edged raster — spatial tiles
 and free masks, written 0/255 — is measured instead by the CROSS-BOUNDARY STEP:
 paired samples 1.5 px either side of the mask's 50% contour, `(inside minus
 outside)` on the corrected render minus the same difference on the render
-WITHOUT the correction, ranked by magnitude at the same 90th percentile and
-held to the same `0.012` budget. Differencing against the uncorrected render is
-what makes a subject edge lying under the mask border cancel, so only the
-discontinuity the correction itself introduced is budgeted. For that family a
+WITHOUT the correction, ranked by magnitude at the same 90th percentile.
+Differencing against the uncorrected render is what makes a subject edge lying
+under the mask border cancel on BOTH rulers, so only the discontinuity the
+correction itself introduced is budgeted. The two budgets are SEPARATE
+constants (`ZONE_BOUNDARY_RIM_MAX`, `ZONE_BOUNDARY_STEP_MAX`), both `0.012`
+today: they were one constant until step 9, which meant re-deriving either
+ruler's budget silently re-tuned the other, and the island's three accepted
+tiles sit 1.7%-3.3% below the step ceiling where that would have moved them. For that family a
 reading of ZERO measured crossings is a refusal, never a pass — until 2026-08-30
 the rim ruler returned `0.000` from an empty transition band for every hard
 raster ever gated, and the gate read that as comfortably inside budget. A Full-zone correction then uses the three-arm gate
@@ -2113,8 +2166,9 @@ re-derived from the current rendered stack before each fit; overlapping
 estimator ramps are normalized to sum to at most one, while the correction's
 movement coverage remains its own raw, pre-normalization range ramp. Ramps span
 one to two bin widths, and one final value-transition gate
-applies a shared direction-preserving bisection shrink against the `0.012` rim
-budget. A native correction uses `MaskRole::Custom`, a deterministic English
+applies a shared direction-preserving bisection shrink against the range
+path's own `0.012` rim budget (`RANGE_BOUNDARY_RIM_MAX`, which has always been
+its own constant). A native correction uses `MaskRole::Custom`, a deterministic English
 name, and the full-frame sentinel `Linear { zero_x: 0.5, zero_y: -0.8,
 full_x: 0.5, full_y: -0.4 }` intersected with `RangeMask::Luminance`; the XMP
 reader and writer therefore need no new grammar. Color-range partitioning is

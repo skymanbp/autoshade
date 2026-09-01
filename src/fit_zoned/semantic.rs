@@ -382,6 +382,7 @@ mod tests {
             crate::rationale::keys::ZONE_ATMOSPHERE_DROPPED,
             crate::rationale::keys::ZONE_BOUNDARY_PASSED,
             crate::rationale::keys::ZONE_BOUNDARY_DROPPED,
+            crate::rationale::keys::ZONE_BOUNDARY_INERT,
         ];
         let refusal_count = four
             .notes
