@@ -115,12 +115,22 @@ jobs:
           done
       - name: Smoke test — arm64 slice
         run: ./dist/autoshade --version
-      # The sidecars' own dependency-free self-test, on the interpreter the
-      # runner has. It touches no weights and no network, so it is the one
-      # piece of the AI path that CAN be proved here — and it is the piece the
-      # Mac port changed (the shared `pick_device`).
+      # The sidecars' own self-test: it loads neither torch nor weights and
+      # touches no network, so it is the one piece of the AI path that CAN be
+      # proved here — and it is the piece the Mac port changed (the shared
+      # `pick_device`). It is not dependency-free, which is what this comment
+      # used to claim and what nothing had checked, because the step only runs
+      # on a tag and no tag was pushed between the Mac port and v1.2.0: it
+      # imports numpy. The runner's system interpreter is externally managed,
+      # so the honest way to give it that one package is to bring an
+      # interpreter of our own rather than override someone else's manager.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
       - name: Sidecar self-test
-        run: python3 python/segment.py --self-test
+        run: |
+          python3 -m pip install --quiet --disable-pip-version-check numpy
+          python3 python/segment.py --self-test
       # Rosetta is not installed on the hosted runners. Reporting that the Intel
       # slice was BUILT BUT NOT EXECUTED is the honest line; silently skipping it
       # would let a broken slice ship as a tested one.
