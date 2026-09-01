@@ -164,10 +164,46 @@ jobs:
         run: |
           ditto -c -k --keepParent dist/AutoShade.app \
             "AutoShade-${{ steps.ver.outputs.version }}-macos-universal.zip"
+      # The second macOS asset, by user ruling (docs/ROADMAP.md, 31 Aug):
+      # someone who wants only the command line should not have to download a
+      # GUI bundle and reach inside it for the binary. Up to v1.1.0 the macOS
+      # asset WAS this shape; M3 replaced it with the .app rather than adding
+      # to it, and the ruling on that report item was to ship both.
+      #
+      # Payload rules come from build_app_bundle.sh, not from a second opinion
+      # written here: same universal binary, same sidecar excludes (no
+      # multi-gigabyte weights -- those are fetched on first use -- no
+      # bytecode, no sidecar tests).
+      - name: Stage the standalone CLI
+        run: |
+          stage="cli-stage/AutoShade-${{ steps.ver.outputs.version }}-macos-cli"
+          rm -rf cli-stage && mkdir -p "$stage/python"
+          cp dist/autoshade "$stage/"
+          /usr/bin/rsync -a \
+            --exclude 'weights/' --exclude '__pycache__/' \
+            --exclude 'test_*.py' --exclude '*.pyc' \
+            python/ "$stage/python/"
+          cp -R assets "$stage/assets"
+          cp LICENSE README.md "$stage/"
+          # The same three claims the bundle makes, on the shape that has no
+          # plist to lint: the binary runs, its sidecars came along, and no
+          # weights rode in with them.
+          "$stage/autoshade" --version
+          test -f "$stage/python/segment.py"
+          test ! -e "$stage/python/weights"
+          echo "sidecars: $(find "$stage/python" -type f | wc -l) files"
+      - name: Archive the standalone CLI
+        # ditto here too, for the ad-hoc code signature: a plain zip drops the
+        # extended attribute it lives in, and Apple silicon refuses to run an
+        # unsigned binary at all.
+        run: |
+          ditto -c -k --keepParent \
+            "cli-stage/AutoShade-${{ steps.ver.outputs.version }}-macos-cli" \
+            "AutoShade-${{ steps.ver.outputs.version }}-macos-cli.zip"
       - uses: actions/upload-artifact@v4
         with:
           name: macos
-          path: AutoShade-*-macos-universal.zip
+          path: AutoShade-*-macos-*.zip
           if-no-files-found: error
 
   # The battery runs BESIDE the build on its own runner, not after it inside

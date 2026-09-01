@@ -106,6 +106,24 @@ one.
 - No behaviour changes on any platform: production passes the same constant it
   did before.
 
+## macOS
+
+- **This is the first release with a macOS desktop app.** `AutoShade.app` is
+  universal — Apple silicon and Intel in one binary — and ad-hoc signed, which
+  is what lets it run at all on Apple silicon; it is not notarisation and is
+  not claimed to be. The CLI sits beside the GUI in `Contents/MacOS`, because
+  the sidecar search stops at the bundle and a command-line binary anywhere
+  else would not find `python/`.
+- **Two macOS assets ship, not one.** The `.app` archive, and a standalone CLI
+  archive carrying the same universal binary with the same sidecars beside it
+  — for anyone who wants the command line without downloading a GUI bundle and
+  reaching inside it. Both are packed with `ditto`: a plain `zip` drops the
+  extended attribute the ad-hoc signature lives in.
+- **The Apple-GPU path is implemented and unmeasured.** The sidecars share one
+  `cuda → mps → cpu` ladder, and the CUDA argument vector is byte-for-byte
+  what it was. No latency, memory or `deform_conv2d`-fallback numbers have
+  been taken on real Apple hardware, and none are claimed.
+
 ## Upgrading
 
 - **The installer removes the pre-rename payload.** The rename to AutoShade
@@ -116,9 +134,44 @@ one.
   still launched the old version. v1.2.0's installer deletes exactly the names
   the rename changed, moves the Start Menu group, and leaves the develop store
   and downloaded model weights untouched.
-- Everything the v1.1.0 notes said about `AUTOSHOP_*` environment names,
-  `autoshop.local.json` and the pre-rename data directory still applies: the
-  old spellings are read with a warning and will be removed in a later release.
+### Three directories move themselves on first launch
+
+Each is a whole-directory `rename` on one volume, so every file inside comes
+across together or none does; each says so once; and each falls back to the old
+name and retries next time rather than starting an empty second copy.
+
+| What | From | To | If it cannot move |
+|---|---|---|---|
+| Develop store — every recipe, version, snapshot and mask raster | `%LOCALAPPDATA%\autoshop` | `%LOCALAPPDATA%\autoshade` | keeps using the old folder |
+| Window geometry, recent library, theme (eframe prefs) | `%APPDATA%\Autoshop` | `%APPDATA%\AutoShade` | keeps the old storage key for the session |
+| Export registry — which deliverable filename belongs to which photo | `.autoshop-export-registry` beside the output | `.autoshade-export-registry` | keeps claiming under the old name |
+
+The export registry is the one to understand: it is an on-disk identity
+namespace, not a label. Re-keying it instead of moving it would abandon every
+claim and start reassigning `-2`, `-3` suffixes from scratch, which is exactly
+the collision it exists to prevent. Every claim file travels byte-for-byte
+under the same group key.
+
+If a directory of the NEW name already exists beside one of the old, nothing is
+moved and nothing is merged: which of two develops of the same photo you meant
+to keep is not a decision this app makes silently. It says so and uses the new
+one.
+
+On macOS none of this runs. This is the first Mac release, so no Mac ever wrote
+the old spellings — and `Library/Application Support` is case-insensitive by
+default, so a probe for the old name could match another program's folder,
+which these code paths would then rename.
+
+### What still answers to the old name, and for how long
+
+| Compatibility shim | Status |
+|---|---|
+| `AUTOSHOP_*` environment variables | read, with a one-per-name warning; removed in a later release |
+| `autoshop.local.json` settings file | read until the next time settings are saved; removed in a later release |
+| Pre-rename rationale mark | read; written only in the new spelling |
+| `x:xmptk` era marker, both spellings | **permanent.** An existing sidecar does not upgrade itself, and reading an era-1 file as era-2 reinterprets a relative colour temperature as an absolute one — a white-balance shift across the whole library |
+| eframe storage key `Autoshop` | read once, to perform the move above |
+
 - Style indexes built before v1.1.0's mask-habit widening still need one
   rebuild (`invalid length 10`).
 
