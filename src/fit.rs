@@ -7409,51 +7409,27 @@ mod tests {
     #[test]
     fn content_divergence_is_calibrated_on_every_shipped_showcase_asset() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/images");
-        let expected = [0.075f32, 0.168, 0.095];
-        for (index, &want) in expected.iter().enumerate() {
-            let source = image::open(root.join(format!("showcase-{}-before.jpg", index + 1)))
-                .unwrap();
-            let target = image::open(root.join(format!("showcase-{}-after.jpg", index + 1)))
-                .unwrap();
-            let measured = structure_divergence_for(
-                &source,
-                &target,
-                &EditRecipe::default(),
-                None,
-            );
+        // The two shipped reverse-fit panels (v1.2.2), each read at the
+        // top-row offsets the panel geometry fixes: the neutral conversion at
+        // left, the generated target in the middle. Both generators were asked
+        // for a grade and not a rebuild, so both sit UNDER the threshold and
+        // the full solve ran on each; the fired arm of the same statistic is
+        // pinned on a synthetic pair by
+        // `content_divergence_fires_on_flat_sky_to_cloud_deck`. The pins are
+        // the values measured when the panels were composed; a panel swapped
+        // for another generation moves them, which is the point.
+        for (file, want) in [
+            ("showcase-viaduct-reverse-fit.jpg", 0.180f32),
+            ("showcase-cornwall-reverse-fit.jpg", 0.136f32),
+        ] {
+            let panel = image::open(root.join(file)).unwrap();
+            let source = panel.crop_imm(0, 136, 532, 356);
+            let target = panel.crop_imm(535, 136, 530, 356);
+            let measured =
+                structure_divergence_for(&source, &target, &EditRecipe::default(), None);
+            eprintln!("STRUCTURE_CALIBRATION {file} {measured:?}");
             assert!(
                 measured.d < DIVERGENCE_GLOBAL && (measured.d - want).abs() <= 0.05,
-                "showcase {} calibration drifted: {measured:?}, expected {want:.3}",
-                index + 1
-            );
-        }
-        // The shipped reimagine triptychs, each pinned on the side of the
-        // threshold its own page claims.  Two generators stayed on the input's
-        // structure; the island one was asked to clear the haze and invented its
-        // way through it, so `under` is false there and the docs describe an
-        // Atmosphere-mode fit.  Pinning only the same-content assets would leave
-        // the one asset whose divergence actually fires uncalibrated.
-        for (file, want, under) in [
-            ("showcase-viaduct-reimagine-fit-triptych.jpg", 0.126f32, true),
-            ("showcase-sunset-reimagine-fit-triptych.jpg", 0.226f32, true),
-            ("showcase-island-reimagine-fit-triptych.jpg", 0.700f32, false),
-        ] {
-            let triptych = image::open(root.join(file)).unwrap();
-            let source = triptych.crop_imm(0, 136, 532, 356);
-            let target = triptych.crop_imm(535, 136, 530, 356);
-            let measured = structure_divergence_for(
-                &source,
-                &target,
-                &EditRecipe::default(),
-                None,
-            );
-            assert_eq!(
-                measured.d < DIVERGENCE_GLOBAL,
-                under,
-                "{file} crossed the wrong side of the threshold: {measured:?}"
-            );
-            assert!(
-                (measured.d - want).abs() <= 0.05,
                 "{file} calibration drifted: {measured:?}, expected {want:.3}"
             );
         }
@@ -7463,22 +7439,15 @@ mod tests {
     fn evidence_gating_does_not_regress_any_shipped_showcase_pair() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/images");
         let mut pairs = Vec::new();
-        for index in 1..=3 {
-            pairs.push((
-                format!("showcase-{index}"),
-                image::open(root.join(format!("showcase-{index}-before.jpg"))).unwrap(),
-                image::open(root.join(format!("showcase-{index}-after.jpg"))).unwrap(),
-            ));
-        }
         for (name, file) in [
-            ("viaduct", "showcase-viaduct-reimagine-fit-triptych.jpg"),
-            ("sunset", "showcase-sunset-reimagine-fit-triptych.jpg"),
+            ("viaduct", "showcase-viaduct-reverse-fit.jpg"),
+            ("cornwall", "showcase-cornwall-reverse-fit.jpg"),
         ] {
-            let triptych = image::open(root.join(file)).unwrap();
+            let panel = image::open(root.join(file)).unwrap();
             pairs.push((
                 name.to_string(),
-                triptych.crop_imm(0, 136, 532, 356),
-                triptych.crop_imm(535, 136, 530, 356),
+                panel.crop_imm(0, 136, 532, 356),
+                panel.crop_imm(535, 136, 530, 356),
             ));
         }
         for (name, source, target) in pairs {
@@ -7507,9 +7476,9 @@ mod tests {
     }
 
     #[test]
-    fn same_content_evidence_diagnosis_reports_viaduct_support_and_terminal_readings() {
+    fn same_content_evidence_diagnosis_reports_cornwall_support_and_terminal_readings() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/images");
-        let triptych = image::open(root.join("showcase-viaduct-reimagine-fit-triptych.jpg")).unwrap();
+        let triptych = image::open(root.join("showcase-cornwall-reverse-fit.jpg")).unwrap();
         let source = triptych.crop_imm(0, 136, 532, 356);
         let target = triptych.crop_imm(535, 136, 530, 356);
         // 532x356 against 530x356 thumbnails to 384x257 against 384x258: the
@@ -7535,7 +7504,7 @@ mod tests {
             &evidence.target_weights,
         );
         eprintln!(
-            "SAME_CONTENT_DIAG viaduct d={:.4} supported={}/{} ident={:.4} luma_weight={:.4} look={:.6}->{:.6} joint={joint_base:?}->{joint_after:?} recipe={:?}",
+            "SAME_CONTENT_DIAG cornwall d={:.4} supported={}/{} ident={:.4} luma_weight={:.4} look={:.6}->{:.6} joint={joint_base:?}->{joint_after:?} recipe={:?}",
             report.divergence.d,
             supported,
             evidence.spatial_supported.len(),
@@ -7575,17 +7544,20 @@ mod tests {
         assert!(report.divergence.d < DIVERGENCE_GLOBAL);
         assert!(supported > evidence.spatial_supported.len() / 2);
         assert!(luma_weight > 0.5);
-        // The paired robust estimator turned this real pair from a terminal
-        // do-no-harm reset (0.031 -> 0.031, ev forced to 0) into a genuine
-        // fit (0.042 -> 0.026 look, joint 0.119 -> 0.033 measured): pin the
-        // fit, not the reset.
+        // The paired robust estimator fits this real pair (0.059 -> 0.039
+        // look, joint 0.178 -> 0.045 measured on the v1.2.2 Cornwall panel):
+        // pin the fit, not a reset. The viaduct panel is the wrong subject
+        // here — its top row is the pair whose full solve needed zones and
+        // tiles, and on the panel thumbnails the global-only path ends in a
+        // do-no-harm reset (0.035 -> 0.035), which is exactly what this test
+        // must NOT be satisfied by.
         assert!(
             report.err_after < report.err_before,
             "the paired path must actually fit this pair: {:.4} -> {:.4}",
             report.err_before,
             report.err_after
         );
-        assert!(report.err_after < 0.032, "look residual {:.4}", report.err_after);
+        assert!(report.err_after < 0.045, "look residual {:.4}", report.err_after);
         assert!(
             !report
                 .notes
@@ -7595,7 +7567,7 @@ mod tests {
             report.recipe.rationale
         );
         let joint = joint_after.expect("the joint family had an opinion before the fit");
-        assert!(joint.weighted < 0.08, "joint after {:.4}", joint.weighted);
+        assert!(joint.weighted < 0.06, "joint after {:.4}", joint.weighted);
     }
 
     /// Step-7b conservation law, half one: an IDENTITY field (every cell maps

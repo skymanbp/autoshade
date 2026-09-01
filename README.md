@@ -8,7 +8,7 @@
 An AI decides *what to change*. A deterministic Rust engine *does* it.
 **In the recipe-development path, the AI never touches a pixel.**
 
-[Download v1.2.1](https://github.com/skymanbp/autoshade/releases/tag/v1.2.1) ·
+[Download v1.2.2](https://github.com/skymanbp/autoshade/releases/tag/v1.2.2) ·
 [Architecture](docs/ARCHITECTURE.md) ·
 [Roadmap](docs/ROADMAP.md) ·
 [MIT](LICENSE)
@@ -35,7 +35,6 @@ tools are separate, opt-in paths and are labelled as such.
 - [What it does](#what-it-does)
 - [What is new here](#what-is-new-here)
 - [How it works](#how-it-works)
-- [Results: two batches, six frames](#results-two-batches-six-frames)
 - [Measured numbers](#measured-numbers)
 - [Install and quickstart](#install-and-quickstart)
 - [User manual](#user-manual)
@@ -117,6 +116,21 @@ the last subsection lists what is designed but not yet shipped.
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/pillar-analysis-dark.svg" />
   <img src="docs/images/pillar-analysis-light.svg" alt="Pillar 1: a Lightroom RAW+XMP library becomes exemplars carrying a 14-dimension feature, a SigLIP 2 image vector, a Qwen3-VL sentence and a local-work habit; a query retrieves its four nearest past shots by the hybrid distance, and their habits reach the proposer behind an untrusted-data fence before a capped pull moves the proposal toward the photographer's own means" />
 </picture>
+
+<img src="docs/images/showcase-island-four-looks.jpg" alt="Lakeside island town: straight conversion and three AI develops driven by three different direction texts" />
+
+<sub><b>One photograph, four looks.</b> The straight conversion of a hazy
+lakeside frame and three AI develops of the same RAW at the same
+<code>--style 1.0 --strength 0.9</code> against the same 169-exemplar
+index of the photographer's own Lightroom edits — only the <b>direction
+text</b> changes. Each run retrieves the four most similar of the
+photographer's own edits and states their habits to the model as the target,
+so the direction moves the result within that anchor rather than to three
+unrelated grades (mean saturation 23 % / 12 % / 19 % for moody / golden / vivid against the conversion's
+18 %; all three runs ended on the verifier's <i>Revise</i> and are
+rendered from their unsaved proposals).
+Judge trails and prompts in [docs/SHOWCASE.md](docs/SHOWCASE.md); model-judge
+scores are automated review, not human aesthetic approval.</sub>
 
 `autoshade style-index <dir>` (or the GUI's **Style reference library**) turns
 *every finished edit you ever made* — each Lightroom RAW+XMP pair — into an
@@ -207,6 +221,32 @@ byte, while the other tiers change only its wording.
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/pillar-reimagine-fit-dark.svg" />
   <img src="docs/images/pillar-reimagine-fit-light.svg" alt="Pillar 2: a generated or finished target is measured against the input by the structural-divergence statistic D, which selects a full solve or a bounded atmosphere mode; a robust tone regression and gated local stages produce a recipe, and only the recipe reaches the full-resolution render" />
 </picture>
+
+<img src="docs/images/showcase-viaduct-reverse-fit.jpg" alt="Stone viaduct: straight conversion, generated target, and the recovered recipe rendered on the RAW, with a 1:1 detail row" />
+
+<sub><b>Stone viaduct.</b> Top row: the straight conversion, a 3520×2352
+<code>gpt-image-2</code> target asked for <i>a clearer afternoon, a little more
+contrast, a slightly deeper blue sky, everything else unchanged</i>
+(<b>D = 0.180</b>, under the 0.35 threshold, so the full solve ran),
+and the recovered recipe rendered on the 9504×6336 RAW: look error
+<b>0.161 → 0.050</b> through a global solve, a four-band colour mixer, two
+semantic zones, four boundary-gated tiles and two field masks. Bottom row:
+the same window of the frame at each source's native resolution — the recipe
+carries the look, the RAW carries the detail, and the generated frame carries
+neither at full size. The top-left sky tile is where the v1.2.2 seam fix was
+measured: its cross-boundary step 0.0278 → 0.0042, the delivered seam
++3.15 → +0.92 codes on the mask-free ruler.</sub>
+
+<img src="docs/images/showcase-cornwall-reverse-fit.jpg" alt="Cornwall lighthouse islet: straight conversion, generated target, and the recovered recipe rendered on the RAW, with a 1:1 detail row" />
+
+<sub><b>Cornwall lighthouse islet.</b> The same three stages on a frame shot
+with the body set to a 4:3 aspect, which is how it found the two frame defects
+v1.2.2 fixes: sized from the sensor frame the same prompt bought a target at
+<b>D = 0.136</b> (0.304 when the request was sized from the cropped
+preview), and the fit ran on a neutral develop of the full frame with the
+calibration composed into the solve — look error <b>0.137 → 0.027</b>,
+two semantic zones, four boundary-gated tiles and two field masks; the global stage also admitted per-channel cast curves that pass the re-hue gate yet tint the delivered sky toward violet — shown as fitted, registered as a v1.2.3 defect. Full measurements and prompts in
+[docs/SHOWCASE.md](docs/SHOWCASE.md).</sub>
 
 `match` recovers an editable recipe from any finished rendition of the same
 frame — a generated image, an export, someone else's grade — without copying
@@ -405,54 +445,6 @@ Three properties hold it together:
   fields it owns inside the existing document, so a Lightroom catalogue
   survives a round trip.
 
-## Results: two batches, six frames
-
-Each row is one Sony α7R IVA 61 MP `.ARW`. Every frame not marked *generated*
-is rendered by AutoShade's engine from a recipe; the neutral frame is
-AutoShade's own conversion, not the camera JPEG. Model-judge scores are
-automated review, not human aesthetic approval.
-
-Both batches are the SAME photograph — a hazy lakeside island town — so that
-what changes between them is the capability and not the subject. They were
-re-run end to end on the current build (2026-08-30), and the AI develops were
-asked for a committed grade (`--strength 0.9`) rather than the conservative
-shipped default, because a showcase should show what the axis is for. Every
-number below was read from that run.
-
-### Batch 1 — original · AI analysis · AI analysis with a style reference
-
-<table>
-<tr>
-<td width="33%"><img src="docs/images/showcase-island-neutral.jpg" alt="Lakeside island town: neutral engine conversion" /><br /><sub><b>Original.</b> Neutral engine conversion of the RAW — flat, and hazy, because that is what the sensor recorded.</sub></td>
-<td width="33%"><img src="docs/images/showcase-island-ai.jpg" alt="Lakeside island town: AI develop with the style read disabled" /><br /><sub><b>AI analysis.</b> The vision advisor's develop with the style read <i>disabled</i> (<code>--style 0 --strength 0.9</code>), including its own crop. The visual judge scored the first proposal 80/100, bought a guided revision and adopted it at 84/100, then bought a second that came back at 83 and was discarded. Final verdict Accept.</sub></td>
-<td width="33%"><img src="docs/images/showcase-island-ai-style.jpg" alt="Lakeside island town: AI develop with four retrieved style references" /><br /><sub><b>AI analysis + style reference.</b> The same advisor at the same strength with <code>--style 1.0</code>, handed the four most similar edits from a 169-photo index of the photographer's own Lightroom library as soft references. Judged 84/100, then 84 and 91 across two adopted revisions — and the run still ended on a <i>Revise</i> verdict, because the judge's target was not reached. The only difference between this pane and the last is whether those four neighbours reached the model; nothing is copied pixel for pixel.</sub></td>
-</tr>
-</table>
-
-### One photograph, three looks — the direction text drives the retrieval
-
-<img src="docs/images/showcase-island-three-looks.jpg" alt="Lakeside island town: straight conversion and three AI develops driven by three different direction texts" />
-
-<sub>The same frame, the same <code>--style 1.0 --strength 0.9</code>, the same 169-exemplar library — only the <b>direction text</b> changes, and the retrieval hears it (post text-hubness correction): each run pulled a <i>different</i> finished look from the photographer's own 94-photo look library (tags <i>dark moody low-key / muted desaturated / cross-processed</i>; <i>cinematic, warm golden tones, soft low contrast</i>; <i>cool blue tones, punchy high contrast, cross-processed</i>), and the grades measurably diverge — mean saturation 63 / 18 / 75 against the conversion's 45. Judged 92; 86 → 91 with one guided revision adopted; 84 with its revision re-scored 73 and discarded (do-no-harm). All three closed on <i>Revise</i> against the direct-tier target, so none auto-saved.</sub>
-
-### Batch 2 — original · AI full-image generation · AI reverse-fit
-
-<table>
-<tr>
-<td width="33%"><img src="docs/images/showcase-island-neutral.jpg" alt="Lakeside island town: neutral engine conversion" /><br /><sub><b>Original.</b> The same neutral conversion as Batch 1.</sub></td>
-<td width="33%"><img src="docs/images/showcase-island-reimagine.jpg" alt="Lakeside island town: AI-generated 3520×2352 target with the haze removed" /><br /><sub><b>AI full-image generation</b> (<i>generated</i>). A 3520×2352 target from a configured <code>gpt-image-2</code>, asked for the same scene on a clear day. It invented its way through the haze, and both stages measured exactly that: <code>reimagine</code> reported <b>D = 0.732</b> against the frame it sent, and the fit re-measured <b>D = 0.731</b> against the neutral render — more than twice the 0.35 threshold either way.</sub></td>
-<td width="33%"><img src="docs/images/showcase-island-fit.jpg" alt="Lakeside island town: reverse-fitted recipe rendered on the original RAW at 9504×6336" /><br /><sub><b>AI reverse-fit.</b> Because D crossed the threshold, the fit refused the full solve and ran the bounded <b>atmosphere</b> mode: exposure within ±1 EV, white-balance gains in [0.80, 1.25], saturation within ±30, no per-channel curves, confidence capped. Look error 0.207 → 0.093 at confidence 0.440. The per-band colour mixer proposed a move here and gave it back: the Orange and Yellow bands are one-sided on this pair (the generation replaced their population), and unmeasurable is not equal. It is visibly better than the original and visibly short of the generated frame — which is the honest answer, because the haze is <i>in</i> the photograph and no develop control can remove what was never recorded.</sub></td>
-</tr>
-</table>
-
-More examples — the shoreline `analyze` pair, a second style triptych, the
-stone-viaduct reverse-fit (D = 0.126, look error 0.048 → 0.017 at confidence
-0.662411, per-band HSL on three bands, three boundary-gated spatial tiles and
-two field masks — the tile seam v1.0.x shipped and disclosed is root-fixed,
-measured gone on the mask-free ruler), and three earlier pairs including two
-documented failure modes — are
-in [docs/SHOWCASE.md](docs/SHOWCASE.md).
-
 ## Measured numbers
 
 Every figure below is reproduced from the sections that own it; none is an
@@ -462,17 +454,17 @@ estimate. Sources are the pinned claims in
 
 | What | Measured | Where |
 |---|---|---|
-| Automated test battery | 1280 library / 23 CLI / 159 GUI / 2+2 contract tests; `check_docs` re-derives the pinned release claims | [Tech stack](#tech-stack-algorithms-and-design-philosophy) |
+| Automated test battery | 1308 library / 23 CLI / 160 GUI / 2+2 contract tests; `check_docs` re-derives the pinned release claims | [Tech stack](#tech-stack-algorithms-and-design-philosophy) |
 | RAW coverage | 24 extensions, 725 camera bodies; nine-camera format zoo 9/9 at the last release gate | [Supported formats](#supported-formats) |
 | Lightroom Texture parity | 45 of 45 period/depth anchors within ±0.02 | [Develop pipeline](#develop-pipeline-and-tone-model) |
 | Radial mask closure | 41 of 41 measured vectors within ≤1 px | [Lens correction](#lens-correction-and-lightroom-mask-frame-laws) |
 | Linear mask closure (openly not pixel-closed) | RMS 9.748 / 7.025 / 6.336 px with lens correction on, 12.449 / 9.943 / 4.979 px off | [Lens correction](#lens-correction-and-lightroom-mask-frame-laws) |
 | Brush geometry | D1 error 874 px → 9.8 px after pixel-centre sampling and the pixel/aspect metric | [Masks](#masks) |
 | X-Trans demosaic (approximate) | X-S10 G/R ratio 1.5503 → 0.9476 | [RAW decode](#raw-decode-and-cfa) |
-| Reverse-fit, island town (atmosphere mode) | look error 0.207 → 0.093, confidence 0.440221, generated-target divergence D = 0.731 (0.732 as `reimagine` measured it) | [Results](#results-two-batches-six-frames) |
-| Reverse-fit, stone viaduct (full solve) | look error 0.048 → 0.017 (0.019 global with the per-band mixer solving Orange −18, Yellow −18, Blue +18 saturation; three spatial tiles and two field masks bought the rest), confidence 0.662411, D = 0.126 | [docs/SHOWCASE.md](docs/SHOWCASE.md) |
+| Reverse-fit, stone viaduct (full solve) | look error 0.161 → 0.050 at confidence 0.25 (a global solve, the per-band mixer on Orange/Yellow/Aqua/Blue, two semantic zones, four boundary-gated tiles and two field masks), D = 0.180; the sky tile's seam 0.0278 → 0.0042 (k 0.121), delivered +3.15 → +0.92 codes | [What is new §2](#2-reverse-fit-inverse-rendering-from-any-finished-look) |
+| Reverse-fit, Cornwall islet (full solve, composed calibration) | look error 0.137 → 0.027 at confidence 0.65, D = 0.136 sized from the sensor frame (0.304 from the cropped preview) | [docs/SHOWCASE.md](docs/SHOWCASE.md) |
 | Local-field ceiling, calibration pair | global fit 0.0961 against a ceiling of 0.0700; the accepted sky zone realizes 0.134 of the distance | [What is new §7](#7-a-bilateral-grid-local-field-prices-every-local-producer-first) |
-| AI develop, model judge | 2026-08-30 batch at `--strength 0.9`, style off / style 1.0: island 80 → 84 / 84 → 91; river 63 → 69 / 68 → 78; shoreline 68 → 84 / 61 → 72. Earlier pairs (townhouse 84 → 86, balcony 78 → 84, hillside 63 → 87) are the v0.33.0 batch and are labelled as such | [docs/SHOWCASE.md](docs/SHOWCASE.md) |
+| AI develop, model judge | 2026-09-01 four-looks batch at `--style 1.0 --strength 0.9`: moody 87 → 89 (revision adopted); golden 81 (revision 78 discarded; the proposer never set the grain the direction asked for); vivid 72 → 82 (adopted) → 73 (discarded). All three runs ended on the verifier's Revise, so none auto-saved; the figure renders their final proposals | [docs/SHOWCASE.md](docs/SHOWCASE.md) |
 | Style retrieval weights | corpus harness (169 described exemplars, 156 queries): `W_EMB=4`, `W_TXT=0.5`, `W_DESC=0.5`, standardised variant with the text-hubness correction — MAE 0.688864 vs baseline 0.713143, +0.024280, CI [+0.005837, +0.041111] under the prose proxy; the corrected point at the old `W_TXT=4` regresses with CI [−0.069654, −0.005140], which is why the weight moved; under the tag-string proxy nothing beats the text-free row; `W_LOOK=1.0` is unmeasured (the harness cannot see the look library) and its scale is a real ratio against the direction terms — it ships inside a stable band, order unchanged to 2x and first moving at 4x | [AI advisor](#ai-advisor-and-reverse-fit) |
 | Memory budget | 1800 MB per photo from a 1771 MB reference probe; 4 GiB RAW admission gate | [Application](#application-and-infrastructure) |
 
@@ -480,7 +472,7 @@ estimate. Sources are the pinned claims in
 
 ### Download a release
 
-The v1.2.1 release is built by GitHub Actions from the tag and provides the
+The v1.2.2 release is built by GitHub Actions from the tag and provides the
 Windows front ends plus a first macOS universal (arm64 + x86_64) CLI archive;
 Linux is built and tested in CI with no prebuilt binaries yet. `checksums.txt`
 on the release page carries the SHA-256 of every asset.
@@ -489,21 +481,21 @@ on the release page carries the SHA-256 of every asset.
 |---|---:|---|
 | `autoshade.exe` (CLI) | 20,110,336 bytes | `1691fd41d76efd60efbd5ae444a1dc9d4ee74db83d1746b66580fb8ec0ed8636` |
 | `autoshade-gui.exe` (desktop app) | 26,424,832 bytes | `f32b867e5adb44bc36b99d33e229684c10ef3e0b18090d60500404304715a260` |
-| `AutoShade-Setup-1.2.1.exe` (installer) | 14,212,337 bytes | `c147396ab2243ce6f8993631511838b9af580213f1589c379e33a675b827a742` |
-| `autoshade-1.2.1-windows-x64.zip` (portable archive) | 18,790,752 bytes | `2f0f8be598f6e5401a4d5a6d7f3b70f88c18052216bc6fc105444e7e3fbf3929` |
-| `AutoShade-1.2.1-macos-universal.zip` (macOS app bundle) | 37,368,504 bytes | `73618c2abda8dfe25f46d9199fef55e1f53813eb558ceadd184d2fef7d263def` |
-| `AutoShade-1.2.1-macos-cli.zip` (macOS command line only) | 16,121,719 bytes | `51558b8ed0e8a2d46d2189d6fe23fc408f871fe29ef724ad89359642cf1eb93b` |
+| `AutoShade-Setup-1.2.2.exe` (installer) | 14,212,337 bytes | `c147396ab2243ce6f8993631511838b9af580213f1589c379e33a675b827a742` |
+| `autoshade-1.2.2-windows-x64.zip` (portable archive) | 18,790,752 bytes | `2f0f8be598f6e5401a4d5a6d7f3b70f88c18052216bc6fc105444e7e3fbf3929` |
+| `AutoShade-1.2.2-macos-universal.zip` (macOS app bundle) | 37,368,504 bytes | `73618c2abda8dfe25f46d9199fef55e1f53813eb558ceadd184d2fef7d263def` |
+| `AutoShade-1.2.2-macos-cli.zip` (macOS command line only) | 16,121,719 bytes | `51558b8ed0e8a2d46d2189d6fe23fc408f871fe29ef724ad89359642cf1eb93b` |
 
 Download from the
-[v1.2.1 release page](https://github.com/skymanbp/autoshade/releases/tag/v1.2.1):
+[v1.2.2 release page](https://github.com/skymanbp/autoshade/releases/tag/v1.2.2):
 
-- **Installer (recommended):** run `AutoShade-Setup-1.2.1.exe`. It installs for
+- **Installer (recommended):** run `AutoShade-Setup-1.2.2.exe`. It installs for
   the current user without administrator access, adds Start Menu shortcuts,
   offers optional desktop and user `PATH` tasks, and removes its own files on
   uninstall while keeping the develop store in `%LOCALAPPDATA%\autoshade`.
   Upgrading over a pre-rename install also deletes the executables, icon and
   fonts that carried the old name.
-- **Portable archive:** extract `autoshade-1.2.1-windows-x64.zip` to a directory
+- **Portable archive:** extract `autoshade-1.2.2-windows-x64.zip` to a directory
   you can keep intact and run either executable from there, beside the bundled
   `assets/` and `python/` sidecars.
 
@@ -512,12 +504,12 @@ Download from the
 Two macOS archives ship, both universal (Apple silicon and Intel in one
 binary):
 
-- `AutoShade-1.2.1-macos-universal.zip` is the app. Unzip it and move
+- `AutoShade-1.2.2-macos-universal.zip` is the app. Unzip it and move
   `AutoShade.app` to `/Applications`. The command-line binary travels inside
   the same bundle — `AutoShade.app/Contents/MacOS/autoshade` — so this download
   alone is enough for a terminal user too; symlink it onto your `PATH` if you
   want a short name.
-- `AutoShade-1.2.1-macos-cli.zip` is the command line on its own, with the same
+- `AutoShade-1.2.2-macos-cli.zip` is the command line on its own, with the same
   sidecars and assets beside it, for anyone who does not want a GUI bundle.
 
 Unpack either with Finder or `ditto -x -k <zip> <dir>`.
@@ -784,13 +776,13 @@ versions, and a deleted-version registry; SCUNet success requires the typed
 `sidecar_wrote` contract. A 1771 MB reference probe sets the 1800 MB per-photo
 budget, while the 4 GiB RAW gate bounds admission. The [`build`
 workflow](.github/workflows/build.yml) covers default and GUI feature sets on
-Ubuntu and macOS. The current battery is **1280 library (1268 pass + 12 `#[ignore]`d forensic probes) / 23 CLI / 159 GUI / 2+2 contract** tests; the
+Ubuntu and macOS. The current battery is **1308 library (1296 pass + 12 `#[ignore]`d forensic probes) / 23 CLI / 160 GUI / 2+2 contract** tests; the
 [`scripts/check_docs.py`](scripts/check_docs.py) gate re-derives pinned release
 claims. Model weights are not stored in this repository.
 
 ## Status, roadmap, and known limitations
 
-Release gates for v1.2.1 cover the CLI, desktop GUI, sidecar contracts, format
+Release gates for v1.2.2 cover the CLI, desktop GUI, sidecar contracts, format
 fixtures, and deterministic renderer; the built artifacts' sizes and hashes
 are listed above. macOS ships prebuilt binaries and a desktop app for the
 first time in this release, and nobody has used them interactively: CI builds
@@ -845,9 +837,8 @@ that index before use.
 
 The showcase photographs are the author's own Sony α7R IVA frames — © 2026
 skymanbp, all rights reserved. They document AutoShade's output and are not
-covered by the software's MIT license. The three established before/after
-pairs retain their visible watermarks and embedded copyright metadata; the
-newer composed cat/style/reimagine JPEGs omit EXIF and add no watermark.
+covered by the software's MIT license. The three composed showcase panels
+omit EXIF and carry no watermark.
 
 ### Fonts and model weights
 

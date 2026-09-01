@@ -96,9 +96,16 @@
 > experimental generative edits, an optional pixel-**heal** retouch mode (§4.7)
 > the deterministic look **reverse-fit** (§4.8) and the local server's refusal
 > model (§4.9).
-> 1280 library + 23 CLI + 159 GUI + 2+2 contract tests are enumerated in the GUI
-> build; the library result is 1268 pass + 12 `#[ignore]`d forensic probes
-> (counts refreshed 2026-09-01: the release run of disclosure fixes is net +5 —
+> 1308 library + 23 CLI + 160 GUI + 2+2 contract tests are enumerated in the GUI
+> build; the library result is 1296 pass + 12 `#[ignore]`d forensic probes
+> (counts refreshed 2026-09-01 for v1.2.2: +29 / −1 by name against `d628c80` —
+> 22 from the style-index batch (`28bed68`: `xmp_pair`, `content_cache`,
+> `style_cache` and six `style` tests), the two contextual-budget boundary arms
+> (`adf5955`), the size-plan and base-look frame tests (`fb3ef85`, `6552c44`),
+> the two band-table tests (`7420c0a`), and the same-content diagnosis test
+> re-pointed from the viaduct panel to the Cornwall one (−1 / +1); the GUI
+> battery is +1, the sidecar-folder preference; before that, v1.2.1's release
+> run of disclosure fixes was net +5 —
 > `a_truncated_rationale_says_how_much_it_lost` and
 > `look_weight_is_a_real_ratio_against_the_direction_terms` (`13cebf9`), the
 > neutral-solution exit's own note and the post-stamp domain disclosure
