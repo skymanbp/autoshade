@@ -465,9 +465,22 @@ pub enum RootAdoption {
 /// of the hundreds of `store_root()` calls a session makes, and keeps the
 /// disclosure to one line. With `act` false the answer is still correct: the
 /// three exists-checks alone say which directory is in use.
-pub(crate) fn adopt_pre_rename_root(parent: &Path, act: bool) -> (PathBuf, RootAdoption) {
+///
+/// `adopt` is [`ADOPT_PRE_RENAME`] at both production call sites, and a
+/// parameter rather than a direct read of the const for the reason the GUI's
+/// `adopt_prefs_between` takes the same decision as an argument: with it wired
+/// in, every branch below -- the refusal included -- is reachable from the
+/// battery on every platform. Reading the const here instead makes three of
+/// the four branches unreachable on macOS, where the tests that describe them
+/// then assert something that cannot happen, and leaves the refusal itself
+/// executed nowhere at all.
+pub(crate) fn adopt_pre_rename_root(
+    parent: &Path,
+    act: bool,
+    adopt: bool,
+) -> (PathBuf, RootAdoption) {
     let current = parent.join(STORE_DIR_NAME);
-    if !ADOPT_PRE_RENAME {
+    if !adopt {
         return (current, RootAdoption::Nothing);
     }
     let legacy = parent.join(LEGACY_STORE_DIR_NAME);
@@ -536,11 +549,13 @@ pub fn store_root_with_trust() -> (PathBuf, RootTrust) {
         .map(|d| (PathBuf::from(d), RootTrust::PerUser))
         .or_else(|| {
             per_user_data_dir()
-                .map(|d| (adopt_pre_rename_root(&d, latch()).0, RootTrust::PerUser))
+                .map(|d| {
+                    (adopt_pre_rename_root(&d, latch(), ADOPT_PRE_RENAME).0, RootTrust::PerUser)
+                })
         })
         .unwrap_or_else(|| {
             (
-                adopt_pre_rename_root(&std::env::temp_dir(), latch()).0,
+                adopt_pre_rename_root(&std::env::temp_dir(), latch(), ADOPT_PRE_RENAME).0,
                 RootTrust::SharedFallback,
             )
         });
@@ -6005,7 +6020,7 @@ mod tests {
         std::fs::write(legacy.join("develops/photo-0123456789abcdef/recipe.json"), b"{}").unwrap();
         std::fs::write(legacy.join(crate::config::LEGACY_SETTINGS_FILE), b"{}").unwrap();
 
-        let (root, outcome) = adopt_pre_rename_root(&parent, true);
+        let (root, outcome) = adopt_pre_rename_root(&parent, true, true);
 
         assert_eq!(outcome, RootAdoption::Migrated);
         assert_eq!(root, parent.join(STORE_DIR_NAME), "the current name is the one in use");
@@ -6018,7 +6033,7 @@ mod tests {
         assert!(root.join(crate::config::LEGACY_SETTINGS_FILE).is_file());
 
         // Idempotent: a second launch finds nothing to adopt and says nothing.
-        assert_eq!(adopt_pre_rename_root(&parent, true).1, RootAdoption::Nothing);
+        assert_eq!(adopt_pre_rename_root(&parent, true, true).1, RootAdoption::Nothing);
 
         let _ = std::fs::remove_dir_all(&parent);
     }
@@ -6041,7 +6056,7 @@ mod tests {
         std::fs::write(legacy.join("mark.txt"), b"old").unwrap();
         std::fs::write(current.join("mark.txt"), b"new").unwrap();
 
-        let (root, outcome) = adopt_pre_rename_root(&parent, true);
+        let (root, outcome) = adopt_pre_rename_root(&parent, true, true);
 
         assert_eq!(outcome, RootAdoption::KeptBoth);
         assert_eq!(root, current, "the current store is the one in use");
@@ -6068,7 +6083,7 @@ mod tests {
         std::fs::create_dir_all(&legacy).unwrap();
         std::fs::write(legacy.join("mark.txt"), b"the user's edits").unwrap();
 
-        let (root, outcome) = adopt_pre_rename_root(&parent, false);
+        let (root, outcome) = adopt_pre_rename_root(&parent, false, true);
 
         assert_eq!(outcome, RootAdoption::FellBack);
         assert_eq!(root, legacy, "the store that holds the edits must stay the one in use");
@@ -6078,12 +6093,65 @@ mod tests {
         let _ = std::fs::remove_dir_all(&parent);
     }
 
+    /// The branch macOS takes: adoption OFF, and the folder left strictly alone.
+    ///
+    /// `ADOPT_PRE_RENAME` is false there because no Mac ever ran the pre-rename
+    /// spelling, so an `autoshop` directory in `Library/Application Support`
+    /// belongs to some other program -- and on a case-insensitive volume the
+    /// `is_dir()` probe would match `Autoshop` just as readily. This function
+    /// does not merely read what it finds, it RENAMES it, so the refusal has to
+    /// be total: no adoption, no fallback to the old name, and above all not one
+    /// byte moved.
+    ///
+    /// Reachable on every platform because the decision is a parameter. Before
+    /// that it was reachable on none: the const made this branch the only one
+    /// macOS could run while the three tests above described the other three,
+    /// which is exactly how the Mac lane went red (runs 33437618323 and before)
+    /// with nothing anywhere exercising the refusal.
+    ///
+    /// MUTATION: drop the `!adopt` guard, or have either production call site
+    /// pass `true` instead of the const, and this test fails.
+    #[test]
+    fn a_build_that_does_not_adopt_leaves_the_old_folder_strictly_alone() {
+        let parent = adoption_scratch("refuse");
+        let legacy = parent.join(LEGACY_STORE_DIR_NAME);
+        std::fs::create_dir_all(legacy.join("develops")).unwrap();
+        std::fs::write(legacy.join("mark.txt"), b"someone else's data").unwrap();
+
+        let (root, outcome) = adopt_pre_rename_root(&parent, true, false);
+
+        assert_eq!(outcome, RootAdoption::Nothing, "a refusal has nothing to disclose");
+        assert_eq!(root, parent.join(STORE_DIR_NAME), "the current name, never the old one");
+        assert!(legacy.is_dir(), "the folder this build does not own must still be there");
+        assert_eq!(
+            std::fs::read(legacy.join("mark.txt")).unwrap(),
+            b"someone else's data",
+            "not one byte of a stranger's directory may move"
+        );
+        assert!(!root.exists(), "refusing to adopt must not mint a store either");
+
+        // The production call sites pass the const, not `true`. Windows cannot
+        // execute the macOS value, so it asserts the WIRING instead -- the same
+        // reason the per-platform pin below reads its own source.
+        let src = crate::source_before_tests(include_str!("store.rs"));
+        assert_eq!(
+            src.matches("adopt_pre_rename_root(&d, latch(), ADOPT_PRE_RENAME)").count()
+                + src
+                    .matches("adopt_pre_rename_root(&std::env::temp_dir(), latch(), ADOPT_PRE_RENAME)")
+                    .count(),
+            2,
+            "both production call sites must pass the platform const"
+        );
+
+        let _ = std::fs::remove_dir_all(&parent);
+    }
+
     /// The fourth case, which is the common one: a clean machine. No folder of
     /// either name, so the current name is the answer and nothing is said.
     #[test]
     fn a_first_run_adopts_nothing_and_says_nothing() {
         let parent = adoption_scratch("nothing");
-        let (root, outcome) = adopt_pre_rename_root(&parent, true);
+        let (root, outcome) = adopt_pre_rename_root(&parent, true, true);
         assert_eq!(outcome, RootAdoption::Nothing);
         assert_eq!(root, parent.join(STORE_DIR_NAME));
         assert!(!root.exists(), "resolving a root must not CREATE it");

@@ -87,6 +87,25 @@ one.
   `dtolnay/rust-toolchain@stable` with no version. The reproducibility claim in
   ARCHITECTURE is scoped to match: same recipe + same RAW + the same build.
 
+## A platform decision no test could reach
+
+- **The macOS test lane is green again.** The Mac port turned the pre-rename
+  store adoption off on macOS on purpose: no Mac ever ran the Autoshop
+  spelling, `Library/Application Support` is case-insensitive by default, and
+  the adoption does not merely read what it finds — it renames it. A folder of
+  that name on a Mac is a stranger's. What the port did not do was update the
+  three tests describing the adoption's branches, which went on asserting them
+  unconditionally, so every push after it failed `test (macos-latest)` on
+  exactly those three and nothing else.
+- The decision is now a parameter, the shape the GUI's preference adoption
+  already used, so all four branches — the refusal included — run on every
+  platform. The refusal had until now been executed on none: macOS was the only
+  build that took it and macOS was where the suite died. It is pinned by a test
+  that a stranger's directory keeps every byte, plus a source-level check that
+  both production call sites pass the platform constant rather than `true`.
+- No behaviour changes on any platform: production passes the same constant it
+  did before.
+
 ## Upgrading
 
 - **The installer removes the pre-rename payload.** The rename to AutoShade
@@ -105,7 +124,7 @@ one.
 
 ## Verification
 
-Merged-tree battery on the release commit: library 1267 passed / 0 failed /
+Merged-tree battery on the release commit: library 1268 passed / 0 failed /
 12 ignored, CLI binary 23, GUI binary 159, contract suites 2 + 2, clippy 0
 warnings across lib and all targets, `check_docs` 23 PASS / 0 FAIL / 5 SKIP.
 Every behaviour change in this release carries a named test and at least one
