@@ -1677,8 +1677,19 @@ const SAME_FRAME_ASPECT_TOL: f32 = 0.02;
 /// the same scene at the same aspect passes, and nothing short of registration
 /// would catch it — which is exactly why the caller warns instead of refusing.
 pub fn same_frame_plausible(src: &DynamicImage, target: &DynamicImage) -> bool {
-    let ar = |w: u32, h: u32| w.max(1) as f32 / h.max(1) as f32;
-    let (a, b) = (ar(src.width(), src.height()), ar(target.width(), target.height()));
+    same_frame_plausible_dims((src.width(), src.height()), (target.width(), target.height()))
+}
+
+/// [`same_frame_plausible`] on dimensions alone — the ONE aspect rule every
+/// "is this the sensor frame?" question in the crate reads: the reference
+/// check above, `reimagine`'s choice of input frame, `match`'s choice of
+/// source frame and the base-look estimator's pairing (v1.2.2, the in-camera
+/// aspect-crop class: a body set to 4:3 writes a centred 4:3 preview over its
+/// 3:2 sensor). One tolerance, so a frame cannot be "the same" to one
+/// consumer and "cropped" to another.
+pub fn same_frame_plausible_dims(a: (u32, u32), b: (u32, u32)) -> bool {
+    let ar = |(w, h): (u32, u32)| w.max(1) as f32 / h.max(1) as f32;
+    let (a, b) = (ar(a), ar(b));
     (a - b).abs() <= SAME_FRAME_ASPECT_TOL * a.max(b)
 }
 

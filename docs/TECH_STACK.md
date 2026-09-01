@@ -1144,8 +1144,10 @@ states which downstream fits still read them. Full mode is unchanged.
 lossy generated target, negotiates a flexible size and its supported fallback
 (sized from the frame it sends: a RAW sends its sensor frame, never an
 in-camera-cropped embedded preview, since v1.2.2), then can feed that target
-into `match` for an editable full-resolution
-approximation; parameter downgrades occur only when structured error blame—or
+into `match` for an editable full-resolution approximation — `match` in turn
+fits on the camera's embedded rendition only while that rendition is the
+sensor frame, and on a neutral develop of the full frame with the calibration
+composed when it is an in-camera crop (the same 2 % aspect rule); parameter downgrades occur only when structured error blame—or
 the equivalent streamed-refusal wrapper—names that parameter, while `heal`
 copies real neighbouring pixels, mean-corrects and feather-blends the patch,
 and remains a deterministic pixel operation rather than XMP.

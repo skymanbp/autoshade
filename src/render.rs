@@ -6392,6 +6392,28 @@ fn base_curve_lut(knots: &[[f32; 2]]) -> Vec<f32> {
 /// either side — an inability the pre-era repair must never mistake for a
 /// verdict), `Some(empty)` for the identity verdict (= no base look), and
 /// `Some(knots)` otherwise.
+/// The part of `neutral` the camera's embedded rendition shows: the whole
+/// develop when the two share the sensor frame, else the centred crop at the
+/// rendition's aspect. A body set to an in-camera aspect writes a centred
+/// crop (a Sony 4:3 preview over the 3:2 sensor measured centred at NCC 0.987
+/// against 0.83 for either side, v1.2.2); pairing the full frame against it
+/// put the edge strips' histogram on one side of the CDF match only.
+pub fn camera_frame_of(neutral: &DynamicImage, camera: &DynamicImage) -> DynamicImage {
+    let (nw, nh) = (neutral.width(), neutral.height());
+    let (cw, ch) = (camera.width(), camera.height());
+    if cw == 0 || ch == 0 || crate::fit::same_frame_plausible_dims((nw, nh), (cw, ch)) {
+        return neutral.clone();
+    }
+    let target = cw as f64 / ch as f64;
+    let (w, h) = if nw as f64 / nh as f64 > target {
+        ((nh as f64 * target).round() as u32, nh)
+    } else {
+        (nw, (nw as f64 / target).round() as u32)
+    };
+    let (w, h) = (w.clamp(1, nw), h.clamp(1, nh));
+    neutral.crop_imm((nw - w) / 2, (nh - h) / 2, w, h)
+}
+
 pub fn camera_base_knots(
     neutral: &DynamicImage,
     camera: &DynamicImage,
@@ -8889,6 +8911,37 @@ mod tests {
         assert!(longest <= 12, "posterised plateau of {longest} identical output levels");
         assert!(vals[229] < 250, "input 0.9 must not latch to white: {}", vals[229]);
         assert!(vals[250] > vals[235], "the tail keeps rising toward the (1,1) pin");
+    }
+
+    /// v1.2.2: the base-look estimator pairs the rendition against the frame
+    /// it SHOWS. A 300x200 neutral with dark side strips and a "camera"
+    /// rendition that is its centred 4:3 crop, pixel for pixel: paired whole,
+    /// the strips' mass sits on one side of the CDF match only and a curve
+    /// appears where there is none; paired on the camera's frame the pair is
+    /// the identity it is. A same-frame pair passes through untouched.
+    #[test]
+    fn the_base_look_is_estimated_on_the_frame_the_camera_shows() {
+        let neutral = image::DynamicImage::ImageRgb8(image::RgbImage::from_fn(300, 200, |x, _| {
+            if !(16..283).contains(&x) {
+                image::Rgb([20, 20, 20])
+            } else {
+                let v = (x * 255 / 300) as u8;
+                image::Rgb([v, v, v])
+            }
+        }));
+        let camera = neutral.crop_imm(16, 0, 267, 200);
+        assert!(
+            !camera_base_knots(&neutral, &camera).expect("judgeable").is_empty(),
+            "paired whole, the edge strips read as a camera curve"
+        );
+        let paired = camera_frame_of(&neutral, &camera);
+        assert_eq!((paired.width(), paired.height()), (267, 200));
+        assert!(
+            camera_base_knots(&paired, &camera).expect("judgeable").is_empty(),
+            "paired on the frame the camera shows, an identical crop is the identity"
+        );
+        let same = camera_frame_of(&neutral, &neutral.thumbnail(150, 100));
+        assert_eq!((same.width(), same.height()), (300, 200), "a same-frame pair is untouched");
     }
 
     #[test]

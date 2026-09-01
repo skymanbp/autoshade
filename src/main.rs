@@ -1679,7 +1679,41 @@ fn match_cmd(
             o.display()
         );
     }
-    let src = decode::preview_only(raw)?;
+    // The source frame. The camera's embedded rendition is this command's
+    // contract (no demosaic, and the calibration stamp below was validated
+    // on it) — but only while that rendition IS the sensor frame. A body set
+    // to an in-camera aspect writes a centred crop (a 4:3 preview over a 3:2
+    // sensor); fitting on it paired the target against a different frame,
+    // warned "CROPPED", and mapped every zone and tile mask onto the wrong
+    // one (v1.2.2). For that class the source is a neutral develop of the
+    // sensor frame with the calibration COMPOSED into the solve — the route
+    // the desktop app has used since v0.25.0 — and nothing is stamped after.
+    let preview = decode::preview_only(raw)?;
+    let frame = decode::frame_size(raw)?;
+    let composed = !fit::same_frame_plausible_dims(
+        (preview.width(), preview.height()),
+        (frame.0 as u32, frame.1 as u32),
+    );
+    let (src, fit_base) = if composed {
+        println!(
+            "  note: the embedded preview ({}x{}) is an in-camera crop of the {}x{} sensor \
+             frame — fitting on a neutral develop of the full frame, calibration composed \
+             into the solve",
+            preview.width(),
+            preview.height(),
+            frame.0,
+            frame.1
+        );
+        // Comfortably above both consumers (the fit analyses at 384, the
+        // judge at 1024) — the same working edge the base-look estimator uses.
+        const SOURCE_EDGE: u32 = 2048;
+        (
+            render::render_to_image(raw, &EditRecipe::default(), None, Some(SOURCE_EDGE))?,
+            pipeline::calibration_recipe(pipeline::fit_calibration(raw)),
+        )
+    } else {
+        (preview, EditRecipe::default())
+    };
     // THE raw-vs-baked dispatch (R22-1). The target is a finished rendition
     // of this frame — usually a baked file, but "another RAW you developed
     // elsewhere" is a legitimate reference and `decode::load_image` refuses a
@@ -1738,12 +1772,12 @@ fn match_cmd(
             &tgt,
             &seg,
             &mask,
-            &EditRecipe::default(),
+            &fit_base,
             fit_options,
             regions.min(autoshade::fit_zoned::semantic::MAX_SEMANTIC_REGIONS),
         )
         } else {
-            fit::fit_recipe_with(&src, &tgt, fit_options)
+            fit::fit_recipe_from_with(&src, &tgt, &fit_base, fit_options)
         })
     };
     let mut rep = run_fit(zoned)?;
@@ -1869,13 +1903,21 @@ fn match_cmd(
     } else {
         None
     };
-    let cal = pipeline::fit_calibration(raw);
-    pipeline::stamp_fit_calibration(&mut rep.recipe, cal);
-    // The residual above was read before that stamp existed, so it describes
-    // the embedded rendition rather than the file this command writes. Say so
-    // in BOTH places the number appears -- the console line the user is
-    // reading right now, and the rationale that ships with the recipe.
-    let shift = pipeline::post_stamp_domain_shift(&rep.recipe);
+    // With the calibration composed into the solve the recipe already
+    // carries it and the residual describes the delivered frame: nothing to
+    // stamp, nothing to disclose.
+    let shift = if composed {
+        None
+    } else {
+        let cal = pipeline::fit_calibration(raw);
+        pipeline::stamp_fit_calibration(&mut rep.recipe, cal);
+        // The residual above was read before that stamp existed, so it
+        // describes the embedded rendition rather than the file this command
+        // writes. Say so in BOTH places the number appears -- the console line
+        // the user is reading right now, and the rationale that ships with the
+        // recipe.
+        pipeline::post_stamp_domain_shift(&rep.recipe)
+    };
     let domain = match shift.as_deref() {
         Some(what) => format!("; measured on the camera's embedded rendition, before {what}"),
         None => String::new(),

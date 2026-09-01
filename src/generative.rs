@@ -585,17 +585,7 @@ fn develop_is_sent(raw: bool, planned: (u32, u32), preview: (u32, u32), frame: (
         return false;
     }
     let outresolved = planned.0.max(planned.1) > preview.0.max(preview.1);
-    outresolved || !same_aspect(preview, frame)
-}
-
-/// Two frames share an aspect within 1 % — the embedded preview of a 3:2
-/// sensor is a few pixels off the develop's ratio, not a different frame.
-fn same_aspect(a: (u32, u32), b: (u32, u32)) -> bool {
-    if a.1 == 0 || b.1 == 0 {
-        return a == b;
-    }
-    let (ra, rb) = (a.0 as f64 / a.1 as f64, b.0 as f64 / b.1 as f64);
-    (ra - rb).abs() <= 0.01 * ra.max(rb)
+    outresolved || !crate::fit::same_frame_plausible_dims(preview, frame)
 }
 
 /// The output-size request strategy: try the flexible high-res size first (when

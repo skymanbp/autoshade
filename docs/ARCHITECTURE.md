@@ -873,6 +873,7 @@ line is whether the NUMBERS are wrong or only the fine detail:
 | Monochrome or 4-colour (CYGM/RGBE) sensor | **Refuse**, before the develop (`render::refuse_unsupported_sensor`) | The engine emits three-channel colour only; deciding after the demosaic spent a full-frame buffer to learn what the metadata already said |
 | A camera RAW named `.tif` | **Refuse**, naming the marker that gave it away | The `image` crate would decode a DNG's first IFD — the *thumbnail* — so the photo would open, look right, and develop at a few hundred pixels. Opening wrong is worse than not opening |
 | Third-party parser panics | **Named error**, process survives (`decode::guard_parser_panic`) | The GUI has wrapped workers in `catch_unwind` since v0.22; the CLI had nothing, so one malformed file killed a whole `batch` run |
+| Embedded preview at an **in-camera aspect crop** (a 4:3 preview over a 3:2 sensor) | **Treat it as the crop it is** (v1.2.2): `reimagine` sizes and sends the sensor frame, `match` fits on a neutral develop of the sensor frame with the calibration composed, the base-look estimator pairs the develop's centred crop | The preview is a display artefact; every consumer that took it for the frame paired two different frames (`fit::same_frame_plausible_dims` is the one rule) |
 | No embedded preview (ORF class) | **Degrade** to a neutral develop + say so | rawler overrides no rendition method for 12 of the 24 formats; that is a fact about the format, not a broken file. `embedded_preview` keeps the strict "camera pixels or nothing" contract, because the base-look estimator's method depends on it |
 | Non-Bayer CFA (X-Trans) | **Demosaic in-tree over the array's own geometry** (v0.34.0, `render::demosaic_over_cfa_geometry`) + disclose per render | rawler's `PPGDemosaic` is Bayer-only and its guard (`CFA::is_rgb`) checks the pattern's NAME, not its geometry; through v0.33.0 its chroma pass left R unwritten at 8 of the 36 photosites per tile and B at a different 8 — the measured green-dark cast. Now every channel interpolates only from photosites that measured it: colour/tone/framing correct, fine detail approximate and disclosed |
 | A RAW whose develop would peak over **4 GiB** — 138,547,333 px and up, at the measured 31 B/px (a 150 MP back; a 102 MP GFX is well clear) | **Refuse**, naming the estimate and its per-pixel basis (v0.34.0, `decode::refuse_raw_develop_over_ceiling`, charged in `render::render_to_image_in` before the sensor is decompressed) | The baked door has refused an over-ceiling file since L02 while the RAW door had NO per-file limit at all, so a ~150 MP back on the default `batch --jobs 3` was the worse instance of the same defect with nothing opt-in about it. The ceiling is the SAME 4 GiB, and the message says outright that `--jobs 1` is not the answer — a single file's peak is not a concurrency budget. This IS a behaviour change: such a file used to be attempted, and would page |
@@ -2505,7 +2506,17 @@ saved calibration is all-neutral (`pipeline::fit_calibration`; an earlier
 UNSTAMPED fit recipe would otherwise poison the authority with its empty
 curve) — so every closed-loop candidate render IS the canvas's one-pass
 `user(base(x))` and the deliverable carries the calibration by
-construction. Fitting from the raw neutral spent the bounded model (the
+construction. The CLI `match` keeps its embedded-rendition source and
+post-fit stamp, but only while that rendition *is* the sensor frame: a body
+set to an in-camera aspect writes a centred crop (a 4:3 preview over a 3:2
+sensor), and since v1.2.2 the CLI detects it with the crate's one aspect
+rule (`fit::same_frame_plausible_dims`, the 2 % tolerance the reference
+check already used) and takes the GUI's composed route on a neutral
+develop of the full frame instead — fitting on the crop paired the target
+against a different frame, warned "CROPPED", and mapped every zone and
+tile mask onto the wrong one. The same rule sizes `reimagine`'s request
+from the frame it sends, and `render::camera_frame_of` pairs the base-look
+estimator's develop against the frame the rendition shows. Fitting from the raw neutral spent the bounded model (the
 ±60 saturation cap, the hue-rotation budget, the slider ranges)
 re-deriving the 0.6–1.4 EV camera look before the actual grade got a say —
 measured on a real pair, the neutral-source solve pegged saturation and

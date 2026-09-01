@@ -2577,6 +2577,10 @@ pub fn photo_base_knots_checked(raw: &Path) -> Option<Vec<[f32; 2]>> {
     // same histogram signal as 61 MP at a fraction of the transients.
     match crate::render::render_to_image(raw, &EditRecipe::default(), None, Some(2048)) {
         Ok(neutral) => {
+            // Paired against the frame the rendition SHOWS (v1.2.2): a body
+            // set to an in-camera aspect writes a centred crop, and the edge
+            // strips it leaves out belong in neither histogram.
+            let neutral = crate::render::camera_frame_of(&neutral, &camera);
             // Estimate on the profile-vignette-corrected neutral — the same
             // base a stamped canvas starts from (see render::estimation_base).
             let est = crate::render::estimation_base(&neutral, &fresh_lens_profile(raw));
