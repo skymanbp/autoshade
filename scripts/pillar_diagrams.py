@@ -140,8 +140,8 @@ def pillar_analysis(theme):
             "your own library decides what “your style” means; the model only proposes")
     y = 92
     s.box(28, y, 190, 124, "This RAW", "EXIF, histogram, preview", num="01")
-    s.box(258, y, 210, 124, "Similarity, three rulers",
-          "14-dim hand feature; image and text vectors optional",
+    s.box(258, y, 210, 124, "Similarity, four terms",
+          "14-dim hand feature; image, text and sentence vectors",
           kind="accent", num="02")
     s.box(508, y, 200, 124, "K = 4 neighbours",
           "from YOUR RAW + .xmp library", num="03")
@@ -173,7 +173,7 @@ def pillar_analysis(theme):
     s.note(28, y2 + 88, "on your disk unless")
     s.note(28, y2 + 104, "you send one on purpose.")
     return s.render(
-        "Pillar 1: this RAW, three similarity rulers, four neighbours from your own "
+        "Pillar 1: this RAW, a four-term similarity, four neighbours from your own "
         "library, a reference block, then propose, verify and blend into a recipe")
 
 

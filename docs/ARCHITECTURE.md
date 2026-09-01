@@ -1,6 +1,7 @@
 # AutoShade — Architecture
 
-> Status: **implemented** (v1.2.0 — the honest-disclosure release). The reverse-fit's
+> Status: **implemented** (v1.2.0 — the AutoShade rename and the
+> honest-disclosure release). The reverse-fit's
 > in-range estimator is now a PAIRED ROBUST REGRESSION (2026-08-26): on
 > same-frame pairs the tone map is estimated from corresponding pixels
 > (per-bin Tukey-IRLS means, median start, robust weight × evidence weight),
@@ -92,9 +93,16 @@
 > experimental generative edits, an optional pixel-**heal** retouch mode (§4.7)
 > the deterministic look **reverse-fit** (§4.8) and the local server's refusal
 > model (§4.9).
-> 1275 library + 23 CLI + 159 GUI + 2+2 contract tests are enumerated in the GUI
-> build; the library result is 1263 pass + 12 `#[ignore]`d forensic probes
-> (counts refreshed 2026-08-31: step 9 is net +10 — it added 11 named tests
+> 1280 library + 23 CLI + 159 GUI + 2+2 contract tests are enumerated in the GUI
+> build; the library result is 1268 pass + 12 `#[ignore]`d forensic probes
+> (counts refreshed 2026-09-01: the release run of disclosure fixes is net +5 —
+> `a_truncated_rationale_says_how_much_it_lost` and
+> `look_weight_is_a_real_ratio_against_the_direction_terms` (`13cebf9`), the
+> neutral-solution exit's own note and the post-stamp domain disclosure
+> (`693917b`), and `a_build_that_does_not_adopt_leaves_the_old_folder_strictly_alone`,
+> the store adoption's refusal branch, which the macOS opt-out had until then
+> left executed on no platform at all (`410993e`) — so library 1263→1268;
+> before it, step 9 is net +10 — it added 11 named tests
 > (2 `fit` for the per-pixel white-balance statistic and for a readable
 > correspondence field choosing the PAIRING as well as the population, 7
 > `fit_zoned` for the introduced-rim boundary arms and the k=0 render
@@ -2664,10 +2672,20 @@ directory named by a hash of an absolute path orphans every develop under it.
 For the same reason the one-time adoption of a pre-rename `autoshop` store is
 DISABLED on macOS: no Mac ever ran the old name, APFS is case-insensitive by
 default, and an adoption firing there could only rename a directory belonging
-to somebody else's program. Both spellings, and the opt-out, are pinned by a
-test that asserts the arms it cannot execute still EXIST in the source —
-deleting the macOS arm is otherwise a silent no-op on the machine the battery
-runs on.
+to somebody else's program. Both spellings are pinned by a test that asserts
+the arms it cannot execute still EXIST in the source — deleting the macOS arm
+is otherwise a silent no-op on the machine the battery runs on.
+
+The opt-out is stronger than a source assertion. `adopt_pre_rename_root` takes
+the decision as a PARAMETER, the shape `adopt_prefs_between` next door already
+used, and both production call sites pass the constant; so the refusal runs as
+a BEHAVIOURAL test on every platform — that a directory this build does not own
+keeps every byte — and the source check is reduced to confirming those two call
+sites pass the constant rather than `true`. Reading the constant inside the
+function instead left three of the four branches unreachable on macOS while the
+tests describing them asserted unconditionally, which is why the Mac lane failed
+on exactly those three for every push after the port; and it left the refusal —
+the one branch macOS could take — executed by no test on any platform.
 
 The GUI's own preferences (window size, theme, language) use the eframe
 storage key `AutoShade` on every platform. The pre-rename `Autoshop`
