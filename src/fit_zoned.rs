@@ -124,14 +124,21 @@ const ZONE_CLIP_GROWTH: f32 = 0.01;
 /// tree reproduces them; quoting them against this ruler would be a number
 /// with no source.
 ///
-/// THE BUDGET ITSELF STAYS AT +0.012, deliberately and not by inertia. It is
-/// a VISIBILITY threshold in luma — how large a discontinuity at a mask
-/// border a viewer sees — and step 9 did not change the quantity's units or
-/// scale, it removed a foreign term (the scene's own bow) from the
-/// measurement. Re-deriving it downward would need a perceptual study this
-/// batch does not have, and a guessed number would be worse than the
-/// calibrated one. It is now its own constant: [`ZONE_BOUNDARY_STEP_MAX`]
-/// carries the hard-raster ruler's budget, so moving either one can no longer
+/// THE CONSTANT ITSELF STAYS AT +0.012, deliberately and not by inertia. It
+/// was calibrated where neighbourhood contrast can mask a discontinuity of
+/// this size — real textured and feathered borders — and it is NOT a
+/// visibility threshold that holds everywhere: v1.2.2 measured a tile seam
+/// in clean sky at 7.8 sigma over a mask-free neutral control while sitting
+/// exactly on this number. THIS ruler may keep the scalar because it only
+/// ever samples INSIDE a feathered transition band, where the correction is
+/// a ramp by construction; the hard-raster step ruler cannot, so its
+/// samples are charged per crossing against their own context (see
+/// [`ZONE_BOUNDARY_STEP_MAX`], [`BOUNDARY_STEP_FLOOR`]) and that constant
+/// is the CAP on the exchange, not a promise about bare-sky visibility.
+/// Re-deriving the number itself would need a perceptual study this batch
+/// does not have, and a guessed number would be worse than the calibrated
+/// one. It is its own constant: [`ZONE_BOUNDARY_STEP_MAX`] carries the
+/// hard-raster ruler's ceiling, so moving either one can no longer
 /// silently re-tune the other. The supervisor's independent RAW rim metric
 /// remains the final regression check, because it samples a 40px crossing
 /// neighbourhood rather than this analysis-grid statistic.
@@ -146,9 +153,43 @@ pub(super) const ZONE_BOUNDARY_RIM_MAX: f32 = 0.012;
 /// k=0.114, 0.0732 → 0.0116 after k=0.168, 0.0675 → 0.0118 after k=0.187,
 /// i.e. 0.0002/0.0004/0.0002 luma of slack (1.7%/3.3%/1.7% of the budget) —
 /// so any downward move re-shrinks real tiles and must be argued on the step
-/// ruler's own evidence. Carried over at the rim's calibrated +0.012, so the
-/// split itself is byte-identical.
+/// ruler's own evidence. Carried over at the rim's calibrated +0.012 — but
+/// as a CEILING, not a flat budget: each crossing is charged against its own
+/// per-crossing budget (`max(scene's own step, [`BOUNDARY_STEP_SHAPE`] x the
+/// correction's own same-side slope)`, clamped to `[BOUNDARY_STEP_FLOOR,
+/// this constant]`), and the gate compares the charged 90th percentile. A
+/// crossing whose neighbourhood can mask the whole ceiling is charged its
+/// raw step — bit-identical to the scalar rule, which is how the island's
+/// accepted tiles keep their numbers — while one in smooth sky is charged
+/// at the exchange rate its own context earns, which is what stops a tile
+/// seam from hiding inside a budget calibrated on texture.
 pub(super) const ZONE_BOUNDARY_STEP_MAX: f32 = 0.012;
+/// Per-crossing floor of the contextual step budget: ONE code value of the
+/// 8-bit analysis render. Three derivations agree. (1) Instrument:
+/// `fit::pixels_of` is `to_rgb8()/255`, so below one code the ruler ranks
+/// its own rounding, not seams. (2) Perception: unmasked step detection on
+/// a uniform field is ~0.5-1% Weber, which at mid-grey in a gamma-2.2
+/// encoding is ~0.6 code — one code sits at-or-just-above bare threshold on
+/// a flat patch, which is why 8-bit banding is visible at all. (3) Ruler
+/// noise: each sample is a difference of two differences of ROUNDED values
+/// — four quantisations — whose p90 on a gently graded patch is ~0.95
+/// code; a floor below that would gate quantisation noise.
+pub(super) const BOUNDARY_STEP_FLOOR: f32 = 1.0 / 255.0;
+/// Exchange rate of the slope term: a correction whose own same-side
+/// variation over the 3-px baseline is `s` earns a budget of `3 * s`
+/// before the clamp, so a genuine ramp saturates the ceiling and stays
+/// whole. The slope is the MINIMUM over two consecutive same-side
+/// baselines, because a hard raster's resample-and-refine collar spans
+/// exactly the first baseline out and reads as a spurious inner slope —
+/// the seam's own soft shoulder must never buy the seam its budget; a
+/// true ramp shows the same slope on both baselines and keeps full
+/// credit. Calibrated on `feathered_fixture` (+0.55 EV over a 32-px alpha
+/// ramp): the measured same-side slope is ~0.0089 luma on either
+/// baseline, and 3 x 0.0089 = 0.0267 clamps to the ceiling with a 2.2x
+/// margin — it saturates even if quantisation reads the slope a full
+/// code low (3 x 1 code = 0.0118 ~ ceiling). A value of 2 sits on that
+/// coin flip; 3 does not.
+pub(super) const BOUNDARY_STEP_SHAPE: f32 = 3.0;
 /// Acceptance: the zone-local error ([`zone_err`]) must fall to ≤ this
 /// fraction of its pre-correction value. The correction is judged on ITS
 /// zone, not on the frame-global `look_err` — measured on the real pair
@@ -540,6 +581,30 @@ const ZONE_STEP_OFFSET: usize = 2;
 pub(super) struct BoundaryReading {
     pub(super) rim: f32,
     pub(super) transitions: usize,
+    /// The context-charged reading the hard-raster gate compares: each
+    /// crossing's introduced step, scaled by `ceiling / budget` where its
+    /// own per-crossing budget sits below the ceiling, ranked at the same
+    /// 90th percentile. Since every charge >= its raw step, `charged >=
+    /// rim` at every rank: the new predicate subsumes the old, and nothing
+    /// the gate refuses today can become acceptable. The soft rim and
+    /// luminance-range families DECLINE to charge (`charged == rim` by
+    /// construction): the rim ruler samples only inside a feather, where
+    /// the correction is a ramp by construction, and the range ruler's
+    /// admission rule (`range.rs`) is already a binary form of this test.
+    pub(super) charged: f32,
+}
+
+/// The three frames one cross-boundary crossing is read from.
+#[derive(Clone, Copy)]
+struct StepFrames<'a> {
+    /// This same frame rendered WITHOUT the correction under test.
+    reference: &'a [[f32; 3]],
+    /// The render under measurement — the `k` the bisection is trying.
+    rendered: &'a [[f32; 3]],
+    /// The k=1 candidate, FROZEN through the bisection; the correction's
+    /// own slope is read from it and never from `rendered`. See
+    /// [`boundary_line_steps`].
+    frozen: &'a [[f32; 3]],
 }
 
 fn median(mut values: Vec<f32>) -> f32 {
@@ -694,13 +759,16 @@ fn boundary_rim(
         boundary_line_rims(reference, rendered, weights, x, w, h, &mut rims);
     }
     if rims.is_empty() {
-        return BoundaryReading { rim: 0.0, transitions: 0 };
+        return BoundaryReading { rim: 0.0, transitions: 0, charged: 0.0 };
     }
     rims.sort_by(|a, b| a.abs().total_cmp(&b.abs()));
     let rank = ((rims.len() as f32 * ZONE_BOUNDARY_PERCENTILE).ceil() as usize)
         .saturating_sub(1)
         .min(rims.len() - 1);
-    BoundaryReading { rim: rims[rank].abs(), transitions: rims.len() }
+    // This family declines to charge — it samples only inside a feathered
+    // transition band, where the correction is a ramp by construction. See
+    // [`BoundaryReading::charged`].
+    BoundaryReading { rim: rims[rank].abs(), transitions: rims.len(), charged: rims[rank].abs() }
 }
 
 /// Add one scan line's cross-boundary steps to `out`.
@@ -731,19 +799,27 @@ fn boundary_rim(
 /// report the SAME sign instead of cancelling. Both samples must still be on
 /// their own side of the contour, which drops a pair straddling a sliver
 /// thinner than the stand-off rather than reading a plateau that is not there.
+///
+/// Each crossing is pushed as `(introduced step, context charge)`. `frozen`
+/// is the k=1 candidate, held constant through the shrink bisection, from
+/// which the correction's own same-side slope is read — the shape of a
+/// correction is a property of the correction, and shrinking scales it
+/// without changing its shape; measuring it live would let the budget chase
+/// the bisection.
 fn boundary_line_steps(
-    reference: &[[f32; 3]],
-    rendered: &[[f32; 3]],
+    frames: StepFrames<'_>,
     geometry: &[f32],
     start: usize,
     step: usize,
     len: usize,
-    out: &mut Vec<f32>,
+    out: &mut Vec<(f32, f32)>,
 ) {
+    let StepFrames { reference, rendered, frozen } = frames;
     let luma = |p: &[f32; 3]| 0.299 * p[0] + 0.587 * p[1] + 0.114 * p[2];
     let index = |p: usize| -> Option<usize> {
         let i = start + p * step;
-        (i < geometry.len() && i < rendered.len() && i < reference.len()).then_some(i)
+        (i < geometry.len() && i < rendered.len() && i < reference.len() && i < frozen.len())
+            .then_some(i)
     };
     let stand_off = ZONE_STEP_OFFSET.saturating_sub(1);
     for p in 1..len {
@@ -775,7 +851,59 @@ fn boundary_line_steps(
         }
         let rendered_step = luma(&rendered[i_in]) - luma(&rendered[i_out]);
         let reference_step = luma(&reference[i_in]) - luma(&reference[i_out]);
-        out.push(rendered_step - reference_step);
+        let introduced = rendered_step - reference_step;
+        // Per-crossing budget: a correction may introduce a cross-contour
+        // step no larger than the largest smooth variation already present
+        // over the same 3-px baseline — the scene's own step across the
+        // contour (`context`, off the frame rendered WITHOUT the
+        // correction), or [`BOUNDARY_STEP_SHAPE`] times the correction's own
+        // slope beside it — never more than the ceiling, never less than
+        // one code value. The slope is read off the FROZEN k=1 candidate,
+        // one baseline further out on each side; an unavailable or
+        // side-crossing extended foot contributes zero slope (no credit),
+        // and the crossing still counts either way.
+        let u1 = |i: usize| luma(&frozen[i]) - luma(&reference[i]);
+        let baseline = 2 * stand_off + 1;
+        let probe = |foot: usize, inward: bool, hops: usize| -> Option<usize> {
+            let away = baseline * hops;
+            let p = if forward == inward { foot.checked_add(away) } else { foot.checked_sub(away) }?;
+            if p >= len {
+                return None;
+            }
+            let i = index(p)?;
+            (inside(i) == inward).then_some(i)
+        };
+        // A ramp earns credit only where it PERSISTS past the guided-refine
+        // collar: each side's slope is the MINIMUM over two consecutive
+        // same-side baselines. A true alpha ramp shows the same slope on
+        // both; a hard raster's resample-and-refine collar (~3 analysis px,
+        // exactly the first baseline out) shows it on the inner one only —
+        // measured on the real seam: inner |u1| slope ~0.005-0.008 in CLEAN
+        // sky, which times [`BOUNDARY_STEP_SHAPE`] had bought the whole
+        // ceiling back. The seam's own soft shoulder is part of the seam,
+        // never a masker.
+        let slope_in = match (probe(far_in, true, 1), probe(far_in, true, 2)) {
+            (Some(e1), Some(e2)) => (u1(e1) - u1(i_in)).abs().min((u1(e2) - u1(e1)).abs()),
+            _ => 0.0,
+        };
+        let slope_out = match (probe(far_out, false, 1), probe(far_out, false, 2)) {
+            (Some(e1), Some(e2)) => (u1(i_out) - u1(e1)).abs().min((u1(e1) - u1(e2)).abs()),
+            _ => 0.0,
+        };
+        let budget = reference_step
+            .abs()
+            .max(BOUNDARY_STEP_SHAPE * slope_in.max(slope_out))
+            .clamp(BOUNDARY_STEP_FLOOR, ZONE_BOUNDARY_STEP_MAX);
+        // A BRANCH, not a multiply by a ratio that happens to be one: at or
+        // above the ceiling the charge IS the raw step, bit for bit, so a
+        // fully textured or genuinely ramped border is governed by exactly
+        // the constant it was governed by before this batch.
+        let charge = if budget >= ZONE_BOUNDARY_STEP_MAX {
+            introduced.abs()
+        } else {
+            introduced.abs() * (ZONE_BOUNDARY_STEP_MAX / budget)
+        };
+        out.push((introduced, charge));
     }
 }
 
@@ -794,26 +922,42 @@ fn boundary_line_steps(
 fn boundary_step(
     reference: &[[f32; 3]],
     rendered: &[[f32; 3]],
+    frozen: &[[f32; 3]],
     geometry: &[f32],
     width: u32,
     height: u32,
 ) -> BoundaryReading {
     let (w, h) = (width as usize, height as usize);
+    let frames = StepFrames { reference, rendered, frozen };
     let mut steps = Vec::new();
     for y in 0..h {
-        boundary_line_steps(reference, rendered, geometry, y * w, 1, w, &mut steps);
+        boundary_line_steps(frames, geometry, y * w, 1, w, &mut steps);
     }
     for x in 0..w {
-        boundary_line_steps(reference, rendered, geometry, x, w, h, &mut steps);
+        boundary_line_steps(frames, geometry, x, w, h, &mut steps);
     }
     if steps.is_empty() {
-        return BoundaryReading { rim: 0.0, transitions: 0 };
+        return BoundaryReading { rim: 0.0, transitions: 0, charged: 0.0 };
     }
-    steps.sort_by(|a, b| a.abs().total_cmp(&b.abs()));
-    let rank = ((steps.len() as f32 * ZONE_BOUNDARY_PERCENTILE).ceil() as usize)
-        .saturating_sub(1)
-        .min(steps.len() - 1);
-    BoundaryReading { rim: steps[rank].abs(), transitions: steps.len() }
+    let rank_of = |values: &mut Vec<f32>| -> f32 {
+        values.sort_by(|a, b| a.abs().total_cmp(&b.abs()));
+        let rank = ((values.len() as f32 * ZONE_BOUNDARY_PERCENTILE).ceil() as usize)
+            .saturating_sub(1)
+            .min(values.len() - 1);
+        values[rank].abs()
+    };
+    // Two ranks over two orderings, deliberately: `rim` stays the raw luma
+    // p90 every existing log line and pinned triple is comparable against,
+    // and `charged` — the same crossings after each one's context charge —
+    // is what the gate compares. A single re-ranked field would return
+    // "that crossing's own luma step" at a silently moved position.
+    let mut raw: Vec<f32> = steps.iter().map(|&(step, _)| step).collect();
+    let mut charges: Vec<f32> = steps.iter().map(|&(_, charge)| charge).collect();
+    BoundaryReading {
+        rim: rank_of(&mut raw),
+        transitions: steps.len(),
+        charged: rank_of(&mut charges),
+    }
 }
 
 /// Apply one scalar to every correction in the accepted zone set. Each dial

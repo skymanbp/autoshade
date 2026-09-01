@@ -216,6 +216,7 @@ pub(in crate::fit_zoned) fn attach_free_masks(
                 ("n", number.to_string()), ("err_before", format!("{frame_before:.6}")),
                 ("err_after", format!("{frame_after:.6}")),
                 ("step", format!("{:.5}", boundary.reading.rim)),
+                ("charged", format!("{:.5}", boundary.reading.charged)),
             ]),
         );
         disclosed += 1;

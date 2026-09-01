@@ -605,7 +605,7 @@ fn range_transition_rim(
     }
     let transition_count = rims.iter().map(Vec::len).sum();
     if transition_count == 0 {
-        return BoundaryReading { rim: 0.0, transitions: 0 };
+        return BoundaryReading { rim: 0.0, transitions: 0, charged: 0.0 };
     }
     let rim = rims
         .into_iter()
@@ -620,7 +620,12 @@ fn range_transition_rim(
             values[rank].abs()
         })
         .fold(0.0f32, f32::max);
-    BoundaryReading { rim, transitions: transition_count }
+    // This family declines to charge: its admission rule above (a bow in a
+    // locally smooth value crossing, never a pre-existing subject edge) is
+    // already a binary form of the contextual test, and a graded context
+    // here is capped near 2.5/255 by construction — no dynamic range. See
+    // [`super::BoundaryReading::charged`].
+    BoundaryReading { rim, transitions: transition_count, charged: rim }
 }
 
 fn range_boundary_note_args(

@@ -2134,11 +2134,30 @@ outside)` on the corrected render minus the same difference on the render
 WITHOUT the correction, ranked by magnitude at the same 90th percentile.
 Differencing against the uncorrected render is what makes a subject edge lying
 under the mask border cancel on BOTH rulers, so only the discontinuity the
-correction itself introduced is budgeted. The two budgets are SEPARATE
-constants (`ZONE_BOUNDARY_RIM_MAX`, `ZONE_BOUNDARY_STEP_MAX`), both `0.012`
-today: they were one constant until step 9, which meant re-deriving either
-ruler's budget silently re-tuned the other, and the island's three accepted
-tiles sit 1.7%-3.3% below the step ceiling where that would have moved them. For that family a
+correction itself introduced is budgeted. The two constants are SEPARATE
+(`ZONE_BOUNDARY_RIM_MAX`, `ZONE_BOUNDARY_STEP_MAX`), both `0.012` today:
+they were one constant until step 9, which meant re-deriving either ruler's
+budget silently re-tuned the other, and the island's three accepted tiles
+sit 1.7%-3.3% below the step ceiling where that would have moved them.
+Since v1.2.2 the step constant is a CEILING rather than a flat budget:
+0.012 was calibrated where neighbourhood contrast masks a discontinuity of
+that size, and a measured tile seam in clean sky sat exactly on it at 7.8
+sigma over a mask-free neutral control. Each crossing is therefore charged
+against its own per-crossing budget — the larger of the scene's own step
+across the same feet and `BOUNDARY_STEP_SHAPE = 3` times the correction's
+own same-side slope read off the frozen k=1 candidate (the minimum over
+two consecutive baselines, so the resample-and-refine collar — the seam's
+own soft shoulder — earns nothing while a persisting ramp keeps full
+credit), clamped to
+`[BOUNDARY_STEP_FLOOR = 1/255, ceiling]` — and the gate compares the
+charged 90th percentile alongside the still-disclosed raw step. A crossing
+whose context reaches the ceiling is charged its raw step bit-for-bit, so
+textured borders and true ramps are governed by exactly the number they
+were governed by before; a crossing in smooth sky must fit inside what its
+own neighbourhood can actually mask. The soft rim and luminance-range
+families keep the scalar: the rim ruler samples only inside a feather,
+where the correction is a ramp by construction, and the range ruler admits
+only locally smooth crossings by rule. For the step family a
 reading of ZERO measured crossings is a refusal, never a pass — until 2026-08-30
 the rim ruler returned `0.000` from an empty transition band for every hard
 raster ever gated, and the gate read that as comfortably inside budget. A Full-zone correction then uses the three-arm gate

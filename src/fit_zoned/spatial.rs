@@ -360,6 +360,7 @@ fn boundary_args(
         ("k", format!("{k:.3}")),
         ("before", format!("{:.4}", before.rim)),
         ("after", format!("{:.4}", after.rim)),
+        ("charged", format!("{:.4}", after.charged)),
         ("max", format!("{ZONE_BOUNDARY_STEP_MAX:.3}")),
         ("transitions", after.transitions.to_string()),
     ]
@@ -479,7 +480,7 @@ pub(super) fn enforce_bitmap_boundary(
             boundary_rim(reference, rendered, weights, s_img.width(), s_img.height())
         }
         BoundaryRuler::CrossBoundaryStep { geometry, reference } => {
-            boundary_step(reference, rendered, geometry, s_img.width(), s_img.height())
+            boundary_step(reference, rendered, &initial_px, geometry, s_img.width(), s_img.height())
         }
     };
     // One ruler, one budget. The gate body is ruler-agnostic, so the budget
@@ -509,12 +510,16 @@ pub(super) fn enforce_bitmap_boundary(
         let frame = fit::look_err_with_evidence(&pixels, tgt_px, &report.evidence);
         (reading, pixels, frame)
     };
-    let kept = if initial.rim <= budget {
+    // `charged`, not `rim`: each crossing ranked after its own context
+    // charge. On the soft family the two are equal by construction, and on
+    // a fully textured hard border the charge branch returns the raw step
+    // bit for bit, so everything that passed before this batch still does.
+    let kept = if initial.charged <= budget {
         let frame = fit::look_err_with_evidence(&initial_px, tgt_px, &report.evidence);
         Some((1.0, initial, initial_px, frame))
     } else {
         let zero = render_at(report, 0.0);
-        if zero.0.rim > budget {
+        if zero.0.charged > budget {
             None
         } else {
             let (mut lo, mut hi) = (0.0f32, 1.0f32);
@@ -522,7 +527,7 @@ pub(super) fn enforce_bitmap_boundary(
             for _ in 0..12 {
                 let mid = (lo + hi) * 0.5;
                 let measured = render_at(report, mid);
-                if measured.0.rim <= budget {
+                if measured.0.charged <= budget {
                     lo = mid;
                     best = (mid, measured.0, measured.1, measured.2);
                 } else {
@@ -1280,8 +1285,23 @@ mod tests {
         target_ev: Option<f32>,
         name: &str,
     ) -> BoundaryFixture {
+        contextual_fixture(80, exposure_ev, target_ev, name)
+    }
+
+    /// `texture` is the sawtooth amplitude in 8-bit code values; 0 is a
+    /// flat field. The DIAL is identical across the arms of a contextual
+    /// test, so the arms differ ONLY in what the neighbourhood does —
+    /// which is the whole claim: a contextual budget cannot be falsified
+    /// with one neighbourhood.
+    fn contextual_fixture(
+        texture: u8,
+        exposure_ev: f32,
+        target_ev: Option<f32>,
+        name: &str,
+    ) -> BoundaryFixture {
         let source = DynamicImage::ImageRgb8(RgbImage::from_fn(64, 64, |x, y| {
-            let base = 80 + ((x * 3 + y * 5) % 80) as u8;
+            let base =
+                if texture == 0 { 80 } else { 80 + ((x * 3 + y * 5) % texture as u32) as u8 };
             Rgb([base, base, base])
         }));
         let mask = GrayImage::from_fn(64, 64, |x, y| {
@@ -1358,6 +1378,59 @@ mod tests {
         (source, target_pixels, report, path, geometry, reference, candidate)
     }
 
+    /// A mask whose alpha JUMPS to 0.55 at the contour and then rises to
+    /// 1.0 over `shoulder` px. With a short shoulder this is the shape of
+    /// a hard raster's resample-and-refine collar: a step wearing a soft
+    /// shoulder. With a long one it is a step carrying a genuine
+    /// persistent ramp. The target sits at `target_ev`, so a shrink
+    /// IMPROVES the frame and the boundary gate is the only judge.
+    fn shoulder_fixture(
+        shoulder: f32,
+        exposure_ev: f32,
+        target_ev: f32,
+        name: &str,
+    ) -> BoundaryFixture {
+        // A warm, NON-grey field on purpose: on a grey field every luma
+        // difference is a whole 8-bit code, so a same-side slope quantises to
+        // 0 or 1 code and `3 x slope` can only ever be the floor or ~the
+        // ceiling. Three channels rounding separately give luma sub-code
+        // resolution, so the earned budget can sit strictly between the two.
+        let source = DynamicImage::ImageRgb8(RgbImage::from_fn(64, 64, |_, _| Rgb([150, 120, 100])));
+        let mask = GrayImage::from_fn(64, 64, |x, _| {
+            Luma([if x < 32 {
+                0
+            } else {
+                let alpha = 0.55 + 0.45 * (((x - 32) as f32 / shoulder).min(1.0));
+                (alpha * 255.0).round() as u8
+            }])
+        });
+        let path = super::super::tests::fixture_mask_path(name);
+        mask.save(path.path()).unwrap();
+        let adjustment = LocalAdjustment {
+            mask: MaskGeometry::Bitmap { path: path.path().to_string_lossy().into_owned() },
+            name: "Shouldered step".to_string(),
+            role: MaskRole::Custom,
+            amount: 1.0,
+            exposure_ev,
+            ..Default::default()
+        };
+        let mut recipe = crate::recipe::EditRecipe::default();
+        recipe.masks.push(adjustment);
+        let candidate = fit::pixels_of(&render::develop_preview(&source, &recipe));
+        let reference = fit::pixels_of(&render::develop_preview(
+            &source,
+            &crate::recipe::EditRecipe::default(),
+        ));
+        let mut wanted = recipe.clone();
+        wanted.masks[0].exposure_ev = target_ev;
+        let target = render::develop_preview(&source, &wanted);
+        let target_pixels = fit::pixels_of(&target);
+        let mut report = super::super::tests::neutral_report(&source, &target);
+        report.recipe = recipe;
+        let geometry = mask_weights(&mask, 64, 64);
+        (source, target_pixels, report, path, geometry, reference, candidate)
+    }
+
     #[test]
     fn tile_boundary_shrink_preserves_direction_and_budget() {
         let mut original = LocalAdjustment {
@@ -1398,7 +1471,7 @@ mod tests {
             "premise: a 0/255 raster has no transition band to read: {unread:?}"
         );
         // Premise 2: the new ruler is not, and this tile is over budget.
-        let measured = boundary_step(&reference, &candidate, &geometry, 64, 64);
+        let measured = boundary_step(&reference, &candidate, &candidate, &geometry, 64, 64);
         assert!(measured.transitions > 0, "the 50% contour must be measurable: {measured:?}");
         assert!(
             measured.rim > ZONE_BOUNDARY_STEP_MAX,
@@ -1453,11 +1526,21 @@ mod tests {
             one_sided > ZONE_BOUNDARY_STEP_MAX,
             "premise: the in-zone delta alone is over budget ({one_sided})"
         );
-        let paired = boundary_step(&reference, &candidate, &geometry, 64, 64);
+        let paired = boundary_step(&reference, &candidate, &candidate, &geometry, 64, 64);
         assert!(paired.transitions > 0, "the ramp still crosses 50%: {paired:?}");
         assert!(
             paired.rim <= ZONE_BOUNDARY_STEP_MAX,
             "a continuous ramp is not a cross-boundary step: {paired:?} vs {one_sided}"
+        );
+        // The MECHANISM, not just the outcome: the ramp's own same-side
+        // slope saturates its per-crossing budget at the ceiling (3 x
+        // ~0.0089 luma clamps to 0.012), so the charge branch returns the
+        // raw step bit for bit. A future edit that keeps the ramp green for
+        // any other reason moves these bits.
+        assert_eq!(
+            paired.charged.to_bits(),
+            paired.rim.to_bits(),
+            "a saturated ramp must charge nothing: {paired:?}"
         );
         let accepted = enforce_bitmap_boundary(
             &source,
@@ -1478,6 +1561,230 @@ mod tests {
         feather.remove();
     }
 
+    /// Acceptance (v1.2.2 seam batch): the hard-raster gate charges each
+    /// crossing against its own context, so the SAME dial that is
+    /// over-budget in clean sky is untouched over texture. No scalar budget
+    /// of any value can produce these verdicts at once, which is what pins
+    /// the mechanism rather than one number.
+    ///
+    /// Registered coverage gap, disclosed rather than hidden: a mutation
+    /// that reads the slope term from the render under bisection instead of
+    /// the frozen k=1 candidate is NOT killed by these arms — the
+    /// difference only shows on a smooth fixture whose correction carries a
+    /// genuine in-zone gradient, which no fixture here builds.
+    #[test]
+    fn contextual_budget_charges_smooth_borders_and_leaves_textured_ones_alone() {
+        const ARM_EV: f32 = 0.09;
+        // Captured from a run of the scalar-rule path (charged == rim on a
+        // fully textured border makes the new gate walk it bit-for-bit).
+        const ARM_B_SHIPPED_K: f32 = 0.80249023;
+        const ARM_B_SHIPPED_RIM: f32 = 0.011764735;
+        let gate = |source: &DynamicImage,
+                    target: &[[f32; 3]],
+                    report: &mut FitReport,
+                    geometry: &[f32],
+                    reference: &[[f32; 3]],
+                    candidate: Vec<[f32; 3]>| {
+            let frame_before = fit::look_err_with_evidence(reference, target, &report.evidence);
+            enforce_bitmap_boundary(
+                source,
+                target,
+                report,
+                0,
+                BitmapBoundaryInput {
+                    ruler: BoundaryRuler::CrossBoundaryStep { geometry, reference },
+                    initial_px: candidate,
+                    frame_before,
+                },
+            )
+        };
+
+        // Arm A — smooth field, hard mask: RED on the flat ceiling. The
+        // dial sits INSIDE the old scalar budget, so the shipped rule
+        // free-passed it at k=1.0 — that pass is the measured 7.8-sigma
+        // sky seam — while its context (scene step 0, correction slope 0)
+        // earns only the floor.
+        let (source, target, mut report, path, geometry, reference, candidate) =
+            contextual_fixture(0, ARM_EV, Some(ARM_EV * 0.5), "ctx-budget-flat");
+        let measured = boundary_step(&reference, &candidate, &candidate, &geometry, 64, 64);
+        assert!(
+            measured.rim > BOUNDARY_STEP_FLOOR && measured.rim <= ZONE_BOUNDARY_STEP_MAX,
+            "premise: the dial must sit inside the old scalar budget: {measured:?}"
+        );
+        assert!(
+            measured.charged > ZONE_BOUNDARY_STEP_MAX,
+            "a flat neighbourhood must charge that same step over the ceiling: {measured:?}"
+        );
+        let accepted =
+            gate(&source, &target, &mut report, &geometry, &reference, candidate)
+                .expect("a smooth-sky seam is negotiated down, not dropped");
+        path.remove();
+        assert!(
+            accepted.k < 1.0,
+            "the shipped rule free-passed this; the contextual one must shrink: k={}",
+            accepted.k
+        );
+        assert!(
+            accepted.reading.rim <= BOUNDARY_STEP_FLOOR + 1e-6,
+            "on a flat field every budget is the floor, so the kept raw step is one code: {:?}",
+            accepted.reading
+        );
+
+        // Arm B — the SAME dial over texture: bit-identity with the scalar
+        // rule. The sawtooth's minimum scene step across any crossing is 9
+        // code = 0.0353 luma, 2.94x the ceiling, so every budget clamps to
+        // the ceiling and the charge branch returns the raw step verbatim.
+        let (source, target, mut report, path, geometry, reference, candidate) =
+            contextual_fixture(80, ARM_EV, Some(ARM_EV * 0.5), "ctx-budget-textured");
+        let measured = boundary_step(&reference, &candidate, &candidate, &geometry, 64, 64);
+        assert_eq!(
+            measured.charged.to_bits(),
+            measured.rim.to_bits(),
+            "texture at 2.94x the ceiling charges nothing: {measured:?}"
+        );
+        let accepted =
+            gate(&source, &target, &mut report, &geometry, &reference, candidate)
+                .expect("the textured arm was never in question");
+        path.remove();
+        // Bit-identity with the SHIPPED scalar rule, pinned as literals: on
+        // this arm `charged == rim` at every bisection step by construction
+        // (the branch returns the raw step verbatim), so the gate walks the
+        // exact path v1.2.1 walked and lands on the exact bits. A `<= budget`
+        // assertion here would be worthless — any tightening satisfies it,
+        // which is precisely how the original defect shipped.
+        assert_eq!(
+            accepted.reading.charged.to_bits(),
+            accepted.reading.rim.to_bits(),
+            "texture must still charge nothing at the accepted k: {:?}",
+            accepted.reading
+        );
+        assert_eq!(
+            (accepted.k, accepted.reading.rim),
+            (ARM_B_SHIPPED_K, ARM_B_SHIPPED_RIM),
+            "the textured arm must land on the shipped rule's exact bits"
+        );
+
+        // Arm C — texture earns AT MOST the ceiling, never more: the same
+        // textured neighbourhood at 3x the dial is over the ceiling and
+        // shrinks. With A this kills any additive rule (`budget = context +
+        // constant`) as surely as A+B kill every scalar: the exchange is a
+        // clamped ratio, not an offset.
+        let (source, target, mut report, path, geometry, reference, candidate) =
+            contextual_fixture(80, ARM_EV * 3.0, Some(ARM_EV * 1.5), "ctx-budget-3x");
+        let measured = boundary_step(&reference, &candidate, &candidate, &geometry, 64, 64);
+        assert!(
+            measured.rim > ZONE_BOUNDARY_STEP_MAX,
+            "premise: three times the dial is over the ceiling even for texture: {measured:?}"
+        );
+        let accepted =
+            gate(&source, &target, &mut report, &geometry, &reference, candidate)
+                .expect("over-ceiling texture is negotiated, not dropped");
+        path.remove();
+        assert!(accepted.k < 1.0, "texture may buy the ceiling and nothing more: k={}", accepted.k);
+    }
+
+    /// Captured from a run of the persistence rule on `shoulder_fixture`
+    /// (arm F below says what moving them means).
+    const ARM_F_K: f32 = 0.24536133;
+    const ARM_F_RIM: f32 = 0.007843137;
+
+    /// Acceptance (v1.2.2 seam batch, second finding of the same class):
+    /// slope credit must PERSIST past the first baseline. Measured on the
+    /// real seam: the resample-and-refine collar spans exactly the first
+    /// baseline out, so a hard tile edge in CLEAN sky read an inner |u1|
+    /// slope of 0.005-0.008 luma, and three times that bought the whole
+    /// ceiling back for a 43-crossing sky band. The soft shoulder a seam
+    /// wears must never fund the seam.
+    #[test]
+    fn a_ramp_earns_budget_only_where_it_persists_past_the_collar() {
+        let gate = |source: &DynamicImage,
+                    target: &[[f32; 3]],
+                    report: &mut FitReport,
+                    geometry: &[f32],
+                    reference: &[[f32; 3]],
+                    candidate: Vec<[f32; 3]>| {
+            let frame_before = fit::look_err_with_evidence(reference, target, &report.evidence);
+            enforce_bitmap_boundary(
+                source,
+                target,
+                report,
+                0,
+                BitmapBoundaryInput {
+                    ruler: BoundaryRuler::CrossBoundaryStep { geometry, reference },
+                    initial_px: candidate,
+                    frame_before,
+                },
+            )
+        };
+
+        // Arm E: the collar shape. Alpha completes its rise within ONE
+        // baseline, so the inner baseline reads a steep slope and the
+        // second reads none. The minimum refuses the credit; the budget
+        // floors; the dial shrinks. Reading the inner baseline alone
+        // frees exactly the measured seam.
+        let (source, target, mut report, path, geometry, reference, candidate) =
+            shoulder_fixture(4.0, 0.09, 0.045, "collar-shoulder");
+        let measured = boundary_step(&reference, &candidate, &candidate, &geometry, 64, 64);
+        assert!(
+            measured.rim > BOUNDARY_STEP_FLOOR && measured.rim <= ZONE_BOUNDARY_STEP_MAX,
+            "premise: the raw step sits inside the old scalar budget: {measured:?}"
+        );
+        assert!(
+            measured.charged > ZONE_BOUNDARY_STEP_MAX,
+            "a collar shoulder must not fund its own step: {measured:?}"
+        );
+        let accepted =
+            gate(&source, &target, &mut report, &geometry, &reference, candidate)
+                .expect("a collar-shouldered step is negotiated down, not dropped");
+        path.remove();
+        assert!(
+            accepted.k < 1.0,
+            "the shipped rule free-passed this shape; the persistence rule must shrink: k={}",
+            accepted.k
+        );
+        assert!(
+            accepted.reading.rim <= BOUNDARY_STEP_FLOOR + 1e-6,
+            "with no persistent slope the budget is the floor: {:?}",
+            accepted.reading
+        );
+
+        // Arm F: the same 0.55 step carrying a ramp that PERSISTS (to 1.0
+        // over 32 px), at a dial whose earned budget clears two code values
+        // so the 8-bit kept step can land strictly between floor and ceiling
+        // and stays under three, so every mutation lands on a DIFFERENT
+        // code (at 0.30 EV the budget fell between one and two codes and the
+        // quantised step could only land on the floor; at 0.45 EV it cleared
+        // three codes and a saturated SHAPE would land on the same step).
+        // Consecutive
+        // baselines agree, so the correction earns
+        // three times its own slope and NO MORE. `k` and the kept reading
+        // are pinned bit-for-bit: a mutation that reads the slope off the
+        // render under bisection (the budget would chase k), deletes the
+        // term, or saturates it (SHAPE = infinity) each lands on different
+        // bits.
+        let (source, target, mut report, path, geometry, reference, candidate) =
+            shoulder_fixture(32.0, 0.37, 0.185, "persistent-ramp");
+        let measured = boundary_step(&reference, &candidate, &candidate, &geometry, 64, 64);
+        assert!(
+            measured.rim > ZONE_BOUNDARY_STEP_MAX,
+            "premise: this dial is over even the ceiling: {measured:?}"
+        );
+        let accepted =
+            gate(&source, &target, &mut report, &geometry, &reference, candidate)
+                .expect("a persistent ramp earns its slope budget and shrinks to it");
+        path.remove();
+        assert_eq!(
+            (accepted.k, accepted.reading.rim),
+            (ARM_F_K, ARM_F_RIM),
+            "the slope-earned budget must land on these exact bits"
+        );
+        assert!(
+            accepted.reading.rim > BOUNDARY_STEP_FLOOR && accepted.reading.rim < ZONE_BOUNDARY_STEP_MAX,
+            "the earned budget sits strictly between floor and ceiling: {:?}",
+            accepted.reading
+        );
+    }
+
     /// Acceptance 1 (2026-08-30): a hard 0/255 mask now produces a REAL
     /// reading, and a boundary that cannot be sampled is refused instead of
     /// passing on an empty one. Before the fix both halves were the same
@@ -1489,7 +1796,7 @@ mod tests {
         let blind = boundary_rim(&reference, &candidate, &geometry, 64, 64);
         assert_eq!((blind.rim, blind.transitions), (0.0, 0), "the defect, pinned: {blind:?}");
 
-        let measured = boundary_step(&reference, &candidate, &geometry, 64, 64);
+        let measured = boundary_step(&reference, &candidate, &candidate, &geometry, 64, 64);
         // r2c0 of a 4x4 grid on 64x64 is cols 0..16, rows 32..48. Its left
         // edge is the frame edge, so the crossings are: 16 rows x 1 (right
         // edge) + 16 columns x 2 (top and bottom edges) = 48. Pinned exactly,
@@ -1506,7 +1813,7 @@ mod tests {
         // The same correction measured against ITSELF introduces no step: the
         // difference in differences is zero when nothing changed, so scene
         // content at the border can never be blamed on the correction.
-        let quiet = boundary_step(&candidate, &candidate, &geometry, 64, 64);
+        let quiet = boundary_step(&candidate, &candidate, &candidate, &geometry, 64, 64);
         assert_eq!(quiet.rim, 0.0, "an unchanged render has no induced step: {quiet:?}");
         assert!(quiet.transitions > 0, "and it is still measured, not skipped");
         path.remove();

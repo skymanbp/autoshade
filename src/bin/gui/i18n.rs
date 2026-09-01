@@ -1809,8 +1809,9 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
         " 局部场在 {producer} 后停止：跳过 [{skipped}]，余量 {margin}。"),
     (" Field mask {n} proposed: {sign} m={mass} s={share_src}/{share_tgt} D={d} p={pixels}.",
         " 自由形状场蒙版 {n} 已提出：符号 {sign}，质量 {mass}，证据占比为源图 {share_src}、目标图 {share_tgt}，D={d}，{pixels} 个像素。"),
-    (" Field mask {n} attached: {err_before}->{err_after}, cross-boundary step {step} (bitmap/XMP loss).",
-        " 自由形状场蒙版 {n} 已作为引擎位图附加：合成全画面 {err_before} -> {err_after}，跨边界跳变 {step}。经典 XMP 会以已命名的位图蒙版损失不包含此校正。"),
+    (" Field mask {n} attached: {err_before}->{err_after}, cross-boundary step \
+      {step}, context-charged {charged} (bitmap/XMP loss).",
+        " 自由形状场蒙版 {n} 已作为引擎位图附加：合成全画面 {err_before} -> {err_after}，跨边界跳变 {step}，语境计费读数 {charged}。经典 XMP 会以已命名的位图蒙版损失不包含此校正。"),
     (" Field mask component(s) {n} refused: {why}.",
         " 自由形状场蒙版分量 {n} 已拒绝：{why}。"),
     (" No field mask qualified: {why}.",
@@ -1990,13 +1991,13 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
       cap; {attached} tile(s) attached.",
         " 空间推导在深度 {depth} 停止，附加上限为 {cap} 个图块；实际附加 {attached} 个。"),
     (" Spatial tile {id} passed the boundary gate: cross-boundary step \
-      {before} -> {after} luma after direction-preserving shrink k={k} \
-      (budget {max}, {transitions} measured crossings).",
-        " 空间图块 {id} 通过边界门控：保持方向缩减 k={k} 后，跨边界跳变由 {before} -> {after} 亮度（预算 {max}，测得 {transitions} 处穿越）。"),
+      {before} -> {after} luma after direction-preserving shrink k={k}, \
+      context-charged {charged} (ceiling {max}, {transitions} measured crossings).",
+        " 空间图块 {id} 通过边界门控：保持方向缩减 k={k} 后，跨边界跳变由 {before} -> {after} 亮度，语境计费读数 {charged}（上限 {max}，测得 {transitions} 处穿越）。"),
     (" Spatial tile {id} refused by its boundary/composed-frame gate: \
-      candidate step {before}, final reading {after}, budget {max} \
-      ({transitions} measured crossings, k={k}).",
-        " 空间图块 {id} 被边界/合成画面门控拒绝：候选跳变 {before}，最终读数 {after}，预算 {max}（测得 {transitions} 处穿越，k={k}）。"),
+      candidate step {before}, final reading {after}, context-charged \
+      {charged}, ceiling {max} ({transitions} measured crossings, k={k}).",
+        " 空间图块 {id} 被边界/合成画面门控拒绝：候选跳变 {before}，最终读数 {after}，语境计费读数 {charged}，上限 {max}（测得 {transitions} 处穿越，k={k}）。"),
     (" Guided mask refinement kept for {label}: coverage delta {coverage}, \
       guide-edge alignment {before} -> {after}, core pixels changed {core}.",
         " {label} 的引导蒙版细化已保留：覆盖变化 {coverage}，引导边缘对齐 {before} -> {after}，内部像素变化 {core}。"),
