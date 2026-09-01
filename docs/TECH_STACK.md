@@ -1181,11 +1181,18 @@ and zero-confidence fields are conservation-tested to change nothing.
   `W_DESC = 0.5` are the corpus harness's winners after the retrieval-rank
   recalibration on the described index, which re-ran S2's grid with the hubness
   correction the standardisation now applies (**calibration-controlled**; see
-  *Measured results*). `W_LOOK = 1.0` is a **normalisation, not a
-  calibrated number**: the look library carries no develop settings, so the
-  harness's leave-one-out settings objective cannot see it at all, and no other
-  term ranks looks against each other, so the scale cannot change their order —
-  pinned by `look_weight_scale_does_not_change_look_order`.
+  *Measured results*). `W_LOOK = 1.0` is **unmeasured, not inert**: the look
+  library carries no develop settings, so the harness's leave-one-out settings
+  objective cannot see it at all. Its scale is a real ratio whenever a
+  direction is given — the text and description terms rank looks against each
+  other too, against each look's own image vector and its description — so it
+  can change which look wins. What is pinned instead is each regime for what it
+  is: `look_weight_cannot_reorder_without_a_direction` (no direction: the look
+  term is the only live one, so the scale is inert) and
+  `look_weight_is_a_real_ratio_against_the_direction_terms` (shipped weights, a
+  library where direction and image disagree: the order holds from 0 through
+  2x the shipped value and first moves at 4x, so 1.0 sits inside a measured
+  stable band rather than on a knife edge).
 - The two direction-text terms have a **standardised variant** (cosines
   computed against every candidate first, z-scored over that candidate set, and
   only then weighted) because raw SigLIP image↔text cosines are tiny and

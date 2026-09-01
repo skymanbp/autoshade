@@ -162,10 +162,12 @@ image-to-text cosines are tiny and tightly clustered, which is a real reason to
 suspect the raw term. It is now the one that ships: with real descriptions the
 standardised variant wins and its text terms beat having none at all, while the
 raw variant's cannot be told apart from zero. `W_LOOK =
-1.0` is a normalisation rather than a measured number: the look library carries
-no develop settings, so the harness's settings objective cannot see it, and
-nothing else ranks looks against each other, so its scale cannot change their
-order. Their
+1.0` is unmeasured rather than inert: the look library carries no develop
+settings, so the harness's settings objective cannot see it, and once a
+direction is given the text terms rank looks against each other too, which
+makes its scale a real ratio. It ships inside a measured stable band — the
+retrieved order holds from 0 through twice that value and first moves at four
+times it. Their
 settings, curve habit, colour families and local-work habit reach the advisor as
 a *soft reference* — the last of these as one sentence saying how many of the
 retrieved shots masked the sky, lifted the subject or worked the foreground and
@@ -475,7 +477,7 @@ estimate. Sources are the pinned claims in
 | Reverse-fit, stone viaduct (full solve) | look error 0.048 → 0.015 (0.019 global with the per-band mixer solving Orange −18, Yellow −18, Blue +18 saturation; four spatial tiles and one field mask bought the rest), confidence 0.662411, D = 0.126 | [docs/SHOWCASE.md](docs/SHOWCASE.md) |
 | Local-field ceiling, calibration pair | global fit 0.0961 against a ceiling of 0.0700; the accepted sky zone realizes 0.134 of the distance | [What is new §7](#7-a-bilateral-grid-local-field-prices-every-local-producer-first) |
 | AI develop, model judge | 2026-08-30 batch at `--strength 0.9`, style off / style 1.0: island 80 → 84 / 84 → 91; river 63 → 69 / 68 → 78; shoreline 68 → 84 / 61 → 72. Earlier pairs (townhouse 84 → 86, balcony 78 → 84, hillside 63 → 87) are the v0.33.0 batch and are labelled as such | [docs/SHOWCASE.md](docs/SHOWCASE.md) |
-| Style retrieval weights | corpus harness (169 described exemplars, 156 queries): `W_EMB=4`, `W_TXT=0.5`, `W_DESC=0.5`, standardised variant with the text-hubness correction — MAE 0.688864 vs baseline 0.713143, +0.024280, CI [+0.005837, +0.041111] under the prose proxy; the corrected point at the old `W_TXT=4` regresses with CI [−0.069654, −0.005140], which is why the weight moved; under the tag-string proxy nothing beats the text-free row; `W_LOOK=1.0` is a normalisation the harness cannot see | [AI advisor](#ai-advisor-and-reverse-fit) |
+| Style retrieval weights | corpus harness (169 described exemplars, 156 queries): `W_EMB=4`, `W_TXT=0.5`, `W_DESC=0.5`, standardised variant with the text-hubness correction — MAE 0.688864 vs baseline 0.713143, +0.024280, CI [+0.005837, +0.041111] under the prose proxy; the corrected point at the old `W_TXT=4` regresses with CI [−0.069654, −0.005140], which is why the weight moved; under the tag-string proxy nothing beats the text-free row; `W_LOOK=1.0` is unmeasured (the harness cannot see the look library) and its scale is a real ratio against the direction terms — it ships inside a stable band, order unchanged to 2x and first moving at 4x | [AI advisor](#ai-advisor-and-reverse-fit) |
 | Memory budget | 1800 MB per photo from a 1771 MB reference probe; 4 GiB RAW admission gate | [Application](#application-and-infrastructure) |
 
 ## Install and quickstart

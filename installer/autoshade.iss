@@ -16,6 +16,10 @@ AppSupportURL={#AppURL}
 AppUpdatesURL={#AppURL}/releases
 DefaultDirName={autopf}\AutoShade
 DefaultGroupName=AutoShade
+; The pre-rename group is deleted by name in [InstallDelete]; without this
+; an upgrade would keep writing AutoShade shortcuts into a folder called
+; Autoshop, because UsePreviousGroup defaults to yes.
+UsePreviousGroup=no
 PrivilegesRequired=lowest
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
@@ -45,6 +49,30 @@ Name: "desktopicon"; Description: "Create a &desktop shortcut"; GroupDescription
 ; This updates only HKCU\Environment\Path, so it never needs elevation. Existing
 ; processes retain their old environment block; start a new terminal after setup.
 Name: "addtopath"; Description: "Add the AutoShade CLI to my user &PATH (new terminals only)"; GroupDescription: "Command-line integration:"; Flags: unchecked
+
+[InstallDelete]
+; The rename (Autoshop -> AutoShade) changed the name of every artifact this
+; installer ships, but AppId deliberately did NOT (see [Code] below), so setup
+; UPGRADES a pre-rename install in place -- and Inno leaves a file it no longer
+; ships exactly where it is. Without this section an upgraded machine keeps two
+; runnable CLIs and two runnable GUIs side by side, plus a Start Menu group
+; whose shortcuts still launch the 1.0.x binaries. This section runs BEFORE
+; [Files]. Every entry is a name that CHANGED in the rename: nothing here can
+; reach a file the current payload still ships, the per-user develop store
+; (%LOCALAPPDATA%\autoshade\, outside {app}), or python\weights.
+Type: files; Name: "{app}\autoshop.exe"
+Type: files; Name: "{app}\autoshop-gui.exe"
+Type: files; Name: "{app}\assets\autoshop.ico"
+Type: files; Name: "{app}\assets\fonts\*-autoshop.ttf"
+; Shortcuts go by their own old names rather than by wiping the folder, so
+; anything the user put in that group survives; the folder itself goes only if
+; it empties. {group} is already the NEW group (UsePreviousGroup=no) and so
+; cannot reach any of these.
+Type: files; Name: "{autoprograms}\Autoshop\Autoshop.lnk"
+Type: files; Name: "{autoprograms}\Autoshop\Autoshop CLI.lnk"
+Type: files; Name: "{autoprograms}\Autoshop\Uninstall Autoshop.lnk"
+Type: dirifempty; Name: "{autoprograms}\Autoshop"
+Type: files; Name: "{autodesktop}\Autoshop.lnk"
 
 [Files]
 Source: "..\dist\autoshade.exe"; DestDir: "{app}"; Flags: ignoreversion

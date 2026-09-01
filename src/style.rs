@@ -303,13 +303,26 @@ pub const W_TXT_DEFAULT: f64 = 0.5;
 /// term only ([`standardise`] says why), so this term is measured exactly as
 /// it was.
 pub const W_DESC_DEFAULT: f64 = 0.5;
-/// Weight of the look-library image term. It is the ONLY term that ranks looks
-/// against EACH OTHER (the description term reranks them, but through the same
-/// candidate set), so its SCALE cannot change their order — pinned by
-/// `look_weight_scale_does_not_change_look_order`. 1.0 is therefore a
-/// normalisation, not a tuned number, and the harness never evaluated it: the
-/// look library carries no settings, so the leave-one-out settings objective
-/// cannot see it at all.
+/// Weight of the look-library image term, and the one weight the harness never
+/// evaluated: the look library carries no settings, so the leave-one-out
+/// settings objective cannot see it at all.
+///
+/// It is NOT inert. Whenever a DIRECTION is given, the two text terms rank
+/// looks against each other as well — `txt` scores that direction against each
+/// look's own IMAGE vector and `desc` against its description, both per look —
+/// so this weight is a real ratio against them and its SCALE can change which
+/// look wins. This comment used to claim the opposite and cite a test that
+/// could not have caught it: that test drove `txt: 0.0, desc: 0.0` over
+/// fixtures carrying neither tags nor a description, making the look term the
+/// only live one and the claim a tautology.
+///
+/// Both regimes are now pinned for what they are:
+/// `look_weight_cannot_reorder_without_a_direction` (no text — a pure scale on
+/// a single term) and `look_weight_is_a_real_ratio_against_the_direction_terms`
+/// (shipped weights — the order holds from 0 through 2x the shipped value on a
+/// library where direction and image disagree, and first moves at 4x). 1.0 is
+/// therefore an UNMEASURED value sitting in a measured stable band, not a
+/// normalisation that could not matter.
 pub const W_LOOK_DEFAULT: f64 = 1.0;
 /// Does the ranking Z-SCORE the two direction-text terms over the candidate
 /// set before weighting them, or weight the raw `1 − cos` gaps?
@@ -5562,18 +5575,25 @@ mod tests {
         assert_eq!(hubness_profile([Some(&flat[..]), None].into_iter()), None);
     }
 
-    /// W_LOOK's SCALE cannot change which look wins, because no other term
-    /// ranks looks against each other while W_TXT and W_DESC ship at 0.
+    /// WITHOUT a direction, `W_LOOK` scales the only live term, so it cannot
+    /// reorder the look library.
     ///
-    /// This is what makes 1.0 a normalisation rather than an uncalibrated
-    /// guess - the harness never measured it and does not need to. If either
-    /// text weight ever ships non-zero, W_LOOK becomes a real ratio, and this
-    /// test starts failing for that reason.
+    /// A real regime, not a contrivance: production builds ONE query for
+    /// exemplars and looks (`pipeline::retrieve_style`), and its text side is
+    /// `None` whenever Analyze ran with no direction.
+    ///
+    /// It is NOT the general case, and this test cannot speak to it — it
+    /// drives both text weights to zero over fixtures that carry neither tags
+    /// nor a description, so `weights.look` multiplies the only term there is.
+    /// Its doc used to promise that "if either text weight ever ships non-zero
+    /// this test starts failing"; both ship at 0.5 and it kept passing,
+    /// because nothing here reads the shipped weights.
+    /// `look_weight_is_a_real_ratio_against_the_direction_terms` covers those.
     ///
     /// MUTATION: give `retrieve_looks_with_terms` a second look-ranking term
     /// that does not scale with `weights.look`, and the orders diverge.
     #[test]
-    fn look_weight_scale_does_not_change_look_order() {
+    fn look_weight_cannot_reorder_without_a_direction() {
         let q = unit_embed();
         let looks: Vec<LookExemplar> = [0.99f32, 0.5, 0.1, -0.4]
             .iter()
@@ -5608,8 +5628,80 @@ mod tests {
         for scale in [0.25, 1.0, 3.0, 17.5] {
             assert_eq!(order(scale), one, "W_LOOK={scale} must not reorder the look library");
         }
-        // …and the shipped weight IS 1.0, i.e. the normalisation this states.
+        // …and the shipped weight IS 1.0, the value the sibling test measures.
         assert_eq!(W_LOOK_DEFAULT, 1.0);
+    }
+
+    /// WITH a direction, `W_LOOK` is a real ratio: its SCALE can change which
+    /// look wins.
+    ///
+    /// The look term is not the only one ranking looks against each other.
+    /// `txt` scores the direction against each look's own IMAGE vector
+    /// (`cosine_gap(query_text, Some(&e.embed))`) and `desc` against its
+    /// description — both per look, both live at the shipped weights. On a
+    /// library where the direction DISAGREES with image similarity the text
+    /// terms lead, and the order flips once the look term outweighs them.
+    ///
+    /// The band is what makes an unmeasured 1.0 defensible: the order holds
+    /// from 0 through 2.0 and first moves at 4.0, so the shipped value is not
+    /// on a knife edge. A MEASUREMENT on this fixture, not a guarantee — the
+    /// harness still cannot see this weight.
+    ///
+    /// MUTATION: zero `txt` and `desc` here and the reorder arm fails, which
+    /// is precisely how the old guard passed while claiming the general case.
+    #[test]
+    fn look_weight_is_a_real_ratio_against_the_direction_terms() {
+        // No separate "the direction terms are live" premise assert: comparing
+        // two shipped constants is decided at compile time and says nothing.
+        // The shipped-order arm below IS the premise — it inverts image
+        // similarity, which only the direction terms can do.
+        let q_img = embed_axes(&[(0, 1.0)]);
+        let q_txt = embed_axes(&[(1, 1.0)]);
+        // Image similarity descends 0..3; the direction is orthogonal to the
+        // image query, so its cosine ASCENDS over the same four — the two
+        // rankings are exact opposites.
+        let looks: Vec<LookExemplar> = [0.9f32, 0.7, 0.5, 0.3]
+            .iter()
+            .enumerate()
+            .map(|(i, &c)| {
+                let v = embed_axes(&[(0, c), (1, (1.0f32 - c * c).sqrt())]);
+                LookExemplar {
+                    stem: format!("look-{i}"), path: format!("{i}.jpg"),
+                    embed: v.clone(), tags: vec![format!("tag-{i}")],
+                    vocab_scores: None, desc: Some(format!("desc {i}")),
+                    desc_embed: Some(v),
+                }
+            })
+            .collect();
+        let idx = StyleIndex {
+            version: CURRENT_INDEX_VERSION, mean: vec![0.0; NDIM], std: vec![1.0; NDIM],
+            exemplars: Vec::new(), source_dir: None, looks, looks_dir: None,
+            embed_provenance: None,
+        };
+        let order = |look: f64| -> Vec<String> {
+            let w = RetrievalWeights { look, ..RetrievalWeights::SHIPPED };
+            idx.retrieve_looks(StyleQuery::new(Some(&q_img), Some(&q_txt), w), 4)
+                .into_iter()
+                .map(|l| l.stem.clone())
+                .collect()
+        };
+        let shipped = order(W_LOOK_DEFAULT);
+        assert_eq!(
+            shipped,
+            ["look-3", "look-2", "look-1", "look-0"],
+            "at the shipped weights the direction leads, against image similarity"
+        );
+        for scale in [0.0, 0.0625, 0.25, 0.5, 1.0, 2.0] {
+            assert_eq!(order(scale), shipped, "W_LOOK={scale} is inside the stable band");
+        }
+        // The arm the old guard could not have: the terms genuinely compete,
+        // so a big enough look weight buys the image ranking outright.
+        assert_eq!(
+            order(8.0),
+            ["look-0", "look-1", "look-2", "look-3"],
+            "a dominant look term restores image order — the scale IS a ratio"
+        );
+        assert_ne!(order(4.0), shipped, "the band ends between 2.0 and 4.0");
     }
 
     /// One scoring helper, used by the ranking AND by the diagnostic.

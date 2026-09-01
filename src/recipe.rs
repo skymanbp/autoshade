@@ -2211,6 +2211,50 @@ impl EditRecipe {
             }
             before - s.len()
         }
+        /// [`cap`] for the PROSE rationale — the one capped string a person
+        /// actually reads. Cuts like `cap`, then spends part of the budget
+        /// saying that it cut. Returns the content bytes lost, like `cap`.
+        ///
+        /// Why plain `cap` is the wrong tool here. `cap` leaves NO trace in
+        /// the string: a rationale that overran `MAX_RATIONALE` simply stopped
+        /// mid-sentence, and every later reader — the persisted `recipe.json`,
+        /// the rationale shown beside the develop — saw a record that looked
+        /// COMPLETE. The loss was reported only out of band, through
+        /// `ClampSummary::truncated_string_bytes`: one line of CLI stderr, and
+        /// in the GUI a restore-time toast (actions.rs / workers.rs) that is
+        /// gone the moment it is dismissed and never reaches whoever opens the
+        /// file next week. The NOTES vector had already solved its half of
+        /// this by pushing a `rationale::TRUNCATED_SENTINEL` past `MAX_NOTES`;
+        /// the string was the asymmetric side.
+        ///
+        /// The marker is plain English, NOT the notes vec's NUL poison pill.
+        /// That pill exists so a truncated vec can never strip-match the
+        /// (complete) string; this string is itself the human record, and its
+        /// reader is owed a sentence. It names the ceiling and the ORIGINAL
+        /// length rather than the bytes dropped, because both are known before
+        /// the cut — sizing a marker against a number that the marker's own
+        /// length changes has no fixed point.
+        ///
+        /// The byte ceiling stays the load-bearing promise: the body is cut to
+        /// `max - marker.len()` so the result is at most `max` INCLUDING the
+        /// marker, and a `max` too small to hold one (unreachable for a 16 KiB
+        /// constant against a ~75-byte marker) drops the marker rather than
+        /// break the ceiling.
+        fn cap_rationale(s: &mut String, max: usize) -> usize {
+            if s.len() <= max {
+                return 0;
+            }
+            let before = s.len();
+            let marker = format!(
+                " [rationale truncated at the {max}-byte ceiling; the original was {before} bytes]"
+            );
+            if marker.len() >= max {
+                return cap(s, max);
+            }
+            let cut = cap(s, max - marker.len());
+            s.push_str(&marker);
+            cut
+        }
         /// One brush group's strokes, bounded — sync IDs and each stroke's
         /// token stream. Shared by [`cap_geometry`]'s `Brush` and `AiMask`
         /// arms, because a carrier bounded in one and trusted in the other is
@@ -2273,7 +2317,7 @@ impl EditRecipe {
                 MaskGeometry::Linear { .. } | MaskGeometry::Radial { .. } => (0, 0),
             }
         }
-        summary.truncated_string_bytes += cap(&mut self.rationale, MAX_RATIONALE);
+        summary.truncated_string_bytes += cap_rationale(&mut self.rationale, MAX_RATIONALE);
         // The pass-through block is STRINGS from a foreign document, so it
         // falls under the same rule as `rationale` and the mask names above:
         // the reader fills it from a fixed sixteen keys, but a hand-edited
@@ -2974,7 +3018,11 @@ mod tests {
         let mut multi = EditRecipe { rationale: "é".repeat(50_000), ..Default::default() };
         multi.clamp(); // would panic if the cut ignored char boundaries
         assert!(multi.rationale.len() <= 16384);
-        assert!(multi.rationale.chars().all(|c| c == 'é'), "cut mid-character");
+        // The BODY is what the cut lands in; the ASCII marker `cap_rationale`
+        // appends is not part of the record and is checked by its own tests.
+        let body = multi.rationale.split(" [rationale truncated").next().unwrap();
+        assert!(!body.is_empty(), "the marker ate the whole budget");
+        assert!(body.chars().all(|c| c == 'é'), "cut mid-character");
 
         // The neutralisation itself: a zero-area crop is an edit on arrival…
         let mut degenerate = EditRecipe {
@@ -3965,8 +4013,47 @@ mod tests {
         };
         let d = r.clamp();
         assert_eq!(d.truncated_curve_points, 44, "300 points over the 256 cap");
-        assert_eq!(d.truncated_string_bytes, 20_000 - 16_384, "rationale past its cap");
+        // The marker rides INSIDE the ceiling, so the body loses its own
+        // length on top of the overflow. Spelled out rather than derived from
+        // the code under test: this pins the wording too.
+        let marker = " [rationale truncated at the 16384-byte ceiling; the original was 20000 bytes]";
+        assert_eq!(
+            d.truncated_string_bytes,
+            20_000 - (16_384 - marker.len()),
+            "rationale past its cap, minus the room its own marker takes"
+        );
+        assert_eq!(r.rationale.len(), 16_384, "marker included, not on top");
         assert!(!d.is_empty(), "curve/string loss alone must flip is_empty");
+    }
+
+    /// A truncated rationale says so IN the string.
+    ///
+    /// The out-of-band `truncated_string_bytes` is transient — one line of CLI
+    /// stderr, one dismissable GUI toast — while the string is what survives
+    /// into `recipe.json` and onto the screen. Before this, a record cut at
+    /// 16 KiB read as if the writer had finished there.
+    #[test]
+    fn a_truncated_rationale_says_how_much_it_lost() {
+        let mut over = EditRecipe { rationale: "x".repeat(20_000), ..Default::default() };
+        over.clamp();
+        assert!(over.rationale.len() <= 16_384, "the ceiling is the promise");
+        assert!(
+            over.rationale.ends_with("bytes]"),
+            "no marker: {:?}",
+            &over.rationale[over.rationale.len().saturating_sub(96)..]
+        );
+        // Both numbers a reader needs, and both TRUE: the ceiling that cut it
+        // and how long the record had been. 20000 is recoverable from the
+        // string alone, which is the whole point.
+        assert!(over.rationale.contains("16384-byte ceiling"), "ceiling not named");
+        assert!(over.rationale.contains("the original was 20000 bytes"), "original length not named");
+
+        // Negative arm: a rationale that FITS is not annotated. A marker that
+        // is always appended tells the reader nothing.
+        let mut under = EditRecipe { rationale: "x".repeat(4_096), ..Default::default() };
+        let clean = under.clamp();
+        assert_eq!(clean.truncated_string_bytes, 0);
+        assert_eq!(under.rationale, "x".repeat(4_096), "an in-budget rationale is untouched");
     }
 
     /// The dab cap cuts on a TOKEN boundary, not a byte one (R28 2b,
