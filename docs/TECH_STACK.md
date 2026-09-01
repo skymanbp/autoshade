@@ -1141,8 +1141,10 @@ population-evidence note names the structurally withheld luma/hue ranges and
 states which downstream fits still read them. Full mode is unchanged.
 
 `reimagine` uses the configured `gpt-image-2` Images edit path as an explicitly
-lossy generated target, negotiates a flexible size and its supported fallback,
-then can feed that target into `match` for an editable full-resolution
+lossy generated target, negotiates a flexible size and its supported fallback
+(sized from the frame it sends: a RAW sends its sensor frame, never an
+in-camera-cropped embedded preview, since v1.2.2), then can feed that target
+into `match` for an editable full-resolution
 approximation; parameter downgrades occur only when structured error blame—or
 the equivalent streamed-refusal wrapper—names that parameter, while `heal`
 copies real neighbouring pixels, mean-corrects and feather-blends the patch,

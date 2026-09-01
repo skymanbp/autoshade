@@ -10,6 +10,10 @@
 //!     400, so no model list is hard-coded. For a RAW whose embedded preview is
 //!     smaller than the flexible target, the input is a full-sensor neutral
 //!     develop (sharp real detail in, instead of an upscaled ~1.6 MP preview).
+//!     The size is planned from the frame that is SENT: a RAW's sensor frame
+//!     (`decode::frame_size`), never its embedded preview, which may carry an
+//!     in-camera aspect crop (a 4:3 preview over a 3:2 sensor) — and such a
+//!     preview is never the input either.
 //!   * **Aspect-correct enum fallback** — 1536×1024 / 1024×1536 / 1024×1024 by
 //!     orientation instead of squashing every photo into a 1:1 square.
 //!   * **Configurable quality tier** (`low|medium|high|auto`, default `high`).
@@ -208,14 +212,23 @@ pub fn reimagine(
     // (unique_out already prepared the path).
     pipeline::preflight_out(out, raw_path)?;
     let src = decode::preview_only(raw_path)?;
-    let (w, h) = src.dimensions();
-    let sizes = SizePlan::for_source(cfg, w, h);
+    let preview = src.dimensions();
+    // The plan sizes the frame that is SENT, because the pixels are resized
+    // to it exactly. A RAW sends its sensor frame — `frame_size`'s
+    // DefaultCropSize rectangle in display orientation, the frame the develop
+    // below and `match` both use — never the embedded preview's: a body set
+    // to a 4:3 aspect writes a 4:3 preview over its 3:2 sensor, and a plan
+    // sized from that preview stretched the 3:2 develop into 4:3 on the wire
+    // (v1.2.2; the target then came back 4:3 against a 3:2 develop).
+    let frame = sent_frame(raw_path, preview)?;
+    let sizes = SizePlan::for_source(cfg, frame.0, frame.1);
     let (sw, sh) = parse_size(sizes.try_first());
 
     // Input pixels: when the flexible target outresolves the embedded preview of
-    // a RAW, feed a full-sensor neutral develop instead — real detail in, not an
-    // upscaled ~1.6 MP preview (input quality bounds faithful-region output).
-    let base = if decode::is_raw(raw_path) && sw.max(sh) > w.max(h) {
+    // a RAW — or the preview is not the sensor frame at all — feed a full-sensor
+    // neutral develop instead: real detail in, not an upscaled ~1.6 MP preview
+    // (input quality bounds faithful-region output), in the frame the plan sized.
+    let base = if develop_is_sent(decode::is_raw(raw_path), (sw, sh), preview, frame) {
         println!("  developing full sensor for a sharp high-res input …");
         gui_progress("developing full sensor for a sharp high-res input …");
         // Capped at 2× the API target edge: visually native for the final
@@ -546,6 +559,43 @@ pub fn retouch(
     }
     println!("generative fill -> {} ({bw}x{bh}, composite)", out.display());
     Ok(())
+}
+
+/// The frame `reimagine` puts on the wire for `path`: a RAW's sensor frame
+/// ([`decode::frame_size`] — DefaultCropSize in display orientation, what the
+/// full develop renders), a baked image's own pixels. The size plan is drawn
+/// from THIS frame and from nothing else, because the input is resized to the
+/// plan exactly: sizing from a RAW's embedded preview while sending its
+/// develop stretched the develop whenever the body had written the preview
+/// at an in-camera aspect crop.
+fn sent_frame(path: &Path, preview: (u32, u32)) -> Result<(u32, u32)> {
+    if !decode::is_raw(path) {
+        return Ok(preview);
+    }
+    let (w, h) = decode::frame_size(path)?;
+    Ok((w as u32, h as u32))
+}
+
+/// Whether the full develop, not the embedded preview, is the input: when the
+/// planned size outresolves the preview, and whenever the preview is not the
+/// sensor frame (an in-camera aspect crop) — resizing a 4:3 preview onto a
+/// 3:2 plan would stretch it exactly as sizing from it stretched the develop.
+fn develop_is_sent(raw: bool, planned: (u32, u32), preview: (u32, u32), frame: (u32, u32)) -> bool {
+    if !raw {
+        return false;
+    }
+    let outresolved = planned.0.max(planned.1) > preview.0.max(preview.1);
+    outresolved || !same_aspect(preview, frame)
+}
+
+/// Two frames share an aspect within 1 % — the embedded preview of a 3:2
+/// sensor is a few pixels off the develop's ratio, not a different frame.
+fn same_aspect(a: (u32, u32), b: (u32, u32)) -> bool {
+    if a.1 == 0 || b.1 == 0 {
+        return a == b;
+    }
+    let (ra, rb) = (a.0 as f64 / a.1 as f64, b.0 as f64 / b.1 as f64);
+    (ra - rb).abs() <= 0.01 * ra.max(rb)
 }
 
 /// The output-size request strategy: try the flexible high-res size first (when
@@ -1730,6 +1780,34 @@ mod tests {
         // Below the API minimum → no flexible size (enum fallback).
         assert_eq!(flex_size(6000, 4000, 100_000), None);
         assert_eq!(flex_size(0, 4000, u32::MAX), None);
+    }
+
+    /// v1.2.2: the size plan follows the frame that is SENT. A body set to a
+    /// 4:3 aspect writes a 4:3 embedded preview over its 3:2 sensor; the plan
+    /// used to be sized from that preview while the pixels sent were the 3:2
+    /// develop, `resize_exact`-ed into 4:3 — and the generated target came
+    /// back 4:3 against the 3:2 develop the reverse-fit pairs it with.
+    /// `develop_is_sent` is the other half: a preview that is not the sensor
+    /// frame is never the input, however large it is.
+    #[test]
+    fn the_size_plan_follows_the_sent_frame_not_the_cropped_preview() {
+        // Sized from the 3:2 sensor frame, as the develop is sent.
+        let plan = SizePlan::for_budget(6000, 4000, u32::MAX);
+        let (sw, sh) = parse_size(plan.try_first());
+        assert!((sw as f64 / sh as f64 - 1.5).abs() < 0.02, "{sw}x{sh} is not 3:2");
+        // Sized from the 4:3 preview instead, the same budget lands on 4:3 —
+        // the shipped defect, stated so the fix has a shape to differ from.
+        let (cw, ch) = parse_size(SizePlan::for_budget(1440, 1080, u32::MAX).try_first());
+        assert!((cw as f64 / ch as f64 - 4.0 / 3.0).abs() < 0.02, "{cw}x{ch} is not 4:3");
+        // A 4:3 preview over a 3:2 frame: the develop is sent even when the
+        // preview would outresolve the plan.
+        assert!(develop_is_sent(true, (1536, 1024), (1600, 1200), (6000, 4000)));
+        // The usual case: a preview in the frame's aspect, outresolved.
+        assert!(develop_is_sent(true, (sw, sh), (1616, 1080), (6000, 4000)));
+        // Same aspect and not outresolved: the preview is the input.
+        assert!(!develop_is_sent(true, (1536, 1024), (1616, 1080), (6000, 4000)));
+        // A baked image is its own frame.
+        assert!(!develop_is_sent(false, (sw, sh), (1440, 1080), (1440, 1080)));
     }
 
     /// L02: the in-place box blur must be BIT-identical to the previous
