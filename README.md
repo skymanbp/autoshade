@@ -480,12 +480,12 @@ on the release page carries the SHA-256 of every asset.
 
 | File | Size | SHA-256 |
 |---|---:|---|
-| `autoshade.exe` (CLI) | 20,110,336 bytes | `2e0b1cf90837010c657bff5db2229fb73f145a5322397faaa72155207c7dbbc5` |
-| `autoshade-gui.exe` (desktop app) | 26,425,856 bytes | `ade218e804dab995bd79c47608f22198a0a2ceecf932d6045467865b71289919` |
-| `AutoShade-Setup-1.2.1.exe` (installer) | 14,217,455 bytes | `9a36788d78f6557d013cb0cbee71f34bae150918f3b806a42441fbd049685ffd` |
-| `autoshade-1.2.1-windows-x64.zip` (portable archive) | 18,790,699 bytes | `b03bb5aec0335ab22514afe7117530bf36883fa1460697fd1382e7e1d974d8ea` |
-| `AutoShade-1.2.1-macos-universal.zip` (macOS app bundle) | 37,369,887 bytes | `b42df0055af99780e3e71939fa481e790cc6ce846cbd50ee2414f3a7dda16533` |
-| `AutoShade-1.2.1-macos-cli.zip` (macOS command line only) | 16,120,927 bytes | `8f04523db95c25f8b8b71824b82512f0e3e69c572e1ccd96bcf68125029232cb` |
+| `autoshade.exe` (CLI) | 20,110,336 bytes | `1691fd41d76efd60efbd5ae444a1dc9d4ee74db83d1746b66580fb8ec0ed8636` |
+| `autoshade-gui.exe` (desktop app) | 26,424,832 bytes | `f32b867e5adb44bc36b99d33e229684c10ef3e0b18090d60500404304715a260` |
+| `AutoShade-Setup-1.2.1.exe` (installer) | 14,212,337 bytes | `c147396ab2243ce6f8993631511838b9af580213f1589c379e33a675b827a742` |
+| `autoshade-1.2.1-windows-x64.zip` (portable archive) | 18,790,752 bytes | `2f0f8be598f6e5401a4d5a6d7f3b70f88c18052216bc6fc105444e7e3fbf3929` |
+| `AutoShade-1.2.1-macos-universal.zip` (macOS app bundle) | 37,368,504 bytes | `73618c2abda8dfe25f46d9199fef55e1f53813eb558ceadd184d2fef7d263def` |
+| `AutoShade-1.2.1-macos-cli.zip` (macOS command line only) | 16,121,719 bytes | `51558b8ed0e8a2d46d2189d6fe23fc408f871fe29ef724ad89359642cf1eb93b` |
 
 Download from the
 [v1.2.1 release page](https://github.com/skymanbp/autoshade/releases/tag/v1.2.1):
