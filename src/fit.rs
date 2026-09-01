@@ -75,6 +75,8 @@
 //! cannot localise them) — the AI style-prompt path covers intent the numbers
 //! cannot.
 
+use std::borrow::Cow;
+
 use image::DynamicImage;
 
 use crate::recipe::{CurvePoint, EditRecipe};
@@ -1020,6 +1022,146 @@ fn weighted_cdf(px: &[[f32; 3]], weights: &[f32], value: impl Fn(&[f32; 3]) -> f
     let mut acc = 0.0;
     for v in &mut hist { acc += *v; *v = acc / total; }
     hist
+}
+
+/// Weighted median of a scattered sample, lower-median convention: the first
+/// value at which the cumulative weight reaches half of the total.
+///
+/// Deliberately NOT [`weighted_cdf`] + [`quantile`]. That pair bins its key
+/// into `HIST_BINS` buckets over `[0, 1]`, which is right for a channel value
+/// and wrong for the quantity this batch reads: a per-pixel LOG RATIO is
+/// signed, unbounded, and concentrated near zero, so a `[0, 1]` histogram
+/// would clamp half of it into one bin. Sorting is exact and the cost is one
+/// sort of the analysis frame per channel, against thirteen full renders on
+/// the same path.
+fn weighted_median(samples: &mut [(f32, f32)]) -> f32 {
+    if samples.is_empty() {
+        return 0.0;
+    }
+    samples.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let total = samples.iter().map(|&(_, w)| w as f64).sum::<f64>();
+    if total <= 0.0 {
+        return 0.0;
+    }
+    let half = total * 0.5;
+    let mut carried = 0.0f64;
+    for &(value, weight) in samples.iter() {
+        carried += weight as f64;
+        if carried >= half {
+            return value;
+        }
+    }
+    samples[samples.len() - 1].0
+}
+
+/// The population AND the pairing the Atmosphere white balance is solved on.
+/// ONE authority chooses both, and that is the point: a readable
+/// shared-content population EXISTS only because a correspondence field was
+/// readable, and the field that is trusted to say WHICH pixels are shared is
+/// the same field that says WHICH target pixel each source pixel corresponds
+/// to. Taking the population without the pairing is how a RECOMPOSED pair —
+/// the same content, moved in frame, which is squarely inside Atmosphere's
+/// remit — gets read as a colour cast: same-index pairing against the raw
+/// target array is a random association once content has moved.
+///
+/// With no readable field the two sides are index-paired exactly as they
+/// always were, and the per-pixel weight is `min(source, target)`. That is
+/// not an invention: it is this module's own two-sidedness rule, the
+/// `source_evidence_share.min(target_evidence_share)` that [`EvidenceModel`]
+/// already applies to every range.
+///
+/// With a readable field `p.source` ALONE is the coherent weight, and mixing
+/// in `p.target` would not be. `shared_content_population` sets `source[i]`
+/// exactly where `conf[i] >= CONFIDENT_MATCH`, i.e. exactly where `pair_tp[i]`
+/// IS that source pixel's counterpart; the target weights are RANK-paired
+/// (built by sorting `luma601(&tp[..])`), so `target_weights[i]` is a
+/// statement about `tp[i]`'s own luma rank, not about a pairing with `sp[i]`.
+fn atmosphere_wb_pairing<'a>(
+    tp: &'a [[f32; 3]],
+    evidence: &'a EvidenceModel,
+    correspondence: Option<&'a PairCorrespondence>,
+    readable: Option<&'a SharedPopulation>,
+) -> (&'a [[f32; 3]], Cow<'a, [f32]>) {
+    match readable {
+        Some(p) => (
+            correspondence.map_or(tp, |c| c.tp.as_slice()),
+            Cow::Borrowed(p.source.as_slice()),
+        ),
+        None => {
+            let n = evidence.source_weights.len().min(evidence.target_weights.len());
+            let paired = (0..n)
+                .map(|i| evidence.source_weights[i].min(evidence.target_weights[i]))
+                .collect::<Vec<_>>();
+            (tp, Cow::Owned(paired))
+        }
+    }
+}
+
+/// The Atmosphere global white balance: a weighted median of the PER-PIXEL
+/// log ratio, taken jointly over ONE population, normalised by its own
+/// geometric mean and inverted through the engine's WB model. Returns the
+/// rounded Kelvin, the rounded tint, and the normalised `wanted` gains the
+/// search was fitted to.
+///
+/// Three INDEPENDENT per-channel medians — what this replaces — are a ratio
+/// of two marginals. On a bimodal frame the two marginals' halfway points
+/// fall in different sub-populations, so their ratio is not the colour change
+/// of any pixel in the frame; on the crate's own `flat_sky_to_cloud_deck`,
+/// where no pixel changed its chromaticity at all, they read K 4400 /
+/// tint +55.2. This reads one cloud of per-pixel colour CHANGES and takes its
+/// centre.
+///
+/// The LOG form is written rather than the raw ratio because the median
+/// commutes with a monotone map — the two are numerically identical — and the
+/// log is what makes the estimator a LOCATION statistic on one cloud instead
+/// of a ratio of two. The `1e-5` floor is this call site's own existing
+/// convention, not a new knob.
+///
+/// The MEDIAN, not the mean, for exactly the reason it always was: a newly
+/// generated cloud highlight must not own a frame-wide average. That comment
+/// was not overruled by this batch — what the per-pixel form adds is that the
+/// robustness now applies to the CHANGE each pixel underwent rather than to
+/// two brightness distributions read apart from each other.
+fn atmosphere_wb_from_populations(
+    sp: &[[f32; 3]],
+    pair_tp: &[[f32; 3]],
+    pair_w: &[f32],
+    anchor: f32,
+) -> (f32, f32, [f32; 3]) {
+    let n = sp.len().min(pair_tp.len());
+    let mut ratio = [1.0f32; 3];
+    let mut samples: Vec<(f32, f32)> = Vec::with_capacity(n);
+    for (ch, slot) in ratio.iter_mut().enumerate() {
+        samples.clear();
+        for i in 0..n {
+            let w = pair_w.get(i).copied().unwrap_or(0.0).max(0.0);
+            if w <= 0.0 {
+                continue;
+            }
+            let source = render::srgb_to_linear(sp[i][ch]).max(1e-5);
+            let target = render::srgb_to_linear(pair_tp[i][ch]).max(1e-5);
+            samples.push((target.ln() - source.ln(), w));
+        }
+        *slot = weighted_median(&mut samples).exp();
+    }
+    let common = (ratio[0] * ratio[1] * ratio[2]).max(1e-12).powf(1.0 / 3.0);
+    let wanted = ratio.map(|v| v / common);
+    let (lo, hi) = (WB_SEARCH_K.0.ln(), WB_SEARCH_K.1.ln());
+    let tint = ((1.0 - wanted[1]) / 0.20 * 100.0).clamp(-100.0, 100.0);
+    let mut best = (anchor, f32::INFINITY);
+    for i in 0..=400 {
+        let k = (lo + (hi - lo) * i as f32 / 400.0).exp();
+        let gains = render::wb_gains(anchor, k, tint);
+        let err = gains
+            .iter()
+            .zip(wanted)
+            .map(|(&g, want)| (g.max(1e-5) / want.max(1e-5)).log2().powi(2))
+            .sum::<f32>();
+        if err < best.1 {
+            best = (k, err);
+        }
+    }
+    ((best.0 / 50.0).round() * 50.0, round1(tint), wanted)
 }
 
 fn weighted_mean(px: &[[f32; 3]], weights: &[f32], ch: usize) -> Option<f32> {
@@ -2847,9 +2989,13 @@ fn fit_atmosphere_from_parts(
         None => AtmosphereReference::WholeFrame,
     };
     // Borrowed, never cloned, on the unrestricted path: with no field the two
-    // solves below read the very slices they always read, so a pair without a
-    // correspondence field is byte-identical by construction rather than by
-    // arithmetic luck.
+    // solves below read the very slices they always read — and that now
+    // covers the PAIRED TARGET ARRAY as well, since `atmosphere_wb_pairing`
+    // hands back `tp` itself when there is no readable field, and hands back
+    // `c.tp` when there is. `c.tp` is pinned identical to `tp` under an
+    // identity field, so the remap is a provable no-op on every
+    // same-composition pair and the only arrays that differ belong to pairs
+    // whose content actually moved.
     let readable = shared.as_ref().filter(|p| p.readable());
     let ref_source = readable.map_or(evidence.source_weights.as_slice(), |p| p.source.as_slice());
     let ref_target = readable.map_or(evidence.target_weights.as_slice(), |p| p.target.as_slice());
@@ -2872,36 +3018,15 @@ fn fit_atmosphere_from_parts(
         .clamp(-budget.ev, budget.ev);
     recipe.exposure_ev = round2(exposure);
 
-    // Robust per-channel medians identify the atmospheric cast without
-    // letting a newly generated cloud highlight own a frame-wide mean. Remove
-    // their common brightness through the geometric mean, then invert the
-    // engine's own WB model.
-    let mut ratio = [1.0f32; 3];
-    for ch in 0..3 {
-        let sc = weighted_cdf(sp, ref_source, |p| render::srgb_to_linear(p[ch]));
-        let tc = weighted_cdf(tp, ref_target, |p| render::srgb_to_linear(p[ch]));
-        ratio[ch] = quantile(&tc, 0.5).max(1e-5) / quantile(&sc, 0.5).max(1e-5);
-    }
-    let common = (ratio[0] * ratio[1] * ratio[2]).max(1e-12).powf(1.0 / 3.0);
-    let wanted = ratio.map(|v| v / common);
+    // The white balance is solved on ONE population of per-pixel colour
+    // changes — see `atmosphere_wb_pairing` for why the field that chose the
+    // population must also choose the pairing, and
+    // `atmosphere_wb_from_populations` for why the statistic is a per-pixel
+    // median rather than three independent marginal ones.
     let anchor = base.as_shot_k.unwrap_or(5500.0);
-    let (lo, hi) = (WB_SEARCH_K.0.ln(), WB_SEARCH_K.1.ln());
-    let tint = ((1.0 - wanted[1]) / 0.20 * 100.0).clamp(-100.0, 100.0);
-    let mut best = (anchor, f32::INFINITY);
-    for i in 0..=400 {
-        let k = (lo + (hi - lo) * i as f32 / 400.0).exp();
-        let gains = render::wb_gains(anchor, k, tint);
-        let err = gains
-            .iter()
-            .zip(wanted)
-            .map(|(&g, want)| (g.max(1e-5) / want.max(1e-5)).log2().powi(2))
-            .sum::<f32>();
-        if err < best.1 {
-            best = (k, err);
-        }
-    }
-    let wb_k = (best.0 / 50.0).round() * 50.0;
-    let wb_tint = round1(tint);
+    let (pair_tp, pair_w) = atmosphere_wb_pairing(tp, evidence, correspondence, readable);
+    let (wb_k, wb_tint, _wanted) =
+        atmosphere_wb_from_populations(sp, pair_tp, &pair_w, anchor);
     let wb_search_bound = (strength.get() > crate::recipe::GradeStrength::DEFAULT
         && (wb_k <= WB_SEARCH_K.0 || wb_k >= WB_SEARCH_K.1))
         .then_some(wb_k);
@@ -6502,9 +6627,149 @@ mod tests {
             &EditRecipe::default(),
             FitOptions { strength: crate::recipe::GradeStrength::new(0.65), provider: None },
         );
-        assert_eq!(report.recipe.temperature_k, Some(7100.0));
-        assert_eq!(report.recipe.tint, 22.3);
+        // RE-PINNED by step 9, user ruling 1 (2026-08-31). The calibration
+        // pair no longer PERSISTS a white balance at the shipped default, and
+        // that is the budget doing its job rather than a capability lost.
+        // Measured first-party on this corpus: the per-pixel estimator asks
+        // K 16050 / tint +34.3, gains [1.263, 0.931, 0.764], gain RATIO
+        // 1.6534, where the marginal-median estimator asked K 7100 / +22.3 at
+        // ratio 1.2314. `ATMOSPHERE_WB_GAIN_RATIO` allows 1.40 at
+        // `GradeStrength::DEFAULT`, so the demand is refused and the recipe
+        // keeps the as-shot white balance.
+        //
+        // The refusal is a function of STRENGTH, not a ceiling. `wb_ratio` is
+        // `between(1.20, ATMOSPHERE_WB_GAIN_RATIO, 3.0)` interpolated on the
+        // strength axis, so at strength 1.0 the budget is 3.0 and the very
+        // same pair persists the very same move — which the second arm below
+        // measures rather than asserting. Wanting a larger white-balance
+        // shift is exactly what the F1 freedom axis already ships.
+        assert_eq!(report.recipe.temperature_k, None);
+        assert_eq!(report.recipe.tint, 0.0);
+        // The EXPOSURE solve is not part of this batch: it stays on the
+        // marginal weighted luma median. Measured unchanged at -1.00, which
+        // is the assertion that would have caught an accidental side effect.
         assert_eq!(report.recipe.exposure_ev, -1.0);
+        let full = fit_recipe_from_with(
+            &source,
+            &target,
+            &EditRecipe::default(),
+            FitOptions { strength: crate::recipe::GradeStrength::new(1.0), provider: None },
+        );
+        assert_eq!(
+            full.recipe.temperature_k,
+            Some(16050.0),
+            "the same demand is INSIDE the budget once the strength axis widens it"
+        );
+        assert!((full.recipe.tint - 34.3).abs() <= 0.05, "tint {}", full.recipe.tint);
+    }
+
+    /// Step 9 / acceptance A1: a pair in which NO pixel changed its
+    /// chromaticity may not persist a colour cast.
+    ///
+    /// The ground truth is structural and readable in the fixture's own
+    /// source rather than asserted here: `flat_sky_to_cloud_deck`'s land
+    /// branch never consults `clouds`, so the lower half is byte-identical
+    /// between the two builds, and its sky keeps the same chromaticity vector
+    /// `[l*0.83, l*0.92, l]` with only the luminance `l` redrawn. There is no
+    /// cast to find. Three INDEPENDENT per-channel medians nonetheless read
+    /// K 4400 / tint +55.2 on it - 27x this tolerance - because the source's
+    /// smooth sky and the target's cloud deck put the three marginals'
+    /// halfway points in different sub-populations, so their ratio is no
+    /// pixel's colour. The fixture is 384x256 == `ANALYZE_EDGE`, so
+    /// `analysis_pair` does not resample it.
+    ///
+    /// Supervisor mutations M-1-A (the three marginal medians restored) and
+    /// M-1-E (the geometric-mean normalisation deleted) both go red here.
+    #[test]
+    fn a_pair_that_changed_no_pixel_chromaticity_persists_no_cast() {
+        let (src, tgt) = flat_sky_to_cloud_deck();
+        let report = fit_recipe(&src, &tgt);
+        assert_eq!(
+            report.mode,
+            FitMode::Atmosphere,
+            "premise: the cloud deck is content-divergent, so RC1 is what runs"
+        );
+        let k = report
+            .recipe
+            .temperature_k
+            .expect("a neutral demand is inside the atmosphere budget and persists");
+        assert!(
+            (k - 5500.0).abs() <= 200.0,
+            "no chromaticity moved, so the anchor must stand: {k} K, tint {}",
+            report.recipe.tint
+        );
+        assert!(
+            report.recipe.tint.abs() <= 2.0,
+            "no chromaticity moved, so no tint may be invented: {}",
+            report.recipe.tint
+        );
+    }
+
+    /// Step 9 / acceptance A2: a readable correspondence field chooses the
+    /// POPULATION and the PAIRING, and the estimator may not take one without
+    /// the other.
+    ///
+    /// The target here is the same target, RECOMPOSED - rolled down by 64 of
+    /// its 256 rows, 25% of the frame. Content preserved, moved in frame,
+    /// which is squarely inside Atmosphere's remit and is exactly what
+    /// same-index pairing cannot survive: with the population restricted to
+    /// the shared content but the pairing left on the raw index, the
+    /// estimator reads a large invented cast off a pair whose true `gr/gb` is
+    /// 1.000000. 64 of 256 rows is 12 of the sidecar's 48 grid cells exactly,
+    /// so a field that knows the roll is a two-line variant of
+    /// `identity_test_field`.
+    ///
+    /// It asserts on the value the SOLVE returns rather than on the recipe,
+    /// and that is not a convenience: both wrong answers demand a gain ratio
+    /// above `ATMOSPHERE_WB_GAIN_RATIO`, so all three arms persist `None` and
+    /// a black-box assertion could not see the defect at all.
+    ///
+    /// Supervisor mutation M-1-B (read `tp` instead of the remapped array
+    /// when the field is readable) goes red here and only here.
+    #[test]
+    fn a_readable_field_chooses_the_pairing_and_not_only_the_population() {
+        let (src, tgt) = flat_sky_to_cloud_deck();
+        let rolled = {
+            let rgb = tgt.to_rgb8();
+            let (w, h) = (rgb.width(), rgb.height());
+            DynamicImage::ImageRgb8(image::RgbImage::from_fn(w, h, |x, y| {
+                *rgb.get_pixel(x, (y + h - 64) % h)
+            }))
+        };
+        let (s_img, t_img) = analysis_pair(&src, &rolled);
+        let (w, h) = (s_img.width(), s_img.height());
+        let sp = pixels_of(&render::develop_preview(&s_img, &EditRecipe::default()));
+        let tp = pixels_of(&t_img);
+        let evidence = evidence_model_for(&sp, &tp, w, h).structure_blind(&tp);
+        let g = crate::correspond::GRID;
+        let cells = g * g;
+        let field = crate::correspond::CorrespondenceField {
+            map_y: (0..cells).map(|c| (((c / g) + 12) % g) as f32).collect(),
+            ..identity_field()
+        };
+        let pc = correspondence_for_pair(&field, &tp, (w, h), (w, h));
+        let shared = shared_content_population(&evidence, &pc)
+            .expect("both sides carry evidence mass");
+        assert!(
+            shared.readable(),
+            "premise: the field must be readable, retention {:.3}/{:.3}",
+            shared.source_retained,
+            shared.target_retained
+        );
+        let (pair_tp, pair_w) =
+            atmosphere_wb_pairing(&tp, &evidence, Some(&pc), Some(&shared));
+        let (_, _, unpaired) =
+            atmosphere_wb_from_populations(&sp, &tp, &pair_w, 5500.0);
+        assert!(
+            (unpaired[0] / unpaired[2] - 1.0).abs() > 0.10,
+            "premise: same-index pairing against a moved target IS broken: {unpaired:?}"
+        );
+        let (_, _, wanted) =
+            atmosphere_wb_from_populations(&sp, pair_tp, &pair_w, 5500.0);
+        assert!(
+            (wanted[0] / wanted[2] - 1.0).abs() <= 0.02,
+            "the field that chose the population must also choose the pairing: {wanted:?}"
+        );
     }
 
     #[test]
@@ -9201,37 +9466,21 @@ mod tests {
         let tp = pixels_of(&t_img);
         let structural = evidence_model_for(&sp, &tp, s_img.width(), s_img.height());
         let evidence = structural.structure_blind(&tp);
-        let mut ratio = [1.0f32; 3];
-        for ch in 0..3 {
-            let sc = weighted_cdf(&sp, &evidence.source_weights, |p| {
-                render::srgb_to_linear(p[ch])
-            });
-            let tc = weighted_cdf(&tp, &evidence.target_weights, |p| {
-                render::srgb_to_linear(p[ch])
-            });
-            ratio[ch] = quantile(&tc, 0.5).max(1e-5) / quantile(&sc, 0.5).max(1e-5);
-        }
-        let common = (ratio[0] * ratio[1] * ratio[2]).max(1e-12).powf(1.0 / 3.0);
-        let wanted = ratio.map(|value| value / common);
+        // Rule 09: the suite holds NO private copy of the solve. Everything
+        // above is the shipped preamble (`analysis_pair` -> `develop_preview`
+        // -> `evidence_model_for` -> `structure_blind`); the estimator itself
+        // is the shipped one, called with `provider: None` — which is what
+        // all three callers of this helper pass. The copy that used to live
+        // here had drifted twice: it rounded the tint BEFORE the 401-step
+        // search instead of after, and it read `evidence.source_weights` /
+        // `evidence.target_weights` where production had moved to the
+        // shared-content reference, so since R30 R2 it had been testing a
+        // solve production no longer performed.
         let anchor = base.as_shot_k.unwrap_or(5500.0);
-        let (lo, hi) = (WB_SEARCH_K.0.ln(), WB_SEARCH_K.1.ln());
-        let tint = round1(((1.0 - wanted[1]) / 0.20 * 100.0).clamp(-100.0, 100.0));
-        let mut best = (anchor, f32::INFINITY);
-        for i in 0..=400 {
-            let k = (lo + (hi - lo) * i as f32 / 400.0).exp();
-            let gains = render::wb_gains(anchor, k, tint);
-            let err = gains
-                .iter()
-                .zip(wanted)
-                .map(|(&gain, want)| {
-                    (gain.max(1e-5) / want.max(1e-5)).log2().powi(2)
-                })
-                .sum::<f32>();
-            if err < best.1 {
-                best = (k, err);
-            }
-        }
-        (anchor, (best.0 / 50.0).round() * 50.0, tint)
+        let (pair_tp, pair_w) = atmosphere_wb_pairing(&tp, &evidence, None, None);
+        let (wb_k, wb_tint, _) =
+            atmosphere_wb_from_populations(&sp, pair_tp, &pair_w, anchor);
+        (anchor, wb_k, wb_tint)
     }
 
     fn mean_hue_in_rows(img: &DynamicImage, rows: std::ops::Range<u32>) -> f64 {

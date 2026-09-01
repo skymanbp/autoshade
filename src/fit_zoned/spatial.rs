@@ -360,7 +360,7 @@ fn boundary_args(
         ("k", format!("{k:.3}")),
         ("before", format!("{:.4}", before.rim)),
         ("after", format!("{:.4}", after.rim)),
-        ("max", format!("{ZONE_BOUNDARY_RIM_MAX:.3}")),
+        ("max", format!("{ZONE_BOUNDARY_STEP_MAX:.3}")),
         ("transitions", after.transitions.to_string()),
     ]
 }
@@ -374,6 +374,29 @@ pub(super) enum BitmapBoundaryWhy {
     /// `0.000` off `0` transitions is exactly what let every hard-edged tile
     /// through the gate that was supposed to be holding the seam budget.
     Unmeasured,
+    /// The correction that survived the gate does not move a single pixel of
+    /// the analysis render: the accepted render is byte-identical to the
+    /// frame WITHOUT it. Step 9 made this reachable — under the transported
+    /// differential a `k=0` render reads exactly 0.0 by construction, so the
+    /// budget can never refuse it and the bisection returns the largest `k`
+    /// that passes, which for a correction whose every visible strength
+    /// introduces a seam is a `k` that renders to nothing.
+    ///
+    /// The test is BYTE IDENTITY of the render, deliberately not a threshold
+    /// on `k`. `k == 0.0` alone would catch almost nothing: the reading falls
+    /// continuously to zero with `k`, and the 8-bit analysis render quantises
+    /// a small enough `k` into a literal no-op, so the bisection almost
+    /// always lands on a tiny POSITIVE `k` rather than on zero. And a
+    /// threshold ON `k` is not a threshold on visibility at all — `k` scales
+    /// whatever dials the zone happens to carry, so the same `k` moves
+    /// different numbers of pixels for different corrections. Comparing the
+    /// two renders asks the question directly and needs no constant.
+    ///
+    /// An inert attachment is strictly worse than a refusal: it occupies the
+    /// exclusion budget the next candidate needs, consumes the attachment
+    /// cap, keeps a raster on disk, and discloses a before/after pair it did
+    /// not produce.
+    Inert,
 }
 
 pub(super) struct BitmapBoundaryAccepted {
@@ -401,7 +424,17 @@ pub(super) enum BoundaryRuler<'a> {
     /// path that is the segmentation raster's OWN alpha at analysis size
     /// (`mask_weights` of `region.source`), so it is already a contour and
     /// not an evidence-scoped product.
-    TransitionBand { weights: &'a [f32] },
+    TransitionBand {
+        weights: &'a [f32],
+        /// The same frame rendered WITHOUT this correction, for exactly the
+        /// reason [`BoundaryRuler::CrossBoundaryStep`] carries one: the rim
+        /// this ruler now reports is the rim the correction INTRODUCED, so a
+        /// bow the scene already had under the feather must cancel instead of
+        /// being charged. Carried in the ENUM rather than as a loose
+        /// argument, so a caller cannot hand over a stale reference by
+        /// omitting it.
+        reference: &'a [[f32; 3]],
+    },
     /// Hard 0/255 rasters — spatial tiles and free masks, which have no
     /// transition band for the rim ruler to read and therefore always scored
     /// `rim 0.000 / 0 transitions` and passed. The correction's own induced
@@ -442,12 +475,20 @@ pub(super) fn enforce_bitmap_boundary(
 ) -> Result<BitmapBoundaryAccepted, BitmapBoundaryRefusal> {
     let BitmapBoundaryInput { ruler, initial_px, frame_before } = input;
     let measure = |rendered: &[[f32; 3]]| match ruler {
-        BoundaryRuler::TransitionBand { weights } => {
-            boundary_rim(rendered, weights, s_img.width(), s_img.height())
+        BoundaryRuler::TransitionBand { weights, reference } => {
+            boundary_rim(reference, rendered, weights, s_img.width(), s_img.height())
         }
         BoundaryRuler::CrossBoundaryStep { geometry, reference } => {
             boundary_step(reference, rendered, geometry, s_img.width(), s_img.height())
         }
+    };
+    // One ruler, one budget. The gate body is ruler-agnostic, so the budget
+    // has to be chosen HERE rather than read from a constant both rulers
+    // share — otherwise re-deriving the rim silently re-tunes every spatial
+    // tile and free mask that passes through this same comparison.
+    let budget = match ruler {
+        BoundaryRuler::TransitionBand { .. } => ZONE_BOUNDARY_RIM_MAX,
+        BoundaryRuler::CrossBoundaryStep { .. } => ZONE_BOUNDARY_STEP_MAX,
     };
     let initial = measure(&initial_px);
     let hard_edged = matches!(ruler, BoundaryRuler::CrossBoundaryStep { .. });
@@ -468,12 +509,12 @@ pub(super) fn enforce_bitmap_boundary(
         let frame = fit::look_err_with_evidence(&pixels, tgt_px, &report.evidence);
         (reading, pixels, frame)
     };
-    let kept = if initial.rim <= ZONE_BOUNDARY_RIM_MAX {
+    let kept = if initial.rim <= budget {
         let frame = fit::look_err_with_evidence(&initial_px, tgt_px, &report.evidence);
         Some((1.0, initial, initial_px, frame))
     } else {
         let zero = render_at(report, 0.0);
-        if zero.0.rim > ZONE_BOUNDARY_RIM_MAX {
+        if zero.0.rim > budget {
             None
         } else {
             let (mut lo, mut hi) = (0.0f32, 1.0f32);
@@ -481,7 +522,7 @@ pub(super) fn enforce_bitmap_boundary(
             for _ in 0..12 {
                 let mid = (lo + hi) * 0.5;
                 let measured = render_at(report, mid);
-                if measured.0.rim <= ZONE_BOUNDARY_RIM_MAX {
+                if measured.0.rim <= budget {
                     lo = mid;
                     best = (mid, measured.0, measured.1, measured.2);
                 } else {
@@ -495,6 +536,17 @@ pub(super) fn enforce_bitmap_boundary(
         report.recipe.masks.truncate(first_mask);
         return Err(BitmapBoundaryRefusal { why: BitmapBoundaryWhy::Rim, initial });
     };
+    // Both rulers now carry the frame rendered WITHOUT this correction, so
+    // the question "did the surviving k actually do anything" is answerable
+    // for free and exactly. See `BitmapBoundaryWhy::Inert`.
+    let reference = match ruler {
+        BoundaryRuler::TransitionBand { reference, .. } => reference,
+        BoundaryRuler::CrossBoundaryStep { reference, .. } => reference,
+    };
+    if pixels == reference {
+        report.recipe.masks.truncate(first_mask);
+        return Err(BitmapBoundaryRefusal { why: BitmapBoundaryWhy::Inert, initial });
+    }
     if frame > frame_before + SPATIAL_FRAME_REGRESSION_TOL {
         report.recipe.masks.truncate(first_mask);
         return Err(BitmapBoundaryRefusal { why: BitmapBoundaryWhy::Frame, initial });
@@ -1340,7 +1392,7 @@ mod tests {
             boundary_fixture(-0.40, Some(-0.20), "tile-boundary-budget");
 
         // Premise 1: the old ruler is blind here, by construction.
-        let unread = boundary_rim(&candidate, &geometry, 64, 64);
+        let unread = boundary_rim(&reference, &candidate, &geometry, 64, 64);
         assert_eq!(
             unread.transitions, 0,
             "premise: a 0/255 raster has no transition band to read: {unread:?}"
@@ -1349,7 +1401,7 @@ mod tests {
         let measured = boundary_step(&reference, &candidate, &geometry, 64, 64);
         assert!(measured.transitions > 0, "the 50% contour must be measurable: {measured:?}");
         assert!(
-            measured.rim > ZONE_BOUNDARY_RIM_MAX,
+            measured.rim > ZONE_BOUNDARY_STEP_MAX,
             "premise: a -0.40 EV hard tile steps across its own border: {measured:?}"
         );
 
@@ -1372,7 +1424,7 @@ mod tests {
         .expect("a shrinkable tile must be negotiated, not dropped");
         assert!(accepted.k < 1.0, "an over-budget step must really shrink: k={}", accepted.k);
         assert!(
-            accepted.reading.rim <= ZONE_BOUNDARY_RIM_MAX,
+            accepted.reading.rim <= ZONE_BOUNDARY_STEP_MAX,
             "the kept reading must be inside the budget: {:?}",
             accepted.reading
         );
@@ -1398,13 +1450,13 @@ mod tests {
         let inside = 32 * 64 + 33;
         let one_sided = (luma(&candidate[inside]) - luma(&reference[inside])).abs();
         assert!(
-            one_sided > ZONE_BOUNDARY_RIM_MAX,
+            one_sided > ZONE_BOUNDARY_STEP_MAX,
             "premise: the in-zone delta alone is over budget ({one_sided})"
         );
         let paired = boundary_step(&reference, &candidate, &geometry, 64, 64);
         assert!(paired.transitions > 0, "the ramp still crosses 50%: {paired:?}");
         assert!(
-            paired.rim <= ZONE_BOUNDARY_RIM_MAX,
+            paired.rim <= ZONE_BOUNDARY_STEP_MAX,
             "a continuous ramp is not a cross-boundary step: {paired:?} vs {one_sided}"
         );
         let accepted = enforce_bitmap_boundary(
@@ -1434,7 +1486,7 @@ mod tests {
     fn hard_tile_mask_yields_a_measured_cross_boundary_step() {
         let (_, _, _, path, geometry, reference, candidate) =
             boundary_fixture(-0.40, Some(-0.20), "tile-boundary-hard-reading");
-        let blind = boundary_rim(&candidate, &geometry, 64, 64);
+        let blind = boundary_rim(&reference, &candidate, &geometry, 64, 64);
         assert_eq!((blind.rim, blind.transitions), (0.0, 0), "the defect, pinned: {blind:?}");
 
         let measured = boundary_step(&reference, &candidate, &geometry, 64, 64);
@@ -1447,7 +1499,7 @@ mod tests {
             "every edge of the rectangle inside the frame must be sampled: {measured:?}"
         );
         assert!(
-            measured.rim > 4.0 * ZONE_BOUNDARY_RIM_MAX,
+            measured.rim > 4.0 * ZONE_BOUNDARY_STEP_MAX,
             "the seam this tile makes is several times over budget: {measured:?}"
         );
 
@@ -1462,6 +1514,44 @@ mod tests {
 
     /// A mask with no sampleable contour is REFUSED. The old gate's "pass"
     /// was built on exactly this reading.
+    /// Step 9, scope addition: the SAME rule on the bitmap gate that tiles,
+    /// free masks and semantic regions share. A candidate whose accepted
+    /// render is byte-identical to the frame without it is refused, so the
+    /// tile sweep takes its `owned.remove()` / `refused.insert()` /
+    /// `continue` path — the raster goes, the area stays available to the
+    /// next candidate (`excluded` is only accumulated on the attach path at
+    /// spatial.rs), and the disclosure is the refusal note rather than
+    /// TILE_ATTACHED with a before/after pair nothing produced.
+    /// Supervisor mutation M-4-B (the check deleted) goes red here.
+    #[test]
+    fn an_inert_bitmap_correction_is_refused_rather_than_attached() {
+        let (source, target, mut report, path, geometry, reference, _candidate) =
+            boundary_fixture(-0.40, Some(-0.20), "tile-boundary-inert");
+        let frame_before =
+            fit::look_err_with_evidence(&reference, &target, &report.evidence);
+        let outcome = enforce_bitmap_boundary(
+            &source,
+            &target,
+            &mut report,
+            0,
+            BitmapBoundaryInput {
+                ruler: BoundaryRuler::CrossBoundaryStep {
+                    geometry: &geometry,
+                    reference: &reference,
+                },
+                // The candidate render IS the reference: nothing moved.
+                initial_px: reference.clone(),
+                frame_before,
+            },
+        );
+        let Err(refusal) = outcome else {
+            panic!("a correction that moves no pixel may not attach");
+        };
+        assert_eq!(refusal.why, BitmapBoundaryWhy::Inert);
+        assert!(report.recipe.masks.is_empty(), "and its mask must not survive");
+        path.remove();
+    }
+
     #[test]
     fn unmeasurable_boundary_is_refused_never_passed() {
         let (source, target, mut report, path, _, reference, candidate) =

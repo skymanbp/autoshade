@@ -822,6 +822,18 @@ CLAIMS: list[Claim | SetClaim] = [
         r"(?P<cli>\d+) CLI / (?P<gui>\d+) GUI / (?P<c1>\d+)\+(?P<c2>\d+) contract",
         battery_test_counts,
     ),
+    # The headline evidence table states the same counts in a SHORTER shape,
+    # with no "(N pass + N ignored)" clause, so neither regex above could ever
+    # match it -- and it silently drifted to 1191/22/151 while every other
+    # mention moved. A claim of its own is the only thing that stops that
+    # happening again.
+    Claim(
+        README,
+        "test counts — headline evidence table",
+        r"Automated test battery \| (?P<lib>\d+) library / (?P<cli>\d+) CLI / "
+        r"(?P<gui>\d+) GUI / (?P<c1>\d+)\+(?P<c2>\d+) contract tests",
+        battery_test_counts,
+    ),
     Claim(
         ARCH,
         "camera models — §4 + §5 (all mentions must agree)",

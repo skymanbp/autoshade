@@ -406,21 +406,25 @@ fn calibration_local_support_is_not_constant() {
 /// The NumPy solver's ceiling on the calibration pair `neutral.jpg -> target.jpg`,
 /// measured on the Rust module's OWN exported analysis pixels, guide and fit weight.
 ///
-/// PROVENANCE — RE-MEASURED 2026-08-30 on NumPy 2.3.5 / Python 3.13.3
+/// PROVENANCE — RE-MEASURED 2026-08-31 (step 9) on NumPy 2.3.5 / Python 3.13.3
 /// (Windows 11), by the same three documented steps:
 ///   `cargo test --release -- --ignored export_calibration_field_inputs_for_numpy`
 ///   `python scripts/field_check.py`   (tikhonov=1.0, smooth=(1,1,1), iterations=90)
 ///   `cargo test --release -- --ignored compare_calibration_field_with_numpy`
-/// reported `numpy ceiling (production objective) = 0.067702` against the Rust
-/// port's 0.067702, on a global figure of 0.096207, with
-/// `max |grid_rust - grid_numpy| = 1.1e-5`.  The two solvers still agree to
-/// four more digits than the bound asks; what MOVED is the INPUT — step 4a's
-/// per-band colour mixer changed this pair's global render (its global look
-/// error by 6e-5), and the local field's ceiling is a function of that render.
-/// The previous figure was 0.070_022_5, measured 2026-08-27 before the mixer
-/// existed.  The recon's published grid figures are NOT reusable here: they
-/// were measured on the RAW-path renders, a different baseline.
-const NUMPY_FIELD_CEILING_CALIBRATION: f32 = 0.067_702_0;
+/// reported `numpy ceiling (production objective) = 0.070085` against the Rust
+/// port's 0.070085, on a global figure of 0.099869, with
+/// `max |grid_rust - grid_numpy| = 8.6e-6` and `weight_max_abs_delta = 0.0`.
+/// The two solvers still agree to four more digits than the bound asks; what
+/// MOVED is the INPUT — step 9's Atmosphere white balance is a per-pixel
+/// log-ratio median instead of three marginal medians, this pair's demand
+/// (gain ratio 1.6534) is outside the default atmosphere WB budget, so the
+/// global render no longer carries a persisted 7100 K / +22.3, and the local
+/// field's ceiling is a function of that render. The value before step 9 was
+/// 0.067_702_0 (2026-08-30, after step 4a's per-band colour mixer), and
+/// 0.070_022_5 before that (2026-08-27, before the mixer). The recon's
+/// published grid figures are NOT reusable here: they were measured on the
+/// RAW-path renders, a different baseline.
+const NUMPY_FIELD_CEILING_CALIBRATION: f32 = 0.070_085_0;
 /// The largest per-parameter disagreement between the two solvers over all 768
 /// vertices: measured 1.50e-5 in the same run, bounded here at a legible 1e-4.
 const NUMPY_FIELD_GRID_MAX_DELTA: f32 = 1e-4;

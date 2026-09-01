@@ -22,6 +22,7 @@ fn push_refusal(report: &mut FitReport, refusals: &[FreeMaskRefusal]) {
         FreeMaskWhy::Footprint, FreeMaskWhy::Mass, FreeMaskWhy::RasterClaim,
         FreeMaskWhy::RasterWrite, FreeMaskWhy::ZoneRefused,
         FreeMaskWhy::Frame, FreeMaskWhy::Rim, FreeMaskWhy::Unmeasured,
+        FreeMaskWhy::Inert,
     ] {
         let numbers = refusals.iter().filter(|r| r.why == why).map(|r| r.n).collect::<Vec<_>>();
         if numbers.is_empty() { continue; }
@@ -200,6 +201,7 @@ pub(in crate::fit_zoned) fn attach_free_masks(
                     spatial::BitmapBoundaryWhy::Frame => FreeMaskWhy::Frame,
                     spatial::BitmapBoundaryWhy::Rim => FreeMaskWhy::Rim,
                     spatial::BitmapBoundaryWhy::Unmeasured => FreeMaskWhy::Unmeasured,
+                    spatial::BitmapBoundaryWhy::Inert => FreeMaskWhy::Inert,
                 };
                 push_refusal(report, &[FreeMaskRefusal { n: number, why }]);
                 disclosed += 1;

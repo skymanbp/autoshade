@@ -344,7 +344,7 @@ fn free_mask_attachment_emits_typed_note_with_improvement() {
         .expect("synthetic fixture must attach one free mask");
     let value = |key: &str| note.args.iter().find(|(k, _)| *k == key).map(|(_, v)| v.parse::<f32>().unwrap()).unwrap();
     assert!(value("err_after") < value("err_before"));
-    assert!(value("step") <= ZONE_BOUNDARY_RIM_MAX);
+    assert!(value("step") <= ZONE_BOUNDARY_STEP_MAX);
     std::fs::remove_dir_all(dir).ok();
     let _ = (source_px, target_px);
 }
@@ -568,7 +568,7 @@ fn p36_remainder_is_realised_or_honestly_refused() {
                 .unwrap();
             let step = value("step");
             assert!(value("err_after") < value("err_before"));
-            assert!(step <= ZONE_BOUNDARY_RIM_MAX, "step {step} exceeded the shared budget");
+            assert!(step <= ZONE_BOUNDARY_STEP_MAX, "step {step} exceeded the free mask's own step budget");
         }
     }
     cleanup_corpus_run(&head, &head_home);

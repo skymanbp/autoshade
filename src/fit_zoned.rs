@@ -85,19 +85,70 @@ const ZONE_TEXTURE_MIN: f32 = 0.70;
 const ZONE_TEXTURE_MAX: f32 = 1.95;
 /// Weighted clipped-luma share may grow by at most one percentage point.
 const ZONE_CLIP_GROWTH: f32 = 0.01;
-/// Maximum signed sky-side luma bump across the 5%-95% mask feather. The
-/// statistic is the 90th percentile of `brightest sky-half - settled sky` on
-/// rows/columns carrying BOTH settled interiors, so positive means the
-/// feather bows into the bright-rim direction. At the 384-edge analysis size
-/// the synthetic bright-half probe reads +0.120, the opposite-sign probe
-/// +0.013, the same-sign probe -0.020, the four accepted repository fixture
-/// entries -0.007, the no-zone calibration +0.013, the previous fitted pair
-/// -0.009, and HEAD's opposite-sign pair +0.054. The real pair measures +0.038
-/// before the gate and +0.012 after its largest passing shrink (k=0.093).
-/// The calibrated round budget is +0.012; the supervisor's independent RAW
-/// rim metric is the final regression check because it samples a 40px crossing
+/// Maximum luma rim the correction may INTRODUCE across the 5%-95% mask
+/// feather. The statistic is the 90th percentile, BY MAGNITUDE, of
+/// `rendered - transported(reference)` at each transition run's largest
+/// deviation, on rows/columns carrying both settled interiors — see
+/// [`boundary_line_rims`] for why the reference is transported through the
+/// settled sky's own linear multiplier and why the rank is a magnitude.
+///
+/// EVERY PROBE VALUE BELOW WAS RE-MEASURED FOR STEP 9, because the statistic
+/// changed: what preceded it read the corrected render against its own
+/// settled sky with no reference at all, so it carried a content floor and
+/// ranked its samples signed. At the 384-edge analysis size, first-party this
+/// batch:
+///
+/// * synthetic bright-half probe +0.120, just-over-budget opposite-sign probe
+///   +0.013 — unchanged, and unchanged BY ARITHMETIC rather than by luck: the
+///   fixture's settled sky is 0.20 on every row, so the reference reading is
+///   exactly 0 and the transport multiplier is exactly 1.
+/// * same-sign probe +0.020, which was -0.020. The shape did not move; the
+///   RANK did (`|-0.020| == 0.0200`), and the gate still keeps that fixture at
+///   k=1 because the bow is in the reference too.
+/// * the four accepted repository fixture entries +0.012 each, reached by a
+///   shrink instead of passing free: candidates +0.046 (k=0.244) and +0.019
+///   (k=0.852). The move is the REFERENCE, not the rank — measured on that
+///   fixture the previous statistic's signed 90th percentile is -0.0044 and
+///   its MAGNITUDE 90th percentile 0.0044, against an introduced rim of
+///   0.0461. The zone was shipping a rim it had itself made, invisible
+///   because the scene's own bow under the feather cancelled it.
+/// * the real calibration pair +0.030 before the gate and +0.012 after its
+///   largest passing shrink k=0.371, over 731 measured transitions; its sky
+///   zone consequently keeps -0.184 EV where the absolute ruler had shrunk
+///   it into -0.12..-0.15 EV to pay for a bow it had not introduced.
+///
+/// NOT re-measured, and therefore NOT carried forward: the "no-zone
+/// calibration +0.013", "previous fitted pair -0.009" and "HEAD's
+/// opposite-sign pair +0.054" probes this block used to quote. They were
+/// bespoke measurements of the replaced statistic and no instrument in the
+/// tree reproduces them; quoting them against this ruler would be a number
+/// with no source.
+///
+/// THE BUDGET ITSELF STAYS AT +0.012, deliberately and not by inertia. It is
+/// a VISIBILITY threshold in luma — how large a discontinuity at a mask
+/// border a viewer sees — and step 9 did not change the quantity's units or
+/// scale, it removed a foreign term (the scene's own bow) from the
+/// measurement. Re-deriving it downward would need a perceptual study this
+/// batch does not have, and a guessed number would be worse than the
+/// calibrated one. It is now its own constant: [`ZONE_BOUNDARY_STEP_MAX`]
+/// carries the hard-raster ruler's budget, so moving either one can no longer
+/// silently re-tune the other. The supervisor's independent RAW rim metric
+/// remains the final regression check, because it samples a 40px crossing
 /// neighbourhood rather than this analysis-grid statistic.
 pub(super) const ZONE_BOUNDARY_RIM_MAX: f32 = 0.012;
+/// Maximum induced cross-boundary step for a HARD 0/255 raster — spatial
+/// tiles and free masks, read by [`boundary_step`] rather than
+/// [`boundary_rim`]. Split out of [`ZONE_BOUNDARY_RIM_MAX`] because the two
+/// rulers measure two different shapes on two different mask families, and
+/// while ONE constant served both, re-deriving either budget silently
+/// re-tuned the other. That coupling is not theoretical: the accepted tiles
+/// of the calibration island park ON this ceiling — 0.1063 → 0.0118 after
+/// k=0.114, 0.0732 → 0.0116 after k=0.168, 0.0675 → 0.0118 after k=0.187,
+/// i.e. 0.0002/0.0004/0.0002 luma of slack (1.7%/3.3%/1.7% of the budget) —
+/// so any downward move re-shrinks real tiles and must be argued on the step
+/// ruler's own evidence. Carried over at the rim's calibrated +0.012, so the
+/// split itself is byte-identical.
+pub(super) const ZONE_BOUNDARY_STEP_MAX: f32 = 0.012;
 /// Acceptance: the zone-local error ([`zone_err`]) must fall to ≤ this
 /// fraction of its pre-correction value. The correction is judged on ITS
 /// zone, not on the frame-global `look_err` — measured on the real pair
@@ -501,16 +552,51 @@ fn median(mut values: Vec<f32>) -> f32 {
     }
 }
 
-/// Add signed readings for one row or column. A transition contributes only
-/// when that SAME scan line reaches settled sky (>=95%) and settled land
-/// (<=5%); this keeps a soft but one-sided mask edge from inventing an
-/// interior. Within the 5%-95% run, the sky half is tested for a bright
-/// overshoot against the median settled sky on that same row/column. The
-/// settled land is required as the other side of a real crossing; the signed
-/// sky-side amplitude deliberately matches the visible defect and the
-/// supervisor's independent render metric.
+/// Add one row's or column's INTRODUCED transition rims to `out`.
+///
+/// A transition contributes only when that SAME scan line reaches settled sky
+/// (>=95%) and settled land (<=5%); this keeps a soft but one-sided mask edge
+/// from inventing an interior. Within the 5%-95% run, the sky half is tested
+/// against `reference` — this same frame rendered WITHOUT the correction
+/// under test — exactly as [`boundary_line_steps`] already tests its own
+/// crossings, so scene content under the feather cannot false-positive.
+///
+/// The reference is TRANSPORTED through the settled sky's own linear
+/// multiplier before it is subtracted:
+///
+/// ```text
+///     M            = linear(median settled sky on `rendered`)
+///                  / linear(median settled sky on `reference`)
+///     transported(L) = encode(M * linear(L))
+///     d(i)         = luma(rendered[i]) - transported(luma(reference[i]))
+/// ```
+///
+/// A plain difference of differences is NOT enough here, and the reason is
+/// that every zone dial is MULTIPLICATIVE in linear light: a band pixel
+/// carrying a content rim `r` above the settled sky moves MORE in absolute
+/// luma than the settled sky does under the same multiplier, so the additive
+/// residual keeps a term proportional to `r * (m - 1)` and charges the
+/// correction for a bow it did not introduce. Measured on a 12x4 hazy fixture
+/// under ONE multiply applied to the WHOLE frame (no seam exists by
+/// construction, truth 0.0000): additive reads -0.0083 / +0.0069 / +0.0110 /
+/// +0.0201 at g = 0.70 / 1.30 / 1.50 / 2.00, i.e. 1.68x the budget at a +1 EV
+/// dial; the transported form reads exactly +0.0000 in every cell.
+/// `transported` is exact because it asks "what would this pixel look like if
+/// it had received the settled sky's OWN treatment", so the pixel's own
+/// content cancels identically whatever the transfer function does.
+///
+/// The `M == 1.0` short circuit is load bearing rather than decoration: the
+/// sRGB round trip is accurate to 8.9e-08 but not bit exact, and only bit
+/// exactness makes `rendered == reference` read 0.0 EXACTLY, which is what
+/// keeps the `k=0` verdict an invariant instead of a float coin flip.
+///
+/// ONE argmax, taken on the difference and ranked by MAGNITUDE — two
+/// independent maxima would pair the brightest rendered pixel with a
+/// reference pixel somewhere else on the line, which is a comparison of two
+/// different places rather than one pixel's own change.
 fn boundary_line_rims(
-    px: &[[f32; 3]],
+    reference: &[[f32; 3]],
+    rendered: &[[f32; 3]],
     weights: &[f32],
     start: usize,
     step: usize,
@@ -519,22 +605,34 @@ fn boundary_line_rims(
 ) {
     let luma = |p: &[f32; 3]| 0.299 * p[0] + 0.587 * p[1] + 0.114 * p[2];
     let mut sky = Vec::new();
+    let mut sky_reference = Vec::new();
     let mut land = Vec::new();
     for p in 0..len {
         let i = start + p * step;
-        if i >= px.len() || i >= weights.len() {
+        if i >= rendered.len() || i >= reference.len() || i >= weights.len() {
             break;
         }
         if weights[i] >= ZONE_BOUNDARY_HIGH {
-            sky.push(luma(&px[i]));
+            sky.push(luma(&rendered[i]));
+            sky_reference.push(luma(&reference[i]));
         } else if weights[i] <= ZONE_BOUNDARY_LOW {
-            land.push(luma(&px[i]));
+            land.push(luma(&rendered[i]));
         }
     }
     if sky.len() < ZONE_BOUNDARY_INTERIOR_MIN || land.len() < ZONE_BOUNDARY_INTERIOR_MIN {
         return;
     }
     let sky_settled = median(sky);
+    let reference_settled = median(sky_reference);
+    let multiplier = render::srgb_to_linear(sky_settled)
+        / render::srgb_to_linear(reference_settled).max(1e-5);
+    let transported = |l: f32| -> f32 {
+        if multiplier == 1.0 {
+            l
+        } else {
+            render::linear_to_srgb(multiplier * render::srgb_to_linear(l))
+        }
+    };
     let mut p = 0usize;
     while p < len {
         let i = start + p * step;
@@ -544,34 +642,45 @@ fn boundary_line_rims(
             p += 1;
             continue;
         }
-        let mut sky_max: Option<f32> = None;
+        let mut introduced: Option<f32> = None;
         while p < len {
             let i = start + p * step;
-            if i >= px.len()
+            if i >= rendered.len()
+                || i >= reference.len()
                 || i >= weights.len()
                 || !(ZONE_BOUNDARY_LOW..ZONE_BOUNDARY_HIGH).contains(&weights[i])
             {
                 break;
             }
-            let here = luma(&px[i]);
             if weights[i] >= ZONE_BOUNDARY_MID {
-                sky_max = Some(sky_max.map_or(here, |v| v.max(here)));
+                let here = luma(&rendered[i]) - transported(luma(&reference[i]));
+                introduced = Some(match introduced {
+                    Some(v) if v.abs() >= here.abs() => v,
+                    _ => here,
+                });
             }
             p += 1;
         }
-        if let Some(sky_edge) = sky_max {
-            out.push(sky_edge - sky_settled);
+        if let Some(here) = introduced {
+            out.push(here);
         }
     }
 }
 
 /// Boundary-continuity reading beside [`local_quality`]. Unlike that
 /// mask-weighted in-zone average, this samples ONLY the transition band and
-/// compares it with both settled interiors on the same rows/columns. The
-/// signed 90th percentile is robust to isolated silhouette highlights while
-/// retaining the systematic bright bow that repeats along an edge.
+/// compares it with the same band on the UNCORRECTED render, transported
+/// through the settled sky's own multiplier ([`boundary_line_rims`]).
+///
+/// The result is a MAGNITUDE at the 90th percentile, ranked exactly as
+/// [`boundary_step`] already ranks its own samples and for the reason stated
+/// there: a correction that darkens its side of a border is as visible a seam
+/// as one that brightens it, and a signed percentile would let a zone's dark
+/// edge hide behind its bright one. Robust to an isolated silhouette
+/// highlight, while retaining the systematic bow that repeats along an edge.
 fn boundary_rim(
-    px: &[[f32; 3]],
+    reference: &[[f32; 3]],
+    rendered: &[[f32; 3]],
     weights: &[f32],
     width: u32,
     height: u32,
@@ -579,19 +688,19 @@ fn boundary_rim(
     let (w, h) = (width as usize, height as usize);
     let mut rims = Vec::new();
     for y in 0..h {
-        boundary_line_rims(px, weights, y * w, 1, w, &mut rims);
+        boundary_line_rims(reference, rendered, weights, y * w, 1, w, &mut rims);
     }
     for x in 0..w {
-        boundary_line_rims(px, weights, x, w, h, &mut rims);
+        boundary_line_rims(reference, rendered, weights, x, w, h, &mut rims);
     }
     if rims.is_empty() {
         return BoundaryReading { rim: 0.0, transitions: 0 };
     }
-    rims.sort_by(f32::total_cmp);
+    rims.sort_by(|a, b| a.abs().total_cmp(&b.abs()));
     let rank = ((rims.len() as f32 * ZONE_BOUNDARY_PERCENTILE).ceil() as usize)
         .saturating_sub(1)
         .min(rims.len() - 1);
-    BoundaryReading { rim: rims[rank], transitions: rims.len() }
+    BoundaryReading { rim: rims[rank].abs(), transitions: rims.len() }
 }
 
 /// Add one scan line's cross-boundary steps to `out`.
@@ -1711,6 +1820,7 @@ fn fit_recipe_zoned_multi_inner(
             crate::rationale::keys::ZONE_TOO_SMALL => "ZONE_TOO_SMALL",
             crate::rationale::keys::ZONE_SHARE_MISMATCH => "ZONE_SHARE_MISMATCH",
             crate::rationale::keys::ZONE_BOUNDARY_PASSED => "ZONE_BOUNDARY_PASSED",
+            crate::rationale::keys::ZONE_BOUNDARY_INERT => "ZONE_BOUNDARY_INERT",
             crate::rationale::keys::REGION_BOUNDARY_REFUSED => "REGION_BOUNDARY_REFUSED",
             crate::rationale::keys::ZONE_QUALITY_TEXTURE_FAILED => "ZONE_QUALITY_TEXTURE_FAILED",
             crate::rationale::keys::ZONE_QUALITY_CLIPPING_FAILED => "ZONE_QUALITY_CLIPPING_FAILED",
@@ -1978,6 +2088,11 @@ fn attach_semantic_regions(
     let tgt_px = fit::pixels_of(&t_img);
     let preview = render::develop_preview(&s_img, &report.recipe);
     let (aw, ah) = preview.dimensions();
+    // Region j is measured against the render region j-1 left behind, the
+    // same rule the tile sweep already follows with its own `current`
+    // (`spatial::sweep_tiles`). Region 0 reads the pre-region render, which
+    // was already being computed for its dimensions and then discarded.
+    let mut current = fit::pixels_of(&preview);
     let mut frame_err = report.err_after;
     let corr = report.correspondence.take();
     let mut accepted = Vec::new();
@@ -2019,6 +2134,7 @@ fn attach_semantic_regions(
                     // the viaduct pair (2026-08-30); see the batch report.
                     ruler: spatial::BoundaryRuler::TransitionBand {
                         weights: &zone.source_weights,
+                        reference: &current,
                     },
                     initial_px: zone.rendered,
                     frame_before,
@@ -2032,6 +2148,7 @@ fn attach_semantic_regions(
                         &target_moments,
                     );
                     zone.rendered = boundary.pixels;
+                    current.clone_from(&zone.rendered);
                     frame_err = fit::look_err_with_evidence(
                         &zone.rendered,
                         &tgt_px,
@@ -2069,6 +2186,9 @@ fn attach_semantic_regions(
                         // so adding a third ruler here has to come back.
                         spatial::BitmapBoundaryWhy::Unmeasured => {
                             "the region boundary could not be sampled"
+                        }
+                        spatial::BitmapBoundaryWhy::Inert => {
+                            "no shrink inside the budget moved a single pixel"
                         }
                     };
                     crate::rationale::push_note(
@@ -2310,10 +2430,16 @@ fn attach_zones_with_divergence(
 ) {
     let (s_img, t_img) = fit::analysis_pair(src, target);
     let tgt_px = fit::pixels_of(&t_img);
-    let (aw, ah) = {
-        let c = render::develop_preview(&s_img, &report.recipe);
-        (c.width(), c.height())
-    };
+    // This render was already being made and thrown away for its dimensions
+    // alone. It is ALSO the boundary gate k=0 baseline: `first_zone` is
+    // `masks.len()` as of right here (every rejection path inside
+    // `attach_one_zone` pops its own mask again), so nothing between this
+    // line and the gate can change the recipe it was rendered from. Binding
+    // it is what makes the differential rim cost zero extra renders.
+    let base = render::develop_preview(&s_img, &report.recipe);
+    let (aw, ah) = (base.width(), base.height());
+    let reference_masks = report.recipe.masks.len();
+    let reference_px = fit::pixels_of(&base);
     let sw = mask_weights(src_mask, aw, ah);
     let tw = mask_weights(tgt_mask, t_img.width(), t_img.height());
     // Partition validity — judged on the raw mask shares (Σw/n), before any
@@ -2447,12 +2573,17 @@ fn attach_zones_with_divergence(
                 / zone.source_weights.len().max(1) as f32
         })
         .collect::<Vec<_>>();
+    debug_assert_eq!(
+        first_zone, reference_masks,
+        "the bound reference is the k=0 baseline only while no other mask joined"
+    );
     let final_px = match enforce_boundary_gate(
         &s_img,
         report,
         &sw,
         &correction_shares,
         first_zone,
+        &reference_px,
         initial_px,
     ) {
         BoundaryGateResult::Kept { k, before, after, pixels } => {
@@ -2564,18 +2695,47 @@ fn boundary_note_args(
 
 /// Enforce the pair-level boundary budget after the independent zone-local
 /// gates. `initial_px` is the analysis render the last accepted zone already
-/// made. Only re-measurements during an actual shrink render again, always at
-/// analysis size; no full-resolution render is introduced.
+/// made; `reference_px` is the SAME frame rendered before any zone was
+/// attached, i.e. this gate own `k=0` baseline, which the caller already had
+/// in hand. Only re-measurements during an actual shrink render again, always
+/// at analysis size; no full-resolution render is introduced.
 fn enforce_boundary_gate(
     s_img: &DynamicImage,
     report: &mut FitReport,
     sky_weights: &[f32],
     correction_shares: &[f32],
     first_zone: usize,
+    reference_px: &[[f32; 3]],
     initial_px: Vec<[f32; 3]>,
 ) -> BoundaryGateResult {
-    let initial = boundary_rim(&initial_px, sky_weights, s_img.width(), s_img.height());
+    let initial =
+        boundary_rim(reference_px, &initial_px, sky_weights, s_img.width(), s_img.height());
     let zone_count = report.recipe.masks.len().saturating_sub(first_zone);
+    // A correction that survives this gate must MOVE something. Step 9 made
+    // that worth checking: under the transported differential a `k=0` render
+    // reads exactly 0.0, so the budget can no longer refuse it and the
+    // bisection returns the largest passing `k` — which, for a correction
+    // whose every visible strength introduces a seam, renders to nothing. An
+    // inert attachment is strictly worse than a refusal: it keeps a raster on
+    // disk and discloses a before/after pair it did not produce. The test is
+    // BYTE IDENTITY of the render against `reference_px` rather than a
+    // threshold on `k`; see `spatial::BitmapBoundaryWhy::Inert` for why a
+    // threshold on `k` would be the wrong instrument.
+    let refuse_inert = |report: &mut FitReport, reading: BoundaryReading, k: f32| {
+        report.recipe.masks.truncate(first_zone);
+        crate::rationale::push_note(
+            &mut report.recipe.rationale,
+            &mut report.notes,
+            crate::rationale::Note::new(
+                crate::rationale::keys::ZONE_BOUNDARY_INERT,
+                boundary_note_args(zone_count, k, initial, reading),
+            ),
+        );
+    };
+    if initial_px.as_slice() == reference_px {
+        refuse_inert(report, initial, 1.0);
+        return BoundaryGateResult::Dropped;
+    }
     if initial.rim <= ZONE_BOUNDARY_RIM_MAX {
         crate::rationale::push_note(
             &mut report.recipe.rationale,
@@ -2604,10 +2764,18 @@ fn enforce_boundary_gate(
             k,
         );
         let pixels = fit::pixels_of(&render::develop_preview(s_img, &report.recipe));
-        let reading = boundary_rim(&pixels, sky_weights, s_img.width(), s_img.height());
+        let reading =
+            boundary_rim(reference_px, &pixels, sky_weights, s_img.width(), s_img.height());
         (reading, pixels)
     };
 
+    // INVARIANT, not a policy branch. The reading is now the rim the
+    // correction INTRODUCED against `reference_px`, and `k=0` zeroes every
+    // additive dial and drops every gain (see `shrink_zone_corrections`), so
+    // a zero-dialled attached mask MUST render back to `reference_px` and
+    // read exactly 0.0. A non-zero reading here means a mask carrying no
+    // correction is not a render no-op, which is an engine bug rather than a
+    // seam. The branch stays because a deleted branch cannot catch that.
     let (zero, zero_px) = render_at(report, 0.0);
     if zero.rim > ZONE_BOUNDARY_RIM_MAX {
         report.recipe.masks.truncate(first_zone);
@@ -2636,6 +2804,10 @@ fn enforce_boundary_gate(
         } else {
             hi = mid;
         }
+    }
+    if best.1.as_slice() == reference_px {
+        refuse_inert(report, best.0, lo);
+        return BoundaryGateResult::Dropped;
     }
     shrink_zone_corrections(
         &mut report.recipe.masks[first_zone..],
@@ -4371,7 +4543,7 @@ mod tests {
             .iter()
             .find(|m| m.role == MaskRole::ZoneSky)
             .unwrap_or_else(|| panic!("Atmosphere luma correction was lost: {}", report.recipe.rationale));
-        assert_eq!(sky.color_gains, Some([1.0; 3]));
+        assert_gains_withheld(sky.color_gains);
         assert_eq!(sky.saturation, 0.0);
         assert!(report
             .notes
@@ -4408,7 +4580,7 @@ mod tests {
             .iter()
             .find(|mask| mask.role == MaskRole::ZoneSky)
             .expect("the Atmosphere luma correction must survive the refused hue band");
-        assert_eq!(sky.color_gains, Some([1.0; 3]));
+        assert_gains_withheld(sky.color_gains);
         assert_eq!(sky.saturation, 0.0);
         assert!(report
             .notes
@@ -4526,6 +4698,110 @@ mod tests {
         (pixels, weights, w, h)
     }
 
+    /// The reference every `boundary_fixture_pixels` reading is taken
+    /// against: the SAME shape with no rim at all. Its settled sky is the
+    /// fixture own 0.20 on every row and its band-sky cells carry that same
+    /// 0.20, so `M == 1.0` exactly and `transported` is the identity - which
+    /// is WHY the differential ruler reproduces every pre-step-9 absolute
+    /// reading on this fixture, rather than merely happening not to move it.
+    fn boundary_fixture_reference() -> Vec<[f32; 3]> {
+        boundary_fixture_pixels(0.0).0
+    }
+
+    /// `(reference, rendered, weights, width, height)` — the two buffers a
+    /// differential reading needs, plus the geometry they share.
+    type BoundaryArm = (Vec<[f32; 3]>, Vec<[f32; 3]>, Vec<f32>, u32, u32);
+
+    /// One row of the 12-wide boundary shape: four settled-sky columns, four
+    /// transition columns (weights .8/.6/.4/.2, so only the first two reach
+    /// [`ZONE_BOUNDARY_MID`] and are sampled), four settled-land columns.
+    fn boundary_row(settled_sky: f32, band_sky: f32, band_land: f32, land: f32) -> [f32; 12] {
+        [
+            settled_sky, settled_sky, settled_sky, settled_sky,
+            band_sky, band_sky, band_land, band_land,
+            land, land, land, land,
+        ]
+    }
+
+    /// A step-9 boundary arm: one (reference, rendered) pair over the shared
+    /// 12x4 feather. Both buffers are given explicitly, because the whole
+    /// point of the ruler is that it reads the DIFFERENCE between them.
+    fn boundary_arm(reference_row: [f32; 12], rendered_row: [f32; 12]) -> BoundaryArm {
+        let (w, h) = (12u32, 4u32);
+        let line_weights = [1.0, 1.0, 1.0, 1.0, 0.8, 0.6, 0.4, 0.2, 0.0, 0.0, 0.0, 0.0];
+        let n = (w * h) as usize;
+        let (mut reference, mut rendered, mut weights) =
+            (Vec::with_capacity(n), Vec::with_capacity(n), Vec::with_capacity(n));
+        for _ in 0..h {
+            for x in 0..12usize {
+                reference.push([reference_row[x]; 3]);
+                rendered.push([rendered_row[x]; 3]);
+                weights.push(line_weights[x]);
+            }
+        }
+        (reference, rendered, weights, w, h)
+    }
+
+    /// What the pre-step-9 ruler read, expressed WITHOUT a second copy of the
+    /// old code: a reference that is flat at `settled` has an identity
+    /// multiplier and a band reading of zero, so the differential collapses
+    /// to `brightest sky-half - settled sky`, which is exactly the absolute
+    /// statistic this batch replaces.
+    fn absolute_rim(
+        settled: f32,
+        rendered: &[[f32; 3]],
+        weights: &[f32],
+        w: u32,
+        h: u32,
+    ) -> BoundaryReading {
+        let flat = vec![[settled; 3]; rendered.len()];
+        boundary_rim(&flat, rendered, weights, w, h)
+    }
+
+    fn image_of(px: &[[f32; 3]], w: u32, h: u32) -> DynamicImage {
+        DynamicImage::ImageRgb8(RgbImage::from_fn(w, h, |x, y| {
+            let p = px[(y * w + x) as usize];
+            image::Rgb(p.map(|c| (c.clamp(0.0, 1.0) * 255.0).round() as u8))
+        }))
+    }
+
+    /// Two zone masks over `weights`, so a boundary-gate call has something
+    /// real to shrink. Returns the owned raster so the caller can remove it.
+    fn boundary_zone_masks(
+        name: &str,
+        weights: &[f32],
+        w: u32,
+        h: u32,
+        sky_ev: f32,
+        land_ev: f32,
+    ) -> (crate::store::OwnedRaster, Vec<LocalAdjustment>) {
+        let mask = GrayImage::from_fn(w, h, |x, y| {
+            image::Luma([(weights[(y * w + x) as usize] * 255.0).round() as u8])
+        });
+        let path = fixture_mask_path(name);
+        mask.save(path.path()).unwrap();
+        let geometry =
+            MaskGeometry::Bitmap { path: path.path().to_string_lossy().into_owned() };
+        let masks = vec![
+            LocalAdjustment {
+                mask: geometry.clone(),
+                role: MaskRole::ZoneSky,
+                amount: 1.0,
+                exposure_ev: sky_ev,
+                ..Default::default()
+            },
+            LocalAdjustment {
+                mask: geometry,
+                role: MaskRole::ZoneLand,
+                amount: 1.0,
+                inverted: true,
+                exposure_ev: land_ev,
+                ..Default::default()
+            },
+        ];
+        (path, masks)
+    }
+
     fn soft_zone_pair(
         name: &str,
         sky_ev: f32,
@@ -4569,6 +4845,24 @@ mod tests {
         (source, mask, path, report)
     }
 
+    /// Colour withheld means UNITY gains, and since step 9 that is a
+    /// tolerance rather than an equality. The boundary gate no longer waves
+    /// through a correction whose rim the scene was hiding, so more zones now
+    /// reach `shrink_zone_corrections` - and that function writes each gain
+    /// through its deliberately explicit common/differential decomposition,
+    /// `1.0 + k*c + k*(v - c)`, which for a withheld channel (`v == 1.0`)
+    /// cancels to unity only up to float rounding. Measured 0.99999994 on the
+    /// fixtures below. The property is "no colour move", not "these bits";
+    /// the redundant decomposition is kept because it is what makes the
+    /// shrink policy explicit (see that function's own comment).
+    fn gains_withheld(gains: Option<[f32; 3]>) -> bool {
+        gains.is_some_and(|g| g.iter().all(|v| (v - 1.0).abs() <= 1e-6))
+    }
+
+    fn assert_gains_withheld(gains: Option<[f32; 3]>) {
+        assert!(gains_withheld(gains), "colour was not withheld: {gains:?}");
+    }
+
     fn note_number(note: &crate::rationale::Note, name: &str) -> f32 {
         note.args
             .iter()
@@ -4582,11 +4876,13 @@ mod tests {
     #[test]
     fn boundary_rim_is_measured_across_the_mask_transition_band() {
         let (pixels, weights, w, h) = boundary_fixture_pixels(0.12);
-        let reading = boundary_rim(&pixels, &weights, w, h);
+        let reference = boundary_fixture_reference();
+        let reading = boundary_rim(&reference, &pixels, &weights, w, h);
         assert_eq!(reading.transitions, h as usize, "one feather crossing per row");
         assert!(
             (reading.rim - 0.12).abs() <= 1e-6,
-            "the brightest sky-half deviation must be measured against the settled sky: {reading:?}"
+            "the brightest introduced sky-half deviation must be measured against the \
+             uncorrected render: {reading:?}"
         );
     }
 
@@ -4594,7 +4890,7 @@ mod tests {
     fn opposite_sign_zone_pair_exceeds_the_rim_budget_before_shrinking() {
         assert_eq!(ZONE_BOUNDARY_RIM_MAX, 0.012, "the measured calibration is pinned");
         let (pixels, weights, w, h) = boundary_fixture_pixels(0.013);
-        let reading = boundary_rim(&pixels, &weights, w, h);
+        let reading = boundary_rim(&boundary_fixture_reference(), &pixels, &weights, w, h);
         assert!(
             reading.rim > ZONE_BOUNDARY_RIM_MAX,
             "the just-over-budget opposite-sign shape must exercise the gate: {reading:?}"
@@ -4605,9 +4901,24 @@ mod tests {
     fn rim_shrink_keeps_each_zones_direction_and_lands_inside_the_budget() {
         let (source, mask, path, mut report) = soft_zone_pair("zoned-rim-shrink", -0.65, 0.20);
         let weights = mask_weights(&mask, source.width(), source.height());
+        // The uncorrected render: a literally uniform grey, so its band reads
+        // exactly its own settled sky and the differential reduces to the
+        // pre-step-9 absolute reading. This fixture therefore keeps its old
+        // verdict by arithmetic, not by luck.
+        let reference = fit::pixels_of(&render::develop_preview(
+            &source,
+            &crate::recipe::EditRecipe::default(),
+        ));
         let initial = fit::pixels_of(&render::develop_preview(&source, &report.recipe));
-        let verdict =
-            enforce_boundary_gate(&source, &mut report, &weights, &[0.5, 0.5], 0, initial);
+        let verdict = enforce_boundary_gate(
+            &source,
+            &mut report,
+            &weights,
+            &[0.5, 0.5],
+            0,
+            &reference,
+            initial,
+        );
         let BoundaryGateResult::Kept { k, before, after, .. } = verdict else {
             panic!("a shrinkable pair was dropped: {}", report.recipe.rationale);
         };
@@ -4627,31 +4938,62 @@ mod tests {
         path.remove();
     }
 
+    /// RE-PINNED by step 9, user ruling 4 (2026-08-31), and the reason it
+    /// moved matters more than the number. The p90 rank is now a MAGNITUDE,
+    /// matching the doctrine [`boundary_step`] already states: a correction
+    /// that darkens its side of a border is as visible a seam as one that
+    /// brightens it, and a signed percentile lets a dark edge hide behind a
+    /// bright one. So this fixture reads +0.0200 where it used to read
+    /// -0.020. The SHAPE did not move - `|-0.020| == 0.0200` - the RANK did,
+    /// and this is not a regression.
+    ///
+    /// What the test pins today is therefore stronger than what it pinned
+    /// before: the same-sign bow is SCENE CONTENT, present in the
+    /// uncorrected render too, so the differential ruler charges nothing for
+    /// it and the gate keeps the candidate at exactly k=1 - even though the
+    /// magnitude of that bow is nearly twice the budget.
     #[test]
     fn same_sign_zone_pair_needs_no_shrink() {
         let (pixels, weights, w, h) = boundary_fixture_pixels(-0.02);
-        let reading = boundary_rim(&pixels, &weights, w, h);
-        assert!(reading.rim < 0.0, "the previous-fit direction must not look like a bright rim");
+        let against_flat = boundary_rim(&boundary_fixture_reference(), &pixels, &weights, w, h);
+        assert!(
+            (against_flat.rim - 0.0200).abs() <= 1e-6,
+            "a dark bow is now ranked by magnitude: {against_flat:?}"
+        );
+        assert!(
+            against_flat.rim > ZONE_BOUNDARY_RIM_MAX,
+            "and it no longer hides under a signed percentile: {against_flat:?}"
+        );
 
-        let source = DynamicImage::ImageRgb8(RgbImage::from_fn(w, h, |x, y| {
-            let p = pixels[(y * w + x) as usize];
-            image::Rgb(p.map(|c| (c * 255.0).round() as u8))
-        }));
+        let source = image_of(&pixels, w, h);
+        let reference = fit::pixels_of(&render::develop_preview(
+            &source,
+            &crate::recipe::EditRecipe::default(),
+        ));
         let mut report = neutral_report(&source, &source);
         report.recipe.masks = vec![
             LocalAdjustment { role: MaskRole::ZoneSky, exposure_ev: -0.35, ..Default::default() },
             LocalAdjustment { role: MaskRole::ZoneLand, exposure_ev: -0.90, ..Default::default() },
         ];
-        // Pin the same-sign policy independently of scene content: a monotone
-        // transition reading is already inside budget, so the gate must keep
-        // the candidate exactly at k=1.
-        let verdict =
-            enforce_boundary_gate(&source, &mut report, &weights, &[0.5, 0.5], 0, pixels);
+        let expected = boundary_rim(&reference, &pixels, &weights, w, h);
+        assert!(
+            expected.rim <= ZONE_BOUNDARY_RIM_MAX,
+            "the scene bow is in the reference too, so nothing is charged: {expected:?}"
+        );
+        let verdict = enforce_boundary_gate(
+            &source,
+            &mut report,
+            &weights,
+            &[0.5, 0.5],
+            0,
+            &reference,
+            pixels,
+        );
         let BoundaryGateResult::Kept { k, after, .. } = verdict else {
             panic!("same-sign pair was dropped");
         };
         assert_eq!(k, 1.0);
-        assert_eq!(after.rim, reading.rim);
+        assert_eq!(after.rim, expected.rim);
         assert_eq!(report.recipe.masks[0].exposure_ev, -0.35);
         assert_eq!(report.recipe.masks[1].exposure_ev, -0.90);
     }
@@ -4686,6 +5028,7 @@ mod tests {
         );
 
         let mut measured = Vec::new();
+        let mut candidates = Vec::new();
         for (fixture, report) in [("sky", &sky_report), ("sky+land", &land_report)] {
             let note = report
                 .notes
@@ -4693,7 +5036,15 @@ mod tests {
                 .find(|n| n.key == crate::rationale::keys::ZONE_BOUNDARY_PASSED)
                 .unwrap_or_else(|| panic!("{fixture} lacked a boundary verdict: {}", report.recipe.rationale));
             let rim = note_number(note, "after");
+            eprintln!(
+                "BOUNDARY_CALIBRATION {fixture}: before={:.4} after={:.4} k={:.3} n={}",
+                note_number(note, "before"),
+                rim,
+                note_number(note, "k"),
+                note_number(note, "transitions"),
+            );
             assert!(rim <= ZONE_BOUNDARY_RIM_MAX, "{fixture} rim {rim:.3}");
+            candidates.push((fixture, note_number(note, "before"), note_number(note, "k")));
             for mask in &report.recipe.masks {
                 measured.push((fixture, mask.role, rim));
             }
@@ -4704,11 +5055,39 @@ mod tests {
                 && measured.iter().any(|(_, role, _)| *role == MaskRole::ZoneLand),
             "both supported zone classes may reach the boundary gate: {measured:?}"
         );
-        let expected = [-0.004f32, -0.004, -0.004, -0.004];
+        // RE-DERIVED by step 9 against the differential ruler. Before it,
+        // all four entries read -0.004 and passed at k=1 without a shrink;
+        // the doc block above `ZONE_BOUNDARY_RIM_MAX` claimed -0.007 for the
+        // same four, and measurement says the TEST was the accurate one
+        // (-0.0044) and the doc block stale. Both are now superseded.
+        //
+        // The whole move is the REFERENCE, not the magnitude rank: measured
+        // first-party on this fixture, the pre-step-9 statistic's signed 90th
+        // percentile is -0.0044 and its MAGNITUDE 90th percentile is 0.0044,
+        // while the introduced-rim reading is 0.0461. The sky zone was
+        // shipping a 0.046 luma rim it had itself introduced, invisible to
+        // the absolute ruler because the scene's own bow under the feather
+        // cancelled it — ARM B's false negative, on a repository fixture.
+        // Both fixtures now shrink onto the ceiling instead of passing free.
+        let expected = [0.012f32, 0.012, 0.012, 0.012];
         for ((fixture, role, rim), expected) in measured.iter().zip(expected) {
             assert!(
                 (*rim - expected).abs() <= 0.002,
                 "{fixture}/{role:?} boundary calibration drifted: {rim:.3} vs {expected:.3}"
+            );
+        }
+        let expected_candidates = [("sky", 0.0460f32, 0.244f32), ("sky+land", 0.0190, 0.852)];
+        for ((fixture, before, k), (want_fixture, want_before, want_k)) in
+            candidates.iter().zip(expected_candidates)
+        {
+            assert_eq!(*fixture, want_fixture);
+            assert!(
+                (*before - want_before).abs() <= 0.002,
+                "{fixture} candidate rim drifted: {before:.4} vs {want_before:.4}"
+            );
+            assert!(
+                (*k - want_k).abs() <= 0.02,
+                "{fixture} shrink drifted: k={k:.3} vs {want_k:.3}"
             );
         }
         assert!(
@@ -4719,44 +5098,48 @@ mod tests {
         land_path.remove();
     }
 
+    /// Step 9: the `Dropped` verdict is now an INVARIANT rather than a
+    /// policy branch, and this test is what keeps it from being dead code.
+    ///
+    /// The old body asked a +0.03 scene rim already present in the source to
+    /// be dropped, which is precisely the false positive this batch removes:
+    /// under the differential ruler that rim is in the reference too, costs
+    /// nothing, and the pair is kept. What CAN still reach the branch is an
+    /// engine bug - a zero-dialled attached mask that is not a render no-op -
+    /// because `shrink_zone_corrections` at k=0 zeroes every additive dial
+    /// and drops every gain, so the k=0 render is REQUIRED to reproduce the
+    /// reference. Handing the gate a reference the k=0 render cannot
+    /// reproduce is how that bug is simulated here.
     #[test]
-    fn a_rim_that_cannot_be_shrunk_is_dropped_with_its_own_note() {
-        let (pixels, line_weights, w, h) = boundary_fixture_pixels(0.03);
-        let source = DynamicImage::ImageRgb8(RgbImage::from_fn(w, h, |x, y| {
-            let p = pixels[(y * w + x) as usize];
-            image::Rgb(p.map(|c| (c * 255.0).round() as u8))
-        }));
-        let mask = GrayImage::from_fn(w, h, |x, y| {
-            image::Luma([(line_weights[(y * w + x) as usize] * 255.0).round() as u8])
-        });
-        let path = fixture_mask_path("zoned-rim-unshrinkable");
-        mask.save(path.path()).unwrap();
-        let geometry = MaskGeometry::Bitmap { path: path.path().to_string_lossy().into_owned() };
+    fn a_zero_dialled_mask_that_is_not_a_render_no_op_is_dropped_with_its_own_note() {
+        let (pixels, line_weights, w, h) = boundary_fixture_pixels(0.0);
+        let source = image_of(&pixels, w, h);
+        let (path, masks) =
+            boundary_zone_masks("zoned-rim-unshrinkable", &line_weights, w, h, -0.2, 0.1);
         let mut report = neutral_report(&source, &source);
-        report.recipe.masks = vec![
-            LocalAdjustment {
-                mask: geometry.clone(),
-                role: MaskRole::ZoneSky,
-                amount: 1.0,
-                exposure_ev: -0.2,
-                ..Default::default()
-            },
-            LocalAdjustment {
-                mask: geometry,
-                role: MaskRole::ZoneLand,
-                amount: 1.0,
-                inverted: true,
-                exposure_ev: 0.1,
-                ..Default::default()
-            },
-        ];
+        report.recipe.masks = masks;
+        // A reference whose band sits 0.05 luma BELOW what any k reproduces.
+        // Its settled sky is untouched, so the transport multiplier is
+        // exactly 1.0 and the gap cannot be explained away as treatment.
+        let mut reference = fit::pixels_of(&render::develop_preview(
+            &source,
+            &crate::recipe::EditRecipe::default(),
+        ));
+        for (i, weight) in line_weights.iter().enumerate() {
+            if (ZONE_BOUNDARY_LOW..ZONE_BOUNDARY_HIGH).contains(weight) {
+                reference[i] = reference[i].map(|c| c - 0.05);
+            }
+        }
         let initial = fit::pixels_of(&render::develop_preview(&source, &report.recipe));
+        let premise = boundary_rim(&reference, &initial, &line_weights, w, h);
+        assert!(premise.rim > ZONE_BOUNDARY_RIM_MAX, "premise: {premise:?}");
         let verdict = enforce_boundary_gate(
             &source,
             &mut report,
             &line_weights,
             &[0.5, 0.5],
             0,
+            &reference,
             initial,
         );
         assert!(matches!(verdict, BoundaryGateResult::Dropped));
@@ -4776,9 +5159,20 @@ mod tests {
     fn boundary_gate_discloses_the_applied_shrink_and_measured_rim() {
         let (source, mask, path, mut report) = soft_zone_pair("zoned-rim-disclosure", -0.65, 0.20);
         let weights = mask_weights(&mask, source.width(), source.height());
+        let reference = fit::pixels_of(&render::develop_preview(
+            &source,
+            &crate::recipe::EditRecipe::default(),
+        ));
         let initial = fit::pixels_of(&render::develop_preview(&source, &report.recipe));
-        let verdict =
-            enforce_boundary_gate(&source, &mut report, &weights, &[0.5, 0.5], 0, initial);
+        let verdict = enforce_boundary_gate(
+            &source,
+            &mut report,
+            &weights,
+            &[0.5, 0.5],
+            0,
+            &reference,
+            initial,
+        );
         let BoundaryGateResult::Kept { k, before, after, .. } = verdict else {
             panic!("disclosure fixture dropped");
         };
@@ -4790,8 +5184,302 @@ mod tests {
         assert!((note_number(note, "k") - k).abs() <= 0.0005);
         assert!((note_number(note, "before") - before.rim).abs() <= 0.0005);
         assert!((note_number(note, "after") - after.rim).abs() <= 0.0005);
-        assert!(report.recipe.rationale.contains("signed transition rim"));
+        assert!(report.recipe.rationale.contains("introduced transition rim"));
         assert!(report.recipe.rationale.contains("shared differential shrink k="));
+        path.remove();
+    }
+
+    /// Step 9 / R1 (acceptance A4, ARM A): the gate charges the CORRECTION,
+    /// not the scene. A +0.060 bow the scene already has under the feather
+    /// used to read +0.064 absolute; even the k=0 render kept +0.060 of it,
+    /// so the whole zone pair was dropped for a rim no zone dial made. That
+    /// is the island failure verbatim: "candidate rim 0.060 luma, and even
+    /// shared shrink k=0 left 0.058 (budget 0.012, 817 measured
+    /// transitions)". Supervisor mutation M-2-A (the absolute reading
+    /// restored) goes red on the second assertion.
+    #[test]
+    fn the_boundary_gate_charges_the_correction_and_not_the_scene() {
+        let (reference, rendered, weights, w, h) = boundary_arm(
+            boundary_row(0.20, 0.26, 0.40, 0.40),
+            boundary_row(0.20, 0.264, 0.40, 0.40),
+        );
+        let absolute = absolute_rim(0.20, &rendered, &weights, w, h);
+        assert!(
+            (absolute.rim - 0.064).abs() <= 1e-6 && absolute.rim > ZONE_BOUNDARY_RIM_MAX,
+            "premise: the scene's own bow alone busts the budget: {absolute:?}"
+        );
+        let introduced = boundary_rim(&reference, &rendered, &weights, w, h);
+        assert_eq!(introduced.transitions, h as usize, "one crossing per row");
+        assert!(
+            (introduced.rim - 0.004).abs() <= 1e-6,
+            "only what the correction added may be charged: {introduced:?}"
+        );
+
+        let source = image_of(&reference, w, h);
+        let (path, masks) = boundary_zone_masks("s9-arm-a", &weights, w, h, -0.2, 0.1);
+        let mut report = neutral_report(&source, &source);
+        report.recipe.masks = masks;
+        let verdict = enforce_boundary_gate(
+            &source,
+            &mut report,
+            &weights,
+            &[0.5, 0.5],
+            0,
+            &reference,
+            rendered,
+        );
+        let BoundaryGateResult::Kept { k, after, .. } = verdict else {
+            panic!("a correction that introduced 0.004 was dropped: {}", report.recipe.rationale);
+        };
+        assert_eq!(k, 1.0, "nothing to shrink");
+        assert!((after.rim - 0.004).abs() <= 1e-6, "{after:?}");
+        path.remove();
+    }
+
+    /// Step 9 / R2 (ARM B): the mirror image - a rim the correction really
+    /// introduced is charged even when the scene HIDES it. A -0.040 scene
+    /// notch plus a +0.030 introduced rim reads -0.010 absolute, inside the
+    /// budget, so the old fast path kept it at k=1 and shipped a seam 2.5x
+    /// the visibility line. Without this arm the whole change would be
+    /// indistinguishable from raising the budget.
+    #[test]
+    fn a_rim_the_correction_introduced_is_charged_even_where_the_scene_hides_it() {
+        let (reference, rendered, weights, w, h) = boundary_arm(
+            boundary_row(0.20, 0.16, 0.40, 0.40),
+            boundary_row(0.20, 0.19, 0.40, 0.40),
+        );
+        let absolute = absolute_rim(0.20, &rendered, &weights, w, h);
+        assert!(
+            (absolute.rim - 0.010).abs() <= 1e-6 && absolute.rim <= ZONE_BOUNDARY_RIM_MAX,
+            "premise: the absolute reading passes this seam: {absolute:?}"
+        );
+        let introduced = boundary_rim(&reference, &rendered, &weights, w, h);
+        assert!(
+            (introduced.rim - 0.030).abs() <= 1e-6 && introduced.rim > ZONE_BOUNDARY_RIM_MAX,
+            "the introduced rim must be charged: {introduced:?}"
+        );
+
+        let source = image_of(&reference, w, h);
+        let (path, masks) = boundary_zone_masks("s9-arm-b", &weights, w, h, 0.30, -0.10);
+        let mut report = neutral_report(&source, &source);
+        report.recipe.masks = masks;
+        let verdict = enforce_boundary_gate(
+            &source,
+            &mut report,
+            &weights,
+            &[0.5, 0.5],
+            0,
+            &reference,
+            rendered,
+        );
+        let BoundaryGateResult::Kept { k, after, .. } = verdict else {
+            panic!("the k=0 render is a no-op here, so the gate may not drop: {}", report.recipe.rationale);
+        };
+        assert_ne!(k, 1.0, "the fast path shipped an introduced rim of 0.030");
+        assert!(after.rim <= ZONE_BOUNDARY_RIM_MAX, "and the shrink must land it: {after:?}");
+        path.remove();
+    }
+
+    /// Step 9 / R3 (ARM C): ONE multiply applied identically to the WHOLE
+    /// frame introduces no seam, so the reading must be zero. It is the arm
+    /// that separates the shipped ruler from a plain difference of
+    /// differences, and the reason the difference is not plain: every zone
+    /// dial is multiplicative in LINEAR light, so a band pixel carrying a
+    /// content rim above the settled sky moves MORE in absolute luma under
+    /// the same multiplier. Transporting the reference through the settled
+    /// sky's own multiplier cancels that identically. Supervisor mutation
+    /// M-2-B (the additive form) goes red here and nowhere else.
+    #[test]
+    fn one_multiply_over_the_whole_frame_introduces_no_rim() {
+        let gain = 2.0f32;
+        let lift = |v: f32| render::linear_to_srgb(gain * render::srgb_to_linear(v));
+        let reference_row = boundary_row(0.180, 0.240, 0.240, 0.400);
+        let mut rendered_row = reference_row;
+        for value in &mut rendered_row {
+            *value = lift(*value);
+        }
+        let (reference, rendered, weights, w, h) = boundary_arm(reference_row, rendered_row);
+
+        let absolute = absolute_rim(lift(0.180), &rendered, &weights, w, h);
+        assert!(
+            absolute.rim > 6.0 * ZONE_BOUNDARY_RIM_MAX,
+            "premise: the absolute ruler reads this seamless frame as a large rim: {absolute:?}"
+        );
+        let additive =
+            (rendered_row[4] - rendered_row[0]) - (reference_row[4] - reference_row[0]);
+        assert!(
+            additive > ZONE_BOUNDARY_RIM_MAX,
+            "premise: even a plain difference of differences busts the budget: {additive}"
+        );
+        let introduced = boundary_rim(&reference, &rendered, &weights, w, h);
+        assert!(
+            introduced.rim <= 1e-4,
+            "a uniform multiply is not a seam: {introduced:?} (additive would read {additive})"
+        );
+
+        let source = image_of(&reference, w, h);
+        let (path, masks) = boundary_zone_masks("s9-arm-c", &weights, w, h, -0.2, 0.1);
+        let mut report = neutral_report(&source, &source);
+        report.recipe.masks = masks;
+        let verdict = enforce_boundary_gate(
+            &source,
+            &mut report,
+            &weights,
+            &[0.5, 0.5],
+            0,
+            &reference,
+            rendered,
+        );
+        let BoundaryGateResult::Kept { k, .. } = verdict else {
+            panic!("a seamless frame was dropped: {}", report.recipe.rationale);
+        };
+        assert_eq!(k, 1.0);
+        path.remove();
+    }
+
+    /// Step 9 / R4 (ARM D): `rendered == reference` reads EXACTLY 0.0. Not a
+    /// tolerance - exact equality is what the `M == 1.0` short circuit in
+    /// `boundary_line_rims` buys, and it is what makes the retained `Dropped`
+    /// branch an invariant instead of a float coin flip: without it the sRGB
+    /// round trip leaves up to 8.9e-08. Supervisor mutation M-2-D (the short
+    /// circuit removed) goes red here and a tolerance-based assertion would
+    /// not catch it.
+    #[test]
+    fn an_unchanged_render_introduces_exactly_zero_rim() {
+        let row = boundary_row(0.20, 0.26, 0.40, 0.40);
+        let (reference, rendered, weights, w, h) = boundary_arm(row, row);
+        let reading = boundary_rim(&reference, &rendered, &weights, w, h);
+        assert_eq!(reading.transitions, h as usize, "and it is measured, not skipped");
+        assert_eq!(reading.rim, 0.0, "an unchanged render has no introduced rim: {reading:?}");
+    }
+
+    /// Step 9 / R5 (ARM E): ONE argmax on the DIFFERENCE, never two
+    /// independent maxima. The band carries two humps; the correction leaves
+    /// the taller one alone and lifts the shorter one by +0.050. Two
+    /// independent maxima would compare the tallest rendered pixel with the
+    /// tallest reference pixel - the same pixel, unchanged - and report 0.000
+    /// while a 0.050 seam ships. Supervisor mutation M-2-C goes red here;
+    /// this arm exists BECAUSE the specification predicted M-2-C would
+    /// survive on a single-hump fixture.
+    #[test]
+    fn the_rim_is_one_argmax_on_the_difference_not_two_independent_maxima() {
+        let (reference, rendered, weights, w, h) = boundary_arm(
+            [0.20, 0.20, 0.20, 0.20, 0.28, 0.22, 0.40, 0.40, 0.40, 0.40, 0.40, 0.40],
+            [0.20, 0.20, 0.20, 0.20, 0.28, 0.27, 0.40, 0.40, 0.40, 0.40, 0.40, 0.40],
+        );
+        let luma = |p: &[f32; 3]| 0.299 * p[0] + 0.587 * p[1] + 0.114 * p[2];
+        let peak = |px: &[[f32; 3]]| {
+            (0..12usize)
+                .filter(|x| (0.5..0.95).contains(&weights[*x]))
+                .map(|x| luma(&px[x]))
+                .fold(f32::NEG_INFINITY, f32::max)
+        };
+        assert!(
+            (peak(&rendered) - peak(&reference)).abs() <= 1e-6,
+            "premise: the two buffers share their maximum, so two maxima cancel"
+        );
+        let reading = boundary_rim(&reference, &rendered, &weights, w, h);
+        assert!(
+            (reading.rim - 0.050).abs() <= 1e-6,
+            "the pixel that actually moved must be the one reported: {reading:?}"
+        );
+    }
+
+    /// Step 9 / R6 (ARM F, user ruling 4): the p90 rank is a MAGNITUDE. One
+    /// scan line crosses the feather TWICE - a +0.030 bright bow and a -0.050
+    /// dark one - and a signed percentile would report the bright one and let
+    /// the larger dark seam hide behind it. Supervisor mutation M-2-E (the
+    /// rank reverted to signed) goes red here; this arm exists BECAUSE the
+    /// specification predicted M-2-E would survive on a single-run fixture.
+    #[test]
+    fn the_rim_percentile_ranks_by_magnitude_so_a_dark_seam_cannot_hide() {
+        let (w, h) = (16u32, 4u32);
+        let line_weights = [
+            1.0, 1.0, 1.0, 1.0, 0.8, 0.6, 0.0, 0.0, 0.0, 0.0, 0.8, 0.6, 0.0, 0.0, 0.0, 0.0f32,
+        ];
+        let n = (w * h) as usize;
+        let (mut reference, mut rendered, mut weights) =
+            (Vec::with_capacity(n), Vec::with_capacity(n), Vec::with_capacity(n));
+        for _ in 0..h {
+            for (x, weight) in line_weights.iter().copied().enumerate() {
+                let base = if weight == 0.0 { 0.40 } else { 0.20 };
+                let moved = match x {
+                    4 | 5 => base + 0.030,
+                    10 | 11 => base - 0.050,
+                    _ => base,
+                };
+                reference.push([base; 3]);
+                rendered.push([moved; 3]);
+                weights.push(weight);
+            }
+        }
+        let reading = boundary_rim(&reference, &rendered, &weights, w, h);
+        assert_eq!(reading.transitions, 2 * h as usize, "two crossings per row");
+        assert!(
+            (reading.rim - 0.050).abs() <= 1e-6,
+            "the darker seam is the larger one and must be the one reported: {reading:?}"
+        );
+    }
+
+    /// Step 9, scope addition: an ATTACHED-BUT-INERT zone correction is a
+    /// REFUSAL, on the zone gate.
+    ///
+    /// RC2 caused this. With the transported differential a `k=0` render
+    /// reads exactly 0.0 by construction, so the `Dropped` branch that used
+    /// to catch a correction no shrink could rescue is structurally
+    /// unreachable, and the bisection hands back the largest passing `k`
+    /// instead — which for a correction whose every visible strength
+    /// introduces a seam is a `k` that renders to nothing. Attaching that is
+    /// strictly worse than refusing it: it keeps a raster on disk and
+    /// discloses a before/after pair it did not produce.
+    ///
+    /// The criterion is byte identity of the render, not a threshold on `k`;
+    /// the fixture below therefore drives it by rendering to the reference
+    /// exactly, which is the general case rather than the `k == 0.0` corner.
+    /// Supervisor mutation M-4-A (the check deleted) goes red here.
+    #[test]
+    fn an_inert_zoned_correction_is_refused_rather_than_attached() {
+        let (pixels, weights, w, h) = boundary_fixture_pixels(0.0);
+        let source = image_of(&pixels, w, h);
+        let (path, masks) = boundary_zone_masks("s9-inert-zone", &weights, w, h, -0.2, 0.1);
+        let mut report = neutral_report(&source, &source);
+        report.recipe.masks = masks;
+        let reference = fit::pixels_of(&render::develop_preview(
+            &source,
+            &crate::recipe::EditRecipe::default(),
+        ));
+        let verdict = enforce_boundary_gate(
+            &source,
+            &mut report,
+            &weights,
+            &[0.5, 0.5],
+            0,
+            &reference,
+            reference.clone(),
+        );
+        assert!(
+            matches!(verdict, BoundaryGateResult::Dropped),
+            "a correction that moves no pixel may not attach"
+        );
+        assert!(report.recipe.masks.is_empty(), "and its masks must not survive");
+        let note = report
+            .notes
+            .iter()
+            .find(|n| n.key == crate::rationale::keys::ZONE_BOUNDARY_INERT)
+            .expect("an inert refusal needs its own typed note, not the PASSED one");
+        assert!(
+            report.recipe.rationale.contains("byte-identical to the frame without it"),
+            "the disclosure must say what happened: {}",
+            report.recipe.rationale
+        );
+        assert_eq!(note_number(note, "n"), 2.0);
+        assert!(
+            !report
+                .notes
+                .iter()
+                .any(|n| n.key == crate::rationale::keys::ZONE_BOUNDARY_PASSED),
+            "a refusal may not also announce a pass"
+        );
         path.remove();
     }
 
@@ -5294,7 +5982,7 @@ mod tests {
         assert!(
             report.recipe.masks.iter().any(|m| {
                 m.role == MaskRole::ZoneSky
-                    && m.color_gains == Some([1.0; 3])
+                    && gains_withheld(m.color_gains)
                     && m.saturation == 0.0
             }),
             "two-sided luma must retain the sky zone while one-sided hue is withheld: {}",
@@ -5861,8 +6549,17 @@ mod tests {
             .iter()
             .find(|mask| mask.role == MaskRole::ZoneSky)
             .expect("the calibration sky zone must survive");
-        assert!((-0.15..=-0.12).contains(&sky.exposure_ev));
-        assert_eq!(sky.color_gains, Some([1.0; 3]));
+        // RE-PINNED by step 9, and it moved in the STRONGER direction. The
+        // pre-step-9 rim was absolute, so the bow the calibration scene
+        // already carried under the feather was charged to this correction
+        // and the gate shrank it to -0.12..-0.15 EV to pay for it. The
+        // differential ruler charges only the rim the correction introduces,
+        // so less shrink buys the same seam budget and the zone keeps
+        // -0.186 EV. This is the same repair the island log describes from
+        // the other end ("candidate rim 0.060 ... even shared shrink k=0 left
+        // 0.058"), measured on the calibration pair instead.
+        assert!((-0.20..=-0.17).contains(&sky.exposure_ev), "ev {}", sky.exposure_ev);
+        assert_gains_withheld(sky.color_gains);
         assert_eq!(sky.saturation, 0.0);
         let note = report
             .notes
@@ -6279,10 +6976,39 @@ mod tests {
             Some(legacy.recipe.rationale.as_str()),
             "the hand-off note is appended to the historical rationale, nothing else changes"
         );
-        let (mut a, mut b) = (multi.recipe.clone(), legacy.recipe.clone());
-        a.rationale.clear();
-        b.rationale.clear();
+        // Two runs of a raster-allocating pipeline can never claim the same
+        // sibling FILENAMES: `OwnedRaster::claim_sibling` takes the first free
+        // name beside the mask, and the first run's rasters are still on disk
+        // when the second one runs. Before step 9 the comparison happened to
+        // work because neither run KEPT a sibling raster; the differential rim
+        // leaves the zone corrections weaker in this fixture, the spatial
+        // sweep now finds residual worth two tiles and a free mask, and both
+        // runs keep three. Compare with each distinct bitmap path replaced by
+        // its order of first appearance - which is the property this test is
+        // about (same masks, same sharing, same dials) and not an assertion
+        // about which filename the filesystem handed out.
+        let canonical = |recipe: &crate::recipe::EditRecipe| {
+            let mut out = recipe.clone();
+            out.rationale.clear();
+            let mut seen: Vec<String> = Vec::new();
+            for mask in &mut out.masks {
+                if let MaskGeometry::Bitmap { path } = &mut mask.mask {
+                    let index = seen.iter().position(|p| p == path).unwrap_or_else(|| {
+                        seen.push(path.clone());
+                        seen.len() - 1
+                    });
+                    *path = format!("raster#{index}");
+                }
+            }
+            out
+        };
+        let (a, b) = (canonical(&multi.recipe), canonical(&legacy.recipe));
         assert_eq!(serde_json::to_vec(&a).unwrap(), serde_json::to_vec(&b).unwrap());
+        assert_eq!(
+            multi.recipe.masks.len(),
+            legacy.recipe.masks.len(),
+            "and both routes must allocate the same number of masks"
+        );
         assert_eq!(multi.err_after.to_bits(), legacy.err_after.to_bits());
         path.remove();
     }
