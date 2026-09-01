@@ -236,6 +236,12 @@ neither the 1.5 GB SigLIP checkpoint nor the 4.3 GB Qwen one is loaded. The
 cache is only ever a saving: deleting `style-exemplars.json` costs time, never
 correctness, and a corrupt or foreign one is rebuilt with a printed reason.
 
+**Built your index on v1.2.0 or v1.2.1?** If your library carries any HSL or
+colour-grade edit, that index was written correctly but refused on load
+(`exemplar 0 has an unsupported setting key`), and the Style control read
+nothing. Run `style-index` once on v1.2.2; the build is the same, only the read
+was wrong.
+
 `style-index --looks` builds the separate finished-photo look library; it never
 adds camera features or develop settings to those records, and it is capped at
 **500** finished photos (a curated set of reference grades, not an archive —

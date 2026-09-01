@@ -760,6 +760,53 @@ fn distil_keys() -> Vec<(String, String)> {
     out
 }
 
+/// The band every stored `settings` label is clamped to at the index door —
+/// the ONE table both sides of the index read. [`read_settings`] writes every
+/// label in [`REF_KEYS`] and [`distil_keys`]; [`StyleIndex::load`] refuses a
+/// label this table does not carry. Until v1.2.2 the loader carried its own
+/// twelve-label list, so the vocabulary v1.2.0's symmetric distillation added
+/// — the 24 HSL cells and the 14 colour-grade fields — was written by every
+/// build and rejected by every load: one HSL edit anywhere in the library and
+/// the index failed at "exemplar 0 has an unsupported setting key",
+/// `style-index --looks` then replaced it with a looks-only file, and the
+/// Style control read no edits without saying why. The bands are the
+/// recipe's own (`Hsl::clamp` ±100 on every cell; `ColorGrade::clamp` hue
+/// 0..360, sat and blending 0..100, lum and balance ±100), so a stored value
+/// can never be one the engine would re-clamp. Pinned by
+/// `every_label_the_writer_produces_has_a_band_at_the_door` and the save/load
+/// round trip beside it.
+fn setting_bands() -> &'static BTreeMap<String, (f32, f32)> {
+    static BANDS: std::sync::OnceLock<BTreeMap<String, (f32, f32)>> = std::sync::OnceLock::new();
+    BANDS.get_or_init(|| {
+        let mut out = BTreeMap::new();
+        for (_, label) in REF_KEYS {
+            let band = match label {
+                "exposure" => (-5.0, 5.0),
+                "temperature_K" => (2000.0, 40000.0),
+                "contrast" | "highlights" | "shadows" | "whites" | "blacks" | "vibrance"
+                | "clarity" | "tint" | "saturation" | "dehaze" => (-100.0, 100.0),
+                other => panic!("REF_KEYS label {other} has no band at the index door"),
+            };
+            out.insert(label.to_string(), band);
+        }
+        for f in crate::advisor::catalogue::hsl_expansion() {
+            out.insert(f.metric, (-100.0, 100.0));
+        }
+        for (field, _) in crate::advisor::catalogue::COLOR_GRADE_CRS {
+            let band = if field.ends_with("_hue") {
+                (0.0, 360.0)
+            } else if field.ends_with("_sat") || field == "blending" {
+                (0.0, 100.0)
+            } else {
+                // `*_lum` and `balance`
+                (-100.0, 100.0)
+            };
+            out.insert(format!("{COLOR_GRADE_LABEL}{field}"), band);
+        }
+        out
+    })
+}
+
 /// 14-dim feature vector from capture metadata + histogram.
 pub fn feature_vector(meta: &Meta, hist: &Histogram) -> [f32; NDIM] {
     let lnpos = |v: f32| if v > 0.0 { v.ln() } else { 0.0 };
@@ -2924,21 +2971,16 @@ impl StyleIndex {
                 );
             }
 
-            // Same bands the recipe's own clamp() enforces (temperature_k
-            // 2000..40000, sliders ±100) — one source of truth, so a stored
-            // exemplar can never carry a value the engine would re-clamp.
+            // One table for every label `read_settings` can write
+            // (`setting_bands`): the recipe's own clamp() bands, so a stored
+            // exemplar can never carry a value the engine would re-clamp, and
+            // a label the writer never produces is refused as before.
             for (key, value) in &mut exemplar.settings {
-                let (lo, hi) = match key.as_str() {
-                    "exposure" => (-5.0, 5.0),
-                    "temperature_K" => (2000.0, 40000.0),
-                    "contrast" | "highlights" | "shadows" | "whites" | "blacks"
-                    | "vibrance" | "clarity" | "tint" | "saturation" | "dehaze" => {
-                        (-100.0, 100.0)
-                    }
-                    _ => anyhow::bail!(
+                let Some(&(lo, hi)) = setting_bands().get(key.as_str()) else {
+                    anyhow::bail!(
                         "style index {} exemplar {i} has an unsupported setting key",
                         path.display()
-                    ),
+                    )
                 };
                 *value = value.clamp(lo, hi);
             }
@@ -4764,6 +4806,85 @@ mod tests {
         assert!(StyleIndex::load(&path).is_err());
 
         let _ = std::fs::remove_file(path);
+    }
+
+    /// The v1.2.0 distillation vocabulary was written by every build and
+    /// refused by every load (the loader kept its own twelve-label list): an
+    /// index with ONE HSL edit in it could not be read back by the binary
+    /// that wrote it. MUTATION: drop the `hsl_expansion` loop or the
+    /// colour-grade loop from `setting_bands` and this goes red.
+    #[test]
+    fn every_label_the_writer_produces_has_a_band_at_the_door() {
+        let bands = setting_bands();
+        for (_, label) in REF_KEYS {
+            assert!(bands.contains_key(label), "reference label {label} has no band");
+        }
+        let distilled = distil_keys();
+        assert_eq!(distilled.len(), 38, "24 HSL cells + 14 colour-grade fields");
+        for (crs, label) in &distilled {
+            assert!(
+                bands.contains_key(label),
+                "{crs} is written as {label}, which the loader would refuse"
+            );
+        }
+        assert_eq!(bands.len(), 12 + 38, "no band for a label nobody writes");
+        assert_eq!(bands["hsl.hue.red"], (-100.0, 100.0));
+        assert_eq!(bands["color_grade.shadow_hue"], (0.0, 360.0));
+        assert_eq!(bands["color_grade.midtone_sat"], (0.0, 100.0));
+        assert_eq!(bands["color_grade.blending"], (0.0, 100.0));
+        assert_eq!(bands["color_grade.balance"], (-100.0, 100.0));
+        assert_eq!(bands["color_grade.global_lum"], (-100.0, 100.0));
+        assert!(!bands.contains_key("ignore previous instructions"));
+    }
+
+    /// The whole defect, end to end: an exemplar carrying every label
+    /// `read_settings` can write survives `save` -> `load`, clamped to the
+    /// recipe's bands, instead of invalidating the index the writer produced.
+    #[test]
+    fn an_index_with_the_distillation_vocabulary_survives_its_own_save_and_load() {
+        let dir = crate::test_dir("style-distil-roundtrip");
+        let path = dir.join("style-index.json");
+        let mut idx = StyleIndex {
+            version: CURRENT_INDEX_VERSION,
+            mean: vec![0.0; NDIM],
+            std: vec![1.0; NDIM],
+            exemplars: vec![StyleExemplar {
+                stem: "photo".into(),
+                feat: vec![0.0; NDIM],
+                tag: "wide/mid/midday/landscape".into(),
+                settings: BTreeMap::new(),
+                curve: Some([0.0, 0.0]),
+                path: None,
+                families: None,
+                embed: None,
+                tags: Vec::new(),
+                vocab_scores: None,
+                desc: None,
+                desc_embed: None,
+                masks: None,
+            }],
+            source_dir: None,
+            looks: Vec::new(),
+            looks_dir: None,
+            embed_provenance: None,
+        };
+        let labels = REF_KEYS
+            .iter()
+            .map(|(k, l)| (k.to_string(), l.to_string()))
+            .chain(distil_keys());
+        for (_, label) in labels {
+            idx.exemplars[0].settings.insert(label, 1.0);
+        }
+        idx.exemplars[0].settings.insert("hsl.saturation.blue".into(), 250.0);
+        idx.exemplars[0].settings.insert("color_grade.shadow_hue".into(), 400.0);
+        idx.save(&path).expect("save");
+        let loaded = StyleIndex::load(&path).expect("the index the writer produced loads back");
+        let s = &loaded.exemplars[0].settings;
+        assert_eq!(s.len(), 12 + 38, "every written label came back");
+        assert_eq!(s["hsl.saturation.blue"], 100.0, "clamped to the recipe's band");
+        assert_eq!(s["color_grade.shadow_hue"], 360.0);
+        assert_eq!(s["exposure"], 1.0);
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// L04-3, first belt: out-of-band magnitudes are refused at the door.

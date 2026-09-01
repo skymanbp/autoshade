@@ -1,8 +1,10 @@
 # AutoShade — Architecture
 
-> Status: **implemented** (v1.2.1 — the AutoShade rename, the
-> honest-disclosure release, and a Windows preferences migration that
-> could never have succeeded). The reverse-fit's
+> Status: **implemented** (v1.2.2 — the contextual boundary budget, the
+> embedded-preview-is-not-the-frame class, the style index's one band table,
+> `--xmp-dir` and incremental index builds; v1.2.1 was the AutoShade rename
+> and a Windows preferences migration that could never have succeeded). The
+> reverse-fit's
 > in-range estimator is now a PAIRED ROBUST REGRESSION (2026-08-26): on
 > same-frame pairs the tone map is estimated from corresponding pixels
 > (per-bin Tukey-IRLS means, median start, robust weight × evidence weight),
@@ -1858,6 +1860,19 @@ skipped-for-sidecar S`; a full-hit rebuild loads neither model checkpoint. The
 LOOK library keeps the description cache and nothing more — its records carry no
 14-dim feature for an entry to be about, it is capped at 500 curated finished
 photos, and it is rebuilt only when that folder is re-curated.
+
+The index door has ONE table for the `settings` labels it admits —
+`style::setting_bands`, the recipe's own clamp bands, read by `load` for every
+stored exemplar. `read_settings` writes the twelve reference sliders and the
+distillation vocabulary v1.2.0 added (the 24 HSL cells and the 14 colour-grade
+fields, `distil_keys`); until v1.2.2 the loader carried its own twelve-label
+list, so a library with one HSL or colour-grade edit produced an index the same
+binary refused to read back ("exemplar 0 has an unsupported setting key"), and
+`style-index --looks`, which merges into the existing file, replaced it with a
+looks-only index. Two tests hold the two sides together: every label the writer
+can produce has a band, and an exemplar carrying all fifty survives
+`save` → `load` clamped to the recipe's ranges. A label nobody writes is still
+refused at the door.
 
 Two disclosure rules follow from those states. A develop that ASKED for style
 and ended with no reference always says so in the rationale — the condition is

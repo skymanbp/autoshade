@@ -189,10 +189,11 @@ fn adopt_prefs_between(current: &Path, legacy: &Path, adopt: bool) -> PrefsAdopt
     // sibling adoptions (`store::adopt_pre_rename_root`,
     // `serve::adopted_export_registry_root`) rename WITHIN a directory that
     // already exists, which is why only this one needs the parent made first.
-    if let Some(parent) = current.parent() {
-        if !parent.as_os_str().is_empty() && std::fs::create_dir_all(parent).is_err() {
-            return PrefsAdoption::FellBack;
-        }
+    if let Some(parent) = current.parent()
+        && !parent.as_os_str().is_empty()
+        && std::fs::create_dir_all(parent).is_err()
+    {
+        return PrefsAdoption::FellBack;
     }
     match std::fs::rename(legacy, current) {
         Ok(()) => PrefsAdoption::Migrated,
