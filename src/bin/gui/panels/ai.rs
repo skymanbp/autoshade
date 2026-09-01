@@ -502,6 +502,67 @@ impl AutoShadeApp {
                 self.start_style_build(dir);
             }
         });
+        // ── where the SIDECARS are, when they are not beside the RAWs (the
+        // GUI half of `style-index --xmp-dir`). A second row rather than a
+        // second picker on the row above: it is the OPTIONAL half of "which
+        // library", and the common answer — beside each RAW — needs no click.
+        ui.horizontal_wrapped(|ui| {
+            let building = self.style_build_inflight;
+            let mut pick = false;
+            let mut clear = false;
+            ui.add_enabled_ui(!building, |ui| {
+                if ui
+                    .button(tr(lang, "🗂 Sidecar folder…"))
+                    .on_hover_text(tr(lang,
+                        "Where your .xmp sidecars live when they are NOT beside the RAWs — an exported catalogue, or a photo volume you cannot write to. AutoShade looks for a mirror of the library's own folder tree first, then a flat folder of sidecars, then beside the RAW as before.",
+                    ))
+                    .clicked()
+                {
+                    pick = true;
+                }
+                if ui
+                    .add_enabled(
+                        self.style_xmp_dir.is_some(),
+                        egui::Button::new(tr(lang, "Beside the RAWs")),
+                    )
+                    .on_hover_text(tr(lang,
+                        "Forget that folder and pair each RAW with the .xmp beside it, the way every build before this one did.",
+                    ))
+                    .clicked()
+                {
+                    clear = true;
+                }
+            });
+            let shown = match &self.style_xmp_dir {
+                Some(d) => abs_display(d),
+                None => tr(lang, "beside each RAW").to_string(),
+            };
+            ui.label(
+                egui::RichText::new(trf(lang, "sidecars: {path}", &[("path", &shown)]))
+                    .weak()
+                    .small(),
+            );
+            // rfd OUTSIDE the enabled-closure above, for its reason: modal, and
+            // it borrows nothing.
+            if pick {
+                let mut dialog = rfd::FileDialog::new();
+                if let Some(d) = self.style_xmp_dir.clone().filter(|d| d.is_dir()) {
+                    dialog = dialog.set_directory(d);
+                } else if let Some(d) = self.style_src_dir.clone().filter(|d| d.is_dir()) {
+                    dialog = dialog.set_directory(d);
+                }
+                if let Some(dir) = dialog.pick_folder() {
+                    // Remembered, NOT built from: choosing where the sidecars
+                    // are is not asking for an hour of decoding — the build
+                    // button above is. (Picking the RAW folder starts a build
+                    // because that IS the request; this one qualifies it.)
+                    self.style_xmp_dir = Some(dir);
+                }
+            }
+            if clear {
+                self.style_xmp_dir = None;
+            }
+        });
         // ── the opt-in reference PHOTO (the "both" half of feedback #6: the
         // index AND an actual picture).
         let built = matches!(

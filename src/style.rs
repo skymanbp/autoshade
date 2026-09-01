@@ -20,7 +20,7 @@ use crate::xmp::CrsSource;
 use crate::pipeline;
 use crate::recipe::EditRecipe;
 
-const NDIM: usize = 14;
+pub(crate) const NDIM: usize = 14;
 /// Unbounded (log / ratio) dims to z-score; the rest are already ~bounded.
 const ZSCORE_DIMS: [usize; 4] = [0, 1, 2, 10];
 /// Per-dim distance weights (scene-type discriminators heavier).
@@ -680,7 +680,7 @@ pub const LEGACY_INDEX_PATH: &str = "out/style-index.json";
 /// ±inf in `normalize`, and two exemplars straddling the mean then handed
 /// the retrieval sort a mixed NaN/inf key set — an unspecified ranking (a
 /// silently wrong style reference in a PAID prompt) or a sort panic.
-const MAX_FEATURE_ABS: f32 = 1e3;
+pub(crate) const MAX_FEATURE_ABS: f32 = 1e3;
 
 /// Slider keys the reference block shows, as `(crs attribute, label)`.
 ///
@@ -1098,6 +1098,32 @@ pub fn stage_embed_frame(
     Ok(staged)
 }
 
+/// The CONTENT key of every staged frame in a build, computed ONCE.
+///
+/// Three consumers key on it — the exemplar cache
+/// ([`crate::style_cache`]), the description cache and the description
+/// stage's hit/miss split — and it used to be computed inside the third,
+/// which is why the first two could not exist. A frame that cannot be hashed
+/// gets `None`: it is measured again next build, and says so.
+fn frame_digests(frames: &[Option<StagedFrame>], what: &str) -> Vec<Option<String>> {
+    frames
+        .iter()
+        .map(|f| {
+            let f = f.as_ref()?;
+            match crate::describe::frame_digest(f.image()) {
+                Ok(d) => Some(d),
+                Err(e) => {
+                    eprintln!(
+                        "  {what}: one frame could not be hashed ({e:#}) — it is measured again \
+                         next build"
+                    );
+                    None
+                }
+            }
+        })
+        .collect()
+}
+
 /// Hand a [`StagedFrame`] to the sidecar. Serialised process-wide against
 /// every other embed (`embed::with_model_slot`) — one resident model, whatever
 /// the caller's concurrency.
@@ -1216,18 +1242,21 @@ fn embed_desc_texts(
 trait DescribedRecord {
     fn desc(&self) -> Option<&str>;
     fn tags(&self) -> &[String];
+    fn has_desc_embed(&self) -> bool;
     fn set_desc_embed(&mut self, v: Option<Vec<f32>>);
 }
 
 impl DescribedRecord for StyleExemplar {
     fn desc(&self) -> Option<&str> { self.desc.as_deref() }
     fn tags(&self) -> &[String] { &self.tags }
+    fn has_desc_embed(&self) -> bool { self.desc_embed.is_some() }
     fn set_desc_embed(&mut self, v: Option<Vec<f32>>) { self.desc_embed = v; }
 }
 
 impl DescribedRecord for LookExemplar {
     fn desc(&self) -> Option<&str> { self.desc.as_deref() }
     fn tags(&self) -> &[String] { &self.tags }
+    fn has_desc_embed(&self) -> bool { self.desc_embed.is_some() }
     fn set_desc_embed(&mut self, v: Option<Vec<f32>>) { self.desc_embed = v; }
 }
 
@@ -1246,13 +1275,24 @@ fn attach_desc_embeddings<R: DescribedRecord>(
     if records.is_empty() {
         return;
     }
-    let texts: Vec<Option<String>> =
-        records.iter().map(|r| desc_text(r.desc(), r.tags())).collect();
+    // A record that ALREADY carries a vector contributes no text: the cache
+    // answered it (`crate::style_cache`), and re-embedding the same sentence
+    // would be the sidecar call this batch exists to avoid.
+    let texts: Vec<Option<String>> = records
+        .iter()
+        .map(|r| (!r.has_desc_embed()).then(|| desc_text(r.desc(), r.tags())).flatten())
+        .collect();
     let live = texts.iter().filter(|t| t.is_some()).count();
     match embed_desc_texts(opts, dir, &texts) {
         Ok(vectors) => {
+            // Only WRITE a vector that was produced: a `None` here is either a
+            // record that had nothing to embed or one that already had its
+            // vector, and overwriting the second with `None` would throw the
+            // cached answer away at the last step.
             for (record, vector) in records.iter_mut().zip(vectors) {
-                record.set_desc_embed(vector);
+                if vector.is_some() {
+                    record.set_desc_embed(vector);
+                }
             }
             if live > 0 {
                 println!("  {what}: {live} description vector(s) in one text call");
@@ -1341,6 +1381,255 @@ pub struct BuildProgress {
     pub total: usize,
 }
 
+/// The bands the EXEMPLAR CACHE admits an entry inside — the index door's own
+/// numbers ([`exemplar_is_finite`]), handed to the cache rather than restated
+/// there.
+///
+/// A cache is a file on disk, so it gets the index's threat model ("invariants
+/// at the door"), not "we wrote it, so it is fine": a bit-rotted vector served
+/// out of it would land in a published index that then refuses to LOAD,
+/// turning a cache defect into a destroyed library.
+const CACHE_BANDS: crate::style_cache::Bands = crate::style_cache::Bands {
+    ndim: NDIM,
+    feature_abs: MAX_FEATURE_ABS,
+    embed_dim: crate::embed::EMBED_DIM,
+    vocab: LOOK_VOCAB.len(),
+    desc_chars: MAX_DESC_CHARS,
+    version: CURRENT_INDEX_VERSION,
+};
+
+/// One photograph's result from the decode pool.
+struct BuiltRecord {
+    ex: StyleExemplar,
+    /// The staged embedding frame, when this build had to produce one. `None`
+    /// means the cache answered this photograph whole and nothing was decoded.
+    frame: Option<StagedFrame>,
+    /// The content key, when it is already known — i.e. it came from the
+    /// cache. A decoded record's key is hashed from its frame after the pool.
+    digest: Option<String>,
+    /// The identity of the file this was measured from, for the cache's fast
+    /// path on the NEXT build.
+    stamp: Option<crate::style_cache::SourceStamp>,
+}
+
+/// Read one photograph's SIDECAR and assemble its exemplar, with `feat`
+/// already measured — by a decode, or by the cache.
+///
+/// This half is paid on EVERY build, deliberately: the sliders, the curve, the
+/// family summary and the mask habit are properties of the `.xmp`, not of the
+/// pixels, so a photograph whose vectors came out of the cache still re-reads
+/// the edit the photographer may have changed since. It is a small file read
+/// beside a ~1 s decode.
+///
+/// `fill` is where a cache entry's own answers are applied — before the
+/// finiteness door below, so anything the cache hands back is checked by the
+/// same rule a freshly measured exemplar is.
+fn read_exemplar(
+    raw: &Path,
+    sidecar: &Path,
+    feat: [f32; NDIM],
+    loss_counts: &[std::sync::atomic::AtomicU32],
+    fill: impl FnOnce(&mut StyleExemplar),
+) -> Option<StyleExemplar> {
+    use std::sync::atomic::Ordering;
+    // An unreadable sidecar must SKIP the photo, not produce a settings-free
+    // exemplar that dilutes retrieval (the pair scan guaranteed the .xmp
+    // exists — a read failure here is a real error).
+    let Some(xmp) = crate::store::read_sidecar(sidecar) else {
+        eprintln!("  skip {}: xmp unreadable or over the sidecar size cap", pipeline::stem(raw));
+        return None;
+    };
+    // The photographer's LOCAL work, read through the SAME importer the
+    // develop chain uses (S3). Path-aware, so a brush group whose strokes live
+    // in a sibling `.acr` is readable; SILENT, because a 169-photo build
+    // discloses what it could not read ONCE, in aggregate, after the pool —
+    // not 169 times inside it.
+    let losses = crate::xmp::import_losses_for_photo(&xmp, raw);
+    // A Range Mask this engine cannot honour is DROPPED by the importer, so
+    // the surviving recipe under-reports the photographer's refinements — the
+    // loss channel is where that fact still exists (see
+    // `MaskHabit::of_with_refused_ranges`).
+    let refused_ranges = losses
+        .iter()
+        .filter(|l| l.reason.same_kind(crate::xmp::MaskImportReason::ForeignRangeMask))
+        .count();
+    let habit = crate::mask_habit::MaskHabit::of_with_refused_ranges(
+        &crate::xmp::xmp_to_recipe_for_photo(&xmp, raw).masks,
+        refused_ranges,
+    );
+    for l in &losses {
+        if let Some(k) =
+            crate::xmp::MaskImportReason::ALL.iter().position(|r| r.same_kind(l.reason))
+        {
+            loss_counts[k].fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    let mut ex = StyleExemplar {
+        stem: pipeline::stem(raw).to_string(),
+        path: std::path::absolute(raw).ok().map(|p| p.display().to_string()),
+        tag: derive_tag(&feat),
+        feat: feat.to_vec(),
+        settings: read_settings(&xmp),
+        curve: crate::eval::user_curve_shape(&xmp).map(|(b, s)| [b, s]),
+        families: crate::eval::user_family_summary(&xmp),
+        embed: None,
+        tags: Vec::new(),
+        vocab_scores: None,
+        desc: None,
+        desc_embed: None,
+        masks: Some(habit),
+    };
+    fill(&mut ex);
+    if exemplar_is_finite(&ex) {
+        Some(ex)
+    } else {
+        eprintln!(
+            "  skip {}: non-finite or out-of-band metadata/settings (would corrupt the index)",
+            pipeline::stem(raw)
+        );
+        None
+    }
+}
+
+/// May this build skip the DECODE for a photograph the cache already holds?
+///
+/// All-or-nothing, and that is the point: the frame digest is a function of
+/// the staged frame, so a photograph that skipped the decode has no frame —
+/// and a record with no frame can never afterwards be embedded or described.
+/// A cache entry therefore either answers everything this build asked for, or
+/// the photograph decodes.
+fn cache_answers_everything(
+    entry: &crate::style_cache::CachedExemplar,
+    want_embed: bool,
+    want_desc: bool,
+    provenance: &str,
+) -> bool {
+    let embed_ok =
+        !want_embed || (entry.embed.is_some() && entry.embedding_is_current(provenance));
+    let desc_ok = !want_desc || entry.current_desc().is_some();
+    embed_ok && desc_ok
+}
+
+/// Serve one cache entry's answers into an exemplar this build just read.
+///
+/// Gated on what the build ASKED for: a `style-index` without `--embed` must
+/// not silently acquire vectors, and one without `--describe` must not
+/// silently acquire prose — either would make the index claim work the user
+/// did not request this run.
+fn apply_cached(
+    ex: &mut StyleExemplar,
+    c: &crate::style_cache::CachedExemplar,
+    want_embed: bool,
+    want_desc: bool,
+) {
+    if want_embed {
+        ex.embed = c.embed.clone();
+        ex.vocab_scores = c.vocab_scores.clone();
+        // Derived, never stored: `tags_from_scores` is the one definition of
+        // what a score vector MEANS, and a stored tag list would be a second.
+        ex.tags = c.vocab_scores.as_deref().map(tags_from_scores).unwrap_or_default();
+    }
+    if want_desc {
+        ex.desc = c.current_desc().map(str::to_string);
+    }
+    // The text vector, only while it is still the vector of what this record
+    // now SAYS. The description and the tags above decide that, and either may
+    // have come from somewhere else this build — so the stored text is
+    // compared, not assumed.
+    if want_embed
+        && c.desc_embed.is_some()
+        && c.desc_text.is_some()
+        && c.desc_text == desc_text(ex.desc.as_deref(), &ex.tags)
+    {
+        ex.desc_embed = c.desc_embed.clone();
+    }
+}
+
+/// The cache entry for one finished exemplar.
+///
+/// A build that did NOT ask for a pass carries the PREVIOUS entry's answer for
+/// it forward instead of overwriting it with the absence: `style-index`
+/// without `--embed` measures no vector at all, and publishing that as the new
+/// truth would throw away an hour of SigLIP work because the user rebuilt the
+/// 14-dim index once.
+fn cache_entry(
+    ex: &StyleExemplar,
+    source: crate::style_cache::SourceStamp,
+    prior: Option<&crate::style_cache::CachedExemplar>,
+    want_embed: bool,
+    want_desc: bool,
+    provenance: &str,
+) -> crate::style_cache::CachedExemplar {
+    let (embed, vocab_scores, desc_embed, stamp, desc_text_now) = if want_embed {
+        (
+            ex.embed.clone(),
+            ex.vocab_scores.clone(),
+            ex.desc_embed.clone(),
+            ex.embed.is_some().then(|| provenance.to_string()),
+            desc_text(ex.desc.as_deref(), &ex.tags),
+        )
+    } else {
+        (
+            prior.and_then(|p| p.embed.clone()),
+            prior.and_then(|p| p.vocab_scores.clone()),
+            prior.and_then(|p| p.desc_embed.clone()),
+            prior.and_then(|p| p.provenance.clone()),
+            prior.and_then(|p| p.desc_text.clone()),
+        )
+    };
+    crate::style_cache::CachedExemplar {
+        source,
+        version: CURRENT_INDEX_VERSION,
+        feat: ex.feat.clone(),
+        embed,
+        vocab_scores,
+        provenance: stamp,
+        desc: if want_desc {
+            ex.desc.clone().map(crate::describe::CachedDescription::current)
+        } else {
+            prior.and_then(|p| p.desc.clone())
+        },
+        desc_text: desc_text_now,
+        desc_embed,
+    }
+}
+
+/// How many unpaired RAWs [`unpaired_note`] NAMES before it stops counting.
+///
+/// Ten, not all of them: the count is the fact, the names are the recognition
+/// aid, and a library where every photograph is unpaired (the user pointed the
+/// build at the wrong folder — the single most common way this ends in an
+/// empty index) would otherwise answer with a 2,000-line wall.
+const MAX_UNPAIRED_LISTED: usize = 10;
+
+/// The RAWs a build could NOT learn from, because no folder in the pairing
+/// rule held their sidecar.
+///
+/// Until this existed the build printed only the SURVIVING pair count, so a
+/// library that indexed 40 of 2,000 photographs and a library of 40 read
+/// identically — and the commonest cause of "0 RAW+.xmp pairs" (sidecars kept
+/// in a separate tree, which `--xmp-dir` now reaches) was indistinguishable
+/// from "you have not edited anything".
+///
+/// STEMS, never full paths, like every other per-photograph disclosure in this
+/// module: the folder is already on the line above it.
+fn unpaired_note(unpaired: &[&Path]) -> Option<String> {
+    if unpaired.is_empty() {
+        return None;
+    }
+    let named: Vec<&str> =
+        unpaired.iter().take(MAX_UNPAIRED_LISTED).map(|p| pipeline::stem(p)).collect();
+    let more = unpaired.len() - named.len();
+    let tail = if more > 0 { format!(", and {more} more") } else { String::new() };
+    Some(format!(
+        "  {} RAW(s) skipped — no .xmp sidecar found (looked in --xmp-dir, its mirror of this \
+         folder, and beside the RAW): {}{}",
+        unpaired.len(),
+        named.join(", "),
+        tail
+    ))
+}
+
 fn report(on_progress: &dyn Fn(BuildProgress), stage: BuildStage, done: usize, total: usize) {
     on_progress(BuildProgress { stage, done, total });
 }
@@ -1358,11 +1647,20 @@ fn embed_frames(
     opts: &crate::embed::EmbedOpts,
     dir: &Path,
     frames: &[Option<StagedFrame>],
+    want: &[bool],
     what: &str,
 ) -> Result<Vec<Option<crate::embed::EmbedRecord>>> {
     let mut out: Vec<Option<crate::embed::EmbedRecord>> = (0..frames.len()).map(|_| None).collect();
-    let live: Vec<(usize, &StagedFrame)> =
-        frames.iter().enumerate().filter_map(|(i, f)| f.as_ref().map(|f| (i, f))).collect();
+    // `want[i] == false` is a record whose vector the CACHE already answered
+    // (`crate::style_cache`): it contributes no manifest line, gets `None`
+    // back, and keeps what it has — the same shape as a record whose staging
+    // failed, and the reason a full-hit rebuild starts no sidecar at all.
+    let live: Vec<(usize, &StagedFrame)> = frames
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| want.get(*i).copied().unwrap_or(true))
+        .filter_map(|(i, f)| f.as_ref().map(|f| (i, f)))
+        .collect();
     if live.is_empty() {
         return Ok(out);
     }
@@ -1450,6 +1748,7 @@ fn attach_descriptions<R: DescribableRecord>(
     describe: DescribeSwitch,
     dir: &Path,
     cache_path: &Path,
+    digests: &[Option<String>],
     frames: &[Option<StagedFrame>],
     records: &mut [R],
     what: &str,
@@ -1472,24 +1771,12 @@ fn attach_descriptions<R: DescribableRecord>(
         opts.script.display()
     );
     let mut cache = crate::describe::DescriptionCache::load(cache_path);
-    // The digest of every frame this build can describe, and the description
-    // the cache already holds for it.
-    let mut digests: Vec<Option<String>> = Vec::with_capacity(total);
+    // The digests are the BUILD's, computed once by [`frame_digests`] and
+    // shared with the image stage and the exemplar cache — a record that came
+    // whole out of that cache has a key here and no frame, which is exactly
+    // what makes it a hit with nothing to send.
     let mut hits = 0usize;
-    for frame in frames.iter() {
-        let Some(frame) = frame else {
-            digests.push(None);
-            continue;
-        };
-        match crate::describe::frame_digest(frame.image()) {
-            Ok(d) => digests.push(Some(d)),
-            Err(e) => {
-                eprintln!("  {what}: one frame could not be hashed ({e:#}) — it is not described");
-                digests.push(None);
-            }
-        }
-    }
-    for (record, digest) in records.iter_mut().zip(&digests) {
+    for (record, digest) in records.iter_mut().zip(digests) {
         if let Some(desc) = digest.as_deref().and_then(|d| cache.get(d)) {
             record.set_desc(Some(desc.to_string()));
             hits += 1;
@@ -1880,8 +2167,17 @@ pub struct StyleIndex {
 impl StyleIndex {
     /// Scan a folder for RAW+.xmp pairs (the user's own edits) and build the
     /// index, reporting nothing but the historical stdout lines.
-    pub fn build(dir: &Path, embed: EmbeddingSwitch, describe: DescribeSwitch) -> Result<StyleIndex> {
-        Self::build_reporting(dir, embed, describe, &|_| {})
+    ///
+    /// `xmp_dir` is the `--xmp-dir` folder of sidecars, or `None` for the
+    /// beside-the-RAW convention; either way the pairing rule is
+    /// [`crate::xmp_pair`]'s and only its.
+    pub fn build(
+        dir: &Path,
+        xmp_dir: Option<&Path>,
+        embed: EmbeddingSwitch,
+        describe: DescribeSwitch,
+    ) -> Result<StyleIndex> {
+        Self::build_reporting(dir, xmp_dir, embed, describe, &|_| {})
     }
 
     /// Build the finished-photo look library. Looks are embedding-only and
@@ -1972,7 +2268,8 @@ impl StyleIndex {
         // unlike the RAW build this one fails the record rather than degrading
         // it.
         report(on_progress, BuildStage::Embed, 0, total);
-        let vectors = embed_frames(&opts, &scratch, &frames, "look library")?;
+        let want = vec![true; frames.len()];
+        let vectors = embed_frames(&opts, &scratch, &frames, &want, "look library")?;
         let _ = std::fs::remove_file(vocab_path);
         for (i, (look, record)) in looks.iter_mut().zip(&vectors).enumerate() {
             let record = record.as_ref().ok_or_else(|| {
@@ -1985,11 +2282,18 @@ impl StyleIndex {
         report(on_progress, BuildStage::Embed, total, total);
         // STAGE 3 — ONE Qwen call over the frames that are not already
         // described, then STAGE 4, ONE SigLIP text call over the whole set.
+        // The look library keeps the DESCRIPTION cache and nothing else: its
+        // records carry no 14-dim feature for a `style_cache` entry to be
+        // about, it is capped at a few hundred CURATED finished photos, and it
+        // is rebuilt only when the user re-curates that folder — where the RAW
+        // build is the hour-long one this batch exists for.
+        let digests = frame_digests(&frames, "look library");
         attach_descriptions(
             &describe_opts,
             describe,
             &scratch,
             &crate::describe::cache_path_in(&scratch),
+            &digests,
             &frames,
             &mut looks,
             "look library",
@@ -2026,6 +2330,7 @@ impl StyleIndex {
     /// says why.
     pub fn build_reporting(
         dir: &Path,
+        xmp_dir: Option<&Path>,
         embed: EmbeddingSwitch,
         describe: DescribeSwitch,
         on_progress: &dyn Fn(BuildProgress),
@@ -2038,8 +2343,25 @@ impl StyleIndex {
         // baked source has no camera rendition at all, so it could contribute
         // an exemplar to the index but never a comparable one.
         let raws = pipeline::find_raws(dir)?;
-        let pairs: Vec<_> = raws.iter().filter(|r| r.with_extension("xmp").exists()).collect();
+        // ONE pairing rule ([`crate::xmp_pair`]), resolved HERE on the calling
+        // thread and carried into the pool as a PATH. The rule memoises one
+        // folder listing per folder, so resolving the whole scan in one place
+        // is also what keeps a 2,000-photograph library at one `read_dir` per
+        // folder; and a worker that re-derived the name would be the second
+        // definition of the rule that module exists to remove.
+        let pairing = crate::xmp_pair::XmpPairing::new(dir, xmp_dir);
+        let mut pairs: Vec<(&Path, PathBuf)> = Vec::new();
+        let mut unpaired: Vec<&Path> = Vec::new();
+        for raw in &raws {
+            match pairing.find(raw) {
+                Some(sidecar) => pairs.push((raw.as_path(), sidecar)),
+                None => unpaired.push(raw.as_path()),
+            }
+        }
         println!("building style index from {} RAW+.xmp pairs ...", pairs.len());
+        if let Some(note) = unpaired_note(&unpaired) {
+            println!("{note}");
+        }
         // Decode in parallel: each pair pays ~1s of full-res embedded-JPEG decode
         // and the old serial scan left every other core idle (a 2000-pair library
         // took the better part of an hour). The worker count IS the process-wide
@@ -2083,13 +2405,25 @@ impl StyleIndex {
                 opts.vocab_file = Some(vocab_path.clone());
         }
         let total = pairs.len();
+        // What this machine has ALREADY measured (`crate::style_cache`):
+        // loaded once here, read by every worker, republished at the end with
+        // the keys this build used.
+        let cache_path = crate::style_cache::cache_path_in(&embed_dir);
+        let cache = crate::style_cache::ExemplarCache::load(&cache_path, CACHE_BANDS);
+        // WHICH passes this build is asking for. The decode-skipping fast path
+        // is all-or-nothing per photograph against exactly these: a partial
+        // hit that skipped the decode would leave a record with no staged
+        // frame and therefore no way ever to embed or describe it.
+        let want_embed = embedder.is_some();
+        let want_desc = want_embed && describe.on() && describer.available();
+        let provenance = embed_provenance_string();
         // What this library's mask content COST on the way in, by named reason
         // (S3). An atomic per reason rather than a channel field: the losses
         // are a property of the BUILD, not of any one exemplar, and the two
         // producers (`build_reporting`'s pool) only ever add.
         let loss_counts: [AtomicU32; crate::xmp::MaskImportReason::ALL.len()] =
             std::array::from_fn(|_| AtomicU32::new(0));
-        let mut slots: Vec<Option<(StyleExemplar, Option<StagedFrame>)>> = Vec::new();
+        let mut slots: Vec<Option<BuiltRecord>> = Vec::new();
         slots.resize_with(total, || None);
         let next = AtomicUsize::new(0);
         let done = AtomicUsize::new(0);
@@ -2102,9 +2436,10 @@ impl StyleIndex {
                 let (pairs, next, done) = (&pairs, &next, &done);
                 let (embedder, embed_dir) = (&embedder, &embed_dir);
                 let loss_counts = &loss_counts;
+                let (cache, provenance) = (&cache, provenance.as_str());
                 s.spawn(move || loop {
                     let i = next.fetch_add(1, Ordering::Relaxed);
-                    let Some(&raw) = pairs.get(i) else { break };
+                    let Some((raw, sidecar)) = pairs.get(i).map(|(r, s)| (*r, s)) else { break };
                     // --- UNDER THE DECODE PERMIT: the decode itself, and the
                     // staging of the embedding frame FROM the decoded buffer.
                     // Nothing else. R28 Batch-4 4b (adjudication F3) shortened
@@ -2121,6 +2456,44 @@ impl StyleIndex {
                     // that is exactly the ~1.4 GB stack `MAX_CONCURRENT_DECODES`
                     // exists to bound. Inside, the invariant is unchanged: a
                     // 61 MP preview is alive only while its permit is.
+                    // `saved_quarter_turns` is part of the FILE's identity
+                    // (the decode below composes it), so it is read before the
+                    // cache is asked, not inside the decode call.
+                    let turns = crate::store::saved_quarter_turns(raw);
+                    let stamp = crate::style_cache::SourceStamp::of(raw, turns);
+                    // Already measured, unchanged, and able to answer
+                    // everything this build wants? Then this photograph costs
+                    // NOTHING: no decode, no staged frame, no model call. The
+                    // 14 features are a function of the FILE (EXIF, histogram,
+                    // the saved rotation), which is why the stamp — and not
+                    // the frame digest alone — is what unlocks this.
+                    let warm = stamp
+                        .as_ref()
+                        .and_then(|s| cache.warm(s))
+                        .and_then(|(digest, entry)| {
+                            let feat: [f32; NDIM] = entry.feat.as_slice().try_into().ok()?;
+                            cache_answers_everything(entry, want_embed, want_desc, provenance)
+                                .then_some((digest.to_string(), entry, feat))
+                        });
+                    if let Some((digest, entry, feat)) = warm {
+                        let record = read_exemplar(raw, sidecar, feat, loss_counts, |ex| {
+                            apply_cached(ex, entry, want_embed, want_desc)
+                        });
+                        let n = done.fetch_add(1, Ordering::Relaxed) + 1;
+                        if n % 20 == 0 {
+                            println!("  {} / {}", n, total);
+                        }
+                        let _ = tx.send((
+                            i,
+                            record.map(|ex| BuiltRecord {
+                                ex,
+                                frame: None,
+                                digest: Some(digest),
+                                stamp,
+                            }),
+                        ));
+                        continue;
+                    }
                     let permit = decode::DecodePermit::acquire();
                     // Destructured, not bound whole: bound as `d`, the entire
                     // `Decoded` — rawler's sensor buffers included — would stay
@@ -2133,10 +2506,7 @@ impl StyleIndex {
                     // answers. `saved_quarter_turns` is one small read beside
                     // a ~1 s decode, and answers 0 for the common case (a
                     // foreign Lightroom library this app has never developed).
-                    let staged = match decode::decode_raw_turned(
-                        raw,
-                        crate::store::saved_quarter_turns(raw),
-                    ) {
+                    let staged = match decode::decode_raw_turned(raw, turns) {
                         Ok(decode::Decoded { meta, histogram, preview, .. }) => {
                             let feat = feature_vector(&meta, &histogram);
                             // 181 MB in, 200 KB out: after this the sidecars
@@ -2166,84 +2536,14 @@ impl StyleIndex {
                     // small file read; the model sidecars run once each, after
                     // the pool has finished.
                     drop(permit);
+                    // The sidecar half is the SAME work the warm path above
+                    // does, through the same door — `fill` is a no-op here
+                    // because a decoded record's content key is not known
+                    // until its frame has been hashed, which happens once for
+                    // the whole build after the pool.
                     let ex = staged.and_then(|(feat, frame)| {
-                        // An unreadable sidecar must SKIP the photo, not
-                        // produce a settings-free exemplar that dilutes
-                        // retrieval (the pair scan guaranteed the .xmp
-                        // exists — a read failure here is a real error).
-                        match crate::store::read_sidecar(&raw.with_extension("xmp")) {
-                            Some(xmp) => {
-                                // The photographer's LOCAL work, read through
-                                // the SAME importer the develop chain uses
-                                // (S3). Path-aware, so a brush group whose
-                                // strokes live in a sibling `.acr` is readable;
-                                // SILENT, because a 169-photo build discloses
-                                // what it could not read ONCE, in aggregate,
-                                // after the pool — not 169 times inside it.
-                                let losses = crate::xmp::import_losses_for_photo(&xmp, raw);
-                                // A Range Mask this engine cannot honour is
-                                // DROPPED by the importer, so the surviving
-                                // recipe under-reports the photographer's
-                                // refinements — the loss channel is where that
-                                // fact still exists (see
-                                // `MaskHabit::of_with_refused_ranges`).
-                                let refused_ranges = losses
-                                    .iter()
-                                    .filter(|l| {
-                                        l.reason.same_kind(
-                                            crate::xmp::MaskImportReason::ForeignRangeMask,
-                                        )
-                                    })
-                                    .count();
-                                let habit = crate::mask_habit::MaskHabit::of_with_refused_ranges(
-                                    &crate::xmp::xmp_to_recipe_for_photo(&xmp, raw).masks,
-                                    refused_ranges,
-                                );
-                                for l in &losses {
-                                    if let Some(k) = crate::xmp::MaskImportReason::ALL
-                                        .iter()
-                                        .position(|r| r.same_kind(l.reason))
-                                    {
-                                        loss_counts[k].fetch_add(1, Ordering::Relaxed);
-                                    }
-                                }
-                                let ex = StyleExemplar {
-                                    stem: pipeline::stem(raw).to_string(),
-                                    path: std::path::absolute(raw)
-                                        .ok()
-                                        .map(|p| p.display().to_string()),
-                                    tag: derive_tag(&feat),
-                                    feat: feat.to_vec(),
-                                    settings: read_settings(&xmp),
-                                    curve: crate::eval::user_curve_shape(&xmp)
-                                        .map(|(b, s)| [b, s]),
-                                    families: crate::eval::user_family_summary(&xmp),
-                                    embed: None,
-                                    tags: Vec::new(),
-                                    vocab_scores: None,
-                                    desc: None,
-                                    desc_embed: None,
-                                    masks: Some(habit),
-                                };
-                                if exemplar_is_finite(&ex) {
-                                    Some((ex, frame))
-                                } else {
-                                    eprintln!(
-                                        "  skip {}: non-finite or out-of-band metadata/settings \
-                                         (would corrupt the index)",
-                                        pipeline::stem(raw)
-                                    );
-                                    None
-                                }
-                            }
-                            None => {
-                                eprintln!(
-                                    "  skip {}: xmp unreadable or over the sidecar size cap",
-                                    pipeline::stem(raw)
-                                );
-                                None
-                            }
-                        }
+                        read_exemplar(raw, sidecar, feat, loss_counts, |_| {})
+                            .map(|ex| BuiltRecord { ex, frame, digest: None, stamp })
                     });
                     // Progress counts COMPLETED photos (completion order differs
                     // from index order under parallelism) so it stays monotonic.
@@ -2264,9 +2564,43 @@ impl StyleIndex {
         });
         // Failed decodes left None slots — drop them in order, like the serial
         // `continue` did.
-        let (mut exemplars, frames): (Vec<StyleExemplar>, Vec<Option<StagedFrame>>) =
-            slots.into_iter().flatten().unzip();
+        let mut exemplars: Vec<StyleExemplar> = Vec::with_capacity(total);
+        let mut frames: Vec<Option<StagedFrame>> = Vec::with_capacity(total);
+        // The CONTENT key of each record, and the identity of the file it came
+        // from: carried from the cache when the decode was skipped, filled in
+        // from the staged frame below otherwise.
+        let mut digests: Vec<Option<String>> = Vec::with_capacity(total);
+        let mut stamps: Vec<Option<crate::style_cache::SourceStamp>> = Vec::with_capacity(total);
+        // How many photographs cost NOTHING this build. Reported, because the
+        // fast path is the one place that trusts an mtime.
+        let mut reused = 0usize;
+        for record in slots.into_iter().flatten() {
+            if record.frame.is_none() && record.digest.is_some() {
+                reused += 1;
+            }
+            exemplars.push(record.ex);
+            frames.push(record.frame);
+            digests.push(record.digest);
+            stamps.push(record.stamp);
+        }
         let live = exemplars.len();
+        // Every staged frame's key, once for the whole build.
+        for (slot, digest) in frame_digests(&frames, "style index").into_iter().enumerate() {
+            if digest.is_some() {
+                digests[slot] = digest;
+            }
+        }
+        // A photograph whose FILE identity moved but whose PIXELS did not — a
+        // rename, a copy, a `touch`, a re-pointed library — had to decode, and
+        // its content key only became knowable just now. Its model answers are
+        // still this build's answers, and it must not pay for them twice.
+        for ((ex, digest), frame) in exemplars.iter_mut().zip(&digests).zip(&frames) {
+            if frame.is_none() {
+                continue; // came whole out of the cache, already complete
+            }
+            let Some(entry) = digest.as_deref().and_then(|d| cache.get(d)) else { continue };
+            apply_cached(ex, entry, want_embed, want_desc);
+        }
         // What the index LEARNED about this library's local work, and what it
         // could not read, in one line each (S3). The second line is the honest
         // half: a habit summarised from masks the importer refused is a
@@ -2310,7 +2644,11 @@ impl StyleIndex {
         if let Some(opts) = embedder.as_ref() {
             // STAGE 2 — ONE SigLIP image call for the whole library.
             report(on_progress, BuildStage::Embed, 0, live);
-            match embed_frames(opts, &embed_dir, &frames, "style index") {
+            // Only the records the cache did NOT answer. When it answered
+            // every one, `embed_frames` starts no sidecar at all — which is
+            // the 1.50 GB checkpoint a rebuild used to load for nothing.
+            let want: Vec<bool> = exemplars.iter().map(|e| e.embed.is_none()).collect();
+            match embed_frames(opts, &embed_dir, &frames, &want, "style index") {
                 Ok(records) => {
                     for (ex, record) in exemplars.iter_mut().zip(records) {
                         // DEGRADE, never fail: a photo without a vector keeps
@@ -2337,6 +2675,7 @@ impl StyleIndex {
                 describe,
                 &embed_dir,
                 &crate::describe::cache_path_in(&embed_dir),
+                &digests,
                 &frames,
                 &mut exemplars,
                 "style index",
@@ -2350,6 +2689,41 @@ impl StyleIndex {
             report(on_progress, BuildStage::Text, live, live);
         }
         drop(frames);
+        // What this build MEASURED, for the next one. Written after the model
+        // stages so every entry carries this build's finished answers, and
+        // only for records whose content key is known.
+        let mut keep: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        let mut next = crate::style_cache::ExemplarCache::default();
+        for ((ex, digest), stamp) in exemplars.iter().zip(&digests).zip(&stamps) {
+            let (Some(digest), Some(stamp)) = (digest.clone(), stamp.clone()) else { continue };
+            let prior = cache.get(&digest);
+            keep.insert(digest.clone());
+            next.insert(
+                digest,
+                cache_entry(ex, stamp, prior, want_embed, want_desc, &provenance),
+            );
+        }
+        let retired = cache.retired(&keep);
+        // A build that staged NO frames has no content keys at all — every
+        // `style-index` without the embedding pass is one — and publishing its
+        // empty keep-set would destroy an hour of a previous build's work.
+        // Same instinct as `save`'s empty-index refusal.
+        if !keep.is_empty()
+            && let Err(e) = next.save(&cache_path, &keep)
+        {
+            eprintln!("  style index: the exemplar cache could not be published ({e:#})");
+        }
+        println!(
+            "  style index cache: reused {reused}, recomputed {}, removed {retired},              skipped-for-sidecar {}",
+            live - reused,
+            unpaired.len()
+        );
+        // Mean and σ come from the MERGED exemplar set, always: `compute_norm`
+        // averages over every exemplar, so a library that gained or lost ONE
+        // photograph legitimately moves every z-scored dimension. Re-derived
+        // from the stored features rather than cached with them, because a
+        // cached normalisation would be the one number in this file that no
+        // longer describes the set it is used on.
         let (mean, std) = compute_norm(&exemplars);
         // Record where this index was built from, for UI provenance / other users.
         let source_dir = std::path::absolute(dir).map(|p| p.display().to_string()).ok();
@@ -4753,6 +5127,205 @@ mod tests {
             tags: Vec::new(), vocab_scores: None, desc: None, desc_embed: None,
             masks: None,
         }
+    }
+
+    // ── the exemplar cache (step: incremental style-index builds) ──────────
+
+    /// A measured exemplar, stamped, written to the cache and read back.
+    fn cached_round_trip(ex: &StyleExemplar, tag: &str) -> crate::style_cache::CachedExemplar {
+        let dir = crate::test_dir(tag);
+        let path = crate::style_cache::cache_path_in(&dir);
+        let digest = "ab".repeat(32);
+        let stamp = crate::style_cache::SourceStamp {
+            path: "lib/shot.arw".into(),
+            len: 1234,
+            mtime_ns: 5678,
+            turns: 0,
+        };
+        let mut cache = crate::style_cache::ExemplarCache::default();
+        cache.insert(
+            digest.clone(),
+            cache_entry(ex, stamp, None, true, true, &embed_provenance_string()),
+        );
+        cache.save(&path, &[digest.clone()].into_iter().collect()).expect("publish");
+        let back = crate::style_cache::ExemplarCache::load(&path, CACHE_BANDS);
+        let entry = back.get(&digest).expect("the entry survives the round trip").clone();
+        std::fs::remove_dir_all(&dir).ok();
+        entry
+    }
+
+    fn measured_exemplar() -> StyleExemplar {
+        let mut ex = plain_exemplar("shot");
+        ex.feat = vec![0.125, -3.5, 1.75, 0.5, 0.25, 0.375, 0.0, 0.0, 0.5, -0.5, 0.1, 1.5, 0.2, 0.0];
+        ex.embed = Some(embed_axes(&[(0, 1.0), (7, 2.0)]));
+        ex.vocab_scores = Some(flat_profile(0.25));
+        ex.tags = tags_from_scores(&flat_profile(0.25));
+        ex.desc = Some("warm, lifted shadows and film-like grain".into());
+        ex.desc_embed = Some(embed_axes(&[(3, 1.0), (9, -1.0)]));
+        ex
+    }
+
+    /// A REBUILD over unchanged files must serve exactly the numbers the first
+    /// build measured — not "close", the same bits: the retrieval sort orders
+    /// f32 keys with `total_cmp`, so a cache that round-tripped a vector
+    /// imprecisely would silently reorder neighbours.
+    ///
+    /// MUTATION: drop any field from [`cache_entry`]/[`apply_cached`] (or
+    /// serialise the vectors through a lossy format) and this fails.
+    #[test]
+    fn a_rebuild_serves_back_the_numbers_the_first_build_measured_bit_for_bit() {
+        let first = measured_exemplar();
+        let entry = cached_round_trip(&first, "style-cache-roundtrip");
+        // What a fresh read of the same sidecar produces before the model
+        // stages run: features from the cache, everything else empty.
+        let mut second = plain_exemplar("shot");
+        second.feat = entry.feat.clone();
+        apply_cached(&mut second, &entry, true, true);
+        let bits = |v: &Option<Vec<f32>>| {
+            v.as_ref().map(|v| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>())
+        };
+        assert_eq!(
+            first.feat.iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
+            second.feat.iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
+            "the 14 features survive the cache bit for bit"
+        );
+        assert_eq!(bits(&first.embed), bits(&second.embed), "and so does the image vector");
+        assert_eq!(bits(&first.desc_embed), bits(&second.desc_embed), "and the text vector");
+        assert_eq!(first.vocab_scores, second.vocab_scores);
+        assert_eq!(first.desc, second.desc);
+        assert_eq!(first.tags, second.tags, "tags are DERIVED from the scores, never stored");
+        // …and the normalisation the index publishes is the same, because it
+        // is computed from those same features.
+        assert_eq!(compute_norm(&[first]), compute_norm(&[second]));
+    }
+
+    /// The MERGED set decides the normalisation. `compute_norm` averages over
+    /// every exemplar, so one photograph joining the library legitimately
+    /// moves every z-scored dimension — and one leaving moves it back.
+    ///
+    /// MUTATION: cache the mean/σ with the exemplars and serve them unchanged
+    /// on a rebuild (i.e. make this a function of the FIRST build's set) and
+    /// the first assertion fails.
+    #[test]
+    fn mean_and_sigma_are_recomputed_over_the_merged_exemplar_set() {
+        let mut a = plain_exemplar("a");
+        a.feat = vec![0.0; NDIM];
+        let mut b = plain_exemplar("b");
+        b.feat = vec![4.0; NDIM];
+        let one = compute_norm(std::slice::from_ref(&a));
+        let two = compute_norm(&[a.clone(), b.clone()]);
+        for &d in &ZSCORE_DIMS {
+            assert_ne!(one.0[d], two.0[d], "dim {d}: adding a photograph moves the mean");
+            assert_ne!(one.1[d], two.1[d], "dim {d}: and the deviation");
+        }
+        // Removing it again is the same computation over the smaller set, not
+        // a stored number that has to be walked back.
+        assert_eq!(compute_norm(std::slice::from_ref(&a)), one, "the set decides, nothing else");
+    }
+
+    /// The fast path is ALL-OR-NOTHING: an entry that cannot answer everything
+    /// this build asked for must not let the photograph skip its decode,
+    /// because a record with no staged frame can never be embedded or
+    /// described afterwards.
+    ///
+    /// MUTATION: weaken either arm of [`cache_answers_everything`] to `true`
+    /// and this fails.
+    #[test]
+    fn the_decode_is_skipped_only_when_the_cache_answers_every_pass_asked_for() {
+        let ex = measured_exemplar();
+        let full = cached_round_trip(&ex, "style-cache-answers");
+        let here = embed_provenance_string();
+        assert!(cache_answers_everything(&full, true, true, &here), "a complete entry answers");
+        assert!(
+            !cache_answers_everything(&full, true, true, "some other checkpoint"),
+            "a vector from another checkpoint answers a different question"
+        );
+        // Vectors but no prose: enough for --embed, not enough for --describe.
+        let mut no_desc = full.clone();
+        no_desc.desc = None;
+        assert!(cache_answers_everything(&no_desc, true, false, &here));
+        assert!(!cache_answers_everything(&no_desc, true, true, &here));
+        // Prose but no vectors: the mirror case.
+        let mut no_embed = full.clone();
+        no_embed.embed = None;
+        assert!(!cache_answers_everything(&no_embed, true, false, &here));
+        assert!(cache_answers_everything(&no_embed, false, false, &here));
+    }
+
+    /// The text vector is only reusable while it is still the vector of what
+    /// the record SAYS. A description that arrived from somewhere else this
+    /// build — or a tag list the scores changed — invalidates it.
+    ///
+    /// MUTATION: drop the `desc_text` comparison in [`apply_cached`] and this
+    /// fails: the index would carry a text vector of a sentence it no longer
+    /// holds, and the W_DESC term would rank on prose nobody can see.
+    #[test]
+    fn a_stale_description_vector_is_not_served_back() {
+        let ex = measured_exemplar();
+        let entry = cached_round_trip(&ex, "style-cache-stale-text");
+        // Same record, same everything: the vector is served.
+        let mut same = plain_exemplar("shot");
+        apply_cached(&mut same, &entry, true, true);
+        assert!(same.desc_embed.is_some(), "the text has not changed");
+        // Now the build does NOT want prose, so the record's text becomes its
+        // tag string — a different sentence, and the stored vector is not its.
+        let mut retagged = plain_exemplar("shot");
+        apply_cached(&mut retagged, &entry, true, false);
+        assert_eq!(retagged.desc, None, "prose was not asked for");
+        assert_eq!(
+            retagged.desc_embed, None,
+            "and the vector of the prose is not the vector of the tags"
+        );
+    }
+
+    /// A 14-dim-only rebuild must not throw away the vectors an embedding
+    /// build paid for.
+    ///
+    /// MUTATION: make [`cache_entry`] always write this build's (absent)
+    /// answers and this fails — `style-index` without `--embed` would erase an
+    /// hour of SigLIP work, and the next `--embed` build would redo all of it.
+    #[test]
+    fn a_build_without_the_embedding_pass_carries_the_previous_one_forward() {
+        let measured = measured_exemplar();
+        let prior = cached_round_trip(&measured, "style-cache-carry");
+        // The same photograph, re-read by a build that asked for neither pass.
+        let bare = plain_exemplar("shot");
+        let stamp = prior.source.clone();
+        let kept = cache_entry(&bare, stamp, Some(&prior), false, false, "irrelevant");
+        assert_eq!(kept.embed, prior.embed, "the image vector survives");
+        assert_eq!(kept.vocab_scores, prior.vocab_scores);
+        assert_eq!(kept.desc_embed, prior.desc_embed);
+        assert_eq!(kept.desc, prior.desc, "and so does the prose");
+        assert_eq!(kept.provenance, prior.provenance, "with the provenance that stamps it");
+        // …while a build that DID ask writes its own answers.
+        let fresh = cache_entry(&bare, prior.source.clone(), Some(&prior), true, true, "now");
+        assert_eq!(fresh.embed, None, "this build measured no vector, and says so");
+        assert_eq!(fresh.desc, None);
+    }
+
+    /// The RAWs a build could not pair are DISCLOSED — the count always, the
+    /// first [`MAX_UNPAIRED_LISTED`] by stem, and "and N more" for the rest.
+    ///
+    /// MUTATION: drop the `unpaired_note` call from the build (or make it
+    /// answer `None` for a non-empty list) and this fails; the build would
+    /// again print only its surviving pair count, which is how "you pointed me
+    /// at the wrong folder" and "you have edited 40 photographs" came to look
+    /// identical.
+    #[test]
+    fn the_raws_with_no_sidecar_are_counted_and_the_first_few_named() {
+        assert_eq!(unpaired_note(&[]), None, "a fully paired library says nothing");
+        let one = [Path::new("lib/shot-a.arw")];
+        let note = unpaired_note(&one.map(|p| p)).expect("one unpaired RAW is disclosed");
+        assert!(note.contains("1 RAW(s) skipped"), "{note}");
+        assert!(note.contains("shot-a"), "{note}");
+        assert!(!note.contains("more"), "one is not more than the listing cap: {note}");
+        let many: Vec<std::path::PathBuf> =
+            (0..MAX_UNPAIRED_LISTED + 3).map(|i| std::path::PathBuf::from(format!("s{i}.arw"))).collect();
+        let refs: Vec<&Path> = many.iter().map(|p| p.as_path()).collect();
+        let note = unpaired_note(&refs).expect("many unpaired RAWs are disclosed");
+        assert!(note.contains(&format!("{} RAW(s) skipped", MAX_UNPAIRED_LISTED + 3)), "{note}");
+        assert!(note.contains("and 3 more"), "the wall is capped: {note}");
+        assert!(!note.contains(&format!("s{}", MAX_UNPAIRED_LISTED)), "{note}");
     }
 
     /// The embedding block is ADDITIVE: an absent vector on either side costs

@@ -7176,6 +7176,43 @@
         assert!(app.fit_deep && app.fit_ai_judge);
     }
 
+    /// The sidecar folder (`style-index --xmp-dir`'s GUI half) is remembered
+    /// BESIDE the library folder it qualifies, and defaults to "beside each
+    /// RAW" in both places.
+    ///
+    /// MUTATION: drop `style_xmp_dir` from either `Prefs` or the save/restore
+    /// pair and this fails — a remembered library folder with a forgotten
+    /// sidecar folder rebuilds to an EMPTY index on the next launch, which is
+    /// the one failure mode this control exists to remove.
+    #[test]
+    fn the_sidecar_folder_is_persisted_beside_the_library_folder() {
+        assert_eq!(
+            AutoShadeApp::default().style_xmp_dir,
+            None,
+            "the default is the beside-the-RAW convention every build has used"
+        );
+        assert_eq!(
+            Prefs::default().style_xmp_dir,
+            None,
+            "and a prefs file written before this key existed decodes to the same answer"
+        );
+        let prefs = Prefs {
+            style_src_dir: Some(std::path::PathBuf::from("D:/library")),
+            style_xmp_dir: Some(std::path::PathBuf::from("D:/sidecars")),
+            ..Prefs::default()
+        };
+        let json = serde_json::to_string(&prefs).expect("prefs serialize");
+        let decoded: Prefs = serde_json::from_str(&json).expect("prefs deserialize");
+        assert_eq!(decoded.style_xmp_dir, prefs.style_xmp_dir);
+        assert_eq!(decoded.style_src_dir, prefs.style_src_dir);
+        // An older file that predates the key still loads, and answers None.
+        let older = json.replace(r#""style_xmp_dir":"D:/sidecars","#, "");
+        assert!(!older.contains("style_xmp_dir"), "the key really was removed: {older}");
+        let decoded: Prefs = serde_json::from_str(&older).expect("an older prefs file loads");
+        assert_eq!(decoded.style_xmp_dir, None);
+        assert_eq!(decoded.style_src_dir, prefs.style_src_dir, "and loses nothing else");
+    }
+
     /// R23-2: the reference-PHOTO switch is off by default in BOTH defaults
     /// (the app's and the prefs'), so neither a fresh install nor an upgraded
     /// prefs file silently starts putting a second image on every paid call.

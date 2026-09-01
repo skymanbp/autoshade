@@ -330,6 +330,21 @@ pub struct CachedDescription {
 }
 
 impl CachedDescription {
+    /// One description, stamped with THIS build's provenance.
+    ///
+    /// The ONE place the three stamps are written, so a value can never carry
+    /// a checkpoint it did not come from: the description cache stamps its own
+    /// entries here, and so does the style exemplar cache, which stores the
+    /// same type rather than a bare string for exactly that reason.
+    pub fn current(desc: String) -> Self {
+        CachedDescription {
+            desc,
+            model: MODEL_REPO.to_string(),
+            revision: MODEL_REVISION.to_string(),
+            prompt_version: PROMPT_VERSION,
+        }
+    }
+
     /// Is this entry an answer to the question THIS build is asking? The
     /// checkpoint, the revision and the prompt version all have to match — a
     /// description written by another prompt is a different answer to a
@@ -360,6 +375,11 @@ pub struct DescriptionCache {
 /// same file.
 pub const CACHE_FILE: &str = "style-descriptions.json";
 
+/// What [`crate::content_cache`] calls this file in the sentences it prints —
+/// so a degradation still reads as "description cache …", exactly as it did
+/// when those four sentences lived here.
+const CACHE_LABEL: &str = "description cache";
+
 /// The cache inside a NAMED directory.
 ///
 /// A parameter rather than a global read, for the reason every other seam in
@@ -386,61 +406,18 @@ impl DescriptionCache {
 
     /// Load the cache at `path`, or an empty one with a disclosed reason.
     ///
-    /// Three degradations, all silent-by-design only in the "no cache yet"
-    /// case: an absent file is empty and says nothing; an over-cap or
-    /// unparseable file is empty AND prints why; entries from another
-    /// checkpoint or prompt are dropped at load rather than filtered at every
-    /// lookup, so `len()` is the number of entries that can actually be used.
+    /// The file mechanics — the byte cap, the four degradations, the atomic
+    /// publish below — are [`crate::content_cache`]'s, shared with the style
+    /// exemplar cache. What is OWNED here is the admission rule: entries from
+    /// another checkpoint or prompt are dropped at load rather than filtered
+    /// at every lookup, so `len()` is the number of entries that can actually
+    /// be used.
     pub fn load(path: &Path) -> Self {
-        use std::io::Read as _;
-        if !path.exists() {
-            return Self::default();
-        }
         let mut cache = Self::default();
-        let text = match std::fs::File::open(path).and_then(|f| {
-            let mut bytes = Vec::new();
-            f.take((MAX_CACHE_BYTES + 1) as u64).read_to_end(&mut bytes)?;
-            Ok(bytes)
-        }) {
-            Ok(bytes) if bytes.len() > MAX_CACHE_BYTES => {
-                eprintln!(
-                    "  description cache {} exceeds the {}-byte cap — rebuilding it",
-                    path.display(),
-                    MAX_CACHE_BYTES
-                );
-                return cache;
-            }
-            Ok(bytes) => match String::from_utf8(bytes) {
-                Ok(t) => t,
-                Err(_) => {
-                    eprintln!(
-                        "  description cache {} is not UTF-8 — rebuilding it",
-                        path.display()
-                    );
-                    return cache;
-                }
-            },
-            Err(e) => {
-                eprintln!(
-                    "  description cache {} is unreadable ({e}) — rebuilding it",
-                    path.display()
-                );
-                return cache;
-            }
-        };
         let parsed: std::collections::BTreeMap<String, CachedDescription> =
-            match serde_json::from_str(&text) {
-                Ok(v) => v,
-                Err(e) => {
-                    eprintln!(
-                        "  description cache {} is unusable ({e}) — rebuilding it",
-                        path.display()
-                    );
-                    return cache;
-                }
-            };
+            crate::content_cache::read_map(path, CACHE_LABEL, MAX_CACHE_BYTES);
         for (key, value) in parsed {
-            if is_digest(&key)
+            if crate::content_cache::is_digest(&key)
                 && value.is_current()
                 && let Some(desc) = sanitize_desc(&value.desc)
             {
@@ -459,15 +436,7 @@ impl DescriptionCache {
     /// Remember one description. The value is stamped with THIS build's
     /// provenance, never with whatever the caller happened to hold.
     pub fn insert(&mut self, digest: String, desc: String) {
-        self.entries.insert(
-            digest,
-            CachedDescription {
-                desc,
-                model: MODEL_REPO.to_string(),
-                revision: MODEL_REVISION.to_string(),
-                prompt_version: PROMPT_VERSION,
-            },
-        );
+        self.entries.insert(digest, CachedDescription::current(desc));
     }
 
     /// Publish the cache, bounded and atomically.
@@ -495,39 +464,8 @@ impl DescriptionCache {
             }
             chosen.entry(k).or_insert(v);
         }
-        let text = serde_json::to_string(&chosen).context("serialise the description cache")?;
-        if text.len() > MAX_CACHE_BYTES {
-            bail!(
-                "refusing to write a {}-byte description cache over {} (cap {} bytes)",
-                text.len(),
-                path.display(),
-                MAX_CACHE_BYTES
-            );
-        }
-        crate::pipeline::ensure_parent(path)?;
-        // tmp + durable replace, like the style index itself: this file is
-        // read whole, so a half-written one would be a cache that disables
-        // itself on the next build.
-        static TMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let tmp = path.with_extension(format!(
-            "json.tmp{}-{}",
-            std::process::id(),
-            TMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-        ));
-        std::fs::write(&tmp, text)
-            .with_context(|| format!("write description cache {}", tmp.display()))?;
-        if let Err(e) = crate::store::durable_replace(&tmp, path) {
-            let _ = std::fs::remove_file(&tmp);
-            return Err(e).with_context(|| format!("publish description cache {}", path.display()));
-        }
-        Ok(())
+        crate::content_cache::publish_map(path, CACHE_LABEL, &chosen, MAX_CACHE_BYTES)
     }
-}
-
-/// A 64-hex lowercase key, i.e. something this cache could have written. A
-/// foreign key is dropped at load rather than trusted as a digest.
-fn is_digest(key: &str) -> bool {
-    key.len() == 64 && key.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
 #[cfg(test)]

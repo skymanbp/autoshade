@@ -167,8 +167,8 @@ autoshade apply <src> <recipe.json> (-o|--out) FILE [--long-edge N]
 autoshade auto <src> [-o|--out FILE] [--guidance TEXT] [--style 0..1] [--strength 0..1] [--adherence 0..1] [--embed|--no-embed] [--deep] [--reference-image] [--denoise] [--denoise-strength 0..1] [--denoise-model NAME] [--long-edge N]
 autoshade denoise <src> [-o|--out FILE] [--strength 0..1] [--model NAME]
 autoshade batch <dir> [--render] [--limit N] [--include-baked] [--jobs N] [--long-edge N]
-autoshade eval <dir> [--limit N] [--jobs N] [--fresh] [--state FILE]
-autoshade style-index <dir> [--embed|--no-embed] [--describe]
+autoshade eval <dir> [--xmp-dir DIR] [--limit N] [--jobs N] [--fresh] [--state FILE]
+autoshade style-index <dir> [--xmp-dir DIR] [--embed|--no-embed] [--describe]
 autoshade style-index --looks <dir> [--embed|--no-embed] [--describe]
 autoshade style-query <photo> [--direction TEXT] [--style 0..1] [--embed]
 autoshade reimagine <src> --prompt TEXT [--fidelity high|low] [--quality low|medium|high|auto] [--fidelity-retry] [-o|--out FILE]
@@ -187,6 +187,54 @@ is set (avoiding duplicate analysis and billing for RAW+JPEG pairs), and
 defaults to three photos in flight; `--long-edge` on `batch` requires
 `--render`. `eval` defaults to serial work and resumes from its state file.
 Denoise-strength/model overrides require `--denoise` on `auto`.
+
+### Where your `.xmp` sidecars are — `--xmp-dir`
+
+`style-index` and `eval` pair each RAW with the `.xmp` sidecar your editor
+wrote. By default that is the file **beside the RAW**, which is where Lightroom
+and ACR put it. If yours live somewhere else — an exported catalogue, or a
+photo volume you cannot write to — point `--xmp-dir` at that folder and three
+places are searched, in order:
+
+1. `<xmp-dir>/<the RAW's folder relative to `<dir>`>/<name>.xmp` — a sidecar
+   tree that **mirrors** your library;
+2. `<xmp-dir>/<name>.xmp` — one **flat** folder of sidecars for a nested
+   library;
+3. `<the RAW's own folder>/<name>.xmp` — beside the RAW, as before.
+
+The extension matches in any case (`.xmp` or `.XMP`) on every platform,
+Windows and macOS alike. The stem does not: a sidecar belongs to the photograph
+whose name it carries exactly.
+
+`style-index` now also says which RAWs it **skipped** for want of a sidecar —
+the count, and the first ten by name. A library that indexed 40 of 2,000
+photographs used to look exactly like a library of 40.
+
+### Rebuilds only measure what changed
+
+A `style-index` build caches what it measured per photograph — the 14 camera
+features, the SigLIP image vector, the vocabulary scores, the description and
+its text vector — in `style-exemplars.json` beside the index, keyed by the
+content of the frame it measured (the same key the description cache has always
+used). A rebuild:
+
+* **reuses** a photograph whose file is unchanged and whose cached answers cover
+  the passes you asked for — no decode, no model call at all;
+* **recomputes** anything new, edited, moved or rotated, and anything whose
+  cached answers came from a different checkpoint, phrase list or prompt;
+* **retires** entries for photographs that have left the library;
+* still re-reads every `.xmp`, because your sliders, curve, colour families and
+  mask habit can change without the pixels changing;
+* still recomputes the index's normalisation over the **whole merged set** —
+  adding one photograph legitimately moves the mean and deviation of every
+  normalised dimension, so those are never cached.
+
+Each build prints one line saying so:
+`style index cache: reused N, recomputed M, removed K, skipped-for-sidecar S`.
+A rebuild where every photograph is reused starts no model sidecar at all —
+neither the 1.5 GB SigLIP checkpoint nor the 4.3 GB Qwen one is loaded. The
+cache is only ever a saving: deleting `style-exemplars.json` costs time, never
+correctness, and a corrupt or foreign one is rebuilt with a printed reason.
 
 `style-index --looks` builds the separate finished-photo look library; it never
 adds camera features or develop settings to those records, and it is capped at

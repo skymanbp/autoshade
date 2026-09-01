@@ -975,6 +975,24 @@ most `512` characters at the door in both languages, invisible format characters
 stripped, and every surface that renders it — the two proposer reference blocks
 and the `style-query` diagnostic — passes it through that same door again.
 
+**…and so is everything else a build measures.** `style-exemplars.json`
+(`src/style_cache.rs`) sits beside it under the same key shape and the same file
+mechanics (`src/content_cache.rs` owns both: the byte cap, the four
+degradations, the `tmp`+`durable_replace` publish, the 64-hex key rule). It maps
+that digest to the 14-dim feature, the SigLIP image vector, the vocabulary
+scores, the description and its text vector, plus a `SourceStamp` (absolute
+path case-folded on Windows, length, mtime, saved quarter-turns) — the stamp is
+what lets an unchanged file skip the DECODE, which the digest alone cannot,
+since the digest is of the frame that decode produces. Entries are gated per
+field by the index feature version, `embed_provenance_string()` and
+`CachedDescription::is_current()`, and admitted only inside the index door's own
+bands, so a bit-rotted vector can never reach a published index. It is capped at
+`5,000` entries (the RAW library's own cap) under a 40 KiB per-entry bound, and
+PRUNED to what the build used rather than topped up — an entry here is ~16 KiB
+of vector text against the description cache's ~200 bytes. The index's
+normalisation is never cached: `compute_norm` is a mean and σ over the whole
+merged exemplar set.
+
 The two populations have separate caps because one file holds both: 5,000 RAW
 exemplars and **500 looks**, against a 40 KiB per-record bound and a 228 MiB
 file envelope (5,500 × 40 KiB = 214.84 MiB). A look library is a curated set of

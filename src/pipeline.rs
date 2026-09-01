@@ -2777,8 +2777,9 @@ pub fn write_xmp(
     // PNG/TIFF's neighbouring .xmp is someone else's file (store::
     // lightroom_sidecar draws the same line for restore). Reading it anyway
     // meant a foreign sidecar was consulted on every save of a baked photo.
-    if crate::decode::is_raw(raw) {
-        let lr = raw.with_extension("xmp");
+    if crate::decode::is_raw(raw)
+        && let Some(lr) = crate::xmp_pair::XmpPairing::beside().find(raw)
+    {
         match crate::store::read_sidecar_checked(&lr) {
             // A blank file carries nothing to merge and nothing to lose.
             SidecarRead::Ok(t) if !t.trim().is_empty() => base = Some((lr, t)),

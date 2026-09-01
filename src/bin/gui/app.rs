@@ -78,6 +78,14 @@ pub(crate) struct AutoShadeApp {
     /// The folder the style library was last built FROM — prefilled into the
     /// picker so a rebuild does not mean finding it again. Persisted.
     pub(crate) style_src_dir: Option<PathBuf>,
+    /// Where that library's `.xmp` sidecars live when they are NOT beside the
+    /// RAWs — the GUI half of `style-index --xmp-dir`. `None` is the
+    /// beside-the-RAW convention every build before this one used, and stays
+    /// the default. Persisted beside the folder it qualifies, because the two
+    /// are one answer to "which library": a remembered source folder with a
+    /// forgotten sidecar folder would rebuild to an EMPTY index on the next
+    /// launch.
+    pub(crate) style_xmp_dir: Option<PathBuf>,
     pub(crate) looks_src_dir: Option<PathBuf>,
     pub(crate) use_looks: bool,
     pub(crate) direction_adherence: f32,
@@ -1569,6 +1577,7 @@ impl Default for AutoShadeApp {
             style_embed: false,
             style_describe: false,
             style_src_dir: None,
+            style_xmp_dir: None,
             looks_src_dir: None,
             use_looks: true,
             direction_adherence: autoshade::recipe::DirectionAdherence::DEFAULT,
@@ -2004,6 +2013,7 @@ impl eframe::App for AutoShadeApp {
                 style_embed: self.style_embed,
                 style_describe: self.style_describe,
                 style_src_dir: self.style_src_dir.clone(),
+                style_xmp_dir: self.style_xmp_dir.clone(),
                 looks_src_dir: self.looks_src_dir.clone(),
                 use_looks: self.use_looks,
                 direction_adherence: self.direction_adherence,
