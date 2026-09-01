@@ -228,8 +228,12 @@ None of these change a render; all of them change what the product says.
 - **Two macOS assets ship, not one.** The `.app` archive, and a standalone CLI
   archive carrying the same universal binary with the same sidecars beside it —
   for anyone who wants the command line without downloading a GUI bundle and
-  reaching inside it. Both are packed with `ditto`: a plain `zip` drops the
-  extended attribute the ad-hoc signature lives in.
+  reaching inside it. Both are packed with `ditto`, the archiver macOS itself
+  unpacks with: a plain `zip` mangles the symlink layout and the extended
+  attributes a bundle needs, and the copy that comes back out is a directory
+  that no longer launches. (The binaries' own ad-hoc signatures ride inside the
+  Mach-O, not in an attribute — the archiver matters for the tree, not for
+  them.)
 - **The Apple-GPU path is implemented and unmeasured.** The sidecars share one
   `cuda → mps → cpu` ladder, and the CUDA argument vector is byte-for-byte what
   it was. No latency, memory or `deform_conv2d`-fallback numbers have been

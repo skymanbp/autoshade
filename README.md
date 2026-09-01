@@ -351,17 +351,6 @@ Written down in the plan and the design memos, in delivery order:
   semantic class or by luminance band; a colour-range producer is designed and
   not built. Until it is, a look that differs only by hue over a spatially
   scattered region is fitted globally or not at all.
-- **A published macOS desktop app.** The three platform gaps behind it are
-  closed in the tree — ⌘Q now asks before discarding unsaved work, the
-  bundled sidecars are found inside `<App>.app/Contents/Resources`, and the
-  develop store lives under the user's `Library/Application Support` — and the
-  release workflow builds, lints and verifies an ad-hoc signed `AutoShade.app`
-  on every tag. What has not happened is a release that publishes it: the
-  first macOS desktop asset appears with the next tag, and the bundle is
-  ad-hoc signed rather than notarised, so Gatekeeper needs one explicit
-  「Open Anyway」 per machine. Apple-silicon GPU inference (Metal/MPS) is
-  wired and **unmeasured** — no Mac has run this build, so its speed and its
-  memory ceiling are reported by testers, not claimed here.
 - **A published Linux binary.** Linux is built and tested in CI from source on
   every push; the release workflow does not produce a Linux asset.
 
@@ -491,30 +480,40 @@ on the release page carries the SHA-256 of every asset.
 
 | File | Size | SHA-256 |
 |---|---:|---|
-| `autoshop.exe` (CLI) | 19,963,904 bytes | `64730aca96adb80350a3484e32e1e6dad57060d9575deb1eb125ca8380ad6d78` |
-| `autoshop-gui.exe` (desktop app) | 26,249,728 bytes | `e2d51f846c7bffb32ec96355274f9c7d914234b3de5f85dea185098700943b68` |
-| `Autoshop-Setup-1.1.0.exe` (installer) | 13,923,181 bytes | `9fcf9a542e554368ed9e83a6697d33ef9848b79baf9f1e7c728f38d770a6f4da` |
-| `autoshop-1.1.0-windows-x64.zip` (portable archive) | 18,696,286 bytes | `9efcd97dc491a9bb9e0eabbc0943f2bf443850699f76716b777ae22c3bd92b41` |
-| `autoshop-1.1.0-macos-universal.zip` (macOS universal CLI) | 36,894,209 bytes | `898eace14399aae800e653336cf6c789fb76d52f75edafeffc99cb1e4558b272` |
+| `autoshade.exe` (CLI) | 20,110,336 bytes | `2e0b1cf90837010c657bff5db2229fb73f145a5322397faaa72155207c7dbbc5` |
+| `autoshade-gui.exe` (desktop app) | 26,425,856 bytes | `ade218e804dab995bd79c47608f22198a0a2ceecf932d6045467865b71289919` |
+| `AutoShade-Setup-1.2.0.exe` (installer) | 14,217,455 bytes | `9a36788d78f6557d013cb0cbee71f34bae150918f3b806a42441fbd049685ffd` |
+| `autoshade-1.2.0-windows-x64.zip` (portable archive) | 18,790,699 bytes | `b03bb5aec0335ab22514afe7117530bf36883fa1460697fd1382e7e1d974d8ea` |
+| `AutoShade-1.2.0-macos-universal.zip` (macOS app bundle) | 37,369,887 bytes | `b42df0055af99780e3e71939fa481e790cc6ce846cbd50ee2414f3a7dda16533` |
+| `AutoShade-1.2.0-macos-cli.zip` (macOS command line only) | 16,120,927 bytes | `8f04523db95c25f8b8b71824b82512f0e3e69c572e1ccd96bcf68125029232cb` |
 
 Download from the
 [v1.2.0 release page](https://github.com/skymanbp/autoshade/releases/tag/v1.2.0):
 
-- **Installer (recommended):** run `Autoshop-Setup-1.1.0.exe`. It installs for
+- **Installer (recommended):** run `AutoShade-Setup-1.2.0.exe`. It installs for
   the current user without administrator access, adds Start Menu shortcuts,
   offers optional desktop and user `PATH` tasks, and removes its own files on
-  uninstall while keeping the develop store in `%LOCALAPPDATA%\autoshop`.
-- **Portable archive:** extract `autoshop-1.1.0-windows-x64.zip` to a directory
+  uninstall while keeping the develop store in `%LOCALAPPDATA%\autoshade`.
+  Upgrading over a pre-rename install also deletes the executables, icon and
+  fonts that carried the old name.
+- **Portable archive:** extract `autoshade-1.2.0-windows-x64.zip` to a directory
   you can keep intact and run either executable from there, beside the bundled
   `assets/` and `python/` sidecars.
 
 #### macOS
 
-The macOS archive is universal (Apple silicon and Intel in one file). Unzip it
-and move `AutoShade.app` to `/Applications`. The command-line binary travels
-inside the same bundle — `AutoShade.app/Contents/MacOS/autoshade` — so a
-terminal user needs no second download; symlink it onto your `PATH` if you want
-a short name.
+Two macOS archives ship, both universal (Apple silicon and Intel in one
+binary):
+
+- `AutoShade-1.2.0-macos-universal.zip` is the app. Unzip it and move
+  `AutoShade.app` to `/Applications`. The command-line binary travels inside
+  the same bundle — `AutoShade.app/Contents/MacOS/autoshade` — so this download
+  alone is enough for a terminal user too; symlink it onto your `PATH` if you
+  want a short name.
+- `AutoShade-1.2.0-macos-cli.zip` is the command line on its own, with the same
+  sidecars and assets beside it, for anyone who does not want a GUI bundle.
+
+Unpack either with Finder or `ditto -x -k <zip> <dir>`.
 
 The bundle is **ad-hoc signed, not notarised**, so the first launch is refused:
 macOS reports that the developer cannot be verified. That refusal is expected,
@@ -784,10 +783,15 @@ claims. Model weights are not stored in this repository.
 
 ## Status, roadmap, and known limitations
 
-Release gates for v1.0.0 cover the CLI, desktop GUI, sidecar contracts, format
+Release gates for v1.2.0 cover the CLI, desktop GUI, sidecar contracts, format
 fixtures, and deterministic renderer; the built artifacts' sizes and hashes
-are listed above. Interactive use on Ubuntu and macOS, where only CI source
-builds run, remains less exercised.
+are listed above. macOS ships prebuilt binaries and a desktop app for the
+first time in this release, and nobody has used them interactively: CI builds
+both slices, runs `--version` on the arm64 one, self-tests the sidecars and
+inspects the bundle, and that is the whole of the evidence. Apple-silicon GPU
+inference (Metal/MPS) is wired and **unmeasured** — its speed and its memory
+ceiling are reported by testers, not claimed here. Ubuntu is still CI source
+builds only.
 
 Honesty markers: the approximate X-Trans path, locally re-derived rather than
 Adobe-identical AI masks, measured-but-not-bit-exact Lightroom rendering
