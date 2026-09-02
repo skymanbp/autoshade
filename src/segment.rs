@@ -11,7 +11,7 @@
 
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Command;
 
 use anyhow::{bail, Context, Result};
 use image::GrayImage;
@@ -555,19 +555,12 @@ pub fn segment_file(opts: &SegmentOpts, input: &Path, output: &Path) -> Result<S
     // `exists()` guard here never fired for them.
     let before = crate::artifact_state(output);
     let prompt_file = stage_prompt_file(opts, input)?;
-    let mut cmd = Command::new(&opts.python_bin);
-    // What a `.env` may push at this child is an ALLOWLIST, not "everything
-    // the capability table did not refuse" — see `config::dotenv_child_env`.
-    // Compute knobs (CUDA_VISIBLE_DEVICES, thread counts) pass; anything that
-    // names a path, a host, a credential or a library to load does not, which
-    // is what stops a photo pack's `.env` from handing this process
-    // LD_PRELOAD. The user's OWN environment is unaffected: nothing calls
-    // env_clear, so the child still inherits it. `-E` below is the second
-    // layer for PYTHON* specifically.
-    cmd.envs(crate::config::dotenv_child_env());
-    cmd.envs(crate::config::Config::sidecar_child_env());
-    // `-E`: ignore PYTHON* environment variables — same import-hijack
-    // guard as the denoise sidecar (config.rs protects them too).
+    // `crate::sidecar_command` carries the whole child preamble — the `.env`
+    // ALLOWLIST, captured stdio, no console flash, a kill group — shared with
+    // the denoise bridge and the backend probe below so none of them can drift.
+    let mut cmd = crate::sidecar_command(&opts.python_bin);
+    // `-E`: ignore PYTHON* environment variables — the second layer for that
+    // family specifically (config.rs protects them too).
     append_segment_args(
         &mut cmd,
         opts,
@@ -575,35 +568,12 @@ pub fn segment_file(opts: &SegmentOpts, input: &Path, output: &Path) -> Result<S
         output,
         prompt_file.as_ref().map(|p| p.path.as_path()),
     );
-    cmd
-        // CAPTURE, never inherit: the release GUI is windows_subsystem="windows"
-        // and has NO console, so inherited handles discard the sidecar's output —
-        // the reason a missing dependency used to surface as a bare exit code.
-        // The tail goes into the error instead, which reaches the GUI toast.
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    // Don't flash a console window when the windowed GUI spawns the sidecar.
-    crate::hide_child_console(&mut cmd);
-    // Tree-wide kill on timeout — same rule as the denoise sidecar (L11#7).
-    crate::arm_kill_group(&mut cmd);
-    let run = (|| -> Result<std::process::Output> {
-        let child = cmd.spawn().with_context(|| {
-            format!(
-                "launch segmentation sidecar ({} {}) — is Python on PATH / AUTOSHADE_PYTHON set?",
-                opts.python_bin,
-                opts.script.display()
-            )
-        })?;
-        let group = crate::assign_kill_group(&child);
-        crate::denoise::bounded_child_output(
-            child,
-            "segmentation sidecar",
-            crate::denoise::sidecar_timeout(),
-            "AUTOSHADE_SIDECAR_TIMEOUT_SECS",
-            group,
-        )
-    })();
+    let run = crate::run_sidecar_child(
+        &mut cmd,
+        "segmentation sidecar",
+        &format!("{} {}", opts.python_bin, opts.script.display()),
+        crate::denoise::sidecar_timeout(),
+    );
     let out = match run {
         Ok(out) => out,
         Err(error) => {
@@ -613,11 +583,7 @@ pub fn segment_file(opts: &SegmentOpts, input: &Path, output: &Path) -> Result<S
     };
     if !out.status.success() {
         crate::denoise::discard_failed_output(output, before);
-        bail!(
-            "segmentation sidecar exited with {}: {}",
-            out.status.code().map(|c| c.to_string()).unwrap_or_else(|| "signal".into()),
-            crate::sidecar_tail(&out.stderr, &out.stdout)
-        );
+        return Err(crate::sidecar_exit_error("segmentation sidecar", &out));
     }
     // Exit 0 alone is not success — THIS run must have produced a non-empty
     // mask (see `crate::sidecar_wrote` for the three refusals).
@@ -708,32 +674,22 @@ fn birefnet_deps_available(opts: &SegmentOpts) -> Option<bool> {
         if !opts.script.exists() {
             return None;
         }
-        let mut cmd = Command::new(&opts.python_bin);
-        // Same child-environment discipline as the segmentation spawn: an
-        // allowlisted `.env`, `-E` against PYTHON* import hijacking, no
-        // inherited console, and a kill group so a wedged probe cannot outlive
-        // the develop.
-        cmd.envs(crate::config::dotenv_child_env());
-        cmd.envs(crate::config::Config::sidecar_child_env());
+        // The SAME child discipline as the segmentation spawn, because it is
+        // literally the same helper: an allowlisted `.env`, no inherited
+        // console, and a kill group so a wedged probe cannot outlive the
+        // develop. `-E` is this argv's own second layer against PYTHON*.
+        let mut cmd = crate::sidecar_command(&opts.python_bin);
         cmd.arg("-E")
             .arg(&opts.script)
             .arg("--target")
             .arg("subject")
             .arg("--probe-backend")
-            .args(crate::config::Config::load().weights_args())
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        crate::hide_child_console(&mut cmd);
-        crate::arm_kill_group(&mut cmd);
-        let child = cmd.spawn().ok()?;
-        let group = crate::assign_kill_group(&child);
-        let out = crate::denoise::bounded_child_output(
-            child,
+            .args(crate::config::Config::load().weights_args());
+        let out = crate::run_sidecar_child(
+            &mut cmd,
             "segmentation backend probe",
+            &format!("{} {}", opts.python_bin, opts.script.display()),
             crate::denoise::sidecar_timeout(),
-            "AUTOSHADE_SIDECAR_TIMEOUT_SECS",
-            group,
         )
         .ok()?;
         if !out.status.success() {
@@ -851,27 +807,56 @@ impl BackendMarker {
 /// on an actual CHANGE in this machine's capability, so it fires once and then
 /// stops: the re-run rewrites the marker with today's verdict either way.
 ///
-/// **Everything unknown means NO.** No marker (an alpha written before this
-/// build), an unparseable one, or a probe that could not run all leave the
-/// cache alone. That costs nothing real: `AI_BACKEND_GENERATION` 2 has not
-/// shipped, so every alpha that survives into v0.35.0 re-derives once anyway
-/// and is written by this build, with a marker.
+/// **NO MARKER means gen-1, and gen-1 is renewed ONCE.** This arm used to
+/// leave an unmarked alpha alone, on the premise that the population was empty:
+/// "`AI_BACKEND_GENERATION` 2 has not shipped, so every alpha that survives
+/// into v0.35.0 re-derives once anyway". That premise was false when it was
+/// written — the constant has been 2 since v0.35.0 — so every alpha a v0.35.0
+/// build cached BEFORE markers existed is on disk right now under today's
+/// generation, with no provenance, and was being served forever with softer
+/// edges nobody could see recorded. So the policy reads what is actually on
+/// disk: a marker present is trusted; a marker ABSENT means the alpha predates
+/// provenance, is treated as gen-1, and is re-derived once. The re-run writes a
+/// marker, so it happens once per alpha and never again.
+///
+/// **And only where a replacement can actually be produced.** The renewal path
+/// DELETES the cached alpha before re-running (see `resolve_ai_masks`, which
+/// must, or `sidecar_wrote` reads the stale file as this run's output), so
+/// renewing on a machine that cannot segment would trade a good mask for an
+/// `unresolved`. Both arms therefore require today's probe to say `Some(true)`:
+/// an unanswerable probe (no interpreter, no script, a probe that timed out)
+/// leaves the cache exactly as it is.
 fn should_renew_cached_alpha(alpha: &Path, opts: &SegmentOpts) -> bool {
-    let Some(m) = BackendMarker::read(alpha) else { return false };
+    let marker = BackendMarker::read(alpha);
     // The MARKER half first, so the 4.3 s probe is never spent on an alpha
     // whose own record already says the answer cannot change.
-    if !backend_is_fallback(&m.backend) || m.birefnet_deps != Some(false) {
+    if let Some(m) = marker.as_ref()
+        && (!backend_is_fallback(&m.backend) || m.birefnet_deps != Some(false))
+    {
         return false;
     }
-    marker_is_stale(&m, birefnet_deps_available(opts))
+    renewal_verdict(marker.as_ref(), birefnet_deps_available(opts))
 }
 
 /// The decision of [`should_renew_cached_alpha`] with today's verdict handed
 /// IN, so the rule can be exercised by a test instead of being reachable only
 /// through a real interpreter and a process-wide memo — the same split
 /// [`ai_cache_key_gen`] makes for the generation term.
-fn marker_is_stale(m: &BackendMarker, deps_now: Option<bool>) -> bool {
-    backend_is_fallback(&m.backend) && m.birefnet_deps == Some(false) && deps_now == Some(true)
+///
+/// Both branches end in `deps_now == Some(true)` and that is the termination
+/// argument: a marked fallback is renewed only on a machine that has GAINED the
+/// backend (the re-run rewrites the verdict, so it cannot fire twice), and an
+/// unmarked alpha only where a replacement can be produced (the re-run writes
+/// the marker, so it cannot fire twice either).
+fn renewal_verdict(m: Option<&BackendMarker>, deps_now: Option<bool>) -> bool {
+    match m {
+        Some(m) => {
+            backend_is_fallback(&m.backend)
+                && m.birefnet_deps == Some(false)
+                && deps_now == Some(true)
+        }
+        None => deps_now == Some(true),
+    }
 }
 
 /// What one [`resolve_ai_masks`] pass did, for the disclosure channels.
@@ -1731,6 +1716,7 @@ mod tests {
     /// true and re-derives every alpha on a machine that cannot answer.
     #[test]
     fn a_fallback_alpha_is_renewed_only_when_this_machine_gained_the_backend() {
+        let marker_is_stale = |m: &BackendMarker, deps_now| renewal_verdict(Some(m), deps_now);
         let mk = |backend: &str, deps: Option<bool>| BackendMarker {
             backend: backend.to_string(),
             birefnet_deps: deps,
@@ -1754,16 +1740,28 @@ mod tests {
         // 6. The pinned model's own alphas are never thrown away.
         assert!(!marker_is_stale(&mk(primary, Some(true)), Some(true)));
         assert!(!marker_is_stale(&mk(primary, Some(false)), Some(true)));
+        // 7. NO MARKER: an alpha cached under today's generation before
+        //    provenance existed. Renewed once where a replacement can be
+        //    produced — and only there, because the renewal deletes the cached
+        //    alpha before re-running.
+        assert!(renewal_verdict(None, Some(true)), "an unmarked alpha is gen-1 and re-derives");
+        assert!(!renewal_verdict(None, Some(false)), "this machine cannot replace it");
+        assert!(!renewal_verdict(None, None), "an unanswerable probe is not a yes");
     }
 
-    /// An alpha with NO marker beside it keeps its cache hit. The whole
-    /// population this could matter for is empty for released builds —
-    /// `AI_BACKEND_GENERATION` 2 has not shipped, so every alpha surviving into
-    /// v0.35.0 re-derives once and is written by this build, with a marker —
-    /// and guessing "it was probably a fallback" would spend a model run per
-    /// mask on evidence nobody has.
+    /// An unmarked alpha is renewed — but NOT on a machine that cannot produce
+    /// a replacement, which is this arm.
+    ///
+    /// The renewal path deletes the cached alpha before it re-runs, so a
+    /// machine with no interpreter and no script would trade the
+    /// photographer's mask for an `unresolved`. `birefnet_deps_available`
+    /// answers `None` here (the script does not exist, so no probe is spawned)
+    /// and the cache stands.
+    ///
+    /// MUTATION: make the `None` marker arm of `renewal_verdict` return `true`
+    /// unconditionally and this fails.
     #[test]
-    fn an_unmarked_cached_alpha_is_left_alone() {
+    fn an_unmarked_cached_alpha_is_kept_when_this_machine_cannot_replace_it() {
         let dir = std::env::temp_dir()
             .join(format!("autoshade-seg-test-unmarked-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -1779,7 +1777,10 @@ mod tests {
             reference_point: None,
             prompt_points: None,
         };
-        assert!(!should_renew_cached_alpha(&alpha, &opts), "no marker ⇒ no re-derivation");
+        assert!(
+            !should_renew_cached_alpha(&alpha, &opts),
+            "no way to re-derive ⇒ the cached mask stands"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

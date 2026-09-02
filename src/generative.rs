@@ -402,6 +402,12 @@ pub fn retouch(
     // (L09#1): the parent used to be created only after paying AND after
     // the up-to-1.8 GB composite. See reimagine.
     pipeline::preflight_out(out, raw_path)?;
+    // A17: the LOCAL full-resolution phase, one at a time process-wide
+    // (`crate::full_res_slot`). It is released explicitly before the model call
+    // below and re-entered for the composite, because those are the two phases
+    // that hold whole frames — holding an admission slot across a call that
+    // runs for minutes would stall every export for that entire time.
+    let heavy = crate::full_res_slot();
     let raw = decode::is_raw(raw_path);
     // ONE dispatch for both source kinds (`render::source_pixels`). The cap is
     // RAW-only here: preview mode develops a RAW AT ≤2048 (the cap runs before
@@ -452,6 +458,10 @@ pub fn retouch(
     }
     let mut composite = base.to_rgba8();
     drop(base);
+    // Out of the full-resolution section: what survives across the model call
+    // is the ~240 MB composite (the A7 staging above), and waiting on the
+    // network is not what the slot exists to serialise.
+    drop(heavy);
 
     println!(
         "⚠ EXPERIMENTAL generative fill via {} ({}, quality={quality}, base={bw}x{bh} {}; composite)",
@@ -502,6 +512,10 @@ pub fn retouch(
     // `to_rgb8`, not `to_rgba8`: the blend reads only RGB and writes an
     // opaque alpha, so the RGBA copy was 241 MB of pure waste at 61 MP —
     // and it coexisted with the 181 MB RGB frame it was copied from.
+    // Back into the full-resolution section for the COMPOSITE: the generative
+    // upscale and the weight plane are ~241 MB each at 61 MP, and this is the
+    // phase the slot was scoped to.
+    let _heavy = crate::full_res_slot();
     let gen_img = image::load_from_memory(&result)
         .context("decode generative result")?
         .resize_exact(bw, bh, FilterType::Lanczos3)
@@ -2067,7 +2081,7 @@ mod tests {
             python_bin: "python".into(),
             denoise_model: "scunet_color_real_psnr".into(),
             denoise_script: String::new(),
-            denoise_cache: String::new(),
+            weights_dir: String::new(),
             segment_script: String::new(),
             embed_script: String::new(),
             correspond_script: String::new(),
@@ -2173,7 +2187,7 @@ mod tests {
             python_bin: "python".into(),
             denoise_model: "scunet_color_real_psnr".into(),
             denoise_script: String::new(),
-            denoise_cache: String::new(),
+            weights_dir: String::new(),
             segment_script: String::new(),
             embed_script: String::new(),
             correspond_script: String::new(),
@@ -2283,7 +2297,7 @@ mod tests {
             python_bin: "python".into(),
             denoise_model: "scunet_color_real_psnr".into(),
             denoise_script: String::new(),
-            denoise_cache: String::new(),
+            weights_dir: String::new(),
             segment_script: String::new(),
             embed_script: String::new(),
             correspond_script: String::new(),
@@ -2460,7 +2474,7 @@ mod tests {
             python_bin: "python".into(),
             denoise_model: String::new(),
             denoise_script: String::new(),
-            denoise_cache: String::new(),
+            weights_dir: String::new(),
             segment_script: String::new(),
             embed_script: String::new(),
             correspond_script: String::new(),
