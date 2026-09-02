@@ -555,14 +555,16 @@ _TOOLCHAIN_PINS = ("rust-toolchain.toml", "rust-toolchain")
 def toolchain_truth(_args: argparse.Namespace) -> Truth:
     """The toolchain the docs must agree with.
 
-    This repo pins NO toolchain (no rust-toolchain / rust-toolchain.toml —
-    `edition = "2024"` in Cargo.toml is an edition, not a compiler version), so
-    there is no machine-checkable truth for "which rustc built this". The check
-    is therefore DOC-INTERNAL: ARCHITECTURE §5's claim must agree with README's
-    Tech line — the two places a reader looks. Compared at major.minor, since
-    §5 carries the patch ("1.94.1") and README does not ("1.94"). If a pin ever
-    lands in the repo, the branch below promotes it to the source of record
-    automatically and the doc-internal fallback stops being used.
+    Since v1.2.4 the repo DOES pin one (`rust-toolchain.toml`), so the branch
+    below promotes it to the source of record and the doc-internal fallback
+    stops being used — exactly as this function was written to do. The fallback
+    is kept, not deleted: it is what the check falls back to if the pin is ever
+    removed, and a claim that silently stops checking anything is worse than one
+    that checks the weaker thing.
+
+    The comparison here stays at major.minor, because the fallback source
+    (README's Tech line) carries no patch. `pinned_toolchain` below is the row
+    that compares the PATCH, and it is the one the pin made possible.
     """
     for rel in _TOOLCHAIN_PINS:
         p = REPO / rel
@@ -580,6 +582,28 @@ def toolchain_truth(_args: argparse.Namespace) -> Truth:
         raise LookupError("README.md: Tech line no longer states rustc/cargo X.Y")
     return Truth((m.group("toolchain"),), f"README.md:{line_of(src, m.start())} "
                  "(doc-internal: repo pins no toolchain)")
+
+
+def pinned_toolchain(_args: argparse.Namespace) -> Truth | Skip:
+    """The channel `rust-toolchain.toml` pins, exactly — patch included.
+
+    `toolchain_truth` compares at major.minor because its fallback source has no
+    patch, so "1.94.1 in ARCHITECTURE, 1.94.2 on every runner" reads as a match.
+    The pin closed that: it is what `rustup` hands every `cargo` call, so it is
+    what actually built the published binaries, and §5 states the patch. This
+    row compares the two verbatim.
+
+    SKIPs rather than fails when the pin is absent, so removing the pin does not
+    turn this into a red that says nothing about the docs.
+    """
+    p = REPO / "rust-toolchain.toml"
+    if not p.is_file():
+        return Skip("rust-toolchain.toml is absent: there is no pin to compare against")
+    src = text("rust-toolchain.toml")
+    m = re.search(r'channel\s*=\s*"([^"]+)"', src)
+    if not m:
+        raise LookupError('rust-toolchain.toml: no channel = "…" to read')
+    return Truth((m.group(1),), f"rust-toolchain.toml:{line_of(src, m.start())}")
 
 
 def major_minor(v: tuple[str, ...]) -> tuple[str, ...]:
@@ -628,23 +652,14 @@ def census_counts(_args: argparse.Namespace) -> Truth | Skip:
     CI/release runs that have the corpus set `AUTOSHADE_CENSUS_ROOT` and get a
     first-party count check against the source-of-truth comment.
 
-    The pre-rename `AUTOSHOP_CENSUS_ROOT` still answers, the same way the app
-    answers to every other pre-rename variable (`config::with_legacy_alias`).
-    A gate that quietly SKIPPED because the operator's shell still spells it the
-    old way is worse than no gate: it reports PASS-with-SKIP and nothing is
-    checked.
+    The pre-rename `AUTOSHOP_CENSUS_ROOT` no longer answers: v1.2.4 closed the
+    app's own `AUTOSHOP_*` door (the alias prefix and the four functions that
+    rebuilt names out of it are gone from `config.rs`), and a gate that kept a
+    second spelling the app itself refuses would be checking a configuration
+    nothing else honours.
     """
     name = "AUTOSHADE_CENSUS_ROOT"
     raw = os.environ.get(name)
-    if not raw:
-        name = "AUTOSHOP_CENSUS_ROOT"
-        raw = os.environ.get(name)
-        if raw:
-            print(
-                f"warning: {name} still works, but it is the pre-rename name and the"
-                " next release removes it; rename it to AUTOSHADE_CENSUS_ROOT.",
-                file=sys.stderr,
-            )
     if not raw:
         return Skip("AUTOSHADE_CENSUS_ROOT is unset: the census corpus is outside the repo")
     root = Path(raw)
@@ -774,6 +789,12 @@ CLAIMS: list[Claim | SetClaim] = [
         r"rustc/cargo \*\*(?P<toolchain>\d+(?:\.\d+)+)\*\*",
         toolchain_truth,
         major_minor,
+    ),
+    Claim(
+        ARCH,
+        "toolchain — §5 vs the rust-toolchain.toml pin (patch included)",
+        r"rustc/cargo \*\*(?P<toolchain>\d+(?:\.\d+)+)\*\*",
+        pinned_toolchain,
     ),
     # ── R28 doc-audit additions (2026-08-20): pin the maintained COPIES the
     # original 11 rows could not see — the audit found the bug template's

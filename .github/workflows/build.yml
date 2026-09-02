@@ -25,8 +25,19 @@ jobs:
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
+      # A45: the repo pins its compiler (`rust-toolchain.toml`), and `rustup`
+      # honours that file for every `cargo` call below without a toolchain
+      # input. Asserted rather than assumed — an unpinned runner building the
+      # published binaries is exactly the drift the pin exists to end.
+      - name: Toolchain
+        shell: bash
+        run: |
+          want=$(sed -n 's/^channel *= *"\(.*\)"/\1/p' rust-toolchain.toml)
+          got=$(rustc --version | cut -d' ' -f2)
+          echo "rust-toolchain.toml pins $want; rustc reports $got"
+          test "$want" = "$got" || { echo "::error::the pin was not honoured"; exit 1; }
       - name: cargo build (default features)
         run: cargo build --release --locked
       - name: cargo build (gui feature)
@@ -44,7 +55,7 @@ jobs:
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: cargo test (default features)
@@ -62,7 +73,7 @@ jobs:
   debug-asserts:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: cargo test (lib, debug profile)
