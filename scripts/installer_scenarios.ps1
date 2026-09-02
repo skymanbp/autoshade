@@ -583,7 +583,11 @@ Assert-That (-not (Test-Path -LiteralPath $group)) 'the Start Menu group is gone
 Assert-Same (Get-DisplayNameEntryCount $AppName) 0 'the Programs and Features entry is gone'
 Assert-Same (Get-PathEntryCount $installDir) 0 'the PATH entry is gone'
 Assert-Same (Get-UserPathRaw) $pathBefore 'the user PATH is byte-identical to before the run'
-Assert-That (-not (Test-Path -LiteralPath 'HKCU:\Software\Autoshop\InstallerScenario')) `
+# Whichever key this build wrote -- the shipped one on a runner with no other
+# AutoShade, the scenario one on a developer machine -- HKCU\Software\Autoshop
+# has to be back to the state the run found it in. Naming only the scenario key
+# would pass on CI without having checked anything.
+Assert-Same (Test-Path -LiteralPath 'HKCU:\Software\Autoshop') $autoshopKeyBefore `
     "the installer's own state key is gone"
 Assert-Same (Get-Sha256 (Join-Path $weightsDir 'birefnet.marker')) $weightsHash 'the weights were kept'
 Assert-Same (Get-TreeSignature $weightsDir) $weightsBefore 'every weights file was kept'
