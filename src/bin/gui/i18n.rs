@@ -182,11 +182,12 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
       spread its dark and bright slices {fan} degrees apart (limit \
       {limit}). Shrinking them — first toward the one shape all three \
       channels share, then toward no curves at all — was tried first: \
-      either no point on that path cleared the limit, or the strongest \
-      point that did bought less than the fit's own quantisation budget, \
-      so none shipped. A single-hued region sorted into a hue fan by \
-      brightness is not something any develop control can put back.",
-        " 色偏曲线已被扣留：它们会把同一个色相类沿亮度拉散——该色相类占画面可测色彩的 {share}，而三条通道曲线会把它的暗部与亮部切片拉开 {fan} 度（上限 {limit}）。先尝试过把它们收缩——先收向三个通道共有的那一个形状，再收向完全不加曲线：这条路上没有任何一点进入上限之内，或者进入上限之内最强的一点带来的改进不足拟合自身的量化预算，于是一条也没有采用。单一色相的区域被按明暗分选成多个色相，任何显影控件都无法还原。"),
+      either no point on that path cleared the limit, or the \
+      best-paying point that did bought less than the fit's own \
+      quantisation budget, so none shipped. A single-hued region sorted \
+      into a hue fan by brightness is not something any develop control \
+      can put back.",
+        " 色偏曲线已被扣留：它们会把同一个色相类沿亮度拉散——该色相类占画面可测色彩的 {share}，而三条通道曲线会把它的暗部与亮部切片拉开 {fan} 度（上限 {limit}）。先尝试过把它们收缩——先收向三个通道共有的那一个形状，再收向完全不加曲线：这条路上没有任何一点进入上限之内，或者进入上限之内改进最大的那一点带来的改进也不足拟合自身的量化预算，于是一条也没有采用。单一色相的区域被按明暗分选成多个色相，任何显影控件都无法还原。"),
     (" Colour-cast curves were shrunk toward the shape all three channels \
       share: as fitted they would have opened a {fan_before} degree hue \
       fan in a class holding {share} of the frame's measurable colour \
@@ -204,6 +205,22 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
       holds enough of the frame across two luma slices for a fan to have \
       a value.",
         " 收缩后曲线的色相沿亮度跨度无法测量：任何色相类都没有在两个亮度切片上占到足够的画面。"),
+    (" The finished recipe was read once more against the untouched photo: \
+      it sorted one hue class apart across luminance — that class holds \
+      {share} of the frame's measurable colour and its dark and bright \
+      slices ended {fan} degrees apart, against a limit of {limit} — so \
+      the colour-cast curves were taken back out, which brings that class \
+      inside the limit.",
+        " 成品配方又对照未处理的原片读了一次：它把同一个色相类沿亮度分选开了——该色相类占画面可测色彩的 {share}，其暗部与亮部切片最终相差 {fan} 度，上限为 {limit}——因此把色偏曲线又取了出来，这使该色相类回到上限之内。"),
+    (" The finished recipe was read once more against the untouched photo: \
+      it sorted one hue class apart across luminance — that class holds \
+      {share} of the frame's measurable colour and its dark and bright \
+      slices ended {fan} degrees apart, against a limit of {limit}. Taking \
+      the colour-cast curves back out still left {after} degrees, so they \
+      were not the cause and they were kept; tone and saturation are what \
+      spread that class, and no develop control puts a brightness-sorted \
+      hue fan back.",
+        " 成品配方又对照未处理的原片读了一次：它把同一个色相类沿亮度分选开了——该色相类占画面可测色彩的 {share}，其暗部与亮部切片最终相差 {fan} 度，上限为 {limit}。把色偏曲线取出来之后仍有 {after} 度，说明起因不是这些曲线，于是把它们保留了下来；把该色相类拉散的是影调与饱和度，而任何显影控件都无法把按明暗分选出来的色相跨度还原。"),
     (" Global colour cast measured from consistent hue rotation across the populated frame (rotation {rotation} degrees, chroma ratio {ratio}); white balance and saturation were read from population evidence.", " 已从画面中各色相带一致的色相旋转测得全局色偏（旋转 {rotation} 度，色度比 {ratio}）；白平衡和饱和度取自整体证据。"),
     (" High-strength fit disclosed unsupported movement in {kind}: {ranges}. The controls were retained, but confidence is capped by the strength budget.", " 高强度拟合显示 {kind} 中没有双侧证据的移动：{ranges}。控制保留，置信度受强度预算限制。"),
     // ── Settings ────────────────────────────────────────────────────────────
