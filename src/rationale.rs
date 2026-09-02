@@ -165,10 +165,11 @@ pub mod keys {
          frame's measurable colour, and the three channel curves would have \
          spread its dark and bright slices {fan} degrees apart (limit \
          {limit}). Shrinking them — first toward the one shape all three \
-         channels share, then toward no curves at all — was tried first: no \
-         milder version both cleared the limit and left the frame closer to \
-         the target. A single-hued region sorted into a hue fan by brightness \
-         is not something any develop control can put back.";
+         channels share, then toward no curves at all — was tried first: \
+         either no point on that path cleared the limit, or the strongest \
+         point that did bought less than the fit's own quantisation budget, \
+         so none shipped. A single-hued region sorted into a hue fan by \
+         brightness is not something any develop control can put back.";
     /// v1.2.3: the stage's THIRD outcome — the fan gate convicted the fitted
     /// curves and a PROJECTED, milder cast shipped instead of nothing.
     ///
@@ -179,6 +180,12 @@ pub mod keys {
     /// the admission states them, because the same thing is true of them —
     /// the ratio arm rejects only when the evidence is unidentifiable, so an
     /// admitted ratio may legitimately exceed 1.0.
+    ///
+    /// `rehued` is here, and [`FIT_NOTE_CAST_ADMITTED_FOREIGN`] travels beside
+    /// this note, because a projected cast must disclose AT LEAST what an
+    /// admitted one does: these are curves the fit INVENTED to answer a
+    /// conviction rather than curves it measured off the pair, so the two
+    /// pixel-aligned readings matter more here, not less.
     pub const FIT_NOTE_CAST_PROJECTED: &str =
         " Colour-cast curves were shrunk toward the shape all three channels \
          share: as fitted they would have opened a {fan_before} degree hue \
@@ -186,7 +193,8 @@ pub mod keys {
          (limit {limit}), so they were taken back to t = {t} of the fitted \
          cast (1 = as fitted, 0.5 = one curve shared by all three channels, \
          0 = none). The look error with the shrunk curves is {ratio} of the \
-         error without them (the strength budget's bound is {bound}).";
+         error without them (the strength budget's bound is {bound}), and \
+         they re-hued {rehued} of the frame past the rotation budget.";
     /// The projected curves' own fan reading, when the census has one.
     pub const FIT_NOTE_CAST_PROJECTED_FAN: &str =
         " The projected curves change that class's hue spread across \

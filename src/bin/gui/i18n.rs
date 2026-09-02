@@ -181,19 +181,21 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
       frame's measurable colour, and the three channel curves would have \
       spread its dark and bright slices {fan} degrees apart (limit \
       {limit}). Shrinking them — first toward the one shape all three \
-      channels share, then toward no curves at all — was tried first: no \
-      milder version both cleared the limit and left the frame closer to \
-      the target. A single-hued region sorted into a hue fan by brightness \
-      is not something any develop control can put back.",
-        " 色偏曲线已被扣留：它们会把同一个色相类沿亮度拉散——该色相类占画面可测色彩的 {share}，而三条通道曲线会把它的暗部与亮部切片拉开 {fan} 度（上限 {limit}）。先尝试过把它们收缩——先收向三个通道共有的那一个形状，再收向完全不加曲线：没有找到任何一个收缩版本能在进入上限之内的同时让画面更接近目标。单一色相的区域被按明暗分选成多个色相，任何显影控件都无法还原。"),
+      channels share, then toward no curves at all — was tried first: \
+      either no point on that path cleared the limit, or the strongest \
+      point that did bought less than the fit's own quantisation budget, \
+      so none shipped. A single-hued region sorted into a hue fan by \
+      brightness is not something any develop control can put back.",
+        " 色偏曲线已被扣留：它们会把同一个色相类沿亮度拉散——该色相类占画面可测色彩的 {share}，而三条通道曲线会把它的暗部与亮部切片拉开 {fan} 度（上限 {limit}）。先尝试过把它们收缩——先收向三个通道共有的那一个形状，再收向完全不加曲线：这条路上没有任何一点进入上限之内，或者进入上限之内最强的一点带来的改进不足拟合自身的量化预算，于是一条也没有采用。单一色相的区域被按明暗分选成多个色相，任何显影控件都无法还原。"),
     (" Colour-cast curves were shrunk toward the shape all three channels \
       share: as fitted they would have opened a {fan_before} degree hue \
       fan in a class holding {share} of the frame's measurable colour \
       (limit {limit}), so they were taken back to t = {t} of the fitted \
       cast (1 = as fitted, 0.5 = one curve shared by all three channels, \
       0 = none). The look error with the shrunk curves is {ratio} of the \
-      error without them (the strength budget's bound is {bound}).",
-        " 色偏曲线已向三个通道共有的形状收缩：按拟合原样，它们会在占画面可测色彩 {share} 的色相类内拉开 {fan_before} 度的色相跨度（上限 {limit}），因此把它们收缩到拟合值的 t = {t}（1 = 原样，0.5 = 三个通道共用一条曲线，0 = 不加曲线）。加上收缩后曲线的观感误差与不加曲线时的比值为 {ratio}（强度预算的上限为 {bound}）。"),
+      error without them (the strength budget's bound is {bound}), and \
+      they re-hued {rehued} of the frame past the rotation budget.",
+        " 色偏曲线已向三个通道共有的形状收缩：按拟合原样，它们会在占画面可测色彩 {share} 的色相类内拉开 {fan_before} 度的色相跨度（上限 {limit}），因此把它们收缩到拟合值的 t = {t}（1 = 原样，0.5 = 三个通道共用一条曲线，0 = 不加曲线）。加上收缩后曲线的观感误差与不加曲线时的比值为 {ratio}（强度预算的上限为 {bound}），并使画面的 {rehued} 超出色相旋转预算。"),
     (" The projected curves change that class's hue spread across \
       luminance by {fan_after} degrees, inside the {target} degree target \
       a projection has to reach.",

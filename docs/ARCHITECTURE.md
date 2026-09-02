@@ -2193,8 +2193,8 @@ Refusing outright cost the showcase pair a third of its fit (look error
 0.137 → 0.058 instead of 0.137 → 0.033, confidence 0.646 → 0.577), and the
 fan gate's verdict is narrower than "this cast is wrong": it says "not in
 this SHAPE". So when the fan gate is the ONLY gate that fails — the two
-pixel-aligned vetoes and the unsupported-hue-range veto all clear — the stage
-does not empty the curves. It walks them down a one-parameter path and ships
+pixel-aligned vetoes, the unsupported-hue-range veto AND the aggregate ratio
+gate all clear — the stage does not empty the curves. It walks them down a one-parameter path and ships
 the strongest point that clears.
 
 The path gives up the CHROMATIC part first. Write `L` for the per-knot mean
@@ -2221,8 +2221,8 @@ to the identity, where the fan is zero by construction and the outcome is
 exactly the old refusal.
 
 The search is a 12-step bisection for the largest `t` whose RENDERED
-candidate clears, never an algebraic reading of the curves — the same rule
-every closed-loop stage here follows. Each candidate is re-judged by all four
+candidate is ADMISSIBLE, never an algebraic reading of the curves — the same
+rule every closed-loop stage here follows. Each candidate is re-judged by all four
 gates from scratch, so a milder cast that makes the aggregate ratio fail, or
 that trips a pixel veto the fitted cast happened to clear, is refused and
 says so; and the strength budget's bound rides into that judgement exactly as
@@ -2238,19 +2238,77 @@ because the gates decide whether a MEASURED cast may ship, not whether an
 INVENTED milder one is worth shipping, and marginal gain does not earn
 regional risk.
 
+Those two thresholds are applied in different PLACES, and that is a soundness
+requirement rather than tidiness. A bisection can only find the largest member
+of a downward-closed set, and only the gates-and-fan half is downward-closed:
+the fan grows with `t`, and every gate clears as the curves approach the
+identity. The gain runs the other way — it falls to zero at `t = 0`, where
+there are no curves at all. Testing both inside the loop makes the clearing
+set an interval `[a, b]` with `a > 0`, so a probe that fails on the GAIN
+pushes the search away from the band and out at `None`, refusing a pair whose
+refusal sentence then claims the whole path was searched. So the loop tests
+admissibility alone and the gain bar is applied once, to the winner. The gain
+is not monotone in `t` — measured on the coast fixture's candidate
+(2026-09-02) it reads 0.00104 at `t` 0.25, 0.00190 at 0.35, 0.00169 at 0.40,
+0.00187 at 0.50, a wiggle the size of `FIT_QUANT` itself — so judging only the
+winner refuses two marginal rescues the older shape happened to find. That is
+the right direction: a rescue whose worth depends on which point of the path
+you land on is worth nothing. The cost is stated, not hidden: the gain is evaluated at exactly ONE point,
+the strongest admissible shrink, so a shrink that pays only at a milder `t`
+is not found — measured on the two-family HSL pair (2026-09-02), where every
+`t ≤ 0.25` is admissible and pays 0.0019–0.0033 while the strongest
+admissible point reads −0.012, so the pair is refused and its refusal
+sentence says exactly that. A best-paying-admissible search is a registered
+follow-up, not this batch's.
+
+The precedence is the design's, exactly: the fan gate must be the ONLY gate
+that convicted. A pixel-aligned veto says the DESTINATION is wrong and no
+point on the path makes a wrong destination right; the ratio gate says the
+curves did not buy enough, and a weaker version of curves that did not pay is
+not an answer to that — it would also ship a sentence naming the fan and only
+the fan, disclosing one of the two verdicts its curves had to survive. Either
+way the pair stays refused, with the note it already had.
+
+A projected cast discloses at least what an ADMITTED one does, and for a
+sharper reason: these are curves the fit INVENTED to answer a conviction
+rather than curves it measured off the pair, so the two pixel-aligned readings
+matter more here, not less. Its head note carries the conviction, the shrink,
+the ratio against its bound and the re-hued share, and the admission's own
+foreign-hue clause follows it — the same key, so there is one sentence and one
+translation, and the same measured / not-measurable pair so a census that
+never ran is never published as `0.000`. A projected curve that lands on the
+identity at every knot is emitted EMPTY, per channel, exactly as the fit
+leaves a channel it never fitted, so `t = 1` reproduces the fitted curves byte
+for byte including the empty ones and no recipe ships five knots that do
+nothing.
+
 Ordering is the whole of the byte-identity argument. A pair the pixel vetoes
 refuse is refused unprojected, so the viaduct's `match` recipe is byte-for-byte
-what it was. And the rescue runs on ONE call: the `fit_cast_stage` that
-produces the recipe the user gets. The mixer's do-no-harm loop judges both of
+what it was. The rescue runs on exactly two calls, and both of them produce
+the recipe the user gets: the `fit_cast_stage` after the mixer's do-no-harm
+block, and the 4b do-no-harm loop's re-fit, which REPLACES that recipe one
+saturation step down. The mixer's do-no-harm loop judges both of
 its branches with the cast the gates MEASURED, because its question is about
 the MIXER and an invented compromise must not out-vote a per-band solve the
 evidence supports — with the rescue live in every call, four fixture verdicts
 moved that have nothing to do with this feature (canyon-warm's mixer flipped
-from withdrawn to attached, the two-family HSL pair's the other way).
+from withdrawn to attached, the two-family HSL pair's the other way; that
+experiment's four are a superset of the THREE that survive the confinement,
+named below).
+
+The 4b call is exercised but its SUCCESS is unfixtured, and that too is a
+measurement rather than an impression: instrumenting the loop body and running
+the whole library battery (2026-09-02) logs 189 entries, nine of which re-fit
+a fan-convicted cast — so the rescue is entered there with something to
+answer, and in all nine the search finds nothing that both clears the target
+and pays, so no test in the tree has ever seen a projected cast come back out
+of that loop. "A rescued cast survives the saturation step-down" is verified
+by reading. The comment that used to stand at that loop, "no current fixture
+reaches the loop body", was false and is corrected in place.
 
 Cornwall, global stage, `match` without `--zoned` (2026-09-02): the fitted
-curves would have opened 38° in a class holding 0.917 of the frame's
-measurable colour; shrunk to `t = 0.363` they open +7°, and the fit reports
+curves would have opened 37.6° in a class holding 0.917 of the frame's
+measurable colour; shrunk to `t = 0.363` they open +7.4°, and the fit reports
 look error 0.137 → 0.030 at confidence 0.664 — better than the v1.2.2 render
 that carried the defect (0.033 / 0.646). The delivered sky's hue spread
 across luma octiles is 10.5°, against 33.1° in v1.2.2, 1.6° when the cast is
@@ -2260,17 +2318,42 @@ rejected: it recovers a little more (0.026 at confidence 0.680, `t = 0.483`)
 by delivering a 15.3° sky fan, and the recovered 0.004 of look error is not
 worth a fan the user cannot undo.
 
-One more consequence is worth naming because it moved a fixture. A pair whose
-cast is convicted can now land where the terminal do-no-harm check used to
-reset the whole recipe to the calibration base: the canyon-warm regression
-went from 0.0387 → 0.0387 at the 0.25 confidence floor to 0.0387 → 0.0339 at
-0.406, with its delivered sky at 216.9° against 213.9° before and no fan at
-all (that fixture's sky is one flat colour). What the projection does NOT do
-is pay the gate's deliberate cost: a scene genuinely lit at two colour
-temperatures needs the fan, so every point on the path reproduces
-proportionally less of what it needed, no `t` both clears and buys anything,
-and the refusal stands — now saying that the shrink was tried. That case has
-a fixture of its own since v1.2.3.
+THREE fixture verdicts moved, and they are named here because a feature that
+moves a calibration owes the reader the list.
+
+**One.** A pair whose cast is convicted can now land where the terminal
+do-no-harm check used to reset the whole recipe to the calibration base: the
+canyon-warm regression went from 0.0387 → 0.0387 at the 0.25 confidence floor
+to 0.0387 → 0.0339 at 0.406, with its delivered sky at 216.9° against 213.9°
+before and no fan at all (that fixture's sky is one flat colour). Its joint
+reading moves with it, 0.1796 → 0.0437, which takes it out of the joint
+family's refusal band and leaves canyon-gold as that band's only member — the
+whole record of six fixture readings was re-measured on this tree and had
+drifted in every row.
+
+**Two.** Canyon-warm's protection MIGRATED. Because its mixer now attaches
+first, the cast curves re-derived against that state rotate nothing at all
+(0.0000 of the frame, against 0.1250 with the mixer neutralised), so the
+rotation veto no longer fires on it and what stops the violet is the
+composition of the mixer and the projection. The `ROT_DEG`/`ROT_SHARE`
+calibration test therefore reads the gate on the PAIR — mixer neutralised —
+which is what that calibration is about; the delivered-frame guard is where
+the protection is measured, and it reads 216.9° against a ±30° band around
+213°.
+
+**Three.** The two-family HSL fixture ends where it began. With the gain bar
+tested inside the bisection it shipped a rescue worth 0.0006 of look error,
+which took its finished residual under the `FIT_QUANT_CLEAN` = 0.025 floor and
+cost the pair the sentence naming `hsl`. With the bar applied once, to the
+winner, that rescue is refused, the residual is back at 0.0256 and the
+disclosure is back with it — the fix-up's soundness change paid for itself
+here.
+
+What the projection does NOT do is pay the gate's deliberate cost: a scene
+genuinely lit at two colour temperatures needs the fan, so every point on the
+path reproduces proportionally less of what it needed, no `t` both clears and
+buys anything, and the refusal stands — now saying that the shrink was tried.
+That case has a fixture of its own since v1.2.3.
 
 The colour stage's ADMISSION is disclosed too, from the same release. Every
 way of producing nothing already had a note, and the strength budget
@@ -2291,7 +2374,10 @@ and the old wording then stated the opposite of its own measurement. The
 bound is `budget.cast_ratio` — the value the path actually used, which the
 strength budget widens from 2.0 at the shipped default up to 3.0 — not a
 fixed constant. The fan is SIGNED, because three channel curves can narrow a
-class's spread as easily as widen it.
+class's spread as easily as widen it, and it is printed to one decimal,
+because at whole degrees the admitted haze pair's 14.6° rendered as "+15
+degrees, against a limit of 15" — a sentence stating a violation of the
+number beside it, over a reading that had passed.
 
 **Atmosphere** mode instead uses bounded robust exposure, white balance,
 a five-point tone curve, saturation and the same evidence-gated per-band
