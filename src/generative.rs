@@ -97,12 +97,17 @@ fn generation_divergence(sent_png: &[u8], generated_png: &[u8]) -> Result<crate:
         .context("decode the sent input for the fidelity reading")?;
     let generated = image::load_from_memory(generated_png)
         .context("decode the generated result for the fidelity reading")?;
-    Ok(crate::fit::structure_divergence_for(
+    // The analysis raster is a fixed 384x256 with an all-ones mask, so the
+    // instrument resolves it; an abstention would mean the statistic changed
+    // shape under this caller, and that is an error rather than a fidelity of
+    // zero the caller would report as a perfect match.
+    crate::fit::structure_divergence_for(
         &sent,
         &generated,
         &crate::recipe::EditRecipe::default(),
         None,
-    ))
+    )
+    .context("the fidelity reading found no resolvable structural core")
 }
 
 /// Overall HTTP deadline for one BLOCKING `images/edits` POST — the fallback

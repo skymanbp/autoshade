@@ -1833,12 +1833,14 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     (" Range boundary-continuity gate kept {n} correction(s): signed \
       transition rim {before} to {after} luma after shared \
       direction-preserving shrink k={k} (budget {max}, {transitions} \
-      measured crossings).",
-        " 范围边界连续性门保留了 {n} 个校正：共享保方向收缩 k={k} 后，有符号过渡边缘亮度由 {before} 变为 {after}（预算 {max}，测得 {transitions} 个交叉）。"),
+      measured crossings); the delivered tone order falls back by at most \
+      {reversal} luma against the {rev_max} allowed.",
+        " 范围边界连续性门保留了 {n} 个校正：共享保方向收缩 k={k} 后，有符号过渡边缘亮度由 {before} 变为 {after}（预算 {max}，测得 {transitions} 个交叉）；交付的色调顺序最大回落 {reversal} 亮度（允许 {rev_max}）。"),
     (" Range corrections refused by the boundary-continuity gate: candidate \
       rim {before} luma, and even zero differential left {after} (budget \
-      {max}, {transitions} measured crossings).",
-        " 范围校正被边界连续性门拒绝：候选边缘亮度为 {before}，即使差分归零仍为 {after}（预算 {max}，测得 {transitions} 个交叉）。"),
+      {max}, {transitions} measured crossings); the delivered tone order \
+      falls back by at most {reversal} luma against the {rev_max} allowed.",
+        " 范围校正被边界连续性门拒绝：候选边缘亮度为 {before}，即使差分归零仍为 {after}（预算 {max}，测得 {transitions} 个交叉）；交付的色调顺序最大回落 {reversal} 亮度（允许 {rev_max}）。"),
     (" Range corrections refused after the final boundary pass: the \
       composed frame residual {after} exceeded the global-only residual \
       {global} plus tolerance {tol}, so all {n} range correction(s) were removed.",
@@ -1868,6 +1870,12 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
         " 自由形状场蒙版 {n} 已作为引擎位图附加：合成全画面 {err_before} -> {err_after}，跨边界跳变 {step}，语境计费读数 {charged}。经典 XMP 会以已命名的位图蒙版损失不包含此校正。"),
     (" Field mask component(s) {n} refused: {why}.",
         " 自由形状场蒙版分量 {n} 已拒绝：{why}。"),
+    (" No tone move was solved for {label}: its own population covers \
+      {knots} of the 8 tone knots, and a slider solve needs at least 2.",
+        " 未为 {label} 求解色调移动：它自身的人口只覆盖 8 个色调节点中的 {knots} 个，而滑块求解至少需要 2 个。"),
+    (" Field mask candidate {n} was not offered: an accepted spatial tile \
+      already covers it ({filter}), p={pixels} s={share_src}/{share_tgt}.",
+        " 自由形状场蒙版候选 {n} 未提出：已被接受的空间图块覆盖（{filter}），{pixels} 个像素，证据占比为源图 {share_src}、目标图 {share_tgt}。"),
     (" No field mask qualified: {why}.",
         " 没有符合条件的自由形状场蒙版：{why}。"),
     (" [revision round {round} failed ({e}) — keeping the previous verified proposal]",

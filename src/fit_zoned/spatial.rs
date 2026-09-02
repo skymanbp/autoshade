@@ -39,9 +39,17 @@ pub(super) struct TileReading {
     pub(super) target_weights: Vec<f32>,
     pub(super) source_share: f32,
     pub(super) target_share: f32,
+    /// The tile's own footprint on the analysis grid, in pixels — the quantity
+    /// [`MIN_MASK_PIXELS`] gates, and not the same thing as the evidence-scoped
+    /// `source_share` beside it (a share is a weighted fraction of the frame;
+    /// this is a count of the pixels the raster actually covers).
+    pub(super) pixels: usize,
     pub(super) residual: f32,
     pub(super) ci95: f32,
-    pub(super) divergence: fit::Divergence,
+    /// `None` is [`fit::structure_divergence`]'s abstention. It is NOT a matched
+    /// reading, so [`eligible`] refuses the tile rather than letting a footprint
+    /// nothing measured clear a gate that exists to require survival.
+    pub(super) divergence: Option<fit::Divergence>,
 }
 
 impl TileReading {
@@ -123,14 +131,32 @@ fn weighted_residual(
     (mean as f32, ci95 as f32)
 }
 
-fn read_tile(
+/// Everything a tile reading holds that does NOT depend on the current render:
+/// its geometry, the frame evidence re-aggregated over that geometry, its
+/// footprint and its structural reading.  The traversal re-reads the same
+/// node once per generation — a four-tile attachment sweeps the same 20 nodes
+/// four times — and only the residual moves between those passes, because the
+/// evidence model is frozen before the first producer runs and the structural
+/// reading is taken against `evidence.source_pixels`, not against the render.
+/// Keyed by [`TileId`], so the recompute happens once per node per fit.
+struct TileEvidence {
+    scoped: ScopedMaskEvidence,
+    pixels: usize,
+    divergence: Option<fit::Divergence>,
+}
+
+type TileEvidenceCache = std::collections::BTreeMap<TileId, std::rc::Rc<TileEvidence>>;
+
+fn tile_evidence(
     id: TileId,
-    current: &[[f32; 3]],
     target: &[[f32; 3]],
     evidence: &fit::EvidenceModel,
-) -> TileReading {
+    cache: &mut TileEvidenceCache,
+) -> std::rc::Rc<TileEvidence> {
+    if let Some(hit) = cache.get(&id) {
+        return std::rc::Rc::clone(hit);
+    }
     let n = (evidence.width as usize * evidence.height as usize)
-        .min(current.len())
         .min(target.len())
         .min(evidence.source_weights.len())
         .min(evidence.target_weights.len());
@@ -148,7 +174,6 @@ fn read_tile(
     // keeps the evidence that a replaced sky's identical luma bins withheld
     // frame-wide.
     let scoped = scoped_mask_evidence(target, evidence, &geometry);
-    let (residual, ci95) = weighted_residual(current, target, &scoped.source_weights);
     let divergence = fit::structure_divergence(
         &evidence.source_pixels[..n.min(evidence.source_pixels.len())],
         &target[..n],
@@ -156,24 +181,57 @@ fn read_tile(
         evidence.height,
         &geometry,
     );
+    let entry = std::rc::Rc::new(TileEvidence {
+        pixels: geometry.iter().filter(|value| **value > 0.0).count(),
+        scoped,
+        divergence,
+    });
+    cache.insert(id, std::rc::Rc::clone(&entry));
+    entry
+}
+
+fn read_tile(
+    id: TileId,
+    current: &[[f32; 3]],
+    target: &[[f32; 3]],
+    evidence: &fit::EvidenceModel,
+    cache: &mut TileEvidenceCache,
+) -> TileReading {
+    let held = tile_evidence(id, target, evidence, cache);
+    let (residual, ci95) = weighted_residual(current, target, &held.scoped.source_weights);
     TileReading {
         id,
-        source_weights: scoped.source_weights,
-        target_weights: scoped.target_weights,
-        source_share: scoped.source_share,
-        target_share: scoped.target_share,
+        source_weights: held.scoped.source_weights.clone(),
+        target_weights: held.scoped.target_weights.clone(),
+        // ONE share ruler: this reading is the same number the attachment gate
+        // now applies (`fit_zoned::attach_one_zone`), so a tile admitted here
+        // can no longer be refused there for a size it was never measured at.
+        source_share: held.scoped.source_share,
+        target_share: held.scoped.target_share,
+        pixels: held.pixels,
         residual,
         ci95,
-        divergence,
+        divergence: held.divergence,
     }
 }
 
 fn eligible(reading: &TileReading, parent_residual: f32) -> Result<(), &'static str> {
-    if reading.source_share < MIN_ZONE_SHARE {
+    // The footprint floor comes FIRST because it is the cheapest true statement
+    // about the candidate, and because the gates under it read statistics taken
+    // over that footprint: a share and a structural correlation measured over a
+    // handful of pixels are not more informative for having been computed.
+    if reading.pixels < MIN_MASK_PIXELS {
+        Err("footprint")
+    } else if reading.source_share < MIN_ZONE_SHARE {
         Err("source-share")
     } else if reading.target_share < MIN_ZONE_SHARE {
         Err("target-share")
-    } else if reading.divergence.d >= fit::DIVERGENCE_ZONE {
+    } else if reading.divergence.is_none() {
+        // No reading, so no claim that the structure survived — and survival is
+        // exactly what the next arm requires. Until v1.2.4 the instrument
+        // answered an unmeasurable footprint with D = 0 and this gate passed it.
+        Err("structure-unmeasured")
+    } else if reading.divergence.is_some_and(|d| d.d >= fit::DIVERGENCE_ZONE) {
         Err("structural-divergence")
     } else if !reading.ci95.is_finite() || reading.residual.abs() <= reading.ci95 {
         Err("confidence-interval")
@@ -192,7 +250,10 @@ fn reading_args(
         ("id", reading.id.tag()),
         ("s", format!("{:.3}", reading.source_share)),
         ("t", format!("{:.3}", reading.target_share)),
-        ("d", format!("{:.3}", reading.divergence.d)),
+        // An unread footprint says so; a 0.000 here would read as a measured
+        // perfect structural match.
+        ("d", reading.divergence.map_or_else(
+            || "unmeasured".to_string(), |d| format!("{:.3}", d.d))),
         ("residual", format!("{:+.5}", reading.residual)),
         ("parent", format!("{:+.5}", parent_residual)),
         ("ci", format!("{:.5}", reading.ci95)),
@@ -278,13 +339,20 @@ fn next_tile(
     evidence: &fit::EvidenceModel,
     attached: &BTreeSet<TileId>,
     refused: &BTreeSet<TileId>,
+    cache: &mut TileEvidenceCache,
 ) -> TileSearch {
-    let root = read_tile(TileId { depth: 0, row: 0, col: 0 }, current, target, evidence);
+    let root = read_tile(TileId { depth: 0, row: 0, col: 0 }, current, target, evidence, cache);
     let mut pending = Vec::new();
     for row in 0..2 {
         for col in 0..2 {
             pending.push(PendingTile {
-                reading: read_tile(TileId { depth: 1, row, col }, current, target, evidence),
+                reading: read_tile(
+                    TileId { depth: 1, row, col },
+                    current,
+                    target,
+                    evidence,
+                    cache,
+                ),
                 parent_residual: root.residual,
             });
         }
@@ -318,6 +386,7 @@ fn next_tile(
                         current,
                         target,
                         evidence,
+                        cache,
                     ),
                     parent_residual: node.reading.residual,
                 });
@@ -582,6 +651,9 @@ pub(super) fn attach_tiles(
     let mut refused = BTreeSet::new();
     let mut generation = 0usize;
     let mut excluded = vec![0.0f32; report.evidence.source_weights.len()];
+    // One cache for the whole traversal: the render-independent half of every
+    // node's reading is computed once and re-read on the later generations.
+    let mut cache = TileEvidenceCache::new();
     let corr = report.correspondence.take();
     while attached.len() < cap {
         let current = fit::pixels_of(&render::develop_preview(&s_img, &report.recipe));
@@ -590,9 +662,16 @@ pub(super) fn attach_tiles(
             &current,
             &tgt_px,
             &report.evidence,
+            &mut cache,
         );
-        let (visited, candidate) =
-            next_tile(&current, &tgt_px, &report.evidence, &attached, &refused);
+        let (visited, candidate) = next_tile(
+            &current,
+            &tgt_px,
+            &report.evidence,
+            &attached,
+            &refused,
+            &mut cache,
+        );
         // ONE aggregated sweep note per generation: the full per-node map
         // re-rendered every generation was a transcript, and it truncated the
         // attachment disclosure off the persisted rationale. Leaf candidates
@@ -815,8 +894,15 @@ pub(super) fn attach_tiles(
             ),
         );
         let _path = owned.into_path();
+        // The SHRUNK alpha, not the raw raster. What this vector withholds from
+        // the free-mask producer is the correction a tile actually delivers, and
+        // the boundary gate may have negotiated that correction down to a
+        // fraction `k` of itself (the calibration island's accepted tiles keep
+        // k = 0.114 / 0.168 / 0.187). A tile shrunk to a ninth of its fitted
+        // strength leaves most of its residual on the frame, so blocking the
+        // next producer with the full alpha hid work nobody had done.
         for (dst, alpha) in excluded.iter_mut().zip(accepted_coverage) {
-            *dst = dst.max(alpha);
+            *dst = dst.max(alpha * boundary.k);
         }
         attached.insert(reading.id);
         generation += 1;
@@ -844,6 +930,18 @@ pub(super) fn attach_tiles(
 mod tests {
     use super::*;
     use image::{Rgb, RgbImage};
+
+    /// The cache is a per-traversal accelerator, never a behaviour: every
+    /// test below reads a node with an EMPTY cache, so what it asserts is
+    /// the computed reading and not a stored one.
+    fn read_tile_uncached(
+        id: TileId,
+        current: &[[f32; 3]],
+        target: &[[f32; 3]],
+        evidence: &fit::EvidenceModel,
+    ) -> TileReading {
+        read_tile(id, current, target, evidence, &mut TileEvidenceCache::new())
+    }
 
     type BoundaryFixture = (
         DynamicImage,
@@ -905,14 +1003,14 @@ mod tests {
         let id = TileId { depth: 2, row: 0, col: 0 };
         let mut evidence = fit::evidence_model_for(&current, &target, 64, 64);
         pretend_full_support(&mut evidence);
-        let supported = read_tile(id, &current, &target, &evidence);
+        let supported = read_tile_uncached(id, &current, &target, &evidence);
         assert!(supported.source_share >= MIN_ZONE_SHARE, "{supported:?}");
         assert!(
             (supported.source_share - supported.target_share).abs() < 1e-4,
             "a tile's two shares are one population: {supported:?}"
         );
         evidence.spatial_weights.fill(0.0);
-        let unsupported = read_tile(id, &current, &target, &evidence);
+        let unsupported = read_tile_uncached(id, &current, &target, &evidence);
         assert_eq!(unsupported.source_share, 0.0, "{unsupported:?}");
         assert_eq!(unsupported.target_share, 0.0, "{unsupported:?}");
         assert_eq!(eligible(&unsupported, 0.0), Err("source-share"));
@@ -945,7 +1043,8 @@ mod tests {
             target_share: bright.target_evidence_share,
             residual: 0.1,
             ci95: 0.0,
-            divergence: fit::Divergence { correlation: 1.0, energy_error: 0.0, d: 0.0 },
+            pixels: MIN_MASK_PIXELS,
+            divergence: Some(fit::Divergence { correlation: 1.0, energy_error: 0.0, d: 0.0 }),
         };
         assert!(target_missing.source_share >= MIN_ZONE_SHARE, "{target_missing:?}");
         assert!(target_missing.target_share < MIN_ZONE_SHARE, "{target_missing:?}");
@@ -966,13 +1065,16 @@ mod tests {
         let original = fit::pixels_of(&DynamicImage::ImageRgb8(source));
         let mut evidence = fit::evidence_model_for(&original, &target, 64, 64);
         pretend_full_support(&mut evidence);
-        let reading = read_tile(
+        let reading = read_tile_uncached(
             TileId { depth: 2, row: 0, col: 0 },
             &current,
             &target,
             &evidence,
         );
-        assert!(reading.divergence.d >= fit::DIVERGENCE_ZONE, "{reading:?}");
+        assert!(
+            reading.divergence.is_some_and(|d| d.d >= fit::DIVERGENCE_ZONE),
+            "{reading:?}"
+        );
         assert_eq!(eligible(&reading, 0.0), Err("structural-divergence"));
     }
 
@@ -1003,6 +1105,7 @@ mod tests {
             &evidence,
             &BTreeSet::new(),
             &BTreeSet::new(),
+            &mut TileEvidenceCache::new(),
         );
         assert!(visited.iter().any(|(reading, _, verdict)| {
             reading.id == (TileId { depth: 1, row: 1, col: 0 }) && verdict.is_err()
@@ -1096,8 +1199,8 @@ mod tests {
             fit::evidence_model_for(&source_pixels, &target_pixels, edge, edge);
         pretend_full_support(&mut evidence);
         evidence.source_pixels = target_pixels.clone();
-        let expected = read_tile(id, &current_pixels, &target_pixels, &evidence).residual;
-        let stale = read_tile(id, &source_pixels, &target_pixels, &evidence).residual;
+        let expected = read_tile_uncached(id, &current_pixels, &target_pixels, &evidence).residual;
+        let stale = read_tile_uncached(id, &source_pixels, &target_pixels, &evidence).residual;
         assert!(expected.abs() > 0.02, "fixture has no current-render residual");
         assert!((expected - stale).abs() > 0.02, "fixture does not distinguish fit order");
         CurrentRenderFixture { source, target, evidence, base, raster_home, dir, expected, stale }
@@ -1170,7 +1273,7 @@ mod tests {
     #[test]
     fn tile_attachment_cannot_regress_the_composed_frame() {
         let (current, target, evidence) = localized_residual();
-        let reading = read_tile(
+        let reading = read_tile_uncached(
             TileId { depth: 2, row: 2, col: 0 },
             &current,
             &target,
@@ -1227,7 +1330,7 @@ mod tests {
                 evidence.spatial_weights[(y * edge + x) as usize] = 0.0;
             }
         }
-        let reading = read_tile(id, &source_px, &target_px, &evidence);
+        let reading = read_tile_uncached(id, &source_px, &target_px, &evidence);
         assert!(reading.source_share >= MIN_ZONE_SHARE, "{reading:?}");
         let upper = (10 * edge + 10) as usize;
         let lower = (70 * edge + 10) as usize;
@@ -1257,7 +1360,7 @@ mod tests {
             &mut report,
             &mut frame_err,
             &attachment,
-            fit::Divergence { correlation: 1.0, energy_error: 0.0, d: 0.0 },
+            Some(fit::Divergence { correlation: 1.0, energy_error: 0.0, d: 0.0 }),
             None,
         );
         path.remove();
@@ -1376,6 +1479,145 @@ mod tests {
         report.recipe = recipe;
         let geometry = mask_weights(&mask, 64, 64);
         (source, target_pixels, report, path, geometry, reference, candidate)
+    }
+
+    /// A hard 0/255 tile raster over a SMOOTH, sloping field: the correction
+    /// it carries has an in-zone gradient of its own because the SCENE has
+    /// one, not because its alpha ramps.
+    ///
+    /// Every other fixture in this module holds the field flat (or fills it
+    /// with a sawtooth) and varies the ALPHA, so the only same-side slope any
+    /// of them offers the per-crossing budget is a mask shape. A cloudless sky
+    /// falling off towards the horizon is the shape the seam batch was about,
+    /// and under a hard tile edge it reads as a constant alpha over a varying
+    /// dose — the one arrangement none of them builds.
+    ///
+    /// Two deliberate choices. DIAGONAL, because a tile has a vertical and a
+    /// horizontal border and a one-axis gradient leaves the crossings on one
+    /// of them flat; those would earn the floor, take the top of the ranking
+    /// and decide the percentile by themselves. WARM with the three channels
+    /// rising at different rates, because on a grey field every luma
+    /// difference is a whole 8-bit code and the earned budget could then only
+    /// land on the floor or near the ceiling — the same reason
+    /// [`shoulder_fixture`] is not grey. Here the field's own luma rises 0.44
+    /// code per pixel after the render's curve, so the scene's step across the
+    /// 3-px baseline is 1.32 code — over the floor and under two — while a
+    /// +1.5 EV dose slopes 0.80 code beside it, and three times that clears
+    /// two codes without reaching the ceiling. That separation is the whole
+    /// design: an 8-bit kept step can only tell the two budgets apart if they
+    /// admit a different NUMBER of code values.
+    fn gradient_fixture(exposure_ev: f32, name: &str) -> BoundaryFixture {
+        let source = DynamicImage::ImageRgb8(RgbImage::from_fn(64, 64, |x, y| {
+            let d = x + y;
+            Rgb([(90 + 2 * d / 3) as u8, (72 + d / 2) as u8, (60 + d / 3) as u8])
+        }));
+        let mask = GrayImage::from_fn(64, 64, |x, y| {
+            Luma([if in_tile(TileId { depth: 2, row: 2, col: 0 }, x, y, 64, 64) {
+                255
+            } else {
+                0
+            }])
+        });
+        let path = super::super::tests::fixture_mask_path(name);
+        mask.save(path.path()).unwrap();
+        let adjustment = LocalAdjustment {
+            mask: MaskGeometry::Bitmap { path: path.path().to_string_lossy().into_owned() },
+            name: "Spatial tile r2c0".to_string(),
+            role: MaskRole::Custom,
+            amount: 1.0,
+            exposure_ev,
+            ..Default::default()
+        };
+        let mut recipe = crate::recipe::EditRecipe::default();
+        recipe.masks.push(adjustment);
+        let candidate = fit::pixels_of(&render::develop_preview(&source, &recipe));
+        let reference = fit::pixels_of(&render::develop_preview(
+            &source,
+            &crate::recipe::EditRecipe::default(),
+        ));
+        let mut wanted = recipe.clone();
+        wanted.masks[0].exposure_ev = exposure_ev * 0.5;
+        let target = render::develop_preview(&source, &wanted);
+        let target_pixels = fit::pixels_of(&target);
+        let mut report = super::super::tests::neutral_report(&source, &target);
+        report.recipe = recipe;
+        let geometry = mask_weights(&mask, 64, 64);
+        (source, target_pixels, report, path, geometry, reference, candidate)
+    }
+
+    /// Captured from a run of `gradient_fixture` at +1.5 EV (the test below
+    /// says what moving them means).
+    const GRADIENT_K: f32 = 0.030517578;
+    const GRADIENT_RIM: f32 = 0.007396072;
+
+    /// A22 (v1.2.4). The slope term is read on a correction whose gradient is
+    /// the SCENE's, and it is read off the FROZEN k = 1 candidate.
+    ///
+    /// The dose is chosen so the earned budget clears TWO code values while
+    /// the scene's own step across the same baseline clears only one: the
+    /// kept step then lands on a different 8-bit code depending on whether
+    /// the slope was consulted, which is the only way an 8-bit reading can
+    /// tell the two apart.
+    ///
+    /// MUTATIONS, both run on 2026-09-02. Zero the term (`let slope_in =
+    /// 0.0f32; let slope_out = 0.0f32;` in `boundary_line_steps`): this test
+    /// fails on the charge comparison, and so do
+    /// `a_ramp_earns_budget_only_where_it_persists_past_the_collar` and
+    /// `tile_boundary_shrink_preserves_direction_and_budget` — 3 of 149.
+    /// Read it off the render under bisection instead of the frozen candidate
+    /// (`boundary_step(reference, rendered, rendered, ...)` in
+    /// `enforce_bitmap_boundary`): the budget chases `k` down, and the pinned
+    /// pair lands on (0.029785156, 0.005094141) — a kept step of 1.30 code
+    /// where the frozen reading keeps 1.89.
+    #[test]
+    fn a_scene_gradient_under_a_hard_raster_earns_its_own_slope_budget() {
+        const EV: f32 = 1.5;
+        let (source, target, mut report, path, geometry, reference, candidate) =
+            gradient_fixture(EV, "ctx-budget-gradient");
+        let with_slope = boundary_step(&reference, &candidate, &candidate, &geometry, 64, 64);
+        // The SAME crossings with the slope term switched off and nothing
+        // else changed: handing the ruler the reference as its own frozen
+        // candidate makes `u1` identically zero on both sides, so each
+        // crossing earns the scene's own step alone.
+        let no_slope = boundary_step(&reference, &candidate, &reference, &geometry, 64, 64);
+        assert_eq!(
+            (with_slope.rim.to_bits(), with_slope.transitions),
+            (no_slope.rim.to_bits(), no_slope.transitions),
+            "the raw step is the same reading either way: {with_slope:?} vs {no_slope:?}",
+        );
+        assert!(
+            with_slope.charged < no_slope.charged,
+            "the scene's own gradient must buy budget: {with_slope:?} vs {no_slope:?}",
+        );
+        let frame_before = fit::look_err_with_evidence(&reference, &target, &report.evidence);
+        let accepted = enforce_bitmap_boundary(
+            &source,
+            &target,
+            &mut report,
+            0,
+            BitmapBoundaryInput {
+                ruler: BoundaryRuler::CrossBoundaryStep {
+                    geometry: &geometry,
+                    reference: &reference,
+                },
+                initial_px: candidate,
+                frame_before,
+            },
+        )
+        .expect("a sloping-sky seam is negotiated down, not dropped");
+        path.remove();
+        assert_eq!(
+            (accepted.k, accepted.reading.rim),
+            (GRADIENT_K, GRADIENT_RIM),
+            "the slope-earned budget must land on these exact bits: {:?} from \n             {with_slope:?} against {no_slope:?}",
+            accepted.reading,
+        );
+        assert!(
+            accepted.reading.rim > BOUNDARY_STEP_FLOOR
+                && accepted.reading.rim < ZONE_BOUNDARY_STEP_MAX,
+            "the earned budget sits strictly between floor and ceiling: {:?}",
+            accepted.reading,
+        );
     }
 
     /// A mask whose alpha JUMPS to 0.55 at the contour and then rises to
@@ -1567,11 +1809,19 @@ mod tests {
     /// of any value can produce these verdicts at once, which is what pins
     /// the mechanism rather than one number.
     ///
-    /// Registered coverage gap, disclosed rather than hidden: a mutation
-    /// that reads the slope term from the render under bisection instead of
-    /// the frozen k=1 candidate is NOT killed by these arms — the
-    /// difference only shows on a smooth fixture whose correction carries a
-    /// genuine in-zone gradient, which no fixture here builds.
+    /// Neither arm here can see the frozen-candidate rule: both budgets are
+    /// decided by the neighbourhood (a flat field earns the floor, texture at
+    /// 2.94x the ceiling clamps), so the slope term is 0 or irrelevant and a
+    /// mutation reading it off the render under bisection changes nothing on
+    /// this fixture. Two other tests hold that rule, both measured under that
+    /// exact mutation on 2026-09-02:
+    /// `a_ramp_earns_budget_only_where_it_persists_past_the_collar` arm F
+    /// moves from (k 0.24536133, rim 0.007843137) to (0.14794922,
+    /// 0.0039215684), and
+    /// `a_scene_gradient_under_a_hard_raster_earns_its_own_slope_budget`
+    /// from (0.030517578, 0.007396072) to (0.029785156, 0.005094141). The
+    /// second is the smooth in-zone gradient this note used to say no fixture
+    /// built.
     #[test]
     fn contextual_budget_charges_smooth_borders_and_leaves_textured_ones_alone() {
         const ARM_EV: f32 = 0.09;
@@ -1964,7 +2214,7 @@ mod tests {
             evidence.luma[6]
         );
         let id = TileId { depth: 2, row: 3, col: 2 };
-        let reading = read_tile(id, &sp, &tp, &evidence);
+        let reading = read_tile_uncached(id, &sp, &tp, &evidence);
         // A 0.40 ground pixel inside r3c2: the frame gives it no weight, the
         // tile's own population keeps it.
         let probe = (288 * w + 224) as usize;
@@ -2006,8 +2256,8 @@ mod tests {
         );
         let current = fit::pixels_of(&render::develop_preview(&s_img, &recipe));
         let strong_id = TileId { depth: 2, row: 2, col: 0 };
-        let strong = read_tile(strong_id, &current, &target_pixels, &evidence);
-        let parent = read_tile(
+        let strong = read_tile_uncached(strong_id, &current, &target_pixels, &evidence);
+        let parent = read_tile_uncached(
             TileId { depth: 1, row: 1, col: 0 },
             &current,
             &target_pixels,
@@ -2015,13 +2265,13 @@ mod tests {
         );
         assert_eq!(eligible(&strong, parent.residual), Ok(()), "{strong:?}");
         for col in 0..4 {
-            let sky = read_tile(
+            let sky = read_tile_uncached(
                 TileId { depth: 2, row: 0, col },
                 &current,
                 &target_pixels,
                 &evidence,
             );
-            let sky_parent = read_tile(
+            let sky_parent = read_tile_uncached(
                 TileId { depth: 1, row: 0, col: col / 2 },
                 &current,
                 &target_pixels,

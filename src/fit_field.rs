@@ -172,6 +172,18 @@ impl LocalField {
 
 /// The 96-cell structural reading, one value per pixel: per 12x8 cell,
 /// `1 - clamp(D, 0, 1)` from [`fit::structure_divergence`] over that cell's mask.
+///
+/// A cell whose eroded core is under [`fit::STRUCTURE_MIN_CORE_PX`] is NOT
+/// measured, and a cell nothing measured earns no support: it reads 0, not the
+/// 1.0 of a measured match.  Before v1.2.4 the instrument answered such a cell
+/// with `Divergence::matched()`, so every eroded cell claimed full structural
+/// survival and this term was silently constant wherever the cells were small
+/// — the support half of the fit weight was inert exactly where it was least
+/// deserved.  When NO cell resolves, the frame carries no structural
+/// measurement anywhere; withholding the whole frame on that ground would
+/// starve a fit nothing measured, so the term is dropped wholesale (uniform
+/// 1.0) instead — the pre-v1.2.4 reading for that case, and the same "may
+/// refuse to help, never starve" stance the correspondence field takes.
 pub(crate) fn local_support(
     current: &[[f32; 3]], target: &[[f32; 3]], width: u32, height: u32,
 ) -> Vec<f32> {
@@ -189,15 +201,18 @@ pub(crate) fn local_support(
                         && y * FIELD_Y as u32 / height == cell_y)
                 })
                 .collect::<Vec<_>>();
-            let reading = fit::structure_divergence(current, target, width, height, &mask).d;
-            1.0 - reading.clamp(0.0, 1.0)
+            fit::structure_divergence(current, target, width, height, &mask)
+                .map(|reading| 1.0 - reading.d.clamp(0.0, 1.0))
         })
         .collect::<Vec<_>>();
+    if readings.iter().all(Option::is_none) {
+        return vec![1.0f32; n];
+    }
     for (i, slot) in support.iter_mut().enumerate() {
         let (x, y) = (i as u32 % width, i as u32 / width);
         let cell = (y * FIELD_Y as u32 / height * FIELD_X as u32
             + x * FIELD_X as u32 / width) as usize;
-        *slot = readings[cell];
+        *slot = readings[cell].unwrap_or(0.0);
     }
     support
 }

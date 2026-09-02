@@ -235,7 +235,22 @@ fn free_masks_eat_only_what_tiles_left() {
     report.evidence = evidence;
     let excluded = spatial::attach_tiles(&source, &target, &mut report, &home, false, 1);
     assert!(report.recipe.masks.len() >= 2, "fixture did not accept a tile: {}", report.recipe.rationale);
-    assert!(excluded.iter().any(|alpha| *alpha >= 0.5));
+    // A35 (v1.2.4): what a tile hands the free-mask producer is the alpha the
+    // boundary gate LEFT it — its raster times the accepted `k` — and not the
+    // raster it asked for. The gate negotiated this tile down to k = 0.159, so
+    // it reserves a sixth of its footprint and the region stays open to a
+    // producer that can correct what the tile was forbidden to.
+    // `a_tile_reserves_only_the_alpha_the_boundary_gate_left_it` pins the rule
+    // itself; this is the end-to-end reading that shows `attach_tiles` emits it.
+    let max_excluded = excluded.iter().cloned().fold(0.0f32, f32::max);
+    assert!(
+        (max_excluded - TILE_EXCLUSION_ALPHA).abs() <= 1e-6,
+        "the exclusion must be the accepted alpha, not the raw raster: {max_excluded}",
+    );
+    assert!(
+        excluded.iter().all(|alpha| *alpha == 0.0 || (*alpha - max_excluded).abs() <= 1e-6),
+        "a hard raster times one scalar is still a hard raster",
+    );
     let evidence = report.evidence.clone();
     let proposals = propose_free_masks(
         &field_from(&truth, -0.1), &excluded, &source_px, &target_px, &evidence, 2,
@@ -244,6 +259,93 @@ fn free_masks_eat_only_what_tiles_left() {
     assert!(proposals[0].mask.as_raw().iter().enumerate()
         .all(|(i, value)| excluded[i] < 0.5 || *value == 0));
     std::fs::remove_dir_all(dir).ok();
+}
+
+/// The alpha `attach_tiles` leaves on the fixture in
+/// `free_masks_eat_only_what_tiles_left`: that tile's raster times the `k`
+/// its boundary gate accepted.
+const TILE_EXCLUSION_ALPHA: f32 = 0.1586914;
+
+/// A35 (v1.2.4). A tile reserves the strength it KEPT, not the footprint it
+/// asked for, and what the reservation removes is disclosed by name.
+///
+/// Before this batch the exclusion handed to the free-mask producer was the
+/// tile's raw 0/255 raster, so a tile the boundary gate had negotiated down to
+/// a sixth of its dial still took its whole footprint off the table: the
+/// residual the gate had just forbidden that tile to correct was forbidden to
+/// everyone. And the removal was silent — the filter lives inside the seed
+/// predicate, so an excluded region never became a component and nothing in
+/// the report said work had been declined (A34).
+///
+/// The two arms are the SAME region and the same field at two exclusion
+/// strengths; nothing else differs.
+///
+/// MUTATIONS, all run on 2026-09-02. Ignore the exclusion in the seed
+/// predicate (`offered = carries_residual(i).then(...)`): arm B proposes over
+/// a region an accepted tile covers whole, and fails — 1 of 18. Silence the
+/// disclosure (`let withheld = Vec::new();`): arm B's drop goes back to
+/// leaving no trace, and the same test fails. The WIRING that produces the
+/// alpha is pinned next door: drop the `* boundary.k` from `attach_tiles`'
+/// exclusion merge and `free_masks_eat_only_what_tiles_left` fails on the
+/// pinned 0.1586914 against a raw 1.0 — 1 of 150.
+#[test]
+fn a_tile_reserves_only_the_alpha_the_boundary_gate_left_it() {
+    // The same disc, source and dose as `free_mask_proposes_the_blob_the_tiles_cannot_box`,
+    // whose proposal is known to clear every other filter: the only variable
+    // across the two arms below is the exclusion strength.
+    let truth = disc(221, 167, 64);
+    let source = DynamicImage::ImageRgb8(RgbImage::from_fn(EDGE, EDGE, |x, y| {
+        let i = (y * EDGE + x) as usize;
+        let value = if truth[i] { 40 + ((x * 37 + y * 53) % 180) as u8 } else { 10 };
+        Rgb([value; 3])
+    }));
+    let source = render::develop_preview(&source, &crate::recipe::EditRecipe::default());
+    let target = with_delta(&source, &truth, -26);
+    let field = field_from(&truth, -0.1);
+    let (source_px, target_px, evidence) = proposal_inputs(&source, &target);
+    let scaled = |k: f32| truth.iter().map(|t| if *t { k } else { 0.0 }).collect::<Vec<f32>>();
+
+    // Arm A — the tile kept a sixth of its dial, so it reserves a sixth, and
+    // the producer proposes over it exactly as if no tile were there.
+    let open = search_free_masks(
+        &field, &scaled(TILE_EXCLUSION_ALPHA), &source_px, &target_px, &evidence, 2,
+    );
+    assert_eq!(open.proposals.len(), 1, "a lightly corrected region stays open: {open:?}");
+    assert!(open.withheld.is_empty(), "nothing was withheld: {:?}", open.withheld);
+
+    // Arm B — the same region at full strength IS reserved, and the drop is
+    // named with the share it covers instead of vanishing.
+    let closed = search_free_masks(&field, &scaled(1.0), &source_px, &target_px, &evidence, 2);
+    assert!(closed.proposals.is_empty(), "a fully corrected region is reserved: {closed:?}");
+    assert_eq!(closed.withheld.len(), 1, "the drop must be carried: {closed:?}");
+    let (number, component) = &closed.withheld[0];
+    assert_eq!(*number, 1, "the withheld set is ranked like the offered one");
+    assert!(
+        component.pixels >= MIN_MASK_PIXELS,
+        "only components that could have been proposals are named: {component:?}",
+    );
+    assert!(
+        component.share.0 > 0.0 && component.share.1 > 0.0,
+        "the disclosure carries the share it covers: {component:?}",
+    );
+
+    // And the note reaches the rationale, which is where a reader sees it.
+    let mut report = super::super::tests::neutral_report(&source, &target);
+    report.evidence = evidence;
+    let home_dir =
+        std::env::temp_dir().join(format!("autoshade-free-withheld-{}", std::process::id()));
+    std::fs::create_dir_all(&home_dir).unwrap();
+    let home = crate::store::OwnedRaster::scratch(home_dir.join("mask.png"));
+    attach_free_masks(&source, &target, &mut report, &home, &field, &scaled(1.0), false, 2);
+    let note = report.notes.iter()
+        .find(|note| note.key == crate::rationale::keys::FIELD_MASK_WITHHELD)
+        .unwrap_or_else(|| panic!("no withheld disclosure: {}", report.recipe.rationale));
+    assert!(
+        note.args.iter().any(|(key, value)| *key == "filter" && value == "accepted-tile-alpha"),
+        "the disclosure names the filter that dropped it: {:?}",
+        note.args,
+    );
+    std::fs::remove_dir_all(home_dir).ok();
 }
 
 #[test]

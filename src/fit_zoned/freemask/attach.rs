@@ -22,7 +22,7 @@ fn push_refusal(report: &mut FitReport, refusals: &[FreeMaskRefusal]) {
         FreeMaskWhy::Footprint, FreeMaskWhy::Mass, FreeMaskWhy::RasterClaim,
         FreeMaskWhy::RasterWrite, FreeMaskWhy::ZoneRefused,
         FreeMaskWhy::Frame, FreeMaskWhy::Rim, FreeMaskWhy::Unmeasured,
-        FreeMaskWhy::Inert,
+        FreeMaskWhy::Inert, FreeMaskWhy::StructureUnmeasured,
     ] {
         let numbers = refusals.iter().filter(|r| r.why == why).map(|r| r.n).collect::<Vec<_>>();
         if numbers.is_empty() { continue; }
@@ -56,6 +56,20 @@ pub(in crate::fit_zoned) fn attach_free_masks(
     let search = search_free_masks(
         field, excluded, &report.evidence.source_pixels, &target_px, &report.evidence, cap,
     );
+    // What the accepted tiles took off the table, before anything is proposed:
+    // the filter that removed it is named, and so is the share it covers.
+    for (number, component) in &search.withheld {
+        crate::rationale::push_note(
+            &mut report.recipe.rationale, &mut report.notes,
+            crate::rationale::Note::new(crate::rationale::keys::FIELD_MASK_WITHHELD, vec![
+                ("n", number.to_string()),
+                ("filter", "accepted-tile-alpha".into()),
+                ("pixels", component.pixels.to_string()),
+                ("share_src", format!("{:.3}", component.share.0)),
+                ("share_tgt", format!("{:.3}", component.share.1)),
+            ]),
+        );
+    }
     let components = search.proposals.len()
         + search.refusals.iter().filter(|r| r.why != FreeMaskWhy::NoCandidates).count();
     let mut disclosed = search.refusals.iter()
@@ -169,7 +183,9 @@ pub(in crate::fit_zoned) fn attach_free_masks(
         let first_mask = report.recipe.masks.len();
         let Some(accepted) = attach_one_zone(
             &s_img, &target_px, report, &mut frame_err, &attachment,
-            proposal.divergence, corr.as_ref(),
+            // A proposal only exists once the structural gate has READ its
+            // component, so this reading is present by construction.
+            Some(proposal.divergence), corr.as_ref(),
         ) else {
             owned.remove();
             report.recipe.rationale.truncate(rationale_before_attach);

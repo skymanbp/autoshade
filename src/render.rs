@@ -3044,17 +3044,17 @@ fn is_lr_post_correction_geometry(g: &MaskGeometry) -> bool {
 /// carrying the measurement buys the whole residual, so the family stays and
 /// the columns land.
 ///
-/// Registered as the residual it is: ON a column the table is within 0.0009 of
+/// The residual is what it is, and this is it: ON a column the table is within 0.0009 of
 /// the measurement; BETWEEN two columns it is still unmeasured. The two widest
 /// gaps of the eight-column version were probed and closed rather than
 /// estimated (f = 15 and f = 35, above), which leaves the f ≤ 10 end as the
 /// coarsest remaining seam — dropping f = 5 and predicting it from f = 1/10
-/// costs rms 0.0253 (`a_07` §2). Registered, not done: no export sits inside
+/// costs rms 0.0253 (`a_07` §2). That seam stays open by decision: no export sits inside
 /// that gap, and its transition is narrow enough (W ≤ 0.17 in ρ) that the same
 /// α error is a far smaller contour displacement than at f = 15/35
 /// (`me3-a-report.md` §4).
 ///
-/// # Registered, not modelled
+/// # Carried as measurement, not as a formula
 ///
 /// * `d_out` deliberately does NOT land as a constant — it is baked into the
 ///   column tails, so the value below costs zero pixels either way. It is
