@@ -1494,8 +1494,9 @@ than the pre-call state; model weights remain outside the repository.
   `python/requirements-{common,cuda,macos}.txt` — the one cuda/mps/cpu ladder
   every sidecar reads, the shared sidecar plumbing the three single-artifact
   ones bind rather than copy, and the per-platform dependency sets.
-- `.github/workflows/build.yml`, `.github/workflows/release.yml` and
-  `scripts/check_docs.py` — CI and document
-  drift gates.
+- `.github/workflows/build.yml`, `.github/workflows/release.yml`,
+  `.github/workflows/installer-upgrade.yml` and `scripts/check_docs.py` —
+  CI, the installer scenario chain run against the previous published
+  release, and the document drift gates.
 - `docs/ARCHITECTURE.md` and `docs/ROADMAP.md` — release battery and operational
   boundaries.
