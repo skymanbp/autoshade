@@ -2177,10 +2177,11 @@ pay look error for a fan it did not open — and the delivered reading is
 disclosed with both numbers; that arm is not defensive, because tone and
 saturation alone reach 12.9° of added fan on the `p36` calibration pair, which
 carries no cast at all. Measured over the whole library battery (2026-09-02):
-108 finished Full-mode renders, the widest delivered fan among them the coast
-fixture's 14.2° against the 15° line, so the check fires on nothing in the tree
-and changes no recipe. That is what a structural guarantee looks like while the
-calibration above it is doing its job.
+108 finished Full-mode renders, and the widest ADDED fan among them — the
+reading this check judges, the same one the gate judges — is the coast
+fixture's 14.2° against the 15° line, so the check fires on nothing in the
+tree and changes no recipe. That is what a structural guarantee looks like
+while the calibration above it is doing its job.
 
 Two tolerances are stated here rather than discovered later. **The worst
 case**: the gate judges the spread the curves ADD and subtracts the spread
@@ -2213,8 +2214,9 @@ Refusing outright cost the showcase pair a third of its fit (look error
 fan gate's verdict is narrower than "this cast is wrong": it says "not in
 this SHAPE". So when the fan gate is the ONLY gate that fails — the two
 pixel-aligned vetoes, the unsupported-hue-range veto AND the aggregate ratio
-gate all clear — the stage does not empty the curves. It walks them down a one-parameter path and ships
-the strongest point that clears.
+gate all clear — the stage does not empty the curves. It walks them down a
+one-parameter path and ships the best-PAYING point on that path that clears
+(v1.2.3 shipped the strongest one; see the search's own section below).
 
 The path gives up the CHROMATIC part first. Write `L` for the per-knot mean
 of the three fitted outputs (the shape all three channels share — one curve
@@ -2248,7 +2250,9 @@ says so; and the strength budget's bound rides into that judgement exactly as
 it does for a fitted cast. It runs in three phases: a 12-step bisection for
 the admissible frontier `t_max`, a fixed eight-cell sweep of `(0, t_max]` that
 keeps the best-PAYING admissible probe, and eight golden-section iterations on
-the winning cell so the answer is not quantised to the grid. Two thresholds are the projection's own. It must
+the winning cell so the answer is not quantised to the grid.
+
+Two thresholds are the projection's own. It must
 clear **half** the refusal line — `FAN_PROJECT_DEG` = 7.5°, not 15° —
 because 15° is where the calibration put the visibility edge (the FAN_DEG=20
 experiment shipped a 19° cast that left 20.6° of delivered fan) while the
