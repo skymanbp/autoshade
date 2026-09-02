@@ -544,10 +544,11 @@ name.
   Phase A measured the same two sequentially at `6.59 s` and `6.39 s`; running
   the independent cell readings under `rayon` and scattering them in cell order
   is bit-identical by construction and the determinism test still passes.
-- `look_err_with_evidence`'s structural term is inert on this pair (its core is
-  under 100 px, so `structure_divergence` answers `matched()`); the ceiling and
-  every realized share inherit that. Registered elsewhere, not compensated for
-  here.
+- `look_err_with_evidence`'s structural term abstains on this pair (its core is
+  under 100 px, so `structure_divergence` returns `None` since v1.2.4 instead of
+  a manufactured match). It is a penalty term, so an abstention charges nothing
+  and these numbers are unchanged; the ceiling and every realized share inherit
+  that.
 
 ### Source
 
@@ -563,9 +564,13 @@ name.
 
 The B3 free-mask producer (`src/fit_zoned/freemask.rs`) consumes the local-field
 remainder after tiles. Candidate pixels have `weight > 0`, `abs(remainder) >
-2/255`, and accepted-tile alpha below 0.5. Four-connected components never
-cross sign, rank by `sum(abs(remainder) * weight)`, and use the fallback 64-pixel
-minimum footprint. The pre-render gates are shared source/target evidence
+2/255`, and accepted-tile alpha below 0.5 — since v1.2.4 that alpha is the
+tile's raster times the `k` its boundary gate accepted, and what the filter
+removes is disclosed with its pixel count and both shares
+(`FIELD_MASK_WITHHELD`). Four-connected components never cross sign, rank by
+`sum(abs(remainder) * weight)`, and use the shared 64-pixel minimum footprint
+(`MIN_MASK_PIXELS`), which spatial tiles apply as well. The pre-render gates
+are shared source/target evidence
 `>= 0.03`,
 `structure_divergence < 0.65`, then cap 2. Attachment reuses the 2048-pixel
 raster, radius-8 guided refinement with `(4/255)^2`, zero frame-regression
