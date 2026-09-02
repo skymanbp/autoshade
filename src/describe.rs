@@ -67,6 +67,26 @@ const _: () = assert!(
     "the per-entry bound cannot hold a maximally escaped description plus its key"
 );
 
+/// How many hex characters of the library path's digest name a library in the
+/// cache. Sixteen: 64 bits, over a set of at most a handful of folders per
+/// machine, and the cost of a collision is one library sharing another's slice
+/// of the cap rather than anything incorrect.
+pub const ROOT_KEY_CHARS: usize = 16;
+
+/// The name one LIBRARY goes by inside the description cache.
+///
+/// The digest of the folder rather than the folder, for the reason
+/// [`CachedDescription::root`] states: the field has to be bounded, and a path
+/// is not. Both index builders resolve their directory the same way
+/// (`style::library_key`), so the RAW library and the look library that share
+/// one cache file are two different keys and get two different shares of the
+/// cap.
+pub fn library_key(dir: &Path) -> String {
+    let mut s = crate::sha256::Sha256::new();
+    s.update(dir.display().to_string().as_bytes());
+    s.finish().chars().take(ROOT_KEY_CHARS).collect()
+}
+
 /// Everything one description run needs; built from [`Config`] like
 /// [`crate::embed::EmbedOpts`] and [`crate::correspond::CorrespondOpts`].
 pub struct DescribeOpts {
@@ -327,6 +347,26 @@ pub struct CachedDescription {
     pub model: String,
     pub revision: String,
     pub prompt_version: u32,
+    /// Which LIBRARY paid for this description, as [`library_key`] spells it —
+    /// [`ROOT_KEY_CHARS`] hex characters, not the folder.
+    ///
+    /// Bookkeeping for [`DescriptionCache::retain`] and nothing else: it is
+    /// never part of whether an entry is usable ([`Self::is_current`] does not
+    /// read it), because a description is a fact about a FRAME and the frame
+    /// digest is the key. What it buys is a cap that can be shared out — see
+    /// `retain`, where an unlabelled entry is simply its own group.
+    ///
+    /// A KEY rather than the path, so that the field is bounded by
+    /// construction: [`MAX_CACHE_ENTRY_BYTES`] is derived from a maximal
+    /// description plus its digest, and a Windows library path would have
+    /// widened that bound by more than the description it sits beside.
+    ///
+    /// `#[serde(default)]` and `Option`: entries written before v1.2.4 carry
+    /// none and stay usable. `crate::style_cache` stores this type too and
+    /// leaves it `None`, which costs nothing — that cache is pruned to one
+    /// build's own keep set by construction and has no cap to share.
+    #[serde(default)]
+    pub root: Option<String>,
 }
 
 impl CachedDescription {
@@ -342,7 +382,13 @@ impl CachedDescription {
             model: MODEL_REPO.to_string(),
             revision: MODEL_REVISION.to_string(),
             prompt_version: PROMPT_VERSION,
+            root: None,
         }
+    }
+
+    /// [`Self::current`], labelled with the library that paid for it.
+    pub fn current_in(desc: String, root: &str) -> Self {
+        CachedDescription { root: Some(root.to_string()), ..Self::current(desc) }
     }
 
     /// Is this entry an answer to the question THIS build is asking? The
@@ -417,11 +463,16 @@ impl DescriptionCache {
         let parsed: std::collections::BTreeMap<String, CachedDescription> =
             crate::content_cache::read_map(path, CACHE_LABEL, MAX_CACHE_BYTES);
         for (key, value) in parsed {
+            // The library key is disk input like everything else here, and it
+            // is the one field with no other door: a value longer than the key
+            // this build writes is not one, and is dropped to unlabelled
+            // rather than allowed to widen the per-entry bound.
             if crate::content_cache::is_digest(&key)
                 && value.is_current()
                 && let Some(desc) = sanitize_desc(&value.desc)
             {
-                cache.entries.insert(key, CachedDescription { desc, ..value });
+                let root = value.root.filter(|r| r.len() <= ROOT_KEY_CHARS);
+                cache.entries.insert(key, CachedDescription { desc, root, ..value });
             }
         }
         cache
@@ -433,37 +484,90 @@ impl DescriptionCache {
         self.entries.get(digest).map(|e| e.desc.as_str())
     }
 
-    /// Remember one description. The value is stamped with THIS build's
-    /// provenance, never with whatever the caller happened to hold.
-    pub fn insert(&mut self, digest: String, desc: String) {
-        self.entries.insert(digest, CachedDescription::current(desc));
+    /// Remember one description, and which library paid for it. The value is
+    /// stamped with THIS build's provenance, never with whatever the caller
+    /// happened to hold.
+    pub fn insert(&mut self, digest: String, desc: String, root: &str) {
+        self.entries.insert(digest, CachedDescription::current_in(desc, root));
+    }
+
+    /// The entries a publish would write: this build's, then a FAIR SHARE of
+    /// the cap for every other library in the file.
+    ///
+    /// The old rule was "this build's keys first, then top up in ascending key
+    /// order", and at the cap it was a thrash rather than a retention: a
+    /// digest is a hash, so ascending key order is arbitrary, and a second
+    /// library whose own keys filled the cap evicted the first library
+    /// ENTIRELY. Alternating between two libraries then re-described every
+    /// photograph of whichever one ran last — the cache's whole purpose,
+    /// inverted, precisely for the user who keeps a RAW library and a look
+    /// library and rebuilds both.
+    ///
+    /// The share is water-filled from the SMALLEST group up: each remaining
+    /// group may take `left / groups`, a group with fewer entries than that
+    /// takes all it has and donates the rest, and the pass repeats over the
+    /// larger groups. So two libraries that fit together both survive whole,
+    /// and two that do not each keep half rather than one keeping everything.
+    /// Groups are walked in a fixed order and filled in ascending key order,
+    /// so two machines with the same file publish the same file: an LRU would
+    /// need a clock in every entry, and evictions nobody can reproduce are
+    /// evictions nobody can debug.
+    ///
+    /// `cap` is a parameter so the rule can be exercised at a size a test can
+    /// build; [`Self::save`] passes [`MAX_CACHE_ENTRIES`].
+    fn retain<'a>(
+        &'a self,
+        keep: &std::collections::BTreeSet<String>,
+        root: &str,
+        cap: usize,
+    ) -> std::collections::BTreeMap<&'a String, &'a CachedDescription> {
+        let mut chosen: std::collections::BTreeMap<&String, &CachedDescription> =
+            self.entries.iter().filter(|(k, _)| keep.contains(*k)).take(cap).collect();
+        // Everything this build did NOT touch, grouped by the library that
+        // paid for it. An entry with no label (written before v1.2.4) is its
+        // own group rather than anyone's, which is the only reading that does
+        // not put someone else's entries at risk on the first run after an
+        // upgrade.
+        let mut groups: std::collections::BTreeMap<&str, Vec<(&String, &CachedDescription)>> =
+            std::collections::BTreeMap::new();
+        for (k, v) in &self.entries {
+            if chosen.contains_key(k) {
+                continue;
+            }
+            groups.entry(v.root.as_deref().unwrap_or("")).or_default().push((k, v));
+        }
+        // THIS library's own untouched entries first, at whatever share is
+        // left: a rebuild that dropped a photograph should not lose its
+        // description before another library loses one.
+        let mut order: Vec<&str> = groups.keys().copied().collect();
+        order.sort_by_key(|g| (*g != root, groups[g].len(), *g));
+        let mut left = cap.saturating_sub(chosen.len());
+        let mut remaining = order.len();
+        for group in order {
+            if remaining == 0 {
+                break;
+            }
+            let share = left / remaining;
+            for (k, v) in groups[group].iter().take(share) {
+                chosen.insert(k, v);
+                left -= 1;
+            }
+            remaining -= 1;
+        }
+        chosen
     }
 
     /// Publish the cache, bounded and atomically.
     ///
-    /// `keep` is the set of keys THIS build used; when the cache is over
-    /// [`MAX_CACHE_ENTRIES`] those are retained first and the remainder is
-    /// filled in ascending key order. Deterministic on purpose: an LRU would
-    /// need a clock in every entry, and two machines evicting differently is a
-    /// difference nobody could reproduce.
-    pub fn save(&self, path: &Path, keep: &std::collections::BTreeSet<String>) -> Result<()> {
-        let mut chosen: std::collections::BTreeMap<&String, &CachedDescription> =
-            self.entries.iter().filter(|(k, _)| keep.contains(*k)).collect();
-        if chosen.len() > MAX_CACHE_ENTRIES {
-            // A build that produced more entries than the cap is not a state
-            // the library caps allow (5,000 RAW + 500 looks), so this is a
-            // guard rather than a policy: keep the first N by key.
-            let over: Vec<&String> = chosen.keys().skip(MAX_CACHE_ENTRIES).copied().collect();
-            for k in over {
-                chosen.remove(k);
-            }
-        }
-        for (k, v) in &self.entries {
-            if chosen.len() >= MAX_CACHE_ENTRIES {
-                break;
-            }
-            chosen.entry(k).or_insert(v);
-        }
+    /// `keep` is the set of keys THIS build used and `root` the library it
+    /// built; [`Self::retain`] owns which entries survive the cap.
+    pub fn save(
+        &self,
+        path: &Path,
+        keep: &std::collections::BTreeSet<String>,
+        root: &str,
+    ) -> Result<()> {
+        let chosen = self.retain(keep, root, MAX_CACHE_ENTRIES);
         crate::content_cache::publish_map(path, CACHE_LABEL, &chosen, MAX_CACHE_BYTES)
     }
 }
@@ -527,9 +631,10 @@ mod tests {
 
         let path = dir.join("style-descriptions.json");
         let mut cache = DescriptionCache::default();
-        cache.insert(da.clone(), "a warm, lifted grade".into());
+        let lib = library_key(Path::new("D:/library"));
+        cache.insert(da.clone(), "a warm, lifted grade".into(), &lib);
         let keep: std::collections::BTreeSet<String> = [da.clone()].into_iter().collect();
-        cache.save(&path, &keep).unwrap();
+        cache.save(&path, &keep, &lib).unwrap();
 
         let reloaded = DescriptionCache::load(&path);
         assert_eq!(reloaded.get(&db), Some("a warm, lifted grade"), "content key hits");
@@ -566,6 +671,78 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// A26 — two libraries at the cap keep both sets, and alternating builds
+    /// stop evicting each other.
+    ///
+    /// The old rule kept THIS build's keys and topped the rest up in ascending
+    /// key order, so a second library whose own keys filled the cap took the
+    /// whole file: every alternation re-described the library that ran last,
+    /// which is the cache's purpose inverted. The share is water-filled, so
+    /// two libraries that fit together survive whole and two that do not each
+    /// keep half.
+    ///
+    /// MUTATION: replace `retain`'s grouped fill with the old
+    /// `chosen.entry(k).or_insert(v)` walk over `self.entries` and the
+    /// "library A survives B's build" assertion fails by name.
+    #[test]
+    fn two_libraries_share_the_cache_cap_instead_of_evicting_each_other() {
+        let a = library_key(Path::new("D:/library-a"));
+        let b = library_key(Path::new("D:/library-b"));
+        assert_ne!(a, b, "premise: two folders are two keys");
+        // Digests chosen so library B owns the LOW half of the key order —
+        // the half the old "ascending key" top-up reached first.
+        let key = |lib: u8, n: usize| format!("{lib:02x}{n:062x}");
+        let mut cache = DescriptionCache::default();
+        let a_keys: Vec<String> = (0..4).map(|n| key(0xbb, n)).collect();
+        let b_keys: Vec<String> = (0..4).map(|n| key(0x11, n)).collect();
+        for k in &a_keys {
+            cache.insert(k.clone(), "library a".into(), &a);
+        }
+        for k in &b_keys {
+            cache.insert(k.clone(), "library b".into(), &b);
+        }
+        // Library B rebuilds, and its four descriptions alone fill the cap.
+        let cap = 8;
+        let keep: std::collections::BTreeSet<String> = b_keys.iter().cloned().collect();
+        let kept = cache.retain(&keep, &b, cap);
+        assert_eq!(kept.len(), cap, "the cap is filled, not under-used");
+        for k in &a_keys {
+            assert!(kept.contains_key(k), "library A survives library B's build: {k}");
+        }
+        for k in &b_keys {
+            assert!(kept.contains_key(k), "…and B keeps its own: {k}");
+        }
+        // Over the cap, the share is halved rather than taken whole: four of
+        // B's own (this build's) plus two of A's.
+        let tight = cache.retain(&keep, &b, 6);
+        assert_eq!(tight.len(), 6);
+        assert_eq!(
+            b_keys.iter().filter(|k| tight.contains_key(*k)).count(),
+            4,
+            "this build's own entries are never evicted for another library's"
+        );
+        assert_eq!(
+            a_keys.iter().filter(|k| tight.contains_key(*k)).count(),
+            2,
+            "and the other library keeps its share rather than nothing"
+        );
+        // A THIRD library, unlabelled (written before v1.2.4), is its own
+        // group and gets a share too rather than being swept as nobody's.
+        let old_keys: Vec<String> = (0..4).map(|n| key(0x22, n)).collect();
+        for k in &old_keys {
+            cache.entries.insert(k.clone(), CachedDescription::current("legacy".into()));
+        }
+        let three = cache.retain(&keep, &b, 8);
+        assert_eq!(three.len(), 8);
+        assert_eq!(b_keys.iter().filter(|k| three.contains_key(*k)).count(), 4);
+        assert_eq!(a_keys.iter().filter(|k| three.contains_key(*k)).count(), 2);
+        assert_eq!(
+            old_keys.iter().filter(|k| three.contains_key(*k)).count(),
+            2,
+            "an unlabelled entry is its own library, not nobody's"
+        );
+    }
+
     /// The runtime half of the `const` assertion above: a MAXIMAL entry —
     /// 512 characters that each JSON-escape to six bytes — really serialises
     /// inside [`MAX_CACHE_ENTRY_BYTES`], so the file cap can hold a full
@@ -579,6 +756,9 @@ mod tests {
             model: MODEL_REPO.to_string(),
             revision: MODEL_REVISION.to_string(),
             prompt_version: PROMPT_VERSION,
+            // The widest this field can be: the key is a fixed-width digest
+            // slice, which is the whole reason it is not the path.
+            root: Some("f".repeat(ROOT_KEY_CHARS)),
         };
         let key = "f".repeat(64);
         let one: std::collections::BTreeMap<&str, &CachedDescription> =
