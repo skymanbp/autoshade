@@ -209,6 +209,14 @@ const RANGE_BOUNDARY_RIM_MAX: f32 = 0.012;
 /// 8-bit code is under the quantisation of the render this gate measures, so
 /// nothing it admits can be drawn.
 const RANGE_TRANSFER_REVERSAL_MAX: f32 = 0.5 / 255.0;
+/// How close two neighbouring REFERENCE pixels have to be, in the coordinate
+/// a band's mask ramps along, before the crossing between them counts as a
+/// smooth one a correction may be charged for. Two-and-a-half 8-bit levels
+/// preserves the retained smooth-gradient stress while excluding real subject
+/// edges. The number is unchanged: it was spelled inline inside
+/// [`range_transition_rim`] while luma was the only coordinate, and it is a
+/// constant now because a colour band asks the same question in its own.
+const RANGE_SMOOTH_CROSSING: f32 = 2.5 / 255.0;
 /// Native bands reuse the global evidence model's measured 1.5% population
 /// floor; a smaller interval is not a two-sided measurement.
 pub(super) const RANGE_MIN_EVIDENCE_SHARE: f32 = 0.015;
@@ -223,6 +231,121 @@ const RANGE_HOST: MaskGeometry = MaskGeometry::Linear {
     full_x: 0.5,
     full_y: -0.4,
 };
+
+/// The coordinate ONE range mask's weight ramps along.
+///
+/// A boundary reading only means something in that coordinate. A luminance
+/// band ramps over an interval of luma, so a step it induces is a luma step.
+/// A colour band ramps over a shell of chromaticity distance around its own
+/// reference colour, so a step it induces is a chromaticity step, and the luma
+/// ruler reads 0.000 across an edge that is plainly visible: a red pixel beside
+/// a green one of the same luma differs by nothing the luma ruler measures.
+///
+/// So the family keeps ONE rule and reads it in each band's own units. Two
+/// neighbours are admitted when the REFERENCE separates them by at most
+/// [`RANGE_SMOOTH_CROSSING`] here; they belong to a transition when their
+/// reference midpoint falls inside that transition's ramp; and the reading is
+/// how far apart the RENDER puts the same two pixels. Instantiated on
+/// [`Self::Luma`] this is, arithmetically, the reading the rim gate has taken
+/// since v1.2.2 -- the p90 ranks magnitudes, so the luma arm's sign never
+/// reached the verdict.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum RangeSelector {
+    /// Rec.601 display luma: the coordinate `RangeMask::Luminance` ramps in.
+    Luma,
+    /// Brightness-independent distance from a colour band's reference colour:
+    /// the exact quantity `render::range_weight` ramps a `RangeMask::Color`
+    /// over ([`render::chromaticity_distance`]).
+    Chromaticity([f32; 3]),
+}
+
+impl RangeSelector {
+    /// Where one pixel sits along this coordinate. Non-finite when the pixel
+    /// carries no reading here, which for chromaticity is a pixel too dark to
+    /// have one; callers skip those samples rather than inventing a position.
+    fn position(self, px: &[f32; 3]) -> f32 {
+        match self {
+            Self::Luma => display_luma(px),
+            Self::Chromaticity(reference) => render::chromaticity_distance(&reference, px),
+        }
+    }
+
+    /// How far apart two pixels are along this coordinate. The luma arm keeps
+    /// the signed difference the rim gate has always taken; the chromaticity
+    /// arm is the same distance function applied BETWEEN the two pixels
+    /// instead of between one pixel and the band's colour, and is never
+    /// negative. Both are ranked by magnitude below.
+    fn separation(self, a: &[f32; 3], b: &[f32; 3]) -> f32 {
+        match self {
+            Self::Luma => display_luma(b) - display_luma(a),
+            Self::Chromaticity(_) => render::chromaticity_distance(a, b),
+        }
+    }
+}
+
+/// One ramp of one mask: the coordinate it ramps in, and the interval over
+/// which its weight changes.
+#[derive(Clone, Copy, Debug)]
+struct RangeTransition {
+    selector: RangeSelector,
+    lo: f32,
+    hi: f32,
+}
+
+/// Every ramp a range mask carries. A luminance trapezoid has two, and a hard
+/// edge contributes none exactly as before; a colour ball has one, from the
+/// distance where its weight starts falling to the one where it reaches zero.
+fn range_transitions(range: &RangeMask) -> Vec<RangeTransition> {
+    match *range {
+        RangeMask::Luminance { lo_outer, lo, hi, hi_outer } => [(lo_outer, lo), (hi, hi_outer)]
+            .into_iter()
+            .filter(|(a, b)| a.is_finite() && b.is_finite() && b > a)
+            .map(|(lo, hi)| RangeTransition { selector: RangeSelector::Luma, lo, hi })
+            .collect(),
+        RangeMask::Color { r, g, b, amount, .. } => {
+            let tolerance = render::colour_range_tolerance(amount);
+            [(0.5 * tolerance, tolerance)]
+                .into_iter()
+                .filter(|(a, b)| a.is_finite() && b.is_finite() && b > a)
+                .map(|(lo, hi)| RangeTransition {
+                    selector: RangeSelector::Chromaticity([r, g, b]),
+                    lo,
+                    hi,
+                })
+                .collect()
+        }
+    }
+}
+
+/// The footprint the ORDER reading walks, in the coordinate that has an
+/// order. `None` for a colour band, and that is a measured decision rather
+/// than an omission.
+///
+/// [`range_transfer_reversal`] asks whether the delivered values stayed in
+/// the order the reference put them in. Luma is a signed axis and the move a
+/// luminance band makes — lift or lower a span — preserves that order when it
+/// is doing its job, so a reversal there is always a defect. Chromaticity
+/// distance from a band's own colour is RADIAL, and the move a colour band
+/// exists to make — carry the band's population toward the target's colour —
+/// changes every member's radius: the member that sat exactly on the band's
+/// colour ends up a shift away from it while the member that sat a shift away
+/// on the far side ends up on it. The radial order inverts by construction,
+/// so the test would read the correction's success as its defect. Measured on
+/// the synthetic scattered-hue pair: a modest desaturation of the blue band
+/// was refused on this reading with a rim of 0.000, shrunk to k=0.104, and
+/// then dropped by the composed-frame ceiling for want of any gain left.
+///
+/// A colour band's boundary is therefore judged by the rim, in ITS coordinate
+/// — which is the reading that answers the question a colour ramp raises: did
+/// two neighbours the photograph gave the same colour come out different.
+fn range_footprint(range: &RangeMask) -> Option<(RangeSelector, (f32, f32))> {
+    match *range {
+        RangeMask::Luminance { lo_outer, hi_outer, .. } => {
+            Some((RangeSelector::Luma, (lo_outer, hi_outer)))
+        }
+        RangeMask::Color { .. } => None,
+    }
+}
 
 #[derive(Clone, Debug)]
 struct ResidualRun {
@@ -240,6 +363,10 @@ struct RangeBand {
     source: RangeMask,
     target: RangeMask,
     divergence: fit::Divergence,
+    /// The ACR hue band a COLOUR band was measured on; `None` for a luminance
+    /// band. It names the population in the disclosure and decides which
+    /// abstention sentence a refusal is written into.
+    hue_band: Option<usize>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -272,6 +399,12 @@ thread_local! {
     static RANGE_FRESH_RENDER_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static RANGE_FINAL_FRAME_ERR_OVERRIDE: std::cell::Cell<Option<f32>> =
         const { std::cell::Cell::new(None) };
+    /// The A/B arm the corpus test measures the colour family against: with
+    /// it set the fallback is exactly the luminance-only producer that ran
+    /// before this family existed, so two runs in one process differ by this
+    /// feature and nothing else.
+    static COLOUR_RANGE_SUPPRESSED: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
 }
 
 fn display_luma(p: &[f32; 3]) -> f32 {
@@ -282,6 +415,11 @@ fn range_weights_for_pixels(range: &RangeMask, pixels: &[[f32; 3]]) -> Vec<f32> 
     pixels.iter().map(|p| render::range_weight(range, p)).collect()
 }
 
+/// Overlapping ramps of ONE partition may not count a pixel twice in one
+/// estimator. The two families never meet here: each is a stage of its own
+/// ([`attach_band_stage`]) and every band re-derives its population from a
+/// fresh render of the stack so far, so a pixel a luminance band already
+/// moved is measured as the luminance band left it.
 fn normalize_partition_weights(weights: &mut [Vec<f32>]) {
     let n = weights.iter().map(Vec::len).min().unwrap_or(0);
     for i in 0..n {
@@ -433,6 +571,7 @@ fn bands_from_runs(
                 energy_error: 0.0,
                 d,
             },
+            hue_band: None,
         });
     }
     bands
@@ -745,16 +884,7 @@ fn range_transition_rim(
     height: u32,
 ) -> BoundaryReading {
     let (w, h) = (width as usize, height as usize);
-    let transitions = ranges
-        .iter()
-        .flat_map(|range| match *range {
-            RangeMask::Luminance { lo_outer, lo, hi, hi_outer } => {
-                [(lo_outer, lo), (hi, hi_outer)]
-            }
-            RangeMask::Color { .. } => [(f32::NAN, f32::NAN); 2],
-        })
-        .filter(|(a, b)| a.is_finite() && b.is_finite() && b > a)
-        .collect::<Vec<_>>();
+    let transitions = ranges.iter().flat_map(range_transitions).collect::<Vec<_>>();
     let mut rims = vec![Vec::new(); transitions.len()];
     let mut sample_pair = |a: usize, b: usize| {
         let Some((ra, rb, pa, pb)) = reference
@@ -765,24 +895,28 @@ fn range_transition_rim(
         else {
             return;
         };
-        let (la, lb) = (display_luma(ra), display_luma(rb));
-        // A range rim is a bow in a locally smooth value crossing, not a
-        // pre-existing subject edge. Two-and-a-half 8-bit levels preserves
-        // the retained smooth-gradient stress while excluding real edges.
-        if (la - lb).abs() > 2.5 / 255.0 {
-            return;
-        }
-        let middle = (la + lb) * 0.5;
-        let rendered_a = display_luma(pa);
-        let rendered_b = display_luma(pb);
-        let signed_bow = if la <= lb {
-            rendered_b - rendered_a
-        } else {
-            rendered_a - rendered_b
-        };
-        for (transition, &(outer, inner)) in transitions.iter().enumerate() {
-            if (outer..=inner).contains(&middle) {
-                rims[transition].push(signed_bow);
+        for (index, transition) in transitions.iter().enumerate() {
+            let selector = transition.selector;
+            // A range rim is a bow in a locally smooth crossing, not a
+            // pre-existing subject edge -- and SMOOTH is a claim about the
+            // coordinate this band selects on, which is why the test moved
+            // inside the loop. A colour band's ramp lives exactly where the
+            // luma ruler would have called every crossing smooth.
+            let separation = selector.separation(ra, rb);
+            if !separation.is_finite() || separation.abs() > RANGE_SMOOTH_CROSSING {
+                continue;
+            }
+            let (sa, sb) = (selector.position(ra), selector.position(rb));
+            if !sa.is_finite() || !sb.is_finite() {
+                continue;
+            }
+            let middle = (sa + sb) * 0.5;
+            if !(transition.lo..=transition.hi).contains(&middle) {
+                continue;
+            }
+            let bow = selector.separation(pa, pb);
+            if bow.is_finite() {
+                rims[index].push(bow);
             }
         }
     };
@@ -814,66 +948,86 @@ fn range_transition_rim(
         })
         .fold(0.0f32, f32::max);
     // This family declines to charge: its admission rule above (a bow in a
-    // locally smooth value crossing, never a pre-existing subject edge) is
-    // already a binary form of the contextual test, and a graded context
-    // here is capped near 2.5/255 by construction — no dynamic range. See
-    // [`super::BoundaryReading::charged`].
+    // locally smooth crossing, never a pre-existing subject edge) is already
+    // a binary form of the contextual test, and a graded context here is
+    // capped at [`RANGE_SMOOTH_CROSSING`] by construction — no dynamic
+    // range. See [`super::BoundaryReading::charged`].
     BoundaryReading { rim, transitions: transition_count, charged: rim }
 }
 
-/// The delivered transfer's worst TONE REVERSAL across the bands' edges, in
-/// luma.
+/// The delivered transfer's worst ORDER REVERSAL across the bands' edges, in
+/// each band's own coordinate.
 ///
 /// The reading is taken in the same two frames the rim gate uses: the
 /// REFERENCE (the globals-only twin the engine passes in) supplies the input
-/// tone order, and the RENDERED frame supplies the delivered one. Pixels are
-/// binned by reference luma into the render's own 8-bit codes and each
-/// populated bin holds the mean delivered luma of its members; walking the bins
-/// upward, the reading is the deepest fall below the highest delivered luma
-/// already reached. A monotone transfer of any steepness — including one that
-/// compresses 30 input codes into 9.9, which is what the calibration band
-/// measures — reads exactly 0. An inversion reads its own depth.
+/// order, and the RENDERED frame supplies the delivered one. Pixels are binned
+/// by their reference POSITION along the coordinate, into the render's own
+/// 8-bit codes, and each populated bin holds the mean delivered position of its
+/// members; walking the bins upward, the reading is the deepest fall below the
+/// highest delivered position already reached. A monotone transfer of any
+/// steepness — including one that compresses 30 input codes into 9.9, which is
+/// what the calibration band measures — reads exactly 0. An inversion reads
+/// its own depth.
 ///
-/// Only the bands' own spans and their transitions are read: outside
-/// `lo_outer..hi_outer` the correction has no weight and its transfer is the
-/// identity, so including it would dilute the bins that carry the question.
+/// ONLY BANDS WHOSE COORDINATE HAS AN ORDER are walked, which today means the
+/// luminance family: [`range_footprint`] hands back nothing for a colour band,
+/// and the measurement behind that is written there. Luma is a signed axis and
+/// this is the tone order the gate has ranked since v1.2.4.
+///
+/// Two coordinates would never share a histogram — 0.30 of luma and 0.30 of
+/// chromaticity are different facts about different pixels — so each footprint
+/// is grouped by its own selector, given its own bins, and the reading is the
+/// worst of them. A colour band contributes no group and is judged by the rim.
+///
+/// Only the bands' own footprints are read: outside them the correction has no
+/// weight and its transfer is the identity, so including them would dilute the
+/// bins that carry the question.
 fn range_transfer_reversal(
     reference: &[[f32; 3]],
     rendered: &[[f32; 3]],
     ranges: &[RangeMask],
 ) -> f32 {
     const BINS: usize = 256;
-    let spans = ranges
-        .iter()
-        .filter_map(|range| match *range {
-            RangeMask::Luminance { lo_outer, hi_outer, .. } => Some((lo_outer, hi_outer)),
-            RangeMask::Color { .. } => None,
-        })
-        .collect::<Vec<_>>();
-    let mut sum = [0.0f64; BINS];
-    let mut count = [0u32; BINS];
-    for (reference, delivered) in reference.iter().zip(rendered) {
-        let l = display_luma(reference);
-        if !spans.iter().any(|(lo, hi)| l >= *lo && l <= *hi) {
-            continue;
+    let mut groups: Vec<(RangeSelector, Vec<(f32, f32)>)> = Vec::new();
+    for range in ranges {
+        let Some((selector, span)) = range_footprint(range) else { continue };
+        match groups.iter_mut().find(|(known, _)| *known == selector) {
+            Some((_, spans)) => spans.push(span),
+            None => groups.push((selector, vec![span])),
         }
-        let bin = (l.clamp(0.0, 1.0) * (BINS - 1) as f32).round() as usize;
-        sum[bin] += display_luma(delivered) as f64;
-        count[bin] += 1;
     }
-    let mut highest = f32::NEG_INFINITY;
-    let mut depth = 0.0f32;
-    for bin in 0..BINS {
-        if count[bin] == 0 {
-            continue;
+    let mut worst = 0.0f32;
+    for (selector, spans) in groups {
+        let mut sum = [0.0f64; BINS];
+        let mut count = [0u32; BINS];
+        for (reference, delivered) in reference.iter().zip(rendered) {
+            let l = selector.position(reference);
+            if !l.is_finite() || !spans.iter().any(|(lo, hi)| l >= *lo && l <= *hi) {
+                continue;
+            }
+            let after = selector.position(delivered);
+            if !after.is_finite() {
+                continue;
+            }
+            let bin = (l.clamp(0.0, 1.0) * (BINS - 1) as f32).round() as usize;
+            sum[bin] += after as f64;
+            count[bin] += 1;
         }
-        let delivered = (sum[bin] / count[bin] as f64) as f32;
-        if highest > f32::NEG_INFINITY {
-            depth = depth.max(highest - delivered);
+        let mut highest = f32::NEG_INFINITY;
+        let mut depth = 0.0f32;
+        for bin in 0..BINS {
+            if count[bin] == 0 {
+                continue;
+            }
+            let delivered = (sum[bin] / count[bin] as f64) as f32;
+            if highest > f32::NEG_INFINITY {
+                depth = depth.max(highest - delivered);
+            }
+            highest = highest.max(delivered);
         }
-        highest = highest.max(delivered);
+        worst = worst.max(depth);
     }
-    depth
+    worst
 }
 
 fn range_boundary_note_args(
@@ -922,6 +1076,33 @@ fn enforce_range_boundary_gate(
         reading.rim <= RANGE_BOUNDARY_RIM_MAX && reversal <= RANGE_TRANSFER_REVERSAL_MAX
     };
     let range_count = report.recipe.masks.len().saturating_sub(first_range);
+    // A correction that survives this gate must MOVE something, and the test
+    // is BYTE IDENTITY of the render against the reference rather than a
+    // threshold on `k` — the zoned gate's own invariant since step 9 (see
+    // [`crate::rationale::keys::ZONE_BOUNDARY_INERT`]), which this family
+    // never had. The colour producer is what made it fire: on the p39
+    // calibration pair the bisection returned k=0.000 and the stage kept a
+    // mask whose every dial was zero and whose colour gains had been dropped —
+    // a correction the sidecar would carry, the GUI would list, and nothing
+    // would render. An inert attachment is strictly worse than a refusal.
+    let refuse_inert = |report: &mut FitReport,
+                        reading: BoundaryReading,
+                        reversal: f32,
+                        k: f32| {
+        report.recipe.masks.truncate(first_range);
+        crate::rationale::push_note(
+            &mut report.recipe.rationale,
+            &mut report.notes,
+            crate::rationale::Note::new(
+                crate::rationale::keys::RANGE_BOUNDARY_INERT,
+                range_boundary_note_args(range_count, k, initial, reading, reversal),
+            ),
+        );
+    };
+    if initial_px.as_slice() == reference {
+        refuse_inert(report, initial, initial_reversal, 1.0);
+        return BoundaryGateResult::Dropped;
+    }
     if passes(&initial, initial_reversal) {
         crate::rationale::push_note(
             &mut report.recipe.rationale,
@@ -986,6 +1167,10 @@ fn enforce_range_boundary_gate(
         } else {
             hi = mid;
         }
+    }
+    if best.2.as_slice() == reference {
+        refuse_inert(report, best.0, best.1, lo);
+        return BoundaryGateResult::Dropped;
     }
     shrink_zone_corrections(
         &mut report.recipe.masks[first_range..],
@@ -1053,10 +1238,531 @@ fn final_range_frame_err(
     }
 }
 
-/// Automatic pure-Rust fallback after the global fit. Bands are attempted in
-/// ascending luma order, and every attempt derives its source population from
-/// the current rendered stack rather than the untouched source.
-pub(super) fn attach_luminance_ranges(
+/// A hue band this producer declined, and the reading that declined it.
+/// Colour bands are named by the ACR band they were measured on rather than
+/// by an interval, because that band is the population the frozen evidence
+/// model already carries a verdict for.
+#[derive(Clone, Debug, PartialEq)]
+struct ColourAbstention {
+    band: usize,
+    reason: String,
+}
+
+/// A colour band that cleared every proposal gate, carrying the numbers its
+/// propose disclosure prints.
+#[derive(Clone, Debug, PartialEq)]
+struct ColourProposal {
+    band: RangeBand,
+    hue_band: usize,
+    /// Weighted share of the analysis frame the emitted mask selects.
+    share: f32,
+    /// The chromaticity tolerance the emitted `crs:ColorAmount` really buys,
+    /// after the schema's 0..=1 clamp — not the radius that was measured.
+    tolerance: f32,
+    residual: f32,
+    score: f32,
+}
+
+#[derive(Debug, Default, PartialEq)]
+struct ColourDerivation {
+    proposals: Vec<ColourProposal>,
+    abstentions: Vec<ColourAbstention>,
+}
+
+/// Hard membership of one ACR hue band on whichever frame is passed in.
+/// [`fit::evidence_hue_band`] is the SAME classifier the evidence model bins
+/// with (a 0.06 chroma floor, then the nearest of the eight HSL centres), so
+/// the population this producer measures and the population the frozen
+/// verdicts are about are one population and not two that resemble each other.
+fn hue_band_members(px: &[[f32; 3]], band: usize) -> Vec<f32> {
+    px.iter()
+        .map(|p| if fit::evidence_hue_band(p) == Some(band) { 1.0 } else { 0.0 })
+        .collect()
+}
+
+/// One hue band's own colour and the chromaticity radius that holds nine of
+/// its members in ten, plus the member that sits closest to that colour.
+///
+/// The radius is the band's [`ZONE_BOUNDARY_PERCENTILE`] distance from its own
+/// weighted mean: DERIVED from the population, not tuned, and taken at the
+/// same percentile the boundary readings are budgeted at, so the mask and the
+/// gate agree on which members are the body of the band and which are its
+/// edge.
+///
+/// `None` when the band has no members, or when its mean colour is too dark to
+/// carry a chromaticity at all — the same rule `render::range_weight` applies
+/// to a near-black reference, asked before a mask is built rather than after.
+fn colour_band_centre(px: &[[f32; 3]], members: &[f32]) -> Option<([f32; 3], f32, usize)> {
+    let mut mass = 0.0f64;
+    let mut mean = [0.0f64; 3];
+    for (p, &w) in px.iter().zip(members) {
+        if w <= 0.0 {
+            continue;
+        }
+        mass += w as f64;
+        for (channel, value) in mean.iter_mut().zip(p) {
+            *channel += w as f64 * *value as f64;
+        }
+    }
+    if mass <= 0.0 {
+        return None;
+    }
+    let reference = [
+        (mean[0] / mass) as f32,
+        (mean[1] / mass) as f32,
+        (mean[2] / mass) as f32,
+    ];
+    let mut distances = Vec::new();
+    let mut nearest: Option<(f32, usize)> = None;
+    for (i, (p, &w)) in px.iter().zip(members).enumerate() {
+        if w <= 0.0 {
+            continue;
+        }
+        let d = render::chromaticity_distance(&reference, p);
+        if !d.is_finite() {
+            continue;
+        }
+        distances.push(d);
+        if nearest.is_none_or(|(best, _)| d < best) {
+            nearest = Some((d, i));
+        }
+    }
+    let (_, sample) = nearest?;
+    distances.sort_by(f32::total_cmp);
+    let rank = ((distances.len() as f32 * ZONE_BOUNDARY_PERCENTILE).ceil() as usize)
+        .saturating_sub(1)
+        .min(distances.len() - 1);
+    Some((reference, distances[rank], sample))
+}
+
+/// The colour Range Mask keyed to one band's colour at that band's radius.
+///
+/// The tolerance IS the radius. Measured on the synthetic scattered-hue pair:
+/// at the radius, every unit of the ball's weight lands on a member of the
+/// band it was derived from (purity 1.000 on both of that frame's bands); at
+/// twice the radius — which would put the p90 member in the full-weight core
+/// rather than on the ramp — purity falls to 0.55 and 0.78, because the ball
+/// starts selecting the very pixels the band excluded.
+///
+/// AND IT STOPS BEFORE NEUTRAL. A ball wide enough to reach the achromatic
+/// axis is not a colour range: it would select grey, which belongs to no hue
+/// band at all, and a correction through it is a global move that walked past
+/// the global stage's gates. The reference colour's own distance from neutral
+/// is that limit, measured rather than chosen, and at it grey lands exactly on
+/// the tolerance where the weight reaches zero.
+///
+/// Over 1.05 the sidecar's grammar cannot go, so a very wide band gets a mask
+/// narrower than its measurement asked for and the proposal disclosure prints
+/// the tolerance that was actually bought.
+///
+/// `(px, py)` is the member closest to the reference colour. Lightroom treats
+/// it as a cosmetic sample marker, and this way it is a real sample of the
+/// band instead of an invented point.
+fn colour_mask(
+    reference: [f32; 3],
+    radius: f32,
+    sample: usize,
+    width: u32,
+    height: u32,
+) -> RangeMask {
+    let (w, h) = (width.max(1) as usize, height.max(1) as usize);
+    let neutral = render::chromaticity_distance(&reference, &[0.5; 3]);
+    let tolerance = if neutral.is_finite() { radius.min(neutral) } else { radius };
+    RangeMask::Color {
+        r: reference[0],
+        g: reference[1],
+        b: reference[2],
+        amount: render::colour_range_amount(tolerance),
+        px: ((sample % w) as f32 + 0.5) / w as f32,
+        py: ((sample / w).min(h - 1) as f32 + 0.5) / h as f32,
+    }
+}
+
+/// Derive colour bands from the current rendered stack.
+///
+/// THE CASE THIS PRODUCER EXISTS FOR is a look that differs by COLOUR over a
+/// population no rectangle and no silhouette can hold: the same hue wherever it
+/// appears in the frame. The luminance producer above cannot see it, because a
+/// hue move need not move luma at all; the spatial producers cannot hold it,
+/// because the population is scattered. Until this existed such a look was
+/// fitted globally or not at all.
+///
+/// THE EVIDENCE IS TWO-SIDED OR THERE IS NO BAND, and that is not a
+/// precaution: a hue-shifting edit DEPOPULATES its own band on the target
+/// side, so a band only the source populates is exactly the shape a circular
+/// argument takes here — "the target has no blues, therefore correct the
+/// blues" is the edit talking about itself. Two independent arms answer it.
+/// The FROZEN original-pair verdict `evidence.hue[band]` is asked through the
+/// same [`evidence_refusal`] the luminance producer uses, so both sides must
+/// clear the 1.5% population floor and the band must carry structural weight.
+/// Then the DELIVERED populations are asked the same question again, on the
+/// two frames the mask will actually be applied to, because the global stage
+/// may have moved hues since the evidence was frozen. A band that fails either
+/// arm abstains with the reading that refused it. A third arm sits downstream
+/// and is not optional either: [`attach_one_zone`] re-scopes the evidence over
+/// the mask's OWN population and withholds the colour class outright when the
+/// hue bands that population moves are unsupported.
+///
+/// A GLOBAL COLOUR MOVE PRODUCES NO BAND HERE, for the same reason a global
+/// tone move produces no luminance band: the residual is read on the CURRENT
+/// render, so whatever the global stage already matched is gone before this
+/// function sees it, and the bands read under [`ZONE_MATCHED_ERR`] — the
+/// observed matched domain, which is the line a band has to clear to be
+/// proposed at all. A global move the global stage was REFUSED is caught by
+/// the two-sidedness arms instead, because refusing it does not put the
+/// target's hues back into the source's bands.
+fn derive_colour_bands(
+    source_px: &[[f32; 3]],
+    target_px: &[[f32; 3]],
+    evidence: &fit::EvidenceModel,
+    width: u32,
+    height: u32,
+) -> ColourDerivation {
+    #[cfg(test)]
+    if COLOUR_RANGE_SUPPRESSED.with(std::cell::Cell::get) {
+        return ColourDerivation::default();
+    }
+    let mut out = ColourDerivation::default();
+    let n = source_px.len().min(target_px.len());
+    if n == 0 {
+        return out;
+    }
+    let (source_px, target_px) = (&source_px[..n], &target_px[..n]);
+    for band in 0..crate::recipe::HSL_BANDS.len().min(evidence.hue.len()) {
+        let source_members = hue_band_members(source_px, band);
+        let target_members = hue_band_members(target_px, band);
+        let residual = zone_err(
+            &zone_moments(source_px, &source_members),
+            &zone_moments(target_px, &target_members),
+        );
+        // Silent under the observed matched domain, exactly as a luminance bin
+        // under the residual trigger is silent. A quiet band is not a refusal
+        // anyone needs explained, and eight of them per fit would bury the
+        // bands that were refused for a reason.
+        if residual < ZONE_MATCHED_ERR {
+            continue;
+        }
+        if let Some(reason) = evidence_refusal(&evidence.hue[band]) {
+            out.abstentions.push(ColourAbstention { band, reason });
+            continue;
+        }
+        let share_of = |members: &[f32]| members.iter().sum::<f32>() / n as f32;
+        let (source_share, target_share) =
+            (share_of(&source_members), share_of(&target_members));
+        if source_share < RANGE_MIN_EVIDENCE_SHARE || target_share < RANGE_MIN_EVIDENCE_SHARE {
+            out.abstentions.push(ColourAbstention {
+                band,
+                reason: format!(
+                    "the rendered band holds {:.1}% and the target band {:.1}% \
+                     of the frame, against the {:.1}% two-sided floor",
+                    source_share * 100.0,
+                    target_share * 100.0,
+                    RANGE_MIN_EVIDENCE_SHARE * 100.0,
+                ),
+            });
+            continue;
+        }
+        let Some((reference, radius, sample)) = colour_band_centre(source_px, &source_members)
+        else {
+            out.abstentions.push(ColourAbstention {
+                band,
+                reason: "the band's mean colour is too dark to carry a chromaticity"
+                    .to_string(),
+            });
+            continue;
+        };
+        // ONE MASK, READ ON BOTH FRAMES. The target population has to be
+        // defined the same way as the source one or the share gate reads a
+        // sizing artefact as a composition mismatch: on the synthetic pair the
+        // target band's OWN ball covered 4.7% of the frame against the source
+        // ball's 18.2%, for populations that are 26.9% and 26.8% of it. The
+        // emitted mask is the ruler for both sides, so what the share gate
+        // compares is one question asked twice — which is why `target` here is
+        // the same mask and not a second one keyed to the target's colour.
+        //
+        // That also makes the gate a circularity guard in its own right, and
+        // the last of four: a colour move large enough to carry the target's
+        // pixels out of the mask leaves the target share far under the source's
+        // and the shared 2:1 composition gate refuses the band, rather than
+        // fitting a correction to a population that is no longer there.
+        let source = colour_mask(reference, radius, sample, width, height);
+        let target = source;
+        let coverage = ZoneCoverage {
+            source: range_weights_for_pixels(&source, source_px),
+            target: range_weights_for_pixels(&target, target_px),
+        };
+        let share = coverage.source.iter().sum::<f32>() / n as f32;
+        let verdict = &evidence.hue[band];
+        let d = if verdict.divergence.is_finite() { verdict.divergence } else { 1.0 };
+        out.proposals.push(ColourProposal {
+            band: RangeBand {
+                attachment: ZoneAttachment {
+                    // Both weight vectors are placeholders the entry point
+                    // replaces: the source population is re-derived from the
+                    // current rendered stack before every attempt, and the
+                    // target population is normalised against every OTHER band
+                    // in the same fit. They start as this band's own raw ramp so
+                    // the structure is meaningful when a test builds one alone.
+                    source_weights: coverage.source.clone(),
+                    target_weights: coverage.target.clone(),
+                    coverage: Some(coverage),
+                    mask: RANGE_HOST,
+                    range: Some(source),
+                    name: String::new(),
+                    role: MaskRole::Custom,
+                    inverted: false,
+                    label: String::new(),
+                    min_share: MIN_ZONE_SHARE,
+                    frame_regression_tol: RANGE_FRAME_REGRESSION_TOL,
+                },
+                source,
+                target,
+                divergence: fit::Divergence {
+                    correlation: (1.0 - d).clamp(-1.0, 1.0),
+                    energy_error: 0.0,
+                    d,
+                },
+                hue_band: Some(band),
+            },
+            hue_band: band,
+            share,
+            tolerance: match source {
+                RangeMask::Color { amount, .. } => render::colour_range_tolerance(amount),
+                RangeMask::Luminance { .. } => 0.0,
+            },
+            residual,
+            score: residual * verdict.two_sided_share.max(1e-6),
+        });
+    }
+    // The same cap the luminance family answers to, applied to this family's
+    // own set: four bands is the measured stability ceiling for value-range
+    // evidence and a hue band is no better identified than a luma one. The
+    // ranking is the luminance family's too — residual weighted by the band's
+    // two-sided share — so a large move in a band barely anyone populates does
+    // not displace a real one. Ties go to the lower band index, so the outcome
+    // does not depend on iteration order.
+    out.proposals.sort_by(|a, b| {
+        b.score.total_cmp(&a.score).then_with(|| a.hue_band.cmp(&b.hue_band))
+    });
+    for dropped in out.proposals.split_off(out.proposals.len().min(RANGE_MAX_BANDS)) {
+        out.abstentions.push(ColourAbstention {
+            band: dropped.hue_band,
+            reason: format!(
+                "band residual {:.3} ranked below the {} bands the evidence cap keeps",
+                dropped.residual, RANGE_MAX_BANDS,
+            ),
+        });
+    }
+    // Attach in band order, not in score order: the rationale then reads red to
+    // magenta the way the HSL mixer does, and the mask names follow it.
+    out.proposals.sort_by_key(|proposal| proposal.hue_band);
+    out.abstentions.sort_by_key(|abstention| abstention.band);
+    for (index, proposal) in out.proposals.iter_mut().enumerate() {
+        proposal.band.attachment.name = format!("Colour range {:02}", index + 1);
+        proposal.band.attachment.label = format!(
+            "Colour range {:02} ({})",
+            index + 1,
+            crate::recipe::HSL_BANDS[proposal.hue_band],
+        );
+    }
+    out
+}
+
+fn push_colour_proposal(report: &mut FitReport, proposal: &ColourProposal) {
+    crate::rationale::push_note(
+        &mut report.recipe.rationale,
+        &mut report.notes,
+        crate::rationale::Note::new(
+            crate::rationale::keys::COLOUR_RANGE_PROPOSED,
+            vec![
+                ("label", proposal.band.attachment.label.clone()),
+                ("band", crate::recipe::HSL_BANDS[proposal.hue_band].to_string()),
+                ("share", format!("{:.1}", proposal.share * 100.0)),
+                ("tol", format!("{:.3}", proposal.tolerance)),
+                ("residual", format!("{:.3}", proposal.residual)),
+            ],
+        ),
+    );
+}
+
+fn push_colour_abstention(report: &mut FitReport, abstention: &ColourAbstention) {
+    crate::rationale::push_note(
+        &mut report.recipe.rationale,
+        &mut report.notes,
+        crate::rationale::Note::new(
+            crate::rationale::keys::COLOUR_RANGE_ABSTAINED,
+            vec![
+                ("band", crate::recipe::HSL_BANDS[abstention.band].to_string()),
+                ("reason", abstention.reason.clone()),
+            ],
+        ),
+    );
+}
+
+/// One family's bands, attached, gated and shrunk as a stage of its own.
+///
+/// TWO FAMILIES, TWO STAGES, and that is not tidiness. The boundary gate
+/// shrinks every correction it holds by ONE shared `k`, so a colour band whose
+/// edge is over budget would crush the luminance bands beside it: measured on
+/// the p37 corpus pair, one gate over both families took `k` to 0.003 and the
+/// frame from 0.15915 — where the luminance bands alone left it — to 0.16474.
+/// The composed-frame ceiling could not see that, because it compares against
+/// the residual the fallback was handed and not against the stage before it.
+/// Staged, each family carries its own shrink and its own ceiling, and the
+/// colour family is measured against the frame the luminance family actually
+/// left behind. It is the same layering the producers above already use.
+struct RangeStage {
+    accepted: usize,
+    worst: f32,
+    /// The render this stage leaves behind; `None` when it attached nothing
+    /// and the frame the caller already had still stands.
+    pixels: Option<Vec<[f32; 3]>>,
+}
+
+fn attach_band_stage(
+    s_img: &DynamicImage,
+    tgt_px: &[[f32; 3]],
+    report: &mut FitReport,
+    mut bands: Vec<RangeBand>,
+    reference_px: &[[f32; 3]],
+) -> RangeStage {
+    let nothing = RangeStage { accepted: 0, worst: 0.0, pixels: None };
+    if bands.is_empty() {
+        return nothing;
+    }
+    // The frame metric this stage was HANDED is its ceiling; every band it
+    // accepts must leave the composed frame no worse than it found it.
+    let entry_frame_err = report.err_after;
+    let all_ranges = bands.iter().map(|band| band.source).collect::<Vec<_>>();
+    let target_coverage = bands
+        .iter()
+        .map(|band| range_weights_for_pixels(&band.target, tgt_px))
+        .collect::<Vec<_>>();
+    let mut target_weights = target_coverage.clone();
+    normalize_partition_weights(&mut target_weights);
+    for (band, weights) in bands.iter_mut().zip(target_weights) {
+        band.attachment.target_weights = weights;
+    }
+    let first_range = report.recipe.masks.len();
+    let mut frame_err = report.err_after;
+    let corr = report.correspondence.take();
+    let mut accepted = Vec::new();
+    for i in 0..bands.len() {
+        let (mut current_weights, mut current_coverage) =
+            range_weights_from_current_render(s_img, &report.recipe, &all_ranges);
+        bands[i].attachment.source_weights = std::mem::take(&mut current_weights[i]);
+        bands[i].attachment.coverage = Some(ZoneCoverage {
+            source: std::mem::take(&mut current_coverage[i]),
+            target: target_coverage[i].clone(),
+        });
+        let accepted_band = attach_one_zone(
+            s_img,
+            tgt_px,
+            report,
+            &mut frame_err,
+            &bands[i].attachment,
+            // A band's divergence is DERIVED from its own evidence range
+            // rather than read off the structural instrument, so it is always
+            // present: there is nothing here for the instrument to abstain
+            // about.
+            Some(bands[i].divergence),
+            corr.as_ref(),
+        );
+        let refused = "the shared estimator or do-no-harm gates refused the correction";
+        match (accepted_band, bands[i].hue_band) {
+            (Some(zone), _) => accepted.push(zone),
+            (None, Some(band)) => push_colour_abstention(
+                report,
+                &ColourAbstention { band, reason: refused.to_string() },
+            ),
+            (None, None) => push_range_abstention(
+                report,
+                &RangeAbstention {
+                    lo: match bands[i].source {
+                        RangeMask::Luminance { lo, .. } => lo,
+                        RangeMask::Color { .. } => 0.0,
+                    },
+                    hi: match bands[i].source {
+                        RangeMask::Luminance { hi, .. } => hi,
+                        RangeMask::Color { .. } => 1.0,
+                    },
+                    reason: refused.to_string(),
+                },
+            ),
+        }
+    }
+    report.correspondence = corr;
+    if accepted.is_empty() {
+        return nothing;
+    }
+    let initial_px = accepted.last().expect("accepted range exists").rendered.clone();
+    let accepted_ranges = accepted
+        .iter()
+        .filter_map(|zone| zone.range)
+        .collect::<Vec<_>>();
+    let shares = accepted
+        .iter()
+        .map(|zone| {
+            zone.source_weights.iter().sum::<f32>()
+                / zone.source_weights.len().max(1) as f32
+        })
+        .collect::<Vec<_>>();
+    let final_px = match enforce_range_boundary_gate(
+        s_img,
+        report,
+        reference_px,
+        &accepted_ranges,
+        &shares,
+        first_range,
+        initial_px,
+    ) {
+        BoundaryGateResult::Kept { pixels, .. } => pixels,
+        BoundaryGateResult::Dropped => return nothing,
+    };
+    let final_frame_err = final_range_frame_err(&final_px, tgt_px, &report.evidence);
+    if final_frame_err > entry_frame_err + RANGE_FRAME_REGRESSION_TOL {
+        report.recipe.masks.truncate(first_range);
+        crate::rationale::push_note(
+            &mut report.recipe.rationale,
+            &mut report.notes,
+            crate::rationale::Note::new(
+                crate::rationale::keys::RANGE_FRAME_REFUSED,
+                vec![
+                    ("n", accepted.len().to_string()),
+                    ("global", format!("{entry_frame_err:.3}")),
+                    ("after", format!("{final_frame_err:.3}")),
+                    ("tol", format!("{RANGE_FRAME_REGRESSION_TOL:+.3}")),
+                ],
+            ),
+        );
+        report.err_after = entry_frame_err;
+        return nothing;
+    }
+    for zone in &mut accepted {
+        let after = zone_moments(&final_px, &zone.source_weights);
+        let target = zone_moments(tgt_px, &zone.target_weights);
+        zone.after = zone_err(&after, &target);
+        push_zone_attached_note(report, zone);
+    }
+    report.err_after = final_frame_err;
+    RangeStage {
+        accepted: accepted.len(),
+        worst: accepted.iter().map(|zone| zone.after).fold(0.0f32, f32::max),
+        pixels: Some(final_px),
+    }
+}
+
+/// Automatic pure-Rust fallback after the global fit, and the one entry point
+/// both range families share.
+///
+/// Luminance bands run first, in ascending luma order, then colour bands in
+/// ACR band order on the frame the luminance stage left behind. Each family is
+/// a stage of its own — see [`attach_band_stage`] for the measurement that
+/// made that necessary — and every attempt inside a stage derives its source
+/// population from the current rendered stack rather than the untouched
+/// source. The confidence the two stages earn is reported once, at the end,
+/// on the worst band either of them accepted.
+pub(super) fn attach_ranges(
     src: &DynamicImage,
     target: &DynamicImage,
     report: &mut FitReport,
@@ -1064,12 +1770,8 @@ pub(super) fn attach_luminance_ranges(
 ) {
     let (s_img, t_img) = fit::analysis_pair(src, target);
     let tgt_px = fit::pixels_of(&t_img);
-    let global_px = fit::pixels_of(&render::develop_preview(&s_img, &report.recipe));
-    // Preserve the global stage's own reported frame metric as the ceiling;
-    // every accepted range must be no worse than the recipe already handed
-    // to this fallback.
-    let global_frame_err = report.err_after;
-    let mut derived = derive_luminance_bands(&global_px, &tgt_px, &report.evidence, proposals);
+    let mut current_px = fit::pixels_of(&render::develop_preview(&s_img, &report.recipe));
+    let derived = derive_luminance_bands(&current_px, &tgt_px, &report.evidence, proposals);
     for merged in &derived.merges {
         crate::rationale::push_note(
             &mut report.recipe.rationale,
@@ -1090,142 +1792,49 @@ pub(super) fn attach_luminance_ranges(
     for abstention in &derived.abstentions {
         push_range_abstention(report, abstention);
     }
-    if derived.bands.is_empty() {
-        fit::append_finished_disclosure(report, &global_px, &tgt_px);
-        return;
+    let luminance = attach_band_stage(&s_img, &tgt_px, report, derived.bands, &current_px);
+    if let Some(pixels) = luminance.pixels {
+        current_px = pixels;
     }
-
-    let all_ranges = derived.bands.iter().map(|band| band.source).collect::<Vec<_>>();
-    let target_coverage = derived
-        .bands
-        .iter()
-        .map(|band| range_weights_for_pixels(&band.target, &tgt_px))
-        .collect::<Vec<_>>();
-    let mut target_weights = target_coverage.clone();
-    normalize_partition_weights(&mut target_weights);
-    for (band, weights) in derived.bands.iter_mut().zip(target_weights) {
-        band.attachment.target_weights = weights;
+    let colour = derive_colour_bands(
+        &current_px,
+        &tgt_px,
+        &report.evidence,
+        s_img.width(),
+        s_img.height(),
+    );
+    for proposal in &colour.proposals {
+        push_colour_proposal(report, proposal);
     }
-    let first_range = report.recipe.masks.len();
-    let mut frame_err = report.err_after;
-    let corr = report.correspondence.take();
-    let mut accepted = Vec::new();
-    for i in 0..derived.bands.len() {
-        let (mut current_weights, mut current_coverage) =
-            range_weights_from_current_render(&s_img, &report.recipe, &all_ranges);
-        derived.bands[i].attachment.source_weights = std::mem::take(&mut current_weights[i]);
-        derived.bands[i].attachment.coverage = Some(ZoneCoverage {
-            source: std::mem::take(&mut current_coverage[i]),
-            target: target_coverage[i].clone(),
-        });
-        let accepted_band = attach_one_zone(
-            &s_img,
-            &tgt_px,
-            report,
-            &mut frame_err,
-            &derived.bands[i].attachment,
-            // A band's divergence is DERIVED from its own luma evidence rather
-            // than read off the structural instrument, so it is always present:
-            // there is nothing here for the instrument to abstain about.
-            Some(derived.bands[i].divergence),
-            corr.as_ref(),
-        );
-        match accepted_band {
-            Some(zone) => accepted.push(zone),
-            None => push_range_abstention(
-                report,
-                &RangeAbstention {
-                    lo: match derived.bands[i].source {
-                        RangeMask::Luminance { lo, .. } => lo,
-                        RangeMask::Color { .. } => 0.0,
-                    },
-                    hi: match derived.bands[i].source {
-                        RangeMask::Luminance { hi, .. } => hi,
-                        RangeMask::Color { .. } => 1.0,
-                    },
-                    reason: "the shared estimator or do-no-harm gates refused the correction"
-                        .to_string(),
-                },
-            ),
-        }
+    for abstention in &colour.abstentions {
+        push_colour_abstention(report, abstention);
     }
-    report.correspondence = corr;
-    if accepted.is_empty() {
-        fit::append_finished_disclosure(report, &global_px, &tgt_px);
-        return;
+    let bands = colour.proposals.into_iter().map(|proposal| proposal.band).collect();
+    let colour = attach_band_stage(&s_img, &tgt_px, report, bands, &current_px);
+    if let Some(pixels) = colour.pixels {
+        current_px = pixels;
     }
-
-    let initial_px = accepted.last().expect("accepted range exists").rendered.clone();
-    let accepted_ranges = accepted
-        .iter()
-        .filter_map(|zone| zone.range)
-        .collect::<Vec<_>>();
-    let shares = accepted
-        .iter()
-        .map(|zone| {
-            zone.source_weights.iter().sum::<f32>()
-                / zone.source_weights.len().max(1) as f32
-        })
-        .collect::<Vec<_>>();
-    let final_px = match enforce_range_boundary_gate(
-        &s_img,
-        report,
-        &global_px,
-        &accepted_ranges,
-        &shares,
-        first_range,
-        initial_px,
-    ) {
-        BoundaryGateResult::Kept { pixels, .. } => pixels,
-        BoundaryGateResult::Dropped => {
-            fit::append_finished_disclosure(report, &global_px, &tgt_px);
-            return;
-        }
-    };
-    let final_frame_err = final_range_frame_err(&final_px, &tgt_px, &report.evidence);
-    if final_frame_err > global_frame_err + RANGE_FRAME_REGRESSION_TOL {
-        report.recipe.masks.truncate(first_range);
+    let accepted = luminance.accepted + colour.accepted;
+    if accepted > 0 {
+        let worst = luminance.worst.max(colour.worst);
+        report.recipe.confidence = report
+            .recipe
+            .confidence
+            .min(fit::clamp_confidence(1.0 - worst * ZONE_CONFIDENCE_SLOPE));
         crate::rationale::push_note(
             &mut report.recipe.rationale,
             &mut report.notes,
             crate::rationale::Note::new(
-                crate::rationale::keys::RANGE_FRAME_REFUSED,
+                crate::rationale::keys::RANGE_CONFIDENCE,
                 vec![
-                    ("n", accepted.len().to_string()),
-                    ("global", format!("{global_frame_err:.3}")),
-                    ("after", format!("{final_frame_err:.3}")),
-                    ("tol", format!("{RANGE_FRAME_REGRESSION_TOL:+.3}")),
+                    ("n", accepted.to_string()),
+                    ("worst", format!("{worst:.3}")),
+                    ("frame", format!("{:.3}", report.err_after)),
                 ],
             ),
         );
-        report.err_after = global_frame_err;
-        fit::append_finished_disclosure(report, &global_px, &tgt_px);
-        return;
     }
-    for zone in &mut accepted {
-        let after = zone_moments(&final_px, &zone.source_weights);
-        let target = zone_moments(&tgt_px, &zone.target_weights);
-        zone.after = zone_err(&after, &target);
-        push_zone_attached_note(report, zone);
-    }
-    frame_err = final_frame_err;
-    report.err_after = frame_err;
-    let worst = accepted.iter().map(|zone| zone.after).fold(0.0f32, f32::max);
-    let range_conf = fit::clamp_confidence(1.0 - worst * ZONE_CONFIDENCE_SLOPE);
-    report.recipe.confidence = report.recipe.confidence.min(range_conf);
-    crate::rationale::push_note(
-        &mut report.recipe.rationale,
-        &mut report.notes,
-        crate::rationale::Note::new(
-            crate::rationale::keys::RANGE_CONFIDENCE,
-            vec![
-                ("n", accepted.len().to_string()),
-                ("worst", format!("{worst:.3}")),
-                ("frame", format!("{frame_err:.3}")),
-            ],
-        ),
-    );
-    fit::append_finished_disclosure(report, &final_px, &tgt_px);
+    fit::append_finished_disclosure(report, &current_px, &tgt_px);
 }
 
 #[cfg(test)]
@@ -1802,7 +2411,7 @@ mod tests {
         let (source, target) = compact_rank_wave_fixture();
         let mut report = neutral_report(&source, &target);
         let global_err = report.err_after;
-        attach_luminance_ranges(&source, &target, &mut report, &[]);
+        attach_ranges(&source, &target, &mut report, &[]);
         let note = report
             .notes
             .iter()
@@ -1826,7 +2435,7 @@ mod tests {
         let mut report = neutral_report(&source, &target);
         let global_frame_err = report.err_after;
         RANGE_FINAL_FRAME_ERR_OVERRIDE.with(|value| value.set(Some(global_frame_err + 0.001)));
-        attach_luminance_ranges(&source, &target, &mut report, &[]);
+        attach_ranges(&source, &target, &mut report, &[]);
         assert!(report.recipe.masks.is_empty(), "the complete range stack must be reverted");
         assert_eq!(report.err_after, global_frame_err);
         assert!(report.notes.iter().any(|note| {
@@ -1928,7 +2537,7 @@ mod tests {
             true,
             None,
         );
-        attach_luminance_ranges(&source, &source, &mut deferred, &[]);
+        attach_ranges(&source, &source, &mut deferred, &[]);
         assert_eq!(
             serde_json::to_vec(&deferred.recipe).unwrap(),
             serde_json::to_vec(&global.recipe).unwrap(),
@@ -2176,7 +2785,7 @@ mod tests {
         let (fixture, _, _ranges) = range_boundary_fixture();
         let target = rank_wave_target(&fixture);
         let mut report = neutral_report(&fixture, &target);
-        attach_luminance_ranges(&fixture, &target, &mut report, &[]);
+        attach_ranges(&fixture, &target, &mut report, &[]);
         assert!(
             RANGE_FRESH_RENDER_CALLS.with(std::cell::Cell::get) >= 2,
             "the fallback loop must freshly render each candidate's current stack"
@@ -2206,7 +2815,7 @@ mod tests {
         };
         let mut report = neutral_report(&source, &target);
         report.recipe.masks.push(existing.clone());
-        attach_luminance_ranges(&source, &target, &mut report, &[]);
+        attach_ranges(&source, &target, &mut report, &[]);
         assert_eq!(report.recipe.masks.first(), Some(&existing));
         assert!(report.notes.iter().any(|note| note.key == crate::rationale::keys::RANGE_ATTACHED));
     }
@@ -2537,5 +3146,548 @@ mod tests {
              depth, read {}",
             depth * 255.0,
         );
+    }
+
+    /// A frame whose colour lives in two scattered populations of DIFFERENT
+    /// ACR bands, only one of which the target moves.
+    ///
+    /// The moved population is the case this producer exists for: one hue,
+    /// everywhere it appears, in 4-pixel blocks no rectangle and no silhouette
+    /// can enclose. The UNMOVED population is why a global answer will not do
+    /// -- anything applied to the whole frame that fixes the blues moves the
+    /// oranges that already match.
+    ///
+    /// Measured on this fixture's own 384x384 analysis frame, with the mask
+    /// the producer derives for the blue band (radius 0.675, and every unit of
+    /// its weight on a member of that band on BOTH frames):
+    ///
+    /// ```text
+    /// target blue        mask covers src / tgt   ratio   band residual
+    /// [0.24 0.34 0.72]      18.2% / 21.1%        1.16       0.068
+    /// [0.18 0.29 0.78]      18.2% /  9.7%        1.88       0.052
+    /// [0.16 0.28 0.80]      18.2% /  9.6%        1.89       0.093
+    /// [0.14 0.26 0.83]      18.2% / 10.1%        1.79       0.148
+    /// [0.10 0.22 0.88]      18.2% /  8.5%        2.14       0.240
+    /// ```
+    ///
+    /// The first row is the case this producer is for — the look pulls the
+    /// blues back and the two populations stay comparable. The last is past
+    /// the shared 2:1 composition gate: that move carried the target's pixels
+    /// out of the mask, so there is nothing left to fit them against.
+    fn scattered_hue_pair(target_blue: [f32; 3]) -> (DynamicImage, DynamicImage) {
+        const EDGE: u32 = 64;
+        let build = |blue: [f32; 3]| {
+            DynamicImage::ImageRgb8(RgbImage::from_fn(EDGE, EDGE, |x, y| {
+                let pixel = match ((x / 4) * 7 + (y / 4) * 13) % 5 {
+                    0 => blue,
+                    1 => [0.80f32, 0.45, 0.15],
+                    _ => [0.50f32, 0.50, 0.50],
+                };
+                image::Rgb(pixel.map(|c| (c * 255.0).round() as u8))
+            }))
+        };
+        (build([0.20, 0.30, 0.75]), build(target_blue))
+    }
+
+    /// ACR band 5. `fit::evidence_hue_band` puts both the source blue
+    /// ([0.20 0.30 0.75], hue 229 degrees) and the target blue here.
+    const BLUE_BAND: usize = 5;
+
+    /// A target blue the look pulled BACK: the two populations stay comparable
+    /// through the mask, so the band is measurable (see the fixture's table).
+    const MEASURABLE_BLUE: [f32; 3] = [0.24, 0.34, 0.72];
+    /// A target blue the look pushed past the mask: 18.2% of the frame against
+    /// 8.5%, which the shared composition gate refuses.
+    const UNREACHABLE_BLUE: [f32; 3] = [0.10, 0.22, 0.88];
+
+    /// A luminance range over the whole 0..=1 domain: the tone ruler asked
+    /// about every pixel there is, so it cannot be said to have missed
+    /// something for want of a place to look.
+    fn full_luma_range() -> RangeMask {
+        RangeMask::Luminance { lo_outer: 0.0, lo: 0.0, hi: 1.0, hi_outer: 1.0 }
+    }
+
+    fn colour_masks(recipe: &crate::recipe::EditRecipe) -> usize {
+        recipe
+            .masks
+            .iter()
+            .filter(|mask| matches!(mask.range, Some(RangeMask::Color { .. })))
+            .count()
+    }
+
+    fn range_only_layers() -> ZonedLayerOpts {
+        ZonedLayerOpts { field: false, spatial: false, free_masks: false, refine_masks: false }
+    }
+
+    fn segmentation_off() -> SegmentOpts {
+        SegmentOpts {
+            python_bin: "autoshade-test-no-such-python".into(),
+            script: "Cargo.toml".into(),
+            target: "sky".into(),
+            reference_point: None,
+            prompt_points: None,
+        }
+    }
+
+    #[test]
+    fn a_scattered_hue_band_becomes_a_native_colour_range_correction() {
+        let (source, target) = scattered_hue_pair(MEASURABLE_BLUE);
+        let mut report = neutral_report(&source, &target);
+        let before = report.err_after;
+        attach_ranges(&source, &target, &mut report, &[]);
+        assert_eq!(colour_masks(&report.recipe), 1, "{}", report.recipe.rationale);
+        assert!(
+            report.err_after < before,
+            "the colour band did not pay for itself: {before} -> {}\n{}",
+            report.err_after,
+            report.recipe.rationale,
+        );
+        let key_present = |key: &str| report.notes.iter().any(|note| note.key == key);
+        assert!(key_present(crate::rationale::keys::COLOUR_RANGE_PROPOSED));
+        assert!(key_present(crate::rationale::keys::COLOUR_RANGE_ATTACHED));
+        // Native in the sidecar: the sentinel host and the colour range are
+        // both classic ACR grammar, so nothing is lost on the way out.
+        let xmp = crate::xmp::recipe_to_xmp(&report.recipe);
+        assert!(!xmp.contains("Mask/Bitmap"), "a colour band must not need a raster");
+        assert!(xmp.contains("crs:ColorAmount"));
+        assert_eq!(colour_masks(&crate::xmp::xmp_to_recipe(&xmp)), 1);
+    }
+
+    #[test]
+    fn a_colour_move_that_leaves_the_mask_is_refused_not_fitted() {
+        // The FOURTH circularity guard, and the one that needs no evidence
+        // model at all: the mask is the ruler for both frames, so a move big
+        // enough to carry the target's pixels out of it leaves the two shares
+        // past 2:1 and the shared composition gate refuses the band. Fitting it
+        // anyway would be solving a correction against a population that is no
+        // longer there.
+        let (source, target) = scattered_hue_pair(UNREACHABLE_BLUE);
+        let mut report = neutral_report(&source, &target);
+        attach_ranges(&source, &target, &mut report, &[]);
+        assert_eq!(colour_masks(&report.recipe), 0, "{}", report.recipe.rationale);
+        assert!(
+            report.notes.iter().any(|note| {
+                note.key == crate::rationale::keys::ZONE_SHARE_MISMATCH
+            }),
+            "the refusal must name the composition, not go unexplained: {}",
+            report.recipe.rationale,
+        );
+        assert!(
+            report.notes.iter().any(|note| {
+                note.key == crate::rationale::keys::COLOUR_RANGE_ABSTAINED
+            }),
+            "{}",
+            report.recipe.rationale,
+        );
+    }
+
+    #[test]
+    fn a_global_colour_move_leaves_no_colour_range_behind() {
+        // The target IS the source under ONE global saturation move, so no
+        // colour band may survive: every pixel of every band moved by the
+        // same rule, and a band that claimed the move would be claiming a
+        // population it does not own.
+        //
+        // Measured on this fixture, the refusal is not the quiet one. The
+        // global model cannot reproduce this move on these synthetic
+        // colours — it returns a neutral recipe under its own do-no-harm —
+        // so the residual is still on the frame when the producer runs and
+        // two bands ARE proposed. Neither survives: the Orange band's own
+        // populations are 22% against 11%, which is the shared 2:1
+        // composition gate, and the Blue band's correction costs the
+        // composed frame +0.00198 against a tolerance of exactly zero.
+        let (source, _) = scattered_hue_pair([0.20, 0.30, 0.75]);
+        let global = crate::recipe::EditRecipe { saturation: 22.0, ..Default::default() };
+        let target = render::develop_preview(&source, &global);
+        let path = fixture_mask_path("colour-range-global-move");
+        let report = fit_recipe_zoned_inner(
+            &source,
+            &target,
+            &segmentation_off(),
+            &path,
+            &crate::recipe::EditRecipe::default(),
+            None,
+            range_only_layers(),
+        );
+        assert_eq!(colour_masks(&report.recipe), 0, "{}", report.recipe.rationale);
+        // AND EVERY PROPOSAL IS ANSWERED BY NAME. A band that vanished
+        // between the proposal and the recipe without a refusal naming it
+        // would be a correction the fit dropped in silence, which is the
+        // one outcome the disclosure channels exist to prevent.
+        let bands_named = |key: &'static str| {
+            report
+                .notes
+                .iter()
+                .filter(|note| note.key == key)
+                .filter_map(|note| {
+                    note.args
+                        .iter()
+                        .find(|(name, _)| *name == "band")
+                        .map(|(_, value)| value.clone())
+                })
+                .collect::<std::collections::BTreeSet<_>>()
+        };
+        let proposed = bands_named(crate::rationale::keys::COLOUR_RANGE_PROPOSED);
+        let refused = bands_named(crate::rationale::keys::COLOUR_RANGE_ABSTAINED);
+        assert!(
+            !proposed.is_empty() && proposed.is_subset(&refused),
+            "proposed {proposed:?} but refused only {refused:?}\n{}",
+            report.recipe.rationale,
+        );
+        path.remove();
+    }
+
+    #[test]
+    fn a_one_sided_hue_band_abstains_instead_of_arguing_with_itself() {
+        let (source, target) = scattered_hue_pair(MEASURABLE_BLUE);
+        let (s_img, t_img) = fit::analysis_pair(&source, &target);
+        let (sp, tp) = (fit::pixels_of(&s_img), fit::pixels_of(&t_img));
+        let (w, h) = (s_img.width(), s_img.height());
+        let evidence = fit::evidence_model_for(&sp, &tp, w, h);
+        let two_sided = derive_colour_bands(&sp, &tp, &evidence, w, h);
+        assert!(
+            two_sided.proposals.iter().any(|p| p.hue_band == BLUE_BAND),
+            "premise: the moved band is proposable while both sides hold it: {two_sided:?}",
+        );
+
+        // ARM ONE, the frozen verdict. A hue-shifting edit empties the very
+        // band it moved, which is what makes "the target has no blues, so
+        // correct the blues" circular. The producer must refuse to be the
+        // second half of that sentence.
+        let mut one_sided_evidence = evidence.clone();
+        one_sided_evidence.hue[BLUE_BAND].target_populated = false;
+        one_sided_evidence.hue[BLUE_BAND].target_share = 0.0;
+        one_sided_evidence.hue[BLUE_BAND].target_evidence_share = 0.0;
+        one_sided_evidence.hue[BLUE_BAND].two_sided_share = 0.0;
+        one_sided_evidence.hue[BLUE_BAND].weight = 0.0;
+        let one_sided = derive_colour_bands(&sp, &tp, &one_sided_evidence, w, h);
+        assert!(!one_sided.proposals.iter().any(|p| p.hue_band == BLUE_BAND));
+        assert!(
+            one_sided.abstentions.iter().any(|a| {
+                a.band == BLUE_BAND && a.reason.contains("target population")
+            }),
+            "{one_sided:?}",
+        );
+
+        // ARM TWO, the delivered populations. The frozen verdict is held OPEN
+        // here on purpose: the frames are the ones the mask would be applied
+        // to, and a target the edit emptied has to refuse on its own reading
+        // rather than relying on the frozen model to have noticed.
+        let (_, emptied) = scattered_hue_pair([0.62, 0.60, 0.58]);
+        let (_, e_img) = fit::analysis_pair(&source, &emptied);
+        let delivered = derive_colour_bands(&sp, &fit::pixels_of(&e_img), &evidence, w, h);
+        assert!(!delivered.proposals.iter().any(|p| p.hue_band == BLUE_BAND));
+        assert!(
+            delivered.abstentions.iter().any(|a| {
+                a.band == BLUE_BAND && a.reason.contains("two-sided floor")
+            }),
+            "{delivered:?}",
+        );
+    }
+
+    /// A frame that sweeps from a saturated colour to neutral at CONSTANT
+    /// display luma. Rec.601 luma is linear in the channels, so interpolating
+    /// between two colours of equal luma holds the luma exactly: the luma
+    /// ruler is blind across the whole frame by construction, and anything a
+    /// reading picks up here it picked up in chromaticity.
+    fn equal_luma_chromaticity_ramp() -> (DynamicImage, [f32; 3]) {
+        const W: u32 = 80;
+        const H: u32 = 8;
+        let saturated = [0.30f32, 0.50, 0.70];
+        let luma = display_luma(&saturated);
+        let image = DynamicImage::ImageRgb8(RgbImage::from_fn(W, H, |x, _| {
+            let t = x as f32 / (W - 1) as f32;
+            let pixel = saturated.map(|c| c + t * (luma - c));
+            image::Rgb(pixel.map(|c| (c.clamp(0.0, 1.0) * 255.0).round() as u8))
+        }));
+        (image, saturated)
+    }
+
+    #[test]
+    fn the_colour_rim_reads_a_step_the_luma_ruler_is_blind_to() {
+        let (frame, keyed) = equal_luma_chromaticity_ramp();
+        let colour = RangeMask::Color {
+            r: keyed[0],
+            g: keyed[1],
+            b: keyed[2],
+            amount: 0.0,
+            px: 0.0,
+            py: 0.5,
+        };
+        // One luminance transition spanning the whole frame, so the luma
+        // ruler is asked about exactly the same pixels and cannot be said to
+        // have missed the step for want of a place to look.
+        let luma_probe = RangeMask::Luminance { lo_outer: 0.0, lo: 0.9, hi: 0.95, hi_outer: 1.0 };
+        let recipe = crate::recipe::EditRecipe {
+            masks: vec![LocalAdjustment {
+                mask: RANGE_HOST,
+                range: Some(colour),
+                color_gains: Some([1.60, 1.00, 0.35]),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let reference = fit::pixels_of(&render::develop_preview(
+            &frame,
+            &crate::recipe::EditRecipe::default(),
+        ));
+        let rendered = fit::pixels_of(&render::develop_preview(&frame, &recipe));
+        let (w, h) = (frame.width(), frame.height());
+        let seen = range_transition_rim(&reference, &rendered, &[colour], w, h);
+        let blind = range_transition_rim(&reference, &rendered, &[luma_probe], w, h);
+        assert!(seen.transitions > 0 && blind.transitions > 0, "{seen:?} {blind:?}");
+        assert!(
+            seen.rim > RANGE_BOUNDARY_RIM_MAX,
+            "the colour band's own edge must be visible to its own ruler: {seen:?}",
+        );
+        assert!(
+            blind.rim < RANGE_BOUNDARY_RIM_MAX,
+            "the luma ruler is supposed to be blind here: {blind:?}",
+        );
+    }
+
+    #[test]
+    fn the_order_test_is_not_asked_of_a_radial_coordinate() {
+        let keyed = [0.30f32, 0.50, 0.70];
+        let range = RangeMask::Color {
+            r: keyed[0],
+            g: keyed[1],
+            b: keyed[2],
+            amount: 1.0,
+            px: 0.5,
+            py: 0.5,
+        };
+        let luma = display_luma(&keyed);
+        // A sweep from the keyed colour to neutral at constant luma:
+        // chromaticity distance from the key rises monotonically along it, and
+        // the tone ruler is blind to the whole frame by construction.
+        let reference = (0..256)
+            .map(|i| {
+                let t = i as f32 / 255.0;
+                keyed.map(|c| c + t * (luma - c))
+            })
+            .collect::<Vec<_>>();
+        // THE MOVE A COLOUR BAND EXISTS TO MAKE: carry the whole population
+        // toward a different colour, rigidly. Every neighbour keeps the
+        // difference it had, so nothing steps and nothing folds — but every
+        // member's RADIUS from the band's own colour changes, and the member
+        // that sat exactly on that colour is now half the sweep away from it.
+        let shifted = reference
+            .iter()
+            .map(|p| {
+                [
+                    p[0] - 0.5 * (luma - keyed[0]),
+                    p[1] - 0.5 * (luma - keyed[1]),
+                    p[2] - 0.5 * (luma - keyed[2]),
+                ]
+            })
+            .collect::<Vec<_>>();
+        let selector = RangeSelector::Chromaticity(keyed);
+        assert!(
+            selector.position(&reference[0]) < selector.position(&reference[128])
+                && selector.position(&shifted[0]) > selector.position(&shifted[128]),
+            "premise: a rigid colour shift inverts the RADIAL order it is read \
+             on, {} -> {} against {} -> {}",
+            selector.position(&reference[0]),
+            selector.position(&reference[128]),
+            selector.position(&shifted[0]),
+            selector.position(&shifted[128]),
+        );
+        // The ruler a colour band IS judged by reads this frame correctly:
+        // neighbours the photograph gave the same colour still have it.
+        let rim = range_transition_rim(&reference, &shifted, &[range], 256, 1);
+        assert!(
+            rim.transitions > 0 && rim.rim <= RANGE_BOUNDARY_RIM_MAX,
+            "a rigid shift steps nothing: {rim:?}",
+        );
+        // So the order reading is not asked of this coordinate at all. Were it
+        // asked, it would refuse the correction above for succeeding.
+        assert_eq!(range_transfer_reversal(&reference, &shifted, &[range]), 0.0);
+        // And the luminance coordinate's own order test is untouched by the
+        // same frames: nothing moved in luma, so it reads exactly zero.
+        assert_eq!(
+            range_transfer_reversal(&reference, &shifted, &[full_luma_range()]),
+            0.0,
+        );
+    }
+
+    /// The luminance readings this batch measured on the fixtures that
+    /// already existed, before and after the selector split: crossings and
+    /// p90 rim on two fixtures, and the reversal depth of an eight-code step.
+    const PINNED_OPPOSING: (usize, f32, f32) = (4620, 0.015686244, 0.015686244);
+    const PINNED_MIXED: (usize, f32) = (880, 0.007843144);
+    const PINNED_STEP_REVERSAL: f32 = 0.027450979;
+
+    #[test]
+    fn the_luminance_boundary_readings_are_unchanged_by_the_selector_split() {
+        // The two readings a luminance band is judged on, on the fixtures
+        // that already existed, pinned to the values they carried before the
+        // rim and reversal gates learned a second coordinate. A luminance
+        // band's arithmetic is the same arithmetic; only its spelling moved.
+        let (source, reference, ranges) = range_boundary_fixture();
+        let rendered = fit::pixels_of(&render::develop_preview(
+            &source,
+            &opposing_range_recipe(&ranges),
+        ));
+        let reading = range_transition_rim(
+            &reference,
+            &rendered,
+            &ranges,
+            source.width(),
+            source.height(),
+        );
+        let (mixed, wide) = mixed_gradient_fixture();
+        let untouched = range_transition_rim(&mixed, &mixed, &wide, 80, 8);
+        let ramp = (0..256).map(|i| [i as f32 / 255.0; 3]).collect::<Vec<_>>();
+        let stepped = ramp
+            .iter()
+            .map(|p| [if p[0] > 0.5 { p[0] - 8.0 / 255.0 } else { p[0] }; 3])
+            .collect::<Vec<_>>();
+        // One assertion, so one run reports every pin that moved.
+        assert_eq!(
+            (
+                (reading.transitions, reading.rim, reading.charged),
+                (untouched.transitions, untouched.rim),
+                range_transfer_reversal(&ramp, &stepped, &[full_luma_range()]),
+            ),
+            (PINNED_OPPOSING, PINNED_MIXED, PINNED_STEP_REVERSAL),
+        );
+    }
+
+    #[test]
+    fn colour_range_round_trips_through_the_lightroom_sidecar() {
+        // Values that survive the sidecar's six decimals exactly, so the
+        // round trip is an equality and not a tolerance.
+        let range = RangeMask::Color {
+            r: 0.25,
+            g: 0.5,
+            b: 0.75,
+            amount: 0.375,
+            px: 0.125,
+            py: 0.625,
+        };
+        let recipe = crate::recipe::EditRecipe {
+            masks: vec![LocalAdjustment {
+                mask: RANGE_HOST,
+                range: Some(range),
+                name: "Colour range 01".to_string(),
+                role: MaskRole::Custom,
+                saturation: -12.0,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let xmp = crate::xmp::recipe_to_xmp(&recipe);
+        assert_eq!(xmp.matches("Mask/RangeMask").count(), 1);
+        assert!(!xmp.contains("Mask/Bitmap"));
+        // The element Lightroom itself writes for a colour range: a
+        // CorrectionRangeMask carrying Type 1, a ColorAmount and one
+        // PointModels entry of "r g b px py 0".
+        assert!(xmp.contains("crs:Type=\"1\""));
+        assert!(xmp.contains("crs:ColorAmount=\"0.375000\""));
+        assert!(xmp.contains(
+            "<rdf:li>0.250000 0.500000 0.750000 0.125000 0.625000 0</rdf:li>",
+        ));
+        let round_trip = crate::xmp::xmp_to_recipe(&xmp);
+        assert_eq!(round_trip.masks.len(), 1);
+        assert_eq!(round_trip.masks[0].mask, RANGE_HOST);
+        assert_eq!(round_trip.masks[0].range, Some(range));
+    }
+
+    /// The corpus arm: the colour family may not cost any real pair anything.
+    ///
+    /// Both arms run in this process, so the difference between them is this
+    /// feature and nothing else. A pair where no colour band attaches must be
+    /// byte-identical, and a pair where one does must be no worse on the
+    /// composed frame -- the ceiling the range family's own frame gate
+    /// enforces, checked here on the pairs rather than trusted.
+    #[test]
+    fn calibration_colour_ranges_never_cost_a_corpus_pair() {
+        let Some(root) = fit::calibration_corpus() else { return };
+        let mut pairs = vec![(
+            "neutral".to_string(),
+            image::open(root.join("neutral.jpg")).unwrap(),
+            image::open(root.join("target.jpg")).unwrap(),
+        )];
+        for code in ["p36", "p37", "p38", "p39"] {
+            let raw = root.join(format!("{code}.arw"));
+            let target = root.join(format!("{code}-target.jpg"));
+            if !raw.exists() || !target.exists() {
+                continue;
+            }
+            pairs.push((
+                code.to_string(),
+                crate::decode::preview_only(&raw).unwrap(),
+                image::open(target).unwrap(),
+            ));
+        }
+        for (code, source, target) in pairs {
+            let run = |suppressed: bool, tag: &str| {
+                COLOUR_RANGE_SUPPRESSED.with(|cell| cell.set(suppressed));
+                let path = fixture_mask_path(&format!("colour-corpus-{code}-{tag}"));
+                let report = fit_recipe_zoned_inner(
+                    &source,
+                    &target,
+                    &segmentation_off(),
+                    &path,
+                    &crate::recipe::EditRecipe::default(),
+                    None,
+                    range_only_layers(),
+                );
+                COLOUR_RANGE_SUPPRESSED.with(|cell| cell.set(false));
+                path.remove();
+                report
+            };
+            let without = run(true, "without");
+            let with = run(false, "with");
+            let bands = colour_masks(&with.recipe);
+            assert!(
+                with.err_after <= without.err_after + 1e-6,
+                "{code}: {bands} colour band(s) cost the frame {} -> {}\n{}",
+                without.err_after,
+                with.err_after,
+                with.recipe.rationale,
+            );
+            if bands == 0 {
+                // The rationale is EXPECTED to differ: a proposal and its
+                // refusal are disclosures, and making them is the point. What
+                // may not differ is anything that renders or exports.
+                assert_eq!(
+                    serde_json::to_string(&with.recipe.masks).unwrap(),
+                    serde_json::to_string(&without.recipe.masks).unwrap(),
+                    "{code}: no colour band attached, so the correction stack \
+                     must be byte-identical",
+                );
+                assert_eq!(
+                    (with.err_after, with.recipe.confidence),
+                    (without.err_after, without.recipe.confidence),
+                    "{code}: a refused colour band moved the frame or the claim",
+                );
+            }
+            let attached = with
+                .notes
+                .iter()
+                .filter(|note| note.key == crate::rationale::keys::COLOUR_RANGE_ATTACHED)
+                .map(|note| {
+                    let arg = |name: &str| {
+                        note.args
+                            .iter()
+                            .find(|(key, _)| *key == name)
+                            .map(|(_, value)| value.clone())
+                            .unwrap_or_default()
+                    };
+                    format!(
+                        "[{} {} -> {}, ev {}, gains {} {} {}, sat {}]",
+                        arg("label"), arg("before"), arg("after"), arg("ev"),
+                        arg("g0"), arg("g1"), arg("g2"), arg("sat"),
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(" ");
+            println!(
+                "COLOUR_RANGE_CORPUS {code}: bands {bands}, frame {:.8} -> {:.8} {attached}",
+                without.err_after, with.err_after,
+            );
+        }
     }
 }

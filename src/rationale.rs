@@ -686,24 +686,55 @@ pub mod keys {
         " Luminance range [{lo}, {hi}] merged into [{into_lo}, {into_hi}] \
          {why}; both runs have sign {sign}.";
     pub const RANGE_BOUNDARY_PASSED: &str =
-        " Range boundary-continuity gate kept {n} correction(s): signed \
-         transition rim {before} to {after} luma after shared \
-         direction-preserving shrink k={k} (budget {max}, {transitions} \
-         measured crossings); the delivered tone order falls back by at most \
+        " Range boundary-continuity gate kept {n} correction(s): transition \
+         rim {before} to {after} after shared direction-preserving shrink \
+         k={k} (budget {max}, {transitions} measured crossings, each read in \
+         its own band's selector — luma for a luminance band, chromaticity \
+         for a colour band); the delivered tone order, a reading only a \
+         luminance band's coordinate carries, falls back by at most \
          {reversal} luma against the {rev_max} allowed.";
     pub const RANGE_BOUNDARY_REFUSED: &str =
         " Range corrections refused by the boundary-continuity gate: candidate \
-         rim {before} luma, and even zero differential left {after} (budget \
-         {max}, {transitions} measured crossings); the delivered tone order \
-         falls back by at most {reversal} luma against the {rev_max} allowed.";
+         rim {before}, and even zero differential left {after} (budget \
+         {max}, {transitions} measured crossings, each read in its own \
+         band's selector); the delivered tone order, a reading only a \
+         luminance band's coordinate carries, falls back by at most \
+         {reversal} luma against the {rev_max} allowed.";
+    /// Distinct from [`RANGE_BOUNDARY_REFUSED`], which says the k=0 render
+    /// was itself over budget. THIS one says the gate found a shrink inside
+    /// the budget and that shrink moves no pixel at all, so there is nothing
+    /// to attach.
+    pub const RANGE_BOUNDARY_INERT: &str =
+        " {n} range correction(s) dropped by the boundary-continuity gate: \
+         candidate rim {before}, and the largest shrink inside budget {max} \
+         was k={k}, whose render is byte-identical to the frame without it — \
+         reading {after} over {transitions} measured crossings, with the \
+         delivered tone order falling back {reversal} luma against the \
+         {rev_max} allowed. An inert attachment would occupy the correction \
+         budget and \
+         disclose a change it did not make.";
     pub const RANGE_FRAME_REFUSED: &str =
         " Range corrections refused after the final boundary pass: the \
-         composed frame residual {after} exceeded the global-only residual \
-         {global} plus tolerance {tol}, so all {n} range correction(s) were removed.";
+         composed frame residual {after} exceeded the residual {global} this \
+         stage was handed plus tolerance {tol}, so all {n} range \
+         correction(s) were removed.";
     pub const RANGE_CONFIDENCE: &str =
-        " Confidence for this fit includes the {n} accepted luminance-range \
+        " Confidence for this fit includes the {n} accepted range \
          correction(s) (worst band residual {worst}); the final frame residual \
          is {frame}.";
+
+    // --- native colour-range fallback (fit_zoned/range.rs) --------------
+    pub const COLOUR_RANGE_PROPOSED: &str =
+        " {label} proposed from the {band} colour band: the mask selects \
+         {share}% of the frame within {tol} chromaticity of that band's own \
+         mean colour, and the band differs from the target by {residual}.";
+    pub const COLOUR_RANGE_ATTACHED: &str =
+        " {label} attached (local exposure {ev} EV, colour gains \
+         [{g0} {g1} {g2}], saturation {sat}): band residual {before} → \
+         {after}. The sentinel-hosted colour range is native in the \
+         Lightroom sidecar.";
+    pub const COLOUR_RANGE_ABSTAINED: &str =
+        " Colour range on the {band} band abstained: {reason}.";
 
     // --- local-field analyzer (fit_zoned/field.rs) ----------------------
     pub const LOCAL_CEILING: &str =

@@ -1842,7 +1842,7 @@ fn fit_recipe_zoned_inner_seeded(
                 .then(|| field::solve_local_field(src, target, &mut report)).flatten();
             let proposals = field.as_ref()
                 .map(|(_, reading)| reading.proposals.as_slice()).unwrap_or(&[]);
-            range::attach_luminance_ranges(src, target, &mut report, proposals);
+            range::attach_ranges(src, target, &mut report, proposals);
             (report, field, "ranges")
         }
     };
@@ -3058,6 +3058,30 @@ fn push_zone_attached_note(report: &mut FitReport, zone: &AcceptedZone) {
                     ("label", label.to_string()),
                     ("lo", format!("{lo:.3}")),
                     ("hi", format!("{hi:.3}")),
+                    ("ev", format!("{ev:+.2}")),
+                    ("g0", format!("{:.2}", gains[0])),
+                    ("g1", format!("{:.2}", gains[1])),
+                    ("g2", format!("{:.2}", gains[2])),
+                    ("sat", format!("{saturation:+.0}")),
+                    ("before", format!("{:.3}", zone.before)),
+                    ("after", format!("{:.3}", zone.after)),
+                ],
+            ),
+        );
+        return;
+    }
+    // A colour band's own sentence. Its interval would be a chromaticity
+    // radius around a colour, which no reader can picture from two numbers,
+    // so the band it was measured on rides in the LABEL and the radius is
+    // printed once, by the proposal note, in the units it was measured in.
+    if let Some(RangeMask::Color { .. }) = zone.range {
+        crate::rationale::push_note(
+            &mut report.recipe.rationale,
+            &mut report.notes,
+            crate::rationale::Note::new(
+                crate::rationale::keys::COLOUR_RANGE_ATTACHED,
+                vec![
+                    ("label", label.to_string()),
                     ("ev", format!("{ev:+.2}")),
                     ("g0", format!("{:.2}", gains[0])),
                     ("g1", format!("{:.2}", gains[1])),
@@ -4361,7 +4385,7 @@ mod tests {
                         vec![("e", crate::rationale::error_line(&e))],
                     ),
                 );
-                range::attach_luminance_ranges(src, target, &mut report, &[]);
+                range::attach_ranges(src, target, &mut report, &[]);
                 report
             }
         }
