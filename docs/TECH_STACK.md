@@ -1431,11 +1431,12 @@ than the pre-call state; model weights remain outside the repository.
 
 ### Parameters
 
-- Core toolchain: Rust edition 2024; `1.94` is the version the shipped
-  binaries were built with, **not a pin**. The repo carries no
-  `rust-toolchain*` file and no `.cargo` config, and all six CI steps use
-  `dtolnay/rust-toolchain@stable` with no version, so a later stable compiles
-  this tree too. Edition 2024 is the only floor the manifest states.
+- Core toolchain: Rust edition 2024; `1.94.1` is a **pin**
+  (`rust-toolchain.toml`), which `rustup` honours for every `cargo` call. The
+  CI steps still say `dtolnay/rust-toolchain@stable` — they need no version
+  input — and every job that builds a published binary asserts it got the
+  pinned version before it compiles. Edition 2024 is the floor the manifest
+  states.
 - Desktop UI: `eframe`/`egui 0.29` (**dependency pin**).
 - HTTP implementation: `tiny_http`; embedded HTML/CSS/JS via `include_str!`
   (**designed self-contained UI**).
@@ -1459,12 +1460,16 @@ than the pre-call state; model weights remain outside the repository.
   Lightroom, brush-table, and RAW-zoo suites are additional and are not
   smuggled into the ordinary count.
 - The build workflow checks default and GUI feature sets on Ubuntu and macOS.
-  The published binary artifacts are the Windows builds and two universal macOS
-  archives — the app bundle and the command line on its own — all built by
-  GitHub Actions from the tag (the bundle has shipped since v1.2.0).
+  The published binary artifacts are the Windows builds, two universal macOS
+  archives — the app bundle and the command line on its own (the bundle has
+  shipped since v1.2.0) — and, since v1.2.4, a Linux x64 command-line archive
+  built on Ubuntu 22.04; all of them are built by GitHub Actions from the tag.
 - Apple-silicon GPU inference (Metal/MPS) is selected by `python/_device.py`
-  and is **unmeasured**: no Mac has run this build, so no timing, no memory
-  ceiling, and no `PYTORCH_ENABLE_MPS_FALLBACK` coverage claim is made for it.
+  and is **measured on every release run** (`scripts/mps_probe.py`, on the
+  macos-battery runner): the chosen device, a fixed forward pass, the peak
+  device memory, and whether `torchvision.ops.deform_conv2d` is native or
+  falls back — the last asked with `PYTORCH_ENABLE_MPS_FALLBACK` removed,
+  since with it on the fallback cannot be observed.
 - `scripts/check_docs.py` re-derives version, extension, camera, dependency,
   toolchain, and test-battery claims from the tree. A moved claim is a failure,
   not a silent skip.
