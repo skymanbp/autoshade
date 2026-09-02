@@ -135,8 +135,8 @@ band the loader clamps it to (the recipe's own: ±100 on every HSL cell; hue
 colour-grade wheels). Two tests pin it: every label `read_settings` can write
 has a band, and an exemplar carrying all fifty survives `save` → `load`.
 Dropping either loop from the table turns both red. Rebuild your index once
-on v1.2.2 if you built it on v1.2.0 or v1.2.1 and your library carries HSL or
-colour-grade edits — the build itself was always correct; only the read was
+on v1.2.2 or any later release if you built it on v1.2.0 or v1.2.1 and your
+library carries HSL or colour-grade edits — the build itself was always correct; only the read was
 refused.
 
 ## What else is in v1.2.2
@@ -225,7 +225,7 @@ recomputed 0` and produced a byte-identical index; the look-library build
 then merged 94 finished photos into it instead of replacing it (the v1.2.1
 binary's behaviour on the same files was "0 loadable, replaced").
 
-All four release assets were downloaded from the GitHub release and verified
+All six release assets were downloaded from the GitHub release and verified
 against `checksums.txt` and an independently computed SHA-256 before the
 README and site tables were filled; the local install was upgraded from the
 downloaded installer and its executables compared byte for byte with the

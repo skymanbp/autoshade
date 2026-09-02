@@ -1,5 +1,12 @@
 # Autoshop v1.1.0 — layered reverse fit, per-band colour, style retrieval with eyes
 
+> **Erratum (added 2026-09-02).** This release also changed the library API
+> without saying so: `generative::reimagine` returns `Result<ReimagineReport>`
+> (the frame divergence and the first divergent step) instead of `Result<()>`,
+> and the image call returns a typed `GeneratedImage` instead of a
+> `(Vec<u8>, String)` pair. The CLI and GUI were updated in the same commit;
+> anything else that links the crate had to follow.
+
 Autoshop v1.1.0 is the largest release since 1.0: the reverse fit learns to
 work in layers (semantic regions, luminance ranges, spatial tiles and a
 free-form remainder), gains a per-band colour mixer, and puts the whole

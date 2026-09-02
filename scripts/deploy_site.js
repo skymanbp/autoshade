@@ -3,14 +3,21 @@
 // pushing main does not publish). Same mint→deploy→delete shape as the
 // CodeEraser site deploy, adapted to this project name.
 //
-// `.secret` at the repo root holds the user's master token, which can only
-// mint other tokens (it has no Pages permission, and listing /accounts with it
-// is expectedly empty). This script mints a one-hour token scoped to
+// `.secret` at the repo root holds the user's personal token (kept there by
+// the user's decision of 2026-09-02: the file is gitignored and read only
+// in-process). It mints other tokens, and since 2026-09-02 it also carries
+// Cache Purge on the zone. This script mints a one-hour token scoped to
 // "Pages Write" on the account, hands it to wrangler through the environment,
-// and deletes it in `finally`. No token value is ever printed or written.
+// deletes it in `finally`, and then purges the edge cache of the custom domain
+// with the personal token itself — `site/_headers` gives `/images/*` a seven-
+// day `max-age`, so without the purge a deploy replaces the origin bytes and
+// the apex keeps serving the old copy until the TTL runs out (seen after the
+// v1.2.0 deploy: `cf-cache-status: HIT`, `Age: 80753`). No token value is ever
+// printed or written.
 const fs = require("fs");
 const path = require("path");
 const { spawnSync } = require("child_process");
+const { purgeEverything } = require("./purge_site_cache.js");
 
 const root = path.join(__dirname, "..");
 const API = "https://api.cloudflare.com/client/v4";
@@ -80,6 +87,9 @@ async function main() {
     await cf("DELETE", `/user/tokens/${temp.id}`, master);
     console.log(`[cleanup] temp token ${temp.id} deleted`);
   }
+  // A failed deploy leaves the old files at the origin, and purging then would
+  // only cost cache hits, so the purge is conditional on wrangler's exit code.
+  if (status === 0) await purgeEverything(master);
   process.exit(status);
 }
 

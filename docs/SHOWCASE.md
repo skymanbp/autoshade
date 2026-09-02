@@ -12,8 +12,8 @@ camera JPEG. Model-judge scores are automated review, not human aesthetic
 approval. Image paths are relative to this file's directory.
 
 Every RAW is a Sony α7R IVA 61 MP `.ARW` (9504 × 6336). The Cornwall frame was
-shot with the body set to a 4:3 aspect, which is how it surfaced the two
-defects v1.2.2 fixes on the way to this page (see
+shot with the body set to a 4:3 aspect, which is how it surfaced the frame
+defect v1.2.2 fixes — one class, three places — on the way to this page (see
 [RELEASE_NOTES_v1.2.2.md](RELEASE_NOTES_v1.2.2.md)).
 
 ## Part A — AI analysis with a style reference: one photograph, four looks

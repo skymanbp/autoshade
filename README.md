@@ -99,9 +99,10 @@ tools are separate, opt-in paths and are labelled as such.
 
 Out of scope in this release: bit-exact Adobe rendering (parity is measured,
 not identical), an exact X-Trans demosaic (the plane fit is approximate),
-prebuilt Linux binaries (CI builds and tests them from source), a signed or
-notarised macOS build (the app bundle is ad-hoc signed, so the first launch
-needs an explicit 「Open Anyway」), and colour-range semantic regions.
+prebuilt Linux binaries (CI builds and tests them from source), a notarised
+macOS build (a decision, not a gap: the app bundle stays ad-hoc signed, so the
+first launch needs one explicit 「Open Anyway」 per machine), and colour-range
+semantic regions.
 
 ## What is new here
 
@@ -325,8 +326,9 @@ After the zones or bands, a frozen-evidence quadtree visits the strongest
 supported nodes first, stops at a 4×4 grid, and keeps a tile only when both
 frames contribute ≥ 3 % evidence, original structure remains comparable, the
 tile's confidence interval excludes zero, its boundary stays within the
-calibrated rim budget (0.012), and the composed frame does not regress at a
-zero tolerance. Tiles are ordinary editable engine bitmap masks; recipe JSON
+calibrated rim ceiling (0.012, charged per crossing against the scene's own
+step since v1.2.2), and the composed frame does not regress at a zero
+tolerance. Tiles are ordinary editable engine bitmap masks; recipe JSON
 keeps them losslessly and classic XMP omits each with a named bitmap-mask
 loss rather than inventing an approximate rectangle.
 
@@ -414,8 +416,8 @@ Everything that used to sit here has shipped: the style-retrieval expansion
 (finished exports as a look library, the SigLIP 2 text tower, local Qwen3-VL
 descriptions, the GUI embedding switch and the Direction-adherence axis) landed
 across steps 14 and S1–S3, and the eased linear-gradient falloff — the measured
-C1 Hermite smoothstep, RMS 0.0045 against 0.017 for a straight ramp — is on
-`main` awaiting the next release.
+C1 Hermite smoothstep, RMS 0.0045 against 0.017 for a straight ramp — shipped
+in v1.2.0.
 
 ## How it works
 
@@ -473,7 +475,7 @@ estimate. Sources are the pinned claims in
 | Reverse-fit, stone viaduct (full solve) | look error 0.161 → 0.050 at confidence 0.25 (a global solve, the per-band mixer on Orange/Yellow/Aqua/Blue, two semantic zones, four boundary-gated tiles and two field masks), D = 0.180; the sky tile's seam 0.0278 → 0.0042 (k 0.121), delivered +3.15 → +0.92 codes | [What is new §2](#2-reverse-fit-inverse-rendering-from-any-finished-look) |
 | Reverse-fit, Cornwall islet (full solve, composed calibration) | look error 0.137 → 0.027 at confidence 0.66, D = 0.136 sized from the sensor frame (0.304 from the cropped preview); the global cast projected to t = 0.363, delivered sky hue spread 9.6° (v1.2.2 shipped 33.1°) | [docs/SHOWCASE.md](docs/SHOWCASE.md) |
 | Local-field ceiling, calibration pair | global fit 0.0961 against a ceiling of 0.0700; the accepted sky zone realizes 0.134 of the distance | [What is new §7](#7-a-bilateral-grid-local-field-prices-every-local-producer-first) |
-| AI develop, model judge | 2026-09-02 four-looks batch on the full 169 + 94 index at `--style 1.0 --strength 0.9`, the direction leading: moody 68 → 70 → 78 (both adopted) → 69 (discarded), verdict Accept; golden 87 → 84 (discarded) after the verifier twice sent the proposal back for the grain it never set, verdict Revise — unsaved, the figure renders the proposal; vivid 70 → 84 (adopted) → 82 (discarded), verdict Accept. The finished-look-only run (2026-09-01) and v1.2.2's full-index run are on the showcase page |
+| AI develop, model judge | 2026-09-02 four-looks batch on the full 169 + 94 index at `--style 1.0 --strength 0.9`, the direction leading: moody 68 → 70 → 78 (both adopted) → 69 (discarded), verdict Accept; golden 87 → 84 (discarded) after the verifier twice sent the proposal back for the grain it never set, verdict Revise — unsaved, the figure renders the proposal; vivid 70 → 84 (adopted) → 82 (discarded), verdict Accept. The finished-look-only run (2026-09-01) and v1.2.2's full-index run are on the showcase page | [AI advisor](#ai-advisor-and-reverse-fit) |
 | Style retrieval weights | corpus harness (169 described exemplars, 156 queries): `W_EMB=4`, `W_TXT=0.5`, `W_DESC=0.5`, standardised variant with the text-hubness correction — MAE 0.688864 vs baseline 0.713143, +0.024280, CI [+0.005837, +0.041111] under the prose proxy; the corrected point at the old `W_TXT=4` regresses with CI [−0.069654, −0.005140], which is why the weight moved; under the tag-string proxy nothing beats the text-free row; `W_LOOK=1.0` is unmeasured (the harness cannot see the look library) and its scale is a real ratio against the direction terms — it ships inside a stable band, order unchanged to 2x and first moving at 4x | [AI advisor](#ai-advisor-and-reverse-fit) |
 | Memory budget | 1800 MB per photo from a 1771 MB reference probe; 4 GiB RAW admission gate | [Application](#application-and-infrastructure) |
 
@@ -482,8 +484,9 @@ estimate. Sources are the pinned claims in
 ### Download a release
 
 The v1.2.3 release is built by GitHub Actions from the tag and provides the
-Windows front ends plus a first macOS universal (arm64 + x86_64) CLI archive;
-Linux is built and tested in CI with no prebuilt binaries yet. `checksums.txt`
+Windows front ends and two macOS universal (arm64 + x86_64) archives — the
+desktop app bundle, and the command line on its own; Linux is built and tested
+in CI with no prebuilt binaries yet. `checksums.txt`
 on the release page carries the SHA-256 of every asset.
 
 | File | Size | SHA-256 |
@@ -793,9 +796,9 @@ claims. Model weights are not stored in this repository.
 
 Release gates for v1.2.3 cover the CLI, desktop GUI, sidecar contracts, format
 fixtures, and deterministic renderer; the built artifacts' sizes and hashes
-are listed above. macOS ships prebuilt binaries and a desktop app for the
-first time in this release, and nobody has used them interactively: CI builds
-both slices, runs `--version` on the arm64 one, self-tests the sidecars and
+are listed above. macOS has shipped prebuilt binaries and a desktop app since
+v1.2.0, and nobody has reported using them interactively: CI builds both
+slices, runs `--version` on the arm64 one, self-tests the sidecars and
 inspects the bundle, and that is the whole of the evidence. Apple-silicon GPU
 inference (Metal/MPS) is wired and **unmeasured** — its speed and its memory
 ceiling are reported by testers, not claimed here. Ubuntu is still CI source

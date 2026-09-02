@@ -1,7 +1,7 @@
 # AutoShade user manual
 
-The operating manual for AutoShade v1.0.0 — the desktop app, the CLI, and the
-embedded web UI. Installation and the first run are in the README's
+The operating manual for AutoShade — the desktop app, the CLI, and the
+embedded web UI; it describes the current release named in the README. Installation and the first run are in the README's
 [Install and quickstart](../README.md#install-and-quickstart); what the program
 is, what is new in it, and how it works are the README's opening sections;
 subsystem boundaries are in [ARCHITECTURE.md](ARCHITECTURE.md) and the
@@ -239,8 +239,8 @@ correctness, and a corrupt or foreign one is rebuilt with a printed reason.
 **Built your index on v1.2.0 or v1.2.1?** If your library carries any HSL or
 colour-grade edit, that index was written correctly but refused on load
 (`exemplar 0 has an unsupported setting key`), and the Style control read
-nothing. Run `style-index` once on v1.2.2; the build is the same, only the read
-was wrong.
+nothing. Run `style-index` once on v1.2.2 or any later release; the build is the
+same, only the read was wrong.
 
 `style-index --looks` builds the separate finished-photo look library; it never
 adds camera features or develop settings to those records, and it is capped at
@@ -296,8 +296,10 @@ looks with the local vision model* checkbox, which stays greyed out until the
 embedding checkbox above it is on.
 `--adherence 0..1` picks the prompt tier the proposer and verifier are told:
 `<=0.40` Hint, `0.40..0.70` Direct, above `0.70` Brief, default `0.65`
-(Direct). It is prompt intent only — it never moves a render bound — and it
-does nothing without a `--guidance` direction, which is why the desktop app
+(Direct). It never moves a render bound. It chooses the prompt tier and, since
+v1.2.3, who leads: at Direct or Brief the direction leads and the library's
+style pull is not applied (see *Who leads* below); at Hint the library leads.
+It does nothing without a `--guidance` direction, which is why the desktop app
 greys the slider out until Direction has text.
 
 Every setting below is named `AUTOSHADE_*`. Up to v1.1.0 the app was called

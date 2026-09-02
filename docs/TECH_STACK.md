@@ -1454,9 +1454,9 @@ than the pre-call state; model weights remain outside the repository.
   Lightroom, brush-table, and RAW-zoo suites are additional and are not
   smuggled into the ordinary count.
 - The build workflow checks default and GUI feature sets on Ubuntu and macOS.
-  The published binary artifacts are Windows builds plus a universal macOS CLI
-  archive; the macOS `.app` bundle is built, linted and verified on every tag
-  but has not been published in a release yet.
+  The published binary artifacts are the Windows builds and two universal macOS
+  archives — the app bundle and the command line on its own — all built by
+  GitHub Actions from the tag (the bundle has shipped since v1.2.0).
 - Apple-silicon GPU inference (Metal/MPS) is selected by `python/_device.py`
   and is **unmeasured**: no Mac has run this build, so no timing, no memory
   ceiling, and no `PYTORCH_ENABLE_MPS_FALLBACK` coverage claim is made for it.

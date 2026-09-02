@@ -810,10 +810,12 @@ reading by the measured margin, and this family declines the contextual charge.
 Three hand mutations turn it red and were reverted byte for byte: budget
 0.012 → 0.007, window 2.5/255 → 4.5/255, and `charged = rim × 1.5`.
 
-One gap in the release battery is worth naming: `AUTOSHADE_FIT_CALIBRATION_DIR`
-is unset on the build machine, so every calibration-corpus test in the tree
-returns without running. The corpus exists; only the pointer is missing. Those
-tests are decorative until the release battery sets it, and it should.
+One gap in the release battery closed with this release: until now
+`AUTOSHADE_FIT_CALIBRATION_DIR` was unset on the build machine, so every
+calibration-corpus test in the tree returned without running. The final
+battery of this release runs one lane with it set (see the table under
+"What else is in v1.2.3"), and that lane is part of the release battery from
+here on.
 
 ## What else is in v1.2.3
 
