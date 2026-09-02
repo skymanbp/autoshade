@@ -7356,10 +7356,13 @@ fn turn_brush_strokes(
 /// **`frame`** is the shape of the rectangle the coordinates are in BEFORE the
 /// turn, and only the brush arm reads it ([`CoordFrame`]). `None` means "not
 /// known here", and the honest consequence is that a brush's dabs are left
-/// where they were — every production caller supplies one, and the only one
-/// that can pass `None` (`pipeline::rotate_recipe`, which reads the photo's
-/// header lazily) does so exactly when the recipe holds no brush stroke at all
-/// ([`recipe_has_brush_strokes`]).
+/// where they were — every production caller supplies one when it can.
+/// `pipeline::rotate_recipe`, which reads the photo's header lazily, passes
+/// `None` exactly when the recipe holds no brush stroke at all
+/// ([`recipe_has_brush_strokes`]); the sidecar import (W14) passes it for a
+/// document that declares an orientation but no rectangle, beside a
+/// photograph whose own rectangle cannot be read, and takes that consequence
+/// knowingly — the boxes and points turn, a brush's dabs stay.
 pub fn orient_recipe_coords(
     r: &mut EditRecipe,
     o: Orientation,

@@ -375,6 +375,14 @@ impl<'a> FrameScope<'a> {
     ///   elements — symptom D is removed only for documents where some element
     ///   declares both.
     fn resolve(doc: &'a str) -> Self {
+        Self::resolve_with_start(doc).0
+    }
+
+    /// [`resolve`] plus WHERE it resolved to: the `<` of the Description it
+    /// narrowed to, or `None` for either whole-document fallback. The merge
+    /// asks, because a declaration it corrects has to land inside the span
+    /// this reader will search, or the engine's own round trip loses it.
+    fn resolve_with_start(doc: &'a str) -> (Self, Option<usize>) {
         let mut from = 0;
         while let Some((start, gt, self_closing)) = next_xml_tag(doc, from) {
             from = gt + 1;
@@ -396,10 +404,10 @@ impl<'a> FrameScope<'a> {
             if span.declared_number("tiff:ImageWidth").is_some()
                 && span.declared_number("tiff:ImageLength").is_some()
             {
-                return span;
+                return (span, Some(start));
             }
         }
-        FrameScope(doc)
+        (FrameScope(doc), None)
     }
 
     /// The number THIS scope declares for `name`, in either XMP spelling —
@@ -4518,15 +4526,22 @@ enum FrameDecl {
 /// recipe imported from this very sidecar, which is what keeps the round trip
 /// byte for byte.
 ///
-/// `tag` is the crs Description's own opening tag (`None` when the document
-/// has none and a fresh Description will be inserted). An orientation declared
-/// somewhere this merge cannot rewrite — the property-element spelling, or a
-/// second Description — is left alone and the geometry is written in the frame
-/// IT declares, with the note saying so; two declarations of one property in
-/// one document is a shape no reader can be asked to resolve.
+/// `desc` is the crs Description's own opening tag with its offset in
+/// `existing` (`None` when the document has none and a fresh Description
+/// will be inserted). The declaration is corrected ONLY where this engine's
+/// own reader will read it back — [`FrameScope::resolve`] narrows to the one
+/// Description that declares both dimensions, so the crs Description must
+/// be that one, or the reader must be in its whole-document fallback — and
+/// only where the old value cannot survive beside the new one (an attribute
+/// of that tag, or no declaration anywhere). Anything else — the
+/// property-element spelling, a frame kept in a second Description, as
+/// exiftool writes it — is left alone and the geometry is written in the
+/// frame the file declares, with the note saying so: a correction the reader
+/// cannot see would lose the turn on the next import and put the numbers in
+/// a frame nobody recovers.
 fn merge_frame(
     existing: &str,
-    tag: Option<&str>,
+    desc: Option<(usize, &str)>,
     photo: Option<FrameAspect>,
 ) -> (Option<FrameAspect>, FrameDecl, Option<String>) {
     let mentions_tiff = ["xmlns:tiff", "tiff:ImageWidth", "tiff:ImageLength", "tiff:Orientation"]
@@ -4548,17 +4563,22 @@ fn merge_frame(
         return (Some(frame), FrameDecl::Keep, None);
     };
     let frame = FrameAspect { turn: want, ..frame };
-    let declared = declared_orientation(existing);
+    let (scope, scope_start) = FrameScope::resolve_with_start(existing);
+    let declared = scope.declared_orientation();
     if declared.unwrap_or(rawler::Orientation::Normal) == want {
         return (Some(frame), FrameDecl::Keep, None);
     }
     // It disagrees, so it has to be rewritten — and it can be rewritten only
-    // where this merge already rewrites, i.e. as an attribute of the tag it is
-    // splicing. Anywhere else the old value would survive beside the new one.
-    let rewritable = tag.is_some_and(|t| {
-        xml_attribute_raw(t, "tiff:Orientation").is_some()
-            || find_outside_constructs(existing, "tiff:Orientation").is_none()
-    });
+    // where this merge already rewrites (as an attribute of the tag it is
+    // splicing; anywhere else the old value would survive beside the new
+    // one) AND where the reader will look for it (that tag's Description is
+    // the reader's scope, or the reader searches the whole document).
+    let at_scope = scope_start.is_none_or(|s| desc.is_some_and(|(start, _)| start == s));
+    let rewritable = at_scope
+        && desc.is_some_and(|(_, t)| {
+            xml_attribute_raw(t, "tiff:Orientation").is_some()
+                || find_outside_constructs(existing, "tiff:Orientation").is_none()
+        });
     if rewritable {
         return (Some(frame), FrameDecl::Orientation, None);
     }
@@ -4567,7 +4587,7 @@ fn merge_frame(
         Some(FrameAspect { turn: kept, ..frame }),
         FrameDecl::Keep,
         Some(format!(
-            "this sidecar declares tiff:Orientation where a merge cannot rewrite it, so the \
+            "this sidecar keeps its tiff: frame where a merge cannot rewrite it, so the \
              photo's own orientation ({}) was not written and the geometry was saved in the \
              frame the file declares ({})",
             want.to_u16().max(1),
@@ -4578,13 +4598,17 @@ fn merge_frame(
 
 /// The ONE `tiff:Orientation` attribute a merge appends when the base's own
 /// disagrees with the frame being written ([`FrameDecl::Orientation`]). The
-/// namespace and the rectangle are the base's and stay untouched; only this
-/// property is ours to correct.
-fn orientation_declaration(frame: Option<FrameAspect>) -> String {
-    match frame {
-        Some(f) => format!("\n    tiff:Orientation=\"{}\"", f.turn().to_u16().max(1)),
-        None => String::new(),
-    }
+/// rectangle is the base's and stays untouched; only this property is ours
+/// to correct — but the prefix must be BOUND on the tag that uses it. A
+/// document may bind `tiff:` on an ancestor rather than on the Description
+/// itself, and a prefix no enclosing element binds makes the whole sidecar
+/// unreadable to an XML parser, Lightroom's included. So the binding rides
+/// along exactly when the tag lacks one: re-binding a prefix an ancestor
+/// already binds is legal XML, a duplicate attribute on one tag is not.
+fn orientation_declaration(frame: Option<FrameAspect>, bind_prefix: bool) -> String {
+    let Some(f) = frame else { return String::new() };
+    let binding = if bind_prefix { "\n    xmlns:tiff=\"http://ns.adobe.com/tiff/1.0/\"" } else { "" };
+    format!("{binding}\n    tiff:Orientation=\"{}\"", f.turn().to_u16().max(1))
 }
 
 /// [`merge_recipe_into_xmp`] with a FALLBACK frame — the photo's own aspect,
@@ -4640,7 +4664,8 @@ pub fn merge_recipe_into_xmp_in_frame_for_photo(
     let mut tag = existing[desc_start..=gt].to_string();
     // …and the frame decision, which needs that tag: whether the base's own
     // `tiff:Orientation` is somewhere this splice can correct (W14).
-    let (frame, declare_frame, frame_note) = merge_frame(existing, Some(&tag), photo_frame);
+    let (frame, declare_frame, frame_note) =
+        merge_frame(existing, Some((desc_start, &tag)), photo_frame);
     notes.extend(frame_note);
     // A corrected orientation replaces the base's attribute rather than
     // joining it — the same strip-then-append discipline the crs keys take one
@@ -4678,7 +4703,9 @@ pub fn merge_recipe_into_xmp_in_frame_for_photo(
         "{head}{tiff}{attrs}>",
         tiff = match declare_frame {
             FrameDecl::Whole => frame_declaration(frame),
-            FrameDecl::Orientation => orientation_declaration(frame),
+            FrameDecl::Orientation => {
+                orientation_declaration(frame, xml_attribute_raw(&tag, "xmlns:tiff").is_none())
+            }
             FrameDecl::Keep => String::new(),
         },
         attrs = owned_attrs(r, frame),
@@ -11429,6 +11456,90 @@ mod tests {
         // cannot place must not invent a frame for it.
         let blind = merge_recipe_into_xmp(&base, &r).expect("mergeable").doc;
         assert!(blind.contains("tiff:Orientation=\"8\""), "{blind}");
+    }
+
+    /// **A corrected orientation is written only where this engine's own
+    /// reader will find it, and arrives bound.** [`FrameScope::resolve`] takes
+    /// the declaration from the one Description that declares both
+    /// dimensions, so a correction spliced onto a DIFFERENT Description (the
+    /// exiftool shape: one Description per namespace) would be invisible to
+    /// the reader — the round trip would lose the turn while the coordinates
+    /// went out in a frame nobody recovers. And an attribute whose prefix no
+    /// enclosing element binds makes the WHOLE sidecar unreadable to an XML
+    /// parser, Lightroom's included. Three shapes, one rule each:
+    ///
+    /// * the frame lives in another Description ⇒ the base's declaration is
+    ///   kept, the geometry goes out in the frame the file declares, and the
+    ///   merge NAMES what it could not write;
+    /// * the crs Description declares the frame and an ancestor binds the
+    ///   prefix ⇒ the correction lands on the crs tag WITH its own binding;
+    /// * the crs Description binds the prefix itself ⇒ corrected, bound once.
+    ///
+    /// MUTATION THIS CATCHES: drop the scope check from `merge_frame` and
+    /// the first shape writes a `tiff:Orientation` the reader never sees;
+    /// drop the binding from `orientation_declaration` and the second shape
+    /// carries `tiff:` with no binding in its own start tag.
+    #[test]
+    fn a_corrected_orientation_lands_where_the_reader_looks_and_arrives_bound() {
+        use rawler::Orientation as O;
+        let r = EditRecipe { exposure_ev: 0.25, ..Default::default() };
+        let turned = |base: &str| {
+            merge_recipe_into_xmp_in_frame(
+                base,
+                &r,
+                FrameAspect::from_size_turned(9504.0, 6336.0, O::Rotate90),
+            )
+            .expect("mergeable")
+        };
+        let crs_tag = |doc: &str| {
+            let start = find_crs_description(doc).expect("the settings Description survives");
+            let (gt, _) = scan_tag_end(doc, start).expect("its start tag closes");
+            doc[start..=gt].to_string()
+        };
+
+        // 1. The exiftool shape: the rectangle in property-element form in a
+        //    Description of its own, the settings in Lightroom's attribute form.
+        let apart = lr_doc("").replace(
+            " <rdf:Description rdf:about=\"\"\n    xmlns:crs=",
+            " <rdf:Description rdf:about=\"\"\n    xmlns:tiff=\"http://ns.adobe.com/tiff/1.0/\">\n\
+             \x20  <tiff:ImageWidth>9504</tiff:ImageWidth>\n\
+             \x20  <tiff:ImageLength>6336</tiff:ImageLength>\n\
+             \x20 </rdf:Description>\n\
+             \x20 <rdf:Description rdf:about=\"\"\n    xmlns:crs=",
+        );
+        assert!(apart.contains("<tiff:ImageWidth>9504</tiff:ImageWidth>"), "exiftool-shaped: {apart}");
+        assert_eq!(declared_orientation(&apart), None);
+        let out = turned(&apart);
+        assert!(!out.doc.contains("tiff:Orientation"), "nothing the reader cannot see: {}", out.doc);
+        assert_eq!(declared_orientation(&out.doc), None);
+        assert!(out.doc.contains("<tiff:ImageWidth>9504</tiff:ImageWidth>"), "{}", out.doc);
+        assert!(
+            out.notes.iter().any(|n| n.contains("where a merge cannot rewrite it") && n.contains("(6)")),
+            "the loss is named, with the turn that was not written: {:?}",
+            out.notes
+        );
+
+        // 2. The frame on the crs Description, the prefix bound on an ancestor.
+        let above = in_frame(&lr_doc(""), 9504, 6336).replace(
+            "xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\">",
+            "xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\"\n  xmlns:tiff=\"http://ns.adobe.com/tiff/1.0/\">",
+        );
+        assert_eq!(above.matches("xmlns:tiff=").count(), 1, "{above}");
+        let out = turned(&above).doc;
+        let tag = crs_tag(&out);
+        assert_eq!(tag.matches("tiff:Orientation=\"6\"").count(), 1, "one correction: {tag}");
+        assert_eq!(tag.matches("xmlns:tiff=").count(), 1, "bound where it is used: {tag}");
+        assert_eq!(declared_orientation(&out), Some(O::Rotate90), "{out}");
+
+        // 3. The Lightroom shape: the crs Description binds the prefix itself.
+        let bound = in_frame(&lr_doc(""), 9504, 6336).replace(
+            "tiff:ImageWidth",
+            "xmlns:tiff=\"http://ns.adobe.com/tiff/1.0/\"\n   tiff:ImageWidth",
+        );
+        let out = turned(&bound).doc;
+        assert_eq!(out.matches("xmlns:tiff=").count(), 1, "bound once: {out}");
+        assert_eq!(out.matches("tiff:Orientation=\"6\"").count(), 1, "{out}");
+        assert_eq!(declared_orientation(&out), Some(O::Rotate90), "{out}");
     }
 
     /// The shape 154 of the reference library's 174 sidecars actually have: a
