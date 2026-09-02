@@ -475,11 +475,23 @@ enum RadialDecode {
     /// which needs no aspect) and the caller raises the rotation disclosure,
     /// exactly as every build before v0.32.0 did for every rotated radial.
     Unrotated(EngineRadial),
-    /// The corners do not describe an ellipse at the declared angle — the
-    /// decode's own `a > 0 ∧ b > 0` guard. Real Lightroom data satisfies it
-    /// 80/80 (`BBOX-DECODE.md` §2.1); a sidecar that does not is either
-    /// malformed or uses a convention outside `|θ| < 90°`, and rendering it
-    /// anyway would draw a mask the file does not describe.
+    /// The corners do not describe an ellipse at all — a DEGENERATE fold, one
+    /// of whose semi-axes is zero or not a number. A zero-width ellipse is not
+    /// an ellipse, and the renderer's `max(1e-4)` would draw it as a hairline.
+    ///
+    /// A NEGATIVE semi-axis is NOT this: it used to be refused here, under an
+    /// `a > 0 ∧ b > 0` guard, and the me6-2026-09 pack refuted the refusal.
+    /// Group D's nine exports hand Lightroom a plain box (Left < Right,
+    /// Top < Bottom) with `crs:Angle="30"`, which folds to `b = −0.020096`;
+    /// Lightroom renders the ellipse of |b| — imported that way, the nine match
+    /// Lightroom's own α to a pooled rms of 0.0069, the same order as every
+    /// other family in the pack, with the α = ½ contour +6.3 / +8.9 / +12.8 px
+    /// out at Feather 25 / 50 / 75 on a 1248 px scale. Refused, they rendered
+    /// nothing at all (pooled rms 0.3931). The ellipse metric is
+    /// `(u/a)² + (v/b)²` and cannot see the sign; this engine's own
+    /// `mask_weight` already takes `.abs()` of both semi-axes for that reason,
+    /// so the refusal was the only thing standing between a readable file and
+    /// the mask it describes.
     Refused,
 }
 
@@ -574,16 +586,21 @@ fn lr_to_engine(lr: LrRadial, frame: Option<FrameAspect>) -> RadialDecode {
     // taking it verbatim keeps those masks bit-stable instead of routing them
     // through a numerical fold that can only lose digits.
     //
-    // The guard still applies, and at `θ = 0` it reads as `R > L ∧ B > T`: an
-    // inverted corner pair at zero rotation decodes to a negative semi-axis
-    // (it is one of the 16 of 195 the naive reading could not read either),
-    // and the sign law forbids it — `Left > Right` occurs only with
-    // `Angle > 0`, 6/6. A DEGENERATE box (`R == L`) is refused by the same
-    // test: a zero-width ellipse is not an ellipse, where the renderer's
-    // `max(1e-4)` used to draw it as a hairline.
+    // The guard still applies, and at `θ = 0` the fold IS the box, so here it
+    // reads as `R ≠ L ∧ B ≠ T`: a degenerate box is refused — a zero-width
+    // ellipse is not an ellipse, where the renderer's `max(1e-4)` used to draw
+    // it as a hairline. An INVERTED corner pair is not degenerate and is no
+    // longer refused; see [`RadialDecode::Refused`] for the group-D
+    // measurement, and note that this arm has to be the `θ → 0` limit of the
+    // folded one below — one law written twice would be two laws. The 115
+    // unrotated components in the user's library all have `xn > 0 ∧ yn > 0`,
+    // so `abs()` is the identity on every one of them and they stay
+    // bit-stable; an inverted pair now imports as the ellipse it describes and
+    // re-exports with its corners sorted, which is what the no-frame arm below
+    // has always done with one.
     if lr.angle_deg == 0.0 {
-        return if xn > 0.0 && yn > 0.0 {
-            RadialDecode::Exact(boxed(k * xn, k * yn, 0.0))
+        return if xn != 0.0 && yn != 0.0 {
+            RadialDecode::Exact(boxed(k * xn.abs(), k * yn.abs(), 0.0))
         } else {
             RadialDecode::Refused
         };
@@ -605,7 +622,13 @@ fn lr_to_engine(lr: LrRadial, frame: Option<FrameAspect>) -> RadialDecode {
     };
     let (sin, cos) = lr.angle_deg.to_radians().sin_cos();
     let (a, b) = (xn * s * cos + yn * sin, -xn * s * sin + yn * cos);
-    if !(a > 0.0 && b > 0.0) {
+    // DEGENERATE is refused; NEGATIVE is not degenerate. See
+    // [`RadialDecode::Refused`] for the group-D measurement that separated the
+    // two: an ellipse is `(u/a)² + (v/b)²`, so a negative fold names the same
+    // curve as its magnitude, and Lightroom draws that curve. `is_finite`
+    // stays because the old `a > 0 && b > 0` also caught a NaN corner, and a
+    // NaN semi-axis would reach the renderer as a NaN weight.
+    if !(a.is_finite() && b.is_finite()) || a == 0.0 || b == 0.0 {
         return RadialDecode::Refused;
     }
     // Into the engine's normalised frame: `rx = k·a/W`, `ry = k·b/H`, which in
@@ -5791,10 +5814,11 @@ fn component_import_reasons(
             // every other unreadable value, with the geometry arm's cost
             // (`OutOfModel` takes the whole correction). Real Lightroom data
             // clears it 80/80 (`BBOX-DECODE.md` §2.1); what does not is a box
-            // that decodes to a NEGATIVE semi-axis at the declared angle, i.e.
-            // not an ellipse this model can name. `OutOfModel` is the honest
-            // existing reason — "a value we can read that lands outside this
-            // engine's model" — and needs no new word in any UI language.
+            // that folds to a semi-axis of ZERO at the declared angle, i.e.
+            // not an ellipse at all. `OutOfModel` is the honest existing
+            // reason — "a value we can read that lands outside this engine's
+            // model" — and needs no new word in any UI language. A NEGATIVE
+            // fold left this gate in v1.2.4: see [`RadialDecode::Refused`].
             if matches!(
                 lr_to_engine(
                     LrRadial {
@@ -7371,7 +7395,7 @@ fn parse_one_correction_with_reader(
         // box in PIXEL space, not a bounding box — decoded (with the `k` frame
         // affine and the pixel→normalised rotation fold) by `lr_to_engine`,
         // whose doc carries the evidence. `Refused` is the decode's own
-        // `a > 0 ∧ b > 0` guard: `None` here takes the WHOLE correction, which
+        // degenerate-fold guard: `None` here takes the WHOLE correction, which
         // is what `component_import_reasons` has already independently decided
         // for the same component, so the two arms cannot disagree about what
         // the file says.
@@ -10301,25 +10325,27 @@ mod tests {
         }
     }
 
-    /// The decode's own guard. `a > 0 ∧ b > 0` holds for 80/80 rotated
-    /// components in the user's library and is not a fit — it is what the model
-    /// PREDICTS (`Left > Right` forces `Angle > 0`, `Top > Bottom` forces
-    /// `Angle < 0`, both at once impossible; the library agrees 16/16,
-    /// p = 2.5 × 10⁻⁵). A box that violates it is not an ellipse this model can
-    /// name, so the correction is refused and NAMED rather than rendered as
-    /// some other shape.
+    /// The decode's own guard, and the one thing it still refuses: a
+    /// DEGENERATE fold. The sign law — `Left > Right` forces `Angle > 0`,
+    /// `Top > Bottom` forces `Angle < 0`, both at once impossible, and the
+    /// library agrees 16/16, p = 2.5 × 10⁻⁵ — is a true statement about what
+    /// Lightroom WRITES. It was ALSO wired up as a readability gate, and
+    /// me6-2026-09 group D refuted that half: Lightroom draws the ellipse of
+    /// the folded MAGNITUDES ([`RadialDecode::Refused`] carries the numbers).
+    /// So an inverted pair imports, and only a zero fold is refused and NAMED.
     ///
-    /// MUTATION THIS CATCHES: delete the guard and the mask imports as a
-    /// mirrored ellipse with no disclosure at all.
+    /// MUTATION THIS CATCHES: delete the guard and a zero-area box imports as
+    /// a hairline (the renderer's `max(1e-4)`) with no disclosure at all;
+    /// put the sign half of it back and the group-D shape stops rendering.
     #[test]
     fn a_radial_whose_corners_do_not_decode_is_refused_and_named() {
-        // `Left > Right` with a NEGATIVE angle — the one combination the sign
-        // law forbids.
+        // A zero-AREA box: both corner pairs coincide, so the fold is (0, 0) at
+        // every tilt. No ellipse, however it is turned.
         let doc = in_frame(
             &lr_doc(&lr_correction(
                 "Impossible",
                 "",
-                &lr_radial_at("-0.088191", "0.520214", "1.113528", "0.494492", "-29.513785"),
+                &lr_radial_at("0.500000", "0.500000", "0.500000", "0.500000", "-29.513785"),
             )),
             9504,
             6336,
@@ -10334,18 +10360,48 @@ mod tests {
             }],
             "…and NAMED"
         );
-        // The same box with the angle the law requires decodes fine — so the
-        // refusal is about the geometry, not about the file being unusual.
-        let ok = in_frame(
-            &lr_doc(&lr_correction(
-                "Fine",
-                "",
-                &lr_radial_at("-0.088191", "0.520214", "1.113528", "0.494492", "29.513785"),
-            )),
-            9504,
-            6336,
-        );
-        assert_eq!(xmp_to_recipe(&ok).masks.len(), 1);
+        // A zero-WIDTH box at zero tilt is degenerate for the same reason — at
+        // θ = 0 the fold is the box. Under a tilt the SAME corners are not
+        // degenerate at all: Lightroom stores the ROTATED corners, so a stored
+        // width of zero folds to the honest pair (Y·sinθ, Y·cosθ). Both arms
+        // are asserted here so that neither can drift into the other.
+        let flat = |angle: &str| {
+            in_frame(
+                &lr_doc(&lr_correction(
+                    "Flat",
+                    "",
+                    &lr_radial_at("0.300000", "0.500000", "0.700000", "0.500000", angle),
+                )),
+                9504,
+                6336,
+            )
+        };
+        assert!(xmp_to_recipe(&flat("0")).masks.is_empty(), "zero-width at θ = 0 must not render");
+        assert_eq!(unsupported_corrections(&flat("0")), 1, "zero-width at θ = 0 is a drop");
+        assert_eq!(xmp_to_recipe(&flat("-29.513785")).masks.len(), 1, "its tilted fold is an ellipse");
+        // A box the sign law says Lightroom never writes still RENDERS — the
+        // refusal is about degeneracy, not about the file being unusual. Both
+        // tilts of the same corners import, and each is a real ellipse rather
+        // than the hairline a degenerate fold would leave.
+        let shape = |angle: &str| {
+            let doc = in_frame(
+                &lr_doc(&lr_correction(
+                    "Fine",
+                    "",
+                    &lr_radial_at("-0.088191", "0.520214", "1.113528", "0.494492", angle),
+                )),
+                9504,
+                6336,
+            );
+            let masks = xmp_to_recipe(&doc).masks;
+            assert_eq!(masks.len(), 1, "angle {angle} did not import");
+            assert_eq!(unsupported_corrections(&doc), 0, "angle {angle} was still counted a drop");
+            engine_pixel_ellipse(&masks[0].mask, 9504.0, 6336.0)
+        };
+        for angle in ["-29.513785", "29.513785"] {
+            let (major, minor, _) = shape(angle);
+            assert!(major > 300.0 && minor > 300.0, "angle {angle} is a hairline: {major} x {minor}");
+        }
     }
 
     /// The frame affine is the IDENTITY — the 2026-08-19 ruling set

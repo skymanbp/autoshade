@@ -1354,6 +1354,26 @@ battery — the nine that were still refused were all `Mask/Image`, which R27
 Batch-5's recomputation arm took. The per-photo refusal rate over the 147-pair
 eval corpus fell the same way, 2.35 → 0.05 masks per photo.)
 
+`crs:CorrectionActive="false"` — the mask eye — lands on `OutOfModel`, and
+me6-2026-09 group E measured that it should. Three exports of the same two
+corrections: `E-BOTH` with both active, `E-EYE-OFF` with the key written into
+the sidecar by hand, and `E-CLICK` where the user hid the mask in Lightroom and
+Lightroom wrote the key itself. Lightroom renders the last two IDENTICALLY —
+`max|Δ| = 0` over the whole 6240 × 4160 frame — and both 73 DN away from
+`E-BOTH`, so the key is the entire difference and hand-writing it is a faithful
+edit. This engine drops the correction on import and names it, which is the
+same picture, and the sidecar's own mask group survives a merge byte for byte,
+so an eye set in Lightroom is still set after a round trip through this app.
+
+Every me6-2026-09 number in this document comes from one producer and one
+script: `render::lr_pack::export_lr_pack_renders_for_the_mask_measurement`
+(`#[ignore]`; renders all 46 sidecars through the production import + develop
+path) and `scripts/lr_mask_parity.py`, which subtracts each group's no-mask
+reference and divides by a tone coordinate recovered from the pack itself, so
+the comparison is in coverage rather than in exposed pixels. Five further tests
+in `render::lr_pack` pin the verdicts from the fixture without rendering
+anything, and print a skip reason when `AUTOSHADE_LR_PACK` is unset.
+
 **R27 Batch-4 (L-08) took the brush half of the remaining refusal.** A
 `Mask/Aggregate` and its `Mask/Paint` children are now a first-class geometry,
 `MaskGeometry::Brush` — the group's `(MaskBlendMode, MaskValue, MaskInverted)`
@@ -1519,7 +1539,7 @@ written in the frame's PIXEL coordinates, so the decode is
 
 ```
 X = (R−L)/2·W          Y = (B−T)/2·H          SIGNED, never abs()
-a =  X·cos θ + Y·sin θ    b = −X·sin θ + Y·cos θ      guard: a > 0 ∧ b > 0
+a =  X·cos θ + Y·sin θ    b = −X·sin θ + Y·cos θ      guard: a ≠ 0 ∧ b ≠ 0
 ```
 
 with `θ = crs:Angle`. The naive reading gets the axis RATIO wrong by a median
@@ -1531,6 +1551,20 @@ no free parameters it predicts that `Left > Right` forces `Angle > 0` and
 library agrees 16/16, p = 2.5 × 10⁻⁵ — and the two rendered subjects land on
 it at the pixel (`P24` 8.3 : 1 at +24.35°; `P22` decoded tilt
 −60.486° against a measured −60.5°).
+
+That sign law is a true statement about what Lightroom WRITES. Until v1.2.4 it
+was also wired up as a readability GATE — `a > 0 ∧ b > 0`, refuse otherwise —
+and me6-2026-09 group D refuted that half. Its nine exports hand Lightroom a
+plain box (`Left < Right`, `Top < Bottom`) at `crs:Angle="30"`, whose fold is
+`b = −0.020096`, and Lightroom draws the ellipse of the MAGNITUDES: imported
+that way the nine match Lightroom's own α to a pooled rms of 0.0069 — the same
+order as every other family in the pack — with the α = ½ contour +6.3 / +8.9 /
++12.8 px out at `Feather` 25 / 50 / 75 on a 1248 px scale. Refused, they
+rendered nothing at all (pooled rms 0.3931). An ellipse metric is
+`(u/a)² + (v/b)²` and cannot see the sign, and `mask_weight` already takes
+`.abs()` of both semi-axes, so the guard is DEGENERACY-only from v1.2.4: a zero
+or non-finite fold is refused and NAMED, a negative one imports. The `θ = 0`
+fast path carries the same law, because it is that fold's own limit.
 
 Three more constants ride with it, each measured on the same twelve-export
 experiment:
@@ -1592,20 +1626,44 @@ experiment:
 
   Radial transport closes all 41 measured point vectors to ≤1 px (wall 20/20
   RMS 0.568 px; second set 21/21 RMS 0.243 px). Clean dilation is ≤0.35 pp and
-  R1 is about 0.5 pp; the R2 big-mask excess remains open at about 1.2 pp.
+  R1 is about 0.5 pp. **The R2 big-mask excess is closed, and it is not a
+  dilation law.** me6-2026-09 group A exported one centred feather-0 radial at
+  three sizes — 0.30×0.32, 0.50×0.50 and 0.70×0.63 of a 6240×4160 frame — with
+  the lens correction OFF, and Lightroom's α = ½ boundary sits at
+  ρ = 0.99880 / 0.99875 / 0.99872 of the STORED ellipse: a pure scale, mean
+  0.99876, sd 4×10⁻⁵, independent of mask size. This engine's own boundary is
+  the stored ellipse to 0.05 px at all three, so the residual is
+  −1.12 / −1.96 / −2.79 px only because the ellipse is bigger. That 0.99876 is
+  the 2026-08-19 `LR_MASK_FRAME_SCALE = 1.0` ruling re-measured on a second
+  frame rather than a new fact, and the ruling stands. With the correction ON
+  the same three read −5.55 / −17.53 / −38.46 px, growing with radius because
+  the excess is then the lens map sampled at the mask's own radius — and
+  Lightroom's `.lcp` pool is the measured alternative for that map, not a
+  better one: rendering group A through `lcp::solve_mask_warp` instead of the
+  in-camera knots moves the residuals to −24.17 / −46.34 / −73.22 px.
   LINEAR H2 is intentionally not described as 1 px-closed: ON residuals are
   9.748/7.025/6.336 px RMS and OFF residuals are 12.449/9.943/4.979 px RMS.
   A fitted anisotropic-aspect candidate is diagnostic only and is not shipped.
 
   Linear coverage has one engine law, `linear_coverage(t, profile)`, applied
   after the existing H2 handle transport and pixel/aspect projection. The
-  shipped `LINEAR_FALLOFF` is `Eased`, the measured C1 Hermite smoothstep:
-  Lightroom turns over at both handles (80/80 rows) and a free-end profile
-  fit (handle rows and profile fitted jointly, so a soft profile cannot hide
-  inside a shrunken span; `scripts/linear_falloff_probe.py --fit`) reaches RMS
-  0.0045 for smoothstep against 0.017 for linear. This is a render hard change
-  for linear
-  masks only; radial and bitmap masks remain byte-identical.
+  shipped `LINEAR_FALLOFF` is `Measured`: the C1 Hermite smoothstep on the
+  abscissa `t^1.124`. `Eased` — the same smoothstep unwarped — held that slot
+  until me6-2026-09 group B, and the reason it looked right is that the fit
+  which chose it (`scripts/linear_falloff_probe.py --fit`) scored candidates
+  against exported row LUMA, which is the tone curve composed with the mask.
+  `scripts/lr_mask_parity.py` inverts the tone chain first, and Lightroom's own
+  COVERAGE turns out to be skewed: the α = ½ contour sits at t = 0.5436 of the
+  handle axis on twelve isolated gradients (three positions × two orientations
+  × lens ON/OFF), with the three positions and the two lens states agreeing to
+  0.0002. Pooled over the twelve, rms(α) against that measured coverage is
+  0.0064 for the warped law, 0.0315 for the unwarped smoothstep, 0.0323 for a
+  raised cosine and 0.0598 for the linear ramp; end to end the engine's own
+  residual falls from 0.0293 to 0.0074 and its α = ½ contour from
+  +34.2 / +38.2 px to +0.9 / +5.0 px. The remainder is an ORIENTATION split —
+   vertical gradients fit an exponent of 1.1215 and horizontal ones 1.1293 —
+  and one exponent cannot be inside both. This is a render hard change for
+  LINEAR masks only; radial and bitmap masks remain byte-identical.
 
   ⚠ `mask_warp_center` and `linear_handle_warp` are two deliberate v1.0.0
   **hard forward schema breaks** inside `LensProfile`: older `deny_unknown_fields`
@@ -1682,17 +1740,27 @@ experiment:
   with 1.43 and B7's 1.4335 excluded by four shape-free instruments and by a
   forward check that puts their predicted endpoints past what the pixels show
   (the table never states `d_out`, so this costs zero pixels), and aspect
-  invariance is sampled once — the shipped table scores rms(α) 0.0009 on a
+  invariance was sampled once — the shipped table scores rms(α) 0.0009 on a
   held-out aspect 1.2 export against 0.0004 on the fitted 2.5, with the best
   single radial rescale between the two at k = 1.00076, i.e. nothing in the
-  falloff is anchored in pixels. Still registered: that check is one extra
-  aspect at `Feather = 50` only, the `Feather = 1` far tail is unresolved, and
-  BETWEEN columns is still unmeasured at the `Feather ≤ 10` end.
+  falloff is anchored in pixels. me6-2026-09 group C closed all three of the
+  caveats this paragraph used to carry, and closed them with no change to the
+  table. Aspect invariance is now two HELD-OUT aspects at three feathers each —
+  box 0.4×0.5 (pixel aspect 1.20) and 0.8×0.3 (4.00) at `Feather` 10 / 25 / 75 —
+  scoring pooled rms(α) 0.0061 and 0.0064 against 0.0103 on the fitted 2.5
+  geometry, so the unfamiliar aspect is if anything the easier case. The
+  `Feather = 1` far tail is measured at rms(α) 0.0097. And BETWEEN columns is
+  measured at the narrow end: `Feather` 1 / 2 / 3 / 7 score 0.0097 / 0.0115 /
+  0.0115 / 0.0083, where `Feather` 1 is one of the table's own columns and 2, 3
+  and 7 are interpolated between columns — and the four score alike, so no
+  column is inserted. Adding rungs to a table that already reproduces the
+  pixels to 1.2 % of α would be fitting the instrument, and the exports that
+  would have paid for them do not exist: me6-2026-09 is the last Lightroom
+  ground truth this project collected.
   (`~/.claude/plans/r29-materials/b7-analysis.md`, `…-2.md`, `me3-a-report.md`
-  and `me3-b-report.md`; the item lives in
-  V2_PLAN §7 item 1 — M1_PLAN and V2_PLAN are development ledgers kept outside
-  the public tree since 2026-08-20, the same standing as the probe reports these
-  sections cite.)
+  and `me3-b-report.md`; M1_PLAN and V2_PLAN are development ledgers kept
+  outside the public tree since 2026-08-20, the same standing as the probe
+  reports these sections cite.)
 * **`crs:LocalHue`'s scale is 180, not 100.** A controlled export with the mask
   Hue slider at +50 wrote `crs:LocalHue="0.277778"`; 0.277778 × 180 = 50.00004.
 

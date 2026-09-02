@@ -41,17 +41,72 @@ pub(crate) const MASK_RASTER_BUDGET_BYTES: usize = 256 * 1024 * 1024;
 
 /// The linear-gradient profile selected by the Lightroom falloff measurement.
 ///
-/// `Eased` is shipped after the Lightroom probe measured C1-softened handles.
-const LINEAR_FALLOFF: LinearFalloff = LinearFalloff::Eased;
+/// `Measured` is shipped after the me6-2026-09 pack measured Lightroom's own
+/// COVERAGE rather than its exported luma — see [`LINEAR_FALLOFF_WARP`].
+const LINEAR_FALLOFF: LinearFalloff = LinearFalloff::Measured;
 
-#[allow(dead_code)] // Clamped remains pinned by the historical-ramp test.
+#[allow(dead_code)] // Clamped and Eased remain pinned by the historical tests.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum LinearFalloff {
     /// The historical piecewise-linear ramp.
     Clamped,
     /// C1 Hermite smoothstep, with zero slope at both handles.
     Eased,
+    /// [`LinearFalloff::Eased`] on a measured abscissa —
+    /// `smoothstep(t^`[`LINEAR_FALLOFF_WARP`]`)`, the shipped law.
+    Measured,
 }
+
+/// Lightroom's linear gradient is SKEWED: its half-coverage contour sits at
+/// `t = 0.5436` of the handle axis, not at the midpoint. Measured on the
+/// me6-2026-09 pack's twelve isolated gradients — three positions × two
+/// orientations × lens correction on and off, handles 20 % of the short side
+/// apart on a 6240 × 4160 frame. The three positions and the two lens states
+/// agree to 0.0002; the two ORIENTATIONS do not, and that is the whole of the
+/// residual: 0.5411 on the six vertical gradients, 0.5460 on the six
+/// horizontal.
+///
+/// # Why the shipped smoothstep was symmetric, and why that was wrong
+///
+/// The `Eased` fit that chose it (`scripts/linear_falloff_probe.py --fit`)
+/// scored candidate profiles against the exported row LUMA, normalised between
+/// the two plateaus — which is `T(coverage)`, the tone curve composed with the
+/// mask, not the mask. A monotone tone curve cannot turn a straight ramp into
+/// an S with zero slope at both ends, so `Eased` beating `Clamped` survives
+/// that confusion; the SHAPE does not. `scripts/lr_mask_parity.py` inverts the
+/// tone curve first — it recovers Lightroom's own value-in-stops from the
+/// pack's feather-0 masks and the wall's 4:1 brightness range — and the
+/// coverage that comes out is not symmetric.
+///
+/// # The number
+///
+/// `scripts/lr_mask_parity.py` fits an exponent PER GRADIENT (`fit_warp_q`).
+/// The twelve span 1.1210…1.1300, mean 1.1254, sd 0.0041, and the spread is
+/// the orientation split again: 1.1215 on the vertical six, 1.1293 on the
+/// horizontal six. The shipped `1.124` sits inside that range, 0.0014 (a third
+/// of an sd) under the pooled mean; carrying the mean instead would move the
+/// α = ½ contour by 0.2 px on the pack's 832 px handle span, which is a fifth
+/// of the residual the best single exponent leaves anyway.
+///
+/// The tone model is not what decides it. Re-solving the tone coordinate with
+/// the second-difference weight at 20 and at 120 instead of 50
+/// (`--tone-smoothness`) moves the pooled exponent to 1.1253 and 1.1224 — a
+/// 0.0030 band, narrower than the between-gradient sd and containing the
+/// shipped value.
+///
+/// Scored against the measured coverage, pooled over all twelve gradients:
+/// rms(α) 0.0064 for this law, 0.0315 for the unwarped smoothstep, 0.0323 for
+/// a raised cosine and 0.0598 for the linear ramp. End to end — the engine's
+/// own α field against Lightroom's, on the rendered pixels — the pooled
+/// residual falls from 0.0293 to 0.0074, and the α = ½ contour from
+/// +34.2 / +38.2 px to +0.9 / +5.0 px (vertical / horizontal). What is left is
+/// the orientation split, and one exponent cannot be inside both halves of it.
+///
+/// ⚠ RENDER-BEHAVIOUR CHANGE: every LINEAR mask renders differently from this
+/// version on. The coverage moves by at most 0.0624 in α (at `t = 0.4606`),
+/// and the half-coverage contour moves 3.97 % of the handle span toward the
+/// Full end. Radial, bitmap, brush and AI masks are byte-identical.
+const LINEAR_FALLOFF_WARP: f32 = 1.124;
 
 /// Reshape the existing handle-axis parameter without changing handle
 /// transport, coordinate frames, or geometry metrics.
@@ -60,6 +115,14 @@ fn linear_coverage(t: f32, profile: LinearFalloff) -> f32 {
     match profile {
         LinearFalloff::Clamped => t,
         LinearFalloff::Eased => t * t * (3.0 - 2.0 * t),
+        LinearFalloff::Measured => {
+            // `powf` at the two ends is exact — `0^q = 0`, `1^q = 1` — so the
+            // handles stay where the sidecar put them and the plateaus stay
+            // flat, which is what makes this a reshape and not a transport
+            // change.
+            let u = t.powf(LINEAR_FALLOFF_WARP);
+            u * u * (3.0 - 2.0 * u)
+        }
     }
 }
 
@@ -3628,18 +3691,23 @@ fn mask_weight(g: &MaskGeometry, nx: f32, ny: f32, bmp: Option<&image::GrayImage
         // WHOLE exported frame — same entropy-coded segment, max|Δ| = 0 across
         // 26 M pixels (me3-b §5, re-verified first-hand at adjudication) — so
         // every sector is covered, not just the one the earlier fit sampled.
-        // What genuinely stays open (docs/V2_PLAN.md §7 item 11): all four
-        // probes are the SAME box (Top 0.4 / Left 0.333333 / Bottom 0.6 /
-        // Right 0.666667, aspect 2.5, centred, Angle 0), so a second geometry
-        // is still zero-sample; only {−100, 0, +100} were exported, so an
-        // implementation that acts strictly INSIDE the endpoints would be
-        // invisible here; and Roundness × Angle≠0 is untested.
-        // Registered, not claimed (me3-b §4.3, H8): the −100 and +100 exports
-        // differ by a whole-frame, zero-mean dither rearrangement of ≤ ±4 DN
-        // with no spatial structure and no far-field asymmetry. Mechanism
-        // unresolved. It is written down so a later batch that meets the same
-        // ±1 DN wash on these probe negatives checks for THIS before reading
-        // it as a signal.
+        // me6-2026-09 group D closed the rest of it on a SECOND geometry:
+        // box 0.4 × 0.3 centred (0.6, 0.4) at `crs:Angle="30"`, pixel aspect
+        // 2.0 — another shape, another place, and a non-zero tilt — exported at
+        // Roundness −100 / 0 / +100 crossed with Feather 25 / 50 / 75. All
+        // nine are the same pixels: max|Δ| = 0 DN over 26 M pixels in each of
+        // the three feather triples, and the files differ only by the six or
+        // seven bytes of embedded XMP. Roundness × Angle ≠ 0 is measured, the
+        // second geometry is measured, and the no-op holds at every feather
+        // that has one.
+        // That pack also RETIRES the "zero-mean dither of ≤ ±4 DN" this
+        // comment used to register from me3-b §4.3: at q100 with no output
+        // sharpening the difference is not small, it is exactly zero, so the
+        // earlier wash was that export's own encoder rather than a Roundness
+        // effect. What no export tested is a value strictly between −100, 0
+        // and +100 — Lightroom's slider is an integer and all three of its
+        // ends render identically, so "stored, not rendered" is what the
+        // measurements describe.
         // The sibling `feather` HAD the same guessing bug — Lightroom writes it
         // 0..100 and xmp.rs used to import the value raw, so Feather="72"
         // clamped to fully feathered; both XMP directions now convert on the
@@ -8579,6 +8647,11 @@ pub fn apply_lens_geometry(
     DynamicImage::ImageRgb16(out)
 }
 
+/// The Lightroom export pack's producer and its pinned measurements — a test
+/// module, so nothing here is compiled into a shipped binary.
+#[cfg(test)]
+mod lr_pack;
+
 #[cfg(test)]
 mod tests {
 
@@ -9263,8 +9336,9 @@ mod tests {
         // Zero end on row 0's centre (ny = 0.125), full end on row 3's centre
         // (ny = 0.875). vy = 0.75, len2 = 0.5625, so the weights are
         // (ny − 0.125)·0.75/0.5625 = 0, 1/3, 2/3, 1 — every operand dyadic, and
-        // the last one EXACTLY 1. Eased bytes: 0, round(66.0) = 66,
-        // round(189.0) = 189, 255.
+        // the last one EXACTLY 1. Through the shipped `Measured` profile,
+        // smoothstep(t^1.124), they are 0, round(52.17) = 52,
+        // round(177.52) = 178, 255.
         let ramp = LocalAdjustment {
             mask: MaskGeometry::Linear {
                 zero_x: 0.5, zero_y: 0.125, full_x: 0.5, full_y: 0.875,
@@ -9273,7 +9347,7 @@ mod tests {
         };
         let lcov = mask_coverage(&ramp, &flat(4), MaskFrame::AsRendered);
         let column: Vec<u8> = (0..4).map(|y| lcov.get_pixel(2, y)[0]).collect();
-        assert_eq!(column, vec![0, 66, 189, 255], "the eased ramp must span its ends exactly");
+        assert_eq!(column, vec![0, 52, 178, 255], "the shipped ramp must span its ends exactly");
 
         // --- (c) BITMAP -----------------------------------------------------
         // A 2-wide raster [0, 255] read by a 4-wide frame. Texel centres sit at
@@ -9801,12 +9875,12 @@ mod tests {
         // The four rows sample at their CENTRES, ny = (y + 0.5)/4, so the
         // weights are exactly 1/8, 3/8, 5/8, 7/8 — the top row is no longer
         // AT the gradient's zero end, it is an eighth of the way past it, and
-        // it darkens according to the shipped eased profile (R29 C2's
-        // half-pixel move, visible here). Pinned EXACTLY rather than bounded:
+        // it darkens according to the shipped profile (R29 C2's half-pixel
+        // move, visible here). Pinned EXACTLY rather than bounded:
         // a degenerate linear (zero == full) renders weight 1 everywhere, so
-        // this comparison carries the identical eased weight through every
+        // this comparison carries the identical shipped weight through every
         // stage below it.
-        let top_weight = linear_coverage(0.125, LinearFalloff::Eased);
+        let top_weight = linear_coverage(0.125, LINEAR_FALLOFF);
         let eighth = EditRecipe {
             masks: vec![LocalAdjustment {
                 mask: MaskGeometry::Linear { zero_x: 0.5, zero_y: 0.5, full_x: 0.5, full_y: 0.5 },
@@ -9818,7 +9892,7 @@ mod tests {
         };
         let mut eighth_px = vec![[0.6_f32, 0.6, 0.6]; 1];
         apply_develop_anon(&mut eighth_px, 1, 1, &eighth);
-        assert_eq!(data[0], eighth_px[0], "top row carries exactly its eased coverage");
+        assert_eq!(data[0], eighth_px[0], "top row carries exactly its shipped coverage");
         assert!(data[0][0] < 0.6, "…which is a real darkening: {}", data[0][0]);
         assert!(data[3][0] < 0.5, "bottom should darken: {}", data[3][0]);
         // The interior rows carry the actual gradient — the endpoint checks
@@ -11248,6 +11322,14 @@ mod tests {
         my - (x - mx) * (fx - zx) / (fy - zy)
     }
 
+    /// The coverage the shipped LINEAR profile puts at the geometric midline.
+    /// `linear_coverage` is not symmetric about t = ½ (me6-2026-09 group B
+    /// measured the abscissa warp), so a bisection hunting for the midline
+    /// must hunt for THIS level rather than for a hard-coded 0.5.
+    fn d2_midline_coverage() -> f32 {
+        linear_coverage(0.5, LINEAR_FALLOFF)
+    }
+
     fn d2_coverage_crossing_x(
         mask: &crate::recipe::LocalAdjustment,
         y: f32,
@@ -11259,7 +11341,7 @@ mod tests {
         let (mut lo, mut hi) = (0.0f32, 1.0f32);
         for _ in 0..40 {
             let mid = (lo + hi) * 0.5;
-            if (end(mid) < 0.5) == increasing {
+            if (end(mid) < d2_midline_coverage()) == increasing {
                 lo = mid;
             } else {
                 hi = mid;
@@ -11279,7 +11361,7 @@ mod tests {
         let (mut lo, mut hi) = (0.0f32, 1.0f32);
         for _ in 0..40 {
             let mid = (lo + hi) * 0.5;
-            if (end(mid) < 0.5) == increasing {
+            if (end(mid) < d2_midline_coverage()) == increasing {
                 lo = mid;
             } else {
                 hi = mid;
@@ -11332,7 +11414,12 @@ mod tests {
         let p = lens_geom_norm(q.0, q.1, dims, &profile, 0.0);
         let unwarp = frame.unwarp(dims).expect("active non-identity engine map");
         let weight = mask_weight_in(&mask.mask, p.0, p.1, None, Some(&unwarp), dims);
-        let math_error_px = (weight - 0.5).abs() * 0.06 * dims.0;
+        // The midline's coverage is `d2_midline_coverage()`, not 0.5: the
+        // shipped profile is eased on a warped abscissa. Dividing the coverage
+        // error by the span rather than by the profile's own slope (1.535 at
+        // the midline) makes this bound 1.5x TIGHTER than the pixel error it
+        // names, which is the safe direction.
+        let math_error_px = (weight - d2_midline_coverage()).abs() * 0.06 * dims.0;
         assert!(math_error_px < 0.1, "active LINEAR midline math is {math_error_px:.4}px off");
 
         // Raster pin: run the exact coverage-then-geometry composition used by
@@ -11340,11 +11427,13 @@ mod tests {
         let base = DynamicImage::ImageRgb8(RgbImage::from_pixel(w, h, image::Rgb([128, 128, 128])));
         let coverage = DynamicImage::ImageLuma8(mask_coverage(&mask, &base, frame));
         let rendered = apply_lens_geometry(&coverage, &profile, 0.0);
-        let got = d2_rgb16_crossing_x_at(&rendered, h / 2, 32767.5);
+        // 255 codes then 257 per code: the same 8-bit ladder the old 32767.5
+        // target rode, re-aimed at the midline's coverage (0.43837 -> 28728.6).
+        let got = d2_rgb16_crossing_x_at(&rendered, h / 2, d2_midline_coverage() * 255.0 * 257.0);
         let expected = q.0 * dims.0;
-        // The public coverage raster is 8-bit, so its rounded 0.5 code adds a
-        // measured 0.16 px crossing bias; the float engine-law assertion above
-        // is the sub-0.1 px contract, while this pins end-to-end wiring.
+        // The public coverage raster is 8-bit, so its rounded midline code adds
+        // a measured sub-0.2 px crossing bias; the float engine-law assertion
+        // above is the sub-0.1 px contract, while this pins end-to-end wiring.
         assert!((got - expected).abs() < 0.3, "rendered {got:.4}px vs stored {expected:.4}px");
 
         // The actual local-adjustment renderer uses the same frame preparation,
@@ -11356,9 +11445,17 @@ mod tests {
         };
         let effect = apply_lens_geometry(&develop_preview(&base, &recipe), &profile, 0.0);
         let effect_rgb = effect.to_rgb16();
-        let target = 0.5
-            * (effect_rgb.get_pixel(0, h / 2)[1] as f32
-                + effect_rgb.get_pixel(w - 1, h / 2)[1] as f32);
+        // The mask blend `p·(1 − w) + t·w` runs in the same sRGB-gamma domain
+        // the output is rounded from, so the rendered value is AFFINE in the
+        // coverage `w` and the midline's level is simply the two plateaus
+        // interpolated at `d2_midline_coverage()`. This was the mean of the
+        // two while the profile was symmetric about t = ½; it no longer is.
+        // Interpolating (rather than reading the level off a probe render)
+        // also keeps the target off the 8-bit ladder — on this 0.84-code-per-
+        // pixel ramp a whole-code target is worth 0.6 px of bias.
+        let zero_end = effect_rgb.get_pixel(w - 1, h / 2)[1] as f32;
+        let full_end = effect_rgb.get_pixel(0, h / 2)[1] as f32;
+        let target = zero_end + d2_midline_coverage() * (full_end - zero_end);
         let effect_crossing = d2_rgb16_crossing_x_at(&effect, h / 2, target);
         assert!(
             (effect_crossing - expected).abs() < 0.35,
@@ -12825,11 +12922,14 @@ mod tests {
         // term at +100/Feather=50 and R29 me3-b measured −100 at Feather=0 and
         // the whole-frame Roundness×Feather identity at Feather=50, so the
         // assertions below now pin MEASURED behaviour rather than a documented
-        // assumption — the values did not have to change for that. Still open
-        // (docs/V2_PLAN.md §7 item 11): a second geometry, the values strictly
-        // between the endpoints, and Roundness × Angle≠0. Pinning the no-op so
-        // any future falloff-shape implementation lands together with the doc
-        // and the XMP round-trip.
+        // assumption — the values did not have to change for that. me6-2026-09
+        // group D then added the second geometry AND the non-zero tilt (box
+        // 0.4 × 0.3 centred (0.6, 0.4), `crs:Angle="30"`, Roundness −100/0/+100
+        // crossed with Feather 25/50/75): nine exports, max|Δ| = 0 DN in every
+        // triple, pinned from the pack itself in `render::lr_pack::
+        // lightroom_and_the_engine_both_draw_one_ellipse_for_every_roundness`.
+        // Pinning the no-op so any future falloff-shape implementation lands
+        // together with the doc and the XMP round-trip.
         let radial = |roundness: f32| MaskGeometry::Radial {
             top: 0.2,
             left: 0.1,
@@ -12882,8 +12982,8 @@ mod tests {
             for j in 0..=4 {
                 let (nx, ny) = (i as f32 / 4.0, j as f32 / 4.0);
                 let (b, c) = (
-                    linear_coverage(nx, LinearFalloff::Eased),
-                    linear_coverage(ny, LinearFalloff::Eased),
+                    linear_coverage(nx, LINEAR_FALLOFF),
+                    linear_coverage(ny, LINEAR_FALLOFF),
                 );
                 for (mode, want) in [
                     (MaskCombine::Add, 1.0 - (1.0 - b) * (1.0 - c)),
@@ -12905,7 +13005,7 @@ mod tests {
         };
         assert_eq!(
             combined_mask_weight(&plain, 0.3, 0.9, None, &[], None, (1.0, 1.0)),
-            linear_coverage(0.3, LinearFalloff::Eased)
+            linear_coverage(0.3, LINEAR_FALLOFF)
         );
         // Components fold IN LIST ORDER: subtract-then-add differs from
         // add-then-subtract, so a reorder is a real semantic change.
@@ -12920,8 +13020,8 @@ mod tests {
         };
         let (nx, ny) = (0.5, 0.75);
         let want = {
-            let b = linear_coverage(nx, LinearFalloff::Eased);
-            let c = linear_coverage(ny, LinearFalloff::Eased);
+            let b = linear_coverage(nx, LINEAR_FALLOFF);
+            let c = linear_coverage(ny, LINEAR_FALLOFF);
             let w = b * (1.0 - c);
             1.0 - (1.0 - w) * (1.0 - c)
         };
@@ -14491,17 +14591,20 @@ mod tests {
         let cov = mask_coverage(&grad, &grey, MaskFrame::AsRendered);
         // Rows sample at their CENTRES, ny = (y + 0.5)/20, so this 0→1
         // gradient reads t = 0.025 / 0.525 / 0.975 at rows 0 / 10 / 19; the
-        // shipped Eased profile maps those to 0.0018 / 0.5375 / 0.9982 and the
-        // map quantises to `round(w · 255)` = 0 / 137 / 255 (Clamped gave
-        // 6 / 134 / 249). Pinned EXACTLY, both because the arithmetic is exact
-        // and because rows 10 and 19 still separate the conventions: `y/h`
-        // gives t = 0.0 / 0.5 / 0.95 → 0 / 128 / 253. Under Clamped the old
+        // shipped `Measured` profile maps those to 0.00075 / 0.47703 / 0.99768
+        // and quantises to `round(w · 255)` = 0 / 122 / 254 (Clamped gave
+        // 6 / 134 / 249; the unwarped smoothstep gave 0 / 137 / 255). Pinned
+        // EXACTLY, both because the arithmetic is exact and because rows 10
+        // and 19 still separate the conventions: `y/h` would give
+        // t = 0.0 / 0.5 / 0.95 → 0 / 112 / 249. Under Clamped the old
         // `assert_eq!(…, 0)` on row 0 was the whole reason this test caught
-        // R29 C2 rather than sleeping through it; under Eased row 0 rounds to
-        // 0 either way, so rows 10 and 19 carry that duty now.
-        assert_eq!(cov.get_pixel(10, 0)[0], 0, "eased zero end is flat at the handle");
-        assert_eq!(cov.get_pixel(10, 19)[0], 255, "eased full end reaches the plateau");
-        assert_eq!(cov.get_pixel(10, 10)[0], 137, "eased midpoint sits past the linear centre");
+        // R29 C2 rather than sleeping through it; under any eased profile row
+        // 0 rounds to 0 either way, so rows 10 and 19 carry that duty now. Row
+        // 19 reading 254 rather than 255 IS the warp: the last sample sits at
+        // t = 0.975, and smoothstep(0.975^1.124) = 0.99768 is under 254.5/255.
+        assert_eq!(cov.get_pixel(10, 0)[0], 0, "the zero end is flat at the handle");
+        assert_eq!(cov.get_pixel(10, 19)[0], 254, "the full end reaches its plateau");
+        assert_eq!(cov.get_pixel(10, 10)[0], 122, "the midpoint sits off the linear centre");
 
         // (b) amount halves the whole map; inversion flips its direction.
         let half = LocalAdjustment { amount: 0.5, ..grad.clone() };
@@ -14546,7 +14649,7 @@ mod tests {
         for (nx, ny) in [(0.30, 0.25), (0.55, 0.50), (0.75, 0.65)] {
             let dx = (nx - zx) * w;
             let dy = (ny - zy) * h;
-            let want = linear_coverage((dx * px + dy * py) / den, LinearFalloff::Eased);
+            let want = linear_coverage((dx * px + dy * py) / den, LINEAR_FALLOFF);
             let got = mask_weight_in(&g, nx, ny, None, None, (w, h));
             assert!((got - want).abs() < 1e-6, "({nx},{ny}): got {got}, want {want}");
             let normalized = mask_weight(&g, nx, ny, None);
@@ -14634,7 +14737,27 @@ mod tests {
 
     #[test]
     fn shipped_linear_falloff_is_eased() {
-        assert_eq!(LINEAR_FALLOFF, LinearFalloff::Eased);
+        // The shipped arm is `Measured` — Hermite smoothstep on the measured
+        // abscissa t^LINEAR_FALLOFF_WARP (me6-2026-09 group B, 12 gradients).
+        assert_eq!(LINEAR_FALLOFF, LinearFalloff::Measured);
+        // …and it is still an EASING, which is what this test's name buys:
+        // C1 at both handles, strictly monotone in between, and equal to the
+        // other two profiles exactly at t = 0 and t = 1. A mutation pointing
+        // LINEAR_FALLOFF at Clamped fails the slope pair as well as the
+        // assert_eq above.
+        for &t in &[0.0f32, 1.0] {
+            assert_eq!(linear_coverage(t, LINEAR_FALLOFF), linear_coverage(t, LinearFalloff::Clamped));
+        }
+        let d = 1e-3;
+        let slope = |t: f32| (linear_coverage(t + d, LINEAR_FALLOFF) - linear_coverage(t, LINEAR_FALLOFF)) / d;
+        assert!(slope(0.0) < 0.02, "zero handle is not C1: {}", slope(0.0));
+        assert!(slope(1.0 - d) < 0.02, "full handle is not C1: {}", slope(1.0 - d));
+        let mut prev = -1.0f32;
+        for i in 0..=1000 {
+            let got = linear_coverage(i as f32 / 1000.0, LINEAR_FALLOFF);
+            assert!(got > prev, "not monotone at t = {}", i as f32 / 1000.0);
+            prev = got;
+        }
     }
 
     #[test]
@@ -14723,9 +14846,9 @@ mod tests {
             let t = (((nx - zero_x) * (full_x - zero_x) + (ny - zero_y) * (full_y - zero_y))
                 / ((full_x - zero_x).powi(2) + (full_y - zero_y).powi(2)))
                 .clamp(0.0, 1.0);
-            image::Luma([(linear_coverage(t, LinearFalloff::Eased) * 255.0).round() as u8])
+            image::Luma([(linear_coverage(t, LINEAR_FALLOFF) * 255.0).round() as u8])
         });
-        assert_eq!(got.as_raw(), want.as_raw(), "linear mask coverage did not use the eased ramp");
+        assert_eq!(got.as_raw(), want.as_raw(), "linear mask coverage did not use the shipped ramp");
 
         let byte = |value: f32| (value * 255.0).round() as u8;
         assert_eq!(linear_coverage(0.25, LinearFalloff::Eased), 0.15625);
@@ -14743,8 +14866,9 @@ mod tests {
         // `p·(1 − w) + t·w`, so on a flat grey the mask weight is recovered
         // EXACTLY as `(base − row) / (base − full_plateau)` — no assumption
         // about the exposure model, and no 8-bit quantisation. The expected
-        // profile is the LITERAL Hermite smoothstep, not `linear_coverage`,
-        // so a mutation of the Eased arm cannot rewrite its own oracle.
+        // profile is the LITERAL Hermite smoothstep on the LITERAL measured
+        // abscissa, not `linear_coverage` and not LINEAR_FALLOFF_WARP, so a
+        // mutation of the shipped arm cannot rewrite its own oracle.
         let (w, h) = (4usize, 1000usize);
         let base = 0.5_f32;
         let recipe = EditRecipe {
@@ -14766,12 +14890,13 @@ mod tests {
             let ny = (y as f32 + MASK_SAMPLE_CENTRE) / h as f32;
             ((0.80 - ny) / (0.80 - 0.35)).clamp(0.0, 1.0)
         };
-        // (a) every row IS the literal smoothstep of its projected t (the
-        // 0.001 work floor and the tone LUT leave ≤ 2e-3 of slack).
+        // (a) every row IS the literal warped smoothstep of its projected t
+        // (the 0.001 work floor and the tone LUT leave ≤ 2e-3 of slack).
         for (y, &got) in coverage.iter().enumerate() {
             let t = t_of(y);
-            let want = t * t * (3.0 - 2.0 * t);
-            assert!((got - want).abs() < 2e-3, "row {y}: t {t:.4} rendered {got:.5}, smoothstep {want:.5}");
+            let u = t.powf(1.124);
+            let want = u * u * (3.0 - 2.0 * u);
+            assert!((got - want).abs() < 2e-3, "row {y}: t {t:.4} rendered {got:.5}, warped smoothstep {want:.5}");
         }
         // (b) C1 at BOTH handles: the coverage slope over the ten rows just
         // inside each handle is ≤ 0.1 of the mid-ramp slope (Clamped: ≈ 1.0;
@@ -14785,10 +14910,11 @@ mod tests {
         let zero_end = slope(zero_row - 11, zero_row - 1);
         assert!(full_end < 0.1 * mid_slope, "full-end slope {full_end:.2e} is not eased vs mid {mid_slope:.2e}");
         assert!(zero_end < 0.1 * mid_slope, "zero-end slope {zero_end:.2e} is not eased vs mid {mid_slope:.2e}");
-        // (c) the eased midpoint is 1.5× the linear slope of the same span.
+        // (c) the shipped midpoint is 1.535× the linear slope of the same
+        // span: 1.5 from the smoothstep, × 1.0314 from d(t^1.124)/dt at t = ½.
         let linear_slope = 1.0 / (zero_row - full_row) as f32;
         let ratio = mid_slope / linear_slope;
-        assert!((1.45..=1.55).contains(&ratio), "mid-ramp slope ratio {ratio:.4} is not ~1.5");
+        assert!((1.52..=1.55).contains(&ratio), "mid-ramp slope ratio {ratio:.4} is not ~1.535");
     }
 
     #[test]
