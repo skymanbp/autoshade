@@ -1467,12 +1467,20 @@ const NEUTRAL_MISPREDICTION_MAX: f32 = 0.015;
 /// Below it there is no identified population to score and the metric
 /// reports infinite (fall back).
 const NEUTRAL_SHARED_MIN: usize = 512;
-/// Cast-curve acceptance: the fitted per-channel curves must cut the hue-aware
-/// look error to ≤ this fraction of the without-curves error, else they are
-/// rejected as a content mismatch masquerading as a cast (see the stage-4
-/// comment in [`fit_recipe`]). A true global cast slashes the error far past
-/// this; a content difference only nibbles at it while damaging regions.
-#[allow(dead_code)]
+/// Cast-curve acceptance ANCHOR: the shipped-default value of
+/// [`FitBudget::cast_ratio`], which the strength budget interpolates between
+/// 1.5 and 3.0. The ratio arm compares the with-curves look error against
+/// `budget.cast_ratio` × the without-curves error — but it is not a hard
+/// admission threshold and never was: it rejects only when the evidence is
+/// also unidentifiable (`identifiability < 0.25`), because a content mismatch
+/// masquerading as a cast is a thing you can only diagnose when the pair is
+/// too unidentifiable to trust the aggregate. So an ADMITTED cast's ratio may
+/// legitimately exceed this number, and any prose that says "the curves cut
+/// the error to at most X" is wrong.
+///
+/// Read straight only by [`cast_gate_outcome`]; the shipped path reads
+/// `budget.cast_ratio`, so a test asserting against THIS constant is not
+/// asserting against the gate the fit used at any strength but the default.
 const CAST_ACCEPT_RATIO: f32 = 2.0;
 
 // --- cast foreign-hue veto (the second, pixel-aligned gate) -----------------
@@ -1627,14 +1635,27 @@ const ROT_HUE_MEASURABLE_CHROMA: f32 = 0.03;
 
 /// Hue classes for the fan census: the foreign-hue veto's 15° bins, so the
 /// two colour gates partition hue on one grid.
+///
+/// The grid has a fixed PHASE, and that is a stated sensitivity, not an
+/// oversight: a coherent region whose hue straddles a class edge splits
+/// across two classes, each holding half its mass, and can fall under
+/// [`FAN_SHARE`] and go unjudged. The precedent is the foreign-hue veto,
+/// which has read hue on this same fixed grid since it was written; a
+/// phase-free alternative (sliding windows, or clustering the hue histogram)
+/// would buy edge-invariance at the cost of a census whose population is no
+/// longer identical to the rotation budget's — and that identity is what
+/// stops the two gates drifting into disagreeing about WHICH pixels they
+/// read. Cornwall's convicted class sits at 0.917 of the population, nowhere
+/// near an edge, so the wreck is not a marginal case of this.
 const FAN_HUE_CLASSES: usize = 24;
 
 /// A hue class — and a luma slice inside it — must be a REGION of its own
 /// population before its mean hue counts as evidence. Deliberately the same
 /// number as [`ROT_SHARE`] and [`VETO_CREATED_SHARE`] (0.05 = region, not
-/// speckle) and deliberately its own constant: the three gates answer
-/// different questions and a retune of one must not silently move the
-/// others.
+/// speckle) and deliberately its own constant: those three share-gated
+/// censuses (there are FOUR cast gates; the aggregate-ratio one has no share
+/// term) answer different questions, and a retune of one must not silently
+/// move the others.
 ///
 /// CALIBRATED by sweep (2026-09-01, `hue_fan_weighted` on the four
 /// calibration pairs plus Cornwall). The slice floor is on a plateau here:
@@ -1676,6 +1697,23 @@ const FAN_SHARE: f32 = 0.05;
 /// is refused too. The fit then under-corrects — tone, saturation and the
 /// per-band mixer only — rather than ship a region sorted into a hue fan a
 /// user cannot undo with any single develop control.
+///
+/// WORST CASE, stated because the gate judges the ADDED spread and a reader
+/// will otherwise take this for the delivered one. The class is a 15° bin of
+/// the BEFORE hue, so the baseline the census subtracts is itself bounded by
+/// one class width — and one class width IS this number. An admitted cast
+/// can therefore leave up to `2 × FAN_DEG` ≈ 30° of ABSOLUTE hue spread
+/// inside the class, when the class arrived already spread across its own
+/// bin and the curves add just under the limit on top. That is the gate's
+/// tolerance, and it is asserted rather than promised: see
+/// `an_admitted_cast_delivers_at_most_two_class_widths_of_hue_fan`, which
+/// pins the admitted haze pair's DELIVERED in-class spread under 2 ×
+/// FAN_DEG.
+///
+/// It is also a calibrated threshold and not a structural guarantee: the
+/// mixer's do-no-harm loop re-fits after every shrink, so the solve can
+/// search for a cast that clears the limit rather than give the cast up —
+/// which is exactly what the 20° experiment above shows it doing.
 const FAN_DEG: f32 = 15.0;
 
 // --- the REPORTED-CONFIDENCE family (R23-6) ---------------------------------
@@ -3021,6 +3059,11 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure_opts(
             sat_pegged: sat_pegged.then_some(FitMode::Full),
             cast,
             cast_admitted_by_strength: cast_admission,
+            // `!fit_regressed` is the third way to ship no curves and the
+            // one the field's name does not suggest: the terminal do-no-harm
+            // check resets `recipe = base.clone()`, so the gates may have
+            // ADMITTED a cast that is no longer in the recipe. Disclosing
+            // that admission would describe curves the user cannot find.
             cast_admitted: (!fit_regressed && !cast.refused())
                 .then_some(cast.readings)
                 .flatten(),
@@ -3817,7 +3860,11 @@ struct SolveFacts {
     cast_admitted_by_strength: Option<(f32, f32)>,
     /// Every gate reading of a cast that was ADMITTED, so the shipped
     /// curves disclose the numbers they passed on. `None` = no curves
-    /// shipped (refused, or none fitted at all).
+    /// shipped, in any of THREE ways: a gate refused them, none were fitted
+    /// at all, or the TERMINAL do-no-harm check reset the whole recipe to
+    /// the calibration base. The third leaves the gates' own verdict at
+    /// "admitted" while nothing of the solve — curves included — ships,
+    /// which is why the construction site ands in `!fit_regressed`.
     cast_admitted: Option<CastReadings>,
     /// The existing evidence gates withheld a one-sided range. This is the
     /// cause carried into the FAR classifier; it is not a second refusal flag.
@@ -3984,21 +4031,13 @@ fn compose_report(mut recipe: EditRecipe, m: Measured<'_>, solve: SolveFacts) ->
     // (`FIT_NOTE_CAST_ADMITTED_BY_STRENGTH`, below), so an ordinary
     // admission — the commonest result of the whole stage — reached the user
     // as an unexplained presence, exactly the asymmetry R23-6 A-2 fixed on
-    // the rejection side. The four readings are the four gates' own numbers.
+    // the rejection side. The four gates' own numbers ride THREE notes: the
+    // two that can abstain each get a measured and a not-measurable clause,
+    // so a census that never ran never reaches the user as 0.000.
     if let Some(r) = solve.cast_admitted {
-        push_note(
-            &mut rationale,
-            &mut notes,
-            Note::new(
-                keys::FIT_NOTE_CAST_ADMITTED,
-                vec![
-                    ("ratio", format!("{:.3}", r.ratio)),
-                    ("foreign", format!("{:.3}", r.foreign)),
-                    ("rehued", format!("{:.3}", r.rehued)),
-                    ("fan", format!("{:.0}", r.fan)),
-                ],
-            ),
-        );
+        for note in cast_admission_notes(r) {
+            push_note(&mut rationale, &mut notes, note);
+        }
     }
     if let Some(cast) = m.evidence.global_cast {
         push_note(
@@ -4464,12 +4503,27 @@ pub fn rescore_report(
     let carried_reading = |arg: &str| {
         carried_arg(keys::FIT_NOTE_CAST_ADMITTED, arg).and_then(|v| v.parse::<f32>().ok())
     };
-    let carried_cast_admitted = carried_reading("ratio").map(|ratio| CastReadings {
-        ratio,
-        foreign: carried_reading("foreign").unwrap_or(0.0),
-        rehued: carried_reading("rehued").unwrap_or(0.0),
-        fan: carried_reading("fan").unwrap_or(0.0),
-    });
+    // The two ABSTAINING readings ride their own notes, so their ABSENCE is
+    // carried too: a missing arg re-renders as the not-measurable sentence,
+    // never as 0.000. The head's three are all-or-nothing — without them
+    // there is no admission to re-report, and defaulting any of them would
+    // be the same invention on the rescore side.
+    let carried_cast_admitted = match (
+        carried_reading("ratio"),
+        carried_reading("bound"),
+        carried_reading("rehued"),
+    ) {
+        (Some(ratio), Some(bound), Some(rehued)) => Some(CastReadings {
+            ratio,
+            bound,
+            foreign: carried_arg(keys::FIT_NOTE_CAST_ADMITTED_FOREIGN, "foreign")
+                .and_then(|value| value.parse::<f32>().ok()),
+            rehued,
+            fan: carried_arg(keys::FIT_NOTE_CAST_ADMITTED_FAN, "fan")
+                .and_then(|value| value.parse::<f32>().ok()),
+        }),
+        _ => None,
+    };
     // The fan refusal's readings ride the same way; without them the rescore
     // would re-emit the note with zeroes.
     let carried_fan = carried_arg(keys::FIT_NOTE_CAST_HUE_FANNED, "share")
@@ -4608,17 +4662,75 @@ pub fn rescore_report(
 /// same numbers a refusal would have quoted. Before v1.2.3 admission was
 /// silent unless the strength budget bought it, so the commonest outcome of
 /// the stage (curves shipped) reached the user with no reading at all.
+///
+/// Two of the four are `Option` and stay `Option` all the way into the note.
+/// A gate that ABSTAINS has not measured zero, and collapsing the abstention
+/// to `0.0` published a number nobody took: on a target with too little
+/// chromatic mass the admission note read "created 0.000 of the frame in
+/// hues the target does not contain" out of a census that never ran.
 #[derive(Default, Clone, Copy, PartialEq, Debug)]
 struct CastReadings {
     /// Weighted look error WITH the curves over the error without them.
     ratio: f32,
-    /// Foreign-hue population share the curves CREATE (with − without); 0
-    /// when the target carries no hue evidence to be foreign to.
-    foreign: f32,
+    /// The bound that ratio was judged against on THIS path —
+    /// `budget.cast_ratio`, which the strength budget widens (2.0 at the
+    /// shipped default, up to 3.0), not the [`CAST_ACCEPT_RATIO`] anchor.
+    bound: f32,
+    /// Foreign-hue population share the curves CREATE (with − without).
+    /// `None` = not measurable: the target carries no hue evidence for a hue
+    /// to be foreign TO.
+    foreign: Option<f32>,
     /// Weighted share of the population re-hued past [`ROT_DEG`].
     rehued: f32,
-    /// Widest hue fan the curves opened inside one hue class, in degrees.
-    fan: f32,
+    /// Hue spread the curves ADD inside the widest hue class, in degrees.
+    /// SIGNED — the curves can also NARROW a class. `None` = not measurable:
+    /// no hue class holds [`FAN_SHARE`] of the census population across two
+    /// populated luma slices.
+    fan: Option<f32>,
+}
+
+/// The notes an ADMITTED cast writes: the head, which carries the three
+/// readings that are always measured, then one clause for each reading that
+/// can ABSTAIN.
+///
+/// It is a named function and not three inline `push_note`s so the
+/// abstention wording is reachable from a test without needing a pair that
+/// happens to abstain — the case that shipped the fabricated `0.000` is by
+/// construction the rare one.
+fn cast_admission_notes(r: CastReadings) -> Vec<crate::rationale::Note> {
+    use crate::rationale::{keys, Note};
+    vec![
+        Note::new(
+            keys::FIT_NOTE_CAST_ADMITTED,
+            vec![
+                ("ratio", format!("{:.3}", r.ratio)),
+                ("bound", format!("{:.3}", r.bound)),
+                ("rehued", format!("{:.3}", r.rehued)),
+            ],
+        ),
+        match r.foreign {
+            Some(share) => Note::new(
+                keys::FIT_NOTE_CAST_ADMITTED_FOREIGN,
+                vec![("foreign", format!("{share:.3}"))],
+            ),
+            // NOT `0.000`: the target carried no hue evidence, so no census
+            // ran and there is no share to report.
+            None => Note::plain(keys::FIT_NOTE_CAST_ADMITTED_FOREIGN_NA),
+        },
+        match r.fan {
+            // SIGNED. The curves can NARROW a class's spread across
+            // luminance, and "opened a −3 degree hue fan" reported that as
+            // an opening.
+            Some(degrees) => Note::new(
+                keys::FIT_NOTE_CAST_ADMITTED_FAN,
+                vec![
+                    ("fan", format!("{degrees:+.0}")),
+                    ("limit", format!("{FAN_DEG:.0}")),
+                ],
+            ),
+            None => Note::plain(keys::FIT_NOTE_CAST_ADMITTED_FAN_NA),
+        },
+    ]
 }
 
 /// Which of the hue/ratio gates (if any) refused the colour stage — they
@@ -4684,12 +4796,17 @@ fn cast_gate_outcome_with_ratio(
             || cast_rotates_a_region_weighted(cur, with_px, evidence)
             || moved_unsupported_hue_range_names_vouched(cur, with_px, evidence, vouch)
                 .is_some(),
-        hue_fanned: fan.filter(|&(_, degrees)| degrees >= FAN_DEG),
+        hue_fanned: fan
+            .filter(|&(_, added, _)| added >= FAN_DEG)
+            .map(|(share, added, _)| (share, added)),
         readings: Some(CastReadings {
             ratio: err_with / err_without.max(1e-6),
-            foreign: foreign_created_share_weighted(cur, with_px, tp, evidence).unwrap_or(0.0),
+            bound: accept_ratio,
+            // Both of these stay Option: `.unwrap_or(0.0)` here is what
+            // turned "this gate did not run" into a published measurement.
+            foreign: foreign_created_share_weighted(cur, with_px, tp, evidence),
             rehued: rehued_share_weighted(cur, with_px, evidence),
-            fan: fan.map(|(_, degrees)| degrees).unwrap_or(0.0),
+            fan: fan.map(|(_, added, _)| added),
         }),
     }
 }
@@ -4914,7 +5031,7 @@ fn unrepresented_note(
         // `color_grade` is the tone-conditioned version of the same move.
         // Name the second only when the channel curves — our one lever with
         // that shape — are absent, which is both the honest condition and the
-        // common one (they are refused by the three gates far more often than
+        // common one (they are refused by the four gates far more often than
         // they are kept).
         names.push("hsl");
         if recipe.red_curve.is_empty()
@@ -5974,11 +6091,25 @@ fn rehued_share_weighted(
 /// curves rotate rigidly (a real global cast correction: every slice moves
 /// together) reads zero however far it moves. That subtraction is what makes
 /// this a capability gate rather than a second rotation budget.
+///
+/// A CLASS IS A HUE POPULATION, NOT A REGION. Cornwall's convicted class
+/// holds 0.917 of the census population — that is the seascape's whole blue
+/// class, sky AND sea, which the curves sort by luminance together; the
+/// row-defined sky alone carries 0.561 of the hue weight. Prose that calls
+/// the 0.917 "the sky" is naming the wrong population.
+///
+/// Returns, for the class the curves ADD the most spread to:
+/// `(share, added, delivered)` — its share of the census population, the
+/// spread the curves add to it (SIGNED: negative means they narrowed it),
+/// and the ABSOLUTE spread it carries after the curves. The gate judges
+/// `added`; `delivered` is what a viewer sees, and the two differ by the
+/// baseline, which is bounded by one class width (see [`FAN_DEG`]'s worst
+/// case).
 fn hue_fan_weighted(
     cur: &[[f32; 3]],
     with_px: &[[f32; 3]],
     evidence: &EvidenceModel,
-) -> Option<(f32, f32)> {
+) -> Option<(f32, f32, f32)> {
     let mut mass = [[0.0f32; EVIDENCE_LUMA_BINS]; FAN_HUE_CLASSES];
     let mut before = [[(0.0f32, 0.0f32); EVIDENCE_LUMA_BINS]; FAN_HUE_CLASSES];
     let mut after = [[(0.0f32, 0.0f32); EVIDENCE_LUMA_BINS]; FAN_HUE_CLASSES];
@@ -6019,7 +6150,7 @@ fn hue_fan_weighted(
         worst
     };
     let mean = |(sin, cos): (f32, f32)| sin.atan2(cos).to_degrees().rem_euclid(360.0);
-    let mut worst: Option<(f32, f32)> = None;
+    let mut worst: Option<(f32, f32, f32)> = None;
     for class in 0..FAN_HUE_CLASSES {
         let class_mass: f32 = mass[class].iter().sum();
         let share = class_mass / population;
@@ -6033,9 +6164,10 @@ fn hue_fan_weighted(
         // One slice cannot fan: a class confined to a single luma bin has no
         // internal structure for the curves to sort.
         if was.len() < 2 { continue; }
-        let fan = spread(&now) - spread(&was);
-        if worst.is_none_or(|(_, seen)| fan > seen) {
-            worst = Some((share, fan));
+        let delivered = spread(&now);
+        let fan = delivered - spread(&was);
+        if worst.is_none_or(|(_, seen, _)| fan > seen) {
+            worst = Some((share, fan, delivered));
         }
     }
     worst
@@ -9874,7 +10006,7 @@ mod tests {
         );
 
         // THE reading, and its margin over the threshold.
-        let (share, fan) = hue_fan_weighted(&cur, &with_px, &evidence)
+        let (share, fan, _) = hue_fan_weighted(&cur, &with_px, &evidence)
             .expect("the sky is a region-sized hue class");
         assert!(share > 0.5, "premise broken: the sky class is not region-sized ({share:.3})");
         assert!(fan > 2.5 * FAN_DEG, "margin eroded: fan {fan:.1}° against {FAN_DEG}°");
@@ -9959,13 +10091,67 @@ mod tests {
         ] {
             let c = cast_stage_candidate(&src, &tgt);
             let fan = hue_fan_weighted(&c.cur, &c.with_px, &evidence_model(&c.cur, &c.tp))
-                .map(|(_, degrees)| degrees)
+                .map(|(_, added, _)| added)
                 .unwrap_or(0.0);
             assert!(
                 fan < ceiling * FAN_DEG,
                 "margin eroded: {name} fans {fan:.1}° against the {FAN_DEG}° threshold"
             );
         }
+    }
+
+    /// v1.2.3 fix-up — the gate's stated WORST CASE, asserted instead of
+    /// promised. The gate judges the spread the curves ADD and subtracts the
+    /// spread the class arrived with; because a class is a bin of the BEFORE
+    /// hue, that baseline is bounded by one class width — and one class
+    /// width IS `FAN_DEG` (360° / FAN_HUE_CLASSES). So an ADMITTED cast can
+    /// leave up to 2 × FAN_DEG of ABSOLUTE in-class spread in the delivered
+    /// frame, which is the tolerance the rustdoc, ARCHITECTURE.md and the
+    /// release notes all now state in words. The haze pair is the one whose
+    /// cast the fit admits, so it is where the words get checked.
+    #[test]
+    fn an_admitted_cast_delivers_at_most_two_class_widths_of_hue_fan() {
+        let clean = synth();
+        let mut haze = EditRecipe {
+            exposure_ev: -0.3,
+            contrast: -45.0,
+            blacks: 40.0,
+            saturation: -40.0,
+            blue_curve: vec![
+                CurvePoint { input: 0, output: 25 },
+                CurvePoint { input: 128, output: 132 },
+                CurvePoint { input: 255, output: 255 },
+            ],
+            ..Default::default()
+        };
+        haze.clamp();
+        let hazed = render::develop_preview(&clean, &haze);
+        assert!(
+            !fit_recipe(&hazed, &clean).recipe.blue_curve.is_empty(),
+            "premise broken: this pair's cast is no longer admitted"
+        );
+        let candidate = cast_stage_candidate(&hazed, &clean);
+        let (_, added, delivered) = hue_fan_weighted(
+            &candidate.cur,
+            &candidate.with_px,
+            &evidence_model(&candidate.cur, &candidate.tp),
+        )
+        .expect("premise broken: the admitted haze pair has no region-sized hue class");
+        assert!(
+            delivered < 2.0 * FAN_DEG,
+            "an ADMITTED cast delivered {delivered:.1}° of ABSOLUTE in-class hue spread, \
+             past the 2 × {FAN_DEG}° worst case the docs claim (added {added:.1}°)"
+        );
+        // …and the two halves of that arithmetic, so a failure says which
+        // one broke: the admission bound, and the class-width bound on the
+        // baseline the gate subtracts.
+        assert!(added < FAN_DEG, "premise broken: the haze cast would be refused ({added:.1}°)");
+        assert_eq!(360.0 / FAN_HUE_CLASSES as f32, FAN_DEG, "one hue class is one FAN_DEG wide");
+        assert!(
+            delivered - added < 360.0 / FAN_HUE_CLASSES as f32,
+            "the baseline the gate subtracts ({:.1}°) is not bounded by one class width",
+            delivered - added
+        );
     }
 
     /// v1.2.3 — the stage's ADMISSION was silent. Every way of producing
@@ -10011,12 +10197,76 @@ mod tests {
                 .and_then(|(_, v)| v.parse::<f32>().ok())
                 .unwrap_or_else(|| panic!("the note carries {name}: {:?}", note.args))
         };
-        // Every reading must be the one that ACTUALLY let the curves
-        // through — i.e. each is on the passing side of its own gate.
-        assert!(arg("ratio") < CAST_ACCEPT_RATIO, "the disclosed ratio passed its gate");
-        assert!(arg("foreign") < VETO_CREATED_SHARE, "the disclosed foreign share passed");
-        assert!(arg("rehued") < ROT_SHARE, "the disclosed re-hued share passed");
-        assert!(arg("fan") < FAN_DEG, "the disclosed fan passed");
+        // The two readings whose gates are one-sided thresholds ARE on the
+        // passing side of their own gate, and the claim is only made for
+        // them: the rehued share and the fan reject above their constant,
+        // full stop.
+        assert!(arg("rehued") < ROT_SHARE, "the disclosed rehued share passed");
+        let fan_arg = |name: &str| {
+            let n = report
+                .notes
+                .iter()
+                .find(|n| n.key == crate::rationale::keys::FIT_NOTE_CAST_ADMITTED_FAN)
+                .unwrap_or_else(|| panic!("an admitted cast reports its fan: {}", report.recipe.rationale));
+            n.args
+                .iter()
+                .find(|(k, _)| *k == name)
+                .and_then(|(_, v)| v.parse::<f32>().ok())
+                .unwrap_or_else(|| panic!("the fan note carries {name}: {:?}", n.args))
+        };
+        assert!(fan_arg("fan") < FAN_DEG, "the disclosed fan passed");
+        assert_eq!(fan_arg("limit"), FAN_DEG, "the fan note names the limit it measured against");
+        let foreign_arg = report
+            .notes
+            .iter()
+            .find(|n| n.key == crate::rationale::keys::FIT_NOTE_CAST_ADMITTED_FOREIGN)
+            .and_then(|n| n.args.iter().find(|(k, _)| *k == "foreign"))
+            .and_then(|(_, v)| v.parse::<f32>().ok())
+            .expect("this pair's target carries hue evidence, so the share is measurable");
+        assert!(foreign_arg < VETO_CREATED_SHARE, "the disclosed foreign share passed");
+
+        // The RATIO is NOT claimed to have passed a threshold, because it
+        // has none: the ratio arm rejects only when the evidence is also
+        // unidentifiable, so an admitted ratio may exceed its bound. What
+        // the note must get right is WHICH bound the path used — and that is
+        // `budget.cast_ratio`, which the strength budget moves. Asserting
+        // against the CAST_ACCEPT_RATIO constant would have passed for a
+        // note quoting a bound the fit never applied.
+        assert_eq!(
+            arg("bound"),
+            FitBudget::for_strength(crate::recipe::GradeStrength::default()).cast_ratio,
+            "the default-strength solve discloses the default-strength bound"
+        );
+        // …and it is whatever bound the gate was HANDED, which at any
+        // strength but the default is a different number from the anchor.
+        // The end-to-end arm cannot make this point on its own: at the
+        // default strength `budget.cast_ratio` IS `CAST_ACCEPT_RATIO`, so a
+        // note hard-coding the constant would agree with it. (Re-fitting the
+        // same pair at max strength does not help either — the budget also
+        // moves the solve, and this pair's max-strength cast is refused by
+        // the fan gate at 19°.) So the threading is asserted where it lives.
+        let widened = FitBudget::for_strength(crate::recipe::GradeStrength::new(1.0)).cast_ratio;
+        assert_ne!(
+            widened, CAST_ACCEPT_RATIO,
+            "premise broken: max strength no longer widens the cast bound"
+        );
+        let candidate = cast_stage_candidate(&render::develop_preview(&clean, &haze), &clean);
+        let handed = cast_gate_outcome_with_ratio(
+            &candidate.cur,
+            &candidate.with_px,
+            &candidate.tp,
+            &evidence_model(&candidate.cur, &candidate.tp),
+            None,
+            widened,
+        )
+        .readings
+        .expect("the gate always keeps its readings")
+        .bound;
+        assert_eq!(
+            handed, widened,
+            "the gate must record the bound it was GIVEN, not the default anchor"
+        );
+
         // And a REFUSED stage says the opposite thing, never both.
         let refused = fit_recipe(&coast(false), &coast(true));
         assert!(
@@ -10026,6 +10276,102 @@ mod tests {
                 .any(|n| n.key == crate::rationale::keys::FIT_NOTE_CAST_ADMITTED),
             "a withheld cast must not also claim admission: {}",
             refused.recipe.rationale
+        );
+    }
+
+    /// v1.2.3 fix-up — an abstaining gate is not a gate that measured zero.
+    /// Two of the four readings can decline to answer (`foreign` when the
+    /// target carries no hue evidence at all, `fan` when no hue class is
+    /// region-sized across two luma slices), and the admission note used to
+    /// print `0.000` for both — a measurement never taken, disclosed as if
+    /// it had been, in the very note that exists so the admission can be
+    /// checked.
+    #[test]
+    fn an_unmeasured_cast_reading_says_so_instead_of_printing_a_zero() {
+        // 1) The PLUMBING: a target with no chromatic mass at all leaves the
+        //    foreign-hue census with nothing to be foreign to, and the fan
+        //    census with no region-sized class. Both must arrive as None.
+        let grey = DynamicImage::ImageRgb8(RgbImage::from_fn(48, 48, |x, y| {
+            let v = (24 + ((x * 3 + y * 2) % 200)) as u8;
+            image::Rgb([v, v, v])
+        }));
+        let (s, t) = analysis_pair(&grey, &grey);
+        let tp = pixels_of(&t);
+        let cur = pixels_of(&render::develop_preview(&s, &EditRecipe::default()));
+        let evidence = evidence_model(&cur, &tp);
+        let readings = cast_gate_outcome_with_ratio(
+            &cur,
+            &cur,
+            &tp,
+            &evidence,
+            None,
+            CAST_ACCEPT_RATIO,
+        )
+        .readings
+        .expect("the gate always keeps its readings");
+        assert_eq!(readings.foreign, None, "a colourless target has no foreign-hue share");
+        assert_eq!(readings.fan, None, "a colourless target has no region-sized hue class");
+
+        // 2) The DISCLOSURE: an abstention becomes a sentence, and that
+        //    sentence carries no number at all — the failure mode was a
+        //    digit, so the assertion is about digits.
+        let abstained = cast_admission_notes(CastReadings {
+            ratio: 0.5,
+            bound: CAST_ACCEPT_RATIO,
+            foreign: None,
+            rehued: 0.0,
+            fan: None,
+        });
+        let keys_of: Vec<&str> = abstained.iter().map(|n| n.key).collect();
+        assert_eq!(
+            keys_of,
+            vec![
+                crate::rationale::keys::FIT_NOTE_CAST_ADMITTED,
+                crate::rationale::keys::FIT_NOTE_CAST_ADMITTED_FOREIGN_NA,
+                crate::rationale::keys::FIT_NOTE_CAST_ADMITTED_FAN_NA,
+            ]
+        );
+        for note in &abstained[1..] {
+            assert!(note.args.is_empty(), "a not-measurable clause carries no reading");
+            let text = crate::rationale::render_one(note);
+            assert!(
+                !text.chars().any(|c| c.is_ascii_digit()),
+                "an unmeasured reading must not print a number: {text}"
+            );
+            assert!(
+                text.contains("not measurable"),
+                "an unmeasured reading must SAY it was not measured: {text}"
+            );
+        }
+
+        // 3) …and a MEASURED fan is signed, because the curves can narrow a
+        //    class as easily as widen one, and "opened a −3 degree hue fan"
+        //    reported a narrowing as an opening.
+        let narrowed = cast_admission_notes(CastReadings {
+            ratio: 0.5,
+            bound: CAST_ACCEPT_RATIO,
+            foreign: Some(0.0),
+            rehued: 0.0,
+            fan: Some(-3.2),
+        });
+        let fan_note = narrowed
+            .iter()
+            .find(|n| n.key == crate::rationale::keys::FIT_NOTE_CAST_ADMITTED_FAN)
+            .expect("a measured fan writes the measured clause");
+        assert_eq!(
+            fan_note.args.iter().find(|(k, _)| *k == "fan").map(|(_, v)| v.as_str()),
+            Some("-3"),
+            "a narrowing reads as a signed change, not as an opened fan"
+        );
+        assert!(crate::rationale::render_one(fan_note).contains("narrowed"));
+        let widened = cast_admission_notes(CastReadings { fan: Some(8.4), ..CastReadings::default() });
+        assert_eq!(
+            widened
+                .iter()
+                .find(|n| n.key == crate::rationale::keys::FIT_NOTE_CAST_ADMITTED_FAN)
+                .and_then(|n| n.args.iter().find(|(k, _)| *k == "fan"))
+                .map(|(_, v)| v.as_str()),
+            Some("+8")
         );
     }
 

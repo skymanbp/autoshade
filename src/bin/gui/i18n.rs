@@ -158,12 +158,24 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     (" White balance withheld: rotated share {rotated_share} over {coverage} of the frame exceeded the strength budget.", " 白平衡已保留：色相旋转份额 {rotated_share}（覆盖画面 {coverage}）超出强度预算。"),
     (" White balance search reached the {k} K domain bound; the requested colour temperature may lie beyond the fitted range.", " 白平衡达到 {k} K 的域边界；请求的色温可能超出拟合范围。"),
     (" Colour-cast curves were admitted by the strength budget (measured ratio {ratio}, budget {budget}).", " 色偏曲线已获强度预算准入（测得比值 {ratio}，预算 {budget}）。"),
-    (" Colour-cast curves were admitted: they cut the look error to {ratio} \
-      of what it was without them, created {foreign} of the frame in hues \
-      the target does not contain, re-hued {rehued} of it, and opened a \
-      {fan} degree hue fan inside the widest hue class — all four gates \
-      clear.",
-        " 色偏曲线已采用：它们把观感误差压到不加曲线时的 {ratio}，在目标不含的色相上新增了画面的 {foreign}，使 {rehued} 的画面变色，并在占比最大的色相类内把色相沿亮度拉开了 {fan} 度——四道门全部通过。"),
+    (" Colour-cast curves were admitted: the look error with the curves is \
+      {ratio} of the error without them (the strength budget's bound is \
+      {bound}), and they re-hued {rehued} of the frame past the rotation \
+      budget.",
+        " 色偏曲线已采用：加曲线后的观感误差与不加曲线时的比值为 {ratio}（强度预算的上限为 {bound}），并使画面的 {rehued} 超出色相旋转预算。"),
+    (" They created {foreign} of the frame in hues the target does not \
+      contain.",
+        " 它们在目标不含的色相上新增了画面的 {foreign}。"),
+    (" The foreign-hue share was not measurable: the target carries too \
+      little colour to say which hues are foreign to it.",
+        " 目标外色相份额无法测量：目标的色彩太少，无法判定色相是否为它所不含。"),
+    (" They changed the widest hue class's hue spread across luminance by \
+      {fan} degrees, against a limit of {limit} (a negative value means \
+      they narrowed it).",
+        " 它们把占比最大的色相类内沿亮度的色相跨度改变了 {fan} 度，上限为 {limit}（负值表示跨度变小）。"),
+    (" The hue fan was not measurable: no hue class holds enough of the \
+      frame across two luma slices for a fan to have a value.",
+        " 色相沿亮度的跨度无法测量：任何色相类都没有在两个亮度切片上占到足够的画面。"),
     (" Colour-cast curves were withheld: they would have fanned one hue \
       class apart across luminance — that class holds {share} of the \
       frame's measurable colour, and the three channel curves would have \
