@@ -2078,19 +2078,57 @@ Cornwall solve does not refuse outright (the mixer's do-no-harm loop halves
 Aqua/Blue and refits until a milder cast measures 19°, which ships and still
 leaves a 20.6° fan in the delivered sky); at 15° the refusal stands and the
 delivered sky's spread is 1.6° — the same coherence the target's own sky
-has — at a look error of 0.058 instead of 0.033. The refusal is disclosed
-with its readings, and adding the gate changed no existing verdict: it is
-never the sole rejector on any calibration pair, and a pair the pixel-aligned
-gates already refuse keeps reporting exactly the note it reported before,
-which is what holds those recipes byte-identical.
+has — at a look error of 0.058 instead of 0.033. That 20° result is also
+the honest limit of the fix: this is a calibrated threshold, not a structural
+guarantee. The do-no-harm loop re-fits after every shrink, so the solve can
+search for a cast that clears the limit rather than give the cast up, and the
+20° experiment is exactly that behaviour caught in the act.
+
+Two tolerances are stated here rather than discovered later. **The worst
+case**: the gate judges the spread the curves ADD and subtracts the spread
+the class arrived with, and that baseline is bounded by one class width —
+which is 15°, the same number — so an ADMITTED cast can leave up to 30° of
+ABSOLUTE in-class spread in the delivered frame. That bound is asserted on
+the admitted haze pair, not promised. **The bin phase**: the classes are a
+fixed 15° grid, so a coherent region straddling a class edge splits into two
+and can fall under the 5% floor. That is the same grid-phase sensitivity the
+foreign-hue veto has always had, and it is kept deliberately: reading the
+census on one identical population is what stops the two gates drifting into
+disagreeing about WHICH pixels they judge. Cornwall's convicted class holds
+0.917 of the census population — the seascape's whole blue class, sky AND
+sea, which the curves sort by luminance together; the row-defined sky alone
+carries 0.561 of the hue weight. The 0.917 names a hue population, not a
+region, and prose that calls it "the sky" is naming the wrong thing.
+
+The refusal is disclosed with its readings, and adding the gate changed no
+existing verdict: it is never the sole rejector on any calibration pair, and
+a pair the pixel-aligned gates already refuse keeps reporting exactly the
+note it reported before, which is what holds those recipes byte-identical.
+The scope of that byte-identity claim is exact, because the admission notes
+below APPEND to the rationale and the rationale is part of the recipe: a pair
+whose cast is refused (the viaduct) or never fitted is byte-identical to
+v1.2.2; a pair whose cast is ADMITTED is not.
 
 The colour stage's ADMISSION is disclosed too, from the same release. Every
 way of producing nothing already had a note, and the strength budget
 disclosed when IT bought a marginal cast, but the commonest outcome of the
 whole stage — the curves shipped on their own merits — reached the user as
 an unexplained presence. An admitted cast now carries the four gates' own
-readings (look-error ratio, foreign share created, re-hued share, widest hue
-fan) so the admission can be checked rather than believed.
+readings so the admission can be checked rather than believed — across THREE
+notes, not one, because two of the four can ABSTAIN. The look-error ratio,
+the bound it was judged against and the re-hued share are always measured and
+ride the head note; the foreign-hue share and the hue fan each get a measured
+clause and a not-measurable clause, so a census that never ran (a target with
+no chromatic mass; no hue class region-sized across two luma slices) says so
+in words instead of publishing `0.000` as though it had been measured. The
+ratio is stated against its bound rather than as "cut the look error to": the
+ratio arm rejects only when the evidence is ALSO unidentifiable
+(`identifiability < 0.25`), so an admitted ratio may legitimately exceed 1.0,
+and the old wording then stated the opposite of its own measurement. The
+bound is `budget.cast_ratio` — the value the path actually used, which the
+strength budget widens from 2.0 at the shipped default up to 3.0 — not a
+fixed constant. The fan is SIGNED, because three channel curves can narrow a
+class's spread as easily as widen it.
 
 **Atmosphere** mode instead uses bounded robust exposure, white balance,
 a five-point tone curve, saturation and the same evidence-gated per-band
