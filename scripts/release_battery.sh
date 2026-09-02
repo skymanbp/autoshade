@@ -34,10 +34,10 @@
 # GPU note: the sidecar script paths reach ALL THREE lanes, so a machine with
 # weights configured can have the default lane and the calibration lane load a
 # model at the same time. Measured on an 8 GB card with the v1.2.4 suite: both
-# lanes completed, twice, the calibration lane taking 822 s against the default
-# lane's 446 s because its corpus-gated tests actually run. On a smaller card,
-# run the lanes one at a time by passing a different --out per lane rather than
-# by editing this script.
+# lanes completed, twice, the calibration lane taking 822 s and 842 s against the
+# default lane's 446 s and 486 s, because its corpus-gated tests actually run
+# instead of printing a skip line. On a smaller card, run the lanes one at a
+# time by passing a different --out per lane rather than by editing this script.
 
 set -u
 set -o pipefail
@@ -52,7 +52,7 @@ while [ $# -gt 0 ]; do
         --out) OUT=$2; shift 2 ;;
         --baseline) BASELINE=$2; shift 2 ;;
         --save-baseline) SAVE_BASELINE=1; shift ;;
-        -h|--help) sed -n '2,32p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h|--help) sed -n '2,41p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) echo "release_battery: unknown argument $1" >&2; exit 2 ;;
     esac
 done
