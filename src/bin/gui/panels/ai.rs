@@ -270,7 +270,7 @@ impl AutoShadeApp {
                 &mut self.style_strength,
                 1.0,
                 STYLE_STRENGTH_DEFAULT,
-                tr(lang, "Personal style strength: how far AI proposals lean toward your past XMP editing habits (0 = ignore)"),
+                tr(lang, "Personal style strength: how far AI proposals lean toward your past XMP editing habits (0 = ignore). With a Direction written above at Adherence over 40%, the direction leads instead and your habits are sent as background only — whatever this dial says."),
             );
             // R23-2: a slider that provably cannot do anything must not read as
             // live. The old one showed 30% and a tooltip about "your past XMP
@@ -326,7 +326,7 @@ impl AutoShadeApp {
                 &mut self.direction_adherence,
                 1.0,
                 autoshade::recipe::DirectionAdherence::DEFAULT,
-                tr(lang, "How closely the AI follows your direction; disabled until Direction has text: <=40% Hint, 40-70% Direct, above 70% Brief. Prompt intent only - it never moves a render limit."),
+                tr(lang, "How closely the AI follows your direction; disabled until Direction has text: <=40% Hint, 40-70% Direct, above 70% Brief. Prompt intent only - it never moves a render limit. Direct and Brief also decide WHO LEADS: your style library becomes background and its distillation pull is skipped, so a direction can take a photo somewhere your past edits never went. Hint leaves the library in the lead."),
             );
         });
         // R23-4 (feedback #13): the THIRD analysis-side control, under the two

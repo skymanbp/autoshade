@@ -69,6 +69,10 @@ enum Command {
         guidance: Option<String>,
         /// How strongly to follow your historical edit style, 0..1 (needs a built
         /// `style-index`). Omit to use AUTOSHADE_STYLE_STRENGTH (default 0.3).
+        /// With NO --guidance, >=0.85 states the retrieved habits as a TARGET to
+        /// reproduce. WITH a --guidance direction at --adherence above 0.40, the
+        /// direction leads instead: the habits are quoted as BACKGROUND for
+        /// continuity and no distillation pull is applied, whatever this value is.
         #[arg(long, value_parser = unit_interval)]
         style: Option<f32>,
         /// How COMMITTED the grade should be, 0..1 — a different axis from
@@ -81,7 +85,11 @@ enum Command {
         /// and the TIER NAME is what the proposer and the verifier are told:
         /// <=0.40 Hint, 0.40..0.70 Direct, >0.70 Brief. Omitted = 0.65, i.e.
         /// Direct. Prompt intent only — it never moves a render bound — and it
-        /// does nothing at all without a direction.
+        /// does nothing at all without a direction. At Direct or Brief it also
+        /// decides WHO LEADS: your style library becomes background and its
+        /// distillation pull is skipped, so a direction can take a photo
+        /// somewhere your past edits never went. At Hint the library leads as
+        /// before.
         #[arg(long, value_parser = unit_interval)]
         adherence: Option<f32>,
         /// Let the local SigLIP 2 sidecar answer the style query, so the look
@@ -146,6 +154,10 @@ enum Command {
         guidance: Option<String>,
         /// How strongly to follow your historical edit style, 0..1 (needs a built
         /// `style-index`). Omit for AUTOSHADE_STYLE_STRENGTH (default 0.3).
+        /// With NO --guidance, >=0.85 states the retrieved habits as a TARGET to
+        /// reproduce. WITH a --guidance direction at --adherence above 0.40, the
+        /// direction leads instead: the habits are quoted as BACKGROUND for
+        /// continuity and no distillation pull is applied, whatever this value is.
         #[arg(long, value_parser = unit_interval)]
         style: Option<f32>,
         /// How COMMITTED the grade should be, 0..1 (see `analyze --strength`);
@@ -156,7 +168,11 @@ enum Command {
         /// and the TIER NAME is what the proposer and the verifier are told:
         /// <=0.40 Hint, 0.40..0.70 Direct, >0.70 Brief. Omitted = 0.65, i.e.
         /// Direct. Prompt intent only — it never moves a render bound — and it
-        /// does nothing at all without a direction.
+        /// does nothing at all without a direction. At Direct or Brief it also
+        /// decides WHO LEADS: your style library becomes background and its
+        /// distillation pull is skipped, so a direction can take a photo
+        /// somewhere your past edits never went. At Hint the library leads as
+        /// before.
         #[arg(long, value_parser = unit_interval)]
         adherence: Option<f32>,
         /// Let the local SigLIP 2 sidecar answer the style query, so the look
@@ -341,9 +357,17 @@ enum Command {
         direction: Option<String>,
         /// The Style axis used to render the reference block, 0..1 (default
         /// 0.3). At >=0.85 the block states the retrieved habits as a TARGET
-        /// rather than a ceiling.
+        /// rather than a ceiling — unless a --direction leads it (see
+        /// --adherence).
         #[arg(long, value_parser = unit_interval)]
         style: Option<f32>,
+        /// The adherence dial this forecast should assume, 0..1 (default 0.65,
+        /// i.e. Direct — the same default `analyze` uses). With a --direction
+        /// at Direct or Brief the block is rendered in its BACKGROUND voice,
+        /// which is what the develop would send; at Hint the historical
+        /// ceiling/target wording stands.
+        #[arg(long, value_parser = unit_interval)]
+        adherence: Option<f32>,
         /// Ask the SigLIP 2 sidecar for the query vectors. Without it the
         /// diagnostic shows the 14-dim ranking and says the look library is
         /// unreachable.
@@ -560,10 +584,11 @@ fn main() -> Result<()> {
                 style_index_cmd(&dir, xmp_dir.as_deref(), switch, prose)
             }
         }
-        Command::StyleQuery { photo, direction, style, embed } => style_query_cmd(
+        Command::StyleQuery { photo, direction, style, adherence, embed } => style_query_cmd(
             &photo,
             direction.as_deref(),
             style.unwrap_or(0.3),
+            adherence.map(DirectionAdherence::new).unwrap_or_default(),
             embed_switch(embed, false),
         ),
         Command::Reimagine { raw, prompt, fidelity, quality, fidelity_retry, out } => {
@@ -853,6 +878,7 @@ fn style_query_cmd(
     photo: &Path,
     direction: Option<&str>,
     style: f32,
+    adherence: autoshade::recipe::DirectionAdherence,
     embed: autoshade::style::EmbeddingSwitch,
 ) -> Result<()> {
     let decoded = decode::decode_any(photo)?;
@@ -907,7 +933,17 @@ fn style_query_cmd(
             fmt_desc(e.desc.as_deref())
         );
     }
-    let reference = idx.render_reference_for_style(&ex, style);
+    // The block the DEVELOP would send, voice and all: this diagnostic used to
+    // render the Style axis alone, so from v1.2.3 on it would have forecast a
+    // TARGET block for a run that actually sends a BACKGROUND one.
+    let voice = autoshade::style::StyleVoice::choose(style, direction, adherence);
+    let reference = idx.render_reference_for_style(&ex, style, direction, adherence);
+    println!(
+        "voice: {voice:?} (Style {style:.2}, adherence {:.2} = {}, direction {})",
+        adherence.get(),
+        adherence.tier().as_str(),
+        if direction.is_some_and(|d| !d.trim().is_empty()) { "present" } else { "none" },
+    );
     // The SHARED fence constants, not a second literal: the point of printing
     // the proposer's block is that it is the proposer's block.
     println!("reference (proposer block):\n{}", reference.as_deref()
@@ -960,14 +996,20 @@ fn style_query_cmd(
     }
     // DERIVED, through the pipeline's own mapping. It used to print the literal
     // "direct" whatever the dial said — a diagnostic that reported a tier the
-    // develop would not have used. `style-query` has no `--adherence` flag, so
-    // the dial is the shipped default and the line says which that is.
-    let adherence = autoshade::recipe::DirectionAdherence::default();
+    // develop would not have used. Since v1.2.3 `--adherence` is a flag here,
+    // so the line quotes the dial that was actually asked for.
     if let Some(tier) = pipeline::direction_adherence_tier(direction, adherence) {
         println!(
-            "  {}   (from the DEFAULT adherence dial {:.2}; `analyze --adherence` moves it)",
+            "  {}   (from adherence dial {:.2})",
             autoshade::rationale::keys::ADVISOR_NOTE_DIRECTION_ADHERENCE.replace("{tier}", tier),
             adherence.get()
+        );
+    }
+    if !voice.distils() {
+        println!(
+            "  {}",
+            autoshade::rationale::keys::STYLE_BACKGROUND
+                .replace("{tier}", adherence.tier().as_str())
         );
     }
     Ok(())

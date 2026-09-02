@@ -593,6 +593,26 @@ pub mod keys {
         " [style distillation then pulled this recipe toward this user's past \
          edits (effective strength {pct}%; moved: {fields}) — final values can \
          differ from the derivation above]";
+    /// The develop where the DIRECTION led and the library did not pull
+    /// (v1.2.3, user ruling 2026-09-01). It is the counterpart of
+    /// [`STYLE_DISTILLED`] and exists for the same reason: the recipe's final
+    /// numbers are read beside a derivation that must not be able to
+    /// contradict them, and "no pull was applied" is as much a fact about
+    /// this develop as a 100% pull would have been. It names the adherence
+    /// tier because that dial — not a new control — is what chose the voice,
+    /// so a user who wants their library back knows which slider to move.
+    ///
+    /// It names the DIAL, not a flag. Rationale notes are surface-neutral by
+    /// construction — this text is persisted into the recipe and re-rendered
+    /// in the CLI, the desktop app and the browser — and this was the only key
+    /// in the file whose TEXT spelled a CLI option. The desktop app has an
+    /// Adherence slider and the web page has had one since v1.2.3; neither has
+    /// a command line to type a flag on.
+    pub const STYLE_BACKGROUND: &str =
+        " [your style library was kept as BACKGROUND for this develop — the direction \
+         leads at adherence tier {tier}, so no style-distillation pull was applied to \
+         these numbers; lower the Adherence dial to 40% or below to hand the library \
+         back the lead]";
     pub const STYLE_REVERIFY_FAILED: &str =
         " [re-verification after style distillation failed ({e}) — the verdict \
          above describes the PRE-distillation recipe]";

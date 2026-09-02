@@ -7818,11 +7818,22 @@
         // the dial is not a magnitude.
         let tip = tr(
             Lang::En,
-            "How closely the AI follows your direction; disabled until Direction has text: <=40% Hint, 40-70% Direct, above 70% Brief. Prompt intent only - it never moves a render limit.",
+            "How closely the AI follows your direction; disabled until Direction has text: <=40% Hint, 40-70% Direct, above 70% Brief. Prompt intent only - it never moves a render limit. Direct and Brief also decide WHO LEADS: your style library becomes background and its distillation pull is skipped, so a direction can take a photo somewhere your past edits never went. Hint leaves the library in the lead.",
         );
         for tier in ["Hint", "Direct", "Brief"] {
             assert!(tip.contains(tier), "the tooltip must name the {tier} tier: {tip}");
         }
+        // v1.2.3: …and that two of those three tiers ALSO decide who leads.
+        // A user reading only "prompt intent only" would have no way to know
+        // that this dial is what stops their own library from being distilled
+        // into the answer.
+        for clause in ["WHO LEADS", "background", "Hint leaves the library in the lead"] {
+            assert!(tip.contains(clause), "the tooltip must say {clause:?}: {tip}");
+        }
+        // The zh half is a translation of the SAME key, so a drifted pair
+        // would fall back to English here rather than fail silently.
+        let zh = tr(Lang::Zh, "How closely the AI follows your direction; disabled until Direction has text: <=40% Hint, 40-70% Direct, above 70% Brief. Prompt intent only - it never moves a render limit. Direct and Brief also decide WHO LEADS: your style library becomes background and its distillation pull is skipped, so a direction can take a photo somewhere your past edits never went. Hint leaves the library in the lead.");
+        assert!(zh.contains("主导"), "the zh tooltip must carry the clause too: {zh}");
     }
 
     /// S2: the description preference survives a restart, defaults OFF in

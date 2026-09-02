@@ -718,8 +718,8 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     ("this photo is turned, and pixel repairs still work on the un-turned frame — turn it back to 0 first",
         "本照片已旋转，而像素修复仍在未旋转的画幅上工作——请先把旋转转回 0"),
     ("Style", "风格"),
-    ("Personal style strength: how far AI proposals lean toward your past XMP editing habits (0 = ignore)",
-        "个人风格强度：AI 提案向你过往 XMP 编辑习惯靠拢的程度（0 = 不参考）"),
+    ("Personal style strength: how far AI proposals lean toward your past XMP editing habits (0 = ignore). With a Direction written above at Adherence over 40%, the direction leads instead and your habits are sent as background only — whatever this dial says.",
+        "个人风格强度：AI 提案向你过往 XMP 编辑习惯靠拢的程度（0 = 不参考）。若上方写了 Direction 且 Adherence 高于 40%，则改由方向主导，你的习惯只作为参照给模型——与本滑杆的数值无关。"),
 
     // ── AI panel · the grade STRENGTH axis (R23-3, feedback #5) ──────────────
     ("Strength", "强度"),
@@ -1875,6 +1875,11 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
       edits (effective strength {pct}%; moved: {fields}) — final values can \
       differ from the derivation above]",
         " [风格蒸馏随后将本配方拉向该用户的历史编辑（有效强度 {pct}%；被拉动的项：{fields}）——最终数值可能与上文推导不同]"),
+    (" [your style library was kept as BACKGROUND for this develop — the direction \
+      leads at adherence tier {tier}, so no style-distillation pull was applied to \
+      these numbers; lower the Adherence dial to 40% or below to hand the library \
+      back the lead]",
+        " [本次显影只把你的风格库当作参照——指令在遵循度档位 {tier} 上主导，因此没有对这些数值做风格蒸馏拉动；把遵循度（Adherence）滑杆调到 40% 或以下即可把主导权交回风格库]"),
     (" [re-verification after style distillation failed ({e}) — the verdict \
       above describes the PRE-distillation recipe]",
         " [风格蒸馏后的复验失败（{e}）——上方判词描述的是蒸馏前的配方]"),
@@ -2095,7 +2100,8 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     (" Cross-image correspondence unavailable ({e}) — the content-divergent estimators ran without it.",
         " 跨图对应不可用（{e}）——内容分歧估计器已在没有它的情况下运行。"),
     ("Adherence", "遵循度"),
-    ("How closely the AI follows your direction; disabled until Direction has text: <=40% Hint, 40-70% Direct, above 70% Brief. Prompt intent only - it never moves a render limit.", "AI 对你所写方向的遵循程度；Direction 为空时不可用：≤ 40% Hint，40-70% Direct，高于 70% Brief。仅影响提示词意图，不会改变任何渲染限制。"),
+    ("How closely the AI follows your direction; disabled until Direction has text: <=40% Hint, 40-70% Direct, above 70% Brief. Prompt intent only - it never moves a render limit. Direct and Brief also decide WHO LEADS: your style library becomes background and its distillation pull is skipped, so a direction can take a photo somewhere your past edits never went. Hint leaves the library in the lead.",
+        "AI 对你所写方向的遵循程度；Direction 为空时不可用：≤ 40% Hint，40-70% Direct，高于 70% Brief。仅影响提示词意图，不会改变任何渲染限制。Direct 与 Brief 还决定由方向还是风格库主导：你的风格库退为参照，其风格蒸馏拉动被跳过，方向因此可以把一张照片带到你过往编辑从未去过的地方。Hint 则让风格库继续主导。"),
     ("a system font was found but not loaded — {font}. File names in the scripts it covers may show as boxes.",
         // Deliberately says "字体" and not "系统字体": 系 (U+7CFB) is in no
         // other translated string, so embedding it would mean regenerating

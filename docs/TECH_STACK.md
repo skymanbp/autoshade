@@ -1073,6 +1073,15 @@ below, and moves a mask's slider amplitudes only.
 target**: a channel that has one ends on it. There is no cap, and until this
 batch two doc comments claimed there was.
 
+**One exception, since v1.2.3: when the direction leads, nothing is pulled at
+all.** `pipeline::style_blend_pull` returns `None` in the `Background` voice — a
+non-blank direction at adherence tier `Direct` or `Brief` — so `blend_toward` is
+not called, no channel moves, and the Style dial's arithmetic is out of the
+picture however high it is set. The develop discloses it with the
+`STYLE_BACKGROUND` rationale note. Everything below this line describes what the
+pull does when it runs, which is every other develop: no direction, a blank one,
+or one at tier `Hint`.
+
 What keeps that from meaning "delete the colour" is the VOCABULARY and the
 GATE, not a cap. Distillation used to pull twelve flat sliders and nothing else,
 so at Style 1.0 a proposal's `vibrance` and `saturation` were replaced by the
