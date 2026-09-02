@@ -378,10 +378,136 @@ fn the_local_field_never_reaches_the_engine_or_the_recipe_schema() {
     }
 }
 
-/// The 96-cell structural support must actually vary on a real pair: synthetic
-/// fixtures are too small for `structure_divergence` (their cells fall under its
-/// core-pixel floor and read as matched), so this is the one test where the
-/// support term is live rather than a constant 1.0.
+/// A pair whose left third is REPLACED by a different texture and whose right
+/// two thirds keep their structure under a tone move. `width` and `height` set
+/// the cell geometry `local_support` will cut, which is the variable the tests
+/// below are actually about.
+fn structural_pair(width: u32, height: u32) -> (Vec<[f32; 3]>, Vec<[f32; 3]>) {
+    let source = (0..width * height)
+        .map(|i| {
+            let (x, y) = (i % width, i / width);
+            let v = (40 + ((x * 37 + y * 53) % 180)) as f32 / 255.0;
+            [v, v, v]
+        })
+        .collect::<Vec<_>>();
+    let target = source
+        .iter()
+        .enumerate()
+        .map(|(i, p)| {
+            let (x, y) = (i as u32 % width, i as u32 / width);
+            if x < width / 3 {
+                let v = (30 + ((x * 91 + y * 17) % 200)) as f32 / 255.0;
+                [v, v, v]
+            } else {
+                [p[0] * 0.8, p[1] * 0.8, p[2] * 0.8]
+            }
+        })
+        .collect::<Vec<_>>();
+    (source, target)
+}
+
+/// A33 (v1.2.4). The structural reading ABSTAINS below its resolvable core,
+/// and an abstention is not a claim that the structure survived.
+///
+/// [`fit::structure_divergence`] used to manufacture a `matched()` verdict —
+/// D = 0, correlation 1, energy error 0 — for any mask whose three-pixel
+/// erosion left fewer than [`fit::STRUCTURE_MIN_CORE_PX`] pixels. Every
+/// consumer reads D = 0 as "this region is structurally identical", so a
+/// region too small to measure was granted the strongest possible verdict in
+/// its own favour, for free.
+///
+/// The floor is exact and this fixture sits on it deliberately: a 16-px cell
+/// erodes to a 10 x 10 core, which is 100 and resolves, and a 15-px one to
+/// 9 x 10 = 90, which does not.
+///
+/// MUTATION (2026-09-02): restore the old answer —
+/// `return Some(Divergence::matched());` under the core floor in
+/// `structure_divergence` — and the None assertion fails, along with the two
+/// abstaining columns below.
+#[test]
+fn the_structural_reading_abstains_below_its_resolvable_core() {
+    let (width, height) = (64u32, 64u32);
+    let (source, target) = structural_pair(width, height);
+    let square = |side: u32| {
+        (0..width * height)
+            .map(|i| {
+                let (x, y) = (i % width, i / width);
+                f32::from(x < side && y < side)
+            })
+            .collect::<Vec<f32>>()
+    };
+    // 12 x 12 erodes to 6 x 6 = 36 core pixels; 20 x 20 to 14 x 14 = 196.
+    assert!(
+        fit::structure_divergence(&source, &target, width, height, &square(12)).is_none(),
+        "a mask under the core floor must abstain, not report a match",
+    );
+    let resolved = fit::structure_divergence(&source, &target, width, height, &square(20))
+        .expect("a mask over the core floor resolves");
+    assert!(
+        resolved.d > 0.0,
+        "the replaced corner is not a match: {resolved:?}",
+    );
+    // Geometry disagreement is the other abstention, and it is the one that
+    // used to hand a caller a matched verdict for a mask of the wrong size.
+    assert!(
+        fit::structure_divergence(&source, &target, width, height, &square(20)[..10]).is_none(),
+        "a weights vector of the wrong length must abstain",
+    );
+}
+
+/// A33's consumer half. `local_support` modulates the field solve cell by
+/// cell, and an unread cell must contribute NO claim (0.0) rather than the
+/// full support of a measured match (1.0) — except where NO cell in the frame
+/// resolves, which is a frame the instrument cannot read at all and where
+/// withholding every cell would starve a solve that used to run.
+///
+/// The 190 x 128 frame cuts ten 16-px columns and two 15-px ones, so the same
+/// frame carries both answers: cells 5 (x 80..94) and 11 (x 175..189) abstain
+/// while their neighbours resolve. The 96 x 64 frame cuts 8 x 8 cells, whose
+/// 2 x 2 core is far under the floor, so nothing in it resolves.
+///
+/// MUTATION (2026-09-02): `readings[cell].unwrap_or(1.0)` — the abstaining
+/// columns read as fully supported and the first assertion fails.
+#[test]
+fn an_unreadable_cell_makes_no_support_claim_but_an_unreadable_frame_keeps_one() {
+    let (width, height) = (190u32, 128u32);
+    let (source, target) = structural_pair(width, height);
+    let support = local_support(&source, &target, width, height);
+    let at = |x: u32| support[(60 * width + x) as usize];
+    assert_eq!(
+        (at(85), at(180)),
+        (0.0, 0.0),
+        "a cell whose core is 90 px makes no claim either way",
+    );
+    assert!(
+        at(70) > 0.5,
+        "the kept two thirds resolve and read as supported: {}",
+        at(70),
+    );
+    assert!(
+        at(20) < at(70),
+        "the replaced third reads lower than the kept one: {} against {}",
+        at(20),
+        at(70),
+    );
+
+    // The wholesale exception, and the reason it exists: every cell of this
+    // frame is unreadable, so the modulation is dropped rather than applied
+    // as a frame-wide zero.
+    let (width, height) = (96u32, 64u32);
+    let (source, target) = structural_pair(width, height);
+    let support = local_support(&source, &target, width, height);
+    assert!(
+        support.iter().all(|v| *v == 1.0),
+        "a frame nothing can read must keep the pre-v1.2.4 constant",
+    );
+}
+
+/// The 96-cell structural support on a REAL pair, where the cells carry a
+/// photograph's own structure rather than a planted texture and the reading
+/// has to separate a replaced sky from kept land. The synthetic frame in
+/// `an_unreadable_cell_makes_no_support_claim_but_an_unreadable_frame_keeps_one`
+/// proves the abstention rule; this proves the reading is worth having.
 #[test]
 fn calibration_local_support_is_not_constant() {
     let Some(root) = fit::calibration_corpus() else { return };

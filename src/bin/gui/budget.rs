@@ -222,4 +222,80 @@ mod tests {
             HEAVY_PEAK_COMMIT_MB
         );
     }
+
+    /// A18 (v1.2.4). The wiring census: WHERE the permit is taken, and that
+    /// each site actually holds it.
+    ///
+    /// [`heavy_permit`] is a reservation whose value must live as long as the
+    /// work it pays for. Every policy test above proves the reservation is
+    /// correct; none of them proves it is TAKEN, so a new full-frame commit
+    /// added on a fresh worker was one forgotten line away from decoding a
+    /// 60 MP raster beside two others while every admission test stayed green.
+    ///
+    /// Two things are pinned here, both read off the GUI's own source at
+    /// runtime (the module tree is walked, as the inclusion law and the font
+    /// gate do — an `include_str!` list would lose a new file silently).
+    ///
+    /// The SITES, file by file: a thirteenth is not necessarily wrong, but it
+    /// is a new heavy path and it stops here until someone says so in this
+    /// list. And the BINDING: `heavy_permit(...)` as a bare statement drops
+    /// its guard at the semicolon and reserves nothing at all, which reads
+    /// exactly like the working line and is the failure this census exists to
+    /// catch. `let _ = heavy_permit(..)` has the same defect and is the same
+    /// single character away, so the test demands a NAMED binding.
+    #[test]
+    fn every_budget_wiring_site_is_named_and_holds_its_permit() {
+        fn walk_rs(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+            for entry in std::fs::read_dir(dir).expect("gui source dir listable") {
+                let path = entry.expect("dir entry").path();
+                if path.is_dir() {
+                    walk_rs(&path, out);
+                } else if path.extension().is_some_and(|x| x == "rs") {
+                    out.push(path);
+                }
+            }
+        }
+        // The twelve wiring points, as of v1.2.4. `budget.rs` itself is the
+        // definition and its own tests, not a wiring site.
+        const CENSUS: [(&str, usize); 5] = [
+            ("actions.rs", 3),
+            ("export.rs", 2),
+            ("masks.rs", 1),
+            ("retouch.rs", 5),
+            ("workers.rs", 1),
+        ];
+        let gui_src =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src").join("bin").join("gui");
+        let mut sources = Vec::new();
+        walk_rs(&gui_src, &mut sources);
+        assert!(sources.len() >= 6, "expected the split module tree, found {}", sources.len());
+        let mut found: std::collections::BTreeMap<String, usize> = Default::default();
+        for path in &sources {
+            if path.file_name().is_some_and(|n| n == "budget.rs") {
+                continue;
+            }
+            let text = std::fs::read_to_string(path).expect("gui source readable");
+            let name = path.file_name().expect("file name").to_string_lossy().into_owned();
+            for line in text.lines() {
+                let Some(at) = line.find("crate::budget::heavy_permit(") else { continue };
+                *found.entry(name.clone()).or_default() += 1;
+                let binding = line[..at].trim_start();
+                assert!(
+                    binding.starts_with("let _") && !binding.starts_with("let _ ="),
+                    "a permit must be BOUND or it is released at the semicolon \
+                     and reserves nothing: {name}: {}",
+                    line.trim(),
+                );
+            }
+        }
+        let expected: std::collections::BTreeMap<String, usize> =
+            CENSUS.iter().map(|(name, n)| ((*name).to_string(), *n)).collect();
+        assert_eq!(
+            found, expected,
+            "the budget wiring moved: every heavy full-frame path takes a permit, \
+             and this census is where a new one is declared",
+        );
+        assert_eq!(found.values().sum::<usize>(), 12, "twelve wiring points");
+    }
 }
+

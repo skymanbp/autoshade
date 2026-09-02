@@ -13,6 +13,56 @@ const RANGE_RESIDUAL_TRIGGER: f32 = 0.03;
 const RANGE_MIN_RAMP: f32 = 1.0 / 17.0;
 /// Two evidence intervals provide measured transition headroom before the
 /// shared boundary shrink has to reduce correction differentials.
+///
+/// # The re-cut probe, and what the widest ramp actually does
+///
+/// v1.2.3 could not measure this width. Its synthetic probe was 512 rows and
+/// the mask-free instrument (`scripts/rim_overshoot.py`) needs 180 px of
+/// margin on each side of the boundary it locates, so every column of the 2/17
+/// rows was rejected and the table carried "unmeasurable", not "measured
+/// clean". That probe also pinned the band at ONE luminance position.
+///
+/// The probe is re-cut in
+/// `tests::the_recut_ramp_probe_measures_every_ramp_the_producer_emits`: a
+/// 64 x 1020 vertical grey ramp, a 4/17-wide band, the instrument's own
+/// 60/60/60 geometry ported unchanged, and the band's position swept across
+/// five values. Every cell now returns n = 64 of 64 columns, including the
+/// 2/17 rows nothing could read before.
+///
+/// TWO RULERS, AND THEY DISAGREE BY CONSTRUCTION. The mask-free overshoot
+/// reads mean 0.0000 and max 0.0000 in ALL 90 cells — every ramp, every EV,
+/// every position — because the DIFFERENCE it ranks stays monotone even where
+/// the delivered luma does not. The tone-order reading
+/// ([`range_transfer_reversal`], the depth of the delivered transfer's
+/// non-monotone excursion) is the ruler that sees the rest, and its control
+/// (the same frame at 0.00 EV) is exactly 0.000000 in all 15 of its cells.
+/// Depths below, in 8-bit codes, columns = band centre luma:
+///
+/// ```text
+/// ramp 1/17    0.36 0.43 0.50 0.57 0.64     ramp 1.5/17   0.36 0.43 0.50 0.57 0.64
+///  -0.35 EV       0    0    0    1    2      -0.35 EV        0    0    0    0    0
+///  -0.56 EV       0    1    4    7    8      -0.56 EV        0    0    1    2    3
+///  -0.80 EV       3    6    9   13   17      -0.80 EV        0    1    5    7   10
+///  -1.10 EV       7   12   16   21   26      -1.10 EV        2    7   11   15   19
+///  -1.50 EV      13   19   25   31   38      -1.50 EV        8   13   18   25   31
+///
+/// ramp 2/17 (THIS CONSTANT)   0.36 0.43 0.50 0.57 0.64
+///  -0.35 EV                      0    0    0    0    0
+///  -0.56 EV                      0    0    0    0    0
+///  -0.80 EV                      0    0    1    3    6
+///  -1.10 EV                      0    2    5    9   14
+///  -1.50 EV                      3    7   13   19   24
+/// ```
+///
+/// So the widest ramp is the SAFEST of the three at every cell — which is the
+/// case for this ceiling and not against it — but it is not safe: at -0.80 EV
+/// and above it inverts too, and the position sweep is what shows it (the same
+/// EV reads 0 codes low in the frame and 6 high in it). The viaduct's real 2/17
+/// band at -0.80 EV sits at codes 0-30, the bottom of that row, which is why it
+/// measures clean. Nothing here asks for a different width: a wider ramp is
+/// monotonically better on this table and the ceiling is already the widest the
+/// producer emits, while the inversions are closed by the sign test on the
+/// delivered transfer ([`RANGE_TRANSFER_REVERSAL_MAX`]) rather than by a re-tune.
 const RANGE_MAX_RAMP: f32 = 2.0 / 17.0;
 /// Native range transitions reuse the calibrated zoned signed-rim budget
 /// — MEASURED as defensible in that role on 2026-09-01, no longer carried
@@ -86,8 +136,11 @@ const RANGE_MAX_RAMP: f32 = 2.0 / 17.0;
 /// 19 bins with +0.855. The same estimator over the zero-weight control
 /// region, where the true slope is exactly 1.000, reads +0.942 to +1.039:
 /// a +/-0.05 noise floor, so +0.019 is one noise unit from a reversal.
-/// That is why the tone-reversal gap below is REGISTERED and not
-/// dismissed. The mask-free `scripts/rim_overshoot.py` reads mean 0.0006 /
+/// Both pairs therefore pass the sign test v1.2.4 added
+/// ([`RANGE_TRANSFER_REVERSAL_MAX`]) — driven end to end, the calibration
+/// band reads 0.0001 luma against the 0.0020 allowed — and the gate carries
+/// that reading beside this one.
+/// The mask-free `scripts/rim_overshoot.py` reads mean 0.0006 /
 /// p90 0.0018 / max 0.0082 at the calibration transition against its own
 /// control of exactly 0.0000; it is NOT applicable at the viaduct's
 /// contour and says so in its own numbers — its 60 px plateau windows must
@@ -109,25 +162,53 @@ const RANGE_MAX_RAMP: f32 = 2.0 / 17.0;
 /// sky, where any step is an artefact — which is why the same statistic
 /// decided v1.2.2 and cannot decide this.
 ///
-/// WHAT THIS DOES NOT SAY. The ruler ranks MAGNITUDE, so it cannot tell a
-/// preserved gradient from an inverted one of the same size. Driving the
-/// same shape on a synthetic 16-bit grey ramp at the ramp widths the
-/// producer emits: a 1.5/17 band reverses from -0.56 EV (a 2-code dip;
-/// 26.5 codes at -1.50) and a 1/17 band (`RANGE_MIN_RAMP`) from -0.35 EV
-/// (1 code; 32 at -1.50), while `rim_overshoot.py` reads max 0.0000 over
-/// its full n=1024 on every one of those rows, because the DIFFERENCE it
-/// ranks stays monotone. The `RANGE_MAX_RAMP` (2/17) rows of that probe
-/// are UNMEASURABLE by that instrument rather than measured clean: it
-/// needs 180 px of margin each side and the probe's locator lands exactly
-/// on row 180 of a 512-row frame, so every column is rejected (n=0). The
-/// probe also pins the band at the CALIBRATION position, and luminance
-/// POSITION is a third axis it does not sweep — the viaduct's real 2/17
-/// band at -0.80 EV sits at codes 0-30 and does not reverse. Neither real
-/// pair reaches that corner, but nothing in this gate stands between them
-/// and it. Registered for its own batch: the answer is a sign test on the
-/// delivered transfer, not a re-tune of this ceiling, and it would change
-/// which corrections attach.
+/// WHAT THIS RULER DOES NOT SAY, AND WHAT NOW SAYS IT. This ruler ranks
+/// MAGNITUDE, so it cannot tell a preserved gradient from an inverted one
+/// of the same size, and neither can the mask-free ruler, because the
+/// DIFFERENCE it ranks stays monotone even where the delivered luma does
+/// not. v1.2.3 measured that gap on a synthetic ramp and left it open;
+/// v1.2.4 closes it with a second reading rather than a re-tune of this
+/// number. [`RANGE_TRANSFER_REVERSAL_MAX`] carries the sign test, the
+/// re-cut probe behind it carries the table (see [`RANGE_MAX_RAMP`], where
+/// every ramp the producer emits is now measured at five band positions,
+/// and the mask-free ruler reads 0.0000 in all 90 cells while the tone
+/// order inverts by up to 38 codes), and `enforce_range_boundary_gate`
+/// applies both readings as one verdict: a band that inverts the tone order
+/// is shrunk to the largest amount that does not, and both readings ride
+/// the disclosure. This ceiling is unchanged and is not what was wrong.
 const RANGE_BOUNDARY_RIM_MAX: f32 = 0.012;
+/// Ceiling on the depth of a TONE REVERSAL the delivered transfer may carry
+/// across a band's edges, in luma. `RANGE_BOUNDARY_RIM_MAX` above ranks
+/// MAGNITUDE, so it cannot tell a preserved gradient from an inverted one of
+/// the same size; this is the ruler that can, and the two together are what
+/// "the delivered transition is a ramp" means.
+///
+/// MEASURED, on the re-cut synthetic probe
+/// (`the_recut_ramp_probe_measures_every_ramp_the_producer_emits`) and on the
+/// two real pairs that attach a band:
+///
+/// * The estimator's own floor is EXACTLY 0. On the probe's zero-strength
+///   control — the same frame, the same band, 0.00 EV — the delivered transfer
+///   is the identity and this reading is 0.000000 on all 15 (ramp, position)
+///   cells. It is a running-maximum depth, not a slope, so per-bin noise has to
+///   accumulate before it registers, and on an unmoved render there is none.
+/// * The real pairs sit a long way under the line. Driven end to end on
+///   2026-09-02 — `match --zoned` on the calibration pair with segmentation
+///   pointed at nothing, so the band path is the one that attaches — the
+///   accepted band [0.471, 0.765] at -0.56 EV reads 0.0001 luma of fall-back,
+///   0.026 of an 8-bit code, one twentieth of this ceiling, beside a rim of
+///   0.002 over 18651 crossings; the band attaches unchanged at k = 1.000.
+///   v1.2.3's slope table said the same thing with a different estimator: 0
+///   reversals over the calibration band's 30 populated 1-code bins and the
+///   viaduct's 19.
+/// * The probe's smallest REAL inversion is 1 code = 0.0039 luma (a 1/17 band
+///   at -0.35 EV, v1.2.3's table), and this batch's own sweep reproduces it.
+///
+/// Half a code is therefore the line: it is above a floor of exactly zero and
+/// below the smallest inversion any configuration has produced, and half an
+/// 8-bit code is under the quantisation of the render this gate measures, so
+/// nothing it admits can be drawn.
+const RANGE_TRANSFER_REVERSAL_MAX: f32 = 0.5 / 255.0;
 /// Native bands reuse the global evidence model's measured 1.5% population
 /// floor; a smaller interval is not a two-sided measurement.
 pub(super) const RANGE_MIN_EVIDENCE_SHARE: f32 = 0.015;
@@ -740,11 +821,67 @@ fn range_transition_rim(
     BoundaryReading { rim, transitions: transition_count, charged: rim }
 }
 
+/// The delivered transfer's worst TONE REVERSAL across the bands' edges, in
+/// luma.
+///
+/// The reading is taken in the same two frames the rim gate uses: the
+/// REFERENCE (the globals-only twin the engine passes in) supplies the input
+/// tone order, and the RENDERED frame supplies the delivered one. Pixels are
+/// binned by reference luma into the render's own 8-bit codes and each
+/// populated bin holds the mean delivered luma of its members; walking the bins
+/// upward, the reading is the deepest fall below the highest delivered luma
+/// already reached. A monotone transfer of any steepness — including one that
+/// compresses 30 input codes into 9.9, which is what the calibration band
+/// measures — reads exactly 0. An inversion reads its own depth.
+///
+/// Only the bands' own spans and their transitions are read: outside
+/// `lo_outer..hi_outer` the correction has no weight and its transfer is the
+/// identity, so including it would dilute the bins that carry the question.
+fn range_transfer_reversal(
+    reference: &[[f32; 3]],
+    rendered: &[[f32; 3]],
+    ranges: &[RangeMask],
+) -> f32 {
+    const BINS: usize = 256;
+    let spans = ranges
+        .iter()
+        .filter_map(|range| match *range {
+            RangeMask::Luminance { lo_outer, hi_outer, .. } => Some((lo_outer, hi_outer)),
+            RangeMask::Color { .. } => None,
+        })
+        .collect::<Vec<_>>();
+    let mut sum = [0.0f64; BINS];
+    let mut count = [0u32; BINS];
+    for (reference, delivered) in reference.iter().zip(rendered) {
+        let l = display_luma(reference);
+        if !spans.iter().any(|(lo, hi)| l >= *lo && l <= *hi) {
+            continue;
+        }
+        let bin = (l.clamp(0.0, 1.0) * (BINS - 1) as f32).round() as usize;
+        sum[bin] += display_luma(delivered) as f64;
+        count[bin] += 1;
+    }
+    let mut highest = f32::NEG_INFINITY;
+    let mut depth = 0.0f32;
+    for bin in 0..BINS {
+        if count[bin] == 0 {
+            continue;
+        }
+        let delivered = (sum[bin] / count[bin] as f64) as f32;
+        if highest > f32::NEG_INFINITY {
+            depth = depth.max(highest - delivered);
+        }
+        highest = highest.max(delivered);
+    }
+    depth
+}
+
 fn range_boundary_note_args(
     n: usize,
     k: f32,
     before: BoundaryReading,
     after: BoundaryReading,
+    reversal: f32,
 ) -> Vec<(&'static str, String)> {
     vec![
         ("n", n.to_string()),
@@ -753,6 +890,8 @@ fn range_boundary_note_args(
         ("after", format!("{:.3}", after.rim)),
         ("max", format!("{RANGE_BOUNDARY_RIM_MAX:.3}")),
         ("transitions", after.transitions.to_string()),
+        ("reversal", format!("{reversal:.4}")),
+        ("rev_max", format!("{RANGE_TRANSFER_REVERSAL_MAX:.4}")),
     ]
 }
 
@@ -772,14 +911,24 @@ fn enforce_range_boundary_gate(
         s_img.width(),
         s_img.height(),
     );
+    let initial_reversal = range_transfer_reversal(reference, &initial_px, ranges);
+    // TWO readings, one verdict. The rim ranks the SIZE of the bow a transition
+    // carries and the reversal ranks its SIGN, and a band can fail either
+    // alone: v1.2.3 measured a 1.5/17 band at -0.56 EV inverting the tone order
+    // by 2 codes at the far corner while the rim ruler read 0.0000 over its
+    // whole n, because the DIFFERENCE that ruler ranks stays monotone even
+    // where the delivered luma does not.
+    let passes = |reading: &BoundaryReading, reversal: f32| {
+        reading.rim <= RANGE_BOUNDARY_RIM_MAX && reversal <= RANGE_TRANSFER_REVERSAL_MAX
+    };
     let range_count = report.recipe.masks.len().saturating_sub(first_range);
-    if initial.rim <= RANGE_BOUNDARY_RIM_MAX {
+    if passes(&initial, initial_reversal) {
         crate::rationale::push_note(
             &mut report.recipe.rationale,
             &mut report.notes,
             crate::rationale::Note::new(
                 crate::rationale::keys::RANGE_BOUNDARY_PASSED,
-                range_boundary_note_args(range_count, 1.0, initial, initial),
+                range_boundary_note_args(range_count, 1.0, initial, initial, initial_reversal),
             ),
         );
         return BoundaryGateResult::Kept {
@@ -792,7 +941,7 @@ fn enforce_range_boundary_gate(
 
     let originals = report.recipe.masks[first_range..].to_vec();
     debug_assert_eq!(originals.len(), correction_shares.len());
-    let render_at = |report: &mut FitReport, k: f32| -> (BoundaryReading, Vec<[f32; 3]>) {
+    let render_at = |report: &mut FitReport, k: f32| -> (BoundaryReading, f32, Vec<[f32; 3]>) {
         shrink_zone_corrections(
             &mut report.recipe.masks[first_range..],
             &originals,
@@ -807,27 +956,31 @@ fn enforce_range_boundary_gate(
             s_img.width(),
             s_img.height(),
         );
-        (reading, pixels)
+        let reversal = range_transfer_reversal(reference, &pixels, ranges);
+        (reading, reversal, pixels)
     };
-    let (zero, zero_px) = render_at(report, 0.0);
-    if zero.rim > RANGE_BOUNDARY_RIM_MAX {
+    // `k = 0` is no local correction at all, so its delivered transfer IS the
+    // reference's own and the reversal reading is 0 by construction; only the
+    // rim can refuse here, and it does so for the reason it always did.
+    let (zero, zero_reversal, zero_px) = render_at(report, 0.0);
+    if !passes(&zero, zero_reversal) {
         report.recipe.masks.truncate(first_range);
         crate::rationale::push_note(
             &mut report.recipe.rationale,
             &mut report.notes,
             crate::rationale::Note::new(
                 crate::rationale::keys::RANGE_BOUNDARY_REFUSED,
-                range_boundary_note_args(range_count, 0.0, initial, zero),
+                range_boundary_note_args(range_count, 0.0, initial, zero, zero_reversal),
             ),
         );
         return BoundaryGateResult::Dropped;
     }
     let (mut lo, mut hi) = (0.0f32, 1.0f32);
-    let mut best = (zero, zero_px);
+    let mut best = (zero, zero_reversal, zero_px);
     for _ in 0..12 {
         let mid = (lo + hi) * 0.5;
         let measured = render_at(report, mid);
-        if measured.0.rim <= RANGE_BOUNDARY_RIM_MAX {
+        if passes(&measured.0, measured.1) {
             lo = mid;
             best = measured;
         } else {
@@ -845,10 +998,10 @@ fn enforce_range_boundary_gate(
         &mut report.notes,
         crate::rationale::Note::new(
             crate::rationale::keys::RANGE_BOUNDARY_PASSED,
-            range_boundary_note_args(range_count, lo, initial, best.0),
+            range_boundary_note_args(range_count, lo, initial, best.0, best.1),
         ),
     );
-    BoundaryGateResult::Kept { k: lo, before: initial, after: best.0, pixels: best.1 }
+    BoundaryGateResult::Kept { k: lo, before: initial, after: best.0, pixels: best.2 }
 }
 
 fn push_range_abstention(report: &mut FitReport, abstention: &RangeAbstention) {
@@ -971,7 +1124,10 @@ pub(super) fn attach_luminance_ranges(
             report,
             &mut frame_err,
             &derived.bands[i].attachment,
-            derived.bands[i].divergence,
+            // A band's divergence is DERIVED from its own luma evidence rather
+            // than read off the structural instrument, so it is always present:
+            // there is nothing here for the instrument to abstain about.
+            Some(derived.bands[i].divergence),
             corr.as_ref(),
         );
         match accepted_band {
@@ -2053,5 +2209,333 @@ mod tests {
         attach_luminance_ranges(&source, &target, &mut report, &[]);
         assert_eq!(report.recipe.masks.first(), Some(&existing));
         assert!(report.notes.iter().any(|note| note.key == crate::rationale::keys::RANGE_ATTACHED));
+    }
+
+    // ---------------------------------------------------------------------
+    // The RE-CUT synthetic ramp probe (v1.2.4)
+    // ---------------------------------------------------------------------
+
+    /// Height of the probe frame, in rows, chosen so the SUPERVISOR'S OWN
+    /// mask-free instrument fits on it unchanged.
+    ///
+    /// `scripts/rim_overshoot.py` needs 180 px of margin on each side of the
+    /// boundary it locates (60 px of transition + 60 px of gap + a 60 px
+    /// plateau window) and its 121-row transition window must COVER the
+    /// transition. On a frame whose luma runs 0 to 1 over `PROBE_ROWS` rows
+    /// those two demands pull opposite ways: a taller frame buys margin and
+    /// spends it again by stretching the transition. `RANGE_MAX_RAMP` (2/17 of
+    /// luma) lands on 120 rows here, just inside the 121-row window, and
+    /// 180 rows is 0.176 of luma, which is what fixes the position sweep to
+    /// [0.36, 0.64]. v1.2.3's probe was 512 rows: its 2/17 transition was only
+    /// 60 rows wide but every window that had to bracket it ran off the top of
+    /// the frame, so that instrument returned n = 0 and the widest ramp this
+    /// producer emits went unmeasured rather than measured clean.
+    const PROBE_ROWS: u32 = 1020;
+    /// Every column of a vertical ramp is the same column; the instrument
+    /// reads one number per column, so 64 of them is 64 independent readings
+    /// of a deterministic frame.
+    const PROBE_COLS: u32 = 64;
+    /// The band's own width in luma, wide enough that the plateau window on
+    /// the inside of the lo transition (60 px of gap plus 60 px of window,
+    /// starting 60 px past the crossing) still lands inside the band.
+    const PROBE_BAND: f32 = 4.0 / 17.0;
+
+    fn probe_frame() -> DynamicImage {
+        DynamicImage::ImageRgb8(RgbImage::from_fn(PROBE_COLS, PROBE_ROWS, |_, y| {
+            let value = (y as f32 / (PROBE_ROWS - 1) as f32 * 255.0).round() as u8;
+            image::Rgb([value; 3])
+        }))
+    }
+
+    fn probe_range(position: f32, ramp: f32) -> RangeMask {
+        let (lo, hi) = (position - PROBE_BAND * 0.5, position + PROBE_BAND * 0.5);
+        RangeMask::Luminance {
+            lo_outer: (lo - ramp).max(0.0),
+            lo,
+            hi,
+            hi_outer: (hi + ramp).min(1.0),
+        }
+    }
+
+    fn probe_recipe(range: RangeMask, ev: f32) -> crate::recipe::EditRecipe {
+        crate::recipe::EditRecipe {
+            masks: vec![LocalAdjustment {
+                mask: RANGE_HOST,
+                range: Some(range),
+                name: "probe band".to_string(),
+                exposure_ev: ev,
+                role: MaskRole::Custom,
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+    }
+
+    /// `scripts/rim_overshoot.py`, ported: same 60/60/60 geometry, the same
+    /// per-column first-0.5-crossing locator, the same median plateaus, the
+    /// same zero-padded 3-tap smoothing of the transition window, and the same
+    /// "distance outside the interval the two plateaus bound" reading. A
+    /// monotone transition of any steepness scores 0 and an identical pair of
+    /// renders scores exactly 0.0000, which is the control this table quotes.
+    fn mask_free_overshoot(
+        zoned: &[[f32; 3]],
+        twin: &[[f32; 3]],
+        weights: &[f32],
+        width: usize,
+        height: usize,
+    ) -> (usize, f32, f32) {
+        const HALF: i32 = 60;
+        const PLATEAU_GAP: i32 = 60;
+        const PLATEAU_WIDTH: i32 = 60;
+        let median = |values: &mut Vec<f32>| -> f32 {
+            values.sort_by(f32::total_cmp);
+            let n = values.len();
+            if n == 0 {
+                0.0
+            } else if n % 2 == 1 {
+                values[n / 2]
+            } else {
+                (values[n / 2 - 1] + values[n / 2]) * 0.5
+            }
+        };
+        let mut readings = Vec::new();
+        for x in 0..width {
+            let column = |y: usize| display_luma(&zoned[y * width + x])
+                - display_luma(&twin[y * width + x]);
+            let mut centre = None;
+            for y in 0..height - 1 {
+                let (a, b) = (weights[y * width + x], weights[(y + 1) * width + x]);
+                if (a - 0.5) * (b - 0.5) <= 0.0 && a != b {
+                    centre = Some(y as i32);
+                    break;
+                }
+            }
+            let Some(centre) = centre else { continue };
+            let sky0 = centre - HALF - PLATEAU_GAP - PLATEAU_WIDTH;
+            let sky1 = centre - HALF - PLATEAU_GAP;
+            let land0 = centre + HALF + PLATEAU_GAP;
+            let land1 = centre + HALF + PLATEAU_GAP + PLATEAU_WIDTH;
+            if sky0 < 0 || land1 > height as i32 {
+                continue;
+            }
+            let mut sky = (sky0..sky1).map(|y| column(y as usize)).collect::<Vec<_>>();
+            let mut land = (land0..land1).map(|y| column(y as usize)).collect::<Vec<_>>();
+            let (sky, land) = (median(&mut sky), median(&mut land));
+            let (low, high) = (sky.min(land), sky.max(land));
+            let first = (centre - HALF).max(0);
+            let last = (centre + HALF).min(height as i32 - 1);
+            let raw = (first..=last).map(|y| column(y as usize)).collect::<Vec<_>>();
+            let smoothed = (0..raw.len())
+                .map(|i| {
+                    let left = if i == 0 { 0.0 } else { raw[i - 1] };
+                    let right = if i + 1 == raw.len() { 0.0 } else { raw[i + 1] };
+                    (left + raw[i] + right) / 3.0
+                })
+                .collect::<Vec<_>>();
+            readings.push(
+                smoothed
+                    .iter()
+                    .map(|value| (value - high).max(low - value).max(0.0))
+                    .fold(0.0f32, f32::max),
+            );
+        }
+        let n = readings.len();
+        let mean = if n == 0 { 0.0 } else { readings.iter().sum::<f32>() / n as f32 };
+        let max = readings.iter().copied().fold(0.0f32, f32::max);
+        (n, mean, max)
+    }
+
+    struct ProbeCell {
+        n: usize,
+        overshoot_mean: f32,
+        overshoot_max: f32,
+        reversal: f32,
+    }
+
+    fn probe_cell(
+        frame: &DynamicImage,
+        twin: &[[f32; 3]],
+        position: f32,
+        ramp: f32,
+        ev: f32,
+    ) -> ProbeCell {
+        let range = probe_range(position, ramp);
+        let zoned = fit::pixels_of(&render::develop_preview(frame, &probe_recipe(range, ev)));
+        let weights = twin.iter().map(|p| render::range_weight(&range, p)).collect::<Vec<_>>();
+        let (n, overshoot_mean, overshoot_max) = mask_free_overshoot(
+            &zoned,
+            twin,
+            &weights,
+            PROBE_COLS as usize,
+            PROBE_ROWS as usize,
+        );
+        ProbeCell {
+            n,
+            overshoot_mean,
+            overshoot_max,
+            reversal: range_transfer_reversal(twin, &zoned, &[range]),
+        }
+    }
+
+    /// THE RE-CUT PROBE. Two claims are pinned here and nowhere else.
+    ///
+    /// 1. `RANGE_MAX_RAMP` is MEASURABLE. v1.2.3 could not read it: every
+    ///    column of its 512-row probe was rejected by the mask-free
+    ///    instrument's margin test, so the widest ramp the producer emits was
+    ///    absent from the table on purpose. On this frame every cell returns
+    ///    n = 64 of 64 columns.
+    /// 2. The luminance POSITION of the band is swept, which v1.2.3's probe
+    ///    never did — it pinned the band at the calibration position and said
+    ///    so.
+    ///
+    /// The numbers this prints are transcribed into `RANGE_MAX_RAMP`'s own
+    /// rustdoc; the assertions below are the pins.
+    ///
+    /// MUTATION: `RANGE_MAX_RAMP` 2/17 -> 3/17 makes the widest ramp 180 rows
+    /// wide, the instrument's 121-row window can no longer bracket it, and the
+    /// n = 64 assertion fails.
+    #[test]
+    fn the_recut_ramp_probe_measures_every_ramp_the_producer_emits() {
+        let frame = probe_frame();
+        let twin = fit::pixels_of(&render::develop_preview(
+            &frame,
+            &crate::recipe::EditRecipe::default(),
+        ));
+        let positions = [0.36f32, 0.43, 0.50, 0.57, 0.64];
+        let ramps = [
+            ("1/17", RANGE_MIN_RAMP),
+            ("1.5/17", 1.5 / 17.0),
+            ("2/17 (RANGE_MAX_RAMP)", RANGE_MAX_RAMP),
+        ];
+        let evs = [0.0f32, -0.35, -0.56, -0.80, -1.10, -1.50];
+        for (label, ramp) in ramps {
+            for ev in evs {
+                for position in positions {
+                    let cell = probe_cell(&frame, &twin, position, ramp, ev);
+                    eprintln!(
+                        "RAMP_PROBE ramp={label} ev={ev:+.2} position={position:.2} \
+                         n={} overshoot_mean={:.4} overshoot_max={:.4} reversal={:.6}",
+                        cell.n, cell.overshoot_mean, cell.overshoot_max, cell.reversal,
+                    );
+                    assert_eq!(
+                        cell.n, PROBE_COLS as usize,
+                        "the re-cut probe must be MEASURABLE at ramp {label}, \
+                         position {position}: the instrument rejected columns",
+                    );
+                    if ev == 0.0 {
+                        // The control: the same frame twice. Both instruments
+                        // must read exactly zero, or neither number below means
+                        // anything.
+                        assert_eq!(cell.overshoot_max, 0.0, "control overshoot must be exact 0");
+                        assert_eq!(cell.reversal, 0.0, "control reversal must be exact 0");
+                    }
+                }
+            }
+        }
+    }
+
+    /// A3. The sign test refuses what the magnitude ruler cannot see.
+    ///
+    /// The 1.5/17 band at -0.56 EV is v1.2.3's own counter-example: it inverts
+    /// the delivered tone order while `rim_overshoot.py` reads 0.0000 over its
+    /// whole n, because the DIFFERENCE that ruler ranks stays monotone. The
+    /// probe reproduces the inversion, and the gate now shrinks it away.
+    ///
+    /// MUTATION: drop `reversal <= RANGE_TRANSFER_REVERSAL_MAX` from the gate's
+    /// `passes` predicate and the k assertion below fails (the band is kept
+    /// whole at k = 1 with the inversion delivered).
+    #[test]
+    fn the_tone_reversal_gate_shrinks_a_band_the_rim_ruler_cannot_see() {
+        let frame = probe_frame();
+        let twin = fit::pixels_of(&render::develop_preview(
+            &frame,
+            &crate::recipe::EditRecipe::default(),
+        ));
+        let range = probe_range(0.50, 1.5 / 17.0);
+        let mut worst = 0.0f32;
+        for ev in [-0.56f32, -0.80, -1.10, -1.50] {
+            let cell = probe_cell(&frame, &twin, 0.50, 1.5 / 17.0, ev);
+            eprintln!(
+                "SIGN_TEST ev={ev:+.2} overshoot_max={:.4} reversal={:.6}",
+                cell.overshoot_max, cell.reversal,
+            );
+            worst = worst.max(cell.reversal);
+        }
+        assert!(
+            worst > RANGE_TRANSFER_REVERSAL_MAX,
+            "premise: this probe must invert the tone order somewhere, worst {worst}",
+        );
+
+        // Now through the gate itself, on the configuration that inverts.
+        let mut report = neutral_report(&frame, &frame);
+        report.recipe = probe_recipe(range, -1.50);
+        let initial_px =
+            fit::pixels_of(&render::develop_preview(&frame, &report.recipe));
+        let before = range_transfer_reversal(&twin, &initial_px, &[range]);
+        assert!(before > RANGE_TRANSFER_REVERSAL_MAX, "premise: {before}");
+        let result = enforce_range_boundary_gate(
+            &frame,
+            &mut report,
+            &twin,
+            &[range],
+            &[1.0],
+            0,
+            initial_px,
+        );
+        let BoundaryGateResult::Kept { k, pixels, .. } = result else {
+            panic!("the gate must shrink this band, not drop it")
+        };
+        let after = range_transfer_reversal(&twin, &pixels, &[range]);
+        eprintln!("SIGN_TEST_GATE k={k:.4} reversal {before:.6} -> {after:.6}");
+        assert!(k < 1.0, "an inverting band must not be kept whole: k={k}");
+        assert!(
+            after <= RANGE_TRANSFER_REVERSAL_MAX,
+            "the shrink must land inside the budget: {after}",
+        );
+        assert!(
+            report.notes.iter().any(|note| {
+                note.key == crate::rationale::keys::RANGE_BOUNDARY_PASSED
+                    && note.args.iter().any(|(key, _)| *key == "reversal")
+            }),
+            "the gate must disclose the reading it acted on: {}",
+            report.recipe.rationale,
+        );
+    }
+
+    /// The statistic itself, on hand-built transfers rather than on a render:
+    /// a compressive monotone transfer reads exactly 0 no matter how flat it
+    /// gets, and an inversion reads its own depth.
+    #[test]
+    fn the_transfer_reversal_reads_depth_and_ignores_compression() {
+        let range = RangeMask::Luminance { lo_outer: 0.0, lo: 0.0, hi: 1.0, hi_outer: 1.0 };
+        let build = |map: &dyn Fn(f32) -> f32| -> (Vec<[f32; 3]>, Vec<[f32; 3]>) {
+            let reference =
+                (0..256).map(|i| [i as f32 / 255.0; 3]).collect::<Vec<_>>();
+            let rendered = reference
+                .iter()
+                .map(|p| [map(p[0]).clamp(0.0, 1.0); 3])
+                .collect::<Vec<_>>();
+            (reference, rendered)
+        };
+        let (reference, flat) = build(&|x| 0.5 + 0.02 * x);
+        assert_eq!(
+            range_transfer_reversal(&reference, &flat, &[range]),
+            0.0,
+            "a 50x compression is still monotone",
+        );
+        // An 8-code step down, sampled one input code past the step: the
+        // highest delivered luma before the drop is the value at x = 0.5 and
+        // the first value after it is (0.5 + 1/255) - 8/255, so the depth this
+        // frame CARRIES is seven codes, not eight. The reading is the depth of
+        // the excursion, which is the quantity a viewer sees, and not the size
+        // of the step that caused it.
+        let (reference, inverted) = build(&|x| if x > 0.5 { x - 8.0 / 255.0 } else { x });
+        let depth = range_transfer_reversal(&reference, &inverted, &[range]);
+        assert!(
+            (depth * 255.0 - 7.0).abs() < 0.51,
+            "an 8-code step down one code past the peak must read 7 codes of \
+             depth, read {}",
+            depth * 255.0,
+        );
     }
 }

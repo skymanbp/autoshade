@@ -63,6 +63,16 @@ const SHIPPED_LAYERS: ZonedLayerOpts = ZonedLayerOpts {
 /// to carry trustworthy moments (a real sky measures 10–40%; segmentation
 /// misses and boundary slivers sit far below).
 pub(crate) const MIN_ZONE_SHARE: f32 = 0.03;
+/// ONE footprint floor for every hard-raster mask family — spatial tiles and
+/// free-form components alike.  A component under 64 analysis pixels is an 8x8
+/// patch of the 384-edge grid: below the structural instrument's own resolvable
+/// core ([`fit::STRUCTURE_MIN_CORE_PX`], which its three-pixel erosion puts out
+/// of reach for anything this small), and under a quarter of the 3-px baseline
+/// the boundary-step ruler needs on each side of a crossing.  The free-mask
+/// producer carried this floor from its first batch while the tile producer had
+/// none, which is the asymmetry v1.2.4 closes: the two families are gated by
+/// the same rulers downstream, so they are admitted by the same floor.
+pub(crate) const MIN_MASK_PIXELS: usize = 64;
 /// Conservative local-exposure budget: ±2.5 EV covers any real sky-to-sky
 /// brightness gap; a larger demand means the zones do not correspond.
 const ZONE_EV_LIMIT: f32 = 2.5;
@@ -135,9 +145,12 @@ const ZONE_CLIP_GROWTH: f32 = 0.01;
 /// samples are charged per crossing against their own context (see
 /// [`ZONE_BOUNDARY_STEP_MAX`], [`BOUNDARY_STEP_FLOOR`]) and that constant
 /// is the CAP on the exchange, not a promise about bare-sky visibility.
-/// Re-deriving the number itself would need a perceptual study this batch
-/// does not have, and a guessed number would be worse than the calibrated
-/// one. It is its own constant: [`ZONE_BOUNDARY_STEP_MAX`] carries the
+/// No perceptual study is owed for this number, and none is planned: it is a
+/// calibrated exchange rate, not a visibility threshold, and the batch that
+/// questioned it measured what the rate actually buys — the calibration
+/// island's seam fell from +3.15 to +0.92 code values under this budget and
+/// is not visible at 1:1. A number re-derived from a fresh threshold study
+/// would replace a measurement that exists with a preference that does not. It is its own constant: [`ZONE_BOUNDARY_STEP_MAX`] carries the
 /// hard-raster ruler's ceiling, so moving either one can no longer
 /// silently re-tune the other. The supervisor's independent RAW rim metric
 /// remains the final regression check, because it samples a 40px crossing
@@ -158,10 +171,23 @@ const ZONE_CLIP_GROWTH: f32 = 0.01;
 /// scene's own gradient is inside the reading rather than differenced
 /// away, and the budget is spent on the scene first. It is a p90 like this
 /// one, so the maxima neither ruler ranks moved the other way (0.01217 and
-/// 0.01407 on those pairs) while the ranked reading fell. THIS ruler's
-/// half of the claim is still UNMEASURED: a feathered zone needs a
-/// segmentation sidecar the measuring batch was not allowed to start, so
-/// nothing there should be read as covering it.
+/// 0.01407 on those pairs) while the ranked reading fell.
+///
+/// THIS ruler's half was measured on 2026-09-02, with the segmentation
+/// sidecar running under the shared GPU lock. `match --zoned` over the six
+/// corpus pairs attaches a feathered semantic zone on three of them, and this
+/// ruler reads 745 / 691 / 793 transitions inside their transition bands —
+/// it is LIVE on the family it was written for, not returning the empty
+/// `0 transitions` that let every hard raster past it. The ceiling binds
+/// where the correction is large and does not where it is not: introduced
+/// rims of 0.029 and 0.040 luma shrink to exactly +0.012 at k=0.385 and
+/// k=0.271, while a mild zone introducing 0.006 is kept whole at k=1.000.
+/// The constant therefore STANDS on its own family's evidence: reached from
+/// above on real pairs, and not a tax on a zone that stays under it.
+/// What those runs do not carry is the range family's second instrument (a
+/// monotone delivered transfer plus a mask-free control), which reads a
+/// rendered frame this path never writes to disk; the gate readings above
+/// are what this ruler is held to.
 pub(super) const ZONE_BOUNDARY_RIM_MAX: f32 = 0.012;
 /// Maximum induced cross-boundary step for a HARD 0/255 raster — spatial
 /// tiles and free masks, read by [`boundary_step`] rather than
@@ -1178,28 +1204,28 @@ const JOINT_MIN_SHARE: f32 = 0.02;
 // Independent of the fixture values and NOWHERE inherited from the
 // sky/land zones (their four constants each carry a measured real-pair
 // anchor for a DIFFERENT quantity and must not be borrowed — R19). Every
-// The fixture test records the measurements below and enforces the policy
-// that the cause, not the measurement, chooses the typed FAR note.
+// number below is this family's own. The fixture test records those
+// measurements and enforces the policy that the cause, not the measurement,
+// chooses the typed FAR note.
 //
 // STATUS (R24 batch 2, 2026-08-17): the policy boundary is established. R23-6
-// against synthetic fixtures alone and recorded the debt in this very block
-// ("wants a real-pair review before anyone treats a number here as measured
-// truth"). Six real (RAW, finished JPEG) pairs off the user's own library —
-// EXIF-timestamp-confirmed same frame — have since been measured through
-// `autoshade match`, and they provided independent review evidence. The table is
-// `fit::tests::joint_family_is_calibrated_on_the_fixture_set`'s doc; the
-// The fixture and real-pair values are retained as regression evidence; they
-// do not widen the boundary when a refusal happens to read farther away.
-// The ONE pair the user called
-// nonsense (an astro composite: the Milky Way gone, the deep blue turned
-// grey) read 0.141 — under the old 0.25 line, so it raised no warning and
-// still reported 0.58 confidence.
+// set it against synthetic fixtures alone and recorded the debt in this very
+// block ("wants a real-pair review before anyone treats a number here as
+// measured truth"). Six real (RAW, finished JPEG) pairs off the user's own
+// library — EXIF-timestamp-confirmed same frame — have since been measured
+// through `autoshade match`, and they provided that review. Their table is
+// `fit::tests::joint_family_is_calibrated_on_the_fixture_set`'s doc. The
+// fixture and real-pair values are retained as regression evidence; they do
+// not widen the boundary when a refusal happens to read farther away. The ONE
+// pair the user called nonsense (an astro composite: the Milky Way gone, the
+// deep blue turned grey) read 0.141 — under the old 0.25 line, so it raised
+// no warning and still reported 0.58 confidence.
 //
 // The separation the fixtures established is unchanged and still holds: a
 // fit that REACHES its target lands the weighted reading at 0.001-0.06,
 // while the pair whose target is a repaint the global model structurally
 // cannot reach lands at 0.58. The real pairs simply showed where inside
-// that gap is where the fixed policy line separates the two claims.
+// that gap the fixed policy line has to sit.
 
 /// The weighted reading at which reported confidence hits its floor — the
 /// joint family's counterpart of `fit`'s own FAR line, and the other end of
@@ -1217,16 +1243,15 @@ const JOINT_MIN_SHARE: f32 = 0.02;
 ///   * A one-sided evidence reading is a refusal, even when it is beyond the
 ///     line; a supported but unsuccessful reading is a miss and must warn.
 ///     The fixture readings remain regression evidence, not a numeric ceiling.
-///     (The former measurement table is retained below for audit context.)
-//
-///     real failure pair arrives: the two fixtures where the solver
-///     correctly REFUSED to chase a whole-scene regrade (canyon warm 0.061,
-///     canyon gold 0.093). Those are policy refusals, not misses, so they
-///     must not be accused of being far — and 0.093 leaves only 8% of
-///     headroom. The line is deliberately biased the other way (41% of
-///     headroom over the real failure): a real pair the user called nonsense
-///     outranks a synthetic fixture whose silence is a judgement call.
-//
+///   * WHERE INSIDE THE GAP the line sits is a choice, and this is the
+///     reasoning behind it: the two fixtures where the solver correctly
+///     REFUSED to chase a whole-scene regrade (canyon warm 0.061, canyon
+///     gold 0.093) are policy refusals, not misses, so they must not be
+///     accused of being far — and 0.093 leaves only 8% of headroom under
+///     the line. The line is deliberately biased the other way (41% of
+///     headroom under the real failure at 0.141): a real pair the user
+///     called nonsense outranks a synthetic fixture whose silence is a
+///     judgement call.
 pub(crate) const JOINT_FAR_ERR: f32 = 0.10;
 
 /// One FAR-line cause classifier shared by the global and zoned fit paths.
@@ -1517,11 +1542,26 @@ fn joint_reading_from_buckets(buckets: &[JointBucket]) -> Option<JointReading> {
 ///      white-balance test, both of which are joint-independent. That is a
 ///      QUIETER disclosure, not a wrong one, and it was missing from this list.
 ///
-/// Verified by running the suite under it — every `fit` / `fit_zoned` test that
-/// does not assert this family's existence passes unchanged (41 of them as of
-/// R23's round review); the five that fail are exactly the ones asserting it
-/// EXISTS, which is the correct answer to switching it off and is why the
-/// variable is a diagnostic, not a supported test configuration.
+/// Verified by running the WHOLE lib suite under it, re-measured 2026-09-02
+/// on v1.2.4: `AUTOSHADE_FIT_JOINT=off cargo test --release --lib` reports
+/// 1322 passed, 9 failed, 12 ignored. Every failure is in `fit` or
+/// `fit_zoned` — 265 of the 274 tests in those two modules pass unchanged —
+/// and every one of the nine reads this family's own output through one of
+/// the four consumers above: `fit::joint_family_is_calibrated_on_the_fixture_set`
+/// and `fit::the_worst_bucket_cannot_gate_a_stage` read the reading itself,
+/// `fit::wb_default_strength_is_byte_identical_to_head` pins a confidence the
+/// cap produces, `fit::same_content_evidence_diagnosis_reports_cornwall_support_and_terminal_readings`
+/// reads the terminal arm, `fit::a_residual_the_mixer_cannot_reach_is_still_named`,
+/// `fit::solving_the_bands_takes_the_colour_shape_out_of_the_residual`,
+/// `fit::the_unsolvable_controls_are_named_for_this_pair` and
+/// `fit_zoned::unrepresented_note_is_derived_from_the_finished_zoned_render`
+/// assert the colour-shaped route of `unrepresented_note` that consumer 4
+/// describes falling back, and
+/// `fit_zoned::the_joint_family_matches_by_value_not_by_position` asserts the
+/// family exists at all. That is the correct answer to switching it off and
+/// is why the variable is a diagnostic, not a supported test configuration.
+/// (The count moved from R23's "41 of them / five that fail": the suite has
+/// grown and three of the four consumers gained tests since.)
 fn joint_family_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| {
@@ -1707,7 +1747,7 @@ fn fit_recipe_zoned_inner_seeded(
                 let zone_divergence = measure_zone_divergence(src, target, base, &src_mask);
                 let divergent_cover = [zone_divergence.sky, zone_divergence.land]
                     .into_iter()
-                    .filter(|zone| zone.divergence.d >= fit::DIVERGENCE_ZONE)
+                    .filter(|zone| zone.divergence.is_some_and(|d| d.d >= fit::DIVERGENCE_ZONE))
                     .map(|zone| zone.share)
                     .sum::<f32>();
                 let mut report = fit::fit_recipe_from_promoted_with_disclosure_opts(
@@ -1754,7 +1794,7 @@ fn fit_recipe_zoned_inner_seeded(
             let zone_divergence = measure_zone_divergence(src, target, base, &src_mask);
             let divergent_cover = [zone_divergence.sky, zone_divergence.land]
                 .into_iter()
-                .filter(|zone| zone.divergence.d >= fit::DIVERGENCE_ZONE)
+                .filter(|zone| zone.divergence.is_some_and(|d| d.d >= fit::DIVERGENCE_ZONE))
                 .map(|zone| zone.share)
                 .sum::<f32>();
             let mut report = fit::fit_recipe_from_promoted_with_disclosure_opts(
@@ -1938,7 +1978,11 @@ fn fit_recipe_zoned_multi_inner(
             let weights = mask_weights(&r.source, w, h);
             ZoneDivergence { divergence: fit::structure_divergence(&sp, &tp, w, h, &weights), share: weights.iter().sum::<f32>() / weights.len().max(1) as f32 }
         }).collect::<Vec<_>>();
-        let divergent_cover = divergences.iter().filter(|d| d.divergence.d >= fit::DIVERGENCE_ZONE).map(|d| d.share).sum::<f32>();
+        // Promotion is the claim that the structure was REPLACED over this much
+        // of the frame, so a region the instrument could not read contributes
+        // nothing to the cover: `is_some_and` refuses on an absent reading where
+        // the old field read a matched 0.0 and refused for the wrong reason.
+        let divergent_cover = divergences.iter().filter(|d| d.divergence.is_some_and(|r| r.d >= fit::DIVERGENCE_ZONE)).map(|d| d.share).sum::<f32>();
         let mut report = fit::fit_recipe_from_promoted_with_disclosure_opts(src, target, base,
             divergent_cover >= fit::DIVERGENT_COVER_PROMOTES, true, options);
         // The same disclosure the sky/land route makes for ITS refinement.
@@ -2404,7 +2448,10 @@ fn attach_semantic_regions(
 
 #[derive(Clone, Copy)]
 struct ZoneDivergence {
-    divergence: fit::Divergence,
+    /// `None` is [`fit::structure_divergence`]'s abstention, never a matched
+    /// reading: the region's eroded core was under the instrument's resolvable
+    /// size, so nothing was measured either way.
+    divergence: Option<fit::Divergence>,
     share: f32,
 }
 
@@ -3066,7 +3113,7 @@ fn attach_one_zone(
     report: &mut FitReport,
     frame_err: &mut f32,
     attachment: &ZoneAttachment,
-    divergence: fit::Divergence,
+    divergence: Option<fit::Divergence>,
     corr: Option<&fit::PairCorrespondence>,
 ) -> Option<AcceptedZone> {
     // `label` drives the rationale prose; it's the zone's stable ASCII tag, so
@@ -3082,7 +3129,10 @@ fn attach_one_zone(
     // bounded distribution precisely BECAUSE its content was replaced, and
     // weighting its statistics by "does this pixel correspond" would starve
     // the very zone the divergent-zones-are-never-dropped ruling protects.
-    let mode = if divergence.d >= fit::DIVERGENCE_ZONE {
+    // Atmosphere is the claim that this zone's CONTENT was replaced, and an
+    // abstention makes no claim at all — so an unread zone is fitted the way a
+    // measured-matched one is, and the note below says which of the two it was.
+    let mode = if divergence.is_some_and(|d| d.d >= fit::DIVERGENCE_ZONE) {
         ZoneMode::Atmosphere
     } else {
         ZoneMode::Full
@@ -3098,6 +3148,25 @@ fn attach_one_zone(
     };
     let min_wt =
         |i: usize| sw.get(i).copied().unwrap_or(0.0).min(tw.get(i).copied().unwrap_or(0.0));
+    // THE share ruler, and the only one (v1.2.4). A mask's share is the
+    // weighted fraction of the analysis frame its own population covers —
+    // `spatial::scoped_mask_evidence`'s reading for tiles and free masks, the
+    // raster's own alpha for a semantic zone — and NOT that population after
+    // the robust pairing has thrown outliers out of it.
+    //
+    // Two rulers used to answer one question. This gate read the ROBUST
+    // COMPOSED share while every producer admitted its candidate on the FROZEN
+    // one, so on the calibration island three tiles cleared their producer's
+    // gate and were then refused here, and the two disclosures printed
+    // different shares for the same tile. They are not two estimates of one
+    // number: robust rejection measures how clean the tone RELATION is, which
+    // is the question the do-no-harm and quality gates below already ask and
+    // answer with their own numbers. Size is a question about the mask, so it
+    // is asked once, of the mask, in the currency the producer used.
+    let share_of = |weights: &[f32]| {
+        weights.iter().map(|w| w.max(0.0) as f64).sum::<f64>() as f32
+            / weights.len().max(1) as f32
+    };
     // The SAME robust paired estimator the global tone stage runs (one
     // mechanism, two call sites): pixels the two zones do not share — the
     // divergent cloud deck, a moved subject — lose weight by the influence
@@ -3141,9 +3210,7 @@ fn attach_one_zone(
     let (tgt_eff, zone_robust, zw_source, zw_target, ms, mt, gate_s_share, gate_t_share) =
         match field {
             Some((c, zr, zws, zwt, ms, mt)) => {
-                let gs = zone_moments(&cur_px, &compose(sw, &zr)).share;
-                let gt = zone_moments(tgt_px, &compose(tw, &zr)).share;
-                (c.tp.as_slice(), zr, zws, zwt, ms, mt, gs, gt)
+                (c.tp.as_slice(), zr, zws, zwt, ms, mt, share_of(sw), share_of(tw))
             }
             None => {
                 let zr = fit::paired_robust_tone(&cur_px, tgt_px, &|i: usize| min_wt(i), false);
@@ -3151,8 +3218,7 @@ fn attach_one_zone(
                 let zwt = compose(tw, &zr);
                 let ms = zone_moments(&cur_px, &zws);
                 let mt = zone_moments(tgt_px, &zwt);
-                let (gs, gt) = (ms.share, mt.share);
-                (tgt_px, zr, zws, zwt, ms, mt, gs, gt)
+                (tgt_px, zr, zws, zwt, ms, mt, share_of(sw), share_of(tw))
             }
         };
     if gate_s_share < attachment.min_share || gate_t_share < attachment.min_share {
@@ -3181,7 +3247,8 @@ fn attach_one_zone(
             mode_key,
             vec![
                 ("label", label.to_string()),
-                ("d", format!("{:.3}", divergence.d)),
+                ("d", divergence.map_or_else(
+                    || "unmeasured".to_string(), |d| format!("{:.3}", d.d))),
             ],
         ),
     );
@@ -3280,6 +3347,13 @@ fn attach_one_zone(
     // violent pseudo-map instead (measured, real pair: the flat hazy sky
     // drew exposure −0.70 and its zone residual went 0.016 → 0.108). Below
     // an IQR floor, fall back to the moment-EV and leave the tone flat.
+    // A NARROW band's own population can testify at fewer than two of the
+    // engine's eight tone knots, and `fit_tone_sliders_supported` answers that
+    // with a neutral solve rather than a one-point system. That is the right
+    // answer and it used to be a silent one: the zone attached with its colour
+    // move and a tone residual nothing had refused, explained, or named. The
+    // count is taken inside the solve's own borrow and disclosed after it.
+    let mut unsupported_knots: Option<usize> = None;
     if mode == ZoneMode::Full {
         let rp = fit::pixels_of(&render::develop_preview(s_img, &report.recipe));
         let s_cdf = zone_luma_cdf(&rp, &zw_source);
@@ -3325,6 +3399,10 @@ fn attach_one_zone(
                     )
                 }
             };
+            let supported_knots = support.iter().filter(|value| **value > 0.0).count();
+            if supported_knots < 2 {
+                unsupported_knots = Some(supported_knots);
+            }
             let (ev, sliders) =
                 fit::fit_tone_sliders_supported(&tone_map, &support, &score_set);
             m.exposure_ev = round2(ev.clamp(-ZONE_EV_LIMIT, ZONE_EV_LIMIT));
@@ -3339,6 +3417,16 @@ fn attach_one_zone(
     } else {
         let m = report.recipe.masks.last_mut().expect("zone mask just pushed");
         m.exposure_ev = round2(d.exposure_ev.clamp(-ZONE_ATMOS_EV_LIMIT, ZONE_ATMOS_EV_LIMIT));
+    }
+    if let Some(knots) = unsupported_knots {
+        crate::rationale::push_note(
+            &mut report.recipe.rationale,
+            &mut report.notes,
+            crate::rationale::Note::new(
+                crate::rationale::keys::ZONE_TONE_UNSUPPORTED,
+                vec![("label", label.to_string()), ("knots", knots.to_string())],
+            ),
+        );
     }
     // Closed-loop zone saturation on real renders (the gains change chroma
     // by themselves — only a render knows where the zone landed).
@@ -4089,8 +4177,8 @@ mod tests {
         }
     }
 
-    fn divergence(d: f32) -> fit::Divergence {
-        fit::Divergence { correlation: 1.0 - d, energy_error: 0.0, d }
+    fn divergence(d: f32) -> Option<fit::Divergence> {
+        Some(fit::Divergence { correlation: 1.0 - d, energy_error: 0.0, d })
     }
 
     fn pretend_full_support(evidence: &mut fit::EvidenceModel) {
@@ -4234,7 +4322,7 @@ mod tests {
                 let zone_divergence = measure_zone_divergence(src, target, base, &src_mask);
                 let divergent_cover = [zone_divergence.sky, zone_divergence.land]
                     .into_iter()
-                    .filter(|zone| zone.divergence.d >= fit::DIVERGENCE_ZONE)
+                    .filter(|zone| zone.divergence.is_some_and(|d| d.d >= fit::DIVERGENCE_ZONE))
                     .map(|zone| zone.share)
                     .sum::<f32>();
                 let mut report = fit::fit_recipe_from_promoted_with_disclosure(
@@ -4412,6 +4500,105 @@ mod tests {
             &root.join("neutral.jpg"),
             "disabled range layers",
         );
+        range_path.remove();
+    }
+
+    /// Write the two artefacts the HEAD-equivalence arm above reads.
+    ///
+    /// That arm compares the layered fit, with every layer disabled, against a
+    /// recipe some earlier executable produced on the calibration pair. Until
+    /// v1.2.4 nothing in the tree could produce one, so the baseline was a
+    /// file with no procedure behind it and the arm was unrunnable for anyone
+    /// who did not already have it. The procedure is now exactly this:
+    ///
+    /// ```text
+    /// git switch --detach <the commit you want as the baseline>
+    /// AUTOSHADE_LAYERED_HEAD_SEMANTIC=<dir>/semantic.json \
+    /// AUTOSHADE_LAYERED_HEAD_RANGE=<dir>/range.json \
+    /// AUTOSHADE_FIT_CALIBRATION_DIR=<corpus> \
+    ///   cargo test --release -- --ignored export_layered_head_equivalence_artifacts
+    /// git switch -                       # then run the arm on your branch
+    /// ```
+    ///
+    /// It writes to the SAME paths the arm reads, which is the point: the
+    /// baseline is whatever executable last ran this, and the commit that
+    /// produced it is a `git switch` away rather than a memory. Ignored by
+    /// default because it overwrites that baseline, and because it needs the
+    /// calibration corpus and the correspondence sidecar.
+    ///
+    /// v1.2.4's own rebaseline is recorded in the batch report: the artefacts
+    /// carried before it came from the pre-layer executable, and this release
+    /// deliberately changes what the disabled-layer path produces on a real
+    /// pair (the structural reading abstains where it used to claim a match,
+    /// and the attachment gate reads one share ruler), so those files describe
+    /// a fit the tree no longer performs. The two synthetic arms above, which
+    /// compare against `legacy_zoned_fit` in the same process, are the
+    /// equivalence check that does not age.
+    #[test]
+    #[ignore]
+    fn export_layered_head_equivalence_artifacts() {
+        let layers = ZonedLayerOpts {
+            field: false, spatial: false, free_masks: false, refine_masks: false,
+        };
+        let (Some(head_semantic), Some(head_range)) = (
+            crate::config::live_env("AUTOSHADE_LAYERED_HEAD_SEMANTIC"),
+            crate::config::live_env("AUTOSHADE_LAYERED_HEAD_RANGE"),
+        ) else {
+            panic!("set AUTOSHADE_LAYERED_HEAD_SEMANTIC and AUTOSHADE_LAYERED_HEAD_RANGE");
+        };
+        let root = fit::calibration_corpus().expect("the artefacts are cut on the corpus pair");
+        let source = image::open(root.join("neutral.jpg")).unwrap();
+        let target = image::open(root.join("target.jpg")).unwrap();
+        let cfg = crate::config::Config::load();
+        let corr = crate::correspond::fit_provider(
+            crate::correspond::CorrespondOpts::from_config(&cfg),
+        );
+        let write = |path: &str, report: &FitReport| {
+            std::fs::write(path, serde_json::to_vec_pretty(&report.recipe).unwrap()).unwrap();
+            eprintln!("wrote {path}");
+        };
+
+        let semantic_path = fixture_mask_path("layered-head-export-semantic");
+        let mut semantic = fit_recipe_zoned_inner(
+            &source,
+            &target,
+            &SegmentOpts::from_config(&cfg, "sky"),
+            &semantic_path,
+            &crate::recipe::EditRecipe::default(),
+            Some(&corr),
+            layers,
+        );
+        crate::pipeline::stamp_fit_calibration(
+            &mut semantic.recipe,
+            crate::pipeline::fit_calibration(&root.join("neutral.jpg")),
+        );
+        write(&head_semantic, &semantic);
+        semantic_path.remove();
+
+        // The same fit with segmentation pointed at nothing, which is how the
+        // arm reaches the luminance-range path instead of the semantic one.
+        let range_path = fixture_mask_path("layered-head-export-range");
+        let range_seg = SegmentOpts {
+            python_bin: cfg.python_bin.clone(),
+            script: "D:/no-such-dir/none.py".into(),
+            target: "sky".into(),
+            reference_point: None,
+            prompt_points: None,
+        };
+        let mut range = fit_recipe_zoned_inner(
+            &source,
+            &target,
+            &range_seg,
+            &range_path,
+            &crate::recipe::EditRecipe::default(),
+            Some(&corr),
+            layers,
+        );
+        crate::pipeline::stamp_fit_calibration(
+            &mut range.recipe,
+            crate::pipeline::fit_calibration(&root.join("neutral.jpg")),
+        );
+        write(&head_range, &range);
         range_path.remove();
     }
 
@@ -4630,7 +4817,7 @@ mod tests {
         let wrong_weights = mask_weights(&target_mask, w, h);
         let wrong = fit::structure_divergence(&sp, &tp, w, h, &wrong_weights);
         assert!(
-            (wrong.d - direct.d).abs() > 0.05,
+            (wrong.expect("resolvable").d - direct.expect("resolvable").d).abs() > 0.05,
             "the two mask populations must be discriminating: source={direct:?}, target={wrong:?}"
         );
 
@@ -4650,17 +4837,17 @@ mod tests {
                 &mask,
             );
             eprintln!(
-                "CALIBRATION_DIVERGENCE sky={:.6} land={:.6}",
-                actual.sky.divergence.d,
-                actual.land.divergence.d
+                "CALIBRATION_DIVERGENCE sky={:?} land={:?}",
+                actual.sky.divergence.map(|r| r.d),
+                actual.land.divergence.map(|r| r.d)
             );
             assert!(
-                (actual.sky.divergence.d - 1.186).abs() <= 0.05,
+                actual.sky.divergence.is_some_and(|r| (r.d - 1.186).abs() <= 0.05),
                 "sky calibration drifted: {:?}",
                 actual.sky.divergence
             );
             assert!(
-                (actual.land.divergence.d - 0.436).abs() <= 0.05,
+                actual.land.divergence.is_some_and(|r| (r.d - 0.436).abs() <= 0.05),
                 "land calibration drifted: {:?}",
                 actual.land.divergence
             );
@@ -5820,7 +6007,7 @@ mod tests {
             if atmosphere {
                 // Forced past DIVERGENCE_ZONE so the SAME pair is judged by the
                 // Atmosphere match arm — the mode split itself is under test.
-                fit::Divergence { correlation: 0.0, energy_error: 1.0, d: 1.0 }
+                Some(fit::Divergence { correlation: 0.0, energy_error: 1.0, d: 1.0 })
             } else {
                 measure_zone_divergence(&src, &tgt, &crate::recipe::EditRecipe::default(), &mask)
                     .sky
@@ -6427,6 +6614,89 @@ mod tests {
     /// then +0.08 brighter on the target -- whose upper part shares that bin.
     /// Frame-wide the bin keeps well under 35% structural survival and is
     /// withheld; the ground alone keeps all of it.
+    /// A zone whose own population lives BETWEEN the engine's tone knots. Its
+    /// luma spans 0.298-0.447, which is evidence bins 5 to 7, while the eight
+    /// knots (`render::TONE_KNOTS_X`) fall in bins 0, 1, 4, 8, 11, 13, 15 and
+    /// 16 — and the robust map's own span, widened by the 1/32 the knot reader
+    /// allows either side, still reaches neither 0.25 below nor 0.50 above.
+    /// The interquartile spread measures 0.059 against the identifiability
+    /// floor of 0.05, so the tone solve RUNS and then finds nothing to stand
+    /// on, which is the case this fixture exists to reach.
+    /// `shifted` warms the zone without leaving its band, so a colour move
+    /// attaches and the tone move is the only thing left unanswered.
+    fn unsupported_knot_fixture(shifted: bool) -> DynamicImage {
+        DynamicImage::ImageRgb8(RgbImage::from_fn(96, 96, |x, y| {
+            // The WHOLE frame stays inside the band, the zone included. A
+            // brighter surround would put its own values into the zone through
+            // the analysis resample of the mask edge, and a few hundred blended
+            // pixels are all it takes to clear `fit::SUPPORT_MIN_PIXELS` at a
+            // knot the zone itself never reaches.
+            let base = (76 + ((x * 5 + y * 3) % 39)) as f32;
+            if shifted && y >= 48 {
+                image::Rgb([(base * 1.18).min(255.0) as u8, base as u8, (base * 0.86) as u8])
+            } else {
+                image::Rgb([base as u8; 3])
+            }
+        }))
+    }
+
+    /// v1.2.4: a zone that cannot support a tone solve SAYS SO.
+    ///
+    /// `fit::fit_tone_sliders_supported` answers an under-determined knot
+    /// system with a neutral solve, and that is the right answer: one
+    /// supported knot cannot separate exposure from contrast, and a guess
+    /// would put a dial on the recipe that no pixel of the zone asked for.
+    /// What it did not do was say anything. The zone attached with its colour
+    /// move, its tone residual stayed on the frame, and nothing in the report
+    /// distinguished "this zone wanted no tone move" from "this zone could not
+    /// be asked" — the same silence the free-mask refusals were built to end.
+    ///
+    /// MUTATION (2026-09-02): delete the `if let Some(knots)` push that
+    /// follows the solve — the note disappears and this test fails.
+    #[test]
+    fn a_zone_that_cannot_support_a_tone_solve_says_so() {
+        let (w, h) = (96u32, 96u32);
+        let src = unsupported_knot_fixture(false);
+        let tgt = unsupported_knot_fixture(true);
+        let mask =
+            GrayImage::from_fn(w, h, |_, y| image::Luma([if y >= h / 2 { 255u8 } else { 0 }]));
+        let path = fixture_mask_path("zone-unsupported-knots");
+        mask.save(path.path()).unwrap();
+        let mut report = neutral_report(&src, &tgt);
+        pretend_full_support(&mut report.evidence);
+        let (s_img, t_img) = fit::analysis_pair(&src, &tgt);
+        let t_px = fit::pixels_of(&t_img);
+        let sw = mask_weights(&mask, s_img.width(), s_img.height());
+        let tw = mask_weights(&mask, t_img.width(), t_img.height());
+        let attachment = semantic_attachment(sw, tw, &path);
+        let mut frame_err = report.err_after;
+        let accepted = attach_one_zone(
+            &s_img,
+            &t_px,
+            &mut report,
+            &mut frame_err,
+            &attachment,
+            divergence(0.0),
+            None,
+        );
+        path.remove();
+        assert!(
+            accepted.is_some(),
+            "premise: the colour move must attach: {}",
+            report.recipe.rationale,
+        );
+        let note = report
+            .notes
+            .iter()
+            .find(|note| note.key == crate::rationale::keys::ZONE_TONE_UNSUPPORTED)
+            .unwrap_or_else(|| panic!("no disclosure: {}", report.recipe.rationale));
+        assert!(
+            note.args.iter().any(|(key, value)| *key == "knots" && value == "0"),
+            "the disclosure carries the count it measured: {:?}",
+            note.args,
+        );
+    }
+
     fn poisoned_bin_fixture() -> (DynamicImage, DynamicImage, GrayImage) {
         let (w, h) = (fit::ANALYZE_EDGE, fit::ANALYZE_EDGE);
         let sky_rows = h * 2 / 3;
@@ -6649,6 +6919,281 @@ mod tests {
         mask_path.remove();
     }
 
+
+    /// The hue twin of [`poisoned_bin_fixture`]. The top two thirds are
+    /// REPLACED content that occupies the same warm hue band as the ground, so
+    /// frame-wide that band keeps too little structural survival to testify;
+    /// the ground alone keeps all of it, and it is the ground that carries the
+    /// hue move the target asks for.
+    fn poisoned_hue_fixture() -> (DynamicImage, DynamicImage, GrayImage) {
+        let (w, h) = (fit::ANALYZE_EDGE, fit::ANALYZE_EDGE);
+        let sky_rows = h * 2 / 3;
+        let warm = |v: f32, muted: bool| {
+            // The SAME hue angle on both sides (28.3 deg against 29.5 deg, one
+            // evidence band), a different chroma: the ground's move must stay
+            // inside the band whose testimony this test is about.
+            let (r, g, b) = if muted { (1.00, 0.72, 0.45) } else { (1.00, 0.62, 0.28) };
+            image::Rgb([
+                ((v * r).clamp(0.0, 1.0) * 255.0).round() as u8,
+                ((v * g).clamp(0.0, 1.0) * 255.0).round() as u8,
+                ((v * b).clamp(0.0, 1.0) * 255.0).round() as u8,
+            ])
+        };
+        let build = |target: bool| {
+            DynamicImage::ImageRgb8(RgbImage::from_fn(w, h, |x, y| {
+                if y < sky_rows {
+                    if target {
+                        // Replaced: a stripe deck in the same hue family, so it
+                        // lands in the same evidence band and poisons it.
+                        warm(if (y / 8) % 2 == 0 { 0.35 } else { 0.75 }, false)
+                    } else {
+                        warm(0.50 + 0.20 * x as f32 / (w - 1) as f32, false)
+                    }
+                } else {
+                    // The ground: identical structure on both sides, rotated
+                    // toward yellow on the target.
+                    warm(0.55 + 0.15 * x as f32 / (w - 1) as f32, target)
+                }
+            }))
+        };
+        let sky_mask = GrayImage::from_fn(w, h, |_, y| {
+            image::Luma([if y < sky_rows { 255u8 } else { 0 }])
+        });
+        (build(false), build(true), sky_mask)
+    }
+
+    /// A21. The scoped HUE verdict is the zone's own, asserted without going
+    /// through the frame-wide identity.
+    ///
+    /// `a_zone_is_judged_by_its_own_members_not_the_frames_bins` pins the LUMA
+    /// half of `EvidenceModel::scoped` on its own members and the hue half only
+    /// through the whole-frame identity `scoped(ones, ones) == frame`, which a
+    /// zone-path defect cannot move. This is the missing half: a hue band the
+    /// FRAME withholds, the GROUND keeps and the SKY does not.
+    ///
+    /// MUTATION: `EvidenceModel::scoped` returning `hue: self.hue.clone()`
+    /// instead of `ranges.hue`. The whole-frame identity stays green because
+    /// over the whole frame the two are the same object; the band search below
+    /// finds nothing and this test fails.
+    #[test]
+    fn a_zones_scoped_hue_verdict_is_its_own_not_the_frames() {
+        let (src, tgt, sky_mask) = poisoned_hue_fixture();
+        let (s_img, t_img) = fit::analysis_pair(&src, &tgt);
+        let sp = fit::pixels_of(&s_img);
+        let tp = fit::pixels_of(&t_img);
+        let frame = fit::evidence_model_for(&sp, &tp, s_img.width(), s_img.height());
+        let sky = mask_weights(&sky_mask, s_img.width(), s_img.height());
+        let ground: Vec<f32> = sky.iter().map(|w| 1.0 - w).collect();
+        let ground_view = frame.scoped(&tp, &ground, &ground);
+        let sky_view = frame.scoped(&tp, &sky, &sky);
+        let band = (0..frame.hue.len())
+            .find(|&i| {
+                frame.hue[i].source_populated
+                    && frame.hue[i].weight <= 0.0
+                    && ground_view.hue[i].weight > 0.0
+            })
+            .unwrap_or_else(|| {
+                panic!(
+                    "premise: a hue band the frame withholds and the ground keeps\n\
+                     frame  {:?}\nground {:?}",
+                    frame.hue, ground_view.hue,
+                )
+            });
+        assert!(
+            sky_view.hue[band].weight <= 0.0,
+            "the replaced sky must keep withholding its own band: {:?}",
+            sky_view.hue[band],
+        );
+        assert!(
+            ground_view.hue[band].two_sided_share > 0.0,
+            "the ground's own band must be two-sided: {:?}",
+            ground_view.hue[band],
+        );
+    }
+
+    /// A23. The neutral-solution exit, REACHED.
+    ///
+    /// Its own doc used to say it was not reachable from a synthetic pair and
+    /// that only the six-arm live runs evidenced it. It is reachable, and the
+    /// construction is the one the exit describes: a zone whose residual is
+    /// large while every class the estimator could move is withheld. The
+    /// replaced sky of [`poisoned_hue_fixture`] is exactly that: it is
+    /// structurally unsupported on both axes, so the tone probe names its luma
+    /// ranges and the chroma probe names its hue band, both withholding arms
+    /// fire, and every dial the estimator produced is zeroed. What is left is a
+    /// solution that came out neutral beside a residual that did not.
+    ///
+    /// MUTATION: give the exit `ZONE_ALREADY_MATCHED` instead of
+    /// `ZONE_NO_MOVEMENT_SURVIVED` and the key assertion below fails.
+    #[test]
+    fn the_neutral_solution_exit_is_reached_when_every_class_is_withheld() {
+        let (src, tgt, sky_mask) = poisoned_hue_fixture();
+        let path = fixture_mask_path("poisoned-bin-sky-neutral");
+        sky_mask.save(path.path()).unwrap();
+        let mut report = neutral_report(&src, &tgt);
+        let (s_img, t_img) = fit::analysis_pair(&src, &tgt);
+        let t_px = fit::pixels_of(&t_img);
+        let sky = ZoneAttachment {
+            source_weights: mask_weights(&sky_mask, s_img.width(), s_img.height()),
+            target_weights: mask_weights(&sky_mask, t_img.width(), t_img.height()),
+            coverage: None,
+            mask: MaskGeometry::Bitmap { path: path.path().to_string_lossy().into_owned() },
+            range: None,
+            name: String::new(),
+            role: MaskRole::ZoneSky,
+            inverted: false,
+            label: MaskRole::ZoneSky.tag().to_string(),
+            min_share: MIN_ZONE_SHARE,
+            frame_regression_tol: ZONE_GLOBAL_REGRESSION_TOL,
+        };
+        let masks_before = report.recipe.masks.len();
+        let mut frame_err = report.err_after;
+        let accepted = attach_one_zone(
+            &s_img,
+            &t_px,
+            &mut report,
+            &mut frame_err,
+            &sky,
+            measure_zone_divergence(&src, &tgt, &crate::recipe::EditRecipe::default(), &sky_mask)
+                .sky
+                .divergence,
+            None,
+        );
+        assert!(
+            accepted.is_none(),
+            "a neutral solution must not attach: {}",
+            report.recipe.rationale
+        );
+        assert_eq!(
+            report.recipe.masks.len(),
+            masks_before,
+            "the exit must pop its own mask: {}",
+            report.recipe.rationale,
+        );
+        let note = report
+            .notes
+            .iter()
+            .find(|n| n.key == crate::rationale::keys::ZONE_NO_MOVEMENT_SURVIVED)
+            .unwrap_or_else(|| {
+                panic!("the neutral-solution exit was not reached: {}", report.recipe.rationale)
+            });
+        // It is the NEUTRAL-SOLUTION exit and not the already-matched one: the
+        // residual it discloses is far above the skip line it does not claim.
+        let before = note
+            .args
+            .iter()
+            .find(|(key, _)| *key == "before")
+            .map(|(_, value)| value.parse::<f32>().expect("a numeric residual"))
+            .expect("the exit discloses the residual it leaves behind");
+        assert!(
+            before > ZONE_SKIP_ERR,
+            "the exit must fire on a zone that is NOT matched, read {before}",
+        );
+        assert!(
+            !report
+                .notes
+                .iter()
+                .any(|n| n.key == crate::rationale::keys::ZONE_ALREADY_MATCHED),
+            "no arm may claim a match here: {}",
+            report.recipe.rationale,
+        );
+        path.remove();
+    }
+
+    /// A24. The arbitration's REJECT branch, driven deterministically.
+    ///
+    /// `loopback_multi_run_arbitrates_against_the_seeded_two` asserts the
+    /// reject branch only `if` the run happened to refuse, so nothing pinned it.
+    /// This fixture makes the tie certain: the loopback bridge hands the
+    /// multi-class call the same sky plane the single-class call returns, and
+    /// [`zoned_pair`]'s land is byte-identical on both sides, so the two-region
+    /// reference and the multi-region candidate solve the same sky and nothing
+    /// else. `multi_error >= two_error` then holds by equality and the
+    /// candidate is dropped, so the branch runs on every execution of this
+    /// test rather than on the ones that happen to refuse.
+    ///
+    /// WHAT THIS PINS, and what it does not, both measured on 2026-09-02.
+    /// Deleting the `chosen.notes.push(refusal)` in the reject branch fails
+    /// here: the branch must publish the comparison it lost, and the loser's
+    /// `mask-region-*` must not reach the kept recipe. Making
+    /// `release_unselected_rasters` a no-op does NOT fail here, and the
+    /// measurement says why: on this fixture the candidate's one region is
+    /// `ZONE_DROPPED`, so it claims no raster and there is no orphan to leave
+    /// behind. The release itself is pinned next door by
+    /// `release_unselected_rasters_keeps_exactly_what_the_kept_recipe_references`,
+    /// which does fail under that same no-op. The on-disk sweep below stays as
+    /// a guard for the day a refused candidate does claim one.
+    #[test]
+    fn the_multi_region_reject_branch_discloses_the_comparison_it_lost() {
+        let (src, tgt, _) = zoned_pair();
+        let base = crate::recipe::EditRecipe::default();
+        let dir = crate::test_dir("seg-arb-reject");
+        let seg = loopback_segment_opts(&dir, PlaneSource::Input, src.width(), src.height());
+        let anchor = crate::store::OwnedRaster::scratch(dir.join("anchor.png"));
+        let report = fit_recipe_zoned_with_regions(
+            &src,
+            &tgt,
+            &seg,
+            &anchor,
+            &base,
+            fit::FitOptions::default(),
+            4,
+        );
+        let refusal = report
+            .notes
+            .iter()
+            .find(|n| n.key == crate::rationale::keys::REGION_FRAME_REFUSED)
+            .unwrap_or_else(|| {
+                panic!(
+                    "the reject branch must be reached on this fixture: {}",
+                    report.recipe.rationale
+                )
+            });
+        let arg = |key: &str| {
+            refusal
+                .args
+                .iter()
+                .find(|(name, _)| *name == key)
+                .map(|(_, value)| value.parse::<f32>().expect("a numeric reading"))
+                .unwrap_or_else(|| panic!("the refusal discloses {key}"))
+        };
+        assert!(
+            arg("multi") >= arg("two"),
+            "the refusal must disclose the comparison it lost: {refusal:?}",
+        );
+        let referenced = report
+            .recipe
+            .masks
+            .iter()
+            .filter_map(|m| match &m.mask {
+                MaskGeometry::Bitmap { path } => std::path::Path::new(path)
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned()),
+                _ => None,
+            })
+            .collect::<std::collections::HashSet<_>>();
+        assert!(
+            referenced.iter().all(|name| !name.starts_with("mask-region-")),
+            "a refused candidate must ship no region mask: {referenced:?}",
+        );
+        let on_disk = std::fs::read_dir(&dir)
+            .expect("the run's own directory")
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        for name in &on_disk {
+            if name.starts_with("mask-") || name == "anchor.png" {
+                assert!(
+                    referenced.contains(name),
+                    "the reject branch left an orphan claim {name}; kept {referenced:?}",
+                );
+            }
+        }
+        for name in &referenced {
+            assert!(on_disk.contains(name), "referenced raster {name} is missing");
+        }
+    }
+
     /// The neutral-solution exit does not borrow the "already matches" claim.
     ///
     /// `neutral_zone` (below `local_quality`) fires when every dial the
@@ -6659,15 +7204,14 @@ mod tests {
     /// prints the contradicting residual inside its own claim. Same rule and
     /// same fix as `ZONE_SHARE_NO_CORRECTION` (rationale.rs:354-360).
     ///
-    /// WHAT THIS TEST DOES NOT COVER, stated rather than implied: the exit is
-    /// not reachable from a flat synthetic pair. Reaching it needs a zone
-    /// whose movable class solves to neutral WHILE its residual stays large,
-    /// and on 16x16 block fixtures those two conditions exclude each other --
-    /// every attempt either attaches a correction or lands on the legitimate
-    /// `zone_skips` exit with a genuinely small residual (0.008 measured).
-    /// The exit's live behaviour is evidenced only by the six-arm runs. So
-    /// this test pins the two things that ARE decidable here: the sentences
-    /// are different, and the new one makes no claim about matching.
+    /// This test pins the two things that are decidable from the note alone:
+    /// the sentences are different, and the new one makes no claim about
+    /// matching. The exit ITSELF is reached and asserted by
+    /// `the_neutral_solution_exit_is_reached_when_every_class_is_withheld`,
+    /// which builds the construction the exit describes — a large residual
+    /// beside a solution that came out neutral because every movable class was
+    /// withheld. v1.2.3's note here said no synthetic pair could reach it; that
+    /// was true only of the 16x16 block fixtures it had tried.
     ///
     /// MUTATION: give `ZONE_NO_MOVEMENT_SURVIVED` the text of
     /// `ZONE_ALREADY_MATCHED` and both assertions below fail.

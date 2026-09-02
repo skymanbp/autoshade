@@ -689,11 +689,13 @@ pub mod keys {
         " Range boundary-continuity gate kept {n} correction(s): signed \
          transition rim {before} to {after} luma after shared \
          direction-preserving shrink k={k} (budget {max}, {transitions} \
-         measured crossings).";
+         measured crossings); the delivered tone order falls back by at most \
+         {reversal} luma against the {rev_max} allowed.";
     pub const RANGE_BOUNDARY_REFUSED: &str =
         " Range corrections refused by the boundary-continuity gate: candidate \
          rim {before} luma, and even zero differential left {after} (budget \
-         {max}, {transitions} measured crossings).";
+         {max}, {transitions} measured crossings); the delivered tone order \
+         falls back by at most {reversal} luma against the {rev_max} allowed.";
     pub const RANGE_FRAME_REFUSED: &str =
         " Range corrections refused after the final boundary pass: the \
          composed frame residual {after} exceeded the global-only residual \
@@ -725,6 +727,12 @@ pub mod keys {
          {step}, context-charged {charged} (bitmap/XMP loss).";
     pub const FIELD_MASK_REFUSED: &str =
         " Field mask component(s) {n} refused: {why}.";
+    pub const ZONE_TONE_UNSUPPORTED: &str =
+        " No tone move was solved for {label}: its own population covers \
+         {knots} of the 8 tone knots, and a slider solve needs at least 2.";
+    pub const FIELD_MASK_WITHHELD: &str =
+        " Field mask candidate {n} was not offered: an accepted spatial tile \
+         already covers it ({filter}), p={pixels} s={share_src}/{share_tgt}.";
     pub const FIELD_MASK_NONE: &str =
         " No field mask qualified: {why}.";
 

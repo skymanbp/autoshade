@@ -2742,15 +2742,26 @@ of the same size: on a synthetic 16-bit grey ramp a 1.5/17 band reverses from
 −0.56 EV (a 2-code dip, 26.5 codes at −1.50) and a 1/17 band from −0.35 EV,
 while `rim_overshoot.py` reads max 0.0000 over its full n = 1024 on every one
 of those MEASURED rows, because the difference it ranks stays monotone. The
-widest ramp the producer emits (2/17) is unmeasurable by that instrument on
-this probe rather than measured clean — it needs 180 px of margin each side
-and the probe's locator lands exactly on row 180 of a 512-row frame, so every
-column is rejected and n = 0. The probe also pins the band at the calibration
-position, and luminance POSITION is a third axis it does not sweep: the
-viaduct's real 2/17 band at −0.80 EV sits at codes 0–30 and does not reverse.
-Neither real pair reaches that corner — the calibration band's own minimum
-slope is +0.019 — and the answer is a sign test on the delivered transfer
-rather than a re-tune of this ceiling, so it is registered for its own batch.
+widest ramp the producer emits (2/17) was unmeasurable by that instrument on
+that probe rather than measured clean — it needs 180 px of margin each side
+and the probe's locator landed exactly on row 180 of a 512-row frame, so every
+column was rejected and n = 0.
+
+v1.2.4 re-cut the probe and closed both gaps. The frame is 64 x 1020 with a
+4/17 band, the mask-free instrument's own 60/60/60 geometry is ported into the
+test, and the band's luminance POSITION — the third axis the old probe pinned
+— is swept over five values, so every cell returns n = 64 of 64, the 2/17 rows
+included. Over 3 ramps x 5 EVs x 5 positions the mask-free ruler reads 0.0000
+in all 90 cells while the delivered tone order inverts by up to 38 codes; the
+widest ramp is the safest of the three at every cell and still inverts from
+−0.80 EV upward, and position alone moves one row from 0 to 6 codes. The
+answer ships with the measurement instead of after it: `range_transfer_reversal`
+reads the depth of the delivered transfer's non-monotone excursion and
+`enforce_range_boundary_gate` applies it beside the rim, shrinking a band that
+inverts the tone order to the largest amount that does not
+(`RANGE_TRANSFER_REVERSAL_MAX` = 0.5/255; the control reads exactly 0.000000 in
+all 15 of its cells and both real pairs read 0). The rim ceiling itself is
+unchanged and was never what was wrong.
 
 For the step family a reading of ZERO measured crossings is a refusal, never
 a pass — until 2026-08-30 the rim ruler returned `0.000` from an empty
@@ -2964,12 +2975,18 @@ incremental share cannot reach `TILE_SHAPE_MIN = 0.5` once the plane holds
 Below `TILE_SHAPE_MIN` the quadtree's effective cap drops from
 `SPATIAL_MAX_ATTACHMENTS` to two, and the calibration test pins that the
 `TILE_DEPTH_CAP` note the quadtree prints equals the cap `LOCAL_SHAPE`
-disclosed. Registered, not fixed: `local_support` reads a constant 1.0
-whenever a 12x8 cell erodes under `structure_divergence`'s 100-core-pixel
-floor — every synthetic fixture (144x96 and smaller) and, at `ANALYZE_EDGE =
-384`, analysis rasters wider than about 5.4:1 or taller than 1:4 — so the
-corpus test `calibration_local_support_is_not_constant` is the one place the
-support term is exercised live.
+disclosed. Fixed in v1.2.4: under `structure_divergence`'s
+100-core-pixel floor the reading ABSTAINS (`None`) instead of manufacturing a
+matched verdict, and `local_support` gives an unread cell 0.0 — no support
+claim — rather than the 1.0 of a measured match. A frame where NO cell
+resolves keeps the old constant 1.0, deliberately: an instrument that can read
+nothing anywhere must not starve a solve that used to run. Both halves are
+pinned on a 190x128 frame that cuts sixteen-pixel columns (core 100, resolved)
+and fifteen-pixel ones (core 90, abstaining) at the same time, by
+`fit_field::tests::the_structural_reading_abstains_below_its_resolvable_core`
+and `fit_field::tests::an_unreadable_cell_makes_no_support_claim_but_an_unreadable_frame_keeps_one`;
+`calibration_local_support_is_not_constant` remains the reading's real-pair
+check.
 
 A band proposal is a span `[lo, hi)` of CURRENT-render luma — the field's
 guide domain — and never an evidence-bin index: the range producer bins by the
@@ -3018,9 +3035,14 @@ stage compacts its tentative attachment text before that bound, and typed
 producer readings stay the retained disclosure.
 
 The tile pass reads the pair through `fit::analysis_pair`, so its coverage
-and estimator vectors are congruent by construction (asserted). Caching
-scoped tile evidence by `TileId` is registered as a performance follow-up; it
-is not implemented here.
+and estimator vectors are congruent by construction (asserted). Scoped tile
+evidence is cached by `TileId` (v1.2.4): everything in a node's reading except
+its residual is a function of the frozen evidence model and the tile's own
+geometry, so the full-frame `scoped_mask_evidence` and the
+`structure_divergence` behind it are computed once per node per fit instead of
+once per node per generation. On the calibration pair the traversal reads 50
+node evidences and computes 17 of them, and the cached reading is the same
+reading a fresh one produces (`the_tile_evidence_cache_recomputes_each_node_once`).
 
 Each leaf reuses `attach_one_zone` through `ZoneAttachment { min_share: 0.03,
 frame_regression_tol: 0.0 }`, then passes its own `0.012` cross-boundary-step
@@ -3033,9 +3055,14 @@ named bitmap loss; no gradient approximation is emitted.
 **Free-form remainder masks (B3, 2026-08-28).** After the quadtree tiles,
 `fit_zoned::freemask` consumes only analysis pixels whose local-field remainder
 still exceeds `SPATIAL_RESIDUAL_MIN` and whose accepted-tile alpha is below
-0.5. Deterministic 4-connected components are sign-pure and ranked by
-`sum(abs(remainder) * LocalField.weight)`. Components below the fallback
-64-pixel footprint floor are refused before any render,
+0.5. Since v1.2.4 that alpha is the one the boundary gate LEFT the tile — its
+raster times the accepted `k` — so a tile negotiated down to a sixth of its
+dial reserves a sixth of its footprint instead of all of it, and what the
+filter does remove is disclosed by number, pixel count and both shares instead
+of silently never becoming a component. Deterministic 4-connected components
+are sign-pure and ranked by `sum(abs(remainder) * LocalField.weight)`.
+Components below the shared 64-pixel footprint floor (`MIN_MASK_PIXELS`, which
+v1.2.4 also applies to spatial tiles) are refused before any render,
 each must clear the shared 3% source/target evidence gate and
 `structure_divergence < DIVERGENCE_ZONE`, with the two-proposal cap disclosing
 all capped or otherwise refused components. Accepted components use the tile

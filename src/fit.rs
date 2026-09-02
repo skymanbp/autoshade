@@ -804,6 +804,7 @@ fn spatial_evidence(
     }
     let mut weights = vec![0.0f32; sp.len().min(tp.len())];
     let mut divergences = vec![f32::INFINITY; weights.len()];
+    let mut readings = Vec::with_capacity((ROWS * COLS) as usize);
     for row in 0..ROWS {
         for col in 0..COLS {
             let mut mask = vec![0.0f32; ss.len()];
@@ -814,16 +815,31 @@ fn spatial_evidence(
                     }
                 }
             }
-            let reading = structure_divergence(&ss, &tt, sw, sh, &mask);
-            let d = reading.d;
-            let confidence = (1.0 - d / EVIDENCE_DIVERGENCE_CUTOFF).clamp(0.0, 1.0);
-            for y in 0..h {
-                for x in 0..w {
-                    if x * COLS / w.max(1) == col && y * ROWS / h.max(1) == row {
-                        let i = (y * w + x) as usize;
-                        weights[i] = confidence;
-                        divergences[i] = d;
-                    }
+            readings.push(structure_divergence(&ss, &tt, sw, sh, &mask));
+        }
+    }
+    // WHOLESALE, or per cell. A frame whose every cell falls under the
+    // instrument's resolvable core carries no structural reading anywhere,
+    // and withholding every pixel's evidence on that ground would starve a
+    // frame nothing measured; there the modulation is dropped, which is the
+    // behaviour this function had before the instrument learned to abstain.
+    // Where SOME cell resolves the frame IS measured, and a cell that did not
+    // resolve earns no support claim: its divergence keeps the initialised
+    // infinity and its confidence stays 0.
+    if readings.iter().all(Option::is_none) {
+        return (vec![1.0; weights.len()], vec![0.0; divergences.len()]);
+    }
+    for (cell, reading) in readings.into_iter().enumerate() {
+        let (row, col) = (cell as u32 / COLS, cell as u32 % COLS);
+        let Some(reading) = reading else { continue };
+        let d = reading.d;
+        let confidence = (1.0 - d / EVIDENCE_DIVERGENCE_CUTOFF).clamp(0.0, 1.0);
+        for y in 0..h {
+            for x in 0..w {
+                if x * COLS / w.max(1) == col && y * ROWS / h.max(1) == row {
+                    let i = (y * w + x) as usize;
+                    weights[i] = confidence;
+                    divergences[i] = d;
                 }
             }
         }
@@ -860,8 +876,13 @@ pub fn evidence_model_for(
     };
     let (spatial_weights, spatial_divergence) = spatial_evidence(sp, tp, w, h);
     let all_spatial = vec![1.0f32; n];
-    let global_divergence = structure_divergence(sp, tp, w, h, &all_spatial).d;
-    let globally_same_content = global_divergence < DIVERGENCE_GLOBAL;
+    // The frame-wide reading carries the same wholesale rule: its mask is
+    // all-ones, so no cell mask can resolve where this one abstains, and an
+    // abstention here means the frame itself is under the instrument's
+    // resolvable core. That is not a verdict about content, so it must not
+    // withhold every range's evidence.
+    let global_reading = structure_divergence(sp, tp, w, h, &all_spatial);
+    let globally_same_content = global_reading.is_none_or(|r| r.d < DIVERGENCE_GLOBAL);
     let spatial_supported = spatial_divergence
         .iter()
         .map(|&divergence| globally_same_content || divergence < DIVERGENCE_ZONE)
@@ -1187,10 +1208,22 @@ fn weighted_mean_chroma(px: &[[f32; 3]], weights: &[f32]) -> Option<f32> {
 }
 
 impl Divergence {
+    /// A hand-built matched reading, for fixtures that need one.
+    /// PRODUCTION NEVER MANUFACTURES ONE: `structure_divergence` either
+    /// measures a divergence or abstains, and a manufactured 0.0 on a
+    /// production path is the defect v1.2.4 removed.
+    #[cfg(test)]
     fn matched() -> Self {
         Self { correlation: 1.0, energy_error: 0.0, d: 0.0 }
     }
 }
+
+/// The smallest eroded core [`structure_divergence`] will read. The
+/// translation search inside it already refuses any shift supported by fewer
+/// than this many paired samples, so below this size the correlation half of
+/// the statistic has no support at any offset and the reading would be the
+/// constant its own guard produces rather than a measurement.
+pub const STRUCTURE_MIN_CORE_PX: usize = 100;
 
 /// Tone-invariant structural comparison shared by the global and zoned
 /// solvers. Luma is rank-equalized through a mask-weighted 1024-bin CDF; a
@@ -1198,16 +1231,29 @@ impl Divergence {
 /// Central-difference rank-gradient maps are pooled at sigma 2 and correlated
 /// over translations of +/-6 pixels. Five Gaussian bands (sigma 1/2/4/8/16)
 /// contribute the RMS log2 energy-ratio error.
+///
+/// `None` is an ABSTENTION and never a matched reading. It is returned when
+/// the rasters are not one geometry, or when the eroded core holds fewer than
+/// [`STRUCTURE_MIN_CORE_PX`] pixels. Both used to return
+/// `Divergence::matched()`, i.e. D = 0 — the value every consumer reads as
+/// "the structure survived" — so a free-mask component of 90 core pixels
+/// cleared the structural gate for free and [`crate::fit_field::local_support`]
+/// handed an unmeasurable cell the full 1.0 support of a measured match.
+/// A caller answers its own question without a reading: a gate that needs
+/// "the structure survived" REFUSES, a decision that needs "the structure was
+/// destroyed" does not fire, and a per-cell modulation drops the unread cell
+/// — or, where no cell in the frame resolves, drops the modulation wholesale
+/// rather than withholding evidence over a frame nothing measured.
 pub fn structure_divergence(
     src_px: &[[f32; 3]],
     tgt_px: &[[f32; 3]],
     w: u32,
     h: u32,
     weights: &[f32],
-) -> Divergence {
+) -> Option<Divergence> {
     let n = w as usize * h as usize;
     if n == 0 || src_px.len() != n || tgt_px.len() != n || weights.len() != n {
-        return Divergence::matched();
+        return None;
     }
 
     let rank_equalized = |px: &[[f32; 3]]| -> Vec<f32> {
@@ -1250,8 +1296,8 @@ pub fn structure_divergence(
         }
         core = next;
     }
-    if core.iter().filter(|&&v| v).count() < 100 {
-        return Divergence::matched();
+    if core.iter().filter(|&&v| v).count() < STRUCTURE_MIN_CORE_PX {
+        return None;
     }
 
     let gaussian_blur = |input: &[f32], sigma: f32| -> Vec<f32> {
@@ -1387,7 +1433,7 @@ pub fn structure_divergence(
         / 5.0)
         .sqrt();
     let d = ((1.0 - correlation).powi(2) + energy_error.powi(2)).sqrt();
-    Divergence { correlation, energy_error, d }
+    Some(Divergence { correlation, energy_error, d })
 }
 
 /// The common, pixel-aligned 384×256 analysis raster used by both scopes and
@@ -1406,12 +1452,14 @@ pub(crate) fn divergence_raster(
     (pixels_of(&src_base), pixels_of(&tgt_grid), w, h)
 }
 
+/// [`structure_divergence`] over the pair's own analysis raster, carrying that
+/// function's abstention: `None` is "not measured", never "matched".
 pub(crate) fn structure_divergence_for(
     src: &DynamicImage,
     target: &DynamicImage,
     base: &EditRecipe,
     weights: Option<&[f32]>,
-) -> Divergence {
+) -> Option<Divergence> {
     let (sp, tp, w, h) = divergence_raster(src, target, base);
     let all;
     let weights = match weights {
@@ -1914,8 +1962,8 @@ pub fn same_frame_plausible_dims(a: (u32, u32), b: (u32, u32)) -> bool {
 /// The two analysis rasters of a pair, in ONE geometry.
 ///
 /// Every evidence statistic pairs source pixel `i` with target pixel `i`, and
-/// [`structure_divergence`] refuses (returns `matched`, D = 0) when the two
-/// rasters differ in length. Thumbnailing the two images independently let a
+/// [`structure_divergence`] abstains (returns `None`) when the two rasters
+/// differ in length. Thumbnailing the two images independently let a
 /// ONE-ROW difference decide that: a 1600x1067 source lands on 384x256 and a
 /// 1600x1069 target on 384x257, the frame-wide divergence read as 0, the
 /// same-content verdict came out true and no evidence range could ever be
@@ -1983,7 +2031,12 @@ pub struct FitReport {
     pub mode: FitMode,
     /// Structural reading that selected `mode` (promotion may select
     /// Atmosphere even when this frame-global value is below its threshold).
-    pub divergence: Divergence,
+    /// `None` is [`structure_divergence`]'s abstention — not a matched
+    /// reading. In production this reading always resolves, because
+    /// [`divergence_raster`] builds a fixed 384x256 grid whose all-ones core
+    /// is 378x250 px; the option is here so no consumer can read a matched
+    /// verdict off a frame nothing measured.
+    pub divergence: Option<Divergence>,
     /// The rationale as typed notes (L12#2B): `render_en(&notes)` is the
     /// recipe's `rationale` byte-for-byte (empty prose prefix — the fit
     /// rationale is fully deterministic), so the GUI renders it localized
@@ -2393,7 +2446,11 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure_opts(
     let evidence = evidence_model_for(&sp, &tp, s_img.width(), s_img.height());
     let err_before = look_err_with_evidence(&sp, &tp, &evidence);
     let divergence = structure_divergence_for(src, target, base, None);
-    let mode = if divergence.d >= DIVERGENCE_GLOBAL || divergent_zone_promotes {
+    // Atmosphere is the claim that the structure was REPLACED, so an
+    // abstention cannot promote into it: `is_some_and` refuses to fire on a
+    // reading nobody took, where the old `d >= …` on a matched-by-default
+    // value would have read 0.0 and refused for the wrong reason.
+    let mode = if divergence.is_some_and(|r| r.d >= DIVERGENCE_GLOBAL) || divergent_zone_promotes {
         FitMode::Atmosphere
     } else {
         FitMode::Full
@@ -3369,7 +3426,7 @@ fn fit_atmosphere_from_parts(
     tp: &[[f32; 3]],
     base: &EditRecipe,
     same_frame: bool,
-    divergence: Divergence,
+    divergence: Option<Divergence>,
     structural: &EvidenceModel,
     defer_disclosure: bool,
     strength: crate::recipe::GradeStrength,
@@ -4117,7 +4174,7 @@ struct Measured<'a> {
     tp: &'a [[f32; 3]],
     same_frame: bool,
     mode: FitMode,
-    divergence: Divergence,
+    divergence: Option<Divergence>,
     evidence: &'a EvidenceModel,
     structural_evidence: Option<&'a EvidenceModel>,
     defer_disclosure: bool,
@@ -4249,7 +4306,10 @@ fn compose_report(mut recipe: EditRecipe, m: Measured<'_>, solve: SolveFacts) ->
             vec![
                 ("err_before", format!("{err_before:.3}")),
                 ("err_after", format!("{err_after:.3}")),
-                ("d", format!("{:.3}", m.divergence.d)),
+                // An unread frame says so rather than printing a 0.000 that
+                // would read as a measured perfect match.
+                ("d", m.divergence.map_or_else(
+                    || "unmeasured".to_string(), |r| format!("{:.3}", r.d))),
             ],
         ),
     );
@@ -4873,7 +4933,10 @@ pub fn rescore_report(
         .and_then(|share| share.parse::<f32>().ok())
         .zip(carried_arg(keys::FIT_NOTE_CAST_HUE_FANNED, "fan").and_then(|fan| fan.parse::<f32>().ok()));
     let divergence = structure_divergence_for(src, target, &EditRecipe::default(), None);
-    let mode = if divergence.d >= DIVERGENCE_GLOBAL || carried(keys::FIT_SUMMARY_ATMOSPHERE) {
+    // Same stance as the solve path: an unread frame is not promoted.
+    let mode = if divergence.is_some_and(|r| r.d >= DIVERGENCE_GLOBAL)
+        || carried(keys::FIT_SUMMARY_ATMOSPHERE)
+    {
         FitMode::Atmosphere
     } else {
         FitMode::Full
@@ -7775,8 +7838,10 @@ pub(crate) fn look_err_with_evidence(
         }
     }
     let (w, h) = (evidence.width, evidence.height);
+    // A PENALTY term: with no reading there is nothing to charge. That is what
+    // the abstention says here — not that the structure survived.
     let structural = if w > 0 && h > 0 && evidence.source_weights.len() == a.len() {
-        structure_divergence(a, b, w, h, &evidence.source_weights).d
+        structure_divergence(a, b, w, h, &evidence.source_weights).map_or(0.0, |r| r.d)
     } else {
         0.0
     };
@@ -8140,7 +8205,7 @@ mod tests {
                 tp: &px,
                 same_frame: true,
                 mode: FitMode::Atmosphere,
-                divergence: Divergence::matched(),
+                divergence: Some(Divergence::matched()),
                 evidence: &evidence,
                 structural_evidence: Some(&evidence),
                 defer_disclosure: false,
@@ -8701,7 +8766,8 @@ mod tests {
         let synthetic = structure_divergence_for(&src, &tgt, &EditRecipe::default(), None);
         eprintln!("STRUCTURE_CALIBRATION synthetic={synthetic:?}");
         assert!(
-            synthetic.d >= DIVERGENCE_GLOBAL,
+            synthetic.expect("a 384x256 analysis raster always resolves").d
+                >= DIVERGENCE_GLOBAL,
             "a generated cloud deck must cross the global threshold: {synthetic:?}"
         );
 
@@ -8720,7 +8786,7 @@ mod tests {
             );
             eprintln!("STRUCTURE_CALIBRATION real={measured:?}");
             assert!(
-                (measured.d - 0.491).abs() <= 0.05,
+                (measured.expect("resolvable").d - 0.491).abs() <= 0.05,
                 "generated-cloud calibration drifted: {measured:?}"
             );
         }
@@ -8754,7 +8820,8 @@ mod tests {
                 structure_divergence_for(&source, &target, &EditRecipe::default(), None);
             eprintln!("STRUCTURE_CALIBRATION {file} {measured:?}");
             assert!(
-                measured.d < DIVERGENCE_GLOBAL && (measured.d - want).abs() <= 0.05,
+                measured.is_some_and(|r| r.d < DIVERGENCE_GLOBAL
+                    && (r.d - want).abs() <= 0.05),
                 "{file} calibration drifted: {measured:?}, expected {want:.3}"
             );
         }
@@ -8830,7 +8897,7 @@ mod tests {
         );
         eprintln!(
             "SAME_CONTENT_DIAG cornwall d={:.4} supported={}/{} ident={:.4} luma_weight={:.4} look={:.6}->{:.6} joint={joint_base:?}->{joint_after:?} recipe={:?}",
-            report.divergence.d,
+            report.divergence.expect("resolvable").d,
             supported,
             evidence.spatial_supported.len(),
             evidence.identifiability,
@@ -8862,11 +8929,11 @@ mod tests {
                         }
                     }
                 }
-                cells.push(structure_divergence(&ss, &tt, sw, sh, &mask).d);
+                cells.push(structure_divergence(&ss, &tt, sw, sh, &mask).map(|r| r.d));
             }
         }
         eprintln!("SAME_CONTENT_DIAG cells={cells:?}");
-        assert!(report.divergence.d < DIVERGENCE_GLOBAL);
+        assert!(report.divergence.expect("resolvable").d < DIVERGENCE_GLOBAL);
         assert!(supported > evidence.spatial_supported.len() / 2);
         assert!(luma_weight > 0.5);
         // The paired robust estimator fits this real pair — re-measured
@@ -9782,7 +9849,7 @@ mod tests {
         eprintln!(
             "CONTENT_DIVERGENT_DIAG mode={:?} d={:.4} look={:.6}->{:.6} confidence={:.3} recipe ev={:.2} temp={:?} tint={:.1} curve={} sat={:.1} detail={:.1}/{:.1}",
             report.mode,
-            report.divergence.d,
+            report.divergence.map_or(f32::NAN, |r| r.d),
             report.err_before,
             report.err_after,
             report.recipe.confidence,
@@ -9927,7 +9994,7 @@ mod tests {
         let promoted = fit_recipe_from_promoted(&source, &source, &EditRecipe::default(), true);
         assert_eq!(promoted.mode, FitMode::Atmosphere);
         assert!(
-            promoted.divergence.d < DIVERGENCE_GLOBAL,
+            promoted.divergence.expect("resolvable").d < DIVERGENCE_GLOBAL,
             "the zone-share branch, not global D, must be load-bearing"
         );
         assert_eq!(DIVERGENT_COVER_PROMOTES, 0.35);
@@ -10054,7 +10121,10 @@ mod tests {
             .find(|n| n.key == crate::rationale::keys::FIT_SUMMARY_ATMOSPHERE)
             .expect("Atmosphere summary note");
         let disclosed = summary.args.iter().find(|(key, _)| *key == "d").unwrap().1.clone();
-        assert_eq!(disclosed, format!("{:.3}", report.divergence.d));
+        assert_eq!(
+            disclosed,
+            format!("{:.3}", report.divergence.expect("resolvable").d)
+        );
         assert!(report.recipe.rationale.contains("structure cannot be reconstructed"));
         assert!(report.recipe.rationale.contains(&format!("D={disclosed}")));
         assert!(report
@@ -13815,7 +13885,7 @@ mod tests {
                     tp: &px,
                     same_frame: true,
                     mode: FitMode::Full,
-                    divergence: Divergence::matched(),
+                    divergence: Some(Divergence::matched()),
                     evidence,
                     structural_evidence: None,
                     defer_disclosure: false,
