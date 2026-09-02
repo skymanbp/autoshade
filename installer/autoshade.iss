@@ -161,10 +161,16 @@ const
   // uninstall leaves a dead directory on the user's PATH forever.
   InstallerStateKey = 'Software\Autoshop\InstallerScenario';
 #endif
-  // 1 = setup wrote ';' and then the install directory; 2 = setup wrote the
-  // directory alone, because the PATH was empty or already ended in ';'. The
-  // uninstaller deletes exactly that span and nothing else, so a PATH that
-  // carried a trailing or doubled separator before setup ran carries it after.
+  // 3 = setup wrote ';' and then the install directory; 4 = setup wrote the
+  // directory alone, because the PATH was empty or already ended in ';'. For
+  // 3 and 4 the uninstaller deletes exactly that span and nothing else, so a
+  // PATH that carried a trailing or doubled separator before setup ran carries
+  // it after. 1 is what every installer before 1.2.4 wrote: it added the entry
+  // but recorded nothing about the separator, so for 1 the uninstaller takes
+  // the entry alone and leaves any separator where it is — exact for the
+  // Windows default user PATH, which ends in ';', and at worst one harmless
+  // trailing ';' otherwise. (The 1.2.4 installer-upgrade workflow found this:
+  // its base install is the previous published release.)
   PathMarkerName = 'PathAddedByInstaller';
   DevelopStoreName = 'DevelopStore';
   // Where Inno itself records this install. DisplayVersion in here is the only
@@ -415,11 +421,11 @@ begin
   end;
 
   NewPath := ExistingPath;
-  Marker := 2;
+  Marker := 4;
   if (NewPath <> '') and (NewPath[Length(NewPath)] <> ';') then
   begin
     NewPath := NewPath + ';';
-    Marker := 1;
+    Marker := 3;
   end;
   NewPath := NewPath + InstallDir;
 
@@ -427,7 +433,7 @@ begin
     RaiseException('Could not update the current user PATH.');
   if not RegWriteDWordValue(HKCU, InstallerStateKey, PathMarkerName, Marker) then
     RaiseException('PATH was updated, but the uninstall marker could not be written.');
-  if Marker = 1 then
+  if Marker = 3 then
     Log('PATH task: appended a separator and the install directory to HKCU\Environment\Path.')
   else
     Log('PATH task: appended the install directory to HKCU\Environment\Path (it already ended in a separator, or was empty).');
@@ -437,6 +443,7 @@ procedure RemoveInstallDirFromUserPath;
 var
   ExistingPath, NewPath, InstallDir: String;
   Start, Len: Integer;
+  Last: Boolean;
   Marker: Cardinal;
 begin
   if (not RegQueryDWordValue(HKCU, InstallerStateKey, PathMarkerName, Marker)) or
@@ -453,22 +460,26 @@ begin
   end;
 
   // Take back exactly the bytes AddInstallDirToUserPath wrote: the entry, and
-  // the one separator it put in front of the entry (marker 1). When it wrote
-  // the entry straight after a separator the user already had (marker 2), the
-  // entry alone goes, and that separator stays where it was. Re-joining the
-  // parsed entries instead dropped a trailing ';' and would collapse a doubled
-  // one — the user's PATH must come back byte for byte. Should the user have
-  // moved the entry off the end, the separator on the side setup did not
-  // write is taken instead, so no empty entry is left behind.
+  // the one separator it put in front of the entry (marker 3). When it wrote
+  // the entry straight after a separator the user already had (marker 4), the
+  // entry alone goes, and that separator stays where it was. A marker of 1
+  // came from an installer before 1.2.4, which recorded nothing about the
+  // separator: the entry alone goes, so a user byte is never taken — exact
+  // when the PATH ended in ';' before that install (the Windows default), one
+  // harmless trailing ';' otherwise. Re-joining the parsed entries instead
+  // dropped a trailing ';' and would collapse a doubled one. Should the user
+  // have moved the entry off the end, the separator that follows it is taken
+  // with it, so no empty entry is left in the middle.
   NewPath := ExistingPath;
-  if (Marker = 1) and (Start > 1) and (NewPath[Start - 1] = ';') then
+  Last := Start + Len > Length(NewPath);
+  if (Marker = 3) and (Start > 1) and (NewPath[Start - 1] = ';') then
     Delete(NewPath, Start - 1, Len + 1)
-  else if (Marker = 2) and (Start + Len > Length(NewPath)) then
-    Delete(NewPath, Start, Len)
-  else if (Start + Len <= Length(NewPath)) and (NewPath[Start + Len] = ';') then
+  else if (Marker = 3) and (not Last) and (NewPath[Start + Len] = ';') then
     Delete(NewPath, Start, Len + 1)
-  else if (Start > 1) and (NewPath[Start - 1] = ';') then
-    Delete(NewPath, Start - 1, Len + 1)
+  else if Last then
+    Delete(NewPath, Start, Len)
+  else if NewPath[Start + Len] = ';' then
+    Delete(NewPath, Start, Len + 1)
   else
     Delete(NewPath, Start, Len);
 

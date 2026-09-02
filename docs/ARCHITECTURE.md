@@ -3513,7 +3513,13 @@ a PATH that ended in `;` before setup — a GitHub runner's does, a developer's
 usually not — ends in `;` after uninstall. The workflow's first run found the
 old split-and-rejoin eating that trailing separator; the chain now runs under
 three PATH shapes (as found, trailing `;`, trailing `;;`) and asserts the
-bytes come back identical under each.
+bytes come back identical under each. An install made by an installer
+before 1.2.4 recorded only that it added the entry, not whether it wrote the
+separator, so over such an install the uninstaller takes the entry alone and
+leaves any separator — exact for the Windows default user PATH, which ends
+in `;`, and at worst one trailing `;` otherwise; that is what the chain
+asserts when its base is a pre-1.2.4 release, and it goes back to byte
+identity by itself once the previous release is 1.2.4.
 
 A scenario run must never be able to touch the real install, so the identity is
 a compile-time parameter: `/DAppIdOverride` and `/DAppNameOverride` give a test

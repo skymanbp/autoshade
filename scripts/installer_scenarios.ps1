@@ -114,6 +114,24 @@ function Get-UserPathRaw {
     return [string]$key.GetValue('Path', '', 'DoNotExpandEnvironmentNames')
 }
 
+# The uninstaller's promise about the user PATH, as it can be kept. An
+# installer before 1.2.4 recorded that it added the entry but not whether it
+# wrote the separator, so an uninstall over such a base is exact up to one
+# trailing ';' -- exact outright when the PATH ended in ';' to begin with,
+# which the Windows default user PATH does. From a 1.2.4 base on, byte for
+# byte. The comparison is keyed on the base VERSION, so this relaxation
+# expires by itself once the previous published release is 1.2.4 or later.
+function Assert-UserPathRestored {
+    param([string]$Before, [string]$What)
+    $now = Get-UserPathRaw
+    if ([version]$BaseVersion -lt [version]'1.2.4') {
+        Assert-Same $now.TrimEnd(';') $Before.TrimEnd(';') "$What, up to the trailing separator a pre-1.2.4 installer could not record"
+    }
+    else {
+        Assert-Same $now $Before $What
+    }
+}
+
 function Set-UserPathRaw {
     # Written back with the kind it was found in, so a REG_SZ PATH is not
     # silently promoted to REG_EXPAND_SZ by the test harness.
@@ -615,7 +633,7 @@ Assert-That (-not (Test-Path -LiteralPath (Join-Path $installDir 'python\segment
 Assert-That (-not (Test-Path -LiteralPath $group)) 'the Start Menu group is gone'
 Assert-Same (Get-DisplayNameEntryCount $AppName) 0 'the Programs and Features entry is gone'
 Assert-Same (Get-PathEntryCount $installDir) 0 'the PATH entry is gone'
-Assert-Same (Get-UserPathRaw) $pathBefore 'the user PATH is byte-identical to before the run'
+Assert-UserPathRestored $pathBefore 'the user PATH is byte-identical to before the run'
 # Whichever key this build wrote -- the shipped one on a runner with no other
 # AutoShade, the scenario one on a developer machine -- HKCU\Software\Autoshop
 # has to be back to the state the run found it in. Naming only the scenario key
@@ -686,7 +704,7 @@ Write-Head 'cleanup proof'
 Assert-That (-not (Test-Path -LiteralPath (Get-UninstallKeyPath $AppId))) "no registry key for $AppId"
 Assert-That (-not (Test-Path -LiteralPath $installDir)) "no directory at $installDir"
 Assert-That (-not (Test-Path -LiteralPath $group)) "no Start Menu folder at $group"
-Assert-Same (Get-UserPathRaw) $pathBefore 'the user PATH is byte-identical to before the run'
+Assert-UserPathRestored $pathBefore 'the user PATH is byte-identical to before the run'
 Assert-That (-not (Test-Path -LiteralPath 'HKCU:\Software\Autoshop\InstallerScenario')) `
     'no scenario state left in the registry'
 Assert-Same (Test-Path -LiteralPath 'HKCU:\Software\Autoshop') $autoshopKeyBefore `
