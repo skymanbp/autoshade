@@ -14,7 +14,119 @@ const RANGE_MIN_RAMP: f32 = 1.0 / 17.0;
 /// Two evidence intervals provide measured transition headroom before the
 /// shared boundary shrink has to reduce correction differentials.
 const RANGE_MAX_RAMP: f32 = 2.0 / 17.0;
-/// Native range transitions reuse the calibrated zoned signed-rim budget.
+/// Native range transitions reuse the calibrated zoned signed-rim budget
+/// — MEASURED as defensible in that role on 2026-09-01, no longer carried
+/// over on the shared number alone.
+///
+/// THIS RULER IS NOT `boundary_step`. It never differences the scene away:
+/// `range_transition_rim` admits a neighbouring pair only where the
+/// REFERENCE crossing is already smooth (`|dl| <= 2.5/255`) and then
+/// reports the RENDERED gradient there, so the scene's own gradient is
+/// INSIDE the reading and is spent before the correction adds anything.
+/// That argument is not new — the comment inside `range_transition_rim`
+/// has said since v1.2.2 that a graded context here is capped near 2.5/255
+/// by construction and so has no dynamic range. What this block adds is
+/// the MEASUREMENT behind it and a test that pins the scale.
+///
+/// CHARGING HERE WOULD OVER-TIGHTEN, NOT LOOSEN. v1.2.2's charge is
+/// `raw * (MAX / budget)` with `budget` clamped at or below `MAX`
+/// (`fit_zoned.rs`, `boundary_step`), so the multiplier is >= 1 by
+/// construction and can never weaken a gate. For THIS ruler the context
+/// term is the admitted crossing itself, capped at 2.5/255 = 0.0098 —
+/// always under this 0.012 ceiling — so every crossing would be charged at
+/// least 1.22x and the pass condition would collapse to
+/// `scene + correction <= scene`: no steepening admitted anywhere, which
+/// refuses nearly every band. The tile seam v1.2.2 fixed is the opposite
+/// failure mode: the step ruler CANCELS the scene and then handed clean
+/// sky the same flat budget as texture, which is why that ruler had to be
+/// charged per crossing and this one must not be.
+///
+/// WHAT THE BUDGET BUYS IS A p90, NOT A PER-CROSSING CAP. The reading is
+/// the 90th percentile of |signed bow| (`ZONE_BOUNDARY_PERCENTILE`), so a
+/// tenth of the crossings sit above it, ungoverned. At the ranked crossing:
+/// the widest crossing the window admitted on either real pair measures
+/// 0.00978 luma (2.49 codes) against this budget's 3.06, so where the scene
+/// already fills the window a correction adds 0.57 of a code and no more,
+/// and where it is flat the ceiling is the whole 3.06 — 1.22x the steepest
+/// crossing the window is willing to call smooth. The measured MAXIMA are
+/// above both, as a p90 gate permits: calibration 0.00978 -> 0.01217
+/// (1.24x, +0.61 code), viaduct 0.00978 -> 0.01407 (1.44x, +1.09 codes,
+/// past 0.012 itself).
+///
+/// First-party on the real pairs, segmentation and correspondence made
+/// unavailable so `match --zoned` takes this fallback. TWO RASTERS are in
+/// play and every number below says which. The ENGINE gates on the 384-px
+/// thumbnail it develops itself (its crossing counts appear in the
+/// rationale); the readings are a transcription of this same statistic
+/// over a full-resolution develop downsampled to a 384-px long edge. The
+/// reference the engine passes is `&global_px` — the TWIN, global
+/// correction with no range masks — so the transcription uses the twin as
+/// its basis too.
+///
+/// * calibration pair, band luma [0.471, 0.765] at -0.56 EV: gate k=1.000
+///   over 18651 engine crossings. Transcribed over 18297 crossings, twin
+///   basis: uncorrected p90 0.00392 (1.00 code, max 0.00978), delivered
+///   p90 0.00230 (0.59, max 0.01217).
+/// * stone-viaduct pair, band luma [0.118, 0.882] at -0.80 EV and
+///   saturation +23: gate k=1.000 over 1214 engine crossings. Transcribed
+///   over 1224, twin basis: uncorrected p90 0.00874 (2.23 codes, max
+///   0.00978), delivered p90 0.00857 (2.19, max 0.01407) — the band moved
+///   the ranked reading DOWN. Read against the no-masks base instead of
+///   the twin the same pair gives 0.00874 over 1272; that is not the frame
+///   the gate sees.
+/// * the Cornwall pair attaches no band at all: one is dropped by the
+///   do-no-harm arm and two abstain, so it carries no reading either way.
+///
+/// The delivered transitions are RAMPS, measured and not assumed, with the
+/// instrument's own noise beside them. Over the populated 1-code bins of
+/// the delivered transfer (twin luma to delivered luma, 1200 px) the
+/// calibration band shows 0 reversals in 30 bins, minimum slope +0.019 and
+/// maximum +0.964 — COMPRESSIVE: 30 input codes into 9.9 delivered ones,
+/// with 9 of the 30 bins under slope 0.1 — and the viaduct 0 reversals in
+/// 19 bins with +0.855. The same estimator over the zero-weight control
+/// region, where the true slope is exactly 1.000, reads +0.942 to +1.039:
+/// a +/-0.05 noise floor, so +0.019 is one noise unit from a reversal.
+/// That is why the tone-reversal gap below is REGISTERED and not
+/// dismissed. The mask-free `scripts/rim_overshoot.py` reads mean 0.0006 /
+/// p90 0.0018 / max 0.0082 at the calibration transition against its own
+/// control of exactly 0.0000; it is NOT applicable at the viaduct's
+/// contour and says so in its own numbers — its 60 px plateau windows must
+/// bracket the transition, and there the band's spread of 40.4 codes
+/// exceeds the plateau gap of 22.1 on 201 of 231 columns.
+///
+/// THE SEAM-STYLE READING IS BASIS-DEPENDENT HERE, WHICH IS WHY IT DOES
+/// NOT DECIDE. Stepping across the calibration band's contours in 8-bit
+/// codes at 1200 px, the shape v1.2.2 used on the tile, all four measured
+/// rows: lo_outer +9.05 codes at z +10.08 on the twin basis but +2.83 at
+/// z +1.94 on the neutral one; lo +7.18 at z +6.99 twin and +8.28 at
+/// z +8.92 neutral (p90 |.| 22.84 codes, 26.8x the control's sd of 0.853).
+/// A 5x swing at ONE contour between two honest bases is itself the
+/// evidence. A range edge IS an iso-luminance contour of the photograph,
+/// so a difference across it is the correction doing its job, and the
+/// transfer above shows the ramp COMPRESSING (dT max +0.964 inside it):
+/// those 9 codes are the scene's own gradient being flattened, not an
+/// induced step. A tile boundary is an arbitrary rectangle over continuous
+/// sky, where any step is an artefact — which is why the same statistic
+/// decided v1.2.2 and cannot decide this.
+///
+/// WHAT THIS DOES NOT SAY. The ruler ranks MAGNITUDE, so it cannot tell a
+/// preserved gradient from an inverted one of the same size. Driving the
+/// same shape on a synthetic 16-bit grey ramp at the ramp widths the
+/// producer emits: a 1.5/17 band reverses from -0.56 EV (a 2-code dip;
+/// 26.5 codes at -1.50) and a 1/17 band (`RANGE_MIN_RAMP`) from -0.35 EV
+/// (1 code; 32 at -1.50), while `rim_overshoot.py` reads max 0.0000 over
+/// its full n=1024 on every one of those rows, because the DIFFERENCE it
+/// ranks stays monotone. The `RANGE_MAX_RAMP` (2/17) rows of that probe
+/// are UNMEASURABLE by that instrument rather than measured clean: it
+/// needs 180 px of margin each side and the probe's locator lands exactly
+/// on row 180 of a 512-row frame, so every column is rejected (n=0). The
+/// probe also pins the band at the CALIBRATION position, and luminance
+/// POSITION is a third axis it does not sweep — the viaduct's real 2/17
+/// band at -0.80 EV sits at codes 0-30 and does not reverse. Neither real
+/// pair reaches that corner, but nothing in this gate stands between them
+/// and it. Registered for its own batch: the answer is a sign test on the
+/// delivered transfer, not a re-tune of this ceiling, and it would change
+/// which corrections attach.
 const RANGE_BOUNDARY_RIM_MAX: f32 = 0.012;
 /// Native bands reuse the global evidence model's measured 1.5% population
 /// floor; a smaller interval is not a two-sided measurement.
@@ -1407,6 +1519,90 @@ mod tests {
         assert!(
             reading.rim > RANGE_BOUNDARY_RIM_MAX && reading.rim < 0.05,
             "the retained 5/255-class stress must cross 0.012 but not 0.05: {reading:?}"
+        );
+    }
+
+    /// A ramp whose columns advance by 2 and 4 codes in turn: the 2-code
+    /// steps sit inside `range_transition_rim`'s smooth-crossing window and
+    /// the 4-code ones are the real edges it exists to exclude. Vertical
+    /// neighbours are identical, exactly as a real smooth region's are along
+    /// its iso-luminance contours.
+    fn mixed_gradient_fixture() -> (Vec<[f32; 3]>, Vec<RangeMask>) {
+        let (w, h) = (80u32, 8u32);
+        let source = DynamicImage::ImageRgb8(image::ImageBuffer::from_fn(w, h, |x, _| {
+            let steps = (x / 2) * 6 + (x % 2) * 2;
+            image::Rgb([(5 + steps).min(255) as u8; 3])
+        }));
+        // One transition spanning the whole ramp, so the reading is the p90
+        // of the fixture's own gradient and nothing else.
+        let ranges = vec![RangeMask::Luminance {
+            lo_outer: 0.0,
+            lo: 0.98,
+            hi: 0.99,
+            hi_outer: 1.0,
+        }];
+        let reference = fit::pixels_of(&render::develop_preview(
+            &source,
+            &crate::recipe::EditRecipe::default(),
+        ));
+        (reference, ranges)
+    }
+
+    /// THE SCALE OF THIS RULER, pinned (2026-09-01). Unlike [`boundary_step`],
+    /// `range_transition_rim` never differences the scene away: it reports the
+    /// RENDERED gradient at crossings whose REFERENCE gradient is already
+    /// smooth (<= 2.5/255). Two consequences hold the budget in place and
+    /// neither had a test.
+    ///
+    /// 1. The admission window BOUNDS an untouched render's own reading, so
+    ///    [`RANGE_BOUNDARY_RIM_MAX`] has to clear 2.5/255 or the gate would
+    ///    shrink corrections to pay for gradients they never touched. At the
+    ///    p90 the gate ranks, what is left where the scene already fills the
+    ///    window is 0.012 - 2.5/255 = 0.0022 luma, 0.56 of a code — and a
+    ///    tenth of the crossings rank above it and are not bounded at all.
+    /// 2. This family declines the contextual charge v1.2.2 gave the hard
+    ///    raster ruler, which is what `charged == rim` states here.
+    ///
+    /// Measured first-party on the real pairs the same day, on the TWIN basis
+    /// the engine itself passes (`&global_px` — the globals-only render, no
+    /// range masks): with segmentation unavailable a range band attaches on
+    /// the calibration pair (p90 0.00392 max 0.00978 uncorrected, 0.00230 max
+    /// 0.01217 delivered, over 18297 transcribed crossings) and on the
+    /// stone-viaduct pair (p90 0.00874 max 0.00978 to 0.00857 max 0.01407
+    /// over 1224) — the correction moved the RANKED reading down on both,
+    /// while the maxima it does not rank rose to 1.24x and 1.44x of the
+    /// steepest crossing the window admitted. The engine's own gate counts,
+    /// on the 384-px thumbnail it develops itself, are 18651 and 1214.
+    #[test]
+    fn the_range_rim_budget_clears_the_window_that_bounds_an_untouched_render() {
+        let (reference, ranges) = mixed_gradient_fixture();
+        let reading = range_transition_rim(&reference, &reference, &ranges, 80, 8);
+        eprintln!("RANGE_WINDOW_CALIBRATION untouched={reading:?}");
+        assert!(reading.transitions > 0, "premise: the ruler sampled: {reading:?}");
+        assert!(
+            reading.rim <= 2.5 / 255.0,
+            "the smooth-crossing window must bound an untouched render's own \
+             reading, or the gate charges a correction for the scene: {reading:?}"
+        );
+        // Derived from the render, not from two literals: the subtrahend is
+        // this fixture's OWN untouched reading, so what is pinned is the
+        // budget's scale against a measurement. At the p90 the gate ranks, a
+        // correction on a scene that FILLS the window has 0.012 - 2.5/255 =
+        // 0.56 of a code left; this fixture reads 2/255, so it leaves 1.06.
+        let allowance_codes = (RANGE_BOUNDARY_RIM_MAX - reading.rim) * 255.0;
+        assert!(
+            (1.0..=1.1).contains(&allowance_codes),
+            "the budget must clear the reading an untouched render produces \
+             here, by the measured margin: {allowance_codes:.3} codes from \
+             {reading:?}"
+        );
+        assert!(
+            reading.rim <= RANGE_BOUNDARY_RIM_MAX,
+            "and an untouched render must therefore pass its own gate: {reading:?}"
+        );
+        assert_eq!(
+            reading.charged, reading.rim,
+            "the luminance-range family declines the contextual charge: {reading:?}"
         );
     }
 

@@ -2247,10 +2247,104 @@ were governed by before; a crossing in smooth sky must fit inside what its
 own neighbourhood can actually mask. The soft rim and luminance-range
 families keep the scalar: the rim ruler samples only inside a feather,
 where the correction is a ramp by construction, and the range ruler admits
-only locally smooth crossings by rule. For the step family a
-reading of ZERO measured crossings is a refusal, never a pass — until 2026-08-30
-the rim ruler returned `0.000` from an empty transition band for every hard
-raster ever gated, and the gate read that as comfortably inside budget. A Full-zone correction then uses the three-arm gate
+only locally smooth crossings by rule.
+
+**The range family's half of that sentence is measured (2026-09-01), and it
+holds for a reason the step ruler does not share.** `range_transition_rim`
+never differences the scene away: it admits a neighbouring pair only where
+the REFERENCE crossing is already smooth (`|Δl| ≤ 2.5/255`) and then reports
+the RENDERED gradient there, so the scene's own gradient sits inside the
+reading and is spent before the correction adds anything. That argument was
+already in the tree — the comment inside `range_transition_rim` has said
+since v1.2.2 that a graded context here is capped near 2.5/255 by
+construction and therefore has no dynamic range; what 2026-09-01 adds is the
+measurement behind it and a test. Charging this ruler the way the step ruler
+is charged would OVER-tighten it, not loosen it: the v1.2.2 charge is
+`raw × (MAX ÷ budget)` with `budget` clamped at or below `MAX`, so the
+multiplier is ≥ 1 by construction and can never weaken a gate; and here the
+context term is the admitted crossing itself, capped at 2.5/255 = 0.0098 and
+so always under the 0.012 ceiling, which would collapse the pass condition to
+"scene + correction ≤ scene" — no steepening admitted anywhere.
+
+What the budget buys is a **p90**, not a per-crossing cap. The reading is the
+90th percentile of |signed bow|, so a tenth of the crossings rank above it
+and are not bounded at all. At that rank the widest crossing the window
+admitted on either real pair measures 0.00978 luma (2.49 codes) against the
+budget's 3.06, so where the scene already sits at the top of the window a
+correction adds 0.57 of a code and no more, and where it is flat the ceiling
+is the whole 3.06 — 1.22× the steepest crossing the window is willing to call
+smooth. The measured maxima sit above both, as a p90 gate permits:
+calibration 0.00978 → 0.01217 (1.24×), viaduct 0.00978 → 0.01407 (1.44×, i.e.
+1.09 codes added at that one crossing, past the 0.012 budget itself).
+
+Driven first-party with segmentation and correspondence made unavailable so
+`match --zoned` takes the fallback, a band attaches on the calibration pair
+(luma [0.471, 0.765], −0.56 EV) and on the stone viaduct (luma [0.118,
+0.882], −0.80 EV and saturation +23); the Cornwall pair attaches none. TWO
+RASTERS are in play and the table says which. The ENGINE gates on the 384-px
+thumbnail it develops itself, and disclosed `k=1.000` over 18 651 and 1 214
+crossings. The readings below are a transcription of the same statistic over
+a full-resolution develop downsampled to a 384-px long edge, on the basis the
+engine passes it — `&global_px`, the globals-only twin with no range masks.
+
+| transcription, twin basis | calibration | stone viaduct |
+|---|---:|---:|
+| crossings | 18 297 | 1 224 |
+| uncorrected p90 (max) | 0.00392 (0.00978) | 0.00874 (0.00978) |
+| delivered p90 (max) | 0.00230 (0.01217) | 0.00857 (0.01407) |
+
+The correction moved the RANKED reading down on both pairs. The delivered
+transitions are ramps rather than steps: over the populated 1-code bins of
+the delivered transfer (twin luma → delivered luma at 1200 px) the
+calibration band shows 0 reversals in 30 bins with a minimum slope of +0.019
+and a maximum of +0.964 — compressive, 30 input codes into 9.9 delivered ones
+with 9 of the 30 bins under slope 0.1 — and the viaduct 0 in 19 with +0.855.
+The same estimator over the zero-weight control region, where the true slope
+is exactly 1.000, reads +0.942 to +1.039: a ±0.05 noise floor, which puts
++0.019 one noise unit away from a reversal and is why the magnitude-blindness
+below is registered rather than dismissed. `scripts/rim_overshoot.py` reads
+mean 0.0006 / p90 0.0018 / max 0.0082 luma at the calibration transition,
+against its own control of exactly 0.0000.
+
+The seam-style statistic that decided v1.2.2 does not decide this one, and
+its own numbers say why. Stepping across the calibration band's contours in
+8-bit codes at 1200 px, all four measured rows: lo_outer +9.05 codes at
+z +10.08 on the twin basis but +2.83 at z +1.94 on the neutral one; lo +7.18
+at z +6.99 twin and +8.28 at z +8.92 neutral — with p90 |·| 22.84 codes, 26.8
+times the control's sd of 0.853. A fivefold swing at ONE contour between two
+honest bases is itself the evidence that the reading is basis-dependent. A
+tile edge is an arbitrary rectangle laid across continuous sky, so any step
+there is an artefact; a range edge IS an iso-luminance contour of the
+photograph, so a difference across it is the correction doing its job — and
+the transfer above shows the ramp compressing (maximum +0.964 inside it), so
+those 9 codes are the scene's own gradient being flattened rather than an
+induced step. Beside the v1.2.2 seam table (neutral +0.15 codes at 1.3 σ, the
+v1.2.1 tile +1.59 at 7.8 σ, the fix +0.92) the range family is a different
+SHAPE of thing, not a smaller number of the same shape.
+
+Two limits go on the record with it. The mask-free spatial ruler is not
+applicable at the viaduct's contour, by its own numbers — its 60 px plateau
+windows must bracket the transition, and there the band's own spread (40.4
+codes) exceeds the plateau gap (22.1) on 201 of 231 columns. And this ruler
+ranks MAGNITUDE, so it cannot tell a preserved gradient from an inverted one
+of the same size: on a synthetic 16-bit grey ramp a 1.5/17 band reverses from
+−0.56 EV (a 2-code dip, 26.5 codes at −1.50) and a 1/17 band from −0.35 EV,
+while `rim_overshoot.py` reads max 0.0000 over its full n = 1024 on every one
+of those MEASURED rows, because the difference it ranks stays monotone. The
+widest ramp the producer emits (2/17) is unmeasurable by that instrument on
+this probe rather than measured clean — it needs 180 px of margin each side
+and the probe's locator lands exactly on row 180 of a 512-row frame, so every
+column is rejected and n = 0. The probe also pins the band at the calibration
+position, and luminance POSITION is a third axis it does not sweep: the
+viaduct's real 2/17 band at −0.80 EV sits at codes 0–30 and does not reverse.
+Neither real pair reaches that corner — the calibration band's own minimum
+slope is +0.019 — and the answer is a sign test on the delivered transfer
+rather than a re-tune of this ceiling, so it is registered for its own batch.
+
+For the step family a reading of ZERO measured crossings is a refusal, never
+a pass — until 2026-08-30 the rim ruler returned `0.000` from an empty
+transition band for every hard raster ever gated, and the gate read that as
+comfortably inside budget. A Full-zone correction then uses the three-arm gate
 (v0.26.1, third arm R30 batch 1): halve the zone error, land it at/below an
 absolute matched floor (0.02 of linear-mean error, brightness within a quarter
 stop — the floor lives in scale-dependent linear light, so the EV companion
