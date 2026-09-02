@@ -2045,9 +2045,54 @@ pixels), admitted by the same two-sided population gate the rest of the module
 reads, with refusals typed and named and `hsl.hue` never solved; it is judged
 twice, once where it is fitted and once after the cast curves against its own
 absence on the finished frame; then per-channel CDF residuals as red/green/blue curves,
-admitted only through three vetoes (aggregate error, foreign-hue, rotation
-budget) — each veto is a specific real-photo failure recorded at its const
-block. **Atmosphere** mode instead uses bounded robust exposure, white balance,
+admitted only through four vetoes (aggregate error, foreign-hue, rotation
+budget, hue fan) — each veto is a specific real-photo failure recorded at its const
+block.
+
+The fourth veto, the **hue-fan gate** (v1.2.3), closes the hole the first
+three structurally cannot see. They all ask about a pixel's DESTINATION: how
+far it travelled, whether it landed in a hue the target holds nowhere,
+whether the aggregate improved. Three INDEPENDENT monotone channel maps do
+something no hue-preserving control can and none of those questions reach:
+they sort a single-hued region into several hues BY LUMINANCE. On the
+Cornwall lighthouse-islet reverse fit (the pair v1.2.2 shipped as fitted and
+registered) the admitted curves moved the sky's mean hue 218.3° → 217.6°,
+rotated no pixel past the 75° census at all (weighted re-hued share
+0.000000), created 0.000000 foreign share and halved the look error
+(0.0576 → 0.0334) — while splitting the sky's hue across luminance from a
+1.6° spread to 33.1° in the delivered render: 226.8° in the dark half
+(violet), 193.8° in the bright cloud (green-cyan). The gate re-reads the
+rotation budget's exact census population — a measurable hue before (chroma
+≥ 0.03), a visible tint after (chroma ≥ 0.04), evidence-weighted — bins it
+by 15° hue class and by the evidence model's own luma bins, and measures the
+widest circular gap between a class's slice mean hues MINUS the gap they
+started from, so a class that was already fanned (content) or that the
+curves rotate rigidly (a real global cast) reads zero. A class holding ≥ 5%
+of the population that gains ≥ 15° of spread is refused. Calibration, all
+measured on the analysis raster the fit itself uses: the wreck 37.6° and its
+synthetic fixture 44.6° against the accepted haze-correction 7.8°,
+canyon-warm 7.5°, canyon-gold 5.2°, hazy→vivid 2.7° — 15° is one full hue
+class, 1.9× above the largest legitimate reading and 2.5× below the wreck.
+It was verified end to end, not only on the census: at a 20° threshold the
+Cornwall solve does not refuse outright (the mixer's do-no-harm loop halves
+Aqua/Blue and refits until a milder cast measures 19°, which ships and still
+leaves a 20.6° fan in the delivered sky); at 15° the refusal stands and the
+delivered sky's spread is 1.6° — the same coherence the target's own sky
+has — at a look error of 0.058 instead of 0.033. The refusal is disclosed
+with its readings, and adding the gate changed no existing verdict: it is
+never the sole rejector on any calibration pair, and a pair the pixel-aligned
+gates already refuse keeps reporting exactly the note it reported before,
+which is what holds those recipes byte-identical.
+
+The colour stage's ADMISSION is disclosed too, from the same release. Every
+way of producing nothing already had a note, and the strength budget
+disclosed when IT bought a marginal cast, but the commonest outcome of the
+whole stage — the curves shipped on their own merits — reached the user as
+an unexplained presence. An admitted cast now carries the four gates' own
+readings (look-error ratio, foreign share created, re-hued share, widest hue
+fan) so the admission can be checked rather than believed.
+
+**Atmosphere** mode instead uses bounded robust exposure, white balance,
 a five-point tone curve, saturation and the same evidence-gated per-band
 colour mixer, never per-channel curves, and caps the
 reported confidence because develop controls cannot reconstruct the changed
