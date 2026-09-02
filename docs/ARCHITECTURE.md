@@ -2142,8 +2142,8 @@ to the identity, where the fan is zero by construction and the outcome is
 exactly the old refusal.
 
 The search is a 12-step bisection for the largest `t` whose RENDERED
-candidate clears, never an algebraic reading of the curves — the same rule
-every closed-loop stage here follows. Each candidate is re-judged by all four
+candidate is ADMISSIBLE, never an algebraic reading of the curves — the same
+rule every closed-loop stage here follows. Each candidate is re-judged by all four
 gates from scratch, so a milder cast that makes the aggregate ratio fail, or
 that trips a pixel veto the fitted cast happened to clear, is refused and
 says so; and the strength budget's bound rides into that judgement exactly as
