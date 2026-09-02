@@ -10692,6 +10692,44 @@ mod tests {
         );
     }
 
+    /// A rescore re-renders and re-scores; it does not re-run the gates, so
+    /// every gate fact has to ride its own note back. The projection's do
+    /// too — otherwise a rescored recipe would keep the shrunk curves and
+    /// lose the only sentence that says why they are shrunk.
+    #[test]
+    fn a_rescored_projection_carries_its_own_readings_back() {
+        use crate::rationale::keys;
+        let src = coast(false);
+        let tgt = coast(true);
+        let solved = fit_recipe(&src, &tgt);
+        let head = |r: &FitReport, arg: &str| projection_arg(r, keys::FIT_NOTE_CAST_PROJECTED, arg);
+        assert!(
+            head(&solved, "t").is_some(),
+            "premise broken: this pair no longer projects: {}",
+            solved.recipe.rationale
+        );
+        let rescored =
+            rescore_report(&src, &tgt, &solved.recipe, solved.err_before, &solved.notes);
+        for arg in ["share", "fan_before", "t", "ratio", "bound"] {
+            assert_eq!(
+                head(&rescored, arg),
+                head(&solved, arg),
+                "the rescore must carry {arg} back, not re-invent or drop it"
+            );
+        }
+        assert_eq!(
+            projection_arg(&rescored, keys::FIT_NOTE_CAST_PROJECTED_FAN, "fan_after"),
+            projection_arg(&solved, keys::FIT_NOTE_CAST_PROJECTED_FAN, "fan_after"),
+            "…and the fan clause with it"
+        );
+        // …and it does not ALSO claim admission on the way back.
+        assert!(
+            !rescored.notes.iter().any(|n| n.key == keys::FIT_NOTE_CAST_ADMITTED),
+            "a rescored projection must not become an admission: {}",
+            rescored.recipe.rationale
+        );
+    }
+
     /// A rescue has to be worth having. The four gates decide whether a cast
     /// the fit MEASURED may ship; whether a milder one the fit INVENTED is
     /// worth shipping is the projection's own question, and the answer is
