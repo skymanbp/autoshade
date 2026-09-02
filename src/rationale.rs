@@ -99,6 +99,28 @@ pub mod keys {
         " White balance search reached the {k} K domain bound; the requested colour temperature may lie beyond the fitted range.";
     pub const FIT_NOTE_CAST_ADMITTED_BY_STRENGTH: &str =
         " Colour-cast curves were admitted by the strength budget (measured ratio {ratio}, budget {budget}).";
+    /// v1.2.3: ORDINARY admission, silent until now. The stage disclosed
+    /// every way it could produce nothing and the one way the strength
+    /// budget bought a marginal cast, but the commonest outcome — the curves
+    /// shipped on their own merits — reached the user as an unexplained
+    /// presence. These are the four gates' own readings, in their order.
+    pub const FIT_NOTE_CAST_ADMITTED: &str =
+        " Colour-cast curves were admitted: they cut the look error to {ratio} \
+         of what it was without them, created {foreign} of the frame in hues \
+         the target does not contain, re-hued {rehued} of it, and opened a \
+         {fan} degree hue fan inside the widest hue class — all four gates \
+         clear.";
+    /// v1.2.3: the fan gate's refusal. Named apart from
+    /// [`FIT_NOTE_REHUE_BLOCKED`] because the damage is a different shape —
+    /// no pixel travels far, the region's MEAN hue barely moves, and what
+    /// breaks is the hue's coherence ACROSS luminance.
+    pub const FIT_NOTE_CAST_HUE_FANNED: &str =
+        " Colour-cast curves were withheld: they would have fanned one hue \
+         class apart across luminance — that class holds {share} of the \
+         frame's measurable colour, and the three channel curves would have \
+         spread its dark and bright slices {fan} degrees apart (limit \
+         {limit}). A single-hued region sorted into a hue fan by brightness \
+         is not something any develop control can put back.";
     pub const FIT_NOTE_GLOBAL_CAST: &str =
         " Global colour cast measured from consistent hue rotation across the populated frame (rotation {rotation} degrees, chroma ratio {ratio}); white balance and saturation were read from population evidence.";
     pub const FIT_NOTE_VETO_DISCLOSED: &str =

@@ -158,6 +158,19 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     (" White balance withheld: rotated share {rotated_share} over {coverage} of the frame exceeded the strength budget.", " 白平衡已保留：色相旋转份额 {rotated_share}（覆盖画面 {coverage}）超出强度预算。"),
     (" White balance search reached the {k} K domain bound; the requested colour temperature may lie beyond the fitted range.", " 白平衡达到 {k} K 的域边界；请求的色温可能超出拟合范围。"),
     (" Colour-cast curves were admitted by the strength budget (measured ratio {ratio}, budget {budget}).", " 色偏曲线已获强度预算准入（测得比值 {ratio}，预算 {budget}）。"),
+    (" Colour-cast curves were admitted: they cut the look error to {ratio} \
+      of what it was without them, created {foreign} of the frame in hues \
+      the target does not contain, re-hued {rehued} of it, and opened a \
+      {fan} degree hue fan inside the widest hue class — all four gates \
+      clear.",
+        " 色偏曲线已采用：它们把观感误差压到不加曲线时的 {ratio}，在目标不含的色相上新增了画面的 {foreign}，使 {rehued} 的画面变色，并在占比最大的色相类内把色相沿亮度拉开了 {fan} 度——四道门全部通过。"),
+    (" Colour-cast curves were withheld: they would have fanned one hue \
+      class apart across luminance — that class holds {share} of the \
+      frame's measurable colour, and the three channel curves would have \
+      spread its dark and bright slices {fan} degrees apart (limit \
+      {limit}). A single-hued region sorted into a hue fan by brightness \
+      is not something any develop control can put back.",
+        " 色偏曲线已被扣留：它们会把同一个色相类沿亮度拉散——该色相类占画面可测色彩的 {share}，而三条通道曲线会把它的暗部与亮部切片拉开 {fan} 度（上限 {limit}）。单一色相的区域被按明暗分选成多个色相，任何显影控件都无法还原。"),
     (" Global colour cast measured from consistent hue rotation across the populated frame (rotation {rotation} degrees, chroma ratio {ratio}); white balance and saturation were read from population evidence.", " 已从画面中各色相带一致的色相旋转测得全局色偏（旋转 {rotation} 度，色度比 {ratio}）；白平衡和饱和度取自整体证据。"),
     (" High-strength fit disclosed unsupported movement in {kind}: {ranges}. The controls were retained, but confidence is capped by the strength budget.", " 高强度拟合显示 {kind} 中没有双侧证据的移动：{ranges}。控制保留，置信度受强度预算限制。"),
     // ── Settings ────────────────────────────────────────────────────────────
