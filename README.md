@@ -8,7 +8,7 @@
 An AI decides *what to change*. A deterministic Rust engine *does* it.
 **In the recipe-development path, the AI never touches a pixel.**
 
-[Download v1.2.2](https://github.com/skymanbp/autoshade/releases/tag/v1.2.2) ·
+[Download v1.2.3](https://github.com/skymanbp/autoshade/releases/tag/v1.2.3) ·
 [Architecture](docs/ARCHITECTURE.md) ·
 [Roadmap](docs/ROADMAP.md) ·
 [MIT](LICENSE)
@@ -121,16 +121,16 @@ the last subsection lists what is designed but not yet shipped.
 
 <sub><b>One photograph, four looks.</b> The straight conversion of a hazy
 lakeside frame and three AI develops of the same RAW at the same
-<code>--strength 0.9</code> — only the <b>direction text</b> changes. The
-index behind them held the photographer's 94-photo finished-look library and
-no RAW+XMP exemplars, so each run took one finished photo, chosen by the
-direction text, as an image reference, and the direction led: mean saturation
-34 % / 12 % / 29 % for moody / golden / vivid against the conversion's 17 %,
-mean brightness 38 % / 61 % / 65 % against 47 %. With the photographer's own
-169 edits indexed at <code>--style 1.0</code> the same three directions
-stayed inside those edits' cool, hazy register (23 % / 11 % / 18 %) — that is
-what the Style axis is for, and a direction-led tier is registered for
-v1.2.3. Judge trails and prompts in [docs/SHOWCASE.md](docs/SHOWCASE.md);
+<code>--style 1.0 --strength 0.9</code> against the photographer's full
+index — 169 Lightroom RAW+XMP edits and a 94-photo finished-look library —
+where only the <b>direction text</b> changes. Since v1.2.3 a written
+direction leads and those edits become background: mean saturation
+28 % / 11 % / 30 % for moody / golden / vivid against the
+conversion's 17 %, mean brightness 43 % / 58 % / 70 % against
+47 %. On v1.2.2 the same three directions on the same index came back
+at 23 % / 11 % / 17 % saturation and 54 % / 58 % / 55 % brightness — inside those
+edits' cool, hazy register, four points of brightness apart. Judge trails,
+prompts and the finished-look-only run in [docs/SHOWCASE.md](docs/SHOWCASE.md);
 model-judge scores are automated review, not human aesthetic approval.</sub>
 
 `autoshade style-index <dir>` (or the GUI's **Style reference library**) turns
@@ -197,7 +197,7 @@ with roughly what strength, so the proposer places its own masks the way you
 place yours instead of following the generic "add 1-2 masks" advice alone;
 the `style_pull`
 (0.18 at the shipped Style 0.3, full at Style 1.0) moves the proposal toward your historical means
-without copying one, and the rationale names the shots it leaned on. Strength
+without copying one — unless you wrote a Direction at Adherence above 40 %, in which case the direction leads, no pull is applied and the rationale says so — and the rationale names the shots it leaned on. Strength
 above 0.70 with Style below 0.85 no longer receives the old committed-tier
 FLOOR wording because that floor belongs to the Style axis. It is
 bounded at 5,000 RAW exemplars **and 500 looks** against one 228 MiB serialized
@@ -245,9 +245,14 @@ with the body set to a 4:3 aspect, which is how it found the two frame defects
 v1.2.2 fixes: sized from the sensor frame the same prompt bought a target at
 <b>D = 0.136</b> (0.304 when the request was sized from the cropped
 preview), and the fit ran on a neutral develop of the full frame with the
-calibration composed into the solve — look error <b>0.137 → 0.027</b>,
-two semantic zones, four boundary-gated tiles and two field masks; the global stage also admitted per-channel cast curves that pass the re-hue gate yet tint the delivered sky toward violet — shown as fitted, registered as a v1.2.3 defect. Full measurements and prompts in
-[docs/SHOWCASE.md](docs/SHOWCASE.md).</sub>
+calibration composed into the solve — look error <b>0.137 → 0.027</b> at
+confidence 0.66, two semantic zones, four boundary-gated tiles and two field masks. This is the frame
+that found v1.2.3's cast defect: the v1.2.2 fit admitted three channel curves that
+passed every hue veto and still fanned the sky 33.1° across luminance
+(violet at the top, green-cyan in the bright cloud). A fourth veto now reads that fan,
+and the curves are shrunk toward one shared shape (t = 0.363) until it clears —
+the delivered sky spread is 9.6° against the target's 1.6°. Full measurements
+and prompts in [docs/SHOWCASE.md](docs/SHOWCASE.md).</sub>
 
 `match` recovers an editable recipe from any finished rendition of the same
 frame — a generated image, an export, someone else's grade — without copying
@@ -258,9 +263,12 @@ knots and least-squares solved against the engine's own slider basis with a
 ridge and a model-selection prior (so numerically equivalent but semantically
 ruinous slider combinations lose); saturation closes by mean-chroma ratio,
 secant-refined through real renders; the per-channel CDF residual becomes
-red/green/blue curves admitted only through three vetoes, one of which refuses
+red/green/blue curves admitted only through four vetoes and a projection: one veto refuses
 any cast that paints a hue more than 45° from every target family over ≥ 5 % of the
-frame. The residual tone curve places its knots uniformly in the LUT's *output*
+frame, and the fourth (v1.2.3) refuses three curves that sort a single-hued region
+into several hues by luminance — a fan of ≥ 15° in a class holding ≥ 5 % of the
+frame's measurable colour — after first shrinking them toward the shape all three
+share, and beyond it toward no curves, and shipping the strongest point that clears. The residual tone curve places its knots uniformly in the LUT's *output*
 domain, which keeps a steep camera base curve from sagging the chords by
 ~10/255.
 
@@ -455,7 +463,7 @@ estimate. Sources are the pinned claims in
 
 | What | Measured | Where |
 |---|---|---|
-| Automated test battery | 1308 library / 23 CLI / 160 GUI / 2+2 contract tests; `check_docs` re-derives the pinned release claims | [Tech stack](#tech-stack-algorithms-and-design-philosophy) |
+| Automated test battery | 1332 library / 23 CLI / 160 GUI / 2+2 contract tests; `check_docs` re-derives the pinned release claims | [Tech stack](#tech-stack-algorithms-and-design-philosophy) |
 | RAW coverage | 24 extensions, 725 camera bodies; nine-camera format zoo 9/9 at the last release gate | [Supported formats](#supported-formats) |
 | Lightroom Texture parity | 45 of 45 period/depth anchors within ±0.02 | [Develop pipeline](#develop-pipeline-and-tone-model) |
 | Radial mask closure | 41 of 41 measured vectors within ≤1 px | [Lens correction](#lens-correction-and-lightroom-mask-frame-laws) |
@@ -463,9 +471,9 @@ estimate. Sources are the pinned claims in
 | Brush geometry | D1 error 874 px → 9.8 px after pixel-centre sampling and the pixel/aspect metric | [Masks](#masks) |
 | X-Trans demosaic (approximate) | X-S10 G/R ratio 1.5503 → 0.9476 | [RAW decode](#raw-decode-and-cfa) |
 | Reverse-fit, stone viaduct (full solve) | look error 0.161 → 0.050 at confidence 0.25 (a global solve, the per-band mixer on Orange/Yellow/Aqua/Blue, two semantic zones, four boundary-gated tiles and two field masks), D = 0.180; the sky tile's seam 0.0278 → 0.0042 (k 0.121), delivered +3.15 → +0.92 codes | [What is new §2](#2-reverse-fit-inverse-rendering-from-any-finished-look) |
-| Reverse-fit, Cornwall islet (full solve, composed calibration) | look error 0.137 → 0.027 at confidence 0.65, D = 0.136 sized from the sensor frame (0.304 from the cropped preview) | [docs/SHOWCASE.md](docs/SHOWCASE.md) |
+| Reverse-fit, Cornwall islet (full solve, composed calibration) | look error 0.137 → 0.027 at confidence 0.66, D = 0.136 sized from the sensor frame (0.304 from the cropped preview); the global cast projected to t = 0.363, delivered sky hue spread 9.6° (v1.2.2 shipped 33.1°) | [docs/SHOWCASE.md](docs/SHOWCASE.md) |
 | Local-field ceiling, calibration pair | global fit 0.0961 against a ceiling of 0.0700; the accepted sky zone realizes 0.134 of the distance | [What is new §7](#7-a-bilateral-grid-local-field-prices-every-local-producer-first) |
-| AI develop, model judge | 2026-09-01 four-looks batch, finished-look library only, `--strength 0.9`: moody 71 (guided revision 64 discarded), verdict Accept; golden 84 → 92 (adopted) after the verifier twice sent the proposal back for the grain it never set, verdict Revise — unsaved, the figure renders the proposal; vivid 64 → 72 → 84 (adopted) → 73 (discarded), verdict Accept. The same directions on the full 169 + 94 index at `--style 1.0`: 87 → 89, 81, 72 → 82 → 73, all three Revise | [docs/SHOWCASE.md](docs/SHOWCASE.md) |
+| AI develop, model judge | 2026-09-02 four-looks batch on the full 169 + 94 index at `--style 1.0 --strength 0.9`, the direction leading: moody 68 → 70 → 78 (both adopted) → 69 (discarded), verdict Accept; golden 87 → 84 (discarded) after the verifier twice sent the proposal back for the grain it never set, verdict Revise — unsaved, the figure renders the proposal; vivid 70 → 84 (adopted) → 82 (discarded), verdict Accept. The finished-look-only run (2026-09-01) and v1.2.2's full-index run are on the showcase page |
 | Style retrieval weights | corpus harness (169 described exemplars, 156 queries): `W_EMB=4`, `W_TXT=0.5`, `W_DESC=0.5`, standardised variant with the text-hubness correction — MAE 0.688864 vs baseline 0.713143, +0.024280, CI [+0.005837, +0.041111] under the prose proxy; the corrected point at the old `W_TXT=4` regresses with CI [−0.069654, −0.005140], which is why the weight moved; under the tag-string proxy nothing beats the text-free row; `W_LOOK=1.0` is unmeasured (the harness cannot see the look library) and its scale is a real ratio against the direction terms — it ships inside a stable band, order unchanged to 2x and first moving at 4x | [AI advisor](#ai-advisor-and-reverse-fit) |
 | Memory budget | 1800 MB per photo from a 1771 MB reference probe; 4 GiB RAW admission gate | [Application](#application-and-infrastructure) |
 
@@ -473,7 +481,7 @@ estimate. Sources are the pinned claims in
 
 ### Download a release
 
-The v1.2.2 release is built by GitHub Actions from the tag and provides the
+The v1.2.3 release is built by GitHub Actions from the tag and provides the
 Windows front ends plus a first macOS universal (arm64 + x86_64) CLI archive;
 Linux is built and tested in CI with no prebuilt binaries yet. `checksums.txt`
 on the release page carries the SHA-256 of every asset.
@@ -482,21 +490,21 @@ on the release page carries the SHA-256 of every asset.
 |---|---:|---|
 | `autoshade.exe` (CLI) | 20,207,104 bytes | `2da324a9e877908e38eacac79028e0e4dd8665fb5b11a4a6c3a2329f49dca242` |
 | `autoshade-gui.exe` (desktop app) | 26,497,024 bytes | `46fe35d7dea1f60b3bda9df37c5b807a83eadacac42371e0b706616781330c4f` |
-| `AutoShade-Setup-1.2.2.exe` (installer) | 14,221,824 bytes | `fbe812176eceba7c7413d60a29e7b28028cefd2bcf6639b8440d415d94229306` |
-| `autoshade-1.2.2-windows-x64.zip` (portable archive) | 18,884,742 bytes | `fda462e21efc2413d4636f13d5482626349fb4b3e8964b3278ec84008bcf4b5b` |
-| `AutoShade-1.2.2-macos-universal.zip` (macOS app bundle) | 37,523,500 bytes | `433a35267f50100b9282a9cfb1d6c7e4fefda890a9c10f33670bb33a91755999` |
-| `AutoShade-1.2.2-macos-cli.zip` (macOS command line only) | 16,197,828 bytes | `32f7b8679c7ee2364ae2295731774c3ac2c7ee1056db531af90d8d5941150188` |
+| `AutoShade-Setup-1.2.3.exe` (installer) | 14,221,824 bytes | `fbe812176eceba7c7413d60a29e7b28028cefd2bcf6639b8440d415d94229306` |
+| `autoshade-1.2.3-windows-x64.zip` (portable archive) | 18,884,742 bytes | `fda462e21efc2413d4636f13d5482626349fb4b3e8964b3278ec84008bcf4b5b` |
+| `AutoShade-1.2.3-macos-universal.zip` (macOS app bundle) | 37,523,500 bytes | `433a35267f50100b9282a9cfb1d6c7e4fefda890a9c10f33670bb33a91755999` |
+| `AutoShade-1.2.3-macos-cli.zip` (macOS command line only) | 16,197,828 bytes | `32f7b8679c7ee2364ae2295731774c3ac2c7ee1056db531af90d8d5941150188` |
 
 Download from the
-[v1.2.2 release page](https://github.com/skymanbp/autoshade/releases/tag/v1.2.2):
+[v1.2.3 release page](https://github.com/skymanbp/autoshade/releases/tag/v1.2.3):
 
-- **Installer (recommended):** run `AutoShade-Setup-1.2.2.exe`. It installs for
+- **Installer (recommended):** run `AutoShade-Setup-1.2.3.exe`. It installs for
   the current user without administrator access, adds Start Menu shortcuts,
   offers optional desktop and user `PATH` tasks, and removes its own files on
   uninstall while keeping the develop store in `%LOCALAPPDATA%\autoshade`.
   Upgrading over a pre-rename install also deletes the executables, icon and
   fonts that carried the old name.
-- **Portable archive:** extract `autoshade-1.2.2-windows-x64.zip` to a directory
+- **Portable archive:** extract `autoshade-1.2.3-windows-x64.zip` to a directory
   you can keep intact and run either executable from there, beside the bundled
   `assets/` and `python/` sidecars.
 
@@ -505,12 +513,12 @@ Download from the
 Two macOS archives ship, both universal (Apple silicon and Intel in one
 binary):
 
-- `AutoShade-1.2.2-macos-universal.zip` is the app. Unzip it and move
+- `AutoShade-1.2.3-macos-universal.zip` is the app. Unzip it and move
   `AutoShade.app` to `/Applications`. The command-line binary travels inside
   the same bundle — `AutoShade.app/Contents/MacOS/autoshade` — so this download
   alone is enough for a terminal user too; symlink it onto your `PATH` if you
   want a short name.
-- `AutoShade-1.2.2-macos-cli.zip` is the command line on its own, with the same
+- `AutoShade-1.2.3-macos-cli.zip` is the command line on its own, with the same
   sidecars and assets beside it, for anyone who does not want a GUI bundle.
 
 Unpack either with Finder or `ditto -x -k <zip> <dir>`.
@@ -777,13 +785,13 @@ versions, and a deleted-version registry; SCUNet success requires the typed
 `sidecar_wrote` contract. A 1771 MB reference probe sets the 1800 MB per-photo
 budget, while the 4 GiB RAW gate bounds admission. The [`build`
 workflow](.github/workflows/build.yml) covers default and GUI feature sets on
-Ubuntu and macOS. The current battery is **1308 library (1296 pass + 12 `#[ignore]`d forensic probes) / 23 CLI / 160 GUI / 2+2 contract** tests; the
+Ubuntu and macOS. The current battery is **1332 library (1320 pass + 12 `#[ignore]`d forensic probes) / 23 CLI / 160 GUI / 2+2 contract** tests; the
 [`scripts/check_docs.py`](scripts/check_docs.py) gate re-derives pinned release
 claims. Model weights are not stored in this repository.
 
 ## Status, roadmap, and known limitations
 
-Release gates for v1.2.2 cover the CLI, desktop GUI, sidecar contracts, format
+Release gates for v1.2.3 cover the CLI, desktop GUI, sidecar contracts, format
 fixtures, and deterministic renderer; the built artifacts' sizes and hashes
 are listed above. macOS ships prebuilt binaries and a desktop app for the
 first time in this release, and nobody has used them interactively: CI builds

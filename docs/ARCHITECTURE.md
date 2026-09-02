@@ -1,9 +1,10 @@
 # AutoShade — Architecture
 
-> Status: **implemented** (v1.2.2 — the contextual boundary budget, the
-> embedded-preview-is-not-the-frame class, the style index's one band table,
-> `--xmp-dir` and incremental index builds; v1.2.1 was the AutoShade rename
-> and a Windows preferences migration that could never have succeeded). The
+> Status: **implemented** (v1.2.3 — the hue-fan veto and the cast projection,
+> the direction-led Style voice, the range boundary budget measured and kept,
+> four rationale notes reaching the Chinese UI; v1.2.2 was the contextual
+> boundary budget, the embedded-preview-is-not-the-frame class, the style
+> index's one band table, `--xmp-dir` and incremental index builds). The
 > reverse-fit's
 > in-range estimator is now a PAIRED ROBUST REGRESSION (2026-08-26): on
 > same-frame pairs the tone map is estimated from corresponding pixels
@@ -96,14 +97,17 @@
 > experimental generative edits, an optional pixel-**heal** retouch mode (§4.7)
 > the deterministic look **reverse-fit** (§4.8) and the local server's refusal
 > model (§4.9).
-> 1308 library + 23 CLI + 160 GUI + 2+2 contract tests are enumerated in the GUI
-> build; the library result is 1296 pass + 12 `#[ignore]`d forensic probes
-> (counts refreshed 2026-09-01 for v1.2.2: +29 / −1 by name against `d628c80` —
-> 22 from the style-index batch (`28bed68`: `xmp_pair`, `content_cache`,
-> `style_cache` and six `style` tests), the two contextual-budget boundary arms
-> (`adf5955`), the size-plan and base-look frame tests (`fb3ef85`, `6552c44`),
-> the two band-table tests (`7420c0a`), and the same-content diagnosis test
-> re-pointed from the viaduct panel to the Cornwall one (−1 / +1); the GUI
+> 1332 library + 23 CLI + 160 GUI + 2+2 contract tests are enumerated in the GUI
+> build; the library result is 1320 pass + 12 `#[ignore]`d forensic probes
+> (counts refreshed 2026-09-02 for v1.2.3: +24 / −0 by name against `8e631f7` —
+> the five hue-fan gate tests and the nine projection tests in `fit::tests`
+> (one of which replaces `cast_curves_must_not_fan_a_coherent_sky_across_luminance`),
+> the range-rim budget window test, and the seven direction-led Style tests
+> (`StyleVoice`, the judge's brief, the blend-site guard, the web `adherence`
+> field); before that, v1.2.2 was +29 / −1 against `d628c80` — 22 from the
+> style-index batch, the two contextual-budget boundary arms, the size-plan
+> and base-look frame tests, the two band-table tests, and the same-content
+> diagnosis test re-pointed to the Cornwall panel; the GUI
 > battery is +1, the sidecar-folder preference; before that, v1.2.1's release
 > run of disclosure fixes was net +5 —
 > `a_truncated_rationale_says_how_much_it_lost` and

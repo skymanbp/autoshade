@@ -1152,9 +1152,15 @@ realistic one `2,517 B`
 `match` is inverse rendering rather than pixel copying: it aligns luminance
 CDFs, searches exposure, solves a regularized basis of engine controls, adds a
 residual monotone tone curve, closes saturation in a render/measure loop, and
-fits channel-cast curves; `cast_paints_foreign_hues` vetoes a cast that creates
-a visible colour family more than 45 degrees from every target family over at
-least 5% of the frame; terminal do-no-harm can shrink saturation or reset to
+fits channel-cast curves, which ship only through four vetoes — the look-error
+ratio against the strength budget's bound, `cast_paints_foreign_hues` (a visible
+colour family more than 45 degrees from every target family over at least 5% of
+the frame), `cast_rotates_a_region` (75 degrees over 5%), and since v1.2.3
+`hue_fan_weighted` (one hue class sorted more than 15 degrees apart across
+luminance); a cast only the fan gate convicts is projected along
+`C(t) = x + min(1, 2t)(L − x) + max(0, 2t − 1)(C − L)` toward the shared shape
+`L` and beyond it toward no curves, the largest `t` whose rendered candidate
+clears 7.5 degrees, all four gates and a `FIT_QUANT` gain bar shipping; terminal do-no-harm can shrink saturation or reset to
 the caller's base recipe.
 
 Atmosphere mode is entered because structure diverges; its instruments are the
@@ -1443,7 +1449,7 @@ than the pre-call state; model weights remain outside the repository.
 - The 61 MP RAW probe measured `151 MB` peak commit for decode,
   `1771 MB` for calibration/render preparation, and `1766 MB` for the
   full-resolution render tail; the combined process peak remained `1771 MB`.
-- The release battery is **1308 library (1296 pass + 12 `#[ignore]`d forensic
+- The release battery is **1332 library (1320 pass + 12 `#[ignore]`d forensic
   probes) / 23 CLI / 160 GUI / 2+2 contract** tests. Environment-gated real
   Lightroom, brush-table, and RAW-zoo suites are additional and are not
   smuggled into the ordinary count.

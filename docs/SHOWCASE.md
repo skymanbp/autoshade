@@ -2,9 +2,10 @@
 
 The three figures behind the README's pillars and the frames on
 [autoshade.dev](https://autoshade.dev/#showcase-a), with every number the
-captions quote and the prompts that bought the generated targets. All three
-were produced on 2026-09-01 — Part B on the v1.2.2 build, Part A on the
-pre-release tree as its caption says; every frame not marked
+captions quote and the prompts that bought the generated targets. Part A and
+the Cornwall panel were rendered on 2026-09-02 on the v1.2.3 build; the
+stone-viaduct panel is the v1.2.2 render, whose recipe v1.2.3 reproduces byte
+for byte; every frame not marked
 *generated* is rendered by AutoShade's engine from a recipe, and every
 "straight conversion" is AutoShade's own neutral develop of the RAW, not the
 camera JPEG. Model-judge scores are automated review, not human aesthetic
@@ -21,42 +22,43 @@ defects v1.2.2 fixes on the way to this page (see
 
 <sub><b>Lakeside island town.</b> Top left, the straight conversion of a hazy
 frame. The other three are AI develops of the same RAW at the same
-<code>--style 1.0 --strength 0.9</code> against the same index, and the only
-thing that changes between them is the <b>direction text</b>. That index held
-the photographer's 94-photo finished-look library and <i>no</i> RAW+XMP
-exemplars — the state v1.2.2's Defect 3 had left every index built on
-v1.2.0/v1.2.1 in, and the state this library was in when the panel was
-rendered, on the pre-release tree before the loader fix landed (the v1.2.2
-binary reads the same index file to the same state: 0 exemplars, 94 finished
-photos). So the Style axis had nothing to act on — each run's rationale says
-so in as many words — and what the model received was the direction text and
-one finished photo, chosen from the look library by that text, as an image.
-The direction led: mean saturation 34 % / 12 % / 29 % (moody / golden /
-vivid) against the conversion's 17 %, mean brightness 38 % / 61 % / 65 %
-against 47 %, measured on the panel's cells. Direction and judge trail, per
-panel: <i>dark moody low-key tones, a cross-processed colour treatment, a
-teal-and-orange split tone</i> — visual judge 71/100 Revise (the village
-crushed toward black, the orange counterpoint too weak), its guided revision
-re-scored 64 and was discarded, verdict Accept; <i>warm golden tones,
-film-like grain, lifted matte shadows</i> — the verifier sent the proposal
-back twice because it never set the grain the direction asked for, the visual
-judge scored 84 and its guided revision 92 was adopted, and the verifier's
-word on the adopted recipe was Revise, so this panel is the unsaved proposal
-rendered with <code>--out</code> (the proposal also crops 3 % off the top and
-5 % off the bottom); <i>vivid saturated colours, punchy high contrast, crisp
-clarity</i> — visual judge 64/100 Revise, guided revisions re-scored 72 and 84
-and were adopted, a third 73 was discarded, verdict Accept. For contrast: with
-the photographer's own 169 Lightroom RAW+XMP pairs indexed beside the look
-library (SigLIP 2 image vectors + Qwen3-VL descriptions), the same three
-directions at the same settings came back at 23 % / 11 % / 18 % saturation
-and 54 % / 58 % / 55 % brightness — inside the photographer's own cool, hazy
-register, because <code>--style 1.0</code> states the four nearest edits'
-habits to the model as the target and the direction then moves within that
-anchor. That is what the Style axis is for; a tier in which a given direction
-leads and the photographer's edits become background is registered for
-v1.2.3. Nothing is copied pixel for pixel: the reference reaches the model as
-one image and the direction as text, and what comes back is a recipe the
+<code>--style 1.0 --strength 0.9</code> against the same index — the
+photographer's 169 Lightroom RAW+XMP edits (SigLIP 2 image vectors + Qwen3-VL
+descriptions) beside the 94-photo finished-look library — and the only thing
+that changes between them is the <b>direction text</b>. Since v1.2.3 a
+written direction at the default Adherence leads: the four nearest past edits
+reach the model as background continuity, the finished photo the direction
+ranked highest reaches it as an image, and no pull toward the library's means
+is applied. Measured on the panel's cells: mean saturation
+28 % / 11 % / 30 % (moody / golden / vivid) against the conversion's
+17 %, mean brightness 43 % / 58 % / 70 % against 47 %.
+Direction and judge trail, per panel: <i>dark moody low-key tones, a
+cross-processed colour treatment, a teal-and-orange split tone</i> — visual judge 68/100 Revise (the village and foreground shadows crushed, the orange counterpoint too weak), guided revisions re-scored 70 and 78 and were adopted, a third 69 was discarded, verdict Accept;
+<i>warm golden tones, film-like grain, lifted matte shadows</i> — the verifier sent the proposal back twice because it never set the grain the direction asked for, the visual judge then scored 87 Revise (chroma noise across the smooth sky), its guided revision re-scored 84 and was discarded, and the verifier's word on the recipe was Revise, so this panel is the unsaved proposal rendered with <code>--out</code>;
+<i>vivid saturated colours, punchy high contrast, crisp clarity</i> — visual judge 70/100 Revise (foliage and village crushed to near-black, dehaze and clarity halos), its guided revision re-scored 84 and was adopted, a second 82 was discarded, verdict Accept.
+For contrast, the same three directions on the same index on v1.2.2 came back
+at 23 % / 11 % / 17 % saturation and 54 % / 58 % / 55 % brightness — inside the
+photographer's own cool, hazy register, four points of brightness apart —
+because <code>--style 1.0</code> stated the four nearest edits' habits as the
+target and the direction could only move within that anchor. Nothing is
+copied pixel for pixel: the references reach the model as numbers, prose and
+one image, the direction as text, and what comes back is a recipe the
 engine renders.</sub>
+
+<img src="images/showcase-island-four-looks-looks-only.jpg" alt="Lakeside island town: the same three directions against the finished-look library alone" />
+
+<sub><b>The same frame against the finished-look library alone</b> (2026-09-01,
+the v1.2.2 showcase panel). With no RAW+XMP exemplars indexed — the state
+v1.2.2's Defect 3 had left every index built on v1.2.0/v1.2.1 in — the Style
+axis had nothing to act on and each run took one finished photo, chosen by
+the direction text, as an image: mean saturation 34 % / 12 % / 29 % against
+17 %, brightness 38 % / 61 % / 65 % against 47 %. Judge trails: moody 71 Revise
+(guided revision 64 discarded), verdict Accept; golden 84 → 92 (adopted) after
+the verifier twice sent the proposal back for the grain it never set, verdict
+Revise (the unsaved proposal rendered with <code>--out</code>); vivid 64 → 72 →
+84 (adopted) → 73 (discarded), verdict Accept. This is the ceiling on what a
+direction can do with no library holding it back, and the v1.2.3 panel above
+is measured against it.</sub>
 
 ## Part B — Reimagine → reverse-fit: the recipe carries the look, the RAW carries the detail
 
@@ -105,10 +107,24 @@ sized the request from that preview, sent the develop squashed into 4:3 and
 measured <b>D = 0.304</b>; sized from the sensor frame (v1.2.2) the same
 prompt measured <b>D = 0.139</b>, and the panel's top-row frames re-measure
 at <b>D = 0.136</b>. Look error <b>0.137 → 0.027</b> at
-confidence 0.65, fitted on a neutral develop of the full frame
+confidence 0.66, fitted on a neutral develop of the full frame
 with the calibration composed into the solve — the route the desktop app
-takes, which the CLI now takes too whenever the preview is not the sensor
-frame: a global tone and saturation solve with the per-band mixer on Aqua and Blue (−18 luminance each), a sky zone (−0.10 EV, colour gains 0.96 / 0.99 / 1.09, saturation +8; zone residual 0.067 → 0.008) and a land zone (−0.15 EV, gains 1.12 / 0.97 / 0.96, saturation −9; 0.036 → 0.003), four boundary-gated spatial tiles (r0c3, r0c0, r2c2, r0c1, each context-charged 0.0110–0.0120 against the 0.012 ceiling) and two field masks (frame 0.0291 → 0.0269). The global stage also admitted per-channel cast curves — red 0 → 23 and 255 → 179, green 0 → 56 and 255 → 189, blue 0 → 50 and 255 → 209 — which pass the fit's re-hue gate (a region of ≥ 5 % of the frame rotated ≥ 75°) yet tint the delivered sky toward violet against the target's blue. The render is shown as fitted, with that tint; the gap — a hue-preserving cast stage, and a rationale note on ordinary cast admission, which today is silent — is registered for v1.2.3 in the roadmap.</sub>
+takes, which the CLI takes too whenever the preview is not the sensor
+frame: a global tone and saturation solve with the per-band mixer on Aqua and Blue (−18 luminance each, Blue saturation −1), a sky zone (−0.10 EV, colour gains 1.00 / 1.00 / 1.00, saturation +6; zone residual 0.023 → 0.007) and a land zone (−0.20 EV, gains 1.03 / 1.00 / 0.97, saturation +5; 0.018 → 0.003), four boundary-gated spatial tiles (r0c3, r0c0, r2c2, r0c1, each context-charged 0.0112–0.0120 against the 0.012 ceiling) and two field masks (frame 0.0288 → 0.0270). This is the frame that found v1.2.3's cast defect. The
+v1.2.2 fit admitted per-channel cast curves — red 0 → 23 and 255 → 179, green
+0 → 56 and 255 → 189, blue 0 → 50 and 255 → 209 — which passed every hue veto
+the stage had (foreign hue, a region re-hued ≥ 75°, the look-error ratio) and
+still sorted the delivered sky 33.1° apart across luminance: violet in the
+dark half, green-cyan in the bright cloud, while the sky's mean hue moved 0.7°.
+A fourth veto now measures that fan on the rotation census's own population,
+and a convicted cast is shrunk along one path — toward the shape the three
+curves share, and beyond it toward no curves — to the strongest point whose
+rendered candidate clears 7.5°: here t = 0.363, three identical curves, a
+delivered sky spread of 9.6° against the target's 1.6° and v1.2.2's
+33.1°. The global stage alone reads 0.137 → 0.030 at confidence
+0.664 (v1.2.2 0.033 at 0.646 with the fanning curves; refused outright,
+0.058 at 0.577). Both the gate and the projection are in
+[RELEASE_NOTES_v1.2.3.md](RELEASE_NOTES_v1.2.3.md) with every number.</sub>
 
 ## What the figures do not show
 
