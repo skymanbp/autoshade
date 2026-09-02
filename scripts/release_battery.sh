@@ -30,6 +30,14 @@
 # Windows note: Git Bash paths are converted with `cygpath -w` before they are
 # handed to cargo, because cargo.exe reads CARGO_TARGET_DIR as a native path
 # and would take `/d/t/x` for a directory called `d` on the current drive.
+#
+# GPU note: the sidecar script paths reach ALL THREE lanes, so a machine with
+# weights configured can have the default lane and the calibration lane load a
+# model at the same time. Measured on an 8 GB card with the v1.2.4 suite: both
+# lanes completed, twice, the calibration lane taking 822 s against the default
+# lane's 446 s because its corpus-gated tests actually run. On a smaller card,
+# run the lanes one at a time by passing a different --out per lane rather than
+# by editing this script.
 
 set -u
 set -o pipefail
