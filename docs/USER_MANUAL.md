@@ -372,7 +372,12 @@ does not bundle. Settings carries a **Python interpreter** field with a
 fills the field with the first one that actually RUNS — it executes
 `--version` rather than trusting that a file exists, because a Mac without
 developer tools has a `/usr/bin/python3` whose only behaviour is to offer to
-install them. Finding none is reported as such rather than leaving the field
+install them. The macOS candidates, in order, are `/opt/homebrew/bin/python3`
+(Apple-silicon Homebrew), `/usr/local/bin/python3` (Intel Homebrew), the
+python.org framework at
+`/Library/Frameworks/Python.framework/Versions/Current/bin/python3`, and
+`/usr/bin/python3` last; you can also type a full path instead of pressing
+Detect. Finding none is reported as such rather than leaving the field
 silently unchanged. Blank means the platform default: `python` on Windows,
 `python3` elsewhere.
 
