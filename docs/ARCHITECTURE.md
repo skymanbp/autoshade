@@ -2143,10 +2143,10 @@ source and a *target rendition* of it (a `reimagine` output, an exported JPEG,
 any finished reference of that shot) — solve for the `EditRecipe` that
 reproduces the target through our own engine ([`src/fit.rs`](../src/fit.rs)).
 No target pixels are copied: the answer is global sliders + curves and,
-optionally, semantic bitmap region adjustments or native luminance-range
-adjustments. It applies at full sensor resolution; classic XMP carries the
-representable global controls and native ranges, while semantic-region bitmaps
-stay engine-only. Deterministic and key-free.
+optionally, semantic bitmap region adjustments or native luminance- and
+colour-range adjustments. It applies at full sensor resolution; classic XMP
+carries the representable global controls and native ranges, while
+semantic-region bitmaps stay engine-only. Deterministic and key-free.
 
 The method is deliberately **distribution-level, not per-pixel regression** — a
 generative target is not pixel-aligned with its source, so only statistics are
@@ -2596,7 +2596,7 @@ OneFormer inference per frame); each accepted region selects Full or Atmosphere
 independently and confidence is the minimum of global confidence and the worst
 accepted-region confidence. The historical two-region route is the default;
 four regions are opt-in through `--regions 4` or the GUI control. A disabled or
-unavailable sidecar instead runs the pure-Rust luminance-range pass
+unavailable sidecar instead runs the pure-Rust range pass
 ([`src/fit_zoned/range.rs`](../src/fit_zoned/range.rs)); if neither
 producer keeps a correction, the global fit ships unchanged. Segmentation
 success does not derive range bands. The same structural statistic independently selects **Full** or bounded
@@ -2655,10 +2655,11 @@ charged 90th percentile alongside the still-disclosed raw step. A crossing
 whose context reaches the ceiling is charged its raw step bit-for-bit, so
 textured borders and true ramps are governed by exactly the number they
 were governed by before; a crossing in smooth sky must fit inside what its
-own neighbourhood can actually mask. The soft rim and luminance-range
+own neighbourhood can actually mask. The soft rim and range
 families keep the scalar: the rim ruler samples only inside a feather,
 where the correction is a ramp by construction, and the range ruler admits
-only locally smooth crossings by rule.
+only locally smooth crossings by rule, in whichever coordinate the band it
+is reading is made of.
 
 **The range family's half of that sentence is measured (2026-09-01), and it
 holds for a reason the step ruler does not share.** `range_transition_rim`
@@ -2808,8 +2809,62 @@ path's own `0.012` rim budget (`RANGE_BOUNDARY_RIM_MAX`, which has always been
 its own constant). A native correction uses `MaskRole::Custom`, a deterministic English
 name, and the full-frame sentinel `Linear { zero_x: 0.5, zero_y: -0.8,
 full_x: 0.5, full_y: -0.4 }` intersected with `RangeMask::Luminance`; the XMP
-reader and writer therefore need no new grammar. Color-range partitioning is
-outside this step.
+reader and writer therefore need no new grammar.
+
+**The second range family partitions by colour (v1.2.4).** A hue band is a
+population like a luminance band, so it is produced by the same machinery and
+judged by the same gates. `derive_colour_bands`
+([`src/fit_zoned/range.rs`](../src/fit_zoned/range.rs)) walks the eight ACR hue
+bands the evidence model already carries, stays silent on any band already
+inside the observed matched domain (`ZONE_MATCHED_ERR`), and then has to clear
+FOUR independent guards against the circularity a hue-shifting edit creates by
+depopulating its own band on the target side. The FROZEN evidence verdict must
+be two-sided (`evidence_refusal`, the same call the luminance family makes);
+both DELIVERED populations must clear the shared `0.015` two-sided floor on the
+frames the mask will actually be applied to, because the global stage may have
+moved hues since the evidence was frozen; `attach_one_zone` re-scopes the
+evidence over the mask's OWN population and withholds the colour class when the
+hue bands that population moves are unsupported; and — because ONE mask is
+derived from the source band and read on BOTH frames — a move large enough to
+carry the target's pixels out of that mask leaves the two shares past the
+shared 2:1 composition gate, and the band is refused rather than fitted against
+a population that is no longer there. A band that survives is keyed to its
+members' weighted mean colour at their `ZONE_BOUNDARY_PERCENTILE` chromaticity
+radius — the same percentile the boundary readings are budgeted at, so the mask
+and the gate agree on which members are the body of the band — stopped before
+that ball can reach neutral, and emitted as `RangeMask::Color` against the same
+`RANGE_HOST` sentinel: `Type="1"` with `crs:ColorAmount` and a `PointModels`
+sample in the sidecar, a grammar the reader and writer already carried. The
+four-band cap, the ranking (residual weighted by two-sided share), the rim
+budget, the zero frame-regression tolerance and every disclosure channel are
+the luminance family's.
+
+**Each family is a stage of its own, and that is measured rather than tidy.**
+The boundary gate shrinks everything it holds by ONE bisection `k`, so a single
+gate over both families let a colour band's edge crush the luminance bands
+beside it: on the p37 corpus pair `k` fell to 0.003 and the composed frame went
+from 0.15915 — where the luminance bands alone left it — to 0.16474, invisible
+to the composed-frame ceiling because that ceiling compares against the
+residual the FALLBACK was handed. `attach_band_stage` runs each family with its
+own shrink and its own entry ceiling, and the colour stage is measured against
+the frame the luminance stage actually left behind. Staging also gave the range
+family the byte-identity refusal the semantic family has had since step 9: a
+bisection that lands on `k = 0` renders the reference back and is refused as
+`RANGE_BOUNDARY_INERT`, instead of shipping a mask with every dial at zero.
+
+**The rim ruler follows each band's own coordinate.** `RangeSelector` gives a
+mask the reading its transitions are actually made of — signed luma difference
+for a luminance band, chromaticity distance for a colour one — so a colour
+band's edge is measured across the pixels the photograph gave the same COLOUR,
+not the same brightness, and the luminance readings are byte-identical across
+the split (pinned by
+`the_luminance_boundary_readings_are_unchanged_by_the_selector_split`). The
+delivered tone-order test stays a luminance reading only, and `range_footprint`
+returns `None` for a colour mask to say so: chromaticity distance from a band's
+own key is a RADIAL coordinate, which a rigid colour move inverts by
+construction, so asking the order question of it would refuse exactly the
+correction a colour band exists to make
+(`the_order_test_is_not_asked_of_a_radial_coordinate`).
 
 **Evidence verdicts follow the population a correction moves (B1,
 2026-08-27).** `EvidenceModel::scoped(tp, source_zone, target_zone)`
@@ -2832,8 +2887,8 @@ the same box operator (`thumbnail_exact`; a Lanczos3 target against a
 box-filtered source was measured to move a same-scene fit from 0.019 to
 0.034 by kernel asymmetry alone); an equal-shape pair is therefore
 byte-for-byte the two thumbnails it always was, by construction, and
-every producer (global fit, rescore, semantic zones, luminance ranges, tiles)
-reads the pair through that one helper. Before this, the two images were
+every producer (global fit, rescore, semantic zones, both range families,
+tiles) reads the pair through that one helper. Before this, the two images were
 thumbnailed independently and a ONE-ROW rounding difference (1600x1067 ->
 384x256 against 1600x1069 -> 384x257) made `structure_divergence` return
 `matched` on the unequal lengths, the same-content verdict came out true,
@@ -2989,8 +3044,8 @@ and `fit_field::tests::an_unreadable_cell_makes_no_support_claim_but_an_unreadab
 check.
 
 A band proposal is a span `[lo, hi)` of CURRENT-render luma — the field's
-guide domain — and never an evidence-bin index: the range producer bins by the
-ORIGINAL source luma (`evidence.source_pixels`), and after a global tone move
+guide domain — and never an evidence-bin index: the luminance producer bins by
+the ORIGINAL source luma (`evidence.source_pixels`), and after a global tone move
 the two domains no longer coincide (the calibration pair's −1 EV global fit
 shifts them by about two bins). `derive_luminance_bands` therefore maps each
 span onto its own bins through the pixels that occupy it — the weighted
@@ -3013,7 +3068,7 @@ disclosure and the smaller tile cap.
 
 The final automatic layer is a frozen-evidence spatial quadtree
 ([`src/fit_zoned/spatial.rs`](../src/fit_zoned/spatial.rs)). It runs after
-either semantic zones or the mutually exclusive luminance-range fallback and
+either semantic zones or the mutually exclusive range fallback and
 always renders the current recipe before deriving residuals. A node intersects
 the original pair's source and target evidence with its normalized rectangle;
 edits cannot move pixels into evidence. Best-first priority is
@@ -3088,8 +3143,10 @@ outside a `2 * radius` collar are restored byte for byte, whole-frame coverage
 may change by at most `0.002`, and transition-weighted Sobel guide-edge
 alignment may not decrease. Otherwise the original alpha is retained with a
 typed abstention. A kept alpha is fitted from scratch and still crosses the
-ordinary rim and composed-frame gates. Colour-range semantic regions remain
-out of scope.
+ordinary rim and composed-frame gates. A colour range is a range mask like a
+luminance one, so the filter never proposes one either: both are observed
+domains, and a guided filter has no evidence about which pixels belong to a
+domain it did not measure.
 
 **The reference, and the second reading (v0.29.0, R23-6).** The desktop
 target is no longer only an app-generated variant: `canvas::fit_target`

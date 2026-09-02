@@ -5201,6 +5201,60 @@ pub fn mask_coverage(
     out
 }
 
+/// The brightness-independent colour distance a [`RangeMask::Color`]
+/// selects on: each channel divided by its own pixel's Rec.601 luma, then
+/// Euclidean. The two arguments have the same FORM, so one function answers
+/// both questions the colour range asks -- "how far is this pixel from the
+/// band's reference colour" (the mask's own selector) and "how far apart are
+/// these two pixels" (the step the range family measures across a colour
+/// band's ramp).
+///
+/// `INFINITY` where either colour is too dark to carry a reliable
+/// chromaticity, which is the documented rule this used to spell inline
+/// inside [`range_weight`]: clamping instead let a black pixel match a black
+/// reference at full weight through arbitrary 1e-4/1e-4 ratios, and flooring
+/// a near-black REFERENCE made it read as ordinary grey and select bright
+/// neutral regions at full weight. Each caller decides what the unreadable
+/// pixel means for its own question: zero weight in the mask, a skipped
+/// sample in the range family's boundary gate.
+pub fn chromaticity_distance(reference: &[f32; 3], px: &[f32; 3]) -> f32 {
+    if luma601(px) < 1e-4 || luma601(reference) < 1e-4 {
+        return f32::INFINITY;
+    }
+    let rl = luma601(reference).max(1e-4);
+    let pl = luma601(px).max(1e-4);
+    let mut d2 = 0.0;
+    for (rc, pc) in [(reference[0], px[0]), (reference[1], px[1]), (reference[2], px[2])] {
+        let diff = rc / rl - pc / pl;
+        d2 += diff * diff;
+    }
+    d2.sqrt()
+}
+
+/// The chromaticity tolerance a `crs:ColorAmount` of zero still selects.
+const COLOUR_RANGE_MIN_TOLERANCE: f32 = 0.15;
+/// How much further a full `crs:ColorAmount` of one widens it.
+const COLOUR_RANGE_TOLERANCE_SPAN: f32 = 0.9;
+
+/// The chromaticity distance at which a colour Range Mask's weight reaches
+/// zero. The mask holds full weight out to half of it and ramps to nothing
+/// over the second half; Lightroom's `crs:ColorAmount` (0..=1, LR default
+/// 0.5) is the widening knob and [`COLOUR_RANGE_MIN_TOLERANCE`] is what a
+/// zero amount still selects.
+pub fn colour_range_tolerance(amount: f32) -> f32 {
+    COLOUR_RANGE_MIN_TOLERANCE + COLOUR_RANGE_TOLERANCE_SPAN * amount.clamp(0.0, 1.0)
+}
+
+/// The inverse of [`colour_range_tolerance`]: the `crs:ColorAmount` whose
+/// tolerance is `tolerance`, clamped into the 0..=1 the schema allows. A
+/// measured radius under the floor returns 0 and the emitted mask is WIDER
+/// than the measurement asked for; one over the ceiling returns 1 and it is
+/// narrower. Both are honest limits of the sidecar's own grammar, and a
+/// caller that cares prints the tolerance it actually got.
+pub fn colour_range_amount(tolerance: f32) -> f32 {
+    ((tolerance - COLOUR_RANGE_MIN_TOLERANCE) / COLOUR_RANGE_TOLERANCE_SPAN).clamp(0.0, 1.0)
+}
+
 /// Per-pixel Range Mask weight [0,1] — Lightroom's 范围蒙版, multiplied into the
 /// geometric mask weight (intersection).
 ///
@@ -5236,18 +5290,11 @@ pub fn range_weight(rm: &RangeMask, px: &[f32; 3]) -> f32 {
             // The REFERENCE is held to the same rule: flooring a near-black
             // reference and normalising it made it read as ordinary grey and
             // select bright neutral regions at full weight.
-            if luma601(px) < 1e-4 || luma601(&[*r, *g, *b]) < 1e-4 {
+            let d = chromaticity_distance(&[*r, *g, *b], px);
+            if !d.is_finite() {
                 return 0.0;
             }
-            let rl = luma601(&[*r, *g, *b]).max(1e-4);
-            let pl = luma601(px).max(1e-4);
-            let mut d2 = 0.0;
-            for (rc, pc) in [(*r, px[0]), (*g, px[1]), (*b, px[2])] {
-                let diff = rc / rl - pc / pl;
-                d2 += diff * diff;
-            }
-            let d = d2.sqrt();
-            let d_max = 0.15 + 0.9 * amount.clamp(0.0, 1.0);
+            let d_max = colour_range_tolerance(*amount);
             1.0 - ramp(0.5 * d_max, d_max, d)
         }
     }

@@ -1875,25 +1875,50 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     (" Luminance range [{lo}, {hi}] merged into [{into_lo}, {into_hi}] \
       {why}; both runs have sign {sign}.",
         " 亮度范围 [{lo}, {hi}] 已合并到 [{into_lo}, {into_hi}]（{why}）；两段符号相同，为 {sign}。"),
-    (" Range boundary-continuity gate kept {n} correction(s): signed \
-      transition rim {before} to {after} luma after shared \
-      direction-preserving shrink k={k} (budget {max}, {transitions} \
-      measured crossings); the delivered tone order falls back by at most \
+    (" Range boundary-continuity gate kept {n} correction(s): transition \
+      rim {before} to {after} after shared direction-preserving shrink \
+      k={k} (budget {max}, {transitions} measured crossings, each read in \
+      its own band's selector — luma for a luminance band, chromaticity \
+      for a colour band); the delivered tone order, a reading only a \
+      luminance band's coordinate carries, falls back by at most \
       {reversal} luma against the {rev_max} allowed.",
-        " 范围边界连续性门保留了 {n} 个校正：共享保方向收缩 k={k} 后，有符号过渡边缘亮度由 {before} 变为 {after}（预算 {max}，测得 {transitions} 个交叉）；交付的色调顺序最大回落 {reversal} 亮度（允许 {rev_max}）。"),
+        " 范围边界连续性门保留了 {n} 个校正：共享保方向收缩 k={k} 后，过渡边缘由 {before} 变为 {after}（预算 {max}，测得 {transitions} 个交叉，每个都按所属色带自身的选择坐标读取——亮度带读亮度，颜色带读色度）；交付的色调顺序（只有亮度带的坐标才有这个读数）最大回落 {reversal} 亮度（允许 {rev_max}）。"),
     (" Range corrections refused by the boundary-continuity gate: candidate \
-      rim {before} luma, and even zero differential left {after} (budget \
-      {max}, {transitions} measured crossings); the delivered tone order \
-      falls back by at most {reversal} luma against the {rev_max} allowed.",
-        " 范围校正被边界连续性门拒绝：候选边缘亮度为 {before}，即使差分归零仍为 {after}（预算 {max}，测得 {transitions} 个交叉）；交付的色调顺序最大回落 {reversal} 亮度（允许 {rev_max}）。"),
+      rim {before}, and even zero differential left {after} (budget \
+      {max}, {transitions} measured crossings, each read in its own \
+      band's selector); the delivered tone order, a reading only a \
+      luminance band's coordinate carries, falls back by at most \
+      {reversal} luma against the {rev_max} allowed.",
+        " 范围校正被边界连续性门拒绝：候选边缘为 {before}，即使差分归零仍为 {after}（预算 {max}，测得 {transitions} 个交叉，每个都按所属色带自身的选择坐标读取）；交付的色调顺序（只有亮度带的坐标才有这个读数）最大回落 {reversal} 亮度（允许 {rev_max}）。"),
+    (" {n} range correction(s) dropped by the boundary-continuity gate: \
+      candidate rim {before}, and the largest shrink inside budget {max} \
+      was k={k}, whose render is byte-identical to the frame without it — \
+      reading {after} over {transitions} measured crossings, with the \
+      delivered tone order falling back {reversal} luma against the \
+      {rev_max} allowed. An inert attachment would occupy the correction \
+      budget and \
+      disclose a change it did not make.",
+        " 边界连续性门丢弃了 {n} 个范围校正：候选边缘为 {before}，预算 {max} 内最大的收缩为 k={k}，其渲染结果与不加该校正的画面逐字节一致——读数 {after}，测得 {transitions} 个交叉，交付的色调顺序回落 {reversal} 亮度（允许 {rev_max}）。无效附加会占用校正预算，并声称做了它并未做的改动。"),
     (" Range corrections refused after the final boundary pass: the \
-      composed frame residual {after} exceeded the global-only residual \
-      {global} plus tolerance {tol}, so all {n} range correction(s) were removed.",
-        " 最终边界检查后已拒绝范围校正：合成全画面残差 {after} 超过仅全局残差 {global} 加容差 {tol}，因此移除了全部 {n} 个范围校正。"),
-    (" Confidence for this fit includes the {n} accepted luminance-range \
+      composed frame residual {after} exceeded the residual {global} this \
+      stage was handed plus tolerance {tol}, so all {n} range \
+      correction(s) were removed.",
+        " 最终边界检查后已拒绝范围校正：合成全画面残差 {after} 超过本阶段接手时的残差 {global} 加容差 {tol}，因此移除了全部 {n} 个范围校正。"),
+    (" Confidence for this fit includes the {n} accepted range \
       correction(s) (worst band residual {worst}); the final frame residual \
       is {frame}.",
-        " 本次拟合的置信度包含 {n} 个已接受的亮度范围校正（最差范围残差 {worst}）；最终全画面残差为 {frame}。"),
+        " 本次拟合的置信度包含 {n} 个已接受的范围校正（最差范围残差 {worst}）；最终全画面残差为 {frame}。"),
+    (" {label} proposed from the {band} colour band: the mask selects \
+      {share}% of the frame within {tol} chromaticity of that band's own \
+      mean colour, and the band differs from the target by {residual}.",
+        " 已从 {band} 颜色色带提出 {label}：该蒙版选中画面的 {share}%，即与该色带自身平均色的色度距离在 {tol} 以内的像素；该色带与目标相差 {residual}。"),
+    (" {label} attached (local exposure {ev} EV, colour gains \
+      [{g0} {g1} {g2}], saturation {sat}): band residual {before} → \
+      {after}. The sentinel-hosted colour range is native in the \
+      Lightroom sidecar.",
+        " 已附加 {label}（局部曝光 {ev} EV、色彩增益 [{g0} {g1} {g2}]、饱和度 {sat}）：色带残差 {before} → {after}。由全画面 LINEAR 承载的颜色范围会原生写入 Lightroom 边车。"),
+    (" Colour range on the {band} band abstained: {reason}.",
+        " {band} 色带上的颜色范围已放弃：{reason}。"),
     (" Local-field ceiling: global {global}, ceiling {ceiling}, realized \
       {realized}, saturated vertices {saturated}, CG iterations {iterations}.",
         " 局部场上限：全局 {global}，上限 {ceiling}，已实现 {realized}，饱和顶点 {saturated}，CG 迭代 {iterations}。"),
