@@ -1921,21 +1921,37 @@ mod tests {
             .get_args()
             .map(|arg| arg.to_string_lossy().into_owned())
             .collect();
+        // The legacy argv, and then whatever the CONFIGURATION appends —
+        // `append_segment_args` ends with `Config::load().weights_args()`, so a
+        // machine with a weights directory set produces two more arguments and a
+        // machine without produces none. Naming the two halves separately is what
+        // makes this assertion mean the same thing on both; a flat list meant
+        // "the legacy argv" on one machine and "the battery is red" on the other.
+        let mut expected: Vec<String> = [
+            "-E",
+            "python/segment.py",
+            "--input",
+            "in.png",
+            "--output",
+            "out.png",
+            "--target",
+            "object",
+            "--reference-point",
+            "0.200000 0.300000",
+        ]
+        .iter()
+        .map(|s| (*s).to_string())
+        .collect();
+        let weights: Vec<String> = crate::config::Config::load()
+            .weights_args()
+            .iter()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        expected.extend(weights.iter().cloned());
         assert_eq!(
-            argv,
-            [
-                "-E",
-                "python/segment.py",
-                "--input",
-                "in.png",
-                "--output",
-                "out.png",
-                "--target",
-                "object",
-                "--reference-point",
-                "0.200000 0.300000",
-            ],
-            "a gesture-free subtype-0 invocation keeps the exact legacy argv"
+            argv, expected,
+            "a gesture-free subtype-0 invocation keeps the exact legacy argv, plus \
+             only the weights arguments the configuration contributes ({weights:?})"
         );
     }
 
