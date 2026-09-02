@@ -957,14 +957,17 @@ turns with it since R27 Batch-3 (A8): a document THIS build writes declares its
 frame — `tiff:ImageWidth/ImageLength` in the SOURCE frame plus a
 `tiff:Orientation` carrying the COMPOSED state (`xmp::frame_declaration`, fed
 by `pipeline::photo_frame_aspect`) — which closed the 「the sidecar describes
-the unturned frame」 gap Batch-2 registered. The declaration is added only where
-the merge target mentions no `tiff:` at all, so the 16 real Lightroom sidecars
-still round-trip byte for byte; and the turn is still not RECOVERABLE from a
-classic ACR sidecar on the way back, so `recipe.json` remains the authoritative
-restore path. Not turned: a photo carrying BAKED pixels — a retouch/AI master
-is a raster on disk in the frame it was baked in, so the GUI refuses the turn
-with that reason on the button rather than turning the canvas out from under
-it.
+the unturned frame」 gap Batch-2 registered. Since v1.2.4 the declaration goes
+out wherever the merge target does not already carry it, and the target's own
+`tiff:Orientation` is CORRECTED when the composed turn has moved away from it —
+that is how a turn made here reaches Lightroom. It is a no-op for a recipe
+imported from the very sidecar it is saved back into, so a real Lightroom
+sidecar still round-trips byte for byte. The turn IS recoverable from a classic
+ACR sidecar now (§4.5, the sidecar orientation law); `recipe.json` remains the
+authoritative restore path for everything a `crs:` document cannot carry. Not
+turned: a photo carrying BAKED pixels — a retouch/AI master is a raster on disk
+in the frame it was baked in, so the GUI refuses the turn with that reason on
+the button rather than turning the canvas out from under it.
 
 **And WHERE the frame starts comes from the DefaultCrop rectangle, not from the
 sensor corner (v0.32.0).** Block registration of eight AutoShade renders against
@@ -1364,6 +1367,47 @@ Lightroom wrote the key itself. Lightroom renders the last two IDENTICALLY —
 edit. This engine drops the correction on import and names it, which is the
 same picture, and the sidecar's own mask group survives a merge byte for byte,
 so an eye set in Lightroom is still set after a round trip through this app.
+
+**The sidecar orientation law (v1.2.4).** Lightroom keeps a photograph's current
+orientation in the sidecar's `tiff:Orientation`, and THAT value — not the RAW's
+own EXIF tag — is the frame it delivers. me6-2026-09 measured it: the pack's
+capture carries IFD0 `Orientation = 8` (`Rotate270`), all 46 sidecars declare
+`tiff:Orientation="1"`, and Lightroom exported **6240 × 4160 landscape** from
+every one of them; `E-CLICK.xmp` — the one sidecar Lightroom 9.4 rewrote itself
+— wrote that same `"1"` back beside corrected 6240 × 4160 dimensions, so the
+value Lightroom honours is also the value Lightroom writes. This engine's
+delivered frame is `compose_orientation(EXIF, quarter_turns)`, so the two agree
+exactly when
+
+```text
+compose_orientation(the RAW's EXIF, quarter_turns) == the sidecar's tiff:Orientation
+```
+
+— one equation, solved for the turn on the way in
+(`render::quarter_turns_between`) and run forwards on the way out
+(`pipeline::photo_frame_aspect` feeding `xmp::frame_declaration`). Before it all
+46 rendered **4160 × 6240 portrait** against Lightroom's landscape, and a
+rotation made in Lightroom did not survive import at all. A MIRRORED
+declaration (`tiff:Orientation` 2/4/5/7) over an un-mirrored capture has no
+solution — the four quarter turns are the rotation subgroup, of index two in the
+eight EXIF states — so that tag is refused BY NAME through the diagnostics
+channel and the photograph's own EXIF decides, rather than being mapped to the
+nearest rotation, which would mirror every mask in the file. Over the
+174-sidecar reference library the law changes nothing at all: 169 sidecars pair
+with a readable capture and all 169 declare exactly its EXIF state (145 × `1`,
+23 × `8`, 1 × `6`), 2 declare no orientation, 3 have no capture beside them.
+The population it moves is the one Lightroom itself rotated.
+
+The same law fixed WHERE those coordinates land. 154 of those 174 sidecars
+declare an orientation and NO `tiff:ImageWidth`/`tiff:ImageLength` at all, 17 of
+them over a portrait capture and carrying mask geometry — and the declaration
+alone is enough to place the geometry, because `render::orient_point` is
+aspect-free and only a brush's radii need the rectangle. The reader used to
+require both, so those 17 files' masks stayed in the sensor frame while the
+render delivered the turned one, and the merge wrote DISPLAY-frame numbers back
+under a declaration saying they were sensor-frame. Both halves now fall back to
+the photograph's own rectangle when the document declares none, which is the
+reading `xmp::merge_frame`'s no-`tiff:` arm already took.
 
 Every me6-2026-09 number in this document comes from one producer and one
 script: `render::lr_pack::export_lr_pack_renders_for_the_mask_measurement`

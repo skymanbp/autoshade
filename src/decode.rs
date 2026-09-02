@@ -1817,6 +1817,11 @@ pub fn decode_raw_turned(path: &Path, quarter_turns: u8) -> Result<Decoded> {
     // the dummy raw's hard-coded field (see [`raw_orientation_of`]), COMPOSED
     // with the photographer's quarter turns (R27). Free — `md` is decoded one
     // line above, and the composition is a bit-twiddle.
+    //
+    // This composition is also what an imported sidecar's `tiff:Orientation`
+    // is solved AGAINST (`render::quarter_turns_between`): the frame delivered
+    // here is the frame Lightroom's own export has, because the importer chose
+    // `quarter_turns` to make the two equal.
     let orientation = crate::render::compose_orientation(raw_orientation_of(&md), quarter_turns);
 
     // `dummy = true`: populate dimensions / WB / levels without decompressing

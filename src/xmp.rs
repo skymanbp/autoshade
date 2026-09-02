@@ -320,11 +320,7 @@ impl FrameAspect {
         FrameAspect::from_size_turned(
             span.declared_number("tiff:ImageWidth")?,
             span.declared_number("tiff:ImageLength")?,
-            span.declared_number("tiff:Orientation")
-                .filter(|v| (1.0..=8.0).contains(v))
-                .map_or(rawler::Orientation::Normal, |v| {
-                    rawler::Orientation::from_u16(v as u16)
-                }),
+            span.declared_orientation().unwrap_or(rawler::Orientation::Normal),
         )
     }
 }
@@ -379,6 +375,14 @@ impl<'a> FrameScope<'a> {
     ///   elements — symptom D is removed only for documents where some element
     ///   declares both.
     fn resolve(doc: &'a str) -> Self {
+        Self::resolve_with_start(doc).0
+    }
+
+    /// [`resolve`] plus WHERE it resolved to: the `<` of the Description it
+    /// narrowed to, or `None` for either whole-document fallback. The merge
+    /// asks, because a declaration it corrects has to land inside the span
+    /// this reader will search, or the engine's own round trip loses it.
+    fn resolve_with_start(doc: &'a str) -> (Self, Option<usize>) {
         let mut from = 0;
         while let Some((start, gt, self_closing)) = next_xml_tag(doc, from) {
             from = gt + 1;
@@ -400,10 +404,10 @@ impl<'a> FrameScope<'a> {
             if span.declared_number("tiff:ImageWidth").is_some()
                 && span.declared_number("tiff:ImageLength").is_some()
             {
-                return span;
+                return (span, Some(start));
             }
         }
-        FrameScope(doc)
+        (FrameScope(doc), None)
     }
 
     /// The number THIS scope declares for `name`, in either XMP spelling —
@@ -435,6 +439,84 @@ impl<'a> FrameScope<'a> {
             .parse::<f64>()
             .ok()
             .filter(|v| v.is_finite())
+    }
+
+    /// The `tiff:Orientation` THIS scope declares, or `None` when it declares
+    /// none — the ONE parser of that property, so the frame read above and the
+    /// import law below cannot disagree about a value.
+    ///
+    /// **`None` and `Some(Normal)` are different answers**, and both callers
+    /// need the difference: a document that declares no orientation says
+    /// nothing about which way the photograph is up (and the photograph's own
+    /// EXIF decides), while one that declares `1` says it is upright — which,
+    /// over a capture whose EXIF says otherwise, is a rotation the
+    /// photographer made in Lightroom. A number outside EXIF's own 1..=8
+    /// domain reads as no declaration rather than as `Unknown`, which is what
+    /// the `filter` in `from_xmp` has always done.
+    fn declared_orientation(self) -> Option<rawler::Orientation> {
+        self.declared_number("tiff:Orientation")
+            .filter(|v| (1.0..=8.0).contains(v))
+            .map(|v| rawler::Orientation::from_u16(v as u16))
+    }
+}
+
+/// The `tiff:Orientation` a whole document declares, through the same scope
+/// resolution [`FrameAspect::from_xmp`] uses — `None` when it declares none.
+///
+/// Separate from `from_xmp` because the two questions come apart in the field:
+/// 154 of the 174 sidecars in the reference library declare an orientation and
+/// NO `tiff:ImageWidth`/`tiff:ImageLength` at all, so a reader that could only
+/// learn the turn along with the rectangle would learn it for 18 of them.
+fn declared_orientation(doc: &str) -> Option<rawler::Orientation> {
+    FrameScope::resolve(doc).declared_orientation()
+}
+
+/// What a sidecar's `tiff:Orientation` means for the photograph beside it: the
+/// frame its `crs:` coordinates must be carried INTO, and the photographer's
+/// turn that makes this engine's render DELIVER that frame.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct HonouredTurn {
+    /// The source -> display turn [`crate::render::orient_recipe_coords`]
+    /// moves the imported geometry by.
+    turn: rawler::Orientation,
+    /// [`EditRecipe::quarter_turns`], chosen so that
+    /// `compose_orientation(the RAW's EXIF, quarter_turns) == turn`.
+    quarter_turns: u8,
+    /// The declared state that could NOT be delivered, for the disclosure.
+    /// `Some` only for a mirror ([`crate::render::quarter_turns_between`]).
+    refused: Option<rawler::Orientation>,
+}
+
+/// [`crate::render::quarter_turns_between`] — the sidecar orientation law —
+/// applied to one document / photograph pair. The law itself, its measurement
+/// and its sign convention live on that function; this is the import side's
+/// half of the citation.
+///
+/// Three arms, and the first two are today's behaviour byte for byte:
+///
+/// * the document declares no orientation ⇒ it says nothing about which way
+///   the photograph is up, so neither does the recipe;
+/// * there is no photograph to compose against — a baked source, an unreadable
+///   RAW ⇒ the declaration is the only frame information there is and is taken
+///   at face value, which is what every build before this one did with it;
+/// * both are known ⇒ the law. `Some(k)` is the turn that makes the delivered
+///   frame equal Lightroom's; `None` is a MIRROR, refused whole.
+///
+/// **A refused tag is treated as no tag**: the photograph's own EXIF decides
+/// the frame, so the geometry still lands on the part of the picture Lightroom
+/// put it on and only the handedness is lost. Honouring half of it — turning
+/// the coordinates into a frame the render will never produce — would move
+/// every mask in the file instead.
+fn honour_declared_orientation(
+    declared: Option<rawler::Orientation>,
+    exif: Option<rawler::Orientation>,
+) -> HonouredTurn {
+    let plain = |turn| HonouredTurn { turn, quarter_turns: 0, refused: None };
+    let Some(want) = declared else { return plain(rawler::Orientation::Normal) };
+    let Some(exif) = exif else { return plain(want) };
+    match crate::render::quarter_turns_between(exif, want) {
+        Some(quarter_turns) => HonouredTurn { turn: want, quarter_turns, refused: None },
+        None => HonouredTurn { turn: exif, quarter_turns: 0, refused: Some(want) },
     }
 }
 
@@ -4404,35 +4486,129 @@ pub fn merge_recipe_into_xmp(existing: &str, r: &EditRecipe) -> Option<MergeOutc
     merge_recipe_into_xmp_in_frame(existing, r, None)
 }
 
-/// Which frame a MERGE writes its geometry in, and whether this writer must
-/// declare that frame itself (R27 A8).
+/// What the merged tag must DECLARE about the frame its geometry is written
+/// in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FrameDecl {
+    /// The base already says it; touch nothing. This is what keeps a real
+    /// Lightroom sidecar's own bytes intact through a round trip.
+    Keep,
+    /// Only the ORIENTATION disagrees with the frame we are writing in (or the
+    /// base declares none and the frame is turned) — set that one attribute
+    /// and leave the base's rectangle, namespace and attribute order alone.
+    Orientation,
+    /// The base mentions no `tiff:` at all — write the whole block.
+    Whole,
+}
+
+/// Which frame a MERGE writes its geometry in, and what the output must
+/// declare so the two agree (R27 A8; the orientation half is W14).
 ///
 /// The rule is that the coordinates and the declaration can never disagree:
 ///
-/// * the base declares a usable frame ⇒ that one wins and needs no help. It is
-///   what Lightroom itself measured this file's coordinates against, and a
-///   sidecar and its photo can legitimately disagree (a re-crop, a proxy).
-/// * the base mentions `tiff:` but declares no usable pair ⇒ we must not add
-///   attributes to its tag (a second `xmlns:tiff`, or a second
-///   `tiff:ImageWidth`, is not well-formed XML), so the geometry goes out in
-///   the DISPLAY frame — which is what a document that declares nothing means
-///   by its own numbers, and what every build before R27 wrote.
-/// * the base is silent about `tiff:` ⇒ the photo's SOURCE frame, declared.
-///   This is the arm that makes a portrait photo's merged sidecar readable:
-///   without the declaration the numbers would be sensor-frame in a document
-///   that claims nothing, and our own reader would take them for display-frame.
-fn merge_frame(existing: &str, photo: Option<FrameAspect>) -> (Option<FrameAspect>, bool) {
-    if let Some(base) = FrameAspect::from_xmp(existing) {
-        return (Some(base), false);
-    }
-    let touched = ["xmlns:tiff", "tiff:ImageWidth", "tiff:ImageLength", "tiff:Orientation"]
+/// * the base declares a usable RECTANGLE ⇒ that one wins and needs no help.
+///   It is what Lightroom itself measured this file's coordinates against, and
+///   a sidecar and its photo can legitimately disagree (a re-crop, a proxy).
+/// * the base declares none ⇒ the photo's SOURCE rectangle. Before W14 a base
+///   that merely MENTIONED `tiff:` got the DISPLAY rectangle and no
+///   declaration instead, on the grounds that attributes could not be added to
+///   its tag — but 154 of the 174 sidecars in the reference library are
+///   exactly that shape (a `tiff:Orientation` with no dimensions), 17 of them
+///   over a portrait capture and carrying mask geometry, and for those the
+///   display-frame numbers went out under a declaration saying the frame was
+///   turned: a quarter turn wrong in Lightroom AND in our own reader.
+///
+/// The TURN is the photograph's own composed state whenever we know it
+/// (`render::quarter_turns_between` is the law), because that is the frame the
+/// recipe's coordinates are in. When it differs from what the base declares,
+/// the base's `tiff:Orientation` is CORRECTED to match — that is how a
+/// rotation made in AutoShade reaches Lightroom, and it is a no-op for a
+/// recipe imported from this very sidecar, which is what keeps the round trip
+/// byte for byte.
+///
+/// `desc` is the crs Description's own opening tag with its offset in
+/// `existing` (`None` when the document has none and a fresh Description
+/// will be inserted). The declaration is corrected ONLY where this engine's
+/// own reader will read it back — [`FrameScope::resolve`] narrows to the one
+/// Description that declares both dimensions, so the crs Description must
+/// be that one, or the reader must be in its whole-document fallback — and
+/// only where the old value cannot survive beside the new one (an attribute
+/// of that tag, or no declaration anywhere). Anything else — the
+/// property-element spelling, a frame kept in a second Description, as
+/// exiftool writes it — is left alone and the geometry is written in the
+/// frame the file declares, with the note saying so: a correction the reader
+/// cannot see would lose the turn on the next import and put the numbers in
+/// a frame nobody recovers.
+fn merge_frame(
+    existing: &str,
+    desc: Option<(usize, &str)>,
+    photo: Option<FrameAspect>,
+) -> (Option<FrameAspect>, FrameDecl, Option<String>) {
+    let mentions_tiff = ["xmlns:tiff", "tiff:ImageWidth", "tiff:ImageLength", "tiff:Orientation"]
         .iter()
         .any(|k| find_outside_constructs(existing, k).is_some());
-    if touched {
-        (photo.map(|f| f.displayed()), false)
-    } else {
-        (photo, photo.is_some())
+    let base = FrameAspect::from_xmp(existing);
+    // The rectangle: the base's when it declares one, else the photograph's.
+    let Some(frame) = base.or(photo) else {
+        return (None, FrameDecl::Keep, None);
+    };
+    if !mentions_tiff {
+        // Nothing of ours to disturb — declare the whole block, which is the
+        // arm that makes a portrait photo's merged sidecar readable at all.
+        return (Some(frame), FrameDecl::Whole, None);
     }
+    // The turn the recipe's coordinates are actually in. Without a photograph
+    // there is nothing to compose, so the base's own declaration stands.
+    let Some(want) = photo.map(|p| p.turn()) else {
+        return (Some(frame), FrameDecl::Keep, None);
+    };
+    let frame = FrameAspect { turn: want, ..frame };
+    let (scope, scope_start) = FrameScope::resolve_with_start(existing);
+    let declared = scope.declared_orientation();
+    if declared.unwrap_or(rawler::Orientation::Normal) == want {
+        return (Some(frame), FrameDecl::Keep, None);
+    }
+    // It disagrees, so it has to be rewritten — and it can be rewritten only
+    // where this merge already rewrites (as an attribute of the tag it is
+    // splicing; anywhere else the old value would survive beside the new
+    // one) AND where the reader will look for it (that tag's Description is
+    // the reader's scope, or the reader searches the whole document).
+    let at_scope = scope_start.is_none_or(|s| desc.is_some_and(|(start, _)| start == s));
+    let rewritable = at_scope
+        && desc.is_some_and(|(_, t)| {
+            xml_attribute_raw(t, "tiff:Orientation").is_some()
+                || find_outside_constructs(existing, "tiff:Orientation").is_none()
+        });
+    if rewritable {
+        return (Some(frame), FrameDecl::Orientation, None);
+    }
+    let kept = declared.unwrap_or(rawler::Orientation::Normal);
+    (
+        Some(FrameAspect { turn: kept, ..frame }),
+        FrameDecl::Keep,
+        Some(format!(
+            "this sidecar keeps its tiff: frame where a merge cannot rewrite it, so the \
+             photo's own orientation ({}) was not written and the geometry was saved in the \
+             frame the file declares ({})",
+            want.to_u16().max(1),
+            kept.to_u16().max(1)
+        )),
+    )
+}
+
+/// The ONE `tiff:Orientation` attribute a merge appends when the base's own
+/// disagrees with the frame being written ([`FrameDecl::Orientation`]). The
+/// rectangle is the base's and stays untouched; only this property is ours
+/// to correct — but the prefix must be BOUND on the tag that uses it. A
+/// document may bind `tiff:` on an ancestor rather than on the Description
+/// itself, and a prefix no enclosing element binds makes the whole sidecar
+/// unreadable to an XML parser, Lightroom's included. So the binding rides
+/// along exactly when the tag lacks one: re-binding a prefix an ancestor
+/// already binds is legal XML, a duplicate attribute on one tag is not.
+fn orientation_declaration(frame: Option<FrameAspect>, bind_prefix: bool) -> String {
+    let Some(f) = frame else { return String::new() };
+    let binding = if bind_prefix { "\n    xmlns:tiff=\"http://ns.adobe.com/tiff/1.0/\"" } else { "" };
+    format!("{binding}\n    tiff:Orientation=\"{}\"", f.turn().to_u16().max(1))
 }
 
 /// [`merge_recipe_into_xmp`] with a FALLBACK frame — the photo's own aspect,
@@ -4457,7 +4633,6 @@ pub fn merge_recipe_into_xmp_in_frame_for_photo(
     frame: Option<FrameAspect>,
     photo: Option<&std::path::Path>,
 ) -> Option<MergeOutcome> {
-    let (frame, declare_frame) = merge_frame(existing, frame);
     if existing.len() > MAX_XMP_BYTES {
         return None;
     }
@@ -4465,7 +4640,10 @@ pub fn merge_recipe_into_xmp_in_frame_for_photo(
         return None;
     }
     let mut notes: Vec<String> = Vec::new();
+    let photo_frame = frame;
     let Some(desc_start) = find_crs_description(existing) else {
+        let (frame, _, note) = merge_frame(existing, None, photo_frame);
+        notes.extend(note);
 
 
         // A well-formed sidecar that simply carries no camera-raw settings —
@@ -4484,6 +4662,23 @@ pub fn merge_recipe_into_xmp_in_frame_for_photo(
     // BOTH quote styles: single-quoted attributes are legal XML, and leaving
     // one behind would duplicate the attribute we append.
     let mut tag = existing[desc_start..=gt].to_string();
+    // …and the frame decision, which needs that tag: whether the base's own
+    // `tiff:Orientation` is somewhere this splice can correct (W14).
+    let (frame, declare_frame, frame_note) =
+        merge_frame(existing, Some((desc_start, &tag)), photo_frame);
+    notes.extend(frame_note);
+    // A corrected orientation replaces the base's attribute rather than
+    // joining it — the same strip-then-append discipline the crs keys take one
+    // loop down, for the same reason.
+    if declare_frame == FrameDecl::Orientation {
+        while let Some((span, _)) = xml_attribute_raw(&tag, "tiff:Orientation") {
+            let mut left = span.start;
+            while left > 0 && tag.as_bytes()[left - 1].is_ascii_whitespace() {
+                left -= 1;
+            }
+            tag.replace_range(left..span.end, "");
+        }
+    }
     for key in merge_strip_keys(r) {
         let name = format!("crs:{key}");
         while let Some((span, _)) = xml_attribute_raw(&tag, &name) {
@@ -4506,7 +4701,13 @@ pub fn merge_recipe_into_xmp_in_frame_for_photo(
     let head = tag[..tag.len() - closing_len].trim_end().to_string();
     let new_tag = format!(
         "{head}{tiff}{attrs}>",
-        tiff = if declare_frame { frame_declaration(frame) } else { String::new() },
+        tiff = match declare_frame {
+            FrameDecl::Whole => frame_declaration(frame),
+            FrameDecl::Orientation => {
+                orientation_declaration(frame, xml_attribute_raw(&tag, "xmlns:tiff").is_none())
+            }
+            FrameDecl::Keep => String::new(),
+        },
         attrs = owned_attrs(r, frame),
     );
 
@@ -7754,6 +7955,29 @@ fn xmp_to_recipe_clamped_impl(
     // ONCE and served to both geometry decodes (crop and masks), because they
     // are the same encoding in the same frame (`FrameAspect`).
     let frame = FrameAspect::from_xmp(xmp);
+    // …and WHICH WAY IS UP, which is a separate read (`declared_orientation`
+    // says why) and needs the photograph as well as the document. The
+    // photograph's half is its un-rotated rectangle plus its own EXIF turn,
+    // through the memo `photo_frame_aspect` and `migrate_recipe_coord_frame`
+    // already share — one header walk per photo per process, not one per
+    // consumer. Skipped entirely when the document declares no orientation,
+    // because then the law has nothing to solve and the read would buy
+    // nothing.
+    let declared = declared_orientation(xmp);
+    let source = declared
+        .and(photo)
+        .filter(|p| crate::decode::is_raw(p))
+        .and_then(crate::pipeline::source_frame_memo);
+    let turn = honour_declared_orientation(declared, source.map(|(_, exif)| exif));
+    if let (Some(refused), Some(diag)) = (turn.refused, diag) {
+        // NAMED, never silently mapped to the nearest rotation: the value, the
+        // reason it cannot be delivered, and what was kept instead.
+        diag.warn(format!(
+            "tiff:Orientation=\"{}\" mirrors the frame and no quarter turn can deliver it — \
+             the sidecar's orientation was refused and the photo's own EXIF orientation kept",
+            refused.to_u16()
+        ));
+    }
     // Adobe applies `CropAngle` only under `HasCrop="True"` — importing a
     // stale angle from a DISABLED crop activated a straighten Adobe itself
     // does not render.
@@ -7940,21 +8164,36 @@ fn xmp_to_recipe_clamped_impl(
     // numbers. It moves the crop, every mask box, the range-mask sample point
     // and — under a mirror — the straighten's sign, all in one pass.
     //
-    // A landscape document (`tiff:Orientation` absent or 1) turns nothing, so
-    // this is inert for every frame the twelve-export experiment and the 16
-    // reference sidecars contain.
+    // A document whose declared orientation already IS the photograph's own
+    // turns nothing, so this stays inert for every frame the twelve-export
+    // experiment, the 16 reference sidecars and the 169 pairs of the reference
+    // library contain (that census found 0 sidecars declaring an orientation
+    // their RAW's EXIF disagrees with; the me6-2026-09 pack is the measured
+    // exception, and it is 46 for 46).
+    //
+    // The turn is `HonouredTurn`'s, not `frame`'s: they are the same value
+    // whenever both exist, and the two come apart exactly where the law has
+    // something to say — a refused mirror, and a document that declares an
+    // orientation but no rectangle.
     //
     // The frame handed along is the SOURCE rectangle, because that is the one
     // these coordinates are still in (R29 C1, `render::CoordFrame`): a brush's
     // radii are in width units, so the rewrite has to divide by the width the
-    // document declares, not by the one the display frame will have.
-    if let Some(f) = frame {
-        crate::render::orient_recipe_coords(
-            &mut r,
-            f.turn(),
-            crate::render::CoordFrame::new(f.w, f.h),
-        );
-    }
+    // document declares — or, when it declares none, by the photograph's own,
+    // which is the rectangle Lightroom measured against and the one
+    // `merge_frame`'s third arm already declares on the way back out.
+    crate::render::orient_recipe_coords(
+        &mut r,
+        turn.turn,
+        frame.and_then(|f| crate::render::CoordFrame::new(f.w, f.h)).or_else(|| {
+            source.and_then(|((w, h), _)| crate::render::CoordFrame::new(w as f64, h as f64))
+        }),
+    );
+    // …and the turn that makes the render DELIVER the frame those coordinates
+    // are now in. Zero for every document whose declaration agrees with the
+    // capture, which is what keeps an un-rotated recipe's JSON byte-identical
+    // (`quarter_turns` is the one `skip_serializing_if` field).
+    r.quarter_turns = turn.quarter_turns;
     // Independent scalar controls saturate at the recipe contract and are
     // named by `unparsable_crs_numbers` when that changes a foreign value.
     // Compound crop and mask data are rejected earlier because clamping only
@@ -11105,6 +11344,268 @@ mod tests {
                 "{turn:?}: crop {c:?}"
             );
         }
+    }
+
+    /// **The import half of the sidecar orientation law** (W14), arm by arm.
+    /// The law itself, its measurement and its sign convention live on
+    /// [`crate::render::quarter_turns_between`]; this pins what THIS module
+    /// does with the answer.
+    ///
+    /// MUTATION THIS CATCHES: hand `honour_declared_orientation` the declared
+    /// state as its own EXIF (`quarter_turns_between(want, want)`) and every
+    /// row that needs a turn comes back 0 — the defect the me6-2026-09 pack
+    /// measured, where 46 landscape exports rendered portrait.
+    #[test]
+    fn a_sidecars_declared_orientation_becomes_the_photographers_quarter_turns() {
+        use rawler::Orientation as O;
+        let turn = |declared, exif| honour_declared_orientation(declared, exif);
+        // No declaration: the document says nothing about which way the photo
+        // is up, so neither does the recipe. Today's behaviour, byte for byte.
+        assert_eq!(
+            turn(None, Some(O::Rotate270)),
+            HonouredTurn { turn: O::Normal, quarter_turns: 0, refused: None }
+        );
+        // No photograph to compose against (a baked source, an unreadable
+        // RAW): the declaration is the only frame information there is and is
+        // taken at face value, which is what every build before W14 did.
+        assert_eq!(
+            turn(Some(O::Rotate270), None),
+            HonouredTurn { turn: O::Rotate270, quarter_turns: 0, refused: None }
+        );
+        // The me6-2026-09 pack's own row: IFD0 Orientation = 8 under 46
+        // sidecars that declare 1. One clockwise quarter turn delivers the
+        // landscape frame Lightroom exported.
+        assert_eq!(
+            turn(Some(O::Normal), Some(O::Rotate270)),
+            HonouredTurn { turn: O::Normal, quarter_turns: 1, refused: None }
+        );
+        // Agreement costs nothing — which is why the 169 sidecar/RAW pairs of
+        // the reference library, all of which agree, import unchanged.
+        for o in [O::Normal, O::Rotate90, O::Rotate180, O::Rotate270, O::Transpose] {
+            assert_eq!(turn(Some(o), Some(o)).quarter_turns, 0, "{o:?} agrees with itself");
+        }
+        // A MIRROR over an un-mirrored capture has no quarter turn at all, so
+        // the tag is refused WHOLE: the photograph's own EXIF decides the
+        // frame, exactly as it does for a sidecar that declares nothing, and
+        // the refusal is named rather than mapped to the nearest rotation.
+        assert_eq!(
+            turn(Some(O::HorizontalFlip), Some(O::Normal)),
+            HonouredTurn { turn: O::Normal, quarter_turns: 0, refused: Some(O::HorizontalFlip) }
+        );
+        // …and a mirror over a MIRRORED capture is a plain rotation, so it is
+        // honoured. "Mirrored values are refused" would have been the wrong
+        // rule: what cannot be delivered is a change of HANDEDNESS.
+        assert_eq!(
+            turn(Some(O::VerticalFlip), Some(O::HorizontalFlip)),
+            HonouredTurn { turn: O::VerticalFlip, quarter_turns: 2, refused: None }
+        );
+    }
+
+    /// **The export half**: a merge corrects the base's `tiff:Orientation` when
+    /// — and only when — the photographer's turn has moved away from it.
+    ///
+    /// Both halves matter and they pull against each other. A save that never
+    /// touched the tag could not carry a rotation made here to Lightroom; a
+    /// save that always rewrote it would move the base's own bytes on every
+    /// round trip. The composed state (`pipeline::photo_frame_aspect`) decides,
+    /// so a recipe imported from this very sidecar composes back to the value
+    /// already in it and nothing is written.
+    ///
+    /// MUTATION THIS CATCHES: return `FrameDecl::Keep` unconditionally from
+    /// `merge_frame`'s disagreement arm and the turned save leaves
+    /// `tiff:Orientation="8"` on a document whose geometry is now landscape.
+    #[test]
+    fn a_merge_corrects_the_declared_orientation_only_when_the_turn_moved() {
+        use rawler::Orientation as O;
+        // A Lightroom-shaped base: the sensor rectangle plus a portrait turn.
+        let base = in_frame(&lr_doc(""), 9504, 6336)
+            .replace("tiff:ImageWidth", "tiff:Orientation=\"8\"\n   tiff:ImageWidth");
+        let r = EditRecipe { exposure_ev: 0.25, ..Default::default() };
+        let merged = |turn| {
+            merge_recipe_into_xmp_in_frame(
+                &base,
+                &r,
+                FrameAspect::from_size_turned(9504.0, 6336.0, turn),
+            )
+            .expect("the base is mergeable")
+            .doc
+        };
+        // Unmoved: the base's own frame block survives verbatim, in its own
+        // order, with its own whitespace.
+        let same = merged(O::Rotate270);
+        assert_eq!(same.matches("tiff:Orientation").count(), 1, "{same}");
+        assert!(
+            same.contains("tiff:Orientation=\"8\"\n   tiff:ImageWidth=\"9504\""),
+            "the base's frame block did not survive byte for byte: {same}"
+        );
+        // Turned here: the declaration follows the composed state, exactly
+        // once, and the rectangle it was measured against does not move.
+        let turned = merged(O::Normal);
+        assert_eq!(
+            turned.matches("tiff:Orientation").count(),
+            1,
+            "one declaration, never two: {turned}"
+        );
+        assert!(turned.contains("tiff:Orientation=\"1\""), "{turned}");
+        assert!(turned.contains("tiff:ImageWidth=\"9504\""), "the rectangle stays: {turned}");
+        // …and a reader gets each one back out.
+        assert_eq!(declared_orientation(&same), Some(O::Rotate270));
+        assert_eq!(declared_orientation(&turned), Some(O::Normal));
+        // Without a photograph there is nothing to compose, so the base's own
+        // declaration stands — a `recipe_to_xmp`-style save of a document we
+        // cannot place must not invent a frame for it.
+        let blind = merge_recipe_into_xmp(&base, &r).expect("mergeable").doc;
+        assert!(blind.contains("tiff:Orientation=\"8\""), "{blind}");
+    }
+
+    /// **A corrected orientation is written only where this engine's own
+    /// reader will find it, and arrives bound.** [`FrameScope::resolve`] takes
+    /// the declaration from the one Description that declares both
+    /// dimensions, so a correction spliced onto a DIFFERENT Description (the
+    /// exiftool shape: one Description per namespace) would be invisible to
+    /// the reader — the round trip would lose the turn while the coordinates
+    /// went out in a frame nobody recovers. And an attribute whose prefix no
+    /// enclosing element binds makes the WHOLE sidecar unreadable to an XML
+    /// parser, Lightroom's included. Three shapes, one rule each:
+    ///
+    /// * the frame lives in another Description ⇒ the base's declaration is
+    ///   kept, the geometry goes out in the frame the file declares, and the
+    ///   merge NAMES what it could not write;
+    /// * the crs Description declares the frame and an ancestor binds the
+    ///   prefix ⇒ the correction lands on the crs tag WITH its own binding;
+    /// * the crs Description binds the prefix itself ⇒ corrected, bound once.
+    ///
+    /// MUTATION THIS CATCHES: drop the scope check from `merge_frame` and
+    /// the first shape writes a `tiff:Orientation` the reader never sees;
+    /// drop the binding from `orientation_declaration` and the second shape
+    /// carries `tiff:` with no binding in its own start tag.
+    #[test]
+    fn a_corrected_orientation_lands_where_the_reader_looks_and_arrives_bound() {
+        use rawler::Orientation as O;
+        let r = EditRecipe { exposure_ev: 0.25, ..Default::default() };
+        let turned = |base: &str| {
+            merge_recipe_into_xmp_in_frame(
+                base,
+                &r,
+                FrameAspect::from_size_turned(9504.0, 6336.0, O::Rotate90),
+            )
+            .expect("mergeable")
+        };
+        let crs_tag = |doc: &str| {
+            let start = find_crs_description(doc).expect("the settings Description survives");
+            let (gt, _) = scan_tag_end(doc, start).expect("its start tag closes");
+            doc[start..=gt].to_string()
+        };
+
+        // 1. The exiftool shape: the rectangle in property-element form in a
+        //    Description of its own, the settings in Lightroom's attribute form.
+        let apart = lr_doc("").replace(
+            " <rdf:Description rdf:about=\"\"\n    xmlns:crs=",
+            " <rdf:Description rdf:about=\"\"\n    xmlns:tiff=\"http://ns.adobe.com/tiff/1.0/\">\n\
+             \x20  <tiff:ImageWidth>9504</tiff:ImageWidth>\n\
+             \x20  <tiff:ImageLength>6336</tiff:ImageLength>\n\
+             \x20 </rdf:Description>\n\
+             \x20 <rdf:Description rdf:about=\"\"\n    xmlns:crs=",
+        );
+        assert!(apart.contains("<tiff:ImageWidth>9504</tiff:ImageWidth>"), "exiftool-shaped: {apart}");
+        assert_eq!(declared_orientation(&apart), None);
+        let out = turned(&apart);
+        assert!(!out.doc.contains("tiff:Orientation"), "nothing the reader cannot see: {}", out.doc);
+        assert_eq!(declared_orientation(&out.doc), None);
+        assert!(out.doc.contains("<tiff:ImageWidth>9504</tiff:ImageWidth>"), "{}", out.doc);
+        assert!(
+            out.notes.iter().any(|n| n.contains("where a merge cannot rewrite it") && n.contains("(6)")),
+            "the loss is named, with the turn that was not written: {:?}",
+            out.notes
+        );
+
+        // 2. The frame on the crs Description, the prefix bound on an ancestor.
+        let above = in_frame(&lr_doc(""), 9504, 6336).replace(
+            "xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\">",
+            "xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\"\n  xmlns:tiff=\"http://ns.adobe.com/tiff/1.0/\">",
+        );
+        assert_eq!(above.matches("xmlns:tiff=").count(), 1, "{above}");
+        let out = turned(&above).doc;
+        let tag = crs_tag(&out);
+        assert_eq!(tag.matches("tiff:Orientation=\"6\"").count(), 1, "one correction: {tag}");
+        assert_eq!(tag.matches("xmlns:tiff=").count(), 1, "bound where it is used: {tag}");
+        assert_eq!(declared_orientation(&out), Some(O::Rotate90), "{out}");
+
+        // 3. The Lightroom shape: the crs Description binds the prefix itself.
+        let bound = in_frame(&lr_doc(""), 9504, 6336).replace(
+            "tiff:ImageWidth",
+            "xmlns:tiff=\"http://ns.adobe.com/tiff/1.0/\"\n   tiff:ImageWidth",
+        );
+        let out = turned(&bound).doc;
+        assert_eq!(out.matches("xmlns:tiff=").count(), 1, "bound once: {out}");
+        assert_eq!(out.matches("tiff:Orientation=\"6\"").count(), 1, "{out}");
+        assert_eq!(declared_orientation(&out), Some(O::Rotate90), "{out}");
+    }
+
+    /// The shape 154 of the reference library's 174 sidecars actually have: a
+    /// `tiff:Orientation` and NO `tiff:ImageWidth`/`tiff:ImageLength` at all,
+    /// 17 of them over a portrait capture and carrying mask geometry.
+    ///
+    /// The declaration alone is enough to place the geometry — `orient_point`
+    /// is aspect-free, and only a brush's radii need the rectangle — so the
+    /// reader turns on it, and the writer un-turns on it. Before W14 the
+    /// reader required the rectangle too, so those masks stayed in the sensor
+    /// frame while the render delivered the turned one (a quarter turn off),
+    /// and the merge wrote DISPLAY-frame numbers back under a declaration
+    /// saying they were sensor-frame.
+    ///
+    /// MUTATION THIS CATCHES: gate the `orient_recipe_coords` call on
+    /// `frame.is_some()` again and the box comes back where the file put it,
+    /// i.e. on the wrong axis of the delivered frame.
+    #[test]
+    fn an_orientation_declared_without_a_rectangle_still_places_the_mask() {
+        use rawler::Orientation as O;
+        let doc = lr_doc(&lr_correction(
+            "Mask 8",
+            "",
+            &lr_radial_at("0.100000", "0.200000", "0.300000", "0.600000", "0"),
+        ))
+        .replace("crs:Version=\"15.5.1\"", "tiff:Orientation=\"8\"\n   crs:Version=\"15.5.1\"");
+        assert_eq!(declared_orientation(&doc), Some(O::Rotate270));
+        assert!(FrameAspect::from_xmp(&doc).is_none(), "this document declares no rectangle");
+        let r = xmp_to_recipe(&doc);
+        let MaskGeometry::Radial { top, left, bottom, right, .. } = r.masks[0].mask else {
+            panic!("a radial");
+        };
+        // `Rotate270` maps (u, v) -> (v, 1 - u), so the stored box's x range
+        // 0.20..0.60 becomes the y range 0.40..0.80 and its y range 0.10..0.30
+        // becomes the x range 0.10..0.30.
+        assert!((left - 0.10).abs() < 1e-6 && (right - 0.30).abs() < 1e-6, "x {left}..{right}");
+        assert!((top - 0.40).abs() < 1e-6 && (bottom - 0.80).abs() < 1e-6, "y {top}..{bottom}");
+
+        // …and the writer un-turns it against the photograph's own rectangle,
+        // which is the only one there is. The numbers that leave are the
+        // file's, not the display frame's, and the base's own declaration is
+        // untouched because it already says what the geometry now means.
+        let out = merge_recipe_into_xmp_in_frame(
+            &doc,
+            &r,
+            FrameAspect::from_size_turned(9504.0, 6336.0, O::Rotate270),
+        )
+        .expect("mergeable")
+        .doc;
+        assert_eq!(out.matches("tiff:Orientation").count(), 1, "{out}");
+        assert!(out.contains("tiff:Orientation=\"8\""), "{out}");
+        assert!(out.contains("crs:Left=\"0.2"), "the stored box is source-frame again: {out}");
+        // The round trip is the identity on the engine's own numbers.
+        let back = xmp_to_recipe(&out);
+        let MaskGeometry::Radial { top: t1, left: l1, bottom: b1, right: r1, .. } =
+            back.masks[0].mask
+        else {
+            panic!("a radial");
+        };
+        assert!(
+            (l1 - left).abs() < 1e-5
+                && (r1 - right).abs() < 1e-5
+                && (t1 - top).abs() < 1e-5
+                && (b1 - bottom).abs() < 1e-5,
+            "the round trip moved the box: {l1}..{r1} x {t1}..{b1}"
+        );
     }
 
     /// The REAL probe sidecars, when they are on the machine. Twelve controlled
