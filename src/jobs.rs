@@ -94,15 +94,26 @@
 //! would have to invent a number; the honest bound is the worker count the user
 //! chose. If a run starts collecting 429s, lower `--jobs`.
 //!
-//! Not covered, and disclosed rather than pretended away: `eprintln!` lines
-//! raised deep inside the pipeline (e.g. the GPT-proposer fallback warn in
-//! `pipeline::produce_recipe`) go straight to the process stderr and therefore appear in
-//! COMPLETION order, not index order. They cannot interleave mid-line — Rust
-//! holds the stderr lock across the whole `write_fmt` — but they are not
-//! attributable to a photo by position. Callers that need the attribution read
-//! the typed `rationale::Note` channel `produce_recipe` returns as its third
-//! element and render it INTO the block (that is what `eval` does above one
-//! job); the notes carry the same fallback disclosure by construction.
+//! The DEVELOP CHAIN's own disclosures are inside this ordering. They used to
+//! be bare `eprintln!`s that went straight to the process stderr in COMPLETION
+//! order — the GPT-proposer fallback warn, the clamp disclosure, the XMP merge
+//! notes. `produce_recipe`, `render_to_file` and `write_xmp` now take a
+//! caller-supplied [`crate::diag::Sink`], `batch` gives each worker a
+//! `diag::Collector` and drains it into THAT photo's block, and v1.2.4
+//! finished the sweep: `pipeline.rs`, `render.rs` and `recipe.rs` hold zero
+//! bare `eprintln!` and the census in `pipeline::tests` pins that at zero. So
+//! those lines are released by the sequencer in INDEX order with the rest of
+//! the transcript — on stdout, inside the block, attributable by position.
+//!
+//! Not covered, and disclosed rather than pretended away: bare `eprintln!`s a
+//! worker can transitively reach that are NOT the develop chain's — the
+//! store's and the decoder's. Those still go to the process stderr and
+//! therefore still appear in COMPLETION order. They cannot interleave mid-line
+//! — Rust holds the stderr lock across the whole `write_fmt` — but they are
+//! not attributable to a photo by position. The typed `rationale::Note`
+//! channel `produce_recipe` returns as its third element remains the
+//! attributable path for anything a caller renders itself (that is what `eval`
+//! does above one job).
 
 use std::collections::BTreeMap;
 use std::io::Write;
