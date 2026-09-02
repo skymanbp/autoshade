@@ -4383,6 +4383,38 @@
         );
     }
 
+    /// v1.2.4 A7 — the projection's two NOT-MEASURABLE clauses reach the
+    /// Chinese UI. Both keys existed with translations and neither had ever
+    /// been produced, so nothing checked that the catalogue actually answers
+    /// for them; `trf` falls back to the English key SILENTLY, which is
+    /// exactly the shape of failure a translation gate cannot see from the
+    /// outside. The note-key path is the panel's own (`trf(lang, n.key, …)`
+    /// in panels/ai.rs), so this exercises the site the user reads through.
+    #[test]
+    fn the_projections_not_measurable_clauses_reach_both_languages() {
+        for note in [
+            autoshade::rationale::Note::plain(
+                autoshade::rationale::keys::FIT_NOTE_CAST_PROJECTED_FAN_NA,
+            ),
+            autoshade::rationale::Note::plain(
+                autoshade::rationale::keys::FIT_NOTE_CAST_ADMITTED_FOREIGN_NA,
+            ),
+        ] {
+            let en = trf(crate::i18n::Lang::En, note.key, &[]);
+            let zh = trf(crate::i18n::Lang::Zh, note.key, &[]);
+            assert_eq!(en, note.key, "English is the key itself");
+            assert!(en.contains("not measurable"), "the English clause says so: {en}");
+            assert_ne!(zh, en, "the Chinese clause must not fall back to English: {zh}");
+            assert!(zh.contains("无法测量"), "…and must say the same thing: {zh}");
+            for text in [en, zh] {
+                assert!(
+                    !text.chars().any(|c| c.is_ascii_digit()),
+                    "an unmeasured reading must not print a number in either language: {text}"
+                );
+            }
+        }
+    }
+
     /// L12#2A: the verdict is TYPED data rendered at draw time — the zh
     /// catalogue must actually translate every decision word, or the map
     /// silently falls back to English (tr's contract) and the gate that

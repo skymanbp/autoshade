@@ -2162,10 +2162,25 @@ Aqua/Blue and refits until a milder cast measures 19°, which ships and still
 leaves a 20.6° fan in the delivered sky); at 15° the refusal stands and the
 delivered sky's spread is 1.6° — the same coherence the target's own sky
 has — at a look error of 0.058 instead of 0.033. That 20° result is also
-the honest limit of the fix: this is a calibrated threshold, not a structural
-guarantee. The do-no-harm loop re-fits after every shrink, so the solve can
-search for a cast that clears the limit rather than give the cast up, and the
-20° experiment is exactly that behaviour caught in the act.
+what the fix had to answer structurally rather than by calibration. The
+do-no-harm loop re-fits after every shrink, so the solve can search for a cast
+that clears the limit rather than give the cast up, and the 20° experiment is
+exactly that behaviour caught in the act: a threshold nothing re-reads at the
+end is a threshold the pipeline can walk around one admissible step at a time.
+
+Since v1.2.4 the finished render is read once more, with the same census,
+against the untouched base — the pair the user actually gets, rather than one
+stage's candidate. Over the line, the cast curves are withdrawn and the frame
+re-measured, and the recipe that clears is what ships. If the reading survives
+the withdrawal the curves were not the cause, so they go back — a fit must not
+pay look error for a fan it did not open — and the delivered reading is
+disclosed with both numbers; that arm is not defensive, because tone and
+saturation alone reach 12.9° of added fan on the `p36` calibration pair, which
+carries no cast at all. Measured over the whole library battery (2026-09-02):
+108 finished Full-mode renders, the widest delivered fan among them the coast
+fixture's 14.2° against the 15° line, so the check fires on nothing in the tree
+and changes no recipe. That is what a structural guarantee looks like while the
+calibration above it is doing its job.
 
 Two tolerances are stated here rather than discovered later. **The worst
 case**: the gate judges the spread the curves ADD and subtracts the spread
@@ -2224,13 +2239,16 @@ mildest member is still convicted can rescue nothing, so the path continues
 to the identity, where the fan is zero by construction and the outcome is
 exactly the old refusal.
 
-The search is a 12-step bisection for the largest `t` whose RENDERED
-candidate is ADMISSIBLE, never an algebraic reading of the curves — the same
-rule every closed-loop stage here follows. Each candidate is re-judged by all four
+The search reads the RENDERED candidate at every probe, never an
+algebraic reading of the curves — the same rule every closed-loop stage here
+follows — and re-judges each one by all four
 gates from scratch, so a milder cast that makes the aggregate ratio fail, or
 that trips a pixel veto the fitted cast happened to clear, is refused and
 says so; and the strength budget's bound rides into that judgement exactly as
-it does for a fitted cast. Two thresholds are the projection's own. It must
+it does for a fitted cast. It runs in three phases: a 12-step bisection for
+the admissible frontier `t_max`, a fixed eight-cell sweep of `(0, t_max]` that
+keeps the best-PAYING admissible probe, and eight golden-section iterations on
+the winning cell so the answer is not quantised to the grid. Two thresholds are the projection's own. It must
 clear **half** the refusal line — `FAN_PROJECT_DEG` = 7.5°, not 15° —
 because 15° is where the calibration put the visibility edge (the FAN_DEG=20
 experiment shipped a 19° cast that left 20.6° of delivered fan) while the
@@ -2247,23 +2265,32 @@ requirement rather than tidiness. A bisection can only find the largest member
 of a downward-closed set, and only the gates-and-fan half is downward-closed:
 the fan grows with `t`, and every gate clears as the curves approach the
 identity. The gain runs the other way — it falls to zero at `t = 0`, where
-there are no curves at all. Testing both inside the loop makes the clearing
+there are no curves at all — and it is not monotone in between: measured on
+the coast fixture's candidate (2026-09-02) it reads 0.00104 at `t` 0.25,
+0.00190 at 0.35, 0.00169 at 0.40, 0.00187 at 0.50, a wiggle the size of
+`FIT_QUANT` itself. Testing both inside the loop makes the clearing
 set an interval `[a, b]` with `a > 0`, so a probe that fails on the GAIN
 pushes the search away from the band and out at `None`, refusing a pair whose
-refusal sentence then claims the whole path was searched. So the loop tests
-admissibility alone and the gain bar is applied once, to the winner. The gain
-is not monotone in `t` — measured on the coast fixture's candidate
-(2026-09-02) it reads 0.00104 at `t` 0.25, 0.00190 at 0.35, 0.00169 at 0.40,
-0.00187 at 0.50, a wiggle the size of `FIT_QUANT` itself — so judging only the
-winner refuses two marginal rescues the older shape happened to find. That is
-the right direction: a rescue whose worth depends on which point of the path
-you land on is worth nothing. The cost is stated, not hidden: the gain is evaluated at exactly ONE point,
-the strongest admissible shrink, so a shrink that pays only at a milder `t`
-is not found — measured on the two-family HSL pair (2026-09-02), where every
-`t ≤ 0.25` is admissible and pays 0.0019–0.0033 while the strongest
-admissible point reads −0.012, so the pair is refused and its refusal
-sentence says exactly that. A best-paying-admissible search is a registered
-follow-up, not this batch's.
+refusal sentence then claims the whole path was searched. So the bisection is
+pointed at admissibility alone, and the gain question is answered by SWEEPING
+the admissible interval the bisection found. The bar is then applied once, to
+the MAXIMUM over that interval, which is what makes a refusal honest: `None`
+means "nothing on this path pays" rather than "the strongest point on this
+path did not pay".
+
+v1.2.3 judged the frontier alone and wrote the cost of doing so down: a shrink
+that pays only at a milder `t` was not found, and the two-family HSL pair was
+refused although every `t ≤ 0.25` on its path was admissible and paid
+0.0019–0.0033 while the frontier read −0.012. v1.2.4 closes that, and the
+sweep is what a bisection could not do soundly. The pair now ships a shrink at
+`t = 0.318` whose look error is 0.885 of the error without it, and its finished
+residual falls 0.0256 → 0.0227 — under the `FIT_QUANT_CLEAN` = 0.025 floor at
+which the unrepresented-controls disclosure returns early because there is
+nothing left to explain, so that pair ships a better fit and a shorter
+rationale, and the `hsl` sentence it used to carry is asserted on a wider band
+gap instead. Nothing else in the tree moves: the calibration pairs p36–p41 and
+the generated pair are byte-identical before and after, because on none of them
+does the fan gate convict alone.
 
 The precedence is the design's, exactly: the fan gate must be the ONLY gate
 that convicted. A pixel-aligned veto says the DESTINATION is wrong and no

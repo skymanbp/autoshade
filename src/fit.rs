@@ -1164,6 +1164,56 @@ fn atmosphere_wb_from_populations(
     ((best.0 / 50.0).round() * 50.0, round1(tint), wanted)
 }
 
+/// The Atmosphere global exposure: a weighted median of the PER-PIXEL log2
+/// luminance ratio, taken over the same population and the same pairing the
+/// white balance is solved on.
+///
+/// What this replaces is a ratio of two MARGINALS — the median of the source's
+/// weighted luminance CDF against the median of the target's — and the reason
+/// is the one already written out for the white balance, one line up. Two
+/// marginals' halfway points fall in different sub-populations whenever the
+/// frame is bimodal, so their ratio is not the luminance change of any pixel
+/// in the frame; and once a correspondence field has said WHICH pixels are
+/// shared, reading the two sides independently throws away the very pairing
+/// that made the population trustworthy. This reads one cloud of per-pixel
+/// luminance CHANGES and takes its centre.
+///
+/// The LOG form, the MEDIAN rather than the mean, and the `1e-5` floor are
+/// the white-balance solve's, for its reasons: the median commutes with a
+/// monotone map so the log is free, a location statistic on one cloud is what
+/// a global exposure is, and a newly bright region must not drag the whole
+/// frame.
+///
+/// Rec.601 luminance, which is the weighting the marginal solve used and the
+/// one the tone stage reads, so this changes the STATISTIC and not the
+/// quantity it is a statistic of.
+///
+/// MEASURED_PLACEHOLDER
+fn atmosphere_exposure_from_populations(
+    sp: &[[f32; 3]],
+    pair_tp: &[[f32; 3]],
+    pair_w: &[f32],
+) -> f32 {
+    let luma = |p: &[f32; 3]| {
+        0.299 * render::srgb_to_linear(p[0])
+            + 0.587 * render::srgb_to_linear(p[1])
+            + 0.114 * render::srgb_to_linear(p[2])
+    };
+    let n = sp.len().min(pair_tp.len());
+    let mut samples: Vec<(f32, f32)> = Vec::with_capacity(n);
+    for i in 0..n {
+        let w = pair_w.get(i).copied().unwrap_or(0.0).max(0.0);
+        if w <= 0.0 {
+            continue;
+        }
+        samples.push((
+            (luma(&pair_tp[i]).max(1e-5) / luma(&sp[i]).max(1e-5)).log2(),
+            w,
+        ));
+    }
+    weighted_median(&mut samples)
+}
+
 fn weighted_mean(px: &[[f32; 3]], weights: &[f32], ch: usize) -> Option<f32> {
     let mut sum = 0.0f32;
     let mut total = 0.0f32;
@@ -2983,6 +3033,16 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure_opts(
                 recipe.blue_curve = Vec::new();
             }
         }
+        eprintln!(
+            "CASTGATE rehue={} ratio={} fan={} projected={} curves={}",
+            out.rehue_blocked,
+            out.ratio_rejected,
+            out.hue_fanned.is_some(),
+            out.projected.is_some(),
+            !recipe.red_curve.is_empty()
+                || !recipe.green_curve.is_empty()
+                || !recipe.blue_curve.is_empty()
+        );
         out
     };
     fit_cast_stage(&mut recipe, false);
@@ -3005,6 +3065,7 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure_opts(
                 &evidence,
             )
         };
+        eprintln!("LOOP4A_ENTER");
         let mut neutral = recipe.clone();
         neutral.hsl = crate::recipe::Hsl::default();
         // BOTH sides of this comparison are judged with the cast the gates
@@ -3019,6 +3080,7 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure_opts(
         fit_cast_stage(&mut neutral, false);
         let neutral_err = finished_err(&neutral);
         while finished_err(&recipe) > neutral_err + 1e-4 {
+            eprintln!("LOOP4A_STEP");
             let shrunk = halved_hsl(&recipe.hsl);
             recipe.hsl = shrunk;
             if recipe.hsl.is_neutral() {
@@ -3100,6 +3162,16 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure_opts(
         let shrunk = halved_hsl(&recipe.hsl);
         recipe.hsl = shrunk;
         cast = fit_cast_stage(&mut recipe, true);
+        eprintln!(
+            "LOOP4B sat={} projected={:?} fanned={:?} rehue={} ratio={} earns={:?} r={:?}",
+            recipe.saturation,
+            cast.projected.map(|p| p.t),
+            cast.hue_fanned,
+            cast.rehue_blocked,
+            cast.ratio_rejected,
+            cast.earns_projection(),
+            cast.readings.map(|r| (r.ratio, r.bound, r.fan))
+        );
         end_px = pixels_of(&render::develop_preview(&s_img, &recipe));
         err_after = look_err_with_evidence(&end_px, &tp, &evidence);
         end_moves_hue =
@@ -3335,34 +3407,25 @@ fn fit_atmosphere_from_parts(
     // same-composition pair and the only arrays that differ belong to pairs
     // whose content actually moved.
     let readable = shared.as_ref().filter(|p| p.readable());
-    let ref_source = readable.map_or(evidence.source_weights.as_slice(), |p| p.source.as_slice());
-    let ref_target = readable.map_or(evidence.target_weights.as_slice(), |p| p.target.as_slice());
     // One report has one frame ruler: the caller's structural `err_before`
     // belongs to the mode-selection model, while every Atmosphere measurement
     // below is read on the structure-blind population model.
     let err_before = look_err_with_evidence(sp, tp, evidence);
     let mut recipe = base.clone();
 
-    let linear_luma_cdf = |px: &[[f32; 3]], weights: &[f32]| {
-        weighted_cdf(px, weights, |p| {
-            0.299 * render::srgb_to_linear(p[0])
-                + 0.587 * render::srgb_to_linear(p[1])
-                + 0.114 * render::srgb_to_linear(p[2])
-        })
-    };
-    let (sl, tl) = (linear_luma_cdf(sp, ref_source), linear_luma_cdf(tp, ref_target));
-    let exposure = (quantile(&tl, 0.5).max(1e-5) / quantile(&sl, 0.5).max(1e-5))
-        .log2()
+    // ONE population and ONE pairing for BOTH robust global controls — see
+    // `atmosphere_wb_pairing` for why the field that chose the population must
+    // also choose the pairing, and `atmosphere_wb_from_populations` for why
+    // the statistic is a per-pixel median rather than a ratio of marginals.
+    // v1.2.4 finished that argument: the exposure asks the same question the
+    // white balance asks, with luminance in place of a channel, so it is now
+    // solved the same way — see `atmosphere_exposure_from_populations`.
+    let anchor = base.as_shot_k.unwrap_or(5500.0);
+    let (pair_tp, pair_w) = atmosphere_wb_pairing(tp, evidence, correspondence, readable);
+    let exposure = atmosphere_exposure_from_populations(sp, pair_tp, &pair_w)
         .clamp(-budget.ev, budget.ev);
     recipe.exposure_ev = round2(exposure);
 
-    // The white balance is solved on ONE population of per-pixel colour
-    // changes — see `atmosphere_wb_pairing` for why the field that chose the
-    // population must also choose the pairing, and
-    // `atmosphere_wb_from_populations` for why the statistic is a per-pixel
-    // median rather than three independent marginal ones.
-    let anchor = base.as_shot_k.unwrap_or(5500.0);
-    let (pair_tp, pair_w) = atmosphere_wb_pairing(tp, evidence, correspondence, readable);
     let (wb_k, wb_tint, _wanted) =
         atmosphere_wb_from_populations(sp, pair_tp, &pair_w, anchor);
     let wb_search_bound = (strength.get() > crate::recipe::GradeStrength::DEFAULT
@@ -8592,15 +8655,20 @@ mod tests {
     #[test]
     fn content_divergence_is_calibrated_on_every_shipped_showcase_asset() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/images");
-        // The two shipped reverse-fit panels (v1.2.2), each read at the
-        // top-row offsets the panel geometry fixes: the neutral conversion at
-        // left, the generated target in the middle. Both generators were asked
+        // The two shipped reverse-fit panels — the viaduct as composed for
+        // v1.2.2 (`01de443`) and the Cornwall panel as RE-composed for v1.2.3
+        // (`f3885b2`) — each read at the top-row offsets the panel geometry
+        // fixes: the neutral conversion at left, the generated target in the
+        // middle. Both generators were asked
         // for a grade and not a rebuild, so both sit UNDER the threshold and
         // the full solve ran on each; the fired arm of the same statistic is
         // pinned on a synthetic pair by
         // `content_divergence_fires_on_flat_sky_to_cloud_deck`. The pins are
         // the values measured when the panels were composed; a panel swapped
-        // for another generation moves them, which is the point.
+        // for another generation moves them, which is the point. Re-measured
+        // on the shipped v1.2.3 bytes (2026-09-02): viaduct 0.17987, Cornwall
+        // 0.13568 — the Cornwall re-composition did not move its reading off
+        // the pin it had, which is why the pin below is the same number.
         for (file, want) in [
             ("showcase-viaduct-reverse-fit.jpg", 0.180f32),
             ("showcase-cornwall-reverse-fit.jpg", 0.136f32),
@@ -8727,12 +8795,14 @@ mod tests {
         assert!(report.divergence.d < DIVERGENCE_GLOBAL);
         assert!(supported > evidence.spatial_supported.len() / 2);
         assert!(luma_weight > 0.5);
-        // The paired robust estimator fits this real pair (0.059 -> 0.039
-        // look, joint 0.178 -> 0.045 measured on the v1.2.2 Cornwall panel):
-        // pin the fit, not a reset. The viaduct panel is the wrong subject
+        // The paired robust estimator fits this real pair — re-measured
+        // 2026-09-02 on the SHIPPED v1.2.3 panel: look 0.05888 -> 0.03061,
+        // joint 0.17777 -> 0.04699, with the panel's cast projected at
+        // t = 0.515 — so pin the fit, not a reset. The viaduct panel is the
+        // wrong subject
         // here — its top row is the pair whose full solve needed zones and
         // tiles, and on the panel thumbnails the global-only path ends in a
-        // do-no-harm reset (0.035 -> 0.035), which is exactly what this test
+        // do-no-harm reset (0.0354 -> 0.0354), which is exactly what this test
         // must NOT be satisfied by.
         assert!(
             report.err_after < report.err_before,
@@ -14283,6 +14353,305 @@ mod tests {
                 report.recipe.confidence
             );
         }
+    }
+
+    #[test]
+    fn zz_probe_corpus() {
+        let Some(root) = calibration_corpus() else { return };
+        // The generated-cloud pair, then every P-coded RAW pair present.
+        // Each RAW pair is loaded exactly as CLI `match` loads one: the frame
+        // developed at the default recipe on a 2048 edge, against the
+        // calibration recipe as the base.
+        let mut pairs: Vec<(String, DynamicImage, DynamicImage, EditRecipe)> = Vec::new();
+        pairs.push((
+            "neutral".to_string(),
+            image::open(root.join("neutral.jpg")).unwrap(),
+            image::open(root.join("target.jpg")).unwrap(),
+            EditRecipe::default(),
+        ));
+        for code in ["p36", "p37", "p38", "p39", "p40", "p41"] {
+            let raw = root.join(format!("{code}.arw"));
+            let tgt = root.join(format!("{code}-target.jpg"));
+            if !raw.is_file() || !tgt.is_file() {
+                continue;
+            }
+            let src = render::render_to_image(&raw, &EditRecipe::default(), None, Some(2048))
+                .expect("develop");
+            pairs.push((
+                code.to_string(),
+                src,
+                image::open(tgt).unwrap(),
+                crate::pipeline::calibration_recipe(crate::pipeline::fit_calibration(&raw)),
+            ));
+        }
+        for (name, src, tgt, base) in &pairs {
+            let report = fit_recipe_from(src, tgt, base);
+            let (s_img, t_img) = analysis_pair(src, tgt);
+            let sp = pixels_of(&render::develop_preview(&s_img, base));
+            let tp = pixels_of(&t_img);
+            let evidence = evidence_model_for(&sp, &tp, s_img.width(), s_img.height());
+            let px = pixels_of(&render::develop_preview(&s_img, &report.recipe));
+            let fanv = hue_fan_weighted(&sp, &px, &evidence);
+            let has = |k: &str| report.notes.iter().any(|n| n.key == k);
+            use crate::rationale::keys;
+            let cast_state = if has(keys::FIT_NOTE_CAST_PROJECTED) {
+                "projected"
+            } else if has(keys::FIT_NOTE_CAST_HUE_FANNED) {
+                "fanned"
+            } else if has(keys::FIT_NOTE_CAST_ADMITTED) {
+                "admitted"
+            } else if has(keys::FIT_NOTE_CAST_REJECTED) {
+                "rejected"
+            } else if has(keys::FIT_NOTE_REHUE_BLOCKED) {
+                "rehue-blocked"
+            } else {
+                "none"
+            };
+            // The as-fitted cast, i.e. what the gate refused or shrank.
+            let c = cast_stage_candidate_from(src, tgt, base);
+            let cand_evidence = evidence_model(&c.cur, &c.tp);
+            let err_admitted = look_err_with_evidence(&c.with_px, &c.tp, &cand_evidence);
+            let err_no_cast = look_err_with_evidence(&c.cur, &c.tp, &cand_evidence);
+            let cand_fan = hue_fan_weighted(&c.cur, &c.with_px, &cand_evidence);
+            eprintln!(
+                "CORPUS pair={name} mode={:?} err={:.6}->{:.6} conf={:.6} cast={cast_state} t={} ratio={} deliv_fan={:?} cand_fan={:?} err_admitted={:.6} err_no_cast={:.6} sat={:.1} regressed={}",
+                report.mode,
+                report.err_before,
+                report.err_after,
+                report.recipe.confidence,
+                note_arg(&report, keys::FIT_NOTE_CAST_PROJECTED, "t"),
+                note_arg(&report, keys::FIT_NOTE_CAST_PROJECTED, "ratio"),
+                fanv,
+                cand_fan,
+                err_admitted,
+                err_no_cast,
+                report.recipe.saturation,
+                has(keys::FIT_NOTE_REGRESSED),
+            );
+        }
+    }
+
+    /// A frame whose only colour evidence is a per-band HUE gap: one field
+    /// rotated, its chroma and luminance untouched.
+    ///
+    /// The rest of the frame is a neutral luminance ramp, so the joint
+    /// LUMINANCE x CHROMA buckets are identical between the two builds and the
+    /// only thing that moved is where the coloured field sits on the hue
+    /// circle.
+    fn band_rotation_frame(hue: f32) -> DynamicImage {
+        let (w, h) = (192u32, 128u32);
+        let mut img = RgbImage::new(w, h);
+        for y in 0..h {
+            for x in 0..w {
+                let level = 0.20 + 0.60 * y as f32 / (h - 1) as f32;
+                let p = if x < w - w / 8 {
+                    [level, level, level]
+                } else {
+                    // HSL -> RGB, written out because the engine's own
+                    // converter is private to `render` and this fixture wants
+                    // one hue at a fixed chroma and luminance.
+                    let s = 0.22f32;
+                    let c = (1.0 - (2.0 * level - 1.0).abs()) * s;
+                    let hp = hue.rem_euclid(360.0) / 60.0;
+                    let xx = c * (1.0 - (hp % 2.0 - 1.0).abs());
+                    let (r, g, b) = match hp as u32 {
+                        0 => (c, xx, 0.0),
+                        1 => (xx, c, 0.0),
+                        2 => (0.0, c, xx),
+                        3 => (0.0, xx, c),
+                        4 => (xx, 0.0, c),
+                        _ => (c, 0.0, xx),
+                    };
+                    let m = level - c / 2.0;
+                    [r + m, g + m, b + m]
+                };
+                img.put_pixel(
+                    x,
+                    y,
+                    image::Rgb(p.map(|c| (c.clamp(0.0, 1.0) * 255.0).round() as u8)),
+                );
+            }
+        }
+        DynamicImage::ImageRgb8(img)
+    }
+
+    /// v1.2.4 A20 — the BAND-CENTROID arm of `residual_is_colour_shaped`,
+    /// tested on its own.
+    ///
+    /// The function has two arms and only one of them had a fixture. The
+    /// chromatic-bucket arm answers "a value range of this frame's colour is
+    /// far off and the neutral ranges at the same brightness are not"; the
+    /// band-centroid arm answers "a populated hue band's centroid is more
+    /// than [`UNREPRESENTED_HUE_DEG`] away from the target's", which is the
+    /// one axis the per-band mixer is forbidden to solve. A residual made
+    /// ONLY of a hue rotation leaves the first arm silent — rotating a hue
+    /// changes neither the luminance nor the chroma distribution the joint
+    /// buckets are built from — so this pair separates them: 30 degrees of
+    /// Blue-band rotation, every chromatic bucket well under
+    /// [`UNREPRESENTED_CHROMATIC_ERR`], and the disclosure still names `hsl`.
+    ///
+    /// Mutation: raise [`UNREPRESENTED_HUE_DEG`] to 200 (past anything a hue
+    /// circle can produce) and this goes red on the colour-shape assertion,
+    /// with the bucket-arm premise still passing — which is what proves the
+    /// centroid arm is what was speaking.
+    #[test]
+    fn a_band_centroid_gap_alone_makes_the_residual_colour_shaped() {
+        let after = band_rotation_frame(215.0);
+        let target = band_rotation_frame(255.0);
+        let (a_img, t_img) = analysis_pair(&after, &target);
+        let after_px = pixels_of(&a_img);
+        let tp = pixels_of(&t_img);
+        let evidence = evidence_model_for(&after_px, &tp, a_img.width(), a_img.height());
+
+        // PREMISE — the chromatic-BUCKET arm is silent: only the hue moved,
+        // so the luminance x chroma distributions are the same on both sides.
+        let buckets = crate::fit_zoned::joint_buckets_with_evidence(
+            &after_px,
+            &tp,
+            Some(&evidence.source_weights),
+            Some(&evidence.target_weights),
+        );
+        let worst_of = |chromatic: bool| {
+            buckets
+                .iter()
+                .filter(|b| b.chromatic == chromatic)
+                .map(|b| b.err)
+                .fold(0.0f32, f32::max)
+        };
+        let (chromatic_worst, neutral_worst) = (worst_of(true), worst_of(false));
+        eprintln!(
+            "BAND_CENTROID chromatic_worst={chromatic_worst:.4} neutral_worst={neutral_worst:.4}"
+        );
+        assert!(
+            chromatic_worst < UNREPRESENTED_CHROMATIC_ERR
+                || chromatic_worst < neutral_worst + UNREPRESENTED_CHROMATIC_LEAD,
+            "premise: the bucket arm must be silent here ({chromatic_worst:.4} vs \
+             {neutral_worst:.4})"
+        );
+
+        // …and the CENTROID arm is what speaks.
+        assert!(
+            residual_is_colour_shaped(&after_px, &tp, &evidence),
+            "a populated band's centroid {UNREPRESENTED_HUE_DEG}° off is a per-band colour job"
+        );
+        let note = unrepresented_note(
+            &EditRecipe::default(),
+            &after_px,
+            &tp,
+            0.10,
+            FitMode::Full,
+            &evidence,
+        )
+        .expect("a colour-shaped residual above the floor is disclosed");
+        let controls = note
+            .args
+            .iter()
+            .find(|(k, _)| *k == "controls")
+            .map(|(_, v)| v.as_str())
+            .unwrap_or_default();
+        assert!(
+            controls.contains("hsl"),
+            "…and the disclosure names the axis the mixer cannot reach: {controls:?}"
+        );
+    }
+
+    /// v1.2.4 A7 — the PROJECTION's two abstaining clauses, rendered and
+    /// asserted rather than merely reachable in principle.
+    ///
+    /// A projected cast discloses at least what an admitted one does, and two
+    /// of those readings can decline to answer: `foreign` when the target
+    /// carries no hue evidence to be foreign to, `fan` when no hue class is
+    /// region-sized across two luma slices. Both abstentions had keys and
+    /// translations and neither had ever been produced by a fixture, so
+    /// nothing in the tree said what they print — and the failure mode they
+    /// exist to prevent is a digit: `0.000` for a measurement never taken.
+    ///
+    /// The abstention itself is read off a FIXTURE rather than hand-written:
+    /// the same colourless frame the admission's abstention test uses, put
+    /// through the two censuses the projection reads, so "no region-sized
+    /// class / no foreign class" is a measurement here and not an assumption.
+    /// The clauses are then built from those two `None`s.
+    ///
+    /// Mutation: make `cast_projection_notes` fall back to
+    /// `Some(0.0)` for either reading and the digit assertions go red.
+    #[test]
+    fn an_unmeasured_projected_reading_says_so_instead_of_printing_a_zero() {
+        use crate::rationale::keys;
+        // 1) The PLUMBING, measured on a frame with no chromatic mass at all.
+        let grey = DynamicImage::ImageRgb8(RgbImage::from_fn(48, 48, |x, y| {
+            let v = (24 + ((x * 3 + y * 2) % 200)) as u8;
+            image::Rgb([v, v, v])
+        }));
+        let (s, t) = analysis_pair(&grey, &grey);
+        let tp = pixels_of(&t);
+        let cur = pixels_of(&render::develop_preview(&s, &EditRecipe::default()));
+        let evidence = evidence_model(&cur, &tp);
+        assert_eq!(
+            foreign_hue_bins_weighted(&tp, &evidence.target_hue_weights),
+            None,
+            "a colourless target gives the foreign-hue census nothing to be foreign to"
+        );
+        assert_eq!(
+            hue_fan_weighted(&cur, &cur, &evidence),
+            None,
+            "…and no hue class is region-sized across two luma slices"
+        );
+
+        // 2) The DISCLOSURE: a projection carrying both abstentions writes
+        //    the not-measurable clauses, in the order the admission's are in,
+        //    and neither prints a number.
+        let abstained = cast_projection_notes(CastProjection {
+            share: 0.917,
+            fan_before: 37.6,
+            t: 0.363,
+            fan_after: None,
+            ratio: 0.525,
+            bound: CAST_ACCEPT_RATIO,
+            rehued: 0.0,
+            foreign: None,
+        });
+        let keys_of: Vec<&str> = abstained.iter().map(|n| n.key).collect();
+        assert_eq!(
+            keys_of,
+            vec![
+                keys::FIT_NOTE_CAST_PROJECTED,
+                keys::FIT_NOTE_CAST_ADMITTED_FOREIGN_NA,
+                keys::FIT_NOTE_CAST_PROJECTED_FAN_NA,
+            ],
+            "a projection that could not measure either reading still says three things"
+        );
+        for note in &abstained[1..] {
+            assert!(note.args.is_empty(), "a not-measurable clause carries no reading");
+            let text = crate::rationale::render_one(note);
+            assert!(
+                !text.chars().any(|c| c.is_ascii_digit()),
+                "an unmeasured reading must not print a number: {text}"
+            );
+            assert!(
+                text.contains("not measurable"),
+                "an unmeasured reading must SAY it was not measured: {text}"
+            );
+        }
+
+        // 3) …and the same abstention on the SEARCH side, where it has to
+        //    mean the opposite of a refusal: a census with no opinion cannot
+        //    put a candidate over the projection target, so the shrink is
+        //    admissible and the pair is rescued rather than refused for want
+        //    of a reading.
+        let judged = search_cast_projection_t(0.05, |t| CastOutcome {
+            readings: Some(CastReadings {
+                ratio: 1.0 - 0.1 * t,
+                bound: CAST_ACCEPT_RATIO,
+                foreign: None,
+                rehued: 0.0,
+                fan: None,
+            }),
+            ..CastOutcome::default()
+        });
+        assert!(
+            judged.is_some(),
+            "an abstaining fan census must CLEAR the projection target, not fail it"
+        );
     }
 
     /// v1.2.4 A39 — the TERMINAL delivered-fan check, withdrawing arm.

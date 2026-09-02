@@ -211,7 +211,7 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
       slices ended {fan} degrees apart, against a limit of {limit} — so \
       the colour-cast curves were taken back out, which brings that class \
       inside the limit.",
-        " 成品配方又对照未处理的原片读了一次：它把同一个色相类沿亮度分选开了——该色相类占画面可测色彩的 {share}，其暗部与亮部切片最终相差 {fan} 度，上限为 {limit}——因此把色偏曲线又取了出来，这使该色相类回到上限之内。"),
+        " 成品配方再对照未处理的原片读了一次：它把同一个色相类沿亮度分选开了——该色相类占画面可测色彩的 {share}，其暗部与亮部切片最终相差 {fan} 度，上限为 {limit}——因此把色偏曲线重新取了出来，这使该色相类回到上限之内。"),
     (" The finished recipe was read once more against the untouched photo: \
       it sorted one hue class apart across luminance — that class holds \
       {share} of the frame's measurable colour and its dark and bright \
@@ -220,7 +220,7 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
       were not the cause and they were kept; tone and saturation are what \
       spread that class, and no develop control puts a brightness-sorted \
       hue fan back.",
-        " 成品配方又对照未处理的原片读了一次：它把同一个色相类沿亮度分选开了——该色相类占画面可测色彩的 {share}，其暗部与亮部切片最终相差 {fan} 度，上限为 {limit}。把色偏曲线取出来之后仍有 {after} 度，说明起因不是这些曲线，于是把它们保留了下来；把该色相类拉散的是影调与饱和度，而任何显影控件都无法把按明暗分选出来的色相跨度还原。"),
+        " 成品配方再对照未处理的原片读了一次：它把同一个色相类沿亮度分选开了——该色相类占画面可测色彩的 {share}，其暗部与亮部切片最终相差 {fan} 度，上限为 {limit}。把色偏曲线取出来之后仍有 {after} 度，说明起因不是这些曲线，于是把它们保留了下来；把该色相类拉散的是影调与饱和度，而任何显影控件都无法把按明暗分选出来的色相跨度还原。"),
     (" Global colour cast measured from consistent hue rotation across the populated frame (rotation {rotation} degrees, chroma ratio {ratio}); white balance and saturation were read from population evidence.", " 已从画面中各色相带一致的色相旋转测得全局色偏（旋转 {rotation} 度，色度比 {ratio}）；白平衡和饱和度取自整体证据。"),
     (" High-strength fit disclosed unsupported movement in {kind}: {ranges}. The controls were retained, but confidence is capped by the strength budget.", " 高强度拟合显示 {kind} 中没有双侧证据的移动：{ranges}。控制保留，置信度受强度预算限制。"),
     // ── Settings ────────────────────────────────────────────────────────────
