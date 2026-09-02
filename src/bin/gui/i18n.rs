@@ -1877,9 +1877,9 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
         " [风格蒸馏随后将本配方拉向该用户的历史编辑（有效强度 {pct}%；被拉动的项：{fields}）——最终数值可能与上文推导不同]"),
     (" [your style library was kept as BACKGROUND for this develop — the direction \
       leads at adherence tier {tier}, so no style-distillation pull was applied to \
-      these numbers; lower --adherence to 0.40 or below to hand the library back \
-      the lead]",
-        " [本次显影只把你的风格库当作参照——指令在遵循度档位 {tier} 上主导，因此没有对这些数值做风格蒸馏拉动；把 --adherence 调到 0.40 或以下即可把主导权交回风格库]"),
+      these numbers; lower the Adherence dial to 40% or below to hand the library \
+      back the lead]",
+        " [本次显影只把你的风格库当作参照——指令在遵循度档位 {tier} 上主导，因此没有对这些数值做风格蒸馏拉动；把遵循度（Adherence）滑杆调到 40% 或以下即可把主导权交回风格库]"),
     (" [re-verification after style distillation failed ({e}) — the verdict \
       above describes the PRE-distillation recipe]",
         " [风格蒸馏后的复验失败（{e}）——上方判词描述的是蒸馏前的配方]"),

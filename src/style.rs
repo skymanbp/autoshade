@@ -640,7 +640,7 @@ pub const STYLE_TARGET_MIN: f32 = 0.85;
 /// exemplars + 94 finished looks): three directions as far apart as "dark
 /// moody low-key … teal-and-orange", "warm golden tones, film-like grain,
 /// lifted matte shadows" and "vivid saturated colours, punchy high contrast"
-/// developed to per-panel-cell mean HSV S/V of 23/54 · 11/58 · 18/55 — all
+/// developed to per-panel-cell mean HSV S/V of 23/54 · 11/58 · 17/55 — all
 /// three inside the library's own cool hazy register, against the neutral
 /// develop's 17/47. The same three directions with the photographer's own
 /// edits removed from the index separated to 34/38 · 12/61 · 29/65.
@@ -655,9 +655,16 @@ pub const STYLE_TARGET_MIN: f32 = 0.85;
 /// The NUMBERS the block prints never depend on the voice. They are what the
 /// photographer actually did, and rewriting a measurement to match a dial is
 /// the fabrication this block exists to refuse.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// `Default` is [`Self::Ceiling`] — the voice a develop with no direction and
+/// the shipped Style default already renders — because [`crate::advisor::GradeIntent`]
+/// derives `Default` and carries this voice to the reviewers. The default has to be
+/// the one that says "nothing is leading": a forgotten field must not silently
+/// tell a judge that the photographer's library is background.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum StyleVoice {
     /// Below [`STYLE_TARGET_MIN`], nothing leading: the habits are a CEILING.
+    #[default]
     Ceiling,
     /// At or above [`STYLE_TARGET_MIN`], nothing leading: the habits are the
     /// TARGET to reproduce.

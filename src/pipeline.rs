@@ -142,16 +142,24 @@ struct StyleRetrieval {
 /// the revision round would come to judge against a different brief than the
 /// round it is revising — which is the mechanism that flattened the look in the
 /// first place (six showcase runs, revision hints that were pure subtraction).
+///
+/// `style_voice` is the SAME value the reference block and the distillation
+/// pull read (v1.2.3). It is a parameter and not a second
+/// `StyleVoice::choose` call for the reason the whole function exists: a
+/// reviewer deciding for itself whose aim this develop pursues is how the
+/// wording and the arithmetic came apart in the first place.
 fn grade_intent<'a>(
     req: &GradeRequest,
     direction: Option<&'a str>,
     style_look: Option<&'a str>,
+    style_voice: crate::style::StyleVoice,
 ) -> crate::advisor::GradeIntent<'a> {
     crate::advisor::GradeIntent {
         strength: req.strength,
         adherence: req.adherence,
         direction,
         style_look,
+        style_voice,
     }
 }
 
@@ -446,7 +454,7 @@ pub fn produce_recipe(
     // the retrieval found. ONE value, spread into the verifier, the first
     // judgement and every hint-guided re-judge below.
     let style_look = retrieved.as_ref().and_then(|r| r.look_summary.as_deref());
-    let intent = grade_intent(&req, user_direction, style_look);
+    let intent = grade_intent(&req, user_direction, style_look, style_voice);
     if verbose && ref_str.is_some() {
         println!("style    : reference from similar past edits (strength {:.0}%)", req.style * 100.0);
     }
@@ -6916,7 +6924,14 @@ mod tests {
             assert_eq!(note.key, keys::STYLE_BACKGROUND);
             let text = render_one(&note);
             assert!(text.contains(tier), "the dial that chose the voice: {text}");
-            assert!(text.contains("--adherence"), "…and how to hand the lead back: {text}");
+            // The DIAL, in the user's own words — not a CLI flag. This note is
+            // persisted and re-rendered in the desktop app and the browser too,
+            // and neither has a command line to type one on.
+            assert!(
+                text.contains("lower the Adherence dial to 40% or below"),
+                "…and how to hand the lead back: {text}"
+            );
+            assert!(!text.contains("--"), "a rationale note names no flag: {text}");
         }
         // The three negative controls, which is what stops this becoming a
         // note on every develop: a voice that DID distil, and a develop whose
@@ -6993,6 +7008,53 @@ mod tests {
         assert!(crate::rationale::keys::STYLE_LOOK_IMAGE.contains("look photo"));
     }
 
+    /// v1.2.3: EVERY `blend_toward` in this file is guarded by the voice.
+    ///
+    /// `the_direction_led_develop_skips_the_distillation_pull` proves the
+    /// HELPER — that `style_blend_pull` returns `None` in `Background`. It
+    /// cannot prove that either call site reads it, because nothing in the
+    /// battery runs `produce_recipe`'s blend path (it needs a paid analysis).
+    /// Restoring `crate::style::style_pull(req.style)` at either site would
+    /// compile and leave the whole battery green — including the
+    /// judge-candidate site, which is the one that governs an ADOPTED
+    /// revision, i.e. exactly the recipe two of the three 2026-09-01
+    /// acceptance develops actually shipped.
+    ///
+    /// So this is a source guard, the same instrument
+    /// `the_style_look_summary_reaches_every_reviewer...` uses on
+    /// `GradeIntent`: count equality plus adjacency, with both needles
+    /// assembled so the assertion cannot match itself.
+    ///
+    /// MUTATION: delete `&& let Some(pull) = style_blend_pull(style_voice,
+    /// req.style)` from either site (restoring an unguarded pull) and the
+    /// count assertion fails.
+    #[test]
+    fn every_blend_site_in_this_file_is_guarded_by_the_style_voice() {
+        let src = include_str!("pipeline.rs");
+        let call = concat!("blend_toward", "(&mut ");
+        let guard = concat!("style_blend_pull", "(style_voice, req.style)");
+        let calls: Vec<usize> = src.match_indices(call).map(|(i, _)| i).collect();
+        let guards: Vec<usize> = src.match_indices(guard).map(|(i, _)| i).collect();
+        assert_eq!(calls.len(), 2, "the two blend sites: the verified proposal and the judge candidate");
+        assert_eq!(
+            guards.len(),
+            calls.len(),
+            "every blend in this file must be gated on the voice, and nothing else may be"
+        );
+        // ADJACENCY, not just arithmetic: each guard is the one immediately
+        // above its own call, so two guards on one site and none on the other
+        // cannot satisfy the count. 400 bytes is the `if let` chain plus its
+        // opening brace — measured at 112 and 173 bytes on 2026-09-01.
+        for (g, c) in guards.iter().zip(&calls) {
+            assert!(g < c, "a guard must precede its blend (guard {g}, call {c})");
+            assert!(
+                c - g < 400,
+                "the guard at {g} is {} bytes from the blend at {c} — too far to be its gate",
+                c - g
+            );
+        }
+    }
+
     /// B2: the style-look summary reaches EVERY reviewer of one analysis —
     /// the verifier, the first judgement, and the re-judge inside every
     /// hint-guided revision round.
@@ -7014,14 +7076,22 @@ mod tests {
             adherence: DirectionAdherence::new(0.2),
             ..GradeRequest::with_style(0.7)
         };
-        let intent = grade_intent(&req, Some("moodier"), Some("warm golden tones"));
+        let intent = grade_intent(
+            &req,
+            Some("moodier"),
+            Some("warm golden tones"),
+            crate::style::StyleVoice::Background,
+        );
         assert_eq!(intent.style_look, Some("warm golden tones"), "the look must reach the intent");
         assert_eq!(intent.direction, Some("moodier"), "and it must not displace the direction");
         assert_eq!(intent.strength.get(), 0.9);
         assert_eq!(intent.adherence.get(), 0.2);
         // No library, no claim: the reviewers are told nothing rather than an
         // empty look.
-        assert_eq!(grade_intent(&req, None, None).style_look, None);
+        assert_eq!(
+            grade_intent(&req, None, None, crate::style::StyleVoice::Ceiling).style_look,
+            None
+        );
 
         // …and there is exactly ONE place in this file that builds one. A
         // second literal is how the revision round would come to judge against
@@ -7071,7 +7141,12 @@ mod tests {
             looks_count: 1,
         };
         let req = GradeRequest::with_style(0.7);
-        let intent = grade_intent(&req, None, retrieved.look_summary.as_deref());
+        let intent = grade_intent(
+            &req,
+            None,
+            retrieved.look_summary.as_deref(),
+            crate::style::StyleVoice::Ceiling,
+        );
         assert_eq!(intent.style_look, summary.as_deref());
         // An empty library answers None, and the reviewers are told nothing.
         assert_eq!(crate::style::StyleIndex::look_summary(&[], &[]), None);

@@ -2837,6 +2837,16 @@ impl DirectionAdherence {
         Self(if v.is_finite() { v.clamp(0.0, 1.0) } else { Self::DEFAULT })
     }
 
+    /// Resolve a dial a surface may not have sent — the web body's absent
+    /// `adherence`. The same one definition [`GradeStrength::from_optional`]
+    /// exists for, and for a sharper reason since v1.2.3: this dial now also
+    /// decides WHO LEADS, so `unwrap_or(0.0)` on an omitted field would not
+    /// merely soften a prompt, it would hand the lead back to the style
+    /// library on every older client's request.
+    pub fn from_optional(v: Option<f32>) -> Self {
+        v.map(Self::new).unwrap_or_default()
+    }
+
     pub fn get(self) -> f32 { self.0 }
     pub fn pct(self) -> f32 { self.0 * 100.0 }
     pub fn tier(self) -> AdherenceTier {

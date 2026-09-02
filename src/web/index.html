@@ -187,6 +187,11 @@
       <input type="range" class="style-strength" min="0" max="100" step="5" value="30" style="width:140px" />
       <span class="style-val">30%</span>
     </label>
+    <label class="chk" title="How closely the AI follows the Direction above; it does nothing without one. 40% or below (Hint) leaves your style library in the lead and keeps the distillation pull; above 40% (Direct / Brief) the direction leads and your library is sent as background only.">
+      Adherence
+      <input type="range" class="adherence" min="0" max="100" step="5" value="65" style="width:140px" />
+      <span class="adherence-val">65%</span>
+    </label>
     <button type="button" class="info-btn" title="What's in my style library?">ⓘ Library info</button>
     <div class="popover" hidden></div>
   </div>
@@ -1101,6 +1106,8 @@ async function selectPhoto(id, stem, el) {
 
   const ss = main.querySelector(".style-strength");
   ss.oninput = () => { main.querySelector(".style-val").textContent = ss.value + "%"; };
+  const ad = main.querySelector(".adherence");
+  ad.oninput = () => { main.querySelector(".adherence-val").textContent = ad.value + "%"; };
   const pop = main.querySelector(".popover");
   main.querySelector(".info-btn").onclick = async () => {
     if (!pop.hidden) { pop.hidden = true; return; }
@@ -1414,7 +1421,12 @@ async function analyze() {
   const stale = () => setStatus("analysis for another photo finished — its result was NOT applied here; if it saved, reopening that photo shows it, otherwise re-run Analyze there");
   try {
     const style = (parseFloat(document.querySelector(".style-strength")?.value ?? "30") || 0) / 100;
-    const body = { id, guidance, style_strength: style };
+    // Adherence decides WHO LEADS when a direction is given (v1.2.3): at 40%
+    // or below the style library keeps the lead, above it the direction does.
+    // The `?? "65"` fallback is the server's own DirectionAdherence::DEFAULT,
+    // so a page without the control sends what this surface sent before.
+    const adherence = (parseFloat(document.querySelector(".adherence")?.value ?? "65") || 0) / 100;
+    const body = { id, guidance, style_strength: style, adherence };
     if (refine) body.base = state.recipe;          // adjust current edit, don't start over
     if (state.region) {
       body.region = state.region;  // box-select: target this region
