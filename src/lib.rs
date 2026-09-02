@@ -918,8 +918,10 @@ mod tests {
         walk(&root, &mut files);
         assert!(files.len() > 20, "premise: the walk found the tree ({} files)", files.len());
         // The literal, spelled in two halves so this assertion's own source
-        // is not the thing it forbids.
-        let banned = format!("\"{}", crate::SKIP_PREFIX);
+        // is not the thing it forbids. Only the first four letters, so a
+        // hand-written `"SKIP …"` line is caught as well as `"SKIPPED …"`
+        // (one such spelling hid in xmp.rs until the v1.2.4 merge).
+        let banned = format!("\"{}", &crate::SKIP_PREFIX[..4]);
         let mut offenders: Vec<String> = Vec::new();
         for file in &files {
             if file.file_name().is_some_and(|n| n == "lib.rs") {

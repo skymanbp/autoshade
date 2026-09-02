@@ -16251,7 +16251,10 @@ mod tests {
     #[test]
     fn env_mask_brush_sample_matches_stage_three_ground_truth() {
         let Some(root) = crate::config::live_env("AUTOSHADE_MB_SAMPLE_ROOT") else {
-            eprintln!("SKIP env_mask_brush_sample_matches_stage_three_ground_truth: AUTOSHADE_MB_SAMPLE_ROOT unset");
+            crate::test_skipped(
+                "env_mask_brush_sample_matches_stage_three_ground_truth",
+                "AUTOSHADE_MB_SAMPLE_ROOT unset",
+            );
             return;
         };
         let root = std::path::Path::new(&root);

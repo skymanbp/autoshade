@@ -14461,7 +14461,10 @@ mod tests {
             let raw = root.join(format!("{code}.arw"));
             let target_path = root.join(format!("{code}-target.jpg"));
             if !raw.is_file() || !target_path.is_file() {
-                eprintln!("SKIPPED {code}: the two-temperature pair is not in this corpus");
+                crate::test_skipped(
+                    "the_fan_gate_costs_a_real_two_temperature_pair_nothing",
+                    &format!("the two-temperature pair {code} is not in this corpus"),
+                );
                 continue;
             }
             // Loaded exactly as CLI `match` loads a RAW: the frame developed
