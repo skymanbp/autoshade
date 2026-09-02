@@ -1,82 +1,43 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "diagram_type": "architecture",
   "meta": {
     "title": "AutoShade — architecture and the ideas inside it",
     "locale": "en",
-    "quality_profile": "showcase"
+    "quality_profile": "showcase",
+    "layout": "computed"
   },
   "components": [
     {
       "id": "responses-api",
       "type": "external",
       "label": "Responses API",
-      "sublabel": "OpenAI-compatible vision",
-      "pos": [
-        520,
-        40
-      ],
-      "size": [
-        200,
-        72
-      ]
+      "sublabel": "OpenAI-compatible vision"
     },
     {
       "id": "claude-cli",
       "type": "external",
       "label": "claude CLI",
       "sublabel": "subprocess · OAuth · data only",
-      "pos": [
-        760,
-        40
-      ],
-      "size": [
-        200,
-        72
-      ],
       "tag": "no API key"
     },
     {
       "id": "desktop-gui",
       "type": "frontend",
       "label": "Desktop GUI",
-      "sublabel": "autoshade-gui · eframe 0.29",
-      "pos": [
-        40,
-        220
-      ],
-      "size": [
-        200,
-        72
-      ]
+      "sublabel": "autoshade-gui · eframe 0.29"
     },
     {
       "id": "cli",
       "type": "frontend",
       "label": "CLI",
-      "sublabel": "autoshade · clap 4.6",
-      "pos": [
-        40,
-        316
-      ],
-      "size": [
-        200,
-        72
-      ]
+      "sublabel": "autoshade · clap 4.6"
     },
     {
       "id": "web-ui",
       "type": "frontend",
       "label": "Local web UI",
       "sublabel": "serve · tiny_http · loopback",
-      "pos": [
-        40,
-        412
-      ],
-      "size": [
-        200,
-        72
-      ],
       "tag": "per-run token"
     },
     {
@@ -84,43 +45,19 @@
       "type": "backend",
       "label": "RAW decode",
       "sublabel": "decode.rs · rawler 0.7.2",
-      "pos": [
-        280,
-        220
-      ],
-      "size": [
-        200,
-        72
-      ],
       "tag": "24 formats · 725 bodies"
     },
     {
       "id": "ai-advisor",
       "type": "backend",
       "label": "AI advisor",
-      "sublabel": "propose · verify · judge",
-      "pos": [
-        520,
-        220
-      ],
-      "size": [
-        200,
-        72
-      ]
+      "sublabel": "propose · verify · judge"
     },
     {
       "id": "edit-recipe",
       "type": "backend",
       "label": "EditRecipe",
       "sublabel": "recipe.rs · bounded JSON",
-      "pos": [
-        760,
-        220
-      ],
-      "size": [
-        200,
-        72
-      ],
       "tag": "rationale + confidence"
     },
     {
@@ -128,14 +65,6 @@
       "type": "backend",
       "label": "Render engine",
       "sublabel": "render.rs · measured LR parity",
-      "pos": [
-        1000,
-        220
-      ],
-      "size": [
-        200,
-        72
-      ],
       "tag": "byte-identical"
     },
     {
@@ -143,43 +72,19 @@
       "type": "database",
       "label": "Style index",
       "sublabel": "14-d + 12 settings + SigLIP 2",
-      "pos": [
-        280,
-        420
-      ],
-      "size": [
-        200,
-        72
-      ],
       "tag": "k = 4 retrieval"
     },
     {
       "id": "develop-store",
       "type": "database",
       "label": "Develop store",
-      "sublabel": "store.rs · versions + variants",
-      "pos": [
-        760,
-        420
-      ],
-      "size": [
-        200,
-        72
-      ]
+      "sublabel": "store.rs · versions + variants"
     },
     {
       "id": "xmp-sidecar",
       "type": "database",
       "label": "XMP sidecar",
       "sublabel": "xmp.rs · hand-rolled crs: merge",
-      "pos": [
-        1000,
-        420
-      ],
-      "size": [
-        200,
-        72
-      ],
       "tag": "byte-preserving"
     },
     {
@@ -187,14 +92,6 @@
       "type": "backend",
       "label": "Reverse-fit",
       "sublabel": "CDF inverse rendering · D gate",
-      "pos": [
-        520,
-        600
-      ],
-      "size": [
-        200,
-        72
-      ],
       "tag": "Full / Atmosphere"
     },
     {
@@ -202,14 +99,6 @@
       "type": "backend",
       "label": "Local producers",
       "sublabel": "zones · bands · quadtree tiles",
-      "pos": [
-        760,
-        600
-      ],
-      "size": [
-        200,
-        72
-      ],
       "tag": "free-form masks: designed"
     },
     {
@@ -217,14 +106,6 @@
       "type": "backend",
       "label": "Local-field analyzer",
       "sublabel": "12x8x8 bilateral grid · CG",
-      "pos": [
-        1000,
-        600
-      ],
-      "size": [
-        200,
-        72
-      ],
       "tag": "ceiling, read-only"
     },
     {
@@ -232,14 +113,6 @@
       "type": "backend",
       "label": "Embedding sidecar",
       "sublabel": "embed.py · SigLIP 2 base/16",
-      "pos": [
-        280,
-        780
-      ],
-      "size": [
-        200,
-        72
-      ],
       "tag": "768-d, pinned"
     },
     {
@@ -247,14 +120,6 @@
       "type": "backend",
       "label": "Correspondence sidecar",
       "sublabel": "correspond.py · DIFT on SD 2.1",
-      "pos": [
-        520,
-        780
-      ],
-      "size": [
-        200,
-        72
-      ],
       "tag": "48x48 field"
     },
     {
@@ -262,15 +127,21 @@
       "type": "backend",
       "label": "Segmentation sidecar",
       "sublabel": "BiRefNet · OneFormer · SAM 2.1",
-      "pos": [
-        760,
-        780
-      ],
-      "size": [
-        200,
-        72
-      ],
       "tag": "guided refine"
+    },
+    {
+      "id": "describe-sidecar",
+      "type": "backend",
+      "label": "Description sidecar",
+      "sublabel": "describe.py · Qwen3-VL-2B",
+      "tag": "one grade sentence"
+    },
+    {
+      "id": "denoise-sidecar",
+      "type": "backend",
+      "label": "Denoise sidecar",
+      "sublabel": "denoise.py · SCUNet × 5",
+      "tag": "opt-in, before tone"
     }
   ],
   "boundaries": [
@@ -299,7 +170,9 @@
       "wraps": [
         "embed-sidecar",
         "correspond-sidecar",
-        "segment-sidecar"
+        "segment-sidecar",
+        "describe-sidecar",
+        "denoise-sidecar"
       ]
     },
     {
@@ -333,8 +206,7 @@
       "from": "raw-decode",
       "to": "ai-advisor",
       "label": "preview·EXIF·histogram",
-      "variant": "emphasis",
-      "labelDy": -30
+      "variant": "emphasis"
     },
     {
       "id": "advisor-calls-responses",
@@ -348,8 +220,7 @@
       "from": "ai-advisor",
       "to": "edit-recipe",
       "label": "bounded slider set",
-      "variant": "emphasis",
-      "labelDy": -30
+      "variant": "emphasis"
     },
     {
       "id": "recipe-to-verifier",
@@ -370,15 +241,13 @@
       "from": "render-engine",
       "to": "xmp-sidecar",
       "label": ".xmp + rendered image",
-      "variant": "emphasis",
-      "labelDy": 24
+      "variant": "emphasis"
     },
     {
       "id": "recipe-to-store",
       "from": "edit-recipe",
       "to": "develop-store",
-      "label": "saved per photo path",
-      "labelDy": 24
+      "label": "saved per photo path"
     },
     {
       "id": "style-to-advisor",
@@ -390,43 +259,49 @@
       "id": "embed-to-style",
       "from": "embed-sidecar",
       "to": "style-index",
-      "label": "768-d image embedding",
-      "labelDy": -18
+      "label": "768-d image embedding"
     },
     {
       "id": "fit-to-producers",
       "from": "reverse-fit",
       "to": "local-producers",
-      "label": "global fit · mode",
-      "labelDy": -30
+      "label": "global fit · mode"
     },
     {
       "id": "analyzer-to-producers",
       "from": "field-analyzer",
       "to": "local-producers",
-      "label": "ceiling · cap · band proposals",
-      "labelDy": -30
+      "label": "ceiling · cap · band proposals"
     },
     {
       "id": "producers-to-store",
       "from": "local-producers",
       "to": "develop-store",
-      "label": "recovered recipe + masks",
-      "labelDy": -18
+      "label": "recovered recipe + masks"
     },
     {
       "id": "correspond-to-fit",
       "from": "correspond-sidecar",
       "to": "reverse-fit",
-      "label": "where content moved",
-      "labelDy": -18
+      "label": "where content moved"
     },
     {
       "id": "segment-to-producers",
       "from": "segment-sidecar",
       "to": "local-producers",
-      "label": "sky/land · subject · object",
-      "labelDy": -18
+      "label": "sky/land · subject · object"
+    },
+    {
+      "id": "describe-to-style",
+      "from": "describe-sidecar",
+      "to": "style-index",
+      "label": "one sentence per photo"
+    },
+    {
+      "id": "denoise-to-render",
+      "from": "denoise-sidecar",
+      "to": "render-engine",
+      "label": "denoised pixels"
     }
   ],
   "cards": [

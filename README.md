@@ -118,6 +118,8 @@ the last subsection lists what is designed but not yet shipped.
   <img src="docs/images/pillar-analysis-light.svg" alt="Pillar 1: a Lightroom RAW+XMP library becomes exemplars carrying a 14-dimension feature, a SigLIP 2 image vector, a Qwen3-VL sentence and a local-work habit; a query retrieves its four nearest past shots by the hybrid distance, and their habits reach the proposer behind an untrusted-data fence before a capped pull moves the proposal toward the photographer's own means" />
 </picture>
 
+<sub>Zoom and pan this diagram at [autoshade.dev/#pillar-analysis](https://autoshade.dev/#pillar-analysis).</sub>
+
 <img src="docs/images/showcase-island-four-looks.jpg" alt="Lakeside island town: straight conversion and three AI develops driven by three different direction texts" />
 
 <sub><b>One photograph, four looks.</b> The straight conversion of a hazy
@@ -230,6 +232,8 @@ byte, while the other tiers change only its wording.
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/pillar-reimagine-fit-dark.svg" />
   <img src="docs/images/pillar-reimagine-fit-light.svg" alt="Pillar 2: a generated or finished target is measured against the input by the structural-divergence statistic D, which selects a full solve or a bounded atmosphere mode; a robust tone regression and gated local stages produce a recipe, and only the recipe reaches the full-resolution render" />
 </picture>
+
+<sub>Zoom and pan this diagram at [autoshade.dev/#pillar-reimagine-fit](https://autoshade.dev/#pillar-reimagine-fit).</sub>
 
 <img src="docs/images/showcase-viaduct-reverse-fit.jpg" alt="Stone viaduct: straight conversion, generated target, and the recovered recipe rendered on the RAW, with a 1:1 detail row" />
 
@@ -386,6 +390,8 @@ new model's result.
   <img src="docs/images/pillar-lightroom-math-light.svg" alt="Pillar 3: sidecar and recipe read and write both ways into the engine over four measured laws — mask frames, lens geometry, tone and falloff, and the brush kernel — each published with its own residual" />
 </picture>
 
+<sub>Zoom and pan this diagram at [autoshade.dev/#pillar-lightroom-math](https://autoshade.dev/#pillar-lightroom-math).</sub>
+
 The tone LUT, the two-arm Texture model (`A1 = 0.172443`, `A2 = 0.304888`;
 45 of 45 Lightroom anchors within ±0.02), the 290×11 radial feather LUT,
 the brush law `(1 − ρ^m)^n` with the measured flow constant `κ = 0.1284`
@@ -429,14 +435,17 @@ in v1.2.0.
 ## How it works
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/images/architecture-dark.png" />
-  <img src="docs/images/architecture-light.png" alt="AutoShade architecture: three front ends over one Rust library with the style index, reverse-fit, local producers and the local-field analyzer; local Python sidecars for embeddings, correspondence and segmentation; opt-in external AI services" />
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/architecture-dark.svg" />
+  <img src="docs/images/architecture-light.svg" alt="AutoShade architecture: three front ends over one Rust library with the style index, reverse-fit, local producers and the local-field analyzer; five local Python sidecars for embeddings, descriptions, correspondence, segmentation and denoise; opt-in external AI services" />
 </picture>
 
-<sub>Architecture with the ideas inside it: the style index, reverse-fit, its local producers, the bilateral-grid analyzer, and the local sidecars are drawn as the components they are. The diagram predates the fourth and fifth sidecars (`correspond.py`, `describe.py`) and draws three; the sidecar family is enumerated in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). The interactive version is
-[docs/architecture/autoshade.architecture.html](docs/architecture/autoshade.architecture.html),
-generated from [autoshade.architecture.json](docs/architecture/autoshade.architecture.json)
-with [archify](https://github.com/tt-a1i/archify).</sub>
+<sub>Twenty components, nineteen connections and three boundaries, generated from
+[autoshade.architecture.json](docs/architecture/autoshade.architecture.json) by
+[scripts/architecture_diagram.py](scripts/architecture_diagram.py): no position
+in the picture is chosen by hand, and the shared checker in
+[scripts/diagram_check.py](scripts/diagram_check.py) refuses to write the file
+when any two labels, borders or arrows touch. Zoom and pan it at
+[autoshade.dev/architecture.html](https://autoshade.dev/architecture.html).</sub>
 
 The primary path is short. [`src/decode.rs`](src/decode.rs) decodes the RAW
 and yields a preview, EXIF, and a histogram; the vision advisor in
