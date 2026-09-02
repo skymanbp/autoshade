@@ -180,9 +180,28 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
       class apart across luminance — that class holds {share} of the \
       frame's measurable colour, and the three channel curves would have \
       spread its dark and bright slices {fan} degrees apart (limit \
-      {limit}). A single-hued region sorted into a hue fan by brightness \
+      {limit}). Shrinking them — first toward the one shape all three \
+      channels share, then toward no curves at all — was tried first: no \
+      milder version both cleared the limit and left the frame closer to \
+      the target. A single-hued region sorted into a hue fan by brightness \
       is not something any develop control can put back.",
-        " 色偏曲线已被扣留：它们会把同一个色相类沿亮度拉散——该色相类占画面可测色彩的 {share}，而三条通道曲线会把它的暗部与亮部切片拉开 {fan} 度（上限 {limit}）。单一色相的区域被按明暗分选成多个色相，任何显影控件都无法还原。"),
+        " 色偏曲线已被扣留：它们会把同一个色相类沿亮度拉散——该色相类占画面可测色彩的 {share}，而三条通道曲线会把它的暗部与亮部切片拉开 {fan} 度（上限 {limit}）。先尝试过把它们收缩——先收向三个通道共有的那一个形状，再收向完全不加曲线：没有找到任何一个收缩版本能在进入上限之内的同时让画面更接近目标。单一色相的区域被按明暗分选成多个色相，任何显影控件都无法还原。"),
+    (" Colour-cast curves were shrunk toward the shape all three channels \
+      share: as fitted they would have opened a {fan_before} degree hue \
+      fan in a class holding {share} of the frame's measurable colour \
+      (limit {limit}), so they were taken back to t = {t} of the fitted \
+      cast (1 = as fitted, 0.5 = one curve shared by all three channels, \
+      0 = none). The look error with the shrunk curves is {ratio} of the \
+      error without them (the strength budget's bound is {bound}).",
+        " 色偏曲线已向三个通道共有的形状收缩：按拟合原样，它们会在占画面可测色彩 {share} 的色相类内拉开 {fan_before} 度的色相跨度（上限 {limit}），因此把它们收缩到拟合值的 t = {t}（1 = 原样，0.5 = 三个通道共用一条曲线，0 = 不加曲线）。加上收缩后曲线的观感误差与不加曲线时的比值为 {ratio}（强度预算的上限为 {bound}）。"),
+    (" The projected curves change that class's hue spread across \
+      luminance by {fan_after} degrees, inside the {target} degree target \
+      a projection has to reach.",
+        " 收缩后的曲线把该色相类沿亮度的色相跨度改变了 {fan_after} 度，在收缩需要达到的 {target} 度目标之内。"),
+    (" The projected curves' hue fan was not measurable: no hue class \
+      holds enough of the frame across two luma slices for a fan to have \
+      a value.",
+        " 收缩后曲线的色相沿亮度跨度无法测量：任何色相类都没有在两个亮度切片上占到足够的画面。"),
     (" Global colour cast measured from consistent hue rotation across the populated frame (rotation {rotation} degrees, chroma ratio {ratio}); white balance and saturation were read from population evidence.", " 已从画面中各色相带一致的色相旋转测得全局色偏（旋转 {rotation} 度，色度比 {ratio}）；白平衡和饱和度取自整体证据。"),
     (" High-strength fit disclosed unsupported movement in {kind}: {ranges}. The controls were retained, but confidence is capped by the strength budget.", " 高强度拟合显示 {kind} 中没有双侧证据的移动：{ranges}。控制保留，置信度受强度预算限制。"),
     // ── Settings ────────────────────────────────────────────────────────────
