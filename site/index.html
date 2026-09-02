@@ -343,7 +343,7 @@ autoshade apply "photo.ARW" "recipe.json" -o "developed.tif"</code></pre>
           <div class="tech-index" aria-hidden="true">01</div>
           <div>
             <h3>RAW decode and CFA</h3>
-            <p>rawler covers <strong>24 RAW formats and 725 camera bodies</strong>. Bayer uses the normal demosaic path; the <strong>approximate</strong> X-Trans path fits colour planes over a 5×5 CFA neighbourhood and moved the measured X-S10 G/R ratio from 1.5503 to 0.9476. EXIF orientation runs at the head of the chain, while no-preview, untagged-16-bit, unsupported-sensor, and decoder failures remain explicit.</p>
+            <p>rawler covers <strong>24 RAW formats and 725 camera bodies</strong>. Bayer uses the normal demosaic path; the <strong>approximate</strong> X-Trans path fits colour planes over a 5×5 CFA neighbourhood and moved the measured X-S10 G/R ratio from 1.5503 to 0.9476. Orientation runs at the head of the chain — the RAW's EXIF state composed with the photographer's own quarter turns, and a Lightroom sidecar's <code>tiff:Orientation</code> chooses those turns, so a rotation made in Lightroom survives the import — while no-preview, untagged-16-bit, unsupported-sensor, and decoder failures remain explicit.</p>
             <p class="source-link"><a href="https://github.com/skymanbp/autoshade/blob/main/docs/TECH_STACK.md#raw-decode-and-cfa">Details: RAW decode and CFA →</a></p>
           </div>
         </article>

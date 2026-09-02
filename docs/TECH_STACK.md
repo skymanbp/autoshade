@@ -27,8 +27,12 @@ converted with qcms. Bayer data uses rawler's normal demosaic path, while a
 non-2×2 three-colour CFA takes AutoShade's geometry-driven X-Trans path: for
 each missing colour at a pixel it fits a plane to matching photosites in a
 5×5 neighbourhood, then evaluates that plane at the target while retaining
-the sensor's measured channel exactly. `orient_f32` applies EXIF orientation
-immediately after demosaic, before development, masks, straighten, or crop.
+the sensor's measured channel exactly. `orient_f32` applies the COMPOSED
+orientation — the RAW's EXIF state followed by the photographer's quarter
+turns — immediately after demosaic, before development, masks, straighten, or
+crop; an imported Lightroom sidecar's `tiff:Orientation` is solved for those
+quarter turns (`render::quarter_turns_between`), so the delivered frame is the
+frame Lightroom exports.
 
 If a RAW has no usable embedded preview, the decoder builds a neutral rendition
 from the sensor mosaic instead of failing the open. Parser panics are contained

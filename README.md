@@ -302,10 +302,12 @@ the brush law `(1 − ρ^m)^n` with the measured flow constant `κ = 0.1284`
 Sony's own 16 native samples (radial 41/41 vectors within 1 px; linear
 openly *not* pixel-closed, RMS 9.748/7.025/6.336 px) were each fitted to
 Lightroom output. The XMP layer is hand-rolled on purpose — no XML crate —
-so a catalogue sidecar is merged into byte for byte, down to the SVD fold
+so a catalogue sidecar is merged into byte for byte — down to the SVD fold
 between Lightroom's pixel-space radial tilt and the engine's normalised
-rotation, and Lightroom's Brotli-packed brush dab streams are imported and
-verified (`MD5 → .acr → Brotli`). Two of those fits were re-measured in
+rotation, and down to its `tiff:Orientation`, rewritten only when the
+photographer's own turn has moved away from it — and Lightroom's Brotli-packed
+brush dab streams are imported and verified (`MD5 → .acr → Brotli`). Two of
+those fits were re-measured in
 v1.2.4 against Lightroom's own coverage rather than exported luma, on a
 46-export pack: the LINEAR falloff moved onto the abscissa `t^1.124`
 (α rms 0.0293 → 0.0074), and the radial boundary was shown to be a pure
@@ -611,8 +613,10 @@ numbers](#measured-numbers) are not repeated.
 ### RAW decode and CFA
 
 - `src/decode.rs` uses rawler for **RAW decode, 24 formats**, with 725 bodies
-  in the release database; `orient_f32` applies EXIF orientation at the head
-  of the chain.
+  in the release database; `orient_f32` applies the composed orientation — the
+  RAW's EXIF state plus the photographer's own quarter turns — at the head of
+  the chain, and an imported Lightroom sidecar's `tiff:Orientation` chooses
+  those turns, so a rotation made in Lightroom survives the import.
 - Bayer data takes rawler's demosaic path; X-Trans uses an **approximate** 5×5
   CFA-geometry plane fit, and no-preview RAWs, untagged 16-bit rasters and
   mono sensors are disclosed or refused.
