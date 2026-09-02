@@ -777,7 +777,8 @@ frame.
   `lr_mask_warp_norm`, inverse mask map, and H2 evaluation.
 - `src/recipe.rs` and `src/xmp.rs` — stored centre, linear handle warp, schema
   gates, and Lightroom import/export.
-- `docs/ROADMAP.md` — D1/D2 measurement verdicts and remaining R2 residual.
+- `docs/ROADMAP-archive.md` — D1/D2 measurement verdicts; the remaining R2
+  residual is a measured number under the README's *Measured numbers*.
 
 ## XMP and Lightroom interoperability
 
@@ -841,8 +842,8 @@ through the strict binary path described above.
   polarity, mask geometry, conservative merge, and writer.
 - `src/pipeline.rs` — sidecar read/merge/save/export orchestration.
 - `src/store.rs` — per-user develop store and saved merge bases.
-- `docs/ARCHITECTURE.md`, `docs/V2_PLAN.md`, and `docs/ROADMAP.md` — sidecar
-  measurement and storage-semantics ledger.
+- `docs/ARCHITECTURE.md`, `docs/V2_PLAN.md`, `docs/ROADMAP.md` and
+  `docs/ROADMAP-archive.md` — sidecar measurement and storage-semantics ledger.
 
 ## AI advisor and reverse fit
 
@@ -1345,7 +1346,7 @@ and zero-confidence fields are conservation-tested to change nothing.
     description, i.e. a text that describes the query photograph perfectly,
     while a user's typed Direction is not that. Both text weights are therefore
     calibrated on a friendlier query than they will see — the re-measurement
-    with real direction texts that the S2 ROADMAP entry registered is what moved
+    with real direction texts (the S2 entry in `docs/ROADMAP-archive.md`) is what moved
     `W_TXT` from `4` to `0.5`.
   - The leave-one-out observations are CORRELATED (every exemplar appears in
     other queries' neighbourhoods), so every interval describes this corpus and

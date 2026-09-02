@@ -10,7 +10,7 @@ An AI decides *what to change*. A deterministic Rust engine *does* it.
 
 [Download v1.2.3](https://github.com/skymanbp/autoshade/releases/tag/v1.2.3) ·
 [Architecture](docs/ARCHITECTURE.md) ·
-[Roadmap](docs/ROADMAP.md) ·
+[Release ledger](docs/ROADMAP.md) ·
 [MIT](LICENSE)
 
 </div>
@@ -818,9 +818,9 @@ closes 41/41 measured vectors to ≤1 px; clean dilation is within 0.35 pp, R1
 about 0.5 pp, with an open R2 excess of about 1.2 pp. LINEAR remains not
 pixel-closed (RMS figures under [Measured numbers](#measured-numbers)).
 
-See [docs/ROADMAP.md](docs/ROADMAP.md) for planned work and
-[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for subsystem boundaries and
-dependency rationale.
+See [docs/ROADMAP.md](docs/ROADMAP.md) for the release ledger and the
+standing rulings, and [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for
+subsystem boundaries and dependency rationale.
 
 ## License and acknowledgements
 
