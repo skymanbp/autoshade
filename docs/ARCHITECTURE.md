@@ -2174,7 +2174,13 @@ is not monotone in `t` — measured on the coast fixture's candidate
 0.00187 at 0.50, a wiggle the size of `FIT_QUANT` itself — so judging only the
 winner refuses two marginal rescues the older shape happened to find. That is
 the right direction: a rescue whose worth depends on which point of the path
-you land on is worth nothing.
+you land on is worth nothing. The cost is stated, not hidden: the gain is evaluated at exactly ONE point,
+the strongest admissible shrink, so a shrink that pays only at a milder `t`
+is not found — measured on the two-family HSL pair (2026-09-02), where every
+`t ≤ 0.25` is admissible and pays 0.0019–0.0033 while the strongest
+admissible point reads −0.012, so the pair is refused and its refusal
+sentence says exactly that. A best-paying-admissible search is a registered
+follow-up, not this batch's.
 
 The precedence is the design's, exactly: the fan gate must be the ONLY gate
 that convicted. A pixel-aligned veto says the DESTINATION is wrong and no
@@ -2207,7 +2213,9 @@ its branches with the cast the gates MEASURED, because its question is about
 the MIXER and an invented compromise must not out-vote a per-band solve the
 evidence supports — with the rescue live in every call, four fixture verdicts
 moved that have nothing to do with this feature (canyon-warm's mixer flipped
-from withdrawn to attached, the two-family HSL pair's the other way).
+from withdrawn to attached, the two-family HSL pair's the other way; that
+experiment's four are a superset of the THREE that survive the confinement,
+named below).
 
 The 4b call is exercised but its SUCCESS is unfixtured, and that too is a
 measurement rather than an impression: instrumenting the loop body and running

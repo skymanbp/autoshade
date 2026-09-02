@@ -165,10 +165,11 @@ pub mod keys {
          frame's measurable colour, and the three channel curves would have \
          spread its dark and bright slices {fan} degrees apart (limit \
          {limit}). Shrinking them — first toward the one shape all three \
-         channels share, then toward no curves at all — was tried first: no \
-         milder version both cleared the limit and left the frame closer to \
-         the target. A single-hued region sorted into a hue fan by brightness \
-         is not something any develop control can put back.";
+         channels share, then toward no curves at all — was tried first: \
+         either no point on that path cleared the limit, or the strongest \
+         point that did bought less than the fit's own quantisation budget, \
+         so none shipped. A single-hued region sorted into a hue fan by \
+         brightness is not something any develop control can put back.";
     /// v1.2.3: the stage's THIRD outcome — the fan gate convicted the fitted
     /// curves and a PROJECTED, milder cast shipped instead of nothing.
     ///

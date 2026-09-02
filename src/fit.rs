@@ -3026,10 +3026,11 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure_opts(
     // this call, so a solve whose mixer stayed neutral is rescued on the same
     // terms as one whose mixer attached.
     //
-    // The 4b call's rescue has NO FIXTURE. That loop's body is unreached by
-    // every pair in the corpus (see its own note), so "a fan-convicted cast
-    // survives the saturation step-down" is verified by reading this code and
-    // not by a test; a pair that reaches the loop body should pin it.
+    // The 4b call's rescue is ENTERED but its SUCCESS has no fixture: nine
+    // fixture re-fits reach that loop body fan-convicted (its own note has the
+    // count) and none is rescued there, so "a fan-convicted cast survives the
+    // saturation step-down" is verified by reading this code and not by a
+    // test; a pair that projects inside that loop should pin it.
     let mut cast = fit_cast_stage(&mut recipe, true);
 
     // --- 4b) do-no-harm — the pipeline-END check ------------------------------
@@ -6297,7 +6298,13 @@ fn cast_curves_are_identity(curves: &[Vec<CurvePoint>; 3]) -> bool {
 /// pair both go from projected to refused here. That is the right direction —
 /// a rescue whose worth depends on which point of the path you happen to land
 /// on is worth nothing — and it is the only direction a bisection can search
-/// soundly. Pinned by
+/// soundly. The cost is stated, not hidden: the gain is evaluated at exactly
+/// ONE point, the strongest admissible shrink, so a shrink that pays only at
+/// a milder `t` is not found. Measured on the two-family HSL pair
+/// (2026-09-02): every `t ≤ 0.25` is admissible and pays 0.0019–0.0033, the
+/// strongest admissible point reads a gain of −0.012, and the pair is
+/// refused — the refusal sentence says exactly that. A best-paying-admissible
+/// search is a registered follow-up, not this batch's. Pinned by
 /// `the_search_does_not_bisect_past_a_band_the_gain_bar_opens`.
 ///
 /// Bisection, 12 steps — the convention this file already uses for
@@ -11213,9 +11220,10 @@ mod tests {
     /// the loop makes the clearing set an interval `[a, b]` with `a > 0`, and
     /// a probe that fails on the GAIN moves the search DOWN, away from the
     /// band, to `None`. The refusal is conservative, but the sentence it then
-    /// writes — "no milder version both cleared the limit and left the frame
-    /// closer to the target" — is a claim about the whole path made by a
-    /// search that never looked at it.
+    /// wrote — "no milder version both cleared the limit and left the frame
+    /// closer to the target" — was a claim about the whole path made by a
+    /// search that never looked at it; the sentence now says what the search
+    /// did (nothing cleared, or the strongest clearing point did not pay).
     ///
     /// The synthetic path here is exactly that shape: admissible up to
     /// `t = 0.4`, worth more than [`FIT_QUANT`] only above `t = 0.36`. The two
@@ -12036,12 +12044,14 @@ mod tests {
     ///
     /// What moved is not the gate — it is where canyon-warm's protection comes
     /// from. On the shipped pipeline that pair's mixer now attaches FIRST
-    /// ([Orange sat +18 lum +18, Blue sat -18 lum -3]), and against THAT state
+    /// ([Orange sat +18 lum +18, Blue sat -18 lum -2.6]), and against THAT state
     /// the re-derived cast curves rotate nothing: measured 0.0000 of the frame
     /// with the mixer in place, 0.1250 with it neutralised. So the fixture's
     /// cast is no longer stopped by the rotation veto; it is stopped by the
     /// composition of the mixer and the hue-fan projection, which convicts the
-    /// curves at 17.2° and ships a shrunk cast at t = 0.653 reading +7.2°.
+    /// curves at 16.9° on the pipeline's weighted census (17.2° on this test's
+    /// unweighted stage-4 reconstruction — two populations, both stated) and
+    /// ships a shrunk cast at t = 0.653 reading +7.2°.
     ///
     /// The protection itself is intact and is measured where it belongs — on
     /// the DELIVERED frame, by `warm_rock_cast_must_not_violet_the_pale_sky`,
