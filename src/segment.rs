@@ -1380,16 +1380,19 @@ mod tests {
     #[test]
     fn single_class_sky_call_is_unchanged() {
         let Some(corpus) = crate::fit::calibration_corpus() else {
-            eprintln!("SKIPPED sidecar sky identity test: AUTOSHADE_FIT_CALIBRATION_DIR unset");
+            crate::test_skipped(
+                "sidecar sky identity test",
+                "AUTOSHADE_FIT_CALIBRATION_DIR unset",
+            );
             return;
         };
         let cfg = crate::config::Config::load();
         let mut opts = SegmentOpts::from_config(&cfg, "sky");
         opts.script = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("python/segment.py");
         if !opts.script.is_file() {
-            eprintln!(
-                "SKIPPED sidecar sky identity test: segmentation sidecar absent at {}",
-                opts.script.display()
+            crate::test_skipped(
+                "sidecar sky identity test",
+                &format!("segmentation sidecar absent at {}", opts.script.display()),
             );
             return;
         }
@@ -1478,7 +1481,10 @@ mod tests {
         #[cfg(windows)]
         let linked = std::os::windows::fs::symlink_file(&target, &link).is_ok();
         if !linked {
-            eprintln!("SKIPPED linked_plane_path_is_refused: platform cannot create symlink");
+            crate::test_skipped(
+                "linked_plane_path_is_refused",
+                "platform cannot create symlink",
+            );
             let _ = std::fs::remove_dir_all(dir);
             return;
         }

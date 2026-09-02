@@ -325,7 +325,10 @@ mod tests {
     #[test]
     fn fit_calibration_four_regions_has_typed_verdicts_when_corpus_is_available() {
         let Some(corpus) = crate::fit::calibration_corpus() else {
-            eprintln!("SKIPPED four-region calibration test: AUTOSHADE_FIT_CALIBRATION_DIR unset");
+            crate::test_skipped(
+                "four-region calibration test",
+                "AUTOSHADE_FIT_CALIBRATION_DIR unset",
+            );
             return;
         };
         let cfg = crate::config::Config::load();
@@ -333,9 +336,9 @@ mod tests {
         seg.script = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("python/segment.py");
         if !seg.script.is_file() {
-            eprintln!(
-                "SKIPPED four-region calibration test: segmentation sidecar absent at {}",
-                seg.script.display()
+            crate::test_skipped(
+                "four-region calibration test",
+                &format!("segmentation sidecar absent at {}", seg.script.display()),
             );
             return;
         }
