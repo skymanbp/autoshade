@@ -7036,6 +7036,58 @@ pub fn compose_orientation(exif: Orientation, quarter_turns: u8) -> Orientation 
     compose_two(exif, quarter_turn_orientation(quarter_turns))
 }
 
+/// The INVERSE of [`compose_orientation`] in its second argument: the quarter
+/// turns that carry a photograph's own EXIF state to `want`, or `None` when no
+/// quarter turn can.
+///
+/// **THE SIDECAR ORIENTATION LAW, written once and cited from both sides of
+/// the XMP boundary.** Lightroom keeps a photograph's current orientation in
+/// the sidecar's `tiff:Orientation`, and THAT value — not the RAW's own EXIF
+/// tag — is the frame it delivers. Measured on the me6-2026-09 pack: the RAW
+/// carries IFD0 `Orientation = 8` (`Rotate270`), all 46 sidecars declare
+/// `tiff:Orientation="1"`, and Lightroom exported 6240 x 4160 LANDSCAPE from
+/// every one of them. `E-CLICK.xmp` — the one sidecar Lightroom 9.4 rewrote
+/// itself, after the user hid a mask and pressed Ctrl+S — wrote
+/// `tiff:Orientation="1"` back beside corrected 6240 x 4160 dimensions, so the
+/// value Lightroom honours is also the value Lightroom writes.
+///
+/// This engine's delivered frame is `compose_orientation(EXIF, quarter_turns)`
+/// ([`crate::decode::decode_raw_turned`], `render_to_image_in`), so the two
+/// engines agree exactly when
+///
+/// ```text
+///     compose_orientation(the RAW's EXIF, quarter_turns) == the sidecar's tiff:Orientation
+/// ```
+///
+/// and this function solves that for `quarter_turns`. The import side reads it
+/// ([`crate::xmp`]'s `honour_declared_orientation`); the export side composes
+/// it forward again ([`crate::pipeline::photo_frame_aspect`] feeding
+/// `xmp::frame_declaration`). One equation, two directions, no second model.
+///
+/// **When there is no answer.** The eight EXIF states are the dihedral group
+/// of the square; the four quarter turns are its rotation subgroup, of index
+/// two. `want` is therefore reachable exactly when it has the same HANDEDNESS
+/// as `exif` — both mirrored (`tiff:Orientation` 2/4/5/7) or both not (1/3/6/8)
+/// — and a mirrored sidecar over an un-mirrored capture asks for a reflection
+/// this engine has no stage to perform. `quarter_turns` is a count of quarter
+/// turns and not a whole [`Orientation`] on purpose ([`quarter_turn_orientation`]
+/// says why), so it cannot encode one either. `None` says so, and the importer
+/// refuses that tag BY NAME instead of mapping it to the nearest rotation,
+/// which would mirror every mask in the file without telling anyone.
+///
+/// Solved by SEARCH over the four turns rather than by a second piece of group
+/// algebra: `compose_two` is the only composition in this build, and a closed
+/// form here would be a second one to keep in step with it. Four comparisons.
+pub fn quarter_turns_between(exif: Orientation, want: Orientation) -> Option<u8> {
+    // `Unknown` is `Normal`'s twin on the way in everywhere else
+    // (`decode::raw_orientation_of`), and `compose_orientation` never returns
+    // it, so it has to be folded before the comparison or an unreadable tag
+    // would answer `None` and be reported as a refused mirror.
+    let fold = |o| if matches!(o, Orientation::Unknown) { Orientation::Normal } else { o };
+    let want = fold(want);
+    (0u8..4).find(|k| compose_orientation(fold(exif), *k) == want)
+}
+
 /// `b ∘ a` in coordinate terms — apply `a`, then `b`. Private because the only
 /// composition the pipeline needs is [`compose_orientation`]'s; exposing a
 /// general group operation would invite a second place to decide the order.
@@ -13325,6 +13377,69 @@ mod tests {
         assert_eq!(compose_orientation(Orientation::Rotate90, 2), Orientation::Rotate270);
         assert_eq!(compose_orientation(Orientation::Rotate270, 1), Orientation::Normal);
         assert_eq!(compose_orientation(Orientation::Normal, 4), Orientation::Normal);
+    }
+
+    /// [`quarter_turns_between`] IS [`compose_orientation`]'s inverse, over the
+    /// whole 8 x 8 table of (capture EXIF state, sidecar `tiff:Orientation`)
+    /// pairs — the sidecar orientation law, checked rather than argued.
+    ///
+    /// Three properties, exhaustively:
+    ///   * every answer it gives is right: `compose(exif, k) == want`;
+    ///   * it answers exactly when the two states have the same HANDEDNESS,
+    ///     which is the index-two rotation subgroup fact the doc comment rests
+    ///     on — so a refusal is a real impossibility, not a search that gave up;
+    ///   * the me6-2026-09 pack's own row: EXIF 8 over a sidecar declaring 1 is
+    ///     one clockwise quarter turn, which is what makes the delivered frame
+    ///     6240 x 4160 instead of 4160 x 6240.
+    ///
+    /// MUTATION THIS CATCHES: search `0u8..3` instead of `0u8..4` and the 16
+    /// pairs needing three quarter turns come back `None` — a refused rotation
+    /// reported as a mirror.
+    #[test]
+    fn quarter_turns_between_is_the_inverse_of_compose_orientation() {
+        const STATES: [Orientation; 8] = [
+            Orientation::Normal,
+            Orientation::HorizontalFlip,
+            Orientation::Rotate180,
+            Orientation::VerticalFlip,
+            Orientation::Transpose,
+            Orientation::Rotate90,
+            Orientation::Transverse,
+            Orientation::Rotate270,
+        ];
+        let mut solved = 0;
+        for exif in STATES {
+            for want in STATES {
+                let reachable = orientation_mirrors(exif) == orientation_mirrors(want);
+                match quarter_turns_between(exif, want) {
+                    Some(k) => {
+                        assert!(k < 4, "{exif:?} -> {want:?}: {k} is not a quarter turn");
+                        assert_eq!(
+                            compose_orientation(exif, k),
+                            want,
+                            "{exif:?} + {k} quarter turns is not {want:?}"
+                        );
+                        assert!(reachable, "{exif:?} -> {want:?} crosses a mirror and cannot be a turn");
+                        solved += 1;
+                    }
+                    None => assert!(
+                        !reachable,
+                        "{exif:?} -> {want:?} keeps its handedness, so some quarter turn reaches it"
+                    ),
+                }
+            }
+        }
+        // Half the table is reachable, which IS the index-two statement.
+        assert_eq!(solved, 32, "the rotation subgroup has index two in the dihedral group");
+        // `Unknown` is `Normal`'s twin on both sides, never a refusal.
+        assert_eq!(quarter_turns_between(Orientation::Unknown, Orientation::Normal), Some(0));
+        assert_eq!(quarter_turns_between(Orientation::Normal, Orientation::Unknown), Some(0));
+        // The pack: IFD0 Orientation = 8 under a sidecar that declares 1.
+        assert_eq!(
+            quarter_turns_between(Orientation::Rotate270, Orientation::Normal),
+            Some(1),
+            "the me6-2026-09 pack's own row"
+        );
     }
 
     /// The 竖图横躺 regression net (R27 A10), stated as the property that

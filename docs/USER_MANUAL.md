@@ -25,10 +25,13 @@ algorithms in [TECH_STACK.md](TECH_STACK.md).
 
 Use **Open photo…** (`Ctrl+O`), drag and drop, or **Open folder…**. The library
 is read-only: AutoShade stores develop state separately and never rewrites the
-source RAW. The viewer applies EXIF orientation before crop and mask geometry,
-so every tool works in the displayed frame. The neutral view is AutoShade's own
-conversion, not the camera JPEG; histogram and clipping information are
-computed from the decoded image and also feed the AI verifier.
+source RAW. The viewer applies the photo's orientation before crop and mask
+geometry, so every tool works in the displayed frame — and when a Lightroom
+sidecar sits beside the RAW, the rotation Lightroom holds for that photo is the
+one AutoShade opens it in, not the camera's original. A turn made here is
+written back into the sidecar, so Lightroom picks it up too. The neutral view
+is AutoShade's own conversion, not the camera JPEG; histogram and clipping
+information are computed from the decoded image and also feed the AI verifier.
 
 ## 2. Develop the image
 

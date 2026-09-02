@@ -2043,9 +2043,17 @@ fn orient_memo() -> &'static std::sync::Mutex<std::collections::HashMap<CurveMem
     MEMO.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
 }
 
-/// [`orient_memo`]'s reader. Inabilities are NOT cached — a locked file must be
-/// retried, the same rule the curve memo follows.
-fn source_frame_memo(path: &Path) -> Option<SourceFrame> {
+/// [`orient_memo`]'s reader, and the ONE door to a photograph's un-rotated
+/// rectangle plus its own EXIF turn. Inabilities are NOT cached — a locked
+/// file must be retried, the same rule the curve memo follows.
+///
+/// `pub(crate)` since W14: the XMP import needs the EXIF state to solve the
+/// sidecar orientation law (`render::quarter_turns_between`), and it needs the
+/// rectangle for the same brush rescale [`photo_frame_aspect`] needs it for.
+/// Three consumers, one header walk per photo per process — before this the
+/// frame supply had a second private memo of its own, so a photo could be
+/// walked twice for one fact.
+pub(crate) fn source_frame_memo(path: &Path) -> Option<SourceFrame> {
     let key = (path.to_path_buf(), curve_ident(path));
     if let Some(hit) = orient_memo().lock().ok().and_then(|m| m.get(&key).copied()) {
         return Some(hit);
@@ -3011,9 +3019,18 @@ fn write_xmp_doc(
     // frame` needs the frame to un-turn the dab stream, and without this the
     // writer would have emitted a portrait capture's brush in the display
     // frame while its `tiff:` block declared the sensor one.
+    //
+    // W14 widened it once more, for the same reason and one field further out:
+    // a QUARTER TURN is a frame fact even when the recipe holds no coordinate
+    // at all. Without this a photo rotated in AutoShade and saved with nothing
+    // else on it wrote a sidecar that declared no orientation, so the rotation
+    // never reached Lightroom — the export half of the same law the import
+    // half now reads (`render::quarter_turns_between`).
     let frame = photo
         .filter(|_| {
-            crate::render::recipe_has_frame_coords(recipe) || recipe.straighten_deg != 0.0
+            crate::render::recipe_has_frame_coords(recipe)
+                || recipe.straighten_deg != 0.0
+                || !recipe.quarter_turns.is_multiple_of(4)
         })
         .and_then(|p| photo_frame_aspect(p, recipe.quarter_turns));
     let merged = merge_base.and_then(|(_, b)| {
@@ -3103,10 +3120,10 @@ fn write_xmp_doc(
 }
 
 /// The photo's own SOURCE frame — un-rotated size plus the turn that carries
-/// it to the display frame — memoised per file the way [`orient_memo`] is:
-/// both answers cost the same metadata read, and the strip-card and batch
-/// surfaces ask per recipe, not per photo. `None` for a photo whose frame
-/// cannot be read; the caller discloses that rather than guessing an aspect.
+/// it to the display frame — through [`source_frame_memo`]: both answers cost
+/// the same metadata read, and the strip-card and batch surfaces ask per
+/// recipe, not per photo. `None` for a photo whose frame cannot be read; the
+/// caller discloses that rather than guessing an aspect.
 ///
 /// **The SOURCE frame, not the display one** (R27 A7). `decode::frame_size`
 /// applies the orientation and hands back what the render produces; the frame
@@ -3120,27 +3137,14 @@ fn write_xmp_doc(
 /// state, so the declared `tiff:Orientation` describes the frame this build
 /// actually displays — closing the Batch-2 registration that a sidecar written
 /// for a turned photo described the un-turned frame.
+///
+/// **This composition IS the export half of the sidecar orientation law**
+/// (`render::quarter_turns_between`, which states it and cites the
+/// measurement): the reader solves `compose_orientation(EXIF, quarter_turns)
+/// == tiff:Orientation` for the turn, and this is the same equation run
+/// forwards so the writer declares the frame the render delivers.
 fn photo_frame_aspect(photo: &Path, quarter_turns: u8) -> Option<xmp::FrameAspect> {
-    /// `(un-turned source size, the file's own EXIF orientation)`.
-    type SourceFrame = ((usize, usize), rawler::Orientation);
-    static MEMO: std::sync::OnceLock<
-        std::sync::Mutex<std::collections::HashMap<CurveMemoKey, SourceFrame>>,
-    > = std::sync::OnceLock::new();
-    let memo = MEMO.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
-    let key = (photo.to_path_buf(), curve_ident(photo));
-    let cached = memo.lock().ok().and_then(|m| m.get(&key).copied());
-    let ((w, h), exif) = match cached {
-        Some(v) => v,
-        None => {
-            // Inabilities are NOT cached — a locked file must be retried, the
-            // rule the curve and orientation memos already follow.
-            let v = crate::decode::source_frame(photo).ok()?;
-            match memo.lock() {
-                Ok(mut m) => *m.entry(key).or_insert(v),
-                Err(_) => v,
-            }
-        }
-    };
+    let ((w, h), exif) = source_frame_memo(photo)?;
     xmp::FrameAspect::from_size_turned(
         w as f64,
         h as f64,

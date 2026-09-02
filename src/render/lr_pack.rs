@@ -111,18 +111,6 @@ impl Calibration {
     }
 }
 
-/// The frame a mask is RASTERISED in: the develop's working buffer, which is
-/// the sensor array before the EXIF quarter turn. Lightroom rasterises in the
-/// same landscape frame (`FrameAspect`), so this is the frame the two engines'
-/// α fields are comparable in.
-fn mask_frame_dims(base: &Path, delivered: (u32, u32)) -> (u32, u32) {
-    let turn = crate::decode::raw_orientation(base).unwrap_or(rawler::Orientation::Normal);
-    // `to_flips().0` is the TRANSPOSE bit — the four orientations that swap the
-    // two axes, which are exactly the ones whose delivered frame is the
-    // working frame turned on its side.
-    if turn.to_flips().0 { (delivered.1, delivered.0) } else { delivered }
-}
-
 /// The engine's mask α over one frame, evaluated with the SAME primitives
 /// `apply_masks` uses — `combined_mask_weight` at pixel centres, through the
 /// caller's [`super::MaskFrame`] — and combined across the recipe's masks the
@@ -216,11 +204,21 @@ fn export_lr_pack_renders_for_the_mask_measurement() {
             .unwrap_or_else(|e| panic!("write the {code} render: {e}"));
         drop(img);
 
-        // The α pair, in the develop's own working frame. `geometry_profile` +
+        // The α pair, in the develop's own working frame — which is the
+        // DELIVERED frame: `render_to_image_in` orients the demosaiced buffer
+        // (`orient_f32`) before `apply_develop`, so the mask loop and this
+        // raster see the same rectangle. `geometry_profile` +
         // `MaskFrame::downstream` are the two lines the develop itself runs, so
         // the raster below is the coverage the render applied, not a second
         // opinion about it.
-        let dims = mask_frame_dims(&base, (w, h));
+        //
+        // Until W14 this line TRANSPOSED the delivered dims to reach
+        // Lightroom's landscape frame, because the render came out portrait
+        // (the sidecar's `tiff:Orientation` was not read, so `quarter_turns`
+        // stayed 0 and the RAW's EXIF 8 turned the frame Lightroom does not
+        // turn). The compensation is gone with the defect: 6240 × 4160 either
+        // way, and now for the right reason.
+        let dims = (w, h);
         let geom = super::geometry_profile(&recipe);
         let stored = alpha_raster(
             &recipe,
@@ -369,6 +367,79 @@ fn the_pack_imports_every_active_correction_and_names_only_the_inactive() {
     }
 }
 
+/// A rotation made in Lightroom survives the import, so the engine delivers
+/// Lightroom's own frame.
+///
+/// The pack is the measurement that convicted this: `base.ARW` carries IFD0
+/// `Orientation = 8` (`Rotate270`, portrait), all 46 sidecars declare
+/// `tiff:Orientation="1"`, and Lightroom exported 6240 × 4160 LANDSCAPE from
+/// every one of them — so Lightroom honours the sidecar over the RAW's EXIF,
+/// and `E-CLICK.xmp`, the one sidecar Lightroom 9.4 rewrote itself, wrote that
+/// same `"1"` back beside corrected 6240 × 4160 dimensions.
+///
+/// The import therefore has to bring back `quarter_turns = 1`, which composes
+/// with `Rotate270` to `Normal` — the landscape frame the exports are in
+/// (`render::quarter_turns_between` is the law and the sign convention).
+/// Before W14 it brought back 0 and all 46 renders came out 4160 × 6240
+/// portrait; the probe's own `meta.json` from the W10 round says so, 46 for
+/// 46.
+///
+/// MUTATION THIS CATCHES: stop reading `tiff:Orientation` on import (or hand
+/// `honour_declared_orientation` the declared state as its own EXIF) and all
+/// 46 come back `quarter_turns = 0`, delivering the portrait frame Lightroom
+/// never produced.
+#[test]
+fn the_packs_lightroom_rotation_survives_the_import() {
+    let Some(root) = pack_root() else { return };
+    let base = root.join("base.ARW");
+    let ((sw, sh), exif) =
+        crate::decode::source_frame(&base).expect("read the pack RAW's source frame");
+    assert_eq!(exif, rawler::Orientation::Rotate270, "the pack's RAW is IFD0 Orientation = 8");
+    assert_eq!((sw, sh), (6240, 4160), "the pack's source rectangle");
+    let codes = codes(&root);
+    assert_eq!(codes.len(), 46, "the me6-2026-09 pack is 46 sidecars");
+    for code in codes {
+        let xmp = std::fs::read_to_string(root.join("xmp").join(format!("{code}.xmp")))
+            .unwrap_or_else(|e| panic!("read the {code} sidecar: {e}"));
+        assert!(xmp.contains("tiff:Orientation=\"1\""), "{code} declares Lightroom's rotation");
+        let recipe = crate::xmp::xmp_to_recipe_for_photo(&xmp, &base);
+        assert_eq!(recipe.quarter_turns, 1, "{code}: the sidecar's rotation did not survive");
+        // …and that turn is what makes the delivered frame Lightroom's. This
+        // is `decode::frame_size_turned`'s own arithmetic, run off the one
+        // header read above instead of re-reading the RAW forty-six times.
+        let delivered = crate::render::compose_orientation(exif, recipe.quarter_turns);
+        let dims = if crate::decode::orientation_transposes(delivered) { (sh, sw) } else { (sw, sh) };
+        assert_eq!(dims, (6240, 4160), "{code}: the delivered frame is not Lightroom's");
+    }
+
+    // …and the other half of the law, on the same capture: a declaration this
+    // engine has no stage to deliver. `tiff:Orientation="5"` is `Transpose`, a
+    // MIRROR, and the capture's own `Rotate270` is not — no quarter turn
+    // crosses that, so the tag is refused WHOLE and the refusal is NAMED on
+    // the diagnostics channel the rest of the import discloses through. The
+    // photograph's own EXIF then decides, exactly as it does for a sidecar
+    // that declares nothing, so the mask still lands on the part of the
+    // picture Lightroom put it on and only the handedness is lost.
+    let mirrored = std::fs::read_to_string(root.join("xmp").join("C-A12-F25.xmp"))
+        .expect("read the C-A12-F25 sidecar")
+        .replace("tiff:Orientation=\"1\"", "tiff:Orientation=\"5\"");
+    let sink = crate::diag::Collector::new();
+    let recipe = crate::xmp::xmp_to_recipe_with_diag(
+        &mirrored,
+        &crate::diag::Diag::about(&sink, &base),
+    );
+    assert_eq!(recipe.quarter_turns, 0, "a refused tag leaves the photo's own EXIF in charge");
+    let said: Vec<String> = sink.take().into_iter().map(|l| l.text).collect();
+    assert_eq!(said.len(), 1, "exactly one line, and it is the refusal: {said:?}");
+    assert!(
+        said[0].contains("tiff:Orientation=\"5\"")
+            && said[0].contains("mirrors the frame")
+            && said[0].contains("EXIF orientation kept"),
+        "the refusal must name the value, the reason and what was kept: {}",
+        said[0]
+    );
+}
+
 /// Roundness moves NOTHING. Lightroom's own exports at Roundness −100, 0 and
 /// +100 are the same pixels — `max|Δ| = 0` over 26 Mpx, three times, at
 /// feather 25/50/75 on a tilted 2:1 ellipse — so this engine's documented
@@ -420,6 +491,102 @@ fn lightroom_and_the_engine_both_draw_one_ellipse_for_every_roundness() {
         assert_eq!(engine[0], engine[1], "F{feather}: the engine moved α from R−100 to R0");
         assert_eq!(engine[1], engine[2], "F{feather}: the engine moved α from R0 to R+100");
     }
+}
+
+/// ONE LAW, THREE FACES: the CLI, the GUI and the `xmp` round trip all save
+/// through `pipeline::write_xmp` and nothing else (`bin/gui/actions.rs`,
+/// `bin/gui/export.rs` and `bin/gui/workers.rs` each call it directly, and the
+/// GUI has no XMP writer of its own), so this drives that one door on the
+/// pack's real bytes.
+///
+/// Two facts, and they pull against each other. A save that never touched
+/// `tiff:Orientation` could not carry a rotation made here to Lightroom; a
+/// save that always rewrote it would move a real Lightroom sidecar's bytes on
+/// every round trip. So: an unchanged recipe composes back to the value
+/// already in the file and nothing is written, and a turn made here composes
+/// to a new value that IS written and comes back on the next import.
+///
+/// The capture is HARD-LINKED, not copied — 53 MB, and a copy would be the
+/// only expensive line here.
+///
+/// MUTATION THIS CATCHES: drop the `quarter_turns` arm from `write_xmp_doc`'s
+/// frame gate and the LAST save below — a recipe carrying nothing but the turn
+/// — writes a sidecar that declares no orientation at all, so a photo the user
+/// only rotated leaves the app with its rotation lost. (The masked saves above
+/// survive that mutation: their geometry opens the same gate.)
+#[test]
+fn one_law_three_faces_a_turn_saved_here_reaches_lightroom_and_comes_back() {
+    let Some(root) = pack_root() else { return };
+    let dir = crate::store::store_root().join("w14-orientation-round-trip");
+    std::fs::create_dir_all(&dir).expect("create the round-trip directory");
+    let raw = dir.join("base.ARW");
+    let _ = std::fs::remove_file(&raw);
+    if std::fs::hard_link(root.join("base.ARW"), &raw).is_err() {
+        std::fs::copy(root.join("base.ARW"), &raw).expect("place the pack's capture");
+    }
+    // The Lightroom sidecar, beside the RAW, which is where `write_xmp` looks
+    // for its merge base.
+    let lr = dir.join("base.xmp");
+    std::fs::copy(root.join("xmp").join("C-A12-F25.xmp"), &lr).expect("place the pack's sidecar");
+    let text = std::fs::read_to_string(&lr).expect("read the placed sidecar");
+
+    // FACE 1 — import. The sidecar's rotation arrives as the photographer's.
+    let recipe = crate::xmp::xmp_to_recipe_for_photo(&text, &raw);
+    assert_eq!(recipe.quarter_turns, 1, "the sidecar's rotation did not survive the import");
+    assert_eq!(recipe.masks.len(), 1, "and its one radial came with it");
+
+    // FACE 2 — save it back unchanged. The tag Lightroom wrote is still the
+    // tag in the file, exactly once.
+    let save = |r: &EditRecipe| {
+        let (out, _, _) = crate::pipeline::write_xmp(&raw, r, crate::diag::silent())
+            .expect("write the sidecar projection");
+        std::fs::read_to_string(&out).expect("read the sidecar projection back")
+    };
+    let unchanged = save(&recipe);
+    assert_eq!(unchanged.matches("tiff:Orientation").count(), 1, "{unchanged}");
+    assert!(unchanged.contains("tiff:Orientation=\"1\""), "{unchanged}");
+    assert_eq!(
+        crate::xmp::xmp_to_recipe_for_photo(&unchanged, &raw).quarter_turns,
+        1,
+        "the round trip lost the turn"
+    );
+
+    // FACE 3 — turn it here, the way the toolbar does (`pipeline::rotate_recipe`
+    // is what `gui::actions::rotate_photo` calls), and save again. The
+    // declaration follows the composed state: one more clockwise turn on top
+    // of `Normal` is `Rotate90`, which is `tiff:Orientation="6"`.
+    let mut turned = recipe.clone();
+    crate::pipeline::rotate_recipe(&mut turned, &raw, 1).expect("turn the recipe");
+    assert_eq!(turned.quarter_turns, 2, "one turn on top of the sidecar's own");
+    let after = save(&turned);
+    assert_eq!(after.matches("tiff:Orientation").count(), 1, "{after}");
+    assert!(after.contains("tiff:Orientation=\"6\""), "the turn did not reach Lightroom: {after}");
+    assert_eq!(
+        crate::xmp::xmp_to_recipe_for_photo(&after, &raw).quarter_turns,
+        2,
+        "the turn did not come back"
+    );
+
+    // …and a turn with NOTHING ELSE on it. A recipe holding no coordinate at
+    // all still has a frame fact to declare, and `write_xmp_doc`'s gate has to
+    // fetch the photograph's frame for it — otherwise the sidecar of a photo
+    // the user only rotated declares no orientation and the rotation never
+    // leaves the app. Three quarter turns on top of the capture's `Rotate270`
+    // is `Rotate180`, i.e. `tiff:Orientation="3"`.
+    let bare = EditRecipe { quarter_turns: 3, ..Default::default() };
+    let bare_doc = save(&bare);
+    assert_eq!(bare_doc.matches("tiff:Orientation").count(), 1, "{bare_doc}");
+    assert!(
+        bare_doc.contains("tiff:Orientation=\"3\""),
+        "a turn with no geometry did not reach Lightroom: {bare_doc}"
+    );
+    assert_eq!(
+        crate::xmp::xmp_to_recipe_for_photo(&bare_doc, &raw).quarter_turns,
+        3,
+        "the bare turn did not come back"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// `crs:CorrectionActive="false"` — the mask eye — read three ways.
