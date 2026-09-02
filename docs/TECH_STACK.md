@@ -1241,8 +1241,12 @@ and zero-confidence fields are conservation-tested to change nothing.
   recalibration on the described index reverses it: best standardised
   `(4, 4, 0.5)` = 0.664818 against best raw `(4, 2, 0)` = 0.693811, and only
   the standardised variant's text terms beat their own variant's text-free row
-  with a paired CI excluding 0. `STANDARDISE_TEXT_TERMS = true` therefore ships
-  and the raw path stays one flag away, tested. Below three comparable
+  with a paired CI excluding 0. The standardised arm is therefore the only one that ships — the
+  switch is gone rather than left as an untested second ranking carrying
+  weights nobody calibrated for it, and the harness still sweeps both arms
+  and prints both tables. A third proxy of typed SHORT directions separates
+  the head-to-head S2 could not: best raw 0.410916 against best standardised
+  0.377820, paired 95% CI [+0.021870, +0.043719]. Below three comparable
   candidates, or with a degenerate spread, the standardised variant falls back
   to the raw gap and discloses it (**measured variant choice,
   mutation-tested**).

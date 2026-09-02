@@ -175,11 +175,18 @@ direction) is subtracted before the z-score; without that correction one
 exemplar took 68% of a direction's top-4s over 169 different photographs.
 `W_TXT` shipped at `4` for one batch; the corrected re-measurement showed that
 point's MAE advantage was partly regression to the corpus mean, and at `0.5`
-opposite directions share a top-1 only 44.7% of the time (71% with no text
-term at all) while 149 of 169 exemplars are actually retrieved (52 before).
-The harness sweeps **two** query-text proxies — each held-out photo's own
-local description, and its attribute tag string — and the answer is still
-that the prose earns the text terms and the tag string does not.
+opposite directions shared a top-1 only 44.7% of the time (71% with no text
+term at all) while 149 of 169 exemplars were actually retrieved (52 before) —
+the S2 measurement, on the index that then carried 12 settings keys.
+The harness sweeps **three** query-text proxies — each held-out photo's own
+local description, its attribute tag string, and a typed-length SHORT
+direction assigned from that photo's own tags. The prose earns the text terms
+and the tag string does not; the short direction, the only proxy shaped like
+what a user types, prices them: `W_TXT` 0.5 costs nothing measurable
+(+0.000447, CI [-0.006972, +0.007980] against no text at all) and `W_DESC` 0.5
+costs +0.013643 (CI [+0.006785, +0.020881]) for the direction separation it
+buys — opposite directions share a top-1 46.9% of the time with it and 60.7%
+without.
 A **z-scored variant** of the two text terms is built and tested — raw SigLIP
 image-to-text cosines are tiny and tightly clustered, which is a real reason to
 suspect the raw term. It is now the one that ships: with real descriptions the

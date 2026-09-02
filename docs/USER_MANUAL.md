@@ -170,7 +170,7 @@ autoshade batch <dir> [--render] [--limit N] [--include-baked] [--jobs N] [--lon
 autoshade eval <dir> [--xmp-dir DIR] [--limit N] [--jobs N] [--fresh] [--state FILE]
 autoshade style-index <dir> [--xmp-dir DIR] [--embed|--no-embed] [--describe]
 autoshade style-index --looks <dir> [--embed|--no-embed] [--describe]
-autoshade style-query <photo> [--direction TEXT] [--style 0..1] [--adherence 0..1] [--embed]
+autoshade style-query <photo> [--direction TEXT] [--style 0..1] [--adherence 0..1] [--embed] [--distil]
 autoshade reimagine <src> --prompt TEXT [--fidelity high|low] [--quality low|medium|high|auto] [--fidelity-retry] [-o|--out FILE]
 autoshade match <src> <target> [--render] [--zoned] [--regions 2..4] [--strength 0..1] [--style-prompt] [--ai-judge] [--deep] [-o|--out FILE]
 autoshade correspond <source> <target> [-o|--out FILE]
@@ -253,7 +253,10 @@ term beside the raw cosine it came from — each neighbour's local-work counts
 (`Ceiling` / `Target` / `Background` — pass `--adherence` to forecast a
 different dial than the shipped 0.65), and the proposer reference
 blocks, including the explicit reason a look library is unreachable when no
-embedding vector is available.
+embedding vector is available — and with `--distil`, the distillation a develop
+would apply: every channel including the ones it refuses, the Style pull, and
+how many neighbours are black-and-white and therefore take no part in the
+mixer. It prints; it never renders.
 
 A RAW index build also reads the **masks** in each sidecar, and summarises them
 as a habit: how many you enabled, how many carry a Range Mask, and per use —
@@ -314,7 +317,7 @@ Six environment overrides steer retrieval, each read in exactly one place:
 | `AUTOSHADE_STYLE_EMBED` | `1`/`0` — use the SigLIP sidecar. Set (any value) beats the GUI preference; `--embed`/`--no-embed` beats both. |
 | `AUTOSHADE_STYLE_DESCRIBE` | `1`/`0` — run the local look-description pass during an index build. Set (any value) beats the GUI preference; `--describe` beats both. It never turns the embedding on by itself. |
 | `AUTOSHADE_STYLE_EMBED_WEIGHT` | `W_EMB`, the query-image ↔ exemplar-image cosine block. `0` reproduces the 14-dimension ranking exactly. |
-| `AUTOSHADE_STYLE_TEXT_WEIGHT` | `W_TXT`, the Direction-text ↔ exemplar-image term, scored after each exemplar's text hubness is subtracted. Ships at `0.5`: it spent one batch at `4`, where the corrected re-measurement showed the ranking collapsing onto a few hub exemplars; it shipped at `0` while the only query text available to the harness was a tag string. |
+| `AUTOSHADE_STYLE_TEXT_WEIGHT` | `W_TXT`, the Direction-text ↔ exemplar-image term, scored after each exemplar's text hubness is subtracted. Ships at `0.5`: it spent one batch at `4`, where the corrected re-measurement showed the ranking collapsing onto a few hub exemplars; it shipped at `0` while the only query text available to the harness was a tag string. Re-tested in v1.2.4 against typed short Directions: 0.5 costs nothing measurable on the settings objective and is the largest weight that leaves the corpus open. |
 | `AUTOSHADE_STYLE_DESC_WEIGHT` | `W_DESC`, the Direction-text ↔ exemplar-description term. Ships at `0.5`. It shipped at `4` when both sides of the term were tag strings; with real prose that point measures *worse* than switching the term off, so it was re-fitted. |
 | `AUTOSHADE_STYLE_LOOK_WEIGHT` | `W_LOOK`, the look-library image term. |
 | `AUTOSHADE_SEND_REFERENCE_IMAGE` | `1`/`0` — also send the retrieved reference photo itself (not just its text) with `analyze`/`auto` proposals; `--reference-image` turns it on per run. Destination-trust: only your own environment or user-level settings can set it — a downloaded photo pack's `.env` cannot, because it decides whether your photograph goes on the wire. `batch` never sends one. |
