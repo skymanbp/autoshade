@@ -1611,6 +1611,12 @@ experiment:
   **hard forward schema breaks** inside `LensProfile`: older `deny_unknown_fields`
   readers refuse a recipe carrying either fact instead of silently dropping a
   coordinate map. Old recipes default both fields and remain readable.
+
+  Four families of ALREADY-SAVED content may rerender under a build that carries
+  these frame facts, and they are the list README's status section points at:
+  angled LINEAR masks on non-square frames, RADIAL and LINEAR masks whose lens
+  profile came from camera metadata, modern table-backed Lightroom brushes, and
+  subtype-0 object masks that carry gesture points.
 * **A mask is sampled at PIXEL CENTRES — R29 C2, v0.35.0.** `render::
   MASK_SAMPLE_CENTRE` is the one constant behind five sites that must agree
   (`apply_masks`' frame producer, `mask_coverage`'s overlay, `sample_gray_norm`'s
@@ -3309,7 +3315,10 @@ sidecars, an `.icns` rendered from the shipped PNG, a hand-written
 deployment target the binaries were actually built for), and an inside-out
 ad-hoc `codesign`. Ad-hoc signing is a real limitation and is documented as
 one in the README: it costs the user one 「Open Anyway」, and notarisation is
-not scheduled.
+not scheduled. The clearance is per MACHINE rather than per launch: both routes
+— System Settings → Privacy & Security → Open Anyway, and right-click → Open in
+Finder — record the same decision, and a later version installed over the app
+inherits it, so the refusal is a first-install cost rather than a recurring one.
 
 ## 5. Why Rust — and the whole stack, named
 

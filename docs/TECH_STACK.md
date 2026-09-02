@@ -1326,6 +1326,10 @@ and zero-confidence fields are conservation-tested to change nothing.
     direction over 169 different photographs, `(4,4,0.5)` put the same exemplar
     in the top-4 of `59.9 %` of them and only `52` of `169` exemplars ever
     appeared in any top-4; at `(4,0.5,0.5)` corrected it is `13.5 %` and `149`.
+    On that same comparison two OPPOSED directions shared their top-1 for
+    `71 %` of the queries before the correction and `44.7 %` after it — the
+    third column of the same before/after row, also recorded in
+    `docs/RELEASE_NOTES_v1.1.0.md` and `docs/ROADMAP.md`.
     Under the harness's own prose proxy, `(4,4,0.5)`'s 4-neighbour settings
     PREDICTION sits at mean `|z| = 0.3557` against `0.4445` for the text-free
     row and `0.6819` for the held-out photographs' own settings — i.e. part of
