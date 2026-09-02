@@ -519,8 +519,8 @@ Download from the
   and names both versions when it refuses. Upgrading over a pre-rename install
   also deletes the executables, icon and fonts that carried the old name.
 - **Uninstalling has two doors** — the Programs and Features entry, and
-  「Uninstall AutoShade」 in the Start Menu group. Either one asks
-  whether to delete the two things it never installed: the downloaded model
+  「Uninstall AutoShade」 in the Start Menu group. Either one asks whether
+  to delete the two things it never installed: the downloaded model
   weights and the develop store in `%LOCALAPPDATA%\autoshade`. It names the
   size it found for each, and keeping both is the default, so a later install
   starts where you left off.

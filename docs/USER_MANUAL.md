@@ -1,8 +1,10 @@
 # AutoShade user manual
 
 The operating manual for AutoShade — the desktop app, the CLI, and the
-embedded web UI; it describes the current release named in the README. Downloading a release and the first run are in the README's
-[Install and quickstart](../README.md#install-and-quickstart), and [Install, upgrade, and uninstall on Windows](#install-upgrade-and-uninstall-on-windows)
+embedded web UI; it describes the current release named in the README.
+Downloading a release and the first run are in the README's
+[Install and quickstart](../README.md#install-and-quickstart), and
+[Install, upgrade, and uninstall on Windows](#install-upgrade-and-uninstall-on-windows)
 below is what the installer does the second time it is run; what the program
 is, what is new in it, and how it works are the README's opening sections;
 subsystem boundaries are in [ARCHITECTURE.md](ARCHITECTURE.md) and the
