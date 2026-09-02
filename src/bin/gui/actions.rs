@@ -2001,7 +2001,7 @@ impl AutoShadeApp {
     }
 
     /// The 「Paint mask」 checkbox was just flipped (it writes `paint_mode`
-    /// itself; this is the follow-up). Ticking it sweeps the other canvas
+    /// itself; this is what runs after it). Ticking it sweeps the other canvas
     /// tools, exactly as before. UN-ticking it used to do nothing at all —
     /// and `paint_mode` is ALSO the flag a live MASK-brush session paints
     /// through (`start_mask_brush` sets it), so un-ticking left an orphan

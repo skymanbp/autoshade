@@ -2166,7 +2166,7 @@ mod tests {
         assert_ne!(sha256_hex(b"abc"), sha256_hex(b"abd"));
     }
 
-    /// R28 follow-up, item 5: the report must not be able to tell which side a
+    /// R28 item 5: the report must not be able to tell which side a
     /// photograph came from. Aggregates are sums over per-photo stats, so this
     /// is a statement about the ROUND TRIP being exact, and it is asserted bit
     /// for bit rather than approximately — the whole reason the fold runs in

@@ -102,8 +102,9 @@ pub(crate) fn draw_mask_overlay(
             }
         }
         // Raster masks have no parametric outline to draw — mark the selection
-        // with a badge instead of pretending a shape (rendering the raster as a
-        // live translucent overlay is the A② follow-up).
+        // with a badge instead of pretending a shape; the coverage itself is the
+        // translucent overlay (`show_mask_overlay`, the O key, drawn by the
+        // canvas from `render::mask_coverage`).
         MaskGeometry::Bitmap { .. } => {
             p.text(
                 xf.rect.left_top() + egui::vec2(10.0, 10.0),

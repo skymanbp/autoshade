@@ -704,7 +704,10 @@ numbers](#measured-numbers) are not repeated.
   are above.
 - macOS has shipped binaries and an app since v1.2.0 and nobody has reported
   using them interactively: CI is the whole of the evidence. Apple-silicon
-  Metal/MPS is wired and **unmeasured**; Ubuntu is CI source builds only.
+  Metal/MPS is measured on every release run by `scripts/mps_probe.py`
+  (device, forward time, peak memory, whether `deform_conv2d` falls back to
+  the CPU — the numbers are in the release notes); Linux ships a
+  command-line archive and has no desktop app.
 - Honesty markers: the approximate X-Trans path, locally re-derived rather
   than Adobe-identical AI masks, measured-but-not-bit-exact Lightroom parity,
   lossy reimagine targets, and a LINEAR mask frame that is not pixel-closed

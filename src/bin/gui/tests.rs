@@ -7768,7 +7768,7 @@
         app.sync_base_turns(&ctx);
         assert_eq!(app.base_preview.as_ref().unwrap().dimensions(), (6, 8));
 
-        // BAKED PIXELS close the door, whole strip (registered limitation):
+        // BAKED PIXELS close the door, whole strip (a limitation by design):
         // a master raster is a file in the frame it was baked in, and this
         // build cannot record that it predates a turn.
         app.variants[0].origin = Some("master.png".into());

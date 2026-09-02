@@ -76,7 +76,7 @@ pub fn hide_child_console(cmd: &mut std::process::Command) {
 /// when this handle closes, even if THIS process crashes first. Unix: the
 /// child leads its own process group (armed pre-spawn) and [`Self::kill_tree`]
 /// signals the group; there is no close-kills equivalent, so descendants
-/// surviving a NORMAL exit are not reaped there (registered — secondary
+/// surviving a NORMAL exit are not reaped there (accepted: a secondary
 /// platform, and the pipes still bound the drain).
 pub struct KillGroup {
     #[cfg(windows)]

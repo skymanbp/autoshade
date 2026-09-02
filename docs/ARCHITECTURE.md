@@ -234,7 +234,7 @@
 > `every_make_in_the_raw_zoo_decodes_and_agrees_with_itself` in
 > [`src/decode.rs`](../src/decode.rs), 9/9 at the last release). Every release
 > runs all three and records their own counts, rather than carrying the previous
-> release's forward — see ROADMAP「发版链 + 环境门套件」.
+> release's forward — see ROADMAP「完成每项后的例行动作」.
 > v0.23.3 (round 13): the XMP xmlns conflict gate resolves namespace bindings
 > through an element SCOPE STACK and refuses only where a binding would
 > actually corrupt this document's reading (a nested rebound island nobody
@@ -1509,8 +1509,9 @@ The accepted cost is stated where the rule lives — deleting every mask inside
 AutoShade no longer propagates the deletion to the sidecar (delete them on the
 Lightroom side), and republishing a mask block you HAVE edited recasts
 `MaskName`/`MaskSyncID` deterministically from our writer. The user re-examined
-both on 2026-08-19 and confirmed them as settled (ROADMAP L-19), so they are a
-documented trade, not an open question.
+both on 2026-08-19 and confirmed them as settled (the L-19 ruling, kept in
+`docs/ROADMAP-archive.md`), so they are a documented trade, not an open
+question.
 
 The **export** direction is disclosed the same way (M6a). Classic ACR XMP
 cannot express everything the engine renders, so the writer names what it left
@@ -2943,8 +2944,10 @@ value range spans replaced sky and land alike, so its own population is blind
 (the grid's win was spatial x value, B2/B3 territory) -- and r2c0's warm gains
 are withheld because Blue/Purple are one-sided inside the tile (the old frame
 share let them through): 0.0549 -> 0.0452 -> 0.0369 against 0.0345. A zone
-whose dials come out neutral is still dropped without a note (registered
-follow-up).
+whose dials come out neutral is dropped with `ZONE_NO_MOVEMENT_SURVIVED`,
+which names the zone and the residual it started from; `ZONE_ALREADY_MATCHED`
+is reserved for the two skip exits whose residual really is under the
+threshold.
 
 Shared analysis geometry and the structure-blind Atmosphere ruler (2026-08-27,
 user-ruled). Every GUI-path figure in the two paragraphs above (0.0175 ->
@@ -3451,8 +3454,9 @@ sidecars, an `.icns` rendered from the shipped PNG, a hand-written
 `Info.plist` (`plutil`-linted, its minimum system version checked against the
 deployment target the binaries were actually built for), and an inside-out
 ad-hoc `codesign`. Ad-hoc signing is a real limitation and is documented as
-one in the README: it costs the user one 「Open Anyway」, and notarisation is
-not scheduled. The clearance is per MACHINE rather than per launch: both routes
+one in the README: it costs the user one 「Open Anyway」; ad-hoc signing is
+final (the ruling of 2026-09-02: no Apple Developer ID will be bought for this
+project). The clearance is per MACHINE rather than per launch: both routes
 — System Settings → Privacy & Security → Open Anyway, and right-click → Open in
 Finder — record the same decision, and a later version installed over the app
 inherits it, so the refusal is a first-install cost rather than a recurring one.
