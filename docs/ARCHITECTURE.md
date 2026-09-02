@@ -2100,14 +2100,98 @@ sea, which the curves sort by luminance together; the row-defined sky alone
 carries 0.561 of the hue weight. The 0.917 names a hue population, not a
 region, and prose that calls it "the sky" is naming the wrong thing.
 
-The refusal is disclosed with its readings, and adding the gate changed no
-existing verdict: it is never the sole rejector on any calibration pair, and
-a pair the pixel-aligned gates already refuse keeps reporting exactly the
-note it reported before, which is what holds those recipes byte-identical.
-The scope of that byte-identity claim is exact, because the admission notes
-below APPEND to the rationale and the rationale is part of the recipe: a pair
-whose cast is refused (the viaduct) or never fitted is byte-identical to
-v1.2.2; a pair whose cast is ADMITTED is not.
+The refusal is disclosed with its readings, and a pair the pixel-aligned
+gates already refuse keeps reporting exactly the note it reported before,
+which is what holds those recipes byte-identical. The scope of that
+byte-identity claim is exact, because the admission notes below APPEND to the
+rationale and the rationale is part of the recipe: a pair whose cast is
+refused (the viaduct) or never fitted is byte-identical to v1.2.2; a pair
+whose cast is ADMITTED or PROJECTED is not.
+
+### …and a projection, so a convicted cast is shrunk rather than thrown away
+
+Refusing outright cost the showcase pair a third of its fit (look error
+0.137 → 0.058 instead of 0.137 → 0.033, confidence 0.646 → 0.577), and the
+fan gate's verdict is narrower than "this cast is wrong": it says "not in
+this SHAPE". So when the fan gate is the ONLY gate that fails — the two
+pixel-aligned vetoes and the unsupported-hue-range veto all clear — the stage
+does not empty the curves. It walks them down a one-parameter path and ships
+the strongest point that clears.
+
+The path gives up the CHROMATIC part first. Write `L` for the per-knot mean
+of the three fitted outputs (the shape all three channels share — one curve
+applied to every channel) and `dC = C − L` for each channel's deviation from
+it. Then `C(t) = x + min(1, 2t)·(L − x) + max(0, 2t − 1)·dC`: `t = 1` is the
+fitted cast, `t = 0.5` is one shared curve with no chromatic difference left
+at all, `t = 0` is no curves. It is still three Lightroom RGB curves at every
+`t`, so the recipe round-trips to XMP unchanged, and it is the same idiom one
+stage up — shrink until the finished frame stops objecting.
+
+The lower half of that path is there because measurement put it there. The
+design this implements stopped at `L`, on the premise that one curve applied
+to all three channels cannot fan a hue class. The premise is false, and the
+showcase pair is where it fails: hue is a RATIO, so a shared curve moves it
+wherever its slope changes, and Cornwall's shared shape has segment slopes
+0.172 / 0.859 / 1.127 / 0.188 — its top segment nearly flat because the
+fitted red curve clips at 179 from input 191 up. Measured on that shape
+(2026-09-02): a dark sky pixel moves +0.2°, a mid one −3.2°, a bright one
+−20.1° as its blue channel is crushed toward the other two, and the census
+reads 17.3° of ADDED fan at `t = 0.5` — above FAN_DEG itself. A family whose
+mildest member is still convicted can rescue nothing, so the path continues
+to the identity, where the fan is zero by construction and the outcome is
+exactly the old refusal.
+
+The search is a 12-step bisection for the largest `t` whose RENDERED
+candidate clears, never an algebraic reading of the curves — the same rule
+every closed-loop stage here follows. Each candidate is re-judged by all four
+gates from scratch, so a milder cast that makes the aggregate ratio fail, or
+that trips a pixel veto the fitted cast happened to clear, is refused and
+says so; and the strength budget's bound rides into that judgement exactly as
+it does for a fitted cast. Two thresholds are the projection's own. It must
+clear **half** the refusal line — `FAN_PROJECT_DEG` = 7.5°, not 15° —
+because 15° is where the calibration put the visibility edge (the FAN_DEG=20
+experiment shipped a 19° cast that left 20.6° of delivered fan) while the
+widest fan the gate passes on its own merits is the haze correction's 7.8°: a
+cast the fit CHOOSES to keep must be no worse than one it already accepts.
+And it must buy more than `FIT_QUANT` of absolute look error — the fit's own
+quantisation budget, the same constant the terminal do-no-harm check uses —
+because the gates decide whether a MEASURED cast may ship, not whether an
+INVENTED milder one is worth shipping, and marginal gain does not earn
+regional risk.
+
+Ordering is the whole of the byte-identity argument. A pair the pixel vetoes
+refuse is refused unprojected, so the viaduct's `match` recipe is byte-for-byte
+what it was. And the rescue runs on ONE call: the `fit_cast_stage` that
+produces the recipe the user gets. The mixer's do-no-harm loop judges both of
+its branches with the cast the gates MEASURED, because its question is about
+the MIXER and an invented compromise must not out-vote a per-band solve the
+evidence supports — with the rescue live in every call, four fixture verdicts
+moved that have nothing to do with this feature (canyon-warm's mixer flipped
+from withdrawn to attached, the two-family HSL pair's the other way).
+
+Cornwall, global stage, `match` without `--zoned` (2026-09-02): the fitted
+curves would have opened 38° in a class holding 0.917 of the frame's
+measurable colour; shrunk to `t = 0.363` they open +7°, and the fit reports
+look error 0.137 → 0.030 at confidence 0.664 — better than the v1.2.2 render
+that carried the defect (0.033 / 0.646). The delivered sky's hue spread
+across luma octiles is 10.5°, against 33.1° in v1.2.2, 1.6° when the cast is
+refused outright and 1.6° in the target itself; its mean hue is 216.7°
+against the target's 215.3°. The 15° target was measured beside it and
+rejected: it recovers a little more (0.026 at confidence 0.680, `t = 0.483`)
+by delivering a 15.3° sky fan, and the recovered 0.004 of look error is not
+worth a fan the user cannot undo.
+
+One more consequence is worth naming because it moved a fixture. A pair whose
+cast is convicted can now land where the terminal do-no-harm check used to
+reset the whole recipe to the calibration base: the canyon-warm regression
+went from 0.0387 → 0.0387 at the 0.25 confidence floor to 0.0387 → 0.0339 at
+0.406, with its delivered sky at 216.9° against 213.9° before and no fan at
+all (that fixture's sky is one flat colour). What the projection does NOT do
+is pay the gate's deliberate cost: a scene genuinely lit at two colour
+temperatures needs the fan, so every point on the path reproduces
+proportionally less of what it needed, no `t` both clears and buys anything,
+and the refusal stands — now saying that the shrink was tried. That case has
+a fixture of its own since v1.2.3.
 
 The colour stage's ADMISSION is disclosed too, from the same release. Every
 way of producing nothing already had a note, and the strength budget
