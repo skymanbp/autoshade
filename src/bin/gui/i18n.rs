@@ -1941,14 +1941,35 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
         "以上快捷键全部免费——没有 Creative 档位，没有 Cloud，没有每月赎金。"),
     // ── R22 #4/#14b: AI panel (analysis / whole-image / reverse-fit) ──────────
     //    + the develop panel's group captions
-    (" Boundary-continuity gate kept {n} zoned correction(s): signed transition \
+    (" Boundary-continuity gate kept {n} zoned correction(s): introduced transition \
       rim {before} to {after} luma after shared differential shrink k={k} \
       (budget {max}, {transitions} measured transitions).",
-        " 分区边界连续性门保留了 {n} 个分区校正：共享差异收缩 k={k} 后，有符号过渡边缘亮度由 {before} 降至 {after}（预算 {max}，测量了 {transitions} 个过渡）。"),
+        " 分区边界连续性门保留了 {n} 个分区校正：共享差异收缩 k={k} 后，引入的过渡边缘亮度由 {before} 变为 {after}（预算 {max}，测量了 {transitions} 个过渡）。"),
     (" Zoned corrections dropped by the boundary-continuity gate: candidate \
       rim {before} luma, and even shared shrink k=0 left {after} \
       (budget {max}, {transitions} measured transitions).",
         " 分区校正被边界连续性门弃用：候选边缘亮度为 {before}，且共享收缩 k=0 时仍为 {after}（预算 {max}，测量了 {transitions} 个过渡）。"),
+    // v1.2.2 shipped these four English sentences with no zh entry, so the
+    // GUI fell back to English mid-paragraph for a Chinese reader. The
+    // "kept" line above is the same note whose wording moved from "signed"
+    // to "introduced" in that batch, which orphaned its old translation.
+    (" Zoned {n} correction(s) dropped by the boundary-continuity gate: \
+      candidate introduced rim {before} luma, and the largest shrink inside \
+      budget {max} was k={k}, whose render is byte-identical to the frame \
+      without it — reading {after} over {transitions} measured transitions. \
+      An inert attachment would occupy the correction budget and disclose a \
+      change it did not make.",
+        " {n} 个分区校正被边界连续性门弃用：候选引入的边缘亮度为 {before}，而预算 {max} 之内最大的收缩为 k={k}，其渲染结果与不含该校正的画面逐字节相同——读数为 {after}，测量了 {transitions} 个过渡。无效的附加会占用校正预算，并报告一项它其实没有做出的改动。"),
+    (" No zoned {label} correction attached: every control that survived \
+      the evidence and quality gates solved to neutral, so the zone \
+      residual {before} is left uncorrected.",
+        " 未附加 {label} 分区校正：通过证据门与质量门的每一项控制都解算为中性，因此 {before} 的分区残差保持未校正。"),
+    (" The residual above was measured on this camera's embedded rendition, \
+      which is the frame the fit and the review both saw. The delivered \
+      render additionally applies this photo's own calibration ({what}), so \
+      it is a different frame — closer to the target in luma, and differing \
+      in chroma, because the camera curve is matched on luma alone.",
+        " 上述残差是在本相机的嵌入渲染上测得的，那正是拟合与复查共同依据的画面。交付渲染还会额外应用这张照片自己的校准（{what}），因此那是另一幅画面——在亮度上更接近目标，在色度上则有所不同，因为相机曲线只按亮度匹配。"),
     ("Analysis", "分析"),
     ("Pixel-level AI tools stay at their tools: select subject / select sky in Local Masks, denoise in Detail, heal and fill in Retouch.",
         "像素级 AI 工具就近放置：选主体 / 选天空在局部蒙版，降噪在细节，修复填充在修饰。"),
