@@ -2138,8 +2138,9 @@ far it travelled, whether it landed in a hue the target holds nowhere,
 whether the aggregate improved. Three INDEPENDENT monotone channel maps do
 something no hue-preserving control can and none of those questions reach:
 they sort a single-hued region into several hues BY LUMINANCE. On the
-Cornwall lighthouse-islet reverse fit (the pair v1.2.2 shipped as fitted and
-registered) the admitted curves moved the sky's mean hue 218.3° → 217.6°,
+Cornwall lighthouse-islet reverse fit (the pair v1.2.2 shipped as fitted —
+closed by this gate in v1.2.3, made structural by the terminal re-read in
+v1.2.4) the admitted curves moved the sky's mean hue 218.3° → 217.6°,
 rotated no pixel past the 75° census at all (weighted re-hued share
 0.000000), created 0.000000 foreign share and halved the look error
 (0.0576 → 0.0334) — while splitting the sky's hue across luminance from a
@@ -2331,15 +2332,22 @@ from withdrawn to attached, the two-family HSL pair's the other way; that
 experiment's four are a superset of the THREE that survive the confinement,
 named below).
 
-The 4b call is exercised but its SUCCESS is unfixtured, and that too is a
-measurement rather than an impression: instrumenting the loop body and running
-the whole library battery (2026-09-02) logs 189 entries, nine of which re-fit
-a fan-convicted cast — so the rescue is entered there with something to
-answer, and in all nine the search finds nothing that both clears the target
-and pays, so no test in the tree has ever seen a projected cast come back out
-of that loop. "A rescued cast survives the saturation step-down" is verified
-by reading. The comment that used to stand at that loop, "no current fixture
-reaches the loop body", was false and is corrected in place.
+The 4b call is exercised and its SUCCESS is UNREACHABLE, which is a
+measurement rather than an impression. Instrumenting the loop body and running
+the whole library battery with all seven calibration pairs present
+(2026-09-02) logs 186 entries — 107 on the error arm, 140 on the hue-guard
+arm, 62 on both — of which 9 re-fit a fan-convicted cast, so the rescue is
+entered there with something to answer. Every one of those 9 is ALSO
+rotation-blocked, so `earns_projection` answers `None` and the search is not
+even called: 0 of the 186 earn a projection and 0 come back projected. At the
+stage's own call site the two gates do come apart (67 fan-only refusals in 545
+stage runs), so what couples them is the stepped-down state rather than the
+gates themselves; about forty pairs built to separate them reproduced the
+coupling every time. The projection's arithmetic is pinned directly at
+`search_cast_projection`; what no test witnesses is the ROUTE through this
+loop, and the census is why that is a dead end rather than a gap. The comment
+that used to stand at that loop, "no current fixture reaches the loop body",
+was false and is corrected in place.
 
 Cornwall, global stage, `match` without `--zoned` (2026-09-02): the fitted
 curves would have opened 37.6° in a class holding 0.917 of the frame's
