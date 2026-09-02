@@ -5836,8 +5836,17 @@ mod tests {
     /// altogether and the first assertion sees one name twice.
     #[test]
     fn a_shared_stem_is_disambiguated_by_its_folder() {
+        // Built with the platform's own separator: a fixture that spelled the
+        // Windows one failed on Linux and macOS, where a backslash is a
+        // filename character and the path has no parent to name.
         let mk = |stem: &str, folder: &str| StyleExemplar {
-            path: Some(format!("D:\\rolls\\{folder}\\{stem}.ARW")),
+            path: Some(
+                std::path::PathBuf::from("rolls")
+                    .join(folder)
+                    .join(format!("{stem}.ARW"))
+                    .display()
+                    .to_string(),
+            ),
             ..plain_exemplar(stem)
         };
         let a = mk("00001234", "iceland");
