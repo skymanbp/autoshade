@@ -192,8 +192,9 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
       (limit {limit}), so they were taken back to t = {t} of the fitted \
       cast (1 = as fitted, 0.5 = one curve shared by all three channels, \
       0 = none). The look error with the shrunk curves is {ratio} of the \
-      error without them (the strength budget's bound is {bound}).",
-        " 色偏曲线已向三个通道共有的形状收缩：按拟合原样，它们会在占画面可测色彩 {share} 的色相类内拉开 {fan_before} 度的色相跨度（上限 {limit}），因此把它们收缩到拟合值的 t = {t}（1 = 原样，0.5 = 三个通道共用一条曲线，0 = 不加曲线）。加上收缩后曲线的观感误差与不加曲线时的比值为 {ratio}（强度预算的上限为 {bound}）。"),
+      error without them (the strength budget's bound is {bound}), and \
+      they re-hued {rehued} of the frame past the rotation budget.",
+        " 色偏曲线已向三个通道共有的形状收缩：按拟合原样，它们会在占画面可测色彩 {share} 的色相类内拉开 {fan_before} 度的色相跨度（上限 {limit}），因此把它们收缩到拟合值的 t = {t}（1 = 原样，0.5 = 三个通道共用一条曲线，0 = 不加曲线）。加上收缩后曲线的观感误差与不加曲线时的比值为 {ratio}（强度预算的上限为 {bound}），并使画面的 {rehued} 超出色相旋转预算。"),
     (" The projected curves change that class's hue spread across \
       luminance by {fan_after} degrees, inside the {target} degree target \
       a projection has to reach.",

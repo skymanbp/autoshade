@@ -179,6 +179,12 @@ pub mod keys {
     /// the admission states them, because the same thing is true of them —
     /// the ratio arm rejects only when the evidence is unidentifiable, so an
     /// admitted ratio may legitimately exceed 1.0.
+    ///
+    /// `rehued` is here, and [`FIT_NOTE_CAST_ADMITTED_FOREIGN`] travels beside
+    /// this note, because a projected cast must disclose AT LEAST what an
+    /// admitted one does: these are curves the fit INVENTED to answer a
+    /// conviction rather than curves it measured off the pair, so the two
+    /// pixel-aligned readings matter more here, not less.
     pub const FIT_NOTE_CAST_PROJECTED: &str =
         " Colour-cast curves were shrunk toward the shape all three channels \
          share: as fitted they would have opened a {fan_before} degree hue \
@@ -186,7 +192,8 @@ pub mod keys {
          (limit {limit}), so they were taken back to t = {t} of the fitted \
          cast (1 = as fitted, 0.5 = one curve shared by all three channels, \
          0 = none). The look error with the shrunk curves is {ratio} of the \
-         error without them (the strength budget's bound is {bound}).";
+         error without them (the strength budget's bound is {bound}), and \
+         they re-hued {rehued} of the frame past the rotation budget.";
     /// The projected curves' own fan reading, when the census has one.
     pub const FIT_NOTE_CAST_PROJECTED_FAN: &str =
         " The projected curves change that class's hue spread across \
