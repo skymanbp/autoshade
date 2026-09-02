@@ -2247,7 +2247,56 @@ were governed by before; a crossing in smooth sky must fit inside what its
 own neighbourhood can actually mask. The soft rim and luminance-range
 families keep the scalar: the rim ruler samples only inside a feather,
 where the correction is a ramp by construction, and the range ruler admits
-only locally smooth crossings by rule. For the step family a
+only locally smooth crossings by rule.
+
+**The range family's half of that sentence is measured (2026-09-01), and it
+holds for a reason the step ruler does not share.** `range_transition_rim`
+never differences the scene away: it admits a neighbouring pair only where
+the REFERENCE crossing is already smooth (`|dl| ≤ 2.5/255`) and then reports
+the RENDERED gradient there, so the scene's own gradient sits inside the
+reading and is spent before the correction adds anything. The widest
+crossing the window admitted on either real pair measures 0.00978 luma
+(2.49 codes) against the budget's 3.06, so where the scene already sits at
+the top of the window a correction may add 0.57 of a code and no more,
+while where it is flat the ceiling is the whole 3.06 — an absolute cap on
+the delivered gradient at 1.22× the steepest crossing the window is willing
+to call smooth. Charging this ruler the way
+the step ruler is charged would divide by a context term already counted in
+the numerator, and would LOOSEN the gate. Driven first-party with
+segmentation and correspondence made unavailable so `match --zoned` takes
+the fallback, a band attaches on the calibration pair (luma [0.471, 0.765],
+−0.56 EV, `k=1.000` over 18 651 crossings) and on the stone viaduct (luma
+[0.118, 0.882], −0.80 EV and saturation +23, `k=1.000` over 1 214); the
+Cornwall pair attaches none. The same ruler run on the UNCORRECTED render
+reads 0.00392 (1.00 code) and 0.00874 (2.23 codes) respectively, against
+delivered readings of 0.00230 and 0.00874 — the correction moved the p90
+down or not at all. The delivered transitions are ramps rather than steps:
+over the populated 1-code bins of the delivered transfer (no-ranges twin
+luma → delivered luma at 1200 px) the calibration band shows 0 reversals in
+30 bins with a minimum slope of +0.019 and the viaduct 0 in 19 with +0.855,
+and `scripts/rim_overshoot.py` reads mean 0.0006 / p90 0.0018 / max 0.0082
+luma at the calibration transition against its own control of exactly
+0.0000. Beside the v1.2.2 seam table (neutral +0.15 codes at 1.3 σ, the
+v1.2.1 tile +1.59 at 7.8 σ, the fix +0.92) the range family is a different
+SHAPE of thing rather than a smaller number of the same shape: a tile edge
+is an arbitrary rectangle laid across continuous sky, while a range edge IS
+an iso-luminance contour of the photograph, so a difference across it is the
+correction rather than an artefact and only the transition's shape
+distinguishes the two. Two limits are on the record with it. The mask-free
+spatial ruler is not applicable at the viaduct's contour, by its own
+numbers — its 60 px plateau windows must bracket the transition, and there
+the band's own spread (40.4 codes) exceeds the plateau gap (22.1) on 201 of
+231 columns. And this ruler ranks MAGNITUDE, so it cannot tell a preserved
+gradient from an inverted one of the same size: on a synthetic 16-bit grey
+ramp a band at the widest ramp the producer emits delivers a tone reversal
+from −0.80 EV (a 4-code dip, 20 codes at −1.50) and at the narrowest from
+−0.35 EV, with `rim_overshoot.py` reading 0.0000 throughout because the
+DIFFERENCE it ranks stays monotone. Neither real pair reaches that corner —
+the calibration band's own minimum slope is +0.019 — and the answer is a
+sign test on the delivered transfer rather than a re-tune of this ceiling,
+so it is registered for its own batch.
+
+For the step family a
 reading of ZERO measured crossings is a refusal, never a pass — until 2026-08-30
 the rim ruler returned `0.000` from an empty transition band for every hard
 raster ever gated, and the gate read that as comfortably inside budget. A Full-zone correction then uses the three-arm gate
