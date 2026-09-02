@@ -99,6 +99,105 @@ pub mod keys {
         " White balance search reached the {k} K domain bound; the requested colour temperature may lie beyond the fitted range.";
     pub const FIT_NOTE_CAST_ADMITTED_BY_STRENGTH: &str =
         " Colour-cast curves were admitted by the strength budget (measured ratio {ratio}, budget {budget}).";
+    /// v1.2.3: ORDINARY admission, silent until now. The stage disclosed
+    /// every way it could produce nothing and the one way the strength
+    /// budget bought a marginal cast, but the commonest outcome — the curves
+    /// shipped on their own merits — reached the user as an unexplained
+    /// presence.
+    ///
+    /// The four gates' readings ride THREE notes, not one, because two of
+    /// them can ABSTAIN. `ratio`, `bound` and `rehued` are always measured,
+    /// so they sit here; `foreign` and `fan` each get a measured clause and a
+    /// not-measurable clause below, so an abstention reaches the user as a
+    /// SENTENCE and never as a digit. It has to be a separate key rather than
+    /// a word substituted into `{foreign}`: interpolated args are copied
+    /// verbatim into whichever language the note renders in, so an English
+    /// word in an arg would be the one untranslatable part of a translated
+    /// sentence.
+    ///
+    /// `ratio` is stated against its bound rather than as "cut the look error
+    /// to": the ratio arm rejects only when the evidence is unidentifiable,
+    /// so an ADMITTED cast's ratio may legitimately exceed 1.0 (the curves
+    /// made the aggregate look error worse and were still the honest answer),
+    /// and "cut the error to 1.202" states the opposite of its own
+    /// measurement. `bound` is the value the path actually used —
+    /// `budget.cast_ratio`, which the strength budget widens from 2.0 at the
+    /// shipped default up to 3.0 — not a fixed constant.
+    pub const FIT_NOTE_CAST_ADMITTED: &str =
+        " Colour-cast curves were admitted: the look error with the curves is \
+         {ratio} of the error without them (the strength budget's bound is \
+         {bound}), and they re-hued {rehued} of the frame past the rotation \
+         budget.";
+    /// The foreign-hue reading of an admitted cast, when the target carries
+    /// enough colour for the question to have an answer.
+    pub const FIT_NOTE_CAST_ADMITTED_FOREIGN: &str =
+        " They created {foreign} of the frame in hues the target does not \
+         contain.";
+    /// …and when it does not. The share is not zero; it is undefined, and
+    /// `0.000` here would report a measurement never taken.
+    pub const FIT_NOTE_CAST_ADMITTED_FOREIGN_NA: &str =
+        " The foreign-hue share was not measurable: the target carries too \
+         little colour to say which hues are foreign to it.";
+    /// The hue-fan reading of an admitted cast. SIGNED, because the curves
+    /// can also NARROW a class's spread across luminance and "opened a −3
+    /// degree hue fan" is not a thing that happens.
+    pub const FIT_NOTE_CAST_ADMITTED_FAN: &str =
+        " They changed the widest hue class's hue spread across luminance by \
+         {fan} degrees, against a limit of {limit} (a negative value means \
+         they narrowed it).";
+    /// …and when no hue class is region-sized across two luma slices, so the
+    /// fan has no value to report at all.
+    pub const FIT_NOTE_CAST_ADMITTED_FAN_NA: &str =
+        " The hue fan was not measurable: no hue class holds enough of the \
+         frame across two luma slices for a fan to have a value.";
+    /// v1.2.3: the fan gate's refusal. Named apart from
+    /// [`FIT_NOTE_REHUE_BLOCKED`] because the damage is a different shape —
+    /// no pixel travels far, the region's MEAN hue barely moves, and what
+    /// breaks is the hue's coherence ACROSS luminance.
+    ///
+    /// Since the projection landed, this sentence is reached ONLY after the
+    /// stage has tried shrinking the three curves toward the shape they share
+    /// and been refused there too, so it says so: a refusal that does not
+    /// mention the cheaper answer invites the reader to ask for it.
+    pub const FIT_NOTE_CAST_HUE_FANNED: &str =
+        " Colour-cast curves were withheld: they would have fanned one hue \
+         class apart across luminance — that class holds {share} of the \
+         frame's measurable colour, and the three channel curves would have \
+         spread its dark and bright slices {fan} degrees apart (limit \
+         {limit}). Shrinking them — first toward the one shape all three \
+         channels share, then toward no curves at all — was tried first: no \
+         milder version both cleared the limit and left the frame closer to \
+         the target. A single-hued region sorted into a hue fan by brightness \
+         is not something any develop control can put back.";
+    /// v1.2.3: the stage's THIRD outcome — the fan gate convicted the fitted
+    /// curves and a PROJECTED, milder cast shipped instead of nothing.
+    ///
+    /// Written in place of [`FIT_NOTE_CAST_ADMITTED`], never beside it: the
+    /// curves that shipped are not the curves the gates first judged, and
+    /// "admitted" would describe a cast the fit never handed back. `ratio`
+    /// and `bound` are the PROJECTED candidate's, stated the same neutral way
+    /// the admission states them, because the same thing is true of them —
+    /// the ratio arm rejects only when the evidence is unidentifiable, so an
+    /// admitted ratio may legitimately exceed 1.0.
+    pub const FIT_NOTE_CAST_PROJECTED: &str =
+        " Colour-cast curves were shrunk toward the shape all three channels \
+         share: as fitted they would have opened a {fan_before} degree hue \
+         fan in a class holding {share} of the frame's measurable colour \
+         (limit {limit}), so they were taken back to t = {t} of the fitted \
+         cast (1 = as fitted, 0.5 = one curve shared by all three channels, \
+         0 = none). The look error with the shrunk curves is {ratio} of the \
+         error without them (the strength budget's bound is {bound}).";
+    /// The projected curves' own fan reading, when the census has one.
+    pub const FIT_NOTE_CAST_PROJECTED_FAN: &str =
+        " The projected curves change that class's hue spread across \
+         luminance by {fan_after} degrees, inside the {target} degree target \
+         a projection has to reach.";
+    /// …and when it does not. Not zero — undefined, exactly as for an
+    /// admitted cast whose census abstains.
+    pub const FIT_NOTE_CAST_PROJECTED_FAN_NA: &str =
+        " The projected curves' hue fan was not measurable: no hue class \
+         holds enough of the frame across two luma slices for a fan to have \
+         a value.";
     pub const FIT_NOTE_GLOBAL_CAST: &str =
         " Global colour cast measured from consistent hue rotation across the populated frame (rotation {rotation} degrees, chroma ratio {ratio}); white balance and saturation were read from population evidence.";
     pub const FIT_NOTE_VETO_DISCLOSED: &str =
