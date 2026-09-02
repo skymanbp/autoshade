@@ -509,11 +509,26 @@ Download from the
 [v1.2.3 release page](https://github.com/skymanbp/autoshade/releases/tag/v1.2.3):
 
 - **Installer (recommended):** run `AutoShade-Setup-1.2.3.exe`. It installs for
-  the current user without administrator access, adds Start Menu shortcuts,
-  offers optional desktop and user `PATH` tasks, and removes its own files on
-  uninstall while keeping the develop store in `%LOCALAPPDATA%\autoshade`.
-  Upgrading over a pre-rename install also deletes the executables, icon and
-  fonts that carried the old name.
+  the current user without administrator access, adds Start Menu shortcuts, and
+  offers optional desktop and user `PATH` tasks.
+- **Upgrading is in place.** Run a newer installer over an existing install and
+  it stays the same install: same directory, one entry in Programs and
+  Features, one `PATH` entry, shortcuts replaced rather than duplicated, and
+  your develop store and downloaded model weights left exactly as they were.
+  A running AutoShade is closed for you first. An OLDER installer is refused
+  and names both versions when it refuses. Upgrading over a pre-rename install
+  also deletes the executables, icon and fonts that carried the old name.
+- **Uninstalling has two doors** — the Programs and Features entry, and
+  「Uninstall AutoShade」 in the Start Menu group. Either one asks
+  whether to delete the two things it never installed: the downloaded model
+  weights and the develop store in `%LOCALAPPDATA%\autoshade`. It names the
+  size it found for each, and keeping both is the default, so a later install
+  starts where you left off.
+- **Silently, for a scripted rollout:** `AutoShade-Setup-1.2.3.exe /VERYSILENT
+  /SUPPRESSMSGBOXES /NORESTART` installs or upgrades with no window and no
+  prompt, and `unins000.exe /VERYSILENT /SUPPRESSMSGBOXES` in the install
+  directory uninstalls the same way. The silent uninstall keeps your weights
+  and develop store unless you add `/DELETEDATA=1`.
 - **Portable archive:** extract `autoshade-1.2.3-windows-x64.zip` to a directory
   you can keep intact and run either executable from there, beside the bundled
   `assets/` and `python/` sidecars.

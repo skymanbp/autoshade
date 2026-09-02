@@ -1,8 +1,9 @@
 # AutoShade user manual
 
 The operating manual for AutoShade — the desktop app, the CLI, and the
-embedded web UI; it describes the current release named in the README. Installation and the first run are in the README's
-[Install and quickstart](../README.md#install-and-quickstart); what the program
+embedded web UI; it describes the current release named in the README. Downloading a release and the first run are in the README's
+[Install and quickstart](../README.md#install-and-quickstart), and [Install, upgrade, and uninstall on Windows](#install-upgrade-and-uninstall-on-windows)
+below is what the installer does the second time it is run; what the program
 is, what is new in it, and how it works are the README's opening sections;
 subsystem boundaries are in [ARCHITECTURE.md](ARCHITECTURE.md) and the
 algorithms in [TECH_STACK.md](TECH_STACK.md).
@@ -16,6 +17,7 @@ algorithms in [TECH_STACK.md](TECH_STACK.md).
 - [Lightroom and XMP interoperability](#lightroom-and-xmp-interoperability)
 - [Configure and use the AI features](#configure-and-use-the-ai-features)
 - [Privacy, trust, and paid-feature boundary](#privacy-trust-and-paid-feature-boundary)
+- [Install, upgrade, and uninstall on Windows](#install-upgrade-and-uninstall-on-windows)
 
 ## 1. Open and inspect a photo
 
@@ -470,3 +472,61 @@ read-only. If the configured Delivery folder is inside or above a photo's
 folder, that delivery subtree is intentionally writable; Settings warns when
 this removes the folder's protection. "Export .xmp beside the photo" is the
 separate, confirmed per-photo sidecar exception.
+
+## Install, upgrade, and uninstall on Windows
+
+`AutoShade-Setup-<version>.exe` installs for the current user, needs no
+administrator rights, and puts the program in
+`%LOCALAPPDATA%\Programs\AutoShade` unless you choose another folder. Two
+tasks are offered and both start unticked: a desktop shortcut, and adding the
+install directory to your user `PATH` so `autoshade` works from any new
+terminal (already-open terminals keep the environment they started with).
+
+**Upgrading.** Run the newer installer; there is nothing to uninstall first.
+The welcome page tells you which version it found and which one it is about to
+put there. It installs into the SAME directory as the existing install, even if
+that is not the default one, replaces every program file, and leaves one entry
+in Programs and Features, one `PATH` entry and one set of Start Menu shortcuts
+rather than a second copy of each. Two things it does not touch: the model
+weights under `python\weights` inside the install folder, which are a
+multi-gigabyte download the AI sidecars fetch on first use, and your develop
+store in `%LOCALAPPDATA%\autoshade`, which holds your edits, thumbnails and
+style index. If AutoShade is running, setup closes it before replacing its
+files and does not start it again afterwards.
+
+Running an OLDER installer over a newer install is refused, with a message
+naming both versions. Uninstall first if you really mean to go back.
+
+**Uninstalling.** There are two ways in, and they do the same thing: the
+AutoShade entry in **Settings → Apps → Installed apps** (Programs and
+Features), or 「Uninstall AutoShade」 in the AutoShade Start Menu
+folder. Either one removes the program files, the shortcuts, the `PATH` entry
+it added and the registry entry — and then asks one question: whether to
+delete the downloaded model weights and your develop store as well. The
+question names how large each one is, and **No, keep them** is the default
+button. Keep them if you might install AutoShade again: the weights are a large
+download and the store is your work. The install folder is left in place when
+you keep them, because it is where the weights live; it is removed entirely
+when you delete them.
+
+**Silently.** For a scripted install, upgrade or rollout:
+
+```text
+AutoShade-Setup-<version>.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART
+AutoShade-Setup-<version>.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /DIR="D:\Apps\AutoShade" /TASKS="addtopath"
+```
+
+The first form upgrades an existing install in place; `/DIR=` and `/TASKS=` only
+matter for a first install. A refused downgrade exits with a non-zero code and
+writes the reason to the log; add `/LOG="path"` to keep one.
+
+To uninstall without any window, run `unins000.exe` from the install directory:
+
+```text
+unins000.exe /VERYSILENT /SUPPRESSMSGBOXES
+unins000.exe /VERYSILENT /SUPPRESSMSGBOXES /DELETEDATA=1
+```
+
+The first keeps the model weights and the develop store — the same answer
+the dialog defaults to. The second deletes both and removes the install folder
+with them.
