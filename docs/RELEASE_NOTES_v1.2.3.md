@@ -905,3 +905,13 @@ soundness of the search and on sentences that had drifted from the code.
 Cornwall, zoned solve on the tagged tree: look error 0.137 → 0.027 at
 confidence 0.66; the recipe differs from the pre-release build's run only in
 the reworded rationale, and the rendered panel is byte-identical to it.
+
+All six release assets were downloaded from the GitHub release (run
+33641516217: windows, macos, macos-battery and publish all green) and verified
+with `sha256sum -c checksums.txt` and an independently computed SHA-256 before
+the README and site tables were filled from those bytes; the downloaded CLI
+reports `autoshade 1.2.3`. The local install was upgraded in place from the
+downloaded installer and both executables compared byte for byte with the
+release checksums (registry 1.2.3, the 19 weight files untouched). autoshade.dev
+was deployed from `site/` and byte-verified against it, Cloudflare's beacon
+stripped: 22 files identical, 0 mismatched.
