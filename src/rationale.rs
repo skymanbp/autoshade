@@ -189,10 +189,11 @@ pub mod keys {
          spread its dark and bright slices {fan} degrees apart (limit \
          {limit}). Shrinking them — first toward the one shape all three \
          channels share, then toward no curves at all — was tried first: \
-         either no point on that path cleared the limit, or the strongest \
-         point that did bought less than the fit's own quantisation budget, \
-         so none shipped. A single-hued region sorted into a hue fan by \
-         brightness is not something any develop control can put back.";
+         either no point on that path cleared the limit, or the \
+         best-paying point that did bought less than the fit's own \
+         quantisation budget, so none shipped. A single-hued region sorted \
+         into a hue fan by brightness is not something any develop control \
+         can put back.";
     /// v1.2.3: the stage's THIRD outcome — the fan gate convicted the fitted
     /// curves and a PROJECTED, milder cast shipped instead of nothing.
     ///
@@ -229,6 +230,29 @@ pub mod keys {
         " The projected curves' hue fan was not measurable: no hue class \
          holds enough of the frame across two luma slices for a fan to have \
          a value.";
+    /// v1.2.4: the TERMINAL delivered-fan check. The fan gate judges one
+    /// stage's candidate; this reads the same census on the finished render
+    /// against the untouched photo, so a do-no-harm loop cannot walk the
+    /// recipe around the limit one admissible step at a time.
+    pub const FIT_NOTE_DELIVERED_FAN: &str =
+        " The finished recipe was read once more against the untouched photo: \
+         it sorted one hue class apart across luminance — that class holds \
+         {share} of the frame's measurable colour and its dark and bright \
+         slices ended {fan} degrees apart, against a limit of {limit} — so \
+         the colour-cast curves were taken back out, which brings that class \
+         inside the limit.";
+    /// …and the arm where the curves were NOT the cause: taking them out
+    /// leaves the reading standing, so they go back — a fit must not pay look
+    /// error for a fan it did not open — and the reading is disclosed.
+    pub const FIT_NOTE_DELIVERED_FAN_UNCAUSED: &str =
+        " The finished recipe was read once more against the untouched photo: \
+         it sorted one hue class apart across luminance — that class holds \
+         {share} of the frame's measurable colour and its dark and bright \
+         slices ended {fan} degrees apart, against a limit of {limit}. Taking \
+         the colour-cast curves back out still left {after} degrees, so they \
+         were not the cause and they were kept; tone and saturation are what \
+         spread that class, and no develop control puts a brightness-sorted \
+         hue fan back.";
     pub const FIT_NOTE_GLOBAL_CAST: &str =
         " Global colour cast measured from consistent hue rotation across the populated frame (rotation {rotation} degrees, chroma ratio {ratio}); white balance and saturation were read from population evidence.";
     pub const FIT_NOTE_VETO_DISCLOSED: &str =

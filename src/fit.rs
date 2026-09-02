@@ -1591,9 +1591,36 @@ const ROT_VISIBLE_BEFORE: f32 = 0.05;
 /// inside `cc ∈ [0.03, 0.05) × wc ∈ [0.04, 0.09)` — a faint tint re-hued
 /// into another faint tint, invisible on BOTH ends — are exempt by design,
 /// and the band's exact borders are pinned by the
-/// `the_pass_through_exemption_borders_are_patrolled` fixture; if a real
-/// pair ever wrecks a region at those chroma levels, this pair of floors
-/// is the suspect.
+/// `the_pass_through_exemption_borders_are_patrolled` fixture.
+///
+/// How much the exemption actually forgives is measured rather than
+/// supposed. Across every calibration pair, on the cast candidate the
+/// rotation census reads (2026-09-02), counted the unweighted way
+/// [`rehued_share`] counts: the share of analysed pixels that falls inside
+/// the band at all, and the share that falls inside it AND turns
+/// [`ROT_DEG`] or more —
+///
+/// | pair    | in band | in band and turned |
+/// |---------|---------|--------------------|
+/// | neutral | 17.53% | 3.41% |
+/// | p36     | 1.32% | 0.26% |
+/// | p37     | 3.36% | 3.14% |
+/// | p38     | 4.87% | 0.33% |
+/// | p39     | 1.22% | 0.39% |
+/// | p40     | 10.73% | 0.01% |
+/// | p41     | 0.61% | 0.22% |
+///
+/// The band is not empty and never was: `neutral` hides
+/// 3.41% of the frame turning past 75°, which is
+/// 0.68× [`ROT_SHARE`] — real forgiveness, at the
+/// scale the census would otherwise convict on. That is the trade this pair
+/// of floors makes, stated in numbers: those pixels are invisible on both
+/// ends, so forgiving them costs a viewer nothing, and the alternative
+/// measured in R17 was a veto that ate its whole margin on a haze correction
+/// that wrecked nothing. If a pair ever wrecks a region at these chroma
+/// levels these floors are where to look — and no pair in this corpus does,
+/// because a wreck needs a visible end and the band has none by
+/// construction.
 #[cfg(test)]
 const ROT_VISIBLE_AFTER: f32 = 0.09;
 /// The BEFORE side of the rotation census needs only a MEASURABLE hue, not a
@@ -1624,7 +1651,8 @@ const ROT_HUE_MEASURABLE_CHROMA: f32 = 0.03;
 // cancels them.
 //
 // Measured on the Cornwall reverse-fit pair (2026-09-01, the defect v1.2.2
-// shipped and registered): the admitted curves leave the sky's mean hue at
+// shipped — closed by this gate in v1.2.3 and made structural by the
+// terminal re-read in v1.2.4): the admitted curves leave the sky's mean hue at
 // 218.3° → 217.6° (0.7°, invisible), rotate no pixel past 75° at all
 // (`rehued_share_weighted` = 0.000000, unweighted 0.0058), create 0.000000
 // foreign share and cut the look error nearly in half (0.0576 → 0.0334,
@@ -1746,6 +1774,19 @@ const FAN_DEG: f32 = 15.0;
 /// See [`projected_cast_curves`] for the path and [`search_cast_projection`]
 /// for the search.
 const FAN_PROJECT_DEG: f32 = FAN_DEG / 2.0;
+/// Cells the projection's gain sweep divides the admissible interval into.
+/// The gain wiggles over `t` — 0.00104 / 0.00190 / 0.00169 / 0.00187 at
+/// `t` 0.25 / 0.35 / 0.40 / 0.50 on the coast candidate — so the grid has to
+/// be fine enough to bracket an interior peak, and every probe costs a full
+/// render, so it is not made finer than the structure it has to see. Eight
+/// cells put each probe 0.05 of `t` apart on a frontier at 0.4, half the
+/// spacing of that measured wiggle.
+const PROJECT_GRID: usize = 8;
+/// Golden-section iterations on the winning cell. Each iteration multiplies
+/// the bracket by 0.618, so eight of them take a cell 0.05 wide down to
+/// 0.0011 of `t` — just past the third decimal the projection note prints,
+/// which is as far as refining can change anything the user reads.
+const PROJECT_REFINE: usize = 8;
 
 // --- the REPORTED-CONFIDENCE family (R23-6) ---------------------------------
 // One calibration with two ends, named as one so they can never be retuned
@@ -1759,10 +1800,44 @@ const FAN_PROJECT_DEG: f32 = FAN_DEG / 2.0;
 // which is exactly why neither ever fired on the fit the user called
 // nonsense. `the_confidence_family_is_one_calibration` pins the relation.
 //
-// The slope stays 6.0: this round does not retune the look-error ladder (it
-// would need the real failure pair that has not arrived). What changes is
-// that this ladder is no longer the ONLY thing allowed to set the number —
-// see `fit_zoned::JOINT_CONFIDENCE_SLOPE`, which can only lower it.
+// The slope stays 6.0, and since 2026-09-02 that is a MEASURED calibration
+// rather than a postponement. This ladder is not the only thing allowed to
+// set the number: `recipe.confidence` starts here and is then `min`-ed with
+// the joint ladder (`fit_zoned::JOINT_CONFIDENCE_SLOPE`), the evidence
+// identifiability cap and the not-same-frame cap, each of which can only
+// LOWER it. So the question "is 6.0 right" is only asked on a pair where
+// none of the three binds.
+//
+// Read on every real pair in the corpus, each loaded the way CLI `match`
+// loads a RAW (the frame developed at the default recipe, the calibration
+// recipe as the base), delivered residual against what the report carries:
+//
+// | pair    | residual | this ladder | reported |
+// |---------|----------|-------------|----------|
+// | p40     | 0.033481 | 0.799       | 0.611693 |
+// | p41     | 0.041265 | 0.752       | 0.437316 |
+// | p38     | 0.053713 | 0.678       | 0.250000 |
+// | p39     | 0.054478 | 0.673       | 0.478439 |
+// | neutral | 0.099869 | 0.401       | 0.250000 |
+// | p36     | 0.105034 | 0.370       | 0.369798 |
+// | p37     | 0.161220 | 0.250       | 0.250000 |
+//
+// Two pairs are where the ladder decides. On `p36` nothing else binds and it
+// IS the number, to the last digit the report prints: 1 - 6 x 0.105034 =
+// 0.369796 against a reported 0.369798, on a fit that took 0.111648 to
+// 0.105034 and claims 0.37 for it — which is the right claim for a fit that
+// closed 6% of its gap. On `p37` the residual is past [`FIT_FAR_ERR`], the
+// ladder is already on [`CONFIDENCE_FLOOR`], and the reported number is that
+// floor. On the other five the ladder is an upper bound one of the three caps
+// takes further down, which is also what makes reported confidence
+// non-monotone in the residual ACROSS pairs — `p39` reports 0.478 at a WORSE
+// residual than `p41`'s 0.437 — and that is the family working as designed
+// rather than a slope that needs moving: this ladder proposes, the others can
+// only dispose downward.
+//
+// Retuning would need a pair on which THIS term is the number and the number
+// is wrong. The corpus has exactly one pair on which this term is the number,
+// and it is right. So 6.0 stands, and nothing is waiting on it.
 
 /// Confidence per unit of look error.
 const CONFIDENCE_SLOPE: f32 = 6.0;
@@ -3026,11 +3101,10 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure_opts(
     // this call, so a solve whose mixer stayed neutral is rescued on the same
     // terms as one whose mixer attached.
     //
-    // The 4b call's rescue is ENTERED but its SUCCESS has no fixture: nine
-    // fixture re-fits reach that loop body fan-convicted (its own note has the
-    // count) and none is rescued there, so "a fan-convicted cast survives the
-    // saturation step-down" is verified by reading this code and not by a
-    // test; a pair that projects inside that loop should pin it.
+    // The 4b call's rescue is ENTERED and its success is UNREACHABLE from any
+    // state this tree can reach — the census at that loop has the numbers and
+    // the reason, which is a fact about how the two colour gates behave in a
+    // stepped-down state rather than a hole in the fixture set.
     let mut cast = fit_cast_stage(&mut recipe, true);
 
     // --- 4b) do-no-harm — the pipeline-END check ------------------------------
@@ -3046,21 +3120,30 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure_opts(
     // this loop (golden-sky pair: a distorted tone map made the whole fit
     // regress) was root-fixed by `tone_cdf_pair`, but the claim that stood
     // here until 2026-09-02 — "no current fixture reaches the loop body" — is
-    // FALSE and was measured false: instrumenting the body and running the
-    // whole library battery on this tree logs 189 entries, 110 on the error
-    // arm and 141 on the hue-guard arm (both, on 62 of them). Nine of those
-    // re-fits hand back a FAN-CONVICTED cast, all on the error arm, from
-    // `evidence_gating_does_not_regress_any_shipped_showcase_pair` (5),
-    // `the_per_band_mixer_never_rotates_a_hue_band` (3) and
-    // `a_one_sided_band_is_refused_by_name_never_read_as_equal` (1).
+    // FALSE and was measured false. Instrumenting the body and running the
+    // whole library battery on this tree (2026-09-02, with the calibration
+    // corpus present) logs 186 entries: 107 on the error arm, 140 on the
+    // hue-guard arm, 62 on both.
     //
     // So the rescue at the `fit_cast_stage` call below is NOT dead code — it
-    // is entered with a conviction to answer. What has no fixture is the
-    // rescue SUCCEEDING here: in all nine the projection is tried and finds
-    // nothing that both clears the target and pays, so the cast is refused
-    // and the step-down continues. "A rescued cast survives the saturation
-    // step-down" is therefore verified by reading this code, not by a test.
-    // If you find a pair that projects inside this loop, pin it.
+    // is entered with a conviction to answer: 9 of those 186 re-fits hand
+    // back a FAN-CONVICTED cast. What no fixture reaches is the rescue
+    // SUCCEEDING here, and the measurement says why. All 9 are ALSO
+    // rotation-blocked, so `earns_projection` returns `None` on every one of
+    // them and the projection is never even attempted — 0 of the 186
+    // earn it, 0 come back projected. The coupling belongs to the
+    // stepped-down states rather than to the gates: at the stage's own call
+    // site the same battery separates them on 67 of 545 stage runs (the
+    // census in `a_silently_rejected_colour_stage_now_says_so`).
+    //
+    // That is a measured dead end, not a postponement. About forty pairs were
+    // built for it — one-sided-band wedges to drive the hue-guard arm,
+    // split-chroma frames to drive the error arm — and every one reproduced
+    // the coupling. The projection arithmetic is pinned where it lives, at
+    // `search_cast_projection`
+    // (`the_search_takes_the_best_paying_admissible_shrink`); what has no
+    // end-to-end witness is the ROUTE through this loop, and the reason it
+    // has none is the census above.
     let sat_fitted = recipe.saturation;
     let mut end_px = pixels_of(&render::develop_preview(&s_img, &recipe));
     let mut err_after = look_err_with_evidence(&end_px, &tp, &evidence);
@@ -3088,6 +3171,21 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure_opts(
         recipe.hsl = shrunk;
         cast = fit_cast_stage(&mut recipe, true);
         end_px = pixels_of(&render::develop_preview(&s_img, &recipe));
+        err_after = look_err_with_evidence(&end_px, &tp, &evidence);
+        end_moves_hue =
+            moved_unsupported_hue_range_names_vouched(&sp, &end_px, &evidence, hue_vouch)
+                .is_some();
+    }
+    // TERMINAL delivered-fan check — see `withdraw_curves_for_delivered_fan`
+    // for why a calibrated per-stage gate needs a structural re-read here.
+    // It runs on the Full path only, and that is a fact about the mode rather
+    // than a gap: `fit_atmosphere_from_parts` clears all three channel curves
+    // unconditionally before its own do-no-harm loop, so an Atmosphere recipe
+    // has no cast for a loop to walk around.
+    let delivered_fan =
+        withdraw_curves_for_delivered_fan(&s_img, &sp, &evidence, &mut recipe, &mut end_px);
+    let cast_withdrawn = matches!(delivered_fan, Some((_, _, None)));
+    if cast_withdrawn {
         err_after = look_err_with_evidence(&end_px, &tp, &evidence);
         end_moves_hue =
             moved_unsupported_hue_range_names_vouched(&sp, &end_px, &evidence, hue_vouch)
@@ -3154,7 +3252,7 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure_opts(
     }
 
     // --- report ---------------------------------------------------------------
-    compose_report(
+    let mut report = compose_report(
         recipe,
         Measured {
             err_before,
@@ -3211,10 +3309,18 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure_opts(
                 // …and not projected: a projected cast ships its OWN
                 // sentence, which states the conviction it survived. Writing
                 // both would give one cast two accounts.
-                && cast.projected.is_none())
+                && cast.projected.is_none()
+                // …and not withdrawn by the terminal delivered-fan check,
+                // for exactly the reason `!fit_regressed` is here: the gates'
+                // verdict stays "admitted" while the curves it describes are
+                // no longer in the recipe the user gets. Only the WITHDRAWING
+                // arm counts — the disclosing arm leaves the curves in place.
+                && !cast_withdrawn)
             .then_some(cast.readings)
             .flatten(),
-            cast_projected: (!fit_regressed).then_some(cast.projected).flatten(),
+            cast_projected: (!fit_regressed && !cast_withdrawn)
+                .then_some(cast.projected)
+                .flatten(),
             evidence_refused: evidence_has_one_sided(&evidence),
             sat_fitted: sat_reduced.then_some(sat_fitted),
             regressed: fit_regressed.then_some(joint_regressed),
@@ -3226,7 +3332,30 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure_opts(
             hsl: hsl_facts,
             atmosphere_reference: AtmosphereReference::WholeFrame,
         },
-    )
+    );
+    // The terminal check speaks last because it acted last, and it speaks
+    // whenever it acted — a recipe that lost its cast curves at the very end
+    // is not something the reader can work out from the rest of the sentence.
+    if let Some((share, fan, still)) = delivered_fan {
+        let mut args = vec![
+            ("share", format!("{share:.3}")),
+            ("fan", format!("{fan:+.1}")),
+            ("limit", format!("{FAN_DEG:.0}")),
+        ];
+        let key = match still {
+            None => crate::rationale::keys::FIT_NOTE_DELIVERED_FAN,
+            Some(after) => {
+                args.push(("after", format!("{after:+.1}")));
+                crate::rationale::keys::FIT_NOTE_DELIVERED_FAN_UNCAUSED
+            }
+        };
+        crate::rationale::push_note(
+            &mut report.recipe.rationale,
+            &mut report.notes,
+            crate::rationale::Note::new(key, args),
+        );
+    }
+    report
 }
 
 /// Bounded global solve used when structural correspondence has failed. It
@@ -3276,14 +3405,14 @@ fn fit_atmosphere_from_parts(
     // same-composition pair and the only arrays that differ belong to pairs
     // whose content actually moved.
     let readable = shared.as_ref().filter(|p| p.readable());
-    let ref_source = readable.map_or(evidence.source_weights.as_slice(), |p| p.source.as_slice());
-    let ref_target = readable.map_or(evidence.target_weights.as_slice(), |p| p.target.as_slice());
     // One report has one frame ruler: the caller's structural `err_before`
     // belongs to the mode-selection model, while every Atmosphere measurement
     // below is read on the structure-blind population model.
     let err_before = look_err_with_evidence(sp, tp, evidence);
     let mut recipe = base.clone();
 
+    let ref_source = readable.map_or(evidence.source_weights.as_slice(), |p| p.source.as_slice());
+    let ref_target = readable.map_or(evidence.target_weights.as_slice(), |p| p.target.as_slice());
     let linear_luma_cdf = |px: &[[f32; 3]], weights: &[f32]| {
         weighted_cdf(px, weights, |p| {
             0.299 * render::srgb_to_linear(p[0])
@@ -3291,6 +3420,38 @@ fn fit_atmosphere_from_parts(
                 + 0.114 * render::srgb_to_linear(p[2])
         })
     };
+    // The exposure reads the shared-content POPULATION, like the white
+    // balance, but as the ratio of the two sides' MARGINAL weighted-luma
+    // medians rather than as a location statistic on one cloud of per-pixel
+    // changes. That asymmetry is deliberate as of 2026-09-02, and it is
+    // deliberate because it was tried the other way and measured.
+    //
+    // The paired form — a weighted median of the per-pixel log2 luminance
+    // ratio over exactly the population and pairing
+    // `atmosphere_wb_pairing` hands the white balance — buys NOTHING on the
+    // real pairs and costs a synthetic one its whole fit. Measured on this
+    // tree: the generated-cloud calibration pair reads 0.188686 -> 0.099869
+    // either way, `p37` reads 0.247107 -> 0.161220 either way, and no other
+    // corpus pair reaches this code at all (Full-mode exposure comes from the
+    // tone-slider solve). Against that, `hazy_canyon_source` ->
+    // `vivid_warm_target` moves -0.28 EV -> -0.22 EV, and
+    // `flat_sky_to_cloud_deck` stops fitting altogether: its finished recipe
+    // regresses and the terminal do-no-harm check returns the base, reading
+    // 0.1619 -> 0.1619 where the marginal solve delivers a fit that ends
+    // closer (`a_per_band_move_the_frame_ruler_refuses_shrinks_to_zero_and_says_so`
+    // asserts exactly that, and it is the test the paired form failed).
+    //
+    // The reason the two statistics differ here and agree on the white
+    // balance is that they are not answering the same question. The WB's
+    // cloud is a cloud of RATIOS between corresponding pixels, and its centre
+    // is the cast. Luminance is what a content-divergent pair changes MOST —
+    // a cloud deck is not the sky it replaced — so the centre of its
+    // per-pixel ratio cloud is a statement about how much the CONTENT moved,
+    // while the ratio of the two medians is a statement about the two frames'
+    // levels, which is what an exposure control sets. On a pair whose content
+    // genuinely changed, the paired statistic answers the wrong question
+    // confidently. So the marginal median stays, on the shared-content
+    // population, and this is the last word on it rather than a postponement.
     let (sl, tl) = (linear_luma_cdf(sp, ref_source), linear_luma_cdf(tp, ref_target));
     let exposure = (quantile(&tl, 0.5).max(1e-5) / quantile(&sl, 0.5).max(1e-5))
         .log2()
@@ -3591,14 +3752,6 @@ fn fit_atmosphere_from_parts(
             atmosphere_reference,
         },
     )
-}
-
-#[cfg(test)]
-#[allow(dead_code)]
-fn atmosphere_tone_curve(cur: &[[f32; 3]], tgt: &[[f32; 3]]) -> Vec<CurvePoint> {
-    let ca = vec![1.0; cur.len()];
-    let ta = vec![1.0; tgt.len()];
-    atmosphere_tone_curve_weighted(cur, tgt, &ca, &ta, ATMOSPHERE_CURVE_SLOPE_MIN, ATMOSPHERE_CURVE_SLOPE_MAX)
 }
 
 fn atmosphere_tone_curve_weighted(
@@ -5049,7 +5202,7 @@ struct CastOutcome {
     projected: Option<CastProjection>,
 }
 
-#[allow(dead_code)]
+#[cfg(test)]
 fn cast_gate_outcome(
     cur: &[[f32; 3]],
     with_px: &[[f32; 3]],
@@ -6269,46 +6422,44 @@ fn cast_curves_are_identity(curves: &[Vec<CurvePoint>; 3]) -> bool {
     curves.iter().all(|c| c.iter().all(|p| p.input == p.output))
 }
 
-/// The projection SEARCH, over `t` alone: the largest `t` whose judged
-/// candidate is ADMISSIBLE — all four gates clear and the fan is no more than
-/// [`FAN_PROJECT_DEG`] — and then, once, whether that winner buys enough to be
-/// worth shipping. `None` when nothing on the path qualifies, and then the
-/// stage refuses the cast exactly as it did before the projection existed.
+/// The projection SEARCH, over `t` alone: among the ADMISSIBLE shrinks — all
+/// four gates clear and the fan is no more than [`FAN_PROJECT_DEG`] — the one
+/// that buys the MOST look error, shipped when that gain clears [`FIT_QUANT`].
+/// `None` when nothing on the path qualifies, and then the stage refuses the
+/// cast exactly as it did before the projection existed.
 ///
-/// TWO PHASES, and the split is a soundness requirement rather than tidiness.
-/// A bisection can only find the largest member of a DOWNWARD-CLOSED set, and
-/// only the admissibility half is downward-closed: the fan is non-decreasing
-/// in `t` (measured, `the_projected_fan_grows_with_t`) and every gate clears
-/// as the curves go to the identity. The GAIN is the other way round — it
-/// falls to zero as `t → 0`, because at `t = 0` there are no curves and the
-/// ratio is 1. Testing both inside the loop makes the clearing set an
-/// interval `[a, b]` with `a > 0`, and a bisection from `lo = 0` can then walk
-/// BELOW `a` and report `None` where a perfectly good rescue exists — a
-/// conservative failure (the pair is refused) but one whose refusal sentence
-/// claims the whole path was searched. So the loop tests admissibility only,
-/// and the gain bar is applied once, to the winner.
+/// THREE PHASES, and the shape of each follows from what is monotone in `t`
+/// and what is not.
 ///
-/// The gain is NOT monotone in `t`, and that was measured before it was
-/// assumed: on the coast fixture's stage-4 candidate (2026-09-02) it reads
-/// 0.00104 at `t = 0.25`, 0.00190 at 0.35, 0.00169 at 0.40 and 0.00187 at
-/// 0.50 — a wiggle the size of [`FIT_QUANT`] itself. So judging the WINNER
-/// rather than every probe can refuse a rescue that some lower `t` would have
-/// bought by a fraction of the quantisation budget, and on two fixtures it
-/// does: the coast candidate under a widened bound and the two-family HSL
-/// pair both go from projected to refused here. That is the right direction —
-/// a rescue whose worth depends on which point of the path you happen to land
-/// on is worth nothing — and it is the only direction a bisection can search
-/// soundly. The cost is stated, not hidden: the gain is evaluated at exactly
-/// ONE point, the strongest admissible shrink, so a shrink that pays only at
-/// a milder `t` is not found. Measured on the two-family HSL pair
-/// (2026-09-02): every `t ≤ 0.25` is admissible and pays 0.0019–0.0033, the
-/// strongest admissible point reads a gain of −0.012, and the pair is
-/// refused — the refusal sentence says exactly that. A best-paying-admissible
-/// search is a registered follow-up, not this batch's. Pinned by
-/// `the_search_does_not_bisect_past_a_band_the_gain_bar_opens`.
+/// PHASE 1 finds the admissible FRONTIER `t_max` by bisection, 12 steps — the
+/// convention this file already uses for closed-loop searches — because
+/// admissibility is the DOWNWARD-CLOSED half of the question and the only
+/// half a bisection may be pointed at: the fan is non-decreasing in `t`
+/// (measured, `the_projected_fan_grows_with_t`) and every gate clears as the
+/// curves go to the identity.
 ///
-/// Bisection, 12 steps — the convention this file already uses for
-/// closed-loop searches.
+/// PHASE 2 sweeps a fixed grid of [`PROJECT_GRID`] cells over `(0, t_max]`
+/// and keeps the admissible probe with the largest GAIN, the frontier
+/// included. The gain is NOT monotone in `t`, and that was measured before it
+/// was assumed: on the coast fixture's stage-4 candidate (2026-09-02) it
+/// reads 0.00104 at `t = 0.25`, 0.00190 at 0.35, 0.00169 at 0.40 and 0.00187
+/// at 0.50 — a wiggle the size of [`FIT_QUANT`] itself. Judging the frontier
+/// ALONE therefore refused pairs on which an admissible paying shrink exists,
+/// and that was v1.2.3's stated cost: on the two-family HSL pair every
+/// `t ≤ 0.25` is admissible and pays 0.0019–0.0033 while the frontier reads
+/// a gain of −0.012, so the pair was refused although the path held a rescue
+/// worth more than the quantisation budget. Sweeping the interval is what
+/// closes that, and the sweep is also what makes the gain bar sound: the bar
+/// is now applied to the MAXIMUM over the admissible set, so a `None` really
+/// does mean "nothing on this path pays".
+///
+/// PHASE 3 refines the winning cell by golden section, [`PROJECT_REFINE`]
+/// iterations, so the answer is not quantised to the grid. Every probe in
+/// both phases is re-judged by all four gates from scratch and only an
+/// admissible probe can win, so neither the sweep nor the refinement can walk
+/// out of the admissible set even where the RENDERED fan is not exactly
+/// monotone: an inadmissible probe scores `-inf` and the bracket closes away
+/// from it.
 ///
 /// The GAIN requirement is this function's own and is stricter than the
 /// ratio gate. The gates decide whether a cast the fit MEASURED may ship;
@@ -6319,18 +6470,14 @@ fn cast_curves_are_identity(curves: &[Vec<CurvePoint>; 3]) -> bool {
 /// number the terminal do-no-harm check uses to decide that a difference is a
 /// difference at all.
 ///
-/// MEASURED (2026-09-02, six fixtures): without this the two-family HSL pair
-/// shipped a projection worth 0.0006 of look error — a third of `FIT_QUANT` —
-/// and it cost that pair its `hsl` disclosure, because a residual the fit had
-/// nibbled at no longer read as a per-band colour job.
+/// Pinned by `the_search_takes_the_best_paying_admissible_shrink`, which
+/// builds a path whose gain peaks in the interior and asserts that the search
+/// lands on the peak rather than on the frontier.
 fn search_cast_projection_t(
     err_without: f32,
     mut judge: impl FnMut(f32) -> CastOutcome,
 ) -> Option<(f32, CastOutcome)> {
-    // PHASE 1 — the DOWNWARD-CLOSED half, and the only thing the bisection is
-    // allowed to see.
-    //
-    // An ABSTAINING census CLEARS this target, and that is a reading rather
+    // An ABSTAINING census CLEARS the fan target, and that is a reading rather
     // than a hole in one: `hue_fan_weighted` returns `None` when no hue class
     // holds [`FAN_SHARE`] of the population across two populated luma slices,
     // so there is no longer anything region-sized that COULD be over the
@@ -6342,22 +6489,69 @@ fn search_cast_projection_t(
                 .readings
                 .is_some_and(|r| r.fan.is_none_or(|fan| fan <= FAN_PROJECT_DEG))
     };
+    // PHASE 1 — the admissible FRONTIER, by bisection over the one
+    // downward-closed half of the question.
     let (mut lo, mut hi) = (0.0f32, 1.0f32);
-    let mut best: Option<(f32, CastOutcome)> = None;
+    let mut frontier: Option<(f32, CastOutcome)> = None;
     for _ in 0..12 {
         let mid = 0.5 * (lo + hi);
         let out = judge(mid);
         if admissible(&out) {
-            best = Some((mid, out));
+            frontier = Some((mid, out));
             lo = mid;
         } else {
             hi = mid;
         }
     }
-    // PHASE 2 — the gain bar, once, on the winner.
-    let (t, out) = best?;
-    let readings = out.readings?;
-    (err_without * (1.0 - readings.ratio) > FIT_QUANT).then_some((t, out))
+    let (t_max, frontier_out) = frontier?;
+    let gain_of = |out: &CastOutcome| out.readings.map(|r| err_without * (1.0 - r.ratio));
+    // Judge one `t`, keep it when it is admissible and pays more than the best
+    // so far, and score an inadmissible probe `-inf` so the golden section
+    // closes away from it. `best` is a parameter rather than a capture so this
+    // closure borrows `judge` alone.
+    let mut probe = |t: f32, best: &mut (f32, CastOutcome, f32)| -> f32 {
+        let out = judge(t);
+        if !admissible(&out) {
+            return f32::NEG_INFINITY;
+        }
+        // `admissible` has already established that the readings are present.
+        let Some(gain) = gain_of(&out) else { return f32::NEG_INFINITY };
+        if gain > best.2 {
+            *best = (t, out, gain);
+        }
+        gain
+    };
+    // PHASE 2 — the gain sweep over `(0, t_max]`. The frontier is already
+    // judged, so it seeds the comparison without a second render.
+    let mut best = (t_max, frontier_out, gain_of(&frontier_out)?);
+    let cell = t_max / PROJECT_GRID as f32;
+    for k in 1..PROJECT_GRID {
+        probe(cell * k as f32, &mut best);
+    }
+    // PHASE 3 — golden section on the cell either side of the winner, in the
+    // classic three-point form: one new render per iteration, the other
+    // interior point carried over from the last one.
+    const INV_PHI: f32 = 0.618_034;
+    let (mut a, mut b) = ((best.0 - cell).max(0.0), (best.0 + cell).min(t_max));
+    let (mut c, mut d) = (b - INV_PHI * (b - a), a + INV_PHI * (b - a));
+    let (mut fc, mut fd) = (probe(c, &mut best), probe(d, &mut best));
+    for _ in 0..PROJECT_REFINE {
+        if fc >= fd {
+            b = d;
+            d = c;
+            fd = fc;
+            c = b - INV_PHI * (b - a);
+            fc = probe(c, &mut best);
+        } else {
+            a = c;
+            c = d;
+            fc = fd;
+            d = a + INV_PHI * (b - a);
+            fd = probe(d, &mut best);
+        }
+    }
+    // The gain bar, once, on the MAXIMUM over the admissible set.
+    (best.2 > FIT_QUANT).then_some((best.0, best.1))
 }
 
 /// The projection search wired to the RENDERER: `search_cast_projection_t`
@@ -6373,14 +6567,18 @@ fn search_cast_projection_t(
 /// saturation step down. The mixer's own do-no-harm comparison judges both of
 /// its branches with the cast the gates MEASURED — see the note at that loop.
 ///
-/// The second call site is EXERCISED but its success is UNFIXTURED. Measured
+/// The second call site is EXERCISED and its success is UNREACHABLE. Measured
 /// 2026-09-02 by instrumenting the 4b loop body and running the whole library
-/// battery: the body runs 189 times and nine of those re-fits carry a
-/// fan-convicted cast, so the rescue is entered there with something to
-/// answer — but in all nine the search finds nothing that both clears
-/// [`FAN_PROJECT_DEG`] and pays [`FIT_QUANT`], so no test in the tree has ever
-/// seen a PROJECTED cast come back out of that loop. That half is verified by
-/// reading.
+/// battery with the calibration corpus present: the body runs 186 times and
+/// 9 of those re-fits carry a fan-convicted cast — and every one of the 9
+/// is rotation-blocked as well, so `earns_projection` answers `None` and this
+/// function is not reached from there at all. At the FIRST call site the two
+/// gates do come apart (67 fan-only refusals in 545 stage runs), so what
+/// couples them is the stepped-down state, not the gates. This function's own
+/// arithmetic is pinned by
+/// `the_search_takes_the_best_paying_admissible_shrink`; what no test in the
+/// tree witnesses is a PROJECTED cast coming back out of that loop, and the
+/// census at the loop says why that is a dead end rather than a gap.
 ///
 /// On return `recipe` carries the WINNING candidate's curves, not the last
 /// probe's — the loop's final probe is a rejected `t` more often than not.
@@ -6766,6 +6964,94 @@ fn hue_fan_weighted(
     worst
 }
 
+/// Does this FINISHED render sort a hue class apart across luminance past
+/// [`FAN_DEG`], measured against the untouched base with the fan gate's own
+/// census? `Some((share, fan))` when it does, `None` when it does not or when
+/// the census abstains.
+///
+/// The gate one stage up judges a CANDIDATE — the cast curves against the
+/// state they were fitted on — and it is a calibrated threshold applied at
+/// one point in the pipeline. This reads the same census on the pair the user
+/// actually sees: the recipe that is about to be handed back, against doing
+/// nothing at all.
+fn delivered_fan_conviction(
+    sp: &[[f32; 3]],
+    end_px: &[[f32; 3]],
+    evidence: &EvidenceModel,
+) -> Option<(f32, f32)> {
+    hue_fan_weighted(sp, end_px, evidence)
+        .filter(|&(_, fan, _)| fan > FAN_DEG)
+        .map(|(share, fan, _)| (share, fan))
+}
+
+/// The TERMINAL delivered-fan check, and the structural half of a promise
+/// v1.2.3 could only make as a calibration.
+///
+/// The fan gate convicts the cast stage's own candidate, and the do-no-harm
+/// loop above re-fits that stage after every saturation step — so nothing in
+/// the loop's arithmetic stops it walking to a state whose FINISHED render
+/// fans a class past [`FAN_DEG`], one admissible step at a time. The FAN_DEG
+/// = 20 experiment is that behaviour caught in the act: the loop halved
+/// Aqua/Blue and refitted until a milder cast measured 19°, which shipped and
+/// left 20.6° of fan in the delivered sky. A threshold nothing re-reads at
+/// the end is a threshold the pipeline can walk around.
+///
+/// The remedy is the gate's own, and it is aimed at the gate's own subject.
+/// Three independent monotone channel maps are the control the fan gate
+/// exists for and the one the loop keeps re-fitting, so they are withdrawn
+/// and the frame re-measured — the same "shrink until the finished frame
+/// stops objecting" idiom the mixer and the saturation loop already use,
+/// taken to its end in one step because curves have no smaller unit than
+/// "present". If the reading clears, that recipe ships with the sentence
+/// that says so.
+///
+/// If the reading survives the withdrawal the curves were NOT the cause, and
+/// then the honest act is to say so rather than to keep taking the recipe
+/// apart: the curves go back exactly as the loop left them (so a fit pays no
+/// look error for a fan it did not open) and the delivered reading is
+/// disclosed with both numbers. That case is real rather than defensive —
+/// measured 2026-09-02, the `p36` calibration pair delivers 12.9° of added
+/// fan carrying NO cast curves at all, so tone and saturation alone reach
+/// most of the way to the line — and it is the reason this check withdraws
+/// one named control instead of degrading the whole fit.
+///
+/// Returns `(share, fan, still)` when the delivered render is convicted: the
+/// class's share, the fan it had, and the fan that survived withdrawing the
+/// curves — `None` there means the withdrawal cleared it and the
+/// curve-less recipe is what ships.
+///
+/// MEASURED 2026-09-02 by instrumenting this point and running the whole
+/// library battery: 108 finished Full-mode renders, the widest delivered fan
+/// among them 14.2° in a class holding 0.638 of the measurable colour (the
+/// `coast` fixture, whose cast is projected), then `p36`'s 12.9° and the
+/// two-temperature `p40` pair's 12.4°. So at [`FAN_DEG`] this check fires on
+/// nothing in the tree — it costs one census per fit and changes no recipe —
+/// which is what a structural guarantee looks like while the calibration
+/// above it is doing its job. Its two arms are pinned by
+/// `the_terminal_check_takes_the_curves_out_of_a_fanning_render` and
+/// `a_delivered_fan_the_curves_did_not_cause_is_disclosed_not_withdrawn`, and
+/// the standing margin by `no_shipped_fit_delivers_a_hue_fan_past_the_limit`.
+fn withdraw_curves_for_delivered_fan(
+    s_img: &DynamicImage,
+    sp: &[[f32; 3]],
+    evidence: &EvidenceModel,
+    recipe: &mut EditRecipe,
+    end_px: &mut Vec<[f32; 3]>,
+) -> Option<(f32, f32, Option<f32>)> {
+    let (share, fan) = delivered_fan_conviction(sp, end_px, evidence)?;
+    let mut without = recipe.clone();
+    without.red_curve.clear();
+    without.green_curve.clear();
+    without.blue_curve.clear();
+    let px = pixels_of(&render::develop_preview(s_img, &without));
+    let still = delivered_fan_conviction(sp, &px, evidence).map(|(_, fan)| fan);
+    if still.is_none() {
+        *recipe = without;
+        *end_px = px;
+    }
+    Some((share, fan, still))
+}
+
 fn rehued_coverage_weighted(evidence: &EvidenceModel) -> f32 {
     evidence
         .source_hue_weights
@@ -7039,9 +7325,33 @@ fn is_neutralish(p: &[f32; 3]) -> bool {
 /// never override it, because misregistration fakes exactly that reading
 /// (the fail-open direction), and the fallback itself is the safe arm —
 /// on the two live pairs whose evidence failed a gate, the fallback solve
-/// measured better than the gated one both times (a benign uniform >1.75×
-/// inflation remains synthetic-only; no real pair has produced one). Gate order: cheap counts and shares first, the
-/// misprediction pass (a full-frame scan plus four CDFs) last, so
+/// measured better than the gated one both times. The sentence that stood
+/// here — that a benign uniform >1.75× inflation had only ever been seen on
+/// a constructed frame, never on a real pair — was half right, and the
+/// measurement replaces it. Neutral shares on both sides of every
+/// calibration pair (2026-09-02):
+///
+/// | pair    | source | target | ratio |
+/// |---------|--------|--------|-------|
+/// | neutral | 0.7203 | 0.3073 | 2.34x |
+/// | p36     | 0.3682 | 0.0733 | 5.02x |
+/// | p37     | 0.3639 | 0.2884 | 1.26x |
+/// | p38     | 0.3498 | 0.1668 | 2.10x |
+/// | p39     | 0.7108 | 0.1925 | 3.69x |
+/// | p40     | 0.4634 | 0.0184 | 25.13x |
+/// | p41     | 0.2870 | 0.0638 | 4.50x |
+///
+/// So 6 of the 7 corpus pairs are over the line and the
+/// unconditional fallback is an everyday arm rather than a contingency —
+/// `p36` shows how a SAME-CONTENT pair gets there, its grade lifting chroma
+/// until four fifths of the source's neutral class is no longer neutral on
+/// the target side. What is still synthetic is the BENIGN case the old sentence
+/// meant: two sides differing only by a uniform neutral-share scale over the
+/// same composition, which only `a_uniformly_inflated_neutral_class_keeps_the_gate`
+/// builds. Every real pair over the line is over it because the two sides
+/// really do hold different colour populations, which is the reading the
+/// fallback exists to distrust. Gate order: cheap counts and shares first,
+/// the misprediction pass (a full-frame scan plus four CDFs) last, so
 /// under-evidenced pairs never pay for it.
 #[cfg(test)]
 fn tone_cdf_pair(sp: &[[f32; 3]], tp: &[[f32; 3]]) -> (Vec<f32>, Vec<f32>) {
@@ -7198,12 +7508,6 @@ pub(crate) fn neutral_gate_misprediction(sp: &[[f32; 3]], tp: &[[f32; 3]]) -> f3
         cnt += 1.0;
     }
     acc / cnt
-}
-
-#[cfg(test)]
-#[allow(dead_code)]
-fn channel_cdf(px: &[[f32; 3]], ch: usize) -> Vec<f32> {
-    cdf_from_values(px.iter().map(|p| p[ch]), px.len())
 }
 
 /// F(x): fraction of pixels ≤ x (linear interp between bins).
@@ -7666,9 +7970,13 @@ mod tests {
         // shift is exactly what the F1 freedom axis already ships.
         assert_eq!(report.recipe.temperature_k, None);
         assert_eq!(report.recipe.tint, 0.0);
-        // The EXPOSURE solve is not part of this batch: it stays on the
-        // marginal weighted luma median. Measured unchanged at -1.00, which
-        // is the assertion that would have caught an accidental side effect.
+        // The EXPOSURE solve stays on the marginal weighted-luma median over
+        // the shared-content population, and that is now a measured decision
+        // rather than a postponement: the paired per-pixel form was
+        // implemented and measured on 2026-09-02, moved neither this pair nor
+        // `p37`, and stopped `flat_sky_to_cloud_deck` fitting at all. The
+        // reasoning is at the solve; this assertion is what would catch an
+        // accidental side effect, and it reads -1.00 on both statistics.
         assert_eq!(report.recipe.exposure_ev, -1.0);
         let full = fit_recipe_from_with(
             &source,
@@ -8421,15 +8729,20 @@ mod tests {
     #[test]
     fn content_divergence_is_calibrated_on_every_shipped_showcase_asset() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/images");
-        // The two shipped reverse-fit panels (v1.2.2), each read at the
-        // top-row offsets the panel geometry fixes: the neutral conversion at
-        // left, the generated target in the middle. Both generators were asked
+        // The two shipped reverse-fit panels — the viaduct as composed for
+        // v1.2.2 (`01de443`) and the Cornwall panel as RE-composed for v1.2.3
+        // (`f3885b2`) — each read at the top-row offsets the panel geometry
+        // fixes: the neutral conversion at left, the generated target in the
+        // middle. Both generators were asked
         // for a grade and not a rebuild, so both sit UNDER the threshold and
         // the full solve ran on each; the fired arm of the same statistic is
         // pinned on a synthetic pair by
         // `content_divergence_fires_on_flat_sky_to_cloud_deck`. The pins are
         // the values measured when the panels were composed; a panel swapped
-        // for another generation moves them, which is the point.
+        // for another generation moves them, which is the point. Re-measured
+        // on the shipped v1.2.3 bytes (2026-09-02): viaduct 0.17987, Cornwall
+        // 0.13568 — the Cornwall re-composition did not move its reading off
+        // the pin it had, which is why the pin below is the same number.
         for (file, want) in [
             ("showcase-viaduct-reverse-fit.jpg", 0.180f32),
             ("showcase-cornwall-reverse-fit.jpg", 0.136f32),
@@ -8556,12 +8869,14 @@ mod tests {
         assert!(report.divergence.d < DIVERGENCE_GLOBAL);
         assert!(supported > evidence.spatial_supported.len() / 2);
         assert!(luma_weight > 0.5);
-        // The paired robust estimator fits this real pair (0.059 -> 0.039
-        // look, joint 0.178 -> 0.045 measured on the v1.2.2 Cornwall panel):
-        // pin the fit, not a reset. The viaduct panel is the wrong subject
+        // The paired robust estimator fits this real pair — re-measured
+        // 2026-09-02 on the SHIPPED v1.2.3 panel: look 0.05888 -> 0.03061,
+        // joint 0.17777 -> 0.04699, with the panel's cast projected at
+        // t = 0.515 — so pin the fit, not a reset. The viaduct panel is the
+        // wrong subject
         // here — its top row is the pair whose full solve needed zones and
         // tiles, and on the panel thumbnails the global-only path ends in a
-        // do-no-harm reset (0.035 -> 0.035), which is exactly what this test
+        // do-no-harm reset (0.0354 -> 0.0354), which is exactly what this test
         // must NOT be satisfied by.
         assert!(
             report.err_after < report.err_before,
@@ -10552,9 +10867,17 @@ mod tests {
     }
 
     fn cast_stage_candidate(src: &DynamicImage, tgt: &DynamicImage) -> CastCandidate {
+        cast_stage_candidate_from(src, tgt, &EditRecipe::default())
+    }
+
+    fn cast_stage_candidate_from(
+        src: &DynamicImage,
+        tgt: &DynamicImage,
+        base: &EditRecipe,
+    ) -> CastCandidate {
         let (s, t) = analysis_pair(src, tgt);
         let tp = pixels_of(&t);
-        let mut pre = fit_recipe(src, tgt).recipe;
+        let mut pre = fit_recipe_from(src, tgt, base).recipe;
         pre.red_curve = Vec::new();
         pre.green_curve = Vec::new();
         pre.blue_curve = Vec::new();
@@ -11226,7 +11549,13 @@ mod tests {
     /// wrote — "no milder version both cleared the limit and left the frame
     /// closer to the target" — was a claim about the whole path made by a
     /// search that never looked at it; the sentence now says what the search
-    /// did (nothing cleared, or the strongest clearing point did not pay).
+    /// did (nothing cleared, or the best-paying clearing point did not pay).
+    ///
+    /// The property survives the v1.2.4 sweep unchanged, and it is the reason
+    /// the sweep could be added at all: the bisection still sees only
+    /// admissibility, so the gain bar is still applied after the search
+    /// rather than inside it — now to the maximum the sweep found rather than
+    /// to the frontier.
     ///
     /// The synthetic path here is exactly that shape: admissible up to
     /// `t = 0.4`, worth more than [`FIT_QUANT`] only above `t = 0.36`. The two
@@ -11272,6 +11601,61 @@ mod tests {
             out.readings.unwrap().fan,
             Some(0.0),
             "…and be the admissible outcome, not the last probe"
+        );
+    }
+
+    /// v1.2.4 — the search takes the BEST-PAYING admissible shrink, not the
+    /// strongest one.
+    ///
+    /// v1.2.3 judged the gain at exactly one point, the admissible frontier,
+    /// and said so: a shrink that pays only at a milder `t` was not found, and
+    /// the two-family HSL pair was refused although every `t ≤ 0.25` on its
+    /// path was admissible and paid 0.0019–0.0033. The path here has that
+    /// shape written down — admissible up to `t = 0.4`, gain peaking at
+    /// `t = 0.2` and falling to a tenth of [`FIT_QUANT`] at the frontier — so
+    /// a frontier-only search must refuse it and a sweep must find the peak.
+    /// Both premises are asserted before the search runs, so the fixture
+    /// cannot drift into testing something else.
+    #[test]
+    fn the_search_takes_the_best_paying_admissible_shrink() {
+        let err_without = 0.05f32;
+        // gain(t) = 0.0033 − 0.06·(t − 0.2)², so the peak is 0.0033 at
+        // t = 0.2 and the frontier at t = 0.4 pays 0.0009 — half the bar.
+        let gain = |t: f32| 0.0033 - 0.06 * (t - 0.2) * (t - 0.2);
+        let judge = |t: f32| CastOutcome {
+            readings: Some(CastReadings {
+                ratio: 1.0 - gain(t) / err_without,
+                bound: CAST_ACCEPT_RATIO,
+                foreign: Some(0.0),
+                rehued: 0.0,
+                fan: Some(if t <= 0.4 { 0.0 } else { 4.0 * FAN_PROJECT_DEG }),
+            }),
+            ..CastOutcome::default()
+        };
+        assert!(
+            judge(0.4).readings.unwrap().fan.unwrap() <= FAN_PROJECT_DEG
+                && judge(0.45).readings.unwrap().fan.unwrap() > FAN_PROJECT_DEG,
+            "premise: the admissible frontier is at t = 0.4"
+        );
+        assert!(gain(0.4) < FIT_QUANT, "premise: the FRONTIER does not pay ({})", gain(0.4));
+        assert!(gain(0.2) > FIT_QUANT, "premise: the interior peak does ({})", gain(0.2));
+
+        let (t, out) = search_cast_projection_t(err_without, judge)
+            .expect("an admissible paying shrink exists at t = 0.2 and must be found");
+        assert!(
+            (t - 0.2).abs() <= 0.01,
+            "the search must land on the gain PEAK, not the frontier: {t}"
+        );
+        assert!(
+            gain(t) > gain(0.4),
+            "…so it must pay more than the frontier does ({} vs {})",
+            gain(t),
+            gain(0.4)
+        );
+        assert_eq!(
+            out.readings.unwrap().fan,
+            Some(0.0),
+            "…and carry the winning probe's own readings"
         );
     }
 
@@ -12149,9 +12533,9 @@ mod tests {
     /// R18: the pass-through exemption's exact borders, patrolled (the R17
     /// disclosure left the band unmonitored). A rotation invisible on both
     /// ends (cc < 0.05 ∧ wc < 0.09) is exempt; crossing EITHER visibility
-    /// floor puts it straight back in the census. If a real pair ever
-    /// wrecks a region inside the exempt band, ROT_VISIBLE_* is the
-    /// suspect (see the const doc).
+    /// floor puts it straight back in the census. How much the band forgives
+    /// on real frames is measured in [`ROT_VISIBLE_AFTER`]'s doc — it is not
+    /// a rounding error, and the borders below are what keeps it bounded.
     #[test]
     fn the_pass_through_exemption_borders_are_patrolled() {
         let share = |c: [f32; 3], w: [f32; 3]| rehued_share(&vec![c; 100], &vec![w; 100]);
@@ -12521,10 +12905,30 @@ mod tests {
     /// produce nothing was also the only one the user could not read about.
     ///
     /// The decision is pinned as a PURE function because no fixture in this
-    /// repo reaches the ratio arm without a hue gate also firing (measured:
-    /// of the six fixture pairs, 13 stage runs accept, 8 are hue-only
-    /// rejections and 5 are both) — an end-to-end test would therefore pass
-    /// on the hue note and prove nothing about the arm it is named for.
+    /// repo reaches the ratio arm AT ALL — an end-to-end test would pass on
+    /// some other gate's note and prove nothing about the arm it is named
+    /// for. The old count here ("of the six fixture pairs, 13 stage runs
+    /// accept, 8 are hue-only rejections and 5 are both") was written when
+    /// the stage had three gates; it has four since v1.2.3, and the count is
+    /// re-measured on this tree by instrumenting the gate block and running
+    /// the whole library battery in its own pass (2026-09-02, with the shared
+    /// five-pair calibration corpus present): 545 attributable stage runs —
+    ///
+    /// | outcome                              | runs |
+    /// |--------------------------------------|------|
+    /// | admitted, curves shipped             |  111 |
+    /// | admitted by projection               |   29 |
+    /// | refused, rotation budget alone       |  265 |
+    /// | refused, hue fan alone               |   67 |
+    /// | refused, rotation budget AND hue fan |   44 |
+    /// | no curves fitted (nothing to judge)  |   29 |
+    /// | refused by the aggregate ratio       |    0 |
+    ///
+    /// Zero, not "always with a hue gate": on every pair in this repo one of
+    /// the three DESTINATION gates convicts first, or the curves pay. So the
+    /// arm's note is verified here, where the decision is, and the census
+    /// above is the reason that is the right place for it rather than a
+    /// smaller ambition.
     #[test]
     fn a_silently_rejected_colour_stage_now_says_so() {
         use crate::rationale::keys;
@@ -13923,6 +14327,68 @@ mod tests {
         );
     }
 
+    /// (d') The 4a' arbitration, pinned on a SYNTHETIC pair. Stage 4a judges
+    /// its mixer on a render the cast stage has not touched; the arbitration
+    /// after it takes that verdict again on the FINISHED frame, against the
+    /// same recipe with the mixer given back and the cast refitted on THAT
+    /// state. Until this test the only frame that reached it was the viaduct
+    /// crop out of the calibration corpus, so on a bare checkout the
+    /// arbitration was live and unwatched — deleting the loop left the whole
+    /// battery green.
+    ///
+    /// `two_family_hsl_pair(50.0)` is the pin because the SAME frame gives
+    /// both answers, one strength apart. Measured 2026-09-02 by counting the
+    /// loop's iterations: at the lowest strength stage 4a hands the
+    /// arbitration a non-neutral mixer, the finished frame says it costs
+    /// something, and three halvings later it is gone — while the fit still
+    /// IMPROVES (0.0328 -> 0.0205), which is what distinguishes an
+    /// arbitrated withdrawal from the terminal do-no-harm reset. At full
+    /// strength the same frame keeps its mixer: the arbitration is reading
+    /// the state, not disliking the fixture.
+    #[test]
+    fn the_finished_frame_arbitration_withdraws_a_synthetic_mixer_that_costs_it() {
+        let (src, tgt) = two_family_hsl_pair(50.0);
+        let solve = |s: f32| {
+            fit_recipe_from_with(
+                &src,
+                &tgt,
+                &EditRecipe::default(),
+                FitOptions { strength: crate::recipe::GradeStrength::new(s), provider: None },
+            )
+        };
+        let low = solve(0.0);
+        assert_eq!(low.mode, FitMode::Full, "premise: this pair is fitted as one frame");
+        assert!(
+            !low.notes.iter().any(|n| n.key == crate::rationale::keys::FIT_NOTE_REGRESSED),
+            "premise: no terminal reset stands behind the neutral mixer"
+        );
+        assert!(
+            low.err_after < low.err_before - 0.01,
+            "premise: the fit itself succeeds here ({:.4} -> {:.4})",
+            low.err_before,
+            low.err_after
+        );
+        assert!(
+            low.recipe.hsl.is_neutral(),
+            "the finished frame says the mixer costs it, so it must go: {:?}",
+            low.recipe.hsl
+        );
+        assert!(
+            hsl_note(&low, crate::rationale::keys::FIT_NOTE_HSL_WITHDRAWN_ERROR).is_some(),
+            "…and say so: {}",
+            low.recipe.rationale
+        );
+        // The other answer, same frame: at full strength the mixer earns its
+        // place on the finished frame and is delivered.
+        let high = solve(1.0);
+        assert_eq!(high.mode, FitMode::Full);
+        assert!(
+            !high.recipe.hsl.is_neutral(),
+            "the arbitration reads the state, not the fixture: {:?}",
+            high.recipe.hsl
+        );
+    }
+
     /// (e) The strength dial really turns this stage: the ceiling is monotone
     /// across the three stops AND it binds at each of them.
     #[test]
@@ -13956,6 +14422,498 @@ mod tests {
         assert!(high > cap(0.65), "strength 1 spends past the default ceiling: {high}");
     }
 
+    /// v1.2.4 B1 — what the fan gate costs on a REAL two-temperature scene,
+    /// measured instead of assumed.
+    ///
+    /// v1.2.3 shipped the gate with its cost measured only on synthetic
+    /// two-temperature frames (`two_temperature_coast`), and said so: on a
+    /// real photograph lit at two colour temperatures at once the gate could
+    /// in principle refuse a cast the photograph genuinely needs. Two such
+    /// photographs were then found in the user's own library by searching
+    /// 169 per-exemplar descriptions for mixed lighting and looking at the
+    /// finished renders: `p40`, a night street under neon and shop signs
+    /// beneath a fiery sunset sky, and `p41`, a building at twilight with a
+    /// warm horizon band, a deep blue sky and a warm lamp.
+    ///
+    /// The measured answer (2026-09-02, both pairs at the shipped default)
+    /// is that the gate costs these pairs NOTHING, and the margin is the
+    /// interesting part: `p40`'s fitted cast reads 13.5° of added fan against
+    /// the 15° line — 1.5° of headroom, the closest any real pair in the
+    /// corpus comes — and ships ADMITTED as fitted, 0.0788 → 0.0335 at
+    /// confidence 0.612. `p41`'s reads 9.0°, and its cast is refused by a
+    /// different gate entirely (the pixel-aligned re-hue veto), so the fan
+    /// gate is not what withheld it there either.
+    ///
+    /// Both pairs are OPTIONAL, like every other corpus pair: absent, the
+    /// test says so and passes, and the synthetic two-temperature fixture
+    /// carries the refusal side of the same question on its own.
+    ///
+    /// Mutation: halve [`FAN_DEG`] and `p40` goes from admitted to convicted,
+    /// red on the fan-margin assertion.
+    #[test]
+    fn the_fan_gate_costs_a_real_two_temperature_pair_nothing() {
+        use crate::rationale::keys;
+        let Some(root) = calibration_corpus() else { return };
+        for (code, want_fan, want_before, want_after, want_conf) in [
+            ("p40", 13.5f32, 0.0788f32, 0.0335f32, 0.612f32),
+            ("p41", 9.0, 0.0782, 0.0413, 0.437),
+        ] {
+            let raw = root.join(format!("{code}.arw"));
+            let target_path = root.join(format!("{code}-target.jpg"));
+            if !raw.is_file() || !target_path.is_file() {
+                eprintln!("SKIPPED {code}: the two-temperature pair is not in this corpus");
+                continue;
+            }
+            // Loaded exactly as CLI `match` loads a RAW: the frame developed
+            // at the default recipe on a 2048 edge, against the calibration
+            // recipe as the base.
+            let src = render::render_to_image(&raw, &EditRecipe::default(), None, Some(2048))
+                .expect("develop the two-temperature RAW");
+            let tgt = image::open(target_path).expect("the finished rendition");
+            let base = crate::pipeline::calibration_recipe(crate::pipeline::fit_calibration(&raw));
+            let report = fit_recipe_from(&src, &tgt, &base);
+            let candidate = cast_stage_candidate_from(&src, &tgt, &base);
+            let evidence = evidence_model(&candidate.cur, &candidate.tp);
+            let (share, fan, _) =
+                hue_fan_weighted(&candidate.cur, &candidate.with_px, &evidence)
+                    .expect("a two-temperature frame has a region-sized hue class");
+            eprintln!(
+                "TWO_TEMPERATURE {code} share={share:.3} fitted_fan={fan:.1} err={:.6}->{:.6} conf={:.6}",
+                report.err_before, report.err_after, report.recipe.confidence
+            );
+            assert!(
+                (fan - want_fan).abs() <= 0.6,
+                "{code}: the fitted cast's fan moved off the measured {want_fan}°: {fan:.1}°"
+            );
+            assert!(
+                fan < FAN_DEG,
+                "{code}: the fan gate now convicts a real two-temperature pair ({fan:.1}° \
+                 against {FAN_DEG}°) — that is the cost this test exists to measure"
+            );
+            assert!(
+                !report.notes.iter().any(|n| n.key == keys::FIT_NOTE_CAST_HUE_FANNED
+                    || n.key == keys::FIT_NOTE_CAST_PROJECTED),
+                "{code}: …so neither the refusal nor the projection may appear: {}",
+                report.recipe.rationale
+            );
+            assert!(
+                (report.err_before - want_before).abs() <= 0.002
+                    && (report.err_after - want_after).abs() <= 0.002,
+                "{code}: residual moved off the measured {want_before} -> {want_after}: {:.6} -> {:.6}",
+                report.err_before,
+                report.err_after
+            );
+            assert!(
+                (report.recipe.confidence - want_conf).abs() <= 0.02,
+                "{code}: confidence moved off the measured {want_conf}: {}",
+                report.recipe.confidence
+            );
+        }
+    }
+
+    /// A frame whose only colour evidence is a per-band HUE gap: one field
+    /// rotated, its chroma and luminance untouched.
+    ///
+    /// The rest of the frame is a neutral luminance ramp, so the joint
+    /// LUMINANCE x CHROMA buckets are identical between the two builds and the
+    /// only thing that moved is where the coloured field sits on the hue
+    /// circle.
+    fn band_rotation_frame(hue: f32) -> DynamicImage {
+        let (w, h) = (192u32, 128u32);
+        let mut img = RgbImage::new(w, h);
+        for y in 0..h {
+            for x in 0..w {
+                let level = 0.20 + 0.60 * y as f32 / (h - 1) as f32;
+                let p = if x < w - w / 8 {
+                    [level, level, level]
+                } else {
+                    // HSL -> RGB, written out because the engine's own
+                    // converter is private to `render` and this fixture wants
+                    // one hue at a fixed chroma and luminance.
+                    let s = 0.22f32;
+                    let c = (1.0 - (2.0 * level - 1.0).abs()) * s;
+                    let hp = hue.rem_euclid(360.0) / 60.0;
+                    let xx = c * (1.0 - (hp % 2.0 - 1.0).abs());
+                    let (r, g, b) = match hp as u32 {
+                        0 => (c, xx, 0.0),
+                        1 => (xx, c, 0.0),
+                        2 => (0.0, c, xx),
+                        3 => (0.0, xx, c),
+                        4 => (xx, 0.0, c),
+                        _ => (c, 0.0, xx),
+                    };
+                    let m = level - c / 2.0;
+                    [r + m, g + m, b + m]
+                };
+                img.put_pixel(
+                    x,
+                    y,
+                    image::Rgb(p.map(|c| (c.clamp(0.0, 1.0) * 255.0).round() as u8)),
+                );
+            }
+        }
+        DynamicImage::ImageRgb8(img)
+    }
+
+    /// v1.2.4 A20 — the BAND-CENTROID arm of `residual_is_colour_shaped`,
+    /// tested on its own.
+    ///
+    /// The function has two arms and only one of them had a fixture. The
+    /// chromatic-bucket arm answers "a value range of this frame's colour is
+    /// far off and the neutral ranges at the same brightness are not"; the
+    /// band-centroid arm answers "a populated hue band's centroid is more
+    /// than [`UNREPRESENTED_HUE_DEG`] away from the target's", which is the
+    /// one axis the per-band mixer is forbidden to solve. A residual made
+    /// ONLY of a hue rotation leaves the first arm silent — rotating a hue
+    /// changes neither the luminance nor the chroma distribution the joint
+    /// buckets are built from — so this pair separates them: 30 degrees of
+    /// Blue-band rotation, every chromatic bucket well under
+    /// [`UNREPRESENTED_CHROMATIC_ERR`], and the disclosure still names `hsl`.
+    ///
+    /// Mutation: raise [`UNREPRESENTED_HUE_DEG`] to 200 (past anything a hue
+    /// circle can produce) and this goes red on the colour-shape assertion,
+    /// with the bucket-arm premise still passing — which is what proves the
+    /// centroid arm is what was speaking.
+    #[test]
+    fn a_band_centroid_gap_alone_makes_the_residual_colour_shaped() {
+        let after = band_rotation_frame(215.0);
+        let target = band_rotation_frame(255.0);
+        let (a_img, t_img) = analysis_pair(&after, &target);
+        let after_px = pixels_of(&a_img);
+        let tp = pixels_of(&t_img);
+        let evidence = evidence_model_for(&after_px, &tp, a_img.width(), a_img.height());
+
+        // PREMISE — the chromatic-BUCKET arm is silent: only the hue moved,
+        // so the luminance x chroma distributions are the same on both sides.
+        let buckets = crate::fit_zoned::joint_buckets_with_evidence(
+            &after_px,
+            &tp,
+            Some(&evidence.source_weights),
+            Some(&evidence.target_weights),
+        );
+        let worst_of = |chromatic: bool| {
+            buckets
+                .iter()
+                .filter(|b| b.chromatic == chromatic)
+                .map(|b| b.err)
+                .fold(0.0f32, f32::max)
+        };
+        let (chromatic_worst, neutral_worst) = (worst_of(true), worst_of(false));
+        eprintln!(
+            "BAND_CENTROID chromatic_worst={chromatic_worst:.4} neutral_worst={neutral_worst:.4}"
+        );
+        assert!(
+            chromatic_worst < UNREPRESENTED_CHROMATIC_ERR
+                || chromatic_worst < neutral_worst + UNREPRESENTED_CHROMATIC_LEAD,
+            "premise: the bucket arm must be silent here ({chromatic_worst:.4} vs \
+             {neutral_worst:.4})"
+        );
+
+        // …and the CENTROID arm is what speaks.
+        assert!(
+            residual_is_colour_shaped(&after_px, &tp, &evidence),
+            "a populated band's centroid {UNREPRESENTED_HUE_DEG}° off is a per-band colour job"
+        );
+        let note = unrepresented_note(
+            &EditRecipe::default(),
+            &after_px,
+            &tp,
+            0.10,
+            FitMode::Full,
+            &evidence,
+        )
+        .expect("a colour-shaped residual above the floor is disclosed");
+        let controls = note
+            .args
+            .iter()
+            .find(|(k, _)| *k == "controls")
+            .map(|(_, v)| v.as_str())
+            .unwrap_or_default();
+        assert!(
+            controls.contains("hsl"),
+            "…and the disclosure names the axis the mixer cannot reach: {controls:?}"
+        );
+    }
+
+    /// v1.2.4 A7 — the PROJECTION's two abstaining clauses, rendered and
+    /// asserted rather than merely reachable in principle.
+    ///
+    /// A projected cast discloses at least what an admitted one does, and two
+    /// of those readings can decline to answer: `foreign` when the target
+    /// carries no hue evidence to be foreign to, `fan` when no hue class is
+    /// region-sized across two luma slices. Both abstentions had keys and
+    /// translations and neither had ever been produced by a fixture, so
+    /// nothing in the tree said what they print — and the failure mode they
+    /// exist to prevent is a digit: `0.000` for a measurement never taken.
+    ///
+    /// The abstention itself is read off a FIXTURE rather than hand-written:
+    /// the same colourless frame the admission's abstention test uses, put
+    /// through the two censuses the projection reads, so "no region-sized
+    /// class / no foreign class" is a measurement here and not an assumption.
+    /// The clauses are then built from those two `None`s.
+    ///
+    /// Mutation: make `cast_projection_notes` fall back to
+    /// `Some(0.0)` for either reading and the digit assertions go red.
+    #[test]
+    fn an_unmeasured_projected_reading_says_so_instead_of_printing_a_zero() {
+        use crate::rationale::keys;
+        // 1) The PLUMBING, measured on a frame with no chromatic mass at all.
+        let grey = DynamicImage::ImageRgb8(RgbImage::from_fn(48, 48, |x, y| {
+            let v = (24 + ((x * 3 + y * 2) % 200)) as u8;
+            image::Rgb([v, v, v])
+        }));
+        let (s, t) = analysis_pair(&grey, &grey);
+        let tp = pixels_of(&t);
+        let cur = pixels_of(&render::develop_preview(&s, &EditRecipe::default()));
+        let evidence = evidence_model(&cur, &tp);
+        assert_eq!(
+            foreign_hue_bins_weighted(&tp, &evidence.target_hue_weights),
+            None,
+            "a colourless target gives the foreign-hue census nothing to be foreign to"
+        );
+        assert_eq!(
+            hue_fan_weighted(&cur, &cur, &evidence),
+            None,
+            "…and no hue class is region-sized across two luma slices"
+        );
+
+        // 2) The DISCLOSURE: a projection carrying both abstentions writes
+        //    the not-measurable clauses, in the order the admission's are in,
+        //    and neither prints a number.
+        let abstained = cast_projection_notes(CastProjection {
+            share: 0.917,
+            fan_before: 37.6,
+            t: 0.363,
+            fan_after: None,
+            ratio: 0.525,
+            bound: CAST_ACCEPT_RATIO,
+            rehued: 0.0,
+            foreign: None,
+        });
+        let keys_of: Vec<&str> = abstained.iter().map(|n| n.key).collect();
+        assert_eq!(
+            keys_of,
+            vec![
+                keys::FIT_NOTE_CAST_PROJECTED,
+                keys::FIT_NOTE_CAST_ADMITTED_FOREIGN_NA,
+                keys::FIT_NOTE_CAST_PROJECTED_FAN_NA,
+            ],
+            "a projection that could not measure either reading still says three things"
+        );
+        for note in &abstained[1..] {
+            assert!(note.args.is_empty(), "a not-measurable clause carries no reading");
+            let text = crate::rationale::render_one(note);
+            assert!(
+                !text.chars().any(|c| c.is_ascii_digit()),
+                "an unmeasured reading must not print a number: {text}"
+            );
+            assert!(
+                text.contains("not measurable"),
+                "an unmeasured reading must SAY it was not measured: {text}"
+            );
+        }
+
+        // 3) …and the same abstention on the SEARCH side, where it has to
+        //    mean the opposite of a refusal: a census with no opinion cannot
+        //    put a candidate over the projection target, so the shrink is
+        //    admissible and the pair is rescued rather than refused for want
+        //    of a reading.
+        let judged = search_cast_projection_t(0.05, |t| CastOutcome {
+            readings: Some(CastReadings {
+                ratio: 1.0 - 0.1 * t,
+                bound: CAST_ACCEPT_RATIO,
+                foreign: None,
+                rehued: 0.0,
+                fan: None,
+            }),
+            ..CastOutcome::default()
+        });
+        assert!(
+            judged.is_some(),
+            "an abstaining fan census must CLEAR the projection target, not fail it"
+        );
+    }
+
+    /// v1.2.4 A39 — the TERMINAL delivered-fan check, withdrawing arm.
+    ///
+    /// The fan gate is a calibration applied to one stage's candidate, and the
+    /// 4b do-no-harm loop re-fits that stage after every saturation step; the
+    /// FAN_DEG = 20 experiment showed the loop walking to a 19° cast that
+    /// shipped and left 20.6° in the delivered sky. This is the structural
+    /// re-read that closes that: the same census, on the finished render
+    /// against the untouched base.
+    ///
+    /// The subject is the coast pair's cast AS FITTED — the curves the gate
+    /// convicts at 37.6° and that therefore never ship — put into the recipe
+    /// by hand, which is exactly the state a loop that walked around the gate
+    /// would hand over.
+    ///
+    /// Mutation: widen `delivered_fan_conviction`'s test to `fan > 4.0 *
+    /// FAN_DEG` and this goes red on its first assertion.
+    #[test]
+    fn the_terminal_check_takes_the_curves_out_of_a_fanning_render() {
+        let (src, tgt) = (coast(false), coast(true));
+        let (s_img, t_img) = analysis_pair(&src, &tgt);
+        let base = EditRecipe::default();
+        let sp = pixels_of(&render::develop_preview(&s_img, &base));
+        let tp = pixels_of(&t_img);
+        let evidence = evidence_model_for(&sp, &tp, s_img.width(), s_img.height());
+        let mut recipe = cast_stage_candidate(&src, &tgt).with;
+        assert!(!recipe.red_curve.is_empty(), "premise: the fixture demanded a cast");
+        let mut end_px = pixels_of(&render::develop_preview(&s_img, &recipe));
+        let (share, fan) = delivered_fan_conviction(&sp, &end_px, &evidence)
+            .expect("premise: the as-fitted cast fans the delivered render past the limit");
+        eprintln!("TERMINAL_FAN as-fitted share={share:.3} fan={fan:.1}");
+        assert!(fan > FAN_DEG, "premise: {fan:.1}° must be over the {FAN_DEG}° line");
+
+        let acted = withdraw_curves_for_delivered_fan(
+            &s_img,
+            &sp,
+            &evidence,
+            &mut recipe,
+            &mut end_px,
+        )
+        .expect("a convicted delivered render must be acted on");
+        assert_eq!(acted.2, None, "withdrawing the curves must clear the reading");
+        assert!(
+            recipe.red_curve.is_empty()
+                && recipe.green_curve.is_empty()
+                && recipe.blue_curve.is_empty(),
+            "…by taking the three channel curves out of the recipe"
+        );
+        assert_eq!(
+            delivered_fan_conviction(&sp, &end_px, &evidence),
+            None,
+            "…and the render the caller keeps must be the one that clears"
+        );
+    }
+
+    /// …and the other arm: a delivered fan the curves did not cause is
+    /// DISCLOSED, not paid for.
+    ///
+    /// Withdrawing a control that is not the cause would cost the user look
+    /// error for nothing, so when the reading survives the withdrawal the
+    /// curves go back exactly as they were and the numbers are published
+    /// instead. The case is not hypothetical: `p36` delivers 12.9° of added
+    /// fan carrying no cast curves at all. Here it is driven at full size by
+    /// a colour-grade split — shadows and highlights sent to opposite hues,
+    /// which is a per-luminance hue move by construction — and the recipe
+    /// DOES carry channel curves, deliberately: one shape shared by all three
+    /// channels, the achromatic half of the projection path, which moves
+    /// contrast and cannot sort a hue class by luminance. Without them the
+    /// arm would be vacuous — withdrawing nothing from a recipe that has
+    /// nothing changes nothing, and the mutation below could not fail.
+    ///
+    /// Mutation: move `*recipe = without; *end_px = px;` out of the
+    /// `still.is_none()` guard so the withdrawal is unconditional, and this
+    /// goes red on the "unchanged" assertion.
+    #[test]
+    fn a_delivered_fan_the_curves_did_not_cause_is_disclosed_not_withdrawn() {
+        let (src, tgt) = (coast(false), coast(true));
+        let (s_img, t_img) = analysis_pair(&src, &tgt);
+        let sp = pixels_of(&render::develop_preview(&s_img, &EditRecipe::default()));
+        let tp = pixels_of(&t_img);
+        let evidence = evidence_model_for(&sp, &tp, s_img.width(), s_img.height());
+        let mut recipe = EditRecipe::default();
+        recipe.color_grade.shadow_hue = 30.0;
+        recipe.color_grade.shadow_sat = 100.0;
+        recipe.color_grade.highlight_hue = 210.0;
+        recipe.color_grade.highlight_sat = 100.0;
+        recipe.color_grade.blending = 0.0;
+        let shared = vec![
+            crate::recipe::CurvePoint { input: 0, output: 0 },
+            crate::recipe::CurvePoint { input: 128, output: 134 },
+            crate::recipe::CurvePoint { input: 255, output: 255 },
+        ];
+        recipe.red_curve.clone_from(&shared);
+        recipe.green_curve.clone_from(&shared);
+        recipe.blue_curve = shared;
+        let before = recipe.clone();
+        let mut end_px = pixels_of(&render::develop_preview(&s_img, &recipe));
+        let (share, fan) = delivered_fan_conviction(&sp, &end_px, &evidence)
+            .expect("premise: the colour-grade split fans the render past the limit");
+        eprintln!("TERMINAL_FAN uncaused share={share:.3} fan={fan:.1}");
+
+        let (_, reported, still) = withdraw_curves_for_delivered_fan(
+            &s_img,
+            &sp,
+            &evidence,
+            &mut recipe,
+            &mut end_px,
+        )
+        .expect("a convicted delivered render must be acted on");
+        assert_eq!(reported, fan, "the disclosure reports the reading it convicted on");
+        let still = still.expect("no curve was the cause, so the reading must survive");
+        assert!(
+            still > FAN_DEG,
+            "…and it must still be over the line to be reported ({still:.1})"
+        );
+        assert!(
+            !recipe.red_curve.is_empty(),
+            "premise: there were curves to withdraw, so keeping them means something"
+        );
+        assert_eq!(recipe, before, "the recipe must come back UNCHANGED");
+        assert_eq!(
+            delivered_fan_conviction(&sp, &end_px, &evidence).map(|(_, f)| f),
+            Some(fan),
+            "…and so must the render the caller keeps"
+        );
+    }
+
+    /// The standing margin the check leaves, asserted so a change that eats it
+    /// says so here rather than by silently withdrawing a fit's cast curves.
+    ///
+    /// Measured 2026-09-02 across the whole library battery: 108 finished
+    /// Full-mode renders, the widest delivered fan among them the coast
+    /// fixture's 14.2° against the 15° line. This walks the fixtures that
+    /// carry a real cast and pins both halves — every one clears, and the
+    /// worst is close enough to the line to be worth reading.
+    ///
+    /// Mutation: set `FAN_PROJECT_DEG` to `FAN_DEG` (let the projection keep
+    /// twice the fan it is allowed) and the coast pair's delivered reading
+    /// goes over the line, red here.
+    #[test]
+    fn no_shipped_fit_delivers_a_hue_fan_past_the_limit() {
+        let panel_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/images");
+        let panel = image::open(panel_root.join("showcase-cornwall-reverse-fit.jpg")).unwrap();
+        let (hz_src, hz_tgt) = haze_pair();
+        let (tf_src, tf_tgt) = two_family_hsl_pair(50.0);
+        let pairs: Vec<(&str, DynamicImage, DynamicImage)> = vec![
+            ("coast", coast(false), coast(true)),
+            ("two-temperature coast", coast(false), two_temperature_coast()),
+            ("haze", hz_src, hz_tgt),
+            ("two-family hsl", tf_src, tf_tgt),
+            (
+                "cornwall panel",
+                panel.crop_imm(0, 136, 532, 356),
+                panel.crop_imm(535, 136, 530, 356),
+            ),
+        ];
+        let mut worst = 0.0f32;
+        for (name, src, tgt) in &pairs {
+            let report = fit_recipe(src, tgt);
+            let (s_img, t_img) = analysis_pair(src, tgt);
+            let sp = pixels_of(&render::develop_preview(&s_img, &EditRecipe::default()));
+            let tp = pixels_of(&t_img);
+            let evidence = evidence_model_for(&sp, &tp, s_img.width(), s_img.height());
+            let px = pixels_of(&render::develop_preview(&s_img, &report.recipe));
+            let reading = hue_fan_weighted(&sp, &px, &evidence);
+            eprintln!("DELIVERED_FAN {name} {reading:?}");
+            assert_eq!(
+                delivered_fan_conviction(&sp, &px, &evidence),
+                None,
+                "{name} delivered a hue fan past {FAN_DEG}°: {reading:?}"
+            );
+            if let Some((_, fan, _)) = reading {
+                worst = worst.max(fan);
+            }
+        }
+        assert!(
+            (worst - 14.2).abs() < 0.5,
+            "the worst delivered fan moved off the measured 14.2°: {worst:.1}"
+        );
+    }
+
     /// (f) Once the mixer has closed a band gap, the residual the
     /// unrepresented-controls disclosure reads no longer has the shape of a
     /// per-band colour job — and while the gap is only PARTLY closed it still
@@ -13987,47 +14945,83 @@ mod tests {
             residual_is_colour_shaped(&partial_px, &tp, &evidence),
             "a HALF-closed band gap is still a per-band colour residual"
         );
-        // …and the disclosure names it. That is where this test has always
-        // been, and CAST-2's fix-up put it back; the round trip is worth
-        // recording, because it is what the projection's soundness fix bought.
-        // With the projection's gain bar tested INSIDE the bisection, this
-        // pair shipped a rescued cast worth 0.0006 of look error — a third of
-        // `FIT_QUANT` — which nibbled the finished residual from 0.0256 to
-        // 0.0236, under the `FIT_QUANT_CLEAN` = 0.025 floor where
-        // `unrepresented_note` returns early because "there is nothing left to
-        // explain", and cost this pair its `hsl` sentence for a gain the fit
-        // does not consider a difference. With the bar applied ONCE, to the
-        // winner of an admissibility-only search, the rescue is refused (the
-        // pair's cast is fan-convicted at 15.5° and stays withheld) and the
-        // residual is back above the floor.
-        //
-        // Both halves are asserted with their numbers because the margin is
-        // thin: measured 2026-09-02 on this tree, 0.025648 against a floor of
-        // 0.025 — 0.0006 of headroom, so a move either way must fail here
-        // rather than switch a disclosure off in silence.
+        // …and whether the disclosure NAMES it is a second question, decided
+        // by the residual's SIZE rather than its shape, and on this pair the
+        // v1.2.4 projection sweep moved it. Measured 2026-09-02 on this tree:
+        // the cast the fan gate convicts at 15.5° is now shrunk to t = 0.318,
+        // whose look-error ratio is 0.885 — a gain of 0.0033, nearly twice
+        // `FIT_QUANT` — which takes the finished residual 0.032837 → 0.022693,
+        // under the `FIT_QUANT_CLEAN` = 0.025 floor at which
+        // `unrepresented_note` returns early because there is nothing left to
+        // explain. So this pair ships a better fit and a shorter rationale,
+        // and both halves are asserted here with their numbers so neither can
+        // move in silence. The `hsl` contract itself is not weakened — it is
+        // asserted below on a WIDER gap, where the same half-closed shape
+        // survives at a residual the floor does not silence.
         assert!(
-            (partial.err_after - 0.0256).abs() < 0.001,
-            "the partial fit's finished residual moved off the measured 0.0256: {}",
+            (partial.err_after - 0.0227).abs() < 0.001,
+            "the partial fit's finished residual moved off the measured 0.0227: {}",
             partial.err_after
         );
         assert!(
-            partial.err_after > FIT_QUANT_CLEAN,
-            "…and it must stay ABOVE the disclosure floor {FIT_QUANT_CLEAN} \
-             (measured margin 0.0006): {}",
+            partial.err_after < FIT_QUANT_CLEAN,
+            "…which is what puts it UNDER the disclosure floor {FIT_QUANT_CLEAN}: {}",
             partial.err_after
         );
         assert!(
-            !partial
+            partial
                 .notes
                 .iter()
                 .any(|n| n.key == crate::rationale::keys::FIT_NOTE_CAST_PROJECTED),
-            "…and no rescued cast ships on this pair: {}",
+            "…and the rescued cast is what bought that: {}",
             partial.recipe.rationale
         );
         assert!(
-            names_hsl(&partial),
-            "…so the disclosure must still name it: {}",
+            !names_hsl(&partial),
+            "…so the residual is below the size at which the disclosure speaks: {}",
             partial.recipe.rationale
+        );
+
+        // The `hsl` half of the contract, on a gap +/-18 cannot come close to
+        // closing: +/-80 demanded. The mixer still attaches, the residual is
+        // still a per-band colour job, and at 0.0601 it is well clear of the
+        // floor — so the sentence that CAST-2's fix-up put back is still
+        // asserted in the tree, on the pair that can carry it.
+        let (wide_src, wide_tgt) = two_family_hsl_pair(80.0);
+        let wide = fit_recipe_from_with(
+            &wide_src,
+            &wide_tgt,
+            &base,
+            FitOptions { strength: crate::recipe::GradeStrength::new(0.65), provider: None },
+        );
+        let (wide_s_img, wide_t_img) = analysis_pair(&wide_src, &wide_tgt);
+        let wide_px = pixels_of(&render::develop_preview(&wide_s_img, &wide.recipe));
+        let wide_tp = pixels_of(&wide_t_img);
+        let wide_evidence = evidence_model_for(
+            &pixels_of(&render::develop_preview(&wide_s_img, &base)),
+            &wide_tp,
+            wide_s_img.width(),
+            wide_s_img.height(),
+        );
+        assert!(!wide.recipe.hsl.is_neutral(), "premise: the mixer attaches on the wide gap too");
+        assert!(
+            (wide.err_after - 0.0601).abs() < 0.002,
+            "the wide pair's residual moved off the measured 0.0601: {}",
+            wide.err_after
+        );
+        assert!(
+            wide.err_after > FIT_QUANT_CLEAN,
+            "…and it must stay ABOVE the disclosure floor {FIT_QUANT_CLEAN}: {}",
+            wide.err_after
+        );
+        assert!(
+            residual_is_colour_shaped(&wide_px, &wide_tp, &wide_evidence),
+            "a gap this far past the ceiling is still a per-band colour residual"
+        );
+        assert!(
+            names_hsl(&wide),
+            "…so the disclosure must still name it: {}",
+            wide.recipe.rationale
         );
 
         // Strength 1: the ceiling now covers the demand. The counterfactual is
