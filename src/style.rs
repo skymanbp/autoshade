@@ -617,6 +617,97 @@ pub const LOOK_TAGS_K: usize = 4;
 /// dressing a zero up as a target.
 pub const COLOUR_HABIT_FLOOR: f32 = 5.0;
 
+/// The Style value at which the retrieved habits stop being a ceiling and
+/// become the target.
+///
+/// NOT a new number: this is the `strength.get() >= 0.85` literal that has
+/// sat inside `StyleIndex::render_reference` since GATE 5. Naming it is what
+/// lets [`StyleVoice::for_style`] be the ONE place that reads it, now that a
+/// second input (the direction) can also decide the voice.
+pub const STYLE_TARGET_MIN: f32 = 0.85;
+
+/// WHOSE aim the style-reference block states.
+///
+/// Until v1.2.3 this was a single `bold` boolean read off the Style axis, so
+/// the block had exactly two things it could say: a CEILING ("stay within
+/// it, do not exceed it") below [`STYLE_TARGET_MIN`], and a TARGET
+/// ("REPRODUCE this look") at or above it. Either way the retrieved library
+/// was the thing to hit, and a free-text direction could only move the
+/// proposal WITHIN it.
+///
+/// MEASURED, 2026-09-01, on the island showcase frame at `--style 1.0
+/// --strength 0.9` against this photographer's own index (169 RAW+XMP
+/// exemplars + 94 finished looks): three directions as far apart as "dark
+/// moody low-key … teal-and-orange", "warm golden tones, film-like grain,
+/// lifted matte shadows" and "vivid saturated colours, punchy high contrast"
+/// developed to per-panel-cell mean HSV S/V of 23/54 · 11/58 · 18/55 — all
+/// three inside the library's own cool hazy register, against the neutral
+/// develop's 17/47. The same three directions with the photographer's own
+/// edits removed from the index separated to 34/38 · 12/61 · 29/65.
+///
+/// User ruling 2026-09-01: **when a direction is given, the photographer's
+/// own edits are background and the direction leads.** [`Self::Background`]
+/// is that third voice. It is chosen by the direction-adherence dial the app
+/// already had — the dial whose entire job is "how strongly should this
+/// direction be followed" — rather than by a fourth control the user would
+/// have to discover.
+///
+/// The NUMBERS the block prints never depend on the voice. They are what the
+/// photographer actually did, and rewriting a measurement to match a dial is
+/// the fabrication this block exists to refuse.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StyleVoice {
+    /// Below [`STYLE_TARGET_MIN`], nothing leading: the habits are a CEILING.
+    Ceiling,
+    /// At or above [`STYLE_TARGET_MIN`], nothing leading: the habits are the
+    /// TARGET to reproduce.
+    Target,
+    /// A non-empty direction at adherence tier `Direct` or `Brief`: the
+    /// habits are BACKGROUND for continuity and the direction overrides
+    /// them. The numeric distillation goes with the voice — see
+    /// [`Self::distils`] and `pipeline::produce_recipe`.
+    Background,
+}
+
+impl StyleVoice {
+    /// The ONE derivation. Every surface that renders or forecasts the block
+    /// (`pipeline::produce_recipe`, the CLI's `style-query`) calls this
+    /// instead of re-deciding from `style >= 0.85` — two hand-written copies
+    /// of that comparison is exactly how the block's wording and the
+    /// pipeline's blend drifted apart before.
+    ///
+    /// A blank or absent direction cannot lead, and a `Hint` direction has
+    /// asked not to; both keep the historical voices, byte for byte
+    /// (`the_no_direction_block_is_byte_identical`).
+    pub fn choose(
+        style: f32,
+        direction: Option<&str>,
+        adherence: crate::recipe::DirectionAdherence,
+    ) -> Self {
+        let leads = direction.is_some_and(|d| !d.trim().is_empty())
+            && matches!(
+                adherence.tier(),
+                crate::recipe::AdherenceTier::Direct | crate::recipe::AdherenceTier::Brief
+            );
+        if leads { Self::Background } else { Self::for_style(style) }
+    }
+
+    /// The historical two-way split, for the entry points that have no
+    /// direction to offer (the gate fixtures, [`StyleIndex::render_reference`]).
+    pub fn for_style(style: f32) -> Self {
+        if style >= STYLE_TARGET_MIN { Self::Target } else { Self::Ceiling }
+    }
+
+    /// Whether this voice also pulls the finished recipe toward the library's
+    /// measured means (`blend_toward`, `style_pull`).
+    ///
+    /// [`Self::Background`] does not, and that is half the ruling: leaving the
+    /// wording as background while the arithmetic still lerped the proposal
+    /// onto the library's mean would have moved the numbers back to exactly
+    /// the place the words had just given up.
+    pub fn distils(self) -> bool { !matches!(self, Self::Background) }
+}
+
 /// The colour floor the STYLE DIAL itself supplies when the neighbours' own
 /// habit is too near zero to be one, as `(hsl band ±, colour-grade wheel
 /// saturation)`.
@@ -3328,10 +3419,30 @@ similar past edits share: {s}"
         ex: &[&StyleExemplar],
         strength: crate::recipe::GradeStrength,
     ) -> Option<String> {
+        self.render_reference_voiced(ex, strength, StyleVoice::for_style(strength.get()))
+    }
+
+    /// [`Self::render_reference`] with the block's VOICE decided by the
+    /// caller ([`StyleVoice`]) rather than by the Style axis alone — which is
+    /// what lets a leading direction turn the same measurements into
+    /// background instead of a target (v1.2.3).
+    ///
+    /// `strength` is still read for one thing only: the dial-allowance arm of
+    /// the colour sentence, which quotes `style_colour_floor`. Every other
+    /// use of it moved into the voice.
+    pub fn render_reference_voiced(
+        &self,
+        ex: &[&StyleExemplar],
+        strength: crate::recipe::GradeStrength,
+        voice: StyleVoice,
+    ) -> Option<String> {
         if ex.is_empty() {
             return None;
         }
-        let bold = strength.get() >= 0.85;
+        // The historical boolean, now DERIVED from the voice: one name for
+        // "the habits are the target", so the four aim clauses below cannot
+        // disagree about which voice is speaking.
+        let bold = matches!(voice, StyleVoice::Target);
         let lines: Vec<String> = ex
             .iter()
             .map(|e| {
@@ -3377,10 +3488,16 @@ similar past edits share: {s}"
             let n = curves.len() as f32;
             let bl = curves.iter().map(|c| c[0]).sum::<f32>() / n;
             let ss = curves.iter().map(|c| c[1]).sum::<f32>() / n;
-            let aim = if bold {
-                "— shape your `tone_curve` at least this strongly; you MAY go further."
-            } else {
-                "— shape your `tone_curve` to a similar gentleness, not stronger."
+            let aim = match voice {
+                StyleVoice::Target => {
+                    "— shape your `tone_curve` at least this strongly; you MAY go further."
+                }
+                StyleVoice::Ceiling => {
+                    "— shape your `tone_curve` to a similar gentleness, not stronger."
+                }
+                StyleVoice::Background => {
+                    "— their habit; the direction may ask for a different tone shape, and it leads."
+                }
             };
             format!(
                 "  THEIR TYPICAL MASTER TONE CURVE: black-lift {bl:+.0}, S-strength {ss:+.0} \
@@ -3408,7 +3525,16 @@ similar past edits share: {s}"
             let (wheel_sat, wheel_lum) = (mean(|f| f.grade[0]), mean(|f| f.grade[1]));
             let shaped =
                 [hue, sat, lum, wheel_sat, wheel_lum].iter().fold(0.0f32, |m, v| m.max(v.abs()));
-            let aim = if !bold {
+            let aim = if matches!(voice, StyleVoice::Background) {
+                // BACKGROUND states the same measurement and then hands the
+                // decision over. Neither a ceiling ("do not exceed") nor a
+                // floor is available to it: both are claims about what THIS
+                // photo should be, and under the 2026-09-01 ruling the
+                // direction is what makes that claim.
+                "that is their colour HABIT, not a target for this photo; where the direction \
+asks for other colour, follow the direction."
+                    .to_string()
+            } else if !bold {
                 "match this LEVEL of colour shaping, do not exceed it.".to_string()
             } else if shaped >= COLOUR_HABIT_FLOOR {
                 "treat this LEVEL of colour shaping as your FLOOR — you may go beyond it."
@@ -3468,10 +3594,16 @@ saturation or luminance band this photo calls for, and at least {grade_pm:.0} of
                     .iter()
                     .map(|(tag, n)| format!("{tag} ({n}/{})", ex.len()))
                     .collect();
-                let aim = if bold {
-                    "— REPRODUCE this look; it is the target, and you may push past it."
-                } else {
-                    "— the look their edits tend toward; stay within it, do not exceed it."
+                let aim = match voice {
+                    StyleVoice::Target => {
+                        "— REPRODUCE this look; it is the target, and you may push past it."
+                    }
+                    StyleVoice::Ceiling => {
+                        "— the look their edits tend toward; stay within it, do not exceed it."
+                    }
+                    StyleVoice::Background => {
+                        "— the look their edits tend toward; the direction may take this photo elsewhere."
+                    }
                 };
                 format!("  THEIR SHARED LOOK across these shots: {} {aim}", shared.join(", "))
             }
@@ -3484,32 +3616,50 @@ saturation or luminance band this photo calls for, and at least {grade_pm:.0} of
         // block is byte-identical to the one S2 shipped.
         let local_work_note = crate::mask_habit::local_work_note(
             &ex.iter().map(|e| e.masks).collect::<Vec<_>>(),
-            bold,
+            voice,
         );
-        if bold {
-            Some(format!(
+        match voice {
+            StyleVoice::Target => Some(format!(
                 "STYLE REFERENCE — TARGET style to reproduce (the retrieved shots define the settings, curve habit, colour \
                  families and LOOK to reproduce; the scene differs): {}{}{}{}{}",
                 lines.join("  |  "), curve_note, family_note, look_note, local_work_note
-            ))
-        } else {
-            Some(format!(
+            )),
+            StyleVoice::Ceiling => Some(format!(
                 "STYLE REFERENCE — how this user edited SIMILAR past shots (for consistency with their \
                  taste; reference, do NOT copy verbatim, the scene differs): {}{}{}{}{}",
                 lines.join("  |  "), curve_note, family_note, look_note, local_work_note
-            ))
+            )),
+            // The header says BACKGROUND in its first word, because a model
+            // that reads only the first clause of a 4 KB block must still
+            // come away with the right one of the two jobs.
+            StyleVoice::Background => Some(format!(
+                "STYLE BACKGROUND — how this user edited SIMILAR past shots, for continuity only; the scene \
+                 differs. The DIRECTION LEADS: where it and these habits conflict, follow the \
+                 direction: {}{}{}{}{}",
+                lines.join("  |  "), curve_note, family_note, look_note, local_work_note
+            )),
         }
     }
 
     /// Style-axis spelling used by the advisor pipeline. Kept separate from
     /// the historical GradeStrength entry point so existing gate fixtures do
     /// not change their API while Style >= 0.85 gets target wording.
+    ///
+    /// Since v1.2.3 it also takes what the develop knows about the DIRECTION,
+    /// because the voice is a function of all three inputs — see
+    /// [`StyleVoice::choose`], which is the only place that decision is made.
     pub fn render_reference_for_style(
         &self,
         ex: &[&StyleExemplar],
         style: f32,
+        direction: Option<&str>,
+        adherence: crate::recipe::DirectionAdherence,
     ) -> Option<String> {
-        self.render_reference(ex, crate::recipe::GradeStrength::new(style))
+        self.render_reference_voiced(
+            ex,
+            crate::recipe::GradeStrength::new(style),
+            StyleVoice::choose(style, direction, adherence),
+        )
     }
 }
 
@@ -8746,5 +8896,300 @@ old ({flat_old:+.2}, {mix_old:.2}, {wheel_old:.2})  new ({flat_new:+.2}, {mix_ne
             r.len(),
             crate::advisor::REFERENCE_BUDGET_BYTES
         );
+        // v1.2.3: the BACKGROUND voice is a fourth width to measure, not a
+        // rewording of a measured one — its header and three of its four aim
+        // clauses are longer than the ones they replace. The widest block the
+        // app can build is now the maximum over three voices, so the door is
+        // tried with all three.
+        let background = |ex: &[StyleExemplar]| {
+            let refs: Vec<&StyleExemplar> = ex.iter().collect();
+            idx.render_reference_voiced(
+                &refs,
+                crate::recipe::GradeStrength::new(0.90),
+                StyleVoice::Background,
+            )
+            .unwrap()
+        };
+        for (name, ex) in [
+            ("maximal, shaped colour habit", &with),
+            ("maximal, near-zero colour habit", &flattest),
+        ] {
+            let bg = background(ex);
+            println!("BACKGROUND voice, {name}: {} B", bg.len());
+            assert!(bg.starts_with("STYLE BACKGROUND — "), "{bg}");
+            assert!(
+                bg.len() <= crate::advisor::REFERENCE_BUDGET_BYTES,
+                "the widest BACKGROUND block ({name}) is {} B, over the {} B budget",
+                bg.len(),
+                crate::advisor::REFERENCE_BUDGET_BYTES
+            );
+        }
+    }
+
+    // ── v1.2.3: WHO LEADS when a direction is given ───────────────────────
+
+    /// The exemplar the voice tests render: every aim clause the block has
+    /// (curve, colour families, shared look, local work) is populated, so a
+    /// voice that forgot one of them shows up as a diff and not as silence.
+    fn voiced_exemplar() -> StyleExemplar {
+        StyleExemplar {
+            stem: "roll-07".into(),
+            feat: vec![0.0; NDIM],
+            tag: "wide/mid/goldenish/landscape".into(),
+            settings: [("contrast", 18.0f32), ("exposure", -0.4), ("vibrance", 12.0)]
+                .iter()
+                .map(|(k, v)| ((*k).to_string(), *v))
+                .collect(),
+            curve: Some([6.0, 22.0]),
+            path: None,
+            families: Some(crate::eval::FamilySummary {
+                hsl: [3.0, 14.0, 5.0],
+                grade: [16.0, 3.0],
+                rgb_curves: 2,
+            }),
+            embed: None,
+            tags: vec!["warm golden tones".into(), "deep blacks".into()],
+            vocab_scores: None,
+            desc: Some("a warm golden-hour lean with deep blacks".into()),
+            desc_embed: None,
+            masks: Some(two_mask_habit()),
+        }
+    }
+
+    fn empty_index() -> StyleIndex {
+        StyleIndex {
+            version: CURRENT_INDEX_VERSION,
+            mean: vec![0.0; NDIM],
+            std: vec![1.0; NDIM],
+            exemplars: Vec::new(),
+            source_dir: None,
+            looks: Vec::new(),
+            looks_dir: None,
+            embed_provenance: None,
+        }
+    }
+
+    /// The voice is a function of THREE inputs and is decided in one place.
+    ///
+    /// The table is the ruling in full: a direction only leads when the
+    /// photographer asked for it to be followed (`Direct`/`Brief`), and a
+    /// `Hint` direction — or a blank one, or none — leaves the historical
+    /// Style-axis split exactly as it was.
+    ///
+    /// MUTATION: delete the `Self::Background` arm of `StyleVoice::choose`
+    /// (return `Self::for_style(style)` unconditionally) and the six
+    /// direction-led rows fail.
+    #[test]
+    fn the_style_voice_is_chosen_in_one_place() {
+        use crate::recipe::DirectionAdherence as A;
+        let d = Some("vivid saturated colours, punchy high contrast");
+        for (style, direction, adherence, want) in [
+            // Nothing to lead: the two shipped voices, unchanged.
+            (0.30f32, None, 0.65f32, StyleVoice::Ceiling),
+            (0.90, None, 0.65, StyleVoice::Target),
+            (0.30, Some("   "), 0.90, StyleVoice::Ceiling),
+            (0.90, Some(""), 0.90, StyleVoice::Target),
+            // A direction the user asked to treat as a HINT does not lead.
+            (0.30, d, 0.20, StyleVoice::Ceiling),
+            (0.90, d, 0.20, StyleVoice::Target),
+            (0.90, d, A::TIER_LOW_MAX, StyleVoice::Target),
+            // Direct (the shipped default) and Brief both lead, at every
+            // Style value — which is the point: the Style axis no longer
+            // decides who wins.
+            (0.30, d, 0.401, StyleVoice::Background),
+            (0.30, d, A::DEFAULT, StyleVoice::Background),
+            (0.90, d, A::DEFAULT, StyleVoice::Background),
+            (1.00, d, A::DEFAULT, StyleVoice::Background),
+            (0.90, d, 0.701, StyleVoice::Background),
+            (1.00, d, 1.0, StyleVoice::Background),
+        ] {
+            assert_eq!(
+                StyleVoice::choose(style, direction, A::new(adherence)),
+                want,
+                "style {style}, direction {direction:?}, adherence {adherence}"
+            );
+        }
+        // …and the numeric half of the ruling rides on the same value.
+        assert!(StyleVoice::Ceiling.distils());
+        assert!(StyleVoice::Target.distils());
+        assert!(!StyleVoice::Background.distils());
+        // The Style-axis split itself is untouched, boundary included.
+        assert_eq!(StyleVoice::for_style(STYLE_TARGET_MIN), StyleVoice::Target);
+        assert_eq!(StyleVoice::for_style(STYLE_TARGET_MIN - 0.001), StyleVoice::Ceiling);
+    }
+
+    /// The two shipped voices are BYTE-IDENTICAL to what v1.2.2 rendered.
+    ///
+    /// These three literals were captured from the v1.2.2 build (8e631f7)
+    /// BEFORE the third voice existed, with `{:?}` on the rendered block, and
+    /// they cover both arms of the colour sentence: a shaped habit (the FLOOR
+    /// arm) and a near-zero one (B4's dial-allowance arm). A develop with no
+    /// direction — or one the user marked `Hint` — must reach the model with
+    /// the same prompt it always did, at every Style value, or v1.2.3 would
+    /// have quietly re-graded every library user's photos as well.
+    ///
+    /// MUTATION: change one word of any aim clause or header and this fails,
+    /// printing the diff position.
+    #[test]
+    fn the_no_direction_block_is_byte_identical() {
+        use crate::recipe::DirectionAdherence as A;
+        let idx = empty_index();
+        let shaped = voiced_exemplar();
+        let flat = StyleExemplar {
+            families: Some(crate::eval::FamilySummary {
+                hsl: [2.0, 2.0, 0.0],
+                grade: [0.0, 0.0],
+                rgb_curves: 0,
+            }),
+            ..voiced_exemplar()
+        };
+        let ceiling_030 =
+            concat!(
+                "STYLE REFERENCE — how this user edited SIMILAR past shots (for consistency with their ",
+                "taste; reference, do NOT copy verbatim, the scene differs): ",
+                "[wide/mid/goldenish/landscape] contrast +18, exposure -0, vibrance +12 · look: warm ",
+                "golden tones, deep blacks — a warm golden-hour lean with deep blacks  THEIR TYPICAL ",
+                "MASTER TONE CURVE: black-lift +6, S-strength +22 (0..255 scale) — shape your ",
+                "`tone_curve` to a similar gentleness, not stronger.  THEIR TYPICAL COLOUR SHAPING (1 ",
+                "of 1 similar shots): HSL mixer mean |hue| 3, |sat| 14, |lum| 5 across the 8 bands; ",
+                "colour-grade strongest wheel saturation 16, mean |wheel lum| 3; per-channel RGB curves ",
+                "on 2.0 of 3 channels — match this LEVEL of colour shaping, do not exceed it.  THEIR ",
+                "SHARED LOOK across these shots: deep blacks (1/1), warm golden tones (1/1) — the look ",
+                "their edits tend toward; stay within it, do not exceed it.  THEIR TYPICAL LOCAL WORK ",
+                "(1 of 1 similar shots carry masks): 1 of 1 mask the sky (linear from the top, or an AI ",
+                "sky selection: exposure -0.6 EV, highlights -25); 1 of 1 lift the subject (radial, or ",
+                "an AI subject selection: exposure +0.4 EV, shadows +20); none use range masks — place ",
+                "similar masks, not stronger.",
+            )
+            ;
+        let target_090 =
+            concat!(
+                "STYLE REFERENCE — TARGET style to reproduce (the retrieved shots define the settings, ",
+                "curve habit, colour families and LOOK to reproduce; the scene differs): ",
+                "[wide/mid/goldenish/landscape] contrast +18, exposure -0, vibrance +12 · look: warm ",
+                "golden tones, deep blacks — a warm golden-hour lean with deep blacks  THEIR TYPICAL ",
+                "MASTER TONE CURVE: black-lift +6, S-strength +22 (0..255 scale) — shape your ",
+                "`tone_curve` at least this strongly; you MAY go further.  THEIR TYPICAL COLOUR SHAPING ",
+                "(1 of 1 similar shots): HSL mixer mean |hue| 3, |sat| 14, |lum| 5 across the 8 bands; ",
+                "colour-grade strongest wheel saturation 16, mean |wheel lum| 3; per-channel RGB curves ",
+                "on 2.0 of 3 channels — treat this LEVEL of colour shaping as your FLOOR — you may go ",
+                "beyond it.  THEIR SHARED LOOK across these shots: deep blacks (1/1), warm golden tones ",
+                "(1/1) — REPRODUCE this look; it is the target, and you may push past it.  THEIR ",
+                "TYPICAL LOCAL WORK (1 of 1 similar shots carry masks): 1 of 1 mask the sky (linear ",
+                "from the top, or an AI sky selection: exposure -0.6 EV, highlights -25); 1 of 1 lift ",
+                "the subject (radial, or an AI subject selection: exposure +0.4 EV, shadows +20); none ",
+                "use range masks — treat this as your FLOOR — place at least these masks.",
+            )
+            ;
+        let target_flat_090 =
+            concat!(
+                "STYLE REFERENCE — TARGET style to reproduce (the retrieved shots define the settings, ",
+                "curve habit, colour families and LOOK to reproduce; the scene differs): ",
+                "[wide/mid/goldenish/landscape] contrast +18, exposure -0, vibrance +12 · look: warm ",
+                "golden tones, deep blacks — a warm golden-hour lean with deep blacks  THEIR TYPICAL ",
+                "MASTER TONE CURVE: black-lift +6, S-strength +22 (0..255 scale) — shape your ",
+                "`tone_curve` at least this strongly; you MAY go further.  THEIR TYPICAL COLOUR SHAPING ",
+                "(1 of 1 similar shots): HSL mixer mean |hue| 2, |sat| 2, |lum| 0 across the 8 bands; ",
+                "colour-grade strongest wheel saturation 0, mean |wheel lum| 0; per-channel RGB curves ",
+                "on 0.0 of 3 channels — that is their HABIT, too near zero to BE a floor — do not read ",
+                "it as one. Your floor comes from the STYLE dial instead: at least ±28 on whichever ",
+                "`hsl` saturation or luminance band this photo calls for, and at least 23 of ",
+                "`color_grade` wheel saturation; you may go beyond that.  THEIR SHARED LOOK across ",
+                "these shots: deep blacks (1/1), warm golden tones (1/1) — REPRODUCE this look; it is ",
+                "the target, and you may push past it.  THEIR TYPICAL LOCAL WORK (1 of 1 similar shots ",
+                "carry masks): 1 of 1 mask the sky (linear from the top, or an AI sky selection: ",
+                "exposure -0.6 EV, highlights -25); 1 of 1 lift the subject (radial, or an AI subject ",
+                "selection: exposure +0.4 EV, shadows +20); none use range masks — treat this as your ",
+                "FLOOR — place at least these masks.",
+            )
+            ;
+        for (name, ex, style, want) in [
+            ("ceiling 0.30", &shaped, 0.30f32, ceiling_030),
+            ("target 0.90", &shaped, 0.90, target_090),
+            ("target 0.90, near-zero colour habit", &flat, 0.90, target_flat_090),
+        ] {
+            // The historical entry point …
+            assert_eq!(
+                idx.render_reference(&[ex], crate::recipe::GradeStrength::new(style))
+                    .expect("a block"),
+                want,
+                "{name}: render_reference drifted from v1.2.2"
+            );
+            // … and the pipeline's, with nothing leading it: no direction at
+            // all, a blank one, and a direction the user made a HINT.
+            for (why, direction, adherence) in [
+                ("no direction", None, A::DEFAULT),
+                ("blank direction", Some("  \t "), A::DEFAULT),
+                ("hint direction", Some("vivid punchy colour"), 0.2),
+                ("hint at the band edge", Some("vivid punchy colour"), A::TIER_LOW_MAX),
+            ] {
+                assert_eq!(
+                    idx.render_reference_for_style(&[ex], style, direction, A::new(adherence))
+                        .expect("a block"),
+                    want,
+                    "{name} / {why}: the pipeline's block drifted from v1.2.2"
+                );
+            }
+        }
+    }
+
+    /// A LEADING direction turns every aim clause into background — and only
+    /// the aim clauses. The measurements are the same measurements.
+    ///
+    /// This is the wording half of the 2026-09-01 ruling; the numeric half is
+    /// `pipeline::the_direction_led_develop_skips_the_distillation_pull`.
+    ///
+    /// MUTATION: remove the `StyleVoice::Background` arm from any one of the
+    /// four aim clauses (or from the header) and this fails, naming the arm
+    /// whose ceiling/floor language survived.
+    #[test]
+    fn a_leading_direction_speaks_the_block_as_background() {
+        use crate::recipe::DirectionAdherence as A;
+        let idx = empty_index();
+        let ex = voiced_exemplar();
+        let d = Some("dark moody low-key, teal-and-orange");
+        for adherence in [A::DEFAULT, 0.9] {
+            for style in [0.30f32, 0.90, 1.0] {
+                let b = idx
+                    .render_reference_for_style(&[&ex], style, d, A::new(adherence))
+                    .expect("a block");
+                let at = format!("adherence {adherence}, style {style}");
+                // The header names the job in its FIRST word.
+                assert!(b.starts_with("STYLE BACKGROUND — "), "{at}: {b}");
+                assert!(b.contains("The DIRECTION LEADS"), "{at}: {b}");
+                // Every aim clause hands the decision over …
+                for clause in [
+                    "their habit; the direction may ask for a different tone shape",
+                    "that is their colour HABIT, not a target for this photo",
+                    "the direction may take this photo elsewhere",
+                    "their habit; the direction decides what this photo needs",
+                ] {
+                    assert!(b.contains(clause), "{at}: missing {clause:?} in {b}");
+                }
+                // … and NOTHING in the block still claims a ceiling or a floor.
+                for banned in [
+                    "do not exceed it",
+                    "not stronger",
+                    "FLOOR",
+                    "REPRODUCE this look",
+                    "TARGET style to reproduce",
+                    "you MAY go further",
+                ] {
+                    assert!(!b.contains(banned), "{at}: {banned:?} survived in {b}");
+                }
+                // The MEASUREMENTS are untouched — a voice may not rewrite a
+                // number, which is the rule the whole block is built on.
+                for measured in [
+                    "black-lift +6, S-strength +22",
+                    "|hue| 3, |sat| 14, |lum| 5",
+                    "strongest wheel saturation 16, mean |wheel lum| 3",
+                    "deep blacks (1/1), warm golden tones (1/1)",
+                    "exposure -0.6 EV, highlights -25",
+                    "[wide/mid/goldenish/landscape] contrast +18, exposure -0, vibrance +12",
+                ] {
+                    assert!(b.contains(measured), "{at}: lost {measured:?} from {b}");
+                }
+            }
+        }
     }
 }

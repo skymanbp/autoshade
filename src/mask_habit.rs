@@ -38,6 +38,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::recipe::{LocalAdjustment, MaskGeometry};
+use crate::style::StyleVoice;
 
 /// The eleven sliders a habit is summarised over, in canonical order, spelled
 /// with the labels `style::REF_KEYS` already uses for the global half of the
@@ -591,19 +592,29 @@ fn slider_phrase(mean: &[f32; N_HABIT_SLIDERS]) -> String {
 /// every denominator, so an old index produces the S2 block byte for byte
 /// (`reference_local_work_note_is_absent_when_no_neighbour_carries_masks`).
 ///
-/// `bold` is the Style >= 0.85 axis the rest of the block already switches on:
-/// at that strength the retrieved shots are the TARGET, so the note reads as a
-/// floor rather than a ceiling.
-pub fn local_work_note(habits: &[Option<MaskHabit>], bold: bool) -> String {
+/// `voice` is the block's own [`StyleVoice`], so this note cannot disagree
+/// with the header above it: a TARGET block states the habit as a floor, a
+/// CEILING block as a limit, and a BACKGROUND block (a direction is leading,
+/// v1.2.3) as a habit the direction is free to override. It used to be a
+/// `bold: bool` read off Style >= 0.85 — a two-state answer to a question
+/// that now has three.
+pub fn local_work_note(habits: &[Option<MaskHabit>], voice: StyleVoice) -> String {
     let measured: Vec<&MaskHabit> = habits.iter().flatten().collect();
     let m = measured.len();
     if m == 0 {
         return String::new();
     }
-    let aim = if bold {
-        "treat this as your FLOOR — place at least these masks."
-    } else {
-        "place similar masks, not stronger."
+    // The BLOCK's voice, not a second decision (v1.2.3). A `bold` boolean
+    // here could only ever answer "ceiling or floor?", and the third answer
+    // the 2026-09-01 ruling needs is "neither — the direction decides".
+    let aim = match voice {
+        StyleVoice::Target => {
+            "treat this as your FLOOR — place at least these masks."
+        }
+        StyleVoice::Ceiling => "place similar masks, not stronger.",
+        StyleVoice::Background => {
+            "their habit; the direction decides what this photo needs."
+        }
     };
     let worked = measured.iter().filter(|h| h.count > 0).count();
     if worked == 0 {
@@ -936,8 +947,8 @@ mod tests {
         let h = MaskHabit::of(&[]);
         assert_eq!(h.count, 0);
         assert_eq!(h, MaskHabit::default());
-        assert_eq!(local_work_note(&[None, None], false), "", "unmeasured says nothing");
-        let note = local_work_note(&[Some(h), Some(h)], false);
+        assert_eq!(local_work_note(&[None, None], StyleVoice::Ceiling), "", "unmeasured says nothing");
+        let note = local_work_note(&[Some(h), Some(h)], StyleVoice::Ceiling);
         assert!(note.contains("none of the 2 similar shots carries a mask"), "{note}");
     }
 
@@ -985,8 +996,8 @@ mod tests {
     #[test]
     fn reference_local_work_note_wording_follows_strength() {
         let habits = [Some(sky_habit(-0.6))];
-        let gentle = local_work_note(&habits, false);
-        let bold = local_work_note(&habits, true);
+        let gentle = local_work_note(&habits, StyleVoice::Ceiling);
+        let bold = local_work_note(&habits, StyleVoice::Target);
         assert!(gentle.contains("place similar masks, not stronger."), "{gentle}");
         assert!(!gentle.contains("FLOOR"), "{gentle}");
         assert!(bold.contains("treat this as your FLOOR — place at least these masks."), "{bold}");
@@ -1001,7 +1012,7 @@ mod tests {
     /// exposure to a tenth of a stop and the rest as integers.
     #[test]
     fn the_local_work_note_states_the_placement_and_its_numbers() {
-        let note = local_work_note(&[Some(sky_habit(-0.6)), None, Some(MaskHabit::of(&[]))], false);
+        let note = local_work_note(&[Some(sky_habit(-0.6)), None, Some(MaskHabit::of(&[]))], StyleVoice::Ceiling);
         assert!(
             note.contains("1 of 2 mask the sky (linear from the top, or an AI sky selection: \
                            exposure -0.6 EV, highlights -25, dehaze +10)"),
@@ -1013,7 +1024,7 @@ mod tests {
         assert!(!note.contains("mostly work globally"), "{note}");
         let mostly = local_work_note(
             &[Some(sky_habit(-0.6)), Some(MaskHabit::of(&[])), Some(MaskHabit::of(&[]))],
-            false,
+            StyleVoice::Ceiling,
         );
         assert!(mostly.contains("They mostly work globally"), "{mostly}");
     }
@@ -1032,7 +1043,7 @@ mod tests {
             LocalAdjustment { mask: gradient(0.8, 0.0), exposure_ev: 0.0, highlights: -30.0, ..Default::default() };
             3
         ]);
-        let note = local_work_note(&[Some(one), Some(three)], false);
+        let note = local_work_note(&[Some(one), Some(three)], StyleVoice::Ceiling);
         // (-2.0*1 + 0.0*3) / 4 = -0.5, not the -1.0 a mean of means would give.
         assert!(note.contains("exposure -0.5 EV"), "{note}");
     }
@@ -1047,7 +1058,7 @@ mod tests {
             noise_reduction: 40.0,
             ..Default::default()
         }]);
-        let note = local_work_note(&[Some(h)], false);
+        let note = local_work_note(&[Some(h)], StyleVoice::Ceiling);
         assert!(note.contains("1 of 1 mask the sky (linear from the top, or an AI sky selection)"), "{note}");
         assert!(!note.contains("exposure +0.0"), "{note}");
     }
@@ -1072,7 +1083,7 @@ mod tests {
         }]);
         assert_eq!(refined_sky.range.n, 0, "premise: it is filed under sky, not range");
         assert_eq!(refined_sky.refined, 1);
-        let note = local_work_note(&[Some(refined_sky), Some(sky_habit(-0.6))], false);
+        let note = local_work_note(&[Some(refined_sky), Some(sky_habit(-0.6))], StyleVoice::Ceiling);
         assert!(note.contains("1 of 2 refine a mask with a range mask"), "{note}");
         assert!(!note.contains("none use range masks"), "{note}");
         // …and a refinement the IMPORTER dropped counts too. The recipe below
@@ -1081,7 +1092,7 @@ mod tests {
         // still say the photographer refined it.
         let dropped = MaskHabit::of_with_refused_ranges(&[mask(gradient(0.8, 0.0))], 1);
         assert_eq!(dropped.refined, 1, "the loss channel is the surviving evidence");
-        let note = local_work_note(&[Some(dropped)], false);
+        let note = local_work_note(&[Some(dropped)], StyleVoice::Ceiling);
         assert!(note.contains("1 of 1 refine a mask with a range mask"), "{note}");
         // The count can never exceed the mask count, so it under-states rather
         // than over-states when a refusal lands on a muted correction.
@@ -1101,7 +1112,7 @@ mod tests {
             name: "D:/Photography/Raw/2026/ROLL-0042.ARW".into(),
             ..mask(gradient(0.8, 0.0))
         }]);
-        let note = local_work_note(&[Some(hostile)], true);
+        let note = local_work_note(&[Some(hostile)], StyleVoice::Target);
         for needle in ["D:/", "Photography", "ROLL-0042", ".ARW", "\\"] {
             assert!(!note.contains(needle), "{needle:?} reached the prompt: {note}");
         }
@@ -1140,7 +1151,7 @@ mod tests {
             ..Default::default()
         })]);
         assert_eq!(colour_and_curve.curved, 1, "the local curve is counted");
-        let note = local_work_note(&[Some(colour_and_curve)], true);
+        let note = local_work_note(&[Some(colour_and_curve)], StyleVoice::Target);
         // The MEASUREMENT: `temperature` is now one of the sliders a bucket's
         // mean is taken over, and it is the strongest one here.
         assert!(note.contains("temperature -30"), "{note}");
@@ -1159,7 +1170,7 @@ mod tests {
             enabled: true,
             ..Default::default()
         })]);
-        let n = local_work_note(&[Some(colour_only)], true);
+        let n = local_work_note(&[Some(colour_only)], StyleVoice::Target);
         assert!(n.contains("They work COLOUR inside the mask"), "{n}");
         assert!(!n.contains("draw a tone curve"), "no curve was measured: {n}");
         let curve_only = MaskHabit::of(&[sky(LocalAdjustment {
@@ -1169,7 +1180,7 @@ mod tests {
             enabled: true,
             ..Default::default()
         })]);
-        let n = local_work_note(&[Some(curve_only)], true);
+        let n = local_work_note(&[Some(curve_only)], StyleVoice::Target);
         assert!(n.contains("They shape TONE inside the mask with its own `main_curve`"), "{n}");
         assert!(!n.contains("They work COLOUR"), "no WB was measured: {n}");
 
@@ -1182,7 +1193,7 @@ mod tests {
             enabled: true,
             ..Default::default()
         })]);
-        let n = local_work_note(&[Some(tonal)], true);
+        let n = local_work_note(&[Some(tonal)], StyleVoice::Target);
         assert!(!n.contains("inside the mask"), "nothing measured, nothing claimed: {n}");
         assert!(!n.contains("temperature"), "{n}");
         assert_eq!(MaskHabit::of(&[]).curved, 0, "no masks, no curves");
@@ -1209,7 +1220,7 @@ mod tests {
         assert_eq!(h.curved, 0, "a pre-B5 record measured no curves and claims none");
         assert_eq!(h.sky.mean[I_TEMPERATURE], 0.0, "the unmeasured axes zero-fill");
         assert_eq!(h.sky.mean[0], -0.6, "and the measured ones keep their column");
-        let note = local_work_note(&[Some(h)], true);
+        let note = local_work_note(&[Some(h)], StyleVoice::Target);
         assert!(note.contains("exposure -0.6 EV"), "{note}");
         assert!(!note.contains("temperature"), "an unmeasured axis is silent: {note}");
         assert!(!note.contains("inside the mask"), "{note}");
@@ -1258,7 +1269,7 @@ mod tests {
             ..Default::default()
         }]);
         assert_eq!(h.sky.mean[I_HUE], -22.0, "the hue column carries the move");
-        let note = local_work_note(&[Some(h)], true);
+        let note = local_work_note(&[Some(h)], StyleVoice::Target);
         assert!(note.contains("hue -22"), "{note}");
         assert!(note.contains("They work COLOUR inside the mask"), "{note}");
         assert!(note.contains("`hue`"), "the pointer names the axis: {note}");
@@ -1270,7 +1281,7 @@ mod tests {
         let old: MaskHabit = serde_json::from_str(json).expect("a pre-G3 habit still loads");
         assert_eq!(old.sky.mean[I_HUE], 0.0, "the new column zero-fills");
         assert_eq!(old.sky.mean[0], -0.6, "and every old column keeps its place");
-        let n = local_work_note(&[Some(old)], true);
+        let n = local_work_note(&[Some(old)], StyleVoice::Target);
         assert!(!n.contains("hue"), "an unmeasured axis is silent: {n}");
     }
 
@@ -1293,7 +1304,7 @@ mod tests {
                 enabled: true,
                 ..a
             }]);
-            local_work_note(&[Some(h)], true)
+            local_work_note(&[Some(h)], StyleVoice::Target)
         };
         for (axis, a) in [
             ("saturation", LocalAdjustment { saturation: 14.0, ..Default::default() }),
@@ -1394,8 +1405,8 @@ mod tests {
             other: b,
         };
         for (name, note) in [
-            ("every axis moved", local_work_note(&vec![Some(build(extreme)); crate::style::RETRIEVE_K], true)),
-            ("longest names", local_work_note(&vec![Some(build(widest)); crate::style::RETRIEVE_K], true)),
+            ("every axis moved", local_work_note(&vec![Some(build(extreme)); crate::style::RETRIEVE_K], StyleVoice::Target)),
+            ("longest names", local_work_note(&vec![Some(build(widest)); crate::style::RETRIEVE_K], StyleVoice::Target)),
         ] {
             println!("{name} local-work note: {} chars, bound {MAX_LOCAL_WORK_CHARS}", note.chars().count());
             assert!(
@@ -1404,7 +1415,7 @@ mod tests {
                 note.chars().count()
             );
         }
-        let note = local_work_note(&vec![Some(build(widest)); crate::style::RETRIEVE_K], true);
+        let note = local_work_note(&vec![Some(build(widest)); crate::style::RETRIEVE_K], StyleVoice::Target);
         // At most three sliders per clause is what makes that bound hold — a
         // ten-slider clause would be ~3x this.
         assert_eq!(HABIT_SLIDERS_SHOWN, 3);

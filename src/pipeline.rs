@@ -403,6 +403,14 @@ pub fn produce_recipe(
     // the weights in force, once, and carried into both places that would
     // otherwise claim it: the look block and the IMAGE 2 sentence.
     let look_by_direction = crate::style::StyleIndex::look_ranked_by_direction(style_query);
+    // WHOSE aim the style block states, and — inseparably — whether the
+    // recipe is afterwards pulled onto the library's means at all (v1.2.3,
+    // user ruling 2026-09-01). Decided ONCE here, from the Style axis, the
+    // direction and the adherence dial, and read by both halves below; the
+    // wording and the arithmetic disagreeing about who leads is precisely
+    // the defect this replaces.
+    let style_voice =
+        crate::style::StyleVoice::choose(req.style, user_direction, req.adherence);
     let retrieved = style_ix.as_ref().map(|ix| {
         let (ex, looks) =
             retrieve_style(ix, &meta, &histogram, style_query, raw, req.use_looks);
@@ -410,7 +418,12 @@ pub fn produce_recipe(
         StyleRetrieval {
             // GATE 5: the reference block's own "do not exceed it" clauses are
             // templated on the STYLE axis, not on grade strength.
-            reference: ix.render_reference_for_style(&ex, req.style),
+            reference: ix.render_reference_for_style(
+                &ex,
+                req.style,
+                user_direction,
+                req.adherence,
+            ),
             targets: crate::style::style_targets(&ex),
             stems: crate::style::neighbour_stems(&ex),
             // The nearest shot's own file, for the opt-in reference IMAGE. A
@@ -730,9 +743,18 @@ pub fn produce_recipe(
     // is the WORDING the model reads about the reference
     // (`style::render_reference`), never the blend arithmetic; the Style slider
     // keeps sole ownership of that number.
-    if let Some(r) = &retrieved {
+    // …and NOT when the direction leads. `StyleVoice::Background` already told
+    // the proposer these habits are background; lerping its answer onto the
+    // library's arithmetic mean afterwards would put the numbers back exactly
+    // where the words had just given them up, and at Style 1.0 `style_pull` is
+    // FULL — the proposal's own value replaced. The skip is disclosed by
+    // `STYLE_BACKGROUND` in the block below; the re-verification that follows a
+    // real blend goes with it, because there is no second recipe to describe.
+    if let Some(r) = &retrieved
+        && let Some(pull) = style_blend_pull(style_voice, req.style)
+    {
         let pre_blend = recipe.clone();
-        crate::style::blend_toward(&mut recipe, &r.targets, crate::style::style_pull(req.style));
+        crate::style::blend_toward(&mut recipe, &r.targets, pull);
         recipe.clamp();
         // The blend mutates the recipe AFTER the rationale was written and
         // AFTER the verdict above. When it actually changed something (a pull
@@ -753,7 +775,7 @@ pub fn produce_recipe(
                 crate::rationale::Note::new(
                     crate::rationale::keys::STYLE_DISTILLED,
                     vec![
-                        ("pct", format!("{:.0}", crate::style::style_pull(req.style) * 100.0)),
+                        ("pct", format!("{pct:.0}", pct = pull * 100.0)),
                         ("fields", fields),
                     ],
                 ),
@@ -959,13 +981,11 @@ pub fn produce_recipe(
                             // original walked (style distillation above)
                             // — otherwise adopting it would silently
                             // undo the user's style pull (review R20-S2).
-                            if let Some(sr) = &retrieved {
+                            if let Some(sr) = &retrieved
+                                && let Some(pull) = style_blend_pull(style_voice, req.style)
+                            {
                                 let pre = r.clone();
-                                crate::style::blend_toward(
-                                    &mut r,
-                                    &sr.targets,
-                                    crate::style::style_pull(req.style),
-                                );
+                                crate::style::blend_toward(&mut r, &sr.targets, pull);
                                 r.clamp();
                                 candidate_distilled =
                                     (r != pre).then(|| crate::style::distilled_fields(&pre, &r));
@@ -1177,6 +1197,16 @@ pub fn produce_recipe(
     if let Some(note) = retrieved.as_ref().and_then(|r| style_neighbours_note(&r.stems)) {
         crate::rationale::push_note(&mut recipe.rationale, &mut det_notes, note);
     }
+    // …and in WHICH VOICE those shots were quoted (v1.2.3). Written HERE, in
+    // the post-judge disclosure block, for the same reason every other style
+    // note is: an adopted visual revision replaces `recipe` wholesale and
+    // clears `det_notes` with it, so a note left beside the blend is dropped on
+    // exactly the runs that changed the most. `STYLE_DISTILLED` can afford to
+    // sit there because the adopted candidate re-runs the blend and writes its
+    // own; a skip has no such second writer.
+    if let Some(note) = style_background_note(style_voice, req.adherence, ref_str) {
+        crate::rationale::push_note(&mut recipe.rationale, &mut det_notes, note);
+    }
     if let Some(file) = &ref_image_stem {
         crate::rationale::push_note(
             &mut recipe.rationale,
@@ -1320,6 +1350,43 @@ pub(crate) fn style_neighbours_note(stems: &[String]) -> Option<crate::rationale
         crate::rationale::keys::STYLE_NEIGHBOURS,
         vec![("files", stems.join(", ")), ("n", stems.len().to_string())],
     ))
+}
+
+/// The distillation pull this develop should apply, or `None` when the
+/// direction leads and the photographer's library is only background.
+///
+/// The gate and the arithmetic in ONE place, because the pull is applied
+/// TWICE — once to the verified proposal and once, inside the judge loop, to
+/// every candidate that might replace it ("the candidate walks the SAME look
+/// chain"). A skip written at only one of the two would mean an adopted
+/// visual revision silently re-imposed the library the words had just
+/// released, on exactly the runs that changed the most.
+///
+/// A pure function so both halves of the v1.2.3 ruling are testable without a
+/// paid call (`the_direction_led_develop_skips_the_distillation_pull`).
+pub(crate) fn style_blend_pull(voice: crate::style::StyleVoice, style: f32) -> Option<f32> {
+    voice.distils().then(|| crate::style::style_pull(style))
+}
+
+/// "Your library was quoted as background and NOT pulled onto" — the
+/// counterpart of `STYLE_DISTILLED` for the develop that skipped the blend
+/// (v1.2.3, user ruling 2026-09-01).
+///
+/// Conditioned on the REFERENCE, not on the index: a develop that retrieved
+/// nothing has no library to have kept as background, and saying otherwise
+/// would be a claim about a block that was never rendered. Pure, and beside
+/// [`style_gap_note`], for the same reason that one is.
+pub(crate) fn style_background_note(
+    voice: crate::style::StyleVoice,
+    adherence: crate::recipe::DirectionAdherence,
+    reference: Option<&str>,
+) -> Option<crate::rationale::Note> {
+    (reference.is_some() && !voice.distils()).then(|| {
+        crate::rationale::Note::new(
+            crate::rationale::keys::STYLE_BACKGROUND,
+            vec![("tier", adherence.tier().as_str().to_string())],
+        )
+    })
 }
 
 /// "This develop asked for personal style and got NOTHING" — the disclosure
@@ -6796,6 +6863,87 @@ mod tests {
         );
         // Nothing retrieved ⇒ no claim (the gap note owns that case).
         assert!(style_neighbours_note(&[]).is_none());
+    }
+
+    /// v1.2.3, the NUMERIC half of the 2026-09-01 ruling: a develop the
+    /// direction leads is not pulled onto the library's means, and says so.
+    ///
+    /// The wording half (`style::a_leading_direction_speaks_the_block_as_
+    /// background`) on its own would have been a lie by arithmetic: the block
+    /// would tell the model these habits are background, and `blend_toward`
+    /// would then lerp its answer back onto them — at Style 1.0 replacing the
+    /// proposal's own value outright (`style::blend_toward`, "t = 1 reaches
+    /// the target"). Both halves read the same `StyleVoice`.
+    ///
+    /// MUTATION: make `style_blend_pull` return `Some(style_pull(style))`
+    /// unconditionally (i.e. keep blending in the Background voice) and the
+    /// `Background` rows fail.
+    #[test]
+    fn the_direction_led_develop_skips_the_distillation_pull() {
+        use crate::rationale::{keys, render_one};
+        use crate::recipe::DirectionAdherence as A;
+        use crate::style::StyleVoice;
+
+        // The two shipped voices pull exactly what they always pulled — the
+        // Style axis keeps sole ownership of that number (GATE 5).
+        for (voice, style) in [
+            (StyleVoice::Ceiling, 0.3f32),
+            (StyleVoice::Ceiling, 0.65),
+            (StyleVoice::Target, 0.9),
+            (StyleVoice::Target, 1.0),
+        ] {
+            assert_eq!(
+                style_blend_pull(voice, style),
+                Some(crate::style::style_pull(style)),
+                "{voice:?} at Style {style} must still distil"
+            );
+        }
+        // …and the leading direction pulls NOTHING, at every Style value,
+        // including the 1.0 that used to replace the proposal outright.
+        for style in [0.0f32, 0.3, 0.85, 0.9, 1.0] {
+            assert_eq!(
+                style_blend_pull(StyleVoice::Background, style),
+                None,
+                "a direction-led develop must not be pulled at Style {style}"
+            );
+        }
+
+        // The skip is DISCLOSED, and names the dial that caused it.
+        let block = Some("STYLE BACKGROUND — …");
+        for (adherence, tier) in [(A::DEFAULT, "direct"), (0.9, "brief")] {
+            let note = style_background_note(StyleVoice::Background, A::new(adherence), block)
+                .expect("a skipped pull is not silent");
+            assert_eq!(note.key, keys::STYLE_BACKGROUND);
+            let text = render_one(&note);
+            assert!(text.contains(tier), "the dial that chose the voice: {text}");
+            assert!(text.contains("--adherence"), "…and how to hand the lead back: {text}");
+        }
+        // The three negative controls, which is what stops this becoming a
+        // note on every develop: a voice that DID distil, and a develop whose
+        // retrieval produced no block to have kept as background.
+        for voice in [StyleVoice::Ceiling, StyleVoice::Target] {
+            assert!(
+                style_background_note(voice, A::default(), block).is_none(),
+                "{voice:?} distilled — it has no skip to disclose"
+            );
+        }
+        assert!(
+            style_background_note(StyleVoice::Background, A::default(), None).is_none(),
+            "no reference was rendered, so there is no library to call background"
+        );
+
+        // End to end through the ONE derivation: the develop the user actually
+        // ran (Style 1.0, the default adherence, a direction) is the case that
+        // must skip, and the same develop with the direction removed is not.
+        let d = Some("dark moody low-key, teal-and-orange");
+        assert_eq!(
+            style_blend_pull(StyleVoice::choose(1.0, d, A::default()), 1.0),
+            None
+        );
+        assert_eq!(
+            style_blend_pull(StyleVoice::choose(1.0, None, A::default()), 1.0),
+            Some(crate::style::style_pull(1.0))
+        );
     }
 
     /// L09#1: a missing parent is created up-front (the documented
