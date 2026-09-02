@@ -101,6 +101,32 @@ fn platform_modifier(s: &'static str) -> &'static str {
 /// compile-time literal, so a translated string is filled by plain replacement.
 /// A placeholder a translation happens to drop is simply left as-is (visible),
 /// never a panic.
+/// An argument VALUE that is a word, not a measurement, renders in the session
+/// language too.
+///
+/// [`trf`] copies argument values verbatim, which is right for a number, a path
+/// or a model's own prose — and wrong for the handful of args whose value is an
+/// enumerated English phrase the engine chose from a fixed set
+/// (`rationale::values`). Those were the one untranslated fragment inside an
+/// otherwise translated sentence: the zh Fit panel read
+/// 「高强度拟合显示 luma ranges 中…」.
+///
+/// A MECHANISM, not a special case: every argument of every note passes
+/// through here, and the registry is `rationale::values::ALL`, which the i18n
+/// audit extracts — so a new enumerated value that has no zh row fails the
+/// gate instead of appearing in English.
+///
+/// The match is on the WHOLE value, never on a substring: anything not in the
+/// registry is returned untouched, so a measurement, a path, or a model's prose
+/// that merely mentions one of these phrases can never be rewritten by a
+/// catalogue lookup.
+fn tr_value(lang: Lang, value: &str) -> &str {
+    match autoshade::rationale::values::ALL.iter().find(|v| **v == value) {
+        Some(enumerated) => tr(lang, enumerated),
+        None => value,
+    }
+}
+
 pub fn trf(lang: Lang, en: &'static str, args: &[(&str, &str)]) -> String {
     // ONE pass over the TEMPLATE, never over inserted values: the old
     // sequential replace rescanned everything already substituted, so a value
@@ -117,7 +143,7 @@ pub fn trf(lang: Lang, en: &'static str, args: &[(&str, &str)]) -> String {
             Some(close) => {
                 let name = &after[1..close];
                 match args.iter().find(|(n, _)| *n == name) {
-                    Some((_, value)) => out.push_str(value),
+                    Some((_, value)) => out.push_str(tr_value(lang, value)),
                     // A placeholder a translation drops (or a caller does not
                     // supply) stays visible as-is — the existing contract.
                     None => out.push_str(&after[..=close]),
@@ -206,6 +232,12 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
         " 收缩后曲线的色相沿亮度跨度无法测量：任何色相类都没有在两个亮度切片上占到足够的画面。"),
     (" Global colour cast measured from consistent hue rotation across the populated frame (rotation {rotation} degrees, chroma ratio {ratio}); white balance and saturation were read from population evidence.", " 已从画面中各色相带一致的色相旋转测得全局色偏（旋转 {rotation} 度，色度比 {ratio}）；白平衡和饱和度取自整体证据。"),
     (" High-strength fit disclosed unsupported movement in {kind}: {ranges}. The controls were retained, but confidence is capped by the strength budget.", " 高强度拟合显示 {kind} 中没有双侧证据的移动：{ranges}。控制保留，置信度受强度预算限制。"),
+    // Enumerated ARGUMENT values (`rationale::values`), substituted through
+    // `tr_value` — the `{kind}` above is one of these two.
+    ("luma ranges", "明度范围"),
+    ("hue bands", "色相带"),
+    (" [the proposal exceeded recipe limits — discarded {dropped}]",
+        " [该提案超出了配方上限——已丢弃 {dropped}]"),
     // ── Settings ────────────────────────────────────────────────────────────
     ("Language", "语言"),
     ("Reverse-fit", "反推 / Reverse-fit"),
@@ -1701,10 +1733,6 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
       not areas of the picture — their pixels are spread over the whole \
       frame.",
         " 联合分布检查（亮度 × 色度值域桶，其中 {n} 个在两侧都有充分证据）：按覆盖比例计算的失配 {weighted}，最差值域 {worst}（{label}）。这些是数值区间而不是画面上的区域——桶内像素分布在整幅画面各处。"),
-    (" That joint mismatch is large: the two images still differ inside \
-      matching value ranges, which the single residual number above \
-      cannot show — treat this fit as a starting point, not a match.",
-        " 联合失配偏大：两张图在相同的数值区间内仍然不同，而上面那个单一残差数字显示不出这一点——请把本次反推当作起点，而不是匹配结果。"),
     (" The fit tried the supported controls but did not reach the target: \
       the two images still differ inside matching value ranges, which the \
       single residual number above cannot show; treat this fit as a starting \

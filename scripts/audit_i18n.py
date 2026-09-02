@@ -137,6 +137,9 @@ DYNAMIC_SOURCES = [
     # The rationale note templates live in ONE module by contract, so a new
     # note key without a zh pair fails this gate (L12#2B).
     ("impl_fn", "rationale", "pub mod keys", "mod keys"),
+    # …and the enumerated ARGUMENT values, in ONE module for the same reason:
+    # a new one without a zh pair fails this gate (A5).
+    ("impl_fn", "rationale", "pub mod values", "mod values"),
     ("calls", "gui", "set_canvas_status("),
     # persist_postponed's key is its SECOND argument (after the error), so
     # the plain first-arg collector cannot see it: this kind takes the first

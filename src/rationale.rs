@@ -53,6 +53,29 @@ impl Note {
     }
 }
 
+/// Argument VALUES that are words rather than measurements.
+///
+/// `trf` copies an argument's value verbatim into the template, which is right
+/// for a number, a path or the model's own prose — and wrong for the handful of
+/// args whose value is an ENUMERATED English phrase this engine chose. Those
+/// were the one untranslated fragment inside an otherwise translated sentence:
+/// the zh Fit panel read 「高强度拟合显示 luma ranges 中…」.
+///
+/// A REGISTRY, not a special case: `ALL` is what the GUI's `trf` consults
+/// before substituting any argument, and what the i18n audit extracts, so a new
+/// enumerated value is translated by adding it here and giving it a zh row —
+/// and forgotten by neither.
+pub mod values {
+    /// [`keys::FIT_NOTE_VETO_DISCLOSED`]'s `kind`, when the withheld evidence
+    /// is tonal.
+    pub const LUMA_RANGES: &str = "luma ranges";
+    /// …and when it is chromatic.
+    pub const HUE_BANDS: &str = "hue bands";
+
+    /// Every enumerated value, for the renderer and for the audit.
+    pub const ALL: &[&str] = &[LUMA_RANGES, HUE_BANDS];
+}
+
 /// Every note template, byte-for-byte the English the persisted rationale
 /// carries (leading separators/spaces included — notes concatenate with NO
 /// joiner). In ONE module so the i18n audit extracts the full key set
@@ -250,10 +273,6 @@ pub mod keys {
         " (the joint distribution check found no value range with enough \
          evidence on both sides, so it has no opinion on this pair; confidence \
          remains capped by the pair's shared-evidence identifiability)";
-    pub const FIT_NOTE_JOINT_FAR: &str =
-        " That joint mismatch is large: the two images still differ inside \
-         matching value ranges, which the single residual number above \
-         cannot show — treat this fit as a starting point, not a match.";
     pub const FIT_NOTE_JOINT_MISS: &str =
         " The fit tried the supported controls but did not reach the target: \
          the two images still differ inside matching value ranges, which the \
@@ -769,13 +788,21 @@ pub mod keys {
          discarded";
 
     // --- the vision proposer's own repairs (advisor/openai.rs) -----------
+    /// The FIRST clamp of a model proposal, disclosed. Typed since v1.2.4 for
+    /// the same reason the axis-length repair below is: the provider used to
+    /// push both as English prose into `recipe.rationale`, where the
+    /// suffix-strip contract reads them as the MODEL's own words and no
+    /// surface can translate them.
+    pub const PROPOSAL_LIMITS_DISCARDED: &str =
+        " [the proposal exceeded recipe limits — discarded {dropped}]";
     /// R23-1: OpenAI strict mode cannot bound an array's LENGTH, so a
     /// miscounted `hsl` axis used to fail the whole recipe deserialize and
     /// throw away a paid high-detail vision call. The axis is repaired and
-    /// the repair disclosed. (Written by the provider, which has no notes
-    /// vec of its own — so this one renders as English in the rationale's
-    /// PROSE prefix until `propose` grows a notes channel; the zh pair is
-    /// registered so the localized rendering lands the moment it does.)
+    /// the repair disclosed. Both this and the clamp above are written by the
+    /// PROVIDER, which had no notes vec of its own, so both rendered as
+    /// English in the rationale's PROSE prefix whatever the session language
+    /// was. v1.2.4 gave `Proposal` a `notes` field: they travel as typed keys
+    /// now, and their zh rows reach a surface.
     pub const HSL_AXIS_LENGTH_REPAIRED: &str =
         " [the proposal's 8-band colour mixer arrived with the wrong number of values \
          ({axes}) — the missing bands were read as neutral 0 and any extra ones dropped, \

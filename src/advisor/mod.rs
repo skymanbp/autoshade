@@ -444,6 +444,16 @@ pub struct Proposal {
     pub thinking: Option<Thinking>,
     /// Which manual lens controls this response actually spoke about.
     pub lens: LensOpinion,
+    /// The provider's OWN deterministic disclosures, typed (L12#2B).
+    ///
+    /// The provider makes two: the 8-band mixer arrived the wrong length, and
+    /// the proposal exceeded the recipe's limits. Until v1.2.4 both were pushed
+    /// into `recipe.rationale` as English prose, which the suffix-strip
+    /// contract then reads as the MODEL's own words — so the GUI showed them in
+    /// English inside an otherwise Chinese sentence, with no key to translate.
+    /// They ride here as well, in the order they were appended, so the caller
+    /// can adopt them as the head of its own note list.
+    pub notes: Vec<crate::rationale::Note>,
 }
 
 /// Per-field bound on the thinking prose (each field is specified as ONE

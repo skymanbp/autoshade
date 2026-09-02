@@ -46,10 +46,25 @@
 //! worker can transitively reach (the store's, the decoder's, the folder scan's,
 //! the base-look estimator's) are NOT converted, and the gate in
 //! `pipeline::tests` pins that boundary file by file so it cannot drift
-//! silently: each of those already names its own photograph by stem or by path,
-//! and threading a sink through the ~30 GUI/web/store call sites of
-//! `photo_base_knots` / `repair_pre_era_base_curve` is a separate sweep, not a
-//! side effect of this one.
+//! silently.
+//!
+//! That sweep ran in v1.2.4. The base-look family
+//! (`photo_base_knots` / `photo_base_knots_checked` /
+//! `repair_pre_era_base_curve` / `saved_recipe_snapshot`) now takes a `&Diag`
+//! on an `_in` form, with the old signature kept as a wrapper that binds
+//! [`photo`] — so the ~30 GUI/web/store call sites are byte-for-byte unchanged
+//! while `produce_recipe` hands down its OWN sink and a pooled worker's base-look
+//! lines land in that worker's transcript block. The develop chain's own files
+//! (`pipeline.rs`, `render.rs`, `recipe.rs`) now hold ZERO bare `eprintln!`, and
+//! the census in `pipeline::tests` pins that at zero.
+//!
+//! Two of them are routed without being injectable, and that is the decision
+//! rather than an omission. The folder scan raises [`Subject::Run`] lines
+//! before any photograph exists and has no pooled caller to route to; the
+//! decoder's approximate-demosaic disclosure sits under `render_to_image`,
+//! whose call sites do not carry a channel. Both bind the process default
+//! here, so the chain still has exactly ONE write to stderr and injecting
+//! either later is a parameter, not a hunt.
 
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -300,6 +315,13 @@ pub fn photo(p: &Path) -> Diag<'static> {
 /// stderr, about pixels with no file behind them.
 pub fn pixels() -> Diag<'static> {
     Diag::pixels_only(stderr())
+}
+
+/// stderr, about the RUN rather than any one photograph — the folder scan's
+/// "this directory could not be read", which happens before any photograph has
+/// been identified and therefore has no subject to name.
+pub fn run() -> Diag<'static> {
+    Diag::new(stderr(), Subject::Run)
 }
 
 /// Discarded, about pixels with no file behind them — a probe whose answer is

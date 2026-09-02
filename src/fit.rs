@@ -4271,10 +4271,10 @@ fn compose_report(mut recipe: EditRecipe, m: Measured<'_>, solve: SolveFacts) ->
         push_note(&mut rationale, &mut notes, Note::new(keys::FIT_NOTE_CAST_ADMITTED_BY_STRENGTH, vec![("ratio", format!("{ratio:.3}")), ("budget", format!("{budget:.3}"))]));
     }
     if let Some(ranges) = &solve.veto_luma {
-        push_note(&mut rationale, &mut notes, Note::new(keys::FIT_NOTE_VETO_DISCLOSED, vec![("kind", "luma ranges".into()), ("ranges", ranges.clone())]));
+        push_note(&mut rationale, &mut notes, Note::new(keys::FIT_NOTE_VETO_DISCLOSED, vec![("kind", crate::rationale::values::LUMA_RANGES.into()), ("ranges", ranges.clone())]));
     }
     if let Some(ranges) = &solve.veto_hue {
-        push_note(&mut rationale, &mut notes, Note::new(keys::FIT_NOTE_VETO_DISCLOSED, vec![("kind", "hue bands".into()), ("ranges", ranges.clone())]));
+        push_note(&mut rationale, &mut notes, Note::new(keys::FIT_NOTE_VETO_DISCLOSED, vec![("kind", crate::rationale::values::HUE_BANDS.into()), ("ranges", ranges.clone())]));
     }
     // Every Atmosphere `Measured` carries its structural model (the solve and
     // the rescore both build one); a breach is a programming error, and a

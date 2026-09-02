@@ -2113,6 +2113,29 @@ impl EditRecipe {
     /// Clamp every slider into its documented legal range. The AI is
     /// instructed to stay in range, but we never trust the input blindly —
     /// an out-of-range value would otherwise corrupt the render downstream.
+    /// The ceiling on the persisted rationale string.
+    ///
+    /// An abuse bound, not a disclosure budget. The layered zoned fit's typed
+    /// notes (17-bin range refusals, per-generation tile sweeps, refinement
+    /// readings) legitimately reach ~6 KB on the calibration pair; 4096
+    /// truncated the tile ATTACHMENT disclosure off the persisted recipe while
+    /// the masks stayed.
+    ///
+    /// Raised from 16 KiB in v1.2.4, on a measurement rather than a feeling:
+    /// `rationale::MAX_NOTES` is 64 and the longest template in
+    /// `rationale::keys` is 647 bytes (`FIT_NOTE_CAST_HUE_FANNED`, measured
+    /// 2026-09-02), so a run that fills the note vector can put 41,408 bytes of
+    /// TEMPLATE alone on the string before a single interpolated value — two
+    /// and a half times the old ceiling, and the sixty-four longest templates
+    /// together already came to 16,183 of its 16,384 bytes. Cutting the prose
+    /// first (see `cap_rationale`) is what keeps a disclosure from being lost;
+    /// this is what keeps it from being lost when there is no prose left to
+    /// drop. `the_rationale_ceiling_holds_every_typed_note_a_run_can_produce`
+    /// re-derives the template bound from the source, so a longer note fails a
+    /// test instead of costing a disclosure. An abuse bound it remains: a
+    /// hand-edited foreign recipe.json still cannot smuggle a payload past it.
+    pub(crate) const MAX_RATIONALE: usize = 64 * 1024;
+
     pub fn clamp(&mut self) -> ClampSummary {
         let mut summary = ClampSummary::default();
         // f32::clamp passes a NaN receiver STRAIGHT THROUGH — a non-finite
@@ -2142,14 +2165,6 @@ impl EditRecipe {
         const MAX_MASKS: usize = 64;
         const MAX_CURVE_POINTS: usize = 256;
         const MAX_BASE_KNOTS: usize = 256;
-        /// An abuse bound, not a disclosure budget. The layered zoned
-        /// fit's typed notes (17-bin range refusals, per-generation tile
-        /// sweeps, refinement readings) legitimately reach ~6 KB on the
-        /// calibration pair; 4096 truncated the tile ATTACHMENT disclosure
-        /// off the persisted recipe while the masks stayed. Sized so honest
-        /// writer output never loses its tail, while a hand-edited foreign
-        /// recipe.json still cannot smuggle a payload.
-        const MAX_RATIONALE: usize = 16 * 1024;
         /// A mask label is a UI affordance; Lightroom's own are far shorter.
         const MAX_NAME: usize = 256;
         /// A path, not a payload — comfortably past Windows' extended limit.
@@ -2212,8 +2227,25 @@ impl EditRecipe {
             before - s.len()
         }
         /// [`cap`] for the PROSE rationale — the one capped string a person
-        /// actually reads. Cuts like `cap`, then spends part of the budget
-        /// saying that it cut. Returns the content bytes lost, like `cap`.
+        /// actually reads, and the only one whose TAIL is load-bearing. Cuts
+        /// from the FRONT and spends part of the budget saying that it cut.
+        /// Returns the content bytes lost, like `cap`.
+        ///
+        /// **Which end (v1.2.4).** This string is `<the model's prose><the
+        /// engine's typed notes>` — the notes concatenate onto the end, and
+        /// `rationale::render_en(&notes)` is required to equal the SUFFIX. A
+        /// cut from the back therefore ate the disclosures first and left the
+        /// prose whole: an island run of 121 paragraphs came back as 119 with
+        /// its typed notes gone, and because the suffix no longer matched, the
+        /// GUI could not localize what remained either. Cutting from the FRONT
+        /// inverts both: the engine's own record survives, the strip still
+        /// matches, and what is lost is the model's prose — which is the half
+        /// no other reader depends on.
+        ///
+        /// The cut lands on the next PARAGRAPH break when one is within a
+        /// kilobyte of the byte cut, so the survivor starts at a sentence
+        /// rather than mid-word; a note template contains no newline, so this
+        /// can never advance into the disclosures.
         ///
         /// Why plain `cap` is the wrong tool here. `cap` leaves NO trace in
         /// the string: a rationale that overran `MAX_RATIONALE` simply stopped
@@ -2237,22 +2269,40 @@ impl EditRecipe {
         ///
         /// The byte ceiling stays the load-bearing promise: the body is cut to
         /// `max - marker.len()` so the result is at most `max` INCLUDING the
-        /// marker, and a `max` too small to hold one (unreachable for a 16 KiB
-        /// constant against a ~75-byte marker) drops the marker rather than
-        /// break the ceiling.
+        /// marker, and a `max` too small to hold one drops the marker rather than
+        /// break the ceiling. (Unreachable in practice: the constant is 64 KiB
+        /// and the marker is under a hundred bytes.)
         fn cap_rationale(s: &mut String, max: usize) -> usize {
             if s.len() <= max {
                 return 0;
             }
             let before = s.len();
             let marker = format!(
-                " [rationale truncated at the {max}-byte ceiling; the original was {before} bytes]"
+                "[rationale truncated at the {max}-byte ceiling; the original was {before} bytes] "
             );
             if marker.len() >= max {
                 return cap(s, max);
             }
-            let cut = cap(s, max - marker.len());
+            let keep = max - marker.len();
+            // The naive cut, moved UP to a char boundary so the survivor is
+            // valid UTF-8 (this runs on input nobody validated).
+            let mut start = before - keep;
+            while start < before && !s.is_char_boundary(start) {
+                start += 1;
+            }
+            // …and up again to the next paragraph break when there is one
+            // nearby, so the survivor opens at a sentence. Moving up only ever
+            // drops MORE, so the ceiling still holds.
+            if let Some(nl) = s[start..].find('\n')
+                && nl < 1024
+            {
+                start += nl + 1;
+            }
+            let cut = start;
+            let tail = s.split_off(start);
+            s.clear();
             s.push_str(&marker);
+            s.push_str(&tail);
             cut
         }
         /// One brush group's strokes, bounded — sync IDs and each stroke's
@@ -2317,7 +2367,8 @@ impl EditRecipe {
                 MaskGeometry::Linear { .. } | MaskGeometry::Radial { .. } => (0, 0),
             }
         }
-        summary.truncated_string_bytes += cap_rationale(&mut self.rationale, MAX_RATIONALE);
+        summary.truncated_string_bytes +=
+            cap_rationale(&mut self.rationale, Self::MAX_RATIONALE);
         // The pass-through block is STRINGS from a foreign document, so it
         // falls under the same rule as `rationale` and the mask names above:
         // the reader fills it from a fixed sixteen keys, but a hand-edited
@@ -3014,7 +3065,11 @@ mod tests {
             ..Default::default()
         };
         r.clamp();
-        assert!(r.rationale.len() <= 16384, "rationale unbounded: {}", r.rationale.len());
+        assert!(
+            r.rationale.len() <= EditRecipe::MAX_RATIONALE,
+            "rationale unbounded: {}",
+            r.rationale.len()
+        );
         assert!(r.masks[0].name.len() <= 256, "mask name unbounded: {}", r.masks[0].name.len());
         match &r.masks[0].mask {
             MaskGeometry::Bitmap { path } => {
@@ -3027,10 +3082,11 @@ mod tests {
         // truncate` panics off a char boundary, and this input is unvalidated.
         let mut multi = EditRecipe { rationale: "é".repeat(50_000), ..Default::default() };
         multi.clamp(); // would panic if the cut ignored char boundaries
-        assert!(multi.rationale.len() <= 16384);
-        // The BODY is what the cut lands in; the ASCII marker `cap_rationale`
-        // appends is not part of the record and is checked by its own tests.
-        let body = multi.rationale.split(" [rationale truncated").next().unwrap();
+        assert!(multi.rationale.len() <= 65_536);
+        // The BODY is what SURVIVES the cut; the ASCII marker `cap_rationale`
+        // puts in front of it is not part of the record and is checked by its
+        // own tests.
+        let body = multi.rationale.split("bytes] ").nth(1).unwrap();
         assert!(!body.is_empty(), "the marker ate the whole budget");
         assert!(body.chars().all(|c| c == 'é'), "cut mid-character");
 
@@ -4018,7 +4074,7 @@ mod tests {
             tone_curve: (0..300u32)
                 .map(|i| CurvePoint { input: (i % 256) as u8, output: 0 })
                 .collect(),
-            rationale: "x".repeat(20_000),
+            rationale: "x".repeat(80_000),
             ..Default::default()
         };
         let d = r.clamp();
@@ -4026,14 +4082,137 @@ mod tests {
         // The marker rides INSIDE the ceiling, so the body loses its own
         // length on top of the overflow. Spelled out rather than derived from
         // the code under test: this pins the wording too.
-        let marker = " [rationale truncated at the 16384-byte ceiling; the original was 20000 bytes]";
+        let marker =
+            "[rationale truncated at the 65536-byte ceiling; the original was 80000 bytes] ";
         assert_eq!(
             d.truncated_string_bytes,
-            20_000 - (16_384 - marker.len()),
+            80_000 - (65_536 - marker.len()),
             "rationale past its cap, minus the room its own marker takes"
         );
-        assert_eq!(r.rationale.len(), 16_384, "marker included, not on top");
+        assert_eq!(r.rationale.len(), 65_536, "marker included, not on top");
         assert!(!d.is_empty(), "curve/string loss alone must flip is_empty");
+    }
+
+    /// A19: the DEFAULT recipe, byte-for-byte, against a checked-in fixture.
+    ///
+    /// `EditRecipe::default()` is the shape every surface starts from and the
+    /// shape `serde(default)` fills a foreign `recipe.json` with, so a change
+    /// to any default value or any field NAME is a change to what a saved
+    /// develop means when it is read back by a different build. The type's own
+    /// tests each pin one field they care about; nothing pinned the whole
+    /// serialization, so a renamed field or a silently changed default reached
+    /// disk with the battery green.
+    ///
+    /// A byte comparison against `src/fixtures/default-recipe.json` rather than
+    /// a value comparison: the JSON is what travels — to `recipe.json`, into the
+    /// XMP writer's inputs and into the verifier's prompt — so field ORDER and
+    /// spelling are part of the contract, and only the text can state them. A
+    /// deliberate change re-blesses the fixture in the same commit, where a
+    /// reviewer sees exactly which defaults moved.
+    ///
+    /// MUTATION: change any default (for example `version` to 3) or rename any
+    /// field and the diff below names it.
+    #[test]
+    fn the_default_recipe_serializes_byte_for_byte_as_its_fixture() {
+        let golden = include_str!("fixtures/default-recipe.json");
+        let now = format!(
+            "{}
+",
+            serde_json::to_string_pretty(&EditRecipe::default()).expect("the default serializes")
+        );
+        if now != golden {
+            // Name the first differing line rather than dumping 90 of them.
+            let at = now
+                .lines()
+                .zip(golden.lines())
+                .position(|(a, b)| a != b)
+                .map(|i| format!("line {}: now {:?}, fixture {:?}",
+                    i + 1,
+                    now.lines().nth(i).unwrap_or(""),
+                    golden.lines().nth(i).unwrap_or("")))
+                .unwrap_or_else(|| format!(
+                    "same prefix, different length: now {} lines, fixture {} lines",
+                    now.lines().count(),
+                    golden.lines().count()
+                ));
+            panic!(
+                "the default recipe's serialization changed — {at}
+                 If the change is intended, re-bless src/fixtures/default-recipe.json                  in the same commit."
+            );
+        }
+    }
+
+    /// A32: a clamp drops the model's PROSE, never the engine's typed notes.
+    ///
+    /// The string is `<prose><notes>` and `rationale::render_en` is required to
+    /// equal its suffix, so cutting from the back ate the disclosures AND broke
+    /// the strip that would have let the GUI localize what was left. An island
+    /// run of 121 paragraphs came back as 119 with its typed notes gone.
+    ///
+    /// MUTATION: cut from the back again (`cap(s, max - marker.len())` plus a
+    /// trailing marker) and the `ends_with` assertion below fails.
+    #[test]
+    fn a_rationale_over_the_ceiling_keeps_its_typed_notes() {
+        use crate::rationale::{keys, Note};
+        let notes = vec![
+            Note::new(keys::FIT_NOTE_STRENGTH, vec![("pct", "80".into())]),
+            Note::plain(keys::FIT_NOTE_WB_WITHHELD_FOREIGN_HUE),
+            Note::new(keys::PROPOSAL_LIMITS_DISCARDED, vec![("dropped", "exposure_ev".into())]),
+        ];
+        let tail = crate::rationale::render_en(&notes);
+        // Prose in front, in paragraphs, comfortably past the ceiling.
+        let prose = "The model explains itself at length.\n".repeat(3_000);
+        let mut r = EditRecipe {
+            rationale: format!("{prose}{tail}"),
+            ..Default::default()
+        };
+        assert!(r.rationale.len() > EditRecipe::MAX_RATIONALE, "the fixture must overflow");
+        let summary = r.clamp();
+        assert!(r.rationale.len() <= EditRecipe::MAX_RATIONALE, "the ceiling is still the promise");
+        assert!(
+            r.rationale.ends_with(&tail),
+            "the typed disclosures were dropped: {:?}",
+            &r.rationale[r.rationale.len().saturating_sub(160)..]
+        );
+        assert!(r.rationale.starts_with("[rationale truncated"), "the cut is not disclosed");
+        // …and the survivor opens at a paragraph, not mid-word.
+        let body = r.rationale.split("bytes] ").nth(1).unwrap();
+        assert!(body.starts_with("The model explains"), "cut mid-sentence: {:?}", &body[..40]);
+        assert!(summary.truncated_string_bytes > 0, "the loss must still be reported");
+    }
+
+    /// A32: the ceiling holds every typed note a run can produce.
+    ///
+    /// `cap_rationale` keeps the tail, so a disclosure is lost only when the
+    /// NOTES ALONE overrun the ceiling. `rationale::MAX_NOTES` bounds how many
+    /// there can be; this bounds how long each is, from the source, so a new
+    /// and longer template fails here instead of silently costing a disclosure
+    /// on some future run.
+    ///
+    /// MUTATION: put `MAX_RATIONALE` back to `16 * 1024` and this fails.
+    #[test]
+    fn the_rationale_ceiling_holds_every_typed_note_a_run_can_produce() {
+        // An UPPER bound on any one template: the SOURCE span of each
+        // `pub const … = "…";` inside `rationale::keys`. Line continuations
+        // only add bytes, so the span is never shorter than the string it
+        // decodes to — which is the safe direction for sizing a ceiling.
+        let src = include_str!("rationale.rs");
+        let module = src.split("pub mod keys {").nth(1).expect("the keys module moved");
+        let longest = module
+            .split("pub const ")
+            .skip(1)
+            .filter_map(|c| c.split_once("&str ="))
+            .filter_map(|(_, v)| v.split_once("\";"))
+            .map(|(lit, _)| lit.len())
+            .max()
+            .expect("no note templates found");
+        assert!(longest > 400, "the source scan found nothing plausible: {longest}");
+        let worst = crate::rationale::MAX_NOTES * longest;
+        assert!(
+            EditRecipe::MAX_RATIONALE >= worst,
+            "a full note vector is {worst} bytes of template alone; the ceiling is {}",
+            EditRecipe::MAX_RATIONALE
+        );
     }
 
     /// A truncated rationale says so IN the string.
@@ -4044,19 +4223,19 @@ mod tests {
     /// 16 KiB read as if the writer had finished there.
     #[test]
     fn a_truncated_rationale_says_how_much_it_lost() {
-        let mut over = EditRecipe { rationale: "x".repeat(20_000), ..Default::default() };
+        let mut over = EditRecipe { rationale: "x".repeat(80_000), ..Default::default() };
         over.clamp();
-        assert!(over.rationale.len() <= 16_384, "the ceiling is the promise");
+        assert!(over.rationale.len() <= 65_536, "the ceiling is the promise");
         assert!(
-            over.rationale.ends_with("bytes]"),
+            over.rationale.starts_with("[rationale truncated"),
             "no marker: {:?}",
-            &over.rationale[over.rationale.len().saturating_sub(96)..]
+            &over.rationale[..96.min(over.rationale.len())]
         );
         // Both numbers a reader needs, and both TRUE: the ceiling that cut it
-        // and how long the record had been. 20000 is recoverable from the
+        // and how long the record had been. 80000 is recoverable from the
         // string alone, which is the whole point.
-        assert!(over.rationale.contains("16384-byte ceiling"), "ceiling not named");
-        assert!(over.rationale.contains("the original was 20000 bytes"), "original length not named");
+        assert!(over.rationale.contains("65536-byte ceiling"), "ceiling not named");
+        assert!(over.rationale.contains("the original was 80000 bytes"), "original length not named");
 
         // Negative arm: a rationale that FITS is not annotated. A marker that
         // is always appended tells the reader nothing.

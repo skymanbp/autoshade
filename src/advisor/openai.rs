@@ -15,7 +15,7 @@ use serde_json::{json, Value};
 
 use crate::config::Config;
 use crate::decode::{Histogram, Meta};
-use crate::rationale::{keys, render_one, Note};
+use crate::rationale::{keys, Note};
 use crate::recipe::{EditRecipe, HSL_BANDS};
 
 use super::catalogue::{self, edit_recipe_schema};
@@ -751,15 +751,21 @@ impl OpenAiProvider {
         // the photographer's old `crs:Texture` standing over it.
         recipe.schema_era = crate::recipe::SCHEMA_ERA;
         super::project_remote_recipe_text(&mut recipe, &[key]);
+        // The provider's own disclosures, appended to the English rationale AND
+        // carried as typed notes (A10): `push_note` does both, so the persisted
+        // string is byte-identical to what it always was while the GUI gets a
+        // key it can render in the session language.
+        let mut notes: Vec<Note> = Vec::new();
         if !repaired.is_empty() {
             // Repaired, but never silently: the mixer bands the model meant
             // are not the bands it will get. Our own text (axis names + the
             // counts we measured), so it rides AFTER the secret-projecting
             // bound above without needing it.
-            recipe.rationale.push_str(&render_one(&Note::new(
-                keys::HSL_AXIS_LENGTH_REPAIRED,
-                vec![("axes", repaired.join(", "))],
-            )));
+            crate::rationale::push_note(
+                &mut recipe.rationale,
+                &mut notes,
+                Note::new(keys::HSL_AXIS_LENGTH_REPAIRED, vec![("axes", repaired.join(", "))]),
+            );
         }
         // Never trust the model's ranges — and never eat the loss silently:
         // this is the FIRST clamp, so the render-time ValidatedRecipe sees an
@@ -770,15 +776,19 @@ impl OpenAiProvider {
             // The stderr line is invisible in the windowed GUI (L08) — the
             // rationale rides the recipe to every surface, so the discard is
             // disclosed exactly where the proposal is read.
-            recipe.rationale.push_str(&format!(
-                " [the proposal exceeded recipe limits — discarded {}]",
-                dropped.describe()
-            ));
+            crate::rationale::push_note(
+                &mut recipe.rationale,
+                &mut notes,
+                Note::new(
+                    keys::PROPOSAL_LIMITS_DISCARDED,
+                    vec![("dropped", dropped.describe())],
+                ),
+            );
         }
         // GATE 2: the same axis that shaped the prompt shapes the soft caps, or
         // a bolder proposal is compressed straight back to the old ceiling here.
         recipe.temper(ctx.strength);
-        Ok(Proposal { recipe, thinking, lens })
+        Ok(Proposal { recipe, thinking, lens, notes })
     }
 }
 
@@ -1050,11 +1060,37 @@ mod tests {
         assert_eq!(recipe.hsl.luminance, [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]);
 
         // The disclosure the caller appends names both axes and their counts.
-        let note = render_one(&Note::new(
+        let note = crate::rationale::render_one(&Note::new(
             keys::HSL_AXIS_LENGTH_REPAIRED,
             vec![("axes", repaired.join(", "))],
         ));
         assert!(note.contains("hue had 7, luminance had 9"), "{note}");
+
+        // A10: the disclosure is TYPED, and it is on the string as well — the
+            // provider path pushes both through `push_note`, so the persisted
+            // English is byte-identical to what it always was while the GUI
+            // gets a key. Checked at the source because building a `Proposal`
+            // means a paid network call.
+            let whole = include_str!("openai.rs");
+            let body = whole
+                .split("super::project_remote_recipe_text(&mut recipe, &[key]);")
+                .nth(1)
+                .expect("the provider body moved")
+                .split("Ok(Proposal {")
+                .next()
+                .unwrap();
+            for key in ["HSL_AXIS_LENGTH_REPAIRED", "PROPOSAL_LIMITS_DISCARDED"] {
+                assert!(body.contains(&format!("keys::{key}")), "{key} left the provider path");
+            }
+            assert!(
+                !body.contains("recipe.rationale.push_str("),
+                "the provider is writing untyped prose into the rationale again"
+            );
+            assert_eq!(
+                body.matches("&mut notes,").count(),
+                2,
+                "both provider disclosures must ride the typed channel"
+            );
 
         // A correctly-sized mixer is left completely alone (no false note).
         let mut fine: Value =
@@ -1519,7 +1555,7 @@ mod tests {
             python_bin: "python".into(),
             denoise_model: "scunet_color_real_psnr".into(),
             denoise_script: String::new(),
-            denoise_cache: String::new(),
+            weights_dir: String::new(),
             segment_script: String::new(),
             embed_script: String::new(),
             correspond_script: String::new(),
@@ -1921,16 +1957,41 @@ mod tests {
         );
     }
 
-    /// The one thing this round could NOT verify without spending money, kept
-    /// as an executable question instead of a claim (R23-4's implementation
-    /// guard rail).
+    /// R23-4's executable question, ANSWERED — and kept executable, because the
+    /// answer is a fact about a provider and providers change.
     ///
     /// `catalogue::think_envelope_schema` lists the thinking fields BEFORE
-    /// `recipe` in `required`, and the prompt states that order — but whether
-    /// OpenAI's strict structured output GENERATES fields in the declared order
-    /// is undocumented, and if it does not, "think before you write" is only as
-    /// strong as the prompt. This probe measures it on a real call: the byte
-    /// offset of `"scene"` in the RAW response text must precede `"recipe"`.
+    /// `recipe` in `required`, and the prompt states that order in words — but
+    /// whether OpenAI's strict structured output GENERATES fields in the
+    /// declared order is undocumented, and if it does not, "think before you
+    /// write" is only as strong as the prompt. This probe measures it on a real
+    /// call, from the byte offsets of the keys in the RAW response text.
+    ///
+    /// MEASURED THREE TIMES, two endpoints, two models, two dates, same
+    /// answer: the keys come back in strict ALPHABETICAL order, so the recipe
+    /// is written FIRST and the thinking after it.
+    ///
+    /// | call | endpoint | `recipe` | `scene` | `self_critique` | `tool_plan` |
+    /// |---|---|---|---|---|---|
+    /// | R27, 2026-08-19 | the relay | 170 | 1269 | 1393 | 1595 |
+    /// | v1.2.4, 2026-09-02 | `gpt-5` on api.openai.com | 194 | 1604 | 1702 | 1961 |
+    /// | v1.2.4, 2026-09-02 | `gpt-5` on api.openai.com | 230 | 2527 | 2667 | 2859 |
+    ///
+    /// The OFFSETS are per-call — they move with how much prose the model
+    /// wrote — and only the ORDER is stable, which is why the assertion below
+    /// compares a sequence rather than numbers. `intended_look` opened all
+    /// three answers and `pixel_tool_suggestions` fell between it and
+    /// `recipe`: alphabetical across all six fields, every time. The
+    /// consequence is stated where the schema lives: the envelope's
+    /// structural benefits (an explicit plan, an auditable self-critique, a
+    /// per-family use/skip decision) never depended on generation order, and
+    /// "think before you write" rests on the prompt.
+    ///
+    /// The assertion below is therefore the MEASUREMENT, not the hope: it
+    /// passes on the observed alphabetical order and goes red the day a
+    /// provider generates something else — including the day one starts
+    /// honouring the declaration, which is the day the rename
+    /// `think_envelope_schema` describes would be worth making.
     ///
     /// Run it deliberately (it costs one paid vision call):
     ///   AUTOSHADE_THINK_PROBE_KEY=sk-… cargo test --lib -- --ignored think_envelope_field_order
@@ -1974,15 +2035,33 @@ mod tests {
         .expect("the probe call completes");
         let text = extract_output_text(&value).expect("the probe response carries output text");
         eprintln!("probe response ({} bytes):\n{text}", text.len());
-        let at = |k: &str| text.find(k).unwrap_or_else(|| panic!("`{k}` is missing: {text}"));
-        let (scene, plan, recipe, critique) =
-            (at("\"scene\""), at("\"tool_plan\""), at("\"recipe\""), at("\"self_critique\""));
-        eprintln!("offsets: scene={scene} tool_plan={plan} recipe={recipe} critique={critique}");
-        assert!(
-            scene < recipe && plan < recipe,
-            "strict mode did NOT generate the declared order — the envelope still \
-             structures the answer, but 'think before you write' would then rest on the \
-             prompt alone; record this and consider the separate plan role"
+        let at = |k: &str| {
+            let quoted = format!("\"{k}\"");
+            text.find(&quoted).unwrap_or_else(|| panic!("`{k}` is missing: {text}"))
+        };
+        // Read the declared order off the schema itself: a second copy of the
+        // field list here could drift from the one the call actually sent.
+        let schema = catalogue::think_envelope_schema();
+        let declared: Vec<&str> = schema["required"]
+            .as_array()
+            .expect("the envelope declares its field order")
+            .iter()
+            .map(|v| v.as_str().expect("a required field is a name"))
+            .collect();
+        let mut by_offset: Vec<(usize, &str)> = declared.iter().map(|k| (at(k), *k)).collect();
+        by_offset.sort_unstable();
+        eprintln!("written order: {by_offset:?}");
+        let written: Vec<&str> = by_offset.iter().map(|(_, k)| *k).collect();
+        let mut alphabetical = declared.clone();
+        alphabetical.sort_unstable();
+        assert_eq!(
+            written, alphabetical,
+            "the generated order is no longer the alphabetical one measured twice \
+             (R27 2026-08-19, v1.2.4 2026-09-02). If it is now `{declared:?}`, strict \
+             mode has begun honouring the declaration and 'think before you write' is \
+             structural rather than prompt-borne; if it is a third thing, the mechanism \
+             this probe records is wrong. Either way the rustdoc above and \
+             `catalogue::think_envelope_schema` state a measurement that no longer holds."
         );
     }
 }
