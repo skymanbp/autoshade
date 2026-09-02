@@ -413,7 +413,18 @@ settings file can supply them.
   cool hazy register. Drop Adherence to 40 % or below (tier **Hint**) and the
   library leads again, exactly as it did in v1.2.2 — with no Direction at all, or
   a blank one, nothing about the Style control changes. A develop that skipped the
-  pull says so in its rationale and names the tier that decided it.
+  pull says so in its rationale and names the tier that decided it. The judge that
+  reviews the finished frame is briefed the same way: with the direction leading it
+  is told your past-edit look is CONTINUITY, not the brief, so a revision it buys
+  cannot be spent walking the direction back toward your library.
+
+  All three surfaces can choose. CLI: `--adherence` on `analyze` and `auto`.
+  Desktop: the **Adherence** slider, active once Direction has text. Browser
+  (`autoshade serve`): the **Adherence** slider beside **Style influence**, and
+  for anything driving that HTTP API directly, the `POST /api/analyze` body takes
+  an optional `adherence` field (0..1). Omitting it means 0.65 — the same default
+  every other surface has — so a client written before v1.2.3 sends the same
+  request it always sent.
 - **Reimagine:** enter a prompt in the AI panel or use `reimagine` to create a
   generated, lower-resolution target. `--fidelity high` (the default, and the
   GUI's mode) tells the model to re-develop the same photograph, not repaint

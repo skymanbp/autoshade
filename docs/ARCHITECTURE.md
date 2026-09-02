@@ -2002,7 +2002,7 @@ that. Measured on the island showcase frame (2026-09-01, `--style 1.0 --strength
 as far apart as *dark moody low-key … teal-and-orange*, *warm golden tones,
 film-like grain, lifted matte shadows* and *vivid saturated colours, punchy high
 contrast, crisp clarity* developed to per-panel-cell mean HSV S/V of **23/54 ·
-11/58 · 18/55** — all three inside the library's own cool hazy register, against
+11/58 · 17/55** — all three inside the library's own cool hazy register, against
 the neutral develop's 17/47. The same three directions against an index with the
 photographer's own edits removed separated to **34/38 · 12/61 · 29/65**.
 
@@ -2022,14 +2022,49 @@ Style 0.85 — and it decides two things at once:
   so neither the verified proposal nor a judge candidate is pulled toward
   `style_targets`, and the re-verification that follows a real blend is skipped
   with it. Wording alone would have been a lie by arithmetic: at Style 1.0
-  `style_pull` is FULL, i.e. the proposal's own value is replaced.
+  `style_pull` is FULL, i.e. the proposal's own value is replaced. Both call sites
+  are pinned by a source guard
+  (`pipeline::every_blend_site_in_this_file_is_guarded_by_the_style_voice`), because
+  no test in the battery can run the blend path itself — it needs a paid analysis —
+  and the judge-candidate site is the one that governs an ADOPTED revision.
+* **the reviewer's brief.** `GradeIntent` carries the same voice to
+  `judge::intent_rubric`. In `Ceiling`/`Target` the retrieved look is stated as the
+  BRIEF that a revision may not walk back (B2, unchanged and pinned byte-for-byte);
+  in `Background` it is stated as CONTINUITY the judge must neither enforce nor
+  penalise, and the refusal is re-aimed at the DIRECTION. This is not decoration:
+  the judge BUYS revisions, and two of the three 2026-09-01 acceptance develops
+  adopted a guided one, so an unconditioned rubric left the own-edit library as the
+  stated brief for the reviewer that chose the recipe that shipped.
 
 Retrieval is unchanged — `req.style > 0` still gates it, the direction still ranks
 the exemplars and the look, IMAGE 2 still goes, and `STYLE_NEIGHBOURS` /
 `STYLE_REF_IMAGE` / the look notes still disclose it. The skip has its own note,
-`STYLE_BACKGROUND`, which names the adherence tier that caused it and how to hand
-the lead back. With no direction, a blank one, or one at tier `Hint`, the block is
-byte-identical to v1.2.2 at every Style value
+`STYLE_BACKGROUND`, which names the adherence tier that caused it and the DIAL to
+move — not a CLI flag: the note is persisted and re-rendered in three surfaces, two
+of which have no command line.
+
+**Why the look-library block and IMAGE 2 keep saying "match its grade".** The
+reference block says the direction leads while `render_look_reference` still sends
+"match its grade, not its content" and the IMAGE 2 sentences still say "Match that
+LEVEL of grading". That is not a contradiction: the finished photo in those two
+places is ranked WITH the direction among its terms — `look_ranked_by_direction` is
+true exactly when the direction text carries a non-zero text or description weight,
+and only then may the block claim "and direction" — so following that photo's grade
+is following the direction rather than overruling it. The half that is NOT
+direction-ranked — the shared tags of the photographer's own past RAW+XMP edits,
+folded into `look_summary` — is the half the voice demotes, in the block and in the
+judge's brief alike.
+
+The adherence dial reaches every surface: `--adherence` (CLI), the Adherence slider
+(desktop, and the browser page since v1.2.3), and the optional `adherence` field on
+the analyze request body. That field exists because the dial stopped being prompt
+intent only: without it every web develop carrying a direction was forced into
+`Background` with no way back, while the other two surfaces could choose `Hint`.
+Absent, it resolves through `DirectionAdherence::from_optional` to the same 0.65
+every other surface defaults to, so an older client's request is unchanged.
+
+With no direction, a blank one, or one at tier `Hint`, the block is byte-identical
+to v1.2.2 at every Style value
 (`style::the_no_direction_block_is_byte_identical`, whose three fixtures were
 captured from the v1.2.2 build before the third voice existed).
 
