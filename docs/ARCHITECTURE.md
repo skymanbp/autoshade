@@ -97,6 +97,17 @@
 > experimental generative edits, an optional pixel-**heal** retouch mode (§4.7)
 > the deterministic look **reverse-fit** (§4.8) and the local server's refusal
 > model (§4.9).
+> The battery is one command, `scripts/release_battery.sh`: a **default** lane
+> (`cargo test`, the corpus variable unset), a **gui** lane (the
+> `autoshade-gui` bin under the `gui` feature) and a **calib** lane (the
+> library a second time with `AUTOSHADE_FIT_CALIBRATION_DIR` at the p36-p39
+> corpus and `--nocapture`, which is the only way a skipped test's own line
+> reaches the transcript at all), each in its own target and data directory
+> and all three in parallel. It refuses to start at all when the corpus is
+> absent, because a battery whose corpus-gated tests skip is green for the
+> wrong reason; it writes a `=== name ===` transcript that
+> `scripts/check_docs.py --gates` reads the counts and the lane set back out
+> of, and it prints the by-name test-set difference against a saved baseline.
 > 1332 library + 23 CLI + 160 GUI + 2+2 contract tests are enumerated in the GUI
 > build; the library result is 1320 pass + 12 `#[ignore]`d forensic probes
 > (counts refreshed 2026-09-02 for v1.2.3: +24 / −0 by name against `8e631f7` —
@@ -566,7 +577,11 @@
 > [`src/embed.rs`](../src/embed.rs): the sidecar is asked for `--fp16` (which it
 > has implemented since R27 and nothing ever passed — CUDA-only by its own
 > construction, and it re-casts to fp32 before normalising, so no invariant the
-> Rust side checks moves), and calls are SINGLE-FLIGHTED behind a process-wide
+> Rust side checks moves; measured against an fp32 twin of the same
+> 169-exemplar library, `1 - cos` is at most 2.235e-5, the top-5 is identical
+> for 168 of 169 leave-one-out queries and no retrieved SET moves at all — the
+> one place the drift is visible is the tag argmax, which flips a phrase for 6
+> of the 169), and calls are SINGLE-FLIGHTED behind a process-wide
 > gate, so at most one model is resident whatever the caller's concurrency.
 > 4 × 1.50 GB becomes 1 × 0.75 GB. The gate was chosen over wiring `embed.py`'s
 > (already implemented) manifest batching because it also covers the
@@ -1901,17 +1916,23 @@ nearest past photo as a second `input_image` on the propose call — the prompt
 names the two frames by position, `store:false` covers both, and the extra image
 is disclosed in the tooltip and in the rationale.
 
-**S1 continuation: text and finished-look retrieval.** The RAW index remains
-the v5, 14-dimensional EXIF/histogram retrieval and now may carry additive
+**S1 continuation: text and finished-look retrieval.** The RAW index keeps the
+14-dimensional EXIF/histogram retrieval it shipped at v5, is written at version
+6, and may carry additive
 SigLIP 2 image vectors, Direction text vectors, zero-shot vocabulary scores,
 bounded tags, and an optional description vector. Its distance is
 `d14 + W_EMB(1-cos(q_img,e_img)) + W_TXT(1-cos(q_txt,e_img)) + W_DESC(1-cos(q_txt,e_desc))`;
 missing or width-mismatched vectors contribute zero, and zero weights preserve
 the v5 order bit for bit. The vocabulary is a versioned, grouped list of 33
 SigLIP-style photographic phrases; at most one winning phrase per group enters
-the four-tag summary.
+the four-tag summary, and a group's winner is the phrase whose score stands
+furthest above the LIBRARY's own mean for it, so a caption every photograph
+scores highly on cannot own a tag everywhere. That is what version 6 is: tags
+feed `desc_text`, so re-deriving them moves the ranking and not just the
+printed summary. Every index this build reads — v4, v5 or v6 — therefore has
+its tags re-derived on load rather than trusted from disk.
 
-**S3: the local-work habit.** A v5 exemplar may additionally carry a
+**S3: the local-work habit.** An exemplar may additionally carry a
 `MaskHabit` (`src/mask_habit.rs`) read from the same sidecar the settings come
 from, through the develop chain's own path-aware importer
 (`xmp::xmp_to_recipe_for_photo`): the number of masks the photographer ENABLED
@@ -1974,8 +1995,18 @@ the only available bank made antonym pairs agree *more*. S2's calibration harnes
 under BOTH query-text proxies: under the tag-string proxy the raw variant
 wins and neither text term can be told apart from zero, while under the
 real-prose proxy the standardised variant beats its own text-free row with a
-paired CI excluding 0. So `STANDARDISE_TEXT_TERMS = true` ships and the raw
-path stays one flag away rather than being deleted or shipped unmeasured. The switch and the
+paired CI excluding 0. So the standardised arm is the only one that ships and
+the raw path is gone rather than kept one flag away: a switch nothing flips is
+an untested second ranking carrying weights nobody calibrated for it, while the
+harness still sweeps both arms and prints both tables. A third proxy of typed
+SHORT directions then settled the head-to-head S2 could not — best raw 0.410916
+against best standardised 0.377820, paired CI [+0.021870, +0.043719] — and
+priced the shipped weights on the same run: `W_TXT` 0.5 costs nothing
+measurable (+0.000447, CI [-0.006972, +0.007980]) and is the largest weight
+that leaves the corpus open, while `W_DESC` 0.5 costs +0.013643 (CI
+[+0.006785, +0.020881]) and buys the antonym separation that is the Direction
+control's only other mechanism (top-1 overlap 46.9 % with it, 60.7 % without).
+The switch and the
 four weights are resolved once, as values (`EmbeddingSwitch`,
 `RetrievalWeights`), and travel on the develop request; nothing writes the
 process environment to express a flag, and `retrieve_with_embed`,
