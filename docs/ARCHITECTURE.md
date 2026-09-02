@@ -3350,6 +3350,60 @@ ad-hoc `codesign`. Ad-hoc signing is a real limitation and is documented as
 one in the README: it costs the user one 「Open Anyway」, and notarisation is
 not scheduled.
 
+### 4.12 Windows: one AppId, and an uninstall the user answers
+
+Two promises live in `installer/autoshade.iss` — setup upgrades an existing
+install in place, and the user can choose to uninstall — and both are
+behaviour, not settings, so both are checked by installing.
+`scripts/installer_scenarios.ps1` drives the installer through the six states a
+user can put it in (fresh install, upgrade over a running program, downgrade,
+uninstall keeping the data, reinstall, uninstall deleting it) and asserts what
+each one leaves in the registry, on `PATH`, in the Start Menu and on disk.
+`.github/workflows/installer-upgrade.yml` runs that same script on a clean
+Windows runner against the PREVIOUS published release, so the upgrade is
+measured across the version boundary the release notes claim it works over, and
+not against a second copy of the same build.
+
+**Upgrading is the same install, moved forward.** `AppId` is a constant GUID
+that already survived the Autoshop rename, and it is what Inno recognises an
+existing install by, so it is never derived from the version;
+`UsePreviousAppDir=yes` then puts the new files where the old ones are,
+whatever directory that is. What comes out the other side is one Programs and
+Features entry, one `PATH` entry, the same three Start Menu shortcuts
+overwritten rather than added to, and every shipped file replaced
+(`ignoreversion`) — while `{app}\python\weights\`, the multi-gigabyte
+download the sidecars fetch on first use, and the develop store outside `{app}`
+are left byte for byte alone, because neither is installer payload. A running
+AutoShade holds its own executable open, so `CloseApplications=yes` lets
+Restart Manager close it and `RestartApplications=no` declines to start it
+again; the log names what it found. Going BACKWARDS is refused: setup reads
+`DisplayVersion` out of the uninstall key and compares it NUMERICALLY — a
+text compare puts 1.2.10 before 1.2.9 — then stops with a message naming
+both versions, which in a silent run is a non-zero exit code and the reason in
+the log.
+
+**Uninstalling has two doors and one question.** Programs and Features carries
+the entry Inno writes from the AppId, and the Start Menu group carries
+「Uninstall AutoShade」 beside the two launchers, so a user who never
+opens that control panel still has a way out. Either door asks whether to
+delete the two things the installer never installed — the downloaded
+weights and the develop store — naming the size found in each and
+defaulting to keeping both. A silent uninstall cannot be asked, so it keeps
+them unless `/DELETEDATA=1` is on its command line. That question is put with
+`SuppressibleMsgBox` rather than `MsgBox`, which is the difference between a
+decision and a hang: a plain `MsgBox` from Pascal Script displays even under
+`/VERYSILENT /SUPPRESSMSGBOXES` and waits there for a click nobody is present
+to give. Program files, shortcuts, `PATH` entry and registry entry go in either
+mode; the install folder itself goes only when the data went with it.
+
+A scenario run must never be able to touch the real install, so the identity is
+a compile-time parameter: `/DAppIdOverride` and `/DAppNameOverride` give a test
+build its own GUID, its own Start Menu group and its own installer-state key,
+and a release compile passes neither and therefore always gets the constants.
+The scenario script asserts that, and photographs the shipped install's
+registry entry, directory and Start Menu folder before and after to prove they
+did not move.
+
 ## 5. Why Rust — and the whole stack, named
 
 Cross-platform, no GC pauses on large-image pipelines, first-class image crates,

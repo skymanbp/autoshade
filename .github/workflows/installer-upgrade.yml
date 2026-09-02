@@ -1,0 +1,152 @@
+# The installer's two promises, checked by installing.
+#
+# `release.yml` BUILDS the installer and publishes it; nothing there ever runs
+# it, so "upgrades in place" and "lets the user choose to uninstall" were claims
+# with no check behind them — and the one machine that did check them was the
+# author's, by hand, after the release was already public. This workflow runs
+# the previous published release and this build against each other on a clean
+# Windows runner, through the six states a user can put the installer in, and
+# fails on any assertion.
+#
+# The runner is `windows-latest` on purpose, against the pin doctrine in
+# `release.yml`. That doctrine exists so a PUBLISHED asset is reproducible from
+# its tag; this job publishes nothing. What it measures — Restart Manager, the
+# uninstall registry, the user PATH — is OS behaviour, and the version of
+# Windows worth measuring it on is the one users are being moved to.
+#
+# The assertions live in `scripts/installer_scenarios.ps1`, which is also what a
+# developer runs locally, so there is one description of correct behaviour and
+# not two. Locally it runs under a throwaway AppId; here the runner is empty, so
+# it runs under the shipped one.
+name: installer-upgrade
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  scenarios:
+    runs-on: windows-latest
+    env:
+      SHIPPED_APP_ID: '{B2C8B506-4DD8-4F06-B25D-7A3FBE9A742C}'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Resolve the version
+        id: ver
+        shell: pwsh
+        run: |
+          $cargo = Get-Content Cargo.toml -Raw
+          $m = [regex]::Match($cargo, '(?ms)^\[package\].*?^version\s*=\s*"(?<v>[^"]+)"')
+          if (-not $m.Success) { throw 'could not read package.version from Cargo.toml' }
+          $v = $m.Groups['v'].Value
+          "version=$v" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          # One below this build, for the downgrade scenario. A published
+          # release cannot be used for it: the refusal is code THIS tree added,
+          # so an older installer would simply install and prove nothing.
+          $parts = @($v -split '\.' | ForEach-Object { [int]($_ -replace '\D.*$', '') })
+          while ($parts.Count -lt 3) { $parts += 0 }
+          if ($parts[2] -gt 0) { $parts[2]-- }
+          elseif ($parts[1] -gt 0) { $parts[1]--; $parts[2] = 0 }
+          elseif ($parts[0] -gt 0) { $parts[0]--; $parts[1] = 0; $parts[2] = 0 }
+          else { throw "no version below $v exists" }
+          $down = $parts -join '.'
+          "downgrade=$down" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          Write-Host "this build $v, downgrade probe $down"
+
+      - name: cargo build (default features)
+        run: cargo build --release --locked
+      - name: cargo build (gui feature)
+        run: cargo build --release --locked --bins --features gui
+
+      - name: Stage dist/
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Copy-Item target\release\autoshade.exe dist\
+          Copy-Item target\release\autoshade-gui.exe dist\
+          .\dist\autoshade.exe --version
+
+      - name: Install Inno Setup
+        run: choco install innosetup -y --no-progress
+
+      # The real installer, real AppId, through the same script the release
+      # workflow calls — so a change that breaks packaging fails here first.
+      - name: Build this build's installer
+        shell: pwsh
+        run: .\scripts\build_installer.ps1
+
+      # Same .iss, same AppId, a lower version. Compiled straight with ISCC
+      # because build_installer.ps1 refuses a version the staged exe does not
+      # report, which is exactly the guard we are deliberately stepping around.
+      - name: Build the downgrade probe
+        shell: pwsh
+        run: |
+          $iscc = Join-Path ${env:ProgramFiles(x86)} 'Inno Setup 6\ISCC.exe'
+          if (-not (Test-Path -LiteralPath $iscc)) { throw "ISCC not found at $iscc" }
+          $out = Join-Path $env:RUNNER_TEMP 'downgrade'
+          New-Item -ItemType Directory -Force -Path $out | Out-Null
+          & $iscc "/DAppVersion=${{ steps.ver.outputs.downgrade }}" "/O$out" installer\autoshade.iss
+          if ($LASTEXITCODE -ne 0) { throw "ISCC failed with $LASTEXITCODE" }
+          Get-ChildItem $out
+
+      # The upgrade has to start from bytes a user actually has, not from a
+      # second copy of this build: an in-place upgrade is only interesting
+      # across the version boundary the release notes claim it works over.
+      - name: Download the previous published release
+        id: prev
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $thisTag = "v${{ steps.ver.outputs.version }}"
+          $releases = gh release list --limit 30 --json tagName,isDraft,isPrerelease |
+            ConvertFrom-Json
+          $candidate = $releases |
+            Where-Object { (-not $_.isDraft) -and (-not $_.isPrerelease) -and ($_.tagName -ne $thisTag) } |
+            Select-Object -First 1
+          if ($null -eq $candidate) {
+            throw "no published release before $thisTag to upgrade from"
+          }
+          $dir = Join-Path $env:RUNNER_TEMP 'previous'
+          New-Item -ItemType Directory -Force -Path $dir | Out-Null
+          gh release download $candidate.tagName --pattern 'AutoShade-Setup-*.exe' --dir $dir
+          $setup = Get-ChildItem $dir -Filter 'AutoShade-Setup-*.exe' | Select-Object -First 1
+          if ($null -eq $setup) {
+            throw "$($candidate.tagName) publishes no AutoShade-Setup-*.exe"
+          }
+          $version = [regex]::Match($setup.Name, 'AutoShade-Setup-(?<v>.+)\.exe').Groups['v'].Value
+          "setup=$($setup.FullName)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          Write-Host "upgrading from $($candidate.tagName) ($version)"
+
+      - name: Run the installer scenarios
+        shell: pwsh
+        run: |
+          .\scripts\installer_scenarios.ps1 `
+            -BaseSetup '${{ steps.prev.outputs.setup }}' `
+            -BaseVersion '${{ steps.prev.outputs.version }}' `
+            -UpgradeSetup "target\installer\AutoShade-Setup-${{ steps.ver.outputs.version }}.exe" `
+            -UpgradeVersion '${{ steps.ver.outputs.version }}' `
+            -DowngradeSetup "$env:RUNNER_TEMP\downgrade\AutoShade-Setup-${{ steps.ver.outputs.downgrade }}.exe" `
+            -DowngradeVersion '${{ steps.ver.outputs.downgrade }}' `
+            -AppId "$env:SHIPPED_APP_ID" `
+            -AppName 'AutoShade' `
+            -PayloadRoot . `
+            -WorkRoot "$env:RUNNER_TEMP\installer-scenarios"
+
+      # The Inno logs are the evidence for every log assertion above, and the
+      # only way to read a failure that happened inside setup.
+      - name: Keep the setup logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: installer-scenario-logs
+          path: ${{ runner.temp }}/installer-scenarios/logs
+          if-no-files-found: warn
