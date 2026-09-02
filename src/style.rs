@@ -35,16 +35,21 @@ const WEIGHTS: [f32; NDIM] = [
 /// hand-rotated shot is retrieved as the portrait/landscape it now IS;
 /// **v5: the optional SigLIP 2 embedding block** — a v5 exemplar MAY carry
 /// [`StyleExemplar::embed`] and the distance MAY gain a cosine term, which
-/// changes the RANKING and therefore the version).
-const CURRENT_INDEX_VERSION: u32 = 5;
-/// Index versions this build will serve. v4 is accepted alongside v5 on
-/// purpose: the v5 change is PURELY ADDITIVE (an absent `embed` contributes
-/// nothing to the distance, [`embed_distance`]), so refusing a v4 index would
-/// leave every existing user with a dead Style panel for the length of an
-/// hour-long rebuild in exchange for nothing. The FEATURE semantics of v4 and
-/// v5 are identical — that is what makes this safe, and it is why v3 is still
-/// refused (its aspect dim means something else).
-const READABLE_INDEX_VERSIONS: [u32; 2] = [4, CURRENT_INDEX_VERSION];
+/// changes the RANKING and therefore the version; **v6: the attribute TAGS are
+/// derived against the library mean** ([`tags_from_scores`]), which changes
+/// what a stored tag list means and, through [`desc_text`], the text a
+/// tag-only record's description vector is the vector OF — i.e. the ranking).
+const CURRENT_INDEX_VERSION: u32 = 6;
+/// Index versions this build will serve. v4 and v5 are accepted alongside v6
+/// on purpose. The v5 change was PURELY ADDITIVE (an absent `embed`
+/// contributes nothing to the distance, [`embed_distance`]), and the v6 change
+/// is RE-DERIVABLE: [`StyleIndex::load`] re-scores every stored tag list from
+/// the file's own `vocab_scores` and drops a description vector whose text the
+/// new tags no longer spell, so a v5 file is served as a v6 one without the
+/// hour-long rebuild it would otherwise cost. What is refused is a version
+/// whose 14 FEATURES mean something else — which is why v3 is still refused
+/// (its aspect dim means something else).
+const READABLE_INDEX_VERSIONS: [u32; 3] = [4, 5, CURRENT_INDEX_VERSION];
 // Load-time bounds: an index is disk input that reaches the model prompt, so
 // its size, shape and values get invariants at the door (there is no
 // exfiltration channel — the response is strict json_schema — but an
@@ -271,16 +276,52 @@ pub const W_EMB_DEFAULT: f64 = 4.0;
 /// corpus: 149 of 169 exemplars appear, the most-retrieved one in 13.5 % of
 /// queries instead of 59.9 %.
 ///
-/// THE COST, stated rather than buried: two opposite directions retrieve the
-/// same top-1 for 44.7 % of the 169 queries at 0.5, against 6.3 % at 4.0 —
-/// and 71.0 % with no text term at all. The direction is still heard; it no
-/// longer shouts down the photograph.
+/// RE-MEASURED against real short directions, which is the measurement the S2
+/// ruling registered and the one every number above was missing.
+/// `scripts/calibrate_style_retrieval.py` grew a third query-text proxy,
+/// `short`: twelve typed-length directions, each exemplar assigned the one its
+/// own look tags answer best. Eleven of the twelve were assigned to at least
+/// one exemplar and those eleven are the ladder; the antonym column below is
+/// the mean over the three opposed pairs among them. Two things have to be
+/// said before any MAE is compared across the two runs. The index now carries
+/// FIFTY settings keys per exemplar where the S2 grid saw twelve — `7420c0a`
+/// taught `load` the HSL and colour-grade labels the writer had been emitting
+/// since `a31eb2f` — so the pooled error is on a different scale, and only
+/// within-run differences mean anything. On this scale the 14-dim baseline is
+/// 0.425385, not 0.713143.
 ///
-/// DISCLOSED LIMITATION, unchanged: the harness's query-text proxy is the
-/// held-out exemplar's OWN description, a text that describes the query
-/// photograph perfectly, and a user's typed Direction is not that. It is why
-/// the collapse and antonym numbers above are measured with real direction
-/// texts and reported BESIDE the MAE rather than in place of it.
+/// The objective PREFERS a larger weight, monotonically, and the coverage
+/// table beside it says why that preference must not be obeyed (`W_EMB` 4,
+/// `W_DESC` 0.5, K = 4, 169 photographs x 11 directions):
+///
+/// | `W_TXT` | MAE | top exemplar's share of one direction's top-4 | ever retrieved | antonym top-1 overlap |
+/// |---|---|---|---|---|
+/// | 0.0 | 0.429342 | 10.1 % | 165/169 | 69.0 % |
+/// | 0.5 | 0.426288 | 18.3 % | 167/169 | 46.9 % |
+/// | 1.0 | 0.422403 | 30.2 % | 167/169 | 30.6 % |
+/// | 2.0 | 0.387067 | 63.3 % | 168/169 | 8.5 % |
+/// | 4.0 | 0.382168 | 97.0 % | 159/169 | 1.8 % |
+///
+/// The two right-hand columns bracket the same knob from opposite sides. At
+/// 0.0 the direction is inert: with the description term off as well, two
+/// antonyms retrieve the same top-1 for 100.0 % of the queries. At 4.0 the
+/// PHOTOGRAPH is inert: one exemplar answers 97.0 % of 169 different frames
+/// for a given direction, which is S2's collapse reproduced on the new index.
+/// The harness's own printed recommendation for this proxy is
+/// `W_EMB=0, W_TXT=2, W_DESC=0` at MAE 0.377820, and it is REFUSED on that
+/// table: it recommends the collapse, because the objective cannot see it.
+///
+/// It cannot arbitrate the collapse away either, and the reason is structural
+/// rather than a shortcoming a longer run would fix: the proxy direction is
+/// assigned from the held-out exemplar's OWN tags, so a direction labels its
+/// query, and any weight that retrieves the query's own attributes harder
+/// scores better for doing less. That is what the ladder measures above 0.5.
+///
+/// So 0.5 is PINNED, on the coverage side, and the MAE's job here is to price
+/// it: paired against the text-free `(4, 0, 0)` over the same 7,534
+/// (query, key) observations, `(4, 0.5, 0)` is +0.000447 with a 95 % CI of
+/// [-0.006972, +0.007980]. This term costs nothing measurable, and it is the
+/// largest weight that leaves the corpus open.
 pub const W_TXT_DEFAULT: f64 = 0.5;
 /// Weight of the direction-text ↔ exemplar-DESCRIPTION term.
 ///
@@ -297,11 +338,43 @@ pub const W_TXT_DEFAULT: f64 = 0.5;
 /// +0.048325, paired bootstrap 95 % CI [+0.024290, +0.078587]. Most of that
 /// gain was `W_TXT`; this term added the last +0.015 on top of `(4, 4, 0)`.
 ///
-/// UNCHANGED by this batch's recalibration, which moved `W_TXT` and not this:
-/// the corrected variant's winning row is `(4, 0.5, 0.5)`, MAE 0.688864, CI
+/// UNCHANGED by S2's recalibration, which moved `W_TXT` and not this: the
+/// corrected variant's winning row is `(4, 0.5, 0.5)`, MAE 0.688864, CI
 /// [+0.005837, +0.041111]. The hubness correction applies to the IMAGE-side
-/// term only ([`standardise`] says why), so this term is measured exactly as
-/// it was.
+/// term only ([`standardise`] says why), so this term was measured exactly as
+/// it had been.
+///
+/// AND ON TRIAL in the short-direction re-test, where it turns out to be the
+/// half of the pair that pays. On the current 50-key index (see
+/// [`W_TXT_DEFAULT`] for why the MAE scale moved) with the `short` proxy,
+/// paired row against row rather than each against the baseline — the
+/// observations are the same queries and the same keys in both, so the
+/// difference is paired directly, and two overlapping baseline intervals do
+/// not make two indistinguishable rows:
+///
+/// | against text-free `(4, 0, 0)` | mean | 95 % CI | |
+/// |---|---|---|---|
+/// | `(4, 0.5, 0.5)` as shipped | +0.013643 | [+0.006785, +0.020881] | worse |
+/// | `(4, 0.5, 0)` no description term | +0.000447 | [-0.006972, +0.007980] | not separated |
+/// | `(4, 0, 0.5)` description term alone | +0.016799 | [+0.010650, +0.022835] | worse |
+///
+/// Positive is MORE error. The whole of the shipped pair's cost is this term:
+/// removing it recovers +0.012868, CI [+0.006925, +0.018852]. The mechanism is
+/// the pairing rather than the prose — a short typed direction against a
+/// paragraph of generated description is text against text through a tower
+/// trained for image against text, and S2's proxy hid that by making the query
+/// text a description too. Row counts run 7,534 to 7,540 because a settings
+/// key with no carrier among the four retrieved neighbours yields no
+/// observation.
+///
+/// It is KEPT at 0.5, and what buys it is measured in the same run. At
+/// `W_TXT = 0.5` this is the term that separates opposite directions: antonym
+/// top-1 overlap 46.9 % with it against 60.7 % without, and the corpus stays
+/// open either way (top share 18.3 % against 13.6 %, 167/169 against 168/169
+/// ever retrieved). Predicting the held-out settings is the reference block's
+/// first job and obeying the typed Direction is its second; at zero the second
+/// job keeps one term where it had two. The price is 3.2 % of a pooled
+/// z-scored error, and it is a number now instead of a disclosure.
 pub const W_DESC_DEFAULT: f64 = 0.5;
 /// Weight of the look-library image term, and the one weight the harness never
 /// evaluated: the look library carries no settings, so the leave-one-out
@@ -324,45 +397,6 @@ pub const W_DESC_DEFAULT: f64 = 0.5;
 /// therefore an UNMEASURED value sitting in a measured stable band, not a
 /// normalisation that could not matter.
 pub const W_LOOK_DEFAULT: f64 = 1.0;
-/// Does the ranking Z-SCORE the two direction-text terms over the candidate
-/// set before weighting them, or weight the raw `1 − cos` gaps?
-///
-/// F-14 built the standardised variant because SigLIP image↔text cosines are
-/// tiny and tightly clustered, so a raw term barely reorders anything and a
-/// grid over it can "find" 0 for the wrong reason. S1 measured both variants
-/// and the raw one won — on a grid whose query text was the exemplar's tag
-/// string. S2's recalibration, with real prose on both sides, reverses it:
-/// best standardised `(4, 4, 0.5)` = 0.664818 against best raw `(4, 2, 0)` =
-/// 0.693811, and the raw variant's own text terms are indistinguishable from
-/// having none (paired CI against `(4, 0, 0)` = [−0.001834, +0.004821]) while
-/// the standardised variant's are not ([+0.001589, +0.055436]).
-///
-/// DISCLOSED LIMITATION: the variant head-to-head itself is NOT significant —
-/// paired (raw-best − standardised-best) 95 % CI [−0.000205, +0.054341]
-/// includes 0, barely. The choice therefore rests on which variant won and on
-/// which variant's text terms earn their keep, not on a significant difference
-/// between the two best rows. `scripts/calibrate_style_retrieval.py` prints
-/// both comparisons on every run, so re-deciding it is a re-read, not a
-/// re-derivation.
-///
-/// SINCE THIS BATCH the standardisation does one more thing before the
-/// z-score: it removes each candidate's TEXT HUBNESS ([`text_hubness`]).
-/// Centring over the candidate set takes out the level the PHRASE sits at and
-/// nothing else, so the photographs that score high against every sentence
-/// kept scoring high — 21.7 % of the cosine's variance on the user's index,
-/// against 25.3 % for the only part that can tell two directions apart.
-///
-/// Re-running the harness with the correction in force moves the winning row
-/// from `(4, 4, 0.5)` MAE 0.664818 to `(4, 0.5, 0.5)` MAE 0.688864. The
-/// correction COSTS MAE at a large `W_TXT` — corrected `(4, 4, 0.5)` is
-/// 0.752993, a regression against the 14-dim baseline whose CI excludes 0 —
-/// because under this proxy the query text describes the query photograph, so
-/// a candidate's general affinity to grade prose is partly signal. Against a
-/// real Direction it is not; see [`W_TXT_DEFAULT`] for that measurement.
-///
-/// Pinned by `the_shipped_text_variant_is_the_measured_one`.
-pub const STANDARDISE_TEXT_TERMS: bool = true;
-
 /// The four retrieval weights as ONE value, resolved once at the top of a run
 /// and passed down.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -960,6 +994,28 @@ fn parse_hour(dt: Option<&str>) -> f32 {
         .unwrap_or(12.0)
 }
 
+/// Is this sidecar's frame a BLACK-AND-WHITE conversion?
+///
+/// Three spellings, because Adobe has used three and a library spans years:
+/// `crs:Treatment="Black & White"` (current), `crs:ConvertToGrayscale="True"`
+/// (the older boolean), and a global `crs:Saturation` at the −100 floor, which
+/// is the colour treatment that leaves no colour. Any one of them means the
+/// mixer cells this build stores describe a control the render did not use.
+///
+/// Read through the SAME scope rule as [`read_settings`]: a nested creative
+/// Look's baked black-and-white profile belongs to the profile, not to the
+/// photographer, and learning it would teach the index that this user
+/// "shoots monochrome".
+fn read_monochrome(xmp: &str) -> bool {
+    let scoped = crate::xmp::crs_own_scope(xmp);
+    let scoped = crate::xmp::Scope::new(scoped.as_ref());
+    let treatment = scoped.crs_str("Treatment");
+    let grayscale = scoped.crs_str("ConvertToGrayscale");
+    treatment.as_deref().is_some_and(|t| t.eq_ignore_ascii_case("black & white"))
+        || grayscale.as_deref().is_some_and(|g| g.eq_ignore_ascii_case("true"))
+        || scoped.crs_f32("Saturation").is_some_and(|s| s <= -100.0)
+}
+
 fn read_settings(xmp: &str) -> BTreeMap<String, f32> {
     // As-shot provenance (same rule as the eval harness): under
     // WhiteBalance="As Shot", crs:Temperature/Tint record the CAMERA's
@@ -1109,6 +1165,22 @@ pub struct StyleExemplar {
     /// fabricates none that is not.
     #[serde(default)]
     pub masks: Option<crate::mask_habit::MaskHabit>,
+    /// Did the photographer convert this frame to BLACK AND WHITE?
+    ///
+    /// Read from the sidecar's treatment ([`read_monochrome`]) and not from
+    /// any slider, because there is no slider: a grayscale conversion leaves
+    /// `crs:Saturation` and every `crs:SaturationAdjustment*` where they were,
+    /// so an index that reads only sliders cannot tell a black-and-white
+    /// photograph from a colour one that happens to have an untouched mixer.
+    /// The consequence is [`style_targets`]' — a zero counted as agreement
+    /// drags a band target toward nothing — which is why the fact is stored
+    /// rather than guessed at distillation time.
+    ///
+    /// `#[serde(default)]` on the eleven optional fields above's precedent: a
+    /// pre-v6 index carries none, every exemplar in it reads `false`, and the
+    /// distillation is exactly the one it was. The next build fills it in.
+    #[serde(default)]
+    pub mono: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -1241,6 +1313,88 @@ pub fn stage_embed_frame(
         .save(&staged.img)
         .with_context(|| format!("stage embedding input {}", staged.img.display()))?;
     Ok(staged)
+}
+
+/// The scratch-file prefixes a build writes beside the index — every one of
+/// them an INTERMEDIATE that exists only while the build runs.
+///
+/// `autoshade-embed-` covers both the staged frames and the description-text
+/// manifests (`autoshade-embed-desc-…`), which is why the list is prefixes and
+/// not names.
+const INTERMEDIATE_PREFIXES: [&str; 3] =
+    ["autoshade-embed-", "autoshade-describe-", "autoshade-look-vocab-"];
+
+/// How long an intermediate has to have been sitting there before a build
+/// treats it as ABANDONED rather than as another build's live working file.
+///
+/// A day. The longest a staged frame can legitimately live is one build — it
+/// is written in stage 1 and dropped after stage 4 — and the biggest library
+/// this app admits is 5,000 RAWs, which is hours rather than a day even with
+/// both sidecars. A shorter window would risk deleting a frame out from under
+/// a slow build on someone else's machine, and the cost of waiting is a few
+/// hundred KB of dead PNGs for one extra day.
+const STALE_INTERMEDIATE_AGE: std::time::Duration = std::time::Duration::from_secs(24 * 3600);
+
+/// Delete the intermediates an EARLIER build left behind, and say how many.
+///
+/// [`StagedFrame`] removes its own two files on drop, which covers every path
+/// out of a build that RETURNS — including the error paths, which is what the
+/// RAII was for. What it cannot cover is a process that never unwinds: a
+/// power cut, a `Stop-Process` on a build the user got tired of, the GUI being
+/// killed mid-index. Those frames were then immortal, because nothing else in
+/// the tree ever looked at the store for them — 200 KB per photograph of a
+/// library, accumulating for the life of the installation.
+///
+/// Never OUR pid, whatever the age: the names carry the writing process's id
+/// precisely so that two concurrent builds (the web server's request threads,
+/// the GUI beside a CLI run) cannot mistake each other's files for rubbish,
+/// and a sweep that skipped that test would be the accumulation defect
+/// rewritten as a data race.
+fn sweep_stale_intermediates(dir: &Path, older_than: std::time::Duration) -> usize {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    let mine = format!("-{}-", std::process::id());
+    let mut removed = 0usize;
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if !INTERMEDIATE_PREFIXES.iter().any(|p| name.starts_with(p)) || name.contains(&mine) {
+            continue;
+        }
+        let old = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .map(|t| t.elapsed().map(|age| age >= older_than).unwrap_or(false))
+            .unwrap_or(false);
+        if old && std::fs::remove_file(entry.path()).is_ok() {
+            removed += 1;
+        }
+    }
+    removed
+}
+
+/// [`sweep_stale_intermediates`] at the shipped age, with the one line of
+/// disclosure a build owes for deleting a file it did not write this run.
+fn sweep_intermediates_and_say(dir: &Path, what: &str) {
+    let removed = sweep_stale_intermediates(dir, STALE_INTERMEDIATE_AGE);
+    if removed > 0 {
+        println!("  {what}: removed {removed} staged file(s) left by an interrupted build");
+    }
+}
+
+/// The name one LIBRARY goes by in the description cache.
+///
+/// One spelling for both builders, because the RAW library and the look
+/// library share one cache file and its cap is shared out between them by this
+/// key (`crate::describe::DescriptionCache::retain`). The folder is resolved
+/// the way [`StyleIndex::source_dir`] and [`StyleIndex::looks_dir`] already
+/// resolve it, and then digested — a path that cannot be made absolute is used
+/// as given, because a relative root is still a root and two of them that
+/// differ only by the working directory cost a re-description, never a wrong
+/// description.
+fn library_key(dir: &Path) -> String {
+    let abs = std::path::absolute(dir).unwrap_or_else(|_| dir.to_path_buf());
+    crate::describe::library_key(&abs)
 }
 
 /// The CONTENT key of every staged frame in a build, computed ONCE.
@@ -1387,6 +1541,8 @@ fn embed_desc_texts(
 trait DescribedRecord {
     fn desc(&self) -> Option<&str>;
     fn tags(&self) -> &[String];
+    fn set_tags(&mut self, tags: Vec<String>);
+    fn vocab_scores(&self) -> Option<&[f32]>;
     fn has_desc_embed(&self) -> bool;
     fn set_desc_embed(&mut self, v: Option<Vec<f32>>);
 }
@@ -1394,6 +1550,8 @@ trait DescribedRecord {
 impl DescribedRecord for StyleExemplar {
     fn desc(&self) -> Option<&str> { self.desc.as_deref() }
     fn tags(&self) -> &[String] { &self.tags }
+    fn set_tags(&mut self, tags: Vec<String>) { self.tags = tags; }
+    fn vocab_scores(&self) -> Option<&[f32]> { self.vocab_scores.as_deref() }
     fn has_desc_embed(&self) -> bool { self.desc_embed.is_some() }
     fn set_desc_embed(&mut self, v: Option<Vec<f32>>) { self.desc_embed = v; }
 }
@@ -1401,6 +1559,8 @@ impl DescribedRecord for StyleExemplar {
 impl DescribedRecord for LookExemplar {
     fn desc(&self) -> Option<&str> { self.desc.as_deref() }
     fn tags(&self) -> &[String] { &self.tags }
+    fn set_tags(&mut self, tags: Vec<String>) { self.tags = tags; }
+    fn vocab_scores(&self) -> Option<&[f32]> { self.vocab_scores.as_deref() }
     fn has_desc_embed(&self) -> bool { self.desc_embed.is_some() }
     fn set_desc_embed(&mut self, v: Option<Vec<f32>>) { self.desc_embed = v; }
 }
@@ -1623,6 +1783,7 @@ fn read_exemplar(
         desc: None,
         desc_embed: None,
         masks: Some(habit),
+        mono: read_monochrome(&xmp),
     };
     fill(&mut ex);
     if exemplar_is_finite(&ex) {
@@ -1655,12 +1816,18 @@ fn cache_answers_everything(
     embed_ok && desc_ok
 }
 
-/// Serve one cache entry's answers into an exemplar this build just read.
+/// Serve one cache entry's MEASUREMENTS into an exemplar this build just read.
 ///
 /// Gated on what the build ASKED for: a `style-index` without `--embed` must
 /// not silently acquire vectors, and one without `--describe` must not
 /// silently acquire prose — either would make the index claim work the user
 /// did not request this run.
+///
+/// The TAGS are not served here and neither is the description VECTOR, and
+/// that is the v6 shape rather than an omission: both are functions of the
+/// whole population's scores (`retag`), which nothing inside the decode pool
+/// can know. [`adopt_cached_desc_embed`] serves the vector once they are
+/// final.
 fn apply_cached(
     ex: &mut StyleExemplar,
     c: &crate::style_cache::CachedExemplar,
@@ -1670,18 +1837,22 @@ fn apply_cached(
     if want_embed {
         ex.embed = c.embed.clone();
         ex.vocab_scores = c.vocab_scores.clone();
-        // Derived, never stored: `tags_from_scores` is the one definition of
-        // what a score vector MEANS, and a stored tag list would be a second.
-        ex.tags = c.vocab_scores.as_deref().map(tags_from_scores).unwrap_or_default();
     }
     if want_desc {
         ex.desc = c.current_desc().map(str::to_string);
     }
-    // The text vector, only while it is still the vector of what this record
-    // now SAYS. The description and the tags above decide that, and either may
-    // have come from somewhere else this build — so the stored text is
-    // compared, not assumed.
-    if want_embed
+}
+
+/// Serve one cache entry's description VECTOR, once the text it is the vector
+/// OF is settled.
+///
+/// The rule is unchanged — a stored vector is reusable only while the record
+/// still SAYS the text it was made from — but it can only be applied after
+/// [`retag`], because [`desc_text`] falls back to the tags and since v6 those
+/// are derived from the library mean. Running it inside the pool, as v5 did,
+/// would compare the cached text against tags this build had not derived yet.
+fn adopt_cached_desc_embed(ex: &mut StyleExemplar, c: &crate::style_cache::CachedExemplar) {
+    if ex.desc_embed.is_none()
         && c.desc_embed.is_some()
         && c.desc_text.is_some()
         && c.desc_text == desc_text(ex.desc.as_deref(), &ex.tags)
@@ -1893,6 +2064,7 @@ fn attach_descriptions<R: DescribableRecord>(
     describe: DescribeSwitch,
     dir: &Path,
     cache_path: &Path,
+    library: &str,
     digests: &[Option<String>],
     frames: &[Option<StagedFrame>],
     records: &mut [R],
@@ -1943,7 +2115,7 @@ fn attach_descriptions<R: DescribableRecord>(
         report(on_progress, BuildStage::Describe, total, total);
         // Still republished: the cache's retention set is what this build
         // used, so a build that hit 100 % keeps those entries alive.
-        if let Err(e) = cache.save(cache_path, &keep) {
+        if let Err(e) = cache.save(cache_path, &keep, library) {
             eprintln!("  {what}: the description cache could not be published ({e:#})");
         }
         return;
@@ -1987,7 +2159,7 @@ fn attach_descriptions<R: DescribableRecord>(
         match by_path.get(key.as_str()).and_then(|r| r.desc.clone()) {
             Some(desc) => {
                 if let Some(d) = digests[slot].clone() {
-                    cache.insert(d.clone(), desc.clone());
+                    cache.insert(d.clone(), desc.clone(), library);
                     keep.insert(d);
                 }
                 records[slot].set_desc(Some(desc));
@@ -2003,7 +2175,7 @@ fn attach_descriptions<R: DescribableRecord>(
         );
     }
     println!("  {what}: {fresh} new description(s) in one sidecar call, {hits} from the cache");
-    if let Err(e) = cache.save(cache_path, &keep) {
+    if let Err(e) = cache.save(cache_path, &keep, library) {
         eprintln!("  {what}: the description cache could not be published ({e:#})");
     }
     report(on_progress, BuildStage::Describe, total, total);
@@ -2179,14 +2351,39 @@ fn raw_term(raw: &[Option<f64>], w: f64) -> StandardisedTerm {
     StandardisedTerm { terms: raw.iter().map(|r| r.map_or(0.0, |v| w * v)).collect(), standardised: false, hub_corrected: false }
 }
 
-/// The term the RANKING uses: [`standardise`] or [`raw_term`], per
-/// [`STANDARDISE_TEXT_TERMS`]. One door, so the diagnostic and the pipeline
-/// cannot disagree about which variant is in force.
-fn text_term(raw: &[Option<f64>], hub: Option<&[f64]>, w: f64) -> StandardisedTerm {
-    if STANDARDISE_TEXT_TERMS { standardise(raw, hub, w) } else { raw_term(raw, w) }
-}
-
 /// `raw[i] = Some(1 − cos)` when the pair is comparable, `None` when it is not.
+///
+/// **This is the only text term there is.** F-14 built the standardised
+/// variant beside a raw one and a `STANDARDISE_TEXT_TERMS` switch chose
+/// between them; the switch is gone because the measurement that would decide
+/// it has already been made and cannot be re-opened by a boolean. S1 measured
+/// both on a grid whose query text was the exemplar's TAG STRING and the raw
+/// variant won. S2 gave every exemplar real prose and reversed it: best
+/// standardised `(4, 4, 0.5)` = 0.664818 against best raw `(4, 2, 0)` =
+/// 0.693811, and the raw variant's own text terms were indistinguishable from
+/// having none (paired CI against `(4, 0, 0)` = [−0.001834, +0.004821]) while
+/// the standardised variant's were not ([+0.001589, +0.055436]). The
+/// head-to-head between the two BEST rows was itself not significant (paired
+/// 95 % CI [−0.000205, +0.054341], including 0 barely), so the choice rested
+/// then — and rests now — on which variant's text terms earn their keep.
+///
+/// The short-direction grid settles the head-to-head S2 could not: best raw
+/// `(4, 2, 0)` = 0.410916 against best standardised `(0, 2, 0)` = 0.377820,
+/// paired 95 % CI [+0.021870, +0.043719] — raw worse, 0 excluded. Those two
+/// weight triples are each grid's own argmax and neither is a recommendation
+/// ([`W_TXT_DEFAULT`] refuses both); what they establish is that the variant
+/// chosen for its text terms earning their keep is the one a like-for-like
+/// comparison picks as well, once the query text is the length a user types.
+///
+/// What settled it is that everything measured since is a property of THIS
+/// variant and of nothing else. The hubness correction below is defined on the
+/// z-score; `W_TXT_DEFAULT`'s 0.5, `W_DESC_DEFAULT`'s 0.5 and the antonym and
+/// collapse numbers beside them are the corrected standardised grid's. A raw
+/// arm kept behind a `false` would have been an untested second ranking
+/// carrying weights nobody calibrated for it, which is what a switch nothing
+/// flips actually costs. `scripts/calibrate_style_retrieval.py` still sweeps
+/// both arms and prints both tables, so the comparison stays re-runnable
+/// without a dead branch in the ranking.
 ///
 /// Standardising is TWO centrings, and only the second one used to be here.
 /// Subtracting the candidate set's MEAN takes out the level a phrase sits at —
@@ -2278,16 +2475,99 @@ impl DistanceTerms {
     }
 }
 
-fn tags_from_scores(scores: &[f32]) -> Vec<String> {
+/// The four attribute phrases one photograph is tagged with — the strongest
+/// phrase inside each [`LOOK_GROUPS`] group, then the strongest four of those.
+///
+/// `mean` is the LIBRARY's per-phrase mean ([`vocab_mean`]), subtracted first,
+/// and this is the whole of the fix: a SigLIP image↔text cosine carries a
+/// large per-PHRASE constant that has nothing to do with the photograph. Some
+/// captions simply score high against everything, so the raw argmax picks the
+/// same phrases for the whole library — measured on the user's 169-exemplar
+/// index, "a harsh midday-light photo" was tagged on 88 of 169 photographs
+/// (52 %), 3 of the 33 phrases were never chosen at all, and the GOLDEN-HOUR
+/// exemplar came back tagged `harsh midday-light, film-like grain, cinematic
+/// tones, cross-processed`. Centring is the same move [`standardise`] makes on
+/// the ranking's text terms and for the same reason; it is per-phrase over the
+/// library rather than per-query because a tag is a property of the
+/// photograph, not of a query. After it the commonest phrase is on 21 %, all
+/// 33 are used, and that exemplar reads `warm golden tones, sepia toning,
+/// film-like grain, gentle natural light`. On the 94-photo look library:
+/// commonest phrase 43 % → 27 %, phrases ever used 25 of 33 → 33.
+///
+/// `None` reproduces the v5 derivation exactly, and is what a population with
+/// no score profile at all gets — there is no mean to subtract, which is a
+/// different fact from a mean of zero.
+fn tags_from_scores(scores: &[f32], mean: Option<&[f32]>) -> Vec<String> {
     if scores.len() != LOOK_VOCAB.len() { return Vec::new(); }
+    let mean = mean.filter(|m| m.len() == scores.len());
+    let at = |i: usize| scores[i] - mean.map_or(0.0, |m| m[i]);
     let mut chosen = Vec::new();
     for group in LOOK_GROUPS {
-        if let Some(&idx) = group.iter().max_by(|&&a, &&b| scores[a].total_cmp(&scores[b])) {
-            chosen.push((scores[idx], LOOK_VOCAB[idx]));
+        if let Some(&idx) = group.iter().max_by(|&&a, &&b| at(a).total_cmp(&at(b))) {
+            chosen.push((at(idx), LOOK_VOCAB[idx]));
         }
     }
     chosen.sort_by(|a,b| b.0.total_cmp(&a.0));
     chosen.into_iter().take(LOOK_TAGS_K).map(|(_, s)| s.strip_prefix("a photo with ").or_else(|| s.strip_prefix("an ")).unwrap_or(s).to_string()).collect()
+}
+
+/// A population's per-phrase mean `vocab_scores`, or `None` when no record in
+/// it carries a profile this build can name.
+///
+/// The mean is over the records that HAVE one, never over the population size:
+/// a library where half the photographs failed their sidecar call would
+/// otherwise have every phrase halved, which is a different centre.
+fn vocab_mean<'a>(rows: impl Iterator<Item = Option<&'a [f32]>>) -> Option<Vec<f32>> {
+    let mut sum = vec![0.0f64; LOOK_VOCAB.len()];
+    let mut n = 0u32;
+    for row in rows.flatten().filter(|r| r.len() == LOOK_VOCAB.len()) {
+        for (s, v) in sum.iter_mut().zip(row) {
+            *s += *v as f64;
+        }
+        n += 1;
+    }
+    (n > 0).then(|| sum.iter().map(|s| (s / n as f64) as f32).collect())
+}
+
+/// Re-derive the tag list of every record in ONE population from that
+/// population's own scores.
+///
+/// A population-level pass rather than a per-record one, because since v6 a
+/// tag list is not a function of one score vector: [`tags_from_scores`]
+/// subtracts the library mean, so no record's tags are knowable until every
+/// record's scores are. That is why a build calls this once, after the
+/// embedding and description stages and before the text stage, instead of
+/// tagging each exemplar where its scores arrive.
+///
+/// It also owns the consequence. A stored `desc_embed` is the vector OF a
+/// text, and [`desc_text`] reads the tags for a record with no description; a
+/// record whose tags this pass changed therefore no longer holds the vector it
+/// claims to. Dropping it is what makes the pass safe to run at LOAD as well
+/// as at build — an index written by v5 is re-scored in place, and the text
+/// stage (or the next build) fills the vector back in.
+///
+/// Measured on the user's library, which is the shape this costs something
+/// on: all 169 RAW exemplars carry description PROSE, so [`desc_text`] never
+/// reads their tags and not one vector is dropped there. The 94-photograph
+/// look library carries none — the look build describes nothing — so its
+/// records fall back to the tag string, 92 of the 94 come out with a
+/// different tag list under the library-mean rule, and those 92 hold no
+/// description vector until the next build. That is the upgrade cost of the
+/// rule, in records, and it is paid once.
+fn retag<R: DescribedRecord>(records: &mut [R]) {
+    let Some(mean) = vocab_mean(records.iter().map(|r| r.vocab_scores())) else {
+        return;
+    };
+    for record in records.iter_mut() {
+        let Some(tags) = record.vocab_scores().map(|s| tags_from_scores(s, Some(&mean))) else {
+            continue;
+        };
+        let before = desc_text(record.desc(), record.tags());
+        record.set_tags(tags);
+        if record.has_desc_embed() && before != desc_text(record.desc(), record.tags()) {
+            record.set_desc_embed(None);
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -2382,6 +2662,7 @@ impl StyleIndex {
         let total = files.len();
         report(on_progress, BuildStage::Frames, 0, total);
         std::fs::create_dir_all(&scratch)?;
+        sweep_intermediates_and_say(&scratch, "look library");
         let vocab_path = vocab_scratch_path(&scratch, "looks");
         std::fs::write(&vocab_path, LOOK_VOCAB.join("\n"))?;
         let mut opts = opts;
@@ -2421,7 +2702,6 @@ impl StyleIndex {
                 anyhow::anyhow!("embed look {}: the sidecar returned no vector", files[i].display())
             })?;
             look.embed = record.vector.clone();
-            look.tags = record.vocab_scores.as_deref().map(tags_from_scores).unwrap_or_default();
             look.vocab_scores = record.vocab_scores.clone();
         }
         report(on_progress, BuildStage::Embed, total, total);
@@ -2438,6 +2718,7 @@ impl StyleIndex {
             describe,
             &scratch,
             &crate::describe::cache_path_in(&scratch),
+            &library_key(dir),
             &digests,
             &frames,
             &mut looks,
@@ -2445,6 +2726,11 @@ impl StyleIndex {
             on_progress,
         );
         drop(frames);
+        // The look library is its OWN population, so it gets its own mean:
+        // ninety curated finished photographs and five thousand RAWs are not
+        // one corpus, and centring the two together would tag each against a
+        // level neither of them sits at.
+        retag(&mut looks);
         report(on_progress, BuildStage::Text, 0, total);
         attach_desc_embeddings(&opts, &scratch, &mut looks, "look library");
         report(on_progress, BuildStage::Text, total, total);
@@ -2543,6 +2829,9 @@ impl StyleIndex {
             });
         let describer = crate::describe::DescribeOpts::from_config(&cfg);
         let embed_dir = crate::store::store_root();
+        // Before anything is staged: a build is the only thing that ever looks
+        // at this directory for the intermediates a killed build left in it.
+        sweep_intermediates_and_say(&embed_dir, "style index");
         let vocab_path = vocab_scratch_path(&embed_dir, "raw");
         if let Some(opts) = embedder.as_mut()
             && std::fs::create_dir_all(&embed_dir).is_ok()
@@ -2802,7 +3091,6 @@ impl StyleIndex {
                         // GUI COUNTS these (R28 4b) — an all-failed build used
                         // to land the same toast as an all-embedded one.
                         let Some(record) = record else { continue };
-                        ex.tags = record.vocab_scores.as_deref().map(tags_from_scores).unwrap_or_default();
                         ex.vocab_scores = record.vocab_scores;
                         ex.embed = Some(record.vector);
                     }
@@ -2820,15 +3108,31 @@ impl StyleIndex {
                 describe,
                 &embed_dir,
                 &crate::describe::cache_path_in(&embed_dir),
+                &library_key(dir),
                 &digests,
                 &frames,
                 &mut exemplars,
                 "style index",
                 on_progress,
             );
+            // The TAGS, once — over the finished population, because since v6
+            // they are derived against its mean (`retag`). It runs after the
+            // description stage so a record that gained prose there is judged
+            // on the text it now says, and before the text stage so that stage
+            // embeds the final text.
+            retag(&mut exemplars);
+            // …and only now may a cached description VECTOR be served, for the
+            // same reason: `desc_text` reads the tags the line above settled.
+            if want_embed {
+                for (ex, digest) in exemplars.iter_mut().zip(&digests) {
+                    if let Some(entry) = digest.as_deref().and_then(|d| cache.get(d)) {
+                        adopt_cached_desc_embed(ex, entry);
+                    }
+                }
+            }
             // STAGE 4 — ONE SigLIP text call for the whole library. It runs
-            // AFTER the two above because the text it embeds is what they just
-            // produced, and because one call is the entire point.
+            // AFTER the three above because the text it embeds is what they
+            // just produced, and because one call is the entire point.
             report(on_progress, BuildStage::Text, 0, live);
             attach_desc_embeddings(opts, &embed_dir, &mut exemplars, "style index");
             report(on_progress, BuildStage::Text, live, live);
@@ -3130,6 +3434,15 @@ impl StyleIndex {
             }
         }
 
+        // The TAGS are RE-DERIVED from the file's own scores, never taken as
+        // written. Since v6 a tag list is a statement about the library mean
+        // (`tags_from_scores`), so a v5 file's stored lists are the raw argmax
+        // and a v6 file's are already these — the pass is idempotent on the
+        // second, which is what lets one door serve both versions. Each
+        // population is centred on itself, and a description vector whose text
+        // the new tags no longer spell is dropped rather than served.
+        retag(&mut idx.exemplars);
+        retag(&mut idx.looks);
         Ok(idx)
     }
 
@@ -3213,8 +3526,8 @@ impl StyleIndex {
         // `vocab_scores` is the stored measurement of it. The DESCRIPTION term
         // gets `None` — see `standardise`.
         let hubs = hubness_profile(candidates.iter().map(|e| e.vocab_scores.as_deref()));
-        let txt = text_term(&txt_gaps, hubs.as_deref(), weights.txt);
-        let desc = text_term(&desc_gaps, None, weights.desc);
+        let txt = standardise(&txt_gaps, hubs.as_deref(), weights.txt);
+        let desc = standardise(&desc_gaps, None, weights.desc);
         candidates
             .iter()
             .enumerate()
@@ -3279,8 +3592,8 @@ impl StyleIndex {
         let desc_gaps: Vec<Option<f64>> =
             self.looks.iter().map(|e| cosine_gap(query_text, e.desc_embed.as_deref())).collect();
         let hubs = hubness_profile(self.looks.iter().map(|e| e.vocab_scores.as_deref()));
-        let txt = text_term(&txt_gaps, hubs.as_deref(), weights.txt);
-        let desc = text_term(&desc_gaps, None, weights.desc);
+        let txt = standardise(&txt_gaps, hubs.as_deref(), weights.txt);
+        let desc = standardise(&desc_gaps, None, weights.desc);
         let mut scored: Vec<(&LookExemplar, DistanceTerms)> = self
             .looks
             .iter()
@@ -3806,6 +4119,19 @@ pub fn index_info_at(central: &Path, legacy: &Path) -> StyleIndexInfo {
     }
 }
 
+/// The one FOLDER name that tells two same-named photographs apart, or `None`
+/// when this exemplar has no path to read one from.
+///
+/// The immediate parent and nothing above it. A camera counter wraps at 9999
+/// and starts again, so two rolls hold two `00001234` and the folder they sit
+/// in is the shortest thing that distinguishes them — while the folder's
+/// PARENT is the layout of the user's disk, which a persisted, displayed
+/// rationale has no business carrying.
+fn parent_hint(path: Option<&str>) -> Option<String> {
+    let name = Path::new(path?).parent()?.file_name()?.to_string_lossy().into_owned();
+    (!name.is_empty()).then_some(name)
+}
+
 /// The file names of the exemplars ONE retrieval actually used — the answer
 /// to "which library is it referencing, and which shots?" (feedback #6, the
 /// user's stated top pain: the reference was invisible).
@@ -3814,12 +4140,30 @@ pub fn index_info_at(central: &Path, legacy: &Path) -> StyleIndexInfo {
 /// three UIs, and the folder layout is not the point. Bounded on both axes
 /// ([`MAX_DISCLOSED_NEIGHBOURS`], [`MAX_STEM_CHARS`]) so a long-named library
 /// cannot crowd out the rest of the rationale.
+///
+/// A stem SHARED by two of the disclosed neighbours gets its folder in front
+/// of it (A27). Every keyed surface already tells those two apart by path —
+/// self-exclusion, the exemplar cache, the neighbour ranking — and this
+/// sentence was the one place that did not: the user's own 169-exemplar
+/// library holds four eight-digit camera counters carried by two photographs
+/// each, and "the 4 most similar" then named the same shot twice with no way
+/// to tell which two frames answered. The hint is added ONLY to the names it
+/// disambiguates, so a library with no collision reads exactly as it did.
 pub fn neighbour_stems(ex: &[&StyleExemplar]) -> Vec<String> {
-    ex.iter()
-        .take(MAX_DISCLOSED_NEIGHBOURS)
+    let shown: Vec<&&StyleExemplar> = ex.iter().take(MAX_DISCLOSED_NEIGHBOURS).collect();
+    shown
+        .iter()
         .map(|e| {
-            let mut s: String = e.stem.chars().take(MAX_STEM_CHARS).collect();
-            if s.chars().count() < e.stem.chars().count() {
+            let shared = shown.iter().filter(|o| o.stem == e.stem).count() > 1;
+            let name = match shared.then(|| parent_hint(e.path.as_deref())).flatten() {
+                Some(folder) => format!("{folder}/{}", e.stem),
+                None => e.stem.clone(),
+            };
+            // The cut is the one this disclosure has always made: the cap in
+            // CHARACTERS, with an ellipsis after it, so a reader can tell a
+            // cut name from one that merely stops.
+            let mut s: String = name.chars().take(MAX_STEM_CHARS).collect();
+            if s.chars().count() < name.chars().count() {
                 s.push('…');
             }
             s
@@ -3904,6 +4248,63 @@ const GRADE_NOT_A_DECISION: [&str; 2] = ["blending", "balance"];
 /// `sum(w*mean)/sum(w)` that `mask_habit::BucketHabit::w` exists to make
 /// possible rather than a mean of means. Non-finite and non-positive weights
 /// are dropped at the door, like every other number that reaches a render.
+/// The settings labels whose band has no negative side — a MAGNITUDE, where
+/// "which way does the library lean" is a question with one possible answer.
+///
+/// Read off [`setting_bands`], never listed here: the bands are the recipe's
+/// own clamps, so a control that gains or loses its negative side moves this
+/// with it. Today it is the four colour-grade `*_sat` fields and `blending`
+/// (0..100), and `temperature_K` (2000..40000), which reaches the plain-mean
+/// path instead.
+fn label_is_one_sided(label: &str) -> bool {
+    setting_bands().get(label).is_some_and(|&(lo, _)| lo >= 0.0)
+}
+
+/// The weighted mean of a population that EXERCISED the axis, or `None`.
+///
+/// [`consistent_mean`] for a one-sided quantity, minus the half of it that
+/// cannot fail: with every value ≥ 0 the mean IS the mean of the absolute
+/// values, so `rho` is exactly 1 whenever the axis was touched at all and the
+/// direction gate can only ever pass. Applying it to a colour-grade `*_sat`
+/// field therefore looked like a guard and was an identity — every non-zero
+/// population produced a target, including `[0, 0, 0, 40]`, whose mean of 10
+/// is one photographer's split tone spread over three who did not tone at all.
+///
+/// This asks the only question a magnitude can answer, and asks it out loud:
+/// did the population touch the axis? The OUTPUT is unchanged for every
+/// population a loaded index can hold — `setting_bands` clamps these labels to
+/// 0..100 at the door, so `consistent_mean` returned this same number — and
+/// what changes is that the code no longer states a test it cannot run. A
+/// stricter rule (a minimum SHARE of the population that toned) is not
+/// invented here because there is no calibration for one: on the user's index
+/// the wheels' own participation is not a quantity this batch measured.
+fn exercised_mean(vals: impl IntoIterator<Item = (f32, f32)>) -> Option<f32> {
+    let (mut wsum, mut sum, mut abs) = (0.0f64, 0.0f64, 0.0f64);
+    for (w, v) in vals {
+        if !w.is_finite() || !v.is_finite() || w <= 0.0 {
+            continue;
+        }
+        wsum += w as f64;
+        sum += w as f64 * v as f64;
+        abs += w as f64 * (v as f64).abs();
+    }
+    if wsum <= 0.0 || abs <= 0.0 {
+        return None;
+    }
+    Some((sum / wsum) as f32)
+}
+
+/// The habit a population shows on ONE settings label, or `None` when it shows
+/// none — the door [`style_targets`] reads for every label-keyed channel.
+///
+/// Which rule applies is decided by the label's own BAND ([`label_is_one_sided`])
+/// rather than by where in the loop the question is asked, so a control that
+/// gains a negative side starts being direction-gated without anyone
+/// remembering to come back here.
+fn habit_mean(label: &str, vals: impl IntoIterator<Item = (f32, f32)>) -> Option<f32> {
+    if label_is_one_sided(label) { exercised_mean(vals) } else { consistent_mean(vals) }
+}
+
 fn consistent_mean(vals: impl IntoIterator<Item = (f32, f32)>) -> Option<f32> {
     let (mut wsum, mut sum, mut abs) = (0.0f64, 0.0f64, 0.0f64);
     for (w, v) in vals {
@@ -4042,24 +4443,45 @@ impl StyleTargets {
 /// photographer can be unanimous about blues and undecided about greens, and
 /// one summary number for "the mixer" would lose that.
 ///
-/// **The `hue` axis of the 8-band mixer is ingested and never distilled.** Not
-/// doctrine borrowed from the reverse-fit side, which does not govern the
-/// generative path — a measured distinction. Mixer saturation and luminance
-/// change how strongly a colour READS; mixer hue changes WHICH COLOUR IT IS, on
-/// whatever content happens to occupy that band in THIS photograph. And the
-/// corpus says that is scene-bound rather than habitual. Over the four real
-/// neighbour sets the diagnosis measured, read through this module's own
-/// reader: the Orange band's hue mean is `-3.75` on one set and `+16.0` on
-/// another; Yellow inside ONE set is `[-17, 0, +83, -29]`; Green inside another
-/// is `[-24, -12, +19, 0]`. The sign flips between neighbourhoods of the same
-/// photographer and inside one of them, which is what tracking subject matter
-/// looks like — and the last two would be refused by the gate anyway (rho 0.287
-/// and 0.309).
+/// **The `hue` axis of the 8-band mixer is ingested and never distilled.**
+/// Mixer saturation and luminance change how strongly a colour READS; mixer
+/// hue changes WHICH COLOUR IT IS, on whatever content happens to occupy that
+/// band in THIS photograph.
+///
+/// MEASURED on the whole 169-exemplar library (v1.2.4), and the measurement
+/// corrected the reason this switch used to give. It said the corpus showed
+/// mixer hue to be SCENE-BOUND rather than habitual, on four four-neighbour
+/// sets. Grouping the whole library by the vocabulary's own light class —
+/// golden hour, blue hour, overcast, harsh midday, night, the only group in
+/// [`LOOK_VOCAB`] that names the scene rather than the grade — the scene
+/// explains 1.2 % to 7.8 % of each hue band's variance (η², 155 exemplars
+/// carrying the mixer). It explains 1.1 % to 5.4 % of the two axes that ARE
+/// distilled. Hue is no more scene-bound by lighting than saturation is, so
+/// that reason does not hold and is not kept.
+///
+/// What DOES separate them is reach, and it is why the switch stays off.
+/// Replaying the production ranking leave-one-out over all 169 exemplars, the
+/// consistency gate would return a hue target on 8–49 % of the four-neighbour
+/// sets, mean |target| 5.6–20.2 and a maximum of 55.75 on the red band. A
+/// saturation target of that size makes a colour read more strongly; a hue
+/// target of that size makes the reds orange, in whatever the frame happens to
+/// put in the red band — and the fan veto v1.2.3 added exists because
+/// per-band hue moves are the one control whose effect is a RELATIONSHIP
+/// between the content and the grade rather than a property of the grade.
+///
+/// Recorded beside it, because it is the check that would license turning it
+/// on and it fails: over the sets where the gate fires, the target's mean
+/// absolute error against the held-out photograph's own value is 14.632 for
+/// hue, 16.187 for saturation and 11.499 for luminance, against 6.943 /
+/// 5.165 / 4.300 for leaving the control at 0. That is a statement about the
+/// distillation as a whole and not about hue — [`blend_toward`] pulls a
+/// PROPOSAL toward a habit on purpose and never claimed to predict the edit
+/// this photographer would have made to this frame — so it is written down
+/// rather than used to switch anything off.
 ///
 /// The wheels are the opposite case and ARE distilled: a split-tone angle is
-/// applied to a tonal RANGE with no content to re-identify, and the same corpus
-/// puts it at a stable 201–229° across neighbourhoods. One line in the loop
-/// below turns mixer hue on if a later batch measures otherwise.
+/// applied to a tonal RANGE with no content to re-identify, and the corpus
+/// puts it at a stable 201–229° across neighbourhoods.
 pub fn style_targets(ex: &[&StyleExemplar]) -> StyleTargets {
     use crate::advisor::catalogue;
     let mut out = StyleTargets::default();
@@ -4072,12 +4494,25 @@ pub fn style_targets(ex: &[&StyleExemplar]) -> StyleTargets {
     let read = |label: &str| -> Vec<f32> {
         ex.iter().filter_map(|e| e.settings.get(label).copied()).collect()
     };
+    // The eight-band mixer is read from the COLOUR exemplars only (A29): a
+    // photograph the photographer converted to black and white has no colour
+    // for that mixer to shape, so its cells describe a control its render did
+    // not use. They are zeros, and `consistent_mean` counts a zero as
+    // agreement rather than as opposition — so one monochrome neighbour in
+    // four silently pulls every band target a quarter of the way to nothing
+    // while never being able to refuse one. Excluded from the MIXER only: the
+    // grade wheels are how a black-and-white frame is toned at all, and the
+    // twelve flat sliders are the plain mean they have been since R23.
+    let colour: Vec<&&StyleExemplar> = ex.iter().filter(|e| !e.mono).collect();
+    let read_colour = |label: &str| -> Vec<f32> {
+        colour.iter().filter_map(|e| e.settings.get(label).copied()).collect()
+    };
     for f in catalogue::hsl_expansion() {
         if f.axis == catalogue::HSL_AXIS_HUE {
             continue;
         }
         if let Some(cell) = out.hsl.get_mut(f.axis).and_then(|a| a.get_mut(f.band)) {
-            *cell = consistent_mean(read(&f.metric).into_iter().map(|v| (1.0, v)));
+            *cell = habit_mean(&f.metric, read_colour(&f.metric).into_iter().map(|v| (1.0, v)));
         }
     }
     // The wheels' INTENSITIES first: an angle is only learned for a wheel whose
@@ -4088,7 +4523,7 @@ pub fn style_targets(ex: &[&StyleExemplar]) -> StyleTargets {
             continue;
         }
         let label = format!("{COLOR_GRADE_LABEL}{field}");
-        if let Some(m) = consistent_mean(read(&label).into_iter().map(|v| (1.0, v))) {
+        if let Some(m) = habit_mean(&label, read(&label).into_iter().map(|v| (1.0, v))) {
             out.grade.insert(field, m);
         }
     }
@@ -4441,6 +4876,110 @@ pub const MAX_DISTILLED_FIELDS_CHARS: usize = 384;
 
 /// Style axis pull: preserve the shipped 0.3 default's historical 0.18 pull,
 /// while allowing Style 1.0 to reach the retrieved target fully.
+/// What ONE retrieved neighbour set distils to, and what the Style dial would
+/// do with it — printed, never rendered (A30).
+///
+/// The Style pull is the least inspectable thing the develop chain does: it
+/// reads thirty-eight settings keys off four photographs, refuses most of them
+/// through a consistency gate, and the only trace in the result is the
+/// `STYLE_DISTILLED` sentence naming the fields that moved. A photographer
+/// asking "why is my blue not being pulled?" had no way to see whether the
+/// answer was "your neighbours disagree", "they never touched it" or "the dial
+/// is at zero".
+///
+/// It re-derives NOTHING: the targets come from [`style_targets`] and the
+/// applied line from [`blend_toward`] over a NEUTRAL recipe, which is the
+/// production pair. So a preview that disagrees with a develop is a defect in
+/// one of those two, not in a second implementation of them.
+///
+/// A NEUTRAL recipe rather than a real proposal, and the difference is stated
+/// in the line itself: `blend_toward` interpolates from wherever the proposal
+/// is toward the target, so the amount a real develop moves depends on what
+/// the proposer said. From zero it is the whole pull, which is the upper bound
+/// and the readable one.
+pub fn distillation_preview(ex: &[&StyleExemplar], style: f32) -> String {
+    use crate::advisor::catalogue;
+    let targets = style_targets(ex);
+    let pull = style_pull(style);
+    let names: Vec<String> = neighbour_stems(ex);
+    let mut out = format!(
+        "distillation preview: {} neighbour(s) [{}], Style {style:.2} → pull {pull:.3}\n",
+        ex.len(),
+        names.join(", ")
+    );
+    let mono = ex.iter().filter(|e| e.mono).count();
+    if mono > 0 {
+        out.push_str(&format!(
+            "  {mono} of them are black-and-white and take no part in the mixer\n"
+        ));
+    }
+    if targets.is_empty() {
+        out.push_str("  no target on any channel — this set agrees about nothing it was read for\n");
+        return out;
+    }
+    let flat: Vec<String> =
+        targets.sliders.iter().map(|(f, v)| format!("{f} {v:+.2}")).collect();
+    out.push_str(&format!(
+        "  sliders   {}\n",
+        if flat.is_empty() { "none".to_string() } else { flat.join(", ") }
+    ));
+    for (axis, (axis_name, _)) in catalogue::HSL_AXES.iter().enumerate() {
+        if axis == catalogue::HSL_AXIS_HUE {
+            out.push_str("  mixer hue ingested, never distilled (see `style_targets`)\n");
+            continue;
+        }
+        let cells: Vec<String> = catalogue::hsl_expansion()
+            .into_iter()
+            .filter(|f| f.axis == axis)
+            .filter_map(|f| {
+                let v = (*targets.hsl.get(axis)?.get(f.band)?)?;
+                Some(format!("{} {v:+.2}", f.metric.rsplit('.').next().unwrap_or(&f.metric)))
+            })
+            .collect();
+        out.push_str(&format!(
+            "  mixer {axis_name:11} {} of 8 bands: {}\n",
+            cells.len(),
+            if cells.is_empty() { "no habit this set agrees on".to_string() } else { cells.join(", ") }
+        ));
+    }
+    let wheels: Vec<String> = targets.grade.iter().map(|(f, v)| format!("{f} {v:+.2}")).collect();
+    out.push_str(&format!(
+        "  wheels    {}\n",
+        if wheels.is_empty() { "no habit this set agrees on".to_string() } else { wheels.join(", ") }
+    ));
+    let curve: Vec<String> = ["black_lift", "s_strength"]
+        .iter()
+        .zip(targets.curve)
+        .filter_map(|(n, v)| v.map(|v| format!("{n} {v:+.2}")))
+        .collect();
+    out.push_str(&format!(
+        "  curve     {}\n",
+        if curve.is_empty() { "no shape this set agrees on".to_string() } else { curve.join(", ") }
+    ));
+    for (slot, cells) in &targets.masks {
+        let named: Vec<String> = crate::mask_habit::HABIT_SLIDERS
+            .iter()
+            .zip(cells)
+            .filter_map(|(n, v)| v.map(|v| format!("{n} {v:+.2}")))
+            .collect();
+        let bucket = crate::mask_habit::Bucket::ALL
+            .get(*slot)
+            .map(|b| format!("{b:?}"))
+            .unwrap_or_else(|| slot.to_string());
+        out.push_str(&format!("  masks {bucket:7} {}\n", named.join(", ")));
+    }
+    // …and what the dial would actually MOVE, through the production blend.
+    let neutral = EditRecipe::default();
+    let mut pulled = neutral.clone();
+    blend_toward(&mut pulled, &targets, pull);
+    let moved = distilled_fields(&neutral, &pulled);
+    out.push_str(&format!(
+        "  applied to a NEUTRAL proposal at this Style: {}\n",
+        if moved.is_empty() { "nothing moves".to_string() } else { moved }
+    ));
+    out
+}
+
 pub fn style_pull(style: f32) -> f32 {
     let s = style.clamp(0.0, 1.0);
     if s >= 0.5 { s } else { s * 0.6 }
@@ -4546,6 +5085,7 @@ mod tests {
             embed: None,
             tags: Vec::new(), vocab_scores: None, desc: None, desc_embed: None,
             masks: None,
+            mono: false,
         };
         let (a, b) = (mk(0.4, 20.0, 10.0), mk(0.6, 40.0, 30.0));
         let targets = style_targets(&[&a, &b]);
@@ -4581,6 +5121,7 @@ mod tests {
             path: None, families: None, embed: None,
             tags: Vec::new(), vocab_scores: None, desc: None, desc_embed: None,
             masks: None,
+            mono: false,
         };
         let low = idx.render_reference(&[&ex], crate::recipe::GradeStrength::new(0.65)).unwrap();
         let high = idx.render_reference(&[&ex], crate::recipe::GradeStrength::new(0.9)).unwrap();
@@ -4601,6 +5142,7 @@ mod tests {
             embed: None,
             tags: Vec::new(), vocab_scores: None, desc: None, desc_embed: None,
             masks: None,
+            mono: false,
         };
         let idx = StyleIndex {
             version: CURRENT_INDEX_VERSION,
@@ -4652,6 +5194,7 @@ mod tests {
             settings: BTreeMap::new(),
             curve: None,
             masks: None,
+            mono: false,
         };
         let q_path = "D:\\roll-a\\DSC1.ARW";
         // Path identity: the same file, case-flipped, is SELF on Windows.
@@ -4681,6 +5224,7 @@ mod tests {
             settings: BTreeMap::new(),
             curve: Some([f32::NAN, 0.0]),
             masks: None,
+            mono: false,
         };
         assert!(!exemplar_is_finite(&e), "NaN curve shape refused");
         e.curve = None;
@@ -4702,6 +5246,7 @@ mod tests {
             embed: None,
             tags: Vec::new(), vocab_scores: None, desc: None, desc_embed: None,
             masks: None,
+            mono: false,
         };
         let idx = StyleIndex {
             version: CURRENT_INDEX_VERSION,
@@ -4811,6 +5356,7 @@ mod tests {
             embed: None,
             tags: Vec::new(), vocab_scores: None, desc: None, desc_embed: None,
             masks: None,
+            mono: false,
         };
         let with = mk(Some(crate::eval::FamilySummary {
             hsl: [2.0, 18.0, 6.0],
@@ -4863,6 +5409,7 @@ mod tests {
             embed: None,
             tags: Vec::new(), vocab_scores: None, desc: None, desc_embed: None,
             masks: None,
+            mono: false,
         };
         let idx = StyleIndex {
             version: CURRENT_INDEX_VERSION,
@@ -4922,6 +5469,7 @@ mod tests {
             embed: None,
             tags: Vec::new(), vocab_scores: None, desc: None, desc_embed: None,
                 masks: None,
+                mono: false,
             }],
             source_dir: None,
             looks: Vec::new(), looks_dir: None, embed_provenance: None,
@@ -5019,6 +5567,7 @@ mod tests {
                 desc: None,
                 desc_embed: None,
                 masks: None,
+                mono: false,
             }],
             source_dir: None,
             looks: Vec::new(),
@@ -5068,6 +5617,7 @@ mod tests {
             embed: None,
             tags: Vec::new(), vocab_scores: None, desc: None, desc_embed: None,
                 masks: None,
+                mono: false,
             }],
             source_dir: None,
             looks: Vec::new(), looks_dir: None, embed_provenance: None,
@@ -5115,6 +5665,7 @@ mod tests {
             embed: None,
             tags: Vec::new(), vocab_scores: None, desc: None, desc_embed: None,
             masks: None,
+            mono: false,
         };
         let idx = StyleIndex {
             version: CURRENT_INDEX_VERSION,
@@ -5191,6 +5742,7 @@ mod tests {
             embed: None,
             tags: Vec::new(), vocab_scores: None, desc: None, desc_embed: None,
             masks: None,
+            mono: false,
         };
         let built = StyleIndex {
             version: CURRENT_INDEX_VERSION,
@@ -5256,6 +5808,7 @@ mod tests {
             embed: None,
             tags: Vec::new(), vocab_scores: None, desc: None, desc_embed: None,
             masks: None,
+            mono: false,
         };
         let long = "x".repeat(MAX_STEM_CHARS + 20);
         let all = [mk("DSC0001"), mk("DSC0002"), mk("DSC0003"), mk("DSC0004"), mk(&long)];
@@ -5273,6 +5826,44 @@ mod tests {
         assert_eq!(one[0].chars().count(), MAX_STEM_CHARS + 1, "capped + ellipsis: {one:?}");
         assert!(one[0].ends_with('…'), "truncation is visible: {one:?}");
         assert!(neighbour_stems(&[]).is_empty(), "nothing retrieved ⇒ nothing claimed");
+    }
+
+    /// A27 — two neighbours that share a camera counter are named apart, and
+    /// nothing else changes.
+    ///
+    /// MUTATION: drop the `shared` test and prefix every name, and the
+    /// "unshared names are untouched" assertion fails; drop the hint
+    /// altogether and the first assertion sees one name twice.
+    #[test]
+    fn a_shared_stem_is_disambiguated_by_its_folder() {
+        let mk = |stem: &str, folder: &str| StyleExemplar {
+            path: Some(format!("D:\\rolls\\{folder}\\{stem}.ARW")),
+            ..plain_exemplar(stem)
+        };
+        let a = mk("00001234", "iceland");
+        let b = mk("00001234", "cornwall");
+        let c = mk("00009876", "cornwall");
+        let got = neighbour_stems(&[&a, &b, &c]);
+        assert_eq!(got, vec!["iceland/00001234", "cornwall/00001234", "00009876"]);
+        // The hint is the immediate folder ONLY — the disclosure is persisted
+        // and displayed, and the tree above it is the user's disk layout.
+        assert!(!got.iter().any(|s| s.contains("rolls")), "no layout above the folder: {got:?}");
+        // …and a collision the disclosure does not SHOW is not a collision:
+        // the fifth neighbour is never named, so it cannot rename the first.
+        let far = mk("00001234", "faroe");
+        let others = [mk("00001111", "iceland"), mk("00002222", "iceland"), mk("00003333", "iceland")];
+        let bounded =
+            neighbour_stems(&[&a, &others[0], &others[1], &others[2], &far]);
+        assert!(bounded.iter().all(|s| !s.contains('/')), "unshared names are untouched: {bounded:?}");
+        assert_eq!(bounded.len(), MAX_DISCLOSED_NEIGHBOURS);
+        // An exemplar with no path cannot be disambiguated, and says the same
+        // name twice rather than inventing a folder.
+        let pathless = StyleExemplar { path: None, ..plain_exemplar("00001234") };
+        assert_eq!(
+            neighbour_stems(&[&pathless, &pathless]),
+            vec!["00001234", "00001234"],
+            "no path, no hint — and no invented one"
+        );
     }
 
     /// L04-3: the f32→f64 accumulator switch is a no-op on real data — the
@@ -5295,6 +5886,7 @@ mod tests {
             embed: None,
             tags: Vec::new(), vocab_scores: None, desc: None, desc_embed: None,
             masks: None,
+            mono: false,
         };
         let idx = StyleIndex {
             version: CURRENT_INDEX_VERSION,
@@ -5404,6 +5996,7 @@ mod tests {
             embed: None,
             tags: Vec::new(), vocab_scores: None, desc: None, desc_embed: None,
             masks: None,
+            mono: false,
         }
     }
 
@@ -5437,9 +6030,11 @@ mod tests {
         ex.feat = vec![0.125, -3.5, 1.75, 0.5, 0.25, 0.375, 0.0, 0.0, 0.5, -0.5, 0.1, 1.5, 0.2, 0.0];
         ex.embed = Some(embed_axes(&[(0, 1.0), (7, 2.0)]));
         ex.vocab_scores = Some(flat_profile(0.25));
-        ex.tags = tags_from_scores(&flat_profile(0.25));
         ex.desc = Some("warm, lifted shadows and film-like grain".into());
         ex.desc_embed = Some(embed_axes(&[(3, 1.0), (9, -1.0)]));
+        // The tags through the door a build uses since v6 — the population's,
+        // not this record's alone.
+        retag(std::slice::from_mut(&mut ex));
         ex
     }
 
@@ -5459,6 +6054,11 @@ mod tests {
         let mut second = plain_exemplar("shot");
         second.feat = entry.feat.clone();
         apply_cached(&mut second, &entry, true, true);
+        // The two stages a build runs after the pool, in the build's own
+        // order: the tags are the POPULATION's (v6, `retag`), and only then
+        // may a cached description vector be served.
+        retag(std::slice::from_mut(&mut second));
+        adopt_cached_desc_embed(&mut second, &entry);
         let bits = |v: &Option<Vec<f32>>| {
             v.as_ref().map(|v| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>())
         };
@@ -5534,9 +6134,9 @@ mod tests {
     /// the record SAYS. A description that arrived from somewhere else this
     /// build — or a tag list the scores changed — invalidates it.
     ///
-    /// MUTATION: drop the `desc_text` comparison in [`apply_cached`] and this
-    /// fails: the index would carry a text vector of a sentence it no longer
-    /// holds, and the W_DESC term would rank on prose nobody can see.
+    /// MUTATION: drop the `desc_text` comparison in [`adopt_cached_desc_embed`]
+    /// and this fails: the index would carry a text vector of a sentence it no
+    /// longer holds, and the W_DESC term would rank on prose nobody can see.
     #[test]
     fn a_stale_description_vector_is_not_served_back() {
         let ex = measured_exemplar();
@@ -5544,11 +6144,15 @@ mod tests {
         // Same record, same everything: the vector is served.
         let mut same = plain_exemplar("shot");
         apply_cached(&mut same, &entry, true, true);
+        retag(std::slice::from_mut(&mut same));
+        adopt_cached_desc_embed(&mut same, &entry);
         assert!(same.desc_embed.is_some(), "the text has not changed");
         // Now the build does NOT want prose, so the record's text becomes its
         // tag string — a different sentence, and the stored vector is not its.
         let mut retagged = plain_exemplar("shot");
         apply_cached(&mut retagged, &entry, true, false);
+        retag(std::slice::from_mut(&mut retagged));
+        adopt_cached_desc_embed(&mut retagged, &entry);
         assert_eq!(retagged.desc, None, "prose was not asked for");
         assert_eq!(
             retagged.desc_embed, None,
@@ -5822,7 +6426,7 @@ mod tests {
                 scores[idx] = (group_no * 10 + offset) as f32;
             }
         }
-        let tags = tags_from_scores(&scores);
+        let tags = tags_from_scores(&scores, None);
         assert!(tags.len() <= LOOK_TAGS_K);
         let chosen = LOOK_VOCAB
             .iter()
@@ -5833,6 +6437,109 @@ mod tests {
         for group in LOOK_GROUPS {
             assert!(chosen.iter().filter(|idx| group.contains(idx)).count() <= 1);
         }
+    }
+
+    /// A25 — the tag list is a statement about the LIBRARY, not about one
+    /// score vector.
+    ///
+    /// The premise is the real corpus's own failure mode, reproduced in
+    /// miniature: one phrase (`deep blacks`, group 1) scores high on every
+    /// photograph, so the raw argmax hands it to all three and the phrase that
+    /// actually tells them apart never wins its group. Centring on the library
+    /// mean is the whole fix.
+    ///
+    /// MUTATION: pass `None` for the mean inside `retag`, or make `vocab_mean`
+    /// return a zero vector, and the "all three read the same" assertion fires.
+    #[test]
+    fn tags_are_derived_against_the_library_mean() {
+        // Four HUB phrases, one in each of the first four groups, scoring high
+        // on every photograph — so the raw top-four is those four, whoever the
+        // photograph is. Each exemplar's OWN phrase lives in a later group and
+        // scores well below them.
+        const HUBS: [usize; 4] = [0, 3, 7, 9];
+        const OWN: [usize; 3] = [12, 16, 20];
+        let mut pop = Vec::new();
+        for (i, own) in OWN.iter().enumerate() {
+            let mut ex = plain_exemplar(&format!("p{i}"));
+            let mut scores = vec![0.05f32; LOOK_VOCAB.len()];
+            for h in HUBS {
+                scores[h] = 0.90;
+            }
+            scores[*own] = 0.30;
+            ex.vocab_scores = Some(scores);
+            pop.push(ex);
+        }
+        let raw: Vec<Vec<String>> = pop
+            .iter()
+            .map(|e| tags_from_scores(e.vocab_scores.as_deref().unwrap(), None))
+            .collect();
+        assert_eq!(raw[0], raw[1], "premise: the raw derivation cannot tell them apart");
+        assert_eq!(raw[1], raw[2], "premise: the raw derivation cannot tell them apart");
+        assert!(raw[0].contains(&"deep blacks".to_string()), "premise: the hubs win raw");
+
+        retag(&mut pop);
+        let now: Vec<&[String]> = pop.iter().map(|e| e.tags.as_slice()).collect();
+        assert!(
+            now[0] != now[1] && now[1] != now[2],
+            "centred on the library mean, all three read the same: {now:?}"
+        );
+        // Each photograph's own phrase is what centring surfaces.
+        for (e, own) in pop.iter().zip(OWN) {
+            let phrase = LOOK_VOCAB[own]
+                .strip_prefix("a photo with ")
+                .or_else(|| LOOK_VOCAB[own].strip_prefix("an "))
+                .unwrap_or(LOOK_VOCAB[own]);
+            assert!(e.tags.iter().any(|t| t == phrase), "{} lost its own phrase: {:?}", e.stem, e.tags);
+        }
+        // A population nobody embedded has no mean, and its tags are left as
+        // they are rather than emptied.
+        let mut none = vec![plain_exemplar("no-scores")];
+        none[0].tags = vec!["kept".into()];
+        retag(&mut none);
+        assert_eq!(none[0].tags, vec!["kept".to_string()], "no profile, no re-derivation");
+    }
+
+    /// …and the derivation's consequence: a description VECTOR is the vector
+    /// OF a text, so a record whose tags moved must not keep one built from
+    /// the tags it no longer has.
+    ///
+    /// MUTATION: drop the `set_desc_embed(None)` arm of `retag` and the
+    /// tag-only record below keeps a vector of a sentence it stopped saying.
+    #[test]
+    fn retagging_drops_a_description_vector_of_the_old_tag_text() {
+        let mut pop = Vec::new();
+        for (i, own) in [12usize, 16, 20].iter().enumerate() {
+            let mut ex = plain_exemplar(&format!("p{i}"));
+            let mut scores = vec![0.05f32; LOOK_VOCAB.len()];
+            for h in [0usize, 3, 7, 9] {
+                scores[h] = 0.90;
+            }
+            scores[*own] = 0.30;
+            ex.vocab_scores = Some(scores);
+            ex.tags = tags_from_scores(ex.vocab_scores.as_deref().unwrap(), None);
+            ex.desc_embed = Some(unit_embed());
+            pop.push(ex);
+        }
+        // …and one that carries PROSE: its text does not read the tags at all,
+        // so its vector must survive the same pass.
+        let mut prose = plain_exemplar("prose");
+        let mut scores = vec![0.05f32; LOOK_VOCAB.len()];
+        for h in [0usize, 3, 7, 9] {
+            scores[h] = 0.90;
+        }
+        scores[25] = 0.40;
+        prose.vocab_scores = Some(scores);
+        prose.tags = tags_from_scores(prose.vocab_scores.as_deref().unwrap(), None);
+        prose.desc = Some("a warm, hazy grade".into());
+        prose.desc_embed = Some(unit_embed());
+        pop.push(prose);
+
+        retag(&mut pop);
+        assert!(
+            pop[..3].iter().all(|e| e.desc_embed.is_none()),
+            "a tag-only record's vector is of the OLD tag string"
+        );
+        assert!(pop[3].desc_embed.is_some(), "prose does not read the tags, so its vector stands");
     }
 
     #[test]
@@ -5947,8 +6654,14 @@ mod tests {
     /// main's shape, and reads main's own five-field file back through this
     /// one, so the compatibility is a test rather than a comment.
     ///
-    /// MUTATION: bump `CURRENT_INDEX_VERSION` past main's
-    /// `READABLE_INDEX_VERSIONS` and the version assertion fails.
+    /// The VERSION half moved in v1.2.4 and is stated as what it now is: v6 is
+    /// deliberately outside a pre-v6 build's readable set, because the tag
+    /// derivation changed. What this test still owns is the FORMAT half — the
+    /// look block is additive, so an older reader parses the file and refuses
+    /// it on the version rather than choking on a key.
+    ///
+    /// MUTATION: give `StyleIndex` a `deny_unknown_fields`, or drop
+    /// `#[serde(default)]` from the look block, and the shadow parse fails.
     #[test]
     fn a_looks_only_index_stays_readable_by_a_pre_look_build() {
         // main v1.0.0's `StyleIndex`, field for field (cfc8b3d src/style.rs).
@@ -5978,9 +6691,10 @@ mod tests {
         let json = serde_json::to_string(&looks_only).expect("serialise");
         let old: V1Index =
             serde_json::from_str(&json).expect("a pre-look build must still parse this index");
-        // main reads versions 4 and 5 and refuses anything else outright, so the
-        // look block may not ride on a version bump.
-        assert!(matches!(old.version, 4 | 5), "version {} is outside main's readable set", old.version);
+        // v6 is outside a pre-v6 build's readable set BY DESIGN; what matters
+        // here is that the refusal is a version decision it can reach, not a
+        // parse error on the look block.
+        assert_eq!(old.version, CURRENT_INDEX_VERSION, "the shadow parse reads the real version");
         assert_eq!(old.mean.len(), NDIM);
         assert_eq!(old.std.len(), NDIM);
         assert!(old.exemplars.is_empty(), "the RAW half really is empty in this file");
@@ -6029,8 +6743,8 @@ mod tests {
     /// correction is 0.752993, a regression the CI does NOT straddle, so
     /// keeping 4.0 was not an option once the correction shipped.
     ///
-    /// MUTATION: flip `STANDARDISE_TEXT_TERMS`, or move any of the three
-    /// weights, and this fails — which is the point: the numbers in
+    /// MUTATION: move any of the three weights, or make the shipped door stop
+    /// z-scoring, and this fails — which is the point: the numbers in
     /// TECH_STACK and README are then stale too.
     #[test]
     fn the_shipped_text_variant_is_the_measured_one() {
@@ -6047,18 +6761,20 @@ mod tests {
         // elsewhere (and clippy refuses it). The shipped door must Z-SCORE the
         // gaps over the candidate set and say that it did.
         let gaps = [Some(0.10), Some(0.20), Some(0.60)];
-        let shipped = text_term(&gaps, None, 2.0);
+        let shipped = standardise(&gaps, None, 2.0);
         assert!(shipped.standardised, "the shipped variant must standardise");
         assert!(
             (shipped.terms.iter().sum::<f64>()).abs() < 1e-12,
             "a z-scored term is centred on the candidate set: {:?}",
             shipped.terms
         );
-        // The other variant is not dead code — it is one flag away, and it
-        // still weights the raw gap.
-        let other = raw_term(&gaps, 2.0);
-        assert!(!other.standardised);
-        assert_eq!(other.terms, vec![0.2, 0.4, 1.2]);
+        // The weighted RAW gap survives only as the disclosed FALLBACK for a
+        // candidate set too small to standardise — never as a second ranking
+        // behind a flag. Two comparable candidates is below
+        // `MIN_STANDARDISATION_CANDIDATES`, so this is that path.
+        let short = standardise(&[Some(0.10), Some(0.20)], None, 2.0);
+        assert!(!short.standardised, "a set of two is not standardisable");
+        assert_eq!(short.terms, vec![0.2, 0.4], "…and the raw gap is weighted instead");
         // A non-zero W_DESC is what makes the look block's "and direction"
         // wording true, so the shipped defaults must license it.
         let q = StyleQuery::new(None, Some(&[1.0]), RetrievalWeights::SHIPPED);
@@ -6103,9 +6819,8 @@ mod tests {
     /// it is added to.
     ///
     /// MUTATION: return `plain()` unconditionally from `standardise` and the
-    /// mean/spread assertions fail; make the ranking standardise while
-    /// `STANDARDISE_TEXT_TERMS` is off (or the reverse) and the agreement
-    /// assertion fails.
+    /// mean/spread assertions fail; report `standardised: false` from the path
+    /// that z-scored (or the reverse) and the agreement assertion fails.
     #[test]
     fn text_term_is_standardised_over_the_candidate_set() {
         // Four candidates whose text cosines are tightly clustered, exactly
@@ -6154,18 +6869,11 @@ mod tests {
         let spread = z.terms.iter().cloned().fold(f64::MIN, f64::max)
             - z.terms.iter().cloned().fold(f64::MAX, f64::min);
         assert!(spread > 1.0, "the standardised term actually separates candidates: {spread}");
-        // …and the RANKING reports the variant it actually used. The harness
-        // measured the raw variant as the better one on the real corpus
-        // (`the_shipped_text_variant_is_the_measured_one`), so this test tracks
-        // the flag rather than asserting the design argument's preference: what
-        // must never happen is a ranking that standardises while the diagnostic
-        // says it did not, or the reverse.
-        assert!(scored.iter().all(|(_, t)| t.txt_standardised == STANDARDISE_TEXT_TERMS));
-        if !STANDARDISE_TEXT_TERMS {
-            for ((_, t), gap) in scored.iter().zip(&raw) {
-                assert!((t.txt - gap).abs() < 1e-12, "the raw variant weights the gap itself");
-            }
-        }
+        // …and the RANKING reports what it actually did. What must never
+        // happen is a ranking that standardises while the diagnostic says it
+        // did not, or the reverse — four comparable candidates is above
+        // `MIN_STANDARDISATION_CANDIDATES`, so every one of these must say so.
+        assert!(scored.iter().all(|(_, t)| t.txt_standardised), "the ranking z-scored and must say so");
         // The ORDER is unchanged - standardisation is affine within a query,
         // which is the point: it rescales the term, it does not invent one.
         // True HERE because these exemplars carry no `vocab_scores`, so the
@@ -7001,6 +7709,7 @@ mod tests {
             desc: Some("d".repeat(MAX_DESC_CHARS)),
             desc_embed: Some(worst),
             masks: None,
+            mono: false,
         };
         let look_bytes = serde_json::to_vec(&max_look).unwrap().len();
         let raw_bytes = serde_json::to_vec(&max_raw).unwrap().len();
@@ -7283,7 +7992,76 @@ mod tests {
         assert!(index.looks.iter().all(|l| l.embed.len() == crate::embed::EMBED_DIM));
         assert!(index.looks.iter().all(|l| l.desc.as_deref() == Some("a stubbed grade sentence")));
         assert!(index.looks.iter().all(|l| l.desc_embed.is_some()));
+        // A31 — a build that RETURNS leaves no staged frame behind. Asserted
+        // on the real scratch directory of a real staged build, because that
+        // is the claim `StagedFrame`'s Drop makes and nothing was checking it.
+        assert_eq!(
+            intermediates_at(&root.join("scratch")),
+            Vec::<String>::new(),
+            "a finished build owns no leftovers"
+        );
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Every intermediate a build writes into the scratch directory, by name —
+    /// so a leak shows up as the file it is rather than as a count.
+    fn intermediates_at(dir: &Path) -> Vec<String> {
+        let mut out: Vec<String> = std::fs::read_dir(dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| INTERMEDIATE_PREFIXES.iter().any(|p| n.starts_with(p)))
+            .collect();
+        out.sort();
+        out
+    }
+
+    /// A31 — the frames an INTERRUPTED build left are collected by the next
+    /// one, and nobody else's are.
+    ///
+    /// `StagedFrame`'s Drop covers every path out of a build that returns; a
+    /// process that is killed mid-index unwinds nothing, and until this sweep
+    /// existed those PNGs stayed in the user's store for the life of the
+    /// installation because nothing ever looked for them.
+    ///
+    /// MUTATION: drop the `name.contains(&mine)` test and the live-build file
+    /// below is deleted out from under its owner; drop the age test and the
+    /// second sweep takes the fresh foreign file too.
+    #[test]
+    fn an_interrupted_builds_staged_frames_are_swept_by_the_next() {
+        let dir = crate::test_dir("style-sweep");
+        let mine = std::process::id();
+        let plant = |name: &str| {
+            std::fs::write(dir.join(name), b"staged pixels").expect("plant");
+            name.to_string()
+        };
+        // Two abandoned frames and an abandoned manifest, from a build whose
+        // process is long gone…
+        let dead_png = plant("autoshade-embed-999999-0-idx-3.png");
+        let dead_json = plant("autoshade-embed-999999-0-idx-3.json");
+        let dead_manifest = plant("autoshade-describe-999999-4.jsonl");
+        let dead_vocab = plant("autoshade-look-vocab-looks-999999-0.txt");
+        // …one belonging to THIS process, which is a live build's working file…
+        let live = plant(&format!("autoshade-embed-{mine}-0-idx-0.png"));
+        // …and a file that is not an intermediate at all.
+        let index = plant("style-index.json");
+
+        // Age ZERO: everything foreign is old enough to be abandoned.
+        assert_eq!(sweep_stale_intermediates(&dir, std::time::Duration::ZERO), 4);
+        let left = intermediates_at(&dir);
+        assert_eq!(left, vec![live.clone()], "only this process's own frame survives");
+        for gone in [&dead_png, &dead_json, &dead_manifest, &dead_vocab] {
+            assert!(!dir.join(gone).exists(), "{gone} should have been swept");
+        }
+        assert!(dir.join(&index).exists(), "the index itself is not an intermediate");
+
+        // A DAY: a foreign file written a moment ago is another build's live
+        // working file, not rubbish.
+        let fresh = plant("autoshade-embed-888888-0-idx-1.png");
+        assert_eq!(sweep_stale_intermediates(&dir, STALE_INTERMEDIATE_AGE), 0);
+        assert!(dir.join(&fresh).exists(), "a fresh foreign frame is somebody's live build");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The SWITCH is the only thing that starts the description pass — not the
@@ -7555,14 +8333,21 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// …and the other direction: an index this build writes must stay readable
-    /// by a build that has never heard of `masks`. That is what makes shipping
-    /// this WITHOUT a version bump honest — a v5 file is still a v5 file to
-    /// `main`, and the new key is one it ignores.
+    /// …and the other direction: an index this build writes stays PARSEABLE by
+    /// a build that has never heard of `masks`. The added keys are ones an
+    /// older reader ignores, which is what "additive field" means and what
+    /// lets `masks` ship without a version of its own.
     ///
-    /// MUTATION THIS KILLS: bumping `CURRENT_INDEX_VERSION` for an additive
-    /// field (every pre-S3 build then refuses the file outright), or giving
-    /// `StyleExemplar` a `deny_unknown_fields` that would make the reverse true.
+    /// The VERSION is a separate decision and since v1.2.4 it says something
+    /// else: v6 changed what a stored tag list means (`tags_from_scores`
+    /// subtracts the library mean), so a pre-v6 build must refuse this file
+    /// rather than rank on it. The two halves are asserted apart below — the
+    /// format is additive, and the refusal is a version decision rather than a
+    /// parse failure.
+    ///
+    /// MUTATION THIS KILLS: giving `StyleExemplar` a `deny_unknown_fields`
+    /// (the shadow parse then fails), or dropping the version bump that
+    /// protects the tag derivation (the second assertion then fails).
     #[test]
     fn an_s3_index_reads_on_a_pre_s3_build() {
         // main's `StyleExemplar`, field for field as of ba13091 (S1+S2 merged).
@@ -7603,10 +8388,10 @@ mod tests {
         assert!(json.contains("\"masks\""), "premise: the file really carries the new block");
         let old: PreS3Index =
             serde_json::from_str(&json).expect("a pre-S3 build must still parse this index");
+        assert_eq!(old.version, CURRENT_INDEX_VERSION, "the shadow parse reads the real version");
         assert!(
-            matches!(old.version, 4 | 5),
-            "version {} is outside the set main reads — an additive field may not ride a bump",
-            old.version
+            !matches!(old.version, 4 | 5),
+            "v6 must be refused BY VERSION by a pre-v6 build: the tag derivation moved"
         );
         assert_eq!(old.exemplars.len(), 1);
         assert_eq!(old.exemplars[0].stem, "a");
@@ -7659,6 +8444,7 @@ mod tests {
             desc: None,
             desc_embed: None,
             masks: None,
+            mono: false,
         };
         for strength in [0.30f32, 0.90] {
             let got = idx
@@ -7725,6 +8511,7 @@ mod tests {
             desc: None,
             desc_embed: None,
             masks,
+            mono: false,
         };
         let index_with = |masks: [Option<MaskHabit>; 3]| StyleIndex {
             version: CURRENT_INDEX_VERSION,
@@ -7810,6 +8597,7 @@ mod tests {
             desc: None,
             desc_embed: None,
             masks: None,
+            mono: false,
         }
     }
 
@@ -7999,11 +8787,153 @@ mod tests {
     /// MUTATION THIS KILLS: dropping the `out.grade.contains_key(sat)` guard.
     #[test]
     fn a_wheel_hue_is_not_learned_without_its_own_intensity() {
-        let a = vocab_ex(&[("color_grade.shadow_hue", 229.0), ("color_grade.shadow_sat", 20.0)]);
-        let b = vocab_ex(&[("color_grade.shadow_hue", 229.0), ("color_grade.shadow_sat", -20.0)]);
+        // The intensity a loaded index can actually fail on is an UNTOUCHED
+        // one: `setting_bands` clamps `*_sat` to 0..100, so the population
+        // that produces no intensity target is the one that never toned. (It
+        // used to be `+20` against `-20`, a pair no index door admits — see
+        // `a_one_sided_intensity_is_gated_on_being_exercised`.)
+        let a = vocab_ex(&[("color_grade.shadow_hue", 229.0), ("color_grade.shadow_sat", 0.0)]);
+        let b = vocab_ex(&[("color_grade.shadow_hue", 212.0), ("color_grade.shadow_sat", 0.0)]);
         let targets = style_targets(&[&a, &b]);
-        assert_eq!(targets.grade.get("shadow_sat"), None, "the premise: intensity cancels");
+        assert_eq!(targets.grade.get("shadow_sat"), None, "the premise: nobody toned");
         assert_eq!(targets.grade.get("shadow_hue"), None, "so the angle is not learned either");
+    }
+
+    /// A30 — the distillation preview says what was learned AND what was not.
+    ///
+    /// The value of the flag is the second half: a photographer whose blue is
+    /// not being pulled needs to see whether the answer is "your neighbours
+    /// disagree", "they never touched it" or "the dial is at zero", and only a
+    /// line that names the refusals can say which.
+    ///
+    /// MUTATION: print only the channels that produced a target (drop the
+    /// "no habit this set agrees on" arms) and the two refusal assertions
+    /// fail; re-derive the applied line instead of calling `blend_toward` and
+    /// the Style-0 assertion fails.
+    #[test]
+    fn the_distillation_preview_names_the_refusals_as_well_as_the_targets() {
+        let a = vocab_ex(&[
+            ("contrast", 20.0),
+            ("hsl.saturation.blue", 40.0),
+            ("hsl.saturation.green", 20.0),
+            ("color_grade.shadow_sat", 20.0),
+            ("color_grade.shadow_hue", 229.0),
+        ]);
+        // …and a neighbour that contradicts the GREEN band and nothing else.
+        let b = vocab_ex(&[
+            ("contrast", 20.0),
+            ("hsl.saturation.blue", 40.0),
+            ("hsl.saturation.green", -20.0),
+            ("color_grade.shadow_sat", 20.0),
+            ("color_grade.shadow_hue", 229.0),
+        ]);
+        let text = distillation_preview(&[&a, &b], 0.65);
+        assert!(text.contains("2 neighbour(s)"), "{text}");
+        assert!(text.contains("Style 0.65"), "{text}");
+        assert!(text.contains("blue +40.00"), "the band they agree on is named: {text}");
+        assert!(!text.contains("green"), "the band they contradict carries no target: {text}");
+        assert!(text.contains("1 of 8 bands"), "…and the count says how many did: {text}");
+        assert!(
+            text.contains("mixer luminance") && text.contains("0 of 8 bands: no habit this set agrees on"),
+            "an untouched channel says so rather than going quiet: {text}"
+        );
+        assert!(text.contains("shadow_hue +229.00") && text.contains("shadow_sat +20.00"), "{text}");
+        assert!(text.contains("curve     no shape this set agrees on"), "{text}");
+        assert!(text.contains("mixer hue ingested, never distilled"), "{text}");
+        // The applied line is `blend_toward`'s, so Style 0 moves nothing while
+        // the TARGETS above are unchanged — which is exactly the question the
+        // flag exists to answer.
+        let zero = distillation_preview(&[&a, &b], 0.0);
+        assert!(zero.contains("blue +40.00"), "the habit is still measured at Style 0: {zero}");
+        assert!(zero.contains("at this Style: nothing moves"), "{zero}");
+        assert!(
+            text.contains("at this Style: contrast"),
+            "and at 0.65 the pull names what it moved: {text}"
+        );
+        // A set that agrees about nothing says that in one line rather than
+        // printing five empty channels.
+        let c = vocab_ex(&[]);
+        let empty = distillation_preview(&[&c, &c], 0.65);
+        assert!(empty.contains("no target on any channel"), "{empty}");
+        // …and a black-and-white neighbour is disclosed, because its absence
+        // from the mixer is the reason a band target can differ from what a
+        // reader counting neighbours would expect (A29).
+        let mut mono = vocab_ex(&[("hsl.saturation.blue", 0.0)]);
+        mono.mono = true;
+        let with_mono = distillation_preview(&[&a, &b, &mono], 0.65);
+        assert!(
+            with_mono.contains("1 of them are black-and-white"),
+            "the mixer's abstention is disclosed: {with_mono}"
+        );
+    }
+
+    /// A28 — the direction gate a one-sided magnitude cannot fail is not a
+    /// gate, and the code now says which question it asks.
+    ///
+    /// MUTATION: send `*_sat` back through `consistent_mean` (delete the
+    /// `label_is_one_sided` arm of `habit_mean`) and the FIRST assertion still
+    /// passes — that is the point, the two rules agree on every population an
+    /// index door admits — while `label_is_one_sided` below fails, which is
+    /// what pins the rule to the band table rather than to a hand-kept list.
+    #[test]
+    fn a_one_sided_intensity_is_gated_on_being_exercised() {
+        // One photographer in four toned; the other three left the wheel
+        // alone. rho is exactly 1 here — zeros do not oppose — so the
+        // direction gate passes and the target is the plain mean.
+        let toned = vocab_ex(&[("color_grade.shadow_sat", 40.0)]);
+        let quiet = vocab_ex(&[("color_grade.shadow_sat", 0.0)]);
+        let targets = style_targets(&[&toned, &quiet, &quiet, &quiet]);
+        assert_eq!(
+            targets.grade.get("shadow_sat").copied(),
+            Some(10.0),
+            "one wheel in four at 40 is a target of 10, gate or no gate"
+        );
+        // …and nobody touching it is still no target at all.
+        let none = style_targets(&[&quiet, &quiet]);
+        assert_eq!(none.grade.get("shadow_sat"), None);
+        // The rule is READ OFF the band table, so a control that gains a
+        // negative side stops being treated as a magnitude by itself.
+        assert!(label_is_one_sided("color_grade.shadow_sat"), "0..100 is one-sided");
+        assert!(!label_is_one_sided("color_grade.shadow_lum"), "±100 is not");
+        assert!(!label_is_one_sided("hsl.saturation.blue"), "±100 is not");
+        assert!(label_is_one_sided("color_grade.blending"), "0..100 is one-sided");
+    }
+
+    /// A29 — a black-and-white neighbour has no colour for the eight-band
+    /// mixer to shape, so it must not be counted as agreeing with a band
+    /// target of zero.
+    ///
+    /// MUTATION: drop the `!e.mono` filter and the three colour photographs'
+    /// unanimous +40 comes back as +30 — a quarter of the way to nothing,
+    /// contributed by a frame that has no blues.
+    #[test]
+    fn a_monochrome_neighbour_does_not_drag_a_band_target() {
+        let colour = vocab_ex(&[("hsl.saturation.blue", 40.0)]);
+        let mut mono = vocab_ex(&[("hsl.saturation.blue", 0.0)]);
+        mono.mono = true;
+        let with_mono = style_targets(&[&colour, &colour, &colour, &mono]);
+        assert_eq!(
+            with_mono.hsl[1][5], Some(40.0),
+            "three unanimous colour neighbours, and the black-and-white one abstains"
+        );
+        // The premise: counted, the same population lands somewhere else.
+        let mut counted = mono.clone();
+        counted.mono = false;
+        let dragged = style_targets(&[&colour, &colour, &colour, &counted]);
+        assert_eq!(dragged.hsl[1][5], Some(30.0), "premise: an un-flagged zero drags");
+        // A set of nothing BUT monochrome neighbours learns no mixer target
+        // rather than learning zero.
+        let all_mono = style_targets(&[&mono, &mono]);
+        assert!(all_mono.hsl.iter().flatten().all(Option::is_none), "{:?}", all_mono.hsl);
+        // …and the exclusion is the MIXER's alone: a monochrome frame is
+        // toned with the grade wheels like any other, and its tonal sliders
+        // are a habit.
+        let mut toned = mono.clone();
+        toned.settings.insert("color_grade.shadow_sat".into(), 30.0);
+        toned.settings.insert("contrast".into(), 20.0);
+        let wheels = style_targets(&[&toned, &toned]);
+        assert_eq!(wheels.grade.get("shadow_sat").copied(), Some(30.0), "wheels still count");
+        assert_eq!(wheels.sliders.get("contrast").copied(), Some(20.0), "so do the twelve");
     }
 
     /// AN UNSATURATED WHEEL HAS NOTHING TO LERP FROM — the same rule the
@@ -8066,16 +8996,20 @@ mod tests {
 
     /// THE MIXER'S HUE AXIS IS INGESTED AND NEVER DISTILLED. Saturation and
     /// luminance change how strongly a colour READS; hue changes WHICH COLOUR
-    /// IT IS, on whatever content occupies that band in this photograph — and
-    /// the corpus says that is scene-bound (`style_targets` carries the
-    /// measurement). The ingestion still happens, so a later batch that
-    /// measures otherwise turns it on by deleting one `continue`.
+    /// IT IS, on whatever content occupies that band in this photograph.
+    /// `style_targets` carries the v1.2.4 measurement that settled it on the
+    /// whole 169-exemplar library: the scene explains as little of hue (η²
+    /// 1.2–7.8 %) as of the two axes that are distilled (1.1–5.4 %), so the
+    /// scene-boundness this switch used to cite is not the reason — the reach
+    /// is, at up to 55.75 on one band. The INGESTION stays, because the
+    /// measurement is made on the stored settings and a switch defended by
+    /// numbers has to leave the numbers measurable.
     ///
     /// MUTATION THIS KILLS: removing the `HSL_AXIS_HUE` skip.
     #[test]
     fn mixer_hue_is_ingested_and_never_distilled() {
         let ex = vocab_ex(&[("hsl.hue.blue", 30.0), ("hsl.saturation.blue", 30.0)]);
-        assert!(ex.settings.contains_key("hsl.hue.blue"), "ingested, so a later batch has the data");
+        assert!(ex.settings.contains_key("hsl.hue.blue"), "ingested, so the axis stays measurable");
         let targets = style_targets(&[&ex, &ex]);
         assert!(
             targets.hsl[crate::advisor::catalogue::HSL_AXIS_HUE].iter().all(Option::is_none),
@@ -8245,7 +9179,7 @@ mod tests {
     /// THE CALIBRATION HARNESS — batch 2's numbers, measured on the real
     /// library rather than argued from it.
     ///
-    /// `#[ignore]` and env-gated, on the `AUTOSHOP_FIT_CALIBRATION_DIR`
+    /// `#[ignore]` and env-gated, on the `AUTOSHADE_FIT_CALIBRATION_DIR`
     /// precedent and for its reason: the corpus is one photographer's RAWs and
     /// sidecars, it cannot live in a public repository, and a machine-absolute
     /// path baked into a test is the mistake that pattern exists to avoid.
@@ -8767,6 +9701,7 @@ old ({flat_old:+.2}, {mix_old:.2}, {wheel_old:.2})  new ({flat_new:+.2}, {mix_ne
             desc: Some("d".repeat(MAX_DESC_CHARS)),
             desc_embed: None,
             masks,
+            mono: false,
         };
         let idx = StyleIndex {
             version: CURRENT_INDEX_VERSION,
@@ -8960,6 +9895,7 @@ old ({flat_old:+.2}, {mix_old:.2}, {wheel_old:.2})  new ({flat_new:+.2}, {mix_ne
             desc: Some("a warm golden-hour lean with deep blacks".into()),
             desc_embed: None,
             masks: Some(two_mask_habit()),
+            mono: false,
         }
     }
 

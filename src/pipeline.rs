@@ -6858,6 +6858,7 @@ mod tests {
             embed: None,
             tags: Vec::new(), vocab_scores: None, desc: None, desc_embed: None,
             masks: None,
+            mono: false,
         };
         let all = [ex("DSC0001"), ex("DSC0002"), ex("DSC0003")];
         let refs: Vec<&StyleExemplar> = all.iter().collect();

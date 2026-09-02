@@ -20,18 +20,25 @@ tower, produced by ONE ``python/embed.py --text-manifest`` batch over the whole
 index and cached (``--proxies``/``--build-proxies``), so the 1.5 GB checkpoint
 is loaded once per corpus and never during a grid sweep.
 
-S2 splits that into TWO proxies, because there are now two kinds of text in the
-index and they are not interchangeable:
+S2 split that into TWO proxies, and v1.2.4 adds a THIRD, because these are
+different kinds of text and they are not interchangeable:
 
   * ``prose``  - the held-out exemplar's own local DESCRIPTION (describe.py).
   * ``tags``   - its attribute tag string, which is what S1 measured whenever
                  an exemplar had no description.
+  * ``short``  - a real, SHORT direction of the kind a user types, drawn from
+                 ``SHORT_DIRECTIONS`` and assigned to each exemplar by word
+                 overlap with its own tags.  The other two proxies describe
+                 the query photograph perfectly and a typed Direction does
+                 not; that gap was registered as the thing the shipped
+                 W_TXT/W_DESC had never been measured against, and this is the
+                 measurement.
 
-Both grids are swept and both tables printed.  This is the question S2 has to
-answer honestly: a description weight calibrated on the tag string would ship
-a W_DESC that the prose never earned, and a description weight that only ever
-sees prose cannot say whether the prose beats the tags it replaced.  The
-recommendation at the bottom is the best point across BOTH proxies, and it
+All three grids are swept and all three tables printed.  This is the question
+S2 had to answer honestly: a description weight calibrated on the tag string
+would ship a W_DESC that the prose never earned, and a description weight that
+only ever sees prose cannot say whether the prose beats the tags it replaced.
+The recommendation at the bottom is the best point across the proxies, and it
 still has to beat the 14-dim baseline with a paired bootstrap CI excluding 0 —
 otherwise the weight ships at 0.
 
@@ -48,8 +55,11 @@ Raw vs standardised
 SigLIP image-to-text cosines are tiny and tightly clustered, so the raw
 ``1 - cos`` text term barely reorders anything and a grid over it "finds" 0 for
 the wrong reason.  ``src/style.rs`` therefore z-scores the text and description
-terms over each query's CANDIDATE SET before weighting them, and this harness
-evaluates BOTH variants so the shipped one is the measured one.
+terms over each query's CANDIDATE SET before weighting them.  Since v1.2.4 the
+ranking has ONLY that arm — the ``STANDARDISE_TEXT_TERMS`` switch is gone, and
+``style::standardise`` records why — but this harness still sweeps both, so the
+comparison that settled it stays re-runnable rather than becoming a claim in a
+comment.
 
 ``--self-test`` runs the whole pipeline on a deterministic in-memory fixture
 with no model, no photo corpus and no cached proxies, and ASSERTS its
@@ -210,17 +220,85 @@ def synthetic_records():
 # -------------------------------------------------------------- text proxies
 
 
-PROXY_KINDS = ("prose", "tags")
+PROXY_KINDS = ("prose", "tags", "short")
+
+# The ladder the `short` proxy draws from: the three directions the showcase
+# panel was rendered with, and nine one-to-four-word ones of the kind a user
+# actually types.  Fixed here rather than passed in, because a weight measured
+# against a direction set nobody can reproduce is not a measurement.
+SHORT_DIRECTIONS = (
+    "dark moody low-key tones, a cross-processed colour treatment, a teal-and-orange split tone",
+    "warm golden tones, film-like grain, lifted matte shadows",
+    "vivid saturated colours, punchy high contrast, crisp clarity",
+    "warm evening",
+    "cool clean",
+    "film grain",
+    "high key",
+    "moody blue hour",
+    "punchy landscape",
+    "soft portrait",
+    "muted pastel",
+    "night city lights",
+)
+
+# Words that carry no look — they match everything and would decide the
+# assignment below by grammar rather than by grade.
+_STOPWORDS = frozenset(
+    "a an the with and of photo tones colours colour light photograph".split()
+)
+
+
+def _look_words(text):
+    return {
+        w
+        for w in "".join(c if c.isalpha() else " " for c in text.lower()).split()
+        if w and w not in _STOPWORDS
+    }
+
+
+def short_direction_for(tags):
+    """Which SHORT direction would a user plausibly type for this photograph?
+
+    The one the largest FRACTION of whose look words the exemplar's own
+    attribute tags carry, ties broken by how many words that was and then by
+    position in the ladder.  The fraction rather than the count is what keeps
+    the experiment about short directions: a raw overlap count is won by
+    whichever ladder entry has the most words, and the three long showcase
+    directions took 146 of the 169 exemplars that way.  Under the fraction the
+    ladder spreads 44 / 25 / 21 / 20 / 16 / 11 / 10 / 7 / 7 / 6 / 2 across
+    eleven of its twelve entries.
+
+    `None` when nothing overlaps: an exemplar no direction in the ladder
+    describes contributes no text term at all, exactly like an exemplar with no
+    description, rather than being assigned a direction at random and measured
+    as noise.
+
+    The tags rather than the prose, deliberately: they are the bounded
+    vocabulary both sides of the retrieval share, so the assignment is a
+    property of the corpus and not of one model's sentence.
+    """
+    want = _look_words(", ".join(tags))
+    best, score = None, (0.0, 0)
+    for direction in SHORT_DIRECTIONS:
+        words = _look_words(direction)
+        if not words:
+            continue
+        hit = len(words & want)
+        rank = (hit / len(words), hit)
+        if rank > score:
+            best, score = direction, rank
+    return best
 
 
 def proxy_texts(data, kind):
     """The string whose SigLIP text vector stands in for each query's direction.
 
-    Two kinds, never blended: `prose` is the exemplar's own local description
-    and is None where there is none, `tags` is its attribute tag string. S1's
-    single proxy was `desc or tags`, which silently measured whichever the
-    record happened to carry — so a corpus that was half described produced one
-    number for two different experiments.
+    Three kinds, never blended: `prose` is the exemplar's own local description
+    and is None where there is none, `tags` is its attribute tag string, and
+    `short` is the ladder direction that best matches those tags. S1's single
+    proxy was `desc or tags`, which silently measured whichever the record
+    happened to carry — so a corpus that was half described produced one number
+    for two different experiments.
     """
     if kind not in PROXY_KINDS:
         raise ValueError(f"unknown proxy kind {kind!r}")
@@ -229,8 +307,10 @@ def proxy_texts(data, kind):
         if kind == "prose":
             desc = r.get("desc")
             out.append(desc.strip()[:MAX_DESC_CHARS] if isinstance(desc, str) and desc.strip() else None)
-        else:
+        elif kind == "tags":
             out.append(", ".join(r["tags"]) if r["tags"] else None)
+        else:
+            out.append(short_direction_for(r["tags"]) if r["tags"] else None)
     return out
 
 
@@ -742,19 +822,19 @@ def main():
         if shippable and (best is None or shippable[0][0] < best[1][0]):
             best = (kind, shippable[0])
 
-    # THE ANSWER, across both proxies. A weight ships only if the point that
+    # THE ANSWER, across the proxies. A weight ships only if the point that
     # earned it beat the 14-dim baseline with a CI excluding 0 — otherwise the
     # text terms ship at the baseline's own value, which is 0.
     print()
     if best is None:
         print(
-            "SHIPPED WEIGHTS: W_EMB=0, W_TXT=0, W_DESC=0 — no grid point under either proxy beat "
+            "SHIPPED WEIGHTS: W_EMB=0, W_TXT=0, W_DESC=0 — no grid point under any proxy beat "
             "the 14-dim baseline with a CI excluding 0"
         )
         return
     kind, (mae, key, gain, ci) = best
     print(
-        f"SHIPPED WEIGHTS (winner across both proxies, proxy={kind}): W_EMB={key[0]:g}, "
+        f"SHIPPED WEIGHTS (winner across the proxies, proxy={kind}): W_EMB={key[0]:g}, "
         f"W_TXT={key[1]:g}, W_DESC={key[2]:g}, variant={'standardised' if key[3] else 'raw'} "
         f"(MAE {mae:.6f}, {gain:+.6f} vs baseline, CI [{ci[0]:+.6f}, {ci[1]:+.6f}])"
     )

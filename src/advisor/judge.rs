@@ -114,9 +114,32 @@ impl FitAction {
     }
 }
 
+/// Does `haystack` MENTION `word` — does it occur at the START of a word?
+///
+/// The whole of [`hint_action`]'s matching, and the reason it is a named
+/// function: a bare `contains` reads a keyword anywhere inside a longer word
+/// that means something else, and that is not a near-miss but a wrong ACTION
+/// on untrusted text. "lower" sits inside "flower", "less" inside "flawless",
+/// "over" inside "recover", "sky" inside "whisky", "zone" inside "ozone" — one
+/// class, five instances, and the earlier fix could only delete the two worst
+/// offenders from the vocabulary.
+///
+/// A word START and not a whole word, because several entries are deliberate
+/// stems: "saturat" has to read "saturated" and "saturation", "desatur" has to
+/// read "desaturate". The left edge is where the class lives; the right edge
+/// carries no defect and is left open. A boundary is the start of the string
+/// or any non-alphanumeric character, so a hyphen counts and "over-saturated"
+/// is two words here exactly as it is in English.
+fn mentions(haystack: &str, word: &str) -> bool {
+    haystack
+        .match_indices(word)
+        .any(|(at, _)| haystack[..at].chars().next_back().is_none_or(|c| !c.is_alphanumeric()))
+}
+
 /// Read a judge hint as a CHOICE among [`FitAction`]s.
 ///
-/// Keyword matching, deliberately. The alternative is asking the model for a
+/// Keyword matching through [`mentions`], deliberately. The alternative is
+/// asking the model for a
 /// structured field, which means extending [`judgement_schema`] — and that
 /// schema is under a hard constraint (an unsupported keyword 400s the whole
 /// call; see its doc) plus a rule that its numbers cannot carry bounds.
@@ -127,39 +150,57 @@ impl FitAction {
 ///
 /// `zoned_used` and `can_zone` are the CALLER's own facts and they win: the
 /// zoned action is offered only when it is available and not already spent.
+/// Every spelling that NAMES saturation, prefixes included.
+///
+/// [`mentions`] reads a WORD START, so "desaturate" is not reachable through
+/// "saturat" the way it was under the plain `contains` this list ran on: the
+/// prefixed spellings have to be listed, or the branch that would have chosen
+/// their direction is never entered at all. [`SAT_DOWN`] is a subset of this
+/// list for exactly that reason, pinned by
+/// `every_saturation_direction_word_is_also_a_domain_word`.
+const SAT_DOMAIN: [&str; 11] = [
+    "saturat", "desatur", "oversatur", "over-satur", "undersatur", "chroma", "vivid",
+    "colourful", "colorful", "punch", "muted",
+];
+
+/// The spellings that carry a DIRECTION as well as the domain.
+const SAT_DOWN: [&str; 10] = [
+    "too ", "reduce", "desatur", "oversatur", "over-satur", "muted", "lower",
+    "pull back", "dial back", "tone down",
+];
+
 pub fn hint_action(hint: &str, zoned_used: bool, can_zone: bool) -> FitAction {
     let h = hint.to_lowercase();
-    let any = |ws: &[&str]| ws.iter().any(|w| h.contains(w));
+    let any = |ws: &[&str]| ws.iter().any(|w| mentions(&h, w));
     if !zoned_used
         && can_zone
         && any(&["sky", "region", "local", "area", "zone", "foreground", "background", "horizon"])
     {
         return FitAction::Zoned;
     }
-    if any(&["saturat", "chroma", "vivid", "colourful", "colorful", "punch", "muted"]) {
+    if any(&SAT_DOMAIN) {
         // Direction words are read against the CANDIDATE, which is what the
         // judge is describing: "too saturated" / "pull back" ⇒ down. The
         // default is up, because the reported failure mode of this whole
         // subsystem is under-reaching, not over-reaching.
         //
-        // Every entry has to survive being a SUBSTRING, since that is what
-        // `contains` tests. Two did not and were removed (R23 round review
-        // NIT-1): "less" fires inside "flawless" / "seamless", "over" inside
-        // "recover" / "recovered" / "overall" — all four are ordinary words in
-        // praise or in a SHADOW instruction, and each one flipped a "push
-        // further" hint into a pull-back. "too " keeps its trailing space
-        // against the same failure.
+        // The entries are WORD STARTS, which is what [`mentions`] tests. Under
+        // the plain `contains` this list ran on, "less" fired inside
+        // "flawless" and "over" inside "recover" / "overall" — ordinary words
+        // in praise or in a SHADOW instruction, each flipping a "push further"
+        // hint into a pull-back — and the two were deleted (R23 round review
+        // NIT-1) because nothing else could be done about them then. "lower"
+        // survived the same review with its own residual disclosed: it sits
+        // inside "flower", so a hint naming flowers and asking for more chroma
+        // read as a pull-back. `mentions` is the root fix for all three, and
+        // "lower" now means the word.
         //
-        // KNOWN residual, disclosed rather than silently carried: "lower" also
-        // sits inside "flower". A hint that names flowers and asks for more
-        // chroma reads as a pull-back. It stays because the direct reading
-        // ("lower the saturation") is the commoner one and the cost of a wrong
-        // sign is bounded — the retry is discarded unless it re-scores at least
-        // as high — but it is the same class of defect as the two above.
-        let down = any(&[
-            "too ", "reduce", "desatur", "muted", "lower", "pull back",
-            "dial back", "tone down",
-        ]);
+        // "oversatur" carries a direction the bare word list cannot see, in
+        // both spellings the model writes: with "over" gone from the list, an
+        // "over-saturated" hint chose MORE saturation. Nothing brings "over"
+        // back — "over the top" is a pull-back and "over the horizon" is not,
+        // and a word-start match cannot tell them apart.
+        let down = any(&SAT_DOWN);
         return FitAction::Saturation(if down {
             -FIT_ACTION_SAT_STEP
         } else {
@@ -581,10 +622,11 @@ mod tests {
             hint_action("push the saturation further", false, false),
             FitAction::Saturation(FIT_ACTION_SAT_STEP)
         );
-        // …and the direction words are matched as SUBSTRINGS, so a word that
-        // merely CONTAINS one must not flip the sign (R23 review NIT-1). Both
-        // of these read as "push further" to a human and used to come back as
-        // a pull-back: "flawless" contains "less", "recover" contains "over".
+        // …and every keyword is matched at a WORD START ([`mentions`]), so a
+        // word that merely CONTAINS one must not flip the sign (R23 review
+        // NIT-1). Both of these read as "push further" to a human and used to
+        // come back as a pull-back: "flawless" contains "less", "recover"
+        // contains "over".
         assert_eq!(
             hint_action("nearly flawless, push a touch more saturation", false, false),
             FitAction::Saturation(FIT_ACTION_SAT_STEP),
@@ -609,6 +651,89 @@ mod tests {
             FitAction::Saturation(d) => assert_eq!(d.abs(), FIT_ACTION_SAT_STEP),
             other => panic!("expected a bounded saturation step, got {other:?}"),
         }
+    }
+
+    /// The word-start rule, over every keyword the earlier fix could only
+    /// delete around (v1.2.4).
+    ///
+    /// MUTATION: put `h.contains(w)` back in place of `mentions(&h, w)` and
+    /// the four "must not be read as" cases below fail by name — the flower
+    /// hint flips to a pull-back, the whisky and ozone hints buy a zoned pass
+    /// nobody asked for.
+    /// A11 — the DOMAIN gate must know every spelling the direction list does.
+    ///
+    /// `mentions` reads a word start, so a prefixed spelling reaches neither
+    /// list through its stem. "desaturate" was in the direction list and not
+    /// in the domain one, and the branch that would have read its direction
+    /// was therefore never entered: the hint returned `None` where the plain
+    /// `contains` had returned a pull-back.
+    ///
+    /// MUTATION THIS KILLS: dropping any `*satur*` entry from `SAT_DOMAIN`.
+    #[test]
+    fn every_saturation_direction_word_is_also_a_domain_word() {
+        for word in SAT_DOWN.iter().filter(|w| w.contains("satur")) {
+            assert!(
+                SAT_DOMAIN.contains(word),
+                "{word} chooses a direction the domain gate never reaches"
+            );
+        }
+    }
+
+    #[test]
+    fn a_keyword_is_read_as_a_word_and_not_as_a_syllable() {
+        // The residual the previous fix disclosed and left standing.
+        assert_eq!(
+            hint_action("the flowers need more chroma", false, false),
+            FitAction::Saturation(FIT_ACTION_SAT_STEP),
+            "\"flower\" must not be read as \"lower\""
+        );
+        // …and it still hears the word itself, on either side of a boundary.
+        assert_eq!(
+            hint_action("lower the saturation", false, false),
+            FitAction::Saturation(-FIT_ACTION_SAT_STEP)
+        );
+        // The same class in the ZONE list, which the earlier fix never swept.
+        assert_eq!(
+            hint_action("the whisky bottle is the subject", false, true),
+            FitAction::None,
+            "\"whisky\" must not be read as \"sky\""
+        );
+        assert_eq!(
+            hint_action("the ozone haze reads flat", false, true),
+            FitAction::None,
+            "\"ozone\" must not be read as \"zone\""
+        );
+        assert_eq!(
+            hint_action("the sky is flat", false, true),
+            FitAction::Zoned,
+            "…and the word itself still selects the zoned pass"
+        );
+        // A stem still reads its whole family to the RIGHT, which carries no
+        // defect and is deliberately left open. To the LEFT it cannot, which
+        // is the whole point — so a prefixed spelling has to be listed, and
+        // `every_saturation_direction_word_is_also_a_domain_word` is what
+        // stops the two lists drifting apart again.
+        for h in ["desaturate the blues", "reduce the saturation"] {
+            assert_eq!(
+                hint_action(h, false, false),
+                FitAction::Saturation(-FIT_ACTION_SAT_STEP),
+                "{h}"
+            );
+        }
+        // The compound the word-start rule would otherwise drop out of the
+        // domain gate entirely, in both spellings the model writes — and it
+        // carries its own direction, which the bare word list could not see.
+        for h in ["the result is oversaturated", "the result is over-saturated"] {
+            assert_eq!(
+                hint_action(h, false, false),
+                FitAction::Saturation(-FIT_ACTION_SAT_STEP),
+                "{h}"
+            );
+        }
+        assert_eq!(
+            hint_action("the greens look undersaturated", false, false),
+            FitAction::Saturation(FIT_ACTION_SAT_STEP)
+        );
     }
 
     /// The wire contract, pinned over a counted loopback endpoint: BOTH

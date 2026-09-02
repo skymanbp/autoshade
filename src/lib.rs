@@ -211,6 +211,29 @@ pub fn sidecar_script_present(script: &std::path::Path) -> bool {
     !script.as_os_str().is_empty() && script.exists()
 }
 
+/// The ONE line a test prints when it did not run, and the prefix a battery
+/// transcript counts them by (A44).
+///
+/// Seven tests skip themselves — the calibration corpus is one photographer's
+/// RAWs and cannot live in a public repository, and two more need a model
+/// sidecar and its weights — and each wrote its own `eprintln!("SKIPPED …")`.
+/// Seven spellings is a summary nobody can compute: a green battery with three
+/// silent skips and a green battery with none read identically, which is
+/// exactly the difference a release wants to see. `scripts/release_battery.sh`
+/// greps this prefix, and `no_test_prints_its_own_skip_line` keeps the
+/// spelling single.
+///
+/// `test` is the test's own name and `why` the reason in the user's terms, so
+/// a transcript line stands on its own: what did not run, and what would make
+/// it run.
+#[cfg(test)]
+pub(crate) const SKIP_PREFIX: &str = "SKIPPED";
+
+#[cfg(test)]
+pub(crate) fn test_skipped(test: &str, why: &str) {
+    eprintln!("{SKIP_PREFIX} {test}: {why}");
+}
+
 /// Shared executor for the single-artifact MODEL sidecars (`embed.rs`,
 /// `correspond.rs`): spawn under [`with_model_slot`], bound the wait, apply
 /// the exit-0-is-not-success contract, and hand back the artifact's text.
@@ -475,9 +498,9 @@ pub(crate) fn test_dir(tag: &str) -> std::path::PathBuf {
 /// test (a `.bat` on Windows, a `chmod +x` sh script elsewhere). Extracted
 /// when `correspond.rs`'s tests would have been the third copy of the
 /// `#[cfg(windows)]` / permissions boilerplate (`denoise.rs`'s harness and
-/// `advisor/claude.rs`'s CLI stub carry the earlier two; the claude stub
-/// speaks a different protocol and converting it is registered follow-up,
-/// not flattened in passing). The BODIES are the test's own — this helper
+/// `advisor/claude.rs`'s CLI stub carry the earlier two; that one also writes
+/// an envelope file and two capture paths of its own, and keeps its own
+/// spelling). The BODIES are the test's own — this helper
 /// owns only the platform ceremony, so no behaviour moves.
 #[cfg(test)]
 pub(crate) fn write_stand_in(
@@ -575,6 +598,55 @@ mod tests {
         assert!(sidecar_wrote("x sidecar", &real, None).is_ok());
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A44 — a test that skips itself says so through [`test_skipped`] and
+    /// nowhere else, so a battery transcript can COUNT the skips.
+    ///
+    /// Seven call sites across four modules wrote their own `eprintln!`; a
+    /// summary over seven spellings is a summary somebody has to maintain, and
+    /// the one it replaced (a reader noticing three silent lines in 1,300) is
+    /// the one this batch was opened to remove.
+    ///
+    /// MUTATION THIS KILLS: any new `eprintln!("SKIPPED …")` anywhere under
+    /// `src/`. The walk is over the real tree rather than an `include_str!`
+    /// list, so a file added tomorrow is covered without anyone adding it
+    /// here.
+    #[test]
+    fn no_test_prints_its_own_skip_line() {
+        fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+            for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    walk(&path, out);
+                } else if path.extension().is_some_and(|e| e == "rs") {
+                    out.push(path);
+                }
+            }
+        }
+        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut files = Vec::new();
+        walk(&root, &mut files);
+        assert!(files.len() > 20, "premise: the walk found the tree ({} files)", files.len());
+        // The literal, spelled in two halves so this assertion's own source
+        // is not the thing it forbids.
+        let banned = format!("\"{}", crate::SKIP_PREFIX);
+        let mut offenders: Vec<String> = Vec::new();
+        for file in &files {
+            if file.file_name().is_some_and(|n| n == "lib.rs") {
+                continue; // the helper and this test live here
+            }
+            let src = std::fs::read_to_string(file).expect("read a source file");
+            if src.contains(&banned) {
+                offenders.push(file.display().to_string());
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "these print their own skip line instead of calling test_skipped: {offenders:?}"
+        );
+        // …and the helper really writes the prefix the battery greps for.
+        assert_eq!(crate::SKIP_PREFIX, "SKIPPED");
     }
 
     #[test]

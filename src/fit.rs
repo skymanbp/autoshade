@@ -7508,9 +7508,12 @@ pub(crate) fn calibration_corpus() -> Option<std::path::PathBuf> {
         std::path::PathBuf::from(crate::config::live_env_os("AUTOSHADE_FIT_CALIBRATION_DIR")?);
     let required = ["neutral.jpg", "target.jpg", "fitted.recipe.json", "sky-mask.png"];
     if !dir.is_dir() || required.iter().any(|name| !dir.join(name).is_file()) {
-        eprintln!(
-            "SKIPPED calibration test: incomplete corpus at {} (need neutral.jpg, target.jpg, fitted.recipe.json, sky-mask.png)",
-            dir.display()
+        crate::test_skipped(
+            "calibration test",
+            &format!(
+                "incomplete corpus at {} (need neutral.jpg, target.jpg, fitted.recipe.json, sky-mask.png)",
+                dir.display()
+            ),
         );
         return None;
     }
@@ -8160,7 +8163,7 @@ mod tests {
         // the command line.
         let (n, t) = (root.join("p36-preview.jpg"), root.join("p36-target.jpg"));
         if !n.is_file() || !t.is_file() {
-            eprintln!("SKIPPED p36 fixture test: pair not in the corpus");
+            crate::test_skipped("p36 fixture test", "pair not in the corpus");
             return;
         }
         let src = image::open(n).unwrap();
@@ -8211,7 +8214,7 @@ mod tests {
         let (source_path, target_path) =
             (root.join("p36-preview.jpg"), root.join("p36-target.jpg"));
         if !source_path.is_file() || !target_path.is_file() {
-            eprintln!("SKIPPED p36 rescore test: pair not in the corpus");
+            crate::test_skipped("p36 rescore test", "pair not in the corpus");
             return;
         }
         let source = image::open(source_path).expect("p36 preview");

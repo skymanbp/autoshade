@@ -373,6 +373,12 @@ enum Command {
         /// unreachable.
         #[arg(long)]
         embed: bool,
+        /// Also print the DISTILLATION the Style dial would apply: which
+        /// bands, wheels, curve and mask sliders the retrieved neighbours
+        /// agree on, which ones they do not, and what that moves on a neutral
+        /// proposal at this --style. Prints, never renders; spends nothing.
+        #[arg(long)]
+        distil: bool,
     },
     /// EXPERIMENTAL: full-frame generative restyle via OpenAI Images (low-res,
     /// lossy re-render — NOT a master; the XMP/render path is the real workflow).
@@ -584,13 +590,16 @@ fn main() -> Result<()> {
                 style_index_cmd(&dir, xmp_dir.as_deref(), switch, prose)
             }
         }
-        Command::StyleQuery { photo, direction, style, adherence, embed } => style_query_cmd(
-            &photo,
-            direction.as_deref(),
-            style.unwrap_or(0.3),
-            adherence.map(DirectionAdherence::new).unwrap_or_default(),
-            embed_switch(embed, false),
-        ),
+        Command::StyleQuery { photo, direction, style, adherence, embed, distil } => {
+            style_query_cmd(
+                &photo,
+                direction.as_deref(),
+                style.unwrap_or(0.3),
+                adherence.map(DirectionAdherence::new).unwrap_or_default(),
+                embed_switch(embed, false),
+                distil,
+            )
+        }
         Command::Reimagine { raw, prompt, fidelity, quality, fidelity_retry, out } => {
             let cfg = Config::load();
             let out = out.unwrap_or_else(|| default_out(&raw, "reimagine", "png"));
@@ -777,21 +786,16 @@ fn embed_switch(embed: bool, no_embed: bool) -> autoshade::style::EmbeddingSwitc
 /// penalty and not a bonus, and under the standardised variant that is exactly
 /// the candidate-set mean. `,z` marks a term the standardised variant really
 /// z-scored and `,raw-fallback` its disclosed give-up (fewer than three
-/// comparable candidates, or a degenerate spread); the shipped RAW variant
-/// prints neither, because for it the weighted gap is not a fallback.
+/// comparable candidates, or a degenerate spread). There is no third mark
+/// because there is no third variant: the raw arm behind the old
+/// `STANDARDISE_TEXT_TERMS` switch is gone (see `style::standardise`).
 fn fmt_text_terms(t: &autoshade::style::DistanceTerms) -> String {
     let one = |label: &str, term: f64, gap: Option<f64>, standardised: bool| -> String {
         let raw = gap.map(|g| format!("{g:.6}")).unwrap_or_else(|| "–".into());
-        // `z` marks a term the ranking z-scored; nothing marks the raw
-        // variant, which is what ships. `raw-fallback` is reserved for the
-        // STANDARDISED variant giving up on a candidate set it could not
-        // standardise — printing it on every line of a raw-variant run would
-        // report a degradation that did not happen.
-        let mark = match (autoshade::style::STANDARDISE_TEXT_TERMS, standardised) {
-            (true, true) => ",z",
-            (true, false) => ",raw-fallback",
-            (false, _) => "",
-        };
+        // `z` marks a term the ranking z-scored; `raw-fallback` is the
+        // ranking giving up on a candidate set it could not standardise, which
+        // is a DEGRADATION and says so.
+        let mark = if standardised { ",z" } else { ",raw-fallback" };
         format!(" {label}={term:.6}(raw={raw}{mark})")
     };
     // The hubness disclosure (clearing A8): `txt_hub_corrected`'s doc promises
@@ -880,6 +884,7 @@ fn style_query_cmd(
     style: f32,
     adherence: autoshade::recipe::DirectionAdherence,
     embed: autoshade::style::EmbeddingSwitch,
+    distil: bool,
 ) -> Result<()> {
     let decoded = decode::decode_any(photo)?;
     let idx = match autoshade::style::load_effective() {
@@ -891,9 +896,8 @@ fn style_query_cmd(
     // cannot be read against weights it did not state.
     let weights = autoshade::style::RetrievalWeights::from_env();
     println!(
-        "weights: W_EMB={:.6} W_TXT={:.6} W_DESC={:.6} W_LOOK={:.6}  text-term variant: {}",
+        "weights: W_EMB={:.6} W_TXT={:.6} W_DESC={:.6} W_LOOK={:.6}  text terms:          standardised (z-scored per query, hubness removed first)",
         weights.emb, weights.txt, weights.desc, weights.look,
-        if autoshade::style::STANDARDISE_TEXT_TERMS { "standardised (z-scored per query)" } else { "raw (the calibrated winner)" }
     );
     let (mut qi, mut qt) = (None, None);
     let mut embedding_status = "disabled (embedding switch is off)".to_string();
@@ -971,6 +975,13 @@ fn style_query_cmd(
                 fmt_desc(l.desc.as_deref())
             );
         }
+    }
+    // The distillation, on the SAME retrieved set the lines above printed —
+    // `style::distillation_preview` runs the production `style_targets` and
+    // `blend_toward`, so this is what the develop would pull toward and not a
+    // second reading of the neighbours.
+    if distil {
+        print!("{}", autoshade::style::distillation_preview(&ex, style));
     }
     println!("disclosure notes:");
     if !ex.is_empty() {
@@ -3401,7 +3412,10 @@ mod tests {
         assert!(index.contains("--looks"), "{index}");
         // …and `style-query` says what it prints and that it spends nothing.
         let query = render("style-query");
-        for phrase in ["weights in force", "No advisor call", "--direction", "--embed"] {
+        for phrase in [
+            "weights in force", "No advisor call", "--direction", "--embed",
+            "--distil", "Prints, never renders",
+        ] {
             assert!(query.contains(phrase), "style-query --help must say {phrase:?}: {query}");
         }
         // No flag on any of the three may ship with an empty help line.
@@ -3577,6 +3591,54 @@ fn ")
             body.matches("fmt_desc(").count(),
             2,
             "the neighbour line and the look line both print the prose"
+        );
+    }
+
+    /// A30 — the distillation preview is a flag on the diagnostic that already
+    /// retrieves, and it really rides the command.
+    ///
+    /// The preview's CONTENT is `style::distillation_preview`'s own test; what
+    /// this pins is the wiring, the same way the prose and mask helpers above
+    /// are pinned: a diagnostic that computed the preview and never printed it
+    /// would pass every assertion in the library.
+    ///
+    /// MUTATION THIS KILLS: dropping the `if distil` call from
+    /// `style_query_cmd`, or leaving the flag out of the `Command::StyleQuery`
+    /// match arm (the count is then 0).
+    #[test]
+    fn style_query_prints_the_distillation_when_asked() {
+        let body = include_str!("main.rs")
+            .split("fn style_query_cmd(")
+            .nth(1)
+            .expect("the diagnostic exists")
+            .split("
+fn ")
+            .next()
+            .unwrap();
+        assert_eq!(
+            body.matches("distillation_preview(").count(),
+            1,
+            "the diagnostic prints the preview it took a flag for"
+        );
+        assert!(body.contains("if distil"), "…and only when asked: {body:.0}");
+        // The flag reaches the function: clap builds the arm, so a missing
+        // parameter is a compile error, but a flag parsed and dropped is not.
+        let parsed = Cli::try_parse_from([
+            "autoshade", "style-query", "photo.arw", "--distil", "--style", "0.9",
+        ])
+        .expect("the flag parses");
+        match parsed.command {
+            Command::StyleQuery { distil, style, .. } => {
+                assert!(distil, "the flag is carried, not swallowed");
+                assert_eq!(style, Some(0.9));
+            }
+            _ => panic!("expected the style-query arm"),
+        }
+        let off = Cli::try_parse_from(["autoshade", "style-query", "photo.arw"])
+            .expect("and it is optional");
+        assert!(
+            matches!(off.command, Command::StyleQuery { distil: false, .. }),
+            "the preview is off unless asked for"
         );
     }
 

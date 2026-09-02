@@ -93,11 +93,38 @@ impl EmbedOpts {
 /// (10 explicit mantissa bits), and the quantity built from them is an order
 /// COMPARISON, not a measurement.
 ///
-/// **Registered as unverified**: the resulting cosine drift is argued, not
-/// measured — this batch ran no GPU sidecar. The escape hatch is therefore
-/// real rather than decorative: `AUTOSHADE_EMBED_FP32` forces the old load, so
-/// an index built before this change can be queried in exactly the arithmetic
-/// it was built with.
+/// **MEASURED.** The 169-exemplar library was indexed twice by the same binary
+/// on the same GPU, the two arms differing only in `AUTOSHADE_EMBED_FP32`.
+/// Image vectors: `1 - cos(fp16, fp32)` is at most 2.235e-5 and 2.951e-6 on
+/// average, the largest single element differs by 1.025e-3, not one of the 169
+/// vectors is bit-identical, and both arms land within 1.2e-7 of unit norm. On
+/// the ranking with no direction in it — the 14-dim block plus
+/// `style::embed_distance` at the shipped weight — the top-5 is
+/// IDENTICAL for 168 of 169 leave-one-out queries, and the exception swaps
+/// ranks 1 and 2 of the same five photographs. No retrieved SET moves at all,
+/// so the distilled targets, which are a mean over the retrieved set and not
+/// over its order, cannot move either.
+///
+/// **Where it is not free**, which is why `AUTOSHADE_EMBED_FP32` is a real
+/// escape hatch rather than a decorative one. The same tower scores
+/// `style::LOOK_VOCAB`, and a tag is an ARGMAX over those scores: they differ
+/// by at most 5.4e-4 between the arms, and that is enough to flip a group's
+/// winner wherever two captions sit that close. 6 of the 169 exemplars come
+/// out with different tags. When the description sidecar is OFF,
+/// `style::desc_text` falls back to the tag string and `desc_embed` is that
+/// string's vector, so those six — and, measured, only those six — carry a
+/// cosine of 0.924 to 0.997 against their fp32 selves where every other
+/// exemplar carries 0.999998. The description term then reorders around them:
+/// over the three showcase directions the top-5 SET differs for 6, 5 and 31 of
+/// 169 queries and the top-1 for 1, 2 and 9. With descriptions present
+/// `desc_text` prefers the prose, which no tag argmax feeds, and the flips
+/// leave the ranking alone.
+///
+/// So the default stays fp16: half the resident weights, an image-side drift
+/// that moved no retrieved set in 169 queries, and one discrete
+/// boundary — the tag argmax — named here rather than discovered later. An
+/// index built in the other precision is still queried in the arithmetic it
+/// was built with by setting the variable.
 fn fp16_wanted() -> bool {
     !crate::config::live_env("AUTOSHADE_EMBED_FP32")
         .map(|v| !matches!(v.trim(), "" | "0" | "false" | "off"))

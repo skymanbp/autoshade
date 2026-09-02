@@ -547,6 +547,86 @@ def battery_test_counts(args: argparse.Namespace) -> Truth | Skip:
     return Truth(value, f"{path.name} (=== test default === / === test gui ===, by suite name)")
 
 
+def _battery_block_text(path: Path, name: str) -> str | None:
+    """One `=== name ===` block verbatim, or None when the transcript has none.
+
+    `_battery_blocks` keeps only the result tuples, which is all the count
+    claim needs. The calibration lane is claimed on things that are not
+    counts — the skip lines a test prints, the summary the script writes — so
+    this hands back the block's own text.
+    """
+    raw = path.read_text(encoding="utf-8").replace("\r\n", "\n").replace("\r", "\n")
+    out: list[str] = []
+    inside = False
+    for line in raw.split("\n"):
+        m = _BLOCK.match(line)
+        if m:
+            inside = m.group("name") == name
+            continue
+        if inside:
+            out.append(line)
+    return "\n".join(out) if out else None
+
+
+_LANE = re.compile(r"^lane (?P<name>[a-z][a-z0-9_]*)", re.M)
+
+
+def check_release_battery_lanes(args: argparse.Namespace) -> tuple[str, list[str]]:
+    """Every lane `scripts/release_battery.sh` runs, named in ARCHITECTURE.
+
+    The script is the source of record: each `lane <name>` invocation in it is
+    a lane, and the battery paragraph must name each one in bold, so a lane
+    added later cannot stay undocumented while the prose still describes
+    three. With a --gates transcript the same names must each own a
+    `=== test <name> ===` block, and the calibration lane's library suite must
+    report the same test count as the default lane's — the corpus variable
+    decides whether a test SKIPS, never whether it exists, so a disagreement
+    means the two lanes did not run the same suite.
+
+    A transcript written by hand rather than by the script has no calibration
+    block; that is a SKIP with the reason, not a failure, because the claim is
+    about the script's lanes and not about how the transcript was produced.
+    """
+    script = "scripts/release_battery.sh"
+    lanes = _LANE.findall(text(script))
+    if not lanes:
+        raise LookupError(f"{script}: no `lane <name>` invocation — the lane set moved")
+    doc = text(ARCH)
+    missing = [n for n in lanes if f"**{n}**" not in doc]
+    if missing:
+        return "FAIL", [
+            f"        {script} runs {', '.join(lanes)}",
+            f"        {ARCH} names none of: {', '.join(missing)}",
+        ]
+    detail = [f"        lanes {', '.join(lanes)}   ({script} -> {ARCH})"]
+    if not args.gates:
+        return "PASS", detail
+    path = Path(args.gates)
+    blocks = _battery_blocks(path)
+    absent = [n for n in lanes if f"test {n}" not in blocks]
+    if absent:
+        return "SKIP", detail + [
+            f"        {path.name} has no '=== test {absent[0]} ===' block — it was "
+            "not written by release_battery.sh, so its lanes cannot be checked"
+        ]
+    calib = {t: p + i for t, _, p, _, i in blocks["test calib"] if not t.startswith("doc-tests:")}
+    default = {t: p + i for t, _, p, _, i in blocks["test default"] if not t.startswith("doc-tests:")}
+    lib = "src/lib.rs"
+    if lib in calib and lib in default and calib[lib] != default[lib]:
+        return "FAIL", detail + [
+            f"        {path.name}: {lib} is {default[lib]} in the default lane and "
+            f"{calib[lib]} in the calibration lane — the corpus variable must not "
+            "change which tests exist"
+        ]
+    body = _battery_block_text(path, "test calib") or ""
+    skips = sum(1 for line in body.split("\n") if line.startswith("SKIPPED "))
+    detail.append(
+        f"        {path.name}: calibration lane ran {calib.get(lib, 0)} library tests, "
+        f"{skips} of them skipped for want of a corpus or a sidecar"
+    )
+    return "PASS", detail
+
+
 # ── Toolchain ───────────────────────────────────────────────────────────────
 
 _TOOLCHAIN_PINS = ("rust-toolchain.toml", "rust-toolchain")
@@ -725,6 +805,7 @@ CLAIMS: list[Claim | SetClaim] = [
         r"library result is (?P<passed>\d+) pass \+ (?P<ignored>\d+) `#\[ignore\]`d",
         readme_battery_numbers,
     ),
+    SetClaim(ARCH, "release-battery lanes", check_release_battery_lanes),
     Claim(
         ARCH,
         "RAW ext count — §4 milestone table",

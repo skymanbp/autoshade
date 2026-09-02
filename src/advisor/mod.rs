@@ -2290,6 +2290,7 @@ mod tests {
             embed: None,
             tags: Vec::new(), vocab_scores: None, desc: None, desc_embed: None,
             masks: None,
+            mono: false,
         };
         assert_ne!(
             idx.render_reference(&[&ex], calib),
