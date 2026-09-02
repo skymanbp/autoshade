@@ -149,15 +149,19 @@ const ZONE_CLIP_GROWTH: f32 = 0.01;
 /// driven on the two real pairs where a band attaches with segmentation
 /// unavailable: the delivered transitions are monotone ramps (0 reversals
 /// over 30 and 19 populated 1-code bins of the delivered transfer, minimum
-/// slope +0.019 and +0.855), the mask-free ruler reads p90 0.0018 luma
-/// against a control of exactly 0.0000, and the correction moved that
-/// gate's own p90 DOWN (0.00392 -> 0.00230) or not at all (0.00874 ->
-/// 0.00874) — that ruler reports the RENDERED gradient on already-smooth
-/// crossings, so the scene's own gradient is inside the reading rather
-/// than differenced away, and the budget is spent on the scene first.
-/// THIS ruler's half of the claim is still UNMEASURED: a feathered zone
-/// needs a segmentation sidecar the measuring batch was not allowed to
-/// start, so nothing there should be read as covering it.
+/// slope +0.019 and +0.855, against that estimator's own +/-0.05 noise
+/// floor), the mask-free ruler reads p90 0.0018 luma against a control of
+/// exactly 0.0000, and on the basis the engine actually gates against —
+/// the globals-only twin — the correction moved that gate's own p90 DOWN
+/// on both pairs (0.00392 -> 0.00230 and 0.00874 -> 0.00857). That ruler
+/// reports the RENDERED gradient on already-smooth crossings, so the
+/// scene's own gradient is inside the reading rather than differenced
+/// away, and the budget is spent on the scene first. It is a p90 like this
+/// one, so the maxima neither ruler ranks moved the other way (0.01217 and
+/// 0.01407 on those pairs) while the ranked reading fell. THIS ruler's
+/// half of the claim is still UNMEASURED: a feathered zone needs a
+/// segmentation sidecar the measuring batch was not allowed to start, so
+/// nothing there should be read as covering it.
 pub(super) const ZONE_BOUNDARY_RIM_MAX: f32 = 0.012;
 /// Maximum induced cross-boundary step for a HARD 0/255 raster — spatial
 /// tiles and free masks, read by [`boundary_step`] rather than
