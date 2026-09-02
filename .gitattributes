@@ -24,3 +24,12 @@
 # git considers identical, and read as tampering. Autodetected `text` is not
 # enough: with no attribute at all `core.autocrlf=true` converts on checkout.
 python/*.json text eol=lf
+
+# The Rust fixtures, for the first reason again: `src/fixtures/*.json` are
+# pulled in with `include_str!` and compared BYTE FOR BYTE against what the
+# serializer produces (`recipe::tests::the_default_recipe_serializes_byte_for_byte_as_its_fixture`).
+# `serde_json` writes LF, so a checkout that rewrote the fixture to CRLF would
+# fail that test on a tree git considers identical --- on any Windows clone with
+# the default `core.autocrlf=true`, which is this machine's setting and every
+# Windows contributor's.
+src/fixtures/*.json text eol=lf

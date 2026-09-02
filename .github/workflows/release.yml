@@ -28,8 +28,19 @@ jobs:
   windows:
     runs-on: windows-2022
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
+      # A45: the repo pins its compiler (`rust-toolchain.toml`), and `rustup`
+      # honours that file for every `cargo` call below without a toolchain
+      # input. Asserted rather than assumed — an unpinned runner building the
+      # published binaries is exactly the drift the pin exists to end.
+      - name: Toolchain
+        shell: bash
+        run: |
+          want=$(sed -n 's/^channel *= *"\(.*\)"/\1/p' rust-toolchain.toml)
+          got=$(rustc --version | cut -d' ' -f2)
+          echo "rust-toolchain.toml pins $want; rustc reports $got"
+          test "$want" = "$got" || { echo "::error::the pin was not honoured"; exit 1; }
       - name: Resolve the version
         id: ver
         shell: bash
@@ -69,7 +80,7 @@ jobs:
       - name: Build the portable archive
         shell: pwsh
         run: ./scripts/build_portable.ps1 -Version '${{ steps.ver.outputs.version }}'
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: windows
           path: |
@@ -82,11 +93,25 @@ jobs:
   macos:
     runs-on: macos-15
     env:
-      # Must stay equal to the .app's LSMinimumSystemVersion when M3 lands.
+      # M3 landed in v1.2.0 (the .app is built and inspected below), so this
+      # is no longer a promise about a future step: it must stay equal to the
+      # bundle's LSMinimumSystemVersion, and "The bundle says what it is"
+      # fails the job when it does not.
       MACOSX_DEPLOYMENT_TARGET: '12.0'
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
+      # A45: the repo pins its compiler (`rust-toolchain.toml`), and `rustup`
+      # honours that file for every `cargo` call below without a toolchain
+      # input. Asserted rather than assumed — an unpinned runner building the
+      # published binaries is exactly the drift the pin exists to end.
+      - name: Toolchain
+        shell: bash
+        run: |
+          want=$(sed -n 's/^channel *= *"\(.*\)"/\1/p' rust-toolchain.toml)
+          got=$(rustc --version | cut -d' ' -f2)
+          echo "rust-toolchain.toml pins $want; rustc reports $got"
+          test "$want" = "$got" || { echo "::error::the pin was not honoured"; exit 1; }
       - name: Resolve the version
         id: ver
         run: |
@@ -124,7 +149,7 @@ jobs:
       # imports numpy. The runner's system interpreter is externally managed,
       # so the honest way to give it that one package is to bring an
       # interpreter of our own rather than override someone else's manager.
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: '3.12'
       - name: Sidecar self-test
@@ -210,10 +235,76 @@ jobs:
           ditto -c -k --keepParent \
             "cli-stage/AutoShade-${{ steps.ver.outputs.version }}-macos-cli" \
             "AutoShade-${{ steps.ver.outputs.version }}-macos-cli.zip"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: macos
           path: AutoShade-*-macos-*.zip
+          if-no-files-found: error
+
+  # A42: the third published CLI. `build.yml` has compiled and tested this
+  # target since R28 Batch-1, so the binary was known to work on Linux and was
+  # simply never shipped — a Linux user had to build from source to run the
+  # command line. Same shape as the macOS CLI zip above, same payload rules
+  # taken from `build_app_bundle.sh` rather than re-decided here: the binary,
+  # the sidecars without their weights, the assets, LICENSE and README.
+  #
+  # `ubuntu-22.04`, not `ubuntu-latest`, for this file's own rule about
+  # reproducibility — and because the oldest supported image is the one whose
+  # glibc the widest set of distributions can run.
+  linux:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      # A45: the repo pins its compiler (`rust-toolchain.toml`), and `rustup`
+      # honours that file for every `cargo` call below without a toolchain
+      # input. Asserted rather than assumed — an unpinned runner building the
+      # published binaries is exactly the drift the pin exists to end.
+      - name: Toolchain
+        shell: bash
+        run: |
+          want=$(sed -n 's/^channel *= *"\(.*\)"/\1/p' rust-toolchain.toml)
+          got=$(rustc --version | cut -d' ' -f2)
+          echo "rust-toolchain.toml pins $want; rustc reports $got"
+          test "$want" = "$got" || { echo "::error::the pin was not honoured"; exit 1; }
+      - name: Resolve the version
+        id: ver
+        run: |
+          v="${{ github.event.inputs.version }}"
+          if [ -z "$v" ]; then v="${GITHUB_REF_NAME#v}"; fi
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+      - name: cargo build (default features)
+        run: cargo build --release --locked
+      - name: Stage the standalone CLI
+        run: |
+          stage="cli-stage/AutoShade-${{ steps.ver.outputs.version }}-linux-x64"
+          rm -rf cli-stage && mkdir -p "$stage/python"
+          cp target/release/autoshade "$stage/"
+          rsync -a \
+            --exclude 'weights/' --exclude '__pycache__/' \
+            --exclude 'test_*.py' --exclude '*.pyc' \
+            python/ "$stage/python/"
+          cp -R assets "$stage/assets"
+          cp LICENSE README.md "$stage/"
+          # The same three claims the macOS CLI stage makes: the binary runs,
+          # its sidecars came along, and no weights rode in with them.
+          "$stage/autoshade" --version
+          test -f "$stage/python/segment.py"
+          test ! -e "$stage/python/weights"
+          echo "sidecars: $(find "$stage/python" -type f | wc -l) files"
+      - name: Archive the standalone CLI
+        # `zip -y` keeps symlinks as symlinks and preserves the executable bit,
+        # which is the whole of what this payload needs (there is no code
+        # signature to lose, so ditto's job on macOS has no counterpart here).
+        run: |
+          cd cli-stage
+          zip -q -r -y \
+            "../AutoShade-${{ steps.ver.outputs.version }}-linux-x64.zip" \
+            "AutoShade-${{ steps.ver.outputs.version }}-linux-x64"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: linux
+          path: AutoShade-*-linux-x64.zip
           if-no-files-found: error
 
   # The battery runs BESIDE the build on its own runner, not after it inside
@@ -224,20 +315,39 @@ jobs:
   macos-battery:
     runs-on: macos-15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Batteries
         run: |
           cargo test --locked --release
           cargo test --locked --release --features gui --bin autoshade-gui
+      # A49: the Metal path, MEASURED. M2 routed all five sidecars through one
+      # `cuda -> mps -> cpu` ladder and v1.2.0 shipped saying the Metal arm was
+      # unmeasured — no timing, no memory figure, and no answer to whether
+      # `torchvision.ops.deform_conv2d` (which BiRefNet needs, and which Metal
+      # has historically not implemented) was quietly running on the CPU under
+      # the `PYTORCH_ENABLE_MPS_FALLBACK` the app itself sets. This is the only
+      # runner in the chain that HAS Metal, so it is the only place the three
+      # questions can be answered. The numbers go into the job summary.
+      #
+      # The runner's system interpreter is externally managed, so an
+      # interpreter of our own is brought rather than someone else's manager
+      # overridden — the same reasoning as the sidecar self-test above.
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - name: Metal (MPS) measurement
+        run: |
+          python3 -m pip install --quiet --disable-pip-version-check torch torchvision
+          python3 scripts/mps_probe.py
 
   publish:
-    needs: [windows, macos, macos-battery]
+    needs: [windows, macos, linux, macos-battery]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
         with:
           # NOT `assets`: the checkout above brings the repo's own assets/
           # (fonts, ICC, icons) and the first live run flattened those onto

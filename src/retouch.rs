@@ -783,6 +783,16 @@ pub fn heal(
 /// Shared by `heal` and `clone_stamp`, which differ only in how they build
 /// the spot list.
 fn heal_and_save(base: DynamicImage, spots: &[HealSpot], out: &Path) -> Result<()> {
+    // A17: the LOCAL full-resolution phase, one at a time process-wide
+    // (`crate::full_res_slot`). Scoped HERE rather than at `heal`'s entry, and
+    // that is the honest boundary: `base` is live from the decode above and
+    // across `detect_spots`' network call by construction, so taking the slot
+    // at the decode would queue every export behind a model call — exactly the
+    // stall this scoping exists to prevent. What IS bounded is the phase that
+    // allocates ON TOP of `base`: the depth conversion, the healed frame, the
+    // re-attached alpha and the encode. `clone_stamp` reaches the same phase
+    // through the same door, so neither caller can forget it.
+    let _heavy = crate::full_res_slot();
     let alpha = split_alpha(&base);
     let healed = if deep_color(&base) {
         let mut rgb = base.into_rgb16();

@@ -146,9 +146,12 @@ impl ClaudeProvider {
         // (any project checkout) and the workspace was never trusted
         // interactively, the CLI errors out — "Ignoring N permissions.allow
         // entries … this workspace has not been trusted" + exit 1 — and the
-        // whole analysis fails. Verified live 2026-07-14: identical invocation
-        // from `D:/Projects/Autoshop` prints the trust error, from a fresh temp
-        // dir it does not. The verifier is a pure stdin/stdout call that never
+        // whole analysis fails. Verified live 2026-07-14: the identical
+        // invocation run from an untrusted checkout of this repository prints
+        // the trust error, and run from a fresh temp dir it does not. (The
+        // checkout is deliberately not named here: it is one machine's layout,
+        // and a comment that pins a developer's directory is wrong on every
+        // other one.) The verifier is a pure stdin/stdout call that never
         // touches files, so the temp dir (always present) is a safe workspace.
         cmd.current_dir(std::env::temp_dir());
         // Don't flash a console window when the windowed GUI spawns this CLI child.
@@ -339,36 +342,26 @@ mod tests {
     fn stand_in(dir: &std::path::Path, envelope: &str) -> String {
         let env_file = dir.join("envelope.json");
         std::fs::write(&env_file, envelope).unwrap();
-        #[cfg(windows)]
-        {
-            let p = dir.join("claude.bat");
-            let body = format!(
+        crate::write_stand_in(
+            dir,
+            "claude",
+            &format!(
                 "@echo off\r\necho %* > \"{argv}\"\r\nfindstr \"^\" > \"{prompt}\"\r\ntype \"{env}\"\r\n",
                 argv = dir.join("argv.txt").display(),
                 prompt = dir.join("prompt.txt").display(),
                 env = env_file.display(),
-            );
-            std::fs::write(&p, body).unwrap();
-            p.to_string_lossy().into_owned()
-        }
-        #[cfg(not(windows))]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let p = dir.join("claude.sh");
+            ),
             // `%s`, not `%%s`: Rust's format! leaves `%` alone, so the doubled
             // form reached sh as a literal `%%s` and printf wrote "%s %s %s"
             // — the argv VALUES were never recorded, and every assertion
             // reading this file was vacuous on non-Windows.
-            let body = format!(
-                "#!/bin/sh\nprintf '%s ' \"$@\" > \"{argv}\"\ncat > \"{prompt}\"\ncat \"{env}\"\n",
+            &format!(
+                "printf '%s ' \"$@\" > \"{argv}\"\ncat > \"{prompt}\"\ncat \"{env}\"\n",
                 argv = dir.join("argv.txt").display(),
                 prompt = dir.join("prompt.txt").display(),
                 env = env_file.display(),
-            );
-            std::fs::write(&p, body).unwrap();
-            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
-            p.to_string_lossy().into_owned()
-        }
+            ),
+        )
     }
 
     /// A stand-in "claude" that REFUSES `--effort` the way clap does — exit 2
@@ -379,10 +372,10 @@ mod tests {
         let env_file = dir.join("envelope.json");
         std::fs::write(&env_file, envelope).unwrap();
         let argv = dir.join("argv.txt");
-        #[cfg(windows)]
-        {
-            let p = dir.join("claude.bat");
-            let body = format!(
+        crate::write_stand_in(
+            dir,
+            "claude",
+            &format!(
                 "@echo off\r\n\
                  echo %* >> \"{argv}\"\r\n\
                  findstr \"^\" > nul\r\n\
@@ -395,17 +388,9 @@ mod tests {
                  exit /b 2\r\n",
                 argv = argv.display(),
                 env = env_file.display(),
-            );
-            std::fs::write(&p, body).unwrap();
-            p.to_string_lossy().into_owned()
-        }
-        #[cfg(not(windows))]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let p = dir.join("claude.sh");
-            let body = format!(
-                "#!/bin/sh\n\
-                 printf '%s ' \"$@\" >> \"{argv}\"\n\
+            ),
+            &format!(
+                "printf '%s ' \"$@\" >> \"{argv}\"\n\
                  printf '\\n' >> \"{argv}\"\n\
                  cat > /dev/null\n\
                  case \" $* \" in\n\
@@ -415,11 +400,8 @@ mod tests {
                  cat \"{env}\"\n",
                 argv = argv.display(),
                 env = env_file.display(),
-            );
-            std::fs::write(&p, body).unwrap();
-            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
-            p.to_string_lossy().into_owned()
-        }
+            ),
+        )
     }
 
     fn fixture_meta() -> Meta {
@@ -552,28 +534,12 @@ mod tests {
         let big = dir.join("big.txt");
         let line = format!("{}\n", "x".repeat(4095));
         std::fs::write(&big, line.repeat(300)).unwrap();
-        #[cfg(windows)]
-        let bin = {
-            let p = dir.join("claude.bat");
-            std::fs::write(
-                &p,
-                format!("@echo off\r\nfindstr \"^\" > nul\r\ntype \"{}\"\r\n", big.display()),
-            )
-            .unwrap();
-            p.to_string_lossy().into_owned()
-        };
-        #[cfg(not(windows))]
-        let bin = {
-            use std::os::unix::fs::PermissionsExt;
-            let p = dir.join("claude.sh");
-            std::fs::write(
-                &p,
-                format!("#!/bin/sh\ncat > /dev/null\ncat \"{}\"\n", big.display()),
-            )
-            .unwrap();
-            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
-            p.to_string_lossy().into_owned()
-        };
+        let bin = crate::write_stand_in(
+            &dir,
+            "claude",
+            &format!("@echo off\r\nfindstr \"^\" > nul\r\ntype \"{}\"\r\n", big.display()),
+            &format!("cat > /dev/null\ncat \"{}\"\n", big.display()),
+        );
         let provider = ClaudeProvider { bin, model: "test-model".into(), effort: None };
         let err = provider
             .verify(&EditRecipe::default(), &fixture_meta(), &fixture_hist(), &Default::default())

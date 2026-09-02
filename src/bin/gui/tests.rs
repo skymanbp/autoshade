@@ -4412,6 +4412,87 @@
         assert_eq!(line, "修订 — 太亮");
     }
 
+    /// A5: an argument value that is a WORD renders in the session language.
+    ///
+    /// `FIT_NOTE_VETO_DISCLOSED` interpolates `{kind}`, whose value the engine
+    /// picks from a fixed set of two English phrases. Copied verbatim, that was
+    /// the one untranslated fragment inside an otherwise Chinese sentence.
+    ///
+    /// MUTATION: substitute `value` instead of `tr_value(lang, value)` in `trf`
+    /// and the zh assertion below finds "luma ranges" in the rendered line.
+    #[test]
+    fn an_enumerated_argument_value_renders_in_the_session_language() {
+        use autoshade::rationale::values;
+        // Spelled in full at every `trf` site on purpose: `audit_i18n.py`'s
+        // dynamic-key registry recognises `rationale::keys::…`, and a site it
+        // cannot recognise is one it cannot prove has a zh row.
+        let render = |lang, kind: &str| {
+            trf(
+                lang,
+                autoshade::rationale::keys::FIT_NOTE_VETO_DISCLOSED,
+                &[("kind", kind), ("ranges", "[0.1-0.2]")],
+            )
+        };
+        let zh = render(Lang::Zh, values::LUMA_RANGES);
+        assert!(zh.contains("明度范围"), "the value stayed English: {zh}");
+        assert!(!zh.contains("luma ranges"), "the value stayed English: {zh}");
+        let zh_hue = render(Lang::Zh, values::HUE_BANDS);
+        assert!(zh_hue.contains("色相带"), "{zh_hue}");
+        assert!(!zh_hue.contains("hue bands"), "{zh_hue}");
+        // English is unchanged, value included — the persisted rationale and
+        // the en UI must still read exactly what the engine wrote.
+        let en = render(Lang::En, values::LUMA_RANGES);
+        assert!(en.contains("luma ranges"), "{en}");
+        // A value that is NOT in the registry is never rewritten by a
+        // catalogue lookup: measurements, paths and model prose ride through
+        // verbatim, and the match is on the WHOLE value, so an enumerated
+        // phrase merely CONTAINED in a sentence is left alone too.
+        let free = trf(
+            Lang::Zh,
+            autoshade::rationale::keys::FIT_NOTE_VETO_DISCLOSED,
+            &[("kind", values::HUE_BANDS), ("ranges", "[0.10-0.20] and luma ranges nearby")],
+        );
+        assert!(
+            free.contains("[0.10-0.20] and luma ranges nearby"),
+            "a free-text arg was rewritten: {free}"
+        );
+    }
+
+    /// A10: the provider's own disclosures are keys, in both languages.
+    ///
+    /// Both used to be English prose pushed straight into `recipe.rationale`,
+    /// where the suffix-strip contract reads them as the MODEL's words — so the
+    /// zh panel showed an English sentence with nothing to translate.
+    #[test]
+    fn the_providers_own_disclosures_render_in_both_languages() {
+        // Unrolled rather than looped, and the constants spelled in full: a
+        // render call whose key argument is a loop variable is exactly the
+        // shape `audit_i18n.py`'s dynamic-key registry exists to refuse — and
+        // the audit reads raw source, so writing that shape inside a COMMENT
+        // trips it too.
+        let both = |zh: String, en: String, cn: &str, arg: &str| {
+            assert_ne!(zh, en, "no zh rendering: {en}");
+            assert!(zh.contains(cn), "rendered as {zh}");
+            // The argument still lands, in both.
+            assert!(zh.contains(arg), "{zh}");
+            assert!(en.contains(arg), "{en}");
+        };
+        let axes = [("axes", "hue had 7")];
+        both(
+            trf(Lang::Zh, autoshade::rationale::keys::HSL_AXIS_LENGTH_REPAIRED, &axes),
+            trf(Lang::En, autoshade::rationale::keys::HSL_AXIS_LENGTH_REPAIRED, &axes),
+            "色彩混合器",
+            "hue had 7",
+        );
+        let dropped = [("dropped", "exposure_ev")];
+        both(
+            trf(Lang::Zh, autoshade::rationale::keys::PROPOSAL_LIMITS_DISCARDED, &dropped),
+            trf(Lang::En, autoshade::rationale::keys::PROPOSAL_LIMITS_DISCARDED, &dropped),
+            "配方上限",
+            "exposure_ev",
+        );
+    }
+
     /// L12#2B: typed rationale notes describe ONE develop's rationale tail.
     /// Every wholesale recipe swap (undo / version load / variant switch /
     /// AI apply) goes through resync_recipe_display — if that did not clear
@@ -4805,7 +4886,7 @@
             python_bin: "python".into(),
             denoise_model: "scunet_color_real_psnr".into(),
             denoise_script: String::new(),
-            denoise_cache: String::new(),
+            weights_dir: String::new(),
             segment_script: String::new(),
             embed_script: String::new(),
             correspond_script: String::new(),

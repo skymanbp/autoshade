@@ -549,7 +549,7 @@ pub fn produce_recipe(
     // AI chain): it has ONE consumer, the deliverable stamp, so reading it late
     // keeps it as fresh as it has always been instead of widening its staleness
     // window across minutes of network calls for no gain.
-    let (anchor_k, anchor_tint) = match saved_recipe_snapshot(raw) {
+    let (anchor_k, anchor_tint) = match saved_recipe_snapshot(raw, &crate::diag::Diag::about(sink, raw)) {
         // Saved-first, like the base-look stamp below (a legacy save keeps
         // None -> the 5500 K anchor -> byte-identical rendering of its
         // tuned Kelvin).
@@ -601,6 +601,10 @@ pub fn produce_recipe(
             Ok(p) => {
                 thinking = p.thinking;
                 lens_opinion = p.lens;
+                // The provider's own disclosures are the HEAD of this call's
+                // note list (A10): they were appended to the model's prose, so
+                // by the suffix contract they are where the notes start.
+                det_notes = p.notes;
                 (p.recipe, true)
             }
             Err(e) if base.is_some() => {
@@ -714,8 +718,9 @@ pub fn produce_recipe(
             Ok(v) => {
                 recipe = revised.recipe;
                 // Fresh model prose — the notes described the DISCARDED
-                // recipe's tail, so they reset with it (the suffix contract).
-                det_notes.clear();
+                // recipe's tail, so they reset with it (the suffix contract),
+                // to the new proposal's own provider disclosures.
+                det_notes = revised.notes;
                 // …and the working travels with the proposal it explains.
                 thinking = revised.thinking;
                 lens_opinion = revised.lens;
@@ -967,8 +972,14 @@ pub fn produce_recipe(
                     // The FIELD LIST, not a flag: the note this feeds names what
                     // moved, and the candidate's pull is a different pull from
                     // the one above (a different proposal went into it).
-                    let mut candidate_distilled: Option<String> = None;
+                    // The pull the candidate was ACTUALLY blended with rides WITH
+                    // the field list (A6): the note used to re-derive the
+                    // percentage from `style_pull(req.style)` while the blend used
+                    // `style_blend_pull`'s answer, and two derivations of one fact
+                    // are two places for the disclosure to drift from the edit.
+                    let mut candidate_distilled: Option<(f32, String)> = None;
                     let mut candidate_thinking: Option<crate::advisor::Thinking> = None;
+                    let mut candidate_notes: Vec<crate::rationale::Note> = Vec::new();
                     let outcome = visual_review_round(
                         &h,
                         &recipe,
@@ -985,6 +996,7 @@ pub fn produce_recipe(
                             let mut r = p.recipe;
                             candidate_thinking = p.thinking;
                             candidate_lens.set(p.lens);
+                            candidate_notes = p.notes;
                             // The candidate walks the SAME look chain the
                             // original walked (style distillation above)
                             // — otherwise adopting it would silently
@@ -995,8 +1007,8 @@ pub fn produce_recipe(
                                 let pre = r.clone();
                                 crate::style::blend_toward(&mut r, &sr.targets, pull);
                                 r.clamp();
-                                candidate_distilled =
-                                    (r != pre).then(|| crate::style::distilled_fields(&pre, &r));
+                                candidate_distilled = (r != pre)
+                                    .then(|| (pull, crate::style::distilled_fields(&pre, &r)));
                             }
                             Ok(r)
                         },
@@ -1012,8 +1024,9 @@ pub fn produce_recipe(
                         VisualRound::Adopted { recipe: r2, verdict: v2, second } => {
                             recipe = *r2;
                             // Fresh model prose — the notes described the
-                            // DISCARDED recipe's tail (the suffix contract).
-                            det_notes.clear();
+                            // DISCARDED recipe's tail (the suffix contract),
+                            // to this candidate's own provider disclosures.
+                            det_notes = std::mem::take(&mut candidate_notes);
                             // …and the working travels with its proposal.
                             thinking = candidate_thinking;
                             lens_opinion = candidate_lens.get();
@@ -1053,17 +1066,11 @@ pub fn produce_recipe(
                                     ]
                                 },
                             ));
-                            if let Some(fields) = candidate_distilled.clone() {
+                            if let Some((pull, fields)) = candidate_distilled.clone() {
                                 log.push(crate::rationale::Note::new(
                                     crate::rationale::keys::STYLE_DISTILLED,
                                     vec![
-                                        (
-                                            "pct",
-                                            format!(
-                                                "{:.0}",
-                                                crate::style::style_pull(req.style) * 100.0
-                                            ),
-                                        ),
+                                        ("pct", format!("{pct:.0}", pct = pull * 100.0)),
                                         ("fields", fields),
                                     ],
                                 ));
@@ -1296,7 +1303,7 @@ pub fn produce_recipe(
     // Its OWN read of the saved recipe (the WB anchor above took an earlier one
     // because the prompt needed it): this stamp is the snapshot's only consumer,
     // so it stays as late — and as fresh — as it has always been.
-    match saved_recipe_snapshot(raw) {
+    match saved_recipe_snapshot(raw, &crate::diag::Diag::about(sink, raw)) {
         Some(saved) => {
             // The era stamp travels WITH the curve (the paste rule): the
             // proposer's recipe is era-2 by Default — or whatever integer the
@@ -1313,7 +1320,8 @@ pub fn produce_recipe(
             // authored here, never by the model: version is provenance, and
             // the response schema makes the model emit SOMETHING for it.
             recipe.version = crate::recipe::CALIB_ERA;
-            recipe.base_curve = photo_base_knots(raw);
+            recipe.base_curve =
+                photo_base_knots_in(raw, &crate::diag::Diag::about(sink, raw));
             recipe.lens_profile = fresh_lens_profile(raw);
         }
     }
@@ -1943,6 +1951,21 @@ pub fn prime_curve_memo(raw: &Path, ident: CurveIdent, knots: Vec<[f32; 2]>) {
 /// already-stored curve WORSE — it is now laid over a correct develop, which
 /// is what turns "slightly off" into several stops dark.
 pub fn repair_pre_era_base_curve(raw: &Path, r: &mut EditRecipe) -> Option<String> {
+    repair_pre_era_base_curve_in(raw, r, &crate::diag::photo(raw))
+}
+
+/// [`repair_pre_era_base_curve`] on a caller-supplied channel.
+///
+/// The estimator below discloses three separate inabilities, and under a pooled
+/// `batch` they used to reach the process stderr in completion order. A caller
+/// that owns a transcript block hands its own sink here instead; the wrapper
+/// above keeps every GUI/web/store call site on the process default, byte for
+/// byte as it was.
+pub fn repair_pre_era_base_curve_in(
+    raw: &Path,
+    r: &mut EditRecipe,
+    d: &crate::diag::Diag,
+) -> Option<String> {
     if !base_curve_looks_pre_era(r.version, &r.base_curve) {
         return None;
     }
@@ -1953,7 +1976,7 @@ pub fn repair_pre_era_base_curve(raw: &Path, r: &mut EditRecipe) -> Option<Strin
     let fresh = match cached {
         Some(c) => Some(c),
         None => {
-            let c = photo_base_knots_checked(raw);
+            let c = photo_base_knots_checked_in(raw, d);
             // ANSWERS are cached — the empty identity verdict included. An
             // inability (`None`) is not: it means the decode, the preview or
             // the neutral develop did not work THIS time (a locked file, a
@@ -2346,7 +2369,7 @@ pub fn migrate_loaded_recipe(raw: &Path, r: &mut EditRecipe) -> LoadMigration {
 ///
 /// The pre-era repair happens HERE, in the one funnel every library consumer
 /// shares, so no surface can render a washed-frame curve by forgetting to ask.
-fn saved_recipe_snapshot(raw: &Path) -> Option<EditRecipe> {
+fn saved_recipe_snapshot(raw: &Path, d: &crate::diag::Diag) -> Option<EditRecipe> {
     // A crashed publish's survivor is a save like any other — republish it
     // BEFORE reading, or this snapshot returns None inside the retire window
     // and the caller stamps fresh calibration over the survivor's (the same
@@ -2371,10 +2394,9 @@ fn saved_recipe_snapshot(raw: &Path) -> Option<EditRecipe> {
         crate::store::LrSidecar::Unreadable(why) => {
             // Unreadable is not absent — but it cannot outrank either.
             // Disclosed, then the stored develop stands.
-            eprintln!(
-                "⚠ {}: a Lightroom sidecar sits beside this photo but could not be read ({why}) — calibration falls back to the stored develop",
-                stem(raw)
-            );
+            d.warn(format!(
+                "a Lightroom sidecar sits beside this photo but could not be read ({why}) — calibration falls back to the stored develop"
+            ));
         }
         _ => {}
     }
@@ -2382,8 +2404,8 @@ fn saved_recipe_snapshot(raw: &Path) -> Option<EditRecipe> {
         if let Ok(text) = crate::store::read_text_capped(&p, crate::store::MAX_STORE_JSON)
             && let Ok(mut r) = serde_json::from_str::<EditRecipe>(&text)
         {
-            if let Some(note) = repair_pre_era_base_curve(raw, &mut r) {
-                eprintln!("⚠ {}: {note}", stem(raw));
+            if let Some(note) = repair_pre_era_base_curve_in(raw, &mut r, d) {
+                d.warn(note);
             }
             return Some(r);
         }
@@ -2412,7 +2434,7 @@ pub struct PhotoCalibration {
 /// The fresh arm is era-stamped by construction — those estimates come from
 /// THIS build's sampler.
 pub fn photo_calibration(raw: &Path) -> PhotoCalibration {
-    match saved_recipe_snapshot(raw) {
+    match saved_recipe_snapshot(raw, &crate::diag::photo(raw)) {
         Some(r) => PhotoCalibration {
             version: r.version,
             base_curve: r.base_curve,
@@ -2466,7 +2488,7 @@ pub fn calibration_is_neutral(cal: &PhotoCalibration) -> bool {
 /// produces. Branching on the snapshot directly keeps the fresh estimate
 /// (a demosaic for a RAW) to at most ONE run.
 pub fn fit_calibration(raw: &Path) -> PhotoCalibration {
-    match saved_recipe_snapshot(raw) {
+    match saved_recipe_snapshot(raw, &crate::diag::photo(raw)) {
         Some(r) => {
             let cal = PhotoCalibration {
                 version: r.version,
@@ -2627,7 +2649,12 @@ pub fn fresh_as_shot_wb(raw: &Path) -> (Option<f32>, Option<f32>) {
 /// tell that failure apart from the estimator's own empty answer use
 /// [`photo_base_knots_checked`].
 pub fn photo_base_knots(raw: &Path) -> Vec<[f32; 2]> {
-    photo_base_knots_checked(raw).unwrap_or_default()
+    photo_base_knots_in(raw, &crate::diag::photo(raw))
+}
+
+/// [`photo_base_knots`] on a caller-supplied channel.
+pub fn photo_base_knots_in(raw: &Path, d: &crate::diag::Diag) -> Vec<[f32; 2]> {
+    photo_base_knots_checked_in(raw, d).unwrap_or_default()
 }
 
 /// The tri-state form the pre-era repair needs: `None` = no estimate could be
@@ -2637,6 +2664,17 @@ pub fn photo_base_knots(raw: &Path) -> Vec<[f32; 2]> {
 /// photo needs no base look"). An answer may replace a saved curve; an
 /// inability must leave it alone.
 pub fn photo_base_knots_checked(raw: &Path) -> Option<Vec<[f32; 2]>> {
+    photo_base_knots_checked_in(raw, &crate::diag::photo(raw))
+}
+
+/// [`photo_base_knots_checked`] on a caller-supplied channel. The three
+/// disclosures below name an INABILITY, and each is about the photograph the
+/// channel is bound to — which is why they no longer spell its path
+/// themselves: the sink renders the attribution.
+pub fn photo_base_knots_checked_in(
+    raw: &Path,
+    d: &crate::diag::Diag,
+) -> Option<Vec<[f32; 2]>> {
     if !decode::is_raw(raw) {
         return None;
     }
@@ -2644,7 +2682,7 @@ pub fn photo_base_knots_checked(raw: &Path) -> Option<Vec<[f32; 2]>> {
         Ok(Some(c)) => c,
         Ok(None) => return None,
         Err(e) => {
-            eprintln!("⚠ base look skipped: embedded preview of {} failed ({e})", raw.display());
+            d.warn(format!("base look skipped: the embedded preview could not be read ({e})"));
             return None;
         }
     };
@@ -2664,10 +2702,7 @@ pub fn photo_base_knots_checked(raw: &Path) -> Option<Vec<[f32; 2]>> {
                 None => {
                     // Could not JUDGE (too few pixels on a side) — an
                     // inability like the arms above, never a verdict.
-                    eprintln!(
-                        "⚠ base look skipped: too few pixels to compare for {}",
-                        raw.display()
-                    );
+                    d.warn("base look skipped: too few pixels to compare");
                     None
                 }
             }
@@ -2676,7 +2711,7 @@ pub fn photo_base_knots_checked(raw: &Path) -> Option<Vec<[f32; 2]>> {
             // Disclosed, not silent: the caller's own render will surface the
             // same failure loudly, but the resulting darker-than-canvas output
             // needs a traceable cause in the log.
-            eprintln!("⚠ base look skipped: neutral develop of {} failed ({e})", raw.display());
+            d.warn(format!("base look skipped: the neutral develop failed ({e})"));
             None
         }
     }
@@ -4677,7 +4712,8 @@ fn walk_photos_counted(
         let rd = match std::fs::read_dir(dir) {
             Ok(rd) => rd,
             Err(e) if !is_root => {
-                eprintln!("⚠ skipping unreadable folder {} ({e})", dir.display());
+                crate::diag::run()
+                    .warn(format!("skipping unreadable folder {} ({e})", dir.display()));
                 *skipped += 1;
                 return Ok(());
             }
@@ -4687,7 +4723,10 @@ fn walk_photos_counted(
             let entry = match entry {
                 Ok(e) => e,
                 Err(e) => {
-                    eprintln!("⚠ skipping unreadable entry under {} ({e})", dir.display());
+                    crate::diag::run().warn(format!(
+                        "skipping unreadable entry under {} ({e})",
+                        dir.display()
+                    ));
                     *skipped += 1;
                     continue;
                 }
@@ -4701,7 +4740,8 @@ fn walk_photos_counted(
                     }
                 }
                 Err(e) => {
-                    eprintln!("⚠ skipping unreadable entry {} ({e})", p.display());
+                    crate::diag::run()
+                        .warn(format!("skipping unreadable entry {} ({e})", p.display()));
                     *skipped += 1;
                 }
             }
@@ -4955,7 +4995,7 @@ mod tests {
     #[test]
     fn every_worker_reachable_warning_flows_through_the_sink() {
         // (file, fragment, how many times it must be raised through the sink)
-        const SITES: [(&str, &str, usize); 12] = [
+        const SITES: [(&str, &str, usize); 21] = [
             ("src/pipeline.rs", "GPT proposer failed", 1),
             ("src/pipeline.rs", "style embedding unavailable", 1),
             // The run-scoped `Once` line — 5c had to leave this one
@@ -4973,6 +5013,22 @@ mod tests {
             ("src/render.rs", "bitmap mask '{path}' exceeds the", 1),
             // Three arms of the same aggregate-budget refusal, one loop.
             ("src/render.rs", "mask raster '{path}' skipped", 3),
+            // v1.2.4's second sweep. The base-look family took a `&Diag` on an
+            // `_in` form, so `produce_recipe` hands these its own sink and a
+            // pooled worker's base-look lines land in that worker's block.
+            ("src/pipeline.rs", "a Lightroom sidecar sits beside this photo", 1),
+            ("src/pipeline.rs", "warn(note)", 1),
+            ("src/pipeline.rs", "base look skipped: the embedded preview", 1),
+            ("src/pipeline.rs", "base look skipped: too few pixels", 1),
+            ("src/pipeline.rs", "base look skipped: the neutral develop", 1),
+            // The folder SCAN. `Subject::Run`, because these happen before any
+            // photograph has been identified — the stamp is empty and the bytes
+            // on stderr are the ones that shipped.
+            ("src/pipeline.rs", "skipping unreadable folder", 1),
+            ("src/pipeline.rs", "skipping unreadable entry under", 1),
+            ("src/pipeline.rs", "skipping unreadable entry {}", 1),
+            // The decoder's approximate-demosaic disclosure.
+            ("src/render.rs", "non-Bayer colour filter array", 1),
         ];
         let mut checked = 0usize;
         let mut scanned = 0usize;
@@ -5000,7 +5056,7 @@ mod tests {
             checked += hits.len();
         }
         // PREMISE: a scanner that matched nothing would pass vacuously.
-        assert_eq!(checked, 14, "every registered site must have been inspected");
+        assert_eq!(checked, 23, "every registered site must have been inspected");
         assert!(scanned > 40, "the statement scanner found almost nothing: {scanned}");
 
         // THE CENSUS. What is left of `eprintln!` in the develop chain's own
@@ -5010,26 +5066,24 @@ mod tests {
         // * `src/diag.rs` = 1: the DEFAULT SINK itself. Every routed line ends
         //   here unless the caller says otherwise, and it is the only write to
         //   the process stderr the develop chain performs.
-        // * `src/pipeline.rs` = 8: five belong to the RESTORE/base-look
-        //   helpers (`saved_recipe_snapshot`, `photo_base_knots_checked`) —
-        //   library-wide functions with ~30 GUI/web/store call sites, each of
-        //   which already names its photograph by stem or by path; threading a
-        //   sink through them is its own sweep and is registered as such in
-        //   `crate::diag`'s module doc. Three are the folder SCAN's, which run
-        //   before any pool, in the caller's own thread, and are about a
-        //   directory rather than a photograph.
-        // * `src/render.rs` = 1: `disclose_approximate_demosaic`, which names
-        //   its file by full path and belongs to the decoder rather than to
-        //   this chain (same registered sweep).
+        // * `src/pipeline.rs` = 0, `src/render.rs` = 0, `src/recipe.rs` = 0:
+        //   v1.2.4 finished the sweep R29-1 started. The base-look family took
+        //   a `&Diag` on an `_in` form with the old signature kept as a
+        //   wrapper, so the ~30 GUI/web/store call sites are unchanged while
+        //   `produce_recipe` hands down its own sink; the folder scan raises
+        //   `Subject::Run` lines (no photograph exists yet, and the empty stamp
+        //   keeps the shipped bytes); the decoder's approximate-demosaic
+        //   disclosure is bound to its photograph. The last two are routed but
+        //   not injectable, which `crate::diag`'s module doc states as the
+        //   decision and the reason.
         // * `src/main.rs` = 9: the SERIAL single-photo commands (`analyze`,
         //   `apply`, `auto`, `fit`) and their import-note siblings. One photo,
         //   one thread, a printed header directly above — nothing to order and
         //   nobody to route to. The pooled `batch` worker has none.
-        // * `src/recipe.rs` = 0: `ValidatedRecipe::disclose` was the last one.
         const CENSUS: [(&str, usize); 5] = [
             ("src/diag.rs", 1),
-            ("src/pipeline.rs", 8),
-            ("src/render.rs", 1),
+            ("src/pipeline.rs", 0),
+            ("src/render.rs", 0),
             ("src/main.rs", 9),
             ("src/recipe.rs", 0),
         ];
@@ -5064,7 +5118,7 @@ mod tests {
             .unwrap();
 
         // No sidecar: the stored develop answers (the common case).
-        assert!(saved_recipe_snapshot(&raw).is_some());
+        assert!(saved_recipe_snapshot(&raw, &crate::diag::photo(&raw)).is_some());
 
         // A NEWER Lightroom sidecar with a real edit vetoes it.
         let lr = raw.with_extension("xmp");
@@ -5080,7 +5134,7 @@ mod tests {
             .set_modified(std::time::SystemTime::now() + std::time::Duration::from_secs(3600))
             .unwrap();
         assert!(
-            saved_recipe_snapshot(&raw).is_none(),
+            saved_recipe_snapshot(&raw, &crate::diag::photo(&raw)).is_none(),
             "a newer Lightroom edit supersedes the stored calibration"
         );
 
@@ -5091,7 +5145,7 @@ mod tests {
             .unwrap()
             .set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(3600))
             .unwrap();
-        let kept = saved_recipe_snapshot(&raw).expect("the older sidecar does not veto");
+        let kept = saved_recipe_snapshot(&raw, &crate::diag::photo(&raw)).expect("the older sidecar does not veto");
         assert_eq!(kept.exposure_ev, 0.5);
 
         // A NEUTRAL newer sidecar is not a save and does not veto either.
@@ -5102,7 +5156,7 @@ mod tests {
             .unwrap()
             .set_modified(std::time::SystemTime::now() + std::time::Duration::from_secs(3600))
             .unwrap();
-        assert!(saved_recipe_snapshot(&raw).is_some(), "a neutral sidecar is not intent");
+        assert!(saved_recipe_snapshot(&raw, &crate::diag::photo(&raw)).is_some(), "a neutral sidecar is not intent");
 
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_dir_all(&dev);
@@ -6762,7 +6816,7 @@ mod tests {
             python_bin: "python".into(),
             denoise_model: "scunet_color_real_psnr".into(),
             denoise_script: String::new(),
-            denoise_cache: String::new(),
+            weights_dir: String::new(),
             segment_script: String::new(),
             embed_script: String::new(),
             correspond_script: String::new(),
@@ -7007,6 +7061,45 @@ mod tests {
         assert_eq!(path, "D:\\looks\\finished.jpg");
         assert!(is_look, "the selected image is explicitly from the look library");
         assert!(crate::rationale::keys::STYLE_LOOK_IMAGE.contains("look photo"));
+    }
+
+    /// A6: a disclosed style pull is the pull the blend ACTUALLY used.
+    ///
+    /// The adopted candidate's `STYLE_DISTILLED` note re-derived its percentage
+    /// from `style_pull(req.style)` while the blend beside it used
+    /// `style_blend_pull`'s answer. The two agree today; they are not the same
+    /// function, and `style_blend_pull` is where the v1.2.3 direction ruling
+    /// lives — it already answers `None` where `style_pull` answers a number,
+    /// which is a case where they differ outright. A second derivation of one
+    /// fact is a second place for the disclosure to drift from the edit it
+    /// describes, and the drifting one governed an ADOPTED revision.
+    ///
+    /// MUTATION: put `crate::style::style_pull(req.style) * 100.0` back into
+    /// the candidate's note and the count assertion names it.
+    #[test]
+    fn a_disclosed_style_pull_is_the_one_the_blend_used() {
+        // The case where the two derivations differ, driven for real.
+        let voice = crate::style::StyleVoice::Background;
+        assert_eq!(style_blend_pull(voice, 1.0), None, "a direction-led develop is not pulled");
+        assert!(
+            crate::style::style_pull(1.0) > 0.0,
+            "…while the re-derivation would have stated a pull anyway"
+        );
+        // So only ONE of them may reach a rationale. In production code this
+        // file derives the pull in exactly one place: `style_blend_pull`.
+        let src = crate::source_before_tests(include_str!("pipeline.rs"));
+        let needle = concat!("style::style", "_pull(");
+        assert_eq!(
+            src.matches(needle).count(),
+            1,
+            "a second derivation of the style pull came back into production code"
+        );
+        // …and both notes state a percentage taken from a `pull` binding.
+        assert_eq!(
+            src.matches("(\"pct\", format!(\"{pct:.0}\", pct = pull * 100.0))").count(),
+            2,
+            "the verified proposal and the adopted candidate each state their own pull"
+        );
     }
 
     /// v1.2.3: EVERY `blend_toward` in this file is guarded by the voice.

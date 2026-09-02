@@ -356,7 +356,7 @@
 >   names that select COMPUTE BEHAVIOUR — no path, no endpoint, no credential,
 >   nothing that loads code — which deliberately excludes the cache knobs
 >   (`HF_HOME`, `TORCH_HOME`: a redirected cache is a poisoned-model path, the
->   same reason `AUTOSHADE_DENOISE_CACHE` is `Destination`) and the proxy
+>   same reason `AUTOSHADE_WEIGHTS_DIR` is `Destination`) and the proxy
 >   variables (a proxy decides where bytes go). The reach this costs is small
 >   and recoverable: a child INHERITS the parent's environment — nothing calls
 >   `env_clear` — so a user's own `HF_HOME` or `HTTPS_PROXY` still arrives
@@ -2130,6 +2130,11 @@ the engine's own neutral develop for a RAW (a ≤2048px cap by default) or the
 source thumbnailed to 2048px for a baked image — never the camera's baked
 preview, so the healed master stays on the same tone chain as the canvas
 develop; `--full-res` works at full resolution on either source type (slow).
+A full-resolution heal is the largest allocation this process makes, so it
+takes the same one-at-a-time admission slot (`lib::full_res_slot`) the local
+server's full-resolution requests take: the ticket is process-wide, not the
+server's private static, because two full-frame buffers on one machine is the
+shape that runs it out of memory no matter which surface asked for them.
 
 ### 4.8 Look matching / reverse-fit (`match`) — V2
 
@@ -2968,10 +2973,10 @@ Every examined ineligible node lands with its id and reason in that
 generation's single typed sweep note (nodes already attached or refused told
 their story in their own generation); eligible leaf candidates keep a full
 per-node reading, and downstream failures (raster, estimator, boundary) keep
-per-tile notes. The persisted-rationale abuse bound is 16 KiB so this
-disclosure is never what truncation eats; the B3 free-mask stage compacts its
-tentative attachment text before that bound, and typed producer readings stay
-the retained disclosure.
+per-tile notes. The persisted-rationale abuse bound is 64 KiB (16 KiB before
+v1.2.4) so this disclosure is never what truncation eats; the B3 free-mask
+stage compacts its tentative attachment text before that bound, and typed
+producer readings stay the retained disclosure.
 
 The tile pass reads the pair through `fit::analysis_pair`, so its coverage
 and estimator vectors are congruent by construction (asserted). Caching
@@ -3001,8 +3006,12 @@ disclosure, connectivity, cap, layer-off identity, ceiling stop, determinism,
 bitmap recipe/XMP losslessness, neutral corpus disclosure, and p36 honest-
 refusal checks. No live arm attached a free mask: downstream candidates were
 refused by the shared gates. Tentative attachment text is compacted while
-refinement and typed refusals remain; the B3 stage stays below 16 KiB (an
-inherited pre-stage transcript can still reach the exact legacy ceiling).
+refinement and typed refusals remain; the B3 stage stays below 16 KiB, which
+was the whole ceiling when it was written and an inherited pre-stage transcript
+could reach exactly. v1.2.4 raised the ceiling to 64 KiB — one full note vector
+is 16,183 bytes of TEMPLATE alone, so the old bound could be spent before a
+single reading was written — and made truncation cut from the FRONT, keeping
+the newest lines and stamping the marker that says how many bytes went.
 
 Mask refinement is a production step, never a post-fit edit
 ([`src/mask_refine.rs`](../src/mask_refine.rs)). A dependency-free local-linear
@@ -3281,6 +3290,19 @@ and a failed rename falls back to the legacy namespace rather than
 reassigning filenames. macOS opts out of the prefs adoption for the store's
 reason (no Mac ever ran the old name; case-insensitive APFS).
 
+The SETTINGS FILE follows the same doctrine and is the last piece of the rename
+to do so. v1.2.0 answered to a second spelling forever — every `AUTOSHOP_*`
+environment name aliased its `AUTOSHADE_*` twin, and the loader read
+`autoshop.local.json` as a permanent fallback — which meant a v1.1 upgrader's
+API keys lived in a file the app would read but never write, so the next save
+wrote the new name and the old one silently kept a stale key. v1.2.4 closes
+both: the alias door is gone (no `AUTOSHOP_*` name resolves anywhere), and the
+pre-rename file is RENAMED ONCE on first load, exactly like the store root — a
+same-volume `rename`, both-present keeps both and uses the new one, and a
+failed rename falls back to READING the old file for that session so nothing is
+lost while the rename is retried next launch. The adoption is latched, so it
+answers once per process rather than per settings read.
+
 `scripts/build_app_bundle.sh` assembles the bundle: both binaries, the
 sidecars, an `.icns` rendered from the shipped PNG, a hand-written
 `Info.plist` (`plutil`-linted, its minimum system version checked against the
@@ -3293,7 +3315,14 @@ not scheduled.
 
 Cross-platform, no GC pauses on large-image pipelines, first-class image crates,
 single-binary distribution, trivial `std::process` shell-out to `claude`.
-Toolchain in use: rustc/cargo **1.94.1** (verified locally), **edition 2024**.
+Toolchain in use: rustc/cargo **1.94.1**, **edition 2024**. Since v1.2.4 that
+version is PINNED rather than observed — [`rust-toolchain.toml`](../rust-toolchain.toml)
+carries the channel, `rustup` honours it for every `cargo` call in the
+repository, the release and build workflows assert that the runner got it
+before they compile anything, and `scripts/check_docs.py` compares this
+sentence against the pin, patch included. Before that the sentence said
+"verified locally" and meant it: one laptop, one day, while CI built the
+published binaries with whatever `stable` was that morning.
 
 The rest of this section is the complete list of what this project actually
 depends on, with each entry's REASON — because "first-class image crates" is a

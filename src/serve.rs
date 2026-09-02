@@ -470,16 +470,20 @@ fn handle(mut request: Request, state: &AppState, image_token: &str) -> Result<(
 /// for anyway: they cannot look at two exports at once, and finishing the
 /// first sooner beats thrashing through both.
 ///
-/// Deliberately NOT taken by /api/retouch and /api/heal. Their wall clock is
-/// dominated by a generative API call that can run for MINUTES, and holding
-/// this across the network would block every export for that entire time to
-/// solve a memory problem that exists only during their brief local
-/// compositing phase. Scoping a permit to that phase is the open follow-up;
-/// their peak is recorded with the other engine buffer-lifetime items.
+/// /api/retouch and /api/heal do NOT take it at handler entry, and since v1.2.4
+/// they do not go unbounded either: the slot moved into the library
+/// ([`crate::full_res_slot`]) and the two engines take it around their own
+/// LOCAL phases only, releasing it across the generative call that dominates
+/// their wall clock. Holding an admission slot across a network wait is how one
+/// slow request stalls every fast one, which is why the whole-handler form was
+/// refused here in the first place.
 ///
 /// Lock ORDER: taken at handler entry, before SAVE_LOCK. No path takes
-/// SAVE_LOCK first and then this, so the two cannot deadlock.
-static HEAVY: std::sync::Mutex<()> = std::sync::Mutex::new(());
+/// SAVE_LOCK first and then this, so the two cannot deadlock. The engines take
+/// it deeper, and take nothing else while they hold it.
+fn heavy() -> crate::FullResSlot {
+    crate::full_res_slot()
+}
 
 
 
@@ -2228,7 +2232,7 @@ fn registered_export_out(
 ///
 /// The repair is keyed on whether the funnel RAN, never on its note — a None
 /// note also means "tried, inability", and re-running the identical call paid
-/// the failed decode twice per request while holding the HEAVY lock.
+/// the failed decode twice per request while holding the full-resolution slot.
 fn deliverable_source(
     req: &mut DevelopReq,
     raw: &Path,
@@ -2263,8 +2267,8 @@ fn deliverable_source(
 
 /// Export to ./out (the library stays read-only). Returns the written path.
 fn api_export(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
-    // Full-resolution work — see HEAVY. Held for the whole handler.
-    let _heavy = HEAVY.lock().unwrap_or_else(|p| p.into_inner());
+    // Full-resolution work — see `heavy`. Held for the whole handler.
+    let _heavy = heavy();
 
     let stamp = request_gen(request);
     let mut req: DevelopReq = read_json(request)?;
@@ -2333,8 +2337,8 @@ fn api_export(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
 /// Render and stream the image back as a download (browser "Save As"), without
 /// leaving a copy in ./out. Renders to a temp file, then streams + deletes it.
 fn api_download(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
-    // Full-resolution work — see HEAVY. Held for the whole handler.
-    let _heavy = HEAVY.lock().unwrap_or_else(|p| p.into_inner());
+    // Full-resolution work — see `heavy`. Held for the whole handler.
+    let _heavy = heavy();
 
     let stamp = request_gen(request);
     let mut req: DevelopReq = read_json(request)?;

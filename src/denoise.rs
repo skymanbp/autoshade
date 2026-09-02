@@ -14,7 +14,6 @@
 //!     when the source is an already-baked PNG/TIFF/JPEG).
 
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
 
 use anyhow::{anyhow, bail, Context, Result};
 use image::{DynamicImage, GenericImageView, ImageBuffer, Rgb};
@@ -242,7 +241,7 @@ impl DenoiseOpts {
         DenoiseOpts {
             python_bin: cfg.python_bin.clone(),
             script: PathBuf::from(&cfg.denoise_script),
-            cache: PathBuf::from(&cfg.denoise_cache),
+            cache: PathBuf::from(&cfg.weights_dir),
             model: model_override.unwrap_or_else(|| cfg.denoise_model.clone()),
             // clamp KEEPS NaN — a non-finite strength would ship "--strength
             // NaN" to the sidecar instead of honouring the 0..1 contract.
@@ -469,17 +468,11 @@ fn run_sidecar_carrying(
     // the exit-0-no-write refusal keeps its full strength.
     let staged = staged_sibling(output);
     let before = crate::artifact_state(&staged);
-    let mut cmd = Command::new(&opts.python_bin);
-    // What a `.env` may push at this child is an ALLOWLIST, not "everything
-    // the capability table did not refuse" — see `config::dotenv_child_env`.
-    // Compute knobs (CUDA_VISIBLE_DEVICES, thread counts) pass; anything that
-    // names a path, a host, a credential or a library to load does not. That
-    // is what stops a photo pack's `.env` from handing this process
-    // LD_PRELOAD, which ld.so would honour BEFORE the `-E` below — `-E` only
-    // filters PYTHON*, so it was never the guard for that class. The user's
-    // OWN environment still reaches the child: nothing calls env_clear.
-    cmd.envs(crate::config::dotenv_child_env());
-    cmd.envs(crate::config::Config::sidecar_child_env());
+    // `crate::sidecar_command` carries the whole child preamble — the `.env`
+    // ALLOWLIST, captured stdio, no console flash, a kill group — so this
+    // bridge and the three others cannot drift apart. See it for why each of
+    // those is not optional.
+    let mut cmd = crate::sidecar_command(&opts.python_bin);
     // `-E`: ignore PYTHON* environment variables — a cwd .env's
     // `PYTHONPATH=.` beside a hostile `numpy.py` is code execution at
     // import time (config.rs also protects those vars; two layers).
@@ -494,36 +487,16 @@ fn run_sidecar_carrying(
         .arg("--strength")
         .arg(format!("{:.4}", opts.strength))
         .arg("--cache")
-        .arg(&opts.cache)
-        // CAPTURE, never inherit (same reason as the segmentation sidecar): the
-        // release GUI has no console, so inherited handles silently discard the
-        // sidecar's reason for failing. Cost of the capture: the CLI no longer
-        // sees the live model-download progress, only the tail on failure.
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    // Don't flash a console window when the windowed GUI spawns the sidecar.
-    crate::hide_child_console(&mut cmd);
-    // The whole process TREE dies with the budget, not just the launcher
-    // (L11#7): torch workers survived the old direct-child kill.
-    crate::arm_kill_group(&mut cmd);
-    let run = (|| -> Result<std::process::Output> {
-        let child = cmd.spawn().with_context(|| {
-            format!(
-                "launch denoise sidecar ({} {}) — is Python on PATH / AUTOSHADE_PYTHON set?",
-                opts.python_bin,
-                opts.script.display()
-            )
-        })?;
-        let group = crate::assign_kill_group(&child);
-        bounded_child_output(
-            child,
-            "denoise sidecar",
-            budget,
-            "AUTOSHADE_SIDECAR_TIMEOUT_SECS",
-            group,
-        )
-    })();
+        .arg(&opts.cache);
+    // Cost of the shared capture, stated where a reader of THIS bridge will
+    // look for it: the CLI no longer sees live model-download progress, only
+    // the tail on failure.
+    let run = crate::run_sidecar_child(
+        &mut cmd,
+        "denoise sidecar",
+        &format!("{} {}", opts.python_bin, opts.script.display()),
+        budget,
+    );
     let out = match run {
         Ok(out) => out,
         Err(error) => {
@@ -539,11 +512,7 @@ fn run_sidecar_carrying(
     if !out.status.success() {
         discard_failed_output(&staged, before);
         release_empty_claim(output);
-        bail!(
-            "denoise sidecar exited with {}: {}",
-            out.status.code().map(|c| c.to_string()).unwrap_or_else(|| "signal".into()),
-            crate::sidecar_tail(&out.stderr, &out.stdout)
-        );
+        return Err(crate::sidecar_exit_error("denoise sidecar", &out));
     }
     // Exit 0 alone is NOT success: THIS run must have produced the artifact
     // (`crate::sidecar_wrote`). Without the pre-spawn snapshot, a sidecar
@@ -1315,19 +1284,40 @@ mod tests {
     /// L11#7b: every sidecar spawn is wrapped in a kill-group — the timeout
     /// must reap the whole tree (torch workers survived the direct-child
     /// kill), and a NEW spawn site must join the rule.
+    ///
+    /// The rule is about the SPAWN, not about a spelling. v1.2.4 moved the
+    /// ceremony into `crate::sidecar_command` / `crate::run_sidecar_child`, so
+    /// the two python bridges stopped spelling it themselves — and this test,
+    /// which asked each file for the literal names, failed on the change that
+    /// made the rule harder to break. Each spawning file must now do ONE of
+    /// two things: go through the shared executor, or arm and assign itself
+    /// (`advisor/claude.rs`, whose child is a `claude` CLI rather than a
+    /// python sidecar and which reads its stdout as a stream). The executor is
+    /// checked for still doing both by `lib::sidecar_executor_tests`.
+    ///
+    /// MUTATION: replace `crate::sidecar_command(` in `denoise.rs` with
+    /// `std::process::Command::new(` and this names the file.
     #[test]
     fn every_sidecar_spawn_is_wrapped_in_a_kill_group() {
+        // Assembled needles: denoise.rs scans its own text, so literal
+        // needles here would match themselves (the advisor/mod.rs rule).
+        let arm = format!("arm{}kill_group", '_');
+        let assign = format!("assign{}kill_group", '_');
+        let door = format!("crate::sidecar{}command(", '_');
+        let run = format!("crate::run{0}sidecar{0}child(", '_');
         for (name, src) in [
             ("denoise.rs", include_str!("denoise.rs")),
             ("segment.rs", include_str!("segment.rs")),
             ("advisor/claude.rs", include_str!("advisor/claude.rs")),
         ] {
-            // Assembled needles: denoise.rs scans its own text, so literal
-            // needles here would match themselves (the advisor/mod.rs rule).
-            let arm = format!("arm{}kill_group", '_');
-            let assign = format!("assign{}kill_group", '_');
-            assert!(src.contains(&arm), "{name} spawns without arming a kill-group");
-            assert!(src.contains(&assign), "{name} spawns without assigning a kill-group");
+            let src = crate::source_before_tests(src);
+            let through_the_door = src.contains(&door) && src.contains(&run);
+            let by_hand = src.contains(&arm) && src.contains(&assign);
+            assert!(
+                through_the_door || by_hand,
+                "{name} spawns a child without a kill-group: it neither goes through the \
+                 shared sidecar executor nor arms and assigns one itself"
+            );
         }
     }
 }

@@ -525,19 +525,26 @@ fn non_bayer_rgb_cfa(raw: &rawler::RawImage) -> Option<&rawler::cfa::CFA> {
 /// built for this array (Markesteijn for X-Trans), and is correspondingly
 /// softer. Saying nothing would leave someone comparing against Fujifilm's own
 /// converter with no explanation for the difference.
+///
+/// Raised through [`crate::diag`] like every other develop-chain disclosure, so
+/// the line carries its photograph as DATA and a pooled `batch` worker can put
+/// it in that worker's own transcript block. It is bound to the process default
+/// rather than to a caller's sink, and that is the decision: this sits under
+/// `render_to_image`, whose call sites do not carry a channel, and threading one
+/// through all of them to reach a single disclosure would buy nothing today.
+/// The line's own text no longer spells the path — the sink renders the
+/// attribution — so it reads `⚠ <stem>: this file comes from a …` where it used
+/// to read `⚠ <full path> comes from a …`.
 fn disclose_approximate_demosaic(raw: &rawler::RawImage, path: &Path) {
     let Some(cfa) = non_bayer_rgb_cfa(raw) else { return };
-    eprintln!(
-        "⚠ {} comes from a {}×{} non-Bayer colour filter array ({}), which this build demosaics \
-         over the array's own geometry instead of with an algorithm written for this sensor \
-         family. Every channel is interpolated from the photosites that actually measured it, so \
-         colour, tone and framing are correct; fine detail is softer than a dedicated converter \
-         would resolve",
-        path.display(),
-        cfa.width,
-        cfa.height,
-        cfa
-    );
+    crate::diag::photo(path).warn(format!(
+        "this file comes from a {}×{} non-Bayer colour filter array ({}), which this build \
+         demosaics over the array's own geometry instead of with an algorithm written for this \
+         sensor family. Every channel is interpolated from the photosites that actually measured \
+         it, so colour, tone and framing are correct; fine detail is softer than a dedicated \
+         converter would resolve",
+        cfa.width, cfa.height, cfa
+    ));
 }
 
 /// Half-width, in photosites, of the window the two missing channels are

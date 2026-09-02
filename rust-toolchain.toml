@@ -1,0 +1,21 @@
+# The compiler this project is built, linted and tested with.
+#
+# Until v1.2.4 the version was a SENTENCE and nothing more — ARCHITECTURE §5's
+# "Toolchain in use: rustc/cargo 1.94.1 (verified locally)", verified on one
+# laptop on one day, while every workflow ran `dtolnay/rust-toolchain@stable`
+# and therefore built with whatever `stable` happened to be that morning. The
+# published binaries and the sentence describing them were free to drift, and
+# nothing would have said so.
+#
+# `rustup` honours this file for every `cargo` and `rustc` invocation inside the
+# repository, so the workflows need no toolchain input: they assert the version
+# instead (the "Toolchain" step in build.yml and release.yml), which is what
+# makes "CI used the pin" observable rather than assumed.
+# `scripts/check_docs.py` compares ARCHITECTURE §5's sentence against the
+# channel below, so the two cannot drift apart again.
+#
+# Raising it is a deliberate act: bump this line and the ARCHITECTURE sentence
+# in the same commit, and let the batteries run on the new compiler.
+[toolchain]
+channel = "1.94.1"
+components = ["clippy"]

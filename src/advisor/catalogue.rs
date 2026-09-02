@@ -1893,25 +1893,32 @@ fn value_is_active(live: GlobalValue<'_>, neutral: GlobalValue<'_>) -> bool {
 /// `deny_unknown_fields` downgrades and R21's `recipe_norm` structure
 /// fingerprint). One envelope, one paid call, zero new roles.
 ///
-/// ORDER, measured (R27, 2026-08-19): strict structured output does NOT
-/// generate fields in the declared order. The paid probe
-/// (`openai::tests::think_envelope_field_order_probe`, run once with a real
-/// key) came back with the answer's keys in strict ALPHABETICAL order —
-/// `recipe` at byte 170, `scene` at 1269, `self_critique` at 1393,
-/// `tool_plan` at 1595 — so the model wrote the recipe FIRST and the
-/// "thinking" after it, whatever `required` declares. Mechanism hypothesis
-/// (n=1, but exactly alphabetical): the endpoint serialises object keys
-/// sorted, the same way this tree's own `serde_json` does. Consequence:
-/// "think before you write" rests on the PROMPT alone; the envelope's
-/// structural benefits (an explicit plan, an auditable self-critique, a
-/// per-family use/skip decision) survive unchanged, because they never
-/// depended on generation order. Registered option, deliberately not taken
-/// now: renaming the thinking fields to sort ahead of `recipe`
-/// alphabetically would force the order via the measured mechanism — a
-/// second probe should confirm the mechanism before any rename trades on it.
-/// The probe stays `#[ignore]`d + env-gated (`AUTOSHADE_THINK_PROBE_KEY`) and
-/// FAILS LOUDLY by design when the order is not generated, so re-running it
-/// is the mechanism check.
+/// ORDER, measured on three paid calls: strict structured output does NOT
+/// generate fields in the declared order. The probe
+/// (`openai::tests::think_envelope_field_order_probe`) came back with the
+/// answer's keys in strict ALPHABETICAL order every time — R27 (2026-08-19,
+/// through the relay) at `recipe` 170, `scene` 1269, `self_critique` 1393,
+/// `tool_plan` 1595, and twice on 2026-09-02 (`gpt-5` on api.openai.com) at
+/// `recipe` 194/230, `scene` 1604/2527, `self_critique` 1702/2667,
+/// `tool_plan` 1961/2859 — so the model writes the recipe FIRST and the
+/// "thinking" after it, whatever `required` declares. The offsets move with
+/// the length of the model's prose; the ORDER does not. Two endpoints, two
+/// models, two dates, one order:
+/// the mechanism the first run could only hypothesise (keys serialised
+/// sorted, the same way this tree's own `serde_json` does) is what the
+/// second run confirms. Consequence: "think before you write" rests on the
+/// PROMPT alone; the envelope's structural benefits (an explicit plan, an
+/// auditable self-critique, a per-family use/skip decision) survive
+/// unchanged, because they never depended on generation order.
+///
+/// The rename the mechanism makes possible — spelling the thinking fields so
+/// they sort ahead of `recipe` — is NOT taken, and this is the decision, not
+/// a pause before one. It would buy generation order at the price of naming
+/// every envelope field after a provider's serialiser: the names reach the
+/// prompt, the parser, the `deny_unknown_fields` envelope struct and every
+/// fixture, and they would have to be renamed back the day a provider honours
+/// the declaration. The probe's assertion now encodes the alphabetical
+/// measurement, so that day announces itself.
 pub fn think_envelope_schema() -> Value {
     let families: Vec<Value> = CONTROL_FAMILIES
         .iter()

@@ -197,6 +197,49 @@ pub fn with_model_slot<T>(body: impl FnOnce() -> T) -> T {
     body()
 }
 
+/// The FULL-RESOLUTION slot: local work that holds a whole frame in memory
+/// runs one at a time, process-wide.
+///
+/// A single 61-megapixel export peaks near 1.7 GiB — decoded sensor, f32
+/// develop buffer, the packed 16-bit frame and the lens-geometry destination —
+/// so the web server's eight admitted requests could reach ~13.6 GiB before
+/// caches and encoders, which is an out-of-memory kill on any ordinary machine.
+/// Preview-sized work stays parallel; only full-resolution work queues here.
+///
+/// A GUARD rather than a closure (the shape [`with_model_slot`] takes), because
+/// the callers that need it most must RELEASE it in the middle of their own
+/// function: a generative fill's local phases sit either side of a model call
+/// that runs for minutes, and holding an admission slot across a network wait
+/// is how one slow request stalls every fast one.
+///
+/// WHO TAKES IT, and it is the whole set: the server's full-resolution export
+/// and download handlers, `retouch::heal_and_save` (the door both the heal and
+/// the clone-stamp reach), and `generative::retouch`'s two local phases.
+/// `generative::reimagine` does NOT, and that is a measured exclusion rather
+/// than an omission — its develop is capped at twice the API target edge
+/// (~2048 px, "~16x lighter than a full 61 MP develop" in its own comment), so
+/// it is not full-resolution work and queueing it behind an export would cost
+/// latency for no memory.
+///
+/// The lock is not reentrant, so no holder may call another taker: the two
+/// server handlers reach `render_to_file` and nothing in `retouch` or
+/// `generative`, and `generative::retouch` drops before it re-enters. A caller
+/// that grows a path from one to the other deadlocks itself, which is why the
+/// set above is written down.
+pub struct FullResSlot {
+    /// Held for the guard's whole lifetime; LEAVING the section is dropping it,
+    /// so nothing ever reads this field.
+    _guard: std::sync::MutexGuard<'static, ()>,
+}
+
+/// Enter the full-resolution section; the returned guard leaves it when
+/// dropped. Poison is recovered rather than re-panicked, like every other lock
+/// in this tree.
+pub fn full_res_slot() -> FullResSlot {
+    static SLOT: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    FullResSlot { _guard: SLOT.lock().unwrap_or_else(|p| p.into_inner()) }
+}
+
 /// A configured sidecar script path that actually NAMES a file.
 ///
 /// Empty is the "not configured" sentinel, so this is two questions in one:
@@ -234,21 +277,83 @@ pub(crate) fn test_skipped(test: &str, why: &str) {
     eprintln!("{SKIP_PREFIX} {test}: {why}");
 }
 
+/// ONE python sidecar child, configured the way every one of them must be.
+///
+/// Four bridges spelled this sequence out by hand — denoise, segmentation, the
+/// segmentation backend probe, and the single-artifact model executor — and a
+/// hand-copied preamble is one that drifts silently: the guard that goes
+/// missing is a guard nothing tests for, because each copy is its own truth.
+/// The steps, and why each is not optional:
+///
+/// * the env ALLOWLIST (`config::dotenv_child_env` + `Config::sidecar_child_env`)
+///   plus the caller's `-E`, the two layers against a `.env` handing this child
+///   `LD_PRELOAD` or a `PYTHONPATH` beside a hostile `numpy.py`;
+/// * stdio CAPTURED, never inherited: the release GUI is
+///   `windows_subsystem = "windows"` and has no console, so an inherited handle
+///   discards the reason a missing dependency failed;
+/// * no console flash when the windowed GUI is the one spawning;
+/// * a kill GROUP, so a timeout takes the torch workers with it and not just
+///   the launcher (L11#7).
+///
+/// The caller adds the argv — which is per bridge — and nothing else.
+pub fn sidecar_command(program: impl AsRef<std::ffi::OsStr>) -> std::process::Command {
+    let mut cmd = std::process::Command::new(program);
+    cmd.envs(crate::config::dotenv_child_env());
+    cmd.envs(crate::config::Config::sidecar_child_env());
+    cmd.stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    hide_child_console(&mut cmd);
+    arm_kill_group(&mut cmd);
+    cmd
+}
+
+/// Spawn a [`sidecar_command`] and wait for it under `budget`.
+///
+/// `who` names the bridge in every message the user can see; `launched` is what
+/// was actually run, and it differs per bridge on purpose (the model executor
+/// has only an interpreter to name, the script bridges name interpreter and
+/// script). The wait is [`crate::denoise::bounded_child_output`]: bounded
+/// streams, a detached drain after a grace, disclosed truncation.
+pub fn run_sidecar_child(
+    cmd: &mut std::process::Command,
+    who: &str,
+    launched: &str,
+    budget: std::time::Duration,
+) -> anyhow::Result<std::process::Output> {
+    use anyhow::Context;
+    let child = cmd.spawn().with_context(|| {
+        format!("launch {who} ({launched}) — is Python on PATH / AUTOSHADE_PYTHON set?")
+    })?;
+    let group = assign_kill_group(&child);
+    crate::denoise::bounded_child_output(
+        child,
+        who,
+        budget,
+        "AUTOSHADE_SIDECAR_TIMEOUT_SECS",
+        group,
+    )
+}
+
+/// The refusal a non-zero sidecar exit becomes, identical for every bridge:
+/// the code (or `signal` when there is none) and the tail of what the child
+/// said. The caller discards its own half-written artifact first — that part
+/// cannot be shared, because what counts as the artifact differs per bridge.
+pub fn sidecar_exit_error(who: &str, out: &std::process::Output) -> anyhow::Error {
+    let reason = match out.status.code() {
+        Some(c) => c.to_string(),
+        None => "signal".to_string(),
+    };
+    anyhow::anyhow!("{who} exited with {reason}: {}", sidecar_tail(&out.stderr, &out.stdout))
+}
+
 /// Shared executor for the single-artifact MODEL sidecars (`embed.rs`,
 /// `correspond.rs`): spawn under [`with_model_slot`], bound the wait, apply
 /// the exit-0-is-not-success contract, and hand back the artifact's text.
 /// Extracted when the correspondence bridge would have been the FOURTH copy
-/// of this sequence — the two callers here are byte-for-byte the same shape;
-/// `denoise.rs` and `segment.rs` keep their own variants for now (staged
-/// output conversion, stdout report parsing, the probe door — real
-/// per-bridge differences, registered as a follow-up rather than flattened
-/// in passing).
-///
-/// The steps, and why:
-/// * env ALLOWLIST (`config::dotenv_child_env`) + `-E` in the caller's argv —
-///   the two layers against a PYTHON* import hijack;
-/// * stdio CAPTURED, never inherited: the release GUI has no console, so an
-///   inherited handle would discard the reason a missing dependency failed;
+/// of this sequence. What it adds over [`sidecar_command`] +
+/// [`run_sidecar_child`] — which every bridge now shares — is the part that is
+/// genuinely about a single-artifact model run:
 /// * the slot covers the child's whole life — what must be exclusive is the
 ///   model RESIDENT in the GPU, and the sidecar timeout
 ///   (`denoise::bounded_child_output`) doubles as the gate's release;
@@ -280,40 +385,19 @@ pub fn run_model_sidecar_bounded(
     // caller's 0-byte claim file), so the artifact state is sampled BEFORE
     // the spawn.
     let before = artifact_state(output);
-    let mut cmd = std::process::Command::new(python_bin);
-    cmd.envs(crate::config::dotenv_child_env());
-    cmd.envs(crate::config::Config::sidecar_child_env());
+    let mut cmd = sidecar_command(python_bin);
     cmd.args(args)
         // Where the model weights live — one policy, appended here so all
         // three sidecars this function launches agree (see `weights_args`).
-        .args(crate::config::Config::load().weights_args())
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped());
-    hide_child_console(&mut cmd);
-    arm_kill_group(&mut cmd);
+        .args(crate::config::Config::load().weights_args());
     let discard = || crate::denoise::discard_failed_output(output, before);
-    let out = with_model_slot(|| -> anyhow::Result<std::process::Output> {
-        let child = cmd.spawn().with_context(|| {
-            format!("launch {who} ({python_bin}) — is Python on PATH / AUTOSHADE_PYTHON set?")
-        })?;
-        let group = assign_kill_group(&child);
-        crate::denoise::bounded_child_output(
-            child,
-            who,
-            crate::denoise::sidecar_timeout(),
-            "AUTOSHADE_SIDECAR_TIMEOUT_SECS",
-            group,
-        )
+    let out = with_model_slot(|| {
+        run_sidecar_child(&mut cmd, who, python_bin, crate::denoise::sidecar_timeout())
     })
     .inspect_err(|_| discard())?;
     if !out.status.success() {
         discard();
-        let reason = match out.status.code() {
-            Some(c) => c.to_string(),
-            None => "signal".to_string(),
-        };
-        bail!("{who} exited with {reason}: {}", sidecar_tail(&out.stderr, &out.stdout));
+        return Err(sidecar_exit_error(who, &out));
     }
     sidecar_wrote(who, output, before).inspect_err(|_| discard())?;
     if let Some(cap) = max_bytes {
@@ -442,6 +526,210 @@ pub(crate) fn source_before_tests(src: &str) -> &str {
     src
 }
 
+/// A17: the full-resolution section, and where the two engines scope it.
+#[cfg(test)]
+mod full_res_slot_tests {
+    use std::time::Duration;
+
+    /// It is a SECTION: a second entrant waits, and waits only until the first
+    /// leaves.
+    ///
+    /// MUTATION: give `full_res_slot` a fresh `Mutex` per call and the first
+    /// assertion fails — which is the state the memory bound was added to
+    /// prevent, eight 1.7 GiB exports admitted together.
+    #[test]
+    fn the_full_res_section_admits_one_at_a_time_and_then_releases() {
+        let held = super::full_res_slot();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let waiter = std::thread::spawn(move || {
+            let _second = super::full_res_slot();
+            let _ = tx.send(());
+        });
+        assert!(
+            rx.recv_timeout(Duration::from_millis(250)).is_err(),
+            "a second entrant was admitted while the first held the section"
+        );
+        drop(held);
+        assert!(
+            rx.recv_timeout(Duration::from_secs(30)).is_ok(),
+            "the section never released"
+        );
+        waiter.join().unwrap();
+    }
+
+    /// The generative fill LEAVES the section for the model call and comes back
+    /// for the composite.
+    ///
+    /// A source check, because the property is about a call that runs for
+    /// minutes against a paid API: what is under test is the ORDER of three
+    /// statements, and no test that can run offline reaches them.
+    ///
+    /// MUTATION: delete the `drop(heavy);` in `generative::retouch` and this
+    /// names it — every export would then queue behind a model call, which is
+    /// exactly why the whole-handler form was refused in `serve`.
+    #[test]
+    fn the_generative_fill_holds_the_section_only_for_its_local_phases() {
+        let src = crate::source_before_tests(include_str!("generative.rs"));
+        let enter = src.find("let heavy = crate::full_res_slot();").expect("no local phase");
+        let rest = &src[enter..];
+        let release = rest.find("drop(heavy);").expect("the local phase never releases");
+        let call = rest.find("call_images_edit(").expect("the model call moved");
+        assert!(release < call, "the section is still held across the model call");
+        let composite = rest[call..]
+            .find("let _heavy = crate::full_res_slot();")
+            .expect("the composite phase is unbounded");
+        let blend = rest[call..].find("composite_in_place(").expect("the composite moved");
+        assert!(composite < blend, "the section is entered after the blend, not before it");
+    }
+
+    /// Healing takes the section at the one door both of its callers use.
+    #[test]
+    fn healing_takes_the_section_where_it_allocates() {
+        let src = crate::source_before_tests(include_str!("retouch.rs"));
+        let door = src.find("fn heal_and_save(").expect("the shared heal door moved");
+        let body = &src[door..];
+        let slot = body.find("crate::full_res_slot();").expect("heal_and_save is unbounded");
+        let alpha = body.find("split_alpha(&base)").expect("the phase moved");
+        assert!(slot < alpha, "the section must open before the first allocation");
+    }
+
+    /// The server's two full-resolution handlers take the LIBRARY's slot — one
+    /// policy, not a second mutex that bounds nothing the engines do.
+    #[test]
+    fn the_servers_heavy_handlers_take_the_one_library_slot() {
+        let src = crate::source_before_tests(include_str!("serve.rs"));
+        assert!(
+            src.contains("fn heavy() -> crate::FullResSlot"),
+            "serve grew its own admission lock again"
+        );
+        assert_eq!(
+            src.matches("let _heavy = heavy();").count(),
+            2,
+            "the full-resolution export and download handlers are the two that take it"
+        );
+    }
+}
+
+/// A14: one door for every python sidecar, and it behaves the same at it.
+#[cfg(test)]
+mod sidecar_executor_tests {
+    use std::time::Duration;
+
+    /// Nothing builds a python child by hand any more.
+    ///
+    /// Checked at the SOURCE because the drift this guards against is a
+    /// MISSING line — a bridge that forgets `arm_kill_group` leaves torch
+    /// workers alive after a timeout, and that has no signature until the day
+    /// a run times out on a user's machine. Only [`super::sidecar_command`]
+    /// may spell the preamble; a second speller is a second copy waiting to
+    /// drift, which is exactly how these four bridges came to differ.
+    ///
+    /// MUTATION: put `Command::new(&opts.python_bin)` and its four preamble
+    /// lines back in `segment.rs` and this names the file.
+    #[test]
+    fn no_python_child_is_built_by_hand_any_more() {
+        for (file, src) in [
+            ("denoise.rs", include_str!("denoise.rs")),
+            ("segment.rs", include_str!("segment.rs")),
+        ] {
+            let non_test = crate::source_before_tests(src);
+            assert!(
+                non_test.contains("crate::sidecar_command("),
+                "{file} no longer goes through the shared sidecar command"
+            );
+            for spelled in [
+                "dotenv_child_env()",
+                "sidecar_child_env()",
+                "hide_child_console(&mut cmd)",
+                "arm_kill_group(&mut cmd)",
+                "assign_kill_group(",
+            ] {
+                assert!(
+                    !non_test.contains(spelled),
+                    "{file} spells `{spelled}` itself again — that is the fifth copy"
+                );
+            }
+        }
+        // And the shared constructor still carries every step it took over.
+        let lib = crate::source_before_tests(include_str!("lib.rs"));
+        for spelled in [
+            "dotenv_child_env()",
+            "sidecar_child_env()",
+            "hide_child_console(&mut cmd)",
+            "arm_kill_group(&mut cmd)",
+            "assign_kill_group(&child)",
+            "Stdio::piped()",
+        ] {
+            assert!(lib.contains(spelled), "sidecar_command dropped `{spelled}`");
+        }
+    }
+
+    /// A sidecar that exits non-zero produces ONE refusal, and the child's
+    /// stderr is IN it.
+    ///
+    /// The child is this test binary re-invoked, so the check needs no Python
+    /// and no model: what is under test is the executor, not the script. It
+    /// proves the two things the four hand-written copies each had to get
+    /// right — stdio captured rather than inherited (an inherited handle would
+    /// leave the reason on a console the release GUI does not have), and the
+    /// exit code carried into the message.
+    ///
+    /// MUTATION: change `Stdio::piped()` to `Stdio::inherit()` in
+    /// `sidecar_command` and the stderr assertion fails.
+    #[test]
+    fn a_sidecar_that_exits_non_zero_is_mapped_to_one_refusal() {
+        const CHILD: &str = "AUTOSHADE_SIDECAR_EXECUTOR_TEST_CHILD";
+        if std::env::var_os(CHILD).is_some() {
+            eprintln!("the reason it could not run");
+            std::process::exit(3);
+        }
+        let exe = std::env::current_exe().unwrap();
+        let mut cmd = super::sidecar_command(&exe);
+        cmd.args([
+            "--exact",
+            "sidecar_executor_tests::a_sidecar_that_exits_non_zero_is_mapped_to_one_refusal",
+            "--nocapture",
+        ])
+        .env(CHILD, "1");
+        let out = super::run_sidecar_child(
+            &mut cmd,
+            "test sidecar",
+            &exe.display().to_string(),
+            Duration::from_secs(120),
+        )
+        .expect("the child ran and was waited on");
+        assert_eq!(out.status.code(), Some(3), "the child's own exit code must survive the wait");
+        let refusal = super::sidecar_exit_error("test sidecar", &out).to_string();
+        assert!(
+            refusal.starts_with("test sidecar exited with 3: "),
+            "the refusal must name the bridge and the code: {refusal}"
+        );
+        assert!(
+            refusal.contains("the reason it could not run"),
+            "the child's stderr was not captured: {refusal}"
+        );
+    }
+
+    /// A program that cannot be launched says what to do about it.
+    ///
+    /// The spawn context is the one line that reaches a user whose Python is
+    /// simply not installed, and it was hand-copied at all four bridges.
+    #[test]
+    fn a_sidecar_that_cannot_launch_names_the_setting_that_fixes_it() {
+        let mut cmd = super::sidecar_command("autoshade-no-such-program-exists");
+        let e = super::run_sidecar_child(
+            &mut cmd,
+            "test sidecar",
+            "autoshade-no-such-program-exists",
+            Duration::from_secs(5),
+        )
+        .expect_err("a program that does not exist cannot launch")
+        .to_string();
+        assert!(e.contains("launch test sidecar"), "{e}");
+        assert!(e.contains("AUTOSHADE_PYTHON"), "the refusal must name the way out: {e}");
+    }
+}
+
 /// TEST-ONLY: a unique-per-test fixture dir. Fixed names let two concurrent
 /// test processes (nextest, a second worktree) delete each other's fixtures
 /// mid-run, and a leftover output from an aborted run flips assertions — so
@@ -497,11 +785,12 @@ pub(crate) fn test_dir(tag: &str) -> std::path::PathBuf {
 /// return its path — the shared ceremony behind every sidecar-bridge loopback
 /// test (a `.bat` on Windows, a `chmod +x` sh script elsewhere). Extracted
 /// when `correspond.rs`'s tests would have been the third copy of the
-/// `#[cfg(windows)]` / permissions boilerplate (`denoise.rs`'s harness and
-/// `advisor/claude.rs`'s CLI stub carry the earlier two; that one also writes
-/// an envelope file and two capture paths of its own, and keeps its own
-/// spelling). The BODIES are the test's own — this helper
-/// owns only the platform ceremony, so no behaviour moves.
+/// `#[cfg(windows)]` / permissions boilerplate. `advisor/claude.rs`'s three
+/// CLI stubs went through it in v1.2.4: the earlier note had left them out on
+/// the grounds that a `claude` child speaks a different protocol from a python
+/// one, and the protocol was never the obstacle — the BODIES are the
+/// caller's own, and this helper owns only the platform ceremony, so no
+/// behaviour moves.
 #[cfg(test)]
 pub(crate) fn write_stand_in(
     dir: &std::path::Path,
