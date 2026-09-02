@@ -1097,17 +1097,15 @@ fn same_path(a: &Path, b: &Path) -> bool {
         return true;
     }
     // Canonicalization fixes casing only for the EXISTING ancestor chain —
-    // absent tail components come back spelled verbatim. On Windows a
-    // case-flipped absent leaf ("Recipe.json" for a first, not-yet-written
-    // recipe.json) still names the same future file (NTFS is
-    // case-insensitive), and classifying it as redirected bypassed the
-    // backup gate. Folding case widens equality toward the safe side —
-    // canonical treatment means the gate applies — EXCEPT inside an NTFS
-    // dir with per-directory case sensitivity enabled (WSL-created,
-    // exotic), where two genuinely distinct case-variant leaves conflate:
-    // accepted trade-off, since default-insensitive NTFS is the case that
-    // bypassed the gate.
-    if cfg!(windows) {
+    // absent tail components come back spelled verbatim. A case-flipped absent
+    // leaf ("Recipe.json" for a first, not-yet-written recipe.json) names the
+    // same future file wherever the volume folds case, and classifying it as
+    // redirected bypassed the backup gate. The rule is the VOLUME's, asked
+    // once per directory (`store::volume_folds_case`), not the platform's:
+    // `cfg!(windows)` used to leave the gate bypassable on macOS and on a
+    // Linux-mounted exFAT card, and to conflate two genuinely distinct
+    // case-variant leaves inside a per-directory case-sensitive NTFS folder.
+    if autoshade::store::volume_folds_case(&na) {
         return na.to_string_lossy().to_lowercase() == nb.to_string_lossy().to_lowercase();
     }
     false
@@ -2584,7 +2582,7 @@ mod tests {
             python_bin: "python".into(),
             denoise_model: "m".into(),
             denoise_script: String::new(),
-            denoise_cache: String::new(),
+            weights_dir: String::new(),
             segment_script: String::new(),
             embed_script: String::new(),
             correspond_script: String::new(),
@@ -2680,15 +2678,23 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// MUTATION: put `cfg!(windows)` back in `same_path` and this fails on any
+    /// case-sensitive volume, which is the setup it used to be blind to.
     #[test]
-    #[cfg(windows)]
-    fn same_path_folds_case_of_an_absent_leaf() {
+    fn same_path_folds_case_of_an_absent_leaf_where_the_volume_does() {
         let dir = std::env::temp_dir().join(format!("autoshade-cli-same-path-case-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
-        // The leaf does NOT exist — only the ancestor chain canonicalizes, so
-        // equality must come from the case fold, not from canonicalize.
-        assert!(same_path(&dir.join("recipe.json"), &dir.join("Recipe.json")));
-        // A genuinely different absent leaf must stay different.
+        // The probe needs one existing name to flip; the LEAF under test still
+        // must not exist, because only the ancestor chain canonicalizes and
+        // equality has to come from the case fold rather than from canonicalize.
+        std::fs::write(dir.join("anchor.txt"), b"x").unwrap();
+        let folds = autoshade::store::volume_folds_case(&dir.join("recipe.json"));
+        assert_eq!(
+            same_path(&dir.join("recipe.json"), &dir.join("Recipe.json")),
+            folds,
+            "the overwrite gate must follow the volume's own case rule"
+        );
+        // A genuinely different absent leaf stays different on either volume.
         assert!(!same_path(&dir.join("recipe.json"), &dir.join("other.json")));
         let _ = std::fs::remove_dir_all(&dir);
     }

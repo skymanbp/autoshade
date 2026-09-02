@@ -8245,7 +8245,7 @@ mod tests {
     /// THE CALIBRATION HARNESS — batch 2's numbers, measured on the real
     /// library rather than argued from it.
     ///
-    /// `#[ignore]` and env-gated, on the `AUTOSHOP_FIT_CALIBRATION_DIR`
+    /// `#[ignore]` and env-gated, on the `AUTOSHADE_FIT_CALIBRATION_DIR`
     /// precedent and for its reason: the corpus is one photographer's RAWs and
     /// sidecars, it cannot live in a public repository, and a machine-absolute
     /// path baked into a test is the mistake that pattern exists to avoid.

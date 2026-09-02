@@ -416,6 +416,17 @@ pub enum RootTrust {
 pub(crate) const STORE_DIR_NAME: &str = "AutoShade";
 #[cfg(not(target_os = "macos"))]
 pub(crate) const STORE_DIR_NAME: &str = "autoshade";
+/// The store directory's pre-rename name.
+///
+/// KEPT, and this is the settled answer rather than another grace period:
+/// v1.2.4 retired the `AUTOSHOP_*` environment door and the pre-rename settings
+/// FILE name, both of which stood in configuration the app rewrites on the next
+/// save. This one stands in front of the user's develops — every edit they have
+/// ever made — and there is no release after which a v1.1 install stops having
+/// them under the old folder name. Someone jumping from v1.1 straight to a much
+/// later version must still find their store, so [`adopt_pre_rename_root`]
+/// keeps looking; it renames once, discloses what it did, and a store that has
+/// been adopted never meets this constant again.
 pub(crate) const LEGACY_STORE_DIR_NAME: &str = "autoshop";
 
 /// Whether a pre-rename directory sitting beside the current one is OURS.
@@ -646,21 +657,27 @@ fn fnv1a64(bytes: &[u8]) -> u64 {
 /// as orphans; the store's stem-cased artifact names assume a
 /// case-insensitive root on Windows throughout.)
 ///
-/// OFF Windows the fold does NOT run, and that is the decision, not an
-/// omission: case-insensitivity is a property of the VOLUME, and only Windows
-/// guarantees it for every local one. Linux is case-sensitive on every
-/// ordinary filesystem, and macOS ships APFS case-insensitive by default but
-/// formats case-SENSITIVE on request — so a compile-time fold there is a
-/// guess, and the two ways of guessing wrong are not symmetric. Folding on a
-/// case-sensitive volume MERGES two genuinely different photos into one
-/// develop dir and one develop lock, and each save then overwrites the
-/// other's recipe; not folding on a case-insensitive one costs at most a
-/// second develop dir for one photo, with both still readable and neither
-/// destroyed. Aliases off Windows are handled where they can be handled
-/// truthfully instead: [`identity_of`] resolves the spelling
-/// through `fs::canonicalize`, which collapses symlink and `..` aliases on
-/// every platform (whether a given libc's `realpath` ALSO normalises case is
-/// not relied on here — nothing in this module reads case out of it).
+/// OFF Windows the fold does NOT run — a compile-time constant, deliberately,
+/// even though [`volume_folds_case`] can now answer the same question per
+/// volume and every path COMPARISON in this app asks it.
+///
+/// A key is not a comparison. This one names a DIRECTORY that has to be the
+/// same one next week: `<stem>-<hash>` is where every recipe, snapshot, mask
+/// raster and lock for that photo lives. The probe reads the filesystem, and a
+/// filesystem read can fail for reasons that have nothing to do with case — a
+/// disconnected network volume, a permission, an antivirus holding the
+/// directory — at which point it answers [`DEFAULT_CASE_FOLD`] instead, the key
+/// changes, and the develop orphans. Stability outranks precision here, and the
+/// asymmetry decides the direction: folding on a case-sensitive volume MERGES
+/// two genuinely different photos into one develop dir and one develop lock, so
+/// each save overwrites the other's recipe, while not folding on a
+/// case-insensitive one costs at most a second develop dir, both readable and
+/// neither destroyed. So the fold runs exactly where the platform guarantees it
+/// for every local volume. Aliases off Windows are handled where they can be
+/// handled truthfully instead: [`identity_of`] resolves the spelling through
+/// `fs::canonicalize`, which collapses symlink and `..` aliases on every
+/// platform (whether a given libc's `realpath` ALSO normalises case is not
+/// relied on here — nothing in this module reads case out of it).
 pub fn photo_key(src: &Path) -> String {
     key_from_spelling(&identity_of(src))
 }
@@ -675,9 +692,118 @@ pub(crate) fn photo_key_lexical(src: &Path) -> String {
 }
 
 fn key_from_spelling(abs: &Path) -> String {
-    // The ONE place the platform's case rule is decided; see `photo_key` for
-    // why it is a compile-time constant and not a per-volume probe.
+    // The STORE KEY's case rule, and the one place it is decided. Deliberately
+    // NOT [`volume_folds_case`]: see `photo_key` for why a key may not depend
+    // on a probe that can fail.
     key_from_spelling_folded(abs, cfg!(windows))
+}
+
+/// The case rule to assume when a volume cannot be probed.
+///
+/// Windows folds on every local volume by default, macOS ships APFS
+/// case-insensitive and formats case-SENSITIVE only on request, and every
+/// ordinary Linux filesystem is case-sensitive.
+const DEFAULT_CASE_FOLD: bool = cfg!(windows) || cfg!(target_os = "macos");
+
+/// Does the volume `path` sits on resolve names case-INSENSITIVELY?
+///
+/// Case sensitivity is a property of the VOLUME, not of the operating system,
+/// and one machine can hold both kinds: a Linux box with an exFAT card mounted,
+/// a Mac formatted case-sensitive, a Windows directory opted out of folding by
+/// `fsutil` or created from WSL. Every path comparison that asked
+/// `cfg!(windows)` instead was therefore wrong on some real setup — it let a
+/// case-flipped `-o` past the overwrite gate on macOS and on a Linux-mounted
+/// card, and conflated two genuinely distinct files inside a case-sensitive
+/// Windows directory. This is the ONE helper they all ask now.
+///
+/// Empirical and read-only: it flips the ASCII case of an existing entry's name
+/// and asks whether the flipped spelling names the SAME OBJECT. Same object,
+/// not merely "something exists" — a directory holding both `Photos` and
+/// `pHOTOS` holds two of them and is case-SENSITIVE, and answering "folds"
+/// there is the one error that costs data.
+///
+/// Probed once per directory per process, at the deepest EXISTING ancestor of
+/// `path` (the leaf commonly does not exist yet). A directory that cannot be
+/// probed — unreadable, or empty of any name carrying an ASCII letter — answers
+/// [`DEFAULT_CASE_FOLD`].
+pub fn volume_folds_case(path: &Path) -> bool {
+    let Some(dir) = path.ancestors().skip(1).find(|p| p.is_dir()) else {
+        return DEFAULT_CASE_FOLD;
+    };
+    static MEMO: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<PathBuf, bool>>,
+    > = std::sync::OnceLock::new();
+    let memo = MEMO.get_or_init(Default::default);
+    // A poisoned mutex must not change the ANSWER: probe again rather than
+    // panic. The memo is a cache of a pure question about the filesystem, so
+    // a lost entry costs one extra `read_dir` and nothing else.
+    if let Ok(m) = memo.lock()
+        && let Some(hit) = m.get(dir)
+    {
+        return *hit;
+    }
+    let folds = dir_folds_case(dir).unwrap_or(DEFAULT_CASE_FOLD);
+    if let Ok(mut m) = memo.lock() {
+        // One entry per directory touched, and a session touches a bounded
+        // number of them; the store's own key memo is the larger of the two.
+        m.insert(dir.to_path_buf(), folds);
+    }
+    folds
+}
+
+/// [`volume_folds_case`]'s probe, on one directory, with no memo.
+///
+/// `None` when the directory answers nothing: unreadable, or holding no name
+/// with an ASCII letter to flip. The scan stops at the first usable name, and
+/// at 64 entries either way so a photo library's root costs a bounded read.
+fn dir_folds_case(dir: &Path) -> Option<bool> {
+    let entries = std::fs::read_dir(dir).ok()?;
+    for entry in entries.flatten().take(64) {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        if !name.bytes().any(|b| b.is_ascii_alphabetic()) {
+            continue;
+        }
+        let flipped: String = name
+            .chars()
+            .map(|c| {
+                if c.is_ascii_uppercase() {
+                    c.to_ascii_lowercase()
+                } else {
+                    c.to_ascii_uppercase()
+                }
+            })
+            .collect();
+        return Some(same_object(&dir.join(name), &dir.join(&flipped)));
+    }
+    None
+}
+
+/// Do these two spellings name ONE object on disk?
+#[cfg(unix)]
+fn same_object(a: &Path, b: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    // Device + inode is the platform's own answer to this question, and the
+    // only one that survives a case-INSENSITIVE volume: `realpath` returns the
+    // spelling it was handed there, so two spellings of one file canonicalize
+    // to two different strings.
+    match (std::fs::metadata(a), std::fs::metadata(b)) {
+        (Ok(x), Ok(y)) => x.dev() == y.dev() && x.ino() == y.ino(),
+        _ => false,
+    }
+}
+
+/// Do these two spellings name ONE object on disk?
+#[cfg(not(unix))]
+fn same_object(a: &Path, b: &Path) -> bool {
+    // Windows exposes no stable inode on stable Rust (`file_index` is behind
+    // an unstable feature). `canonicalize` opens the object and asks the
+    // filesystem for its FINAL name, which comes back in the TRUE on-disk
+    // casing, so two spellings of one file canonicalize to one string.
+    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+        (Ok(x), Ok(y)) => x == y,
+        _ => false,
+    }
 }
 
 /// [`key_from_spelling`] with that case rule handed IN, so BOTH halves of it
@@ -772,7 +898,8 @@ fn the_stem_fold_never_invents_a_name_ntfs_cannot_resolve() {
         "a case-sensitive host must not merge two photos into one develop"
     );
     // The wiring: `photo_key` folds exactly where the platform guarantees
-    // case-insensitive paths for every local volume (see its doc comment).
+    // case-insensitive paths for every local volume, and NOT per volume — see
+    // its doc comment for why a key may not depend on a probe that can fail.
     if cfg!(windows) {
         assert_eq!(photo_key(upper), photo_key(lower), "NTFS: one file, one key");
     } else {
@@ -799,6 +926,92 @@ fn the_stem_fold_never_invents_a_name_ntfs_cannot_resolve() {
         assert_eq!(folded.chars().count(), stem.chars().count(), "no expansion: {folded}");
         assert_eq!(folded, stem.to_ascii_lowercase(), "only ASCII letters fold: {folded}");
     }
+}
+
+/// [`volume_folds_case`] answers what the VOLUME does, not what the operating
+/// system usually does.
+///
+/// The ground truth is taken from the filesystem in the same breath — write one
+/// file, then ask whether the case-flipped spelling opens — so the test proves
+/// the probe on whatever volume the temp directory happens to live on, which is
+/// the entire point of replacing `cfg!(windows)` with a probe.
+///
+/// MUTATION: make `dir_folds_case` return `Some(false)` and this fails on every
+/// case-insensitive volume (each Windows runner, and a default-APFS Mac).
+#[cfg(test)]
+#[test]
+fn the_case_rule_is_read_off_the_volume_not_off_the_platform() {
+    let dir = std::env::temp_dir()
+        .join(format!("autoshade-case-probe-{}-{}", std::process::id(), next_tmp_seq()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("Ab.txt"), b"x").unwrap();
+    let truth = std::fs::metadata(dir.join("aB.txt")).is_ok();
+    assert_eq!(
+        volume_folds_case(&dir.join("Ab.txt")),
+        truth,
+        "the probe disagreed with the volume it was probing"
+    );
+    // The leaf a caller actually hands in usually does NOT exist yet (a first
+    // `-o`, a recipe not written), so the probe is taken at the deepest
+    // EXISTING ancestor and must answer the same.
+    assert_eq!(volume_folds_case(&dir.join("not-written-yet.json")), truth);
+    // Nothing to probe: the platform rule, stated once and only once.
+    let empty = dir.join("empty");
+    std::fs::create_dir_all(&empty).unwrap();
+    assert_eq!(
+        volume_folds_case(&empty.join("photo.arw")),
+        DEFAULT_CASE_FOLD,
+        "an unprobeable directory must fall back to the platform rule"
+    );
+    assert_eq!(
+        DEFAULT_CASE_FOLD,
+        cfg!(windows) || cfg!(target_os = "macos"),
+        "the platform rule: Windows and default APFS fold, ordinary Linux does not"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The probe may never call a case-SENSITIVE volume a folding one.
+///
+/// It asks whether the flipped spelling names the SAME OBJECT, not whether
+/// something answers to it, and that distinction is the one that costs data: a
+/// case-sensitive directory can hold both spellings as two separate files, and
+/// calling it "folds" would hand two photos one develop dir and one develop
+/// lock. Both outcomes are asserted from the same fixture — where the second
+/// spelling can be CREATED there are two files and the answer must be "does not
+/// fold", and where creating it collides there is one file and the answer must
+/// be "folds".
+///
+/// MUTATION: replace `same_object` with a bare `b.exists()` and a
+/// case-sensitive runner reports folding for a directory holding two files.
+#[cfg(test)]
+#[test]
+fn two_spellings_are_only_one_name_when_they_are_one_object() {
+    let dir = std::env::temp_dir()
+        .join(format!("autoshade-case-object-{}-{}", std::process::id(), next_tmp_seq()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("Cd.txt"), b"first").unwrap();
+    let second = std::fs::OpenOptions::new().write(true).create_new(true).open(dir.join("cD.txt"));
+    match second {
+        Ok(_) => assert_eq!(
+            dir_folds_case(&dir),
+            Some(false),
+            "two files were created, so this volume tells them apart"
+        ),
+        Err(e) => {
+            assert_eq!(
+                e.kind(),
+                std::io::ErrorKind::AlreadyExists,
+                "the fixture must fail by collision, not by anything else: {e}"
+            );
+            assert_eq!(
+                dir_folds_case(&dir),
+                Some(true),
+                "the second spelling collided with the first, so this volume folds"
+            );
+        }
+    }
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// The photo's IDENTITY spelling, memoized for the process lifetime. The
