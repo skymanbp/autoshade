@@ -170,7 +170,7 @@ autoshade batch <dir> [--render] [--limit N] [--include-baked] [--jobs N] [--lon
 autoshade eval <dir> [--xmp-dir DIR] [--limit N] [--jobs N] [--fresh] [--state FILE]
 autoshade style-index <dir> [--xmp-dir DIR] [--embed|--no-embed] [--describe]
 autoshade style-index --looks <dir> [--embed|--no-embed] [--describe]
-autoshade style-query <photo> [--direction TEXT] [--style 0..1] [--embed]
+autoshade style-query <photo> [--direction TEXT] [--style 0..1] [--adherence 0..1] [--embed]
 autoshade reimagine <src> --prompt TEXT [--fidelity high|low] [--quality low|medium|high|auto] [--fidelity-retry] [-o|--out FILE]
 autoshade match <src> <target> [--render] [--zoned] [--regions 2..4] [--strength 0..1] [--style-prompt] [--ai-judge] [--deep] [-o|--out FILE]
 autoshade correspond <source> <target> [-o|--out FILE]
@@ -249,7 +249,9 @@ the RAW half's 5,000-exemplar cap and this one share a 228 MiB index envelope).
 `style-query` is an offline diagnostic that prints the weights in force, the
 exact retrieval terms behind every ranked neighbour and look — each weighted
 term beside the raw cosine it came from — each neighbour's local-work counts
-(`masks=… sky=… subject=…`), and the proposer reference
+(`masks=… sky=… subject=…`), the VOICE the reference block will be spoken in
+(`Ceiling` / `Target` / `Background` — pass `--adherence` to forecast a
+different dial than the shipped 0.65), and the proposer reference
 blocks, including the explicit reason a look library is unreachable when no
 embedding vector is available.
 
@@ -398,6 +400,20 @@ settings file can supply them.
   is opt-in and reports how many indexed records carry vectors. Strength
   independently controls the fit budget and confidence cap; Direction adherence
   chooses Hint, Direct, or Brief wording when a Direction is present.
+- **Who leads, Direction or your library (v1.2.3):** write a **Direction** and
+  leave **Adherence** at its default 65 % (or higher) and the direction leads.
+  Your library is still retrieved, still ranked by that direction, still shown to
+  the model and still named in the rationale — but it arrives as BACKGROUND for
+  continuity ("where these habits and the direction conflict, follow the
+  direction"), and the `style_pull` above is **not applied at all**, whatever the
+  Style slider says. That is the whole point: measured on one frame at Style 100 %
+  and Strength 90 %, three directions as far apart as *dark moody low-key,
+  teal-and-orange*, *warm golden tones with lifted matte shadows* and *vivid
+  saturated colours, punchy high contrast* all came back inside the library's own
+  cool hazy register. Drop Adherence to 40 % or below (tier **Hint**) and the
+  library leads again, exactly as it did in v1.2.2 — with no Direction at all, or
+  a blank one, nothing about the Style control changes. A develop that skipped the
+  pull says so in its rationale and names the tier that decided it.
 - **Reimagine:** enter a prompt in the AI panel or use `reimagine` to create a
   generated, lower-resolution target. `--fidelity high` (the default, and the
   GUI's mode) tells the model to re-develop the same photograph, not repaint

@@ -768,7 +768,7 @@ back, or `temper` compresses it back). All six read the dial.
 | 2 | `EditRecipe::temper` | [`src/recipe.rs`](../src/recipe.rs) | The four soft-cap knees/ceilings scale by `1 + (s − 0.5)·0.7` — 0.5 is the shipped 50→70 / 30→45 exactly, and full strength asymptotes at 94.5, still inside the ±100 hard `clamp` |
 | 3 | Verifier prompt | `advisor::{verify_flat_clause, verify_cooked_clause}` | The too-FLAT band tightens, the OVER-COOKED band relaxes; the target and the photographer's DIRECTION are stated ABOVE the checklist they modify |
 | 4 | Visual judge rubric | `advisor::judge::intent_rubric` | The Develop rubric gains the target and the direction. FitMatch gains neither — a look MATCH has no strength |
-| 5 | Style reference wording | `style::render_reference` (+ gate 1's reference clause) | Below Style 0.85 the retrieved habit is a CEILING ("not stronger", "do not exceed it"); at or above it, a FLOOR headed "TARGET style to reproduce". This gate is templated on the STYLE axis, not on this dial: strength above 0.70 with Style below 0.85 no longer receives the old committed-tier FLOOR wording. The measured NUMBERS never change — a dial must not restate what the photographer actually did |
+| 5 | Style reference wording | `style::render_reference` (+ gate 1's reference clause) | Below Style 0.85 the retrieved habit is a CEILING ("not stronger", "do not exceed it"); at or above it, a FLOOR headed "TARGET style to reproduce". Since v1.2.3 a THIRD voice, `StyleVoice::Background`, is chosen instead whenever a non-empty direction is present at adherence `Direct`/`Brief` — header "STYLE BACKGROUND … The DIRECTION LEADS", and every aim clause hands the decision to the direction (§4.6). This gate is templated on the STYLE axis, not on this dial: strength above 0.70 with Style below 0.85 no longer receives the old committed-tier FLOOR wording. The measured NUMBERS never change in any voice — a dial must not restate what the photographer actually did |
 | 6 | No-AI fallback | `advisor::heuristic` | The baseline's histogram-driven recovery goes through the same `temper` dial, so the fallback cannot taste different from the AI path at one setting |
 
 Bands are coarse (≤ 0.4 restrained / ≤ 0.7 balanced / above committed) because
@@ -801,7 +801,11 @@ and are not on the axis either. The **Style** slider's `style_pull` (0.18 at the
 shipped Style 0.3, full at Style 1.0) is off the strength axis on purpose too:
 that number bounds mean-regression toward the user's
 own average edit, so coupling it to strength would turn "push harder" into "look
-more like my average" — the other axis, pointing the other way.
+more like my average" — the other axis, pointing the other way. Since v1.2.3 there
+is exactly one case in which that pull does not run at all — a direction leading at
+adherence `Direct`/`Brief` (`pipeline::style_blend_pull`, §4.6). That is not a
+strength decision either; it is the same `StyleVoice` the wording above reads, so
+the block and the arithmetic cannot disagree about who leads.
 
 This also closes a gap this document had already declared: the verifier row above
 has always promised "consistent with metadata **& intent**", while
@@ -1988,6 +1992,46 @@ direction helped choose the look only when a text weight is actually non-zero.
 Direction adherence is an independent Hint/Direct/Brief prompt tier using the
 same band edges as Strength; the verifier is told the selected tier, and only
 when a direction exists.
+
+**Who leads when a direction is given (v1.2.3).** Until v1.2.3 the retrieved
+library was always the thing to hit: the block said either "stay within it" or
+"REPRODUCE this look", and `blend_toward` then lerped the finished proposal onto
+the neighbours' means. A free-text direction could only move the proposal WITHIN
+that. Measured on the island showcase frame (2026-09-01, `--style 1.0 --strength
+0.9`, an index of 169 RAW+XMP exemplars plus 94 finished looks): three directions
+as far apart as *dark moody low-key … teal-and-orange*, *warm golden tones,
+film-like grain, lifted matte shadows* and *vivid saturated colours, punchy high
+contrast, crisp clarity* developed to per-panel-cell mean HSV S/V of **23/54 ·
+11/58 · 18/55** — all three inside the library's own cool hazy register, against
+the neutral develop's 17/47. The same three directions against an index with the
+photographer's own edits removed separated to **34/38 · 12/61 · 29/65**.
+
+The user's ruling: when a direction is given, the photographer's own edits are
+background and the direction leads. The mechanism is the adherence dial the app
+already had, not a fourth control. `style::StyleVoice::choose(style, direction,
+adherence)` is the ONE derivation — `Background` when a non-empty direction meets
+tier `Direct` or `Brief`, otherwise the historical `Ceiling`/`Target` split at
+Style 0.85 — and it decides two things at once:
+
+* **the wording.** `render_reference_voiced` renders the block in that voice. In
+  `Background` the header reads "STYLE BACKGROUND … The DIRECTION LEADS" and each
+  of the four aim clauses (curve, colour families, shared look, local work) becomes
+  a habit the direction may override. The measured NUMBERS are byte-identical
+  across all three voices; only the aims move.
+* **the arithmetic.** `pipeline::style_blend_pull` returns `None` in `Background`,
+  so neither the verified proposal nor a judge candidate is pulled toward
+  `style_targets`, and the re-verification that follows a real blend is skipped
+  with it. Wording alone would have been a lie by arithmetic: at Style 1.0
+  `style_pull` is FULL, i.e. the proposal's own value is replaced.
+
+Retrieval is unchanged — `req.style > 0` still gates it, the direction still ranks
+the exemplars and the look, IMAGE 2 still goes, and `STYLE_NEIGHBOURS` /
+`STYLE_REF_IMAGE` / the look notes still disclose it. The skip has its own note,
+`STYLE_BACKGROUND`, which names the adherence tier that caused it and how to hand
+the lead back. With no direction, a blank one, or one at tier `Hint`, the block is
+byte-identical to v1.2.2 at every Style value
+(`style::the_no_direction_block_is_byte_identical`, whose three fixtures were
+captured from the v1.2.2 build before the third voice existed).
 
 ### 4.7 Pixel retouch / heal (optional) — V2
 
