@@ -126,20 +126,32 @@ jobs:
           "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
           Write-Host "upgrading from $($candidate.tagName) ($version)"
 
+      # Three PATH shapes, each a full run of the chain: the PATH as the runner
+      # has it, a trailing ';' and a doubled one. The runner's own PATH happens
+      # to end in ';' -- the first run of this workflow found the uninstaller
+      # eating it -- but a runner image can change, so the shape is passed in
+      # rather than inherited.
       - name: Run the installer scenarios
         shell: pwsh
         run: |
-          .\scripts\installer_scenarios.ps1 `
-            -BaseSetup '${{ steps.prev.outputs.setup }}' `
-            -BaseVersion '${{ steps.prev.outputs.version }}' `
-            -UpgradeSetup "target\installer\AutoShade-Setup-${{ steps.ver.outputs.version }}.exe" `
-            -UpgradeVersion '${{ steps.ver.outputs.version }}' `
-            -DowngradeSetup "$env:RUNNER_TEMP\downgrade\AutoShade-Setup-${{ steps.ver.outputs.downgrade }}.exe" `
-            -DowngradeVersion '${{ steps.ver.outputs.downgrade }}' `
-            -AppId "$env:SHIPPED_APP_ID" `
-            -AppName 'AutoShade' `
-            -PayloadRoot . `
-            -WorkRoot "$env:RUNNER_TEMP\installer-scenarios"
+          $shapes = @('', ';', ';;')
+          $i = 0
+          foreach ($suffix in $shapes) {
+            $i++
+            Write-Host "=== PATH shape $i of $($shapes.Count): suffix '$suffix'"
+            .\scripts\installer_scenarios.ps1 `
+              -BaseSetup '${{ steps.prev.outputs.setup }}' `
+              -BaseVersion '${{ steps.prev.outputs.version }}' `
+              -UpgradeSetup "target\installer\AutoShade-Setup-${{ steps.ver.outputs.version }}.exe" `
+              -UpgradeVersion '${{ steps.ver.outputs.version }}' `
+              -DowngradeSetup "$env:RUNNER_TEMP\downgrade\AutoShade-Setup-${{ steps.ver.outputs.downgrade }}.exe" `
+              -DowngradeVersion '${{ steps.ver.outputs.downgrade }}' `
+              -AppId "$env:SHIPPED_APP_ID" `
+              -AppName 'AutoShade' `
+              -PayloadRoot . `
+              -WorkRoot "$env:RUNNER_TEMP\installer-scenarios\shape-$i" `
+              -PathSuffix $suffix
+          }
 
       # The Inno logs are the evidence for every log assertion above, and the
       # only way to read a failure that happened inside setup.
@@ -148,5 +160,5 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: installer-scenario-logs
-          path: ${{ runner.temp }}/installer-scenarios/logs
+          path: ${{ runner.temp }}/installer-scenarios/*/logs
           if-no-files-found: warn

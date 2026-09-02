@@ -45,6 +45,14 @@
     The base installer was compiled from this .iss, so its log carries this
     tree's sentences and its tasks include addtopath. Off for a published
     release: the file and registry assertions still run, the log ones do not.
+
+.PARAMETER PathSuffix
+    Appended to the user PATH for the duration of the run and taken off again
+    at the end (and on any error), so the uninstaller's promise -- the PATH
+    comes back byte for byte -- is measured on more than one shape. A GitHub
+    runner's PATH ends in ';' and a developer's usually does not, and the
+    first CI run found the uninstaller eating that trailing separator. Pass
+    ';' or ';;'; empty measures the PATH as found.
 #>
 [CmdletBinding()]
 param(
@@ -60,6 +68,7 @@ param(
     [string]$WorkRoot,
     [string]$ForbiddenAppId,
     [switch]$BaseFromThisTree,
+    [string]$PathSuffix = '',
     # Run the [Setup] assertions and stop. Nothing is installed, no
     # installer is needed, and the whole file is read in under a second.
     [switch]$SourceOnly
@@ -103,6 +112,16 @@ function Assert-Same {
 function Get-UserPathRaw {
     $key = Get-Item -LiteralPath 'HKCU:\Environment'
     return [string]$key.GetValue('Path', '', 'DoNotExpandEnvironmentNames')
+}
+
+function Set-UserPathRaw {
+    # Written back with the kind it was found in, so a REG_SZ PATH is not
+    # silently promoted to REG_EXPAND_SZ by the test harness.
+    param([string]$Value)
+    $key = Get-Item -LiteralPath 'HKCU:\Environment'
+    $kind = [Microsoft.Win32.RegistryValueKind]::ExpandString
+    if ($null -ne $key.GetValue('Path')) { $kind = $key.GetValueKind('Path') }
+    [Microsoft.Win32.Registry]::SetValue('HKEY_CURRENT_USER\Environment', 'Path', $Value, $kind)
 }
 
 function Get-UserPathEntries {
@@ -397,6 +416,20 @@ $payload = Get-PayloadMap $PayloadRoot
 
 Write-Head 'What this run must not disturb'
 $pathBefore = Get-UserPathRaw
+$script:PathOriginal = $pathBefore
+if ($PathSuffix -ne '') {
+    Set-UserPathRaw ($script:PathOriginal + $PathSuffix)
+    $pathBefore = Get-UserPathRaw
+    Write-Host "user PATH given the suffix '$PathSuffix' for this run ($($script:PathOriginal.Length) -> $($pathBefore.Length) characters)"
+}
+# Whatever stops this script early, the suffix comes off again.
+trap {
+    if ($PathSuffix -ne '') {
+        Set-UserPathRaw $script:PathOriginal
+        Write-Host "user PATH restored to its original $($script:PathOriginal.Length) characters after an error"
+    }
+    break
+}
 $autoshopKeyBefore = Test-Path -LiteralPath 'HKCU:\Software\Autoshop'
 [IO.File]::WriteAllText((Join-Path $WorkRoot 'user-path-before.txt'), $pathBefore)
 Write-Host "user PATH: $($pathBefore.Length) characters, $(@(Get-UserPathEntries).Count) entries"
@@ -677,6 +710,11 @@ if (-not [string]::IsNullOrWhiteSpace($ForbiddenAppId)) {
     }
     Assert-Same (Get-TreeSignature (Get-StartMenuGroup 'AutoShade')) $forbiddenGroupBefore `
         "the shipped install's Start Menu folder is untouched"
+}
+
+if ($PathSuffix -ne '') {
+    Set-UserPathRaw $script:PathOriginal
+    Assert-Same (Get-UserPathRaw) $script:PathOriginal 'the user PATH is back to the bytes found before the suffix went on'
 }
 
 Write-Head 'result'

@@ -3430,7 +3430,15 @@ them unless `/DELETEDATA=1` is on its command line. That question is put with
 decision and a hang: a plain `MsgBox` from Pascal Script displays even under
 `/VERYSILENT /SUPPRESSMSGBOXES` and waits there for a click nobody is present
 to give. Program files, shortcuts, `PATH` entry and registry entry go in either
-mode; the install folder itself goes only when the data went with it.
+mode; the install folder itself goes only when the data went with it. The
+`PATH` entry goes by span, not by re-joining: setup records whether it wrote
+the separator in front of its directory or appended the directory to a PATH
+that already ended in `;`, and the uninstaller deletes exactly that span, so
+a PATH that ended in `;` before setup — a GitHub runner's does, a developer's
+usually not — ends in `;` after uninstall. The workflow's first run found the
+old split-and-rejoin eating that trailing separator; the chain now runs under
+three PATH shapes (as found, trailing `;`, trailing `;;`) and asserts the
+bytes come back identical under each.
 
 A scenario run must never be able to touch the real install, so the identity is
 a compile-time parameter: `/DAppIdOverride` and `/DAppNameOverride` give a test

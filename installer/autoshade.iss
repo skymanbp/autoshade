@@ -161,6 +161,10 @@ const
   // uninstall leaves a dead directory on the user's PATH forever.
   InstallerStateKey = 'Software\Autoshop\InstallerScenario';
 #endif
+  // 1 = setup wrote ';' and then the install directory; 2 = setup wrote the
+  // directory alone, because the PATH was empty or already ended in ';'. The
+  // uninstaller deletes exactly that span and nothing else, so a PATH that
+  // carried a trailing or doubled separator before setup ran carries it after.
   PathMarkerName = 'PathAddedByInstaller';
   DevelopStoreName = 'DevelopStore';
   // Where Inno itself records this install. DisplayVersion in here is the only
@@ -184,6 +188,37 @@ begin
   StringChangeEx(Result, '/', '\', True);
   while (Length(Result) > 3) and (Result[Length(Result)] = '\') do
     Delete(Result, Length(Result), 1);
+end;
+
+// The span of the entry in PathValue that names Wanted: Start is 1-based and
+// Len is the entry's own length, separators excluded. False when absent.
+function FindPathEntry(const PathValue, Wanted: String;
+                       var Start, Len: Integer): Boolean;
+var
+  I, SegStart: Integer;
+  Entry: String;
+begin
+  Result := False;
+  SegStart := 1;
+  I := 1;
+  while I <= Length(PathValue) + 1 do
+  begin
+    if (I > Length(PathValue)) or (PathValue[I] = ';') then
+    begin
+      Entry := Copy(PathValue, SegStart, I - SegStart);
+      if (Entry <> '') and
+         (CompareText(NormalizedPathEntry(Entry),
+                      NormalizedPathEntry(Wanted)) = 0) then
+      begin
+        Start := SegStart;
+        Len := I - SegStart;
+        Result := True;
+        Exit;
+      end;
+      SegStart := I + 1;
+    end;
+    I := I + 1;
+  end;
 end;
 
 function PathContainsEntry(const PathValue, Wanted: String): Boolean;
@@ -367,6 +402,7 @@ end;
 procedure AddInstallDirToUserPath;
 var
   ExistingPath, NewPath, InstallDir: String;
+  Marker: Cardinal;
 begin
   InstallDir := ExpandConstant('{app}');
   if not RegQueryStringValue(HKCU, UserEnvironmentKey, 'Path', ExistingPath) then
@@ -379,72 +415,69 @@ begin
   end;
 
   NewPath := ExistingPath;
+  Marker := 2;
   if (NewPath <> '') and (NewPath[Length(NewPath)] <> ';') then
+  begin
     NewPath := NewPath + ';';
+    Marker := 1;
+  end;
   NewPath := NewPath + InstallDir;
 
   if not RegWriteExpandStringValue(HKCU, UserEnvironmentKey, 'Path', NewPath) then
     RaiseException('Could not update the current user PATH.');
-  if not RegWriteDWordValue(HKCU, InstallerStateKey, PathMarkerName, 1) then
+  if not RegWriteDWordValue(HKCU, InstallerStateKey, PathMarkerName, Marker) then
     RaiseException('PATH was updated, but the uninstall marker could not be written.');
-  Log('PATH task: appended the install directory to HKCU\Environment\Path.');
+  if Marker = 1 then
+    Log('PATH task: appended a separator and the install directory to HKCU\Environment\Path.')
+  else
+    Log('PATH task: appended the install directory to HKCU\Environment\Path (it already ended in a separator, or was empty).');
 end;
 
 procedure RemoveInstallDirFromUserPath;
 var
-  ExistingPath, Remaining, Entry, NewPath, InstallDir: String;
-  Separator: Integer;
-  HaveOutput, LastEntry: Boolean;
+  ExistingPath, NewPath, InstallDir: String;
+  Start, Len: Integer;
   Marker: Cardinal;
 begin
   if (not RegQueryDWordValue(HKCU, InstallerStateKey, PathMarkerName, Marker)) or
-     (Marker <> 1) then
+     (Marker = 0) then
     Exit;
 
   InstallDir := ExpandConstant('{app}');
-  if RegQueryStringValue(HKCU, UserEnvironmentKey, 'Path', ExistingPath) then
+  if not RegQueryStringValue(HKCU, UserEnvironmentKey, 'Path', ExistingPath) then
+    Exit;
+  if not FindPathEntry(ExistingPath, InstallDir, Start, Len) then
   begin
-    Remaining := ExistingPath;
-    NewPath := '';
-    HaveOutput := False;
-    while True do
-    begin
-      Separator := Pos(';', Remaining);
-      LastEntry := Separator = 0;
-      if LastEntry then
-      begin
-        Entry := Remaining;
-        Remaining := '';
-      end
-      else
-      begin
-        Entry := Copy(Remaining, 1, Separator - 1);
-        Delete(Remaining, 1, Separator);
-      end;
-
-      if CompareText(NormalizedPathEntry(Entry),
-                     NormalizedPathEntry(InstallDir)) <> 0 then
-      begin
-        if HaveOutput then
-          NewPath := NewPath + ';';
-        NewPath := NewPath + Entry;
-        HaveOutput := True;
-      end;
-
-      if LastEntry then
-        Break;
-    end;
-
-    if NewPath <> ExistingPath then
-    begin
-      if not RegWriteExpandStringValue(HKCU, UserEnvironmentKey, 'Path', NewPath) then
-      begin
-        Log('PATH cleanup: could not update HKCU\Environment\Path; leaving marker in place.');
-        Exit;
-      end;
-      Log('PATH cleanup: removed the installer-added install directory.');
-    end;
+    Log('PATH cleanup: the install directory is no longer on the user PATH; nothing to remove.');
+    Exit;
   end;
+
+  // Take back exactly the bytes AddInstallDirToUserPath wrote: the entry, and
+  // the one separator it put in front of the entry (marker 1). When it wrote
+  // the entry straight after a separator the user already had (marker 2), the
+  // entry alone goes, and that separator stays where it was. Re-joining the
+  // parsed entries instead dropped a trailing ';' and would collapse a doubled
+  // one — the user's PATH must come back byte for byte. Should the user have
+  // moved the entry off the end, the separator on the side setup did not
+  // write is taken instead, so no empty entry is left behind.
+  NewPath := ExistingPath;
+  if (Marker = 1) and (Start > 1) and (NewPath[Start - 1] = ';') then
+    Delete(NewPath, Start - 1, Len + 1)
+  else if (Marker = 2) and (Start + Len > Length(NewPath)) then
+    Delete(NewPath, Start, Len)
+  else if (Start + Len <= Length(NewPath)) and (NewPath[Start + Len] = ';') then
+    Delete(NewPath, Start, Len + 1)
+  else if (Start > 1) and (NewPath[Start - 1] = ';') then
+    Delete(NewPath, Start - 1, Len + 1)
+  else
+    Delete(NewPath, Start, Len);
+
+  if not RegWriteExpandStringValue(HKCU, UserEnvironmentKey, 'Path', NewPath) then
+  begin
+    Log('PATH cleanup: could not update HKCU\Environment\Path; leaving marker in place.');
+    Exit;
+  end;
+  Log('PATH cleanup: removed the installer-added install directory and the separator setup wrote for it.');
 end;
 
 // Everything under the installer's state key describes THIS install, so the
