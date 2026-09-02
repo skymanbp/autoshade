@@ -145,9 +145,12 @@ const ZONE_CLIP_GROWTH: f32 = 0.01;
 /// samples are charged per crossing against their own context (see
 /// [`ZONE_BOUNDARY_STEP_MAX`], [`BOUNDARY_STEP_FLOOR`]) and that constant
 /// is the CAP on the exchange, not a promise about bare-sky visibility.
-/// Re-deriving the number itself would need a perceptual study this batch
-/// does not have, and a guessed number would be worse than the calibrated
-/// one. It is its own constant: [`ZONE_BOUNDARY_STEP_MAX`] carries the
+/// No perceptual study is owed for this number, and none is planned: it is a
+/// calibrated exchange rate, not a visibility threshold, and the batch that
+/// questioned it measured what the rate actually buys — the calibration
+/// island's seam fell from +3.15 to +0.92 code values under this budget and
+/// is not visible at 1:1. A number re-derived from a fresh threshold study
+/// would replace a measurement that exists with a preference that does not. It is its own constant: [`ZONE_BOUNDARY_STEP_MAX`] carries the
 /// hard-raster ruler's ceiling, so moving either one can no longer
 /// silently re-tune the other. The supervisor's independent RAW rim metric
 /// remains the final regression check, because it samples a 40px crossing
@@ -168,10 +171,23 @@ const ZONE_CLIP_GROWTH: f32 = 0.01;
 /// scene's own gradient is inside the reading rather than differenced
 /// away, and the budget is spent on the scene first. It is a p90 like this
 /// one, so the maxima neither ruler ranks moved the other way (0.01217 and
-/// 0.01407 on those pairs) while the ranked reading fell. THIS ruler's
-/// half of the claim is still UNMEASURED: a feathered zone needs a
-/// segmentation sidecar the measuring batch was not allowed to start, so
-/// nothing there should be read as covering it.
+/// 0.01407 on those pairs) while the ranked reading fell.
+///
+/// THIS ruler's half was measured on 2026-09-02, with the segmentation
+/// sidecar running under the shared GPU lock. `match --zoned` over the six
+/// corpus pairs attaches a feathered semantic zone on three of them, and this
+/// ruler reads 745 / 691 / 793 transitions inside their transition bands —
+/// it is LIVE on the family it was written for, not returning the empty
+/// `0 transitions` that let every hard raster past it. The ceiling binds
+/// where the correction is large and does not where it is not: introduced
+/// rims of 0.029 and 0.040 luma shrink to exactly +0.012 at k=0.385 and
+/// k=0.271, while a mild zone introducing 0.006 is kept whole at k=1.000.
+/// The constant therefore STANDS on its own family's evidence: reached from
+/// above on real pairs, and not a tax on a zone that stays under it.
+/// What those runs do not carry is the range family's second instrument (a
+/// monotone delivered transfer plus a mask-free control), which reads a
+/// rendered frame this path never writes to disk; the gate readings above
+/// are what this ruler is held to.
 pub(super) const ZONE_BOUNDARY_RIM_MAX: f32 = 0.012;
 /// Maximum induced cross-boundary step for a HARD 0/255 raster — spatial
 /// tiles and free masks, read by [`boundary_step`] rather than
@@ -1526,11 +1542,26 @@ fn joint_reading_from_buckets(buckets: &[JointBucket]) -> Option<JointReading> {
 ///      white-balance test, both of which are joint-independent. That is a
 ///      QUIETER disclosure, not a wrong one, and it was missing from this list.
 ///
-/// Verified by running the suite under it — every `fit` / `fit_zoned` test that
-/// does not assert this family's existence passes unchanged (41 of them as of
-/// R23's round review); the five that fail are exactly the ones asserting it
-/// EXISTS, which is the correct answer to switching it off and is why the
-/// variable is a diagnostic, not a supported test configuration.
+/// Verified by running the WHOLE lib suite under it, re-measured 2026-09-02
+/// on v1.2.4: `AUTOSHADE_FIT_JOINT=off cargo test --release --lib` reports
+/// 1322 passed, 9 failed, 12 ignored. Every failure is in `fit` or
+/// `fit_zoned` — 265 of the 274 tests in those two modules pass unchanged —
+/// and every one of the nine reads this family's own output through one of
+/// the four consumers above: `fit::joint_family_is_calibrated_on_the_fixture_set`
+/// and `fit::the_worst_bucket_cannot_gate_a_stage` read the reading itself,
+/// `fit::wb_default_strength_is_byte_identical_to_head` pins a confidence the
+/// cap produces, `fit::same_content_evidence_diagnosis_reports_cornwall_support_and_terminal_readings`
+/// reads the terminal arm, `fit::a_residual_the_mixer_cannot_reach_is_still_named`,
+/// `fit::solving_the_bands_takes_the_colour_shape_out_of_the_residual`,
+/// `fit::the_unsolvable_controls_are_named_for_this_pair` and
+/// `fit_zoned::unrepresented_note_is_derived_from_the_finished_zoned_render`
+/// assert the colour-shaped route of `unrepresented_note` that consumer 4
+/// describes falling back, and
+/// `fit_zoned::the_joint_family_matches_by_value_not_by_position` asserts the
+/// family exists at all. That is the correct answer to switching it off and
+/// is why the variable is a diagnostic, not a supported test configuration.
+/// (The count moved from R23's "41 of them / five that fail": the suite has
+/// grown and three of the four consumers gained tests since.)
 fn joint_family_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| {
@@ -4472,6 +4503,105 @@ mod tests {
         range_path.remove();
     }
 
+    /// Write the two artefacts the HEAD-equivalence arm above reads.
+    ///
+    /// That arm compares the layered fit, with every layer disabled, against a
+    /// recipe some earlier executable produced on the calibration pair. Until
+    /// v1.2.4 nothing in the tree could produce one, so the baseline was a
+    /// file with no procedure behind it and the arm was unrunnable for anyone
+    /// who did not already have it. The procedure is now exactly this:
+    ///
+    /// ```text
+    /// git switch --detach <the commit you want as the baseline>
+    /// AUTOSHADE_LAYERED_HEAD_SEMANTIC=<dir>/semantic.json \
+    /// AUTOSHADE_LAYERED_HEAD_RANGE=<dir>/range.json \
+    /// AUTOSHADE_FIT_CALIBRATION_DIR=<corpus> \
+    ///   cargo test --release -- --ignored export_layered_head_equivalence_artifacts
+    /// git switch -                       # then run the arm on your branch
+    /// ```
+    ///
+    /// It writes to the SAME paths the arm reads, which is the point: the
+    /// baseline is whatever executable last ran this, and the commit that
+    /// produced it is a `git switch` away rather than a memory. Ignored by
+    /// default because it overwrites that baseline, and because it needs the
+    /// calibration corpus and the correspondence sidecar.
+    ///
+    /// v1.2.4's own rebaseline is recorded in the batch report: the artefacts
+    /// carried before it came from the pre-layer executable, and this release
+    /// deliberately changes what the disabled-layer path produces on a real
+    /// pair (the structural reading abstains where it used to claim a match,
+    /// and the attachment gate reads one share ruler), so those files describe
+    /// a fit the tree no longer performs. The two synthetic arms above, which
+    /// compare against `legacy_zoned_fit` in the same process, are the
+    /// equivalence check that does not age.
+    #[test]
+    #[ignore]
+    fn export_layered_head_equivalence_artifacts() {
+        let layers = ZonedLayerOpts {
+            field: false, spatial: false, free_masks: false, refine_masks: false,
+        };
+        let (Some(head_semantic), Some(head_range)) = (
+            crate::config::live_env("AUTOSHADE_LAYERED_HEAD_SEMANTIC"),
+            crate::config::live_env("AUTOSHADE_LAYERED_HEAD_RANGE"),
+        ) else {
+            panic!("set AUTOSHADE_LAYERED_HEAD_SEMANTIC and AUTOSHADE_LAYERED_HEAD_RANGE");
+        };
+        let root = fit::calibration_corpus().expect("the artefacts are cut on the corpus pair");
+        let source = image::open(root.join("neutral.jpg")).unwrap();
+        let target = image::open(root.join("target.jpg")).unwrap();
+        let cfg = crate::config::Config::load();
+        let corr = crate::correspond::fit_provider(
+            crate::correspond::CorrespondOpts::from_config(&cfg),
+        );
+        let write = |path: &str, report: &FitReport| {
+            std::fs::write(path, serde_json::to_vec_pretty(&report.recipe).unwrap()).unwrap();
+            eprintln!("wrote {path}");
+        };
+
+        let semantic_path = fixture_mask_path("layered-head-export-semantic");
+        let mut semantic = fit_recipe_zoned_inner(
+            &source,
+            &target,
+            &SegmentOpts::from_config(&cfg, "sky"),
+            &semantic_path,
+            &crate::recipe::EditRecipe::default(),
+            Some(&corr),
+            layers,
+        );
+        crate::pipeline::stamp_fit_calibration(
+            &mut semantic.recipe,
+            crate::pipeline::fit_calibration(&root.join("neutral.jpg")),
+        );
+        write(&head_semantic, &semantic);
+        semantic_path.remove();
+
+        // The same fit with segmentation pointed at nothing, which is how the
+        // arm reaches the luminance-range path instead of the semantic one.
+        let range_path = fixture_mask_path("layered-head-export-range");
+        let range_seg = SegmentOpts {
+            python_bin: cfg.python_bin.clone(),
+            script: "D:/no-such-dir/none.py".into(),
+            target: "sky".into(),
+            reference_point: None,
+            prompt_points: None,
+        };
+        let mut range = fit_recipe_zoned_inner(
+            &source,
+            &target,
+            &range_seg,
+            &range_path,
+            &crate::recipe::EditRecipe::default(),
+            Some(&corr),
+            layers,
+        );
+        crate::pipeline::stamp_fit_calibration(
+            &mut range.recipe,
+            crate::pipeline::fit_calibration(&root.join("neutral.jpg")),
+        );
+        write(&head_range, &range);
+        range_path.remove();
+    }
+
     #[test]
     fn field_disabled_layer_is_byte_identical() {
         let (source, target, sky) = zoned_pair();
@@ -6978,13 +7108,23 @@ mod tests {
     /// multi-class call the same sky plane the single-class call returns, and
     /// [`zoned_pair`]'s land is byte-identical on both sides, so the two-region
     /// reference and the multi-region candidate solve the same sky and nothing
-    /// else. `multi_error >= two_error` then holds by equality, the candidate is
-    /// dropped, and every raster it claimed must go with it.
+    /// else. `multi_error >= two_error` then holds by equality and the
+    /// candidate is dropped, so the branch runs on every execution of this
+    /// test rather than on the ones that happen to refuse.
     ///
-    /// MUTATION: `release_unselected_rasters` made a no-op leaves the loser's
-    /// `mask-region-*` raster on disk and the orphan assertion fails.
+    /// WHAT THIS PINS, and what it does not, both measured on 2026-09-02.
+    /// Deleting the `chosen.notes.push(refusal)` in the reject branch fails
+    /// here: the branch must publish the comparison it lost, and the loser's
+    /// `mask-region-*` must not reach the kept recipe. Making
+    /// `release_unselected_rasters` a no-op does NOT fail here, and the
+    /// measurement says why: on this fixture the candidate's one region is
+    /// `ZONE_DROPPED`, so it claims no raster and there is no orphan to leave
+    /// behind. The release itself is pinned next door by
+    /// `release_unselected_rasters_keeps_exactly_what_the_kept_recipe_references`,
+    /// which does fail under that same no-op. The on-disk sweep below stays as
+    /// a guard for the day a refused candidate does claim one.
     #[test]
-    fn the_multi_region_reject_branch_releases_the_rasters_it_claimed() {
+    fn the_multi_region_reject_branch_discloses_the_comparison_it_lost() {
         let (src, tgt, _) = zoned_pair();
         let base = crate::recipe::EditRecipe::default();
         let dir = crate::test_dir("seg-arb-reject");

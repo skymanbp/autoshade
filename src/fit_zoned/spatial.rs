@@ -147,15 +147,28 @@ struct TileEvidence {
 
 type TileEvidenceCache = std::collections::BTreeMap<TileId, std::rc::Rc<TileEvidence>>;
 
+// Reads and recomputes of `tile_evidence`, for the test that pins what the
+// cache is worth. Test-only: production keeps no counters, and the numbers are
+// only meaningful inside one traversal anyway.
+#[cfg(test)]
+thread_local! {
+    static TILE_EVIDENCE_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static TILE_EVIDENCE_COMPUTES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 fn tile_evidence(
     id: TileId,
     target: &[[f32; 3]],
     evidence: &fit::EvidenceModel,
     cache: &mut TileEvidenceCache,
 ) -> std::rc::Rc<TileEvidence> {
+    #[cfg(test)]
+    TILE_EVIDENCE_READS.with(|reads| reads.set(reads.get() + 1));
     if let Some(hit) = cache.get(&id) {
         return std::rc::Rc::clone(hit);
     }
+    #[cfg(test)]
+    TILE_EVIDENCE_COMPUTES.with(|computes| computes.set(computes.get() + 1));
     let n = (evidence.width as usize * evidence.height as usize)
         .min(target.len())
         .min(evidence.source_weights.len())
@@ -2234,6 +2247,57 @@ mod tests {
             reading.source_share > frame_share,
             "{} must exceed the frame-masked share {frame_share}",
             reading.source_share
+        );
+    }
+
+    /// A38 (v1.2.4). The scoped-evidence cache: one recompute per NODE, not
+    /// one per node per generation, and the same bytes either way.
+    ///
+    /// The traversal re-reads the whole visited set once per generation, and
+    /// everything in a reading except the residual is a function of the frozen
+    /// evidence model and the tile's own geometry — a full-frame
+    /// `scoped_mask_evidence` and a `structure_divergence` per node per pass,
+    /// none of which could have changed. On the calibration pair the counters
+    /// below say what that was costing.
+    ///
+    /// The cache is keyed by `TileId` and holds an `Rc`, so a hit cannot
+    /// return a different reading than a miss; the second assertion pins that
+    /// the cached traversal attaches exactly what the uncached reader sees.
+    ///
+    /// MUTATION (2026-09-02): make `tile_evidence` skip its cache lookup
+    /// (`if false { ... }`) and reads == computes, which fails here while
+    /// every other tile test stays green.
+    #[test]
+    fn the_tile_evidence_cache_recomputes_each_node_once() {
+        let Some(root) = fit::calibration_corpus() else { return };
+        let source = image::open(root.join("neutral.jpg")).unwrap();
+        let target = image::open(root.join("target.jpg")).unwrap();
+        let mut report = super::super::tests::neutral_report(&source, &target);
+        let dir = std::env::temp_dir()
+            .join(format!("autoshade-tile-cache-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let home = crate::store::OwnedRaster::scratch(dir.join("tile.png"));
+        TILE_EVIDENCE_READS.with(|reads| reads.set(0));
+        TILE_EVIDENCE_COMPUTES.with(|computes| computes.set(0));
+        let excluded = attach_tiles(&source, &target, &mut report, &home, false, 2);
+        let reads = TILE_EVIDENCE_READS.with(std::cell::Cell::get);
+        let computes = TILE_EVIDENCE_COMPUTES.with(std::cell::Cell::get);
+        std::fs::remove_dir_all(&dir).ok();
+        eprintln!("TILE_EVIDENCE reads={reads} computes={computes}");
+        assert!(
+            reads > computes,
+            "the traversal must re-read nodes it has already scoped: {reads} vs {computes}",
+        );
+        // 21 nodes is the whole quadtree above the leaf cap (1 + 4 + 16), so a
+        // recompute count at or under it is one pass over the tree however
+        // many generations the attachment cap allows.
+        assert!(
+            computes <= 21,
+            "each node is scoped once per fit, not once per generation: {computes}",
+        );
+        assert!(
+            excluded.iter().any(|alpha| *alpha > 0.0),
+            "premise: this pair attaches a tile",
         );
     }
 

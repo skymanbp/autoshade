@@ -137,8 +137,9 @@ const RANGE_MAX_RAMP: f32 = 2.0 / 17.0;
 /// region, where the true slope is exactly 1.000, reads +0.942 to +1.039:
 /// a +/-0.05 noise floor, so +0.019 is one noise unit from a reversal.
 /// Both pairs therefore pass the sign test v1.2.4 added
-/// ([`RANGE_TRANSFER_REVERSAL_MAX`]) with a reading of 0, and the gate
-/// carries that reading beside this one.
+/// ([`RANGE_TRANSFER_REVERSAL_MAX`]) — driven end to end, the calibration
+/// band reads 0.0001 luma against the 0.0020 allowed — and the gate carries
+/// that reading beside this one.
 /// The mask-free `scripts/rim_overshoot.py` reads mean 0.0006 /
 /// p90 0.0018 / max 0.0082 at the calibration transition against its own
 /// control of exactly 0.0000; it is NOT applicable at the viaduct's
@@ -191,8 +192,15 @@ const RANGE_BOUNDARY_RIM_MAX: f32 = 0.012;
 ///   is the identity and this reading is 0.000000 on all 15 (ramp, position)
 ///   cells. It is a running-maximum depth, not a slope, so per-bin noise has to
 ///   accumulate before it registers, and on an unmoved render there is none.
-/// * Both real pairs read 0: the calibration band shows 0 reversals over its 30
-///   populated 1-code bins and the viaduct 0 over 19 (v1.2.3's table).
+/// * The real pairs sit a long way under the line. Driven end to end on
+///   2026-09-02 — `match --zoned` on the calibration pair with segmentation
+///   pointed at nothing, so the band path is the one that attaches — the
+///   accepted band [0.471, 0.765] at -0.56 EV reads 0.0001 luma of fall-back,
+///   0.026 of an 8-bit code, one twentieth of this ceiling, beside a rim of
+///   0.002 over 18651 crossings; the band attaches unchanged at k = 1.000.
+///   v1.2.3's slope table said the same thing with a different estimator: 0
+///   reversals over the calibration band's 30 populated 1-code bins and the
+///   viaduct's 19.
 /// * The probe's smallest REAL inversion is 1 code = 0.0039 luma (a 1/17 band
 ///   at -0.35 EV, v1.2.3's table), and this batch's own sweep reproduces it.
 ///
