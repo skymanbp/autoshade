@@ -212,13 +212,18 @@ at `(x+0.5, y+0.5)` through `MASK_SAMPLE_CENTRE`, then optional luminance- or
 colour-range weights refine the geometry; components compose in document order
 as Add, Subtract, or Intersect rather than being flattened to one union.
 
-The ramp itself is centralized in `linear_coverage(t, profile)`. This batch
-ships `LINEAR_FALLOFF = Eased`, the measured C1 Hermite smoothstep. Lightroom
-turns over at both handles (80/80 rows), and a free-end profile fit
-(`scripts/linear_falloff_probe.py --fit`) reaches RMS 0.0045 for smoothstep
-against 0.017 for linear. This is a render hard
-change for linear masks only; radial
-and bitmap masks remain byte-identical.
+The ramp itself is centralized in `linear_coverage(t, profile)`. Since
+v1.2.4 it ships `LINEAR_FALLOFF = Measured`: the C1 smoothstep on the warped
+abscissa `t^1.124` (`LINEAR_FALLOFF_WARP`). The `Eased` profile of v1.2.0
+came from `scripts/linear_falloff_probe.py --fit`, which scored against
+exported row luma — the tone curve composed with the mask — and so kept the
+smoothstep's shape while missing where Lightroom's half-coverage sits
+(t = 0.5436 of the span, not ½). Measured against Lightroom's own coverage on
+the 46-export pack (`scripts/lr_mask_parity.py`), the warped smoothstep
+scores rms 0.0064 against 0.0315 for the plain smoothstep and 0.0598 for a
+straight ramp, and the half-coverage contour closes from +34.2/+38.2 px to
++0.9/+5.0 px. Each of the two changes was a render hard change for linear
+masks only; radial and bitmap masks stay byte-identical.
 
 Lightroom brush strokes may arrive indirectly through a sibling
 `MaskBrushTable`; the importer resolves the MD5-addressed `.acr` member,
@@ -764,8 +769,11 @@ frame.
   `−22.8 / +24.4 / −10.8 px`; Lightroom measured
   `+0.6 / −2.9 / −0.5 px`. The sign is opposite and the magnitude is
   `8.5–41x` too large, which is why H1 is not retained as an alternative.
-- The R2 large-mask dilation residual is about `1.2 percentage points` and
-  remains an open item. It is not hidden inside a new fitted scale.
+- The R2 large-mask excess is closed and is not a dilation law: on the
+  46-export pack Lightroom's α = ½ boundary is a pure `0.99876` scale of the
+  stored ellipse (sd 4×10⁻⁵ across masks 0.30/0.50/0.70 of frame), so the
+  `−1.12 / −1.96 / −2.79 px` residual is the ellipse being bigger, and the
+  `LR_MASK_FRAME_SCALE = 1.0` ruling stands.
 - `LensProfile.mask_warp_center` and `LensProfile.linear_handle_warp` are two
   intentional forward schema breaks: old binaries must refuse recipes carrying
   frame facts they cannot apply safely.

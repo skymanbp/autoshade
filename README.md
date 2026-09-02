@@ -305,7 +305,11 @@ Lightroom output. The XMP layer is hand-rolled on purpose — no XML crate —
 so a catalogue sidecar is merged into byte for byte, down to the SVD fold
 between Lightroom's pixel-space radial tilt and the engine's normalised
 rotation, and Lightroom's Brotli-packed brush dab streams are imported and
-verified (`MD5 → .acr → Brotli`).
+verified (`MD5 → .acr → Brotli`). Two of those fits were re-measured in
+v1.2.4 against Lightroom's own coverage rather than exported luma, on a
+46-export pack: the LINEAR falloff moved onto the abscissa `t^1.124`
+(α rms 0.0293 → 0.0074), and the radial boundary was shown to be a pure
+0.99876 scale of the stored ellipse — no dilation law.
 
 ### 10. Generated pixels are quarantined and measured
 
@@ -384,6 +388,9 @@ the tests [`scripts/check_docs.py`](scripts/check_docs.py) re-derives.
 | Lightroom Texture parity | 45 of 45 period/depth anchors within ±0.02 | [Develop pipeline](#develop-pipeline-and-tone-model) |
 | Radial mask closure | 41 of 41 measured vectors within ≤1 px | [Lens correction](#lens-correction-and-lightroom-mask-frame-laws) |
 | Linear mask closure (openly not pixel-closed) | RMS 9.748 / 7.025 / 6.336 px with lens correction on, 12.449 / 9.943 / 4.979 px off | [Lens correction](#lens-correction-and-lightroom-mask-frame-laws) |
+| Linear falloff vs Lightroom coverage (46-export pack) | smoothstep on `t^1.124`: α rms 0.0064 against 0.0315 for the plain smoothstep and 0.0598 for a straight ramp; half-coverage contour +34.2/+38.2 px → +0.9/+5.0 px | [Lens correction](#lens-correction-and-lightroom-mask-frame-laws) |
+| Radial boundary (46-export pack) | a pure 0.99876 scale of the stored ellipse (sd 4×10⁻⁵ over masks 0.30/0.50/0.70 of frame): −1.12/−1.96/−2.79 px, no dilation law | [Lens correction](#lens-correction-and-lightroom-mask-frame-laws) |
+| Roundness (tilted 2:1 ellipse, feather 25/50/75) | Lightroom's R−100/0/+100 exports differ by max\|Δ\| = 0 DN over 26 Mpx; the engine draws one ellipse too | [Masks](#masks) |
 | Brush geometry | D1 error 874 px → 9.8 px after pixel-centre sampling and the pixel/aspect metric | [Masks](#masks) |
 | X-Trans demosaic (approximate) | X-S10 G/R ratio 1.5503 → 0.9476 | [RAW decode](#raw-decode-and-cfa) |
 | Reverse-fit, stone viaduct (full solve) | look error 0.161 → 0.050 at confidence 0.25 (a global solve, the per-band mixer on Orange/Yellow/Aqua/Blue, two semantic zones, four boundary-gated tiles and two field masks), D = 0.180; the sky tile's seam 0.0278 → 0.0042 (k 0.121), delivered +3.15 → +0.92 codes | [What is new §2](#2-reverse-fit-inverse-rendering-from-any-finished-look) |
@@ -703,7 +710,7 @@ numbers](#measured-numbers) are not repeated.
   lossy reimagine targets, and a LINEAR mask frame that is not pixel-closed
   while RADIAL closes 41/41 vectors to ≤1 px.
 - Older recipes stay readable; a v1.0.0 recipe carrying the new `LensProfile`
-  frame facts is refused by older binaries rather than misread, and four
+  frame facts is refused by older binaries rather than misread, and six
   families of existing content may rerender — both in
   [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), with the ledger and standing
   rulings in [docs/ROADMAP.md](docs/ROADMAP.md).

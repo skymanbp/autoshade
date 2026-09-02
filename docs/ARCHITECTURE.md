@@ -1674,7 +1674,10 @@ experiment:
   these frame facts, and they are the list README's status section points at:
   angled LINEAR masks on non-square frames, RADIAL and LINEAR masks whose lens
   profile came from camera metadata, modern table-backed Lightroom brushes, and
-  subtype-0 object masks that carry gesture points.
+  subtype-0 object masks that carry gesture points. v1.2.4 adds two more:
+  every LINEAR mask, because the falloff abscissa is now the measured
+  `t^1.124`, and a radial whose stored corners fold to a negative semi-axis,
+  which imports as the magnitude ellipse instead of being refused.
 * **A mask is sampled at PIXEL CENTRES — R29 C2, v0.35.0.** `render::
   MASK_SAMPLE_CENTRE` is the one constant behind five sites that must agree
   (`apply_masks`' frame producer, `mask_coverage`'s overlay, `sample_gray_norm`'s
