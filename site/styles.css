@@ -51,6 +51,18 @@
     --focus: #7bc4ff;
     --shadow: 0 22px 60px rgba(0, 0, 0, 0.3);
   }
+
+  /* The diagrams read the page's own tokens through the `--dg-*` contract far
+     below, so twelve of those fifteen names have already flipped one rule
+     above and are not restated here. The three accents are the exception:
+     they are literal hex chosen for contrast against the diagram's own box
+     fill rather than against the page, so they are the three that need a dark
+     value of their own. */
+  .diagram-stage {
+    --dg-accent-blue: #7fb2ea;
+    --dg-accent-rust: #e6a077;
+    --dg-accent-green: #6fc294;
+  }
 }
 
 *,
@@ -386,12 +398,12 @@ h4 {
    zeroes only margin-top and `.image-pair figure` zeroed only margin-bottom, so
    40px INLINE margins survived on `.hero-figure` and on every before/after
    frame: the page's largest image and all six case-study frames sat 40px inside
-   the column `.wide-figure` and `.pillar-figure` fill, and `.image-pair`'s
+   the column `.wide-figure` and `.diagram-figure` fill, and `.image-pair`'s
    declared `gap: 1rem` rendered as a 96px gutter (40 + 16 + 40). Every figure
    idiom sets its own margin here, so no UA default can reach any of them. */
 .hero-figure,
 .wide-figure,
-.pillar-figure {
+.diagram-figure {
   margin: 0 0 2.2rem;
 }
 
@@ -577,10 +589,12 @@ h4 {
   color: var(--ink-soft);
 }
 
-/* The pillar diagrams are SVG line art, not photographs: they carry their own
+/* The diagrams are SVG line art, not photographs: they carry their own
    background and their own theme, so they take the frame the photo figures take
-   but none of the surface fill behind it. */
-.pillar-figure {
+   but none of the surface fill behind it. The frame clips its own corners
+   because the pan window inside it is a plain rectangle and would otherwise
+   square them off again. */
+.diagram-figure {
   overflow: hidden;
   border: 1px solid var(--line);
   border-radius: var(--radius-md);
@@ -590,15 +604,162 @@ h4 {
    rail and spans the same column every showcase figure fills. Without this the
    page renders figures at two widths and two left edges: 56rem indented 6rem
    here, 74rem flush everywhere else. */
-.tech-list .pillar-figure {
+.tech-list .diagram-figure {
   width: calc(100% + var(--rail) + var(--rail-gap));
   margin-left: calc(-1 * (var(--rail) + var(--rail-gap)));
 }
 
-.pillar-figure img {
+/* The colour contract between the page and the generated drawings, and the pan
+   window that holds them.
+
+   `scripts/architecture_diagram.py` and `scripts/pillar_diagrams.py` write
+   `fill="var(--dg-text, #12151a)"` and its fourteen siblings into the SVG, so
+   each name below is read out of the drawing by name: rename one here and the
+   drawing quietly falls back to the hex the generator baked in and stops
+   following the page. Twelve of the fifteen are the page's own tokens, which
+   already flip under `prefers-color-scheme`, so only the three literal accents
+   are restated in the dark query near the top of this file.
+
+   `overflow: hidden` is what makes the SVG's viewBox a window onto the drawing
+   rather than a larger picture, and `touch-action: none` hands every finger to
+   the pan and pinch handlers -- without it the browser claims the gesture as a
+   page scroll partway through and the diagram stops following the finger. On a
+   phone that trade is deliberate: a swipe that starts on a diagram pans the
+   diagram. Nothing in this block transitions or animates, so
+   `prefers-reduced-motion` has nothing here to turn off. */
+.diagram-stage {
+  --dg-bg: var(--surface);
+  --dg-box: var(--page);
+  --dg-box-stroke: var(--line);
+  --dg-side: var(--surface-soft);
+  --dg-group: var(--page-raised);
+  --dg-group-stroke: color-mix(in srgb, var(--line) 80%, transparent);
+  --dg-text: var(--ink);
+  --dg-sub: var(--ink-soft);
+  --dg-note: var(--ink-soft);
+  --dg-arrow: color-mix(in srgb, var(--ink-soft) 70%, transparent);
+  --dg-tag: var(--ink-soft);
+  --dg-tag-bg: var(--surface-soft);
+  --dg-accent-blue: #2f66a8;
+  --dg-accent-rust: #8f5029;
+  --dg-accent-green: #2f6b47;
+
+  overflow: hidden;
+  background: var(--dg-bg);
+  cursor: grab;
+  touch-action: none;
+}
+
+.diagram-stage.is-dragging {
+  cursor: grabbing;
+}
+
+/* The focus ring is drawn inside the box: the figure clips its own corners, so
+   the page's usual `outline-offset: 4px` would be cut off on all four sides. */
+.diagram-stage:focus-visible {
+  outline: 3px solid var(--focus);
+  outline-offset: -3px;
+}
+
+/* Either selector is enough. The class is what the generators emit; the
+   descendant form keeps the layout right if one of them ever forgets it, which
+   the script already tolerates because it finds the drawing by element name
+   rather than by class. */
+.diagram-stage > svg,
+.diagram-svg {
   display: block;
   width: 100%;
   height: auto;
+}
+
+/* The controls carry `hidden` in the markup and lose it to the script, so a
+   reader with JavaScript off is never shown four buttons that cannot do
+   anything. `[hidden]` is only honoured while nothing sets `display`, which is
+   why this sets it behind `:not([hidden])` instead of on the bare class. */
+.diagram-controls:not([hidden]) {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  padding: 0.45rem 0.6rem;
+  border-top: 1px solid var(--line);
+  gap: 0.4rem;
+}
+
+.diagram-controls button,
+.diagram-fullscreen {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 1.9rem;
+  min-height: 1.9rem;
+  padding: 0.1rem 0.6rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--ink-soft);
+  font-family: inherit;
+  font-size: 0.82rem;
+  font-weight: 640;
+  line-height: 1.1;
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.diagram-controls button:hover,
+.diagram-fullscreen:hover {
+  border-color: var(--accent);
+  color: var(--ink);
+}
+
+/* Tabular figures over a fixed floor: the readout changes on every wheel notch,
+   and a proportional "100%" turning into "138%" would shove the buttons beside
+   it sideways while the reader is still aiming at them. */
+.diagram-zoom {
+  min-width: 3.2rem;
+  padding-right: 0.2rem;
+  color: var(--ink-soft);
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+/* The hint reads at the left end of the row while the buttons stay right. It is
+   the one element here whose visual order differs from its DOM order, and it is
+   not focusable, so focus order and reading order still agree. */
+.diagram-hint {
+  order: -1;
+  margin-right: auto;
+  color: var(--ink-soft);
+  font-size: 0.76rem;
+}
+
+/* Full screen is the browser's own view, with no page around the figure to
+   inherit from: it paints its own ground, gives the stage every pixel the
+   controls do not need, and keeps the controls on screen because they are the
+   way back out other than Escape. Only the unprefixed selector is written,
+   which is the same line the script draws -- a browser without
+   `Element.requestFullscreen` is shown no full-screen button at all. */
+.diagram-figure:fullscreen {
+  display: flex;
+  flex-direction: column;
+  padding: 1rem;
+  border: 0;
+  border-radius: 0;
+  background: var(--page);
+}
+
+.diagram-figure:fullscreen .diagram-stage {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.diagram-figure:fullscreen .diagram-stage > svg {
+  height: 100%;
+}
+
+.diagram-figure:fullscreen .diagram-controls:not([hidden]) {
+  border-top: 0;
 }
 
 /* The content box here already matches `.section` exactly -- the padding
@@ -851,6 +1012,50 @@ h4 {
   color: var(--ink-soft);
 }
 
+/* architecture.html is nothing but the one diagram, so its stage takes a fixed
+   slice of the viewport instead of the height the drawing's own aspect ratio
+   would give it at column width. The SVG is fitted inside that box --
+   `preserveAspectRatio` defaults to `xMidYMid meet` -- so a tall drawing
+   shrinks to fit and a wide one is centred with space above and below. Neither
+   can push the page sideways, and the script reads its scale out of the screen
+   matrix rather than out of the stage's width, so a drag still tracks the
+   cursor exactly through that centring. */
+.architecture-page .diagram-stage {
+  height: min(78vh, 60rem);
+}
+
+.architecture-page .diagram-stage > svg {
+  height: 100%;
+}
+
+/* One section, then the footer: the section's own bottom rule and the footer's
+   top rule would otherwise draw two lines a few pixels apart, which is what
+   `.docs` above avoids on the home page. */
+.architecture-page .section {
+  border-bottom: 0;
+}
+
+/* This page's h1 is a section heading, not a hero. At the hero scale -- up to
+   6.6rem inside a 15ch measure -- the title alone would fill the screen the
+   diagram below it is the whole point of. */
+.architecture-page h1 {
+  max-width: 24ch;
+  margin-bottom: 1.3rem;
+  font-size: clamp(2.15rem, 4.6vw, 4.3rem);
+  font-weight: 720;
+  letter-spacing: -0.05em;
+}
+
+/* The way off that page. It has no anchors of its own, so this row under the
+   diagram is its navigation. */
+.diagram-links {
+  display: flex;
+  flex-wrap: wrap;
+  margin-top: 1.6rem;
+  gap: 0.3rem 1.5rem;
+  font-size: 0.9rem;
+}
+
 @media (max-width: 58rem) {
   .site-header nav {
     display: none;
@@ -932,13 +1137,21 @@ h4 {
   }
 
   /* Redefine the tokens rather than the grid: `.tech-list article` and the
-     `.pillar-figure` breakout both derive from them, so a hardcoded override
+     `.diagram-figure` breakout both derive from them, so a hardcoded override
      here would move the rail without moving the figure that reclaims it --
      which is exactly what it did, overhanging the section's left edge by
      1.9rem. `.case-study header` is a plain block now and needs no rail. */
   .tech-list {
     --rail: 2rem;
     --rail-gap: 0.6rem;
+  }
+
+  .diagram-hint {
+    display: none;
+  }
+
+  .architecture-page .diagram-stage {
+    height: 60vh;
   }
 
   .format-grid figcaption {

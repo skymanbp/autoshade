@@ -2,6 +2,19 @@
 
 This directory is a build-free, self-contained Cloudflare Pages site. Its HTML, CSS, headers, and local images can be published as-is; no package install or asset compilation is required.
 
+The four diagrams are **inline SVG**, spliced into `index.html` and
+`architecture.html` between `<!-- diagram:NAME -->` markers by
+`scripts/pillar_diagrams.py` and `scripts/architecture_diagram.py`; run those
+two after any change to a diagram and commit the pages they rewrite. Inline is
+what lets the page's own light/dark tokens colour the drawing through the
+`--dg-*` custom properties in `styles.css`, and it takes the diagrams out of
+the `/images/*` cache described below — an HTML change is served immediately,
+so the `?v=` key now only has to cover the photographs. `diagram.js` is the one
+script this site loads: it gives every diagram wheel zoom, drag pan, pinch,
+buttons and keyboard control, and `_headers` allows it with `script-src 'self'`
+(it was `'none'`, which blocks an inline block outright and would have left the
+controls hidden on the live site while every local preview looked correct).
+
 ## Local preview
 
 From the repository root:

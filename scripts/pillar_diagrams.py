@@ -1,272 +1,283 @@
 #!/usr/bin/env python3
-"""Author the three pillar diagrams as SVG, light and dark from one source.
+"""Draw the three pillar diagrams, light and dark, from one description each.
 
-archify (github.com/tt-a1i/archify), which drew docs/images/architecture-*.png,
-is not installable on this machine any more (`npm i -g git+...` → no
-package.json; the npm package of that name is a different project), so these
-are hand-authored with the same visual language: rounded boxes, a numbered
-flow, muted sublabels, and one accent per pillar. Two files per diagram, light
-and dark, so README's existing <picture> pattern keeps working.
+archify (github.com/tt-a1i/archify), which drew the architecture PNG the README
+used to carry, is not installable on this machine any more (`npm i -g git+…`
+finds no package.json; the npm package of that name is a different project), so
+these are authored here in the same visual language the architecture picture
+now uses: rounded boxes, a numbered flow, muted sublabels, one accent per
+pillar. `scripts/architecture_diagram.py` is the fourth diagram and the same
+shared canvas, `scripts/diagram_check.py`, measures all four.
+
+Boxes are placed by hand here — a pillar is an argument in a fixed order, not a
+graph to be laid out — but nothing else is. Every box takes the height its own
+wrapped text needs, every row takes the tallest box in it, and every connector
+label goes wherever the checker says nothing else already is. Two defects the
+previous hand-placed version carried are gone with that: three captions sat on
+top of the vertical arrows they named, and pillar 1's "the block is a reference"
+arrow pointed at empty canvas instead of at the advisor box.
 """
 import os
 import sys
 
-OUTS = sys.argv[1:] or ["docs/images", "site/images"]
+HERE = os.path.dirname(os.path.abspath(__file__))
+ROOT = os.path.dirname(HERE)
+sys.path.insert(0, HERE)
 
-THEMES = {
-    "light": dict(bg="#ffffff", box="#f6f7f9", boxstroke="#d5d9e0", text="#12151a",
-                  sub="#5b6472", arrow="#98a1af", note="#6b7480", side="#eef1f5"),
-    "dark": dict(bg="#0d1117", box="#161b22", boxstroke="#30363d", text="#e6edf3",
-                 sub="#9aa4b2", arrow="#6e7681", note="#8b949e", side="#12171f"),
-}
+from diagram_check import (Canvas, node_metrics,
+                           place_connector_label, write_svgs)
 
-ACCENT = {"analysis": "#3f7cc4", "reimagine": "#b1683a", "lightroom": "#4a8a63"}
+OUT_DIRS = ["docs/images"]
+SITE_TARGET = "site/index.html"
 
-FONT = ("-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, "
-        "'Helvetica Neue', Arial, sans-serif")
-
-
-def esc(t):
-    return t.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-
-
-def wrap(text, width):
-    """Greedy wrap on spaces — the labels are short and hand-written, so this
-    never has to be clever; it only has to be deterministic."""
-    words, lines, cur = text.split(), [], ""
-    for w in words:
-        cand = (cur + " " + w).strip()
-        if len(cand) > width and cur:
-            lines.append(cur)
-            cur = w
-        else:
-            cur = cand
-    if cur:
-        lines.append(cur)
-    return lines
+W = 1200.0
+PAD_X = 28.0
+ROW_GAP = 72.0
+HEAD_TOP = 20.0
+ACCENT = {"pillar-analysis": "accent_blue",
+          "pillar-reimagine-fit": "accent_rust",
+          "pillar-lightroom-math": "accent_green"}
 
 
-class Svg:
-    def __init__(self, w, h, theme, accent):
-        self.w, self.h, self.t, self.a = w, h, THEMES[theme], ACCENT[accent]
-        self.parts = []
+class Sheet:
+    """A canvas plus the row bookkeeping the three pillars share: give it rows
+    of boxes and it sizes each one from its own text, aligns the row on the
+    tallest, and remembers the geometry so the connector calls below can name
+    an edge of a box instead of a coordinate."""
 
-    def box(self, x, y, w, h, title, sub=None, kind="box", num=None):
-        c = self.t
-        fill = c["side"] if kind == "side" else c["box"]
-        stroke = self.a if kind == "accent" else c["boxstroke"]
-        sw = 1.6 if kind == "accent" else 1.0
-        dash = ' stroke-dasharray="5 4"' if kind == "side" else ""
-        self.parts.append(
-            f'<rect x="{x}" y="{y}" width="{w}" height="{h}" rx="10" fill="{fill}" '
-            f'stroke="{stroke}" stroke-width="{sw}"{dash}/>'
-        )
-        ty = y + (26 if sub else h / 2 + 5)
-        if num is not None:
-            self.parts.append(
-                f'<text x="{x + 12}" y="{y + 20}" font-family="{FONT}" font-size="11" '
-                f'font-weight="700" fill="{self.a}">{num}</text>'
-            )
-            ty = y + 40
-        for i, line in enumerate(wrap(title, 22)):
-            self.parts.append(
-                f'<text x="{x + w / 2}" y="{ty + i * 16}" text-anchor="middle" '
-                f'font-family="{FONT}" font-size="13" font-weight="600" '
-                f'fill="{c["text"]}">{esc(line)}</text>'
-            )
-        if sub:
-            sy = ty + len(wrap(title, 22)) * 16 + 4
-            lines = wrap(sub, 20)
-            for i, line in enumerate(lines):
-                self.parts.append(
-                    f'<text x="{x + w / 2}" y="{sy + i * 14}" text-anchor="middle" '
-                    f'font-family="{FONT}" font-size="11" fill="{c["sub"]}">{esc(line)}</text>'
-                )
-            bottom = sy + (len(lines) - 1) * 14
-            assert bottom <= y + h - 8, (
-                f"box {title!r}: text reaches {bottom:.0f}, box ends at {y + h}")
-        for line in wrap(title, 22) + (wrap(sub, 20) if sub else []):
-            assert len(line) * 7.2 <= w - 14, f"box {title!r}: line {line!r} too wide for {w}"
+    def __init__(self, name, alt, title, sub):
+        self.name, self.alt, self.title, self.sub = name, alt, title, sub
+        self.accent = ACCENT[name]
+        self.rows = []
+        self.box_top, self.box_h, self.box_x = {}, {}, {}
 
-    def arrow(self, x1, y1, x2, y2, label=None, dashed=False):
-        c = self.t
-        d = ' stroke-dasharray="4 4"' if dashed else ""
-        self.parts.append(
-            f'<line x1="{x1}" y1="{y1}" x2="{x2}" y2="{y2}" stroke="{c["arrow"]}" '
-            f'stroke-width="1.4" marker-end="url(#a)"{d}/>'
-        )
-        if label:
-            mx, my = (x1 + x2) / 2, (y1 + y2) / 2 - 7
-            self.parts.append(
-                f'<text x="{mx}" y="{my}" text-anchor="middle" font-family="{FONT}" '
-                f'font-size="10.5" fill="{c["note"]}">{esc(label)}</text>'
-            )
+    def row(self, top, boxes):
+        self.rows.append((top, boxes))
+        return [b["rid"] for b in boxes]
 
-    def title(self, x, y, text, sub):
-        c = self.t
-        self.parts.append(
-            f'<text x="{x}" y="{y}" font-family="{FONT}" font-size="17" font-weight="700" '
-            f'fill="{c["text"]}">{esc(text)}</text>'
-        )
-        self.parts.append(
-            f'<text x="{x}" y="{y + 20}" font-family="{FONT}" font-size="12" '
-            f'fill="{c["sub"]}">{esc(sub)}</text>'
-        )
+    @staticmethod
+    def _row_height(boxes):
+        return max(node_metrics(b["w"], b["title"], b.get("sub"), None,
+                                b.get("num"))[3] for b in boxes)
 
-    def note(self, x, y, text, anchor="start"):
-        self.parts.append(
-            f'<text x="{x}" y="{y}" text-anchor="{anchor}" font-family="{FONT}" '
-            f'font-size="11" fill="{self.t["note"]}">{esc(text)}</text>'
-        )
+    def build(self, extra_bottom):
+        bottom = max(top + self._row_height(boxes) for top, boxes in self.rows)
+        c = Canvas(W, bottom + extra_bottom, self.alt, dom_id=self.name)
+        c.heading(PAD_X, HEAD_TOP, self.title, self.sub)
+        for top, boxes in self.rows:
+            rh = self._row_height(boxes)
+            for b in boxes:
+                c.node(b["x"], top, b["w"], rh, title=b["title"],
+                       sub=b.get("sub"), num=b.get("num"), accent=self.accent,
+                       kind="accent" if b.get("accent") else "box",
+                       rid=b["rid"])
+                self.box_top[b["rid"]] = top
+                self.box_h[b["rid"]] = rh
+                self.box_x[b["rid"]] = (b["x"], b["w"])
+        return c
 
-    def render(self, alt):
-        c = self.t
-        return (
-            f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {self.w} {self.h}" '
-            f'width="{self.w}" height="{self.h}" role="img" aria-label="{esc(alt)}">'
-            f'<defs><marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" '
-            f'markerHeight="7" orient="auto-start-reverse">'
-            f'<path d="M 0 0 L 10 5 L 0 10 z" fill="{c["arrow"]}"/></marker></defs>'
-            f'<rect width="{self.w}" height="{self.h}" fill="{c["bg"]}"/>'
-            + "".join(self.parts)
-            + "</svg>"
-        )
+    def left(self, rid, f=0.5):
+        return (self.box_x[rid][0], self.box_top[rid] + self.box_h[rid] * f)
+
+    def right(self, rid, f=0.5):
+        x, w = self.box_x[rid]
+        return (x + w, self.box_top[rid] + self.box_h[rid] * f)
+
+    def top(self, rid, f=0.5):
+        x, w = self.box_x[rid]
+        return (x + w * f, self.box_top[rid])
+
+    def bottom(self, rid, f=0.5):
+        x, w = self.box_x[rid]
+        return (x + w * f, self.box_top[rid] + self.box_h[rid])
+
+
+def chain(c, s, ids):
+    """Left-to-right arrows between neighbouring boxes of one row."""
+    for a, b in zip(ids, ids[1:]):
+        c.connector([s.right(a), s.left(b)], src=a, dst=b)
 
 
 # ── Pillar 1 — AI analysis develop ─────────────────────────────────────────
-def pillar_analysis(theme):
-    s = Svg(1200, 470, theme, "analysis")
-    s.title(28, 34, "Pillar 1 — AI analysis develop",
-            "your own library decides what “your style” means; the model only proposes")
-    y = 92
-    s.box(28, y, 190, 124, "This RAW", "EXIF, histogram, preview", num="01")
-    s.box(258, y, 210, 124, "Similarity, four terms",
-          "14-dim hand feature; image, text and sentence vectors",
-          kind="accent", num="02")
-    s.box(508, y, 200, 124, "K = 4 neighbours",
-          "from YOUR RAW + .xmp library", num="03")
-    s.box(748, y, 230, 124, "Reference block",
-          "sliders, curve, colour families, look, mask habits", num="04")
-    s.arrow(218, y + 60, 254, y + 60)
-    s.arrow(468, y + 60, 504, y + 60)
-    s.arrow(708, y + 60, 744, y + 60)
-
-    y2 = 266
-    s.box(258, y2, 230, 124, "Advisor proposes a recipe",
-          "bounded by a schema", kind="accent", num="05")
-    s.box(528, y2, 200, 124, "Verifier",
-          "numbers only, never pixels; two revisions", num="06")
-    s.box(768, y2, 210, 124, "Style blend",
-          "toward the neighbours’ means, capped", num="07")
-    s.box(994, y2, 178, 124, "EditRecipe", "renderable, exports to XMP",
-          kind="accent")
-    s.arrow(863, y + 124, 863, y2 - 6, "the block is a reference, never a copy")
-    s.arrow(488, y2 + 60, 524, y2 + 60)
-    s.arrow(728, y2 + 60, 764, y2 + 60)
-    s.arrow(978, y2 + 60, 1002, y2 + 60)
-    s.arrow(628, y2 + 124, 628, y2 + 138)
-    s.arrow(628, y2 + 138, 378, y2 + 138)
-    s.arrow(378, y2 + 138, 378, y2 + 128, "revise")
-    s.note(28, y2 + 34, "Every model input is")
-    s.note(28, y2 + 50, "text and numbers.")
-    s.note(28, y2 + 72, "The photographs stay")
-    s.note(28, y2 + 88, "on your disk unless")
-    s.note(28, y2 + 104, "you send one on purpose.")
-    return s.render(
-        "Pillar 1: this RAW, a four-term similarity, four neighbours from your own "
-        "library, a reference block, then propose, verify and blend into a recipe")
+def pillar_analysis():
+    s = Sheet(
+        "pillar-analysis",
+        "Diagram: a RAW plus XMP library becomes exemplars carrying a "
+        "14-dimension feature, SigLIP 2 image vectors and Qwen3-VL sentences; "
+        "a query retrieves four neighbours by the hybrid distance; their "
+        "habits reach the proposer behind an untrusted-data fence and a capped "
+        "pull moves the result toward the photographer's means",
+        "Pillar 1 — AI analysis develop",
+        "your own library decides what “your style” means; the model only "
+        "proposes")
+    first = s.row(92, [
+        dict(rid="raw", x=28, w=190, num="01", title="This RAW",
+             sub="EXIF, histogram, preview"),
+        dict(rid="sim", x=258, w=210, num="02", accent=True,
+             title="Similarity, four terms",
+             sub="14-dim hand feature; image, text and sentence vectors"),
+        dict(rid="knn", x=508, w=200, num="03", title="K = 4 neighbours",
+             sub="from YOUR RAW + .xmp library"),
+        dict(rid="ref", x=748, w=230, num="04", title="Reference block",
+             sub="sliders, curve, colour families, look, mask habits")])
+    y2 = 92 + Sheet._row_height(s.rows[0][1]) + ROW_GAP
+    second = s.row(y2, [
+        dict(rid="advisor", x=258, w=230, num="05", accent=True,
+             title="Advisor proposes a recipe", sub="bounded by a schema"),
+        dict(rid="verify", x=528, w=200, num="06", title="Verifier",
+             sub="numbers only, never pixels; two revisions"),
+        dict(rid="blend", x=768, w=210, num="07", title="Style blend",
+             sub="toward the neighbours’ means, capped"),
+        dict(rid="recipe", x=994, w=178, accent=True, title="EditRecipe",
+             sub="renderable, exports to XMP")])
+    c = s.build(extra_bottom=76)
+    chain(c, s, first)
+    chain(c, s, second)
+    # 04 -> 05: down out of the reference block, left across the sheet, into
+    # the advisor's top edge. The hand-placed version drew this straight down
+    # from the block and stopped in empty canvas, 260 px from any box.
+    down, into = s.bottom(first[-1]), s.top(second[0], 0.62)
+    ref_to_advisor = [down, (down[0], down[1] + 30), (into[0], down[1] + 30),
+                      into]
+    c.connector(ref_to_advisor, src=first[-1], dst=second[0])
+    # 06 -> 05: the revision loop, under the row it belongs to.
+    loop_y = s.box_top[second[1]] + s.box_h[second[1]] + 32
+    a, b = s.bottom(second[1], 0.35), s.bottom(second[0], 0.62)
+    revise = [a, (a[0], loop_y), (b[0], loop_y), b]
+    c.connector(revise, src=second[1], dst=second[0])
+    place_connector_label(c, ref_to_advisor,
+                          "the block is a reference, never a copy", "04 to 05")
+    place_connector_label(c, revise, "revise", "06 back to 05")
+    c.note(PAD_X, y2 + 24, ["Every model input is", "text and numbers."])
+    c.note(PAD_X, y2 + 76, ["The photographs stay", "on your disk unless",
+                            "you send one on purpose."])
+    return c
 
 
 # ── Pillar 2 — generation and reverse fit ──────────────────────────────────
-def pillar_reimagine(theme):
-    s = Svg(1200, 470, theme, "reimagine")
-    s.title(28, 34, "Pillar 2 — AI generates the look, the engine recovers the recipe",
-            "the generated pixels are a TARGET, never the delivery")
-    y = 92
-    s.box(28, y, 176, 124, "Neutral render", "the RAW, no edits", num="01")
-    s.box(240, y, 210, 124, "Generated target",
-          "fidelity-hardened prompt; it may invent content",
-          kind="accent", num="02")
-    s.box(486, y, 214, 124, "Structural divergence D",
-          "gradient correlation + pyramid energy", num="03")
-    s.box(736, y, 214, 124, "Which fit is honest",
-          "full fit, or atmosphere only", kind="accent", num="04")
-    s.box(986, y, 186, 124, "Global fit",
-          "64-bin Tukey-IRLS + evidence", num="05")
-    s.arrow(204, y + 60, 236, y + 60)
-    s.arrow(450, y + 60, 482, y + 60)
-    s.arrow(700, y + 60, 732, y + 60)
-    s.arrow(950, y + 60, 982, y + 60)
-
-    y2 = 266
-    s.box(28, y2, 214, 124, "Semantic zones OR ranges",
-          "four regions, or bands — never both", num="06")
-    s.box(278, y2, 206, 124, "Evidence quadtree tiles",
-          "frozen evidence, depth 2, four tiles", num="07")
-    s.box(520, y2, 196, 124, "Residual free mask",
-          "what the layers left unexplained", num="08")
-    s.box(752, y2, 198, 124, "Honesty budget",
-          "strength decides what may move", kind="accent", num="09")
-    s.box(986, y2, 186, 124, "EditRecipe + XMP",
-          "no pixel is delivered", kind="accent")
-    s.arrow(1079, y + 124, 1079, 214)
-    s.arrow(1079, 232, 135, 232)
-    s.arrow(135, 232, 135, y2 - 6, "each layer must earn its place against the evidence")
-    s.arrow(242, y2 + 60, 274, y2 + 60)
-    s.arrow(484, y2 + 60, 516, y2 + 60)
-    s.arrow(716, y2 + 60, 748, y2 + 60)
-    s.arrow(950, y2 + 60, 982, y2 + 60)
-    return s.render(
-        "Pillar 2: neutral render and a generated target, structural divergence "
-        "picking the fitting mode, a global fit, then layered attachment under an "
-        "honesty budget, ending in a recipe and XMP")
+def pillar_reimagine():
+    s = Sheet(
+        "pillar-reimagine-fit",
+        "Diagram: a generated target is measured against the input by the "
+        "structural-divergence statistic D, which selects either a full solve "
+        "or a bounded atmosphere mode; a Tukey-biweight tone regression and "
+        "gated local stages produce a recipe, and only the recipe reaches the "
+        "full-resolution render",
+        "Pillar 2 — AI generates the look, the engine recovers the recipe",
+        "the generated pixels are a TARGET, never the delivery")
+    top = s.row(92, [
+        dict(rid="neutral", x=28, w=176, num="01", title="Neutral render",
+             sub="the RAW, no edits"),
+        dict(rid="target", x=240, w=210, num="02", accent=True,
+             title="Generated target",
+             sub="fidelity-hardened prompt; it may invent content"),
+        dict(rid="diverge", x=486, w=214, num="03",
+             title="Structural divergence D",
+             sub="gradient correlation + pyramid energy"),
+        dict(rid="mode", x=736, w=214, num="04", accent=True,
+             title="Which fit is honest", sub="full fit, or atmosphere only"),
+        dict(rid="global", x=986, w=186, num="05", title="Global fit",
+             sub="64-bin Tukey-IRLS + evidence")])
+    y2 = 92 + Sheet._row_height(s.rows[0][1]) + ROW_GAP
+    bot = s.row(y2, [
+        dict(rid="regions", x=28, w=214, num="06",
+             title="Semantic zones OR ranges",
+             sub="four regions, or bands — never both"),
+        dict(rid="tiles", x=278, w=206, num="07",
+             title="Evidence quadtree tiles",
+             sub="frozen evidence, depth 2, four tiles"),
+        dict(rid="free", x=520, w=196, num="08", title="Residual free mask",
+             sub="what the layers left unexplained"),
+        dict(rid="budget", x=752, w=198, num="09", accent=True,
+             title="Honesty budget", sub="strength decides what may move"),
+        dict(rid="out", x=986, w=186, accent=True, title="EditRecipe + XMP",
+             sub="no pixel is delivered")])
+    c = s.build(extra_bottom=40)
+    chain(c, s, top)
+    chain(c, s, bot)
+    # 05 -> 06: one polyline with one head, where the hand-placed version drew
+    # three separate arrows and so put an arrowhead at each corner.
+    a, into = s.bottom(top[-1]), s.top(bot[0])
+    lane = a[1] + 32
+    carry = [a, (a[0], lane), (into[0], lane), into]
+    c.connector(carry, src=top[-1], dst=bot[0])
+    place_connector_label(c, carry,
+                          "each layer must earn its place against the evidence",
+                          "05 to 06")
+    return c
 
 
 # ── Pillar 3 — the Lightroom mathematics ───────────────────────────────────
-def pillar_lightroom(theme):
-    s = Svg(1200, 470, theme, "lightroom")
-    s.title(28, 34, "Pillar 3 — the mathematics of matching Lightroom",
-            "measured against Adobe’s own output, not guessed from documentation")
-    s.box(28, 104, 200, 118, "Lightroom .xmp", "crs: fields, masks, curves",
-          kind="accent")
-    s.box(500, 104, 200, 118, "EditRecipe", "one typed model, both directions",
-          kind="accent")
-    s.box(972, 104, 200, 118, "Engine render", "deterministic f32 pipeline",
-          kind="accent")
-    s.arrow(228, 150, 496, 150, "read: own scope, nested Look, as-shot rule")
-    s.arrow(496, 184, 228, 184, "write: conservative merge, named losses")
-    s.arrow(700, 163, 968, 163, "render")
-
-    y = 268
-    s.box(28, y, 268, 132, "Mask-frame law",
-          "radial through Lightroom’s own inverse; linear handles transported", num="01")
-    s.box(330, y, 250, 132, "Lens geometry",
-          "profile ungeom; image centre derived, not tuned", num="02")
-    s.box(614, y, 250, 132, "Tone and falloff",
-          "monotone tone LUT; C¹ smoothstep falloff, fitted", num="03")
-    s.box(898, y, 274, 132, "Brush kernel",
-          "k(ρ;h) = (1 − ρ^m)^n, fitted to held-out strokes",
-          num="04")
-    s.arrow(600, 222, 600, y - 8, "every law is a measured claim with a residual")
-    return s.render(
-        "Pillar 3: .xmp and the recipe read and write both ways into the engine, "
-        "over four measured laws — mask frames, lens geometry, tone and falloff, "
-        "and the brush kernel")
+def pillar_lightroom():
+    s = Sheet(
+        "pillar-lightroom-math",
+        "Diagram: a Lightroom sidecar is read by a scoped XML layer, its "
+        "slider domains are measured rather than assumed, mask coordinates "
+        "cross measured frame laws, and each result is published with its "
+        "residual",
+        "Pillar 3 — the mathematics of matching Lightroom",
+        "measured against Adobe’s own output, not guessed from documentation")
+    xmp, rec, eng = s.row(104, [
+        dict(rid="xmp", x=28, w=200, accent=True, title="Lightroom .xmp",
+             sub="crs: fields, masks, curves"),
+        dict(rid="recipe", x=500, w=200, accent=True, title="EditRecipe",
+             sub="one typed model, both directions"),
+        dict(rid="engine", x=972, w=200, accent=True, title="Engine render",
+             sub="deterministic f32 pipeline")])
+    y2 = 104 + Sheet._row_height(s.rows[0][1]) + ROW_GAP + 30
+    laws = s.row(y2, [
+        dict(rid="frame", x=28, w=268, num="01", title="Mask-frame law",
+             sub="radial through Lightroom’s own inverse; linear handles "
+                 "transported"),
+        dict(rid="lens", x=330, w=250, num="02", title="Lens geometry",
+             sub="profile ungeom; image centre derived, not tuned"),
+        dict(rid="tone", x=614, w=250, num="03", title="Tone and falloff",
+             sub="monotone tone LUT; C¹ smoothstep falloff, fitted"),
+        dict(rid="brush", x=898, w=274, num="04", title="Brush kernel",
+             sub="k(ρ;h) = (1 − ρ^m)^n, fitted to held-out strokes")])
+    c = s.build(extra_bottom=30)
+    read = [s.right(xmp, 0.34), s.left(rec, 0.34)]
+    write = [s.left(rec, 0.72), s.right(xmp, 0.72)]
+    render = [s.right(rec), s.left(eng)]
+    c.connector(read, src=xmp, dst=rec)
+    c.connector(write, src=rec, dst=xmp)
+    c.connector(render, src=rec, dst=eng)
+    # All four laws are measured against the recipe, so the arrow leaves the
+    # recipe and fans into all four — the old one left the empty middle of the
+    # sheet and ended between two boxes, naming neither. The trunk and the bus
+    # bar carry no arrowhead; the four drops each end on their own box.
+    down = s.bottom(rec)
+    bus = down[1] + 34
+    trunk = [down, (down[0], bus)]
+    c.connector(trunk, src=rec, head=False)
+    ends = [s.top(rid) for rid in laws]
+    law = [(ends[0][0], bus), (ends[-1][0], bus)]
+    c.connector(law, head=False)
+    for rid, end in zip(laws, ends):
+        c.connector([(end[0], bus), end], dst=rid)
+    place_connector_label(c, read,
+                          "read: own scope, nested Look, as-shot rule", "read")
+    place_connector_label(c, write,
+                          "write: conservative merge, named losses", "write")
+    place_connector_label(c, render, "render", "render")
+    place_connector_label(c, law,
+                          "every law is a measured claim with a residual", "laws")
+    return c
 
 
 def main():
-    for out in OUTS:
-        os.makedirs(out, exist_ok=True)
+    os.chdir(ROOT)
     for name, fn in (("pillar-analysis", pillar_analysis),
                      ("pillar-reimagine-fit", pillar_reimagine),
                      ("pillar-lightroom-math", pillar_lightroom)):
-        for theme in ("light", "dark"):
-            body = fn(theme)
-            for out in OUTS:
-                path = os.path.join(out, f"{name}-{theme}.svg")
-                with open(path, "w", encoding="utf-8", newline='\n') as f:
-                    f.write(body)
-                print(path, os.path.getsize(path), "B")
+        canvas = fn()
+        written, runs, segs = write_svgs(canvas, name, OUT_DIRS,
+                                         site_targets=[SITE_TARGET])
+        print("%s %.0fx%.0f — %d text runs, %d connector segments, 0 overlaps"
+              % (name, canvas.w, canvas.h, runs, segs))
+        for p in written:
+            print(" ", p, os.path.getsize(p), "B")
 
 
-main()
+if __name__ == "__main__":
+    main()
