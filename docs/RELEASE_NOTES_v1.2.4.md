@@ -331,7 +331,12 @@ forward pass, the peak device memory, and whether
 `torchvision.ops.deform_conv2d` runs natively on Metal or falls back to the CPU
 — asked in a separate process with `PYTORCH_ENABLE_MPS_FALLBACK` removed,
 because with the app's own setting in place the fallback is invisible. The
-numbers appear in the run's job summary. The v1.2.4 release run measures it on the macOS runner (the `macos-battery` job runs `scripts/mps_probe.py`), and its numbers are copied into this paragraph by the post-release refill commit, the same commit that fills the asset table from the published bytes.
+numbers appear in the run's job summary. On the v1.2.4 release run
+(`33698677463`, torch 2.14.0 on the GitHub `macos-latest` runner) the device
+chosen was `mps`, the forward pass (mean of 20, 1×3×512×512) took 8.2 ms,
+peak device memory was 1067.0 MiB as the driver reports it, and
+`deform_conv2d` did not fall back to the CPU: it is implemented natively on
+that backend.
 
 The workflows moved to the current major versions of the GitHub-provided
 actions (checkout v7, setup-python v7, upload-artifact v7, download-artifact

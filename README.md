@@ -101,7 +101,9 @@ where only the <b>direction text</b> changes. Since v1.2.3 a written
 direction leads and those edits become background: mean saturation
 28 % / 11 % / 30 % for moody / golden / vivid against the
 conversion's 17 %, mean brightness 43 % / 58 % / 70 % against
-47 %. On v1.2.2 the same three directions on the same index came back
+47 %. The vivid develop's recipe crops — its cell is 9504×5702, 7 % off
+the top and 3 % off the bottom — while moody, golden and the conversion are
+the full 9504×6336 frame. On v1.2.2 the same three directions on the same index came back
 at 23 % / 11 % / 17 % saturation and 54 % / 58 % / 55 % brightness — inside those
 edits' cool, hazy register, four points of brightness apart. Judge trails,
 prompts and the finished-look-only run in [docs/SHOWCASE.md](docs/SHOWCASE.md);
@@ -410,13 +412,13 @@ command-line archive; `checksums.txt` carries the SHA-256 of every asset.
 
 | File | Size | SHA-256 |
 |---|---:|---|
-| `autoshade.exe` (CLI) | 20,254,208 bytes | `a505ed5a74f2409dc1b8eb02d2b3c3b6329c3d280123837a7dc442d8aba0451d` |
-| `autoshade-gui.exe` (desktop app) | 26,539,520 bytes | `99b04b5113fc15a1b265513a11a24636b93dc77f211dd4343b2095855ea05397` |
-| `AutoShade-Setup-1.2.4.exe` (installer) | 14,252,034 bytes | `624028b5201fbe6450e49587d596cdc14419b792ae8ffc2360b86be3fc0ea532` |
-| `autoshade-1.2.4-windows-x64.zip` (portable archive) | 18,921,899 bytes | `ef2c8a903f7fe3d05eb1b0f657f90f862e89cd32679e5ab8b8d2938828a30128` |
-| `AutoShade-1.2.4-macos-universal.zip` (macOS app bundle) | 37,582,911 bytes | `3fd6d08e90edbb6942e88345973a1413ef9945328acad9159d5329dc96f0706a` |
-| `AutoShade-1.2.4-linux-x64.zip` (Linux command line only) | 00,000,000 bytes | `0000000000000000000000000000000000000000000000000000000000000000` |
-| `AutoShade-1.2.4-macos-cli.zip` (macOS command line only) | 16,222,248 bytes | `a1957f14dc884a6ce19e91835187e54081aca47c4a84e45381452ce96b164887` |
+| `autoshade.exe` (CLI) | 20,571,136 bytes | `db805f25533cae30d9af946ef6c90675a3c6fe22366c765d8bbba76fb54fc1b8` |
+| `autoshade-gui.exe` (desktop app) | 26,830,848 bytes | `646efd94d696df717196430317de976be1d149ffcef49f39d6b71ebb025bfce3` |
+| `AutoShade-Setup-1.2.4.exe` (installer) | 14,371,977 bytes | `ea6e2e33109a143fbbfe6a6ba2eface953076d9e19b30dec07e6c794200f7fcd` |
+| `autoshade-1.2.4-windows-x64.zip` (portable archive) | 19,115,603 bytes | `9a67fadeb6a7feaa4fd0fabbe1b56a469e2e45507599232e1371cec373cf129c` |
+| `AutoShade-1.2.4-macos-universal.zip` (macOS app bundle) | 38,719,335 bytes | `b548f6f90853cb104370c1cd87680cb2ed0e37cd8fd1ffd4c452742cd49006a3` |
+| `AutoShade-1.2.4-linux-x64.zip` (Linux command line only) | 9,309,472 bytes | `a8c8977f044c7f8fe3873bcd0f7605da06eeefafa60e3c1d47246f42a2f246a6` |
+| `AutoShade-1.2.4-macos-cli.zip` (macOS command line only) | 16,756,263 bytes | `92dd7ddf10e1c1e7776720ed84dcebeda78b2a2fcdf252ec880ccde7059cd284` |
 
 Download from the
 [v1.2.4 release page](https://github.com/skymanbp/autoshade/releases/tag/v1.2.4):

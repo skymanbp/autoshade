@@ -31,7 +31,10 @@ reach the model as background continuity, the finished photo the direction
 ranked highest reaches it as an image, and no pull toward the library's means
 is applied. Measured on the panel's cells: mean saturation
 28 % / 11 % / 30 % (moody / golden / vivid) against the conversion's
-17 %, mean brightness 43 % / 58 % / 70 % against 47 %.
+17 %, mean brightness 43 % / 58 % / 70 % against 47 %. The vivid develop's
+recipe crops — its cell is 9504×5702, 7 % off the top and 3 % off the
+bottom — while moody, golden and the conversion are the full 9504×6336
+frame.
 Direction and judge trail, per panel: <i>dark moody low-key tones, a
 cross-processed colour treatment, a teal-and-orange split tone</i> — visual judge 68/100 Revise (the village and foreground shadows crushed, the orange counterpoint too weak), guided revisions re-scored 70 and 78 and were adopted, a third 69 was discarded, verdict Accept;
 <i>warm golden tones, film-like grain, lifted matte shadows</i> — the verifier sent the proposal back twice because it never set the grain the direction asked for, the visual judge then scored 87 Revise (chroma noise across the smooth sky), its guided revision re-scored 84 and was discarded, and the verifier's word on the recipe was Revise, so this panel is the unsaved proposal rendered with <code>--out</code>;

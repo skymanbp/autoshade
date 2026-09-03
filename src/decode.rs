@@ -3,8 +3,8 @@
 //! Backed by `rawler` 0.7.2 — chosen for Sony A7R IV/IVA coverage, embedded
 //! preview extraction, and full EXIF (see `docs/M1_PLAN.md` §1 and §9; the
 //! older pure-Rust `rawloader` froze its camera DB before these bodies). One
-//! backend for now: a `Decoder` trait abstraction is deferred until a second
-//! backend is actually needed (the user shoots a single camera family).
+//! backend: a `Decoder` trait abstraction would only pay for itself with a
+//! second backend, and the user shoots a single camera family.
 //!
 //! All `rawler` calls here were written against the crate's real source
 //! (`RawSource::new`, `get_decoder`, the `Decoder` trait, `RawMetadata.exif`),
