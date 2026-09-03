@@ -90,9 +90,68 @@ export AUTOSHADE_SEGMENT_SCRIPT=${AUTOSHADE_SEGMENT_SCRIPT:-$(native "$REPO/pyth
 export AUTOSHADE_CORRESPOND_SCRIPT=${AUTOSHADE_CORRESPOND_SCRIPT:-$(native "$REPO/python/correspond.py")}
 [ -n "${AUTOSHADE_CENSUS_ROOT:-}" ] && export AUTOSHADE_CENSUS_ROOT
 
+lib_by_module() {
+    # lib_by_module <extra harness args...> — the library suite as ONE PROCESS
+    # PER TOP-LEVEL TEST MODULE, printed in the shape cargo prints a single run
+    # (one `Running unittests src/lib.rs` header, every test line, one summed
+    # `test result:` line) so `check_docs.py --gates` reads it unchanged.
+    #
+    # Why not one process: an endpoint-security sensor on the release machine
+    # (CrowdStrike Falcon) terminates a single process that runs the whole
+    # suite — its own event channel says so, ID 9 "A process was terminated
+    # because malicious behavior was detected", at the second of every death
+    # (2026-09-02, eleven of eleven, exit status 0xE0000027). The suite writes
+    # and executes sidecar stubs, spawns copies of itself, kills job objects
+    # and hard-links files, and to a behavioural model that chain is malware
+    # shaped. It is cumulative: any module alone stays under the threshold
+    # (37 of 37 measured), the full suite in one process does not, and
+    # skipping the trigger tests only moves the kill later. Nothing is skipped
+    # here: the module list is the harness's own --list, every name runs
+    # exactly once, and the counts are summed by name.
+    cargo test --offline --release --lib --no-run 2>&1 || return 1
+    names=$(cargo test --offline --release --lib -- --list 2>/dev/null | grep ': test$' | sed 's/: test$//')
+    [ -n "$names" ] || { echo "release_battery: the library lists no tests"; return 1; }
+    modules=$(printf '%s\n' "$names" | sed 's/::.*//' | sort -u)
+    echo "     Running unittests src/lib.rs ($(printf '%s\n' "$modules" | wc -l | tr -d ' ') modules, one process each)"
+    # The harness args this lane was given (--nocapture for the calibration
+    # lane) ride along on every module's command line; saved before the loop
+    # because `set --` below reuses the positional parameters.
+    extra=("$@")
+    rc=0; passed=0; failed=0; ignored=0; measured=0; secs=0; status=ok
+    for m in $modules; do
+        # `tests` is the crate root's own module: as a prefix it would match
+        # every test, so its members run by exact name.
+        if [ "$m" = tests ]; then
+            set -- --exact $(printf '%s\n' "$names" | grep '^tests::') ${extra+"${extra[@]}"}
+        else
+            set -- "$m::" ${extra+"${extra[@]}"}
+        fi
+        out=$(cargo test --offline --release --lib -- "$@" 2>&1)
+        mrc=$?
+        [ "$mrc" = 0 ] || { rc=$mrc; status=FAILED; }
+        printf '%s\n' "$out" | grep -v '^     Running \|^running [0-9]* tests\?$\|^test result: '
+        line=$(printf '%s\n' "$out" | grep '^test result: ' | tail -n 1)
+        [ -n "$line" ] || { status=FAILED; rc=1; echo "release_battery: module $m printed no test result"; continue; }
+        n() { printf '%s\n' "$line" | sed -n "s/.* \([0-9][0-9]*\) $1;.*/\1/p"; }
+        passed=$((passed + $(n passed)))
+        failed=$((failed + $(n failed)))
+        ignored=$((ignored + $(n ignored)))
+        measured=$((measured + $(n measured)))
+        secs=$(printf '%s %s\n' "$secs" "$(printf '%s\n' "$line" | sed -n 's/.*finished in \([0-9.]*\)s.*/\1/p')" | awk '{printf "%.2f", $1 + $2}')
+    done
+    echo
+    echo "test result: $status. $passed passed; $failed failed; $ignored ignored; $measured measured; 0 filtered out; finished in ${secs}s"
+    echo
+    return $rc
+}
+
 lane() {
-    # lane <name> <extra cargo args...> — one cargo test in its own target and
-    # data dir, output to $WORK/<name>.txt, exit status to $WORK/<name>.rc.
+    # lane <name> <extra cargo args...> — one lane in its own target and data
+    # dir, output to $WORK/<name>.txt, exit status to $WORK/<name>.rc. With no
+    # cargo args the lane is the default battery (library by module, then the
+    # binaries, the integration tests and the doc-tests); `--lib -- <harness
+    # args>` is the library by module with those harness args; anything else
+    # is one plain cargo test.
     name=$1
     shift
     mkdir -p "$TARGET_ROOT/$name" "$DATA_ROOT/$name"
@@ -107,7 +166,15 @@ lane() {
         cd "$REPO" || exit 1
         # `${1+"$@"}` and not `"$@"`: macOS still ships bash 3.2, where an
         # empty `"$@"` under `set -u` is an unbound-variable error.
-        cargo test --offline --release ${1+"$@"} 2>&1
+        if [ $# -eq 0 ]; then
+            lib_by_module && cargo test --offline --release --bins --test '*' 2>&1 \
+                && cargo test --offline --release --doc 2>&1
+        elif [ "$1" = --lib ] && [ "${2:-}" = -- ]; then
+            shift 2
+            lib_by_module ${1+"$@"}
+        else
+            cargo test --offline --release ${1+"$@"} 2>&1
+        fi
         echo $? > "$WORK/$name.rc"
     ) > "$WORK/$name.txt" 2>&1
 }

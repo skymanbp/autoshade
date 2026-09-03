@@ -286,7 +286,7 @@ validates its envelope and bounds, Brotli-decompresses it, then parses the
   Brotli decode, and dab-token parser.
 - `docs/ARCHITECTURE.md` and `docs/V2_PLAN.md` — mask measurement ledger.
 
-## Reverse-fit luminance ranges
+## Reverse-fit luminance and colour ranges
 
 ### Method
 
@@ -301,16 +301,25 @@ their independently calibrated `0.02` drift insurance.
 Before each attempt, `render::range_weight` is evaluated on the current render.
 Overlapping estimator weights are normalized to a total no greater than one,
 while each correction keeps the raw, pre-normalization ramp of its own
-`RangeMask` as the coverage it actually moves. One final value-transition gate
-shrinks every retained differential by the same direction-preserving bisection
-scalar.
+`RangeMask` as the coverage it actually moves. One value-transition gate per family
+shrinks every differential that family retained by the same direction-preserving
+bisection scalar, and a shrink whose render is byte-identical to the frame
+without it is refused (`RANGE_BOUNDARY_INERT`).
 
 Native masks use `MaskRole::Custom`, deterministic `Luminance range NN` names,
 and an intersecting `RangeMask::Luminance` on the observed-domain full-frame
 sentinel `Linear { zero_x: 0.5, zero_y: -0.8, full_x: 0.5, full_y: -0.4 }`.
 That is the existing Lightroom component grammar, so no recipe era or XMP
 reader/writer branch changes. Segmentation and range production are mutually
-exclusive, and this batch emits no color partitions.
+exclusive. Since v1.2.4 a second family partitions by colour: on the frame the
+luminance stage leaves, `derive_colour_bands` walks the eight ACR hue bands,
+keys one `RangeMask::Color` (`Colour range NN`) to each surviving band's
+weighted mean colour at its p90 chromaticity radius, stopped before neutral,
+and reads that one mask on both frames; a band must be two-sided in the frozen
+evidence and on the delivered frames, and the shared 2:1 composition gate
+refuses a move that carried the target's pixels out of the mask. The rim gate
+reads each band in its own coordinate (`RangeSelector`); the tone-order test is
+a luminance reading only.
 
 ### Parameters and measurements
 
@@ -336,7 +345,8 @@ exclusive, and this batch emits no color partitions.
 - `src/fit_zoned.rs` — residual runs, multi-region semantic/generalized weighted attachment, range
   boundary gate, disclosures, and conservation tests.
 - `src/render.rs` — sequential range evaluation on current rendered pixels.
-- `src/xmp.rs` — intersected native luminance-range projection.
+- `src/xmp.rs` — intersected native luminance- and colour-range projection
+  (`Type="1"`, `crs:ColorAmount`, one `PointModels` sample).
 
 ## Zone-scoped evidence view
 
@@ -1476,8 +1486,8 @@ than the pre-call state; model weights remain outside the repository.
 - The 61 MP RAW probe measured `151 MB` peak commit for decode,
   `1771 MB` for calibration/render preparation, and `1766 MB` for the
   full-resolution render tail; the combined process peak remained `1771 MB`.
-- The release battery is **1332 library (1320 pass + 12 `#[ignore]`d forensic
-  probes) / 23 CLI / 160 GUI / 2+2 contract** tests. Environment-gated real
+- The release battery is **1395 library (1381 pass + 14 `#[ignore]`d forensic
+  probes) / 24 CLI / 164 GUI / 2+2 contract** tests. Environment-gated real
   Lightroom, brush-table, and RAW-zoo suites are additional and are not
   smuggled into the ordinary count.
 - The build workflow checks default and GUI feature sets on Ubuntu and macOS.

@@ -205,8 +205,8 @@
   使用 `RANGE_FRAME_REGRESSION_TOL = 0.0`，合成证据加权帧变差即逐段放弃；
   零可接受段保持全局配方逐字节不变。
   持久化使用 `MaskRole::Custom`、确定性英文名与全画面 LINEAR 哨兵交集，故
-  recipe schema/XMP grammar 均不升级；该批不产出 color range，此后也没有（终局裁定见
-  「终局裁定与外部事实」；作为蒙版类型的 `RangeMask::Color` 本就在）。合并、逐段
+  recipe schema/XMP grammar 均不升级；该批不产出 color range（色彩范围生产者
+  于 v1.2.4 W5 建成，见顶部 v1.2.4 条；作为蒙版类型的 `RangeMask::Color` 本就在）。合并、逐段
   放弃、收缩 k 与零差分仍失败均走 typed rationale，GUI 卡显示原生亮度范围
   及四个有序边界。
   **一条已定的观察结论（主审裁定）**：Full 模式范围带的色彩增益无独立帽——带自身
@@ -444,7 +444,7 @@
 
 ### v1.1 收口裁定（2026-08-30，主审记录在案）
 
-- **色彩范围区**：**终局＝不做**。逐带 HSL（4a，`ab01520`）已覆盖「按色带选人口改色彩」的主面；独立 color-range **生产者**是新特性而非缺陷，v1.2.0–v1.2.3 全线都没为它开渲染面，理由与当时一字不改。作为**蒙版类型**的 `RangeMask::Color` 本就在 recipe/XMP/引擎里（`src/recipe.rs:2007`），需要时用户手工可用。
+- **色彩范围区**：~~终局＝不做~~ → **v1.2.4 W5 已建**（`ba71a69`，合并 `7a4d42e`）。逐带 HSL（4a，`ab01520`）覆盖的是「按色带选人口改色彩」的全局面；v1.2.4 的生产者 `derive_colour_bands` 与亮度带共用同一套证据规则、门、预算与披露通道，两族各自成阶段（p37 曾因共用一个收缩 k 从 0.15915 退到 0.16474），色带证据必须双向否则弃权；语料 p36/p37/p39 各得 1/1/2 条，neutral 与 p38 逐字节不变，无一对回退。作为**蒙版类型**的 `RangeMask::Color` 本就在 recipe/XMP/引擎里（`src/recipe.rs:2007`）。
 - **CE 冗余清理批 + 超预算文件拆分**：冗余清理**已做完**（2026-08-31 的 B2a/B2b/B2c/D1/A12 五条 `ce8a804`，加 B1a 侧车样板 `1d3e1fc`，见归档）。超预算文件拆分 v1.2.0–v1.2.3 未做，现状实测（ec7f01e，`wc -l`）：store.rs 9368 / fit.rs 14060 / style.rs 9202 / fit_zoned.rs 7540 / pipeline.rs 7275 / ARCHITECTURE.md 3387 / config.rs 2873 / i18n.rs 2287 / range.rs 2057 / check_docs.py 983 / calibrate_style_retrieval.py 764——它就是 v1.2.3 条末点名的六条之⑤，处置见顶部 v1.2.4 条。
 - **4a′ 合成 Full 钉 + `UNREPRESENTED_HUE_DEG` 带质心路测试**：带质心路**已有测试**——夹具 `two_family_hsl_pair` 与 `solving_the_bands_takes_the_colour_shape_out_of_the_residual`（`src/fit.rs:13726` / `:13962`；阈值常量 `src/fit.rs:5419` = 20.0）。v1.2.3 的收缩投影使该对残差落到 `FIT_QUANT_CLEAN` 之下、`hsl` 披露随之转静，即 v1.2.3 条末六条之②。
 - **逐方向 β**（OLS 斜率 0.247–2.000）：**终局裁定＝不拟合**——那会是 12 个文本上的自由参数，语料撑不起；出厂单一 β 保持不动。

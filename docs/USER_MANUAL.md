@@ -108,8 +108,8 @@ With **Zoned fit (sky)** enabled, reverse-fit always solves the global recipe
 first. Successful segmentation adds up to four disjoint semantic class bitmap
 corrections; each region selects Full or Atmosphere independently. If
 segmentation is disabled or unavailable, the same entry automatically tries
-evidence-gated native luminance ranges instead, and if no band is accepted the
-global recipe is kept. A range band is retained only when its composed
+evidence-gated native luminance ranges and then colour ranges instead, and if
+no band is accepted the global recipe is kept. A range band is retained only when its composed
 evidence-weighted frame is no worse than the running global/banded result.
 The historical two-region route is the default. Enable **Up to four semantic
 regions** in the GUI, or pass `--regions 4` on the CLI, to opt in to the
@@ -118,16 +118,18 @@ longer. The default two-region dials and confidence are byte-identical to
 `662b688`; only the rationale gains one typed `ZONE_ALREADY_MATCHED` note per
 zone whose dials did not move.
 Generated range masks persist as editable **Luminance range** cards with their
-four ordered bounds; their sentinel-hosted range components project to
-Lightroom XMP, while semantic bitmap masks remain engine-only. This release
-derives luminance ranges only, not color ranges.
+four ordered bounds and **Colour range** cards keyed to one hue band's mean
+colour; their sentinel-hosted range components project to Lightroom XMP as the
+masks Lightroom itself writes, while semantic bitmap masks remain engine-only.
+The luminance family runs first and the colour family on the frame it leaves,
+each gated as a stage of its own.
 
 The mechanics — population-scoped verdicts, the local-field ceiling, quadtree
 tiles, and guided refinement — are in [What is new here](../README.md#what-is-new-here)
 §5–§8. What you see in use: both analysis rasters share one geometry (the
 target is resampled into the source's analysis thumbnail), so a one-row
 rounding difference can no longer switch the structural evidence gate off; the
-global recipe and frame-wide luminance ranges are judged on the whole frame, a
+global recipe and frame-wide range bands are judged on the whole frame, a
 semantic zone or spatial tile on its own members. The analyzer produces
 numbers only and never enters the recipe, the engine, or the sidecar; after
 every producer the rationale states its ceiling, whether the remainder is
@@ -139,8 +141,9 @@ to describe them (bins 3 and 4 on the calibration pair, at 29.1/255 and
 actually measured, so an unmeasured region cannot pose as structure; a
 remainder the 4x4 tile means do not explain halves the quadtree's budget from
 four tiles to two, and the quadtree stops at a 4x4 grid and that cap.
-Luminance ranges are never spatially refined. Colour-range semantic regions are
-not derived.
+Range masks are never spatially refined, neither luminance nor colour: the
+guided filter refines silhouettes and tile collars, and an observed domain is
+not something it has evidence about.
 
 The free-form field-mask pass then consumes only the remainder not already
 covered by accepted tiles. It uses the field's frozen per-pixel weight, keeps

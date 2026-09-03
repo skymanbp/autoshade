@@ -62,7 +62,8 @@ An AI decides *what to change*. A deterministic Rust engine *does* it.
   embeddings.
 - **Reverse-fit** — `match` estimates an engine recipe from any target look,
   measures how far its *content* diverged before trusting it, then fits
-  global, semantic and luminance-range corrections behind evidence gates.
+  global, semantic, luminance-range and colour-range corrections behind
+  evidence gates.
 - **Generative and pixel tools, opt-in and labelled** — reimagine
   (gpt-image-2), retouch, heal and SCUNet denoise are the only paths that can
   invent or alter scene content, and are marked so.
@@ -222,13 +223,15 @@ moved.
 
 Details: [docs/TECH_STACK.md#ai-advisor-and-reverse-fit](docs/TECH_STACK.md#ai-advisor-and-reverse-fit).
 
-### 5. Semantic zones and luminance bands, judged on their own population
+### 5. Semantic zones, luminance bands and colour bands, judged on their own population
 
 - Local corrections come from mutually exclusive producers: a local OneFormer
   ADE20K pass yields semantic bitmap regions (sky/land by default, up to four
   disjoint class regions opt-in), and with segmentation off or unavailable a
   pure-Rust pass derives **XMP-native luminance-range bands** from rank-paired
-  residuals under an evidence gate.
+  residuals under an evidence gate, then **colour-range bands** from the eight
+  ACR hue bands — one mask keyed to each band's own mean colour, read on both
+  frames, and refused unless the band has evidence on both sides of the edit.
 - Every verdict follows the population a correction moves: a land zone is not
   withheld because a replaced sky shares its luminance bins, and a zone whose
   luminance already matches says so instead of being dialled for a hairline
@@ -385,7 +388,7 @@ the tests [`scripts/check_docs.py`](scripts/check_docs.py) re-derives.
 
 | What | Measured | Where |
 |---|---|---|
-| Automated test battery | 1332 library / 23 CLI / 160 GUI / 2+2 contract tests; `check_docs` re-derives the pinned release claims | [Tech stack](#tech-stack-algorithms-and-design-philosophy) |
+| Automated test battery | 1395 library / 24 CLI / 164 GUI / 2+2 contract tests; `check_docs` re-derives the pinned release claims | [Tech stack](#tech-stack-algorithms-and-design-philosophy) |
 | RAW coverage | 24 extensions, 725 camera bodies; nine-camera format zoo 9/9 at the last release gate | [Supported formats](#supported-formats) |
 | Lightroom Texture parity | 45 of 45 period/depth anchors within ±0.02 | [Develop pipeline](#develop-pipeline-and-tone-model) |
 | Radial mask closure | 41 of 41 measured vectors within ≤1 px | [Lens correction](#lens-correction-and-lightroom-mask-frame-laws) |
@@ -697,7 +700,7 @@ numbers](#measured-numbers) are not repeated.
   the 1800 MB per-photo budget, and a 4 GiB RAW gate bounds admission.
 - The [`build` workflow](.github/workflows/build.yml) covers default and GUI
   feature sets on Ubuntu and macOS; model weights are not stored here. The
-  current battery is **1332 library (1320 pass + 12 `#[ignore]`d forensic probes) / 23 CLI / 160 GUI / 2+2 contract** tests, and
+  current battery is **1395 library (1381 pass + 14 `#[ignore]`d forensic probes) / 24 CLI / 164 GUI / 2+2 contract** tests, and
   [`scripts/check_docs.py`](scripts/check_docs.py) re-derives the pinned
   release claims.
 

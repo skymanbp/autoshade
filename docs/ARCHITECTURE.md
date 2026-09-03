@@ -103,13 +103,25 @@
 > library a second time with `AUTOSHADE_FIT_CALIBRATION_DIR` at the p36-p39
 > corpus and `--nocapture`, which is the only way a skipped test's own line
 > reaches the transcript at all), each in its own target and data directory
-> and all three in parallel. It refuses to start at all when the corpus is
+> and all three in parallel. Both library lanes run the suite as ONE PROCESS
+> PER TOP-LEVEL MODULE (`lib_by_module`): an endpoint-security sensor on the
+> release machine (CrowdStrike Falcon) terminates a single process that runs
+> the whole suite — its own event channel says so, ID 9 "terminated because
+> malicious behavior was detected", at the second of every one of eleven
+> deaths on 2026-09-02 (exit status `0xE0000027`; the suite writes and runs
+> sidecar stubs, spawns copies of itself, kills job objects and hard-links
+> files, a malware-shaped chain to a behavioural model) — while any module
+> alone stays under its threshold (37 of 37 measured). The module list is
+> the harness's own `--list`, every name runs exactly once, and the counts
+> are summed by suite into the one `test result:` line the gate reads; the
+> CLI, contract and doc-test suites run as cargo runs them. It refuses to
+> start at all when the corpus is
 > absent, because a battery whose corpus-gated tests skip is green for the
 > wrong reason; it writes a `=== name ===` transcript that
 > `scripts/check_docs.py --gates` reads the counts and the lane set back out
 > of, and it prints the by-name test-set difference against a saved baseline.
-> 1332 library + 23 CLI + 160 GUI + 2+2 contract tests are enumerated in the GUI
-> build; the library result is 1320 pass + 12 `#[ignore]`d forensic probes
+> 1395 library + 24 CLI + 164 GUI + 2+2 contract tests are enumerated in the GUI
+> build; the library result is 1381 pass + 14 `#[ignore]`d forensic probes
 > (counts refreshed 2026-09-02 for v1.2.3: +24 / −0 by name against `8e631f7` —
 > the five hue-fan gate tests and the nine projection tests in `fit::tests`
 > (one of which replaces `cast_curves_must_not_fan_a_coherent_sky_across_luminance`),
