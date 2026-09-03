@@ -147,14 +147,18 @@ Details: [docs/TECH_STACK.md#ai-advisor-and-reverse-fit](docs/TECH_STACK.md#ai-a
 <code>gpt-image-2</code> target asked for <i>a clearer afternoon, a little more
 contrast, a slightly deeper blue sky, everything else unchanged</i>
 (<b>D = 0.180</b>, under the 0.35 threshold, so the full solve ran),
-and the recovered recipe rendered on the 9504×6336 RAW: look error
-<b>0.161 → 0.050</b> through a global solve, a four-band colour mixer, two
-semantic zones, four boundary-gated tiles and two field masks. Bottom row:
-the same window of the frame at each source's native resolution — the recipe
-carries the look, the RAW carries the detail, and the generated frame carries
-neither at full size. The top-left sky tile is where the v1.2.2 seam fix was
-measured: its cross-boundary step 0.0278 → 0.0042, the delivered seam
-+3.15 → +0.92 codes on the mask-free ruler.</sub>
+and the recovered recipe rendered on the 9504×6336 RAW, fitted at panel
+Strength 100 % (the product default is 65 %): look error
+<b>0.161 → 0.023</b> at confidence 0.63 through a global solve whose cast
+curves were projected to t = 0.485, a four-band colour mixer at the 45
+ceiling, two semantic zones, two boundary-gated tiles and one field mask.
+Bottom row: the same window of the frame at each source's native
+resolution — the recipe carries the look, the RAW carries the detail, and
+the generated frame carries neither at full size. At the default 65 % the
+same pair fits to 0.047 at confidence 0.25 with the mixer capped at 18, and
+v1.2.2's fit of it is where the seam fix was measured, on the top-left sky
+tile: cross-boundary step 0.0278 → 0.0042, the delivered seam +3.15 → +0.92
+codes on the mask-free ruler.</sub>
 
 <img src="docs/images/showcase-cornwall-reverse-fit.jpg" alt="Cornwall lighthouse islet: straight conversion, generated target, and the recovered recipe rendered on the RAW, with a 1:1 detail row" />
 
@@ -395,7 +399,7 @@ the tests [`scripts/check_docs.py`](scripts/check_docs.py) re-derives.
 | Roundness (tilted 2:1 ellipse, feather 25/50/75) | Lightroom's R−100/0/+100 exports differ by max\|Δ\| = 0 DN over 26 Mpx; the engine draws one ellipse too | [Masks](#masks) |
 | Brush geometry | D1 error 874 px → 9.8 px after pixel-centre sampling and the pixel/aspect metric | [Masks](#masks) |
 | X-Trans demosaic (approximate) | X-S10 G/R ratio 1.5503 → 0.9476 | [RAW decode](#raw-decode-and-cfa) |
-| Reverse-fit, stone viaduct (full solve) | look error 0.161 → 0.050 at confidence 0.25 (a global solve, the per-band mixer on Orange/Yellow/Aqua/Blue, two semantic zones, four boundary-gated tiles and two field masks), D = 0.180; the sky tile's seam 0.0278 → 0.0042 (k 0.121), delivered +3.15 → +0.92 codes | [What is new §2](#2-reverse-fit-inverse-rendering-from-any-finished-look) |
+| Reverse-fit, stone viaduct (full solve, panel Strength 100 %) | look error 0.161 → 0.023 at confidence 0.63 (a global solve with the cast curves projected to t = 0.485, the per-band mixer on Orange/Yellow/Aqua/Blue at the 45 ceiling, two semantic zones, two boundary-gated tiles and one field mask), D = 0.180; at the default 65 % the pair fits to 0.047 at confidence 0.25 with the mixer capped at 18, four tiles and two field masks, and v1.2.2's fit of it is where the seam fix was measured: sky tile 0.0278 → 0.0042 (k 0.121), delivered +3.15 → +0.92 codes | [What is new §2](#2-reverse-fit-inverse-rendering-from-any-finished-look) |
 | Reverse-fit, Cornwall islet (full solve, composed calibration) | look error 0.137 → 0.027 at confidence 0.66, D = 0.136 sized from the sensor frame (0.304 from the cropped preview); the global cast projected to t = 0.363, delivered sky hue spread 9.6° (v1.2.2 shipped 33.1°) | [docs/SHOWCASE.md](docs/SHOWCASE.md) |
 | Local-field ceiling, calibration pair | global fit 0.0961 against a ceiling of 0.0700; the accepted sky zone realizes 0.134 of the distance | [What is new §7](#7-a-bilateral-grid-local-field-prices-every-local-producer-first) |
 | AI develop, model judge | 2026-09-02 four-looks batch on the full 169 + 94 index at `--style 1.0 --strength 0.9`, the direction leading: moody 68 → 70 → 78 (both adopted) → 69 (discarded), verdict Accept; golden 87 → 84 (discarded) after the verifier twice sent the proposal back for the grain it never set, verdict Revise — unsaved, the figure renders the proposal; vivid 70 → 84 (adopted) → 82 (discarded), verdict Accept. The finished-look-only run (2026-09-01) and v1.2.2's full-index run are on the showcase page | [AI advisor](#ai-advisor-and-reverse-fit) |

@@ -4,8 +4,9 @@ The three figures behind the README's pillars and the frames on
 [autoshade.dev](https://autoshade.dev/#showcase-a), with every number the
 captions quote and the prompts that bought the generated targets. Part A and
 the Cornwall panel were rendered on 2026-09-02 on the v1.2.3 build; the
-stone-viaduct panel is the v1.2.2 render, whose recipe v1.2.3 reproduces byte
-for byte; every frame not marked
+stone-viaduct panel's right column was re-rendered on 2026-09-03 on the v1.2.4
+build at panel Strength 100 %, its other two columns being the v1.2.2
+composition's frames re-encoded once; every frame not marked
 *generated* is rendered by AutoShade's engine from a recipe, and every
 "straight conversion" is AutoShade's own neutral develop of the RAW, not the
 camera JPEG. Model-judge scores are automated review, not human aesthetic
@@ -85,15 +86,25 @@ deeper blue sky, everything else unchanged"</i> — a grade, not a rebuild,
 which is what keeps a generator on the input's structure: <code>reimagine</code>
 measured <b>D = 0.177</b> against the frame it sent, and the calibration test
 that pins this panel re-measures the two top-row frames at
-<b>D = 0.180</b>, under the 0.35 threshold, so the full solve ran.
-Look error <b>0.161 → 0.050</b>: a global tone and saturation solve, the
-per-band colour mixer on four bands (Orange −18/+7, Yellow −18/−5, Aqua
-+18/−18, Blue +18/−18 saturation/luminance), a sky zone (−0.15 EV) and a
-land zone, four boundary-gated spatial tiles and two field masks. Confidence
-0.25, because the target's look also uses controls the fit never solves
-(per-band hue, colour grading, local masks), and the rationale says so. The
-sky tile at top left is the one the v1.2.2 seam fix was measured on: its
-cross-boundary step reads 0.0278 → 0.0042 at k = 0.121 (context-charged
+<b>D = 0.180</b>, under the 0.35 threshold, so the full solve ran. The right
+column is the v1.2.4 fit at panel Strength 100 % (the product default is
+65 %). Look error <b>0.161 → 0.023</b>: a global tone and saturation solve
+whose three cast curves were projected to t = 0.485 (as fitted they would
+have opened a 22.1° hue fan in a class holding 0.210 of the frame's colour),
+the per-band colour mixer at the 45 ceiling (Orange −32/+9, Yellow −45/0,
+Aqua +45/−45, Blue +38/−45 saturation/luminance), a sky zone (−0.16 EV,
+colour gains 0.91 / 1.00 / 1.05, saturation +8; zone residual 0.123 → 0.074)
+and a land zone (0.00 EV, gains 1.01 / 1.00 / 1.00, saturation −4;
+0.014 → 0.009), two boundary-gated spatial tiles (r3c3 and r3c2,
+context-charged 0.0117 and 0.0120 against the 0.012 ceiling) and one field
+mask (frame 0.0242 → 0.0234). Confidence 0.63, read from the two accepted
+zones' worst residual, and the rationale still names what the fit never
+solves (per-band hue, temperature and tint, local masks). At the default
+65 % the same pair fits to 0.047 at confidence 0.25 with the mixer capped at
+18 (Orange −18/+7, Yellow −18/−5, Aqua +18/−18, Blue +18/−18), a sky zone at
+−0.15 EV, four tiles and two field masks; v1.2.2's default-strength fit of
+it is where the seam fix was measured, on the top-left sky tile: its
+cross-boundary step read 0.0278 → 0.0042 at k = 0.121 (context-charged
 0.0116 against the 0.012 ceiling), and the delivered seam on the mask-free
 ruler fell from +3.15 to +0.92 codes.</sub>
 
