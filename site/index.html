@@ -67,7 +67,7 @@
         </dl>
       </div>
       <figure class="hero-figure">
-        <img src="images/showcase-island-four-looks.jpg?v=1.2.3" width="1600" height="1112" alt="Lakeside island town: straight conversion and three AI develops driven by three different direction texts">
+        <img src="images/showcase-island-four-looks.jpg?v=1.2.4" width="1600" height="1112" alt="Lakeside island town: straight conversion and three AI develops driven by three different direction texts">
         <figcaption><strong>One photograph, four looks.</strong> Sony α7R IVA <code>.ARW</code>, 61 MP: the straight conversion of a hazy lakeside frame, then three AI develops of the same RAW at the same <code>--style 1.0 --strength 0.9</code> against the photographer's full index — 169 Lightroom RAW+XMP edits and a 94-photo finished-look library — where only the direction text changes. Since v1.2.3 a written direction leads and those edits become background: mean saturation 28 % / 11 % / 30 % for moody / golden / vivid against the conversion's 17 %, mean brightness 43 % / 58 % / 70 % against 47 %. On v1.2.2 the same directions on the same index stayed inside those edits' cool, hazy register (23 % / 11 % / 17 %, four points of brightness apart). Judge trails on the showcase page — automated review, not human aesthetic approval.</figcaption>
       </figure>
     </section>
@@ -113,18 +113,19 @@
     <section class="section split-section" id="download" aria-labelledby="download-title">
       <div>
         <p class="section-kicker">Download</p>
-        <h2 id="download-title">Download v1.2.3.</h2>
-        <p>The published release has 7 assets — the 6 files below plus <code>checksums.txt</code>, which carries the SHA-256 of each:</p>
+        <h2 id="download-title">Download v1.2.4.</h2>
+        <p>The published release has 8 assets — the 7 files below plus <code>checksums.txt</code>, which carries the SHA-256 of each:</p>
         <ul>
           <li><code>autoshade.exe</code> — 20,254,208 bytes (CLI)</li>
           <li><code>autoshade-gui.exe</code> — 26,539,520 bytes (desktop app)</li>
-          <li><code>AutoShade-Setup-1.2.3.exe</code> — 14,252,034 bytes (installer)</li>
-          <li><code>autoshade-1.2.3-windows-x64.zip</code> — 18,921,899 bytes (portable archive)</li>
-          <li><code>AutoShade-1.2.3-macos-universal.zip</code> — 37,582,911 bytes (macOS app bundle)</li>
-          <li><code>AutoShade-1.2.3-macos-cli.zip</code> — 16,222,248 bytes (macOS command line only)</li>
+          <li><code>AutoShade-Setup-1.2.4.exe</code> — 14,252,034 bytes (installer)</li>
+          <li><code>autoshade-1.2.4-windows-x64.zip</code> — 18,921,899 bytes (portable archive)</li>
+          <li><code>AutoShade-1.2.4-macos-universal.zip</code> — 37,582,911 bytes (macOS app bundle)</li>
+          <li><code>AutoShade-1.2.4-linux-x64.zip</code> — 00,000,000 bytes (Linux command line only)</li>
+          <li><code>AutoShade-1.2.4-macos-cli.zip</code> — 16,222,248 bytes (macOS command line only)</li>
         </ul>
         <p>Choose the <strong>installer</strong> for the recommended current-user setup with no administrator access, or the <strong>portable ZIP</strong> to extract and keep the executables beside their bundled assets and Python sidecars. A newer installer run over an existing install upgrades it in place — same directory, one entry in Programs and Features, weights and develop store untouched — and uninstalling asks whether to delete those two, keeping them unless you say otherwise. macOS has had a desktop app since v1.2.0: the universal (arm64 + x86_64) <code>AutoShade.app</code>, ad-hoc signed rather than notarised, so the first launch needs one explicit <em>Open Anyway</em> per machine — with the command line inside the same bundle, or as its own smaller archive. Linux is built and tested in CI with no prebuilt binaries yet.</p>
-        <p><a class="button button-primary" href="https://github.com/skymanbp/autoshade/releases/tag/v1.2.3">Open the v1.2.3 release</a></p>
+        <p><a class="button button-primary" href="https://github.com/skymanbp/autoshade/releases/tag/v1.2.4">Open the v1.2.4 release</a></p>
       </div>
       <div class="quickstart" aria-labelledby="quickstart-title">
         <h3 id="quickstart-title">Quickstart</h3>
@@ -157,12 +158,12 @@ autoshade apply "photo.ARW" "recipe.json" -o "developed.tif"</code></pre>
       <p class="section-lede">Generate a complete visual target, then fit an ordinary engine recipe to its look. The generated target can invent content; the fitted render cannot. The recovered recipe is editable and can be applied deterministically to the original full-resolution RAW.</p>
 
       <figure class="wide-figure">
-        <img src="images/showcase-viaduct-reverse-fit.jpg?v=1.2.3" width="1600" height="1000" alt="Stone viaduct: straight conversion, generated target, and the recovered recipe rendered on the RAW, with a 1:1 detail row" loading="lazy">
+        <img src="images/showcase-viaduct-reverse-fit.jpg?v=1.2.4" width="1600" height="1000" alt="Stone viaduct: straight conversion, generated target, and the recovered recipe rendered on the RAW, with a 1:1 detail row" loading="lazy">
         <figcaption><strong>Stone viaduct — the recipe carries the look, the RAW carries the detail.</strong> Top row: the straight conversion, a 3520×2352 <code>gpt-image-2</code> target asked for <em>a clearer afternoon, a little more contrast, a slightly deeper blue sky, everything else unchanged</em> (<strong>D = 0.180</strong>, under the 0.35 threshold, so the full solve ran), and the recovered recipe rendered on the 9504×6336 RAW: look error <strong>0.161 → 0.050</strong> through a global solve, a four-band colour mixer, two semantic zones, four boundary-gated tiles and two field masks. Bottom row: the same window of the frame at each source's native resolution. The top-left sky tile is where the v1.2.2 seam fix was measured — cross-boundary step 0.0278 → 0.0042, the delivered seam +3.15 → +0.92 codes on the mask-free ruler. <a href="https://github.com/skymanbp/autoshade/blob/main/docs/SHOWCASE.md">Full measurements →</a></figcaption>
       </figure>
 
       <figure class="wide-figure">
-        <img src="images/showcase-cornwall-reverse-fit.jpg?v=1.2.3" width="1600" height="1000" alt="Cornwall lighthouse islet: straight conversion, generated target, and the recovered recipe rendered on the RAW, with a 1:1 detail row" loading="lazy">
+        <img src="images/showcase-cornwall-reverse-fit.jpg?v=1.2.4" width="1600" height="1000" alt="Cornwall lighthouse islet: straight conversion, generated target, and the recovered recipe rendered on the RAW, with a 1:1 detail row" loading="lazy">
         <figcaption><strong>Cornwall lighthouse islet — the same three stages on a 4:3-shot frame.</strong> The body was set to a 4:3 aspect, so its embedded preview is a centred crop of the 3:2 sensor, and that is how this frame found the two defects v1.2.2 fixes: sized from the sensor frame the same prompt bought a target at <strong>D = 0.136</strong> (0.304 when the request was sized from the cropped preview), and the fit ran on a neutral develop of the full frame with the calibration composed into the solve — look error <strong>0.137 → 0.027</strong> at confidence 0.66, two semantic zones, four boundary-gated tiles and two field masks. It is also the frame that found v1.2.3's cast defect: the v1.2.2 fit admitted three channel curves that passed every hue veto and still fanned the sky 33.1° across luminance. A fourth veto now reads that fan and the curves are shrunk toward one shared shape (t = 0.363) until it clears — delivered sky spread 9.6° against the target's 1.6°. <a href="https://github.com/skymanbp/autoshade/blob/main/docs/SHOWCASE.md">Full measurements →</a></figcaption>
       </figure>
 
@@ -179,39 +180,39 @@ autoshade apply "photo.ARW" "recipe.json" -o "developed.tif"</code></pre>
 
       <div class="format-grid">
         <figure>
-          <img src="images/formats/cr2.jpg?v=1.2.3" width="600" height="400" alt="Canon CR2 develop" loading="lazy">
+          <img src="images/formats/cr2.jpg?v=1.2.4" width="600" height="400" alt="Canon CR2 develop" loading="lazy">
           <figcaption><strong>.cr2</strong><span>Canon EOS 40D</span></figcaption>
         </figure>
         <figure>
-          <img src="images/formats/cr3.jpg?v=1.2.3" width="600" height="400" alt="Canon CR3 develop" loading="lazy">
+          <img src="images/formats/cr3.jpg?v=1.2.4" width="600" height="400" alt="Canon CR3 develop" loading="lazy">
           <figcaption><strong>.cr3</strong><span>Canon EOS R6</span></figcaption>
         </figure>
         <figure>
-          <img src="images/formats/nef.jpg?v=1.2.3" width="600" height="399" alt="Nikon NEF develop" loading="lazy">
+          <img src="images/formats/nef.jpg?v=1.2.4" width="600" height="399" alt="Nikon NEF develop" loading="lazy">
           <figcaption><strong>.nef</strong><span>Nikon D700</span></figcaption>
         </figure>
         <figure>
-          <img src="images/formats/arw.jpg?v=1.2.3" width="600" height="400" alt="Sony ARW develop" loading="lazy">
+          <img src="images/formats/arw.jpg?v=1.2.4" width="600" height="400" alt="Sony ARW develop" loading="lazy">
           <figcaption><strong>.arw</strong><span>Sony α7 III</span></figcaption>
         </figure>
         <figure>
-          <img src="images/formats/orf.jpg?v=1.2.3" width="600" height="450" alt="Olympus ORF develop" loading="lazy">
+          <img src="images/formats/orf.jpg?v=1.2.4" width="600" height="450" alt="Olympus ORF develop" loading="lazy">
           <figcaption><strong>.orf</strong><span>Olympus E-M5</span></figcaption>
         </figure>
         <figure>
-          <img src="images/formats/rw2.jpg?v=1.2.3" width="600" height="451" alt="Panasonic RW2 develop" loading="lazy">
+          <img src="images/formats/rw2.jpg?v=1.2.4" width="600" height="451" alt="Panasonic RW2 develop" loading="lazy">
           <figcaption><strong>.rw2</strong><span>Panasonic DMC-GX85</span></figcaption>
         </figure>
         <figure>
-          <img src="images/formats/pef.jpg?v=1.2.3" width="600" height="397" alt="Pentax PEF develop" loading="lazy">
+          <img src="images/formats/pef.jpg?v=1.2.4" width="600" height="397" alt="Pentax PEF develop" loading="lazy">
           <figcaption><strong>.pef</strong><span>Pentax K-5</span></figcaption>
         </figure>
         <figure>
-          <img src="images/formats/dng.jpg?v=1.2.3" width="600" height="398" alt="Ricoh DNG develop" loading="lazy">
+          <img src="images/formats/dng.jpg?v=1.2.4" width="600" height="398" alt="Ricoh DNG develop" loading="lazy">
           <figcaption><strong>.dng</strong><span>Ricoh GR II</span></figcaption>
         </figure>
         <figure>
-          <img src="images/formats/raf.jpg?v=1.2.3" width="600" height="400" alt="Fujifilm RAF X-Trans develop" loading="lazy">
+          <img src="images/formats/raf.jpg?v=1.2.4" width="600" height="400" alt="Fujifilm RAF X-Trans develop" loading="lazy">
           <figcaption><strong>.raf</strong><span>Fujifilm X-S10 · X-Trans, approximate</span></figcaption>
         </figure>
       </div>
@@ -256,7 +257,7 @@ autoshade apply "photo.ARW" "recipe.json" -o "developed.tif"</code></pre>
       <p class="section-kicker">Three pillars</p>
       <h2 id="pillars-title">Three things this does that a RAW developer does not.</h2>
       <p class="section-lede">Everything below the fold is one of these three, or infrastructure for one of these three. Each pillar states its own mathematics and its own measured result; the eight implementation areas that follow are where those results were taken.</p>
-      <p class="section-lede"><strong>These describe v1.2.3 — the download above.</strong> The local description model, the correspondence sidecar, the spatial-tile and free-mask fit stages and the recalibrated retrieval weights all ship in it, and v1.2.0 adds the joint white-balance solve, the shared-content reference population, and a third zone-acceptance arm that buys a correction on an absolute gain.</p>
+      <p class="section-lede"><strong>These describe v1.2.4 — the download above.</strong> The local description model, the correspondence sidecar, the spatial-tile and free-mask fit stages and the recalibrated retrieval weights all ship in it, and v1.2.0 adds the joint white-balance solve, the shared-content reference population, and a third zone-acceptance arm that buys a correction on an absolute gain.</p>
 
       <div class="tech-list">
         <article id="pillar-analysis">

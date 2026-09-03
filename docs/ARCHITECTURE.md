@@ -1,6 +1,11 @@
 # AutoShade — Architecture
 
-> Status: **implemented** (v1.2.3 — the hue-fan veto and the cast projection,
+> Status: **implemented** (v1.2.4 — the clearing batch: a Linux x64 command-line
+> archive and a Metal path the release run measures, a colour-range family beside
+> the luminance ranges, the Lightroom pack's measured laws, a sidecar's declared
+> orientation choosing the delivered frame, the cast projection's best-paying
+> shrink, and a release battery partitioned against the release machine's
+> endpoint sensor; v1.2.3 was the hue-fan veto and the cast projection,
 > the direction-led Style voice, the range boundary budget measured and kept,
 > four rationale notes reaching the Chinese UI; v1.2.2 was the contextual
 > boundary budget, the embedded-preview-is-not-the-frame class, the style
@@ -122,7 +127,15 @@
 > of, and it prints the by-name test-set difference against a saved baseline.
 > 1395 library + 24 CLI + 164 GUI + 2+2 contract tests are enumerated in the GUI
 > build; the library result is 1381 pass + 14 `#[ignore]`d forensic probes
-> (counts refreshed 2026-09-02 for v1.2.3: +24 / −0 by name against `8e631f7` —
+> (counts refreshed 2026-09-02 for v1.2.4: +70 / −7 by name against `f3885b2` —
+> the twelve colour-range tests in `fit_zoned::range`, the eight Lightroom-pack
+> measurements in `render::lr_pack`, eight cast/fit tests in `fit::tests`, seven
+> style-index tests, five zoned-fit tests, the orientation law's four
+> `xmp::tests`, the four full-resolution-slot tests and 22 more across thirteen
+> modules; the seven removed are the six `config::` tests of the retired
+> `AUTOSHOP_*` alias door and one `segment::` test replaced by its
+> kept-when-this-machine-cannot-replace-it successor; before that, v1.2.3 was
+> +24 / −0 against `8e631f7` —
 > the five hue-fan gate tests and the nine projection tests in `fit::tests`
 > (one of which replaces `cast_curves_must_not_fan_a_coherent_sky_across_luminance`),
 > the range-rim budget window test, and the seven direction-led Style tests

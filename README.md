@@ -8,7 +8,7 @@
 An AI decides *what to change*. A deterministic Rust engine *does* it.
 **In the recipe-development path, the AI never touches a pixel.**
 
-[Download v1.2.3](https://github.com/skymanbp/autoshade/releases/tag/v1.2.3) ·
+[Download v1.2.4](https://github.com/skymanbp/autoshade/releases/tag/v1.2.4) ·
 [Architecture](docs/ARCHITECTURE.md) ·
 [Release ledger](docs/ROADMAP.md) ·
 [MIT](LICENSE)
@@ -72,11 +72,9 @@ An AI decides *what to change*. A deterministic Rust engine *does* it.
   by all three.
 
 Out of scope in this release: bit-exact Adobe rendering (parity is measured),
-an exact X-Trans demosaic (the plane fit is approximate), prebuilt Linux
-binaries (CI builds and tests them from source), a notarised macOS build (a
-decision, not a gap — the bundle stays ad-hoc signed, so the first launch
-needs one explicit 「Open Anyway」 per machine), and colour-range semantic
-regions.
+an exact X-Trans demosaic (the plane fit is approximate) and a notarised macOS
+build (a decision, not a gap — the bundle stays ad-hoc signed, so the first
+launch needs one explicit 「Open Anyway」 per machine).
 
 ## What is new here
 
@@ -330,21 +328,18 @@ Details: [docs/TECH_STACK.md#ai-advisor-and-reverse-fit](docs/TECH_STACK.md#ai-a
 
 ### Designed, not yet shipped
 
-Written down in the plan and the design memos, in delivery order:
-
-- **Colour-range semantic regions.** Reverse-fit partitions a frame by
-  semantic class or by luminance band; a colour-range producer is designed and
-  not built. Until it is, a look that differs only by hue over a spatially
-  scattered region is fitted globally or not at all.
-- **A published Linux binary.** Linux is built and tested in CI from source on
-  every push; the release workflow does not produce a Linux asset.
-
-Everything that used to sit here has shipped: the style-retrieval expansion
-(finished exports as a look library, the SigLIP 2 text tower, local Qwen3-VL
-descriptions, the GUI embedding switch and the Direction-adherence axis) landed
-across steps 14 and S1–S3, and the eased linear-gradient falloff — the measured
-C1 Hermite smoothstep, RMS 0.0045 against 0.017 for a straight ramp — shipped
-in v1.2.0.
+Nothing. Everything that used to sit here has shipped: the style-retrieval
+expansion (finished exports as a look library, the SigLIP 2 text tower, local
+Qwen3-VL descriptions, the GUI embedding switch and the Direction-adherence
+axis) landed across steps 14 and S1–S3; the eased linear-gradient falloff — the
+C1 Hermite smoothstep, RMS 0.0045 against 0.017 for a straight ramp on its
+first measurement — shipped in v1.2.0, and v1.2.4 moved its abscissa onto
+`t^1.124` against Lightroom's own 46 exports (α rms 0.0064; 0.0315 for the
+plain smoothstep, 0.0598 for a straight ramp); and v1.2.4 closed the last two
+entries: the colour-range producer (the reverse-fit's second range family:
+one mask keyed to each ACR hue band's own mean colour, written as the
+colour range mask Lightroom itself writes) and a Linux x64 command-line archive built and
+published from the tag beside the Windows and macOS assets.
 
 ## How it works
 
@@ -409,25 +404,25 @@ the tests [`scripts/check_docs.py`](scripts/check_docs.py) re-derives.
 
 ### Download a release
 
-The v1.2.3 release is built by GitHub Actions from the tag: the Windows front
-ends, and two macOS universal (arm64 + x86_64) archives. Linux is built and
-tested in CI, with no prebuilt binaries yet; `checksums.txt` carries the
-SHA-256 of every asset.
+The v1.2.4 release is built by GitHub Actions from the tag: the Windows front
+ends, two macOS universal (arm64 + x86_64) archives and a Linux x64
+command-line archive; `checksums.txt` carries the SHA-256 of every asset.
 
 | File | Size | SHA-256 |
 |---|---:|---|
 | `autoshade.exe` (CLI) | 20,254,208 bytes | `a505ed5a74f2409dc1b8eb02d2b3c3b6329c3d280123837a7dc442d8aba0451d` |
 | `autoshade-gui.exe` (desktop app) | 26,539,520 bytes | `99b04b5113fc15a1b265513a11a24636b93dc77f211dd4343b2095855ea05397` |
-| `AutoShade-Setup-1.2.3.exe` (installer) | 14,252,034 bytes | `624028b5201fbe6450e49587d596cdc14419b792ae8ffc2360b86be3fc0ea532` |
-| `autoshade-1.2.3-windows-x64.zip` (portable archive) | 18,921,899 bytes | `ef2c8a903f7fe3d05eb1b0f657f90f862e89cd32679e5ab8b8d2938828a30128` |
-| `AutoShade-1.2.3-macos-universal.zip` (macOS app bundle) | 37,582,911 bytes | `3fd6d08e90edbb6942e88345973a1413ef9945328acad9159d5329dc96f0706a` |
-| `AutoShade-1.2.3-macos-cli.zip` (macOS command line only) | 16,222,248 bytes | `a1957f14dc884a6ce19e91835187e54081aca47c4a84e45381452ce96b164887` |
+| `AutoShade-Setup-1.2.4.exe` (installer) | 14,252,034 bytes | `624028b5201fbe6450e49587d596cdc14419b792ae8ffc2360b86be3fc0ea532` |
+| `autoshade-1.2.4-windows-x64.zip` (portable archive) | 18,921,899 bytes | `ef2c8a903f7fe3d05eb1b0f657f90f862e89cd32679e5ab8b8d2938828a30128` |
+| `AutoShade-1.2.4-macos-universal.zip` (macOS app bundle) | 37,582,911 bytes | `3fd6d08e90edbb6942e88345973a1413ef9945328acad9159d5329dc96f0706a` |
+| `AutoShade-1.2.4-linux-x64.zip` (Linux command line only) | 00,000,000 bytes | `0000000000000000000000000000000000000000000000000000000000000000` |
+| `AutoShade-1.2.4-macos-cli.zip` (macOS command line only) | 16,222,248 bytes | `a1957f14dc884a6ce19e91835187e54081aca47c4a84e45381452ce96b164887` |
 
 Download from the
-[v1.2.3 release page](https://github.com/skymanbp/autoshade/releases/tag/v1.2.3):
+[v1.2.4 release page](https://github.com/skymanbp/autoshade/releases/tag/v1.2.4):
 
 \
-- **Installer (recommended):** run `AutoShade-Setup-1.2.3.exe`. It installs for
+- **Installer (recommended):** run `AutoShade-Setup-1.2.4.exe`. It installs for
   the current user without administrator access, adds Start Menu shortcuts, and
   offers optional desktop and user `PATH` tasks.
 - **Upgrading is in place.** Run a newer installer over an existing install and
@@ -443,12 +438,12 @@ Download from the
   weights and the develop store in `%LOCALAPPDATA%\autoshade`. It names the
   size it found for each, and keeping both is the default, so a later install
   starts where you left off.
-- **Silently, for a scripted rollout:** `AutoShade-Setup-1.2.3.exe /VERYSILENT
+- **Silently, for a scripted rollout:** `AutoShade-Setup-1.2.4.exe /VERYSILENT
   /SUPPRESSMSGBOXES /NORESTART` installs or upgrades with no window and no
   prompt, and `unins000.exe /VERYSILENT /SUPPRESSMSGBOXES` in the install
   directory uninstalls the same way. The silent uninstall keeps your weights
   and develop store unless you add `/DELETEDATA=1`.
-- **Portable archive:** extract `autoshade-1.2.3-windows-x64.zip` to a directory
+- **Portable archive:** extract `autoshade-1.2.4-windows-x64.zip` to a directory
   you can keep intact and run either executable from there, beside the bundled
   `assets/` and `python/` sidecars.
 
@@ -457,10 +452,10 @@ Download from the
 Both macOS archives are universal (Apple silicon and Intel in one binary);
 unpack either with Finder or `ditto -x -k <zip> <dir>`.
 
-- `AutoShade-1.2.3-macos-universal.zip` is the app: move `AutoShade.app` to
+- `AutoShade-1.2.4-macos-universal.zip` is the app: move `AutoShade.app` to
   `/Applications`. The command line travels inside it
   (`AutoShade.app/Contents/MacOS/autoshade`), so this download alone serves a
-  terminal user; `AutoShade-1.2.3-macos-cli.zip` is that binary alone.
+  terminal user; `AutoShade-1.2.4-macos-cli.zip` is that binary alone.
 - The bundle is **ad-hoc signed, not notarised**, so the first launch is
   refused: macOS reports that the developer cannot be verified. Clearing it is
   per machine, not per launch — **System Settings → Privacy & Security → Open
@@ -469,6 +464,12 @@ unpack either with Finder or `ditto -x -k <zip> <dir>`.
   download on first use into the develop store, not the signed read-only
   bundle; the interpreter is a Settings field with **Detect**
   ([manual](docs/USER_MANUAL.md#configure-and-use-the-ai-features)).
+
+The Linux archive, `AutoShade-1.2.4-linux-x64.zip`, is the command line for
+x86-64 Linux, built on Ubuntu 22.04 with the same payload as the macOS
+command-line archive: the binary, the Python sidecars without their weights,
+the assets, LICENSE and README. Unpack it anywhere and run `./autoshade`;
+there is no Linux desktop app.
 
 ### Build from source
 
@@ -706,7 +707,7 @@ numbers](#measured-numbers) are not repeated.
 
 ## Status, roadmap, and known limitations
 
-- Release gates for v1.2.3 cover the CLI, desktop GUI, sidecar contracts,
+- Release gates for v1.2.4 cover the CLI, desktop GUI, sidecar contracts,
   format fixtures and the deterministic renderer; artifact sizes and hashes
   are above.
 - macOS has shipped binaries and an app since v1.2.0 and nobody has reported
