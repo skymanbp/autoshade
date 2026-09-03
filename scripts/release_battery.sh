@@ -216,7 +216,7 @@ NAMES="$WORK/names.txt"
     export CARGO_TARGET_DIR=$(native "$TARGET_ROOT/default")
     export AUTOSHADE_DATA_DIR=$(native "$DATA_ROOT/default")
     cargo test --offline --release --lib -- --list 2>/dev/null
-) | grep ': test$' | sort > "$NAMES"
+) | grep ': test$' | sed 's/: test$//' | sort > "$NAMES"
 NAME_COUNT=$(wc -l < "$NAMES" | tr -d ' ')
 
 DIFF="$WORK/diff.txt"
@@ -227,12 +227,17 @@ if [ "$SAVE_BASELINE" = 1 ]; then
     cp "$NAMES" "$BASELINE"
     echo "baseline saved: $BASELINE ($NAME_COUNT names)" > "$DIFF"
 elif [ -f "$BASELINE" ]; then
-    ADDED=$(comm -13 "$BASELINE" "$NAMES" | wc -l | tr -d ' ')
-    REMOVED=$(comm -23 "$BASELINE" "$NAMES" | wc -l | tr -d ' ')
+    # A baseline is a sorted list of bare test names. One saved by an earlier
+    # version of this script, or copied from the harness's own `--list`, still
+    # carries the `: test` suffix; strip it here so both sides compare by name.
+    BASE_NAMES="$WORK/baseline-names.txt"
+    sed 's/: test$//' "$BASELINE" | tr -d '' | sort > "$BASE_NAMES"
+    ADDED=$(comm -13 "$BASE_NAMES" "$NAMES" | wc -l | tr -d ' ')
+    REMOVED=$(comm -23 "$BASE_NAMES" "$NAMES" | wc -l | tr -d ' ')
     {
         echo "baseline: $BASELINE"
-        comm -13 "$BASELINE" "$NAMES" | sed 's/^/+ /'
-        comm -23 "$BASELINE" "$NAMES" | sed 's/^/- /'
+        comm -13 "$BASE_NAMES" "$NAMES" | sed 's/^/+ /'
+        comm -23 "$BASE_NAMES" "$NAMES" | sed 's/^/- /'
     } > "$DIFF"
 else
     echo "no baseline at $BASELINE — run with --save-baseline on the base commit" > "$DIFF"
