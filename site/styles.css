@@ -13,7 +13,6 @@
   --warm: #a34b29;
   --focus: #0a69c7;
   --shadow: 0 22px 60px rgba(40, 48, 44, 0.11);
-  --shadow-stage: 0 44px 110px rgba(40, 48, 44, 0.2), 0 10px 26px rgba(40, 48, 44, 0.08);
   --radius-sm: 0.55rem;
   --radius-md: 1rem;
   --radius-lg: 1.5rem;
@@ -51,7 +50,6 @@
     --warm: #f19a72;
     --focus: #7bc4ff;
     --shadow: 0 22px 60px rgba(0, 0, 0, 0.3);
-    --shadow-stage: 0 44px 110px rgba(0, 0, 0, 0.55), 0 10px 26px rgba(0, 0, 0, 0.3);
   }
 
   /* The diagrams read the page's own tokens through the `--dg-*` contract far
@@ -295,9 +293,10 @@ h4 {
 
 /* One centred column: the owner line and the name inside the h1, the
    one-liner, the two buttons, one quiet line of platforms and licence, then
-   the four-looks figure set wider than the text measure. Three text styles,
-   so the copy reads in one voice; the two-column grid, eyebrow, lede and
-   facts strip it replaces were seven. */
+   the four-looks figure a step narrower than the text measure so the name
+   stays the loudest thing on the screen. Three text styles, so the copy reads
+   in one voice; the two-column grid, eyebrow, lede and facts strip it
+   replaces were seven. */
 .hero {
   padding-top: clamp(5rem, 11vw, 9rem);
   text-align: center;
@@ -320,6 +319,7 @@ h4 {
 .hero-owner {
   display: block;
   margin-bottom: 0.5em;
+  text-align: left;
   color: var(--ink-soft);
   font-size: max(0.16em, 0.95rem);
   font-weight: 600;
@@ -443,11 +443,8 @@ h4 {
 }
 
 .hero-figure {
-  width: min(86rem, 100vw - 3rem);
-  margin: 4.4rem 0 2.2rem 50%;
-  transform: translateX(-50%);
-  border-radius: 1.4rem;
-  box-shadow: var(--shadow-stage);
+  width: min(100%, 66rem);
+  margin: 4rem auto 2.2rem;
 }
 
 .hero-figure figcaption {
@@ -1096,12 +1093,6 @@ h4 {
 
   :root {
     --gutter: 1.25rem;
-  }
-
-  .hero-figure {
-    width: 100%;
-    margin-left: 0;
-    transform: none;
   }
 
   .feature-grid,
