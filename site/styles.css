@@ -13,6 +13,7 @@
   --warm: #a34b29;
   --focus: #0a69c7;
   --shadow: 0 22px 60px rgba(40, 48, 44, 0.11);
+  --shadow-stage: 0 44px 110px rgba(40, 48, 44, 0.2), 0 10px 26px rgba(40, 48, 44, 0.08);
   --radius-sm: 0.55rem;
   --radius-md: 1rem;
   --radius-lg: 1.5rem;
@@ -50,6 +51,7 @@
     --warm: #f19a72;
     --focus: #7bc4ff;
     --shadow: 0 22px 60px rgba(0, 0, 0, 0.3);
+    --shadow-stage: 0 44px 110px rgba(0, 0, 0, 0.55), 0 10px 26px rgba(0, 0, 0, 0.3);
   }
 
   /* The diagrams read the page's own tokens through the `--dg-*` contract far
@@ -274,8 +276,7 @@ h4 {
   border-bottom: 1px solid var(--line);
 }
 
-.section-kicker,
-.eyebrow {
+.section-kicker {
   margin-bottom: 1rem;
   color: var(--accent-strong);
   font-size: 0.76rem;
@@ -292,54 +293,63 @@ h4 {
   line-height: 1.55;
 }
 
+/* One centred column: the owner line and the name inside the h1, the
+   one-liner, the two buttons, one quiet line of platforms and licence, then
+   the four-looks figure set wider than the text measure. Three text styles,
+   so the copy reads in one voice; the two-column grid, eyebrow, lede and
+   facts strip it replaces were seven. */
 .hero {
-  padding-top: clamp(4.8rem, 10vw, 8.5rem);
+  padding-top: clamp(5rem, 11vw, 9rem);
+  text-align: center;
 }
 
-/* The hero was a two-column grid built around the 53-character one-liner as
-   its h1: at `max-width: 15ch` that is five lines of display type, and the
-   lede hung at the bottom of the right column (`grid-row: 1 / span 2;
-   align-self: end`), so the top of that column stayed empty and the
-   four-looks figure sat below the fold. The name leads now, the one-liner is
-   its tagline, and the copy reads down one column, so there is no grid. */
+.hero-copy {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+
+.hero-copy h1 {
+  max-width: none;
+  margin-bottom: 1.5rem;
+  font-size: clamp(3.6rem, 9.6vw, 9.4rem);
+  line-height: 0.94;
+  letter-spacing: -0.07em;
+}
+
 .hero-owner {
   display: block;
-  margin-bottom: 0.2em;
+  margin-bottom: 0.5em;
   color: var(--ink-soft);
-  font-size: 0.34em;
-  font-weight: 720;
-  letter-spacing: -0.02em;
+  font-size: max(0.16em, 0.95rem);
+  font-weight: 600;
+  letter-spacing: 0;
 }
 
 .hero-tagline {
-  max-width: var(--measure-text);
-  margin: 0 0 1.4rem;
-  font-size: clamp(1.55rem, 2.9vw, 2.5rem);
-  font-weight: 720;
-  line-height: 1.16;
-  letter-spacing: -0.04em;
+  max-width: 32ch;
+  margin: 0 auto 2.2rem;
+  color: var(--ink-soft);
+  font-size: clamp(1.35rem, 2.2vw, 1.85rem);
+  font-weight: 450;
+  line-height: 1.3;
+  letter-spacing: -0.02em;
   text-wrap: balance;
 }
 
-.hero-lede {
-  max-width: var(--measure-text);
-  margin: 0 0 1.8rem;
+.hero-meta {
+  margin: 0;
   color: var(--ink-soft);
-  font-size: clamp(1.1rem, 1.9vw, 1.4rem);
-  line-height: 1.55;
-}
-
-.hero-lede em {
-  color: var(--ink);
-  font-style: normal;
-  font-weight: 680;
+  font-size: 0.92rem;
+  font-weight: 500;
 }
 
 .actions {
   display: flex;
   flex-wrap: wrap;
+  justify-content: center;
   align-items: center;
-  margin-top: 0.75rem;
+  margin: 0 0 1.4rem;
   gap: 0.8rem;
 }
 
@@ -372,36 +382,6 @@ h4 {
 .button-secondary {
   background: var(--surface);
   color: var(--ink);
-}
-
-.hero-facts {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  margin: 3rem 0 2.2rem;
-  border-top: 1px solid var(--line);
-  border-bottom: 1px solid var(--line);
-}
-
-.hero-facts div {
-  padding: 1rem 1.2rem 1rem 0;
-}
-
-.hero-facts div + div {
-  padding-left: 1.2rem;
-  border-left: 1px solid var(--line);
-}
-
-.hero-facts dt {
-  color: var(--ink-soft);
-  font-size: 0.72rem;
-  font-weight: 700;
-  letter-spacing: 0.1em;
-  text-transform: uppercase;
-}
-
-.hero-facts dd {
-  margin: 0.18rem 0 0;
-  font-weight: 680;
 }
 
 /* The UA stylesheet sets `figure { margin: 1em 40px }`. The h1..p reset above
@@ -460,6 +440,18 @@ h4 {
 .wide-figure figcaption strong,
 .image-pair figcaption strong {
   color: var(--ink);
+}
+
+.hero-figure {
+  width: min(86rem, 100vw - 3rem);
+  margin: 4.4rem 0 2.2rem 50%;
+  transform: translateX(-50%);
+  border-radius: 1.4rem;
+  box-shadow: var(--shadow-stage);
+}
+
+.hero-figure figcaption {
+  text-align: left;
 }
 
 /* Higher specificity than `.section-lede`, so this is what six of the seven
@@ -1106,19 +1098,10 @@ h4 {
     --gutter: 1.25rem;
   }
 
-  .hero-facts {
-    grid-template-columns: 1fr;
-  }
-
-  .hero-facts div,
-  .hero-facts div + div {
-    padding: 0.75rem 0;
-    border-top: 1px solid var(--line);
-    border-left: 0;
-  }
-
-  .hero-facts div:first-child {
-    border-top: 0;
+  .hero-figure {
+    width: 100%;
+    margin-left: 0;
+    transform: none;
   }
 
   .feature-grid,
