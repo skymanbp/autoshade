@@ -296,21 +296,33 @@ h4 {
   padding-top: clamp(4.8rem, 10vw, 8.5rem);
 }
 
-.hero-copy {
-  display: grid;
-  grid-template-columns: minmax(0, 1.7fr) minmax(16rem, 0.75fr);
-  column-gap: clamp(2rem, 6vw, 6rem);
+/* The hero was a two-column grid built around the 53-character one-liner as
+   its h1: at `max-width: 15ch` that is five lines of display type, and the
+   lede hung at the bottom of the right column (`grid-row: 1 / span 2;
+   align-self: end`), so the top of that column stayed empty and the
+   four-looks figure sat below the fold. The name leads now, the one-liner is
+   its tagline, and the copy reads down one column, so there is no grid. */
+.hero-owner {
+  display: block;
+  margin-bottom: 0.2em;
+  color: var(--ink-soft);
+  font-size: 0.34em;
+  font-weight: 720;
+  letter-spacing: -0.02em;
 }
 
-.hero-copy .eyebrow,
-.hero-copy h1 {
-  grid-column: 1;
+.hero-tagline {
+  max-width: var(--measure-text);
+  margin: 0 0 1.4rem;
+  font-size: clamp(1.55rem, 2.9vw, 2.5rem);
+  font-weight: 720;
+  line-height: 1.16;
+  letter-spacing: -0.04em;
+  text-wrap: balance;
 }
 
 .hero-lede {
-  grid-column: 2;
-  grid-row: 1 / span 2;
-  align-self: end;
+  max-width: var(--measure-text);
   margin: 0 0 1.8rem;
   color: var(--ink-soft);
   font-size: clamp(1.1rem, 1.9vw, 1.4rem);
@@ -325,7 +337,6 @@ h4 {
 
 .actions {
   display: flex;
-  grid-column: 1 / -1;
   flex-wrap: wrap;
   align-items: center;
   margin-top: 0.75rem;
@@ -365,7 +376,6 @@ h4 {
 
 .hero-facts {
   display: grid;
-  grid-column: 1 / -1;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   margin: 3rem 0 2.2rem;
   border-top: 1px solid var(--line);
@@ -1063,14 +1073,6 @@ h4 {
 
   .header-repo {
     margin-left: auto;
-  }
-
-  .hero-copy {
-    display: block;
-  }
-
-  .hero-lede {
-    max-width: 42rem;
   }
 
   .feature-grid,
