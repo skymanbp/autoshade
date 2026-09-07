@@ -73,13 +73,33 @@ fn install_panic_reporter() {
     #[cfg(target_os = "macos")]
     let main_thread = std::thread::current().id();
     std::panic::set_hook(Box::new(move |info| {
+        // CONTAINED or FATAL — the same rule about claims matching outcomes,
+        // applied to the headline itself. `decode::guard_parser_panic` and
+        // `spawn_worker` both catch, and this hook runs INSIDE both, so one
+        // unreadable photo used to raise "must close" over an app that kept
+        // running and then reported that file's own error. The report is
+        // written either way — a contained panic is still a defect worth
+        // recording — but only the fatal half gets a modal.
+        let contained = autoshade::panic_guard::panic_is_recoverable();
         // The claim must match the outcome (review R12-10): on a first
         // launch the store root may not exist yet, and a failed write must
         // not direct the user at a report that is not there.
         let root = autoshade::store::store_root();
         let _ = std::fs::create_dir_all(&root);
         let log = root.join("panic.log");
-        let wrote = std::fs::write(&log, format!("AutoShade crashed: {info}\n").as_bytes()).is_ok();
+        let headline = if contained {
+            "AutoShade recovered from an internal error"
+        } else {
+            "AutoShade crashed"
+        };
+        let wrote = std::fs::write(&log, format!("{headline}: {info}\n").as_bytes()).is_ok();
+        if contained {
+            // The failure still reaches the user — as the operation's own
+            // error line, from the `Msg` the guard synthesizes — and that
+            // line names the FILE, which a modal about the process cannot.
+            default(info);
+            return;
+        }
         // Built once, shown by whichever dialog this platform has. The claim
         // still has to match the outcome, which is what `wrote` decides.
         let msg = if wrote {

@@ -28,6 +28,7 @@ pub mod lensmeta;
 pub mod mask_habit;
 pub(crate) mod mask_refine;
 pub mod openai_models;
+pub mod panic_guard;
 pub mod pipeline;
 pub mod rationale;
 pub mod recipe;

@@ -251,6 +251,7 @@ pub fn render_to_image_in(
     // sitting under the whole ~720 MB-per-plane develop chain below (A7
     // buffer-lifetime queue).
     crate::decode::guard_tiff_chain(raw_path)?;
+    crate::decode::guard_raw_plane_extent(raw_path)?;
     let (rawimage, orientation) = {
         let src = RawSource::new(raw_path)
             .with_context(|| format!("open RAW {}", raw_path.display()))?;
@@ -1366,6 +1367,11 @@ pub fn as_shot_wb(raw_path: &Path) -> Option<(f32, f32)> {
     // A cyclic-IFD file degrades to None here — the documented
     // no-metadata path (callers keep the historical 5500 K anchor).
     crate::decode::guard_tiff_chain(raw_path).ok()?;
+    // Same degradation as the line above, for the same documented reason:
+    // an over-ceiling frame has no WB to offer and the caller keeps the
+    // historical 5500 K anchor. The refusal a person reads comes from the
+    // develop funnel, which cannot degrade.
+    crate::decode::guard_raw_plane_extent(raw_path).ok()?;
     let src = RawSource::new(raw_path).ok()?;
     let decoder = get_decoder(&src).ok()?;
     // A6: the last `get_decoder` caller in the crate, and the one that can

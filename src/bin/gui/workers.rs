@@ -27,6 +27,11 @@ impl AutoShadeApp {
         // never re-arms until the next input event.
         self.egui_ctx.request_repaint();
         std::thread::spawn(move || {
+            // This body's panic is CONTAINED by the `catch_unwind` below.
+            // Declared, so the panic hook does not announce a crash over an
+            // app that is about to report the failure and carry on
+            // (`autoshade::panic_guard`).
+            let _contained = autoshade::panic_guard::Recoverable::enter();
             let msg = std::panic::catch_unwind(std::panic::AssertUnwindSafe(body))
                 .unwrap_or_else(|p| {
                     let s = p

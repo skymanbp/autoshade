@@ -1387,6 +1387,7 @@ pub fn source_frame(path: &Path) -> Result<((usize, usize), rawler::Orientation)
         return Ok(((w as usize, h as usize), exif));
     }
     guard_tiff_chain(path)?;
+    guard_raw_plane_extent(path)?;
     let src = RawSource::new(path).with_context(|| format!("open RAW {}", path.display()))?;
     let decoder = decoder_for(path, &src)?;
     let params = RawDecodeParams { image_index: 0 };
@@ -1475,6 +1476,20 @@ impl Drop for DecodePermit {
     }
 }
 
+/// One TIFF scalar read, shared by the two header guards below so the second
+/// one is not a second copy of the first's byte-order handling.
+fn tiff_u16(r: &mut impl std::io::Read, le: bool) -> std::io::Result<u16> {
+    let mut b = [0u8; 2];
+    r.read_exact(&mut b)?;
+    Ok(if le { u16::from_le_bytes(b) } else { u16::from_be_bytes(b) })
+}
+
+fn tiff_u32(r: &mut impl std::io::Read, le: bool) -> std::io::Result<u32> {
+    let mut b = [0u8; 4];
+    r.read_exact(&mut b)?;
+    Ok(if le { u32::from_le_bytes(b) } else { u32::from_be_bytes(b) })
+}
+
 /// Refuse a TIFF-container RAW whose top-level IFD chain CYCLES, before
 /// rawler ever walks it.
 ///
@@ -1515,16 +1530,6 @@ pub(crate) fn guard_tiff_chain(path: &Path) -> Result<()> {
     /// Far above any real file (a RAW carries ≤4) and above rawler's own
     /// internal caps of 10/16 — a chain this long is already pathological.
     const MAX_IFDS: usize = 64;
-    fn u16at(r: &mut impl std::io::Read, le: bool) -> std::io::Result<u16> {
-        let mut b = [0u8; 2];
-        r.read_exact(&mut b)?;
-        Ok(if le { u16::from_le_bytes(b) } else { u16::from_be_bytes(b) })
-    }
-    fn u32at(r: &mut impl std::io::Read, le: bool) -> std::io::Result<u32> {
-        let mut b = [0u8; 4];
-        r.read_exact(&mut b)?;
-        Ok(if le { u32::from_le_bytes(b) } else { u32::from_be_bytes(b) })
-    }
     let Ok(file) = std::fs::File::open(path) else { return Ok(()) };
     let mut r = std::io::BufReader::new(file);
     let mut bom = [0u8; 2];
@@ -1539,12 +1544,12 @@ pub(crate) fn guard_tiff_chain(path: &Path) -> Result<()> {
     // The magic word is READ but not enforced: rawler's own check is
     // commented out (reader.rs:151-154), which is how Panasonic RW2's 0x55
     // reaches the same walker. Enforcing 42 here would leave RW2 unguarded.
-    if u16at(&mut r, le).is_err() {
+    if tiff_u16(&mut r, le).is_err() {
         return Ok(());
     }
     // base = corr = 0 at every call site we guard (decoders/mod.rs:909), so
     // there is no offset correction to model.
-    let Ok(mut next) = u32at(&mut r, le) else { return Ok(()) };
+    let Ok(mut next) = tiff_u32(&mut r, le) else { return Ok(()) };
     let mut seen = std::collections::HashSet::new();
     let mut walked = 0usize;
     while next != 0 {
@@ -1564,12 +1569,225 @@ pub(crate) fn guard_tiff_chain(path: &Path) -> Result<()> {
         if r.seek(std::io::SeekFrom::Start(u64::from(next))).is_err() {
             return Ok(());
         }
-        let Ok(entries) = u16at(&mut r, le) else { return Ok(()) };
+        let Ok(entries) = tiff_u16(&mut r, le) else { return Ok(()) };
         if r.seek(std::io::SeekFrom::Current(i64::from(entries) * 12)).is_err() {
             return Ok(());
         }
-        let Ok(n) = u32at(&mut r, le) else { return Ok(()) };
+        let Ok(n) = tiff_u32(&mut r, le) else { return Ok(()) };
         next = n;
+    }
+    Ok(())
+}
+
+/// Refuse a TIFF-container RAW whose SENSOR PLANE is over the third-party
+/// decoder's own allocation ceiling, before that decoder is asked to allocate
+/// it.
+///
+/// **The root cause this closes.** AutoShade's per-file RAW ceiling
+/// ([`refuse_raw_develop_over_ceiling`]) is charged against the pixel count in
+/// a DUMMY `RawImage` — a number only rawler can produce. rawler's allocator
+/// has a LOWER ceiling of its own and it PANICS at it: `alloc_image_plain!`
+/// (`pixarray.rs:546-556`) refuses `w * h > 500_000_000 || w > 50_000 ||
+/// h > 50_000`, and it checks that BEFORE the `dummy` short-circuit, so even
+/// the metadata-only probe trips it. Worse, `plain_image_from_ifd`
+/// (`decoders/mod.rs:598`) charges the ceiling with `decode_width * cpp` as the
+/// WIDTH, so a three-sample linear frame reaches it at a third of the pixel
+/// count a Bayer frame would. Between the two ceilings AutoShade's own,
+/// carefully worded refusal was therefore UNREACHABLE: the probe that would
+/// have measured the file panicked first, and [`guard_parser_panic`] reported
+/// "a defect in the third-party decoder for this format" — which is not what
+/// happened. The frame is simply larger than that decoder builds for.
+///
+/// The natural instance is an upscaler's output, not a corrupt file: a 2x pass
+/// over a 60 MP frame writes a 19008x12672 LinearRaw DNG at 3 samples per
+/// pixel in 416x416 tiles, which rounds up to 19136 tile-columns and asks for
+/// `19136 * 3 = 57408` by `12896` — over BOTH limits at once.
+///
+/// Mirrors rawler's arithmetic instead of approximating it: the same tile
+/// round-up (`decoders/mod.rs:588-594`), the same `* cpp` on the width, the
+/// same three comparisons. An approximation would either admit files that
+/// still panic or refuse files that decode today.
+///
+/// **Rejects ONLY on proof**, exactly like [`guard_tiff_chain`] and for the
+/// same reason: any IO error, any non-TIFF magic, any IFD that does not
+/// DECLARE itself sensor data passes through untouched. The declaration is
+/// `PhotometricInterpretation` CFA or LinearRaw — a preview or an embedded
+/// JPEG is BlackIsZero / RGB / YCbCr — so a file that decodes today cannot
+/// start failing here.
+///
+/// Called from the four PIXEL doors and no others: [`source_frame`],
+/// [`decode_raw_turned`], `render::render_to_image_in` and
+/// `render::as_shot_wb` — every place that asks for a `RawImage`. Deliberately
+/// NOT from [`raw_orientation`], [`embedded_xmp`] or `camera_rendition`: those
+/// read metadata and the embedded preview, which an over-ceiling file answers
+/// perfectly well, and refusing there would blank the gallery thumbnail of a
+/// photo whose only problem is that it cannot be developed.
+pub(crate) fn guard_raw_plane_extent(path: &Path) -> Result<()> {
+    use std::io::{Read as _, Seek as _};
+    /// `alloc_image_plain!` (rawler `pixarray.rs:546-556`), verbatim.
+    const MAX_SIDE: u64 = 50_000;
+    const MAX_ELEMS: u64 = 500_000_000;
+    /// The two `PhotometricInterpretation` values that MEAN "this IFD is
+    /// sensor data": CFA (a Bayer / X-Trans mosaic, one sample per pixel) and
+    /// LinearRaw (already demosaiced — what a DNG converter or an upscaler
+    /// writes, three samples per pixel).
+    const PHOTOMETRIC_CFA: u64 = 32803;
+    const PHOTOMETRIC_LINEAR_RAW: u64 = 34892;
+    /// Bounded for the same reason [`guard_tiff_chain`] bounds its walk: this
+    /// guard must never become the thing that hangs on a crafted file.
+    const MAX_IFDS: usize = 64;
+    const MAX_SUB_IFDS: u32 = 16;
+
+    const TAG_IMAGE_WIDTH: u16 = 0x0100;
+    const TAG_IMAGE_LENGTH: u16 = 0x0101;
+    const TAG_PHOTOMETRIC: u16 = 0x0106;
+    const TAG_SAMPLES_PER_PIXEL: u16 = 0x0115;
+    const TAG_TILE_WIDTH: u16 = 0x0142;
+    const TAG_TILE_LENGTH: u16 = 0x0143;
+    const TAG_SUB_IFDS: u16 = 0x014A;
+
+    /// A SHORT or LONG whose `count` is 1 lives INSIDE the entry's own 4-byte
+    /// value field, left-justified in both byte orders (TIFF 6.0 section 2).
+    /// Every tag this walk reads is that shape; anything else is not our tag.
+    fn scalar(typ: u16, count: u32, v: [u8; 4], le: bool) -> Option<u64> {
+        if count != 1 {
+            return None;
+        }
+        match typ {
+            3 => Some(u64::from(if le {
+                u16::from_le_bytes([v[0], v[1]])
+            } else {
+                u16::from_be_bytes([v[0], v[1]])
+            })),
+            4 => Some(u64::from(if le { u32::from_le_bytes(v) } else { u32::from_be_bytes(v) })),
+            _ => None,
+        }
+    }
+
+    let Ok(file) = std::fs::File::open(path) else { return Ok(()) };
+    let mut r = std::io::BufReader::new(file);
+    let mut bom = [0u8; 2];
+    if r.read_exact(&mut bom).is_err() {
+        return Ok(());
+    }
+    let le = match &bom {
+        b"II" => true,
+        b"MM" => false,
+        _ => return Ok(()), // not a TIFF container — nothing here to measure
+    };
+    // Read but not enforced, for the reason guard_tiff_chain records: rawler
+    // does not enforce it either, which is how RW2 0x55 reaches the walker.
+    if tiff_u16(&mut r, le).is_err() {
+        return Ok(());
+    }
+    let Ok(first) = tiff_u32(&mut r, le) else { return Ok(()) };
+
+    // Breadth-first over the root chain AND the SubIFDs hung off it — the
+    // shape every TIFF-based RAW uses to carry its sensor plane, and the same
+    // one [`raw_in_tiff_clothing`] keys on. [`guard_tiff_chain`] runs before
+    // this at every call site, so the chain is already known acyclic; the
+    // visited set is here so a standalone call cannot spin either.
+    let mut queue = std::collections::VecDeque::from([first]);
+    let mut seen = std::collections::HashSet::new();
+    let mut walked = 0usize;
+    while let Some(off) = queue.pop_front() {
+        if off == 0 || !seen.insert(off) {
+            continue;
+        }
+        walked += 1;
+        if walked > MAX_IFDS {
+            return Ok(());
+        }
+        if r.seek(std::io::SeekFrom::Start(u64::from(off))).is_err() {
+            return Ok(());
+        }
+        let Ok(entries) = tiff_u16(&mut r, le) else { return Ok(()) };
+        let mut buf = vec![0u8; usize::from(entries) * 12];
+        if r.read_exact(&mut buf).is_err() {
+            return Ok(());
+        }
+        // next_ifd follows the entries — read it BEFORE any seek below moves
+        // the cursor away to chase a SubIFD offset list.
+        if let Ok(next) = tiff_u32(&mut r, le) {
+            queue.push_back(next);
+        }
+
+        let (mut width, mut height, mut spp, mut photometric) = (None, None, None, None);
+        let (mut tile_w, mut tile_h) = (None, None);
+        for e in buf.chunks_exact(12) {
+            let rd16 = |a: usize| {
+                let b = [e[a], e[a + 1]];
+                if le { u16::from_le_bytes(b) } else { u16::from_be_bytes(b) }
+            };
+            let tag = rd16(0);
+            let typ = rd16(2);
+            let count = {
+                let b = [e[4], e[5], e[6], e[7]];
+                if le { u32::from_le_bytes(b) } else { u32::from_be_bytes(b) }
+            };
+            let inline = [e[8], e[9], e[10], e[11]];
+            // IFD (13) is the type a DNG writer is free to use for SubIFDs
+            // instead of LONG (4); both carry the same offsets.
+            if tag == TAG_SUB_IFDS && matches!(typ, 4 | 13) {
+                if count == 1 {
+                    if let Some(o) = scalar(4, 1, inline, le) {
+                        queue.push_back(o as u32);
+                    }
+                } else if count <= MAX_SUB_IFDS
+                    && let Some(list) = scalar(4, 1, inline, le)
+                    && r.seek(std::io::SeekFrom::Start(list)).is_ok()
+                {
+                    for _ in 0..count {
+                        let Ok(o) = tiff_u32(&mut r, le) else { break };
+                        queue.push_back(o);
+                    }
+                }
+                continue;
+            }
+            let Some(v) = scalar(typ, count, inline, le) else { continue };
+            match tag {
+                TAG_IMAGE_WIDTH => width = Some(v),
+                TAG_IMAGE_LENGTH => height = Some(v),
+                TAG_PHOTOMETRIC => photometric = Some(v),
+                TAG_SAMPLES_PER_PIXEL => spp = Some(v),
+                TAG_TILE_WIDTH => tile_w = Some(v),
+                TAG_TILE_LENGTH => tile_h = Some(v),
+                _ => {}
+            }
+        }
+
+        let (Some(w), Some(h)) = (width, height) else { continue };
+        if w == 0 || h == 0 {
+            continue;
+        }
+        if !matches!(photometric, Some(PHOTOMETRIC_CFA) | Some(PHOTOMETRIC_LINEAR_RAW)) {
+            continue; // a preview or an embedded JPEG, not the sensor plane
+        }
+        let cpp = spp.unwrap_or(1).max(1);
+        // A TILED plane is rounded UP to whole tiles before it is allocated
+        // (`decoders/mod.rs:588-594`); a stripped one allocates its own size.
+        let (dw, dh) = match (tile_w, tile_h) {
+            (Some(tw), Some(tl)) if tw > 0 && tl > 0 => {
+                (w.div_ceil(tw).saturating_mul(tw), h.div_ceil(tl).saturating_mul(tl))
+            }
+            _ => (w, h),
+        };
+        let alloc_w = dw.saturating_mul(cpp);
+        if alloc_w > MAX_SIDE || dh > MAX_SIDE || alloc_w.saturating_mul(dh) > MAX_ELEMS {
+            // Everything a person can act on: the frame as the file declares
+            // it, the allocation it becomes (so the verdict is auditable
+            // rather than an oracle), that the FILE is fine, and the workflow
+            // that does work — upscaling AFTER the develop, where it belongs.
+            anyhow::bail!(
+                "{} carries a {w}x{h} sensor plane at {cpp} sample(s) per pixel, which this \
+                 build's RAW decoder allocates as {alloc_w} x {dh} elements — past its own \
+                 {MAX_SIDE}-per-side and {MAX_ELEMS}-element ceiling, so asking it to decode \
+                 this frame aborts instead of returning. Nothing is wrong with the file; it is \
+                 simply a larger frame than this build develops. Develop the ORIGINAL frame in \
+                 AutoShade and run the upscaler on the result",
+                path.display()
+            );
+        }
     }
     Ok(())
 }
@@ -1665,6 +1883,10 @@ pub(crate) fn guard_parser_panic<T>(
     what: &str,
     call: impl FnOnce() -> Result<T>,
 ) -> Result<T> {
+    // The panic below is CONTAINED. Say so on this thread, so the GUI's
+    // panic hook reports it as the one file's failure it is instead of
+    // raising a modal claiming the app must close ([`crate::panic_guard`]).
+    let _contained = crate::panic_guard::Recoverable::enter();
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(call)) {
         Ok(r) => r,
         Err(p) => {
@@ -1782,6 +2004,7 @@ pub fn decode_raw(path: &Path) -> Result<Decoded> {
 /// turn is impossible to forget: the un-turned door SAYS 0 in one place.
 pub fn decode_raw_turned(path: &Path, quarter_turns: u8) -> Result<Decoded> {
     guard_tiff_chain(path)?;
+    guard_raw_plane_extent(path)?;
     let src = RawSource::new(path).with_context(|| format!("open RAW {}", path.display()))?;
     let decoder = decoder_for(path, &src)?;
     let params = RawDecodeParams { image_index: 0 };
@@ -2580,6 +2803,194 @@ mod tests {
         let foreign = dir.join("foreign.bin");
         std::fs::write(&foreign, b"ftypcrx not a tiff at all").unwrap();
         guard_tiff_chain(&foreign).expect("non-TIFF must pass through");
+    }
+
+    /// A header-only little-endian TIFF: a root IFD hanging ONE SubIFD that
+    /// carries exactly the tags [`guard_raw_plane_extent`] reads. No pixel
+    /// data at all — the guard never reads any, which is the whole point of
+    /// measuring the plane before the decoder is opened.
+    fn tiff_with_plane(
+        w: u32,
+        h: u32,
+        spp: u16,
+        photometric: u16,
+        tile: Option<(u32, u32)>,
+    ) -> Vec<u8> {
+        /// One 12-byte IFD entry with `count == 1`. A SHORT is left-justified
+        /// in the value field, which little-endian `to_le_bytes` produces for
+        /// free (`[lo, hi, 0, 0]`).
+        fn entry(tag: u16, typ: u16, val: u32) -> [u8; 12] {
+            let mut e = [0u8; 12];
+            e[..2].copy_from_slice(&tag.to_le_bytes());
+            e[2..4].copy_from_slice(&typ.to_le_bytes());
+            e[4..8].copy_from_slice(&1u32.to_le_bytes());
+            e[8..].copy_from_slice(&val.to_le_bytes());
+            e
+        }
+        // Ascending tag order, as TIFF 6.0 requires — the guard does not care,
+        // but a fixture that lies about the format teaches nothing.
+        let mut plane = vec![
+            entry(0x0100, 4, w),
+            entry(0x0101, 4, h),
+            entry(0x0106, 3, u32::from(photometric)),
+            entry(0x0115, 3, u32::from(spp)),
+        ];
+        if let Some((tw, tl)) = tile {
+            plane.push(entry(0x0142, 4, tw));
+            plane.push(entry(0x0143, 4, tl));
+        }
+        // Header (8) + a 1-entry root IFD (2 + 12 + 4) = the SubIFD's offset.
+        let sub_off: u32 = 26;
+        let mut f: Vec<u8> = Vec::new();
+        f.extend(b"II");
+        f.extend(42u16.to_le_bytes());
+        f.extend(8u32.to_le_bytes());
+        f.extend(1u16.to_le_bytes());
+        f.extend(entry(0x014A, 4, sub_off));
+        f.extend(0u32.to_le_bytes());
+        assert_eq!(f.len(), sub_off as usize, "the SubIFD offset must be where it lands");
+        f.extend((plane.len() as u16).to_le_bytes());
+        for e in &plane {
+            f.extend(e);
+        }
+        f.extend(0u32.to_le_bytes());
+        f
+    }
+
+    /// The plane guard on the frame that raised it and on its sibling that
+    /// did not: a 2x upscale of a 60 MP body writes a 19008x12672 LinearRaw
+    /// DNG at 3 samples per pixel in 416x416 tiles, which rawler rounds to
+    /// 19136 tile-columns and allocates as 19136 * 3 = 57408 by 12896 — over
+    /// BOTH of its limits. The un-upscaled 9504x6336 denoise pass from the
+    /// same run computes 28704 x 6400 and must still open.
+    ///
+    /// MUTATION THIS KILLS: dropping the `* cpp` (the linear frame would look
+    /// like 19136 x 12896 and pass both limits), or dropping the tile
+    /// round-up (a plane just under a tile boundary would be under-measured).
+    #[test]
+    fn the_plane_guard_refuses_an_upscaled_linear_dng_and_admits_its_sibling() {
+        let dir = std::env::temp_dir()
+            .join(format!("autoshade-plane-extent-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let big = dir.join("upscaled.dng");
+        std::fs::write(&big, tiff_with_plane(19008, 12672, 3, 34892, Some((416, 416)))).unwrap();
+        let err = guard_raw_plane_extent(&big).unwrap_err().to_string();
+        // The measurement is quoted back, so the verdict is auditable rather
+        // than an oracle — and so a future arithmetic change is visible here.
+        assert!(err.contains("19008x12672"), "{err}");
+        assert!(err.contains("3 sample"), "{err}");
+        assert!(err.contains("57408 x 12896"), "{err}");
+        // …and it must NOT blame the file or the decoder for a defect.
+        assert!(err.contains("Nothing is wrong with the file"), "{err}");
+
+        let sibling = dir.join("denoised.dng");
+        std::fs::write(&sibling, tiff_with_plane(9504, 6336, 3, 34892, Some((416, 400)))).unwrap();
+        guard_raw_plane_extent(&sibling).expect("28704 x 6400 is under both limits");
+
+        // A 60 MP Bayer mosaic — one sample per pixel, no tiles — is nowhere
+        // near either limit and must not have become slower to open.
+        let bayer = dir.join("mosaic.arw");
+        std::fs::write(&bayer, tiff_with_plane(9568, 6376, 1, 32803, None)).unwrap();
+        guard_raw_plane_extent(&bayer).expect("a Bayer frame passes");
+
+        // ONLY ON PROOF: the same over-ceiling geometry that does NOT declare
+        // itself sensor data is a preview, and rawler never allocates a plane
+        // for it. Refusing here would blank working files.
+        let preview = dir.join("preview.tif");
+        std::fs::write(&preview, tiff_with_plane(19008, 12672, 3, 2, Some((416, 416)))).unwrap();
+        guard_raw_plane_extent(&preview).expect("an RGB preview is not the sensor plane");
+
+        // …as does anything that is not a TIFF container at all.
+        let foreign = dir.join("foreign.bin");
+        std::fs::write(&foreign, b"ftypcrx not a tiff at all").unwrap();
+        guard_raw_plane_extent(&foreign).expect("non-TIFF passes through");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The BOUNDARY of both limits, pinned the way the allocation ceiling's is
+    /// (`the_allocation_ceiling_refuses_equality_and_admits_one_byte_below`):
+    /// rawler's comparisons are strict `>`, so exactly-at-the-limit decodes
+    /// and one past it does not. Getting this edge wrong in either direction
+    /// either refuses a file that works or lets the panic through.
+    #[test]
+    fn the_plane_guard_admits_the_exact_limit_and_refuses_one_past_it() {
+        let dir =
+            std::env::temp_dir().join(format!("autoshade-plane-edge-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let probe = |name: &str, w: u32, h: u32| {
+            let p = dir.join(name);
+            std::fs::write(&p, tiff_with_plane(w, h, 1, 32803, None)).unwrap();
+            guard_raw_plane_extent(&p)
+        };
+        // Per side: 50_000 is admitted, 50_001 is not.
+        probe("side-at.tif", 50_000, 1).expect("exactly 50000 wide still decodes");
+        assert!(probe("side-over.tif", 50_001, 1).is_err(), "50001 wide trips the side limit");
+        probe("tall-at.tif", 1, 50_000).expect("exactly 50000 tall still decodes");
+        assert!(probe("tall-over.tif", 1, 50_001).is_err(), "50001 tall trips the side limit");
+        // Total elements: 500_000_000 is admitted, one row more is not.
+        probe("elems-at.tif", 50_000, 10_000).expect("exactly 500M elements still decodes");
+        assert!(
+            probe("elems-over.tif", 50_000, 10_001).is_err(),
+            "500,050,000 elements trips the total limit"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// EVERY door that asks the third-party decoder for a `RawImage` measures
+    /// the plane first. The guard is worth nothing at three of four doors: the
+    /// panic it prevents is raised by whichever one is reached first, and the
+    /// gallery, the CLI batch and the render funnel each reach a different one.
+    ///
+    /// A structural test because there is nothing to call — what is asserted
+    /// is that the line IS there, the same shape as
+    /// `the_one_raw_develop_funnel_charges_the_ceiling_before_it_decompresses`.
+    ///
+    /// MUTATION THIS KILLS: deleting the guard from any single door, or adding
+    /// a fifth `raw_image` call site without one.
+    #[test]
+    fn every_raw_image_door_measures_the_plane_first() {
+        for (file, doors_expected) in [("src/decode.rs", 2usize), ("src/render.rs", 2usize)] {
+            // LF-normalised: this repo has MIXED line endings by design.
+            let text = std::fs::read_to_string(
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(file),
+            )
+            .unwrap_or_else(|e| panic!("{file} readable: {e}"))
+            .replace("\r\n", "\n");
+            // TOP-LEVEL functions only. A test helper lives inside `mod tests`
+            // and is therefore indented, so it never starts one of these
+            // chunks; a chunk that runs into a test module stops at it.
+            let mut starts: Vec<usize> = text
+                .match_indices("\nfn ")
+                .chain(text.match_indices("\npub fn "))
+                .chain(text.match_indices("\npub(crate) fn "))
+                .map(|(i, _)| i)
+                .collect();
+            starts.sort_unstable();
+            assert!(!starts.is_empty(), "{file}: no top-level fn — re-anchor this test");
+            let mut doors = 0usize;
+            for (n, &s) in starts.iter().enumerate() {
+                let whole = &text[s..starts.get(n + 1).copied().unwrap_or(text.len())];
+                let body = &whole[..whole.find("\n#[cfg(test)]").unwrap_or(whole.len())];
+                if !body.contains(".raw_image(") {
+                    continue;
+                }
+                doors += 1;
+                assert!(
+                    body.contains("guard_raw_plane_extent("),
+                    "{file}: a `raw_image` door with no plane measurement — {}",
+                    body.lines().nth(1).unwrap_or_default().trim()
+                );
+            }
+            assert_eq!(
+                doors, doors_expected,
+                "{file}: the number of `raw_image` doors changed — a new one needs the guard \
+                 line, and this count updated deliberately"
+            );
+        }
     }
 
     /// A minimal little-endian TIFF whose root IFD carries ONE entry: tag
