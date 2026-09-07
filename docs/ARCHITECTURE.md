@@ -1,6 +1,10 @@
 # AutoShade — Architecture
 
-> Status: **implemented** (v1.2.4 — the clearing batch: a Linux x64 command-line
+> Status: **implemented** (v1.2.5 — the sensor plane is measured from the
+> container before the decoder is asked to allocate it, so a frame past that
+> decoder's own ceiling is a named refusal naming the frame and the workflow
+> that works instead of an abort, and a CONTAINED panic no longer raises a modal
+> saying the app must close; v1.2.4 was the clearing batch: a Linux x64 command-line
 > archive and a Metal path the release run measures, a colour-range family beside
 > the luminance ranges, the Lightroom pack's measured laws, a sidecar's declared
 > orientation choosing the delivered frame, the cast projection's best-paying
@@ -125,9 +129,15 @@
 > wrong reason; it writes a `=== name ===` transcript that
 > `scripts/check_docs.py --gates` reads the counts and the lane set back out
 > of, and it prints the by-name test-set difference against a saved baseline.
-> 1395 library + 24 CLI + 164 GUI + 2+2 contract tests are enumerated in the GUI
-> build; the library result is 1381 pass + 14 `#[ignore]`d forensic probes
-> (counts refreshed 2026-09-02 for v1.2.4: +70 / −7 by name against `f3885b2` —
+> 1399 library + 24 CLI + 164 GUI + 2+2 contract tests are enumerated in the GUI
+> build; the library result is 1385 pass + 14 `#[ignore]`d forensic probes
+> (counts refreshed 2026-09-06 for v1.2.5: +4 / −0 by name against `af8fae8` —
+> the two plane-guard tests and the four-door source sweep in `decode::tests`,
+> and the nesting-and-unwind test in `panic_guard::tests`; the calibration lane
+> did not run for this release and is not counted — its p36-p39 corpus is not on
+> the release machine, so `scripts/release_battery.sh` refused to start rather
+> than report corpus-gated tests that skip and pass. Before that, refreshed
+> 2026-09-02 for v1.2.4: +70 / −7 by name against `f3885b2` —
 > the twelve colour-range tests in `fit_zoned::range`, the eight Lightroom-pack
 > measurements in `render::lr_pack`, eight cast/fit tests in `fit::tests`, seven
 > style-index tests, five zoned-fit tests, the orientation law's four
