@@ -83,6 +83,8 @@ doc-tests 0, GUI **164 passed / 0 failed**; `audit_i18n` 0 findings;
 `subset_gui_fonts --check` 875/875 embedded; `check_docs.py` 0 FAIL. By-name
 test-set difference against v1.2.4: **+4 / −0**.
 
+CI on the tag: `installer-upgrade` (run 34078722150), which upgrades the previously published installer to this build on a clean runner, is green on `5281e39`. The `build` workflow's four ordinary jobs are green on the same commit; its debug-profile library job, which takes about four and a half hours, was still running when this was published. The tag was pushed ahead of it on a measurement rather than a hope: this change adds no `debug_assert!` of its own (`git show 78bee6f -- src/ | grep -c debug_assert` is 0), the only real assertion in any file it touches is a length check in `box_blur_h` that it does not go near, and a guard that refuses BEFORE the allocation cannot make an existing assertion fire.
+
 **The calibration lane did not run, and is not claimed.** It re-runs the
 library with the p36–p39 fit corpus in reach, and that corpus is not on this
 machine — it was deleted in a disk clean-up on 2026-09-03. Without it every
