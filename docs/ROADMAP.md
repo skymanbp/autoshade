@@ -2,11 +2,13 @@
 
 > 这是**已发生之事的台账**，不是待办表：每一条要么是已发布的版本与实测数字，
 > 要么是带理由的终局裁定（一个测出来的数、一条仪器极限、一次用户拍板）。
-> 每项都附 `file:line` 或提交锚点，供新会话不重读全库即可接手。更新于 **2026-09-02**。
+> 每项都附 `file:line` 或提交锚点，供新会话不重读全库即可接手。更新于 **2026-09-06**。
 >
-> **v1.2.4 已发布**（2026-09-02，tag `v1.2.4` → `00d1c5f`，release run `33698677463`
-> 五工位绿，资产回下载字节校验）——清账批：每一项遗留都已发布、测量或以裁定关闭，
-> 本文件不再持有任何计划中的工作；v1.2.4 条目在下方版本台账顶部。
+> **v1.2.5 已发布**（2026-09-06，tag `v1.2.5` → `5281e39`，release run `34079174603`
+> 五工位绿，7 资产回下载字节校验，官网 20/20 逐字节，本机已升）——两个用户报的缺陷：
+> 超出解码器自身天花板的帧改为具名拒绝，被接住的 panic 不再自称「必须关闭」。
+> v1.2.4 立下的「本文件不再持有任何计划中的工作」仍然成立；两条版本条目都在下方
+> 版本台账顶部。
 >
 > 项目自 v1.1.0 起名为 **skymanbp's AutoShade**（短名 AutoShade），二进制
 > `autoshade` / `autoshade-gui`，环境变量前缀 `AUTOSHADE_`。官网 **autoshade.dev**
@@ -14,7 +16,7 @@
 > `skymanbp-autoshop.dev` 301 过去），部署走 `scripts/deploy_site.js`——现场用仓库根
 > `.secret` 的主令牌铸一个一小时期限的 Pages Write 令牌、`finally` 里删掉，令牌值不
 > 打印也不落盘。`site/_headers` 给 `/images/*` 七天 TTL（`max-age=604800`）而 URL 固定，
-> 所以图片靠 `?v=<release>` 缓存键翻新（`site/index.html` 现为 `?v=1.2.3`）；边缘 purge
+> 所以图片靠 `?v=<release>` 缓存键翻新（`site/index.html` 现为 `?v=1.2.5`）；边缘 purge
 > 权限用户已于 2026-09-02 补授给个人令牌，`scripts/purge_site_cache.js` 里连同
 > 「主令牌无法委派 Cache Purge」的实证一起在库。
 >
@@ -23,6 +25,15 @@
 > [docs/ROADMAP-archive.md](ROADMAP-archive.md)（追加式档案，勿重写）。
 
 ## 版本台账（逐版已发布内容与实测数字，新在上；均已完成，勿重做）
+
+### v1.2.5 — 两个缺陷（用户报，一次修）
+
+- **🚢 v1.2.5 已发布 2026-09-06（tag `v1.2.5` → `5281e39`，release run `34079174603` 五工位绿（Windows CLI+GUI、Inno 安装包、便携 zip、macOS 通用 .app + CLI、Linux x64 CLI）；7 资产回下载 `sha256sum -c checksums.txt` 全 OK 且独立 SHA-256 逐件一致，解包 CLI 自报 `autoshade 1.2.5`、独立 exe 与 zip 内副本逐字节同；README/官网资产表由回下载字节回填（`908e160`）；官网部署后**逐字节校验 20/20 相同**——剥掉的是 367 B 的 CF beacon，即 `<script …cloudflareinsights…></script>` **连同其后的换行**（只剥标签会让每个 HTML 差 1 B，三页皆然，这一字节此前从未被写下来），`site/_headers` 的 9 条规则按其覆盖的线上文件逐条命中（`_headers` 自身取 404 是设计：它是 Pages 部署期配置，没有 URL，只能按效果验），15 个 `?v=1.2.5` 键 URL 各自回落到仓库字节（`cf-cache-status: MISS`）且三页无残留 `?v=1.2.4`；本机 `%LOCALAPPDATA%\Programs\AutoShade` 静默原地升级（`/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP-`），**验收按文件不按退出码**：两个 exe 的 sha256 与 `checksums.txt` 全等（`autoshade.exe` 20,654,080 B `c6e20f5d…`、`autoshade-gui.exe` 26,869,760 B `90d2a50d…`）、文件版本 1.2.5、`autoshade --version` 报 `autoshade 1.2.5`、安装目录一个、Programs and Features 一条 1.2.5、PendingFileRenameOperations 两条无一涉 AutoShade、OneFormer 权重 8 文件 881,203,461 B 与显影库 1313 文件 6,011,190 B 升级前后同，全程未启动 GUI——`installer/autoshade.iss:143` 的 `[Run]` 段本就故意为空。）** 用户 2026-09-06 报三件事，两件是缺陷、一件不是（下方逐条），修复合在 `78bee6f`，发版提交 `5281e39`。
+  1. **超出解码器自身天花板的帧：从第三方 panic 改为具名拒绝**——用户的 `*-Topaz-Gigapixel-2X.dng` 一打开就弹「AutoShade hit an internal error and must close」，模态里是 rawler 的 panic（`rawler-0.7.2/src/decoders/mod.rs:598`）。**根因不是那张文件有问题，而是两道天花板之间有个够不着的缝**：rawler 的 `alloc_image_plain!`（`pixarray.rs:546-556`）在 `w*h > 500_000_000 || w > 50_000 || h > 50_000` 时 **panic**，且这道检查排在 `$dummy` 短路**之前**；而 `plain_image_from_ifd` 把 **`decode_width * cpp` 当作宽**来记账，所以一张 3 采样的 LinearRaw 帧在**⅓ 于 Bayer 帧的像素数**上就撞线。AutoShade 自己那道 `refuse_raw_develop_over_ceiling`（`MAX_ALLOC = 4 GiB`，31 B/px 折 138,547,333 px）本来是好的拒绝，但它是**拿一个 dummy `RawImage` 的像素数**去记账的——那个数只有 rawler 能给出，于是**落在两道天花板之间的帧，好的拒绝永远够不着，替它出场的是 panic**。用户这张实测 19008×12672 LinearRaw、spp=3、瓦片 416×416，按瓦片向上取整后是 **57408 × 12896**，两条限都过（宽 > 50,000，元素数 > 500,000,000）。**修法＝在解码器分配之前，从容器里把帧量出来**：`decode::guard_raw_plane_extent`（[decode.rs:1626](../src/decode.rs#L1626)）走 TIFF/DNG 的根 IFD 链 + SubIFD（BFS，`MAX_IFDS=64` / `MAX_SUB_IFDS=16`），只认自称传感器数据的面（PhotometricInterpretation CFA=32803 / LinearRaw=34892），把 rawler 那套算术**逐字镜像**一遍（瓦片 `((w-1)/tw+1)*tw`、`alloc_w = decode_width * cpp`），**只在拿到证据时拒绝**——拒绝语里点名两条限并明说「文件没有问题，只是比这个 build 能显影的帧更大，请在 AutoShade 里显影原始帧、再对结果跑放大器」。四个 `raw_image` 门全部接上：[decode.rs:1390](../src/decode.rs#L1390)（`source_frame`）、[decode.rs:2007](../src/decode.rs#L2007)（`decode_raw_turned`）、[render.rs:254](../src/render.rs#L254)（`render_to_image_in`）、[render.rs:1374](../src/render.rs#L1374)（`as_shot_wb`，按其成文契约降级为 `None` 而非报错）。顺带把 `tiff_u16`/`tiff_u32` 从 `guard_tiff_chain` 里提到模块级，免得第二道守卫是第一道字节序处理的副本。**素材库里那两个 `-Topaz-` 文件与 Topaz 零集成**：`dng` 在 `RAW_EXTS`（[decode.rs:121](../src/decode.rs#L121)）里，扫描就把用户自己放在 RAW 文件夹里的放大结果列了出来。
+  2. **被接住的 panic 不再自称「必须关闭」**——同一个模态的另一半假话：那个 panic **已经被 `catch_unwind` 接住了**，程序并不会关闭，而 hook 无从分辨。修法是给 hook 一个能分辨的依据而不是改文案：新 [src/panic_guard.rs](../src/panic_guard.rs) 用**线程局部的深度（不是布尔——守卫会嵌套）** + RAII，`Drop` 在展开中、hook 之后运行，所以「接住过」这件事在 hook 看得见的时刻仍然为真；`guard_parser_panic` 与 GUI 工作线程（[workers.rs:29](../src/bin/gui/workers.rs#L29)）进入该作用域，hook（[gui/main.rs:76](../src/bin/gui/main.rs#L76)）据此把标题写成「AutoShade recovered from an internal error」、**照旧写报告**、然后交回默认 hook 且**不弹模态**。测试 `the_scope_nests_and_a_caught_panic_still_restores_it` 钉住嵌套与还原。
+  3. **第三问不是缺陷，用户裁定不改**——「重置+保存过的图还是显示 ● edited」：重置**确实**清干净了（`cleared.txt` + `legacy.tombstone`、无 `recipe.json`），角标亮着是因为 ARW 旁边躺着一份 Lightroom 侧车 `.xmp`。`has_develop_or_sidecar`（[store.rs:3577](../src/store.rs#L3577)）的语义是「**某处**存在显影——我们的或 Lightroom 的」，这是成文的设计（L13#2 注释）。用户 2026-09-06 裁定：**不改语义**。
+  4. **门与未跑的门**——本树实测：lib **1385 过 / 0 败 / 14 忽略**（枚举 1399，按顶层模块一进程一跑，Falcon 会杀掉跑整套的单进程见 [[autoshade-falcon-kills-tests]]）、CLI 24、集成 2+2、doc-test 0、GUI **164 过 / 0 败**；clippy 默认与 gui 两套特性各 0 警告；`audit_i18n` 0；`subset_gui_fonts --check` 875/875；`check_docs --gates` **28 PASS / 0 FAIL / 2 SKIP**——首跑 3 FAIL，抓出的正是我手工 grep 漏掉的两份 README 电池计数副本（[README.md:392](../README.md#L392) 证据表、[README.md:710](../README.md#L710) 发布门段落），是门在干它该干的活。**校准车道没跑，也没有被声称**：p36–p39 语料在 2026-09-03 清理里删掉了（`fitted.recipe` / `sky-mask*` / `p3[6-9]` 目录三种找法均 0 命中），`release_battery.sh` 宁可拒绝启动也不肯把「语料门控 → skip → pass」当成绿，所以转录里没有 `=== test calib ===` 块、`check_docs` 对该行 SKIP。它的主题是拟合估计器，本版一行未动；它会覆盖而本版**确实**动到的那条路——全分辨率显影漏斗——改为直接实测：一张真实 60 MP Sony ARW 全分辨率显影，**9504 × 6336 出图**。此项披露同时写在 [docs/RELEASE_NOTES_v1.2.5.md](RELEASE_NOTES_v1.2.5.md)、ARCHITECTURE 的计数括注与 `5281e39` 的提交信息里。
+  5. **打标签时还没绿的两道门，事后判决**——`installer-upgrade` run `34078722150`（`scenarios` 作业）在 `5281e39` 上 **success**；`build` run `34078722229` 的 `debug-asserts` 作业（约 4.6 h）在发版时仍在跑，**打标签是有测量依据地先行的**：`git show 78bee6f -- src/ | grep -c debug_assert` = **0**，被改到的文件里唯一一条真 `debug_assert` 是 `box_blur_h` 的长度检查（与本改动无关），`main.rs` 那处命中是 `cfg_attr` 不是断言——一道**在分配之前拦下来的前置守卫**不可能让某条既有断言开火。
 
 ### v1.2.4 — 清账批
 
