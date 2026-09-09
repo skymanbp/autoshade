@@ -107,9 +107,26 @@ def _download(url, dest, max_bytes):
     # truncated each other and could publish a corrupted download.
     tmp = f"{dest}.{os.getpid()}.part"
     try:
-        with requests.get(url, stream=True, timeout=60) as r:
+        # `identity`: Content-Length counts the bytes ON THE WIRE, while
+        # `iter_content` hands back the DECODED body — two different numbers
+        # the moment the server compresses. raw.githubusercontent.com gzips
+        # the pinned network_scunet.py (2908 on the wire, 11445 decoded), so a
+        # PERFECT download was refused below as "stopped at 11445 of 2908" and
+        # the .py could never be fetched onto a cold cache. Asking for no
+        # encoding makes the two the same quantity again — and it is what
+        # gives the guard anything to check on huggingface.co, which gzips the
+        # pinned JSON files and then sends no Content-Length at all.
+        with requests.get(url, stream=True, timeout=60,
+                          headers={"Accept-Encoding": "identity"}) as r:
             r.raise_for_status()
-            total = int(r.headers.get("Content-Length", 0))
+            # A server may compress anyway. Its Content-Length is then not
+            # comparable to what we write, and the honest move is to not
+            # compare: zero is the value the rest of this function already
+            # reads as "the endpoint did not tell us a size". The sha256 in
+            # _fetch_verified is the authority in either case.
+            encoding = r.headers.get("Content-Encoding", "").strip().lower()
+            total = (0 if encoding not in ("", "identity")
+                     else int(r.headers.get("Content-Length", 0)))
             done = 0
             with open(tmp, "wb") as f:
                 for chunk in r.iter_content(chunk_size=1 << 20):

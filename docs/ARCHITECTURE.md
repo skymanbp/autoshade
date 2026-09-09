@@ -1,6 +1,6 @@
 # AutoShade — Architecture
 
-> Status: **implemented** (v1.2.5 — the sensor plane is measured from the
+> Status: **implemented** (v1.2.6 — the sensor plane is measured from the
 > container before the decoder is asked to allocate it, so a frame past that
 > decoder's own ceiling is a named refusal naming the frame and the workflow
 > that works instead of an abort, and a CONTAINED panic no longer raises a modal
@@ -129,9 +129,15 @@
 > wrong reason; it writes a `=== name ===` transcript that
 > `scripts/check_docs.py --gates` reads the counts and the lane set back out
 > of, and it prints the by-name test-set difference against a saved baseline.
-> 1399 library + 24 CLI + 164 GUI + 2+2 contract tests are enumerated in the GUI
-> build; the library result is 1385 pass + 14 `#[ignore]`d forensic probes
-> (counts refreshed 2026-09-06 for v1.2.5: +4 / −0 by name against `af8fae8` —
+> 1400 library + 24 CLI + 164 GUI + 2+2 contract tests are enumerated in the GUI
+> build; the library result is 1386 pass + 14 `#[ignore]`d forensic probes
+> (counts refreshed 2026-09-08 for v1.2.6: +1 / −0 by name against `616f795` —
+> `denoise::the_sidecar_downloader_asks_for_an_unencoded_body`, which pins the
+> `identity` request the sidecar downloader now makes; the saved name baseline
+> was gone with `target/` in the 2026-09-03 clean-up, so the difference was
+> taken directly between the tag's source and this tree. The calibration lane
+> did not run for this release either, for the same reason as v1.2.5. Before
+> that, refreshed 2026-09-06 for v1.2.5: +4 / −0 by name against `af8fae8` —
 > the two plane-guard tests and the four-door source sweep in `decode::tests`,
 > and the nesting-and-unwind test in `panic_guard::tests`; the calibration lane
 > did not run for this release and is not counted — its p36-p39 corpus is not on
@@ -491,6 +497,22 @@
 > `_reclaim_stale_parts`, `_fetch_verified` — and the other four reach it
 > instead of reimplementing it, which is why their progress lines announce
 > themselves as `[denoise]`.
+>
+> `_download` asks for `Accept-Encoding: identity`, and that is load-bearing
+> rather than tidy. `Content-Length` counts the bytes on the WIRE while
+> `iter_content` hands back the DECODED body, so on a compressing endpoint
+> the two are different numbers: raw.githubusercontent.com gzips the pinned
+> `network_scunet.py` (2908 on the wire, 11445 decoded) and v0.23.2 through
+> v1.2.5 refused that perfect download as "stopped at 11445 of 2908 bytes" --
+> the .py could not be fetched onto a cold cache at all, so AI denoise never
+> ran on a machine without one. huggingface.co gzips the pinned JSON files
+> too but sends no `Content-Length`, which is the only reason the other four
+> sidecars were unaffected: their short-download check had nothing to compare
+> and skipped. Asking for `identity` makes the header comparable again on
+> both hosts (huggingface.co then answers `Content-Length: 47164` for the
+> pinned tokenizer config, which is its pinned byte count), and a response
+> that arrives encoded anyway is treated as sizeless rather than truncated.
+> `_fetch_verified`'s sha256 stays the authority in every case.
 >
 > That discipline lives in **three** shared modules, not in each script.
 > [`python/_device.py`](../python/_device.py) is the one `cuda` -> `mps` ->

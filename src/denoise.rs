@@ -1248,6 +1248,28 @@ mod tests {
         assert!(refusal < publish, "the refusal must guard the publish");
     }
 
+    /// L11#5, the other half: that refusal must compare like with like.
+    /// `Content-Length` counts the bytes ON THE WIRE while `iter_content`
+    /// yields DECODED ones, so on a compressing host they are different
+    /// numbers - raw.githubusercontent.com sends 2908 for the 11445-byte
+    /// pinned network file, and v0.23.2 through v1.2.5 refused that correct
+    /// download as "stopped at 11445 of 2908 bytes", which is why AI denoise
+    /// could not fetch its model onto a cold cache at all. The request asks
+    /// for an unencoded body so the header means what the check assumes;
+    /// drop the header and the refusal above starts firing on every
+    /// compressing endpoint the five sidecars fetch from.
+    #[test]
+    fn the_sidecar_downloader_asks_for_an_unencoded_body() {
+        assert!(
+            SIDECAR_SRC.contains("\"Accept-Encoding\": \"identity\""),
+            "the downloader must ask for an unencoded body"
+        );
+        assert!(
+            SIDECAR_SRC.contains("Content-Encoding"),
+            "a response that arrives encoded anyway must be read as sizeless"
+        );
+    }
+
     /// L11#5: day-old orphaned `.part` files (a hard kill skips the python
     /// `finally`) are reclaimed — on the dest prefix ONLY, so the sweep can
     /// never touch the image-output .part names in the user's out/ dir.

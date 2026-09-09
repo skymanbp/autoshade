@@ -16,7 +16,7 @@
   <meta name="theme-color" content="#f5f1e9" media="(prefers-color-scheme: light)">
   <meta name="theme-color" content="#101817" media="(prefers-color-scheme: dark)">
   <link rel="icon" type="image/png" href="favicon.png">
-  <link rel="stylesheet" href="styles.css?v=1.2.5">
+  <link rel="stylesheet" href="styles.css?v=1.2.6">
 </head>
 <body>
   <a class="skip-link" href="#main-content">Skip to content</a>
@@ -53,7 +53,7 @@
         <p class="hero-meta">Windows · macOS · Linux (CLI) · Open source under MIT</p>
       </div>
       <figure class="hero-figure">
-        <img src="images/showcase-island-four-looks.jpg?v=1.2.5" width="1600" height="1112" alt="Lakeside island town: straight conversion and three AI develops driven by three different direction texts">
+        <img src="images/showcase-island-four-looks.jpg?v=1.2.6" width="1600" height="1112" alt="Lakeside island town: straight conversion and three AI develops driven by three different direction texts">
         <figcaption><strong>One photograph, four looks.</strong> A straight conversion of one Sony α7R IVA 61 MP <code>.ARW</code> and three AI develops of the same RAW, where only the direction text changes. The judge trails on the <a href="https://github.com/skymanbp/autoshade/blob/main/docs/SHOWCASE.md">showcase page</a> are automated review, not human aesthetic approval.</figcaption>
       </figure>
     </section>
@@ -99,19 +99,19 @@
     <section class="section split-section" id="download" aria-labelledby="download-title">
       <div>
         <p class="section-kicker">Download</p>
-        <h2 id="download-title">Download v1.2.5.</h2>
+        <h2 id="download-title">Download v1.2.6.</h2>
         <p>The published release has 8 assets: the 7 files below plus <code>checksums.txt</code>, which carries the SHA-256 of each:</p>
         <ul>
           <li><code>autoshade.exe</code>, 20,654,080 bytes (CLI)</li>
           <li><code>autoshade-gui.exe</code>, 26,869,760 bytes (desktop app)</li>
-          <li><code>AutoShade-Setup-1.2.5.exe</code>, 14,394,354 bytes (installer)</li>
-          <li><code>autoshade-1.2.5-windows-x64.zip</code>, 19,155,461 bytes (portable archive)</li>
-          <li><code>AutoShade-1.2.5-macos-universal.zip</code>, 38,803,471 bytes (macOS app bundle)</li>
-          <li><code>AutoShade-1.2.5-linux-x64.zip</code>, 9,306,949 bytes (Linux command line only)</li>
-          <li><code>AutoShade-1.2.5-macos-cli.zip</code>, 16,799,984 bytes (macOS command line only)</li>
+          <li><code>AutoShade-Setup-1.2.6.exe</code>, 14,394,354 bytes (installer)</li>
+          <li><code>autoshade-1.2.6-windows-x64.zip</code>, 19,155,461 bytes (portable archive)</li>
+          <li><code>AutoShade-1.2.6-macos-universal.zip</code>, 38,803,471 bytes (macOS app bundle)</li>
+          <li><code>AutoShade-1.2.6-linux-x64.zip</code>, 9,306,949 bytes (Linux command line only)</li>
+          <li><code>AutoShade-1.2.6-macos-cli.zip</code>, 16,799,984 bytes (macOS command line only)</li>
         </ul>
         <p>The installer sets up for the current user, no administrator access; the portable ZIP keeps the executables beside their bundled sidecars. A newer installer upgrades in place, develop store and weights intact. The macOS universal <code>AutoShade.app</code> is ad-hoc signed, not notarised: the first launch needs one <em>Open Anyway</em> per machine.</p>
-        <p><a class="button button-primary" href="https://github.com/skymanbp/autoshade/releases/tag/v1.2.5">Open the v1.2.5 release</a></p>
+        <p><a class="button button-primary" href="https://github.com/skymanbp/autoshade/releases/tag/v1.2.6">Open the v1.2.6 release</a></p>
       </div>
       <div class="quickstart" aria-labelledby="quickstart-title">
         <h3 id="quickstart-title">Quickstart</h3>
@@ -144,12 +144,12 @@ autoshade apply "photo.ARW" "recipe.json" -o "developed.tif"</code></pre>
       <p class="section-lede">Generate a target, then fit an engine recipe to its look. The target can invent content; the fitted render cannot. The recipe is editable and applies to the full RAW.</p>
 
       <figure class="wide-figure">
-        <img src="images/showcase-viaduct-reverse-fit.jpg?v=1.2.5" width="1600" height="1000" alt="Stone viaduct: straight conversion, generated target, and the recovered recipe rendered on the RAW, with a 1:1 detail row" loading="lazy">
+        <img src="images/showcase-viaduct-reverse-fit.jpg?v=1.2.6" width="1600" height="1000" alt="Stone viaduct: straight conversion, generated target, and the recovered recipe rendered on the RAW, with a 1:1 detail row" loading="lazy">
         <figcaption><strong>Stone viaduct: the recipe carries the look.</strong> Top row: the straight conversion, a <code>gpt-image-2</code> target (<strong>D = 0.180</strong>, under the 0.35 threshold, so the full solve ran), and the recovered recipe on the RAW. Look error <strong>0.161 → 0.023</strong> at confidence 0.63, at panel Strength 100 %, not the 65 % default. <a href="https://github.com/skymanbp/autoshade/blob/main/docs/SHOWCASE.md">Full measurements →</a></figcaption>
       </figure>
 
       <figure class="wide-figure">
-        <img src="images/showcase-cornwall-reverse-fit.jpg?v=1.2.5" width="1600" height="1000" alt="Cornwall lighthouse islet: straight conversion, generated target, and the recovered recipe rendered on the RAW, with a 1:1 detail row" loading="lazy">
+        <img src="images/showcase-cornwall-reverse-fit.jpg?v=1.2.6" width="1600" height="1000" alt="Cornwall lighthouse islet: straight conversion, generated target, and the recovered recipe rendered on the RAW, with a 1:1 detail row" loading="lazy">
         <figcaption><strong>Cornwall lighthouse islet: the same three stages.</strong> The body's 4:3 aspect makes its embedded preview a centred crop of the 3:2 sensor. Sized from the sensor frame the prompt bought a target at <strong>D = 0.136</strong>, against 0.304 from the preview. Look error <strong>0.137 → 0.027</strong> at confidence 0.66. <a href="https://github.com/skymanbp/autoshade/blob/main/docs/SHOWCASE.md">Full measurements →</a></figcaption>
       </figure>
 
@@ -166,39 +166,39 @@ autoshade apply "photo.ARW" "recipe.json" -o "developed.tif"</code></pre>
 
       <div class="format-grid">
         <figure>
-          <img src="images/formats/cr2.jpg?v=1.2.5" width="600" height="400" alt="Canon CR2 develop" loading="lazy">
+          <img src="images/formats/cr2.jpg?v=1.2.6" width="600" height="400" alt="Canon CR2 develop" loading="lazy">
           <figcaption><strong>.cr2</strong><span>Canon EOS 40D</span></figcaption>
         </figure>
         <figure>
-          <img src="images/formats/cr3.jpg?v=1.2.5" width="600" height="400" alt="Canon CR3 develop" loading="lazy">
+          <img src="images/formats/cr3.jpg?v=1.2.6" width="600" height="400" alt="Canon CR3 develop" loading="lazy">
           <figcaption><strong>.cr3</strong><span>Canon EOS R6</span></figcaption>
         </figure>
         <figure>
-          <img src="images/formats/nef.jpg?v=1.2.5" width="600" height="399" alt="Nikon NEF develop" loading="lazy">
+          <img src="images/formats/nef.jpg?v=1.2.6" width="600" height="399" alt="Nikon NEF develop" loading="lazy">
           <figcaption><strong>.nef</strong><span>Nikon D700</span></figcaption>
         </figure>
         <figure>
-          <img src="images/formats/arw.jpg?v=1.2.5" width="600" height="400" alt="Sony ARW develop" loading="lazy">
+          <img src="images/formats/arw.jpg?v=1.2.6" width="600" height="400" alt="Sony ARW develop" loading="lazy">
           <figcaption><strong>.arw</strong><span>Sony α7 III</span></figcaption>
         </figure>
         <figure>
-          <img src="images/formats/orf.jpg?v=1.2.5" width="600" height="450" alt="Olympus ORF develop" loading="lazy">
+          <img src="images/formats/orf.jpg?v=1.2.6" width="600" height="450" alt="Olympus ORF develop" loading="lazy">
           <figcaption><strong>.orf</strong><span>Olympus E-M5</span></figcaption>
         </figure>
         <figure>
-          <img src="images/formats/rw2.jpg?v=1.2.5" width="600" height="451" alt="Panasonic RW2 develop" loading="lazy">
+          <img src="images/formats/rw2.jpg?v=1.2.6" width="600" height="451" alt="Panasonic RW2 develop" loading="lazy">
           <figcaption><strong>.rw2</strong><span>Panasonic DMC-GX85</span></figcaption>
         </figure>
         <figure>
-          <img src="images/formats/pef.jpg?v=1.2.5" width="600" height="397" alt="Pentax PEF develop" loading="lazy">
+          <img src="images/formats/pef.jpg?v=1.2.6" width="600" height="397" alt="Pentax PEF develop" loading="lazy">
           <figcaption><strong>.pef</strong><span>Pentax K-5</span></figcaption>
         </figure>
         <figure>
-          <img src="images/formats/dng.jpg?v=1.2.5" width="600" height="398" alt="Ricoh DNG develop" loading="lazy">
+          <img src="images/formats/dng.jpg?v=1.2.6" width="600" height="398" alt="Ricoh DNG develop" loading="lazy">
           <figcaption><strong>.dng</strong><span>Ricoh GR II</span></figcaption>
         </figure>
         <figure>
-          <img src="images/formats/raf.jpg?v=1.2.5" width="600" height="400" alt="Fujifilm RAF X-Trans develop" loading="lazy">
+          <img src="images/formats/raf.jpg?v=1.2.6" width="600" height="400" alt="Fujifilm RAF X-Trans develop" loading="lazy">
           <figcaption><strong>.raf</strong><span>Fujifilm X-S10 · X-Trans, approximate</span></figcaption>
         </figure>
       </div>
@@ -242,7 +242,7 @@ autoshade apply "photo.ARW" "recipe.json" -o "developed.tif"</code></pre>
     <section class="section technology" id="pillars" aria-labelledby="pillars-title">
       <p class="section-kicker">Three pillars</p>
       <h2 id="pillars-title">Three things this does that a RAW developer does not.</h2>
-      <p class="section-lede">Everything below is one of these three or infrastructure for them. Each pillar states its own mathematics and its own measured result. This is v1.2.5, the download above.</p>
+      <p class="section-lede">Everything below is one of these three or infrastructure for them. Each pillar states its own mathematics and its own measured result. This is v1.2.6, the download above.</p>
 
       <div class="tech-list">
         <article id="pillar-analysis">
@@ -392,7 +392,7 @@ autoshade apply "photo.ARW" "recipe.json" -o "developed.tif"</code></pre>
           <div class="tech-index" aria-hidden="true">08</div>
           <div>
             <h3>Application and infrastructure</h3>
-            <p>Rust 2024 backs one library shared by the CLI, the egui desktop app and a loopback web UI. The server combines a 32-byte token with Host/Origin/no-store defenses; SCUNet must satisfy <code>sidecar_wrote</code>. A <strong>1771 MB</strong> probe set the 1800 MB per-photo budget. The v1.2.5 battery is 1399 library, 24 CLI, 164 GUI and 2+2 contract tests.</p>
+            <p>Rust 2024 backs one library shared by the CLI, the egui desktop app and a loopback web UI. The server combines a 32-byte token with Host/Origin/no-store defenses; SCUNet must satisfy <code>sidecar_wrote</code>. A <strong>1771 MB</strong> probe set the 1800 MB per-photo budget. The v1.2.6 battery is 1400 library, 24 CLI, 164 GUI and 2+2 contract tests.</p>
             <p class="source-link"><a href="https://github.com/skymanbp/autoshade/blob/main/docs/TECH_STACK.md#application-and-infrastructure">Details: application and infrastructure →</a></p>
           </div>
         </article>
@@ -452,6 +452,6 @@ autoshade apply "photo.ARW" "recipe.json" -o "developed.tif"</code></pre>
        build step and no bundler, so a shared script file would be one
        more request and one more cache key to get wrong at release time.
        Change one copy, change the other. -->
-  <script src="diagram.js?v=1.2.5" defer></script>
+  <script src="diagram.js?v=1.2.6" defer></script>
 </body>
 </html>
