@@ -418,11 +418,11 @@ command-line archive; `checksums.txt` carries the SHA-256 of every asset.
 |---|---:|---|
 | `autoshade.exe` (CLI) | 20,654,080 bytes | `c6e20f5d95761f6db973d8149c1bc96f7cd985394b9d91ee034df16de5c48a83` |
 | `autoshade-gui.exe` (desktop app) | 26,869,760 bytes | `90d2a50de6d834f98883a7ceb4dd8dc4fd52e322c5399ddafb2c6faaa25f2e83` |
-| `AutoShade-Setup-1.2.6.exe` (installer) | 14,394,354 bytes | `efed856382e89bc708e7cefc537fb21abbec17e55e764ce366af3815bafff514` |
-| `autoshade-1.2.6-windows-x64.zip` (portable archive) | 19,155,461 bytes | `ae185e715344eed5507ca01e3f98c43cd47ccc53af3387af3e57c19e0fee71fd` |
-| `AutoShade-1.2.6-macos-universal.zip` (macOS app bundle) | 38,803,471 bytes | `1dd885cd0ebd70b083eaeda6fbc96cb57e58058e7af890e5ec07e65f23fd1cf9` |
-| `AutoShade-1.2.6-linux-x64.zip` (Linux command line only) | 9,306,949 bytes | `599c0a0b248214d56604da91453ecfd30139537835cde7242eaac240194be42c` |
-| `AutoShade-1.2.6-macos-cli.zip` (macOS command line only) | 16,799,984 bytes | `338f0009cdfa15faff8f050e4b67b03b009ca3d0e437272592718c87c7495968` |
+| `AutoShade-Setup-1.2.6.exe` (installer) | 14,397,689 bytes | `1fa235dd0d17c7be1cae282ed2a1e14c16ebebb24fdb53e3a47d9e36626c4bdd` |
+| `autoshade-1.2.6-windows-x64.zip` (portable archive) | 19,159,416 bytes | `41cacddc95f06a0b89a1262210d4afa1590c441d4ef23efb49957707dd9f1972` |
+| `AutoShade-1.2.6-macos-universal.zip` (macOS app bundle) | 38,836,406 bytes | `d8c939dd554c649b276cd12bbe19967172b40459a5d6b10b515eb8b4350c7f97` |
+| `AutoShade-1.2.6-linux-x64.zip` (Linux command line only) | 9,305,042 bytes | `f0e8d8a1858221fb6737a07bfc0c0410536ea3d36bf2b53ff6c04010714516f6` |
+| `AutoShade-1.2.6-macos-cli.zip` (macOS command line only) | 16,811,684 bytes | `fc42eb8b0413d79a104ab56b374935c75efe49d071527bbdb61ec05f53490680` |
 
 Download from the
 [v1.2.6 release page](https://github.com/skymanbp/autoshade/releases/tag/v1.2.6):
