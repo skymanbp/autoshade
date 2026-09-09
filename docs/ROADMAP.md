@@ -2,13 +2,13 @@
 
 > 这是**已发生之事的台账**，不是待办表：每一条要么是已发布的版本与实测数字，
 > 要么是带理由的终局裁定（一个测出来的数、一条仪器极限、一次用户拍板）。
-> 每项都附 `file:line` 或提交锚点，供新会话不重读全库即可接手。更新于 **2026-09-06**。
+> 每项都附 `file:line` 或提交锚点，供新会话不重读全库即可接手。更新于 **2026-09-09**。
 >
-> **v1.2.5 已发布**（2026-09-06，tag `v1.2.5` → `5281e39`，release run `34079174603`
-> 五工位绿，8 资产回下载字节校验，官网 20/20 逐字节，本机已升）——两个用户报的缺陷：
-> 超出解码器自身天花板的帧改为具名拒绝，被接住的 panic 不再自称「必须关闭」。
-> v1.2.4 立下的「本文件不再持有任何计划中的工作」仍然成立；两条版本条目都在下方
-> 版本台账顶部。
+> **v1.2.6 已发布**（2026-09-09，tag `v1.2.6` → `24a467f`，release run `34309073383`
+> 五工位绿，8 资产回下载字节校验，官网 19/19 逐字节，本机已升）——一个用户报的缺陷：
+> 被 gzip 压缩的模型下载不再被当成断流拒绝（v0.23.2–v1.2.5 冷缓存机器上 AI denoise
+> 从来下不动模型）。v1.2.4 立下的「本文件不再持有任何计划中的工作」仍然成立；三条
+> 版本条目都在下方版本台账顶部。
 >
 > 项目自 v1.1.0 起名为 **skymanbp's AutoShade**（短名 AutoShade），二进制
 > `autoshade` / `autoshade-gui`，环境变量前缀 `AUTOSHADE_`。官网 **autoshade.dev**
@@ -25,6 +25,13 @@
 > [docs/ROADMAP-archive.md](ROADMAP-archive.md)（追加式档案，勿重写）。
 
 ## 版本台账（逐版已发布内容与实测数字，新在上；均已完成，勿重做）
+
+### v1.2.6 — 压缩过的下载不再被当成断流
+
+- **🚢 v1.2.6 已发布 2026-09-09（tag `v1.2.6` → `24a467f`，release run `34309073383` 五工位绿（Windows CLI+GUI、Inno 安装包、便携 zip、macOS 通用 .app + CLI、Linux x64 CLI，publish 亦绿）；8 资产（7 件 + `checksums.txt` 自身）回下载，`sha256sum -c checksums.txt` 7/7 OK 且独立重算逐件一致（installer `1fa235dd…` 14,397,689 B、windows zip `41cacddc…` 19,159,416 B、macos universal `d8c939dd…` 38,836,406 B、linux `f0e8d8a1…` 9,305,042 B、macos-cli `fc42eb8b…` 16,811,684 B）；zip 内两个 exe 与独立资产逐字节同，解包 CLI 自报 `autoshade 1.2.6`，**zip 内 `python/denoise.py` sha256 `1002fef7…5915c7` 与仓库同**（修复确实随资产出厂）、同目录 `test_*.py` 0 个（三个安装器的排除规则生效）；README/官网资产表由回下载字节回填（`aa61b8f`）；官网 `deploy_site.js` exit 0 + purge OK，实测 **19/19 逐字节相同**（剥掉的仍是 367 B 的 CF beacon**连同其后的换行**）、17 个 `?v=1.2.6` 键 URL 各自回落到仓库字节（`cf-cache-status: MISS`）、三页 0 个陈旧键（校验脚本须带浏览器 User-Agent，默认 urllib UA 被该区 bot 规则回 403；`/404.html` 按设计以 404 状态返回正文）；本机 `%LOCALAPPDATA%\Programs\AutoShade` 静默原地升级（`/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP-`，**从 PowerShell 跑**——Git Bash 的 MSYS 会改写 Inno 开关成路径而弹向导），**验收按文件不按退出码**：`autoshade.exe` 20,654,592 B `ce501eb6…`、`autoshade-gui.exe` 26,869,760 B `185227c4…` 两者 sha256 与 `checksums.txt` 全等、文件版本 1.2.6、安装目录一个、Programs and Features 一条「AutoShade version 1.2.6」、PendingFileRenameOperations 8 条无一涉 AutoShade、权重 39 文件 9,342,127,142 B 升级前后同，全程未启动 GUI；升级后用**发布出厂的** sidecar 复跑一次去噪：exit 0，合成噪声图对干净参考 RMS 0.03497 → 0.00331。）**
+  1. **AI denoise 在任何冷缓存机器上都下不动模型（v0.23.2 起，六个版本）**——用户点 AI denoise 得到`refusing network_scunet.py: the download stopped at 11445 of 2908 bytes`，进度行还写着 `0/0 MB (393.6%)`。**根因是两个数从来就不是同一个量**：`_download` 的短下载守卫拿 `iter_content` 交回的**解压后**字节数去比响应头 `Content-Length`，而后者数的是**线上**字节。raw.githubusercontent.com 对钉住的 `network_scunet.py` 开 gzip——线上 2908、解压 11445、sha256 正是 [denoise.py:68](../python/denoise.py#L68) 自 v0.23.2 起钉的那个值；`100 × 11445 / 2908 = 393.57%` 就是那行进度。守卫来自 `61bbd18`（2026-08-11）、首发于 v0.23.2，所以 v0.23.2–v1.2.5 只能把这个 `.py` 下到**已经有它**的缓存里——新装机器上画布按钮与导出勾选两个时机都止步于此。权重不受影响不是运气：KAIR release 资产不压缩（实测 `Content-Length: 71982841` = [denoise.py:90](../python/denoise.py#L90) 钉的字节数），比的是同类。**修法是一个请求头而不是放宽比较**：[denoise.py:110-128](../python/denoise.py#L110-L128) 请求 `Accept-Encoding: identity` 让 `Content-Length` 重新等于写下的字节数，服务端仍压缩时把它当作**没给大小**（0，函数本来就这么读）而不是断流；流内字节帽原样不动（它一直按解压字节对钉表记账），`_fetch_verified` 的 sha256 仍是最终权威。**这是五个 sidecar 共用的同一个下载器**——[_sidecar.py:45](../python/_sidecar.py#L45) 把 `denoise._fetch_verified` 导给 describe/embed/correspond，segment 同路。它们躲过这个缺陷的原因值得写下：huggingface.co **也**对钉住的 JSON 开 gzip，但**根本不发 `Content-Length`**，于是那道守卫无从比较、每次都跳过；改成 identity 之后 HF 对钉住的 `tokenizer_config.json` 答 `Content-Length: 47164`，正是 [embed.py:135](../python/embed.py#L135) 钉的字节数——这道守卫在模型下载上**第一次真正开始工作**。
+  2. **CI 不跑任何 python 套件，所以钉子做了两侧**——`grep -rn "unittest" .github/workflows/*.yml` 零命中，`python/test_*.py` 只是本机门。新 [python/test_denoise.py](../python/test_denoise.py) 六条契约（gzip 响应不算短下载、请求要求不编码、真短下载仍拒、超帽仍中途拒、拒绝后无 `.part`、无 Content-Length 端点仍发布），对**改前**的文件跑有两条转红，其中一条逐字复现用户那句话；同时新增随 lib 电池进 CI 的源文本不变量 [denoise.rs:1250](../src/denoise.rs#L1250) `the_sidecar_downloader_asks_for_an_unencoded_body`。两条断言各手工变异一次（先删请求头、再删「编码即无大小」那支）都具名转红，还原后 `python/denoise.py` sha256 `1002fef7…5915c7` 与变异前逐字节相同。
+  3. **门与未跑的门**——本树实测：lib **1386 过 / 0 败 / 14 忽略**（枚举 1400，逐顶层模块一进程一跑，416.66 s，见 [[autoshade-falcon-kills-tests]]）、CLI 24、集成 2+2、doc-test 0、GUI **164 过 / 0 败**；clippy 默认与 gui 两套特性各 0 警告；`audit_i18n` 11 项检查全 0；`subset_gui_fonts --check` 875/875；`check_docs --gates` **28 PASS / 0 FAIL / 2 SKIP**——首跑 1 FAIL，抓出的正是手工 grep 漏掉的第四处电池计数副本（[TECH_STACK.md:1489](TECH_STACK.md#L1489)），门在干它该干的活；按名集差 **+1 / −0**，唯一新名就是上面那条 Rust 钉子（保存的名单基线随 `target/` 在 2026-09-03 清理里删了，集差改为直接在 v1.2.5 标签源与本树之间取）。**校准车道仍未跑，也没有被声称**：p36–p39 语料 2026-09-03 已删，`release_battery.sh` 实测 exit 1 拒绝启动；它的主题是拟合估计器，本版一行未动。由此产生的两条 SKIP 一并披露：转录不是 `release_battery.sh` 写的，`check_docs` 因而把 lane 检查判 SKIP；XMP 普查 SKIP 是因为语料在库外。**发版时仍在跑的门**：main 上 `build` run `34309071035` 的 `debug-asserts` 作业（约 4.6 h）——本批 `src/` 只加了 22 行、全在测试模块内，`git show 24a467f -- src/ | grep -c debug_assert` = **0**，一条只读源文本常量的断言不可能让既有断言开火；`installer-upgrade` 在标签上（run `34309073384`）已 success。
 
 ### v1.2.5 — 两个缺陷（用户报，一次修）
 
