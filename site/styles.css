@@ -1,3 +1,25 @@
+/* `--font-sans` below has named Inter since this stylesheet was written, but
+   nothing ever fetched it: there is no font stylesheet in any of the three
+   pages, and naming a family does not download it. Every visitor without Inter
+   already installed -- almost all of them -- read the page in Segoe UI or SF
+   instead, which is not the face the tracking below was tuned for.
+
+   `fonts/Inter-autoshade.woff2` is 96,368 bytes of Inter 4.001 carrying both
+   the `opsz` 14-32 and `wght` 100-900 axes, so this one declaration covers
+   every weight the page asks for, and `font-optical-sizing`, which is `auto` by
+   default, gives the hero its display-size drawing while body copy keeps the
+   14pt one. The URL resolves against THIS file rather than the page, which is
+   what makes the single line correct for `/`, for `/architecture.html`, and for
+   the 404 served at an arbitrary path. `swap`, because the fallback stack is a
+   real one: the text is readable from the first paint either way. */
+@font-face {
+  font-family: Inter;
+  src: url("fonts/Inter-autoshade.woff2") format("woff2");
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: swap;
+}
+
 :root {
   color-scheme: light dark;
   --page: #f5f1e9;
@@ -57,12 +79,14 @@
      above and are not restated here. The three accents are the exception:
      they are literal hex chosen for contrast against the diagram's own box
      fill rather than against the page, so they are the three that need a dark
-     value of their own. */
-  .diagram-stage {
-    --dg-accent-blue: #7fb2ea;
-    --dg-accent-rust: #e6a077;
-    --dg-accent-green: #6fc294;
-  }
+     value of their own -- and they CANNOT be written here. This block is a
+     `.diagram-stage` rule, and so is the base one that sets all fifteen names
+     far below; both are specificity (0,1,0), a media query adds none, so the
+     later rule in the file wins in both themes. Written here, the dark values
+     never applied once: `--dg-accent-blue` computed to #2f66a8, the light
+     value, with dark matching. The three now sit directly after that base rule
+     instead, where source order does what this file's `:root` pair relies on.
+     The other twelve are safe precisely because they flip on `:root` above. */
 }
 
 *,
@@ -205,6 +229,19 @@ h4 {
 
 .skip-link:focus {
   transform: translateY(0);
+}
+
+/* `a:hover` up at the top of this file is (0,1,1) and `.skip-link` is (0,1,0),
+   so a hovered skip link took `--warm` on `--ink`: 2.85:1 in light and 1.96:1
+   in dark, against 14.77 and 16.14 unhovered. It is the page's only inverted
+   surface that did not already restate its foreground for the hover state --
+   `.button-primary` is the other inverted element and sets both colours on
+   `:hover` -- so these two lines close the class rather than patch one case.
+   Everything else the global rule reaches sits on the page ground, where the
+   rust it applies is the intended affordance and clears AA on its own. */
+.skip-link:hover,
+.skip-link:focus {
+  color: var(--page);
 }
 
 .site-header {
@@ -503,9 +540,18 @@ h4 {
   margin: 0;
 }
 
+/* Equal tracks, not 0.8/1.2. The card had the wider share back when the left
+   column was an intro and seven bullets; it now holds the release table, which
+   is the column with something to line up, while the card holds a numbered list
+   and two `pre` blocks that scroll their own overflow either way. At 0.8fr the
+   left track was 432px inside the 1184px container -- too narrow for
+   `filename  use  bytes`, so the heading wrapped and every row doubled, and the
+   two columns ended 359px apart. Equal tracks plus the three-column table below
+   close that to 31px without stretching either side into space it has no
+   content for. */
 .split-section {
   display: grid;
-  grid-template-columns: minmax(0, 0.8fr) minmax(0, 1.2fr);
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   align-items: start;
   gap: clamp(2.5rem, 7vw, 7rem);
 }
@@ -523,9 +569,63 @@ h4 {
   box-shadow: var(--shadow);
 }
 
-.quickstart ol,
-.split-section ul {
+.quickstart ol {
   padding-left: 1.4rem;
+}
+
+/* The seven release assets are a table now, not a bulleted list, so the byte
+   counts share one right-aligned scan column instead of trailing each filename
+   in prose. `.split-section ul` retired with the list it indented; the section
+   holds no other `ul`. Tabular figures and `nowrap` because the column is read
+   down, and a nine-digit count that wrapped would break that column. */
+.release-files {
+  width: 100%;
+  margin: 1.1rem 0 1.4rem;
+  border-collapse: collapse;
+  font-size: 0.86rem;
+  line-height: 1.5;
+  text-align: left;
+}
+
+.release-files th,
+.release-files td {
+  padding: 0.55rem 0.5rem 0.55rem 0;
+  border-bottom: 1px solid var(--line);
+  vertical-align: top;
+}
+
+.release-files th {
+  color: var(--ink-soft);
+  font-size: 0.74rem;
+  font-weight: 780;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.release-files code {
+  overflow-wrap: anywhere;
+}
+
+/* What each asset is for is its own column now rather than a second line inside
+   the filename cell. Stacked, it made all seven rows two lines tall for no
+   reason once the track was wide enough to hold both -- and a stacked label is
+   not a column you can read down. Quieter than the filename because the
+   filename is what is being scanned for. No `nowrap` anywhere in this table:
+   `overflow-wrap` above lets a long filename break instead, which keeps the
+   table inside its own grid column at every width rather than spilling into the
+   gap between the two. */
+.release-files .asset-use {
+  padding-right: 1.25rem;
+  color: var(--ink-soft);
+}
+
+.release-files .asset-bytes {
+  padding-right: 0;
+  font-family: var(--font-mono);
+  font-size: 0.8rem;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  white-space: nowrap;
 }
 
 .quickstart li + li {
@@ -649,6 +749,19 @@ h4 {
   touch-action: none;
 }
 
+/* The three literal accents, dark. They live here rather than in the dark query
+   at the top of the file for the reason recorded there: same selector, same
+   specificity, and this rule is later, so this is the only place a dark value
+   can survive. Measured against the drawing's own canvas, node, group and side
+   fills, the light triple reaches 4.71/5.05/5.10 and the dark 6.19/6.32/6.42. */
+@media (prefers-color-scheme: dark) {
+  .diagram-stage {
+    --dg-accent-blue: #7fb2ea;
+    --dg-accent-rust: #e6a077;
+    --dg-accent-green: #6fc294;
+  }
+}
+
 .diagram-stage.is-dragging {
   cursor: grabbing;
 }
@@ -684,8 +797,15 @@ h4 {
   gap: 0.4rem;
 }
 
-.diagram-controls button,
-.diagram-fullscreen {
+/* `:not([hidden])` for the same reason the container above carries it, and it
+   was missing here: `diagram.js` sets `fullscreenButton.hidden = true` for a
+   browser without the unprefixed Fullscreen API, but `display: inline-flex` at
+   (0,1,1) beats the UA sheet's `[hidden] { display: none }` at (0,1,0), so that
+   browser was shown a button that does nothing -- exactly the outcome the
+   comment above says the pattern exists to avoid. Not reproducible in a browser
+   that has the API, which is why it survived. */
+.diagram-controls button:not([hidden]),
+.diagram-fullscreen:not([hidden]) {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -883,6 +1003,23 @@ h4 {
   font-size: clamp(1.45rem, 3vw, 2.35rem);
 }
 
+/* Each of these headings is an `<a>` now: the separate "Details: ... ->" line
+   under every item was folded into its own title. Left to the global rule it
+   took `--accent-strong` and an underline at h3 size, which reads as eleven
+   large teal links rather than as the section's headings. It keeps the heading
+   colour and earns its affordance on hover instead, the way the header nav
+   does. `underline` on hover rather than a colour change, because at this size
+   the colour shift alone is the louder of the two. */
+.tech-list h3 a {
+  color: inherit;
+  text-decoration: none;
+}
+
+.tech-list h3 a:hover {
+  color: inherit;
+  text-decoration: underline;
+}
+
 .tech-list p {
   color: var(--ink-soft);
 }
@@ -910,9 +1047,13 @@ h4 {
   gap: 1rem;
 }
 
+/* No `min-height` any more. The 13rem existed to give the eyebrow at the top
+   and the title at the bottom room to sit apart, and the condensed copy dropped
+   the eyebrow; keeping the floor left a card that was mostly empty above its
+   own title. Grid rows stretch their items to the tallest by default, so the
+   cards in a row still match without a number in this file deciding it. */
 .doc-grid > a {
   display: flex;
-  min-height: 13rem;
   padding: 1.5rem;
   flex-direction: column;
   border: 1px solid var(--line);
@@ -936,9 +1077,13 @@ h4 {
   text-transform: uppercase;
 }
 
+/* The fixed 2.5rem top margin went with the eyebrow it used to clear: the
+   condensed copy removed the eyebrow, and the card now sizes to its own
+   content. `.doc-grid span` above is left alone -- it still describes an
+   eyebrow correctly should one ever come back. */
 .doc-grid strong {
   display: block;
-  margin: 2.5rem 0 0.35rem;
+  margin: 0 0 0.35rem;
   font-size: 1.25rem;
 }
 

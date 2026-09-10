@@ -16,7 +16,8 @@
   <meta name="theme-color" content="#f5f1e9" media="(prefers-color-scheme: light)">
   <meta name="theme-color" content="#101817" media="(prefers-color-scheme: dark)">
   <link rel="icon" type="image/png" href="favicon.png">
-  <link rel="stylesheet" href="styles.css?v=1.2.6">
+  <link rel="preload" href="fonts/Inter-autoshade.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="stylesheet" href="styles.css?v=1.2.6-1">
 </head>
 <body>
   <a class="skip-link" href="#main-content">Skip to content</a>
@@ -54,39 +55,39 @@
       </div>
       <figure class="hero-figure">
         <img src="images/showcase-island-four-looks.jpg?v=1.2.6" width="1600" height="1112" alt="Lakeside island town: straight conversion and three AI develops driven by three different direction texts">
-        <figcaption><strong>One photograph, four looks.</strong> A straight conversion of one Sony α7R IVA 61 MP <code>.ARW</code> and three AI develops of the same RAW, where only the direction text changes. The judge trails on the <a href="https://github.com/skymanbp/autoshade/blob/main/docs/SHOWCASE.md">showcase page</a> are automated review, not human aesthetic approval.</figcaption>
+        <figcaption><strong>One photograph, four looks.</strong> One Sony α7R IVA 61 MP <code>.ARW</code>: straight conversion and three AI develops, changing only direction text. <a href="https://github.com/skymanbp/autoshade/blob/main/docs/SHOWCASE.md">Judge trails</a> are automated review, not human aesthetic approval.</figcaption>
       </figure>
     </section>
 
     <section class="section prose-intro" id="overview" aria-labelledby="overview-title">
       <p class="section-kicker">What it is</p>
-      <h2 id="overview-title">A small recipe between the model and your photograph.</h2>
-      <p class="section-lede">An AI decides what to change. A deterministic Rust engine does it. A non-destructive developer for RAW and baked images, where the AI proposal becomes a small <code>EditRecipe</code> and the same renderer applies it in the desktop app, the CLI and the web UI.</p>
+      <h2 id="overview-title">AI proposes. The engine develops.</h2>
+      <p class="section-lede">A deterministic Rust engine renders AI proposals.</p>
 
       <div class="feature-grid">
         <article>
           <h3>One develop engine</h3>
-          <p>Exposure, white balance, curves, HSL, color grading, texture, clarity, dehaze, detail, crop, and lens-aware local adjustments render through one deterministic engine.</p>
+          <p>Exposure, white balance, curves, HSL, color grading, texture, clarity, dehaze, detail, crop, and lens-aware local adjustments.</p>
         </article>
         <article>
           <h3>Editable AI proposals</h3>
-          <p><code>analyze</code> and <code>auto</code> propose recipes, validate them against image statistics, render them, and can run one bounded visual-review revision.</p>
+          <p><code>analyze</code> and <code>auto</code> propose and validate recipes against image statistics, render them, and allow one bounded visual-review revision.</p>
         </article>
         <article>
           <h3>Local masks</h3>
-          <p>Linear, radial, brush, luminance-range, and color-range masks sit alongside local subject, sky, and point-prompted object selection.</p>
+          <p>Linear, radial, brush, luminance-range, color-range; local subject, sky and point-prompted object selection.</p>
         </article>
         <article>
           <h3>Sidecars both ways</h3>
-          <p>Lightroom/ACR sidecars round-trip with conservative merge behavior for fields AutoShade does not model.</p>
+          <p>Lightroom/ACR round-trip; conservative merges preserve unmodeled fields.</p>
         </article>
         <article>
           <h3>Versions and variants</h3>
-          <p>Ordinary develops, generated targets, and reverse-fitted looks remain distinct without rewriting the source photo.</p>
+          <p>Ordinary develops, generated targets and reverse-fitted looks stay distinct; the source stays untouched.</p>
         </article>
         <article>
           <h3>Three front ends</h3>
-          <p>The desktop GUI, scriptable CLI, and small local web UI all use the same library.</p>
+          <p>Desktop GUI, scriptable CLI, local web UI; one shared library.</p>
         </article>
       </div>
 
@@ -100,17 +101,22 @@
       <div>
         <p class="section-kicker">Download</p>
         <h2 id="download-title">Download v1.2.6.</h2>
-        <p>The published release has 8 assets: the 7 files below plus <code>checksums.txt</code>, which carries the SHA-256 of each:</p>
-        <ul>
-          <li><code>autoshade.exe</code>, 20,654,080 bytes (CLI)</li>
-          <li><code>autoshade-gui.exe</code>, 26,869,760 bytes (desktop app)</li>
-          <li><code>AutoShade-Setup-1.2.6.exe</code>, 14,397,689 bytes (installer)</li>
-          <li><code>autoshade-1.2.6-windows-x64.zip</code>, 19,159,416 bytes (portable archive)</li>
-          <li><code>AutoShade-1.2.6-macos-universal.zip</code>, 38,836,406 bytes (macOS app bundle)</li>
-          <li><code>AutoShade-1.2.6-linux-x64.zip</code>, 9,305,042 bytes (Linux command line only)</li>
-          <li><code>AutoShade-1.2.6-macos-cli.zip</code>, 16,811,684 bytes (macOS command line only)</li>
-        </ul>
-        <p>The installer sets up for the current user, no administrator access; the portable ZIP keeps the executables beside their bundled sidecars. A newer installer upgrades in place, develop store and weights intact. The macOS universal <code>AutoShade.app</code> is ad-hoc signed, not notarised: the first launch needs one <em>Open Anyway</em> per machine.</p>
+        <p>8 assets: 7 files below, plus <code>checksums.txt</code> with their SHA-256.</p>
+        <table class="release-files">
+          <thead>
+            <tr><th scope="col">File</th><th scope="col">Use</th><th scope="col" class="asset-bytes">Bytes</th></tr>
+          </thead>
+          <tbody>
+            <tr><td><code>autoshade.exe</code></td><td class="asset-use">CLI</td><td class="asset-bytes">20,654,080</td></tr>
+            <tr><td><code>autoshade-gui.exe</code></td><td class="asset-use">desktop app</td><td class="asset-bytes">26,869,760</td></tr>
+            <tr><td><code>AutoShade-Setup-1.2.6.exe</code></td><td class="asset-use">installer</td><td class="asset-bytes">14,397,689</td></tr>
+            <tr><td><code>autoshade-1.2.6-windows-x64.zip</code></td><td class="asset-use">portable archive</td><td class="asset-bytes">19,159,416</td></tr>
+            <tr><td><code>AutoShade-1.2.6-macos-universal.zip</code></td><td class="asset-use">macOS app bundle</td><td class="asset-bytes">38,836,406</td></tr>
+            <tr><td><code>AutoShade-1.2.6-linux-x64.zip</code></td><td class="asset-use">Linux command line only</td><td class="asset-bytes">9,305,042</td></tr>
+            <tr><td><code>AutoShade-1.2.6-macos-cli.zip</code></td><td class="asset-use">macOS command line only</td><td class="asset-bytes">16,811,684</td></tr>
+          </tbody>
+        </table>
+        <p>Installer: current user, no administrator access; upgrades in place preserve develop store and weights. Portable ZIP: executables beside bundled sidecars. macOS universal <code>AutoShade.app</code>: ad-hoc signed, not notarised; first launch needs one <em>Open Anyway</em> per machine.</p>
         <p><a class="button button-primary" href="https://github.com/skymanbp/autoshade/releases/tag/v1.2.6">Open the v1.2.6 release</a></p>
       </div>
       <div class="quickstart" aria-labelledby="quickstart-title">
@@ -118,39 +124,53 @@
         <h4>Desktop</h4>
         <ol>
           <li>Start <code>autoshade-gui</code>.</li>
-          <li>Choose <strong>Open photo…</strong>, press <kbd>Ctrl</kbd>+<kbd>O</kbd>, or drag in a supported photo.</li>
-          <li>Move a Develop slider and compare it with the neutral conversion.</li>
-          <li>Press <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>E</kbd> to export a copy. The original remains untouched.</li>
+          <li><strong>Open photo…</strong>, <kbd>Ctrl</kbd>+<kbd>O</kbd>, or drag in a supported photo.</li>
+          <li>Adjust a Develop slider; compare with the neutral conversion.</li>
+          <li><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>E</kbd> exports a copy; the original stays untouched.</li>
         </ol>
         <h4>CLI</h4>
         <pre><code>autoshade decode "photo.ARW" -o "preview.jpg"
 autoshade apply "photo.ARW" "recipe.json" -o "developed.tif"</code></pre>
         <p>With the image/vision role configured:</p>
         <pre><code>autoshade auto "photo.ARW" --guidance "natural color; protect highlights" -o "developed.tif"</code></pre>
-        <p class="source-link"><a href="https://github.com/skymanbp/autoshade/blob/main/README.md#install-and-quickstart">Build and setup details in the README →</a></p>
+        <p class="source-link"><a href="https://github.com/skymanbp/autoshade/blob/main/README.md#install-and-quickstart">Build and setup →</a></p>
       </div>
     </section>
 
     <section class="section showcase" id="showcase-a" aria-labelledby="showcase-a-title">
       <p class="section-kicker">Showcase · Part A</p>
       <h2 id="showcase-a-title">AI analysis and style transfer</h2>
-      <p class="section-lede">Part A is the figure above. One Sony α7R IVA 61 MP <code>.ARW</code>, three direction texts, and one index of the photographer's 169 Lightroom RAW+XMP edits and 94-photo finished-look library. Nothing is copied pixel for pixel; what comes back is a recipe the engine renders at full resolution.</p>
-      <p>Directions, retrieved references and judge trails per panel, with every number, are in the <a href="https://github.com/skymanbp/autoshade/blob/main/docs/SHOWCASE.md">showcase page</a>.</p>
+      <p class="section-lede">One Sony α7R IVA 61 MP <code>.ARW</code>, three directions, an index of the photographer's 169 Lightroom RAW+XMP edits and 94-photo finished-look library. Recipes render at full resolution; no pixels are copied.</p>
+
+      <div class="feature-grid">
+        <article>
+          <h3>Two pinned local models</h3>
+          <p>SigLIP 2 <code>siglip2-base-patch16-384</code> puts photographs and Direction text in one 768-dimensional space; <code>Qwen3-VL-2B-Instruct</code> writes one sentence on each photograph's grade. Both read the same staged 512 px frame, so a RAW is never decoded twice.</p>
+        </article>
+        <article>
+          <h3>One distance, four terms</h3>
+          <p><code>d14 + W_EMB(1&minus;cos) + W_TXT(1&minus;cos) + W_DESC(1&minus;cos)</code> over the image, Direction-text and description cosines, shipped at <strong>4 / 0.5 / 0.5</strong>. A missing vector contributes zero; zeroed weights reproduce the feature-only ranking exactly.</p>
+        </article>
+        <article>
+          <h3>Weights the harness chose</h3>
+          <p><strong>14</strong> normalized photographic features, z-scored only where the variance is useful. Both Direction-text cosines are standardised across candidates first, and the weights come from a leave-one-out sweep over <strong>169 exemplars</strong>.</p>
+        </article>
+      </div>
     </section>
 
     <section class="section showcase part-b" id="showcase-b" aria-labelledby="showcase-b-title">
       <p class="section-kicker">Showcase · Part B</p>
       <h2 id="showcase-b-title">Reimagine → reverse-fit</h2>
-      <p class="section-lede">Generate a target, then fit an engine recipe to its look. The target can invent content; the fitted render cannot. The recipe is editable and applies to the full RAW.</p>
+      <p class="section-lede">Targets can invent content; fitted renders cannot. Fit an editable recipe to the target's look, then apply it to the full RAW.</p>
 
       <figure class="wide-figure">
         <img src="images/showcase-viaduct-reverse-fit.jpg?v=1.2.6" width="1600" height="1000" alt="Stone viaduct: straight conversion, generated target, and the recovered recipe rendered on the RAW, with a 1:1 detail row" loading="lazy">
-        <figcaption><strong>Stone viaduct: the recipe carries the look.</strong> Top row: the straight conversion, a <code>gpt-image-2</code> target (<strong>D = 0.180</strong>, under the 0.35 threshold, so the full solve ran), and the recovered recipe on the RAW. Look error <strong>0.161 → 0.023</strong> at confidence 0.63, at panel Strength 100 %, not the 65 % default. <a href="https://github.com/skymanbp/autoshade/blob/main/docs/SHOWCASE.md">Full measurements →</a></figcaption>
+        <figcaption><strong><a href="https://github.com/skymanbp/autoshade/blob/main/docs/SHOWCASE.md">Stone viaduct.</a></strong> Top row: straight conversion, <code>gpt-image-2</code> target (<strong>D = 0.180</strong>, under the 0.35 threshold: full solve), recovered recipe on the RAW. Look error <strong>0.161 → 0.023</strong> at confidence 0.63, at panel Strength 100 %, not the 65 % default.</figcaption>
       </figure>
 
       <figure class="wide-figure">
         <img src="images/showcase-cornwall-reverse-fit.jpg?v=1.2.6" width="1600" height="1000" alt="Cornwall lighthouse islet: straight conversion, generated target, and the recovered recipe rendered on the RAW, with a 1:1 detail row" loading="lazy">
-        <figcaption><strong>Cornwall lighthouse islet: the same three stages.</strong> The body's 4:3 aspect makes its embedded preview a centred crop of the 3:2 sensor. Sized from the sensor frame the prompt bought a target at <strong>D = 0.136</strong>, against 0.304 from the preview. Look error <strong>0.137 → 0.027</strong> at confidence 0.66. <a href="https://github.com/skymanbp/autoshade/blob/main/docs/SHOWCASE.md">Full measurements →</a></figcaption>
+        <figcaption><strong><a href="https://github.com/skymanbp/autoshade/blob/main/docs/SHOWCASE.md">Cornwall lighthouse islet: the same three stages.</a></strong> The body's 4:3 aspect makes its embedded preview a centred crop of the 3:2 sensor. Sized from the sensor frame the prompt bought a target at <strong>D = 0.136</strong>, against 0.304 from the preview. Look error <strong>0.137 → 0.027</strong> at confidence 0.66.</figcaption>
       </figure>
 
       <aside class="honesty" aria-label="Reverse-fit limitation">
@@ -161,8 +181,8 @@ autoshade apply "photo.ARW" "recipe.json" -o "developed.tif"</code></pre>
 
     <section class="section" id="formats" aria-labelledby="formats-title">
       <p class="section-kicker">Supported formats</p>
-      <h2 id="formats-title">A nine-camera RAW zoo, backed by 24 RAW extensions.</h2>
-      <p class="section-lede">Every tile below is a neutral AutoShade render of one real CC0 file, not an embedded preview. The environment-gated release suite last recorded 9/9.</p>
+      <h2 id="formats-title">Nine cameras, 24 RAW extensions.</h2>
+      <p class="section-lede">AutoShade neutral renders, one CC0 file per sample, not embedded previews. The environment-gated release suite last recorded 9/9.</p>
 
       <div class="format-grid">
         <figure>
@@ -207,21 +227,21 @@ autoshade apply "photo.ARW" "recipe.json" -o "developed.tif"</code></pre>
         <article>
           <h3>Camera RAW · 24 extensions</h3>
           <p><code>arw, dng, raw, raf, nef, cr2, cr3, orf, rw2, pef, srw, 3fr, fff, iiq, mef, mos, erf, kdc, dcr, dcs, crw, nrw, mrw, ari</code></p>
-          <p>Decoding uses rawler, whose database covers 725 camera models. Twelve formats carry no embedded preview; AutoShade shows its own neutral rendition instead and says so.</p>
+          <p>rawler decodes; its database covers 725 camera models. Twelve formats lack embedded previews; AutoShade displays and identifies its own neutral rendition.</p>
         </article>
         <article>
           <h3>Baked rasters · 8 extensions</h3>
           <p><code>jpg, jpeg, png, tif, tiff, bmp, webp, gif</code></p>
-          <p>ICC profiles on baked imports are converted through qcms when present. Monochrome and four-colour sensor arrays are refused rather than reinterpreted as three-channel colour.</p>
+          <p>qcms converts ICC profiles when present. Monochrome and four-colour sensor arrays are refused, never reinterpreted as three-channel colour.</p>
         </article>
       </div>
-      <p class="attribution">The nine format samples come from the <a href="https://raw.pixls.us/">raw.pixls.us community sample repository</a> under CC0 1.0 Public Domain.</p>
+      <p class="attribution">Nine format samples from <a href="https://raw.pixls.us/">raw.pixls.us</a> under CC0 1.0 Public Domain.</p>
     </section>
 
     <section class="section technology" id="architecture" aria-labelledby="architecture-title">
       <p class="section-kicker">How it works</p>
-      <h2 id="architecture-title">One binary, three front ends, and the pieces the AI never touches.</h2>
-      <p class="section-lede">Three front ends sit on one Rust library. The advisor and the external services return a bounded recipe, never pixels. Drag to pan, scroll to zoom.</p>
+      <h2 id="architecture-title">One binary. Three front ends.</h2>
+      <p class="section-lede">One Rust library; the advisor and external services return bounded recipes, never pixels. Drag to pan, scroll to zoom.</p>
       <figure class="diagram-figure" data-diagram="architecture">
         <div class="diagram-stage" tabindex="0" role="group" aria-label="Architecture diagram, drag to pan, scroll to zoom">
           <!-- diagram:architecture -->
@@ -241,14 +261,14 @@ autoshade apply "photo.ARW" "recipe.json" -o "developed.tif"</code></pre>
 
     <section class="section technology" id="pillars" aria-labelledby="pillars-title">
       <p class="section-kicker">Three pillars</p>
-      <h2 id="pillars-title">Three things this does that a RAW developer does not.</h2>
-      <p class="section-lede">Everything below is one of these three or infrastructure for them. Each pillar states its own mathematics and its own measured result. This is v1.2.6, the download above.</p>
+      <h2 id="pillars-title">Three things this does.</h2>
+      <p class="section-lede">Three pillars and their infrastructure, with mathematics and measured results. v1.2.6.</p>
 
       <div class="tech-list">
         <article id="pillar-analysis">
           <div class="tech-index" aria-hidden="true">I</div>
           <div>
-            <h3>AI analysis develop</h3>
+            <h3><a href="https://github.com/skymanbp/autoshade/blob/main/docs/TECH_STACK.md#ai-advisor-and-reverse-fit">AI analysis develop</a></h3>
             <figure class="diagram-figure" data-diagram="pillar-analysis">
               <div class="diagram-stage" tabindex="0" role="group" aria-label="Pillar 1 diagram, drag to pan, scroll to zoom">
                 <!-- diagram:pillar-analysis -->
@@ -264,15 +284,14 @@ autoshade apply "photo.ARW" "recipe.json" -o "developed.tif"</code></pre>
                 <span class="diagram-hint">Click the diagram, then scroll to zoom</span>
               </div>
             </figure>
-            <p>Your catalogue is the style reference. Every Lightroom RAW+XMP pair becomes an exemplar with a <strong>14-dimension</strong> EXIF+histogram feature, your slider values and tone curve. Local models add a <strong>768-D</strong> SigLIP 2 vector and a Qwen3-VL-2B sentence. A develop retrieves its <strong>4</strong> nearest past shots by <code>d14 + W_EMB(1−cos) + W_TXT·z(1−cos−hub) + W_DESC·z(1−cos)</code>. <code>W_EMB=4</code>, <code>W_TXT=0.5</code> and <code>W_DESC=0.5</code> are the leave-one-out winners on the real corpus. A capped pull, <strong>0.18</strong> at Style 0.3, moves the proposal toward your means without copying it.</p>
-            <p class="source-link"><a href="https://github.com/skymanbp/autoshade/blob/main/docs/TECH_STACK.md#ai-advisor-and-reverse-fit">Details: AI advisor and reverse fit →</a></p>
+            <p>Each of your Lightroom RAW+XMP pairs becomes an exemplar with a <strong>14-dimension</strong> EXIF+histogram feature, sliders and tone curve. Local models add a <strong>768-D</strong> SigLIP 2 vector and Qwen3-VL-2B sentence. Retrieval: <strong>4</strong> nearest past shots by <code>d14 + W_EMB(1−cos) + W_TXT·z(1−cos−hub) + W_DESC·z(1−cos)</code>. Leave-one-out corpus winners: <code>W_EMB=4</code>, <code>W_TXT=0.5</code> and <code>W_DESC=0.5</code>. A capped pull, <strong>0.18</strong> at Style 0.3, moves the proposal toward your means without copying it.</p>
           </div>
         </article>
 
         <article id="pillar-reimagine-fit">
           <div class="tech-index" aria-hidden="true">II</div>
           <div>
-            <h3>AI full-image generation, recovered as an editable recipe</h3>
+            <h3><a href="https://github.com/skymanbp/autoshade/blob/main/docs/TECH_STACK.md#layered-spatial-reverse-fit-and-mask-refinement">AI full-image generation → editable recipe</a></h3>
             <figure class="diagram-figure" data-diagram="pillar-reimagine-fit">
               <div class="diagram-stage" tabindex="0" role="group" aria-label="Pillar 2 diagram, drag to pan, scroll to zoom">
                 <!-- diagram:pillar-reimagine-fit -->
@@ -288,15 +307,14 @@ autoshade apply "photo.ARW" "recipe.json" -o "developed.tif"</code></pre>
                 <span class="diagram-hint">Click the diagram, then scroll to zoom</span>
               </div>
             </figure>
-            <p><code>reimagine</code> composes every prompt onto a faithfulness scaffold, because <code>gpt-image-2</code> silently drops <code>input_fidelity</code>. Below <code>D = 0.35</code> the full solve runs; at or above it a bounded Atmosphere mode takes over. Local work attaches in one order: semantic regions or luminance bands, a frozen-evidence quadtree to <strong>4×4</strong>, then at most two free-form masks, each through the same <strong>3%</strong> evidence, <code>D &lt; 0.65</code> and <strong>0.012</strong> rim gates. What you get back is a recipe you can edit, never the generated pixels.</p>
-            <p class="source-link"><a href="https://github.com/skymanbp/autoshade/blob/main/docs/TECH_STACK.md#layered-spatial-reverse-fit-and-mask-refinement">Details: layered spatial reverse-fit →</a></p>
+            <p><code>reimagine</code> adds a faithfulness scaffold to every prompt: <code>gpt-image-2</code> silently drops <code>input_fidelity</code>. Below <code>D = 0.35</code>: full solve; at or above: bounded Atmosphere mode. Local order: semantic regions or luminance bands, frozen-evidence quadtree to <strong>4×4</strong>, then at most two free-form masks. Each passes the same <strong>3%</strong> evidence, <code>D &lt; 0.65</code> and <strong>0.012</strong> rim gates. The recovered recipe is editable; generated pixels never carry over.</p>
           </div>
         </article>
 
         <article id="pillar-lightroom-math">
           <div class="tech-index" aria-hidden="true">III</div>
           <div>
-            <h3>The mathematics of matching Lightroom</h3>
+            <h3><a href="https://github.com/skymanbp/autoshade/blob/main/docs/TECH_STACK.md#lens-correction-and-lightroom-mask-frame-laws">Matching Lightroom</a></h3>
             <figure class="diagram-figure" data-diagram="pillar-lightroom-math">
               <div class="diagram-stage" tabindex="0" role="group" aria-label="Pillar 3 diagram, drag to pan, scroll to zoom">
                 <!-- diagram:pillar-lightroom-math -->
@@ -312,8 +330,7 @@ autoshade apply "photo.ARW" "recipe.json" -o "developed.tif"</code></pre>
                 <span class="diagram-hint">Click the diagram, then scroll to zoom</span>
               </div>
             </figure>
-            <p>A hand-rolled XML layer reads and writes Camera Raw's own scope, so unknown namespaces survive a merge. The pixel side is measured too: a Fritsch–Carlson tone LUT, <strong>45 of 45</strong> Lightroom Texture anchors within ±0.02, and a <strong>290×11</strong> radial feather table. Radials close <strong>41/41</strong> vectors to ≤1 px, while linear handles are openly <em>not</em> pixel-closed, at <strong>9.748/7.025/6.336 px</strong> RMS. The linear falloff is a smoothstep on the measured abscissa <code>t^1.124</code>, rms <strong>0.0064</strong> against <strong>0.0315</strong> for the plain one.</p>
-            <p class="source-link"><a href="https://github.com/skymanbp/autoshade/blob/main/docs/TECH_STACK.md#lens-correction-and-lightroom-mask-frame-laws">Details: Lightroom mask-frame laws →</a></p>
+            <p>Hand-rolled XML reads and writes Camera Raw's own scope; unknown namespaces survive merges. Measured: Fritsch–Carlson tone LUT, <strong>45 of 45</strong> Lightroom Texture anchors within ±0.02, <strong>290×11</strong> radial feather table. Radials close <strong>41/41</strong> vectors to ≤1 px; linear handles are <em>not</em> pixel-closed: <strong>9.748/7.025/6.336 px</strong> RMS. Linear falloff: smoothstep on the measured abscissa <code>t^1.124</code>, rms <strong>0.0064</strong> against <strong>0.0315</strong> for plain smoothstep.</p>
           </div>
         </article>
       </div>
@@ -321,79 +338,71 @@ autoshade apply "photo.ARW" "recipe.json" -o "developed.tif"</code></pre>
 
     <section class="section technology" id="technology" aria-labelledby="technology-title">
       <p class="section-kicker">Tech stack &amp; algorithms</p>
-      <h2 id="technology-title">The implementation details, not a logo strip.</h2>
-      <p class="section-lede">Eight implementation areas, from decode to application infrastructure. Each Details link opens the equations, provenance, measurements and sources.</p>
+      <h2 id="technology-title">The implementation details.</h2>
+      <p class="section-lede">Eight areas; links open equations, provenance, measurements and sources.</p>
 
-      <div class="tech-list">
+      <div class="tech-list tech-summary">
         <article id="tech-decode">
           <div class="tech-index" aria-hidden="true">01</div>
           <div>
-            <h3>RAW decode and CFA</h3>
-            <p>rawler covers <strong>24 RAW formats and 725 camera bodies</strong>. The <strong>approximate</strong> X-Trans path fits colour planes over a 5×5 CFA neighbourhood and moved the measured X-S10 G/R ratio from 1.5503 to 0.9476. A Lightroom sidecar's <code>tiff:Orientation</code> chooses the quarter turns.</p>
-            <p class="source-link"><a href="https://github.com/skymanbp/autoshade/blob/main/docs/TECH_STACK.md#raw-decode-and-cfa">Details: RAW decode and CFA →</a></p>
+            <h3><a href="https://github.com/skymanbp/autoshade/blob/main/docs/TECH_STACK.md#raw-decode-and-cfa">RAW decode and CFA</a></h3>
+            <p>rawler: <strong>24 RAW formats and 725 camera bodies</strong>. <strong>Approximate</strong> X-Trans fits colour planes over a 5×5 CFA neighbourhood; the measured X-S10 G/R ratio moved from 1.5503 to 0.9476. Lightroom sidecar <code>tiff:Orientation</code> chooses quarter turns.</p>
           </div>
         </article>
 
         <article id="tech-render">
           <div class="tech-index" aria-hidden="true">02</div>
           <div>
-            <h3>Develop pipeline and tone model</h3>
-            <p>The deterministic f32 renderer runs linear-light vignette and dehaze, a monotone Fritsch–Carlson tone LUT with Highlights inside it, then curves, HSL, clarity and local edits. Negative Texture is two measured low-pass arms, <code>A1=0.172443</code> and <code>A2=0.304888</code>.</p>
-            <p class="source-link"><a href="https://github.com/skymanbp/autoshade/blob/main/docs/TECH_STACK.md#develop-pipeline-and-tone-model">Details: develop pipeline and tone model →</a></p>
+            <h3><a href="https://github.com/skymanbp/autoshade/blob/main/docs/TECH_STACK.md#develop-pipeline-and-tone-model">Develop pipeline and tone model</a></h3>
+            <p>Deterministic f32 rendering: linear-light vignette and dehaze, monotone Fritsch–Carlson tone LUT containing Highlights, then curves, HSL, clarity and local edits. Negative Texture: two measured low-pass arms, <code>A1=0.172443</code> and <code>A2=0.304888</code>.</p>
           </div>
         </article>
 
         <article id="tech-masks">
           <div class="tech-index" aria-hidden="true">03</div>
           <div>
-            <h3>Masks</h3>
-            <p>Radial, linear, brush, bitmap, luminance-range and colour-range masks compose as Add/Subtract/Intersect. Radial feather samples a measured <strong>290×11 alpha LUT</strong>; brush dabs use <code>kappa=0.1284</code> flow. The pixel/aspect metric cut the D1 error from <strong>874 px to 9.8 px</strong>.</p>
-            <p class="source-link"><a href="https://github.com/skymanbp/autoshade/blob/main/docs/TECH_STACK.md#masks">Details: masks →</a></p>
+            <h3><a href="https://github.com/skymanbp/autoshade/blob/main/docs/TECH_STACK.md#masks">Masks</a></h3>
+            <p>Radial, linear, brush, bitmap, luminance-range and colour-range: Add/Subtract/Intersect. Radial feather uses a measured <strong>290×11 alpha LUT</strong>; brush dab flow: <code>kappa=0.1284</code>. The pixel/aspect metric cut D1 error from <strong>874 px to 9.8 px</strong>.</p>
           </div>
         </article>
 
         <article id="tech-ai-masks">
           <div class="tech-index" aria-hidden="true">04</div>
           <div>
-            <h3>AI masks</h3>
-            <p>Subject selection uses commit-pinned BiRefNet with a named U²-Net fallback; sky uses OneFormer and a <strong>150-class</strong> ADE20K table; object gestures become ordered positive points for SAM 2.1 over the <code>gp1</code> contract. Locally derived alpha is disclosed as non-Adobe.</p>
-            <p class="source-link"><a href="https://github.com/skymanbp/autoshade/blob/main/docs/TECH_STACK.md#ai-masks">Details: AI masks →</a></p>
+            <h3><a href="https://github.com/skymanbp/autoshade/blob/main/docs/TECH_STACK.md#ai-masks">AI masks</a></h3>
+            <p>Subject selection: commit-pinned BiRefNet, named U²-Net fallback. Sky: OneFormer, <strong>150-class</strong> ADE20K table. Object gestures: ordered positive points for SAM 2.1 over <code>gp1</code>. Locally derived alpha is disclosed as non-Adobe.</p>
           </div>
         </article>
 
         <article id="tech-lens">
           <div class="tech-index" aria-hidden="true">05</div>
           <div>
-            <h3>Lens correction and Lightroom mask-frame laws</h3>
-            <p>Sony 0x7037's <strong>16 samples at (i+1)/16</strong> feed a 2048-node/64-knot mask solve; Newton inversion reads rectilinear <code>.lcp</code> profiles and refuses fisheye-only ones. Radials close <strong>41/41 vectors to ≤1 px</strong>; linear H2 keeps lines straight and openly records its RMS residuals.</p>
-            <p class="source-link"><a href="https://github.com/skymanbp/autoshade/blob/main/docs/TECH_STACK.md#lens-correction-and-lightroom-mask-frame-laws">Details: lens correction and Lightroom mask-frame laws →</a></p>
+            <h3><a href="https://github.com/skymanbp/autoshade/blob/main/docs/TECH_STACK.md#lens-correction-and-lightroom-mask-frame-laws">Lens correction and Lightroom mask-frame laws</a></h3>
+            <p>Sony 0x7037's <strong>16 samples at (i+1)/16</strong> feed a 2048-node/64-knot mask solve; Newton inversion reads rectilinear <code>.lcp</code> profiles and refuses fisheye-only ones. Radials close <strong>41/41 vectors to ≤1 px</strong>; linear H2 keeps lines straight and records its RMS residuals.</p>
           </div>
         </article>
 
         <article id="tech-xmp">
           <div class="tech-index" aria-hidden="true">06</div>
           <div>
-            <h3>XMP and Lightroom interoperability</h3>
-            <p>Typed <code>Tag</code>/<code>Scope</code> traversal reads Camera Raw's own scope, including nested <code>Look</code>, then a conservative merge preserves unmodeled fields. Measured domains include <code>LocalExposure2012=EV/4</code>, local Hue <code>/180</code>, the other local family <code>/100</code>, and global Sharpness <strong>1:1</strong>.</p>
-            <p class="source-link"><a href="https://github.com/skymanbp/autoshade/blob/main/docs/TECH_STACK.md#xmp-and-lightroom-interoperability">Details: XMP and Lightroom interoperability →</a></p>
+            <h3><a href="https://github.com/skymanbp/autoshade/blob/main/docs/TECH_STACK.md#xmp-and-lightroom-interoperability">XMP and Lightroom interoperability</a></h3>
+            <p>Typed <code>Tag</code>/<code>Scope</code> traversal reads Camera Raw's own scope including nested <code>Look</code>; conservative merge preserves unmodeled fields. Measured domains: <code>LocalExposure2012=EV/4</code>, local Hue <code>/180</code>, other local family <code>/100</code>, global Sharpness <strong>1:1</strong>.</p>
           </div>
         </article>
 
         <article id="tech-ai">
           <div class="tech-index" aria-hidden="true">07</div>
           <div>
-            <h3>AI advisor and reverse fit</h3>
-            <p>Proposals become bounded recipes with <code>store:false</code> and a do-no-harm gate. A cast ships only through four vetoes, among them foreign hues <strong>≥45° over ≥5%</strong> of the frame and a <strong>≥15°</strong> hue fan across luminance. Reimagine and heal remain generated-pixel operations.</p>
-            <p class="source-link"><a href="https://github.com/skymanbp/autoshade/blob/main/docs/TECH_STACK.md#ai-advisor-and-reverse-fit">Details: AI advisor and reverse fit →</a></p>
+            <h3><a href="https://github.com/skymanbp/autoshade/blob/main/docs/TECH_STACK.md#ai-advisor-and-reverse-fit">AI advisor and reverse fit</a></h3>
+            <p>Bounded proposals use <code>store:false</code> and a do-no-harm gate. A cast ships only through four vetoes, including foreign hues <strong>≥45° over ≥5%</strong> of the frame and a <strong>≥15°</strong> hue fan across luminance. Reimagine and heal remain generated-pixel operations.</p>
           </div>
         </article>
 
         <article id="tech-app">
           <div class="tech-index" aria-hidden="true">08</div>
           <div>
-            <h3>Application and infrastructure</h3>
-            <p>Rust 2024 backs one library shared by the CLI, the egui desktop app and a loopback web UI. The server combines a 32-byte token with Host/Origin/no-store defenses; SCUNet must satisfy <code>sidecar_wrote</code>. A <strong>1771 MB</strong> probe set the 1800 MB per-photo budget. The v1.2.6 battery is 1400 library, 24 CLI, 164 GUI and 2+2 contract tests.</p>
-            <p class="source-link"><a href="https://github.com/skymanbp/autoshade/blob/main/docs/TECH_STACK.md#application-and-infrastructure">Details: application and infrastructure →</a></p>
+            <h3><a href="https://github.com/skymanbp/autoshade/blob/main/docs/TECH_STACK.md#application-and-infrastructure">Application and infrastructure</a></h3>
+            <p>Rust 2024: one library for CLI, egui desktop and loopback web UI. Server: 32-byte token and Host/Origin/no-store defenses. SCUNet requires <code>sidecar_wrote</code>. A <strong>1771 MB</strong> probe set the 1800 MB per-photo budget. The v1.2.6 battery: 1400 library, 24 CLI, 164 GUI and 2+2 contract tests.</p>
           </div>
         </article>
       </div>
@@ -401,32 +410,26 @@ autoshade apply "photo.ARW" "recipe.json" -o "developed.tif"</code></pre>
 
     <section class="section docs" id="docs" aria-labelledby="docs-title">
       <p class="section-kicker">Documentation</p>
-      <h2 id="docs-title">Follow the implementation all the way down.</h2>
+      <h2 id="docs-title">Follow the implementation.</h2>
       <div class="doc-grid">
         <a href="https://github.com/skymanbp/autoshade/blob/main/docs/USER_MANUAL.md">
-          <span>Read first</span>
           <strong>User manual &amp; CLI reference</strong>
-          <small>Install, develop, masks, versions, export, AI roles, privacy, and trust boundaries.</small>
+          <small>Install, develop, masks, versions, export, AI roles, privacy, trust boundaries.</small>
         </a>
         <a href="https://github.com/skymanbp/autoshade/blob/main/docs/ARCHITECTURE.md">
-          <span>Go deeper</span>
           <strong>Architecture</strong>
           <small>Subsystem boundaries and dependency rationale.</small>
         </a>
         <a href="https://github.com/skymanbp/autoshade/blob/main/docs/SHOWCASE.md">
-          <span>See more</span>
           <strong>Full showcase gallery</strong>
-          <small>Every pair and panel this page has shown, with the numbers that produced it.</small>
+          <small>All pairs, panels, directions, references, judge trails and measurements.</small>
         </a>
         <a href="https://github.com/skymanbp/autoshade/blob/main/docs/ROADMAP.md">
-          <span>What shipped</span>
           <strong>Release ledger</strong>
-          <small>Every release, what it measured, and the standing rulings.</small>
+          <small>Releases, measurements and standing rulings.</small>
         </a>
         <a href="https://github.com/skymanbp/autoshade/blob/main/LICENSE">
-          <span>Use it</span>
           <strong>MIT license</strong>
-          <small>The software is open source under the MIT license.</small>
         </a>
       </div>
     </section>
@@ -438,7 +441,6 @@ autoshade apply "photo.ARW" "recipe.json" -o "developed.tif"</code></pre>
         <img src="favicon.png" width="36" height="36" alt="AutoShade icon">
         <span>AutoShade</span>
       </a>
-      <p>AI-assisted automatic development of RAW photographs.</p>
     </div>
     <div class="footer-notes">
       <p>Software: MIT. Showcase photographs: © 2026 skymanbp, all rights reserved.</p>
@@ -446,12 +448,8 @@ autoshade apply "photo.ARW" "recipe.json" -o "developed.tif"</code></pre>
     </div>
   </footer>
 
-  <!-- Zoom and pan for the diagrams. This block is identical in
-       index.html and architecture.html, character for character: the
-       site is static files served straight from the repository with no
-       build step and no bundler, so a shared script file would be one
-       more request and one more cache key to get wrong at release time.
-       Change one copy, change the other. -->
+  <!-- Shared diagram controls stay external for script-src self. Bump the
+       script URL on both diagram pages whenever its bytes change. -->
   <script src="diagram.js?v=1.2.6" defer></script>
 </body>
 </html>

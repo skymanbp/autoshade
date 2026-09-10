@@ -7,6 +7,10 @@
   X-Content-Type-Options: nosniff
   X-Frame-Options: DENY
 
+# Font filenames are version keys; rename changed fonts to bypass cached bytes.
+/fonts/*
+  Cache-Control: public, max-age=31536000, immutable
+
 /images/*
   Cache-Control: public, max-age=604800
 

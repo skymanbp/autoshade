@@ -1,6 +1,6 @@
 # AutoShade static site
 
-This directory is a build-free, self-contained Cloudflare Pages site. Its HTML, CSS, headers, and local images can be published as-is; no package install or asset compilation is required.
+This directory is a build-free, self-contained Cloudflare Pages site. Its HTML, CSS, headers, local images and fonts can be published as-is; no package install or asset compilation is required.
 
 The four diagrams are **inline SVG**, spliced into `index.html` and
 `architecture.html` between `<!-- diagram:NAME -->` markers by
@@ -15,6 +15,14 @@ zoom, drag pan, pinch, buttons and keyboard control, and `_headers` allows it
 with `script-src 'self'` (it was `'none'`, which blocks an inline block
 outright and would have left the controls hidden on the live site while every
 local preview looked correct).
+
+The page sans face lives in `fonts/Inter-autoshade.woff2`: the supplied 96,368-byte
+Inter 4.001 variable subset, with optical size 14-32 and weight 100-900.
+`fonts/OFL-Inter.txt` is its SIL Open Font License 1.1. All three pages preload
+the same file with `crossorigin`; `styles.css` uses `font-display: swap`, a real
+system fallback and automatic optical sizing. The monospace stack stays as it
+was. Diagram labels keep their explicit system/Segoe UI stack because the
+generators lay them out against measured metrics for that face.
 
 ## Local preview
 
@@ -38,7 +46,9 @@ The script reads the master token from the git-ignored `.secret` file, mints a o
 
 **Image URLs carry `?v=<release>`.** `_headers` gives `/images/*` a seven-day `max-age`, which is right for bytes that rarely change and wrong on the day they do: after the v1.2.0 deploy the apex served the previous Pillar 1 diagram from cache (`cf-cache-status: HIT`, `Age: 80753`) while the `pages.dev` alias, which is not behind that cache, already served the new one. The query string puts the release in the cache key, so a changed image is a new object rather than a week-old one. Bump it whenever `site/images/` changes. `scripts/purge_site_cache.js` exists for the same problem and does NOT work with the current master token: it mints a zone-scoped token that verifies active and can `GET /zones/<id>`, but `POST /zones/<id>/purge_cache` answers 401, i.e. the master token cannot delegate Cache Purge. Purging needs either a master token that carries that permission or one click in the dashboard (Caching -> Configuration -> Purge Everything).
 
-**`styles.css` and `diagram.js` carry the key too.** The purge above empties the edge, not a visitor's browser, and on the custom domain the zone's default 4-hour Browser Cache TTL rewrites the Pages origin's `Cache-Control` on those two files to `max-age=14400` (the `pages.dev` alias, which is not behind the zone, serves the origin's `max-age=0, must-revalidate`). HTML is not edge-cached and keeps its `max-age=0`, so the 2026-09-06 hero deploy reached a browser that had loaded the page earlier that afternoon as the new `index.html` styled by the old `styles.css`: the owner line at full h1 size, the tagline as body text, the lede back in the retired right column. A `_headers` rule of `Cache-Control: no-cache` for the two files was tried the same day and came back from the apex as `max-age=14400` as well, so the header cannot fix this from inside the repository; the query-string key can, because a changed key is a URL the browser has never seen. Bump the key on `styles.css` (currently `?v=1.2.6`) or `diagram.js` (`?v=1.2.6`) whenever that file changes, in all three HTML files. The zone-level alternative is the dashboard's Browser Cache TTL set to "Respect Existing Headers", which would make the origin's `max-age=0` reach browsers and retire the key for these two files; that is a zone setting, not a repository change.
+**`styles.css` and `diagram.js` carry the key too.** The purge above empties the edge, not a visitor's browser, and on the custom domain the zone's default 4-hour Browser Cache TTL rewrites the Pages origin's `Cache-Control` on those two files to `max-age=14400` (the `pages.dev` alias, which is not behind the zone, serves the origin's `max-age=0, must-revalidate`). HTML is not edge-cached and keeps its `max-age=0`, so the 2026-09-06 hero deploy reached a browser that had loaded the page earlier that afternoon as the new `index.html` styled by the old `styles.css`: the owner line at full h1 size, the tagline as body text, the lede back in the retired right column. A `_headers` rule of `Cache-Control: no-cache` for the two files was tried the same day and came back from the apex as `max-age=14400` as well, so the header cannot fix this from inside the repository; the query-string key can, because a changed key is a URL the browser has never seen. Bump the key on `styles.css` (currently `?v=1.2.6-1`) or `diagram.js` (`?v=1.2.6`) whenever that file changes, wherever it is loaded: the stylesheet in all three HTML files, the script in `index.html` and `architecture.html`. The zone-level alternative is the dashboard's Browser Cache TTL set to "Respect Existing Headers", which would make the origin's `max-age=0` reach browsers and retire the key for these two files; that is a zone setting, not a repository change.
+
+**Font filenames are their cache keys.** `_headers` gives `/fonts/*` a one-year `max-age` with `immutable`. The bundled subset is finished; if its bytes ever change, give it a new filename and update the font-face URL and all three preloads together. A long cache is safe because a changed font then has a new URL. The licence ships alongside it.
 
 The custom domain `autoshade.dev` (and `www.`) is attached to the `autoshade` Pages project (renamed in place from `autoshop`, deployments preserved): the zone lives in the same account and both names are proxied CNAME records pointing at `autoshop-d7w.pages.dev`, with certificates issued by Pages. Re-attaching after a project rebuild is done through the Pages project's **Custom domains** page or the Pages domains API.
 
