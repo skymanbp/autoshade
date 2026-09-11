@@ -49,6 +49,7 @@
   4. 删除 `a_widened_feather_at_a_mild_dose_passes_the_charged_gate_at_k_one`，并入 `widening_the_feather_first_buys_back_the_charge_the_budget_takes`。**原断言 `k == 1.0` 本身不成立**，而且不成立的理由是仪器而不是修法：过渡带尺读的是亏空，加宽不减亏空，只挣斜率额度，于是在夹子内部 charge 几乎归零、k 大幅回升，但不会精确落在 1.0。改钉三条可复现的量：窄臂 `charged/rim` ≈ 3.06（= 天花板/地板）、宽臂 `charged ≤ 1.25 × rim`、`wide_k > 2 × narrow_k`。
 
 - **门（本树实测）**：`cargo test --release --lib fit_zoned` **167 过 / 0 败 / 1 忽略**（164.89 s，含上面两条实测行）、`cargo test --release --lib mask_refine` **4 过 / 0 败**、`cargo clippy --release --all-targets` **0 警告**（exit 0）、`cargo check --lib --tests` 干净；`scripts/audit_i18n.py` 11 项检查全 0；`scripts/check_docs.py` **25 PASS / 0 FAIL / 5 SKIP**。**未跑、也没有被声称**：release 全量 lib 电池、CLI/集成/GUI 三趟、校准车道——按任务书由统筹方跑。
+- **合入 main 时补的一处（2026-09-10，主模型）**：本批中文披露用到的「接缝 / 斜坡 / 轮廓 / 锐利」五个汉字不在嵌入字体子集里，`embedded_fonts_cover_every_ui_symbol` 在合并树上红（["U+5229 利", "U+5761 坡", "U+5ED3 廓", "U+659C 斜", "U+7F1D 缝"]）。按 [assets/fonts/README.md](../assets/fonts/README.md) 的正规流程从五个 OFL 供体重生成：只有 `NotoSansSC-autoshade.ttf` 变了（216,188 → 217,760 B，812 CJK 码点），其余四个子集重生成后逐字节未变故不入 diff；`subset_gui_fonts.py --check` 880/880。措辞不改，因为这是用户可读的理由文本，不该为字体让步。
 
 ### 未发布（已提交，待下次发版）— AI 面板拆成四个分区，库的依赖画成阶梯
 
