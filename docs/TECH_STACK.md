@@ -1516,7 +1516,7 @@ than the pre-call state; model weights remain outside the repository.
   `1771 MB` for calibration/render preparation, and `1766 MB` for the
   full-resolution render tail; the combined process peak remained `1771 MB`.
 - The release battery is **1436 library (1422 pass + 14 `#[ignore]`d forensic
-  probes) / 24 CLI / 168 GUI / 2+2 contract** tests. Environment-gated real
+  probes) / 24 CLI / 169 GUI / 2+2 contract** tests. Environment-gated real
   Lightroom, brush-table, and RAW-zoo suites are additional and are not
   smuggled into the ordinary count.
 - The build workflow checks default and GUI feature sets on Ubuntu and macOS.

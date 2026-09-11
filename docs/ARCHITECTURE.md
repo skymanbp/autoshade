@@ -129,10 +129,11 @@
 > wrong reason; it writes a `=== name ===` transcript that
 > `scripts/check_docs.py --gates` reads the counts and the lane set back out
 > of, and it prints the by-name test-set difference against a saved baseline.
-> 1436 library + 24 CLI + 168 GUI + 2+2 contract tests are enumerated in the GUI
+> 1436 library + 24 CLI + 169 GUI + 2+2 contract tests are enumerated in the GUI
 > build; the library result is 1422 pass + 14 `#[ignore]`d forensic probes
-> (counts refreshed 2026-09-11 after the R33 merge, not yet released: +41 / −1 by
-> name against `5ffa275` — the four lanes' tests, listed in the ROADMAP's
+> (counts refreshed 2026-09-11 after the R33 merge and the deep-thinking box, not yet
+> released: +42 / −1 by name against `5ffa275` — the four lanes' tests plus the
+> box's, listed in the ROADMAP's
 > unreleased ledger; the −1 is `the_local_field_never_reaches_the_engine_or_the_recipe_schema`,
 > renamed `the_engine_renders_the_field_from_the_recipe_and_never_calls_the_analyzer`
 > when the field became a shipped control; taken statically between the tag's

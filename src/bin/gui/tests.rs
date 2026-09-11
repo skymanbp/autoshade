@@ -7788,6 +7788,86 @@
         );
     }
 
+    /// User feedback 2026-09-11: the deep-thinking working listed INLINE in
+    /// the rationale sentence ran the Analysis fold to a wall of text. The
+    /// four notes only a thinking analysis produces (R23-4's three sentences
+    /// and R23-1b's pixel-tool line) now draw in a framed box of their own
+    /// under the sentence, one row each with its subject as the lead, while
+    /// the sentence keeps its deterministic tail — nothing the rationale said
+    /// is lost, only moved. Both languages, since the leads are ours.
+    ///
+    /// The split is a DISPLAY decision over the typed notes. A develop whose
+    /// string no longer matches its notes (the disk-restored case) shows the
+    /// raw English whole, exactly as before — and the box must not print the
+    /// working a second time.
+    ///
+    /// MUTATION THIS KILLS: leaving the working inside the sentence, dropping
+    /// a row, or boxing the working on the fallback path too.
+    #[test]
+    fn the_deep_thinking_working_draws_in_its_own_box_under_the_rationale() {
+        use autoshade::rationale::{keys, render_one, Note};
+        let notes = vec![
+            Note::new(keys::JUDGE_SCORE, vec![("score", "88".into()), ("critique", "balanced".into())]),
+            Note::new(keys::THINK_SCENE, vec![("scene", "a harbour at dusk".into())]),
+            Note::new(keys::THINK_LOOK, vec![("look", "cool and quiet".into())]),
+            Note::new(keys::THINK_CRITIQUE, vec![("critique", "a touch under the target".into())]),
+            Note::new(keys::PIXEL_TOOLS, vec![("tools", "denoise (grain in the sky)".into())]),
+        ];
+        let rationale: String =
+            std::iter::once("Prose.".to_string()).chain(notes.iter().map(render_one)).collect();
+        let working =
+            ["a harbour at dusk", "cool and quiet", "a touch under the target", "denoise (grain in the sky)"];
+        for lang in [crate::i18n::Lang::En, crate::i18n::Lang::Zh] {
+            let mut app = AutoShadeApp {
+                lang,
+                rationale: rationale.clone(),
+                rationale_notes: notes.clone(),
+                ..Default::default()
+            };
+            app.recipe.rationale = rationale.clone();
+            let seen = tall_frame(&mut app, |a, ui| a.ai_panel(ui));
+            let sentence = seen
+                .iter()
+                .find(|t| t.starts_with("“Prose."))
+                .unwrap_or_else(|| panic!("{lang:?}: the rationale sentence is missing: {seen:?}"));
+            let judge = trf(lang, autoshade::rationale::keys::JUDGE_SCORE, &[("score", "88"), ("critique", "balanced")]);
+            assert!(
+                sentence.contains(&judge),
+                "{lang:?}: the deterministic tail stays in the sentence: {sentence:?}"
+            );
+            for w in working {
+                assert!(!sentence.contains(w), "{lang:?}: the working left the sentence: {sentence:?}");
+                assert_eq!(
+                    seen.iter().filter(|t| t.contains(w)).count(),
+                    1,
+                    "{lang:?}: {w:?} is drawn exactly once, in the box: {seen:?}"
+                );
+            }
+            for lead in [
+                tr(lang, "Deep thinking · its working"),
+                tr(lang, "What it saw:"),
+                tr(lang, "The look it aimed for:"),
+                tr(lang, "Its own critique against your strength target:"),
+                tr(lang, "Pixel tools it suggests (nothing was run):"),
+            ] {
+                assert!(seen.iter().any(|t| t == lead), "{lang:?}: {lead:?} is missing: {seen:?}");
+            }
+        }
+        // Fallback: no typed notes → the raw English, whole, and no box.
+        let mut app = AutoShadeApp { rationale: rationale.clone(), ..Default::default() };
+        app.recipe.rationale = rationale.clone();
+        let seen = tall_frame(&mut app, |a, ui| a.ai_panel(ui));
+        let title = tr(app.lang, "Deep thinking · its working");
+        assert!(
+            seen.iter().any(|t| t.starts_with("“Prose.") && working.iter().all(|w| t.contains(w))),
+            "without notes the working stays inside the raw sentence: {seen:?}"
+        );
+        assert!(
+            !seen.iter().any(|t| t == title),
+            "and no box is drawn for a sentence that still carries it: {seen:?}"
+        );
+    }
+
     /// R23-4 (feedback #13, "let it think"): the desktop shell of thinking
     /// mode. It is the most expensive switch on the panel, so the properties
     /// that matter are: off in BOTH defaults, drawn beside the dials it reads
