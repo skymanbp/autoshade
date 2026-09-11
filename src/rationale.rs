@@ -510,8 +510,9 @@ pub mod keys {
         " No zoned correction attached: the source and target zone shares differ by more than 2:1, so neither population is a comparable measurement of the same subject.";
     pub const ZONE_BOUNDARY_PASSED: &str =
         " Boundary-continuity gate kept {n} zoned correction(s): introduced transition \
-         rim {before} to {after} luma after shared differential shrink k={k} \
-         (budget {max}, {transitions} measured transitions).";
+         rim {before} to {after} luma after shared differential shrink k={k}, \
+         context-charged {charged}, colour {colour} charged {colour_charged} \
+         (ceiling {max}, {transitions} measured transitions).";
     /// Step 9. Distinct from [`ZONE_BOUNDARY_DROPPED`], which says the k=0
     /// render was itself over budget (an engine invariant failure). THIS one
     /// says the gate found a shrink inside the budget and that shrink moves
@@ -519,14 +520,16 @@ pub mod keys {
     pub const ZONE_BOUNDARY_INERT: &str =
         " Zoned {n} correction(s) dropped by the boundary-continuity gate: \
          candidate introduced rim {before} luma, and the largest shrink inside \
-         budget {max} was k={k}, whose render is byte-identical to the frame \
-         without it — reading {after} over {transitions} measured transitions. \
-         An inert attachment would occupy the correction budget and disclose a \
-         change it did not make.";
+         ceiling {max} was k={k}, whose render is byte-identical to the frame \
+         without it — reading {after} luma (context-charged {charged}, colour \
+         {colour} charged {colour_charged}) over {transitions} measured \
+         transitions. An inert attachment would occupy the correction budget \
+         and disclose a change it did not make.";
     pub const ZONE_BOUNDARY_DROPPED: &str =
         " Zoned corrections dropped by the boundary-continuity gate: candidate \
          rim {before} luma, and even shared shrink k=0 left {after} \
-         (budget {max}, {transitions} measured transitions).";
+         (context-charged {charged}, colour {colour} charged {colour_charged}, \
+         ceiling {max}, {transitions} measured transitions).";
     pub const ZONE_ATTACHED: &str =
         " Zoned {label} correction attached ({label}-to-{label} moments → \
          local exposure {ev} EV, colour gains [{g0} {g1} {g2}], \
@@ -632,7 +635,8 @@ pub mod keys {
     /// reading or shrink factor is reported for a shrink it never accepted.
     pub const REGION_BOUNDARY_REFUSED: &str =
         " The {label} region was refused by its boundary-continuity gate \
-         ({why}): candidate rim {before} luma against budget {max} \
+         ({why}): candidate rim {before} luma, context-charged {charged}, \
+         colour {colour} charged {colour_charged}, against ceiling {max} \
          ({transitions} measured transitions).";
 
     // --- spatial residual tiles and bitmap-mask refinement -------------
@@ -661,11 +665,13 @@ pub mod keys {
     pub const TILE_BOUNDARY_PASSED: &str =
         " Spatial tile {id} passed the boundary gate: cross-boundary step \
          {before} -> {after} luma after direction-preserving shrink k={k}, \
-         context-charged {charged} (ceiling {max}, {transitions} measured crossings).";
+         context-charged {charged}, colour {colour} charged {colour_charged} \
+         (ceiling {max}, {transitions} measured crossings).";
     pub const TILE_BOUNDARY_REFUSED: &str =
         " Spatial tile {id} refused by its boundary/composed-frame gate: \
          candidate step {before}, final reading {after}, context-charged \
-         {charged}, ceiling {max} ({transitions} measured crossings, k={k}).";
+         {charged}, colour {colour} charged {colour_charged}, ceiling {max} \
+         ({transitions} measured crossings, k={k}).";
     pub const MASK_REFINEMENT_KEPT: &str =
         " Guided mask refinement kept for {label}: coverage delta {coverage}, \
          guide-edge alignment {before} -> {after}, core pixels changed {core}.";
@@ -673,6 +679,21 @@ pub mod keys {
         " Guided mask refinement abstained for {label}: coverage delta {coverage}, \
          guide-edge alignment {before} -> {after}, core pixels changed {core}; \
          the original mask bytes were retained.";
+    /// The second bounded mask operation, disclosed separately from the
+    /// guided refinement because it is a different claim: the refinement says
+    /// where the boundary IS, this says how WIDE it was made and over how
+    /// much of the contour.
+    pub const MASK_FEATHER_WIDENED: &str =
+        " Semantic mask feather widened for {label}: {share}% of the 50% \
+         contour runs through guide detail too smooth to hide a seam, so the \
+         alpha ramp there was broadened to a radius of up to {radius} px \
+         (coverage delta {coverage}); where the guide has edges the alpha was \
+         left untouched, so silhouettes stay crisp.";
+    pub const MASK_FEATHER_ABSTAINED: &str =
+        " Semantic mask feather widening abstained for {label}: {share}% of \
+         the 50% contour was smooth enough to widen against a radius cap of \
+         {radius} px (coverage delta {coverage}); the original mask bytes were \
+         retained.";
 
     // --- native luminance-range fallback (fit_zoned.rs) -----------------
     pub const RANGE_ATTACHED: &str =

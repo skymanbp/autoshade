@@ -2835,11 +2835,148 @@ charged 90th percentile alongside the still-disclosed raw step. A crossing
 whose context reaches the ceiling is charged its raw step bit-for-bit, so
 textured borders and true ramps are governed by exactly the number they
 were governed by before; a crossing in smooth sky must fit inside what its
-own neighbourhood can actually mask. The soft rim and range
-families keep the scalar: the rim ruler samples only inside a feather,
-where the correction is a ramp by construction, and the range ruler admits
-only locally smooth crossings by rule, in whichever coordinate the band it
-is reading is made of.
+own neighbourhood can actually mask.
+
+**Both mask families now charge, against the same per-crossing budget, read
+off the same three frames.** Until this batch the soft rim ruler DECLINED,
+on the argument that it samples only inside a feather "where the correction
+is a ramp by construction". A real desert-dusk pair falsified that. The
+OneFormer sky raster is the model's own soft class probability
+(`python/segment.py`, "edges come pre-feathered"), so in featureless haze its
+5%-95% band is whatever the model emitted — two or three analysis pixels —
+and a flat ceiling let the shared shrink park the correction exactly on it:
+the CLI disclosed `introduced transition rim 0.021 to 0.012 luma after shared
+differential shrink k=0.592 (budget 0.012, 691 measured transitions)`, and the
+finished 2048-px render carried a 0.013-0.016 luma step across the 50% contour
+in smooth haze (p50 0.018 with the mask against 0.005 without, 8-px stand-off,
+154 columns) — 3-4 codes of 255 in a gradient with nothing to hide them. The
+hard family's own ruler would have budgeted that same neighbourhood at ONE
+code. `boundary_rim` therefore takes the same `StepFrames` the step ruler
+takes and charges each transition against `max(|scene's own luma change
+across the transition band on the reference|, BOUNDARY_STEP_SHAPE × the
+correction's own same-side slope read outward from the 50% contour on the
+frozen k=1 candidate, minimum over two consecutive baselines)`, clamped to
+`[BOUNDARY_STEP_FLOOR, ZONE_BOUNDARY_RIM_MAX]`; `rim` stays the raw p90 for
+logs and pinned triples, `charged` is what the gate compares. The scene term
+spans the whole BAND rather than the hard ruler's 3-px feet, because the
+quantity being budgeted is not a 3-px step: it is how far the treatment
+inside the band falls short of the settled treatment, which the band's whole
+width carries. The slope term is read from the CONTOUR outward, exactly where
+the hard ruler reads it, and that placement is what makes a wide alpha ramp
+earn credit (the probes stay inside its own ramp) while a two-pixel one earns
+none (they land on the settled plateaus). One contract for both families: no
+seam larger than the scene's own local variation, floor one code, ceiling
+0.012.
+
+**Both rulers also read COLOUR, charged identically.** The same difference in
+differences is taken per channel — for the step ruler on R, G and B directly,
+for the rim ruler through a per-channel transport `M_c` — and the crossing
+reports the largest of the three magnitudes together with the channel that
+produced it, which is then charged against THAT channel's own context. The
+gate compares `max(charged luma p90, charged colour p90)`
+(`BoundaryReading::gated`), and both colour ranks ride in the disclosure
+beside the luma ones. A luma-only ruler reads a coloured halo as 0: gains
+that reproduce a target's mean colour can hold luma601 inside one code while
+moving one channel several, which along a mesa silhouette is exactly the
+artefact the eye picks up first.
+
+That is not only an argument: it is what moved a repository fixture. The
+`sky+land` pair in `every_accepted_fixture_zone_still_passes_the_boundary_gate`
+asks for wide per-channel gains ([0.60, 0.63, 0.67] source to
+[0.92, 0.72, 0.48] target), and its verdict changed under this batch while
+`sky` — a photograph — did not move by a bit. Both fixtures put a real scene
+step under the contour, so on both the luma budget saturates and the charge is
+inert (`charged` equals the raw rim on every row); what the luma ruler read as
+a 0.019 rim shrinking to 0.012 was carrying a colour rim the same size, and
+ranking `max(charged luma, charged colour)` runs the shrink on until the
+COLOUR p90 reaches the ceiling: `k` 0.852 to 0.088, kept luma rim 0.012 to
+0.002, colour rim on 0.012.
+
+One instrument note rides with that. A single channel's `u1` is a difference
+of two 8-BIT renders, so its slope over the 3-px baseline quantises to whole
+code values and the min-over-two-baselines rule reads 0 on a ramp that is
+plainly there; luma is the same measurement with three independent
+quantisations averaged, so it resolves the SAME shared alpha ramp sub-code.
+The channel slope is therefore floored at the luma slope
+(`colour_slope_credit`) — a lower bound on the correction's own shape, never
+an invented credit. Without it the budget stops cancelling the channel ratio
+and a pure EXPOSURE dial over a warm field is charged as if it were a halo:
+measured on `shoulder_fixture(32.0, 0.37)`, the accepted shrink fell 0.24536
+to 0.14795 and the kept step from two code values to one.
+
+**The range family still declines, and for a reason that is not an assumption
+about shape:** `range_transition_rim` admits only crossings whose REFERENCE is
+already smooth and then reports the RENDERED gradient there, in whichever
+coordinate the band it is reading is made of, so the scene's own variation
+sits inside the reading instead of being differenced away. It builds its
+`BoundaryReading` through `BoundaryReading::uncharged`, whose colour ranks are
+0.0 because the per-channel ruler was not run — not because a colour seam was
+measured and found absent.
+
+**A budget can only take strength away, so the other half of the fix adds
+ramp.** `mask_refine::widen_smooth_feather` runs on the SOURCE semantic raster
+in both semantic producers, beside the guided refinement and before any
+boundary reading is taken. Within a collar of `2 × cap` px around the mask's
+50% contour it measures the GUIDE's own change over a `cap / 4` probe
+distance — the box-averaged guide here against the same average `probe` px
+away along either axis — and compares it to ONE CODE, the rule
+`BOUNDARY_STEP_FLOOR` is built on, read on the guide instead of the render. A
+DIFFERENCE of smoothed values rather than an average of |gradient|, because
+the second does not cancel: an 8-bit gradient IS a staircase of one-code
+steps, whose |gradient| averages to something near the threshold however wide
+the window, so a rule built on it would refuse to widen exactly the
+featureless haze it exists for.
+
+The credit falls linearly from 1 at a perfectly flat guide to 0 at one code,
+is read ON the 50% contour, and is then carried out to everything the
+broadening kernel reaches by taking the SMALLEST credit in reach
+(`mask_refine::spread_min`, the graded twin of the collar's dilation).
+Smoothness is a property of the CROSSING, not of the pixel being written:
+nine pixels to the flat side of a mesa silhouette the guide is perfectly
+smooth, and a rule that read the guide where it writes would widen that flank
+while the silhouette itself stayed pinned — a stepped profile, and a worse
+boundary than the one it started from. (Measured on the split-guide fixture
+before the propagation landed: the silhouette row came back with alpha 3/255
+nine pixels out where the original mask had 0.)
+
+The delivered alpha is then `alpha + credit × (box-blurred alpha − alpha)` at
+a box radius capped at `FEATHER_CAP_SHARE = 3%` of the mask's own height, so
+the ramp it delivers is about 6% of the frame — a SHARE, so the rule needs no
+rescaling between the analysis grid and the raster the PNG is written at, and
+a BRACKETED one: the transition-band ruler reads the correction's shortfall
+at the 50% contour, `(1 − ZONE_BOUNDARY_MID) = 0.5` of the settled height,
+which a wider ramp does not reduce, while a ramp `W` analysis px wide earns
+`BOUNDARY_STEP_SHAPE × (3-px baseline ÷ W)` of that height back as slope
+credit and earns it only where the ramp persists past two consecutive
+baselines. Below ~14 analysis px the second baseline lands on the settled
+plateau and the credit is refused; above ~18 the credit falls below the
+shortfall it has to pay for. Where the guide has an edge the credit is zero
+and the alpha is untouched, so silhouettes stay crisp; where it is
+featureless haze the same correction height is delivered over a ramp several
+times wider, which divides the per-pixel step by the same factor without
+taking any strength away. Coverage is conserved inside
+`COVERAGE_DELTA_MAX`, nothing outside the collar may move, and the operation
+abstains — with its own `MASK_FEATHER_WIDENED` / `MASK_FEATHER_ABSTAINED`
+disclosure — when nothing is smooth, when the widened bytes would be
+identical, or when either conservation law fails. Hard rasters (spatial tiles,
+free masks) are never widened: they are 0/255 by construction and the
+cross-boundary-step ruler is reading exactly that.
+
+Order matters and is enforced by placement: the widening runs FIRST, so the
+gate measures the mask that will actually be rendered, and so the widened ramp
+earns slope credit against the budget above — the two halves of the fix
+compose instead of each taking strength away. Measured on the 64x256 haze
+fixture at +0.30 EV (`FEATHER_WIDENING`, printed by
+`widening_the_feather_first_buys_back_the_charge_the_budget_takes`): a 3-px
+segmentation feather reads `rim 0.0235`, is charged `0.0720` — 3.06x, which is
+the whole `ceiling / floor` exchange, because a flat neighbourhood earns
+nothing but the floor — and the shared shrink keeps `k = 0.142`. Widen the
+same feather first and the rim is UNCHANGED at `0.0235` while the charge falls
+to `0.0240`, 1.02x, and the shrink keeps `k = 0.526`: **3.7x the strength, at
+the same 0.012 ceiling**. Not `k = 1`, and the reason is the instrument rather
+than the fix: the transition-band ruler reads the correction's SHORTFALL at
+the 50% contour — the ramp's height, which a wider ramp does not reduce — so
+what widening buys back is the slope credit, not the reading.
 
 **The range family's half of that sentence is measured (2026-09-01), and it
 holds for a reason the step ruler does not share.** `range_transition_rim`

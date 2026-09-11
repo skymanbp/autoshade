@@ -240,6 +240,17 @@ Details: [docs/TECH_STACK.md#ai-advisor-and-reverse-fit](docs/TECH_STACK.md#ai-a
   withheld because a replaced sky shares its luminance bins, and a zone whose
   luminance already matches says so instead of being dialled for a hairline
   gain.
+- A semantic zone's boundary is held to the same per-crossing budget a tile's
+  is: no seam larger than the scene's own local variation, floored at one code
+  value and capped at the calibrated 0.012. Both rulers read luma **and** each
+  colour channel, so a gain set that reproduces a target's mean colour cannot
+  hide a coloured halo behind an unmoved luma.
+- Because a budget can only take strength away, the source raster's feather is
+  **widened first** where the guide is too smooth to hide anything: the same
+  correction height is delivered over a ramp up to 6 % of the frame height, so
+  its per-pixel step falls by the same factor at full strength, while alpha
+  under a real edge is left byte-identical and silhouettes stay crisp. Both the
+  widening and its abstention are disclosed.
 
 Details: [docs/TECH_STACK.md#zone-scoped-evidence-view](docs/TECH_STACK.md#zone-scoped-evidence-view).
 
@@ -251,8 +262,8 @@ supported nodes first and stops at a 4×4 grid.
 - A tile is kept only when both frames contribute ≥ 3 % evidence, original
   structure stays comparable, its confidence interval excludes zero, its
   boundary stays within the calibrated rim ceiling (0.012, charged per
-  crossing against the scene's own step since v1.2.2), and the composed frame
-  does not regress.
+  crossing against the scene's own step since v1.2.2 — in luma and per colour
+  channel), and the composed frame does not regress.
 - Tiles are ordinary editable bitmap masks: recipe JSON keeps them losslessly
   and classic XMP omits each with a named bitmap-mask loss.
 - A **free-form remainder pass** ranks 4-connected, sign-pure components of

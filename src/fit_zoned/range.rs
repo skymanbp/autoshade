@@ -932,7 +932,7 @@ fn range_transition_rim(
     }
     let transition_count = rims.iter().map(Vec::len).sum();
     if transition_count == 0 {
-        return BoundaryReading { rim: 0.0, transitions: 0, charged: 0.0 };
+        return BoundaryReading::uncharged(0.0, 0);
     }
     let rim = rims
         .into_iter()
@@ -947,12 +947,14 @@ fn range_transition_rim(
             values[rank].abs()
         })
         .fold(0.0f32, f32::max);
-    // This family declines to charge: its admission rule above (a bow in a
-    // locally smooth crossing, never a pre-existing subject edge) is already
-    // a binary form of the contextual test, and a graded context here is
-    // capped at [`RANGE_SMOOTH_CROSSING`] by construction — no dynamic
-    // range. See [`super::BoundaryReading::charged`].
-    BoundaryReading { rim, transitions: transition_count, charged: rim }
+    // This family declines to charge, and it is the ONLY one that still
+    // does: its admission rule above (a bow in a locally smooth crossing,
+    // never a pre-existing subject edge) is already a binary form of the
+    // contextual test, and a graded context here is capped at
+    // [`RANGE_SMOOTH_CROSSING`] by construction — no dynamic range. It also
+    // does not run the per-channel ruler, because it already reads whichever
+    // coordinate its band is made of. See [`super::BoundaryReading::uncharged`].
+    BoundaryReading::uncharged(rim, transition_count)
 }
 
 /// The delivered transfer's worst ORDER REVERSAL across the bands' edges, in

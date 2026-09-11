@@ -632,10 +632,39 @@ reading.
   (`ZONE_STEP_OFFSET = 2` px paired samples across the 50% contour,
   differenced against the render without the correction). Zero measured
   crossings refuses the correction instead of passing it.
+- Both mask families charge each crossing against the same per-crossing
+  budget: `max(the scene's own change across the crossing, BOUNDARY_STEP_SHAPE
+  = 3 x the correction's own same-side slope off the frozen k=1 candidate,
+  minimum over two consecutive baselines)` clamped to `[BOUNDARY_STEP_FLOOR =
+  1/255, the family's ceiling]`, with the charge `raw x (ceiling / budget)`
+  below the ceiling and the raw reading at or above it. The soft
+  transition-band ruler joined that rule on 2026-09-10; the luminance/colour
+  range family still declines, because it admits only already-smooth crossings
+  and reports the rendered gradient there.
+- Every crossing is read in luma AND per channel (the soft family transports
+  each channel through the settled zone's own multiplier `M_c`), the crossing
+  reports the largest of the three channel magnitudes, and the gate compares
+  `max(charged luma p90, charged colour p90)`. The channel's slope credit is
+  floored at the LUMA slope (`colour_slope_credit`): one channel's `u1` is a
+  difference of two 8-bit renders, so its slope over a 3-px baseline
+  quantises to whole codes and the min-over-two-baselines rule reads 0 on a
+  real ramp, while luma resolves that same shared ramp sub-code.
 - Tile rasters use normalized source coordinates with a 2048-pixel long-edge
   cap. JSON is lossless; classic XMP reports the existing named bitmap loss.
 - Guided refinement uses radius `8`, epsilon `(4/255)^2`, a `2 * radius`
   restored collar boundary, and maximum coverage drift `0.002`.
+- SEMANTIC rasters only (never tiles or free masks) additionally get their
+  SOURCE feather widened before any boundary reading: inside a `2 x cap`
+  collar around the 50% contour, where the guide's own change over a
+  `cap / 4` probe distance is under one code, alpha is blended toward a box
+  blur at a radius capped at `FEATHER_CAP_SHARE = 3%` of the mask height —
+  a delivered ramp of about 6%, bracketed by what the transition-band ruler
+  will pay slope credit for (~14 to ~18 analysis px). Credit falls linearly
+  to zero at one code, is read ON the contour and carried outward by the
+  SMALLEST credit in reach (`spread_min`), so alpha within reach of a real
+  edge is untouched. Same `0.002` coverage law, nothing outside the collar
+  may move, and the operation abstains with its own disclosure when nothing
+  is smooth.
 - The shipped automatic path on the calibration pair (range fallback)
   attaches `r2c0` then `r3c0`: frozen shares `3.9%/3.9%` and `3.6%/3.6%`,
   original `D = 0.303` and `0.438`, signed residuals `-0.094` and `-0.060`

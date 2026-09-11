@@ -139,12 +139,22 @@ const ZONE_CLIP_GROWTH: f32 = 0.01;
 /// this size — real textured and feathered borders — and it is NOT a
 /// visibility threshold that holds everywhere: v1.2.2 measured a tile seam
 /// in clean sky at 7.8 sigma over a mask-free neutral control while sitting
-/// exactly on this number. THIS ruler may keep the scalar because it only
-/// ever samples INSIDE a feathered transition band, where the correction is
-/// a ramp by construction; the hard-raster step ruler cannot, so its
-/// samples are charged per crossing against their own context (see
-/// [`ZONE_BOUNDARY_STEP_MAX`], [`BOUNDARY_STEP_FLOOR`]) and that constant
-/// is the CAP on the exchange, not a promise about bare-sky visibility.
+/// exactly on this number. It is therefore a CEILING here too, exactly as
+/// [`ZONE_BOUNDARY_STEP_MAX`] has been since v1.2.2, and no longer a flat
+/// budget. THIS ruler used to keep the scalar, on the argument that it only
+/// ever samples INSIDE a feathered transition band "where the correction is
+/// a ramp by construction". A desert-dusk pair falsified that argument: a
+/// semantic sky raster is the segmentation model's own soft class
+/// probability, so in featureless haze its band is the two or three analysis
+/// pixels the model happened to emit, and the flat ceiling let the shared
+/// shrink park the correction exactly on it — a measured 0.013-0.016 luma
+/// step across the 50% contour in the finished 2048-px render (p50 0.018
+/// with the mask against 0.005 without, 8-px stand-off, 154 columns), 3-4
+/// codes of 255 in a smooth gradient, where the hard family's own ruler
+/// would have budgeted one code. Every transition is now charged per
+/// crossing against its own context ([`crossing_budget`],
+/// [`BOUNDARY_STEP_FLOOR`]), in luma AND per channel, and this constant is
+/// the CAP on that exchange, not a promise about bare-sky visibility.
 /// No perceptual study is owed for this number, and none is planned: it is a
 /// calibrated exchange rate, not a visibility threshold, and the batch that
 /// questioned it measured what the rate actually buys — the calibration
@@ -627,20 +637,86 @@ const ZONE_STEP_OFFSET: usize = 2;
 pub(super) struct BoundaryReading {
     pub(super) rim: f32,
     pub(super) transitions: usize,
-    /// The context-charged reading the hard-raster gate compares: each
+    /// The context-charged LUMA reading every boundary gate compares: each
     /// crossing's introduced step, scaled by `ceiling / budget` where its
-    /// own per-crossing budget sits below the ceiling, ranked at the same
-    /// 90th percentile. Since every charge >= its raw step, `charged >=
-    /// rim` at every rank: the new predicate subsumes the old, and nothing
-    /// the gate refuses today can become acceptable. The soft rim and
-    /// luminance-range families DECLINE to charge (`charged == rim` by
-    /// construction): the rim ruler samples only inside a feather, where
-    /// the correction is a ramp by construction, and the range ruler's
-    /// admission rule (`range.rs`) is already a binary form of this test.
+    /// own per-crossing budget ([`crossing_budget`]) sits below the ceiling,
+    /// ranked at the same 90th percentile. Since every charge >= its raw
+    /// step, `charged >= rim` at every rank: the charged predicate subsumes
+    /// the raw one, and nothing a gate refuses today can become acceptable.
+    ///
+    /// BOTH mask families charge, and since this batch they charge the SAME
+    /// quantity read off the SAME three frames. The soft family used to
+    /// decline, on the argument that a feathered band is "a ramp by
+    /// construction"; a desert-dusk pair falsified it. The OneFormer sky
+    /// raster is the model's own soft class probability, so its transition
+    /// in featureless haze is whatever the model emitted — two or three
+    /// analysis pixels — and the flat ceiling let the shrink park the
+    /// correction exactly on 0.012: a measured 0.013-0.016 luma step across
+    /// the 50% contour in the finished 2048-px render (p50 0.018 with the
+    /// mask against 0.005 without, 8-px stand-off, 154 columns), 3-4 codes
+    /// of 255 in a smooth gradient. The hard family's own ruler would have
+    /// budgeted that same haze at ONE code. One contract now: no seam larger
+    /// than the scene's own local variation, floor one code, ceiling the
+    /// family's constant.
+    ///
+    /// The luminance/colour-range family still declines, and for a reason
+    /// that is not an assumption about shape: it admits only crossings whose
+    /// REFERENCE is already smooth and then reports the RENDERED gradient
+    /// there, so the scene's own variation sits inside the reading instead
+    /// of being differenced away (`range.rs`). See
+    /// [`BoundaryReading::uncharged`].
     pub(super) charged: f32,
+    /// The raw per-CHANNEL reading, ranked exactly like `rim`: at each
+    /// crossing the same difference in differences is taken on R, G and B
+    /// and the crossing reports the largest magnitude of the three. A
+    /// luma-only ruler reads a colour seam as nothing — gains that reproduce
+    /// a target's mean colour can hold luma601 almost fixed while moving one
+    /// channel several codes, which along a silhouette is a coloured halo.
+    pub(super) colour: f32,
+    /// `colour` after the same per-crossing charge, computed on the channel
+    /// that produced the reading. The gate compares [`BoundaryReading::gated`].
+    pub(super) colour_charged: f32,
 }
 
-/// The three frames one cross-boundary crossing is read from.
+impl BoundaryReading {
+    /// What every boundary gate compares: whichever charged rank is worse.
+    /// ONE number, so a correction cannot pass by being quiet in the
+    /// coordinate it did not move.
+    pub(super) fn gated(self) -> f32 {
+        self.charged.max(self.colour_charged)
+    }
+
+    /// A reading from the family that measures its band's OWN coordinate —
+    /// luma for a luminance band, chromaticity for a colour band — and
+    /// therefore neither charges nor runs the per-channel ruler
+    /// (`range::range_transition_rim`). The colour ranks are 0.0 because
+    /// that ruler was not run, not because a colour seam was measured and
+    /// found absent; the reading it does return is already in the coordinate
+    /// its band is made of.
+    pub(super) fn uncharged(rim: f32, transitions: usize) -> Self {
+        Self { rim, transitions, charged: rim, colour: 0.0, colour_charged: 0.0 }
+    }
+
+    fn nothing_measured() -> Self {
+        Self { rim: 0.0, transitions: 0, charged: 0.0, colour: 0.0, colour_charged: 0.0 }
+    }
+}
+
+/// One measured crossing (hard family) or transition (soft family), in both
+/// coordinates and both currencies. The raw and charged ranks are taken over
+/// SEPARATE orderings, so `rim` stays the luma p90 every existing log line
+/// and pinned triple is comparable against while `charged` is what the gate
+/// compares; a single re-ranked field would return "that crossing's own luma
+/// step" at a silently moved position.
+#[derive(Clone, Copy, Debug)]
+struct CrossingSample {
+    luma: f32,
+    luma_charge: f32,
+    colour: f32,
+    colour_charge: f32,
+}
+
+/// The three frames one crossing is read from.
 #[derive(Clone, Copy)]
 struct StepFrames<'a> {
     /// This same frame rendered WITHOUT the correction under test.
@@ -653,6 +729,134 @@ struct StepFrames<'a> {
     frozen: &'a [[f32; 3]],
 }
 
+/// One scan line's addressing: `(start, step, len)`, exactly the triple both
+/// line rulers already walk.
+type LineWalk = (usize, usize, usize);
+
+/// ONE crossing's contextual budget, shared by BOTH mask families: a
+/// correction may introduce a discontinuity no larger than the largest
+/// smooth variation the neighbourhood already carries — the scene's own
+/// change across the crossing (`context`, read off the frame rendered
+/// WITHOUT the correction) or [`BOUNDARY_STEP_SHAPE`] times the correction's
+/// own same-side slope beside it ([`crossing_slope`]) — never more than the
+/// family's `ceiling`, never less than one code value.
+fn crossing_budget(context: f32, slope: f32, ceiling: f32) -> f32 {
+    context.abs().max(BOUNDARY_STEP_SHAPE * slope).clamp(BOUNDARY_STEP_FLOOR, ceiling)
+}
+
+/// A BRANCH, not a multiply by a ratio that happens to be one: at or above
+/// the ceiling the charge IS the raw reading, bit for bit, so a fully
+/// textured or genuinely ramped border is governed by exactly the constant it
+/// was governed by before the charge existed.
+fn crossing_charge(introduced: f32, budget: f32, ceiling: f32) -> f32 {
+    if budget >= ceiling {
+        introduced.abs()
+    } else {
+        introduced.abs() * (ceiling / budget)
+    }
+}
+
+/// The magnitude 90th percentile both rulers rank at. A correction that
+/// darkens its side of a border is as visible a seam as one that brightens
+/// it, and a signed percentile would let a dark edge hide behind a bright
+/// one.
+fn magnitude_rank(values: &mut [f32]) -> f32 {
+    values.sort_by(|a, b| a.abs().total_cmp(&b.abs()));
+    let rank = ((values.len() as f32 * ZONE_BOUNDARY_PERCENTILE).ceil() as usize)
+        .saturating_sub(1)
+        .min(values.len() - 1);
+    values[rank].abs()
+}
+
+/// The slope credit one crossing's COLOUR reading earns.
+///
+/// A single channel's `u1` is a difference of two 8-BIT renders, so its slope
+/// over the 3-px baseline quantises to whole code values — and the MIN over
+/// two consecutive baselines then reads 0 whenever either baseline happens not
+/// to cross a code, on a ramp that is plainly there. Luma is the same
+/// measurement with three independent quantisations averaged, so it resolves
+/// the SAME shape sub-code (it is why [`BOUNDARY_STEP_SHAPE`] could be
+/// calibrated at all), and the correction's alpha ramp is shared by all three
+/// channels: the luma reading is therefore a valid lower bound on any one
+/// channel's slope, never an invented credit.
+///
+/// Without this floor the colour ruler charges a seam that is not a colour
+/// seam. Measured on `shoulder_fixture(32.0, 0.37)` — a pure EXPOSURE dial
+/// over a warm field, where every channel moves together and the budget is
+/// supposed to cancel the channel ratio exactly — the R channel's slope
+/// quantised to zero, its budget fell to the one-code floor, and the accepted
+/// shrink went 0.24536133 -> 0.14794922 with the kept step falling from two
+/// code values to one. That is the instrument's rounding, not a halo.
+fn colour_slope_credit(channel_slope: f32, luma_slope: f32) -> f32 {
+    channel_slope.max(luma_slope)
+}
+
+/// The correction's OWN same-side slope beside one crossing, in `channel`
+/// (`None` reads luma), shared by both families.
+///
+/// `feet` are the two far feet the crossing was measured on, as positions
+/// along the line; each side's slope walks further out in its own direction
+/// on `2 * (ZONE_STEP_OFFSET - 1) + 1`-px baselines and is the MINIMUM over
+/// two consecutive ones, because a ramp earns credit only where it PERSISTS
+/// past the guided-refine collar: a hard raster's resample-and-refine collar
+/// spans exactly the first baseline out and reads as a spurious inner slope
+/// — measured on the real seam, inner |u1| slope ~0.005-0.008 in CLEAN sky,
+/// which times [`BOUNDARY_STEP_SHAPE`] had bought the whole ceiling back. The
+/// seam's own soft shoulder is part of the seam, never a masker. A true ramp
+/// shows the same slope on both baselines and keeps full credit. The larger
+/// of the two sides is returned; an unavailable or side-crossing extended
+/// foot contributes zero slope (no credit).
+///
+/// `u1` is read off the FROZEN k=1 candidate, never off the render under
+/// bisection: the shape of a correction is a property of the correction, and
+/// shrinking scales it without changing its shape; measuring it live would
+/// let the budget chase the bisection.
+fn crossing_slope(
+    frames: StepFrames<'_>,
+    alpha: &[f32],
+    line: LineWalk,
+    feet: (usize, usize),
+    forward: bool,
+    channel: Option<usize>,
+) -> f32 {
+    let StepFrames { reference, rendered, frozen } = frames;
+    let (start, step, len) = line;
+    let (far_in, far_out) = feet;
+    let read = |p: &[f32; 3]| match channel {
+        Some(c) => p[c],
+        None => 0.299 * p[0] + 0.587 * p[1] + 0.114 * p[2],
+    };
+    let index = |p: usize| -> Option<usize> {
+        let i = start + p * step;
+        (i < alpha.len() && i < rendered.len() && i < reference.len() && i < frozen.len())
+            .then_some(i)
+    };
+    let inside = |i: usize| alpha[i] >= ZONE_BOUNDARY_MID;
+    let (Some(i_in), Some(i_out)) = (index(far_in), index(far_out)) else {
+        return 0.0;
+    };
+    let u1 = |i: usize| read(&frozen[i]) - read(&reference[i]);
+    let baseline = 2 * ZONE_STEP_OFFSET.saturating_sub(1) + 1;
+    let probe = |foot: usize, inward: bool, hops: usize| -> Option<usize> {
+        let away = baseline * hops;
+        let p = if forward == inward { foot.checked_add(away) } else { foot.checked_sub(away) }?;
+        if p >= len {
+            return None;
+        }
+        let i = index(p)?;
+        (inside(i) == inward).then_some(i)
+    };
+    let slope_in = match (probe(far_in, true, 1), probe(far_in, true, 2)) {
+        (Some(e1), Some(e2)) => (u1(e1) - u1(i_in)).abs().min((u1(e2) - u1(e1)).abs()),
+        _ => 0.0,
+    };
+    let slope_out = match (probe(far_out, false, 1), probe(far_out, false, 2)) {
+        (Some(e1), Some(e2)) => (u1(i_out) - u1(e1)).abs().min((u1(e1) - u1(e2)).abs()),
+        _ => 0.0,
+    };
+    slope_in.max(slope_out)
+}
+
 fn median(mut values: Vec<f32>) -> f32 {
     values.sort_by(f32::total_cmp);
     let middle = values.len() / 2;
@@ -663,7 +867,7 @@ fn median(mut values: Vec<f32>) -> f32 {
     }
 }
 
-/// Add one row's or column's INTRODUCED transition rims to `out`.
+/// Add one row's or column's INTRODUCED transition readings to `out`.
 ///
 /// A transition contributes only when that SAME scan line reaches settled sky
 /// (>=95%) and settled land (<=5%); this keeps a soft but one-sided mask edge
@@ -705,27 +909,56 @@ fn median(mut values: Vec<f32>) -> f32 {
 /// independent maxima would pair the brightest rendered pixel with a
 /// reference pixel somewhere else on the line, which is a comparison of two
 /// different places rather than one pixel's own change.
+///
+/// COLOUR rides the identical form, one transport per channel
+/// (`M_c` from the settled sky's own median in that channel), and the
+/// transition reports the largest of the three magnitudes together with the
+/// channel that produced it, so the charge below is read on that channel's
+/// own context.
+///
+/// Each transition is CHARGED against the same per-crossing budget the
+/// cross-boundary-step ruler uses ([`crossing_budget`]), computed on the same
+/// three frames: the scene's own luma change across the whole transition band
+/// on the reference — the span the introduced bow itself is measured over —
+/// or [`BOUNDARY_STEP_SHAPE`] times the correction's own same-side slope read
+/// outward from the 50% contour ([`crossing_slope`]), whichever is larger.
+/// The contour, not the band edge, is where the slope is read, for the same
+/// reason the hard ruler reads it there: a WIDE alpha ramp keeps the probes
+/// inside its own ramp and earns credit, a two-pixel one puts them on the
+/// settled plateaus where the correction is flat and earns none. That is what
+/// makes the feather widening upstream ([`crate::mask_refine::widen_smooth_feather`])
+/// buy back the strength the charge takes away, instead of the two fighting.
 fn boundary_line_rims(
-    reference: &[[f32; 3]],
-    rendered: &[[f32; 3]],
+    frames: StepFrames<'_>,
     weights: &[f32],
     start: usize,
     step: usize,
     len: usize,
-    out: &mut Vec<f32>,
+    out: &mut Vec<CrossingSample>,
 ) {
+    let StepFrames { reference, rendered, frozen } = frames;
     let luma = |p: &[f32; 3]| 0.299 * p[0] + 0.587 * p[1] + 0.114 * p[2];
+    let index = |p: usize| -> Option<usize> {
+        let i = start + p * step;
+        (i < rendered.len() && i < reference.len() && i < frozen.len() && i < weights.len())
+            .then_some(i)
+    };
     let mut sky = Vec::new();
     let mut sky_reference = Vec::new();
+    let mut sky_channels: [Vec<f32>; 3] = [Vec::new(), Vec::new(), Vec::new()];
+    let mut sky_reference_channels: [Vec<f32>; 3] = [Vec::new(), Vec::new(), Vec::new()];
     let mut land = Vec::new();
     for p in 0..len {
-        let i = start + p * step;
-        if i >= rendered.len() || i >= reference.len() || i >= weights.len() {
+        let Some(i) = index(p) else {
             break;
-        }
+        };
         if weights[i] >= ZONE_BOUNDARY_HIGH {
             sky.push(luma(&rendered[i]));
             sky_reference.push(luma(&reference[i]));
+            for c in 0..3 {
+                sky_channels[c].push(rendered[i][c]);
+                sky_reference_channels[c].push(reference[i][c]);
+            }
         } else if weights[i] <= ZONE_BOUNDARY_LOW {
             land.push(luma(&rendered[i]));
         }
@@ -744,23 +977,40 @@ fn boundary_line_rims(
             render::linear_to_srgb(multiplier * render::srgb_to_linear(l))
         }
     };
+    let mut channel_multiplier = [1.0f32; 3];
+    for c in 0..3 {
+        let settled = median(std::mem::take(&mut sky_channels[c]));
+        let settled_reference = median(std::mem::take(&mut sky_reference_channels[c]));
+        channel_multiplier[c] = render::srgb_to_linear(settled)
+            / render::srgb_to_linear(settled_reference).max(1e-5);
+    }
+    let transported_channel = |c: usize, v: f32| -> f32 {
+        if channel_multiplier[c] == 1.0 {
+            v
+        } else {
+            render::linear_to_srgb(channel_multiplier[c] * render::srgb_to_linear(v))
+        }
+    };
+    let inside = |i: usize| weights[i] >= ZONE_BOUNDARY_MID;
+    let stand_off = ZONE_STEP_OFFSET.saturating_sub(1);
     let mut p = 0usize;
     while p < len {
-        let i = start + p * step;
-        if i >= weights.len()
-            || !(ZONE_BOUNDARY_LOW..ZONE_BOUNDARY_HIGH).contains(&weights[i])
-        {
+        let Some(i) = index(p) else {
+            p += 1;
+            continue;
+        };
+        if !(ZONE_BOUNDARY_LOW..ZONE_BOUNDARY_HIGH).contains(&weights[i]) {
             p += 1;
             continue;
         }
+        let band_begin = p;
         let mut introduced: Option<f32> = None;
+        let mut coloured: Option<(f32, usize)> = None;
         while p < len {
-            let i = start + p * step;
-            if i >= rendered.len()
-                || i >= reference.len()
-                || i >= weights.len()
-                || !(ZONE_BOUNDARY_LOW..ZONE_BOUNDARY_HIGH).contains(&weights[i])
-            {
+            let Some(i) = index(p) else {
+                break;
+            };
+            if !(ZONE_BOUNDARY_LOW..ZONE_BOUNDARY_HIGH).contains(&weights[i]) {
                 break;
             }
             if weights[i] >= ZONE_BOUNDARY_MID {
@@ -769,12 +1019,86 @@ fn boundary_line_rims(
                     Some(v) if v.abs() >= here.abs() => v,
                     _ => here,
                 });
+                for c in 0..3 {
+                    let moved = rendered[i][c] - transported_channel(c, reference[i][c]);
+                    coloured = Some(match coloured {
+                        Some((v, channel)) if v.abs() >= moved.abs() => (v, channel),
+                        _ => (moved, c),
+                    });
+                }
             }
             p += 1;
         }
-        if let Some(here) = introduced {
-            out.push(here);
-        }
+        let Some(here) = introduced else {
+            continue;
+        };
+        let band_end = p - 1;
+        // The SCENE's own variation over the span the bow was measured on:
+        // the settled pixel just outside each end of the transition band.
+        // Not the 3-px baseline the hard ruler uses, because the quantity
+        // being budgeted is not a 3-px step — it is how far the treatment
+        // inside the band falls short of the settled treatment, which the
+        // whole band's width carries.
+        let settled = |q: usize| if q < len { index(q) } else { None };
+        let band_feet = match (band_begin.checked_sub(1).and_then(settled), settled(band_end + 1)) {
+            (Some(a), Some(b)) if inside(a) != inside(b) => {
+                Some(if inside(a) { (a, b) } else { (b, a) })
+            }
+            _ => None,
+        };
+        // The 50% contour inside this band, and the same two far feet the
+        // hard ruler stands on, so the slope credit is the same measurement.
+        let contour = (band_begin.saturating_sub(1)..(band_end + 1).min(len.saturating_sub(1)))
+            .find_map(|q| {
+                let (Some(a), Some(b)) = (index(q), index(q + 1)) else {
+                    return None;
+                };
+                (inside(a) != inside(b)).then_some((q, q + 1))
+            });
+        let slope_feet = contour.and_then(|(low, high)| {
+            let high_inside = index(high).map(inside)?;
+            let (near_in, near_out) = if high_inside { (high, low) } else { (low, high) };
+            let forward = near_in > near_out;
+            let (far_in, far_out) = (
+                if forward { near_in.checked_add(stand_off)? } else { near_in.checked_sub(stand_off)? },
+                if forward { near_out.checked_sub(stand_off)? } else { near_out.checked_add(stand_off)? },
+            );
+            if far_in >= len || far_out >= len {
+                return None;
+            }
+            let (i_in, i_out) = (index(far_in)?, index(far_out)?);
+            (inside(i_in) && !inside(i_out)).then_some(((far_in, far_out), forward))
+        });
+        let slope_of = |channel: Option<usize>| match slope_feet {
+            Some((feet, forward)) => crossing_slope(
+                frames,
+                weights,
+                (start, step, len),
+                feet,
+                forward,
+                channel,
+            ),
+            None => 0.0,
+        };
+        let context = |channel: Option<usize>| match (band_feet, channel) {
+            (Some((i_in, i_out)), Some(c)) => reference[i_in][c] - reference[i_out][c],
+            (Some((i_in, i_out)), None) => luma(&reference[i_in]) - luma(&reference[i_out]),
+            (None, _) => 0.0,
+        };
+        let slope = slope_of(None);
+        let budget = crossing_budget(context(None), slope, ZONE_BOUNDARY_RIM_MAX);
+        let (colour_here, channel) = coloured.unwrap_or((0.0, 0));
+        let colour_budget = crossing_budget(
+            context(Some(channel)),
+            colour_slope_credit(slope_of(Some(channel)), slope),
+            ZONE_BOUNDARY_RIM_MAX,
+        );
+        out.push(CrossingSample {
+            luma: here,
+            luma_charge: crossing_charge(here, budget, ZONE_BOUNDARY_RIM_MAX),
+            colour: colour_here.abs(),
+            colour_charge: crossing_charge(colour_here, colour_budget, ZONE_BOUNDARY_RIM_MAX),
+        });
     }
 }
 
@@ -783,38 +1107,51 @@ fn boundary_line_rims(
 /// compares it with the same band on the UNCORRECTED render, transported
 /// through the settled sky's own multiplier ([`boundary_line_rims`]).
 ///
+/// `frozen` is the k=1 candidate held constant through the shrink bisection —
+/// the frame the correction's own slope is read from, exactly as
+/// [`boundary_step`] reads it.
+///
 /// The result is a MAGNITUDE at the 90th percentile, ranked exactly as
 /// [`boundary_step`] already ranks its own samples and for the reason stated
-/// there: a correction that darkens its side of a border is as visible a seam
-/// as one that brightens it, and a signed percentile would let a zone's dark
-/// edge hide behind its bright one. Robust to an isolated silhouette
-/// highlight, while retaining the systematic bow that repeats along an edge.
+/// there. Robust to an isolated silhouette highlight, while retaining the
+/// systematic bow that repeats along an edge.
 fn boundary_rim(
     reference: &[[f32; 3]],
     rendered: &[[f32; 3]],
+    frozen: &[[f32; 3]],
     weights: &[f32],
     width: u32,
     height: u32,
 ) -> BoundaryReading {
     let (w, h) = (width as usize, height as usize);
+    let frames = StepFrames { reference, rendered, frozen };
     let mut rims = Vec::new();
     for y in 0..h {
-        boundary_line_rims(reference, rendered, weights, y * w, 1, w, &mut rims);
+        boundary_line_rims(frames, weights, y * w, 1, w, &mut rims);
     }
     for x in 0..w {
-        boundary_line_rims(reference, rendered, weights, x, w, h, &mut rims);
+        boundary_line_rims(frames, weights, x, w, h, &mut rims);
     }
-    if rims.is_empty() {
-        return BoundaryReading { rim: 0.0, transitions: 0, charged: 0.0 };
+    reading_of(&rims)
+}
+
+/// Rank one ruler's samples into the four numbers a gate and its disclosure
+/// need. Four ORDERINGS on purpose — see [`CrossingSample`].
+fn reading_of(samples: &[CrossingSample]) -> BoundaryReading {
+    if samples.is_empty() {
+        return BoundaryReading::nothing_measured();
     }
-    rims.sort_by(|a, b| a.abs().total_cmp(&b.abs()));
-    let rank = ((rims.len() as f32 * ZONE_BOUNDARY_PERCENTILE).ceil() as usize)
-        .saturating_sub(1)
-        .min(rims.len() - 1);
-    // This family declines to charge — it samples only inside a feathered
-    // transition band, where the correction is a ramp by construction. See
-    // [`BoundaryReading::charged`].
-    BoundaryReading { rim: rims[rank].abs(), transitions: rims.len(), charged: rims[rank].abs() }
+    let mut raw: Vec<f32> = samples.iter().map(|s| s.luma).collect();
+    let mut charges: Vec<f32> = samples.iter().map(|s| s.luma_charge).collect();
+    let mut colours: Vec<f32> = samples.iter().map(|s| s.colour).collect();
+    let mut colour_charges: Vec<f32> = samples.iter().map(|s| s.colour_charge).collect();
+    BoundaryReading {
+        rim: magnitude_rank(&mut raw),
+        transitions: samples.len(),
+        charged: magnitude_rank(&mut charges),
+        colour: magnitude_rank(&mut colours),
+        colour_charged: magnitude_rank(&mut colour_charges),
+    }
 }
 
 /// Add one scan line's cross-boundary steps to `out`.
@@ -838,7 +1175,12 @@ fn boundary_rim(
 /// A luma step the subject already had at that border — a roof line the mask
 /// follows, a horizon a tile edge grazes — appears in both terms and cancels,
 /// so scene content cannot false-positive. What survives is only the
-/// discontinuity the correction introduced, which is the seam itself.
+/// discontinuity the correction introduced, which is the seam itself. The
+/// identical difference is taken PER CHANNEL, and the crossing reports the
+/// largest of the three magnitudes: a gain set that reproduces a target's
+/// mean colour can leave luma601 nearly still while moving one channel
+/// several codes across the contour, and a luma-only ruler reads that halo
+/// as 0.
 ///
 /// "Inside" is the `>= mid` side, decided by the mask and never by the
 /// direction of the scan, so the left and right edges of one brightened tile
@@ -846,19 +1188,16 @@ fn boundary_rim(
 /// their own side of the contour, which drops a pair straddling a sliver
 /// thinner than the stand-off rather than reading a plateau that is not there.
 ///
-/// Each crossing is pushed as `(introduced step, context charge)`. `frozen`
-/// is the k=1 candidate, held constant through the shrink bisection, from
-/// which the correction's own same-side slope is read — the shape of a
-/// correction is a property of the correction, and shrinking scales it
-/// without changing its shape; measuring it live would let the budget chase
-/// the bisection.
+/// Each crossing is charged against its own per-crossing budget
+/// ([`crossing_budget`]), whose slope term is read off `frozen`, the k=1
+/// candidate held constant through the shrink bisection ([`crossing_slope`]).
 fn boundary_line_steps(
     frames: StepFrames<'_>,
     geometry: &[f32],
     start: usize,
     step: usize,
     len: usize,
-    out: &mut Vec<(f32, f32)>,
+    out: &mut Vec<CrossingSample>,
 ) {
     let StepFrames { reference, rendered, frozen } = frames;
     let luma = |p: &[f32; 3]| 0.299 * p[0] + 0.587 * p[1] + 0.114 * p[2];
@@ -898,58 +1237,37 @@ fn boundary_line_steps(
         let rendered_step = luma(&rendered[i_in]) - luma(&rendered[i_out]);
         let reference_step = luma(&reference[i_in]) - luma(&reference[i_out]);
         let introduced = rendered_step - reference_step;
-        // Per-crossing budget: a correction may introduce a cross-contour
-        // step no larger than the largest smooth variation already present
-        // over the same 3-px baseline — the scene's own step across the
-        // contour (`context`, off the frame rendered WITHOUT the
-        // correction), or [`BOUNDARY_STEP_SHAPE`] times the correction's own
-        // slope beside it — never more than the ceiling, never less than
-        // one code value. The slope is read off the FROZEN k=1 candidate,
-        // one baseline further out on each side; an unavailable or
-        // side-crossing extended foot contributes zero slope (no credit),
-        // and the crossing still counts either way.
-        let u1 = |i: usize| luma(&frozen[i]) - luma(&reference[i]);
-        let baseline = 2 * stand_off + 1;
-        let probe = |foot: usize, inward: bool, hops: usize| -> Option<usize> {
-            let away = baseline * hops;
-            let p = if forward == inward { foot.checked_add(away) } else { foot.checked_sub(away) }?;
-            if p >= len {
-                return None;
+        let line = (start, step, len);
+        let slope = crossing_slope(frames, geometry, line, (far_in, far_out), forward, None);
+        let budget = crossing_budget(reference_step, slope, ZONE_BOUNDARY_STEP_MAX);
+        // The same crossing in colour: the channel that moved most decides
+        // the reading, and is charged against ITS OWN context.
+        let mut worst = (0.0f32, 0usize);
+        for c in 0..3 {
+            let step_c = (rendered[i_in][c] - rendered[i_out][c])
+                - (reference[i_in][c] - reference[i_out][c]);
+            if step_c.abs() > worst.0.abs() {
+                worst = (step_c, c);
             }
-            let i = index(p)?;
-            (inside(i) == inward).then_some(i)
-        };
-        // A ramp earns credit only where it PERSISTS past the guided-refine
-        // collar: each side's slope is the MINIMUM over two consecutive
-        // same-side baselines. A true alpha ramp shows the same slope on
-        // both; a hard raster's resample-and-refine collar (~3 analysis px,
-        // exactly the first baseline out) shows it on the inner one only —
-        // measured on the real seam: inner |u1| slope ~0.005-0.008 in CLEAN
-        // sky, which times [`BOUNDARY_STEP_SHAPE`] had bought the whole
-        // ceiling back. The seam's own soft shoulder is part of the seam,
-        // never a masker.
-        let slope_in = match (probe(far_in, true, 1), probe(far_in, true, 2)) {
-            (Some(e1), Some(e2)) => (u1(e1) - u1(i_in)).abs().min((u1(e2) - u1(e1)).abs()),
-            _ => 0.0,
-        };
-        let slope_out = match (probe(far_out, false, 1), probe(far_out, false, 2)) {
-            (Some(e1), Some(e2)) => (u1(i_out) - u1(e1)).abs().min((u1(e1) - u1(e2)).abs()),
-            _ => 0.0,
-        };
-        let budget = reference_step
-            .abs()
-            .max(BOUNDARY_STEP_SHAPE * slope_in.max(slope_out))
-            .clamp(BOUNDARY_STEP_FLOOR, ZONE_BOUNDARY_STEP_MAX);
-        // A BRANCH, not a multiply by a ratio that happens to be one: at or
-        // above the ceiling the charge IS the raw step, bit for bit, so a
-        // fully textured or genuinely ramped border is governed by exactly
-        // the constant it was governed by before this batch.
-        let charge = if budget >= ZONE_BOUNDARY_STEP_MAX {
-            introduced.abs()
-        } else {
-            introduced.abs() * (ZONE_BOUNDARY_STEP_MAX / budget)
-        };
-        out.push((introduced, charge));
+        }
+        let (colour_introduced, channel) = worst;
+        let colour_context = reference[i_in][channel] - reference[i_out][channel];
+        let colour_slope = colour_slope_credit(
+            crossing_slope(frames, geometry, line, (far_in, far_out), forward, Some(channel)),
+            slope,
+        );
+        let colour_budget =
+            crossing_budget(colour_context, colour_slope, ZONE_BOUNDARY_STEP_MAX);
+        out.push(CrossingSample {
+            luma: introduced,
+            luma_charge: crossing_charge(introduced, budget, ZONE_BOUNDARY_STEP_MAX),
+            colour: colour_introduced.abs(),
+            colour_charge: crossing_charge(
+                colour_introduced,
+                colour_budget,
+                ZONE_BOUNDARY_STEP_MAX,
+            ),
+        });
     }
 }
 
@@ -962,9 +1280,7 @@ fn boundary_line_steps(
 /// punched full of interior holes that are not boundaries at all.
 ///
 /// The result is a MAGNITUDE, ranked exactly as `range::range_transition_rim`
-/// already ranks its own signed samples: a correction that darkens its side
-/// of a border is as visible a seam as one that brightens it, and a signed
-/// percentile would let a tile's dark edge hide behind its bright one.
+/// already ranks its own signed samples ([`magnitude_rank`]).
 fn boundary_step(
     reference: &[[f32; 3]],
     rendered: &[[f32; 3]],
@@ -982,28 +1298,7 @@ fn boundary_step(
     for x in 0..w {
         boundary_line_steps(frames, geometry, x, w, h, &mut steps);
     }
-    if steps.is_empty() {
-        return BoundaryReading { rim: 0.0, transitions: 0, charged: 0.0 };
-    }
-    let rank_of = |values: &mut Vec<f32>| -> f32 {
-        values.sort_by(|a, b| a.abs().total_cmp(&b.abs()));
-        let rank = ((values.len() as f32 * ZONE_BOUNDARY_PERCENTILE).ceil() as usize)
-            .saturating_sub(1)
-            .min(values.len() - 1);
-        values[rank].abs()
-    };
-    // Two ranks over two orderings, deliberately: `rim` stays the raw luma
-    // p90 every existing log line and pinned triple is comparable against,
-    // and `charged` — the same crossings after each one's context charge —
-    // is what the gate compares. A single re-ranked field would return
-    // "that crossing's own luma step" at a silently moved position.
-    let mut raw: Vec<f32> = steps.iter().map(|&(step, _)| step).collect();
-    let mut charges: Vec<f32> = steps.iter().map(|&(_, charge)| charge).collect();
-    BoundaryReading {
-        rim: rank_of(&mut raw),
-        transitions: steps.len(),
-        charged: rank_of(&mut charges),
-    }
+    reading_of(&steps)
 }
 
 /// Apply one scalar to every correction in the accepted zone set. Each dial
@@ -1744,6 +2039,15 @@ fn fit_recipe_zoned_inner_seeded(
                         readings.push(("semantic target", false, reading));
                     }
                 }
+                // The SOURCE feather only: a seam is a property of the frame
+                // that gets rendered, and the target raster is read for
+                // statistics that a wider ramp would only blur.
+                let widenings = vec![widen_source_feather(
+                    src,
+                    &mut src_mask,
+                    mask_path,
+                    "semantic source",
+                )];
                 let zone_divergence = measure_zone_divergence(src, target, base, &src_mask);
                 let divergent_cover = [zone_divergence.sky, zone_divergence.land]
                     .into_iter()
@@ -1778,6 +2082,7 @@ fn fit_recipe_zoned_inner_seeded(
                         ),
                     );
                 }
+                push_widening_notes(&mut report, &widenings);
                 let field = layers.field
                     .then(|| field::solve_local_field(src, target, &mut report)).flatten();
                 attach_zones_with_divergence(
@@ -1924,7 +2229,7 @@ fn fit_recipe_zoned_multi_inner(
     max_regions: usize,
 ) -> FitReport {
     let semantic = segment_multiclass_both(src, target, seg, mask_path, max_regions);
-    let (regions, rasters, sky_pair, refinements) = match semantic {
+    let (regions, rasters, sky_pair, refinements, widenings) = match semantic {
         Ok(pair) => pair,
         Err(e) => {
             // A multi-manifest failure is a semantic-layer failure, not a
@@ -1962,6 +2267,7 @@ fn fit_recipe_zoned_multi_inner(
             src, target, seg, mask_path, base, options, SHIPPED_LAYERS, Some(sky_pair),
         );
         push_refinement_notes(&mut report, &refinements);
+        push_widening_notes(&mut report, &widenings);
         crate::rationale::push_note(
             &mut report.recipe.rationale,
             &mut report.notes,
@@ -1987,6 +2293,7 @@ fn fit_recipe_zoned_multi_inner(
             divergent_cover >= fit::DIVERGENT_COVER_PROMOTES, true, options);
         // The same disclosure the sky/land route makes for ITS refinement.
         push_refinement_notes(&mut report, &refinements);
+        push_widening_notes(&mut report, &widenings);
         let field = SHIPPED_LAYERS.field.then(|| field::solve_local_field(src, target, &mut report)).flatten();
         attach_semantic_regions(src, target, &mut report, &regions, &rasters, &divergences);
         (report, field, "semantic regions")
@@ -2127,6 +2434,69 @@ fn frame_err_under(
 /// One guided-refinement reading per class plane, as the bridge took it.
 type PlaneRefinement = (String, bool, crate::mask_refine::RefineReading);
 
+/// One feather-widening reading, as the caller needs to disclose it.
+type FeatherWidening = (String, bool, crate::mask_refine::WidenReading);
+
+/// Widen a SOURCE semantic raster's feather where the guide is smooth and
+/// replace its PNG bytes, exactly the way a kept guided refinement replaces
+/// them — same claimed name, same raster, because the widened alpha is this
+/// zone's own mask and the recipe already points at that path.
+///
+/// It runs BEFORE any boundary reading is taken, and the order is load
+/// bearing in both directions. The gate must measure the mask that will
+/// actually be rendered; and a ramp that persists past a crossing's two
+/// baselines earns slope credit against the per-crossing budget
+/// ([`crossing_slope`]), so the two halves of the fix compose instead of
+/// each taking strength away. Measured on the 64x256 haze fixture at
+/// +0.30 EV: a 3-px feather is charged 3.06x its raw rim — the whole
+/// ceiling/floor exchange — and keeps k = 0.142; widened first, the raw rim
+/// is unchanged, the charge falls to 1.02x and the shrink keeps k = 0.526,
+/// 3.7x the strength at the same ceiling. Not k = 1, because the
+/// transition-band ruler reads the ramp's HEIGHT and a wider ramp does not
+/// reduce that; what widening buys back is the slope credit.
+fn widen_source_feather(
+    guide: &DynamicImage,
+    mask: &mut GrayImage,
+    raster: &crate::store::OwnedRaster,
+    label: &str,
+) -> FeatherWidening {
+    match crate::mask_refine::widen_smooth_feather(guide, mask) {
+        crate::mask_refine::WidenOutcome::Widened { mask: widened, reading } => {
+            if widened.save(raster.path()).is_ok() {
+                *mask = widened;
+                (label.to_string(), true, reading)
+            } else {
+                (label.to_string(), false, reading)
+            }
+        }
+        crate::mask_refine::WidenOutcome::Abstained { reading } => {
+            (label.to_string(), false, reading)
+        }
+    }
+}
+
+fn push_widening_notes(report: &mut FitReport, widenings: &[FeatherWidening]) {
+    for (label, widened, reading) in widenings {
+        crate::rationale::push_note(
+            &mut report.recipe.rationale,
+            &mut report.notes,
+            crate::rationale::Note::new(
+                if *widened {
+                    crate::rationale::keys::MASK_FEATHER_WIDENED
+                } else {
+                    crate::rationale::keys::MASK_FEATHER_ABSTAINED
+                },
+                vec![
+                    ("label", label.clone()),
+                    ("share", format!("{:.1}", reading.widened_share * 100.0)),
+                    ("radius", reading.max_radius.to_string()),
+                    ("coverage", format!("{:.6}", reading.coverage_delta)),
+                ],
+            ),
+        );
+    }
+}
+
 fn push_refinement_notes(report: &mut FitReport, refinements: &[PlaneRefinement]) {
     for (label, kept, reading) in refinements {
         crate::rationale::push_note(
@@ -2160,6 +2530,7 @@ type MultiClassSegments = (
     Vec<crate::store::OwnedRaster>,
     (GrayImage, GrayImage),
     Vec<PlaneRefinement>,
+    Vec<FeatherWidening>,
 );
 
 fn segment_multiclass_both(
@@ -2228,6 +2599,7 @@ fn segment_multiclass_both(
         // renderer will actually persist rather than from a second, rougher
         // semantic path.
         let mut refinements: Vec<PlaneRefinement> = Vec::new();
+        let mut widenings: Vec<FeatherWidening> = Vec::new();
         for (side, frame, planes) in [("source", src, &mut source), ("target", target, &mut target_planes)] {
             for plane in planes.iter_mut() {
                 let label = format!("semantic {side} class {} {}", plane.class_id, plane.label);
@@ -2239,10 +2611,26 @@ fn segment_multiclass_both(
                 ) {
                     crate::mask_refine::RefineOutcome::Kept { mask, reading } => {
                         plane.mask = mask;
-                        refinements.push((label, true, reading));
+                        refinements.push((label.clone(), true, reading));
                     }
                     crate::mask_refine::RefineOutcome::Abstained { reading } => {
-                        refinements.push((label, false, reading));
+                        refinements.push((label.clone(), false, reading));
+                    }
+                }
+                // SOURCE planes only, and before `resolve_regions`, for the
+                // reason the refinement above gives: the disjoint partition
+                // must be built from the alphas the renderer will persist.
+                // The region raster is claimed and written further down from
+                // exactly these bytes, so nothing here needs its own save.
+                if side == "source" {
+                    match crate::mask_refine::widen_smooth_feather(frame, &plane.mask) {
+                        crate::mask_refine::WidenOutcome::Widened { mask, reading } => {
+                            plane.mask = mask;
+                            widenings.push((label, true, reading));
+                        }
+                        crate::mask_refine::WidenOutcome::Abstained { reading } => {
+                            widenings.push((label, false, reading));
+                        }
                     }
                 }
             }
@@ -2279,7 +2667,7 @@ fn segment_multiclass_both(
             }
             rasters.push(raster);
         }
-        Ok((regions, rasters, (source_sky, target_sky), refinements))
+        Ok((regions, rasters, (source_sky, target_sky), refinements, widenings))
     })();
     for p in [&src_in, &tgt_in, &src_manifest, &tgt_manifest] { let _ = std::fs::remove_file(p); }
     run
@@ -2376,6 +2764,12 @@ fn attach_semantic_regions(
                                 ("k", format!("{:.3}", boundary.k)),
                                 ("max", format!("{:.3}", ZONE_BOUNDARY_RIM_MAX)),
                                 ("transitions", boundary.reading.transitions.to_string()),
+                                ("charged", format!("{:.3}", boundary.reading.charged)),
+                                ("colour", format!("{:.3}", boundary.reading.colour)),
+                                (
+                                    "colour_charged",
+                                    format!("{:.3}", boundary.reading.colour_charged),
+                                ),
                             ],
                         ),
                     );
@@ -2411,6 +2805,12 @@ fn attach_semantic_regions(
                                 ("before", format!("{:.3}", refusal.initial.rim)),
                                 ("max", format!("{:.3}", ZONE_BOUNDARY_RIM_MAX)),
                                 ("transitions", refusal.initial.transitions.to_string()),
+                                ("charged", format!("{:.3}", refusal.initial.charged)),
+                                ("colour", format!("{:.3}", refusal.initial.colour)),
+                                (
+                                    "colour_charged",
+                                    format!("{:.3}", refusal.initial.colour_charged),
+                                ),
                             ],
                         ),
                     );
@@ -2902,6 +3302,9 @@ fn boundary_note_args(
         ("after", format!("{:.3}", after.rim)),
         ("max", format!("{ZONE_BOUNDARY_RIM_MAX:.3}")),
         ("transitions", after.transitions.to_string()),
+        ("charged", format!("{:.3}", after.charged)),
+        ("colour", format!("{:.3}", after.colour)),
+        ("colour_charged", format!("{:.3}", after.colour_charged)),
     ]
 }
 
@@ -2920,8 +3323,17 @@ fn enforce_boundary_gate(
     reference_px: &[[f32; 3]],
     initial_px: Vec<[f32; 3]>,
 ) -> BoundaryGateResult {
-    let initial =
-        boundary_rim(reference_px, &initial_px, sky_weights, s_img.width(), s_img.height());
+    // `initial_px` is the k=1 candidate, so it is also this gate's FROZEN
+    // frame: the correction's own slope is a property of the correction and
+    // must never chase the bisection (see [`crossing_slope`]).
+    let initial = boundary_rim(
+        reference_px,
+        &initial_px,
+        &initial_px,
+        sky_weights,
+        s_img.width(),
+        s_img.height(),
+    );
     let zone_count = report.recipe.masks.len().saturating_sub(first_zone);
     // A correction that survives this gate must MOVE something. Step 9 made
     // that worth checking: under the transported differential a `k=0` render
@@ -2948,7 +3360,7 @@ fn enforce_boundary_gate(
         refuse_inert(report, initial, 1.0);
         return BoundaryGateResult::Dropped;
     }
-    if initial.rim <= ZONE_BOUNDARY_RIM_MAX {
+    if initial.gated() <= ZONE_BOUNDARY_RIM_MAX {
         crate::rationale::push_note(
             &mut report.recipe.rationale,
             &mut report.notes,
@@ -2976,8 +3388,14 @@ fn enforce_boundary_gate(
             k,
         );
         let pixels = fit::pixels_of(&render::develop_preview(s_img, &report.recipe));
-        let reading =
-            boundary_rim(reference_px, &pixels, sky_weights, s_img.width(), s_img.height());
+        let reading = boundary_rim(
+            reference_px,
+            &pixels,
+            &initial_px,
+            sky_weights,
+            s_img.width(),
+            s_img.height(),
+        );
         (reading, pixels)
     };
 
@@ -2989,7 +3407,7 @@ fn enforce_boundary_gate(
     // correction is not a render no-op, which is an engine bug rather than a
     // seam. The branch stays because a deleted branch cannot catch that.
     let (zero, zero_px) = render_at(report, 0.0);
-    if zero.rim > ZONE_BOUNDARY_RIM_MAX {
+    if zero.gated() > ZONE_BOUNDARY_RIM_MAX {
         report.recipe.masks.truncate(first_zone);
         crate::rationale::push_note(
             &mut report.recipe.rationale,
@@ -3010,7 +3428,7 @@ fn enforce_boundary_gate(
     for _ in 0..12 {
         let mid = (lo + hi) * 0.5;
         let measured = render_at(report, mid);
-        if measured.0.rim <= ZONE_BOUNDARY_RIM_MAX {
+        if measured.0.gated() <= ZONE_BOUNDARY_RIM_MAX {
             lo = mid;
             best = measured;
         } else {
@@ -5145,7 +5563,7 @@ mod tests {
         h: u32,
     ) -> BoundaryReading {
         let flat = vec![[settled; 3]; rendered.len()];
-        boundary_rim(&flat, rendered, weights, w, h)
+        boundary_rim(&flat, rendered, rendered, weights, w, h)
     }
 
     fn image_of(px: &[[f32; 3]], w: u32, h: u32) -> DynamicImage {
@@ -5267,7 +5685,7 @@ mod tests {
     fn boundary_rim_is_measured_across_the_mask_transition_band() {
         let (pixels, weights, w, h) = boundary_fixture_pixels(0.12);
         let reference = boundary_fixture_reference();
-        let reading = boundary_rim(&reference, &pixels, &weights, w, h);
+        let reading = boundary_rim(&reference, &pixels, &pixels, &weights, w, h);
         assert_eq!(reading.transitions, h as usize, "one feather crossing per row");
         assert!(
             (reading.rim - 0.12).abs() <= 1e-6,
@@ -5280,7 +5698,7 @@ mod tests {
     fn opposite_sign_zone_pair_exceeds_the_rim_budget_before_shrinking() {
         assert_eq!(ZONE_BOUNDARY_RIM_MAX, 0.012, "the measured calibration is pinned");
         let (pixels, weights, w, h) = boundary_fixture_pixels(0.013);
-        let reading = boundary_rim(&boundary_fixture_reference(), &pixels, &weights, w, h);
+        let reading = boundary_rim(&boundary_fixture_reference(), &pixels, &pixels, &weights, w, h);
         assert!(
             reading.rim > ZONE_BOUNDARY_RIM_MAX,
             "the just-over-budget opposite-sign shape must exercise the gate: {reading:?}"
@@ -5345,7 +5763,7 @@ mod tests {
     #[test]
     fn same_sign_zone_pair_needs_no_shrink() {
         let (pixels, weights, w, h) = boundary_fixture_pixels(-0.02);
-        let against_flat = boundary_rim(&boundary_fixture_reference(), &pixels, &weights, w, h);
+        let against_flat = boundary_rim(&boundary_fixture_reference(), &pixels, &pixels, &weights, w, h);
         assert!(
             (against_flat.rim - 0.0200).abs() <= 1e-6,
             "a dark bow is now ranked by magnitude: {against_flat:?}"
@@ -5365,7 +5783,7 @@ mod tests {
             LocalAdjustment { role: MaskRole::ZoneSky, exposure_ev: -0.35, ..Default::default() },
             LocalAdjustment { role: MaskRole::ZoneLand, exposure_ev: -0.90, ..Default::default() },
         ];
-        let expected = boundary_rim(&reference, &pixels, &weights, w, h);
+        let expected = boundary_rim(&reference, &pixels, &pixels, &weights, w, h);
         assert!(
             expected.rim <= ZONE_BOUNDARY_RIM_MAX,
             "the scene bow is in the reference too, so nothing is charged: {expected:?}"
@@ -5419,6 +5837,7 @@ mod tests {
 
         let mut measured = Vec::new();
         let mut candidates = Vec::new();
+        let mut charges = Vec::new();
         for (fixture, report) in [("sky", &sky_report), ("sky+land", &land_report)] {
             let note = report
                 .notes
@@ -5427,12 +5846,23 @@ mod tests {
                 .unwrap_or_else(|| panic!("{fixture} lacked a boundary verdict: {}", report.recipe.rationale));
             let rim = note_number(note, "after");
             eprintln!(
-                "BOUNDARY_CALIBRATION {fixture}: before={:.4} after={:.4} k={:.3} n={}",
+                "BOUNDARY_CALIBRATION {fixture}: before={:.4} after={:.4} charged={:.4} \
+                 colour={:.4}/{:.4} k={:.3} n={}",
                 note_number(note, "before"),
                 rim,
+                note_number(note, "charged"),
+                note_number(note, "colour"),
+                note_number(note, "colour_charged"),
                 note_number(note, "k"),
                 note_number(note, "transitions"),
             );
+            charges.push((
+                fixture,
+                rim,
+                note_number(note, "charged"),
+                note_number(note, "colour"),
+                note_number(note, "colour_charged"),
+            ));
             assert!(rim <= ZONE_BOUNDARY_RIM_MAX, "{fixture} rim {rim:.3}");
             candidates.push((fixture, note_number(note, "before"), note_number(note, "k")));
             for mask in &report.recipe.masks {
@@ -5459,14 +5889,34 @@ mod tests {
         // the absolute ruler because the scene's own bow under the feather
         // cancelled it — ARM B's false negative, on a repository fixture.
         // Both fixtures now shrink onto the ceiling instead of passing free.
-        let expected = [0.012f32, 0.012, 0.012, 0.012];
+        //
+        // RE-DERIVED AGAIN (2026-09-10) for the unified per-crossing budget
+        // and the colour coordinate that landed with it. Measured, and the
+        // two halves of that change had very different effects here:
+        //
+        //   * the per-crossing CHARGE moved nothing. Both fixtures put a
+        //     real scene step under the contour — the photograph its own
+        //     texture, the synthetic pair its rock/sky edge at y=12 — so on
+        //     both the budget saturates and `charged` equals the raw rim.
+        //     `sky` is therefore pinned at exactly the numbers the scalar
+        //     rule produced: 0.0460 before, 0.012 after, k=0.244.
+        //   * the COLOUR coordinate moved `sky+land`, and it is the halo the
+        //     coordinator's brief describes, on a repository fixture. That
+        //     pair asks for wide per-channel gains ([0.60, 0.63, 0.67] ->
+        //     [0.92, 0.72, 0.48]), and a luma-only ruler read the rim those
+        //     gains paint as 0.019/0.012 while the channels were moving far
+        //     more. Ranking `max(charged luma, charged colour)` the shrink
+        //     now runs until the COLOUR p90 reaches the ceiling: k falls
+        //     0.852 -> 0.088 and the kept luma rim 0.012 -> 0.002, with the
+        //     colour rim sitting on 0.012.
+        let expected = [0.012f32, 0.012, 0.002, 0.002];
         for ((fixture, role, rim), expected) in measured.iter().zip(expected) {
             assert!(
                 (*rim - expected).abs() <= 0.002,
                 "{fixture}/{role:?} boundary calibration drifted: {rim:.3} vs {expected:.3}"
             );
         }
-        let expected_candidates = [("sky", 0.0460f32, 0.244f32), ("sky+land", 0.0190, 0.852)];
+        let expected_candidates = [("sky", 0.0460f32, 0.244f32), ("sky+land", 0.0190, 0.088)];
         for ((fixture, before, k), (want_fixture, want_before, want_k)) in
             candidates.iter().zip(expected_candidates)
         {
@@ -5483,6 +5933,28 @@ mod tests {
         assert!(
             measured.iter().all(|(_, _, rim)| *rim <= ZONE_BOUNDARY_RIM_MAX),
             "accepted fixture calibration: {measured:?}"
+        );
+        // The attribution itself, asserted rather than left to the numbers
+        // above, because a re-pin that cannot say WHICH ruler moved is not a
+        // re-pin. Both fixtures saturate the luma budget, so the charge is
+        // inert on both...
+        for (fixture, rim, charged, _, _) in &charges {
+            assert!(
+                (charged - rim).abs() <= 0.001,
+                "{fixture}: a scene step under the contour saturates the luma budget, so the \
+                 per-crossing charge may not move this verdict: {charges:?}"
+            );
+        }
+        // ...and every code of `sky+land`'s drift is the colour coordinate,
+        // which stopped the shrink exactly on the ceiling.
+        let (_, land_rim, _, _, land_colour) = charges[1];
+        assert!(
+            land_colour >= 5.0 * land_rim,
+            "the channels moved where luma barely did: {charges:?}"
+        );
+        assert!(
+            (land_colour - ZONE_BOUNDARY_RIM_MAX).abs() <= 0.001,
+            "and the shrink stopped where the COLOUR rank reached the ceiling: {charges:?}"
         );
         path.remove();
         land_path.remove();
@@ -5521,7 +5993,7 @@ mod tests {
             }
         }
         let initial = fit::pixels_of(&render::develop_preview(&source, &report.recipe));
-        let premise = boundary_rim(&reference, &initial, &line_weights, w, h);
+        let premise = boundary_rim(&reference, &initial, &initial, &line_weights, w, h);
         assert!(premise.rim > ZONE_BOUNDARY_RIM_MAX, "premise: {premise:?}");
         let verdict = enforce_boundary_gate(
             &source,
@@ -5598,7 +6070,7 @@ mod tests {
             (absolute.rim - 0.064).abs() <= 1e-6 && absolute.rim > ZONE_BOUNDARY_RIM_MAX,
             "premise: the scene's own bow alone busts the budget: {absolute:?}"
         );
-        let introduced = boundary_rim(&reference, &rendered, &weights, w, h);
+        let introduced = boundary_rim(&reference, &rendered, &rendered, &weights, w, h);
         assert_eq!(introduced.transitions, h as usize, "one crossing per row");
         assert!(
             (introduced.rim - 0.004).abs() <= 1e-6,
@@ -5643,7 +6115,7 @@ mod tests {
             (absolute.rim - 0.010).abs() <= 1e-6 && absolute.rim <= ZONE_BOUNDARY_RIM_MAX,
             "premise: the absolute reading passes this seam: {absolute:?}"
         );
-        let introduced = boundary_rim(&reference, &rendered, &weights, w, h);
+        let introduced = boundary_rim(&reference, &rendered, &rendered, &weights, w, h);
         assert!(
             (introduced.rim - 0.030).abs() <= 1e-6 && introduced.rim > ZONE_BOUNDARY_RIM_MAX,
             "the introduced rim must be charged: {introduced:?}"
@@ -5701,7 +6173,7 @@ mod tests {
             additive > ZONE_BOUNDARY_RIM_MAX,
             "premise: even a plain difference of differences busts the budget: {additive}"
         );
-        let introduced = boundary_rim(&reference, &rendered, &weights, w, h);
+        let introduced = boundary_rim(&reference, &rendered, &rendered, &weights, w, h);
         assert!(
             introduced.rim <= 1e-4,
             "a uniform multiply is not a seam: {introduced:?} (additive would read {additive})"
@@ -5738,7 +6210,7 @@ mod tests {
     fn an_unchanged_render_introduces_exactly_zero_rim() {
         let row = boundary_row(0.20, 0.26, 0.40, 0.40);
         let (reference, rendered, weights, w, h) = boundary_arm(row, row);
-        let reading = boundary_rim(&reference, &rendered, &weights, w, h);
+        let reading = boundary_rim(&reference, &rendered, &rendered, &weights, w, h);
         assert_eq!(reading.transitions, h as usize, "and it is measured, not skipped");
         assert_eq!(reading.rim, 0.0, "an unchanged render has no introduced rim: {reading:?}");
     }
@@ -5768,7 +6240,7 @@ mod tests {
             (peak(&rendered) - peak(&reference)).abs() <= 1e-6,
             "premise: the two buffers share their maximum, so two maxima cancel"
         );
-        let reading = boundary_rim(&reference, &rendered, &weights, w, h);
+        let reading = boundary_rim(&reference, &rendered, &rendered, &weights, w, h);
         assert!(
             (reading.rim - 0.050).abs() <= 1e-6,
             "the pixel that actually moved must be the one reported: {reading:?}"
@@ -5803,7 +6275,7 @@ mod tests {
                 weights.push(weight);
             }
         }
-        let reading = boundary_rim(&reference, &rendered, &weights, w, h);
+        let reading = boundary_rim(&reference, &rendered, &rendered, &weights, w, h);
         assert_eq!(reading.transitions, 2 * h as usize, "two crossings per row");
         assert!(
             (reading.rim - 0.050).abs() <= 1e-6,
@@ -5869,6 +6341,338 @@ mod tests {
                 .iter()
                 .any(|n| n.key == crate::rationale::keys::ZONE_BOUNDARY_PASSED),
             "a refusal may not also announce a pass"
+        );
+        path.remove();
+    }
+
+    /// `(source, mask, weights, reference, candidate, raster, report)` — one
+    /// soft-feather arm, rendered at k=1, with everything a boundary reading
+    /// or a gate call needs.
+    type HazyFeather = (
+        DynamicImage,
+        GrayImage,
+        Vec<f32>,
+        Vec<[f32; 3]>,
+        Vec<[f32; 3]>,
+        crate::store::OwnedRaster,
+        fit::FitReport,
+    );
+
+    const HAZY: (u32, u32) = (64, 256);
+
+    fn hazy_arm(
+        name: &str,
+        source: DynamicImage,
+        mask: GrayImage,
+        exposure_ev: f32,
+        gains: Option<[f32; 3]>,
+    ) -> HazyFeather {
+        let path = fixture_mask_path(name);
+        mask.save(path.path()).unwrap();
+        let weights = mask_weights(&mask, HAZY.0, HAZY.1);
+        let mut report = neutral_report(&source, &source);
+        report.recipe.masks = vec![LocalAdjustment {
+            mask: MaskGeometry::Bitmap { path: path.path().to_string_lossy().into_owned() },
+            role: MaskRole::ZoneSky,
+            amount: 1.0,
+            exposure_ev,
+            color_gains: gains,
+            ..Default::default()
+        }];
+        let reference = fit::pixels_of(&render::develop_preview(
+            &source,
+            &crate::recipe::EditRecipe::default(),
+        ));
+        let candidate = fit::pixels_of(&render::develop_preview(&source, &report.recipe));
+        (source, mask, weights, reference, candidate, path, report)
+    }
+
+    /// A hazy frame carrying a NARROW soft mask edge — the shape the
+    /// desert-dusk defect was measured on, at fixture scale.
+    ///
+    /// The field rises 8 code values over 256 rows (0.031 code/px), so the
+    /// scene's own change across any baseline either ruler reads is a small
+    /// fraction of one code: featureless by exactly the rule
+    /// [`BOUNDARY_STEP_FLOOR`] states, and nothing here can mask anything.
+    /// `scene_edge` plants a hard 30-code luma step under the contour
+    /// instead — the control arm, where the neighbourhood can mask the whole
+    /// ceiling and the charge must vanish bit for bit.
+    ///
+    /// 256 ROWS on purpose. Both halves of this batch are stated in ANALYSIS
+    /// pixels — the budget's 3-px baseline and the widener's share-of-height
+    /// cap — so only a frame at the analysis grid's own scale exercises
+    /// either rule. `ramp` is the alpha transition's width; three is what a
+    /// segmentation model emits in haze, and the whole height of the
+    /// correction is then delivered across those three pixels.
+    fn hazy_feather(
+        name: &str,
+        ramp: f32,
+        exposure_ev: f32,
+        gains: Option<[f32; 3]>,
+        scene_edge: bool,
+    ) -> HazyFeather {
+        let (w, h) = HAZY;
+        let source = DynamicImage::ImageRgb8(RgbImage::from_fn(w, h, |x, y| {
+            let base = 100.0 + y as f32 * 8.0 / (h - 1) as f32
+                + if scene_edge && x >= 32 { 30.0 } else { 0.0 };
+            let v = base.round().clamp(0.0, 255.0) as u8;
+            image::Rgb([v, v, v])
+        }));
+        let mask = GrayImage::from_fn(w, h, |x, _| {
+            let t = ((x as f32 - (32.0 - ramp * 0.5)) / ramp).clamp(0.0, 1.0);
+            image::Luma([(t * 255.0).round() as u8])
+        });
+        hazy_arm(name, source, mask, exposure_ev, gains)
+    }
+
+    fn hazy_rim(
+        reference: &[[f32; 3]],
+        rendered: &[[f32; 3]],
+        weights: &[f32],
+    ) -> BoundaryReading {
+        boundary_rim(reference, rendered, rendered, weights, HAZY.0, HAZY.1)
+    }
+
+    /// The same raster at a different dose, so a test can ask what the gate
+    /// WOULD have kept under a rule it no longer applies.
+    fn dose(
+        source: &DynamicImage,
+        path: &crate::store::OwnedRaster,
+        exposure_ev: f32,
+    ) -> Vec<[f32; 3]> {
+        let mut recipe = crate::recipe::EditRecipe::default();
+        recipe.masks.push(LocalAdjustment {
+            mask: MaskGeometry::Bitmap { path: path.path().to_string_lossy().into_owned() },
+            role: MaskRole::ZoneSky,
+            amount: 1.0,
+            exposure_ev,
+            ..Default::default()
+        });
+        fit::pixels_of(&render::develop_preview(source, &recipe))
+    }
+
+    fn zone_share(weights: &[f32]) -> f32 {
+        weights.iter().sum::<f32>() / weights.len().max(1) as f32
+    }
+
+    /// A1 (2026-09-10). The soft family charges its own transitions now, and
+    /// this fixture is the shape that forced it: a two-to-three pixel
+    /// segmentation feather over featureless haze, where the scalar ceiling
+    /// let the shrink park a three-code seam and call it inside budget.
+    #[test]
+    fn a_narrow_feather_over_haze_is_charged_against_its_own_flat_context() {
+        let (source, _, weights, reference, candidate, path, mut report) =
+            hazy_feather("soft-charge-haze", 3.0, 0.30, None, false);
+        let measured = hazy_rim(&reference, &candidate, &weights);
+        assert!(measured.transitions > 0, "premise: the feather must be read: {measured:?}");
+        assert!(
+            measured.charged >= measured.rim,
+            "the charge may never weaken a reading: {measured:?}"
+        );
+        let rate = ZONE_BOUNDARY_RIM_MAX / BOUNDARY_STEP_FLOOR;
+        assert!(
+            (measured.charged / measured.rim - rate).abs() <= 0.01,
+            "a featureless neighbourhood earns the floor and nothing more, so every transition \
+             pays the whole ceiling/floor exchange of {rate:.2}x: {measured:?}"
+        );
+        let verdict = enforce_boundary_gate(
+            &source,
+            &mut report,
+            &weights,
+            &[zone_share(&weights)],
+            0,
+            &reference,
+            candidate,
+        );
+        let BoundaryGateResult::Kept { k, after, .. } = verdict else {
+            panic!("a shrinkable feather was dropped: {}", report.recipe.rationale);
+        };
+        assert!((0.0..1.0).contains(&k), "the dose must really shrink: k={k}");
+        assert!(after.gated() <= ZONE_BOUNDARY_RIM_MAX, "the kept reading: {after:?}");
+        assert!(
+            after.rim <= BOUNDARY_STEP_FLOOR + 1e-6,
+            "on a flat neighbourhood every budget is the floor, so the kept seam is ONE code \
+             instead of the three the scalar ceiling allowed: {after:?}"
+        );
+        // The scalar rule, reproduced first-party rather than kept as a second
+        // copy of the old code: at twice the kept dose the RAW rim is still
+        // inside the old budget — that is the shrink the gate used to hand
+        // back — while the charged reading is over the ceiling.
+        let doubled = dose(&source, &path, 0.30 * (2.0 * k).min(1.0));
+        let old_rule = hazy_rim(&reference, &doubled, &weights);
+        assert!(
+            old_rule.rim <= ZONE_BOUNDARY_RIM_MAX,
+            "premise: the raw-rim rule would have kept twice this dose: {old_rule:?}"
+        );
+        assert!(
+            old_rule.charged > ZONE_BOUNDARY_RIM_MAX,
+            "and the charged rule refuses it: {old_rule:?}"
+        );
+        path.remove();
+    }
+
+    /// A2: the control arm. The charge is contextual, not a tightening — put
+    /// a real luma step under the same feather and the reading is the raw one
+    /// BIT FOR BIT, which is the scalar rule's own arithmetic.
+    #[test]
+    fn a_hard_scene_edge_under_the_feather_saturates_the_budget_and_charges_nothing() {
+        let (_, _, weights, reference, candidate, path, _) =
+            hazy_feather("soft-charge-scene-edge", 3.0, 0.30, None, true);
+        let measured = hazy_rim(&reference, &candidate, &weights);
+        assert!(measured.transitions > 0, "premise: the feather must be read: {measured:?}");
+        assert_eq!(
+            (measured.charged.to_bits(), measured.colour_charged.to_bits()),
+            (measured.rim.to_bits(), measured.colour.to_bits()),
+            "a 30-code scene step across the band saturates the ceiling in both coordinates, \
+             so both readings are the raw ones: {measured:?}"
+        );
+        path.remove();
+    }
+
+    /// B then A, the order the producer runs them in. Widening the feather
+    /// first gives the ramp back its slope credit, so the SAME dose is charged
+    /// almost nothing and the shared shrink lands where the raw rim alone
+    /// asked instead of a third of the way there.
+    ///
+    /// What this arm can and cannot claim is worth stating, because the
+    /// instrument decides it: the transition-band ruler reads the correction's
+    /// SHORTFALL at the 50% contour, which a wider ramp does not reduce — it
+    /// is the ramp's height, not its steepness. What widening buys is the
+    /// slope CREDIT, and only inside the window the budget's own constants
+    /// draw (see [`crate::mask_refine`]'s cap): wide enough to persist past
+    /// two 3-px baselines, narrow enough that `BOUNDARY_STEP_SHAPE` times its
+    /// slope still covers the shortfall. Inside that window the charge nearly
+    /// vanishes, which is what this test pins.
+    #[test]
+    fn widening_the_feather_first_buys_back_the_charge_the_budget_takes() {
+        let (source, mask, weights, reference, candidate, narrow_path, mut narrow) =
+            hazy_feather("soft-charge-narrow", 3.0, 0.30, None, false);
+        let narrow_reading = hazy_rim(&reference, &candidate, &weights);
+        let BoundaryGateResult::Kept { k: narrow_k, .. } = enforce_boundary_gate(
+            &source,
+            &mut narrow,
+            &weights,
+            &[zone_share(&weights)],
+            0,
+            &reference,
+            candidate,
+        ) else {
+            panic!("the narrow arm was dropped: {}", narrow.recipe.rationale);
+        };
+        narrow_path.remove();
+
+        let crate::mask_refine::WidenOutcome::Widened { mask: widened, reading } =
+            crate::mask_refine::widen_smooth_feather(&source, &mask)
+        else {
+            panic!("featureless haze must be widened, not abstained on");
+        };
+        assert!(
+            reading.widened_share >= 0.99,
+            "the whole contour of this fixture is haze: {reading:?}"
+        );
+        let (_, _, wide_weights, wide_reference, wide_candidate, wide_path, mut wide) =
+            hazy_arm("soft-charge-widened", source.clone(), widened, 0.30, None);
+        let measured = hazy_rim(&wide_reference, &wide_candidate, &wide_weights);
+        assert!(
+            measured.charged <= 1.25 * measured.rim,
+            "a ramp that persists past two baselines earns nearly its whole budget back, \
+             against the narrow arm's {:.2}x: {measured:?}",
+            narrow_reading.charged / narrow_reading.rim
+        );
+        let verdict = enforce_boundary_gate(
+            &source,
+            &mut wide,
+            &wide_weights,
+            &[zone_share(&wide_weights)],
+            0,
+            &wide_reference,
+            wide_candidate,
+        );
+        let BoundaryGateResult::Kept { k: wide_k, after, .. } = verdict else {
+            panic!("the widened arm was dropped: {}", wide.recipe.rationale);
+        };
+        // Printed, like BOUNDARY_CALIBRATION, so the numbers this argument
+        // rests on are readable from a test run instead of a changelog.
+        eprintln!(
+            "FEATHER_WIDENING narrow: rim={:.4} charged={:.4} k={:.3} | \
+             widened: rim={:.4} charged={:.4} k={:.3} kept={:.4}",
+            narrow_reading.rim,
+            narrow_reading.charged,
+            narrow_k,
+            measured.rim,
+            measured.charged,
+            wide_k,
+            after.gated(),
+        );
+        assert!(after.gated() <= ZONE_BOUNDARY_RIM_MAX, "the kept reading: {after:?}");
+        assert!(
+            wide_k > 2.0 * narrow_k,
+            "widening must hand back most of the ceiling/floor exchange the charge took: \
+             k={wide_k:.4} against the narrow arm's {narrow_k:.4}"
+        );
+        wide_path.remove();
+    }
+
+    /// The colour ruler, on the arrangement a luma-only one cannot see: gains
+    /// normalised to leave luma601 where it was. Without the per-channel
+    /// difference in differences this zone reads as no seam at all.
+    #[test]
+    fn a_luma_preserving_colour_zone_is_a_seam_the_luma_ruler_cannot_see() {
+        let (source, _, weights, reference, candidate, path, mut report) = hazy_feather(
+            "soft-colour-seam",
+            3.0,
+            0.0,
+            Some([1.205, 0.964, 0.723]),
+            false,
+        );
+        let measured = hazy_rim(&reference, &candidate, &weights);
+        assert!(measured.transitions > 0, "premise: the feather must be read: {measured:?}");
+        assert!(
+            measured.rim < BOUNDARY_STEP_FLOOR,
+            "premise: these gains move luma601 by less than one code: {measured:?}"
+        );
+        assert!(
+            measured.charged <= ZONE_BOUNDARY_RIM_MAX,
+            "premise: the luma gate alone would keep this zone whole: {measured:?}"
+        );
+        assert!(
+            measured.colour > 4.0 * measured.rim,
+            "the channels moved where luma did not: {measured:?}"
+        );
+        assert!(
+            measured.colour_charged > ZONE_BOUNDARY_RIM_MAX,
+            "and the colour gate must refuse the halo: {measured:?}"
+        );
+        let verdict = enforce_boundary_gate(
+            &source,
+            &mut report,
+            &weights,
+            &[zone_share(&weights)],
+            0,
+            &reference,
+            candidate,
+        );
+        let BoundaryGateResult::Kept { k, after, .. } = verdict else {
+            panic!("a shrinkable colour seam was dropped: {}", report.recipe.rationale);
+        };
+        assert!(k < 1.0, "the gate must shrink on the colour reading alone: k={k}");
+        assert!(after.gated() <= ZONE_BOUNDARY_RIM_MAX, "{after:?}");
+        path.remove();
+    }
+
+    /// The regression guard the colour ruler needs: on a NEUTRAL frame under
+    /// a pure exposure dial the per-channel reading is the luma reading, so
+    /// the second coordinate cannot have moved any verdict that was decided
+    /// on a grey fixture.
+    #[test]
+    fn a_pure_exposure_zone_reads_the_same_in_colour_as_in_luma() {
+        let (_, _, weights, reference, candidate, path, _) =
+            hazy_feather("soft-colour-neutral", 3.0, 0.30, None, false);
+        let measured = hazy_rim(&reference, &candidate, &weights);
+        assert!(
+            (measured.colour - measured.rim).abs() <= 1e-6
+                && (measured.colour_charged - measured.charged).abs() <= 1e-6,
+            "R = G = B makes the two coordinates one reading: {measured:?}"
         );
         path.remove();
     }
@@ -7695,7 +8499,7 @@ mod tests {
             let multi_path = crate::store::OwnedRaster::scratch(dir.join("multi.png"));
             let (sm, tm) = segment_both(&src, &tgt, &seg, &legacy_path)
                 .unwrap_or_else(|e| panic!("{tag}: single-class bridge: {e:#}"));
-            let (regions, rasters, (ms, mt), _refinements) =
+            let (regions, rasters, (ms, mt), _refinements, _widenings) =
                 segment_multiclass_both(&src, &tgt, &seg, &multi_path, 4)
                     .unwrap_or_else(|e| panic!("{tag}: multi-class bridge: {e:#}"));
             assert_eq!(sm.dimensions(), (ew, eh), "{tag}: single-class input sizing");
