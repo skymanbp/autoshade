@@ -243,13 +243,19 @@ pub(crate) fn ai_xref(lang: Lang, tip: &str) -> String {
     format!("{tip}\n\n{}", tr(lang, "More AI features are in the AI area at the top of this panel"))
 }
 
-/// Fold-state override for the two collapsibles that hide a WIDTH-PINNED row
-/// (the Reimagine prompt+button row and the Generative Fill prompt): `None` in
-/// a real run — the user's own fold state — and `Some(true)` under `cfg(test)`,
-/// because a headless frame never clicks a header and an unopened fold makes a
-/// width assertion silently vacuous instead of red. The width tests also call
-/// egui's own `set_everything_is_visible`; this covers the panels a test drives
-/// without it.
+/// Fold-state override for every collapsible whose body a headless test has to
+/// read: `None` in a real run — the user's own fold state — and `Some(true)`
+/// under `cfg(test)`, because a headless frame never clicks a header and an
+/// unopened fold makes an assertion silently vacuous instead of red. The width
+/// tests also call egui's own `set_everything_is_visible`; this covers the
+/// panels a test drives without it.
+///
+/// It started as the override for the two folds hiding a WIDTH-PINNED row (the
+/// Reimagine prompt+button row and the Generative Fill prompt). R30 split the
+/// AI panel into four folds of its own, and each one carries rows a test
+/// asserts on — the Direction prompt's #14a ceiling, the library ladder's
+/// gates, the reverse-fit row whose fourth widget once widened the panel — so
+/// all four take the same treatment.
 pub(crate) fn fold_open_in_tests() -> Option<bool> {
     cfg!(test).then_some(true)
 }

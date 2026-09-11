@@ -405,6 +405,21 @@ pub(crate) struct AutoShadeApp {
     /// is there or not.
     #[cfg(test)]
     pub(crate) adherence_gate_enabled: Option<bool>,
+    /// Test seam (R30): was the REFERENCE-LIBRARIES sub-area's body enabled
+    /// this frame? At Style 0 the pipeline opens no library at all
+    /// (`(req.style > 0.0).then(load_effective)`), so the whole sub-area is
+    /// drawn disabled — and nothing but this can tell a rebuilt
+    /// `add_enabled_ui(self.style_strength > 0.0, …)` from a comment about one.
+    #[cfg(test)]
+    pub(crate) ai_library_gate_enabled: Option<bool>,
+    /// Test seam (R30): was 「Use look library」 usable this frame? The look
+    /// library is retrieved ONLY through the SigLIP 2 query vector, so the
+    /// switch is live only when there are finished photos AND an embedding to
+    /// find them with — two halves, and a rendered tick says nothing about
+    /// either. Its warn label is readable from the drawn text; its
+    /// ENABLEMENT is not.
+    #[cfg(test)]
+    pub(crate) looks_switch_enabled: Option<bool>,
     // --- batch recipe copy / paste ---
     pub(crate) multi_sel: HashSet<usize>,             // Ctrl+click gallery multi-selection
     pub(crate) copied: Option<EditRecipe>,            // the recipe "clipboard" (in-app only)
@@ -1718,6 +1733,10 @@ impl Default for AutoShadeApp {
             ai_gate_enabled: None,
             #[cfg(test)]
             adherence_gate_enabled: None,
+            #[cfg(test)]
+            ai_library_gate_enabled: None,
+            #[cfg(test)]
+            looks_switch_enabled: None,
             multi_sel: HashSet::new(),
             copied: None,
             copied_from: None,

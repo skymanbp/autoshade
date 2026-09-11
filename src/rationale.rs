@@ -820,9 +820,9 @@ pub mod keys {
     /// only this module uses would draw as a tofu box there.)
     pub const STYLE_NO_REFERENCE: &str =
         " [no style reference was available for this photo — the Style slider ({pct}%) had \
-         no effect on this develop. Build your style library in the AI panel → Style \
-         reference library: a folder of your own RAWs with their Lightroom .xmp sidecars \
-         beside them]";
+         no effect on this develop. Build your style library in the AI panel → Reference \
+         libraries → My Lightroom edits library: a folder of your own RAWs with their \
+         Lightroom .xmp sidecars beside them]";
     /// Which past shots this develop actually leaned on (R23-2 transparency).
     pub const STYLE_NEIGHBOURS: &str =
         " [style reference: your own edits on {files} — the {n} most similar shots in your \

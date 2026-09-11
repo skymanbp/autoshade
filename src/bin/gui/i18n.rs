@@ -257,7 +257,7 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
         " [该提案超出了配方上限——已丢弃 {dropped}]"),
     // ── Settings ────────────────────────────────────────────────────────────
     ("Language", "语言"),
-    ("Reverse-fit", "反推 / Reverse-fit"),
+    ("Reverse-fit · local; AI review is paid", "反推 / Reverse-fit · 本地；AI 打分付费"),
     ("Zoned fit (sky)", "分区反推：天空 / Zoned fit (sky)"),
     ("Up to four semantic regions", "最多四个语义区域 / Up to four semantic regions"),
     ("Opt in to semantic regions beyond the historical sky/land pass; this costs one OneFormer pass per frame and may take longer.", "选择历史天空/地面流程之外的语义区域；每次 OneFormer 推理，耗时可能更长。"),
@@ -335,7 +335,7 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
 
     // ── Retouch (reimagine / fill / heal / clone) ─────────────────────────────
     ("Retouch", "修饰 · Retouch"),
-    ("Reimagine (whole image)", "整图 AI 生成 · Reimagine"),
+    ("Reimagine (whole image) · paid API", "整图 AI 生成 · Reimagine · 付费 API"),
     ("✨ Generate image", "✨ AI 生成出片"),
     ("Repaint the whole image with gpt-image, styled by the prompt on the left (empty = a neutral finished develop). Repainted pixels = not faithful; the result is added as an 「AI generated」 variant at the bottom and switched to, so you can keep tweaking without reverting. Models that accept any size (gpt-image-2) reach ~8MP, others ~1.5K. Needs an image API (OPENAI_API_KEY, or the OAuth image bridge in Settings).",
         "用 gpt-image 直接重绘整张图（风格取左侧提示词；留空=中性成片方向）。重绘像素=非保真；生成后自动加入底部「AI 生成」变体并切过去，可继续微调不会变回去。支持任意尺寸的模型（gpt-image-2）可达 ~8MP，其余 ~1.5K。需图像 API（OPENAI_API_KEY，或设置里的 OAuth 图像桥）。"),
@@ -821,11 +821,14 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     ("How hard the AI pushes the grade — a different axis from Style: Style asks how close to your own past edits, Strength asks how committed the result should be. 50% is where every AI guardrail NUMBER was calibrated: the ±50/±35 pair and the soft caps are bit-for-bit the ones earlier releases used, but the restraint WORDING those releases sent is now the 40%-and-below prose, so no single setting brings an old release back whole. From 41% up the AI must decide EACH colour control explicitly instead of leaving it neutral by default; the default 65% (double-click to reset) leans a little further than the calibration point. Above 70% it is additionally told to use the controls it wants at a strength a viewer can see, and the visual review may then run up to 3 rounds — the same ceiling 「Deep thinking」 raises it to, and either one ALONE is enough to make the worst case 17 API calls (10 carrying images). The clipping and white-point safeguards never widen with it.",
         "AI 下手有多重 —— 与「风格」是两条不同的轴：风格问「有多接近你过往的习惯」，强度问「出手多重」。50% 是所有 AI 限制参数的标定点：±50/±35 这一对与配方的两对上限，与此前各版本逐位相同；但那些版本发出的克制用词，如今属于不高于 40% 的那一档，所以没有任何单一档位能把旧版完整带回来。41% 起，AI 要对每一个颜色控件逐一表态，不能默认留白；默认 65%（双击复位到这里）比标定点再进一点。高于 70% 时还会要求它把想用的控件用到观者可见的力度，并把视觉复查上限提到 3 轮 —— 与勾选「Deep thinking」相同的上限，两者只要占其一，最多就是 17 次 API 调用（其中 10 次带图）。高光与黑位的安全边界永不随强度放宽。"),
 
-    // ── AI panel · style reference library (R23-2, feedback #6) ──────────────
+    // ── AI panel · reference libraries (R23-2 feedback #6; R30 ladder) ───────
     ("⚠ no library", "⚠ 未建库"),
-    ("This slider does nothing until a style reference library is built — the section just below builds one.",
-        "在建好风格参考库之前，这个滑杆不起作用——下面那一节就是用来建库的。"),
-    ("Style reference library", "风格参考库"),
+    ("This slider does nothing until a style reference library is built — the 「Reference libraries」 section below builds one.",
+        "在建好风格参考库之前，这个滑杆不起作用——下面的「参考库」一节就是用来建库的。"),
+    ("Reference libraries · local", "参考库 · 本地"),
+    ("Style is at 0%: the analysis reads no library", "风格为 0%：AI 分析不读任何库"),
+    ("My Lightroom edits library (RAW + .xmp)", "你的 Lightroom 编辑库（RAW + .xmp）"),
+    ("Retrieval engine", "检索引擎"),
     ("an unrecorded folder", "未记录的文件夹"),
     ("{n} finished photos · from {path} · built {age} ago", "{n} 张成片 · 来自 {path} · {age} 前建库"),
     ("Library file: {path}", "库文件：{path}"),
@@ -2011,10 +2014,10 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
       develop; rebuild it with: autoshade style-index <folder>]",
         " [风格参考不可用（{e}）——本次显影中风格滑杆未起作用；用 autoshade style-index <文件夹> 重建]"),
     (" [no style reference was available for this photo — the Style slider ({pct}%) had \
-      no effect on this develop. Build your style library in the AI panel → Style \
-      reference library: a folder of your own RAWs with their Lightroom .xmp sidecars \
-      beside them]",
-        " [本片没有可用的风格参考——风格滑杆（{pct}%）在这次显影中未起作用。请在 AI 面板 → 风格参考库里建库：一个放着你自己的 RAW、每个旁边带 Lightroom .xmp 的文件夹]"),
+      no effect on this develop. Build your style library in the AI panel → Reference \
+      libraries → My Lightroom edits library: a folder of your own RAWs with their \
+      Lightroom .xmp sidecars beside them]",
+        " [本片没有可用的风格参考——风格滑杆（{pct}%）在这次显影中未起作用。请在 AI 面板 → 参考库 → 你的 Lightroom 编辑库里建库：一个放着你自己的 RAW、每个旁边带 Lightroom .xmp 的文件夹]"),
     (" [style reference: your own edits on {files} — the {n} most similar shots in your \
       style library]",
         " [风格参考：你自己对 {files} 的编辑——风格参考库里最接近的 {n} 张]"),
@@ -2099,7 +2102,7 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
       it is a different frame — closer to the target in luma, and differing \
       in chroma, because the camera curve is matched on luma alone.",
         " 上述残差是在本相机的嵌入渲染上测得的，那正是拟合与复查共同依据的画面。交付渲染还会额外应用这张照片自己的校准（{what}），因此那是另一幅画面——在亮度上更接近目标，在色度上则有所不同，因为相机曲线只按亮度匹配。"),
-    ("Analysis", "分析"),
+    ("Analysis · paid API", "分析 · 付费 API"),
     ("Pixel-level AI tools stay at their tools: select subject / select sky in Local Masks, denoise in Detail, heal and fill in Retouch.",
         "像素级 AI 工具就近放置：选主体 / 选天空在局部蒙版，降噪在细节，修复填充在修饰。"),
     ("More AI features are in the AI area at the top of this panel",
@@ -2232,8 +2235,11 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
         // all five font subsets for one glyph. The path in {font} says which
         // font it is far better than the adjective would.
         "字体已找到但未加载——{font}。用到这类文字的文件名可能显示为方块。"),
-    ("Look library", "外观库"),
+    ("Finished-photo look library (JPEG)", "成片外观库（JPEG）"),
     ("Use look library", "使用外观库"),
+    ("Turn on the SigLIP 2 look embedding first — the look library is retrieved through it",
+        "先打开 SigLIP 2 外观嵌入——外观库要靠它检索"),
+    ("ticked, but unreachable: SigLIP 2 is off", "已勾选，但读不到：SigLIP 2 未开启"),
     ("Pick look folder…", "选择成片文件夹…"),
     ("Build look library", "构建外观库"),
     ("Use SigLIP 2 look embedding (downloads 1.5 GB once; index builds and analyses take longer)", "使用 SigLIP 2 外观嵌入（首次下载 1.5 GB；建库与分析都会变慢）"),

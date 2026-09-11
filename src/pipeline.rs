@@ -6868,7 +6868,7 @@ mod tests {
         let text = render_one(&a);
         assert!(text.contains("65%"), "the slider position the user set: {text}");
         assert!(
-            text.contains("Style reference library"),
+            text.contains("My Lightroom edits library"),
             "and where to fix it, in the GUI the user is looking at: {text}"
         );
 

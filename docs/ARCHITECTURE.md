@@ -1993,9 +1993,13 @@ which is the control that carries the decision. Every other row is untouched.
 **Three surfaces, one loader (R23-2).** The library
 ([`src/style.rs`](../src/style.rs)) is built from RAW+`.xmp` pairs by
 `autoshade style-index <dir>`, by the web info panel, and — since R23-2 — by the
-GUI's **AI panel › Style reference library** (folder picker → background worker
-with per-photo progress; no cancel, because `StyleIndex::build` has no
-cancellation checkpoints, so the button simply stays disabled until it lands).
+GUI's **AI panel › Reference libraries › My Lightroom edits library** (folder
+picker → background worker with per-photo progress; no cancel, because
+`StyleIndex::build` has no cancellation checkpoints, so the button simply stays
+disabled until it lands). R30 gave that entry its own sub-area and gated it:
+the whole 「Reference libraries」 fold is drawn disabled while the Style slider
+sits at 0, because `(req.style > 0.0).then(load_effective)` in `pipeline.rs`
+opens no index at that setting.
 The index always publishes to the per-user store (`store::style_index_path`);
 the legacy cwd-relative `out/style-index.json` stays readable. Reading it is
 `style::load_effective` / `style::index_info` — ONE central-then-legacy walk

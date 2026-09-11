@@ -406,8 +406,13 @@ settings file can supply them.
   `--deep` permits additional bounded rounds. Accepted output remains a normal
   recipe and XMP.
 - **Style match/read:** build the RAW+XMP style reference library with the GUI
-  or `style-index`, and optionally build a separate finished-photo look library
-  with `style-index --looks`. The Style control retrieves similar prior edits
+  (**AI › Reference libraries › My Lightroom edits library**) or `style-index`,
+  and optionally build a separate finished-photo look library with
+  `style-index --looks` (**AI › Reference libraries › Finished-photo look
+  library**). Both libraries are read only while the Style control is above 0,
+  and the look library is retrieved through the SigLIP 2 embedding alone — so
+  its **Use look library** switch stays disabled until **Use SigLIP 2 look
+  embedding**, one rung above it, is on. The Style control retrieves similar prior edits
   and pulls the proposal toward them with `style_pull` (0.18 at the shipped
   Style 0.3, full at Style 1.0 — at 1.0 a control that has a target ends ON it).
   It pulls the twelve global sliders, the 8-band mixer's saturation and

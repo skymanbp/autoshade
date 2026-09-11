@@ -4,10 +4,10 @@
 //! verdict + Direction + Analyze/Refine + Style lived at the top of Develop,
 //! whole-image Reimagine and reverse-fit sat in the middle of Retouch (between
 //! the brush tools), and reverse-fit's own 「Zoned fit (sky)」 switch was in
-//! Settings, two panels away from the button it changes. One AI area, three
-//! sub-areas — analysis / whole-image generation / reverse-fit — is the whole
-//! idea; the panel sits at the TOP of the side panel because it is the headline
-//! feature, above the sliders it writes into.
+//! Settings, two panels away from the button it changes. One AI area, four
+//! sub-areas — analysis / reference libraries / whole-image generation /
+//! reverse-fit — is the whole idea; the panel sits at the TOP of the side
+//! panel because it is the headline feature, above the sliders it writes into.
 //!
 //! What deliberately did NOT move: the PIXEL-level AI verbs (AI select
 //! subject / sky in Local Masks, AI Denoise now in Detail, AI heal in Retouch,
@@ -24,15 +24,26 @@
 //! feedback #13), which sits under both dials because it reads them: the visual
 //! judge's round budget comes off the Strength band directly above it.
 //!
-//! R23-2 landed the third of those: [`AutoShadeApp::ai_style_library`] — the
-//! desktop app's FIRST production-side entry for the style reference library
-//! (building existed only on the CLI and in the web panel, so the Style slider
-//! shipped permanently inert for anyone who double-clicks the exe), plus the
-//! transparency half of the same feedback item: which library, how big, how
-//! old, and which shots the last analysis actually leaned on. It sits INSIDE
-//! `ai_analysis`, directly under the slider it explains, rather than in a
-//! fold or in Settings — the status IS half the feature.
-
+//! R30 cut the panel along the line the USER PAYS ON, and made one hidden
+//! dependency visible. Each sub-area is now its own `CollapsingHeader` whose
+//! title carries a COST TAG (`· paid API` / `· local`), and the library
+//! controls — which spend local disk, CPU and one download, never an API
+//! call — left `ai_analysis` for a sub-area of their own
+//! ([`AutoShadeApp::ai_libraries`]), drawn as the three-rung LADDER they
+//! always were:
+//!
+//!   * a library is read at all only while Style > 0 (`pipeline.rs`'s
+//!     `(req.style > 0.0).then(load_effective)`);
+//!   * the LOOK library is retrieved ONLY through the SigLIP 2 query vector,
+//!     which `pipeline.rs` builds as `req.style > 0.0 && req.embed.on()` and
+//!     without which `StyleIndex::retrieve_looks_with_terms` returns an empty
+//!     list;
+//!   * and `use_looks` defaults to true while `style_embed` defaults to false
+//!     (`model.rs`), so a fresh install shipped a ticked look-library switch
+//!     that provably read nothing, disclosed only by a rationale note AFTER a
+//!     paid analysis (`pipeline.rs`'s `looks_unreachable`).
+//!
+//! The three gates below (a)/(b)/(c) are those three facts, drawn.
 use crate::*;
 
 fn style_age_hours(age: Option<std::time::Duration>) -> String {
@@ -97,6 +108,7 @@ impl AutoShadeApp {
                         self.ai_gate_enabled = Some(ui.is_enabled());
                     }
                     self.ai_analysis(ui);
+                    self.ai_libraries(ui);
                     self.ai_generate(ui);
                     self.ai_reverse_fit(ui);
                     // Where the AI verbs that did NOT move to this panel live.
@@ -116,230 +128,307 @@ impl AutoShadeApp {
         ui.add_space(SPACE_MD); // fence to the Develop heading below
     }
 
-    /// Sub-area 1 — ANALYSIS: the verdict and rationale one Analyze run wrote,
-    /// the Direction prompt it reads, its two verbs, and the personal-style
-    /// strength. Body migrated verbatim from `develop::dev_ai` (R22 #4).
+    /// Sub-area ① — ANALYSIS (paid API): the verdict and rationale one Analyze
+    /// run wrote, the Direction prompt it reads, its two verbs, and the two
+    /// taste dials that steer them. Body migrated verbatim from
+    /// `develop::dev_ai` (R22 #4); R30 moved the LIBRARY half out of it into
+    /// [`AutoShadeApp::ai_libraries`], so this fold is now exactly the controls
+    /// that spend money — which is what its 「· paid API」 tag claims while it
+    /// is collapsed.
+    ///
+    /// Default OPEN: it is the panel's first read.
     fn ai_analysis(&mut self, ui: &mut egui::Ui) {
         let lang = self.lang;
-        group_caption(ui, tr(lang, "Analysis"));
-        if let Some((d, reasons)) = &self.verdict {
-            // Accept reads calm; anything else (Revise/Reject)
-            // gets the warn colour so it can't be skimmed past.
-            // Matched on the TYPED decision, never its rendered
-            // spelling — the old `starts_with("Accept")` sniff
-            // would have flipped every verdict to warn the moment
-            // the word was translated.
-            let col = if matches!(d, autoshade::advisor::Decision::Accept) {
-                ui.visuals().strong_text_color()
-            } else {
-                ui.visuals().warn_fg_color
-            };
-            let text = trf(
-                lang,
-                "{decision} — {reasons}",
-                &[
-                    ("decision", tr(lang, autoshade::advisor::decision_key(d))),
-                    ("reasons", &reasons.join("; ")),
-                ],
-            );
-            ui.label(egui::RichText::new(text).color(col));
-        }
-        // The deterministic tail renders LOCALIZED when its typed
-        // notes ride along and still match the string's suffix
-        // (L12#2B); any mismatch — a truncation, a disk-restored
-        // develop with no notes — shows the raw English instead
-        // (silent-English fallback, user decision 2026-08-11).
-        let localized = (!self.rationale_notes.is_empty())
-            .then(|| {
-                let det: String = self
-                    .rationale_notes
-                    .iter()
-                    .map(autoshade::rationale::render_one)
-                    .collect();
-                self.rationale.strip_suffix(det.as_str()).map(|prose| {
-                    let mut s = String::from(prose);
-                    for n in &self.rationale_notes {
-                        let args: Vec<(&str, &str)> =
-                            n.args.iter().map(|(k, v)| (*k, v.as_str())).collect();
-                        s.push_str(&trf(lang, n.key, &args));
-                    }
-                    s
-                })
-            })
-            .flatten();
-        let shown = localized.as_deref().unwrap_or(&self.rationale);
-        if !shown.is_empty() {
-            ui.label(
-                egui::RichText::new(format!("“{shown}”"))
-                    .italics()
-                    .weak(),
-            );
-        }
-        ui.label(tr(lang, "Direction"))
-            .on_hover_text(tr(lang, "Free-text direction for AI Analyze — e.g. warmer and moodier"));
-        // #14a: was `desired_width(f32::INFINITY)` — a full-panel ribbon on a
-        // wide side panel. `prompt_field` caps it, widens while focused and
-        // shows the whole text on hover.
-        let _field = prompt_field(
-            ui,
-            &mut self.guidance,
-            tr(lang, "e.g. warmer and moodier, lift the shadows"),
-        );
-        #[cfg(test)]
-        {
-            self.prompt_rects.push(_field.rect);
-        }
-        // The prompt's triggers sit DIRECTLY under it (user feedback:
-        // the toolbar Analyze button sat nowhere near the text it
-        // consumes). TWO explicit verbs replace the old pre-armed
-        // 「Refine」 checkbox — a mode you had to remember to tick
-        // (and untick) before clicking is exactly the kind of hidden
-        // state a button-per-intent design removes.
-        ui.horizontal_wrapped(|ui| {
-            // `analyze_inflight` too, or ✕ leaves these ENABLED while
-            // `start_analyze` silently refuses (it must refuse — the
-            // cancelled call is still on the wire and still billing).
-            // A button that looks live and does nothing, for up to the
-            // 600 s stall budget, with the status line saying the app
-            // is free, is worse than one that says why it is greyed.
-            let ready = self.src_path.is_some() && !self.busy && !self.analyze_inflight;
-            let waiting = self.analyze_inflight && !self.busy;
-            let why = |ui: egui::Response| {
-                if waiting {
-                    ui.on_hover_text(tr(
-                        lang,
-                        "the cancelled AI call is still running (and still billed) — this re-arms when it finishes or times out",
-                    ))
+        egui::CollapsingHeader::new(tr(lang, "Analysis · paid API"))
+            .id_salt("sec_ai_analysis")
+            .default_open(true)
+            // Headless layout tests must see these rows — a test frame never
+            // clicks a header, and the Direction prompt carries the #14a width
+            // rule. Only `cfg(test)` forces it; a real run keeps the user's
+            // own fold state.
+            .open(fold_open_in_tests())
+            .show(ui, |ui| {
+            if let Some((d, reasons)) = &self.verdict {
+                // Accept reads calm; anything else (Revise/Reject)
+                // gets the warn colour so it can't be skimmed past.
+                // Matched on the TYPED decision, never its rendered
+                // spelling — the old `starts_with("Accept")` sniff
+                // would have flipped every verdict to warn the moment
+                // the word was translated.
+                let col = if matches!(d, autoshade::advisor::Decision::Accept) {
+                    ui.visuals().strong_text_color()
                 } else {
-                    ui
-                }
-            };
-            if why(ui
-                .add_enabled(ready, egui::Button::new(tr(lang, "AI Analyze")))
-                .on_hover_text(tr(lang,
-                    "AI proposes a recipe from scratch (GPT proposal + validation + a visual \
-                     review: the result is RENDERED and judged by the vision model, which may \
-                     buy one guided revision), written into the sliders — undoable. Uses the \
-                     Direction above; Style and Strength steer it. COST, worst case: 11 API \
-                     calls, 6 of them carrying images (8 high-detail frames). Ticking 「Deep \
-                     thinking」 below OR pushing Strength above 70% raises that ceiling — \
-                     either one alone does it; the Deep thinking tooltip has the numbers.",
-                )))
-                .clicked()
-            {
-                self.start_analyze(false);
+                    ui.visuals().warn_fg_color
+                };
+                let text = trf(
+                    lang,
+                    "{decision} — {reasons}",
+                    &[
+                        ("decision", tr(lang, autoshade::advisor::decision_key(d))),
+                        ("reasons", &reasons.join("; ")),
+                    ],
+                );
+                ui.label(egui::RichText::new(text).color(col));
             }
-            // Refining a neutral edit IS analyzing — disable the verb
-            // until there is an edit to refine.
-            let has_edit = ready && !self.recipe.is_noop();
-            if why(ui
-                .add_enabled(has_edit, egui::Button::new(tr(lang, "AI Refine")))
-                .on_hover_text(tr(lang,
-                    "Adjust the CURRENT edit instead of proposing from scratch — your sliders are \
-                     the starting point (enabled once the edit is non-neutral).",
-                )))
-                .clicked()
-            {
-                self.start_analyze(true);
-            }
-        });
-        // The two TASTE DIALS get their own lines, below the verbs (R23-3).
-        //
-        // They used to share the verbs' row, with a note claiming the wrap kept
-        // Style on-panel at narrow widths. It did not: `egui::Slider` lays its
-        // value box, track and LABEL out in a nested `ui.horizontal`, and a
-        // nested row never wraps in a wrapping parent — it overflows and is
-        // clipped. At the default 320 px side panel the row drew only Style's
-        // value ("30"), with the word "Style" itself off-panel, and a headless
-        // frame confirms it. Adding a second dial to that row hid it outright.
-        // One dial per line is also what every other slider in this app does.
-        ui.horizontal_wrapped(|ui| {
-            // #16: the ONE slider in the app that never went through the
-            // panel's own helper — a bare `egui::Slider` with `show_value(false)`
-            // and a hand-rolled "30%" label beside it, so it alone had no
-            // double-click / right-click reset and no hover ↑/↓ nudge, and its
-            // 0..1 storage was shown on a scale nothing else in the UI uses.
-            // `slider_pct_hinted` puts it on the same 0..100 track as every
-            // other stored fraction (Amount, feathers, tolerance), resets to the
-            // shared default, and keeps the explanation as the tooltip's first
-            // line instead of on a separate label.
-            Self::slider_pct_hinted(
-                ui,
-                lang,
-                tr(lang, "Style"),
-                &mut self.style_strength,
-                1.0,
-                STYLE_STRENGTH_DEFAULT,
-                tr(lang, "Personal style strength: how far AI proposals lean toward your past XMP editing habits (0 = ignore). With a Direction written above at Adherence over 40%, the direction leads instead and your habits are sent as background only — whatever this dial says."),
-            );
-            // R23-2: a slider that provably cannot do anything must not read as
-            // live. The old one showed 30% and a tooltip about "your past XMP
-            // editing habits" on a fresh install with no library at all — a
-            // control that was permanently inert with nothing saying so. Only
-            // when the status is KNOWN and negative (never while it is still
-            // being read, which would flash a false warning every launch).
-            if matches!(
-                self.style_info.as_ref().map(|i| &i.state),
-                Some(
-                    autoshade::style::StyleIndexState::Absent
-                        | autoshade::style::StyleIndexState::Unusable { .. }
-                )
-            ) {
+            // The deterministic tail renders LOCALIZED when its typed
+            // notes ride along and still match the string's suffix
+            // (L12#2B); any mismatch — a truncation, a disk-restored
+            // develop with no notes — shows the raw English instead
+            // (silent-English fallback, user decision 2026-08-11).
+            let localized = (!self.rationale_notes.is_empty())
+                .then(|| {
+                    let det: String = self
+                        .rationale_notes
+                        .iter()
+                        .map(autoshade::rationale::render_one)
+                        .collect();
+                    self.rationale.strip_suffix(det.as_str()).map(|prose| {
+                        let mut s = String::from(prose);
+                        for n in &self.rationale_notes {
+                            let args: Vec<(&str, &str)> =
+                                n.args.iter().map(|(k, v)| (*k, v.as_str())).collect();
+                            s.push_str(&trf(lang, n.key, &args));
+                        }
+                        s
+                    })
+                })
+                .flatten();
+            let shown = localized.as_deref().unwrap_or(&self.rationale);
+            if !shown.is_empty() {
                 ui.label(
-                    egui::RichText::new(tr(lang, "⚠ no library"))
-                        .color(ui.visuals().warn_fg_color)
-                        .small(),
-                )
-                .on_hover_text(tr(lang,
-                    "This slider does nothing until a style reference library is built — the section just below builds one.",
-                ));
+                    egui::RichText::new(format!("“{shown}”"))
+                        .italics()
+                        .weak(),
+                );
             }
-        });
-        // R23-3 (feedback #5): the SECOND taste axis, directly under the first —
-        // they are a PAIR, and the whole reported problem was that only the style
-        // half existed, so "lean on my habits" was the only dial there was and it
-        // bought MORE restraint. Same helper as Style, so it gets the same 0..100
-        // track, double-click reset and ↑/↓ nudge.
-        Self::slider_pct_hinted(
-            ui,
-            lang,
-            tr(lang, "Strength"),
-            &mut self.grade_strength,
-            1.0,
-            GRADE_STRENGTH_DEFAULT,
-            tr(lang,
-                "How hard the AI pushes the grade — a different axis from Style: Style asks how close to your own past edits, Strength asks how committed the result should be. 50% is where every AI guardrail NUMBER was calibrated: the ±50/±35 pair and the soft caps are bit-for-bit the ones earlier releases used, but the restraint WORDING those releases sent is now the 40%-and-below prose, so no single setting brings an old release back whole. From 41% up the AI must decide EACH colour control explicitly instead of leaving it neutral by default; the default 65% (double-click to reset) leans a little further than the calibration point. Above 70% it is additionally told to use the controls it wants at a strength a viewer can see, and the visual review may then run up to 3 rounds — the same ceiling 「Deep thinking」 raises it to, and either one ALONE is enough to make the worst case 17 API calls (10 carrying images). The clipping and white-point safeguards never widen with it.",
-            ),
-        );
-        let has_direction = !self.guidance.trim().is_empty();
-        ui.add_enabled_ui(has_direction, |ui| {
+            ui.label(tr(lang, "Direction"))
+                .on_hover_text(tr(lang, "Free-text direction for AI Analyze — e.g. warmer and moodier"));
+            // #14a: was `desired_width(f32::INFINITY)` — a full-panel ribbon on a
+            // wide side panel. `prompt_field` caps it, widens while focused and
+            // shows the whole text on hover.
+            let _field = prompt_field(
+                ui,
+                &mut self.guidance,
+                tr(lang, "e.g. warmer and moodier, lift the shadows"),
+            );
             #[cfg(test)]
             {
-                // The gate's own witness (same seam as `ai_gate_enabled`): a
-                // comment cannot keep the wrapper here.
-                self.adherence_gate_enabled = Some(ui.is_enabled());
+                self.prompt_rects.push(_field.rect);
             }
+            // The prompt's triggers sit DIRECTLY under it (user feedback:
+            // the toolbar Analyze button sat nowhere near the text it
+            // consumes). TWO explicit verbs replace the old pre-armed
+            // 「Refine」 checkbox — a mode you had to remember to tick
+            // (and untick) before clicking is exactly the kind of hidden
+            // state a button-per-intent design removes.
+            ui.horizontal_wrapped(|ui| {
+                // `analyze_inflight` too, or ✕ leaves these ENABLED while
+                // `start_analyze` silently refuses (it must refuse — the
+                // cancelled call is still on the wire and still billing).
+                // A button that looks live and does nothing, for up to the
+                // 600 s stall budget, with the status line saying the app
+                // is free, is worse than one that says why it is greyed.
+                let ready = self.src_path.is_some() && !self.busy && !self.analyze_inflight;
+                let waiting = self.analyze_inflight && !self.busy;
+                let why = |ui: egui::Response| {
+                    if waiting {
+                        ui.on_hover_text(tr(
+                            lang,
+                            "the cancelled AI call is still running (and still billed) — this re-arms when it finishes or times out",
+                        ))
+                    } else {
+                        ui
+                    }
+                };
+                if why(ui
+                    .add_enabled(ready, egui::Button::new(tr(lang, "AI Analyze")))
+                    .on_hover_text(tr(lang,
+                        "AI proposes a recipe from scratch (GPT proposal + validation + a visual \
+                         review: the result is RENDERED and judged by the vision model, which may \
+                         buy one guided revision), written into the sliders — undoable. Uses the \
+                         Direction above; Style and Strength steer it. COST, worst case: 11 API \
+                         calls, 6 of them carrying images (8 high-detail frames). Ticking 「Deep \
+                         thinking」 below OR pushing Strength above 70% raises that ceiling — \
+                         either one alone does it; the Deep thinking tooltip has the numbers.",
+                    )))
+                    .clicked()
+                {
+                    self.start_analyze(false);
+                }
+                // Refining a neutral edit IS analyzing — disable the verb
+                // until there is an edit to refine.
+                let has_edit = ready && !self.recipe.is_noop();
+                if why(ui
+                    .add_enabled(has_edit, egui::Button::new(tr(lang, "AI Refine")))
+                    .on_hover_text(tr(lang,
+                        "Adjust the CURRENT edit instead of proposing from scratch — your sliders are \
+                         the starting point (enabled once the edit is non-neutral).",
+                    )))
+                    .clicked()
+                {
+                    self.start_analyze(true);
+                }
+            });
+            // The two TASTE DIALS get their own lines, below the verbs (R23-3).
+            //
+            // They used to share the verbs' row, with a note claiming the wrap kept
+            // Style on-panel at narrow widths. It did not: `egui::Slider` lays its
+            // value box, track and LABEL out in a nested `ui.horizontal`, and a
+            // nested row never wraps in a wrapping parent — it overflows and is
+            // clipped. At the default 320 px side panel the row drew only Style's
+            // value ("30"), with the word "Style" itself off-panel, and a headless
+            // frame confirms it. Adding a second dial to that row hid it outright.
+            // One dial per line is also what every other slider in this app does.
+            ui.horizontal_wrapped(|ui| {
+                // #16: the ONE slider in the app that never went through the
+                // panel's own helper — a bare `egui::Slider` with `show_value(false)`
+                // and a hand-rolled "30%" label beside it, so it alone had no
+                // double-click / right-click reset and no hover ↑/↓ nudge, and its
+                // 0..1 storage was shown on a scale nothing else in the UI uses.
+                // `slider_pct_hinted` puts it on the same 0..100 track as every
+                // other stored fraction (Amount, feathers, tolerance), resets to the
+                // shared default, and keeps the explanation as the tooltip's first
+                // line instead of on a separate label.
+                Self::slider_pct_hinted(
+                    ui,
+                    lang,
+                    tr(lang, "Style"),
+                    &mut self.style_strength,
+                    1.0,
+                    STYLE_STRENGTH_DEFAULT,
+                    tr(lang, "Personal style strength: how far AI proposals lean toward your past XMP editing habits (0 = ignore). With a Direction written above at Adherence over 40%, the direction leads instead and your habits are sent as background only — whatever this dial says."),
+                );
+                // R23-2: a slider that provably cannot do anything must not read as
+                // live. The old one showed 30% and a tooltip about "your past XMP
+                // editing habits" on a fresh install with no library at all — a
+                // control that was permanently inert with nothing saying so. Only
+                // when the status is KNOWN and negative (never while it is still
+                // being read, which would flash a false warning every launch).
+                if matches!(
+                    self.style_info.as_ref().map(|i| &i.state),
+                    Some(
+                        autoshade::style::StyleIndexState::Absent
+                            | autoshade::style::StyleIndexState::Unusable { .. }
+                    )
+                ) {
+                    ui.label(
+                        egui::RichText::new(tr(lang, "⚠ no library"))
+                            .color(ui.visuals().warn_fg_color)
+                            .small(),
+                    )
+                    .on_hover_text(tr(lang,
+                        "This slider does nothing until a style reference library is built — the 「Reference libraries」 section below builds one.",
+                    ));
+                }
+            });
+            // R23-3 (feedback #5): the SECOND taste axis, directly under the first —
+            // they are a PAIR, and the whole reported problem was that only the style
+            // half existed, so "lean on my habits" was the only dial there was and it
+            // bought MORE restraint. Same helper as Style, so it gets the same 0..100
+            // track, double-click reset and ↑/↓ nudge.
             Self::slider_pct_hinted(
                 ui,
                 lang,
-                tr(lang, "Adherence"),
-                &mut self.direction_adherence,
+                tr(lang, "Strength"),
+                &mut self.grade_strength,
                 1.0,
-                autoshade::recipe::DirectionAdherence::DEFAULT,
-                tr(lang, "How closely the AI follows your direction; disabled until Direction has text: <=40% Hint, 40-70% Direct, above 70% Brief. Prompt intent only - it never moves a render limit. Direct and Brief also decide WHO LEADS: your style library becomes background and its distillation pull is skipped, so a direction can take a photo somewhere your past edits never went. Hint leaves the library in the lead."),
+                GRADE_STRENGTH_DEFAULT,
+                tr(lang,
+                    "How hard the AI pushes the grade — a different axis from Style: Style asks how close to your own past edits, Strength asks how committed the result should be. 50% is where every AI guardrail NUMBER was calibrated: the ±50/±35 pair and the soft caps are bit-for-bit the ones earlier releases used, but the restraint WORDING those releases sent is now the 40%-and-below prose, so no single setting brings an old release back whole. From 41% up the AI must decide EACH colour control explicitly instead of leaving it neutral by default; the default 65% (double-click to reset) leans a little further than the calibration point. Above 70% it is additionally told to use the controls it wants at a strength a viewer can see, and the visual review may then run up to 3 rounds — the same ceiling 「Deep thinking」 raises it to, and either one ALONE is enough to make the worst case 17 API calls (10 carrying images). The clipping and white-point safeguards never widen with it.",
+                ),
             );
-        });
-        // R23-4 (feedback #13): the THIRD analysis-side control, under the two
-        // dials it modifies — the target score and round budget it unlocks are
-        // read off the Strength band directly above it.
-        ui.checkbox(&mut self.deep_think, tr(lang, "Deep thinking"))
-            .on_hover_text(tr(lang,
-                "Make the AI show its work and let it iterate. The proposal must first name what it sees, decide EACH tool family (tone / white balance / presence / HSL / colour grading / curves / detail / framing / masks) with a reason, state the look it is going for, and end by critiquing its own answer — those three sentences land in the rationale above. It also asks the image model for one step more reasoning effort (only when a tier other than 「provider default」 is set in Settings), and lets the visual judge keep going until it scores well enough: 2 rounds at a balanced Strength, 3 above 70%. COST: a normal analyze is at worst 11 API calls (6 with images, 8 high-detail frames); with this box ticked OR Strength above 70% — either one alone is enough — it is at worst 17 calls (10 with images, 14 high-detail), plus roughly 10-20% more output tokens per proposal. Batch and the eval harness never do this.",
-            ));
-        self.ai_style_library(ui);
+            let has_direction = !self.guidance.trim().is_empty();
+            ui.add_enabled_ui(has_direction, |ui| {
+                #[cfg(test)]
+                {
+                    // The gate's own witness (same seam as `ai_gate_enabled`): a
+                    // comment cannot keep the wrapper here.
+                    self.adherence_gate_enabled = Some(ui.is_enabled());
+                }
+                Self::slider_pct_hinted(
+                    ui,
+                    lang,
+                    tr(lang, "Adherence"),
+                    &mut self.direction_adherence,
+                    1.0,
+                    autoshade::recipe::DirectionAdherence::DEFAULT,
+                    tr(lang, "How closely the AI follows your direction; disabled until Direction has text: <=40% Hint, 40-70% Direct, above 70% Brief. Prompt intent only - it never moves a render limit. Direct and Brief also decide WHO LEADS: your style library becomes background and its distillation pull is skipped, so a direction can take a photo somewhere your past edits never went. Hint leaves the library in the lead."),
+                );
+            });
+            // R23-4 (feedback #13): the THIRD analysis-side control, under the two
+            // dials it modifies — the target score and round budget it unlocks are
+            // read off the Strength band directly above it.
+            ui.checkbox(&mut self.deep_think, tr(lang, "Deep thinking"))
+                .on_hover_text(tr(lang,
+                    "Make the AI show its work and let it iterate. The proposal must first name what it sees, decide EACH tool family (tone / white balance / presence / HSL / colour grading / curves / detail / framing / masks) with a reason, state the look it is going for, and end by critiquing its own answer — those three sentences land in the rationale above. It also asks the image model for one step more reasoning effort (only when a tier other than 「provider default」 is set in Settings), and lets the visual judge keep going until it scores well enough: 2 rounds at a balanced Strength, 3 above 70%. COST: a normal analyze is at worst 11 API calls (6 with images, 8 high-detail frames); with this box ticked OR Strength above 70% — either one alone is enough — it is at worst 17 calls (10 with images, 14 high-detail), plus roughly 10-20% more output tokens per proposal. Batch and the eval harness never do this.",
+                ));
+            });
     }
 
-    /// Sub-area 1b — the STYLE REFERENCE LIBRARY: what the Style slider above
+    /// Sub-area ② — REFERENCE LIBRARIES (local): the three switches an analysis
+    /// leans on, drawn as the dependency LADDER they actually are (R30).
+    ///
+    /// Nothing in this fold reaches a paid API — disk, CPU, and one model
+    /// download — which is what its 「· local」 tag says. COLLAPSED by default
+    /// because it is a setup-time surface: built once, then left alone.
+    ///
+    /// Gate (a) lives here: at Style 0 the pipeline opens no library at all
+    /// (`(req.style > 0.0).then(load_effective)`), so every control below is
+    /// decoration at that setting and the whole body is drawn disabled with
+    /// the reason above it. Gates (b) and (c) — the look library's dependency
+    /// on the SigLIP 2 query vector, and the default trap that ships from it —
+    /// belong to one rung and live in [`AutoShadeApp::ai_look_library`].
+    fn ai_libraries(&mut self, ui: &mut egui::Ui) {
+        let lang = self.lang;
+        // Read the status ONCE per session (cached in `style_info`) — the file
+        // can reach 32 MB, and this draws every frame. OUTSIDE the fold and
+        // outside the gate on purpose: the Style slider's own 「⚠ no library」
+        // flag one sub-area up reads this same cached answer, so a collapsed
+        // (or gated) ② must not starve it. Not in tests: a headless frame
+        // would spawn a worker reading the developer's own store, and the
+        // tests drive `style_info` directly instead.
+        if !cfg!(test) && self.style_info.is_none() && !self.style_info_loading {
+            self.start_style_info();
+        }
+        ui.add_space(SPACE_XS);
+        // Gate (a). Read off the SAME comparison the pipeline makes, so the
+        // two can never disagree about what "reads a library" means.
+        let reads_a_library = self.style_strength > 0.0;
+        egui::CollapsingHeader::new(tr(lang, "Reference libraries · local"))
+            .id_salt("sec_ai_libraries")
+            .default_open(false)
+            // Headless layout tests must see these rows: a test frame never
+            // clicks a header, and an unopened fold makes an assertion about
+            // them silently vacuous instead of red.
+            .open(fold_open_in_tests())
+            .show(ui, |ui| {
+                if !reads_a_library {
+                    // OUTSIDE the disabled scope below, deliberately: the one
+                    // sentence that explains a greyed section must not itself
+                    // be greyed out.
+                    ui.label(
+                        egui::RichText::new(tr(lang,
+                            "Style is at 0%: the analysis reads no library",
+                        ))
+                        .weak()
+                        .small(),
+                    );
+                }
+                ui.add_enabled_ui(reads_a_library, |ui| {
+                    #[cfg(test)]
+                    {
+                        // The gate's own witness (the same seam as
+                        // `ai_gate_enabled`): a comment cannot keep it here.
+                        self.ai_library_gate_enabled = Some(ui.is_enabled());
+                    }
+                    self.ai_edits_library(ui);
+                    self.ai_retrieval_engine(ui);
+                    self.ai_look_library(ui);
+                });
+            });
+    }
+
+    /// Ladder rung 1 — YOUR OWN EDITS (RAW + `.xmp`): what the Style slider
     /// actually leans on, and the only place in the desktop app that can build
     /// it (R23-2, feedback #6).
     ///
@@ -348,19 +437,11 @@ impl AutoShadeApp {
     /// permanently inert for anyone who double-clicks the exe; and even with a
     /// library built, nothing ever said WHICH one — the user's own words were
     /// "I have no idea which library it is referencing". So the status line is
-    /// not decoration here, it is half the feature, and it sits directly under
-    /// the slider it explains rather than behind a fold.
-    fn ai_style_library(&mut self, ui: &mut egui::Ui) {
+    /// not decoration here, it is half the feature, and it stays at the head of
+    /// this rung rather than behind a fold of its own.
+    fn ai_edits_library(&mut self, ui: &mut egui::Ui) {
         let lang = self.lang;
-        // Read the status ONCE per session (cached in `style_info`) — the file
-        // can reach 32 MB, and this draws every frame. Not in tests: a headless
-        // frame would spawn a worker reading the developer's own store, and the
-        // tests drive `style_info` directly instead.
-        if !cfg!(test) && self.style_info.is_none() && !self.style_info_loading {
-            self.start_style_info();
-        }
-        ui.add_space(SPACE_XS);
-        group_caption(ui, tr(lang, "Style reference library"));
+        group_caption(ui, tr(lang, "My Lightroom edits library (RAW + .xmp)"));
         // ── the status line: which library, how big, how old, and where.
         match self.style_info.as_ref().map(|i| (i.path.clone(), i.state.clone())) {
             Some((path, autoshade::style::StyleIndexState::Built { total, source_dir, age, with_embedding, looks, .. })) => {
@@ -582,6 +663,18 @@ impl AutoShadeApp {
                 tr(lang, "Build a style library first — there is no reference photo to send")
             });
         });
+    }
+
+    /// Ladder rung 2 — the RETRIEVAL ENGINE: the vectors the rungs on either
+    /// side of it are searched with. It sits BETWEEN the two libraries because
+    /// that is where it sits in the pipeline: rung 1 still works without it
+    /// (the 14-dim feature retrieval), rung 3 does not — `pipeline.rs`'s
+    /// `query_embed` is the only query vector the look search has.
+    fn ai_retrieval_engine(&mut self, ui: &mut egui::Ui) {
+        let lang = self.lang;
+        ui.add_space(SPACE_XS);
+        ui.separator();
+        group_caption(ui, tr(lang, "Retrieval engine"));
         ui.checkbox(&mut self.style_embed, tr(lang, "Use SigLIP 2 look embedding (downloads 1.5 GB once; index builds and analyses take longer)"))
             .on_hover_text(tr(lang, "Embedding is optional and local. The environment override wins when set; rebuild the index after changing this switch."));
         // The description pass needs the embedding pass: it runs over the same
@@ -595,8 +688,15 @@ impl AutoShadeApp {
                     tr(lang, "Turn on the look embedding first — the description pass runs over the same frames")
                 });
         });
+    }
+
+    /// Ladder rung 3 — FINISHED PHOTOS (JPEG): the look library, plus the two
+    /// gates that stop its switch from lying about itself.
+    fn ai_look_library(&mut self, ui: &mut egui::Ui) {
+        let lang = self.lang;
+        ui.add_space(SPACE_XS);
         ui.separator();
-        group_caption(ui, tr(lang, "Look library"));
+        group_caption(ui, tr(lang, "Finished-photo look library (JPEG)"));
         if let Some(info) = &self.style_info
             && let autoshade::style::StyleIndexState::Built { looks, looks_dir, age, .. } = &info.state {
                 let from = looks_dir.clone().unwrap_or_else(|| tr(lang, "an unrecorded folder").to_string());
@@ -619,13 +719,46 @@ impl AutoShadeApp {
             }
             if let Some(dir) = build { self.start_looks_build(dir); }
         });
+        // Gates (b) and (c). The look library is reached ONLY through the
+        // SigLIP 2 query vector — `pipeline.rs` builds it as `req.style > 0.0
+        // && req.embed.on()`, and `StyleIndex::retrieve_looks_with_terms`
+        // returns an empty list when there is no query vector at all — so the
+        // switch is live only when there are looks AND something to retrieve
+        // them with, and the tooltip names the half that is missing.
         let has_looks = matches!(self.style_info.as_ref().map(|i| &i.state), Some(autoshade::style::StyleIndexState::Built { looks, .. }) if *looks > 0);
-        ui.add_enabled_ui(has_looks, |ui| {
-            ui.checkbox(&mut self.use_looks, tr(lang, "Use look library"));
+        let retrievable = self.style_embed;
+        ui.horizontal_wrapped(|ui| {
+            ui.add_enabled_ui(has_looks && retrievable, |ui| {
+                #[cfg(test)]
+                {
+                    // The gate's own witness (the same seam as
+                    // `ai_gate_enabled`): a comment cannot keep it here.
+                    self.looks_switch_enabled = Some(ui.is_enabled());
+                }
+                let resp = ui.checkbox(&mut self.use_looks, tr(lang, "Use look library"));
+                if !retrievable {
+                    resp.on_hover_text(tr(lang,
+                        "Turn on the SigLIP 2 look embedding first — the look library is retrieved through it",
+                    ));
+                }
+            });
+            // (c) the DEFAULT TRAP, named where it happens rather than after a
+            // paid call: `use_looks` defaults to true and `style_embed` to
+            // false (model.rs:281/286), so a fresh install ships this box
+            // ticked over a retrieval that cannot run. The rationale's
+            // `looks_unreachable` note says the same thing — but only once an
+            // analysis has already been billed for.
+            if self.use_looks && !retrievable {
+                ui.label(
+                    egui::RichText::new(tr(lang, "ticked, but unreachable: SigLIP 2 is off"))
+                        .color(ui.visuals().warn_fg_color)
+                        .small(),
+                );
+            }
         });
     }
 
-    /// Sub-area 2 — WHOLE-IMAGE GENERATION: let gpt-image DIRECTLY produce the
+    /// Sub-area ③ — WHOLE-IMAGE GENERATION (paid API): let gpt-image DIRECTLY produce the
     /// picture (the optional "GPT makes the image" path). Distinct from AI
     /// Analyze, which emits a faithful parametric recipe. The result becomes a
     /// new「AI 生成」variant in the strip below; the reverse-fit sub-area under
@@ -635,11 +768,13 @@ impl AutoShadeApp {
     /// never revert or double-cook it.
     ///
     /// Collapsed by default: this is the OPTIONAL path (and the paid one), so
-    /// the analysis sub-area above it stays the panel's first read.
+    /// the analysis sub-area at the top stays the panel's first read. R30 put
+    /// the cost in the header text as well — a collapsed fold that says
+    /// 「· paid API」 is the only warning a user gets before opening it.
     fn ai_generate(&mut self, ui: &mut egui::Ui) {
         let lang = self.lang;
         ui.add_space(SPACE_XS);
-        egui::CollapsingHeader::new(tr(lang, "Reimagine (whole image)"))
+        egui::CollapsingHeader::new(tr(lang, "Reimagine (whole image) · paid API"))
             .id_salt("sec_ai_reimagine")
             .default_open(false)
             // Headless layout tests must see this row: it carries the R19
@@ -755,159 +890,173 @@ impl AutoShadeApp {
             });
     }
 
-    /// Sub-area 3 — REVERSE-FIT: turn the freshly generated look back into an
+    /// Sub-area ④ — REVERSE-FIT (local; the AI review is paid): turn the
+    /// freshly generated look back into an
     /// editable recipe — how the low-res experiment becomes a full-res, XMP-able
     ///「反推」variant. A PEER of the generation sub-area, not a row inside it:
     /// its own switches (the optional AI review, and zoned fit — which used to
     /// live in Settings, two panels from the button it changes) are settings for
     /// this verb, and burying them one fold deeper than the verb was the
     /// scattering this panel exists to end.
+    ///
+    /// R30 gave it a header of its own (it was a `group_caption` under a
+    /// separator) and left it OPEN by default: the fit and the extract are
+    /// local and free, and the one paid switch inside — 「AI review」 — is
+    /// what the header's 「AI 打分付费」 half names.
     fn ai_reverse_fit(&mut self, ui: &mut egui::Ui) {
         let lang = self.lang;
         ui.add_space(SPACE_XS);
-        ui.separator();
-        group_caption(ui, tr(lang, "Reverse-fit"));
-        let can_fit = self.fit_target().is_some() && self.source_preview.is_some();
-        if !can_fit {
-            ui.label(
-                egui::RichText::new(tr(lang,
-                    "Pick a reference below, or generate an image and stay on that variant, to reverse-fit a recipe."))
-                    .weak()
-                    .small(),
-            );
-        }
-        // ── the REFERENCE row (R23-6 B): any finished rendition of this same
-        // frame — your own Lightroom export, the camera's JPEG, another RAW
-        // developed elsewhere. The generated-variant entry below still works
-        // untouched; this one simply stops it from being the only one.
-        let mut pick_ref = false;
-        let mut clear_ref = false;
-        ui.horizontal_wrapped(|ui| {
-            ui.add_enabled_ui(!self.busy, |ui| {
-                if ui
-                    .button(tr(lang, "🖼 Choose reference…"))
-                    .on_hover_text(tr(lang,
-                        "Reverse-fit toward ANY finished version of THIS SAME photo — your own \
-                         Lightroom/Capture One export, the camera's JPEG, a TIFF, or another RAW \
-                         (developed neutrally first). The fit solves the develop parameters that \
-                         reproduce that file's look and leaves your pixels untouched. It must be \
-                         the same frame: a different picture is warned about, not refused, and \
-                         its result means nothing.",
-                    ))
-                    .clicked()
-                {
-                    pick_ref = true;
-                }
-            });
-            if let Some(p) = self.fit_ref.clone() {
-                let name = p
-                    .file_name()
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| p.display().to_string());
-                ui.label(egui::RichText::new(name).weak().small())
-                    .on_hover_text(p.display().to_string());
-                // Bare glyph, not `tr` — the symbol IS the label in every
-                // language (the same rule the variant-strip and gallery ✕
-                // buttons follow); only the tooltip is translated.
-                if ui
-                    .small_button("✕")
-                    .on_hover_text(tr(lang,
-                        "Forget this reference and go back to reverse-fitting the active generated variant",
-                    ))
-                    .clicked()
-                {
-                    clear_ref = true;
-                }
+        egui::CollapsingHeader::new(tr(lang, "Reverse-fit · local; AI review is paid"))
+            .id_salt("sec_ai_reverse_fit")
+            .default_open(true)
+            // Same reason as the folds above: a headless frame never clicks a
+            // header, and this body carries the row whose width runaway
+            // `the_generate_button_stays_one_line_and_the_panel_stays_put`
+            // exists to catch.
+            .open(fold_open_in_tests())
+            .show(ui, |ui| {
+            let can_fit = self.fit_target().is_some() && self.source_preview.is_some();
+            if !can_fit {
+                ui.label(
+                    egui::RichText::new(tr(lang,
+                        "Pick a reference below, or generate an image and stay on that variant, to reverse-fit a recipe."))
+                        .weak()
+                        .small(),
+                );
             }
-        });
-        // rfd OUTSIDE the closure above (it borrows `ui`) and after the row is
-        // laid out: the dialog is modal and blocks this thread.
-        if pick_ref && let Some(p) = util::photo_file_dialog() {
-            self.fit_ref = Some(p);
-        }
-        if clear_ref {
-            self.fit_ref = None;
-        }
-        ui.horizontal_wrapped(|ui| {
-            ui.add_enabled_ui(!self.busy && can_fit, |ui| {
-                if ui
-                    .button(tr(lang, "🎛 Reverse-fit recipe → sliders/XMP"))
-                    .on_hover_text(tr(lang,
-                        "Statistical fit: reverse the freshly generated look into editable develop params \
-                         (local, no API cost). Sliders update (undoable), and for RAW a Lightroom XMP goes \
-                         into this photo's develop store; hit Export to render the full-resolution result. \
-                         Uses the panel's Strength control as the reverse-fit honesty budget.",
-                    ))
-                    .clicked()
-                {
-                    self.start_fit();
-                }
-                if ui
-                    .button(tr(lang, "📝 Extract style prompt"))
-                    .on_hover_text(tr(lang,
-                        "Compare the original / generated images and have the vision model write a reusable \
-                         style prompt: auto-fills the Reimagine prompt (ready to restyle other photos) and \
-                         saves ./out/<stem>.style.txt.",
-                    ))
-                    .clicked()
-                {
-                    self.start_style_prompt();
-                }
-            });
-            // R20 opt-in LLM-as-a-judge. OUTSIDE the can_fit gate: the
-            // toggle is a persisted PREFERENCE, not a fit-time verb —
-            // gating it on can_fit locked a setting behind having a
-            // generated variant active (review R20-N1). Only busy
-            // disables it.
-            ui.add_enabled_ui(!self.busy, |ui| {
-                ui.checkbox(&mut self.fit_ai_judge, tr(lang, "AI review"))
-                    .on_hover_text(tr(lang,
-                        "After the fit, show the target and the fitted render to the vision model and \
-                         have it SCORE the match (0-100) with a short critique — LLM as a judge. One \
-                         paid vision call per fit (needs the image API key); the fit itself stays \
-                         local and free. The score, its critique AND its suggestion land in the \
-                         status line below — nothing is changed for you. No cancel: like the fit \
-                         itself, the app stays busy until the review returns.",
-                    ));
-            });
-        });
-        // R23-6 D: the review can now also ACT, when asked. Directly under
-        //「AI review」 and gated on it, because a deep fit IS that review plus
-        // a loop — a checkbox that silently switched the other one on would
-        // be two settings pretending to be one.
-        //
-        // Its own ROW, not another widget in the wrapped row above: the
-        // reverse-fit row already carries two long buttons and a checkbox,
-        // and a fourth item widened the auto-fitting side panel by 25 px
-        // (measured;`the_generate_button_stays_one_line_and_the_panel_stays_put`
-        // is the witness — that test exists because this panel's width has
-        // run away once before).
-        ui.add_enabled_ui(!self.busy && self.fit_ai_judge, |ui| {
-            ui.checkbox(&mut self.fit_deep, tr(lang, "deep"))
-                .on_hover_text(if self.fit_ai_judge {
-                    tr(lang,
-                        "DEEP REVERSE-FIT: run the review BEFORE saving and let it buy one \
-                         guided retry — the reviewer's suggestion picks the next ACTION \
-                         (add the zoned pass, pull the chroma chase back), never the \
-                         numbers, and the retry is kept only if it re-scores at least as \
-                         high. COST: up to two paid vision calls instead of one, and the \
-                         save waits for them; there is NO cancel, exactly as for the \
-                         review itself. Off = the reviewed fit is saved first and the \
-                         score is a note (the behaviour of every release since v0.26.0).",
-                    )
-                } else {
-                    tr(lang, "Turn on 「AI review」 first — the deep fit is that review, iterated")
+            // ── the REFERENCE row (R23-6 B): any finished rendition of this same
+            // frame — your own Lightroom export, the camera's JPEG, another RAW
+            // developed elsewhere. The generated-variant entry below still works
+            // untouched; this one simply stops it from being the only one.
+            let mut pick_ref = false;
+            let mut clear_ref = false;
+            ui.horizontal_wrapped(|ui| {
+                ui.add_enabled_ui(!self.busy, |ui| {
+                    if ui
+                        .button(tr(lang, "🖼 Choose reference…"))
+                        .on_hover_text(tr(lang,
+                            "Reverse-fit toward ANY finished version of THIS SAME photo — your own \
+                             Lightroom/Capture One export, the camera's JPEG, a TIFF, or another RAW \
+                             (developed neutrally first). The fit solves the develop parameters that \
+                             reproduce that file's look and leaves your pixels untouched. It must be \
+                             the same frame: a different picture is warned about, not refused, and \
+                             its result means nothing.",
+                        ))
+                        .clicked()
+                    {
+                        pick_ref = true;
+                    }
                 });
-        });
-        // Migrated from Settings (#4): a switch that only ever changes what
-        // the button above does. Same rule as 「AI review」 — a persisted
-        // preference, so no can_fit gate (and, as in Settings, no busy gate:
-        // `start_fit` reads the flag when it runs).
-        ui.checkbox(&mut self.zoned_fit, tr(lang, "Zoned fit (sky)")).on_hover_text(tr(
-            lang,
-            "On reverse-fit, fit globally first. Sky segmentation and native luminance-range fallback stay exclusive; then frozen-evidence spatial tiles are tried automatically on a 4x4 grid with a four-tile cap and zero frame regression. Conservative guided refinement may keep or abstain before fitting semantic/tile masks, and never changes luminance ranges. Bitmap masks stay engine-only with a named XMP loss; native ranges are written to the Lightroom sidecar. Segmentation needs the python dependencies (transformers + torch), and every fallback or abstention is noted in the rationale.",
-        ));
-        ui.checkbox(&mut self.zoned_four_regions, tr(lang, "Up to four semantic regions"))
-            .on_hover_text(tr(lang, "Opt in to semantic regions beyond the historical sky/land pass; this costs one OneFormer pass per frame and may take longer."));
+                if let Some(p) = self.fit_ref.clone() {
+                    let name = p
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| p.display().to_string());
+                    ui.label(egui::RichText::new(name).weak().small())
+                        .on_hover_text(p.display().to_string());
+                    // Bare glyph, not `tr` — the symbol IS the label in every
+                    // language (the same rule the variant-strip and gallery ✕
+                    // buttons follow); only the tooltip is translated.
+                    if ui
+                        .small_button("✕")
+                        .on_hover_text(tr(lang,
+                            "Forget this reference and go back to reverse-fitting the active generated variant",
+                        ))
+                        .clicked()
+                    {
+                        clear_ref = true;
+                    }
+                }
+            });
+            // rfd OUTSIDE the closure above (it borrows `ui`) and after the row is
+            // laid out: the dialog is modal and blocks this thread.
+            if pick_ref && let Some(p) = util::photo_file_dialog() {
+                self.fit_ref = Some(p);
+            }
+            if clear_ref {
+                self.fit_ref = None;
+            }
+            ui.horizontal_wrapped(|ui| {
+                ui.add_enabled_ui(!self.busy && can_fit, |ui| {
+                    if ui
+                        .button(tr(lang, "🎛 Reverse-fit recipe → sliders/XMP"))
+                        .on_hover_text(tr(lang,
+                            "Statistical fit: reverse the freshly generated look into editable develop params \
+                             (local, no API cost). Sliders update (undoable), and for RAW a Lightroom XMP goes \
+                             into this photo's develop store; hit Export to render the full-resolution result. \
+                             Uses the panel's Strength control as the reverse-fit honesty budget.",
+                        ))
+                        .clicked()
+                    {
+                        self.start_fit();
+                    }
+                    if ui
+                        .button(tr(lang, "📝 Extract style prompt"))
+                        .on_hover_text(tr(lang,
+                            "Compare the original / generated images and have the vision model write a reusable \
+                             style prompt: auto-fills the Reimagine prompt (ready to restyle other photos) and \
+                             saves ./out/<stem>.style.txt.",
+                        ))
+                        .clicked()
+                    {
+                        self.start_style_prompt();
+                    }
+                });
+                // R20 opt-in LLM-as-a-judge. OUTSIDE the can_fit gate: the
+                // toggle is a persisted PREFERENCE, not a fit-time verb —
+                // gating it on can_fit locked a setting behind having a
+                // generated variant active (review R20-N1). Only busy
+                // disables it.
+                ui.add_enabled_ui(!self.busy, |ui| {
+                    ui.checkbox(&mut self.fit_ai_judge, tr(lang, "AI review"))
+                        .on_hover_text(tr(lang,
+                            "After the fit, show the target and the fitted render to the vision model and \
+                             have it SCORE the match (0-100) with a short critique — LLM as a judge. One \
+                             paid vision call per fit (needs the image API key); the fit itself stays \
+                             local and free. The score, its critique AND its suggestion land in the \
+                             status line below — nothing is changed for you. No cancel: like the fit \
+                             itself, the app stays busy until the review returns.",
+                        ));
+                });
+            });
+            // R23-6 D: the review can now also ACT, when asked. Directly under
+            //「AI review」 and gated on it, because a deep fit IS that review plus
+            // a loop — a checkbox that silently switched the other one on would
+            // be two settings pretending to be one.
+            //
+            // Its own ROW, not another widget in the wrapped row above: the
+            // reverse-fit row already carries two long buttons and a checkbox,
+            // and a fourth item widened the auto-fitting side panel by 25 px
+            // (measured;`the_generate_button_stays_one_line_and_the_panel_stays_put`
+            // is the witness — that test exists because this panel's width has
+            // run away once before).
+            ui.add_enabled_ui(!self.busy && self.fit_ai_judge, |ui| {
+                ui.checkbox(&mut self.fit_deep, tr(lang, "deep"))
+                    .on_hover_text(if self.fit_ai_judge {
+                        tr(lang,
+                            "DEEP REVERSE-FIT: run the review BEFORE saving and let it buy one \
+                             guided retry — the reviewer's suggestion picks the next ACTION \
+                             (add the zoned pass, pull the chroma chase back), never the \
+                             numbers, and the retry is kept only if it re-scores at least as \
+                             high. COST: up to two paid vision calls instead of one, and the \
+                             save waits for them; there is NO cancel, exactly as for the \
+                             review itself. Off = the reviewed fit is saved first and the \
+                             score is a note (the behaviour of every release since v0.26.0).",
+                        )
+                    } else {
+                        tr(lang, "Turn on 「AI review」 first — the deep fit is that review, iterated")
+                    });
+            });
+            // Migrated from Settings (#4): a switch that only ever changes what
+            // the button above does. Same rule as 「AI review」 — a persisted
+            // preference, so no can_fit gate (and, as in Settings, no busy gate:
+            // `start_fit` reads the flag when it runs).
+            ui.checkbox(&mut self.zoned_fit, tr(lang, "Zoned fit (sky)")).on_hover_text(tr(
+                lang,
+                "On reverse-fit, fit globally first. Sky segmentation and native luminance-range fallback stay exclusive; then frozen-evidence spatial tiles are tried automatically on a 4x4 grid with a four-tile cap and zero frame regression. Conservative guided refinement may keep or abstain before fitting semantic/tile masks, and never changes luminance ranges. Bitmap masks stay engine-only with a named XMP loss; native ranges are written to the Lightroom sidecar. Segmentation needs the python dependencies (transformers + torch), and every fallback or abstention is noted in the rationale.",
+            ));
+            ui.checkbox(&mut self.zoned_four_regions, tr(lang, "Up to four semantic regions"))
+                .on_hover_text(tr(lang, "Opt in to semantic regions beyond the historical sky/land pass; this costs one OneFormer pass per frame and may take longer."));
+            });
     }
 }

@@ -7083,6 +7083,12 @@
     /// it. All three read the ONE cached status, so this pins the rendered
     /// panel in each state rather than the predicate alone.
     ///
+    /// R30 moved that section out of `ai_analysis` into the 「Reference
+    /// libraries」 fold and renamed its caption to say WHICH library it is
+    /// (「My Lightroom edits library (RAW + .xmp)」, against the finished-photo
+    /// look library one rung below). The states, the entry point and the
+    /// slider's flag are unchanged — only the name this test looks for is.
+    ///
     /// The status is INJECTED: the production panel spawns a worker to read it
     /// (the file reaches 32 MB), and a headless frame must not go to the
     /// developer's own store for an answer.
@@ -7099,7 +7105,7 @@
             AutoShadeApp { style_info: info(StyleIndexState::Absent), ..Default::default() };
         let seen = tall_frame(&mut app, |a, ui| a.ai_panel(ui));
         assert!(
-            seen.iter().any(|t| t == "Style reference library"),
+            seen.iter().any(|t| t == "My Lightroom edits library (RAW + .xmp)"),
             "the section must exist at all — otherwise this test proves nothing: {seen:?}"
         );
         assert!(
@@ -7168,6 +7174,190 @@
         assert!(
             seen.iter().any(|t| t.contains("no library")),
             "and the slider is flagged: {seen:?}"
+        );
+    }
+
+    /// R30: the AI panel is FOUR folds, in one order, each saying what it
+    /// costs — and the middle one is a three-rung dependency ladder.
+    ///
+    /// The reported defect was that the panel mixed paid and local controls
+    /// with nothing to tell them apart, so the fix is only real if the cost
+    /// tag is IN THE HEADER (the one thing a collapsed fold still shows) and
+    /// the rungs sit in dependency order: the edits library is usable on its
+    /// own, the retrieval engine is what the look library is reached through,
+    /// so the engine must sit between them and not after both.
+    ///
+    /// Both languages, because a tag that only exists in English is not a
+    /// disclosure for the user who reported this.
+    ///
+    /// MUTATION THIS KILLS: drop a cost tag, reorder the sub-areas, or move
+    /// the retrieval engine below the look library it feeds.
+    #[test]
+    fn the_ai_panel_is_four_folds_that_each_say_what_they_cost() {
+        for lang in [crate::i18n::Lang::En, crate::i18n::Lang::Zh] {
+            let mut app = AutoShadeApp { lang, ..Default::default() };
+            let seen = tall_frame(&mut app, |a, ui| a.ai_panel(ui));
+            let want = [
+                tr(lang, "Analysis · paid API"),
+                tr(lang, "Reference libraries · local"),
+                tr(lang, "My Lightroom edits library (RAW + .xmp)"),
+                tr(lang, "Retrieval engine"),
+                tr(lang, "Finished-photo look library (JPEG)"),
+                tr(lang, "Reimagine (whole image) · paid API"),
+                tr(lang, "Reverse-fit · local; AI review is paid"),
+            ];
+            let mut at = 0usize;
+            for w in want {
+                let i = seen.iter().skip(at).position(|t| t == w).unwrap_or_else(|| {
+                    panic!("{lang:?}: {w:?} is missing or out of order in {seen:?}")
+                });
+                at += i + 1;
+            }
+        }
+    }
+
+    /// R30 gate (a): at Style 0 the pipeline opens NO library — `pipeline.rs`'s
+    /// `(req.style > 0.0).then(load_effective)` — so every control in the
+    /// 「Reference libraries」 sub-area is decoration at that setting. Before
+    /// this it drew live: two build entries and three switches that provably
+    /// could not change the next analysis.
+    ///
+    /// The threshold is the PIPELINE'S, not a rounded band, so 1% must re-arm
+    /// it — that is why phase ③ exists.
+    ///
+    /// MUTATION THIS KILLS: delete the `add_enabled_ui(reads_a_library, …)`
+    /// wrapper in panels/ai.rs, widen the comparison to `>= 0.0`, or drop the
+    /// sentence that says why the section is grey.
+    #[test]
+    fn the_reference_library_area_is_dead_while_style_is_at_zero() {
+        let ctx = egui::Context::default();
+        crate::theme::install_theme(&ctx, crate::theme::ThemePref::Dark);
+        let frame = |app: &mut AutoShadeApp| -> Option<bool> {
+            app.ai_library_gate_enabled = None; // this frame's evidence only
+            let _ = ctx.run(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(1000.0, 900.0),
+                    )),
+                    ..Default::default()
+                },
+                |ctx| {
+                    // The sub-area ships COLLAPSED; egui's own test hook opens
+                    // every collapsible, so a fold state cannot make this
+                    // vacuous.
+                    ctx.memory_mut(|m| m.set_everything_is_visible(true));
+                    egui::SidePanel::left("controls").default_width(320.0).show(ctx, |ui| {
+                        app.ai_panel(ui);
+                    });
+                },
+            );
+            app.ai_library_gate_enabled
+        };
+        // ① the shipped default: Style is above 0, so the libraries are read.
+        let mut app = AutoShadeApp::default();
+        assert!(app.style_strength > 0.0, "premise: the app ships with Style above 0");
+        assert_eq!(frame(&mut app), Some(true), "a Style above 0 does read a library");
+        // ② Style at 0: nothing in the section can reach the next analysis.
+        app.style_strength = 0.0;
+        assert_eq!(
+            frame(&mut app),
+            Some(false),
+            "at Style 0 the pipeline loads no index at all — the section must not read as live"
+        );
+        // …and the reason is ON SCREEN, not only in a tooltip.
+        let seen = tall_frame(&mut app, |a, ui| a.ai_panel(ui));
+        assert!(
+            seen.iter().any(|t| t.contains("Style is at 0%")),
+            "a greyed section must say why it is grey: {seen:?}"
+        );
+        // ③ the smallest step off 0 re-arms it.
+        app.style_strength = 0.01;
+        assert_eq!(frame(&mut app), Some(true), "any non-zero Style opens a library");
+    }
+
+    /// R30 gates (b) and (c): 「Use look library」 was a switch that shipped ON
+    /// over a retrieval that could not run.
+    ///
+    /// The look library is reached ONLY through the SigLIP 2 query vector
+    /// (`pipeline.rs` builds it as `req.style > 0.0 && req.embed.on()`, and
+    /// `StyleIndex::retrieve_looks_with_terms` returns an EMPTY list when
+    /// neither query vector exists), while `use_looks` defaults to true and
+    /// `style_embed` to false. So a fresh install carried a ticked switch that
+    /// read nothing, and the only disclosure was the rationale's
+    /// `looks_unreachable` note — after an analysis had already been billed.
+    ///
+    /// MUTATION THIS KILLS: drop `retrievable` from the switch's enablement,
+    /// delete the warn label, or leave the label up once the embedding is on.
+    #[test]
+    fn the_look_library_switch_is_dead_and_says_so_while_siglip_is_off() {
+        use autoshade::style::{StyleIndexInfo, StyleIndexState};
+        let built = |looks| {
+            Some(StyleIndexInfo {
+                path: "C:/store/style-index.json".into(),
+                state: StyleIndexState::Built {
+                    total: 40,
+                    version: 6,
+                    source_dir: Some("D:/photos/edited".into()),
+                    scenes: Vec::new(),
+                    with_embedding: 40,
+                    looks,
+                    looks_dir: Some("D:/photos/finished".into()),
+                    age: Some(std::time::Duration::from_secs(3600)),
+                },
+            })
+        };
+        // The DEFAULTS are the trap, and that is the premise this rests on.
+        assert!(AutoShadeApp::default().use_looks, "premise: the look library ships ON");
+        assert!(!AutoShadeApp::default().style_embed, "…over an embedding that ships OFF");
+
+        // ── looks exist, SigLIP off: inert, and it says why on the panel.
+        let mut app = AutoShadeApp { style_info: built(94), ..Default::default() };
+        let seen = tall_frame(&mut app, |a, ui| a.ai_panel(ui));
+        assert!(
+            seen.iter().any(|t| t == "Use look library"),
+            "premise: the switch is on screen at all: {seen:?}"
+        );
+        assert_eq!(
+            app.looks_switch_enabled,
+            Some(false),
+            "a library that cannot be retrieved must not offer a live switch"
+        );
+        assert!(
+            seen.iter().any(|t| t.contains("ticked, but unreachable")),
+            "the default trap must be visible BEFORE an analysis is paid for: {seen:?}"
+        );
+
+        // ── SigLIP on: retrievable, so the switch is live and the flag is gone.
+        app.style_embed = true;
+        let seen = tall_frame(&mut app, |a, ui| a.ai_panel(ui));
+        assert_eq!(
+            app.looks_switch_enabled,
+            Some(true),
+            "with the embedding on, the switch is usable"
+        );
+        assert!(
+            !seen.iter().any(|t| t.contains("ticked, but unreachable")),
+            "and the warning must not outlive its cause: {seen:?}"
+        );
+
+        // ── no finished photos: still inert, but for the OTHER half — and an
+        // UNTICKED switch is not a trap, so no warning either.
+        let mut app = AutoShadeApp {
+            style_info: built(0),
+            use_looks: false,
+            style_embed: true,
+            ..Default::default()
+        };
+        let seen = tall_frame(&mut app, |a, ui| a.ai_panel(ui));
+        assert_eq!(
+            app.looks_switch_enabled,
+            Some(false),
+            "no finished photos means nothing to use"
+        );
+        assert!(
+            !seen.iter().any(|t| t.contains("ticked, but unreachable")),
+            "an unticked switch is not the default trap: {seen:?}"
         );
     }
 
