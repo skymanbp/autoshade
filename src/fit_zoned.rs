@@ -2350,7 +2350,17 @@ fn fit_recipe_zoned_multi_inner(
     let multi_error = frame_err_under(src, target, &report, &two.evidence);
     let two_error = frame_err_under(src, target, &two, &two.evidence);
     if multi_error >= two_error {
-        let verdict_name = |key: &str| match key {
+        // The two key FAMILIES first (R34 §D2): one outcome each, two
+        // carriers each, and `is_colour_refusal`/`is_tone_refusal` are the one
+        // place that knows it — a match arm per key would be a second place.
+        let verdict_name = |key: &str| {
+            if is_colour_refusal(key) {
+                return "ZONE_EVIDENCE_WITHHELD_COLOUR";
+            }
+            if is_tone_refusal(key) {
+                return "ZONE_EVIDENCE_WITHHELD_TONE";
+            }
+            match key {
             crate::rationale::keys::ZONE_ATTACHED => "ZONE_ATTACHED",
             crate::rationale::keys::ZONE_ALREADY_MATCHED => "ZONE_ALREADY_MATCHED",
             crate::rationale::keys::ZONE_NO_MOVEMENT_SURVIVED => "ZONE_NO_MOVEMENT_SURVIVED",
@@ -2366,11 +2376,10 @@ fn fit_recipe_zoned_multi_inner(
             crate::rationale::keys::ZONE_ATMOSPHERE_DROPPED => "ZONE_ATMOSPHERE_DROPPED",
             crate::rationale::keys::ZONE_MODE_FULL => "ZONE_MODE_FULL",
             crate::rationale::keys::ZONE_MODE_ATMOSPHERE => "ZONE_MODE_ATMOSPHERE",
-            crate::rationale::keys::ZONE_EVIDENCE_WITHHELD_COLOUR => "ZONE_EVIDENCE_WITHHELD_COLOUR",
-            crate::rationale::keys::ZONE_EVIDENCE_WITHHELD_TONE => "ZONE_EVIDENCE_WITHHELD_TONE",
             crate::rationale::keys::ZONE_QUALITY_PASSED => "ZONE_QUALITY_PASSED",
             // An honest "something else", never a verdict the zone did not get.
             _ => "ZONE_OTHER",
+            }
         };
         let regions_text = regions.iter().map(|region| {
             let label = format!("region-{}-{}", region.class_id, region.label);
@@ -3655,6 +3664,32 @@ fn attach_one_zone(
     } else {
         ZoneMode::Full
     };
+    // R34 §D5. MODE governs the control set; SCALE governs the estimator —
+    // exactly R33 §D's split, now asked of the ZONE's own reading at the
+    // FRAME's own line. A Full zone whose texture was re-synthesised while its
+    // layout held (0.35 <= d < DIVERGENCE_ZONE: the desert sky) still
+    // regressed target luma on source luma pixel by pixel, and the
+    // errors-in-variables dilution R33 §D measured on the frame is the same
+    // dilution here — the zone read 0.72 of the target's L* spread. An
+    // abstention makes no claim, so it keeps the pairing it had.
+    let pairing = if divergence.is_some_and(|d| d.d >= fit::DIVERGENCE_GLOBAL) {
+        fit::PairingScale::Cell
+    } else {
+        fit::PairingScale::Pixel
+    };
+    // R34 §D2. The REGION's own 12x8 cells, the instrument that can admit a
+    // control this zone's PIXELS cannot vouch. Built here rather than threaded
+    // from the orchestration: every one of the six producers hands this
+    // function the frame's own analysis target and the report's own frozen
+    // evidence, so building from those two IS one instrument per solve by
+    // construction — the property the threading exists for — without a
+    // twenty-first parameter on twenty call sites.
+    let cells = crate::fit_cells::PairedCells::build(
+        tgt_px,
+        s_img.width(),
+        s_img.height(),
+        &report.evidence,
+    );
     let compose = |base: &[f32], robust: &Option<fit::PairedRobustTone>| -> Vec<f32> {
         let mut out = base.to_vec();
         if let Some(r) = robust {
@@ -3770,6 +3805,25 @@ fn attach_one_zone(
             ],
         ),
     );
+    // Only the CELL scale earns a sentence: Pixel is what every zone did
+    // before R34 and what the mode note already describes, so a zone whose
+    // estimator did not change says nothing new and its rationale stays
+    // byte-identical.
+    if mode == ZoneMode::Full && pairing == fit::PairingScale::Cell {
+        crate::rationale::push_note(
+            &mut report.recipe.rationale,
+            &mut report.notes,
+            crate::rationale::Note::new(
+                crate::rationale::keys::ZONE_PAIRING_SCALE,
+                vec![
+                    ("label", label.to_string()),
+                    ("d", divergence.map_or_else(
+                        || "unmeasured".to_string(), |d| format!("{:.3}", d.d))),
+                    ("line", format!("{:.2}", fit::DIVERGENCE_GLOBAL)),
+                ],
+            ),
+        );
+    }
     let zone_before = zone_err(&ms, &mt);
     // Composition is an input fact, not an acceptance verdict. Disclose it
     // before any early evidence/quality return so a withheld correction still
@@ -3887,18 +3941,28 @@ fn attach_one_zone(
             // falling back to the weighted quantile transport only when the
             // paired estimate is too thin — and either way solving only the
             // knots this zone's own population supports.
-            let refit = fit::paired_robust_tone(
-                &rp,
-                tgt_eff,
-                &|i: usize| {
-                    zw_source
-                        .get(i)
-                        .copied()
-                        .unwrap_or(0.0)
-                        .min(zw_target.get(i).copied().unwrap_or(0.0))
-                },
-                false,
-            );
+            // R34 §D5. At CELL scale index `i` on one side is not index `i`
+            // on the other, so this regression is a well-formed answer to a
+            // question nobody asked; the weighted quantile transport below is
+            // the honest estimator, and an empty `points` is what selects it.
+            // The rule is `fit::paired_correspondence`'s, asked of the zone's
+            // reading instead of the frame's — one doctrine, two scopes.
+            let refit = (pairing == fit::PairingScale::Pixel)
+                .then(|| {
+                    fit::paired_robust_tone(
+                        &rp,
+                        tgt_eff,
+                        &|i: usize| {
+                            zw_source
+                                .get(i)
+                                .copied()
+                                .unwrap_or(0.0)
+                                .min(zw_target.get(i).copied().unwrap_or(0.0))
+                        },
+                        false,
+                    )
+                })
+                .flatten();
             let points = refit.as_ref().map(|r| r.points.clone()).unwrap_or_default();
             let support = fit::knot_support_for(&rp, &zw_source, &points);
             let score_set: Vec<(f32, f32, f32)> = match refit.as_ref() {
@@ -4008,19 +4072,57 @@ fn attach_one_zone(
         &chroma_probe_px,
         &zone_evidence,
     );
-    // R33 §F asked whether `fit_cells` could lift these two withholdings
-    // the way it lifts the white balance's and the mixer's. It cannot, and
-    // the reason is structural rather than a threshold: `fit_zone_dials`
-    // solves `color_gains` from this zone's MASK-WEIGHTED MEAN moments, and a
-    // cell voucher restricted to the same mask reads cell MEANS over the same
-    // pixels — the estimator's objective and the voucher's measurement are
-    // one quantity, so its verdict is not independent evidence. Measured on
-    // the reference pair it read 1.000 converged / 0.000 diverged at every
-    // site whose probe was not already null. The white balance (a weighted
-    // median of per-pixel log ratios) and the mixer (per-band populations)
-    // ARE vouched by cells, because those partitions are independent of the
-    // cell grid. These two stay withheld, by name, as before.
-    if luma_ranges.is_some() {
+    // R34 §D2. THE admission gate for a region whose PIXELS cannot pair.
+    //
+    // R33 §F refused to consult `fit_cells` here, on the ground that
+    // `fit_zone_dials` solves `color_gains` from this zone's MASK-WEIGHTED
+    // MEAN moments while a cell voucher restricted to the same mask reads
+    // cell MEANS over the same pixels — one quantity, therefore no
+    // independent verdict. That argument is superseded, and it was wrong in
+    // one specific way: the voucher reads 96 cells, and since R34 §D1 it also
+    // reads the DIRECTION of each cell's move against the direction to its
+    // OWN target mean. A zone-wide gain that matches the zone mean while
+    // dragging cells whose targets lie elsewhere converges the mean and fails
+    // the partition. The estimator's objective is one number; the voucher's
+    // measurement is 96 directed ones, and "1.000 converged" is then a
+    // measurement that every sky cell wants the same warm push, not a
+    // tautology.
+    //
+    // This is also the ONE place R33's "Atmosphere passes no cells" is
+    // deliberately not followed, and for the reason that doctrine exists. An
+    // Atmosphere zone is the CLAIM that this region's content was replaced,
+    // and the cells are exactly the instrument that separates a replaced
+    // TEXTURE (layout intact — a recolour, recoverable) from a replaced
+    // LAYOUT (nothing to recover). Passing no cells here would refuse the
+    // question rather than answer it. What does NOT change is the budget:
+    // `shrink_atmosphere_gains_in` and `zone_gain` still bound whatever is
+    // admitted, because admission is evidence and budget is strength.
+    //
+    // AND IT IS ASKED ONLY WHERE THE PIXELS CANNOT ANSWER. That is the whole
+    // lane's rule, not a second one: a region whose own structural reading is
+    // under `DIVERGENCE_GLOBAL` has pixels that ARE each other's counterparts,
+    // the pixel-scale refusal about it is a measurement, and a region may not
+    // overrule its own pixels. Measured: on the toy zone fixtures (sky D 0.024
+    // to 0.101) the cells read 1.000/0.000/1.000 and shipped a colour move
+    // twelve pinned refusals exist to refuse — while the sentence printed for
+    // it, "because this region's texture was re-synthesised", was false about
+    // every one of them. The reference sky reads 0.617 and is the case this
+    // arm was built for.
+    let region_vouch = |probe: &[[f32; 3]]| -> Option<crate::fit_cells::CellVouch> {
+        if pairing != fit::PairingScale::Cell {
+            return None;
+        }
+        cells.as_ref().map(|c| c.vouch(&cur_px, probe, Some(moved_source)))
+    };
+    let hue_cells = hue_bands.as_ref().and_then(|_| region_vouch(&chroma_probe_px));
+    let luma_cells = luma_ranges.as_ref().and_then(|_| region_vouch(&luma_probe_px));
+    // An ABSTENTION is never an admission: no cell grid, or a region whose
+    // cells carried no trust-weighted evidence mass, leaves the strict
+    // refusal exactly where it was. That is what keeps every zero-evidence
+    // pin standing by construction rather than by threshold.
+    let colour_withheld = hue_bands.is_some() && !hue_cells.is_some_and(|v| v.vouched());
+    let tone_withheld = luma_ranges.is_some() && !luma_cells.is_some_and(|v| v.vouched());
+    if tone_withheld {
         let m = report.recipe.masks.last_mut().expect("zone mask just pushed");
         m.exposure_ev = 0.0;
         m.contrast = 0.0;
@@ -4029,48 +4131,99 @@ fn attach_one_zone(
         m.whites = 0.0;
         m.blacks = 0.0;
     }
-    if hue_bands.is_some() {
+    if colour_withheld {
         let m = report.recipe.masks.last_mut().expect("zone mask just pushed");
         m.color_gains = Some([1.0; 3]);
         m.saturation = 0.0;
     }
-    // ONE NOTE PER CONTROL CLASS ACTUALLY WITHHELD. The two probes above
+    // ONE NOTE PER CONTROL CLASS, AND IT NAMES THE OUTCOME. The two probes
     // withhold independently, so a single "correction withheld" sentence
-    // described none of the three outcomes correctly. Each note states only
-    // its own class; when both fire, their conjunction is the whole-zone
-    // refusal, and what SURVIVED is carried positively by the attach note.
+    // described none of the three outcomes correctly. Since R34 each class
+    // has FOUR: strict-clean (nothing said, the attach note carries it),
+    // shipped-on-region-evidence, refused-by-the-cells, and
+    // the-cells-abstained. A refusal is now a measurement — it prints the
+    // three shares it was decided on — so "withheld" can no longer be read as
+    // "nobody looked".
+    let cells_said = |verdict: Option<crate::fit_cells::CellVouch>| -> String {
+        match verdict {
+            Some(v) if v.read > 0 => {
+                let (converged, diverged, aligned) = v.shares();
+                format!(
+                    "{converged} converged, {diverged} diverged, {aligned} aligned over {} cells",
+                    v.read
+                )
+            }
+            _ => "abstained: no cell of this region carried measurable evidence".to_string(),
+        }
+    };
     if let Some(hue_bands) = hue_bands.as_ref() {
-        crate::rationale::push_note(
-            &mut report.recipe.rationale,
-            &mut report.notes,
-            crate::rationale::Note::new(
-                crate::rationale::keys::ZONE_EVIDENCE_WITHHELD_COLOUR,
+        let note = match (colour_withheld, hue_cells) {
+            (false, Some(v)) => {
+                let (converged, diverged, aligned) = v.shares();
+                crate::rationale::Note::new(
+                    crate::rationale::keys::ZONE_COLOUR_VOUCHED_BY_CELLS,
+                    vec![
+                        ("label", label.to_string()),
+                        ("hue_bands", hue_bands.clone()),
+                        ("converged", converged),
+                        ("diverged", diverged),
+                        ("aligned", aligned),
+                    ],
+                )
+            }
+            _ if pairing == fit::PairingScale::Cell => crate::rationale::Note::new(
+                crate::rationale::keys::ZONE_EVIDENCE_WITHHELD_COLOUR_CELLS,
                 vec![
                     ("label", label.to_string()),
                     ("hue_bands", hue_bands.clone()),
+                    ("cells", cells_said(hue_cells)),
                 ],
             ),
-        );
+            // A region whose pixels pair was never asked, so its sentence is
+            // R33's, unchanged to the byte.
+            _ => crate::rationale::Note::new(
+                crate::rationale::keys::ZONE_EVIDENCE_WITHHELD_COLOUR,
+                vec![("label", label.to_string()), ("hue_bands", hue_bands.clone())],
+            ),
+        };
+        crate::rationale::push_note(&mut report.recipe.rationale, &mut report.notes, note);
     }
     if let Some(luma_ranges) = luma_ranges.as_ref() {
-        crate::rationale::push_note(
-            &mut report.recipe.rationale,
-            &mut report.notes,
-            crate::rationale::Note::new(
-                crate::rationale::keys::ZONE_EVIDENCE_WITHHELD_TONE,
+        let note = match (tone_withheld, luma_cells) {
+            (false, Some(v)) => {
+                let (converged, diverged, aligned) = v.shares();
+                crate::rationale::Note::new(
+                    crate::rationale::keys::ZONE_TONE_VOUCHED_BY_CELLS,
+                    vec![
+                        ("label", label.to_string()),
+                        ("luma_ranges", luma_ranges.clone()),
+                        ("converged", converged),
+                        ("diverged", diverged),
+                        ("aligned", aligned),
+                    ],
+                )
+            }
+            _ if pairing == fit::PairingScale::Cell => crate::rationale::Note::new(
+                crate::rationale::keys::ZONE_EVIDENCE_WITHHELD_TONE_CELLS,
                 vec![
                     ("label", label.to_string()),
                     ("luma_ranges", luma_ranges.clone()),
+                    ("cells", cells_said(luma_cells)),
                 ],
             ),
-        );
+            _ => crate::rationale::Note::new(
+                crate::rationale::keys::ZONE_EVIDENCE_WITHHELD_TONE,
+                vec![("label", label.to_string()), ("luma_ranges", luma_ranges.clone())],
+            ),
+        };
+        crate::rationale::push_note(&mut report.recipe.rationale, &mut report.notes, note);
     }
     // The skip line, re-asked of the class that can still move: with colour
     // withheld the acceptance below judges the luma-only residual, so a zone
     // already matched THERE is left alone with the honest note instead of
     // being dialled for a hairline tone gain against a chroma gap it may not
     // touch (the calibration land: luma 0.004, chroma-dominated 0.045).
-    if hue_bands.is_some() && luma_ranges.is_none() {
+    if colour_withheld && !tone_withheld {
         let luma_before = zone_luma_err(&ms, &mt);
         if zone_skips(luma_before, ev_gap) {
             report.recipe.masks.pop();
@@ -4085,7 +4238,7 @@ fn attach_one_zone(
             return None;
         }
     }
-    if hue_bands.is_some() && luma_ranges.is_none() {
+    if colour_withheld && !tone_withheld {
         let original = {
             let m = report.recipe.masks.last().expect("zone mask just pushed");
             [m.exposure_ev, m.contrast, m.highlights, m.shadows, m.whites, m.blacks]
@@ -4187,12 +4340,16 @@ fn attach_one_zone(
         }
         return None;
     }
-    let accepted_before = if hue_bands.is_some() && luma_ranges.is_none() {
+    // The acceptance judges the residual the zone was allowed to move: with
+    // colour withheld and tone kept, that is the luma-only one. A class the
+    // REGION's cells admitted is a class that shipped, so it is judged in the
+    // whole-zone residual like any other shipped control.
+    let accepted_before = if colour_withheld && !tone_withheld {
         zone_luma_err(&ms, &mt)
     } else {
         zone_before
     };
-    let accepted_after = if hue_bands.is_some() && luma_ranges.is_none() {
+    let accepted_after = if colour_withheld && !tone_withheld {
         zone_luma_err(&m_after, &mt)
     } else {
         zone_after
@@ -4305,6 +4462,23 @@ fn raster_centroid(mask: &GrayImage) -> (f32, f32) {
         return (0.5, 0.5);
     }
     ((sx / sa / f64::from(w)) as f32, (sy / sa / f64::from(h)) as f32)
+}
+
+/// Was this note a zone's COLOUR refusal? One outcome, two carriers since
+/// R34 §D2: a region whose pixels are each other's counterparts keeps R33's
+/// sentence, and a region past the pairing line gets the one that also prints
+/// what its cells measured. Everything that asks "was the colour refused, and
+/// was the band named?" asks it here, so the question cannot drift apart from
+/// the two sentences that answer it.
+pub(crate) fn is_colour_refusal(key: &str) -> bool {
+    key == crate::rationale::keys::ZONE_EVIDENCE_WITHHELD_COLOUR
+        || key == crate::rationale::keys::ZONE_EVIDENCE_WITHHELD_COLOUR_CELLS
+}
+
+/// The tone half of [`is_colour_refusal`].
+pub(crate) fn is_tone_refusal(key: &str) -> bool {
+    key == crate::rationale::keys::ZONE_EVIDENCE_WITHHELD_TONE
+        || key == crate::rationale::keys::ZONE_EVIDENCE_WITHHELD_TONE_CELLS
 }
 
 /// Per-pixel mask weights for an analysis frame of `w`×`h` — the SAME
@@ -4632,27 +4806,77 @@ mod tests {
         mask_path.remove();
     }
 
-    #[test]
-    fn zoned_color_gains_cannot_move_a_zero_evidence_hue_band() {
+    /// A blue sky over warm rocks, and the same frame with the sky repainted
+    /// at THE SAME LUMINANCE — Rec.601 0.5180 for every sky colour here, ripple
+    /// slope included — so the pair is a PURE hue change and the only band the
+    /// frozen per-pixel evidence can call zero-evidence is the hue one. (A
+    /// repaint that also lifts luma takes the luma evidence one-sided with it,
+    /// the sky's `source_weights` fall to zero, and the region ABSTAINS before
+    /// the rule under test is ever reached — which is what
+    /// `a_region_of_only_unsupported_pixels_abstains_and_the_refusal_stands`
+    /// pins on purpose.)
+    ///
+    /// The sky's TEXTURE is re-synthesised as well: an independent per-pixel
+    /// draw on each side of the pair, so the region's own structural reading
+    /// lands past `fit::DIVERGENCE_GLOBAL` and its pixels stop being each
+    /// other's counterparts. That is not decoration — it is the ONLY state in
+    /// which the cells are asked at all, because a region whose pixels pair
+    /// may not overrule them. The land half is byte-identical on both sides.
+    ///
+    /// `two_ways` repaints the right half the OTHER way, cool instead of warm.
+    /// The zone's MEAN still asks for a warm gain — and the pixel-scale robust
+    /// pairing still throws one of the two halves out as outliers, which is
+    /// exactly the blindness R34 answers — while the region's cells, which read
+    /// all of it, are asked for two opposite moves by one gain.
+    fn zero_evidence_hue_pair(two_ways: bool) -> (DynamicImage, DynamicImage, GrayImage) {
         let (w, h) = (64u32, 64u32);
-        let build = |gold: bool| {
+        let hash = |i: u32, seed: u32| {
+            let mut v = i.wrapping_mul(747796405).wrapping_add(seed.wrapping_mul(2891336453));
+            v ^= v >> 16;
+            v = v.wrapping_mul(2246822519);
+            v ^= v >> 13;
+            (v % 10_000) as f32 / 10_000.0 - 0.5
+        };
+        let build = |repaint: bool, two_ways: bool| {
             DynamicImage::ImageRgb8(RgbImage::from_fn(w, h, |x, y| {
                 let ripple = (x as f32 / (w - 1) as f32) * 0.08;
+                let blue = [0.34 + 0.3 * ripple, 0.55 + 0.5 * ripple, 0.82 + ripple];
                 let p = if y < h / 2 {
-                    if gold {
-                        [0.82 + ripple, 0.62 + 0.5 * ripple, 0.34 + 0.3 * ripple]
+                    let grain = 0.22 * hash(y * w + x, if repaint { 9_999 } else { 1 });
+                    let sky = if !repaint {
+                        blue
+                    } else if two_ways && x >= w / 2 {
+                        [0.16 + 0.2 * ripple, 0.6165 + 0.667 * ripple, 0.95 + 0.4 * ripple]
                     } else {
-                        [0.34 + 0.3 * ripple, 0.55 + 0.5 * ripple, 0.82 + ripple]
-                    }
+                        [0.60 + 0.8 * ripple, 0.495 + 0.4 * ripple, 0.42 + 0.2 * ripple]
+                    };
+                    sky.map(|channel| channel + grain)
                 } else {
                     [0.42 + ripple, 0.34 + 0.5 * ripple, 0.25 + 0.3 * ripple]
                 };
                 image::Rgb(p.map(|channel| (channel.clamp(0.0, 1.0) * 255.0).round() as u8))
             }))
         };
-        let src = build(false);
-        let tgt = build(true);
         let mask = GrayImage::from_fn(w, h, |_, y| image::Luma([if y < h / 2 { 255 } else { 0 }]));
+        (build(false, two_ways), build(true, two_ways), mask)
+    }
+
+    /// R34 §D2, and the RE-PIN of `zoned_color_gains_cannot_move_a_zero_evidence_hue_band`.
+    ///
+    /// OLD RULE: a zone's colour controls are withheld whenever the probe moves
+    /// a hue band the frozen per-pixel evidence calls zero-evidence — always,
+    /// by name, whatever the target says about the result.
+    /// NEW RULE: they are withheld unless the REGION's own 12x8 cell means
+    /// vouch the rendered move — converged, not diverged, and pointing in the
+    /// direction each cell's own target asks for.
+    /// WHY: a repaint that leaves the layout alone and changes the colour has
+    /// no two-sided hue evidence BY CONSTRUCTION (the source sky holds no
+    /// Orange at all), so the old rule refused every same-layout recolour on
+    /// the ground that it was a recolour. The cells can tell that case from a
+    /// region whose layout moved, and this fixture is both halves of it.
+    #[test]
+    fn zoned_color_gains_move_a_zero_evidence_hue_band_only_where_the_regions_cells_vouch_it() {
+        let (src, tgt, mask) = zero_evidence_hue_pair(false);
         let path = fixture_mask_path("zoned-evidence-hue");
         mask.save(path.path()).unwrap();
         let mut report = neutral_report(&src, &tgt);
@@ -4664,17 +4888,118 @@ mod tests {
             .masks
             .iter()
             .find(|mask| mask.role == MaskRole::ZoneSky)
-            .expect("the supported luma correction must survive the refused hue band");
-        assert_eq!(sky.color_gains, Some([1.0; 3]));
-        assert_eq!(sky.saturation, 0.0);
+            .expect("the sky zone must attach");
+        let gains = sky.color_gains.expect("a zone always carries its gains");
+        // What is pinned here is the ADMISSION, not the size of the move: the
+        // gain is still bounded by `zone_gain` at this Strength and still
+        // shrunk by the boundary gate afterwards (measured 1.039 on this
+        // fixture), so the rule is that a warm gain SHIPS where R33 flattened
+        // it to unity — not that it arrives whole. `gains_withheld` is the
+        // module's own definition of flattened-to-unity, so the two cannot
+        // drift apart.
+        assert!(
+            !gains_withheld(Some(gains)) && gains[0] > gains[2],
+            "the warm recolour the region's cells vouched must SHIP: {gains:?}"
+        );
         let note = report
             .notes
             .iter()
-            .find(|note| note.key == crate::rationale::keys::ZONE_EVIDENCE_WITHHELD_COLOUR)
+            .find(|note| note.key == crate::rationale::keys::ZONE_COLOUR_VOUCHED_BY_CELLS)
+            .unwrap_or_else(|| panic!("the admission was silent: {}", report.recipe.rationale));
+        assert!(
+            note.args.iter().any(|(key, value)| *key == "hue_bands" && value != "none"),
+            "the band the pixel-scale reading withholds is still named: {note:?}"
+        );
+        let share = |name: &str| {
+            note.args
+                .iter()
+                .find(|(key, _)| *key == name)
+                .and_then(|(_, v)| v.parse::<f32>().ok())
+                .unwrap_or_else(|| panic!("{name} missing from {note:?}"))
+        };
+        assert!(share("converged") >= 0.70, "the note prints what admitted it: {note:?}");
+        assert!(share("aligned") >= 0.70, "…including the direction share: {note:?}");
+        path.remove();
+    }
+
+    /// …and the other half of the same rule: a repaint that took half the
+    /// region one way and half the other is still refused, because the single
+    /// gain the zone's mean asks for drags one of those halves away from its
+    /// own cell targets. The refusal is now a MEASUREMENT rather than a bare
+    /// "zero evidence".
+    #[test]
+    fn a_region_whose_cells_ask_for_opposite_moves_keeps_its_colour_refusal() {
+        let (src, tgt, mask) = zero_evidence_hue_pair(true);
+        let path = fixture_mask_path("zoned-evidence-hue-two-ways");
+        mask.save(path.path()).unwrap();
+        let mut report = neutral_report(&src, &tgt);
+
+        attach_zones(&src, &tgt, &mut report, &mask, &mask, &path);
+
+        if let Some(sky) = report.recipe.masks.iter().find(|m| m.role == MaskRole::ZoneSky) {
+            assert_eq!(
+                sky.color_gains,
+                Some([1.0; 3]),
+                "half the region asks for the opposite move, so none of the gain ships"
+            );
+            assert_eq!(sky.saturation, 0.0);
+        }
+        let note = report
+            .notes
+            .iter()
+            .find(|note| note.key == crate::rationale::keys::ZONE_EVIDENCE_WITHHELD_COLOUR_CELLS)
             .unwrap_or_else(|| panic!("the zoned refusal was silent: {}", report.recipe.rationale));
         assert!(
             note.args.iter().any(|(key, value)| *key == "hue_bands" && value != "none"),
             "the refused hue band must be named: {note:?}"
+        );
+        let cells = note
+            .args
+            .iter()
+            .find(|(key, _)| *key == "cells")
+            .map(|(_, v)| v.as_str())
+            .unwrap_or_else(|| panic!("the refusal must print what it measured: {note:?}"));
+        assert!(
+            cells.contains("converged") || cells.contains("abstained"),
+            "a refusal is a measurement now: {cells}"
+        );
+        path.remove();
+    }
+
+    /// The abstention is load-bearing and unchanged: a region made only of
+    /// pixels no evidence weighted has nothing to say, so every strict
+    /// refusal stands and the note says WHY it could not be lifted.
+    #[test]
+    fn a_region_of_only_unsupported_pixels_abstains_and_the_refusal_stands() {
+        let (src, tgt, mask) = zero_evidence_hue_pair(false);
+        let path = fixture_mask_path("zoned-evidence-hue-abstain");
+        mask.save(path.path()).unwrap();
+        let mut report = neutral_report(&src, &tgt);
+        // Zero the evidence everywhere the MASK reaches on the analysis raster
+        // — its own soft edge included. Zeroing by analysis ROW instead misses
+        // the cell row the feathered boundary straddles, and one read cell is
+        // enough to make the region speak rather than abstain.
+        let (s_img, _) = fit::analysis_pair(&src, &tgt);
+        let alpha = mask_weights(&mask, s_img.width(), s_img.height());
+        for (weight, member) in report.evidence.source_weights.iter_mut().zip(&alpha) {
+            if *member > 0.0 {
+                *weight = 0.0;
+            }
+        }
+
+        attach_zones(&src, &tgt, &mut report, &mask, &mask, &path);
+
+        if let Some(sky) = report.recipe.masks.iter().find(|m| m.role == MaskRole::ZoneSky) {
+            assert_eq!(sky.color_gains, Some([1.0; 3]), "an abstention is never a vouch");
+        }
+        let note = report
+            .notes
+            .iter()
+            .find(|note| note.key == crate::rationale::keys::ZONE_EVIDENCE_WITHHELD_COLOUR_CELLS)
+            .unwrap_or_else(|| panic!("the zoned refusal was silent: {}", report.recipe.rationale));
+        assert!(
+            note.args.iter().any(|(key, value)| *key == "cells" && value.contains("abstained")),
+            "the note must say the cells abstained rather than refused: {note:?}"
         );
         path.remove();
     }
@@ -4846,7 +5171,7 @@ mod tests {
         );
         assert!(
             full_report.notes.iter().any(|note| {
-                note.key == crate::rationale::keys::ZONE_EVIDENCE_WITHHELD_TONE
+                is_tone_refusal(note.key)
                     && note.args.iter().any(|(key, value)| {
                         *key == "label" && value == MaskRole::ZoneSky.tag()
                     })
@@ -4868,7 +5193,7 @@ mod tests {
         );
         assert!(
             !atmosphere_report.notes.iter().any(|note| {
-                note.key == crate::rationale::keys::ZONE_EVIDENCE_WITHHELD_TONE
+                is_tone_refusal(note.key)
             }),
             "an Atmosphere zone must read the blind report ruler: {}",
             atmosphere_report.recipe.rationale
@@ -5577,8 +5902,20 @@ mod tests {
         );
     }
 
+    /// RE-PIN (R34 §D2).
+    ///
+    /// OLD RULE: an Atmosphere zone attaches its luma correction and its
+    /// COLOUR is withheld — always, because the region diverged.
+    /// NEW RULE: it attaches its luma correction, and its colour follows its
+    /// own cells: withheld unless the target's own 12x8 cell means over that
+    /// zone vouch the rendered move, and whichever way it goes the recipe and
+    /// the rationale agree.
+    /// WHY: "this region diverged" is the premise that its pixels are not each
+    /// other's counterparts — which makes the pixel-scale refusal unmeasurable
+    /// rather than correct. The cells are the measurement that premise leaves
+    /// available, and this fixture supplies D 0.80 precisely to reach it.
     #[test]
-    fn a_divergent_zone_is_still_attached_in_atmosphere_mode() {
+    fn a_divergent_zone_is_still_attached_in_atmosphere_mode_and_its_colour_follows_its_cells() {
         let (src, tgt, sky_mask) = zoned_pair();
         let mask_path = fixture_mask_path("zoned-atmos-attached");
         sky_mask.save(mask_path.path()).unwrap();
@@ -5601,16 +5938,12 @@ mod tests {
             .iter()
             .find(|m| m.role == MaskRole::ZoneSky)
             .unwrap_or_else(|| panic!("Atmosphere luma correction was lost: {}", report.recipe.rationale));
-        assert_gains_withheld(sky.color_gains);
-        assert_eq!(sky.saturation, 0.0);
+        let gains = sky.color_gains;
         assert!(report
             .notes
             .iter()
             .any(|n| n.key == crate::rationale::keys::ZONE_MODE_ATMOSPHERE));
-        assert!(report
-            .notes
-            .iter()
-            .any(|n| n.key == crate::rationale::keys::ZONE_EVIDENCE_WITHHELD_COLOUR));
+        assert_colour_verdict_matches_recipe(&report, "sky", gains);
         mask_path.remove();
     }
 
@@ -5637,13 +5970,12 @@ mod tests {
             .masks
             .iter()
             .find(|mask| mask.role == MaskRole::ZoneSky)
-            .expect("the Atmosphere luma correction must survive the refused hue band");
-        assert_gains_withheld(sky.color_gains);
-        assert_eq!(sky.saturation, 0.0);
-        assert!(report
-            .notes
-            .iter()
-            .any(|note| note.key == crate::rationale::keys::ZONE_EVIDENCE_WITHHELD_COLOUR));
+            .expect("the Atmosphere luma correction must survive the hue-band verdict");
+        let gains = sky.color_gains;
+        // R34 §D2 re-pin: the luma correction surviving is this test's subject
+        // and is unchanged; what the colour class does is now its cells' to
+        // decide, and the recipe must agree with the sentence either way.
+        assert_colour_verdict_matches_recipe(&report, "sky", gains);
         mask_path.remove();
     }
 
@@ -5919,6 +6251,39 @@ mod tests {
 
     fn assert_gains_withheld(gains: Option<[f32; 3]>) {
         assert!(gains_withheld(gains), "colour was not withheld: {gains:?}");
+    }
+
+    /// R34 §D2. The RECIPE and the SENTENCE must say the same thing about one
+    /// zone's colour: exactly one verdict is disclosed for it, unity gains go
+    /// with the refusal and a moved gain goes with the vouch. R33's pins
+    /// asserted only the gains, which could not tell "refused" from "nobody
+    /// looked" — and could not survive a design where both outcomes exist.
+    fn assert_colour_verdict_matches_recipe(
+        report: &FitReport,
+        label: &str,
+        gains: Option<[f32; 3]>,
+    ) {
+        let says = |key_matches: &dyn Fn(&str) -> bool| {
+            report.notes.iter().any(|note| {
+                key_matches(note.key)
+                    && note.args.iter().any(|(name, value)| *name == "label" && value == label)
+            })
+        };
+        let vouched = says(&|key| key == crate::rationale::keys::ZONE_COLOUR_VOUCHED_BY_CELLS);
+        let refused = says(&|key| is_colour_refusal(key));
+        assert!(
+            vouched != refused,
+            "exactly one colour verdict must be disclosed for {label}: {}",
+            report.recipe.rationale
+        );
+        if refused {
+            assert_gains_withheld(gains);
+        } else {
+            assert!(
+                !gains_withheld(gains),
+                "a colour the cells vouched must actually ship: {gains:?}"
+            );
+        }
     }
 
     fn note_number(note: &crate::rationale::Note, name: &str) -> f32 {
@@ -7567,7 +7932,7 @@ mod tests {
             report
                 .notes
                 .iter()
-                .any(|note| note.key == crate::rationale::keys::ZONE_EVIDENCE_WITHHELD_COLOUR),
+                .any(|note| is_colour_refusal(note.key)),
             "rationale must disclose the partial sky hue refusal: {}",
             report.recipe.rationale
         );
@@ -7728,6 +8093,115 @@ mod tests {
         mask_path.remove();
     }
 
+    /// R34 §D5. A ZONE whose texture was re-synthesised while its layout held:
+    /// the same slow base ramp, a known affine contrast map, and an
+    /// independent per-pixel hash on each side of the zone. The bottom half is
+    /// byte-identical on both sides, so only the zone is under test.
+    fn resynthesised_zone(target: bool) -> DynamicImage {
+        let (w, h) = (192u32, 128u32);
+        let hash = |i: u32, seed: u32| {
+            let mut v = i.wrapping_mul(747796405).wrapping_add(seed.wrapping_mul(2891336453));
+            v ^= v >> 16;
+            v = v.wrapping_mul(2246822519);
+            v ^= v >> 13;
+            (v % 10_000) as f32 / 10_000.0 - 0.5
+        };
+        DynamicImage::ImageRgb8(RgbImage::from_fn(w, h, |x, y| {
+            let v = if y < h / 2 {
+                let seed = if target { 9_999 } else { 1 };
+                let base = 0.20 + 0.55 * (x as f32 / (w - 1) as f32)
+                    + 0.40 * hash(y * w + x, seed);
+                let base = base.clamp(0.0, 1.0);
+                if target { (0.5 + 1.35 * (base - 0.5)).clamp(0.0, 1.0) } else { base }
+            } else {
+                0.45 + 0.10 * (x as f32 / (w - 1) as f32)
+            };
+            image::Rgb([(v * 255.0).round() as u8; 3])
+        }))
+    }
+
+    /// R34 §D5: MODE governs the control set, SCALE governs the estimator.
+    ///
+    /// The zone above is a Full zone at either divergence — the mode line is
+    /// `DIVERGENCE_ZONE` (0.65) and both readings here are under it — so the
+    /// ONLY thing that changes between the two runs is which estimator solved
+    /// its tone. At Pixel scale the paired regression measures the regression
+    /// of one noise draw on another and errors-in-variables shrinks the slope
+    /// it recovers; at Cell scale the zone's own luma distribution carries the
+    /// map exactly. This is R33 §D's frame-level measurement, at zone level.
+    #[test]
+    fn a_full_zone_whose_pixels_do_not_pair_solves_its_tone_from_its_own_population() {
+        let (src, tgt) = (resynthesised_zone(false), resynthesised_zone(true));
+        let mask = GrayImage::from_fn(192, 128, |_, y| {
+            image::Luma([if y < 64 { 255u8 } else { 0 }])
+        });
+        let path = fixture_mask_path("zone-pairing-scale");
+        mask.save(path.path()).unwrap();
+        let (s_img, t_img) = fit::analysis_pair(&src, &tgt);
+        let t_px = fit::pixels_of(&t_img);
+        let sw = mask_weights(&mask, s_img.width(), s_img.height());
+        let tw = mask_weights(&mask, t_img.width(), t_img.height());
+        let spread = |px: &[[f32; 3]], weights: &[f32]| -> f32 {
+            let mass = weights.iter().map(|w| *w as f64).sum::<f64>().max(1e-9);
+            let mean = px
+                .iter()
+                .zip(weights)
+                .map(|(p, w)| fit::luma601(p) as f64 * *w as f64)
+                .sum::<f64>()
+                / mass;
+            (px.iter()
+                .zip(weights)
+                .map(|(p, w)| *w as f64 * (fit::luma601(p) as f64 - mean).powi(2))
+                .sum::<f64>()
+                / mass)
+                .sqrt() as f32
+        };
+        let wanted = spread(&t_px, &tw);
+        let solve = |d: f32| -> f32 {
+            let mut report = neutral_report(&src, &tgt);
+            let attachment = semantic_attachment(sw.clone(), tw.clone(), &path);
+            let mut frame_err = report.err_after;
+            attach_one_zone(
+                &s_img,
+                &t_px,
+                &mut report,
+                &mut frame_err,
+                &attachment,
+                divergence(d),
+                None,
+            );
+            let rendered = fit::pixels_of(&render::develop_preview(&s_img, &report.recipe));
+            spread(&rendered, &sw)
+        };
+        let (paired, population) = (solve(0.20), solve(0.50));
+        assert!(
+            (population / wanted - 1.0).abs() < (paired / wanted - 1.0).abs(),
+            "the population arm must land closer to the target's own spread: \
+             target {wanted:.4}, pixel scale {paired:.4}, cell scale {population:.4}"
+        );
+        assert!(
+            (population / wanted - 1.0).abs() <= 0.05,
+            "…within 5% of it: target {wanted:.4}, cell scale {population:.4}"
+        );
+        // …and the scale is DISCLOSED where it changed the estimator, and only
+        // there: a Pixel-scale zone is what every zone did before R34.
+        let scale_note = |d: f32| {
+            let mut report = neutral_report(&src, &tgt);
+            let attachment = semantic_attachment(sw.clone(), tw.clone(), &path);
+            let mut frame_err = report.err_after;
+            attach_one_zone(
+                &s_img, &t_px, &mut report, &mut frame_err, &attachment, divergence(d), None,
+            );
+            report
+                .notes
+                .iter()
+                .any(|n| n.key == crate::rationale::keys::ZONE_PAIRING_SCALE)
+        };
+        assert!(scale_note(0.50), "a cell-scale zone says which estimator solved it");
+        assert!(!scale_note(0.20), "a pixel-scale zone says nothing new");
+        path.remove();
+    }
+
     #[test]
     fn synthetic_zone_survives_luminance_with_one_sided_hue_refusal() {
         let (w, h) = (64u32, 64u32);
@@ -7772,7 +8246,7 @@ mod tests {
         assert_eq!(sky.color_gains, Some([1.0; 3]));
         assert_eq!(sky.saturation, 0.0);
         assert!(
-            report.notes.iter().any(|n| n.key == crate::rationale::keys::ZONE_EVIDENCE_WITHHELD_COLOUR),
+            report.notes.iter().any(|n| is_colour_refusal(n.key)),
             "the synthetic acceptance must disclose the refused hue band: {}",
             report.recipe.rationale
         );
@@ -7854,14 +8328,14 @@ mod tests {
         let note = report
             .notes
             .iter()
-            .find(|n| n.key == crate::rationale::keys::ZONE_EVIDENCE_WITHHELD_TONE)
+            .find(|n| is_tone_refusal(n.key))
             .unwrap_or_else(|| panic!("the zoned tone refusal was silent: {}", report.recipe.rationale));
         assert!(
             note.args.iter().any(|(k, v)| *k == "luma_ranges" && !v.is_empty() && v != "none"),
             "the refused luma range must be named: {note:?}"
         );
         assert!(
-            !report.notes.iter().any(|n| n.key == crate::rationale::keys::ZONE_EVIDENCE_WITHHELD_COLOUR),
+            !report.notes.iter().any(|n| is_colour_refusal(n.key)),
             "an achromatic pair must not claim a refused hue band: {}",
             report.recipe.rationale
         );
@@ -8140,7 +8614,7 @@ mod tests {
             !report
                 .notes
                 .iter()
-                .any(|n| n.key == crate::rationale::keys::ZONE_EVIDENCE_WITHHELD_TONE),
+                .any(|n| is_tone_refusal(n.key)),
             "the ground zone must not be vetoed through the sky's bins: {}",
             report.recipe.rationale
         );
@@ -8177,7 +8651,7 @@ mod tests {
             .notes
             .iter()
             .find(|note| {
-                note.key == crate::rationale::keys::ZONE_EVIDENCE_WITHHELD_TONE
+                is_tone_refusal(note.key)
                     && note.args.iter().any(|(key, value)| {
                         *key == "label" && value == land_tag
                     })
@@ -8619,7 +9093,7 @@ mod tests {
             None,
         );
         assert!(
-            report.notes.iter().any(|n| n.key == crate::rationale::keys::ZONE_EVIDENCE_WITHHELD_COLOUR),
+            report.notes.iter().any(|n| is_colour_refusal(n.key)),
             "premise: the one-sided hue withholds colour: {}",
             report.recipe.rationale
         );
@@ -8685,7 +9159,7 @@ mod tests {
             .notes
             .iter()
             .find(|note| {
-                note.key == crate::rationale::keys::ZONE_EVIDENCE_WITHHELD_COLOUR
+                is_colour_refusal(note.key)
                     && note.args.iter().any(|(key, value)| {
                         *key == "label" && value == MaskRole::ZoneSky.tag()
                     })
@@ -8698,7 +9172,7 @@ mod tests {
                 .any(|(key, value)| *key == "hue_bands" && value.contains("Aqua"))
         );
         assert!(!report.notes.iter().any(|note| {
-            note.key == crate::rationale::keys::ZONE_EVIDENCE_WITHHELD_TONE
+            is_tone_refusal(note.key)
                 && note.args.iter().any(|(key, value)| {
                     *key == "label" && value == MaskRole::ZoneSky.tag()
                 })

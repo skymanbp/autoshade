@@ -159,6 +159,23 @@ const ATMOSPHERE_CONFIDENCE_CAP: f32 = 0.50;
 const HSL_BAND_LIMIT_MIN: f32 = 6.0;
 const HSL_BAND_LIMIT_DEFAULT: f32 = 18.0;
 const HSL_BAND_LIMIT_MAX: f32 = 45.0;
+/// R34 §D4. Per-channel gain bound of the SHIPPED colour field, at Strength 0
+/// / the shipped default / Strength 1.
+///
+/// The DEFAULT point is `fit_field::BOUNDS_HIGH`'s own 0.35, and that is not a
+/// coincidence to be tidied away: the field never ships at or below the
+/// default strength, so pinning the default point to the analyzer's constant
+/// is what keeps the default recipe byte-identical while giving the dial
+/// somewhere to go. Above it the bound opens because the demand is measured:
+/// on the desert-dusk reference pair the repainted sky still wants R +0.465 in
+/// linear gain after the whole zone ladder has run, and a field capped at 0.35
+/// answers that by saturating 15 of the horizon row's vertices — a field that
+/// has run out of range is not a measurement of what is left, it is a wall.
+/// 0.80 at Strength 1 leaves headroom above the largest demand this corpus has
+/// shown rather than being fitted to it.
+const FIELD_GAIN_MIN: f32 = 0.35;
+const FIELD_GAIN_DEFAULT: f32 = 0.35;
+const FIELD_GAIN_MAX: f32 = 0.80;
 /// Kelvin domain the WB search walks in log space; landing on either end is
 /// disclosed above default strength (`FIT_NOTE_WB_SEARCH_BOUND`).
 const WB_SEARCH_K: (f32, f32) = (2000.0, 40000.0);
@@ -193,6 +210,12 @@ pub struct FitBudget {
     /// solve the strength dial could not reach, and the zone that most needed
     /// it (R33 §F).
     pub zone_gain: (f32, f32),
+    /// R34 §D4. Per-channel gain bound of the colour field the recipe SHIPS
+    /// (`fit_zoned::field::attach_colour_field`'s support-free pass). The
+    /// ANALYSIS field — the ceiling, the shape verdicts, `LOCAL_STOP_MARGIN` —
+    /// is never solved against this: it keeps `fit_field::BOUNDS_HIGH`, so the
+    /// number the sequencer stops on is the number it has always been.
+    pub field_gain: f32,
     pub vetoes: VetoPolicy,
 }
 
@@ -236,6 +259,7 @@ impl FitBudget {
                 between(0.92, crate::fit_zoned::ZONE_ATMOS_GAIN_MIN, 0.50),
                 between(1.08, crate::fit_zoned::ZONE_ATMOS_GAIN_MAX, 2.00),
             ),
+            field_gain: between(FIELD_GAIN_MIN, FIELD_GAIN_DEFAULT, FIELD_GAIN_MAX),
             vetoes: if s >= 0.85 { VetoPolicy::Disclose } else { VetoPolicy::Withhold },
         }
     }
@@ -2862,6 +2886,7 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure_opts(
                 robust: None,
                 paired: false,
                 vouched_bands: None,
+                cast_cells: None,
                 hsl: HslStageFacts::default(),
                 atmosphere_reference: AtmosphereReference::WholeFrame,
             },
@@ -2895,7 +2920,7 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure_opts(
                 structural_evidence: None,
                 defer_disclosure,
             },
-            SolveFacts { budget: Some(FitBudget::for_strength(options.strength)), strength: Some(options.strength.get()), veto_luma: None, veto_hue: None, wb_clamped: None, wb_search_bound: None, wb_rotation_coverage: None, wb_rotation_disclosure: None, cast_admitted_by_strength: None, cast_admitted: None, cast_projected: None, wb_cells: None, wb_foreign_hue_withheld: false, wb_rotation_withheld: false, sat_pegged: None, cast: CastOutcome::default(), evidence_refused: false, sat_fitted: None, regressed: None, detail: (0.0, 0.0), detail_withheld: true, robust: None, paired: false, vouched_bands: None, hsl: HslStageFacts::default(), atmosphere_reference: AtmosphereReference::WholeFrame },
+            SolveFacts { budget: Some(FitBudget::for_strength(options.strength)), strength: Some(options.strength.get()), veto_luma: None, veto_hue: None, wb_clamped: None, wb_search_bound: None, wb_rotation_coverage: None, wb_rotation_disclosure: None, cast_admitted_by_strength: None, cast_admitted: None, cast_projected: None, wb_cells: None, wb_foreign_hue_withheld: false, wb_rotation_withheld: false, sat_pegged: None, cast: CastOutcome::default(), evidence_refused: false, sat_fitted: None, regressed: None, detail: (0.0, 0.0), detail_withheld: true, robust: None, paired: false, vouched_bands: None, cast_cells: None, hsl: HslStageFacts::default(), atmosphere_reference: AtmosphereReference::WholeFrame },
         );
     }
 
@@ -3308,6 +3333,10 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure_opts(
             && recipe.blue_curve.is_empty())
         {
             let with_px = pixels_of(&render::develop_preview(&s_img, recipe));
+            // R34 §D3. The REGION arm of the hue-damage guard, recomputed for
+            // THIS candidate: a cell verdict is a statement about what an edit
+            // did, so it is as short-lived as the edit.
+            let with_cells = cells.as_ref().and_then(|c| c.region_arm(&cur, &with_px));
             // FOUR gates, all must pass: the aggregate ratio (a marginal win
             // does not earn regional risk), the foreign-hue veto (a large
             // aggregate win does not earn a region painted in hues the target
@@ -3322,6 +3351,7 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure_opts(
                 &tp,
                 &evidence,
                 hue_vouch,
+                cells.as_ref().zip(with_cells.as_ref().map(|(_, v)| v.as_slice())),
                 full_cast_accept_ratio,
             );
             // v1.2.3 — the PROJECTION, and its ORDER is the whole of the
@@ -3348,12 +3378,14 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure_opts(
                     [&fitted[0], &fitted[1], &fitted[2]],
                     look_err_with_evidence(&cur, &tp, &evidence),
                     |px| {
+                        let arm = cells.as_ref().and_then(|c| c.region_arm(&cur, px));
                         cast_gate_outcome_with_ratio(
                             &cur,
                             px,
                             &tp,
                             &evidence,
                             hue_vouch,
+                            cells.as_ref().zip(arm.as_ref().map(|(_, v)| v.as_slice())),
                             full_cast_accept_ratio,
                         )
                     },
@@ -3503,9 +3535,15 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure_opts(
     // but the FINISHED recipe must not move pixels blindly through hue bands
     // no evidence covers — if it does, saturation is the shrinkable dial,
     // with the cast curves refitted each step exactly like the error arm.
-    let mut end_moves_hue =
-        moved_unsupported_hue_range_names_vouched(&sp, &end_px, &evidence, hue_vouch)
-            .is_some();
+    let mut end_cells = cells.as_ref().and_then(|c| c.region_arm(&sp, &end_px));
+    let mut end_moves_hue = moved_unsupported_hue_range_names_vouched(
+        &sp,
+        &end_px,
+        &evidence,
+        hue_vouch,
+        cells.as_ref().zip(end_cells.as_ref().map(|(_, v)| v.as_slice())),
+    )
+    .is_some();
     // The per-band mixer joins global saturation as a shrinkable dial here:
     // it is the second colour move judged only at the composed end state, and
     // leaving it out would let the guard exhaust saturation at zero while the
@@ -3523,9 +3561,15 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure_opts(
         cast = fit_cast_stage(&mut recipe, true);
         end_px = pixels_of(&render::develop_preview(&s_img, &recipe));
         err_after = look_err_with_evidence(&end_px, &tp, &evidence);
-        end_moves_hue =
-            moved_unsupported_hue_range_names_vouched(&sp, &end_px, &evidence, hue_vouch)
-                .is_some();
+        end_cells = cells.as_ref().and_then(|c| c.region_arm(&sp, &end_px));
+        end_moves_hue = moved_unsupported_hue_range_names_vouched(
+            &sp,
+            &end_px,
+            &evidence,
+            hue_vouch,
+            cells.as_ref().zip(end_cells.as_ref().map(|(_, v)| v.as_slice())),
+        )
+        .is_some();
     }
     // TERMINAL delivered-fan check — see `withdraw_curves_for_delivered_fan`
     // for why a calibrated per-stage gate needs a structural re-read here.
@@ -3538,9 +3582,15 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure_opts(
     let cast_withdrawn = matches!(delivered_fan, Some((_, _, None)));
     if cast_withdrawn {
         err_after = look_err_with_evidence(&end_px, &tp, &evidence);
-        end_moves_hue =
-            moved_unsupported_hue_range_names_vouched(&sp, &end_px, &evidence, hue_vouch)
-                .is_some();
+        end_cells = cells.as_ref().and_then(|c| c.region_arm(&sp, &end_px));
+        end_moves_hue = moved_unsupported_hue_range_names_vouched(
+            &sp,
+            &end_px,
+            &evidence,
+            hue_vouch,
+            cells.as_ref().zip(end_cells.as_ref().map(|(_, v)| v.as_slice())),
+        )
+        .is_some();
     }
     let sat_reduced = recipe.saturation != sat_fitted;
     // The end-state guard owns the withdrawal sentence when IT is the loop
@@ -3552,7 +3602,15 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure_opts(
             HslWithdrawal::Error
         });
     }
-    let vouched_bands = vouched_hue_band_names(&sp, &end_px, &evidence, hue_vouch);
+    let end_arm = cells.as_ref().zip(end_cells.as_ref().map(|(_, v)| v.as_slice()));
+    let vouched_bands = vouched_hue_band_names(&sp, &end_px, &evidence, hue_vouch, end_arm);
+    // R34 §D3. The bands the REGION carried, with the verdict it was admitted
+    // on — the same one `region_arm` gated on, not a second reading of it.
+    // Two outcomes, two sentences: this and `vouched_bands` never describe the
+    // same band, because a pixel the paired arm vouches never reaches the cell
+    // arm.
+    let cast_cells = cell_vouched_hue_band_names(&sp, &end_px, &evidence, hue_vouch, end_arm)
+        .zip(end_cells.as_ref().map(|(vouch, _)| *vouch));
     // TERMINAL do-no-harm: saturation is the loop's only shrinkable dial, so
     // it can exhaust at zero with the finished recipe STILL rendering farther
     // from the target than the untouched source (the tone/curve stages have
@@ -3627,7 +3685,16 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure_opts(
                 .then(|| moved_unsupported_luma_range_names(&sp, &after_px, &evidence))
                 .flatten(),
             veto_hue: (budget.vetoes == VetoPolicy::Disclose)
-                .then(|| moved_unsupported_hue_range_names_vouched(&sp, &after_px, &evidence, hue_vouch))
+                .then(|| {
+                    let arm = cells.as_ref().and_then(|c| c.region_arm(&sp, &after_px));
+                    moved_unsupported_hue_range_names_vouched(
+                        &sp,
+                        &after_px,
+                        &evidence,
+                        hue_vouch,
+                        cells.as_ref().zip(arm.as_ref().map(|(_, v)| v.as_slice())),
+                    )
+                })
                 .flatten(),
             // The same budget disclosures Atmosphere makes, because it is the
             // same stage: a Full-mode WB that was scaled back, that landed on
@@ -3688,6 +3755,7 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure_opts(
             robust: robust_facts,
             paired,
             vouched_bands,
+            cast_cells,
             hsl: hsl_facts,
             atmosphere_reference: AtmosphereReference::WholeFrame,
         },
@@ -4192,6 +4260,7 @@ fn fit_atmosphere_from_parts(
             robust: None,
             paired: false,
             vouched_bands: None,
+            cast_cells: None,
             hsl: hsl_facts,
             atmosphere_reference,
         },
@@ -4435,7 +4504,11 @@ fn fit_hsl_stage(
     // this stage's fault and not this stage's to fix (the pipeline-end loop
     // owns that case); only movement this stage ADDS is its own.
     let blind_before =
-        moved_unsupported_hue_range_names_vouched(sp, &before_px, evidence, vouch).is_some();
+        // R34 §D3 deliberately stops here: the mixer has its own cell
+        // admission (`one_sided_vouch` below), asked of the BAND's population
+        // rather than the frame's, and two cell verdicts on one stage would be
+        // two instruments answering one question.
+        moved_unsupported_hue_range_names_vouched(sp, &before_px, evidence, vouch, None).is_some();
 
     // --- admission --------------------------------------------------------
     let (sa, ta) = band_stats_weighted(&before_px, &evidence.source_hue_weights);
@@ -4595,7 +4668,8 @@ fn fit_hsl_stage(
         let regressed = look_err_with_evidence(&px, tp, evidence) > err_before + 1e-4;
         let blind_new = budget.vetoes == VetoPolicy::Withhold
             && !blind_before
-            && moved_unsupported_hue_range_names_vouched(sp, &px, evidence, vouch).is_some();
+            && moved_unsupported_hue_range_names_vouched(sp, &px, evidence, vouch, None)
+                .is_some();
         if !regressed && !blind_new {
             return facts;
         }
@@ -4707,6 +4781,11 @@ struct SolveFacts {
     /// on the finished render — disclosed so the withheld-note's "vetoed
     /// movement" claim is never silently contradicted.
     vouched_bands: Option<String>,
+    /// R34 §D3: one-sided hue bands the REGION's own cells carried movement
+    /// through, and the verdict they were carried on. A different claim from
+    /// `vouched_bands` and therefore a different field: those pixels were
+    /// never individually vouched, and saying they were would be false.
+    cast_cells: Option<(String, crate::fit_cells::CellVouch)>,
     /// The per-band colour mixer's own verdicts: which bands it could not
     /// measure, and whether it gave back what it fitted.
     hsl: HslStageFacts,
@@ -4954,7 +5033,7 @@ fn compose_report(mut recipe: EditRecipe, m: Measured<'_>, solve: SolveFacts) ->
     // is temperature still as-shot on a pair whose light obviously changed? —
     // unanswered.
     if let Some(verdict) = solve.wb_cells {
-        let (converged, diverged) = verdict.vouch.shares();
+        let (converged, diverged, aligned) = verdict.vouch.shares();
         push_note(
             &mut rationale,
             &mut notes,
@@ -4964,7 +5043,11 @@ fn compose_report(mut recipe: EditRecipe, m: Measured<'_>, solve: SolveFacts) ->
                 } else {
                     keys::FIT_NOTE_WB_CELLS_REFUSED
                 },
-                vec![("converged", converged), ("diverged", diverged)],
+                vec![
+                    ("converged", converged),
+                    ("diverged", diverged),
+                    ("aligned", aligned),
+                ],
             ),
         );
     }
@@ -5125,6 +5208,22 @@ fn compose_report(mut recipe: EditRecipe, m: Measured<'_>, solve: SolveFacts) ->
             Note::new(
                 keys::FIT_NOTE_VOUCHED_CONVERGENCE,
                 vec![("bands", bands.clone())],
+            ),
+        );
+    }
+    if let Some((bands, verdict)) = &solve.cast_cells {
+        let (converged, diverged, aligned) = verdict.shares();
+        push_note(
+            &mut rationale,
+            &mut notes,
+            Note::new(
+                keys::FIT_NOTE_CAST_CELLS_VOUCHED,
+                vec![
+                    ("bands", bands.clone()),
+                    ("converged", converged),
+                    ("diverged", diverged),
+                    ("aligned", aligned),
+                ],
             ),
         );
     }
@@ -5547,6 +5646,7 @@ pub fn rescore_report(
                     vouch: crate::fit_cells::CellVouch {
                         converged: read("converged"),
                         diverged: read("diverged"),
+                        aligned: read("aligned"),
                         read: 1,
                     },
                     admitted,
@@ -5587,6 +5687,25 @@ pub fn rescore_report(
             paired: carried(keys::FIT_SUMMARY_WITH_CURVE_PAIRED)
                 || carried(keys::FIT_SUMMARY_NO_CURVE_PAIRED),
             vouched_bands: carried_arg(keys::FIT_NOTE_VOUCHED_CONVERGENCE, "bands"),
+            // …and its region twin, recovered the way the WB cell verdict is:
+            // a rescore re-renders but never re-runs the cell instrument, so
+            // the measurement rides the note it was published in.
+            cast_cells: carried_arg(keys::FIT_NOTE_CAST_CELLS_VOUCHED, "bands").map(|bands| {
+                let read = |arg: &str| {
+                    carried_arg(keys::FIT_NOTE_CAST_CELLS_VOUCHED, arg)
+                        .and_then(|v| v.parse::<f32>().ok())
+                        .unwrap_or(0.0)
+                };
+                (
+                    bands,
+                    crate::fit_cells::CellVouch {
+                        converged: read("converged"),
+                        diverged: read("diverged"),
+                        aligned: read("aligned"),
+                        read: 1,
+                    },
+                )
+            }),
             // The mixer's evidence verdicts cross over for the same reason
             // the cast gates do: the deep step moves global dials, it never
             // re-runs the per-band population gate. What the mixer MOVED is
@@ -5865,8 +5984,9 @@ fn cast_gate_outcome(
     tp: &[[f32; 3]],
     evidence: &EvidenceModel,
     vouch: Option<(&[f32], &[[f32; 3]])>,
+    cells: Option<CellArm<'_>>,
 ) -> CastOutcome {
-    cast_gate_outcome_with_ratio(cur, with_px, tp, evidence, vouch, CAST_ACCEPT_RATIO)
+    cast_gate_outcome_with_ratio(cur, with_px, tp, evidence, vouch, cells, CAST_ACCEPT_RATIO)
 }
 
 /// The panel Strength a report was solved at, recovered from its own notes.
@@ -5887,12 +6007,14 @@ pub(crate) fn carried_strength_from_notes(prior: &[crate::rationale::Note]) -> c
         .unwrap_or_default()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn cast_gate_outcome_with_ratio(
     cur: &[[f32; 3]],
     with_px: &[[f32; 3]],
     tp: &[[f32; 3]],
     evidence: &EvidenceModel,
     vouch: Option<(&[f32], &[[f32; 3]])>,
+    cells: Option<CellArm<'_>>,
     accept_ratio: f32,
 ) -> CastOutcome {
     let err_without = look_err_with_evidence(cur, tp, evidence);
@@ -5907,7 +6029,7 @@ fn cast_gate_outcome_with_ratio(
             && evidence.identifiability < 0.25,
         rehue_blocked: cast_paints_foreign_hues_weighted(cur, with_px, tp, evidence)
             || cast_rotates_a_region_weighted(cur, with_px, evidence)
-            || moved_unsupported_hue_range_names_vouched(cur, with_px, evidence, vouch)
+            || moved_unsupported_hue_range_names_vouched(cur, with_px, evidence, vouch, cells)
                 .is_some(),
         hue_fanned: fan
             .filter(|&(_, added, _)| added >= FAN_DEG)
@@ -7776,7 +7898,7 @@ pub(crate) fn moved_unsupported_range_names(
     with_px: &[[f32; 3]],
     evidence: &EvidenceModel,
 ) -> Option<(String, String)> {
-    let hits = moved_unsupported_range_hits(cur, with_px, evidence, None);
+    let hits = moved_unsupported_range_hits(cur, with_px, evidence, None, None);
     let (luma, hue) = (hits.luma, hits.hue);
     if luma.0 == 0.0 && hue.0 == 0.0 { return None; }
     let names = |hits: &[bool], ranges: &[EvidenceRange]| {
@@ -7790,7 +7912,7 @@ pub(crate) fn moved_unsupported_luma_range_names(
     with_px: &[[f32; 3]],
     evidence: &EvidenceModel,
 ) -> Option<String> {
-    let luma = moved_unsupported_range_hits(cur, with_px, evidence, None).luma;
+    let luma = moved_unsupported_range_hits(cur, with_px, evidence, None, None).luma;
     if luma.0 == 0.0 { return None; }
     Some(luma.1.iter().zip(&evidence.luma).filter_map(|(&hit, range)| hit.then_some(range.label.as_str())).collect::<Vec<_>>().join(", "))
 }
@@ -7800,7 +7922,7 @@ pub(crate) fn moved_unsupported_hue_range_names(
     with_px: &[[f32; 3]],
     evidence: &EvidenceModel,
 ) -> Option<String> {
-    moved_unsupported_hue_range_names_vouched(cur, with_px, evidence, None)
+    moved_unsupported_hue_range_names_vouched(cur, with_px, evidence, None, None)
 }
 
 /// [`moved_unsupported_hue_range_names`] with a per-pixel robust voucher for
@@ -7812,8 +7934,9 @@ pub(crate) fn moved_unsupported_hue_range_names_vouched(
     with_px: &[[f32; 3]],
     evidence: &EvidenceModel,
     vouch: Option<(&[f32], &[[f32; 3]])>,
+    cells: Option<CellArm<'_>>,
 ) -> Option<String> {
-    let hue = moved_unsupported_range_hits(cur, with_px, evidence, vouch).hue;
+    let hue = moved_unsupported_range_hits(cur, with_px, evidence, vouch, cells).hue;
     if hue.0 == 0.0 { return None; }
     Some(hue.1.iter().zip(&evidence.hue).filter_map(|(&hit, range)| hit.then_some(range.label.as_str())).collect::<Vec<_>>().join(", "))
 }
@@ -7823,12 +7946,14 @@ fn moved_unsupported_range_hits(
     with_px: &[[f32; 3]],
     evidence: &EvidenceModel,
     vouch: Option<(&[f32], &[[f32; 3]])>,
+    cells: Option<CellArm<'_>>,
 ) -> MovedRangeHits {
     let mut moved_luma = 0.0f32;
     let mut moved_hue = 0.0f32;
     let mut luma = [false; EVIDENCE_LUMA_BINS];
     let mut hue = [false; EVIDENCE_HUE_BANDS];
     let mut vouched_hue = [false; EVIDENCE_HUE_BANDS];
+    let mut cell_vouched_hue = [false; EVIDENCE_HUE_BANDS];
     for (i, (before, after)) in cur.iter().zip(with_px).enumerate() {
         let unsupported_luma = source_luma_is_withheld(i, evidence);
         let unsupported_hue = source_hue_is_withheld(i, evidence);
@@ -7866,8 +7991,48 @@ fn moved_unsupported_range_hits(
                             .get(i)
                             .is_some_and(|target| converges_toward(target, before, after))
                 });
+            // R34 §D3. THE cell arm, for the pixels the paired one cannot
+            // be ASKED about — a strictly smaller set than the pixels it did
+            // not vouch, and the difference is the whole policy. A pixel
+            // whose texture SURVIVED has a counterpart; moving it away from
+            // that counterpart is evidence against the move, never a reason
+            // to ask its neighbours for a second opinion. Guarding on
+            // `!converges` alone let a surviving region overrule its own
+            // pixels: measured on the canyon-gold fixture, whose synthetic
+            // pair is aligned to the pixel (D 0.028), the cells read
+            // 0.921 / 0.079 / 0.981 and rotated a pale-blue sky 158° into the
+            // target's native gold — the exact policy
+            // `cast_must_not_rotate_the_sky_into_a_target_native_hue` exists
+            // to refuse, and the sentence this arm prints ("those pixels are
+            // re-synthesised and have no paired counterpart") would have been
+            // false about every one of them.
+            //
+            // The reading is the PIXEL's OWN structural confidence against
+            // `DIVERGENCE_GLOBAL` — the same line the mode split and the zone
+            // tone estimator use — and deliberately NOT `spatially`.
+            // `spatial_supported` is `globally_same_content || d <
+            // DIVERGENCE_ZONE`: a frame that pairs overall marks every pixel
+            // of a repainted sky supported, which is R33's "region is not
+            // frame" inside the flag's own definition. The reference frame
+            // reads 0.275, so `spatially` is true right across a sky whose own
+            // reading is 0.617 and whose pixels are therefore not each other's
+            // counterparts. Measured through this predicate rather than
+            // through that flag, the arm still carries [Aqua, Blue] on the
+            // reference pair (0.966 / 0.017 / 0.937) and is refused on the
+            // canyon, which is the whole difference.
+            let unpaired =
+                evidence.spatial_weights.get(i).copied().unwrap_or(1.0) < 1.0 - DIVERGENCE_GLOBAL;
+            let by_cells = unpaired
+                && !converges
+                && cells.is_some_and(|(grid, verdicts)| {
+                    grid.cell_of(i)
+                        .and_then(|cell| verdicts.get(cell).copied().flatten())
+                        == Some(true)
+                });
             if converges {
                 vouched_hue[band] = true;
+            } else if by_cells {
+                cell_vouched_hue[band] = true;
             } else {
                 moved_hue += membership;
                 hue[band] = true;
@@ -7881,7 +8046,7 @@ fn moved_unsupported_range_hits(
     let total = evidence.population.max(1.0);
     if moved_luma / total < ROT_SHARE { moved_luma = 0.0; luma = [false; EVIDENCE_LUMA_BINS]; }
     if moved_hue / total < ROT_SHARE { moved_hue = 0.0; hue = [false; EVIDENCE_HUE_BANDS]; }
-    MovedRangeHits { luma: (moved_luma, luma), hue: (moved_hue, hue), vouched_hue }
+    MovedRangeHits { luma: (moved_luma, luma), hue: (moved_hue, hue), vouched_hue, cell_vouched_hue }
 }
 
 /// The per-range verdicts of one blind-move audit: which withheld ranges were
@@ -7893,7 +8058,20 @@ struct MovedRangeHits {
     luma: (f32, [bool; EVIDENCE_LUMA_BINS]),
     hue: (f32, [bool; EVIDENCE_HUE_BANDS]),
     vouched_hue: [bool; EVIDENCE_HUE_BANDS],
+    /// R34 §D3: the bands the REGION's cells carried movement through, kept
+    /// apart from `vouched_hue` because they are a different claim — "these
+    /// pixels have no counterpart and their cell vouched for them" is not
+    /// "each of these pixels was individually vouched", and a disclosure that
+    /// printed one sentence for both would be saying something untrue about
+    /// one of them.
+    cell_vouched_hue: [bool; EVIDENCE_HUE_BANDS],
 }
+
+/// One candidate render's REGION verdicts, and the grid that indexes them:
+/// `fit_cells`'s answer for the pixels the per-pixel voucher cannot reach.
+/// Recomputed per candidate — it is a verdict about what an edit DID, so it
+/// cannot outlive the edit it judged.
+pub(crate) type CellArm<'a> = (&'a crate::fit_cells::PairedCells, &'a [Option<bool>]);
 
 /// Names of the one-sided hue bands that vouched convergence moved pixels
 /// through on the finished render — the disclosure's raw material.
@@ -7902,10 +8080,28 @@ pub(crate) fn vouched_hue_band_names(
     with_px: &[[f32; 3]],
     evidence: &EvidenceModel,
     vouch: Option<(&[f32], &[[f32; 3]])>,
+    cells: Option<CellArm<'_>>,
 ) -> Option<String> {
-    let hits = moved_unsupported_range_hits(cur, with_px, evidence, vouch);
+    let hits = moved_unsupported_range_hits(cur, with_px, evidence, vouch, cells);
+    band_names(&hits.vouched_hue, evidence)
+}
+
+/// R34 §D3. The other half of the same audit: the one-sided bands the
+/// REGION's cells carried movement through. Two outcomes, two lists, two
+/// sentences — see [`MovedRangeHits::cell_vouched_hue`].
+pub(crate) fn cell_vouched_hue_band_names(
+    cur: &[[f32; 3]],
+    with_px: &[[f32; 3]],
+    evidence: &EvidenceModel,
+    vouch: Option<(&[f32], &[[f32; 3]])>,
+    cells: Option<CellArm<'_>>,
+) -> Option<String> {
+    let hits = moved_unsupported_range_hits(cur, with_px, evidence, vouch, cells);
+    band_names(&hits.cell_vouched_hue, evidence)
+}
+
+fn band_names(hits: &[bool; EVIDENCE_HUE_BANDS], evidence: &EvidenceModel) -> Option<String> {
     let names = hits
-        .vouched_hue
         .iter()
         .zip(&evidence.hue)
         .filter_map(|(&hit, range)| hit.then_some(range.label.as_str()))
@@ -8566,6 +8762,16 @@ mod tests {
         assert!(low.cast_ratio < mid.cast_ratio && mid.cast_ratio < high.cast_ratio);
         assert!(low.zone_gain.0 > mid.zone_gain.0 && mid.zone_gain.0 > high.zone_gain.0);
         assert!(low.zone_gain.1 < mid.zone_gain.1 && mid.zone_gain.1 < high.zone_gain.1);
+        // R34 §D4. The field's gain bound is FLAT up to the default — the
+        // field does not ship there, so a dial that moved it below the default
+        // would be a number with no behaviour behind it — and opens above it.
+        assert_eq!(low.field_gain, mid.field_gain, "flat where the field never ships");
+        assert!(mid.field_gain < high.field_gain, "and monotone where it does");
+        // The two calibration points the reference pair set: 0.85 must reach
+        // the measured sky demand (R +0.465) and 1.0 must clear 0.75.
+        let at85 = FitBudget::for_strength(crate::recipe::GradeStrength::new(0.85));
+        assert!(at85.field_gain >= 0.50, "0.85 reaches the reference sky: {}", at85.field_gain);
+        assert!(high.field_gain >= 0.75, "1.0 reaches the full ladder: {}", high.field_gain);
         assert_eq!(low.vetoes, VetoPolicy::Withhold);
         assert_eq!(high.vetoes, VetoPolicy::Disclose);
     }
@@ -8590,6 +8796,10 @@ mod tests {
                 crate::fit_zoned::ZONE_ATMOS_GAIN_MIN,
                 crate::fit_zoned::ZONE_ATMOS_GAIN_MAX,
             ),
+            // R34 §D4 added this axis; its DEFAULT point is the analyzer's own
+            // `BOUNDS_HIGH` gain, so a default-strength recipe — which never
+            // ships a field at all — is byte-identical.
+            field_gain: crate::fit_field::default_gain_bound(),
             vetoes: VetoPolicy::Withhold,
         });
         assert_eq!(60.0 * b.sat / ATMOSPHERE_SAT_LIMIT, 60.0);
@@ -9113,6 +9323,7 @@ mod tests {
                 robust: None,
                 paired: false,
                 vouched_bands: None,
+                cast_cells: None,
                 hsl: HslStageFacts::default(),
                 atmosphere_reference: AtmosphereReference::WholeFrame,
             },
@@ -12702,7 +12913,9 @@ mod tests {
         let c = cast_stage_candidate(&base, &clean);
         let evidence = evidence_model(&c.cur, &c.tp);
         let out =
-            cast_gate_outcome_with_ratio(&c.cur, &c.with_px, &c.tp, &evidence, None, CAST_ACCEPT_RATIO);
+            cast_gate_outcome_with_ratio(
+                &c.cur, &c.with_px, &c.tp, &evidence, None, None, CAST_ACCEPT_RATIO,
+            );
         let fan = out
             .readings
             .expect("a judged cast carries readings")
@@ -12992,6 +13205,7 @@ mod tests {
             &candidate.tp,
             &evidence_model(&candidate.cur, &candidate.tp),
             None,
+            None,
             widened,
         )
         .readings
@@ -13039,6 +13253,7 @@ mod tests {
             &cur,
             &tp,
             &evidence,
+            None,
             None,
             CAST_ACCEPT_RATIO,
         )
@@ -14748,26 +14963,26 @@ mod tests {
             "premise: the legacy rotation veto must not be what decides this"
         );
 
-        let strict = cast_gate_outcome(&cur, &with_cast, &target, &evidence, None);
+        let strict = cast_gate_outcome(&cur, &with_cast, &target, &evidence, None, None);
         assert!(
             strict.rehue_blocked,
             "with no paired verdict a move through an unmeasurable band is blind: {strict:?}"
         );
         assert_eq!(
-            vouched_hue_band_names(&cur, &with_cast, &evidence, None),
+            vouched_hue_band_names(&cur, &with_cast, &evidence, None, None),
             None,
             "…and nothing was carried, so nothing is named as carried"
         );
 
         let weights = vec![1.0f32; w * h];
         let vouch = Some((weights.as_slice(), target.as_slice()));
-        let vouched = cast_gate_outcome(&cur, &with_cast, &target, &evidence, vouch);
+        let vouched = cast_gate_outcome(&cur, &with_cast, &target, &evidence, vouch, None);
         assert!(
             !vouched.rehue_blocked,
             "every moved pixel converged on its OWN paired target: {vouched:?}"
         );
         assert_eq!(
-            vouched_hue_band_names(&cur, &with_cast, &evidence, vouch).as_deref(),
+            vouched_hue_band_names(&cur, &with_cast, &evidence, vouch, None).as_deref(),
             Some("Aqua"),
             "the band the voucher carried movement through must be disclosed by name"
         );
@@ -14776,6 +14991,169 @@ mod tests {
         // are the same readings.
         assert_eq!(strict.readings, vouched.readings);
         assert_eq!(strict.ratio_rejected, vouched.ratio_rejected);
+    }
+
+    /// R34 §D3, and the positive twin of
+    /// `cast_gate_withholds_motion_where_hue_evidence_is_zero`: the REGION's
+    /// own cells carry a cast through a one-sided band that no per-pixel
+    /// voucher could.
+    ///
+    /// The per-pixel arm is not merely weak here, it is ABSENT: `hue_vouch` is
+    /// `robust_tone.filter(|_| paired)`, and `paired` is false at cell scale,
+    /// so a solve that reached this state has no paired map to vouch with —
+    /// which is exactly the state a repainted region puts the solve in. What
+    /// remains is the target's own verdict on the render: the strip's cell
+    /// means moved toward, and in the direction of, the target's.
+    #[test]
+    fn the_regions_cells_carry_the_cast_through_a_one_sided_band_and_are_named_apart() {
+        let (w, h) = (64usize, 64usize);
+        let hash = |i: usize, seed: u32| {
+            let mut v = (i as u32)
+                .wrapping_mul(747796405)
+                .wrapping_add(seed.wrapping_mul(2891336453));
+            v ^= v >> 16;
+            v = v.wrapping_mul(2246822519);
+            v ^= v >> 13;
+            (v % 1000) as f32 / 1000.0 - 0.5
+        };
+        let mut cur = Vec::with_capacity(w * h);
+        let mut target = Vec::with_capacity(w * h);
+        let mut with_cast = Vec::with_capacity(w * h);
+        for i in 0..w * h {
+            let (x, y) = (i % w, i / w);
+            let base = 0.14 * x as f32 / (w - 1) as f32;
+            // Independent texture draws on the two sides: pixel i on one side
+            // is not pixel i on the other, which is what a repaint does.
+            let here = 0.34 + base + 0.10 * hash(i, 1);
+            let there = 0.34 + base + 0.10 * hash(i, 9_999);
+            let clean = [there, there + 0.02, there + 0.01];
+            if y < 10 {
+                let cyan = [here - 0.22, here + 0.10, here + 0.18];
+                cur.push(cyan);
+                target.push(clean);
+                with_cast.push(std::array::from_fn(|c| cyan[c] + 0.7 * (clean[c] - cyan[c])));
+            } else {
+                cur.push([here, here + 0.02, here + 0.01]);
+                target.push(clean);
+                with_cast.push([here, here + 0.02, here + 0.01]);
+            }
+        }
+        let evidence = evidence_model(&cur, &target);
+        let aqua = &evidence.hue[4];
+        assert!(
+            aqua.source_populated && !aqua.target_populated && aqua.weight <= 0.0,
+            "premise: the band is ONE-SIDED, not sparse and not two-sided: {aqua:?}"
+        );
+
+        let strict = cast_gate_outcome(&cur, &with_cast, &target, &evidence, None, None);
+        assert!(
+            strict.rehue_blocked,
+            "with no verdict at either scale the move is blind: {strict:?}"
+        );
+
+        let cells = crate::fit_cells::PairedCells::build(&target, w as u32, h as u32, &evidence)
+            .expect("a populated pair builds cells");
+        let verdicts = cells.verdicts(&cur, &with_cast, None);
+        let arm = Some((&cells, verdicts.as_slice()));
+        let carried = cast_gate_outcome(&cur, &with_cast, &target, &evidence, None, arm);
+        assert!(
+            !carried.rehue_blocked,
+            "the region's cells moved toward their own targets: {carried:?}"
+        );
+        assert_eq!(
+            cell_vouched_hue_band_names(&cur, &with_cast, &evidence, None, arm).as_deref(),
+            Some("Aqua"),
+            "the band the REGION carried movement through is disclosed by name"
+        );
+        assert_eq!(
+            vouched_hue_band_names(&cur, &with_cast, &evidence, None, arm),
+            None,
+            "…and it is NOT claimed as individually vouched pixels: two outcomes, two lists"
+        );
+        // The two gates the strength budget owns are untouched: the cell arm
+        // lifts ONE arm, and both calls take the same readings.
+        assert_eq!(strict.readings, carried.readings);
+        assert_eq!(strict.ratio_rejected, carried.ratio_rejected);
+    }
+
+    /// R34 §D3's OTHER half, and the rule the first implementation got
+    /// wrong: the cell arm answers for pixels the paired arm cannot be ASKED
+    /// about, not for pixels it did not vouch.
+    ///
+    /// Same fixture as above with ONE change — both sides draw the same
+    /// texture, so every pixel HAS a counterpart. The band is still one-sided,
+    /// the cells still converge, and the veto still stands, because a pixel
+    /// that survived and moved away from its own counterpart is evidence
+    /// against the move rather than a request for a second opinion. Guarding
+    /// on `!converges` instead rotated the canyon-gold sky 158° into the
+    /// target's native gold with the cells reading 0.921 / 0.079 / 0.981.
+    #[test]
+    fn the_cell_arm_is_refused_where_the_pixels_did_survive() {
+        let (w, h) = (64usize, 64usize);
+        let hash = |i: usize| {
+            let mut v = (i as u32).wrapping_mul(747796405).wrapping_add(2891336453);
+            v ^= v >> 16;
+            v = v.wrapping_mul(2246822519);
+            v ^= v >> 13;
+            (v % 1000) as f32 / 1000.0 - 0.5
+        };
+        let mut cur = Vec::with_capacity(w * h);
+        let mut target = Vec::with_capacity(w * h);
+        let mut with_cast = Vec::with_capacity(w * h);
+        for i in 0..w * h {
+            let (x, y) = (i % w, i / w);
+            let here = 0.34 + 0.14 * x as f32 / (w - 1) as f32 + 0.10 * hash(i);
+            let clean = [here, here + 0.02, here + 0.01];
+            if y < 10 {
+                let cyan = [here - 0.22, here + 0.10, here + 0.18];
+                cur.push(cyan);
+                target.push(clean);
+                with_cast.push(std::array::from_fn(|c| cyan[c] + 0.7 * (clean[c] - cyan[c])));
+            } else {
+                cur.push(clean);
+                target.push(clean);
+                with_cast.push(clean);
+            }
+        }
+        let evidence = evidence_model(&cur, &target);
+        let aqua = &evidence.hue[4];
+        assert!(
+            aqua.source_populated && !aqua.target_populated && aqua.weight <= 0.0,
+            "premise: the band is still ONE-SIDED: {aqua:?}"
+        );
+        let survived = evidence
+            .spatial_weights
+            .iter()
+            .filter(|w| **w >= 1.0 - DIVERGENCE_GLOBAL)
+            .count();
+        assert_eq!(
+            survived,
+            evidence.spatial_weights.len(),
+            "premise: with one texture draw every pixel's own structure survived"
+        );
+
+        let cells = crate::fit_cells::PairedCells::build(&target, w as u32, h as u32, &evidence)
+            .expect("a populated pair builds cells");
+        let verdicts = cells.verdicts(&cur, &with_cast, None);
+        let strip = cells.cell_of(5 * w + 5).expect("the strip sits in a cell");
+        assert_eq!(
+            verdicts.get(strip).copied().flatten(),
+            Some(true),
+            "premise: the strip's own cell DID move toward its target — the arm is \
+             refused on the pixels' standing, not because the cells disagreed"
+        );
+        let arm = Some((&cells, verdicts.as_slice()));
+
+        let carried = cast_gate_outcome(&cur, &with_cast, &target, &evidence, None, arm);
+        assert!(
+            carried.rehue_blocked,
+            "a surviving region may not overrule its own pixels: {carried:?}"
+        );
+        assert_eq!(
+            cell_vouched_hue_band_names(&cur, &with_cast, &evidence, None, arm),
+            None,
+            "…and nothing is claimed to have been carried by cells"
+        );
     }
 
     #[test]
@@ -14822,7 +15200,7 @@ mod tests {
             !cast_rotates_a_region(&cur, &with_cast),
             "fixture must isolate unsupported-range motion from the legacy rotation veto"
         );
-        let outcome = cast_gate_outcome(&cur, &with_cast, &target, &evidence, None);
+        let outcome = cast_gate_outcome(&cur, &with_cast, &target, &evidence, None, None);
         assert!(
             outcome.rehue_blocked,
             "a global cast moved a zero-evidence hue range without triggering legacy vetoes: {outcome:?}"
@@ -14970,6 +15348,7 @@ mod tests {
                     robust: None,
                     paired: false,
                     vouched_bands: None,
+                    cast_cells: None,
                     hsl: HslStageFacts::default(),
                     atmosphere_reference: AtmosphereReference::WholeFrame,
                 },

@@ -111,6 +111,28 @@ render did not move the frame toward the target, the recipe returns to as-shot
 and says so. A same-frame pair whose light did not change therefore still
 reports `temperature_k` unset.
 
+**When a region was repainted rather than re-graded.** An AI variant that
+recolours the sky and leaves its layout alone breaks the pixel-to-pixel
+correspondence inside that region, and reverse-fit used to withhold the zone's
+colour and tone controls on exactly that ground — correctly for the pixels,
+wrongly for the region. The same 12×8 cell check now answers for a REGION too —
+but only where that region's own structural reading says its pixels are not each
+other's counterparts, because a region whose pixels do correspond may not
+overrule them. Where it applies, the withheld move is rendered and put to the
+target's own cell means over that zone, and it ships only if most of the
+region's cells moved closer to their own targets *and* in the direction those
+targets ask for. Per control class you will see one of: nothing at all (the
+evidence was never in question); *withheld … zero-evidence hue bands*, the
+sentence unchanged from before, for a region whose pixels do still correspond
+and were therefore the ones asked; *shipped on REGION evidence* with the three
+shares it was admitted on; or, for a region past the pairing line whose cells
+said no, that same refusal with the shares it was decided on — including the
+case where the cells *abstained* because nothing in that region carried
+measurable evidence. Where the cells were asked, a refusal is a measurement now
+rather than a silence. A zone whose own structural reading
+is past the pairing line also says which estimator solved its tone, because a
+per-pixel regression reads a repainted texture's contrast low.
+
 **The colour field.** Past the 65% default, and only there, the fit may also
 attach a smooth 12×8×8 local colour/tone field — the residual its masks and
 range bands cannot shape. It appears in the develop panel's **Local Masks**
@@ -123,6 +145,14 @@ rest of the recipe unchanged. Copy/paste to another photo drops it and tells
 you — its cells are measured on this frame's own geometry and mean nothing on
 someone else's picture. At or below 65% no field is attached and the recipe
 file does not carry the key at all.
+
+Where a region was repainted, the field is solved twice and the target decides
+which answer each of its 96 cells keeps: the ordinary structure-weighted solve,
+or a support-free one with a wider per-channel gain that the panel's Strength
+sets. A cell takes the second only if rendering it moved that cell toward its
+own target; the rationale line says how many of the measured cells did. The
+field is then dropped whole if it makes the frame worse, or if it improved the
+frame by making the sky or the land zone worse.
 
 With **Zoned fit (sky)** enabled, reverse-fit always solves the global recipe
 first. Successful segmentation adds up to four disjoint semantic class bitmap

@@ -65,6 +65,13 @@ An AI decides *what to change*. A deterministic Rust engine *does* it.
   global, semantic, luminance-range and colour-range corrections behind
   evidence gates; past the default Strength it may also carry a smooth
   12×8×8 local colour field, the one control with no Lightroom equivalent.
+  Where a repaint broke the pixel-to-pixel correspondence inside one region —
+  and only there, since a region whose pixels still correspond may not overrule
+  them — that region's own 12×8 cell means decide whether the move ships: closer
+  to each cell's target, and in the direction that target asks for. A
+  same-layout recolour is recoverable, a region whose layout moved is still
+  refused, and the refusal is a measurement printed with the shares it was
+  decided on.
 - **Generative and pixel tools, opt-in and labelled** — reimagine
   (gpt-image-2), retouch, heal and SCUNet denoise are the only paths that can
   invent or alter scene content, and are marked so.

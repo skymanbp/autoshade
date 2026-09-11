@@ -3,7 +3,7 @@
 use image::DynamicImage;
 
 use crate::fit::{self, FitReport};
-use crate::fit_field::{smooth_3tap_luma, LocalField};
+use crate::fit_field::{smooth_3tap_luma, FieldSolveOpts, LocalField};
 use crate::render;
 use super::range::{RANGE_MAX_BANDS, RANGE_MIN_EVIDENCE_SHARE};
 use super::spatial::SPATIAL_MAX_ATTACHMENTS;
@@ -251,31 +251,40 @@ pub(super) fn solve_local_field(
     // mismatch between the two would show here instead of being papered over.
     let realized = realized_share(field.global, field.ceiling, report.err_after)
         .map_or_else(|| "n/a".to_string(), |value| format!("{value:.3}"));
-    crate::rationale::push_note(&mut report.recipe.rationale, &mut report.notes,
-        crate::rationale::Note::new(crate::rationale::keys::LOCAL_CEILING, vec![
-            ("global", format!("{:.6}", field.global)), ("ceiling", format!("{:.6}", field.ceiling)),
-            ("realized", realized), ("saturated", field.saturated.to_string()),
-            ("iterations", field.solve.iterations.to_string()),
-        ]));
+    note(report, crate::rationale::keys::LOCAL_CEILING, vec![
+        ("global", format!("{:.6}", field.global)), ("ceiling", format!("{:.6}", field.ceiling)),
+        ("realized", realized), ("saturated", field.saturated.to_string()),
+        ("iterations", field.solve.iterations.to_string()),
+    ]);
     let bins = if reading.structured_bins.is_empty() { "0:blind".to_string() }
         else { format!("0:blind,{}", reading.structured_bins.iter().map(usize::to_string).collect::<Vec<_>>().join(",")) };
-    crate::rationale::push_note(&mut report.recipe.rationale, &mut report.notes,
-        crate::rationale::Note::new(crate::rationale::keys::LOCAL_SHAPE, vec![
-            ("r2_tiles", format!("{:.3}", reading.r2_tiles)),
-            ("r2_linear", format!("{:.3}", reading.r2_linear)), ("shape", reading.shape.label().into()),
-            ("cap", reading.effective_tile_cap.to_string()), ("structured", bins),
-        ]));
+    note(report, crate::rationale::keys::LOCAL_SHAPE, vec![
+        ("r2_tiles", format!("{:.3}", reading.r2_tiles)),
+        ("r2_linear", format!("{:.3}", reading.r2_linear)), ("shape", reading.shape.label().into()),
+        ("cap", reading.effective_tile_cap.to_string()), ("structured", bins),
+    ]);
     // Bin 0 is named once in LOCAL_SHAPE (`0:blind`); only measured
     // structured bins earn a skip note of their own.
     for &bin in &reading.structured_bins {
-        crate::rationale::push_note(&mut report.recipe.rationale, &mut report.notes,
-            crate::rationale::Note::new(crate::rationale::keys::LOCAL_BAND_SKIPPED, vec![
-                ("bin", bin.to_string()),
-                ("dispersion", format!("{:.2}", field.band_dispersion[bin] * 255.0)),
-                ("max", format!("{:.0}", BAND_DISPERSION_MAX * 255.0)),
-            ]));
+        note(report, crate::rationale::keys::LOCAL_BAND_SKIPPED, vec![
+            ("bin", bin.to_string()),
+            ("dispersion", format!("{:.2}", field.band_dispersion[bin] * 255.0)),
+            ("max", format!("{:.0}", BAND_DISPERSION_MAX * 255.0)),
+        ]);
     }
     Some((field, reading))
+}
+
+/// ONE line for this module's disclosures. Every field note is the same
+/// `push_note(rationale, notes, Note::new(key, args))` triple, and eight copies
+/// of it were eight places for the rationale string and the note list to drift
+/// apart.
+fn note(report: &mut FitReport, key: &'static str, args: Vec<(&'static str, String)>) {
+    crate::rationale::push_note(
+        &mut report.recipe.rationale,
+        &mut report.notes,
+        crate::rationale::Note::new(key, args),
+    );
 }
 
 pub(super) fn realized_share(global: f32, ceiling: f32, err_after: f32) -> Option<f32> {
@@ -293,11 +302,10 @@ pub(super) fn stop_verdict(field: &LocalField, err_after: f32) -> bool {
 pub(super) fn push_realized(report: &mut FitReport, field: &LocalField, producer: &str) {
     let realized = realized_share(field.global, field.ceiling, report.err_after)
         .map_or_else(|| "n/a".to_string(), |value| format!("{value:.3}"));
-    crate::rationale::push_note(&mut report.recipe.rationale, &mut report.notes,
-        crate::rationale::Note::new(crate::rationale::keys::LOCAL_REALIZED, vec![
-            ("producer", producer.into()), ("err_after", format!("{:.6}", report.err_after)),
-            ("ceiling", format!("{:.6}", field.ceiling)), ("realized", realized),
-        ]));
+    note(report, crate::rationale::keys::LOCAL_REALIZED, vec![
+        ("producer", producer.into()), ("err_after", format!("{:.6}", report.err_after)),
+        ("ceiling", format!("{:.6}", field.ceiling)), ("realized", realized),
+    ]);
 }
 
 /// R33 §G. The field as a SHIPPED control, and the last producer in the
@@ -333,47 +341,151 @@ pub(super) fn attach_colour_field(
         return;
     }
     if !stop_verdict_has_headroom(entry, report.err_after) {
-        crate::rationale::push_note(&mut report.recipe.rationale, &mut report.notes,
-            crate::rationale::Note::new(crate::rationale::keys::FIELD_WITHHELD, vec![
-                ("ceiling", format!("{:.6}", entry.ceiling)),
-                ("err_after", format!("{:.6}", report.err_after)),
-                ("margin", format!("{LOCAL_STOP_MARGIN:.3}")),
-            ]));
+        note(report, crate::rationale::keys::FIELD_WITHHELD, vec![
+            ("ceiling", format!("{:.6}", entry.ceiling)),
+            ("err_after", format!("{:.6}", report.err_after)),
+            ("margin", format!("{LOCAL_STOP_MARGIN:.3}")),
+        ]);
         return;
     }
     let (s_img, t_img) = fit::analysis_pair(src, target);
     let current = fit::pixels_of(&render::develop_preview(&s_img, &report.recipe));
     let target_pixels = fit::pixels_of(&t_img);
-    let Some(solved) = LocalField::solve(
-        &current, &target_pixels, s_img.width(), s_img.height(), &report.evidence,
-    ) else {
+    let (w, h) = (s_img.width(), s_img.height());
+    let Some(pass_a) = LocalField::solve(&current, &target_pixels, w, h, &report.evidence)
+    else {
         return;
     };
+    let budget = fit::FitBudget::for_strength(strength);
+    let (solved, admitted, read) =
+        admit_cells(&current, &target_pixels, w, h, report, pass_a, budget.field_gain);
     let after = solved.render(&current);
     let err_with = fit::look_err_with_evidence(&after, &target_pixels, &report.evidence);
     if err_with >= report.err_after {
-        crate::rationale::push_note(&mut report.recipe.rationale, &mut report.notes,
-            crate::rationale::Note::new(crate::rationale::keys::FIELD_REGRESSED, vec![
-                ("before", format!("{:.6}", report.err_after)),
-                ("after", format!("{:.6}", err_with)),
-            ]));
+        note(report, crate::rationale::keys::FIELD_REGRESSED, vec![
+            ("before", format!("{:.6}", report.err_after)),
+            ("after", format!("{:.6}", err_with)),
+        ]);
         return;
     }
+    // …and the do-no-harm the FRAME ruler cannot do. A field that pays for the
+    // sky out of the land wins on the frame and loses the picture, and with
+    // pass B's wider gains that trade is newly affordable. Every attached zone
+    // is re-measured on its own membership, against the same tolerance a zone
+    // is allowed to cost the frame.
+    if let Some((label, was, now)) = zone_regressed(&s_img, report, &after, &target_pixels) {
+        note(report, crate::rationale::keys::FIELD_ZONE_REGRESSED, vec![
+            ("label", label), ("before", format!("{was:.6}")),
+            ("after", format!("{now:.6}")),
+            ("tol", format!("{:.4}", super::ZONE_GLOBAL_REGRESSION_TOL)),
+        ]);
+        return;
+    }
+    note(report, crate::rationale::keys::FIELD_CELLS_ADMITTED, vec![
+        ("admitted", admitted.to_string()), ("read", read.to_string()),
+        ("bound", format!("{:.2}", budget.field_gain)),
+    ]);
     let mut field = solved.as_recipe_field();
     field.round();
     let realized = realized_share(solved.global, solved.ceiling, err_with)
         .map_or_else(|| "n/a".to_string(), |value| format!("{value:.3}"));
-    crate::rationale::push_note(&mut report.recipe.rationale, &mut report.notes,
-        crate::rationale::Note::new(crate::rationale::keys::FIELD_ATTACHED, vec![
-            ("x", field.x.to_string()), ("y", field.y.to_string()), ("b", field.b.to_string()),
-            ("before", format!("{:.6}", report.err_after)),
-            ("after", format!("{:.6}", err_with)),
-            ("ceiling", format!("{:.6}", solved.ceiling)),
-            ("realized", realized),
-            ("saturated", solved.saturated.to_string()),
-        ]));
+    note(report, crate::rationale::keys::FIELD_ATTACHED, vec![
+        ("x", field.x.to_string()), ("y", field.y.to_string()), ("b", field.b.to_string()),
+        ("before", format!("{:.6}", report.err_after)),
+        ("after", format!("{:.6}", err_with)),
+        ("ceiling", format!("{:.6}", solved.ceiling)),
+        ("realized", realized),
+        ("saturated", solved.saturated.to_string()),
+    ]);
     report.recipe.colour_field = Some(field);
     report.err_after = err_with;
+}
+
+/// R34 §D4. PASS B and its admission, the only thing that separates the field
+/// this function ships from the field the analyzer measures.
+///
+/// The analyzer's fit weight is `evidence x local_support x unclipped`, and
+/// `local_support` is `1 - clamp(D)` over the same 12x8 cells this grid is
+/// solved on. On a generative repaint that term is ~0 exactly where the
+/// residual is: on the desert-dusk pair the two rows above the horizon carry
+/// almost no weight, so the field solves them at nothing and the row that DOES
+/// carry weight saturates 15 of its red vertices trying to cover for them.
+/// Dropping the term un-starves the solve, and widening the gain bound gives it
+/// somewhere to go — but a field solved without a structural term is exactly
+/// the "invent your own evidence" this crate refuses by default.
+///
+/// So pass B is not trusted, it is TESTED: solved, rendered, and put to the
+/// target's own cell means. A cell whose mean moved closer to its target AND in
+/// the direction its target asks for takes pass B's eight luma-bin vertices;
+/// every other cell keeps pass A's, unchanged. No cells, no pass B, no change —
+/// the abstention is the pre-R34 field, byte for byte.
+fn admit_cells(
+    current: &[[f32; 3]], target: &[[f32; 3]], width: u32, height: u32,
+    report: &FitReport, pass_a: LocalField, gain: f32,
+) -> (LocalField, usize, usize) {
+    let Some(cells) = crate::fit_cells::PairedCells::build(target, width, height, &report.evidence)
+    else {
+        return (pass_a, 0, 0);
+    };
+    let Some(pass_b) = LocalField::solve_with(
+        current, target, width, height, &report.evidence,
+        crate::fit_field::TIKHONOV, crate::fit_field::SMOOTH, crate::fit_field::ITERATIONS,
+        FieldSolveOpts { gain, local_support: false },
+    ) else {
+        return (pass_a, 0, 0);
+    };
+    let verdicts = cells.verdicts(current, &pass_b.render(current), None);
+    let mut merged = pass_a;
+    let (mut admitted, mut read) = (0usize, 0usize);
+    // Vertex `(iy * FIELD_X + ix) * FIELD_B + ib`: a cell owns the `FIELD_B`
+    // consecutive luma-bin vertices at its own (ix, iy), which is why
+    // `fit_cells` takes its geometry from this grid rather than choosing one.
+    let bins = crate::fit_field::FIELD_B;
+    for (cell, verdict) in verdicts.iter().enumerate() {
+        let Some(vouched) = verdict else { continue };
+        read += 1;
+        if !vouched {
+            continue;
+        }
+        admitted += 1;
+        let span = cell * bins..(cell + 1) * bins;
+        if merged.grid.len() >= span.end && pass_b.grid.len() >= span.end {
+            merged.grid[span.clone()].clone_from_slice(&pass_b.grid[span]);
+        }
+    }
+    (merged, admitted, read)
+}
+
+/// The per-ZONE half of the field's do-no-harm: the first attached zone whose
+/// own look distance the field made worse by more than a zone is ever allowed
+/// to cost the frame, or `None` if it hurt none of them.
+///
+/// Membership comes from [`render::mask_coverage`] — the engine's OWN weight
+/// for that mask, the same number the render applies — so this check and the
+/// pixels it is judging cannot disagree about where the zone is.
+fn zone_regressed(
+    s_img: &DynamicImage, report: &FitReport, after: &[[f32; 3]], target: &[[f32; 3]],
+) -> Option<(String, f32, f32)> {
+    let current = fit::pixels_of(&render::develop_preview(s_img, &report.recipe));
+    report.recipe.masks.iter().find_map(|mask| {
+        if !matches!(mask.role, crate::recipe::MaskRole::ZoneSky | crate::recipe::MaskRole::ZoneLand)
+        {
+            return None;
+        }
+        let coverage =
+            render::mask_coverage(mask, s_img, render::MaskFrame::AsRendered);
+        let weights: Vec<f32> =
+            coverage.as_raw().iter().map(|v| *v as f32 / 255.0).collect();
+        if weights.len() != current.len() || weights.iter().sum::<f32>() <= 0.0 {
+            return None;
+        }
+        let err = |px: &[[f32; 3]]| {
+            fit::look_err_with_evidence(px, target, &report.evidence.scoped(target, &weights, &weights))
+        };
+        let (was, now) = (err(&current), err(after));
+        (now > was + super::ZONE_GLOBAL_REGRESSION_TOL)
+            .then(|| (mask.role.tag().to_string(), was, now))
+    })
 }
 
 /// [`stop_verdict`] read the other way: is there still more than the margin on
@@ -384,11 +496,10 @@ fn stop_verdict_has_headroom(field: &LocalField, err_after: f32) -> bool {
 }
 
 pub(super) fn push_stop(report: &mut FitReport, producer: &str, skipped: &str) {
-    crate::rationale::push_note(&mut report.recipe.rationale, &mut report.notes,
-        crate::rationale::Note::new(crate::rationale::keys::LOCAL_STOP, vec![
-            ("producer", producer.into()), ("skipped", skipped.into()),
-            ("margin", format!("{LOCAL_STOP_MARGIN:.3}")),
-        ]));
+    note(report, crate::rationale::keys::LOCAL_STOP, vec![
+        ("producer", producer.into()), ("skipped", skipped.into()),
+        ("margin", format!("{LOCAL_STOP_MARGIN:.3}")),
+    ]);
 }
 
 #[cfg(test)]
