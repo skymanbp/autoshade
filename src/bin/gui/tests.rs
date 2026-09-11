@@ -7216,24 +7216,35 @@
         }
     }
 
-    /// R30 gate (a): at Style 0 the pipeline opens NO library — `pipeline.rs`'s
-    /// `(req.style > 0.0).then(load_effective)` — so every control in the
-    /// 「Reference libraries」 sub-area is decoration at that setting. Before
-    /// this it drew live: two build entries and three switches that provably
-    /// could not change the next analysis.
+    /// R30 gate (a), split the way the user ruled it: BUILDING a library is not
+    /// READING one.
+    ///
+    /// At Style 0 the pipeline opens no index at all — `pipeline.rs`'s
+    /// `(req.style > 0.0).then(load_effective)` — so the controls that feed an
+    /// analysis (the reference-photo switch, the retrieval engine, 「Use look
+    /// library」) are decoration at that setting and are drawn disabled with
+    /// the reason above them. The folder pickers and the two Build buttons are
+    /// NOT: greying those would have made the library nobody has yet the one
+    /// library nobody can make, and the Style slider's own 「⚠ no library」
+    /// flag points straight at them.
     ///
     /// The threshold is the PIPELINE'S, not a rounded band, so 1% must re-arm
-    /// it — that is why phase ③ exists.
+    /// the read side — that is why phase ③ exists.
     ///
-    /// MUTATION THIS KILLS: delete the `add_enabled_ui(reads_a_library, …)`
-    /// wrapper in panels/ai.rs, widen the comparison to `>= 0.0`, or drop the
-    /// sentence that says why the section is grey.
+    /// MUTATION THIS KILLS: widen the read gate over the build row (phase ②'s
+    /// build witness goes false), drop the wrapper from ANY of the three
+    /// read-side sites (the read witness ORs them, so one ungated control
+    /// flips phase ② on its own), widen the comparison to `>= 0.0`, or drop
+    /// the sentence that says why.
     #[test]
-    fn the_reference_library_area_is_dead_while_style_is_at_zero() {
+    fn the_reference_libraries_build_at_style_zero_but_do_not_read() {
         let ctx = egui::Context::default();
         crate::theme::install_theme(&ctx, crate::theme::ThemePref::Dark);
-        let frame = |app: &mut AutoShadeApp| -> Option<bool> {
-            app.ai_library_gate_enabled = None; // this frame's evidence only
+        // (build side, read side) — one frame answers both, so a change that
+        // moves the boundary between them cannot pass by moving both.
+        let frame = |app: &mut AutoShadeApp| -> (Option<bool>, Option<bool>) {
+            app.ai_library_build_enabled = None; // this frame's evidence only
+            app.ai_library_read_enabled = None;
             let _ = ctx.run(
                 egui::RawInput {
                     screen_rect: Some(egui::Rect::from_min_size(
@@ -7252,28 +7263,41 @@
                     });
                 },
             );
-            app.ai_library_gate_enabled
+            (app.ai_library_build_enabled, app.ai_library_read_enabled)
         };
-        // ① the shipped default: Style is above 0, so the libraries are read.
+        // ① the shipped default: Style is above 0, so both sides are live.
         let mut app = AutoShadeApp::default();
         assert!(app.style_strength > 0.0, "premise: the app ships with Style above 0");
-        assert_eq!(frame(&mut app), Some(true), "a Style above 0 does read a library");
-        // ② Style at 0: nothing in the section can reach the next analysis.
+        assert_eq!(
+            frame(&mut app),
+            (Some(true), Some(true)),
+            "above Style 0 a library is both buildable and read"
+        );
+        // ② Style at 0: the READ side goes dark and the BUILD side does not.
         app.style_strength = 0.0;
         assert_eq!(
             frame(&mut app),
-            Some(false),
-            "at Style 0 the pipeline loads no index at all — the section must not read as live"
+            (Some(true), Some(false)),
+            "at Style 0 the pipeline loads no index — but building one is how a user              gets something for Style to read (user ruling)"
         );
         // …and the reason is ON SCREEN, not only in a tooltip.
         let seen = tall_frame(&mut app, |a, ui| a.ai_panel(ui));
         assert!(
             seen.iter().any(|t| t.contains("Style is at 0%")),
-            "a greyed section must say why it is grey: {seen:?}"
+            "a greyed control must say why it is grey: {seen:?}"
         );
-        // ③ the smallest step off 0 re-arms it.
+        // …beside a build entry that is still there to be used.
+        assert!(
+            seen.iter().any(|t| t.contains("Build / rebuild")),
+            "the build entry stays on the panel at Style 0: {seen:?}"
+        );
+        // ③ the smallest step off 0 re-arms the read side.
         app.style_strength = 0.01;
-        assert_eq!(frame(&mut app), Some(true), "any non-zero Style opens a library");
+        assert_eq!(
+            frame(&mut app),
+            (Some(true), Some(true)),
+            "any non-zero Style opens a library"
+        );
     }
 
     /// R30 gates (b) and (c): 「Use look library」 was a switch that shipped ON

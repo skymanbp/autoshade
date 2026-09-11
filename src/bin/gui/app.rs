@@ -405,13 +405,26 @@ pub(crate) struct AutoShadeApp {
     /// is there or not.
     #[cfg(test)]
     pub(crate) adherence_gate_enabled: Option<bool>,
-    /// Test seam (R30): was the REFERENCE-LIBRARIES sub-area's body enabled
-    /// this frame? At Style 0 the pipeline opens no library at all
-    /// (`(req.style > 0.0).then(load_effective)`), so the whole sub-area is
-    /// drawn disabled — and nothing but this can tell a rebuilt
+    /// Test seam (R30): was the reference libraries' READ side enabled this
+    /// frame? At Style 0 the pipeline opens no library at all
+    /// (`(req.style > 0.0).then(load_effective)`), so the controls that feed an
+    /// analysis are drawn disabled — and nothing but this can tell a rebuilt
     /// `add_enabled_ui(self.style_strength > 0.0, …)` from a comment about one.
+    ///
+    /// ONE Option for a gate applied at THREE sites (the reference-photo
+    /// switch, the retrieval engine, 「Use look library」): the sites fold into
+    /// it with OR, so it answers "was ANY read-side control live this frame?"
+    /// — the question the Style-0 claim actually turns on, and one that a
+    /// wrapper dropped at any single site flips on its own.
     #[cfg(test)]
-    pub(crate) ai_library_gate_enabled: Option<bool>,
+    pub(crate) ai_library_read_enabled: Option<bool>,
+    /// Test seam (R30, user ruling): …and was the BUILD side still live?
+    /// Building a library is not reading one, so gate (a) must never reach the
+    /// folder pickers or the two Build buttons — a library nobody can build is
+    /// a library the Style slider can never be raised onto. Only
+    /// `style_build_inflight` may grey that row.
+    #[cfg(test)]
+    pub(crate) ai_library_build_enabled: Option<bool>,
     /// Test seam (R30): was 「Use look library」 usable this frame? The look
     /// library is retrieved ONLY through the SigLIP 2 query vector, so the
     /// switch is live only when there are finished photos AND an embedding to
@@ -1734,7 +1747,9 @@ impl Default for AutoShadeApp {
             #[cfg(test)]
             adherence_gate_enabled: None,
             #[cfg(test)]
-            ai_library_gate_enabled: None,
+            ai_library_read_enabled: None,
+            #[cfg(test)]
+            ai_library_build_enabled: None,
             #[cfg(test)]
             looks_switch_enabled: None,
             multi_sel: HashSet::new(),

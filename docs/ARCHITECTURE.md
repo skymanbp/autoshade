@@ -1996,10 +1996,13 @@ which is the control that carries the decision. Every other row is untouched.
 GUI's **AI panel › Reference libraries › My Lightroom edits library** (folder
 picker → background worker with per-photo progress; no cancel, because
 `StyleIndex::build` has no cancellation checkpoints, so the button simply stays
-disabled until it lands). R30 gave that entry its own sub-area and gated it:
-the whole 「Reference libraries」 fold is drawn disabled while the Style slider
-sits at 0, because `(req.style > 0.0).then(load_effective)` in `pipeline.rs`
-opens no index at that setting.
+disabled until it lands). R30 gave that entry its own sub-area and gated its
+READ side: while the Style slider sits at 0, `(req.style > 0.0)
+.then(load_effective)` in `pipeline.rs` opens no index, so the controls that
+feed an analysis (the reference-photo switch, the retrieval engine, **Use look
+library**) are drawn disabled with the reason above them. The folder pickers
+and both Build buttons stay live at every Style value — building a library is
+not reading one.
 The index always publishes to the per-user store (`store::style_index_path`);
 the legacy cwd-relative `out/style-index.json` stays readable. Reading it is
 `style::load_effective` / `style::index_info` — ONE central-then-legacy walk

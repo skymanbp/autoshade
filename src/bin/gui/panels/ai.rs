@@ -43,7 +43,11 @@
 //!     that provably read nothing, disclosed only by a rationale note AFTER a
 //!     paid analysis (`pipeline.rs`'s `looks_unreachable`).
 //!
-//! The three gates below (a)/(b)/(c) are those three facts, drawn.
+//! The three gates below (a)/(b)/(c) are those three facts, drawn. Gate (a)
+//! covers the READ side only (user ruling): building a library is not reading
+//! one, so the folder pickers and the two Build buttons stay live at Style 0 —
+//! greying them would make the library nobody has yet the one library nobody
+//! can make, and the Style slider's own 「⚠ no library」 flag points at them.
 use crate::*;
 
 fn style_age_hours(age: Option<std::time::Duration>) -> String {
@@ -372,11 +376,16 @@ impl AutoShadeApp {
     /// download — which is what its 「· local」 tag says. COLLAPSED by default
     /// because it is a setup-time surface: built once, then left alone.
     ///
-    /// Gate (a) lives here: at Style 0 the pipeline opens no library at all
-    /// (`(req.style > 0.0).then(load_effective)`), so every control below is
-    /// decoration at that setting and the whole body is drawn disabled with
-    /// the reason above it. Gates (b) and (c) — the look library's dependency
-    /// on the SigLIP 2 query vector, and the default trap that ships from it —
+    /// Gate (a) is decided here and applied by the three rungs, on the READ
+    /// side ONLY (user ruling): at Style 0 the pipeline opens no library at all
+    /// (`(req.style > 0.0).then(load_effective)`), so the controls that feed an
+    /// analysis — the reference-photo switch, the retrieval engine, 「Use look
+    /// library」 — are drawn disabled with the reason above them, while the
+    /// folder pickers and the two Build buttons stay live at every Style value.
+    /// BUILDING a library is not READING one, and greying the build entry at
+    /// Style 0 would have made the library nobody has yet the one library
+    /// nobody can make. Gates (b) and (c) — the look library's dependency on
+    /// the SigLIP 2 query vector, and the default trap that ships from it —
     /// belong to one rung and live in [`AutoShadeApp::ai_look_library`].
     fn ai_libraries(&mut self, ui: &mut egui::Ui) {
         let lang = self.lang;
@@ -392,7 +401,10 @@ impl AutoShadeApp {
         }
         ui.add_space(SPACE_XS);
         // Gate (a). Read off the SAME comparison the pipeline makes, so the
-        // two can never disagree about what "reads a library" means.
+        // two can never disagree about what "reads a library" means. Handed to
+        // each rung rather than wrapped around them, because the rungs mix
+        // build-side and read-side controls and only the second half is dead
+        // at Style 0.
         let reads_a_library = self.style_strength > 0.0;
         egui::CollapsingHeader::new(tr(lang, "Reference libraries · local"))
             .id_salt("sec_ai_libraries")
@@ -414,18 +426,26 @@ impl AutoShadeApp {
                         .small(),
                     );
                 }
-                ui.add_enabled_ui(reads_a_library, |ui| {
-                    #[cfg(test)]
-                    {
-                        // The gate's own witness (the same seam as
-                        // `ai_gate_enabled`): a comment cannot keep it here.
-                        self.ai_library_gate_enabled = Some(ui.is_enabled());
-                    }
-                    self.ai_edits_library(ui);
-                    self.ai_retrieval_engine(ui);
-                    self.ai_look_library(ui);
-                });
+                self.ai_edits_library(ui, reads_a_library);
+                self.ai_retrieval_engine(ui, reads_a_library);
+                self.ai_look_library(ui, reads_a_library);
             });
+    }
+
+    /// Fold one read-side wrapper's enablement into the single witness the
+    /// gate-(a) test reads.
+    ///
+    /// OR, deliberately — not AND, and not assignment. The claim being pinned
+    /// is 「at Style 0 NO read-side control is live」, so the witness has to
+    /// answer 「was ANY of them live?」: a wrapper dropped at one of the three
+    /// sites then flips it true on its own, where an AND would have been
+    /// masked by the two sites that still said false. The test clears it each
+    /// frame, so `None` means "no read-side control laid out at all" — also a
+    /// red, since the assertions compare against `Some`.
+    #[cfg(test)]
+    fn note_library_read_gate(&mut self, ui: &egui::Ui) {
+        let live = self.ai_library_read_enabled.unwrap_or(false) || ui.is_enabled();
+        self.ai_library_read_enabled = Some(live);
     }
 
     /// Ladder rung 1 — YOUR OWN EDITS (RAW + `.xmp`): what the Style slider
@@ -439,7 +459,7 @@ impl AutoShadeApp {
     /// "I have no idea which library it is referencing". So the status line is
     /// not decoration here, it is half the feature, and it stays at the head of
     /// this rung rather than behind a fold of its own.
-    fn ai_edits_library(&mut self, ui: &mut egui::Ui) {
+    fn ai_edits_library(&mut self, ui: &mut egui::Ui, reads_a_library: bool) {
         let lang = self.lang;
         group_caption(ui, tr(lang, "My Lightroom edits library (RAW + .xmp)"));
         // ── the status line: which library, how big, how old, and where.
@@ -509,6 +529,14 @@ impl AutoShadeApp {
             let mut pick = false;
             let mut build: Option<PathBuf> = None;
             ui.add_enabled_ui(!building, |ui| {
+                #[cfg(test)]
+                {
+                    // The BUILD side's own witness. Gate (a) must never reach
+                    // this row (user ruling), so a read gate accidentally
+                    // widened over it turns this false — which is exactly the
+                    // regression the split exists to prevent.
+                    self.ai_library_build_enabled = Some(ui.is_enabled());
+                }
                 if ui
                     // 🗂, the same glyph Settings uses for a folder action: the
                     // embedded font subset covers it already (📂 is not in it).
@@ -650,17 +678,24 @@ impl AutoShadeApp {
             self.style_info.as_ref().map(|i| &i.state),
             Some(autoshade::style::StyleIndexState::Built { .. })
         );
-        ui.add_enabled_ui(built, |ui| {
-            ui.checkbox(
-                &mut self.send_style_ref_image,
-                tr(lang, "Also give the model a reference photo"),
-            )
-            .on_hover_text(if built {
-                tr(lang,
-                    "WILL UPLOAD TWO IMAGES per analysis call: this photo, plus the ONE most similar shot from your style library, so the model can match your look by eye instead of only by numbers. COST: an analysis with two images is billed for two images instead of one — and a revision round sends both again. The reference is never stored by the provider (store:false), and the rationale names the photo that was used. Off = the numeric style reference only.",
+        // …and it is a READ-side switch: the reference photo rides an analysis
+        // call, so gate (a) wraps it. OUTSIDE the `built` gate, so the witness
+        // reads the gate and not the library's existence.
+        ui.add_enabled_ui(reads_a_library, |ui| {
+            #[cfg(test)]
+            self.note_library_read_gate(ui);
+            ui.add_enabled_ui(built, |ui| {
+                ui.checkbox(
+                    &mut self.send_style_ref_image,
+                    tr(lang, "Also give the model a reference photo"),
                 )
-            } else {
-                tr(lang, "Build a style library first — there is no reference photo to send")
+                .on_hover_text(if built {
+                    tr(lang,
+                        "WILL UPLOAD TWO IMAGES per analysis call: this photo, plus the ONE most similar shot from your style library, so the model can match your look by eye instead of only by numbers. COST: an analysis with two images is billed for two images instead of one — and a revision round sends both again. The reference is never stored by the provider (store:false), and the rationale names the photo that was used. Off = the numeric style reference only.",
+                    )
+                } else {
+                    tr(lang, "Build a style library first — there is no reference photo to send")
+                });
             });
         });
     }
@@ -670,29 +705,38 @@ impl AutoShadeApp {
     /// that is where it sits in the pipeline: rung 1 still works without it
     /// (the 14-dim feature retrieval), rung 3 does not — `pipeline.rs`'s
     /// `query_embed` is the only query vector the look search has.
-    fn ai_retrieval_engine(&mut self, ui: &mut egui::Ui) {
+    fn ai_retrieval_engine(&mut self, ui: &mut egui::Ui, reads_a_library: bool) {
         let lang = self.lang;
         ui.add_space(SPACE_XS);
         ui.separator();
+        // The CAPTION stays live in all three rungs, gated or not: it is the
+        // ladder's own structure, and a greyed rung still has to be readable
+        // as a rung.
         group_caption(ui, tr(lang, "Retrieval engine"));
-        ui.checkbox(&mut self.style_embed, tr(lang, "Use SigLIP 2 look embedding (downloads 1.5 GB once; index builds and analyses take longer)"))
-            .on_hover_text(tr(lang, "Embedding is optional and local. The environment override wins when set; rebuild the index after changing this switch."));
-        // The description pass needs the embedding pass: it runs over the same
-        // staged frames, and its prose only reaches the ranking through the
-        // SigLIP text tower.
-        ui.add_enabled_ui(self.style_embed, |ui| {
-            ui.checkbox(&mut self.style_describe, tr(lang, "Describe looks with the local vision model (downloads 4.3 GB once; slower builds)"))
-                .on_hover_text(if self.style_embed {
-                    tr(lang, "Writes ONE short sentence per photo about its GRADE — white balance, tonality, contrast, colour, finishing — with a local model (Qwen3-VL-2B). Nothing leaves this machine and nothing is billed. Descriptions are cached by frame content, so a rebuild only describes what changed. Off = the fixed attribute tags alone.")
-                } else {
-                    tr(lang, "Turn on the look embedding first — the description pass runs over the same frames")
-                });
+        // The whole rung is read-side — both switches only ever change how a
+        // query is matched — so gate (a) covers it entire.
+        ui.add_enabled_ui(reads_a_library, |ui| {
+            #[cfg(test)]
+            self.note_library_read_gate(ui);
+            ui.checkbox(&mut self.style_embed, tr(lang, "Use SigLIP 2 look embedding (downloads 1.5 GB once; index builds and analyses take longer)"))
+                .on_hover_text(tr(lang, "Embedding is optional and local. The environment override wins when set; rebuild the index after changing this switch."));
+            // The description pass needs the embedding pass: it runs over the
+            // same staged frames, and its prose only reaches the ranking
+            // through the SigLIP text tower.
+            ui.add_enabled_ui(self.style_embed, |ui| {
+                ui.checkbox(&mut self.style_describe, tr(lang, "Describe looks with the local vision model (downloads 4.3 GB once; slower builds)"))
+                    .on_hover_text(if self.style_embed {
+                        tr(lang, "Writes ONE short sentence per photo about its GRADE — white balance, tonality, contrast, colour, finishing — with a local model (Qwen3-VL-2B). Nothing leaves this machine and nothing is billed. Descriptions are cached by frame content, so a rebuild only describes what changed. Off = the fixed attribute tags alone.")
+                    } else {
+                        tr(lang, "Turn on the look embedding first — the description pass runs over the same frames")
+                    });
+            });
         });
     }
 
     /// Ladder rung 3 — FINISHED PHOTOS (JPEG): the look library, plus the two
     /// gates that stop its switch from lying about itself.
-    fn ai_look_library(&mut self, ui: &mut egui::Ui) {
+    fn ai_look_library(&mut self, ui: &mut egui::Ui, reads_a_library: bool) {
         let lang = self.lang;
         ui.add_space(SPACE_XS);
         ui.separator();
@@ -728,19 +772,25 @@ impl AutoShadeApp {
         let has_looks = matches!(self.style_info.as_ref().map(|i| &i.state), Some(autoshade::style::StyleIndexState::Built { looks, .. }) if *looks > 0);
         let retrievable = self.style_embed;
         ui.horizontal_wrapped(|ui| {
-            ui.add_enabled_ui(has_looks && retrievable, |ui| {
+            // Gate (a) OUTSIDE gates (b)/(c): three reasons this switch can be
+            // dead, and each witness has to read its own one.
+            ui.add_enabled_ui(reads_a_library, |ui| {
                 #[cfg(test)]
-                {
-                    // The gate's own witness (the same seam as
-                    // `ai_gate_enabled`): a comment cannot keep it here.
-                    self.looks_switch_enabled = Some(ui.is_enabled());
-                }
-                let resp = ui.checkbox(&mut self.use_looks, tr(lang, "Use look library"));
-                if !retrievable {
-                    resp.on_hover_text(tr(lang,
-                        "Turn on the SigLIP 2 look embedding first — the look library is retrieved through it",
-                    ));
-                }
+                self.note_library_read_gate(ui);
+                ui.add_enabled_ui(has_looks && retrievable, |ui| {
+                    #[cfg(test)]
+                    {
+                        // The gate's own witness (the same seam as
+                        // `ai_gate_enabled`): a comment cannot keep it here.
+                        self.looks_switch_enabled = Some(ui.is_enabled());
+                    }
+                    let resp = ui.checkbox(&mut self.use_looks, tr(lang, "Use look library"));
+                    if !retrievable {
+                        resp.on_hover_text(tr(lang,
+                            "Turn on the SigLIP 2 look embedding first — the look library is retrieved through it",
+                        ));
+                    }
+                });
             });
             // (c) the DEFAULT TRAP, named where it happens rather than after a
             // paid call: `use_looks` defaults to true and `style_embed` to
