@@ -18,8 +18,8 @@ use rayon::prelude::*;
 
 /// Grid extent on the x, y and luma axes.  A vertex is
 /// `(iy * FIELD_X + ix) * FIELD_B + ib`, exactly `splat_table`'s order.
-const FIELD_X: usize = 12;
-const FIELD_Y: usize = 8;
+pub(crate) const FIELD_X: usize = 12;
+pub(crate) const FIELD_Y: usize = 8;
 const FIELD_B: usize = 8;
 /// The parameters carried at every vertex: `[ev, gain_r, gain_g, gain_b, slope]`.
 const PARAMS: usize = 5;
@@ -218,7 +218,10 @@ pub(crate) fn local_support(
 }
 
 /// Both frames strictly inside `(1/255, 254/255)` on all three channels.
-fn unclipped(p: &[f32; 3]) -> bool {
+/// `pub(crate)`: [`crate::fit_cells`] excludes the same pixels from its cell
+/// means for the same reason, and two copies of this line would be two
+/// definitions of "this pixel cannot move".
+pub(crate) fn unclipped(p: &[f32; 3]) -> bool {
     p[0].min(p[1]).min(p[2]) > 1.0 / 255.0 && p[0].max(p[1]).max(p[2]) < 254.0 / 255.0
 }
 

@@ -520,7 +520,7 @@ const EVIDENCE_DIVERGENCE_CUTOFF: f32 = 1.0;
 /// calibration is D=0.628 and survives, while the invented-sky value ranges
 /// retain only 9-16% and do not.
 const EVIDENCE_RANGE_SURVIVAL_MIN: f32 = 1.0 - DIVERGENCE_ZONE;
-const UNSUPPORTED_RANGE_MOVE: f32 = 2.0 / 255.0;
+pub(crate) const UNSUPPORTED_RANGE_MOVE: f32 = 2.0 / 255.0;
 /// The same-content texture calibration retains 0.341 identifiability; the
 /// invented-sky pair retains 0.218. Detail fitting is enabled between them.
 const DETAIL_EVIDENCE_MIN_IDENTIFIABILITY: f32 = 0.30;
@@ -2639,12 +2639,18 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure_opts(
     let tp = pixels_of(&t_img);
     let evidence = evidence_model_for(&sp, &tp, s_img.width(), s_img.height());
     let err_before = look_err_with_evidence(&sp, &tp, &evidence);
+    // The paired-CELL instrument, built once off the frozen evidence model and
+    // the target raster: every admission below asks the SAME cells, so two
+    // stages cannot vouch against two different targets. One pass over the
+    // raster — nothing here runs a second structural instrument.
+    let cells = crate::fit_cells::PairedCells::build(&tp, s_img.width(), s_img.height(), &evidence);
     // ONE reading per solve, at both scales, off one raster build. The mode
     // line and every evidence gate read the FINE number; the coarse one is
     // carried for the disclosure (see [`COARSE_SIGMA_DIVISOR`] for why it is
     // not a more forgiving reading and therefore gates nothing).
     let readings = divergence_pair_for(src, target, base);
     let divergence = readings.fine;
+    let pairing = readings.scale();
     // Atmosphere is the claim that the structure was REPLACED, so an
     // abstention cannot promote into it: `is_some_and` refuses to fire on a
     // reading nobody took, where the old `d >= …` on a matched-by-default
@@ -2832,6 +2838,7 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure_opts(
             budget: Some(FitBudget::for_strength(options.strength)), strength: Some(options.strength.get()), veto_luma: None, veto_hue: None, wb_clamped: None,
                 wb_search_bound: None, wb_rotation_coverage: None, wb_rotation_disclosure: None, cast_admitted_by_strength: None, cast_admitted: None,
                 cast_projected: None,
+                wb_cells: None,
                 wb_foreign_hue_withheld: false,
                 wb_rotation_withheld: false,
                 sat_pegged: None,
@@ -2877,7 +2884,7 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure_opts(
                 structural_evidence: None,
                 defer_disclosure,
             },
-            SolveFacts { budget: Some(FitBudget::for_strength(options.strength)), strength: Some(options.strength.get()), veto_luma: None, veto_hue: None, wb_clamped: None, wb_search_bound: None, wb_rotation_coverage: None, wb_rotation_disclosure: None, cast_admitted_by_strength: None, cast_admitted: None, cast_projected: None, wb_foreign_hue_withheld: false, wb_rotation_withheld: false, sat_pegged: None, cast: CastOutcome::default(), evidence_refused: false, sat_fitted: None, regressed: None, detail: (0.0, 0.0), detail_withheld: true, robust: None, paired: false, vouched_bands: None, hsl: HslStageFacts::default(), atmosphere_reference: AtmosphereReference::WholeFrame },
+            SolveFacts { budget: Some(FitBudget::for_strength(options.strength)), strength: Some(options.strength.get()), veto_luma: None, veto_hue: None, wb_clamped: None, wb_search_bound: None, wb_rotation_coverage: None, wb_rotation_disclosure: None, cast_admitted_by_strength: None, cast_admitted: None, cast_projected: None, wb_cells: None, wb_foreign_hue_withheld: false, wb_rotation_withheld: false, sat_pegged: None, cast: CastOutcome::default(), evidence_refused: false, sat_fitted: None, regressed: None, detail: (0.0, 0.0), detail_withheld: true, robust: None, paired: false, vouched_bands: None, hsl: HslStageFacts::default(), atmosphere_reference: AtmosphereReference::WholeFrame },
         );
     }
 
@@ -3103,6 +3110,79 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure_opts(
         recipe.tone_curve = base.tone_curve.clone();
     }
 
+    // --- 2b) white balance ---------------------------------------------------
+    // Full mode had no white-balance stage AT ALL until R33 — not a gate that
+    // could open, an absent stage — so the one control that says "the light
+    // was a different colour" existed only on the branch taken when the
+    // structure was judged unrecoverable. A same-frame regrade that turned a
+    // grey sky orange therefore had to express the whole cast through
+    // saturation, the per-band mixer and three channel curves, and the hue
+    // gates (correctly) refused most of it.
+    //
+    // It sits AFTER tone and BEFORE saturation for the reason stage 3 already
+    // gives about the cast curves: the chroma chase reads mean chroma, and
+    // reading it on a frame whose illuminant is still wrong asks saturation to
+    // pay for a white-balance error.
+    //
+    // ADMISSION, not estimation. The demand is solved from the population
+    // exactly as Atmosphere solves it; what decides whether it SHIPS is the
+    // target's own verdict on the render it produces — the paired cells over
+    // the whole frame. A cast the cells say took the frame AWAY from its
+    // target is returned to as-shot and named, because an edit may not create
+    // its own evidence.
+    let anchor = base.as_shot_k.unwrap_or(5500.0);
+    let wb_weights: Vec<f32> = {
+        let n = sp.len().min(tp.len());
+        // At PIXEL scale a pixel's robust tone weight is a statement about its
+        // own pairing; at CELL scale it is not, and the cell's structural
+        // trust takes its place.
+        let robust = robust_tone
+            .as_ref()
+            .filter(|_| paired && pairing == PairingScale::Pixel);
+        (0..n)
+            .map(|i| {
+                let trust = match (&robust, &cells) {
+                    (Some(r), _) => r.weights.get(i).copied().unwrap_or(0.0),
+                    (None, Some(c)) => c.pixel_trust(i),
+                    (None, None) => 1.0,
+                };
+                evidence.source_weights[i].min(evidence.target_weights[i]).max(0.0) * trust
+            })
+            .collect()
+    };
+    let (free_k, free_tint, _wanted) =
+        atmosphere_wb_from_populations(&sp, &tp, &wb_weights, anchor);
+    let before_wb = pixels_of(&render::develop_preview(&s_img, &recipe));
+    let wb_restore = (recipe.temperature_k, recipe.tint);
+    let wb_facts = solve_white_balance(
+        &s_img,
+        &tp,
+        &mut recipe,
+        base,
+        &evidence,
+        (free_k, free_tint),
+        anchor,
+        budget,
+        options.strength,
+    );
+    // The verdict is on what the stage DID, not on what it wanted.
+    let wb_moved = (recipe.temperature_k, recipe.tint) != wb_restore;
+    let wb_cells = wb_moved
+        .then(|| {
+            cells.as_ref().map(|c| {
+                c.vouch(&before_wb, &pixels_of(&render::develop_preview(&s_img, &recipe)), None)
+            })
+        })
+        .flatten();
+    // An ABSTENTION cannot admit a control either: where no cell resolved
+    // there is no verdict, and a stage that did not exist before does not get
+    // to ship on silence.
+    if wb_moved && !wb_cells.is_some_and(|v| v.vouched()) {
+        (recipe.temperature_k, recipe.tint) = wb_restore;
+    }
+    let wb_admitted = (recipe.temperature_k, recipe.tint) != wb_restore;
+    let wb_cells = wb_cells.map(|vouch| WbCellVerdict { vouch, admitted: wb_admitted });
+
     // --- 3) global saturation, secant-refined through the real engine --------
     // Saturation stays BEFORE the cast curves: channel CDFs of a desaturated
     // render differ from the target's even with zero cast (each channel's
@@ -3198,7 +3278,8 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure_opts(
     // engine agrees — it runs the mixer before saturation and the RGB curves
     // before the mixer — which is exactly why both colour stages measure
     // their demand on a re-render rather than on an algebraic composition.
-    let mut hsl_facts = fit_hsl_stage(&s_img, &sp, &tp, &evidence, hue_vouch, budget, &mut recipe);
+    let mut hsl_facts =
+        fit_hsl_stage(&s_img, &sp, &tp, &evidence, hue_vouch, cells.as_ref(), budget, &mut recipe);
     let hsl_fitted = recipe.hsl.clone();
     let mut cast_admission: Option<(f32, f32)> = None;
     // `rescue` = may a fan-convicted cast be PROJECTED into something
@@ -3540,12 +3621,18 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure_opts(
             veto_hue: (budget.vetoes == VetoPolicy::Disclose)
                 .then(|| moved_unsupported_hue_range_names_vouched(&sp, &after_px, &evidence, hue_vouch))
                 .flatten(),
-            wb_clamped: None,
-            wb_search_bound: None,
-            wb_rotation_coverage: None,
-            wb_rotation_disclosure: None,
-            wb_foreign_hue_withheld: false,
-            wb_rotation_withheld: false,
+            // The same budget disclosures Atmosphere makes, because it is the
+            // same stage: a Full-mode WB that was scaled back, that landed on
+            // the Kelvin domain's edge, or that the hue gates zeroed says so in
+            // the same words. Quoted only where a WB actually shipped — a
+            // demand the cells refused carries its own note instead.
+            wb_clamped: wb_admitted.then_some(wb_facts.clamped).flatten(),
+            wb_search_bound: wb_admitted.then_some(wb_facts.search_bound).flatten(),
+            wb_rotation_coverage: wb_admitted.then_some(wb_facts.rotation_coverage),
+            wb_rotation_disclosure: wb_admitted.then_some(wb_facts.rotation_disclosure).flatten(),
+            wb_cells,
+            wb_foreign_hue_withheld: wb_admitted && wb_facts.foreign_hue_withheld,
+            wb_rotation_withheld: wb_admitted && wb_facts.rotation_withheld,
             sat_pegged: sat_pegged.then_some(FitMode::Full),
             cast,
             // …and NOT on a projected cast, for the same reason `cast_admitted`
@@ -3620,6 +3707,169 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure_opts(
         );
     }
     report
+}
+
+/// The paired cells' verdict on a rendered white balance, and what came of it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct WbCellVerdict {
+    vouch: crate::fit_cells::CellVouch,
+    admitted: bool,
+}
+
+/// What the white-balance stage decided, in the shape the report needs.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct WbFacts {
+    /// `(ratio_before, ratio_after, rotated_share, rotation_coverage)` when
+    /// the scalar was reduced at all.
+    clamped: Option<(f32, f32, f32, f32)>,
+    /// The free search landed on the finite Kelvin domain's edge.
+    search_bound: Option<f32>,
+    /// Coverage of the rotation census the gates were read on.
+    rotation_coverage: f32,
+    /// `(share, coverage)` when the rotation budget alone forced it to zero.
+    rotation_disclosure: Option<(f32, f32)>,
+    foreign_hue_withheld: bool,
+    rotation_withheld: bool,
+}
+
+/// THE white-balance stage, for BOTH modes.
+///
+/// The caller brings the free `(k, tint)` its own population estimated and the
+/// anchor it is measured from; this function decides how much of that demand
+/// is spent — the shipped default persists an in-budget free WB verbatim and
+/// leaves an out-of-budget one at as-shot, while above default [`budgeted_wb`]
+/// is the sole producer and its scalar lambda is bisected down until neither
+/// the foreign-hue checks nor the weighted rotation census objects.
+///
+/// EXTRACTED, not copied: this block used to live inside
+/// [`fit_atmosphere_from_parts`], and that was the whole reason Full mode had
+/// no white balance at all — the one bounded WB solve the crate owns was
+/// reachable only through the divergent-pair branch, so the commonest pair
+/// there is (the same frame, regraded) could never be told that its light had
+/// changed colour. Behaviour is unchanged for the Atmosphere caller, line for
+/// line; what is new is that a second caller exists.
+#[allow(clippy::too_many_arguments)]
+fn solve_white_balance(
+    s_img: &DynamicImage,
+    tp: &[[f32; 3]],
+    recipe: &mut EditRecipe,
+    base: &EditRecipe,
+    evidence: &EvidenceModel,
+    (wb_k, wb_tint): (f32, f32),
+    anchor: f32,
+    budget: FitBudget,
+    strength: crate::recipe::GradeStrength,
+) -> WbFacts {
+    let wb_search_bound = (strength.get() > crate::recipe::GradeStrength::DEFAULT
+        && (wb_k <= WB_SEARCH_K.0 || wb_k >= WB_SEARCH_K.1))
+        .then_some(wb_k);
+    let before_wb_px = pixels_of(&render::develop_preview(s_img, &recipe));
+    let ratio_before = wb_gain_ratio(render::wb_gains(anchor, wb_k, wb_tint));
+    let mut clamped_ratio = ratio_before;
+    let mut wb_clamped = false;
+    let mut wb_foreign_hue_withheld = false;
+    let mut wb_rotation_withheld = false;
+    let mut wb_rotated_share = 0.0f32;
+    let mut wb_rejected_rotation_share = 0.0f32;
+    let mut wb_rotation_coverage = 0.0f32;
+
+    if strength.get() <= crate::recipe::GradeStrength::DEFAULT {
+        // The shipped default is the pre-F1 path byte-for-byte: an in-budget
+        // free WB is persisted, while an out-of-budget demand stays as-shot.
+        if wb_gains_fit_budget(render::wb_gains(anchor, wb_k, wb_tint), budget) {
+            recipe.temperature_k = Some(wb_k);
+            recipe.tint = wb_tint;
+        }
+    } else {
+        // Above the shipped default, budgeted_wb is the sole producer of a
+        // persisted WB. Its scalar lambda is then reduced only as far as the
+        // rendered foreign-hue and rotation gates require.
+        let (_, _, budgeted_clamped, _, budgeted_ratio, initial_lambda) =
+            budgeted_wb(anchor, wb_k, wb_tint, budget);
+        let mut lambda = initial_lambda;
+        let evaluate = |lambda: f32| {
+            let (k, tint) = wb_path_candidate(anchor, wb_k, wb_tint, lambda);
+            let mut candidate = recipe.clone();
+            candidate.temperature_k = Some(k);
+            candidate.tint = tint;
+            let after = pixels_of(&render::develop_preview(s_img, &candidate));
+            let foreign = cast_paints_foreign_hues(&before_wb_px, &after, tp)
+                || wb_moves_pixels_into_foreign_hues(&before_wb_px, &after, tp);
+            let rotated = rehued_share_weighted(&before_wb_px, &after, evidence);
+            (foreign, rotated, k, tint, after)
+        };
+        let (foreign, mut rotated, _, _, _after) = evaluate(lambda);
+        wb_rotation_coverage = rehued_coverage_weighted(evidence);
+        let foreign_limited = foreign;
+        let rotation_limited_initial = rotated > budget.wb_rotation_share;
+        if rotation_limited_initial {
+            wb_rejected_rotation_share = rotated;
+        }
+        let mut rotation_limited = rotation_limited_initial;
+        if foreign || rotation_limited {
+            // The persisted lambda is legal because it is re-rendered and
+            // re-measured at every bisection step. If the gates were
+            // non-monotone, it could be smaller than the maximum legal lambda.
+            let mut legal = 0.0f32;
+            let mut illegal = lambda;
+            for _ in 0..32 {
+                let middle = (legal + illegal) * 0.5;
+                let (middle_foreign, middle_rotated, _, _, _) = evaluate(middle);
+                if !middle_foreign && middle_rotated <= budget.wb_rotation_share {
+                    legal = middle;
+                } else {
+                    illegal = middle;
+                }
+            }
+            lambda = legal;
+            let (_, final_rotated, _, _, _) = evaluate(lambda);
+            rotated = final_rotated;
+            let (_, _, _, _, _final_after) = evaluate(lambda);
+            wb_rotation_coverage = rehued_coverage_weighted(evidence);
+            // Retain the reason that actually forced the scalar to zero. If
+            // both gates reject the free demand, foreign hue is the stronger
+            // content veto and owns the typed disclosure.
+            wb_foreign_hue_withheld = foreign_limited && lambda <= 1e-5;
+            wb_rotation_withheld = rotation_limited_initial && !wb_foreign_hue_withheld && lambda <= 1e-5;
+            rotation_limited = rotation_limited || rotated > budget.wb_rotation_share;
+        }
+        if lambda <= 1e-5 {
+            // This is the only new WB reset above default; grep should find
+            // this guard and the unchanged luma-veto reset, exactly two sites.
+            recipe.temperature_k = base.temperature_k;
+            recipe.tint = base.tint;
+            clamped_ratio = 1.0;
+        } else {
+            let (chosen_k, chosen_tint) = wb_path_candidate(anchor, wb_k, wb_tint, lambda);
+            recipe.temperature_k = Some(chosen_k);
+            recipe.tint = chosen_tint;
+            let chosen_px = pixels_of(&render::develop_preview(s_img, &recipe));
+            rotated = rehued_share_weighted(&before_wb_px, &chosen_px, evidence);
+            wb_rotation_coverage = rehued_coverage_weighted(evidence);
+            wb_rotated_share = rotated;
+            clamped_ratio = wb_gain_ratio(render::wb_gains(anchor, chosen_k, chosen_tint));
+            wb_clamped = budgeted_clamped || lambda < 1.0 - 1e-6 || rotation_limited;
+        }
+        // A persisted WB that is free and passes both gates carries no clamp
+        // note; all scalar reductions do.
+        if !wb_clamped {
+            clamped_ratio = budgeted_ratio;
+        }
+    }
+    WbFacts {
+        clamped: wb_clamped.then_some((
+            ratio_before,
+            clamped_ratio,
+            wb_rotated_share,
+            wb_rotation_coverage,
+        )),
+        search_bound: wb_search_bound,
+        rotation_coverage: wb_rotation_coverage,
+        rotation_disclosure: wb_rotation_withheld
+            .then_some((wb_rejected_rotation_share.max(wb_rotated_share), wb_rotation_coverage)),
+        foreign_hue_withheld: wb_foreign_hue_withheld,
+        rotation_withheld: wb_rotation_withheld,
+    }
 }
 
 /// Bounded global solve used when structural correspondence has failed. It
@@ -3731,102 +3981,17 @@ fn fit_atmosphere_from_parts(
     let (pair_tp, pair_w) = atmosphere_wb_pairing(tp, evidence, correspondence, readable);
     let (wb_k, wb_tint, _wanted) =
         atmosphere_wb_from_populations(sp, pair_tp, &pair_w, anchor);
-    let wb_search_bound = (strength.get() > crate::recipe::GradeStrength::DEFAULT
-        && (wb_k <= WB_SEARCH_K.0 || wb_k >= WB_SEARCH_K.1))
-        .then_some(wb_k);
-    let before_wb_px = pixels_of(&render::develop_preview(s_img, &recipe));
-    let ratio_before = wb_gain_ratio(render::wb_gains(anchor, wb_k, wb_tint));
-    let mut clamped_ratio = ratio_before;
-    let mut wb_clamped = false;
-    let mut wb_foreign_hue_withheld = false;
-    let mut wb_rotation_withheld = false;
-    let mut wb_rotated_share = 0.0f32;
-    let mut wb_rejected_rotation_share = 0.0f32;
-    let mut wb_rotation_coverage = 0.0f32;
-
-    if strength.get() <= crate::recipe::GradeStrength::DEFAULT {
-        // The shipped default is the pre-F1 path byte-for-byte: an in-budget
-        // free WB is persisted, while an out-of-budget demand stays as-shot.
-        if wb_gains_fit_budget(render::wb_gains(anchor, wb_k, wb_tint), budget) {
-            recipe.temperature_k = Some(wb_k);
-            recipe.tint = wb_tint;
-        }
-    } else {
-        // Above the shipped default, budgeted_wb is the sole producer of a
-        // persisted WB. Its scalar lambda is then reduced only as far as the
-        // rendered foreign-hue and rotation gates require.
-        let (_, _, budgeted_clamped, _, budgeted_ratio, initial_lambda) =
-            budgeted_wb(anchor, wb_k, wb_tint, budget);
-        let mut lambda = initial_lambda;
-        let evaluate = |lambda: f32| {
-            let (k, tint) = wb_path_candidate(anchor, wb_k, wb_tint, lambda);
-            let mut candidate = recipe.clone();
-            candidate.temperature_k = Some(k);
-            candidate.tint = tint;
-            let after = pixels_of(&render::develop_preview(s_img, &candidate));
-            let foreign = cast_paints_foreign_hues(&before_wb_px, &after, tp)
-                || wb_moves_pixels_into_foreign_hues(&before_wb_px, &after, tp);
-            let rotated = rehued_share_weighted(&before_wb_px, &after, evidence);
-            (foreign, rotated, k, tint, after)
-        };
-        let (foreign, mut rotated, _, _, _after) = evaluate(lambda);
-        wb_rotation_coverage = rehued_coverage_weighted(evidence);
-        let foreign_limited = foreign;
-        let rotation_limited_initial = rotated > budget.wb_rotation_share;
-        if rotation_limited_initial {
-            wb_rejected_rotation_share = rotated;
-        }
-        let mut rotation_limited = rotation_limited_initial;
-        if foreign || rotation_limited {
-            // The persisted lambda is legal because it is re-rendered and
-            // re-measured at every bisection step. If the gates were
-            // non-monotone, it could be smaller than the maximum legal lambda.
-            let mut legal = 0.0f32;
-            let mut illegal = lambda;
-            for _ in 0..32 {
-                let middle = (legal + illegal) * 0.5;
-                let (middle_foreign, middle_rotated, _, _, _) = evaluate(middle);
-                if !middle_foreign && middle_rotated <= budget.wb_rotation_share {
-                    legal = middle;
-                } else {
-                    illegal = middle;
-                }
-            }
-            lambda = legal;
-            let (_, final_rotated, _, _, _) = evaluate(lambda);
-            rotated = final_rotated;
-            let (_, _, _, _, _final_after) = evaluate(lambda);
-            wb_rotation_coverage = rehued_coverage_weighted(evidence);
-            // Retain the reason that actually forced the scalar to zero. If
-            // both gates reject the free demand, foreign hue is the stronger
-            // content veto and owns the typed disclosure.
-            wb_foreign_hue_withheld = foreign_limited && lambda <= 1e-5;
-            wb_rotation_withheld = rotation_limited_initial && !wb_foreign_hue_withheld && lambda <= 1e-5;
-            rotation_limited = rotation_limited || rotated > budget.wb_rotation_share;
-        }
-        if lambda <= 1e-5 {
-            // This is the only new WB reset above default; grep should find
-            // this guard and the unchanged luma-veto reset, exactly two sites.
-            recipe.temperature_k = base.temperature_k;
-            recipe.tint = base.tint;
-            clamped_ratio = 1.0;
-        } else {
-            let (chosen_k, chosen_tint) = wb_path_candidate(anchor, wb_k, wb_tint, lambda);
-            recipe.temperature_k = Some(chosen_k);
-            recipe.tint = chosen_tint;
-            let chosen_px = pixels_of(&render::develop_preview(s_img, &recipe));
-            rotated = rehued_share_weighted(&before_wb_px, &chosen_px, evidence);
-            wb_rotation_coverage = rehued_coverage_weighted(evidence);
-            wb_rotated_share = rotated;
-            clamped_ratio = wb_gain_ratio(render::wb_gains(anchor, chosen_k, chosen_tint));
-            wb_clamped = budgeted_clamped || lambda < 1.0 - 1e-6 || rotation_limited;
-        }
-        // A persisted WB that is free and passes both gates carries no clamp
-        // note; all scalar reductions do.
-        if !wb_clamped {
-            clamped_ratio = budgeted_ratio;
-        }
-    }
+    let facts = solve_white_balance(
+        s_img,
+        tp,
+        &mut recipe,
+        base,
+        evidence,
+        (wb_k, wb_tint),
+        anchor,
+        budget,
+        strength,
+    );
     let provisional = pixels_of(&render::develop_preview(s_img, &recipe));
     recipe.tone_curve = atmosphere_tone_curve_weighted(
         &provisional,
@@ -3894,7 +4059,11 @@ fn fit_atmosphere_from_parts(
     // do not correspond, so every control here is solved from distributions
     // — and a band's mean chroma is a distribution. No voucher exists on this
     // path (nothing is paired), so the strict blind-move doctrine applies.
-    let mut hsl_facts = fit_hsl_stage(s_img, sp, tp, evidence, None, budget, &mut recipe);
+    // Atmosphere passes no cells on purpose: its whole doctrine is that the
+    // structure was replaced, so a cell mean over one rectangle is not a
+    // statement about the same content on both sides. Its per-band gate is
+    // unchanged.
+    let mut hsl_facts = fit_hsl_stage(s_img, sp, tp, evidence, None, None, budget, &mut recipe);
     let hsl_fitted = recipe.hsl.clone();
 
     let sat_fitted = recipe.saturation;
@@ -3995,15 +4164,16 @@ fn fit_atmosphere_from_parts(
             strength: Some(strength.get()),
             veto_luma: (budget.vetoes == VetoPolicy::Disclose).then(|| moved_unsupported_luma_range_names(sp, &after_px, veto_evidence)).flatten(),
             veto_hue: (budget.vetoes == VetoPolicy::Disclose).then_some(moved_hue).flatten(),
-            wb_clamped: wb_clamped.then_some((ratio_before, clamped_ratio, wb_rotated_share, wb_rotation_coverage)),
-            wb_search_bound,
-            wb_rotation_coverage: Some(wb_rotation_coverage),
-            wb_rotation_disclosure: wb_rotation_withheld.then_some((wb_rejected_rotation_share.max(wb_rotated_share), wb_rotation_coverage)),
+            wb_clamped: facts.clamped,
+            wb_search_bound: facts.search_bound,
+            wb_rotation_coverage: Some(facts.rotation_coverage),
+            wb_rotation_disclosure: facts.rotation_disclosure,
             cast_admitted_by_strength: None,
             cast_admitted: None,
             cast_projected: None,
-            wb_foreign_hue_withheld,
-            wb_rotation_withheld,
+            wb_cells: None,
+            wb_foreign_hue_withheld: facts.foreign_hue_withheld,
+            wb_rotation_withheld: facts.rotation_withheld,
             sat_pegged: sat_pegged.then_some(FitMode::Atmosphere),
             cast: CastOutcome::default(),
             evidence_refused: evidence_has_one_sided(evidence),
@@ -4178,6 +4348,11 @@ enum HslWithdrawal {
 /// later do-no-harm loop shrinks the mixer (or resets the whole recipe).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct HslStageFacts {
+    /// Bands the frozen evidence called one-sided that the CURRENT render and
+    /// the target's own cells between them admitted (R33 §E). Named, because
+    /// "this band was unmeasurable" and "this band became measurable once the
+    /// light was corrected" are different claims about the same band.
+    vouched: String,
     /// Bands the two-sided population gate refused, each with its reason.
     refused: String,
     withdrawn: Option<HslWithdrawal>,
@@ -4234,12 +4409,14 @@ fn halved_hsl(hsl: &crate::recipe::Hsl) -> crate::recipe::Hsl {
 /// itself out below chroma 0.22 — so the open-loop ratio is a first step, not
 /// an answer. Two iterations, then a do-no-harm that shrinks to zero.
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
 fn fit_hsl_stage(
     s_img: &DynamicImage,
     sp: &[[f32; 3]],
     tp: &[[f32; 3]],
     evidence: &EvidenceModel,
     vouch: Option<(&[f32], &[[f32; 3]])>,
+    cells: Option<&crate::fit_cells::PairedCells>,
     budget: FitBudget,
     recipe: &mut EditRecipe,
 ) -> HslStageFacts {
@@ -4258,6 +4435,50 @@ fn fit_hsl_stage(
     let (sb, tb) = band_stats_weighted(tp, &evidence.target_hue_weights);
     let mut admitted = [false; EVIDENCE_HUE_BANDS];
     let mut refused: Vec<String> = Vec::new();
+    let mut vouched: Vec<String> = Vec::new();
+    // R33 §E. A band the FROZEN evidence calls one-sided was one-sided on the
+    // pair as it arrived — and the stages before this one have since moved the
+    // frame. The sky that carried no Orange because a neutral develop has no
+    // chroma at all carries Orange now, on the render this stage is looking
+    // at, because the white balance and the tone solve put it there.
+    //
+    // That is exactly the laundering this crate refuses by default: an edit
+    // must not create its own evidence. The ONE thing that makes it honest is
+    // the target's own verdict on the pixels the edit created — so the band is
+    // admitted only when it is two-sided ON THE CURRENT RENDER *and* the cells
+    // holding those members say the solve so far took them toward the target.
+    // Without cells, or without that verdict, the band is refused by name
+    // exactly as before.
+    let population = evidence.population.max(1.0);
+    let band_share = |px: &[[f32; 3]], band: usize| {
+        px.iter()
+            .enumerate()
+            .filter(|(_, p)| evidence_hue_band(p) == Some(band))
+            .map(|(i, _)| evidence.source_membership.get(i).copied().unwrap_or(0.0).max(0.0))
+            .sum::<f32>()
+            / population
+    };
+    let one_sided_vouch = |band: usize| -> Option<crate::fit_cells::CellVouch> {
+        let cells = cells?;
+        if band_share(&before_px, band) < EVIDENCE_MIN_SHARE
+            || band_share(tp, band) < EVIDENCE_MIN_SHARE
+        {
+            return None;
+        }
+        let region: Vec<f32> = before_px
+            .iter()
+            .enumerate()
+            .map(|(i, p)| {
+                if evidence_hue_band(p) == Some(band) {
+                    evidence.source_membership.get(i).copied().unwrap_or(0.0).max(0.0)
+                } else {
+                    0.0
+                }
+            })
+            .collect();
+        let verdict = cells.vouch(sp, &before_px, Some(&region));
+        verdict.vouched().then_some(verdict)
+    };
     for band in 0..EVIDENCE_HUE_BANDS {
         let Some(range) = evidence.hue.get(band) else { continue };
         let verdict = if !range.source_populated && !range.target_populated {
@@ -4279,6 +4500,10 @@ fn fit_hsl_stage(
         };
         match verdict {
             None => admitted[band] = true,
+            Some(HslBandRefusal::OneSided) if one_sided_vouch(band).is_some() => {
+                admitted[band] = true;
+                vouched.push(range.label.clone());
+            }
             Some(reason) => {
                 // Only bands the PICTURE actually holds are worth naming: a
                 // band absent from both frames is not a refusal anyone can
@@ -4291,6 +4516,7 @@ fn fit_hsl_stage(
         }
     }
     facts.refused = refused.join(", ");
+    facts.vouched = vouched.join(", ");
     if !admitted.iter().any(|&band| band) {
         return facts;
     }
@@ -4413,6 +4639,12 @@ struct SolveFacts {
     /// Coverage from the same WB rotation census used for its gate.
     wb_rotation_coverage: Option<f32>,
     wb_rotation_disclosure: Option<(f32, f32)>,
+    /// R33 §E: the white balance the population asked for was solved, RENDERED
+    /// and put to the target's own cells. A different claim from the two
+    /// around it: those are capability vetoes on what the edit would do to
+    /// hue, this is the target's verdict on whether it was the right edit.
+    /// `None` = no WB was solved, or no cell resolved to judge one.
+    wb_cells: Option<WbCellVerdict>,
     /// The fitted WB was returned to as-shot because it created target-foreign hues.
     wb_foreign_hue_withheld: bool,
     /// The fitted WB was returned to as-shot because it exceeded the strength
@@ -4708,6 +4940,27 @@ fn compose_report(mut recipe: EditRecipe, m: Measured<'_>, solve: SolveFacts) ->
             ),
         );
     }
+    // The cells' verdict on a rendered white balance: BOTH outcomes are said
+    // out loud. A silent admission would leave "the sky is finally the right
+    // colour" indistinguishable from a lucky population statistic, and a
+    // silent refusal would leave the commonest question about this stage — why
+    // is temperature still as-shot on a pair whose light obviously changed? —
+    // unanswered.
+    if let Some(verdict) = solve.wb_cells {
+        let (converged, diverged) = verdict.vouch.shares();
+        push_note(
+            &mut rationale,
+            &mut notes,
+            Note::new(
+                if verdict.admitted {
+                    keys::FIT_NOTE_WB_CELLS_VOUCHED
+                } else {
+                    keys::FIT_NOTE_WB_CELLS_REFUSED
+                },
+                vec![("converged", converged), ("diverged", diverged)],
+            ),
+        );
+    }
     if solve.wb_foreign_hue_withheld {
         push_note(
             &mut rationale,
@@ -4937,6 +5190,16 @@ fn compose_report(mut recipe: EditRecipe, m: Measured<'_>, solve: SolveFacts) ->
                         },
                     ),
                 ],
+            ),
+        );
+    }
+    if !solve.hsl.vouched.is_empty() {
+        push_note(
+            &mut rationale,
+            &mut notes,
+            Note::new(
+                keys::FIT_NOTE_HSL_BANDS_VOUCHED,
+                vec![("bands", solve.hsl.vouched.clone())],
             ),
         );
     }
@@ -5259,6 +5522,29 @@ pub fn rescore_report(
             wb_search_bound: None,
             wb_rotation_coverage: None,
             wb_rotation_disclosure: None,
+            // A refusal the CELLS made is a measurement of a render this
+            // rescore did not take, so it rides the carried note like every
+            // other gate verdict — the shares with it, or the abstention if
+            // the note carried none.
+            wb_cells: [
+                (keys::FIT_NOTE_WB_CELLS_REFUSED, false),
+                (keys::FIT_NOTE_WB_CELLS_VOUCHED, true),
+            ]
+            .into_iter()
+            .find(|(key, _)| carried(key))
+            .map(|(key, admitted)| {
+                let read = |arg: &str| {
+                    carried_arg(key, arg).and_then(|v| v.parse::<f32>().ok()).unwrap_or(0.0)
+                };
+                WbCellVerdict {
+                    vouch: crate::fit_cells::CellVouch {
+                        converged: read("converged"),
+                        diverged: read("diverged"),
+                        read: 1,
+                    },
+                    admitted,
+                }
+            }),
             wb_foreign_hue_withheld: carried(keys::FIT_NOTE_WB_WITHHELD_FOREIGN_HUE),
             wb_rotation_withheld: carried(keys::FIT_NOTE_WB_WITHHELD_ROTATION),
             sat_pegged: if carried(keys::FIT_NOTE_ATMOSPHERE_SAT_PEGGED) {
@@ -5302,6 +5588,8 @@ pub fn rescore_report(
             hsl: HslStageFacts {
                 refused: carried_arg(keys::FIT_NOTE_HSL_BANDS, "refused")
                     .filter(|refused| refused != "none")
+                    .unwrap_or_default(),
+                vouched: carried_arg(keys::FIT_NOTE_HSL_BANDS_VOUCHED, "bands")
                     .unwrap_or_default(),
                 withdrawn: if carried(keys::FIT_NOTE_HSL_WITHDRAWN_BLIND) {
                     Some(HslWithdrawal::Blind)
@@ -8238,6 +8526,146 @@ mod tests {
         );
     }
 
+    /// The frame under a different illuminant: same pixels, same layout, one
+    /// per-channel scale. Nothing about the scene changed except its light.
+    fn relit(source: &DynamicImage, gains: [f32; 3]) -> DynamicImage {
+        use image::GenericImageView;
+        let (w, h) = (source.width(), source.height());
+        DynamicImage::ImageRgb8(RgbImage::from_fn(w, h, |x, y| {
+            let p = source.get_pixel(x, y).0;
+            image::Rgb(std::array::from_fn(|c| {
+                (p[c] as f32 * gains[c]).round().clamp(0.0, 255.0) as u8
+            }))
+        }))
+    }
+
+    /// R33 §E, the positive half: a FULL-mode pair whose light changed colour
+    /// now gets a white balance.
+    ///
+    /// Until R33 this assertion was impossible to write: `temperature_k` was
+    /// assigned in exactly one function, on the branch taken when the pair's
+    /// structure was judged unrecoverable, so the commonest pair there is —
+    /// the same frame under different light — had no white-balance stage at
+    /// all and had to express the whole cast through saturation, the per-band
+    /// mixer and three channel curves. The gates then (correctly) refused most
+    /// of that, and the fit under-reached on colour by construction.
+    #[test]
+    fn a_full_mode_pair_whose_light_changed_colour_gets_a_white_balance() {
+        let source = synth();
+        // Gentle on purpose: the estimator works in LINEAR light, where an
+        // sRGB gain pair of 1.06 / 0.95 is a gain ratio of 1.27 — inside the
+        // shipped default's 1.40 white-balance budget, so this pair tests the
+        // stage and the admission rather than the budget.
+        let target = relit(&source, [1.06, 1.0, 0.95]);
+        let report = fit_recipe(&source, &target);
+        assert_eq!(report.mode, FitMode::Full, "premise: the structure is untouched");
+        assert_eq!(report.pairing, PairingScale::Pixel, "premise: the texture survived");
+        let k = report.recipe.temperature_k.expect(
+            "a Full-mode pair under warmer light must be able to say so through white balance",
+        );
+        assert!(k > 5500.0, "…and the warmer light reads warmer than as-shot: {k}");
+        // ADMITTED BY THE CELLS, and the report says which verdict it got.
+        assert!(
+            report.notes.iter().any(|n| n.key == crate::rationale::keys::FIT_NOTE_WB_CELLS_VOUCHED),
+            "the admission is disclosed: {}",
+            report.recipe.rationale
+        );
+        assert!(
+            !report.notes.iter().any(|n| n.key == crate::rationale::keys::FIT_NOTE_WB_CELLS_REFUSED),
+            "…and only one of the two verdicts is ever emitted"
+        );
+    }
+
+    /// …and the negative half, which is the anti-laundering rule: the stage
+    /// solves from the population, but what SHIPS is decided by the target's
+    /// own cells. Feed it a pair whose light did not change and the estimator
+    /// has nothing to find; feed it one where the demand moves the frame the
+    /// wrong way and the cells return it to as-shot.
+    #[test]
+    fn a_full_mode_white_balance_ships_only_where_the_target_cells_vouch_it() {
+        // No cast at all: nothing to solve, nothing to disclose.
+        let source = synth();
+        let report = fit_recipe(&source, &source);
+        assert_eq!(report.recipe.temperature_k, None, "an identity pair invents no illuminant");
+        assert!(
+            !report.notes.iter().any(|n| {
+                n.key == crate::rationale::keys::FIT_NOTE_WB_CELLS_VOUCHED
+                    || n.key == crate::rationale::keys::FIT_NOTE_WB_CELLS_REFUSED
+            }),
+            "…and says nothing about a stage that never moved: {}",
+            report.recipe.rationale
+        );
+        // The instrument itself, on the render the stage would have shipped:
+        // a demand pulled the WRONG way is refused over the whole frame.
+        let (s_img, t_img) = analysis_pair(&source, &relit(&source, [1.16, 1.0, 0.84]));
+        let (sp, tp) = (pixels_of(&s_img), pixels_of(&t_img));
+        let evidence = evidence_model_for(&sp, &tp, s_img.width(), s_img.height());
+        let cells = crate::fit_cells::PairedCells::build(&tp, s_img.width(), s_img.height(), &evidence)
+            .expect("a populated pair builds cells");
+        let mut cool = EditRecipe::default();
+        cool.temperature_k = Some(3200.0);
+        let backwards = pixels_of(&render::develop_preview(&s_img, &cool));
+        assert!(
+            !cells.vouch(&sp, &backwards, None).vouched(),
+            "cooling a frame whose target got warmer must never be vouched"
+        );
+    }
+
+    /// A NEUTRAL source under coloured light: the classic one-sided band, and
+    /// the case R33 §E exists for.
+    ///
+    /// A neutral develop has no chroma at all, so `evidence_hue_band` puts no
+    /// source mass in any band; the target's warm rendition puts mass in Red
+    /// and Orange. The frozen evidence therefore calls those bands one-sided —
+    /// UNMEASURABLE, never "already equal" — and the mixer left them neutral
+    /// forever, because a band one-sided on the TARGET side has no source
+    /// member that could ever vouch it.
+    ///
+    /// What changes it is not a loosened gate: the white-balance stage
+    /// corrects the light first, and the band is then two-sided ON THE RENDER
+    /// THIS STAGE SOLVES FROM. The admission still has to be earned — the
+    /// target's own cells must say the earlier stages moved those pixels
+    /// toward it — and the report says which bands were admitted that way.
+    #[test]
+    fn a_band_that_became_two_sided_once_the_light_was_corrected_is_admitted_by_the_cells() {
+        let (w, h) = (192u32, 128u32);
+        let source = DynamicImage::ImageRgb8(RgbImage::from_fn(w, h, |x, y| {
+            let l = 0.12 + 0.74 * (x as f32 / (w - 1) as f32) + 0.06 * (y as f32 / (h - 1) as f32);
+            let v = (l.clamp(0.0, 1.0) * 255.0).round() as u8;
+            image::Rgb([v, v, v])
+        }));
+        let target = relit(&source, [1.06, 1.0, 0.95]);
+        let report = fit_recipe(&source, &target);
+        assert_eq!(report.mode, FitMode::Full, "premise: nothing about the scene moved");
+        let vouched = report
+            .notes
+            .iter()
+            .find(|n| n.key == crate::rationale::keys::FIT_NOTE_HSL_BANDS_VOUCHED)
+            .unwrap_or_else(|| panic!("no band was admitted by the cells: {}", report.recipe.rationale));
+        let bands = vouched
+            .args
+            .iter()
+            .find(|(key, _)| *key == "bands")
+            .map(|(_, value)| value.clone())
+            .unwrap_or_default();
+        assert!(!bands.is_empty(), "the note names the bands it admitted");
+        // …and the same bands are no longer listed as refused for want of
+        // two-sided evidence: one band, one verdict.
+        let refused = report
+            .notes
+            .iter()
+            .find(|n| n.key == crate::rationale::keys::FIT_NOTE_HSL_BANDS)
+            .and_then(|n| n.args.iter().find(|(key, _)| *key == "refused"))
+            .map(|(_, value)| value.clone())
+            .unwrap_or_default();
+        for band in bands.split(", ") {
+            assert!(
+                !refused.contains(band),
+                "{band} is both admitted and refused: refused=[{refused}] vouched=[{bands}]"
+            );
+        }
+    }
+
     #[test]
     fn wb_default_strength_is_byte_identical_to_head() {
         let source = hazy_canyon_source();
@@ -8477,6 +8905,7 @@ mod tests {
                 wb_search_bound: None,
                 wb_rotation_coverage: None,
                 wb_rotation_disclosure: None,
+                wb_cells: None,
                 wb_foreign_hue_withheld: false,
                 wb_rotation_withheld: false,
                 sat_pegged: None,
@@ -14233,6 +14662,7 @@ mod tests {
                     wb_search_bound: None,
                     wb_rotation_coverage: None,
                     wb_rotation_disclosure: None,
+                    wb_cells: None,
                     wb_foreign_hue_withheld: false,
                     wb_rotation_withheld: false,
                     sat_pegged: None,

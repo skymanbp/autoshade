@@ -1709,6 +1709,15 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
       and overall tone/colour were matched with bounded robust controls. Residual look \
       error {err_before} → {err_after}.",
         "反推氛围模式（结构差异 D={d}）：目标结构无法通过显影控制恢复，因此仅以有界的可靠控制匹配其氛围和整体影调/色调。剩余观感误差 {err_before} → {err_after}。"),
+    (" A white balance was solved from the population and then rendered and checked \
+      against the target's own 12x8 cell means: only {converged} of the frame moved \
+      closer and {diverged} moved away, so it was returned to as-shot rather than \
+      shipped on population evidence alone.",
+        " 已从整体证据求解出一次白平衡，渲染后按目标自身的 12x8 单元均值比对：只有 {converged} 的画面更接近目标，另有 {diverged} 反而远离，因此退回相机原始值，不以整体证据独自发布。"),
+    (" The fitted white balance was checked against the target's own 12x8 cell means \
+      before it shipped: {converged} of the frame moved closer to its target and \
+      {diverged} moved away.",
+        " 拟合出的白平衡在发布前已按目标自身的 12x8 单元均值比对：画面的 {converged} 更接近目标，{diverged} 反而远离。"),
     (" Structural reading: D {fine} at pixel scale, {coarse} at layout scale — the \
       pixel-scale reading holds, so this solve paired source pixel with target pixel.",
         " 结构读数：像素尺度 D {fine}，布局尺度 {coarse}——像素尺度读数成立，因此本次求解按源像素对目标像素配对。"),
@@ -1795,6 +1804,11 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
         " 细节控制暂不调整：两侧结构与亮度范围的证据不足，因此未移动清晰度与纹理。"),
     (" Per-band colour mixer, solved from each band's own population: [{moved}]. Hue rotation is never solved, so every band's hue stays 0. Bands left neutral for want of two-sided population evidence: [{refused}].",
         " 逐带颜色混合器按各色带自身的人口统计求解：[{moved}]。色相旋转从不求解，因此每个色带的色相保持 0。因两侧人口证据不足而保持中性的色带：[{refused}]。"),
+    (" Hue bands [{bands}] were one-sided on the pair as it arrived and are two-sided on \
+         the render this stage solved from; the target's own cell means vouched that the \
+         earlier stages moved those pixels toward it, so the bands were admitted rather \
+         than left neutral.",
+        " 色相带 [{bands}] 在图像对进入时是单侧的，而在本阶段求解所依据的渲染上已是双侧；目标自身的单元均值担保了先前各阶段已把这些像素推向目标，因此这些带被采用，而非保持中性。"),
     (" The per-band colour move was given back: applying it did not leave the frame closer to the target, so every band returned to neutral.",
         " 逐带颜色调整已交还：应用后画面并未更接近目标，因此所有色带恢复中性。"),
     (" The per-band colour move was given back: it would have carried pixels through hue bands no two-sided evidence covers, and blind movement is vetoed rather than shipped.",

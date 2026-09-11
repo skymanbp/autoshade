@@ -110,6 +110,20 @@ pub mod keys {
     pub const FIT_NOTE_MODE_MARGIN: &str =
         " The pixel-scale reading is {margin} from the {line} mode threshold: this pair \
          chose between the full solve and Atmosphere mode by that margin.";
+    /// R33 §E: the white balance the population asked for was rendered and
+    /// the paired cells refused it. NOT a capability veto (that is
+    /// `FIT_NOTE_WB_WITHHELD_FOREIGN_HUE` / `_ROTATION`) and NOT "no cast was
+    /// found" — a cast WAS found, and the target said it was the wrong one.
+    pub const FIT_NOTE_WB_CELLS_REFUSED: &str =
+        " A white balance was solved from the population and then rendered and checked \
+         against the target's own 12x8 cell means: only {converged} of the frame moved \
+         closer and {diverged} moved away, so it was returned to as-shot rather than \
+         shipped on population evidence alone.";
+    /// …and the other half of the same sentence: it WAS vouched.
+    pub const FIT_NOTE_WB_CELLS_VOUCHED: &str =
+        " The fitted white balance was checked against the target's own 12x8 cell means \
+         before it shipped: {converged} of the frame moved closer to its target and \
+         {diverged} moved away.";
     pub const FIT_NOTE_FAR: &str =
         " NOTE: the fitted recipe still renders far from the target \
          (residual {err_after}) — this look exceeds what global \
@@ -411,6 +425,15 @@ pub mod keys {
     /// because neither frame's population could speak for them.
     pub const FIT_NOTE_HSL_BANDS: &str =
         " Per-band colour mixer, solved from each band's own population: [{moved}]. Hue rotation is never solved, so every band's hue stays 0. Bands left neutral for want of two-sided population evidence: [{refused}].";
+    /// R33 §E: bands the pair's FROZEN evidence called one-sided that the
+    /// render in front of the stage carries on both sides, whose members the
+    /// target's own cells then vouched. The band stops being unmeasurable
+    /// because the light was corrected, not because anything was assumed.
+    pub const FIT_NOTE_HSL_BANDS_VOUCHED: &str =
+        " Hue bands [{bands}] were one-sided on the pair as it arrived and are two-sided on \
+         the render this stage solved from; the target's own cell means vouched that the \
+         earlier stages moved those pixels toward it, so the bands were admitted rather \
+         than left neutral.";
     pub const FIT_NOTE_HSL_WITHDRAWN_ERROR: &str =
         " The per-band colour move was given back: applying it did not leave the frame closer to the target, so every band returned to neutral.";
     pub const FIT_NOTE_HSL_WITHDRAWN_BLIND: &str =
