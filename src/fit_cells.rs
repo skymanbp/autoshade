@@ -115,7 +115,7 @@ impl PairedCells {
         let cells = CELLS_X * CELLS_Y;
         let of_pixel: Vec<usize> = (0..n)
             .map(|i| {
-                let (x, y) = (i as usize % width as usize, i as usize / width as usize);
+                let (x, y) = (i % width as usize, i / width as usize);
                 (y * CELLS_Y / height as usize) * CELLS_X + x * CELLS_X / width as usize
             })
             .collect();

@@ -81,8 +81,14 @@ const ZONE_ATMOS_EV_LIMIT: f32 = 0.75;
 /// Local saturation shares the global fit's model cap (fit.rs stage 3).
 const ZONE_SAT_LIMIT: f32 = 60.0;
 const ZONE_ATMOS_SAT_LIMIT: f32 = 20.0;
-const ZONE_ATMOS_GAIN_MIN: f32 = 0.85;
-const ZONE_ATMOS_GAIN_MAX: f32 = 1.18;
+/// The window an Atmosphere zone's recolour is shrunk into at the SHIPPED
+/// DEFAULT strength. Since R33 §F it is one point on
+/// [`fit::FitBudget::zone_gain`]'s ladder rather than a fixed pair: these two
+/// numbers are what `FitBudget::for_strength(DEFAULT)` returns, and they are
+/// kept named so the default stays readable at its definition and a test can
+/// pin the two against each other.
+pub(crate) const ZONE_ATMOS_GAIN_MIN: f32 = 0.85;
+pub(crate) const ZONE_ATMOS_GAIN_MAX: f32 = 1.18;
 /// Mask-weighted mean-gradient energy may not fall below this ratio. Accepted
 /// repository zones measure 0.730, 0.980, 1.084, 1.330, 1.684 and 1.918.
 /// The saved generated-cloud correction measures 0.961 with zero clipped-share
@@ -527,13 +533,17 @@ fn clamp_zone_sat_for_mode(v: f32, mode: ZoneMode) -> f32 {
 /// Shrink one atmosphere-zone recolour toward unity with a single scalar, so
 /// every channel keeps the fitted direction and the ratios are not independently
 /// clipped into a different hue.
-fn shrink_atmosphere_gains(gains: [f32; 3]) -> [f32; 3] {
+///
+/// The window is the strength budget's, not a constant: a repainted sky is
+/// precisely the zone a user raising Strength is asking about, and it was the
+/// one control in the solve the dial could not reach.
+fn shrink_atmosphere_gains_in(gains: [f32; 3], window: (f32, f32)) -> [f32; 3] {
     let mut k = 1.0f32;
     for gain in gains {
         if gain > 1.0 {
-            k = k.min((ZONE_ATMOS_GAIN_MAX - 1.0) / (gain - 1.0));
+            k = k.min((window.1 - 1.0) / (gain - 1.0));
         } else if gain < 1.0 {
-            k = k.min((1.0 - ZONE_ATMOS_GAIN_MIN) / (1.0 - gain));
+            k = k.min((1.0 - window.0) / (1.0 - gain));
         }
     }
     gains.map(|gain| 1.0 + k.clamp(0.0, 1.0) * (gain - 1.0))
@@ -3350,7 +3360,11 @@ fn attach_one_zone(
         color_gains: Some(
             match mode {
                 ZoneMode::Full => d.color_gains,
-                ZoneMode::Atmosphere => shrink_atmosphere_gains(d.color_gains),
+                ZoneMode::Atmosphere => shrink_atmosphere_gains_in(
+                    d.color_gains,
+                    fit::FitBudget::for_strength(fit::carried_strength_from_notes(&report.notes))
+                        .zone_gain,
+                ),
             }
             .map(round2),
         ),
@@ -3488,9 +3502,10 @@ fn attach_one_zone(
         m.color_gains = Some([1.0; 3]);
         m.saturation = 0.0;
     }
+    let luma_probe_px = fit::pixels_of(&render::develop_preview(s_img, &luma_probe));
     let luma_ranges = fit::moved_unsupported_luma_range_names(
         &cur_px,
-        &fit::pixels_of(&render::develop_preview(s_img, &luma_probe)),
+        &luma_probe_px,
         &zone_evidence,
     );
     let mut chroma_probe = report.recipe.clone();
@@ -3503,11 +3518,24 @@ fn attach_one_zone(
         m.whites = 0.0;
         m.blacks = 0.0;
     }
+    let chroma_probe_px = fit::pixels_of(&render::develop_preview(s_img, &chroma_probe));
     let hue_bands = fit::moved_unsupported_hue_range_names(
         &cur_px,
-        &fit::pixels_of(&render::develop_preview(s_img, &chroma_probe)),
+        &chroma_probe_px,
         &zone_evidence,
     );
+    // R33 §F asked whether `fit_cells` could lift these two withholdings
+    // the way it lifts the white balance's and the mixer's. It cannot, and
+    // the reason is structural rather than a threshold: `fit_zone_dials`
+    // solves `color_gains` from this zone's MASK-WEIGHTED MEAN moments, and a
+    // cell voucher restricted to the same mask reads cell MEANS over the same
+    // pixels — the estimator's objective and the voucher's measurement are
+    // one quantity, so its verdict is not independent evidence. Measured on
+    // the reference pair it read 1.000 converged / 0.000 diverged at every
+    // site whose probe was not already null. The white balance (a weighted
+    // median of per-pixel log ratios) and the mixer (per-band populations)
+    // ARE vouched by cells, because those partitions are independent of the
+    // cell grid. These two stay withheld, by name, as before.
     if luma_ranges.is_some() {
         let m = report.recipe.masks.last_mut().expect("zone mask just pushed");
         m.exposure_ev = 0.0;
@@ -4883,10 +4911,36 @@ mod tests {
     #[test]
     fn atmosphere_zone_shrinks_gains_toward_unity_but_keeps_their_direction() {
         let original = [1.49f32, 0.83, 0.69];
-        let shrunk = shrink_atmosphere_gains(original);
+        let default_window =
+            fit::FitBudget::for_strength(crate::recipe::GradeStrength::default()).zone_gain;
+        assert_eq!(
+            default_window,
+            (ZONE_ATMOS_GAIN_MIN, ZONE_ATMOS_GAIN_MAX),
+            "the shipped default window is the budget's DEFAULT point, unchanged"
+        );
+        let shrunk = shrink_atmosphere_gains_in(original, default_window);
         assert!(shrunk
             .iter()
             .all(|g| (ZONE_ATMOS_GAIN_MIN..=ZONE_ATMOS_GAIN_MAX).contains(g)));
+        // …and the dial now reaches it: at Strength 1.0 the same fitted gains
+        // keep more of their demand, at Strength 0 less, and the direction is
+        // the same scalar shrink in every case.
+        let wide = shrink_atmosphere_gains_in(
+            original,
+            fit::FitBudget::for_strength(crate::recipe::GradeStrength::new(1.0)).zone_gain,
+        );
+        let narrow = shrink_atmosphere_gains_in(
+            original,
+            fit::FitBudget::for_strength(crate::recipe::GradeStrength::new(0.0)).zone_gain,
+        );
+        for channel in 0..3 {
+            let demand = |g: f32| (g - 1.0).abs();
+            assert!(
+                demand(wide[channel]) >= demand(shrunk[channel]) - 1e-6
+                    && demand(shrunk[channel]) >= demand(narrow[channel]) - 1e-6,
+                "channel {channel} is not monotone in strength: {narrow:?} {shrunk:?} {wide:?}"
+            );
+        }
         let mut common_k: Option<f32> = None;
         for channel in 0..3 {
             assert_eq!(

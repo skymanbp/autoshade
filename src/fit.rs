@@ -186,6 +186,13 @@ pub struct FitBudget {
     /// +/-100 axis. The strength dial has to be able to turn this stage, so
     /// it interpolates like every other budget dimension.
     pub hsl_band: f32,
+    /// Window an ATMOSPHERE zone's per-channel recolour is shrunk into
+    /// (`fit_zoned::shrink_atmosphere_gains`). It was a pair of fixed
+    /// constants, so a user asking for Strength 1.0 on a repainted sky got
+    /// the same [0.85, 1.18] a user asking for 0.0 did — the one place in the
+    /// solve the strength dial could not reach, and the zone that most needed
+    /// it (R33 §F).
+    pub zone_gain: (f32, f32),
     pub vetoes: VetoPolicy,
 }
 
@@ -225,6 +232,10 @@ impl FitBudget {
             slope: (between(0.7, ATMOSPHERE_CURVE_SLOPE_MIN, 0.25), between(1.3, ATMOSPHERE_CURVE_SLOPE_MAX, 3.0)),
             confidence_cap: between(0.50, ATMOSPHERE_CONFIDENCE_CAP, 0.35),
             hsl_band: between(HSL_BAND_LIMIT_MIN, HSL_BAND_LIMIT_DEFAULT, HSL_BAND_LIMIT_MAX),
+            zone_gain: (
+                between(0.92, crate::fit_zoned::ZONE_ATMOS_GAIN_MIN, 0.50),
+                between(1.08, crate::fit_zoned::ZONE_ATMOS_GAIN_MAX, 2.00),
+            ),
             vetoes: if s >= 0.85 { VetoPolicy::Disclose } else { VetoPolicy::Withhold },
         }
     }
@@ -3763,7 +3774,7 @@ fn solve_white_balance(
     let wb_search_bound = (strength.get() > crate::recipe::GradeStrength::DEFAULT
         && (wb_k <= WB_SEARCH_K.0 || wb_k >= WB_SEARCH_K.1))
         .then_some(wb_k);
-    let before_wb_px = pixels_of(&render::develop_preview(s_img, &recipe));
+    let before_wb_px = pixels_of(&render::develop_preview(s_img, recipe));
     let ratio_before = wb_gain_ratio(render::wb_gains(anchor, wb_k, wb_tint));
     let mut clamped_ratio = ratio_before;
     let mut wb_clamped = false;
@@ -3843,7 +3854,7 @@ fn solve_white_balance(
             let (chosen_k, chosen_tint) = wb_path_candidate(anchor, wb_k, wb_tint, lambda);
             recipe.temperature_k = Some(chosen_k);
             recipe.tint = chosen_tint;
-            let chosen_px = pixels_of(&render::develop_preview(s_img, &recipe));
+            let chosen_px = pixels_of(&render::develop_preview(s_img, recipe));
             rotated = rehued_share_weighted(&before_wb_px, &chosen_px, evidence);
             wb_rotation_coverage = rehued_coverage_weighted(evidence);
             wb_rotated_share = rotated;
@@ -4408,7 +4419,6 @@ fn halved_hsl(hsl: &crate::recipe::Hsl) -> crate::recipe::Hsl {
 /// clarity, blends two bands per pixel through a partition of unity and fades
 /// itself out below chroma 0.22 — so the open-loop ratio is a first step, not
 /// an answer. Two iterations, then a do-no-harm that shrinks to zero.
-#[allow(clippy::too_many_arguments)]
 #[allow(clippy::too_many_arguments)]
 fn fit_hsl_stage(
     s_img: &DynamicImage,
@@ -5820,7 +5830,11 @@ fn cast_gate_outcome(
     cast_gate_outcome_with_ratio(cur, with_px, tp, evidence, vouch, CAST_ACCEPT_RATIO)
 }
 
-fn carried_strength_from_notes(prior: &[crate::rationale::Note]) -> crate::recipe::GradeStrength {
+/// The panel Strength a report was solved at, recovered from its own notes.
+/// `pub(crate)` because the zoned passes run AFTER the global solve and are
+/// handed a report rather than the options: the note is the seam, and reading
+/// the fact the report states beats threading a second copy of it.
+pub(crate) fn carried_strength_from_notes(prior: &[crate::rationale::Note]) -> crate::recipe::GradeStrength {
     let arg = |name: &str| {
         prior
             .iter()
@@ -8470,6 +8484,8 @@ mod tests {
         assert!(low.wb_gain.0 > mid.wb_gain.0 && mid.wb_gain.0 > high.wb_gain.0);
         assert!(low.wb_gain.1 < mid.wb_gain.1 && mid.wb_gain.1 < high.wb_gain.1);
         assert!(low.cast_ratio < mid.cast_ratio && mid.cast_ratio < high.cast_ratio);
+        assert!(low.zone_gain.0 > mid.zone_gain.0 && mid.zone_gain.0 > high.zone_gain.0);
+        assert!(low.zone_gain.1 < mid.zone_gain.1 && mid.zone_gain.1 < high.zone_gain.1);
         assert_eq!(low.vetoes, VetoPolicy::Withhold);
         assert_eq!(high.vetoes, VetoPolicy::Disclose);
     }
@@ -8487,6 +8503,13 @@ mod tests {
             slope: (0.5, 1.5),
             confidence_cap: 0.50,
             hsl_band: HSL_BAND_LIMIT_DEFAULT,
+            // R33 §F added this axis; its DEFAULT point is the pair of
+            // constants the zone shrink used to carry alone, so the shipped
+            // default recipe is unchanged and the dial now reaches the zone.
+            zone_gain: (
+                crate::fit_zoned::ZONE_ATMOS_GAIN_MIN,
+                crate::fit_zoned::ZONE_ATMOS_GAIN_MAX,
+            ),
             vetoes: VetoPolicy::Withhold,
         });
         assert_eq!(60.0 * b.sat / ATMOSPHERE_SAT_LIMIT, 60.0);
@@ -8602,8 +8625,7 @@ mod tests {
         let evidence = evidence_model_for(&sp, &tp, s_img.width(), s_img.height());
         let cells = crate::fit_cells::PairedCells::build(&tp, s_img.width(), s_img.height(), &evidence)
             .expect("a populated pair builds cells");
-        let mut cool = EditRecipe::default();
-        cool.temperature_k = Some(3200.0);
+        let cool = EditRecipe { temperature_k: Some(3200.0), ..Default::default() };
         let backwards = pixels_of(&render::develop_preview(&s_img, &cool));
         assert!(
             !cells.vouch(&sp, &backwards, None).vouched(),
