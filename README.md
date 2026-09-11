@@ -50,7 +50,9 @@ An AI decides *what to change*. A deterministic Rust engine *does* it.
 - **A deterministic develop engine** — tone, white balance, curves, HSL,
   colour grading, texture, clarity, dehaze, NR, sharpening, vignette, crop and
   lens correction, under linear, radial, brush, bitmap, luminance-range and
-  colour-range masks composed by Add/Subtract/Intersect.
+  colour-range masks composed by Add/Subtract/Intersect. Linear, radial, brush
+  and AI components export that composition in Lightroom's own grammar;
+  Bitmap components retain a named loss.
 - **Local AI masks** — subject (BiRefNet, named U²-Net fallback), sky
   (OneFormer ADE20K) and point-prompted object (SAM 2.1), as local Python
   sidecars with pinned weights; no API key.
@@ -65,6 +67,10 @@ An AI decides *what to change*. A deterministic Rust engine *does* it.
   global, semantic, luminance-range and colour-range corrections behind
   evidence gates; past the default Strength it may also carry a smooth
   12×8×8 local colour field, the one control with no Lightroom equivalent.
+  A structured sky/land residual can earn two or three overlapping native
+  bands that replace its single correction; hard spatial tiles use four
+  intersecting gradients. Each candidate keeps the existing evidence and
+  boundary gates, and the field solves the remainder after accepted bands.
   Where a repaint broke the pixel-to-pixel correspondence inside one region —
   and only there, since a region whose pixels still correspond may not overrule
   them — that region's own 12×8 cell means decide whether the move ships: closer
@@ -294,8 +300,9 @@ supported nodes first and stops at a 4×4 grid.
   boundary stays within the calibrated rim ceiling (0.012, charged per
   crossing against the scene's own step since v1.2.2 — in luma and per colour
   channel), and the composed frame does not regress.
-- Tiles are ordinary editable bitmap masks: recipe JSON keeps them losslessly
-  and classic XMP omits each with a named bitmap-mask loss.
+- Hard tiles are editable intersections of four gradients and export to
+  Lightroom. A guided raster keeps its named bitmap loss when the native
+  trial fails the shared gates or exceeds the measured rendering budget.
 - A **free-form remainder pass** ranks 4-connected, sign-pure components of
   the residual no tile covers, at most two, through the same gates; every
   proposal on the calibration corpus was refused, so it contributes
@@ -430,7 +437,7 @@ the tests [`scripts/check_docs.py`](scripts/check_docs.py) re-derives.
 
 | What | Measured | Where |
 |---|---|---|
-| Automated test battery | 1449 library / 24 CLI / 169 GUI / 2+2 contract tests; `check_docs` re-derives the pinned release claims | [Tech stack](#tech-stack-algorithms-and-design-philosophy) |
+| Automated test battery | 1474 library / 24 CLI / 172 GUI / 2+2 contract tests; `check_docs` re-derives the pinned release claims | [Tech stack](#tech-stack-algorithms-and-design-philosophy) |
 | RAW coverage | 24 extensions, 725 camera bodies; nine-camera format zoo 9/9 at the last release gate | [Supported formats](#supported-formats) |
 | Lightroom Texture parity | 45 of 45 period/depth anchors within ±0.02 | [Develop pipeline](#develop-pipeline-and-tone-model) |
 | Radial mask closure | 41 of 41 measured vectors within ≤1 px | [Lens correction](#lens-correction-and-lightroom-mask-frame-laws) |
@@ -685,7 +692,9 @@ numbers](#measured-numbers) are not repeated.
 
 - `src/recipe.rs`, `src/render.rs` and `src/xmp.rs` implement radial, linear,
   brush, bitmap, luminance-range and colour-range masks with ordered
-  Add/Subtract/Intersect composition.
+  Add/Subtract/Intersect composition in both the engine and the Lightroom
+  sidecar for every spellable component. Lightroom's own feathered
+  intersection rendering remains unmeasured.
 - Radial feather is a measured 290×11 `alpha(rho, feather)` LUT; brush dabs
   use `(1-rho^m)^n` and the measured `kappa=0.1284` flow law over pixel-centre
   sampling and the pixel/aspect metric, and `MaskBrushTable` import validates
@@ -756,7 +765,7 @@ numbers](#measured-numbers) are not repeated.
   the 1800 MB per-photo budget, and a 4 GiB RAW gate bounds admission.
 - The [`build` workflow](.github/workflows/build.yml) covers default and GUI
   feature sets on Ubuntu and macOS; model weights are not stored here. The
-  current battery is **1449 library (1435 pass + 14 `#[ignore]`d forensic probes) / 24 CLI / 169 GUI / 2+2 contract** tests, and
+  current battery is **1474 library (1459 pass + 15 `#[ignore]`d forensic probes) / 24 CLI / 172 GUI / 2+2 contract** tests, and
   [`scripts/check_docs.py`](scripts/check_docs.py) re-derives the pinned
   release claims.
 

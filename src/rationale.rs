@@ -72,8 +72,25 @@ pub mod values {
     /// …and when it is chromatic.
     pub const HUE_BANDS: &str = "hue bands";
 
+    // Native-carrier and residual-band outcomes are values, not prose.
+    pub const BITMAP_CARRIER: &str = "bitmap";
+    pub const FOUR_GRADIENTS: &str = "four gradients";
+    pub const UNMEASURED: &str = "unmeasured";
+    pub const UNMEASURED_HARD_MASK: &str = "unmeasured (hard mask)";
+    pub const NATIVE_TRIAL_GATED: &str = "native trial gated";
+    pub const BAND_ESTIMATOR: &str = "band estimator";
+    pub const BOUNDARY_BUDGET: &str = "boundary budget";
+    pub const DELTA_E_MARGIN: &str = "deltaE margin";
+    pub const ZONE_DO_NO_HARM: &str = "zone do-no-harm";
+    pub const FRAME_DO_NO_HARM: &str = "frame do-no-harm";
+    pub const BOUNDARY_REGRESSION: &str = "boundary regression";
+
     /// Every enumerated value, for the renderer and for the audit.
-    pub const ALL: &[&str] = &[LUMA_RANGES, HUE_BANDS];
+    pub const ALL: &[&str] = &[
+        LUMA_RANGES, HUE_BANDS, BITMAP_CARRIER, FOUR_GRADIENTS, UNMEASURED,
+        UNMEASURED_HARD_MASK, NATIVE_TRIAL_GATED, BAND_ESTIMATOR, BOUNDARY_BUDGET,
+        DELTA_E_MARGIN, ZONE_DO_NO_HARM, FRAME_DO_NO_HARM, BOUNDARY_REGRESSION,
+    ];
 }
 
 /// Every note template, byte-for-byte the English the persisted rationale
@@ -578,6 +595,14 @@ pub mod keys {
     /// rather than the frame's: a Full zone whose pixels do not pair solves its
     /// tone from the zone's population instead of from paired pixels. Mode
     /// governs the control set, scale governs the estimator.
+    pub const TILE_MASK_CARRIER: &str =
+        " Spatial tile {id} uses {carrier}: maximum refinement alpha change {delta}, rendered change {rendered}, boundary budget {max}.";
+    pub const ZONE_SUBZONES_ATTACHED: &str =
+        " Zoned {label} accepted {k} bands after {trials} trials: residual R2={r2}, breaks={breaks}, overlap={overlap}, deltaE {before} -> {after}, seam {seam_before} -> {seam_after}, target steps {step_before} -> {step_after}.";
+    pub const ZONE_SUBZONES_NOT_EARNED: &str =
+        " Zoned {label} kept the current recipe: the residual did not earn bands (R2={r2}).";
+    pub const ZONE_SUBZONES_REGRESSED: &str =
+        " Zoned {label} kept the current recipe: {k} trial bands regressed or failed a gate ({reason}, {trials} trials); R2={r2}, breaks={breaks}, overlap={overlap}, deltaE {before} -> {after}, seam {seam_before} -> {seam_after}, target steps {step_before} -> {step_after}.";
     pub const ZONE_PAIRING_SCALE: &str =
         " Zoned {label} tone was solved at CELL scale: this zone's own structural reading is {d}, past the {line} pairing line, so its pixels are not each other's counterparts — the tone came from the zone's own luma distribution rather than from a per-pixel regression, which reads a re-synthesised texture's contrast low.";
     /// The share-mismatch exit attaches NO zone. It used to borrow the
@@ -742,10 +767,9 @@ pub mod keys {
          shares source {s}, target {t}, original D={d}, signed residual {residual} \
          (95% CI +/-{ci}, parent {parent}).";
     pub const TILE_ATTACHED: &str =
-        " Spatial tile {id} attached as an engine bitmap: local residual \
+        " Spatial tile {id} attached: local residual \
          {before} -> {after}, composed frame {frame_before} -> {frame_after}, \
-         boundary {boundary}. Classic XMP omits this correction with the named \
-         bitmap-mask loss.";
+         boundary {boundary}.";
     pub const TILE_ABSTAINED: &str =
         " Spatial tile {id} abstained in derivation {generation} ({reason}): \
          frozen evidence shares source \

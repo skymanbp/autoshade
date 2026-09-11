@@ -3,12 +3,17 @@ use std::collections::BTreeSet;
 use image::{DynamicImage, GrayImage, Luma};
 
 use super::*;
+use crate::rationale::values;
 
 pub(super) const SPATIAL_MAX_DEPTH: u8 = 2;
 pub(super) const SPATIAL_MAX_ATTACHMENTS: usize = 4;
 pub(super) const SPATIAL_RESIDUAL_MIN: f32 = 2.0 / 255.0;
 pub(super) const SPATIAL_FRAME_REGRESSION_TOL: f32 = 0.0;
 pub(super) const TILE_RASTER_EDGE: u32 = 2048;
+/// Half a pixel of the tile analysis raster, in normalised frame units.
+/// The Zero/Full ramp fits between adjacent pixel centres, preserving the
+/// integer cell exactly. Unrelated to the renderer's guided-filter tile size.
+const TILE_GRADIENT_RAMP: f32 = 0.5 / TILE_RASTER_EDGE as f32;
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub(super) struct TileId {
@@ -266,7 +271,7 @@ fn reading_args(
         // An unread footprint says so; a 0.000 here would read as a measured
         // perfect structural match.
         ("d", reading.divergence.map_or_else(
-            || "unmeasured".to_string(), |d| format!("{:.3}", d.d))),
+            || values::UNMEASURED.to_string(), |d| format!("{:.3}", d.d))),
         ("residual", format!("{:+.5}", reading.residual)),
         ("parent", format!("{:+.5}", parent_residual)),
         ("ci", format!("{:.5}", reading.ci95)),
@@ -409,18 +414,39 @@ fn next_tile(
     (visited, None)
 }
 
+fn tile_geometry(id: TileId, size: (u32, u32)) -> (MaskGeometry, Vec<MaskComponent>) {
+    // Integer cell arithmetic places a break at ceil(k * size / grid), not
+    // k / grid when the raster has an odd dimension. Keep that exact edge.
+    let edge = |k: u32, n: u32| (k * n).div_ceil(id.grid()) as f32 / n.max(1) as f32;
+    let (left, right) = (edge(id.col as u32, size.0), edge(id.col as u32 + 1, size.0));
+    let (top, bottom) = (edge(id.row as u32, size.1), edge(id.row as u32 + 1, size.1));
+    let r = TILE_GRADIENT_RAMP * 0.5;
+    let shapes = [
+        MaskGeometry::Linear { zero_x: left - r, zero_y: 0.5, full_x: left + r, full_y: 0.5 },
+        MaskGeometry::Linear { zero_x: right + r, zero_y: 0.5, full_x: right - r, full_y: 0.5 },
+        MaskGeometry::Linear { zero_x: 0.5, zero_y: top - r, full_x: 0.5, full_y: top + r },
+        MaskGeometry::Linear { zero_x: 0.5, zero_y: bottom + r, full_x: 0.5, full_y: bottom - r },
+    ];
+    let mut shapes = shapes.into_iter();
+    let base = shapes.next().expect("four half planes");
+    let components = shapes.map(|geometry| MaskComponent { inverted: false, geometry, mode: MaskCombine::Intersect }).collect();
+    (base, components)
+}
+
 fn tile_attachment(
     reading: &TileReading,
-    path: &std::path::Path,
+    size: (u32, u32),
     source_weights: Vec<f32>,
     target_weights: Vec<f32>,
     coverage: ZoneCoverage,
 ) -> ZoneAttachment {
+    let (mask, components) = tile_geometry(reading.id, size);
     ZoneAttachment {
         source_weights,
         target_weights,
         coverage: Some(coverage),
-        mask: MaskGeometry::Bitmap { path: path.to_string_lossy().into_owned() },
+        mask,
+        components,
         range: None,
         name: reading.id.label(),
         role: MaskRole::Custom,
@@ -429,6 +455,16 @@ fn tile_attachment(
         min_share: MIN_ZONE_SHARE,
         frame_regression_tol: SPATIAL_FRAME_REGRESSION_TOL,
     }
+}
+
+/// Alpha error bounds the compositing error for channel values in [0,1].
+/// Compare every pixel, not only coverage and the frozen cores: equal mass
+/// could otherwise hide an edge moved from one place to another.
+fn refinement_alpha_delta(hard: &GrayImage, refined: &GrayImage) -> f32 {
+    if hard.dimensions() != refined.dimensions() { return f32::INFINITY; }
+    hard.as_raw().iter().zip(refined.as_raw())
+        .map(|(a, b)| (*a as f32 - *b as f32).abs() / 255.0)
+        .fold(0.0, f32::max)
 }
 
 fn boundary_args(
@@ -774,7 +810,8 @@ pub(super) fn attach_tiles(
             }
         };
         let (guide, raw_mask) = tile_mask(src, reading.id);
-        let (mask, refined) = if refine {
+        let mut refinement_delta = 0.0;
+        let (mask, mut refined) = if refine {
             match crate::mask_refine::guided_refine(
                 &guide,
                 &raw_mask,
@@ -783,7 +820,12 @@ pub(super) fn attach_tiles(
             ) {
                 crate::mask_refine::RefineOutcome::Kept { mask, reading: refined } => {
                     push_refinement_note(report, &reading.id.label(), true, refined);
-                    (mask, true)
+                    refinement_delta = refinement_alpha_delta(&raw_mask, &mask);
+                    if refinement_delta == 0.0 {
+                        (raw_mask, false)
+                    } else {
+                        (mask, true)
+                    }
                 }
                 crate::mask_refine::RefineOutcome::Abstained { reading: refined } => {
                     push_refinement_note(report, &reading.id.label(), false, refined);
@@ -813,7 +855,7 @@ pub(super) fn attach_tiles(
         };
         assert_eq!(coverage.source.len(), reading.source_weights.len());
         assert_eq!(coverage.target.len(), reading.target_weights.len());
-        let accepted_coverage = coverage.source.clone();
+        let mut accepted_coverage = coverage.source.clone();
         let (source_weights, target_weights) = if refined {
             let source = coverage
                 .source
@@ -831,11 +873,17 @@ pub(super) fn attach_tiles(
         } else {
             (reading.source_weights.clone(), reading.target_weights.clone())
         };
-        let attachment =
-            tile_attachment(&reading, owned.path(), source_weights, target_weights, coverage);
+        let mut attachment =
+            tile_attachment(&reading, mask.dimensions(), source_weights, target_weights, coverage);
+        if refined {
+            attachment.mask = MaskGeometry::Bitmap { path: owned.path().to_string_lossy().into_owned() };
+            attachment.components.clear();
+        }
         let frame_before = fit::look_err_with_evidence(&current, &tgt_px, &report.evidence);
         let mut frame_err = frame_before;
         let first_tile = report.recipe.masks.len();
+        let notes_before_attach = report.notes.len();
+        let rationale_before_attach = report.recipe.rationale.len();
         let accepted = attach_one_zone(
             &s_img,
             &tgt_px,
@@ -871,7 +919,7 @@ pub(super) fn attach_tiles(
                 frame_before,
             },
         );
-        let boundary = match boundary {
+        let mut boundary = match boundary {
             Ok(boundary) => {
                 crate::rationale::push_note(
                     &mut report.recipe.rationale,
@@ -897,6 +945,77 @@ pub(super) fn attach_tiles(
                 continue;
             }
         };
+        let mut rendered_delta = values::UNMEASURED_HARD_MASK.to_string();
+        if refined {
+            // A guide can move edge alpha substantially while the fitted
+            // correction barely moves the image. Put a native trial through
+            // the SAME estimator and boundary gate, then compare both actual
+            // renders at the 2048-edge tile raster. No coverage/core shortcut
+            // and no slider-magnitude proxy decides this projection.
+            let saved_recipe = report.recipe.clone();
+            let saved_notes = report.notes.clone();
+            report.recipe.masks.truncate(first_tile);
+            report.recipe.rationale.truncate(rationale_before_attach);
+            report.notes.truncate(notes_before_attach);
+            let (native_mask, native_components) = tile_geometry(reading.id, mask.dimensions());
+            let native_coverage = render::mask_coverage(&LocalAdjustment {
+                mask: native_mask.clone(), components: native_components.clone(), ..Default::default()
+            }, &s_img, render::MaskFrame::AsRendered);
+            let weights: Vec<f32> = native_coverage.as_raw().iter().map(|a| *a as f32 / 255.0).collect();
+            let native_attachment = tile_attachment(&reading, mask.dimensions(),
+                reading.source_weights.clone(), reading.target_weights.clone(),
+                ZoneCoverage { source: weights.clone(), target: weights.clone() });
+            let mut native_frame = frame_before;
+            let native = attach_one_zone(&s_img, &tgt_px, report, &mut native_frame,
+                &native_attachment, reading.divergence, corr.as_ref());
+            rendered_delta = values::NATIVE_TRIAL_GATED.to_string();
+            let mut projection = None;
+            if let Some(mut native) = native {
+                let trial = enforce_bitmap_boundary(&s_img, &tgt_px, report, first_tile,
+                    BitmapBoundaryInput {
+                        ruler: BoundaryRuler::CrossBoundaryStep { geometry: &weights, reference: &current },
+                        initial_px: std::mem::take(&mut native.rendered), frame_before,
+                    });
+                if let Ok(trial) = trial {
+                    let raster_pixels = render::develop_preview(&guide, &saved_recipe).to_rgb8();
+                    let native_pixels = render::develop_preview(&guide, &report.recipe).to_rgb8();
+                    let delta = raster_pixels.as_raw().iter().zip(native_pixels.as_raw())
+                        .map(|(a,b)| a.abs_diff(*b) as f32 / 255.0).fold(0.0, f32::max);
+                    rendered_delta = format!("{delta:.6}");
+                    if delta <= ZONE_BOUNDARY_STEP_MAX {
+                        projection = Some((native, trial, native_attachment));
+                    }
+                }
+            }
+            if let Some((native, trial, native_attachment)) = projection {
+                accepted = native;
+                boundary = trial;
+                accepted_coverage = native_attachment.coverage.as_ref().expect("tile coverage").source.clone();
+                attachment = native_attachment;
+                refined = false;
+                crate::rationale::push_note(&mut report.recipe.rationale, &mut report.notes,
+                    crate::rationale::Note::new(crate::rationale::keys::TILE_BOUNDARY_PASSED,
+                        boundary_args(reading.id, boundary.k, boundary.initial, boundary.reading)));
+            } else {
+                report.recipe = saved_recipe;
+                report.notes = saved_notes;
+            }
+        }
+        if !refined { owned.remove(); }
+        crate::rationale::push_note(
+            &mut report.recipe.rationale,
+            &mut report.notes,
+            crate::rationale::Note::new(
+                crate::rationale::keys::TILE_MASK_CARRIER,
+                vec![
+                    ("id", reading.id.tag()),
+                    ("carrier", if refined { values::BITMAP_CARRIER } else { values::FOUR_GRADIENTS }.to_string()),
+                    ("delta", format!("{refinement_delta:.6}")),
+                    ("rendered", rendered_delta),
+                    ("max", format!("{ZONE_BOUNDARY_STEP_MAX:.3}")),
+                ],
+            ),
+        );
         let target_moments = zone_moments(&tgt_px, &attachment.target_weights);
         accepted.after = zone_err(
             &zone_moments(&boundary.pixels, &attachment.source_weights),
@@ -1308,7 +1427,7 @@ mod tests {
         );
         let attachment = tile_attachment(
             &reading,
-            std::path::Path::new("mask-zone-tile.png"),
+            (64, 64),
             reading.source_weights.clone(),
             reading.target_weights.clone(),
             ZoneCoverage {
@@ -1318,6 +1437,63 @@ mod tests {
         );
         assert_eq!(SPATIAL_FRAME_REGRESSION_TOL.to_bits(), 0.0f32.to_bits());
         assert_eq!(attachment.frame_regression_tol.to_bits(), 0.0f32.to_bits());
+    }
+
+    #[test]
+    fn four_gradient_tiles_equal_integer_rasters_and_frozen_evidence_shares() {
+        for (w, h) in [(384, 256), (385, 257), (2048, 1365)] {
+            let src = DynamicImage::ImageRgb8(RgbImage::from_fn(w, h, |x, y| {
+                Rgb([64 + ((x + y) % 96) as u8; 3])
+            }));
+            for (row, col) in [(0, 0), (1, 2), (3, 3)] {
+                let id = TileId { depth: 2, row, col };
+                // thumbnail() can upscale a small fixture. Compare coverage
+                // on the raster actually stamped, never zip two different grids.
+                let (guide, hard) = tile_mask(&src, id);
+                let (mask, components) = super::tile_geometry(id, hard.dimensions());
+                let native = render::mask_coverage(&LocalAdjustment {
+                    mask, components, ..Default::default()
+                }, &guide, render::MaskFrame::AsRendered);
+                assert_eq!(native.dimensions(), hard.dimensions());
+                assert!(native.as_raw().iter().zip(hard.as_raw()).all(|(a,b)| a.abs_diff(*b) <= 1),
+                    "source {w}x{h}, raster {:?}, tile {row}/{col}", hard.dimensions());
+                if w == 384 {
+                    let px = fit::pixels_of(&src);
+                    let evidence = fit::evidence_model_for(&px, &px, w, h);
+                    let scope = |alpha: &GrayImage| scoped_mask_evidence(&px, &evidence,
+                        &mask_weights(alpha, w, h));
+                    let (a, b) = (scope(&native), scope(&hard));
+                    assert!((a.source_share - b.source_share).abs() <= 1e-4);
+                    assert!((a.target_share - b.target_share).abs() <= 1e-4);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn geometry_tiles_turn_every_intersection_with_the_image() {
+        let source = DynamicImage::new_rgb8(385, 257);
+        let id = TileId { depth: 2, row: 1, col: 2 };
+        let (guide, hard) = tile_mask(&source, id);
+        let (mask, components) = super::tile_geometry(id, hard.dimensions());
+        let mut recipe = crate::recipe::EditRecipe { masks: vec![LocalAdjustment {
+            mask, components, ..Default::default()
+        }], ..Default::default() };
+        render::orient_recipe_coords(&mut recipe, rawler::Orientation::Rotate90, None);
+        let native = render::mask_coverage(&recipe.masks[0], &guide.rotate90(), render::MaskFrame::AsRendered);
+        let expected = image::imageops::rotate90(&hard);
+        assert_eq!(native.dimensions(), expected.dimensions());
+        assert!(native.as_raw().iter().zip(expected.as_raw()).all(|(a,b)| a.abs_diff(*b) <= 1));
+        assert_eq!(recipe.masks[0].components.len(), 3);
+    }
+
+    #[test]
+    fn tile_refinement_compares_every_alpha_not_just_mass_or_core() {
+        let hard = GrayImage::from_fn(32, 32, |x,_| Luma([if x < 16 { 255 } else { 0 }]));
+        assert_eq!(refinement_alpha_delta(&hard, &hard), 0.0);
+        let shifted = GrayImage::from_fn(32, 32, |x,_| Luma([if x > 0 && x <= 16 { 255 } else { 0 }]));
+        assert_eq!(hard.as_raw().iter().map(|v| *v as u32).sum::<u32>(), shifted.as_raw().iter().map(|v| *v as u32).sum::<u32>());
+        assert!(refinement_alpha_delta(&hard, &shifted) > ZONE_BOUNDARY_STEP_MAX);
     }
 
     fn tile_geometry(id: TileId, width: u32, height: u32) -> Vec<f32> {
@@ -1373,7 +1549,7 @@ mod tests {
         };
         let attachment = tile_attachment(
             &reading,
-            path.path(),
+            raw_mask.dimensions(),
             reading.source_weights.clone(),
             reading.target_weights.clone(),
             coverage,

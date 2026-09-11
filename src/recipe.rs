@@ -1091,7 +1091,7 @@ pub struct LocalAdjustment {
     pub mask: MaskGeometry,
     /// Extra shapes composed onto `mask` in order (Add / Subtract /
     /// Intersect — Lightroom's mask-component grammar). Empty = the base
-    /// geometry alone (v1-compatible). ENGINE-ONLY: see [`MaskComponent`].
+    /// geometry alone (v1-compatible). Export grammar: see [`MaskComponent`].
     pub components: Vec<MaskComponent>,
     /// Lightroom's per-mask eye toggle: `false` mutes the adjustment without
     /// touching its tuned Amount (dragging Amount to 0 as a mute DESTROYED
@@ -1194,17 +1194,16 @@ pub struct LocalAdjustment {
     /// needs r/b ≈ 5.3×; the full 2000–40000 K blackbody range caps at
     /// ≈ 1.9×), so the fit writes the exact gains instead. ENGINE-ONLY: no
     /// classic-ACR counterpart exists, so the XMP writer cannot carry it —
-    /// the fit only attaches it to Bitmap-masked corrections, which classic
-    /// XMP skips anyway (see [`MaskGeometry::Bitmap`]). Composes
+    /// the fit may attach it to a native shape as well. The writer keeps the
+    /// shape and names the separate recolour loss. Composes
     /// multiplicatively with the temperature/tint gains in the engine.
     pub color_gains: Option<[f32; 3]>,
     /// Which semantic zone produced this mask, a STABLE identity independent of
     /// the free-text `name` (which the GUI now translates, so it can no longer
     /// be an equality key). `Custom` for every user/AI mask; the zoned
-    /// reverse-fit tags its two masks `ZoneSky`/`ZoneLand` (fit_zoned.rs). Like
-    /// `color_gains`, ENGINE-ONLY — the fit only sets it on Bitmap masks, which
-    /// the XMP writer skips, so it never reaches a sidecar (round-trips only in
-    /// the app-internal `recipe.json`).
+    /// reverse-fit tags its masks `ZoneSky`/`ZoneLand` (fit_zoned.rs). XMP
+    /// carries it as namespaced AutoShade editing intent; Lightroom's own
+    /// mask grammar carries the coverage independently of this role.
     pub role: MaskRole,
 }
 
@@ -1248,7 +1247,7 @@ impl Default for LocalAdjustment {
 /// text and, since i18n, no longer a reliable key). Set by the zoned
 /// reverse-fit (fit_zoned.rs); `Custom` for every user-placed or AI-segmented
 /// mask. Serialised in `recipe.json` as `"custom"` / `"zone_sky"` /
-/// `"zone_land"`; never written to XMP (see [`LocalAdjustment::role`]).
+/// `"zone_land"`; carried as namespaced AutoShade intent in XMP.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MaskRole {
@@ -1931,16 +1930,32 @@ pub enum MaskCombine {
 
 /// One extra shape composed onto a [`LocalAdjustment`]'s base `mask`, in list
 /// order: coverage starts at the base geometry's weight and each component
-/// folds in via its [`MaskCombine`] mode. ENGINE-ONLY like `color_gains`: the
-/// classic-ACR XMP writer projects only the base geometry (a multi-component
-/// `crs:CorrectionMasks` group needs `crs:MaskBlendMode` semantics we have no
-/// verified reference sidecar for — the roundness rule: never reshape masks
-/// on a guess), so combinations round-trip in recipe.json only.
+/// folds in via its [`MaskCombine`] mode. Linear, radial, brush and AI shapes
+/// export in Lightroom's own grammar. The 174-sidecar census (399 correction
+/// groups, 102 composed) verifies Add = blend 0/value 1, Subtract = blend
+/// 1/value 0, Intersect = subtract the inverted shape. It does NOT verify
+/// Adobe's arithmetic on feathered alphas. Bitmap components remain a named
+/// export loss; recipe.json keeps their full composition.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct MaskComponent {
     pub geometry: MaskGeometry,
     pub mode: MaskCombine,
+    /// Complement this component after its geometry's own inversion. In
+    /// particular, a measured asymmetric linear feather must be complemented,
+    /// not approximated by reversing its handles. Absent/false is byte-stable.
+    /// Older readers fail loudly only for recipes that use the new bit.
+    /// SCHEMA_ERA names the R25 CRS controls, so it does not move here.
+    #[serde(skip_serializing_if = "component_not_inverted")]
+    pub inverted: bool,
+}
+
+fn component_not_inverted(value: &bool) -> bool { !*value }
+
+impl MaskComponent {
+    pub fn net_inverted(&self) -> bool {
+        self.inverted ^ self.geometry.own_inverted()
+    }
 }
 
 impl Default for MaskComponent {
@@ -1948,6 +1963,7 @@ impl Default for MaskComponent {
         Self {
             geometry: MaskGeometry::Linear { zero_x: 0.5, zero_y: 0.0, full_x: 0.5, full_y: 0.5 },
             mode: MaskCombine::Add,
+            inverted: false,
         }
     }
 }

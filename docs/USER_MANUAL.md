@@ -57,7 +57,9 @@ replacing an existing neighboring sidecar requires confirmation.
 
 Open **Local Masks**, create a mask, then adjust the sliders inside that mask.
 Shapes can be combined with Add, Subtract, or Intersect and can carry luminance
-or color range restrictions.
+or color range restrictions. Linear, radial, brush and AI components export
+that composition to Lightroom. Bitmap components remain a named export loss;
+the component Invert control complements its shape before composition.
 
 - **Linear gradient:** choose **＋ Linear gradient**, then drag from the fully
   affected side toward the unaffected side; the shipped falloff eases softly at
@@ -133,6 +135,23 @@ rather than a silence. A zone whose own structural reading
 is past the pairing line also says which estimator solved its tone, because a
 per-pixel regression reads a repainted texture's contrast low.
 
+**A sky can earn bands.** When the sky or land residual has a measured vertical
+colour pattern, the fit trials two or three overlapping corrections in place
+of the single zone. Each band must pass the same evidence and quality gates,
+and the set must improve the zone without worsening the boundary readings
+at any band break or at the horizon. The fit also checks the target's
+actual step within each boundary cell; shrinking a replacement preserves
+the original correction's tone while reducing the new band differences.
+The mask list names each `sky · band 2/3` with its Intersect components visible.
+An unstructured residual keeps the single correction and says why. Hard spatial
+tiles now use four intersecting gradients; a guided edge retains its bitmap
+when a native trial fails the shared gates or exceeds the existing budget
+in the actual rendered correction. The save
+line therefore counts only the Bitmap corrections/components that remain.
+Lightroom reads the native composition, but its own rendering of the written
+intersections has not been measured; AI alpha and local recolour gains still
+have their existing separate disclosures.
+
 **The colour field.** Past the 65% default, and only there, the fit may also
 attach a smooth 12×8×8 local colour/tone field — the residual its masks and
 range bands cannot shape. It appears in the develop panel's **Local Masks**
@@ -164,9 +183,9 @@ evidence-weighted frame is no worse than the running global/banded result.
 The historical two-region route is the default. Enable **Up to four semantic
 regions** in the GUI, or pass `--regions 4` on the CLI, to opt in to the
 expanded route. It performs one OneFormer inference per frame and may take
-longer. The default two-region dials and confidence are byte-identical to
-`662b688`; only the rationale gains one typed `ZONE_ALREADY_MATCHED` note per
-zone whose dials did not move.
+longer. The default two-region path keeps its single corrections unless
+residual-earned bands pass every gate. A zone whose dials did not move gets
+one typed `ZONE_ALREADY_MATCHED` note.
 Generated range masks persist as editable **Luminance range** cards with their
 four ordered bounds and **Colour range** cards keyed to one hue band's mean
 colour; their sentinel-hosted range components project to Lightroom XMP as the
@@ -178,8 +197,9 @@ locally — not Adobe's raster」). **Invert** now reaches the sidecar on a brus
 or AI mask as well as on a gradient, and a Lightroom mask that arrives inverted
 renders inverted here: both used to drop the flag silently, so an imported
 inverted sky selection painted the sky it was meant to exclude. The opt-in
-four-class region bitmaps, spatial tiles and free-form field masks remain
-engine-only with the named bitmap loss.
+four-class region bitmaps, retained refined tiles and free-form field masks
+remain engine-only with the named bitmap loss. Native gradient tiles and
+semantic bands carry their complete geometry composition.
 The luminance family runs first and the colour family on the frame it leaves,
 each gated as a stage of its own.
 

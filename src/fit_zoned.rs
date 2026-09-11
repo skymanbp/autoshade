@@ -31,7 +31,7 @@ use anyhow::{Context, Result};
 use image::{DynamicImage, GenericImageView, GrayImage};
 
 use crate::fit::{self, FitReport};
-use crate::recipe::{LocalAdjustment, MaskGeometry, MaskRole, RangeMask};
+use crate::recipe::{LocalAdjustment, MaskCombine, MaskComponent, MaskGeometry, MaskRole, RangeMask};
 use crate::render;
 use crate::segment::{segment_file, SegmentOpts};
 
@@ -39,6 +39,7 @@ mod field;
 mod freemask;
 mod range;
 mod spatial;
+mod subzones;
 pub mod semantic;
 
 const MASK_REFINE_RADIUS: u32 = 8;
@@ -2737,6 +2738,7 @@ fn attach_semantic_regions(
             target_weights: tw,
             coverage: None,
             mask: MaskGeometry::Bitmap { path: raster.path().to_string_lossy().into_owned() },
+            components: Vec::new(),
             range: None,
             name: format!("region-{}-{}", region.class_id, region.label),
             role: MaskRole::Custom,
@@ -2911,6 +2913,7 @@ struct ZoneAttachment {
     /// exactly the withheld pixels the raster still moves.
     coverage: Option<ZoneCoverage>,
     mask: MaskGeometry,
+    components: Vec<MaskComponent>,
     range: Option<RangeMask>,
     name: String,
     role: MaskRole,
@@ -3185,6 +3188,7 @@ fn attach_zones_with_divergence(
         target_weights: tw.clone(),
         coverage: None,
         mask: MaskGeometry::select_sky(ref_x, ref_y, false, zone_raster.clone()),
+        components: Vec::new(),
         range: None,
         name: String::new(),
         role: MaskRole::ZoneSky,
@@ -3210,6 +3214,7 @@ fn attach_zones_with_divergence(
         target_weights: twl,
         coverage: None,
         mask: MaskGeometry::select_sky(ref_x, ref_y, false, zone_raster),
+        components: Vec::new(),
         range: None,
         name: String::new(),
         role: MaskRole::ZoneLand,
@@ -3323,6 +3328,9 @@ fn attach_zones_with_divergence(
             ],
         ),
     );
+    subzones::replace_zone(&s_img, &tgt_px, report, &sky_attachment, divergence.sky.divergence);
+    subzones::replace_zone(&s_img, &tgt_px, report, &land_attachment, divergence.land.divergence);
+    let final_px = fit::pixels_of(&render::develop_preview(&s_img, &report.recipe));
     fit::append_finished_disclosure(
         report,
         &final_px,
@@ -3395,17 +3403,53 @@ fn enforce_boundary_gate(
     reference_px: &[[f32; 3]],
     initial_px: Vec<[f32; 3]>,
 ) -> BoundaryGateResult {
+    enforce_boundary_gates(s_img, report, &[sky_weights], correction_shares,
+        first_zone, reference_px, initial_px)
+}
+
+/// The same budget and shrink for one semantic horizon or all the horizons
+/// and breaks of a sub-zone set. One bisection owns the complete correction
+/// set; no band can borrow a different ruler or hide a worse boundary.
+fn enforce_boundary_gates(
+    s_img: &DynamicImage,
+    report: &mut FitReport,
+    boundaries: &[&[f32]],
+    correction_shares: &[f32],
+    first_zone: usize,
+    reference_px: &[[f32; 3]],
+    initial_px: Vec<[f32; 3]>,
+) -> BoundaryGateResult {
+    enforce_boundary_gates_with_shrink(s_img, report, boundaries, correction_shares,
+        first_zone, (reference_px, initial_px), shrink_zone_corrections)
+}
+
+/// The same measured gate also handles replacement deltas. Its zero render
+/// is supplied by the caller; ordinary new zones use zero controls, while a
+/// native band replacement retains its accepted parent's controls at zero.
+fn enforce_boundary_gates_with_shrink(
+    s_img: &DynamicImage,
+    report: &mut FitReport,
+    boundaries: &[&[f32]],
+    correction_shares: &[f32],
+    first_zone: usize,
+    (reference_px, initial_px): (&[[f32; 3]], Vec<[f32; 3]>),
+    shrink: impl Fn(&mut [LocalAdjustment], &[LocalAdjustment], &[f32], f32),
+) -> BoundaryGateResult {
+    let read = |pixels: &[[f32; 3]], frozen: &[[f32; 3]]| {
+        boundaries.iter().fold(BoundaryReading::nothing_measured(), |mut all, weights| {
+            let next = boundary_rim(reference_px, pixels, frozen, weights, s_img.width(), s_img.height());
+            all.rim = all.rim.max(next.rim);
+            all.charged = all.charged.max(next.charged);
+            all.colour = all.colour.max(next.colour);
+            all.colour_charged = all.colour_charged.max(next.colour_charged);
+            all.transitions += next.transitions;
+            all
+        })
+    };
     // `initial_px` is the k=1 candidate, so it is also this gate's FROZEN
     // frame: the correction's own slope is a property of the correction and
     // must never chase the bisection (see [`crossing_slope`]).
-    let initial = boundary_rim(
-        reference_px,
-        &initial_px,
-        &initial_px,
-        sky_weights,
-        s_img.width(),
-        s_img.height(),
-    );
+    let initial = read(&initial_px, &initial_px);
     let zone_count = report.recipe.masks.len().saturating_sub(first_zone);
     // A correction that survives this gate must MOVE something. Step 9 made
     // that worth checking: under the transported differential a `k=0` render
@@ -3453,31 +3497,23 @@ fn enforce_boundary_gate(
     let shares = correction_shares.to_vec();
     debug_assert_eq!(shares.len(), originals.len());
     let render_at = |report: &mut FitReport, k: f32| -> (BoundaryReading, Vec<[f32; 3]>) {
-        shrink_zone_corrections(
+        shrink(
             &mut report.recipe.masks[first_zone..],
             &originals,
             &shares,
             k,
         );
         let pixels = fit::pixels_of(&render::develop_preview(s_img, &report.recipe));
-        let reading = boundary_rim(
-            reference_px,
-            &pixels,
-            &initial_px,
-            sky_weights,
-            s_img.width(),
-            s_img.height(),
-        );
+        let reading = read(&pixels, &initial_px);
         (reading, pixels)
     };
 
     // INVARIANT, not a policy branch. The reading is now the rim the
-    // correction INTRODUCED against `reference_px`, and `k=0` zeroes every
-    // additive dial and drops every gain (see `shrink_zone_corrections`), so
-    // a zero-dialled attached mask MUST render back to `reference_px` and
-    // read exactly 0.0. A non-zero reading here means a mask carrying no
-    // correction is not a render no-op, which is an engine bug rather than a
-    // seam. The branch stays because a deleted branch cannot catch that.
+    // correction INTRODUCED against `reference_px`, and `k=0` restores the
+    // caller's baseline (zero controls for an addition, accepted parent
+    // controls for replacement bands). It MUST render back to that baseline
+    // and read exactly 0.0. A non-zero reading is an invariant failure,
+    // not permission to spend a different boundary budget.
     let (zero, zero_px) = render_at(report, 0.0);
     if zero.gated() > ZONE_BOUNDARY_RIM_MAX {
         report.recipe.masks.truncate(first_zone);
@@ -3511,7 +3547,7 @@ fn enforce_boundary_gate(
         refuse_inert(report, best.0, lo);
         return BoundaryGateResult::Dropped;
     }
-    shrink_zone_corrections(
+    shrink(
         &mut report.recipe.masks[first_zone..],
         &originals,
         &shares,
@@ -3890,6 +3926,7 @@ fn attach_one_zone(
     let round2 = |v: f32| (v * 100.0).round() / 100.0;
     report.recipe.masks.push(LocalAdjustment {
         mask: attachment.mask.clone(),
+        components: attachment.components.clone(),
         range: attachment.range,
         name: attachment.name.clone(),
         role: attachment.role,
@@ -5059,6 +5096,7 @@ mod tests {
             target_weights: tw,
             coverage: None,
             mask: MaskGeometry::Bitmap { path: path.path().to_string_lossy().into_owned() },
+            components: Vec::new(),
             range: None,
             name: String::new(),
             role: MaskRole::ZoneSky,
@@ -8589,6 +8627,7 @@ mod tests {
             target_weights: tw.iter().map(|w| 1.0 - w).collect(),
             coverage: None,
             mask: MaskGeometry::Bitmap { path: path.path().to_string_lossy().into_owned() },
+            components: Vec::new(),
             range: None,
             name: String::new(),
             role: MaskRole::ZoneLand,
@@ -8840,6 +8879,7 @@ mod tests {
             target_weights: mask_weights(&sky_mask, t_img.width(), t_img.height()),
             coverage: None,
             mask: MaskGeometry::Bitmap { path: path.path().to_string_lossy().into_owned() },
+            components: Vec::new(),
             range: None,
             name: String::new(),
             role: MaskRole::ZoneSky,
@@ -9493,13 +9533,13 @@ mod tests {
         }
     }
 
-    /// The multi-class layer failing is not the sky fit failing. With a broken
-    /// interpreter the multi bridge fails, the historical route (stubbed masks)
-    /// succeeds, and the report is that route's report plus ONE typed
-    /// `SEMANTIC_REGIONS_UNAVAILABLE` note — never `ZONED_UNAVAILABLE`, whose
-    /// text promises a luminance-range fallback that did not run.
+    /// A failed multi-class bridge still returns the complete historical
+    /// sky/land result plus one sanitized hand-off. R35's additional carrier
+    /// and band disclosures reach the existing typed-note cap on this fixture;
+    /// the complete persisted record survives and the sentinel deliberately
+    /// selects the established raw-English fallback. The cap does not move.
     #[test]
-    fn multi_segmentation_failure_keeps_the_legacy_zones_with_its_own_note() {
+    fn multi_segmentation_failure_preserves_the_legacy_route_when_typed_notes_overflow() {
         let (src, tgt, sky) = zoned_pair();
         // An ABSOLUTE interpreter path, because that is the real shape: the
         // bundled helper resolves one, and `AUTOSHADE_PYTHON` is one. A bare
@@ -9529,13 +9569,18 @@ mod tests {
             .iter()
             .filter(|n| n.key == crate::rationale::keys::SEMANTIC_REGIONS_UNAVAILABLE)
             .collect::<Vec<_>>();
-        assert_eq!(own.len(), 1, "exactly one typed hand-off: {}", multi.recipe.rationale);
-        // …and the hand-off's reason went through the disclosure door. The
-        // sidecar's own error names paths; a rationale is user-visible and is
-        // pasted into bug reports, so neither an absolute path nor an unbounded
-        // traceback may reach it.
-        let reason = own[0].args.iter().find(|(k, _)| *k == "e").map(|(_, v)| v.as_str());
-        let reason = reason.expect("the hand-off note carries its reason");
+        assert_eq!(own.len(), 0, "the overflow does not invent a partial typed suffix");
+        assert_eq!(multi.notes.len(), crate::rationale::MAX_NOTES + 1);
+        assert_eq!(multi.notes.last().unwrap().key, crate::rationale::TRUNCATED_SENTINEL);
+        assert_eq!(&multi.notes[..crate::rationale::MAX_NOTES],
+            &legacy.notes[..crate::rationale::MAX_NOTES], "the bounded prefix is the legacy report's");
+        let appended = multi.recipe.rationale.strip_prefix(legacy.recipe.rationale.as_str())
+            .expect("the complete historical route precedes the one hand-off");
+        let (prefix, suffix) = crate::rationale::keys::SEMANTIC_REGIONS_UNAVAILABLE.split_once("{e}").unwrap();
+        let reason = appended.strip_prefix(prefix).and_then(|s| s.strip_suffix(suffix))
+            .expect("exactly one complete hand-off survives the typed cap");
+        // The same sanitized reason and its unchanged length bound must be
+        // present in the complete record even when the GUI uses raw English.
         assert!(
             !reason.contains("autoshade-e-leak-probe") && !reason.contains('\n'),
             "the hand-off reason leaked this machine's layout or a multi-line trace: {reason}"
@@ -9556,9 +9601,12 @@ mod tests {
             multi.recipe.rationale
         );
         // Everything but that one appended sentence IS the historical route.
-        let appended = crate::rationale::render_one(own[0]);
+        let expected = crate::rationale::render_one(&crate::rationale::Note::new(
+            crate::rationale::keys::SEMANTIC_REGIONS_UNAVAILABLE, vec![("e", reason.to_string())],
+        ));
+        assert_eq!(appended, expected);
         assert_eq!(
-            multi.recipe.rationale.strip_suffix(appended.as_str()),
+            multi.recipe.rationale.strip_suffix(expected.as_str()),
             Some(legacy.recipe.rationale.as_str()),
             "the hand-off note is appended to the historical rationale, nothing else changes"
         );

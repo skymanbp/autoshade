@@ -682,13 +682,13 @@ pub(crate) enum MaskRefineOutcome {
 /// on the persist path; `render_fit_note` (workers.rs) translates it when
 /// the result lands. Owned args only — stringified errors, paths, counts.
 pub(crate) enum FitNote {
-    /// The fit attached at least one semantic bitmap zone.
+    /// The finished fit includes a semantic sky/land correction, possibly bands.
     IncludesSkyZone,
     /// The fit contains at least one native range mask.
     IncludesRangeMasks,
-    /// The fit attached this many engine-only spatial bitmap tiles.
+    /// This many spatial tiles are present, as native geometry or refined rasters.
     IncludesSpatialTiles(usize),
-    /// Guided bitmap-mask production outcomes across semantic/tile masks.
+    /// Complete guided-refinement outcomes across semantic/tile masks.
     MaskRefinement { kept: usize, abstained: usize },
     /// `commit_develop` failed — the fit stays on the canvas unsaved.
     NotPersistedCommit(String),

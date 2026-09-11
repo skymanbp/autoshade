@@ -2077,9 +2077,9 @@ impl AutoShadeApp {
                     });
                 }
                 // --- Shapes（组件）: compose extra geometry onto this mask —
-                // Lightroom's Add / Subtract / Intersect grammar. ENGINE-ONLY
-                // (recipe.rs MaskComponent): the XMP projection carries the
-                // base shape alone.
+                // Lightroom's Add / Subtract / Intersect grammar. Every native
+                // shape projects through the same composition spelling; only
+                // Bitmap components remain a named geometry loss.
                 {
                     ui.horizontal(|ui| {
                         ui.label(tr(lang, "Shapes"));
@@ -2177,6 +2177,10 @@ impl AutoShadeApp {
                                 self.overlay_stale = true;
                                 changed = true;
                             }
+                            if ui.checkbox(&mut self.recipe.masks[i].components[c].inverted, tr(lang, "Invert")).changed() {
+                                self.overlay_stale = true;
+                                changed = true;
+                            }
                             if ui.small_button("🗑").clicked() {
                                 del_comp = Some(c);
                             }
@@ -2194,7 +2198,7 @@ impl AutoShadeApp {
                     }
                     if n_comp > 0 {
                         ui.label(
-                            egui::RichText::new(tr(lang, "Shapes compose in order onto the base mask. In-app render + export only — the Lightroom XMP carries the base shape alone."))
+                            egui::RichText::new(tr(lang, "Shapes compose in order onto the base mask. Linear, radial, brush and AI components export to Lightroom; bitmap components have a named loss."))
                                 .weak()
                                 .small(),
                         );

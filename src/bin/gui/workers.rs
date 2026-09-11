@@ -2477,7 +2477,7 @@ impl AutoShadeApp {
             ),
             FitNote::IncludesSkyZone => tr(
                 lang,
-                " · includes sky-zone correction (adjustable in the mask panel; XMP carries the global part only)",
+                " · includes sky-zone correction (editable in the mask panel; native masks export to XMP and remaining losses are named)",
             )
             .to_string(),
             FitNote::IncludesRangeMasks => tr(
@@ -2487,7 +2487,7 @@ impl AutoShadeApp {
             .to_string(),
             FitNote::IncludesSpatialTiles(n) => trf(
                 lang,
-                " · includes {n} spatial tile correction(s) (adjustable in the mask panel; omitted from classic XMP with a named bitmap loss)",
+                " · includes {n} spatial tile correction(s) (editable in the mask panel; native tiles export to XMP, retained rasters have a named loss)",
                 &[("n", &n.to_string())],
             ),
             FitNote::MaskRefinement { kept, abstained } => trf(
