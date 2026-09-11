@@ -2517,8 +2517,11 @@ linear light, with a cell already AT its target counting as aligned only if it
 was left alone. A zone-wide gain that matches the mean while dragging cells
 whose targets lie elsewhere converges the mean and fails the partition, so
 `CellVouch::vouched` is now `converged >= 0.70 && diverged <= 0.10 && aligned
->= 0.70` and "1.000 converged" on the reference pair is a measurement that
-every sky cell wants the same warm push, not a tautology.
+>= 0.70`, and the verdict stops being a tautology: R33's reading was 1.000 /
+0.000 for any probe that moved anything at all, while the reference sky reads
+0.865 converged / 0.135 diverged / 1.000 ALIGNED — every one of its cells wants
+the same warm push, and a seventh of its trust-weighted mass still ends further
+from its own target than it started.
 
 WHERE IT MAY BE ASKED AT ALL is the rule this design lives or dies by, and it
 is one sentence: *the cells answer where the pixels CANNOT BE ASKED — never

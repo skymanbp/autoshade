@@ -4084,9 +4084,12 @@ fn attach_one_zone(
     // OWN target mean. A zone-wide gain that matches the zone mean while
     // dragging cells whose targets lie elsewhere converges the mean and fails
     // the partition. The estimator's objective is one number; the voucher's
-    // measurement is 96 directed ones, and "1.000 converged" is then a
-    // measurement that every sky cell wants the same warm push, not a
-    // tautology.
+    // measurement is 96 directed ones, so the verdict stops being a
+    // tautology: R33 measured 1.000/0.000 for any probe that moved anything
+    // at all, while the reference sky reads 0.865 converged / 0.135 diverged
+    // / 1.000 ALIGNED — every one of its cells wants the same warm push, and
+    // a seventh of its trust-weighted mass still ends further from its own
+    // target than it started.
     //
     // This is also the ONE place R33's "Atmosphere passes no cells" is
     // deliberately not followed, and for the reason that doctrine exists. An
