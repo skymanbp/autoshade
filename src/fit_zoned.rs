@@ -2074,30 +2074,35 @@ fn fit_recipe_zoned_multi_inner(
     report
 }
 
-/// Claim hygiene after arbitration: every bitmap raster the losing
+/// Claim hygiene after arbitration: every mask raster the losing
 /// `candidate` references and the `kept` report does not is released, and so
 /// is the shared anchor when nothing kept references it. Only files inside
 /// the anchor's own directory (the develop store) are touched, so a recipe
 /// that names a raster elsewhere can never make the fit delete it.
+///
+/// **The question is "which FILE does this mask render from", not "is this
+/// mask a `Bitmap`"** — `render::geometry_raster_path`, the one place that is
+/// answered. Asking the geometry's variant instead was safe only while every
+/// zone was a raster mask: the sky/land zones are Select Sky components now
+/// (`MaskGeometry::select_sky`), and a variant test would have found the kept
+/// recipe referencing nothing, so the `anchor.remove()` below would have
+/// deleted the very alpha the winning report renders both of its zones from.
 fn release_unselected_rasters(
     candidate: &FitReport,
     kept: &FitReport,
     anchor: &crate::store::OwnedRaster,
 ) {
-    let bitmaps = |report: &FitReport| {
+    let rasters = |report: &FitReport| {
         report
             .recipe
             .masks
             .iter()
-            .filter_map(|mask| match &mask.mask {
-                MaskGeometry::Bitmap { path } => Some(path.clone()),
-                _ => None,
-            })
+            .filter_map(|mask| render::geometry_raster_path(&mask.mask).map(str::to_string))
             .collect::<Vec<_>>()
     };
-    let keep = bitmaps(kept).into_iter().collect::<std::collections::HashSet<_>>();
+    let keep = rasters(kept).into_iter().collect::<std::collections::HashSet<_>>();
     let parent = anchor.path().parent();
-    for path in bitmaps(candidate) {
+    for path in rasters(candidate) {
         let file = std::path::Path::new(&path);
         if !keep.contains(&path) && file.parent() == parent {
             let _ = std::fs::remove_file(file);
@@ -2431,7 +2436,7 @@ fn attach_semantic_regions(
     // it into the recipe survive the run.
     for raster in rasters {
         let path = raster.path().to_string_lossy();
-        if !report.recipe.masks.iter().any(|m| matches!(&m.mask, MaskGeometry::Bitmap { path: p } if p == path.as_ref())) {
+        if !report.recipe.masks.iter().any(|m| render::geometry_raster_path(&m.mask) == Some(path.as_ref())) {
             raster.remove();
         }
     }
@@ -2720,11 +2725,35 @@ fn attach_zones_with_divergence(
     // Taken, not borrowed: each zone needs the field WHILE holding the
     // report mutably; restored below so the report keeps carrying it.
     let corr = report.correspondence.take();
+    // THE SKY AND LAND ZONES RIDE OUT AS LIGHTROOM'S OWN SELECT SKY.
+    //
+    // They used to be `MaskGeometry::Bitmap`, which classic ACR XMP has no
+    // encoding for at all: the writer skipped both corrections with a named
+    // `MaskLossReason::Bitmap`, so the sidecar carried the global fit and the
+    // two edits that actually separate a repainted sky from its ground stayed
+    // inside this app. A `Mask/Image` component with `crs:MaskSubType="2"` is
+    // the same INTENT in a form Lightroom reads, and it is honest in both
+    // directions: Lightroom rebuilds its own sky alpha from the component, and
+    // the pixels shown here are the ones AutoShade rendered — never Adobe's
+    // raster. `MaskLossReason::AiMaskRecomputed` is the sentence that says so,
+    // and it replaces the `Bitmap` loss rather than joining it.
+    //
+    // Everything else is deliberately unchanged: the same claimed PNG (ONE
+    // file for both zones, as before), the same roles, the same gates, the
+    // same weights. Only the carrier moved.
+    //
+    // The reference point is the alpha's own centre of mass. `crs:ReferencePoint`
+    // is the photographer's click on 105/105 measured instances and the fit has
+    // no click to carry, so it hands over the one point that is inside this sky
+    // by construction. Both zones name the SAME point: the land zone is this
+    // sky inverted, not a second segmentation.
+    let zone_raster = mask_path.path().to_string_lossy().into_owned();
+    let (ref_x, ref_y) = raster_centroid(src_mask);
     let sky_attachment = ZoneAttachment {
         source_weights: sw.clone(),
         target_weights: tw.clone(),
         coverage: None,
-        mask: MaskGeometry::Bitmap { path: mask_path.path().to_string_lossy().into_owned() },
+        mask: MaskGeometry::select_sky(ref_x, ref_y, false, zone_raster.clone()),
         range: None,
         name: String::new(),
         role: MaskRole::ZoneSky,
@@ -2733,11 +2762,19 @@ fn attach_zones_with_divergence(
         min_share: MIN_ZONE_SHARE,
         frame_regression_tol: ZONE_GLOBAL_REGRESSION_TOL,
     };
+    // `inverted` is spelled TWICE on this one, and each spelling has exactly
+    // one reader. The component's own `crs:MaskInverted` is what the sidecar
+    // carries, so Lightroom inverts its rebuilt sky; `ZoneAttachment::inverted`
+    // becomes `LocalAdjustment::inverted`, which is the flag this engine's
+    // weight loop reads (`render::apply_masks`). The AI arm of `mask_weight`
+    // deliberately does not read the geometry's bit — see
+    // `a_zone_ai_mask_renders_exactly_like_the_bitmap_it_replaced`, which pins
+    // that the render inverts exactly once.
     let land_attachment = ZoneAttachment {
         source_weights: swl,
         target_weights: twl,
         coverage: None,
-        mask: MaskGeometry::Bitmap { path: mask_path.path().to_string_lossy().into_owned() },
+        mask: MaskGeometry::select_sky(ref_x, ref_y, true, zone_raster),
         range: None,
         name: String::new(),
         role: MaskRole::ZoneLand,
@@ -3040,13 +3077,22 @@ fn enforce_boundary_gate(
 
 fn push_zone_attached_note(report: &mut FitReport, zone: &AcceptedZone) {
     let label = zone.label.as_str();
-    let (ev, gains, saturation) = {
+    let (ev, gains, saturation, rides_out) = {
         let mask = report
             .recipe
             .masks
             .get(zone.mask_index)
             .expect("accepted zone mask remains attached");
-        (mask.exposure_ev, mask.color_gains.unwrap_or([1.0; 3]), mask.saturation)
+        (
+            mask.exposure_ev,
+            mask.color_gains.unwrap_or([1.0; 3]),
+            mask.saturation,
+            // Which sentence this note ends with is a fact about the CARRIER,
+            // so it is read off the carrier and nowhere else. The sky/land
+            // pair rides Lightroom's own Select Sky; a semantic region is
+            // still a raster classic XMP cannot hold.
+            matches!(mask.mask, MaskGeometry::AiMask { .. }),
+        )
     };
     if let Some(RangeMask::Luminance { lo, hi, .. }) = zone.range {
         crate::rationale::push_note(
@@ -3098,7 +3144,11 @@ fn push_zone_attached_note(report: &mut FitReport, zone: &AcceptedZone) {
         &mut report.recipe.rationale,
         &mut report.notes,
         crate::rationale::Note::new(
-            crate::rationale::keys::ZONE_ATTACHED,
+            if rides_out {
+                crate::rationale::keys::ZONE_ATTACHED_AI
+            } else {
+                crate::rationale::keys::ZONE_ATTACHED
+            },
             vec![
                 ("label", label.to_string()),
                 ("ev", format!("{ev:+.2}")),
@@ -3765,6 +3815,34 @@ fn attach_one_zone(
         );
         None
     }
+}
+
+/// The alpha-weighted centroid of a mask raster, normalised to its own frame.
+///
+/// This is the `crs:ReferencePoint` a Select Sky component carries. Weighted
+/// by alpha rather than taken from a thresholded bounding box on purpose: the
+/// segmenter's skies are soft-edged and frequently U-shaped around a
+/// silhouette, and a box centre lands in the middle of that U — which is
+/// ground, not sky. The centre of mass is inside the covered region for any
+/// mask this fit will accept.
+///
+/// Pixel CENTRES, through the same [`render::MASK_SAMPLE_CENTRE`] the renderer
+/// samples with, so the point is in the coordinate system the alpha is read
+/// in. `(0.5, 0.5)` for an empty raster: the partition gate upstream already
+/// refuses a sky below [`MIN_ZONE_SHARE`], so that is a floor and not a case.
+fn raster_centroid(mask: &GrayImage) -> (f32, f32) {
+    let (w, h) = mask.dimensions();
+    let (mut sx, mut sy, mut sa) = (0.0f64, 0.0f64, 0.0f64);
+    for (x, y, p) in mask.enumerate_pixels() {
+        let a = f64::from(p.0[0]) / 255.0;
+        sx += (f64::from(x) + f64::from(render::MASK_SAMPLE_CENTRE)) * a;
+        sy += (f64::from(y) + f64::from(render::MASK_SAMPLE_CENTRE)) * a;
+        sa += a;
+    }
+    if sa <= 0.0 || w == 0 || h == 0 {
+        return (0.5, 0.5);
+    }
+    ((sx / sa / f64::from(w)) as f32, (sy / sa / f64::from(h)) as f32)
 }
 
 /// Per-pixel mask weights for an analysis frame of `w`×`h` — the SAME
@@ -6383,6 +6461,48 @@ mod tests {
             "the independently supported land correction must still attach: {}",
             report.recipe.rationale
         );
+        // THE CARRIER. Both zones ride Lightroom's own Select Sky, over ONE
+        // shared claimed PNG, prompted at that alpha's own centre of mass —
+        // which is what lets the sidecar carry corrections classic XMP had to
+        // skip as raster masks (`xmp::masks_xml`, and
+        // `a_reverse_fit_zone_rides_out_as_lightrooms_own_select_sky`).
+        let zone_geoms = report
+            .recipe
+            .masks
+            .iter()
+            .filter(|m| m.role.is_zone())
+            .map(|m| (m.role, m.inverted, m.mask.clone()))
+            .collect::<Vec<_>>();
+        assert!(!zone_geoms.is_empty(), "premise: a zone attached");
+        let want = raster_centroid(&sky_mask);
+        for (role, adj_inverted, g) in &zone_geoms {
+            let crate::recipe::MaskGeometry::AiMask {
+                subtype, ref_x, ref_y, inverted, blend_mode, value, mask_version, raster,
+                provenance, gesture, ..
+            } = g
+            else {
+                panic!("{role:?} must ride a Select Sky component, not {g:?}");
+            };
+            assert_eq!(
+                (*subtype, *blend_mode, *value, *mask_version),
+                (2, 0, 1.0, 1),
+                "{role:?}: the wire format Lightroom reads"
+            );
+            assert_eq!((*ref_x, *ref_y), want, "{role:?}: prompted at the alpha's centre of mass");
+            assert_eq!(
+                *inverted, *adj_inverted,
+                "{role:?}: the component's own bit is the sidecar's inversion"
+            );
+            assert!(
+                provenance.is_empty() && gesture.is_empty(),
+                "{role:?}: the fit mints neither Adobe's digests nor a refinement stroke"
+            );
+            assert_eq!(
+                raster.as_deref(),
+                Some(mask_path.path().to_string_lossy().as_ref()),
+                "{role:?}: ONE claimed raster, the same file both zones always shared"
+            );
+        }
         // The zoned gate judges each ZONE; frame-global error is only bounded
         // (the insurance tolerance, once per attached zone), never required
         // to improve.
@@ -6401,9 +6521,21 @@ mod tests {
             "rationale must disclose the partial sky hue refusal: {}",
             report.recipe.rationale
         );
+        // The XMP honesty note. It used to read 「the Lightroom sidecar carries
+        // the global fit only (classic XMP cannot hold raster masks)」, which
+        // was true while the zones were `MaskGeometry::Bitmap`. They ride out
+        // as Lightroom's own Select Sky now, so the honest sentence is the
+        // OTHER half of the same fact: the intent reaches the sidecar and the
+        // alpha rendered here is ours, not Adobe's.
         assert!(
-            report.recipe.rationale.contains("global fit only"),
+            report.recipe.rationale.contains("rides out as Lightroom's own Select Sky mask")
+                && report.recipe.rationale.contains("not Adobe's"),
             "rationale must carry the XMP honesty note: {}",
+            report.recipe.rationale
+        );
+        assert!(
+            !report.recipe.rationale.contains("global fit only"),
+            "…and must no longer claim the sidecar carries the global fit ALONE: {}",
             report.recipe.rationale
         );
         // R23-6 A-4: confidence must NOT be the frame-global look error's
@@ -7185,15 +7317,16 @@ mod tests {
             arg("multi") >= arg("two"),
             "the refusal must disclose the comparison it lost: {refusal:?}",
         );
+        // By FILE, not by variant: the sky/land zones are Select Sky
+        // components and their alpha is still a claim this hygiene rule owns.
         let referenced = report
             .recipe
             .masks
             .iter()
-            .filter_map(|m| match &m.mask {
-                MaskGeometry::Bitmap { path } => std::path::Path::new(path)
+            .filter_map(|m| {
+                std::path::Path::new(render::geometry_raster_path(&m.mask)?)
                     .file_name()
-                    .map(|n| n.to_string_lossy().into_owned()),
-                _ => None,
+                    .map(|n| n.to_string_lossy().into_owned())
             })
             .collect::<std::collections::HashSet<_>>();
         assert!(
@@ -7799,7 +7932,10 @@ mod tests {
             out.rationale.clear();
             let mut seen: Vec<String> = Vec::new();
             for mask in &mut out.masks {
-                if let MaskGeometry::Bitmap { path } = &mut mask.mask {
+                // Every raster carrier, not just `Bitmap`: a zone's alpha rides
+                // inside its Select Sky component and its claimed filename is
+                // exactly the thing this canonicalisation exists to erase.
+                if let Some(path) = render::geometry_raster_path_mut(&mut mask.mask) {
                     let index = seen.iter().position(|p| p == path).unwrap_or_else(|| {
                         seen.push(path.clone());
                         seen.len() - 1
@@ -7853,10 +7989,8 @@ mod tests {
             report.recipe.rationale
         );
         assert!(!path.path().exists(), "the anchor raster must not outlive a failed partition");
-        assert!(report.recipe.masks.iter().all(|m| match &m.mask {
-            MaskGeometry::Bitmap { path } => !path.contains("mask-region-"),
-            _ => true,
-        }));
+        assert!(report.recipe.masks.iter().all(|m| render::geometry_raster_path(&m.mask)
+            .is_none_or(|path| !path.contains("mask-region-"))));
         let leftovers = std::fs::read_dir(&dir)
             .unwrap()
             .flatten()
@@ -7895,6 +8029,22 @@ mod tests {
             }
             report
         };
+        // The same report shape, but referencing its rasters the way the REAL
+        // sky/land route does now — through a Select Sky component.
+        let zoned_report_with = |paths: &[&str]| {
+            let mut report = neutral_report(
+                &DynamicImage::ImageRgb8(RgbImage::from_pixel(4, 4, image::Rgb([90, 90, 90]))),
+                &DynamicImage::ImageRgb8(RgbImage::from_pixel(4, 4, image::Rgb([110, 110, 110]))),
+            );
+            for p in paths {
+                report.recipe.masks.push(crate::recipe::LocalAdjustment {
+                    mask: crate::recipe::MaskGeometry::select_sky(0.5, 0.3, false, (*p).to_string()),
+                    role: MaskRole::ZoneSky,
+                    ..Default::default()
+                });
+            }
+            report
+        };
         let anchor = crate::store::OwnedRaster::scratch(dir.join("anchor.png"));
         std::fs::write(anchor.path(), b"x").unwrap();
         let (loser_only, shared, foreign) = (
@@ -7916,6 +8066,21 @@ mod tests {
         release_unselected_rasters(&candidate, &kept, &anchor);
         assert!(!anchor.path().exists(), "an unreferenced anchor is released");
         assert!(std::path::Path::new(&shared).exists());
+        // Branch 3: the kept report references the anchor through a SELECT SKY
+        // component, which is what the sky/land route produces. Reading the
+        // geometry's variant instead of its raster path here would have
+        // deleted the alpha the winning report renders both zones from — the
+        // photographer's zoned fit landing on a missing file.
+        std::fs::write(anchor.path(), b"x").unwrap();
+        let loser = file(&dir, "mask-region-3-sky.png");
+        let candidate = report_with(&[&loser]);
+        let kept = zoned_report_with(&[&anchor.path().to_string_lossy()]);
+        release_unselected_rasters(&candidate, &kept, &anchor);
+        assert!(
+            anchor.path().exists(),
+            "a zone's own alpha is a reference like any other — the anchor must survive"
+        );
+        assert!(!std::path::Path::new(&loser).exists(), "…and the loser's raster still goes");
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_dir_all(&outside);
     }
@@ -7948,11 +8113,11 @@ mod tests {
                 .map(|e| e.file_name().to_string_lossy().into_owned())
                 .collect::<Vec<_>>()
         };
+        // By FILE, not by variant — see the sibling helper above.
         let referenced = |report: &FitReport| {
-            report.recipe.masks.iter().filter_map(|m| match &m.mask {
-                MaskGeometry::Bitmap { path } => std::path::Path::new(path)
-                    .file_name().map(|n| n.to_string_lossy().into_owned()),
-                _ => None,
+            report.recipe.masks.iter().filter_map(|m| {
+                std::path::Path::new(render::geometry_raster_path(&m.mask)?)
+                    .file_name().map(|n| n.to_string_lossy().into_owned())
             }).collect::<std::collections::HashSet<_>>()
         };
         // Claim hygiene holds on both branches: every mask raster on disk is

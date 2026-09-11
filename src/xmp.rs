@@ -8245,7 +8245,12 @@ mod tests {
         assert!(!doc.contains("ToneCurvePV2012Green"));
         assert!(!doc.contains("ToneCurvePV2012Blue"));
         assert!(!doc.contains("MaskGroupBasedCorrections"));
-        assert_eq!(losses.len(), 1, "the bitmap zone stays engine-only");
+        assert_eq!(
+            losses.len(),
+            1,
+            "a LEGACY bitmap zone — a recipe.json saved before the zones became \
+             Select Sky components — stays engine-only"
+        );
 
         let projected = xmp_to_recipe(&doc);
         assert_eq!(projected.exposure_ev, -0.8);
@@ -15891,6 +15896,119 @@ mod tests {
             losses.iter().any(|l| l.reason == MaskLossReason::AiMaskRecomputed),
             "the export must say the pixels shown were not Adobe's: {losses:?}"
         );
+    }
+
+    /// The zoned reverse-fit's SKY zone rides out as LIGHTROOM'S OWN Select
+    /// Sky, and the land zone as that mask inverted.
+    ///
+    /// What this replaces: both zones were `MaskGeometry::Bitmap`, which
+    /// classic ACR XMP has no encoding for at all, so `masks_xml` skipped the
+    /// whole correction with a named `MaskLossReason::Bitmap`. The sidecar
+    /// carried the global fit and the two edits that actually separate a
+    /// repainted sky from its ground never reached Lightroom. A `Mask/Image`
+    /// component with `crs:MaskSubType="2"` carries the same INTENT in a form
+    /// Lightroom rebuilds its own sky alpha from.
+    ///
+    /// The honesty is unchanged and is asserted here: the pixels this app
+    /// showed came from OUR render, never Adobe's raster, which is exactly
+    /// what `MaskLossReason::AiMaskRecomputed` says — and it REPLACES the
+    /// `Bitmap` loss rather than joining it, because nothing was left out.
+    /// Recolour gains remain engine-only and keep their own loss.
+    ///
+    /// MUTATION-LINED: put `sky_attachment`/`land_attachment` in `fit_zoned`
+    /// back on `MaskGeometry::Bitmap` and the first half fails; drop the
+    /// `AiMaskRecomputed` push from `masks_xml` and the disclosure half does.
+    #[test]
+    fn a_reverse_fit_zone_rides_out_as_lightrooms_own_select_sky() {
+        let zone = |inverted: bool, gains: Option<[f32; 3]>| EditRecipe {
+            masks: vec![LocalAdjustment {
+                mask: MaskGeometry::select_sky(0.5, 0.25, inverted, "mask-zone-sky.png".into()),
+                role: if inverted {
+                    crate::recipe::MaskRole::ZoneLand
+                } else {
+                    crate::recipe::MaskRole::ZoneSky
+                },
+                inverted,
+                exposure_ev: -0.4,
+                saturation: 12.0,
+                color_gains: gains,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        let r = zone(false, None);
+        let (out, losses) = recipe_to_xmp_with_losses(&r);
+        assert_eq!(
+            out.matches(r#"crs:What="Mask/Image""#).count(),
+            1,
+            "exactly one Select Sky component reaches the sidecar:\n{out}"
+        );
+        assert!(out.contains(r#"crs:MaskSubType="2""#), "…and it is the SKY subtype:\n{out}");
+        assert!(
+            out.contains(r#"crs:ReferencePoint="0.5 0.25""#),
+            "…prompted at the alpha's own centre of mass:\n{out}"
+        );
+        assert!(out.contains(r#"crs:MaskInverted="false""#), "…upright:\n{out}");
+        assert!(out.contains(r#"crs:MaskVersion="1""#), "…with Lightroom's schema stamp:\n{out}");
+        // The CORRECTION, which is the whole point: the zone's dials are in
+        // the file now instead of being skipped along with the mask.
+        assert!(
+            out.contains(&format!("crs:LocalExposure2012=\"{}\"", local_fmt(-0.4 / 4.0))),
+            "the zone's exposure rides out:\n{out}"
+        );
+        assert!(
+            out.contains(&format!("crs:LocalSaturation=\"{}\"", local_fmt(12.0 / 100.0))),
+            "…and its saturation:\n{out}"
+        );
+        // The disclosure: re-derived, NOT a dropped bitmap.
+        assert!(
+            losses.iter().any(|l| l.reason == MaskLossReason::AiMaskRecomputed),
+            "the alpha shown here is ours, and the export must say so: {losses:?}"
+        );
+        assert!(
+            !losses.iter().any(|l| l.reason == MaskLossReason::Bitmap),
+            "nothing was left out of the sidecar, so there is no bitmap loss: {losses:?}"
+        );
+
+        // Recolour gains are still engine-only and keep their own named loss —
+        // the carrier change did not quietly widen what XMP can hold.
+        let recoloured = mask_export_losses(&zone(false, Some([1.18, 0.96, 0.85])));
+        assert!(
+            recoloured.iter().any(|l| l.reason == MaskLossReason::Recolour)
+                && recoloured.iter().any(|l| l.reason == MaskLossReason::AiMaskRecomputed),
+            "both sentences, neither swallowing the other: {recoloured:?}"
+        );
+
+        // THE ROUND TRIP, through this app's own reader: the writer must emit
+        // only what the parser's closed vocabulary accepts, or a sidecar we
+        // wrote would fail to re-import — which is how a photographer loses a
+        // mask to their own save.
+        for inverted in [false, true] {
+            let doc = recipe_to_xmp(&zone(inverted, None));
+            let back = xmp_to_recipe(&doc);
+            assert_eq!(back.masks.len(), 1, "inverted={inverted}: {:?}", back.masks);
+            let MaskGeometry::AiMask {
+                subtype,
+                ref_x,
+                ref_y,
+                inverted: geom_inv,
+                mask_version,
+                ..
+            } = &back.masks[0].mask
+            else {
+                panic!("inverted={inverted}: expected the Select Sky component back");
+            };
+            assert_eq!(
+                (*subtype, *ref_x, *ref_y, *geom_inv, *mask_version),
+                (2, 0.5, 0.25, inverted, 1),
+                "inverted={inverted}: subtype, click and polarity all survive"
+            );
+            assert_eq!(
+                back.masks[0].exposure_ev, -0.4,
+                "inverted={inverted}: and so does the correction"
+            );
+        }
     }
 
     /// An attribute outside the measured vocabulary is REFUSED, not carried.

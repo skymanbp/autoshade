@@ -1010,7 +1010,14 @@ really turned (`image::rotate90` is lossless and these are our own PNGs — the
 `coord_era` migration could only disclose them because those files predated a
 frame nobody could re-derive) into freshly claimed names with the originals left
 in place, and the turn count last; a raster that cannot be turned refuses the
-whole operation rather than leaving a half-turned develop. The XMP sidecar
+whole operation rather than leaving a half-turned develop. **Which rasters** is
+`LocalAdjustment::turnable_raster_paths_mut`, and the rule is ownership, not
+geometry variant: an `AiMask`'s alpha is normally a CACHE of a re-derivation,
+which `orient_recipe_coords` drops so the next develop re-segments at the turned
+reference point — except on a reverse-fit ZONE (`MaskRole::is_zone`), whose
+alpha the fit rendered and solved its dials against. That one is kept and turned
+with the bitmaps; dropping it would leave both zone corrections inert until a
+model run, and inert forever on a machine with no segmentation sidecar. The XMP sidecar
 turns with it since R27 Batch-3 (A8): a document THIS build writes declares its
 frame — `tiff:ImageWidth/ImageLength` in the SOURCE frame plus a
 `tiff:Orientation` carrying the COMPOSED state (`xmp::frame_declaration`, fed
@@ -2323,10 +2330,15 @@ source and a *target rendition* of it (a `reimagine` output, an exported JPEG,
 any finished reference of that shot) — solve for the `EditRecipe` that
 reproduces the target through our own engine ([`src/fit.rs`](../src/fit.rs)).
 No target pixels are copied: the answer is global sliders + curves and,
-optionally, semantic bitmap region adjustments or native luminance- and
+optionally, semantic region adjustments or native luminance- and
 colour-range adjustments. It applies at full sensor resolution; classic XMP
-carries the representable global controls and native ranges, while
-semantic-region bitmaps stay engine-only. Deterministic and key-free.
+carries the representable global controls, the native ranges, and the sky/land
+zones — those ride out as Lightroom's own Select Sky mask
+(`crs:MaskSubType="2"`, the land zone inverted), with Lightroom rebuilding its
+own sky alpha from the component while the raster this engine renders from
+stays ours (`MaskLossReason::AiMaskRecomputed` says so on every save). The
+opt-in four-class region bitmaps, the spatial tiles and the free-form field
+masks stay engine-only with the named bitmap loss. Deterministic and key-free.
 
 The method is deliberately **distribution-level, not per-pixel regression** — a
 generative target is not pixel-aligned with its source, so only statistics are

@@ -1173,11 +1173,30 @@ pub fn resolve_ai_masks(
 
     for m in recipe.masks.iter_mut() {
         let mask_name = if m.name.is_empty() { "unnamed".to_string() } else { m.name.clone() };
+        // A ZONE mask arrives with its alpha already in hand and this function
+        // must not touch it (`crate::recipe::MaskRole::is_zone`). The zoned
+        // reverse-fit renders that alpha itself, claims it beside the develop
+        // and then measures the zone's exposure, colour gains and saturation
+        // AGAINST IT; re-segmenting would swap the population every one of
+        // those numbers was solved on, silently, for a differently-edged sky
+        // from a model run that also costs seconds of GPU. It is not a cache
+        // and there is nothing to renew.
+        //
+        // An UNRESOLVED zone still resolves here — that is a rotate having
+        // dropped the alpha, and subtype 2 at the turned reference point is
+        // exactly the sky this zone means.
+        let zone_owns_its_alpha = m.role.is_zone();
         for g in std::iter::once(&mut m.mask).chain(m.components.iter_mut().map(|c| &mut c.geometry))
         {
             let MaskGeometry::AiMask { subtype, ref_x, ref_y, gesture, raster, .. } = g else {
                 continue;
             };
+            if zone_owns_its_alpha && raster.is_some() {
+                // Deliberately uncounted: `resolved` / `cached` are the
+                // segmenter's own tallies and `describe` renders them as "N AI
+                // mask(s) re-derived by the local segmenter". This mask was not.
+                continue;
+            }
             let (subtype, rx, ry) = (*subtype, *ref_x, *ref_y);
             let prompt_points = match gesture_prompt_points(subtype, rx, ry, gesture) {
                 Ok(points) => points,
@@ -2408,6 +2427,66 @@ mod tests {
         let got = resolve_ai_masks(&cfg, nope, nope, &mut r);
         assert_eq!(got, AiMaskResolution::default(), "{got:?}");
         assert!(got.describe().is_none(), "nothing happened, so nothing is claimed");
+    }
+
+    /// A ZONE mask arrives with its own alpha and this pass must leave it
+    /// exactly where it is.
+    ///
+    /// The zoned reverse-fit renders that alpha, claims it beside the develop
+    /// and then measures the zone's exposure, colour gains and saturation
+    /// AGAINST IT. Re-segmenting would swap the population every one of those
+    /// numbers was solved on — silently, for a differently-edged sky, at the
+    /// price of a model run. It is not a cache and there is nothing to renew,
+    /// so it is not counted as `resolved`/`cached` either: those tallies are
+    /// the segmenter's own and `describe` renders them as "re-derived by the
+    /// local segmenter", which this mask was not.
+    ///
+    /// MUTATION: drop the `zone_owns_its_alpha` guard and the raster is
+    /// re-pointed at a cache key under the (non-existent) photo, so the
+    /// assertion below fails.
+    #[test]
+    fn a_zone_masks_own_alpha_is_never_re_segmented() {
+        let cfg = Config::load();
+        let mut r = crate::recipe::EditRecipe {
+            masks: vec![crate::recipe::LocalAdjustment {
+                mask: crate::recipe::MaskGeometry::select_sky(
+                    0.5,
+                    0.3,
+                    true,
+                    "mask-zone-sky.png".into(),
+                ),
+                role: crate::recipe::MaskRole::ZoneLand,
+                exposure_ev: -0.5,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        // A path that does not exist: anything that tried to stage a frame for
+        // the segmenter would warn, and the assertion below would catch the
+        // raster being replaced or cleared.
+        let nope = Path::new("D:/nope/nothing-here.ARW");
+        let got = resolve_ai_masks(&cfg, nope, nope, &mut r);
+        assert_eq!(got, AiMaskResolution::default(), "nothing was re-derived: {got:?}");
+        assert!(got.describe().is_none(), "…so nothing is claimed to the photographer");
+        let crate::recipe::MaskGeometry::AiMask { raster, .. } = &r.masks[0].mask else {
+            panic!("the geometry must survive untouched");
+        };
+        assert_eq!(
+            raster.as_deref(),
+            Some("mask-zone-sky.png"),
+            "the fit's own alpha is the one the render must use"
+        );
+
+        // …and an UNRESOLVED zone is not exempt: that is a rotate having
+        // dropped the alpha, and subtype 2 at the turned click is exactly the
+        // sky this zone means. With no sidecar reachable it reports the
+        // failure rather than passing silently.
+        let crate::recipe::MaskGeometry::AiMask { raster, .. } = &mut r.masks[0].mask else {
+            unreachable!()
+        };
+        *raster = None;
+        let got = resolve_ai_masks(&cfg, nope, nope, &mut r);
+        assert_ne!(got, AiMaskResolution::default(), "an alpha-less zone still asks: {got:?}");
     }
 
     /// Tier-3 probe: the REAL SAM 2.1 backend, behind an environment gate like

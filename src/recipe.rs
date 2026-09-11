@@ -1181,6 +1181,70 @@ impl MaskRole {
             MaskRole::ZoneLand => Some("Land (reverse-fit)"),
         }
     }
+
+    /// Did the zoned reverse-fit place this mask, and does it therefore OWN
+    /// the alpha it rides?
+    ///
+    /// The distinction is not cosmetic. The sky and land zones ride out as
+    /// Lightroom's own Select Sky ([`MaskGeometry::select_sky`]), so they are
+    /// `AiMask`s — and for every OTHER `AiMask` in this app the `raster` field
+    /// is a CACHE of a re-derivation, keyed by (photo, subtype, reference
+    /// point, frame), which the code is free to drop, renew or recompute. A
+    /// zone's raster is not: it is the alpha the fit MEASURED its exposure,
+    /// gains and saturation against, claimed under a unique name beside the
+    /// develop, and replacing it silently invalidates every number the fit
+    /// disclosed. So the sites that treat an AI alpha as disposable
+    /// (`segment::resolve_ai_masks`, `render::orient_recipe_coords`,
+    /// `LocalAdjustment::turnable_raster_paths_mut`) ask this first.
+    pub fn is_zone(self) -> bool {
+        matches!(self, MaskRole::ZoneSky | MaskRole::ZoneLand)
+    }
+}
+
+impl MaskGeometry {
+    /// Lightroom's own **Select Sky** as this app produces it: a `Mask/Image`
+    /// component with `crs:MaskSubType="2"`, prompted at `(ref_x, ref_y)` and
+    /// rendered here from `raster`.
+    ///
+    /// ONE constructor, because the field list is a WIRE FORMAT: `subtype`
+    /// decides what Lightroom rebuilds, `blend_mode`/`value` are the
+    /// subtract-pair invariants that must stay `(0, 1)` for a union, and
+    /// `mask_version` is Lightroom's own schema stamp (`"1"` on 105/105
+    /// measured instances). A second hand-written copy of that list is exactly
+    /// how one producer would start emitting a component Lightroom reads as
+    /// something else.
+    ///
+    /// `provenance` and `gesture` are EMPTY on purpose. Both are the
+    /// photographer's own material carried back verbatim from a sidecar this
+    /// app read (Adobe's digests, model version, a refinement stroke); minting
+    /// either here would assert a provenance nothing produced.
+    ///
+    /// **`name` is `"Sky 1"`** — Lightroom's own spelling for a Select Sky
+    /// component, one of the measured `crs:MaskName` values. It names the
+    /// COMPONENT inside the correction, not the row this app shows: a zone
+    /// mask's display name comes from [`MaskRole::en_name`] and is localised.
+    ///
+    /// **`inverted` is the COMPONENT's own bit** (`crs:MaskInverted`), which
+    /// is what the sidecar carries — the land zone is the sky mask inverted.
+    /// It is deliberately NOT what the renderer reads: this engine inverts
+    /// through [`LocalAdjustment::inverted`], one bit with one home per
+    /// channel, and the zone attachment sets both to the same value so the
+    /// render and the sidecar invert exactly once each.
+    pub fn select_sky(ref_x: f32, ref_y: f32, inverted: bool, raster: String) -> Self {
+        MaskGeometry::AiMask {
+            name: "Sky 1".to_string(),
+            subtype: 2,
+            ref_x,
+            ref_y,
+            blend_mode: 0,
+            value: 1.0,
+            inverted,
+            mask_version: 1,
+            provenance: Vec::new(),
+            gesture: Vec::new(),
+            raster: Some(raster),
+        }
+    }
 }
 
 /// Where a local adjustment applies. Coordinates are normalised to the frame and
@@ -1973,10 +2037,20 @@ impl LocalAdjustment {
     /// could not turn). Turning it too produced a correctly-turned file nothing
     /// ever pointed at, plus a `rasters_turned` count that promised work the
     /// recipe did not keep.
+    ///
+    /// ONE exception since the sky/land zones became Select Sky components: a
+    /// ZONE mask's alpha is not a cache either ([`MaskRole::is_zone`]). It is
+    /// the fit's own render product, nothing re-derives it from the recipe,
+    /// and a rotate that dropped it would leave both zone corrections inert on
+    /// any machine without the segmentation sidecar — the correction would
+    /// simply vanish from the photograph. `rotate90` is lossless on it exactly
+    /// as it is on a `Bitmap`, so it is turned with them.
     pub fn turnable_raster_paths_mut(&mut self) -> Vec<&mut String> {
+        let zone = self.role.is_zone();
         self.geometries_mut()
-            .filter_map(|g| match g {
+            .filter_map(move |g| match g {
                 MaskGeometry::Bitmap { path } => Some(path),
+                MaskGeometry::AiMask { raster: Some(path), .. } if zone => Some(path),
                 _ => None,
             })
             .collect()

@@ -1929,12 +1929,17 @@ impl AutoShadeApp {
                         changed = true;
                     }
                 }
-                // Bitmap (AI / brush) raster tools: before these, a raster
-                // mask was completely un-editable after creation — a clipped
-                // treeline's only recourse was re-running the model to get
-                // the same raster. Every op BAKES a freshly claimed raster
-                // and repoints (never mutates the input file).
-                if matches!(self.recipe.masks[i].mask, MaskGeometry::Bitmap { .. }) {
+                // Raster tools: before these, a raster mask was completely
+                // un-editable after creation — a clipped treeline's only
+                // recourse was re-running the model to get the same raster.
+                // Every op BAKES a freshly claimed raster and repoints (never
+                // mutates the input file).
+                //
+                // The gate is "does this mask have PIXELS", not "is it a
+                // `Bitmap`": the reverse-fit zones are Select Sky components
+                // now and still ride an ordinary claimed PNG, while an AI mask
+                // whose alpha has not resolved has nothing to open.
+                if autoshade::render::geometry_raster_path(&self.recipe.masks[i].mask).is_some() {
                     ui.horizontal_wrapped(|ui| {
                         let edit_armed = matches!(self.mask_brush, Some((Some(j), _)) if j == i);
                         if ui

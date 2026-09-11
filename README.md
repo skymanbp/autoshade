@@ -230,7 +230,7 @@ Details: [docs/TECH_STACK.md#ai-advisor-and-reverse-fit](docs/TECH_STACK.md#ai-a
 ### 5. Semantic zones, luminance bands and colour bands, judged on their own population
 
 - Local corrections come from mutually exclusive producers: a local OneFormer
-  ADE20K pass yields semantic bitmap regions (sky/land by default, up to four
+  ADE20K pass yields semantic regions (sky/land by default, up to four
   disjoint class regions opt-in), and with segmentation off or unavailable a
   pure-Rust pass derives **XMP-native luminance-range bands** from rank-paired
   residuals under an evidence gate, then **colour-range bands** from the eight
@@ -240,6 +240,15 @@ Details: [docs/TECH_STACK.md#ai-advisor-and-reverse-fit](docs/TECH_STACK.md#ai-a
   withheld because a replaced sky shares its luminance bins, and a zone whose
   luminance already matches says so instead of being dialled for a hairline
   gain.
+- The **sky and land zones ride out to Lightroom** as its own Select Sky mask
+  (`crs:What="Mask/Image"`, `crs:MaskSubType="2"`, the land zone the same
+  component inverted), so the two corrections that separate a repainted sky
+  from its ground reach the sidecar instead of being skipped as raster masks.
+  Lightroom rebuilds its own sky alpha from that intent; the raster AutoShade
+  renders from is its own, which the save line says in as many words (「AI
+  masks ×N re-derived locally — not Adobe's raster」). The opt-in four-class
+  regions, the spatial tiles and the free-form field masks are still raster
+  masks classic XMP cannot hold, and keep the named bitmap loss.
 
 Details: [docs/TECH_STACK.md#zone-scoped-evidence-view](docs/TECH_STACK.md#zone-scoped-evidence-view).
 

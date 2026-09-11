@@ -128,8 +128,13 @@ impl AutoShadeApp {
         let (mw, mh) = base.dimensions();
         let mut gray = image::GrayImage::new(mw, mh);
         let mut canvas = image::RgbaImage::new(mw, mh);
+        // The raster this session SEEDS from, asked by file and not by variant
+        // (`render::geometry_raster_path`): a reverse-fit zone rides Lightroom's
+        // Select Sky component now, and a `Bitmap`-only test would have made
+        // 「🖌 Edit raster」 open an empty canvas over a mask that has pixels.
         if let Some(i) = target
-            && let Some(MaskGeometry::Bitmap { path }) = self.recipe.masks.get(i).map(|m| &m.mask)
+            && let Some(path) =
+                self.recipe.masks.get(i).and_then(|m| autoshade::render::geometry_raster_path(&m.mask))
         {
             match autoshade::render::open_mask_bounded(std::path::Path::new(path)) {
                 Ok(img) => {
@@ -207,7 +212,21 @@ impl AutoShadeApp {
                 let path_s = path.to_string_lossy().into_owned();
                 match target {
                     Some(i) if i < self.recipe.masks.len() => {
-                        self.recipe.masks[i].mask = MaskGeometry::Bitmap { path: path_s };
+                        // REPOINT, never re-shape. A zone's geometry is the
+                        // Select Sky component the sidecar carries; rewriting
+                        // it as a `Bitmap` here would silently take the mask
+                        // back OUT of the Lightroom sidecar it now rides in,
+                        // as the reward for feathering it. A geometry with no
+                        // raster at all has nothing to repoint, so for that one
+                        // the bake still MAKES the raster.
+                        match autoshade::render::geometry_raster_path_mut(
+                            &mut self.recipe.masks[i].mask,
+                        ) {
+                            Some(slot) => *slot = path_s,
+                            None => {
+                                self.recipe.masks[i].mask = MaskGeometry::Bitmap { path: path_s }
+                            }
+                        }
                         self.sel_mask = Some(i);
                         self.status = tr(lang, "mask raster updated — its adjustments now apply to the edited area").into();
                     }
@@ -248,8 +267,12 @@ impl AutoShadeApp {
         tag: &str,
     ) {
         let Some(src) = self.src_path.clone() else { return };
-        let Some(MaskGeometry::Bitmap { path }) =
-            self.recipe.masks.get(i).map(|m| m.mask.clone())
+        let Some(path) = self
+            .recipe
+            .masks
+            .get(i)
+            .and_then(|m| autoshade::render::geometry_raster_path(&m.mask))
+            .map(str::to_string)
         else {
             return;
         };
@@ -265,8 +288,14 @@ impl AutoShadeApp {
             });
         match done {
             Ok(p) => {
-                self.recipe.masks[i].mask =
-                    MaskGeometry::Bitmap { path: p.to_string_lossy().into_owned() };
+                // Repoint in place — same rule, same reason as
+                // `commit_mask_brush`. The read above already proved this
+                // geometry carries a raster, so the slot is there.
+                if let Some(slot) =
+                    autoshade::render::geometry_raster_path_mut(&mut self.recipe.masks[i].mask)
+                {
+                    *slot = p.to_string_lossy().into_owned();
+                }
                 self.dirty = true;
                 self.overlay_stale = true;
                 self.status =
@@ -306,8 +335,12 @@ impl AutoShadeApp {
         }
         let Some(src) = self.src_path.clone() else { return };
         let Some(guide_src) = self.active_source_path() else { return };
-        let Some(MaskGeometry::Bitmap { path }) =
-            self.recipe.masks.get(i).map(|m| m.mask.clone())
+        let Some(path) = self
+            .recipe
+            .masks
+            .get(i)
+            .and_then(|m| autoshade::render::geometry_raster_path(&m.mask))
+            .map(str::to_string)
         else {
             return;
         };

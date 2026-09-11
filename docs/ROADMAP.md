@@ -273,6 +273,24 @@
   in the GUI, one OneFormer inference per frame through `segment::segment_multiclass_file`
   (`src/segment.rs:147`), pinned by `multi_class_planes_are_normalised_and_ordered`
   (`src/segment.rs:1370`).
+- **天空/地面分区以 Lightroom 自有的 Select Sky 出车（未发布，`src/fit_zoned.rs:2752`）**：
+  两个分区不再是 `MaskGeometry::Bitmap`（经典 ACR XMP 无此编码，写入器整条校正跳过
+  并记一条具名 `MaskLossReason::Bitmap`），改为 `MaskGeometry::select_sky`
+  （`src/recipe.rs:1233`，唯一构造器）产出的 `Mask/Image` 组件：`crs:MaskSubType="2"`、
+  `crs:ReferencePoint` = 该 alpha 的 alpha 加权质心（`src/fit_zoned.rs:3833`）、
+  地面分区是同一组件 `crs:MaskInverted="true"`。仍是**同一张** claim 出来的 PNG，
+  角色/门/权重一律不动；渲染逐字节不变（`render.rs`
+  `a_zone_ai_mask_renders_exactly_like_the_bitmap_it_replaced`）。诚实那半句不变：
+  Lightroom 会自行重建天空 alpha，本机显示的栅格是 AutoShade 渲染的——导出披露从
+  `Bitmap` 换成 `AiMaskRecomputed`（「AI 蒙版 ×N 由本机重算——非 Adobe 原栅格」），
+  重上色增益仍是 engine-only 的 `Recolour`。空间图块、四类语义区、自由场蒙版**不变**，
+  仍是带具名位图损失的 engine-only 栅格。
+  **一个分区的 alpha 是「自有」而非「缓存」**（`MaskRole::is_zone`）：
+  `segment::resolve_ai_masks` 不得覆盖它（覆盖＝悄悄换掉所有 dial 解出来的总体），
+  `render::orient_recipe_coords` 不得丢弃它、由 `rotate_recipe` 阶段一随位图一起转
+  （丢弃＝没有 python 边车的机器上两条分区校正永久失效），粘贴到别的照片时与位图
+  一同剥离（`gui/export.rs::paste_payload`）。旧 recipe.json 里已存的位图分区**不迁移**，
+  照旧按位图损失导出。
 - 源照片库只读（`pipeline::guard_readonly`）；输出走 `config::delivery_root()`
   （R24 M8 起为一等设置：settings `out_dir` > `AUTOSHADE_OUT_DIR` > 默认
   `./out`；guard 把配置根与字面 `./out` 都算输出区——见 ARCHITECTURE §4.10。
