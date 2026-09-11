@@ -17,6 +17,29 @@ const COVERAGE_DELTA_MAX: f32 = 0.002;
 /// code at mid-grey, so one code is where a seam starts being visible at all.
 const ONE_CODE: f32 = 1.0 / 255.0;
 
+/// R34 §D8. How many times the guide's OWN flat level a crossing may vary by
+/// and still count as smooth.
+///
+/// The one-code rule above is an absolute statement, and it was calibrated on
+/// an absolute guide: the camera's embedded preview, which arrives with the
+/// body's noise reduction already applied. R33 §A made the fit's source frame
+/// one thing for both entry points — the 2048-px NEUTRAL develop — and a
+/// neutral develop has no noise reduction, so featureless haze carries two or
+/// three codes of sensor noise at the probe distance. The rule then reads 0.0%
+/// of the contour smooth on a hazy horizon that is visibly smooth, the feather
+/// stays at the segmentation model's own two or three pixels, and the mask
+/// ships the step the widening exists to remove (measured on the desert-dusk
+/// pair: 2.8 codes, against 1.1 on the previous source frame).
+///
+/// The cure is to measure the crossing against what the SAME guide does where
+/// nothing is happening, so the verdict survives a change of source frame, of
+/// exposure, or of contrast. [`flat_level`] is that reference, and it is a
+/// FLOOR on the absolute rule rather than a replacement for it: a guide that
+/// really is flat everywhere reads a flat level of ~0 and gets the one-code
+/// rule byte for byte, which is what keeps the synthetic fixtures — and a
+/// silhouette in an otherwise still frame — exactly where they were.
+const SMOOTH_NOISE_MULTIPLE: f32 = 2.0;
+
 /// Box radius of the widened ramp, as a share of the mask's OWN height — so
 /// the ramp it delivers is about twice this, ~6% of the frame height.
 ///
@@ -177,6 +200,32 @@ fn spread_min(seed: &[f32], width: usize, height: usize, radius: usize) -> Vec<f
         }
     }
     spread
+}
+
+/// R34 §D8. What this guide's `variation` reads where nothing is happening:
+/// the lower QUARTILE over the collar.
+///
+/// A quartile and not a minimum, because one perfectly flat pixel is not a
+/// statement about the frame; a quartile and not a mean, because the collar of
+/// a sky mask contains the silhouette as well as the haze and a mean would let
+/// the silhouette set the line it is supposed to fail. Three quarters of a
+/// boundary collar being busier than this is the definition of "this guide is
+/// busy", and a guide that is busy everywhere really can hide a seam
+/// everywhere — which is the claim the widening then makes and the coverage
+/// and core-change conservation laws still police.
+fn flat_level(
+    collar: &[bool], width: usize, variation: &dyn Fn(usize, usize) -> f32,
+) -> f32 {
+    let mut readings: Vec<f32> = (0..collar.len())
+        .filter(|i| collar[*i])
+        .map(|i| variation(i % width, i / width))
+        .collect();
+    if readings.is_empty() {
+        return 0.0;
+    }
+    let at = readings.len() / 4;
+    readings.select_nth_unstable_by(at, f32::total_cmp);
+    readings[at]
 }
 
 fn boundary_collar(alpha: &[u8], width: usize, height: usize, radius: usize) -> Vec<bool> {
@@ -455,10 +504,14 @@ pub(crate) fn widen_smooth_feather(guide: &DynamicImage, mask: &GrayImage) -> Wi
     };
     let collar = dilate(&contour, w, h, 2 * cap);
     let broadened = box_mean(&alpha, w, h, cap);
+    // R34 §D8. The scale the crossings are judged against: this guide's own
+    // variation where nothing is happening, read over the collar the widening
+    // may write into, never below one code. See [`SMOOTH_NOISE_MULTIPLE`].
+    let line = (SMOOTH_NOISE_MULTIPLE * flat_level(&collar, w, &variation)).max(ONE_CODE);
     let mut on_contour = vec![f32::INFINITY; alpha.len()];
     for (i, earned) in on_contour.iter_mut().enumerate() {
         if contour[i] {
-            *earned = (1.0 - variation(i % w, i / w) / ONE_CODE).clamp(0.0, 1.0);
+            *earned = (1.0 - variation(i % w, i / w) / line).clamp(0.0, 1.0);
         }
     }
     // Out to `cap`, which is exactly how far the broadening kernel reaches.
@@ -637,6 +690,103 @@ mod tests {
                 widened.get_pixel(x, 224),
                 mask.get_pixel(x, 224),
                 "the silhouette row must survive byte for byte at x={x}"
+            );
+        }
+    }
+
+    /// [`split_guide_fixture`] with `codes` of deterministic sensor noise laid
+    /// over the WHOLE guide — the noise floor R33 §A put under this stage when
+    /// it made the fit's source frame a NEUTRAL develop instead of the
+    /// camera's noise-reduced preview.
+    ///
+    /// CORRELATED over 4x4 blocks, because that is what the floor looks like
+    /// by the time it reaches this stage: a develop demosaics and resamples,
+    /// and the widener reads its guide through a `probe`-radius box mean that
+    /// averages 25 samples. Uncorrelated per-pixel noise of three codes comes
+    /// out of that box under one code and the absolute rule never notices it —
+    /// measured on this very fixture, which is why the first version of this
+    /// test could not tell the two rules apart.
+    fn noisy_split_guide(ramp: f32, codes: f32) -> (DynamicImage, GrayImage) {
+        let (guide, mask) = split_guide_fixture(ramp, false);
+        let clean = guide.to_rgb8();
+        let noisy = RgbImage::from_fn(clean.width(), clean.height(), |x, y| {
+            let mut v = ((y / 4) * clean.width() + x / 4)
+                .wrapping_mul(747796405)
+                .wrapping_add(2891336453);
+            v ^= v >> 16;
+            v = v.wrapping_mul(2246822519);
+            v ^= v >> 13;
+            let wobble = ((v % 1000) as f32 / 1000.0 - 0.5) * 2.0 * codes;
+            let value = clean.get_pixel(x, y).0[0] as f32 + wobble;
+            Rgb([value.round().clamp(0.0, 255.0) as u8; 3])
+        });
+        (DynamicImage::ImageRgb8(noisy), mask)
+    }
+
+    /// R34 §D8. The smoothness reading follows its GUIDE.
+    ///
+    /// OLD RULE: a crossing is smooth when its guide varies by less than ONE
+    /// CODE across it — an absolute line, calibrated on the camera's embedded
+    /// preview with the body's noise reduction already applied.
+    /// NEW RULE: less than `SMOOTH_NOISE_MULTIPLE` times what the SAME guide
+    /// varies by where nothing is happening (the lower quartile over the
+    /// collar), never below one code.
+    /// WHY: R33 §A made the source frame a 2048-px neutral develop for both
+    /// entry points, and a neutral develop has no noise reduction. Featureless
+    /// haze then carries two or three codes of sensor noise at the probe
+    /// distance, the absolute rule reads 0.0% of a visibly smooth horizon as
+    /// smooth, and the mask ships the step the widening exists to remove (the
+    /// desert-dusk pair: 2.8 codes, against 1.1 on the previous source frame).
+    /// A scale-free line reads the same verdict through a change of source
+    /// frame, exposure or contrast.
+    #[test]
+    fn the_smooth_verdict_survives_the_guides_own_noise_floor() {
+        let (clean_guide, mask) = noisy_split_guide(3.0, 0.0);
+        let (noisy_guide, _) = noisy_split_guide(3.0, 3.0);
+        let widen = |guide: &DynamicImage| match widen_smooth_feather(guide, &mask) {
+            WidenOutcome::Widened { mask, reading } => (mask, reading),
+            WidenOutcome::Abstained { reading } => {
+                panic!("half of this contour is featureless haze: {reading:?}")
+            }
+        };
+        // A guide that really is flat reads a flat level of ~0, so the line
+        // falls back onto ONE_CODE and the zero-noise arm IS the pre-R34
+        // answer — byte for byte against the fixture the old rule was pinned
+        // on.
+        let (flat_mask, flat) = widen(&clean_guide);
+        let (plain_mask, _) = widen(&split_guide_fixture(3.0, false).0);
+        assert_eq!(
+            flat_mask.as_raw(),
+            plain_mask.as_raw(),
+            "a guide with no floor must get the one-code rule byte for byte"
+        );
+        assert!(
+            (0.35..=0.65).contains(&flat.widened_share),
+            "…and that is still exactly the haze half: {flat:?}"
+        );
+        // With three codes of correlated floor under it the line rises and
+        // the haze is still found: 0.332 of the contour against the flat
+        // guide's 0.453. It is not found WHOLE — noise puts some crossings
+        // above twice the collar's lower quartile — but the ABSOLUTE rule
+        // finds 0.000 of it on this same fixture (measured by forcing
+        // `line = ONE_CODE`), and 0.0% is exactly what shipped the step on
+        // the real pair.
+        let (noisy_mask, noisy) = widen(&noisy_guide);
+        assert!(
+            noisy.widened_share >= 0.5 * flat.widened_share,
+            "three codes of sensor noise must not hide the haze: flat {flat:?} noisy {noisy:?}"
+        );
+        assert!(
+            ramp_span(&noisy_mask, 32) >= 3 * ramp_span(&mask, 32),
+            "…and the haze row must really widen through the noise: {} from {}",
+            ramp_span(&noisy_mask, 32),
+            ramp_span(&mask, 32)
+        );
+        for x in 0..64u32 {
+            assert_eq!(
+                noisy_mask.get_pixel(x, 224),
+                mask.get_pixel(x, 224),
+                "a 40-code silhouette is still an edge above a 3-code floor, at x={x}"
             );
         }
     }

@@ -1725,13 +1725,22 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
         "反推氛围模式（结构差异 D={d}）：目标结构无法通过显影控制恢复，因此仅以有界的可靠控制匹配其氛围和整体影调/色调。剩余观感误差 {err_before} → {err_after}。"),
     (" A white balance was solved from the population and then rendered and checked \
       against the target's own 12x8 cell means: only {converged} of the frame moved \
-      closer and {diverged} moved away, so it was returned to as-shot rather than \
-      shipped on population evidence alone.",
-        " 已从整体证据求解出一次白平衡，渲染后按目标自身的 12x8 单元均值比对：只有 {converged} 的画面更接近目标，另有 {diverged} 反而远离，因此退回相机原始值，不以整体证据独自发布。"),
+      closer, {diverged} moved away, and {aligned} moved in the direction its own \
+      target asks for, so it was returned to as-shot rather than shipped on \
+      population evidence alone.",
+        " 已从整体证据求解出一次白平衡，渲染后按目标自身的 12x8 单元均值比对：只有 {converged} 的画面更接近目标，{diverged} 反而远离，{aligned} 的移动方向与各自目标要求的方向一致，因此退回相机原始值，不以整体证据独自发布。"),
     (" The fitted white balance was checked against the target's own 12x8 cell means \
-      before it shipped: {converged} of the frame moved closer to its target and \
-      {diverged} moved away.",
-        " 拟合出的白平衡在发布前已按目标自身的 12x8 单元均值比对：画面的 {converged} 更接近目标，{diverged} 反而远离。"),
+      before it shipped: {converged} of the frame moved closer to its target, \
+      {diverged} moved away, and {aligned} moved in the direction its own target \
+      asks for.",
+        " 拟合出的白平衡在发布前已按目标自身的 12x8 单元均值比对：画面的 {converged} 更接近目标，{diverged} 反而远离，{aligned} 的移动方向与各自目标要求的方向一致。"),
+    (" The region's own cells carried movement through one-sided hue bands \
+      [{bands}]: those pixels are re-synthesised and have no paired counterpart, so \
+      admission was asked of the target's 12x8 cell means instead — {converged} of \
+      the frame moved closer, {diverged} moved away, and {aligned} moved in the \
+      direction its own target asks for. Pixels in cells that did not converge kept \
+      the veto.",
+        " 由区域自身的单元担保像素穿过单侧色相带 [{bands}]：这些像素是重新合成的，没有可配对的对应像素，因此改由目标自身的 12x8 单元均值裁定准入 —— 画面的 {converged} 更接近目标，{diverged} 反而远离，{aligned} 的移动方向与各自目标要求的方向一致。未收敛单元内的像素仍保留否决。"),
     (" Structural reading: D {fine} at pixel scale, {coarse} at layout scale — the \
       pixel-scale reading holds, so this solve paired source pixel with target pixel.",
         " 结构读数：像素尺度 D {fine}，布局尺度 {coarse}——像素尺度读数成立，因此本次求解按源像素对目标像素配对。"),
@@ -1833,6 +1842,16 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
         " 分区 {label} 的色彩控件暂不调整：它们会移动零证据的色相 [{hue_bands}]，因此未盲目调整。"),
     (" Zoned {label} tone controls withheld: they would move zero-evidence luma ranges [{luma_ranges}]. Those ranges were not adjusted blindly.",
         " 分区 {label} 的影调控件暂不调整：它们会移动零证据的亮度范围 [{luma_ranges}]，因此未盲目调整。"),
+    (" Zoned {label} colour controls withheld: they would move zero-evidence hue bands [{hue_bands}], and this region's pixels are not each other's counterparts, so the target's own 12x8 cell means were asked instead — and did not vouch the move either ({cells}). Those bands were not adjusted blindly.",
+        " 分区 {label} 的色彩控件暂不调整：它们会移动零证据的色相 [{hue_bands}]，而该区域的像素与目标像素并非逐一对应，于是改由目标自身的 12x8 单元均值裁定 —— 也没有为这次移动担保（{cells}），因此未盲目调整。"),
+    (" Zoned {label} tone controls withheld: they would move zero-evidence luma ranges [{luma_ranges}], and this region's pixels are not each other's counterparts, so the target's own 12x8 cell means were asked instead — and did not vouch the move either ({cells}). Those ranges were not adjusted blindly.",
+        " 分区 {label} 的影调控件暂不调整：它们会移动零证据的亮度范围 [{luma_ranges}]，而该区域的像素与目标像素并非逐一对应，于是改由目标自身的 12x8 单元均值裁定 —— 也没有为这次移动担保（{cells}），因此未盲目调整。"),
+    (" Zoned {label} colour controls shipped on REGION evidence: the pixel-scale reading withholds hue bands [{hue_bands}] because this region's texture was re-synthesised, so the move was rendered and put to the target's own 12x8 cell means over the zone — {converged} of the region moved closer, {diverged} moved away, and {aligned} moved in the direction its own target asks for.",
+        " 分区 {label} 的色彩控件按区域证据发布：像素尺度的读数因该区域纹理是重新合成的而暂不调整色相 [{hue_bands}]，于是把这次移动渲染出来，交由目标自身在该分区上的 12x8 单元均值裁定 —— 区域的 {converged} 更接近目标，{diverged} 反而远离，{aligned} 的移动方向与各自目标要求的方向一致。"),
+    (" Zoned {label} tone controls shipped on REGION evidence: the pixel-scale reading withholds luma ranges [{luma_ranges}] because this region's texture was re-synthesised, so the move was rendered and put to the target's own 12x8 cell means over the zone — {converged} of the region moved closer, {diverged} moved away, and {aligned} moved in the direction its own target asks for.",
+        " 分区 {label} 的影调控件按区域证据发布：像素尺度的读数因该区域纹理是重新合成的而暂不调整亮度范围 [{luma_ranges}]，于是把这次移动渲染出来，交由目标自身在该分区上的 12x8 单元均值裁定 —— 区域的 {converged} 更接近目标，{diverged} 反而远离，{aligned} 的移动方向与各自目标要求的方向一致。"),
+    (" Zoned {label} tone was solved at CELL scale: this zone's own structural reading is {d}, past the {line} pairing line, so its pixels are not each other's counterparts — the tone came from the zone's own luma distribution rather than from a per-pixel regression, which reads a re-synthesised texture's contrast low.",
+        " 分区 {label} 的影调按单元尺度求解：该分区自身的结构读数为 {d}，已越过 {line} 的配对界线，其像素与目标像素并非逐一对应 —— 影调取自该分区自身的亮度分布，而不是逐像素回归，后者会把重新合成的纹理的对比度读低。"),
     (" No zoned correction attached: the source and target zone shares differ by more than 2:1, so neither population is a comparable measurement of the same subject.",
         " 未附加任何分区修正：源图与目标的分区占比之比超过 2:1，两侧不是对同一主体的可比测量。"),
     (" This target's look appears to use {controls}, which the reverse-fit \
@@ -1999,6 +2018,15 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
       more than {margin} better than the frame this fit already reached \
       ({err_after}), so there was nothing left for it to carry.",
         " 未附加颜色场：色场自身的上限 {ceiling} 相比本次反推已经达到的整幅误差（{err_after}）并没有好过 {margin}，因此它没有还能承担的部分。"),
+    (" Colour field cell admission: {admitted} of {read} measured cells took the \
+      support-free solve, because the target's own cell means vouch there what \
+      their pixels cannot, at a per-channel gain bound of {bound}. The rest kept \
+      the support-weighted solve.",
+        " 颜色场的单元准入：{read} 个已测量单元中有 {admitted} 个采用了不带结构支持项的求解，因为在那里目标自身的单元均值能担保其像素无法担保的部分，逐通道增益上限为 {bound}。其余单元保留带结构支持项的求解。"),
+    (" The solved colour field was given back: it improved the frame but moved \
+      the {label} zone {before} -> {after}, past the {tol} a zone is ever allowed \
+      to cost (per-zone do-no-harm check).",
+        " 已解出的颜色场被退回：它让整幅画面更接近目标，但把 {label} 分区从 {before} 变成 {after}，超出了一个分区所允许付出的 {tol}（逐分区不使画面变差的检查）。"),
     (" The solved colour field was given back: rendering it moved the frame \
       {before} -> {after}, away from the target rather than toward it \
       (do-no-harm check).",

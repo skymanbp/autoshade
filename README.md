@@ -65,6 +65,13 @@ An AI decides *what to change*. A deterministic Rust engine *does* it.
   global, semantic, luminance-range and colour-range corrections behind
   evidence gates; past the default Strength it may also carry a smooth
   12×8×8 local colour field, the one control with no Lightroom equivalent.
+  Where a repaint broke the pixel-to-pixel correspondence inside one region —
+  and only there, since a region whose pixels still correspond may not overrule
+  them — that region's own 12×8 cell means decide whether the move ships: closer
+  to each cell's target, and in the direction that target asks for. A
+  same-layout recolour is recoverable, a region whose layout moved is still
+  refused, and the refusal is a measurement printed with the shares it was
+  decided on.
 - **Generative and pixel tools, opt-in and labelled** — reimagine
   (gpt-image-2), retouch, heal and SCUNet denoise are the only paths that can
   invent or alter scene content, and are marked so.
@@ -423,7 +430,7 @@ the tests [`scripts/check_docs.py`](scripts/check_docs.py) re-derives.
 
 | What | Measured | Where |
 |---|---|---|
-| Automated test battery | 1436 library / 24 CLI / 169 GUI / 2+2 contract tests; `check_docs` re-derives the pinned release claims | [Tech stack](#tech-stack-algorithms-and-design-philosophy) |
+| Automated test battery | 1449 library / 24 CLI / 169 GUI / 2+2 contract tests; `check_docs` re-derives the pinned release claims | [Tech stack](#tech-stack-algorithms-and-design-philosophy) |
 | RAW coverage | 24 extensions, 725 camera bodies; nine-camera format zoo 9/9 at the last release gate | [Supported formats](#supported-formats) |
 | Lightroom Texture parity | 45 of 45 period/depth anchors within ±0.02 | [Develop pipeline](#develop-pipeline-and-tone-model) |
 | Radial mask closure | 41 of 41 measured vectors within ≤1 px | [Lens correction](#lens-correction-and-lightroom-mask-frame-laws) |
@@ -749,7 +756,7 @@ numbers](#measured-numbers) are not repeated.
   the 1800 MB per-photo budget, and a 4 GiB RAW gate bounds admission.
 - The [`build` workflow](.github/workflows/build.yml) covers default and GUI
   feature sets on Ubuntu and macOS; model weights are not stored here. The
-  current battery is **1436 library (1422 pass + 14 `#[ignore]`d forensic probes) / 24 CLI / 169 GUI / 2+2 contract** tests, and
+  current battery is **1449 library (1435 pass + 14 `#[ignore]`d forensic probes) / 24 CLI / 169 GUI / 2+2 contract** tests, and
   [`scripts/check_docs.py`](scripts/check_docs.py) re-derives the pinned
   release claims.
 

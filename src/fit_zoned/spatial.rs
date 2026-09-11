@@ -1395,7 +1395,7 @@ mod tests {
             report
                 .notes
                 .iter()
-                .any(|n| n.key == crate::rationale::keys::ZONE_EVIDENCE_WITHHELD_TONE),
+                .any(|n| super::super::is_tone_refusal(n.key)),
             "moving the withheld half must withhold the tone controls: {}",
             report.recipe.rationale
         );

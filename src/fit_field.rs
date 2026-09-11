@@ -20,7 +20,7 @@ use rayon::prelude::*;
 /// `(iy * FIELD_X + ix) * FIELD_B + ib`, exactly `splat_table`'s order.
 pub(crate) const FIELD_X: usize = 12;
 pub(crate) const FIELD_Y: usize = 8;
-const FIELD_B: usize = 8;
+pub(crate) const FIELD_B: usize = 8;
 /// The parameters carried at every vertex: `[ev, gain_r, gain_g, gain_b, slope]`.
 const PARAMS: usize = 5;
 const VERTICES: usize = FIELD_X * FIELD_Y * FIELD_B;
@@ -34,13 +34,66 @@ const OCCUPANCY_MIN: f32 = 8.0;
 /// The production regulariser, FIXED — no per-image sweep, ever.  The experiment's
 /// sweep picked s=0 on two of its five pairs (an overfitting bias) to buy a last
 /// 0.003 of the objective; determinism and no selection bias are worth more.
-const TIKHONOV: f32 = 1.0;
-const SMOOTH: [f32; 3] = [1.0, 1.0, 1.0];
-const ITERATIONS: usize = 90;
+pub(crate) const TIKHONOV: f32 = 1.0;
+pub(crate) const SMOOTH: [f32; 3] = [1.0, 1.0, 1.0];
+pub(crate) const ITERATIONS: usize = 90;
 /// The refusal line of `fit::look_err_with_evidence`, reused verbatim: a pair the
 /// objective calls unmeasurable gets no field either.
 const IDENTIFIABILITY_MIN: f32 = 1e-5;
 const LN2: f64 = std::f64::consts::LN_2;
+
+/// R34 §D4. The two things the SHIPPED colour field solves differently from
+/// the ANALYSIS instrument, and nothing else.
+///
+/// They are parameters rather than a second solver because the field the user
+/// exports and the field the sequencer measures its ceiling against must be
+/// the same function of the same pixels — the property
+/// `the_engine_renders_the_analyzers_field_bit_for_bit` exists to hold. The
+/// default IS today's analysis solve, so every existing caller is unchanged
+/// byte for byte.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct FieldSolveOpts {
+    /// Per-channel bound on `[gain_r, gain_g, gain_b]`. The analysis solve
+    /// keeps [`BOUNDS_HIGH`]'s own 0.35, so the ceiling it reports is the
+    /// number it has always reported; the shipped field takes the strength
+    /// budget's `field_gain` (`fit::FitBudget`).
+    pub gain: f32,
+    /// Weight the fit by the 96-cell structural support. FALSE is the
+    /// support-free pass: `local_support` is `1 - clamp(D)` per cell, which is
+    /// ~0 wherever a repaint re-synthesised the texture — exactly where the
+    /// residual is — so a field weighted by it is starved of the only work it
+    /// was attached to do. Dropping the term is admissible ONLY behind a
+    /// per-cell admission (`fit_cells`), which is what
+    /// `fit_zoned::field::attach_colour_field` puts in front of it.
+    pub local_support: bool,
+}
+
+impl Default for FieldSolveOpts {
+    fn default() -> Self {
+        Self { gain: BOUNDS_HIGH[1], local_support: true }
+    }
+}
+
+impl FieldSolveOpts {
+    /// The post-solve bound pair for parameter `p`. Only the three GAIN axes
+    /// move; EV and slope keep their constants, because the demand R34
+    /// measured is chromatic and widening an axis nobody asked about is how a
+    /// bound stops meaning anything.
+    fn bounds(self, p: usize) -> (f32, f32) {
+        match p {
+            1..=3 => (-self.gain, self.gain),
+            _ => (BOUNDS_LOW[p], BOUNDS_HIGH[p]),
+        }
+    }
+}
+
+/// The analysis solve's per-channel gain bound, for the budget's DEFAULT
+/// point: one constant, named once, so the "default recipe is byte-identical"
+/// pin reads the analyzer's own number rather than a copy of it.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn default_gain_bound() -> f32 {
+    BOUNDS_HIGH[1]
+}
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct SolveInfo {
@@ -95,15 +148,21 @@ impl LocalField {
         current: &[[f32; 3]], target: &[[f32; 3]], width: u32, height: u32,
         evidence: &fit::EvidenceModel,
     ) -> Option<LocalField> {
-        Self::solve_with(current, target, width, height, evidence, TIKHONOV, SMOOTH, ITERATIONS)
+        Self::solve_with(
+            current, target, width, height, evidence, TIKHONOV, SMOOTH, ITERATIONS,
+            FieldSolveOpts::default(),
+        )
     }
 
     /// The same solve with the regulariser exposed, so a test can pin the
-    /// lambda-to-infinity property.  Production always calls [`Self::solve`].
+    /// lambda-to-infinity property, and — since R34 §D4 — with the two things
+    /// the SHIPPED field solves differently from the ANALYSIS instrument.
+    /// Production analysis always calls [`Self::solve`].
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn solve_with(
         current: &[[f32; 3]], target: &[[f32; 3]], width: u32, height: u32,
         evidence: &fit::EvidenceModel, tikhonov: f32, smooth: [f32; 3], iterations: usize,
+        opts: FieldSolveOpts,
     ) -> Option<LocalField> {
         let (w, h) = (width as usize, height as usize);
         let n = w.checked_mul(h)?;
@@ -113,12 +172,15 @@ impl LocalField {
         }
         // Fit weight = frozen evidence x local structural support x unclipped.  The
         // evidence model is the fit's own; this module never builds a second one.
-        let support = local_support(current, target, width, height);
+        let support = opts
+            .local_support
+            .then(|| local_support(current, target, width, height));
         let mut fit_weight = vec![0.0f32; n];
         let mut mass = 0.0f64;
         for (i, weight) in fit_weight.iter_mut().enumerate() {
             if unclipped(&current[i]) && unclipped(&target[i]) {
-                *weight = evidence.source_weights[i].max(0.0) * support[i];
+                *weight = evidence.source_weights[i].max(0.0)
+                    * support.as_ref().map_or(1.0, |s| s[i]);
             }
             mass += *weight as f64;
         }
@@ -136,7 +198,8 @@ impl LocalField {
             let mut clipped = false;
             for (p, value) in cell.iter_mut().enumerate() {
                 let solved = raw[vertex * PARAMS + p];
-                let bounded = solved.clamp(BOUNDS_LOW[p], BOUNDS_HIGH[p]);
+                let (low, high) = opts.bounds(p);
+                let bounded = solved.clamp(low, high);
                 clipped |= bounded != solved;
                 *value = if supported { bounded } else { 0.0 };
                 flat[vertex * PARAMS + p] = *value;

@@ -7,6 +7,34 @@ use std::path::{Path, PathBuf};
 
 use super::*;
 
+/// R34 §D4. The analysis instrument's solve options ARE the defaults, so every
+/// pre-R34 caller is unchanged byte for byte and the ceiling the sequencer
+/// stops on is the number it has always been. Only the SHIPPED field
+/// (`fit_zoned::field::attach_colour_field`) ever passes anything else.
+#[test]
+fn the_analysis_solve_options_are_the_analyzers_own_constants() {
+    let opts = FieldSolveOpts::default();
+    assert_eq!(opts.gain, BOUNDS_HIGH[1], "the gain bound is the analyzer's own");
+    assert_eq!(opts.gain, default_gain_bound(), "…named once, for the budget's default point");
+    assert!(opts.local_support, "…and the structural support term is ON");
+    for p in 0..PARAMS {
+        assert_eq!(
+            opts.bounds(p),
+            (BOUNDS_LOW[p], BOUNDS_HIGH[p]),
+            "parameter {p} keeps its constants under the default options"
+        );
+    }
+    // Opening the GAIN bound moves the three gain axes and nothing else: EV
+    // and slope keep their constants, because the demand R34 measured is
+    // chromatic and a bound widened for no reason stops meaning anything.
+    let wide = FieldSolveOpts { gain: 0.80, local_support: false };
+    assert_eq!(wide.bounds(0), (BOUNDS_LOW[0], BOUNDS_HIGH[0]), "EV is untouched");
+    assert_eq!(wide.bounds(4), (BOUNDS_LOW[4], BOUNDS_HIGH[4]), "slope is untouched");
+    for p in 1..=3 {
+        assert_eq!(wide.bounds(p), (-0.80, 0.80), "gain axis {p} follows the budget");
+    }
+}
+
 // --------------------------------------------------------------------------
 // synthetic fixtures
 // --------------------------------------------------------------------------
@@ -170,7 +198,9 @@ fn field_adjoint_matches_forward() {
 fn field_infinite_tikhonov_reproduces_the_global_render() {
     let (current, target, w, h) = two_band_pair();
     let evidence = fit::evidence_model_for(&current, &target, w, h);
-    let pinned = LocalField::solve_with(&current, &target, w, h, &evidence, 1e6, SMOOTH, ITERATIONS)
+    let pinned = LocalField::solve_with(
+        &current, &target, w, h, &evidence, 1e6, SMOOTH, ITERATIONS, FieldSolveOpts::default(),
+    )
         .expect("a measurable pair must solve");
     let rendered = pinned.render(&current);
     let mut worst = 0.0f32;

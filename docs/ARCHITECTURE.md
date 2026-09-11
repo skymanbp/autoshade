@@ -129,14 +129,18 @@
 > wrong reason; it writes a `=== name ===` transcript that
 > `scripts/check_docs.py --gates` reads the counts and the lane set back out
 > of, and it prints the by-name test-set difference against a saved baseline.
-> 1436 library + 24 CLI + 169 GUI + 2+2 contract tests are enumerated in the GUI
-> build; the library result is 1422 pass + 14 `#[ignore]`d forensic probes
-> (counts refreshed 2026-09-11 after the R33 merge and the deep-thinking box, not yet
-> released: +42 / −1 by name against `5ffa275` — the four lanes' tests plus the
-> box's, listed in the ROADMAP's
-> unreleased ledger; the −1 is `the_local_field_never_reaches_the_engine_or_the_recipe_schema`,
-> renamed `the_engine_renders_the_field_from_the_recipe_and_never_calls_the_analyzer`
-> when the field became a shipped control; taken statically between the tag's
+> 1449 library + 24 CLI + 169 GUI + 2+2 contract tests are enumerated in the GUI
+> build; the library result is 1435 pass + 14 `#[ignore]`d forensic probes
+> (counts refreshed 2026-09-11 after the R34 merge, not yet released: +57 / −3 by
+> name against `5ffa275` — the four R33 lanes' tests, R34's and the deep-thinking
+> box's, listed in the ROADMAP's unreleased ledger; the −3 are renames:
+> `the_local_field_never_reaches_the_engine_or_the_recipe_schema` →
+> `the_engine_renders_the_field_from_the_recipe_and_never_calls_the_analyzer`
+> when the field became a shipped control, and R34's two re-pins
+> `zoned_color_gains_cannot_move_a_zero_evidence_hue_band` →
+> `…_only_where_the_regions_cells_vouch_it` and
+> `a_divergent_zone_is_still_attached_in_atmosphere_mode` →
+> `…_and_its_colour_follows_its_cells`; taken statically between the tag's
 > source and this tree. The calibration lane has not run since v1.2.6. Before
 > that, refreshed 2026-09-08 for v1.2.6: +1 / −0 by name against `616f795` —
 > `denoise::the_sidecar_downloader_asks_for_an_unencoded_body`, which pins the
@@ -2455,13 +2459,13 @@ is the anti-laundering rule kept, not dropped: an edit may not create its own
 evidence unless the paired target says the created pixels went the right way.
 Atmosphere passes no cells, deliberately.
 
-The zone probes were measured for the same treatment and REFUSED it:
+The zone probes were measured for the same treatment and refused it in R33 —
 `fit_zone_dials` solves `color_gains` from the zone's mask-weighted MEAN
 moments, and a cell voucher restricted to the same mask reads cell MEANS over
-the same pixels, so the estimator's objective and the voucher's measurement
-are one quantity. Measured, it read 1.000 converged / 0.000 diverged at every
-site whose probe was not already null. The reason is recorded at the call site;
-the two withholdings stand. **Full** mode keeps four stages, in this
+the same pixels, so (the argument ran) the estimator's objective and the
+voucher's measurement are one quantity. **R34 supersedes that**; see *The
+region's cells vouch what its pixels cannot* below for what was wrong with it
+and what replaced it. **Full** mode keeps four stages, in this
 order: luminance-CDF tone matching (sampled
 at the engine's own tone knots and least-squares solved against the engine's own
 slider basis, with a ridge + penalised model-selection prior so numerically
@@ -2492,6 +2496,207 @@ is the rule and the measurement behind it is real: on a pair whose texture was
 re-synthesised the paired estimator reports 54 map points, rejects 0.1% of
 them, and under-reads the map's contrast by 10%, while the quantile arm
 recovers the same map to 0.3%.
+
+**The region's cells vouch what its pixels cannot** (R34, unreleased). The
+doctrine R34 replaces is one sentence: *`D >= 0.35` in this region, therefore
+nothing may be paired, therefore nothing may move.* The measurement that breaks
+it is the desert-dusk reference pair, where the FRAME pairs at pixel scale
+(D_fine 0.275) and the sky SUB-REGION does not (0.617). Region is not frame,
+and four separate gates were reading the frame's ruler onto a region it does
+not describe — so an AI repaint that changed the sky's colour and nothing else
+came back 18.2 dE short in exactly the region the user was looking at (17.6 in
+the R33 ledger; 18.2 is the merged tree's own rerun on the binary R34 is
+measured against), with every refusal correctly reasoned from a premise that
+did not hold there.
+
+R33's refusal of the zone probes was wrong in one specific way — the argument
+it rested on, not the caution — and the fix is in the instrument rather than in
+the thresholds. (The caution was right about WHERE: see *where it may be asked
+at all* below, which is the half of R34 that took two measurements to get
+right.) `fit_zone_dials` matches ONE
+number — the zone-wide mean per channel — while the voucher reads 96 cells;
+and since R34 the voucher also reads the DIRECTION of each cell's move against
+the direction to its OWN target mean: `cos(angle(a-b, t-b)) >= ALIGN_COS`
+(0.5, i.e. within 60 degrees), taken on the same cell means transformed into
+linear light, with a cell already AT its target counting as aligned only if it
+was left alone. A zone-wide gain that matches the mean while dragging cells
+whose targets lie elsewhere converges the mean and fails the partition, so
+`CellVouch::vouched` is now `converged >= 0.70 && diverged <= 0.10 && aligned
+>= 0.70`, and the verdict stops being a tautology: R33's reading was 1.000 /
+0.000 for any probe that moved anything at all, while the reference sky reads
+0.865 converged / 0.135 diverged / 1.000 ALIGNED — every one of its cells wants
+the same warm push, and a seventh of its trust-weighted mass still ends further
+from its own target than it started.
+
+WHERE IT MAY BE ASKED AT ALL is the rule this design lives or dies by, and it
+is one sentence: *the cells answer where the pixels CANNOT BE ASKED — never
+where they were asked and said no.* A pixel whose texture survived has a
+counterpart; moving it away from that counterpart is evidence against the move,
+not a reason to poll its neighbours. Both consumers that lift a per-pixel veto
+therefore test the structural reading first, and both were measured getting it
+wrong before they got it right:
+
+  * the global cast arm reads the PIXEL's own `spatial_weights` against
+    `DIVERGENCE_GLOBAL`. Through that predicate the arm still carries
+    [Aqua, Blue] on the reference pair (0.966 / 0.017 / 0.937) and is refused
+    on the canyon-gold fixture, which is the whole difference between the two.
+    Guarding on "the paired arm did not vouch" instead
+    rotated that fixture's pale-blue sky 158° into the target's native gold
+    with the cells reading 0.921 / 0.079 / 0.981, which is exactly the policy
+    `cast_must_not_rotate_the_sky_into_a_target_native_hue` exists to refuse.
+    Note that it may NOT read `evidence.spatial_supported`: that flag is
+    `globally_same_content || d < DIVERGENCE_ZONE`, so a frame that pairs
+    overall marks every pixel of a repainted sky supported — R33's "region is
+    not frame" defect inside the flag's own definition.
+  * the zone probes read the ZONE's own reading against the same line, which is
+    the `PairingScale` they already compute for their tone estimator. Asking
+    unconditionally shipped a colour move twelve pinned refusals exist to
+    refuse, on toy fixtures whose zones read D 0.024 to 0.101 — while the
+    sentence printed for them, "because this region's texture was
+    re-synthesised", was false about every one.
+
+That is also why a zone's refusal has two sentences and not one. A region whose
+pixels pair keeps R33's words to the byte, because nothing about it changed; a
+region past the line gets the sentence that prints what its cells measured.
+`is_colour_refusal` / `is_tone_refusal` are the one place that knows the two
+carriers are one outcome.
+
+SCOPE is the other half of the instrument, and it is not the same at every
+site. Lifting a REGIONAL veto takes a REGIONAL verdict: a veto that is a SHARE
+of the moved population dissolves entirely once enough of that population is
+carried, so admitting pixel by pixel lets a converged minority delete a
+refusal its own region disagrees with (measured: a frame whose cells read 0.337
+converged / 0.663 diverged lifted a one-sided Blue band's veto). `region_arm`
+therefore folds the region's verdict FIRST and hands back the per-cell view
+only if the region vouched; `verdicts` is that same view for the one consumer
+that chooses a vertex per cell rather than lifting a veto. One pass, one set of
+numbers, so a pixel can never be admitted by a cell the region verdict counted
+the other way.
+
+A region is also what the reading is TAKEN OVER, all of it: each cell's before
+and after means, the target mean they are put to, the evidence mass the cell
+votes with, and the trust that mass is scaled by. Restricting only the means —
+which is what the first implementation did — is not a smaller error but a
+different measurement: a cell a zone's feather merely clips answers for a
+population it does not hold, in a voice sized for the population it does. On
+the 64x64 zone fixture the twelve boundary cells then carried 0.447 of the vote
+and diverged by construction, and the region refused a recolour every one of
+its own 48 sky cells had moved correctly (0.553 / 0.447 / 0.553 before the fix,
+0.988 / 0.012 / 0.988 after). With no region the membership is 1.0 everywhere
+and every accumulation is the frame-scope one it always was.
+
+The abstention is unchanged and load-bearing: a cell whose evidence mass x
+trust is zero is not read, so a region made only of structurally unsupported
+pixels ABSTAINS and every strict refusal stands — by construction, not by
+threshold. Four sites consume it:
+
+  * **the zone probes** (`fit_zoned::attach_one_zone`). Each control class is
+    probed as before; where the strict arm withholds AND the zone's own reading
+    is past the pairing line, the probe render is put to the region's own cells
+    over the zone's soft membership, and a vouched class SHIPS with a note
+    naming the band the pixel-scale reading withheld and the three shares that
+    admitted it. A cell-scale refusal now prints those shares too, so "withheld"
+    can no longer be read as "nobody looked". Both zone modes pass cells — this
+    is the one place R33's "Atmosphere passes no cells" is deliberately not
+    followed, and for the reason that doctrine exists: an Atmosphere zone is the
+    CLAIM that the content was replaced, and the cells are exactly the
+    instrument that separates a replaced TEXTURE (layout intact, recoverable)
+    from a replaced LAYOUT (nothing to recover). Admission is evidence; the
+    strength budget still bounds what is admitted.
+  * **the global cast gate** (`fit::moved_unsupported_range_hits`). Its only
+    voucher was per-pixel (`spatially && weight >= 0.5 && converges_toward`),
+    which is noise on a repainted region — and R33 skipped the cell arm as
+    unreachable precisely because the FRAME pairs. Every one of its six arms is
+    now built through `region_arm`, so the frame must vouch as a whole before
+    any of its cells may carry anything; inside a vouched frame, a moved pixel
+    the per-pixel arm cannot carry is carried when its own cell says
+    `Some(true)`. The two are kept in separate lists (`vouched_hue` and
+    `cell_vouched_hue`) and disclosed in separate sentences, because "each of
+    these pixels was individually vouched" and "these pixels have no
+    counterpart and their cell vouched for them" are different claims. The
+    sentence that names the bands the cells carried prints the SAME verdict the
+    gate was opened on, not a second reading of it.
+  * **the colour field** (`fit_zoned::field::attach_colour_field`). Only the
+    SHIPPED producer changed; the analysis solve, its ceiling, the shape
+    verdicts and `LOCAL_STOP_MARGIN` are byte-identical, because the two things
+    that differ are now explicit parameters (`fit_field::FieldSolveOpts`) whose
+    defaults are the analyzer's own constants. Pass A is today's solve. Pass B
+    drops the `local_support` factor — `1 - clamp(D_cell)`, which is ~0 exactly
+    where a repaint put the residual, so the horizon row saturated 15 red
+    vertices covering for two rows that carried no weight at all — and takes
+    its per-channel gain bound from `FitBudget::field_gain`. Pass B is then
+    RENDERED and put to the cells: an admitted cell takes its eight luma-bin
+    vertices, every other cell keeps pass A's, and a field that admits no cell
+    is the pre-R34 field byte for byte. Two do-no-harm checks follow, the
+    frame's and a per-ZONE one read off the attached zone masks through
+    `render::mask_coverage`, because a field that pays for the sky out of the
+    land wins on the frame and loses the picture.
+  * **the zone tone estimator** (R34 §D5). MODE governs the control set, SCALE
+    governs the estimator — R33 §D's split, now asked of the ZONE's own reading
+    at the frame's own line. A Full zone whose divergence is past
+    `DIVERGENCE_GLOBAL` solves its tone from the zone's own luma distribution
+    instead of a per-pixel regression, which on a re-synthesised texture
+    measures the regression of one noise draw on another and under-reads the
+    contrast (R33 measured 10% low at frame level; the reference sky read 0.72
+    of the target's L* spread). The scale is disclosed only where it changed
+    the estimator, so a pixel-scale zone's rationale is unchanged.
+
+What all four did on the reference pair, which is the only honest summary of a
+design — and "did" means CHANGED THE SHIPPED BYTES, read off a leaf-by-leaf
+diff of the three recipes against the merged tree's own baseline rather than
+inferred from the sentences they print:
+
+  * the cast arm ships at Strength 0.65, and only there. The baseline gave the
+    whole per-band mixer back at that strength ("blind movement is vetoed
+    rather than shipped"); with the cells vouching on 0.963 / 0.020 / 0.937 it
+    ships [Red sat +18 lum +18, Orange sat +18 lum +18] and the frame residual
+    reads 0.110 → 0.049 against the baseline's 0.051. At 0.85 and 1.0 the same
+    bands were already carried by F1's high-strength disclosure, and the two
+    recipes' global controls are identical leaf for leaf: what the arm changes
+    there is the SENTENCE — "the controls were retained, but confidence is
+    capped by the strength budget" becomes a measurement, 0.966 / 0.017 /
+    0.937. One outcome, two qualifications: permitted by a budget, or vouched
+    by evidence.
+  * the zone tone estimator changes bytes at every strength. The sky's own
+    correction moves +0.18 → +0.12 EV at 0.65 and +0.17 → +0.12 EV at 1.0, and
+    the free mask field-zone-2 — refused outright as `zone-refused` on the
+    baseline, because a per-pixel regression on its re-synthesised texture
+    solved every control to neutral — becomes an attached +0.08 EV correction
+    at 0.85 and at 1.0 (frame 0.045236 → 0.043859 at 0.85).
+  * the colour field exists above the default strength only: 81 of 88 measured
+    cells at a 0.61 gain bound on 0.85 (frame 0.043859 → 0.017267, against the
+    baseline's 0.045236 → 0.021079), 80 of 88 at 0.80 on Strength 1. At 0.65
+    there is no field at all, which is most of why that strength barely moves.
+  * the zone probes' admission arm shipped on NO site of this pair. Four
+    regions past the pairing line (sky 0.617, two spatial tiles 0.352 and
+    0.422, one free mask 0.391) asked their cells and were refused, the sky at
+    0.865 converged / 0.135 diverged / 1.000 aligned — every cell of it moved
+    the right way, and a seventh of its trust-weighted mass still ended further
+    from its own target in Chebyshev terms, which a single zone-wide gain
+    cannot fix and the colour field can. The sky's zone colour therefore still
+    ships neutral, and the sky's ΔE went 18.2 → 5.9 anyway. That arm is pinned
+    on fixtures; its refusals here are measurements where R33 printed silence.
+
+`FitBudget` gains `field_gain` for the third of those: default point 0.35, the
+analyzer's own `BOUNDS_HIGH` gain, so the default recipe — which ships no field
+at all — is unchanged, rising to 0.80 at Strength 1. The ladder is calibrated
+against a measured demand, not chosen: after the whole zone ladder has run, the
+reference sky still wants R x1.465 / G x1.07 / B x0.78 in linear mean gain.
+
+**The feather widener's smoothness reading follows its guide** (R34 §D8). The
+one-code rule in `mask_refine::widen_smooth_feather` is an absolute statement
+calibrated on an absolute guide — the camera's embedded preview, with the
+body's noise reduction already applied. R33 §A made the source frame one thing
+for both entry points, the 2048-px NEUTRAL develop, which has no noise
+reduction: featureless haze then carries two or three codes of sensor noise at
+the probe distance, the rule read 0.0% of the contour smooth on a visibly
+smooth horizon, and the mask shipped the step the widening exists to remove
+(2.8 codes, against 1.1 on the previous frame). The crossing is now measured
+against what the SAME guide does where nothing is happening — the lower
+quartile of its own variation over the collar, times `SMOOTH_NOISE_MULTIPLE`,
+floored at one code — so the verdict survives a change of source frame, of
+exposure and of contrast, while a guide that really is flat everywhere gets the
+one-code rule byte for byte.
 
 **A rescored report keeps its producers' account** (R33 §H). `rescore_report`
 rebuilds the GLOBAL solve field by field off `SolveFacts`, which is right for a

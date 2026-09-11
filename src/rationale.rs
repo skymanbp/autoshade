@@ -117,13 +117,15 @@ pub mod keys {
     pub const FIT_NOTE_WB_CELLS_REFUSED: &str =
         " A white balance was solved from the population and then rendered and checked \
          against the target's own 12x8 cell means: only {converged} of the frame moved \
-         closer and {diverged} moved away, so it was returned to as-shot rather than \
-         shipped on population evidence alone.";
+         closer, {diverged} moved away, and {aligned} moved in the direction its own \
+         target asks for, so it was returned to as-shot rather than shipped on \
+         population evidence alone.";
     /// …and the other half of the same sentence: it WAS vouched.
     pub const FIT_NOTE_WB_CELLS_VOUCHED: &str =
         " The fitted white balance was checked against the target's own 12x8 cell means \
-         before it shipped: {converged} of the frame moved closer to its target and \
-         {diverged} moved away.";
+         before it shipped: {converged} of the frame moved closer to its target, \
+         {diverged} moved away, and {aligned} moved in the direction its own target \
+         asks for.";
     pub const FIT_NOTE_FAR: &str =
         " NOTE: the fitted recipe still renders far from the target \
          (residual {err_after}) — this look exceeds what global \
@@ -413,6 +415,21 @@ pub mod keys {
          weight, hue-coherent with the global edit) and moved toward its own \
          paired target pixel; unvouched pixels kept the veto.";
 
+    /// R34 §D3. The cast curves moved pixels through a one-sided hue band that
+    /// no per-pixel voucher could carry — the texture there was re-synthesised,
+    /// so pixel `i` has no counterpart to converge toward — and the REGION's own
+    /// 12x8 cells carried them instead. A different claim from
+    /// [`FIT_NOTE_VOUCHED_CONVERGENCE`], which is about pixels that WERE paired,
+    /// and the two never describe one band: a pixel the per-pixel arm vouches
+    /// never reaches the cell arm.
+    pub const FIT_NOTE_CAST_CELLS_VOUCHED: &str =
+        " The region's own cells carried movement through one-sided hue bands \
+         [{bands}]: those pixels are re-synthesised and have no paired counterpart, so \
+         admission was asked of the target's 12x8 cell means instead — {converged} of \
+         the frame moved closer, {diverged} moved away, and {aligned} moved in the \
+         direction its own target asks for. Pixels in cells that did not converge kept \
+         the veto.";
+
     pub const FIT_NOTE_EVIDENCE_WITHHELD: &str =
         " Evidence gating withheld luma ranges [{luma_ranges}] and hue bands [{hue_bands}]. One-sided [{one_sided}] is UNMEASURABLE, not equal, so it vetoed movement. Sparse on both sides [{sparse}] was excluded from estimation but did not veto a move. Structurally divergent [{divergent}] also vetoed movement.";
     pub const FIT_NOTE_DETAIL: &str =
@@ -537,6 +554,32 @@ pub mod keys {
         " Zoned {label} colour controls withheld: they would move zero-evidence hue bands [{hue_bands}]. Those bands were not adjusted blindly.";
     pub const ZONE_EVIDENCE_WITHHELD_TONE: &str =
         " Zoned {label} tone controls withheld: they would move zero-evidence luma ranges [{luma_ranges}]. Those ranges were not adjusted blindly.";
+    /// R34 §D2. The refusal a region at CELL scale earns: its pixels are not
+    /// each other's counterparts, so the cells were asked — and said no. A
+    /// separate key from the two above because the two situations are
+    /// different, not because the wording is: a region whose pixels pair was
+    /// never asked, and printing an empty measurement for it would be the
+    /// "nobody looked" reading R34 exists to remove.
+    pub const ZONE_EVIDENCE_WITHHELD_COLOUR_CELLS: &str =
+        " Zoned {label} colour controls withheld: they would move zero-evidence hue bands [{hue_bands}], and this region's pixels are not each other's counterparts, so the target's own 12x8 cell means were asked instead — and did not vouch the move either ({cells}). Those bands were not adjusted blindly.";
+    /// R34 §D2, the tone half of [`ZONE_EVIDENCE_WITHHELD_COLOUR_CELLS`].
+    pub const ZONE_EVIDENCE_WITHHELD_TONE_CELLS: &str =
+        " Zoned {label} tone controls withheld: they would move zero-evidence luma ranges [{luma_ranges}], and this region's pixels are not each other's counterparts, so the target's own 12x8 cell means were asked instead — and did not vouch the move either ({cells}). Those ranges were not adjusted blindly.";
+    /// R34 §D2. The positive twin of the two sentences above, and the reason
+    /// this is a pair of keys rather than a flag on the withheld one: a zone
+    /// whose colour SHIPPED on region evidence and a zone whose colour was
+    /// withheld are two different outcomes, and the user has to be able to tell
+    /// which one happened from the sentence alone.
+    pub const ZONE_COLOUR_VOUCHED_BY_CELLS: &str =
+        " Zoned {label} colour controls shipped on REGION evidence: the pixel-scale reading withholds hue bands [{hue_bands}] because this region's texture was re-synthesised, so the move was rendered and put to the target's own 12x8 cell means over the zone — {converged} of the region moved closer, {diverged} moved away, and {aligned} moved in the direction its own target asks for.";
+    pub const ZONE_TONE_VOUCHED_BY_CELLS: &str =
+        " Zoned {label} tone controls shipped on REGION evidence: the pixel-scale reading withholds luma ranges [{luma_ranges}] because this region's texture was re-synthesised, so the move was rendered and put to the target's own 12x8 cell means over the zone — {converged} of the region moved closer, {diverged} moved away, and {aligned} moved in the direction its own target asks for.";
+    /// R34 §D5. A zone's tone estimator follows the REGION's own pairing scale
+    /// rather than the frame's: a Full zone whose pixels do not pair solves its
+    /// tone from the zone's population instead of from paired pixels. Mode
+    /// governs the control set, scale governs the estimator.
+    pub const ZONE_PAIRING_SCALE: &str =
+        " Zoned {label} tone was solved at CELL scale: this zone's own structural reading is {d}, past the {line} pairing line, so its pixels are not each other's counterparts — the tone came from the zone's own luma distribution rather than from a per-pixel regression, which reads a re-synthesised texture's contrast low.";
     /// The share-mismatch exit attaches NO zone. It used to borrow the
     /// evidence-withheld sentence with both range lists empty, which read
     /// as "it would move zero-evidence luma ranges [none]" -- a claim about
@@ -832,10 +875,26 @@ pub mod keys {
          rendered in-app only — classic XMP has no coordinate system for a smooth \
          local field, so the Lightroom sidecar carries the rest of this recipe \
          without it.";
+    /// R34 §D4. Which cells of the SHIPPED colour field took the support-free
+    /// solve, and the per-channel gain bound the strength dial allowed them. A
+    /// field that admitted no cell is byte-identical to the pre-R34 one, and
+    /// says so by reading `0 of {read}`.
+    pub const FIELD_CELLS_ADMITTED: &str =
+        " Colour field cell admission: {admitted} of {read} measured cells took the \
+         support-free solve, because the target's own cell means vouch there what \
+         their pixels cannot, at a per-channel gain bound of {bound}. The rest kept \
+         the support-weighted solve.";
     pub const FIELD_WITHHELD: &str =
         " No colour field was attached: the field's own ceiling {ceiling} is not \
          more than {margin} better than the frame this fit already reached \
          ({err_after}), so there was nothing left for it to carry.";
+    /// R34 §D4. The other half of the field's do-no-harm, and the one the
+    /// frame ruler cannot make: a field that pays for one zone out of another
+    /// wins on the frame and loses the picture.
+    pub const FIELD_ZONE_REGRESSED: &str =
+        " The solved colour field was given back: it improved the frame but moved \
+         the {label} zone {before} -> {after}, past the {tol} a zone is ever allowed \
+         to cost (per-zone do-no-harm check).";
     pub const FIELD_REGRESSED: &str =
         " The solved colour field was given back: rendering it moved the frame \
          {before} -> {after}, away from the target rather than toward it \
@@ -1066,7 +1125,8 @@ pub(crate) const GLOBAL_SOLVE_KEYS: &[&str] = &[
     keys::FIT_NOTE_ATMOSPHERE_UNREPRESENTED, keys::FIT_NOTE_DEEP_ADOPTED,
     keys::FIT_NOTE_NOT_SAME_FRAME, keys::FIT_SUMMARY_WITH_CURVE_PAIRED,
     keys::FIT_SUMMARY_NO_CURVE_PAIRED, keys::FIT_NOTE_ROBUST_REJECTED,
-    keys::FIT_NOTE_VOUCHED_CONVERGENCE, keys::FIT_NOTE_EVIDENCE_WITHHELD, keys::FIT_NOTE_DETAIL,
+    keys::FIT_NOTE_VOUCHED_CONVERGENCE, keys::FIT_NOTE_CAST_CELLS_VOUCHED,
+    keys::FIT_NOTE_EVIDENCE_WITHHELD, keys::FIT_NOTE_DETAIL,
     keys::FIT_NOTE_DETAIL_WITHHELD, keys::FIT_NOTE_HSL_BANDS, keys::FIT_NOTE_HSL_BANDS_VOUCHED,
     keys::FIT_NOTE_HSL_WITHDRAWN_ERROR, keys::FIT_NOTE_HSL_WITHDRAWN_BLIND,
     keys::FIT_ATMOSPHERE_REFERENCE_POPULATION, keys::FIT_ATMOSPHERE_REFERENCE_UNPAIRED,
