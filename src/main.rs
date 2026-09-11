@@ -424,9 +424,12 @@ enum Command {
         /// unavailable, automatically try evidence-gated native luminance
         /// ranges; otherwise retain the global fit. Then automatically try up
         /// to four frozen-evidence 4x4 spatial bitmap tiles with zero frame
-        /// regression. Conservative guided mask refinement may abstain. Bitmap
-        /// masks stay engine-only with a named XMP loss; native ranges project
-        /// to Lightroom XMP. No network.
+        /// regression. Conservative guided mask refinement may abstain. The sky
+        /// and land zones ride out as Lightroom's own Select Sky mask
+        /// (Lightroom rebuilds its own sky alpha; the raster rendered here is
+        /// ours, not Adobe's); spatial tiles and free-form field masks stay
+        /// engine-only with a named XMP loss; native ranges project to
+        /// Lightroom XMP. No network.
         #[arg(long)]
         zoned: bool,
         /// Maximum accepted semantic class regions for zoned fitting (the
@@ -1316,7 +1319,7 @@ fn analyze_cmd(
         // With -o the XMP goes BESIDE the redirected recipe (same dir + stem),
         // not to ./out: a lone out/<stem>.xmp is what the GUI/web would restore
         // instead of this recipe, silently dropping everything classic sidecars
-        // cannot carry (bitmap masks, recolour gains).
+        // cannot carry (spatial-tile and field bitmap masks, recolour gains).
         // The recipe write ALONE decides the saved state (the cross-surface
         // rule): failing the command here reported "analyze failed" for a
         // develop every reader already restores, and scripts then re-ran a

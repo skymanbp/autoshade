@@ -242,9 +242,10 @@ pub(crate) struct PastePayload {
     /// For any OTHER photo: the user's EDIT, and nothing that belongs to the
     /// source document.
     pub foreign: EditRecipe,
-    /// Bitmap masks in the payload, for the caller's toast (they are dropped
-    /// from `foreign`, and a silent drop is what the toast exists to prevent).
-    pub bitmap_masks: usize,
+    /// Masks in the payload whose PIXELS belong to the source photo, for the
+    /// caller's toast (they are dropped from `foreign`, and a silent drop is
+    /// what the toast exists to prevent).
+    pub unpastable_masks: usize,
 }
 
 /// The two payloads for `src`. `paste_geometry` off strips crop + straighten
@@ -260,12 +261,20 @@ pub(crate) fn paste_payload(src: EditRecipe, paste_geometry: bool) -> PastePaylo
     // Bitmap masks reference per-photo rasters keyed to the SOURCE stem —
     // pasted onto ANOTHER photo they point at the wrong file (and classic XMP
     // cannot carry them, so recipe.json and .xmp would disagree).
-    let bitmap_masks = foreign
-        .masks
-        .iter()
-        .filter(|m| matches!(m.mask, autoshade::recipe::MaskGeometry::Bitmap { .. }))
-        .count();
-    foreign.masks.retain(|m| !matches!(m.mask, autoshade::recipe::MaskGeometry::Bitmap { .. }));
+    //
+    // The reverse-fit's sky/land ZONES travel no better, and they are AI masks
+    // now (`recipe::MaskGeometry::select_sky`), so the variant test alone would
+    // have carried a stale raster onto a photo it was never segmented for. The
+    // distinction is `MaskRole::is_zone`: an IMPORTED Lightroom AI mask carries
+    // only intent, and `segment::resolve_ai_masks` re-derives it against
+    // whatever photo it lands on, so that one still pastes.
+    let photo_keyed = |m: &autoshade::recipe::LocalAdjustment| {
+        matches!(m.mask, autoshade::recipe::MaskGeometry::Bitmap { .. })
+            || (m.role.is_zone()
+                && autoshade::render::geometry_raster_path(&m.mask).is_some())
+    };
+    let unpastable_masks = foreign.masks.iter().filter(|m| photo_keyed(m)).count();
+    foreign.masks.retain(|m| !photo_keyed(m));
     // The R25 B4 PASS-THROUGH map is PER-DOCUMENT state, not a setting (R25
     // P8). Nothing in this app can author it — it is filled by reading one
     // photo's sidecar and by nothing else — so carrying it to another photo
@@ -277,7 +286,7 @@ pub(crate) fn paste_payload(src: EditRecipe, paste_geometry: bool) -> PastePaylo
     // STRIPS nothing (`xmp::merge_strip_keys`), so every target's own block
     // survives untouched in its own sidecar and there is no loss to report.
     foreign.passthrough.clear();
-    PastePayload { own, foreign, bitmap_masks }
+    PastePayload { own, foreign, unpastable_masks }
 }
 
 impl AutoShadeApp {
@@ -1234,17 +1243,17 @@ impl AutoShadeApp {
         if targets.is_empty() {
             return;
         }
-        let PastePayload { own: recipe_full, foreign: recipe, bitmap_masks: n_bitmap } =
+        let PastePayload { own: recipe_full, foreign: recipe, unpastable_masks: n_raster } =
             paste_payload(src, self.paste_geometry);
         let copied_from = self.copied_from.clone();
         let has_foreign_target = targets.iter().any(|t| Some(t) != copied_from.as_ref());
-        if n_bitmap > 0 && has_foreign_target {
+        if n_raster > 0 && has_foreign_target {
             self.toast(
                 ToastKind::Error,
                 trf(
                     self.lang,
-                    "{n} bitmap mask(s) not pasted — their rasters belong to the source photo (re-run AI select on each target)",
-                    &[("n", &n_bitmap.to_string())],
+                    "{n} raster mask(s) not pasted — their rasters belong to the source photo (re-run AI select, or the reverse-fit, on each target)",
+                    &[("n", &n_raster.to_string())],
                 ),
             );
         }

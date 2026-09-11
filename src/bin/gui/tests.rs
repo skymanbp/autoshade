@@ -37,6 +37,25 @@
             mask: autoshade::recipe::MaskGeometry::Bitmap { path: "sky.png".into() },
             ..Default::default()
         });
+        // A reverse-fit ZONE is not a `Bitmap` any more — it rides Lightroom's
+        // own Select Sky component — but its alpha is still a file in THIS
+        // photo's develop dir, so it travels no better than one.
+        src.masks.push(autoshade::recipe::LocalAdjustment {
+            mask: autoshade::recipe::MaskGeometry::select_sky(
+                0.5,
+                0.25,
+                false,
+                "mask-zone-sky.png".into(),
+            ),
+            role: autoshade::recipe::MaskRole::ZoneSky,
+            ..Default::default()
+        });
+        // …while an IMPORTED Lightroom AI mask carries only intent and
+        // re-segments against whatever photo it lands on, so it does travel.
+        src.masks.push(autoshade::recipe::LocalAdjustment {
+            mask: autoshade::recipe::MaskGeometry::select_sky(0.5, 0.25, false, "cached.png".into()),
+            ..Default::default()
+        });
 
         let p = paste_payload(src.clone(), true);
         assert!(
@@ -46,10 +65,20 @@
         );
         assert_eq!(p.own.passthrough, src.passthrough, "the source photo keeps its own");
         assert_eq!(p.foreign.exposure_ev, 0.75, "the EDIT is what a paste is for");
-        // The rule this one was modelled on, still holding.
-        assert_eq!(p.bitmap_masks, 1, "the raster mask is counted for the toast");
-        assert!(p.foreign.masks.is_empty(), "…and dropped from the foreign payload");
-        assert_eq!(p.own.masks.len(), 1, "…while the clipboard's own photo keeps it");
+        // The rule this one was modelled on, still holding — and it counts by
+        // "whose pixels are these", not by geometry variant: the Bitmap and the
+        // ZONE both stay behind, the imported AI mask rides along.
+        assert_eq!(p.unpastable_masks, 2, "the photo-keyed rasters are counted for the toast");
+        assert_eq!(p.foreign.masks.len(), 1, "…and dropped from the foreign payload");
+        assert!(
+            matches!(
+                &p.foreign.masks[0].mask,
+                autoshade::recipe::MaskGeometry::AiMask { raster: Some(r), .. } if r == "cached.png"
+            ) && p.foreign.masks[0].role == autoshade::recipe::MaskRole::Custom,
+            "the survivor is the re-derivable AI mask: {:?}",
+            p.foreign.masks[0].mask
+        );
+        assert_eq!(p.own.masks.len(), 3, "…while the clipboard's own photo keeps them all");
         // Geometry off strips BOTH arms: composition rarely transfers between
         // frames, and that includes back onto the source.
         let g = paste_payload(src, false);
@@ -5554,6 +5583,56 @@
             // A control with no label of its own still names itself.
             let raw = xmp_loss_line(lang, &[], &["some_future_control"]).expect("a line");
             assert!(raw.contains("some_future_control"), "{lang:?}: {raw}");
+        }
+    }
+
+    /// The line a ZONED save actually produces now, which is two different
+    /// sentences in one breath.
+    ///
+    /// The sky/land zones ride out as Lightroom's own Select Sky, so their
+    /// entry is the AI one — nothing was left out of the sidecar, and what the
+    /// reader must not assume is that the alpha was Adobe's. The spatial tiles
+    /// and free-form field masks are still rasters classic XMP cannot hold, so
+    /// they keep the bitmap loss and the count that goes with it. Before the
+    /// carrier change this line said 「bitmap masks ×4」 and the sky was one of
+    /// the four.
+    ///
+    /// MUTATION: fold `AiMaskRecomputed` into the `Bitmap` arm of
+    /// `xmp_loss_line` and the two-category assertion fails.
+    #[test]
+    fn a_zoned_saves_loss_line_separates_the_select_sky_from_the_bitmap_tiles() {
+        use autoshade::xmp::{MaskLoss, MaskLossReason as R};
+        let loss = |name: &str, reason: R| MaskLoss { name: name.into(), reason };
+        let losses = vec![
+            loss("Sky (reverse-fit)", R::AiMaskRecomputed),
+            loss("Spatial tile d2 r1 c3", R::Bitmap),
+            loss("Spatial tile d2 r2 c0", R::Bitmap),
+            loss("field-zone-1", R::Bitmap),
+        ];
+        for (lang, ai, bitmap) in [
+            (
+                crate::i18n::Lang::En,
+                "AI masks ×1 re-derived locally — not Adobe's raster",
+                "bitmap masks ×3",
+            ),
+            (
+                crate::i18n::Lang::Zh,
+                "AI 蒙版 ×1 由本机重算——非 Adobe 原栅格",
+                "位图蒙版 ×3",
+            ),
+        ] {
+            let line =
+                xmp_loss_line(lang, &losses, &[]).expect("a zoned save has something to say");
+            assert!(line.contains(ai), "{lang:?}: the zone's own sentence: {line}");
+            assert!(line.contains(bitmap), "{lang:?}: and the tiles', counted apart: {line}");
+            assert_eq!(
+                line.matches('×').count(),
+                2,
+                "{lang:?}: two categories, never one: {line}"
+            );
+            // Both are NAMED, which is the actionable half of either sentence.
+            assert!(line.contains("Sky (reverse-fit)"), "{lang:?}: {line}");
+            assert!(line.contains("field-zone-1"), "{lang:?}: {line}");
         }
     }
 

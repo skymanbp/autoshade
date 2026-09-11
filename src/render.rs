@@ -3662,6 +3662,21 @@ fn mask_weight_metric(
 
 /// Mask coverage [0,1] at normalized frame coordinate (nx, ny).
 fn mask_weight(g: &MaskGeometry, nx: f32, ny: f32, bmp: Option<&image::GrayImage>) -> f32 {
+    // THE geometry's own inversion bit, read once from the one place that
+    // knows which geometries have one (`MaskGeometry::own_inverted`). The
+    // three arms below apply it themselves rather than sharing a tail,
+    // because each also owns the rule that a geometry with NO coverage is not
+    // inverted into covering the whole frame — `1 − 0` on an unresolved alpha
+    // is the silent-whole-frame failure, not an inversion.
+    //
+    // The correction's OWN flag is applied by the caller's weight loop
+    // (`apply_masks`, `mask_coverage`, and `lr_pack::alpha_raster`), so the
+    // pair composes to `LocalAdjustment::net_inverted` exactly once — and
+    // never twice, which is what
+    // `an_imported_inverted_ai_mask_renders_the_complement` and
+    // `a_zone_ai_mask_renders_exactly_like_the_bitmap_it_replaced` pin from
+    // the two ends.
+    let own_inverted = g.own_inverted();
     match g {
         MaskGeometry::Linear { zero_x, zero_y, full_x, full_y } => {
             let (vx, vy) = (full_x - zero_x, full_y - zero_y);
@@ -3726,7 +3741,7 @@ fn mask_weight(g: &MaskGeometry, nx: f32, ny: f32, bmp: Option<&image::GrayImage
         // meaning at all. Both are spelled out rather than swept into `..` so
         // a field added to the geometry cannot reach the renderer unnoticed.
         MaskGeometry::Radial {
-            top, left, bottom, right, feather, roundness: _, flipped, angle, midpoint: _,
+            top, left, bottom, right, feather, roundness: _, flipped: _, angle, midpoint: _,
             mask_version: _,
         } => {
             let cx = (left + right) / 2.0;
@@ -3801,7 +3816,7 @@ fn mask_weight(g: &MaskGeometry, nx: f32, ny: f32, bmp: Option<&image::GrayImage
             // through measured neighbours. f ≤ 10, f = 25, f = 50 and f ≥ 75
             // are untouched by it — those columns carried over bit for bit.
             let wgt = radial_falloff(*feather, d);
-            if *flipped {
+            if own_inverted {
                 1.0 - wgt
             } else {
                 wgt
@@ -3884,11 +3899,11 @@ fn mask_weight(g: &MaskGeometry, nx: f32, ny: f32, bmp: Option<&image::GrayImage
         //    subtract brush in the library (`recipe::MaskGeometry::Brush`).
         //    The per-STROKE `BrushStroke::value` is the genuine density, and it
         //    scales each dab BEFORE the screen, inside `brush_raster`.
-        MaskGeometry::Brush { inverted, name: _, blend_mode: _, value: _, strokes: _ } => {
+        MaskGeometry::Brush { inverted: _, name: _, blend_mode: _, value: _, strokes: _ } => {
             match bmp {
                 Some(b) => {
                     let w = sample_gray_norm(b, nx, ny);
-                    if *inverted { 1.0 - w } else { w }
+                    if own_inverted { 1.0 - w } else { w }
                 }
                 // No alpha = no coverage, and NO inversion either. `1 − 0` here
                 // would turn a group that drew nothing into a WHOLE-FRAME
@@ -3912,8 +3927,19 @@ fn mask_weight(g: &MaskGeometry, nx: f32, ny: f32, bmp: Option<&image::GrayImage
         // from a different model with a different edge behaviour — an
         // approximation of the photographer's intent, never a reproduction of
         // their mask.
+        // `inverted` IS rendered here now, and that is a render-behaviour
+        // change with a bug on the other side of it. This arm read no
+        // inversion bit at all, while `parse_one_correction` deliberately
+        // homes a `Mask/Image` component's `crs:MaskInverted` INSIDE the
+        // geometry (one bit, one home) — so every Lightroom sky mask the
+        // photographer had inverted rendered here as a mask over the sky, the
+        // exact region they excluded. `None` keeps the inert contract: no
+        // alpha is no coverage, never a `1 − 0` over the whole frame.
         MaskGeometry::AiMask { .. } => match bmp {
-            Some(b) => sample_gray_norm(b, nx, ny),
+            Some(b) => {
+                let w = sample_gray_norm(b, nx, ny);
+                if own_inverted { 1.0 - w } else { w }
+            }
             None => 0.0,
         },
     }
@@ -4163,13 +4189,38 @@ impl MaskRasterSnapshot {
 ///
 /// Two carriers since R27 Batch-5: an explicit [`MaskGeometry::Bitmap`], and a
 /// [`MaskGeometry::AiMask`] whose alpha `segment::resolve_ai_masks` has already
-/// recomputed. `None` for an AiMask means *not resolved yet, or the segmenter
-/// declined* — which is a real state, and [`is_raster_backed`] is the question
-/// that separates "has no raster" from "needs no raster".
-pub(crate) fn geometry_raster_path(g: &MaskGeometry) -> Option<&str> {
+/// recomputed — or, for a zone mask, the alpha the zoned reverse-fit rendered
+/// itself ([`crate::recipe::MaskGeometry::select_sky`]). `None` for an AiMask
+/// means *not resolved yet, or the segmenter declined* — which is a real
+/// state, and [`is_raster_backed`] is the question that separates "has no
+/// raster" from "needs no raster".
+///
+/// `pub` rather than `pub(crate)` since the zone masks became Select Sky
+/// components: the GUI's raster tools (brush-edit, feather, expand/contract,
+/// full-resolution refine) asked `matches!(.., Bitmap { .. })`, which is the
+/// variant and not the question, and would have silently dropped all four
+/// affordances off every reverse-fit zone row.
+pub fn geometry_raster_path(g: &MaskGeometry) -> Option<&str> {
     match g {
         MaskGeometry::Bitmap { path } => Some(path.as_str()),
         MaskGeometry::AiMask { raster, .. } => raster.as_deref(),
+        _ => None,
+    }
+}
+
+/// [`geometry_raster_path`] for a caller that REPOINTS the geometry at a new
+/// file — the GUI's raster bakes, which never mutate the input PNG and always
+/// claim a fresh name for the result, so the geometry's KIND must survive the
+/// repoint (a bake that rewrote a zone's Select Sky component as a `Bitmap`
+/// would take the mask back out of the sidecar it now rides in).
+///
+/// `None` wherever the immutable twin answers `None`, including an AI mask
+/// with no alpha yet: repointing a geometry that has no raster would be
+/// inventing one, and every caller starts from a raster it just read.
+pub fn geometry_raster_path_mut(g: &mut MaskGeometry) -> Option<&mut String> {
+    match g {
+        MaskGeometry::Bitmap { path } => Some(path),
+        MaskGeometry::AiMask { raster: Some(path), .. } => Some(path),
         _ => None,
     }
 }
@@ -4181,7 +4232,7 @@ pub(crate) fn geometry_raster_path(g: &MaskGeometry) -> Option<&str> {
 /// `None` there, which is exactly the "this mask NEEDS pixels and has none"
 /// state the weight loop must SKIP rather than render at weight 0 — a 0 under
 /// `inverted` applies the adjustment to the entire frame.
-pub(crate) fn is_raster_backed(g: &MaskGeometry) -> bool {
+pub fn is_raster_backed(g: &MaskGeometry) -> bool {
     matches!(g, MaskGeometry::Bitmap { .. } | MaskGeometry::AiMask { .. })
 }
 
@@ -7442,7 +7493,7 @@ pub fn orient_recipe_coords(
             bottom: y0.max(y1),
         };
     }
-    let turn = |g: &mut MaskGeometry| match g {
+    let turn = |g: &mut MaskGeometry, owned_alpha: bool| match g {
         MaskGeometry::Linear { zero_x, zero_y, full_x, full_y } => {
             (*zero_x, *zero_y) = orient_point(o, *zero_x, *zero_y);
             (*full_x, *full_y) = orient_point(o, *full_x, *full_y);
@@ -7473,9 +7524,19 @@ pub fn orient_recipe_coords(
         // cached alpha does not: that raster was segmented in the OLD frame, so
         // rotating it is not a coordinate migration, it is a re-render. The
         // cache is DROPPED and the next develop recomputes it at the turned
-        // point (`segment::resolve_ai_masks`), which is why this geometry is
-        // not a member of `recipe_has_raster_masks` — nothing here fails to be
+        // point (`segment::resolve_ai_masks`), which is why such a geometry is
+        // not a member of `recipe_has_raster_masks` — nothing there fails to be
         // turned, and claiming it did would be the wrong disclosure.
+        //
+        // `owned_alpha` is the ONE exception, and it is the zoned reverse-fit's
+        // sky/land pair ([`crate::recipe::MaskRole::is_zone`]). Their alpha is
+        // a cache of nothing: the fit rendered it, claimed it under a unique
+        // name and measured its dials against it, and no re-segmentation
+        // reproduces it from the recipe. So it is TURNED with the `Bitmap`
+        // rasters instead of dropped (`LocalAdjustment::
+        // turnable_raster_paths_mut`, `pipeline::rotate_recipe` phase 1) —
+        // dropping it would have left both zone corrections inert until a model
+        // run, and inert forever on a machine with no segmentation sidecar.
         //
         // The `gesture` strokes are `BrushStroke`s under a different parent and
         // ride the SAME rewrite (R29 C1). The renderer does not composite them;
@@ -7484,16 +7545,21 @@ pub fn orient_recipe_coords(
         // refinement stroke beside a moved reference point.
         MaskGeometry::AiMask { ref_x, ref_y, raster, gesture, .. } => {
             (*ref_x, *ref_y) = orient_point(o, *ref_x, *ref_y);
-            *raster = None;
+            if !owned_alpha {
+                *raster = None;
+            }
             if let Some(f) = frame {
                 turn_brush_strokes(gesture, o, f);
             }
         }
     };
     for m in r.masks.iter_mut() {
-        turn(&mut m.mask);
+        // A component of a zone mask belongs to that zone: the role is the
+        // ADJUSTMENT's, so it answers for every geometry the adjustment holds.
+        let owned_alpha = m.role.is_zone();
+        turn(&mut m.mask, owned_alpha);
         for c in m.components.iter_mut() {
-            turn(&mut c.geometry);
+            turn(&mut c.geometry, owned_alpha);
         }
         // The colour Range Mask's `(px, py)` is Lightroom's sample MARKER —
         // cosmetic, but it is a point in the original frame like any other,
@@ -7575,14 +7641,22 @@ pub fn recipe_has_brush_strokes(r: &EditRecipe) -> bool {
 /// [`orient_recipe_coords`] — and is counted by [`recipe_has_frame_coords`]
 /// with every other geometry that moves.
 ///
-/// An [`MaskGeometry::AiMask`] has never been a member and still is not: its
-/// cached alpha is DROPPED rather than left behind, so nothing about it fails
-/// to be turned.
+/// An [`MaskGeometry::AiMask`] is a member only when its adjustment is a ZONE
+/// ([`crate::recipe::MaskRole::is_zone`]). Every other AI alpha is a cache
+/// [`orient_recipe_coords`] DROPS rather than leaves behind, so nothing about
+/// it fails to be turned. A zone's alpha is the fit's own file — kept and
+/// turned exactly like a `Bitmap`, and therefore exactly as un-turnable by the
+/// `coord_era` migration, which rewrites coordinates and owns no PNG.
 pub fn recipe_has_raster_masks(r: &EditRecipe) -> bool {
-    let unturnable = |g: &MaskGeometry| matches!(g, MaskGeometry::Bitmap { .. });
-    r.masks
-        .iter()
-        .any(|m| unturnable(&m.mask) || m.components.iter().any(|c| unturnable(&c.geometry)))
+    let unturnable = |g: &MaskGeometry, zone: bool| match g {
+        MaskGeometry::Bitmap { .. } => true,
+        MaskGeometry::AiMask { raster: Some(_), .. } => zone,
+        _ => false,
+    };
+    r.masks.iter().any(|m| {
+        let zone = m.role.is_zone();
+        unturnable(&m.mask, zone) || m.components.iter().any(|c| unturnable(&c.geometry, zone))
+    })
 }
 
 /// In-place horizontal flip that stays in the image's OWN pixel type.
@@ -17757,7 +17831,7 @@ mod tests {
             ..Default::default()
         };
         // The two questions the weight loop asks, answered directly — the same
-        // pair `apply_masks` and `mask_coverage_preview` both consult.
+        // pair `apply_masks` and `mask_coverage` both consult.
         let g = &ai(false).mask;
         assert!(is_raster_backed(g), "an AI mask draws from a raster");
         assert!(geometry_raster_path(g).is_none(), "…and it has none yet");
@@ -17801,6 +17875,224 @@ mod tests {
         );
         let bmp = load_mask_bitmap(&resolved.mask, &crate::diag::pixels()).expect("the alpha must load");
         assert_eq!(mask_weight(&resolved.mask, 0.5, 0.5, Some(&bmp)), 1.0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A reverse-fit ZONE renders through its Select Sky component EXACTLY as
+    /// it rendered through the `MaskGeometry::Bitmap` that carrier replaced —
+    /// byte for byte, upright and inverted.
+    ///
+    /// The change was made for the SIDECAR (classic XMP has no encoding for a
+    /// raster mask, so both zone corrections used to be skipped with a named
+    /// `MaskLossReason::Bitmap`), and the one thing it must not do is move a
+    /// pixel of what the photographer already sees. Both carriers hold the
+    /// same claimed PNG and `mask_weight` samples them through the same
+    /// `sample_gray_norm`, so equality here is the proof that nothing about
+    /// the correction changed except the form it is written down in.
+    ///
+    /// The INVERTED arm is THE TRIPWIRE FOR THE NET BEING APPLIED EXACTLY
+    /// ONCE. A zone spells its inversion in ONE home — `LocalAdjustment::
+    /// inverted`, the flag the weight loop reads — and the Select Sky
+    /// component's own bit stays `false`, so
+    /// [`crate::recipe::LocalAdjustment::net_inverted`] is `true` once and the
+    /// render inverts once. The AI arm of `mask_weight` honours the geometry's
+    /// bit now (it read no inversion at all before this change); if the zone
+    /// ever went back to spelling the fact in both homes, the land zone would
+    /// invert TWICE, cover the sky it excludes, and this assertion is what
+    /// says so.
+    ///
+    /// MUTATION: give `select_sky` below the same `inverted` the adjustment
+    /// carries — the two-home spelling this replaced — and the `inverted` pass
+    /// fails.
+    #[test]
+    fn a_zone_ai_mask_renders_exactly_like_the_bitmap_it_replaced() {
+        let dir =
+            std::env::temp_dir().join(format!("autoshade-zone-ai-render-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("mask-zone-sky.png");
+        // A real partition with a soft edge, not a flat mask: a flat one
+        // renders identically under any sampling and could not witness a
+        // coverage difference between the two carriers.
+        image::GrayImage::from_fn(16, 16, |_, y| {
+            image::Luma([match y {
+                0..=5 => 255,
+                6 => 160,
+                7 => 64,
+                _ => 0,
+            }])
+        })
+        .save(&p)
+        .unwrap();
+        let path = p.to_string_lossy().into_owned();
+        let src = DynamicImage::ImageRgb8(image::RgbImage::from_fn(24, 16, |x, y| {
+            image::Rgb([40 + (x * 7 % 180) as u8, 60 + (y * 5 % 160) as u8, 120])
+        }));
+        let plain = develop_preview(&src, &EditRecipe::default()).to_rgb8().into_raw();
+        for (inverted, role) in [
+            (false, crate::recipe::MaskRole::ZoneSky),
+            (true, crate::recipe::MaskRole::ZoneLand),
+        ] {
+            let zone = |mask: MaskGeometry| EditRecipe {
+                masks: vec![crate::recipe::LocalAdjustment {
+                    mask,
+                    role,
+                    inverted,
+                    exposure_ev: -0.7,
+                    saturation: 18.0,
+                    color_gains: Some([1.12, 0.98, 0.87]),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            };
+            let was = develop_preview(&src, &zone(MaskGeometry::Bitmap { path: path.clone() }))
+                .to_rgb8()
+                .into_raw();
+            let now = develop_preview(
+                &src,
+                // `false`, not `inverted`: the correction's flag above is the
+                // zone's ONE home for it (`fit_zoned`'s `land_attachment`).
+                &zone(MaskGeometry::select_sky(0.5, 0.2, false, path.clone())),
+            )
+            .to_rgb8()
+            .into_raw();
+            assert_eq!(
+                was, now,
+                "inverted={inverted}: the Select Sky carrier must render the bitmap's own pixels"
+            );
+            // Premise: the correction is not a no-op, so the equality above is
+            // not two identical copies of the untouched frame.
+            assert_ne!(
+                plain, now,
+                "inverted={inverted}: the zone must actually change the render"
+            );
+        }
+        // …and the two polarities are not each other, which is what makes the
+        // inverted arm a real second case.
+        let arm = |inverted: bool| {
+            develop_preview(
+                &src,
+                &EditRecipe {
+                    masks: vec![crate::recipe::LocalAdjustment {
+                        mask: MaskGeometry::select_sky(0.5, 0.2, false, path.clone()),
+                        role: crate::recipe::MaskRole::ZoneSky,
+                        inverted,
+                        exposure_ev: -0.7,
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                },
+            )
+            .to_rgb8()
+            .into_raw()
+        };
+        assert_ne!(arm(false), arm(true), "the inversion must reach the pixels");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// THE PRE-EXISTING DEFECT THIS CLOSES, from the IMPORT end: a Lightroom
+    /// AI mask that says `crs:MaskInverted="true"` must render the COMPLEMENT
+    /// of its alpha.
+    ///
+    /// Lightroom spells a component's inversion ON THE COMPONENT, and this
+    /// reader keeps it there — `parse_one_correction` takes an AI mask as the
+    /// base with an EMPTY scope for `LocalAdjustment::inverted`, deliberately,
+    /// so the bit is never spelled twice. The AI arm of `mask_weight` then
+    /// read no inversion at all, so EVERY imported inverted sky selection
+    /// rendered as the sky it excludes. Once the zoned fit began exporting
+    /// `Mask/Image`, that stopped being only an import defect: the product's
+    /// own land zone came back through the product's own sidecar as the sky.
+    ///
+    /// The fixture is this app's own export on purpose — it is the path the
+    /// defect became reachable from — and the two assertions above the loop
+    /// pin that what it emits IS Lightroom's spelling and that the pair below
+    /// differs in nothing but that one attribute. So the loop measures the
+    /// ATTRIBUTE being honoured, not a constant.
+    ///
+    /// MUTATION: drop `own_inverted` from the AI arm of `mask_weight` (its
+    /// state before this change) and the `true` pass fails; apply it in the
+    /// weight loop as well and the net inverts twice, failing the same pass
+    /// the other way.
+    #[test]
+    fn an_imported_inverted_ai_mask_renders_the_complement() {
+        let dir =
+            std::env::temp_dir().join(format!("autoshade-ai-import-inv-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("alpha.png");
+        // A GRADED alpha: a flat one cannot tell `1 - w` from a constant.
+        image::GrayImage::from_fn(8, 8, |x, _| image::Luma([(x * 32) as u8])).save(&p).unwrap();
+        let path = p.to_string_lossy().into_owned();
+
+        // The export, from the zone's own one-home shape: the correction
+        // carries the flag, the component carries `false`, and the sidecar
+        // gets their net on the component — which is the only place Lightroom
+        // has for it.
+        let exported = |inverted: bool| {
+            crate::xmp::recipe_to_xmp(&EditRecipe {
+                masks: vec![crate::recipe::LocalAdjustment {
+                    mask: MaskGeometry::select_sky(0.5, 0.25, false, path.clone()),
+                    role: crate::recipe::MaskRole::ZoneLand,
+                    inverted,
+                    exposure_ev: -0.5,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            })
+        };
+        let inv_doc = exported(true);
+        assert!(
+            inv_doc.contains(r#"crs:What="Mask/Image""#)
+                && inv_doc.contains(r#"crs:MaskInverted="true""#),
+            "premise: the fixture must BE an inverted Lightroom AI mask:\n{inv_doc}"
+        );
+        let up_doc = inv_doc.replace(r#"crs:MaskInverted="true""#, r#"crs:MaskInverted="false""#);
+        assert_eq!(
+            up_doc,
+            exported(false),
+            "premise: the two exports differ in the inversion attribute and nothing else"
+        );
+
+        let bmp = image::open(&p).unwrap().to_luma8();
+        for (attr, text, want_inverted) in
+            [("true", &inv_doc, true), ("false", &up_doc, false)]
+        {
+            let back = crate::xmp::xmp_to_recipe(text);
+            assert_eq!(back.masks.len(), 1, "{attr}: {:?}", back.masks);
+            let m = &back.masks[0];
+            // WHERE the bit landed — inside the geometry, and not also on the
+            // correction, which would invert twice.
+            assert!(!m.inverted, "{attr}: the reader must not lift it onto the correction");
+            assert_eq!(m.mask.own_inverted(), want_inverted, "{attr}: the component keeps it");
+            assert_eq!(m.net_inverted(), want_inverted, "{attr}: …and that is the whole net");
+            // THE RENDER. `raster` is `None` on import — the sidecar carries
+            // the intent, never Adobe's pixels — so point it at the alpha this
+            // engine would recompute and sample the geometry directly.
+            let mut g = m.mask.clone();
+            // The SLOT, not `geometry_raster_path_mut`: that helper repoints a
+            // raster a mask already has, and an imported AI mask has none —
+            // which is the state this is standing in for the segmenter to fill.
+            let MaskGeometry::AiMask { raster, .. } = &mut g else {
+                panic!("{attr}: expected the Select Sky component back, got {g:?}");
+            };
+            *raster = Some(path.clone());
+            for (nx, ny) in [(0.1f32, 0.5f32), (0.4, 0.5), (0.9, 0.5)] {
+                let upright = sample_gray_norm(&bmp, nx, ny);
+                let want = if want_inverted { 1.0 - upright } else { upright };
+                assert_eq!(
+                    mask_weight(&g, nx, ny, Some(&bmp)),
+                    want,
+                    "{attr}: at ({nx}, {ny}) the weight must be the {} alpha",
+                    if want_inverted { "complement of the" } else { "upright" }
+                );
+            }
+            // Premise for the pair: the alpha is not its own complement here.
+            assert_ne!(
+                sample_gray_norm(&bmp, 0.1, 0.5),
+                1.0 - sample_gray_norm(&bmp, 0.1, 0.5),
+                "the fixture must be able to witness an inversion"
+            );
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -17849,6 +18141,55 @@ mod tests {
         };
         assert_ne!((*ref_x, *ref_y), (0.25, 0.10), "the click moved with the frame");
         assert!(raster.is_none(), "the alpha from the OLD frame must not be reused");
+    }
+
+    /// …and the ZONE masks are the one exception, because their alpha is not a
+    /// cache of anything.
+    ///
+    /// The zoned reverse-fit renders that PNG itself, claims it under a unique
+    /// name and measures the zone's exposure, gains and saturation against it;
+    /// no re-segmentation reproduces it from the recipe. Dropping it on a
+    /// rotate would leave both zone corrections inert until a model run — and
+    /// inert forever on a machine with no segmentation sidecar, i.e. the
+    /// photographer's edit silently gone. So it is KEPT here and turned by
+    /// `pipeline::rotate_recipe` phase 1 with the `Bitmap` rasters
+    /// (`LocalAdjustment::turnable_raster_paths_mut`), which is also why it is
+    /// a member of `recipe_has_raster_masks`: a file the `coord_era` migration
+    /// cannot rewrite.
+    ///
+    /// MUTATION: drop the `owned_alpha` guard in `orient_recipe_coords`' AiMask
+    /// arm and the `raster` assertion fails.
+    #[test]
+    fn turning_the_frame_keeps_a_zone_masks_own_alpha_and_turns_it() {
+        let mut r = EditRecipe {
+            coord_era: 0,
+            masks: vec![crate::recipe::LocalAdjustment {
+                exposure_ev: 1.0,
+                role: crate::recipe::MaskRole::ZoneSky,
+                mask: MaskGeometry::select_sky(0.25, 0.10, false, "mask-zone-sky.png".into()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        assert!(
+            recipe_has_raster_masks(&r),
+            "a zone's alpha is a FILE this migration cannot rewrite — it must be disclosed"
+        );
+        assert_eq!(
+            r.masks[0].turnable_raster_paths_mut(),
+            vec![&mut "mask-zone-sky.png".to_string()],
+            "and it is in the walk `rotate_recipe` turns"
+        );
+        assert!(orient_recipe_coords(&mut r, rawler::Orientation::Rotate90, probe_frame()));
+        let MaskGeometry::AiMask { ref_x, ref_y, raster, .. } = &r.masks[0].mask else {
+            panic!("the geometry must survive the migration");
+        };
+        assert_ne!((*ref_x, *ref_y), (0.25, 0.10), "the click still moves with the frame");
+        assert_eq!(
+            raster.as_deref(),
+            Some("mask-zone-sky.png"),
+            "the fit's own alpha is kept for phase 1 to turn, never dropped"
+        );
     }
 
     // ---- R28 Batch-1 1a: the CFA-geometry demosaic ------------------------

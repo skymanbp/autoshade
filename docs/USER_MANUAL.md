@@ -120,7 +120,16 @@ zone whose dials did not move.
 Generated range masks persist as editable **Luminance range** cards with their
 four ordered bounds and **Colour range** cards keyed to one hue band's mean
 colour; their sentinel-hosted range components project to Lightroom XMP as the
-masks Lightroom itself writes, while semantic bitmap masks remain engine-only.
+masks Lightroom itself writes. The sky and land zones project too, as
+Lightroom's own **Select Sky** mask — the land zone is that same component
+inverted — so Lightroom rebuilds its own sky alpha from them, while the raster
+AutoShade renders from is its own (the save line says 「AI masks ×N re-derived
+locally — not Adobe's raster」). **Invert** now reaches the sidecar on a brush
+or AI mask as well as on a gradient, and a Lightroom mask that arrives inverted
+renders inverted here: both used to drop the flag silently, so an imported
+inverted sky selection painted the sky it was meant to exclude. The opt-in
+four-class region bitmaps, spatial tiles and free-form field masks remain
+engine-only with the named bitmap loss.
 The luminance family runs first and the colour family on the frame it leaves,
 each gated as a stage of its own.
 

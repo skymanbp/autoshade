@@ -2085,8 +2085,11 @@ impl AutoShadeApp {
                         // raster. Index-with-matching-path wins; else the
                         // unique path match; else say so — never guess.
                         let out_s = out.to_string_lossy().into_owned();
+                        // By FILE, not by variant: a refined reverse-fit zone
+                        // is a Select Sky component carrying the same raster.
                         let at = |m: &autoshade::recipe::LocalAdjustment| {
-                            matches!(&m.mask, MaskGeometry::Bitmap { path } if *path == stored_ref)
+                            autoshade::render::geometry_raster_path(&m.mask)
+                                == Some(stored_ref.as_str())
                         };
                         let hit = match self.recipe.masks.get(idx) {
                             Some(m) if at(m) => Some(idx),
@@ -2105,7 +2108,14 @@ impl AutoShadeApp {
                         };
                         match hit {
                             Some(i) => {
-                                self.recipe.masks[i].mask = MaskGeometry::Bitmap { path: out_s };
+                                // Repoint, never re-shape (see
+                                // `masks.rs::commit_mask_brush`). `at` already
+                                // proved this geometry carries a raster.
+                                if let Some(slot) = autoshade::render::geometry_raster_path_mut(
+                                    &mut self.recipe.masks[i].mask,
+                                ) {
+                                    *slot = out_s;
+                                }
                                 self.sel_mask = Some(i);
                                 // Same rule as the segmentation landing: the
                                 // selection moved, selection-bound tools on

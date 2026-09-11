@@ -527,6 +527,9 @@ pub mod keys {
         " Zoned corrections dropped by the boundary-continuity gate: candidate \
          rim {before} luma, and even shared shrink k=0 left {after} \
          (budget {max}, {transitions} measured transitions).";
+    /// A zone whose carrier is a raster classic XMP has no encoding for — the
+    /// semantic REGION masks. The sky/land pair is [`ZONE_ATTACHED_AI`]
+    /// instead; `fit_zoned::push_zone_attached_note` picks by carrier.
     pub const ZONE_ATTACHED: &str =
         " Zoned {label} correction attached ({label}-to-{label} moments → \
          local exposure {ev} EV, colour gains [{g0} {g1} {g2}], \
@@ -534,6 +537,21 @@ pub mod keys {
          is a BITMAP mask — rendered in-app; the Lightroom sidecar \
          carries the global fit only (classic XMP cannot hold raster \
          masks).";
+    /// The sky and land zones, which DO reach the sidecar: they ride out as
+    /// Lightroom's own Select Sky mask (`crs:MaskSubType="2"`).
+    ///
+    /// The second half of the sentence is the honesty the bitmap wording used
+    /// to carry in its own way, and it must not be dropped: Lightroom rebuilds
+    /// its own sky alpha from the component, so the pixels shown in this app
+    /// are AutoShade's render and not Adobe's raster. Recolour gains stay
+    /// engine-only and keep their own named loss.
+    pub const ZONE_ATTACHED_AI: &str =
+        " Zoned {label} correction attached ({label}-to-{label} moments → \
+         local exposure {ev} EV, colour gains [{g0} {g1} {g2}], \
+         saturation {sat}): zone residual {before} → {after}. The correction \
+         rides out as Lightroom's own Select Sky mask — Lightroom rebuilds \
+         its own sky alpha from it, and the raster shown here is the one \
+         AutoShade rendered, not Adobe's.";
     pub const ZONE_SHARE_MISMATCH: &str =
         " Note: the {label} zone covers {s}% of the source frame \
          but {t}% of the target's — the compositions differ, so the \

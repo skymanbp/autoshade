@@ -41,15 +41,21 @@ pub(crate) fn photo_file_dialog() -> Option<PathBuf> {
 /// Visualise a mask geometry on the image: linear = the zero→full vector with
 /// end bars (solid = full-effect side); radial = the ellipse outline. Clipped
 /// to the image rect by the painter.
-/// `adj_inverted` is the owning LocalAdjustment's Invert flag: the engine
-/// flips the coverage with it, so the directional markers must flip too —
-/// otherwise the outline points at exactly the wrong side while the red
-/// coverage layer contradicts it in the same frame.
+/// `net_inverted` is [`autoshade::recipe::LocalAdjustment::net_inverted`] for
+/// the owning correction — the Invert flag composed with the geometry's own
+/// bit, which is the whole of what the engine flips the coverage by. The
+/// directional markers must flip with it, or the outline points at exactly the
+/// wrong side while the red coverage layer contradicts it in the same frame.
+///
+/// It arrives ALREADY composed: this function used to take the adjustment's
+/// flag alone and re-XOR a radial's `flipped` itself, which was one more
+/// hand-spelled inversion to drift (and had no answer at all for a brush or
+/// AI mask whose own bit is the only one set).
 pub(crate) fn draw_mask_overlay(
     ui: &egui::Ui,
     xf: ViewXform,
     geom: &MaskGeometry,
-    adj_inverted: bool,
+    net_inverted: bool,
     lang: Lang,
 ) {
     let p = ui.painter_at(xf.rect);
@@ -59,7 +65,7 @@ pub(crate) fn draw_mask_overlay(
             let a = xf.to_screen(*zero_x, *zero_y);
             let b = xf.to_screen(*full_x, *full_y);
             // Invert swaps which end carries the full effect.
-            let (full, zero) = if adj_inverted { (a, b) } else { (b, a) };
+            let (full, zero) = if net_inverted { (a, b) } else { (b, a) };
             p.line_segment([a, b], stroke);
             let v = b - a;
             let len = v.length().max(1.0);
@@ -69,7 +75,7 @@ pub(crate) fn draw_mask_overlay(
             p.circle_filled(full, 4.0, ACCENT); // full-effect end
             p.circle_stroke(zero, 4.0, stroke); // untouched end
         }
-        MaskGeometry::Radial { top, left, bottom, right, flipped, angle, .. } => {
+        MaskGeometry::Radial { top, left, bottom, right, flipped: _, angle, .. } => {
             let (cx, cy) = ((left + right) / 2.0, (top + bottom) / 2.0);
             let c = xf.to_screen(cx, cy);
             if *angle == 0.0 {
@@ -94,8 +100,8 @@ pub(crate) fn draw_mask_overlay(
             }
             // Filled centre = the effect fills the INSIDE; hollow = the
             // geometry's own `flipped` and/or the adjustment's Invert put the
-            // effect OUTSIDE the ellipse (the two compose, matching the engine).
-            if flipped ^ adj_inverted {
+            // effect OUTSIDE the ellipse — composed once, by the caller.
+            if net_inverted {
                 p.circle_stroke(c, 3.0, stroke);
             } else {
                 p.circle_filled(c, 3.0, ACCENT);

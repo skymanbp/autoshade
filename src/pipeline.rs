@@ -1642,18 +1642,30 @@ pub(crate) fn carry_over_unrepresentable(
             // state a radial `angle` (R23-1b), so a rotated ellipse it sends
             // back IS its answer and re-imposing the base's rotation would
             // ignore it.
-            if matches!(&original.mask, MaskGeometry::Bitmap { .. }) {
+            //
+            // RASTER-BACKED, not `Bitmap` (`render::is_raster_backed`): the
+            // reverse-fit's sky/land zones are Select Sky components now
+            // (`recipe::MaskGeometry::select_sky`), and asking the variant
+            // would have let a schema response replace a zone's geometry with
+            // whatever shape it named — orphaning the fit's own alpha and
+            // putting the zone's dials on a gradient. That is precisely the
+            // "the reverse-fit zone silently disappeared the moment the user
+            // clicked Refine" defect this function exists for.
+            if crate::render::is_raster_backed(&original.mask) {
                 refined.mask = original.mask.clone();
             }
             refined.components = original.components.clone();
             refined.enabled = original.enabled;
             refined.color_gains = original.color_gains;
             refined.role = original.role;
-        } else if matches!(&original.mask, MaskGeometry::Bitmap { .. })
+        } else if crate::render::is_raster_backed(&original.mask)
             && original.name.is_empty()
         {
-            // No schema response can be a round-trip copy of an unnamed Bitmap
-            // selection, so preserve the existing prepend behaviour.
+            // No schema response can be a round-trip copy of an unnamed raster
+            // selection, so preserve the existing prepend behaviour. The zone
+            // masks reach this arm exactly as they did as bitmaps: their `name`
+            // is empty by construction (the display label comes from
+            // `MaskRole::en_name`).
             carried_indices.push(base_index);
         } else {
             // A state-bearing mask the response did not identifiably return.
@@ -2210,9 +2222,12 @@ pub struct RotateOutcome {
 ///     freeze their own copies and a saved recipe elsewhere may still point at
 ///     them, so rewriting in place would silently change what an old version
 ///     renders (the same rule the zoned reverse-fit follows).
-///     **`Bitmap` rasters only** (`LocalAdjustment::turnable_raster_paths_mut`):
-///     an `AiMask`'s alpha is a CACHE this turn invalidates, and item 1 clears
-///     it so the next develop re-segments at the turned reference point.
+///     **`Bitmap` rasters and the zoned fit's own zone alphas**
+///     (`LocalAdjustment::turnable_raster_paths_mut`): any OTHER `AiMask`'s
+///     alpha is a CACHE this turn invalidates, and item 1 clears it so the next
+///     develop re-segments at the turned reference point. A zone's alpha is not
+///     a cache — the fit rendered it and solved its dials against it — so it is
+///     turned here and item 1 keeps it (`recipe::MaskRole::is_zone`).
 ///  3. **`quarter_turns` itself**, which is what makes the render, the export
 ///     and the next load agree with the geometry above.
 ///
@@ -2278,7 +2293,8 @@ pub fn rotate_recipe(
     // includes an AI mask's cached alpha and this one does not (R28 Batch-3 3b,
     // adjudication F8-B). See that method for why the two sets differ — in
     // short, phase 2 below DROPS the AI cache by design, so turning it produced
-    // an orphan file and a `rasters_turned` count that over-promised.
+    // an orphan file and a `rasters_turned` count that over-promised. The zone
+    // masks are the one AI alpha phase 2 KEEPS, so they are in this walk.
     let mut rewritten: Vec<(String, String)> = Vec::new();
     let staged = {
         let mut probe = r.clone();

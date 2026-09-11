@@ -261,8 +261,8 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     ("Zoned fit (sky)", "分区反推：天空 / Zoned fit (sky)"),
     ("Up to four semantic regions", "最多四个语义区域 / Up to four semantic regions"),
     ("Opt in to semantic regions beyond the historical sky/land pass; this costs one OneFormer pass per frame and may take longer.", "选择历史天空/地面流程之外的语义区域；每次 OneFormer 推理，耗时可能更长。"),
-    ("On reverse-fit, fit globally first. Sky segmentation and native luminance-range fallback stay exclusive; then frozen-evidence spatial tiles are tried automatically on a 4x4 grid with a four-tile cap and zero frame regression. Conservative guided refinement may keep or abstain before fitting semantic/tile masks, and never changes luminance ranges. Bitmap masks stay engine-only with a named XMP loss; native ranges are written to the Lightroom sidecar. Segmentation needs the python dependencies (transformers + torch), and every fallback or abstention is noted in the rationale.",
-        "反推时先做全局拟合。天空语义分割与原生亮度范围回退二选一；随后自动在 4x4 网格上尝试冻结证据空间图块，最多四个且不允许画面回归。受限的引导细化会在拟合语义/图块蒙版前选择保留或放弃，绝不改变亮度范围。位图蒙版仅由本机引擎渲染并带具名 XMP 损失；原生亮度范围会写入 Lightroom 边车。分割需要 python 依赖（transformers + torch），每次回退或放弃都会写入理由。"),
+    ("On reverse-fit, fit globally first. Sky segmentation and native luminance-range fallback stay exclusive; then frozen-evidence spatial tiles are tried automatically on a 4x4 grid with a four-tile cap and zero frame regression. Conservative guided refinement may keep or abstain before fitting semantic/tile masks, and never changes luminance ranges. The sky and land zones ride out as Lightroom's own Select Sky mask (Lightroom rebuilds its own sky alpha; the raster shown here is ours), while spatial tiles and free-form field masks stay engine-only with a named XMP loss; native ranges are written to the Lightroom sidecar. Segmentation needs the python dependencies (transformers + torch), and every fallback or abstention is noted in the rationale.",
+        "反推时先做全局拟合。天空语义分割与原生亮度范围回退二选一；随后自动在 4x4 网格上尝试冻结证据空间图块，最多四个且不允许画面回归。受限的引导细化会在拟合语义/图块蒙版前选择保留或放弃，绝不改变亮度范围。天空与地面分区以 Lightroom 自有的「选择天空」蒙版写入边车（Lightroom 自行重建天空 alpha，此处的栅格由本机渲染）；空间图块与自由蒙版仍仅由本机引擎渲染并带具名 XMP 损失；原生亮度范围会写入 Lightroom 边车。分割需要 python 依赖（transformers + torch），每次回退或放弃都会写入理由。"),
     ("Analysis — the verifier", "分析 · 校验器"),
     ("Provider", "提供方"),
     ("Model", "模型"),
@@ -1208,8 +1208,8 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
         "忙碌中 — 当前任务完成后才可撤销/重做"),
     ("opened the first photo — {n} more ignored (drop their folder to browse them all)",
         "已打开第一张 — 其余 {n} 张被忽略（把它们所在的文件夹拖进来可整体浏览）"),
-    ("{n} bitmap mask(s) not pasted — their rasters belong to the source photo (re-run AI select on each target)",
-        "{n} 个位图蒙版未粘贴 — 栅格属于源照片（请在各目标上重跑 AI 选择）"),
+    ("{n} raster mask(s) not pasted — their rasters belong to the source photo (re-run AI select, or the reverse-fit, on each target)",
+        "{n} 个栅格蒙版未粘贴 — 栅格属于源照片（请在各目标上重跑 AI 选择或反推）"),
     ("AI segmenting {what}… (first run auto-downloads the model; failures are reported here)",
         "AI 分割{what}中…（首次运行自动下载模型；失败会在此报告）"),
     ("Reset to its default", "重置为默认值"),
@@ -1848,6 +1848,16 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
       carries the global fit only (classic XMP cannot hold raster \
       masks).",
         " 已附加 {label} 区校正（{label} 对 {label} 矩 → 局部曝光 {ev} EV、色彩增益 [{g0} {g1} {g2}]、饱和度 {sat}）：区残差 {before} → {after}。该校正是位图蒙版——仅应用内渲染；Lightroom 边车只携带全局拟合（经典 XMP 无法承载栅格蒙版）。"),
+    // The sky/land pair's own sentence: they DO reach the sidecar now, as
+    // Lightroom's own Select Sky. 「非 Adobe 原栅格」 is the load-bearing half,
+    // the same one the export loss line carries.
+    (" Zoned {label} correction attached ({label}-to-{label} moments → \
+      local exposure {ev} EV, colour gains [{g0} {g1} {g2}], \
+      saturation {sat}): zone residual {before} → {after}. The correction \
+      rides out as Lightroom's own Select Sky mask — Lightroom rebuilds \
+      its own sky alpha from it, and the raster shown here is the one \
+      AutoShade rendered, not Adobe's.",
+        " 已附加 {label} 区校正（{label} 对 {label} 矩 → 局部曝光 {ev} EV、色彩增益 [{g0} {g1} {g2}]、饱和度 {sat}）：区残差 {before} → {after}。该校正以 Lightroom 自有的「选择天空」蒙版写入边车——Lightroom 自行重建天空 alpha；此处的栅格由本机渲染，非 Adobe 原栅格。"),
     (" Note: the {label} zone covers {s}% of the source frame \
       but {t}% of the target's — the compositions differ, so the \
       overall distribution residual stays where the global fit \

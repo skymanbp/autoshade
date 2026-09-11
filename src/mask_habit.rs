@@ -208,17 +208,34 @@ impl Bucket {
 ///    nothing, and the "do they use range masks" question is answered by
 ///    [`MaskHabit::refined`], which counts EVERY refined mask.
 pub fn bucket_of(a: &LocalAdjustment) -> Bucket {
+    // WHICH SIDE of the mask the correction lands on is
+    // [`LocalAdjustment::net_inverted`] and nothing else — the correction's own
+    // Invert flag composed with the geometry's own bit, which is where a
+    // Lightroom sidecar homes it. Every arm below reads it, so the four
+    // classifications agree with what `render::mask_weight` plus the weight
+    // loop actually draw.
+    //
+    // Reading `a.inverted` alone (as three of these arms did) filed an
+    // imported inverted sky selection under `Sky` and an inverted RADIAL under
+    // `Subject`, and it would have filed the reverse-fit's LAND zone under
+    // `Sky` — handing the style distiller a photographer's sky habit to apply
+    // to their ground.
+    let inverted = a.net_inverted();
     match &a.mask {
-        MaskGeometry::AiMask { subtype: 2, .. } => return Bucket::Sky,
-        MaskGeometry::AiMask { subtype: 1, .. } => return Bucket::Subject,
+        MaskGeometry::AiMask { subtype: 2, .. } => {
+            return if inverted { Bucket::Ground } else { Bucket::Sky };
+        }
+        MaskGeometry::AiMask { subtype: 1, .. } => {
+            return if inverted { Bucket::Ground } else { Bucket::Subject };
+        }
         MaskGeometry::Linear { zero_y, full_y, .. } => {
             if full_y != zero_y {
-                // XOR: `inverted` swaps which end of the gradient is covered.
-                return if (full_y < zero_y) != a.inverted { Bucket::Sky } else { Bucket::Ground };
+                // XOR: inversion swaps which end of the gradient is covered.
+                return if (full_y < zero_y) != inverted { Bucket::Sky } else { Bucket::Ground };
             }
         }
         MaskGeometry::Radial { .. } => {
-            return if a.inverted { Bucket::Ground } else { Bucket::Subject };
+            return if inverted { Bucket::Ground } else { Bucket::Subject };
         }
         _ => {}
     }
@@ -783,6 +800,41 @@ mod tests {
     #[test]
     fn bucket_rules_send_an_ai_sky_selection_to_sky() {
         assert_eq!(bucket_of(&mask(ai(2))), Bucket::Sky);
+    }
+
+    /// Rule 1a', the other side: an INVERTED selection covers the complement,
+    /// and the inversion counts from EITHER home.
+    ///
+    /// Two homes, one fact ([`crate::recipe::LocalAdjustment::net_inverted`]).
+    /// The reverse-fit's land zone puts it on the adjustment; an imported
+    /// Lightroom mask puts it inside the geometry, because that is where its
+    /// file put it. Reading only `a.inverted` filed the imported one under
+    /// `Sky` — the photographer's sky habit applied to their ground.
+    ///
+    /// MUTATION: read `a.inverted` instead of `a.net_inverted()` in
+    /// `bucket_of` and the geometry-home half fails; read only the geometry's
+    /// and the adjustment half fails.
+    #[test]
+    fn bucket_rules_send_an_inverted_selection_to_the_complement() {
+        for subtype in [1u32, 2] {
+            // …on the adjustment.
+            let mut m = mask(ai(subtype));
+            m.inverted = true;
+            assert_eq!(bucket_of(&m), Bucket::Ground, "subtype {subtype}, adjustment home");
+            // …and inside the geometry, which is what an import produces.
+            let mut g = ai(subtype);
+            if let MaskGeometry::AiMask { inverted, .. } = &mut g {
+                *inverted = true;
+            }
+            assert_eq!(bucket_of(&mask(g)), Bucket::Ground, "subtype {subtype}, geometry home");
+        }
+        // A radial's own `flipped` counts too — it is the same second flag,
+        // and this arm used to ignore it.
+        let mut g = radial();
+        if let MaskGeometry::Radial { flipped, .. } = &mut g {
+            *flipped = true;
+        }
+        assert_eq!(bucket_of(&mask(g)), Bucket::Ground, "a flipped radial is a vignette");
     }
 
     /// Rule 1b: `MaskSubType="1"` is Subject.

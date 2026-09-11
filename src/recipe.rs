@@ -1181,6 +1181,96 @@ impl MaskRole {
             MaskRole::ZoneLand => Some("Land (reverse-fit)"),
         }
     }
+
+    /// Did the zoned reverse-fit place this mask, and does it therefore OWN
+    /// the alpha it rides?
+    ///
+    /// The distinction is not cosmetic. The sky and land zones ride out as
+    /// Lightroom's own Select Sky ([`MaskGeometry::select_sky`]), so they are
+    /// `AiMask`s — and for every OTHER `AiMask` in this app the `raster` field
+    /// is a CACHE of a re-derivation, keyed by (photo, subtype, reference
+    /// point, frame), which the code is free to drop, renew or recompute. A
+    /// zone's raster is not: it is the alpha the fit MEASURED its exposure,
+    /// gains and saturation against, claimed under a unique name beside the
+    /// develop, and replacing it silently invalidates every number the fit
+    /// disclosed. So the sites that treat an AI alpha as disposable
+    /// (`segment::resolve_ai_masks`, `render::orient_recipe_coords`,
+    /// `LocalAdjustment::turnable_raster_paths_mut`) ask this first.
+    pub fn is_zone(self) -> bool {
+        matches!(self, MaskRole::ZoneSky | MaskRole::ZoneLand)
+    }
+}
+
+impl MaskGeometry {
+    /// Lightroom's own **Select Sky** as this app produces it: a `Mask/Image`
+    /// component with `crs:MaskSubType="2"`, prompted at `(ref_x, ref_y)` and
+    /// rendered here from `raster`.
+    ///
+    /// ONE constructor, because the field list is a WIRE FORMAT: `subtype`
+    /// decides what Lightroom rebuilds, `blend_mode`/`value` are the
+    /// subtract-pair invariants that must stay `(0, 1)` for a union, and
+    /// `mask_version` is Lightroom's own schema stamp (`"1"` on 105/105
+    /// measured instances). A second hand-written copy of that list is exactly
+    /// how one producer would start emitting a component Lightroom reads as
+    /// something else.
+    ///
+    /// `provenance` and `gesture` are EMPTY on purpose. Both are the
+    /// photographer's own material carried back verbatim from a sidecar this
+    /// app read (Adobe's digests, model version, a refinement stroke); minting
+    /// either here would assert a provenance nothing produced.
+    ///
+    /// **`name` is `"Sky 1"`** — Lightroom's own spelling for a Select Sky
+    /// component, one of the measured `crs:MaskName` values. It names the
+    /// COMPONENT inside the correction, not the row this app shows: a zone
+    /// mask's display name comes from [`MaskRole::en_name`] and is localised.
+    ///
+    /// **`inverted` is the COMPONENT's own bit** (`crs:MaskInverted` as a
+    /// Lightroom sidecar spells it). It composes with the correction's own
+    /// flag through [`LocalAdjustment::net_inverted`] and is applied exactly
+    /// once, in both the render and the sidecar. The zoned reverse-fit passes
+    /// `false` here and keeps its inversion on the adjustment — see the call
+    /// site — while an imported Lightroom mask arrives with the bit HERE,
+    /// because that is where its file put it.
+    pub fn select_sky(ref_x: f32, ref_y: f32, inverted: bool, raster: String) -> Self {
+        MaskGeometry::AiMask {
+            name: "Sky 1".to_string(),
+            subtype: 2,
+            ref_x,
+            ref_y,
+            blend_mode: 0,
+            value: 1.0,
+            inverted,
+            mask_version: 1,
+            provenance: Vec::new(),
+            gesture: Vec::new(),
+            raster: Some(raster),
+        }
+    }
+
+    /// The inversion bit the GEOMETRY itself carries, or `false` for one that
+    /// has none.
+    ///
+    /// THREE carriers, and they are the same fact in three spellings: a
+    /// radial's `flipped`, a brush group's `inverted`, an AI mask's
+    /// `inverted`. A `Linear` and a `Bitmap` have no bit of their own — their
+    /// correction inverts through [`LocalAdjustment::inverted`] alone.
+    ///
+    /// Read it here and nowhere else. Every consumer that ever asked a
+    /// geometry "are you inverted" by hand missed at least one carrier: the
+    /// renderer's AI arm honoured no bit at all (so an imported Lightroom
+    /// 「Select Sky, inverted」 rendered the sky it was told to exclude), and
+    /// the sidecar writer's brush and AI arms wrote this bit ALONE, silently
+    /// dropping the correction's own. Both were the same defect —
+    /// hand-spelled inversion — and [`LocalAdjustment::net_inverted`] is where
+    /// the two bits are now allowed to meet.
+    pub fn own_inverted(&self) -> bool {
+        match self {
+            MaskGeometry::Radial { flipped, .. } => *flipped,
+            MaskGeometry::Brush { inverted, .. } => *inverted,
+            MaskGeometry::AiMask { inverted, .. } => *inverted,
+            MaskGeometry::Linear { .. } | MaskGeometry::Bitmap { .. } => false,
+        }
+    }
 }
 
 /// Where a local adjustment applies. Coordinates are normalised to the frame and
@@ -1936,6 +2026,37 @@ impl LocalAdjustment {
         std::iter::once(&mut self.mask).chain(self.components.iter_mut().map(|c| &mut c.geometry))
     }
 
+    /// Is this correction's coverage inverted — **the one place** the two
+    /// inversion bits are allowed to meet.
+    ///
+    /// This engine carries the inversion in two independent places and both
+    /// are legitimate. [`Self::inverted`] is the correction's own Invert flag
+    /// (the GUI checkbox, what the zoned fit's land zone sets, what the render
+    /// applies to the composed coverage); [`MaskGeometry::own_inverted`] is
+    /// the bit a geometry carries itself, which is where a Lightroom sidecar
+    /// homes it and therefore where the importer leaves it. Lightroom has ONE
+    /// inversion per component, so the projection has to hand it their XOR —
+    /// and so does anything else asking which side of the mask the correction
+    /// lands on.
+    ///
+    /// Hand-spelling that XOR is what this method exists to stop. Before it,
+    /// `xmp::lr_net_inverted` composed the radial pair and no other, so a
+    /// brush or AI mask exported the geometry's bit and DROPPED the
+    /// correction's; `render::mask_weight`'s AI arm applied neither; and
+    /// `mask_habit::bucket_of` read the correction's and ignored every
+    /// geometry's. A sky mask inverted in Lightroom therefore round-tripped
+    /// out of this app as a mask over the sky.
+    ///
+    /// SCOPE: the BASE geometry. A COMPONENT carries its own bit and it is
+    /// applied per component — by `render::mask_weight` inside
+    /// `combined_mask_weight`, and by `xmp::masks_xml`, which hands each
+    /// component its own [`MaskGeometry::own_inverted`]. Lightroom inverts per
+    /// component too, so folding the correction's flag into every one of them
+    /// would invert each instead of their composition.
+    pub fn net_inverted(&self) -> bool {
+        self.inverted != self.mask.own_inverted()
+    }
+
     /// Mutable references to every Bitmap raster path this adjustment holds
     /// (base geometry + components) — the ONE walk the store's path
     /// relativize/resolve/detach/snapshot helpers share, so a new geometry
@@ -1973,10 +2094,20 @@ impl LocalAdjustment {
     /// could not turn). Turning it too produced a correctly-turned file nothing
     /// ever pointed at, plus a `rasters_turned` count that promised work the
     /// recipe did not keep.
+    ///
+    /// ONE exception since the sky/land zones became Select Sky components: a
+    /// ZONE mask's alpha is not a cache either ([`MaskRole::is_zone`]). It is
+    /// the fit's own render product, nothing re-derives it from the recipe,
+    /// and a rotate that dropped it would leave both zone corrections inert on
+    /// any machine without the segmentation sidecar — the correction would
+    /// simply vanish from the photograph. `rotate90` is lossless on it exactly
+    /// as it is on a `Bitmap`, so it is turned with them.
     pub fn turnable_raster_paths_mut(&mut self) -> Vec<&mut String> {
+        let zone = self.role.is_zone();
         self.geometries_mut()
-            .filter_map(|g| match g {
+            .filter_map(move |g| match g {
                 MaskGeometry::Bitmap { path } => Some(path),
+                MaskGeometry::AiMask { raster: Some(path), .. } if zone => Some(path),
                 _ => None,
             })
             .collect()

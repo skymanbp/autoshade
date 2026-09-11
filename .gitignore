@@ -1,5 +1,11 @@
 # Rust build artifacts
 /target/
+# Per-lane build directories. Parallel batteries each get their own
+# CARGO_TARGET_DIR (target dir contention is what made them exit 127), and an
+# agent worktree lives INSIDE this repo at .claude/worktrees/<id>/ — so a lane's
+# target dir sits in the working tree where `git add -A` will stage it. Not
+# anchored to the root for that reason: the path is relative to the worktree.
+target-lane-*/
 **/*.rs.bk
 *.pdb
 
