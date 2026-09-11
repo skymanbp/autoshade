@@ -1157,8 +1157,17 @@ fn guid(seed: &str) -> String {
 /// Linear gradients get their direction from Zero→Full and Lightroom writes no
 /// `crs:Flipped` on one at all (27/27 in the same sidecars), so the `matches!`
 /// covers exactly the geometry that has the second flag.
+///
+/// **All THREE second flags now, not just the radial's.** A brush group's
+/// `crs:MaskInverted` and an AI mask's are the same kind of second spelling as
+/// `crs:Flipped`, and this function used to cover neither — so
+/// `brush_mask_xml` / `ai_mask_xml` wrote the GEOMETRY's bit and silently
+/// dropped the correction's, which is how a land zone (or any inverted brush)
+/// left here claiming to cover the half it excludes. The composition itself
+/// lives in [`LocalAdjustment::net_inverted`], the one place the two bits
+/// meet; this stays as the name the writer reads it under.
 fn lr_net_inverted(m: &LocalAdjustment) -> bool {
-    m.inverted ^ matches!(m.mask, MaskGeometry::Radial { flipped: true, .. })
+    m.net_inverted()
 }
 
 /// `(crs:What value, extra geometry attributes)` for a mask geometry, or
@@ -1350,7 +1359,7 @@ const AI_MASK_PROVENANCE_KEYS: [&str; 11] = [
 /// would assert a provenance we did not have, and dropping them would lose the
 /// photographer's own. `crs:MaskSyncID` is the one identity this writer does
 /// mint, because that is what it does for every component it emits.
-fn ai_mask_xml(g: &MaskGeometry, sync_seed: &str) -> Option<String> {
+fn ai_mask_xml(g: &MaskGeometry, sync_seed: &str, net_inverted: bool) -> Option<String> {
     let MaskGeometry::AiMask {
         name,
         subtype,
@@ -1358,7 +1367,11 @@ fn ai_mask_xml(g: &MaskGeometry, sync_seed: &str) -> Option<String> {
         ref_y,
         blend_mode,
         value,
-        inverted,
+        // NOT read here: `net_inverted` is this bit composed with the
+        // correction's own through `LocalAdjustment::net_inverted`, which is
+        // the only inversion Lightroom has a place for. Writing the raw field
+        // dropped `LocalAdjustment::inverted` on the floor.
+        inverted: _,
         mask_version,
         provenance,
         gesture,
@@ -1407,7 +1420,7 @@ fn ai_mask_xml(g: &MaskGeometry, sync_seed: &str) -> Option<String> {
     let head = format!(
         "          <rdf:Description\n\
            crs:What=\"Mask/Image\" crs:MaskActive=\"true\" crs:MaskName=\"{mname}\"\n\
-           crs:MaskBlendMode=\"{blend_mode}\" crs:MaskInverted=\"{inverted}\" \
+           crs:MaskBlendMode=\"{blend_mode}\" crs:MaskInverted=\"{net_inverted}\" \
 crs:MaskSyncID=\"{id}\"\n\
            crs:MaskValue=\"{value}\" crs:MaskVersion=\"{mask_version}\" \
 crs:MaskSubType=\"{subtype}\"\n\
@@ -1462,8 +1475,10 @@ crs:MaskSubType=\"{subtype}\"\n\
 /// file used are carried in `recipe.json` ([`BrushStroke::sync_id`]) but not
 /// re-emitted: a sidecar we rewrite is OUR document, and minting IDs is what
 /// the rest of this writer already does.
-fn brush_mask_xml(g: &MaskGeometry, sync_seed: &str) -> Option<String> {
-    let MaskGeometry::Brush { name, blend_mode, value, inverted, strokes } = g else {
+fn brush_mask_xml(g: &MaskGeometry, sync_seed: &str, net_inverted: bool) -> Option<String> {
+    // `inverted: _` for `ai_mask_xml`'s reason, word for word: the group's own
+    // bit reaches the file only through `LocalAdjustment::net_inverted`.
+    let MaskGeometry::Brush { name, blend_mode, value, inverted: _, strokes } = g else {
         return None;
     };
     let mut painted = String::new();
@@ -1498,7 +1513,7 @@ fn brush_mask_xml(g: &MaskGeometry, sync_seed: &str) -> Option<String> {
         "         <rdf:li>\n\
           <rdf:Description\n\
            crs:What=\"Mask/Aggregate\" crs:MaskActive=\"true\" crs:MaskName=\"{mname}\"\n\
-           crs:MaskBlendMode=\"{blend_mode}\" crs:MaskInverted=\"{inverted}\" \
+           crs:MaskBlendMode=\"{blend_mode}\" crs:MaskInverted=\"{net_inverted}\" \
 crs:MaskSyncID=\"{id}\"\n\
            crs:MaskValue=\"{value}\">\n\
           <crs:Masks>\n\
@@ -2515,7 +2530,7 @@ fn masks_xml(r: &EditRecipe, frame: Option<FrameAspect>) -> (String, Vec<MaskLos
         //    (§A tradeoff).
         let mut withheld: Option<f64> = None;
         let base_li = if matches!(m.mask, MaskGeometry::Brush { .. }) {
-            match brush_mask_xml(&m.mask, &guid(&format!("brush-{i}-{name}"))) {
+            match brush_mask_xml(&m.mask, &guid(&format!("brush-{i}-{name}")), net_inv) {
                 Some(li) => li,
                 None => unreachable!("brush_mask_xml answers every Brush geometry"),
             }
@@ -2523,7 +2538,7 @@ fn masks_xml(r: &EditRecipe, frame: Option<FrameAspect>) -> (String, Vec<MaskLos
         // `Mask/Image` element, carrying the intent Lightroom will recompute
         // from.
         } else if matches!(m.mask, MaskGeometry::AiMask { .. }) {
-            match ai_mask_xml(&m.mask, &guid(&format!("ai-{i}-{name}"))) {
+            match ai_mask_xml(&m.mask, &guid(&format!("ai-{i}-{name}")), net_inv) {
                 Some(li) => li,
                 None => unreachable!("ai_mask_xml answers every AiMask geometry"),
             }
@@ -2552,8 +2567,15 @@ fn masks_xml(r: &EditRecipe, frame: Option<FrameAspect>) -> (String, Vec<MaskLos
         let mut extra_lis = String::new();
         let mut flattened = 0usize;
         for (k, c) in m.components.iter().enumerate() {
-            let li = brush_mask_xml(&c.geometry, &guid(&format!("brush-{i}-{name}-{k}")))
-                .or_else(|| ai_mask_xml(&c.geometry, &guid(&format!("ai-{i}-{name}-{k}"))));
+            // A COMPONENT carries its own bit and nothing else. `m.inverted`
+            // is the correction's, already projected onto the base component
+            // above — Lightroom inverts per component, so spelling it on every
+            // one of them would invert each instead of their composition.
+            let comp_inv = c.geometry.own_inverted();
+            let li = brush_mask_xml(&c.geometry, &guid(&format!("brush-{i}-{name}-{k}")), comp_inv)
+                .or_else(|| {
+                    ai_mask_xml(&c.geometry, &guid(&format!("ai-{i}-{name}-{k}")), comp_inv)
+                });
             match li {
                 Some(li) => extra_lis.push_str(&li),
                 None => flattened += 1,
@@ -15920,9 +15942,12 @@ mod tests {
     /// `AiMaskRecomputed` push from `masks_xml` and the disclosure half does.
     #[test]
     fn a_reverse_fit_zone_rides_out_as_lightrooms_own_select_sky() {
+        // ONE home for the inversion, exactly as `fit_zoned` builds it: the
+        // CORRECTION carries the flag and the component carries `false`, so
+        // `lr_net_inverted` is what reaches `crs:MaskInverted`.
         let zone = |inverted: bool, gains: Option<[f32; 3]>| EditRecipe {
             masks: vec![LocalAdjustment {
-                mask: MaskGeometry::select_sky(0.5, 0.25, inverted, "mask-zone-sky.png".into()),
+                mask: MaskGeometry::select_sky(0.5, 0.25, false, "mask-zone-sky.png".into()),
                 role: if inverted {
                     crate::recipe::MaskRole::ZoneLand
                 } else {
@@ -15986,6 +16011,13 @@ mod tests {
         // mask to their own save.
         for inverted in [false, true] {
             let doc = recipe_to_xmp(&zone(inverted, None));
+            // The sidecar carries the NET on the component, which is the only
+            // place Lightroom has for it — the land zone's `crs:MaskInverted`
+            // is `"true"` even though its geometry's own bit is `false`.
+            assert!(
+                doc.contains(&format!("crs:MaskInverted=\"{inverted}\"")),
+                "inverted={inverted}: the net must reach the component:\n{doc}"
+            );
             let back = xmp_to_recipe(&doc);
             assert_eq!(back.masks.len(), 1, "inverted={inverted}: {:?}", back.masks);
             let MaskGeometry::AiMask {
@@ -16003,6 +16035,22 @@ mod tests {
                 (*subtype, *ref_x, *ref_y, *geom_inv, *mask_version),
                 (2, 0.5, 0.25, inverted, 1),
                 "inverted={inverted}: subtype, click and polarity all survive"
+            );
+            // THE HOME MOVES AND THE NET DOES NOT. Export homes the bit on the
+            // correction; import homes it in the geometry (that is where
+            // Lightroom's own files put it, and `parse_one_correction` leaves
+            // it there rather than spelling it twice). Either way
+            // `net_inverted` is the same fact, which is what makes the render
+            // survive the trip — see `fit_zoned`'s
+            // `a_zone_survives_the_sidecar_round_trip_byte_for_byte`.
+            assert!(
+                !back.masks[0].inverted,
+                "inverted={inverted}: the reader must not ALSO lift it onto the correction"
+            );
+            assert_eq!(
+                back.masks[0].net_inverted(),
+                inverted,
+                "inverted={inverted}: the net is what round-trips"
             );
             assert_eq!(
                 back.masks[0].exposure_ev, -0.4,

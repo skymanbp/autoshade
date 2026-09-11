@@ -208,36 +208,34 @@ impl Bucket {
 ///    nothing, and the "do they use range masks" question is answered by
 ///    [`MaskHabit::refined`], which counts EVERY refined mask.
 pub fn bucket_of(a: &LocalAdjustment) -> Bucket {
-    // `a.inverted` decides WHICH SIDE of an AI selection the correction lands
-    // on, exactly as it does for the radial arm below (a covered ellipse is a
-    // subject; an inverted one is a vignette). The reverse-fit's LAND zone is
-    // the sky component inverted and carries no second segmentation, so
-    // reading the subtype alone would file a photographer's ground work under
-    // `Sky` and hand the style distiller the wrong habit to apply.
+    // WHICH SIDE of the mask the correction lands on is
+    // [`LocalAdjustment::net_inverted`] and nothing else — the correction's own
+    // Invert flag composed with the geometry's own bit, which is where a
+    // Lightroom sidecar homes it. Every arm below reads it, so the four
+    // classifications agree with what `render::mask_weight` plus the weight
+    // loop actually draw.
     //
-    // The component's OWN `crs:MaskInverted` is deliberately not read here,
-    // for the same reason `Radial::flipped` is not: this file classifies what
-    // THIS ENGINE renders, and `render::apply_masks`' weight loop inverts from
-    // `LocalAdjustment::inverted` alone. A Lightroom sidecar homes that bit
-    // inside the geometry instead, so an imported inverted sky selection still
-    // reads as `Sky` — a pre-existing gap in the AI arm of `mask_weight`, not
-    // a classification rule, and one this file must not paper over by
-    // disagreeing with the renderer.
+    // Reading `a.inverted` alone (as three of these arms did) filed an
+    // imported inverted sky selection under `Sky` and an inverted RADIAL under
+    // `Subject`, and it would have filed the reverse-fit's LAND zone under
+    // `Sky` — handing the style distiller a photographer's sky habit to apply
+    // to their ground.
+    let inverted = a.net_inverted();
     match &a.mask {
         MaskGeometry::AiMask { subtype: 2, .. } => {
-            return if a.inverted { Bucket::Ground } else { Bucket::Sky };
+            return if inverted { Bucket::Ground } else { Bucket::Sky };
         }
         MaskGeometry::AiMask { subtype: 1, .. } => {
-            return if a.inverted { Bucket::Ground } else { Bucket::Subject };
+            return if inverted { Bucket::Ground } else { Bucket::Subject };
         }
         MaskGeometry::Linear { zero_y, full_y, .. } => {
             if full_y != zero_y {
-                // XOR: `inverted` swaps which end of the gradient is covered.
-                return if (full_y < zero_y) != a.inverted { Bucket::Sky } else { Bucket::Ground };
+                // XOR: inversion swaps which end of the gradient is covered.
+                return if (full_y < zero_y) != inverted { Bucket::Sky } else { Bucket::Ground };
             }
         }
         MaskGeometry::Radial { .. } => {
-            return if a.inverted { Bucket::Ground } else { Bucket::Subject };
+            return if inverted { Bucket::Ground } else { Bucket::Subject };
         }
         _ => {}
     }
@@ -804,23 +802,39 @@ mod tests {
         assert_eq!(bucket_of(&mask(ai(2))), Bucket::Sky);
     }
 
-    /// Rule 1a', the other side: an INVERTED sky selection covers the ground.
+    /// Rule 1a', the other side: an INVERTED selection covers the complement,
+    /// and the inversion counts from EITHER home.
     ///
-    /// The reverse-fit's land zone is exactly this — the sky component with
-    /// `inverted: true` on the adjustment, which is the flag the renderer's
-    /// weight loop reads (`fit_zoned`'s `land_attachment`). Reading only the
-    /// subtype filed it under `Sky`, which would hand the style distiller a
-    /// photographer's SKY habit to apply to their ground.
+    /// Two homes, one fact ([`crate::recipe::LocalAdjustment::net_inverted`]).
+    /// The reverse-fit's land zone puts it on the adjustment; an imported
+    /// Lightroom mask puts it inside the geometry, because that is where its
+    /// file put it. Reading only `a.inverted` filed the imported one under
+    /// `Sky` — the photographer's sky habit applied to their ground.
     ///
-    /// MUTATION: drop the `a.inverted` test from `bucket_of`'s AI arms and
-    /// both assertions below fail.
+    /// MUTATION: read `a.inverted` instead of `a.net_inverted()` in
+    /// `bucket_of` and the geometry-home half fails; read only the geometry's
+    /// and the adjustment half fails.
     #[test]
-    fn bucket_rules_send_an_inverted_ai_selection_to_ground() {
+    fn bucket_rules_send_an_inverted_selection_to_the_complement() {
         for subtype in [1u32, 2] {
+            // …on the adjustment.
             let mut m = mask(ai(subtype));
             m.inverted = true;
-            assert_eq!(bucket_of(&m), Bucket::Ground, "subtype {subtype} inverted");
+            assert_eq!(bucket_of(&m), Bucket::Ground, "subtype {subtype}, adjustment home");
+            // …and inside the geometry, which is what an import produces.
+            let mut g = ai(subtype);
+            if let MaskGeometry::AiMask { inverted, .. } = &mut g {
+                *inverted = true;
+            }
+            assert_eq!(bucket_of(&mask(g)), Bucket::Ground, "subtype {subtype}, geometry home");
         }
+        // A radial's own `flipped` counts too — it is the same second flag,
+        // and this arm used to ignore it.
+        let mut g = radial();
+        if let MaskGeometry::Radial { flipped, .. } = &mut g {
+            *flipped = true;
+        }
+        assert_eq!(bucket_of(&mask(g)), Bucket::Ground, "a flipped radial is a vignette");
     }
 
     /// Rule 1b: `MaskSubType="1"` is Subject.

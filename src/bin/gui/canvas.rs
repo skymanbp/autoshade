@@ -768,7 +768,13 @@ impl AutoShadeApp {
             // outline must warp whenever the pixels do.
             let geom_active =
                 autoshade::render::geometry_moves_frame(&dist.profile, dist.amount);
-            if let MaskGeometry::Radial { top, left, bottom, right, flipped, angle, .. } = target
+            // `LocalAdjustment::net_inverted` against the geometry actually on
+            // screen: `target` may be a COMPONENT, whose own bit is the one
+            // that composes with the correction's flag here — so the pair is
+            // spelled once, through `MaskGeometry::own_inverted`, rather than
+            // re-XORing a radial's `flipped` at each marker.
+            let net_inverted = m.inverted != target.own_inverted();
+            if let MaskGeometry::Radial { top, left, bottom, right, angle, .. } = target
                 && (deg != 0.0 || geom_active)
             {
                 // The engine evaluates the ellipse in the ORIGINAL frame; under
@@ -800,13 +806,13 @@ impl AutoShadeApp {
                 // Same effect-side marker semantics as draw_mask_overlay.
                 let (ccx, ccy) = orig_norm_to_view(cx, cy, dims, deg, &dist);
                 let cs = xf.to_screen(ccx, ccy);
-                if flipped ^ m.inverted {
+                if net_inverted {
                     p.circle_stroke(cs, 3.0, egui::Stroke::new(2.0, ACCENT));
                 } else {
                     p.circle_filled(cs, 3.0, ACCENT);
                 }
             } else {
-                draw_mask_overlay(ui, xf, &vg, m.inverted, self.lang);
+                draw_mask_overlay(ui, xf, &vg, net_inverted, self.lang);
             }
             let p = ui.painter_at(xf.rect);
             for (h, pos) in mask_handle_points(&vg, xf) {

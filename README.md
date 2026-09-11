@@ -688,6 +688,14 @@ numbers](#measured-numbers) are not repeated.
 - `LR_MASK_FRAME_SCALE=1.0`, `LocalExposure2012=EV/4`, local Hue is
   `degrees/180`, the other measured local family is `/100`, global Sharpness
   is 1:1, and polarity comes from `MaskInverted` rather than `Flipped`.
+- **One inversion, composed in one place.** A recipe spells a mask's polarity
+  twice — the correction's own Invert flag and the geometry's own bit (a
+  radial's `Flip`, a brush group's or an AI mask's `MaskInverted`) — and
+  `LocalAdjustment::net_inverted` is the only place the two meet. The render,
+  the sidecar writer, the mask-habit classifier and the GUI overlay all read
+  that one helper, so an inverted brush or AI selection leaves for Lightroom
+  as the half it really covers, and a Lightroom mask that arrives inverted
+  renders inverted.
 
 ### AI advisor and reverse fit
 

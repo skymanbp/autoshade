@@ -1224,12 +1224,13 @@ impl MaskGeometry {
     /// COMPONENT inside the correction, not the row this app shows: a zone
     /// mask's display name comes from [`MaskRole::en_name`] and is localised.
     ///
-    /// **`inverted` is the COMPONENT's own bit** (`crs:MaskInverted`), which
-    /// is what the sidecar carries — the land zone is the sky mask inverted.
-    /// It is deliberately NOT what the renderer reads: this engine inverts
-    /// through [`LocalAdjustment::inverted`], one bit with one home per
-    /// channel, and the zone attachment sets both to the same value so the
-    /// render and the sidecar invert exactly once each.
+    /// **`inverted` is the COMPONENT's own bit** (`crs:MaskInverted` as a
+    /// Lightroom sidecar spells it). It composes with the correction's own
+    /// flag through [`LocalAdjustment::net_inverted`] and is applied exactly
+    /// once, in both the render and the sidecar. The zoned reverse-fit passes
+    /// `false` here and keeps its inversion on the adjustment — see the call
+    /// site — while an imported Lightroom mask arrives with the bit HERE,
+    /// because that is where its file put it.
     pub fn select_sky(ref_x: f32, ref_y: f32, inverted: bool, raster: String) -> Self {
         MaskGeometry::AiMask {
             name: "Sky 1".to_string(),
@@ -1243,6 +1244,31 @@ impl MaskGeometry {
             provenance: Vec::new(),
             gesture: Vec::new(),
             raster: Some(raster),
+        }
+    }
+
+    /// The inversion bit the GEOMETRY itself carries, or `false` for one that
+    /// has none.
+    ///
+    /// THREE carriers, and they are the same fact in three spellings: a
+    /// radial's `flipped`, a brush group's `inverted`, an AI mask's
+    /// `inverted`. A `Linear` and a `Bitmap` have no bit of their own — their
+    /// correction inverts through [`LocalAdjustment::inverted`] alone.
+    ///
+    /// Read it here and nowhere else. Every consumer that ever asked a
+    /// geometry "are you inverted" by hand missed at least one carrier: the
+    /// renderer's AI arm honoured no bit at all (so an imported Lightroom
+    /// 「Select Sky, inverted」 rendered the sky it was told to exclude), and
+    /// the sidecar writer's brush and AI arms wrote this bit ALONE, silently
+    /// dropping the correction's own. Both were the same defect —
+    /// hand-spelled inversion — and [`LocalAdjustment::net_inverted`] is where
+    /// the two bits are now allowed to meet.
+    pub fn own_inverted(&self) -> bool {
+        match self {
+            MaskGeometry::Radial { flipped, .. } => *flipped,
+            MaskGeometry::Brush { inverted, .. } => *inverted,
+            MaskGeometry::AiMask { inverted, .. } => *inverted,
+            MaskGeometry::Linear { .. } | MaskGeometry::Bitmap { .. } => false,
         }
     }
 }
@@ -1998,6 +2024,37 @@ impl LocalAdjustment {
     /// single place and neither membership rule can silently miss it.
     fn geometries_mut(&mut self) -> impl Iterator<Item = &mut MaskGeometry> {
         std::iter::once(&mut self.mask).chain(self.components.iter_mut().map(|c| &mut c.geometry))
+    }
+
+    /// Is this correction's coverage inverted — **the one place** the two
+    /// inversion bits are allowed to meet.
+    ///
+    /// This engine carries the inversion in two independent places and both
+    /// are legitimate. [`Self::inverted`] is the correction's own Invert flag
+    /// (the GUI checkbox, what the zoned fit's land zone sets, what the render
+    /// applies to the composed coverage); [`MaskGeometry::own_inverted`] is
+    /// the bit a geometry carries itself, which is where a Lightroom sidecar
+    /// homes it and therefore where the importer leaves it. Lightroom has ONE
+    /// inversion per component, so the projection has to hand it their XOR —
+    /// and so does anything else asking which side of the mask the correction
+    /// lands on.
+    ///
+    /// Hand-spelling that XOR is what this method exists to stop. Before it,
+    /// `xmp::lr_net_inverted` composed the radial pair and no other, so a
+    /// brush or AI mask exported the geometry's bit and DROPPED the
+    /// correction's; `render::mask_weight`'s AI arm applied neither; and
+    /// `mask_habit::bucket_of` read the correction's and ignored every
+    /// geometry's. A sky mask inverted in Lightroom therefore round-tripped
+    /// out of this app as a mask over the sky.
+    ///
+    /// SCOPE: the BASE geometry. A COMPONENT carries its own bit and it is
+    /// applied per component — by `render::mask_weight` inside
+    /// `combined_mask_weight`, and by `xmp::masks_xml`, which hands each
+    /// component its own [`MaskGeometry::own_inverted`]. Lightroom inverts per
+    /// component too, so folding the correction's flag into every one of them
+    /// would invert each instead of their composition.
+    pub fn net_inverted(&self) -> bool {
+        self.inverted != self.mask.own_inverted()
     }
 
     /// Mutable references to every Bitmap raster path this adjustment holds

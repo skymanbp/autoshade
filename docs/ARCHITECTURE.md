@@ -2132,10 +2132,13 @@ amount-weighted mean of ten local sliders (in-mask temperature and tint
 included) plus the share of uses carrying a local point curve. The use is
 decided by one pure
 function, `bucket_of` — an AI selection answers from its own `MaskSubType`, a
-linear gradient from which end of the y-down frame its `full` handle covers
-(XORed with `MaskInverted`, which reverses the covered end), a radial from
-whether it is inverted, and a Range Mask only when the geometry says nothing,
-so a refined sky gradient stays a sky gradient. **No geometry is ever averaged**:
+linear gradient from which end of the y-down frame its `full` handle covers, a
+radial from whether it is inverted, and a Range Mask only when the geometry
+says nothing, so a refined sky gradient stays a sky gradient. Every arm reads
+`LocalAdjustment::net_inverted` — the correction's Invert flag composed with
+the geometry's own bit — rather than either flag on its own, so an imported
+inverted sky selection is filed under `ground` and a flipped radial under
+`ground` rather than `subject`. **No geometry is ever averaged**:
 a mask's coordinates are a fact about one frame, so the block carries counts,
 slider means and English, never a coordinate. Retrieval does not read the field
 at all, which is why it ships WITHOUT an index-version bump on `families`'
@@ -2339,6 +2342,26 @@ own sky alpha from the component while the raster this engine renders from
 stays ours (`MaskLossReason::AiMaskRecomputed` says so on every save). The
 opt-in four-class region bitmaps, the spatial tiles and the free-form field
 masks stay engine-only with the named bitmap loss. Deterministic and key-free.
+
+**One inversion bit, one composition, and the zone picks one home.** This
+engine spells a mask's polarity twice — `LocalAdjustment::inverted` (the GUI's
+Invert checkbox, applied by the weight loop) and the geometry's own bit (a
+radial's `flipped`, a brush group's or an AI mask's `MaskInverted`, applied
+inside `mask_weight`). `LocalAdjustment::net_inverted` is the ONE place they
+meet, and everything that must agree about which half of a mask is covered
+reads it: `xmp::lr_net_inverted` (so `ai_mask_xml` and `brush_mask_xml` write
+the NET as the component's `crs:MaskInverted`, never the raw geometry bit),
+`mask_habit::bucket_of`, and the GUI's `draw_mask_overlay`. The land zone sets
+the correction's flag and leaves the component's at `false`
+(`fit_zoned.rs`'s `land_attachment`); Lightroom has only the component, so the
+sidecar carries the net there, and re-importing our own file lands the bit in
+the OTHER home with the net unchanged — which is why the round trip renders
+byte-identically
+(`fit_zoned::a_zone_survives_the_sidecar_round_trip_byte_for_byte`). Two
+defects closed with it: the AI arm of `mask_weight` read no inversion at all,
+so every Lightroom sky mask the photographer had inverted rendered over the
+sky they excluded; and the writer wrote the geometry's raw bit, so an Invert
+ticked on a brush or AI mask never reached the sidecar.
 
 The method is deliberately **distribution-level, not per-pixel regression** — a
 generative target is not pixel-aligned with its source, so only statistics are
