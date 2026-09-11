@@ -104,6 +104,26 @@ also pass the foreign-hue veto and a weighted rotation allowance, pinned at
 0.05 through 65%, about 0.593 at 85%, and 1.0 at full strength. If no legal WB
 remains, it is withheld and the recipe stays as-shot with a typed explanation.
 
+Since v1.2.7 the full solve has a white balance too, not only the Atmosphere
+path. It is solved from the same population estimator and then RENDERED and
+checked against the target's own 12×8 cell means before it ships: if the
+render did not move the frame toward the target, the recipe returns to as-shot
+and says so. A same-frame pair whose light did not change therefore still
+reports `temperature_k` unset.
+
+**The colour field.** Past the 65% default, and only there, the fit may also
+attach a smooth 12×8×8 local colour/tone field — the residual its masks and
+range bands cannot shape. It appears in the develop panel's **Local Masks**
+section as its own row, `▦ Colour field · engine-only`, with an eye to mute it
+and an Amount slider; deleting the row removes it. It is the first control in
+this app with **no Lightroom equivalent at all**: classic XMP has no
+coordinate system for a smooth local field, so the save line names it among
+the things the sidecar cannot carry, and the `.xmp` beside your RAW holds the
+rest of the recipe unchanged. Copy/paste to another photo drops it and tells
+you — its cells are measured on this frame's own geometry and mean nothing on
+someone else's picture. At or below 65% no field is attached and the recipe
+file does not carry the key at all.
+
 With **Zoned fit (sky)** enabled, reverse-fit always solves the global recipe
 first. Successful segmentation adds up to four disjoint semantic class bitmap
 corrections; each region selects Full or Atmosphere independently. If
