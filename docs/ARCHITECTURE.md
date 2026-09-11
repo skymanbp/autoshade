@@ -2633,18 +2633,41 @@ threshold. Four sites consume it:
     of the target's L* spread). The scale is disclosed only where it changed
     the estimator, so a pixel-scale zone's rationale is unchanged.
 
-What all four did on the reference pair at Strength 0.85, which is the only
-honest summary of a design: the cast arm CARRIED [Aqua, Blue] on 0.966 / 0.017
-/ 0.937; the colour field admitted 81 of its 88 measured cells at a gain bound
-of 0.61; four regions past the pairing line (sky 0.617, two spatial tiles 0.352
-and 0.422, one free mask 0.391) ASKED their cells and were refused, the sky at
-0.865 converged / 0.135 diverged / 1.000 aligned — every cell of it moved the
-right way, and a seventh of its trust-weighted mass still ended further from
-its own target in Chebyshev terms, which a single zone-wide gain cannot fix and
-the colour field can. The sky's zone colour therefore still ships neutral, and the sky's ΔE went
-18.2 → 5.9 anyway. The zone probes' admission arm shipped on no site of this
-pair; it is pinned on fixtures, and its refusals here are measurements where
-R33 printed silence.
+What all four did on the reference pair, which is the only honest summary of a
+design — and "did" means CHANGED THE SHIPPED BYTES, read off a leaf-by-leaf
+diff of the three recipes against the merged tree's own baseline rather than
+inferred from the sentences they print:
+
+  * the cast arm ships at Strength 0.65, and only there. The baseline gave the
+    whole per-band mixer back at that strength ("blind movement is vetoed
+    rather than shipped"); with the cells vouching on 0.963 / 0.020 / 0.937 it
+    ships [Red sat +18 lum +18, Orange sat +18 lum +18] and the frame residual
+    reads 0.110 → 0.049 against the baseline's 0.051. At 0.85 and 1.0 the same
+    bands were already carried by F1's high-strength disclosure, and the two
+    recipes' global controls are identical leaf for leaf: what the arm changes
+    there is the SENTENCE — "the controls were retained, but confidence is
+    capped by the strength budget" becomes a measurement, 0.966 / 0.017 /
+    0.937. One outcome, two qualifications: permitted by a budget, or vouched
+    by evidence.
+  * the zone tone estimator changes bytes at every strength. The sky's own
+    correction moves +0.18 → +0.12 EV at 0.65 and +0.17 → +0.12 EV at 1.0, and
+    the free mask field-zone-2 — refused outright as `zone-refused` on the
+    baseline, because a per-pixel regression on its re-synthesised texture
+    solved every control to neutral — becomes an attached +0.08 EV correction
+    at 0.85 and at 1.0 (frame 0.045236 → 0.043859 at 0.85).
+  * the colour field exists above the default strength only: 81 of 88 measured
+    cells at a 0.61 gain bound on 0.85 (frame 0.043859 → 0.017267, against the
+    baseline's 0.045236 → 0.021079), 80 of 88 at 0.80 on Strength 1. At 0.65
+    there is no field at all, which is most of why that strength barely moves.
+  * the zone probes' admission arm shipped on NO site of this pair. Four
+    regions past the pairing line (sky 0.617, two spatial tiles 0.352 and
+    0.422, one free mask 0.391) asked their cells and were refused, the sky at
+    0.865 converged / 0.135 diverged / 1.000 aligned — every cell of it moved
+    the right way, and a seventh of its trust-weighted mass still ended further
+    from its own target in Chebyshev terms, which a single zone-wide gain
+    cannot fix and the colour field can. The sky's zone colour therefore still
+    ships neutral, and the sky's ΔE went 18.2 → 5.9 anyway. That arm is pinned
+    on fixtures; its refusals here are measurements where R33 printed silence.
 
 `FitBudget` gains `field_gain` for the third of those: default point 0.35, the
 analyzer's own `BOUNDS_HIGH` gain, so the default recipe — which ships no field
