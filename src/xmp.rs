@@ -8328,7 +8328,9 @@ mod tests {
                 .filter(|c| c.tier == Some(Tier::RenderedNotExported))
                 .map(|c| c.name)
                 .collect::<Vec<_>>(),
-            vec!["base_curve", "lens_profile"],
+            // R33 §G added the third, and the first that is an EDIT rather
+            // than the engine's own measurement of the photo.
+            vec!["base_curve", "lens_profile", "colour_field"],
         );
     }
 

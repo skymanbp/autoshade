@@ -63,7 +63,8 @@ An AI decides *what to change*. A deterministic Rust engine *does* it.
 - **Reverse-fit** — `match` estimates an engine recipe from any target look,
   measures how far its *content* diverged before trusting it, then fits
   global, semantic, luminance-range and colour-range corrections behind
-  evidence gates.
+  evidence gates; past the default Strength it may also carry a smooth
+  12×8×8 local colour field, the one control with no Lightroom equivalent.
 - **Generative and pixel tools, opt-in and labelled** — reimagine
   (gpt-image-2), retouch, heal and SCUNet denoise are the only paths that can
   invent or alter scene content, and are marked so.
@@ -140,6 +141,19 @@ Details: [docs/TECH_STACK.md#ai-advisor-and-reverse-fit](docs/TECH_STACK.md#ai-a
 </picture>
 
 <sub>Zoom and pan this diagram at [autoshade.dev/#pillar-reimagine-fit](https://autoshade.dev/#pillar-reimagine-fit).</sub>
+
+The source frame is one function for both entry points: a neutral develop of
+the RAW at a 2048 px working edge, never the camera's embedded JPEG preview.
+That matters because the two read differently — on the desert pair below, the
+embedded rendition measures D = 0.361 and buys the bounded atmosphere path,
+while the neutral develop of the same sensor frame measures D = 0.275 and
+earns the full solve. The pair is read at TWO scales and both are printed:
+D = 0.275 per pixel and 0.609 per layout on that frame, so a report says
+whether the solve paired source pixel with target pixel or only their
+statistics. The coarse reading is a second scale, not a more forgiving one —
+measured, it reads HIGHER at frame, zone and cell scope, because the luma is
+rank-equalised against each image's own histogram and removing the shared
+fine texture leaves exactly the regional luma a repaint moved.
 
 <img src="docs/images/showcase-viaduct-reverse-fit.jpg" alt="Stone viaduct: straight conversion, generated target, and the recovered recipe rendered on the RAW, with a 1:1 detail row" />
 
@@ -409,7 +423,7 @@ the tests [`scripts/check_docs.py`](scripts/check_docs.py) re-derives.
 
 | What | Measured | Where |
 |---|---|---|
-| Automated test battery | 1400 library / 24 CLI / 164 GUI / 2+2 contract tests; `check_docs` re-derives the pinned release claims | [Tech stack](#tech-stack-algorithms-and-design-philosophy) |
+| Automated test battery | 1436 library / 24 CLI / 168 GUI / 2+2 contract tests; `check_docs` re-derives the pinned release claims | [Tech stack](#tech-stack-algorithms-and-design-philosophy) |
 | RAW coverage | 24 extensions, 725 camera bodies; nine-camera format zoo 9/9 at the last release gate | [Supported formats](#supported-formats) |
 | Lightroom Texture parity | 45 of 45 period/depth anchors within ±0.02 | [Develop pipeline](#develop-pipeline-and-tone-model) |
 | Radial mask closure | 41 of 41 measured vectors within ≤1 px | [Lens correction](#lens-correction-and-lightroom-mask-frame-laws) |
@@ -735,7 +749,7 @@ numbers](#measured-numbers) are not repeated.
   the 1800 MB per-photo budget, and a 4 GiB RAW gate bounds admission.
 - The [`build` workflow](.github/workflows/build.yml) covers default and GUI
   feature sets on Ubuntu and macOS; model weights are not stored here. The
-  current battery is **1400 library (1386 pass + 14 `#[ignore]`d forensic probes) / 24 CLI / 164 GUI / 2+2 contract** tests, and
+  current battery is **1436 library (1422 pass + 14 `#[ignore]`d forensic probes) / 24 CLI / 168 GUI / 2+2 contract** tests, and
   [`scripts/check_docs.py`](scripts/check_docs.py) re-derives the pinned
   release claims.
 

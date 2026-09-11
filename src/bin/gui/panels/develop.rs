@@ -1384,7 +1384,12 @@ impl AutoShadeApp {
     /// instead (R22 #16), which lit the dot for a list of muted or parked masks
     /// and said nothing the「Local Masks ({n})」count did not already say.
     pub(crate) fn masks_section_active(&self) -> bool {
-        self.recipe.masks.iter().any(mask_active)
+        // R33 §G: the field is in this section and it MOVES PIXELS, so the
+        // section's dot has to see it. `renderable()` is the engine's own
+        // question, asked here for the same reason `mask_active` is — one
+        // rule, so the dot and the render cannot disagree.
+        self.recipe.colour_field.as_ref().is_some_and(|f| f.renderable())
+            || self.recipe.masks.iter().any(mask_active)
     }
 
     /// One develop-panel section — body extracted verbatim from
@@ -1715,6 +1720,73 @@ impl AutoShadeApp {
                 });
                 self.overlay_stale = true;
                 changed = true;
+            }
+            // R33 §G. The colour field, in the Masks section because that is
+            // where a photographer looks for "what else is local about this
+            // photo" — one row, never a list: a recipe holds at most one.
+            //
+            // Its own row rather than a mask entry, because it is not a mask:
+            // it has no geometry to select, no coverage to preview and no
+            // stack position to drag. Three controls, which are the three
+            // questions a user actually has about it — is it on, how much of
+            // it, and get rid of it.
+            if self.recipe.colour_field.is_some() {
+                ui.add_space(SPACE_XS);
+                let mut remove_field = false;
+                ui.horizontal(|ui| {
+                    let field = self.recipe.colour_field.as_mut().expect("just checked");
+                    if ui
+                        .selectable_label(field.enabled, "👁")
+                        .on_hover_text(tr(
+                            lang,
+                            "Show/mute the colour field without losing its amount",
+                        ))
+                        .clicked()
+                    {
+                        field.enabled = !field.enabled;
+                        changed = true;
+                    }
+                    let label = format!(
+                        "▦ {} · {}",
+                        tr(lang, "Colour field"),
+                        tr(lang, "engine-only"),
+                    );
+                    ui.label(if field.enabled {
+                        egui::RichText::new(label)
+                    } else {
+                        egui::RichText::new(label).weak()
+                    })
+                    .on_hover_text(tr(
+                        lang,
+                        "A smooth local colour/tone field the reverse fit solved. It renders here and in every export from this app; classic XMP has no way to carry it, so Lightroom sees the rest of this recipe without it.",
+                    ));
+                    if ui
+                        .small_button("🗑")
+                        .on_hover_text(tr(lang, "Remove the colour field"))
+                        .clicked()
+                    {
+                        remove_field = true;
+                    }
+                });
+                let field = self.recipe.colour_field.as_mut().expect("just checked");
+                let mut pct = field.amount * 100.0;
+                if ui
+                    .add_enabled(
+                        field.enabled,
+                        egui::Slider::new(&mut pct, 0.0..=100.0)
+                            .text(tr(lang, "Amount"))
+                            .suffix("%"),
+                    )
+                    .changed()
+                {
+                    field.amount = (pct / 100.0).clamp(0.0, 1.0);
+                    changed = true;
+                }
+                if remove_field {
+                    self.recipe.colour_field = None;
+                    changed = true;
+                }
+                ui.separator();
             }
             // Selected mask: its full slider set.
             if let Some(i) = self.sel_mask.filter(|&i| i < self.recipe.masks.len()) {

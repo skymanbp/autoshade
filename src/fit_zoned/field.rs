@@ -300,6 +300,89 @@ pub(super) fn push_realized(report: &mut FitReport, field: &LocalField, producer
         ]));
 }
 
+/// R33 §G. The field as a SHIPPED control, and the last producer in the
+/// sequencer — after ranges, tiles and free masks, because it exists to carry
+/// the residual none of them could reach.
+///
+/// Two gates, and the first is the strength dial. At or below
+/// [`GradeStrength::DEFAULT`] the field stays exactly what it has always been,
+/// an analysis instrument, and this function returns without touching the
+/// recipe: the dial means "how far past Lightroom may this fit go", and the
+/// colour field is the first control that leaves Lightroom entirely — a
+/// sidecar cannot carry a coordinate system it has no keys for. The second is
+/// the field's own ceiling: it may only run when there is measurably more than
+/// [`LOCAL_STOP_MARGIN`] still on the table, which is the same verdict
+/// [`stop_verdict`] uses to END the sequencer, read the other way round.
+///
+/// The field is RE-SOLVED here rather than reused. The one from the head of
+/// the sequencer measured the producer-free frame; every producer since has
+/// moved pixels, and a field solved against a render that no longer exists
+/// would spend its budget re-doing work already attached.
+///
+/// Finally, do-no-harm: the attached field is kept only if the frame it
+/// renders is closer to the target than the frame without it. A field that
+/// regresses the frame is dropped and said so.
+pub(super) fn attach_colour_field(
+    src: &DynamicImage,
+    target: &DynamicImage,
+    report: &mut FitReport,
+    strength: crate::recipe::GradeStrength,
+    entry: &LocalField,
+) {
+    if strength.get() <= crate::recipe::GradeStrength::DEFAULT {
+        return;
+    }
+    if !stop_verdict_has_headroom(entry, report.err_after) {
+        crate::rationale::push_note(&mut report.recipe.rationale, &mut report.notes,
+            crate::rationale::Note::new(crate::rationale::keys::FIELD_WITHHELD, vec![
+                ("ceiling", format!("{:.6}", entry.ceiling)),
+                ("err_after", format!("{:.6}", report.err_after)),
+                ("margin", format!("{LOCAL_STOP_MARGIN:.3}")),
+            ]));
+        return;
+    }
+    let (s_img, t_img) = fit::analysis_pair(src, target);
+    let current = fit::pixels_of(&render::develop_preview(&s_img, &report.recipe));
+    let target_pixels = fit::pixels_of(&t_img);
+    let Some(solved) = LocalField::solve(
+        &current, &target_pixels, s_img.width(), s_img.height(), &report.evidence,
+    ) else {
+        return;
+    };
+    let after = solved.render(&current);
+    let err_with = fit::look_err_with_evidence(&after, &target_pixels, &report.evidence);
+    if err_with >= report.err_after {
+        crate::rationale::push_note(&mut report.recipe.rationale, &mut report.notes,
+            crate::rationale::Note::new(crate::rationale::keys::FIELD_REGRESSED, vec![
+                ("before", format!("{:.6}", report.err_after)),
+                ("after", format!("{:.6}", err_with)),
+            ]));
+        return;
+    }
+    let mut field = solved.as_recipe_field();
+    field.round();
+    let realized = realized_share(solved.global, solved.ceiling, err_with)
+        .map_or_else(|| "n/a".to_string(), |value| format!("{value:.3}"));
+    crate::rationale::push_note(&mut report.recipe.rationale, &mut report.notes,
+        crate::rationale::Note::new(crate::rationale::keys::FIELD_ATTACHED, vec![
+            ("x", field.x.to_string()), ("y", field.y.to_string()), ("b", field.b.to_string()),
+            ("before", format!("{:.6}", report.err_after)),
+            ("after", format!("{:.6}", err_with)),
+            ("ceiling", format!("{:.6}", solved.ceiling)),
+            ("realized", realized),
+            ("saturated", solved.saturated.to_string()),
+        ]));
+    report.recipe.colour_field = Some(field);
+    report.err_after = err_with;
+}
+
+/// [`stop_verdict`] read the other way: is there still more than the margin on
+/// the table? One expression, two callers, so "the fit may stop here" and "the
+/// field may run here" can never disagree about the same number.
+fn stop_verdict_has_headroom(field: &LocalField, err_after: f32) -> bool {
+    !stop_verdict(field, err_after) && field.ceiling < field.global
+}
+
 pub(super) fn push_stop(report: &mut FitReport, producer: &str, skipped: &str) {
     crate::rationale::push_note(&mut report.recipe.rationale, &mut report.notes,
         crate::rationale::Note::new(crate::rationale::keys::LOCAL_STOP, vec![

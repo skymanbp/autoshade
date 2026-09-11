@@ -97,6 +97,33 @@ pub mod keys {
          structure cannot be reconstructed by develop controls, so only its atmosphere \
          and overall tone/colour were matched with bounded robust controls. Residual look \
          error {err_before} → {err_after}.";
+    /// The two structural readings and the pairing scale they chose. TWO full
+    /// keys rather than one with a `{scale}` argument: a fragment inside an
+    /// arg would stay English in the zh rendering.
+    pub const FIT_NOTE_PAIRING_PIXEL: &str =
+        " Structural reading: D {fine} at pixel scale, {coarse} at layout scale — the \
+         pixel-scale reading holds, so this solve paired source pixel with target pixel.";
+    pub const FIT_NOTE_PAIRING_CELL: &str =
+        " Structural reading: D {fine} at pixel scale, {coarse} at layout scale — the \
+         pixel-scale reading does not hold, so only cell statistics were paired and never \
+         individual pixels.";
+    pub const FIT_NOTE_MODE_MARGIN: &str =
+        " The pixel-scale reading is {margin} from the {line} mode threshold: this pair \
+         chose between the full solve and Atmosphere mode by that margin.";
+    /// R33 §E: the white balance the population asked for was rendered and
+    /// the paired cells refused it. NOT a capability veto (that is
+    /// `FIT_NOTE_WB_WITHHELD_FOREIGN_HUE` / `_ROTATION`) and NOT "no cast was
+    /// found" — a cast WAS found, and the target said it was the wrong one.
+    pub const FIT_NOTE_WB_CELLS_REFUSED: &str =
+        " A white balance was solved from the population and then rendered and checked \
+         against the target's own 12x8 cell means: only {converged} of the frame moved \
+         closer and {diverged} moved away, so it was returned to as-shot rather than \
+         shipped on population evidence alone.";
+    /// …and the other half of the same sentence: it WAS vouched.
+    pub const FIT_NOTE_WB_CELLS_VOUCHED: &str =
+        " The fitted white balance was checked against the target's own 12x8 cell means \
+         before it shipped: {converged} of the frame moved closer to its target and \
+         {diverged} moved away.";
     pub const FIT_NOTE_FAR: &str =
         " NOTE: the fitted recipe still renders far from the target \
          (residual {err_after}) — this look exceeds what global \
@@ -398,6 +425,15 @@ pub mod keys {
     /// because neither frame's population could speak for them.
     pub const FIT_NOTE_HSL_BANDS: &str =
         " Per-band colour mixer, solved from each band's own population: [{moved}]. Hue rotation is never solved, so every band's hue stays 0. Bands left neutral for want of two-sided population evidence: [{refused}].";
+    /// R33 §E: bands the pair's FROZEN evidence called one-sided that the
+    /// render in front of the stage carries on both sides, whose members the
+    /// target's own cells then vouched. The band stops being unmeasurable
+    /// because the light was corrected, not because anything was assumed.
+    pub const FIT_NOTE_HSL_BANDS_VOUCHED: &str =
+        " Hue bands [{bands}] were one-sided on the pair as it arrived and are two-sided on \
+         the render this stage solved from; the target's own cell means vouched that the \
+         earlier stages moved those pixels toward it, so the bands were admitted rather \
+         than left neutral.";
     pub const FIT_NOTE_HSL_WITHDRAWN_ERROR: &str =
         " The per-band colour move was given back: applying it did not leave the frame closer to the target, so every band returned to neutral.";
     pub const FIT_NOTE_HSL_WITHDRAWN_BLIND: &str =
@@ -790,6 +826,20 @@ pub mod keys {
          {ceiling}, share {realized}.";
     pub const LOCAL_STOP: &str =
         " Local-field stop after {producer}: skipped [{skipped}], margin {margin}.";
+    pub const FIELD_ATTACHED: &str =
+        " Colour field attached ({x}x{y}x{b} vertices): frame {before} -> {after}, \
+         ceiling {ceiling}, share {realized}, saturated vertices {saturated}. It is \
+         rendered in-app only — classic XMP has no coordinate system for a smooth \
+         local field, so the Lightroom sidecar carries the rest of this recipe \
+         without it.";
+    pub const FIELD_WITHHELD: &str =
+        " No colour field was attached: the field's own ceiling {ceiling} is not \
+         more than {margin} better than the frame this fit already reached \
+         ({err_after}), so there was nothing left for it to carry.";
+    pub const FIELD_REGRESSED: &str =
+        " The solved colour field was given back: rendering it moved the frame \
+         {before} -> {after}, away from the target rather than toward it \
+         (do-no-harm check).";
     pub const FIELD_MASK_PROPOSED: &str =
         " Field mask {n} proposed: {sign} m={mass} s={share_src}/{share_tgt} D={d} p={pixels}.";
     pub const FIELD_MASK_ATTACHED: &str =
@@ -977,6 +1027,61 @@ pub mod keys {
          heal coverage) and were left UNTOUCHED; paint fewer or smaller regions";
 }
 
+/// The note keys the GLOBAL reverse-fit solve OWNS: everything
+/// `fit::compose_report` and its helpers can emit, which is the whole
+/// `// --- reverse fit (fit.rs)` section of [`keys`] except
+/// [`keys::ZONE_ROBUST_REJECTED`] (defined there beside its global twin but
+/// pushed by the zoned pass).
+///
+/// It exists for R33 §H, as a DENYLIST: `fit::rescore_report` regenerates
+/// this family from the recipe in front of it, and everything ELSE in a
+/// prior report — zones, native ranges, spatial tiles, free masks, the
+/// boundary gate, the guided refiner, the local field — rides through
+/// untouched. The inverse list, an allowlist of what may be carried, is a
+/// list a new producer forgets to join, and five families had.
+///
+/// `rescore_report_carries_every_key_this_module_files_under_the_solve` pins
+/// it against this file's own text, so a new key in that section fails the
+/// build rather than silently teleporting into a rescored report.
+pub(crate) const GLOBAL_SOLVE_KEYS: &[&str] = &[
+    keys::FIT_SUMMARY_WITH_CURVE, keys::FIT_SUMMARY_NO_CURVE, keys::FIT_SUMMARY_ATMOSPHERE,
+    keys::FIT_NOTE_PAIRING_PIXEL, keys::FIT_NOTE_PAIRING_CELL, keys::FIT_NOTE_MODE_MARGIN,
+    keys::FIT_NOTE_WB_CELLS_REFUSED, keys::FIT_NOTE_WB_CELLS_VOUCHED, keys::FIT_NOTE_FAR,
+    keys::FIT_NOTE_SAT_PEGGED, keys::FIT_NOTE_ATMOSPHERE_SAT_PEGGED,
+    keys::FIT_NOTE_ATMOSPHERE_CONFIDENCE, keys::FIT_NOTE_ATMOSPHERE_POPULATION_EVIDENCE,
+    keys::FIT_NOTE_WB_CLAMPED, keys::FIT_NOTE_WB_WITHHELD_FOREIGN_HUE,
+    keys::FIT_NOTE_WB_WITHHELD_ROTATION, keys::FIT_NOTE_WB_SEARCH_BOUND,
+    keys::FIT_NOTE_CAST_ADMITTED_BY_STRENGTH, keys::FIT_NOTE_CAST_ADMITTED,
+    keys::FIT_NOTE_CAST_ADMITTED_FOREIGN, keys::FIT_NOTE_CAST_ADMITTED_FOREIGN_NA,
+    keys::FIT_NOTE_CAST_ADMITTED_FAN, keys::FIT_NOTE_CAST_ADMITTED_FAN_NA,
+    keys::FIT_NOTE_CAST_HUE_FANNED, keys::FIT_NOTE_CAST_PROJECTED,
+    keys::FIT_NOTE_CAST_PROJECTED_FAN, keys::FIT_NOTE_CAST_PROJECTED_FAN_NA,
+    keys::FIT_NOTE_DELIVERED_FAN, keys::FIT_NOTE_DELIVERED_FAN_UNCAUSED,
+    keys::FIT_NOTE_GLOBAL_CAST, keys::FIT_NOTE_VETO_DISCLOSED, keys::FIT_NOTE_STRENGTH,
+    keys::FIT_DEGENERATE, keys::FIT_NOTE_REGRESSED, keys::FIT_NOTE_SAT_REDUCED,
+    keys::FIT_NOTE_REHUE_BLOCKED, keys::FIT_NOTE_CAST_REJECTED, keys::FIT_NOTE_JOINT,
+    keys::FIT_NOTE_JOINT_NONE, keys::FIT_NOTE_JOINT_MISS, keys::FIT_NOTE_JOINT_REFUSED,
+    keys::FIT_NOTE_JOINT_REGRESSED, keys::FIT_NOTE_EVIDENCE_CONTRADICTED,
+    keys::FIT_NOTE_EVIDENCE_UNMEASURABLE, keys::FIT_NOTE_UNREPRESENTED,
+    keys::FIT_NOTE_ATMOSPHERE_UNREPRESENTED, keys::FIT_NOTE_DEEP_ADOPTED,
+    keys::FIT_NOTE_NOT_SAME_FRAME, keys::FIT_SUMMARY_WITH_CURVE_PAIRED,
+    keys::FIT_SUMMARY_NO_CURVE_PAIRED, keys::FIT_NOTE_ROBUST_REJECTED,
+    keys::FIT_NOTE_VOUCHED_CONVERGENCE, keys::FIT_NOTE_EVIDENCE_WITHHELD, keys::FIT_NOTE_DETAIL,
+    keys::FIT_NOTE_DETAIL_WITHHELD, keys::FIT_NOTE_HSL_BANDS, keys::FIT_NOTE_HSL_BANDS_VOUCHED,
+    keys::FIT_NOTE_HSL_WITHDRAWN_ERROR, keys::FIT_NOTE_HSL_WITHDRAWN_BLIND,
+    keys::FIT_ATMOSPHERE_REFERENCE_POPULATION, keys::FIT_ATMOSPHERE_REFERENCE_UNPAIRED,
+    keys::FIT_ATMOSPHERE_REFERENCE_EXCLUDED, keys::FIT_ATMOSPHERE_REFERENCE_SHARED,
+    keys::FIT_ATMOSPHERE_REFERENCE_THIN, keys::FIT_ATMOSPHERE_REFERENCE_UNMEASURED,
+    keys::FIT_CORRESPONDENCE, keys::FIT_CORRESPONDENCE_UNAVAILABLE,
+];
+
+/// Whether `key` belongs to the global solve's own account — see
+/// [`GLOBAL_SOLVE_KEYS`]. Linear over 67 pointers on a path that runs once
+/// per rescored report; a set would cost more to build than to skip.
+pub(crate) fn is_global_solve_key(key: &str) -> bool {
+    GLOBAL_SOLVE_KEYS.iter().any(|k| std::ptr::eq(*k, key) || *k == key)
+}
+
 /// Render ONE note's English text: substitute each `{name}` with its arg,
 /// in a single pass over the TEMPLATE only (the GUI trf rule — a value that
 /// happens to contain brace syntax is never reinterpreted as markup). An
@@ -1139,6 +1244,52 @@ fn truncate_chars(text: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// R33 §H. [`GLOBAL_SOLVE_KEYS`] is the denylist `fit::rescore_report`
+    /// carries a prior report through, so a key MISSING from it is a global
+    /// claim that teleports, unchanged and unearned, onto a recipe someone
+    /// adjusted after the solve — the exact defect R23 MED-3 cured. The list
+    /// cannot be derived at run time (a key's VALUE is its English template,
+    /// not its name), so it is pinned against this file's own text instead.
+    #[test]
+    fn rescore_report_carries_every_key_this_module_files_under_the_solve() {
+        let text = include_str!("rationale.rs").replace("\r\n", "\n");
+        let section = {
+            let from = text.find("    // --- reverse fit (fit.rs)").expect("the solve's section");
+            let to = text.find("    // --- zoned fit (fit_zoned.rs)").expect("the next section");
+            &text[from..to]
+        };
+        let declared: Vec<&str> = section
+            .lines()
+            .filter_map(|line| line.strip_prefix("    pub const "))
+            .filter_map(|rest| rest.split_once(": &str"))
+            .map(|(name, _)| name)
+            // Filed here beside its global twin, but PUSHED by the zoned
+            // pass: a producer note, and it must ride through.
+            .filter(|name| *name != "ZONE_ROBUST_REJECTED")
+            .collect();
+        assert_eq!(
+            declared.len(),
+            GLOBAL_SOLVE_KEYS.len(),
+            "{} key(s) in the solve's section are not in GLOBAL_SOLVE_KEYS",
+            declared.len() as i64 - GLOBAL_SOLVE_KEYS.len() as i64
+        );
+        // …and each of them is the SAME const, matched by the value the
+        // name binds, which is what the note carries at run time.
+        for name in declared {
+            let at = section.find(&format!("pub const {name}: &str")).expect("just found");
+            let template = &section[at..];
+            let head = template
+                .split_once('"')
+                .and_then(|(_, rest)| rest.split(['"', '\\']).next())
+                .filter(|head| head.len() > 12);
+            let Some(head) = head else { continue };
+            assert!(
+                GLOBAL_SOLVE_KEYS.iter().any(|k| k.starts_with(head)),
+                "{name} is counted but its template is not in GLOBAL_SOLVE_KEYS"
+            );
+        }
+    }
 
     /// The refactor moved every deterministic rationale from `format!` to a
     /// template + args. recipe.json, the XMP comment, the HTTP header, the

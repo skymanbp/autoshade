@@ -2457,6 +2457,24 @@ impl AutoShadeApp {
     /// a language switch during the multi-minute fit renders fresh (L12#4).
     pub(crate) fn render_fit_note(lang: Lang, n: &FitNote) -> String {
         match n {
+            FitNote::SolverMode { atmosphere: false } => {
+                tr(lang, " · full solve (all develop controls)").to_string()
+            }
+            FitNote::SolverMode { atmosphere: true } => tr(
+                lang,
+                " · Atmosphere mode (bounded robust controls — the structure diverged)",
+            )
+            .to_string(),
+            FitNote::SolverPairing { pixel: true, fine, coarse } => trf(
+                lang,
+                " · paired pixel-to-pixel (D {fine} at pixel scale, {coarse} at layout scale)",
+                &[("fine", fine), ("coarse", coarse)],
+            ),
+            FitNote::SolverPairing { pixel: false, fine, coarse } => trf(
+                lang,
+                " · paired by cell statistics only (D {fine} at pixel scale, {coarse} at layout scale)",
+                &[("fine", fine), ("coarse", coarse)],
+            ),
             FitNote::IncludesSkyZone => tr(
                 lang,
                 " · includes sky-zone correction (adjustable in the mask panel; XMP carries the global part only)",

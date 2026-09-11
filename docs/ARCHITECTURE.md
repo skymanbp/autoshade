@@ -129,9 +129,15 @@
 > wrong reason; it writes a `=== name ===` transcript that
 > `scripts/check_docs.py --gates` reads the counts and the lane set back out
 > of, and it prints the by-name test-set difference against a saved baseline.
-> 1400 library + 24 CLI + 164 GUI + 2+2 contract tests are enumerated in the GUI
-> build; the library result is 1386 pass + 14 `#[ignore]`d forensic probes
-> (counts refreshed 2026-09-08 for v1.2.6: +1 / −0 by name against `616f795` —
+> 1436 library + 24 CLI + 168 GUI + 2+2 contract tests are enumerated in the GUI
+> build; the library result is 1422 pass + 14 `#[ignore]`d forensic probes
+> (counts refreshed 2026-09-11 after the R33 merge, not yet released: +41 / −1 by
+> name against `5ffa275` — the four lanes' tests, listed in the ROADMAP's
+> unreleased ledger; the −1 is `the_local_field_never_reaches_the_engine_or_the_recipe_schema`,
+> renamed `the_engine_renders_the_field_from_the_recipe_and_never_calls_the_analyzer`
+> when the field became a shipped control; taken statically between the tag's
+> source and this tree. The calibration lane has not run since v1.2.6. Before
+> that, refreshed 2026-09-08 for v1.2.6: +1 / −0 by name against `616f795` —
 > `denoise::the_sidecar_downloader_asks_for_an_unencoded_body`, which pins the
 > `identity` request the sidecar downloader now makes; the saved name baseline
 > was gone with `target/` in the 2026-09-03 clean-up, so the difference was
@@ -246,7 +252,9 @@
 > `field_recovers_a_planted_two_band_exposure`,
 > `field_band_dispersion_flags_spatially_structured_bins`,
 > `calibration_field_ceiling_matches_the_numpy_solver`,
-> `the_local_field_never_reaches_the_engine_or_the_recipe_schema`,
+> `the_local_field_never_reaches_the_engine_or_the_recipe_schema` (renamed by
+> R33 §G to `the_engine_renders_the_field_from_the_recipe_and_never_calls_the_analyzer`
+> when the field became a shipped control),
 > `calibration_local_support_is_not_constant` and the two new
 > `#[ignore]`d probes `export_calibration_field_inputs_for_numpy` and
 > `compare_calibration_field_with_numpy`; in
@@ -2373,10 +2381,86 @@ so every Lightroom sky mask the photographer had inverted rendered over the
 sky they excluded; and the writer wrote the geometry's raw bit, so an Invert
 ticked on a brush or AI mask never reached the sidecar.
 
+**The source frame is one function** (R33 §A, unreleased):
+`pipeline::fit_source` — a neutral develop of the RAW at
+`FIT_SOURCE_EDGE = 2048` plus the per-photo calibration recipe — and both
+entry points, `main.rs`'s `match` and the GUI's `start_fit` worker, call it.
+The CLI used to take the camera's embedded JPEG preview when one existed, and
+the two frames read differently enough to choose different solvers: on the
+desert-dusk reference pair the embedded rendition measures D = 0.361 and buys
+the bounded Atmosphere path, the neutral develop of the same sensor frame
+measures D = 0.275 and earns the full solve. That divergence between the two
+front ends was the defect; one function is the cure, pinned both by a
+source-text test that neither entry may reach the frame another way and by a
+fixture test on the geometry.
+
 The method is deliberately **distribution-level, not per-pixel regression** — a
 generative target is not pixel-aligned with its source, so only statistics are
 trustworthy. A rank/gradient/pyramid structural-divergence reading selects the
-global policy before any CDF solve. **Full** mode keeps four stages, in this
+global policy before any CDF solve.
+
+**Two scales, both read, both disclosed** (R33 §B). `divergence_pair_for`
+builds the 384×256 raster once and takes two readings off it: the existing
+`structure_divergence`, and `structure_divergence_coarse`, the same statistic
+after a separable Gaussian low-pass at σ = `ANALYZE_EDGE / COARSE_SIGMA_DIVISOR`
+(8 px at 384; the taps are renormalised at the border, unlike the band blurs
+inside `structure_divergence`, so the coarse pass cannot inject a shared
+vignette). The pair reports a `PairingScale` — `Pixel` when the FINE reading is
+under `DIVERGENCE_GLOBAL`, else `Cell` — and both numbers reach the CLI line,
+the GUI status line and the rationale.
+
+The coarse reading was added to test a hypothesis and REFUTED it, which is why
+the mode line did not move to it. The hypothesis was that a repaint leaves the
+LAYOUT intact, so a low-passed reading would be more forgiving and could
+license the full control set on a pair whose texture was replaced. Measured on
+the reference pair it is the opposite at every scope — frame 0.275 fine /
+0.609 coarse, sky zone 0.620 / 0.959, land zone 0.271 / 0.546, 3×3 spatial
+support 0.585 / 0.454, 12×8 cell support 0.417 / 0.413 — because the luma is
+rank-equalised against each image's OWN histogram: removing the shared fine
+texture does not remove a common mode, it leaves exactly the regional luma the
+repaint moved. So the mode line stays on the fine reading, `structural_survival`,
+`spatial_evidence` and `local_support` were NOT switched to coarse, and the
+coarse number is carried as a disclosed second scale. `the_coarse_reading_is_a_second_scale_not_a_more_forgiving_one`
+pins the refutation so a future reader does not re-derive the hypothesis.
+
+**One admission instrument, `fit_cells`** (R33 §C–§E). A `PairedCells` over the
+same 12×8 grid `fit_field` uses answers ONE question: did this edit take the
+frame's cell means toward the target's, or away from them? A cell mean over a
+rectangle needs the two frames to show the same scene in the same place, not
+the same pixels — which is what survives a repaint whose layout is intact and
+whose texture is invented, and exactly where a per-pixel voucher is noise. It
+can only LIFT a veto: it never estimates, never names a value, and an
+abstention (no cell resolved) is never a vouch. Trust per cell is the frozen
+evidence model's own `spatial_weights` averaged over the cell, not a second
+divergence pass — the coarse reading was measured for this job first and
+refused it (0.417 vs 0.413 at 12×8 is a wash, so a second 96-cell instrument
+per admission would have moved the weights by 0.004).
+
+Two stages consume it. **Full mode now has a white balance** (R33 §E):
+`temperature_k` was assigned in exactly one function, on the Atmosphere branch,
+so the commonest pair there is — the same frame regraded — could never be told
+its light had changed and had to express the whole cast through saturation, the
+mixer and three channel curves, which the hue gates then correctly refused. The
+stage is `solve_white_balance`, extracted line for line and called by both
+modes (Atmosphere unchanged), placed after tone and before saturation for the
+reason the cast stage already gives about itself. What decides whether it SHIPS
+is the cells: the WB is solved from the population as before, rendered, and
+returned to as-shot unless the target's own cell means vouch the render it
+produced. Both outcomes are disclosed. The same instrument reopens the mixer's
+hardest case — a band the frozen evidence calls one-sided is admitted when it
+is two-sided ON THE RENDER THE STAGE SOLVES FROM (the WB having corrected the
+light first) AND the cells holding those members vouch the stages so far. That
+is the anti-laundering rule kept, not dropped: an edit may not create its own
+evidence unless the paired target says the created pixels went the right way.
+Atmosphere passes no cells, deliberately.
+
+The zone probes were measured for the same treatment and REFUSED it:
+`fit_zone_dials` solves `color_gains` from the zone's mask-weighted MEAN
+moments, and a cell voucher restricted to the same mask reads cell MEANS over
+the same pixels, so the estimator's objective and the voucher's measurement
+are one quantity. Measured, it read 1.000 converged / 0.000 diverged at every
+site whose probe was not already null. The reason is recorded at the call site;
+the two withholdings stand. **Full** mode keeps four stages, in this
 order: luminance-CDF tone matching (sampled
 at the engine's own tone knots and least-squares solved against the engine's own
 slider basis, with a ridge + penalised model-selection prior so numerically
@@ -2392,6 +2476,33 @@ absence on the finished frame; then per-channel CDF residuals as red/green/blue 
 admitted only through four vetoes (aggregate error, foreign-hue, rotation
 budget, hue fan) — each veto is a specific real-photo failure recorded at its const
 block.
+
+**The tone estimator follows the pairing scale** (R33 §D). `paired_correspondence`
+returns the robust map's points only at `PairingScale::Pixel`; at cell scale
+the population-quantile arm beside it in the same function is the honest
+estimator, and returning the empty vec rather than a flag is what stops a
+scale verdict from being applied to the map and forgotten by the knot-support
+rule. Stated plainly: the Cell branch is NOT reachable through the shipped
+solve today — with the mode line on the fine reading a Full solve is under
+`DIVERGENCE_GLOBAL` by definition, and the only other route is an abstention a
+384×256 all-ones raster cannot produce (`STRUCTURE_MIN_CORE_PX` is 100 against
+~94 500 core pixels). It is written and unit-pinned anyway because the coupling
+is the rule and the measurement behind it is real: on a pair whose texture was
+re-synthesised the paired estimator reports 54 map points, rejects 0.1% of
+them, and under-reads the map's contrast by 10%, while the quantile arm
+recovers the same map to 0.3%.
+
+**A rescored report keeps its producers' account** (R33 §H). `rescore_report`
+rebuilds the GLOBAL solve field by field off `SolveFacts`, which is right for a
+recipe someone adjusted after the solve. Every note a LOCAL producer wrote —
+zones, ranges, tiles, free masks, the boundary gate, the guided refiner, the
+field — had no field to ride on and was dropped, so a `--zoned` fit that went
+through `--deep` reached the user with its masks still rendering and its whole
+local half missing from the rationale. The carrying rule is now a DENYLIST in
+one place, `rationale::GLOBAL_SOLVE_KEYS`; everything else rides through in
+order. An allowlist was the defect — a list a new producer forgets to join, and
+five families had — and the denylist is pinned against `rationale.rs`'s own
+text, because a key's value is its English template and not its name.
 
 The fourth veto, the **hue-fan gate** (v1.2.3), closes the hole the first
 three structurally cannot see. They all ask about a pixel's DESTINATION: how
@@ -3319,15 +3430,69 @@ post-cast arbiter load-bearing). Repeated runs are SHA-identical. A 512 / 768 an
 measured and rejected: the same tiles, +4% / +25-50% wall time, and the
 384-calibrated ruler collapses at 768.
 
+**The colour field as a control (R33 §G, unreleased).** Past
+`GradeStrength::DEFAULT` and nowhere else, `run_local_sequencer` runs one last
+producer after the ranges, the tiles and the free masks: it RE-SOLVES the field
+on the current render (every earlier producer applied — the head-of-sequencer
+field measured a frame that no longer exists), renders it, and keeps it only if
+the frame moved toward the target. Three outcomes, one note each:
+`FIELD_ATTACHED`, `FIELD_WITHHELD` (the ceiling was not more than
+`LOCAL_STOP_MARGIN` better than the frame already reached — `stop_verdict` read
+the other way round, one expression so "the fit may stop here" and "the field
+may run here" cannot disagree) and `FIELD_REGRESSED`.
+
+The strength gate is the design, not a safety valve: the dial means "how far
+past Lightroom may this fit go", and this is the first control that leaves
+Lightroom entirely. At or below the default every result is byte-identical to
+v1.2.6, the stage does not narrate itself, and the recipe writes no key
+(`skip_serializing_if`, the `quarter_turns` rule — an archived version's
+`store::recipe_struct_hash` still matches and no re-archive pass is needed).
+`SCHEMA_ERA` is deliberately NOT bumped: its one consumer,
+`xmp::era_suppressed_attr_keys`, asks whether a recipe has seen the
+twenty-seven R25 `crs:` keys, and a colour field owns none.
+
+ONE renderer: `render::apply_colour_field`, with `LocalField::render` a call
+into it and the guide (`render::field_guide_luma`, re-exported into
+`fit_field` under its analyzer name) and the axis mapping
+(`render::field_axis`) moved into the engine with it. The field runs LAST in
+`apply_develop`, after `apply_masks`, because it is the residual the masks
+could not reach and must read the frame they produced. A field that is off, at
+zero amount, or whose grid length disagrees with its own declared shape leaves
+the frame untouched. The grid's spatial axes are normalised, so a field solved
+on the 384×256 analysis raster renders correctly at any size; the guide's
+3-tap kernel does not rescale, and the resulting discrepancy was MEASURED on
+the reference pair rather than argued: 0.173 codes mean, 1.0 at p99, 2.0 worst
+case, against a field effect of 8.9 codes mean and 60 at p99.
+
+A quarter turn permutes the field's cells with every other coordinate in
+`orient_recipe_coords` and swaps its two axis lengths (a 12×8 grid over a
+landscape frame is an 8×12 grid over the portrait one); the five parameters are
+photometric and ride unchanged. `gui::export::paste_payload` drops it from the
+foreign arm and counts it, like a bitmap mask. `pipeline::carry_over_unrepresentable`
+carries it through a refine, because no response schema can state ninety-six
+vertices.
+
+It is the THIRD `Tier::RenderedNotExported` global and the first that is an
+edit rather than a measurement, which moved a rule: `gui::util::xmp_loss_interrupts`
+asked `engine_only` whether an export loss is actionable, which was the right
+answer for the wrong reason (every engine-only global that could be lost
+happened to be stamped calibration). It now asks
+`catalogue::STAMPED_CALIBRATION` directly, so the base curve stays quiet on
+every save and a field the user asked for says so out loud.
+
 **The local-field analyzer (B2, 2026-08-28).** Before any local producer runs,
 `fit_zoned::field::solve_local_field`
 ([`src/fit_zoned/field.rs`](../src/fit_zoned/field.rs)) solves a read-only
 12x8x8 bilateral field over the pair's shared analysis geometry
 ([`src/fit_field.rs`](../src/fit_field.rs)) and reads shape verdicts off it. It
-is DISCLOSURE ONLY: the field is an owned local of `fit_recipe_zoned_inner`,
-never a `FitReport` member, and a test greps `render.rs` and `recipe.rs` for
-any mention of the module, so recipe schema era 1, the engine and XMP are
-untouched and `src/fit.rs` needed no change at all. `LocalField::solve` returns
+was DISCLOSURE ONLY until R33 §G (unreleased): the field is an owned local of
+`fit_recipe_zoned_inner`, never a `FitReport` member, and a test greps
+`render.rs` and `recipe.rs` for any mention of the module. It now also SHIPS,
+as `EditRecipe.colour_field`, past the default Strength — see **The colour
+field as a control** below; the grep pin survives in the one direction that
+still matters (`the_engine_renders_the_field_from_the_recipe_and_never_calls_the_analyzer`),
+and schema era 1 is unchanged because the field owns no `crs:` key.
+`LocalField::solve` returns
 `None` when the objective already calls the pair unmeasurable (identifiability
 <= 1e-5), when the fit weight carries no mass, or when the solve is
 non-finite; a `None` field — like the disabled layer `ZonedLayerOpts { field:

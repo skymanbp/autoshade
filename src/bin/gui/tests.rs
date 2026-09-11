@@ -56,6 +56,18 @@
             mask: autoshade::recipe::MaskGeometry::select_sky(0.5, 0.25, false, "cached.png".into()),
             ..Default::default()
         });
+        // R33 §G: per-photo in the strongest sense a global control can be.
+        // Its twelve-by-eight cells are normalised to the frame it was solved
+        // on, so cell (3, 1) means "this scene's left-of-centre sky" and
+        // nothing at all on another photograph.
+        src.colour_field = Some(autoshade::recipe::ColourField {
+            x: 2,
+            y: 2,
+            b: 2,
+            grid: vec![[0.1, 0.0, 0.0, 0.0, 0.0]; 8],
+            amount: 1.0,
+            enabled: true,
+        });
 
         let p = paste_payload(src.clone(), true);
         assert!(
@@ -79,6 +91,11 @@
             p.foreign.masks[0].mask
         );
         assert_eq!(p.own.masks.len(), 3, "…while the clipboard's own photo keeps them all");
+        // The colour field is the same kind of loss and is reported the same
+        // way: counted, never silently dropped.
+        assert!(p.colour_field, "the dropped field is reported for the toast");
+        assert!(p.foreign.colour_field.is_none(), "…and is gone from the foreign payload");
+        assert!(p.own.colour_field.is_some(), "…while its own photo keeps it");
         // Geometry off strips BOTH arms: composition rarely transfers between
         // frames, and that includes back onto the source.
         let g = paste_payload(src, false);
@@ -5904,19 +5921,36 @@
     /// the engine's own per-photo measurement vs something the user chose.
     #[test]
     fn engine_calibration_losses_are_disclosed_without_interrupting_the_save() {
-        use autoshade::advisor::catalogue::{Tier, RECIPE_CONTROLS};
+        use autoshade::advisor::catalogue::{Tier, RECIPE_CONTROLS, STAMPED_CALIBRATION};
         use autoshade::xmp::{MaskLoss, MaskLossReason as R};
 
-        // Premise, from the registry rather than from memory: every global
-        // the export can lose today IS engine calibration.
+        // Premise, from the registry rather than from memory. It used to read
+        // "every global the export can lose IS engine calibration", and R33 §G
+        // ended that: `colour_field` is an unexportable global the USER asked
+        // for. So the premise is now the split itself — three rows in the
+        // tier, of which exactly the stamped calibration is un-actionable.
         let rows: Vec<_> = RECIPE_CONTROLS
             .iter()
             .filter(|c| c.tier == Some(Tier::RenderedNotExported))
             .collect();
-        assert_eq!(rows.len(), 2, "the tier's membership moved — re-read this test");
+        assert_eq!(rows.len(), 3, "the tier's membership moved — re-read this test");
         assert!(
             rows.iter().all(|c| c.engine_only),
-            "premise: today's unexportable globals are all engine measurements"
+            "premise: no unexportable global is a value the advisor can state"
+        );
+        let (calibration, chosen): (Vec<&str>, Vec<&str>) = rows
+            .iter()
+            .map(|c| c.name)
+            .partition(|name| STAMPED_CALIBRATION.contains(name));
+        assert_eq!(
+            calibration,
+            vec!["base_curve", "lens_profile"],
+            "the engine's own per-photo measurements"
+        );
+        assert_eq!(
+            chosen,
+            vec!["colour_field"],
+            "…and the one the photographer asked for by raising Strength"
         );
 
         // The quiet arm: the real, universal case — a stamped base curve.
@@ -5957,6 +5991,22 @@
         assert!(
             xmp_loss_interrupts(&[], &["some_future_control"]),
             "a name with no registry row cannot be vouched for as calibration"
+        );
+        // R33 §G, the case that made the rule stop asking `engine_only`: the
+        // advisor cannot state ninety-six grid vertices, but the photographer
+        // asked for the field by raising Strength and removes it in one click.
+        assert!(
+            RECIPE_CONTROLS.iter().any(|c| c.name == "colour_field" && c.engine_only),
+            "premise: it IS engine-only, which is what used to make it quiet"
+        );
+        assert!(
+            xmp_loss_interrupts(&[], &["colour_field"]),
+            "an unexportable control the user chose is actionable — it interrupts"
+        );
+        assert!(
+            xmp_loss_line(crate::i18n::Lang::En, &[], &["colour_field"])
+                .is_some_and(|line| line.contains("colour field")),
+            "…and it is named in words, not by its registry symbol"
         );
         assert!(
             xmp_loss_interrupts(&[], &["base_curve", "clarity"]),

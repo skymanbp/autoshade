@@ -364,18 +364,50 @@ fn field_band_dispersion_flags_spatially_structured_bins() {
     assert!(tested >= 3, "premise: at least three populated bins carry the split, got {tested}");
 }
 
-/// The analyzer is an in-process measuring instrument only.  This grep pin
-/// catches either persistence or engine wiring before a schema snapshot can.
+/// R33 §G REPLACED the rule this pin used to state.
+///
+/// It read `the_local_field_never_reaches_the_engine_or_the_recipe_schema`,
+/// and it was right for as long as the field was an instrument: a grep over
+/// render.rs / recipe.rs / xmp.rs for the analyzer's own module name, catching
+/// persistence or engine wiring before a schema snapshot could. The field now
+/// SHIPS, as `EditRecipe::colour_field`, so that sentence is no longer the
+/// claim anyone wants to make.
+///
+/// What survives is the half that was never about shipping: the engine renders
+/// a `ColourField` off the RECIPE, and must not reach into the analyzer to do
+/// it. One direction of dependency — `fit_field` calls `render`, never the
+/// reverse — is what keeps the solver out of the render path and lets the
+/// render be a pure function of the recipe in front of it. `freemask` is still
+/// fully analysis-side and keeps its original, stronger claim.
 #[test]
-fn the_local_field_never_reaches_the_engine_or_the_recipe_schema() {
+fn the_engine_renders_the_field_from_the_recipe_and_never_calls_the_analyzer() {
     for source in [
         include_str!("../render.rs"),
         include_str!("../recipe.rs"),
         include_str!("../xmp.rs"),
     ] {
-        assert!(!source.contains("fit_field"));
-        assert!(!source.contains("freemask"));
+        // CODE only. The engine now DOCUMENTS the analyzer it shares its guide
+        // and its render with, and an intra-doc link is the opposite of a
+        // hidden dependency — it is the reader being told where the other
+        // half lives. What must not appear is a path expression.
+        let code: String = source
+            .lines()
+            .map(str::trim_start)
+            .filter(|line| !line.starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("
+");
+        assert!(!code.contains("fit_field"), "the engine must not depend on the solver");
+        assert!(!code.contains("freemask"));
     }
+    // …and the shipping half of the same fact, stated positively: the field is
+    // a recipe control with a registry row, an export-loss tier and no `crs:`
+    // key of its own.
+    let row = crate::advisor::catalogue::global_control("colour_field")
+        .expect("the field is a registry control");
+    assert!(row.engine_only, "no response schema can state ninety-six vertices");
+    assert_eq!(row.tier, Some(crate::advisor::catalogue::Tier::RenderedNotExported));
+    assert!(matches!(row.crs, crate::advisor::catalogue::CrsKey::None));
 }
 
 /// A pair whose left third is REPLACED by a different texture and whose right

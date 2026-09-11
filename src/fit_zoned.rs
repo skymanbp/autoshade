@@ -81,8 +81,14 @@ const ZONE_ATMOS_EV_LIMIT: f32 = 0.75;
 /// Local saturation shares the global fit's model cap (fit.rs stage 3).
 const ZONE_SAT_LIMIT: f32 = 60.0;
 const ZONE_ATMOS_SAT_LIMIT: f32 = 20.0;
-const ZONE_ATMOS_GAIN_MIN: f32 = 0.85;
-const ZONE_ATMOS_GAIN_MAX: f32 = 1.18;
+/// The window an Atmosphere zone's recolour is shrunk into at the SHIPPED
+/// DEFAULT strength. Since R33 §F it is one point on
+/// [`fit::FitBudget::zone_gain`]'s ladder rather than a fixed pair: these two
+/// numbers are what `FitBudget::for_strength(DEFAULT)` returns, and they are
+/// kept named so the default stays readable at its definition and a test can
+/// pin the two against each other.
+pub(crate) const ZONE_ATMOS_GAIN_MIN: f32 = 0.85;
+pub(crate) const ZONE_ATMOS_GAIN_MAX: f32 = 1.18;
 /// Mask-weighted mean-gradient energy may not fall below this ratio. Accepted
 /// repository zones measure 0.730, 0.980, 1.084, 1.330, 1.684 and 1.918.
 /// The saved generated-cloud correction measures 0.961 with zero clipped-share
@@ -537,13 +543,17 @@ fn clamp_zone_sat_for_mode(v: f32, mode: ZoneMode) -> f32 {
 /// Shrink one atmosphere-zone recolour toward unity with a single scalar, so
 /// every channel keeps the fitted direction and the ratios are not independently
 /// clipped into a different hue.
-fn shrink_atmosphere_gains(gains: [f32; 3]) -> [f32; 3] {
+///
+/// The window is the strength budget's, not a constant: a repainted sky is
+/// precisely the zone a user raising Strength is asking about, and it was the
+/// one control in the solve the dial could not reach.
+fn shrink_atmosphere_gains_in(gains: [f32; 3], window: (f32, f32)) -> [f32; 3] {
     let mut k = 1.0f32;
     for gain in gains {
         if gain > 1.0 {
-            k = k.min((ZONE_ATMOS_GAIN_MAX - 1.0) / (gain - 1.0));
+            k = k.min((window.1 - 1.0) / (gain - 1.0));
         } else if gain < 1.0 {
-            k = k.min((1.0 - ZONE_ATMOS_GAIN_MIN) / (1.0 - gain));
+            k = k.min((1.0 - window.0) / (1.0 - gain));
         }
     }
     gains.map(|gain| 1.0 + k.clamp(0.0, 1.0) * (gain - 1.0))
@@ -2214,6 +2224,18 @@ fn run_local_sequencer(
         debug_assert_eq!(stage.components, stage.disclosed);
         if stage.ran { field::push_realized(report, local, "free masks"); }
     }
+    // R33 §G: the TERMINAL producer, and the only one that is not a mask. It
+    // runs above the shipped default strength and nowhere else, so every
+    // result at or below it is byte-identical to the build before this one.
+    if let Some((local, _)) = field {
+        field::attach_colour_field(
+            src,
+            target,
+            report,
+            fit::carried_strength_from_notes(&report.notes),
+            local,
+        );
+    }
 }
 
 /// Multi-class semantic path.  It intentionally shares the global solve and
@@ -3822,7 +3844,11 @@ fn attach_one_zone(
         color_gains: Some(
             match mode {
                 ZoneMode::Full => d.color_gains,
-                ZoneMode::Atmosphere => shrink_atmosphere_gains(d.color_gains),
+                ZoneMode::Atmosphere => shrink_atmosphere_gains_in(
+                    d.color_gains,
+                    fit::FitBudget::for_strength(fit::carried_strength_from_notes(&report.notes))
+                        .zone_gain,
+                ),
             }
             .map(round2),
         ),
@@ -3960,9 +3986,10 @@ fn attach_one_zone(
         m.color_gains = Some([1.0; 3]);
         m.saturation = 0.0;
     }
+    let luma_probe_px = fit::pixels_of(&render::develop_preview(s_img, &luma_probe));
     let luma_ranges = fit::moved_unsupported_luma_range_names(
         &cur_px,
-        &fit::pixels_of(&render::develop_preview(s_img, &luma_probe)),
+        &luma_probe_px,
         &zone_evidence,
     );
     let mut chroma_probe = report.recipe.clone();
@@ -3975,11 +4002,24 @@ fn attach_one_zone(
         m.whites = 0.0;
         m.blacks = 0.0;
     }
+    let chroma_probe_px = fit::pixels_of(&render::develop_preview(s_img, &chroma_probe));
     let hue_bands = fit::moved_unsupported_hue_range_names(
         &cur_px,
-        &fit::pixels_of(&render::develop_preview(s_img, &chroma_probe)),
+        &chroma_probe_px,
         &zone_evidence,
     );
+    // R33 §F asked whether `fit_cells` could lift these two withholdings
+    // the way it lifts the white balance's and the mixer's. It cannot, and
+    // the reason is structural rather than a threshold: `fit_zone_dials`
+    // solves `color_gains` from this zone's MASK-WEIGHTED MEAN moments, and a
+    // cell voucher restricted to the same mask reads cell MEANS over the same
+    // pixels — the estimator's objective and the voucher's measurement are
+    // one quantity, so its verdict is not independent evidence. Measured on
+    // the reference pair it read 1.000 converged / 0.000 diverged at every
+    // site whose probe was not already null. The white balance (a weighted
+    // median of per-pixel log ratios) and the mixer (per-band populations)
+    // ARE vouched by cells, because those partitions are independent of the
+    // cell grid. These two stay withheld, by name, as before.
     if luma_ranges.is_some() {
         let m = report.recipe.masks.last_mut().expect("zone mask just pushed");
         m.exposure_ev = 0.0;
@@ -4725,6 +4765,8 @@ mod tests {
             notes: Vec::new(),
             mode: fit::FitMode::Full,
             divergence: divergence(0.0),
+            divergence_coarse: divergence(0.0),
+            pairing: fit::PairingScale::Pixel,
             evidence: fit::evidence_model_for(
                 &fit::pixels_of(&s),
                 &fit::pixels_of(&t),
@@ -5126,6 +5168,106 @@ mod tests {
         range_path.remove();
     }
 
+    /// R33 §G. The colour field SHIPS above the shipped default Strength and
+    /// nowhere else.
+    ///
+    /// Both halves are the point. The dial means "how far past Lightroom may
+    /// this fit go", and this is the first control that leaves Lightroom
+    /// entirely — classic XMP has no coordinate system for a smooth local
+    /// field — so at or below the default the recipe must be BYTE-IDENTICAL to
+    /// the build before this one, which is what the first assertion says. Past
+    /// the default the field attaches, names itself, and is kept only if the
+    /// frame it renders is measurably closer to the target than the frame
+    /// without it.
+    #[test]
+    fn the_colour_field_ships_only_past_the_default_strength() {
+        let (source, target, sky) = zoned_pair();
+        let seg = SegmentOpts {
+            python_bin: "unused-colour-field".into(),
+            script: "unused-colour-field".into(),
+            target: "sky".into(),
+            reference_point: None,
+            prompt_points: None,
+        };
+        let solve = |strength: f32, tag: &str| {
+            let path = fixture_mask_path(tag);
+            sky.save(path.path()).unwrap();
+            SEGMENT_BOTH_OVERRIDE
+                .with(|value| *value.borrow_mut() = Some((sky.clone(), sky.clone())));
+            fit_recipe_zoned_inner_with_options(
+                &source,
+                &target,
+                &seg,
+                &path,
+                &crate::recipe::EditRecipe::default(),
+                fit::FitOptions {
+                    strength: crate::recipe::GradeStrength::new(strength),
+                    provider: None,
+                },
+                SHIPPED_LAYERS,
+            )
+        };
+
+        let default = solve(crate::recipe::GradeStrength::DEFAULT, "colour-field-default");
+        assert!(
+            default.recipe.colour_field.is_none(),
+            "at the shipped default the field stays an instrument: {}",
+            default.recipe.rationale
+        );
+        assert!(
+            !serde_json::to_string(&default.recipe).unwrap().contains("colour_field"),
+            "…and writes no key, so an archived recipe's fingerprint is unchanged"
+        );
+        for key in [
+            crate::rationale::keys::FIELD_ATTACHED,
+            crate::rationale::keys::FIELD_WITHHELD,
+            crate::rationale::keys::FIELD_REGRESSED,
+        ] {
+            assert!(
+                !default.notes.iter().any(|n| n.key == key),
+                "a stage that cannot run must not narrate itself either"
+            );
+        }
+
+        let full = solve(1.0, "colour-field-full");
+        // Above the default the stage RUNS, and says which way it went. Which
+        // of the three it says depends on the fixture's own headroom, and that
+        // is the honest shape of this assertion: the pin is that the stage is
+        // reached and accounts for itself, never that this fixture must have
+        // something left over.
+        let verdict = [
+            crate::rationale::keys::FIELD_ATTACHED,
+            crate::rationale::keys::FIELD_WITHHELD,
+            crate::rationale::keys::FIELD_REGRESSED,
+        ]
+        .into_iter()
+        .find(|key| full.notes.iter().any(|n| n.key == *key));
+        assert!(
+            verdict.is_some(),
+            "past the default the field stage must reach a verdict and disclose it: {}",
+            full.recipe.rationale
+        );
+        if verdict == Some(crate::rationale::keys::FIELD_ATTACHED) {
+            let field = full.recipe.colour_field.as_ref().expect("attached means carried");
+            assert!(field.renderable(), "an attached field must be one the engine can render");
+            assert_eq!(field.amount, 1.0, "it attaches at full amount; the user dials it down");
+            assert_eq!(
+                field.grid.len(),
+                field.x * field.y * field.b,
+                "the grid holds exactly the vertices its shape declares"
+            );
+            assert!(
+                full.err_after <= default.err_after + 1e-6,
+                "a kept field is a field that moved the frame toward the target"
+            );
+        } else {
+            assert!(
+                full.recipe.colour_field.is_none(),
+                "a withheld or regressed field is not carried"
+            );
+        }
+    }
+
     #[test]
     fn field_disabled_layer_is_byte_identical() {
         let (source, target, sky) = zoned_pair();
@@ -5381,10 +5523,36 @@ mod tests {
     #[test]
     fn atmosphere_zone_shrinks_gains_toward_unity_but_keeps_their_direction() {
         let original = [1.49f32, 0.83, 0.69];
-        let shrunk = shrink_atmosphere_gains(original);
+        let default_window =
+            fit::FitBudget::for_strength(crate::recipe::GradeStrength::default()).zone_gain;
+        assert_eq!(
+            default_window,
+            (ZONE_ATMOS_GAIN_MIN, ZONE_ATMOS_GAIN_MAX),
+            "the shipped default window is the budget's DEFAULT point, unchanged"
+        );
+        let shrunk = shrink_atmosphere_gains_in(original, default_window);
         assert!(shrunk
             .iter()
             .all(|g| (ZONE_ATMOS_GAIN_MIN..=ZONE_ATMOS_GAIN_MAX).contains(g)));
+        // …and the dial now reaches it: at Strength 1.0 the same fitted gains
+        // keep more of their demand, at Strength 0 less, and the direction is
+        // the same scalar shrink in every case.
+        let wide = shrink_atmosphere_gains_in(
+            original,
+            fit::FitBudget::for_strength(crate::recipe::GradeStrength::new(1.0)).zone_gain,
+        );
+        let narrow = shrink_atmosphere_gains_in(
+            original,
+            fit::FitBudget::for_strength(crate::recipe::GradeStrength::new(0.0)).zone_gain,
+        );
+        for channel in 0..3 {
+            let demand = |g: f32| (g - 1.0).abs();
+            assert!(
+                demand(wide[channel]) >= demand(shrunk[channel]) - 1e-6
+                    && demand(shrunk[channel]) >= demand(narrow[channel]) - 1e-6,
+                "channel {channel} is not monotone in strength: {narrow:?} {shrunk:?} {wide:?}"
+            );
+        }
         let mut common_k: Option<f32> = None;
         for channel in 0..3 {
             assert_eq!(
@@ -7245,6 +7413,75 @@ mod tests {
             report.recipe.rationale
         );
         assert!(!mask_path.path().exists(), "no zone kept the raster — it must be reclaimed");
+    }
+
+    /// R33 §H. The deep arm adjusts one global dial and re-derives the
+    /// report through `fit::rescore_report`, which rebuilds the GLOBAL solve's
+    /// account field by field off `SolveFacts`. Every note this module writes
+    /// — the zone verdicts, the evidence withholdings, the boundary gate, the
+    /// quality gate, the attachment line, the XMP loss — had no field to ride
+    /// on and was dropped on the floor, so a `--zoned` fit that went through
+    /// `--deep` reached the user with its masks still rendering and its whole
+    /// local half missing from the rationale.
+    ///
+    /// The carrying rule is a denylist (`rationale::GLOBAL_SOLVE_KEYS`), so
+    /// this pin does not name the producer keys it expects: it asserts that
+    /// EVERY note the zoned pass added to the global report is still there
+    /// afterwards, in the same order, whatever those notes turn out to be.
+    #[test]
+    fn a_rescored_zoned_report_still_carries_every_note_its_producers_wrote() {
+        let (src, tgt, sky_mask) = zoned_pair();
+        let mask_path = fixture_mask_path("rescore-carry-mask");
+        sky_mask.save(mask_path.path()).unwrap();
+        let mut report = fit::fit_recipe(&src, &tgt);
+        let global_only: Vec<&'static str> = report.notes.iter().map(|n| n.key).collect();
+        attach_zones(&src, &tgt, &mut report, &sky_mask, &sky_mask, &mask_path);
+        let produced: Vec<&'static str> = report
+            .notes
+            .iter()
+            .map(|n| n.key)
+            .filter(|k| !global_only.contains(k))
+            .collect();
+        assert!(
+            produced.len() >= 4,
+            "premise: the zoned pass wrote several notes of its own, got {}",
+            produced.len()
+        );
+
+        // The deep arm's own move: one global dial, nothing local touched.
+        let mut adjusted = report.recipe.clone();
+        adjusted.saturation += 4.0;
+        adjusted.clamp();
+        let rescored = fit::rescore_report(&src, &tgt, &adjusted, report.err_before, &report.notes);
+
+        let after: Vec<&'static str> = rescored.notes.iter().map(|n| n.key).collect();
+        let surviving: Vec<&'static str> =
+            after.iter().copied().filter(|k| produced.contains(k)).collect();
+        assert_eq!(
+            surviving, produced,
+            "a rescored zoned report must carry every producer note, in order: {}",
+            rescored.recipe.rationale
+        );
+        // …and each one reaches the persisted rationale too, not just the vec.
+        for note in rescored.notes.iter().filter(|n| produced.contains(&n.key)) {
+            let rendered = crate::rationale::render_one(note);
+            assert!(
+                rescored.recipe.rationale.contains(rendered.trim()),
+                "carried note missing from the rationale string: {rendered}"
+            );
+        }
+        // The three the rescore DROPS on purpose stay dropped: carrying is
+        // not a licence for a stale global claim to ride back in.
+        for dropped in [
+            crate::rationale::keys::FIT_NOTE_REGRESSED,
+            crate::rationale::keys::FIT_NOTE_JOINT_REGRESSED,
+            crate::rationale::keys::FIT_NOTE_SAT_REDUCED,
+        ] {
+            assert!(
+                !after.contains(&dropped) || report.notes.iter().all(|n| n.key != dropped),
+                "a deliberately dropped global note came back through the carry"
+            );
+        }
     }
 
     #[test]

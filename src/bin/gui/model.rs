@@ -721,6 +721,15 @@ pub(crate) enum FitNote {
     /// The AI review call failed — the fit itself already landed; this is
     /// the informational layer degrading, never the fit erroring.
     AiReviewFailed(String),
+    /// R33 §I: which solver ran. The mode decides whether white balance,
+    /// channel curves and the paired estimators exist at all, and until now
+    /// the status line said nothing about it — two fits of the same pair from
+    /// two entry points landed in different modes and read identical.
+    SolverMode { atmosphere: bool },
+    /// R33 §I: the two structural readings and the pairing scale they bought.
+    /// Strings, not floats: they are already formatted (and may read
+    /// "unmeasured"), and a landing-time format would be a second rounding.
+    SolverPairing { pixel: bool, fine: String, coarse: String },
     /// R23-6 A-3: the terminal do-no-harm fired and the whole recipe was
     /// reset to the calibration base. A rationale line was never enough for
     /// this one — it is the "the reverse-fit did nothing" outcome, and it

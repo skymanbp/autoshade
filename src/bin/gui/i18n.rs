@@ -1124,7 +1124,15 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     // today; the tier registry decides membership, not this list.
     ("+{n} more", "另 {n} 个"),
     ("(unnamed)", "（无名）"),
+    ("Colour field", "颜色场"),
+    ("engine-only", "仅本机引擎"),
+    ("Show/mute the colour field without losing its amount",
+        "显示或静音颜色场，而不丢失它的强度"),
+    ("Remove the colour field", "移除颜色场"),
+    ("A smooth local colour/tone field the reverse fit solved. It renders here and in every export from this app; classic XMP has no way to carry it, so Lightroom sees the rest of this recipe without it.",
+        "反推解出的一片平滑局部色彩/影调场。它在这里以及本应用的每次导出中渲染；经典 XMP 无法承载它，因此 Lightroom 只会收到这份配方的其余部分，不含它。"),
     ("camera base curve", "相机基础曲线"),
+    ("colour field", "颜色场"),
     ("lens profile correction", "镜头配置文件校正"),
     // The import direction of the same fact (workers.rs, the Opened handler).
     ("this Lightroom sidecar carries {n} global setting(s) the engine does not render (a save keeps them untouched): {list}",
@@ -1208,6 +1216,8 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
         "忙碌中 — 当前任务完成后才可撤销/重做"),
     ("opened the first photo — {n} more ignored (drop their folder to browse them all)",
         "已打开第一张 — 其余 {n} 张被忽略（把它们所在的文件夹拖进来可整体浏览）"),
+    ("The colour field was not pasted — its cells are measured on the source photo's own frame",
+        "颜色场未粘贴 — 它的单元是在源照片自身画幅上量出来的"),
     ("{n} raster mask(s) not pasted — their rasters belong to the source photo (re-run AI select, or the reverse-fit, on each target)",
         "{n} 个栅格蒙版未粘贴 — 栅格属于源照片（请在各目标上重跑 AI 选择或反推）"),
     ("AI segmenting {what}… (first run auto-downloads the model; failures are reported here)",
@@ -1294,6 +1304,14 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
         " · AI 打分：匹配 {score}/100——{critique}"),
     (" · AI review unavailable ({err}) — the fit itself already landed",
         " · AI 打分不可用（{err}）——反推本身已完成"),
+    // ── R33: the solver facts the status line opens with
+    (" · full solve (all develop controls)", " · 完整求解（全部显影控制）"),
+    (" · Atmosphere mode (bounded robust controls — the structure diverged)",
+        " · 氛围模式（有界稳健控制——结构已发生差异）"),
+    (" · paired pixel-to-pixel (D {fine} at pixel scale, {coarse} at layout scale)",
+        " · 逐像素配对（D 像素尺度 {fine}，布局尺度 {coarse}）"),
+    (" · paired by cell statistics only (D {fine} at pixel scale, {coarse} at layout scale)",
+        " · 仅按单元统计配对（D 像素尺度 {fine}，布局尺度 {coarse}）"),
     // ── R23-6: the reverse-fit's own status facts (workers::render_fit_note)
     (" · it suggests: {hint} (nothing was changed — tick 「deep」 to let it try)",
         " · 它的建议：{hint}（什么都没有改动——勾选「深度」才会让它去试）"),
@@ -1705,6 +1723,25 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
       and overall tone/colour were matched with bounded robust controls. Residual look \
       error {err_before} → {err_after}.",
         "反推氛围模式（结构差异 D={d}）：目标结构无法通过显影控制恢复，因此仅以有界的可靠控制匹配其氛围和整体影调/色调。剩余观感误差 {err_before} → {err_after}。"),
+    (" A white balance was solved from the population and then rendered and checked \
+      against the target's own 12x8 cell means: only {converged} of the frame moved \
+      closer and {diverged} moved away, so it was returned to as-shot rather than \
+      shipped on population evidence alone.",
+        " 已从整体证据求解出一次白平衡，渲染后按目标自身的 12x8 单元均值比对：只有 {converged} 的画面更接近目标，另有 {diverged} 反而远离，因此退回相机原始值，不以整体证据独自发布。"),
+    (" The fitted white balance was checked against the target's own 12x8 cell means \
+      before it shipped: {converged} of the frame moved closer to its target and \
+      {diverged} moved away.",
+        " 拟合出的白平衡在发布前已按目标自身的 12x8 单元均值比对：画面的 {converged} 更接近目标，{diverged} 反而远离。"),
+    (" Structural reading: D {fine} at pixel scale, {coarse} at layout scale — the \
+      pixel-scale reading holds, so this solve paired source pixel with target pixel.",
+        " 结构读数：像素尺度 D {fine}，布局尺度 {coarse}——像素尺度读数成立，因此本次求解按源像素对目标像素配对。"),
+    (" Structural reading: D {fine} at pixel scale, {coarse} at layout scale — the \
+      pixel-scale reading does not hold, so only cell statistics were paired and never \
+      individual pixels.",
+        " 结构读数：像素尺度 D {fine}，布局尺度 {coarse}——像素尺度读数不成立，因此只配对单元统计量，不配对单个像素。"),
+    (" The pixel-scale reading is {margin} from the {line} mode threshold: this pair \
+      chose between the full solve and Atmosphere mode by that margin.",
+        " 像素尺度读数距离 {line} 的模式阈值只有 {margin}：本组图像就是以这个差值在完整求解与氛围模式之间做的选择。"),
     (" NOTE: the fitted recipe still renders far from the target \
       (residual {err_after}) — this look exceeds what global \
       sliders can express; consider the AI variant itself or a zoned \
@@ -1781,6 +1818,11 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
         " 细节控制暂不调整：两侧结构与亮度范围的证据不足，因此未移动清晰度与纹理。"),
     (" Per-band colour mixer, solved from each band's own population: [{moved}]. Hue rotation is never solved, so every band's hue stays 0. Bands left neutral for want of two-sided population evidence: [{refused}].",
         " 逐带颜色混合器按各色带自身的人口统计求解：[{moved}]。色相旋转从不求解，因此每个色带的色相保持 0。因两侧人口证据不足而保持中性的色带：[{refused}]。"),
+    (" Hue bands [{bands}] were one-sided on the pair as it arrived and are two-sided on \
+         the render this stage solved from; the target's own cell means vouched that the \
+         earlier stages moved those pixels toward it, so the bands were admitted rather \
+         than left neutral.",
+        " 色相带 [{bands}] 在图像对进入时是单侧的，而在本阶段求解所依据的渲染上已是双侧；目标自身的单元均值担保了先前各阶段已把这些像素推向目标，因此这些带被采用，而非保持中性。"),
     (" The per-band colour move was given back: applying it did not leave the frame closer to the target, so every band returned to neutral.",
         " 逐带颜色调整已交还：应用后画面并未更接近目标，因此所有色带恢复中性。"),
     (" The per-band colour move was given back: it would have carried pixels through hue bands no two-sided evidence covers, and blind movement is vetoed rather than shipped.",
@@ -1947,6 +1989,20 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
         " 局部场在 {producer} 后的实现量：全画面 {err_after}，上限 {ceiling}，比例 {realized}。"),
     (" Local-field stop after {producer}: skipped [{skipped}], margin {margin}.",
         " 局部场在 {producer} 后停止：跳过 [{skipped}]，余量 {margin}。"),
+    (" Colour field attached ({x}x{y}x{b} vertices): frame {before} -> {after}, \
+      ceiling {ceiling}, share {realized}, saturated vertices {saturated}. It is \
+      rendered in-app only — classic XMP has no coordinate system for a smooth \
+      local field, so the Lightroom sidecar carries the rest of this recipe \
+      without it.",
+        " 已附加颜色场（{x}x{y}x{b} 个顶点）：整幅 {before} -> {after}，上限 {ceiling}，占比 {realized}，饱和顶点 {saturated}。它只在本机引擎中渲染 —— 经典 XMP 无法描述平滑的局部色场，因此 Lightroom 侧车文件会带上这份配方的其余部分，但不含它。"),
+    (" No colour field was attached: the field's own ceiling {ceiling} is not \
+      more than {margin} better than the frame this fit already reached \
+      ({err_after}), so there was nothing left for it to carry.",
+        " 未附加颜色场：色场自身的上限 {ceiling} 相比本次反推已经达到的整幅误差（{err_after}）并没有好过 {margin}，因此它没有还能承担的部分。"),
+    (" The solved colour field was given back: rendering it moved the frame \
+      {before} -> {after}, away from the target rather than toward it \
+      (do-no-harm check).",
+        " 已解出的颜色场被退回：渲染它把整幅从 {before} 变成 {after}，离目标更远而不是更近（不使画面变差的检查）。"),
     (" Field mask {n} proposed: {sign} m={mass} s={share_src}/{share_tgt} D={d} p={pixels}.",
         " 自由形状场蒙版 {n} 已提出：符号 {sign}，质量 {mass}，证据占比为源图 {share_src}、目标图 {share_tgt}，D={d}，{pixels} 个像素。"),
     (" Field mask {n} attached: {err_before}->{err_after}, cross-boundary step \
