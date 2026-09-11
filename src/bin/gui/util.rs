@@ -1,6 +1,34 @@
 //! Pure helpers: geometry maps, curve edits, previews, thumb cache.
 
 use super::*;
+use autoshade::recipe::MaskRole;
+
+/// Landing facts describe the finished recipe. The bounded note history
+/// can omit later attachments, and a truncated refinement census must never
+/// be presented as a complete kept/abstained count.
+pub(crate) fn fit_mask_notes(recipe: &EditRecipe, notes: &[autoshade::rationale::Note]) -> Vec<FitNote> {
+    use autoshade::rationale::{keys, TRUNCATED_SENTINEL};
+    let mut out = Vec::new();
+    if recipe.masks.iter().any(|mask| mask.enabled && mask.range.is_none()
+        && matches!(mask.role, MaskRole::ZoneSky | MaskRole::ZoneLand))
+    {
+        out.push(FitNote::IncludesSkyZone);
+    }
+    if recipe.masks.iter().any(|mask| mask.enabled && mask.range.is_some()) {
+        out.push(FitNote::IncludesRangeMasks);
+    }
+    // The producer's label is stable across native and raster carriers,
+    // including older tile labels. Geometry is not a tile's identity.
+    let tiles = recipe.masks.iter().filter(|mask| mask.enabled
+        && mask.role == MaskRole::Custom && mask.name.starts_with("Spatial tile ")).count();
+    if tiles > 0 { out.push(FitNote::IncludesSpatialTiles(tiles)); }
+    if !notes.iter().any(|note| note.key == TRUNCATED_SENTINEL) {
+        let kept = notes.iter().filter(|note| note.key == keys::MASK_REFINEMENT_KEPT).count();
+        let abstained = notes.iter().filter(|note| note.key == keys::MASK_REFINEMENT_ABSTAINED).count();
+        if kept + abstained > 0 { out.push(FitNote::MaskRefinement { kept, abstained }); }
+    }
+    out
+}
 
 /// Build the option list for a model ComboBox: the live-fetched ids if we have
 /// them, else a grounded fallback; the current value is always included so a
@@ -431,7 +459,7 @@ pub(crate) fn xmp_loss_line(
         let head = match reason {
             R::Bitmap => trf(lang, "bitmap masks ×{n}", &[("n", &n)]),
             R::Disabled => trf(lang, "muted masks ×{n}", &[("n", &n)]),
-            R::ComponentsFlattened => trf(lang, "shape components flattened ×{n}", &[("n", &n)]),
+            R::ComponentsFlattened => trf(lang, "bitmap components omitted ×{n}", &[("n", &n)]),
             // The one entry in this list that is NOT about the XMP: the brush
             // rides out COMPLETE, so the frame sentence 「the Lightroom XMP
             // does not carry:」 would be a lie about this item alone. Its own
@@ -524,7 +552,9 @@ pub(crate) fn xmp_loss_line(
 /// appears only on a fit that attached one, so saying so out loud is not the
 /// alarm-on-every-save this rule was written against.
 ///
-/// MASK losses always interrupt: every one of them is a mask the user made.
+/// Actual MASK losses always interrupt. Native tiles and component bands
+/// owe no geometry loss; Bitmap extras still interrupt through the writer
+/// verdict, so this path never re-derives portability from a geometry kind.
 pub(crate) fn xmp_loss_interrupts(
     losses: &[autoshade::xmp::MaskLoss],
     globals: &[&'static str],

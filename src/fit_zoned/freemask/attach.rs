@@ -171,7 +171,7 @@ pub(in crate::fit_zoned) fn attach_free_masks(
             )
         } else { (scoped.source_weights, scoped.target_weights) };
         let attachment = ZoneAttachment {
-            source_weights, target_weights, coverage: Some(coverage),
+            source_weights, target_weights, coverage: Some(coverage), components: Vec::new(),
             mask: MaskGeometry::Bitmap { path: owned.path().to_string_lossy().into_owned() },
             range: None, name: label.clone(), role: MaskRole::Custom, inverted: false,
             label, min_share: MIN_ZONE_SHARE,

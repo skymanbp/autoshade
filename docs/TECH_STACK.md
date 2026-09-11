@@ -215,6 +215,20 @@ direction using the pixel/aspect metric:
 at `(x+0.5, y+0.5)` through `MASK_SAMPLE_CENTRE`, then optional luminance- or
 colour-range weights refine the geometry; components compose in document order
 as Add, Subtract, or Intersect rather than being flattened to one union.
+The XMP writer now projects that same order for Linear/Radial/Brush/AI shapes:
+Add = blend 0/value 1; Subtract = blend 1/value 0; Intersect = subtract the
+inverted shape. Only Bitmap extras retain the “bitmap components omitted”
+loss. The library census verifies syntax, not Lightroom's arithmetic on
+feathered intersections. Namespaced AutoShade metadata retains ambiguous
+editor modes, inversion homes and zone roles without replacing the native
+geometry attributes. Residual-earned sky/land bands intersect Select Sky
+with shared linear ramps; exact component complements keep adjacent bands'
+coverage summing to one under the measured asymmetric feather. Hard tiles
+use four intersecting half planes, while measurably different guided edges
+keep their raster. The band replacement uses the same boundary gate with
+the parent's controls as its shrink baseline, and separately checks direct
+target-step gaps per evidence cell; a transported soft feather is a different
+quantity. The unchanged colour-field producer runs on that stack.
 
 The ramp itself is centralized in `linear_coverage(t, profile)`. Since
 v1.2.4 it ships `LINEAR_FALLOFF = Measured`: the C1 smoothstep on the warped
@@ -1515,8 +1529,8 @@ than the pre-call state; model weights remain outside the repository.
 - The 61 MP RAW probe measured `151 MB` peak commit for decode,
   `1771 MB` for calibration/render preparation, and `1766 MB` for the
   full-resolution render tail; the combined process peak remained `1771 MB`.
-- The release battery is **1449 library (1435 pass + 14 `#[ignore]`d forensic
-  probes) / 24 CLI / 169 GUI / 2+2 contract** tests. Environment-gated real
+- The release battery is **1474 library (1459 pass + 15 `#[ignore]`d forensic
+  probes) / 24 CLI / 172 GUI / 2+2 contract** tests. Environment-gated real
   Lightroom, brush-table, and RAW-zoo suites are additional and are not
   smuggled into the ordinary count.
 - The build workflow checks default and GUI feature sets on Ubuntu and macOS.

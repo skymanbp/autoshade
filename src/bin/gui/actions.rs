@@ -3,7 +3,6 @@
 use super::*;
 
 use autoshade::advisor::{hint_action, FitAction};
-use autoshade::recipe::MaskRole;
 
 /// The persisted develop state belonging to the card that is on the canvas.
 ///
@@ -3500,43 +3499,7 @@ impl AutoShadeApp {
                             }
                         }
                     }
-                    if rep.recipe.masks.iter().any(|mask| {
-                        mask.range.is_none()
-                            && matches!(mask.role, MaskRole::ZoneSky | MaskRole::ZoneLand)
-                    }) {
-                        status.push(FitNote::IncludesSkyZone);
-                    }
-                    if rep.recipe.masks.iter().any(|mask| mask.range.is_some()) {
-                        status.push(FitNote::IncludesRangeMasks);
-                    }
-                    let tiles = rep
-                        .notes
-                        .iter()
-                        .filter(|note| note.key == autoshade::rationale::keys::TILE_ATTACHED)
-                        .count();
-                    if tiles > 0 {
-                        status.push(FitNote::IncludesSpatialTiles(tiles));
-                    }
-                    let refinement_kept = rep
-                        .notes
-                        .iter()
-                        .filter(|note| {
-                            note.key == autoshade::rationale::keys::MASK_REFINEMENT_KEPT
-                        })
-                        .count();
-                    let refinement_abstained = rep
-                        .notes
-                        .iter()
-                        .filter(|note| {
-                            note.key == autoshade::rationale::keys::MASK_REFINEMENT_ABSTAINED
-                        })
-                        .count();
-                    if refinement_kept + refinement_abstained > 0 {
-                        status.push(FitNote::MaskRefinement {
-                            kept: refinement_kept,
-                            abstained: refinement_abstained,
-                        });
-                    }
+                    status.extend(fit_mask_notes(&rep.recipe, &rep.notes));
                     // R23-6 A-3: the terminal do-no-harm reset is "the
                     // reverse-fit did nothing", and a line inside a rationale
                     // block is not where a user finds that out.

@@ -2915,7 +2915,7 @@ pub fn unique_out(path: &Path, tag: &str) -> Option<PathBuf> {
 /// the merge could not be performed and the sidecar was REGENERATED instead
 /// (see [`write_xmp_doc`] for why that is a loss worth telling the user
 /// about), and the per-mask list of what the projection itself could not
-/// carry (M6a — bitmap/muted masks skipped, extra shapes flattened, radial
+/// carry (M6a — bitmap/muted masks skipped, bitmap components omitted, radial
 /// rotation and recolour gains dropped; [`xmp::mask_export_losses`]).
 /// Every caller receives both (round-12 disclosure threading): the old
 /// note-dropping `write_xmp` wrapper was how five of seven surfaces stayed
@@ -3147,7 +3147,7 @@ fn write_xmp_doc(
         msg
     });
     // M6a: the projection's OWN lossy edges (bitmap/muted masks skipped, extra
-    // shapes flattened, rotation + recolour dropped) — judged by the WRITER on
+    // bitmap components omitted, rotation + recolour dropped) — judged by the WRITER on
     // the CLAMPED recipe, i.e. exactly the masks the document carries. The
     // import direction had four disclosure sites and the export direction had
     // none; this is that half. The caller's channel covers every CLI path from
@@ -6304,6 +6304,7 @@ mod tests {
         };
 
         let component = MaskComponent {
+            inverted: false,
             geometry: MaskGeometry::Radial {
                 top: 0.2,
                 left: 0.2,
@@ -6389,11 +6390,12 @@ mod tests {
             LocalAdjustment, MaskCombine, MaskComponent, MaskGeometry,
         };
 
-        // The user's mask carries engine-only state (a Subtract component).
+        // The user's ordered composition must survive a recipe carry-over.
         let base = EditRecipe {
             masks: vec![LocalAdjustment {
                 name: "subject".into(),
                 components: vec![MaskComponent {
+                    inverted: false,
                     geometry: MaskGeometry::Radial {
                         top: 0.2,
                         left: 0.2,

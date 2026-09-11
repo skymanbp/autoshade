@@ -2061,8 +2061,8 @@ fn match_cmd(
     println!("recipe -> {}", recipe_path.display());
     // ALSO write the canonical sidecar. The store's recipe.json is the ONLY
     // recipe the GUI (read_saved_develop) and the web (/api/recipe) read back,
-    // and the XMP below cannot carry the zoned result at all (raster masks,
-    // colour gains, mask roles are recipe-only) — without this, `match --zoned`
+    // and the XMP below still omits remaining rasters, colour gains and the
+    // colour field despite carrying native composition — without this, `match --zoned`
     // produced a full fit that no surface able to render it could ever load.
     // same_path, not string equality: a case-flipped / junction-aliased -o
     // naming the canonical file already wrote it above — writing it a second

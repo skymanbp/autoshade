@@ -4661,6 +4661,7 @@ fn combined_mask_weight(
     let mut w = mask_weight_in(&m.mask, nx, ny, base, unwarp, dims);
     for (c, bmp) in m.components.iter().zip(comp_bmps) {
         let cw = mask_weight_in(&c.geometry, nx, ny, *bmp, unwarp, dims);
+        let cw = if c.inverted { 1.0 - cw } else { cw };
         w = match c.mode {
             crate::recipe::MaskCombine::Add => 1.0 - (1.0 - w) * (1.0 - cw),
             crate::recipe::MaskCombine::Subtract => w * (1.0 - cw),
@@ -13301,6 +13302,7 @@ mod tests {
         let with = |mode| LocalAdjustment {
             mask: MaskGeometry::Linear { zero_x: 0.0, zero_y: 0.5, full_x: 1.0, full_y: 0.5 },
             components: vec![MaskComponent {
+                inverted: false,
                 geometry: MaskGeometry::Linear {
                     zero_x: 0.5,
                     zero_y: 0.0,
@@ -13346,8 +13348,8 @@ mod tests {
         let sub_then_add = LocalAdjustment {
             mask: MaskGeometry::Linear { zero_x: 0.0, zero_y: 0.5, full_x: 1.0, full_y: 0.5 },
             components: vec![
-                MaskComponent { geometry: vertical.clone(), mode: MaskCombine::Subtract },
-                MaskComponent { geometry: vertical.clone(), mode: MaskCombine::Add },
+                MaskComponent { inverted: false, geometry: vertical.clone(), mode: MaskCombine::Subtract },
+                MaskComponent { inverted: false, geometry: vertical.clone(), mode: MaskCombine::Add },
             ],
             ..Default::default()
         };
@@ -13429,6 +13431,7 @@ mod tests {
             exposure_ev: 1.0, // engine-active, so the export gate cares
             mask: MaskGeometry::Linear { zero_x: 0.0, zero_y: 0.5, full_x: 1.0, full_y: 0.5 },
             components: vec![MaskComponent {
+                inverted: false,
                 geometry: MaskGeometry::Bitmap {
                     path: "Z:/__autoshade_definitely_missing__/raster.png".into(),
                 },
@@ -13465,6 +13468,7 @@ mod tests {
             exposure_ev: 1.0,
             mask: MaskGeometry::Bitmap { path: good.to_string_lossy().into_owned() },
             components: vec![MaskComponent {
+                inverted: false,
                 geometry: MaskGeometry::Bitmap { path: missing.into() },
                 mode: MaskCombine::Subtract,
             }],
@@ -18264,31 +18268,18 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// THE PRE-EXISTING DEFECT THIS CLOSES, from the IMPORT end: a Lightroom
-    /// AI mask that says `crs:MaskInverted="true"` must render the COMPLEMENT
-    /// of its alpha.
+    /// Native Lightroom inversion remains a component-owned bit, and must
+    /// render the complement of a graded alpha. AutoShade's optional editing
+    /// metadata instead restores the authored inversion home. A native edit
+    /// that contradicts that metadata wins; neither path may invert twice.
     ///
-    /// Lightroom spells a component's inversion ON THE COMPONENT, and this
-    /// reader keeps it there — `parse_one_correction` takes an AI mask as the
-    /// base with an EMPTY scope for `LocalAdjustment::inverted`, deliberately,
-    /// so the bit is never spelled twice. The AI arm of `mask_weight` then
-    /// read no inversion at all, so EVERY imported inverted sky selection
-    /// rendered as the sky it excludes. Once the zoned fit began exporting
-    /// `Mask/Image`, that stopped being only an import defect: the product's
-    /// own land zone came back through the product's own sidecar as the sky.
-    ///
-    /// The fixture is this app's own export on purpose — it is the path the
-    /// defect became reachable from — and the two assertions above the loop
-    /// pin that what it emits IS Lightroom's spelling and that the pair below
-    /// differs in nothing but that one attribute. So the loop measures the
-    /// ATTRIBUTE being honoured, not a constant.
-    ///
-    /// MUTATION: drop `own_inverted` from the AI arm of `mask_weight` (its
-    /// state before this change) and the `true` pass fails; apply it in the
-    /// weight loop as well and the net inverts twice, failing the same pass
-    /// the other way.
+    /// The native-only pair still differs in exactly MaskInverted. The
+    /// authored pair also differs in ash:Inverted, deliberately, and both
+    /// inconsistent pairs test that stale editing intent cannot veto CRS.
+    /// Dropping the AI geometry's own bit or applying either bit twice must
+    /// still fail the exact coverage assertions below.
     #[test]
-    fn an_imported_inverted_ai_mask_renders_the_complement() {
+    fn ai_mask_import_preserves_authored_inversion_and_native_edits_win() {
         let dir =
             std::env::temp_dir().join(format!("autoshade-ai-import-inv-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -18314,31 +18305,51 @@ mod tests {
                 ..Default::default()
             })
         };
-        let inv_doc = exported(true);
+        let authored_inv = exported(true);
+        let authored_up = exported(false);
         assert!(
-            inv_doc.contains(r#"crs:What="Mask/Image""#)
-                && inv_doc.contains(r#"crs:MaskInverted="true""#),
-            "premise: the fixture must BE an inverted Lightroom AI mask:\n{inv_doc}"
+            authored_inv.contains(r#"crs:What="Mask/Image""#)
+                && authored_inv.contains(r#"crs:MaskInverted="true""#),
+            "premise: the fixture must BE an inverted Lightroom AI mask:\n{authored_inv}"
         );
+        let without_intent = |mut text: String| {
+            while let Some(start) = text.find(" ash:") {
+                let value = start + text[start..].find("=\"").unwrap() + 2;
+                let end = value + text[value..].find('"').unwrap() + 1;
+                text.replace_range(start..end, "");
+            }
+            text
+        };
+        let inv_doc = without_intent(authored_inv.clone());
         let up_doc = inv_doc.replace(r#"crs:MaskInverted="true""#, r#"crs:MaskInverted="false""#);
+        assert_eq!(up_doc, without_intent(authored_up.clone()),
+            "the native-only exports differ in the inversion attribute and nothing else");
         assert_eq!(
-            up_doc,
-            exported(false),
-            "premise: the two exports differ in the inversion attribute and nothing else"
+            authored_inv.replace(r#"crs:MaskInverted="true""#, r#"crs:MaskInverted="false""#)
+                .replace(r#"ash:Inverted="true""#, r#"ash:Inverted="false""#),
+            authored_up,
+            "the authored exports also record the inversion home"
         );
+        let edited_up = authored_inv.replace(r#"crs:MaskInverted="true""#, r#"crs:MaskInverted="false""#);
+        let edited_inv = authored_up.replace(r#"crs:MaskInverted="false""#, r#"crs:MaskInverted="true""#);
 
         let bmp = image::open(&p).unwrap().to_luma8();
-        for (attr, text, want_inverted) in
-            [("true", &inv_doc, true), ("false", &up_doc, false)]
+        for (attr, text, want_inverted, want_whole) in [
+            ("native inverted", &inv_doc, true, false),
+            ("native upright", &up_doc, false, false),
+            ("authored inverted", &authored_inv, true, true),
+            ("authored upright", &authored_up, false, false),
+            ("native edit upright", &edited_up, false, false),
+            ("native edit inverted", &edited_inv, true, false),
+        ]
         {
             let back = crate::xmp::xmp_to_recipe(text);
             assert_eq!(back.masks.len(), 1, "{attr}: {:?}", back.masks);
             let m = &back.masks[0];
-            // WHERE the bit landed — inside the geometry, and not also on the
-            // correction, which would invert twice.
-            assert!(!m.inverted, "{attr}: the reader must not lift it onto the correction");
-            assert_eq!(m.mask.own_inverted(), want_inverted, "{attr}: the component keeps it");
-            assert_eq!(m.net_inverted(), want_inverted, "{attr}: …and that is the whole net");
+            let want_component = want_inverted ^ want_whole;
+            assert_eq!(m.inverted, want_whole, "{attr}: preserve only consistent authored intent");
+            assert_eq!(m.mask.own_inverted(), want_component, "{attr}: the native fallback owns its bit");
+            assert_eq!(m.net_inverted(), want_inverted, "{attr}: the native net wins");
             // THE RENDER. `raster` is `None` on import — the sidecar carries
             // the intent, never Adobe's pixels — so point it at the alpha this
             // engine would recompute and sample the geometry directly.
@@ -18353,8 +18364,12 @@ mod tests {
             for (nx, ny) in [(0.1f32, 0.5f32), (0.4, 0.5), (0.9, 0.5)] {
                 let upright = sample_gray_norm(&bmp, nx, ny);
                 let want = if want_inverted { 1.0 - upright } else { upright };
+                assert_eq!(mask_weight(&g, nx, ny, Some(&bmp)),
+                    if want_component { 1.0 - upright } else { upright },
+                    "{attr}: the geometry honours its own bit exactly once");
+                let composed = combined_mask_weight(m, nx, ny, Some(&bmp), &[], None, (8.0, 8.0));
                 assert_eq!(
-                    mask_weight(&g, nx, ny, Some(&bmp)),
+                    if m.inverted { 1.0 - composed } else { composed },
                     want,
                     "{attr}: at ({nx}, {ny}) the weight must be the {} alpha",
                     if want_inverted { "complement of the" } else { "upright" }
@@ -18710,5 +18725,35 @@ mod tests {
         }
         assert!(!cfa_needs_geometry_demosaic(&CFA::new("RGBE")), "4-colour is refused earlier");
         assert!(cfa_needs_geometry_demosaic(&CFA::new(XTRANS_XS10)));
+    }
+}
+
+#[cfg(test)]
+mod native_composition_round_trip {
+    use super::*;
+    use crate::recipe::{EditRecipe, LocalAdjustment, MaskCombine, MaskComponent};
+
+    #[test]
+    fn xmp_component_round_trip_preserves_unquantized_composed_weights() {
+        for mode in [MaskCombine::Add, MaskCombine::Subtract, MaskCombine::Intersect] {
+            for inverted in [false, true] {
+                let mask = LocalAdjustment {
+                    mask: MaskGeometry::Linear { zero_x: 0.25, zero_y: 0.0, full_x: 0.75, full_y: 1.0 },
+                    components: vec![MaskComponent {
+                        geometry: MaskGeometry::Linear { zero_x: 0.5, zero_y: 0.25, full_x: 0.5, full_y: 0.75 },
+                        mode, inverted,
+                    }], ..Default::default()
+                };
+                let recipe = EditRecipe { masks: vec![mask.clone()], ..Default::default() };
+                let back = crate::xmp::xmp_to_recipe(&crate::xmp::recipe_to_xmp(&recipe));
+                for y in 0..73 {
+                    for x in 0..127 {
+                        let (nx, ny) = ((x as f32 + 0.5) / 127.0, (y as f32 + 0.5) / 73.0);
+                        let sample = |m| combined_mask_weight(m, nx, ny, None, &[None], None, (127.0, 73.0));
+                        assert_eq!(sample(&mask), sample(&back.masks[0]));
+                    }
+                }
+            }
+        }
     }
 }

@@ -129,9 +129,14 @@
 > wrong reason; it writes a `=== name ===` transcript that
 > `scripts/check_docs.py --gates` reads the counts and the lane set back out
 > of, and it prints the by-name test-set difference against a saved baseline.
-> 1449 library + 24 CLI + 169 GUI + 2+2 contract tests are enumerated in the GUI
-> build; the library result is 1435 pass + 14 `#[ignore]`d forensic probes
-> (counts refreshed 2026-09-11 after the R34 merge, not yet released: +57 / −3 by
+> 1474 library + 24 CLI + 172 GUI + 2+2 contract tests are enumerated in the GUI
+> build; the library result is 1459 pass + 15 `#[ignore]`d forensic probes.
+> R35 adds native-composition, geometry-tile and residual-band pins; the GUI
+> result is 171 pass + one explicit scratch-recipe export probe ignored in the
+> ordinary battery. The source name set is +34 / −8 against `816a457`; all
+> eight old names are re-pinned, with unchanged numeric limits, in the R35
+> ledger. Before that, counts were refreshed 2026-09-11
+> after the R34 merge, not yet released: +57 / −3 by
 > name against `5ffa275` — the four R33 lanes' tests, R34's and the deep-thinking
 > box's, listed in the ROADMAP's unreleased ledger; the −3 are renames:
 > `the_local_field_never_reaches_the_engine_or_the_recipe_schema` →
@@ -277,7 +282,7 @@
 > `src/fit_zoned.rs`, `field_disabled_layer_is_byte_identical`,
 > `field_stop_rule_skips_the_tile_producer_and_names_it` and
 > `calibration_local_field_discloses_ceiling_and_realized_share`; nothing
-> removed). THREE suites are ADDITIONAL and env-gated, so a bare `cargo test`
+> removed. THREE suites are ADDITIONAL and env-gated, so a bare `cargo test`
 > does not include them. The F1 release reproof adds +22 default test names
 > and +23 GUI names with no removals or status changes against the B3
 > transcript `target/b3-main/gates-final.txt`.
@@ -1637,8 +1642,9 @@ question.
 
 The **export** direction is disclosed the same way (M6a). Classic ACR XMP
 cannot express everything the engine renders, so the writer names what it left
-behind while it emits: raster (bitmap) and muted masks are skipped whole, extra
-Add/Subtract/Intersect shapes flatten to the base geometry, a rotated radial
+behind while it emits: raster (bitmap) and muted masks are skipped whole,
+Bitmap components are omitted, and Linear/Radial/Brush/AI components export
+their ordered Add/Subtract/Intersect composition. A rotated radial
 exports unrotated **when and only when the document declares no frame** (v0.32.0
 narrowed it from every rotated radial; the note says by how many degrees and
 why), and per-channel recolour gains do not travel. The verdicts are
@@ -2363,8 +2369,9 @@ zones — those ride out as Lightroom's own Select Sky mask
 (`crs:MaskSubType="2"`, the land zone inverted), with Lightroom rebuilding its
 own sky alpha from the component while the raster this engine renders from
 stays ours (`MaskLossReason::AiMaskRecomputed` says so on every save). The
-opt-in four-class region bitmaps, the spatial tiles and the free-form field
-masks stay engine-only with the named bitmap loss. Deterministic and key-free.
+opt-in four-class region bitmaps, retained refined tiles and free-form field
+masks stay engine-only with the named bitmap loss; native gradient tiles and
+semantic bands export their complete composition. Deterministic and key-free.
 
 **One inversion bit, one composition, and the zone picks one home.** This
 engine spells a mask's polarity twice — `LocalAdjustment::inverted` (the GUI's
@@ -2496,6 +2503,84 @@ is the rule and the measurement behind it is real: on a pair whose texture was
 re-synthesised the paired estimator reports 54 map points, rejects 0.1% of
 them, and under-reads the map's contrast by 10%, while the quantile arm
 recovers the same map to 0.3%.
+
+**Lightroom-native composition and residual-earned bands** (R35, unreleased).
+The writer and reader share the measured composition spelling: Add is
+`MaskBlendMode=0 / MaskValue=1`, Subtract is `1 / 0`, and Intersect is
+Subtract with `MaskInverted` complemented. A census of 174 sidecars, 399
+correction groups and 102 composed groups verifies that syntax. It does not
+measure Lightroom's alpha arithmetic on feathered intersections. The component
+mode overrides a Brush/AI shape's carried blend; a plain Add retains a carried
+zero value. Every radial component uses the base's aspect/rotation projection.
+Only Bitmap extras retain `ComponentsFlattened` (displayed as “bitmap
+components omitted”). AutoShade's namespaced editing metadata preserves zone
+roles, the original inversion homes, and the ambiguous Subtract versus
+Intersect-inverted editor choice; Adobe's own attributes carry the complete
+spellable geometry. Whole-correction inversion distributes through the
+component folds by De Morgan's laws.
+
+A spatial tile is four intersecting half planes, with a Zero/Full separation
+of `TILE_GRADIENT_RAMP = 0.5 / 2048`. Integer raster boundaries are retained
+even at odd dimensions. Coverage is pinned against the old raster within one
+code at every pixel and frozen evidence shares within 1e-4. Guided refinement
+is compared at every alpha sample. Core/mass equality does not prove edge
+identity. A changed raster first passes its ordinary estimator and boundary
+gate; a native trial then repeats those gates using the frozen cell evidence.
+The two actual 2048-edge renders must differ by no more than the existing
+`ZONE_BOUNDARY_STEP_MAX` at every channel/pixel, or the refined Bitmap and its
+loss remain. Equivalent geometry ships with both measured deltas disclosed. These
+geometry tiles can be pasted and turned with their components; any Bitmap
+component still belongs to its source photo.
+
+After the single sky/land corrections and their horizon gate,
+`fit_zoned::subzones` bins the alpha-weighted signed Lab residual into eight
+quantiles of the zone's own vertical mass. Signed a/b matters: equal-strength
+warm and cool residuals have the same unsigned deltaE. Two/three-band models
+use sign changes and the largest residual jumps, require R2 > 0.50 and a
+difference between every adjacent band above the zone's 0.02 floor expressed
+on Lab's 100-unit scale. Every qualifying partition reaches the render gates;
+R2 does not discard a weaker explanation whose native rendering may fare
+better. Both candidate sizes use `attach_one_zone`, the parent's
+PairingScale/correspondence, and the band's own population/cell probes. A
+trial replaces the parent, never stacks on it. The whole trial must improve
+the zone's mean deltaE by >0.02 and retain zone/frame do-no-harm. One shared
+boundary-budget shrink covers every band break and the semantic horizon,
+using the same frozen-rim measurement and zero-difference invariant as the
+single-zone gate. After that, the complete set must not regress
+the target-referenced luma, charged luma or charged colour boundary rulers
+at EACH break and at the horizon. A reduction in the worst rim cannot
+hide another rim getting worse; only the compact disclosure takes the maximum.
+The negative cross-rim pin catches that false admission. A second reading
+compares the actual cross-contour target steps in Rec.709 luma, RGB and Lab
+chroma, separately in every existing 12×8 evidence cell. The transported
+soft-rim bow is not that target gap, and has no samples at a hard edge; a
+whole-horizon percentile can also hide a small hazy segment. Both failure
+directions are pinned. Rejected trials restore the recipe and notes; the
+single outcome note is the only change when no split ships.
+
+Replacement shrink uses the same boundary gate and bisection, but its zero
+baseline retains the accepted parent's controls on each band's geometry.
+Shrinking absolute controls toward zero would erase the parent's accepted
+tone along with the new colour differences. The parent is never stacked
+underneath. The bands' actual zero render anchors the differential gate;
+final target-step and do-no-harm checks still compare against the original
+single correction, so overlap equivalence is measured, not assumed.
+
+Band geometry is Select Sky (inverted in the base for land) intersected with
+one or two shared linear ramps. Overlap is searched from 6% to 96% of the
+zone's own height in six-percentage-point steps, capped before neighbouring
+ramps overlap and deduplicated. Every width owes the same boundary and do-no-harm gates.
+The renderer's measured linear feather is asymmetric, so a new optional
+component inversion bit complements the SAME ramp; reversing handles would
+not sum to one. Adjacent bands sum to one, within coverage quantization, using
+the measured eased profile. False is omitted from JSON, preserving older
+recipe bytes; older readers fail loudly only when true is present. SCHEMA_ERA
+still names the R25 CRS control set and does not change. The warm/cool
+fixture requires accepted bands to replace the single correction and improve
+its measured deltaE; a uniform recolour earns no split. The terminal colour field is unchanged and receives the accepted mask
+stack, so it fits only the remainder. Native geometry adds no geometry loss;
+AI recomputation, local recolour gains and any remaining field retain their
+own named disclosures.
 
 **The region's cells vouch what its pixels cannot** (R34, unreleased). The
 doctrine R34 replaces is one sentence: *`D >= 0.35` in this region, therefore

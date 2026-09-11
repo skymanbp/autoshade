@@ -3,6 +3,35 @@
 // change by one byte). `super::*` still resolves to the root.
     use super::*;
 
+    #[test]
+    fn geometry_tiles_paste_while_photo_keyed_components_stay_home() {
+        use autoshade::recipe::{LocalAdjustment, MaskCombine, MaskComponent, MaskGeometry};
+        let tile = LocalAdjustment {
+            name: "Spatial tile r1c2".into(),
+            components: (0..3).map(|_| MaskComponent { mode: MaskCombine::Intersect, ..Default::default() }).collect(),
+            ..Default::default()
+        };
+        let raster_component = LocalAdjustment {
+            components: vec![MaskComponent {
+                geometry: MaskGeometry::Bitmap { path: "refined.png".into() }, ..Default::default()
+            }], ..Default::default()
+        };
+        let zone_component = LocalAdjustment {
+            role: autoshade::recipe::MaskRole::ZoneSky,
+            components: vec![MaskComponent {
+                geometry: MaskGeometry::select_sky(0.5, 0.25, false, "source-sky.png".into()),
+                mode: MaskCombine::Intersect, inverted: false,
+            }], ..Default::default()
+        };
+        let recipe = EditRecipe { masks: vec![tile.clone(), raster_component, zone_component], ..Default::default() };
+        let paste = crate::export::paste_payload(recipe.clone(), true);
+        assert_eq!(paste.unpastable_masks, 2);
+        assert_eq!(paste.foreign.masks, vec![tile]);
+        assert_eq!(paste.own.masks, recipe.masks);
+        assert!(autoshade::xmp::mask_export_losses(&paste.foreign).is_empty());
+        assert!(!xmp_loss_interrupts(&autoshade::xmp::mask_export_losses(&paste.foreign), &[]));
+    }
+
     /// R25 P8: what a paste is allowed to CARRY.
     ///
     /// The pass-through map is per-DOCUMENT state — Lightroom's Transform /
@@ -5528,7 +5557,7 @@
                 [
                     "bitmap masks ×2",
                     "muted masks ×1",
-                    "shape components flattened ×1",
+                    "bitmap components omitted ×1",
                     "radial rotation ×1",
                     "recolour gains ×1",
                 ],
@@ -5538,7 +5567,7 @@
                 [
                     "位图蒙版 ×2",
                     "已静音蒙版 ×1",
-                    "形状组件已压平 ×1",
+                    "位图组件未写入 ×1",
                     "径向旋转 ×1",
                     "重上色增益 ×1",
                 ],
@@ -5608,40 +5637,107 @@
     ///
     /// The sky/land zones ride out as Lightroom's own Select Sky, so their
     /// entry is the AI one — nothing was left out of the sidecar, and what the
-    /// reader must not assume is that the alpha was Adobe's. The spatial tiles
-    /// and free-form field masks are still rasters classic XMP cannot hold, so
-    /// they keep the bitmap loss and the count that goes with it. Before the
+    /// reader must not assume is that the alpha was Adobe's. Hard spatial
+    /// tiles export as gradients; only retained refined tiles and free-form
+    /// field masks keep the bitmap loss and its count. Before the
     /// carrier change this line said 「bitmap masks ×4」 and the sky was one of
     /// the four.
     ///
     /// MUTATION: fold `AiMaskRecomputed` into the `Bitmap` arm of
     /// `xmp_loss_line` and the two-category assertion fails.
     #[test]
-    fn a_zoned_saves_loss_line_separates_the_select_sky_from_the_bitmap_tiles() {
-        use autoshade::xmp::{MaskLoss, MaskLossReason as R};
-        let loss = |name: &str, reason: R| MaskLoss { name: name.into(), reason };
-        let losses = vec![
-            loss("Sky (reverse-fit)", R::AiMaskRecomputed),
-            loss("Spatial tile d2 r1 c3", R::Bitmap),
-            loss("Spatial tile d2 r2 c0", R::Bitmap),
-            loss("field-zone-1", R::Bitmap),
-        ];
+    #[ignore = "lane measurement: AUTOSHADE_R35_RECIPE must name a scratch recipe inside this worktree"]
+    fn r35_scratch_recipe_save_line_counts_only_the_remaining_bitmap_masks() {
+        use autoshade::recipe::MaskGeometry;
+        let path = std::path::PathBuf::from(std::env::var("AUTOSHADE_R35_RECIPE").expect("scratch recipe"));
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).canonicalize().unwrap();
+        assert!(path.canonicalize().unwrap().starts_with(&root));
+        let recipe: EditRecipe = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        let losses = autoshade::xmp::mask_export_losses(&recipe);
+        let globals = autoshade::xmp::global_export_losses(&recipe);
+        let count = recipe.masks.iter().filter(|m| m.enabled && matches!(m.mask, MaskGeometry::Bitmap { .. })).count();
+        let line = xmp_loss_line(crate::i18n::Lang::Zh, &losses, &globals).unwrap_or_default();
+        if count == 0 { assert!(!line.contains("位图蒙版")); }
+        else { assert!(line.contains(&format!("位图蒙版 ×{count}")), "{line}"); }
+        eprintln!("R35 save line: {line}");
+        eprintln!("R35 native tile names: {:?}", recipe.masks.iter().filter(|m|
+            m.name.starts_with("Spatial tile") && matches!(m.mask, MaskGeometry::Linear { .. })
+        ).map(|m| &m.name).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn fit_mask_status_reads_the_recipe_and_never_counts_a_truncated_history() {
+        use autoshade::recipe::{LocalAdjustment, MaskGeometry, MaskRole};
+        use autoshade::rationale::{keys, Note, TRUNCATED_SENTINEL};
+        let recipe = EditRecipe { masks: vec![
+            LocalAdjustment { name: "Spatial tile r0c0".into(), ..Default::default() },
+            LocalAdjustment { name: "Spatial tile r1c0".into(),
+                mask: MaskGeometry::Bitmap { path: "refined.png".into() }, ..Default::default() },
+            LocalAdjustment { name: "Spatial tile r2c0".into(), enabled: false, ..Default::default() },
+            LocalAdjustment { name: "field-zone-1".into(),
+                mask: MaskGeometry::Bitmap { path: "free.png".into() }, ..Default::default() },
+            LocalAdjustment { role: MaskRole::ZoneSky,
+                mask: MaskGeometry::select_sky(0.5, 0.25, false, "sky.png".into()), ..Default::default() },
+        ], ..Default::default() };
+        let mut history = vec![Note::plain(keys::TILE_ATTACHED),
+            Note::plain(keys::MASK_REFINEMENT_KEPT), Note::plain(keys::MASK_REFINEMENT_ABSTAINED)];
+        let complete = fit_mask_notes(&recipe, &history);
+        assert!(complete.iter().any(|n| matches!(n, FitNote::IncludesSpatialTiles(2))));
+        assert!(complete.iter().any(|n| matches!(n, FitNote::MaskRefinement { kept: 1, abstained: 1 })));
+        history.push(Note::plain(TRUNCATED_SENTINEL));
+        let truncated = fit_mask_notes(&recipe, &history);
+        assert!(truncated.iter().any(|n| matches!(n, FitNote::IncludesSkyZone)));
+        assert!(truncated.iter().any(|n| matches!(n, FitNote::IncludesSpatialTiles(2))));
+        assert!(!truncated.iter().any(|n| matches!(n, FitNote::MaskRefinement { .. })));
+        for lang in [crate::i18n::Lang::En, crate::i18n::Lang::Zh] {
+            for note in &truncated {
+                let line = AutoShadeApp::render_fit_note(lang, note);
+                assert!(line.contains("XMP"));
+                assert!(!line.contains("global part only") && !line.contains("全局部分"));
+                assert!(!line.contains("omitted from classic XMP"));
+            }
+        }
+    }
+
+    #[test]
+    fn a_zoned_save_counts_only_free_or_refined_bitmaps_and_exports_geometry_tiles() {
+        use autoshade::recipe::{LocalAdjustment, MaskCombine, MaskComponent, MaskGeometry};
+        let tile = |name: &str| LocalAdjustment {
+            name: name.into(),
+            components: (0..3).map(|_| MaskComponent {
+                mode: MaskCombine::Intersect, ..Default::default()
+            }).collect(),
+            ..Default::default()
+        };
+        let recipe = EditRecipe { masks: vec![
+            LocalAdjustment {
+                name: "Sky (reverse-fit)".into(),
+                mask: MaskGeometry::select_sky(0.5, 0.25, false, "sky.png".into()),
+                ..Default::default()
+            },
+            tile("Spatial tile d2 r1 c3"), tile("Spatial tile d2 r2 c0"),
+            LocalAdjustment {
+                name: "field-zone-1".into(), mask: MaskGeometry::Bitmap { path: "free.png".into() },
+                ..Default::default()
+            },
+        ], ..Default::default() };
+        let losses = autoshade::xmp::mask_export_losses(&recipe);
         for (lang, ai, bitmap) in [
             (
                 crate::i18n::Lang::En,
                 "AI masks ×1 re-derived locally — not Adobe's raster",
-                "bitmap masks ×3",
+                "bitmap masks ×1",
             ),
             (
                 crate::i18n::Lang::Zh,
                 "AI 蒙版 ×1 由本机重算——非 Adobe 原栅格",
-                "位图蒙版 ×3",
+                "位图蒙版 ×1",
             ),
         ] {
             let line =
                 xmp_loss_line(lang, &losses, &[]).expect("a zoned save has something to say");
             assert!(line.contains(ai), "{lang:?}: the zone's own sentence: {line}");
-            assert!(line.contains(bitmap), "{lang:?}: and the tiles', counted apart: {line}");
+            assert!(line.contains(bitmap), "{lang:?}: the free raster is counted apart from native tiles: {line}");
             assert_eq!(
                 line.matches('×').count(),
                 2,

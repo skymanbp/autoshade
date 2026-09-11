@@ -271,10 +271,12 @@ pub(crate) fn paste_payload(src: EditRecipe, paste_geometry: bool) -> PastePaylo
     // distinction is `MaskRole::is_zone`: an IMPORTED Lightroom AI mask carries
     // only intent, and `segment::resolve_ai_masks` re-derives it against
     // whatever photo it lands on, so that one still pastes.
+    // Four-gradient tiles carry their complete geometry and can travel; a
+    // refined Bitmap anywhere in the composition still belongs to its photo.
     let photo_keyed = |m: &autoshade::recipe::LocalAdjustment| {
-        matches!(m.mask, autoshade::recipe::MaskGeometry::Bitmap { .. })
-            || (m.role.is_zone()
-                && autoshade::render::geometry_raster_path(&m.mask).is_some())
+        std::iter::once(&m.mask).chain(m.components.iter().map(|c| &c.geometry))
+            .any(|g| matches!(g, autoshade::recipe::MaskGeometry::Bitmap { .. })
+                || (m.role.is_zone() && autoshade::render::geometry_raster_path(g).is_some()))
     };
     let unpastable_masks = foreign.masks.iter().filter(|m| photo_keyed(m)).count();
     foreign.masks.retain(|m| !photo_keyed(m));

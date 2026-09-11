@@ -1677,7 +1677,7 @@ impl AutoShadeApp {
                 }
                 PlaceTarget::Component(i, mode) if i < self.recipe.masks.len() => {
                     let m = &mut self.recipe.masks[i];
-                    m.components.push(autoshade::recipe::MaskComponent { geometry: geom, mode });
+                    m.components.push(autoshade::recipe::MaskComponent { inverted: false, geometry: geom, mode });
                     self.sel_mask = Some(i);
                     self.sel_component = Some(m.components.len() - 1);
                     tr(self.lang, "shape added to this mask — drag its knobs to adjust; the shape list is under the mask's row").into()

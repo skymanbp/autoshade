@@ -75,7 +75,7 @@ pub enum Shape {
     MaskGeometry,
     /// A Range-Mask refinement (luminance/colour tagged union), or null.
     NullableRangeMask,
-    /// A structure only the engine reads: base-curve knots, the in-camera lens
+    /// A structure outside the advisor schema: base-curve knots, the in-camera lens
     /// profile, extra mask components, linear-light colour gains, the mask
     /// role. These have no schema spelling at all — [`Shape::schema`] answers
     /// `None`, which is why every carrier row is also `engine_only`.
@@ -342,9 +342,11 @@ pub struct Control {
     /// Since R23-1b every remaining one is a PERMANENT design marker, not
     /// staged work, and there are now three kinds. The stamped calibration
     /// (`as_shot_k`, `as_shot_tint`, `base_curve`, `lens_profile`) is the
-    /// engine's own measurement of this photo; `components` / `color_gains` /
-    /// `role` are mask state with no classic-ACR spelling (recipe.rs states
-    /// the first as an explicit design decision); and the nine R25 B2 EFFECTS
+    /// engine's own measurement of this photo; `components` / `role` are
+    /// existing editor state preserved across an advisor refine (native
+    /// components now have a CRS spelling and roles have editing metadata),
+    /// while `color_gains` still has no classic-ACR counterpart. Schema
+    /// ownership is independent of exportability. The nine R25 B2 EFFECTS
     /// are Adobe-only operators under policy SF4-C — asking the model for a
     /// number that moves no pixel here would spend a paid request on a slider
     /// only Lightroom can honour. `enabled` stays here for a reason of its own
@@ -1213,10 +1215,10 @@ pub const LOCAL_CONTROLS: [Control; 28] = [
         range: None,
         neutral: "empty = the base geometry alone",
         engine_only: true,
-        crs: CrsKey::None,
-        tier: Some(Tier::RenderedNotExported),
-        purpose: "extra Add/Subtract/Intersect shapes composed onto `mask` — engine-only by \
-                  design: keep an existing mask's `name` byte-exact and they are preserved for you",
+        crs: CrsKey::Family("CorrectionMasks / MaskBlendMode"),
+        tier: Some(Tier::Rendered),
+        purpose: "extra Add/Subtract/Intersect shapes composed onto `mask` — Lightroom-native \
+                  except Bitmap components; keep an existing mask's `name` byte-exact to preserve them",
     },
     Control {
         name: "enabled",
@@ -2927,7 +2929,7 @@ mod tests {
     ///     pins the gate term itself in both directions.
     ///   * `Shape::EngineCarrier` (`components`, `color_gains`) — NOT probed
     ///     here: neither is a JSON scalar the one-hot/zeroing probe can write,
-    ///     and `components` needs a raster on disk to compose. Their render
+    ///     and a component needs a composed-mask fixture. Their render
     ///     half is backed by their own tests —
     ///     `render::tests::mask_components_compose_add_subtract_intersect` and
     ///     `render::tests::a_missing_component_raster_makes_the_whole_adjustment_inert`

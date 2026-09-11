@@ -556,6 +556,7 @@ fn bands_from_runs(
                     target: range_weights_for_pixels(&target, target_px),
                 }),
                 mask: RANGE_HOST,
+                components: Vec::new(),
                 range: Some(source),
                 name: name.clone(),
                 role: MaskRole::Custom,
@@ -1509,6 +1510,7 @@ fn derive_colour_bands(
                     target_weights: coverage.target.clone(),
                     coverage: Some(coverage),
                     mask: RANGE_HOST,
+                    components: Vec::new(),
                     range: Some(source),
                     name: String::new(),
                     role: MaskRole::Custom,
@@ -2579,6 +2581,7 @@ mod tests {
             target_weights: mask_weights(&mask, t_img.width(), t_img.height()),
             coverage: None,
             mask: MaskGeometry::Bitmap { path: path.path().to_string_lossy().into_owned() },
+            components: Vec::new(),
             range: Some(RangeMask::Luminance {
                 lo_outer: 0.0,
                 lo: 0.0,
