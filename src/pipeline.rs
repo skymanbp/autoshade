@@ -2577,6 +2577,40 @@ pub fn note_post_stamp_domain(
 /// the base INTO the solve makes every candidate render the canvas's own
 /// one-pass `user(base(x))` — the gap is gone by construction and the fit's
 /// residual numbers describe exactly what the user sees.
+/// Working edge of the reverse-fit's source frame. Comfortably above both
+/// consumers (the fit analyses at 384, the AI judge at 1024) and the same
+/// working edge the base-look estimator uses.
+pub const FIT_SOURCE_EDGE: u32 = 2048;
+
+/// THE source frame of a reverse fit, and the calibration that solve composes
+/// — one function, because the two entry points used to choose differently
+/// and the choice decides the answer.
+///
+/// The desktop app fitted its 1280-px `source_preview`; the CLI fitted the
+/// camera's EMBEDDED rendition unless its aspect disagreed with the sensor
+/// frame. Those are two different images of one capture — different tone
+/// curve, different sharpening, different noise — and
+/// [`crate::fit::structure_divergence`] is measured on whichever one the entry
+/// chose. On the user's `reimagine-2` pair (2026-09-10) that difference alone
+/// decided the SOLVER: the embedded rendition reads D = 0.361 and lands in
+/// Atmosphere mode, the 2048-px neutral develop reads D = 0.276 and lands in
+/// Full — one threshold, two answers, same photograph. So the composed branch
+/// is now unconditional and the embedded-preview branch is gone.
+///
+/// A non-RAW source has no sensor frame to develop and no calibration to
+/// compose; both entries keep their existing path for it.
+pub fn fit_source(raw: &Path) -> Result<(image::DynamicImage, crate::recipe::EditRecipe)> {
+    Ok((
+        crate::render::render_to_image(
+            raw,
+            &crate::recipe::EditRecipe::default(),
+            None,
+            Some(FIT_SOURCE_EDGE),
+        )?,
+        calibration_recipe(fit_calibration(raw)),
+    ))
+}
+
 pub fn calibration_recipe(cal: PhotoCalibration) -> crate::recipe::EditRecipe {
     crate::recipe::EditRecipe {
         version: cal.version,
@@ -4914,6 +4948,69 @@ mod tests {
         legacy_value.as_object_mut().unwrap().remove("linear_handle_warp");
         let legacy: LensProfile = serde_json::from_value(legacy_value).unwrap();
         assert!(legacy.linear_handle_warp.is_empty(), "missing field defaults to legacy identity");
+    }
+
+    /// Both reverse-fit entry points take their source frame from ONE
+    /// function, and neither re-declares its working edge.
+    ///
+    /// A source-text pin because there is no runtime seam: the CLI and the
+    /// desktop worker each build their own `(source, base)` pair before any
+    /// shared code is reached, which is exactly how they came to fit two
+    /// different images of one capture — and the structural reading that
+    /// picks Full vs Atmosphere is measured on whichever image the entry
+    /// chose (real pair, 2026-09-10: embedded rendition 0.361 → Atmosphere,
+    /// 2048-px neutral develop 0.276 → Full).
+    #[test]
+    fn both_reverse_fit_entries_take_their_source_frame_from_one_function() {
+        let cli = production_text("src/main.rs");
+        let gui = production_text("src/bin/gui/actions.rs");
+        assert!(
+            cli.contains("pipeline::fit_source(raw)?"),
+            "the CLI match command must take its source frame from pipeline::fit_source"
+        );
+        assert!(
+            gui.contains("pipeline::fit_source(p)?"),
+            "the desktop reverse-fit must take its source frame from pipeline::fit_source"
+        );
+        for (name, text) in [("src/main.rs", &cli), ("src/bin/gui/actions.rs", &gui)] {
+            assert!(
+                !text.contains("SOURCE_EDGE: u32 ="),
+                "{name} re-declares the fit's source edge — FIT_SOURCE_EDGE has one home"
+            );
+        }
+        assert_eq!(FIT_SOURCE_EDGE, 2048, "the working edge both entries quote");
+    }
+
+    /// …and what `fit_source` actually returns, where a RAW is available.
+    /// Env-gated on the private calibration corpus like every other test that
+    /// needs a real negative; it prints its reason and passes when unset.
+    #[test]
+    fn the_fit_source_frame_is_the_sensor_frame_at_the_working_edge() {
+        let Some(root) = crate::fit::calibration_corpus() else { return };
+        let raw = root.join("source.arw");
+        if !raw.is_file() {
+            crate::test_skipped("fit_source geometry", "corpus has no source.arw");
+            return;
+        }
+        let (frame, base) = fit_source(&raw).expect("a corpus RAW develops");
+        assert_eq!(
+            frame.width().max(frame.height()),
+            FIT_SOURCE_EDGE,
+            "the long edge is the working edge"
+        );
+        let sensor = crate::decode::frame_size(&raw).expect("sensor frame");
+        assert!(
+            crate::fit::same_frame_plausible_dims(
+                (frame.width(), frame.height()),
+                (sensor.0 as u32, sensor.1 as u32)
+            ),
+            "the fit source IS the sensor frame, not an in-camera crop of it"
+        );
+        assert_eq!(
+            base,
+            calibration_recipe(fit_calibration(&raw)),
+            "…and the base it composes is the photo's calibration, nothing else"
+        );
     }
 
     /// The PRODUCTION text of `rel`, with every `#[cfg(test)]` item removed.

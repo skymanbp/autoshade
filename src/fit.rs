@@ -100,6 +100,42 @@ pub(crate) const DIVERGENCE_ZONE: f32 = 0.65;
 /// A divergent semantic partition covering this source-frame share promotes
 /// the global solve to Atmosphere mode. The failing sky covers 44.36%.
 pub(crate) const DIVERGENT_COVER_PROMOTES: f32 = 0.35;
+/// The low-pass scale of the COARSE structural reading, as a divisor of the
+/// analysis raster's long edge: sigma = 384 / 48 = 8 px at [`ANALYZE_EDGE`].
+/// Eight pixels is two [`structure_divergence`] bands above the sigma-2
+/// gradient pooling and half its widest band.
+///
+/// WHAT IT IS NOT, measured before it was wired to anything (2026-09-10, the
+/// user's `reimagine-2` pair against its own 2048-px neutral develop). The
+/// coarse reading was built on the hypothesis that a repaint which keeps the
+/// horizon, the ridge and the building where they were would read LOWER at
+/// layout scale than at pixel scale, so cell and population statistics could
+/// be admitted on it where the fine reading refuses. The pair says the
+/// opposite, at every scope:
+///
+/// | scope | D fine | D coarse |
+/// |---|---|---|
+/// | frame | 0.276 | 0.609 |
+/// | sky zone (44.4% cover) | 0.620 | 0.959 |
+/// | land zone | 0.271 | 0.546 |
+/// | mean 3x3 cell support | 0.585 | 0.454 |
+/// | mean 12x8 cell support | 0.417 | 0.413 |
+///
+/// The reason is in the instrument: luma is rank-equalised against each
+/// image's OWN histogram, so removing the fine texture that both frames still
+/// share leaves the broad regional luma the repaint actually moved — a grey
+/// sky turned orange re-orders the ranks between sky and land, and that IS
+/// the residual the fit exists to close. A low-pass makes the statistic more
+/// sensitive to the edit, not less. So the mode line stays on the FINE
+/// reading and no evidence gate was moved onto this one; it is measured and
+/// DISCLOSED beside the fine number ([`crate::rationale::keys::FIT_NOTE_PAIRING`])
+/// so the two scales' disagreement is on the record rather than assumed.
+const COARSE_SIGMA_DIVISOR: f32 = 48.0;
+/// How close to [`DIVERGENCE_GLOBAL`] the fine reading has to be before the
+/// report says the mode was a near thing. There is no hysteresis and no dead
+/// band on the mode line — D = 0.3499 and D = 0.3501 select different solvers
+/// — so the honest substitute for a tie-break is to say when the tie happened.
+const MODE_MARGIN_DISCLOSED: f32 = 0.05;
 /// Independent cap for every residual tone-curve segment. The three showcase
 /// curves peak at 1.762/1.905/1.762; the generated-cloud failure reached 4.52.
 const RESIDUAL_SLOPE_CAP: f32 = 2.0;
@@ -1436,6 +1472,141 @@ pub fn structure_divergence(
     Some(Divergence { correlation, energy_error, d })
 }
 
+/// Separable Gaussian low-pass of an analysis raster, tap weights RENORMALISED
+/// at the border.
+///
+/// [`structure_divergence`]'s own band blurs truncate instead, which is
+/// correct there — the bands are differences of two truncated blurs, so the
+/// border deficit cancels. It does NOT cancel when the blur is the reading's
+/// input: a truncated sigma-8 pass darkens the outer 24 px of both frames by
+/// the same vignette, both rank-equalise it into the same lowest ranks, and
+/// the correlation half of the statistic is handed agreement it did not
+/// measure. Renormalising costs one division per tap and states no border
+/// fact at all.
+fn low_pass_pixels(px: &[[f32; 3]], w: usize, h: usize, sigma: f32) -> Vec<[f32; 3]> {
+    let n = w * h;
+    let radius = (3.0 * sigma).ceil().max(1.0) as isize;
+    let kernel: Vec<f32> = (-radius..=radius)
+        .map(|i| (-(i * i) as f32 / (2.0 * sigma * sigma)).exp())
+        .collect();
+    let mut tmp = vec![[0.0f32; 3]; n];
+    let mut out = vec![[0.0f32; 3]; n];
+    for y in 0..h {
+        for x in 0..w {
+            let (mut acc, mut mass) = ([0.0f32; 3], 0.0f32);
+            for (ki, &kv) in kernel.iter().enumerate() {
+                let sx = x as isize + ki as isize - radius;
+                if (0..w as isize).contains(&sx) {
+                    let p = px[y * w + sx as usize];
+                    for (slot, v) in acc.iter_mut().zip(p) {
+                        *slot += v * kv;
+                    }
+                    mass += kv;
+                }
+            }
+            tmp[y * w + x] = acc.map(|v| v / mass.max(1e-12));
+        }
+    }
+    for y in 0..h {
+        for x in 0..w {
+            let (mut acc, mut mass) = ([0.0f32; 3], 0.0f32);
+            for (ki, &kv) in kernel.iter().enumerate() {
+                let sy = y as isize + ki as isize - radius;
+                if (0..h as isize).contains(&sy) {
+                    let p = tmp[sy as usize * w + x];
+                    for (slot, v) in acc.iter_mut().zip(p) {
+                        *slot += v * kv;
+                    }
+                    mass += kv;
+                }
+            }
+            out[y * w + x] = acc.map(|v| v / mass.max(1e-12));
+        }
+    }
+    out
+}
+
+/// [`structure_divergence`] of the same pair at LAYOUT scale: both sides are
+/// low-passed at [`COARSE_SIGMA_DIVISOR`] first, then handed to the unchanged
+/// instrument with the same weights and the same abstention.
+///
+/// The two readings answer two different questions and the crate needs both.
+/// PIXEL pairing (a per-pixel target, a per-pixel voucher, a paired tone
+/// regression) is only valid where the fine reading says the texture survived.
+/// CELL and population statistics need only the layout: a generative repaint
+/// that re-synthesises every cloud but leaves the horizon, the ridge and the
+/// building where they were has replaced the pixels and KEPT the frame, and
+/// reading the fine number as "this is a different scene" is the wrong
+/// question asked of tone and colour evidence.
+pub(crate) fn structure_divergence_coarse(
+    src_px: &[[f32; 3]],
+    tgt_px: &[[f32; 3]],
+    w: u32,
+    h: u32,
+    weights: &[f32],
+) -> Option<Divergence> {
+    let n = w as usize * h as usize;
+    if n == 0 || src_px.len() != n || tgt_px.len() != n || weights.len() != n {
+        return None;
+    }
+    let sigma = (w.max(h) as f32 / COARSE_SIGMA_DIVISOR).max(1.0);
+    let (wu, hu) = (w as usize, h as usize);
+    structure_divergence(
+        &low_pass_pixels(src_px, wu, hu, sigma),
+        &low_pass_pixels(tgt_px, wu, hu, sigma),
+        w,
+        h,
+        weights,
+    )
+}
+
+/// The two structural readings of ONE pair, measured together on one raster.
+///
+/// Threaded rather than re-measured: the mode line, the evidence model's range
+/// survival, the pairing-scale choice and the disclosure all read the same two
+/// numbers, and a second `structure_divergence_for` call on a re-resampled
+/// frame is how the crate ended up with two independent readings of the same
+/// statistic disagreeing about the same pair.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DivergencePair {
+    /// Pixel-scale agreement: did the texture survive?
+    pub fine: Option<Divergence>,
+    /// Layout-scale agreement: is the scene still in the same place?
+    pub coarse: Option<Divergence>,
+}
+
+impl DivergencePair {
+    /// The pairing scale this reading admits. `Pixel` needs the FINE reading
+    /// to hold; nothing else does. An ABSTENTION is not a match: an unread
+    /// fine reading cannot authorise per-pixel pairing.
+    pub(crate) fn scale(&self) -> PairingScale {
+        if self.fine.is_some_and(|r| r.d < DIVERGENCE_GLOBAL) {
+            PairingScale::Pixel
+        } else {
+            PairingScale::Cell
+        }
+    }
+}
+
+/// At which scale this solve may pair a source sample with a target sample.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PairingScale {
+    /// Per-pixel: index `i` on one side IS index `i` on the other.
+    Pixel,
+    /// Per-cell: only cell statistics correspond, never individual pixels.
+    Cell,
+}
+
+impl PairingScale {
+    /// The one word the CLI prints for this scale.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Pixel => "pixel",
+            Self::Cell => "cell",
+        }
+    }
+}
+
 /// The common, pixel-aligned 384×256 analysis raster used by both scopes and
 /// by the calibration prototype. Both sides are Lanczos-resampled onto that
 /// one grid and the source is placed in the calibration/base domain before
@@ -1470,6 +1641,20 @@ pub(crate) fn structure_divergence_for(
         }
     };
     structure_divergence(&sp, &tp, w, h, weights)
+}
+
+/// Both readings of one pair off ONE [`divergence_raster`] build.
+pub(crate) fn divergence_pair_for(
+    src: &DynamicImage,
+    target: &DynamicImage,
+    base: &EditRecipe,
+) -> DivergencePair {
+    let (sp, tp, w, h) = divergence_raster(src, target, base);
+    let weights = vec![1.0; sp.len()];
+    DivergencePair {
+        fine: structure_divergence(&sp, &tp, w, h, &weights),
+        coarse: structure_divergence_coarse(&sp, &tp, w, h, &weights),
+    }
 }
 /// Quantile clip for CDF inversion — the extreme tails of a generative render
 /// are noise (a few blown/crushed pixels would otherwise own the end knots).
@@ -2037,6 +2222,15 @@ pub struct FitReport {
     /// is 378x250 px; the option is here so no consumer can read a matched
     /// verdict off a frame nothing measured.
     pub divergence: Option<Divergence>,
+    /// The LAYOUT-scale twin of [`Self::divergence`], measured on the same
+    /// raster in the same call ([`divergence_pair_for`]). Nothing is gated on
+    /// it — the mode line and every evidence gate read the fine number — but
+    /// it is disclosed beside it, because the two scales disagreeing is a fact
+    /// about the pair that used to be invisible. See [`COARSE_SIGMA_DIVISOR`].
+    pub divergence_coarse: Option<Divergence>,
+    /// Whether this solve was allowed to pair a source PIXEL with a target
+    /// pixel, or only a source CELL with a target cell.
+    pub pairing: PairingScale,
     /// The rationale as typed notes (L12#2B): `render_en(&notes)` is the
     /// recipe's `rationale` byte-for-byte (empty prose prefix — the fit
     /// rationale is fully deterministic), so the GUI renders it localized
@@ -2445,7 +2639,12 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure_opts(
     let tp = pixels_of(&t_img);
     let evidence = evidence_model_for(&sp, &tp, s_img.width(), s_img.height());
     let err_before = look_err_with_evidence(&sp, &tp, &evidence);
-    let divergence = structure_divergence_for(src, target, base, None);
+    // ONE reading per solve, at both scales, off one raster build. The mode
+    // line and every evidence gate read the FINE number; the coarse one is
+    // carried for the disclosure (see [`COARSE_SIGMA_DIVISOR`] for why it is
+    // not a more forgiving reading and therefore gates nothing).
+    let readings = divergence_pair_for(src, target, base);
+    let divergence = readings.fine;
     // Atmosphere is the claim that the structure was REPLACED, so an
     // abstention cannot promote into it: `is_some_and` refuses to fire on a
     // reading nobody took, where the old `d >= …` on a matched-by-default
@@ -2489,6 +2688,8 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure_opts(
             notes,
             mode,
             divergence,
+            divergence_coarse: readings.coarse,
+            pairing: readings.scale(),
             evidence: report_evidence,
             structural_evidence,
             correspondence: None,
@@ -2526,7 +2727,7 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure_opts(
             &tp,
             base,
             same_frame,
-            divergence,
+            readings,
             &evidence,
             defer_disclosure,
             options.strength,
@@ -2621,6 +2822,8 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure_opts(
                 same_frame,
                 mode,
                 divergence,
+                divergence_coarse: readings.coarse,
+                pairing: readings.scale(),
                 evidence: &evidence,
                 structural_evidence: None,
                 defer_disclosure,
@@ -2668,6 +2871,8 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure_opts(
                 same_frame,
                 mode,
                 divergence,
+                divergence_coarse: readings.coarse,
+                pairing: readings.scale(),
                 evidence: &evidence,
                 structural_evidence: None,
                 defer_disclosure,
@@ -3320,6 +3525,8 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure_opts(
             same_frame,
             mode,
             divergence,
+            divergence_coarse: readings.coarse,
+            pairing: readings.scale(),
             evidence: &evidence,
             structural_evidence: None,
             defer_disclosure,
@@ -3426,7 +3633,7 @@ fn fit_atmosphere_from_parts(
     tp: &[[f32; 3]],
     base: &EditRecipe,
     same_frame: bool,
-    divergence: Option<Divergence>,
+    readings: DivergencePair,
     structural: &EvidenceModel,
     defer_disclosure: bool,
     strength: crate::recipe::GradeStrength,
@@ -3776,7 +3983,9 @@ fn fit_atmosphere_from_parts(
             tp,
             same_frame,
             mode: FitMode::Atmosphere,
-            divergence,
+            divergence: readings.fine,
+            divergence_coarse: readings.coarse,
+            pairing: readings.scale(),
             evidence,
             structural_evidence: Some(structural),
             defer_disclosure,
@@ -4175,6 +4384,8 @@ struct Measured<'a> {
     same_frame: bool,
     mode: FitMode,
     divergence: Option<Divergence>,
+    divergence_coarse: Option<Divergence>,
+    pairing: PairingScale,
     evidence: &'a EvidenceModel,
     structural_evidence: Option<&'a EvidenceModel>,
     defer_disclosure: bool,
@@ -4313,6 +4524,46 @@ fn compose_report(mut recipe: EditRecipe, m: Measured<'_>, solve: SolveFacts) ->
             ],
         ),
     );
+    // BOTH readings and the pairing scale, on every mode. The pair of numbers
+    // is the fit's own answer to "which of these two images am I allowed to
+    // pair with which", and until R33 the Full-mode summaries carried `d` in
+    // their arguments and printed none of it — a solve could land in Full or
+    // in Atmosphere on a reading the user never saw.
+    let reading = |r: Option<Divergence>| {
+        r.map_or_else(|| "unmeasured".to_string(), |r| format!("{:.3}", r.d))
+    };
+    push_note(
+        &mut rationale,
+        &mut notes,
+        Note::new(
+            match m.pairing {
+                PairingScale::Pixel => keys::FIT_NOTE_PAIRING_PIXEL,
+                PairingScale::Cell => keys::FIT_NOTE_PAIRING_CELL,
+            },
+            vec![
+                ("fine", reading(m.divergence)),
+                ("coarse", reading(m.divergence_coarse)),
+            ],
+        ),
+    );
+    // …and when the mode was a near thing, the margin that decided it. A pair
+    // 0.001 from the line and a pair 0.3 from it get the same one-word verdict
+    // otherwise, and only one of them deserves to be believed.
+    if let Some(d) = m.divergence
+        && (d.d - DIVERGENCE_GLOBAL).abs() <= MODE_MARGIN_DISCLOSED
+    {
+        push_note(
+            &mut rationale,
+            &mut notes,
+            Note::new(
+                keys::FIT_NOTE_MODE_MARGIN,
+                vec![
+                    ("margin", format!("{:.3}", (d.d - DIVERGENCE_GLOBAL).abs())),
+                    ("line", format!("{DIVERGENCE_GLOBAL:.2}")),
+                ],
+            ),
+        );
+    }
     // Keyed on the RESIDUAL, not the pre-fit distance: a large but perfectly
     // fittable tone gap (2 EV of exposure) starts far and ends near — only a
     // look the model cannot approach deserves the warning.
@@ -4777,6 +5028,8 @@ fn compose_report(mut recipe: EditRecipe, m: Measured<'_>, solve: SolveFacts) ->
         notes,
         mode: m.mode,
         divergence: m.divergence,
+        divergence_coarse: m.divergence_coarse,
+        pairing: m.pairing,
         evidence: m.evidence.clone(),
         structural_evidence: m.structural_evidence.cloned(),
         correspondence: None,
@@ -4932,7 +5185,8 @@ pub fn rescore_report(
     let carried_fan = carried_arg(keys::FIT_NOTE_CAST_HUE_FANNED, "share")
         .and_then(|share| share.parse::<f32>().ok())
         .zip(carried_arg(keys::FIT_NOTE_CAST_HUE_FANNED, "fan").and_then(|fan| fan.parse::<f32>().ok()));
-    let divergence = structure_divergence_for(src, target, &EditRecipe::default(), None);
+    let readings = divergence_pair_for(src, target, &EditRecipe::default());
+    let divergence = readings.fine;
     // Same stance as the solve path: an unread frame is not promoted.
     let mode = if divergence.is_some_and(|r| r.d >= DIVERGENCE_GLOBAL)
         || carried(keys::FIT_SUMMARY_ATMOSPHERE)
@@ -4990,6 +5244,8 @@ pub fn rescore_report(
             same_frame,
             mode,
             divergence,
+            divergence_coarse: readings.coarse,
+            pairing: readings.scale(),
             evidence,
             structural_evidence: blind.as_ref().map(|_| &structural),
             defer_disclosure: false,
@@ -8206,6 +8462,8 @@ mod tests {
                 same_frame: true,
                 mode: FitMode::Atmosphere,
                 divergence: Some(Divergence::matched()),
+                divergence_coarse: Some(Divergence::matched()),
+                pairing: PairingScale::Pixel,
                 evidence: &evidence,
                 structural_evidence: Some(&evidence),
                 defer_disclosure: false,
@@ -8825,6 +9083,80 @@ mod tests {
                 "{file} calibration drifted: {measured:?}, expected {want:.3}"
             );
         }
+    }
+
+    /// The coarse reading is a SECOND SCALE, not a more forgiving one.
+    ///
+    /// It was added to answer "is the scene still in the same place?" apart
+    /// from "are the same pixels still there?", on the hypothesis that a
+    /// generative repaint keeps the first and destroys the second. The table
+    /// below is what the instrument actually reads, and it refuses the
+    /// hypothesis: on the pairs whose layout is REPLACED the coarse number is
+    /// far above the global threshold, and on the two shipped panels — whose
+    /// layout is untouched — the two readings sit within 0.03 of each other.
+    /// There is no side of any threshold the coarse reading puts a
+    /// same-layout repaint on that the fine reading does not, which is why the
+    /// mode line still reads the fine number and no evidence gate was moved
+    /// onto this one (see [`COARSE_SIGMA_DIVISOR`] for the real pair's own
+    /// four scopes).
+    #[test]
+    fn the_coarse_reading_is_a_second_scale_not_a_more_forgiving_one() {
+        let d = EditRecipe::default();
+        let measure = |src: &DynamicImage, tgt: &DynamicImage| {
+            let pair = divergence_pair_for(src, tgt, &d);
+            (
+                pair.fine.expect("a 384x256 raster always resolves").d,
+                pair.coarse.expect("the low-pass keeps the geometry").d,
+            )
+        };
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/images");
+        let panel_pair = |file: &str| {
+            let panel = image::open(root.join(file)).unwrap();
+            (panel.crop_imm(0, 136, 532, 356), panel.crop_imm(535, 136, 530, 356))
+        };
+        let (viaduct_src, viaduct_tgt) = panel_pair("showcase-viaduct-reverse-fit.jpg");
+        let (cornwall_src, cornwall_tgt) = panel_pair("showcase-cornwall-reverse-fit.jpg");
+        let (cloud_src, cloud_tgt) = flat_sky_to_cloud_deck();
+        let (perm_src, perm_tgt) = structural_permutation_pair();
+        let identity = synth();
+        for (name, (fine, coarse), want_fine, want_coarse) in [
+            ("viaduct", measure(&viaduct_src, &viaduct_tgt), 0.180f32, 0.187f32),
+            ("cornwall", measure(&cornwall_src, &cornwall_tgt), 0.136, 0.110),
+            ("cloud-deck", measure(&cloud_src, &cloud_tgt), 1.642, 0.805),
+            ("permutation", measure(&perm_src, &perm_tgt), 1.970, 1.053),
+            ("identity", measure(&identity, &identity), 0.0, 0.0),
+        ] {
+            eprintln!("TWO_SCALE {name} fine={fine:.4} coarse={coarse:.4}");
+            assert!(
+                (fine - want_fine).abs() <= 0.05,
+                "{name} fine drifted: {fine:.4}, expected {want_fine:.3}"
+            );
+            assert!(
+                (coarse - want_coarse).abs() <= 0.05,
+                "{name} coarse drifted: {coarse:.4}, expected {want_coarse:.3}"
+            );
+        }
+        // The property the mode line depends on, stated as an assertion and not
+        // only as a number: a same-layout panel is Full at BOTH scales, and a
+        // replaced-layout pair is divergent at both. Neither scale rescues or
+        // convicts a pair the other does not.
+        for (name, src, tgt) in [
+            ("viaduct", &viaduct_src, &viaduct_tgt),
+            ("cornwall", &cornwall_src, &cornwall_tgt),
+        ] {
+            let (fine, coarse) = measure(src, tgt);
+            assert!(fine < DIVERGENCE_GLOBAL && coarse < DIVERGENCE_GLOBAL, "{name}: {fine} {coarse}");
+        }
+        for (name, src, tgt) in [
+            ("cloud-deck", &cloud_src, &cloud_tgt),
+            ("permutation", &perm_src, &perm_tgt),
+        ] {
+            let (fine, coarse) = measure(src, tgt);
+            assert!(fine >= DIVERGENCE_GLOBAL && coarse >= DIVERGENCE_GLOBAL, "{name}: {fine} {coarse}");
+        }
+        // …and the pairing scale the readings choose is the FINE one's verdict.
+        assert_eq!(divergence_pair_for(&viaduct_src, &viaduct_tgt, &d).scale(), PairingScale::Pixel);
+        assert_eq!(divergence_pair_for(&cloud_src, &cloud_tgt, &d).scale(), PairingScale::Cell);
     }
 
     #[test]
@@ -13886,6 +14218,8 @@ mod tests {
                     same_frame: true,
                     mode: FitMode::Full,
                     divergence: Some(Divergence::matched()),
+                    divergence_coarse: Some(Divergence::matched()),
+                    pairing: PairingScale::Pixel,
                     evidence,
                     structural_evidence: None,
                     defer_disclosure: false,

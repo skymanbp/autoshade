@@ -1754,40 +1754,19 @@ fn match_cmd(
             o.display()
         );
     }
-    // The source frame. The camera's embedded rendition is this command's
-    // contract (no demosaic, and the calibration stamp below was validated
-    // on it) — but only while that rendition IS the sensor frame. A body set
-    // to an in-camera aspect writes a centred crop (a 4:3 preview over a 3:2
-    // sensor); fitting on it paired the target against a different frame,
-    // warned "CROPPED", and mapped every zone and tile mask onto the wrong
-    // one (v1.2.2). For that class the source is a neutral develop of the
-    // sensor frame with the calibration COMPOSED into the solve — the route
-    // the desktop app has used since v0.25.0 — and nothing is stamped after.
-    let preview = decode::preview_only(raw)?;
-    let frame = decode::frame_size(raw)?;
-    let composed = !fit::same_frame_plausible_dims(
-        (preview.width(), preview.height()),
-        (frame.0 as u32, frame.1 as u32),
-    );
+    // The source frame: `pipeline::fit_source`, the ONE choice both entry
+    // points make. The camera's embedded rendition used to be this command's
+    // contract, with a neutral develop kept for the in-camera-crop class
+    // alone; that made the CLI and the desktop app fit two different images
+    // of one capture, and the structural reading they are both judged by
+    // disagreed across the mode threshold on a real pair. See `fit_source`.
+    let composed = decode::is_raw(raw);
     let (src, fit_base) = if composed {
-        println!(
-            "  note: the embedded preview ({}x{}) is an in-camera crop of the {}x{} sensor \
-             frame — fitting on a neutral develop of the full frame, calibration composed \
-             into the solve",
-            preview.width(),
-            preview.height(),
-            frame.0,
-            frame.1
-        );
-        // Comfortably above both consumers (the fit analyses at 384, the
-        // judge at 1024) — the same working edge the base-look estimator uses.
-        const SOURCE_EDGE: u32 = 2048;
-        (
-            render::render_to_image(raw, &EditRecipe::default(), None, Some(SOURCE_EDGE))?,
-            pipeline::calibration_recipe(pipeline::fit_calibration(raw)),
-        )
+        pipeline::fit_source(raw)?
     } else {
-        (preview, EditRecipe::default())
+        // No sensor frame to develop, no calibration to compose: the baked
+        // file IS the source, and the post-stamp below stays available.
+        (decode::preview_only(raw)?, EditRecipe::default())
     };
     // THE raw-vs-baked dispatch (R22-1). The target is a finished rendition
     // of this frame — usually a baked file, but "another RAW you developed
@@ -1856,24 +1835,36 @@ fn match_cmd(
         })
     };
     let mut rep = run_fit(zoned)?;
-    // Calibration stamp, ONE snapshot (produce_recipe's rule): the fit solved
-    // against the camera's embedded preview — the very base the base curve
-    // approximates — but the deliverable renders from the NEUTRAL sensor
-    // develop, so without the curve the fitted deltas landed on a much darker
-    // base and the render disagreed with the fit's own numbers. The lens
-    // profile and the as-shot WB anchor ride the same snapshot (the fitted
-    // recipe was built from EditRecipe::default and silently dropped both).
-    // The GUI 反推 worker goes one step further: it COMPOSES the calibration
-    // into the solve itself (`fit_recipe_from` + `pipeline::calibration_recipe`,
-    // v0.25.0), so its deliverable carries the calibration with no stamp. The
-    // CLI keeps the embedded-preview source + this post-stamp on purpose
-    // (`preview_only` needs no demosaic, and this command's contract was
-    // validated on it).
+    // The solver and the pairing scale, said out loud before any number is
+    // printed off them: the mode decides whether white balance, channel
+    // curves and the paired estimators exist at all.
+    {
+        let d = |r: Option<fit::Divergence>| {
+            r.map_or_else(|| "unmeasured".to_string(), |r| format!("{:.3}", r.d))
+        };
+        println!(
+            "  solver: {} · paired at {} scale (D {} at pixel scale, {} at layout scale)",
+            match rep.mode {
+                fit::FitMode::Atmosphere => "Atmosphere (bounded robust controls)",
+                fit::FitMode::Full => "full solve",
+            },
+            rep.pairing.label(),
+            d(rep.divergence),
+            d(rep.divergence_coarse),
+        );
+    }
+    // Calibration stamp, ONE snapshot (produce_recipe's rule), kept for the
+    // BAKED-source arm alone: there the fit solves against a file that
+    // carries its own look, the deliverable renders from that same file, and
+    // the stamp is what gives the recipe a camera curve to name. A RAW source
+    // goes through `pipeline::fit_source`, which COMPOSES the calibration
+    // into the solve, so its deliverable carries it by construction — no
+    // stamp, and `post_stamp_domain_shift` has nothing to disclose.
     // R20 opt-in AI review (LLM-as-a-judge), rendered PRE-stamp on purpose:
-    // this fit solved its deltas ON the embedded preview (the base look is in
-    // those pixels), so the judge must see develop_preview(preview, deltas) —
-    // after the calibration stamp below the same render would apply the base
-    // curve a second time. Informational: a failure warns, never errs.
+    // this fit solved its deltas ON `src` (the room the solve ran in), so the
+    // judge must see develop_preview(src, deltas) — on the baked arm, after
+    // the calibration stamp below the same render would apply the base curve
+    // a second time. Informational: a failure warns, never errs.
     const JUDGE_EDGE: u32 = 1024; // detail:high tiles at 512 px — 4 tiles read a grade
     let judge_of = |recipe: &EditRecipe| -> Result<autoshade::advisor::Judgement> {
         let cfg = Config::load();

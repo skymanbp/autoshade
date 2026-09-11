@@ -57,3 +57,4 @@ desktop.ini
 
 # cc-memory project state (tool-local, never content)
 .ccm/
+target-lane-*/

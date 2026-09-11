@@ -4225,6 +4225,8 @@ mod tests {
             notes: Vec::new(),
             mode: fit::FitMode::Full,
             divergence: divergence(0.0),
+            divergence_coarse: divergence(0.0),
+            pairing: fit::PairingScale::Pixel,
             evidence: fit::evidence_model_for(
                 &fit::pixels_of(&s),
                 &fit::pixels_of(&t),

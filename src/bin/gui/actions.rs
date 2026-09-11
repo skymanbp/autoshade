@@ -3214,14 +3214,30 @@ impl AutoShadeApp {
                     // clipped saturated channels at the pass boundary —
                     // both retired by pipeline::calibration_recipe +
                     // fit_recipe_from.
-                    let fit_base = src_path
-                        .as_deref()
-                        .map(|p| {
-                            autoshade::pipeline::calibration_recipe(
-                                autoshade::pipeline::fit_calibration(p),
-                            )
-                        })
-                        .unwrap_or_default();
+                    // …and since R33 §A the SOURCE FRAME comes from the same
+                    // one function the CLI uses: a 2048-px neutral develop of
+                    // the sensor frame. The panel's 1280-px `source_preview`
+                    // is a different image of the same capture — different
+                    // resampling, different sharpening — and the structural
+                    // reading that picks Full vs Atmosphere is measured on
+                    // whichever image the entry chose. A non-RAW source has no
+                    // sensor frame, so it keeps the preview it already has.
+                    let (base, fit_base) = match src_path.as_deref() {
+                        Some(p) if autoshade::decode::is_raw(p) => {
+                            let (frame, cal) = autoshade::pipeline::fit_source(p)?;
+                            (std::sync::Arc::new(frame), cal)
+                        }
+                        other => (
+                            base,
+                            other
+                                .map(|p| {
+                                    autoshade::pipeline::calibration_recipe(
+                                        autoshade::pipeline::fit_calibration(p),
+                                    )
+                                })
+                                .unwrap_or_default(),
+                        ),
+                    };
                     // ONE judge call site for both orderings (R23-6): the
                     // default path reviews AFTER the persist, the deep path
                     // reviews BEFORE it and again after its retry, and a
@@ -3325,6 +3341,20 @@ impl AutoShadeApp {
                     // trf calls here used the language captured at spawn,
                     // minutes stale after a segmentation run.
                     let mut status: Vec<FitNote> = Vec::new();
+                    // FIRST, before every other landing fact: which solver ran
+                    // and at which pairing scale. Everything else on this line
+                    // is a consequence of those two.
+                    let reading = |r: Option<autoshade::fit::Divergence>| {
+                        r.map_or_else(|| "unmeasured".to_string(), |r| format!("{:.3}", r.d))
+                    };
+                    status.push(FitNote::SolverMode {
+                        atmosphere: rep.mode == autoshade::fit::FitMode::Atmosphere,
+                    });
+                    status.push(FitNote::SolverPairing {
+                        pixel: rep.pairing == autoshade::fit::PairingScale::Pixel,
+                        fine: reading(rep.divergence),
+                        coarse: reading(rep.divergence_coarse),
+                    });
                     // ── the DEEP path (R23-6 D). Everything here happens
                     // BEFORE the persist below, which is the whole point and
                     // the deliberate revision of R20's ordering — recorded at

@@ -97,6 +97,19 @@ pub mod keys {
          structure cannot be reconstructed by develop controls, so only its atmosphere \
          and overall tone/colour were matched with bounded robust controls. Residual look \
          error {err_before} → {err_after}.";
+    /// The two structural readings and the pairing scale they chose. TWO full
+    /// keys rather than one with a `{scale}` argument: a fragment inside an
+    /// arg would stay English in the zh rendering.
+    pub const FIT_NOTE_PAIRING_PIXEL: &str =
+        " Structural reading: D {fine} at pixel scale, {coarse} at layout scale — the \
+         pixel-scale reading holds, so this solve paired source pixel with target pixel.";
+    pub const FIT_NOTE_PAIRING_CELL: &str =
+        " Structural reading: D {fine} at pixel scale, {coarse} at layout scale — the \
+         pixel-scale reading does not hold, so only cell statistics were paired and never \
+         individual pixels.";
+    pub const FIT_NOTE_MODE_MARGIN: &str =
+        " The pixel-scale reading is {margin} from the {line} mode threshold: this pair \
+         chose between the full solve and Atmosphere mode by that margin.";
     pub const FIT_NOTE_FAR: &str =
         " NOTE: the fitted recipe still renders far from the target \
          (residual {err_after}) — this look exceeds what global \

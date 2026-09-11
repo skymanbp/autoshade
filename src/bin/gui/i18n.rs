@@ -1290,6 +1290,14 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
         " · AI 打分：匹配 {score}/100——{critique}"),
     (" · AI review unavailable ({err}) — the fit itself already landed",
         " · AI 打分不可用（{err}）——反推本身已完成"),
+    // ── R33: the solver facts the status line opens with
+    (" · full solve (all develop controls)", " · 完整求解（全部显影控制）"),
+    (" · Atmosphere mode (bounded robust controls — the structure diverged)",
+        " · 氛围模式（有界稳健控制——结构已发生差异）"),
+    (" · paired pixel-to-pixel (D {fine} at pixel scale, {coarse} at layout scale)",
+        " · 逐像素配对（D 像素尺度 {fine}，布局尺度 {coarse}）"),
+    (" · paired by cell statistics only (D {fine} at pixel scale, {coarse} at layout scale)",
+        " · 仅按单元统计配对（D 像素尺度 {fine}，布局尺度 {coarse}）"),
     // ── R23-6: the reverse-fit's own status facts (workers::render_fit_note)
     (" · it suggests: {hint} (nothing was changed — tick 「deep」 to let it try)",
         " · 它的建议：{hint}（什么都没有改动——勾选「深度」才会让它去试）"),
@@ -1701,6 +1709,16 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
       and overall tone/colour were matched with bounded robust controls. Residual look \
       error {err_before} → {err_after}.",
         "反推氛围模式（结构差异 D={d}）：目标结构无法通过显影控制恢复，因此仅以有界的可靠控制匹配其氛围和整体影调/色调。剩余观感误差 {err_before} → {err_after}。"),
+    (" Structural reading: D {fine} at pixel scale, {coarse} at layout scale — the \
+      pixel-scale reading holds, so this solve paired source pixel with target pixel.",
+        " 结构读数：像素尺度 D {fine}，布局尺度 {coarse}——像素尺度读数成立，因此本次求解按源像素对目标像素配对。"),
+    (" Structural reading: D {fine} at pixel scale, {coarse} at layout scale — the \
+      pixel-scale reading does not hold, so only cell statistics were paired and never \
+      individual pixels.",
+        " 结构读数：像素尺度 D {fine}，布局尺度 {coarse}——像素尺度读数不成立，因此只配对单元统计量，不配对单个像素。"),
+    (" The pixel-scale reading is {margin} from the {line} mode threshold: this pair \
+      chose between the full solve and Atmosphere mode by that margin.",
+        " 像素尺度读数距离 {line} 的模式阈值只有 {margin}：本组图像就是以这个差值在完整求解与氛围模式之间做的选择。"),
     (" NOTE: the fitted recipe still renders far from the target \
       (residual {err_after}) — this look exceeds what global \
       sliders can express; consider the AI variant itself or a zoned \
