@@ -245,6 +245,9 @@ pub(crate) struct PastePayload {
     /// Bitmap masks in the payload, for the caller's toast (they are dropped
     /// from `foreign`, and a silent drop is what the toast exists to prevent).
     pub bitmap_masks: usize,
+    /// Whether a colour field was dropped from `foreign`, for the same toast
+    /// and the same reason.
+    pub colour_field: bool,
 }
 
 /// The two payloads for `src`. `paste_geometry` off strips crop + straighten
@@ -277,7 +280,15 @@ pub(crate) fn paste_payload(src: EditRecipe, paste_geometry: bool) -> PastePaylo
     // STRIPS nothing (`xmp::merge_strip_keys`), so every target's own block
     // survives untouched in its own sidecar and there is no loss to report.
     foreign.passthrough.clear();
-    PastePayload { own, foreign, bitmap_masks }
+    // R33 §G. A colour field is PER-PHOTO in the strongest sense a control in
+    // this recipe can be: its twelve-by-eight spatial cells are normalised to
+    // the frame it was solved on, so cell (3, 1) means "this scene's left-of-
+    // centre sky" and nothing at all on another photograph. Pasted across, it
+    // would land a measured correction on whatever content happened to sit at
+    // the same coordinates. Counted rather than silently dropped, like the
+    // bitmap masks above: the two losses are the same kind of loss.
+    let colour_field = foreign.colour_field.take().is_some();
+    PastePayload { own, foreign, bitmap_masks, colour_field }
 }
 
 impl AutoShadeApp {
@@ -1234,8 +1245,12 @@ impl AutoShadeApp {
         if targets.is_empty() {
             return;
         }
-        let PastePayload { own: recipe_full, foreign: recipe, bitmap_masks: n_bitmap } =
-            paste_payload(src, self.paste_geometry);
+        let PastePayload {
+            own: recipe_full,
+            foreign: recipe,
+            bitmap_masks: n_bitmap,
+            colour_field: dropped_field,
+        } = paste_payload(src, self.paste_geometry);
         let copied_from = self.copied_from.clone();
         let has_foreign_target = targets.iter().any(|t| Some(t) != copied_from.as_ref());
         if n_bitmap > 0 && has_foreign_target {
@@ -1245,6 +1260,15 @@ impl AutoShadeApp {
                     self.lang,
                     "{n} bitmap mask(s) not pasted — their rasters belong to the source photo (re-run AI select on each target)",
                     &[("n", &n_bitmap.to_string())],
+                ),
+            );
+        }
+        if dropped_field && has_foreign_target {
+            self.toast(
+                ToastKind::Error,
+                tr(
+                    self.lang,
+                    "The colour field was not pasted — its cells are measured on the source photo's own frame",
                 ),
             );
         }

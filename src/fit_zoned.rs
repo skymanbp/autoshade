@@ -1919,6 +1919,18 @@ fn run_local_sequencer(
         debug_assert_eq!(stage.components, stage.disclosed);
         if stage.ran { field::push_realized(report, local, "free masks"); }
     }
+    // R33 §G: the TERMINAL producer, and the only one that is not a mask. It
+    // runs above the shipped default strength and nowhere else, so every
+    // result at or below it is byte-identical to the build before this one.
+    if let Some((local, _)) = field {
+        field::attach_colour_field(
+            src,
+            target,
+            report,
+            fit::carried_strength_from_notes(&report.notes),
+            local,
+        );
+    }
 }
 
 /// Multi-class semantic path.  It intentionally shares the global solve and
@@ -4654,6 +4666,106 @@ mod tests {
         );
         write(&head_range, &range);
         range_path.remove();
+    }
+
+    /// R33 §G. The colour field SHIPS above the shipped default Strength and
+    /// nowhere else.
+    ///
+    /// Both halves are the point. The dial means "how far past Lightroom may
+    /// this fit go", and this is the first control that leaves Lightroom
+    /// entirely — classic XMP has no coordinate system for a smooth local
+    /// field — so at or below the default the recipe must be BYTE-IDENTICAL to
+    /// the build before this one, which is what the first assertion says. Past
+    /// the default the field attaches, names itself, and is kept only if the
+    /// frame it renders is measurably closer to the target than the frame
+    /// without it.
+    #[test]
+    fn the_colour_field_ships_only_past_the_default_strength() {
+        let (source, target, sky) = zoned_pair();
+        let seg = SegmentOpts {
+            python_bin: "unused-colour-field".into(),
+            script: "unused-colour-field".into(),
+            target: "sky".into(),
+            reference_point: None,
+            prompt_points: None,
+        };
+        let solve = |strength: f32, tag: &str| {
+            let path = fixture_mask_path(tag);
+            sky.save(path.path()).unwrap();
+            SEGMENT_BOTH_OVERRIDE
+                .with(|value| *value.borrow_mut() = Some((sky.clone(), sky.clone())));
+            fit_recipe_zoned_inner_with_options(
+                &source,
+                &target,
+                &seg,
+                &path,
+                &crate::recipe::EditRecipe::default(),
+                fit::FitOptions {
+                    strength: crate::recipe::GradeStrength::new(strength),
+                    provider: None,
+                },
+                SHIPPED_LAYERS,
+            )
+        };
+
+        let default = solve(crate::recipe::GradeStrength::DEFAULT, "colour-field-default");
+        assert!(
+            default.recipe.colour_field.is_none(),
+            "at the shipped default the field stays an instrument: {}",
+            default.recipe.rationale
+        );
+        assert!(
+            !serde_json::to_string(&default.recipe).unwrap().contains("colour_field"),
+            "…and writes no key, so an archived recipe's fingerprint is unchanged"
+        );
+        for key in [
+            crate::rationale::keys::FIELD_ATTACHED,
+            crate::rationale::keys::FIELD_WITHHELD,
+            crate::rationale::keys::FIELD_REGRESSED,
+        ] {
+            assert!(
+                !default.notes.iter().any(|n| n.key == key),
+                "a stage that cannot run must not narrate itself either"
+            );
+        }
+
+        let full = solve(1.0, "colour-field-full");
+        // Above the default the stage RUNS, and says which way it went. Which
+        // of the three it says depends on the fixture's own headroom, and that
+        // is the honest shape of this assertion: the pin is that the stage is
+        // reached and accounts for itself, never that this fixture must have
+        // something left over.
+        let verdict = [
+            crate::rationale::keys::FIELD_ATTACHED,
+            crate::rationale::keys::FIELD_WITHHELD,
+            crate::rationale::keys::FIELD_REGRESSED,
+        ]
+        .into_iter()
+        .find(|key| full.notes.iter().any(|n| n.key == *key));
+        assert!(
+            verdict.is_some(),
+            "past the default the field stage must reach a verdict and disclose it: {}",
+            full.recipe.rationale
+        );
+        if verdict == Some(crate::rationale::keys::FIELD_ATTACHED) {
+            let field = full.recipe.colour_field.as_ref().expect("attached means carried");
+            assert!(field.renderable(), "an attached field must be one the engine can render");
+            assert_eq!(field.amount, 1.0, "it attaches at full amount; the user dials it down");
+            assert_eq!(
+                field.grid.len(),
+                field.x * field.y * field.b,
+                "the grid holds exactly the vertices its shape declares"
+            );
+            assert!(
+                full.err_after <= default.err_after + 1e-6,
+                "a kept field is a field that moved the frame toward the target"
+            );
+        } else {
+            assert!(
+                full.recipe.colour_field.is_none(),
+                "a withheld or regressed field is not carried"
+            );
+        }
     }
 
     #[test]

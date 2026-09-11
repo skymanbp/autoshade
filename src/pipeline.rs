@@ -1724,6 +1724,11 @@ pub(crate) fn carry_over_unrepresentable(
     // missing feature. `carried_effects_survive_a_refine` re-derives the field
     // list from `Tier::CarriedOnly`, so the B3/B4 rows fail loudly here until
     // this block is widened with them.
+    // The colour field rides for the same reason and with the same force
+    // (R33 §G): it is `engine_only`, so no response can restate it, and
+    // nothing re-stamps it per photo. A refine that dropped it would silently
+    // delete a solved field the user can see in the canvas.
+    recipe.colour_field = base.colour_field.clone();
     recipe.post_crop_vignette = base.post_crop_vignette;
     recipe.post_crop_vignette_mid = base.post_crop_vignette_mid;
     recipe.post_crop_vignette_feather = base.post_crop_vignette_feather;

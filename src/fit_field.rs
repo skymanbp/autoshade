@@ -157,16 +157,33 @@ impl LocalField {
         })
     }
 
-    /// Field render = `clamp(current + delta, 0, 1)` (`GridSystem.render`).  Guide
-    /// and splat table are re-derived, so this is a pure function of the grid.
-    /// Test-only: production never renders the field (it is analysis-only).
-    #[cfg(test)]
+    /// Field render = `clamp(current + delta, 0, 1)` (`GridSystem.render`).
+    ///
+    /// Since R33 §G this is a CALL into the engine's own renderer rather than
+    /// a second copy of it: the analyzer's measured field and the field the
+    /// user's export carries are the same function of the same pixels, and
+    /// `the_engine_renders_the_analyzers_field_bit_for_bit` holds them to it.
     pub(crate) fn render(&self, current: &[[f32; 3]]) -> Vec<[f32; 3]> {
-        let (w, h) = (self.width as usize, self.height as usize);
-        let guide = smooth_3tap_luma(current, w, h);
-        let splat = splat_table(&guide, w, h);
-        let flat: Vec<f32> = self.grid.iter().flatten().copied().collect();
-        apply_flat(current, &guide, &splat, &flat)
+        let mut out = current.to_vec();
+        crate::render::apply_colour_field(
+            &mut out,
+            self.width as usize,
+            self.height as usize,
+            Some(&self.as_recipe_field()),
+        );
+        out
+    }
+
+    /// This solved field as the recipe carries it, at full amount.
+    pub(crate) fn as_recipe_field(&self) -> crate::recipe::ColourField {
+        crate::recipe::ColourField {
+            x: FIELD_X,
+            y: FIELD_Y,
+            b: FIELD_B,
+            grid: self.grid.clone(),
+            amount: 1.0,
+            enabled: true,
+        }
     }
 }
 
@@ -225,40 +242,20 @@ pub(crate) fn unclipped(p: &[f32; 3]) -> bool {
     p[0].min(p[1]).min(p[2]) > 1.0 / 255.0 && p[0].max(p[1]).max(p[2]) < 254.0 / 255.0
 }
 
-/// `grid_experiment.smooth_3tap` on `luma601`: edge-padded 3-tap along x, then y.
-pub(crate) fn smooth_3tap_luma(px: &[[f32; 3]], width: usize, height: usize) -> Vec<f32> {
-    let luma: Vec<f32> = px.iter().map(fit::luma601).collect();
-    let mut horizontal = vec![0.0f32; luma.len()];
-    for (i, slot) in horizontal.iter_mut().enumerate() {
-        let (row, x) = (i - i % width, i % width);
-        let (left, right) = (row + x.saturating_sub(1), row + (x + 1).min(width - 1));
-        *slot = (luma[left] + luma[i] + luma[right]) / 3.0;
-    }
-    let mut out = vec![0.0f32; luma.len()];
-    for (i, slot) in out.iter_mut().enumerate() {
-        let (y, x) = (i / width, i % width);
-        let (up, down) = (y.saturating_sub(1) * width + x, (y + 1).min(height - 1) * width + x);
-        *slot = (horizontal[up] + horizontal[i] + horizontal[down]) / 3.0;
-    }
-    out
-}
+/// The field's guide, owned by the engine since R33 §G: see
+/// [`crate::render::field_guide_luma`]. Kept under its analyzer name so the
+/// solve reads the way its Python prototype did.
+pub(crate) use crate::render::field_guide_luma as smooth_3tap_luma;
 
 struct Splat { ids: Vec<[u32; 8]>, tri: Vec<[f32; 8]> }
-
-/// `numpy.linspace(0, limit - 1, n, dtype=float32)`: f64 throughout, cast once at
-/// the end, last sample pinned exactly on the stop value.
-fn axis_coords(n: usize, limit: usize) -> Vec<f32> {
-    if n <= 1 { return vec![0.0; n]; }
-    let (stop, step) = ((limit - 1) as f64, (limit - 1) as f64 / (n - 1) as f64);
-    let mut out: Vec<f32> = (0..n).map(|i| (i as f64 * step) as f32).collect();
-    out[n - 1] = stop as f32;
-    out
-}
 
 /// `grid_experiment.splat_table`, slot for slot: x-major then y then b, high index
 /// `min(low + 1, limit - 1)` so the last column/row/bin folds onto itself.
 fn splat_table(guide: &[f32], width: usize, height: usize) -> Splat {
-    let (xs, ys) = (axis_coords(width, FIELD_X), axis_coords(height, FIELD_Y));
+    let (xs, ys) = (
+        crate::render::field_axis(width, FIELD_X),
+        crate::render::field_axis(height, FIELD_Y),
+    );
     let limits = [FIELD_X, FIELD_Y, FIELD_B];
     let mut ids = Vec::with_capacity(guide.len());
     let mut tri = Vec::with_capacity(guide.len());

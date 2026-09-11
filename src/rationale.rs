@@ -787,6 +787,20 @@ pub mod keys {
          {ceiling}, share {realized}.";
     pub const LOCAL_STOP: &str =
         " Local-field stop after {producer}: skipped [{skipped}], margin {margin}.";
+    pub const FIELD_ATTACHED: &str =
+        " Colour field attached ({x}x{y}x{b} vertices): frame {before} -> {after}, \
+         ceiling {ceiling}, share {realized}, saturated vertices {saturated}. It is \
+         rendered in-app only — classic XMP has no coordinate system for a smooth \
+         local field, so the Lightroom sidecar carries the rest of this recipe \
+         without it.";
+    pub const FIELD_WITHHELD: &str =
+        " No colour field was attached: the field's own ceiling {ceiling} is not \
+         more than {margin} better than the frame this fit already reached \
+         ({err_after}), so there was nothing left for it to carry.";
+    pub const FIELD_REGRESSED: &str =
+        " The solved colour field was given back: rendering it moved the frame \
+         {before} -> {after}, away from the target rather than toward it \
+         (do-no-harm check).";
     pub const FIELD_MASK_PROPOSED: &str =
         " Field mask {n} proposed: {sign} m={mass} s={share_src}/{share_tgt} D={d} p={pixels}.";
     pub const FIELD_MASK_ATTACHED: &str =

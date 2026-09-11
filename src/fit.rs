@@ -8775,11 +8775,11 @@ mod tests {
     /// The paired robust estimator does not notice. It reports 54 map points
     /// and rejects 0.1% of them, because every pair it forms IS internally
     /// consistent — it is measuring the regression of one noise draw on
-    /// another, and errors-in-variables shrinks the slope it recovers toward
-    /// 1. Measured on this fixture it under-reads the map's contrast by 10%,
-    /// while the population-quantile arm sitting next to it in the same
-    /// function recovers it to 0.3%: the two marginals carry the map exactly,
-    /// the pairing carries nothing.
+    /// another, and errors-in-variables shrinks toward unity the slope
+    /// it recovers. Measured on this fixture it under-reads the map contrast
+    /// by 10%, while the population-quantile arm sitting next to it in the
+    /// same function recovers it to 0.3%: the two marginals carry the map
+    /// exactly, the pairing carries nothing.
     ///
     /// So the estimator follows the PAIRING SCALE, not the robust fit's own
     /// opinion of itself — that is all [`paired_correspondence`] does. The

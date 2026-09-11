@@ -400,7 +400,7 @@ fn trim_num(v: f32) -> String {
 /// Every field of [`EditRecipe`], in DECLARATION order — which is also the
 /// order the strict schema's `required` array takes, so the generated schema
 /// is byte-identical to the hand-written mirror it replaced.
-pub const RECIPE_CONTROLS: [Control; 64] = [
+pub const RECIPE_CONTROLS: [Control; 65] = [
     Control {
         name: "version",
         shape: Shape::Integer,
@@ -1121,6 +1121,29 @@ pub const RECIPE_CONTROLS: [Control; 64] = [
         purpose: "local (masked) adjustments — one entry per mask, controls listed below",
     },
     Control {
+        // R33 §G. The THIRD global `RenderedNotExported` row, beside the two
+        // calibration carriers — and the first one that is an EDIT rather than
+        // a measurement of the photo. A 12×8×8 bilateral grid of local colour
+        // and tone deltas is a coordinate system classic XMP does not have, so
+        // there is no `crs:` key to lose it to and no partial projection worth
+        // making: the sidecar carries the rest of the recipe unchanged and the
+        // save line NAMES the field as the part it could not take.
+        //
+        // `EngineCarrier`, so the advisor's response schema never asks for it:
+        // nothing the model could say about ninety-six vertices would be an
+        // answer, and a required field would return an empty grid and delete a
+        // solved one on every Refine. It rides a refine through
+        // `pipeline::carry_over_unrepresentable` like the lens profile does.
+        name: "colour_field",
+        shape: Shape::EngineCarrier,
+        range: None,
+        neutral: "absent = no field",
+        engine_only: true,
+        crs: CrsKey::None,
+        tier: Some(Tier::RenderedNotExported),
+        purpose: "smooth 12x8x8 local colour/tone field solved by the reverse fit (rendered                   in-app, never exported to XMP)",
+    },
+    Control {
         name: "rationale",
         shape: Shape::Text,
         range: None,
@@ -1692,9 +1715,27 @@ impl Family {
     }
 }
 
-/// The 13 families the global controls partition into — 10 the AI plans with
-/// plus three engine-only groupings (see [`Family::ai_visible`]).
-pub const CONTROL_FAMILIES: [Family; 13] = [
+/// The four globals that are the ENGINE'S OWN MEASUREMENT of this photo,
+/// re-stamped on every open by `pipeline::stamp_calibration` — not an edit
+/// anybody chose, and nothing anybody can undo.
+///
+/// The list is not new: [`Control::engine_only`]'s doc has named these four as
+/// "the stamped calibration" since R23-1b. What is new (R33 §G) is that a
+/// SECOND question used to be answered with `engine_only` because the two
+/// coincided — `gui::util::xmp_loss_interrupts` asks whether an export loss is
+/// something the photographer can act on, and until now every `engine_only`
+/// global that could be lost was one of these four. `colour_field` is the
+/// counterexample: the advisor cannot state ninety-six vertices, so it is
+/// `engine_only`, but the user asked for it by raising Strength and can switch
+/// it off in one click. Answering "can they act on it?" with "can the model
+/// say it?" would have filed the first actionable global loss this app has
+/// ever had into the quiet channel.
+pub const STAMPED_CALIBRATION: [&str; 4] =
+    ["as_shot_k", "as_shot_tint", "base_curve", "lens_profile"];
+
+/// The 14 families the global controls partition into — 10 the AI plans with
+/// plus four engine-only groupings (see [`Family::ai_visible`]).
+pub const CONTROL_FAMILIES: [Family; 14] = [
     Family {
         name: "tone",
         covers: "exposure, contrast and the four tonal bands (highlights / shadows / whites / blacks)",
@@ -1749,6 +1790,18 @@ pub const CONTROL_FAMILIES: [Family; 13] = [
         name: "masks",
         covers: "local (masked) adjustments — dodging, burning, holding a sky back",
         members: &["masks"],
+    },
+    Family {
+        // R33 §G. A family of its own rather than a fourth member of `masks`,
+        // for the rule `every_ai_visible_control_belongs_to_exactly_one_family`
+        // states: a family is ALL AI-visible or ALL engine-only, and `masks`
+        // is a tool the model really does plan with. The develop panel shows
+        // this row inside its Masks section all the same — the section is a
+        // layout, the family is a partition of the registry, and they were
+        // never required to agree.
+        name: "colour_field",
+        covers: "the smooth local colour/tone field the reverse fit solves — engine-only, no                  Lightroom equivalent",
+        members: &["colour_field"],
     },
     Family {
         // The ONE family with no AI-visible member (R25 B2). It exists so the
@@ -2070,6 +2123,8 @@ pub enum GlobalValue<'a> {
     Masks(&'a [LocalAdjustment]),
     Knots(&'a [[f32; 2]]),
     Lens(&'a LensProfile),
+    /// The solved colour field, or `None` for a recipe that carries none.
+    ColourField(Option<&'a crate::recipe::ColourField>),
     /// The R25 B4 pass-through block: `crs:` key → the verbatim string
     /// Lightroom wrote. Equality is the whole map, which is the right
     /// "is it active" answer for a value nothing interprets.
@@ -2160,6 +2215,7 @@ pub fn global_value<'a>(r: &'a EditRecipe, name: &str) -> Option<GlobalValue<'a>
         base_curve,
         lens_profile,
         masks,
+        colour_field,
         passthrough,
         rationale,
         confidence,
@@ -2226,6 +2282,7 @@ pub fn global_value<'a>(r: &'a EditRecipe, name: &str) -> Option<GlobalValue<'a>
         "base_curve" => GlobalValue::Knots(base_curve),
         "lens_profile" => GlobalValue::Lens(lens_profile),
         "masks" => GlobalValue::Masks(masks),
+        "colour_field" => GlobalValue::ColourField(colour_field.as_ref()),
         "passthrough" => GlobalValue::PassThrough(passthrough),
         "rationale" => GlobalValue::Text(rationale),
         "confidence" => GlobalValue::Num(*confidence),
@@ -2658,7 +2715,13 @@ mod tests {
         // field gets a non-default value here. The skip itself is pinned
         // separately, by
         // `recipe::an_unrotated_recipe_serialises_exactly_as_the_previous_build_wrote_it`.
-        let probe = EditRecipe { quarter_turns: 1, ..EditRecipe::default() };
+        let probe = EditRecipe {
+            quarter_turns: 1,
+            // R33 §G's field skips on `None`, for the argument its doc spells
+            // out — the same argument `quarter_turns` makes one line up.
+            colour_field: Some(crate::recipe::ColourField::default()),
+            ..EditRecipe::default()
+        };
         let recipe = serde_keys(&serde_json::to_value(probe).unwrap());
         assert_same(
             "EditRecipe",
@@ -3071,6 +3134,11 @@ mod tests {
                 "color_nr",
                 "color_nr_detail",
                 "color_nr_smooth",
+                // R33 §G, a SIXTH kind and the first that is an EDIT: the
+                // model cannot state ninety-six grid vertices, and a required
+                // schema field would return an empty grid and delete a solved
+                // field on every Refine.
+                "colour_field",
                 "coord_era",
                 "defringe_green",
                 "defringe_green_hi",

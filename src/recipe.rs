@@ -385,11 +385,110 @@ pub struct EditRecipe {
     /// and composited by the render engine.
     pub masks: Vec<LocalAdjustment>,
 
+    // --- Colour field (engine-only) -----------------------------------------
+    /// A smooth 12×8×8 bilateral grid of local colour/tone deltas: the
+    /// residual the mask-shaped controls above cannot reach, carried as one
+    /// low-frequency field instead of as more rectangles.
+    ///
+    /// **Engine-only, and the first control in this struct that is.** Every
+    /// other field here either projects to a `crs:` property or, like a bitmap
+    /// mask, has a named XMP loss because Lightroom's own model has no place
+    /// for it. This one is a whole coordinate system Lightroom does not have,
+    /// so it is disclosed as a GLOBAL export loss
+    /// ([`crate::advisor::catalogue::Tier::RenderedNotExported`]) and the
+    /// sidecar carries the rest of the recipe unchanged.
+    ///
+    /// **Serialisation: skipped when absent**, following
+    /// [`quarter_turns`](Self::quarter_turns)'s argument exactly. `None` and
+    /// "the key is not there" mean the same thing, so skipping is lossless; it
+    /// keeps a recipe that has no field BYTE-IDENTICAL to what the previous
+    /// build wrote (so `store::recipe_struct_hash` still matches every
+    /// archived version and needs no re-archive pass); and it confines the
+    /// class-① forward break `deny_unknown_fields` makes unavoidable to the
+    /// recipes that actually carry one.
+    ///
+    /// **[`SCHEMA_ERA`] is deliberately NOT bumped**, and that is not an
+    /// oversight: that era's one consumer is
+    /// `xmp::era_suppressed_attr_keys`, which asks a single question — has
+    /// this recipe ever seen the twenty-seven R25 `crs:` keys? A colour field
+    /// owns no `crs:` key and can own none. Bumping would re-classify every
+    /// era-1 recipe in every store as legacy and start suppressing those
+    /// twenty-seven keys again on the next merge, which is a real regression
+    /// bought for nothing.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub colour_field: Option<ColourField>,
+
     // --- Provenance (the AI explains itself) --------------------------------
     /// One or two sentences: why these adjustments, for the user to sanity-check.
     pub rationale: String,
     /// AI self-reported confidence, 0.0..=1.0. Used to gate auto-apply.
     pub confidence: f32,
+}
+
+/// One smooth field of local colour and tone, on the same bilateral grid the
+/// reverse fit analyses with ([`crate::fit_field`]): `x` × `y` spatial cells
+/// × `b` luma bins, five parameters per vertex, read trilinearly per pixel.
+///
+/// The five are the analyzer's, in its order: EV, then a per-channel gain for
+/// R, G and B, then a slope against the pixel's own smoothed luma. The render
+/// is `clamp(c + delta, 0, 1)` with
+/// `delta_c = ln2·c·EV + c·gain_c + (c - guide)·slope`, scaled by
+/// [`amount`](Self::amount) — one shared function, so the engine and the
+/// analyzer cannot drift apart
+/// ([`crate::render::apply_colour_field`]).
+///
+/// `grid` is `x * y * b` vertices in splat order (x-major, then y, then the
+/// luma bin), which is the order [`crate::fit_field`] solves and stores them
+/// in. A field whose length does not match its own declared shape is not a
+/// field: the render leaves the frame untouched rather than guessing which
+/// axis was meant.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ColourField {
+    /// Spatial cells across. 0 disables the field as surely as `enabled: false`.
+    pub x: usize,
+    /// Spatial cells down.
+    pub y: usize,
+    /// Luma bins.
+    pub b: usize,
+    /// `x * y * b` vertices, five parameters each, in splat order.
+    pub grid: Vec<[f32; 5]>,
+    /// How much of the field to apply, 0..=1. The slider the user gets.
+    pub amount: f32,
+    /// The user's on/off, kept separate from `amount` so a field parked at 0
+    /// is distinguishable from one switched off with its strength remembered.
+    pub enabled: bool,
+}
+
+impl Default for ColourField {
+    fn default() -> Self {
+        Self { x: 0, y: 0, b: 0, grid: Vec::new(), amount: 1.0, enabled: true }
+    }
+}
+
+impl ColourField {
+    /// Whether this field can be rendered at all: switched on, carrying some
+    /// amount, and holding exactly the vertices its own shape declares.
+    pub fn renderable(&self) -> bool {
+        self.enabled
+            && self.amount > 0.0
+            && self.x > 0
+            && self.y > 0
+            && self.b > 0
+            && self.grid.len() == self.x * self.y * self.b
+    }
+
+    /// Round every stored parameter to 1e-4, so a solved field's JSON is
+    /// stable across re-solves that agree to four decimals and a hand edit is
+    /// readable.
+    pub fn round(&mut self) {
+        for vertex in &mut self.grid {
+            for p in vertex {
+                *p = (*p * 10_000.0).round() / 10_000.0;
+            }
+        }
+        self.amount = (self.amount.clamp(0.0, 1.0) * 10_000.0).round() / 10_000.0;
+    }
 }
 
 /// The current calibration era, stamped into every recipe we write.
@@ -531,6 +630,7 @@ impl Default for EditRecipe {
             base_curve: Vec::new(),
             lens_profile: LensProfile::default(),
             masks: Vec::new(),
+            colour_field: None,
             rationale: String::new(),
             confidence: 0.0,
         }
@@ -3688,6 +3788,72 @@ mod tests {
     /// decodes as "written against the current control set", so an ordinary
     /// Ctrl+S deletes `crs:Texture`, the Grain block and the detail axes out
     /// of the photographer's own Lightroom sidecar.
+    /// R33 §G. The colour field persists as inline JSON, skipped when absent —
+    /// and that skip is what keeps a recipe nobody solved a field for BYTE
+    /// IDENTICAL to what the previous build wrote, so `store::recipe_struct_hash`
+    /// still matches every archived version and no re-archive pass is needed.
+    ///
+    /// `SCHEMA_ERA` deliberately does NOT move with it. That era answers one
+    /// question — has this recipe ever seen the twenty-seven R25 `crs:` keys?
+    /// (`xmp::era_suppressed_attr_keys` is its only consumer) — and a colour
+    /// field owns no `crs:` key and can own none. Bumping it would re-classify
+    /// every era-1 recipe in every store as legacy and start suppressing those
+    /// twenty-seven keys again on the next merge.
+    #[test]
+    fn a_colour_field_round_trips_and_its_absence_costs_no_bytes() {
+        let bare = serde_json::to_string(&EditRecipe::default()).unwrap();
+        assert!(
+            !bare.contains("colour_field"),
+            "a recipe with no field must not write the key at all"
+        );
+        assert_eq!(
+            EditRecipe::default().schema_era,
+            SCHEMA_ERA,
+            "the era stamp is unchanged: the field owns no crs: key"
+        );
+
+        let field = ColourField {
+            x: 2,
+            y: 2,
+            b: 2,
+            grid: (0..8).map(|i| [i as f32 / 3.0, 0.0, 0.0, 0.0, 0.125]).collect(),
+            amount: 0.5,
+            enabled: true,
+        };
+        let mut solved = EditRecipe { colour_field: Some(field.clone()), ..Default::default() };
+        let json = serde_json::to_string(&solved).unwrap();
+        assert!(json.contains("colour_field"));
+        let back: EditRecipe = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.colour_field.as_ref(), Some(&field));
+
+        // Rounding is to 1e-4 and it is idempotent: a re-solve that agrees to
+        // four decimals writes the same bytes, which is what makes a recipe
+        // diffable at all.
+        solved.colour_field.as_mut().unwrap().round();
+        let rounded = solved.colour_field.clone().unwrap();
+        let mut again = rounded.clone();
+        again.round();
+        assert_eq!(again, rounded, "rounding twice is rounding once");
+        for vertex in &rounded.grid {
+            for p in vertex {
+                assert_eq!(*p, (*p * 10_000.0).round() / 10_000.0);
+            }
+        }
+
+        // `renderable` is the engine's own question and refuses every shape it
+        // cannot read, rather than guessing which axis was meant.
+        assert!(rounded.renderable());
+        for broken in [
+            ColourField { enabled: false, ..rounded.clone() },
+            ColourField { amount: 0.0, ..rounded.clone() },
+            ColourField { x: 3, ..rounded.clone() },
+            ColourField { b: 0, ..rounded.clone() },
+            ColourField { grid: Vec::new(), ..rounded.clone() },
+        ] {
+            assert!(!broken.renderable(), "{broken:?} must not render");
+        }
+    }
+
     #[test]
     fn absent_schema_era_reads_as_the_legacy_control_set() {
         let legacy = r#"{"version":2,"contrast":7.0}"#;

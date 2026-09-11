@@ -2033,6 +2033,124 @@ fn apply_develop_with_rasters(
     if !r.masks.is_empty() {
         apply_masks(data, w, h, r, rasters, frame);
     }
+    // 7) the colour field, LAST and on purpose: it is the residual the
+    //    mask-shaped controls above could not reach, so it must read the
+    //    frame they produced. Its guide is the render's own smoothed luma at
+    //    the render's own resolution, which is what makes it a pure function
+    //    of the pixels in front of it at any size.
+    apply_colour_field(data, w, h, r.colour_field.as_ref());
+}
+
+/// Render one [`ColourField`] over the frame it is handed, in place.
+///
+/// ONE implementation, shared with [`crate::fit_field`]: the analyzer's own
+/// render is a call into this function, so the field the solver measures and
+/// the field the engine ships cannot drift apart. A field that is absent,
+/// switched off, at zero amount, or whose grid length disagrees with its own
+/// declared shape leaves the frame untouched — a mis-shaped grid is not a
+/// field to be guessed at.
+///
+/// Per pixel: a trilinear read of the (x, y, luma-bin) grid, then
+/// `delta_c = ln2·c·EV + c·gain_c + (c - guide)·slope`, scaled by `amount`,
+/// then a display clamp. The guide is [`field_guide_luma`], the same
+/// separable 3-tap the analyzer builds.
+///
+/// **Scale.** The grid's spatial axes are NORMALISED to the frame, so a field
+/// solved on the 384×256 analysis raster renders correctly at 2048 or at
+/// full sensor resolution: cell (i, j) covers the same fraction of the picture
+/// either way. What does NOT rescale is the guide's 3-tap kernel, which is
+/// three pixels wide whatever those pixels are. That difference is
+/// second-order here because the guide's only job is to pick a LUMA BIN out of
+/// eight: a 1/8-wide bin is 32 code values, and the two kernels disagree by
+/// far less than that except on hard edges, where the trilinear read blends
+/// the two bins anyway. It is measured rather than asserted — see the report
+/// for the 2048-vs-384 discrepancy on the reference pair.
+pub(crate) fn apply_colour_field(
+    data: &mut [[f32; 3]],
+    w: usize,
+    h: usize,
+    field: Option<&crate::recipe::ColourField>,
+) {
+    let Some(field) = field.filter(|f| f.renderable()) else { return };
+    if w == 0 || h == 0 || data.len() != w * h {
+        return;
+    }
+    let guide = field_guide_luma(data, w, h);
+    let (xs, ys) = (field_axis(w, field.x), field_axis(h, field.y));
+    let amount = field.amount.clamp(0.0, 1.0);
+    for (i, c) in data.iter_mut().enumerate() {
+        let coords = [
+            xs[i % w],
+            ys[i / w],
+            guide[i].clamp(0.0, 1.0) * (field.b - 1) as f32,
+        ];
+        let limits = [field.x, field.y, field.b];
+        let (mut low, mut high, mut frac) = ([0usize; 3], [0usize; 3], [0.0f32; 3]);
+        for (axis, &limit) in limits.iter().enumerate() {
+            let floor = (coords[axis].floor() as i64).clamp(0, limit as i64 - 1) as usize;
+            (low[axis], high[axis]) = (floor, (floor + 1).min(limit - 1));
+            frac[axis] = coords[axis] - floor as f32;
+        }
+        let mut p = [0.0f64; 5];
+        for slot in 0..8 {
+            let up = [slot >> 2 & 1, slot >> 1 & 1, slot & 1];
+            let at = |a: usize| if up[a] == 1 { high[a] } else { low[a] };
+            let mass = |a: usize| if up[a] == 1 { frac[a] } else { 1.0 - frac[a] };
+            let weight = (mass(0) * mass(1) * mass(2)) as f64;
+            let vertex = &field.grid[(at(1) * field.x + at(0)) * field.b + at(2)];
+            for (q, slot) in p.iter_mut().enumerate() {
+                *slot += weight * vertex[q] as f64;
+            }
+        }
+        let g = guide[i];
+        for ch in 0..3 {
+            let d = std::f64::consts::LN_2 * c[ch] as f64 * p[0]
+                + c[ch] as f64 * p[1 + ch]
+                + (c[ch] - g) as f64 * p[4];
+            c[ch] = (c[ch] + amount * d as f32).clamp(0.0, 1.0);
+        }
+    }
+}
+
+/// The colour field's guide: `grid_experiment.smooth_3tap` on `luma601`,
+/// edge-padded 3-tap along x then y.
+///
+/// It lives HERE, in the engine, rather than in the analyzer that used to own
+/// it (as `fit_field::smooth_3tap_luma`, which is now a re-export of this
+/// name), because the engine is the side that has to render a stored field.
+/// One implementation is not a tidiness point: the field's whole contract is
+/// that what the solver measured is what the engine ships, and a guide that
+/// padded one way here and another way there would move every border pixel's
+/// luma BIN.
+pub(crate) fn field_guide_luma(px: &[[f32; 3]], width: usize, height: usize) -> Vec<f32> {
+    let luma: Vec<f32> = px.iter().map(luma601).collect();
+    let mut horizontal = vec![0.0f32; luma.len()];
+    for (i, slot) in horizontal.iter_mut().enumerate() {
+        let (row, x) = (i - i % width, i % width);
+        let (left, right) = (row + x.saturating_sub(1), row + (x + 1).min(width - 1));
+        *slot = (luma[left] + luma[i] + luma[right]) / 3.0;
+    }
+    let mut out = vec![0.0f32; luma.len()];
+    for (i, slot) in out.iter_mut().enumerate() {
+        let (y, x) = (i / width, i % width);
+        let (up, down) = (y.saturating_sub(1) * width + x, (y + 1).min(height - 1) * width + x);
+        *slot = (horizontal[up] + horizontal[i] + horizontal[down]) / 3.0;
+    }
+    out
+}
+
+/// The colour field's spatial axis: `numpy.linspace(0, limit - 1, n)` in f64,
+/// cast once at the end, the last sample pinned exactly on the stop value so
+/// the grid spans the frame at any resolution. Shared with the analyzer's
+/// splat table for the same reason the guide is.
+pub(crate) fn field_axis(n: usize, limit: usize) -> Vec<f32> {
+    if n <= 1 {
+        return vec![0.0; n];
+    }
+    let (stop, step) = ((limit - 1) as f64, (limit - 1) as f64 / (n - 1) as f64);
+    let mut out: Vec<f32> = (0..n).map(|i| (i as f64 * step) as f32).collect();
+    out[n - 1] = stop as f32;
+    out
 }
 
 fn luma601(p: &[f32; 3]) -> f32 {
@@ -7501,6 +7619,39 @@ pub fn orient_recipe_coords(
         if let Some(RangeMask::Color { px, py, .. }) = m.range.as_mut() {
             (*px, *py) = orient_point(o, *px, *py);
         }
+    }
+    // R33 §G. The colour field's spatial axes are the FRAME's, so a turn
+    // permutes its cells exactly as it permutes every other coordinate here —
+    // and a quarter turn swaps the two axis LENGTHS with them, because a 12x8
+    // grid over a landscape frame is an 8x12 grid over the portrait one.
+    //
+    // The five parameters ride unchanged: EV, three channel gains and a slope
+    // against the pixel's own guide luma are all photometric, none of them a
+    // direction in the picture plane. The luma axis rides unchanged too.
+    //
+    // Cell CENTRES are what turn, not cell corners: the permutation has to be
+    // a bijection on cells, and a corner lands on a boundary where the floor
+    // below could send two cells to one slot and leave another empty.
+    if let Some(field) = r.colour_field.as_mut().filter(|f| f.renderable()) {
+        let swaps = crate::decode::orientation_transposes(o);
+        let (nx, ny) = if swaps { (field.y, field.x) } else { (field.x, field.y) };
+        let mut turned = vec![[0.0f32; 5]; nx * ny * field.b];
+        for j in 0..field.y {
+            for i in 0..field.x {
+                let (u, v) = (
+                    (i as f32 + 0.5) / field.x as f32,
+                    (j as f32 + 0.5) / field.y as f32,
+                );
+                let (tu, tv) = orient_point(o, u, v);
+                let ti = ((tu * nx as f32).floor().max(0.0) as usize).min(nx - 1);
+                let tj = ((tv * ny as f32).floor().max(0.0) as usize).min(ny - 1);
+                for b in 0..field.b {
+                    turned[(tj * nx + ti) * field.b + b] =
+                        field.grid[(j * field.x + i) * field.b + b];
+                }
+            }
+        }
+        (field.x, field.y, field.grid) = (nx, ny, turned);
     }
     true
 }
@@ -13648,6 +13799,129 @@ mod tests {
 
     /// The recipe-level migration: crop and every parametric geometry move,
     /// the round trip is exact, and a Normal photo is untouched.
+    /// R33 §G. The field is a RECIPE control now, so the engine has to render
+    /// it — after the masks, on the frame the masks produced, and only when it
+    /// is renderable at all.
+    ///
+    /// The "after the masks" half is the one worth a test: the field's guide
+    /// is the render's own smoothed luma, so applying it before a mask that
+    /// moves luma would read a different bin out of the grid's eight and
+    /// deliver a different correction. The assertion is therefore not "the
+    /// pixels moved" but "they moved by exactly what `apply_colour_field` does
+    /// to the MASKED render" — within the one code of slack a second u8
+    /// quantisation costs.
+    #[test]
+    fn the_engine_renders_the_colour_field_after_the_masks_it_reads() {
+        use crate::fit::pixels_of;
+        use crate::recipe::{ColourField, LocalAdjustment, MaskGeometry};
+        let (w, h) = (96u32, 64u32);
+        let img = DynamicImage::ImageRgb8(image::RgbImage::from_fn(w, h, |x, y| {
+            let v = 0.15 + 0.7 * (x as f32 / (w - 1) as f32) + 0.1 * (y as f32 / (h - 1) as f32);
+            let c = (v.clamp(0.0, 1.0) * 255.0).round() as u8;
+            image::Rgb([c, c, (c as f32 * 0.92) as u8])
+        }));
+        // A field with a real, spatially varying demand: warmer on the left,
+        // cooler on the right, and a different EV per luma bin.
+        let (fx, fy, fb) = (4usize, 3usize, 4usize);
+        let grid: Vec<[f32; 5]> = (0..fx * fy * fb)
+            .map(|v| {
+                let (cell, bin) = (v / fb, v % fb);
+                let x = (cell % fx) as f32 / (fx - 1) as f32;
+                [0.10 * (bin as f32 / (fb - 1) as f32) - 0.05, 0.06 * x, 0.0, -0.06 * x, 0.02]
+            })
+            .collect();
+        let field = ColourField { x: fx, y: fy, b: fb, grid, amount: 1.0, enabled: true };
+
+        let with_mask = EditRecipe {
+            masks: vec![LocalAdjustment {
+                mask: MaskGeometry::Linear { zero_x: 0.0, zero_y: 0.0, full_x: 1.0, full_y: 0.0 },
+                exposure_ev: -0.9,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let mut both = with_mask.clone();
+        both.colour_field = Some(field.clone());
+
+        let masked = pixels_of(&develop_preview(&img, &with_mask));
+        let mut expected = masked.clone();
+        apply_colour_field(&mut expected, w as usize, h as usize, Some(&field));
+        let actual = pixels_of(&develop_preview(&img, &both));
+        assert_ne!(actual, masked, "premise: this field is not the identity here");
+        let worst = actual
+            .iter()
+            .zip(&expected)
+            .flat_map(|(a, b)| (0..3).map(move |c| (a[c] - b[c]).abs()))
+            .fold(0.0f32, f32::max);
+        assert!(
+            worst <= 1.5 / 255.0,
+            "the engine's field must be apply_colour_field over the MASKED render; worst {}/255",
+            worst * 255.0
+        );
+
+        // …and every way of saying "not now" leaves the frame exactly as the
+        // masks left it. A mis-shaped grid is in this list on purpose: it is
+        // not a field to be guessed at.
+        for parked in [
+            ColourField { enabled: false, ..field.clone() },
+            ColourField { amount: 0.0, ..field.clone() },
+            ColourField { x: fx + 1, ..field.clone() },
+            ColourField { grid: Vec::new(), ..field.clone() },
+        ] {
+            let mut off = with_mask.clone();
+            off.colour_field = Some(parked);
+            assert_eq!(
+                pixels_of(&develop_preview(&img, &off)),
+                masked,
+                "a parked or mis-shaped field must leave the frame untouched"
+            );
+        }
+    }
+
+    /// R33 §G. A quarter turn moves the field's cells with every other
+    /// coordinate in the recipe, and swaps its two axis LENGTHS with them.
+    ///
+    /// Round-tripped through the inverse orientation, because a permutation
+    /// that is off by one cell still looks plausible in isolation: only going
+    /// back proves each cell landed where exactly one cell came from.
+    #[test]
+    fn a_quarter_turn_transposes_the_colour_field_and_comes_back() {
+        use crate::recipe::ColourField;
+        let (fx, fy, fb) = (4usize, 3usize, 2usize);
+        let seed = |i: usize| [i as f32, 0.0, 0.0, 0.0, 0.0];
+        let field = ColourField {
+            x: fx,
+            y: fy,
+            b: fb,
+            grid: (0..fx * fy * fb).map(seed).collect(),
+            amount: 1.0,
+            enabled: true,
+        };
+        for (there, back) in [
+            (Orientation::Rotate90, Orientation::Rotate270),
+            (Orientation::Rotate270, Orientation::Rotate90),
+            (Orientation::Transpose, Orientation::Transpose),
+            (Orientation::Rotate180, Orientation::Rotate180),
+        ] {
+            let mut r = EditRecipe { colour_field: Some(field.clone()), ..Default::default() };
+            orient_recipe_coords(&mut r, there, None);
+            let turned = r.colour_field.clone().expect("the field survives the turn");
+            let swaps = crate::decode::orientation_transposes(there);
+            assert_eq!(
+                (turned.x, turned.y),
+                if swaps { (fy, fx) } else { (fx, fy) },
+                "{there:?}: the axis lengths follow the frame"
+            );
+            assert_eq!(turned.grid.len(), fx * fy * fb, "no vertex was lost or invented");
+            orient_recipe_coords(&mut r, back, None);
+            assert_eq!(
+                r.colour_field.as_ref().expect("still there"),
+                &field,
+                "{there:?} then {back:?} must be the identity on the grid"
+            );
+        }
+    }
+
     #[test]
     fn orient_recipe_coords_moves_geometry_and_round_trips() {
         use crate::recipe::{LocalAdjustment, MaskComponent};

@@ -1120,7 +1120,15 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     // today; the tier registry decides membership, not this list.
     ("+{n} more", "另 {n} 个"),
     ("(unnamed)", "（无名）"),
+    ("Colour field", " 颜色场"),
+    ("engine-only", " 仅本机引擎"),
+    ("Show/mute the colour field without losing its amount",
+        " 显示或静音颜色场，而不丢失它的强度"),
+    ("Remove the colour field", " 移除颜色场"),
+    ("A smooth local colour/tone field the reverse fit solved. It renders here and in every export from this app; classic XMP has no way to carry it, so Lightroom sees the rest of this recipe without it.",
+        " 反推解出的一片平滑局部色彩/影调场。它在这里以及本应用的每次导出中渲染；经典 XMP 无法承载它，因此 Lightroom 只会收到这份配方的其余部分，不含它。"),
     ("camera base curve", "相机基础曲线"),
+    ("colour field", "颜色场"),
     ("lens profile correction", "镜头配置文件校正"),
     // The import direction of the same fact (workers.rs, the Opened handler).
     ("this Lightroom sidecar carries {n} global setting(s) the engine does not render (a save keeps them untouched): {list}",
@@ -1204,6 +1212,8 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
         "忙碌中 — 当前任务完成后才可撤销/重做"),
     ("opened the first photo — {n} more ignored (drop their folder to browse them all)",
         "已打开第一张 — 其余 {n} 张被忽略（把它们所在的文件夹拖进来可整体浏览）"),
+    ("The colour field was not pasted — its cells are measured on the source photo's own frame",
+        " 颜色场未粘贴 — 它的单元是在源照片自身画幅上量出来的"),
     ("{n} bitmap mask(s) not pasted — their rasters belong to the source photo (re-run AI select on each target)",
         "{n} 个位图蒙版未粘贴 — 栅格属于源照片（请在各目标上重跑 AI 选择）"),
     ("AI segmenting {what}… (first run auto-downloads the model; failures are reported here)",
@@ -1965,6 +1975,20 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
         " 局部场在 {producer} 后的实现量：全画面 {err_after}，上限 {ceiling}，比例 {realized}。"),
     (" Local-field stop after {producer}: skipped [{skipped}], margin {margin}.",
         " 局部场在 {producer} 后停止：跳过 [{skipped}]，余量 {margin}。"),
+    (" Colour field attached ({x}x{y}x{b} vertices): frame {before} -> {after}, \
+      ceiling {ceiling}, share {realized}, saturated vertices {saturated}. It is \
+      rendered in-app only — classic XMP has no coordinate system for a smooth \
+      local field, so the Lightroom sidecar carries the rest of this recipe \
+      without it.",
+        " 已附加颜色场（{x}x{y}x{b} 个顶点）：整幅 {before} -> {after}，上限 {ceiling}，占比 {realized}，饱和顶点 {saturated}。它只在本机引擎中渲染 —— 经典 XMP 无法描述平滑的局部色场，因此 Lightroom 侧车文件会带上这份配方的其余部分，但不含它。"),
+    (" No colour field was attached: the field's own ceiling {ceiling} is not \
+      more than {margin} better than the frame this fit already reached \
+      ({err_after}), so there was nothing left for it to carry.",
+        " 未附加颜色场：色场自身的上限 {ceiling} 相比本次反推已经达到的整幅误差（{err_after}）并没有好过 {margin}，因此它没有还能承担的部分。"),
+    (" The solved colour field was given back: rendering it moved the frame \
+      {before} -> {after}, away from the target rather than toward it \
+      (do-no-harm check).",
+        " 已解出的颜色场被退回：渲染它把整幅从 {before} 变成 {after}，离目标更远而不是更近（不使画面变差的检查）。"),
     (" Field mask {n} proposed: {sign} m={mass} s={share_src}/{share_tgt} D={d} p={pixels}.",
         " 自由形状场蒙版 {n} 已提出：符号 {sign}，质量 {mass}，证据占比为源图 {share_src}、目标图 {share_tgt}，D={d}，{pixels} 个像素。"),
     (" Field mask {n} attached: {err_before}->{err_after}, cross-boundary step \

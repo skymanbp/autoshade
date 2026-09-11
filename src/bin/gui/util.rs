@@ -472,6 +472,7 @@ pub(crate) fn xmp_loss_line(
         parts.push(match *g {
             "base_curve" => tr(lang, "camera base curve").to_string(),
             "lens_profile" => tr(lang, "lens profile correction").to_string(),
+            "colour_field" => tr(lang, "colour field").to_string(),
             other => other.to_string(),
         });
     }
@@ -494,26 +495,33 @@ pub(crate) fn xmp_loss_line(
 /// on every save is alarm the user learns to ignore, and the mask half (which
 /// they CAN act on) went with it.
 ///
-/// The judgement comes from a bit the registry already carries, not from a new
-/// tier or a list kept here: `engine_only` means the value is the ENGINE's own
-/// per-photo measurement (the camera base curve, the in-camera lens profile) —
-/// nothing the user chose, so nothing they can undo. When every global loss is
-/// one of those, the sentence still gets said, quietly. One member that is a
-/// user's own choice (the LR-gap batches B2–B5 will add them) puts the toast
-/// back for the whole line.
+/// The judgement comes from the registry, not from a list kept here:
+/// `catalogue::STAMPED_CALIBRATION` is the engine's own per-photo measurement
+/// (the camera base curve, the in-camera lens profile and the two as-shot
+/// anchors) — nothing the user chose, so nothing they can undo. When every
+/// global loss is one of those, the sentence still gets said, quietly. One
+/// member that is a user's own choice puts the toast back for the whole line.
+///
+/// It asked `engine_only` until R33 §G, which was the same answer for the
+/// wrong reason: `engine_only` means the ADVISOR cannot state the value, and
+/// every engine-only global that could be lost happened to be calibration.
+/// `colour_field` broke the coincidence — the model cannot state ninety-six
+/// vertices, but the photographer asked for the field by raising Strength and
+/// removes it in one click, so it is exactly the actionable loss this arm
+/// exists to raise. It is also not universal, unlike a stamped base curve: it
+/// appears only on a fit that attached one, so saying so out loud is not the
+/// alarm-on-every-save this rule was written against.
 ///
 /// MASK losses always interrupt: every one of them is a mask the user made.
 pub(crate) fn xmp_loss_interrupts(
     losses: &[autoshade::xmp::MaskLoss],
     globals: &[&'static str],
 ) -> bool {
-    !losses.is_empty()
-        || globals.iter().any(|g| {
-            // A name with no registry row is not something this can vouch for
-            // as engine calibration — treat the unknown as the user's, which
-            // is the interrupting side.
-            autoshade::advisor::catalogue::global_control(g).is_none_or(|c| !c.engine_only)
-        })
+    use autoshade::advisor::catalogue::STAMPED_CALIBRATION;
+    // A name with no registry row is not something this can vouch for as
+    // engine calibration — an unknown falls to the interrupting side, and so
+    // does every known control that is not one of the stamped four.
+    !losses.is_empty() || globals.iter().any(|g| !STAMPED_CALIBRATION.contains(g))
 }
 
 /// The OTHER corner of the disclosure square (R25 B4): the settings this
