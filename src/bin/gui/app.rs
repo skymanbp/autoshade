@@ -425,6 +425,16 @@ pub(crate) struct AutoShadeApp {
     /// `style_build_inflight` may grey that row.
     #[cfg(test)]
     pub(crate) ai_library_build_enabled: Option<bool>,
+    /// Test seam (R30, user ruling): was the SigLIP 2 switch — the head of the
+    /// retrieval-engine rung — usable this frame? That rung is BUILD-side too:
+    /// `actions.rs` resolves both of its switches when it starts an index
+    /// build, so they decide what a build COMPUTES and not only what a query
+    /// matches on. Gate (a) must therefore not reach it, and this is read off
+    /// the checkbox's own `Response` rather than the surrounding `Ui`, so a
+    /// read gate wrapped back around the rung turns it false wherever the
+    /// wrapper is put.
+    #[cfg(test)]
+    pub(crate) retrieval_engine_enabled: Option<bool>,
     /// Test seam (R30): was 「Use look library」 usable this frame? The look
     /// library is retrieved ONLY through the SigLIP 2 query vector, so the
     /// switch is live only when there are finished photos AND an embedding to
@@ -1750,6 +1760,8 @@ impl Default for AutoShadeApp {
             ai_library_read_enabled: None,
             #[cfg(test)]
             ai_library_build_enabled: None,
+            #[cfg(test)]
+            retrieval_engine_enabled: None,
             #[cfg(test)]
             looks_switch_enabled: None,
             multi_sel: HashSet::new(),

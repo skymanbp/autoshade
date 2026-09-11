@@ -7201,7 +7201,7 @@
                 tr(lang, "Analysis · paid API"),
                 tr(lang, "Reference libraries · local"),
                 tr(lang, "My Lightroom edits library (RAW + .xmp)"),
-                tr(lang, "Retrieval engine"),
+                tr(lang, "Retrieval engine (what a build computes, what a query matches)"),
                 tr(lang, "Finished-photo look library (JPEG)"),
                 tr(lang, "Reimagine (whole image) · paid API"),
                 tr(lang, "Reverse-fit · local; AI review is paid"),
@@ -7216,34 +7216,39 @@
         }
     }
 
-    /// R30 gate (a), split the way the user ruled it: BUILDING a library is not
-    /// READING one.
+    /// R30 gate (a), split the way the user ruled it: only what CONSUMES a
+    /// library goes dark at Style 0. Everything that shapes one stays live.
     ///
     /// At Style 0 the pipeline opens no index at all — `pipeline.rs`'s
-    /// `(req.style > 0.0).then(load_effective)` — so the controls that feed an
-    /// analysis (the reference-photo switch, the retrieval engine, 「Use look
-    /// library」) are decoration at that setting and are drawn disabled with
-    /// the reason above them. The folder pickers and the two Build buttons are
-    /// NOT: greying those would have made the library nobody has yet the one
-    /// library nobody can make, and the Style slider's own 「⚠ no library」
-    /// flag points straight at them.
+    /// `(req.style > 0.0).then(load_effective)` — so the two switches that do
+    /// nothing but feed an analysis (rung 1's reference-photo switch, rung 3's
+    /// 「Use look library」) are decoration at that setting and are drawn
+    /// disabled with the reason above them. Three things are NOT: the folder
+    /// pickers, the two Build buttons, and the whole retrieval-engine rung,
+    /// whose two switches `actions.rs` resolves when it STARTS a build and so
+    /// decide what that build computes. Greying those would have made the
+    /// library nobody has yet the one library nobody can make — and the Style
+    /// slider's own 「⚠ no library」 flag points straight at them.
     ///
     /// The threshold is the PIPELINE'S, not a rounded band, so 1% must re-arm
     /// the read side — that is why phase ③ exists.
     ///
     /// MUTATION THIS KILLS: widen the read gate over the build row (phase ②'s
-    /// build witness goes false), drop the wrapper from ANY of the three
-    /// read-side sites (the read witness ORs them, so one ungated control
-    /// flips phase ② on its own), widen the comparison to `>= 0.0`, or drop
-    /// the sentence that says why.
+    /// build witness goes false), wrap the retrieval-engine rung back in it
+    /// (the retrieval witness goes false), drop the wrapper from EITHER use
+    /// switch (the read witness ORs the two, so one ungated switch flips phase
+    /// ② on its own), widen the comparison to `>= 0.0`, or drop the sentence
+    /// that says why.
     #[test]
     fn the_reference_libraries_build_at_style_zero_but_do_not_read() {
         let ctx = egui::Context::default();
         crate::theme::install_theme(&ctx, crate::theme::ThemePref::Dark);
-        // (build side, read side) — one frame answers both, so a change that
-        // moves the boundary between them cannot pass by moving both.
-        let frame = |app: &mut AutoShadeApp| -> (Option<bool>, Option<bool>) {
+        // (build row, retrieval rung, use switches) — one frame answers all
+        // three, so a change that moves the boundary between them cannot pass
+        // by moving the lot.
+        let frame = |app: &mut AutoShadeApp| -> (Option<bool>, Option<bool>, Option<bool>) {
             app.ai_library_build_enabled = None; // this frame's evidence only
+            app.retrieval_engine_enabled = None;
             app.ai_library_read_enabled = None;
             let _ = ctx.run(
                 egui::RawInput {
@@ -7263,22 +7268,41 @@
                     });
                 },
             );
-            (app.ai_library_build_enabled, app.ai_library_read_enabled)
+            (
+                app.ai_library_build_enabled,
+                app.retrieval_engine_enabled,
+                app.ai_library_read_enabled,
+            )
         };
-        // ① the shipped default: Style is above 0, so both sides are live.
+        // ① the shipped default: Style is above 0, so everything is live.
         let mut app = AutoShadeApp::default();
         assert!(app.style_strength > 0.0, "premise: the app ships with Style above 0");
         assert_eq!(
             frame(&mut app),
-            (Some(true), Some(true)),
-            "above Style 0 a library is both buildable and read"
+            (Some(true), Some(true), Some(true)),
+            "above Style 0 a library is buildable, configurable and read"
         );
-        // ② Style at 0: the READ side goes dark and the BUILD side does not.
+        // ② Style at 0: the two USE switches go dark, and nothing else does.
         app.style_strength = 0.0;
+        let (build, retrieval, read) = frame(&mut app);
         assert_eq!(
-            frame(&mut app),
-            (Some(true), Some(false)),
-            "at Style 0 the pipeline loads no index — but building one is how a user              gets something for Style to read (user ruling)"
+            read,
+            Some(false),
+            "at Style 0 the pipeline loads no index, so neither use switch can change it"
+        );
+        assert_eq!(
+            build,
+            Some(true),
+            "building a library is how a user gets something for Style to read (user ruling)"
+        );
+        // The retrieval engine is BUILD-side too, which is why it is named
+        // separately: `actions.rs` resolves both of its switches when it starts
+        // an index build, so greying them at Style 0 would let a user start a
+        // build they were not allowed to configure.
+        assert_eq!(
+            retrieval,
+            Some(true),
+            "the SigLIP 2 switch configures the BUILD as well as the query — it must stay usable at Style 0"
         );
         // …and the reason is ON SCREEN, not only in a tooltip.
         let seen = tall_frame(&mut app, |a, ui| a.ai_panel(ui));
@@ -7295,7 +7319,7 @@
         app.style_strength = 0.01;
         assert_eq!(
             frame(&mut app),
-            (Some(true), Some(true)),
+            (Some(true), Some(true), Some(true)),
             "any non-zero Style opens a library"
         );
     }

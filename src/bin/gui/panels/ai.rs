@@ -44,10 +44,12 @@
 //!     paid analysis (`pipeline.rs`'s `looks_unreachable`).
 //!
 //! The three gates below (a)/(b)/(c) are those three facts, drawn. Gate (a)
-//! covers the READ side only (user ruling): building a library is not reading
-//! one, so the folder pickers and the two Build buttons stay live at Style 0 —
-//! greying them would make the library nobody has yet the one library nobody
-//! can make, and the Style slider's own 「⚠ no library」 flag points at them.
+//! covers the two USE switches only (user ruling): everything that shapes a
+//! library rather than consuming one stays live at Style 0 — the folder
+//! pickers, both Build buttons, and the retrieval-engine rung, whose two
+//! switches `actions.rs` resolves when it starts a build. Greying those would
+//! have made the library nobody has yet the one library nobody can make, and
+//! the Style slider's own 「⚠ no library」 flag points straight at them.
 use crate::*;
 
 fn style_age_hours(age: Option<std::time::Duration>) -> String {
@@ -376,17 +378,20 @@ impl AutoShadeApp {
     /// download — which is what its 「· local」 tag says. COLLAPSED by default
     /// because it is a setup-time surface: built once, then left alone.
     ///
-    /// Gate (a) is decided here and applied by the three rungs, on the READ
-    /// side ONLY (user ruling): at Style 0 the pipeline opens no library at all
-    /// (`(req.style > 0.0).then(load_effective)`), so the controls that feed an
-    /// analysis — the reference-photo switch, the retrieval engine, 「Use look
-    /// library」 — are drawn disabled with the reason above them, while the
-    /// folder pickers and the two Build buttons stay live at every Style value.
-    /// BUILDING a library is not READING one, and greying the build entry at
-    /// Style 0 would have made the library nobody has yet the one library
-    /// nobody can make. Gates (b) and (c) — the look library's dependency on
-    /// the SigLIP 2 query vector, and the default trap that ships from it —
-    /// belong to one rung and live in [`AutoShadeApp::ai_look_library`].
+    /// Gate (a) is decided here and applied by two rungs, to the two USE
+    /// switches ONLY (user ruling): at Style 0 the pipeline opens no library at
+    /// all (`(req.style > 0.0).then(load_effective)`), so the two controls that
+    /// only ever feed an analysis — rung 1's reference-photo switch and rung
+    /// 3's 「Use look library」 — are drawn disabled with the reason above them.
+    /// Everything else stays live at every Style value: the folder pickers,
+    /// both Build buttons, the status lines, the captions, and the whole
+    /// retrieval-engine rung, whose switches are read by the index BUILDERS as
+    /// well as by a query. BUILDING a library is not READING one, and greying
+    /// the build side at Style 0 would have made the library nobody has yet the
+    /// one library nobody can make. Gates (b) and (c) — the look library's
+    /// dependency on the SigLIP 2 query vector, and the default trap that ships
+    /// from it — belong to one rung and live in
+    /// [`AutoShadeApp::ai_look_library`].
     fn ai_libraries(&mut self, ui: &mut egui::Ui) {
         let lang = self.lang;
         // Read the status ONCE per session (cached in `style_info`) — the file
@@ -427,7 +432,7 @@ impl AutoShadeApp {
                     );
                 }
                 self.ai_edits_library(ui, reads_a_library);
-                self.ai_retrieval_engine(ui, reads_a_library);
+                self.ai_retrieval_engine(ui);
                 self.ai_look_library(ui, reads_a_library);
             });
     }
@@ -436,12 +441,12 @@ impl AutoShadeApp {
     /// gate-(a) test reads.
     ///
     /// OR, deliberately — not AND, and not assignment. The claim being pinned
-    /// is 「at Style 0 NO read-side control is live」, so the witness has to
-    /// answer 「was ANY of them live?」: a wrapper dropped at one of the three
+    /// is 「at Style 0 NEITHER use switch is live」, so the witness has to
+    /// answer 「was EITHER of them live?」: a wrapper dropped at one of the two
     /// sites then flips it true on its own, where an AND would have been
-    /// masked by the two sites that still said false. The test clears it each
-    /// frame, so `None` means "no read-side control laid out at all" — also a
-    /// red, since the assertions compare against `Some`.
+    /// masked by the site that still said false. The test clears it each
+    /// frame, so `None` means "no use switch laid out at all" — also a red,
+    /// since the assertions compare against `Some`.
     #[cfg(test)]
     fn note_library_read_gate(&mut self, ui: &egui::Ui) {
         let live = self.ai_library_read_enabled.unwrap_or(false) || ui.is_enabled();
@@ -705,32 +710,40 @@ impl AutoShadeApp {
     /// that is where it sits in the pipeline: rung 1 still works without it
     /// (the 14-dim feature retrieval), rung 3 does not — `pipeline.rs`'s
     /// `query_embed` is the only query vector the look search has.
-    fn ai_retrieval_engine(&mut self, ui: &mut egui::Ui, reads_a_library: bool) {
+    ///
+    /// BUILD-side as well as read-side, and gate (a) therefore does not touch
+    /// it (user ruling). Both switches are resolved by the two index builders —
+    /// `actions.rs`'s `EmbeddingSwitch::resolve(None, self.style_embed)` and
+    /// `DescribeSwitch::resolve(None, self.style_describe)` — so they decide
+    /// what a build COMPUTES, not only what a query is matched on. Greying them
+    /// at Style 0 would let a user start a build they were not allowed to
+    /// configure, which is worse than either half alone. The caption says so,
+    /// because a switch whose effect spans two phases cannot be read off its
+    /// position in a ladder.
+    fn ai_retrieval_engine(&mut self, ui: &mut egui::Ui) {
         let lang = self.lang;
         ui.add_space(SPACE_XS);
         ui.separator();
-        // The CAPTION stays live in all three rungs, gated or not: it is the
-        // ladder's own structure, and a greyed rung still has to be readable
-        // as a rung.
-        group_caption(ui, tr(lang, "Retrieval engine"));
-        // The whole rung is read-side — both switches only ever change how a
-        // query is matched — so gate (a) covers it entire.
-        ui.add_enabled_ui(reads_a_library, |ui| {
-            #[cfg(test)]
-            self.note_library_read_gate(ui);
-            ui.checkbox(&mut self.style_embed, tr(lang, "Use SigLIP 2 look embedding (downloads 1.5 GB once; index builds and analyses take longer)"))
-                .on_hover_text(tr(lang, "Embedding is optional and local. The environment override wins when set; rebuild the index after changing this switch."));
-            // The description pass needs the embedding pass: it runs over the
-            // same staged frames, and its prose only reaches the ranking
-            // through the SigLIP text tower.
-            ui.add_enabled_ui(self.style_embed, |ui| {
-                ui.checkbox(&mut self.style_describe, tr(lang, "Describe looks with the local vision model (downloads 4.3 GB once; slower builds)"))
-                    .on_hover_text(if self.style_embed {
-                        tr(lang, "Writes ONE short sentence per photo about its GRADE — white balance, tonality, contrast, colour, finishing — with a local model (Qwen3-VL-2B). Nothing leaves this machine and nothing is billed. Descriptions are cached by frame content, so a rebuild only describes what changed. Off = the fixed attribute tags alone.")
-                    } else {
-                        tr(lang, "Turn on the look embedding first — the description pass runs over the same frames")
-                    });
-            });
+        group_caption(ui, tr(lang, "Retrieval engine (what a build computes, what a query matches)"));
+        let embed = ui.checkbox(&mut self.style_embed, tr(lang, "Use SigLIP 2 look embedding (downloads 1.5 GB once; index builds and analyses take longer)"));
+        #[cfg(test)]
+        {
+            // This rung's witness, read off the WIDGET and not the ambient
+            // `Ui`: gate (a) must never reach it, and a read gate wrapped back
+            // around the rung turns this false wherever the wrapper is put.
+            self.retrieval_engine_enabled = Some(embed.enabled);
+        }
+        embed.on_hover_text(tr(lang, "Embedding is optional and local. The environment override wins when set; rebuild the index after changing this switch."));
+        // The description pass needs the embedding pass: it runs over the same
+        // staged frames, and its prose only reaches the ranking through the
+        // SigLIP text tower.
+        ui.add_enabled_ui(self.style_embed, |ui| {
+            ui.checkbox(&mut self.style_describe, tr(lang, "Describe looks with the local vision model (downloads 4.3 GB once; slower builds)"))
+                .on_hover_text(if self.style_embed {
+                    tr(lang, "Writes ONE short sentence per photo about its GRADE — white balance, tonality, contrast, colour, finishing — with a local model (Qwen3-VL-2B). Nothing leaves this machine and nothing is billed. Descriptions are cached by frame content, so a rebuild only describes what changed. Off = the fixed attribute tags alone.")
+                } else {
+                    tr(lang, "Turn on the look embedding first — the description pass runs over the same frames")
+                });
         });
     }
 
