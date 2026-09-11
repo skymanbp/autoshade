@@ -6417,6 +6417,75 @@ mod tests {
         assert!(!mask_path.path().exists(), "no zone kept the raster — it must be reclaimed");
     }
 
+    /// R33 §H. The deep arm adjusts one global dial and re-derives the
+    /// report through `fit::rescore_report`, which rebuilds the GLOBAL solve's
+    /// account field by field off `SolveFacts`. Every note this module writes
+    /// — the zone verdicts, the evidence withholdings, the boundary gate, the
+    /// quality gate, the attachment line, the XMP loss — had no field to ride
+    /// on and was dropped on the floor, so a `--zoned` fit that went through
+    /// `--deep` reached the user with its masks still rendering and its whole
+    /// local half missing from the rationale.
+    ///
+    /// The carrying rule is a denylist (`rationale::GLOBAL_SOLVE_KEYS`), so
+    /// this pin does not name the producer keys it expects: it asserts that
+    /// EVERY note the zoned pass added to the global report is still there
+    /// afterwards, in the same order, whatever those notes turn out to be.
+    #[test]
+    fn a_rescored_zoned_report_still_carries_every_note_its_producers_wrote() {
+        let (src, tgt, sky_mask) = zoned_pair();
+        let mask_path = fixture_mask_path("rescore-carry-mask");
+        sky_mask.save(mask_path.path()).unwrap();
+        let mut report = fit::fit_recipe(&src, &tgt);
+        let global_only: Vec<&'static str> = report.notes.iter().map(|n| n.key).collect();
+        attach_zones(&src, &tgt, &mut report, &sky_mask, &sky_mask, &mask_path);
+        let produced: Vec<&'static str> = report
+            .notes
+            .iter()
+            .map(|n| n.key)
+            .filter(|k| !global_only.contains(k))
+            .collect();
+        assert!(
+            produced.len() >= 4,
+            "premise: the zoned pass wrote several notes of its own, got {}",
+            produced.len()
+        );
+
+        // The deep arm's own move: one global dial, nothing local touched.
+        let mut adjusted = report.recipe.clone();
+        adjusted.saturation += 4.0;
+        adjusted.clamp();
+        let rescored = fit::rescore_report(&src, &tgt, &adjusted, report.err_before, &report.notes);
+
+        let after: Vec<&'static str> = rescored.notes.iter().map(|n| n.key).collect();
+        let surviving: Vec<&'static str> =
+            after.iter().copied().filter(|k| produced.contains(k)).collect();
+        assert_eq!(
+            surviving, produced,
+            "a rescored zoned report must carry every producer note, in order: {}",
+            rescored.recipe.rationale
+        );
+        // …and each one reaches the persisted rationale too, not just the vec.
+        for note in rescored.notes.iter().filter(|n| produced.contains(&n.key)) {
+            let rendered = crate::rationale::render_one(note);
+            assert!(
+                rescored.recipe.rationale.contains(rendered.trim()),
+                "carried note missing from the rationale string: {rendered}"
+            );
+        }
+        // The three the rescore DROPS on purpose stay dropped: carrying is
+        // not a licence for a stale global claim to ride back in.
+        for dropped in [
+            crate::rationale::keys::FIT_NOTE_REGRESSED,
+            crate::rationale::keys::FIT_NOTE_JOINT_REGRESSED,
+            crate::rationale::keys::FIT_NOTE_SAT_REDUCED,
+        ] {
+            assert!(
+                !after.contains(&dropped) || report.notes.iter().all(|n| n.key != dropped),
+                "a deliberately dropped global note came back through the carry"
+            );
+        }
+    }
+
     #[test]
     fn zoned_orchestration_attaches_the_sky_mask_and_improves_the_zone() {
         let (src, tgt, sky_mask) = zoned_pair();

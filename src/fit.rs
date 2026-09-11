@@ -128,7 +128,7 @@ pub(crate) const DIVERGENT_COVER_PROMOTES: f32 = 0.35;
 /// the residual the fit exists to close. A low-pass makes the statistic more
 /// sensitive to the edit, not less. So the mode line stays on the FINE
 /// reading and no evidence gate was moved onto this one; it is measured and
-/// DISCLOSED beside the fine number ([`crate::rationale::keys::FIT_NOTE_PAIRING`])
+/// DISCLOSED beside the fine number ([`crate::rationale::keys::FIT_NOTE_PAIRING_PIXEL`])
 /// so the two scales' disagreement is on the record rather than assumed.
 const COARSE_SIGMA_DIVISOR: f32 = 48.0;
 /// How close to [`DIVERGENCE_GLOBAL`] the fine reading has to be before the
@@ -2944,10 +2944,7 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure_opts(
     // locally re-hued sub-population is handled where it belongs: its RGB
     // transport residual rejects it pixel-by-pixel, and a majority takeover
     // fails the rejected-share gate here.
-    let correspondence = match robust_tone.as_ref() {
-        Some(r) if r.points.len() >= 6 && r.rejected_share <= 0.5 => r.points.clone(),
-        _ => Vec::new(),
-    };
+    let correspondence = paired_correspondence(robust_tone.as_ref(), pairing);
     let paired = correspondence.len() >= 6;
     let robust_facts = paired
         .then_some(robust_tone.as_ref())
@@ -5618,6 +5615,48 @@ pub fn rescore_report(
             atmosphere_reference: AtmosphereReference::WholeFrame,
         },
     )
+    .with_producer_notes(prior)
+}
+
+impl FitReport {
+    /// R33 §H. [`rescore_report`] regenerates the GLOBAL solve's account from
+    /// the recipe in front of it, field by field off [`SolveFacts`]. Every note
+    /// a LOCAL PRODUCER wrote — zones, native ranges, spatial tiles, free
+    /// masks, the boundary gate, the guided refiner, the local field — has no
+    /// field there to ride on, so a `--zoned` fit that went through the deep
+    /// arm reached the user with its whole local half deleted: the masks were
+    /// still in the recipe and still rendering, and the rationale no longer
+    /// mentioned that they existed.
+    ///
+    /// The carrying rule is a DENYLIST and the prefix IS the denylist:
+    /// `FIT_*` is the global solve's own family, every key of it either
+    /// regenerated above or deliberately dropped there (`FIT_NOTE_REGRESSED`,
+    /// `FIT_NOTE_JOINT_REGRESSED`, `FIT_NOTE_SAT_REDUCED` — see the doc on
+    /// `rescore_report`), and both of those verdicts are preserved unchanged.
+    /// Everything else rides through, in its original order, after the
+    /// regenerated head. An allowlist was the defect: it is a list a new
+    /// producer forgets to join, and five families had.
+    ///
+    /// What this deliberately does NOT claim: that a producer note's NUMBERS
+    /// survive the adjustment. "Zone residual 0.505 → 0.494" was measured
+    /// before the deep step moved a global dial. It is kept because it is a
+    /// true statement about an action the zoned pass TOOK and the adjustment
+    /// did not undo — the mask is still there — and because the alternative
+    /// on the table is silence about a correction the user can see. The deep
+    /// step accounts for itself separately through `FIT_NOTE_DEEP_ADOPTED`.
+    fn with_producer_notes(mut self, prior: &[crate::rationale::Note]) -> Self {
+        let carried = prior
+            .iter()
+            .filter(|n| !crate::rationale::is_global_solve_key(n.key));
+        for note in carried {
+            crate::rationale::push_note(
+                &mut self.recipe.rationale,
+                &mut self.notes,
+                note.clone(),
+            );
+        }
+        self
+    }
 }
 
 /// Every reading the colour stage's four gates took, kept whatever the
@@ -6291,6 +6330,47 @@ fn converges_toward(target: &[f32; 3], before: &[f32; 3], after: &[f32; 3]) -> b
 fn tukey_weight(residual: f32, scale: f32) -> f32 {
     let u = residual / (ROBUST_TUKEY_C * scale);
     if u.abs() >= 1.0 { 0.0 } else { (1.0 - u * u) * (1.0 - u * u) }
+}
+
+/// The robust map's points, or none, for the tone stage's PAIRED arm.
+///
+/// Two gates, and R33 §D added the first of them. `PairingScale::Cell` means
+/// the fine structure reading did not vouch that index `i` on one side IS
+/// index `i` on the other; a per-pixel transport fit over unvouched pairs is
+/// then a well-formed answer to a question nobody asked, and the marginal
+/// (population-quantile) arm beside it is the honest estimator. The second
+/// gate is the robust fit's OWN diagnostics, unchanged: enough populated bins
+/// to shape a map, and a majority-consistent pairing.
+///
+/// Returning the empty vec rather than a flag is deliberate: `correspondence`
+/// is what every downstream consumer already reads — the knot support span,
+/// the score set, the colour weights, the hue voucher and the summary key all
+/// follow from its length, so a scale verdict cannot be applied to the map and
+/// forgotten by the support rule.
+///
+/// The Cell branch is not reachable through the shipped solve TODAY and the
+/// unit test beside this function is the only thing that exercises it: with
+/// the mode line on the fine reading (see [`COARSE_SIGMA_DIVISOR`]), a Full
+/// solve has D_fine < [`DIVERGENCE_GLOBAL`], and the only other way to reach
+/// `Cell` is an abstention that a 384x256 all-ones raster cannot produce
+/// ([`STRUCTURE_MIN_CORE_PX`] is 100 against ~94500 core pixels). It is
+/// written and pinned anyway because the coupling is the rule: whoever moves
+/// the mode line must not have to remember that the tone estimator was
+/// supposed to move with it.
+fn paired_correspondence(
+    robust: Option<&PairedRobustTone>,
+    pairing: PairingScale,
+) -> Vec<(f32, f32)> {
+    match robust {
+        Some(r)
+            if pairing == PairingScale::Pixel
+                && r.points.len() >= 6
+                && r.rejected_share <= 0.5 =>
+        {
+            r.points.clone()
+        }
+        _ => Vec::new(),
+    }
 }
 
 pub(crate) fn paired_robust_tone(
@@ -8686,6 +8766,96 @@ mod tests {
                 "{band} is both admitted and refused: refused=[{refused}] vouched=[{bands}]"
             );
         }
+    }
+
+    /// R33 §D. A pair whose TEXTURE was re-synthesised: the same slow
+    /// left-to-right base, a known affine tone map, and a per-pixel hash of
+    /// its own on each side. The layout corresponds; the pixels do not.
+    ///
+    /// The paired robust estimator does not notice. It reports 54 map points
+    /// and rejects 0.1% of them, because every pair it forms IS internally
+    /// consistent — it is measuring the regression of one noise draw on
+    /// another, and errors-in-variables shrinks the slope it recovers toward
+    /// 1. Measured on this fixture it under-reads the map's contrast by 10%,
+    /// while the population-quantile arm sitting next to it in the same
+    /// function recovers it to 0.3%: the two marginals carry the map exactly,
+    /// the pairing carries nothing.
+    ///
+    /// So the estimator follows the PAIRING SCALE, not the robust fit's own
+    /// opinion of itself — that is all [`paired_correspondence`] does. The
+    /// Cell branch this test drives is not reachable through the shipped
+    /// solve (D_fine on this very fixture is 0.406, which is Atmosphere, and
+    /// a Full solve's fine reading cannot abstain — see the function's doc);
+    /// it is pinned because the coupling must survive whoever moves the mode
+    /// line, and because the numbers below are the evidence that it should.
+    #[test]
+    fn a_pair_whose_texture_was_resynthesised_is_read_by_population_not_by_pairing() {
+        let (w, h) = (192u32, 128u32);
+        // One hash, two seeds: same distribution, independent draws.
+        let hash = |i: u32, seed: u32| {
+            let mut v = i.wrapping_mul(747796405).wrapping_add(seed.wrapping_mul(2891336453));
+            v ^= v >> 16;
+            v = v.wrapping_mul(2246822519);
+            v ^= v >> 13;
+            (v % 10_000) as f32 / 10_000.0 - 0.5
+        };
+        let base = |x: u32| 0.20 + 0.55 * (x as f32 / (w - 1) as f32);
+        let map = |v: f32| (0.5 + 1.35 * (v - 0.5)).clamp(0.0, 1.0);
+        let amp = 0.40f32;
+        // The target is the map applied to a RE-SYNTHESISED source, not the
+        // map applied to the source: a repaint invents its own texture and
+        // then wears the look, which is why the two marginals still agree.
+        let build = |seed: u32, mapped: bool| {
+            DynamicImage::ImageRgb8(RgbImage::from_fn(w, h, |x, y| {
+                let v = (base(x) + amp * hash(y * w + x, seed)).clamp(0.0, 1.0);
+                let v = if mapped { map(v) } else { v };
+                let c = (v * 255.0).round() as u8;
+                image::Rgb([c, c, c])
+            }))
+        };
+        let (s_img, t_img) = (build(1, false), build(9_999, true));
+        let (sp, tp) = (pixels_of(&s_img), pixels_of(&t_img));
+        let evidence = evidence_model_for(&sp, &tp, w, h);
+        let robust = paired_robust_tone(
+            &sp,
+            &tp,
+            &|i: usize| evidence.source_weights[i].min(evidence.target_weights[i]),
+            true,
+        );
+        let r = robust.as_ref().expect("premise: the robust fit answers on this pair");
+        assert!(
+            r.points.len() >= 6 && r.rejected_share <= 0.5,
+            "premise: the robust fit's OWN diagnostics are clean here — {} points, \n             {:.3} rejected — so nothing but the pairing scale can refuse it",
+            r.points.len(),
+            r.rejected_share
+        );
+
+        let (s_cdf, t_cdf) = tone_cdf_pair_weighted(&sp, &tp, &evidence);
+        let span = |m: &dyn Fn(f32) -> f32| m(0.65) - m(0.35);
+        let truth = span(&map);
+        let marginal = span(&|x: f32| {
+            quantile(&t_cdf, cdf_at(&s_cdf, x).clamp(P_CLIP, 1.0 - P_CLIP))
+        });
+        let paired = span(&|x: f32| sample_tone_points(&r.points, x));
+        assert!(
+            (marginal - truth).abs() <= 0.05 * truth,
+            "the population arm must recover the map's contrast within 5%: \n             truth {truth:.4}, marginal {marginal:.4}"
+        );
+        assert!(
+            paired <= 0.95 * truth,
+            "premise: the paired arm under-reads it by more than 5%: \n             truth {truth:.4}, paired {paired:.4}"
+        );
+
+        // …and the scale, not the diagnostics, is what routes between them.
+        assert_eq!(
+            paired_correspondence(robust.as_ref(), PairingScale::Pixel).len(),
+            r.points.len(),
+            "at pixel scale the paired arm is unchanged"
+        );
+        assert!(
+            paired_correspondence(robust.as_ref(), PairingScale::Cell).is_empty(),
+            "at cell scale the tone stage falls to its population arm"
+        );
     }
 
     #[test]
@@ -14506,6 +14676,106 @@ mod tests {
             "the objective must use the evidence population, not a uniform replacement");
         assert!((weighted - 0.0591).abs() < 0.005,
             "the evidence-weighted objective calibration drifted: {weighted:.6}");
+    }
+
+    /// The POSITIVE twin of `cast_gate_withholds_motion_where_hue_evidence_is_zero`
+    /// (R33 §E), at the same seam and on the same verdict.
+    ///
+    /// The negative fixture blocks through the OTHER door into
+    /// `source_hue_is_withheld`: its moved pixels are structurally
+    /// unsupported, so no voucher can ever reach them and the refusal is
+    /// unconditional. That left the arm's whole vouching half pinned only
+    /// end-to-end, through a full haze solve, where a change of heart in
+    /// any of six stages would move the same assertion.
+    ///
+    /// Here the band is one-sided and the pixels ARE supported: a cyan strip
+    /// laid over the grey field at the SAME luma (so the rank-equalised
+    /// structure reading sees one scene, and the 3x3 spatial evidence
+    /// supports all 4096 pixels), whose paired target is the clean grey
+    /// underneath. Aqua therefore carries 0.156 of the source and none of
+    /// the target — UNMEASURABLE, and a cast that de-casts the strip moves
+    /// 0.156 of the population through it.
+    ///
+    /// With no voucher that is a blind move and the curves are refused. With
+    /// one, every moved pixel is individually vouched (robust weight, and
+    /// its own paired target is where it went), the refusal lifts, and the
+    /// band is NAMED as carried rather than silently reclassified: two
+    /// different outcomes must not read the same.
+    #[test]
+    fn a_vouched_pixel_carries_the_cast_through_a_one_sided_band_and_is_named() {
+        let (w, h) = (64usize, 64usize);
+        let hash = |i: usize| {
+            let mut v = (i as u32).wrapping_mul(747796405).wrapping_add(2891336453);
+            v ^= v >> 16;
+            v = v.wrapping_mul(2246822519);
+            v ^= v >> 13;
+            (v % 1000) as f32 / 1000.0 - 0.5
+        };
+        let mut cur = Vec::with_capacity(w * h);
+        let mut target = Vec::with_capacity(w * h);
+        let mut with_cast = Vec::with_capacity(w * h);
+        for i in 0..w * h {
+            let (x, y) = (i % w, i / w);
+            let t = 0.10 * hash(i) + 0.14 * x as f32 / (w - 1) as f32;
+            let grey = 0.34 + t;
+            let clean = [grey, grey + 0.02, grey + 0.01];
+            if y < 10 {
+                // Luma-matched to `clean` to within 0.0005, so the strip is a
+                // pure COLOUR difference and the structure reading, which is
+                // rank-equalised luma, sees the same scene on both sides.
+                let cyan = [grey - 0.22, grey + 0.10, grey + 0.18];
+                cur.push(cyan);
+                target.push(clean);
+                with_cast.push(std::array::from_fn(|c| cyan[c] + 0.7 * (clean[c] - cyan[c])));
+            } else {
+                cur.push(clean);
+                target.push(clean);
+                with_cast.push(clean);
+            }
+        }
+        let evidence = evidence_model(&cur, &target);
+        assert!(
+            evidence.spatial_supported.iter().all(|&s| s),
+            "premise: a luma-matched colour strip leaves every pixel structurally supported"
+        );
+        let aqua = &evidence.hue[4];
+        assert!(
+            aqua.source_populated && !aqua.target_populated && aqua.weight <= 0.0,
+            "premise: the band is ONE-SIDED, not sparse and not two-sided: {aqua:?}"
+        );
+        assert!(
+            !cast_rotates_a_region(&cur, &with_cast),
+            "premise: the legacy rotation veto must not be what decides this"
+        );
+
+        let strict = cast_gate_outcome(&cur, &with_cast, &target, &evidence, None);
+        assert!(
+            strict.rehue_blocked,
+            "with no paired verdict a move through an unmeasurable band is blind: {strict:?}"
+        );
+        assert_eq!(
+            vouched_hue_band_names(&cur, &with_cast, &evidence, None),
+            None,
+            "…and nothing was carried, so nothing is named as carried"
+        );
+
+        let weights = vec![1.0f32; w * h];
+        let vouch = Some((weights.as_slice(), target.as_slice()));
+        let vouched = cast_gate_outcome(&cur, &with_cast, &target, &evidence, vouch);
+        assert!(
+            !vouched.rehue_blocked,
+            "every moved pixel converged on its OWN paired target: {vouched:?}"
+        );
+        assert_eq!(
+            vouched_hue_band_names(&cur, &with_cast, &evidence, vouch).as_deref(),
+            Some("Aqua"),
+            "the band the voucher carried movement through must be disclosed by name"
+        );
+        // The two gates the strength budget owns are untouched by any of
+        // this: the voucher lifts ONE arm, and the readings both calls take
+        // are the same readings.
+        assert_eq!(strict.readings, vouched.readings);
+        assert_eq!(strict.ratio_rejected, vouched.ratio_rejected);
     }
 
     #[test]
