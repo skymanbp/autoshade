@@ -26,6 +26,30 @@
 
 ## 版本台账（逐版已发布内容与实测数字，新在上；均已完成，勿重做）
 
+### 未发布（已合入工作分支，尚未发版）— 两族边界尺统一 + 色彩接缝 + 语义羽化加宽
+
+- **软族（TransitionBand）此前「declines to charge」，实测把一条肉眼可见的接缝判成合规**——沙漠黄昏那对图上，语义 SKY 区（软分割栅格，+0.177 EV，色彩已抑制）的下边缘穿过两座台地之间毫无纹理的雾霭，CLI 自报 `introduced transition rim 0.021 to 0.012 luma after shared differential shrink k=0.592 (budget 0.012, 691 measured transitions)`——**收缩按设计把接缝正好停在天花板上**；成片 2048 px 上 50% 等值线两侧亮度差 0.013–0.016（带蒙版 p50 0.018 对不带 0.005，8 px 让位，154 列），即 255 码里的 3–4 码，落在平滑渐变上。同一片雾霭在硬族尺（`boundary_step`，v1.2.2 起按穿越计费）下的预算只有 **1 码**。根因不是常数选错，是**两族尺不同权**，外加**两把尺都只读亮度**。一次系统性改动，三件事：
+  1. **预算统一（A）**——`boundary_rim`（[src/fit_zoned.rs:1118](../src/fit_zoned.rs#L1118)）现在与 `boundary_step` 共用 `StepFrames` 三帧与 `crossing_budget` / `crossing_slope` / `crossing_charge` 三个函数：预算 = max(参考帧上该过渡带**两端**的场景自身变化，`BOUNDARY_STEP_SHAPE`=3 × 冻结 k=1 候选上的同侧斜率，两条相邻基线取小).clamp(`BOUNDARY_STEP_FLOOR`=1/255, `ZONE_BOUNDARY_RIM_MAX`=0.012)；预算低于天花板时 charge = 原始读数 × (天花板/预算)，到顶则**分支取原始读数**（逐比特，不是乘 1.0）。`rim` 仍是原始 p90（日志与既有钉子照旧可比），门改比 `charged`，共享收缩 k 的二分也改比 `charged`。斜率从 **50% 等值线**向外读（与硬族同一处），这正是宽斜坡能挣到额度、两像素斜坡挣不到的原因。`transported`（乘性）参考逻辑一字未动。亮度/色彩-范围族仍不计费（`BoundaryReading::uncharged`，[src/fit_zoned/range.rs:950](../src/fit_zoned/range.rs#L950)）：它只收「参考帧本就平滑」的穿越并报告**渲染后**梯度，场景变化本来就在读数里。
+  2. **色彩接缝（A 的第二坐标）**——两把尺同时按通道做差中差（软族每通道各自走 `M_c` 输运），穿越读数取三通道幅值最大者，并按**该通道自己的**上下文计费；门比 `max(charged, colour_charged)`（`BoundaryReading::gated`）。理由：能复现目标平均色的增益可以把 luma601 压在 1 码以内却把某个通道推开好几码，只读亮度的尺把这种彩色光晕读成 0。**一个仪器脚注也一并入库**：单通道 `u1` 是两张 8 bit 渲染之差，其 3 px 基线斜率量化到整码，两基线取小就会在明明存在的斜坡上读出 0；亮度是同一测量把三次独立量化平均掉，能把**同一条** alpha 斜坡读到亚码。于是通道斜率以亮度斜率为下界（`colour_slope_credit`）——是下界，不是凭空发的额度。没有这条下界，一次**纯曝光**拨盘会被当成光晕计费：`shoulder_fixture(32.0, 0.37)` 上实测收缩 0.24536133 → 0.14794922、保留台阶从 2 码掉到 1 码。
+  3. **平滑区羽化加宽（B）**——预算只会拿走强度，所以另一半是加斜坡。`mask_refine::widen_smooth_feather`（[src/mask_refine.rs:411](../src/mask_refine.rs#L411)）在两条语义产线里、紧挨引导细化、**在任何边界读数之前**跑：在 50% 等值线周围 `2×cap` 的项圈内，若**引导图**自身在 `cap/4` 探测距离上的变化不足 1 码，就把 alpha 向半径 `FEATHER_CAP_SHARE` 的盒糊结果混合，额度从「完全平坦=1」线性降到「1 码=0」。三个细节都是被测出来的，不是设计出来的：
+     - 平滑度用**平滑值之差**而不是 |梯度| 的均值——8 bit 渐变本身就是一串 1 码台阶，|梯度| 无论窗多宽都平均在阈值附近，据此做的规则会**恰好拒绝**它为之存在的那片雾霭；
+     - 额度在**等值线上**读，再用 `spread_min`（项圈膨胀的分级孪生）向外取**最小值**扩散：平滑是**穿越**的属性，不是被写像素的属性。落地前在 split-guide 夹具上实测：台地那一行离等值线 9 px 处，原蒙版 0 的地方回来是 3/255——即把轮廓自己的斜坡往旁边摊，而轮廓本身纹丝不动；
+     - `FEATHER_CAP_SHARE` 是**盒半径**取蒙版自身高度的 **3%**（交付斜坡约 6%），并且是被预算**两头夹死**的：过渡带尺读的是 50% 等值线处的**亏空**（`1 − ZONE_BOUNDARY_MID` = settled 高度的一半，斜坡再宽也不减），而 W 个分析像素宽的斜坡只挣回 `BOUNDARY_STEP_SHAPE × (3 px 基线 ÷ W)`，且必须**跨过两条相邻基线**才算数——低于约 14 个分析像素第二条基线落在已 settled 的平台上、额度被拒，高于约 18 个额度已低于它要付的亏空。384 px 长边的分析网格上横幅约 256 行，这个份额把交付斜坡放在 17 行，正在夹子里，也是分割模型在雾霭里给出的 2–3 px 带的五倍。
+
+     引导图有边缘处 alpha **逐字节不动**，轮廓照旧锐利。覆盖度仍守 `COVERAGE_DELTA_MAX`=0.002，项圈外不得变动，无平滑处则**弃权并披露**（新键 `MASK_FEATHER_WIDENED` / `MASK_FEATHER_ABSTAINED` + zh 对）。硬栅格（空间图块、自由蒙版）**永不加宽**——它们按构造就是 0/255，跨边界尺读的正是这个。
+
+- **顺序是 B→A，两个方向都吃重**：门必须量到真正会被渲染的蒙版；而加宽后的斜坡能在预算里挣回斜率额度。实测（`FEATHER_WIDENING`，64×256 雾霭夹具、3 px 羽化、+0.30 EV）：窄羽化（3 px）读数 rim=0.0235、charged=0.0720（3.06x，正是 天花板/地板 的全额兑换，因为平坦邻域只挣得到地板），共享收缩留下 k=0.142；**先加宽**之后 rim **一位不变**仍是 0.0235、charged 落到 0.0240（1.02x）、收缩留下 k=0.526——**同一个 0.012 天花板下多留 3.7 倍强度**。不是 k=1，而且不是的原因是仪器不是修法：过渡带尺读的是 50% 等值线处的**亏空**（斜坡的高度），斜坡再宽也不减它；加宽买回来的是斜率额度，不是读数。
+
+- **硬族亮度数字未动，且这是被测过的**：新测试 `the_hard_familys_readings_are_untouched_by_the_soft_familys_charge`（spatial.rs）在同一张硬栅格上同时跑两把尺——rim 尺照旧 0 过渡、0 读数；step 尺照旧 48 处穿越；中性画面上纯曝光拨盘的逐通道读数**就是**亮度读数（差 ≤1e-6），这正是本模块所有在灰度夹具上钉死的判决（`ARM_B_SHIPPED_K`、`ARM_F_K`、`GRADIENT_K`）一位不动的原因，`contextual_budget_charges_smooth_borders_and_leaves_textured_ones_alone` 与 `a_scene_gradient_under_a_hard_raster_earns_its_own_slope_budget` 也都在原钉子上通过。
+
+- **重新标定的钉子**（每条都写明旧值→新值与原因）：
+  1. `every_accepted_fixture_zone_still_passes_the_boundary_gate` 的 `expected` **[0.012, 0.012, 0.012, 0.012] → [0.012, 0.012, 0.002, 0.002]**、`expected_candidates` 里 sky+land 的 **k 0.852 → 0.088**（sky 的 0.0460 / 0.012 / k=0.244 一位未动）。**移动它的不是计费而是色彩坐标**，这一点现在由测试自己断言：两个夹具的等值线下都压着真实场景台阶，亮度预算都到顶，`charged` 逐条等于原始 `rim`；而 sky+land 那对（[0.60, 0.63, 0.67] → [0.92, 0.72, 0.48]）要的是很宽的逐通道增益，只读亮度时那圈光晕读作 0.019/0.012，改比 `max(charged, colour_charged)` 之后收缩一直跑到**色彩 p90 顶到天花板**：保留亮度 rim 0.012 → 0.002、色彩 rim 坐在 0.012 上。实测行：`BOUNDARY_CALIBRATION sky: before=0.0460 after=0.0120 charged=0.0120 colour=0.0120/0.0120 k=0.244 n=384`、`sky+land: before=0.0190 after=0.0020 charged=0.0020 colour=0.0120/0.0120 k=0.088 n=384`。
+  2. `FEATHER_CAP_SHARE` **0.06 → 0.03**（含义同时从「半径」改成「半径，交付斜坡约两倍」）。不是收紧常数，是上面那条 14–18 分析像素夹子头一次被写下来：0.06 的半径交付约 12% 帧高的斜坡，越过夹子上沿之后斜率额度已低于亏空，加宽反而白加。
+  3. mask_refine 的 `split_guide_fixture` **128×128 → 64×256**、雾霭行 16 → 32、台地行 112 → 224；`max_radius` 仍是 **8**，但来历从「128 行的 6%」改成「256 行的 3%」。cap 是高度的份额，夹子却是按**分析像素**说的，所以只有按分析网格自身尺度造的夹具才在考这条规则——128 行的夹具考的是一个出厂几何从不索取的 4 px 半径。`fit_zoned` 的 `hazy_feather` 同理改成 64×256。
+  4. 删除 `a_widened_feather_at_a_mild_dose_passes_the_charged_gate_at_k_one`，并入 `widening_the_feather_first_buys_back_the_charge_the_budget_takes`。**原断言 `k == 1.0` 本身不成立**，而且不成立的理由是仪器而不是修法：过渡带尺读的是亏空，加宽不减亏空，只挣斜率额度，于是在夹子内部 charge 几乎归零、k 大幅回升，但不会精确落在 1.0。改钉三条可复现的量：窄臂 `charged/rim` ≈ 3.06（= 天花板/地板）、宽臂 `charged ≤ 1.25 × rim`、`wide_k > 2 × narrow_k`。
+
+- **门（本树实测）**：`cargo test --release --lib fit_zoned` **167 过 / 0 败 / 1 忽略**（164.89 s，含上面两条实测行）、`cargo test --release --lib mask_refine` **4 过 / 0 败**、`cargo clippy --release --all-targets` **0 警告**（exit 0）、`cargo check --lib --tests` 干净；`scripts/audit_i18n.py` 11 项检查全 0；`scripts/check_docs.py` **25 PASS / 0 FAIL / 5 SKIP**。**未跑、也没有被声称**：release 全量 lib 电池、CLI/集成/GUI 三趟、校准车道——按任务书由统筹方跑。
+
 ### 未发布（已提交，待下次发版）— AI 面板拆成四个分区，库的依赖画成阶梯
 
 - **用户报：AI 面板把付费与本地控件混在一起，三个「库」开关是嵌套依赖而界面只字未提（一次系统性改动，未推送、未发版）**

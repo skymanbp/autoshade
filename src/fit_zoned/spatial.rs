@@ -443,6 +443,8 @@ fn boundary_args(
         ("before", format!("{:.4}", before.rim)),
         ("after", format!("{:.4}", after.rim)),
         ("charged", format!("{:.4}", after.charged)),
+        ("colour", format!("{:.4}", after.colour)),
+        ("colour_charged", format!("{:.4}", after.colour_charged)),
         ("max", format!("{ZONE_BOUNDARY_STEP_MAX:.3}")),
         ("transitions", after.transitions.to_string()),
     ]
@@ -559,7 +561,16 @@ pub(super) fn enforce_bitmap_boundary(
     let BitmapBoundaryInput { ruler, initial_px, frame_before } = input;
     let measure = |rendered: &[[f32; 3]]| match ruler {
         BoundaryRuler::TransitionBand { weights, reference } => {
-            boundary_rim(reference, rendered, weights, s_img.width(), s_img.height())
+            // `initial_px` is this gate's k=1 candidate, so BOTH rulers read
+            // the correction's own slope off the same frozen frame.
+            boundary_rim(
+                reference,
+                rendered,
+                &initial_px,
+                weights,
+                s_img.width(),
+                s_img.height(),
+            )
         }
         BoundaryRuler::CrossBoundaryStep { geometry, reference } => {
             boundary_step(reference, rendered, &initial_px, geometry, s_img.width(), s_img.height())
@@ -592,16 +603,19 @@ pub(super) fn enforce_bitmap_boundary(
         let frame = fit::look_err_with_evidence(&pixels, tgt_px, &report.evidence);
         (reading, pixels, frame)
     };
-    // `charged`, not `rim`: each crossing ranked after its own context
-    // charge. On the soft family the two are equal by construction, and on
-    // a fully textured hard border the charge branch returns the raw step
-    // bit for bit, so everything that passed before this batch still does.
-    let kept = if initial.charged <= budget {
+    // `gated()`, not `rim`: every crossing ranked after its own context
+    // charge, in luma AND in colour, whichever is worse. On a fully textured
+    // or genuinely ramped border the charge branch returns the raw reading
+    // bit for bit, so everything that passed on context before this batch
+    // still does; what is new is that the soft family charges too, and that
+    // a correction which moves one channel without moving luma is no longer
+    // read as 0.
+    let kept = if initial.gated() <= budget {
         let frame = fit::look_err_with_evidence(&initial_px, tgt_px, &report.evidence);
         Some((1.0, initial, initial_px, frame))
     } else {
         let zero = render_at(report, 0.0);
-        if zero.0.charged > budget {
+        if zero.0.gated() > budget {
             None
         } else {
             let (mut lo, mut hi) = (0.0f32, 1.0f32);
@@ -609,7 +623,7 @@ pub(super) fn enforce_bitmap_boundary(
             for _ in 0..12 {
                 let mid = (lo + hi) * 0.5;
                 let measured = render_at(report, mid);
-                if measured.0.charged <= budget {
+                if measured.0.gated() <= budget {
                     lo = mid;
                     best = (mid, measured.0, measured.1, measured.2);
                 } else {
@@ -1720,7 +1734,7 @@ mod tests {
             boundary_fixture(-0.40, Some(-0.20), "tile-boundary-budget");
 
         // Premise 1: the old ruler is blind here, by construction.
-        let unread = boundary_rim(&reference, &candidate, &geometry, 64, 64);
+        let unread = boundary_rim(&reference, &candidate, &candidate, &geometry, 64, 64);
         assert_eq!(
             unread.transitions, 0,
             "premise: a 0/255 raster has no transition band to read: {unread:?}"
@@ -2048,6 +2062,40 @@ mod tests {
         );
     }
 
+    /// The soft family's charge (2026-09-10) touches the SOFT family only,
+    /// and the colour ruler that landed with it is ADDITIVE on this one.
+    ///
+    /// Both rulers are run over the same hard raster. The step ruler keeps
+    /// its crossing count and its two luma ranks; the rim ruler still reads
+    /// nothing at all, because a 0/255 raster has no band; and on a NEUTRAL
+    /// frame under a pure exposure dial the per-channel ranks ARE the luma
+    /// ranks — which is why every bit-pinned verdict in this module that runs
+    /// on a grey fixture (`ARM_B_SHIPPED_K`, `ARM_F_K`, `GRADIENT_K`) is
+    /// decided by exactly the numbers it was decided by before.
+    #[test]
+    fn the_hard_familys_readings_are_untouched_by_the_soft_familys_charge() {
+        let (_, _, _, path, geometry, reference, candidate) =
+            boundary_fixture(-0.40, Some(-0.20), "hard-family-unmoved");
+        let blind = boundary_rim(&reference, &candidate, &candidate, &geometry, 64, 64);
+        assert_eq!(
+            (blind.transitions, blind.rim, blind.charged, blind.colour, blind.colour_charged),
+            (0, 0.0, 0.0, 0.0, 0.0),
+            "the two rulers stay separate: a 0/255 raster still has no band to read: {blind:?}"
+        );
+        let measured = boundary_step(&reference, &candidate, &candidate, &geometry, 64, 64);
+        assert_eq!(
+            measured.transitions, 48,
+            "the same 48 crossings this module has always counted: {measured:?}"
+        );
+        assert!(
+            (measured.colour - measured.rim).abs() <= 1e-6
+                && (measured.colour_charged - measured.charged).abs() <= 1e-6,
+            "R = G = B under a pure exposure dial makes the colour ruler the luma ruler: \
+             {measured:?}"
+        );
+        path.remove();
+    }
+
     /// Acceptance 1 (2026-08-30): a hard 0/255 mask now produces a REAL
     /// reading, and a boundary that cannot be sampled is refused instead of
     /// passing on an empty one. Before the fix both halves were the same
@@ -2056,7 +2104,7 @@ mod tests {
     fn hard_tile_mask_yields_a_measured_cross_boundary_step() {
         let (_, _, _, path, geometry, reference, candidate) =
             boundary_fixture(-0.40, Some(-0.20), "tile-boundary-hard-reading");
-        let blind = boundary_rim(&reference, &candidate, &geometry, 64, 64);
+        let blind = boundary_rim(&reference, &candidate, &candidate, &geometry, 64, 64);
         assert_eq!((blind.rim, blind.transitions), (0.0, 0), "the defect, pinned: {blind:?}");
 
         let measured = boundary_step(&reference, &candidate, &candidate, &geometry, 64, 64);

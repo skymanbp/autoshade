@@ -1819,8 +1819,8 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
         " 多区域语义分割不可用（{e}）——改用历史的天空/地面流程。"),
     (" No semantic region cleared the shared support floor on both frames (up to {n} requested) — the historical sky/land pass was used instead.",
         " 没有语义区域在两侧同时达到共享的支持下限（最多请求 {n} 个）——改用历史的天空/地面流程。"),
-    (" The {label} region was refused by its boundary-continuity gate ({why}): candidate rim {before} luma against budget {max} ({transitions} measured transitions).",
-        " {label} 区域被其边界连续性门拒绝（{why}）：候选边缘 {before} luma，预算 {max}（测得 {transitions} 处过渡）。"),
+    (" The {label} region was refused by its boundary-continuity gate ({why}): candidate rim {before} luma, context-charged {charged}, colour {colour} charged {colour_charged}, against ceiling {max} ({transitions} measured transitions).",
+        " {label} 区域被其边界连续性门拒绝（{why}）：候选边缘 {before} luma，语境计费读数 {charged}，色彩读数 {colour}、计费后 {colour_charged}，上限 {max}（测得 {transitions} 处过渡）。"),
     (" Zoned fit skipped: no usable sky partition (sky covers {s}% \
       of the source frame, {t}% of the target's).",
         " 分区拟合已跳过：没有可用的天空分割（天空占原图 {s}%、目标图 {t}%）。"),
@@ -2085,24 +2085,27 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     // ── R22 #4/#14b: AI panel (analysis / whole-image / reverse-fit) ──────────
     //    + the develop panel's group captions
     (" Boundary-continuity gate kept {n} zoned correction(s): introduced transition \
-      rim {before} to {after} luma after shared differential shrink k={k} \
-      (budget {max}, {transitions} measured transitions).",
-        " 分区边界连续性门保留了 {n} 个分区校正：共享差异收缩 k={k} 后，引入的过渡边缘亮度由 {before} 变为 {after}（预算 {max}，测量了 {transitions} 个过渡）。"),
+      rim {before} to {after} luma after shared differential shrink k={k}, \
+      context-charged {charged}, colour {colour} charged {colour_charged} \
+      (ceiling {max}, {transitions} measured transitions).",
+        " 分区边界连续性门保留了 {n} 个分区校正：共享差异收缩 k={k} 后，引入的过渡边缘亮度由 {before} 变为 {after}，语境计费读数 {charged}，色彩读数 {colour}、计费后 {colour_charged}（上限 {max}，测量了 {transitions} 个过渡）。"),
     (" Zoned corrections dropped by the boundary-continuity gate: candidate \
       rim {before} luma, and even shared shrink k=0 left {after} \
-      (budget {max}, {transitions} measured transitions).",
-        " 分区校正被边界连续性门弃用：候选边缘亮度为 {before}，且共享收缩 k=0 时仍为 {after}（预算 {max}，测量了 {transitions} 个过渡）。"),
+      (context-charged {charged}, colour {colour} charged {colour_charged}, \
+      ceiling {max}, {transitions} measured transitions).",
+        " 分区校正被边界连续性门弃用：候选边缘亮度为 {before}，且共享收缩 k=0 时仍为 {after}（语境计费读数 {charged}，色彩读数 {colour}、计费后 {colour_charged}，上限 {max}，测量了 {transitions} 个过渡）。"),
     // v1.2.2 shipped these four English sentences with no zh entry, so the
     // GUI fell back to English mid-paragraph for a Chinese reader. The
     // "kept" line above is the same note whose wording moved from "signed"
     // to "introduced" in that batch, which orphaned its old translation.
     (" Zoned {n} correction(s) dropped by the boundary-continuity gate: \
       candidate introduced rim {before} luma, and the largest shrink inside \
-      budget {max} was k={k}, whose render is byte-identical to the frame \
-      without it — reading {after} over {transitions} measured transitions. \
-      An inert attachment would occupy the correction budget and disclose a \
-      change it did not make.",
-        " {n} 个分区校正被边界连续性门弃用：候选引入的边缘亮度为 {before}，而预算 {max} 之内最大的收缩为 k={k}，其渲染结果与不含该校正的画面逐字节相同——读数为 {after}，测量了 {transitions} 个过渡。无效的附加会占用校正预算，并报告一项它其实没有做出的改动。"),
+      ceiling {max} was k={k}, whose render is byte-identical to the frame \
+      without it — reading {after} luma (context-charged {charged}, colour \
+      {colour} charged {colour_charged}) over {transitions} measured \
+      transitions. An inert attachment would occupy the correction budget \
+      and disclose a change it did not make.",
+        " {n} 个分区校正被边界连续性门弃用：候选引入的边缘亮度为 {before}，而上限 {max} 之内最大的收缩为 k={k}，其渲染结果与不含该校正的画面逐字节相同——亮度读数为 {after}（语境计费读数 {charged}，色彩读数 {colour}、计费后 {colour_charged}），测量了 {transitions} 个过渡。无效的附加会占用校正预算，并报告一项它其实没有做出的改动。"),
     (" No zoned {label} correction attached: every control that survived \
       the evidence and quality gates solved to neutral, so the zone \
       residual {before} is left uncorrected.",
@@ -2164,12 +2167,14 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
         " 空间推导在深度 {depth} 停止，附加上限为 {cap} 个图块；实际附加 {attached} 个。"),
     (" Spatial tile {id} passed the boundary gate: cross-boundary step \
       {before} -> {after} luma after direction-preserving shrink k={k}, \
-      context-charged {charged} (ceiling {max}, {transitions} measured crossings).",
-        " 空间图块 {id} 通过边界门控：保持方向缩减 k={k} 后，跨边界跳变由 {before} -> {after} 亮度，语境计费读数 {charged}（上限 {max}，测得 {transitions} 处穿越）。"),
+      context-charged {charged}, colour {colour} charged {colour_charged} \
+      (ceiling {max}, {transitions} measured crossings).",
+        " 空间图块 {id} 通过边界门控：保持方向缩减 k={k} 后，跨边界跳变由 {before} -> {after} 亮度，语境计费读数 {charged}，色彩读数 {colour}、计费后 {colour_charged}（上限 {max}，测得 {transitions} 处穿越）。"),
     (" Spatial tile {id} refused by its boundary/composed-frame gate: \
       candidate step {before}, final reading {after}, context-charged \
-      {charged}, ceiling {max} ({transitions} measured crossings, k={k}).",
-        " 空间图块 {id} 被边界/合成画面门控拒绝：候选跳变 {before}，最终读数 {after}，语境计费读数 {charged}，上限 {max}（测得 {transitions} 处穿越，k={k}）。"),
+      {charged}, colour {colour} charged {colour_charged}, ceiling {max} \
+      ({transitions} measured crossings, k={k}).",
+        " 空间图块 {id} 被边界/合成画面门控拒绝：候选跳变 {before}，最终读数 {after}，语境计费读数 {charged}，色彩读数 {colour}、计费后 {colour_charged}，上限 {max}（测得 {transitions} 处穿越，k={k}）。"),
     (" Guided mask refinement kept for {label}: coverage delta {coverage}, \
       guide-edge alignment {before} -> {after}, core pixels changed {core}.",
         " {label} 的引导蒙版细化已保留：覆盖变化 {coverage}，引导边缘对齐 {before} -> {after}，内部像素变化 {core}。"),
@@ -2177,6 +2182,17 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
       guide-edge alignment {before} -> {after}, core pixels changed {core}; \
       the original mask bytes were retained.",
         " {label} 的引导蒙版细化已放弃：覆盖变化 {coverage}，引导边缘对齐 {before} -> {after}，内部像素变化 {core}；保留原始蒙版字节。"),
+    (" Semantic mask feather widened for {label}: {share}% of the 50% \
+      contour runs through guide detail too smooth to hide a seam, so the \
+      alpha ramp there was broadened to a radius of up to {radius} px \
+      (coverage delta {coverage}); where the guide has edges the alpha was \
+      left untouched, so silhouettes stay crisp.",
+        " {label} 的语义蒙版羽化已加宽：50% 等值线有 {share}% 落在平滑到藏不住接缝的引导图内容上，该处的 alpha 斜坡被展宽到最大 {radius} px 半径（覆盖变化 {coverage}）；引导图有边缘的地方 alpha 原样保留，因此轮廓依旧锐利。"),
+    (" Semantic mask feather widening abstained for {label}: {share}% of \
+      the 50% contour was smooth enough to widen against a radius cap of \
+      {radius} px (coverage delta {coverage}); the original mask bytes were \
+      retained.",
+        " {label} 的语义蒙版羽化加宽已放弃：50% 等值线只有 {share}% 平滑到可加宽，半径上限为 {radius} px（覆盖变化 {coverage}）；保留原始蒙版字节。"),
     (" · includes {n} spatial tile correction(s) (adjustable in the mask panel; omitted from classic XMP with a named bitmap loss)",
         " · 包含 {n} 个空间图块校正（可在蒙版面板调整；经典 XMP 会以具名位图损失跳过）"),
     (" · guided mask refinement: {kept} kept, {abstained} abstained",
