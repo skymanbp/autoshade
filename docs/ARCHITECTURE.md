@@ -106,6 +106,11 @@
 > experimental generative edits, an optional pixel-**heal** retouch mode (§4.7)
 > the deterministic look **reverse-fit** (§4.8) and the local server's refusal
 > model (§4.9).
+> Every plain `cargo test` compiles the tests at opt-level 2 (`[profile.test]` in
+> Cargo.toml, since 2026-09-11) with debug assertions and overflow checks kept on;
+> unoptimised the library suite took 4014 s on the 16-thread release machine,
+> optimised 325 s (`scripts/release_battery.sh` already ran `--release`, so the
+> slow trips were the lane, merge and CI debug-asserts ones).
 > The battery is one command, `scripts/release_battery.sh`: a **default** lane
 > (`cargo test`, the corpus variable unset), a **gui** lane (the
 > `autoshade-gui` bin under the `gui` feature) and a **calib** lane (the

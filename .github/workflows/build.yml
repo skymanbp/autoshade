@@ -66,10 +66,13 @@ jobs:
       - name: cargo test (gui feature)
         run: cargo test --locked --release --features gui --bin autoshade-gui
 
-  # fit/render carry debug_assert!s that only fire in the debug profile — a
-  # debug lib trip caught four such reds at step 10-B1 — so one debug trip on
+  # fit/render carry debug_assert!s that only fire with debug assertions on — a
+  # debug lib trip caught four such reds at step 10-B1 — so one such trip on
   # the cheapest runner keeps that class covered per push while the jobs
-  # above stay in the profile that ships.
+  # above stay in the profile that ships. Since 2026-09-11 the `test` profile
+  # compiles at opt-level 2 (Cargo.toml `[profile.test]`), which keeps
+  # debug-assertions and overflow-checks ON — so this trip still fires them,
+  # only faster.
   debug-asserts:
     runs-on: ubuntu-latest
     steps:

@@ -36,6 +36,18 @@ required-features = ["gui"]
 # view mode, export options) across launches — table stakes for a real app.
 gui = ["dep:eframe", "dep:egui", "dep:rfd", "dep:ab_glyph", "eframe/persistence"]
 
+# Tests compile optimised. The library battery is image arithmetic on real
+# 2048-px frames, and unoptimised it spent 4014 s (2026-09-11, 16 threads; the
+# three zoned-orchestration tests alone 172.5 s); at opt-level 2 the same
+# battery runs in 325 s and those three in 10.9 s, for a one-time 3 min
+# optimised compile. `debug-assertions` and `overflow-checks` are inherited
+# from `dev` and stay ON (probed: a debug_assert! body runs and a u8 overflow
+# panics under this profile), so the debug_assert!s the CI debug-asserts job
+# exists for still fire in every local `cargo test`. `cargo test --release`
+# (the CI trips in the shipping profile) does not use this profile.
+[profile.test]
+opt-level = 2
+
 [dependencies]
 anyhow = "1.0.103"
 base64 = "0.22"

@@ -1519,6 +1519,14 @@ than the pre-call state; model weights remain outside the repository.
   probes) / 24 CLI / 169 GUI / 2+2 contract** tests. Environment-gated real
   Lightroom, brush-table, and RAW-zoo suites are additional and are not
   smuggled into the ordinary count.
+- Tests compile at opt-level 2 (`[profile.test]` in Cargo.toml) with debug
+  assertions and overflow checks kept on (probed under the profile: a
+  `debug_assert!` body runs, a `u8` overflow panics). Measured 2026-09-11 on the
+  16-thread release machine: the library suite 4014 s unoptimised → 325 s
+  optimised, the three zoned-orchestration tests 172.5 s → 10.9 s, the one-time
+  optimised test compile 3 min 02 s. `scripts/release_battery.sh` and the CI
+  `--release` trips were already optimised; the CI debug-asserts trip
+  (`cargo test --lib`) now runs in this profile and still fires the asserts.
 - The build workflow checks default and GUI feature sets on Ubuntu and macOS.
   The published binary artifacts are the Windows builds, two universal macOS
   archives — the app bundle and the command line on its own (the bundle has
