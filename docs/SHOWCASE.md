@@ -1,12 +1,13 @@
 # AutoShade showcase
 
-The three figures behind the README's pillars and the frames on
+The four figures behind the README's pillars and the frames on
 [autoshade.dev](https://autoshade.dev/#showcase-a), with every number the
 captions quote and the prompts that bought the generated targets. Part A and
 the Cornwall panel were rendered on 2026-09-02 on the v1.2.3 build; the
 stone-viaduct panel's right column was re-rendered on 2026-09-03 on the v1.2.4
 build at panel Strength 100 %, its other two columns being the v1.2.2
-composition's frames re-encoded once; every frame not marked
+composition's frames re-encoded once; the desert-canyon panel was rendered
+on 2026-09-12 on the v1.3.1 build; every frame not marked
 *generated* is rendered by AutoShade's engine from a recipe, and every
 "straight conversion" is AutoShade's own neutral develop of the RAW, not the
 camera JPEG. Model-judge scores are automated review, not human aesthetic
@@ -139,6 +140,47 @@ delivered sky spread of 9.6° against the target's 1.6° and v1.2.2's
 0.664 (v1.2.2 0.033 at 0.646 with the fanning curves; refused outright,
 0.058 at 0.577). Both the gate and the projection are in
 [RELEASE_NOTES_v1.2.3.md](RELEASE_NOTES_v1.2.3.md) with every number.</sub>
+
+### Desert canyon at dusk
+
+<img src="images/showcase-canyon-reverse-fit.jpg" alt="Desert canyon at dusk: straight conversion, generated target, and the recovered recipe rendered on the RAW, with a 1:1 detail row" />
+
+<sub><b>Desert canyon at dusk.</b> The reference pair v1.3.0 and v1.3.1
+were measured on, rendered on 2026-09-12 on the v1.3.1 build. The target
+is a 3520 × 2336 <code>reimagine</code> purchase made from the desktop app
+on 2026-09-10; the app records such a purchase as its origin file only,
+not the Direction text or the model, so unlike the two panels above this
+caption cannot quote the prompt. It is a full regeneration rather than a
+grade: the sky's texture is re-synthesised and only its layout survives,
+which is why this pair reads <b>D = 0.275</b> at pixel scale and 0.609 at
+layout scale (the sky zone 0.617, the land 0.273) — under the 0.35 line at
+frame scope, so the full solve ran, with the sky's pixels admitted on the
+region's own 12 × 8 cell means where no pixel has a partner. The right
+column is the v1.3.1 fit at panel Strength 85 % (`match --zoned`,
+5 min 29 s; the product default is 65 %, where the colour field is inert by
+design and the sky stays 27 ΔE from the target). Look error <b>0.110 →
+0.048</b>: a solved white balance (5653 K as shot → 8400 K, tint +33),
+exposure −1.3 EV with contrast +3.1 and blacks −3.4 under a six-knot
+residual tone curve, global saturation +35, clarity and texture +20 within
+the ±20 budget, the per-band mixer on Red and Orange (saturation +33,
+luminance +33; Aqua and Blue one-sided, left neutral), no cast curves (they
+would have re-hued a region), two Select Sky bands (band 1/2 at +0.14 EV,
+saturation +6; band 2/2 at +0.19 EV, contrast +0.5, shadows −0.9,
+saturation +3; accepted after 15 trials, analysis-scale ΔE 30.1 → 27.1),
+four boundary-gated bitmap tiles (r2c2, r2c0, r1c0, r3c3; cross-boundary
+steps 0.0023–0.0074 after shrink, each context-charged within the 0.012
+ceiling), no field mask (both candidates refused by the zone gate), and the
+12 × 8 × 8 colour field (frame residual 0.0439 → 0.0171, 85 of 88 measured
+cells on the support-free solve). Confidence 0.25, read from the accepted
+zone's residual (0.436), not the frame's 0.047. On the 2048 px acceptance
+render: whole-frame mean |diff| against the target <b>0.0276</b> (v1.2.6
+shipped 0.0571 from the command line and 0.0949 from the saved desktop
+fit), sky ΔE <b>18.2 → 4.9</b> with |dL| 0.6 and L\*std 1.03 of the
+target's, land ΔE 7.0 → 6.9. The far mesas keep a warm haze on the land
+side that the render reads cooler (a\* 24.5 against 18): a haze-colour gap
+along a real edge, inside the land's ΔE, disclosed as the known gap rather
+than measured away. The full three-strength table is in
+[RELEASE_NOTES_v1.3.0.md](RELEASE_NOTES_v1.3.0.md).</sub>
 
 ## What the figures do not show
 
