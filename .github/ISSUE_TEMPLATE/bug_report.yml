@@ -38,7 +38,8 @@ body:
       label: Version
       description: "`autoshade --version`, or the title bar of the desktop app."
       options:
-        - v1.2.6 (latest release)
+        - v1.3.0 (latest release)
+        - v1.2.6
         - v1.2.5
         - v1.2.4
         - v1.2.3

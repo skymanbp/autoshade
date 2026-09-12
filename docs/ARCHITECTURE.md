@@ -1,6 +1,6 @@
 # AutoShade — Architecture
 
-> Status: **implemented** (v1.2.6 — the sensor plane is measured from the
+> Status: **implemented** (v1.3.0 — the sensor plane is measured from the
 > container before the decoder is asked to allocate it, so a frame past that
 > decoder's own ceiling is a named refusal naming the frame and the workflow
 > that works instead of an abort, and a CONTAINED panic no longer raises a modal
@@ -135,15 +135,31 @@
 > `scripts/check_docs.py --gates` reads the counts and the lane set back out
 > of, and it prints the by-name test-set difference against a saved baseline.
 > 1486 library + 24 CLI + 173 GUI + 2+2 contract tests are enumerated in the GUI
-> build; the library result is 1471 pass + 15 `#[ignore]`d forensic probes.
-> R35 adds native-composition, geometry-tile and residual-band pins; the GUI
-> result is 171 pass + one explicit scratch-recipe export probe ignored in the
-> ordinary battery. The source name set is +34 / −8 against `816a457`; all
-> eight old names are re-pinned, with unchanged numeric limits, in the R35
-> ledger. Before that, counts were refreshed 2026-09-11
-> after the R34 merge, not yet released: +57 / −3 by
+> build; the library result is 1471 pass + 15 `#[ignore]`d forensic probes and
+> the GUI result is 172 pass + one explicit scratch-recipe export probe ignored
+> in the ordinary battery. Counts refreshed 2026-09-12 for v1.3.0: +103 / −8 by
+> name against the v1.2.6 tag (`24a467f`), taken statically between the tag's
+> source and this tree; the eight old names are renames (three in R34, four in
+> R35, one in R36), each re-pinned under its new name as the lane notes below
+> record. The calibration lane did not run for this release either. Lane by
+> lane, newest first: R37–R38 added +8 / −0 against `ccbd919` — the
+> target-referenced seam pins
+> `fit_zoned::tests::a_step_the_target_itself_carries_is_not_charged_as_a_seam`,
+> `fit_zoned::spatial::tests::a_tile_edge_the_target_itself_carries_is_not_charged_as_a_seam`,
+> `fit_zoned::tests::the_unasked_part_of_a_step_is_its_excess_over_what_the_target_carries`,
+> `fit_zoned::tests::a_cell_share_needs_a_quorum_a_mean_its_noise_cannot_hide_and_a_code`,
+> `fit_zoned::tests::a_target_referenced_cell_gap_reads_the_band_shape_not_the_texture`
+> and `fit_zoned::subzones::tests::the_regression_disclosure_names_the_rim_cell_component_and_the_mean`,
+> the preview-frame pins
+> `render::tests::preview_mask_coverage_is_the_frame_the_preview_develops_in` and
+> `fit_zoned::spatial::tests::the_native_trial_gate_reads_the_edge_the_preview_paints`
+> — plus one GUI pin, `tests::every_button_stands_one_row_tall_at_the_default_widths`.
+> R35 added native-composition, geometry-tile and residual-band pins: +34 / −8
+> against `816a457`; all eight old names are re-pinned, with unchanged numeric
+> limits, in the R35 ledger. Before that, counts were refreshed 2026-09-11
+> after the R34 merge (released with v1.3.0): +57 / −3 by
 > name against `5ffa275` — the four R33 lanes' tests, R34's and the deep-thinking
-> box's, listed in the ROADMAP's unreleased ledger; the −3 are renames:
+> box's, listed in the ROADMAP's v1.3.0 ledger; the −3 are renames:
 > `the_local_field_never_reaches_the_engine_or_the_recipe_schema` →
 > `the_engine_renders_the_field_from_the_recipe_and_never_calls_the_analyzer`
 > when the field became a shipped control, and R34's two re-pins
@@ -2398,7 +2414,7 @@ so every Lightroom sky mask the photographer had inverted rendered over the
 sky they excluded; and the writer wrote the geometry's raw bit, so an Invert
 ticked on a brush or AI mask never reached the sidecar.
 
-**The source frame is one function** (R33 §A, unreleased):
+**The source frame is one function** (R33 §A, v1.3.0):
 `pipeline::fit_source` — a neutral develop of the RAW at
 `FIT_SOURCE_EDGE = 2048` plus the per-photo calibration recipe — and both
 entry points, `main.rs`'s `match` and the GUI's `start_fit` worker, call it.
@@ -2509,7 +2525,7 @@ re-synthesised the paired estimator reports 54 map points, rejects 0.1% of
 them, and under-reads the map's contrast by 10%, while the quantile arm
 recovers the same map to 0.3%.
 
-**Lightroom-native composition and residual-earned bands** (R35, unreleased).
+**Lightroom-native composition and residual-earned bands** (R35, v1.3.0).
 The writer and reader share the measured composition spelling: Add is
 `MaskBlendMode=0 / MaskValue=1`, Subtract is `1 / 0`, and Intersect is
 Subtract with `MaskInverted` complemented. A census of 174 sidecars, 399
@@ -2632,7 +2648,7 @@ stack, so it fits only the remainder. Native geometry adds no geometry loss;
 AI recomputation, local recolour gains and any remaining field retain their
 own named disclosures.
 
-**The region's cells vouch what its pixels cannot** (R34, unreleased). The
+**The region's cells vouch what its pixels cannot** (R34, v1.3.0). The
 doctrine R34 replaces is one sentence: *`D >= 0.35` in this region, therefore
 nothing may be paired, therefore nothing may move.* The measurement that breaks
 it is the desert-dusk reference pair, where the FRAME pairs at pixel scale
@@ -3849,7 +3865,7 @@ post-cast arbiter load-bearing). Repeated runs are SHA-identical. A 512 / 768 an
 measured and rejected: the same tiles, +4% / +25-50% wall time, and the
 384-calibrated ruler collapses at 768.
 
-**The colour field as a control (R33 §G, unreleased).** Past
+**The colour field as a control (R33 §G, v1.3.0).** Past
 `GradeStrength::DEFAULT` and nowhere else, `run_local_sequencer` runs one last
 producer after the ranges, the tiles and the free masks: it RE-SOLVES the field
 on the current render (every earlier producer applied — the head-of-sequencer
@@ -3904,7 +3920,7 @@ every save and a field the user asked for says so out loud.
 ([`src/fit_zoned/field.rs`](../src/fit_zoned/field.rs)) solves a read-only
 12x8x8 bilateral field over the pair's shared analysis geometry
 ([`src/fit_field.rs`](../src/fit_field.rs)) and reads shape verdicts off it. It
-was DISCLOSURE ONLY until R33 §G (unreleased): the field is an owned local of
+was DISCLOSURE ONLY until R33 §G (v1.3.0): the field is an owned local of
 `fit_recipe_zoned_inner`, never a `FitReport` member, and a test greps
 `render.rs` and `recipe.rs` for any mention of the module. It now also SHIPS,
 as `EditRecipe.colour_field`, past the default Strength — see **The colour

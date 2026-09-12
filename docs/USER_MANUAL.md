@@ -114,7 +114,7 @@ also pass the foreign-hue veto and a weighted rotation allowance, pinned at
 0.05 through 65%, about 0.593 at 85%, and 1.0 at full strength. If no legal WB
 remains, it is withheld and the recipe stays as-shot with a typed explanation.
 
-Since the build after v1.2.6, the full solve has a white balance too, not only the Atmosphere
+Since v1.3.0, the full solve has a white balance too, not only the Atmosphere
 path. It is solved from the same population estimator and then RENDERED and
 checked against the target's own 12×8 cell means before it ships: if the
 render did not move the frame toward the target, the recipe returns to as-shot
