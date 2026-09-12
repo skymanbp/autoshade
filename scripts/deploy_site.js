@@ -15,6 +15,7 @@
 // v1.2.0 deploy: `cf-cache-status: HIT`, `Age: 80753`). No token value is ever
 // printed or written.
 const fs = require("fs");
+const os = require("os");
 const path = require("path");
 const { spawnSync } = require("child_process");
 const { purgeEverything } = require("./purge_site_cache.js");
@@ -63,8 +64,29 @@ async function mint(master) {
   return made;
 }
 
-function deploy(tempValue) {
-  const args = ["wrangler", "pages", "deploy", "site", "--project-name", PROJECT, "--branch", "main", "--commit-dirty=true"];
+// wrangler uploads every file under the directory it is given and reads no
+// ignore file: a browsing tool's request log under the git-ignored
+// site/.gstack/ went live with the 2026-09-01 deploy and stayed there until
+// 2026-09-12. The site is what the repository tracks under site/, so exactly
+// that list is copied into a fresh temporary directory and wrangler is
+// pointed at the copy; `--stage-only` prints the list and stops there.
+function stage() {
+  const list = spawnSync("git", ["ls-files", "-z", "--", "site"], { cwd: root, encoding: "buffer" });
+  if (list.status !== 0) throw new Error(`git ls-files exit=${list.status}`);
+  const files = list.stdout.toString("utf8").split("\0").filter(Boolean);
+  if (files.length === 0) throw new Error("git ls-files found nothing under site/");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "autoshade-site-"));
+  for (const rel of files) {
+    const dest = path.join(dir, path.relative("site", rel));
+    fs.mkdirSync(path.dirname(dest), { recursive: true });
+    fs.copyFileSync(path.join(root, rel), dest);
+  }
+  console.log(`[stage] ${files.length} tracked files under site/ copied to ${dir}`);
+  return { dir, files };
+}
+
+function deploy(tempValue, dir) {
+  const args = ["wrangler", "pages", "deploy", dir, "--project-name", PROJECT, "--branch", "main", "--commit-dirty=true"];
   console.log(`[deploy] $ npx ${args.join(" ")}`);
   const run = spawnSync("npx", args, {
     cwd: root,
@@ -78,14 +100,21 @@ function deploy(tempValue) {
 }
 
 async function main() {
+  const staged = stage();
+  if (process.argv.includes("--stage-only")) {
+    for (const f of staged.files) console.log(`  ${f}`);
+    fs.rmSync(staged.dir, { recursive: true, force: true });
+    return;
+  }
   const master = fs.readFileSync(path.join(root, ".secret"), "utf8").trim();
   const temp = await mint(master);
   let status = 1;
   try {
-    status = deploy(temp.value);
+    status = deploy(temp.value, staged.dir);
   } finally {
     await cf("DELETE", `/user/tokens/${temp.id}`, master);
     console.log(`[cleanup] temp token ${temp.id} deleted`);
+    fs.rmSync(staged.dir, { recursive: true, force: true });
   }
   // A failed deploy leaves the old files at the origin, and purging then would
   // only cost cache hits, so the purge is conditional on wrangler's exit code.
