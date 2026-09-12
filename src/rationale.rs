@@ -37,7 +37,17 @@ pub struct Note {
 /// never a partial translation. (Without the pill, 64 retained copies of a
 /// REPEATED note could still match the string's tail and localize a
 /// truncated subset while the overflow rode as fake "prose" — Codex AL F7.)
-pub const MAX_NOTES: usize = 64;
+///
+/// R36: 512, not 64. The bound was set when a fit carried a handful of
+/// notes; a zoned fit on the reference pair renders about 115 sentences (a
+/// 4x4 + 2x2 tile sweep prints eligibility, boundary, refinement and carrier
+/// per tile), so every such fit tripped the pill and the GUI showed its whole
+/// rationale in English while the zh panel was on. The string ceiling moves
+/// with it (`EditRecipe::MAX_RATIONALE`, 64 KiB → 512 KiB; the two are one
+/// contract, re-derived from the source by
+/// `the_rationale_ceiling_holds_every_typed_note_a_run_can_produce`), so 512
+/// is still a bound a runaway producer hits and one no honest fit reaches.
+pub const MAX_NOTES: usize = 512;
 
 /// Renders to text no rationale string contains (a NUL never enters the
 /// templates), so a truncated vec can never strip-match its string.
@@ -595,8 +605,22 @@ pub mod keys {
     /// rather than the frame's: a Full zone whose pixels do not pair solves its
     /// tone from the zone's population instead of from paired pixels. Mode
     /// governs the control set, scale governs the estimator.
+    /// R36. The third outcome between "vouched" and "withheld": the cells
+    /// agreed on the DIRECTION of the move and refused its SIZE (the reference
+    /// sky: 0.865 converged / 0.135 diverged / 1.000 aligned — every cell asked
+    /// for the warm push, a seventh of the mass was pushed past its own
+    /// target). The largest share of the solved move whose render the same
+    /// voucher admits is what ships, and the sentence prints both verdicts:
+    /// the full move's and the shipped one's.
+    pub const ZONE_COLOUR_VOUCHED_AT_SHARE: &str =
+        " Zoned {label} colour controls shipped at {share} of the solved move on REGION evidence: the pixel-scale reading withholds hue bands [{hue_bands}], the full move was refused by the target's own 12x8 cell means ({full}), and at this share {converged} of the region moved closer, {diverged} moved away, and {aligned} moved in the direction its own target asks for.";
+    pub const ZONE_TONE_VOUCHED_AT_SHARE: &str =
+        " Zoned {label} tone controls shipped at {share} of the solved move on REGION evidence: the pixel-scale reading withholds luma ranges [{luma_ranges}], the full move was refused by the target's own 12x8 cell means ({full}), and at this share {converged} of the region moved closer, {diverged} moved away, and {aligned} moved in the direction its own target asks for.";
+    /// R36: the carrier is chosen by fidelity to the target — the hard cell's
+    /// own residual under each carrier — not by how closely the native render
+    /// resembles the raster's; the rendered change stays as a reading.
     pub const TILE_MASK_CARRIER: &str =
-        " Spatial tile {id} uses {carrier}: maximum refinement alpha change {delta}, rendered change {rendered}, boundary budget {max}.";
+        " Spatial tile {id} uses {carrier}: maximum refinement alpha change {delta}, rendered change {rendered}, hard-cell residual raster/native {fidelity}.";
     pub const ZONE_SUBZONES_ATTACHED: &str =
         " Zoned {label} accepted {k} bands after {trials} trials: residual R2={r2}, breaks={breaks}, overlap={overlap}, deltaE {before} -> {after}, seam {seam_before} -> {seam_after}, target steps {step_before} -> {step_after}.";
     pub const ZONE_SUBZONES_NOT_EARNED: &str =

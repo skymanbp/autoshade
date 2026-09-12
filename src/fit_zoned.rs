@@ -560,6 +560,31 @@ fn shrink_atmosphere_gains_in(gains: [f32; 3], window: (f32, f32)) -> [f32; 3] {
     gains.map(|gain| 1.0 + k.clamp(0.0, 1.0) * (gain - 1.0))
 }
 
+/// R36. Bisection steps of the vouched-share search: 1/64 of the solved move
+/// is the resolution, six analysis renders the cost.
+const ZONE_VOUCH_SHRINK_STEPS: usize = 6;
+
+/// R36. A share `k` of a zone's solved COLOUR move, direction kept: every
+/// gain shrinks toward unity the way `shrink_atmosphere_gains_in` shrinks it
+/// (a linear share of each channel's deviation, so the ratios are not clipped
+/// into a different hue) and the saturation step shrinks with it, both rounded
+/// the way the solve rounds them so the probe IS what would ship.
+fn scale_zone_colour(m: &mut LocalAdjustment, k: f32, mode: ZoneMode) {
+    if let Some(gains) = m.color_gains {
+        m.color_gains = Some(gains.map(|gain| ((1.0 + k * (gain - 1.0)) * 100.0).round() / 100.0));
+    }
+    m.saturation = clamp_zone_sat_for_mode((m.saturation * k).round(), mode);
+}
+
+/// The tone half of [`scale_zone_colour`]: the six tone dials at a share `k`,
+/// rounded as solved.
+fn scale_zone_tone(m: &mut LocalAdjustment, k: f32) {
+    m.exposure_ev = (m.exposure_ev * k * 100.0).round() / 100.0;
+    for dial in [&mut m.contrast, &mut m.highlights, &mut m.shadows, &mut m.whites, &mut m.blacks] {
+        *dial = (*dial * k * 10.0).round() / 10.0;
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 struct LocalQuality {
     texture_ratio: f32,
@@ -4156,12 +4181,63 @@ fn attach_one_zone(
     };
     let hue_cells = hue_bands.as_ref().and_then(|_| region_vouch(&chroma_probe_px));
     let luma_cells = luma_ranges.as_ref().and_then(|_| region_vouch(&luma_probe_px));
+    // R36. A refusal on SIZE is not a refusal on DIRECTION. The reference sky
+    // read 0.865 converged / 0.135 diverged / 1.000 aligned: every cell asked
+    // for the warm push and a seventh of the mass was pushed PAST its own
+    // target — the zone-wide gain the mean asked for was too large for those
+    // cells, not wrong for them. R34 answered that by withholding the whole
+    // gain, and the colour field then carried the sky at its saturated bound.
+    // What the cells CAN vouch is searched for instead: the largest share k
+    // of the solved move (gains and saturation scaled together, direction
+    // kept) whose RENDER the same voucher admits. Admission stays evidence —
+    // the move that ships is the move the cells vouched — and the search is
+    // a budget on size, which is what a share of a move is. It is asked only
+    // where the direction agrees: a region whose cells want opposite moves
+    // (`aligned` under its line) is not asking for less of one move, and
+    // stays refused exactly as before.
+    let vouched_share = |probe_at: &dyn Fn(f32) -> crate::recipe::EditRecipe,
+                         full: Option<crate::fit_cells::CellVouch>|
+     -> Option<(f32, crate::fit_cells::CellVouch)> {
+        let full = full?;
+        if full.vouched() || !full.direction_agrees() {
+            return None;
+        }
+        let (mut lo, mut hi, mut best) = (0.0f32, 1.0f32, None);
+        for _ in 0..ZONE_VOUCH_SHRINK_STEPS {
+            let mid = 0.5 * (lo + hi);
+            let px = fit::pixels_of(&render::develop_preview(s_img, &probe_at(mid)));
+            match region_vouch(&px) {
+                Some(v) if v.vouched() => {
+                    best = Some((mid, v));
+                    lo = mid;
+                }
+                _ => hi = mid,
+            }
+        }
+        best
+    };
+    let colour_at = |k: f32| {
+        let mut probe = chroma_probe.clone();
+        scale_zone_colour(probe.masks.last_mut().expect("zone mask just pushed"), k, mode);
+        probe
+    };
+    let tone_at = |k: f32| {
+        let mut probe = luma_probe.clone();
+        scale_zone_tone(probe.masks.last_mut().expect("zone mask just pushed"), k);
+        probe
+    };
+    let hue_shrunk = hue_bands.as_ref().and_then(|_| vouched_share(&colour_at, hue_cells));
+    let luma_shrunk = luma_ranges.as_ref().and_then(|_| vouched_share(&tone_at, luma_cells));
     // An ABSTENTION is never an admission: no cell grid, or a region whose
     // cells carried no trust-weighted evidence mass, leaves the strict
     // refusal exactly where it was. That is what keeps every zero-evidence
     // pin standing by construction rather than by threshold.
-    let colour_withheld = hue_bands.is_some() && !hue_cells.is_some_and(|v| v.vouched());
-    let tone_withheld = luma_ranges.is_some() && !luma_cells.is_some_and(|v| v.vouched());
+    let colour_withheld = hue_bands.is_some()
+        && !hue_cells.is_some_and(|v| v.vouched())
+        && hue_shrunk.is_none();
+    let tone_withheld = luma_ranges.is_some()
+        && !luma_cells.is_some_and(|v| v.vouched())
+        && luma_shrunk.is_none();
     if tone_withheld {
         let m = report.recipe.masks.last_mut().expect("zone mask just pushed");
         m.exposure_ev = 0.0;
@@ -4170,11 +4246,15 @@ fn attach_one_zone(
         m.shadows = 0.0;
         m.whites = 0.0;
         m.blacks = 0.0;
+    } else if let Some((k, _)) = luma_shrunk {
+        scale_zone_tone(report.recipe.masks.last_mut().expect("zone mask just pushed"), k);
     }
     if colour_withheld {
         let m = report.recipe.masks.last_mut().expect("zone mask just pushed");
         m.color_gains = Some([1.0; 3]);
         m.saturation = 0.0;
+    } else if let Some((k, _)) = hue_shrunk {
+        scale_zone_colour(report.recipe.masks.last_mut().expect("zone mask just pushed"), k, mode);
     }
     // ONE NOTE PER CONTROL CLASS, AND IT NAMES THE OUTCOME. The two probes
     // withhold independently, so a single "correction withheld" sentence
@@ -4197,8 +4277,23 @@ fn attach_one_zone(
         }
     };
     if let Some(hue_bands) = hue_bands.as_ref() {
-        let note = match (colour_withheld, hue_cells) {
-            (false, Some(v)) => {
+        let note = match (hue_shrunk, colour_withheld, hue_cells) {
+            (Some((k, v)), _, Some(full)) => {
+                let (converged, diverged, aligned) = v.shares();
+                crate::rationale::Note::new(
+                    crate::rationale::keys::ZONE_COLOUR_VOUCHED_AT_SHARE,
+                    vec![
+                        ("label", label.to_string()),
+                        ("hue_bands", hue_bands.clone()),
+                        ("share", format!("{k:.3}")),
+                        ("full", cells_said(Some(full))),
+                        ("converged", converged),
+                        ("diverged", diverged),
+                        ("aligned", aligned),
+                    ],
+                )
+            }
+            (_, false, Some(v)) => {
                 let (converged, diverged, aligned) = v.shares();
                 crate::rationale::Note::new(
                     crate::rationale::keys::ZONE_COLOUR_VOUCHED_BY_CELLS,
@@ -4229,8 +4324,23 @@ fn attach_one_zone(
         crate::rationale::push_note(&mut report.recipe.rationale, &mut report.notes, note);
     }
     if let Some(luma_ranges) = luma_ranges.as_ref() {
-        let note = match (tone_withheld, luma_cells) {
-            (false, Some(v)) => {
+        let note = match (luma_shrunk, tone_withheld, luma_cells) {
+            (Some((k, v)), _, Some(full)) => {
+                let (converged, diverged, aligned) = v.shares();
+                crate::rationale::Note::new(
+                    crate::rationale::keys::ZONE_TONE_VOUCHED_AT_SHARE,
+                    vec![
+                        ("label", label.to_string()),
+                        ("luma_ranges", luma_ranges.clone()),
+                        ("share", format!("{k:.3}")),
+                        ("full", cells_said(Some(full))),
+                        ("converged", converged),
+                        ("diverged", diverged),
+                        ("aligned", aligned),
+                    ],
+                )
+            }
+            (_, false, Some(v)) => {
                 let (converged, diverged, aligned) = v.shares();
                 crate::rationale::Note::new(
                     crate::rationale::keys::ZONE_TONE_VOUCHED_BY_CELLS,
@@ -4869,7 +4979,26 @@ mod tests {
     /// exactly the blindness R34 answers — while the region's cells, which read
     /// all of it, are asked for two opposite moves by one gain.
     fn zero_evidence_hue_pair(two_ways: bool) -> (DynamicImage, DynamicImage, GrayImage) {
-        let (w, h) = (64u32, 64u32);
+        zero_evidence_hue_pair_with(two_ways, false)
+    }
+
+    /// `pale_sixth`: the frame is 96 wide (eight-pixel cells, so the sixth is
+    /// exactly two of the twelve cell columns) and the SOURCE's rightmost
+    /// sixth of the sky already sits nine tenths of the way to the warm colour
+    /// — the same luminance, the same direction, a small move left to make;
+    /// the zone gain is bounded by the strength window, so a move that small
+    /// is less than half of what the bounded gain applies. The
+    /// whole target sky is re-synthesised, so no sky pixel pairs and every
+    /// hue band the move touches is zero-evidence; the zone mean then solves
+    /// one gain for the blue five sixths, and that gain pushes the pale sixth
+    /// past its own targets: every cell aligned, a sixth of the mass diverged.
+    /// That is the reference sky's shape (0.865 / 0.135 / 1.000) and the case
+    /// the vouched-share search exists for.
+    fn zero_evidence_hue_pair_with(
+        two_ways: bool,
+        pale_sixth: bool,
+    ) -> (DynamicImage, DynamicImage, GrayImage) {
+        let (w, h) = if pale_sixth { (96u32, 64u32) } else { (64u32, 64u32) };
         let hash = |i: u32, seed: u32| {
             let mut v = i.wrapping_mul(747796405).wrapping_add(seed.wrapping_mul(2891336453));
             v ^= v >> 16;
@@ -4883,12 +5012,17 @@ mod tests {
                 let blue = [0.34 + 0.3 * ripple, 0.55 + 0.5 * ripple, 0.82 + ripple];
                 let p = if y < h / 2 {
                     let grain = 0.22 * hash(y * w + x, if repaint { 9_999 } else { 1 });
+                    let warm = [0.60 + 0.8 * ripple, 0.495 + 0.4 * ripple, 0.42 + 0.2 * ripple];
                     let sky = if !repaint {
-                        blue
+                        if pale_sixth && x >= w * 5 / 6 {
+                            std::array::from_fn(|c| blue[c] + 0.9 * (warm[c] - blue[c]))
+                        } else {
+                            blue
+                        }
                     } else if two_ways && x >= w / 2 {
                         [0.16 + 0.2 * ripple, 0.6165 + 0.667 * ripple, 0.95 + 0.4 * ripple]
                     } else {
-                        [0.60 + 0.8 * ripple, 0.495 + 0.4 * ripple, 0.42 + 0.2 * ripple]
+                        warm
                     };
                     sky.map(|channel| channel + grain)
                 } else {
@@ -5002,6 +5136,60 @@ mod tests {
         assert!(
             cells.contains("converged") || cells.contains("abstained"),
             "a refusal is a measurement now: {cells}"
+        );
+        path.remove();
+    }
+
+    /// R36. Between the two halves above: every cell asks for the same warm
+    /// push, a sixth of the mass has most of that push already made, and the
+    /// single gain the zone's mean solves pushes that sixth past its own targets.
+    /// R34 refused the whole move on the diverged share alone (the reference
+    /// sky's 0.865 / 0.135 / 1.000). The move the cells DO vouch is a share
+    /// of it, and that share ships — warm, non-unity, with the sentence that
+    /// prints both verdicts. The opposite-moves fixture above stays refused:
+    /// its `aligned` share fails, and a smaller move is not what it asks for.
+    #[test]
+    fn a_move_the_cells_refuse_only_for_its_size_ships_at_the_share_they_vouch() {
+        let (src, tgt, mask) = zero_evidence_hue_pair_with(false, true);
+        let path = fixture_mask_path("zoned-evidence-hue-pale-sixth");
+        mask.save(path.path()).unwrap();
+        let mut report = neutral_report(&src, &tgt);
+
+        attach_zones(&src, &tgt, &mut report, &mask, &mask, &path);
+
+        eprintln!("pale-sixth fixture: {}", report.recipe.rationale);
+        let sky = report
+            .recipe
+            .masks
+            .iter()
+            .find(|m| m.role == MaskRole::ZoneSky)
+            .expect("the sky zone must attach");
+        let gains = sky.color_gains.expect("a zone always carries its gains");
+        assert!(
+            !gains_withheld(Some(gains)) && gains[0] > gains[2],
+            "the vouched share of the warm move must SHIP: {gains:?}"
+        );
+        let note = report
+            .notes
+            .iter()
+            .find(|note| note.key == crate::rationale::keys::ZONE_COLOUR_VOUCHED_AT_SHARE)
+            .unwrap_or_else(|| panic!("the shared admission was silent: {}", report.recipe.rationale));
+        let arg = |name: &str| {
+            note.args
+                .iter()
+                .find(|(key, _)| *key == name)
+                .map(|(_, v)| v.clone())
+                .unwrap_or_else(|| panic!("{name} missing from {note:?}"))
+        };
+        let share: f32 = arg("share").parse().unwrap();
+        assert!(share > 0.0 && share < 1.0, "a share of the move, not the move and not nothing: {note:?}");
+        assert!(arg("full").contains("diverged"), "the refused full move is printed: {note:?}");
+        assert!(arg("converged").parse::<f32>().unwrap() >= 0.70, "{note:?}");
+        assert!(arg("aligned").parse::<f32>().unwrap() >= 0.70, "{note:?}");
+        assert!(arg("diverged").parse::<f32>().unwrap() <= 0.10, "the shipped share is the one the cells vouch: {note:?}");
+        assert!(
+            !report.notes.iter().any(|n| n.key == crate::rationale::keys::ZONE_EVIDENCE_WITHHELD_COLOUR_CELLS),
+            "a shipped share is not also a refusal"
         );
         path.remove();
     }
@@ -8295,16 +8483,26 @@ mod tests {
     }
 
     /// The mirror of the test above, and the branch nothing pinned: a
-    /// structurally unsupported region must silence the zone's TONE controls
-    /// and say so in its own words. A hand mutation that deleted the
-    /// tone-zeroing left the whole library green, because every existing
-    /// guard measured the COLOUR half of the same split.
+    /// structurally unsupported region's TONE verdict must be named by luma
+    /// evidence, and the recipe must say the same thing as the sentence. A
+    /// hand mutation that deleted the tone-zeroing left the whole library
+    /// green, because every existing guard measured the COLOUR half of the
+    /// same split.
+    ///
+    /// Since R36 the verdict has two arms, and this pins both on one
+    /// achromatic builder: a ONE-WAY target (every sky cell asks to be
+    /// brighter) is refused in full on the diverged share but agrees on
+    /// direction, so the share the cells vouch ships and the sentence still
+    /// names the luma ranges the pixel reading withheld; a TWO-WAY target
+    /// (the right half asks to be darker) fails `aligned`, is never asked for
+    /// less of one move, keeps the refusal sentence and leaves every tone
+    /// dial at zero.
     #[test]
-    fn synthetic_zone_tone_refusal_is_named_by_luma_evidence() {
+    fn synthetic_zone_tone_verdict_is_named_by_luma_evidence_and_matches_the_recipe() {
         let (w, h) = (96u32, 96u32);
         // ACHROMATIC everywhere: `fit::evidence_hue_band` returns None below
-        // chroma 0.06, so the colour branch cannot fire and the note under
-        // test is the only one that can appear.
+        // chroma 0.06, so the colour branch cannot fire and the notes under
+        // test are the only ones that can appear.
         //
         // The sky half is STRUCTURALLY divergent — a smooth ramp against
         // hard stripes — because that is the only mechanism that can withhold
@@ -8312,75 +8510,118 @@ mod tests {
         // a source bin is never target-empty at equal pixel counts, and the
         // withholding clause that remains is `!spatial_supported`. The ground
         // half is byte-identical on both sides, so its cells stay supported.
-        let build = |target: bool| DynamicImage::ImageRgb8(RgbImage::from_fn(w, h, |x, y| {
-            let v: f32 = if y < h / 2 {
-                if target {
-                    if (y / 2) % 2 == 0 { 0.85 } else { 0.55 }
+        let build = |target: bool, two_ways: bool| {
+            DynamicImage::ImageRgb8(RgbImage::from_fn(w, h, |x, y| {
+                let v: f32 = if y < h / 2 {
+                    if target {
+                        let bright = (y / 2) % 2 == 0;
+                        if two_ways && x >= w / 2 {
+                            if bright { 0.15 } else { 0.05 }
+                        } else if bright {
+                            0.85
+                        } else {
+                            0.55
+                        }
+                    } else {
+                        0.35 + 0.20 * x as f32 / (w - 1) as f32
+                    }
                 } else {
-                    0.35 + 0.20 * x as f32 / (w - 1) as f32
-                }
-            } else {
-                0.18 + 0.12 * (((x / 8) + (y / 8)) % 2) as f32
-            };
-            image::Rgb([(v.clamp(0.0, 1.0) * 255.0).round() as u8; 3])
-        }));
-        let src = build(false);
-        let tgt = build(true);
-        let sp = fit::pixels_of(&src);
-        let tp = fit::pixels_of(&tgt);
-        let evidence = fit::evidence_model_for(&sp, &tp, w, h);
-        let unsupported = evidence.spatial_supported.iter().filter(|&&s| !s).count();
-        eprintln!(
-            "TONE_FIXTURE unsupported={}/{} luma_withheld={} hue_bands_present={}",
-            unsupported,
-            evidence.spatial_supported.len(),
-            evidence.luma.iter().filter(|r| r.source_populated && r.weight <= 0.0).count(),
-            sp.iter().chain(tp.iter()).filter(|p| fit::evidence_hue_band(p).is_some()).count(),
-        );
-        assert!(
-            sp.iter().chain(tp.iter()).all(|p| fit::evidence_hue_band(p).is_none()),
-            "synthetic fixture must be achromatic so the colour branch cannot fire"
-        );
-        assert!(
-            unsupported > 0,
-            "synthetic fixture must contain structurally unsupported pixels"
-        );
+                    0.18 + 0.12 * (((x / 8) + (y / 8)) % 2) as f32
+                };
+                image::Rgb([(v.clamp(0.0, 1.0) * 255.0).round() as u8; 3])
+            }))
+        };
+        let tone_dials = |m: &LocalAdjustment| {
+            [m.exposure_ev, m.contrast, m.highlights, m.shadows, m.whites, m.blacks]
+        };
+        let named = |note: &crate::rationale::Note| {
+            note.args.iter().any(|(k, v)| *k == "luma_ranges" && !v.is_empty() && v != "none")
+        };
         let mask = GrayImage::from_fn(w, h, |_, y| image::Luma([if y < h / 2 { 255 } else { 0 }]));
-        let path = fixture_mask_path("synthetic-zone-tone-refusal");
-        mask.save(path.path()).unwrap();
-        let mut report = neutral_report(&src, &tgt);
-        let (s_img, t_img) = fit::analysis_pair(&src, &tgt);
-        let t_px = fit::pixels_of(&t_img);
-        let sw = mask_weights(&mask, s_img.width(), s_img.height());
-        let tw = mask_weights(&mask, t_img.width(), t_img.height());
-        let attachment = semantic_attachment(sw, tw, &path);
-        let mut frame_err = report.err_after;
-        attach_one_zone(
-            &s_img,
-            &t_px,
-            &mut report,
-            &mut frame_err,
-            &attachment,
-            measure_zone_divergence(&src, &tgt, &crate::recipe::EditRecipe::default(), &mask)
-                .sky
-                .divergence,
-            None,
-        );
-        let note = report
-            .notes
-            .iter()
-            .find(|n| is_tone_refusal(n.key))
-            .unwrap_or_else(|| panic!("the zoned tone refusal was silent: {}", report.recipe.rationale));
-        assert!(
-            note.args.iter().any(|(k, v)| *k == "luma_ranges" && !v.is_empty() && v != "none"),
-            "the refused luma range must be named: {note:?}"
-        );
-        assert!(
-            !report.notes.iter().any(|n| is_colour_refusal(n.key)),
-            "an achromatic pair must not claim a refused hue band: {}",
-            report.recipe.rationale
-        );
-        path.remove();
+        for two_ways in [false, true] {
+            let src = build(false, two_ways);
+            let tgt = build(true, two_ways);
+            let sp = fit::pixels_of(&src);
+            let tp = fit::pixels_of(&tgt);
+            let evidence = fit::evidence_model_for(&sp, &tp, w, h);
+            let unsupported = evidence.spatial_supported.iter().filter(|&&s| !s).count();
+            assert!(
+                sp.iter().chain(tp.iter()).all(|p| fit::evidence_hue_band(p).is_none()),
+                "synthetic fixture must be achromatic so the colour branch cannot fire"
+            );
+            assert!(unsupported > 0, "synthetic fixture must contain structurally unsupported pixels");
+            let path = fixture_mask_path(if two_ways {
+                "synthetic-zone-tone-two-ways"
+            } else {
+                "synthetic-zone-tone-one-way"
+            });
+            mask.save(path.path()).unwrap();
+            let mut report = neutral_report(&src, &tgt);
+            let (s_img, t_img) = fit::analysis_pair(&src, &tgt);
+            let t_px = fit::pixels_of(&t_img);
+            let sw = mask_weights(&mask, s_img.width(), s_img.height());
+            let tw = mask_weights(&mask, t_img.width(), t_img.height());
+            let attachment = semantic_attachment(sw, tw, &path);
+            let mut frame_err = report.err_after;
+            attach_one_zone(
+                &s_img,
+                &t_px,
+                &mut report,
+                &mut frame_err,
+                &attachment,
+                measure_zone_divergence(&src, &tgt, &crate::recipe::EditRecipe::default(), &mask)
+                    .sky
+                    .divergence,
+                None,
+            );
+            eprintln!(
+                "TONE_FIXTURE two_ways={two_ways} unsupported={unsupported}: {}",
+                report.recipe.rationale
+            );
+            // A refused tone move with nothing else to ship leaves NO zone
+            // mask at all ("every control ... solved to neutral"), which is the
+            // strongest form of "every dial at zero".
+            let sky = report.recipe.masks.last();
+            if two_ways {
+                let note = report
+                    .notes
+                    .iter()
+                    .find(|n| is_tone_refusal(n.key))
+                    .unwrap_or_else(|| panic!("the zoned tone refusal was silent: {}", report.recipe.rationale));
+                assert!(named(note), "the refused luma range must be named: {note:?}");
+                if let Some(sky) = sky {
+                    assert_eq!(tone_dials(sky), [0.0; 6], "a refused tone move leaves every dial at zero");
+                }
+                assert!(
+                    !report.notes.iter().any(|n| n.key == crate::rationale::keys::ZONE_TONE_VOUCHED_AT_SHARE),
+                    "cells asking for opposite moves are not asking for a smaller one: {}",
+                    report.recipe.rationale
+                );
+            } else {
+                let sky = sky.expect("the synthetic sky zone was pushed");
+                let note = report
+                    .notes
+                    .iter()
+                    .find(|n| n.key == crate::rationale::keys::ZONE_TONE_VOUCHED_AT_SHARE)
+                    .unwrap_or_else(|| panic!("the vouched share was silent: {}", report.recipe.rationale));
+                assert!(named(note), "the withheld luma range must still be named: {note:?}");
+                let share: f32 = note
+                    .args
+                    .iter()
+                    .find(|(k, _)| *k == "share")
+                    .map(|(_, v)| v.parse().unwrap())
+                    .expect("the share is printed");
+                assert!(share > 0.0 && share < 1.0, "{note:?}");
+                assert!(tone_dials(sky).iter().any(|d| *d != 0.0), "a shipped share must move a dial: {sky:?}");
+                assert!(!report.notes.iter().any(|n| is_tone_refusal(n.key)), "a shipped share is not also a refusal");
+            }
+            assert!(
+                !report.notes.iter().any(|n| is_colour_refusal(n.key)),
+                "an achromatic pair must not claim a refused hue band: {}",
+                report.recipe.rationale
+            );
+            path.remove();
+        }
     }
 
     /// Step-7b conservation, zoned: an IDENTITY field (everything
@@ -9533,13 +9774,17 @@ mod tests {
         }
     }
 
-    /// A failed multi-class bridge still returns the complete historical
-    /// sky/land result plus one sanitized hand-off. R35's additional carrier
-    /// and band disclosures reach the existing typed-note cap on this fixture;
-    /// the complete persisted record survives and the sentinel deliberately
-    /// selects the established raw-English fallback. The cap does not move.
+    /// The multi-class layer failing is not the sky fit failing. With a broken
+    /// interpreter the multi bridge fails, the historical route (stubbed masks)
+    /// succeeds, and the report is that route's report plus ONE typed
+    /// `SEMANTIC_REGIONS_UNAVAILABLE` note — never `ZONED_UNAVAILABLE`, whose
+    /// text promises a luminance-range fallback that did not run.
+    ///
+    /// R35 re-pinned this to the OVERFLOW of the 64-note cap, which its
+    /// carrier and band notes made this fixture trip; R36 raised the cap to
+    /// what a zoned fit actually carries and the original pin is back.
     #[test]
-    fn multi_segmentation_failure_preserves_the_legacy_route_when_typed_notes_overflow() {
+    fn multi_segmentation_failure_keeps_the_legacy_zones_with_its_own_note() {
         let (src, tgt, sky) = zoned_pair();
         // An ABSOLUTE interpreter path, because that is the real shape: the
         // bundled helper resolves one, and `AUTOSHADE_PYTHON` is one. A bare
@@ -9569,18 +9814,18 @@ mod tests {
             .iter()
             .filter(|n| n.key == crate::rationale::keys::SEMANTIC_REGIONS_UNAVAILABLE)
             .collect::<Vec<_>>();
-        assert_eq!(own.len(), 0, "the overflow does not invent a partial typed suffix");
-        assert_eq!(multi.notes.len(), crate::rationale::MAX_NOTES + 1);
-        assert_eq!(multi.notes.last().unwrap().key, crate::rationale::TRUNCATED_SENTINEL);
-        assert_eq!(&multi.notes[..crate::rationale::MAX_NOTES],
-            &legacy.notes[..crate::rationale::MAX_NOTES], "the bounded prefix is the legacy report's");
-        let appended = multi.recipe.rationale.strip_prefix(legacy.recipe.rationale.as_str())
-            .expect("the complete historical route precedes the one hand-off");
-        let (prefix, suffix) = crate::rationale::keys::SEMANTIC_REGIONS_UNAVAILABLE.split_once("{e}").unwrap();
-        let reason = appended.strip_prefix(prefix).and_then(|s| s.strip_suffix(suffix))
-            .expect("exactly one complete hand-off survives the typed cap");
-        // The same sanitized reason and its unchanged length bound must be
-        // present in the complete record even when the GUI uses raw English.
+        assert_eq!(own.len(), 1, "exactly one typed hand-off: {}", multi.recipe.rationale);
+        assert!(
+            !multi.notes.iter().any(|n| n.key == crate::rationale::TRUNCATED_SENTINEL),
+            "a zoned fit must fit under the typed-note cap: {} notes",
+            multi.notes.len()
+        );
+        // …and the hand-off's reason went through the disclosure door. The
+        // sidecar's own error names paths; a rationale is user-visible and is
+        // pasted into bug reports, so neither an absolute path nor an unbounded
+        // traceback may reach it.
+        let reason = own[0].args.iter().find(|(k, _)| *k == "e").map(|(_, v)| v.as_str());
+        let reason = reason.expect("the hand-off note carries its reason");
         assert!(
             !reason.contains("autoshade-e-leak-probe") && !reason.contains('\n'),
             "the hand-off reason leaked this machine's layout or a multi-line trace: {reason}"
@@ -9601,12 +9846,9 @@ mod tests {
             multi.recipe.rationale
         );
         // Everything but that one appended sentence IS the historical route.
-        let expected = crate::rationale::render_one(&crate::rationale::Note::new(
-            crate::rationale::keys::SEMANTIC_REGIONS_UNAVAILABLE, vec![("e", reason.to_string())],
-        ));
-        assert_eq!(appended, expected);
+        let appended = crate::rationale::render_one(own[0]);
         assert_eq!(
-            multi.recipe.rationale.strip_suffix(expected.as_str()),
+            multi.recipe.rationale.strip_suffix(appended.as_str()),
             Some(legacy.recipe.rationale.as_str()),
             "the hand-off note is appended to the historical rationale, nothing else changes"
         );

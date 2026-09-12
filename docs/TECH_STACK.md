@@ -224,8 +224,10 @@ editor modes, inversion homes and zone roles without replacing the native
 geometry attributes. Residual-earned sky/land bands intersect Select Sky
 with shared linear ramps; exact component complements keep adjacent bands'
 coverage summing to one under the measured asymmetric feather. Hard tiles
-use four intersecting half planes, while measurably different guided edges
-keep their raster. The band replacement uses the same boundary gate with
+use four intersecting half planes; a guided edge keeps its raster only when
+the native twin fits the photo worse, on the hard cell's own residual or on
+the frame (R36; R35 kept it whenever the two renders differed by more than
+the boundary budget). The band replacement uses the same boundary gate with
 the parent's controls as its shrink baseline, and separately checks direct
 target-step gaps per evidence cell; a transported soft feather is a different
 quantity. The unchanged colour-field producer runs on that stack.
@@ -551,7 +553,7 @@ name.
   the two seg-on runs differ only by that store path. The recipe JSON itself is
   not byte-identical — what changed inside it is the disclosure (`+544`
   rationale bytes on the semantic arm, `10331 -> 10875`, against a
-  `MAX_RATIONALE` of 16 KiB) and the tile cap the quadtree prints (`4 -> 2`).
+  `MAX_RATIONALE` of 16 KiB at the time; 512 KiB since R36) and the tile cap the quadtree prints (`4 -> 2`).
   The same four identities held on the executable rebuilt after the 2026-08-28
   adversarial-review fixes (sha256 `5cfb5e6c…`; no field proposal survives its
   gates on this pair, so the domain mapping has no live band to move here).
@@ -692,7 +694,8 @@ reading.
   probe measured guide-edge alignment `0.046444 -> 0.023914`, so it correctly
   abstained and retained the original bytes.
 - Ineligible traversal verdicts aggregate into one typed sweep note per
-  generation; the persisted-rationale abuse bound is `16 KiB` (raised from
+  generation; the persisted-rationale abuse bound is `512 KiB` since R36 (`16 KiB`
+  then, raised from
   `4096`, which the pre-tile range path already saturated and which truncated
   the tile attachment disclosure off the persisted recipe).
 - The 384x256 release probe measured 1.72 ms; scaling by pixel count estimates
@@ -1529,7 +1532,7 @@ than the pre-call state; model weights remain outside the repository.
 - The 61 MP RAW probe measured `151 MB` peak commit for decode,
   `1771 MB` for calibration/render preparation, and `1766 MB` for the
   full-resolution render tail; the combined process peak remained `1771 MB`.
-- The release battery is **1474 library (1459 pass + 15 `#[ignore]`d forensic
+- The release battery is **1478 library (1463 pass + 15 `#[ignore]`d forensic
   probes) / 24 CLI / 172 GUI / 2+2 contract** tests. Environment-gated real
   Lightroom, brush-table, and RAW-zoo suites are additional and are not
   smuggled into the ordinary count.

@@ -267,3 +267,49 @@ fn r35_export_truth_for_a_scratch_recipe_names_every_remaining_loss() {
     eprintln!("complete mask-set diff: omitted {expected_bitmaps:?}");
     eprintln!("spellable mask-set diff: [] (roles, components, modes and inversion agree)");
 }
+
+/// R36. What the XMP toolkit does to a document of ours: every element-level
+/// `xmlns:ash` disappears and one binding lands on the first `rdf:Description`
+/// of the file. The intent must still read (XML namespace scoping); with NO
+/// binding anywhere the same attributes are foreign markup and the native
+/// spelling alone decides; a prefix re-bound to another URI on the element
+/// itself shadows the root's binding.
+#[test]
+fn editor_intent_survives_a_namespace_declaration_hoisted_to_the_document_root() {
+    let original = LocalAdjustment {
+        mask: linear(),
+        inverted: true,
+        role: MaskRole::ZoneSky,
+        components: vec![MaskComponent { geometry: radial(false, 0.0), mode: MaskCombine::Subtract, inverted: false }],
+        ..Default::default()
+    };
+    let recipe = EditRecipe { masks: vec![original.clone()], ..Default::default() };
+    let doc = recipe_to_xmp(&recipe);
+    let decl = format!(" xmlns:ash=\"{MASK_INTENT_URI}\"");
+    assert!(doc.matches(decl.as_str()).count() >= 2, "one binding per bearing element:\n{doc}");
+    let stripped = doc.replace(decl.as_str(), "");
+    assert!(!stripped.contains("xmlns:ash") && stripped.contains("ash:Role="));
+    let root = stripped.find("<rdf:Description").expect("an rdf:Description");
+    let hoisted = format!(
+        "{}<rdf:Description{}{}",
+        &stripped[..root],
+        decl,
+        &stripped[root + "<rdf:Description".len()..]
+    );
+    let got = xmp_to_recipe(&hoisted);
+    assert_eq!(got.masks.len(), 1, "{hoisted}");
+    assert_eq!(got.masks[0].role, MaskRole::ZoneSky, "the role read through the root binding");
+    assert!(got.masks[0].inverted, "…and so did the inversion home");
+    assert_eq!(got.masks[0].components, original.components, "…and the authored Subtract spelling");
+    let image = image::DynamicImage::new_rgb8(96, 64);
+    let coverage = |m| crate::render::mask_coverage(m, &image, crate::render::MaskFrame::AsRendered);
+    assert_eq!(coverage(&got.masks[0]), coverage(&original));
+    // No binding at all: coverage still arrives (CRS alone carries it) and the
+    // attributes are not ours to read.
+    let unbound = xmp_to_recipe(&stripped);
+    assert_eq!(unbound.masks[0].role, MaskRole::Custom, "unbound ash: attributes are foreign markup");
+    assert_eq!(coverage(&unbound.masks[0]), coverage(&original));
+    // A binding to another URI on the element shadows the root's.
+    let shadowed = hoisted.replacen(" ash:Role=", " xmlns:ash=\"https://example.invalid/other/\" ash:Role=", 1);
+    assert_eq!(xmp_to_recipe(&shadowed).masks[0].role, MaskRole::Custom, "{shadowed}");
+}

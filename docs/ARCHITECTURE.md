@@ -134,8 +134,8 @@
 > wrong reason; it writes a `=== name ===` transcript that
 > `scripts/check_docs.py --gates` reads the counts and the lane set back out
 > of, and it prints the by-name test-set difference against a saved baseline.
-> 1474 library + 24 CLI + 172 GUI + 2+2 contract tests are enumerated in the GUI
-> build; the library result is 1459 pass + 15 `#[ignore]`d forensic probes.
+> 1478 library + 24 CLI + 172 GUI + 2+2 contract tests are enumerated in the GUI
+> build; the library result is 1463 pass + 15 `#[ignore]`d forensic probes.
 > R35 adds native-composition, geometry-tile and residual-band pins; the GUI
 > result is 171 pass + one explicit scratch-recipe export probe ignored in the
 > ordinary battery. The source name set is +34 / −8 against `816a457`; all
@@ -2531,11 +2531,17 @@ code at every pixel and frozen evidence shares within 1e-4. Guided refinement
 is compared at every alpha sample. Core/mass equality does not prove edge
 identity. A changed raster first passes its ordinary estimator and boundary
 gate; a native trial then repeats those gates using the frozen cell evidence.
-The two actual 2048-edge renders must differ by no more than the existing
-`ZONE_BOUNDARY_STEP_MAX` at every channel/pixel, or the refined Bitmap and its
-loss remain. Equivalent geometry ships with both measured deltas disclosed. These
-geometry tiles can be pasted and turned with their components; any Bitmap
-component still belongs to its source photo.
+The carrier is then chosen by fidelity to the target, not by resemblance
+between the two renders (R36, `native_carrier_fits`): the native tile ships
+unless its residual on the hard cell's own population or its frame error is
+worse than the refined raster's by more than `CARRIER_TIE` (1e-6), and a tie
+goes to the carrier Lightroom can read. R35 had asked instead whether the two
+actual 2048-edge renders differed by more than `ZONE_BOUNDARY_STEP_MAX` at any
+channel/pixel, which kept a raster whose guided edge had never been asked
+which edge fits the photo better; the raster is an intermediate, not the
+truth. The tile's note prints the refinement delta, the rendered change and
+both hard-cell residuals. These geometry tiles can be pasted and turned with
+their components; any Bitmap component still belongs to its source photo.
 
 After the single sky/land corrections and their horizon gate,
 `fit_zoned::subzones` bins the alpha-weighted signed Lab residual into eight
@@ -2572,9 +2578,16 @@ final target-step and do-no-harm checks still compare against the original
 single correction, so overlap equivalence is measured, not assumed.
 
 Band geometry is Select Sky (inverted in the base for land) intersected with
-one or two shared linear ramps. Overlap is searched from 6% to 96% of the
-zone's own height in six-percentage-point steps, capped before neighbouring
-ramps overlap and deduplicated. Every width owes the same boundary and do-no-harm gates.
+one or two shared linear ramps. Overlap is searched on a geometric ladder —
+6%, 12%, 24%, 48% and 96% of the zone's own height, a ramp width being a
+scale (R36, `overlap_ladder`) — capped before neighbouring ramps overlap and
+deduplicated, and at most `SUBZONE_MODEL_BUDGET` (3) residual models per zone
+reach the render gates, fewer bands first and higher R2 next. R35 had walked
+sixteen six-point steps for every qualifying model: 95 + 106 trials on the
+reference pair, all refused, and a zoned match took 17 min where it had taken
+1 min 35 s. The trials' control render (the recipe without its parent) is
+rendered once per zone rather than once per trial. Every width owes the same
+boundary and do-no-harm gates.
 The renderer's measured linear feather is asymmetric, so a new optional
 component inversion bit complements the SAME ramp; reversing handles would
 not sum to one. Adjacent bands sum to one, within coverage quantization, using
@@ -2617,6 +2630,29 @@ whose targets lie elsewhere converges the mean and fails the partition, so
 0.865 converged / 0.135 diverged / 1.000 ALIGNED — every one of its cells wants
 the same warm push, and a seventh of its trust-weighted mass still ends further
 from its own target than it started.
+
+**A refusal on size is not a refusal on direction** (R36). That reading fails
+`vouched` on the diverged share alone: every cell asked for the warm push, and
+a seventh of the mass was pushed PAST its own target because the one gain the
+zone mean solved was too large for those cells, not wrong for them. R34
+withheld the whole gain, and the colour field then carried the sky at its
+saturated bound. Where `CellVouch::direction_agrees` holds (`aligned >= 0.70`)
+and the full move is refused, `attach_one_zone` bisects the SHARE of the
+solved move — the gains scaled linearly toward unity and the saturation step
+with them (`scale_zone_colour`), or the six tone dials (`scale_zone_tone`),
+rounded as the solve rounds so the probe is what would ship — over
+`ZONE_VOUCH_SHRINK_STEPS` (6) renders, and ships the largest share whose
+render the same voucher admits. Admission stays evidence: the move that ships
+is a move the cells vouched, and the search is a budget on size, which is what
+a share of a move is. A region whose cells want opposite moves fails `aligned`
+and is never asked for less of one move; an abstention still lifts nothing. The
+sentence (`ZONE_COLOUR_VOUCHED_AT_SHARE` / `ZONE_TONE_VOUCHED_AT_SHARE`)
+prints the share, the refused full move's verdict and the shipped share's
+three shares. The pin is a 96x64 pair whose source sky is blue over five
+sixths and already nine tenths of the way to the target's warm over the last
+sixth: the bounded zone gain overshoots that sixth, the full move is refused
+at 0.805 converged / 0.155 diverged / 0.853 aligned over 60 cells, and 0.859
+of it ships at 0.805 / 0.054 / 0.853.
 
 WHERE IT MAY BE ASKED AT ALL is the rule this design lives or dies by, and it
 is one sentence: *the cells answer where the pixels CANNOT BE ASKED — never
@@ -3909,8 +3945,9 @@ Every examined ineligible node lands with its id and reason in that
 generation's single typed sweep note (nodes already attached or refused told
 their story in their own generation); eligible leaf candidates keep a full
 per-node reading, and downstream failures (raster, estimator, boundary) keep
-per-tile notes. The persisted-rationale abuse bound is 64 KiB (16 KiB before
-v1.2.4) so this disclosure is never what truncation eats; the B3 free-mask
+per-tile notes. The persisted-rationale abuse bound is 512 KiB since R36
+(16 KiB before v1.2.4, 64 KiB until R36) so this disclosure is never what
+truncation eats; the B3 free-mask
 stage compacts its tentative attachment text before that bound, and typed
 producer readings stay the retained disclosure.
 
@@ -3957,7 +3994,11 @@ was the whole ceiling when it was written and an inherited pre-stage transcript
 could reach exactly. v1.2.4 raised the ceiling to 64 KiB — one full note vector
 is 16,183 bytes of TEMPLATE alone, so the old bound could be spent before a
 single reading was written — and made truncation cut from the FRONT, keeping
-the newest lines and stamping the marker that says how many bytes went.
+the newest lines and stamping the marker that says how many bytes went. R36
+raised the typed-note cap from 64 to 512 (a zoned fit on the reference pair
+renders about 115 sentences, past the old cap, which put the whole zh panel
+back into English) and the ceiling with it to 512 KiB; the two are one
+contract, re-derived from the source by the same test.
 
 Mask refinement is a production step, never a post-fit edit
 ([`src/mask_refine.rs`](../src/mask_refine.rs)). A dependency-free local-linear

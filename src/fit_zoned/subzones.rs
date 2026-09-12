@@ -11,6 +11,28 @@ const SUBZONE_BINS: usize = 8;
 /// coherent warm/cool fixture exceeds 0.99. A majority separates those arms.
 const SUBZONE_R2_MIN: f32 = 0.50;
 const SUBZONE_OVERLAP: f32 = 0.06;
+/// R36. How many residual models reach the render gates per zone, best
+/// first (fewer bands, then higher R2). R35 sent every qualifying partition
+/// at sixteen ramp widths each — 95 + 106 trials on the reference pair, all
+/// refused — and a zoned match went from 1 min 35 s to 17 min. A trial costs
+/// three band solves and a boundary bisection; the budget is what keeps the
+/// mechanism affordable on every photo, not only on the one it helps.
+const SUBZONE_MODEL_BUDGET: usize = 3;
+
+/// The ramp widths one band model is tried at. A ramp width is a SCALE, so
+/// the ladder is geometric — each rung twice the last, from the 6% floor to
+/// the 96% ceiling, five rungs where R35 walked sixteen six-point steps. The
+/// cap folds the upper rungs onto one width; equal widths are tried once.
+fn overlap_ladder(base: f32, cap: f32) -> Vec<f32> {
+    let mut rungs = Vec::new();
+    for scale in [1.0f32, 2.0, 4.0, 8.0, 16.0] {
+        let overlap = (base * scale).min(cap);
+        if rungs.last().is_none_or(|last: &f32| overlap > *last + 1e-6) {
+            rungs.push(overlap);
+        }
+    }
+    rungs
+}
 
 #[derive(Clone, Debug)]
 struct BandModel {
@@ -325,25 +347,27 @@ pub(super) fn replace_zone(
     // The initial 6% overlap is a starting measurement, not a fixed seam.
     // Trial wider native ramps against the same residual and all the same
     // gates. The smallest model wins ties; no reference-pair special case.
-    let models: Vec<_> = models.into_iter().flat_map(|model| {
+    let models: Vec<_> = models.into_iter().take(SUBZONE_MODEL_BUDGET).flat_map(|model| {
         let cap = model.breaks.windows(2).map(|p| (p[1] - p[0]) * 0.9).fold(1.0, f32::min);
-        let mut trials = Vec::new();
-        for step in 1..=16 {
-            let scale = step as f32;
-            let overlap = (model.overlap * scale).min(cap);
-            if trials.last().is_none_or(|last: &BandModel| overlap > last.overlap + 1e-6) {
-                trials.push(BandModel { overlap, ..model.clone() });
-            }
-        }
-        trials
+        overlap_ladder(model.overlap, cap)
+            .into_iter()
+            .map(|overlap| BandModel { overlap, ..model.clone() })
+            .collect::<Vec<_>>()
     }).collect();
     let trial_count = models.len();
+    // The control arm without its parent renders the same for every trial:
+    // one render, not one per trial.
+    let uncorrected = {
+        let mut without_parent = saved_recipe.clone();
+        if let Some(index) = parent_index { without_parent.masks.remove(index); }
+        fit::pixels_of(&render::develop_preview(image, &without_parent))
+    };
+    let uncorrected_error = fit::look_err_with_evidence(&uncorrected, target, &report.evidence);
     for model in models {
         report.recipe = saved_recipe.clone();
         report.notes = saved_notes.clone();
         if let Some(index) = parent_index { report.recipe.masks.remove(index); }
-        let uncorrected = fit::pixels_of(&render::develop_preview(image, &report.recipe));
-        let mut frame_error = fit::look_err_with_evidence(&uncorrected, target, &report.evidence);
+        let mut frame_error = uncorrected_error;
         let first_band = report.recipe.masks.len();
         let attachments: Vec<_> = (0..=model.breaks.len())
             .map(|band| band_attachment(parent, &model, band, image)).collect();
@@ -501,6 +525,13 @@ mod tests {
             &fit::pixels_of(&target), &report.evidence,
         );
         (source, target, parent, report)
+    }
+
+    #[test]
+    fn the_overlap_ladder_is_geometric_and_folds_onto_its_cap() {
+        assert_eq!(overlap_ladder(0.06, 1.0), vec![0.06, 0.12, 0.24, 0.48, 0.96]);
+        assert_eq!(overlap_ladder(0.06, 0.30), vec![0.06, 0.12, 0.24, 0.30]);
+        assert_eq!(overlap_ladder(0.06, 0.05), vec![0.05], "a cap under the floor is one width, tried once");
     }
 
     #[test]

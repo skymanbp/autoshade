@@ -1588,11 +1588,44 @@ fn combine_name(mode: MaskCombine) -> &'static str {
 
 /// Non-Adobe metadata keeps the editor's otherwise ambiguous spelling:
 /// Subtract(shape) and Intersect(inverted shape) have identical CRS triples.
-/// Binding on the element itself keeps merged documents self-contained.
-fn mask_intent_attr<'a>(tag: &'a str, key: &str) -> Option<std::borrow::Cow<'a, str>> {
-    let (_, uri) = xml_attribute_raw(tag, "xmlns:ash")?;
-    if xml_unescape(uri) != MASK_INTENT_URI { return None; }
+/// The writer binds the prefix on every element that uses it, so a document
+/// of ours is self-contained; `declared` is the prefix bound to
+/// [`MASK_INTENT_URI`] by an ANCESTOR — XML namespace scoping, which the XMP
+/// toolkit exercises every time it re-serialises a document: every `xmlns:`
+/// moves to the top-level `rdf:Description`, and a reader that looked only
+/// at the element itself (R35) stopped seeing intent the moment any other
+/// writer had touched the file. A binding on the element still wins either
+/// way — a prefix re-bound to another URI there shadows the ancestor's.
+fn mask_intent_attr<'a>(
+    tag: &'a str,
+    key: &str,
+    declared: bool,
+) -> Option<std::borrow::Cow<'a, str>> {
+    let bound = match xml_attribute_raw(tag, "xmlns:ash") {
+        Some((_, uri)) => xml_unescape(uri) == MASK_INTENT_URI,
+        None => declared,
+    };
+    if !bound { return None; }
     xml_attribute_raw(tag, &format!("ash:{key}")).map(|(_, value)| xml_unescape(value))
+}
+
+/// Does any element of `doc` bind the `ash` prefix to [`MASK_INTENT_URI`]?
+/// The document-level half of [`mask_intent_attr`]'s scoping. "Any element"
+/// rather than "an ancestor" because this reader never holds a parsed tree;
+/// every producer that hoists declarations hoists them to the root, so the
+/// two answers differ only for a document built to make them differ, and the
+/// worst that does is read our own attribute names as ours.
+fn intent_namespace_declared(doc: &str) -> bool {
+    let mut at = 0;
+    while let Some((start, gt, _)) = next_xml_tag(doc, at) {
+        if xml_attribute_raw(&doc[start..=gt], "xmlns:ash")
+            .is_some_and(|(_, uri)| xml_unescape(uri) == MASK_INTENT_URI)
+        {
+            return true;
+        }
+        at = gt + 1;
+    }
+    false
 }
 
 fn geometry_inversion(g: &mut MaskGeometry, inverted: bool) {
@@ -5526,7 +5559,8 @@ fn parse_masks_with_source(
         return Vec::new();
     };
     let mut brush_reader = MaskBrushReader::new(photo, diag);
-    mask_summary_from_block(block, authored_by_autoshade, frame, &mut brush_reader).supported
+    mask_summary_from_block(block, authored_by_autoshade, intent_namespace_declared(xmp), frame, &mut brush_reader)
+        .supported
 }
 
 /// How many corrections in this sidecar produced NO mask at all — AI / depth
@@ -5659,7 +5693,13 @@ fn mask_summary_with_source(
     match owned_element_body(xmp, "crs:MaskGroupBasedCorrections") {
         Ok(Some(block)) => {
             let mut brush_reader = MaskBrushReader::new(photo, diag);
-            mask_summary_from_block(block, authored_by_autoshade, frame, &mut brush_reader)
+            mask_summary_from_block(
+                block,
+                authored_by_autoshade,
+                intent_namespace_declared(xmp),
+                frame,
+                &mut brush_reader,
+            )
         }
         Ok(None) => MaskSummary::default(),
         // The group OPENS but never closes: whatever corrections it holds
@@ -5697,6 +5737,7 @@ fn correction_name(own: Scope<'_>, position: usize) -> String {
 fn mask_summary_from_block(
     block: &str,
     authored_by_autoshade: bool,
+    intent_declared: bool,
     frame: Option<FrameAspect>,
     brush_reader: &mut MaskBrushReader<'_, '_>,
 ) -> MaskSummary {
@@ -5736,7 +5777,7 @@ fn mask_summary_from_block(
         let own = correction_own_scope(seg);
         let own = Scope::new(own.as_ref());
         let name = correction_name(own, seen);
-        match classify_correction(seg, own, authored_by_autoshade, frame, brush_reader) {
+        match classify_correction(seg, own, authored_by_autoshade, intent_declared, frame, brush_reader) {
             MaskCorrectionParse::Supported(mask, reasons)
                 if summary.supported.len() < MAX_MASKS_FROM_XMP =>
             {
@@ -7241,6 +7282,7 @@ fn classify_correction(
     seg: &str,
     own: Scope<'_>,
     authored_by_autoshade: bool,
+    intent_declared: bool,
     frame: Option<FrameAspect>,
     brush_reader: &mut MaskBrushReader<'_, '_>,
 ) -> MaskCorrectionParse {
@@ -7416,7 +7458,9 @@ fn classify_correction(
         Err(reason) => return MaskCorrectionParse::Unsupported(reason),
     }
 
-    let Some(mut parsed) = parse_one_correction_with_reader(seg, own, frame, brush_reader) else {
+    let Some(mut parsed) =
+        parse_one_correction_with_reader(seg, own, intent_declared, frame, brush_reader)
+    else {
         return MaskCorrectionParse::Unsupported(MaskImportReason::OutOfModel);
     };
     // A range we cannot honour costs the RANGE, not the mask: the geometry is
@@ -7551,7 +7595,7 @@ fn parse_one_correction(
     frame: Option<FrameAspect>,
 ) -> Option<LocalAdjustment> {
     let mut brush_reader = MaskBrushReader::new(None, None);
-    parse_one_correction_with_reader(seg, own, frame, &mut brush_reader)
+    parse_one_correction_with_reader(seg, own, intent_namespace_declared(seg), frame, &mut brush_reader)
 }
 
 fn parse_parametric_geometry(
@@ -7714,6 +7758,7 @@ fn parse_parametric_geometry(
 fn parse_one_correction_with_reader(
     seg: &str,
     own: Scope<'_>,
+    intent_declared: bool,
     frame: Option<FrameAspect>,
     brush_reader: &mut MaskBrushReader<'_, '_>,
 ) -> Option<LocalAdjustment> {
@@ -7727,7 +7772,7 @@ fn parse_one_correction_with_reader(
     let (block_at, _, _) = correction_mask_components(seg)?;
     let base_start = base_at - block_at;
     let correction_tag = next_xml_tag(seg, 0).map(|(s, e, _)| &seg[s..=e]).unwrap_or("");
-    let intended_inverted = mask_intent_attr(correction_tag, "Inverted")
+    let intended_inverted = mask_intent_attr(correction_tag, "Inverted", intent_declared)
         .and_then(|v| v.parse::<bool>().ok());
     let mut parsed = Vec::new();
     for c in comps.iter().filter(|c| c.depth == 0 && c.what != "Mask/RangeMask") {
@@ -7755,7 +7800,7 @@ fn parse_one_correction_with_reader(
         false
     } else { base_inv };
     if let Some(whole) = intended_inverted
-        && let Some(own) = mask_intent_attr(correction_tag, "BaseInverted")
+        && let Some(own) = mask_intent_attr(correction_tag, "BaseInverted", intent_declared)
             .and_then(|v| v.parse::<bool>().ok())
         && whole ^ own == base_inv
         // A replaced radial may leave old editing metadata on a linear.
@@ -7774,17 +7819,17 @@ fn parse_one_correction_with_reader(
         let mut component_inverted = false;
         // Trust editor metadata only while it still describes the CRS triple;
         // a Lightroom edit that changes the shape's composition wins over it.
-        let intent = mask_intent_attr(c.tag, "Combine").and_then(|s| match s.as_ref() {
+        let intent = mask_intent_attr(c.tag, "Combine", intent_declared).and_then(|s| match s.as_ref() {
             "add" => Some(MaskCombine::Add),
             "subtract" => Some(MaskCombine::Subtract),
             "intersect" => Some(MaskCombine::Intersect),
             _ => None,
         });
         if let Some(wanted) = intent
-            && let Some(wanted_own) = mask_intent_attr(c.tag, "OwnInverted")
+            && let Some(wanted_own) = mask_intent_attr(c.tag, "OwnInverted", intent_declared)
                 .and_then(|v| v.parse::<bool>().ok())
         {
-            let wanted_component = mask_intent_attr(c.tag, "ComponentInverted")
+            let wanted_component = mask_intent_attr(c.tag, "ComponentInverted", intent_declared)
                 .and_then(|v| v.parse::<bool>().ok()).unwrap_or(false);
             let (p_mode, p_own) = projected_combine(wanted, wanted_own ^ wanted_component, inverted);
             let spelling = combine_spelling(p_mode, p_own);
@@ -7866,7 +7911,7 @@ fn parse_one_correction_with_reader(
         amount: own.crs_f32("CorrectionAmount").unwrap_or(1.0),
         components,
         inverted,
-        role: match mask_intent_attr(correction_tag, "Role").as_deref() {
+        role: match mask_intent_attr(correction_tag, "Role", intent_declared).as_deref() {
             Some("sky") => crate::recipe::MaskRole::ZoneSky,
             Some("land") => crate::recipe::MaskRole::ZoneLand,
             _ => crate::recipe::MaskRole::Custom,
