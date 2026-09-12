@@ -307,8 +307,8 @@ impl AutoShadeApp {
                         ui
                     }
                 };
-                if why(ui
-                    .add_enabled(ready, egui::Button::new(tr(lang, "AI Analyze")))
+                let cell = columns(ui, 2);
+                if why(primary_in(ui, cell, ready, tr(lang, "AI Analyze"))
                     .on_hover_text(tr(lang,
                         "AI proposes a recipe from scratch (GPT proposal + validation + a visual \
                          review: the result is RENDERED and judged by the vision model, which may \
@@ -325,8 +325,7 @@ impl AutoShadeApp {
                 // Refining a neutral edit IS analyzing — disable the verb
                 // until there is an edit to refine.
                 let has_edit = ready && !self.recipe.is_noop();
-                if why(ui
-                    .add_enabled(has_edit, egui::Button::new(tr(lang, "AI Refine")))
+                if why(action_in(ui, cell, has_edit, tr(lang, "AI Refine"))
                     .on_hover_text(tr(lang,
                         "Adjust the CURRENT edit instead of proposing from scratch — your sliders are \
                          the starting point (enabled once the edit is non-neutral).",
@@ -603,10 +602,10 @@ impl AutoShadeApp {
                     // regression the split exists to prevent.
                     self.ai_library_build_enabled = Some(ui.is_enabled());
                 }
-                if ui
-                    // 🗂, the same glyph Settings uses for a folder action: the
-                    // embedded font subset covers it already (📂 is not in it).
-                    .button(tr(lang, "🗂 Pick folder…"))
+                // 🗂, the same glyph Settings uses for a folder action: the
+                // embedded font subset covers it already (📂 is not in it).
+                let cell = columns(ui, 2);
+                if action_in(ui, cell, true, tr(lang, "🗂 Pick folder…"))
                     .on_hover_text(tr(lang,
                         "Choose the folder of your OWN edited RAWs — the ones with a Lightroom .xmp sidecar beside them. Each pair teaches AutoShade one of your finished looks. Indexing starts as soon as you choose.",
                     ))
@@ -623,8 +622,7 @@ impl AutoShadeApp {
                 } else {
                     tr(lang, "🔄 Build / rebuild")
                 };
-                let resp = ui
-                    .add_enabled(have.is_some(), egui::Button::new(label))
+                let resp = primary_in(ui, cell, have.is_some(), label)
                     .on_hover_text(if have.is_some() {
                         tr(lang,
                             "Index every RAW+.xmp pair in that folder (local compute, no API cost). Every RAW is decoded, so a large library takes minutes; the app stays usable and this button re-arms when it finishes. It cannot be cancelled — a build that indexes nothing is refused and leaves your existing library untouched.",
@@ -686,8 +684,8 @@ impl AutoShadeApp {
             let mut pick = false;
             let mut clear = false;
             ui.add_enabled_ui(!building, |ui| {
-                if ui
-                    .button(tr(lang, "🗂 Sidecar folder…"))
+                let cell = columns(ui, 2);
+                if action_in(ui, cell, true, tr(lang, "🗂 XMP folder…"))
                     .on_hover_text(tr(lang,
                         "Where your .xmp sidecars live when they are NOT beside the RAWs — an exported catalogue, or a photo volume you cannot write to. AutoShade looks for a mirror of the library's own folder tree first, then a flat folder of sidecars, then beside the RAW as before.",
                     ))
@@ -695,11 +693,7 @@ impl AutoShadeApp {
                 {
                     pick = true;
                 }
-                if ui
-                    .add_enabled(
-                        self.style_xmp_dir.is_some(),
-                        egui::Button::new(tr(lang, "Beside the RAWs")),
-                    )
+                if action_in(ui, cell, self.style_xmp_dir.is_some(), tr(lang, "Beside the RAWs"))
                     .on_hover_text(tr(lang,
                         "Forget that folder and pair each RAW with the .xmp beside it, the way every build before this one did.",
                     ))
@@ -826,9 +820,10 @@ impl AutoShadeApp {
             let mut pick = false;
             let mut build: Option<PathBuf> = None;
             ui.add_enabled_ui(!building, |ui| {
-                if ui.button(tr(lang, "Pick look folder…")).clicked() { pick = true; }
+                let cell = columns(ui, 2);
+                if action_in(ui, cell, true, tr(lang, "Pick look folder…")).clicked() { pick = true; }
                 let have = self.looks_src_dir.clone().filter(|d| d.is_dir());
-                if ui.add_enabled(have.is_some(), egui::Button::new(tr(lang, "Build look library"))).clicked() { build = have; }
+                if primary_in(ui, cell, have.is_some(), tr(lang, "Build look library")).clicked() { build = have; }
             });
             if pick {
                 let mut dialog = rfd::FileDialog::new();
@@ -968,9 +963,7 @@ impl AutoShadeApp {
                         self.prompt_rects.push(_field.rect);
                     }
                     ui.add_enabled_ui(!self.busy, |ui| {
-                        let resp = ui.add(
-                            egui::Button::new(btn_label).wrap_mode(egui::TextWrapMode::Extend),
-                        );
+                        let resp = ui.add(primary_button(btn_label).wrap_mode(egui::TextWrapMode::Extend));
                         #[cfg(test)]
                         {
                             self.reimagine_btn_rect = Some(resp.rect);
@@ -1055,34 +1048,36 @@ impl AutoShadeApp {
             let mut pick_ref = false;
             let mut clear_ref = false;
             ui.horizontal_wrapped(|ui| {
-                ui.add_enabled_ui(!self.busy, |ui| {
-                    if ui
-                        .button(tr(lang, "🖼 Choose reference…"))
-                        .on_hover_text(tr(lang,
-                            "Reverse-fit toward ANY finished version of THIS SAME photo — your own \
-                             Lightroom/Capture One export, the camera's JPEG, a TIFF, or another RAW \
-                             (developed neutrally first). The fit solves the develop parameters that \
-                             reproduce that file's look and leaves your pixels untouched. It must be \
-                             the same frame: a different picture is warned about, not refused, and \
-                             its result means nothing.",
-                        ))
-                        .clicked()
-                    {
-                        pick_ref = true;
-                    }
-                });
+                if action(ui, !self.busy, tr(lang, "Choose reference…"))
+                    .on_hover_text(tr(lang,
+                        "Reverse-fit toward ANY finished version of THIS SAME photo — your own \
+                         Lightroom/Capture One export, the camera's JPEG, a TIFF, or another RAW \
+                         (developed neutrally first). The fit solves the develop parameters that \
+                         reproduce that file's look and leaves your pixels untouched. It must be \
+                         the same frame: a different picture is warned about, not refused, and \
+                         its result means nothing.",
+                    ))
+                    .clicked()
+                {
+                    pick_ref = true;
+                }
                 if let Some(p) = self.fit_ref.clone() {
                     let name = p
                         .file_name()
                         .map(|n| n.to_string_lossy().into_owned())
                         .unwrap_or_else(|| p.display().to_string());
-                    ui.label(egui::RichText::new(name).weak().small())
+                    // Truncated, never wrapped: a file name is one unbreakable
+                    // word, and egui's inline text layout in a wrapped row ran
+                    // it past the panel edge (11 px at the 320 px default) and
+                    // widened the auto-fitting panel; the full path is on
+                    // hover. Truncation keeps it one atomic widget that wraps
+                    // under the button when the line is short.
+                    ui.add(egui::Label::new(egui::RichText::new(name).weak().small()).truncate())
                         .on_hover_text(p.display().to_string());
                     // Bare glyph, not `tr` — the symbol IS the label in every
                     // language (the same rule the variant-strip and gallery ✕
                     // buttons follow); only the tooltip is translated.
-                    if ui
-                        .small_button("✕")
+                    if glyph(ui, true, "✕")
                         .on_hover_text(tr(lang,
                             "Forget this reference and go back to reverse-fitting the active generated variant",
                         ))
@@ -1101,36 +1096,43 @@ impl AutoShadeApp {
                 self.fit_ref = None;
             }
             ui.horizontal_wrapped(|ui| {
-                ui.add_enabled_ui(!self.busy && can_fit, |ui| {
-                    if ui
-                        .button(tr(lang, "🎛 Reverse-fit recipe → sliders/XMP"))
-                        .on_hover_text(tr(lang,
-                            "Statistical fit: reverse the freshly generated look into editable develop params \
-                             (local, no API cost). Sliders update (undoable), and for RAW a Lightroom XMP goes \
-                             into this photo's develop store; hit Export to render the full-resolution result. \
-                             Uses the panel's Strength control as the reverse-fit honesty budget.",
-                        ))
-                        .clicked()
-                    {
-                        self.start_fit();
-                    }
-                    if ui
-                        .button(tr(lang, "📝 Extract style prompt"))
-                        .on_hover_text(tr(lang,
-                            "Compare the original / generated images and have the vision model write a reusable \
-                             style prompt: auto-fills the Reimagine prompt (ready to restyle other photos) and \
-                             saves ./out/<stem>.style.txt.",
-                        ))
-                        .clicked()
-                    {
-                        self.start_style_prompt();
-                    }
-                });
-                // R20 opt-in LLM-as-a-judge. OUTSIDE the can_fit gate: the
-                // toggle is a persisted PREFERENCE, not a fit-time verb —
-                // gating it on can_fit locked a setting behind having a
-                // generated variant active (review R20-N1). Only busy
-                // disables it.
+                let cell = columns(ui, 2);
+                let can = !self.busy && can_fit;
+                if primary_in(ui, cell, can, tr(lang, "Reverse-fit recipe"))
+                    .on_hover_text(tr(lang,
+                        "Statistical fit: reverse the freshly generated look into editable develop params \
+                         (local, no API cost). Sliders update (undoable), and for RAW a Lightroom XMP goes \
+                         into this photo's develop store; hit Export to render the full-resolution result. \
+                         Uses the panel's Strength control as the reverse-fit honesty budget.",
+                    ))
+                    .clicked()
+                {
+                    self.start_fit();
+                }
+                if action_in(ui, cell, can, tr(lang, "Extract style"))
+                    .on_hover_text(tr(lang,
+                        "Compare the original / generated images and have the vision model write a reusable \
+                         style prompt: auto-fills the Reimagine prompt (ready to restyle other photos) and \
+                         saves ./out/<stem>.style.txt.",
+                    ))
+                    .clicked()
+                {
+                    self.start_style_prompt();
+                }
+            });
+            // R20 opt-in LLM-as-a-judge. OUTSIDE the can_fit gate: the
+            // toggle is a persisted PREFERENCE, not a fit-time verb —
+            // gating it on can_fit locked a setting behind having a
+            // generated variant active (review R20-N1). Only busy
+            // disables it. R38: on a plain row of its own with 「deep」, never
+            // in the wrapped verb row above — its two cells take the whole
+            // line, and a checkbox scoped after them was laid past the line's
+            // end (a scope never wraps), which widened the auto-fitting side
+            // panel by 47 px every frame
+            // (`the_generate_button_stays_one_line_and_the_panel_stays_put`
+            // is the witness — that test exists because this panel's width
+            // has run away once before).
+            ui.horizontal(|ui| {
                 ui.add_enabled_ui(!self.busy, |ui| {
                     ui.checkbox(&mut self.fit_ai_judge, tr(lang, "AI review"))
                         .on_hover_text(tr(lang,
@@ -1142,34 +1144,27 @@ impl AutoShadeApp {
                              itself, the app stays busy until the review returns.",
                         ));
                 });
-            });
-            // R23-6 D: the review can now also ACT, when asked. Directly under
-            //「AI review」 and gated on it, because a deep fit IS that review plus
-            // a loop — a checkbox that silently switched the other one on would
-            // be two settings pretending to be one.
-            //
-            // Its own ROW, not another widget in the wrapped row above: the
-            // reverse-fit row already carries two long buttons and a checkbox,
-            // and a fourth item widened the auto-fitting side panel by 25 px
-            // (measured;`the_generate_button_stays_one_line_and_the_panel_stays_put`
-            // is the witness — that test exists because this panel's width has
-            // run away once before).
-            ui.add_enabled_ui(!self.busy && self.fit_ai_judge, |ui| {
-                ui.checkbox(&mut self.fit_deep, tr(lang, "deep"))
-                    .on_hover_text(if self.fit_ai_judge {
-                        tr(lang,
-                            "DEEP REVERSE-FIT: run the review BEFORE saving and let it buy one \
-                             guided retry — the reviewer's suggestion picks the next ACTION \
-                             (add the zoned pass, pull the chroma chase back), never the \
-                             numbers, and the retry is kept only if it re-scores at least as \
-                             high. COST: up to two paid vision calls instead of one, and the \
-                             save waits for them; there is NO cancel, exactly as for the \
-                             review itself. Off = the reviewed fit is saved first and the \
-                             score is a note (the behaviour of every release since v0.26.0).",
-                        )
-                    } else {
-                        tr(lang, "Turn on 「AI review」 first — the deep fit is that review, iterated")
-                    });
+                // R23-6 D: the review can now also ACT, when asked. Beside
+                //「AI review」 and gated on it, because a deep fit IS that review
+                // plus a loop — a checkbox that silently switched the other one
+                // on would be two settings pretending to be one.
+                ui.add_enabled_ui(!self.busy && self.fit_ai_judge, |ui| {
+                    ui.checkbox(&mut self.fit_deep, tr(lang, "deep"))
+                        .on_hover_text(if self.fit_ai_judge {
+                            tr(lang,
+                                "DEEP REVERSE-FIT: run the review BEFORE saving and let it buy one \
+                                 guided retry — the reviewer's suggestion picks the next ACTION \
+                                 (add the zoned pass, pull the chroma chase back), never the \
+                                 numbers, and the retry is kept only if it re-scores at least as \
+                                 high. COST: up to two paid vision calls instead of one, and the \
+                                 save waits for them; there is NO cancel, exactly as for the \
+                                 review itself. Off = the reviewed fit is saved first and the \
+                                 score is a note (the behaviour of every release since v0.26.0).",
+                            )
+                        } else {
+                            tr(lang, "Turn on 「AI review」 first — the deep fit is that review, iterated")
+                        });
+                });
             });
             // Migrated from Settings (#4): a switch that only ever changes what
             // the button above does. Same rule as 「AI review」 — a persisted

@@ -45,6 +45,7 @@ mod quit;
 // state machine and is compiled (and tested) on every platform.
 #[cfg(target_os = "macos")]
 mod macos;
+mod buttons;
 mod theme;
 mod util;
 mod actions;
@@ -57,6 +58,7 @@ mod panels;
 mod workers;
 use model::*;
 use persist::*;
+use buttons::*;
 use theme::*;
 use util::*;
 use app::*;

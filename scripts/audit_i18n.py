@@ -463,7 +463,11 @@ def literal_bypasses(src: str) -> list[tuple[int, str]]:
     ctor = re.compile(
         r"(?:\.(?:small_button|button|menu_button|label|heading|selectable_label"
         r"|on_hover_text|checkbox|radio_value|selectable_value|hyperlink_to|text)"
-        r"|RichText::new|Window::new)\s*\("
+        r"|RichText::new|Window::new"
+        # R38: the button vocabulary (src/bin/gui/buttons.rs) is a set of free
+        # functions, so a label reaches the screen through none of the methods
+        # above — scan them too, or a bare label would ship untranslated.
+        r"|\b(?:action|action_in|primary|primary_in|primary_button|toggle_in|glyph|glyph_toggle))\s*\("
     )
     skip_callee = re.compile(r"(?:\btrf?|format!)\s*\($")
     out: list[tuple[int, str]] = []

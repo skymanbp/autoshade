@@ -713,8 +713,7 @@ impl AutoShadeApp {
                 // See paint_mode_toggled in actions.rs.
                 self.paint_mode_toggled();
             }
-            if ui
-                .button(tr(lang, "Clear brush"))
+            if action(ui, true, tr(lang, "Clear brush"))
                 .on_hover_text(tr(lang, "Wipe the painted area (shared by Fill, Heal and Stamp)"))
                 .clicked()
             {
@@ -740,7 +739,11 @@ impl AutoShadeApp {
                 {
                     self.prompt_rects.push(_field.rect);
                 }
-                ui.horizontal(|ui| {
+                // R38: wrapped — quality, the full-res switch and the verb are
+                // 321 px at the 320 px default, and a plain row widened the
+                // panel; the verb is enabled on itself, not in a scope (a scope
+                // is laid at the cursor and never wraps).
+                ui.horizontal_wrapped(|ui| {
                     egui::ComboBox::from_id_salt("fill_quality")
                         .selected_text(tr(lang, ["high", "medium", "low"][self.fill_quality.min(2)]))
                         .show_ui(ui, |ui| {
@@ -760,15 +763,12 @@ impl AutoShadeApp {
                     // was a twin of the other three.
                     ui.add_enabled(src_is_raw, egui::Checkbox::new(&mut self.fill_fullres, tr(lang, "Full-res fill")))
                         .on_hover_text(tr(lang, "Composite onto the full-sensor develop (slow, RAW only)"));
-                    ui.add_enabled_ui(!self.busy, |ui| {
-                        if ui
-                            .button(tr(lang, "Remove / Fill"))
-                            .on_hover_text(tr(lang, "Regenerate ONLY the painted area from your prompt (gpt-image API call — costs per image); the rest keeps the engine's own develop"))
-                            .clicked()
-                        {
-                            self.start_fill();
-                        }
-                    });
+                    if primary(ui, !self.busy, tr(lang, "Remove / Fill"))
+                        .on_hover_text(tr(lang, "Regenerate ONLY the painted area from your prompt (gpt-image API call — costs per image); the rest keeps the engine's own develop"))
+                        .clicked()
+                    {
+                        self.start_fill();
+                    }
                 });
                 ui.label(
                     egui::RichText::new(tr(lang,
@@ -783,35 +783,37 @@ impl AutoShadeApp {
             .id_salt("sec_heal")
             .default_open(false)
             .show(ui, |ui| {
+                // R38: the two heal verbs share one aligned row and the
+                // full-res switch sits under them — three free-width controls
+                // in a non-wrapping row overran the default panel width.
                 ui.horizontal(|ui| {
+                    let cell = columns(ui, 2);
                     ui.add_enabled_ui(!self.busy, |ui| {
-                        if ui
-                            // 🤖, the one AI prefix app-wide (#4): ✦ was this
-                            // verb's private glyph. The tooltip carries the
-                            // AI-panel cross-reference — this stays HERE, at
-                            // the pixels it heals.
-                            .button(tr(lang, "🤖 AI heal (auto)"))
+                        // 🤖, the one AI prefix app-wide (#4): ✦ was this
+                        // verb's private glyph. The tooltip carries the
+                        // AI-panel cross-reference — this stays HERE, at
+                        // the pixels it heals.
+                        if action_in(ui, cell, true, tr(lang, "🤖 AI heal (auto)"))
                             .on_hover_text(ai_xref(lang, tr(lang, "A vision model finds small dust spots / blemishes (API call), then each is healed from surrounding REAL pixels — never generated")))
                             .clicked()
                         {
                             self.start_heal(false);
                         }
-                        if ui
-                            .button(tr(lang, "Heal painted area"))
+                        if action_in(ui, cell, true, tr(lang, "Heal area"))
                             .on_hover_text(tr(lang, "Heal the brushed area from surrounding real pixels — local compute, no API"))
                             .clicked()
                         {
                             self.start_heal(true);
                         }
                     });
-                    // Enabled for BAKED sources too (L09#4, user decision
-                    // 2026-08-11): heal honours the flag on both source
-                    // types since b4c6c30, but the RAW-only gate left a
-                    // 61 MP baked TIFF no way to opt out of the 2048px
-                    // downsample the unchecked path bakes into the master.
-                    ui.checkbox(&mut self.heal_fullres, tr(lang, "Full-res heal"))
-                        .on_hover_text(tr(lang, "Heal at full resolution (slow; without it a baked image is saved at 2048px)"));
                 });
+                // Enabled for BAKED sources too (L09#4, user decision
+                // 2026-08-11): heal honours the flag on both source
+                // types since b4c6c30, but the RAW-only gate left a
+                // 61 MP baked TIFF no way to opt out of the 2048px
+                // downsample the unchecked path bakes into the master.
+                ui.checkbox(&mut self.heal_fullres, tr(lang, "Full-res heal"))
+                    .on_hover_text(tr(lang, "Heal at full resolution (slow; without it a baked image is saved at 2048px)"));
                 ui.label(
                     egui::RichText::new(tr(lang,
                         "AI auto-detects dust / blemishes, or paint a mask and Heal it. Pixel retouch from surrounding pixels; saved to ./out.",
@@ -825,10 +827,12 @@ impl AutoShadeApp {
             .id_salt("sec_clone")
             .default_open(false)
             .show(ui, |ui| {
+                // R38: the arm/finish toggle and the stamp's one verb share an
+                // aligned row; the full-res switch sits under them.
                 ui.horizontal(|ui| {
+                    let cell = columns(ui, 2);
                     let label = if self.clone_mode { tr(lang, "✓ Done") } else { tr(lang, "⎘ Enter stamp") };
-                    if ui
-                        .button(label)
+                    if action_in(ui, cell, true, label)
                         .on_hover_text(tr(lang, "Arm the stamp: Alt+click samples a source, the brush paints the target; your painted mask survives"))
                         .clicked()
                     {
@@ -844,14 +848,8 @@ impl AutoShadeApp {
                                 tr(lang, "Stamp: Alt+click to set the source → brush the target area → 「⎘ Clone painted area」").into();
                         }
                     }
-                    // Enabled for BAKED sources too — clone_stamp honours
-                    // the flag on both source types (retouch.rs), the same
-                    // rule as Heal beside it (L15-7).
-                    ui.checkbox(&mut self.clone_fullres, tr(lang, "Full-res clone"))
-                        .on_hover_text(tr(lang, "Clone at full resolution (slow; without it a baked image is saved at 2048px)"));
                     ui.add_enabled_ui(!self.busy && self.clone_mode, |ui| {
-                        if ui
-                            .button(tr(lang, "⎘ Clone painted area"))
+                        if primary_in(ui, cell, true, tr(lang, "⎘ Clone area"))
                             .on_hover_text(tr(lang, "Copy the sampled source over the brushed area verbatim (feathered edges, no tone matching) — local compute"))
                             .clicked()
                         {
@@ -859,6 +857,11 @@ impl AutoShadeApp {
                         }
                     });
                 });
+                // Enabled for BAKED sources too — clone_stamp honours
+                // the flag on both source types (retouch.rs), the same
+                // rule as Heal beside it (L15-7).
+                ui.checkbox(&mut self.clone_fullres, tr(lang, "Full-res clone"))
+                    .on_hover_text(tr(lang, "Clone at full resolution (slow; without it a baked image is saved at 2048px)"));
                 ui.label(
                     egui::RichText::new(tr(lang,
                         "Photoshop-style clone stamp: Alt+click to sample a source (cross marker), brush the area to \

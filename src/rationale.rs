@@ -622,11 +622,11 @@ pub mod keys {
     pub const TILE_MASK_CARRIER: &str =
         " Spatial tile {id} uses {carrier}: maximum refinement alpha change {delta}, rendered change {rendered}, hard-cell residual raster/native {fidelity}.";
     pub const ZONE_SUBZONES_ATTACHED: &str =
-        " Zoned {label} accepted {k} bands after {trials} trials: residual R2={r2}, breaks={breaks}, overlap={overlap}, deltaE {before} -> {after}, seam {seam_before} -> {seam_after}, target steps {step_before} -> {step_after}.";
+        " Zoned {label} accepted {k} bands after {trials} trials: residual R2={r2}, breaks={breaks}, overlap={overlap}, deltaE {before} -> {after}, seam {seam_before} -> {seam_after}, target steps {step_before} -> {step_after}, worst cell regression {regression}.";
     pub const ZONE_SUBZONES_NOT_EARNED: &str =
         " Zoned {label} kept the current recipe: the residual did not earn bands (R2={r2}).";
     pub const ZONE_SUBZONES_REGRESSED: &str =
-        " Zoned {label} kept the current recipe: {k} trial bands regressed or failed a gate ({reason}, {trials} trials); R2={r2}, breaks={breaks}, overlap={overlap}, deltaE {before} -> {after}, seam {seam_before} -> {seam_after}, target steps {step_before} -> {step_after}.";
+        " Zoned {label} kept the current recipe: {k} trial bands regressed or failed a gate ({reason}, {trials} trials); R2={r2}, breaks={breaks}, overlap={overlap}, deltaE {before} -> {after}, seam {seam_before} -> {seam_after}, target steps {step_before} -> {step_after}, worst cell regression {regression}.";
     pub const ZONE_PAIRING_SCALE: &str =
         " Zoned {label} tone was solved at CELL scale: this zone's own structural reading is {d}, past the {line} pairing line, so its pixels are not each other's counterparts — the tone came from the zone's own luma distribution rather than from a per-pixel regression, which reads a re-synthesised texture's contrast low.";
     /// The share-mismatch exit attaches NO zone. It used to borrow the
@@ -636,10 +636,13 @@ pub mod keys {
     /// measurements of the same subject at all.
     pub const ZONE_SHARE_NO_CORRECTION: &str =
         " No zoned correction attached: the source and target zone shares differ by more than 2:1, so neither population is a comparable measurement of the same subject.";
+    /// R37: `asked` is the step the target's own boundary carries there, which
+    /// the correction may reproduce; only the unasked part is charged.
     pub const ZONE_BOUNDARY_PASSED: &str =
         " Boundary-continuity gate kept {n} zoned correction(s): introduced transition \
-         rim {before} to {after} luma after shared differential shrink k={k}, \
-         context-charged {charged}, colour {colour} charged {colour_charged} \
+         rim {before} to {after} luma after shared differential shrink k={k}, of which \
+         the target's own boundary asks {asked}; the unasked part context-charged \
+         {charged}, colour {colour} charged {colour_charged} \
          (ceiling {max}, {transitions} measured transitions).";
     /// Step 9. Distinct from [`ZONE_BOUNDARY_DROPPED`], which says the k=0
     /// render was itself over budget (an engine invariant failure). THIS one
@@ -809,8 +812,9 @@ pub mod keys {
          cap; {attached} tile(s) attached.";
     pub const TILE_BOUNDARY_PASSED: &str =
         " Spatial tile {id} passed the boundary gate: cross-boundary step \
-         {before} -> {after} luma after direction-preserving shrink k={k}, \
-         context-charged {charged}, colour {colour} charged {colour_charged} \
+         {before} -> {after} luma after direction-preserving shrink k={k}, of which \
+         the target's own boundary asks {asked}; the unasked part context-charged \
+         {charged}, colour {colour} charged {colour_charged} \
          (ceiling {max}, {transitions} measured crossings).";
     pub const TILE_BOUNDARY_REFUSED: &str =
         " Spatial tile {id} refused by its boundary/composed-frame gate: \
@@ -951,7 +955,8 @@ pub mod keys {
         " Field mask {n} proposed: {sign} m={mass} s={share_src}/{share_tgt} D={d} p={pixels}.";
     pub const FIELD_MASK_ATTACHED: &str =
         " Field mask {n} attached: {err_before}->{err_after}, cross-boundary step \
-         {step}, context-charged {charged} (bitmap/XMP loss).";
+         {step}, of which the target's own boundary asks {asked}; the unasked part \
+         context-charged {charged} (bitmap/XMP loss).";
     pub const FIELD_MASK_REFUSED: &str =
         " Field mask component(s) {n} refused: {why}.";
     pub const ZONE_TONE_UNSUPPORTED: &str =

@@ -5445,6 +5445,32 @@ pub fn mask_coverage(
     out
 }
 
+/// [`mask_coverage`] in the frame [`develop_preview`] evaluates the mask in,
+/// for the fit's rulers: the recipe answers "will geometry follow?" exactly
+/// as `develop_preview_inner` answers it (the clamped recipe, its composed
+/// profile, the manual amount), so a contour built here sits where the
+/// preview paints the mask's edge.
+///
+/// R38 (2026-09-12): the native four-gradient tile trial, the zone regression
+/// check and the band rulers built their contours with
+/// [`MaskFrame::AsRendered`] and then judged `develop_preview`'s pixels.
+/// Under the reference pair's lens profile (distortion to 1.050) the preview
+/// paints a parametric tile's edge three to four analysis pixels (of 384)
+/// off its stored contour; a step ruler's feet 1.5 px each side of the STORED
+/// contour straddled two lifted pixels on the sky sides, and the one
+/// undisplaced edge ran over dark land — so a 27-code seam read 5 codes and
+/// shipped as a rectangle in the sky. Raster geometry is unmoved by every
+/// frame, which is why only the parametric carrier misread.
+pub fn preview_mask_coverage(
+    m: &crate::recipe::LocalAdjustment,
+    reference: &DynamicImage,
+    recipe: &EditRecipe,
+) -> image::GrayImage {
+    let validated = crate::recipe::ValidatedRecipe::new(recipe);
+    let geom = geometry_profile(&validated);
+    mask_coverage(m, reference, MaskFrame::downstream(&geom, validated.lens_distortion))
+}
+
 /// The brightness-independent colour distance a [`RangeMask::Color`]
 /// selects on: each channel divided by its own pixel's Rec.601 luma, then
 /// Euclidean. The two arguments have the same FORM, so one function answers
@@ -12430,6 +12456,65 @@ mod tests {
             MaskFrame::downstream(&inert, 25.0).unwarp((240.0, 160.0)).is_some(),
             "the manual lens_distortion must be covered, not half-covered"
         );
+    }
+
+    /// R38: the fit's rulers judge `develop_preview`'s pixels, so the contour
+    /// they build must be the one that develop evaluates — the clamped
+    /// recipe's composed profile and manual amount, exactly as
+    /// `develop_preview_inner` decides them. Under a barrel profile the
+    /// stored-frame contour of a linear edge is not where the preview paints
+    /// it (LINEAR samples through `MaskUnwarp::engine_at`); with no geometry
+    /// to follow the two frames are one.
+    #[test]
+    fn preview_mask_coverage_is_the_frame_the_preview_develops_in() {
+        let (w, h) = (480u32, 320u32);
+        let base = DynamicImage::ImageRgb8(image::RgbImage::from_pixel(w, h, image::Rgb([120, 120, 120])));
+        // The barrel of `a_parametric_mask_lands_on_its_stored_coordinates_under_lens_geometry`
+        // (corner factor 0.75, fill scale 0.923): its composite map magnifies
+        // the frame's middle by 8 %, so a hard edge 72 px left of centre paints
+        // 2–5 px away from its stored column, farthest on the centre row.
+        // `barrel_profile()` moves it under a pixel at this size.
+        let profile = crate::recipe::LensProfile {
+            distortion: (0..16).map(|i| 1.0 - 0.25 * (i as f32 / 15.0).powi(2)).collect(),
+            distortion_on: true,
+            ..Default::default()
+        };
+        let edge = crate::recipe::LocalAdjustment {
+            mask: MaskGeometry::Linear { zero_x: 0.35 + 0.5 / w as f32, zero_y: 0.5, full_x: 0.35, full_y: 0.5 },
+            exposure_ev: 0.6,
+            ..Default::default()
+        };
+        let recipe = EditRecipe { lens_profile: profile.clone(), masks: vec![edge.clone()], ..Default::default() };
+        let validated = crate::recipe::ValidatedRecipe::new(&recipe);
+        let expected = mask_coverage(
+            &edge,
+            &base,
+            MaskFrame::downstream(&geometry_profile(&validated), validated.lens_distortion),
+        );
+        let got = preview_mask_coverage(&edge, &base, &recipe);
+        assert_eq!(got.as_raw(), expected.as_raw(), "the preview's own frame, from the recipe");
+        let stored = mask_coverage(&edge, &base, MaskFrame::AsRendered);
+        let rendered = develop_preview(&base, &recipe).to_rgb8();
+        let plain = develop_preview(&base, &EditRecipe { lens_profile: profile, ..Default::default() }).to_rgb8();
+        let lift = |x: u32, y: u32| rendered.get_pixel(x, y)[1] as i32 - plain.get_pixel(x, y)[1] as i32;
+        let full = lift(8, 160);
+        assert!(full > 20, "premise: the edge lifts its side by {full} codes");
+        for y in [60u32, 160, 260] {
+            let painted = (0..w).rev().find(|&x| lift(x, y) * 2 > full).expect("a lifted pixel");
+            let contour = |cov: &image::GrayImage| (0..w).rev().find(|&x| cov.get_pixel(x, y)[0] >= 128).expect("coverage");
+            assert!(
+                contour(&stored).abs_diff(painted) >= 2,
+                "row {y}: premise — the barrel paints the edge at {painted}, off the stored column {}",
+                contour(&stored)
+            );
+            assert!(
+                contour(&got).abs_diff(painted) <= 1,
+                "row {y}: the preview-frame contour ({}) is where the develop paints the edge ({painted})",
+                contour(&got)
+            );
+        }
+        let flat = EditRecipe { masks: vec![edge.clone()], ..Default::default() };
+        assert_eq!(preview_mask_coverage(&edge, &base, &flat).as_raw(), stored.as_raw(), "no geometry: one frame");
     }
 
     /// The GUI's red coverage wash must advertise exactly what the render

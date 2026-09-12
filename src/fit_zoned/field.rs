@@ -460,9 +460,11 @@ fn admit_cells(
 /// own look distance the field made worse by more than a zone is ever allowed
 /// to cost the frame, or `None` if it hurt none of them.
 ///
-/// Membership comes from [`render::mask_coverage`] — the engine's OWN weight
-/// for that mask, the same number the render applies — so this check and the
-/// pixels it is judging cannot disagree about where the zone is.
+/// Membership comes from [`render::preview_mask_coverage`] — the engine's OWN
+/// weight for that mask in the preview's frame, the same number the render
+/// applies — so this check and the pixels it is judging cannot disagree about
+/// where the zone is (a banded zone's linear components move with the lens
+/// profile exactly as `develop_preview` moves them; R38).
 fn zone_regressed(
     s_img: &DynamicImage, report: &FitReport, after: &[[f32; 3]], target: &[[f32; 3]],
 ) -> Option<(String, f32, f32)> {
@@ -472,8 +474,7 @@ fn zone_regressed(
         {
             return None;
         }
-        let coverage =
-            render::mask_coverage(mask, s_img, render::MaskFrame::AsRendered);
+        let coverage = render::preview_mask_coverage(mask, s_img, &report.recipe);
         let weights: Vec<f32> =
             coverage.as_raw().iter().map(|v| *v as f32 / 255.0).collect();
         if weights.len() != current.len() || weights.iter().sum::<f32>() <= 0.0 {

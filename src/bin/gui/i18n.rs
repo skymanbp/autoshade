@@ -316,15 +316,14 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
 
     // ── Gallery / Library ─────────────────────────────────────────────────────
     ("Library", "图库 · Library"),
-    ("Open folder…", "打开文件夹…"),
     ("{dir} · {count} photos", "{dir} · {count} 张照片"),
-    ("⎘ Copy recipe", "⎘ 复制配方"),
+    ("Copy recipe", "复制配方"),
     ("Copy every develop setting from the current photo", "复制当前照片的全部 develop 参数"),
     ("Recipe copied — Ctrl/⌘+click to pick several, then “Paste to selected”", "配方已复制 — Ctrl/⌘+点击选多张，再「粘贴到选中」"),
-    ("⇩ Paste to selected ({n})", "⇩ 粘贴到选中({n})"),
+    ("Paste to selected ({n})", "粘贴到选中({n})"),
     ("Writes each photo's develop into your develop store (recipe JSON; RAW also gets a Lightroom XMP). Leaves library files untouched, renders nothing.",
         "把每张照片的显影写入显影库（配方 JSON；RAW 另附 Lightroom XMP）。不动库文件、不渲染成品。"),
-    ("🖼 Render selected ({n})", "🖼 渲染选中({n})"),
+    ("Render selected ({n})", "渲染选中({n})"),
     ("Each renders by its own saved develop from the store (neutral develop if none) → <Destination>/<name>.developed.*, using the current format / long-edge / sharpening / quality; AI Denoise sits out the batch.",
         "每张按它在显影库里保存的显影出图（没有则中性显影）→ <目标位置>/<名>.developed.*，用当前格式/长边/锐化/质量；AI Denoise 不参与批量"),
     ("Clear selection", "清除多选"),
@@ -356,7 +355,7 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     // variant, so the empty-state line names BOTH entries.
     ("Pick a reference below, or generate an image and stay on that variant, to reverse-fit a recipe.",
         "在下面选一张参考图，或者「AI 生成出片」并停在该变体上，才能反推配方。"),
-    ("🖼 Choose reference…", "🖼 选择参考图…"),
+    ("Choose reference…", "选择参考图…"),
     ("Reverse-fit toward ANY finished version of THIS SAME photo — your own \
       Lightroom/Capture One export, the camera's JPEG, a TIFF, or another RAW \
       (developed neutrally first). The fit solves the develop parameters that \
@@ -378,10 +377,10 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
         "深度反推：在保存之前先做复查，并让它换来一次按提示的重试——复查给出的提示只用来挑选下一个动作（加上分区处理、把饱和度拉回来），从不直接写参数；重试只有在复查分数不低于原分时才会被采用。开销：最多两次收费视觉调用而不是一次，保存也要等它们返回；与复查本身一样，没有取消。关闭 = 先保存复查过的反推结果，分数只作为一条注记（v0.26.0 以来每个版本的行为）。"),
     ("Turn on 「AI review」 first — the deep fit is that review, iterated",
         "请先勾选「AI 打分」——深度反推就是把这次复查反复做几轮"),
-    ("🎛 Reverse-fit recipe → sliders/XMP", "🎛 反推配方 → 滑杆/XMP"),
+    ("Reverse-fit recipe", "反推配方"),
     ("Statistical fit: reverse the freshly generated look into editable develop params (local, no API cost). Sliders update (undoable), and for RAW a Lightroom XMP goes into this photo's develop store; hit Export to render the full-resolution result. Uses the panel's Strength control as the reverse-fit honesty budget.",
         "统计拟合：把刚生成的观感反解成可编辑的 develop 参数（本地运算，无 API 费）。滑杆会更新（可 undo），RAW 会在该照片的显影库里生成 Lightroom XMP；再点「导出」可出全分辨率成品。使用面板的 Strength 控制作为反推预算。"),
-    ("📝 Extract style prompt", "📝 提取风格提示词"),
+    ("Extract style", "提取风格提示词"),
     ("Compare the original / generated images and have the vision model write a reusable style prompt: auto-fills the Reimagine prompt (ready to restyle other photos) and saves ./out/<stem>.style.txt.",
         "对比 原图/生成图，让 vision 模型写一段可复用的风格 prompt：自动填入 Reimagine 提示词（可直接给别的照片重绘用）并存 ./out/<stem>.style.txt。"),
     ("AI review", "AI 打分"),
@@ -418,7 +417,7 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
         "涂抹区域，写下那里该有什么，再点 Remove/Fill。需图像 API（OPENAI_API_KEY，或设置里的 OAuth 图像桥）。"),
     ("Heal (pixel)", "去瑕疵 · Heal（像素）"),
     ("🤖 AI heal (auto)", "🤖 AI 去瑕疵 (auto)"),
-    ("Heal painted area", "修复涂抹区域"),
+    ("Heal area", "修复涂抹区域"),
     ("AI auto-detects dust / blemishes, or paint a mask and Heal it. Pixel retouch from surrounding pixels; saved to ./out.",
         "AI 自动识别灰尘/瑕疵，或涂抹蒙版后修复。按周围像素做像素级修饰；存 ./out。"),
     ("Clone Stamp", "仿制图章 · Clone Stamp"),
@@ -426,7 +425,7 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     ("✓ Done", "✓ 完成"),
     ("Stamp: Alt+click to set the source → brush the target area → 「⎘ Clone painted area」",
         "图章：Alt+点击取源点 → 画笔涂目标区 → 「⎘ 克隆已涂区域」"),
-    ("⎘ Clone painted area", "⎘ 克隆已涂区域"),
+    ("⎘ Clone area", "⎘ 克隆已涂区域"),
     ("Full-res clone", "全分辨率克隆图章"),
     ("Clone at full resolution (slow; without it a baked image is saved at 2048px)",
         "全分辨率克隆（慢；不开启时烘焙图像按 2048px 保存）"),
@@ -504,7 +503,7 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
 
     // ── Develop · Color Mixer (HSL) + Grading ────────────────────────────────
     ("Color Mixer (HSL)", "颜色混合器 · HSL"),
-    ("↺ reset all", "↺ 全部重置"),
+    ("Reset all", "全部重置"),
     ("Hue", "色相"),
     ("Luminance", "明度"),
     ("Color Grading", "颜色分级 · Grading"),
@@ -522,7 +521,7 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
 
     // ── Develop · Crop + Lens ────────────────────────────────────────────────
     ("Crop", "裁剪 · Crop"),
-    ("⛶ Enter crop", "⛶ 进入裁剪"),
+    ("Enter crop", "进入裁剪"),
     ("Straighten (°)", "拉直 (°)"),
     ("Once in (R): drag corner/edge handles to resize, drag inside to move, drag OUTSIDE the box (or the canvas border while the box is full-frame) to rotate-straighten; arrows nudge the box, Enter commits; preview, export and XMP all match. Straighten auto-crops the black corners.",
         "进入后（R）：拖角/边把手调整大小、框内拖动移动、框外（满幅时沿画布边缘）拖动旋转拉直；方向键微移裁剪框，Enter 提交；预览、导出与 XMP 三者一致。拉直会自动裁掉黑边。"),
@@ -614,7 +613,7 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
 
     // ── Develop · Local Masks (add + AI segmentation) ────────────────────────
     ("Local Masks ({n})", "局部蒙版 ({n})"),
-    ("＋ Linear gradient", "＋ 线性渐变"),
+    ("＋ Linear", "＋ 线性"),
     ("Drag on the image: start = fully-applied side, end = unaffected side (Shift = horizontal/vertical)",
         "在图上拖拽：起点=完全应用侧，终点=不受影响侧（Shift = 水平/垂直锁定）"),
     ("Drag on the image to draw a linear gradient (start fully applied → end unaffected; Shift = axis lock)",
@@ -622,7 +621,7 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     ("Drag on the image to draw an elliptical area", "在图上拖拽画一个椭圆区域"),
     ("Drag on the image to draw a radial (elliptical) area", "在图上拖拽画径向（椭圆）区域"),
     ("Drag to reorder", "拖动重新排序"),
-    ("🤖 AI select subject", "🤖 AI 选主体"),
+    ("🤖 Select subject", "🤖 选主体"),
     // R29 B4: the subject backend became BiRefNet (user ruling, 2026-08-21).
     // Three facts the photographer acts on BEFORE clicking, so all three ride
     // in the tooltip: the new dependencies, the 444 MB first run, and the
@@ -631,7 +630,7 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     // the product may leave unanswered.
     ("BiRefNet salient-subject segmentation → bitmap mask (python sidecar: pip install torchvision timm einops; first run auto-downloads a ~444MB model; without them it falls back to U²-Net / pip install rembg, whose edges are softer)",
         "BiRefNet 显著主体分割 → 位图蒙版（python sidecar：pip install torchvision timm einops；首次运行自动下载约 444MB 模型；未安装这些依赖时回退到 U²-Net / pip install rembg，边缘更模糊）"),
-    ("🤖 AI select sky", "🤖 AI 选天空"),
+    ("🤖 Select sky", "🤖 选天空"),
     // R27 Batch-4: the model NAME and its download size both changed with the
     // licence fix (SegFormer-B0's weights are "research or evaluation purposes
     // only"; OneFormer Swin-L is MIT). 14 MB -> 880 MB is a number the user
@@ -670,8 +669,7 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     ("Lum. low", "亮度下限 Lo"),
     ("Lum. high", "亮度上限 Hi"),
     ("Feather", "羽化 Feather"),
-    ("🎯 Click in image…", "🎯 点击图中…"),
-    ("🎯 Sample", "🎯 取样"),
+    ("💧 Sample", "💧 取样"),
     ("Click the color to pick in the image (the same color at other brightnesses is also selected; clicking this button again cancels sampling)",
         "在图上点击要选取的颜色（亮暗不同的同色也会被选中；再点一次此按钮取消取样）"),
     ("Tolerance", "容差 Tolerance"),
@@ -859,7 +857,7 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     ("Index every RAW+.xmp pair in that folder (local compute, no API cost). Every RAW is decoded, so a large library takes minutes; the app stays usable and this button re-arms when it finishes. It cannot be cancelled — a build that indexes nothing is refused and leaves your existing library untouched.",
         "把该文件夹里每一对 RAW+.xmp 都入库（本地计算，无 API 费用）。每张 RAW 都要解码，所以大库要几分钟；构建期间 App 仍可用，完成后本按钮重新可用。构建无法取消——一次什么都没入库的构建会被拒绝，你原有的库保持不动。"),
     ("Pick a folder first", "请先选择文件夹"),
-    ("🗂 Sidecar folder…", "🗂 选择 .xmp 文件夹…"),
+    ("🗂 XMP folder…", "🗂 XMP 文件夹…"),
     ("Where your .xmp sidecars live when they are NOT beside the RAWs — an exported catalogue, or a photo volume you cannot write to. AutoShade looks for a mirror of the library's own folder tree first, then a flat folder of sidecars, then beside the RAW as before.",
         "当你的 .xmp 不在 RAW 旁边时（比如导出到别处的目录，或者一个不能写入的照片盘），这里指向它们所在的文件夹。先按库里同名的下级目录去找，再找只有一层的那种目录，最后仍回到 RAW 旁边。"),
     ("Beside the RAWs", "放在 RAW 旁边"),
@@ -886,8 +884,8 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     ("Before/After side by side", "原图/成片并排"),
     ("⬛ Single", "⬛ 单图"),
     ("The edit fills the canvas; hold B to quickly compare the original", "编辑图占满画布；按住 B 快速对比原图"),
-    ("⚙ Settings", "⚙ 设置"),
-    ("AI provider / model / API key", "AI 提供方 / 模型 / API 密钥"),
+    ("Settings · AI provider / model / API key", "设置 · AI 提供方 / 模型 / API 密钥"),
+    ("Settings", "设置"),
     ("Keyboard shortcuts (F1 / ?)", "快捷键速查（F1 / ?）"),
 
     // ── Toolbar · export bar (update()) ──────────────────────────────────────
@@ -961,7 +959,7 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
 
     // ── Empty-state landing screen (update()) ────────────────────────────────
     ("AI auto-develop · RAW develop", "AI 自动出片 · RAW develop"),
-    ("📷 Open photo…  (Ctrl+O)", "📷 打开照片…  (Ctrl+O)"),
+    ("Open photo…  (Ctrl+O)", "打开照片…  (Ctrl+O)"),
     ("🗂 Open folder…", "🗂 打开文件夹…"),
     ("or drag a RAW / image straight into the window · drag & drop anywhere",
         "或把 RAW / 图片直接拖进窗口 · drag & drop anywhere"),
@@ -1098,9 +1096,9 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     ("bitmap masks ×{n}", "位图蒙版 ×{n}"),
     ("muted masks ×{n}", "已静音蒙版 ×{n}"),
     (" Spatial tile {id} uses {carrier}: maximum refinement alpha change {delta}, rendered change {rendered}, hard-cell residual raster/native {fidelity}.", " 空间块 {id} 使用 {carrier}：细化的最大权重变化 {delta}，渲染变化 {rendered}，原始单元残差 位图/原生 {fidelity}。"),
-    (" Zoned {label} accepted {k} bands after {trials} trials: residual R2={r2}, breaks={breaks}, overlap={overlap}, deltaE {before} -> {after}, seam {seam_before} -> {seam_after}, target steps {step_before} -> {step_after}.", " 区域 {label} 在 {trials} 次试算后接受 {k} 段：残差 R2={r2}，分界={breaks}，重叠={overlap}，色差 {before} → {after}，边界 {seam_before} → {seam_after}，目标边界 {step_before} → {step_after}。"),
+    (" Zoned {label} accepted {k} bands after {trials} trials: residual R2={r2}, breaks={breaks}, overlap={overlap}, deltaE {before} -> {after}, seam {seam_before} -> {seam_after}, target steps {step_before} -> {step_after}, worst cell regression {regression}.", " 区域 {label} 在 {trials} 次试算后接受 {k} 段：残差 R2={r2}，分界={breaks}，重叠={overlap}，色差 {before} → {after}，边界 {seam_before} → {seam_after}，目标边界 {step_before} → {step_after}，最差单元回退 {regression}。"),
     (" Zoned {label} kept the current recipe: the residual did not earn bands (R2={r2}).", " 区域 {label} 保留现有配方：残差未支持分段（R2={r2}）。"),
-    (" Zoned {label} kept the current recipe: {k} trial bands regressed or failed a gate ({reason}, {trials} trials); R2={r2}, breaks={breaks}, overlap={overlap}, deltaE {before} -> {after}, seam {seam_before} -> {seam_after}, target steps {step_before} -> {step_after}.", " 区域 {label} 保留现有配方：{k} 段试算回退或未通过门控（{reason}，{trials} 次试算）；R2={r2}，分界={breaks}，重叠={overlap}，色差 {before} → {after}，边界 {seam_before} → {seam_after}，目标边界 {step_before} → {step_after}。"),
+    (" Zoned {label} kept the current recipe: {k} trial bands regressed or failed a gate ({reason}, {trials} trials); R2={r2}, breaks={breaks}, overlap={overlap}, deltaE {before} -> {after}, seam {seam_before} -> {seam_after}, target steps {step_before} -> {step_after}, worst cell regression {regression}.", " 区域 {label} 保留现有配方：{k} 段试算回退或未通过门控（{reason}，{trials} 次试算）；R2={r2}，分界={breaks}，重叠={overlap}，色差 {before} → {after}，边界 {seam_before} → {seam_after}，目标边界 {step_before} → {step_after}，最差单元回退 {regression}。"),
     ("bitmap components omitted ×{n}", "位图组件未写入 ×{n}"),
     (" Zoned {label} colour controls shipped at {share} of the solved move on REGION evidence: the pixel-scale reading withholds hue bands [{hue_bands}], the full move was refused by the target's own 12x8 cell means ({full}), and at this share {converged} of the region moved closer, {diverged} moved away, and {aligned} moved in the direction its own target asks for.",
         " 分区 {label} 的色彩控件按区域证据、以求解移动的 {share} 份额发布：像素尺度的读数暂不调整色相 [{hue_bands}]，完整移动被目标自身的 12x8 单元均值拒绝（{full}），按此份额区域的 {converged} 更接近目标，{diverged} 反而远离，{aligned} 的移动方向与各自目标要求的方向一致。"),
@@ -1506,7 +1504,7 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     ("Clear crop", "清除裁剪"),
     ("Clear brush", "清除画笔"),
     ("Wipe the painted area (shared by Fill, Heal and Stamp)", "清空涂抹区（填充/修复/图章共用）"),
-    ("＋ Radial gradient", "＋ 径向渐变"),
+    ("＋ Radial", "＋ 径向"),
     ("Delete this mask (its stack order shifts the ones below)", "删除此蒙版（其后的蒙版层序会前移）"),
     ("Crop — drag corners/edges to resize, inside to move, outside to rotate · Esc to exit",
         "裁剪 — 拖角/边把手调整，框内拖动移动，框外拖动旋转拉直 · Esc 退出"),
@@ -1582,8 +1580,6 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     ("Add", "增加"),
     ("Subtract", "排除"),
     ("Intersect", "交叉"),
-    ("▭ Linear", "▭ 线性"),
-    ("◯ Radial", "◯ 径向"),
     ("Drag on the image to add a linear shape to THIS mask",
         "在图上拖拽，为「当前蒙版」添加一个线性形状"),
     ("Drag on the image to add an elliptical shape to THIS mask",
@@ -1599,7 +1595,7 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     ("🖌 Brush", "🖌 笔刷"),
     ("Paint a free-form mask (drag the 「Brush size」 slider, or press [ / ]); 「Apply」 bakes it into a new mask",
         "涂抹绘制自由形状蒙版（拖动下方「笔刷大小」滑杆，或按 [ / ]）；「应用」后生成新蒙版"),
-    ("⌫ Erase", "⌫ 擦除"),
+    ("Erase", "擦除"),
     ("Strokes remove from the selection instead of adding",
         "笔画从选区中移除而非添加"),
     // R22-3 (#9): the mask-brush session grew its own Brush size slider, and
@@ -1610,16 +1606,16 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     ("🖌 Edit raster", "🖌 编辑栅格"),
     ("Brush-edit this mask: paint adds, 「Erase」 removes, 「Apply」 bakes",
         "笔刷编辑此蒙版：涂抹添加，「擦除」移除，「应用」固化"),
-    ("◌ Feather", "◌ 羽化"),
+    ("Soften", "柔化"),
     ("Soften the mask boundary one step (bakes a new raster; repeat for more)",
         "柔化蒙版边界一档（生成新栅格；可重复叠加）"),
-    ("⊕ Expand", "⊕ 扩展"),
+    ("Expand", "扩展"),
     ("Grow the selection one step (bakes a new raster)",
         "选区外扩一档（生成新栅格）"),
-    ("⊖ Contract", "⊖ 收缩"),
+    ("Contract", "收缩"),
     ("Shrink the selection one step (bakes a new raster)",
         "选区内收一档（生成新栅格）"),
-    ("⇱ Full-res refine", "⇱ 全分辨率精修"),
+    ("Full-res refine", "全分辨率精修"),
     ("Re-cut this mask against the FULL-resolution source (guided filter). Preview-res AI masks smear their boundary at export — this snaps it to real edges. Decodes the full-size source; takes a few seconds.",
         "以「全分辨率」原图重新切割此蒙版（引导滤波）。预览分辨率的 AI 蒙版在导出时边界会发糊——此操作让边界贴合真实边缘。需解码全尺寸原图，耗时数秒。"),
     ("could not load this mask's raster ({err}) — starting from an empty brush canvas",
@@ -2053,8 +2049,9 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     (" Field mask {n} proposed: {sign} m={mass} s={share_src}/{share_tgt} D={d} p={pixels}.",
         " 自由形状场蒙版 {n} 已提出：符号 {sign}，质量 {mass}，证据占比为源图 {share_src}、目标图 {share_tgt}，D={d}，{pixels} 个像素。"),
     (" Field mask {n} attached: {err_before}->{err_after}, cross-boundary step \
-      {step}, context-charged {charged} (bitmap/XMP loss).",
-        " 自由形状场蒙版 {n} 已作为引擎位图附加：合成全画面 {err_before} -> {err_after}，跨边界跳变 {step}，语境计费读数 {charged}。经典 XMP 会以已命名的位图蒙版损失不包含此校正。"),
+      {step}, of which the target's own boundary asks {asked}; the unasked part \
+      context-charged {charged} (bitmap/XMP loss).",
+        " 自由形状场蒙版 {n} 已作为引擎位图附加：合成全画面 {err_before} -> {err_after}，跨边界跳变 {step}，其中目标自身边界要求 {asked}；未要求部分的语境计费读数 {charged}。经典 XMP 会以已命名的位图蒙版损失不包含此校正。"),
     (" Field mask component(s) {n} refused: {why}.",
         " 自由形状场蒙版分量 {n} 已拒绝：{why}。"),
     (" No tone move was solved for {label}: its own population covers \
@@ -2195,10 +2192,11 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     // ── R22 #4/#14b: AI panel (analysis / whole-image / reverse-fit) ──────────
     //    + the develop panel's group captions
     (" Boundary-continuity gate kept {n} zoned correction(s): introduced transition \
-      rim {before} to {after} luma after shared differential shrink k={k}, \
-      context-charged {charged}, colour {colour} charged {colour_charged} \
+      rim {before} to {after} luma after shared differential shrink k={k}, of which \
+      the target's own boundary asks {asked}; the unasked part context-charged \
+      {charged}, colour {colour} charged {colour_charged} \
       (ceiling {max}, {transitions} measured transitions).",
-        " 分区边界连续性门保留了 {n} 个分区校正：共享差异收缩 k={k} 后，引入的过渡边缘亮度由 {before} 变为 {after}，语境计费读数 {charged}，色彩读数 {colour}、计费后 {colour_charged}（上限 {max}，测量了 {transitions} 个过渡）。"),
+        " 分区边界连续性门保留了 {n} 个分区校正：共享差异收缩 k={k} 后，引入的过渡边缘亮度由 {before} 变为 {after}，其中目标自身边界要求 {asked}；未要求部分的语境计费读数 {charged}，色彩读数 {colour}、计费后 {colour_charged}（上限 {max}，测量了 {transitions} 个过渡）。"),
     (" Zoned corrections dropped by the boundary-continuity gate: candidate \
       rim {before} luma, and even shared shrink k=0 left {after} \
       (context-charged {charged}, colour {colour} charged {colour_charged}, \
@@ -2275,10 +2273,11 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
       cap; {attached} tile(s) attached.",
         " 空间推导在深度 {depth} 停止，附加上限为 {cap} 个图块；实际附加 {attached} 个。"),
     (" Spatial tile {id} passed the boundary gate: cross-boundary step \
-      {before} -> {after} luma after direction-preserving shrink k={k}, \
-      context-charged {charged}, colour {colour} charged {colour_charged} \
+      {before} -> {after} luma after direction-preserving shrink k={k}, of which \
+      the target's own boundary asks {asked}; the unasked part context-charged \
+      {charged}, colour {colour} charged {colour_charged} \
       (ceiling {max}, {transitions} measured crossings).",
-        " 空间图块 {id} 通过边界门控：保持方向缩减 k={k} 后，跨边界跳变由 {before} -> {after} 亮度，语境计费读数 {charged}，色彩读数 {colour}、计费后 {colour_charged}（上限 {max}，测得 {transitions} 处穿越）。"),
+        " 空间图块 {id} 通过边界门控：保持方向缩减 k={k} 后，跨边界跳变由 {before} -> {after} 亮度，其中目标自身边界要求 {asked}；未要求部分的语境计费读数 {charged}，色彩读数 {colour}、计费后 {colour_charged}（上限 {max}，测得 {transitions} 处穿越）。"),
     (" Spatial tile {id} refused by its boundary/composed-frame gate: \
       candidate step {before}, final reading {after}, context-charged \
       {charged}, colour {colour} charged {colour_charged}, ceiling {max} \

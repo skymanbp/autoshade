@@ -215,9 +215,13 @@ fn free_masks_eat_only_what_tiles_left() {
         role: crate::recipe::MaskRole::ZoneLand, exposure_ev: 0.15, ..Default::default()
     });
     let current = render::develop_preview(&source, &base);
+    // R37: the target's +20 region sits 8 px INSIDE tile d2r2c0 on every
+    // side. With the region ON the tile's edges the target carries the
+    // tile's whole step there, the boundary gate keeps k = 1, and this pin
+    // could no longer tell raster x k from the raster itself.
     let mut target_image = current.to_rgb8();
     for y in 0..EDGE { for x in 0..EDGE {
-        let inside = x < EDGE / 4 && (EDGE / 2..3 * EDGE / 4).contains(&y);
+        let inside = x < EDGE / 4 - 8 && (EDGE / 2 + 8..3 * EDGE / 4 - 8).contains(&y);
         if inside { for value in &mut target_image.get_pixel_mut(x, y).0 { *value = value.saturating_add(20); } }
     }}
     let target = DynamicImage::ImageRgb8(target_image);
@@ -449,7 +453,11 @@ fn free_mask_attachment_emits_typed_note_with_improvement() {
         .expect("synthetic fixture must attach one free mask");
     let value = |key: &str| note.args.iter().find(|(k, _)| *k == key).map(|(_, v)| v.parse::<f32>().unwrap()).unwrap();
     assert!(value("err_after") < value("err_before"));
-    assert!(value("step") <= ZONE_BOUNDARY_STEP_MAX);
+    // R37: the raw step is a reading; what the gate holds under the ceiling
+    // is the part the target does not carry. This target IS the -26 disc, so
+    // it asks for the mask's own edge and the note says so.
+    assert!(value("charged") <= ZONE_BOUNDARY_STEP_MAX, "{note:?}");
+    assert!(value("asked") > 0.0, "{note:?}");
     std::fs::remove_dir_all(dir).ok();
     let _ = (source_px, target_px);
 }

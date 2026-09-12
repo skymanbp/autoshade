@@ -9,7 +9,7 @@ impl AutoShadeApp {
         let lang = self.lang;
         ui.horizontal(|ui| {
             ui.heading(tr(lang, "Library"));
-            if ui.button(tr(lang, "Open folder…")).clicked()
+            if action(ui, true, tr(lang, "🗂 Open folder…")).clicked()
                 && let Some(dir) = rfd::FileDialog::new().pick_folder()
             {
                 self.open_folder(dir);
@@ -25,65 +25,56 @@ impl AutoShadeApp {
             );
         }
         // Batch: copy the open photo's recipe → Ctrl+click a selection → paste.
-        // Lightroom's "sync settings" for the whole working folder. Wrapped:
-        // four dynamically sized controls in a fixed row clipped at narrow
-        // panel widths.
-        ui.horizontal_wrapped(|ui| {
-            // Wrap BETWEEN buttons, never inside one: without this the last
-            // button in a cramped row wrapped its own label one character
-            // per line (a vertical "渲染选中" pillar at the default width).
-            ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
-            // `!busy` like both siblings below. `open_path` re-points
-            // `src_path` immediately but `recipe` only refreshes when the
-            // decode lands, so during an open this pairs photo A's recipe
-            // (below) with photo B's path — and `copied_from` is what
-            // suppresses the "bitmap mask(s) not pasted" warning, so the
-            // mismatch INVERTS that guard and writes A's raster masks into
-            // B's saved develop.
-            // These chips keep the compact Small label but wear a full button
-            // frame: egui's small_button hard-zeroes vertical padding AND
-            // skips the interact-size floor, so the boxes came out squat and
-            // no style token could talk them out of it.
-            let chip = |text: String| egui::Button::new(egui::RichText::new(text).small());
-            ui.add_enabled_ui(self.src_path.is_some() && !self.busy, |ui| {
-                if ui
-                    .add(chip(tr(lang, "⎘ Copy recipe").to_string()))
-                    .on_hover_text(tr(lang, "Copy every develop setting from the current photo"))
-                    .clicked()
-                {
-                    // Flush every pending rename first — the clipboard must
-                    // carry the name the user sees in the box (U10; CX5-9).
-                    self.commit_pending_names();
-                    self.copied = Some(self.recipe.clone());
-                    self.copied_from = self.src_path.clone();
-                    self.status = tr(lang, "Recipe copied — Ctrl/⌘+click to pick several, then “Paste to selected”").to_string();
-                }
-            });
-            let n = self.multi_sel.len();
-            ui.add_enabled_ui(self.copied.is_some() && n > 0 && !self.busy, |ui| {
-                let n_s = n.to_string();
-                if ui
-                    .add(chip(trf(lang, "⇩ Paste to selected ({n})", &[("n", &n_s)])))
-                    .on_hover_text(tr(lang, "Writes each photo's develop into your develop store (recipe JSON; RAW also gets a Lightroom XMP). Leaves library files untouched, renders nothing."))
-                    .clicked()
-                {
-                    self.start_paste();
-                }
-            });
-            ui.add_enabled_ui(n > 0 && !self.busy, |ui| {
-                let n_s = n.to_string();
-                if ui
-                    .add(chip(trf(lang, "🖼 Render selected ({n})", &[("n", &n_s)])))
-                    .on_hover_text(tr(
-                        lang,
-                        "Each renders by its own saved develop from the store (neutral develop if none) → <Destination>/<name>.developed.*, using the current format / long-edge / sharpening / quality; AI Denoise sits out the batch.",
-                    ))
-                    .clicked()
-                {
-                    self.start_batch_render();
-                }
-            });
-            if n > 0 && ui.add(chip("✕".to_string())).on_hover_text(tr(lang, "Clear selection")).clicked() {
+        // Lightroom's "sync settings" for the whole working folder. R38: three
+        // full-width rows — at the 240 px default the three verbs never shared
+        // a line anyway, and a scoped button after a wrapped line's end was
+        // laid past the panel edge (a scope never wraps); ✕ shares the last
+        // row while there is a selection to clear.
+        let cell = columns(ui, 1);
+        // `!busy` like both siblings below. `open_path` re-points
+        // `src_path` immediately but `recipe` only refreshes when the
+        // decode lands, so during an open this pairs photo A's recipe
+        // (below) with photo B's path — and `copied_from` is what
+        // suppresses the "bitmap mask(s) not pasted" warning, so the
+        // mismatch INVERTS that guard and writes A's raster masks into
+        // B's saved develop.
+        if action_in(ui, cell, self.src_path.is_some() && !self.busy, tr(lang, "Copy recipe"))
+            .on_hover_text(tr(lang, "Copy every develop setting from the current photo"))
+            .clicked()
+        {
+            // Flush every pending rename first — the clipboard must
+            // carry the name the user sees in the box (U10; CX5-9).
+            self.commit_pending_names();
+            self.copied = Some(self.recipe.clone());
+            self.copied_from = self.src_path.clone();
+            self.status = tr(lang, "Recipe copied — Ctrl/⌘+click to pick several, then “Paste to selected”").to_string();
+        }
+        let n = self.multi_sel.len();
+        let n_s = n.to_string();
+        if action_in(ui, cell, self.copied.is_some() && n > 0 && !self.busy, trf(lang, "Paste to selected ({n})", &[("n", &n_s)]))
+            .on_hover_text(tr(lang, "Writes each photo's develop into your develop store (recipe JSON; RAW also gets a Lightroom XMP). Leaves library files untouched, renders nothing."))
+            .clicked()
+        {
+            self.start_paste();
+        }
+        ui.horizontal(|ui| {
+            // The last row lends ✕ (clear the selection) one square of its
+            // width while there is a selection to clear.
+            let wide = if n > 0 {
+                egui::vec2(cell.x - row_h(ui) - ui.spacing().item_spacing.x, cell.y)
+            } else {
+                cell
+            };
+            if action_in(ui, wide, n > 0 && !self.busy, trf(lang, "Render selected ({n})", &[("n", &n_s)]))
+                .on_hover_text(tr(
+                    lang,
+                    "Each renders by its own saved develop from the store (neutral develop if none) → <Destination>/<name>.developed.*, using the current format / long-edge / sharpening / quality; AI Denoise sits out the batch.",
+                ))
+                .clicked()
+            {
+                self.start_batch_render();
+            }
+            if n > 0 && glyph(ui, true, "✕").on_hover_text(tr(lang, "Clear selection")).clicked() {
                 self.multi_sel.clear();
             }
         });

@@ -2040,7 +2040,7 @@ impl AutoShadeApp {
             self.placing_mask = None;
             self.place_start = None;
         }
-        // The colour sampler drops unconditionally — its 🎯 label lives on
+        // The colour sampler drops unconditionally — its 💧 label lives on
         // the row that was just left (the first fix of this class).
         self.range_picking = None;
         if matches!(self.mask_brush, Some((Some(j), _)) if Some(j) != keep) {
@@ -2379,7 +2379,6 @@ impl AutoShadeApp {
     /// the state clean so the close guard lets the next close through.
     pub(crate) fn confirm_quit_layer(&mut self, ctx: &egui::Context) {
         let lang = self.lang;
-        let accent = self.theme.colors().accent_text; // Copy — safe in closures
         // Everything quitting would lose: the stash + the open photo's canvas
         // (the live canvas outranks its own stale stash entry). Each entry
         // carries its pixel identity so 「Save all」 persists a baked retouch's
@@ -2521,17 +2520,13 @@ impl AutoShadeApp {
                 // space, the primary (save) tinted and last — a 4px slip from
                 // Save must not land on an unrecoverable Discard.
                 ui.horizontal(|ui| {
-                    cancel |= ui.button(tr(lang, "Cancel")).on_hover_text("Esc").clicked();
+                    cancel |= action(ui, true, tr(lang, "Cancel")).on_hover_text("Esc").clicked();
                     ui.add_space(18.0);
-                    discard_quit = ui
-                        .button(
-                            egui::RichText::new(tr(lang, "Discard & quit"))
-                                .color(ui.visuals().warn_fg_color),
-                        )
+                    let warn = ui.visuals().warn_fg_color;
+                    discard_quit = action(ui, true, egui::RichText::new(tr(lang, "Discard & quit")).color(warn))
                         .on_hover_text(tr(lang, "Quit WITHOUT saving — these edits are gone for good"))
                         .clicked();
-                    save_quit |= ui
-                        .button(egui::RichText::new(tr(lang, "Save all & quit")).color(accent))
+                    save_quit |= primary(ui, true, tr(lang, "Save all & quit"))
                         .on_hover_text(tr(lang, "Enter · save every listed develop, then quit"))
                         .clicked();
                 });

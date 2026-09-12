@@ -166,6 +166,20 @@ impl AutoShadeApp {
         } else {
             format!("{hint}\n{grammar}")
         };
+        // R38: the rail takes what the row leaves after the label and the
+        // value box (floor 60 px, never wider than egui's default): egui's
+        // fixed 100 px rail beside a long label ("Colour noise smoothness")
+        // ran a Detail row 22 px past the 320 px default and widened the
+        // auto-fitting panel, and every later row then laid out to that
+        // width. The style is restored after the widget, so the sibling
+        // rows are untouched.
+        let label_w = ui.fonts(|f| {
+            f.layout_no_wrap(label.to_owned(), egui::TextStyle::Body.resolve(ui.style()), egui::Color32::WHITE).size().x
+        });
+        let spacing = ui.spacing();
+        let rail = (ui.available_width() - label_w - spacing.interact_size.x - 2.0 * spacing.item_spacing.x)
+            .clamp(60.0, spacing.slider_width);
+        let rail_before = std::mem::replace(&mut ui.spacing_mut().slider_width, rail);
         let resp = ui
             .add(
                 egui::Slider::new(value, min..=max)
@@ -175,6 +189,7 @@ impl AutoShadeApp {
                     .text(label),
             )
             .on_hover_text(tip);
+        ui.spacing_mut().slider_width = rail_before;
         // Right-click = reset too (阶段5 手感): the double-click twin — LR
         // muscle memory, and reachable without the precise double timing.
         if (resp.double_clicked() || resp.secondary_clicked()) && *value != default {
@@ -570,9 +585,9 @@ impl AutoShadeApp {
         // one-click archive entry point ON the card whose develop it
         // snapshots. Active card only — the button acts on the LIVE canvas,
         // and offering it on a background card would promise a snapshot of
-        // something else. A small_button in the existing label row: the row is
-        // already at least interact_size.y tall, so the strip's card-height
-        // arithmetic (and its geometry test) is untouched.
+        // something else. A row-height glyph square in the existing label row
+        // (R38): the row is already interact_size.y tall, so the strip's
+        // card-height arithmetic (and its geometry test) is untouched.
         // Inert (visibly, not silently) while a photo is still opening — the
         // canvas then still holds the OUTGOING photo's develop, and the
         // snapshot would land it in the incoming photo's store. Same rule the
@@ -580,8 +595,7 @@ impl AutoShadeApp {
         if active {
             #[cfg(test)]
             drawn.push("＋");
-            if ui
-                .add_enabled(!busy, egui::Button::new("＋").small())
+            if glyph(ui, !busy, "＋")
                 .on_hover_text(tr(lang, "Snapshot this card's develop only as a numbered version (v<N>.recipe.json with frozen mask rasters); Ctrl+S saves every card"))
                 .clicked()
             {
@@ -605,8 +619,7 @@ impl AutoShadeApp {
             } else {
                 tr(lang, "A generated variant's look lives in its pixels — there are no develop parameters to copy onto the ▣ Original card; run 「Reverse-fit」 first")
             };
-            let resp =
-                ui.add_enabled(can && !busy, egui::Button::new("▣").small()).on_hover_text(hover);
+            let resp = glyph(ui, can && !busy, "▣").on_hover_text(hover);
             #[cfg(test)]
             drawn.push(if can && !busy { "▣" } else { "▣(off)" });
             #[cfg(test)]
@@ -629,8 +642,7 @@ impl AutoShadeApp {
         let armed = self.variant_delete_confirm == Some(i);
         if self.variants.len() > 1
             && kind != VariantKind::Original
-            && ui
-                .small_button(if armed { "✕?" } else { "✕" })
+            && glyph(ui, true, if armed { "✕?" } else { "✕" })
                 .on_hover_text(if armed {
                     tr(lang, "Click again to delete this variant — it cannot be brought back (Ctrl+Z does not cross variants)")
                 } else {
@@ -680,7 +692,11 @@ impl AutoShadeApp {
             .id_salt("sec_tone")
             .default_open(true)
             .show(ui, |ui| {
-                ui.horizontal(|ui| {
+                // R38: wrapped, so the eyedropper drops under the checkbox when
+                // the row is short — the pair is 351 px at the 320 px default,
+                // and a plain `horizontal` never wraps: it widened the
+                // auto-fitting panel by 64 px, the widest row in this panel.
+                ui.horizontal_wrapped(|ui| {
                     // A nonzero tint IS a WB edit (recipes saved before the
                     // uncheck-zeroes-tint fix can carry one with no Temp) —
                     // showing "off = as-shot" over an active tint, with its
@@ -702,8 +718,7 @@ impl AutoShadeApp {
                         changed = true;
                     }
                     let label = if self.wb_picking { tr(lang, "💧 Click in image…") } else { tr(lang, "💧 Eyedropper") };
-                    if ui
-                        .small_button(label)
+                    if action(ui, true, label)
                         .on_hover_text(tr(lang,
                             "Click a spot in the image that should be neutral grey/white to auto-solve Temp/Tint (same forward model as the engine). Click again to cancel.",
                         ))
@@ -827,7 +842,10 @@ impl AutoShadeApp {
                             self.hsl_tab = i;
                         }
                     }
-                    if ui.small_button(tr(lang, "↺ reset all")).clicked() {
+                    // R38: a glyph square — the same reset in every mixer row;
+                    // as a text button it ran the HSL tab row to 318 px at the
+                    // 320 px default and widened the auto-fitting panel.
+                    if glyph(ui, true, "↺").on_hover_text(tr(lang, "Reset all")).clicked() {
                         self.recipe.hsl = Hsl::default();
                         changed = true;
                     }
@@ -870,7 +888,10 @@ impl AutoShadeApp {
                                 ui.selectable_value(&mut self.grade_region, i, tr(lang, name));
                             }
                         });
-                    if ui.small_button(tr(lang, "↺ reset all")).clicked() {
+                    // R38: a glyph square — the same reset in every mixer row;
+                    // as a text button it ran the HSL tab row to 318 px at the
+                    // 320 px default and widened the auto-fitting panel.
+                    if glyph(ui, true, "↺").on_hover_text(tr(lang, "Reset all")).clicked() {
                         self.recipe.color_grade = ColorGrade::default();
                         changed = true;
                     }
@@ -972,8 +993,7 @@ impl AutoShadeApp {
                     let missing = tr(lang,
                         "this build did not ship the python sidecar — run AutoShade from the project directory, or point AUTOSHADE_DENOISE_SCRIPT at python/denoise.py",
                     );
-                    if ui
-                        .add_enabled(ready, egui::Button::new(tr(lang, "🤖 AI Denoise now")))
+                    if action(ui, ready, tr(lang, "🤖 AI Denoise now"))
                         // 🤖 + the cross-reference line (#4): this verb stays
                         // beside Noise Reduction on purpose, so its tooltip is
                         // where it says the rest of the AI moved to. On the arm
@@ -1320,8 +1340,8 @@ impl AutoShadeApp {
                 ui.horizontal(|ui| {
                     // ✓ (geometric) — same finish-glyph as 「✓ Apply」; the
                     // emoji ✅ was the odd one out of the check family.
-                    let label = if self.crop_mode { tr(lang, "✓ Done") } else { tr(lang, "⛶ Enter crop") };
-                    if ui.button(label).clicked() {
+                    let label = if self.crop_mode { tr(lang, "✓ Done") } else { tr(lang, "Enter crop") };
+                    if action(ui, true, label).clicked() {
                         let on = !self.crop_mode;
                         self.disarm_tools();
                         self.set_crop_mode(on);
@@ -1347,7 +1367,7 @@ impl AutoShadeApp {
                     if self.crop_aspect != prev_aspect && self.crop_mode {
                         self.crop_aspect_pending = true;
                     }
-                    if ui.button(tr(lang, "Clear crop")).clicked()
+                    if action(ui, true, tr(lang, "Clear crop")).clicked()
                         && self.recipe.crop.take().is_some()
                     {
                         // Through the panel's own change path: clamp + dirty,
@@ -1415,9 +1435,12 @@ impl AutoShadeApp {
         .id_salt("sec_local")
         .default_open(false)
         .show(ui, |ui| {
+            // R38: three equal cells — three free-width toggles in a
+            // non-wrapping row overran the default panel width in English.
             ui.horizontal(|ui| {
+                let cell = columns(ui, 3);
                 let lin_armed = matches!(self.placing_mask, Some((MaskKind::Linear, PlaceTarget::NewMask)));
-                if ui.selectable_label(lin_armed, tr(lang, "＋ Linear gradient")).on_hover_text(tr(lang, "Drag on the image: start = fully-applied side, end = unaffected side (Shift = horizontal/vertical)")).clicked() {
+                if toggle_in(ui, cell, lin_armed, tr(lang, "＋ Linear")).on_hover_text(tr(lang, "Drag on the image: start = fully-applied side, end = unaffected side (Shift = horizontal/vertical)")).clicked() {
                     self.disarm_tools();
                     if !lin_armed {
                         self.placing_mask = Some((MaskKind::Linear, PlaceTarget::NewMask));
@@ -1425,7 +1448,7 @@ impl AutoShadeApp {
                     }
                 }
                 let rad_armed = matches!(self.placing_mask, Some((MaskKind::Radial, PlaceTarget::NewMask)));
-                if ui.selectable_label(rad_armed, tr(lang, "＋ Radial gradient")).on_hover_text(tr(lang, "Drag on the image to draw an elliptical area")).clicked() {
+                if toggle_in(ui, cell, rad_armed, tr(lang, "＋ Radial")).on_hover_text(tr(lang, "Drag on the image to draw an elliptical area")).clicked() {
                     self.disarm_tools();
                     if !rad_armed {
                         self.placing_mask = Some((MaskKind::Radial, PlaceTarget::NewMask));
@@ -1437,8 +1460,7 @@ impl AutoShadeApp {
                 // all pre-existed; this wires the paint canvas into
                 // recipe.masks — see start_mask_brush / commit_mask_brush).
                 let brush_armed = matches!(self.mask_brush, Some((None, _)));
-                if ui
-                    .selectable_label(brush_armed, tr(lang, "🖌 Brush"))
+                if toggle_in(ui, cell, brush_armed, tr(lang, "🖌 Brush"))
                     .on_hover_text(tr(lang, "Paint a free-form mask (drag the 「Brush size」 slider, or press [ / ]); 「Apply」 bakes it into a new mask"))
                     .clicked()
                 {
@@ -1454,17 +1476,17 @@ impl AutoShadeApp {
             // row armed the session.
             if let Some((target, erase)) = self.mask_brush {
                 ui.horizontal(|ui| {
-                    if ui
-                        .selectable_label(erase, tr(lang, "⌫ Erase"))
+                    let cell = columns(ui, 3);
+                    if toggle_in(ui, cell, erase, tr(lang, "Erase"))
                         .on_hover_text(tr(lang, "Strokes remove from the selection instead of adding"))
                         .clicked()
                     {
                         self.mask_brush = Some((target, !erase));
                     }
-                    if ui.button(tr(lang, "✓ Apply")).clicked() {
+                    if primary_in(ui, cell, true, tr(lang, "✓ Apply")).clicked() {
                         self.commit_mask_brush();
                     }
-                    if ui.button(tr(lang, "✕ Cancel")).clicked() {
+                    if action_in(ui, cell, true, tr(lang, "✕ Cancel")).clicked() {
                         self.disarm_tools();
                     }
                 });
@@ -1482,6 +1504,7 @@ impl AutoShadeApp {
                 // instead of spending the click on a "not found at …" toast.
                 let has_helper = segment_helper_available();
                 let can_seg = !self.busy && self.base_preview.is_some() && has_helper;
+                let cell = columns(ui, 2);
                 let missing = tr(lang,
                     "this build did not ship the python sidecar — run AutoShade from the project directory, or point AUTOSHADE_SEGMENT_SCRIPT at python/segment.py",
                 );
@@ -1491,8 +1514,7 @@ impl AutoShadeApp {
                 // tooltip carries the AI-panel cross-reference, but only on the
                 // arm that CAN run: a missing-sidecar message must stay about
                 // the missing sidecar.
-                if ui
-                    .add_enabled(can_seg, egui::Button::new(tr(lang, "🤖 AI select subject")))
+                if action_in(ui, cell, can_seg, tr(lang, "🤖 Select subject"))
                     // R29 B4: the model, its dependencies and its download size
                     // all changed with the user's ruling of 2026-08-21, and the
                     // FALLBACK is named because a machine without torchvision
@@ -1505,8 +1527,7 @@ impl AutoShadeApp {
                 {
                     self.start_segment("subject", "Subject");
                 }
-                if ui
-                    .add_enabled(can_seg, egui::Button::new(tr(lang, "🤖 AI select sky")))
+                if action_in(ui, cell, can_seg, tr(lang, "🤖 Select sky"))
                     .on_hover_text(if has_helper { ai_xref(lang, tr(lang,
                         "OneFormer-ADE20K sky segmentation → bitmap mask (python sidecar: pip install transformers; first run auto-downloads a ~880MB model)",
                     )) } else { missing.to_string() })
@@ -1612,8 +1633,7 @@ impl AutoShadeApp {
                         .on_hover_text(tr(self.lang, "Drag to reorder"));
                         // The eye: Lightroom's lossless mute. Amount-to-0 as a
                         // mute destroyed the tuned value; this keeps it.
-                        if ui
-                            .selectable_label(enabled, "👁")
+                        if glyph_toggle(ui, enabled, "👁")
                             .on_hover_text(tr(
                                 self.lang,
                                 "Show/mute this mask without losing its settings",
@@ -1655,8 +1675,7 @@ impl AutoShadeApp {
                                 self.toast(ToastKind::Error, t.to_string());
                             }
                         }
-                        if ui
-                            .small_button("🗑")
+                        if glyph(ui, true, "🗑")
                             .on_hover_text(tr(self.lang, "Delete this mask (its stack order shifts the ones below)"))
                             .clicked()
                         {
@@ -1735,8 +1754,7 @@ impl AutoShadeApp {
                 let mut remove_field = false;
                 ui.horizontal(|ui| {
                     let field = self.recipe.colour_field.as_mut().expect("just checked");
-                    if ui
-                        .selectable_label(field.enabled, "👁")
+                    if glyph_toggle(ui, field.enabled, "👁")
                         .on_hover_text(tr(
                             lang,
                             "Show/mute the colour field without losing its amount",
@@ -1760,8 +1778,7 @@ impl AutoShadeApp {
                         lang,
                         "A smooth local colour/tone field the reverse fit solved. It renders here and in every export from this app; classic XMP has no way to carry it, so Lightroom sees the rest of this recipe without it.",
                     ));
-                    if ui
-                        .small_button("🗑")
+                    if glyph(ui, true, "🗑")
                         .on_hover_text(tr(lang, "Remove the colour field"))
                         .clicked()
                     {
@@ -1813,11 +1830,45 @@ impl AutoShadeApp {
                         let cur = self.recipe.masks[i].name.clone();
                         self.mask_name_buf = Some((i, cur.clone(), cur));
                     }
+                    // R38: the name takes what the row leaves after the verbs
+                    // beside it (↻ Redraw when the geometry has one, then
+                    // ⬆ ⬇ ⧉), so the row ends where the grid rows below it
+                    // end. At a fixed 110 px, with the two switches also on
+                    // this row, it ran 100 px past the panel — and the panel
+                    // widened to fit, taking every row below it along.
+                    let has_redraw = matches!(
+                        self.recipe.masks[i].mask,
+                        MaskGeometry::Linear { .. } | MaskGeometry::Radial { .. }
+                    );
+                    let reserve = {
+                        let sp = ui.spacing();
+                        let redraw = if has_redraw {
+                            let label = ui.fonts(|f| {
+                                f.layout_no_wrap(
+                                    tr(lang, "↻ Redraw").to_owned(),
+                                    egui::TextStyle::Button.resolve(ui.style()),
+                                    egui::Color32::WHITE,
+                                )
+                                .size()
+                                .x
+                            });
+                            label + 2.0 * sp.button_padding.x + sp.item_spacing.x
+                        } else {
+                            0.0
+                        };
+                        redraw + 3.0 * (crate::buttons::row_h(ui) + sp.item_spacing.x)
+                    };
+                    // The frame's own margin (egui's 4 px each side) lies
+                    // outside `desired_width`, so it comes off the budget too.
+                    let name_margin = egui::Margin::symmetric(4.0, 2.0);
                     let name_resp = {
                         let buf = &mut self.mask_name_buf.as_mut().expect("seeded above").2;
                         ui.add(
                             egui::TextEdit::singleline(buf)
-                                .desired_width(110.0)
+                                .margin(name_margin)
+                                .desired_width(
+                                    (ui.available_width() - reserve - name_margin.sum().x).max(110.0),
+                                )
                                 .hint_text(tr(lang, "Name")),
                         )
                     };
@@ -1864,27 +1915,10 @@ impl AutoShadeApp {
                             }
                         }
                     }
-                    // ONE view switch, not a property of this row (R22 #16): it
-                    // is the same flag the O key toggles, and
-                    // `refresh_mask_overlay` (canvas.rs) always draws whichever
-                    // mask is hovered-or-selected. Sitting in the selected-mask
-                    // row is right — that IS the mask it draws — but 「Overlay」
-                    // beside 「↻ Redraw」 and the ⬆/⬇ order buttons read as
-                    // per-mask state that would be remembered per mask. The
-                    // label now says what it is, in the same words the F1 sheet
-                    // uses for the O key ("Toggle mask overlay").
-                    if ui
-                        .checkbox(&mut self.show_mask_overlay, tr(lang, "Show mask overlay"))
-                        .on_hover_text(tr(lang, "One view switch shared by every mask (shortcut O): shows the hovered-or-selected mask's actual coverage as a red semi-transparent overlay (geometry × range × strength)"))
-                        .changed()
-                    {
-                        self.overlay_stale = true;
-                    }
                     // Mask ORDER is render semantics (masks stack sequentially;
                     // a later mask's range sees earlier masks' output) — so the
                     // list order is editable, not just cosmetic.
-                    if ui
-                        .add_enabled(i > 0, egui::Button::new("⬆").small())
+                    if glyph(ui, i > 0, "⬆")
                         .on_hover_text(tr(lang, "Move up (renders earlier)"))
                         .clicked()
                     {
@@ -1895,8 +1929,7 @@ impl AutoShadeApp {
                         self.overlay_stale = true;
                         changed = true;
                     }
-                    if ui
-                        .add_enabled(i + 1 < self.recipe.masks.len(), egui::Button::new("⬇").small())
+                    if glyph(ui, i + 1 < self.recipe.masks.len(), "⬇")
                         .on_hover_text(tr(lang, "Move down (renders later)"))
                         .clicked()
                     {
@@ -1907,20 +1940,11 @@ impl AutoShadeApp {
                         self.overlay_stale = true;
                         changed = true;
                     }
-                    // Inversion flips the mask's coverage — its Response.changed()
-                    // must drive the develop + overlay like every other mask
-                    // control (was silently discarded: the toggle mutated the
-                    // recipe but never re-rendered until an unrelated edit).
-                    if ui.checkbox(&mut self.recipe.masks[i].inverted, tr(lang, "Invert")).changed() {
-                        self.overlay_stale = true;
-                        changed = true;
-                    }
                     // Duplicate: a second gradient with the same tuned ten
                     // sliders used to mean re-dragging and re-typing every
                     // value. Rasters are DETACHED copies (the version-load
                     // rule), so the twins never share a mutable file.
-                    if ui
-                        .small_button("⧉")
+                    if glyph(ui, true, "⧉")
                         .on_hover_text(tr(lang, "Duplicate this mask (bitmap rasters are copied, so the copies stay independent)"))
                         .clicked()
                     {
@@ -1956,6 +1980,34 @@ impl AutoShadeApp {
                             }
                             changed = true;
                         }
+                    }
+                });
+                // R38: the two switches on their own row, under the verbs.
+                ui.horizontal(|ui| {
+                    // Inversion flips the mask's coverage — its Response.changed()
+                    // must drive the develop + overlay like every other mask
+                    // control (was silently discarded: the toggle mutated the
+                    // recipe but never re-rendered until an unrelated edit).
+                    if ui.checkbox(&mut self.recipe.masks[i].inverted, tr(lang, "Invert")).changed() {
+                        self.overlay_stale = true;
+                        changed = true;
+                    }
+                    // ONE view switch, not a property of this row (R22 #16): it
+                    // is the same flag the O key toggles, and
+                    // `refresh_mask_overlay` (canvas.rs) always draws whichever
+                    // mask is hovered-or-selected. Sitting in the selected-mask
+                    // row is right — that IS the mask it draws — but 「Overlay」
+                    // beside 「Invert」 (and, before R38, 「↻ Redraw」 and the
+                    // ⬆/⬇ order buttons) reads as
+                    // per-mask state that would be remembered per mask. The
+                    // label now says what it is, in the same words the F1 sheet
+                    // uses for the O key ("Toggle mask overlay").
+                    if ui
+                        .checkbox(&mut self.show_mask_overlay, tr(lang, "Show mask overlay"))
+                        .on_hover_text(tr(lang, "One view switch shared by every mask (shortcut O): shows the hovered-or-selected mask's actual coverage as a red semi-transparent overlay (geometry × range × strength)"))
+                        .changed()
+                    {
+                        self.overlay_stale = true;
                     }
                 });
                 // Radial geometry: edge feather (shown 0..100, LR's track) +
@@ -2012,10 +2064,14 @@ impl AutoShadeApp {
                 // now and still ride an ordinary claimed PNG, while an AI mask
                 // whose alpha has not resolved has nothing to open.
                 if autoshade::render::geometry_raster_path(&self.recipe.masks[i].mask).is_some() {
-                    ui.horizontal_wrapped(|ui| {
+                    // R38: two aligned rows — the pair that opens a session
+                    // or a full-size re-cut, then the three one-step
+                    // morphologies — instead of five free-width buttons
+                    // wrapping wherever the panel width fell.
+                    ui.horizontal(|ui| {
+                        let cell = columns(ui, 2);
                         let edit_armed = matches!(self.mask_brush, Some((Some(j), _)) if j == i);
-                        if ui
-                            .selectable_label(edit_armed, tr(lang, "🖌 Edit raster"))
+                        if toggle_in(ui, cell, edit_armed, tr(lang, "🖌 Edit raster"))
                             .on_hover_text(tr(lang, "Brush-edit this mask: paint adds, 「Erase」 removes, 「Apply」 bakes"))
                             .clicked()
                         {
@@ -2025,8 +2081,16 @@ impl AutoShadeApp {
                                 self.start_mask_brush(Some(i));
                             }
                         }
-                        if ui
-                            .button(tr(lang, "◌ Feather"))
+                        if action_in(ui, cell, !self.busy, tr(lang, "Full-res refine"))
+                            .on_hover_text(tr(lang, "Re-cut this mask against the FULL-resolution source (guided filter). Preview-res AI masks smear their boundary at export — this snaps it to real edges. Decodes the full-size source; takes a few seconds."))
+                            .clicked()
+                        {
+                            self.start_mask_refine(i);
+                        }
+                    });
+                    ui.horizontal(|ui| {
+                        let cell = columns(ui, 3);
+                        if action_in(ui, cell, true, tr(lang, "Soften"))
                             .on_hover_text(tr(lang, "Soften the mask boundary one step (bakes a new raster; repeat for more)"))
                             .clicked()
                         {
@@ -2039,8 +2103,7 @@ impl AutoShadeApp {
                                 "mask-edit",
                             );
                         }
-                        if ui
-                            .button(tr(lang, "⊕ Expand"))
+                        if action_in(ui, cell, true, tr(lang, "Expand"))
                             .on_hover_text(tr(lang, "Grow the selection one step (bakes a new raster)"))
                             .clicked()
                         {
@@ -2053,8 +2116,7 @@ impl AutoShadeApp {
                                 "mask-edit",
                             );
                         }
-                        if ui
-                            .button(tr(lang, "⊖ Contract"))
+                        if action_in(ui, cell, true, tr(lang, "Contract"))
                             .on_hover_text(tr(lang, "Shrink the selection one step (bakes a new raster)"))
                             .clicked()
                         {
@@ -2066,13 +2128,6 @@ impl AutoShadeApp {
                                 },
                                 "mask-edit",
                             );
-                        }
-                        if ui
-                            .add_enabled(!self.busy, egui::Button::new(tr(lang, "⇱ Full-res refine")))
-                            .on_hover_text(tr(lang, "Re-cut this mask against the FULL-resolution source (guided filter). Preview-res AI masks smear their boundary at export — this snaps it to real edges. Decodes the full-size source; takes a few seconds."))
-                            .clicked()
-                        {
-                            self.start_mask_refine(i);
                         }
                     });
                 }
@@ -2106,7 +2161,7 @@ impl AutoShadeApp {
                             Some((MaskKind::Linear, PlaceTarget::Component(j, _))) if j == i
                         );
                         if ui
-                            .selectable_label(lin_armed, tr(lang, "▭ Linear"))
+                            .selectable_label(lin_armed, tr(lang, "Linear"))
                             .on_hover_text(tr(lang, "Drag on the image to add a linear shape to THIS mask"))
                             .clicked()
                         {
@@ -2122,7 +2177,7 @@ impl AutoShadeApp {
                             Some((MaskKind::Radial, PlaceTarget::Component(j, _))) if j == i
                         );
                         if ui
-                            .selectable_label(rad_armed, tr(lang, "◯ Radial"))
+                            .selectable_label(rad_armed, tr(lang, "Radial"))
                             .on_hover_text(tr(lang, "Drag on the image to add an elliptical shape to THIS mask"))
                             .clicked()
                         {
@@ -2181,7 +2236,7 @@ impl AutoShadeApp {
                                 self.overlay_stale = true;
                                 changed = true;
                             }
-                            if ui.small_button("🗑").clicked() {
+                            if glyph(ui, true, "🗑").clicked() {
                                 del_comp = Some(c);
                             }
                         });
@@ -2290,8 +2345,8 @@ impl AutoShadeApp {
                                     [*r, *g, *b] = [c[0], c[1], c[2]];
                                     changed = true;
                                 }
-                                let label = if picking_this { tr(lang, "🎯 Click in image…") } else { tr(lang, "🎯 Sample") };
-                                if ui.small_button(label).on_hover_text(tr(lang, "Click the color to pick in the image (the same color at other brightnesses is also selected; clicking this button again cancels sampling)")).clicked() {
+                                let label = if picking_this { tr(lang, "💧 Click in image…") } else { tr(lang, "💧 Sample") };
+                                if action(ui, true, label).on_hover_text(tr(lang, "Click the color to pick in the image (the same color at other brightnesses is also selected; clicking this button again cancels sampling)")).clicked() {
                                     want_pick = true;
                                 }
                             });
@@ -2416,8 +2471,7 @@ impl AutoShadeApp {
                                 .weak()
                                 .small(),
                         );
-                        if ui
-                            .small_button(tr(lang, "↺ Clear"))
+                        if action(ui, true, tr(lang, "↺ Clear"))
                             .on_hover_text(tr(lang, "Drop this mask's per-channel recolour gains (one Ctrl+Z to undo)"))
                             .clicked()
                         {
@@ -2743,11 +2797,10 @@ impl AutoShadeApp {
                                 ui.label(egui::RichText::new(note).weak().small());
                             }
                         }
-                        if ui.small_button(tr(lang, "Load")).on_hover_text(tr(lang, "Replace current parameters (one Ctrl+Z to undo)")).clicked() {
+                        if action(ui, true, tr(lang, "Load")).on_hover_text(tr(lang, "Replace current parameters (one Ctrl+Z to undo)")).clicked() {
                             load = Some(n);
                         }
-                        if ui
-                            .small_button("🗑")
+                        if glyph(ui, true, "🗑")
                             .on_hover_text(tr(lang, "Delete this snapshot (its frozen mask rasters go with it)"))
                             .clicked()
                         {
@@ -2975,8 +3028,7 @@ impl AutoShadeApp {
                 } else {
                     tr(lang, "Copy this photo's stored Lightroom/ACR sidecar into the photo's own folder, where Lightroom reads it. Save the develop first — this delivers what is stored, not what is unsaved on the canvas.")
                 };
-                if ui
-                    .add_enabled(raw && !self.busy, egui::Button::new(label))
+                if action(ui, raw && !self.busy, label)
                     .on_hover_text(hint)
                     .clicked()
                 {

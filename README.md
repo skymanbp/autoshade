@@ -278,7 +278,10 @@ Details: [docs/TECH_STACK.md#ai-advisor-and-reverse-fit](docs/TECH_STACK.md#ai-a
   masks classic XMP cannot hold, and keep the named bitmap loss.
 - A semantic zone's boundary is held to the same per-crossing budget a tile's
   is: no seam larger than the scene's own local variation, floored at one code
-  value and capped at the calibrated 0.012. Both rulers read luma **and** each
+  value and capped at the calibrated 0.012 — and, since R37, charged only on
+  the part of a step the paired target does not itself carry there, read as a
+  cell average so a repainted texture cannot vote, so a horizon the target has
+  is reproduced rather than shrunk away. Both rulers read luma **and** each
   colour channel, so a gain set that reproduces a target's mean colour cannot
   hide a coloured halo behind an unmoved luma.
 - Because a budget can only take strength away, the source raster's feather is
@@ -299,7 +302,8 @@ supported nodes first and stops at a 4×4 grid.
   structure stays comparable, its confidence interval excludes zero, its
   boundary stays within the calibrated rim ceiling (0.012, charged per
   crossing against the scene's own step since v1.2.2 — in luma and per colour
-  channel), and the composed frame does not regress.
+  channel, and since R37 only for what the target does not itself carry
+  there), and the composed frame does not regress.
 - Hard tiles are editable intersections of four gradients and export to
   Lightroom. A guided raster keeps its named bitmap loss only when the native
   trial fails the shared gates or fits the photo worse than the raster on the
@@ -438,7 +442,7 @@ the tests [`scripts/check_docs.py`](scripts/check_docs.py) re-derives.
 
 | What | Measured | Where |
 |---|---|---|
-| Automated test battery | 1478 library / 24 CLI / 172 GUI / 2+2 contract tests; `check_docs` re-derives the pinned release claims | [Tech stack](#tech-stack-algorithms-and-design-philosophy) |
+| Automated test battery | 1486 library / 24 CLI / 173 GUI / 2+2 contract tests; `check_docs` re-derives the pinned release claims | [Tech stack](#tech-stack-algorithms-and-design-philosophy) |
 | RAW coverage | 24 extensions, 725 camera bodies; nine-camera format zoo 9/9 at the last release gate | [Supported formats](#supported-formats) |
 | Lightroom Texture parity | 45 of 45 period/depth anchors within ±0.02 | [Develop pipeline](#develop-pipeline-and-tone-model) |
 | Radial mask closure | 41 of 41 measured vectors within ≤1 px | [Lens correction](#lens-correction-and-lightroom-mask-frame-laws) |
@@ -766,7 +770,7 @@ numbers](#measured-numbers) are not repeated.
   the 1800 MB per-photo budget, and a 4 GiB RAW gate bounds admission.
 - The [`build` workflow](.github/workflows/build.yml) covers default and GUI
   feature sets on Ubuntu and macOS; model weights are not stored here. The
-  current battery is **1478 library (1463 pass + 15 `#[ignore]`d forensic probes) / 24 CLI / 172 GUI / 2+2 contract** tests, and
+  current battery is **1486 library (1471 pass + 15 `#[ignore]`d forensic probes) / 24 CLI / 173 GUI / 2+2 contract** tests, and
   [`scripts/check_docs.py`](scripts/check_docs.py) re-derives the pinned
   release claims.
 

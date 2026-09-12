@@ -202,6 +202,7 @@ pub(in crate::fit_zoned) fn attach_free_masks(
                     geometry: &boundary_geometry,
                     reference: &before_px,
                 },
+                target_boundary: Some(&target_px[..]),
                 initial_px: accepted.rendered,
                 frame_before,
             },
@@ -232,6 +233,7 @@ pub(in crate::fit_zoned) fn attach_free_masks(
                 ("n", number.to_string()), ("err_before", format!("{frame_before:.6}")),
                 ("err_after", format!("{frame_after:.6}")),
                 ("step", format!("{:.5}", boundary.reading.rim)),
+                ("asked", format!("{:.5}", boundary.reading.asked)),
                 ("charged", format!("{:.5}", boundary.reading.charged)),
             ]),
         );

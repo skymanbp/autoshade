@@ -492,6 +492,7 @@ fn boundary_args(
         ("k", format!("{k:.3}")),
         ("before", format!("{:.4}", before.rim)),
         ("after", format!("{:.4}", after.rim)),
+        ("asked", format!("{:.4}", after.asked)),
         ("charged", format!("{:.4}", after.charged)),
         ("colour", format!("{:.4}", after.colour)),
         ("colour_charged", format!("{:.4}", after.colour_charged)),
@@ -590,6 +591,11 @@ pub(super) enum BoundaryRuler<'a> {
 
 pub(super) struct BitmapBoundaryInput<'a> {
     pub(super) ruler: BoundaryRuler<'a>,
+    /// R37. The paired target the boundary is allowed to reproduce, at the
+    /// analysis geometry: the step IT carries at a crossing is not a seam
+    /// (`fit_zoned::unasked`). `None` charges every introduced step — the
+    /// context rule alone, which is what the fixtures pinned on it measure.
+    pub(super) target_boundary: Option<&'a [[f32; 3]]>,
     pub(super) initial_px: Vec<[f32; 3]>,
     pub(super) frame_before: f32,
 }
@@ -608,12 +614,13 @@ pub(super) fn enforce_bitmap_boundary(
     first_mask: usize,
     input: BitmapBoundaryInput<'_>,
 ) -> Result<BitmapBoundaryAccepted, BitmapBoundaryRefusal> {
-    let BitmapBoundaryInput { ruler, initial_px, frame_before } = input;
+    let BitmapBoundaryInput { ruler, target_boundary, initial_px, frame_before } = input;
     let measure = |rendered: &[[f32; 3]]| match ruler {
         BoundaryRuler::TransitionBand { weights, reference } => {
             // `initial_px` is this gate's k=1 candidate, so BOTH rulers read
             // the correction's own slope off the same frozen frame.
-            boundary_rim(
+            boundary_rim_toward(
+                target_boundary,
                 reference,
                 rendered,
                 &initial_px,
@@ -623,7 +630,15 @@ pub(super) fn enforce_bitmap_boundary(
             )
         }
         BoundaryRuler::CrossBoundaryStep { geometry, reference } => {
-            boundary_step(reference, rendered, &initial_px, geometry, s_img.width(), s_img.height())
+            boundary_step_toward(
+                target_boundary,
+                reference,
+                rendered,
+                &initial_px,
+                geometry,
+                s_img.width(),
+                s_img.height(),
+            )
         }
     };
     // One ruler, one budget. The gate body is ruler-agnostic, so the budget
@@ -929,6 +944,7 @@ pub(super) fn attach_tiles(
                     geometry: &accepted_coverage,
                     reference: &current,
                 },
+                target_boundary: Some(&tgt_px[..]),
                 initial_px: accepted.rendered,
                 frame_before,
             },
@@ -973,9 +989,16 @@ pub(super) fn attach_tiles(
             report.recipe.rationale.truncate(rationale_before_attach);
             report.notes.truncate(notes_before_attach);
             let (native_mask, native_components) = tile_geometry(reading.id, mask.dimensions());
-            let native_coverage = render::mask_coverage(&LocalAdjustment {
+            // R38: the contour in the PREVIEW's frame. The pixels this trial
+            // is judged on come from `develop_preview`, which evaluates a
+            // parametric geometry through `MaskFrame::downstream`; under a lens
+            // profile that edge is not at the stored coordinates a stored-frame
+            // contour would put the ruler's feet around
+            // (`preview_mask_coverage`, and the pin
+            // `the_native_trial_gate_reads_the_edge_the_preview_paints`).
+            let native_coverage = render::preview_mask_coverage(&LocalAdjustment {
                 mask: native_mask.clone(), components: native_components.clone(), ..Default::default()
-            }, &s_img, render::MaskFrame::AsRendered);
+            }, &s_img, &report.recipe);
             let weights: Vec<f32> = native_coverage.as_raw().iter().map(|a| *a as f32 / 255.0).collect();
             let native_attachment = tile_attachment(&reading, mask.dimensions(),
                 reading.source_weights.clone(), reading.target_weights.clone(),
@@ -989,6 +1012,7 @@ pub(super) fn attach_tiles(
                 let trial = enforce_bitmap_boundary(&s_img, &tgt_px, report, first_tile,
                     BitmapBoundaryInput {
                         ruler: BoundaryRuler::CrossBoundaryStep { geometry: &weights, reference: &current },
+                        target_boundary: Some(&tgt_px[..]),
                         initial_px: std::mem::take(&mut native.rendered), frame_before,
                     });
                 if let Ok(trial) = trial {
@@ -1110,6 +1134,71 @@ pub(super) fn attach_tiles(
 mod tests {
     use super::*;
     use image::{Rgb, RgbImage};
+
+    /// R38 (2026-09-12). The native four-gradient trial's gate builds its
+    /// contour from the tile's parametric geometry and then judges
+    /// `develop_preview`'s pixels — which evaluate that geometry in
+    /// `MaskFrame::downstream`. Under the reference pair's lens profile
+    /// (sixteen distortion knots to 1.050 and its mask-warp table) the
+    /// preview paints tile r1c0's right edge three to four analysis pixels
+    /// right of its stored column, so a contour built `AsRendered` put the
+    /// step ruler's feet (1.5 px each side) on two lifted pixels and read no
+    /// step there, while the one undisplaced edge ran over dark land: the
+    /// shipped fit carried a 27-code seam the gate had read as 5 codes. The
+    /// contour must be the preview's own ([`render::preview_mask_coverage`]).
+    /// This scene — bright only in a band around the displaced edge, black
+    /// elsewhere — is that misread made deterministic: the stored-frame
+    /// ruler passes a 31-code seam, the preview-frame ruler reads it.
+    #[test]
+    fn the_native_trial_gate_reads_the_edge_the_preview_paints() {
+        use crate::recipe::{EditRecipe, LensProfile, LocalAdjustment};
+        let distortion = vec![1.0002441f32, 1.0003052, 1.0007935, 1.00177, 1.0030518, 1.0049438, 1.0071411, 1.0097656, 1.0128174, 1.0164795, 1.0205078, 1.0252075, 1.0305176, 1.036438, 1.0429688, 1.0502319];
+        let mask_warp = vec![1.0499613f32, 1.0499613, 1.0499614, 1.0499613, 1.0499487, 1.0499315, 1.0499144, 1.0498966, 1.0497608, 1.0496244, 1.0494881, 1.0493188, 1.049047, 1.0487754, 1.048504, 1.0481926, 1.0478381, 1.0474837, 1.0471296, 1.0466602, 1.0461413, 1.0456232, 1.0451062, 1.0445169, 1.0439203, 1.0433248, 1.0427231, 1.0420175, 1.0413136, 1.0406117, 1.0398878, 1.0390792, 1.0382727, 1.0374687, 1.0366169, 1.0356635, 1.0347136, 1.033767, 1.0327886, 1.0317588, 1.0307329, 1.029711, 1.0286266, 1.0274526, 1.0262835, 1.0251197, 1.0239081, 1.022614, 1.0213264, 1.0200449, 1.0187324, 1.0173283, 1.0159314, 1.014542, 1.0131469, 1.0116421, 1.0101459, 1.0086582, 1.0071787, 1.0055816, 1.0039712, 1.0023705, 1.0007797, 0.9999865];
+        let profile = LensProfile { distortion, distortion_on: true, mask_warp, ..Default::default() };
+        let (w, h) = (384u32, 256u32);
+        // Bright only in a band around the tile's right edge (stored x = 95),
+        // black elsewhere, so no other crossing can carry the reading.
+        let scene = DynamicImage::ImageRgb8(RgbImage::from_fn(w, h, |x, _| {
+            Rgb([if (88..108).contains(&x) { 150 } else { 0 }; 3])
+        }));
+        let (mask, components) = super::tile_geometry(TileId { depth: 2, row: 1, col: 0 }, (2048, 1365));
+        let tile = LocalAdjustment { mask, components, exposure_ev: 0.6, ..Default::default() };
+        let recipe = EditRecipe { lens_profile: profile.clone(), masks: vec![tile.clone()], ..Default::default() };
+        let plain = EditRecipe { lens_profile: profile, ..Default::default() };
+        let rendered = fit::pixels_of(&render::develop_preview(&scene, &recipe));
+        let reference = fit::pixels_of(&render::develop_preview(&scene, &plain));
+        let luma = |p: &[f32; 3]| 0.299 * p[0] + 0.587 * p[1] + 0.114 * p[2];
+        let lift = |x: usize, y: usize| {
+            (luma(&rendered[y * w as usize + x]) - luma(&reference[y * w as usize + x])) * 255.0
+        };
+        let seam = lift(92, 100);
+        assert!(seam > 25.0, "premise: the tile lifts the bright band by {seam:.1} codes");
+        let painted = (86..106).rev().find(|&x| lift(x, 100) > seam * 0.5).expect("the lifted edge") as u32;
+        let stored = render::mask_coverage(&tile, &scene, render::MaskFrame::AsRendered);
+        let preview = render::preview_mask_coverage(&tile, &scene, &recipe);
+        let right = |cov: &image::GrayImage| (0..w).rev().find(|&x| cov.get_pixel(x, 100)[0] >= 128).expect("coverage");
+        assert!(
+            right(&stored).abs_diff(painted) >= 3,
+            "premise: the profile paints the edge at {painted}, off the stored column {}",
+            right(&stored)
+        );
+        assert!(
+            right(&preview).abs_diff(painted) <= 1,
+            "the preview-frame contour ({}) is the painted edge ({painted})",
+            right(&preview)
+        );
+        let read = |cov: &image::GrayImage| {
+            let weights: Vec<f32> = cov.as_raw().iter().map(|v| *v as f32 / 255.0).collect();
+            crate::fit_zoned::boundary_step_toward(None, &reference, &rendered, &rendered, &weights, w, h).rim
+        };
+        let (on_stored, on_preview) = (read(&stored), read(&preview));
+        assert!(
+            on_stored < crate::fit_zoned::ZONE_BOUNDARY_STEP_MAX,
+            "the misread this pins: the stored-frame ruler passes the seam ({:.1} codes)",
+            on_stored * 255.0
+        );
+        assert!(on_preview > 0.1, "the preview-frame ruler reads the seam ({:.1} codes)", on_preview * 255.0);
+    }
 
     /// The cache is a per-traversal accelerator, never a behaviour: every
     /// test below reads a node with an EMPTY cache, so what it asserts is
@@ -1841,6 +1930,7 @@ mod tests {
             &mut report,
             0,
             BitmapBoundaryInput {
+                target_boundary: None,
                 ruler: BoundaryRuler::CrossBoundaryStep {
                     geometry: &geometry,
                     reference: &reference,
@@ -1973,6 +2063,7 @@ mod tests {
             &mut report,
             0,
             BitmapBoundaryInput {
+                target_boundary: None,
                 ruler: BoundaryRuler::CrossBoundaryStep {
                     geometry: &geometry,
                     reference: &reference,
@@ -2035,6 +2126,7 @@ mod tests {
             &mut report,
             0,
             BitmapBoundaryInput {
+                target_boundary: None,
                 ruler: BoundaryRuler::CrossBoundaryStep {
                     geometry: &geometry,
                     reference: &reference,
@@ -2087,6 +2179,7 @@ mod tests {
                 report,
                 0,
                 BitmapBoundaryInput {
+                    target_boundary: None,
                     ruler: BoundaryRuler::CrossBoundaryStep { geometry, reference },
                     initial_px: candidate,
                     frame_before,
@@ -2178,6 +2271,107 @@ mod tests {
         assert!(accepted.k < 1.0, "texture may buy the ceiling and nothing more: k={}", accepted.k);
     }
 
+    /// R37: the hard family's half of
+    /// `a_step_the_target_itself_carries_is_not_charged_as_a_seam`
+    /// (fit_zoned.rs). A 128-px frame on purpose: the allowance is pooled on
+    /// the 12x8 evidence grid and honoured from eight crossings per cell, and
+    /// r2c0's edges on the module's 64-px fixtures put five in a cell. And
+    /// +0.30 EV on purpose: half of it still asks four codes at grey 80, where
+    /// half of the module's 0.09 EV dial asks one — the floor, a coin flip.
+    #[test]
+    fn a_tile_edge_the_target_itself_carries_is_not_charged_as_a_seam() {
+        const EV: f32 = 0.30;
+        const EDGE: u32 = 128;
+        let source = DynamicImage::ImageRgb8(RgbImage::from_fn(EDGE, EDGE, |_, _| Rgb([80, 80, 80])));
+        let mask = GrayImage::from_fn(EDGE, EDGE, |x, y| {
+            Luma([if in_tile(TileId { depth: 2, row: 2, col: 0 }, x, y, EDGE, EDGE) { 255 } else { 0 }])
+        });
+        let path = super::super::tests::fixture_mask_path("r37-hard-asked");
+        mask.save(path.path()).unwrap();
+        let recipe_at = |ev: f32| {
+            let mut recipe = crate::recipe::EditRecipe::default();
+            recipe.masks.push(LocalAdjustment {
+                mask: MaskGeometry::Bitmap { path: path.path().to_string_lossy().into_owned() },
+                name: "Spatial tile r2c0".to_string(),
+                role: MaskRole::Custom,
+                amount: 1.0,
+                exposure_ev: ev,
+                ..Default::default()
+            });
+            recipe
+        };
+        let render_at = |ev: f32| fit::pixels_of(&render::develop_preview(&source, &recipe_at(ev)));
+        let reference =
+            fit::pixels_of(&render::develop_preview(&source, &crate::recipe::EditRecipe::default()));
+        let candidate = render_at(EV);
+        let geometry = mask_weights(&mask, EDGE, EDGE);
+        let against = |target: Option<&[[f32; 3]]>| {
+            boundary_step_toward(target, &reference, &candidate, &candidate, &geometry, EDGE, EDGE)
+        };
+        let none = against(None);
+        assert!(
+            none.transitions > 0 && none.charged > ZONE_BOUNDARY_STEP_MAX,
+            "premise: a flat field charges this dial over the ceiling: {none:?}"
+        );
+        let whole = against(Some(&candidate));
+        assert_eq!((whole.charged, whole.colour_charged), (0.0, 0.0), "{whole:?}");
+        assert_eq!(whole.rim.to_bits(), none.rim.to_bits(), "the raw step is a reading, not a charge");
+        assert!((whole.asked - whole.rim).abs() <= 1e-3, "{whole:?}");
+        let untouched = against(Some(&reference));
+        assert_eq!(untouched.charged.to_bits(), none.charged.to_bits(), "{untouched:?}");
+        let opposite = render_at(-EV);
+        assert_eq!(against(Some(&opposite)).charged.to_bits(), none.charged.to_bits());
+        let half = render_at(EV * 0.5);
+        let half_asked = against(Some(&half));
+        assert!(half_asked.charged > 0.0 && half_asked.charged < none.charged, "{half_asked:?}");
+        // A target whose boundary is a coin flip — the re-synthesised
+        // texture's case — allows nothing: a three-code step that changes
+        // sign from pixel to pixel along the whole contour.
+        let flip: Vec<[f32; 3]> = reference
+            .iter()
+            .enumerate()
+            .map(|(i, p)| {
+                let (x, y) = (i % EDGE as usize, i / EDGE as usize);
+                let sign = if (x + y) % 2 == 0 { 1.0 } else { -1.0 };
+                p.map(|c| (c + sign * 3.0 / 255.0).clamp(0.0, 1.0))
+            })
+            .collect();
+        let coin = against(Some(&flip));
+        assert_eq!((coin.charged.to_bits(), coin.asked), (none.charged.to_bits(), 0.0), "{coin:?}");
+
+        // The gate. The frame gate is given the candidate itself so it
+        // improves with every k and cannot decide these arms.
+        let gate = |target: Option<&[[f32; 3]]>| -> (f32, f32, f32) {
+            let target_image = render::develop_preview(&source, &recipe_at(EV));
+            let mut report = super::super::tests::neutral_report(&source, &target_image);
+            report.recipe = recipe_at(EV);
+            let frame_before = fit::look_err_with_evidence(&reference, &candidate, &report.evidence);
+            let accepted = enforce_bitmap_boundary(
+                &source,
+                &candidate,
+                &mut report,
+                0,
+                BitmapBoundaryInput {
+                    target_boundary: target,
+                    ruler: BoundaryRuler::CrossBoundaryStep { geometry: &geometry, reference: &reference },
+                    initial_px: candidate.clone(),
+                    frame_before,
+                },
+            )
+            .unwrap_or_else(|refusal| panic!("negotiated, not dropped: {:?}", refusal.why));
+            (accepted.k, accepted.reading.charged, accepted.reading.asked)
+        };
+        let (k_none, _, asked_none) = gate(None);
+        let (k_whole, charged_whole, asked_whole) = gate(Some(&candidate));
+        let (k_half, ..) = gate(Some(&half));
+        let (k_opposite, ..) = gate(Some(&opposite));
+        assert_eq!((k_whole, charged_whole), (1.0, 0.0), "the target's own edge is kept whole");
+        assert!(asked_whole > 0.0 && asked_none == 0.0);
+        assert_eq!(k_opposite.to_bits(), k_none.to_bits());
+        assert!(k_none < k_half && k_half < 1.0, "none {k_none} half {k_half}");
+        path.remove();
+    }
+
     /// Captured from a run of the persistence rule on `shoulder_fixture`
     /// (arm F below says what moving them means).
     const ARM_F_K: f32 = 0.24536133;
@@ -2205,6 +2399,7 @@ mod tests {
                 report,
                 0,
                 BitmapBoundaryInput {
+                    target_boundary: None,
                     ruler: BoundaryRuler::CrossBoundaryStep { geometry, reference },
                     initial_px: candidate,
                     frame_before,
@@ -2371,6 +2566,7 @@ mod tests {
             &mut report,
             0,
             BitmapBoundaryInput {
+                target_boundary: None,
                 ruler: BoundaryRuler::CrossBoundaryStep {
                     geometry: &geometry,
                     reference: &reference,
@@ -2401,6 +2597,7 @@ mod tests {
             &mut report,
             0,
             BitmapBoundaryInput {
+                target_boundary: None,
                 ruler: BoundaryRuler::CrossBoundaryStep {
                     geometry: &geometry,
                     reference: &reference,
@@ -2430,6 +2627,7 @@ mod tests {
             &mut report,
             0,
             BitmapBoundaryInput {
+                target_boundary: None,
                 ruler: BoundaryRuler::CrossBoundaryStep {
                     geometry: &geometry,
                     reference: &reference,

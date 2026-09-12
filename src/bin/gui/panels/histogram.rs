@@ -181,7 +181,7 @@ impl AutoShadeApp {
                     self.curve_drag = None;
                 }
             }
-            if ui.small_button("↺").on_hover_text(tr(lang, "Clear the current channel's curve")).clicked() {
+            if glyph(ui, true, "↺").on_hover_text(tr(lang, "Clear the current channel's curve")).clicked() {
                 let pts = curve_points_mut(&mut self.recipe, target, self.curve_channel)
                     .expect("the target was validated on entry");
                 if !pts.is_empty() {
