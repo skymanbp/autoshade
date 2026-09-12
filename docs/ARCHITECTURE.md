@@ -134,8 +134,8 @@
 > wrong reason; it writes a `=== name ===` transcript that
 > `scripts/check_docs.py --gates` reads the counts and the lane set back out
 > of, and it prints the by-name test-set difference against a saved baseline.
-> 1478 library + 24 CLI + 172 GUI + 2+2 contract tests are enumerated in the GUI
-> build; the library result is 1463 pass + 15 `#[ignore]`d forensic probes.
+> 1486 library + 24 CLI + 173 GUI + 2+2 contract tests are enumerated in the GUI
+> build; the library result is 1471 pass + 15 `#[ignore]`d forensic probes.
 > R35 adds native-composition, geometry-tile and residual-band pins; the GUI
 > result is 171 pass + one explicit scratch-recipe export probe ignored in the
 > ordinary battery. The source name set is +34 / −8 against `816a457`; all
@@ -2531,6 +2531,15 @@ code at every pixel and frozen evidence shares within 1e-4. Guided refinement
 is compared at every alpha sample. Core/mass equality does not prove edge
 identity. A changed raster first passes its ordinary estimator and boundary
 gate; a native trial then repeats those gates using the frozen cell evidence.
+The native trial's contour is built in the preview's own mask frame (R38,
+`render::preview_mask_coverage`): the pixels every ruler judges come from
+`develop_preview`, which evaluates a parametric geometry through
+`MaskFrame::downstream`, and under the reference pair's lens profile that
+edge sits three to four analysis pixels off the stored contour — a
+stored-frame contour put the step ruler's feet on two lifted pixels, read a
+27-code seam as 5 codes, and shipped a tile as a rectangle in the sky. The
+zone regression check and the band rulers read their weights in the same
+frame.
 The carrier is then chosen by fidelity to the target, not by resemblance
 between the two renders (R36, `native_carrier_fits`): the native tile ships
 unless its residual on the hard cell's own population or its frame error is
@@ -2557,17 +2566,40 @@ trial replaces the parent, never stacks on it. The whole trial must improve
 the zone's mean deltaE by >0.02 and retain zone/frame do-no-harm. One shared
 boundary-budget shrink covers every band break and the semantic horizon,
 using the same frozen-rim measurement and zero-difference invariant as the
-single-zone gate. After that, the complete set must not regress
-the target-referenced luma, charged luma or charged colour boundary rulers
-at EACH break and at the horizon. A reduction in the worst rim cannot
-hide another rim getting worse; only the compact disclosure takes the maximum.
-The negative cross-rim pin catches that false admission. A second reading
-compares the actual cross-contour target steps in Rec.709 luma, RGB and Lab
-chroma, separately in every existing 12×8 evidence cell. The transported
-soft-rim bow is not that target gap, and has no samples at a hard edge; a
-whole-horizon percentile can also hide a small hazy segment. Both failure
-directions are pinned. Rejected trials restore the recipe and notes; the
-single outcome note is the only change when no split ships.
+single-zone gate. After that, the complete set must not regress the
+target-referenced band readings at EACH break and at the horizon — in luma,
+the widest channel and Lab chroma, separately in every 12×8 evidence cell.
+Since R37 both readings are CELL MEANS (`rim_cell_gaps`: the render's
+transition band against the target's through the settled-sky transport;
+`step_cell_gaps`: the cross-contour step against the target's — the
+transported soft-rim bow is not that target gap, and has no samples at a hard
+edge). A cell may move away from the target by no more than the family's
+own seam ceiling in luma or the widest channel — the largest step the
+boundary gate lets any one crossing introduce, so a fidelity ruler that
+refused less would refuse what the gate had just accepted as a seam — and
+by no more than one just noticeable difference in chroma (2.3 ΔE*ab; Mahy,
+Van Eycken & Oosterlinck 1994); and on average over the occupied cells no
+component may get worse by more than the one-code floor, so a drift every
+cell can hide cannot add up (`seams_do_not_regress`, `mean_regression`,
+`CHROMA_JND`). Until R37 both readings were per-crossing 90th-percentile
+ranks, which on a re-synthesised target rank its texture: on the reference
+pair at 0.85 they read 24 codes of noise, and a band set that improved the
+sky's deltaE 30.4 → 25.4 and every worst seam and target step was refused
+for "regressing" one cell by that noise — at every strength since R35. The
+cell means are texture-free, but a one-code per-cell tolerance was still a
+Pareto demand on 288 entries per rim: it refused the same set (deltaE 30.1
+→ 27.0, every maximum of both rulers better) for 1.3 ΔE of chroma in one
+horizon-band cell and 1.2 codes of luma in one contour cell, read through
+the verdict's own disclosure (`worst cell regression band
++0.01332@rim0/cell46/chroma, contour +0.00481@rim0/cell55/luma`,
+2026-09-11), which now prints each ruler's mean beside its worst cell. A
+reduction in the worst rim still cannot hide another cell getting worse
+past those tolerances; only the compact disclosure takes the maximum, and
+the negative cross-rim pin catches that false admission.
+`a_target_referenced_cell_gap_reads_the_band_shape_not_the_texture` pins
+that a three-code checkerboard twin of the target reads under a code while a
+four-code band reads at least three. Rejected trials restore the recipe and
+notes; the single outcome note is the only change when no split ships.
 
 Replacement shrink uses the same boundary gate and bisection, but its zero
 baseline retains the accepted parent's controls on each band's geometry.
@@ -3355,6 +3387,61 @@ earn credit (the probes stay inside its own ramp) while a two-pixel one earns
 none (they land on the settled plateaus). One contract for both families: no
 seam larger than the scene's own local variation, floor one code, ceiling
 0.012.
+
+**A step the target itself carries is not a seam (R37).** The ceiling was
+absolute: whatever a crossing's context earned, nothing could introduce more
+than 0.012 luma there — and on the reference desert-dusk pair the target's own
+horizon steps +8.4 codes at the median (+15.3 at the 90th percentile) against
+the source's +3.0, so the two acceptance rulers — |render step − target step|
+and |introduced step| — contradicted each other by construction. Both rulers
+now take the paired target at the analysis geometry (`StepFrames::target`;
+`boundary_rim_toward`, `boundary_step_toward`, `enforce_boundary_gate_toward`,
+`BitmapBoundaryInput::target_boundary`): the target's own difference in
+differences at a crossing — for the soft family, its own band shortfall
+through its own settled-sky transport — is what the correction may reproduce,
+and only the UNASKED part is charged (`unasked`: nothing while the introduced
+step goes the target's way and no further, the overshoot past it, the whole
+step when it goes the other way; zero asked reduces bit-for-bit to the rule
+above, so `k=0` still reads exactly 0.0 and the bisection keeps its
+invariant). The target's texture is re-synthesised where the zoned fit runs,
+so at one pixel its step is that texture's noise — twelve codes on the
+reference pair's horizon, the size of the correction's own step — and a
+per-crossing sign vote of it is a coin flip even where a cell's mean stands
+thirty standard errors out (385 of 718 crossings agreeing, measured
+2026-09-11). The allowance is therefore a per-cell MEAN: every band pixel
+(soft) or crossing (hard) adds the target's own step, the frozen k=1
+candidate's and the render's to its 12×8 evidence cell (`CellSums`), and a
+cell's SHARE — mean target step over mean candidate step — is honoured only
+from eight crossings, with both means at least one code, the target moving
+the correction's way and its mean at least two standard errors from zero
+(`cell_share`, `TARGET_STEP_MIN_CROSSINGS`, `TARGET_STEP_SIGMAS`,
+`BOUNDARY_STEP_FLOOR`); a coin-flip boundary allows nothing. A share rather
+than a pooled step because a zone dial is multiplicative in linear light —
+its step grows with the base level along one cell, and a pooled absolute
+step left the brighter half of every cell charged for a horizon the target
+carries at exactly the candidate's height — and the allowance it yields,
+share × the crossing's own frozen step, holds still through the shrink
+bisection exactly as the slope credit does. The pass sentences print the
+asked rank beside the charged one (`of which the target's own boundary asks
+{asked}; the unasked part context-charged {charged}`), the free-mask
+attachment note too. The no-target forms (`boundary_rim`, `boundary_step`,
+`enforce_boundary_gate`) survive as the test-only rulers the context-budget
+pins above measure. Pinned on both families
+(`a_step_the_target_itself_carries_is_not_charged_as_a_seam`,
+`a_tile_edge_the_target_itself_carries_is_not_charged_as_a_seam`): the
+candidate as its own target is charged exactly 0.0 and kept at k=1; the
+untouched frame and the opposite dose charge bit-for-bit what the context
+rule charged; half the dose sits strictly between; a coin-flip target charges
+exactly the no-target bits; and
+`a_cell_share_needs_a_quorum_a_mean_its_noise_cannot_hide_and_a_code` pins
+the vote itself — a five-code mean honoured from forty pixels and refused
+from ten. On the reference pair this allows the sky zone nothing in the hazy
+middle of its horizon, and correctly so: there the target's band is
+relatively BRIGHTER than its settled sky — a glow — the opposite of a
+feathered uniform correction's shortfall, and what that horizon asks for is a
+band. That is where the same measurement changed an outcome: the sub-zone
+trial rulers (below). The reference pair's numbers are in the R37 ledger
+entry.
 
 **Both rulers also read COLOUR, charged identically.** The same difference in
 differences is taken per channel — for the step ruler on R, G and B directly,

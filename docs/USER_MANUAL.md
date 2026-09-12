@@ -40,6 +40,14 @@ curves, HSL, color grading, texture, clarity, dehaze, noise reduction,
 sharpening, vignette, crop, and lens-related settings, rendered through the
 same engine as `autoshade apply`.
 
+Buttons follow one vocabulary: the gold button in a group is its main action
+(Export on the toolbar, AI Analyze, Reverse-fit recipe, Apply in a brush
+session, Save settings), icon-only buttons are squares as tall as the text
+buttons beside them, and rows of equal actions in the side panels sit in
+aligned columns. A glyph in front of a label always means the same thing —
+🤖 an AI verb, ✓ finish, ✕ cancel, ＋ add, ↺ reset, 🗂 a folder, 🖌 paint, 💧
+pick from the image.
+
 **Save develop** (`Ctrl+S`) persists the recipe and, for a RAW, its XMP
 projection in the per-user develop store (`%LOCALAPPDATA%\autoshade` on
 Windows). Upgrading from Autoshop v1.1.0 or earlier moves the old
@@ -61,16 +69,16 @@ or color range restrictions. Linear, radial, brush and AI components export
 that composition to Lightroom. Bitmap components remain a named export loss;
 the component Invert control complements its shape before composition.
 
-- **Linear gradient:** choose **＋ Linear gradient**, then drag from the fully
+- **Linear gradient:** choose **＋ Linear**, then drag from the fully
   affected side toward the unaffected side; the shipped falloff eases softly at
   both handles. Hold `Shift` to lock an axis.
-- **Radial gradient:** choose **＋ Radial gradient**, drag the ellipse, then
+- **Radial gradient:** choose **＋ Radial**, drag the ellipse, then
   position, rotate, and feather it.
 - **Brush:** choose **🖌 Brush** and paint. Use Erase to subtract, `[` and `]`
   to change brush size, and **Apply** to bake the stroke into a bitmap alpha.
-- **AI select subject:** runs local BiRefNet, with a named U²-Net fallback when
+- **🤖 Select subject:** runs local BiRefNet, with a named U²-Net fallback when
   the preferred backend cannot run.
-- **AI select sky:** runs local OneFormer ADE20K sky segmentation.
+- **🤖 Select sky:** runs local OneFormer ADE20K sky segmentation.
 - **Point-prompted object:** imported object intent and ordered positive click
   gestures are re-derived locally with SAM 2.1.
 
@@ -139,19 +147,36 @@ rather than a silence. A zone whose own structural reading
 is past the pairing line also says which estimator solved its tone, because a
 per-pixel regression reads a repainted texture's contrast low.
 
+**A step the target has is not a seam.** Since R37 the boundary gate that
+holds every zone, band and tile reads the target too: where the target's own
+boundary steps — a sharp horizon under a hazy source — the correction may
+reproduce that step, and only what it introduces beyond it is charged against
+the seam ceiling. The target's step is read as an average over each evidence
+cell, so a repainted texture's pixel noise neither grants nor refuses
+anything. The pass line says how much the target asked for (`of which the
+target's own boundary asks …`).
+
 **A sky can earn bands.** When the sky or land residual has a measured vertical
 colour pattern, the fit trials two or three overlapping corrections in place
 of the single zone. Each band must pass the same evidence and quality gates,
 and the set must improve the zone without worsening the boundary readings
-at any band break or at the horizon. The fit also checks the target's
-actual step within each boundary cell; shrinking a replacement preserves
-the original correction's tone while reducing the new band differences.
+at any band break or at the horizon. Those readings compare the render with
+the target as cell averages (since R37; ranking single pixels against a
+repainted texture had refused every band on the reference pair): no cell may
+move away from the target by more than a seam's worth, and the average may
+not move by more than a code. The fit also checks the target's actual step
+within each boundary cell; shrinking a replacement preserves the original
+correction's tone while reducing the new band differences.
 The mask list names each `sky · band 2/3` with its Intersect components visible.
 An unstructured residual keeps the single correction and says why. Hard spatial
 tiles now use four intersecting gradients; a guided edge retains its bitmap
 only when the native trial fails the shared gates or fits the photo worse
 than the bitmap on the tile's own cell or on the whole frame — the tile's
-note prints both residuals. The save
+note prints both residuals. The native trial's gate reads the tile's edge
+where the preview paints it under the photo's lens profile (R38): before, a
+contour taken at the tile's stored coordinates sat a few pixels off that
+edge, the seam ruler measured nothing there, and a gradient tile could ship
+as a visible rectangle in the sky. The save
 line therefore counts only the Bitmap corrections/components that remain.
 Lightroom reads the native composition, but its own rendering of the written
 intersections has not been measured; AI alpha and local recolour gains still
@@ -441,7 +466,7 @@ reverse-fit produces an editable recipe.
 
 ## Configure and use the AI features
 
-Open **Settings** to configure the image/vision role and the analysis-verifier
+Open **Settings** (the ⚙ button at the right end of the toolbar) to configure the image/vision role and the analysis-verifier
 role. The image role uses an OpenAI-compatible API for visual proposals and
 generative images. The verifier defaults to the signed-in `claude` CLI over
 OAuth, receives statistics and recipe data rather than image pixels, and can

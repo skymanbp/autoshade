@@ -47,19 +47,6 @@ struct ResidualBin {
     delta: [f64; 3],
 }
 
-/// CIE Lab, D65, from the analysis raster's display sRGB. Keep signed a/b:
-/// equally strong warm/cool residuals have equal deltaE and opposite intent.
-fn lab(rgb: &[f32; 3]) -> [f32; 3] {
-    let [r, g, b] = rgb.map(render::srgb_to_linear);
-    let f = |t: f32| if t > 216.0 / 24389.0 {
-        t.cbrt()
-    } else { (24389.0 / 27.0 * t + 16.0) / 116.0 };
-    let x = f((0.4124564 * r + 0.3575761 * g + 0.1804375 * b) / 0.95047);
-    let y = f(0.2126729 * r + 0.7151522 * g + 0.0721750 * b);
-    let z = f((0.0193339 * r + 0.119192 * g + 0.9503041 * b) / 1.08883);
-    [116.0 * y - 16.0, 500.0 * (x - y), 200.0 * (y - z)]
-}
-
 fn delta_e(before: &[[f32; 3]], target: &[[f32; 3]], weights: &[f32]) -> f32 {
     let (mut sum, mut mass) = (0.0f64, 0.0f64);
     for ((b, t), w) in before.iter().zip(target).zip(weights) {
@@ -190,17 +177,25 @@ fn band_components(model: &BandModel, band: usize) -> Vec<MaskComponent> {
     }).collect()
 }
 
-fn band_weights(model: &BandModel, band: usize, image: &DynamicImage) -> Vec<f32> {
-    let coverage = render::mask_coverage(&LocalAdjustment {
+/// The band's weights in the PREVIEW's frame (R38): its linear components
+/// are transported by the recipe's lens profile exactly as `develop_preview`
+/// transports them, so the ruler's band is the band the render paints.
+fn band_weights(
+    model: &BandModel, band: usize, image: &DynamicImage, recipe: &crate::recipe::EditRecipe,
+) -> Vec<f32> {
+    let coverage = render::preview_mask_coverage(&LocalAdjustment {
         mask: MaskGeometry::Linear { zero_x: 0.5, zero_y: 0.5, full_x: 0.5, full_y: 0.5 },
         components: band_components(model, band),
         ..Default::default()
-    }, image, render::MaskFrame::AsRendered);
+    }, image, recipe);
     coverage.as_raw().iter().map(|v| *v as f32 / 255.0).collect()
 }
 
-fn band_attachment(parent: &ZoneAttachment, model: &BandModel, band: usize, image: &DynamicImage) -> ZoneAttachment {
-    let weights = band_weights(model, band, image);
+fn band_attachment(
+    parent: &ZoneAttachment, model: &BandModel, band: usize, image: &DynamicImage,
+    recipe: &crate::recipe::EditRecipe,
+) -> ZoneAttachment {
+    let weights = band_weights(model, band, image, recipe);
     let mut attachment = parent.clone();
     attachment.source_weights.iter_mut().zip(&weights).for_each(|(w, a)| *w *= a);
     attachment.target_weights.iter_mut().zip(&weights).for_each(|(w, a)| *w *= a);
@@ -219,64 +214,115 @@ fn band_attachment(parent: &ZoneAttachment, model: &BandModel, band: usize, imag
     attachment
 }
 
-fn seams(
-    target: &[[f32; 3]], pixels: &[[f32; 3]], frozen: &[[f32; 3]],
-    rims: &[Vec<f32>], size: (u32, u32),
-) -> Vec<[f32; 3]> {
-    rims.iter().map(|weights| {
-        let rim = boundary_rim(target, pixels, frozen, weights, size.0, size.1);
-        [rim.rim, rim.charged, rim.colour_charged]
-    }).collect()
+/// R37. The target-referenced band gap of every rim, per evidence cell
+/// ([`rim_cell_gaps`]): the MEAN over the cell's transition-band pixels of
+/// the render against the target's band through the settled-sky transport,
+/// in luma, the widest channel and Lab chroma. A mean, because the target's
+/// texture is re-synthesised where this runs: at one pixel it is zero-mean
+/// noise of several codes, and ranking it refused, on the reference pair at
+/// 0.85 (2026-09-11), a band set that improved the sky's deltaE 30.4 -> 25.4
+/// and every worst seam and target step, for "regressing" one cell by that
+/// noise. One entry per cell of every rim, 0 where a rim has no band pixel
+/// in a cell, so two readings of the same rims compare positionally.
+fn seams(target: &[[f32; 3]], pixels: &[[f32; 3]], rims: &[Vec<f32>], size: (u32, u32)) -> Vec<[f32; 3]> {
+    rims.iter().flat_map(|weights| rim_cell_gaps(target, pixels, weights, size.0, size.1)).collect()
 }
 
-/// The soft-rim ruler transports a settled correction through the feather.
-/// It is not the target's own cross-boundary step, and a hard boundary has
-/// no soft-rim samples at all. Read that independent quantity directly in
-/// luma, RGB and Lab chroma. Keep each evidence cell separate: a quiet hazy
-/// segment must not disappear below a whole-horizon percentile.
-fn target_steps(
-    target: &[[f32; 3]], pixels: &[[f32; 3]], rims: &[Vec<f32>], size: (u32, u32),
-) -> Vec<[f32; 3]> {
-    let (w, h) = (size.0 as usize, size.1 as usize);
-    let (nx, ny) = (crate::fit_cells::CELLS_X, crate::fit_cells::CELLS_Y);
-    let luma = |p: [f32; 3]| 0.2126 * p[0] + 0.7152 * p[1] + 0.0722 * p[2];
-    let mut scores = Vec::new();
-    for weights in rims {
-        let mut cells = vec![Vec::<[f32; 3]>::new(); nx * ny];
-        let mut walk = |start: usize, stride: usize, len: usize| {
-            for p in 1..len {
-                let (lo, hi) = (start + (p - 1) * stride, start + p * stride);
-                if (weights[lo] >= 0.5) == (weights[hi] >= 0.5) { continue; }
-                let offset = ZONE_STEP_OFFSET.saturating_sub(1);
-                let Some(a) = (p - 1).checked_sub(offset) else { continue; };
-                let b = p + offset;
-                if b >= len { continue; }
-                let (a, b) = (start + a * stride, start + b * stride);
-                if (weights[a] >= 0.5) != (weights[lo] >= 0.5)
-                    || (weights[b] >= 0.5) != (weights[hi] >= 0.5) { continue; }
-                let gap = std::array::from_fn::<_, 3, _>(|c|
-                    (pixels[a][c] - pixels[b][c]) - (target[a][c] - target[b][c]));
-                let (pa, pb, ta, tb) = (lab(&pixels[a]), lab(&pixels[b]), lab(&target[a]), lab(&target[b]));
-                let chroma = (1..3).map(|c| ((pa[c] - pb[c]) - (ta[c] - tb[c])).powi(2)).sum::<f32>().sqrt() / 100.0;
-                let cell = ((hi / w) * ny / h).min(ny - 1) * nx + ((hi % w) * nx / w).min(nx - 1);
-                cells[cell].push([luma(gap).abs(), gap.into_iter().map(f32::abs).fold(0.0, f32::max), chroma]);
-            }
-        };
-        for y in 0..h { walk(y * w, 1, w); }
-        for x in 0..w { walk(x, w, h); }
-        scores.extend(cells.iter().map(|samples| std::array::from_fn(|c| {
-            if samples.is_empty() { 0.0 } else {
-                magnitude_rank(&mut samples.iter().map(|s| s[c]).collect::<Vec<_>>())
-            }
-        })));
+/// The same gap across each rim's 50% contour ([`step_cell_gaps`]): a hard
+/// boundary has no transition band to read into, and the soft ruler's
+/// transported bow is not the target's own cross-boundary step. Cells stay
+/// separate: a quiet hazy segment must not disappear into a whole horizon.
+fn target_steps(target: &[[f32; 3]], pixels: &[[f32; 3]], rims: &[Vec<f32>], size: (u32, u32)) -> Vec<[f32; 3]> {
+    rims.iter().flat_map(|weights| step_cell_gaps(target, pixels, weights, size.0, size.1)).collect()
+}
+
+/// The CIE76 colour difference an observer can just tell apart: 2.3 dE*ab
+/// (Mahy, Van Eycken & Oosterlinck 1994, Color Res. Appl. 19(2) 105-121,
+/// doi:10.1111/j.1520-6378.1994.tb00070.x). The chroma reading's own
+/// per-cell tolerance, on its 100-unit scale: the boundary gate has no
+/// chroma ruler whose ceiling could serve, and the reading is perceptual.
+const CHROMA_JND: f32 = 2.3;
+
+/// A band set does not regress a boundary when (1) no cell of any rim moves
+/// away from the target by more than `ceiling` — the family's own seam
+/// ceiling, the largest step the boundary gate lets any one crossing
+/// introduce, so a fidelity ruler that refused less would refuse what the
+/// gate had just accepted as a seam — in luma or the widest channel, nor by
+/// more than one just noticeable difference in chroma ([`CHROMA_JND`]); and
+/// (2) on average over the rims' occupied cells no component gets worse by
+/// more than the one-code floor ([`mean_regression`]), so a drift every
+/// cell can hide cannot add up to a regression the local rule never sees.
+/// A better worst rim still cannot pay for a regression at another break
+/// or at the horizon. The per-cell tolerance used to be the one-code floor
+/// itself: a Pareto demand on 288 entries per rim, which on the reference
+/// pair at 0.85 (2026-09-11) refused a set that improved the sky's deltaE
+/// 30.1 -> 27.0 and every maximum of both rulers, for 1.3 dE of chroma in
+/// one cell of the horizon band and 1.2 codes of luma in one cell of its
+/// contour — read through the verdict's own disclosure.
+fn seams_do_not_regress(before: &[[f32; 3]], after: &[[f32; 3]], ceiling: f32) -> bool {
+    if before.is_empty() || before.len() != after.len() {
+        return false;
     }
-    scores
+    let tolerance = [ceiling, ceiling, CHROMA_JND / 100.0];
+    let local = before.iter().zip(after).all(|(b, a)| (0..3).all(|c| a[c] - b[c] <= tolerance[c]));
+    let global = mean_regression(before, after).iter().all(|worse| *worse <= BOUNDARY_STEP_FLOOR);
+    local && global
 }
 
-fn seams_do_not_regress(before: &[[f32; 3]], after: &[[f32; 3]]) -> bool {
-    !before.is_empty() && before.len() == after.len()
-        && before.iter().zip(after).all(|(b, a)| a.iter().zip(b).all(|(a, b)| *a <= b + 1e-6))
+/// The change of each component's mean over the cells either reading
+/// occupies: an unoccupied cell reads 0 in both and would only dilute.
+fn mean_regression(before: &[[f32; 3]], after: &[[f32; 3]]) -> [f32; 3] {
+    let occupied = before
+        .iter()
+        .zip(after)
+        .filter(|(b, a)| b.iter().chain(a.iter()).any(|v| *v > 0.0))
+        .count()
+        .max(1) as f32;
+    std::array::from_fn(|c| before.iter().zip(after).map(|(b, a)| a[c] - b[c]).sum::<f32>() / occupied)
 }
+
+/// The largest increase of any entry between two readings of the same rims:
+/// `(entry, component, increase)`, where `entry / cells` is the rim (0 the
+/// horizon, then each break) and `entry % cells` the evidence cell. None
+/// when nothing got worse, or when the readings do not pair up.
+fn worst_regression(before: &[[f32; 3]], after: &[[f32; 3]]) -> Option<(usize, usize, f32)> {
+    if before.is_empty() || before.len() != after.len() {
+        return None;
+    }
+    let mut worst: Option<(usize, usize, f32)> = None;
+    for (entry, (b, a)) in before.iter().zip(after).enumerate() {
+        for component in 0..3 {
+            let worse = a[component] - b[component];
+            if worse > 0.0 && worst.is_none_or(|(_, _, w)| worse > w) {
+                worst = Some((entry, component, worse));
+            }
+        }
+    }
+    worst
+}
+
+/// The disclosure of [`worst_regression`] and [`mean_regression`] for both
+/// trial rulers: which rim, cell and component each got worse in and by how
+/// much, then the component whose mean moved most; `none` when no cell got
+/// worse.
+fn regression_text(seam: Ruled, step: Ruled) -> String {
+    const COMPONENTS: [&str; 3] = ["luma", "channel", "chroma"];
+    let cells = crate::fit_cells::CELLS_X * crate::fit_cells::CELLS_Y;
+    let one = |(worst, mean): Ruled| {
+        let most = (1..3).fold(0, |most, c| if mean[c] > mean[most] { c } else { most });
+        let mean = format!("mean {:+.5}@{}", mean[most], COMPONENTS[most]);
+        match worst {
+            Some((entry, component, worse)) => format!(
+                "+{worse:.5}@rim{}/cell{}/{} ({mean})", entry / cells, entry % cells, COMPONENTS[component]
+            ),
+            None => format!("none ({mean})"),
+        }
+    };
+    format!("band {}, contour {}", one(seam), one(step))
+}
+
+/// One ruler's two readings of a trial: its worst cell and its means.
+type Ruled = (Option<(usize, usize, f32)>, [f32; 3]);
 
 fn worst_seams(scores: &[[f32; 3]]) -> [f32; 3] {
     scores.iter().fold([0.0f32; 3], |worst, score| std::array::from_fn(|i| worst[i].max(score[i])))
@@ -370,7 +416,7 @@ pub(super) fn replace_zone(
         let mut frame_error = uncorrected_error;
         let first_band = report.recipe.masks.len();
         let attachments: Vec<_> = (0..=model.breaks.len())
-            .map(|band| band_attachment(parent, &model, band, image)).collect();
+            .map(|band| band_attachment(parent, &model, band, image, &report.recipe)).collect();
         let rims: Vec<_> = std::iter::once(parent.source_weights.clone())
             .chain(attachments.iter().map(|a| a.source_weights.clone())).collect();
         let mut solved = true;
@@ -391,10 +437,10 @@ pub(super) fn replace_zone(
                 shrink_to_parent(&mut report.recipe.masks[first_band..], &originals, control, 0.0);
                 let anchor_px = fit::pixels_of(&render::develop_preview(image, &report.recipe));
                 report.recipe.masks[first_band..].clone_from_slice(&originals);
-                enforce_boundary_gates_with_shrink(image, report, &boundaries, &shares, first_band,
+                enforce_boundary_gates_with_shrink(Some(target), image, report, &boundaries, &shares, first_band,
                     (&anchor_px, pixels), |masks, originals, _, k| shrink_to_parent(masks, originals, control, k))
             } else {
-                enforce_boundary_gates(image, report, &boundaries, &shares, first_band, &uncorrected, pixels)
+                enforce_boundary_gates(Some(target), image, report, &boundaries, &shares, first_band, &uncorrected, pixels)
             };
             match verdict {
                 BoundaryGateResult::Kept { pixels: kept, .. } => pixels = kept,
@@ -406,12 +452,16 @@ pub(super) fn replace_zone(
         }
         let after = delta_e(&pixels, target, &parent.source_weights);
         let size = (image.width(), image.height());
-        let seam_before = seams(target, &single_px, &single_px, &rims, size);
-        let seam_after = seams(target, &pixels, &single_px, &rims, size);
+        let seam_before = seams(target, &single_px, &rims, size);
+        let seam_after = seams(target, &pixels, &rims, size);
         let step_before = target_steps(target, &single_px, &rims, size);
         let step_after = target_steps(target, &pixels, &rims, size);
-        let no_seam_regression = seams_do_not_regress(&seam_before, &seam_after)
-            && seams_do_not_regress(&step_before, &step_after);
+        let no_seam_regression = seams_do_not_regress(&seam_before, &seam_after, ZONE_BOUNDARY_RIM_MAX)
+            && seams_do_not_regress(&step_before, &step_after, ZONE_BOUNDARY_STEP_MAX);
+        let regression = regression_text(
+            (worst_regression(&seam_before, &seam_after), mean_regression(&seam_before, &seam_after)),
+            (worst_regression(&step_before, &step_after), mean_regression(&step_before, &step_after)),
+        );
         let zone_before = zone_err(&zone_moments(&single_px, &parent.source_weights), &zone_moments(target, &parent.target_weights));
         let zone_after = zone_err(&zone_moments(&pixels, &parent.source_weights), &zone_moments(target, &parent.target_weights));
         let frame_after = fit::look_err_with_evidence(&pixels, target, &report.evidence);
@@ -434,6 +484,7 @@ pub(super) fn replace_zone(
             ("seam_after", if complete { scores_text(&seam_after) } else { values::UNMEASURED.to_string() }),
             ("step_before", scores_text(&step_before)),
             ("step_after", if complete { scores_text(&step_after) } else { values::UNMEASURED.to_string() }),
+            ("regression", if complete { regression } else { values::UNMEASURED.to_string() }),
         ];
         if reason == "accepted" && best.as_ref().is_none_or(|(_, _, _, error): &(_, _, _, f32)| after < *error - ZONE_GLOBAL_REGRESSION_TOL) {
             report.err_after = frame_after;
@@ -500,7 +551,7 @@ mod tests {
         let model = BandModel { r2: 1.0, breaks: vec![0.3125], overlap: 0.625 * SUBZONE_OVERLAP };
         let masks = if split {
             (0..2).map(|band| {
-                let a = band_attachment(&parent, &model, band, &source);
+                let a = band_attachment(&parent, &model, band, &source, &crate::recipe::EditRecipe::default());
                 LocalAdjustment {
                     mask: a.mask, components: a.components, role: a.role,
                     exposure_ev: 0.15, color_gains: Some(if band == 0 { [1.16, 1.0, 0.84] } else { [0.84, 1.0, 1.16] }),
@@ -536,15 +587,58 @@ mod tests {
 
     #[test]
     fn an_improved_worst_rim_cannot_hide_another_band_boundary_regression() {
+        let ceiling = ZONE_BOUNDARY_RIM_MAX;
         let before = [[0.10, 0.12, 0.15], [0.30, 0.32, 0.35], [0.20, 0.22, 0.25]];
-        let after = [[0.11, 0.13, 0.16], [0.29, 0.31, 0.34], [0.19, 0.21, 0.24]];
+        let after = [[0.113, 0.133, 0.163], [0.29, 0.31, 0.34], [0.19, 0.21, 0.24]];
         assert!(worst_seams(&after).iter().zip(worst_seams(&before)).all(|(a, b)| *a < b),
             "the old maximum-only comparison would admit this set");
-        assert!(!seams_do_not_regress(&before, &after), "the horizon still regressed");
+        assert!(!seams_do_not_regress(&before, &after, ceiling), "the horizon still regressed");
         let conserved = [[0.10, 0.12, 0.15], after[1], after[2]];
-        assert!(seams_do_not_regress(&before, &conserved));
-        assert!(seams_do_not_regress(&before, &before));
-        assert!(!seams_do_not_regress(&before, &conserved[..2]), "a missing rim is not a pass");
+        assert!(seams_do_not_regress(&before, &conserved, ceiling));
+        assert!(seams_do_not_regress(&before, &before, ceiling));
+        assert!(!seams_do_not_regress(&before, &conserved[..2], ceiling), "a missing rim is not a pass");
+        // R37: a cell may move away from the target by the family's seam
+        // ceiling in luma or the widest channel — the gate's own exchange —
+        // and by one just noticeable difference in chroma.
+        let luma = |worse: f32| [[0.10 + worse, 0.12, 0.15], after[1], after[2]];
+        assert!(seams_do_not_regress(&before, &luma(ceiling - 1e-4), ceiling), "under the ceiling is not a regression");
+        assert!(!seams_do_not_regress(&before, &luma(ceiling + 1e-4), ceiling), "past it, it is");
+        let channel = |worse: f32| [[0.10, 0.12 + worse, 0.15], after[1], after[2]];
+        assert!(seams_do_not_regress(&before, &channel(ceiling - 1e-4), ceiling));
+        assert!(!seams_do_not_regress(&before, &channel(ceiling + 1e-4), ceiling));
+        let chroma = |worse: f32| [[0.10, 0.12, 0.15 + worse], after[1], after[2]];
+        assert!(seams_do_not_regress(&before, &chroma(CHROMA_JND / 100.0 - 1e-4), ceiling), "under a JND of chroma");
+        assert!(!seams_do_not_regress(&before, &chroma(CHROMA_JND / 100.0 + 1e-4), ceiling), "a JND past the target is a regression");
+        assert_eq!(seams_do_not_regress(&before, &chroma(ceiling + 1e-4), ceiling), ceiling < CHROMA_JND / 100.0,
+            "the chroma tolerance is the JND, not the luma ceiling");
+        // …and a drift every cell can hide adds up: every cell under the
+        // ceiling, the mean past the one-code floor.
+        let drift = |worse: f32| -> [[f32; 3]; 3] {
+            std::array::from_fn(|i| [before[i][0] + worse, before[i][1], before[i][2]])
+        };
+        assert!(seams_do_not_regress(&before, &drift(BOUNDARY_STEP_FLOOR - 1e-4), ceiling), "a mean drift under a code is rounding");
+        assert!(!seams_do_not_regress(&before, &drift(BOUNDARY_STEP_FLOOR + 1e-4), ceiling), "past a code on average it is a regression");
+        assert!((mean_regression(&before, &drift(0.003))[0] - 0.003).abs() < 1e-6);
+        // Unoccupied cells dilute nothing.
+        let sparse_before = [[0.10, 0.12, 0.15], [0.0; 3], [0.0; 3]];
+        let sparse_after = [[0.10 + 0.005, 0.12, 0.15], [0.0; 3], [0.0; 3]];
+        assert!((mean_regression(&sparse_before, &sparse_after)[0] - 0.005).abs() < 1e-6, "the mean is over occupied cells");
+        assert!(!seams_do_not_regress(&sparse_before, &sparse_after, ceiling), "one occupied cell past a code is the rim's whole mean");
+    }
+
+    #[test]
+    fn the_regression_disclosure_names_the_rim_cell_component_and_the_mean() {
+        let cells = crate::fit_cells::CELLS_X * crate::fit_cells::CELLS_Y;
+        let mut before = vec![[0.1f32; 3]; 2 * cells];
+        let mut after = before.clone();
+        after[cells + 46][2] += 0.0133; // rim 1, cell 46, chroma
+        before[3][0] = 0.2;
+        after[3][0] = 0.15; // an improvement elsewhere
+        let text = regression_text(
+            (worst_regression(&before, &after), mean_regression(&before, &after)),
+            (None, [0.0; 3]),
+        );
+        assert_eq!(text, "band +0.01330@rim1/cell46/chroma (mean +0.00007@chroma), contour none (mean +0.00000@luma)");
     }
 
     #[test]
@@ -576,10 +670,10 @@ mod tests {
         let after: Vec<_> = (0..w*h).map(|i| if i/w < h/2 { [0.36; 3] } else { [0.2; 3] }).collect();
         let rims = vec![weights];
         let size = (w as u32, h as u32);
-        assert!(seams_do_not_regress(&seams(&target, &before, &before, &rims, size),
-            &seams(&target, &after, &before, &rims, size)), "a hard edge has no soft-rim samples");
+        assert!(seams_do_not_regress(&seams(&target, &before, &rims, size),
+            &seams(&target, &after, &rims, size), ZONE_BOUNDARY_RIM_MAX), "a hard edge has no soft-rim samples");
         assert!(!seams_do_not_regress(&target_steps(&target, &before, &rims, size),
-            &target_steps(&target, &after, &rims, size)), "the target step still got worse");
+            &target_steps(&target, &after, &rims, size), ZONE_BOUNDARY_STEP_MAX), "the target step still got worse");
     }
 
     #[test]
@@ -587,16 +681,19 @@ mod tests {
         let (w, h) = (192usize, 96usize);
         let target: Vec<_> = (0..w*h).map(|i| if i/w < h/2 { [0.5; 3] } else { [0.2; 3] }).collect();
         let before: Vec<_> = (0..w*h).map(|i| if i/w < h/2 { [0.49; 3] } else { [0.2; 3] }).collect();
-        let after: Vec<_> = (0..w*h).map(|i| if i/w < h/2 {
-            if i%w < w/crate::fit_cells::CELLS_X { [0.48; 3] } else { [0.5; 3] }
-        } else { [0.2; 3] }).collect();
+        // Eleven columns land on the target; the first moves away from it.
+        let after = |column: f32| -> Vec<[f32; 3]> { (0..w*h).map(|i| if i/w < h/2 {
+            if i%w < w/crate::fit_cells::CELLS_X { [column; 3] } else { [0.5; 3] }
+        } else { [0.2; 3] }).collect() };
         let weights = (0..w*h).map(|i| if i/w < h/2 { 1.0 } else { 0.0 }).collect();
         let rims = vec![weights];
         let size = (w as u32, h as u32);
-        assert!(!seams_do_not_regress(&target_steps(&target, &before, &rims, size),
-            &target_steps(&target, &after, &rims, size)), "one of twelve columns regressed");
-        assert!(seams_do_not_regress(&target_steps(&target, &before, &rims, size),
-            &target_steps(&target, &target, &rims, size)));
+        let steps = |pixels: &[[f32; 3]]| target_steps(&target, pixels, &rims, size);
+        assert!(!seams_do_not_regress(&steps(&before), &steps(&after(0.47)), ZONE_BOUNDARY_STEP_MAX),
+            "one of twelve columns regressed past the ceiling");
+        assert!(seams_do_not_regress(&steps(&before), &steps(&after(0.48)), ZONE_BOUNDARY_STEP_MAX),
+            "a column drifting under the ceiling while eleven land is admitted");
+        assert!(seams_do_not_regress(&steps(&before), &steps(&target), ZONE_BOUNDARY_STEP_MAX));
     }
 
     #[test]
@@ -604,7 +701,8 @@ mod tests {
         let source = DynamicImage::new_rgb8(384, 256);
         for breaks in [vec![0.3], vec![0.2, 0.5]] {
             let model = BandModel { r2: 1.0, breaks, overlap: 0.06 };
-            let weights: Vec<_> = (0..=model.breaks.len()).map(|band| band_weights(&model, band, &source)).collect();
+            let weights: Vec<_> = (0..=model.breaks.len())
+                .map(|band| band_weights(&model, band, &source, &crate::recipe::EditRecipe::default())).collect();
             for i in 0..384 * 256 {
                 let sum = weights.iter().map(|w| w[i]).sum::<f32>();
                 assert!((sum - 1.0).abs() <= 1.0 / 255.0, "pixel {i}: {sum}");

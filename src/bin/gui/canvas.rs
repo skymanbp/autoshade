@@ -484,7 +484,7 @@ impl AutoShadeApp {
                 ui.label(egui::RichText::new(hint).weak().small());
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.small_button("1:1").on_hover_text(tr(lang, "Preview pixels 1:1 (double-click the image to toggle; key: 1)")).clicked() {
+                if action(ui, true, "1:1").on_hover_text(tr(lang, "Preview pixels 1:1 (double-click the image to toggle; key: 1)")).clicked() {
                     // Same ceiling as the render path (view_uv clamps at 12) —
                     // an unclamped value desynced zoom/pan math from the view.
                     // ppp: 1:1 means one texel per PHYSICAL pixel — the value
@@ -495,12 +495,11 @@ impl AutoShadeApp {
                 // "Fit" is natural language, unlike its "1:1" sibling — it
                 // must route through `tr` like every user-facing literal
                 // (the i18n module contract; the audit now flags bypasses).
-                if ui.small_button(tr(lang, "Fit")).on_hover_text(tr(lang, "Fit the whole image to the canvas (double-click the image to toggle; key: 0)")).clicked() {
+                if action(ui, true, tr(lang, "Fit")).on_hover_text(tr(lang, "Fit the whole image to the canvas (double-click the image to toggle; key: 0)")).clicked() {
                     self.zoom_target = 1.0; // glides; the pan clamp eases the rest
                     self.pan = egui::vec2(0.5, 0.5);
                 }
-                if ui
-                    .selectable_label(self.show_clipping, "▲")
+                if glyph_toggle(ui, self.show_clipping, "▲")
                     .on_hover_text(tr(lang, "Clipping warning (J): red = highlight clip, blue = shadow crush (judged on export pixels)"))
                     .clicked()
                 {

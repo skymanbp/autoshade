@@ -1584,7 +1584,7 @@
             };
             let panel = visuals.panel_fill;
             let text = visuals.widgets.noninteractive.fg_stroke.color;
-            let checks: [(&str, egui::Color32, egui::Color32, f64); 7] = [
+            let checks: [(&str, egui::Color32, egui::Color32, f64); 8] = [
                 // (what, fg, bg, minimum). The selected row carries ONLY
                 // accent-coloured text (name + badges — see the gallery row),
                 // so text-on-sel_bg is not a rendered pairing; multi-select
@@ -1597,6 +1597,8 @@
                 ("error toast", c.toast_err_fg, c.toast_err_bg, 4.5),
                 // Non-text indicator: WCAG AA for UI components is 3:1.
                 ("armed clipping triangle", c.clip_tri_on, panel, 3.0),
+                // R38: the primary verb's near-black text on its solid gold.
+                ("primary verb text on its gold fill", crate::buttons::PRIMARY_FG, crate::theme::PILL, 4.5),
             ];
             for (what, fg, bg, min) in checks {
                 let r = ratio(fg, bg);
@@ -8646,4 +8648,132 @@
             ("AutoShade", "Autoshop", !cfg!(target_os = "macos")),
             "the eframe key, the adopted spelling, and the macOS opt-out"
         );
+    }
+
+    /// R38: every button in the vocabulary (`buttons.rs`) stands exactly one
+    /// row tall, icon-only verbs are squares of that row, and no label wraps
+    /// inside its grid cell — rendered at the default panel widths in both
+    /// languages with the widest rows armed: a second variant card, a mask
+    /// brush session, a raster mask selected with a component, a colour
+    /// field, a version, a reference, a multi-selection. The helpers fill
+    /// the registry themselves, so a button that bypasses the vocabulary is
+    /// simply not here; the count floor keeps the pin from passing on an
+    /// empty registry.
+    ///
+    /// Three frames, with both side panels' widths as witnesses. A cell or a
+    /// scoped widget laid past its line's end stands outside the panel and
+    /// widens an auto-fitting panel every frame (R19's runaway, met again as
+    /// +47 px/frame while this vocabulary went in), so a panel that holds
+    /// its default width for three frames has no overflowing row anywhere
+    /// in it — the strongest form of the witness, not merely "stable".
+    #[test]
+    fn every_button_stands_one_row_tall_at_the_default_widths() {
+        use autoshade::recipe::{ColourField, LocalAdjustment, MaskComponent, MaskGeometry};
+        use crate::buttons::DRAWN;
+        use crate::model::{Variant, VariantKind};
+        for lang in [crate::i18n::Lang::En, crate::i18n::Lang::Zh] {
+            let ctx = egui::Context::default();
+            crate::theme::install_theme(&ctx, crate::theme::ThemePref::Dark);
+            let row = ctx.style().spacing.interact_size.y;
+            let mk = |kind| Variant {
+                kind,
+                id: crate::model::new_variant_id(),
+                name: None,
+                recipe: EditRecipe::default(),
+                base: None,
+                origin: None,
+                thumb: None,
+            };
+            let mut app = AutoShadeApp {
+                lang,
+                src_path: Some(PathBuf::from("D:/library/_buttons.ARW")),
+                variants: vec![mk(VariantKind::Original), mk(VariantKind::Generated)],
+                active: 1,
+                versions: vec![1],
+                fit_ref: Some(PathBuf::from("D:/library/_buttons-reference.png")),
+                multi_sel: [0usize].into_iter().collect(),
+                ..Default::default()
+            };
+            app.base_preview = Some(std::sync::Arc::new(image::DynamicImage::new_rgb8(64, 96)));
+            app.recipe.masks.push(LocalAdjustment {
+                mask: MaskGeometry::Bitmap { path: "mask-buttons.png".into() },
+                components: vec![MaskComponent::default()],
+                ..Default::default()
+            });
+            app.recipe.colour_field =
+                Some(ColourField { x: 1, y: 1, b: 1, grid: vec![[0.0; 5]], amount: 0.5, enabled: true });
+            app.sel_mask = Some(0);
+            app.start_mask_brush(None);
+            assert!(app.mask_brush.is_some(), "{lang:?}: the brush session armed");
+            let input = || egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1400.0, 20_000.0),
+                )),
+                ..Default::default()
+            };
+            let mut widths: Vec<[f32; 2]> = Vec::new();
+            let mut rects: Vec<[egui::Rect; 2]> = Vec::new();
+            let mut sections = [0.0f32; 3];
+            for _ in 0..3 {
+                DRAWN.with_borrow_mut(Vec::clear); // the LAST frame's registry only
+                let _ = ctx.run(input(), |ctx| {
+                    ctx.memory_mut(|m| m.set_everything_is_visible(true));
+                    app.upd_top_bar(ctx);
+                    let gallery = egui::SidePanel::left("gallery")
+                        .default_width(240.0)
+                        .show(ctx, |ui| app.gallery_panel(ui));
+                    let controls = egui::SidePanel::left("controls").default_width(320.0).show(ctx, |ui| {
+                        egui::ScrollArea::vertical().show(ui, |ui| {
+                            app.ai_panel(ui);
+                            sections[0] = ui.min_rect().width();
+                            app.develop_panel(ui);
+                            sections[1] = ui.min_rect().width();
+                            app.retouch_panel(ui);
+                            sections[2] = ui.min_rect().width();
+                        });
+                    });
+                    egui::Window::new(tr(lang, "Settings"))
+                        .id(egui::Id::new("settings_window"))
+                        .default_width(480.0)
+                        .show(ctx, |ui| app.settings_ui(ui));
+                    widths.push([gallery.response.rect.width(), controls.response.rect.width()]);
+                    rects.push([gallery.response.rect, controls.response.rect]);
+                });
+            }
+            let drawn = DRAWN.with_borrow(|d| d.clone());
+            for (i, (panel, default)) in [("gallery", 240.0f32), ("controls", 320.0)].into_iter().enumerate() {
+                let seen: Vec<f32> = widths.iter().map(|w| w[i]).collect();
+                let edge = rects[2][i].left() + default + 0.5;
+                let past: Vec<String> = drawn
+                    .iter()
+                    .filter(|d| d.rect.left() >= rects[2][i].left() && d.rect.right() > edge)
+                    .map(|d| format!("{} {:?} {:?}", d.kind, d.label, d.rect))
+                    .collect();
+                assert!(
+                    seen.iter().all(|w| (w - default).abs() <= 0.5),
+                    "{lang:?}: the {panel} panel left its {default} px default: {seen:?} — a row overflows it                      (section widths ai/develop/retouch {sections:?}; buttons past the edge: {past:?})"
+                );
+            }
+            assert!(drawn.len() >= 60, "{lang:?}: only {} buttons reached the registry", drawn.len());
+            for d in &drawn {
+                assert!(
+                    (d.rect.height() - row).abs() <= 0.5,
+                    "{lang:?}: {} {:?} stands {:.1} px, not one row ({row})",
+                    d.kind, d.label, d.rect.height()
+                );
+                if d.kind.starts_with("glyph") {
+                    assert!(
+                        (d.rect.width() - row).abs() <= 0.5,
+                        "{lang:?}: {} {:?} is {:.1} px wide, not a square",
+                        d.kind, d.label, d.rect.width()
+                    );
+                }
+                assert!(d.fits, "{lang:?}: {} {:?} does not fit its cell on one line", d.kind, d.label);
+            }
+            assert!(
+                drawn.iter().filter(|d| d.kind == "primary").count() >= 8,
+                "{lang:?}: the primary verbs are on screen"
+            );
+        }
     }

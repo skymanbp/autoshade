@@ -326,8 +326,7 @@ impl AutoShadeApp {
         // its identity resolution is memoized for the process (store::
         // identity_of), and `store_root` was already read here every frame.
         let exists = shown.is_dir();
-        if ui
-            .add_enabled(exists, egui::Button::new(tr(lang, "🗂 Show in file manager")))
+        if action(ui, exists, tr(lang, "🗂 Show in file manager"))
             .on_hover_text(if exists {
                 tr(lang, "Open this folder in your file manager")
             } else {
@@ -608,8 +607,7 @@ impl AutoShadeApp {
                     } else {
                         tr(lang, "🔄 Fetch models")
                     };
-                    if ui
-                        .add_enabled(!f.analysis_models.fetching, egui::Button::new(label))
+                    if action(ui, !f.analysis_models.fetching, label)
                         .on_hover_text(tr(
                             lang,
                             "List the models THIS endpoint serves (GET /models). The analysis role has its own endpoint and key, so it gets its own list.",
@@ -659,8 +657,7 @@ impl AutoShadeApp {
             }
             ui.horizontal(|ui| {
                 let label = if f.image_models.fetching { tr(lang, "fetching…") } else { tr(lang, "🔄 Fetch models") };
-                let clicked = ui
-                    .add_enabled(!f.image_models.fetching, egui::Button::new(label))
+                let clicked = action(ui, !f.image_models.fetching, label)
                     .on_hover_text(tr(
                         lang,
                         "List the models this endpoint serves (GET /models) so you can pick instead of guess — and a live reachability check for the bridge/API. Uses the key/token typed below; a saved key is only used at the endpoint it was saved for.",
@@ -734,7 +731,7 @@ impl AutoShadeApp {
             ui.label(egui::RichText::new(note).weak().small());
             ui.separator();
             ui.horizontal(|ui| {
-                if ui.button(tr(lang, "Save settings")).clicked() {
+                if primary(ui, true, tr(lang, "Save settings")).clicked() {
                     do_save = true;
                 }
                 if !f.status.is_empty() {

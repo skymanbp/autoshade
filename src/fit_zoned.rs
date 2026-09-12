@@ -712,6 +712,14 @@ pub(super) struct BoundaryReading {
     /// `colour` after the same per-crossing charge, computed on the channel
     /// that produced the reading. The gate compares [`BoundaryReading::gated`].
     pub(super) colour_charged: f32,
+    /// R37. The step the paired TARGET itself carries across this boundary,
+    /// ranked like `rim`: the magnitude 90th percentile of the per-cell
+    /// allowance the charged crossings were read against
+    /// ([`cell_share`]). 0.0 when the ruler ran without a target.
+    /// Disclosed so a kept rim above the ceiling reads as what it is — the
+    /// target's own horizon, reproduced — and not as a gate that let a seam
+    /// through.
+    pub(super) asked: f32,
 }
 
 impl BoundaryReading {
@@ -730,26 +738,45 @@ impl BoundaryReading {
     /// found absent; the reading it does return is already in the coordinate
     /// its band is made of.
     pub(super) fn uncharged(rim: f32, transitions: usize) -> Self {
-        Self { rim, transitions, charged: rim, colour: 0.0, colour_charged: 0.0 }
+        Self { rim, transitions, charged: rim, colour: 0.0, colour_charged: 0.0, asked: 0.0 }
     }
 
     fn nothing_measured() -> Self {
-        Self { rim: 0.0, transitions: 0, charged: 0.0, colour: 0.0, colour_charged: 0.0 }
+        Self { rim: 0.0, transitions: 0, charged: 0.0, colour: 0.0, colour_charged: 0.0, asked: 0.0 }
     }
 }
 
 /// One measured crossing (hard family) or transition (soft family), in both
-/// coordinates and both currencies. The raw and charged ranks are taken over
-/// SEPARATE orderings, so `rim` stays the luma p90 every existing log line
-/// and pinned triple is comparable against while `charged` is what the gate
-/// compares; a single re-ranked field would return "that crossing's own luma
-/// step" at a silently moved position.
+/// coordinates, with everything its charge needs. The raw and charged ranks
+/// are taken over SEPARATE orderings ([`reading_of`]), so `rim` stays the
+/// luma p90 every existing log line and pinned triple is comparable against
+/// while `charged` is what the gate compares; a single re-ranked field would
+/// return "that crossing's own luma step" at a silently moved position.
+///
+/// R37: the charge is no longer computed where the crossing is read. The
+/// paired target's own step is pooled per evidence cell first, as a share of
+/// the frozen candidate's own step ([`CellSums`], [`cell_share`]), and only
+/// the part of the introduced step the target does not carry is charged
+/// ([`unasked`]).
 #[derive(Clone, Copy, Debug)]
 struct CrossingSample {
+    /// The signed luma step the correction introduced on the render under
+    /// measurement.
     luma: f32,
-    luma_charge: f32,
+    /// The same step on the FROZEN k=1 candidate — the correction's own
+    /// shape, which the target's allowance is expressed as a share of.
+    luma_frozen: f32,
+    /// Its per-crossing context budget ([`crossing_budget`]).
+    luma_budget: f32,
+    /// The signed introduced step on `channel`, the channel that moved most.
     colour: f32,
-    colour_charge: f32,
+    channel: usize,
+    colour_budget: f32,
+    /// The frozen candidate's own step per channel.
+    colour_frozen: [f32; 3],
+    /// The evidence cell (`fit_cells::CELLS_X` x `CELLS_Y`) the crossing falls
+    /// in, whose share is the one honoured for it.
+    cell: usize,
 }
 
 /// The three frames one crossing is read from.
@@ -763,11 +790,39 @@ struct StepFrames<'a> {
     /// own slope is read from it and never from `rendered`. See
     /// [`boundary_line_steps`].
     frozen: &'a [[f32; 3]],
+    /// R37. The paired target at the same geometry, when the gate has one:
+    /// the step IT carries at each crossing is what the correction is allowed
+    /// to reproduce there ([`unasked`]). `None` charges every introduced
+    /// step, which is the rule as it stood — what the fixtures pinned on the
+    /// context budget alone still measure.
+    target: Option<&'a [[f32; 3]]>,
 }
 
 /// One scan line's addressing: `(start, step, len)`, exactly the triple both
 /// line rulers already walk.
 type LineWalk = (usize, usize, usize);
+
+/// One scan line of the two boundary walkers — a row or a column of the
+/// analysis frame, `start + p * step` for `p < len`, with the frame `grid`
+/// its evidence cells are laid on — so a walker takes the line as ONE
+/// argument beside its frames, its alpha and its two tallies.
+#[derive(Clone, Copy)]
+struct ScanLine {
+    start: usize,
+    step: usize,
+    len: usize,
+    grid: (usize, usize),
+}
+
+impl ScanLine {
+    fn row(y: usize, (w, h): (usize, usize)) -> Self {
+        Self { start: y * w, step: 1, len: w, grid: (w, h) }
+    }
+
+    fn column(x: usize, (w, h): (usize, usize)) -> Self {
+        Self { start: x, step: w, len: h, grid: (w, h) }
+    }
+}
 
 /// ONE crossing's contextual budget, shared by BOTH mask families: a
 /// correction may introduce a discontinuity no larger than the largest
@@ -790,6 +845,172 @@ fn crossing_charge(introduced: f32, budget: f32, ceiling: f32) -> f32 {
     } else {
         introduced.abs() * (ceiling / budget)
     }
+}
+
+/// R37. The part of an introduced step the paired target does NOT carry at
+/// that crossing: nothing while the correction moves the boundary the way
+/// the target's own boundary goes and no further than it; the overshoot past
+/// it; the whole step when it moves the other way. With no target (`wanted`
+/// 0) every introduced step is unasked, which is the rule as it stood.
+///
+/// Why the gate needed this: the ceiling is absolute. On the reference pair
+/// the target's own horizon steps +8.4 codes at the median (+15.3 at the 90th
+/// percentile) against the source's +3.0, so 101 of 154 contour columns need
+/// the masks to introduce MORE than the whole 3-code ceiling to sit within
+/// three codes of the target — and the sky zone's solved move was shrunk to
+/// k=0.105 for reproducing exactly that horizon. A step the picture itself
+/// has at that place is fidelity, not a seam; only the excess is one.
+/// Monotone in the introduced step for a fixed allowance, so the shrink
+/// bisection keeps its invariant, and exactly 0.0 for an introduced 0.0, so
+/// the k=0 render still reads 0.0.
+fn unasked(introduced: f32, wanted: f32) -> f32 {
+    if introduced * wanted <= 0.0 {
+        introduced.abs()
+    } else {
+        (introduced.abs() - wanted.abs()).max(0.0)
+    }
+}
+
+/// R37. What one evidence cell's boundary pixels add up to, per coordinate
+/// (`[luma, R, G, B]`), so the target's own step is read as a MEAN over the
+/// cell. The target's texture is re-synthesised where the zoned fit runs
+/// (the reference sky pairs at layout scale only: D 0.617 at pixel scale),
+/// so at one pixel its step is that texture's noise — twelve codes on the
+/// reference pair's horizon, the size of the correction's own step. Noise
+/// averages out of a mean and does not out of a rank or a vote: measured on
+/// that pair, the per-crossing sign vote this replaced read a coin flip
+/// (385 of 718 crossings agreeing) in cells whose mean stood thirty
+/// standard errors from zero. Soft family: every band pixel of every line,
+/// each in its own cell; hard family: every crossing.
+#[derive(Clone, Copy, Debug, Default)]
+struct CellSums {
+    /// Band pixels (soft) or crossings (hard) summed.
+    pixels: u32,
+    /// Lines whose crossing sample was assigned to this cell — the quorum.
+    crossings: u32,
+    /// The render under measurement's step against `reference`.
+    rendered: [f32; 4],
+    /// The frozen k=1 candidate's own step — what the correction makes.
+    frozen: [f32; 4],
+    /// The paired target's own step — what the picture asks — and its
+    /// square, for the standard error of the mean. Zero without a target.
+    target: [f32; 4],
+    target_sq: [f32; 4],
+    /// The rendered step's Lab a*/b* part, for the sub-zone trial rulers.
+    ab: [f32; 2],
+}
+
+impl CellSums {
+    fn add(&mut self, rendered: [f32; 4], frozen: [f32; 4], target: Option<[f32; 4]>, ab: [f32; 2]) {
+        self.pixels += 1;
+        for k in 0..4 {
+            self.rendered[k] += rendered[k];
+            self.frozen[k] += frozen[k];
+            if let Some(t) = target {
+                self.target[k] += t[k];
+                self.target_sq[k] += t[k] * t[k];
+            }
+        }
+        self.ab[0] += ab[0];
+        self.ab[1] += ab[1];
+    }
+}
+
+fn cells_grid() -> Vec<CellSums> {
+    vec![CellSums::default(); crate::fit_cells::CELLS_X * crate::fit_cells::CELLS_Y]
+}
+
+/// How many standard errors from zero a cell's mean target step must stand
+/// before it is an allowance: the cell must be able to tell the step from
+/// its own texture noise. Two is the same line the tile eligibility draws on
+/// its 95% residual interval, stated separately because the two instruments
+/// must stay re-derivable on their own evidence.
+const TARGET_STEP_SIGMAS: f32 = 2.0;
+/// Fewer lines than this crossing a cell and it reads no allowance: a mean
+/// of a handful of pixels has a standard error the size of the step. At the
+/// analysis grid a horizontal horizon puts ~32 crossings in each 32-px cell.
+const TARGET_STEP_MIN_CROSSINGS: usize = 8;
+
+/// R37. The share of the correction's own boundary step the paired target
+/// carries in one cell and coordinate `k` (`0` luma, `1..=3` a channel): the
+/// cell's mean target step over its mean frozen-candidate step, honoured
+/// only where the cell holds at least [`TARGET_STEP_MIN_CROSSINGS`]
+/// crossings, both means are at least one code ([`BOUNDARY_STEP_FLOOR`]:
+/// below one code the ruler reads its own rounding), the target moves the
+/// CORRECTION's way, and the target's mean stands at least
+/// [`TARGET_STEP_SIGMAS`] standard errors from zero; 0 otherwise, and 0
+/// everywhere without a target. Above 1 the target asks more than the
+/// candidate makes and the whole step is asked.
+///
+/// A SHARE rather than a pooled step, because a zone dial is multiplicative
+/// in linear light: its step varies with the base level along one cell, and
+/// a pooled absolute step left the brighter half of every cell charged for a
+/// horizon the target carries at exactly the candidate's height. The share
+/// is a property of the correction's shape, so the allowance it yields
+/// (`share × frozen step`) holds still through the shrink bisection exactly
+/// as the slope credit does.
+fn cell_share(cell: &CellSums, k: usize) -> f32 {
+    if (cell.crossings as usize) < TARGET_STEP_MIN_CROSSINGS || cell.pixels == 0 {
+        return 0.0;
+    }
+    let n = cell.pixels as f32;
+    let asked = cell.target[k] / n;
+    let made = cell.frozen[k] / n;
+    let variance = (cell.target_sq[k] / n - asked * asked).max(0.0);
+    let error = (variance / n).sqrt();
+    if asked.abs() < BOUNDARY_STEP_FLOOR
+        || made.abs() < BOUNDARY_STEP_FLOOR
+        || asked * made <= 0.0
+        || asked.abs() < TARGET_STEP_SIGMAS * error
+    {
+        0.0
+    } else {
+        asked / made
+    }
+}
+
+/// [`cell_share`] for every cell, luma first and then the three channels.
+fn cell_shares(cells: &[CellSums]) -> [Vec<f32>; 4] {
+    std::array::from_fn(|k| cells.iter().map(|cell| cell_share(cell, k)).collect())
+}
+
+/// The sub-zone trial rulers' reading of the same sums: the render's mean
+/// step against `reference` per cell — `[|luma|, widest channel, Lab chroma
+/// on the 100-unit scale / 100]`, 0 where a cell has no band pixel.
+fn cell_gaps(cells: &[CellSums]) -> Vec<[f32; 3]> {
+    cells
+        .iter()
+        .map(|cell| {
+            if cell.pixels == 0 {
+                return [0.0; 3];
+            }
+            let n = cell.pixels as f32;
+            let mean = cell.rendered.map(|v| v / n);
+            let chroma = (cell.ab[0] / n).hypot(cell.ab[1] / n) / 100.0;
+            [mean[0].abs(), mean[1..].iter().fold(0.0f32, |m, v| m.max(v.abs())), chroma]
+        })
+        .collect()
+}
+
+/// CIE Lab, D65, from the analysis raster's display sRGB. Keep signed a/b:
+/// equally strong warm/cool residuals have equal deltaE and opposite intent.
+fn lab(rgb: &[f32; 3]) -> [f32; 3] {
+    let [r, g, b] = rgb.map(render::srgb_to_linear);
+    let f = |t: f32| if t > 216.0 / 24389.0 {
+        t.cbrt()
+    } else { (24389.0 / 27.0 * t + 16.0) / 116.0 };
+    let x = f((0.4124564 * r + 0.3575761 * g + 0.1804375 * b) / 0.95047);
+    let y = f(0.2126729 * r + 0.7151522 * g + 0.0721750 * b);
+    let z = f((0.0193339 * r + 0.119192 * g + 0.9503041 * b) / 1.08883);
+    [116.0 * y - 16.0, 500.0 * (x - y), 200.0 * (y - z)]
+}
+
+/// The evidence cell a pixel index falls in, on the same grid the target's
+/// cell means are read on (`fit_cells`).
+fn cell_of(i: usize, (width, height): (usize, usize)) -> usize {
+    let (nx, ny) = (crate::fit_cells::CELLS_X, crate::fit_cells::CELLS_Y);
+    let (x, y) = (i % width.max(1), i / width.max(1));
+    (y * ny / height.max(1)).min(ny - 1) * nx + (x * nx / width.max(1)).min(nx - 1)
 }
 
 /// The magnitude 90th percentile both rulers rank at. A correction that
@@ -855,7 +1076,7 @@ fn crossing_slope(
     forward: bool,
     channel: Option<usize>,
 ) -> f32 {
-    let StepFrames { reference, rendered, frozen } = frames;
+    let StepFrames { reference, rendered, frozen, .. } = frames;
     let (start, step, len) = line;
     let (far_in, far_out) = feet;
     let read = |p: &[f32; 3]| match channel {
@@ -967,64 +1188,63 @@ fn median(mut values: Vec<f32>) -> f32 {
 fn boundary_line_rims(
     frames: StepFrames<'_>,
     weights: &[f32],
-    start: usize,
-    step: usize,
-    len: usize,
+    line: ScanLine,
     out: &mut Vec<CrossingSample>,
+    cells: &mut [CellSums],
 ) {
-    let StepFrames { reference, rendered, frozen } = frames;
+    let StepFrames { reference, rendered, frozen, target } = frames;
+    let ScanLine { start, step, len, grid } = line;
     let luma = |p: &[f32; 3]| 0.299 * p[0] + 0.587 * p[1] + 0.114 * p[2];
     let index = |p: usize| -> Option<usize> {
         let i = start + p * step;
         (i < rendered.len() && i < reference.len() && i < frozen.len() && i < weights.len())
             .then_some(i)
     };
-    let mut sky = Vec::new();
-    let mut sky_reference = Vec::new();
-    let mut sky_channels: [Vec<f32>; 3] = [Vec::new(), Vec::new(), Vec::new()];
-    let mut sky_reference_channels: [Vec<f32>; 3] = [Vec::new(), Vec::new(), Vec::new()];
+    let mut sky_index = Vec::new();
     let mut land = Vec::new();
     for p in 0..len {
         let Some(i) = index(p) else {
             break;
         };
         if weights[i] >= ZONE_BOUNDARY_HIGH {
-            sky.push(luma(&rendered[i]));
-            sky_reference.push(luma(&reference[i]));
-            for c in 0..3 {
-                sky_channels[c].push(rendered[i][c]);
-                sky_reference_channels[c].push(reference[i][c]);
-            }
+            sky_index.push(i);
         } else if weights[i] <= ZONE_BOUNDARY_LOW {
             land.push(luma(&rendered[i]));
         }
     }
-    if sky.len() < ZONE_BOUNDARY_INTERIOR_MIN || land.len() < ZONE_BOUNDARY_INTERIOR_MIN {
+    if sky_index.len() < ZONE_BOUNDARY_INTERIOR_MIN || land.len() < ZONE_BOUNDARY_INTERIOR_MIN {
         return;
     }
-    let sky_settled = median(sky);
-    let reference_settled = median(sky_reference);
-    let multiplier = render::srgb_to_linear(sky_settled)
-        / render::srgb_to_linear(reference_settled).max(1e-5);
-    let transported = |l: f32| -> f32 {
-        if multiplier == 1.0 {
-            l
-        } else {
-            render::linear_to_srgb(multiplier * render::srgb_to_linear(l))
-        }
+    // Each frame's settled sky over the reference's: the multiplier that
+    // frame gives the settled treatment, in luma and per channel. The render
+    // under measurement, the FROZEN k=1 candidate (the correction's own
+    // shape, R37) and the paired target (its own shortfall in the band is
+    // the treatment the picture itself gives this transition, R37) each get
+    // their own, all three read off the same settled pixels.
+    let settled = |frame: &[[f32; 3]]| -> (f32, [f32; 3]) {
+        let l = median(sky_index.iter().map(|&i| luma(&frame[i])).collect());
+        let c = std::array::from_fn(|c| median(sky_index.iter().map(|&i| frame[i][c]).collect()));
+        (l, c)
     };
-    let mut channel_multiplier = [1.0f32; 3];
-    for c in 0..3 {
-        let settled = median(std::mem::take(&mut sky_channels[c]));
-        let settled_reference = median(std::mem::take(&mut sky_reference_channels[c]));
-        channel_multiplier[c] = render::srgb_to_linear(settled)
-            / render::srgb_to_linear(settled_reference).max(1e-5);
-    }
-    let transported_channel = |c: usize, v: f32| -> f32 {
-        if channel_multiplier[c] == 1.0 {
+    let (reference_settled, reference_channels) = settled(reference);
+    let multipliers = |frame: &[[f32; 3]]| -> (f32, [f32; 3]) {
+        let (l, c) = settled(frame);
+        (
+            render::srgb_to_linear(l) / render::srgb_to_linear(reference_settled).max(1e-5),
+            std::array::from_fn(|k| {
+                render::srgb_to_linear(c[k]) / render::srgb_to_linear(reference_channels[k]).max(1e-5)
+            }),
+        )
+    };
+    let (multiplier, channel_multiplier) = multipliers(rendered);
+    let (frozen_multiplier, frozen_channel_multiplier) = multipliers(frozen);
+    let (target_multiplier, target_channel_multiplier) =
+        target.map(multipliers).unwrap_or((1.0, [1.0; 3]));
+    let transport = |m: f32, v: f32| -> f32 {
+        if m == 1.0 {
             v
         } else {
-            render::linear_to_srgb(channel_multiplier[c] * render::srgb_to_linear(v))
+            render::linear_to_srgb(m * render::srgb_to_linear(v))
         }
     };
     let inside = |i: usize| weights[i] >= ZONE_BOUNDARY_MID;
@@ -1040,8 +1260,10 @@ fn boundary_line_rims(
             continue;
         }
         let band_begin = p;
-        let mut introduced: Option<f32> = None;
-        let mut coloured: Option<(f32, usize)> = None;
+        // Each argmax remembers WHERE it was read, so the target's own
+        // shortfall is read at that same pixel and nowhere else.
+        let mut introduced: Option<(f32, usize)> = None;
+        let mut coloured: Option<(f32, usize, usize)> = None;
         while p < len {
             let Some(i) = index(p) else {
                 break;
@@ -1050,22 +1272,41 @@ fn boundary_line_rims(
                 break;
             }
             if weights[i] >= ZONE_BOUNDARY_MID {
-                let here = luma(&rendered[i]) - transported(luma(&reference[i]));
+                let here = luma(&rendered[i]) - transport(multiplier, luma(&reference[i]));
                 introduced = Some(match introduced {
-                    Some(v) if v.abs() >= here.abs() => v,
-                    _ => here,
+                    Some((v, at)) if v.abs() >= here.abs() => (v, at),
+                    _ => (here, i),
                 });
+                let transported: [f32; 3] =
+                    std::array::from_fn(|c| transport(channel_multiplier[c], reference[i][c]));
                 for c in 0..3 {
-                    let moved = rendered[i][c] - transported_channel(c, reference[i][c]);
+                    let moved = rendered[i][c] - transported[c];
                     coloured = Some(match coloured {
-                        Some((v, channel)) if v.abs() >= moved.abs() => (v, channel),
-                        _ => (moved, c),
+                        Some((v, channel, at)) if v.abs() >= moved.abs() => (v, channel, at),
+                        _ => (moved, c, i),
                     });
                 }
+                // R37: the cell sums — this pixel's own step on each frame,
+                // each through ITS settled sky's transport, in its own cell.
+                let shortfall = |m: f32, ms: [f32; 3], frame: &[[f32; 3]]| -> [f32; 4] {
+                    [
+                        luma(&frame[i]) - transport(m, luma(&reference[i])),
+                        frame[i][0] - transport(ms[0], reference[i][0]),
+                        frame[i][1] - transport(ms[1], reference[i][1]),
+                        frame[i][2] - transport(ms[2], reference[i][2]),
+                    ]
+                };
+                let (own, moved) = (lab(&rendered[i]), lab(&transported));
+                cells[cell_of(i, grid)].add(
+                    shortfall(multiplier, channel_multiplier, rendered),
+                    shortfall(frozen_multiplier, frozen_channel_multiplier, frozen),
+                    target.map(|t| shortfall(target_multiplier, target_channel_multiplier, t)),
+                    [own[1] - moved[1], own[2] - moved[2]],
+                );
             }
             p += 1;
         }
-        let Some(here) = introduced else {
+        let Some((here, at)) = introduced else {
             continue;
         };
         let band_end = p - 1;
@@ -1123,17 +1364,29 @@ fn boundary_line_rims(
         };
         let slope = slope_of(None);
         let budget = crossing_budget(context(None), slope, ZONE_BOUNDARY_RIM_MAX);
-        let (colour_here, channel) = coloured.unwrap_or((0.0, 0));
+        let (colour_here, channel, colour_at) = coloured.unwrap_or((0.0, 0, at));
         let colour_budget = crossing_budget(
             context(Some(channel)),
             colour_slope_credit(slope_of(Some(channel)), slope),
             ZONE_BOUNDARY_RIM_MAX,
         );
+        // The frozen candidate's own shortfall at the same pixels, through
+        // ITS settled sky's transport (R37): what the cell's share is of.
+        let luma_frozen = luma(&frozen[at]) - transport(frozen_multiplier, luma(&reference[at]));
+        let colour_frozen = std::array::from_fn(|c| {
+            frozen[colour_at][c] - transport(frozen_channel_multiplier[c], reference[colour_at][c])
+        });
+        let cell = cell_of(at, grid);
+        cells[cell].crossings += 1;
         out.push(CrossingSample {
             luma: here,
-            luma_charge: crossing_charge(here, budget, ZONE_BOUNDARY_RIM_MAX),
-            colour: colour_here.abs(),
-            colour_charge: crossing_charge(colour_here, colour_budget, ZONE_BOUNDARY_RIM_MAX),
+            luma_frozen,
+            luma_budget: budget,
+            colour: colour_here,
+            channel,
+            colour_budget,
+            colour_frozen,
+            cell,
         });
     }
 }
@@ -1151,6 +1404,11 @@ fn boundary_line_rims(
 /// [`boundary_step`] already ranks its own samples and for the reason stated
 /// there. Robust to an isolated silhouette highlight, while retaining the
 /// systematic bow that repeats along an edge.
+///
+/// Since R37 the production gates read [`boundary_rim_toward`] and the
+/// sub-zone trial rulers [`rim_cell_gaps`]; this no-target form is what the
+/// context-budget pins measure.
+#[cfg(test)]
 fn boundary_rim(
     reference: &[[f32; 3]],
     rendered: &[[f32; 3]],
@@ -1159,34 +1417,74 @@ fn boundary_rim(
     width: u32,
     height: u32,
 ) -> BoundaryReading {
-    let (w, h) = (width as usize, height as usize);
-    let frames = StepFrames { reference, rendered, frozen };
-    let mut rims = Vec::new();
-    for y in 0..h {
-        boundary_line_rims(frames, weights, y * w, 1, w, &mut rims);
-    }
-    for x in 0..w {
-        boundary_line_rims(frames, weights, x, w, h, &mut rims);
-    }
-    reading_of(&rims)
+    boundary_rim_toward(None, reference, rendered, frozen, weights, width, height)
 }
 
-/// Rank one ruler's samples into the four numbers a gate and its disclosure
-/// need. Four ORDERINGS on purpose — see [`CrossingSample`].
-fn reading_of(samples: &[CrossingSample]) -> BoundaryReading {
+/// [`boundary_rim`] read toward a paired `target` at the same geometry (R37):
+/// what the target itself does at each transition is pooled per evidence
+/// cell and the correction is charged only for what it introduces beyond
+/// that ([`unasked`], [`cell_share`]). `None` is the rule as it stood.
+fn boundary_rim_toward(
+    target: Option<&[[f32; 3]]>,
+    reference: &[[f32; 3]],
+    rendered: &[[f32; 3]],
+    frozen: &[[f32; 3]],
+    weights: &[f32],
+    width: u32,
+    height: u32,
+) -> BoundaryReading {
+    let (w, h) = (width as usize, height as usize);
+    debug_assert!(target.is_none_or(|t| t.len() == rendered.len()), "one geometry");
+    let frames = StepFrames { reference, rendered, frozen, target };
+    let (mut rims, mut cells) = (Vec::new(), cells_grid());
+    for y in 0..h {
+        boundary_line_rims(frames, weights, ScanLine::row(y, (w, h)), &mut rims, &mut cells);
+    }
+    for x in 0..w {
+        boundary_line_rims(frames, weights, ScanLine::column(x, (w, h)), &mut rims, &mut cells);
+    }
+    reading_of(&rims, &cells, ZONE_BOUNDARY_RIM_MAX)
+}
+
+/// Rank one ruler's samples into the numbers a gate and its disclosure need.
+/// Separate ORDERINGS on purpose — see [`CrossingSample`]. `ceiling` is the
+/// family's own constant, handed in rather than read from a shared one so the
+/// two rulers cannot re-tune each other.
+///
+/// R37: the charge is taken here, after the target's own step has been pooled
+/// per evidence cell as a share of the frozen candidate's ([`cell_share`]);
+/// each crossing pays for the part of its introduced step beyond `share ×
+/// its own frozen step` ([`unasked`]) at its own context rate
+/// ([`crossing_charge`]). `asked` is that allowance ranked like `rim`, for
+/// the disclosure.
+fn reading_of(samples: &[CrossingSample], cells: &[CellSums], ceiling: f32) -> BoundaryReading {
     if samples.is_empty() {
         return BoundaryReading::nothing_measured();
     }
+    let share = cell_shares(cells);
+    let allowed: Vec<f32> = samples.iter().map(|s| share[0][s.cell] * s.luma_frozen).collect();
     let mut raw: Vec<f32> = samples.iter().map(|s| s.luma).collect();
-    let mut charges: Vec<f32> = samples.iter().map(|s| s.luma_charge).collect();
-    let mut colours: Vec<f32> = samples.iter().map(|s| s.colour).collect();
-    let mut colour_charges: Vec<f32> = samples.iter().map(|s| s.colour_charge).collect();
+    let mut charges: Vec<f32> = samples
+        .iter()
+        .zip(&allowed)
+        .map(|(s, &a)| crossing_charge(unasked(s.luma, a), s.luma_budget, ceiling))
+        .collect();
+    let mut colours: Vec<f32> = samples.iter().map(|s| s.colour.abs()).collect();
+    let mut colour_charges: Vec<f32> = samples
+        .iter()
+        .map(|s| {
+            let a = share[s.channel + 1][s.cell] * s.colour_frozen[s.channel];
+            crossing_charge(unasked(s.colour, a), s.colour_budget, ceiling)
+        })
+        .collect();
+    let mut asked = allowed;
     BoundaryReading {
         rim: magnitude_rank(&mut raw),
         transitions: samples.len(),
         charged: magnitude_rank(&mut charges),
         colour: magnitude_rank(&mut colours),
         colour_charged: magnitude_rank(&mut colour_charges),
+        asked: magnitude_rank(&mut asked),
     }
 }
 
@@ -1230,12 +1528,12 @@ fn reading_of(samples: &[CrossingSample]) -> BoundaryReading {
 fn boundary_line_steps(
     frames: StepFrames<'_>,
     geometry: &[f32],
-    start: usize,
-    step: usize,
-    len: usize,
+    line: ScanLine,
     out: &mut Vec<CrossingSample>,
+    cells: &mut [CellSums],
 ) {
-    let StepFrames { reference, rendered, frozen } = frames;
+    let StepFrames { reference, rendered, frozen, target } = frames;
+    let ScanLine { start, step, len, grid } = line;
     let luma = |p: &[f32; 3]| 0.299 * p[0] + 0.587 * p[1] + 0.114 * p[2];
     let index = |p: usize| -> Option<usize> {
         let i = start + p * step;
@@ -1294,15 +1592,38 @@ fn boundary_line_steps(
         );
         let colour_budget =
             crossing_budget(colour_context, colour_slope, ZONE_BOUNDARY_STEP_MAX);
+        // Each frame's own step across the same two feet, less the scene's
+        // (R37): the difference in differences that frame carries. The
+        // target's is what the cell's share is read from.
+        let across = |frame: &[[f32; 3]]| -> [f32; 4] {
+            [
+                (luma(&frame[i_in]) - luma(&frame[i_out])) - reference_step,
+                (frame[i_in][0] - frame[i_out][0]) - (reference[i_in][0] - reference[i_out][0]),
+                (frame[i_in][1] - frame[i_out][1]) - (reference[i_in][1] - reference[i_out][1]),
+                (frame[i_in][2] - frame[i_out][2]) - (reference[i_in][2] - reference[i_out][2]),
+            ]
+        };
+        let own = across(frozen);
+        let (luma_frozen, colour_frozen) = (own[0], [own[1], own[2], own[3]]);
+        let (r_in, r_out) = (lab(&rendered[i_in]), lab(&rendered[i_out]));
+        let (s_in, s_out) = (lab(&reference[i_in]), lab(&reference[i_out]));
+        let cell = cell_of(i_in, grid);
+        cells[cell].add(
+            across(rendered),
+            own,
+            target.map(across),
+            [(r_in[1] - r_out[1]) - (s_in[1] - s_out[1]), (r_in[2] - r_out[2]) - (s_in[2] - s_out[2])],
+        );
+        cells[cell].crossings += 1;
         out.push(CrossingSample {
             luma: introduced,
-            luma_charge: crossing_charge(introduced, budget, ZONE_BOUNDARY_STEP_MAX),
-            colour: colour_introduced.abs(),
-            colour_charge: crossing_charge(
-                colour_introduced,
-                colour_budget,
-                ZONE_BOUNDARY_STEP_MAX,
-            ),
+            luma_frozen,
+            luma_budget: budget,
+            colour: colour_introduced,
+            channel,
+            colour_budget,
+            colour_frozen,
+            cell,
         });
     }
 }
@@ -1317,6 +1638,10 @@ fn boundary_line_steps(
 ///
 /// The result is a MAGNITUDE, ranked exactly as `range::range_transition_rim`
 /// already ranks its own signed samples ([`magnitude_rank`]).
+///
+/// Since R37 the production gates read [`boundary_step_toward`]; this no-target
+/// form is what the context-budget pins measure.
+#[cfg(test)]
 fn boundary_step(
     reference: &[[f32; 3]],
     rendered: &[[f32; 3]],
@@ -1325,16 +1650,78 @@ fn boundary_step(
     width: u32,
     height: u32,
 ) -> BoundaryReading {
+    boundary_step_toward(None, reference, rendered, frozen, geometry, width, height)
+}
+
+/// [`boundary_step`] read toward a paired `target` (R37) — see
+/// [`boundary_rim_toward`]; the same allowance, pooled on the same cells.
+fn boundary_step_toward(
+    target: Option<&[[f32; 3]]>,
+    reference: &[[f32; 3]],
+    rendered: &[[f32; 3]],
+    frozen: &[[f32; 3]],
+    geometry: &[f32],
+    width: u32,
+    height: u32,
+) -> BoundaryReading {
     let (w, h) = (width as usize, height as usize);
-    let frames = StepFrames { reference, rendered, frozen };
-    let mut steps = Vec::new();
+    debug_assert!(target.is_none_or(|t| t.len() == rendered.len()), "one geometry");
+    let frames = StepFrames { reference, rendered, frozen, target };
+    let (mut steps, mut cells) = (Vec::new(), cells_grid());
     for y in 0..h {
-        boundary_line_steps(frames, geometry, y * w, 1, w, &mut steps);
+        boundary_line_steps(frames, geometry, ScanLine::row(y, (w, h)), &mut steps, &mut cells);
     }
     for x in 0..w {
-        boundary_line_steps(frames, geometry, x, w, h, &mut steps);
+        boundary_line_steps(frames, geometry, ScanLine::column(x, (w, h)), &mut steps, &mut cells);
     }
-    reading_of(&steps)
+    reading_of(&steps, &cells, ZONE_BOUNDARY_STEP_MAX)
+}
+
+/// R37. The sub-zone trial rulers' reading: the render's transition-band
+/// gap against `reference` — the paired target, for those rulers — as a
+/// MEAN per evidence cell (`CELLS_X` x `CELLS_Y` entries, 0 where a cell has
+/// no band pixel): `[|luma|, widest channel, Lab chroma / 100]`. The same
+/// scan as [`boundary_rim_toward`]; means where that ranks, because the
+/// target's re-synthesised texture is zero-mean noise per pixel and a rank
+/// of it is a coin flip ([`CellSums`]).
+pub(super) fn rim_cell_gaps(
+    reference: &[[f32; 3]],
+    rendered: &[[f32; 3]],
+    weights: &[f32],
+    width: u32,
+    height: u32,
+) -> Vec<[f32; 3]> {
+    let (w, h) = (width as usize, height as usize);
+    let frames = StepFrames { reference, rendered, frozen: rendered, target: None };
+    let (mut rims, mut cells) = (Vec::new(), cells_grid());
+    for y in 0..h {
+        boundary_line_rims(frames, weights, ScanLine::row(y, (w, h)), &mut rims, &mut cells);
+    }
+    for x in 0..w {
+        boundary_line_rims(frames, weights, ScanLine::column(x, (w, h)), &mut rims, &mut cells);
+    }
+    cell_gaps(&cells)
+}
+
+/// [`rim_cell_gaps`]' hard-family counterpart: the render's cross-contour
+/// step against `reference`'s, per cell ([`boundary_line_steps`]).
+pub(super) fn step_cell_gaps(
+    reference: &[[f32; 3]],
+    rendered: &[[f32; 3]],
+    geometry: &[f32],
+    width: u32,
+    height: u32,
+) -> Vec<[f32; 3]> {
+    let (w, h) = (width as usize, height as usize);
+    let frames = StepFrames { reference, rendered, frozen: rendered, target: None };
+    let (mut steps, mut cells) = (Vec::new(), cells_grid());
+    for y in 0..h {
+        boundary_line_steps(frames, geometry, ScanLine::row(y, (w, h)), &mut steps, &mut cells);
+    }
+    for x in 0..w {
+        boundary_line_steps(frames, geometry, ScanLine::column(x, (w, h)), &mut steps, &mut cells);
+    }
+    cell_gaps(&cells)
 }
 
 /// Apply one scalar to every correction in the accepted zone set. Each dial
@@ -2796,6 +3183,7 @@ fn attach_semantic_regions(
                         weights: &zone.source_weights,
                         reference: &current,
                     },
+                    target_boundary: Some(&tgt_px[..]),
                     initial_px: zone.rendered,
                     frame_before,
                 },
@@ -3291,7 +3679,8 @@ fn attach_zones_with_divergence(
         first_zone, reference_masks,
         "the bound reference is the k=0 baseline only while no other mask joined"
     );
-    let final_px = match enforce_boundary_gate(
+    let final_px = match enforce_boundary_gate_toward(
+        Some(&tgt_px[..]),
         &s_img,
         report,
         &sw,
@@ -3407,6 +3796,7 @@ fn boundary_note_args(
         ("after", format!("{:.3}", after.rim)),
         ("max", format!("{ZONE_BOUNDARY_RIM_MAX:.3}")),
         ("transitions", after.transitions.to_string()),
+        ("asked", format!("{:.3}", after.asked)),
         ("charged", format!("{:.3}", after.charged)),
         ("colour", format!("{:.3}", after.colour)),
         ("colour_charged", format!("{:.3}", after.colour_charged)),
@@ -3419,6 +3809,10 @@ fn boundary_note_args(
 /// attached, i.e. this gate own `k=0` baseline, which the caller already had
 /// in hand. Only re-measurements during an actual shrink render again, always
 /// at analysis size; no full-resolution render is introduced.
+///
+/// Since R37 the production sky/land path calls [`enforce_boundary_gate_toward`]
+/// with its target; this no-target form is what the context-budget pins measure.
+#[cfg(test)]
 fn enforce_boundary_gate(
     s_img: &DynamicImage,
     report: &mut FitReport,
@@ -3428,14 +3822,34 @@ fn enforce_boundary_gate(
     reference_px: &[[f32; 3]],
     initial_px: Vec<[f32; 3]>,
 ) -> BoundaryGateResult {
-    enforce_boundary_gates(s_img, report, &[sky_weights], correction_shares,
+    enforce_boundary_gate_toward(None, s_img, report, sky_weights, correction_shares,
+        first_zone, reference_px, initial_px)
+}
+
+/// [`enforce_boundary_gate`] toward a paired `target` (R37): the horizon the
+/// target itself carries is not charged. The production sky/land path hands
+/// its analysis target here; `None` is the context rule alone.
+#[allow(clippy::too_many_arguments)]
+fn enforce_boundary_gate_toward(
+    target: Option<&[[f32; 3]]>,
+    s_img: &DynamicImage,
+    report: &mut FitReport,
+    sky_weights: &[f32],
+    correction_shares: &[f32],
+    first_zone: usize,
+    reference_px: &[[f32; 3]],
+    initial_px: Vec<[f32; 3]>,
+) -> BoundaryGateResult {
+    enforce_boundary_gates(target, s_img, report, &[sky_weights], correction_shares,
         first_zone, reference_px, initial_px)
 }
 
 /// The same budget and shrink for one semantic horizon or all the horizons
 /// and breaks of a sub-zone set. One bisection owns the complete correction
 /// set; no band can borrow a different ruler or hide a worse boundary.
+#[allow(clippy::too_many_arguments)]
 fn enforce_boundary_gates(
+    target: Option<&[[f32; 3]]>,
     s_img: &DynamicImage,
     report: &mut FitReport,
     boundaries: &[&[f32]],
@@ -3444,14 +3858,16 @@ fn enforce_boundary_gates(
     reference_px: &[[f32; 3]],
     initial_px: Vec<[f32; 3]>,
 ) -> BoundaryGateResult {
-    enforce_boundary_gates_with_shrink(s_img, report, boundaries, correction_shares,
+    enforce_boundary_gates_with_shrink(target, s_img, report, boundaries, correction_shares,
         first_zone, (reference_px, initial_px), shrink_zone_corrections)
 }
 
 /// The same measured gate also handles replacement deltas. Its zero render
 /// is supplied by the caller; ordinary new zones use zero controls, while a
 /// native band replacement retains its accepted parent's controls at zero.
+#[allow(clippy::too_many_arguments)]
 fn enforce_boundary_gates_with_shrink(
+    target: Option<&[[f32; 3]]>,
     s_img: &DynamicImage,
     report: &mut FitReport,
     boundaries: &[&[f32]],
@@ -3462,11 +3878,12 @@ fn enforce_boundary_gates_with_shrink(
 ) -> BoundaryGateResult {
     let read = |pixels: &[[f32; 3]], frozen: &[[f32; 3]]| {
         boundaries.iter().fold(BoundaryReading::nothing_measured(), |mut all, weights| {
-            let next = boundary_rim(reference_px, pixels, frozen, weights, s_img.width(), s_img.height());
+            let next = boundary_rim_toward(target, reference_px, pixels, frozen, weights, s_img.width(), s_img.height());
             all.rim = all.rim.max(next.rim);
             all.charged = all.charged.max(next.charged);
             all.colour = all.colour.max(next.colour);
             all.colour_charged = all.colour_charged.max(next.colour_charged);
+            all.asked = all.asked.max(next.asked);
             all.transitions += next.transitions;
             all
         })
@@ -7297,6 +7714,217 @@ mod tests {
 
     fn zone_share(weights: &[f32]) -> f32 {
         weights.iter().sum::<f32>() / weights.len().max(1) as f32
+    }
+
+    /// R37. A step the paired TARGET itself carries across the feather is
+    /// not a seam. The reference pair's sky zone was shrunk to k=0.105 for
+    /// reproducing the target's own horizon (+8.4 codes at the median against
+    /// the source's +3.0), because the ceiling was absolute. Four targets over
+    /// the narrow hazy feather at one dose: the candidate itself (every
+    /// introduced step is asked, charged exactly 0.0, kept whole), the
+    /// untouched frame (nothing asked: the context rule bit for bit), the
+    /// OPPOSITE dose (asked the other way: the context rule bit for bit) and
+    /// half the dose (half asked: a larger k than none, smaller than whole).
+    #[test]
+    fn a_step_the_target_itself_carries_is_not_charged_as_a_seam() {
+        let (source, _, weights, reference, candidate, path, _) =
+            hazy_feather("r37-soft-asked", 3.0, 0.30, None, false);
+        let against = |target: Option<&[[f32; 3]]>| {
+            boundary_rim_toward(target, &reference, &candidate, &candidate, &weights, HAZY.0, HAZY.1)
+        };
+        let none = against(None);
+        assert!(
+            none.transitions > 0 && none.charged > ZONE_BOUNDARY_RIM_MAX,
+            "premise: on context alone this dose is over the ceiling: {none:?}"
+        );
+        assert_eq!(none.asked, 0.0, "nothing is asked without a target");
+        let whole = against(Some(&candidate));
+        assert_eq!(
+            (whole.charged, whole.colour_charged),
+            (0.0, 0.0),
+            "every introduced step is one the target carries: {whole:?}"
+        );
+        assert_eq!(whole.rim.to_bits(), none.rim.to_bits(), "the raw rim is a reading, not a charge");
+        assert!((whole.asked - whole.rim).abs() <= 1e-3, "and the disclosure says how much was asked: {whole:?}");
+        let untouched = against(Some(&reference));
+        assert_eq!(
+            (untouched.charged.to_bits(), untouched.colour_charged.to_bits(), untouched.asked),
+            (none.charged.to_bits(), none.colour_charged.to_bits(), 0.0),
+            "a target with no step there asks nothing: {untouched:?}"
+        );
+        let opposite = dose(&source, &path, -0.30);
+        let other_way = against(Some(&opposite));
+        assert_eq!(
+            other_way.charged.to_bits(),
+            none.charged.to_bits(),
+            "a step the other way is not asked: {other_way:?}"
+        );
+        let half = dose(&source, &path, 0.15);
+        let half_asked = against(Some(&half));
+        assert!(
+            half_asked.charged > 0.0 && half_asked.charged < none.charged,
+            "half asked, half charged: {half_asked:?} against {none:?}"
+        );
+        assert!(half_asked.asked > 0.0 && half_asked.asked < whole.asked, "{half_asked:?}");
+
+        // The gate, on fresh copies of the same arm: the same source, mask and
+        // dose render the same candidate, so the readings above are the
+        // gate's own.
+        let gate = |name: &str, target: Option<&[[f32; 3]]>| -> (f32, f32, f32) {
+            let (source, _, weights, reference, candidate, path, mut report) =
+                hazy_feather(name, 3.0, 0.30, None, false);
+            let verdict = enforce_boundary_gate_toward(
+                target,
+                &source,
+                &mut report,
+                &weights,
+                &[zone_share(&weights)],
+                0,
+                &reference,
+                candidate,
+            );
+            path.remove();
+            let BoundaryGateResult::Kept { k, after, .. } = verdict else {
+                panic!("{name} was dropped: {}", report.recipe.rationale);
+            };
+            let note = report
+                .notes
+                .iter()
+                .find(|n| n.key == crate::rationale::keys::ZONE_BOUNDARY_PASSED)
+                .expect("typed boundary pass note");
+            assert!((note_number(note, "asked") - after.asked).abs() <= 0.0005, "{note:?}");
+            // The pass sentence itself names the asked part.
+            assert!(
+                report.recipe.rationale.contains("of which the target's own boundary asks"),
+                "{}",
+                report.recipe.rationale
+            );
+            (k, after.charged, after.asked)
+        };
+        let (k_none, _, asked_none) = gate("r37-soft-gate-none", None);
+        let (k_whole, charged_whole, asked_whole) = gate("r37-soft-gate-whole", Some(&candidate));
+        let (k_half, _, _) = gate("r37-soft-gate-half", Some(&half));
+        let (k_opposite, _, _) = gate("r37-soft-gate-opposite", Some(&opposite));
+        assert_eq!((k_whole, charged_whole), (1.0, 0.0), "the target's own horizon is kept whole");
+        assert!(asked_whole > ZONE_BOUNDARY_RIM_MAX && asked_none == 0.0, "{asked_whole} {asked_none}");
+        assert_eq!(k_opposite.to_bits(), k_none.to_bits(), "a horizon the other way buys nothing");
+        assert!(k_none < k_half && k_half < 1.0, "half asked, half free: none {k_none} half {k_half}");
+        path.remove();
+    }
+
+    /// R37. The unasked part of an introduced step, by cases.
+    #[test]
+    fn the_unasked_part_of_a_step_is_its_excess_over_what_the_target_carries() {
+        assert_eq!(unasked(0.02, 0.03), 0.0, "inside what is asked");
+        assert!((unasked(0.03, 0.02) - 0.01).abs() <= 1e-7, "the overshoot");
+        assert_eq!(unasked(0.02, -0.03), 0.02, "the other way: all of it");
+        assert_eq!(unasked(-0.02, -0.03), 0.0, "sign-symmetric");
+        assert_eq!(unasked(0.02, 0.0), 0.02, "no target: the rule as it stood");
+        assert_eq!(unasked(0.0, 0.03), 0.0, "nothing introduced reads exactly 0.0");
+    }
+
+    /// R37. A cell's share is a mean the cell can vouch for: eight crossings
+    /// at least; both means a code or more; the target moving the
+    /// correction's way; and the target's mean two standard errors from
+    /// zero — else nothing.
+    #[test]
+    fn a_cell_share_needs_a_quorum_a_mean_its_noise_cannot_hide_and_a_code() {
+        let cell = |asked: &[f32], made: f32| {
+            let mut cell = CellSums::default();
+            for v in asked {
+                cell.add([0.0; 4], [made; 4], Some([*v; 4]), [0.0; 2]);
+                cell.crossings += 1;
+            }
+            cell
+        };
+        let eight = |v: f32| vec![v; TARGET_STEP_MIN_CROSSINGS];
+        // 0.02 on average, ±0.05 pixel to pixel: a step buried in noise
+        // until enough pixels are averaged.
+        let noisy = |n: usize| -> Vec<f32> {
+            (0..n).map(|i| 0.02 + if i % 2 == 0 { 0.05 } else { -0.05 }).collect()
+        };
+        let cells = vec![
+            cell(&eight(0.02), 0.03),
+            cell(&[0.02; TARGET_STEP_MIN_CROSSINGS - 1], 0.03),
+            cell(&[0.02, -0.02, 0.02, -0.02, 0.02, -0.02, 0.02, -0.02, 0.02, -0.02], 0.03),
+            cell(&eight(0.5 * BOUNDARY_STEP_FLOOR), 0.03),
+            cell(&eight(0.02), 0.5 * BOUNDARY_STEP_FLOOR),
+            cell(&eight(0.06), 0.03),
+            cell(&eight(-0.02), 0.03),
+            cell(&noisy(10), 0.03),
+            cell(&noisy(40), 0.03),
+            CellSums::default(),
+        ];
+        let share = cell_shares(&cells);
+        assert!(
+            (share[0][0] - 2.0 / 3.0).abs() <= 1e-6,
+            "quorum, exact, five codes asked of a seven-code step: two thirds"
+        );
+        assert_eq!(share[0][1], 0.0, "one short of the quorum");
+        assert_eq!(share[0][2], 0.0, "a mean of nothing");
+        assert_eq!(share[0][3], 0.0, "half a code asked is the ruler's rounding");
+        assert_eq!(share[0][4], 0.0, "a candidate step under a code has no share");
+        assert!((share[0][5] - 2.0).abs() <= 1e-6, "more asked than made: the whole step, and then some");
+        assert_eq!(share[0][6], 0.0, "the other way");
+        assert_eq!(share[0][7], 0.0, "ten pixels: a five-code mean 1.3 standard errors out is noise");
+        assert!((share[0][8] - 2.0 / 3.0).abs() <= 1e-6, "forty pixels: 2.5 standard errors out, honoured");
+        assert_eq!(share[0][9], 0.0, "an empty cell reads nothing");
+        assert!(share[1..].iter().all(|channel| channel == &share[0]), "each channel is read the same way");
+    }
+
+    /// R37. The sub-zone trial rulers read a target-referenced gap as a MEAN
+    /// per evidence cell: a re-synthesised texture — the reference pair's
+    /// sky at pixel scale — is zero-mean noise of several codes at every
+    /// crossing, and a per-crossing rank of it refused, on 2026-09-11, a
+    /// band set that improved the sky's deltaE 30.4 -> 25.4 and every worst
+    /// seam and target step, for "regressing" one cell by that noise.
+    #[test]
+    fn a_target_referenced_cell_gap_reads_the_band_shape_not_the_texture() {
+        let (w, h) = (192usize, 96usize);
+        let sky = |i: usize| i / w < h / 2;
+        let flat: Vec<[f32; 3]> = (0..w * h).map(|i| if sky(i) { [0.5; 3] } else { [0.2; 3] }).collect();
+        // An eight-row feather across the horizon, 1 above it and 0 below,
+        // whose 50% contour falls between rows h/2-1 and h/2.
+        let ramp: Vec<f32> =
+            (0..w * h).map(|i| (((h / 2 + 4) as f32 - (i / w) as f32 - 0.5) / 8.0).clamp(0.0, 1.0)).collect();
+        // The target's re-synthesised twin: three codes up and down, pixel
+        // by pixel, on both sides of the horizon.
+        let noisy: Vec<[f32; 3]> = flat
+            .iter()
+            .enumerate()
+            .map(|(i, p)| {
+                let sign = if (i % w + i / w) % 2 == 0 { 1.0 } else { -1.0 };
+                p.map(|c| c + sign * 3.0 / 255.0)
+            })
+            .collect();
+        let (wu, hu) = (w as u32, h as u32);
+        let worst = |gaps: &[[f32; 3]]| gaps.iter().fold(0.0f32, |m, g| m.max(g[0]).max(g[1]));
+        let clean = (rim_cell_gaps(&flat, &flat, &ramp, wu, hu), step_cell_gaps(&flat, &flat, &ramp, wu, hu));
+        assert_eq!(clean.0.len(), crate::fit_cells::CELLS_X * crate::fit_cells::CELLS_Y);
+        assert_eq!((worst(&clean.0), worst(&clean.1)), (0.0, 0.0), "the render IS the target");
+        let twin = (rim_cell_gaps(&noisy, &flat, &ramp, wu, hu), step_cell_gaps(&noisy, &flat, &ramp, wu, hu));
+        assert!(
+            worst(&twin.0) < BOUNDARY_STEP_FLOOR && worst(&twin.1) < BOUNDARY_STEP_FLOOR,
+            "against its re-synthesised twin the gap is the noise's mean, under a code: {:?} {:?}",
+            worst(&twin.0),
+            worst(&twin.1)
+        );
+        // And a four-code shape the render has and the target does not is
+        // read through that same noise: a lift of the band alone for the
+        // soft ruler, of the whole sky side for the hard one.
+        let lifted = |rows: std::ops::Range<usize>| -> Vec<[f32; 3]> {
+            flat.iter()
+                .enumerate()
+                .map(|(i, p)| if rows.contains(&(i / w)) { p.map(|c| c + 4.0 / 255.0) } else { *p })
+                .collect()
+        };
+        let band = rim_cell_gaps(&noisy, &lifted(h / 2 - 4..h / 2), &ramp, wu, hu);
+        let side = step_cell_gaps(&noisy, &lifted(0..h / 2), &ramp, wu, hu);
+        for (name, gaps) in [("band", &band), ("side", &side)] {
+            let read: Vec<f32> = gaps.iter().map(|g| g[0]).filter(|v| *v > 0.0).collect();
+            assert_eq!(read.len(), crate::fit_cells::CELLS_X, "{name}: one horizon cell per column");
+            assert!(read.iter().all(|v| *v >= 3.0 / 255.0), "{name}: four codes read as at least three: {read:?}");
+        }
     }
 
     /// A1 (2026-09-10). The soft family charges its own transitions now, and

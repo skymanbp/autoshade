@@ -1012,7 +1012,7 @@ impl AutoShadeApp {
 
     /// One update() phase — body extracted verbatim from the eframe
     /// update loop (round-12 decomposition).
-    fn upd_top_bar(&mut self, ctx: &egui::Context) {
+    pub(crate) fn upd_top_bar(&mut self, ctx: &egui::Context) {
         // egui's side_top_panel frame keeps only 2px of vertical margin —
         // at that spacing the action row visually touches the strip edges.
         let frame = egui::Frame::side_top_panel(&ctx.style())
@@ -1027,194 +1027,201 @@ impl AutoShadeApp {
             // works between ATOMIC widget allocations, so the enabled gating
             // stays per-widget (ui.add_enabled), and groups are fenced with
             // add_space (a separator that wraps to a line start orphans).
+            // AI Analyze moved INTO the AI section, onto the same row as
+            // the Direction prompt it consumes (user feedback: a trigger
+            // stranded in the toolbar, far from its input, reads as
+            // unrelated — every prompt entry now carries its own button).
+            let ready = self.src_path.is_some() && !self.busy;
+            // R38: the row wraps only BETWEEN its groups — each group is one
+            // measured allocation (`buttons::group`, sized from its labels),
+            // so a narrow window moves a whole group to the next line instead
+            // of splitting Undo from Redo; a plain `ui.horizontal` would be
+            // laid at the cursor at whatever width was left and never wrap.
+            // The group fence sits INSIDE each group's end, where a wrapped
+            // line start cannot orphan it. Export is the row's one primary
+            // verb; Settings and the shortcut sheet are glyph squares.
             ui.horizontal_wrapped(|ui| {
-                if ui
-                    .add_enabled(!self.busy, egui::Button::new(tr(lang, "Open photo…")))
-                    .on_hover_text(tr(lang, "Ctrl+O · or drag a file into the window"))
-                    .clicked()
-                    && let Some(path) = photo_file_dialog()
-                {
-                    self.selected = None; // a one-off file isn't a gallery selection
-                    self.open_path(path);
-                }
-                // AI Analyze moved INTO the AI section, onto the same row as
-                // the Direction prompt it consumes (user feedback: a trigger
-                // stranded in the toolbar, far from its input, reads as
-                // unrelated — every prompt entry now carries its own button).
-                let ready = self.src_path.is_some() && !self.busy;
-                if ui
-                    .add_enabled(ready, egui::Button::new(tr(lang, "Reset")))
-                    .on_hover_text(tr(lang, "Back to this photo's fresh-open look: sliders neutral on the camera-matched base (one undo brings it back)"))
-                    .clicked()
-                {
-                    // Reset = the fresh-open look: sliders neutral on this
-                    // photo's camera-matched base. RE-STAMP the open knots
-                    // rather than keeping the canvas curve — a legacy save
-                    // deliberately carries none, and preserving that emptiness
-                    // made Reset stay dark on every previously-edited photo.
-                    // Only a GENERATED variant keeps no curve (its pixels
-                    // carry the look); an InPlace retouch master is a NEUTRAL
-                    // develop that still needs the calibration on top —
-                    // stripping there turned Reset into "go dark".
-                    let generated = self.active_is_generated();
-                    let base_curve =
-                        if generated { Vec::new() } else { self.photo_knots.clone() };
-                    // The lens profile is the same kind of calibration: Reset
-                    // re-stamps the photo's own (a Generated master's pixels
-                    // already carry the corrections — none re-applied).
-                    let lens_profile =
-                        if generated { Default::default() } else { self.photo_lens.clone() };
-                    // The as-shot anchor follows the SAME generated strip:
-                    // baked pixels carry their WB, so an absolute-Kelvin
-                    // claim over them would be false.
-                    let (as_shot_k, as_shot_tint) = match self.photo_as_shot {
-                        Some((k, t)) if !generated => (Some(k), Some(t)),
-                        _ => (None, None),
-                    };
-                    self.recipe = EditRecipe {
-                        base_curve,
-                        lens_profile,
-                        as_shot_k,
-                        as_shot_tint,
-                        ..EditRecipe::default()
-                    };
-                    self.region = None;
-                    self.dirty = true;
-                    // The old AI rationale/verdict describe the recipe Reset
-                    // just discarded — showing them under neutral sliders lies.
-                    self.resync_recipe_display();
-                }
-                ui.add_space(SPACE_LG);
-                if ui
-                    .add_enabled(ready && !self.undo_stack.is_empty(), egui::Button::new(tr(lang, "↶ Undo")))
-                    .on_hover_text(tr(lang, "Ctrl+Z · undo the last edit"))
-                    .clicked()
-                {
-                    let ctx = ui.ctx().clone();
-                    self.undo(&ctx);
-                }
-                if ui
-                    .add_enabled(ready && !self.redo_stack.is_empty(), egui::Button::new(tr(lang, "↷ Redo")))
-                    .on_hover_text(tr(lang, "Ctrl+Y · redo the undone edit"))
-                    .clicked()
-                {
-                    let ctx = ui.ctx().clone();
-                    self.redo(&ctx);
-                }
-                ui.add_space(SPACE_LG);
-                // Rotate (R27). NOT ↶/↷ — those two glyphs are Undo/Redo one
-                // button to the left, and ↺/↻ are already 「reset all」/
-                // 「Clear」/「↻ Redraw」 in the panels. ⭯/⭮ (U+2B6F/U+2B6E) are
-                // unused anywhere in the tree and both ship in
-                // NotoSansSymbols2-autoshade.ttf, so no subset regeneration.
-                let can_rotate = self.can_rotate();
-                // Disabled buttons state their reason (the pixel-state rule):
-                // a control that greys out in silence reads as a broken app.
-                // Spelled at each site rather than through a helper — the
-                // i18n audit reads `tr()` LEXICALLY, and a key that reaches it
-                // through a closure parameter is a key it cannot check.
-                let blocked = tr(
-                    lang,
-                    "rotation is off while this photo carries baked pixels (retouch / AI rendition) or a tool is armed — its master raster is a file in the frame it was baked in; turn first, retouch after",
-                );
-                let left_hover = if can_rotate {
-                    tr(lang, "A quarter turn anticlockwise — the crop and every mask turn with it (one undo)")
-                } else {
-                    blocked
-                };
-                if ui
-                    .add_enabled(can_rotate, egui::Button::new(tr(lang, "⭯ Turn left")))
-                    .on_hover_text(left_hover)
-                    .clicked()
-                {
-                    let ctx = ui.ctx().clone();
-                    self.rotate_photo(3, &ctx); // anticlockwise = three clockwise
-                }
-                let right_hover = if can_rotate {
-                    tr(lang, "A quarter turn clockwise — the crop and every mask turn with it (one undo)")
-                } else {
-                    blocked
-                };
-                if ui
-                    .add_enabled(can_rotate, egui::Button::new(tr(lang, "⭮ Turn right")))
-                    .on_hover_text(right_hover)
-                    .clicked()
-                {
-                    let ctx = ui.ctx().clone();
-                    self.rotate_photo(1, &ctx);
-                }
-                ui.add_space(SPACE_LG);
-                // View mode: side-by-side vs a full-width edit (hold B =
-                // compare). ◫ lives in egui's bundled fonts — the old ⿲
-                // (U+2FF2) only rendered when the OPTIONAL CJK fallback font
-                // loaded, tofu otherwise.
-                ui.selectable_value(&mut self.view_mode, ViewMode::SideBySide, tr(lang, "◫ Compare"))
-                    .on_hover_text(tr(lang, "Before/After side by side"));
-                ui.selectable_value(&mut self.view_mode, ViewMode::AfterOnly, tr(lang, "⬛ Single"))
-                    .on_hover_text(tr(lang, "The edit fills the canvas; hold B to quickly compare the original"));
-                ui.add_space(SPACE_LG);
-                // Delivery ACTIONS (their settings live in the Develop panel's
-                // Export section; the hover echoes the current delivery state
-                // so it stays glanceable without a toolbar row of combos).
-                //
-                // ONE split button (R22-7). 「Export」 and 「Download…」 were the
-                // same code path — start_render_to — differing only in where
-                // the target came from, which made "where do my files go" a
-                // property of WHICH BUTTON you pressed instead of a setting.
-                // The main half now follows the Destination setting; the ▾ half
-                // is the one-off escape hatch that leaves the setting alone.
-                // Zero item_spacing joins the two halves visually into one
-                // control (egui has no split-button widget).
-                let summary = self.export_summary(lang);
-                ui.scope(|ui| {
-                    ui.spacing_mut().item_spacing.x = 0.0;
-                    if ui
-                        .add_enabled(ready, egui::Button::new(tr(lang, "Export")))
-                        .on_hover_text(format!(
-                            "{}\n{summary}",
-                            tr(lang, "Ctrl+Shift+E (or Ctrl+E) · full-resolution render to the Destination below (follows the current variant's pixels); Destination + settings live in the Export section")
-                        ))
+                group(ui, &[tr(lang, "Open photo…"), tr(lang, "Reset")], 0, |ui| {
+                    if action(ui, !self.busy, tr(lang, "Open photo…"))
+                        .on_hover_text(tr(lang, "Ctrl+O · or drag a file into the window"))
+                        .clicked()
+                        && let Some(path) = photo_file_dialog()
+                    {
+                        self.selected = None; // a one-off file isn't a gallery selection
+                        self.open_path(path);
+                    }
+                    if action(ui, ready, tr(lang, "Reset"))
+                        .on_hover_text(tr(lang, "Back to this photo's fresh-open look: sliders neutral on the camera-matched base (one undo brings it back)"))
                         .clicked()
                     {
-                        self.start_export();
+                        // Reset = the fresh-open look: sliders neutral on this
+                        // photo's camera-matched base. RE-STAMP the open knots
+                        // rather than keeping the canvas curve — a legacy save
+                        // deliberately carries none, and preserving that emptiness
+                        // made Reset stay dark on every previously-edited photo.
+                        // Only a GENERATED variant keeps no curve (its pixels
+                        // carry the look); an InPlace retouch master is a NEUTRAL
+                        // develop that still needs the calibration on top —
+                        // stripping there turned Reset into "go dark".
+                        let generated = self.active_is_generated();
+                        let base_curve =
+                            if generated { Vec::new() } else { self.photo_knots.clone() };
+                        // The lens profile is the same kind of calibration: Reset
+                        // re-stamps the photo's own (a Generated master's pixels
+                        // already carry the corrections — none re-applied).
+                        let lens_profile =
+                            if generated { Default::default() } else { self.photo_lens.clone() };
+                        // The as-shot anchor follows the SAME generated strip:
+                        // baked pixels carry their WB, so an absolute-Kelvin
+                        // claim over them would be false.
+                        let (as_shot_k, as_shot_tint) = match self.photo_as_shot {
+                            Some((k, t)) if !generated => (Some(k), Some(t)),
+                            _ => (None, None),
+                        };
+                        self.recipe = EditRecipe {
+                            base_curve,
+                            lens_profile,
+                            as_shot_k,
+                            as_shot_tint,
+                            ..EditRecipe::default()
+                        };
+                        self.region = None;
+                        self.dirty = true;
+                        // The old AI rationale/verdict describe the recipe Reset
+                        // just discarded — showing them under neutral sliders lies.
+                        self.resync_recipe_display();
                     }
-                    // `add_enabled_ui`, not a disabled Button: menu_button
-                    // returns an InnerResponse and takes no enabled flag.
-                    ui.add_enabled_ui(ready, |ui| {
-                        ui.menu_button("▾", |ui| {
-                            if ui
-                                .button(tr(lang, "Export to…"))
-                                .on_hover_text(tr(lang, "Pick a path for THIS export only — the Destination setting is left as it is"))
-                                .clicked()
-                            {
-                                ui.close_menu();
-                                self.export_to_chosen_path();
-                            }
-                        })
-                        .response
-                        .on_hover_text(tr(lang, "Export to a one-off path…"));
-                    });
                 });
-                if ui
-                    .add_enabled(ready, egui::Button::new(tr(lang, "Save develop")))
-                    .on_hover_text(tr(lang, "Ctrl+S · save this photo's develop (recipe + a Lightroom/ACR XMP for RAW; a baked retouch master is linked so reopening restores it) to your develop store"))
-                    .clicked()
-                {
-                    self.save_xmp();
-                }
-                ui.add_space(SPACE_LG);
-                if ui.button(tr(lang, "⚙ Settings")).on_hover_text(tr(lang, "AI provider / model / API key")).clicked() {
-                    // Reload the form only on the closed→open edge — reloading
-                    // while open wiped everything already typed (incl. keys).
-                    // Toggle semantics, matching ⌨ next door.
-                    if !self.show_settings {
-                        self.load_settings_form();
+                group(ui, &[tr(lang, "↶ Undo"), tr(lang, "↷ Redo")], 0, |ui| {
+                    if action(ui, ready && !self.undo_stack.is_empty(), tr(lang, "↶ Undo"))
+                        .on_hover_text(tr(lang, "Ctrl+Z · undo the last edit"))
+                        .clicked()
+                    {
+                        let ctx = ui.ctx().clone();
+                        self.undo(&ctx);
                     }
-                    self.show_settings = !self.show_settings;
-                }
-                if ui.button("⌨").on_hover_text(tr(lang, "Keyboard shortcuts (F1 / ?)")).clicked() {
-                    self.show_shortcuts = !self.show_shortcuts;
-                }
+                    if action(ui, ready && !self.redo_stack.is_empty(), tr(lang, "↷ Redo"))
+                        .on_hover_text(tr(lang, "Ctrl+Y · redo the undone edit"))
+                        .clicked()
+                    {
+                        let ctx = ui.ctx().clone();
+                        self.redo(&ctx);
+                    }
+                });
+                group(ui, &[tr(lang, "⭯ Turn left"), tr(lang, "⭮ Turn right")], 0, |ui| {
+                    // Rotate (R27). NOT ↶/↷ — those two glyphs are Undo/Redo one
+                    // button to the left, and ↺/↻ are already 「reset all」/
+                    // 「Clear」/「↻ Redraw」 in the panels. ⭯/⭮ (U+2B6F/U+2B6E) are
+                    // unused anywhere in the tree and both ship in
+                    // NotoSansSymbols2-autoshade.ttf, so no subset regeneration.
+                    let can_rotate = self.can_rotate();
+                    // Disabled buttons state their reason (the pixel-state rule):
+                    // a control that greys out in silence reads as a broken app.
+                    // Spelled at each site rather than through a helper — the
+                    // i18n audit reads `tr()` LEXICALLY, and a key that reaches it
+                    // through a closure parameter is a key it cannot check.
+                    let blocked = tr(
+                        lang,
+                        "rotation is off while this photo carries baked pixels (retouch / AI rendition) or a tool is armed — its master raster is a file in the frame it was baked in; turn first, retouch after",
+                    );
+                    let left_hover = if can_rotate {
+                        tr(lang, "A quarter turn anticlockwise — the crop and every mask turn with it (one undo)")
+                    } else {
+                        blocked
+                    };
+                    if action(ui, can_rotate, tr(lang, "⭯ Turn left"))
+                        .on_hover_text(left_hover)
+                        .clicked()
+                    {
+                        let ctx = ui.ctx().clone();
+                        self.rotate_photo(3, &ctx); // anticlockwise = three clockwise
+                    }
+                    let right_hover = if can_rotate {
+                        tr(lang, "A quarter turn clockwise — the crop and every mask turn with it (one undo)")
+                    } else {
+                        blocked
+                    };
+                    if action(ui, can_rotate, tr(lang, "⭮ Turn right"))
+                        .on_hover_text(right_hover)
+                        .clicked()
+                    {
+                        let ctx = ui.ctx().clone();
+                        self.rotate_photo(1, &ctx);
+                    }
+                });
+                group(ui, &[tr(lang, "◫ Compare"), tr(lang, "⬛ Single")], 0, |ui| {
+                    // View mode: side-by-side vs a full-width edit (hold B =
+                    // compare). ◫ lives in egui's bundled fonts — the old ⿲
+                    // (U+2FF2) only rendered when the OPTIONAL CJK fallback font
+                    // loaded, tofu otherwise.
+                    ui.selectable_value(&mut self.view_mode, ViewMode::SideBySide, tr(lang, "◫ Compare"))
+                        .on_hover_text(tr(lang, "Before/After side by side"));
+                    ui.selectable_value(&mut self.view_mode, ViewMode::AfterOnly, tr(lang, "⬛ Single"))
+                        .on_hover_text(tr(lang, "The edit fills the canvas; hold B to quickly compare the original"));
+                });
+                group(ui, &[tr(lang, "Export"), "▾", tr(lang, "Save develop")], 0, |ui| {
+                    // Delivery ACTIONS (their settings live in the Develop panel's
+                    // Export section; the hover echoes the current delivery state
+                    // so it stays glanceable without a toolbar row of combos).
+                    //
+                    // ONE split button (R22-7). 「Export」 and 「Download…」 were the
+                    // same code path — start_render_to — differing only in where
+                    // the target came from, which made "where do my files go" a
+                    // property of WHICH BUTTON you pressed instead of a setting.
+                    // The main half now follows the Destination setting; the ▾ half
+                    // is the one-off escape hatch that leaves the setting alone.
+                    // Zero item_spacing joins the two halves visually into one
+                    // control (egui has no split-button widget).
+                    let summary = self.export_summary(lang);
+                    ui.scope(|ui| {
+                        ui.spacing_mut().item_spacing.x = 0.0;
+                        if primary(ui, ready, tr(lang, "Export"))
+                            .on_hover_text(format!(
+                                "{}\n{summary}",
+                                tr(lang, "Ctrl+Shift+E (or Ctrl+E) · full-resolution render to the Destination below (follows the current variant's pixels); Destination + settings live in the Export section")
+                            ))
+                            .clicked()
+                        {
+                            self.start_export();
+                        }
+                        // `add_enabled_ui`, not a disabled Button: menu_button
+                        // returns an InnerResponse and takes no enabled flag.
+                        ui.add_enabled_ui(ready, |ui| {
+                            ui.menu_button("▾", |ui| {
+                                if ui
+                                    .button(tr(lang, "Export to…"))
+                                    .on_hover_text(tr(lang, "Pick a path for THIS export only — the Destination setting is left as it is"))
+                                    .clicked()
+                                {
+                                    ui.close_menu();
+                                    self.export_to_chosen_path();
+                                }
+                            })
+                            .response
+                            .on_hover_text(tr(lang, "Export to a one-off path…"));
+                        });
+                    });
+                    if action(ui, ready, tr(lang, "Save develop"))
+                        .on_hover_text(tr(lang, "Ctrl+S · save this photo's develop (recipe + a Lightroom/ACR XMP for RAW; a baked retouch master is linked so reopening restores it) to your develop store"))
+                        .clicked()
+                    {
+                        self.save_xmp();
+                    }
+                });
+                group(ui, &[], 2, |ui| {
+                    if glyph(ui, true, "⚙").on_hover_text(tr(lang, "Settings · AI provider / model / API key")).clicked() {
+                        // Reload the form only on the closed→open edge — reloading
+                        // while open wiped everything already typed (incl. keys).
+                        // Toggle semantics, matching ⌨ next door.
+                        if !self.show_settings {
+                            self.load_settings_form();
+                        }
+                        self.show_settings = !self.show_settings;
+                    }
+                    if glyph(ui, true, "⌨").on_hover_text(tr(lang, "Keyboard shortcuts (F1 / ?)")).clicked() {
+                        self.show_shortcuts = !self.show_shortcuts;
+                    }
+                });
             });
         });
     }
@@ -1232,8 +1239,7 @@ impl AutoShadeApp {
                     // which the hover text says rather than promising a
                     // checkpoint they do not have.
                     if self.gen_cancel.is_some()
-                        && ui
-                            .small_button(tr(self.lang, "✕ Cancel"))
+                        && action(ui, true, tr(self.lang, "✕ Cancel"))
                             .on_hover_text(tr(
                                 self.lang,
                                 "Stop waiting: the app unblocks now and the late result is discarded. A generative call halts at its next checkpoint; an AI analyze keeps running (and billing) until it finishes or times out",
@@ -1396,12 +1402,12 @@ impl AutoShadeApp {
                         // Center the button pair by padding half the leftover width.
                         let w = 300.0;
                         ui.add_space((ui.available_width() - w).max(0.0) * 0.5);
-                        if ui.button(tr(self.lang, "📷 Open photo…  (Ctrl+O)")).clicked()
+                        if primary(ui, true, tr(self.lang, "Open photo…  (Ctrl+O)")).clicked()
                             && let Some(p) = photo_file_dialog()
                         {
                             self.open_path(p);
                         }
-                        if ui.button(tr(self.lang, "🗂 Open folder…")).clicked()
+                        if action(ui, true, tr(self.lang, "🗂 Open folder…")).clicked()
                             && let Some(d) = rfd::FileDialog::new().pick_folder()
                         {
                             self.open_folder(d);
@@ -1471,7 +1477,7 @@ impl AutoShadeApp {
             // provider sections outgrow a small display, and without a scroll
             // area the 保存 button ends up unreachable off-screen.
             let max_h = ctx.screen_rect().height() * 0.85;
-            egui::Window::new(tr(self.lang, "⚙ Settings"))
+            egui::Window::new(tr(self.lang, "Settings"))
                 // Fixed id: the TITLE now varies with the language, and egui
                 // keys window state (position, size) off the id.
                 .id(egui::Id::new("settings_window"))

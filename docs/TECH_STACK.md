@@ -227,10 +227,20 @@ coverage summing to one under the measured asymmetric feather. Hard tiles
 use four intersecting half planes; a guided edge keeps its raster only when
 the native twin fits the photo worse, on the hard cell's own residual or on
 the frame (R36; R35 kept it whenever the two renders differed by more than
-the boundary budget). The band replacement uses the same boundary gate with
+the boundary budget). Every ruler that weighs a parametric geometry builds it
+in the preview's mask frame (R38, `render::preview_mask_coverage`): a contour
+at stored coordinates misses the edge the develop paints under a lens
+profile. The band replacement uses the same boundary gate with
 the parent's controls as its shrink baseline, and separately checks direct
-target-step gaps per evidence cell; a transported soft feather is a different
-quantity. The unchanged colour-field producer runs on that stack.
+target-step gaps per evidence cell — since R37 both as cell MEANS against the
+target, tolerated per cell up to the family's seam ceiling (chroma: one 2.3
+ΔE*ab JND) and on average up to the one-code floor, because the per-crossing
+ranks they replaced ranked a re-synthesised target's texture; a transported
+soft feather is a different quantity. Since R37 every boundary gate is target-referenced as
+well: the crossing charge is the part of the introduced step the paired
+target does not carry, the target's own step read as a cell mean (eight-crossing
+quorum; one-code floor; two standard errors from zero) as a share of the
+frozen candidate's. The unchanged colour-field producer runs on that stack.
 
 The ramp itself is centralized in `linear_coverage(t, profile)`. Since
 v1.2.4 it ships `LINEAR_FALLOFF = Measured`: the C1 smoothstep on the warped
@@ -609,7 +619,8 @@ are shared source/target evidence
 `>= 0.03`,
 `structure_divergence < 0.65`, then cap 2. Attachment reuses the 2048-pixel
 raster, radius-8 guided refinement with `(4/255)^2`, zero frame-regression
-tolerance and the 0.012 cross-boundary-step budget. Stage timings are measured by the external
+tolerance and the 0.012 cross-boundary-step budget (charged, since R37, on the
+part of the step the target does not itself carry). Stage timings are measured by the external
 live harness and recorded in the release report; all proposals and verdicts are
 persisted as rationale disclosures while accepted masks retain ordinary bitmap
 recipe/XMP semantics.
@@ -646,8 +657,10 @@ reading.
 - `SPATIAL_FRAME_REGRESSION_TOL = 0.0` and the shared boundary ceiling is
   `0.012`, read for these hard 0/255 rasters as a CROSS-BOUNDARY STEP
   (`ZONE_STEP_OFFSET = 2` px paired samples across the 50% contour,
-  differenced against the render without the correction). Zero measured
-  crossings refuses the correction instead of passing it.
+  differenced against the render without the correction, and since R37
+  charged only for what the paired target does not itself carry across the
+  same feet, read as a per-cell mean). Zero measured crossings refuses the
+  correction instead of passing it.
 - Both mask families charge each crossing against the same per-crossing
   budget: `max(the scene's own change across the crossing, BOUNDARY_STEP_SHAPE
   = 3 x the correction's own same-side slope off the frozen k=1 candidate,
@@ -1532,8 +1545,8 @@ than the pre-call state; model weights remain outside the repository.
 - The 61 MP RAW probe measured `151 MB` peak commit for decode,
   `1771 MB` for calibration/render preparation, and `1766 MB` for the
   full-resolution render tail; the combined process peak remained `1771 MB`.
-- The release battery is **1478 library (1463 pass + 15 `#[ignore]`d forensic
-  probes) / 24 CLI / 172 GUI / 2+2 contract** tests. Environment-gated real
+- The release battery is **1486 library (1471 pass + 15 `#[ignore]`d forensic
+  probes) / 24 CLI / 173 GUI / 2+2 contract** tests. Environment-gated real
   Lightroom, brush-table, and RAW-zoo suites are additional and are not
   smuggled into the ordinary count.
 - Tests compile at opt-level 2 (`[profile.test]` in Cargo.toml) with debug
@@ -1567,6 +1580,9 @@ than the pre-call state; model weights remain outside the repository.
 - `src/lib.rs` and `src/main.rs` — shared library and CLI boundary.
 - `src/bin/gui/` and `src/store.rs` (which owns the pixel source) — egui,
   variants, versions, and deleted-version identity registry.
+- `src/bin/gui/buttons.rs` — the button vocabulary (R38): primary / action /
+  glyph square / toggle, every one exactly one row tall, grid cells for rows
+  of equal verbs; the layout pin renders every panel in both languages.
 - `src/serve.rs` and `src/web/` — embedded web UI and loopback defenses.
 - `src/denoise.rs` and `python/denoise.py` — SCUNet sidecar and
   `sidecar_wrote` contract.
