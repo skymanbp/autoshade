@@ -457,6 +457,20 @@ fn tile_attachment(
     }
 }
 
+/// R36. Which carrier ships once a refined raster and its native
+/// four-gradient twin have BOTH passed the estimator and the boundary gate:
+/// the native one, unless it fits the photo worse — on the hard cell's own
+/// population or on the frame — by more than the tie band. R35 asked instead
+/// whether the two RENDERS resembled each other within the boundary budget,
+/// which kept three of the reference pair's four tiles as rasters whose edge
+/// alpha the guide had moved without ever asking which edge fits the photo
+/// better. The raster is an intermediate, not the truth; equal fidelity is a
+/// tie, and a tie goes to the carrier Lightroom can read.
+fn native_carrier_fits(raster_zone: f32, native_zone: f32, raster_frame: f32, native_frame: f32) -> bool {
+    native_zone <= raster_zone + CARRIER_TIE && native_frame <= raster_frame + CARRIER_TIE
+}
+const CARRIER_TIE: f32 = 1e-6;
+
 /// Alpha error bounds the compositing error for channel values in [0,1].
 /// Compare every pixel, not only coverage and the frozen cores: equal mass
 /// could otherwise hide an edge moved from one place to another.
@@ -946,6 +960,7 @@ pub(super) fn attach_tiles(
             }
         };
         let mut rendered_delta = values::UNMEASURED_HARD_MASK.to_string();
+        let mut fidelity = values::UNMEASURED.to_string();
         if refined {
             // A guide can move edge alpha substantially while the fitted
             // correction barely moves the image. Put a native trial through
@@ -982,7 +997,26 @@ pub(super) fn attach_tiles(
                     let delta = raster_pixels.as_raw().iter().zip(native_pixels.as_raw())
                         .map(|(a,b)| a.abs_diff(*b) as f32 / 255.0).fold(0.0, f32::max);
                     rendered_delta = format!("{delta:.6}");
-                    if delta <= ZONE_BOUNDARY_STEP_MAX {
+                    // R36: fidelity to the target decides (see
+                    // `native_carrier_fits`); the rendered change is a reading.
+                    // Both residuals are read over the HARD cell — the one
+                    // population both carriers claim — and both frames over
+                    // the same frozen evidence.
+                    let hard_target = zone_moments(&tgt_px, &reading.target_weights);
+                    let raster_zone = zone_err(
+                        &zone_moments(&boundary.pixels, &reading.source_weights),
+                        &hard_target,
+                    );
+                    let native_zone = zone_err(
+                        &zone_moments(&trial.pixels, &reading.source_weights),
+                        &hard_target,
+                    );
+                    let raster_frame_after =
+                        fit::look_err_with_evidence(&boundary.pixels, &tgt_px, &report.evidence);
+                    let native_frame_after =
+                        fit::look_err_with_evidence(&trial.pixels, &tgt_px, &report.evidence);
+                    fidelity = format!("{raster_zone:.6}/{native_zone:.6}");
+                    if native_carrier_fits(raster_zone, native_zone, raster_frame_after, native_frame_after) {
                         projection = Some((native, trial, native_attachment));
                     }
                 }
@@ -1012,7 +1046,7 @@ pub(super) fn attach_tiles(
                     ("carrier", if refined { values::BITMAP_CARRIER } else { values::FOUR_GRADIENTS }.to_string()),
                     ("delta", format!("{refinement_delta:.6}")),
                     ("rendered", rendered_delta),
-                    ("max", format!("{ZONE_BOUNDARY_STEP_MAX:.3}")),
+                    ("fidelity", fidelity),
                 ],
             ),
         );
@@ -1485,6 +1519,14 @@ mod tests {
         assert_eq!(native.dimensions(), expected.dimensions());
         assert!(native.as_raw().iter().zip(expected.as_raw()).all(|(a,b)| a.abs_diff(*b) <= 1));
         assert_eq!(recipe.masks[0].components.len(), 3);
+    }
+
+    #[test]
+    fn the_native_carrier_ships_on_equal_or_better_fidelity_and_never_on_worse() {
+        assert!(native_carrier_fits(0.0300, 0.0300, 0.0200, 0.0200), "a tie goes to the native carrier");
+        assert!(native_carrier_fits(0.0300, 0.0290, 0.0200, 0.0199));
+        assert!(!native_carrier_fits(0.0300, 0.0301, 0.0200, 0.0200), "a worse hard-cell residual keeps the raster");
+        assert!(!native_carrier_fits(0.0300, 0.0300, 0.0200, 0.0201), "a worse frame keeps the raster");
     }
 
     #[test]

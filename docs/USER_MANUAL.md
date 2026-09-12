@@ -127,7 +127,11 @@ targets ask for. Per control class you will see one of: nothing at all (the
 evidence was never in question); *withheld … zero-evidence hue bands*, the
 sentence unchanged from before, for a region whose pixels do still correspond
 and were therefore the ones asked; *shipped on REGION evidence* with the three
-shares it was admitted on; or, for a region past the pairing line whose cells
+shares it was admitted on; *shipped at … of the solved move on REGION
+evidence*, when the cells agreed on the direction of the move and refused only
+its size — the largest share of the move they do vouch is what ships, and the
+sentence prints the refused full move's verdict beside the shipped share's
+three shares; or, for a region past the pairing line whose cells
 said no, that same refusal with the shares it was decided on — including the
 case where the cells *abstained* because nothing in that region carried
 measurable evidence. Where the cells were asked, a refusal is a measurement now
@@ -145,8 +149,9 @@ the original correction's tone while reducing the new band differences.
 The mask list names each `sky · band 2/3` with its Intersect components visible.
 An unstructured residual keeps the single correction and says why. Hard spatial
 tiles now use four intersecting gradients; a guided edge retains its bitmap
-when a native trial fails the shared gates or exceeds the existing budget
-in the actual rendered correction. The save
+only when the native trial fails the shared gates or fits the photo worse
+than the bitmap on the tile's own cell or on the whole frame — the tile's
+note prints both residuals. The save
 line therefore counts only the Bitmap corrections/components that remain.
 Lightroom reads the native composition, but its own rendering of the written
 intersections has not been measured; AI alpha and local recolour gains still

@@ -111,6 +111,17 @@ impl CellVouch {
             && self.aligned >= VOUCH_MIN_ALIGNED
     }
 
+    /// R36. The DIRECTION half of the verdict on its own: the region's cells
+    /// point where their own targets lie (the `aligned` share clears its
+    /// line) even though the verdict as a whole fails. That is the one case a
+    /// search over the SIZE of the move may answer — the cells asked for this
+    /// move, only for less of it — and the case it may never answer is the
+    /// one where `aligned` itself fails: cells asking for opposite moves are
+    /// not asking for a smaller one.
+    pub(crate) fn direction_agrees(self) -> bool {
+        self.read > 0 && self.aligned >= VOUCH_MIN_ALIGNED
+    }
+
     /// The three shares as the disclosures print them.
     pub(crate) fn shares(self) -> (String, String, String) {
         (

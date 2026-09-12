@@ -2381,7 +2381,14 @@ impl EditRecipe {
     /// re-derives the template bound from the source, so a longer note fails a
     /// test instead of costing a disclosure. An abuse bound it remains: a
     /// hand-edited foreign recipe.json still cannot smuggle a payload past it.
-    pub(crate) const MAX_RATIONALE: usize = 64 * 1024;
+    ///
+    /// R36: 512 KiB, with `rationale::MAX_NOTES` 64 → 512. A zoned fit on the
+    /// reference pair renders about 115 sentences, so the 64-note vector was
+    /// tripping its truncation sentinel on every such run; the longest template
+    /// is now 780 bytes of source span (measured by the same test, 2026-09-11),
+    /// and 512 × 780 = 399,360 bytes of template alone must fit. Still an
+    /// abuse bound: an honest run writes a few tens of kilobytes.
+    pub(crate) const MAX_RATIONALE: usize = 512 * 1024;
 
     pub fn clamp(&mut self) -> ClampSummary {
         let mut summary = ClampSummary::default();
@@ -2517,7 +2524,7 @@ impl EditRecipe {
         /// The byte ceiling stays the load-bearing promise: the body is cut to
         /// `max - marker.len()` so the result is at most `max` INCLUDING the
         /// marker, and a `max` too small to hold one drops the marker rather than
-        /// break the ceiling. (Unreachable in practice: the constant is 64 KiB
+        /// break the ceiling. (Unreachable in practice: the constant is 512 KiB
         /// and the marker is under a hundred bytes.)
         fn cap_rationale(s: &mut String, max: usize) -> usize {
             if s.len() <= max {
@@ -3327,9 +3334,13 @@ mod tests {
 
         // A multi-byte rationale must not be cut mid-character — `String::
         // truncate` panics off a char boundary, and this input is unvalidated.
-        let mut multi = EditRecipe { rationale: "é".repeat(50_000), ..Default::default() };
+        // Two bytes a character, sized past the ceiling itself (R36 moved it).
+        let mut multi = EditRecipe {
+            rationale: "é".repeat(EditRecipe::MAX_RATIONALE / 2 + 1_000),
+            ..Default::default()
+        };
         multi.clamp(); // would panic if the cut ignored char boundaries
-        assert!(multi.rationale.len() <= 65_536);
+        assert!(multi.rationale.len() <= EditRecipe::MAX_RATIONALE);
         // The BODY is what SURVIVES the cut; the ASCII marker `cap_rationale`
         // puts in front of it is not part of the record and is checked by its
         // own tests.
@@ -4383,26 +4394,30 @@ mod tests {
 
     #[test]
     fn clamp_counts_curve_and_string_truncation() {
+        // The overflow is sized from the ceiling itself (R36 moved it), so
+        // this pins the arithmetic and the wording, not one year's constant.
+        let (max, original) = (EditRecipe::MAX_RATIONALE, EditRecipe::MAX_RATIONALE + 14_464);
         let mut r = EditRecipe {
             tone_curve: (0..300u32)
                 .map(|i| CurvePoint { input: (i % 256) as u8, output: 0 })
                 .collect(),
-            rationale: "x".repeat(80_000),
+            rationale: "x".repeat(original),
             ..Default::default()
         };
         let d = r.clamp();
         assert_eq!(d.truncated_curve_points, 44, "300 points over the 256 cap");
         // The marker rides INSIDE the ceiling, so the body loses its own
-        // length on top of the overflow. Spelled out rather than derived from
-        // the code under test: this pins the wording too.
-        let marker =
-            "[rationale truncated at the 65536-byte ceiling; the original was 80000 bytes] ";
+        // length on top of the overflow. The wording is spelled out rather
+        // than derived from the code under test: this pins the sentence too.
+        let marker = format!(
+            "[rationale truncated at the {max}-byte ceiling; the original was {original} bytes] "
+        );
         assert_eq!(
             d.truncated_string_bytes,
-            80_000 - (65_536 - marker.len()),
+            original - (max - marker.len()),
             "rationale past its cap, minus the room its own marker takes"
         );
-        assert_eq!(r.rationale.len(), 65_536, "marker included, not on top");
+        assert_eq!(r.rationale.len(), max, "marker included, not on top");
         assert!(!d.is_empty(), "curve/string loss alone must flip is_empty");
     }
 
@@ -4473,8 +4488,9 @@ mod tests {
             Note::new(keys::PROPOSAL_LIMITS_DISCARDED, vec![("dropped", "exposure_ev".into())]),
         ];
         let tail = crate::rationale::render_en(&notes);
-        // Prose in front, in paragraphs, comfortably past the ceiling.
-        let prose = "The model explains itself at length.\n".repeat(3_000);
+        // Prose in front, in paragraphs, comfortably past the ceiling
+        // (37 bytes a line, one line per 32 bytes of ceiling).
+        let prose = "The model explains itself at length.\n".repeat(EditRecipe::MAX_RATIONALE / 32);
         let mut r = EditRecipe {
             rationale: format!("{prose}{tail}"),
             ..Default::default()
@@ -4536,19 +4552,26 @@ mod tests {
     /// 16 KiB read as if the writer had finished there.
     #[test]
     fn a_truncated_rationale_says_how_much_it_lost() {
-        let mut over = EditRecipe { rationale: "x".repeat(80_000), ..Default::default() };
+        let original = EditRecipe::MAX_RATIONALE + 14_464;
+        let mut over = EditRecipe { rationale: "x".repeat(original), ..Default::default() };
         over.clamp();
-        assert!(over.rationale.len() <= 65_536, "the ceiling is the promise");
+        assert!(over.rationale.len() <= EditRecipe::MAX_RATIONALE, "the ceiling is the promise");
         assert!(
             over.rationale.starts_with("[rationale truncated"),
             "no marker: {:?}",
             &over.rationale[..96.min(over.rationale.len())]
         );
         // Both numbers a reader needs, and both TRUE: the ceiling that cut it
-        // and how long the record had been. 80000 is recoverable from the
-        // string alone, which is the whole point.
-        assert!(over.rationale.contains("65536-byte ceiling"), "ceiling not named");
-        assert!(over.rationale.contains("the original was 80000 bytes"), "original length not named");
+        // and how long the record had been. The original length is recoverable
+        // from the string alone, which is the whole point.
+        assert!(
+            over.rationale.contains(&format!("{}-byte ceiling", EditRecipe::MAX_RATIONALE)),
+            "ceiling not named"
+        );
+        assert!(
+            over.rationale.contains(&format!("the original was {original} bytes")),
+            "original length not named"
+        );
 
         // Negative arm: a rationale that FITS is not annotated. A marker that
         // is always appended tells the reader nothing.
