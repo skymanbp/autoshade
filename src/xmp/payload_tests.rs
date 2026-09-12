@@ -527,6 +527,83 @@ fn the_real_lightroom_rewrites_read_as_measured() {
     }
     assert_eq!(after.color_nr, 25.0, "with no payload, Lightroom's materialised 25 is what the file says");
     assert_eq!(before.color_nr, 0.0, "the v1.3.0 writer omitted the key");
+
+    // The third pair (2026-09-12, after the release): a v1.3.1 sidecar ITSELF —
+    // the 0.85 reference-pair develop, 285,172 bytes with the payload and five
+    // rasters — rewritten by Lightroom 9.4 after one mask toggle. The whole
+    // develop comes back; what differs is exactly what Lightroom wrote: its own
+    // Select Sky reference point and provenance on the two zone masks, and the
+    // nine unmodelled keys it materialised (kept as passthrough).
+    let (orig, lr) = (read("payload-131-original.xmp"), read("payload-131-lightroom-9.4-rewrite.xmp"));
+    assert_ne!(orig, lr, "premise: Lightroom rewrote the v1.3.1 sidecar");
+    assert!(orig.contains("asr:Writer=\"AutoShade 1.3.1\""), "premise: written by v1.3.1");
+    assert!(!lr.contains(" ash:"), "the intent is stripped, as before");
+    assert_eq!(
+        payload::simple_property(&orig, "asr", "Recipe"),
+        payload::simple_property(&lr, "asr", "Recipe"),
+        "the recipe attribute survived byte for byte"
+    );
+    let (po, pl) = (
+        payload::find(&orig).expect("payload").expect("decodes"),
+        payload::find(&lr).expect("payload after Lightroom").expect("decodes after Lightroom"),
+    );
+    assert!(pl.notes.is_empty(), "{:?}", pl.notes);
+    assert_eq!(pl.rasters.len(), 5);
+    assert!(
+        po.rasters.iter().zip(&pl.rasters).all(|(a, b)| a.name == b.name && a.bytes == b.bytes),
+        "every raster survived byte for byte, in order"
+    );
+    let want = po.recipe;
+    let back = xmp_to_recipe(&lr);
+    let mut diffs = Vec::new();
+    leaf_diffs("", &serde_json::to_value(&want).unwrap(), &serde_json::to_value(&back).unwrap(), &mut diffs);
+    diffs.sort();
+    let lightroom_wrote = [
+        "/masks[0]/mask/provenance", "/masks[0]/mask/ref_x", "/masks[0]/mask/ref_y",
+        "/masks[1]/mask/provenance", "/masks[1]/mask/ref_x", "/masks[1]/mask/ref_y",
+        "/passthrough/CameraProfile", "/passthrough/PerspectiveAspect",
+        "/passthrough/PerspectiveHorizontal", "/passthrough/PerspectiveRotate",
+        "/passthrough/PerspectiveScale", "/passthrough/PerspectiveUpright",
+        "/passthrough/PerspectiveVertical", "/passthrough/PerspectiveX", "/passthrough/PerspectiveY",
+    ];
+    assert_eq!(diffs, lightroom_wrote, "only what Lightroom wrote differs from the develop");
+    assert_eq!(back.colour_field, want.colour_field, "the colour field is back");
+    assert_eq!(back.masks.len(), 6);
+    for (b, w) in back.masks.iter().zip(&want.masks) {
+        assert_eq!((&b.name, b.role, b.enabled, b.inverted), (&w.name, w.role, w.enabled, w.inverted));
+        if matches!(w.mask, MaskGeometry::Bitmap { .. }) {
+            assert_eq!(b.mask, w.mask, "{}: the tile is back, bare name and all", w.name);
+        }
+    }
+    assert_eq!(back.masks.iter().filter(|m| m.role == MaskRole::ZoneSky).count(), 2);
+    assert_eq!((back.exposure_ev, back.temperature_k, back.as_shot_k), (want.exposure_ev, want.temperature_k, want.as_shot_k));
+    assert_eq!(back.color_nr, 0.0, "written at zero, and Lightroom wrote the zero back");
+}
+
+/// Every leaf where `a` and `b` differ, as JSON-pointer-like paths (absent = differs).
+fn leaf_diffs(path: &str, a: &serde_json::Value, b: &serde_json::Value, out: &mut Vec<String>) {
+    use serde_json::Value;
+    match (a, b) {
+        (Value::Object(x), Value::Object(y)) => {
+            let keys: std::collections::BTreeSet<&str> = x.keys().chain(y.keys()).map(String::as_str).collect();
+            for k in keys {
+                match (x.get(k), y.get(k)) {
+                    (Some(u), Some(v)) => leaf_diffs(&format!("{path}/{k}"), u, v, out),
+                    _ => out.push(format!("{path}/{k}")),
+                }
+            }
+        }
+        (Value::Array(x), Value::Array(y)) if x.len() == y.len() => {
+            for (i, (u, v)) in x.iter().zip(y).enumerate() {
+                leaf_diffs(&format!("{path}[{i}]"), u, v, out);
+            }
+        }
+        _ => {
+            if a != b {
+                out.push(path.to_string());
+            }
+        }
+    }
 }
 
 /// The inversion is one bit in two homes (the correction's `inverted`, the

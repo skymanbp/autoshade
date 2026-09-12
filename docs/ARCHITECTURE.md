@@ -143,7 +143,7 @@
 > fresh-document round trip, the replayed Lightroom rewrite, raster placement
 > on a disclosing read only, the refused payload, the merge over a foreign
 > prefix, the raster budget, the zone role from the name, the inversion pair,
-> and the two real Lightroom 9.4 rewrites under `AUTOSHADE_LR_PAYLOAD_FIXTURES`)
+> and the real Lightroom 9.4 rewrites under `AUTOSHADE_LR_PAYLOAD_FIXTURES`)
 > plus one rename, `bitmap_masks_do_not_come_back_from_xmp` →
 > `bitmap_masks_come_back_only_through_the_payload`, re-pinned on both the
 > projection and the whole document. The calibration lane did not run for
@@ -2044,8 +2044,10 @@ were materialised at Camera Raw's own defaults (`ColorNoiseReduction="25"`
 among them, which is where the two smaller v1.3.1 changes come from).
 
 One rewrite of a PROBE sidecar answered which spellings survive
-([`src/xmp/payload.rs`](../src/xmp/payload.rs) module docs; the two real
-round trips are the `AUTOSHADE_LR_PAYLOAD_FIXTURES` test material). Root-level
+([`src/xmp/payload.rs`](../src/xmp/payload.rs) module docs; the real round
+trips — the probe, the v1.3.0 band sidecar and, recorded after the release,
+a v1.3.1 sidecar itself — are the `AUTOSHADE_LR_PAYLOAD_FIXTURES` test
+material). Root-level
 properties in a foreign namespace survive BYTE-EXACT — a 15 KB attribute, an
 `rdf:Bag`, a struct, an `rdf:Seq` of structs totalling 250 KB — re-serialised
 into XMP's compact form (simple properties become attributes on the root

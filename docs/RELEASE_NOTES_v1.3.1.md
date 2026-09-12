@@ -195,14 +195,23 @@ as v1.3.0: its p36–p39 fit corpus was deleted in the 2026-09-03 clean-up and
 and pass. This release does not touch the fit. The Python sidecars are
 unchanged since v1.2.6.
 
-## Not verified
+## Verified after release: a v1.3.1 sidecar through Lightroom itself
 
-An actual v1.3.1-format sidecar has not itself been through Lightroom on
-this machine. The mechanism was proven on the probe — the same spellings
-(root attributes and an `rdf:Seq` of structs under a foreign namespace) that
-this writer emits, and the reader also reads the probe's compact rewritten
-form — but the end-to-end pair "v1.3.1 writes, Lightroom 9.4 rewrites,
-v1.3.1 reads" is a replay (`lightroom_like`, built from the measured shapes),
-not a recording. What Lightroom paints on screen for the written
-intersections was not measured either; what it wrote back for them was. No
-GUI executable was launched.
+At release time the end-to-end pair "v1.3.1 writes, Lightroom 9.4 rewrites,
+v1.3.1 reads" was a replay built from the measured shapes; on 2026-09-12,
+after the release, it was recorded. The 0.85 reference-pair develop — the
+whole recipe with its colour field, two Select Sky zones and four bitmap
+tiles — was written by v1.3.1 as a 285,172-byte sidecar beside a renamed copy
+of the RAW; one mask toggle in Lightroom 9.4 rewrote it in place to 274,012
+bytes. The recipe attribute came back byte for byte, all five rasters came
+back byte for byte (and were placed beside the develop on the disclosing
+read, identical to the originals), every `ash:` attribute was gone, and the
+restored develop differs from the one written in exactly fifteen leaves, all
+Lightroom's own: the Select Sky reference point and provenance it re-derived
+on the two zone masks, and nine unmodelled keys it materialised (kept as
+passthrough). The colour field, the four tiles, both zone roles, the
+calibration anchor, the exact exposure and the zero colour noise reduction
+are the payload's. That pair is now the third fixture under
+`AUTOSHADE_LR_PAYLOAD_FIXTURES`, pinned leaf for leaf. What Lightroom paints
+on screen for the written intersections is still not measured; what it wrote
+back for them is. No GUI executable was launched.

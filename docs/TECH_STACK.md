@@ -960,8 +960,14 @@ readers, never by the silent probes.
   and 23 root attributes this writer omits at rest were materialised at
   Camera Raw's
   defaults (`ColorNoiseReduction="25"`, `ColorGradeBlending="50"`,
-  `CurveRefineSaturation="100"`, the rest 0). Both pairs are the
-  `AUTOSHADE_LR_PAYLOAD_FIXTURES` test material.
+  `CurveRefineSaturation="100"`, the rest 0).
+- A v1.3.1 sidecar itself (2026-09-12, after the release; 285,172 → 274,012
+  bytes after one mask toggle): the recipe attribute (13,924 characters) and
+  all five rasters byte for byte, `ash:` 12 → 0, `ColorNoiseReduction` 0 → 0;
+  the restored develop differs from the written one in fifteen leaves, all
+  Lightroom's (its Select Sky reference point and provenance on the two
+  zone masks, nine materialised keys kept as passthrough). All three pairs
+  are the `AUTOSHADE_LR_PAYLOAD_FIXTURES` test material.
 - A full reverse-fit recipe (46.8 KB compact JSON) packs to 14.1 KB of
   payload; a zone alpha (59.9 KB PNG) to 79.8 KB.
 
