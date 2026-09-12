@@ -132,6 +132,10 @@ keeps its editor intent. What Lightroom itself renders for a written
 intersection, and whether the `ash` attributes survive a Lightroom rewrite,
 is not verified on this machine.
 
+*Measured after release (2026-09-12, Lightroom 9.4): the written
+intersections read and re-serialise intact; the `ash` attributes do not
+survive the rewrite. v1.3.1 answers with a payload — see its notes.*
+
 The spatial tiles the fit attaches are now four intersecting half-planes —
 four Lightroom linear gradients, ramp `0.5/2048` — instead of bitmaps: on the
 analysis raster the gradient matches the hard cell within one code per
@@ -308,3 +312,6 @@ Lightroom's own rendering of the written intersections and whether the `ash`
 attributes survive a Lightroom rewrite; the sidecars for the reference pair
 at all three strengths are kept for that check. No GUI executable was
 launched.
+
+*Both were measured after release, on 2026-09-12, with the user's Lightroom
+9.4: see the v1.3.1 notes.*

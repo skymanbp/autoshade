@@ -1,6 +1,6 @@
 # AutoShade — Architecture
 
-> Status: **implemented** (v1.3.0 — the sensor plane is measured from the
+> Status: **implemented** (v1.3.1 — the sensor plane is measured from the
 > container before the decoder is asked to allocate it, so a frame past that
 > decoder's own ceiling is a named refusal naming the frame and the workflow
 > that works instead of an abort, and a CONTAINED panic no longer raises a modal
@@ -134,14 +134,24 @@
 > wrong reason; it writes a `=== name ===` transcript that
 > `scripts/check_docs.py --gates` reads the counts and the lane set back out
 > of, and it prints the by-name test-set difference against a saved baseline.
-> 1486 library + 24 CLI + 173 GUI + 2+2 contract tests are enumerated in the GUI
-> build; the library result is 1471 pass + 15 `#[ignore]`d forensic probes and
+> 1495 library + 24 CLI + 173 GUI + 2+2 contract tests are enumerated in the GUI
+> build; the library result is 1480 pass + 15 `#[ignore]`d forensic probes and
 > the GUI result is 172 pass + one explicit scratch-recipe export probe ignored
-> in the ordinary battery. Counts refreshed 2026-09-12 for v1.3.0: +103 / −8 by
-> name against the v1.2.6 tag (`24a467f`), taken statically between the tag's
-> source and this tree; the eight old names are renames (three in R34, four in
-> R35, one in R36), each re-pinned under its new name as the lane notes below
-> record. The calibration lane did not run for this release either. Lane by
+> in the ordinary battery. Counts refreshed 2026-09-12 for v1.3.1: +10 / −1 by
+> name against the v1.3.0 tag (`5446012`), taken statically between the tag's
+> source and this tree — the nine payload pins in `xmp::payload_tests` (the
+> fresh-document round trip, the replayed Lightroom rewrite, raster placement
+> on a disclosing read only, the refused payload, the merge over a foreign
+> prefix, the raster budget, the zone role from the name, the inversion pair,
+> and the two real Lightroom 9.4 rewrites under `AUTOSHADE_LR_PAYLOAD_FIXTURES`)
+> plus one rename, `bitmap_masks_do_not_come_back_from_xmp` →
+> `bitmap_masks_come_back_only_through_the_payload`, re-pinned on both the
+> projection and the whole document. The calibration lane did not run for
+> this release either. Before that, counts were refreshed 2026-09-12 for
+> v1.3.0: +103 / −8 by name against the v1.2.6 tag (`24a467f`), taken
+> statically between the tag's source and that tree; the eight old names are
+> renames (three in R34, four in R35, one in R36), each re-pinned under its new
+> name as the lane notes below record. Lane by
 > lane, newest first: R37–R38 added +8 / −0 against `ccbd919` — the
 > target-referenced seam pins
 > `fit_zoned::tests::a_step_the_target_itself_carries_is_not_charged_as_a_seam`,
@@ -2015,6 +2025,96 @@ The cost was paid in TEST FIXTURES, which had used exactly those keys as their
 「unmodelled」 samples and had to be re-based four times across the round (they
 now use `PointColor`, `Look` and `CameraProfileDigest`); what remains named is
 what remains unmodelled.
+
+#### The payload: the whole develop under this app's own namespace (v1.3.1)
+
+Everything above is a PROJECTION: the `crs:` settings Lightroom can read,
+which is not the develop. A colour field, a bitmap tile, a muted mask, a
+zone's role, the calibration anchor, the exact slider value behind a
+two-decimal `Exposure2012` — none of it has a `crs:` spelling, and until
+v1.3.1 `recipe.json` in the store was the only exact record. The sidecar is
+also Lightroom's document: the first Lightroom check of the v1.3.0 sidecars
+(2026-09-12, Lightroom 9.4 cloud desktop, "local" mode) showed that ANY
+edit rewrites the file in place from Lightroom's own model — the
+`crs:MaskGroupBasedCorrections` block came back structurally intact, every
+`ash:` intent attribute inside it was gone (0 of 12, six names), `crs:Version`
+moved from 15.5.1 to 18.4, and twenty-three root attributes this writer
+omits at rest
+were materialised at Camera Raw's own defaults (`ColorNoiseReduction="25"`
+among them, which is where the two smaller v1.3.1 changes come from).
+
+One rewrite of a PROBE sidecar answered which spellings survive
+([`src/xmp/payload.rs`](../src/xmp/payload.rs) module docs; the two real
+round trips are the `AUTOSHADE_LR_PAYLOAD_FIXTURES` test material). Root-level
+properties in a foreign namespace survive BYTE-EXACT — a 15 KB attribute, an
+`rdf:Bag`, a struct, an `rdf:Seq` of structs totalling 250 KB — re-serialised
+into XMP's compact form (simple properties become attributes on the root
+`rdf:Description`, struct fields become attributes on the struct element,
+`xmlns:` declarations are hoisted to the root). Unknown `crs:` attributes and
+elements are dropped. So the writer puts the develop THERE: `asr:Recipe` (the
+recipe as the app holds it, display frame, raster paths reduced to bare
+names; zlib level 9, base64) with `asr:RecipeCrc32`, `asr:Payload="1"` and
+`asr:Writer`, plus `<asr:Rasters>` — every raster nothing can re-derive
+(`LocalAdjustment::turnable_raster_paths_mut`: bitmap tiles and zone alphas,
+never an AI mask's cached re-derivation), each once, as `{Name, Crc32, Data}`
+in the compact struct form, under a 6 MiB raw budget with the overflow named
+as `MaskLossReason::RasterNotEmbedded`. The namespace is
+`https://autoshade.dev/ns/recipe/1.0/`; the prefix is `asr` unless a merge
+base binds that prefix to something else, in which case the next free one is
+taken and the reader — which looks the prefix up by URI, never by name —
+finds it regardless. The merge strips the previous payload (attributes and
+the `Rasters` element, by the prefix the base bound) and appends the new one,
+the strip-then-append discipline the `crs:` keys already follow.
+
+The reader decodes the `crs:` settings exactly as before, then RECONCILES
+(`payload::restore`). Three recipes meet: **P**, the payload; **C**, the crs
+reading of the document, where Lightroom's edits live; **W**, the crs reading
+of P projected through this writer with no payload (`xmp::bare_document`)
+and no `ash:` intent — what Lightroom would have handed back had it
+rewritten the file without touching anything: rounding included, and the
+intent gone, which is the measured half of the rewrite. Leaf by leaf over
+the JSON trees:
+`W ≈ C` (2e-4) means Lightroom did not edit this leaf, so P's exact value is
+restored — which is automatically every leaf the projection cannot carry at
+all, since W and C are then silent on it in the same way; otherwise the
+document says something different from what was written into it, which is
+what an edit looks like, and C wins. The one measured exception is a leaf
+Lightroom MATERIALISES rather than edits (Camera Raw's default for a key this
+writer omits at rest: `ColorNoiseReductionDetail="50"` and its kin), and a
+mask's `role`, the rationale and the confidence are P's outright — intent and
+provenance with no `crs:` spelling. A mask's inversion is one bit in two
+homes — the correction's flag and the geometry's own bit — whose XOR is all
+the `crs:` spelling carries, and which home holds it is intent Lightroom
+drops; so the pair is reconciled as a unit by its net: the net that was
+written came back → the payload's pair, authored home and all; a different
+net → the document's pair, in Lightroom's home (`payload::reconcile_mask`).
+Masks are matched, not zipped: payload masks the projection never wrote
+(muted, bitmap-based) come back as they were; a written mask is paired with
+its read-back by order and name and then with the document's by name; a
+pair Lightroom removed is dropped, a correction Lightroom added is
+appended. A payload this build cannot trust — a
+format version it does not know, bytes that do not inflate, a CRC mismatch,
+an unknown recipe field — is disclosed and the crs reading stands alone.
+
+Rasters are placed beside the develop only on a DISCLOSING read (the
+`_with_diag` doors: the GUI's restore, the CLI, the web server, the store's
+snapshot); the silent probe readers (`xmp_to_recipe_for_photo`, the merge's
+own equality check) compare and never write. A raster already there byte for
+byte is kept; a DIFFERENT file under the name is left alone and the sidecar's
+copy takes a fresh `-2` name that the restored recipe follows; the bare names
+are then anchored to the develop dir exactly as a loaded `recipe.json` is.
+Names are one path component or refused on both sides.
+
+Two smaller consequences of the same measurement. `ColorNoiseReduction` goes
+out at ZERO (`amount_carries`): this engine renders no colour noise reduction,
+so the recipe's 0 is the truth of the render, and the absent key was letting
+Lightroom apply its RAW default of 25 to a photo the app showed without it.
+And an unnamed zone goes out under its role tag (`written_name`: `sky` /
+`land`), which the reader — `payload::zone_name_role`, together with the
+sub-zone fit's own `sky · band 2/3` labels — reads back as the role when no
+intent survives, the last resort for a v1.3.0 sidecar Lightroom rewrote
+before the payload existed (the real band sidecar is the fixture that pins
+it). Intent, when present, still rules, `custom` included.
 
 ### 4.6 Style / eval harness (M4)
 
@@ -4504,7 +4604,9 @@ comments are the source of these one-liners.
 | `brotli-decompressor` 5.0.3 | bounded decompression of modern Lightroom `MaskBrushTable` objects from the sibling ACR store; pinned to the version already present through jxl-oxide |
 | `bytemuck` 1 | zero-copy `Vec<[f32;3]>` ↔ `Vec<f32>` casts in the orientation stage — a 61 MP portrait RAW otherwise pays three ~732 MB full-frame copies (`render::orient_f32`) |
 | `clap` 4.6.1 (`derive`) | the CLI surface: subcommands, `--jobs`, `--strength`, the rest |
+| `crc32fast` 1.5 | the sidecar payload's integrity check (`xmp::payload`): a CRC over the recipe JSON and over each embedded raster, so a truncated or hand-edited sidecar is refused rather than restored. Already locked through png |
 | `dotenvy` 0.15 | reads `.env` — under the trust table of §3, which is why a `.env` may carry a `Secret` and not a `Destination` |
+| `flate2` 1.1 | the sidecar payload's compression (`xmp::payload`): the recipe JSON rides in one root attribute, zlib + base64. Already locked through png (miniz_oxide underneath, pure Rust) |
 | `getrandom` 0.3.4 | CSPRNG bytes for the `serve` session token gating image URLs; anything seeded from the clock is guessable, which is the whole attack. Already transitive, so no new dependency |
 | `image` 0.25 | baked-source decode + every export encode. `default-features = false` and the codec set is opt-in one at a time — `jpeg`, `png`, `tiff`, `webp`, `bmp`, `gif`. avif/heic stay OUT because they mean a C toolchain (dav1d) this tree does not have; R27 added the last three only after checking each one's dependency closure (all pure Rust, no `build.rs`, no bundled C) |
 | `md5` 0.8.0 | verifies the content-addressed key of an ACR `MaskBrushTable` object before parsing it; integrity only, never authentication, and pinned to the version already present through rawler |

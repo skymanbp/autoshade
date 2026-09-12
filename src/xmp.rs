@@ -1771,6 +1771,16 @@ pub enum MaskLossReason {
     /// Per-channel recolour gains (`color_gains`) are engine-only: classic ACR
     /// has no counterpart, so the sidecar renders without them.
     Recolour,
+    /// A raster this mask rides on — a bitmap tile, a zone alpha — could not
+    /// be embedded in the sidecar's AutoShade payload (v1.3.1): the file was
+    /// unreadable, or it would have pushed the document past
+    /// [`payload::RASTER_BUDGET`]. The recipe still names it, so a store that
+    /// has the file renders the mask; a store that does not renders it inert
+    /// and is told why. Lightroom never saw either; this is about what the
+    /// sidecar can give BACK to AutoShade.
+    ///
+    /// [`payload::RASTER_BUDGET`]: payload::RASTER_BUDGET
+    RasterNotEmbedded,
 }
 
 impl MaskLossReason {
@@ -1793,7 +1803,7 @@ impl MaskLossReason {
     /// [`en`]: MaskLossReason::en
     /// [`Rotation`]: MaskLossReason::Rotation
     /// [`same_kind`]: MaskLossReason::same_kind
-    pub const ALL: [MaskLossReason; 7] = [
+    pub const ALL: [MaskLossReason; 8] = [
         MaskLossReason::Bitmap,
         MaskLossReason::Disabled,
         MaskLossReason::ComponentsFlattened,
@@ -1801,6 +1811,7 @@ impl MaskLossReason {
         MaskLossReason::AiMaskRecomputed,
         MaskLossReason::Rotation(0),
         MaskLossReason::Recolour,
+        MaskLossReason::RasterNotEmbedded,
     ];
 
     /// Same VARIANT, payload ignored — the grouping key both prose channels
@@ -1827,6 +1838,10 @@ impl MaskLossReason {
             }
             MaskLossReason::Rotation(_) => "radial rotation dropped",
             MaskLossReason::Recolour => "recolour gains dropped",
+            MaskLossReason::RasterNotEmbedded => {
+                "mask raster(s) not embedded in the sidecar's AutoShade payload (unreadable, or \
+                 over the size budget)"
+            }
         }
     }
 }
@@ -2589,6 +2604,23 @@ fn local_curve_elem(tag: &str, points: &[crate::recipe::CurvePoint]) -> String {
 /// sidecar; see docs/V2_PLAN.md §2a). All 26 `Local*` fields are emitted (the
 /// ones this engine has no model for as 0) as Lightroom expects the full block
 /// — `LocalHue` and `LocalSharpness` joined the carried set in R23-1b.
+/// The `crs:CorrectionName` a mask goes out under, and the name every loss
+/// verdict about it carries: the user's own label when set; for an unnamed
+/// ZONE its role tag (`sky` / `land`), so that a sidecar Lightroom rewrites —
+/// which strips the `ash:Role` intent (measured 2026-09-12) — still says which
+/// zone this was (`payload::zone_name_role` reads it back, and the reader
+/// returns the placeholder to "" exactly as it does `AutoShade <n>`); for any
+/// other unnamed mask the `AutoShade <n>` placeholder, as always.
+fn written_name(i: usize, m: &LocalAdjustment) -> String {
+    if !m.name.is_empty() {
+        return m.name.clone();
+    }
+    if m.role.is_zone() {
+        return m.role.tag().to_string();
+    }
+    format!("AutoShade {}", i + 1)
+}
+
 fn masks_xml(r: &EditRecipe, frame: Option<FrameAspect>) -> (String, Vec<MaskLoss>) {
     let mut losses: Vec<MaskLoss> = Vec::new();
     if r.masks.is_empty() {
@@ -2598,7 +2630,7 @@ fn masks_xml(r: &EditRecipe, frame: Option<FrameAspect>) -> (String, Vec<MaskLos
     for (i, m) in r.masks.iter().enumerate() {
         // The name goes first: it identifies this mask in the loss list even
         // on the arms that never reach the emit below.
-        let name = if m.name.is_empty() { format!("AutoShade {}", i + 1) } else { m.name.clone() };
+        let name = written_name(i, m);
         // The eye toggle: a disabled mask applies nothing, so projecting it
         // as an active correction would make Lightroom render an edit the
         // app does not. Skipped like a Bitmap mask (lossy projection —
@@ -2870,8 +2902,24 @@ crs:MaskBlendMode=\"{}\" crs:MaskInverted=\"{}\" crs:MaskSyncID=\"{seed}\" crs:M
 /// retention from 50 to 0, which is a render change, not a spelling. Those
 /// keep reaching Lightroom by ABSENCE, which is the honest encoding and the
 /// rule `owned_attrs`' vignette/grain block states for the same reason.
+///
+/// **`ColorNoiseReduction` is the one key that goes out at ZERO despite a
+/// non-zero ACR default (v1.3.1).** The argument above — "our 0 means never
+/// learned, absence keeps Lightroom's default" — holds for a control this
+/// engine renders at that default. Colour noise reduction is a control this
+/// engine does not render AT ALL: the pixels AutoShade shows carry none, so
+/// the recipe's 0 is the truth of the render, and an absent key made
+/// Lightroom apply its RAW default of 25 to a photo the app showed without
+/// it. Measured on the Lightroom check of the v1.3.0 sidecars (2026-09-12):
+/// Lightroom materialised `ColorNoiseReduction="25"` into every rewritten
+/// file. Writing the zero is what makes the two renders describe one photo;
+/// the Detail/Smoothness companions stay at-rest-absent (they do nothing at
+/// amount 0, and Lightroom writes its 50/50 back regardless — which the
+/// payload reader treats as a materialisation, not an edit).
 fn amount_carries(key: &str, amount: f32) -> bool {
-    matches!(key, "LuminanceNoiseReductionContrast" | "SharpenEdgeMasking") && amount != 0.0
+    key == "ColorNoiseReduction"
+        || (matches!(key, "LuminanceNoiseReductionContrast" | "SharpenEdgeMasking")
+            && amount != 0.0)
 }
 
 fn owned_attrs(r: &EditRecipe, frame: Option<FrameAspect>) -> String {
@@ -3243,8 +3291,31 @@ pub fn recipe_to_xmp_in_frame(
     r: &EditRecipe,
     frame: Option<FrameAspect>,
 ) -> (String, Vec<MaskLoss>) {
-    let (desc, losses) = crs_description(r, frame);
+    recipe_to_xmp_in_frame_for_photo(r, frame, None)
+}
+
+/// [`recipe_to_xmp_in_frame`] told which PHOTOGRAPH the develop belongs to,
+/// so the payload can anchor a relative raster path to that photo's develop
+/// dir when it embeds the raster (`payload::rasters_element`). Without it an
+/// absolute path still embeds; a bare name cannot, and is disclosed.
+pub fn recipe_to_xmp_in_frame_for_photo(
+    r: &EditRecipe,
+    frame: Option<FrameAspect>,
+    photo: Option<&std::path::Path>,
+) -> (String, Vec<MaskLoss>) {
+    let (desc, losses) = crs_description(r, frame, photo, true);
     (xmp_document(r, &desc), losses)
+}
+
+/// The document the payload reader measures a payload AGAINST: the recipe
+/// projected through this writer with NO payload of its own — what a
+/// Lightroom that touched nothing would hand back, once `payload::restore`
+/// has also dropped the `ash:` intent the way Lightroom does. It carries no
+/// payload precisely so that reading it cannot recurse into one. Crate-wide
+/// for the tests outside this module that assert the PROJECTION rather than
+/// the whole document.
+pub(crate) fn bare_document(r: &EditRecipe, frame: Option<FrameAspect>) -> String {
+    xmp_document(r, &crs_description(r, frame, None, false).0)
 }
 
 /// [`recipe_to_xmp`] and the writer's own per-mask loss verdicts, from ONE pass
@@ -3275,13 +3346,36 @@ fn xmp_document(r: &EditRecipe, desc: &str) -> String {
 ///
 /// A FRESH document declares its own frame (R27 A8) and therefore writes its
 /// geometry in that frame — see [`frame_declaration`] and [`in_source_frame`].
-fn crs_description(r: &EditRecipe, frame: Option<FrameAspect>) -> (String, Vec<MaskLoss>) {
+///
+/// `embed` says whether the AutoShade payload rides along (`payload`): every
+/// document that leaves this app carries it; the ONE exception is the bare
+/// projection the payload reader compares a document against
+/// ([`bare_document`]). `photo` anchors the payload's relative raster paths.
+fn crs_description(
+    r: &EditRecipe,
+    frame: Option<FrameAspect>,
+    photo: Option<&std::path::Path>,
+    embed: bool,
+) -> (String, Vec<MaskLoss>) {
+    // The payload's subject is the recipe AS THE APP HOLDS IT — display frame,
+    // the very value `recipe.json` gets — not the source-frame projection
+    // below, which exists for Lightroom's coordinates alone.
+    let app = r;
     let r = in_source_frame(r, frame);
     let r = r.as_ref();
-    let (children, losses) = owned_children(r, true, frame);
+    let (children, mut losses) = owned_children(r, true, frame);
+    let (payload_attrs, payload_children) = if embed {
+        let (rasters, mut raster_losses) =
+            payload::rasters_element(app, payload::PAYLOAD_PREFIX, photo);
+        losses.append(&mut raster_losses);
+        (payload::root_attrs(app, payload::PAYLOAD_PREFIX), rasters)
+    } else {
+        (String::new(), String::new())
+    };
     let desc = format!(
         "<rdf:Description rdf:about=\"\"\n\
-    xmlns:crs=\"http://ns.adobe.com/camera-raw-settings/1.0/\"{tiff}{attrs}>{children}\n\
+    xmlns:crs=\"http://ns.adobe.com/camera-raw-settings/1.0/\"{tiff}{attrs}{payload_attrs}>\
+{children}{payload_children}\n\
   </rdf:Description>",
         tiff = frame_declaration(frame),
         attrs = owned_attrs(r, frame),
@@ -3408,13 +3502,14 @@ fn insert_crs_description(
     existing: &str,
     r: &EditRecipe,
     frame: Option<FrameAspect>,
+    photo: Option<&std::path::Path>,
 ) -> Option<(String, Vec<MaskLoss>)> {
     let at = find_outside_constructs(existing, "<rdf:RDF")?;
     let (gt, self_closing) = scan_tag_end(existing, at)?;
     if self_closing {
         return None;
     }
-    let (desc, losses) = crs_description(r, frame);
+    let (desc, losses) = crs_description(r, frame, photo, true);
     let mut out = String::with_capacity(existing.len() + 512);
     out.push_str(&existing[..=gt]);
     out.push_str("\n  ");
@@ -4257,8 +4352,10 @@ fn top_level_owned_spans(
             continue;
         }
         if depth == 0
-            && let Some(bare) = name.strip_prefix("crs:")
-            && owned.contains(bare)
+            && (name.strip_prefix("crs:").is_some_and(|bare| owned.contains(bare))
+                // …or a FULL name: the payload's `<asr:Rasters>`, the one
+                // owned element outside the crs namespace.
+                || owned.contains(&name))
         {
             // The leading indentation (and the newline before it) goes with
             // the property — the same whitespace hygiene the attribute strip
@@ -4800,7 +4897,7 @@ pub fn merge_recipe_into_xmp_in_frame_for_photo(
         // the user could take. There is nothing of ours to splice INTO, but
         // there is somewhere to put it: adding our own Description to the
         // existing `rdf:RDF` keeps the file verbatim and makes the merge real.
-        return insert_crs_description(existing, r, frame)
+        return insert_crs_description(existing, r, frame, photo)
             .map(|(doc, losses)| MergeOutcome { doc, notes, losses });
     };
     let (gt, self_closing) = scan_tag_end(existing, desc_start)?;
@@ -4836,18 +4933,27 @@ pub fn merge_recipe_into_xmp_in_frame_for_photo(
             tag.replace_range(left..span.end, "");
         }
     }
+    // The PREVIOUS payload goes the same way (strip, then append ours below).
+    // The prefix the base bound to it is remembered so its `Rasters` element
+    // can be stripped by its real name; the prefix WE bind steps around one
+    // the base binds to something else (`payload::prefix_for`).
+    let old_payload_prefix = payload::strip_root_attrs(&mut tag);
+    let payload_prefix = payload::prefix_for(Some(&tag));
 
 
     // The recipe in the frame the OUTPUT document will be read in (R27) — the
     // base's own declaration when it has one, and it is the base's tag we are
     // rewriting, so the turn has to match what that tag says.
+    // The payload's subject: the develop as the app holds it, before the turn
+    // below (`crs_description` draws the same line).
+    let app = r;
     let turned = in_source_frame(r, frame);
     let r = turned.as_ref();
 
     let closing_len = if self_closing { 2 } else { 1 };
     let head = tag[..tag.len() - closing_len].trim_end().to_string();
     let new_tag = format!(
-        "{head}{tiff}{attrs}>",
+        "{head}{tiff}{attrs}{payload}>",
         tiff = match declare_frame {
             FrameDecl::Whole => frame_declaration(frame),
             FrameDecl::Orientation => {
@@ -4856,6 +4962,7 @@ pub fn merge_recipe_into_xmp_in_frame_for_photo(
             FrameDecl::Keep => String::new(),
         },
         attrs = owned_attrs(r, frame),
+        payload = payload::root_attrs(app, &payload_prefix),
     );
 
     // The element body: drop every owned child block, then prepend ours.
@@ -4956,6 +5063,9 @@ pub fn merge_recipe_into_xmp_in_frame_for_photo(
         .filter(|k| !(preserve_masks && **k == "MaskGroupBasedCorrections"))
         .map(|k| (*k).to_string())
         .chain(merge_strip_keys(r))
+        // The base's payload rasters, by the FULL name the base gave them —
+        // the one owned element outside the crs namespace.
+        .chain(old_payload_prefix.iter().map(|p| format!("{p}:Rasters")))
         .collect();
 
 
@@ -4970,8 +5080,11 @@ pub fn merge_recipe_into_xmp_in_frame_for_photo(
     let mut out = String::with_capacity(existing.len() + 256);
     out.push_str(&existing[..desc_start]);
     out.push_str(&new_tag);
-    let (children, losses) = owned_children(r, !preserve_masks, frame);
+    let (children, mut losses) = owned_children(r, !preserve_masks, frame);
     out.push_str(&children);
+    let (rasters, mut raster_losses) = payload::rasters_element(app, &payload_prefix, photo);
+    losses.append(&mut raster_losses);
+    out.push_str(&rasters);
     out.push_str(body.trim_end());
     out.push_str("\n  </rdf:Description>");
     out.push_str(&existing[tail_start..]);
@@ -7894,27 +8007,36 @@ fn parse_one_correction_with_reader(
                 None
             }
         });
+    // Our own writer synthesises "AutoShade <n>" for unnamed masks (the
+    // block above needs SOME CorrectionName) — importing that back as a
+    // user-given name froze the placeholder and hid the localised
+    // role/label. Round-trip it back to "unnamed". An unnamed ZONE goes out
+    // under its role tag instead (`written_name`), and that placeholder is
+    // also the LAST-RESORT role when the intent below is gone: a sidecar
+    // Lightroom rewrote carries no `ash:` attribute at all (measured
+    // 2026-09-12), and the payload did not exist before v1.3.1
+    // (`payload::zone_name_role`).
+    let placeholder_free = own
+        .crs_str("CorrectionName")
+        .map(|v| v.into_owned())
+        .filter(|n| n.strip_prefix("AutoShade ").is_none_or(|rest| rest.parse::<u32>().is_err()))
+        .unwrap_or_default();
+    let (name, name_role) = payload::zone_name_role(placeholder_free, &mask);
     Some(LocalAdjustment {
         mask,
         range,
-        // Our own writer synthesises "AutoShade <n>" for unnamed masks (the
-        // block above needs SOME CorrectionName) — importing that back as a
-        // user-given name froze the placeholder and hid the localised
-        // role/label. Round-trip it back to "unnamed".
-        name: own
-            .crs_str("CorrectionName")
-            .map(|v| v.into_owned())
-            .filter(|n| {
-                n.strip_prefix("AutoShade ").is_none_or(|rest| rest.parse::<u32>().is_err())
-            })
-            .unwrap_or_default(),
+        name,
         amount: own.crs_f32("CorrectionAmount").unwrap_or(1.0),
         components,
         inverted,
+        // Intent first — a document of ours says the role outright, and says
+        // `custom` outright too — and the name's verdict only where no intent
+        // survives at all.
         role: match mask_intent_attr(correction_tag, "Role", intent_declared).as_deref() {
             Some("sky") => crate::recipe::MaskRole::ZoneSky,
             Some("land") => crate::recipe::MaskRole::ZoneLand,
-            _ => crate::recipe::MaskRole::Custom,
+            Some(_) => crate::recipe::MaskRole::Custom,
+            None => name_role.unwrap_or(crate::recipe::MaskRole::Custom),
         },
         exposure_ev: own.crs_f32("LocalExposure2012").unwrap_or(0.0) * 4.0,
         contrast: q100("LocalContrast2012"),
@@ -8337,6 +8459,41 @@ fn xmp_to_recipe_clamped_impl(
     // SIZE caps cut — dab bytes, strokes, curve knots — is loss no other
     // channel here can see, because `import_losses` reads the document and
     // this reads the recipe the document produced.
+    //
+    // THE PAYLOAD (v1.3.1). Everything above is what the `crs:` settings say,
+    // which is where Lightroom's edits live and the only thing a document
+    // this app never wrote can say. A document this app DID write also
+    // carries the develop itself, exactly, under its own namespace — and a
+    // Lightroom rewrite preserves that (measured 2026-09-12). The two are
+    // reconciled leaf by leaf: Lightroom's value where Lightroom edited, the
+    // exact one everywhere else (`payload::restore`). A payload this build
+    // cannot read is disclosed and the `crs:` reading above stands alone.
+    // Rasters are placed beside the develop only on a DISCLOSING read: the
+    // silent probe readers compare and never write.
+    if let Some(found) = payload::find(xmp) {
+        match found {
+            Ok(p) => {
+                let develop_dir = photo.map(crate::store::develop_dir);
+                r = payload::restore(
+                    r,
+                    p,
+                    frame,
+                    photo,
+                    develop_dir.as_deref(),
+                    diag.is_some(),
+                    diag,
+                );
+            }
+            Err(why) => {
+                if let Some(d) = diag {
+                    d.warn(format!(
+                        "the sidecar carries an AutoShade payload this build could not read \
+                         ({why}) — the develop was imported from its camera-raw settings alone"
+                    ));
+                }
+            }
+        }
+    }
     let dropped = r.clamp();
     (r, dropped)
 }
@@ -8379,20 +8536,31 @@ mod tests {
         assert!(!doc.contains("ToneCurvePV2012Green"));
         assert!(!doc.contains("ToneCurvePV2012Blue"));
         assert!(!doc.contains("MaskGroupBasedCorrections"));
+        // TWO verdicts about the one mask (v1.3.1): the projection skips it,
+        // and the payload could not embed a raster this test never wrote.
         assert_eq!(
-            losses.len(),
+            losses.iter().filter(|l| l.reason == MaskLossReason::Bitmap).count(),
             1,
             "a LEGACY bitmap zone — a recipe.json saved before the zones became \
              Select Sky components — stays engine-only"
         );
+        assert_eq!(
+            losses.iter().filter(|l| l.reason == MaskLossReason::RasterNotEmbedded).count(),
+            1,
+            "a raster that does not exist cannot ride in the payload: {losses:?}"
+        );
+        assert_eq!(losses.len(), 2);
 
-        let projected = xmp_to_recipe(&doc);
+        // The PROJECTION (payload-free): the mask is not in the crs settings.
+        let projected = xmp_to_recipe(&bare_document(&recipe, None));
         assert_eq!(projected.exposure_ev, -0.8);
         assert_eq!(projected.temperature_k, Some(9000.0));
         assert_eq!(projected.tint, 10.0);
         assert_eq!(projected.saturation, 30.0);
         assert_eq!(projected.tone_curve, recipe.tone_curve);
         assert!(projected.masks.is_empty());
+        // The whole document brings the mask back, by name, raster or not.
+        assert_eq!(xmp_to_recipe(&doc).masks.len(), 1);
         assert!(projected.red_curve.is_empty());
         assert!(projected.green_curve.is_empty());
         assert!(projected.blue_curve.is_empty());
@@ -9302,20 +9470,29 @@ mod tests {
         assert!(back.auto_lateral_ca, "the auto-CA flag must come back on");
         // A neutral recipe writes NONE of them: an absent key is how
         // Lightroom is told to keep its own default (Radius 1.0, Detail 25,
-        // Colour NR 25/50/50), and inventing a zero for each would be a
-        // change to the photo, not a faithful silence.
+        // Colour NR Detail/Smoothness 50/50), and inventing a zero for each
+        // would be a change to the photo, not a faithful silence. The ONE
+        // exception is `ColorNoiseReduction` itself (v1.3.1, `amount_carries`):
+        // this engine renders no colour noise reduction, so its zero IS the
+        // render, and an absent key let Lightroom apply its RAW default of 25
+        // to a photo AutoShade showed without it (measured 2026-09-12).
         let neutral = recipe_to_xmp(&EditRecipe::default());
         for key in [
             "SharpenRadius",
             "SharpenDetail",
             "SharpenEdgeMasking",
             "LuminanceNoiseReduction",
-            "ColorNoiseReduction",
+            "ColorNoiseReductionDetail",
+            "ColorNoiseReductionSmoothness",
             "ChromaticAberration",
             "AutoLateralCA",
         ] {
             assert!(!neutral.contains(key), "{key} must be absent from a neutral sidecar");
         }
+        assert!(
+            neutral.contains(r#"crs:ColorNoiseReduction="0""#),
+            "colour NR goes out at the engine's value even at rest: {neutral}"
+        );
         // …and the merge STRIPS them, so a cleared value cannot linger at
         // Lightroom's old number beside ours.
         let lr = "<x:xmpmeta xmlns:x=\"adobe:ns:meta/\">\n \
@@ -9328,9 +9505,13 @@ mod tests {
         assert_eq!(xmp_to_recipe(lr).color_nr, 25.0, "premise: the LR values import");
         assert!(xmp_to_recipe(lr).auto_lateral_ca, "premise: so does the flag");
         let cleared = merged_doc(lr, &EditRecipe::default()).expect("a plain LR sidecar merges");
-        for key in ["SharpenRadius", "ColorNoiseReduction", "AutoLateralCA"] {
+        for key in ["SharpenRadius", "AutoLateralCA"] {
             assert!(!cleared.contains(key), "{key} survived a clear: {cleared}");
         }
+        // …and the colour NR is REPLACED, not merely stripped: one answer,
+        // and it is the engine's zero, never Lightroom's stale 25.
+        assert_eq!(cleared.matches("crs:ColorNoiseReduction=").count(), 1, "one answer: {cleared}");
+        assert!(cleared.contains(r#"crs:ColorNoiseReduction="0""#), "ours: {cleared}");
     }
 
     /// v0.31.1: `crs:Sharpness` is Lightroom's Detail > Sharpening **Amount**
@@ -10173,6 +10354,7 @@ mod tests {
                 MaskLossReason::AiMaskRecomputed => 4,
                 MaskLossReason::Rotation(_) => 5,
                 MaskLossReason::Recolour => 6,
+                MaskLossReason::RasterNotEmbedded => 7,
             }
         }
         for (i, r) in MaskLossReason::ALL.into_iter().enumerate() {
@@ -13299,8 +13481,11 @@ mod tests {
         assert_eq!(w.len(), crate::recipe::MASK_WARP_KNOTS);
         assert!(w[0] > 1.04 && w[w.len() - 1] < 1.0, "the 105mm warp is not the identity: {w:?}");
 
-        let a = recipe_to_xmp_in_frame(&plain, frame).0;
-        let b = recipe_to_xmp_in_frame(&warped, frame).0;
+        // The PROJECTION (payload-free, v1.3.1): the payload carries the whole
+        // recipe, lens profile included, so two whole documents differ by
+        // design; what must not move is what Lightroom reads.
+        let a = bare_document(&plain, frame);
+        let b = bare_document(&warped, frame);
         assert_eq!(a, b, "an active mask warp changed the written sidecar");
         // And the ROUND TRIP still lands on the same recipe geometry, so the
         // equality above is not two identically-broken documents.
@@ -14534,11 +14719,16 @@ mod tests {
         assert!(xmp.contains(r#"crs:WhiteBalance="Custom""#), "{xmp}");
         assert!(xmp.contains(r#"crs:Temperature="4820""#), "{xmp}");
         assert!(xmp.contains(r#"crs:Tint="+15""#), "{xmp}");
-        // Round trip: the import reads Custom back as an absolute target ==
-        // the stamp, which the anchored engine renders as "no Kelvin shift".
-        let back = xmp_to_recipe(&xmp);
+        // Round trip of the PROJECTION: the import reads Custom back as an
+        // absolute target == the stamp, which the anchored engine renders as
+        // "no Kelvin shift".
+        let back = xmp_to_recipe(&bare_document(&r, None));
         assert_eq!(back.temperature_k, Some(4820.0));
         assert_eq!(back.tint, 15.0);
+        // The whole document (v1.3.1) restores the app's own state instead:
+        // a tint-only edit over the stamp, no explicit Kelvin at all.
+        let whole = xmp_to_recipe(&xmp);
+        assert_eq!((whole.temperature_k, whole.as_shot_k, whole.tint), (None, Some(4820.0), 15.0));
         // A legacy recipe (no stamp) keeps the old honest fallback.
         let legacy = EditRecipe { tint: 15.0, ..Default::default() };
         let xmp = recipe_to_xmp(&legacy);
@@ -15297,14 +15487,20 @@ mod tests {
     }
 
     #[test]
-    fn bitmap_masks_do_not_come_back_from_xmp() {
+    fn bitmap_masks_come_back_only_through_the_payload() {
         // The writer skips raster corrections (no classic-XMP encoding), so the
-        // reader must return only the parametric mask — never a phantom.
+        // crs reading must return only the parametric mask — never a phantom.
         let mixed = mixed_parametric_and_raster();
-        let back = xmp_to_recipe(&recipe_to_xmp(&mixed));
+        let back = xmp_to_recipe(&bare_document(&mixed, None));
         assert_eq!(back.masks.len(), 1);
         assert_eq!(back.masks[0].mask, mixed.masks[0].mask);
         assert_eq!(back.masks[0].exposure_ev, -1.0);
+        // The payload (v1.3.1) is what brings it back — by its bare name, the
+        // raster itself being one this test never wrote.
+        let whole = xmp_to_recipe(&recipe_to_xmp(&mixed));
+        assert_eq!(whole.masks.len(), 2);
+        assert_eq!(whole.masks[1].mask, MaskGeometry::Bitmap { path: "subject.png".into() });
+        assert_eq!(whole.masks[1].exposure_ev, 0.6);
     }
 
     #[test]
@@ -17118,3 +17314,10 @@ mod tests {
 #[cfg(test)]
 #[path = "xmp/composition_tests.rs"]
 mod composition_tests;
+
+/// The AutoShade payload: the whole develop under this app's own namespace,
+/// which a Lightroom rewrite preserves (v1.3.1) — see the module's own docs.
+mod payload;
+
+#[cfg(test)]
+mod payload_tests;

@@ -502,6 +502,10 @@ pub(crate) fn xmp_loss_line(
                 None => trf(lang, "radial rotation ×{n}", &[("n", &n)]),
             },
             R::Recolour => trf(lang, "recolour gains ×{n}", &[("n", &n)]),
+            // v1.3.1: the payload could not carry a raster this mask rides on
+            // (unreadable, or over the embed budget) — Lightroom never saw it
+            // either way; this is about what the sidecar gives BACK.
+            R::RasterNotEmbedded => trf(lang, "mask rasters not embedded ×{n}", &[("n", &n)]),
         };
         parts.push(format!("{head} ({})", named(lang, losses, reason)));
     }

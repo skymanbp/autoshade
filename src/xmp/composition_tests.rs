@@ -133,14 +133,23 @@ fn edited_ai_component_mode_overrides_imported_blend_and_add_keeps_plain_zero() 
             mask: linear(), components: vec![MaskComponent { geometry: ai.clone(), mode, inverted: false }],
             ..Default::default()
         }], ..Default::default() };
-        let doc = recipe_to_xmp(&recipe);
+        // The PROJECTION's spelling is read from the payload-free document:
+        // since v1.3.1 the ordinary round trip restores the recipe exactly
+        // from the payload, which would make these assertions about the crs
+        // encoding vacuous.
+        let doc = bare_document(&recipe, None);
         let got = xmp_to_recipe(&doc);
         assert_eq!(got.masks[0].components[0].mode, mode);
         let MaskGeometry::AiMask { blend_mode, value, .. } = got.masks[0].components[0].geometry else { panic!("AI"); };
         assert_eq!(blend_mode, if mode == MaskCombine::Add { 0 } else { 1 });
         assert_eq!(value, 0.0, "plain zero retains its carried spelling only for Add");
-        let doc2 = recipe_to_xmp(&got);
+        let doc2 = bare_document(&got, None);
         assert_eq!(doc, doc2, "a pure second round trip is byte-identical");
+        assert_eq!(
+            xmp_to_recipe(&recipe_to_xmp(&recipe)).masks[0].components,
+            recipe.masks[0].components,
+            "…and the payload restores the carried spelling itself"
+        );
     }
 }
 
@@ -155,14 +164,14 @@ fn edited_brush_component_uses_the_same_spelling_and_preserves_plain_add_zero() 
             mask: linear(), components: vec![MaskComponent { geometry: brush.clone(), mode, inverted: false }],
             ..Default::default()
         }], ..Default::default() };
-        let doc = recipe_to_xmp(&recipe);
+        let doc = bare_document(&recipe, None); // the projection, not the payload (see above)
         let got = xmp_to_recipe(&doc);
         assert_eq!(got.masks.len(), 1, "{doc}");
         assert_eq!(got.masks[0].components[0].mode, mode);
         let MaskGeometry::Brush { blend_mode, value, .. } = got.masks[0].components[0].geometry else { panic!("Brush"); };
         assert_eq!(blend_mode, if mode == MaskCombine::Add { 0 } else { 1 });
         assert_eq!(value, 0.0);
-        assert_eq!(doc, recipe_to_xmp(&got));
+        assert_eq!(doc, bare_document(&got, None));
     }
 }
 
@@ -176,7 +185,7 @@ fn a_complemented_subtract_writes_add_one_even_when_the_import_carried_zero() {
             components: vec![MaskComponent { geometry: ai.clone(), mode, inverted: false }],
             ..Default::default()
         }], ..Default::default() };
-        let got = xmp_to_recipe(&recipe_to_xmp(&recipe));
+        let got = xmp_to_recipe(&bare_document(&recipe, None)); // the projection (see above)
         assert_eq!(got.masks[0].components[0].mode, mode);
         let MaskGeometry::AiMask { blend_mode, value, .. } = got.masks[0].components[0].geometry else { panic!("AI"); };
         assert_eq!((blend_mode, value), (0, 1.0), "De Morgan creates a real Add, not the plain Add zero fallback");
@@ -284,7 +293,9 @@ fn editor_intent_survives_a_namespace_declaration_hoisted_to_the_document_root()
         ..Default::default()
     };
     let recipe = EditRecipe { masks: vec![original.clone()], ..Default::default() };
-    let doc = recipe_to_xmp(&recipe);
+    // The payload-free document: this test is about the INTENT attributes'
+    // scoping, and the payload (v1.3.1) would restore the role regardless.
+    let doc = bare_document(&recipe, None);
     let decl = format!(" xmlns:ash=\"{MASK_INTENT_URI}\"");
     assert!(doc.matches(decl.as_str()).count() >= 2, "one binding per bearing element:\n{doc}");
     let stripped = doc.replace(decl.as_str(), "");

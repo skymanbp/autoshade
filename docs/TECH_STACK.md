@@ -884,6 +884,23 @@ merge base but is not overwritten by ordinary Save. Mask parsing carries
 unsupported semantics with named disclosures and imports `MaskBrushTable`
 through the strict binary path described above.
 
+Since v1.3.1 the sidecar also carries the whole develop under AutoShade's
+own XMP namespace (`https://autoshade.dev/ns/recipe/1.0/`, prefix `asr`):
+the recipe as one compressed root attribute with a CRC, and the rasters
+nothing can re-derive (bitmap tiles, zone alphas) as a sequence of
+`{Name, Crc32, Data}` structs in XMP's compact form. Lightroom preserves
+root-level foreign-namespace properties byte for byte through its rewrite
+(measured) while dropping unknown `crs:` items and AutoShade's per-mask
+intent attributes. On read, the Camera Raw settings are decoded as before
+and reconciled with the payload leaf by leaf against the payload's own
+payload-free, intent-free projection (what a Lightroom rewrite hands back):
+a leaf the document still spells as it was written restores the payload's
+exact value, a leaf Lightroom changed keeps Lightroom's; a mask's inversion
+(correction flag ⊕ geometry bit) is reconciled as one unit by its net;
+masks are matched by order and name so removed corrections drop and added
+ones append. Rasters are placed beside the develop only by the disclosing
+readers, never by the silent probes.
+
 ### Parameters
 
 - Mask-frame scale: `LR_MASK_FRAME_SCALE = 1.0`
@@ -902,6 +919,15 @@ through the strict binary path described above.
   ellipse centre in pixel space (**measured**).
 - `MaskInverted` controls inversion; `Flipped` is not treated as a second
   inversion bit (**measured polarity census**).
+- Payload: zlib level 9 + base64 for the recipe, CRC-32 over the JSON bytes
+  and over each raster, `asr:Payload="1"` format version; raster budget
+  **6 MiB** raw per sidecar (the document cap is 16 MiB); reconciliation
+  tolerance **2e-4** per numeric leaf (Lightroom rewrites numbers to six
+  decimals); Camera Raw defaults treated as materialisation, not edits:
+  `SharpenRadius` 1.0, `SharpenDetail` 25, `LuminanceNoiseReductionDetail`
+  50, `ColorNoiseReductionDetail` 50, `ColorNoiseReductionSmoothness` 50.
+- `ColorNoiseReduction` is written even at 0 (the engine renders no colour
+  noise reduction; an absent key let Lightroom apply its RAW default of 25).
 
 ### Measured results & disclosures
 
@@ -921,11 +947,30 @@ through the strict binary path described above.
 - Conservative merge means “round trip” is structural preservation, not a
   promise that every Lightroom correction is rendered by AutoShade. Unsupported
   or carried-only fields remain disclosed.
+- Lightroom 9.4 rewrite of a probe sidecar (2026-09-12, 281,614 → 283,566
+  bytes): a root attribute, a text element, an `rdf:Bag`, a
+  `parseType="Resource"` struct, a 15 KB gzip+base64 recipe and five raster
+  structs (~250 KB) in AutoShade's namespace all survived byte for byte,
+  re-serialised to the compact attribute form with the namespace binding
+  hoisted to the root; an unknown `crs:` attribute and an unknown `crs:`
+  element were dropped.
+- The same rewrite of a v1.3.0 band sidecar (17,238 → 19,818 bytes): both
+  corrections and their gradient components came back, all twelve `ash:`
+  intent attributes (six names) were stripped, `crs:Version` 15.5.1 → 18.4,
+  and 23 root attributes this writer omits at rest were materialised at
+  Camera Raw's
+  defaults (`ColorNoiseReduction="25"`, `ColorGradeBlending="50"`,
+  `CurveRefineSaturation="100"`, the rest 0). Both pairs are the
+  `AUTOSHADE_LR_PAYLOAD_FIXTURES` test material.
+- A full reverse-fit recipe (46.8 KB compact JSON) packs to 14.1 KB of
+  payload; a zone alpha (59.9 KB PNG) to 79.8 KB.
 
 ### Source
 
 - `src/xmp.rs` — scope selection, typed XML traversal, local/global scaling,
   polarity, mask geometry, conservative merge, and writer.
+- `src/xmp/payload.rs` — the AutoShade payload: writer, reader, the
+  reconciliation rule, raster placement, the zone-role name fallback.
 - `src/pipeline.rs` — sidecar read/merge/save/export orchestration.
 - `src/store.rs` — per-user develop store and saved merge bases.
 - `docs/ARCHITECTURE.md`, `docs/V2_PLAN.md`, `docs/ROADMAP.md` and
@@ -1545,7 +1590,7 @@ than the pre-call state; model weights remain outside the repository.
 - The 61 MP RAW probe measured `151 MB` peak commit for decode,
   `1771 MB` for calibration/render preparation, and `1766 MB` for the
   full-resolution render tail; the combined process peak remained `1771 MB`.
-- The release battery is **1486 library (1471 pass + 15 `#[ignore]`d forensic
+- The release battery is **1495 library (1480 pass + 15 `#[ignore]`d forensic
   probes) / 24 CLI / 173 GUI / 2+2 contract** tests. Environment-gated real
   Lightroom, brush-table, and RAW-zoo suites are additional and are not
   smuggled into the ordinary count.

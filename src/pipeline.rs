@@ -3159,7 +3159,7 @@ fn write_xmp_doc(
     // `mask_export_losses` and builds that block a second time per save.
     let (doc, mask_losses) = match merged {
         Some(pair) => pair,
-        None => xmp::recipe_to_xmp_in_frame(recipe, frame),
+        None => xmp::recipe_to_xmp_in_frame_for_photo(recipe, frame, photo),
     };
     if let Some(m) = xmp::describe_mask_losses(&mask_losses) {
         diag.warn(m);
@@ -4158,8 +4158,13 @@ mod guard_tests {
         let (out, _, losses) = write_xmp(&raw, &r, crate::diag::stderr()).unwrap();
         assert_eq!(
             losses,
-            vec![xmp::MaskLoss { name: "sky".into(), reason: xmp::MaskLossReason::Bitmap }],
-            "the write path must report the raster mask it skipped, and only that"
+            vec![
+                xmp::MaskLoss { name: "sky".into(), reason: xmp::MaskLossReason::Bitmap },
+                // v1.3.1: the payload's own verdict on the same mask — its
+                // raster is not on disk, so the sidecar cannot carry it either.
+                xmp::MaskLoss { name: "sky".into(), reason: xmp::MaskLossReason::RasterNotEmbedded },
+            ],
+            "the write path must report the raster mask it skipped, and nothing about the other"
         );
         let text = std::fs::read_to_string(&out).unwrap();
         assert_eq!(
@@ -6089,7 +6094,8 @@ mod tests {
         assert_eq!(r.quarter_turns, 1);
         // …and the XMP writer's crop pair reads the TURNED rectangle back
         // unchanged, so a round trip cannot apply the turn a second time.
-        let doc = crate::xmp::recipe_to_xmp(&r);
+        // The PROJECTION (payload-free, v1.3.1): what classic ACR reads.
+        let doc = crate::xmp::bare_document(&r, None);
         assert!(doc.contains("crs:HasCrop=\"True\""), "{doc}");
         // R27: the sidecar's `crs:CropAngle` is the NEGATION of the engine's
         // clockwise straighten, at Lightroom's own six decimals
@@ -6108,6 +6114,12 @@ mod tests {
              re-import must report NO turn rather than invent one — the crop it carries is \
              already in the turned frame"
         );
+        // The whole document (v1.3.1) restores the app's own state — the turn
+        // and the crop in the turned frame — which is still ONE application.
+        let whole = crate::xmp::xmp_to_recipe(&crate::xmp::recipe_to_xmp(&r));
+        assert_eq!(whole.quarter_turns, 1);
+        assert_eq!(whole.crop, r.crop);
+        assert_eq!(whole.straighten_deg, -3.5);
     }
 
     /// The two load-time migrations are INDEPENDENT facts and are disclosed

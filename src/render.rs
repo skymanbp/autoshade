@@ -18378,18 +18378,20 @@ mod tests {
         // carries the flag, the component carries `false`, and the sidecar
         // gets their net on the component — which is the only place Lightroom
         // has for it.
-        let exported = |inverted: bool| {
-            crate::xmp::recipe_to_xmp(&EditRecipe {
-                masks: vec![crate::recipe::LocalAdjustment {
-                    mask: MaskGeometry::select_sky(0.5, 0.25, false, path.clone()),
-                    role: crate::recipe::MaskRole::ZoneLand,
-                    inverted,
-                    exposure_ev: -0.5,
-                    ..Default::default()
-                }],
+        let recipe = |inverted: bool| EditRecipe {
+            masks: vec![crate::recipe::LocalAdjustment {
+                mask: MaskGeometry::select_sky(0.5, 0.25, false, path.clone()),
+                role: crate::recipe::MaskRole::ZoneLand,
+                inverted,
+                exposure_ev: -0.5,
                 ..Default::default()
-            })
+            }],
+            ..Default::default()
         };
+        // The PROJECTION (payload-free, v1.3.1): the native bit and the `ash`
+        // intent are the two channels this test is about. The payload is a
+        // third, and the whole documents below put it through the same rows.
+        let exported = |inverted: bool| crate::xmp::bare_document(&recipe(inverted), None);
         let authored_inv = exported(true);
         let authored_up = exported(false);
         assert!(
@@ -18417,7 +18419,18 @@ mod tests {
         );
         let edited_up = authored_inv.replace(r#"crs:MaskInverted="true""#, r#"crs:MaskInverted="false""#);
         let edited_inv = authored_up.replace(r#"crs:MaskInverted="false""#, r#"crs:MaskInverted="true""#);
-
+        // The whole documents (v1.3.1): the payload restores the authored home
+        // when the net Lightroom hands back is the net that was written — the
+        // intent still there, or stripped the way Lightroom strips it — and
+        // yields to a native edit of the net, in Lightroom's home.
+        let whole = |inverted: bool| crate::xmp::recipe_to_xmp(&recipe(inverted));
+        let (whole_inv, whole_up) = (whole(true), whole(false));
+        let (rewritten_inv, rewritten_up) =
+            (without_intent(whole_inv.clone()), without_intent(whole_up.clone()));
+        let rewritten_edited_up =
+            rewritten_inv.replace(r#"crs:MaskInverted="true""#, r#"crs:MaskInverted="false""#);
+        let rewritten_edited_inv =
+            rewritten_up.replace(r#"crs:MaskInverted="false""#, r#"crs:MaskInverted="true""#);
         let bmp = image::open(&p).unwrap().to_luma8();
         for (attr, text, want_inverted, want_whole) in [
             ("native inverted", &inv_doc, true, false),
@@ -18426,6 +18439,11 @@ mod tests {
             ("authored upright", &authored_up, false, false),
             ("native edit upright", &edited_up, false, false),
             ("native edit inverted", &edited_inv, true, false),
+            ("payload inverted", &whole_inv, true, true),
+            ("payload upright", &whole_up, false, false),
+            ("payload, intent stripped", &rewritten_inv, true, true),
+            ("payload, native edit upright", &rewritten_edited_up, false, false),
+            ("payload, native edit inverted", &rewritten_edited_inv, true, false),
         ]
         {
             let back = crate::xmp::xmp_to_recipe(text);

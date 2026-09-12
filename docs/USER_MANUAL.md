@@ -178,9 +178,12 @@ contour taken at the tile's stored coordinates sat a few pixels off that
 edge, the seam ruler measured nothing there, and a gradient tile could ship
 as a visible rectangle in the sky. The save
 line therefore counts only the Bitmap corrections/components that remain.
-Lightroom reads the native composition, but its own rendering of the written
-intersections has not been measured; AI alpha and local recolour gains still
-have their existing separate disclosures.
+Lightroom 9.4 reads the native composition and keeps it through its own
+rewrite of the sidecar (measured 2026-09-12 on the reference pair's sidecars:
+every correction, gradient and Select Sky component came back; only
+AutoShade's intent attributes did not, and since v1.3.1 the zone roles ride
+in the payload and in the corrections' names instead). AI alpha and local
+recolour gains still have their existing separate disclosures.
 
 **The colour field.** Past the 65% default, and only there, the fit may also
 attach a smooth 12×8×8 local colour/tone field — the residual its masks and
@@ -189,8 +192,9 @@ section as its own row, `▦ Colour field · engine-only`, with an eye to mute i
 and an Amount slider; deleting the row removes it. It is the first control in
 this app with **no Lightroom equivalent at all**: classic XMP has no
 coordinate system for a smooth local field, so the save line names it among
-the things the sidecar cannot carry, and the `.xmp` beside your RAW holds the
-rest of the recipe unchanged. Copy/paste to another photo drops it and tells
+the things Lightroom cannot render; since v1.3.1 the `.xmp` beside your RAW
+still carries it inside AutoShade's own payload, and reopening that sidecar
+restores it. Copy/paste to another photo drops it and tells
 you — its cells are measured on this frame's own geometry and mean nothing on
 someone else's picture. At or below 65% no field is attached and the recipe
 file does not carry the key at all.
@@ -463,6 +467,31 @@ Lightroom's computed subject/sky/object alpha or arbitrary bitmap alpha, so
 AutoShade preserves the selection intent and clearly re-derives the mask with
 its own local model; generated image variants remain generated pixels until
 reverse-fit produces an editable recipe.
+
+**The sidecar carries the whole develop (v1.3.1).** Everything above is
+what the Camera Raw settings can say. A sidecar AutoShade writes also carries
+the develop itself — the recipe exactly as the app holds it, plus the mask
+rasters nothing can re-derive (the fit's bitmap tiles and zone alphas) — as
+properties in AutoShade's own XMP namespace on the same document. Lightroom
+9.4 preserves those byte for byte when it rewrites the file (measured
+2026-09-12: a 15 KB recipe and 250 KB of rasters came back unchanged, moved
+into XMP's compact attribute form), while it drops unknown `crs:` items and
+AutoShade's per-mask intent attributes. When such a sidecar is opened again,
+AutoShade reads the Camera Raw settings as before and then reconciles them
+with the payload: where Lightroom changed a value, Lightroom's value wins;
+everywhere else — the colour field, a muted mask, a bitmap tile, a zone's
+role, an exact slider position, the calibration anchor — the payload's exact
+value is restored. Rasters are placed beside the develop on a restore (a
+different file already under the name is left alone and the sidecar's copy
+takes a `-2` name, which the status line says). A payload this build cannot
+read is disclosed and the Camera Raw settings stand alone. The payload adds
+roughly 15 KB for a full reverse-fit recipe and 80 KB per zone alpha; rasters
+past a 6 MiB budget are left out and named in the save line. Two smaller
+changes ride with it: `ColorNoiseReduction` is now always written, so a photo
+AutoShade shows without colour noise reduction no longer gets Lightroom's RAW
+default of 25 on top; and a sky/land zone whose intent Lightroom stripped is
+still recognised from the name the writer gives it (`sky`, `land`,
+`sky · band 2/3`).
 
 ## Configure and use the AI features
 

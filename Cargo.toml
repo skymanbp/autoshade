@@ -1,6 +1,6 @@
 [package]
 name = "autoshade"
-version = "1.3.0"
+version = "1.3.1"
 edition = "2024"
 description = "AI-assisted automatic development of RAW photographs (EditRecipe + deterministic Rust render, XMP sidecar, AI denoise)"
 license = "MIT"
@@ -58,7 +58,16 @@ brotli-decompressor = "=5.0.3"
 # portrait RAW otherwise pays three ~732 MB full-frame copies — see orient_f32).
 bytemuck = "1"
 clap = { version = "4.6.1", features = ["derive"] }
+# The sidecar payload's integrity check (`xmp::payload`): a CRC over the recipe
+# JSON and over each embedded raster, so a truncated or hand-edited sidecar is
+# refused rather than restored. Already locked through png; direct because the
+# XMP writer and reader call it.
+crc32fast = "1.5"
 dotenvy = "0.15"
+# The sidecar payload's compression (`xmp::payload`): the recipe JSON rides in
+# ONE root attribute, zlib + base64. Already locked through png (miniz_oxide
+# underneath, pure Rust, no C); direct because the XMP writer and reader call it.
+flate2 = "1.1"
 # The `serve` session token gating the image URLs (a page the user visits must
 # not be able to drive full-resolution decodes). It has to be CSPRNG bytes —
 # anything seeded from the clock is guessable, which is the whole attack.

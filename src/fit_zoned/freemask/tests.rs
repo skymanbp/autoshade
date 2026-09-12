@@ -476,9 +476,12 @@ fn free_mask_bitmap_recipe_round_trip_and_xmp_loss_is_named() {
     let decoded: crate::recipe::EditRecipe = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(serde_json::to_vec(&decoded).unwrap(), bytes);
     let (_, losses) = crate::xmp::recipe_to_xmp_with_losses(&recipe);
-    assert_eq!(losses.len(), 1);
-    assert_eq!(losses[0].name, "field-zone-1");
+    // Two verdicts on the one mask (v1.3.1): the projection skips a bitmap,
+    // and the payload cannot embed a raster this test never wrote.
+    assert_eq!(losses.len(), 2, "{losses:?}");
+    assert!(losses.iter().all(|l| l.name == "field-zone-1"), "{losses:?}");
     assert_eq!(losses[0].reason, crate::xmp::MaskLossReason::Bitmap);
+    assert_eq!(losses[1].reason, crate::xmp::MaskLossReason::RasterNotEmbedded);
 }
 
 #[test]

@@ -2656,9 +2656,12 @@ mod tests {
         let decoded: crate::recipe::EditRecipe = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(serde_json::to_vec(&decoded).unwrap(), bytes);
         let (_, losses) = crate::xmp::recipe_to_xmp_with_losses(&recipe);
-        assert_eq!(losses.len(), 1, "one bitmap tile has one export loss");
-        assert_eq!(losses[0].name, "Spatial tile r2c0");
+        // The projection's verdict, then the payload's (v1.3.1): the tile's
+        // raster is not on disk, so the sidecar cannot carry it either.
+        assert_eq!(losses.len(), 2, "one bitmap tile: skipped, and not embedded: {losses:?}");
+        assert!(losses.iter().all(|l| l.name == "Spatial tile r2c0"), "{losses:?}");
         assert_eq!(losses[0].reason, crate::xmp::MaskLossReason::Bitmap);
+        assert_eq!(losses[1].reason, crate::xmp::MaskLossReason::RasterNotEmbedded);
     }
 
     /// The frame withholds luma bin 6 because a replaced sky dominates it; a
