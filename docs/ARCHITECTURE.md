@@ -144,8 +144,10 @@
 > `gui_reverse_fit_has_its_own_strength_dial` (the reverse-fit's own dial:
 > one default in three places, the two dials kept apart, drawn in the fold,
 > the prefs round trip, the worker pins); the third Lightroom fixture pair
-> extended an existing test rather than adding one. The calibration lane did
-> not run for this release either. Before that, counts were refreshed
+> extended an existing test rather than adding one. The calibration lane ran
+> after the release, the corpus having been in the fixtures directory all
+> along: 1480 + 15 library tests with the corpus in reach, two stale pins
+> re-pinned in `6ce45a3`, then green. Before that, counts were refreshed
 > 2026-09-12 for v1.3.1: +10 / −1 by
 > name against the v1.3.0 tag (`5446012`), taken statically between the tag's
 > source and this tree — the nine payload pins in `xmp::payload_tests` (the

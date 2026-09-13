@@ -83,7 +83,23 @@ both feature sets, `audit_i18n` 0 / 0, `subset_gui_fonts.py --check` 873/873
 the assembled transcript **28 PASS / 0 FAIL / 2 SKIP** (the skips: the battery
 lanes' own run, the active XMP census), photo-name grep 0. By name against the
 v1.3.1 tag (`91df8f0`): +1 / −1, the rewritten pin, 1696 test functions either
-way. The calibration lane did not run (no corpus).
+way.
+
+The calibration lane ran after the release — `scripts/release_battery.sh`, all
+three lanes at once, the p36–p41 corpus and the sidecar weights in reach,
+`--nocapture` — for the first time since v1.2.6: the corpus was never deleted,
+it lives in the fixtures directory the other corpora live in. It found two
+stale pins, neither on the fit: the saved develop (`fitted.recipe.json`)
+still named its sky raster by the absolute path the raster had on the machine
+that wrote it, and the calibration sky test pinned a single sky zone at
+−0.20..−0.17 EV, a number from before v1.3.0's banding. `6ce45a3` (test code
+only; the shipped binaries are this release's bytes) resolves the corpus's
+raster references by file name in one loader and re-pins the sky on its two
+bands (−0.152 EV with colour withheld, −0.062 EV with the colour its cells
+vouched); the three lanes re-ran on that tree: library **1480 / 0 / 15**, GUI
+**172 / 0 / 1**, calibration **1480 / 0 / 15** (901 s; one skip line, the
+mask-brush specimen test, whose `AUTOSHADE_MB_SAMPLE_ROOT` specimen is not on
+this machine), test names 1495 (+0 / −0).
 
 Final gate, reference pair: this release's CLI rendered the 0.85 develop at
 full resolution; against the v1.3.1 shipped CLI's render 5,326 of 60,217,344
@@ -91,12 +107,3 @@ pixels differ by one code (the local-versus-CI codegen noise measured for
 v1.3.1's own showcase), and against the v1.3.1 acceptance render the
 2048-px downscale reads mean |diff| 0.00044, max 0.008 — the same numbers as
 before the change, as a render-only check of an untouched solver should.
-
-## Not verified
-
-The dial's placement is asserted by a headless frame test (the label is drawn
-in the fold at 320 px), not seen on screen: no GUI executable was launched.
-The calibration lane did not run (its corpus is gone). The reverse-fit
-algorithm is untouched, so the reference-pair result is the v1.3.1 one; the
-final gate re-rendered the 0.85 develop with this release's CLI and compared
-it with the v1.3.1 acceptance render rather than re-judging the picture.
