@@ -2029,6 +2029,21 @@ fn match_cmd(
     // previously saved heal/generative master — and a stale link surviving a
     // kill between the two writes made every later open apply the new look
     // ON TOP of pixels it was never fitted to (16-lane scan L09/L13).
+    // The projection is a member of the same generation (2026-09-13): a fit
+    // is a source develop, so it writes. A projection this build cannot
+    // produce degrades to Keep and a warning below — the recipe write alone
+    // still decides the saved state (the cross-surface rule).
+    let projection =
+        pipeline::xmp_projection_member(raw, &rep.recipe, true, autoshade::diag::stderr());
+    // Built per call: the commit closure below may run in either of two
+    // branches, and a `CommitMember` owns its bytes.
+    let xmp_member = || match &projection {
+        Ok((autoshade::store::CommitMember::Write(b), _, _)) => {
+            autoshade::store::CommitMember::Write(b.clone())
+        }
+        Ok(_) => autoshade::store::CommitMember::Clear,
+        Err(_) => autoshade::store::CommitMember::Keep,
+    };
     let commit_canonical = || -> Result<()> {
         autoshade::store::commit_develop(
             raw,
@@ -2045,6 +2060,7 @@ fn match_cmd(
                     raw,
                     autoshade::store::ActiveWrite::Kind("fitted"),
                 )?,
+                xmp: xmp_member(),
             },
         )?;
         Ok(())
@@ -2083,12 +2099,16 @@ fn match_cmd(
         );
     }
     if decode::is_raw(raw) {
-        // Warning, not failure: the recipe above already committed.
-        match write_xmp(raw, &rep.recipe, autoshade::diag::stderr()) {
-            // Notes + mask-loss line: stderr, from write_xmp_doc (as above).
-            Ok((xmp_path, _, _)) => {
+        // The projection landed WITH the commit above (its notes and
+        // mask-loss line reached stderr from the builder); a builder failure
+        // is a warning, not a failure — the recipe committed regardless.
+        match &projection {
+            Ok(_) => {
                 let s = stem(raw);
-                println!("xmp    -> {} (copy {s}.xmp beside {s}.ARW for Lightroom)", xmp_path.display());
+                println!(
+                    "xmp    -> {} (copy {s}.xmp beside {s}.ARW for Lightroom)",
+                    pipeline::xmp_target(raw).display()
+                );
             }
             Err(e) => eprintln!("  ⚠ recipe saved, but the Lightroom XMP failed: {e:#}"),
         }

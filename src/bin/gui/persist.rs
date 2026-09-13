@@ -171,6 +171,7 @@ pub(crate) fn read_saved_develop_locked(src: &std::path::Path) -> RestoredDevelo
         }
     }
     let mut any = false;
+    let mut neutral = false;
     let mut parse_err: Option<String> = None;
     let mut restored: Option<(EditRecipe, &'static str)> = None;
     for (rj, kind) in [
@@ -202,9 +203,16 @@ pub(crate) fn read_saved_develop_locked(src: &std::path::Path) -> RestoredDevelo
                         autoshade::store::resolve_mask_paths(&mut r, base);
                     }
                     restored = Some((r, kind));
+                } else {
+                    // A NEUTRAL recipe.json is the store's answer, and the
+                    // answer is "neutral" (2026-09-13). The projection beside
+                    // it is DERIVED from it — written or cleared in the same
+                    // commit generation — so a projection that disagrees can
+                    // only be stale, and walking on into it is how a sidecar
+                    // left by a deleted reverse-fit card restored its +90
+                    // saturation over a pristine AI-generated card on open.
+                    neutral = true;
                 }
-                // Neutral recipe.json: fall through — an XMP with real edits
-                // may still exist beside it.
             }
             Err(e) => parse_err = Some(e.to_string()),
         }
@@ -218,6 +226,17 @@ pub(crate) fn read_saved_develop_locked(src: &std::path::Path) -> RestoredDevelo
         // so there is nothing to disclose on this path.
         return RestoredDevelop {
             saved: SavedDevelop::Restored(r, kind),
+            clamp: clamp_dropped,
+            lr_unreadable,
+            ..Default::default()
+        };
+    }
+    if neutral {
+        // The projection is not consulted (see above); the Lightroom
+        // sidecar's own disclosures, gathered before the store walk, ride.
+        return RestoredDevelop {
+            saved: SavedDevelop::NoopOnly,
+            xmp_bad,
             clamp: clamp_dropped,
             lr_unreadable,
             ..Default::default()

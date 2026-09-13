@@ -2135,6 +2135,25 @@ fn publish_json_sidecar(src: &Path, name: &str, bytes: Vec<u8>) -> std::io::Resu
     )
 }
 
+/// Does the saved develop sit on AI-GENERATED pixels — `pixels.json`
+/// recording a `generated` master, resolvable or not? The projection
+/// question keys on the RECORD: a develop saved over a reimagine rendition
+/// describes those pixels whether or not the PNG can be opened right now,
+/// and a Lightroom sidecar projecting it onto the RAW would be a lie either
+/// way ([`read_pixel_source`] answers `None` for a recorded-but-broken
+/// master, the wrong answer here). Absent, unreadable or `inplace` ⇒ false.
+pub fn pixel_source_is_generated(src: &Path) -> bool {
+    let _ = recover_orphan_baks(src);
+    #[derive(serde::Deserialize)]
+    struct KindOnly {
+        kind: Option<String>,
+    }
+    read_bytes_capped(&pixel_source_path(src), MAX_STORE_JSON)
+        .ok()
+        .and_then(|b| serde_json::from_slice::<KindOnly>(&b).ok())
+        .is_some_and(|d| d.kind.as_deref() == Some("generated"))
+}
+
 /// Forget the baked pixel source (the develop went back to parametric-only).
 /// Clearing means DETACH, so the retired `pixels.json.bak` goes too:
 /// `write_pixel_source` keeps the previous linkage there for crash recovery,
@@ -2557,14 +2576,30 @@ pub fn variants_member(src: &Path, w: ActiveWrite<'_>) -> std::io::Result<Commit
     }
 }
 
-/// A single-generation write of the develop triple. `recipe` bytes come from
-/// [`crate::pipeline::recipe_store_bytes`] (clamped + mask-relativized
-/// there), `pixels` from [`pixel_source_record_bytes`], `variants` from
-/// [`variants_member`] — the commit publishes, it does not interpret.
+/// A single-generation write of the develop's four files. `recipe` bytes
+/// come from [`crate::pipeline::recipe_store_bytes`] (clamped +
+/// mask-relativized there), `pixels` from [`pixel_source_record_bytes`],
+/// `variants` from [`variants_member`], `xmp` from
+/// [`crate::pipeline::xmp_projection_member`] — the commit publishes, it
+/// does not interpret.
 pub struct DevelopCommit {
     pub recipe: Option<Vec<u8>>,
     pub pixels: CommitMember,
     pub variants: CommitMember,
+    /// The Lightroom XMP projection (`<stem>.xmp`, [`xmp_target`]) — a
+    /// DERIVED file that lands or clears in the same generation as the
+    /// recipe it projects: `Write` for a develop that describes the RAW
+    /// itself, `Clear` for one that sits on AI-generated pixels (no sidecar
+    /// reproduces those) or on a baked source, `Keep` only when the recipe
+    /// is not written either. It publishes with the sidecar's own
+    /// discipline — stage + rename, no retired `.bak`: regenerable from
+    /// recipe.json, so there is nothing to recover. Until 2026-09-13 every
+    /// writer published it by a separate call AFTER the commit, and the
+    /// quit-time Save-all skipped that call for a generated card without
+    /// retiring what stood there: a projection written for a reverse-fit
+    /// card outlived the card and the recipe, and the open path restored it
+    /// over the pristine AI-generated pixels.
+    pub xmp: CommitMember,
 }
 
 fn commit_dir(src: &Path) -> PathBuf {
@@ -2585,7 +2620,18 @@ struct CommitManifest {
     recipe: String,
     pixels: String,
     variants: String,
+    /// The projection member's word. ADDITIVE at v=1: a marker written
+    /// before the member existed (a crash under an older build) reads as
+    /// `keep`, and an older build resolving a newer stage ignores the field
+    /// — the projection then stays as it was, which the readers tolerate
+    /// (a present recipe.json is never out-answered by it).
+    #[serde(default = "manifest_keep")]
+    xmp: String,
     sums: std::collections::BTreeMap<String, String>,
+}
+
+fn manifest_keep() -> String {
+    "keep".to_string()
 }
 
 /// Publish recipe.json / pixels.json / variants.json as ONE generation (L03).
@@ -2621,6 +2667,7 @@ fn commit_develop_unlocked(src: &Path, commit: DevelopCommit) -> std::io::Result
     if commit.recipe.is_none()
         && matches!(commit.pixels, CommitMember::Keep)
         && matches!(commit.variants, CommitMember::Keep)
+        && matches!(commit.xmp, CommitMember::Keep)
     {
         return Ok(());
     }
@@ -2663,6 +2710,9 @@ fn commit_develop_unlocked(src: &Path, commit: DevelopCommit) -> std::io::Result
         if let CommitMember::Write(b) = &commit.variants {
             stage("variants.json", b)?;
         }
+        if let CommitMember::Write(b) = &commit.xmp {
+            stage("projection.xmp", b)?;
+        }
         // The staged entries' directory records go down BEFORE the marker
         // can exist (unix: dir fsync; Windows: finish_parent is a no-op and
         // durability rests on the write-through rename below plus journaled
@@ -2673,6 +2723,7 @@ fn commit_develop_unlocked(src: &Path, commit: DevelopCommit) -> std::io::Result
             recipe: if commit.recipe.is_some() { "write" } else { "keep" }.to_string(),
             pixels: commit.pixels.word().to_string(),
             variants: commit.variants.word().to_string(),
+            xmp: commit.xmp.word().to_string(),
             sums,
         };
         // THE commit point: one durable rename. Before it, no live file has
@@ -2693,6 +2744,7 @@ fn commit_develop_unlocked(src: &Path, commit: DevelopCommit) -> std::io::Result
         commit.recipe.as_deref().map_or(MemberRef::Keep, MemberRef::Write),
         (&commit.pixels).into(),
         (&commit.variants).into(),
+        (&commit.xmp).into(),
     ) {
         // BEYOND the commit point: the generation is promised and `.commit`
         // stays — recovery completes the apply on the photo's next locked
@@ -2753,6 +2805,7 @@ fn apply_commit_members(
     recipe: MemberRef<'_>,
     pixels: MemberRef<'_>,
     variants: MemberRef<'_>,
+    xmp: MemberRef<'_>,
 ) -> std::io::Result<()> {
     let dev = develop_dir(src);
     let apply = |live: PathBuf, bak: PathBuf, member: MemberRef<'_>| -> std::io::Result<()> {
@@ -2785,7 +2838,27 @@ fn apply_commit_members(
         note_source(src); // the write_recipe breadcrumb rides the same member
     }
     apply(pixel_source_path(src), dev.join("pixels.json.bak"), pixels)?;
-    apply(variants_path(src), dev.join("variants.json.bak"), variants)
+    apply(variants_path(src), dev.join("variants.json.bak"), variants)?;
+    // The projection LAST, after the recipe it projects, and with the
+    // sidecar's own publish discipline: stage + rename, no retired `.bak`
+    // (it is regenerable from recipe.json, so a crash window has nothing to
+    // recover), and a clear is a plain unlink. Same replay idempotence as
+    // the members above: bytes already live are not rewritten.
+    let live = xmp_target(src);
+    match xmp {
+        MemberRef::Write(bytes) => {
+            if read_bytes_capped(&live, MAX_STORE_JSON).is_ok_and(|cur| cur == bytes) {
+                return Ok(());
+            }
+            durable_write(&live, bytes)
+        }
+        MemberRef::Clear => match std::fs::remove_file(&live) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(e),
+        },
+        MemberRef::Keep => Ok(()),
+    }
 }
 
 /// Resolve a `.commit` stage left by a killed [`commit_develop`]. COMMIT
@@ -2847,6 +2920,7 @@ fn resolve_pending_commit_unlocked(src: &Path) -> std::io::Result<()> {
     let recipe = member("recipe.json", &m.recipe)?;
     let pixels = member("pixels.json", &m.pixels)?;
     let variants = member("variants.json", &m.variants)?;
+    let xmp = member("projection.xmp", &m.xmp)?;
     let recipe_ref = recipe.as_deref().map_or(MemberRef::Keep, MemberRef::Write);
     let pixels_ref = match (m.pixels.as_str(), &pixels) {
         ("write", Some(b)) => MemberRef::Write(b),
@@ -2858,7 +2932,12 @@ fn resolve_pending_commit_unlocked(src: &Path) -> std::io::Result<()> {
         ("clear", _) => MemberRef::Clear,
         _ => MemberRef::Keep,
     };
-    apply_commit_members(src, recipe_ref, pixels_ref, variants_ref)?;
+    let xmp_ref = match (m.xmp.as_str(), &xmp) {
+        ("write", Some(b)) => MemberRef::Write(b),
+        ("clear", _) => MemberRef::Clear,
+        _ => MemberRef::Keep,
+    };
+    apply_commit_members(src, recipe_ref, pixels_ref, variants_ref, xmp_ref)?;
     consume_commit_stage(&cdir)?;
     settle_consumed_marker(&cdir);
     Ok(())
@@ -3025,7 +3104,10 @@ pub struct DevelopSnapshot {
     /// photos and preferring an older recipe over a newer LR edit).
     pub lr_xmp: Option<(String, &'static str)>,
     /// The store's XMP projection (central, else legacy ./out) — the
-    /// recipe-absent and neutral-recipe fallthroughs the open path takes.
+    /// recipe-ABSENT fallthrough the open path takes. A present recipe.json,
+    /// neutral or not, is never out-answered by it (2026-09-13): the
+    /// projection is derived from the recipe in the same commit generation,
+    /// so one that disagrees can only be stale.
     pub store_xmp: Option<(String, &'static str)>,
     /// [`LrSidecar::Unreadable`] — a sidecar that EXISTS but cannot answer,
     /// never folded into absence (the caller discloses it).
@@ -3095,8 +3177,9 @@ pub fn read_develop_snapshot(src: &Path) -> std::io::Result<DevelopSnapshot> {
             }
         }
         // The store's XMP projection — what the open path restores when the
-        // recipe is absent or parses neutral. Same one-file precedence walk
-        // as the recipe: only NotFound falls through, and an unreadable
+        // recipe is ABSENT (a present one, neutral included, ends the walk;
+        // the resolver draws that line). Same one-file precedence walk as
+        // the recipe: only NotFound falls through, and an unreadable
         // projection with NO recipe to shadow it is an existing save the
         // caller must refuse over (folded into recipe_err).
         let mut store_xmp = None;
@@ -4334,18 +4417,13 @@ fn backup_store_half_unlocked(
         return backup_xmp_only(src);
     };
     let parsed = serde_json::from_str::<EditRecipe>(&text).ok();
-    // A NEUTRAL recipe.json is NOT what the readers restore: both the GUI
-    // (`SavedDevelop::NoopOnly`) and the web (`api_recipe`) fall THROUGH it
-    // to the XMP sidecar. Snapshotting the neutral JSON while the paired XMP
-    // write destroys the edits it shadows is exactly the silent loss this
-    // gate exists to prevent, so a neutral recipe takes the XMP-only path
-    // (which change-detects and answers Ok(None) when there is no XMP
-    // develop to lose — the plain neutral snapshot below then still runs).
-    if parsed.as_ref().is_some_and(|r| r.is_noop())
-        && let Some(n) = backup_xmp_only(src)?
-    {
-        return Ok(Some(n));
-    }
+    // A NEUTRAL recipe.json IS what the readers restore since 2026-09-13
+    // (the GUI's `SavedDevelop::NoopOnly`, the web's `api_recipe` and the
+    // batch resolver all end their walk at it): the projection beside it is
+    // derived from it — written or cleared in the same commit generation —
+    // so a projection holding edits can only be stale, and preserving that
+    // as a version would resurrect a develop the user had already replaced.
+    // The neutral snapshot below is the whole of what such a save holds.
     if let (Some(existing), Some(inc)) = (&parsed, incoming) {
         // The on-disk copy names rasters by bare file name while `incoming`
         // carries absolute paths — resolve before comparing, or every
@@ -6903,6 +6981,7 @@ mod tests {
                 recipe: Some(big),
                 pixels: CommitMember::Keep,
                 variants: CommitMember::Keep,
+                xmp: CommitMember::Keep,
             },
         )
         .expect_err("a member the recovery reader cannot read back must not commit");
@@ -7016,6 +7095,7 @@ mod tests {
                 recipe: Some(b"{}".to_vec()),
                 pixels: CommitMember::Clear,
                 variants: variants_member(&raw, ActiveWrite::Kind("fitted")).unwrap(),
+                xmp: CommitMember::Keep,
             },
         )
         .unwrap();
@@ -7270,6 +7350,75 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dev);
     }
 
+    /// The projection member replays like the other three: a marked stage
+    /// with `xmp: write` lands the staged sidecar beside its recipe, a
+    /// marked `clear` removes the standing one, and a marker written before
+    /// the member existed (no `xmp` field — an older build's crash) reads as
+    /// `keep`. Also the RECORD-level question the member is decided by on
+    /// the web and the batch paste: `pixel_source_is_generated` answers for
+    /// a recorded generated master whether or not the PNG resolves.
+    #[test]
+    fn the_projection_replays_with_its_generation() {
+        let (dir, raw, dev) = commit_fixture("commit-projection");
+        std::fs::write(recipe_target(&raw), b"gen1-recipe").unwrap();
+        std::fs::write(xmp_target(&raw), b"<x:xmpmeta>gen1</x:xmpmeta>").unwrap();
+        let cdir = dev.join(".commit");
+        let stage = |recipe: &[u8], xmp: Option<&[u8]>, word: &str| {
+            std::fs::create_dir_all(&cdir).unwrap();
+            std::fs::write(cdir.join("recipe.json"), recipe).unwrap();
+            let mut sums = serde_json::Map::new();
+            sums.insert("recipe.json".into(), commit_sum(recipe).into());
+            if let Some(x) = xmp {
+                std::fs::write(cdir.join("projection.xmp"), x).unwrap();
+                sums.insert("projection.xmp".into(), commit_sum(x).into());
+            }
+            let mut manifest = serde_json::json!({
+                "v": 1, "recipe": "write", "pixels": "keep", "variants": "keep", "sums": sums,
+            });
+            if !word.is_empty() {
+                manifest["xmp"] = word.into();
+            }
+            std::fs::write(cdir.join("COMMIT"), serde_json::to_vec(&manifest).unwrap()).unwrap();
+        };
+
+        stage(b"gen2-recipe", Some(b"<x:xmpmeta>gen2</x:xmpmeta>"), "write");
+        recover_orphan_baks(&raw).unwrap();
+        assert_eq!(std::fs::read(recipe_target(&raw)).unwrap(), b"gen2-recipe");
+        assert_eq!(
+            std::fs::read(xmp_target(&raw)).unwrap(),
+            b"<x:xmpmeta>gen2</x:xmpmeta>",
+            "the projection rolled forward with its recipe"
+        );
+        assert!(!cdir.exists(), "the stage is consumed");
+
+        stage(b"gen3-recipe", None, "clear");
+        recover_orphan_baks(&raw).unwrap();
+        assert_eq!(std::fs::read(recipe_target(&raw)).unwrap(), b"gen3-recipe");
+        assert!(!xmp_target(&raw).exists(), "a stale projection dies with the generation that has none");
+
+        std::fs::write(xmp_target(&raw), b"<x:xmpmeta>standing</x:xmpmeta>").unwrap();
+        stage(b"gen4-recipe", None, "");
+        recover_orphan_baks(&raw).unwrap();
+        assert_eq!(std::fs::read(recipe_target(&raw)).unwrap(), b"gen4-recipe");
+        assert_eq!(
+            std::fs::read(xmp_target(&raw)).unwrap(),
+            b"<x:xmpmeta>standing</x:xmpmeta>",
+            "a marker from before the member existed keeps the projection"
+        );
+
+        assert!(!pixel_source_is_generated(&raw), "no record at all");
+        let gone = dev.join("nowhere.png");
+        std::fs::write(pixel_source_path(&raw), pixel_source_record_bytes(&raw, &gone, true).unwrap())
+            .unwrap();
+        assert!(read_pixel_source(&raw).is_none(), "premise: the recorded master does not resolve");
+        assert!(pixel_source_is_generated(&raw), "the RECORD says generated, resolvable or not");
+        std::fs::write(pixel_source_path(&raw), pixel_source_record_bytes(&raw, &gone, false).unwrap())
+            .unwrap();
+        assert!(!pixel_source_is_generated(&raw), "an in-place master is a source develop");
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&dev);
+    }
+
     /// L03: the kill point MID-apply — recipe already published, pixels and
     /// strip still stale. The replay converges the remaining members and
     /// SKIPS the already-applied one, so the previous generation's retired
@@ -7431,12 +7580,14 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dev);
     }
 
-    /// The public saver end to end: a full triple lands as one generation
+    /// The public saver end to end: all four files land as one generation
     /// with no staging residue, a second generation writes + clears + keeps
-    /// per member, and an unresolved strip refuses the WHOLE save before
-    /// anything stages (the all-or-nothing face).
+    /// per member (the projection cleared WITH the recipe that has no
+    /// sidecar to project — the 2026-09-13 stale-projection fix), and an
+    /// unresolved strip refuses the WHOLE save before anything stages (the
+    /// all-or-nothing face).
     #[test]
-    fn a_develop_commit_lands_all_three_or_nothing() {
+    fn a_develop_commit_lands_all_four_or_nothing() {
         let (dir, raw, dev) = commit_fixture("commit-public");
         let m1 = dev.join("m1.png");
         std::fs::write(&m1, b"px-one").unwrap();
@@ -7449,6 +7600,7 @@ mod tests {
                 variants: CommitMember::Write(
                     variants_record_bytes(&raw, &strip_record("fitted")).unwrap(),
                 ),
+                xmp: CommitMember::Write(b"<x:xmpmeta>gen1</x:xmpmeta>".to_vec()),
             },
         )
         .unwrap();
@@ -7457,6 +7609,11 @@ mod tests {
         assert_eq!(master.file_name().unwrap().to_str().unwrap(), "m1.png");
         assert!(generated);
         assert!(matches!(read_variants_checked(&raw), VariantsRead::Strip(_)));
+        assert_eq!(
+            std::fs::read(xmp_target(&raw)).unwrap(),
+            b"<x:xmpmeta>gen1</x:xmpmeta>",
+            "the projection landed in the recipe's generation"
+        );
         assert!(!dev.join(".commit").exists(), "the stage is consumed");
 
         commit_develop(
@@ -7465,12 +7622,14 @@ mod tests {
                 recipe: Some(b"gen2-recipe".to_vec()),
                 pixels: CommitMember::Clear,
                 variants: CommitMember::Keep,
+                xmp: CommitMember::Clear,
             },
         )
         .unwrap();
         assert_eq!(std::fs::read(recipe_target(&raw)).unwrap(), b"gen2-recipe");
         assert!(!has_pixel_source(&raw), "cleared, retired .bak included");
         assert!(matches!(read_variants_checked(&raw), VariantsRead::Strip(_)), "Keep kept it");
+        assert!(!xmp_target(&raw).exists(), "the projection cleared with its generation");
 
         // No `.tmp.` staging litter anywhere in the develop dir.
         for e in std::fs::read_dir(&dev).unwrap().flatten() {
@@ -7490,9 +7649,11 @@ mod tests {
                 recipe: Some(b"gen3-recipe".to_vec()),
                 pixels: CommitMember::Keep,
                 variants: CommitMember::Clear,
+                xmp: CommitMember::Write(b"<x:xmpmeta>gen3</x:xmpmeta>".to_vec()),
             },
         )
         .expect_err("an unresolved strip refuses the whole save");
+        assert!(!xmp_target(&raw).exists(), "all-or-nothing: the projection did not land either");
         assert!(err.to_string().contains("cannot be honoured"), "{err}");
         assert_eq!(
             std::fs::read(recipe_target(&raw)).unwrap(),

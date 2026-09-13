@@ -36,20 +36,12 @@ pub(crate) fn resolve_snapshot_develop(
     if let Some((text, from)) = &snap.recipe {
         let mut r = serde_json::from_str::<EditRecipe>(text)?;
         if r.is_noop() {
-            // Neutral recipe.json restores NOTHING on the open path — an
-            // XMP with real edits may still exist beside it, else the photo
+            // A neutral recipe.json restores NOTHING — on the open path and
+            // here alike (2026-09-13): the projection beside it is derived
+            // from it and can only disagree by being stale, and the snapshot
+            // never carries the embedded packet past a store file. The photo
             // renders the fresh baseline (not the neutral recipe's stale
             // calibration).
-            if let Some((t, k)) = snap.store_xmp.as_ref()
-                && let Some(hit) = xmp_arm(p, t, k, warns)
-            {
-                return Ok(Some(hit));
-            }
-            if let Some(t) = snap.packet_xmp.as_ref()
-                && let Some(hit) = xmp_arm(p, t, "XMP (embedded in the RAW)", warns)
-            {
-                return Ok(Some(hit));
-            }
             return Ok(None);
         }
         // The one restore path that never went through clamp: a stored
@@ -1057,6 +1049,21 @@ impl AutoShadeApp {
         let origin = self.active_variant().and_then(|v| v.origin.clone());
         let strip_rec = self.current_strip_record();
         let generated = self.active_is_generated();
+        // The Lightroom projection is a MEMBER of this commit (2026-09-13):
+        // it lands or clears with the recipe it projects, never after it.
+        // Built here so its merge base (the sidecar beside the RAW) is read
+        // under the same lock; a projection this build cannot produce
+        // degrades to Keep plus the failure toast below — the recipe write
+        // alone still decides the saved state.
+        let (xmp_member, xmp_outcome) = match autoshade::pipeline::xmp_projection_member(
+            &path,
+            &self.recipe,
+            !generated,
+            autoshade::diag::stderr(),
+        ) {
+            Ok((m, note, losses)) => (m, Ok((note, losses))),
+            Err(e) => (autoshade::store::CommitMember::Keep, Err(e)),
+        };
         let committed: anyhow::Result<()> = (|| {
             let recipe_bytes = autoshade::pipeline::recipe_store_bytes(&path, &self.recipe, autoshade::diag::stderr())?;
             let pixels = match &origin {
@@ -1082,7 +1089,12 @@ impl AutoShadeApp {
             )?;
             autoshade::store::commit_develop(
                 &path,
-                autoshade::store::DevelopCommit { recipe: Some(recipe_bytes), pixels, variants },
+                autoshade::store::DevelopCommit {
+                    recipe: Some(recipe_bytes),
+                    pixels,
+                    variants,
+                    xmp: xmp_member,
+                },
             )?;
             Ok(())
         })();
@@ -1106,8 +1118,9 @@ impl AutoShadeApp {
                 self.nav_stash.remove(&path);
                 self.pixels_on_disk = origin;
                 let mut s = if raw {
-                    match autoshade::pipeline::write_xmp(&path, &self.recipe, autoshade::diag::stderr()) {
-                        Ok((p, merge_note, losses)) => {
+                    match xmp_outcome {
+                        Ok((merge_note, losses)) => {
+                            let p = autoshade::pipeline::xmp_target(&path);
                             // A sidecar we could not MERGE was regenerated, and
                             // that drops the user's Lightroom-only properties.
                             // Saying only "saved" is how that loss stayed
@@ -1363,6 +1376,24 @@ impl AutoShadeApp {
                                 .map_err(|e| anyhow::anyhow!(
                                     "refusing to overwrite the saved develop: backing it up failed ({e})"
                                 ))?;
+                            // The projection is a member of the same
+                            // generation (2026-09-13). A paste replaces the
+                            // develop inside whatever card the target is on:
+                            // a persisted GENERATED master says that card
+                            // sits on AI pixels, and no sidecar may project
+                            // a develop over those — the member clears
+                            // instead of lying.
+                            let on_source = !autoshade::store::pixel_source_is_generated(path);
+                            let (xmp_member, xmp_outcome) =
+                                match autoshade::pipeline::xmp_projection_member(
+                                    path,
+                                    &r,
+                                    on_source,
+                                    autoshade::diag::stderr(),
+                                ) {
+                                    Ok((m, note, _)) => (m, Ok(note)),
+                                    Err(e) => (autoshade::store::CommitMember::Keep, Err(e)),
+                                };
                             // ONE single-generation commit, like every other
                             // develop writer (R24-4): the paste used to call
                             // `pipeline::write_recipe` DIRECTLY — the fifth
@@ -1391,9 +1422,10 @@ impl AutoShadeApp {
                                         path,
                                         autoshade::store::ActiveWrite::Unknown,
                                     )?,
+                                    xmp: xmp_member,
                                 },
                             )?;
-                            if autoshade::decode::is_raw(path) {
+                            if autoshade::decode::is_raw(path) && on_source {
                                 // Recipe-write-decides: an XMP failure after
                                 // the recipe landed is a partial success —
                                 // reopening restores the paste regardless.
@@ -1409,13 +1441,13 @@ impl AutoShadeApp {
                                 // per-target UI list of them needs its own
                                 // PasteOutcome member — R23 work, not a
                                 // mislabelled fold into this one.
-                                match autoshade::pipeline::write_xmp(path, &r, autoshade::diag::stderr()) {
-                                    Ok((_, None, _)) => {}
+                                match xmp_outcome {
+                                    Ok(None) => {}
                                     // Regenerated-not-merged loses LR-only
                                     // properties — collected for the paste
                                     // summary (stderr already heard it in
-                                    // write_xmp_doc).
-                                    Ok((_, Some(m), _)) => xmp_notes.push(format!(
+                                    // the builder).
+                                    Ok(Some(m)) => xmp_notes.push(format!(
                                         "{}: {m}",
                                         autoshade::pipeline::stem(path)
                                     )),

@@ -1461,6 +1461,43 @@ own cards; for every non-GUI surface this IS the list. Copy the XMP beside the R
 you want Lightroom to pick it up. A Lightroom sidecar that already sits beside
 the RAW is READ on open — the newer intent wins — and never overwritten.
 
+**The projection is a commit member, and a present `recipe.json` ends the
+read.** `<stem>.xmp` in the store is DERIVED from `recipe.json` — it is what
+the recipe looks like in Lightroom's vocabulary, and it can only ever be
+stale, never newer. Until 2026-09-13 it was nevertheless written by a
+separate call after each commit, and two writers did not keep it truthful:
+the quit dialog's Save-all skipped the call for a generated card without
+retiring the file, and the Analyze landing published one even over a card
+whose pixels are AI-generated. Every reader then fell through a *neutral*
+`recipe.json` into that file, as if a neutral recipe were an absent one. The
+measured case: a 「◭ Reverse-fit」 card was deleted, its +90-saturation
+projection stayed, and the pristine 「✨ AI generated」 card that remained
+reopened cooked in the deleted card's grade with no user action. Two rules
+close both halves: (1) `DevelopCommit.xmp` is the commit's fourth member —
+`pipeline::xmp_projection_member` produces `Write(bytes)` for a source
+develop of a RAW (merged over a Lightroom sidecar beside the RAW when one
+exists, else over the previous projection, exactly what `write_xmp`
+publishes), `Clear` for a develop that sits on AI-generated pixels or on a
+baked image, and `Keep` only when the writer learned nothing (a failed
+projection keeps the previous file rather than publishing a half-truth) —
+staged as `projection.xmp` in the same `.commit/` generation, named in the
+manifest (an older manifest without the member replays as `Keep`), landed
+after the three JSON members and replayed by `resolve_pending_commit`, so the
+file cannot outlive the recipe it projects; every surface that commits a
+develop (GUI Ctrl+S, quit-time Save-all, the Analyze landing, the paste
+worker, the reverse-fit worker, the CLI `match`, the web save) hands the
+member over. (2) The four readers — the GUI open path
+(`persist::read_saved_develop_locked`), the web `api_recipe`, the GUI batch
+resolver and `store::read_develop_snapshot` — consult the projection only
+when the develop has NO `recipe.json`: a neutral recipe is a saved fact (the
+pristine ✨ card), not an absence, and the projection is a fallback for the
+pre-v0.13 stores that had nothing else. The backup gate no longer preserves a
+projection on a neutral recipe's behalf for the same reason.
+`store::pixel_source_is_generated` answers the question the writers that do
+not hold a live card ask (the web save without a master, the batch paste):
+whether the photo's saved develop sits on AI pixels, read from `pixels.json`
+alone.
+
 **Import (R25).** Until v0.31.0 that read imported *no* Lightroom mask at all.
 Two gates each dropped a whole correction on sight: the presence of `crs:Angle`
 (LR writes it on every radial, `"0"` included) and a `crs:MaskBlendMode` on a

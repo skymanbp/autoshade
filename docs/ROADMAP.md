@@ -2,7 +2,13 @@
 
 > 这是**已发生之事的台账**，不是待办表：每一条要么是已发布的版本与实测数字，
 > 要么是带理由的终局裁定（一个测出来的数、一条仪器极限、一次用户拍板）。
-> 每项都附 `file:line` 或提交锚点，供新会话不重读全库即可接手。更新于 **2026-09-12**。
+> 每项都附 `file:line` 或提交锚点，供新会话不重读全库即可接手。更新于 **2026-09-13**。
+>
+> **main 上未发版的改动（2026-09-13，用户报障「就是一打开就这样」）**：develop 库里的 XMP 投影
+> `<stem>.xmp` 成为 develop 提交的第四个成员（源 develop 写、AI 像素/烘焙图清、写不出来才保留），
+> 四个读取端在有 `recipe.json` 时不再落到投影——中性配方是「已存的事实」不是「缺席」。起因：删掉的
+> 「◭ 反推」卡留下 +90 饱和度的投影，剩下的「✨ AI 生成」卡一打开就套着它。门全绿（见台账首条），
+> 未发版；本机安装仍是 1.3.2。
 >
 > **v1.3.2 已发布**（2026-09-12 深夜，tag `v1.3.2` → `d0f7dd4`，release run `34732153004`
 > 五工位绿，8 资产回下载字节校验，官网 23/23 逐字节，本机已升）——反推的强度不再借用「分析」折叠区的强度滑杆：
@@ -41,6 +47,38 @@
 > [docs/ROADMAP-archive.md](ROADMAP-archive.md)（追加式档案，勿重写）。
 
 ## 版本台账（逐版已发布内容与实测数字，新在上；均已完成，勿重做）
+
+### main（未发版）— XMP 投影成为 develop 提交的成员；有 recipe.json 就不读投影（2026-09-13）
+
+- **起因（用户报障，原话）**：「就是一打开就这样。」——一张 RAW 的活动卡是「✨ AI 生成」、配方中性，
+  打开即呈现 +90 饱和度、−1.30 EV 的深红画面，用户未做任何操作。现场读库（只读）：`recipe.json` /
+  `pixels.json` / `variants.json` 三件同一代（20:25:06，中性配方 + generated + 活动卡 generated），
+  而 `<stem>.xmp` 停在两天前（18:56:04），内容正是当时被删掉的「◭ 反推」卡的配方投影
+  （`recipe.json.bak` 18:55:33 同款：对比 +3、高光 −1、黑色 −2、清晰度 +20、纹理 +20、饱和度 +90）。
+- **根因（两半）**：① 投影由每次提交之后的一次单独调用写出，不在提交的代际里；退出对话框的「全部保存」
+  对生成卡跳过这次调用却不退役旧文件，「分析」落地则连生成卡也写一份。② 四个读取端
+  （GUI `persist::read_saved_develop_locked`、web `api_recipe`、GUI 批量 `resolve_snapshot_develop`、
+  库 `store::read_develop_snapshot`）把**中性**的 `recipe.json` 当作「没有」继续落到投影，于是被删卡的
+  投影成了活动卡的 develop。
+- **改法**：`DevelopCommit` 加第四成员 `xmp: CommitMember`（`pipeline::xmp_projection_member`：RAW 的源
+  develop → `Write`（合并基底与 `write_xmp` 一致：RAW 旁的 LR 侧车，否则上一份投影）；AI 像素 / 烘焙图 →
+  `Clear`；投影算不出 → `Keep`），`.commit/` 里暂存为 `projection.xmp`、清单记 `xmp` 字（旧清单缺此字
+  按 `Keep` 重放），在三个 JSON 成员之后落地、`resolve_pending_commit` 同代重放；七个提交点
+  （GUI Ctrl+S、退出 Save-all、分析落地、粘贴 worker、反推 worker、CLI `match`、web 保存）全部交成员，
+  不再有独立的投影写调用跟在提交后面。读取端四处：有 `recipe.json`（含中性）即为 develop，投影只在
+  **没有** `recipe.json` 时才读（v0.13 之前的库）；备份门不再替中性配方保投影。新 `store::pixel_source_is_generated`
+  供不持活动卡的写入端（无主图的 web 保存、批量粘贴）判断 develop 是否坐在 AI 像素上。
+  web 状态行区分「xmp + recipe saved」与「recipe saved …（no Lightroom XMP: this develop sits on
+  AI-generated pixels）」。
+- **门（车道 `/d/wt/fix40`，`lane-fix40`，自家 target 目录、BelowNormal）**：GUI **174 / 0 / 1**
+  （新增 `a_stale_projection_never_cooks_a_pristine_generated_card_on_open`——按现场库原样搭 fixture，
+  在修前的 `persist.rs` 上按构造失败：`(90.0, -1.3)`；`ctrl_s_publishes_the_projection_in_the_recipes_generation`；
+  `read_saved_develop_prefers_recipe_json_then_xmp` 加中性配方分支）、库子集（store/pipeline/serve/xmp/recipe）
+  **424 / 0 / 2**（`a_develop_commit_lands_all_four_or_nothing`、`the_projection_replays_with_its_generation`、
+  `the_projection_member_stages_what_write_xmp_publishes`）、clippy 两组 0、`audit_i18n` 0 / 0、
+  字体子集 `--check` 873/873、照片名 grep 0。
+- **未动的**：CLI `apply` / `auto` / 批量粘贴的 `write_recipe` + `write_xmp` 直写路径（不经 `commit_develop`，
+  本条之前就如此）；Ctrl+S 对生成卡仍拒绝写 XMP（下一条改动把生成卡的编辑拆成新卡时一并处理）。
 
 ### v1.3.2 — 反推强度独立成「反推」折叠区自己的滑杆
 

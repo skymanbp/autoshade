@@ -1678,6 +1678,22 @@ impl AutoShadeApp {
                                         .and_then(|v| v.origin.clone());
                                     let generated = self.active_is_generated();
                                     let strip_rec = self.current_strip_record();
+                                    // The projection is a member of the same
+                                    // generation (2026-09-13) — and for a
+                                    // GENERATED canvas it CLEARS: this landing
+                                    // used to write a sidecar claiming the
+                                    // RAW carried the analysis grade that was
+                                    // in fact tuned over AI pixels.
+                                    let (xmp_member, xmp_outcome) =
+                                        match autoshade::pipeline::xmp_projection_member(
+                                            &p,
+                                            &stamped,
+                                            !generated,
+                                            autoshade::diag::stderr(),
+                                        ) {
+                                            Ok((m, note, losses)) => (m, Ok((note, losses))),
+                                            Err(e) => (autoshade::store::CommitMember::Keep, Err(e)),
+                                        };
                                     let commit_res: anyhow::Result<()> = (|| {
                                         let recipe_bytes =
                                             autoshade::pipeline::recipe_store_bytes(&p, &stamped, autoshade::diag::stderr())?;
@@ -1701,6 +1717,7 @@ impl AutoShadeApp {
                                                 recipe: Some(recipe_bytes),
                                                 pixels,
                                                 variants,
+                                                xmp: xmp_member,
                                             },
                                         )?;
                                         Ok(())
@@ -1737,8 +1754,8 @@ impl AutoShadeApp {
                                                 ),
                                                 None => tr(lang, "AI develop applied · saved to recipe.json").to_string(),
                                             };
-                                            if autoshade::decode::is_raw(&p) {
-                                                match autoshade::pipeline::write_xmp(&p, &stamped, autoshade::diag::stderr()) {
+                                            if autoshade::decode::is_raw(&p) && !generated {
+                                                match xmp_outcome {
                                                     // Regenerated-not-merged AND
                                                     // the M6a projection losses:
                                                     // the same disclosure as
@@ -1748,7 +1765,7 @@ impl AutoShadeApp {
                                                     // this landing needs the
                                                     // export-side line as much
                                                     // as the save does.
-                                                    Ok((_, merge_note, losses)) => {
+                                                    Ok((merge_note, losses)) => {
                                                         // A regenerated-not-merged
                                                         // sidecar always
                                                         // interrupts: it dropped

@@ -1523,7 +1523,10 @@ async function saveXmp() {
     // The server APPENDS why a clear could not be marked (without the marker
     // a sidecar beside the RAW can restore the edits on the next open).
     // Substituting a fixed string threw away the one thing worth reading.
-    setStatus(body.startsWith("cleared") ? body : ("xmp + recipe saved → " + body));
+    // …and a save that wrote no sidecar (a develop over AI-generated pixels,
+    // a baked source) says so itself, starting with "recipe saved".
+    setStatus(body.startsWith("cleared") || body.startsWith("recipe saved")
+      ? body : ("xmp + recipe saved → " + body));
     // ...but NOT the master half when the server says it could not record it:
     // the recipe landed, the pixel link did not, and baselining the master as
     // saved let the next thumbnail click discard the fill with no warning.

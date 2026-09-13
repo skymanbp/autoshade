@@ -985,6 +985,10 @@ fn api_recipe(request: &Request, state: &AppState) -> Result<ResponseBox> {
     // packet at the tail (the GUI open path's `!any` rule; Codex L05
     // EMBED-01: a neutral save must not be out-answered by the baked packet).
     let mut store_answered = false;
+    // A NEUTRAL central recipe.json ends the store walk (2026-09-13): the
+    // projection beside it is derived from it and can only disagree by
+    // being stale, so the loop below is not entered.
+    let mut neutral_store = false;
     for path in [crate::store::recipe_target(raw), crate::store::legacy_recipe(raw)] {
         let text = match crate::store::read_text_capped(&path, crate::store::MAX_STORE_JSON) {
             Ok(t) => {
@@ -1024,11 +1028,15 @@ fn api_recipe(request: &Request, state: &AppState) -> Result<ResponseBox> {
             }
             Ok(_) => {}
         }
-        // A NEUTRAL recipe.json is not a develop: fall through to the XMP, the
-        // GUI's `NoopOnly` rule (`read_saved_develop`). Returning it would tag
-        // the photo SAVED for an edit that does nothing.
+        // A NEUTRAL recipe.json is the store's answer, and the answer is
+        // "neutral" — the GUI's `NoopOnly` rule (`read_saved_develop`):
+        // returning the body would tag the photo SAVED for an edit that does
+        // nothing, and walking on into the projection restored a develop the
+        // user had already replaced. The 404 below carries the fresh base
+        // look, exactly as for a never-analyzed photo.
         if serde_json::from_str::<EditRecipe>(&text).is_ok_and(|r| r.is_noop()) {
-            continue;
+            neutral_store = true;
+            break;
         }
         // Bare raster names stay bare — api_develop/api_export re-anchor them
         // before rendering.
@@ -1077,6 +1085,9 @@ fn api_recipe(request: &Request, state: &AppState) -> Result<ResponseBox> {
     // was tuned in Lightroom over ITS camera-profile base, so it gets the
     // photo's fresh base look — the same rule the GUI applies on open.
     for path in [pipeline::xmp_target(raw), crate::store::legacy_xmp(raw)] {
+        if neutral_store {
+            break;
+        }
         let text = match crate::store::read_text_capped(&path, crate::store::MAX_STORE_JSON) {
             Ok(t) => t,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
@@ -2621,12 +2632,31 @@ fn api_xmp(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
             _ => crate::store::ActiveWrite::Unknown,
         },
     )?;
+    // The projection is a member of this generation (2026-09-13): a develop
+    // that sits on a GENERATED master — this session's, or one the GUI
+    // persisted — projects nothing (no sidecar reproduces AI pixels, and a
+    // projection left standing from an earlier card is what the open path
+    // used to restore over a pristine generated card), so the member clears.
+    let on_source = match &master {
+        Some((_, generated)) => !*generated,
+        None => !crate::store::pixel_source_is_generated(&raw),
+    };
+    let (xmp_member, xmp_outcome) = match pipeline::xmp_projection_member(
+        &raw,
+        &req.recipe,
+        on_source,
+        crate::diag::stderr(),
+    ) {
+        Ok((m, note, losses)) => (m, Ok((note, losses))),
+        Err(e) => (crate::store::CommitMember::Keep, Err(e)),
+    };
     crate::store::commit_develop(
         &raw,
         crate::store::DevelopCommit {
             recipe: Some(pipeline::recipe_store_bytes(&raw, &req.recipe, crate::diag::stderr())?),
             pixels,
             variants,
+            xmp: xmp_member,
         },
     )?;
     let mut master_note = String::new();
@@ -2661,11 +2691,11 @@ fn api_xmp(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
     // the projection write in each arm: the develop tag folds in a sidecar
     // that out-ranks the store, and the tag the tab adopts must describe
     // the state its next If-Match is compared against.
-    match pipeline::write_xmp(&raw, &req.recipe, crate::diag::stderr()) {
+    match xmp_outcome {
         // A regenerated (rather than merged) sidecar is a LOSS of the user's
         // Lightroom-only properties, so it rides the same reply as the path —
         // reporting a bare success here is what made the loss silent.
-        Ok((path, merge_note, losses)) => {
+        Ok((merge_note, losses)) => {
             let merge_note = merge_note.map(|m| format!("\n⚠ {m}")).unwrap_or_default();
             // M6a export-side disclosure, in the SAME "\n⚠ …" note shape the
             // merge loss already uses (the reply is plain text; a new field
@@ -2673,10 +2703,26 @@ fn api_xmp(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
             let mask_note = crate::xmp::describe_mask_losses(&losses)
                 .map(|m| format!("\n⚠ {m}"))
                 .unwrap_or_default();
+            // The reply's first token names what landed: the projection when
+            // one was written (the tab prefixes "xmp + recipe saved →"), else
+            // the recipe, with the reason there is no sidecar — the tab shows
+            // a "recipe saved" body verbatim.
+            let landed = if !crate::decode::is_raw(&raw) {
+                format!(
+                    "recipe saved → {} (XMP applies to RAW only)",
+                    crate::store::recipe_target(&raw).display()
+                )
+            } else if !on_source {
+                format!(
+                    "recipe saved → {} (no Lightroom XMP: this develop sits on AI-generated pixels)",
+                    crate::store::recipe_target(&raw).display()
+                )
+            } else {
+                pipeline::xmp_target(&raw).display().to_string()
+            };
             Ok(with_revision(
                 text_response(&format!(
-                    "{}{save_note}{master_note}{merge_note}{mask_note}",
-                    path.display()
+                    "{landed}{save_note}{master_note}{merge_note}{mask_note}"
                 )),
                 crate::store::develop_revision(&raw).as_deref(),
             ))

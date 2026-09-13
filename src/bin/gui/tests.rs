@@ -2557,6 +2557,26 @@
         };
         assert_eq!((r.exposure_ev, kind), (0.5, "recipe.json"));
 
+        // A NEUTRAL recipe.json beside a projection that holds edits: the
+        // projection is derived from the recipe and can only disagree by
+        // being stale (2026-09-13 — a sidecar left by a deleted reverse-fit
+        // card restored its grade over a pristine generated card). The
+        // store answers NoopOnly; the projection is not consulted — and the
+        // batch resolver draws the same line.
+        std::fs::write(&rj, serde_json::to_string(&EditRecipe::default()).unwrap()).unwrap();
+        assert!(
+            matches!(read_saved_develop(src).saved, SavedDevelop::NoopOnly),
+            "a present neutral recipe.json ends the walk"
+        );
+        let snap = autoshade::store::read_develop_snapshot(src).unwrap();
+        assert!(snap.store_xmp.is_some(), "premise: the edited projection is still there");
+        assert!(
+            crate::export::resolve_snapshot_develop(src, &snap, &mut Vec::new())
+                .unwrap()
+                .is_none(),
+            "the batch answers neutral too"
+        );
+
         // A damaged recipe.json degrades LOUDLY, XMP fallback attached.
         std::fs::write(&rj, "{ not json").unwrap();
         let SavedDevelop::Unreadable { fallback, .. } = read_saved_develop(src).saved else {
@@ -2836,6 +2856,143 @@
     /// neutral with no word — the packet is now the strictly LOWEST-priority
     /// restore source, on the open path and the batch snapshot alike (the
     /// L13 rule: the surfaces answer one develop).
+    /// The user's exact on-disk state of 2026-09-13, opened: an AI-generated
+    /// card active (`pixels.json` generated, `recipe.json` neutral with the
+    /// RAW's calibration), the ▣ card's develop in `variants.json`, and a
+    /// `<stem>.xmp` projection left by a reverse-fit card that was deleted
+    /// before the last save (+90 saturation, −1.3 EV). The open path walked
+    /// past the neutral recipe.json into that projection and rendered the
+    /// generated pixels through the dead card's grade. The canvas must be
+    /// the pristine card: neutral, clean, on the AI pixels.
+    #[test]
+    fn a_stale_projection_never_cooks_a_pristine_generated_card_on_open() {
+        let dir = std::env::temp_dir()
+            .join(format!("autoshade-gui-stale-projection-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // A fake RAW path: the store keys by path, and nothing reads the file.
+        let src = dir.join("_gui_stale_projection.ARW");
+        let dev = autoshade::store::develop_dir(&src);
+        let _ = std::fs::remove_dir_all(&dev);
+        std::fs::create_dir_all(&dev).unwrap();
+        let _scrub = Scrub(vec![dir.clone(), dev.clone()]);
+        let master = dir.join("_gui_stale_projection.reimagine.png");
+        image::DynamicImage::new_rgb8(6, 4).save(&master).unwrap();
+        // recipe.json: neutral apart from the RAW's calibration (the disk
+        // form of a generated card's develop).
+        std::fs::write(
+            autoshade::store::recipe_target(&src),
+            serde_json::to_string(&EditRecipe {
+                base_curve: vec![[0.0, 0.0], [0.5, 0.62], [1.0, 1.0]],
+                as_shot_k: Some(5653.0),
+                as_shot_tint: Some(0.0),
+                ..Default::default()
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        autoshade::store::write_pixel_source(&src, &master, true).unwrap();
+        autoshade::store::write_variants(
+            &src,
+            &autoshade::store::VariantsRecord {
+                extra: Default::default(),
+                v: 1,
+                active_kind: "generated".into(),
+                active_pos: 1,
+                active_id: Some("gen-1".into()),
+                active_name: None,
+                others: vec![autoshade::store::VariantEntry {
+                    extra: Default::default(),
+                    kind: "original".into(),
+                    recipe: EditRecipe { contrast: 4.0, shadows: 28.0, ..Default::default() },
+                    origin: None,
+                    id: Some("original".into()),
+                    name: None,
+                }],
+            },
+        )
+        .unwrap();
+        // The dead card's projection.
+        std::fs::write(
+            autoshade::pipeline::xmp_target(&src),
+            autoshade::xmp::recipe_to_xmp(&EditRecipe {
+                saturation: 90.0,
+                exposure_ev: -1.3,
+                ..Default::default()
+            }),
+        )
+        .unwrap();
+
+        let mut app = AutoShadeApp { src_path: Some(src.clone()), ..Default::default() };
+        let ctx = egui::Context::default();
+        let ai_px = Arc::new(image::DynamicImage::new_rgb8(6, 4));
+        app.tx
+            .send(Msg::Opened(Box::new(Ok((
+                Arc::new(image::DynamicImage::new_rgb8(6, 4)),
+                vec![[0.0, 0.0], [0.5, 0.62], [1.0, 1.0]],
+                Default::default(),
+                Some((5653.0, 0.0)),
+                Some((ai_px.clone(), master.clone(), true)),
+                (1280, None, None),
+                None,
+            )))))
+            .unwrap();
+        app.poll_workers(&ctx);
+
+        assert_eq!(app.variants.len(), 2, "the ▣ card and the ✨ card");
+        assert_eq!(app.active, 1);
+        assert_eq!(app.variants[1].kind, VariantKind::Generated);
+        assert!(
+            app.variants[1].base.as_ref().is_some_and(|b| Arc::ptr_eq(b, &ai_px)),
+            "the canvas sits on the AI pixels"
+        );
+        assert!(
+            app.recipe.is_noop(),
+            "the pristine card, not the deleted reverse-fit's grade: {:?}",
+            (app.recipe.saturation, app.recipe.exposure_ev)
+        );
+        assert_eq!(app.recipe.saturation, 0.0);
+        assert!(app.recipe.base_curve.is_empty(), "calibration stripped on AI pixels");
+        assert!(app.saved_recipe.is_noop(), "the ● baseline agrees");
+        assert!(!app.unsaved_marker_dirty(), "a clean open: {}", app.status);
+        assert!(
+            !app.status.contains("(XMP)"),
+            "nothing was restored from the projection: {}",
+            app.status
+        );
+        assert_eq!(app.variants[0].recipe.contrast, 4.0, "the ▣ card keeps its own develop");
+    }
+
+    /// Ctrl+S publishes the Lightroom projection in the recipe's own
+    /// generation — a projection standing from an earlier develop is
+    /// replaced by the commit, not by a write that runs after it.
+    #[test]
+    fn ctrl_s_publishes_the_projection_in_the_recipes_generation() {
+        let src = std::path::Path::new("D:/library/_gui_ctrl_s_projection.ARW"); // never touched
+        let dev = autoshade::store::develop_dir(src);
+        let _ = std::fs::remove_dir_all(&dev);
+        std::fs::create_dir_all(&dev).unwrap();
+        let _scrub = Scrub(vec![dev.clone()]);
+        let xp = autoshade::pipeline::xmp_target(src);
+        std::fs::write(
+            &xp,
+            autoshade::xmp::recipe_to_xmp(&EditRecipe { saturation: 90.0, ..Default::default() }),
+        )
+        .unwrap();
+        let mut app = AutoShadeApp {
+            src_path: Some(src.to_path_buf()),
+            recipe: EditRecipe { contrast: 7.0, ..Default::default() },
+            ..Default::default()
+        };
+        app.save_xmp();
+        assert!(autoshade::store::recipe_target(src).exists(), "{}", app.status);
+        let back = autoshade::xmp::xmp_to_recipe(&std::fs::read_to_string(&xp).unwrap());
+        assert_eq!(back.contrast, 7.0, "the projection is this generation's");
+        assert_eq!(back.saturation, 0.0, "…and the stale one is gone");
+        assert!(app.status.starts_with("XMP + recipe saved"), "{}", app.status);
+        assert!(!dev.join(".commit").exists(), "the stage is consumed");
+    }
+
     #[test]
     fn an_embedded_raw_xmp_packet_restores_when_nothing_else_answers() {
         let dir = std::env::temp_dir().join(format!("autoshade-gui-packet-restore-{}", std::process::id()));

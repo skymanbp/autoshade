@@ -2931,6 +2931,61 @@ pub fn write_xmp(
     recipe: &EditRecipe,
     sink: &dyn crate::diag::Sink,
 ) -> Result<(PathBuf, Option<String>, Vec<xmp::MaskLoss>)> {
+    let target = xmp_target(raw);
+    let (bytes, note, losses) = xmp_projection_bytes(raw, recipe, sink)?;
+    // Stage + rename, never truncate in place (see `write_xmp_doc`).
+    crate::store::durable_write(&target, &bytes)
+        .with_context(|| format!("publish xmp {}", target.display()))?;
+    Ok((target, note, losses))
+}
+
+/// The `xmp` member of a [`crate::store::DevelopCommit`] for the develop
+/// being committed, with the projection's two disclosures (the merge note
+/// and the per-mask loss list) for the caller's own channel.
+///
+/// The projection is DERIVED from `recipe.json` and lives or dies with it,
+/// in the same generation:
+///
+/// * `on_source` — the develop describes the RAW itself (an Original or
+///   Reverse-fit card; the CLI's fits and analyses; a web save over no
+///   generated master) — and the photo is a camera RAW: `Write`, the bytes
+///   [`write_xmp`] would publish;
+/// * otherwise `Clear`: a develop that sits on AI-generated pixels has no
+///   sidecar that reproduces those pixels, and a baked PNG/JPEG has no
+///   Lightroom-sidecar convention at all.
+///
+/// Until 2026-09-13 every writer published the projection by a SEPARATE
+/// call after its commit — and the quit-time Save-all skipped that call for
+/// a generated card without retiring what stood there. A projection written
+/// for a reverse-fit card therefore outlived the card (deleted) and the
+/// recipe it projected (replaced by the generated card's neutral one), and
+/// the open path restored its +90 saturation over the pristine AI-generated
+/// pixels. `Clear` in the same generation is the writer-side half of that
+/// fix; the readers' half is that a present `recipe.json` — neutral or not
+/// — is never out-answered by the projection beside it.
+pub fn xmp_projection_member(
+    raw: &Path,
+    recipe: &EditRecipe,
+    on_source: bool,
+    sink: &dyn crate::diag::Sink,
+) -> Result<(crate::store::CommitMember, Option<String>, Vec<xmp::MaskLoss>)> {
+    if !on_source || !crate::decode::is_raw(raw) {
+        return Ok((crate::store::CommitMember::Clear, None, Vec::new()));
+    }
+    let (bytes, note, losses) = xmp_projection_bytes(raw, recipe, sink)?;
+    Ok((crate::store::CommitMember::Write(bytes), note, losses))
+}
+
+/// The projection's BYTES without publishing them: exactly what
+/// [`write_xmp`] puts at [`xmp_target`] for `raw` — merge base (the sidecar
+/// Lightroom writes beside the RAW, else the previous projection) and all —
+/// so a develop commit can stage the sidecar into the same generation as the
+/// recipe it projects. Same return shape as the writer minus the path.
+pub fn xmp_projection_bytes(
+    raw: &Path,
+    recipe: &EditRecipe,
+    sink: &dyn crate::diag::Sink,
+) -> Result<(Vec<u8>, Option<String>, Vec<xmp::MaskLoss>)> {
     use crate::store::SidecarRead;
     let target = xmp_target(raw);
     // MERGE, never regenerate over Lightroom's work (A11): the base is the
@@ -2986,7 +3041,9 @@ pub fn write_xmp(
             )),
         }
     }
-    write_xmp_doc(target, recipe, base, &crate::diag::Diag::about(sink, raw), notes)
+    let (doc, note, losses) =
+        build_xmp_doc(&target, recipe, base, &crate::diag::Diag::about(sink, raw), notes)?;
+    Ok((doc.into_bytes(), note, losses))
 }
 
 /// Write the XMP to an EXPLICIT path. Used when the recipe was redirected with
@@ -3035,14 +3092,35 @@ fn write_xmp_doc(
     recipe: &EditRecipe,
     merge_base: Option<(PathBuf, String)>,
     diag: &crate::diag::Diag<'_>,
-    mut notes: Vec<String>,
+    notes: Vec<String>,
 ) -> Result<(PathBuf, Option<String>, Vec<xmp::MaskLoss>)> {
+    let (doc, note, losses) = build_xmp_doc(&out, recipe, merge_base, diag, notes)?;
+    // Stage + rename, never truncate in place: `fs::write` opens the LIVE
+    // sidecar with O_TRUNC, so a full disk, an interruption or a competing
+    // writer left a truncated file where a valid Lightroom sidecar used to
+    // be — the previous projection destroyed by the failed attempt to
+    // replace it. (fs::rename replaces the destination on every platform.)
+    crate::store::durable_write(&out, doc.as_bytes())
+        .with_context(|| format!("publish xmp {}", out.display()))?;
+    Ok((out, note, losses))
+}
+
+/// The document half of [`write_xmp_doc`]: the projection's text plus its
+/// two disclosures, with nothing written. `out` is only NAMED here — the
+/// regenerated-base note says which file lost what — so the same builder
+/// serves the direct writer and the commit member ([`xmp_projection_bytes`]).
+fn build_xmp_doc(
+    out: &Path,
+    recipe: &EditRecipe,
+    merge_base: Option<(PathBuf, String)>,
+    diag: &crate::diag::Diag<'_>,
+    mut notes: Vec<String>,
+) -> Result<(String, Option<String>, Vec<xmp::MaskLoss>)> {
     // ONE source for the photograph: the channel this write discloses on. A
     // separate `photo` parameter beside a separate attribution could disagree,
     // and the frame aspect below is decided by the same identity the warnings
     // are attributed to.
     let photo = diag.photo();
-    ensure_parent(&out)?;
     // The same floor `write_recipe` stands on, for the same reason: this is a
     // persistence boundary, the string caps exist because `rationale` is
     // filled from an upstream failure body, and the XMP lands BESIDE THE RAW
@@ -3115,7 +3193,7 @@ fn write_xmp_doc(
         // rewritten by the regeneration too — the creative `Look` is a NESTED
         // element with no string spelling and is still genuinely lost, which
         // is why it is the example that stayed.)
-        notes.push(if bp == out {
+        notes.push(if bp.as_path() == out {
             format!(
                 "the existing sidecar at {} could not be merged — it was regenerated, \
                  so properties it carried (e.g. Lightroom's creative Look, \
@@ -3164,14 +3242,7 @@ fn write_xmp_doc(
     if let Some(m) = xmp::describe_mask_losses(&mask_losses) {
         diag.warn(m);
     }
-    // Stage + rename, never truncate in place: `fs::write` opens the LIVE
-    // sidecar with O_TRUNC, so a full disk, an interruption or a competing
-    // writer left a truncated file where a valid Lightroom sidecar used to
-    // be — the previous projection destroyed by the failed attempt to
-    // replace it. (fs::rename replaces the destination on every platform.)
-    crate::store::durable_write(&out, doc.as_bytes())
-        .with_context(|| format!("publish xmp {}", out.display()))?;
-    Ok((out, note, mask_losses))
+    Ok((doc, note, mask_losses))
 }
 
 /// The photo's own SOURCE frame — un-rotated size plus the turn that carries
@@ -4061,6 +4132,56 @@ mod guard_tests {
         assert!(text.contains("crs:PointColor=\"0\""), "LR-only property survives the save");
         assert_eq!(text.matches("crs:Exposure2012=").count(), 1, "ours replaces, never duplicates");
         assert!(text.contains("crs:Exposure2012=\"0.75\""), "…with OUR value");
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&dev);
+    }
+
+    /// The commit member is the writer's bytes, merge base and all — so a
+    /// develop commit stages exactly what `write_xmp` would have published
+    /// after it; and it is `Clear` wherever no sidecar may project the
+    /// develop: a develop over AI-generated pixels (`on_source = false`) or
+    /// a baked source, which has no Lightroom-sidecar convention.
+    #[test]
+    fn the_projection_member_stages_what_write_xmp_publishes() {
+        let dir = std::env::temp_dir().join(format!("autoshade-pipe-xmp-member-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let raw = dir.join("_pipe_xmp_member.arw");
+        std::fs::write(&raw, b"raw").unwrap();
+        let dev = crate::store::develop_dir(&raw);
+        let _ = std::fs::remove_dir_all(&dev);
+        std::fs::write(
+            dir.join("_pipe_xmp_member.xmp"),
+            "<x:xmpmeta xmlns:x=\"adobe:ns:meta/\">\n \
+             <rdf:RDF xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\">\n  \
+             <rdf:Description rdf:about=\"\"\n    \
+             xmlns:crs=\"http://ns.adobe.com/camera-raw-settings/1.0/\"\n    \
+             crs:PointColor=\"0\"\n    crs:Exposure2012=\"+1.00\"\n    \
+             crs:HasSettings=\"True\">\n  </rdf:Description>\n \
+             </rdf:RDF>\n</x:xmpmeta>\n",
+        )
+        .unwrap();
+        let r = EditRecipe { exposure_ev: 0.75, contrast: 9.0, ..Default::default() };
+        let (member, _, _) =
+            xmp_projection_member(&raw, &r, true, crate::diag::stderr()).unwrap();
+        let crate::store::CommitMember::Write(staged) = member else {
+            panic!("a source develop of a RAW projects");
+        };
+        let (out, _, _) = write_xmp(&raw, &r, crate::diag::stderr()).unwrap();
+        assert_eq!(std::fs::read(&out).unwrap(), staged, "member bytes == writer bytes");
+        assert!(
+            String::from_utf8_lossy(&staged).contains("crs:PointColor=\"0\""),
+            "…merge base included"
+        );
+        let (member, note, losses) =
+            xmp_projection_member(&raw, &r, false, crate::diag::stderr()).unwrap();
+        assert!(matches!(member, crate::store::CommitMember::Clear), "AI pixels: no sidecar");
+        assert!(note.is_none() && losses.is_empty());
+        let png = dir.join("_pipe_xmp_member.png");
+        std::fs::write(&png, b"png").unwrap();
+        let (member, _, _) =
+            xmp_projection_member(&png, &r, true, crate::diag::stderr()).unwrap();
+        assert!(matches!(member, crate::store::CommitMember::Clear), "a baked source: no sidecar");
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_dir_all(&dev);
     }

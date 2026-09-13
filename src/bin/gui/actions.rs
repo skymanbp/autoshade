@@ -2621,6 +2621,21 @@ impl AutoShadeApp {
                 // disclosure travels with the mutation).
                 let relook_note = autoshade::pipeline::repair_pre_era_base_curve(p, &mut disk);
                 let generated = pix.as_ref().is_some_and(|(_, g)| *g);
+                // The projection is a member of the same generation
+                // (2026-09-13): written for a source develop, CLEARED for a
+                // generated entry. Skipping the write alone (the rule below)
+                // left a sidecar written for an earlier card standing — it
+                // outlived the card and the recipe it projected, and the
+                // open path restored it over the pristine generated pixels.
+                let (xmp_member, xmp_outcome) = match autoshade::pipeline::xmp_projection_member(
+                    p,
+                    &disk,
+                    !generated,
+                    autoshade::diag::stderr(),
+                ) {
+                    Ok((m, note, _)) => (m, Ok(note)),
+                    Err(e) => (autoshade::store::CommitMember::Keep, Err(e)),
+                };
                 // ONE single-generation commit per photo (the Ctrl+S rule,
                 // L03): recipe + baked-pixels link + strip record land whole
                 // or not at all — the background variants this dialog just
@@ -2645,6 +2660,7 @@ impl AutoShadeApp {
                             recipe: Some(recipe_bytes),
                             pixels,
                             variants,
+                            xmp: xmp_member,
                         },
                     )?;
                     Ok(())
@@ -2673,11 +2689,12 @@ impl AutoShadeApp {
                         return Ok(());
                     }
                 }
-                // NO XMP for a generated entry — Ctrl+S refuses those for the
-                // same reason: the look lives in baked pixels no parametric
-                // sidecar can reproduce, and writing one here overwrote a real
-                // Lightroom sidecar with a lie. The recipe + pixels pair alone
-                // restores faithfully.
+                // NO XMP for a generated entry: the look lives in baked
+                // pixels no parametric sidecar can reproduce, and writing one
+                // here overwrote a real Lightroom sidecar with a lie — the
+                // member above CLEARS the projection for such an entry in the
+                // same generation. The recipe + pixels pair alone restores
+                // faithfully.
                 //
                 // OUTSIDE the fatal result: the recipe write alone decides the
                 // saved state (cross-surface rule), so a failed XMP projection
@@ -2688,13 +2705,13 @@ impl AutoShadeApp {
                     // reason as in the batch paste: `xmp_warns` renders under
                     // one fixed "projection(s) failed" sentence, which a
                     // lossy-but-successful projection is not. stderr carries
-                    // the per-photo line from write_xmp_doc.
-                    match autoshade::pipeline::write_xmp(p, &disk, autoshade::diag::stderr()) {
-                        Ok((_, None, _)) => {}
+                    // the per-photo line from the builder.
+                    match xmp_outcome {
+                        Ok(None) => {}
                         // A regenerated (unmerged) sidecar loses LR-only
                         // properties — Save-all's warning list is exactly
                         // where that belongs (round-12 disclosure threading).
-                        Ok((_, Some(n), _)) => {
+                        Ok(Some(n)) => {
                             xmp_warns.push(format!("{}: {n}", autoshade::pipeline::stem(p)));
                         }
                         Err(e) => {
@@ -3548,6 +3565,21 @@ impl AutoShadeApp {
                               // stale pixels.json link surviving the recipe
                               // write made a reopen render the fit on baked
                               // pixels it was never computed against.
+                              // The projection rides the same generation
+                              // (2026-09-13): a fit is a source develop, so
+                              // it always projects; a projection this build
+                              // cannot produce degrades to Keep + the
+                              // XmpFailed note, the recipe still landing.
+                              let (xmp_member, xmp_outcome) =
+                                  match autoshade::pipeline::xmp_projection_member(
+                                      p,
+                                      &rep.recipe,
+                                      true,
+                                      autoshade::diag::stderr(),
+                                  ) {
+                                      Ok((m, note, _)) => (m, Ok(note)),
+                                      Err(e) => (autoshade::store::CommitMember::Keep, Err(e)),
+                                  };
                               let commit_res: anyhow::Result<()> = (|| {
                                   autoshade::store::commit_develop(
                                       p,
@@ -3573,6 +3605,7 @@ impl AutoShadeApp {
                                               p,
                                               autoshade::store::ActiveWrite::Kind("fitted"),
                                           )?,
+                                          xmp: xmp_member,
                                       },
                                   )?;
                                   Ok(())
@@ -3601,9 +3634,11 @@ impl AutoShadeApp {
                                     // Lightroom sidecar cannot carry (the
                                     // ZONE_ATTACHED note), so a second copy
                                     // would say it twice for the same masks.
-                                    match autoshade::pipeline::write_xmp(p, &rep.recipe, autoshade::diag::stderr()) {
-                                        Ok((x, merge_note, _)) => {
-                                            status.push(FitNote::XmpWritten(x));
+                                    match xmp_outcome {
+                                        Ok(merge_note) => {
+                                            status.push(FitNote::XmpWritten(
+                                                autoshade::pipeline::xmp_target(p),
+                                            ));
                                             // Regenerated-not-merged: same
                                             // disclosure as Ctrl+S.
                                             if let Some(m) = merge_note {
