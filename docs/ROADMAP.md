@@ -4,6 +4,11 @@
 > 要么是带理由的终局裁定（一个测出来的数、一条仪器极限、一次用户拍板）。
 > 每项都附 `file:line` 或提交锚点，供新会话不重读全库即可接手。更新于 **2026-09-12**。
 >
+> **main 上未发版的改动（2026-09-12 深夜，用户令）**：反推的强度不再借用「分析」折叠区的强度滑杆——
+> 「反推」折叠区有了自己的「反推强度」滑杆（默认 65%，独立持久化），两把滑杆互不相通。用户原话：
+> 「该在哪就在哪，某个功能属于什么板块就放到该板块。如果不同板块都要，那就分开做，比让人迷惑强。」
+> 门全绿（见台账首条），等用户裁定是否作 v1.3.2 发出；本机安装仍是 1.3.1。
+>
 > **v1.3.1 已发布**（2026-09-12，tag `v1.3.1` → `91df8f0`，release run `34722635800`
 > 五工位绿，8 资产回下载字节校验，官网 22/22 逐字节，本机已升）——侧车装下整份 develop：
 > Lightroom 9.4 实测（`ash` 意图 0/12 存活、23 个根属性被物化、外来命名空间的根级属性逐字节
@@ -35,6 +40,12 @@
 > [docs/ROADMAP-archive.md](ROADMAP-archive.md)（追加式档案，勿重写）。
 
 ## 版本台账（逐版已发布内容与实测数字，新在上；均已完成，勿重做）
+
+### main（未发版）— 反推强度独立成「反推」折叠区自己的滑杆（2026-09-12）
+
+- **起因（用户令，原话）**：「那你这个按钮这么安排很让人搞不清啊？面板中不要出现这种情况。该在哪就在哪，某个功能属于什么板块就放到该板块。如果不同板块都要，那就分开做，比让人迷惑强。」——此前「反推配方」读的是「分析」折叠区的「强度」滑杆（F1 的「一份读数、两处消费」设计，`panel_strength()`），用户在反推那一行找不到文档里的 0.85 该在哪调。
+- **改法**：`AutoShadeApp::fit_strength`（默认 `GradeStrength::DEFAULT` = 0.65；`Prefs::fit_strength` 同源持久化，旧 prefs 缺键按默认解码而不是 serde 的 0.0）；「反推」折叠区在动词行正上方多一条「反推强度」滑杆（`slider_pct_hinted`：0..100 刻度、双击复位、悬停微调，tooltip 写明 ≤65% 与标定路径逐字节相同 / >65% 放宽 / ≥85% 披露）；`panel_strength()` 拆成 `analysis_strength()`（只喂分析请求）与 `fit_strength()`（只喂分区与全局两个反推入口）；AI 区标题的 ● 也看这条滑杆；按钮 tooltip、CLI `match --strength` 帮助、USER_MANUAL 两处、README/SHOWCASE 图注里的「panel Strength」措辞同步改为「Reverse-fit strength」。库侧 rationale 那句「Reverse-fit used panel Strength {pct}%」不动——`fit.rs` 从它反解出强度，改拼法会让旧说明读不回。
+- **门（车道 `/d/wt/fix37`，`lane-fix39`，自家 target 目录、BelowNormal）**：GUI **172 / 0 / 1**（`gui_reverse_fit_uses_the_panel_strength` → `gui_reverse_fit_has_its_own_strength_dial`，同数：默认三处同源、两把滑杆互不相通、320 px 面板画出「Reverse-fit strength」、● 跟随、prefs 往返与缺键解码、worker 源码钉两个入口都读 `fit_strength()` 且 `panel_strength` 不再作为代码出现）、CLI **24 / 0**（`match --strength` 帮助改口）、clippy 两组 0、`audit_i18n` 0 / 0、字体子集 `--check` **873/873**（中文 tooltip 带来 5 个新码点，含 撑/诚/露 三个原本缺的；只重生成 `NotoSansSC-autoshade.ttf` 217,760 → 219,476 B——其余四个子集按今日供体重生成后与库内字节不同、字形集未变，故保留库内版本）、check_docs 25P / 0F / 5S、照片名与令牌 grep 0。库测试未重跑：`src/` 只动了 GUI 与 `main.rs` 的一句帮助文本。官网 `site/index.html` 两处图注同步改口但**未部署**——等发版时一起上线，线上仍是 v1.3.1 的措辞。
 
 ### v1.3.1 — 侧车装下整份 develop，经 Lightroom 重写后原样读回
 

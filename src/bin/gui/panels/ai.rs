@@ -93,6 +93,8 @@ impl AutoShadeApp {
             // R23-3: the strength axis is the SECOND non-zero-default AI input,
             // so it joins on the same "moved off the shared default" test.
             || self.grade_strength != GRADE_STRENGTH_DEFAULT
+            // 2026-09-12: the reverse-fit's own dial lives in this area too.
+            || self.fit_strength != autoshade::recipe::GradeStrength::DEFAULT
     }
 
     pub(crate) fn ai_panel(&mut self, ui: &mut egui::Ui) {
@@ -1095,6 +1097,23 @@ impl AutoShadeApp {
             if clear_ref {
                 self.fit_ref = None;
             }
+            // The fit's OWN Strength, directly above the verb that reads it (user
+            // decision 2026-09-12: a control belongs to the section whose function
+            // it serves). Through v1.3.1 the fit silently read the Analysis dial two
+            // folds up — the last place anyone looking at this row would look. Same
+            // helper as the Analysis dials: 0..100 track, double-click reset, hover
+            // nudge, the explanation as the tooltip.
+            Self::slider_pct_hinted(
+                ui,
+                lang,
+                tr(lang, "Reverse-fit strength"),
+                &mut self.fit_strength,
+                1.0,
+                autoshade::recipe::GradeStrength::DEFAULT,
+                tr(lang,
+                    "The reverse-fit's honesty budget — its own dial: the Analysis Strength above does not reach the fit. At or below the default 65% the fit is byte-identical to the calibrated path. Above it the Atmosphere budget widens, and a white balance outside the budget shrinks along its fitted move instead of staying as-shot. From 85% unsupported movement is DISCLOSED (confidence capped) instead of withheld. Double-click to reset.",
+                ),
+            );
             ui.horizontal_wrapped(|ui| {
                 let cell = columns(ui, 2);
                 let can = !self.busy && can_fit;
@@ -1103,7 +1122,7 @@ impl AutoShadeApp {
                         "Statistical fit: reverse the freshly generated look into editable develop params \
                          (local, no API cost). Sliders update (undoable), and for RAW a Lightroom XMP goes \
                          into this photo's develop store; hit Export to render the full-resolution result. \
-                         Uses the panel's Strength control as the reverse-fit honesty budget.",
+                         Uses the Reverse-fit strength dial above as its honesty budget.",
                     ))
                     .clicked()
                 {

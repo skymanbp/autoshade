@@ -5,7 +5,7 @@ The four figures behind the README's pillars and the frames on
 captions quote and the prompts that bought the generated targets. Part A and
 the Cornwall panel were rendered on 2026-09-02 on the v1.2.3 build; the
 stone-viaduct panel's right column was re-rendered on 2026-09-03 on the v1.2.4
-build at panel Strength 100 %, its other two columns being the v1.2.2
+build at Reverse-fit strength 100 %, its other two columns being the v1.2.2
 composition's frames re-encoded once; the desert-canyon panel was rendered
 on 2026-09-12 on the v1.3.1 build; every frame not marked
 *generated* is rendered by AutoShade's engine from a recipe, and every
@@ -88,7 +88,7 @@ which is what keeps a generator on the input's structure: <code>reimagine</code>
 measured <b>D = 0.177</b> against the frame it sent, and the calibration test
 that pins this panel re-measures the two top-row frames at
 <b>D = 0.180</b>, under the 0.35 threshold, so the full solve ran. The right
-column is the v1.2.4 fit at panel Strength 100 % (the product default is
+column is the v1.2.4 fit at Reverse-fit strength 100 % (the product default is
 65 %). Look error <b>0.161 → 0.023</b>: a global tone and saturation solve
 whose three cast curves were projected to t = 0.485 (as fitted they would
 have opened a 22.1° hue fan in a class holding 0.210 of the frame's colour),
@@ -156,7 +156,7 @@ which is why this pair reads <b>D = 0.275</b> at pixel scale and 0.609 at
 layout scale (the sky zone 0.617, the land 0.273) — under the 0.35 line at
 frame scope, so the full solve ran, with the sky's pixels admitted on the
 region's own 12 × 8 cell means where no pixel has a partner. The right
-column is the v1.3.1 fit at panel Strength 85 % (`match --zoned`,
+column is the v1.3.1 fit at Reverse-fit strength 85 % (`match --zoned`,
 5 min 29 s; the product default is 65 %, where the colour field is inert by
 design and the sky stays 27 ΔE from the target). Look error <b>0.110 →
 0.048</b>: a solved white balance (5653 K as shot → 8400 K, tint +33),

@@ -378,8 +378,8 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     ("Turn on 「AI review」 first — the deep fit is that review, iterated",
         "请先勾选「AI 打分」——深度反推就是把这次复查反复做几轮"),
     ("Reverse-fit recipe", "反推配方"),
-    ("Statistical fit: reverse the freshly generated look into editable develop params (local, no API cost). Sliders update (undoable), and for RAW a Lightroom XMP goes into this photo's develop store; hit Export to render the full-resolution result. Uses the panel's Strength control as the reverse-fit honesty budget.",
-        "统计拟合：把刚生成的观感反解成可编辑的 develop 参数（本地运算，无 API 费）。滑杆会更新（可 undo），RAW 会在该照片的显影库里生成 Lightroom XMP；再点「导出」可出全分辨率成品。使用面板的 Strength 控制作为反推预算。"),
+    ("Statistical fit: reverse the freshly generated look into editable develop params (local, no API cost). Sliders update (undoable), and for RAW a Lightroom XMP goes into this photo's develop store; hit Export to render the full-resolution result. Uses the Reverse-fit strength dial above as its honesty budget.",
+        "统计拟合：把刚生成的观感反解成可编辑的 develop 参数（本地运算，无 API 费）。滑杆会更新（可 undo），RAW 会在该照片的显影库里生成 Lightroom XMP；再点「导出」可出全分辨率成品。使用上方「反推强度」滑杆作为反推的诚实预算。"),
     ("Extract style", "提取风格提示词"),
     ("Compare the original / generated images and have the vision model write a reusable style prompt: auto-fills the Reimagine prompt (ready to restyle other photos) and saves ./out/<stem>.style.txt.",
         "对比 原图/生成图，让 vision 模型写一段可复用的风格 prompt：自动填入 Reimagine 提示词（可直接给别的照片重绘用）并存 ./out/<stem>.style.txt。"),
@@ -829,6 +829,11 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     ("Strength", "强度"),
     ("How hard the AI pushes the grade — a different axis from Style: Style asks how close to your own past edits, Strength asks how committed the result should be. 50% is where every AI guardrail NUMBER was calibrated: the ±50/±35 pair and the soft caps are bit-for-bit the ones earlier releases used, but the restraint WORDING those releases sent is now the 40%-and-below prose, so no single setting brings an old release back whole. From 41% up the AI must decide EACH colour control explicitly instead of leaving it neutral by default; the default 65% (double-click to reset) leans a little further than the calibration point. Above 70% it is additionally told to use the controls it wants at a strength a viewer can see, and the visual review may then run up to 3 rounds — the same ceiling 「Deep thinking」 raises it to, and either one ALONE is enough to make the worst case 17 API calls (10 carrying images). The clipping and white-point safeguards never widen with it.",
         "AI 下手有多重 —— 与「风格」是两条不同的轴：风格问「有多接近你过往的习惯」，强度问「出手多重」。50% 是所有 AI 限制参数的标定点：±50/±35 这一对与配方的两对上限，与此前各版本逐位相同；但那些版本发出的克制用词，如今属于不高于 40% 的那一档，所以没有任何单一档位能把旧版完整带回来。41% 起，AI 要对每一个颜色控件逐一表态，不能默认留白；默认 65%（双击复位到这里）比标定点再进一点。高于 70% 时还会要求它把想用的控件用到观者可见的力度，并把视觉复查上限提到 3 轮 —— 与勾选「Deep thinking」相同的上限，两者只要占其一，最多就是 17 次 API 调用（其中 10 次带图）。高光与黑位的安全边界永不随强度放宽。"),
+
+    // ── AI panel · the reverse-fit's OWN strength (user decision 2026-09-12) ──
+    ("Reverse-fit strength", "反推强度"),
+    ("The reverse-fit's honesty budget — its own dial: the Analysis Strength above does not reach the fit. At or below the default 65% the fit is byte-identical to the calibrated path. Above it the Atmosphere budget widens, and a white balance outside the budget shrinks along its fitted move instead of staying as-shot. From 85% unsupported movement is DISCLOSED (confidence capped) instead of withheld. Double-click to reset.",
+        "反推的诚实预算——反推自己的滑杆：上方「分析」里的强度不影响反推。不高于默认 65% 时，拟合与标定路径逐字节相同。高于它，Atmosphere 预算放宽，超出预算的白平衡沿拟合方向收缩而不是退回机内值。85% 起，没有证据支撑的移动改为披露（置信度封顶）而不是扣下。双击复位。"),
 
     // ── AI panel · reference libraries (R23-2 feedback #6; R30 ladder) ───────
     ("⚠ no library", "⚠ 未建库"),

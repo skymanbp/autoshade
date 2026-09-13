@@ -453,7 +453,7 @@ enum Command {
         /// has always evaluated before it writes.
         #[arg(long)]
         deep: bool,
-        /// The reverse-fit HONESTY BUDGET, 0..1 — the GUI panel's Strength.
+        /// The reverse-fit HONESTY BUDGET, 0..1 — the desktop app's own Reverse-fit strength dial.
         /// At or below the default 0.65 the fit is byte-identical to the
         /// calibrated path; above it the Atmosphere budget widens, an
         /// out-of-budget white balance shrinks along its fitted move instead of

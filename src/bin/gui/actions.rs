@@ -26,11 +26,20 @@ struct PersistedCard<'a> {
 }
 
 impl AutoShadeApp {
-    /// The panel's Strength dial as the typed axis every consumer reads: the
-    /// develop request (R23-3) and the reverse-fit honesty budget (F1) share
-    /// ONE reading, so the two cannot drift apart.
-    pub(crate) fn panel_strength(&self) -> autoshade::recipe::GradeStrength {
+    /// The Analysis fold's Strength dial as the typed axis the develop request
+    /// reads (R23-3). Nothing else reads it.
+    pub(crate) fn analysis_strength(&self) -> autoshade::recipe::GradeStrength {
         autoshade::recipe::GradeStrength::new(self.grade_strength)
+    }
+
+    /// The Reverse-fit fold's OWN Strength dial as the fit's honesty budget
+    /// (F1). Separate from [`Self::analysis_strength`] on purpose — user
+    /// decision 2026-09-12: the two functions live in two folds, so each has
+    /// its own control and neither reading reaches the other. Through v1.3.1
+    /// both read one `panel_strength()`, and the fit's budget was a dial two
+    /// folds above the fit's own row.
+    pub(crate) fn fit_strength(&self) -> autoshade::recipe::GradeStrength {
+        autoshade::recipe::GradeStrength::new(self.fit_strength)
     }
 
     /// Restore persisted prefs (last folder, view mode, export options) and
@@ -45,6 +54,7 @@ impl AutoShadeApp {
         {
             app.style_strength = prefs.style_strength.clamp(0.0, 1.0);
             app.grade_strength = prefs.grade_strength.clamp(0.0, 1.0);
+            app.fit_strength = prefs.fit_strength.clamp(0.0, 1.0);
             app.send_style_ref_image = prefs.send_style_ref_image;
             app.deep_think = prefs.deep_think;
             app.style_embed = prefs.style_embed;
@@ -3036,7 +3046,7 @@ impl AutoShadeApp {
             // R23-3: the OTHER axis — how committed the grade should be. Read
             // here for the same reason, and separate from `style` on purpose
             // (「像不像我」 vs 「下手多重」).
-            strength: self.panel_strength(),
+            strength: self.analysis_strength(),
             // R23-4: read on the UI thread with the rest of the request, for
             // the same reason — a checkbox flipped mid-call must not change
             // what this call is paying for.
@@ -3130,7 +3140,7 @@ impl AutoShadeApp {
             return;
         }
         let src_path = self.src_path.clone();
-        let fit_strength = self.panel_strength();
+        let fit_strength = self.fit_strength();
         let zoned = self.zoned_fit;
         let zoned_regions = if self.zoned_four_regions {
             autoshade::fit_zoned::semantic::MAX_SEMANTIC_REGIONS

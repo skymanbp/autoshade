@@ -59,6 +59,14 @@ pub(crate) struct AutoShadeApp {
     /// raw fraction and handed to `GradeStrength::new` at the call site, which
     /// owns the clamp.
     pub(crate) grade_strength: f32,
+    /// The reverse-fit's HONESTY BUDGET, 0..1 — its OWN dial in the Reverse-fit
+    /// fold (user decision 2026-09-12: a control belongs to the section whose
+    /// function it serves, and a function two sections need gets two controls,
+    /// not one shared reading). Through v1.3.1 the fit read the Analysis
+    /// Strength two folds up, which nobody looking at the fit's own row could
+    /// find. Persisted as the raw fraction; `GradeStrength::new` owns the clamp
+    /// at the call site, exactly like `grade_strength`.
+    pub(crate) fit_strength: f32,
     /// R23-2, feedback #6: also SHOW the vision model the nearest past photo,
     /// not only its numbers. Persisted, and OFF by default — it puts a second
     /// image on every call of a paid analysis (the checkbox says so).
@@ -1613,6 +1621,7 @@ impl Default for AutoShadeApp {
             // (2026-08-17 ⑦). Same one-definition rule as above: the constant is
             // the lib's own `GradeStrength::DEFAULT`.
             grade_strength: GRADE_STRENGTH_DEFAULT,
+            fit_strength: autoshade::recipe::GradeStrength::DEFAULT,
             // OFF: an extra image on a paid call is the user's opt-in, never a
             // default (the same rule `fit_ai_judge` follows).
             send_style_ref_image: false,
@@ -2060,6 +2069,7 @@ impl eframe::App for AutoShadeApp {
                 gallery_dir: self.gallery_dir.clone(),
                 style_strength: self.style_strength,
                 grade_strength: self.grade_strength,
+                fit_strength: self.fit_strength,
                 send_style_ref_image: self.send_style_ref_image,
                 deep_think: self.deep_think,
                 style_embed: self.style_embed,

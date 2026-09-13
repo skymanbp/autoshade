@@ -6641,38 +6641,94 @@
         assert_eq!(req.style, 0.2);
     }
 
-    /// F1: the reverse-fit worker derives its honesty budget from the SAME
-    /// panel reading the develop request uses (`panel_strength`), and that
-    /// reading is what the fit block hands `FitOptions`. Pinned textually on
-    /// the worker's source (the same pattern as `config.rs`'s literal pins)
-    /// because the block runs on a worker thread behind a segmentation call.
+    /// User decision 2026-09-12 (「该在哪就在哪」): a control belongs to the fold
+    /// whose function it serves, and a function two folds need gets two
+    /// controls. The reverse-fit's honesty budget (F1) is therefore its OWN dial
+    /// in the Reverse-fit fold: the Analysis Strength two folds up no longer
+    /// reaches the fit, and the fit's dial never reaches the analyze request.
+    /// The worker half is pinned textually on the worker's source (the
+    /// `config.rs` literal-pin pattern) because the fit block runs on a worker
+    /// thread behind a segmentation call.
     #[test]
-    fn gui_reverse_fit_uses_the_panel_strength() {
-        let app = AutoShadeApp { grade_strength: 0.9, ..Default::default() };
-        assert_eq!(app.panel_strength().get(), 0.9);
+    fn gui_reverse_fit_has_its_own_strength_dial() {
+        // One constant, three consumers: app default, pref default, reset target.
+        assert_eq!(AutoShadeApp::default().fit_strength, autoshade::recipe::GradeStrength::DEFAULT);
         assert_eq!(
-            AutoShadeApp::default().panel_strength().get(),
+            Prefs::default().fit_strength,
             autoshade::recipe::GradeStrength::DEFAULT,
-            "the shipped panel value IS the byte-identical default budget"
+            "a prefs file written before this key existed must decode to the byte-identical \
+             budget, never to serde's 0.0"
         );
         assert_eq!(
-            autoshade::fit::FitBudget::for_strength(app.panel_strength()).vetoes,
+            AutoShadeApp::default().fit_strength().get(),
+            autoshade::recipe::GradeStrength::DEFAULT,
+            "the shipped dial value IS the byte-identical default budget"
+        );
+        // Two dials, two readings: moving either leaves the other alone.
+        let app = AutoShadeApp { grade_strength: 0.9, ..Default::default() };
+        assert_eq!(app.analysis_strength().get(), 0.9);
+        assert_eq!(
+            autoshade::fit::FitBudget::for_strength(app.fit_strength()).vetoes,
+            autoshade::fit::VetoPolicy::Withhold,
+            "the Analysis Strength must not reach the fit"
+        );
+        let app = AutoShadeApp { fit_strength: 0.9, ..Default::default() };
+        assert_eq!(
+            autoshade::fit::FitBudget::for_strength(app.fit_strength()).vetoes,
             autoshade::fit::VetoPolicy::Disclose
         );
+        assert_eq!(
+            app.analysis_strength().get(),
+            GRADE_STRENGTH_DEFAULT,
+            "and the fit's dial never reaches the analyze request"
+        );
+        // DRAWN in the Reverse-fit fold at the default 320 px panel.
+        let mut app = AutoShadeApp::default();
+        let seen = tall_frame(&mut app, |a, ui| a.ai_panel(ui));
+        assert!(
+            seen.iter().any(|t| t == "Reverse-fit strength"),
+            "the dial must exist in the fold: {seen:?}"
+        );
+        // A moved dial lights the AI area's ● like every other AI input.
+        assert!(!app.ai_section_active(), "a fresh AI area has no state to flag");
+        app.fit_strength = 0.85;
+        assert!(app.ai_section_active(), "a moved reverse-fit dial IS AI state");
+        app.fit_strength = autoshade::recipe::GradeStrength::DEFAULT;
+        assert!(!app.ai_section_active(), "back at the default ⇒ back to no dot");
+        // Persisted on its own key; an older prefs file without it loads at the default.
+        let prefs = Prefs { fit_strength: 0.85, ..Prefs::default() };
+        let json = serde_json::to_string(&prefs).expect("prefs serialize");
+        let decoded: Prefs = serde_json::from_str(&json).expect("prefs deserialize");
+        assert_eq!(decoded.fit_strength, 0.85);
+        assert_eq!(decoded.grade_strength, GRADE_STRENGTH_DEFAULT, "its own key, not a rename");
+        let older = json.replace(r#""fit_strength":0.85,"#, "");
+        assert!(!older.contains("fit_strength"), "the key really was removed: {older}");
+        let decoded: Prefs = serde_json::from_str(&older).expect("an older prefs file loads");
+        assert_eq!(decoded.fit_strength, autoshade::recipe::GradeStrength::DEFAULT);
+        // …and the worker reads the fit's own dial, at both fit entry points.
         let worker = include_str!("actions.rs");
         assert!(
-            worker.contains("let fit_strength = self.panel_strength();"),
-            "the reverse-fit block must read the panel dial through panel_strength()"
+            worker.contains("let fit_strength = self.fit_strength();"),
+            "the reverse-fit block must read its own dial through fit_strength()"
         );
         assert_eq!(
             worker.matches("strength: fit_strength,").count(),
             2,
-            "both fit entry points (zoned and global) must receive the panel strength"
+            "both fit entry points (zoned and global) must receive the fit's dial"
+        );
+        assert_eq!(
+            worker.matches("GradeStrength::new(self.fit_strength)").count(),
+            1,
+            "exactly one reading of the fit's dial: fit_strength() itself"
         );
         assert_eq!(
             worker.matches("GradeStrength::new(self.grade_strength)").count(),
             1,
-            "exactly one reading of the dial: panel_strength() itself"
+            "exactly one reading of the Analysis dial: analysis_strength() itself"
+        );
+        assert!(
+            !worker.contains("fn panel_strength") && !worker.contains("self.panel_strength()"),
+            "no shared reading is left (the name may survive in prose, never as code)"
         );
     }
 

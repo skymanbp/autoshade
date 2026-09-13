@@ -863,8 +863,13 @@ this trait.)
 ### 3.1 The grade-strength axis — one dial, six gates (R23-3)
 
 How hard the AI pushes is a first-class user input: `recipe::GradeStrength`
-(0..1) — the GUI's **Strength** slider, the CLI's `--strength`, the web body's
-`grade_strength`. It has two NAMED points: `0.50` is the point every restraint
+(0..1) — the GUI's Analysis-fold **Strength** slider, the CLI's `--strength`,
+the web body's `grade_strength`. The reverse-fit's honesty budget (F1) is the
+same TYPE read from a second dial: since 2026-09-12 the Reverse-fit fold has
+its own **Reverse-fit strength** slider (`fit_strength`, persisted on its own
+key), and neither dial reaches the other's function — user decision: a control
+belongs to the section whose function it serves, and a function two sections
+need gets two controls. It has two NAMED points: `0.50` is the point every restraint
 NUMBER in the app was tuned at (the 147-photo eval of `f944ef3` plus
 `bd3f9d4`'s highlight-integrity cases) — the ±50/±35 guardrail pair and
 `temper`'s knees are bit-for-bit what shipped up to v0.28.0. It is **not** a

@@ -105,8 +105,9 @@ develop. Reverse-fit estimates an engine recipe from that look; copy the fitted
 develop to Original when you want an editable recipe and sidecar for the
 full-resolution source.
 
-Reverse-fit uses the panel's **Strength** value (or `match --strength 0..1`) as
-its honesty budget. At or below the shipped 65% setting the historical path is
+Reverse-fit uses its own **Reverse-fit strength** dial in the Reverse-fit fold
+(or `match --strength 0..1`) as its honesty budget; the Analysis fold's
+Strength above it does not reach the fit. At or below the shipped 65% setting the historical path is
 byte-identical, including white balance: a demand outside its budget remains
 as-shot. Above 65%, WB demands outside the widened budget shrink along the
 requested Kelvin/tint direction and are disclosed. The pre/post WB renders must
@@ -201,8 +202,8 @@ file does not carry the key at all.
 
 Where a region was repainted, the field is solved twice and the target decides
 which answer each of its 96 cells keeps: the ordinary structure-weighted solve,
-or a support-free one with a wider per-channel gain that the panel's Strength
-sets. A cell takes the second only if rendering it moved that cell toward its
+or a support-free one with a wider per-channel gain that the Reverse-fit
+strength sets. A cell takes the second only if rendering it moved that cell toward its
 own target; the rationale line says how many of the measured cells did. The
 field is then dropped whole if it makes the frame worse, or if it improved the
 frame by making the sky or the land zone worse.

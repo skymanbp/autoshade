@@ -194,6 +194,11 @@ pub(crate) struct Prefs {
     /// was too timid, so [`Prefs::default`] supplies 0.65 and serde's
     /// struct-level default routes every missing key through it.
     pub(crate) grade_strength: f32,
+    /// The reverse-fit's own Strength (user decision 2026-09-12). Routed through
+    /// [`Prefs::default`] like `grade_strength`: a prefs file written before this
+    /// key existed decodes to the lib's 0.65 — the byte-identical budget — and
+    /// never to serde's 0.0.
+    pub(crate) fit_strength: f32,
     /// R23-2: the opt-in style REFERENCE photo. `#[serde(default)]` on the
     /// struct means an older prefs file decodes it as `false` — the same
     /// answer as [`Prefs::default`], so an upgrade never silently starts
@@ -275,6 +280,7 @@ impl Default for Prefs {
             gallery_dir: None,
             style_strength: STYLE_STRENGTH_DEFAULT,
             grade_strength: GRADE_STRENGTH_DEFAULT,
+            fit_strength: autoshade::recipe::GradeStrength::DEFAULT,
             // OFF, like every other paid opt-in here (see `fit_ai_judge`).
             send_style_ref_image: false,
             deep_think: false,
