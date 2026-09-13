@@ -1,6 +1,6 @@
 # AutoShade — Architecture
 
-> Status: **implemented** (v1.3.1 — the sensor plane is measured from the
+> Status: **implemented** (v1.3.2 — the sensor plane is measured from the
 > container before the decoder is asked to allocate it, so a frame past that
 > decoder's own ceiling is a named refusal naming the frame and the workflow
 > that works instead of an abort, and a CONTAINED panic no longer raises a modal
@@ -137,7 +137,16 @@
 > 1495 library + 24 CLI + 173 GUI + 2+2 contract tests are enumerated in the GUI
 > build; the library result is 1480 pass + 15 `#[ignore]`d forensic probes and
 > the GUI result is 172 pass + one explicit scratch-recipe export probe ignored
-> in the ordinary battery. Counts refreshed 2026-09-12 for v1.3.1: +10 / −1 by
+> in the ordinary battery. Counts refreshed 2026-09-12 for v1.3.2: +1 / −1 by
+> name against the v1.3.1 tag (`91df8f0`), taken statically between the tag's
+> source and this tree — the shared-reading pin
+> `gui_reverse_fit_uses_the_panel_strength` rewritten as
+> `gui_reverse_fit_has_its_own_strength_dial` (the reverse-fit's own dial:
+> one default in three places, the two dials kept apart, drawn in the fold,
+> the prefs round trip, the worker pins); the third Lightroom fixture pair
+> extended an existing test rather than adding one. The calibration lane did
+> not run for this release either. Before that, counts were refreshed
+> 2026-09-12 for v1.3.1: +10 / −1 by
 > name against the v1.3.0 tag (`5446012`), taken statically between the tag's
 > source and this tree — the nine payload pins in `xmp::payload_tests` (the
 > fresh-document round trip, the replayed Lightroom rewrite, raster placement
