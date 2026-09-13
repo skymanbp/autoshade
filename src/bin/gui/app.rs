@@ -1071,7 +1071,7 @@ impl AutoShadeApp {
                         // carry the look); an InPlace retouch master is a NEUTRAL
                         // develop that still needs the calibration on top —
                         // stripping there turned Reset into "go dark".
-                        let generated = self.active_is_generated();
+                        let generated = self.active_on_ai_pixels();
                         let base_curve =
                             if generated { Vec::new() } else { self.photo_knots.clone() };
                         // The lens profile is the same kind of calibration: Reset
@@ -1881,6 +1881,7 @@ impl eframe::App for AutoShadeApp {
             // advisory sidecar), but it must not die with the window either,
             // so the last boundary before the quit decision flushes the lot.
             self.commit_pending_names();
+            self.fork_edited_card();
             let unsaved_open = self.quit_guard_open_dirty();
             if self.busy {
                 // A running export / retouch / paid AI generation dies with
@@ -1924,6 +1925,12 @@ impl eframe::App for AutoShadeApp {
         self.upd_status_bar(ctx);
 
         self.upd_strips_and_side_panels(ctx);
+        // The immutability rule (2026-09-13): whatever this frame wrote into
+        // the live recipe — a slider, a shortcut, a landing — continues on
+        // an ✎ card when the active card is the pristine ✨ image, BEFORE the
+        // turn sync, the Before rebuild, the develop dispatch and the undo
+        // commit below see it.
+        self.fork_edited_card();
         // The plates follow `recipe.quarter_turns` (R27) BEFORE the Before
         // rebuild and the redevelop dispatch below, so a turn — however it
         // arrived: the toolbar, an undo, a variant switch, a version load —
@@ -1939,7 +1946,7 @@ impl eframe::App for AutoShadeApp {
             // against Reset / undo / paste forever. A Generated canvas
             // recipe's curve is empty by construction, so this compare is
             // simply quiet there.
-            && !self.active_is_generated()
+            && !self.active_on_ai_pixels()
             && self.recipe.base_curve != self.before_curve
             && let Some(b) = self.base_preview.clone()
         {

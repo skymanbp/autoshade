@@ -2135,25 +2135,6 @@ fn publish_json_sidecar(src: &Path, name: &str, bytes: Vec<u8>) -> std::io::Resu
     )
 }
 
-/// Does the saved develop sit on AI-GENERATED pixels — `pixels.json`
-/// recording a `generated` master, resolvable or not? The projection
-/// question keys on the RECORD: a develop saved over a reimagine rendition
-/// describes those pixels whether or not the PNG can be opened right now,
-/// and a Lightroom sidecar projecting it onto the RAW would be a lie either
-/// way ([`read_pixel_source`] answers `None` for a recorded-but-broken
-/// master, the wrong answer here). Absent, unreadable or `inplace` ⇒ false.
-pub fn pixel_source_is_generated(src: &Path) -> bool {
-    let _ = recover_orphan_baks(src);
-    #[derive(serde::Deserialize)]
-    struct KindOnly {
-        kind: Option<String>,
-    }
-    read_bytes_capped(&pixel_source_path(src), MAX_STORE_JSON)
-        .ok()
-        .and_then(|b| serde_json::from_slice::<KindOnly>(&b).ok())
-        .is_some_and(|d| d.kind.as_deref() == Some("generated"))
-}
-
 /// Forget the baked pixel source (the develop went back to parametric-only).
 /// Clearing means DETACH, so the retired `pixels.json.bak` goes too:
 /// `write_pixel_source` keeps the previous linkage there for crash recovery,
@@ -2189,7 +2170,7 @@ fn clear_pixel_source_unlocked_in(root: &Path, src: &Path) -> std::io::Result<()
 /// saved develop: `variants.json`. recipe.json + pixels.json stay the
 /// cross-surface authority for the ACTIVE develop (CLI, web and export never
 /// read this file); what THEY cannot carry is the rest of the strip — the
-/// three-valued per-variant kind and each background variant's own recipe +
+/// per-variant kind and each background variant's own recipe +
 /// baked-raster origin. Before this file existed, every reopen collapsed the
 /// strip to one card whose kind was guessed from the 2-valued pixels.json
 /// flag (a `Fitted` card silently reopened as `Original`), and background
@@ -2203,8 +2184,8 @@ fn variants_path_in(root: &Path, src: &Path) -> PathBuf {
     develop_dir_in(root, src).join("variants.json")
 }
 
-/// One BACKGROUND variant in a [`VariantsRecord`]: three-valued kind
-/// ("original" | "generated" | "fitted"), the variant's full develop recipe,
+/// One BACKGROUND variant in a [`VariantsRecord`]: its kind
+/// ("original" | "generated" | "fitted" | "edited"), the variant's full develop recipe,
 /// and its baked raster origin when the variant is pixel-based. Base pixels
 /// are NOT stored — they re-decode from `origin`; source-based variants
 /// re-develop the shared source.
@@ -2265,8 +2246,14 @@ pub struct VariantsRecord {
     pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
+/// The `variants.json` kind vocabulary — a FORMAT every surface shares (the
+/// GUI's `VariantKind::store_str` spells the same words). `"edited"`
+/// (2026-09-13) is a develop of the user's own over a generated card's
+/// pixels: a generated card is immutable, so any non-neutral develop on AI
+/// pixels is an edited card — [`ActiveWrite::DevelopOnAiPixels`] is how a
+/// writer without a live strip states that.
 fn known_variant_kind(kind: &str) -> bool {
-    matches!(kind, "original" | "generated" | "fitted")
+    matches!(kind, "original" | "generated" | "fitted" | "edited")
 }
 
 /// Persist the strip record. Origins inside the develop dir are stored by
@@ -2523,9 +2510,35 @@ pub enum ActiveWrite<'a> {
     /// Original cards, neither of which the strip UI will delete.
     Kind(&'a str),
     /// The caller replaced the develop INSIDE the active card without
-    /// learning anything about the card itself (the web save, the batch
-    /// paste): the record stands as written.
+    /// learning anything about the card itself (the web save and the batch
+    /// paste, over source pixels): the record stands as written.
     Unknown,
+    /// The caller publishes `recipe` as the active develop over an
+    /// AI-GENERATED master (`master`) and holds no live strip — the web
+    /// save, the batch paste. The GUI's immutability rule (2026-09-13,
+    /// `VariantKind::Edited`): a generated card is the raster itself and
+    /// stays neutral, so a non-neutral develop over it is an EDITED card of
+    /// its own with the pristine card kept beside it. The record's word
+    /// follows the develop: a neutral one is the pristine generated card
+    /// (or an edited card back at neutral, when the master is its own);
+    /// anything else takes the active slot as `"edited"` — the generated
+    /// card it displaces moves into `others` with its identity and name,
+    /// and a master that had no pristine card yet (this session's reimagine
+    /// under the web's own edits) gets one. Before this, a paste onto a
+    /// generated card relabelled the pristine image as the edit and the GUI
+    /// had to unpick it at the door.
+    DevelopOnAiPixels { recipe: &'a EditRecipe, master: &'a Path },
+}
+
+/// Lexical master identity — `std::path::absolute` on both sides, never the
+/// filesystem: the record stores a bare name its reader re-anchors, the
+/// caller hands the spelling it was given, and the master may not exist.
+fn same_master_path(a: &Path, b: &Path) -> bool {
+    a == b
+        || matches!(
+            (std::path::absolute(a), std::path::absolute(b)),
+            (Ok(x), Ok(y)) if x == y
+        )
 }
 
 /// The `variants` member for a [`DevelopCommit`] — the ONE place that
@@ -2572,6 +2585,84 @@ pub fn variants_member(src: &Path, w: ActiveWrite<'_>) -> std::io::Result<Commit
                     Ok(CommitMember::Write(variants_record_bytes(src, &rec)?))
                 }
             }
+        }
+        ActiveWrite::DevelopOnAiPixels { recipe, master } => {
+            let mut rec = match read_variants_checked(src) {
+                // A trivial strip has no record to keep truthful (the GUI
+                // splits a generated card found carrying edits at the door),
+                // and an unresolved one is someone's data (the `Kind` rule).
+                VariantsRead::Absent | VariantsRead::Unresolved => return Ok(CommitMember::Keep),
+                VariantsRead::Strip(rec) => rec,
+            };
+            // The master the ACTIVE card sat on before this write — the
+            // record-level answer, resolvable or not (a develop over a
+            // reimagine rendition describes those pixels whether or not
+            // the PNG opens right now), read under the caller's lock.
+            let recorded = recorded_pixel_source(src).and_then(|(o, g)| g.then_some(o));
+            let same_master = recorded.as_deref().is_some_and(|o| same_master_path(o, master));
+            if recipe.is_noop() {
+                // A neutral develop over AI pixels IS the pristine generated
+                // card — or an edited card back at neutral (Ctrl+Z), which
+                // keeps its word while the master is its own.
+                return match rec.active_kind.as_str() {
+                    "generated" => Ok(CommitMember::Keep),
+                    "edited" if same_master => Ok(CommitMember::Keep),
+                    _ => {
+                        rec.active_kind = "generated".to_string();
+                        Ok(CommitMember::Write(variants_record_bytes(src, &rec)?))
+                    }
+                };
+            }
+            if rec.active_kind == "edited" && same_master {
+                // The develop inside the edited card is replaced; the card
+                // stands, identity and name included.
+                return Ok(CommitMember::Keep);
+            }
+            let mut pos = rec.active_pos.min(rec.others.len());
+            let outgoing_pristine = rec.active_kind == "generated";
+            if outgoing_pristine && let Some(o) = &recorded {
+                // The pristine card whose slot this develop takes survives
+                // as a background card — its identity, name and raster.
+                rec.others.insert(
+                    pos,
+                    VariantEntry {
+                        kind: "generated".to_string(),
+                        recipe: EditRecipe::default(),
+                        origin: Some(o.clone()),
+                        id: rec.active_id.take(),
+                        name: rec.active_name.take(),
+                        extra: Default::default(),
+                    },
+                );
+                pos += 1;
+            }
+            if !(outgoing_pristine && same_master) {
+                // The master this develop sits on had no pristine card of
+                // its own yet.
+                rec.others.insert(
+                    pos,
+                    VariantEntry {
+                        kind: "generated".to_string(),
+                        recipe: EditRecipe::default(),
+                        origin: Some(master.to_path_buf()),
+                        id: None,
+                        name: None,
+                        extra: Default::default(),
+                    },
+                );
+                pos += 1;
+            }
+            if rec.active_kind != "edited" {
+                // A ▣ / ◭ slot taken by an edited develop is a NEW card: the
+                // old identity would attribute that card's snapshots to
+                // this one. (An edited card keeps its own — the develop
+                // inside it changed, the card did not.)
+                rec.active_id = None;
+                rec.active_name = None;
+            }
+            rec.active_kind = "edited".to_string();
+            rec.active_pos = pos;
+            Ok(CommitMember::Write(variants_record_bytes(src, &rec)?))
         }
     }
 }
@@ -3399,6 +3490,38 @@ fn has_pixel_source_in(root: &Path, src: &Path) -> bool {
 /// stderr warning, so "the canvas reverted to the un-retouched source" stays
 /// traceable instead of looking like data loss with no cause.
 pub fn read_pixel_source(src: &Path) -> Option<(PathBuf, bool)> {
+    let (path, generated) = recorded_pixel_source(src)?;
+    if !path.exists() {
+        eprintln!(
+            "⚠ baked master {} is gone — the retouched canvas cannot be restored (the develop falls back to the source)",
+            path.display()
+        );
+        return None;
+    }
+    // A 0-byte file at the recorded path is the CLAIM, not the master — the
+    // same "the claim file is not an artifact" rule sidecar_wrote states. A
+    // crash between claim and publish must not hand an empty frame to the
+    // renderer as the user's retouch (L03).
+    if std::fs::metadata(&path).is_ok_and(|m| m.len() == 0) {
+        eprintln!(
+            "⚠ baked master {} is empty (an unfinished write) — the retouched canvas cannot be restored (the develop falls back to the source)",
+            path.display()
+        );
+        return None;
+    }
+    Some((path, generated))
+}
+
+/// The RECORD-level half of [`read_pixel_source`]: what `pixels.json` says
+/// the develop sits on — the master's resolved path and whether it is an
+/// AI-generated raster — without asking whether that file still exists.
+/// The writers that decide a develop's projection and its strip word (the
+/// web save, the batch paste, [`ActiveWrite::DevelopOnAiPixels`]) need this
+/// answer: a develop saved over a reimagine rendition describes those
+/// pixels whether or not the PNG opens right now, and a Lightroom sidecar
+/// projecting it onto the RAW would be a lie either way. Absent, unreadable
+/// or off-machine records answer `None` with the same warnings.
+pub fn recorded_pixel_source(src: &Path) -> Option<(PathBuf, bool)> {
     // A crashed publish leaves the linkage only in pixels.json.bak — without
     // this the canvas silently reverts to the un-retouched source. A FAILED
     // recovery is already reported by the helper; this reader then degrades
@@ -3479,24 +3602,6 @@ pub fn read_pixel_source(src: &Path) -> Option<(PathBuf, bool)> {
             return None;
         };
         path = contained;
-    }
-    if !path.exists() {
-        eprintln!(
-            "⚠ baked master {} is gone — the retouched canvas cannot be restored (the develop falls back to the source)",
-            path.display()
-        );
-        return None;
-    }
-    // A 0-byte file at the recorded path is the CLAIM, not the master — the
-    // same "the claim file is not an artifact" rule sidecar_wrote states. A
-    // crash between claim and publish must not hand an empty frame to the
-    // renderer as the user's retouch (L03).
-    if std::fs::metadata(&path).is_ok_and(|m| m.len() == 0) {
-        eprintln!(
-            "⚠ baked master {} is empty (an unfinished write) — the retouched canvas cannot be restored (the develop falls back to the source)",
-            path.display()
-        );
-        return None;
     }
     Some((path, generated))
 }
@@ -5088,7 +5193,7 @@ pub struct VersionMetaEntry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     /// The `store_str` spelling of the variant this snapshot was taken from
-    /// ("original" | "generated" | "fitted"), when the taker knew it.
+    /// ("original" | "generated" | "fitted" | "edited"), when the taker knew it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub from_kind: Option<String>,
     /// That variant's opaque id, so the attribution survives a card the user
@@ -5163,7 +5268,7 @@ pub enum EditStateKind {
     Variant {
         /// [`VariantEntry::kind`] spelling ("original" | "generated" |
         /// "fitted"). The taxonomy's binary is `!= "generated"` (parametric
-        /// vs pixel-state — the GUI's `VariantKind::is_parametric`, R24-1).
+        /// vs pixel-state — the GUI's `VariantKind::is_source_based`, R24-1).
         kind: String,
         /// The card `recipe.json` currently mirrors.
         active: bool,
@@ -7355,8 +7460,8 @@ mod tests {
     /// marked `clear` removes the standing one, and a marker written before
     /// the member existed (no `xmp` field — an older build's crash) reads as
     /// `keep`. Also the RECORD-level question the member is decided by on
-    /// the web and the batch paste: `pixel_source_is_generated` answers for
-    /// a recorded generated master whether or not the PNG resolves.
+    /// the web and the batch paste: `recorded_pixel_source` answers for a
+    /// recorded generated master whether or not the PNG resolves.
     #[test]
     fn the_projection_replays_with_its_generation() {
         let (dir, raw, dev) = commit_fixture("commit-projection");
@@ -7406,15 +7511,131 @@ mod tests {
             "a marker from before the member existed keeps the projection"
         );
 
-        assert!(!pixel_source_is_generated(&raw), "no record at all");
+        assert!(recorded_pixel_source(&raw).is_none(), "no record at all");
         let gone = dev.join("nowhere.png");
         std::fs::write(pixel_source_path(&raw), pixel_source_record_bytes(&raw, &gone, true).unwrap())
             .unwrap();
         assert!(read_pixel_source(&raw).is_none(), "premise: the recorded master does not resolve");
-        assert!(pixel_source_is_generated(&raw), "the RECORD says generated, resolvable or not");
+        let (recorded, generated) =
+            recorded_pixel_source(&raw).expect("the RECORD says generated, resolvable or not");
+        assert!(generated);
+        assert_eq!(recorded.file_name().and_then(|n| n.to_str()), Some("nowhere.png"));
         std::fs::write(pixel_source_path(&raw), pixel_source_record_bytes(&raw, &gone, false).unwrap())
             .unwrap();
-        assert!(!pixel_source_is_generated(&raw), "an in-place master is a source develop");
+        assert_eq!(
+            recorded_pixel_source(&raw).map(|(_, g)| g),
+            Some(false),
+            "an in-place master is a source develop"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&dev);
+    }
+
+    /// The immutability rule for writers without a live strip
+    /// (`ActiveWrite::DevelopOnAiPixels`, 2026-09-13): a non-neutral develop
+    /// published over a generated master takes the active slot as an
+    /// "edited" card and keeps the pristine generated card beside it; a
+    /// neutral one is the pristine card itself; an edited card whose
+    /// develop is replaced over its own master stands.
+    #[test]
+    fn a_develop_over_ai_pixels_forks_the_record_and_keeps_the_pristine_card() {
+        let (dir, raw, dev) = commit_fixture("commit-ai-fork");
+        let master = dev.join("reimagine.png");
+        std::fs::write(&master, b"png").unwrap();
+        std::fs::write(pixel_source_path(&raw), pixel_source_record_bytes(&raw, &master, true).unwrap())
+            .unwrap();
+        let edits = EditRecipe { contrast: 7.0, ..Default::default() };
+        let neutral = EditRecipe::default();
+        let member = |recipe: &EditRecipe, master: &Path| {
+            variants_member(&raw, ActiveWrite::DevelopOnAiPixels { recipe, master }).unwrap()
+        };
+        let record = |m: CommitMember| -> VariantsRecord {
+            let CommitMember::Write(b) = m else { panic!("expected a written record") };
+            serde_json::from_slice(&b).unwrap()
+        };
+
+        // No record: a trivial strip has nothing to keep truthful.
+        assert!(matches!(member(&edits, &master), CommitMember::Keep));
+
+        // The pristine card is active, identified and named.
+        write_variants(
+            &raw,
+            &VariantsRecord {
+                extra: Default::default(),
+                v: 1,
+                active_kind: "generated".into(),
+                active_pos: 1,
+                active_id: Some("g1".into()),
+                active_name: Some("sky".into()),
+                others: vec![VariantEntry {
+                    extra: Default::default(),
+                    kind: "original".into(),
+                    recipe: EditRecipe { exposure_ev: 0.4, ..Default::default() },
+                    origin: None,
+                    id: Some("original".into()),
+                    name: None,
+                }],
+            },
+        )
+        .unwrap();
+        assert!(
+            matches!(member(&neutral, &master), CommitMember::Keep),
+            "a neutral develop over its own master is the pristine card"
+        );
+        let forked = record(member(&edits, &master));
+        assert_eq!(forked.active_kind, "edited");
+        assert_eq!(forked.active_pos, 2);
+        assert_eq!(forked.active_id, None, "an edited card is born without an identity to inherit");
+        assert_eq!(forked.active_name, None);
+        assert_eq!(forked.others.len(), 2);
+        assert_eq!(forked.others[0].kind, "original", "the negative keeps its place");
+        assert_eq!(forked.others[1].kind, "generated");
+        assert_eq!(forked.others[1].id.as_deref(), Some("g1"), "the pristine card keeps its identity");
+        assert_eq!(forked.others[1].name.as_deref(), Some("sky"), "…and its name");
+        assert!(forked.others[1].recipe.is_noop(), "…and stays neutral");
+        assert_eq!(
+            forked.others[1].origin.as_deref(),
+            Some(Path::new("reimagine.png")),
+            "…on its raster, relativized by the record writer"
+        );
+
+        // Publish the fork; the edited card now owns the slot.
+        write_variants(&raw, &forked).unwrap();
+        assert!(
+            matches!(member(&edits, &master), CommitMember::Keep),
+            "the develop inside the edited card is replaced, the card stands"
+        );
+        assert!(
+            matches!(member(&neutral, &master), CommitMember::Keep),
+            "an edited card back at neutral keeps its word"
+        );
+
+        // A NEW master under edits (a web reimagine while the edited card
+        // was active): the slot keeps its card, the new raster gets its
+        // pristine card.
+        let master2 = dev.join("reimagine-2.png");
+        std::fs::write(&master2, b"png").unwrap();
+        let regenerated = record(member(&edits, &master2));
+        assert_eq!(regenerated.active_kind, "edited");
+        assert_eq!(regenerated.active_pos, 3);
+        assert_eq!(regenerated.others.len(), 3);
+        assert_eq!(regenerated.others[2].kind, "generated");
+        assert_eq!(regenerated.others[2].origin.as_deref(), Some(Path::new("reimagine-2.png")));
+
+        // A source card's slot taken by edits over a generated master (a web
+        // reimagine under edits while ▣ was active): the new raster's
+        // pristine card is inserted, the slot's identity is not inherited.
+        write_variants(&raw, &strip_record("original")).unwrap();
+        let taken = record(member(&edits, &master));
+        assert_eq!(taken.active_kind, "edited");
+        assert_eq!(taken.active_pos, 1);
+        assert_eq!(taken.active_id, None);
+        assert_eq!(taken.others.len(), 1);
+        assert_eq!(taken.others[0].kind, "generated");
+        assert_eq!(taken.others[0].origin.as_deref(), Some(Path::new("reimagine.png")));
+        // …and neutral over that slot is the pristine card, as before.
+        assert_eq!(record(member(&neutral, &master)).active_kind, "generated");
+
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_dir_all(&dev);
     }

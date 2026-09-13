@@ -784,7 +784,7 @@ impl AutoShadeApp {
                                 // the worker already name it on stderr.
                                 let canvas_master =
                                     self.active_variant().and_then(|v| v.origin.clone());
-                                let t = if self.active_is_generated() {
+                                let t = if self.active_on_ai_pixels() {
                                     tr(
                                         lang,
                                         "preview resolution kept — a generated variant's pixels come from its own render; switch to a source-based variant to work at another resolution",
@@ -1127,11 +1127,12 @@ impl AutoShadeApp {
                                 active_id = st.id;
                                 active_name = st.name;
                                 pixels = match (st.base, st.origin) {
-                                    // The bool is the `pixels.json` FORMAT
-                                    // flag (R24-1's not-collected list), not
-                                    // the parametric predicate.
+                                    // The bool is the `pixels.json` flag —
+                                    // `VariantKind::on_ai_pixels`, the axis
+                                    // the flag records (a ✨ card and its ✎
+                                    // cards sit on the same raster).
                                     (Some(b), Some(o)) => {
-                                        Some((b, o, st.kind == VariantKind::Generated))
+                                        Some((b, o, st.kind.on_ai_pixels()))
                                     }
                                     // Navigated away while the cold master was
                                     // still decoding: the ORIGIN is the pixel
@@ -1183,16 +1184,16 @@ impl AutoShadeApp {
                                 // invariant. These two are 2 of the 6 sites
                                 // that spelled that binary by hand as
                                 // `!= Generated`; they ask
-                                // `VariantKind::is_parametric` now, so a
-                                // fourth kind cannot inherit the answer.
+                                // `VariantKind::is_source_based` now, so a
+                                // new kind cannot inherit the answer.
                                 if let Some(p) = self.src_path.clone() {
-                                    let mut relooked = active_kind.is_parametric()
+                                    let mut relooked = active_kind.is_source_based()
                                         && autoshade::pipeline::repair_pre_era_base_curve(
                                             &p, &mut recipe,
                                         )
                                         .is_some();
                                     for sv in &mut stash_others {
-                                        if sv.kind.is_parametric() {
+                                        if sv.kind.is_source_based() {
                                             relooked |=
                                                 autoshade::pipeline::repair_pre_era_base_curve(
                                                     &p,
@@ -1245,6 +1246,13 @@ impl AutoShadeApp {
                                     // pixels arm below upgrades the card exactly
                                     // when the master really decoded.
                                     active_kind = VariantKind::Fitted;
+                                } else if rec.active_kind == "edited" {
+                                    // An edited card rides the pixels arm
+                                    // below like the generated card it forked
+                                    // from (the same AI raster); the arm needs
+                                    // the WORD to keep it from reopening as
+                                    // the pristine ✨ card.
+                                    active_kind = VariantKind::Edited;
                                 }
                                 // The persisted strip is also where the active
                                 // card's identity + name live (R24-2); a record
@@ -1312,7 +1320,15 @@ impl AutoShadeApp {
                                     v.base = Some(bimg.clone());
                                     v.origin = Some(borigin);
                                     if generated {
-                                        v.kind = VariantKind::Generated;
+                                        // The record's word tells the pristine
+                                        // ✨ card from a ✎ develop over the
+                                        // same raster; a record that predates
+                                        // the split is normalised below.
+                                        v.kind = if active_kind == VariantKind::Edited {
+                                            VariantKind::Edited
+                                        } else {
+                                            VariantKind::Generated
+                                        };
                                     }
                                 }
                                 if generated {
@@ -1404,6 +1420,21 @@ impl AutoShadeApp {
                                 strip.insert(pos, active_v);
                                 self.variants = strip;
                                 self.active = pos;
+                            }
+                            // The AI-card invariant, restored at the door
+                            // (2026-09-13): a record that predates the split
+                            // — the ✨ card edited in place, the way every
+                            // build through v1.3.2 stored it — is normalised
+                            // into the live strip as UNSAVED work (the door
+                            // does not write), and said once.
+                            if self.normalize_ai_cards() {
+                                self.toast(
+                                    ToastKind::Success,
+                                    tr(
+                                        lang,
+                                        "This photo's AI image and the edits over it now sit on separate cards (✨ pristine, ✎ your develop) — Ctrl+S saves the strip this way",
+                                    ),
+                                );
                             }
                             self.saved_strip = disk_strip;
                             self.last_rgb = None; // retained frame was the old photo's
@@ -1531,7 +1562,7 @@ impl AutoShadeApp {
 
     /// `Msg::Analyzed` landing — body extracted verbatim from the
     /// poll_workers pump (round-12 decomposition; indentation kept).
-    fn on_analyzed(
+    pub(crate) fn on_analyzed(
         &mut self,
         lang: Lang,
         epoch: u64,
@@ -1586,7 +1617,7 @@ impl AutoShadeApp {
                         // look.
                         let stamped = recipe;
                         let mut canvas = stamped.clone();
-                        if self.active_is_generated() {
+                        if self.active_on_ai_pixels() {
                             canvas.base_curve = Vec::new();
                             canvas.lens_profile = Default::default();
                             // Anchor follows the strip rule (baked WB).
@@ -1594,6 +1625,11 @@ impl AutoShadeApp {
                             canvas.as_shot_tint = None;
                         }
                         self.recipe = canvas;
+                        // The immutability rule, BEFORE the persist below
+                        // reads the strip: an analysis landing on the
+                        // pristine ✨ card is an edit, and lands on a new ✎
+                        // card — the record this landing writes names it.
+                        self.fork_edited_card();
                         // Wholesale replacement: disarm index-carrying tools +
                         // refresh rationale, THEN install the fresh verdict
                         // and the typed notes (resync cleared both).
@@ -1676,7 +1712,7 @@ impl AutoShadeApp {
                                     let origin = self
                                         .active_variant()
                                         .and_then(|v| v.origin.clone());
-                                    let generated = self.active_is_generated();
+                                    let generated = self.active_on_ai_pixels();
                                     let strip_rec = self.current_strip_record();
                                     // The projection is a member of the same
                                     // generation (2026-09-13) — and for a
@@ -2330,7 +2366,7 @@ impl AutoShadeApp {
             RetouchNote::Reimagined { out, divergence, discarded } => {
                 let mut s = trf(
                     lang,
-                    "「AI generated」variant created → {path} · keep tweaking or 「Reverse-fit」",
+                    "「AI generated」variant created → {path} · edits on it continue on an ✎ card, or 「Reverse-fit」",
                     &[("path", &out.display().to_string())],
                 );
                 // The generation-side fidelity reading — the SAME statistic
@@ -2428,6 +2464,12 @@ impl AutoShadeApp {
                                 // typed name) BEFORE the state swap.
                                 self.commit_pending_names();
                                 self.commit_now();
+                                // The immutability rule for PIXELS: a retouch
+                                // on the pristine ✨ card bakes into a new ✎
+                                // card on the same raster, and the ✨ card
+                                // keeps its pixels. Asked directly — the
+                                // recipe may well be neutral here.
+                                self.fork_from_generated();
                                 let img = Arc::new(img);
                                 let (mw, mh) = img.dimensions();
                                 if let Some(v) = self.variants.get_mut(self.active) {

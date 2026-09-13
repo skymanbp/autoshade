@@ -1109,7 +1109,7 @@ pub(crate) struct StashEntry {
     pub(crate) recipe: EditRecipe,
     pub(crate) base: Option<Arc<image::DynamicImage>>,
     pub(crate) origin: Option<PathBuf>,
-    /// The ACTIVE variant's three-valued kind — a plain `generated: bool`
+    /// The ACTIVE variant's kind — a plain `generated: bool`
     /// here collapsed `Fitted` onto `Original`, so a 「◭ 反推」 card came back
     /// from navigation renamed 「▣ 原片」 (the strip's only rename bug that
     /// needed no disk at all).
@@ -1186,6 +1186,7 @@ pub(crate) enum VariantKind {
     Original,  // 原片 — the loaded RAW / image, your develop
     Generated, // AI 生成 — a whole-frame gpt-image restyle (look in the pixels)
     Fitted,    // 反推 — the generated look solved back into an editable recipe
+    Edited,    // 生图编辑 — the user's own develop over a Generated card's pixels
 }
 
 impl VariantKind {
@@ -1195,6 +1196,7 @@ impl VariantKind {
             VariantKind::Original => "▣ Original",
             VariantKind::Generated => "✨ AI generated",
             VariantKind::Fitted => "◭ Reverse-fit",
+            VariantKind::Edited => "✎ Edited AI image",
         }
     }
 
@@ -1205,6 +1207,7 @@ impl VariantKind {
             VariantKind::Original => "original",
             VariantKind::Generated => "generated",
             VariantKind::Fitted => "fitted",
+            VariantKind::Edited => "edited",
         }
     }
 
@@ -1213,6 +1216,7 @@ impl VariantKind {
             "original" => Some(VariantKind::Original),
             "generated" => Some(VariantKind::Generated),
             "fitted" => Some(VariantKind::Fitted),
+            "edited" => Some(VariantKind::Edited),
             _ => None,
         }
     }
@@ -1220,35 +1224,54 @@ impl VariantKind {
     /// The variant taxonomy's ONE binary (R24-1). A photo is *one negative +
     /// N variants + one version history*; every variant is either
     ///
-    /// * PARAMETRIC (`Original`, `Fitted`) — the look lives in the develop
-    ///   recipe, so it re-renders at any resolution, projects to XMP, and
-    ///   carries the camera calibration the base-curve estimator repairs; or
-    /// * PIXEL-STATE (`Generated`) — the look is baked into pixels, and only
-    ///   a reverse-fit turns it back into parameters.
+    /// * SOURCE-BASED (`Original`, `Fitted`) — the look lives in the develop
+    ///   recipe over the photo's own pixels, so it re-renders at any
+    ///   resolution, projects to XMP, and carries the camera calibration the
+    ///   base-curve estimator repairs; or
+    /// * ON AI PIXELS (`Generated`, `Edited`) — the card develops a
+    ///   generated raster. A `Generated` card is the raster itself and is
+    ///   IMMUTABLE (2026-09-13, user decision): its recipe is neutral by
+    ///   invariant, and an edit made on it continues on an `Edited` card —
+    ///   the user's own develop over that same raster
+    ///   (`AutoShadeApp::fork_edited_card`). Both carry NO calibration (the
+    ///   raster already has the camera look, the lens geometry and a baked
+    ///   white balance), neither projects to XMP (no sidecar reproduces AI
+    ///   pixels), and only a reverse-fit turns the raster's look back into
+    ///   parameters on the negative.
     ///
     /// `origin.is_some()` ("this card hangs off a baked master") is an
     /// ORTHOGONAL second attribute, not this axis: an in-place retouch master
     /// hangs off an *Original*, and a *Fitted* card is source-based with no
-    /// master at all. The exhaustive match is the point — a fourth kind must
+    /// master at all. The exhaustive match is the point — a fifth kind must
     /// declare which side it lands on instead of inheriting `!= Generated`.
     ///
+    /// The `pixels.json` two-valued `generated` flag IS this axis since the
+    /// taxonomy grew its fourth kind: it records that the develop's master
+    /// is an AI raster, which an `Edited` card shares with the `Generated`
+    /// card it forked from — [`VariantKind::on_ai_pixels`] spells it at every
+    /// flag site, so the flag cannot drift from the taxonomy.
+    ///
     /// Deliberately NOT collected here (checked site by site, R24-1):
-    /// * the `pixels.json` two-valued `generated` flag (export.rs:430,
-    ///   actions.rs:1582, workers.rs:1062) — a persisted FORMAT value in the
-    ///   same class as [`VariantKind::store_str`]; routing it through a
-    ///   semantic predicate would silently re-spell the on-disk flag the day
-    ///   the taxonomy grows a kind;
-    /// * `active_is_generated` (actions.rs) — it answers "is the active card
-    ///   THAT kind", and one of its own callers is the flag above;
     /// * `fit_target` (canvas.rs) — a policy about which raster the
-    ///   reverse-fit defaults to, not a claim about parametric-ness;
+    ///   reverse-fit defaults to (the `Generated` card's, never an `Edited`
+    ///   card's: the fit reads pixels, and the edits are sliders the user
+    ///   already has), not a claim about this axis;
     /// * the `== Original` / `!= Original` branches (the strip's ✕ guard,
-    ///   the strip-triviality judgements) — a different axis entirely.
-    pub(crate) fn is_parametric(self) -> bool {
+    ///   the strip-triviality judgements) — a different axis entirely;
+    /// * the `== Generated` checks that guard the immutability rule itself
+    ///   (the fork, `save_version`'s refusal, the door's normalisation) —
+    ///   they ask about the one kind, not the side.
+    pub(crate) fn is_source_based(self) -> bool {
         match self {
             VariantKind::Original | VariantKind::Fitted => true,
-            VariantKind::Generated => false,
+            VariantKind::Generated | VariantKind::Edited => false,
         }
+    }
+
+    /// The other side of [`VariantKind::is_source_based`], named for the
+    /// sites that feed the `pixels.json` flag and the calibration strip.
+    pub(crate) fn on_ai_pixels(self) -> bool {
+        !self.is_source_based()
     }
 }
 

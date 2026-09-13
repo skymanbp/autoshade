@@ -85,7 +85,8 @@ An AI decides *what to change*. A deterministic Rust engine *does* it.
 - **Generative and pixel tools, opt-in and labelled** — reimagine
   (gpt-image-2), retouch, heal and SCUNet denoise are the only paths that can
   invent or alter scene content, and are marked so.
-- **Versions, variants and three front ends** — Original, AI-generated and
+- **Versions, variants and three front ends** — Original, AI-generated
+  (immutable: an edit on one continues on an Edited-AI card beside it) and
   Reverse-fit cards with numbered snapshots in a per-user develop store shared
   by all three.
 

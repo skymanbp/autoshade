@@ -451,7 +451,18 @@ impl AutoShadeApp {
                             }
                             ui.horizontal(|ui| {
                                 let label = egui::RichText::new(tr(lang, kind.label())).small();
-                                ui.label(if active { label.strong().color(accent) } else { label });
+                                let label = ui.label(if active { label.strong().color(accent) } else { label });
+                                // The immutability rule, said where the card
+                                // is (2026-09-13): a ✨ card never takes an
+                                // edit — the first one continues on a new ✎
+                                // card — so the label says so before the
+                                // user wonders where their slider went.
+                                if kind == VariantKind::Generated {
+                                    label.on_hover_text(tr(
+                                        lang,
+                                        "A generated image stays as generated: the first edit here continues on a new ✎ Edited AI image card",
+                                    ));
+                                }
                                 // The card's NAME (R24-3), which until now
                                 // had a persistence path (variants.json,
                                 // R24-2) and no producer. The ACTIVE card
@@ -613,9 +624,11 @@ impl AutoShadeApp {
         // Hidden entirely when this card IS the negative, or when the strip
         // has no Original card to apply onto.
         if active && kind != VariantKind::Original && self.original_index().is_some() {
-            let can = kind.is_parametric();
+            let can = kind.is_source_based();
             let hover = if can {
                 tr(lang, "Copy this variant's develop onto the ▣ Original card — its baked pixels and this card both stay. One Ctrl+Z undoes it; Ctrl+S then saves it as this photo's develop")
+            } else if kind == VariantKind::Edited {
+                tr(lang, "This ✎ card's develop is tuned over AI-generated pixels — on the ▣ Original card those sliders would land on the source frame; run 「Reverse-fit」 on the ✨ card first")
             } else {
                 tr(lang, "A generated variant's look lives in its pixels — there are no develop parameters to copy onto the ▣ Original card; run 「Reverse-fit」 first")
             };
@@ -2619,7 +2632,13 @@ impl AutoShadeApp {
                                             .small(),
                                     );
                                 }
-                                if !kind.is_parametric() {
+                                if kind == VariantKind::Edited {
+                                    ui.label(
+                                        egui::RichText::new(tr(lang, "· develop over AI pixels (no XMP)"))
+                                            .weak()
+                                            .small(),
+                                    );
+                                } else if !kind.is_source_based() {
                                     ui.label(
                                         egui::RichText::new(tr(lang, "· pixel-state (no XMP)"))
                                             .weak()

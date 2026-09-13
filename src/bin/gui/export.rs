@@ -547,9 +547,9 @@ impl AutoShadeApp {
         // are looking at) renders the stale (or absent) recipe.json / stale
         // saved pixels, visibly diverging from the screen.
         // path → (recipe, Some((master, generated)) | None = source pixels).
-        // The bool is the `pixels.json` FORMAT flag, not the R24-1 parametric
-        // predicate: it is written to disk, so it stays spelled against the
-        // kind it names (see `VariantKind::is_parametric`'s not-collected list).
+        // The bool is the `pixels.json` flag — `VariantKind::on_ai_pixels`,
+        // the axis the flag records (a ✨ card and its ✎ cards sit on the
+        // same raster).
         type BatchOverride = (EditRecipe, Option<(PathBuf, bool)>);
         let mut overrides: std::collections::HashMap<PathBuf, BatchOverride> = self
             .nav_stash
@@ -559,7 +559,7 @@ impl AutoShadeApp {
                     p.clone(),
                     (
                         st.recipe.clone(),
-                        st.origin.clone().map(|o| (o, st.kind == VariantKind::Generated)),
+                        st.origin.clone().map(|o| (o, st.kind.on_ai_pixels())),
                     ),
                 )
             })
@@ -568,7 +568,7 @@ impl AutoShadeApp {
             let pix = self
                 .active_variant()
                 .and_then(|v| v.origin.clone())
-                .map(|o| (o, self.active_is_generated()));
+                .map(|o| (o, self.active_on_ai_pixels()));
             overrides.insert(p, (self.recipe.clone(), pix));
         }
         self.spawn_worker(
@@ -876,18 +876,14 @@ impl AutoShadeApp {
         // strip record this save publishes carries the card names, so the
         // card box has to land before the record is built.
         self.commit_pending_names();
+        // The immutability rule's boundary discipline: an edit the frame
+        // hook has not moved yet forks NOW, so the strip this save publishes
+        // names the ✎ card as its holder and the ✨ card as pristine. (Until
+        // 2026-09-13 Ctrl+S REFUSED a generated card outright, and the only
+        // way its develop reached disk was the quit-time Save-all — with the
+        // stale projection that refusal left standing.)
+        self.fork_edited_card();
         let lang = self.lang;
-        if self.active_is_generated() {
-            // A keyboard Ctrl+S refusal must be SEEN — the status line alone
-            // scrolls away under the very next message.
-            let t = tr(
-                lang,
-                "A generated variant's look lives in its pixels — there's no parametric recipe to export; run 「Reverse-fit」 first to get an exportable XMP",
-            );
-            self.status = t.into();
-            self.toast(ToastKind::Error, t);
-            return;
-        }
         let Some(path) = self.src_path.clone() else { return };
         // Reset-then-save means "clear my edits": writing a neutral pair would
         // only pin a misleading ● badge with no in-app way to remove it —
@@ -969,8 +965,8 @@ impl AutoShadeApp {
         // then-locked file) leaves it washed — and Ctrl+S then froze the
         // defect on disk while a single export from the SAME canvas repaired
         // and disclosed. The canvas itself heals here: what is written is
-        // what is shown (a generated canvas was refused above, and its curve
-        // is empty by invariant).
+        // what is shown (a canvas on AI pixels carries no curve by invariant,
+        // and the repair declines an empty one).
         // ...and the HISTORY follows it — the Arc-repoint rule (see the
         // preview-resolution repoint below in this file): calibration is not
         // an edit, so every step holding the exact pre-repair pair is
@@ -1009,7 +1005,7 @@ impl AutoShadeApp {
             let active = self.active;
             for (i, v) in self.variants.iter_mut().enumerate() {
                 if i != active
-                    && v.kind.is_parametric()
+                    && v.kind.is_source_based()
                     && autoshade::pipeline::repair_pre_era_base_curve(&path, &mut v.recipe)
                         .is_some()
                 {
@@ -1048,7 +1044,25 @@ impl AutoShadeApp {
         // whole, with every unsaved protection still armed.
         let origin = self.active_variant().and_then(|v| v.origin.clone());
         let strip_rec = self.current_strip_record();
-        let generated = self.active_is_generated();
+        let generated = self.active_on_ai_pixels();
+        // A canvas on AI pixels is the STRIPPED form — no calibration, the
+        // raster carries it. The DISK form keeps the RAW's (the Analyze
+        // saver's and Save-all's rule, from the same one-snapshot source):
+        // a master that later fails to decode falls back to a corrected
+        // develop on the negative, not a dark one. Memo-cheap after the open.
+        let disk = if generated {
+            let cal = autoshade::pipeline::photo_calibration(&path);
+            EditRecipe {
+                version: cal.version,
+                base_curve: cal.base_curve,
+                lens_profile: cal.lens_profile,
+                as_shot_k: cal.as_shot_k,
+                as_shot_tint: cal.as_shot_tint,
+                ..self.recipe.clone()
+            }
+        } else {
+            self.recipe.clone()
+        };
         // The Lightroom projection is a MEMBER of this commit (2026-09-13):
         // it lands or clears with the recipe it projects, never after it.
         // Built here so its merge base (the sidecar beside the RAW) is read
@@ -1057,7 +1071,7 @@ impl AutoShadeApp {
         // alone still decides the saved state.
         let (xmp_member, xmp_outcome) = match autoshade::pipeline::xmp_projection_member(
             &path,
-            &self.recipe,
+            &disk,
             !generated,
             autoshade::diag::stderr(),
         ) {
@@ -1065,7 +1079,7 @@ impl AutoShadeApp {
             Err(e) => (autoshade::store::CommitMember::Keep, Err(e)),
         };
         let committed: anyhow::Result<()> = (|| {
-            let recipe_bytes = autoshade::pipeline::recipe_store_bytes(&path, &self.recipe, autoshade::diag::stderr())?;
+            let recipe_bytes = autoshade::pipeline::recipe_store_bytes(&path, &disk, autoshade::diag::stderr())?;
             let pixels = match &origin {
                 // An in-place heal/clone/fill bakes pixels into the variant's
                 // origin raster; parametric recipe/XMP cannot carry them, so
@@ -1117,7 +1131,15 @@ impl AutoShadeApp {
                 self.saved_recipe = self.recipe.clone();
                 self.nav_stash.remove(&path);
                 self.pixels_on_disk = origin;
-                let mut s = if raw {
+                let mut s = if generated {
+                    // No sidecar reproduces AI pixels: the projection member
+                    // CLEARED, and the line says so instead of "XMP + recipe".
+                    trf(
+                        lang,
+                        "recipe saved → {path} (no Lightroom XMP: this card's look sits on AI-generated pixels)",
+                        &[("path", &rp.display().to_string())],
+                    )
+                } else if raw {
                     match xmp_outcome {
                         Ok((merge_note, losses)) => {
                             let p = autoshade::pipeline::xmp_target(&path);
@@ -1316,7 +1338,7 @@ impl AutoShadeApp {
             // its pixels already carry the look (the load_version /
             // open-restore strip rule). The ● baseline (pasted_open) is
             // normalized the same way: canvas coordinates.
-            if self.active_is_generated() {
+            if self.active_on_ai_pixels() {
                 live.base_curve = Vec::new();
                 live.lens_profile = Default::default();
                 // Anchor follows the strip rule (baked WB → relative model).
@@ -1325,6 +1347,10 @@ impl AutoShadeApp {
             }
             self.recipe = live.clone();
             self.dirty = true;
+            // A paste onto the pristine ✨ card is an edit: it lands on a new
+            // ✎ card now (the immutability rule), so the ● baseline below
+            // belongs to that card's canvas.
+            self.fork_edited_card();
             // Wholesale recipe replacement: disarm index-carrying tools and
             // refresh derived display, like every other whole-swap path.
             self.resync_recipe_display();
@@ -1383,7 +1409,9 @@ impl AutoShadeApp {
                             // sits on AI pixels, and no sidecar may project
                             // a develop over those — the member clears
                             // instead of lying.
-                            let on_source = !autoshade::store::pixel_source_is_generated(path);
+                            let ai_master = autoshade::store::recorded_pixel_source(path)
+                                .and_then(|(o, g)| g.then_some(o));
+                            let on_source = ai_master.is_none();
                             let (xmp_member, xmp_outcome) =
                                 match autoshade::pipeline::xmp_projection_member(
                                     path,
@@ -1404,12 +1432,16 @@ impl AutoShadeApp {
                             // today's behaviour stated out loud: a paste
                             // copies develop PARAMETERS and never touches the
                             // target's baked master link. The strip member
-                            // goes through the shared primitive as
-                            // `Unknown` — a paste replaces the develop inside
-                            // whatever card the target is on without learning
-                            // anything about that card, and it must not claim
-                            // the base negative's slot (a second Original
-                            // card can never be deleted again).
+                            // goes through the shared primitive: over source
+                            // pixels as `Unknown` — a paste replaces the
+                            // develop inside whatever card the target is on
+                            // without learning anything about that card, and
+                            // it must not claim the base negative's slot (a
+                            // second Original card can never be deleted
+                            // again); over a GENERATED master as
+                            // `DevelopOnAiPixels` — the record's word follows
+                            // the develop (the immutability rule: a pasted
+                            // develop is an ✎ card, the ✨ card stays).
                             autoshade::store::commit_develop(
                                 path,
                                 autoshade::store::DevelopCommit {
@@ -1420,7 +1452,13 @@ impl AutoShadeApp {
                                     pixels: autoshade::store::CommitMember::Keep,
                                     variants: autoshade::store::variants_member(
                                         path,
-                                        autoshade::store::ActiveWrite::Unknown,
+                                        match &ai_master {
+                                            Some(m) => autoshade::store::ActiveWrite::DevelopOnAiPixels {
+                                                recipe: &r,
+                                                master: m,
+                                            },
+                                            None => autoshade::store::ActiveWrite::Unknown,
+                                        },
                                     )?,
                                     xmp: xmp_member,
                                 },

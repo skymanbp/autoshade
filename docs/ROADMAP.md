@@ -4,11 +4,15 @@
 > 要么是带理由的终局裁定（一个测出来的数、一条仪器极限、一次用户拍板）。
 > 每项都附 `file:line` 或提交锚点，供新会话不重读全库即可接手。更新于 **2026-09-13**。
 >
-> **main 上未发版的改动（2026-09-13，用户报障「就是一打开就这样」）**：develop 库里的 XMP 投影
-> `<stem>.xmp` 成为 develop 提交的第四个成员（源 develop 写、AI 像素/烘焙图清、写不出来才保留），
-> 四个读取端在有 `recipe.json` 时不再落到投影——中性配方是「已存的事实」不是「缺席」。起因：删掉的
-> 「◭ 反推」卡留下 +90 饱和度的投影，剩下的「✨ AI 生成」卡一打开就套着它。门全绿（见台账首条），
-> 未发版；本机安装仍是 1.3.2。
+> **main 上未发版的改动（2026-09-13，用户报障「就是一打开就这样」+「AI 生图怎么能在上面继续编辑呢？
+> 肯定是新开变体啊」）**：① develop 库里的 XMP 投影 `<stem>.xmp` 成为 develop 提交的第四个成员
+> （源 develop 写、AI 像素/烘焙图清、写不出来才保留），四个读取端在有 `recipe.json` 时不再落到投影
+> ——中性配方是「已存的事实」不是「缺席」。起因：删掉的「◭ 反推」卡留下 +90 饱和度的投影，剩下的
+> 「✨ AI 生成」卡一打开就套着它。② 「✨ AI 生成」卡不可编辑：在它上面做的第一次编辑（滑杆、粘贴、
+> 载入版本、AI 分析、原位修补）转到旁边新开的「✎ 生图编辑」卡上继续，✨ 卡保持原样；Ctrl+S 对 AI
+> 像素上的卡不再拒绝（存 develop、清投影、状态行说明不出 XMP）；旧版存下的「✨ 卡带编辑」开门即分成
+> ✨ + ✎（未保存工作，提示一次）；web 保存 / 批量粘贴经 `ActiveWrite::DevelopOnAiPixels` 把记录写成
+> `edited` 并保留 ✨ 卡。门全绿（见台账首两条），未发版；本机安装仍是 1.3.2。
 >
 > **v1.3.2 已发布**（2026-09-12 深夜，tag `v1.3.2` → `d0f7dd4`，release run `34732153004`
 > 五工位绿，8 资产回下载字节校验，官网 23/23 逐字节，本机已升）——反推的强度不再借用「分析」折叠区的强度滑杆：
@@ -48,6 +52,37 @@
 
 ## 版本台账（逐版已发布内容与实测数字，新在上；均已完成，勿重做）
 
+### main（未发版）— 「✨ AI 生成」卡不可编辑：编辑转到新开的「✎ 生图编辑」卡（2026-09-13）
+
+- **起因（用户令，原话）**：「而且ai生图怎么能在上面继续编辑呢？肯定是新开变体啊？」——此前在 ✨ 卡上动滑杆就直接改
+  这张卡的 develop：生成图与用户在它上面的显影是同一样东西，原样的生成图一碰就没了，上一条的投影问题也因此没有干净的答案。
+- **改法**：`VariantKind::Edited`（「✎ Edited AI image」/「✎ 生图编辑」，库内字 `edited`；`store::known_variant_kind`
+  接受）；轴谓词 `is_parametric` → `is_source_based`（▣/◭）与 `on_ai_pixels`（✨/✎）——剥校准、`pixels.json`
+  的 generated 标志、投影成员 `Clear` 三处对 ✨/✎ 同样处理，`fit_target` 仍只读 ✨ 卡的栅格。
+  `AutoShadeApp::fork_edited_card`：活动卡是 ✨ 且配方非中性 → 配方搬到紧随其后新开的 ✎ 卡（同一 base Arc / origin、
+  新铸 id、无名），✨ 卡复位为 `EditRecipe::default()`（保留 id 与名字），`active` 跟过去；画布、撤销栈、视图与工具不动
+  （刻意不走 `load_active`）。每帧在侧栏之后、显影派发之前跑一次（app.rs），每个持久化边界读变体条之前再跑一次
+  （Ctrl+S、＋、退出 Save-all、导航 stash、分析落地、载入版本、粘贴活体臂）；原位修补落地直接调 `fork_from_generated`
+  （改的是像素，配方可能中性）→ 修补栅格烘进 ✎ 卡，✨ 卡留原栅格。Ctrl+S 不再拒绝 AI 像素上的卡：存 develop（磁盘形
+  用 `pipeline::photo_calibration` 补回 RAW 校准、画布保持剥离，与 Save-all / 分析保存同规）、变体条、像素链接、
+  `Clear` 投影，状态行「recipe saved → …（no Lightroom XMP…）」；＋ 对 ✎ 存版本、对原样 ✨ 拒绝；「▣ 套到原片」
+  对 ✨/✎ 各自一句拒绝。开门 `normalize_ai_cards`：记录里带编辑的 ✨ 卡（v1.3.2 及之前所有版本存下的形状）分成
+  ✨ + ✎，作为未保存工作、toast 一次（门不写盘；无 ✨ 伴的 ✎ 卡不补——用户可能删了它）。跨端：
+  `ActiveWrite::DevelopOnAiPixels { recipe, master }`（web 保存、批量粘贴）——中性 develop 是原样 ✨ 卡
+  （或回到中性的 ✎ 卡），否则活动槽写成 `edited`、被顶掉的 ✨ 卡连 id/名字/栅格进 `others`、没有原样卡的
+  新 master 补一张；`store::recorded_pixel_source`（`read_pixel_source` 的记录层，不问 master 是否还在）
+  取代上一条的 `pixel_source_is_generated`。✨ 卡标签悬停、reimagine 按钮 tooltip、AI 面板反推空态行、
+  编辑态列表「· develop over AI pixels (no XMP)」同步改口；中文新增 8 对条目。
+- **门（同车道）**：GUI **183 / 0 / 1**（新增 9：滑杆 fork + 帧钩子位置源码钉、载入版本 fork、分析落地先 fork
+  后存盘（磁盘记录 active `edited`、others 里 ✨ 中性且 id 不变）、原位修补烘进 ✎、旧记录开门拆分 + Ctrl+S 后
+  重开静默、Ctrl+S 存 ✨/✎ 且退役旧投影、fit_target 对 ✎ 为 None、＋ 拒 ✨ 收 ✎（meta from_kind=edited）、
+  ▣ 两句拒绝；`navigation_stash_restores_background_variants` 的后台卡改为 ✎、改名冲刷测试改用无照片
+  返回口）、库子集 **425 / 0 / 2**（`a_develop_over_ai_pixels_forks_the_record_and_keeps_the_pristine_card`
+  五种记录形状）、clippy 两组 0、`audit_i18n` 0 / 0 / 0、字体子集 `--check` 874/874（✎ U+270E 已在
+  Symbols2 子集；中文 toast 原用「拆」不在 SC 子集，改「分」）、check_docs 25P / 0F / 5S、照片名 grep 0。
+- **未动的**：CLI `apply` / `auto` 直写路径（同上条）；CLI `match` 仍写 `Kind("fitted")`；web UI 本身无变体条
+  （记录由库写对，GUI 开门时按记录建卡）。
+
 ### main（未发版）— XMP 投影成为 develop 提交的成员；有 recipe.json 就不读投影（2026-09-13）
 
 - **起因（用户报障，原话）**：「就是一打开就这样。」——一张 RAW 的活动卡是「✨ AI 生成」、配方中性，
@@ -78,7 +113,7 @@
   `the_projection_member_stages_what_write_xmp_publishes`）、clippy 两组 0、`audit_i18n` 0 / 0、
   字体子集 `--check` 873/873、照片名 grep 0。
 - **未动的**：CLI `apply` / `auto` / 批量粘贴的 `write_recipe` + `write_xmp` 直写路径（不经 `commit_develop`，
-  本条之前就如此）；Ctrl+S 对生成卡仍拒绝写 XMP（下一条改动把生成卡的编辑拆成新卡时一并处理）。
+  本条之前就如此）；Ctrl+S 对生成卡的拒绝由上面的 ✎ 卡改动收口。
 
 ### v1.3.2 — 反推强度独立成「反推」折叠区自己的滑杆
 

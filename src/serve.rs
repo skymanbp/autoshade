@@ -2619,17 +2619,30 @@ fn api_xmp(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
         ),
         None => crate::store::CommitMember::Keep,
     };
+    // What this develop SITS ON, when that is an AI raster: this session's
+    // generated master (landing in the same generation), else the persisted
+    // one — resolvable or not, the record-level question: a develop over a
+    // reimagine rendition describes those pixels whether or not the PNG
+    // opens right now.
+    let ai_master: Option<PathBuf> = match &master {
+        Some((p, true)) => Some(p.clone()),
+        Some((_, false)) => None,
+        None => crate::store::recorded_pixel_source(&raw).and_then(|(o, g)| g.then_some(o)),
+    };
     // The strip half goes through the ONE owner (R24-4): the web writes no
-    // strip of its own, so it states only what this save really establishes
-    // — a GENERATED session master in the same generation makes the active
-    // card pixel-state, and anything else leaves the record standing
-    // (`Unknown`; the web cannot name a card it never renders, and claiming
-    // the base negative's slot would mint a second, undeletable Original).
+    // strip of its own, so it states only what this save really establishes.
+    // Over an AI raster the record's word follows the develop
+    // (`ActiveWrite::DevelopOnAiPixels` — the GUI's immutability rule,
+    // spelled by the store): a neutral develop is the pristine generated
+    // card, any other is an edited card of its own with the pristine card
+    // kept beside it. Anything else leaves the record standing (`Unknown`;
+    // the web cannot name a card it never renders, and claiming the base
+    // negative's slot would mint a second, undeletable Original).
     let variants = crate::store::variants_member(
         &raw,
-        match &master {
-            Some((_, true)) => crate::store::ActiveWrite::Kind("generated"),
-            _ => crate::store::ActiveWrite::Unknown,
+        match &ai_master {
+            Some(m) => crate::store::ActiveWrite::DevelopOnAiPixels { recipe: &req.recipe, master: m },
+            None => crate::store::ActiveWrite::Unknown,
         },
     )?;
     // The projection is a member of this generation (2026-09-13): a develop
@@ -2637,10 +2650,7 @@ fn api_xmp(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
     // persisted — projects nothing (no sidecar reproduces AI pixels, and a
     // projection left standing from an earlier card is what the open path
     // used to restore over a pristine generated card), so the member clears.
-    let on_source = match &master {
-        Some((_, generated)) => !*generated,
-        None => !crate::store::pixel_source_is_generated(&raw),
-    };
+    let on_source = ai_master.is_none();
     let (xmp_member, xmp_outcome) = match pipeline::xmp_projection_member(
         &raw,
         &req.recipe,

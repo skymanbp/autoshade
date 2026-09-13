@@ -57,9 +57,12 @@ the app says that instead. A settings file still named `autoshop.local.json`
 keeps being read until the next time settings are saved.
 A neighboring Lightroom/ACR `.xmp` is
 read only as the merge base; Save does not overwrite it. A baked image keeps an
-AutoShade recipe but does not receive a RAW XMP. To deliver the stored
-projection where Lightroom reads it, choose **Export .xmp beside the photo**;
-replacing an existing neighboring sidecar requires confirmation.
+AutoShade recipe but does not receive a RAW XMP, and neither does a card on
+AI-generated pixels (✨ / ✎): its develop is saved, a projection left by an
+earlier source develop is retired in the same save, and the status line says
+so. To deliver the stored projection where Lightroom reads it, choose
+**Export .xmp beside the photo**; replacing an existing neighboring sidecar
+requires confirmation.
 
 ## 3. Add local masks
 
@@ -88,10 +91,21 @@ an honest re-derivation instead of presenting an older alpha as its result.
 ## 4. Use versions and variants
 
 A variant is one card for the same photo: **▣ Original**, **✨ AI generated**,
-or **◭ Reverse-fit**. Each card combines its own base pixels with one develop.
-`Ctrl+S` saves every card in the strip together. Switching cards is navigation,
-not an edit; reopening returns to the card that was active at the last save,
-not the last card viewed.
+**✎ Edited AI image**, or **◭ Reverse-fit**. Each card combines its own base
+pixels with one develop. `Ctrl+S` saves every card in the strip together.
+Switching cards is navigation, not an edit; reopening returns to the card that
+was active at the last save, not the last card viewed.
+
+A **✨ AI generated** card is the generated image itself and never changes:
+the first slider you move, paste, version load, AI analysis or in-place retouch
+on it continues on a new **✎ Edited AI image** card right beside it, on the
+same pixels, and the ✨ card stays pristine (a toast says so; hovering the ✨
+label says it before you try). Undo, zoom and tools carry over — only the card
+under the canvas changed. Editing an ✎ card edits that card. Both kinds save
+their develop with `Ctrl+S` and receive no Lightroom XMP (no sidecar can
+reproduce generated pixels). A photo saved by an earlier version with edits on
+its ✨ card opens split into ✨ + ✎ once, as unsaved work, and `Ctrl+S` keeps it
+that way.
 
 A version is a numbered snapshot of one card's develop at one moment. **＋ Save
 as version** writes `v<N>.recipe.json`, frozen `v<N>.mask-*.png` rasters, and
@@ -101,9 +115,12 @@ step. `auto` versions are snapshots made by the backup gate before it replaces
 a saved develop.
 
 An AI-generated variant carries its look in pixels and has no editable XMP
-develop. Reverse-fit estimates an engine recipe from that look; copy the fitted
-develop to Original when you want an editable recipe and sidecar for the
-full-resolution source.
+develop. Reverse-fit estimates an engine recipe from that look — it reads the
+✨ card's pixels, so select that card (an ✎ card's edits are your own sliders
+over the same pixels, not a look to solve for); copy the fitted develop to
+Original when you want an editable recipe and sidecar for the full-resolution
+source. **＋ Save as version** snapshots an ✎ card's develop; a pristine ✨ card
+has nothing to snapshot.
 
 Reverse-fit uses its own **Reverse-fit strength** dial in the Reverse-fit fold
 (or `match --strength 0..1`) as its honesty budget; the Analysis fold's

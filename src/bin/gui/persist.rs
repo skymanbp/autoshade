@@ -742,7 +742,7 @@ pub(crate) fn reconcile_snapshot_calibration(
 /// attributed again), and every PARAMETRIC recipe heals its pre-era base
 /// curve — a strip entry is one click from BEING the canvas. Pixel-state
 /// entries carry empty curves by invariant and are skipped
-/// ([`VariantKind::is_parametric`]).
+/// ([`VariantKind::is_source_based`]).
 pub(crate) fn strip_from_record(
     rec: &autoshade::store::VariantsRecord,
     src: Option<&std::path::Path>,
@@ -772,7 +772,7 @@ pub(crate) fn strip_from_record(
         .collect();
     if let Some(p) = src {
         for v in strip.iter_mut() {
-            if v.kind.is_parametric() {
+            if v.kind.is_source_based() {
                 let _ = autoshade::pipeline::repair_pre_era_base_curve(p, &mut v.recipe);
             }
             // The coordinate frame, for EVERY card including the pixel-state

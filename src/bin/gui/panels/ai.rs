@@ -974,8 +974,8 @@ impl AutoShadeApp {
                             .on_hover_text(tr(lang,
                                 "Repaint the whole image with gpt-image, styled by the prompt on the left \
                                  (empty = a neutral finished develop). Repainted pixels = not faithful; the \
-                                 result is added as an 「AI generated」 variant at the bottom and switched to, \
-                                 so you can keep tweaking without reverting. Models that accept any size \
+                                 result is added as an 「AI generated」 variant at the bottom and switched to; \
+                                 it stays as generated, and your tweaks continue on an ✎ card beside it. Models that accept any size \
                                  (gpt-image-2) reach ~8MP, others ~1.5K. Needs an image API (OPENAI_API_KEY, or the OAuth image bridge in Settings).",
                             ))
                             .clicked()
@@ -1036,12 +1036,20 @@ impl AutoShadeApp {
             .show(ui, |ui| {
             let can_fit = self.fit_target().is_some() && self.source_preview.is_some();
             if !can_fit {
-                ui.label(
-                    egui::RichText::new(tr(lang,
-                        "Pick a reference below, or generate an image and stay on that variant, to reverse-fit a recipe."))
-                        .weak()
-                        .small(),
-                );
+                // An ✎ card is not a fit target (`fit_target`): the fit reads
+                // pixels, and the card's edits are sliders the user already
+                // has — the line says which card to select instead of
+                // pretending nothing was generated.
+                let on_edited =
+                    self.active_variant().is_some_and(|v| v.kind == VariantKind::Edited);
+                let note = if on_edited {
+                    tr(lang,
+                        "Reverse-fit reads the ✨ AI generated card's pixels — select that card; your ✎ edits are sliders over the same pixels and stay where they are.")
+                } else {
+                    tr(lang,
+                        "Pick a reference below, or generate an image and stay on that variant, to reverse-fit a recipe.")
+                };
+                ui.label(egui::RichText::new(note).weak().small());
             }
             // ── the REFERENCE row (R23-6 B): any finished rendition of this same
             // frame — your own Lightroom export, the camera's JPEG, another RAW

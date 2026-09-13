@@ -2290,11 +2290,11 @@
             "the stash carries the TYPED name, not the pre-focus one"
         );
 
-        // save_xmp's head flush, driven WITHOUT disk side effects: on a
-        // generated variant save_xmp refuses with a toast BEFORE touching
-        // any file, but the flush at its head has already run — removing
-        // that flush previously survived this test (Codex batch 41).
-        app.variants[0].kind = VariantKind::Generated;
+        // save_xmp's head flush, driven WITHOUT disk side effects: with no
+        // photo open save_xmp returns right after its head flush (since
+        // 2026-09-13 a generated card no longer refuses — it saves like any
+        // other — so the empty-path return is the disk-free door).
+        app.src_path = None;
         app.mask_name_buf = Some((0, "sky gradient".into(), "sky gradient 2".into()));
         app.save_xmp();
         assert_eq!(
@@ -2359,10 +2359,12 @@
         let (mut app, _scrub) = app_with_masked_photo("h4stash");
         let ctx = egui::Context::default();
         let gen_base = Arc::new(image::DynamicImage::new_rgb8(8, 6));
+        // An ✎ card: the only kind a develop over AI pixels can be since the
+        // immutability rule (a ✨ card carrying edits is split at the door).
         app.variants.push(Variant {
             id: String::new(),
             name: None,
-            kind: VariantKind::Generated,
+            kind: VariantKind::Edited,
             recipe: EditRecipe { contrast: 33.0, ..Default::default() },
             base: Some(gen_base),
             origin: Some(PathBuf::from("out/_h4_gen.png")),
@@ -2382,7 +2384,7 @@
         {
             let st = app.nav_stash.get(&old).expect("background work must stash the strip");
             assert_eq!(st.others.len(), 1);
-            assert!(matches!(st.others[0].kind, VariantKind::Generated));
+            assert!(matches!(st.others[0].kind, VariantKind::Edited));
         }
         // Drain the (failing) decode of the nav target so its Err cannot
         // interleave with the synthetic return below.
@@ -2413,7 +2415,7 @@
         assert!(
             app.variants
                 .iter()
-                .any(|v| v.kind == VariantKind::Generated && v.recipe.contrast == 33.0),
+                .any(|v| v.kind == VariantKind::Edited && v.recipe.contrast == 33.0),
             "…with its unsaved recipe intact"
         );
         // The commit claimed "active position included", and nothing pinned
@@ -2991,6 +2993,456 @@
         assert_eq!(back.saturation, 0.0, "…and the stale one is gone");
         assert!(app.status.starts_with("XMP + recipe saved"), "{}", app.status);
         assert!(!dev.join(".commit").exists(), "the stage is consumed");
+    }
+
+    /// A photo opened onto its AI card: a temp-dir fake RAW (the store keys
+    /// by path; nothing reads the file), a real 6×4 reimagine master, the
+    /// RAW's calibration saved in recipe.json around `active_develop` (the
+    /// disk form of the active card's develop), and the record [▣ (contrast
+    /// 4), ✨ "sky" (id gen-1)]. Returns the app, its context, the dir, the
+    /// RAW, the master and the AI preview Arc; the scrub guard removes both
+    /// dirs. The premise assertions belong to each test, since a pristine
+    /// develop opens as [▣, ✨] and one carrying edits is split at the door.
+    fn ai_card_fixture(
+        tag: &str,
+        active_develop: EditRecipe,
+    ) -> (AutoShadeApp, egui::Context, PathBuf, PathBuf, PathBuf, Arc<image::DynamicImage>, Scrub) {
+        let dir = std::env::temp_dir()
+            .join(format!("autoshade-gui-ai-card-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let src = dir.join(format!("_gui_ai_card_{}.ARW", tag.replace('-', "_")));
+        let dev = autoshade::store::develop_dir(&src);
+        let _ = std::fs::remove_dir_all(&dev);
+        std::fs::create_dir_all(&dev).unwrap();
+        let scrub = Scrub(vec![dir.clone(), dev.clone()]);
+        let master = dir.join("reimagine.png");
+        image::DynamicImage::new_rgb8(6, 4).save(&master).unwrap();
+        let knots = vec![[0.0, 0.0], [0.5, 0.62], [1.0, 1.0]];
+        std::fs::write(
+            autoshade::store::recipe_target(&src),
+            serde_json::to_string(&EditRecipe {
+                base_curve: knots.clone(),
+                as_shot_k: Some(5653.0),
+                as_shot_tint: Some(0.0),
+                ..active_develop
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        autoshade::store::write_pixel_source(&src, &master, true).unwrap();
+        autoshade::store::write_variants(
+            &src,
+            &autoshade::store::VariantsRecord {
+                extra: Default::default(),
+                v: 1,
+                active_kind: "generated".into(),
+                active_pos: 1,
+                active_id: Some("gen-1".into()),
+                active_name: Some("sky".into()),
+                others: vec![autoshade::store::VariantEntry {
+                    extra: Default::default(),
+                    kind: "original".into(),
+                    recipe: EditRecipe { contrast: 4.0, ..Default::default() },
+                    origin: None,
+                    id: Some("original".into()),
+                    name: None,
+                }],
+            },
+        )
+        .unwrap();
+        let mut app = AutoShadeApp { src_path: Some(src.clone()), ..Default::default() };
+        let ctx = egui::Context::default();
+        let ai_px = Arc::new(image::DynamicImage::new_rgb8(6, 4));
+        open_onto_ai_card(&mut app, &ctx, &ai_px, &master);
+        (app, ctx, dir, src, master, ai_px, scrub)
+    }
+
+    /// The synthetic `Msg::Opened` for [`ai_card_fixture`]'s photo — the RAW's
+    /// calibration plus the decoded generated master — landed through the
+    /// real door.
+    fn open_onto_ai_card(
+        app: &mut AutoShadeApp,
+        ctx: &egui::Context,
+        ai_px: &Arc<image::DynamicImage>,
+        master: &std::path::Path,
+    ) {
+        app.tx
+            .send(Msg::Opened(Box::new(Ok((
+                Arc::new(image::DynamicImage::new_rgb8(6, 4)),
+                vec![[0.0, 0.0], [0.5, 0.62], [1.0, 1.0]],
+                Default::default(),
+                Some((5653.0, 0.0)),
+                Some((ai_px.clone(), master.to_path_buf(), true)),
+                (1280, None, None),
+                None,
+            )))))
+            .unwrap();
+        app.poll_workers(ctx);
+    }
+
+    fn strip_kinds(app: &AutoShadeApp) -> Vec<VariantKind> {
+        app.variants.iter().map(|v| v.kind).collect()
+    }
+
+    fn saved_strip_of(src: &std::path::Path) -> autoshade::store::VariantsRecord {
+        match autoshade::store::read_variants_checked(src) {
+            autoshade::store::VariantsRead::Strip(r) => r,
+            _ => panic!("a strip record is on disk"),
+        }
+    }
+
+    /// The immutability rule (2026-09-13, user decision): an edit made while
+    /// the pristine ✨ card is active continues on a new ✎ card on the same
+    /// raster; the ✨ card goes back to neutral, keeps its identity and its
+    /// name, and the canvas is untouched. The frame hook that applies it
+    /// sits between the panels and the develop dispatch.
+    #[test]
+    fn an_edit_on_the_pristine_ai_card_continues_on_a_new_edited_card() {
+        let (mut app, _ctx, _dir, _src, master, ai_px, _scrub) =
+            ai_card_fixture("fork", EditRecipe::default());
+        assert_eq!(strip_kinds(&app), vec![VariantKind::Original, VariantKind::Generated]);
+        assert_eq!(app.active, 1);
+        assert!(app.recipe.is_noop(), "premise: the ✨ card is pristine");
+        assert!(!app.unsaved_marker_dirty(), "premise: a clean open — {}", app.status);
+        assert!(!app.fork_edited_card(), "a neutral recipe on the ✨ card forks nothing");
+        assert_eq!(app.variants.len(), 2);
+
+        app.recipe.contrast = 7.0;
+        app.dirty = true;
+        assert!(app.fork_edited_card(), "the first edit forks");
+        assert_eq!(
+            strip_kinds(&app),
+            vec![VariantKind::Original, VariantKind::Generated, VariantKind::Edited]
+        );
+        assert_eq!(app.active, 2);
+        assert_eq!(app.variants[2].recipe.contrast, 7.0);
+        assert!(app.variants[1].recipe.is_noop(), "the ✨ card is pristine again");
+        assert_eq!(app.variants[1].id, "gen-1", "…and keeps its identity");
+        assert_eq!(app.variants[1].name.as_deref(), Some("sky"), "…and its name");
+        assert!(
+            !app.variants[2].id.is_empty() && app.variants[2].id != "gen-1",
+            "the ✎ card is born with its own identity"
+        );
+        assert_eq!(app.variants[2].name, None);
+        assert!(
+            app.variants[2].base.as_ref().is_some_and(|b| Arc::ptr_eq(b, &ai_px)),
+            "the same pixels"
+        );
+        assert_eq!(app.variants[2].origin.as_deref(), Some(master.as_path()));
+        assert_eq!(app.recipe.contrast, 7.0, "the canvas is untouched");
+        assert!(app.dirty, "…and its pending develop still runs");
+        assert!(!app.fork_edited_card(), "an ✎ card never forks");
+        assert_eq!(app.variants.len(), 3);
+        assert!(app.unsaved_marker_dirty(), "a new card is unsaved work");
+        assert!(app.toasts.iter().any(|t| t.text.contains("✎")), "said by toast");
+
+        // The frame hook sits between the panels (where the sliders write
+        // the recipe) and the develop dispatch — pinned in the source, since
+        // a headless test cannot run eframe's update().
+        let frame = include_str!("app.rs");
+        let panels = frame.find("self.upd_strips_and_side_panels(ctx);").expect("the panels call");
+        let hook = frame[panels..]
+            .find("self.fork_edited_card();")
+            .map(|i| i + panels)
+            .expect("the frame hook after the panels");
+        let dispatch = frame.find("if self.dirty && !self.develop_inflight {").expect("the dispatch");
+        assert!(hook < dispatch, "the hook runs before the develop is dispatched");
+    }
+
+    /// A version loaded onto the pristine ✨ card is an edit like any other.
+    #[test]
+    fn a_version_loaded_onto_the_pristine_ai_card_lands_on_an_edited_card() {
+        let (mut app, _ctx, _dir, src, _master, _ai_px, _scrub) =
+            ai_card_fixture("version", EditRecipe::default());
+        std::fs::write(
+            autoshade::store::version_target(&src, 1),
+            serde_json::to_string(&EditRecipe {
+                contrast: 7.0,
+                base_curve: vec![[0.0, 0.0], [0.5, 0.62], [1.0, 1.0]],
+                ..Default::default()
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        app.load_version(1);
+        assert_eq!(
+            strip_kinds(&app),
+            vec![VariantKind::Original, VariantKind::Generated, VariantKind::Edited],
+            "{}",
+            app.status
+        );
+        assert_eq!(app.active, 2);
+        assert_eq!(app.recipe.contrast, 7.0);
+        assert!(app.recipe.base_curve.is_empty(), "calibration stripped onto AI pixels");
+        assert!(app.variants[1].recipe.is_noop(), "the ✨ card stays pristine");
+        assert!(app.status.starts_with("Loaded version v1"), "{}", app.status);
+    }
+
+    /// The Analyze landing forks BEFORE it persists, so the record it writes
+    /// already names the ✎ card — and the pristine card is saved pristine.
+    #[test]
+    fn an_analyze_landing_on_the_pristine_ai_card_forks_before_it_saves() {
+        let (mut app, _ctx, _dir, src, master, _ai_px, _scrub) =
+            ai_card_fixture("analyze", EditRecipe::default());
+        let epoch = app.gen_epoch;
+        app.on_analyzed(
+            Lang::En,
+            epoch,
+            Box::new(Ok((
+                EditRecipe {
+                    contrast: 7.0,
+                    base_curve: vec![[0.0, 0.0], [0.5, 0.62], [1.0, 1.0]],
+                    ..Default::default()
+                },
+                autoshade::advisor::Verdict {
+                    decision: autoshade::advisor::Decision::Accept,
+                    reasons: Vec::new(),
+                    revised_hint: None,
+                },
+                Vec::new(),
+            ))),
+        );
+        assert_eq!(
+            strip_kinds(&app),
+            vec![VariantKind::Original, VariantKind::Generated, VariantKind::Edited],
+            "{}",
+            app.status
+        );
+        assert_eq!(app.active, 2);
+        assert_eq!(app.recipe.contrast, 7.0);
+        assert!(app.recipe.base_curve.is_empty());
+        assert!(app.variants[1].recipe.is_noop());
+        let rec = saved_strip_of(&src);
+        assert_eq!(rec.active_kind, "edited");
+        assert_eq!(rec.active_pos, 2);
+        assert_eq!(
+            rec.others.iter().map(|e| e.kind.as_str()).collect::<Vec<_>>(),
+            vec!["original", "generated"]
+        );
+        assert!(rec.others[1].recipe.is_noop(), "the pristine card is saved pristine");
+        assert_eq!(rec.others[1].id.as_deref(), Some("gen-1"));
+        let disk: EditRecipe = serde_json::from_str(
+            &std::fs::read_to_string(autoshade::store::recipe_target(&src)).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(disk.contrast, 7.0);
+        assert!(!disk.base_curve.is_empty(), "the disk form keeps the calibration");
+        let (origin, generated) = autoshade::store::read_pixel_source(&src).expect("pixels.json");
+        assert!(generated);
+        assert_eq!(origin, master);
+        assert!(!autoshade::pipeline::xmp_target(&src).exists(), "no projection over AI pixels");
+        assert!(!app.unsaved_marker_dirty(), "the landing saved the forked strip: {}", app.status);
+    }
+
+    /// The immutability rule for PIXELS: an in-place retouch on the pristine
+    /// ✨ card bakes into a new ✎ card; the ✨ card keeps its raster.
+    #[test]
+    fn a_retouch_in_place_on_the_pristine_ai_card_bakes_into_an_edited_card() {
+        let (mut app, ctx, dir, _src, master, ai_px, _scrub) =
+            ai_card_fixture("retouch", EditRecipe::default());
+        let healed = dir.join("healed.png");
+        std::fs::write(&healed, b"png").unwrap();
+        let epoch = app.gen_epoch;
+        app.on_retouched(
+            &ctx,
+            Lang::En,
+            epoch,
+            Ok((
+                image::DynamicImage::ImageRgba8(image::RgbaImage::new(6, 4)),
+                RetouchNote::Filled(healed.clone()),
+                healed.clone(),
+                RetouchKind::InPlace,
+            )),
+        );
+        assert_eq!(
+            strip_kinds(&app),
+            vec![VariantKind::Original, VariantKind::Generated, VariantKind::Edited],
+            "{}",
+            app.status
+        );
+        assert_eq!(app.active, 2);
+        assert_eq!(
+            app.variants[2].origin.as_deref(),
+            Some(healed.as_path()),
+            "the retouch baked into the ✎ card"
+        );
+        assert!(app.variants[2].base.as_ref().is_some_and(|b| !Arc::ptr_eq(b, &ai_px)));
+        assert_eq!(
+            app.variants[1].origin.as_deref(),
+            Some(master.as_path()),
+            "the ✨ card keeps its raster"
+        );
+        assert!(app.variants[1].base.as_ref().is_some_and(|b| Arc::ptr_eq(b, &ai_px)));
+    }
+
+    /// Every build through v1.3.2 stored an edit made on the ✨ card AS the
+    /// ✨ card: recipe.json holds the edits, the record says the active card
+    /// is "generated". The door splits it — once, as unsaved work — and a
+    /// strip saved split reopens as it is, silently.
+    #[test]
+    fn a_strip_saved_with_edits_on_the_ai_card_is_split_at_the_door() {
+        let (mut app, ctx, _dir, src, master, ai_px, _scrub) =
+            ai_card_fixture("split", EditRecipe { contrast: 7.0, ..Default::default() });
+        assert_eq!(
+            strip_kinds(&app),
+            vec![VariantKind::Original, VariantKind::Generated, VariantKind::Edited],
+            "{}",
+            app.status
+        );
+        assert_eq!(app.active, 2, "the canvas follows the edits");
+        assert_eq!(app.recipe.contrast, 7.0);
+        assert!(app.recipe.base_curve.is_empty(), "calibration stripped on AI pixels");
+        assert_eq!(app.variants[2].recipe.contrast, 7.0);
+        assert!(app.variants[2].base.as_ref().is_some_and(|b| Arc::ptr_eq(b, &ai_px)));
+        assert_eq!(app.variants[2].origin.as_deref(), Some(master.as_path()));
+        assert!(app.variants[1].recipe.is_noop(), "the ✨ card is pristine");
+        assert_eq!(app.variants[1].id, "gen-1", "…and keeps the record's identity");
+        assert_eq!(app.variants[1].name.as_deref(), Some("sky"), "…and its name");
+        assert!(app.unsaved_marker_dirty(), "the split is unsaved work until Ctrl+S");
+        assert_eq!(
+            app.toasts.iter().filter(|t| t.text.contains("separate cards")).count(),
+            1,
+            "said once at the door"
+        );
+        assert_eq!(VariantKind::from_store_str("edited"), Some(VariantKind::Edited));
+        assert_eq!(VariantKind::Edited.store_str(), "edited");
+        let rec = app.current_strip_record().expect("a three-card strip has a record");
+        assert_eq!(rec.active_kind, "edited");
+
+        // Ctrl+S persists the split; the same door then reopens it as it is.
+        app.save_xmp();
+        assert!(!app.unsaved_marker_dirty(), "{}", app.status);
+        assert_eq!(saved_strip_of(&src).active_kind, "edited");
+        let mut again = AutoShadeApp { src_path: Some(src.clone()), ..Default::default() };
+        open_onto_ai_card(&mut again, &ctx, &ai_px, &master);
+        assert_eq!(
+            strip_kinds(&again),
+            vec![VariantKind::Original, VariantKind::Generated, VariantKind::Edited],
+            "{}",
+            again.status
+        );
+        assert_eq!(again.active, 2);
+        assert_eq!(again.recipe.contrast, 7.0);
+        assert!(again.variants[1].recipe.is_noop());
+        assert!(!again.unsaved_marker_dirty(), "a split strip reopens clean: {}", again.status);
+        assert!(
+            !again.toasts.iter().any(|t| t.text.contains("separate cards")),
+            "…and silently"
+        );
+    }
+
+    /// Ctrl+S on a card over AI pixels saves that card's develop — no
+    /// refusal (until 2026-09-13 a generated card was refused outright) —
+    /// with the RAW's calibration kept on disk, the canvas stripped, and no
+    /// Lightroom projection: the member CLEARS a standing one.
+    #[test]
+    fn ctrl_s_on_an_ai_pixel_card_saves_its_develop_and_retires_the_projection() {
+        let (mut app, _ctx, _dir, src, master, _ai_px, _scrub) =
+            ai_card_fixture("save", EditRecipe::default());
+        let xp = autoshade::pipeline::xmp_target(&src);
+        std::fs::write(
+            &xp,
+            autoshade::xmp::recipe_to_xmp(&EditRecipe { saturation: 90.0, ..Default::default() }),
+        )
+        .unwrap();
+        // The pristine ✨ card saves as itself.
+        app.save_xmp();
+        assert!(!app.status.contains("Reverse-fit"), "no refusal: {}", app.status);
+        assert!(app.status.contains("AI-generated pixels"), "{}", app.status);
+        assert!(!xp.exists(), "the stale projection is retired by the commit");
+        assert!(!app.unsaved_marker_dirty(), "{}", app.status);
+        assert_eq!(saved_strip_of(&src).active_kind, "generated");
+
+        // An edit → ✎; Ctrl+S saves THAT card's develop.
+        app.recipe.contrast = 7.0;
+        app.save_xmp(); // the boundary fork runs inside
+        assert_eq!(
+            strip_kinds(&app),
+            vec![VariantKind::Original, VariantKind::Generated, VariantKind::Edited],
+            "{}",
+            app.status
+        );
+        assert!(app.status.starts_with("recipe saved"), "{}", app.status);
+        let disk: EditRecipe = serde_json::from_str(
+            &std::fs::read_to_string(autoshade::store::recipe_target(&src)).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(disk.contrast, 7.0);
+        assert_eq!(
+            disk.base_curve,
+            vec![[0.0, 0.0], [0.5, 0.62], [1.0, 1.0]],
+            "the disk form keeps the RAW's saved calibration"
+        );
+        assert_eq!(disk.as_shot_k, Some(5653.0));
+        assert!(app.recipe.base_curve.is_empty(), "the canvas stays stripped");
+        let (origin, generated) = autoshade::store::read_pixel_source(&src).unwrap();
+        assert!(generated);
+        assert_eq!(origin, master);
+        let rec = saved_strip_of(&src);
+        assert_eq!(rec.active_kind, "edited");
+        assert_eq!(
+            rec.others.iter().map(|e| e.kind.as_str()).collect::<Vec<_>>(),
+            vec!["original", "generated"]
+        );
+        assert!(!xp.exists(), "still no projection over AI pixels");
+        assert!(!app.unsaved_marker_dirty(), "{}", app.status);
+    }
+
+    /// The reverse-fit reads the ✨ card's raster, never an ✎ card: the fit
+    /// solves pixels, and the edits are sliders the user already has.
+    #[test]
+    fn fit_target_is_the_pristine_ai_cards_raster_never_the_edited_cards() {
+        let (mut app, ctx, _dir, _src, master, _ai_px, _scrub) =
+            ai_card_fixture("fit", EditRecipe::default());
+        assert_eq!(
+            app.fit_target().as_deref(),
+            Some(master.as_path()),
+            "premise: the ✨ card's raster is the default target"
+        );
+        app.recipe.contrast = 7.0;
+        assert!(app.fork_edited_card());
+        assert_eq!(app.fit_target(), None, "an ✎ card is not a fit target");
+        app.switch_variant(1, &ctx);
+        assert_eq!(app.fit_target().as_deref(), Some(master.as_path()));
+    }
+
+    /// 「＋」 has nothing to snapshot on the pristine ✨ card and everything
+    /// on the ✎ card — attributed to it.
+    #[test]
+    fn a_version_snapshot_is_refused_on_the_pristine_ai_card_and_taken_on_the_edited_one() {
+        let (mut app, _ctx, _dir, src, _master, _ai_px, _scrub) =
+            ai_card_fixture("snapshot", EditRecipe::default());
+        app.save_version();
+        assert!(app.status.contains("pristine"), "{}", app.status);
+        assert!(!autoshade::store::version_target(&src, 1).exists());
+        app.recipe.contrast = 7.0;
+        app.save_version(); // forks at the boundary, then snapshots the ✎ card
+        assert_eq!(app.variants[app.active].kind, VariantKind::Edited);
+        let v1 = autoshade::store::version_target(&src, 1);
+        assert!(v1.exists(), "{}", app.status);
+        let snap: EditRecipe = serde_json::from_str(&std::fs::read_to_string(&v1).unwrap()).unwrap();
+        assert_eq!(snap.contrast, 7.0);
+        let meta = autoshade::store::read_version_meta(&src);
+        assert_eq!(
+            meta.iter().find(|m| m.n == 1).and_then(|m| m.from_kind.as_deref()),
+            Some("edited")
+        );
+    }
+
+    /// 「▣ apply to Original」 refuses both AI-pixel kinds, each for its own
+    /// reason.
+    #[test]
+    fn apply_to_original_refuses_an_edited_card_with_its_own_reason() {
+        let (mut app, ctx, _dir, _src, _master, _ai_px, _scrub) =
+            ai_card_fixture("apply", EditRecipe::default());
+        app.apply_to_original(1, &ctx);
+        assert!(app.status.contains("lives in its pixels"), "{}", app.status);
+        app.recipe.contrast = 7.0;
+        assert!(app.fork_edited_card());
+        app.apply_to_original(2, &ctx);
+        assert!(app.status.contains("AI-generated pixels"), "{}", app.status);
+        assert_eq!(app.variants[0].recipe.contrast, 4.0, "the ▣ card is untouched");
     }
 
     #[test]

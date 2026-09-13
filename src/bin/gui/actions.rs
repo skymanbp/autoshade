@@ -266,6 +266,10 @@ impl AutoShadeApp {
         // buffer carries the photo it was seeded on, so the commits land on
         // the OUTGOING photo even though `src_path` moves below.
         self.commit_pending_names();
+        // …and an edit the frame hook has not moved yet lands on its ✎ card
+        // before the strip is snapshotted (the immutability rule's boundary
+        // discipline — every persist entry point forks first).
+        self.fork_edited_card();
         // …and the buffers themselves die with the photo (M15): carried
         // across, a same-index mask / same-number version / same-card rename
         // box on the NEXT photo skipped the reseed and greeted it pre-filled
@@ -893,16 +897,16 @@ impl AutoShadeApp {
         }
     }
 
-    /// Is the active variant an AI-generated raster (look baked into pixels,
-    /// not the recipe)? Such a variant has no parametric XMP representation —
-    /// exporting a sidecar for it would be a lie; steer the user to 反推 first.
-    ///
-    /// Kept as an IDENTITY question rather than re-expressed through
-    /// [`VariantKind::is_parametric`] (R24-1): several callers feed the
-    /// answer straight into the two-valued `pixels.json` format flag, which
-    /// must keep naming the kind it spells on disk.
-    pub(crate) fn active_is_generated(&self) -> bool {
-        self.active_variant().is_some_and(|v| v.kind == VariantKind::Generated)
+    /// Does the active card develop an AI-generated raster — the pristine
+    /// 「✨ AI generated」 card or a 「✎ Edited AI image」 over the same
+    /// pixels ([`VariantKind::on_ai_pixels`])? Such a canvas carries no
+    /// calibration (the raster already has the camera look, the lens
+    /// geometry and a baked white balance), projects to no Lightroom XMP (no
+    /// sidecar reproduces AI pixels), and is what the `pixels.json` flag
+    /// records. The one place the two kinds part — the ✨ card is immutable,
+    /// the ✎ card is where its edits live — asks `== Generated` directly.
+    pub(crate) fn active_on_ai_pixels(&self) -> bool {
+        self.active_variant().is_some_and(|v| v.kind.on_ai_pixels())
     }
 
     /// Uniform failure disclosure for a foreground persist compound — the
@@ -967,12 +971,12 @@ impl AutoShadeApp {
         // when its card is clicked — no navigation, no stash, no save
         // involved. Memo-bounded; era-2 recipes short-circuit; a PIXEL-STATE
         // card is skipped like at every other ordering site (its curve is
-        // empty by invariant — see `VariantKind::is_parametric`, R24-1).
+        // empty by invariant — see `VariantKind::is_source_based`, R24-1).
         // Synchronous first-click cost: the same accepted class as the open
         // gate — one estimate per photo per process when it succeeds, and a
         // transient inability early-exits on the failed probe and retries on
         // the next read.
-        if vkind.is_parametric()
+        if vkind.is_source_based()
             // ...and never while a CROSS-PHOTO open is in flight (src_path
             // already points at the INCOMING photo — the apply_step /
             // live-canvas override hazard); a same-path keep-flight stays
@@ -1214,6 +1218,118 @@ impl AutoShadeApp {
         }
     }
 
+    /// The immutability rule's ACTION (2026-09-13; user decision: 「AI 生图
+    /// 怎么能在上面继续编辑呢？肯定是新开变体啊」): an edit made while the
+    /// pristine 「✨ AI generated」 card is active does not land on that card.
+    /// The live recipe — the edit — moves to a new 「✎ Edited AI image」 card
+    /// on the same raster, inserted right after the ✨ card, which goes back
+    /// to neutral and stays the pristine image. The canvas is untouched:
+    /// same pixels, same recipe, same undo history (Ctrl+Z on the new card
+    /// returns it to neutral; the ✨ card never held the edit), same view and
+    /// tools — only the card under the canvas changed, so this deliberately
+    /// does NOT go through `load_active`, which restarts all of that.
+    ///
+    /// Called every frame between the panels and the develop dispatch (the
+    /// sliders, the shortcuts, a landing — every path that writes
+    /// `self.recipe`), and at every persist boundary before the strip is
+    /// read (Ctrl+S, ＋, the quit-time Save-all, the stash, the Analyze and
+    /// version-load installs), so no record ever names the ✨ card as the
+    /// holder of an edit. A neutral recipe on the ✨ card forks nothing: a
+    /// Reset there is the pristine image again. Returns whether it forked.
+    pub(crate) fn fork_edited_card(&mut self) -> bool {
+        if self.recipe.is_noop() {
+            return false;
+        }
+        self.fork_from_generated()
+    }
+
+    /// The fork itself, for the one caller that edits PIXELS rather than the
+    /// recipe (the in-place retouch landing — a heal on the ✨ card must bake
+    /// into a new ✎ card however neutral the recipe is). Forks only while
+    /// the active card is the pristine ✨ card.
+    pub(crate) fn fork_from_generated(&mut self) -> bool {
+        let Some(cur) = self.variants.get(self.active) else { return false };
+        if cur.kind != VariantKind::Generated {
+            return false;
+        }
+        let forked = Variant {
+            kind: VariantKind::Edited,
+            id: new_variant_id(),
+            name: None,
+            recipe: self.recipe.clone(),
+            base: cur.base.clone(),
+            origin: cur.origin.clone(),
+            thumb: None,
+        };
+        if let Some(cur) = self.variants.get_mut(self.active) {
+            // Pristine again. Its card keeps the last frame that landed,
+            // which is the pristine render: the edit that triggered this
+            // fork has not been developed yet (the hook runs before the
+            // dispatch). A frame of the neutral recipe that lands late
+            // writes to the active card — the ✎ — and the develop already
+            // due overwrites it.
+            cur.recipe = EditRecipe::default();
+        }
+        self.variants.insert(self.active + 1, forked);
+        self.active += 1;
+        // A ✕ armed on an index past the insertion now names the wrong card.
+        self.variant_delete_confirm = None;
+        let lang = self.lang;
+        self.toast(
+            ToastKind::Success,
+            tr(
+                lang,
+                "✨ AI generated stays as generated — your edit continues on a new ✎ Edited AI image card",
+            ),
+        );
+        true
+    }
+
+    /// The AI-card invariant applied to a strip that arrived from disk
+    /// (2026-09-13): every 「✨ AI generated」 card is pristine, and every
+    /// develop over a generated raster is a 「✎ Edited AI image」 card of its
+    /// own. A record can say otherwise in one way — a ✨ card carrying edits,
+    /// which is how every build through v1.3.2 stored an edit made on the
+    /// generated card. Each such card is split: the edits move to a new ✎
+    /// card right after it (the same raster, its own minted identity), the
+    /// ✨ card keeps its identity and name and goes neutral, and the active
+    /// card follows the edits so the canvas shows what the record described.
+    /// Returns whether anything changed; the caller says so ONCE by toast —
+    /// the split is unsaved work (the door does not write), and Ctrl+S is
+    /// what persists it. (An ✎ card without a ✨ sibling is NOT completed:
+    /// the user may have deleted the pristine card, and a door that
+    /// resurrected it would undo that at every open.)
+    pub(crate) fn normalize_ai_cards(&mut self) -> bool {
+        let mut changed = false;
+        let mut i = 0;
+        while i < self.variants.len() {
+            let carries_edits = self.variants[i].kind == VariantKind::Generated
+                && !self.variants[i].recipe.is_noop();
+            if carries_edits {
+                let edits = std::mem::take(&mut self.variants[i].recipe);
+                let forked = Variant {
+                    kind: VariantKind::Edited,
+                    id: new_variant_id(),
+                    name: None,
+                    recipe: edits,
+                    base: self.variants[i].base.clone(),
+                    origin: self.variants[i].origin.clone(),
+                    thumb: None,
+                };
+                self.variants.insert(i + 1, forked);
+                if self.active == i {
+                    self.active = i + 1;
+                } else if self.active > i {
+                    self.active += 1;
+                }
+                changed = true;
+                i += 1; // past the card just inserted
+            }
+            i += 1;
+        }
+        changed
+    }
+
     /// How card `idx` names itself in a sentence: the user's own name when
     /// it has one, else its localized kind label. Owned, so callers can hand
     /// it to `trf` while `self` is borrowed mutably.
@@ -1262,11 +1378,21 @@ impl AutoShadeApp {
             return;
         }
         let Some(src) = self.variants.get(idx) else { return };
-        if !src.kind.is_parametric() {
-            let t = tr(
-                lang,
-                "A generated variant's look lives in its pixels — there are no develop parameters to copy onto the ▣ Original card; run 「Reverse-fit」 first",
-            );
+        if !src.kind.is_source_based() {
+            // Two refusals, one axis: a ✨ card has no parameters at all, an
+            // ✎ card's are tuned over AI pixels and mean nothing on the
+            // negative (the ▣ button's hover says the same).
+            let t = if src.kind == VariantKind::Edited {
+                tr(
+                    lang,
+                    "This ✎ card's develop is tuned over AI-generated pixels — on the ▣ Original card those sliders would land on the source frame; run 「Reverse-fit」 on the ✨ card first",
+                )
+            } else {
+                tr(
+                    lang,
+                    "A generated variant's look lives in its pixels — there are no develop parameters to copy onto the ▣ Original card; run 「Reverse-fit」 first",
+                )
+            };
             self.status = t.into();
             self.toast(ToastKind::Error, t);
             return;
@@ -1620,17 +1746,21 @@ impl AutoShadeApp {
         // A typed-but-uncommitted name belongs in the snapshot — every
         // persistence entry point flushes all of them (the U10 rule; L27).
         self.commit_pending_names();
+        // The immutability rule's boundary discipline: an edit the frame
+        // hook has not moved yet forks NOW, so the snapshot is attributed
+        // to the ✎ card that holds it.
+        self.fork_edited_card();
         let lang = self.lang;
-        // A PIXEL-STATE variant has no develop worth snapshotting: its look
-        // lives in the raster, and the canvas recipe over it is stripped of
-        // curve, lens and as-shot anchor by construction — so "＋ Save as
-        // version" wrote a near-empty recipe that restored to nothing (R24-2).
-        // Same judgement as Ctrl+S's XMP refusal (`save_xmp`), same remedy:
-        // reverse-fit first, then the snapshot has parameters to hold.
-        if self.active_is_generated() {
+        // The pristine ✨ card has no develop to snapshot — its recipe is
+        // neutral by the immutability rule, so "＋ Save as version" would
+        // store an empty recipe that restores to nothing (R24-2). An ✎ card
+        // does: its develop over the AI pixels is what the snapshot holds
+        // (stripped of calibration like every snapshot taken on AI pixels,
+        // and re-stamped if it ever lands on the negative — R24-3).
+        if self.active_variant().is_some_and(|v| v.kind == VariantKind::Generated) {
             let t = tr(
                 lang,
-                "A generated variant's look lives in its pixels — a version snapshot would store an almost-empty recipe; run 「Reverse-fit」 first",
+                "A pristine ✨ AI generated card has no develop to snapshot — move a slider to start an ✎ Edited AI image card, or run 「Reverse-fit」",
             );
             self.status = t.into();
             self.toast(ToastKind::Error, t);
@@ -1806,7 +1936,7 @@ impl AutoShadeApp {
                 // branch that needs it.
                 let restamped = reconcile_snapshot_calibration(
                     &mut r,
-                    self.active_is_generated(),
+                    self.active_on_ai_pixels(),
                     || {
                         let (k, t) = autoshade::pipeline::fresh_as_shot_wb(&src);
                         (
@@ -1839,6 +1969,10 @@ impl AutoShadeApp {
                 self.recipe = r;
                 self.resync_recipe_display();
                 self.dirty = true;
+                // A snapshot loaded onto the pristine ✨ card is an edit like
+                // any other: it lands on a new ✎ card (the immutability rule),
+                // and the load announcement below names that card's canvas.
+                self.fork_edited_card();
                 let loaded = trf(lang, "Loaded version v{n} — Ctrl+Z returns to before the load", &[("n", &n.to_string())]);
                 if restamped {
                     // Said out loud, in the same channel the other
@@ -2161,7 +2295,7 @@ impl AutoShadeApp {
         // any more. The gate stays because ungating the keyboard would
         // resurrect every scenario above, and the test drives it directly.
         if (!self.open_in_flight || (self.open_same_path && self.keep_recipe))
-            && self.variants.get(self.active).is_none_or(|v| v.kind.is_parametric())
+            && self.variants.get(self.active).is_none_or(|v| v.kind.is_source_based())
             && let Some(p) = self.src_path.clone()
             && autoshade::pipeline::repair_pre_era_base_curve(&p, &mut self.recipe).is_some()
         {
@@ -2392,15 +2526,16 @@ impl AutoShadeApp {
         // Everything quitting would lose: the stash + the open photo's canvas
         // (the live canvas outranks its own stale stash entry). Each entry
         // carries its pixel identity so 「Save all」 persists a baked retouch's
-        // master link exactly like Ctrl+S would. (`== Generated` here is the
-        // `pixels.json` FORMAT flag — not the R24-1 parametric predicate.)
+        // master link exactly like Ctrl+S would. (The bool is the
+        // `pixels.json` flag — `VariantKind::on_ai_pixels`, the axis the
+        // flag records: a ✨ card and its ✎ cards sit on the same raster.)
         let mut pending: Vec<PendingSave> = self
             .nav_stash
             .iter()
             .map(|(p, st)| PendingSave {
                 photo: p.clone(),
                 recipe: st.recipe.clone(),
-                pixels: st.origin.clone().map(|o| (o, st.kind == VariantKind::Generated)),
+                pixels: st.origin.clone().map(|o| (o, st.kind.on_ai_pixels())),
                 strip: stash_strip_record(st),
             })
             .collect();
@@ -2425,7 +2560,7 @@ impl AutoShadeApp {
             // or Save-all had nothing to write and the guard's re-check
             // bounced the close forever (the v0.21 dead-button livelock).
             if self.pending_save_gate_dirty() {
-                let pix = origin.map(|o| (o, self.active_is_generated()));
+                let pix = origin.map(|o| (o, self.active_on_ai_pixels()));
                 pending.push(PendingSave {
                     photo: p,
                     recipe: self.recipe.clone(),

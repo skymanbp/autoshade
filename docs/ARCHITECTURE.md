@@ -1370,7 +1370,7 @@ number, which is never re-issued), mask rasters, `pixels.json`
 (the baked pixel-master
 link) and, since v0.22.0, `variants.json` — the GUI's variant strip
 (background variants' kind/recipe/raster origin + the active card's
-three-valued kind, each card since v0.30.0 also carrying an opaque stable
+four-valued kind, each card since v0.30.0 also carrying an opaque stable
 `id` and an optional `name`, both additive at `v=1` in BOTH directions: the
 record is not `deny_unknown_fields`, so an older build reads a newer strip
 without refusing it, and a `#[serde(flatten)]` capture-all on `VariantsRecord`
@@ -1493,10 +1493,62 @@ when the develop has NO `recipe.json`: a neutral recipe is a saved fact (the
 pristine ✨ card), not an absence, and the projection is a fallback for the
 pre-v0.13 stores that had nothing else. The backup gate no longer preserves a
 projection on a neutral recipe's behalf for the same reason.
-`store::pixel_source_is_generated` answers the question the writers that do
-not hold a live card ask (the web save without a master, the batch paste):
-whether the photo's saved develop sits on AI pixels, read from `pixels.json`
-alone.
+`store::recorded_pixel_source` — the record-level half of
+`read_pixel_source`, which does not ask whether the master still exists —
+answers the question the writers that hold no live card ask (the web save
+without a session master, the batch paste): what the photo's saved develop
+sits on, read from `pixels.json` alone.
+
+**A generated card is immutable (2026-09-13, user decision: 「AI 生图怎么能
+在上面继续编辑呢？肯定是新开变体啊」).** The same report showed the second
+half of the problem: an edit made while the 「✨ AI generated」 card was
+active landed on that card, so the generated image and the user's develop
+over it were one thing — a slider changed "the AI image", the projection
+question above had no clean answer, and the pristine rendition was gone the
+moment it was touched. The taxonomy grew its fourth kind,
+`VariantKind::Edited` (「✎ Edited AI image」, store word `"edited"`), and one
+rule: a ✨ card's recipe is neutral by invariant, and every develop over a
+generated raster is an ✎ card of its own. `AutoShadeApp::fork_edited_card`
+is the rule's action — the live recipe moves to a new ✎ card inserted right
+after the ✨ card (same base `Arc`, same origin, a minted id, no name), the
+✨ card goes back to `EditRecipe::default()` keeping its identity and name,
+`active` follows, and the canvas, its undo history, view and tools are
+untouched (deliberately not `load_active`, which restarts all of that). It
+runs every frame between the side panels and the develop dispatch, so a
+slider, a shortcut or a landing that wrote the recipe forks before the frame
+is developed or committed to history; and at every persist boundary before
+the strip is read (Ctrl+S, ＋, the quit-time Save-all, the navigation stash,
+the Analyze landing's install, a version load, the paste's live arm), so no
+record ever names the ✨ card as an edit's holder. The in-place retouch
+landing asks `fork_from_generated` directly — a heal is an edit of the
+PIXELS, however neutral the recipe — so the retouched raster bakes into the
+✎ card and the ✨ card keeps its own. The axis predicate is
+`VariantKind::is_source_based` (Original, Fitted) / `on_ai_pixels`
+(Generated, Edited): calibration is stripped from the canvas, the
+`pixels.json` flag is written, and the projection member clears for BOTH
+AI-pixel kinds — the flag records what the master is, which the ✎ card
+shares with the ✨ card it forked from — while `fit_target` stays a policy
+about the ✨ card's raster alone (an ✎ card's edits are sliders the user
+already has, and the AI panel's empty-state line says which card to select).
+Ctrl+S no longer refuses a card on AI pixels: it saves the develop (the disk
+form re-stamped with the RAW's calibration from `pipeline::photo_calibration`,
+the canvas stripped, exactly the Save-all's and the Analyze saver's rule),
+the strip, the pixel link, and a CLEAR projection member, and its status line
+says "no Lightroom XMP". 「＋」 snapshots an ✎ card and refuses the pristine ✨
+card (nothing to snapshot); 「▣ apply to Original」 refuses both, each with its
+own reason. At the door, `normalize_ai_cards` splits every ✨ card found
+carrying edits — the shape every build through v1.3.2 saved — into ✨ + ✎ as
+UNSAVED work, said once by toast (the door does not write; an ✎ card without
+a ✨ sibling is left alone, since the user may have deleted the pristine
+card). The cross-surface half is `ActiveWrite::DevelopOnAiPixels { recipe,
+master }` in `store::variants_member`: the writers without a live strip (the
+web save, the batch paste) publish their develop over a generated master
+through it, and the record's word follows the develop — neutral is the
+pristine card (or an ✎ card back at neutral over its own master), anything
+else takes the active slot as `"edited"` with the displaced ✨ card moved into
+`others` (identity, name and raster intact) and a pristine card minted for a
+master that had none. `known_variant_kind` accepts `"edited"`; the CLI
+`match` still states `Kind("fitted")`.
 
 **Import (R25).** Until v0.31.0 that read imported *no* Lightroom mask at all.
 Two gates each dropped a whole correction on sight: the presence of `crs:Angle`
@@ -4277,7 +4329,8 @@ target is no longer only an app-generated variant: `canvas::fit_target`
 prefers an explicitly chosen `fit_ref` (「Choose reference…」 — any finished
 rendition of the same frame; a RAW goes through `render::source_pixels` and is
 developed NEUTRALLY, which the CLI says out loud) and falls back to the active
-generated variant. Both entries coexist, and the CLI has always accepted an
+「✨ AI generated」 card's raster — never an 「✎ Edited AI image」 card's, whose
+edits are sliders the user already has. Both entries coexist, and the CLI has always accepted an
 arbitrary path. A cheap same-frame check (`fit::same_frame_plausible`, aspect
 within 2%) WARNS — never refuses — when the reference is not this shot.
 Alongside the frame-global `look_err`, every fit now carries a **joint

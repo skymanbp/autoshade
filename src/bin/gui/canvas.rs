@@ -130,11 +130,12 @@ impl AutoShadeApp {
             return Some(p.clone());
         }
         let v = self.active_variant()?;
-        // Deliberately NOT `!is_parametric()` (R24-1): this is a POLICY about
+        // Deliberately NOT `on_ai_pixels()` (R24-1): this is a POLICY about
         // which raster the fit DEFAULTS to, not a claim about the card's
-        // parametric-ness — a Fitted card carrying an origin would satisfy
-        // the predicate's negation the day one does, and re-fitting a fit is
-        // not what the button means.
+        // axis — an ✎ card sits on the same raster as its ✨ card, but its
+        // edits are sliders the user already has, not a look to solve for
+        // (the AI panel's empty-state line says so), and re-fitting a fit is
+        // not what the button means either.
         (v.kind == VariantKind::Generated).then(|| v.origin.clone()).flatten()
     }
 

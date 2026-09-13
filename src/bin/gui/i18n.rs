@@ -347,14 +347,16 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     ("Retouch", "修饰 · Retouch"),
     ("Reimagine (whole image) · paid API", "整图 AI 生成 · Reimagine · 付费 API"),
     ("✨ Generate image", "✨ AI 生成出片"),
-    ("Repaint the whole image with gpt-image, styled by the prompt on the left (empty = a neutral finished develop). Repainted pixels = not faithful; the result is added as an 「AI generated」 variant at the bottom and switched to, so you can keep tweaking without reverting. Models that accept any size (gpt-image-2) reach ~8MP, others ~1.5K. Needs an image API (OPENAI_API_KEY, or the OAuth image bridge in Settings).",
-        "用 gpt-image 直接重绘整张图（风格取左侧提示词；留空=中性成片方向）。重绘像素=非保真；生成后自动加入底部「AI 生成」变体并切过去，可继续微调不会变回去。支持任意尺寸的模型（gpt-image-2）可达 ~8MP，其余 ~1.5K。需图像 API（OPENAI_API_KEY，或设置里的 OAuth 图像桥）。"),
+    ("Repaint the whole image with gpt-image, styled by the prompt on the left (empty = a neutral finished develop). Repainted pixels = not faithful; the result is added as an 「AI generated」 variant at the bottom and switched to; it stays as generated, and your tweaks continue on an ✎ card beside it. Models that accept any size (gpt-image-2) reach ~8MP, others ~1.5K. Needs an image API (OPENAI_API_KEY, or the OAuth image bridge in Settings).",
+        "用 gpt-image 直接重绘整张图（风格取左侧提示词；留空=中性成片方向）。重绘像素=非保真；生成后自动加入底部「AI 生成」变体并切过去；它保持原样，你的微调会转到旁边的「✎」卡上继续。支持任意尺寸的模型（gpt-image-2）可达 ~8MP，其余 ~1.5K。需图像 API（OPENAI_API_KEY，或设置里的 OAuth 图像桥）。"),
     ("style to repaint toward — e.g. golden-hour glow, moody film look",
         "想重绘成的风格——如「金色黄昏氛围」「胶片低饱和」"),
     // R23-6 B: the reverse-fit target is no longer only an app-generated
     // variant, so the empty-state line names BOTH entries.
     ("Pick a reference below, or generate an image and stay on that variant, to reverse-fit a recipe.",
         "在下面选一张参考图，或者「AI 生成出片」并停在该变体上，才能反推配方。"),
+    ("Reverse-fit reads the ✨ AI generated card's pixels — select that card; your ✎ edits are sliders over the same pixels and stay where they are.",
+        "反推读取的是「✨ AI 生成」卡的像素——请选中那张卡；你在「✎」卡上的编辑是同一像素上的滑杆，原地保留。"),
     ("Choose reference…", "选择参考图…"),
     ("Reverse-fit toward ANY finished version of THIS SAME photo — your own \
       Lightroom/Capture One export, the camera's JPEG, a TIFF, or another RAW \
@@ -713,8 +715,8 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     ("Show only snapshots taken from the variant you are on. Versions with no recorded source (saved before this) are hidden while it is on.",
         "只列出从当前变体存下的快照。没有记录来源的版本（早于此功能）会被隐藏。"),
     ("{n} hidden — saved from another variant", "已隐藏 {n} 个（来自其他变体）"),
-    ("A generated variant's look lives in its pixels — a version snapshot would store an almost-empty recipe; run 「Reverse-fit」 first",
-        "AI 生成变体的效果在像素里——存版本只会存下一份基本空白的参数；请先跑「反推」"),
+    ("A pristine ✨ AI generated card has no develop to snapshot — move a slider to start an ✎ Edited AI image card, or run 「Reverse-fit」",
+        "原样的「✨ AI 生成」卡没有可存的显影——动一下滑杆就会开出「✎ 生图编辑」卡，或者跑「反推」"),
     ("Renaming v{n} failed: {err}", "v{n} 改名失败：{err}"),
     // R24-3: loading a snapshot TAKEN on a generated card onto a parametric
     // canvas — the snapshot carries no camera base look, so one is stamped.
@@ -725,6 +727,7 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     ("Snapshot history", "快照历史 · Snapshot history"),
     ("· current", "· 当前"),
     ("· pixel-state (no XMP)", "· 像素态（不出 XMP）"),
+    ("· develop over AI pixels (no XMP)", "· AI 像素上的显影（不出 XMP）"),
     ("· on baked pixels", "· 基于烘焙像素"),
 
     // ── Develop · export bar sliders (in update()) ───────────────────────────
@@ -779,6 +782,8 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
         "把这个变体的显影参数复制到「▣ 原片」变体——它的烘焙像素和本变体都保留。一步 Ctrl+Z 可撤销；再按 Ctrl+S 才存为本照片的显影"),
     ("A generated variant's look lives in its pixels — there are no develop parameters to copy onto the ▣ Original card; run 「Reverse-fit」 first",
         "AI 生成变体的效果在像素里——没有可复制到「▣ 原片」变体的显影参数；请先跑「反推」"),
+    ("This ✎ card's develop is tuned over AI-generated pixels — on the ▣ Original card those sliders would land on the source frame; run 「Reverse-fit」 on the ✨ card first",
+        "这张「✎」卡的显影是在 AI 生成像素上调的——复制到「▣ 原片」会把这些滑杆套到原始画面上；请先在「✨」卡上跑「反推」"),
     ("this photo's strip holds no ▣ Original card to apply onto",
         "这张照片的变体里没有「▣ 原片」可以覆盖"),
     ("「{name}」 copied onto the ▣ Original card (its pixels are untouched) — Ctrl+Z undoes it; Ctrl+S then saves it as this photo's develop",
@@ -973,6 +978,16 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     ("▣ Original", "▣ 原片"),
     ("✨ AI generated", "✨ AI 生成"),
     ("◭ Reverse-fit", "◭ 反推"),
+    // 2026-09-13: the immutability rule — a ✨ card never takes an edit; the
+    // first one continues on a new ✎ card, said by toast, by the card's
+    // hover and once at the door for a strip saved before the split.
+    ("✎ Edited AI image", "✎ 生图编辑"),
+    ("✨ AI generated stays as generated — your edit continues on a new ✎ Edited AI image card",
+        "「✨ AI 生成」保持原样——你的编辑在新开的「✎ 生图编辑」卡上继续"),
+    ("A generated image stays as generated: the first edit here continues on a new ✎ Edited AI image card",
+        "生图保持原样：在这张卡上做的第一次编辑会转到新开的「✎ 生图编辑」卡上继续"),
+    ("This photo's AI image and the edits over it now sit on separate cards (✨ pristine, ✎ your develop) — Ctrl+S saves the strip this way",
+        "这张照片的 AI 生图和它上面的编辑已分成两张卡（✨ 原样、✎ 你的显影）——Ctrl+S 会按此保存变体条"),
     ("Switched to variant「{name}」 — variants are independent, switching is lossless",
         "已切到「{name}」变体 — 各变体独立，切换无损"),
 
@@ -1086,9 +1101,9 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     // Terminology: sidecar/边车 is reserved for the RAW-adjacent .xmp; the
     // store's recipe.json is "the saved develop / 已保存的显影" (it no longer
     // sits beside anything).
-    ("A generated variant's look lives in its pixels — there's no parametric recipe to export; run 「Reverse-fit」 first to get an exportable XMP",
-        "生成变体的观感在像素里，没有参数配方可导；先「反推配方」得到可导出的 XMP"),
     ("XMP + recipe saved → {path}", "XMP + 配方已保存 → {path}"),
+    ("recipe saved → {path} (no Lightroom XMP: this card's look sits on AI-generated pixels)",
+        "配方已保存 → {path}（不出 Lightroom XMP：这张卡的观感在 AI 生成的像素上）"),
     ("recipe saved → {path} (XMP applies to RAW only)",
         "配方已保存 → {path}（XMP 仅适用于 RAW）"),
     ("recipe saved — but the Lightroom XMP failed: {err}",
@@ -1311,8 +1326,8 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     // ── Status bar · reimagine / reverse-fit / style prompt ──────────────────
     ("AI generating… (gpt-image; high quality can run minutes — progress in the status bar; ✕ Cancel to stop; hi-res input needs a full-frame develop first)",
         "AI 生成出片中…（gpt-image；高质量可能需要数分钟——进度见状态栏；✕ 取消可停止；高分辨率输入需先全幅显影）"),
-    ("「AI generated」variant created → {path} · keep tweaking or 「Reverse-fit」",
-        "已生成「AI 生成」变体 → {path} · 可继续微调或「反推配方」"),
+    ("「AI generated」variant created → {path} · edits on it continue on an ✎ card, or 「Reverse-fit」",
+        "已生成「AI 生成」变体 → {path} · 在它上面的编辑会转到「✎」卡继续，或「反推配方」"),
     ("Reverse-fitting… (global + semantic/ranges + spatial tiles)",
         "反推配方中…（全局 + 语义/亮度范围 + 空间图块）"),
     ("Reverse-fitting… (statistical fit, local compute)", "反推配方中…（统计拟合，本地运算）"),
