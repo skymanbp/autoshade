@@ -498,13 +498,13 @@ command-line archive; `checksums.txt` carries the SHA-256 of every asset.
 
 | File | Size | SHA-256 |
 |---|---:|---|
-| `autoshade.exe` (CLI) | 21,161,472 bytes | `515742ad24033f725b4c09d98fa2a87541b51437c60983f8b02c5bebaf1867f4` |
-| `autoshade-gui.exe` (desktop app) | 27,462,144 bytes | `1c2454b97983c3bf6dd225d23fae21b9c1cb0731b440950f972cd50400ee2ac5` |
-| `AutoShade-Setup-1.3.3.exe` (installer) | 14,688,467 bytes | `21331c5fc80f4a6ce9656d1c5af2ba7402525abdeb6238ed2faaed026c8f4c5a` |
-| `autoshade-1.3.3-windows-x64.zip` (portable archive) | 19,560,522 bytes | `bc840e187b9b63750f9fb790fdd56edc713c169456a1147b2395d0e2ff3b41ca` |
-| `AutoShade-1.3.3-macos-universal.zip` (macOS app bundle) | 39,574,535 bytes | `048e1d4507990a40c175e32073d4d25a3efef018fd847f52b3156b6e3968e31e` |
-| `AutoShade-1.3.3-linux-x64.zip` (Linux command line only) | 9,500,750 bytes | `1d00999f145b97a53a3992c0c1ec0d08eab88fe1ad093a13e605a78240c1aca9` |
-| `AutoShade-1.3.3-macos-cli.zip` (macOS command line only) | 17,160,308 bytes | `41d0f20f29c725c8a330b9a04aee8dc6f735a8a745e317e32e9450dfbae33afa` |
+| `autoshade.exe` (CLI) | 21,191,680 bytes | `97b0bce5c32badc507481aa583e2f0ec29a7ae0da6cd998b9b9194559a1aa303` |
+| `autoshade-gui.exe` (desktop app) | 27,530,240 bytes | `770b7b253265f95905594b694fc52216a5cb5f7321b0b56f22842b773b6499eb` |
+| `AutoShade-Setup-1.3.3.exe` (installer) | 14,712,485 bytes | `4e96314e286e3509bd0f6e0956f7e8b50ee3c6dba362f358d0ca3639708b294d` |
+| `autoshade-1.3.3-windows-x64.zip` (portable archive) | 19,601,897 bytes | `9f893e67c6722e841a8c19a13e8108d08591a94815665e14ebc0c6855543ed2f` |
+| `AutoShade-1.3.3-macos-universal.zip` (macOS app bundle) | 39,623,831 bytes | `3421c9bda9b66ea0a6298e5f755456e9886e0be55e5c8c672d592f7f1137dcbb` |
+| `AutoShade-1.3.3-linux-x64.zip` (Linux command line only) | 9,514,637 bytes | `b25e3f2a88673d90d77e794336e8d5f606bc3c9681f5667a7d8a8783330b7a3e` |
+| `AutoShade-1.3.3-macos-cli.zip` (macOS command line only) | 17,173,801 bytes | `eeecbc85bf7ff08a20e4dd969e35b925949dfefde5206fb8bc67e48051859f67` |
 
 Download from the
 [v1.3.3 release page](https://github.com/skymanbp/autoshade/releases/tag/v1.3.3):
