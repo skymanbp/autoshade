@@ -148,6 +148,17 @@ library lanes when the tag was cut, at the user's word; its result and the
 `--gates` documentation check are recorded in the ROADMAP ledger entry after
 the release, as the calibration lane's was for v1.3.2.
 
+Recorded after the tag: the battery finished green on the `d0851ab` snapshot
+(the tagged code minus the version literal and the documents — `git diff
+d0851ab v1.3.3 -- src tests python` is empty): library **1483 / 0 / 15**
+(717.51 s, release profile, one process per module), CLI 24, contract
+2 + 2, doc-tests 0, GUI **183 / 0 / 1**, calibration lane **1483 / 0 / 15**
+(1258.61 s; one skip line, the mask-brush specimen test whose
+`AUTOSHADE_MB_SAMPLE_ROOT` specimen is not on this machine), `audit_i18n`
+0 / 0 / 0 and the font check 874/874 inside the battery, 1498 library names
+enumerated, and `check_docs.py --gates` on the transcript with the XMP census
+root supplied **30 PASS / 0 FAIL / 0 SKIP**.
+
 Final gate, reference pair: this release's CLI (`--version` 1.3.3, built in
 its own target directory) rendered the 0.85 develop at full resolution;
 against the v1.3.2 release CLI's render of the same develop **0 of

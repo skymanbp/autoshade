@@ -4,16 +4,17 @@
 > 要么是带理由的终局裁定（一个测出来的数、一条仪器极限、一次用户拍板）。
 > 每项都附 `file:line` 或提交锚点，供新会话不重读全库即可接手。更新于 **2026-09-13**。
 >
-> **v1.3.3（2026-09-13，用户报障「就是一打开就这样」+「AI 生图怎么能在上面继续编辑呢？
-> 肯定是新开变体啊」）**：① develop 库里的 XMP 投影 `<stem>.xmp` 成为 develop 提交的第四个成员
+> **v1.3.3 已发布**（2026-09-13，tag `v1.3.3` → `f5046c9`，release run `34773631322`
+> 五工位绿，8 资产回下载字节校验，官网 23/23 逐字节，本机已升；用户报障「就是一打开就这样」+
+> 「AI 生图怎么能在上面继续编辑呢？肯定是新开变体啊」）——① develop 库里的 XMP 投影 `<stem>.xmp` 成为 develop 提交的第四个成员
 > （源 develop 写、AI 像素/烘焙图清、写不出来才保留），四个读取端在有 `recipe.json` 时不再落到投影
 > ——中性配方是「已存的事实」不是「缺席」。起因：删掉的「◭ 反推」卡留下 +90 饱和度的投影，剩下的
 > 「✨ AI 生成」卡一打开就套着它。② 「✨ AI 生成」卡不可编辑：在它上面做的第一次编辑（滑杆、粘贴、
 > 载入版本、AI 分析、原位修补）转到旁边新开的「✎ 生图编辑」卡上继续，✨ 卡保持原样；Ctrl+S 对 AI
 > 像素上的卡不再拒绝（存 develop、清投影、状态行说明不出 XMP）；旧版存下的「✨ 卡带编辑」开门即分成
 > ✨ + ✎（未保存工作，提示一次）；web 保存 / 批量粘贴经 `ActiveWrite::DevelopOnAiPixels` 把记录写成
-> `edited` 并保留 ✨ 卡。门全绿（见台账首条的两部分）；用户 2026-09-13 令「全部完成后走完整发布流程」，
-> 发版事实随发版后补录。
+> `edited` 并保留 ✨ 卡。用户 2026-09-13 令「全部完成后走完整发布流程」、随后「那你他妈逼发啊」：电池跑到中途打 tag，
+> 电池随后全绿、check_docs 30/30；门与发版事实见台账首条。「本文件不再持有任何计划中的工作」仍然成立。
 >
 > **v1.3.2 已发布**（2026-09-12 深夜，tag `v1.3.2` → `d0f7dd4`，release run `34732153004`
 > 五工位绿，8 资产回下载字节校验，官网 23/23 逐字节，本机已升）——反推的强度不再借用「分析」折叠区的强度滑杆：
@@ -54,6 +55,8 @@
 ## 版本台账（逐版已发布内容与实测数字，新在上；均已完成，勿重做）
 
 ### v1.3.3 — 「✨ AI 生成」卡不可编辑，编辑转到新开的「✎ 生图编辑」卡；XMP 投影成为 develop 提交的成员
+
+- **🚢 v1.3.3 已发布 2026-09-13（tag `v1.3.3` → `f5046c9`，release run `34773631322` 五工位绿（windows 10 m 28 s、macos 12 m 18 s、linux 2 m 23 s、macos-battery 22 m 55 s——Batteries 通过：macOS 库 1479 / 0 / 14、CLI 24；Metal 实测 torch 2.14.0 / 设备 `mps` / 前向 8.7 ms / 峰值 1067.0 MiB / `deform_conv2d` 原生——、publish 15 s）；8 资产（7 件 + `checksums.txt` 自身）回下载，`sha256sum -c checksums.txt` 7/7 OK；便携 zip 内两 exe 与独立资产逐字节同（`cmp`），zip 内 `python/denoise.py` sha256 `1002fef7…` 与仓库同、`test_*.py` 0 个，解包 CLI 自报 `autoshade 1.3.3`；README / 官网资产行由发布字节回填（`ad86478`：CLI 21,191,680 B、GUI 27,530,240 B、安装包 14,712,485 B、便携 19,601,897 B、macOS 通用 39,623,831 B、Linux 9,514,637 B、macOS CLI 17,173,801 B）；官网 `deploy_site.js` exit 0（23 件：4 新传 + 19 已有）+ purge，23/23 逐字节相同（浏览器 UA，剥 CF beacon；未匹配路径以 404 状态返回 `404.html` 正文；`index.html` 15 个 `?v=1.3.3` 键、0 个 1.3.2，首屏「Download v1.3.3.」）；本机 `%LOCALAPPDATA%\Programs\AutoShade` 静默原地升级（PowerShell 跑 Inno `/VERYSILENT /SUPPRESSMSGBOXES /NORESTART`，安装器 exit 0）：两 exe sha256 与 `checksums.txt` 全等、FileVersion 1.3.3、CLI 自报 1.3.3、卸载条目一条（1.3.3）、PendingFileRenameOperations 2 条中 0 条涉 AutoShade、权重类文件 7 个 9,288,670,108 B 升级前后同、81 → 81 文件无一删除（36 件由安装器重写）、全程未启动 GUI。发布说明 [docs/RELEASE_NOTES_v1.3.3.md](RELEASE_NOTES_v1.3.3.md)；发版提交 `f5046c9` 里的资产行是 v1.3.2 的占位、由 `ad86478` 回填（与 v1.3.2 的 `d0f7dd4` → `73a38e8` 同一模式）。**发版前的门**（`d0851ab` 树，即发版树减去版本号与文档）：库 **1483 / 0 / 15**（测试 profile，907.61 s）、CLI 24 / 0、GUI **183 / 0 / 1**（发版电池 GUI 车道，release profile）、clippy 两组 0、`audit_i18n` 0 / 0 / 0、字体 874/874（v1.3.2 为 873）、`cargo metadata --locked` 干净、`check_docs.py` 26P / 0F / 4S（4 个 SKIP＝要转录本才能证的计数项）、照片名 grep 0、按名对 v1.3.2 标签 +15 / −1（静态 1696 → 1710 个测试函数；电池转录本按名：库 1495 → 1498＝+4 / −1（`a_develop_commit_lands_all_three_or_nothing` → `…_all_four_or_nothing`、`the_projection_member_stages_what_write_xmp_publishes`、`the_projection_replays_with_its_generation`、`a_develop_over_ai_pixels_forks_the_record_and_keeps_the_pristine_card`），GUI 173 → 184＝+11 / −0）。**用户 2026-09-13 令「那你他妈逼发啊」**：三车道电池跑到库车道中途时打 tag（默认车道的库已 1498 条 0 失败、GUI 车道已 exit 0），电池随后跑完全绿：**库 1483 / 0 / 15**（release profile、逐模块单进程，717.51 s）、CLI 24、契约 2+2、doc 0、**GUI 183 / 0 / 1**、**校准 1483 / 0 / 15**（1258.61 s；1 条 SKIPPED＝蒙版画笔样本测试，其 `AUTOSHADE_MB_SAMPLE_ROOT` 样本不在本机）、电池内 i18n 0 与字体 874/874、按名 1498，`check_docs.py --gates` 对转录本 + `AUTOSHADE_CENSUS_ROOT=D:\Photography\Raw` → **30 PASS / 0 FAIL / 0 SKIP**（发版树 `f5046c9`）。**终门**（参考对）：1.3.3 CLI（单独 target 目录编译，`--version` 自报 1.3.3）复渲 0.85 参考 develop 全幅：对 v1.3.2 发版 CLI 的同一渲染 **60,217,344 px 中 0 px 不同**，缩到 2048 对 R37 验收渲染 mean|diff| 0.00044 / max 0.008（与 v1.3.2 同数）；三档 0.65 / 0.85 / 1.0 用同一批 develop 在 2048 px 复测，对 v1.3.0 验收时的渲染各 0 px 不同（0.85：天空 ΔE 4.9、|ΔL*| 0.6、L* 展布 1.03、陆地 ΔE 6.9），三档裁切逐一对照目标看过：无缝、无矩形，地平线辉光与远山雾在目标有的位置——求解器与渲染器未动，像素证明。**
 
 #### ① 「✨ AI 生成」卡不可编辑：编辑转到新开的「✎ 生图编辑」卡（2026-09-13）
 
