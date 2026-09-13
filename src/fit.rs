@@ -8723,6 +8723,35 @@ pub(crate) fn calibration_corpus() -> Option<std::path::PathBuf> {
     Some(dir)
 }
 
+/// The corpus's saved zoned develop, `fitted.recipe.json`, with its raster
+/// references resolved INTO the corpus. The app wrote that file with the
+/// absolute path its sky raster had on the machine that produced it, and the
+/// corpus has moved since (from the repository's own target directory, under
+/// the repository's old name, to a fixtures directory) — a test that parsed
+/// the JSON itself rendered a develop whose raster no longer existed and died
+/// on it. The contract above is that the raster lives BESIDE the recipe under
+/// its canonical name, so a reference whose file name is present in the
+/// corpus resolves there; one that is not stays as written and fails where it
+/// always did. Every corpus test that reads the saved develop comes through
+/// here, which is what makes the corpus relocatable as a directory.
+#[cfg(test)]
+pub(crate) fn calibration_recipe(root: &std::path::Path) -> crate::recipe::EditRecipe {
+    let text = std::fs::read_to_string(root.join("fitted.recipe.json"))
+        .expect("calibration fitted.recipe.json");
+    let mut recipe: crate::recipe::EditRecipe =
+        serde_json::from_str(&text).expect("saved calibration recipe");
+    for mask in &mut recipe.masks {
+        for path in mask.bitmap_paths_mut() {
+            let Some(name) = std::path::Path::new(path.as_str()).file_name() else { continue };
+            let local = root.join(name);
+            if local.is_file() {
+                *path = local.to_string_lossy().into_owned();
+            }
+        }
+    }
+    recipe
+}
+
 // --------------------------------------------------------------------------
 
 #[cfg(test)]
@@ -15535,9 +15564,7 @@ mod tests {
         let source = image::open(root.join("neutral.jpg")).expect("calibration neutral.jpg");
         let target = image::open(root.join("target.jpg")).expect("calibration target.jpg");
         let conservative = fit_recipe(&source, &target);
-        let text = std::fs::read_to_string(root.join("fitted.recipe.json"))
-            .expect("calibration fitted.recipe.json");
-        let preferred: EditRecipe = serde_json::from_str(&text).expect("saved calibration recipe");
+        let preferred = calibration_recipe(&root);
         let rescored = rescore_report(&source, &target, &preferred, conservative.err_before, &[]);
         assert_eq!((conservative.mode, rescored.mode), (FitMode::Atmosphere, FitMode::Atmosphere));
         assert_evidence_models_bit_equal(&rescored.evidence, &conservative.evidence);

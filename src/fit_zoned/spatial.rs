@@ -2773,9 +2773,7 @@ mod tests {
         let Some(root) = fit::calibration_corpus() else { return };
         let source = image::open(root.join("neutral.jpg")).unwrap();
         let target = image::open(root.join("target.jpg")).unwrap();
-        let recipe: crate::recipe::EditRecipe =
-            serde_json::from_slice(&std::fs::read(root.join("fitted.recipe.json")).unwrap())
-                .unwrap();
+        let recipe = fit::calibration_recipe(&root);
         let (s_img, t_img) = fit::analysis_pair(&source, &target);
         let original = fit::pixels_of(&s_img);
         let target_pixels = fit::pixels_of(&t_img);

@@ -8213,8 +8213,7 @@ mod tests {
         let saved_mask = material.join("sky-mask.png");
         let raw = material.join("source.arw");
         if material.join("fitted.recipe.json").exists() && saved_mask.exists() && raw.exists() {
-            let text = std::fs::read_to_string(material.join("fitted.recipe.json")).unwrap();
-            let with_zones: crate::recipe::EditRecipe = serde_json::from_str(&text).unwrap();
+            let with_zones = fit::calibration_recipe(&material);
             let mut without_zones = with_zones.clone();
             without_zones.masks.clear();
             let before_image =
@@ -10038,33 +10037,61 @@ mod tests {
         sky_mask.save(mask_path.path()).unwrap();
         let mut report = fit::fit_recipe(&source, &target);
         attach_zones(&source, &target, &mut report, &sky_mask, &sky_mask, &mask_path);
-        let sky = report
-            .recipe
-            .masks
-            .iter()
-            .find(|mask| mask.role == MaskRole::ZoneSky)
-            .expect("the calibration sky zone must survive");
-        // RE-PINNED by step 9, and it moved in the STRONGER direction. The
-        // pre-step-9 rim was absolute, so the bow the calibration scene
-        // already carried under the feather was charged to this correction
-        // and the gate shrank it to -0.12..-0.15 EV to pay for it. The
-        // differential ruler charges only the rim the correction introduces,
-        // so less shrink buys the same seam budget and the zone keeps
-        // -0.186 EV. This is the same repair the island log describes from
-        // the other end ("candidate rim 0.060 ... even shared shrink k=0 left
-        // 0.058"), measured on the calibration pair instead.
-        assert!((-0.20..=-0.17).contains(&sky.exposure_ev), "ev {}", sky.exposure_ev);
-        assert_gains_withheld(sky.color_gains);
-        assert_eq!(sky.saturation, 0.0);
+        // RE-PINNED for v1.3.0's fit (R36 residual banding, R37's target-referenced
+        // seam ruler), measured with the corpus in reach for the first time since
+        // v1.2.6. Before step 9 the absolute rim ruler charged the scene's own bow
+        // to this correction and shrank it to -0.12..-0.15 EV; step 9's
+        // differential ruler let the single sky zone keep -0.186 EV. Since v1.3.0
+        // the sky survives as TWO bands — the residual earned a partition ("Zoned
+        // sky accepted 2 bands after 15 trials") — and the seam ruler reads the
+        // target's own boundary (it asks 0.220 here; the introduced rim 0.028 ->
+        // 0.007 after shared differential shrink k=0.193). The band that carries
+        // the luminance move keeps -0.152 EV with its colour withheld: the
+        // target's 12x8 cell means did not vouch the move (0.628 converged, 0.287
+        // diverged over 60 cells). The second band ships the small colour move
+        // its own cells did vouch (-0.062 EV, saturation +2.4), so the "partial"
+        // refusal of this test's name is now literally partial: one band refuses
+        // colour, the other does not.
+        let sky_bands: Vec<_> =
+            report.recipe.masks.iter().filter(|mask| mask.role == MaskRole::ZoneSky).collect();
+        let (sky, second) = match sky_bands.as_slice() {
+            [first, second] => (*first, *second),
+            other => panic!(
+                "the calibration sky survives as two bands, not {:?}",
+                other.iter().map(|mask| &mask.name).collect::<Vec<_>>()
+            ),
+        };
         let note = report
             .notes
             .iter()
             .find(|note| note.key == crate::rationale::keys::ZONE_BOUNDARY_PASSED)
             .expect("calibration sky must reach the boundary gate");
         let after = note_number(note, "after");
+        // Printed BEFORE the pins: a moved number is only diagnosable from the
+        // rationale that moved it, and a failed assertion never reached here.
+        for mask in &report.recipe.masks {
+            eprintln!(
+                "CALIBRATION_ZONE name={:?} role={:?} ev={:.3} gains={:?} sat={:.1}",
+                mask.name, mask.role, mask.exposure_ev, mask.color_gains, mask.saturation
+            );
+        }
         eprintln!(
             "CALIBRATION_SKY ev={:.3} gains={:?} sat={:.1} rim={:.4} rationale={}",
             sky.exposure_ev, sky.color_gains, sky.saturation, after, report.recipe.rationale
+        );
+        assert!((-0.17..=-0.135).contains(&sky.exposure_ev), "ev {}", sky.exposure_ev);
+        assert_gains_withheld(sky.color_gains);
+        assert_eq!(sky.saturation, 0.0);
+        assert!(
+            (-0.08..=-0.045).contains(&second.exposure_ev),
+            "second band ev {}",
+            second.exposure_ev
+        );
+        assert!(
+            second.saturation > 0.0,
+            "the second band ships the colour its cells vouched: sat {} gains {:?}",
+            second.saturation,
+            second.color_gains
         );
         assert!(after <= ZONE_BOUNDARY_RIM_MAX);
         let colour_note = report
