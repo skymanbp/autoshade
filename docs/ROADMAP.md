@@ -4,10 +4,11 @@
 > 要么是带理由的终局裁定（一个测出来的数、一条仪器极限、一次用户拍板）。
 > 每项都附 `file:line` 或提交锚点，供新会话不重读全库即可接手。更新于 **2026-09-12**。
 >
-> **v1.3.2（2026-09-12 深夜，用户令）**：反推的强度不再借用「分析」折叠区的强度滑杆——
+> **v1.3.2 已发布**（2026-09-12 深夜，tag `v1.3.2` → `d0f7dd4`，release run `34732153004`
+> 五工位绿，8 资产回下载字节校验，官网 23/23 逐字节，本机已升）——反推的强度不再借用「分析」折叠区的强度滑杆：
 > 「反推」折叠区有了自己的「反推强度」滑杆（默认 65%，独立持久化），两把滑杆互不相通。用户原话：
 > 「该在哪就在哪，某个功能属于什么板块就放到该板块。如果不同板块都要，那就分开做，比让人迷惑强。」
-> 门全绿（见台账首条）；用户 2026-09-12 深夜裁定「现在发 v1.3.2」，发版事实随发版后补录。
+> 用户 2026-09-12 深夜裁定「现在发 v1.3.2」；门与发版事实见台账首条。
 >
 > **v1.3.1 已发布**（2026-09-12，tag `v1.3.1` → `91df8f0`，release run `34722635800`
 > 五工位绿，8 资产回下载字节校验，官网 22/22 逐字节，本机已升）——侧车装下整份 develop：
@@ -43,9 +44,10 @@
 
 ### v1.3.2 — 反推强度独立成「反推」折叠区自己的滑杆
 
+- **🚢 v1.3.2 已发布 2026-09-12（tag `v1.3.2` → `d0f7dd4`，release run `34732153004` 五工位绿（windows 11 m 22 s、macos 11 m 32 s、linux 3 m 26 s、macos-battery 23 m 24 s——Batteries 通过：macOS 库 1476 / 0 / 14、CLI 24；Metal 实测 torch 2.14.0 / 设备 `mps` / 前向 8.3 ms / 峰值 1067.0 MiB / `deform_conv2d` 原生——、publish 15 s）；8 资产（7 件 + `checksums.txt` 自身）回下载，`sha256sum -c checksums.txt` 7/7 OK；便携 zip 内两 exe 与独立资产逐字节同（`cmp`），zip 内 `python/denoise.py` sha256 `1002fef7…` 与仓库同、`test_*.py` 0 个，解包 CLI 自报 `autoshade 1.3.2`；README / 官网资产行由发布字节回填（`73a38e8`：CLI 21,161,472 B、GUI 27,462,144 B、安装包 14,688,467 B、便携 19,560,522 B、macOS 通用 39,574,535 B、Linux 9,500,750 B、macOS CLI 17,160,308 B）；官网 `deploy_site.js` exit 0（23 件：4 新传 + 19 已有）+ purge，23/23 逐字节相同（浏览器 UA，剥 CF beacon；未匹配路径以 404 状态返回 `404.html` 正文；`index.html` 15 个 `?v=1.3.2` 键、0 个 1.3.1，首屏「Download v1.3.2.」）；本机 `%LOCALAPPDATA%\Programs\AutoShade` 静默原地升级（PowerShell 跑 Inno `/VERYSILENT /SUPPRESSMSGBOXES /NORESTART`，安装器 exit 0）：两 exe sha256 与 `checksums.txt` 全等、FileVersion 1.3.2、CLI 自报 1.3.2、卸载条目一条（1.3.2）、PendingFileRenameOperations 2 条无一涉 AutoShade、权重类文件 7 个 9,288,670,108 B 升级前后同、81 文件无一删除（36 件由安装器重写：两 exe、assets、python、LICENSE、unins）、全程未启动 GUI。发布说明 [docs/RELEASE_NOTES_v1.3.2.md](RELEASE_NOTES_v1.3.2.md)；发版提交 `d0f7dd4` 里的资产行是 v1.3.1 的占位、由 `73a38e8` 回填（与 v1.3.1 的 `91df8f0` → `3be58e2` 同一模式）。发版电池（车道 `/d/wt/fix37`，release profile、自家 target 目录、BelowNormal）：库 **1480 / 0 / 15**（1495 枚举，514.85 s）、CLI 24、契约 2+2、doc 0、GUI **172 / 0 / 1**、clippy 两组 0、`audit_i18n` 0/0、字体 873/873（v1.3.1 为 868）、`cargo metadata --locked` 干净、`check_docs.py --gates` 转录本 28P / 0F / 2S、按名对 v1.3.1 标签 +1 / −1（1696 个测试函数不变）、校准车道未跑（无语料）；**终门**（参考对）：1.3.2 CLI（`--version` 自报 1.3.2）复渲 0.85 参考 develop，对 v1.3.1 出厂 CLI 的渲染 60,217,344 px 中 5,326 px 差 1 码（与 v1.3.1 示例图量到的本机/CI codegen 噪声同级），对 v1.3.1 验收渲染（2048 px）mean|diff| 0.00044 / max 0.008——反推算法未动，数字与改动前相同。**
 - **起因（用户令，原话）**：「那你这个按钮这么安排很让人搞不清啊？面板中不要出现这种情况。该在哪就在哪，某个功能属于什么板块就放到该板块。如果不同板块都要，那就分开做，比让人迷惑强。」——此前「反推配方」读的是「分析」折叠区的「强度」滑杆（F1 的「一份读数、两处消费」设计，`panel_strength()`），用户在反推那一行找不到文档里的 0.85 该在哪调。
 - **改法**：`AutoShadeApp::fit_strength`（默认 `GradeStrength::DEFAULT` = 0.65；`Prefs::fit_strength` 同源持久化，旧 prefs 缺键按默认解码而不是 serde 的 0.0）；「反推」折叠区在动词行正上方多一条「反推强度」滑杆（`slider_pct_hinted`：0..100 刻度、双击复位、悬停微调，tooltip 写明 ≤65% 与标定路径逐字节相同 / >65% 放宽 / ≥85% 披露）；`panel_strength()` 拆成 `analysis_strength()`（只喂分析请求）与 `fit_strength()`（只喂分区与全局两个反推入口）；AI 区标题的 ● 也看这条滑杆；按钮 tooltip、CLI `match --strength` 帮助、USER_MANUAL 两处、README/SHOWCASE 图注里的「panel Strength」措辞同步改为「Reverse-fit strength」。库侧 rationale 那句「Reverse-fit used panel Strength {pct}%」不动——`fit.rs` 从它反解出强度，改拼法会让旧说明读不回。
-- **门（车道 `/d/wt/fix37`，`lane-fix39`，自家 target 目录、BelowNormal）**：GUI **172 / 0 / 1**（`gui_reverse_fit_uses_the_panel_strength` → `gui_reverse_fit_has_its_own_strength_dial`，同数：默认三处同源、两把滑杆互不相通、320 px 面板画出「Reverse-fit strength」、● 跟随、prefs 往返与缺键解码、worker 源码钉两个入口都读 `fit_strength()` 且 `panel_strength` 不再作为代码出现）、CLI **24 / 0**（`match --strength` 帮助改口）、clippy 两组 0、`audit_i18n` 0 / 0、字体子集 `--check` **873/873**（中文 tooltip 带来 5 个新码点，含 撑/诚/露 三个原本缺的；只重生成 `NotoSansSC-autoshade.ttf` 217,760 → 219,476 B——其余四个子集按今日供体重生成后与库内字节不同、字形集未变，故保留库内版本）、check_docs 25P / 0F / 5S、照片名与令牌 grep 0。库测试未重跑：`src/` 只动了 GUI 与 `main.rs` 的一句帮助文本。官网 `site/index.html` 两处图注同步改口但**未部署**——等发版时一起上线，线上仍是 v1.3.1 的措辞。
+- **门（车道 `/d/wt/fix37`，`lane-fix39`，自家 target 目录、BelowNormal）**：GUI **172 / 0 / 1**（`gui_reverse_fit_uses_the_panel_strength` → `gui_reverse_fit_has_its_own_strength_dial`，同数：默认三处同源、两把滑杆互不相通、320 px 面板画出「Reverse-fit strength」、● 跟随、prefs 往返与缺键解码、worker 源码钉两个入口都读 `fit_strength()` 且 `panel_strength` 不再作为代码出现）、CLI **24 / 0**（`match --strength` 帮助改口）、clippy 两组 0、`audit_i18n` 0 / 0、字体子集 `--check` **873/873**（中文 tooltip 带来 5 个新码点，含 撑/诚/露 三个原本缺的；只重生成 `NotoSansSC-autoshade.ttf` 217,760 → 219,476 B——其余四个子集按今日供体重生成后与库内字节不同、字形集未变，故保留库内版本）、check_docs 25P / 0F / 5S、照片名与令牌 grep 0。库测试在 `9163a77` 当时未重跑（`src/` 只动了 GUI 与 `main.rs` 的一句帮助文本），发版电池里重跑全绿（见上 🚢 条）。官网 `site/index.html` 两处图注同步改口，随本版部署上线。
 
 ### v1.3.1 — 侧车装下整份 develop，经 Lightroom 重写后原样读回
 
