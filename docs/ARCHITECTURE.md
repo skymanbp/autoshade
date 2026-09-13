@@ -1,6 +1,6 @@
 # AutoShade — Architecture
 
-> Status: **implemented** (v1.3.2 — the sensor plane is measured from the
+> Status: **implemented** (v1.3.3 — the sensor plane is measured from the
 > container before the decoder is asked to allocate it, so a frame past that
 > decoder's own ceiling is a named refusal naming the frame and the workflow
 > that works instead of an abort, and a CONTAINED panic no longer raises a modal
@@ -134,10 +134,27 @@
 > wrong reason; it writes a `=== name ===` transcript that
 > `scripts/check_docs.py --gates` reads the counts and the lane set back out
 > of, and it prints the by-name test-set difference against a saved baseline.
-> 1495 library + 24 CLI + 173 GUI + 2+2 contract tests are enumerated in the GUI
-> build; the library result is 1480 pass + 15 `#[ignore]`d forensic probes and
-> the GUI result is 172 pass + one explicit scratch-recipe export probe ignored
-> in the ordinary battery. Counts refreshed 2026-09-12 for v1.3.2: +1 / −1 by
+> 1498 library + 24 CLI + 184 GUI + 2+2 contract tests are enumerated in the GUI
+> build; the library result is 1483 pass + 15 `#[ignore]`d forensic probes and
+> the GUI result is 183 pass + one explicit scratch-recipe export probe ignored
+> in the ordinary battery. Counts refreshed 2026-09-13 for v1.3.3: +15 / −1 by
+> name against the v1.3.2 tag (`d0f7dd4`), taken statically between the tag's
+> source and this tree (1696 → 1710 `#[test]` functions) — the commit pin
+> `a_develop_commit_lands_all_three_or_nothing` rewritten as
+> `a_develop_commit_lands_all_four_or_nothing` for the projection member,
+> three library pins (`the_projection_member_stages_what_write_xmp_publishes`
+> in `pipeline`, `the_projection_replays_with_its_generation` and
+> `a_develop_over_ai_pixels_forks_the_record_and_keeps_the_pristine_card` in
+> `store`) and eleven GUI pins: the reported open-path repro
+> (`a_stale_projection_never_cooks_a_pristine_generated_card_on_open`), Ctrl+S
+> publishing the projection in the recipe's generation, and the nine
+> immutable-card pins (the fork on a slider with the frame hook's position
+> pinned in the source, a version load, the Analyze landing forking before it
+> saves, the in-place retouch baking into the edited card, the door split of a
+> pre-1.3.3 record, Ctrl+S on both AI-pixel kinds retiring a stale projection,
+> `fit_target` on an edited card, Save as version refused on the pristine card
+> and taken on the edited one, both apply-to-Original refusals). Before that,
+> counts were refreshed 2026-09-12 for v1.3.2: +1 / −1 by
 > name against the v1.3.1 tag (`91df8f0`), taken statically between the tag's
 > source and this tree — the shared-reading pin
 > `gui_reverse_fit_uses_the_panel_strength` rewritten as
