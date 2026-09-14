@@ -23,6 +23,20 @@ use crate::config::Config;
 const SIDECAR_DEFAULT_TIMEOUT_SECS: u64 = 30 * 60;
 const SIDECAR_OUTPUT_CAP: usize = 1024 * 1024;
 
+/// Where every denoise entry starts when nothing chooses a strength — the
+/// CLI's `--strength` / `--denoise-strength`, the web export's
+/// `denoise_strength`, the GUI's two dials, and the sidecar's own `--strength`
+/// default (pinned to this value textually in the tests below). ONE number.
+///
+/// 0.5, not 1.0, and the reason is measured (2026-09-13, the user's 61 MP
+/// ISO-640 frame): at 1.0 every SCUNet tier the sidecar ships keeps 1–7 % of
+/// the frame's high-frequency energy (luma HF std 2.27 → 0.12/255 for
+/// `color_real_psnr`) — the rock texture went with the noise. Strength is the
+/// sidecar's luma/chroma split (`blend_luma_chroma` in `python/denoise.py`):
+/// at 0.5 the colour speckle is gone in full (chroma HF 4.5 → 0.07/255) and
+/// half the luminance grain comes back, and the texture with it.
+pub const DEFAULT_STRENGTH: f32 = 0.5;
+
 /// The sidecar budget is its OWN variable, not `AUTOSHADE_HTTP_TIMEOUT_SECS`:
 /// that one tunes API latency, while a sidecar's first run legitimately spends
 /// many minutes downloading a model — a user shortening API timeouts must not
@@ -230,13 +244,21 @@ pub struct DenoiseOpts {
     pub script: PathBuf,
     pub cache: PathBuf,
     pub model: String,
-    /// 0..1 blend with the original (1.0 = full denoise).
+    /// 0..1. NOT a plain blend since 2026-09-13: the sidecar blends the
+    /// LUMINANCE by this amount and takes the model's chroma at
+    /// `min(1, 2·strength)` — colour noise is the ugly half and colour detail
+    /// is low-frequency, so it goes first (in full from 0.5 up), while
+    /// luminance grain returns linearly and brings the texture with it.
+    /// 0 is the identity at every entry ([`denoise_buffer`] never spawns for
+    /// it; the sidecar's law reaches the same bytes), 1 is the model's whole
+    /// output. Default [`DEFAULT_STRENGTH`].
     pub strength: f32,
 }
 
 impl DenoiseOpts {
     /// `model_override` lets the CLI pick a SCUNet tier; `None` uses the config
-    /// default (`color_real_psnr`).
+    /// default (`color_real_psnr`). Callers with nothing chosen pass
+    /// [`DEFAULT_STRENGTH`] — never their own literal.
     pub fn from_config(cfg: &Config, model_override: Option<String>, strength: f32) -> Self {
         DenoiseOpts {
             python_bin: cfg.python_bin.clone(),
@@ -1267,6 +1289,39 @@ mod tests {
         assert!(
             SIDECAR_SRC.contains("Content-Encoding"),
             "a response that arrives encoded anyway must be read as sizeless"
+        );
+    }
+
+    /// The strength's meaning lives in ONE function of the sidecar, and its
+    /// default is THE default (2026-09-13): the luma/chroma split is what
+    /// makes 0.5 a usable answer (a plain blend at 0.5 left chroma HF at
+    /// 2.26/255 — visible colour speckle — where the split leaves 0.07), and
+    /// a sidecar default drifting from `DEFAULT_STRENGTH` would make a bare
+    /// `python denoise.py` run answer differently from every Rust entry.
+    /// `python/test_denoise.py` (local, not CI) pins the arithmetic.
+    #[test]
+    fn the_sidecar_blends_luma_by_strength_and_takes_chroma_first() {
+        assert!(
+            SIDECAR_SRC.contains("def blend_luma_chroma(den, rgb, s):"),
+            "the split blend law must exist under its documented name"
+        );
+        assert!(
+            SIDECAR_SRC.contains("den = blend_luma_chroma(den, rgb, s)"),
+            "main() must route the strength through the split law"
+        );
+        assert!(
+            !SIDECAR_SRC.contains("den = s * den + (1.0 - s) * rgb"),
+            "the plain per-channel blend must not come back beside the split"
+        );
+        let default = format!("ap.add_argument(\"--strength\", type=float, default={DEFAULT_STRENGTH:?},");
+        assert!(
+            SIDECAR_SRC.contains(&default),
+            "the sidecar's own --strength default must be DEFAULT_STRENGTH ({DEFAULT_STRENGTH}): \
+             the line was not found as {default:?}"
+        );
+        assert!(
+            (0.0..=1.0).contains(&DEFAULT_STRENGTH) && DEFAULT_STRENGTH == 0.5,
+            "the measured default (see its doc) is 0.5"
         );
     }
 

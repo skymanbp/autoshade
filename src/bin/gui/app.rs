@@ -204,6 +204,14 @@ pub(crate) struct AutoShadeApp {
     pub(crate) gallery_scroll_to: Option<usize>,
     // --- settings / denoise ---
     pub(crate) save_denoise: bool,     // run SCUNet AI denoise before the full-res render
+    /// 「🤖 AI Denoise on export」's OWN strength (the Export fold's dial) and
+    /// 「🤖 AI Denoise now」's OWN strength (the Detail fold's dial) — two
+    /// timings of one denoiser, two dials, neither reaching the other (user
+    /// decision 2026-09-12: a control sits in the fold whose verb reads it).
+    /// Both start at `denoise::DEFAULT_STRENGTH`; the sidecar's luma/chroma
+    /// split law is what the value means (see `DenoiseOpts::strength`).
+    pub(crate) save_denoise_strength: f32,
+    pub(crate) denoise_strength: f32,
     pub(crate) zoned_fit: bool,        // 反推 adds a sky-to-sky zoned correction (bitmap mask)
     pub(crate) zoned_four_regions: bool, // opt-in semantic expansion to up to four regions
     pub(crate) fit_ai_judge: bool,     // 反推 then asks the vision model to SCORE the match (paid, opt-in)
@@ -1651,6 +1659,8 @@ impl Default for AutoShadeApp {
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
             save_denoise: false,
+            save_denoise_strength: autoshade::denoise::DEFAULT_STRENGTH,
+            denoise_strength: autoshade::denoise::DEFAULT_STRENGTH,
             zoned_fit: true,
             zoned_four_regions: false,
             // Paid opt-in (a vision call per fit) — mirror Prefs::default.
@@ -2093,6 +2103,8 @@ impl eframe::App for AutoShadeApp {
                 exp_dest: self.exp_dest.pref_code(),
                 last_export_dir: self.last_export_dir.clone(),
                 save_denoise: self.save_denoise,
+                save_denoise_strength: self.save_denoise_strength,
+                denoise_strength: self.denoise_strength,
                 zoned_fit: self.zoned_fit,
                 zoned_four_regions: self.zoned_four_regions,
                 fit_ai_judge: self.fit_ai_judge,

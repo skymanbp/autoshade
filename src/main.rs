@@ -202,7 +202,8 @@ enum Command {
         /// Run AI denoise (SCUNet, GPU) before developing — for high-ISO/astro.
         #[arg(long)]
         denoise: bool,
-        /// Denoise strength 0..1 (blend with original); default 1.0.
+        /// Denoise strength 0..1: luminance blend, colour noise removed in
+        /// full from 0.5 up; default 0.5 (`denoise::DEFAULT_STRENGTH`).
         #[arg(long, requires = "denoise", value_parser = unit_interval)]
         denoise_strength: Option<f32>,
         /// SCUNet model: color_real_psnr (default) / color_real_gan / color_15|25|50.
@@ -223,7 +224,8 @@ enum Command {
         /// Output path (default: ./out/<stem>.denoised.tif).
         #[arg(short, long)]
         out: Option<PathBuf>,
-        /// Strength 0..1 (blend with original); default 1.0.
+        /// Strength 0..1: luminance blend, colour noise removed in full from
+        /// 0.5 up; default 0.5 (`denoise::DEFAULT_STRENGTH`).
         #[arg(long, value_parser = unit_interval)]
         strength: Option<f32>,
         /// SCUNet model tier (see `auto --denoise-model`).
@@ -1551,7 +1553,13 @@ fn auto_cmd(
     let accepted = verdict.decision == autoshade::advisor::Decision::Accept;
     // Opt-in AI denoise runs inside the render, before tone/sharpen.
     let dn = denoise
-        .then(|| denoise::DenoiseOpts::from_config(&cfg, denoise_model, denoise_strength.unwrap_or(1.0)));
+        .then(|| {
+            denoise::DenoiseOpts::from_config(
+                &cfg,
+                denoise_model,
+                denoise_strength.unwrap_or(denoise::DEFAULT_STRENGTH),
+            )
+        });
     println!(
         "verdict: {:?}; rendering {} ({}){} ...",
         verdict.decision,
@@ -1701,7 +1709,8 @@ fn denoise_cmd(
     let out = out.unwrap_or_else(|| default_out(input, "denoised", "tif"));
     pipeline::guard_readonly(&out, input)?;
     ensure_parent(&out)?;
-    let opts = denoise::DenoiseOpts::from_config(&cfg, model, strength.unwrap_or(1.0));
+    let opts =
+        denoise::DenoiseOpts::from_config(&cfg, model, strength.unwrap_or(denoise::DEFAULT_STRENGTH));
     if decode::is_raw(input) {
         println!("denoising RAW {} (neutral develop) ...", input.display());
         let (w, h) =

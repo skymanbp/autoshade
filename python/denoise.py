@@ -23,6 +23,12 @@ Usage:
         [--model color_real_psnr|color_real_gan] [--strength 0..1]
         [--tile 512] [--overlap 32] [--cache DIR] [--fp16] [--cpu]
 
+Strength (see `blend_luma_chroma`): the LUMINANCE is blended by the value
+and the model's chroma is taken at min(1, 2*strength) — colour noise goes
+first, luminance grain (and the texture that lives at the same frequencies)
+comes back linearly. 0 = the input bytes, 1 = the model's whole output. The
+default is the Rust side's `denoise::DEFAULT_STRENGTH` (pinned by a test).
+
 Exit code 0 on success; non-zero with a message on stderr otherwise.
 """
 import argparse
@@ -391,12 +397,57 @@ class _nullctx:
         return False
 
 
+# BT.709 luma weights on the sRGB-ENCODED values: a blend law needs a
+# luma/chroma separation, not colorimetry, and the same weights invert the
+# split exactly (see `blend_luma_chroma`).
+_LUMA = (0.2126, 0.7152, 0.0722)
+
+
+def blend_luma_chroma(den, rgb, s):
+    """The strength law: luma blended by `s`, chroma from the model first.
+
+    `den` / `rgb` are float32 HxWx3 RGB in [0,1]; `s` in [0,1]. The luminance
+    (Y' = BT.709 weights) is `s*Y_den + (1-s)*Y_in`; the chroma differences
+    (R'-Y', B'-Y') come from the model at `c = min(1, 2*s)` — in full from
+    s = 0.5 up. Measured on the user's ISO-640 61 MP frame (2026-09-13): the
+    plain per-channel blend at 0.5 left chroma HF at 2.26/255 (visible colour
+    speckle) while this law leaves 0.07/255, with the same luminance grain and
+    the same rock texture back. Colour noise is the ugly half of sensor noise
+    and colour detail is low-frequency, so it goes first; luminance grain
+    returns linearly and brings the texture that lives at the same
+    frequencies with it. s = 0 reproduces `rgb` exactly (c = 0), s = 1 is the
+    model's whole output — the same two endpoints the old blend had.
+    """
+    s = float(np.clip(s, 0.0, 1.0))
+    if s >= 1.0:
+        return den
+    if s <= 0.0:
+        return rgb
+    wr, wg, wb = _LUMA
+    y_den = wr * den[:, :, 0] + wg * den[:, :, 1] + wb * den[:, :, 2]
+    y_in = wr * rgb[:, :, 0] + wg * rgb[:, :, 1] + wb * rgb[:, :, 2]
+    c = min(1.0, 2.0 * s)
+    y = s * y_den + (1.0 - s) * y_in
+    # R'-Y' and B'-Y' blended at the chroma amount; G' follows from the luma
+    # identity Y' = wr*R' + wg*G' + wb*B' (exact inverse, no clipping here —
+    # the caller packs with the usual clip).
+    ry = c * (den[:, :, 0] - y_den) + (1.0 - c) * (rgb[:, :, 0] - y_in)
+    by = c * (den[:, :, 2] - y_den) + (1.0 - c) * (rgb[:, :, 2] - y_in)
+    r = y + ry
+    b = y + by
+    g = (y - wr * r - wb * b) / wg
+    return np.stack([r, g, b], axis=2).astype(np.float32)
+
+
 def main():
     ap = argparse.ArgumentParser(description="AutoShade AI denoise (SCUNet)")
     ap.add_argument("--input", required=True)
     ap.add_argument("--output", required=True)
     ap.add_argument("--model", default="color_real_psnr", choices=list(WEIGHT_URLS))
-    ap.add_argument("--strength", type=float, default=1.0, help="0..1 blend with original")
+    # default = the Rust side's denoise::DEFAULT_STRENGTH (pinned textually
+    # by `the_sidecar_blends_luma_by_strength_and_takes_chroma_first`).
+    ap.add_argument("--strength", type=float, default=0.5,
+                    help="0..1: luminance blend; chroma from the model at min(1, 2*strength)")
     ap.add_argument("--tile", type=int, default=512)
     ap.add_argument("--overlap", type=int, default=32)
     ap.add_argument("--cache", default=os.path.join(os.path.dirname(__file__), "weights"))
@@ -434,8 +485,7 @@ def main():
     den = denoise(model, rgb, device, tile=args.tile, overlap=args.overlap, fp16=args.fp16)
 
     s = float(np.clip(args.strength, 0.0, 1.0))
-    if s < 1.0:
-        den = s * den + (1.0 - s) * rgb
+    den = blend_luma_chroma(den, rgb, s)
 
     out = np.clip(den * maxv + 0.5, 0, maxv).astype(np.uint16 if is16 else np.uint8)
     out = cv2.cvtColor(out, cv2.COLOR_RGB2BGR)

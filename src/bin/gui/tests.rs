@@ -3407,6 +3407,151 @@
         assert_eq!(app.fit_target().as_deref(), Some(master.as_path()));
     }
 
+    /// 2026-09-13 (the user's own store: ▣ `origin = …denoise.png`, the ◭
+    /// card active with `origin = None`, no `pixels.json`): the ◭ card a fit
+    /// lands as hangs off the NEGATIVE's in-place master — the pixels the ▣
+    /// card develops and the fit was solved on — sharing the ▣ card's decoded
+    /// base, and the ● pixel mirror follows the link the worker persisted.
+    /// Without a master the fit keeps landing on the loaded photo, origin-free.
+    #[test]
+    fn a_reverse_fit_lands_on_the_negatives_master() {
+        let ctx = egui::Context::default();
+        let mut app = AutoShadeApp::default();
+        let master = std::path::PathBuf::from("out/_negative_master_test.denoise.png");
+        let clean = std::sync::Arc::new(image::DynamicImage::new_rgba8(4, 4));
+        let ai = std::sync::Arc::new(image::DynamicImage::new_rgba8(4, 4));
+        app.variants = vec![
+            Variant {
+                id: ORIGINAL_VARIANT_ID.into(),
+                name: None,
+                kind: VariantKind::Original,
+                recipe: EditRecipe::default(),
+                base: Some(clean.clone()),
+                origin: Some(master.clone()),
+                thumb: None,
+            },
+            Variant {
+                id: "gen".into(),
+                name: None,
+                kind: VariantKind::Generated,
+                recipe: EditRecipe::default(),
+                base: Some(ai.clone()),
+                origin: Some(std::path::PathBuf::from("out/_negative_master_test.reimagine.png")),
+                thumb: None,
+            },
+        ];
+        app.active = 1;
+        app.base_preview = Some(ai.clone());
+        assert_eq!(
+            app.negative_origin().as_deref(),
+            Some(master.as_path()),
+            "the ▣ card's master is the negative even while the ✨ card is active"
+        );
+        let outcome = |negative: Option<std::path::PathBuf>| FitOutcome {
+            recipe: EditRecipe { contrast: 9.0, ..Default::default() },
+            err_before: 0.3,
+            err_after: 0.1,
+            rationale_notes: Vec::new(),
+            status: Vec::new(),
+            persisted: true,
+            negative,
+        };
+        app.on_fitted(&ctx, Lang::En, Box::new(Ok(outcome(Some(master.clone())))));
+        let fitted = &app.variants[app.active];
+        assert_eq!(fitted.kind, VariantKind::Fitted);
+        assert_eq!(
+            fitted.origin.as_deref(),
+            Some(master.as_path()),
+            "the ◭ card hangs off the negative's master"
+        );
+        assert!(
+            fitted.base.as_ref().is_some_and(|b| std::sync::Arc::ptr_eq(b, &clean)),
+            "…and shares the ▣ card's decoded pixels"
+        );
+        assert_eq!(
+            app.pixels_on_disk.as_deref(),
+            Some(master.as_path()),
+            "the ● pixel mirror follows the persisted link"
+        );
+        assert_eq!(app.recipe.contrast, 9.0, "the fit's develop is live on the new card");
+
+        // No master on the negative: the fit lands on the loaded photo, as
+        // it always did.
+        app.variants[0].origin = None;
+        app.variants[0].base = None;
+        app.switch_variant(1, &ctx);
+        assert_eq!(app.negative_origin(), None);
+        app.on_fitted(&ctx, Lang::En, Box::new(Ok(outcome(None))));
+        let fitted = &app.variants[app.active];
+        assert_eq!(fitted.kind, VariantKind::Fitted);
+        assert_eq!(fitted.origin, None);
+        assert_eq!(app.pixels_on_disk, None);
+    }
+
+    /// The negative IS the ▣ card's pixel source: an in-place denoise landing
+    /// on it repoints the negative at the master, and `negative_path` is what
+    /// the reimagine develops from — the master, else the loaded file.
+    #[test]
+    fn negative_origin_follows_an_in_place_denoise_on_the_original_card() {
+        let ctx = egui::Context::default();
+        let src = std::path::PathBuf::from("_negative_follow_test.ARW");
+        let mut app = AutoShadeApp { src_path: Some(src.clone()), ..Default::default() };
+        let b0 = std::sync::Arc::new(image::DynamicImage::new_rgba8(4, 4));
+        app.variants = vec![Variant {
+            id: ORIGINAL_VARIANT_ID.into(),
+            name: None,
+            kind: VariantKind::Original,
+            recipe: EditRecipe::default(),
+            base: Some(b0.clone()),
+            origin: None,
+            thumb: None,
+        }];
+        app.active = 0;
+        app.base_preview = Some(b0);
+        app.reset_history();
+        assert_eq!(app.negative_origin(), None);
+        assert_eq!(app.negative_path().as_deref(), Some(src.as_path()), "no master: the loaded file");
+        let out = std::path::PathBuf::from("out/_negative_follow_test.denoise.png");
+        let epoch = app.gen_epoch;
+        app.on_retouched(
+            &ctx,
+            Lang::En,
+            epoch,
+            Ok((
+                image::DynamicImage::new_rgba8(4, 4),
+                RetouchNote::Denoised(out.clone()),
+                out.clone(),
+                RetouchKind::InPlace,
+            )),
+        );
+        assert_eq!(app.negative_origin().as_deref(), Some(out.as_path()));
+        assert_eq!(app.negative_path().as_deref(), Some(out.as_path()), "the reimagine input follows");
+        assert_eq!(
+            app.active_source_path().as_deref(),
+            Some(out.as_path()),
+            "and the ▣ card's own source is the same file — one negative"
+        );
+        // The worker halves run behind a segmentation call, so they are
+        // pinned on the source (the config.rs literal-pin pattern): the fit
+        // reads the negative once at the click and the persist links it.
+        let fit = include_str!("actions.rs");
+        assert!(fit.contains("let negative = self.negative_origin();"));
+        assert!(
+            fit.contains("(Some(p), Some(master)) => ("),
+            "the solve's source frame is the master when the negative carries one"
+        );
+        assert!(
+            fit.contains("pixels: match negative.as_deref() {"),
+            "the persisted pixel link follows the same capture"
+        );
+        let reimagine = include_str!("panels/retouch.rs");
+        assert!(reimagine.contains("let Some(negative) = self.negative_path() else { return };"));
+        assert!(
+            reimagine.contains("&cfg, &negative, &prompt, \"high\""),
+            "the reimagine develops the negative, master included"
+        );
+    }
+
     /// 「＋」 has nothing to snapshot on the pristine ✨ card and everything
     /// on the ✎ card — attributed to it.
     #[test]
@@ -7248,6 +7393,69 @@
         };
         assert_eq!(req.strength.get(), 0.9);
         assert_eq!(req.style, 0.2);
+    }
+
+    /// 2026-09-13, the same user decision applied to the denoiser's two
+    /// timings: 「🤖 AI Denoise now」 (Detail fold) and 「🤖 AI Denoise on
+    /// export」 (Export fold) each read a dial of their own, both starting at
+    /// `denoise::DEFAULT_STRENGTH`, each on its own prefs key — an older prefs
+    /// file must decode to that default and never to serde's 0.0 (the
+    /// identity: every denoise would silently do nothing after an upgrade).
+    /// The worker halves are pinned on their sources, like the fit's dial.
+    #[test]
+    fn gui_ai_denoise_has_a_dial_in_each_fold() {
+        use autoshade::denoise::DEFAULT_STRENGTH;
+        let app = AutoShadeApp::default();
+        assert_eq!(app.denoise_strength, DEFAULT_STRENGTH);
+        assert_eq!(app.save_denoise_strength, DEFAULT_STRENGTH);
+        assert_eq!(Prefs::default().denoise_strength, DEFAULT_STRENGTH);
+        assert_eq!(Prefs::default().save_denoise_strength, DEFAULT_STRENGTH);
+        // Two keys, two values, and a file without them loads the default.
+        let prefs = Prefs { denoise_strength: 0.8, save_denoise_strength: 0.3, ..Prefs::default() };
+        let json = serde_json::to_string(&prefs).expect("prefs serialize");
+        let decoded: Prefs = serde_json::from_str(&json).expect("prefs deserialize");
+        assert_eq!(decoded.denoise_strength, 0.8);
+        assert_eq!(decoded.save_denoise_strength, 0.3);
+        let older = json
+            .replace(r#""denoise_strength":0.8,"#, "")
+            .replace(r#""save_denoise_strength":0.3,"#, "");
+        assert!(!older.contains("denoise_strength"), "both keys really were removed: {older}");
+        let decoded: Prefs = serde_json::from_str(&older).expect("an older prefs file loads");
+        assert_eq!(decoded.denoise_strength, DEFAULT_STRENGTH);
+        assert_eq!(decoded.save_denoise_strength, DEFAULT_STRENGTH);
+        // DRAWN, each in its own fold, at the default 320 px panel.
+        let mut app = AutoShadeApp::default();
+        let seen = tall_frame(&mut app, |a, ui| a.develop_panel(ui));
+        assert!(
+            seen.iter().any(|t| t == "AI denoise strength"),
+            "the Detail fold's dial must exist: {seen:?}"
+        );
+        assert!(
+            seen.iter().any(|t| t == "Export denoise strength"),
+            "the Export fold's dial must exist: {seen:?}"
+        );
+        // The export echo carries the amount that will actually land.
+        let app = AutoShadeApp { save_denoise: true, save_denoise_strength: 0.35, ..Default::default() };
+        assert!(
+            app.export_summary(Lang::En).contains("AI Denoise 35%"),
+            "{}",
+            app.export_summary(Lang::En)
+        );
+        // …and each verb reads ITS fold's dial: no literal strength survives
+        // in either worker, and neither reads the other's field.
+        let now = include_str!("panels/retouch.rs");
+        assert!(now.contains("let strength = self.denoise_strength;"));
+        assert!(now.contains("DenoiseOpts::from_config(&cfg, None, strength)"));
+        assert!(!now.contains("save_denoise_strength"), "「AI Denoise now」 must not read the Export dial");
+        let export = include_str!("export.rs");
+        assert!(export.contains("let denoise_strength = self.save_denoise_strength;"));
+        assert!(!export.contains("self.denoise_strength"), "the export must not read the Detail dial");
+        for (name, src) in [("panels/retouch.rs", now), ("export.rs", export)] {
+            assert!(
+                !src.contains("None, 1.0)") && !src.contains("None, 0.5)"),
+                "{name}: a literal strength bypasses the dial"
+            );
+        }
     }
 
     /// User decision 2026-09-12 (「该在哪就在哪」): a control belongs to the fold

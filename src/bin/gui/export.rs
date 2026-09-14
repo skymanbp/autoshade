@@ -317,7 +317,13 @@ impl AutoShadeApp {
         }
         parts.push(tr(lang, EXPORT_SPACES[(self.exp_space as usize).min(2)]).to_string());
         if self.save_denoise {
-            parts.push(tr(lang, "AI Denoise").to_string());
+            // With its amount: the dial under the checkbox is the one number
+            // that decides how much of the minutes-long sidecar result lands.
+            parts.push(format!(
+                "{} {:.0}%",
+                tr(lang, "AI Denoise"),
+                self.save_denoise_strength * 100.0
+            ));
         }
         parts.push(match self.export_dest_dir() {
             // Absolute, like every other place a target is named now: "./out"
@@ -415,6 +421,9 @@ impl AutoShadeApp {
         };
         let recipe = self.recipe.clone();
         let denoise = self.save_denoise;
+        // The Export fold's OWN dial (the Detail fold's 「AI Denoise now」 has
+        // its own), captured at the click like every other export input.
+        let denoise_strength = self.save_denoise_strength;
         let export = self.export_opts();
         let src_photo = self.src_path.clone();
         self.spawn_worker(
@@ -445,7 +454,11 @@ impl AutoShadeApp {
                         .is_some();
                     // SCUNet AI denoise (python sidecar) runs before the develop when on.
                     let opts = denoise.then(|| {
-                        autoshade::denoise::DenoiseOpts::from_config(&autoshade::config::Config::load(), None, 1.0)
+                        autoshade::denoise::DenoiseOpts::from_config(
+                            &autoshade::config::Config::load(),
+                            None,
+                            denoise_strength,
+                        )
                     });
                     autoshade::render::render_to_file(&path, &recipe, &out, opts.as_ref(), Some(&export), autoshade::diag::stderr())?;
                     // FACTS (L12#4): the landing renders the relook note in

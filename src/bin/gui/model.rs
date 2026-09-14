@@ -245,6 +245,14 @@ pub(crate) struct Prefs {
     /// [`ExportDest::LastUsed`], and where the ask-dialog reopens.
     pub(crate) last_export_dir: Option<PathBuf>,
     pub(crate) save_denoise: bool,
+    /// The Export fold's own denoise strength and the Detail fold's own
+    /// (2026-09-13) — two keys for two dials. Routed through
+    /// [`Prefs::default`] like `fit_strength`: a prefs file written before
+    /// these keys existed decodes to `denoise::DEFAULT_STRENGTH`, never to
+    /// serde's 0.0 (which is the identity — every denoise would silently do
+    /// nothing after an upgrade).
+    pub(crate) save_denoise_strength: f32,
+    pub(crate) denoise_strength: f32,
     pub(crate) zoned_fit: bool,
     /// Opt-in expansion from the historical two-region sky/land pass.
     pub(crate) zoned_four_regions: bool,
@@ -296,6 +304,8 @@ impl Default for Prefs {
             exp_dest: 0, // ./out — the CLI/batch shape, unchanged for old prefs
             last_export_dir: None,
             save_denoise: false,
+            save_denoise_strength: autoshade::denoise::DEFAULT_STRENGTH,
+            denoise_strength: autoshade::denoise::DEFAULT_STRENGTH,
             // Zoned sky reverse-fit ON by default: it degrades gracefully to
             // the plain global fit when segmentation is unavailable.
             zoned_fit: true,
@@ -814,6 +824,11 @@ pub(crate) struct FitOutcome {
     pub(crate) rationale_notes: Vec<autoshade::rationale::Note>,
     pub(crate) status: Vec<FitNote>,
     pub(crate) persisted: bool,
+    /// The negative's in-place master the fit was solved on and the persist
+    /// linked (`AutoShadeApp::negative_origin` at the click) — the ◭ card
+    /// lands hanging off it, so what the fit measured, what the canvas shows
+    /// and what `pixels.json` says are one file. `None` = the loaded photo.
+    pub(crate) negative: Option<PathBuf>,
 }
 
 /// Default endpoint for the image-role OAuth preset: a local Codex bridge
@@ -1241,9 +1256,11 @@ impl VariantKind {
     ///
     /// `origin.is_some()` ("this card hangs off a baked master") is an
     /// ORTHOGONAL second attribute, not this axis: an in-place retouch master
-    /// hangs off an *Original*, and a *Fitted* card is source-based with no
-    /// master at all. The exhaustive match is the point — a fifth kind must
-    /// declare which side it lands on instead of inheriting `!= Generated`.
+    /// hangs off an *Original* — and off every *Fitted* card solved after it,
+    /// which inherits the negative's master (`AutoShadeApp::negative_origin`,
+    /// 2026-09-13) and is source-based all the same. The exhaustive match is
+    /// the point — a fifth kind must declare which side it lands on instead
+    /// of inheriting `!= Generated`.
     ///
     /// The `pixels.json` two-valued `generated` flag IS this axis since the
     /// taxonomy grew its fourth kind: it records that the develop's master

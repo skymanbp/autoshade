@@ -1498,6 +1498,8 @@ struct DevelopReq {
     /// Export/download only: run AI denoise first (ignored by live preview).
     #[serde(default)]
     denoise: bool,
+    /// Absent = `denoise::DEFAULT_STRENGTH` — the same answer the CLI and the
+    /// GUI dials start from.
     #[serde(default)]
     denoise_strength: Option<f32>,
     /// Export/download only: "tif" (16-bit master, default) or "jpg".
@@ -2063,7 +2065,13 @@ fn fmt_ext(req: &DevelopReq) -> &'static str {
 
 fn denoise_opts(req: &DevelopReq, cfg: &Config) -> Option<DenoiseOpts> {
     req.denoise
-        .then(|| DenoiseOpts::from_config(cfg, None, req.denoise_strength.unwrap_or(1.0)))
+        .then(|| {
+            DenoiseOpts::from_config(
+                cfg,
+                None,
+                req.denoise_strength.unwrap_or(crate::denoise::DEFAULT_STRENGTH),
+            )
+        })
 }
 
 fn export_slot_path(

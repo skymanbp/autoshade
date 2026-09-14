@@ -553,7 +553,12 @@
 >
 > Since shipped, two *opt-in* pixel-level features were added alongside the
 > parametric core: **AI denoise** (a Python/SCUNet GPU sidecar, run before
-> tone/sharpen) and a **baked-source mode** (edit an already-exported PNG/TIFF,
+> tone/sharpen; since 2026-09-13 its strength is a luma/chroma split —
+> `python/denoise.py::blend_luma_chroma`: luminance blended by the value,
+> the model's chroma taken at `min(1, 2·s)` — with one default,
+> `denoise::DEFAULT_STRENGTH = 0.5`, on the CLI, the web export and the GUI's
+> two dials; 1.0 kept 1–7 % of a 61 MP ISO-640 frame's high-frequency energy
+> across every SCUNet tier, measured) and a **baked-source mode** (edit an already-exported PNG/TIFF,
 > e.g. one denoised in Lightroom — auto-detected by file type). All four sidecar
 > bridges share one success contract (`lib.rs::sidecar_wrote`): *exit 0 alone
 > is not success* — THIS run must have produced the artifact, refusing a
@@ -1566,6 +1571,24 @@ else takes the active slot as `"edited"` with the displaced ✨ card moved into
 `others` (identity, name and raster intact) and a pristine card minted for a
 master that had none. `known_variant_kind` accepts `"edited"`; the CLI
 `match` still states `Kind("fitted")`.
+
+**The negative has one definition (2026-09-13).** `origin.is_some()` is the
+orthogonal attribute — a card hangs off a baked master — and the ▣ Original
+card's master is the photo's NEGATIVE: `AutoShadeApp::negative_origin`
+(that card's `origin`) and `negative_path` (it, else `src_path`). Three
+consumers used to spell the negative as the file on disk and read past an
+in-place denoise / heal on the ▣ card: the reimagine input (now
+`negative_path`), the reverse-fit's source frame (the master loaded through
+`render::source_pixels` at `FIT_SOURCE_EDGE` — a neutral develop already,
+with the photo's calibration composing on top exactly as the ▣ card renders
+it) and the ◭ card the fit lands as (`origin` = the master, `base` shared
+with the ▣ card's decoded pixels), with the fit worker's `pixels` member
+written as that master (`inplace`) instead of `Clear`, so a reopen restores
+the pixels the fit was solved on. The user's own store showed the defect
+(▣ `origin = …denoise.png`, the active ◭ card `origin = None`, no
+`pixels.json`). A ◭ card is therefore source-based AND may carry a master —
+the strip reader already handled the pair (kind from the record, master from
+the pixels arm) and nothing in the persisted formats changed.
 
 **Import (R25).** Until v0.31.0 that read imported *no* Lightroom mask at all.
 Two gates each dropped a whole correction on sight: the presence of `crs:Angle`

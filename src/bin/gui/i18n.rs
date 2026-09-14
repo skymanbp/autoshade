@@ -1301,8 +1301,14 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     // the export-settings entries.
     ("🤖 AI Denoise now", "🤖 立即 AI 去噪"),
     ("Full-res denoise", "全分辨率去噪"),
-    ("Run the SCUNet GPU sidecar on this variant's pixels and show the result on canvas (undoable — bakes a clean base into the current variant; the develop sliders keep applying on top; first run downloads the model)",
-        "对当前变体的像素跑 SCUNet GPU 边车，结果直接上画布（可撤销——干净基图烘焙进当前变体；显影滑杆继续在其上生效；首次运行会下载模型）"),
+    // The verb's OWN dial (2026-09-13; user decision 2026-09-12 — a control
+    // sits in the fold whose verb reads it). The Export fold's twin below
+    // keeps that block's 降噪.
+    ("AI denoise strength", "AI 去噪强度"),
+    ("How much of the SCUNet result 「🤖 AI Denoise now」 bakes in — this fold's own dial (the Export fold's 「on export」 has its own; neither reaches the other). Luminance follows the dial; colour noise is removed in full from 50% up. 100% is the model's whole output, which on a 61 MP ISO-640 frame kept 5% of the texture — the default 50% keeps the rock and loses the colour speckle. Double-click to reset.",
+        "「🤖 立即 AI 去噪」把多少 SCUNet 结果烘焙进去——本折叠区自己的滑杆（「导出」折叠区的「导出时」有它自己的一把，两把互不相通）。亮度跟随滑杆；颜色噪点从 50% 起完全去除。100% 是模型的全部输出，在一张 61 MP、ISO 640 的照片上只留下 5% 的纹理——默认 50% 留住岩石纹理、去掉彩色噪点。双击复位。"),
+    ("Run the SCUNet GPU sidecar on this variant's pixels at the AI denoise strength above and show the result on canvas (undoable — bakes a clean base into the current variant; the develop sliders keep applying on top; first run downloads the model)",
+        "按上方的 AI 去噪强度，对当前变体的像素跑 SCUNet GPU 边车，结果直接上画布（可撤销——干净基图烘焙进当前变体；显影滑杆继续在其上生效；首次运行会下载模型）"),
     // The capability arm. WORD-FOR-WORD the segmentation buttons' missing-
     // sidecar line (only the env var and the file name differ), because it is
     // word-for-word the same situation — a release package ships neither
@@ -1514,8 +1520,13 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     ("a .xmp already sits beside this photo ({path}) — click again to replace it",
         "这张照片旁已有 .xmp（{path}）—— 再点一次会替换它"),
     ("the .xmp could not be delivered: {err}", "无法写出 .xmp：{err}"),
-    ("SCUNet AI denoise before developing — high-ISO / astro (slow, GPU; needs the python sidecar). Batch render skips it.",
-        "显影前 SCUNet AI 降噪——高 ISO/星空（慢，GPU；需 python 边车）。批量渲染不含此项。"),
+    ("SCUNet AI denoise before developing, at the Export denoise strength below — high-ISO / astro (slow, GPU; needs the python sidecar). Batch render skips it.",
+        "显影前按下方的导出降噪强度做 SCUNet AI 降噪——高 ISO/星空（慢，GPU；需 python 边车）。批量渲染不含此项。"),
+    // The checkbox's OWN dial (2026-09-13) — its own state and key; the
+    // Detail fold's 「AI denoise strength」 does not reach it.
+    ("Export denoise strength", "导出降噪强度"),
+    ("How much of the SCUNet result the export-time denoise bakes into every full-resolution delivery — this fold's own dial (the Detail fold's 「AI Denoise now」 has its own; neither reaches the other). Luminance follows the dial; colour noise is removed in full from 50% up; 100% is the model's whole output. Double-click to reset.",
+        "导出时降噪把多少 SCUNet 结果烘焙进每一次全分辨率交付——本折叠区自己的滑杆（「细节」折叠区的「立即 AI 去噪」有它自己的一把，两把互不相通）。亮度跟随滑杆；颜色噪点从 50% 起完全去除；100% 是模型的全部输出。双击复位。"),
     ("All regions", "全部区域"),
     ("Midtones", "中间调"),
     ("Global", "全局"),

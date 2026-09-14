@@ -71,6 +71,8 @@ impl AutoShadeApp {
             app.exp_dest = ExportDest::from_pref(prefs.exp_dest);
             app.last_export_dir = prefs.last_export_dir.clone();
             app.save_denoise = prefs.save_denoise;
+            app.save_denoise_strength = prefs.save_denoise_strength.clamp(0.0, 1.0);
+            app.denoise_strength = prefs.denoise_strength.clamp(0.0, 1.0);
             app.zoned_fit = prefs.zoned_fit;
             app.zoned_four_regions = prefs.zoned_four_regions;
             app.fit_ai_judge = prefs.fit_ai_judge;
@@ -1347,6 +1349,28 @@ impl AutoShadeApp {
     /// card 0 is the negative.
     pub(crate) fn original_index(&self) -> Option<usize> {
         self.variants.iter().position(|v| v.kind == VariantKind::Original)
+    }
+
+    /// The baked master the photo's NEGATIVE carries, if any — the ▣ Original
+    /// card's in-place retouch master (a denoise / heal / clone / fill baked
+    /// into the source), which is what that card develops, exports and
+    /// retouches. Every consumer that reaches for THE NEGATIVE'S pixels rather
+    /// than the active card's — the reimagine input, the reverse-fit's source
+    /// frame, the ◭ card a fit lands as and the pixel link it persists —
+    /// reads this beside `src_path` (2026-09-13). Each of them spelled the
+    /// negative as the file on disk, so after an AI denoise on the ▣ card the
+    /// fit was solved on, rendered from and exported from the un-denoised
+    /// sensor frame while the ▣ card beside it showed the clean one (the
+    /// user's own store: ▣ `origin = …denoise.png`, ◭ `origin = None`, no
+    /// `pixels.json`).
+    pub(crate) fn negative_origin(&self) -> Option<PathBuf> {
+        self.original_index().and_then(|i| self.variants[i].origin.clone())
+    }
+
+    /// The negative's pixels on disk: its master when it carries one, else
+    /// the loaded file — the input a whole-frame reimagine develops from.
+    pub(crate) fn negative_path(&self) -> Option<PathBuf> {
+        self.negative_origin().or_else(|| self.src_path.clone())
     }
 
     /// R24-3 (#7): copy card `idx`'s develop onto the ▣ Original CARD.
@@ -3292,6 +3316,10 @@ impl AutoShadeApp {
             return;
         }
         let src_path = self.src_path.clone();
+        // The negative's in-place master, when the ▣ card carries one: the
+        // source frame below, the ◭ card's origin and the persisted pixel
+        // link all read this ONE capture, so the three cannot disagree.
+        let negative = self.negative_origin();
         let fit_strength = self.fit_strength();
         let zoned = self.zoned_fit;
         let zoned_regions = if self.zoned_four_regions {
@@ -3378,12 +3406,28 @@ impl AutoShadeApp {
                     // reading that picks Full vs Atmosphere is measured on
                     // whichever image the entry chose. A non-RAW source has no
                     // sensor frame, so it keeps the preview it already has.
-                    let (base, fit_base) = match src_path.as_deref() {
-                        Some(p) if autoshade::decode::is_raw(p) => {
+                    // …and when the ▣ card hangs off an in-place master
+                    // (2026-09-13), THAT is the source frame: a neutral
+                    // develop already, loaded as-is through the same dispatch
+                    // (a full-res master is capped to the fit's working edge
+                    // by the same area average the RAW arm downscales with),
+                    // with the photo's calibration composing on top exactly
+                    // as the ▣ card renders it — the master carries none.
+                    let (base, fit_base) = match (src_path.as_deref(), negative.as_deref()) {
+                        (Some(p), Some(master)) => (
+                            std::sync::Arc::new(autoshade::render::source_pixels(
+                                master,
+                                Some(autoshade::pipeline::FIT_SOURCE_EDGE),
+                            )?),
+                            autoshade::pipeline::calibration_recipe(
+                                autoshade::pipeline::fit_calibration(p),
+                            ),
+                        ),
+                        (Some(p), None) if autoshade::decode::is_raw(p) => {
                             let (frame, cal) = autoshade::pipeline::fit_source(p)?;
                             (std::sync::Arc::new(frame), cal)
                         }
-                        other => (
+                        (other, _) => (
                             base,
                             other
                                 .map(|p| {
@@ -3694,12 +3738,18 @@ impl AutoShadeApp {
                             Ok(backed) => {
                               // ONE single-generation commit (the Ctrl+S
                               // rule, L03): the fit's recipe and the
-                              // pixel-link CLEAR land together. The fit is a
+                              // pixel link land together. The fit is a
                               // SOURCE-based develop by construction (it maps
                               // the source neutral onto the rendition), and a
                               // stale pixels.json link surviving the recipe
                               // write made a reopen render the fit on baked
-                              // pixels it was never computed against.
+                              // pixels it was never computed against — so the
+                              // link is CLEARED, unless the negative itself
+                              // hangs off an in-place master (2026-09-13):
+                              // then the fit WAS computed against those
+                              // pixels, the ◭ card lands on them, and the
+                              // link records them as the ▣ card's own Ctrl+S
+                              // would (`inplace`, never `generated`).
                               // The projection rides the same generation
                               // (2026-09-13): a fit is a source develop, so
                               // it always projects; a projection this build
@@ -3724,7 +3774,14 @@ impl AutoShadeApp {
                                               &rep.recipe,
                                               autoshade::diag::stderr(),
                                           )?),
-                                          pixels: autoshade::store::CommitMember::Clear,
+                                          pixels: match negative.as_deref() {
+                                              Some(m) => autoshade::store::CommitMember::Write(
+                                                  autoshade::store::pixel_source_record_bytes(
+                                                      p, m, false,
+                                                  )?,
+                                              ),
+                                              None => autoshade::store::CommitMember::Clear,
+                                          },
                                           // R24-4: this worker publishes a
                                           // REVERSE-FIT into the active slot,
                                           // and the strip record's active
@@ -3856,6 +3913,7 @@ impl AutoShadeApp {
                         recipe: rep.recipe,
                         status,
                         persisted,
+                        negative,
                     })
                 })();
                 Msg::Fitted(Box::new(res))

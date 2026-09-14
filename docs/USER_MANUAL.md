@@ -40,6 +40,17 @@ curves, HSL, color grading, texture, clarity, dehaze, noise reduction,
 sharpening, vignette, crop, and lens-related settings, rendered through the
 same engine as `autoshade apply`.
 
+**🤖 AI Denoise now** in the Detail fold runs the SCUNet sidecar on the active
+card's pixels and bakes the result into that card as its master (undoable; a
+≤2048 px working copy unless **Full-res denoise** is ticked). It reads the
+fold's own **AI denoise strength** dial: luminance follows the dial, colour
+noise is removed in full from 50% up, and 100% is the model's whole output —
+which on a 61 MP ISO-640 frame kept 5% of the texture, so the dial starts at
+50%. The Export fold's **🤖 AI Denoise on export** has a dial of its own, and
+neither reaches the other. A master baked into the **▣ Original** card becomes
+the photo's negative: a later Reimagine sends it, and a Reverse-fit is solved
+on it and lands on it (section 4).
+
 Buttons follow one vocabulary: the gold button in a group is its main action
 (Export on the toolbar, AI Analyze, Reverse-fit recipe, Apply in a brush
 session, Save settings), icon-only buttons are squares as tall as the text
@@ -121,6 +132,12 @@ over the same pixels, not a look to solve for); copy the fitted develop to
 Original when you want an editable recipe and sidecar for the full-resolution
 source. **＋ Save as version** snapshots an ✎ card's develop; a pristine ✨ card
 has nothing to snapshot.
+
+A **◭ Reverse-fit** card develops the same negative the ▣ Original card does —
+its in-place master included: after an AI denoise (or heal, clone, fill) on
+the ▣ card, the fit is solved on that master, the ◭ card renders and exports
+from it, and the fit's save links it in `pixels.json` so a reopen restores the
+same pixels. With no master on the ▣ card the ◭ card develops the loaded file.
 
 Reverse-fit uses its own **Reverse-fit strength** dial in the Reverse-fit fold
 (or `match --strength 0..1`) as its honesty budget; the Analysis fold's
@@ -291,6 +308,12 @@ sharpening, and sRGB, Display P3, or Adobe RGB delivery color space. Resizing is
 the last step, uses Lanczos3, preserves aspect ratio, and never enlarges a
 smaller image.
 
+**🤖 AI Denoise on export** runs the SCUNet sidecar inside every
+full-resolution delivery (the batch render skips it) at the Export fold's own
+**Export denoise strength** dial — the same law as the Detail fold's dial and
+the same 50% start, but its own setting: moving one never moves the other.
+The export summary echoes the amount ("AI Denoise 50%").
+
 CLI exports use q95 sRGB. `--long-edge N` is available on `apply`, `auto`, and
 `batch --render`; `0` or omission means full resolution. It is deliberately an
 export option rather than a recipe field, so one recipe can deliver both a
@@ -327,7 +350,10 @@ sources get recipe JSON but no RAW XMP. `auto` is `analyze` plus render.
 is set (avoiding duplicate analysis and billing for RAW+JPEG pairs), and
 defaults to three photos in flight; `--long-edge` on `batch` requires
 `--render`. `eval` defaults to serial work and resumes from its state file.
-Denoise-strength/model overrides require `--denoise` on `auto`.
+Denoise-strength/model overrides require `--denoise` on `auto`. A denoise
+strength defaults to 0.5 on every surface (`denoise` and `auto --denoise`, the
+web export, both GUI dials): the value blends the luminance, colour noise is
+removed in full from 0.5 up, and 1.0 is the model's whole output.
 
 ### Where your `.xmp` sidecars are — `--xmp-dir`
 

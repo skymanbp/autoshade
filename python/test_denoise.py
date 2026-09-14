@@ -126,5 +126,68 @@ class DownloadTests(unittest.TestCase):
         self.assertEqual(os.path.getsize(self.dest), 4096)
 
 
+def _luma(x):
+    wr, wg, wb = denoise._LUMA
+    return wr * x[..., 0] + wg * x[..., 1] + wb * x[..., 2]
+
+
+class BlendLawTests(unittest.TestCase):
+    """`blend_luma_chroma` — the strength's ONE meaning (2026-09-13).
+
+    Luminance follows the strength linearly; chroma comes from the model at
+    min(1, 2*strength). The endpoints are the old blend's endpoints, so a
+    strength of 0 or 1 changes nothing for anyone who used them.
+    """
+
+    def setUp(self):
+        import numpy as np
+
+        rng = np.random.default_rng(7)
+        self.rgb = rng.random((4, 5, 3), dtype=np.float32) * 0.6 + 0.2
+        self.den = rng.random((4, 5, 3), dtype=np.float32) * 0.6 + 0.2
+        self.np = np
+
+    def test_the_endpoints_are_the_input_and_the_model(self):
+        np = self.np
+        np.testing.assert_array_equal(denoise.blend_luma_chroma(self.den, self.rgb, 0.0), self.rgb)
+        np.testing.assert_array_equal(denoise.blend_luma_chroma(self.den, self.rgb, 1.0), self.den)
+
+    def test_luminance_follows_the_strength_linearly(self):
+        np = self.np
+        for s in (0.25, 0.5, 0.8):
+            out = denoise.blend_luma_chroma(self.den, self.rgb, s)
+            want = s * _luma(self.den) + (1 - s) * _luma(self.rgb)
+            np.testing.assert_allclose(_luma(out), want, atol=1e-5)
+
+    def test_chroma_is_the_models_from_half_strength_up(self):
+        np = self.np
+        for s in (0.5, 0.7, 0.99):
+            out = denoise.blend_luma_chroma(self.den, self.rgb, s)
+            # chroma differences equal the model's exactly: the luma moved,
+            # the colour did not follow the input back
+            np.testing.assert_allclose(out[..., 0] - _luma(out), self.den[..., 0] - _luma(self.den), atol=1e-5)
+            np.testing.assert_allclose(out[..., 2] - _luma(out), self.den[..., 2] - _luma(self.den), atol=1e-5)
+
+    def test_chroma_eases_in_twice_as_fast_as_luma_below_half(self):
+        np = self.np
+        s = 0.25
+        out = denoise.blend_luma_chroma(self.den, self.rgb, s)
+        c = 0.5
+        for ch in (0, 2):
+            want = c * (self.den[..., ch] - _luma(self.den)) + (1 - c) * (self.rgb[..., ch] - _luma(self.rgb))
+            np.testing.assert_allclose(out[..., ch] - _luma(out), want, atol=1e-5)
+
+    def test_a_flat_neutral_field_stays_neutral_at_every_strength(self):
+        # A grey input and a grey model output must not pick up a colour
+        # cast from the reconstruction of G' (the inverse is exact).
+        np = self.np
+        grey_in = np.full((3, 3, 3), 0.3, dtype=np.float32)
+        grey_den = np.full((3, 3, 3), 0.31, dtype=np.float32)
+        for s in (0.1, 0.5, 0.9):
+            out = denoise.blend_luma_chroma(grey_den, grey_in, s)
+            np.testing.assert_allclose(out[..., 0], out[..., 1], atol=1e-6)
+            np.testing.assert_allclose(out[..., 1], out[..., 2], atol=1e-6)
+
+
 if __name__ == "__main__":
     unittest.main()

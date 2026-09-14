@@ -1239,8 +1239,11 @@ impl AutoShadeApp {
                             };
                             if !from_stash && let Some(rec) = &disk_strip {
                                 if rec.active_kind == "fitted" {
-                                    // Fitted is source-based — it has no pixels
-                                    // arm to ride back on; without this the card
+                                    // Fitted is source-based — its pixels arm,
+                                    // when it has one (the negative's in-place
+                                    // master, inherited at the fit), says
+                                    // `inplace` like the ▣ card's and cannot
+                                    // name the kind; without this the card
                                     // cold-reopened renamed 「▣ 原片」. A recorded
                                     // "generated" needs no hand here: the baked
                                     // pixels arm below upgrades the card exactly
@@ -2661,7 +2664,8 @@ impl AutoShadeApp {
     /// `Msg::Fitted` landing — facts arrive typed and are rendered HERE
     /// with the landing-time language (L12#4); the rationale's typed notes
     /// install after `push_variant`'s reload cleared them (L12#2B).
-    fn on_fitted(&mut self, ctx: &egui::Context, lang: Lang, boxed: Box<anyhow::Result<FitOutcome>>) {
+    // pub(crate): the negative-master landing test drives this directly.
+    pub(crate) fn on_fitted(&mut self, ctx: &egui::Context, lang: Lang, boxed: Box<anyhow::Result<FitOutcome>>) {
                 match *boxed {
                     // Either way the worker may have persisted a recipe.json
                     // (an Err can land after that write) — recompute badges.
@@ -2677,11 +2681,13 @@ impl AutoShadeApp {
                             self.nav_stash.remove(
                                 &self.src_path.clone().unwrap_or_default(),
                             );
-                            // The worker cleared pixels.json alongside the
-                            // recipe (a fit is source-based) — keep the
-                            // per-frame ● pixel comparison's disk mirror in
-                            // step with it.
-                            self.pixels_on_disk = None;
+                            // The pixel link the worker committed beside the
+                            // recipe — the negative's in-place master when
+                            // the ▣ card carries one (the ◭ card below hangs
+                            // off it), cleared otherwise (a fit is
+                            // source-based) — so the per-frame ● pixel
+                            // comparison's disk mirror stays in step with it.
+                            self.pixels_on_disk = out.negative.clone();
                         }
                         self.refresh_versions();
                         let mut note = trf(
@@ -2700,14 +2706,25 @@ impl AutoShadeApp {
                         // (same negative as Original), look carried by the recipe —
                         // so it is fully editable, exports XMP and renders at full
                         // resolution. Auto-switch to it.
+                        // SAME negative includes its in-place master
+                        // (2026-09-13): the card hangs off the file the fit
+                        // was solved on, sharing the ▣ card's decoded pixels
+                        // when it has them (a cold ▣ card leaves `base` None
+                        // and `load_active` decodes the master, as for any
+                        // restored baked card).
+                        let base = out.negative.as_deref().and_then(|m| {
+                            let i = self.original_index()?;
+                            let v = &self.variants[i];
+                            (v.origin.as_deref() == Some(m)).then(|| v.base.clone()).flatten()
+                        });
                         self.push_variant(
                             Variant {
                                 kind: VariantKind::Fitted,
                                 id: new_variant_id(),
                                 name: None,
                                 recipe: out.recipe,
-                                base: None,
-                                origin: None,
+                                base,
+                                origin: out.negative,
                                 thumb: None,
                             },
                             ctx,

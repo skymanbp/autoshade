@@ -993,6 +993,22 @@ impl AutoShadeApp {
                 // batch/full-res workflows, but nobody should have to export
                 // to find out what the denoiser does.
                 ui.add_space(SPACE_SM);
+                // The verb's OWN dial, directly above it (user decision
+                // 2026-09-12: a control belongs to the fold whose function it
+                // serves; the Export fold's 「on export」 has a dial of its
+                // own, and neither reaches the other). Same helper as the
+                // reverse-fit's: 0..100 track, double-click reset, hover nudge.
+                Self::slider_pct_hinted(
+                    ui,
+                    lang,
+                    tr(lang, "AI denoise strength"),
+                    &mut self.denoise_strength,
+                    1.0,
+                    autoshade::denoise::DEFAULT_STRENGTH,
+                    tr(lang,
+                        "How much of the SCUNet result 「🤖 AI Denoise now」 bakes in — this fold's own dial (the Export fold's 「on export」 has its own; neither reaches the other). Luminance follows the dial; colour noise is removed in full from 50% up. 100% is the model's whole output, which on a 61 MP ISO-640 frame kept 5% of the texture — the default 50% keeps the rock and loses the colour speckle. Double-click to reset.",
+                    ),
+                );
                 ui.horizontal(|ui| {
                     // CAPABILITY, not just state — the same rule the two
                     // segmentation buttons follow one panel down (R24 batch 2).
@@ -1014,9 +1030,9 @@ impl AutoShadeApp {
                         // sidecar and nothing else — same discipline as the
                         // segmentation pair.
                         .on_hover_text(if has_helper { ai_xref(lang, tr(lang,
-                            "Run the SCUNet GPU sidecar on this variant's pixels and show the result on canvas \
-                             (undoable — bakes a clean base into the current variant; the develop sliders keep \
-                             applying on top; first run downloads the model)",
+                            "Run the SCUNet GPU sidecar on this variant's pixels at the AI denoise strength above \
+                             and show the result on canvas (undoable — bakes a clean base into the current variant; \
+                             the develop sliders keep applying on top; first run downloads the model)",
                         )) } else { missing.to_string() })
                         .clicked()
                     {
@@ -3014,8 +3030,26 @@ impl AutoShadeApp {
                 // variant immediately. Same-named twins in two panels made the
                 // difference invisible until an export took minutes.
                 ui.checkbox(&mut self.save_denoise, tr(lang, "🤖 AI Denoise on export")).on_hover_text(
-                    ai_xref(lang, tr(lang, "SCUNet AI denoise before developing — high-ISO / astro (slow, GPU; needs the python sidecar). Batch render skips it.")),
+                    ai_xref(lang, tr(lang, "SCUNet AI denoise before developing, at the Export denoise strength below — high-ISO / astro (slow, GPU; needs the python sidecar). Batch render skips it.")),
                 );
+                // The checkbox's OWN dial, directly under it (user decision
+                // 2026-09-12): the Detail fold's 「AI Denoise now」 has its own
+                // and neither reaches the other. Always allocated, merely
+                // disabled while the checkbox is off — the appear/disappear
+                // reflow rule the JPEG quality slider above follows.
+                ui.add_enabled_ui(self.save_denoise, |ui| {
+                    Self::slider_pct_hinted(
+                        ui,
+                        lang,
+                        tr(lang, "Export denoise strength"),
+                        &mut self.save_denoise_strength,
+                        1.0,
+                        autoshade::denoise::DEFAULT_STRENGTH,
+                        tr(lang,
+                            "How much of the SCUNet result the export-time denoise bakes into every full-resolution delivery — this fold's own dial (the Detail fold's 「AI Denoise now」 has its own; neither reaches the other). Luminance follows the dial; colour noise is removed in full from 50% up; 100% is the model's whole output. Double-click to reset.",
+                        ),
+                    );
+                });
                 ui.label(
                     egui::RichText::new(tr(lang, "Applied by 「Export」 in the toolbar (Ctrl+Shift+E, or Ctrl+E) and by 「Render selected」 in the library. The ▾ beside Export delivers one file to a path you pick without touching the Destination."))
                         .weak()

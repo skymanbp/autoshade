@@ -4,6 +4,16 @@
 > 要么是带理由的终局裁定（一个测出来的数、一条仪器极限、一次用户拍板）。
 > 每项都附 `file:line` 或提交锚点，供新会话不重读全库即可接手。更新于 **2026-09-13**。
 >
+> **main 上未发版的改动（2026-09-13，用户报障「AI降噪需要一个数值条」「AI降噪后…反推却是建立在未降噪的原图上的」
+> 「降噪效果还需要改进」）**：① 「细节」折叠区「🤖 立即 AI 去噪」有了自己的「AI 去噪强度」滑杆，「导出」折叠区
+> 「🤖 导出时 AI 降噪」有了自己的「导出降噪强度」滑杆（各自状态、各自持久化键、默认 50%、互不相通——2026-09-12 令）；
+> ② 反推与整图生成读**同一个底片**：▣ 原片卡的原位母图（去噪/修补烘出的 `origin`）就是底片——生成图从它出、反推在
+> 它上求解、◭ 卡挂在它上、反推的 `pixels.json` 记它（`inplace`）而不再清空；③ 去噪强度的含义改为亮度/色度分离
+> （侧车 `blend_luma_chroma`：亮度按强度线性混合、色度从 `min(1, 2s)` 取模型输出），默认 `denoise::DEFAULT_STRENGTH
+> = 0.5` 三面统一——用户那张 61 MP、ISO 640 的照片实测：1.0 下五个 SCUNet 档位都只留 1–7% 高频能量（亮度 HF
+> 2.27 → 0.12/255，岩石纹理随噪点一起没了），0.5 分离混合留住纹理（HF 1.15/255）且彩色噪点消失（色度 HF 4.5 →
+> 0.07/255，同强度的逐通道混合留 2.26/255）；瓦片接缝实测 0.06/255（不可见，未动）。门见台账首条；未发版。
+>
 > **v1.3.3 已发布**（2026-09-13，tag `v1.3.3` → `f5046c9`，release run `34773631322`
 > 五工位绿，8 资产回下载字节校验，官网 23/23 逐字节，本机已升；用户报障「就是一打开就这样」+
 > 「AI 生图怎么能在上面继续编辑呢？肯定是新开变体啊」）——① develop 库里的 XMP 投影 `<stem>.xmp` 成为 develop 提交的第四个成员
@@ -53,6 +63,37 @@
 > [docs/ROADMAP-archive.md](ROADMAP-archive.md)（追加式档案，勿重写）。
 
 ## 版本台账（逐版已发布内容与实测数字，新在上；均已完成，勿重做）
+
+### main（未发版）— AI 去噪：两把强度滑杆、亮度/色度分离的强度、反推与生成图读同一个底片（2026-09-13）
+
+- **起因（用户报障，原话）**：「1.AI降噪需要一个数值条，用来调整强度。2.AI降噪后，"原图"变体现在就变成了降噪后的原图，
+  但是我点AI反推之后，反推却是建立在未降噪的原图上的。3.现在降噪效果还需要改进。」
+- **现场（只读用户库）**：该照片的 `develops/<key>/variants.json`：▣ 卡 `origin = …\<stem>.denoise.png`（9504×6336
+  全幅去噪母图，2026-09-10）、✨ 卡 `origin = …reimagine-2.png`、活动 ◭ 卡（16:45 反推）`origin` 缺、无 `pixels.json`
+  ——反推在 RAW 上求解并渲染，▣ 卡却显示去噪母图。
+- **根因**：「底片」在四处拼作磁盘文件 `src_path`（反推源帧 `pipeline::fit_source(src_path)`、◭ 卡 `origin: None`、
+  反推提交 `pixels: Clear`、生成图输入），而原位修补模型把 ▣ 卡的像素源定义成 `origin`——一样东西两个定义。
+- **改法**：`AutoShadeApp::negative_origin`（▣ 卡的 `origin`）/ `negative_path`（它或 `src_path`）唯一定义；
+  `start_reimagine` 喂 `negative_path`；`start_fit` 点击时捕获一次：源帧＝母图经 `render::source_pixels(master,
+  FIT_SOURCE_EDGE)`（已是中性显影；校准仍由 `fit_calibration(src_path)` 叠在上面，与 ▣ 卡渲染同规）、提交的
+  `pixels` 成员写母图（`inplace`）、`FitOutcome.negative` 带到落地：◭ 卡 `origin` = 母图、`base` 与 ▣ 卡共用 Arc、
+  `pixels_on_disk` 跟随。持久化格式未变（读取端本来就按「kind 从记录、母图从 pixels 臂」建卡）。
+- **强度**：`denoise::DEFAULT_STRENGTH = 0.5` 一个常量（CLI `denoise --strength` / `auto --denoise-strength`、web
+  `denoise_strength`、GUI 两滑杆、侧车 `--strength` 默认，源文本钉住）；侧车 `blend_luma_chroma(den, rgb, s)`：Y'
+  （BT.709）按 s 线性、R'−Y' / B'−Y' 按 `min(1, 2s)` 取模型、G' 由恒等式精确反解；0 仍是逐字节恒等、1 仍是模型全输出。
+  GUI：`denoise_strength`（细节折叠区「AI 去噪强度」，喂「立即 AI 去噪」）与 `save_denoise_strength`（导出折叠区
+  「导出降噪强度」，勾选时可用，喂导出时去噪；导出摘要回显「AI Denoise 50%」），各自 Prefs 键、缺键回落 0.5 而非
+  serde 的 0.0。
+- **实测（用户那张峡谷岩壁 RAW（A7R IV-A，ISO 640，1/80 s，f/7.1）；全幅中性显影用 `autoshade denoise --strength 0`
+  的恒等路径取得）**：出厂 1.0 去噪母图对中性显影：各亮度带 HF 亮度 std 2.1 → 0.1/255（比 0.02–0.07），色度 HF
+  4.07 → 0.08；1536×1024 岩石裁片五档全测（`color_real_psnr` 5.1%、`color_real_gan` 6.5%、`color_15` 3.0%、
+  `color_25` 1.7%、`color_50` 0.9% 高频保留）——不是模型档位问题；输入提亮 2.2× 只到 6.7%；瓦片 512/32 对单块
+  1024 差 mean 0.019、脊 0.06/255（不可见，未动）。分离混合 0.5：亮度 HF 1.15/255、色度 HF 0.07/255；逐通道混合
+  0.5：色度 HF 2.26/255（彩色斑点可见）。补丁后侧车端到端：1.0 → 0.12 / 0.07，0.5 → 1.15 / 0.07，0.25 → 1.71 /
+  2.26，无参默认与 0.5 逐字节同。
+- **门**：GUI **186 / 0 / 1**（新增 3：`a_reverse_fit_lands_on_the_negatives_master`、`negative_origin_follows_an_in_place_denoise_on_the_original_card`、`gui_ai_denoise_has_a_dial_in_each_fold`；变异「◭ 卡 `origin: None`」落地测试转红）、库 **1484 / 0 / 15**（436.93 s，新增 `denoise::the_sidecar_blends_luma_by_strength_and_takes_chroma_first`）、CLI 24 / 0、python `test_denoise` 11 / 11（新增 `BlendLawTests` 5 条）、clippy 两组 0、`audit_i18n` 0 / 0 / 0、字体子集 `--check` 877/877（SC 子集 +3 汉字「岩 折 石」，从五 donor 重生成、只入 SC 一件）、`check_docs.py` 25P / 0F / 5S、照片名 grep 0。
+- **未动的**：web UI 无强度控件（沿用 0.5 默认）；CLI `match` 不读 GUI 变体条（无底片母图概念）；「全分辨率去噪」
+  未勾时母图仍是 ≤2048 工作副本（既有披露）；本机安装仍是 1.3.3 出厂件。
 
 ### v1.3.3 — 「✨ AI 生成」卡不可编辑，编辑转到新开的「✎ 生图编辑」卡；XMP 投影成为 develop 提交的成员
 

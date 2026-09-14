@@ -384,6 +384,9 @@ impl AutoShadeApp {
             tr(lang, "AI denoise… (GPU sidecar on a ≤2048px working copy; first run downloads the model)").into()
         };
         let full_res = self.denoise_fullres;
+        // This fold's OWN dial (the Export fold's 「on export」 has its own):
+        // captured at the click, like every other input the worker reads.
+        let strength = self.denoise_strength;
         let edge = self.canvas_edge(); // show at the CANVAS's res (canvas_edge)
         let out_claim = out.clone(); // release the claim on failure (worker tail)
         let out_panic = out.clone(); // …and on a worker panic (see the error closure)
@@ -394,7 +397,7 @@ impl AutoShadeApp {
                 let res = (|| -> RetouchDone {
                     let cfg = autoshade::config::Config::load();
                     let opts =
-                        autoshade::denoise::DenoiseOpts::from_config(&cfg, None, 1.0);
+                        autoshade::denoise::DenoiseOpts::from_config(&cfg, None, strength);
                     autoshade::denoise::denoise_active(&opts, &path, full_res, &out)?;
                     // baked-by-construction: the ./out master this job just wrote.
                     let img = autoshade::decode::load_image(&out)?.thumbnail(edge, edge);
@@ -486,12 +489,17 @@ impl AutoShadeApp {
     /// (`origin = Some(out)`); its saved path is the reverse-fit ("反推配方")
     /// target that turns the look back into sliders + XMP at full resolution.
     pub(crate) fn start_reimagine(&mut self) {
-        // Always reimagine the ORIGINAL negative (src_path), never a generated
-        // variant's pixels — regenerating a rendition is the double-cook path
-        // the variant model exists to avoid. Each call gets a UNIQUE ./out PNG
-        // so two Generated variants never alias the same origin (which would
+        // Always reimagine the NEGATIVE, never a generated variant's pixels —
+        // regenerating a rendition is the double-cook path the variant model
+        // exists to avoid. The negative is the ▣ card's pixel source: the
+        // loaded file, or the in-place master it hangs off after a denoise /
+        // heal (2026-09-13 — the model used to be sent the un-retouched file
+        // while every card beside it showed the retouched one). Names still
+        // key on the photo: each call gets a UNIQUE ./out PNG so two
+        // Generated variants never alias the same origin (which would
         // cross-wire their export / reverse-fit).
         let Some(path) = self.src_path.clone() else { return };
+        let Some(negative) = self.negative_path() else { return };
         if self.busy {
             return;
         }
@@ -543,13 +551,13 @@ impl AutoShadeApp {
                     }),
                     cancel: flag,
                 }));
-                let _mem = crate::budget::heavy_permit(crate::budget::estimate_mb(Some(&path))); // full-frame commit budget (budget.rs)
+                let _mem = crate::budget::heavy_permit(crate::budget::estimate_mb(Some(&negative))); // full-frame commit budget (budget.rs)
                 let res = (|| -> RetouchDone {
                     let cfg = autoshade::config::Config::load();
                     // fidelity "high": the library composes the faithfulness
                     // scaffold onto the prompt and measures D afterwards.
                     let report = autoshade::generative::reimagine(
-                        &cfg, &path, &prompt, "high", &cfg.openai_image_quality, retry, &out,
+                        &cfg, &negative, &prompt, "high", &cfg.openai_image_quality, retry, &out,
                     )?;
                     // baked-by-construction: the ./out master this job just wrote.
                     let img = autoshade::decode::load_image(&out)?.thumbnail(edge, edge);
