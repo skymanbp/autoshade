@@ -104,6 +104,29 @@ end to end on the user's crop: 1.0 → luma HF 0.12 / chroma 0.07, 0.5 → 1.15 
 0.07, 0.25 → 1.71 / 2.26 (per 255), and a run with no `--strength` is
 byte-identical to 0.5.
 
-The three-lane release battery (`scripts/release_battery.sh`, the p36–p41
-calibration corpus and the sidecar weights in reach) and the reference-pair
-final gate are recorded in the ROADMAP ledger entry with the ship facts.
+Final gate, reference pair, before the tag: the 1.3.4 CLI (built in its own
+target directory, `--version` 1.3.4) re-rendered the 0.85 reference develop
+at full resolution — **0 of 60,217,344 pixels** differ from the v1.3.3 CLI's
+render of the same develop; downscaled to 2048 px it sits at mean |diff|
+0.00044 / max 0.008 against the R37 acceptance render, the same numbers as
+v1.3.3 and v1.3.2; 0.65 / 0.85 / 1.0 at 2048 px are pixel-identical to the
+acceptance renders (0 of 2,795,520 each; 0.85: sky ΔE 4.9, |ΔL*| 0.6, L*
+spread 1.03, land ΔE 6.9), and the three crops were viewed beside the
+target: no seam, no rectangle. The solver and the renderer did not change;
+the pixels prove it.
+
+Recorded after the tag: the three-lane release battery
+(`scripts/release_battery.sh`, the p36–p41 calibration corpus and the sidecar
+weights in reach) ran on the `f6d7af3` snapshot before the tag (the tagged
+code minus the version literal and the documents — `git diff f6d7af3 v1.3.4
+-- src tests python assets scripts` is empty) and finished green: library
+**1484 / 0 / 15** (742.83 s, release profile, one process per module),
+CLI 24, contract 2 + 2, doc-tests 0, GUI **186 / 0 / 1**, calibration lane
+**1484 / 0 / 15** (1162.86 s; one skip line, the mask-brush specimen
+test whose `AUTOSHADE_MB_SAMPLE_ROOT` specimen is not on this machine),
+`audit_i18n` 0 / 0 / 0 and the font check 877/877 inside the battery, 1499
+library names enumerated (+1 / −0 against the v1.3.3 transcript; GUI 184 →
+187 by name, +3 / −0), and `check_docs.py --gates` on the transcript with the
+XMP census root supplied **30 PASS / 0 FAIL / 0 SKIP**. The ship facts (the
+release run, the downloaded assets, the site, the local upgrade) are in the
+ROADMAP ledger entry.
