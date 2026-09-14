@@ -1,6 +1,6 @@
 # AutoShade — Architecture
 
-> Status: **implemented** (v1.3.3 — the sensor plane is measured from the
+> Status: **implemented** (v1.3.4 — the sensor plane is measured from the
 > container before the decoder is asked to allocate it, so a frame past that
 > decoder's own ceiling is a named refusal naming the frame and the workflow
 > that works instead of an abort, and a CONTAINED panic no longer raises a modal
@@ -134,10 +134,19 @@
 > wrong reason; it writes a `=== name ===` transcript that
 > `scripts/check_docs.py --gates` reads the counts and the lane set back out
 > of, and it prints the by-name test-set difference against a saved baseline.
-> 1498 library + 24 CLI + 184 GUI + 2+2 contract tests are enumerated in the GUI
-> build; the library result is 1483 pass + 15 `#[ignore]`d forensic probes and
-> the GUI result is 183 pass + one explicit scratch-recipe export probe ignored
-> in the ordinary battery. Counts refreshed 2026-09-13 for v1.3.3: +15 / −1 by
+> 1499 library + 24 CLI + 187 GUI + 2+2 contract tests are enumerated in the GUI
+> build; the library result is 1484 pass + 15 `#[ignore]`d forensic probes and
+> the GUI result is 186 pass + one explicit scratch-recipe export probe ignored
+> in the ordinary battery. Counts refreshed 2026-09-13 for v1.3.4: +4 / −0 by
+> name against the v1.3.3 tag (`f5046c9`), taken statically between the tag's
+> source and this tree (1710 → 1714 `#[test]` functions) — one library pin
+> (`the_sidecar_blends_luma_by_strength_and_takes_chroma_first` in `denoise`:
+> the sidecar's split blend law and its default) and three GUI pins (the ◭
+> card landing on the negative's master with the ● mirror following the
+> persisted link, `negative_origin` following an in-place denoise on the ▣
+> card with the worker halves pinned on their sources, and the two denoise
+> dials — defaults, prefs keys, both drawn, each verb reading its own).
+> Before that, counts were refreshed 2026-09-13 for v1.3.3: +15 / −1 by
 > name against the v1.3.2 tag (`d0f7dd4`), taken statically between the tag's
 > source and this tree (1696 → 1710 `#[test]` functions) — the commit pin
 > `a_develop_commit_lands_all_three_or_nothing` rewritten as
