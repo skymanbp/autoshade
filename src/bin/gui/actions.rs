@@ -1351,19 +1351,30 @@ impl AutoShadeApp {
         self.variants.iter().position(|v| v.kind == VariantKind::Original)
     }
 
-    /// The baked master the photo's NEGATIVE carries, if any — the ▣ Original
-    /// card's in-place retouch master (a denoise / heal / clone / fill baked
-    /// into the source), which is what that card develops, exports and
-    /// retouches. Every consumer that reaches for THE NEGATIVE'S pixels rather
-    /// than the active card's — the reimagine input, the reverse-fit's source
-    /// frame, the ◭ card a fit lands as and the pixel link it persists —
-    /// reads this beside `src_path` (2026-09-13). Each of them spelled the
-    /// negative as the file on disk, so after an AI denoise on the ▣ card the
-    /// fit was solved on, rendered from and exported from the un-denoised
-    /// sensor frame while the ▣ card beside it showed the clean one (the
-    /// user's own store: ▣ `origin = …denoise.png`, ◭ `origin = None`, no
-    /// `pixels.json`).
+    /// The baked master the photo's NEGATIVE carries, if any. Every consumer
+    /// that reaches for THE NEGATIVE'S pixels rather than the active card's —
+    /// the reimagine input, the reverse-fit's source frame, the ◭ card a fit
+    /// lands as and the pixel link it persists — reads this beside `src_path`
+    /// (2026-09-13). Each of them used to spell the negative as the file on
+    /// disk, so after an AI denoise the fit was solved on, rendered from and
+    /// exported from the un-denoised sensor frame while the card beside it
+    /// showed the clean one (the user's own store: ▣ `origin = …denoise.png`,
+    /// ◭ `origin = None`, no `pixels.json`).
+    ///
+    /// Since 2026-09-15 an AI denoise lands as its own ◈ card instead of
+    /// redefining the ▣ card, so the negative is, in order: the ◈ card the
+    /// user stands on, the first ◈ card in the strip (a denoised negative
+    /// exists because the user wants to work from it), else the ▣ card's own
+    /// in-place master (a heal / clone baked into the source).
     pub(crate) fn negative_origin(&self) -> Option<PathBuf> {
+        let denoised =
+            |v: &Variant| (v.kind == VariantKind::Denoised).then(|| v.origin.clone()).flatten();
+        if let Some(master) = self.active_variant().and_then(denoised) {
+            return Some(master);
+        }
+        if let Some(master) = self.variants.iter().find_map(denoised) {
+            return Some(master);
+        }
         self.original_index().and_then(|i| self.variants[i].origin.clone())
     }
 

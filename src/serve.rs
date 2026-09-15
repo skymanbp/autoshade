@@ -1498,8 +1498,10 @@ struct DevelopReq {
     /// Export/download only: run AI denoise first (ignored by live preview).
     #[serde(default)]
     denoise: bool,
-    /// Absent = `denoise::DEFAULT_STRENGTH` — the same answer the CLI and the
-    /// GUI dials start from.
+    /// Absent = the default of the path the photo takes
+    /// (`denoise::default_strength_for`): 1.0 for a RAW, whose mosaic the
+    /// DRUNet path denoises, 0.5 for a baked source on the SCUNet path — the
+    /// same answers the CLI gives.
     #[serde(default)]
     denoise_strength: Option<f32>,
     /// Export/download only: "tif" (16-bit master, default) or "jpg".
@@ -2064,15 +2066,18 @@ fn fmt_ext(req: &DevelopReq) -> &'static str {
     }
 }
 
-fn denoise_opts(req: &DevelopReq, cfg: &Config) -> Option<DenoiseOpts> {
-    req.denoise
-        .then(|| {
-            DenoiseOpts::from_config(
-                cfg,
-                None,
-                req.denoise_strength.unwrap_or(crate::denoise::DEFAULT_STRENGTH),
-            )
-        })
+/// The export's denoise, when asked for. An absent strength is the default
+/// OF THE PATH the photo takes — `DEFAULT_STRENGTH_RAW` for a RAW (the
+/// mosaic-domain denoiser, 2026-09-15) and `DEFAULT_STRENGTH` for a baked
+/// source (the SCUNet path) — the same two answers the CLI gives.
+fn denoise_opts(req: &DevelopReq, cfg: &Config, src: &Path) -> Option<DenoiseOpts> {
+    req.denoise.then(|| {
+        DenoiseOpts::from_config(
+            cfg,
+            None,
+            req.denoise_strength.unwrap_or(crate::denoise::default_strength_for(src)),
+        )
+    })
 }
 
 fn export_slot_path(
@@ -2333,7 +2338,7 @@ fn api_export(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
         &src,
         &req.recipe,
         &tmp,
-        denoise_opts(&req, &cfg).as_ref(),
+        denoise_opts(&req, &cfg, &src).as_ref(),
         None,
         // The shipped channel (R29-1): one request, one photo, one thread.
         crate::diag::stderr(),
@@ -2387,7 +2392,7 @@ fn api_download(request: &mut Request, state: &AppState) -> Result<ResponseBox> 
             &src,
             &req.recipe,
             &tmp,
-            denoise_opts(&req, &cfg).as_ref(),
+            denoise_opts(&req, &cfg, &src).as_ref(),
             None,
             // The shipped channel (R29-1): one request, one photo, one thread.
             crate::diag::stderr(),

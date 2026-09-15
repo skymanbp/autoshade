@@ -101,7 +101,8 @@
 > advise → verify → render
 > pipeline ships across three front ends — a native desktop GUI (`autoshade-gui`,
 > egui/eframe, which links this library in-process), the local web UI (`serve`),
-> and the CLI — plus AI denoise (SCUNet sidecar), the PNG/TIFF
+> and the CLI — plus AI denoise (a DRUNet sidecar on the RAW sensor mosaic,
+> SCUNet on baked sources), the PNG/TIFF
 > baked-source mode, style retrieval, XMP sidecars (global + local masks),
 > experimental generative edits, an optional pixel-**heal** retouch mode (§4.7)
 > the deterministic look **reverse-fit** (§4.8) and the local server's refusal
@@ -570,13 +571,42 @@
 > offer three different remedies.
 >
 > Since shipped, two *opt-in* pixel-level features were added alongside the
-> parametric core: **AI denoise** (a Python/SCUNet GPU sidecar, run before
-> tone/sharpen; since 2026-09-13 its strength is a luma/chroma split —
-> `python/denoise.py::blend_luma_chroma`: luminance blended by the value,
-> the model's chroma taken at `min(1, 2·s)` — with one default,
-> `denoise::DEFAULT_STRENGTH = 0.5`, on the CLI, the web export and the GUI's
-> two dials; 1.0 kept 1–7 % of a 61 MP ISO-640 frame's high-frequency energy
-> across every SCUNet tier, measured) and a **baked-source mode** (edit an already-exported PNG/TIFF,
+> parametric core: **AI denoise** (two Python GPU sidecars. Since 2026-09-15 a
+> RAW is denoised on its SENSOR MOSAIC before demosaic — `python/denoise_raw.py`,
+> hooked in `render::render_to_image_in` ahead of `develop_intermediate`
+> (`denoise::denoise_mosaic`): a non-blind DRUNet-colour over the packed
+> (R,G1,B)/(R,G2,B) triplets under a generalized Anscombe transform whose
+> noise model `var = a·x + b` the sidecar measures on the frame itself
+> (32-px blocks, Haar-diagonal vs box-5 variance to keep only textureless
+> blocks, least squares with outlier rejection), with the exact unbiased
+> inverse; strength is a mosaic-domain blend whose default is
+> `denoise::DEFAULT_STRENGTH_RAW = 1.0`, chosen per source by
+> `denoise::default_strength_for` on the CLI, the web export and the GUI's two
+> dials. Why the mosaic: on the user's ILCE-7RM4A frames the noise is white
+> per CFA plane there and spatially correlated after demosaic, where neither
+> the blind SCUNet nor a non-blind sRGB-domain model separated it from
+> texture — against ground truth (an ISO-100 frame plus synthetic noise at
+> the ISO-640 model the shipped estimator measured on a real frame, injected
+> into the whole 61 MP frame; `scripts/denoise_bench.py`) the mosaic path
+> scored +3.2 / +4.9 dB PSNR over SCUNet 1.0 on two 2048² windows and
+> +3.1 / +5.9 dB on their 20 % most-detailed blocks, where SCUNet 1.0 fell
+> below the noisy input; at an extrapolated ISO-3200 level (the darktable
+> profile's 640→3200 ratios) the lead narrows to +1.1 / +2.0 dB whole-frame
+> and +1.1 / +2.6 dB on the detail blocks, still ahead on every metric. The
+> bench's acceptance line — the RAW path ≥ 1.5 dB above SCUNet 1.0 on the
+> detail blocks in every window — is defined at the measured level, where it
+> passes with room; the extrapolated level's town window sits under it
+> (+1.1 dB) and is reported, not gated. A baked PNG/TIFF/JPEG source
+> keeps `python/denoise.py`'s SCUNet, whose strength has been a luma/chroma
+> split since 2026-09-13 — `blend_luma_chroma`: luminance blended by the
+> value, the model's chroma taken at `min(1, 2·s)` — with its own default
+> `denoise::DEFAULT_STRENGTH = 0.5`; 1.0 kept 1–7 % of a 61 MP ISO-640
+> frame's high-frequency energy across every SCUNet tier, measured. In the
+> GUI the result is a new **◈ Denoised negative** card — source-based over
+> its own 16-bit master, the strip's negative while it exists, the card it
+> was run from untouched; the ≤2048 px working-copy tier and its checkbox
+> retired the same day, because a master baked from it capped every later
+> export of that card) and a **baked-source mode** (edit an already-exported PNG/TIFF,
 > e.g. one denoised in Lightroom — auto-detected by file type). All four sidecar
 > bridges share one success contract (`lib.rs::sidecar_wrote`): *exit 0 alone
 > is not success* — THIS run must have produced the artifact, refusing a
@@ -589,14 +619,17 @@
 > deliverable passes; segment's `exists()` guard never fired for pre-claimed
 > names), which is why the contract lives in one place with all three arms.
 >
-> ### The ML sidecar family (R27 Batch-5; S2 added the fifth)
+> ### The ML sidecar family (R27 Batch-5; S2 added the fifth, the RAW-mosaic denoiser the sixth)
 >
-> There are now **five** Python sidecars, and they share one discipline rather
-> than five copies of it. `python/denoise.py` owns the download-and-refuse
+> There are now **six** Python sidecars, and they share one discipline rather
+> than six copies of it. `python/denoise.py` owns the download-and-refuse
 > implementation — `_download` with an in-stream byte cap, `_sha256`,
-> `_reclaim_stale_parts`, `_fetch_verified` — and the other four reach it
+> `_reclaim_stale_parts`, `_fetch_verified` — and the other five reach it
 > instead of reimplementing it, which is why their progress lines announce
-> themselves as `[denoise]`.
+> themselves as `[denoise]`. `python/denoise_raw.py` (2026-09-15) fetches its
+> DRUNet weights and the two KAIR network files through the same
+> `_fetch_verified`, each sha256- and byte-pinned, and builds the model from a
+> synthetic `models` package so the pinned files import as they do upstream.
 >
 > `_download` asks for `Accept-Encoding: identity`, and that is load-bearing
 > rather than tidy. `Content-Length` counts the bytes on the WIRE while
@@ -634,6 +667,7 @@
 > | sidecar | bridge | model(s) | licence | size |
 > |---|---|---|---|---|
 > | `denoise.py` | `denoise.rs` | SCUNet ×5 | Apache-2.0 (KAIR) | ~72 MB each |
+> | `denoise_raw.py` | `denoise.rs` (`denoise_mosaic`, the RAW path before demosaic) | **DRUNet-colour** (DPIR), sha256-pinned with its two KAIR network files | MIT (weights and code) | 130,579,305 B |
 > | `segment.py --target subject` | `segment.rs` | **BiRefNet** (general checkpoint), sha256-pinned | MIT | 444,473,596 B |
 > | `segment.py --target subject` (fallback) | `segment.rs` | U²-Net via a NAMED rembg session | Apache-2.0 | small |
 > | `segment.py --target sky` | `segment.rs` | **OneFormer ADE20K Swin-L**, sha256-pinned | MIT (weights) | 881,196,376 B |
@@ -1032,7 +1066,7 @@ image path and the API analysis path each need an OpenAI-compatible key.
 | M3 | `auto` end-to-end + batch | batch fixes its work list up front, then runs it through a bounded pool — `--jobs N` since R27, default 3 for `batch` and 1 for `eval` (their pre-R27 concurrency), capped by the memory budget in [`src/jobs.rs`](../src/jobs.rs) and index-ordered on output; since v0.34.0 that budget is per-FILE where the header is free to read (`jobs::survey_peak_mb` — a native-resolution 16-bit TIFF from LR's "Edit in…" can need more than the corpus constant on its own, and says so before the run starts); "pending" = no develop in the store (recipe.json or `<stem>.xmp`, central or legacy) | **done** |
 | M4 | Style retrieval + eval harness (your edits as ground truth) | k-NN over EXIF+histogram, plus an optional SigLIP 2 cosine term (`AUTOSHADE_STYLE_EMBED`, off by default); per-field MAE/bias | **done** |
 | M5 | Local web UI | `tiny_http` + vanilla JS (gallery, live before/after) | **done** |
-| V2 | AI denoise (high-ISO/astro) | Python sidecar → **SCUNet** on GPU, called from Rust | **done** |
+| V2 | AI denoise (high-ISO/astro) | two Python sidecars called from Rust → a non-blind **DRUNet** on the RAW sensor mosaic before demosaic (2026-09-15; the frame's own noise model, GAT + exact unbiased inverse), **SCUNet** on baked sources; the GUI lands the result as a ◈ Denoised negative card | **done** |
 | V2 | Baked-source mode (edit exported PNG/TIFF) | extension dispatch; develop runs on loaded pixels | **done** |
 | V2 | Generative reimagine / retouch | OpenAI Images (`gpt-image-*`); reimagine composes a faithfulness scaffold onto the prompt under `high` (the `input_fidelity` parameter is negotiated away on gpt-image-2), measures the result's structural divergence D with the reverse-fit's own statistic (`fit::structure_divergence_for`, threshold `fit::DIVERGENCE_GLOBAL`), disclosures it, and offers a bounded opt-in retry that keeps the closer of two results | **done (experimental)** |
 | V2 | Pixel retouch / heal (spot removal) | deterministic heal engine + vision spot-detect ([`src/retouch.rs`](../src/retouch.rs)) | **done (experimental)** |
@@ -1565,9 +1599,13 @@ PIXELS, however neutral the recipe — so the retouched raster bakes into the
 ✎ card and the ✨ card keeps its own. A generative fill is not an in-place
 retouch (2026-09-15): the model is shown the active card's developed picture
 and its answer lands as a new ✨ card, `RetouchKind::NewGenerated`, with the
-filled card untouched. The axis predicate is
-`VariantKind::is_source_based` (Original, Fitted) / `on_ai_pixels`
-(Generated, Edited): calibration is stripped from the canvas, the
+filled card untouched. The fifth kind, `VariantKind::Denoised` (「◈ Denoised
+negative」, store word `"denoised"`, 2026-09-15), is what an AI denoise lands
+as — source-based over its own denoised master (`origin`), the develop copied
+from the card it was run from, `RetouchKind::NewDenoised`; the card it was
+run from keeps its pixels and the ▣ card is never redefined. The axis
+predicate is `VariantKind::is_source_based` (Original, Fitted, Denoised) /
+`on_ai_pixels` (Generated, Edited): calibration is stripped from the canvas, the
 `pixels.json` flag is written, and the projection member clears for BOTH
 AI-pixel kinds — the flag records what the master is, which the ✎ card
 shares with the ✨ card it forked from — while `fit_target` stays a policy
@@ -1596,7 +1634,10 @@ master that had none. `known_variant_kind` accepts `"edited"`; the CLI
 **The negative has one definition (2026-09-13).** `origin.is_some()` is the
 orthogonal attribute — a card hangs off a baked master — and the ▣ Original
 card's master is the photo's NEGATIVE: `AutoShadeApp::negative_origin`
-(that card's `origin`) and `negative_path` (it, else `src_path`). Three
+(since 2026-09-15 the ◈ Denoised card's master while one exists — the active
+◈ card first, then the first on the strip — because an AI denoise lands as
+that card and never redefines the ▣ card; else the ▣ card's `origin`, a heal
+or clone in place) and `negative_path` (it, else `src_path`). Three
 consumers used to spell the negative as the file on disk and read past an
 in-place denoise / heal on the ▣ card: the reimagine input (now
 `negative_path`), the reverse-fit's source frame (the master loaded through
@@ -4826,7 +4867,7 @@ tag reads back `None`), so the ICC regression tests write their fixture through
 the `tiff` crate directly, the way Lightroom-style writers produce real profiled
 TIFFs.
 
-**The Python sidecar stack** is deliberately NOT in `Cargo.toml`: five scripts
+**The Python sidecar stack** is deliberately NOT in `Cargo.toml`: six scripts
 under `python/`, shelled out to with `-E`, each doing one job and each failing
 loudly rather than degrading silently (`lib.rs::sidecar_wrote`). They need
 Python 3 + PyTorch (CUDA where the box has it), plus `transformers` on the sky

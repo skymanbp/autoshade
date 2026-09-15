@@ -83,8 +83,9 @@ An AI decides *what to change*. A deterministic Rust engine *does* it.
   refused, and the refusal is a measurement printed with the shares it was
   decided on.
 - **Generative and pixel tools, opt-in and labelled** — reimagine
-  (gpt-image-2), retouch, heal and SCUNet denoise are the only paths that can
-  invent or alter scene content, and are marked so.
+  (gpt-image-2), retouch, heal and AI denoise are the only paths that can
+  invent or alter scene content, and are marked so; a denoise lands as its
+  own card and never rewrites the original.
 - **Versions, variants and three front ends** — Original, AI-generated
   (immutable: an edit on one continues on an Edited-AI card beside it) and
   Reverse-fit cards with numbered snapshots in a per-user develop store shared
@@ -432,7 +433,7 @@ published from the tag beside the Windows and macOS assets.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/architecture-dark.svg" />
-  <img src="docs/images/architecture-light.svg" alt="AutoShade architecture: three front ends over one Rust library with the style index, reverse-fit, local producers and the local-field analyzer; five local Python sidecars for embeddings, descriptions, correspondence, segmentation and denoise; opt-in external AI services" />
+  <img src="docs/images/architecture-light.svg" alt="AutoShade architecture: three front ends over one Rust library with the style index, reverse-fit, local producers and the local-field analyzer; six local Python sidecars for embeddings, descriptions, correspondence, segmentation and two denoisers; opt-in external AI services" />
 </picture>
 
 <sub>Twenty components, nineteen connections and three boundaries, generated from
@@ -573,9 +574,10 @@ behind the `gui` feature. The local AI tools also need Python packages
 (weights download on first use and are not committed): **BiRefNet**
 `pip install torchvision timm einops` against a `torchvision` matched to
 `torch`; **U²-Net fallback** `pip install rembg`; **OneFormer sky and SAM
-2.1** `pip install transformers torch`; **SCUNet denoise**
-([`python/denoise.py`](python/denoise.py)) a `torch` build plus OpenCV, NumPy,
-einops and requests — under CUDA:
+2.1** `pip install transformers torch`; **AI denoise**
+([`python/denoise_raw.py`](python/denoise_raw.py) on the RAW sensor mosaic,
+[`python/denoise.py`](python/denoise.py) on baked sources) a `torch` build plus
+OpenCV, NumPy, einops and requests — under CUDA:
 
 ```bash
 pip install torch --index-url https://download.pytorch.org/whl/cu128
@@ -616,7 +618,7 @@ interoperability, the AI roles and the privacy boundary. The essentials:
 - The source library is read-only; develops, XMP projections and versions live
   in the develop store, and **Export .xmp beside the photo** is the separate,
   confirmed exception.
-- Manual develop, `apply`, local `match`, XMP, masks, SCUNet denoise, style
+- Manual develop, `apply`, local `match`, XMP, masks, AI denoise, style
   indexing and the local AI masks need no API key; `analyze`/`auto`,
   `match --style-prompt`/`--ai-judge`/`--deep`, `reimagine`/`retouch` and
   automatic `heal` detection use the configured role, and the verifier gets
@@ -688,9 +690,10 @@ cannot end a batch.
 - **Non-destructive, interoperable, local first** — the source library stays
   read-only, develops live in a per-user store, and sidecars are merged so a
   Lightroom catalogue survives.
-- **Five local sidecars** — segmentation, denoise, correspondence, look
-  descriptions and style embeddings run on the machine; pixels leave it only
-  for an AI operation you ask for.
+- **Six local sidecars** — segmentation, two denoisers (one on the RAW sensor
+  mosaic, one on baked pixels), correspondence, look descriptions and style
+  embeddings run on the machine; pixels leave it only for an AI operation you
+  ask for.
 - **Generated pixels are labelled** — reimagine, retouch, heal and denoise are
   opt-in exceptions on their own cards, and known weaknesses are honesty
   markers, not caption polish.
@@ -794,7 +797,7 @@ numbers](#measured-numbers) are not repeated.
   725 bodies) · `image`, qcms, rayon, clap, serde, ureq, `eframe`/egui and
   `tiny_http` back the shared library, CLI, desktop GUI and loopback web UI.
 - The server uses a 32-byte token plus Host/Origin/no-store defenses; the GUI
-  keeps variants, versions and a deleted-version registry; SCUNet success
+  keeps variants, versions and a deleted-version registry; a denoise's success
   requires the typed `sidecar_wrote` contract; a 1771 MB reference probe sets
   the 1800 MB per-photo budget, and a 4 GiB RAW gate bounds admission.
 - The [`build` workflow](.github/workflows/build.yml) covers default and GUI
@@ -860,7 +863,8 @@ property, and none are redistributed here.
 
 | Model | Purpose | License |
 |---|---|---|
-| SCUNet | AI denoise | Apache-2.0 |
+| SCUNet | AI denoise (baked sources) | Apache-2.0 |
+| DRUNet (DPIR) | AI denoise (RAW sensor mosaic) | MIT |
 | BiRefNet | Subject segmentation | MIT |
 | U²-Net | Subject fallback | Apache-2.0 |
 | OneFormer ADE20K | Sky segmentation | MIT |

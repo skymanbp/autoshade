@@ -1621,7 +1621,9 @@ fn python_available() -> bool {
     })
 }
 
-/// The same question for the Python DENOISE sidecar (R24 batch 2).
+/// The same question for the Python DENOISE sidecars (R24 batch 2; both
+/// scripts since 2026-09-15 — `denoise_raw.py` takes a RAW's sensor mosaic,
+/// `denoise.py` a baked source, and the verb needs whichever the card is).
 ///
 /// One helper family, one treatment: `python/denoise.py` ships exactly the way
 /// `python/segment.py` does — which is to say a release package carries
@@ -1637,7 +1639,9 @@ pub(crate) fn denoise_helper_available() -> bool {
     static OK: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *OK.get_or_init(|| {
         let cfg = autoshade::config::Config::load();
-        std::path::Path::new(&cfg.denoise_script).exists() && python_available()
+        std::path::Path::new(&cfg.denoise_script).exists()
+            && std::path::Path::new(&cfg.denoise_raw_script).exists()
+            && python_available()
     })
 }
 

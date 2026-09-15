@@ -199,14 +199,18 @@ enum Command {
         /// the standing answer.
         #[arg(long)]
         reference_image: bool,
-        /// Run AI denoise (SCUNet, GPU) before developing — for high-ISO/astro.
+        /// Run AI denoise (GPU sidecar) before developing — for high-ISO/astro.
+        /// A RAW is denoised on its sensor mosaic, before demosaic (DRUNet,
+        /// noise level measured on the frame); a baked source takes SCUNet.
         #[arg(long)]
         denoise: bool,
-        /// Denoise strength 0..1: luminance blend, colour noise removed in
-        /// full from 0.5 up; default 0.5 (`denoise::DEFAULT_STRENGTH`).
+        /// Denoise strength 0..1. RAW: a blend in the RAW domain, default 1.0
+        /// (`denoise::DEFAULT_STRENGTH_RAW`). Baked source: luminance blend,
+        /// colour noise removed in full from 0.5 up, default 0.5.
         #[arg(long, requires = "denoise", value_parser = unit_interval)]
         denoise_strength: Option<f32>,
-        /// SCUNet model: color_real_psnr (default) / color_real_gan / color_15|25|50.
+        /// SCUNet model for a BAKED source: color_real_psnr (default) /
+        /// color_real_gan / color_15|25|50. A RAW's mosaic path has one model.
         #[arg(long, requires = "denoise")]
         denoise_model: Option<String>,
         /// Export at a SIZE (see `apply --long-edge`): long edge in pixels,
@@ -216,19 +220,22 @@ enum Command {
         long_edge: Option<u32>,
     },
     /// AI-denoise a RAW or an already-baked image (PNG/TIFF/JPEG) into a clean
-    /// 16-bit master in ./out. Manual, GPU-accelerated (SCUNet sidecar). Default
-    /// off everywhere else — this is the explicit "denoise now" command.
+    /// 16-bit master in ./out. Manual, GPU-accelerated: a RAW is denoised on
+    /// its sensor mosaic before demosaic (DRUNet, the noise level measured on
+    /// the frame), a baked image through SCUNet. Default off everywhere else —
+    /// this is the explicit "denoise now" command.
     Denoise {
         /// RAW (.arw/.dng/...) or image (.png/.tif/.jpg) to denoise.
         input: PathBuf,
         /// Output path (default: ./out/<stem>.denoised.tif).
         #[arg(short, long)]
         out: Option<PathBuf>,
-        /// Strength 0..1: luminance blend, colour noise removed in full from
-        /// 0.5 up; default 0.5 (`denoise::DEFAULT_STRENGTH`).
+        /// Strength 0..1. RAW: a blend in the RAW domain, default 1.0
+        /// (`denoise::DEFAULT_STRENGTH_RAW`). Baked image: luminance blend,
+        /// colour noise removed in full from 0.5 up, default 0.5.
         #[arg(long, value_parser = unit_interval)]
         strength: Option<f32>,
-        /// SCUNet model tier (see `auto --denoise-model`).
+        /// SCUNet model tier for a BAKED image (see `auto --denoise-model`).
         #[arg(long)]
         model: Option<String>,
     },
@@ -1556,13 +1563,15 @@ fn auto_cmd(
     let (recipe, verdict, _notes) =
         produce_recipe(raw, &cfg, true, guidance.as_deref(), None, req, true, autoshade::diag::stderr())?;
     let accepted = verdict.decision == autoshade::advisor::Decision::Accept;
-    // Opt-in AI denoise runs inside the render, before tone/sharpen.
+    // Opt-in AI denoise runs inside the render — on the sensor mosaic for a
+    // RAW, before demosaic; on the developed pixels for a baked source. An
+    // absent strength is the default of that path.
     let dn = denoise
         .then(|| {
             denoise::DenoiseOpts::from_config(
                 &cfg,
                 denoise_model,
-                denoise_strength.unwrap_or(denoise::DEFAULT_STRENGTH),
+                denoise_strength.unwrap_or(denoise::default_strength_for(raw)),
             )
         });
     println!(
@@ -1714,10 +1723,13 @@ fn denoise_cmd(
     let out = out.unwrap_or_else(|| default_out(input, "denoised", "tif"));
     pipeline::guard_readonly(&out, input)?;
     ensure_parent(&out)?;
-    let opts =
-        denoise::DenoiseOpts::from_config(&cfg, model, strength.unwrap_or(denoise::DEFAULT_STRENGTH));
+    let opts = denoise::DenoiseOpts::from_config(
+        &cfg,
+        model,
+        strength.unwrap_or(denoise::default_strength_for(input)),
+    );
     if decode::is_raw(input) {
-        println!("denoising RAW {} (neutral develop) ...", input.display());
+        println!("denoising RAW {} (on the sensor mosaic, then a neutral develop) ...", input.display());
         let (w, h) =
             render::render_to_file(input, &EditRecipe::default(), &out, Some(&opts), None, autoshade::diag::stderr())?;
         println!("denoised -> {} ({} x {})", out.display(), w, h);
@@ -1726,7 +1738,7 @@ fn denoise_cmd(
         // denoise_active routes baked sources through the oriented
         // load_image working copy — the direct denoise_file path let OpenCV
         // ignore EXIF rotation and drop the tag (permanently sideways out).
-        denoise::denoise_active(&opts, input, true, &out)?;
+        denoise::denoise_active(&opts, input, &out)?;
         println!("denoised -> {}", out.display());
     }
     Ok(())
@@ -2621,6 +2633,7 @@ mod tests {
             python_bin: "python".into(),
             denoise_model: "m".into(),
             denoise_script: String::new(),
+            denoise_raw_script: String::new(),
             weights_dir: String::new(),
             segment_script: String::new(),
             embed_script: String::new(),

@@ -7073,6 +7073,7 @@ mod tests {
             python_bin: "python".into(),
             denoise_model: "scunet_color_real_psnr".into(),
             denoise_script: String::new(),
+            denoise_raw_script: String::new(),
             weights_dir: String::new(),
             segment_script: String::new(),
             embed_script: String::new(),

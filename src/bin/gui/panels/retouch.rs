@@ -404,11 +404,14 @@ impl AutoShadeApp {
         );
     }
 
-    /// AI denoise (SCUNet, GPU sidecar) as an ACTIVE canvas operation: run on
-    /// the current variant's pixels NOW and bake the clean base in-place, so
-    /// the user sees the result immediately instead of only in an export.
-    /// Mirrors heal's plumbing: RetouchKind::InPlace swaps the variant base
-    /// (undoable) and the develop chain keeps rendering on top.
+    /// AI denoise as an ACTIVE canvas operation (2026-09-15): denoise the
+    /// current card's pixel source at full resolution — a RAW on its sensor
+    /// mosaic before demosaic, a baked source through SCUNet — and land the
+    /// master as a NEW ◈ Denoised card (`RetouchKind::NewDenoised`) that
+    /// carries this card's develop. The card you started from, the ▣
+    /// negative included, keeps its pixels; the ◈ card is deleted, not
+    /// undone. The ≤2048 px working-copy tier retired with the in-place
+    /// landing: a master baked from it capped every later export at 2048 px.
     pub(crate) fn start_ai_denoise(&mut self) {
         // Denoise the ACTIVE variant's pixels (a Generated variant → its
         // origin PNG), same source rule as heal/clone.
@@ -422,12 +425,10 @@ impl AutoShadeApp {
             return;
         };
         self.busy = true;
-        self.status = if self.denoise_fullres {
-            tr(lang, "AI denoise (full-res)… (GPU sidecar, can take minutes; first run downloads the model)").into()
-        } else {
-            tr(lang, "AI denoise… (GPU sidecar on a ≤2048px working copy; first run downloads the model)").into()
-        };
-        let full_res = self.denoise_fullres;
+        self.status = tr(lang, "AI denoise (full frame)… (GPU sidecar, can take minutes; first run downloads the model)").into();
+        // Which model the source takes — a FACT for the landing line (L12#4),
+        // decided by the same rule the library applies (`decode::is_raw`).
+        let on_mosaic = autoshade::decode::is_raw(&path);
         // This fold's OWN dial (the Export fold's 「on export」 has its own):
         // captured at the click, like every other input the worker reads.
         let strength = self.denoise_strength;
@@ -442,11 +443,11 @@ impl AutoShadeApp {
                     let cfg = autoshade::config::Config::load();
                     let opts =
                         autoshade::denoise::DenoiseOpts::from_config(&cfg, None, strength);
-                    autoshade::denoise::denoise_active(&opts, &path, full_res, &out)?;
+                    autoshade::denoise::denoise_active(&opts, &path, &out)?;
                     // baked-by-construction: the ./out master this job just wrote.
                     let img = autoshade::decode::load_image(&out)?.thumbnail(edge, edge);
-                    // InPlace: bake into the active variant's base + repoint origin.
-                    Ok((img, RetouchNote::Denoised(out.clone()), out, RetouchKind::InPlace))
+                    // NewDenoised: a new ◈ card hangs off the master.
+                    Ok((img, RetouchNote::Denoised { out: out.clone(), on_mosaic }, out, RetouchKind::NewDenoised))
                 })();
                 if res.is_err() {
                     release_empty_claim(&out_claim);

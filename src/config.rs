@@ -725,6 +725,11 @@ pub struct Config {
     /// SCUNet weight set (color_real_psnr default; see python/denoise.py).
     pub denoise_model: String,
     pub denoise_script: String,
+    /// RAW-domain denoise sidecar (`python/denoise_raw.py`, 2026-09-15):
+    /// DRUNet on the sensor MOSAIC, before demosaic, with the noise model
+    /// measured on the frame. Same trust class as the other scripts — it
+    /// names a program's argv — so env-only and Destination-trusted.
+    pub denoise_raw_script: String,
     /// Where every sidecar's model weights live — see [`default_weights_dir`].
     /// `AUTOSHADE_WEIGHTS_DIR`, or `weights/` beside whichever script answered.
     pub weights_dir: String,
@@ -886,6 +891,7 @@ pub(crate) const SETTINGS: &[Setting] = &[
     // own doc on `LocalSettings`.
     bound("AUTOSHADE_PYTHON", Trust::Destination, |s| &mut s.python_bin), // Command::new
     env_only("AUTOSHADE_DENOISE_SCRIPT", Trust::Destination), // that command's argv
+    env_only("AUTOSHADE_DENOISE_RAW_SCRIPT", Trust::Destination),
     env_only("AUTOSHADE_SEGMENT_SCRIPT", Trust::Destination),
     env_only("AUTOSHADE_EMBED_SCRIPT", Trust::Destination),
     env_only("AUTOSHADE_CORRESPOND_SCRIPT", Trust::Destination),
@@ -1322,6 +1328,8 @@ impl Config {
         // the exe.
         let denoise_script =
             env_val("AUTOSHADE_DENOISE_SCRIPT").unwrap_or_else(|| bundled_helper("python/denoise.py"));
+        let denoise_raw_script = env_val("AUTOSHADE_DENOISE_RAW_SCRIPT")
+            .unwrap_or_else(|| bundled_helper("python/denoise_raw.py"));
         // ONE directory for every sidecar, not just denoise's (see
         // `default_weights_dir`). The pre-M2 `AUTOSHADE_DENOISE_CACHE` spelling
         // retires with the `AUTOSHOP_*` door in v1.2.4: it shipped in v1.2.0
@@ -1412,6 +1420,7 @@ impl Config {
             denoise_model: env_val("AUTOSHADE_DENOISE_MODEL")
                 .unwrap_or_else(|| "color_real_psnr".to_string()),
             denoise_script,
+            denoise_raw_script,
             weights_dir,
             segment_script,
             embed_script,
@@ -1834,6 +1843,7 @@ mod tests {
             "AUTOSHADE_CLAUDE_BIN",
             "AUTOSHADE_PYTHON",
             "AUTOSHADE_DENOISE_SCRIPT",
+            "AUTOSHADE_DENOISE_RAW_SCRIPT",
             "AUTOSHADE_SEGMENT_SCRIPT",
             "AUTOSHADE_EMBED_SCRIPT",
             "AUTOSHADE_CORRESPOND_SCRIPT",

@@ -176,8 +176,27 @@ impl AutoShadeApp {
         let label_w = ui.fonts(|f| {
             f.layout_no_wrap(label.to_owned(), egui::TextStyle::Body.resolve(ui.style()), egui::Color32::WHITE).size().x
         });
+        // The value box is egui's DragValue: a button at least
+        // `interact_size` wide that GROWS with its text. Budgeting it at the
+        // minimum fit the row only while the value was short — a 3-digit
+        // "100" beside the long-labelled percent dials (the denoise dials'
+        // 100 % default, 2026-09-15) ran 4 px past the panel, which then
+        // widened by that much every frame. The budget is the widest text the
+        // track can show (both ends, at the shown decimals) plus the button's
+        // padding, so a row that fits at its default still fits at either
+        // end of a drag.
+        let value_w = {
+            let style = ui.style().drag_value_text_style.resolve(ui.style());
+            let widest = ui.fonts(|f| {
+                [min, max]
+                    .into_iter()
+                    .map(|v| f.layout_no_wrap(format!("{v:.decimals$}"), style.clone(), egui::Color32::WHITE).size().x)
+                    .fold(0.0f32, f32::max)
+            });
+            (widest + 2.0 * ui.spacing().button_padding.x).max(ui.spacing().interact_size.x)
+        };
         let spacing = ui.spacing();
-        let rail = (ui.available_width() - label_w - spacing.interact_size.x - 2.0 * spacing.item_spacing.x)
+        let rail = (ui.available_width() - label_w - value_w - 2.0 * spacing.item_spacing.x)
             .clamp(60.0, spacing.slider_width);
         let rail_before = std::mem::replace(&mut ui.spacing_mut().slider_width, rail);
         let resp = ui
@@ -461,6 +480,14 @@ impl AutoShadeApp {
                                     label.on_hover_text(tr(
                                         lang,
                                         "A generated image stays as generated: the first edit here continues on a new ✎ Edited AI image card",
+                                    ));
+                                } else if kind == VariantKind::Denoised {
+                                    // The ◈ card (2026-09-15): what it is and
+                                    // what a .xmp from it can carry, said where
+                                    // the card is.
+                                    label.on_hover_text(tr(
+                                        lang,
+                                        "The negative AI-denoised into its own master: develop it like the ▣ card, reverse-fit and reimagine read it as the negative while it exists; a .xmp from it carries the sliders only — run Lightroom's own Denoise there",
                                     ));
                                 }
                                 // The card's NAME (R24-3), which until now
@@ -1004,9 +1031,9 @@ impl AutoShadeApp {
                     tr(lang, "AI denoise strength"),
                     &mut self.denoise_strength,
                     1.0,
-                    autoshade::denoise::DEFAULT_STRENGTH,
+                    autoshade::denoise::DEFAULT_STRENGTH_RAW,
                     tr(lang,
-                        "How much of the SCUNet result 「🤖 AI Denoise now」 bakes in — this fold's own dial (the Export fold's 「on export」 has its own; neither reaches the other). Luminance follows the dial; colour noise is removed in full from 50% up. 100% is the model's whole output, which on a 61 MP ISO-640 frame kept 5% of the texture — the default 50% keeps the rock and loses the colour speckle. Double-click to reset.",
+                        "How much of the denoise 「🤖 AI Denoise now」 keeps — this fold's own dial (the Export fold's 「on export」 has its own; neither reaches the other). On a RAW the denoise runs on the sensor mosaic with the noise level measured on the frame: 100% is the model's whole output and the default (the texture stays; anything less only puts noise back). On a baked source (PNG/TIFF/JPEG master) the older SCUNet runs at this dial, and 50% is its sweet spot. Double-click to reset.",
                     ),
                 );
                 ui.horizontal(|ui| {
@@ -1020,7 +1047,7 @@ impl AutoShadeApp {
                     let has_helper = denoise_helper_available();
                     let ready = self.src_path.is_some() && !self.busy && has_helper;
                     let missing = tr(lang,
-                        "this build did not ship the python sidecar — run AutoShade from the project directory, or point AUTOSHADE_DENOISE_SCRIPT at python/denoise.py",
+                        "this build did not ship the python sidecars — run AutoShade from the project directory, or point AUTOSHADE_DENOISE_SCRIPT and AUTOSHADE_DENOISE_RAW_SCRIPT at python/denoise.py and python/denoise_raw.py",
                     );
                     if action(ui, ready, tr(lang, "🤖 AI Denoise now"))
                         // 🤖 + the cross-reference line (#4): this verb stays
@@ -1030,28 +1057,19 @@ impl AutoShadeApp {
                         // sidecar and nothing else — same discipline as the
                         // segmentation pair.
                         .on_hover_text(if has_helper { ai_xref(lang, tr(lang,
-                            "Run the SCUNet GPU sidecar on this variant's pixels at the AI denoise strength above \
-                             and show the result on canvas (undoable — bakes a clean base into the current variant; \
-                             the develop sliders keep applying on top; first run downloads the model)",
+                            "Denoise this card's pixels at full resolution — a RAW on its sensor mosaic before demosaic, \
+                             a baked source through SCUNet — and land the result as a new ◈ Denoised negative card \
+                             carrying this card's develop; the card you started from keeps its pixels (first run \
+                             downloads the model)",
                         )) } else { missing.to_string() })
                         .clicked()
                     {
                         self.start_ai_denoise();
                     }
-                    // Enabled for BAKED sources too (L15-4, the heal-gate
-                    // rule): the engine honours the flag on both source
-                    // types (denoise_active), and the RAW-only gate left a
-                    // high-res baked TIFF no way to opt out of the ≤2048px
-                    // working copy.
-                    // The label names its VERB (R22 #16): four different
-                    // checkboxes in three panels all said just 「Full-res」, so a
-                    // support answer ("tick Full-res") pointed at four controls
-                    // with different gates and different costs.
-                    ui.checkbox(&mut self.denoise_fullres, tr(lang, "Full-res denoise"))
-                        .on_hover_text(tr(lang,
-                            "Denoise at full resolution (the full-sensor develop for a RAW, the image itself for a \
-                             baked source; slow) — off = a ≤2048px working copy for a quick on-canvas result",
-                        ));
+                    // No 「Full-res」 checkbox any more (2026-09-15): the
+                    // result is a CARD, and a card baked from a ≤2048 px
+                    // working copy capped every later export of it at
+                    // 2048 px — the denoise always runs on the full frame.
                 });
             });
         changed
@@ -3030,7 +3048,7 @@ impl AutoShadeApp {
                 // variant immediately. Same-named twins in two panels made the
                 // difference invisible until an export took minutes.
                 ui.checkbox(&mut self.save_denoise, tr(lang, "🤖 AI Denoise on export")).on_hover_text(
-                    ai_xref(lang, tr(lang, "SCUNet AI denoise before developing, at the Export denoise strength below — high-ISO / astro (slow, GPU; needs the python sidecar). Batch render skips it.")),
+                    ai_xref(lang, tr(lang, "AI denoise before developing, at the Export denoise strength below — a RAW on its sensor mosaic, a baked source through SCUNet — for high-ISO / astro (slow, GPU; needs the python sidecar). Batch render skips it, and so does a ◈ Denoised card, whose master is already denoised.")),
                 );
                 // The checkbox's OWN dial, directly under it (user decision
                 // 2026-09-12): the Detail fold's 「AI Denoise now」 has its own
@@ -3044,9 +3062,9 @@ impl AutoShadeApp {
                         tr(lang, "Export denoise strength"),
                         &mut self.save_denoise_strength,
                         1.0,
-                        autoshade::denoise::DEFAULT_STRENGTH,
+                        autoshade::denoise::DEFAULT_STRENGTH_RAW,
                         tr(lang,
-                            "How much of the SCUNet result the export-time denoise bakes into every full-resolution delivery — this fold's own dial (the Detail fold's 「AI Denoise now」 has its own; neither reaches the other). Luminance follows the dial; colour noise is removed in full from 50% up; 100% is the model's whole output. Double-click to reset.",
+                            "How much of the denoise the export-time pass keeps in every full-resolution delivery — this fold's own dial (the Detail fold's 「AI Denoise now」 has its own; neither reaches the other). On a RAW the denoise runs on the sensor mosaic with the noise level measured on the frame: 100% is the model's whole output and the default. On a baked source the older SCUNet runs at this dial, and 50% is its sweet spot. Double-click to reset.",
                         ),
                     );
                 });

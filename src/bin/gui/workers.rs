@@ -2356,10 +2356,15 @@ impl AutoShadeApp {
                 }
                 s
             }
-            RetouchNote::Denoised(p) => trf(
+            RetouchNote::Denoised { out, on_mosaic: true } => trf(
                 lang,
-                "AI denoised → {path} (updated current variant)",
-                &[("path", &p.display().to_string())],
+                "AI denoised on the sensor mosaic → {path} (new ◈ card; the card you started from is untouched)",
+                &[("path", &out.display().to_string())],
+            ),
+            RetouchNote::Denoised { out, on_mosaic: false } => trf(
+                lang,
+                "AI denoised (a baked source, so SCUNet on developed pixels) → {path} (new ◈ card; the card you started from is untouched)",
+                &[("path", &out.display().to_string())],
             ),
             RetouchNote::Cloned { n, out } => trf(
                 lang,
@@ -2446,8 +2451,33 @@ impl AutoShadeApp {
                                     ctx,
                                 );
                             }
+                            RetouchKind::NewDenoised => {
+                                // AI denoise → a NEW ◈ card (2026-09-15): the
+                                // saved master is its pixel source, the develop
+                                // it was made from is its recipe (the LIVE one
+                                // — a slider moved while the sidecar ran is
+                                // what the user sees), and the card it was made
+                                // from keeps its pixels: push_variant saves that
+                                // card's recipe and switches here, exactly like
+                                // a reimagine landing. Nothing enters the
+                                // outgoing card's undo history — a card is
+                                // deleted, not undone.
+                                let recipe = self.recipe.clone();
+                                self.push_variant(
+                                    Variant {
+                                        kind: VariantKind::Denoised,
+                                        id: new_variant_id(),
+                                        name: None,
+                                        recipe,
+                                        base: Some(Arc::new(img)),
+                                        origin: Some(saved),
+                                        thumb: None,
+                                    },
+                                    ctx,
+                                );
+                            }
                             RetouchKind::InPlace => {
-                                // heal/clone/denoise: a pixel touch-up of the
+                                // heal/clone: a pixel touch-up of the
                                 // NEUTRAL-DEVELOP base (never the developed
                                 // rendition — the recipe keeps rendering ON TOP,
                                 // so baking developed pixels would cook the tone

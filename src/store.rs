@@ -2185,7 +2185,7 @@ fn variants_path_in(root: &Path, src: &Path) -> PathBuf {
 }
 
 /// One BACKGROUND variant in a [`VariantsRecord`]: its kind
-/// ("original" | "generated" | "fitted" | "edited"), the variant's full develop recipe,
+/// ("original" | "generated" | "fitted" | "edited" | "denoised"), the variant's full develop recipe,
 /// and its baked raster origin when the variant is pixel-based. Base pixels
 /// are NOT stored — they re-decode from `origin`; source-based variants
 /// re-develop the shared source.
@@ -2253,7 +2253,7 @@ pub struct VariantsRecord {
 /// pixels is an edited card — [`ActiveWrite::DevelopOnAiPixels`] is how a
 /// writer without a live strip states that.
 fn known_variant_kind(kind: &str) -> bool {
-    matches!(kind, "original" | "generated" | "fitted" | "edited")
+    matches!(kind, "original" | "generated" | "fitted" | "edited" | "denoised")
 }
 
 /// Persist the strip record. Origins inside the develop dir are stored by
@@ -5193,7 +5193,7 @@ pub struct VersionMetaEntry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     /// The `store_str` spelling of the variant this snapshot was taken from
-    /// ("original" | "generated" | "fitted" | "edited"), when the taker knew it.
+    /// ("original" | "generated" | "fitted" | "edited" | "denoised"), when the taker knew it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub from_kind: Option<String>,
     /// That variant's opaque id, so the attribution survives a card the user
@@ -5267,8 +5267,10 @@ pub enum EditStateKind {
     /// A rendition card from `variants.json`.
     Variant {
         /// [`VariantEntry::kind`] spelling ("original" | "generated" |
-        /// "fitted"). The taxonomy's binary is `!= "generated"` (parametric
-        /// vs pixel-state — the GUI's `VariantKind::is_source_based`, R24-1).
+        /// "fitted" | "edited" | "denoised"). The taxonomy's binary is
+        /// `!= "generated"` (parametric vs pixel-state — the GUI's
+        /// `VariantKind::is_source_based`, R24-1); a "denoised" card
+        /// (2026-09-15) is parametric over its own denoised master.
         kind: String,
         /// The card `recipe.json` currently mirrors.
         active: bool,

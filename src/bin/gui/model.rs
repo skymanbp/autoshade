@@ -248,7 +248,7 @@ pub(crate) struct Prefs {
     /// The Export fold's own denoise strength and the Detail fold's own
     /// (2026-09-13) — two keys for two dials. Routed through
     /// [`Prefs::default`] like `fit_strength`: a prefs file written before
-    /// these keys existed decodes to `denoise::DEFAULT_STRENGTH`, never to
+    /// these keys existed decodes to `denoise::DEFAULT_STRENGTH_RAW`, never to
     /// serde's 0.0 (which is the identity — every denoise would silently do
     /// nothing after an upgrade).
     pub(crate) save_denoise_strength: f32,
@@ -304,8 +304,8 @@ impl Default for Prefs {
             exp_dest: 0, // ./out — the CLI/batch shape, unchanged for old prefs
             last_export_dir: None,
             save_denoise: false,
-            save_denoise_strength: autoshade::denoise::DEFAULT_STRENGTH,
-            denoise_strength: autoshade::denoise::DEFAULT_STRENGTH,
+            save_denoise_strength: autoshade::denoise::DEFAULT_STRENGTH_RAW,
+            denoise_strength: autoshade::denoise::DEFAULT_STRENGTH_RAW,
             // Zoned sky reverse-fit ON by default: it degrades gracefully to
             // the plain global fit when segmentation is unavailable.
             zoned_fit: true,
@@ -399,7 +399,13 @@ pub(crate) enum RetouchKind {
     /// A whole-frame REIMAGINE rendition → a NEW「AI 生成」variant (its look
     /// lives in the pixels).
     NewGenerated,
-    /// A heal/clone/denoise touch-up of the CURRENT rendition → bake into the
+    /// An AI denoise → a NEW「◈ Denoised negative」card (2026-09-15, user
+    /// decision): the saved master is its `origin`, the recipe of the card it
+    /// was made from is its recipe, and the card it was made from — the ▣
+    /// negative included — keeps its own pixels. An in-place denoise used to
+    /// redefine the ▣ card and left the original one Ctrl+Z away, per session.
+    NewDenoised,
+    /// A heal/clone touch-up of the CURRENT rendition → bake into the
     /// active variant's base AND repoint its `origin` at the saved artifact, so
     /// export / reverse-fit / a further retouch all follow the retouched pixels
     /// (WYSIWYG) instead of the pre-retouch source.
@@ -420,8 +426,10 @@ pub(crate) enum RetouchNote {
         ai_prose: String,
         notes: Vec<autoshade::rationale::Note>,
     },
-    /// AI denoise baked into the active variant.
-    Denoised(PathBuf),
+    /// AI denoise landed as a new ◈ card at this ./out master; `on_mosaic`
+    /// says the source was a RAW, denoised on its sensor mosaic before
+    /// demosaic (a baked source goes through SCUNet on developed pixels).
+    Denoised { out: PathBuf, on_mosaic: bool },
     /// Clone stamp: spot count + artifact.
     Cloned { n: usize, out: PathBuf },
     /// Whole-frame reimagine → a new Generated variant. Carries the
@@ -1203,6 +1211,7 @@ pub(crate) enum VariantKind {
     Generated, // AI 生成 — a whole-frame gpt-image restyle (look in the pixels)
     Fitted,    // 反推 — the generated look solved back into an editable recipe
     Edited,    // 生图编辑 — the user's own develop over a Generated card's pixels
+    Denoised,  // 去噪原片 — the negative AI-denoised into a new master (2026-09-15)
 }
 
 impl VariantKind {
@@ -1213,6 +1222,7 @@ impl VariantKind {
             VariantKind::Generated => "✨ AI generated",
             VariantKind::Fitted => "◭ Reverse-fit",
             VariantKind::Edited => "✎ Edited AI image",
+            VariantKind::Denoised => "◈ Denoised negative",
         }
     }
 
@@ -1224,6 +1234,7 @@ impl VariantKind {
             VariantKind::Generated => "generated",
             VariantKind::Fitted => "fitted",
             VariantKind::Edited => "edited",
+            VariantKind::Denoised => "denoised",
         }
     }
 
@@ -1233,6 +1244,7 @@ impl VariantKind {
             "generated" => Some(VariantKind::Generated),
             "fitted" => Some(VariantKind::Fitted),
             "edited" => Some(VariantKind::Edited),
+            "denoised" => Some(VariantKind::Denoised),
             _ => None,
         }
     }
@@ -1240,10 +1252,14 @@ impl VariantKind {
     /// The variant taxonomy's ONE binary (R24-1). A photo is *one negative +
     /// N variants + one version history*; every variant is either
     ///
-    /// * SOURCE-BASED (`Original`, `Fitted`) — the look lives in the develop
-    ///   recipe over the photo's own pixels, so it re-renders at any
-    ///   resolution, projects to XMP, and carries the camera calibration the
-    ///   base-curve estimator repairs; or
+    /// * SOURCE-BASED (`Original`, `Fitted`, `Denoised`) — the look lives in
+    ///   the develop recipe over the photo's own pixels, so it re-renders at
+    ///   any resolution, projects to XMP, and carries the camera calibration
+    ///   the base-curve estimator repairs. A `Denoised` card (2026-09-15) is
+    ///   the negative itself, AI-denoised on its sensor mosaic into a new
+    ///   master: its `origin` is that master, its recipe is the develop it was
+    ///   made from, and while it exists it is the negative the reverse-fit and
+    ///   the reimagine read (`AutoShadeApp::negative_origin`); or
     /// * ON AI PIXELS (`Generated`, `Edited`) — the card develops a
     ///   generated raster. A `Generated` card is the raster itself and is
     ///   IMMUTABLE (2026-09-13, user decision): its recipe is neutral by
@@ -1281,7 +1297,7 @@ impl VariantKind {
     ///   they ask about the one kind, not the side.
     pub(crate) fn is_source_based(self) -> bool {
         match self {
-            VariantKind::Original | VariantKind::Fitted => true,
+            VariantKind::Original | VariantKind::Fitted | VariantKind::Denoised => true,
             VariantKind::Generated | VariantKind::Edited => false,
         }
     }

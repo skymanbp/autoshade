@@ -295,6 +295,15 @@ pub(crate) fn paste_payload(src: EditRecipe, paste_geometry: bool) -> PastePaylo
 }
 
 impl AutoShadeApp {
+    /// Does 「🤖 AI Denoise on export」 run for THIS export? Ticked, and the
+    /// active card is not a ◈ Denoised card — whose master is already the
+    /// denoised negative, so a second pass (SCUNet over a baked master) would
+    /// only smooth it further (2026-09-15).
+    pub(crate) fn export_denoise_applies(&self) -> bool {
+        self.save_denoise
+            && !self.active_variant().is_some_and(|v| v.kind == VariantKind::Denoised)
+    }
+
     /// One-line echo of the current delivery settings for the Export hover —
     /// e.g. "JPEG · 2560 px · q95 · sRGB (universal) · → D:\deliver" — so the
     /// state stays glanceable now that the settings live in the Export section
@@ -316,9 +325,11 @@ impl AutoShadeApp {
             parts.push(format!("{} {:.0}", tr(lang, "Output sharpening"), self.exp_sharpen));
         }
         parts.push(tr(lang, EXPORT_SPACES[(self.exp_space as usize).min(2)]).to_string());
-        if self.save_denoise {
+        if self.export_denoise_applies() {
             // With its amount: the dial under the checkbox is the one number
             // that decides how much of the minutes-long sidecar result lands.
+            // Absent on a ◈ card, where the pass sits out (the echo says what
+            // will actually land).
             parts.push(format!(
                 "{} {:.0}%",
                 tr(lang, "AI Denoise"),
@@ -410,17 +421,26 @@ impl AutoShadeApp {
         // existing file (this one is about to be created) and, unlike
         // `canonicalize`, it does not hand back a `\\?\` verbatim prefix.
         let shown = abs_display(&out);
-        self.status = if self.save_denoise {
+        // A ◈ card's master IS the denoised negative: the export-time denoise
+        // would run SCUNet over it a second time, so it sits out and the
+        // status says so (`export_denoise_applies`, 2026-09-15).
+        let denoise = self.export_denoise_applies();
+        self.status = if denoise {
             trf(
                 lang,
                 "rendering + AI denoise → {path} … (GPU sidecar, can take minutes)",
+                &[("path", &shown)],
+            )
+        } else if self.save_denoise {
+            trf(
+                lang,
+                "rendering full-resolution → {path} … (this ◈ card is already denoised — the export-time AI denoise sits out)",
                 &[("path", &shown)],
             )
         } else {
             trf(lang, "rendering full-resolution → {path} …", &[("path", &shown)])
         };
         let recipe = self.recipe.clone();
-        let denoise = self.save_denoise;
         // The Export fold's OWN dial (the Detail fold's 「AI Denoise now」 has
         // its own), captured at the click like every other export input.
         let denoise_strength = self.save_denoise_strength;

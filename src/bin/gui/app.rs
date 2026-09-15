@@ -208,8 +208,10 @@ pub(crate) struct AutoShadeApp {
     /// 「🤖 AI Denoise now」's OWN strength (the Detail fold's dial) — two
     /// timings of one denoiser, two dials, neither reaching the other (user
     /// decision 2026-09-12: a control sits in the fold whose verb reads it).
-    /// Both start at `denoise::DEFAULT_STRENGTH`; the sidecar's luma/chroma
-    /// split law is what the value means (see `DenoiseOpts::strength`).
+    /// Both start at `denoise::DEFAULT_STRENGTH_RAW` (1.0, the mosaic path's
+    /// whole output, 2026-09-15); what the value means depends on the path —
+    /// a RAW-domain blend on a RAW, the SCUNet luma/chroma split law on a
+    /// baked source (see `DenoiseOpts::strength`).
     pub(crate) save_denoise_strength: f32,
     pub(crate) denoise_strength: f32,
     pub(crate) zoned_fit: bool,        // 反推 adds a sky-to-sky zoned correction (bitmap mask)
@@ -298,7 +300,6 @@ pub(crate) struct AutoShadeApp {
     pub(crate) fill_quality: usize,                   // 0=high 1=medium 2=low
     pub(crate) fill_fullres: bool,                    // composite onto the full-res develop
     pub(crate) heal_fullres: bool,                    // heal the full-res develop
-    pub(crate) denoise_fullres: bool,                 // AI-denoise the full-sensor develop (slow)
     pub(crate) reimagine_prompt: String,              // whole-image restyle prompt (its own entry)
     // --- production niceties ---
     pub(crate) view_mode: ViewMode,                   // side-by-side vs after-only (hold B = compare)
@@ -1659,8 +1660,8 @@ impl Default for AutoShadeApp {
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
             save_denoise: false,
-            save_denoise_strength: autoshade::denoise::DEFAULT_STRENGTH,
-            denoise_strength: autoshade::denoise::DEFAULT_STRENGTH,
+            save_denoise_strength: autoshade::denoise::DEFAULT_STRENGTH_RAW,
+            denoise_strength: autoshade::denoise::DEFAULT_STRENGTH_RAW,
             zoned_fit: true,
             zoned_four_regions: false,
             // Paid opt-in (a vision call per fit) — mirror Prefs::default.
@@ -1722,7 +1723,6 @@ impl Default for AutoShadeApp {
             fill_quality: 0,
             fill_fullres: false,
             heal_fullres: false,
-            denoise_fullres: false,
             reimagine_prompt: String::new(),
             view_mode: ViewMode::SideBySide,
             toasts: Vec::new(),

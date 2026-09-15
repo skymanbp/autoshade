@@ -679,16 +679,21 @@ mod tests {
     const SIDECAR_SHARED_SRC: &str =
         include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/python/_sidecar.py"));
 
+    const DENOISE_RAW_SRC: &str =
+        include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/python/denoise_raw.py"));
+
     /// The family roster, in one place: a sidecar that fails to enrol here
     /// escapes all four shared contracts below. `describe.py` (S2) is the
-    /// fifth member of the family and the fourth on this roster —
-    /// `denoise.py` holds the `_fetch_verified` gate itself and is pinned by
-    /// its own module's tests.
-    const SIDECARS: [(&str, &str); 4] = [
+    /// fifth member of the family and `denoise_raw.py` (2026-09-15, the
+    /// RAW-domain denoiser) the sixth — `denoise.py` holds the
+    /// `_fetch_verified` gate itself and is pinned by its own module's tests;
+    /// the other five fetch through it and are held to the contracts here.
+    const SIDECARS: [(&str, &str); 5] = [
         ("embed.py", EMBED_SRC),
         ("segment.py", SEGMENT_SRC),
         ("correspond.py", CORRESPOND_SRC),
         ("describe.py", DESCRIBE_SRC),
+        ("denoise_raw.py", DENOISE_RAW_SRC),
     ];
 
     /// Every pinned model file carries BOTH a sha256 and a byte count, in both

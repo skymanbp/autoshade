@@ -252,7 +252,7 @@ pub fn render_to_image_in(
     // buffer-lifetime queue).
     crate::decode::guard_tiff_chain(raw_path)?;
     crate::decode::guard_raw_plane_extent(raw_path)?;
-    let (rawimage, orientation) = {
+    let (mut rawimage, orientation) = {
         let src = RawSource::new(raw_path)
             .with_context(|| format!("open RAW {}", raw_path.display()))?;
         let decoder =
@@ -320,6 +320,27 @@ pub fn render_to_image_in(
         crate::decode::align_default_crop(&mut raw);
         (raw, orientation)
     };
+
+    // --- AI denoise on the MOSAIC (opt-in), BEFORE demosaic (2026-09-15).
+    // The noise on the sensor mosaic is white per CFA plane and follows
+    // var = a·x + b, which a non-blind model removes with the texture left in
+    // place; after demosaic it is spatially correlated and no sRGB-domain
+    // model separated it from texture (the 2026-09-15 probe: SCUNet 1.0's
+    // detail blocks scored BELOW the noisy input on a ground-truth window).
+    // Everything downstream — white balance, calibration, tone, masks — sees
+    // a cleaner mosaic and is otherwise untouched. A sensor without a 2×2
+    // Bayer mosaic (X-Trans, four-colour, linear DNG) is disclosed and takes
+    // the older developed-frame path below.
+    let mut mosaic_denoised = false;
+    if let Some(opts) = denoise {
+        println!("AI denoise (RAW mosaic, DRUNet) on {}x{} ...", rawimage.width, rawimage.height);
+        match crate::denoise::denoise_mosaic(opts, &mut rawimage).context("AI denoise")? {
+            crate::denoise::MosaicDenoise::Denoised => mosaic_denoised = true,
+            crate::denoise::MosaicDenoise::NotApplicable(why) => diag.warn(format!(
+                "AI denoise: {why} — denoising the developed frame instead (the SCUNet path)"
+            )),
+        }
+    }
 
     let wide = working != ExportColorSpace::Srgb;
     // R28 — a non-2×2 RGB CFA is demosaiced HERE, not by rawler, so its
@@ -454,8 +475,9 @@ pub fn render_to_image_in(
         None => (data, w, h),
     };
 
-    // --- AI denoise (opt-in) on the clean demosaiced pixels, before tone/sharpen
-    if let Some(opts) = denoise {
+    // --- AI denoise on the demosaiced pixels: the FALLBACK for a sensor the
+    // mosaic path could not take (see above), before tone/sharpen.
+    if let Some(opts) = denoise.filter(|_| !mosaic_denoised) {
         println!("AI denoise ({}) on {}x{} ...", opts.model, w, h);
         crate::denoise::denoise_buffer(opts, &mut data, w, h).context("AI denoise")?;
     }

@@ -79,6 +79,56 @@
 
 ## 版本台账（逐版已发布内容与实测数字，新在上；均已完成，勿重做）
 
+### 待发布（车道 `lane-dnraw`，2026-09-15）— AI 去噪改走 RAW 感光元件马赛克域，结果落新「◈ 去噪原片」卡
+
+- **起因（用户报障，原话）**：「我在想，是不是可以让 AI降噪 出来后的png…作为一个新的变体，而不是替代原本的原图？现在AI降噪后，
+  原图直接调不出来了。另外，AI降噪后，图片质量变得很低。…LR那边的AI降噪就是质量下降很少的那种。」「哪怕点了全分辨率去噪，
+  好像也不行。并不是分辨率下降，而是图片本身细节丢失严重。」
+- **根因**：① 原位烘焙把 ▣ 卡重新定义成去噪母图（`workers.rs` 的 `RetouchKind::InPlace` 臂 + `active_source_path`），撤销只在
+  本会话、没有「拆开」的路径，未去噪的底片就此不可达；② SCUNet 是**盲**去噪器，跑在去马赛克后的 sRGB 像素上——RAW 马赛克上
+  的噪声按 CFA 平面是白噪声（box5/Haar 比 0.975–0.995）、方差 `a·x + b`（ISO 640：a≈2.0e-4、b≈1.5e-7，[0,1] 单位），去马赛克
+  后空间相关，sRGB 域的非盲模型同样分不开，任何强度都是「拿纹理换噪点」（1.0 只留 1–7% 高频，0.5 是折中）；③ 「全分辨率去噪」
+  未勾时是 ≤2048 工作副本的暗坑，烘成母图后这张卡的每次导出都封顶 2048。
+- **裁定（AskUserQuestion 两轮，六项全取推荐）**：第五种卡「◈ 去噪原片」（源型、`origin`＝去噪母图、配方复制自被去噪的卡、
+  ▣ 卡不动、存在时即 `negative_origin` 读的底片、修补/克隆仍在它上原位）；新卡一律全分辨率（≤2048 档与「全分辨率去噪」复选框
+  退役）；质量路线＝RAW 马赛克域、非盲、噪声模型逐帧自测、(R,G1,B)/(R,G2,B) 打包喂彩色 DRUNet、广义 Anscombe 变换 + 精确无偏逆；
+  强度＝RAW 域混合、默认 1.0（`denoise::DEFAULT_STRENGTH_RAW`），烘焙源仍走 SCUNet 与 v1.3.4 的亮度/色度律、默认 0.5
+  （`default_strength_for` 按源选）；母图仍是 16 位 PNG 中性显影（沿用母图机制，DNG 导出留作将来）；实现本应派 Astra，其额度至
+  2026-09-19 19:07 耗尽，按 2026-09-11「无缝衔接」令由主模型在同一 worktree 接手。
+- **探针（真值基准）**：同机身 ISO-100 帧 + 按实测 ISO-640 模型注入的合成噪声（整幅 61 MP 注入、自测在整幅上跑、事后切两块
+  2048² 窗口；另按 darktable 档案 640→3200 比例 a×4.86、b×10.38 外推一档）：打包彩色 DRUNet 对 SCUNet 1.0 整窗 PSNR
+  **+2.6 / +4.1 dB**（ISO 640）、+0.7 / +1.4 dB（ISO 3200 等效）；最细 20% 块 dPSNR **+2.1 / +4.8 dB**——海滩窗口 SCUNet 1.0
+  的细节块低于含噪输入。逐平面灰度 DRUNet 在 3200 等效档输给打包版，故取打包。真帧端到端（出厂侧车）：61 MP 23.5 s，各平面
+  a 与探针差 ≤2%，岩石 midKept 72.1%（SCUNet 64.1%）。
+- **改法**：新侧车 `python/denoise_raw.py`（16 位灰度 PNG 进出、`--pattern/--black/--white/--strength`；三件钉子
+  `drunet_color.pth` + KAIR `network_unet.py`/`basicblock.py` 各 sha256 + 字节上限、走 `_fetch_verified`、`bias=False`、
+  `weights_only=True`；32 px 块 Haar 对角 vs box-5 方差挑无纹理块、最小二乘三轮剔野、b≥0；`python/test_denoise_raw.py` 14 条）；
+  `denoise::denoise_mosaic` 在 `render::render_to_image_in` 的 `develop_intermediate` 之前原位换掉 `RawImage.data`
+  （非 2×2 Bayer / 线性 DNG / 单色 / 浮点 / cpp≠1 → `NotApplicable` 披露并回退到显影帧 SCUNet 路径；强度 0 不起进程）；
+  `denoise::denoise_active` 一律全幅；`config.denoise_raw_script` / `AUTOSHADE_DENOISE_RAW_SCRIPT`；`embed.rs` SIDECARS 六件。
+  GUI：`VariantKind::Denoised`（存储词 `"denoised"`，`store::known_variant_kind` 准入）、`RetouchKind::NewDenoised`、
+  `RetouchNote::Denoised{out,on_mosaic}`、`negative_origin` 先读活动 ◈ 卡再读条上第一张 ◈ 卡、导出在 ◈ 卡上跳过导出时去噪
+  （`export_denoise_applies`，摘要不回显）、两滑杆默认 1.0、复选框退役、◈ 卡悬停说明；手册 / 架构 / 技术栈 / README /
+  架构图模型六件同步，架构图重生成；基准脚本 `scripts/denoise_bench.py`（路径全部走参数）。
+- **门（车道 target 目录、dev test profile）**：库 **1494 / 0 / 15**（313.28 s；按名 1526 → 1533＝+7 / −0，全部在
+  `denoise::`，该模块 22 → 29）、CLI 24 / 0、契约 2+2、doc 0、GUI **190 / 0 / 1**（按名 188 → 191＝+4 / −1：新
+  `an_ai_denoise_lands_as_a_new_denoised_card_and_leaves_the_source_and_negative_alone`、`the_negative_master_prefers_the_denoised_card`、
+  `a_denoised_card_round_trips_through_the_strip_record`、`the_export_denoise_is_skipped_on_a_denoised_card`；旧
+  `negative_origin_follows_an_in_place_denoise_on_the_original_card` 删除）、clippy 两组 0、`audit_i18n` 0 / 0 / 0、字体 874/874
+  （新串「最佳」改「最合适」，佳未嵌）、python `test_denoise_raw` 14 + `test_denoise` 11 + `test_sidecar` 15 + `test_segment` 4、
+  `check_docs.py` 25P / 0F / 5S（无电池转录本）、照片名 grep 0。**基准**（`scripts/denoise_bench.py`，出厂估计器 + 两侧车，
+  ISO-100 真值帧 + 按出厂估计器在真实 ISO-640 帧上测得的模型注入整幅）：实测档细节块 dPSNR 领先 SCUNet 1.0 **+3.13 / +5.92 dB**
+  （整窗 +3.21 / +4.90；fineKept 94.2/98.0% 对 83.3/88.6%；chromaErr 1.02/0.94 对 1.41/1.57）→ 1.5 dB 线 PASS；外推 ISO-3200 档
+  +1.10 / +2.60（整窗 +1.10 / +2.00），town 窗口低于线——线定义在实测档，外推档只披露；估计器 a 与真值差 ≤1%，b 偏高
+  （8.8e-7 对 1.8e-7，暗部略高估，未改）。**手工变异五组全红、sha256 逐字节还原**：M1 删 `render_to_image_in` 的
+  `denoise_mosaic` 钩子块→`the_mosaic_denoise_runs_before_demosaic` 红；M2 `start_ai_denoise` 落 `InPlace`→文本钉子红；
+  M2' `workers.rs` 落 `Fitted` 卡→落地测试行为断言红；M3 `negative_origin` 忽略 ◈→`the_negative_master_prefers_the_denoised_card` 红；
+  M4 侧车 `bias=True`→python EndToEnd 红 + Rust 钉子红（第一版钉子匹配到了注释里的 `bias=False`、放过了变异，改钉构造调用
+  与 `torch.load(...)` 调用原文后转红——这条本身是本批的一个发现）。GUI 首跑 186 / 4：三条布局测试因两把滑杆默认 100%
+  （三位数值框比 `interact_size.x` 宽 4 px、320 px 面板每帧长 4 px）转红——根因在共享 `slider_impl` 的值框预算，改为按轨道两端
+  最宽文本 + button_padding 预算（任何长标签滑杆拖到 100 都不再撑面板），第四条是新测试切片终点写错（start_fill 在
+  start_ai_denoise 之前，改 start_clone）。
+
 ### v1.3.5 — 生成式填充按本卡外观生成、落新 ✨ 卡；空提示词＝移除（2026-09-15）
 
 - **🚢 v1.3.5 已发布 2026-09-15（tag `v1.3.5` → `5d3a6b1`，release run `34948319640` 五工位绿（windows 10 m 25 s、macos 13 m 28 s、linux 3 m 16 s、macos-battery 23 m 16 s——Batteries 通过：macOS 库 1483 / 0 / 14（765.96 s）、CLI 24、GUI 187 / 0 / 1；Metal 实测 torch 2.14.0 / 设备 `mps` / 前向 8.7 ms / 峰值 1067.0 MiB / `deform_conv2d` 原生——、publish 11 s）；8 资产（7 件 + `checksums.txt` 自身）回下载，`sha256sum -c checksums.txt` 7/7 OK；便携 zip 内两 exe 与独立资产逐字节同（`cmp`），zip 内 `python/denoise.py` sha256 `4002f0c7…` 与仓库同（本版未动它）、`test_*.py` 0 个，解包 CLI 自报 `autoshade 1.3.5` 且 `retouch --help` 写着 `--prompt` 可省略；README / 官网资产行由发布字节回填（`f6539ae`：CLI 21,193,216 B、GUI 27,557,376 B、安装包 14,698,117 B、便携 19,609,350 B、macOS 通用 39,612,111 B、Linux 9,505,400 B、macOS CLI 17,163,221 B）；官网 `deploy_site.js` exit 0（23 件：4 新传 + 19 已有）+ purge，23/23 逐字节相同（浏览器 UA，剥 CF beacon；未匹配路径以 404 状态返回 `404.html` 正文；`index.html` 15 个 `?v=1.3.5` 键、0 个 1.3.4，首屏「Download v1.3.5.」）；本机 `%LOCALAPPDATA%\Programs\AutoShade` 静默原地升级（PowerShell 跑 Inno `/VERYSILENT /SUPPRESSMSGBOXES /NORESTART`，安装器 exit 0）：两 exe sha256 与 `checksums.txt` 全等、FileVersion 1.3.5、CLI 自报 1.3.5、卸载条目一条（1.3.5）、PendingFileRenameOperations 58 条中 0 条涉 AutoShade、权重类文件 11 个 9,576,601,292 B 升级前后同、91 → 91 文件无一删除（36 件由安装器重写）、全程未启动 GUI。发布说明 [docs/RELEASE_NOTES_v1.3.5.md](RELEASE_NOTES_v1.3.5.md)；发版提交 `5d3a6b1` 里的资产行是 v1.3.4 的占位、由 `f6539ae` 回填（与 v1.3.4 的 `14a2a4b` → `2a1ef30` 同一模式）。**发版前的门**见下方「门」条（`24960d9` 树，即发版树减去版本号与文档：`git diff 24960d9 v1.3.5 -- src tests python assets scripts` 为空）。**三车道电池**（用户 2026-09-15 令「走标准发布流程」后、打 tag 前，在 `24960d9` 的冻结快照工作树上跑完）全绿：**库 1487 / 0 / 15**（release profile、逐模块单进程，445.96 s）、CLI 24、契约 2+2、doc 0、**GUI 187 / 0 / 1**、**校准 1487 / 0 / 15**（680.99 s；1 条 SKIPPED＝蒙版画笔样本测试，其 `AUTOSHADE_MB_SAMPLE_ROOT` 样本不在本机）、电池内 i18n 0 与字体 875/875、按名库 1499 → 1502＝+3 / −0（`generative::tests` 的三条）、GUI 187 → 188＝+1 / −0（「门」条所列一条），`check_docs.py --gates` 对转录本 + `AUTOSHADE_CENSUS_ROOT=D:\Photography\Raw` → **30 PASS / 0 FAIL / 0 SKIP**（`f6539ae` 树）。**终门**（参考对，打 tag 前）：1.3.5 CLI（单独 target 目录编译，`--version` 自报 1.3.5）复渲 0.85 参考 develop 全幅：对 v1.3.4 发版 CLI 的同一渲染 **60,217,344 px 中 0 px 不同**，缩到 2048 对 R37 验收渲染 mean|diff| 0.00044 / max 0.008（与 v1.3.4、v1.3.3、v1.3.2 同数）；三档 0.65 / 0.85 / 1.0 用同一批 develop 在 2048 px 复测，对 v1.3.4 发版时的渲染各 0 px 不同（0.85：天空 ΔE 4.9、|ΔL*| 0.6、L* 展布 1.03、陆地 ΔE 6.9），三档裁切图版看过：无缝、无矩形（看的是 v1.3.4 发版时那三张图版——本版渲染与其逐字节相同，而目标 PNG 已不在安装目录 `out/` 下，本次没有重新拼图版；已在发版提交信息与发布说明里披露）——求解器与渲染器未动，像素证明。**
@@ -138,8 +188,8 @@
   0.5：色度 HF 2.26/255（彩色斑点可见）。补丁后侧车端到端：1.0 → 0.12 / 0.07，0.5 → 1.15 / 0.07，0.25 → 1.71 /
   2.26，无参默认与 0.5 逐字节同。
 - **门**：GUI **186 / 0 / 1**（新增 3：`a_reverse_fit_lands_on_the_negatives_master`、`negative_origin_follows_an_in_place_denoise_on_the_original_card`、`gui_ai_denoise_has_a_dial_in_each_fold`；变异「◭ 卡 `origin: None`」落地测试转红）、库 **1484 / 0 / 15**（436.93 s，新增 `denoise::the_sidecar_blends_luma_by_strength_and_takes_chroma_first`）、CLI 24 / 0、python `test_denoise` 11 / 11（新增 `BlendLawTests` 5 条）、clippy 两组 0、`audit_i18n` 0 / 0 / 0、字体子集 `--check` 877/877（SC 子集 +3 汉字「岩 折 石」，从五 donor 重生成、只入 SC 一件）、`check_docs.py` 25P / 0F / 5S、照片名 grep 0。
-- **未动的**：web UI 无强度控件（沿用 0.5 默认）；CLI `match` 不读 GUI 变体条（无底片母图概念）；「全分辨率去噪」
-  未勾时母图仍是 ≤2048 工作副本（既有披露）。
+- **未动的**：web UI 无强度控件（沿用 0.5 默认）；CLI `match` 不读 GUI 变体条（无底片母图概念）；~~「全分辨率去噪」
+  未勾时母图仍是 ≤2048 工作副本（既有披露）~~——2026-09-15 起退役：去噪一律全幅、落新「◈ 去噪原片」卡，见上方待发布条。
 
 ### v1.3.3 — 「✨ AI 生成」卡不可编辑，编辑转到新开的「✎ 生图编辑」卡；XMP 投影成为 develop 提交的成员
 

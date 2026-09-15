@@ -7,9 +7,13 @@
 //! develop pipeline (tone/colour/sharpen) runs in Rust afterward, so denoise
 //! always happens BEFORE sharpening (the order that matters).
 //!
-//! Two entry points:
-//!   * [`denoise_buffer`] — denoise an in-memory full-res RGB buffer (used by the
-//!     render engine, so develop happens on already-clean pixels).
+//! Three entry points:
+//!   * [`denoise_mosaic`] — denoise a decoded RAW's SENSOR MOSAIC in place,
+//!     before demosaic (`python/denoise_raw.py`, DRUNet, the noise level
+//!     measured on the frame; 2026-09-15). The render engine's RAW path.
+//!   * [`denoise_buffer`] — denoise an in-memory full-res RGB buffer through
+//!     SCUNet (`python/denoise.py`): the baked-source path, and the fallback
+//!     for a sensor without a 2×2 Bayer mosaic.
 //!   * [`denoise_file`]   — denoise an image file in place to another file (used
 //!     when the source is an already-baked PNG/TIFF/JPEG).
 
@@ -23,10 +27,10 @@ use crate::config::Config;
 const SIDECAR_DEFAULT_TIMEOUT_SECS: u64 = 30 * 60;
 const SIDECAR_OUTPUT_CAP: usize = 1024 * 1024;
 
-/// Where every denoise entry starts when nothing chooses a strength — the
-/// CLI's `--strength` / `--denoise-strength`, the web export's
-/// `denoise_strength`, the GUI's two dials, and the sidecar's own `--strength`
-/// default (pinned to this value textually in the tests below). ONE number.
+/// Where the SCUNet path starts when nothing chooses a strength — a BAKED
+/// source on the CLI's `--strength` / `--denoise-strength`, the web export's
+/// `denoise_strength`, and the sidecar's own `--strength` default (pinned to
+/// this value textually in the tests below). ONE number for that path.
 ///
 /// 0.5, not 1.0, and the reason is measured (2026-09-13, the user's 61 MP
 /// ISO-640 frame): at 1.0 every SCUNet tier the sidecar ships keeps 1–7 % of
@@ -36,6 +40,24 @@ const SIDECAR_OUTPUT_CAP: usize = 1024 * 1024;
 /// at 0.5 the colour speckle is gone in full (chroma HF 4.5 → 0.07/255) and
 /// half the luminance grain comes back, and the texture with it.
 pub const DEFAULT_STRENGTH: f32 = 0.5;
+
+/// Where the RAW-domain path starts (2026-09-15): the model's whole output.
+/// With the noise level measured on the frame itself, DRUNet on the mosaic
+/// kept 94–98 % of the detail blocks' fine energy on the ground-truth
+/// benchmark at 1.0, and everything below it only put noise back — the
+/// probe's 1.3–1.4× sigma scales and a blend both scored lower. The strength
+/// stays a dial (0 is the identity, 1 is this; [`DenoiseOpts::strength`]),
+/// and the GUI's two dials start here; a baked source under the same dial
+/// takes the SCUNet path, whose own sweet spot is [`DEFAULT_STRENGTH`].
+pub const DEFAULT_STRENGTH_RAW: f32 = 1.0;
+
+/// The default strength for `src`'s path: [`DEFAULT_STRENGTH_RAW`] for a RAW
+/// (the mosaic-domain denoiser) and [`DEFAULT_STRENGTH`] for a baked source
+/// (SCUNet). The CLI and the web export both answer an absent strength here,
+/// so the two surfaces cannot drift.
+pub fn default_strength_for(src: &Path) -> f32 {
+    if crate::decode::is_raw(src) { DEFAULT_STRENGTH_RAW } else { DEFAULT_STRENGTH }
+}
 
 /// The sidecar budget is its OWN variable, not `AUTOSHADE_HTTP_TIMEOUT_SECS`:
 /// that one tunes API latency, while a sidecar's first run legitimately spends
@@ -241,17 +263,26 @@ fn release_empty_claim(p: &Path) {
 /// engine stays decoupled from config/env.
 pub struct DenoiseOpts {
     pub python_bin: String,
+    /// `python/denoise.py` — SCUNet on developed pixels (the baked-source
+    /// path and the non-Bayer fallback).
     pub script: PathBuf,
+    /// `python/denoise_raw.py` — DRUNet on the sensor mosaic (the RAW path,
+    /// 2026-09-15).
+    pub raw_script: PathBuf,
     pub cache: PathBuf,
+    /// The SCUNet tier; the mosaic path has one model and ignores it.
     pub model: String,
-    /// 0..1. NOT a plain blend since 2026-09-13: the sidecar blends the
+    /// 0..1, whose LAW depends on the path. On the mosaic ([`denoise_mosaic`])
+    /// it is a blend in the RAW domain: 0 the input samples, 1 the model's
+    /// whole output, default [`DEFAULT_STRENGTH_RAW`]. On developed pixels
+    /// ([`denoise_buffer`], since 2026-09-13) the sidecar blends the
     /// LUMINANCE by this amount and takes the model's chroma at
     /// `min(1, 2·strength)` — colour noise is the ugly half and colour detail
     /// is low-frequency, so it goes first (in full from 0.5 up), while
-    /// luminance grain returns linearly and brings the texture with it.
-    /// 0 is the identity at every entry ([`denoise_buffer`] never spawns for
-    /// it; the sidecar's law reaches the same bytes), 1 is the model's whole
-    /// output. Default [`DEFAULT_STRENGTH`].
+    /// luminance grain returns linearly and brings the texture with it;
+    /// default [`DEFAULT_STRENGTH`]. 0 is the identity at every entry (no
+    /// spawn; a bare sidecar run reaches the same bytes), 1 the model's whole
+    /// output.
     pub strength: f32,
 }
 
@@ -263,6 +294,7 @@ impl DenoiseOpts {
         DenoiseOpts {
             python_bin: cfg.python_bin.clone(),
             script: PathBuf::from(&cfg.denoise_script),
+            raw_script: PathBuf::from(&cfg.denoise_raw_script),
             cache: PathBuf::from(&cfg.weights_dir),
             model: model_override.unwrap_or_else(|| cfg.denoise_model.clone()),
             // clamp KEEPS NaN — a non-finite strength would ship "--strength
@@ -415,20 +447,16 @@ fn carry_icc_onto_staged(
     w.flush().context("flush the re-encoded product")
 }
 
-/// Denoise the ACTIVE working pixels for an on-canvas result (the GUI's
-/// interactive "AI Denoise now"): a RAW goes through a neutral develop first —
-/// the full sensor with `full_res`, else a ≤2048 px working copy (the same
-/// base contract as retouch: never the camera's baked preview, so the develop
-/// chain keeps running on the engine's own tone pipeline) — a baked PNG/TIFF
-/// is denoised as-is. The caller bakes the output into the current variant,
-/// exactly like a heal result.
-pub fn denoise_active(
-    opts: &DenoiseOpts,
-    input: &Path,
-    full_res: bool,
-    out: &Path,
-) -> Result<()> {
-    if crate::decode::is_raw(input) && full_res {
+/// Denoise a source into a full-resolution 16-bit master at `out` (the GUI's
+/// 「AI Denoise now」, which lands the master as a new ◈ card, and the CLI's
+/// baked arm). A RAW goes through the engine's neutral develop with the
+/// denoise on its sensor mosaic ([`denoise_mosaic`], before demosaic) — the
+/// full sensor, always: the ≤2048 px working-copy tier retired on 2026-09-15
+/// (user decision), because a master baked from it capped every later export
+/// of that card at 2048 px. A baked PNG/TIFF/JPEG is denoised as-is through
+/// SCUNet.
+pub fn denoise_active(opts: &DenoiseOpts, input: &Path, out: &Path) -> Result<()> {
+    if crate::decode::is_raw(input) {
         // The only arm that needs no pixels in memory: the full-res develop
         // denoises INSIDE the engine and writes `out` itself (16-bit).
         crate::render::render_to_file(
@@ -444,13 +472,12 @@ pub fn denoise_active(
         )?;
         return Ok(());
     }
-    // Everything else takes the ONE source dispatch (`render::source_pixels`):
-    // a RAW working copy is developed AT ≤2048 (not full-res then thumbnailed
-    // — the cap runs before tone/geometry, skipping the 61 MP transients), and
-    // a baked source is decoded rather than handed straight to the sidecar
-    // because cv2 ignores EXIF orientation (and imwrite drops the tag), so a
-    // portrait phone JPEG came back as a permanently sideways master.
-    let img = crate::render::source_pixels(input, (!full_res).then_some(2048))?;
+    // A baked source takes the ONE source dispatch (`render::source_pixels`)
+    // at its own resolution: decoded rather than handed straight to the
+    // sidecar because cv2 ignores EXIF orientation (and imwrite drops the
+    // tag), so a portrait phone JPEG came back as a permanently sideways
+    // master.
+    let img = crate::render::source_pixels(input, None)?;
     let tmp = temp_path("autoshade_denoise_base")?;
     if let Err(e) = img.save(&tmp) {
         // A failed save can still have created a partial file — don't leak it
@@ -461,6 +488,231 @@ pub fn denoise_active(
     let res = denoise_file(opts, &tmp, out);
     let _ = std::fs::remove_file(&tmp);
     res
+}
+
+/// What [`denoise_mosaic`] did with a decoded RAW.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MosaicDenoise {
+    /// The mosaic was denoised in place — or the strength was 0 and the
+    /// identity needed no sidecar.
+    Denoised,
+    /// This RAW carries no 2×2 Bayer mosaic to denoise (X-Trans, a four-colour
+    /// or monochrome sensor, a linear DNG, floating-point samples): the caller
+    /// discloses the reason and takes the developed-frame path instead.
+    NotApplicable(String),
+}
+
+/// The three facts the mosaic sidecar needs about a sensor, read off the
+/// decoded RAW by [`mosaic_args`]: the CFA letters at the mosaic origin, the
+/// black level under each of those four sites and the white level.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MosaicArgs {
+    /// `RGGB` / `BGGR` / `GRBG` / `GBRG` — the letters at (0,0), (0,1), (1,0), (1,1).
+    pub pattern: String,
+    /// The black level at each of those four sites, in that order.
+    pub black: [f32; 4],
+    /// The white level (the smallest, when a file declares one per channel).
+    pub white: f32,
+}
+
+/// Read the mosaic facts from a RAW's CFA and levels, or say in one sentence
+/// why this sensor has no 2×2 Bayer mosaic to pack. Pure, so the refusals are
+/// testable without a sensor fixture.
+pub fn mosaic_args(
+    cfa: &rawler::cfa::CFA,
+    black: &rawler::rawimage::BlackLevel,
+    white: &rawler::rawimage::WhiteLevel,
+) -> std::result::Result<MosaicArgs, String> {
+    use rawler::cfa::{CFA_COLOR_B, CFA_COLOR_G, CFA_COLOR_R};
+    if (cfa.width, cfa.height) != (2, 2) {
+        return Err(format!(
+            "a {}×{} {} colour filter array is not a 2×2 Bayer mosaic",
+            cfa.width, cfa.height, cfa
+        ));
+    }
+    let mut pattern = String::with_capacity(4);
+    for (row, col) in [(0, 0), (0, 1), (1, 0), (1, 1)] {
+        pattern.push(match cfa.color_at(row, col) {
+            c if c == CFA_COLOR_R => 'R',
+            c if c == CFA_COLOR_G => 'G',
+            c if c == CFA_COLOR_B => 'B',
+            _ => return Err(format!("a {cfa} mosaic carries a colour other than R, G and B")),
+        });
+    }
+    let g_on_a_diagonal = {
+        let p = pattern.as_bytes();
+        (p[0] == b'G' && p[3] == b'G') || (p[1] == b'G' && p[2] == b'G')
+    };
+    let mut sorted: Vec<char> = pattern.chars().collect();
+    sorted.sort_unstable();
+    if sorted != ['B', 'G', 'G', 'R'] || !g_on_a_diagonal {
+        return Err(format!("a {pattern} mosaic is not one R, one B and two G on a diagonal"));
+    }
+    // The black level is a `width × height` (× cpp) pattern of its own — one
+    // value for the frame, or one per CFA site.
+    let bw = black.width.max(1);
+    let bh = black.height.max(1);
+    let cpp = black.cpp.max(1);
+    let level_at = |row: usize, col: usize| -> Option<f32> {
+        black
+            .levels
+            .get(((row % bh) * bw + (col % bw)) * cpp)
+            .map(|r| r.as_f32())
+    };
+    let mut levels = [0.0f32; 4];
+    for (i, (row, col)) in [(0, 0), (0, 1), (1, 0), (1, 1)].into_iter().enumerate() {
+        levels[i] = level_at(row, col)
+            .ok_or_else(|| format!("the file declares no black level for CFA site ({row},{col})"))?;
+    }
+    let white = white.0.iter().copied().min().ok_or("the file declares no white level")? as f32;
+    if levels.iter().any(|b| !b.is_finite() || *b >= white) {
+        return Err(format!("the black levels {levels:?} do not sit below the white level {white}"));
+    }
+    Ok(MosaicArgs { pattern, black: levels, white })
+}
+
+/// AI-denoise a decoded RAW's sensor mosaic IN PLACE, before demosaic — the
+/// render engine's RAW path (`render_to_image_in`, 2026-09-15).
+///
+/// Why the mosaic and not the developed frame: measured on the user's
+/// ILCE-7RM4A frames, the noise on the mosaic is white per CFA plane and
+/// follows `var = a·x + b`, which the sidecar measures on the frame itself
+/// (12 000 textureless blocks on a 61 MP frame) and hands to a NON-BLIND
+/// model; after demosaic it is spatially correlated, and no sRGB-domain model
+/// — the blind SCUNet or a non-blind one — separated it from texture. On the
+/// ground-truth benchmark (`scripts/denoise_bench.py`, the measured ISO-640
+/// model) this path scored 3.2–4.9 dB above SCUNet 1.0 on the whole frame
+/// and 3.1–5.9 dB on the most-detailed blocks.
+///
+/// The contract with `python/denoise_raw.py` is one 16-bit GRAYSCALE PNG in
+/// (the uncropped mosaic, samples as decoded) and one out (same dimensions,
+/// same depth), plus the CFA letters and levels from [`mosaic_args`]; the
+/// staged-output, exit-0-is-not-success and full-decode acceptance rules are
+/// the ones every sidecar bridge follows. Strength 0 is the identity and
+/// spawns nothing. A sensor without a 2×2 Bayer mosaic returns
+/// [`MosaicDenoise::NotApplicable`] with the reason, and the caller falls back
+/// to [`denoise_buffer`] on the developed frame.
+pub fn denoise_mosaic(opts: &DenoiseOpts, raw: &mut rawler::RawImage) -> Result<MosaicDenoise> {
+    use rawler::rawimage::{RawImageData, RawPhotometricInterpretation as Photo};
+    if opts.strength <= 0.0 {
+        return Ok(MosaicDenoise::Denoised);
+    }
+    let cfa = match &raw.photometric {
+        Photo::Cfa(c) => &c.cfa,
+        Photo::LinearRaw => {
+            return Ok(MosaicDenoise::NotApplicable(
+                "the file carries demosaiced (linear) data, not a sensor mosaic".into(),
+            ));
+        }
+        Photo::BlackIsZero => {
+            return Ok(MosaicDenoise::NotApplicable("a monochrome sensor has no colour mosaic".into()));
+        }
+    };
+    if raw.cpp != 1 {
+        return Ok(MosaicDenoise::NotApplicable(format!(
+            "the sensor data has {} samples per pixel, not a mosaic",
+            raw.cpp
+        )));
+    }
+    let args = match mosaic_args(cfa, &raw.blacklevel, &raw.whitelevel) {
+        Ok(a) => a,
+        Err(why) => return Ok(MosaicDenoise::NotApplicable(why)),
+    };
+    let (w, h) = (raw.width, raw.height);
+    let pixels: Vec<u16> = match &raw.data {
+        RawImageData::Integer(v) => v.clone(),
+        RawImageData::Float(_) => {
+            return Ok(MosaicDenoise::NotApplicable("the sensor data is floating point".into()));
+        }
+    };
+    if pixels.len() != w * h {
+        bail!("denoise: the mosaic holds {} samples for a {w}x{h} frame", pixels.len());
+    }
+    if !opts.raw_script.exists() {
+        bail!(
+            "RAW denoise sidecar not found at {} — run from the project dir or set \
+             AUTOSHADE_DENOISE_RAW_SCRIPT.",
+            opts.raw_script.display()
+        );
+    }
+    let tmp_in = temp_path("autoshade_dn_mosaic_in")?;
+    let staged = match temp_path("autoshade_dn_mosaic_out") {
+        Ok(path) => path,
+        Err(error) => {
+            let _ = std::fs::remove_file(&tmp_in);
+            return Err(error);
+        }
+    };
+    // The claim `temp_path` made is a 0-byte file: `sidecar_wrote` reads
+    // that snapshot and refuses a run that exited 0 without replacing it.
+    let before = crate::artifact_state(&staged);
+    let who = "RAW denoise sidecar";
+    let result = (|| -> Result<Vec<u16>> {
+        let plane = ImageBuffer::<image::Luma<u16>, Vec<u16>>::from_raw(w as u32, h as u32, pixels)
+            .ok_or_else(|| anyhow!("denoise: pack mosaic size mismatch"))?;
+        DynamicImage::ImageLuma16(plane)
+            .save(&tmp_in)
+            .with_context(|| format!("write the mosaic {}", tmp_in.display()))?;
+        let mut cmd = crate::sidecar_command(&opts.python_bin);
+        // `-E`: ignore PYTHON* environment variables (see `run_sidecar_carrying`).
+        cmd.arg("-E")
+            .arg(&opts.raw_script)
+            .arg("--input")
+            .arg(&tmp_in)
+            .arg("--output")
+            .arg(&staged)
+            .arg("--pattern")
+            .arg(&args.pattern)
+            .arg("--black")
+            .arg(
+                args.black
+                    .iter()
+                    .map(|b| format!("{b}"))
+                    .collect::<Vec<_>>()
+                    .join(","),
+            )
+            .arg("--white")
+            .arg(format!("{}", args.white))
+            .arg("--strength")
+            .arg(format!("{:.4}", opts.strength))
+            .arg("--cache")
+            .arg(&opts.cache);
+        let out = crate::run_sidecar_child(
+            &mut cmd,
+            who,
+            &format!("{} {}", opts.python_bin, opts.raw_script.display()),
+            sidecar_timeout(),
+        )?;
+        if !out.status.success() {
+            return Err(crate::sidecar_exit_error(who, &out));
+        }
+        crate::sidecar_wrote(who, &staged, before)?;
+        // The product must FULLY decode as a 16-bit grayscale plane of the
+        // frame's own dimensions — the same acceptance the developed-frame
+        // bridge applies, for the same reason (a header check let a
+        // truncated IDAT through).
+        let mut reader = image::ImageReader::open(&staged)
+            .with_context(|| format!("open the denoised mosaic {}", staged.display()))?;
+        reader.limits(denoise_output_limits(w, h));
+        let decoded = reader.decode().context("the denoised mosaic does not fully decode")?;
+        let DynamicImage::ImageLuma16(plane) = decoded else {
+            bail!("the denoised mosaic is not a 16-bit grayscale image ({:?})", decoded.color());
+        };
+        if (plane.width() as usize, plane.height() as usize) != (w, h) {
+            bail!(
+                "the denoised mosaic is {}x{} but the frame is {w}x{h}",
+                plane.width(),
+                plane.height()
+            );
+        }
+        Ok(plane.into_raw())
+    })();
+    // BOTH temp files go regardless of where the pipeline failed.
+    let _ = std::fs::remove_file(&tmp_in);
+    let _ = std::fs::remove_file(&staged);
+    let pixels = result.with_context(|| format!("{who} product rejected"))?;
+    raw.data = RawImageData::Integer(pixels);
+    Ok(MosaicDenoise::Denoised)
 }
 
 fn run_sidecar(opts: &DenoiseOpts, input: &Path, output: &Path) -> Result<()> {
@@ -744,6 +996,7 @@ mod tests {
         DenoiseOpts {
             python_bin: bin.to_string_lossy().into_owned(),
             script,
+            raw_script: dir.join("denoise_raw.py"),
             cache: dir.join("cache"),
             model: "stand-in".into(),
             strength: 1.0,
@@ -811,6 +1064,7 @@ mod tests {
         let opts = DenoiseOpts {
             python_bin: "definitely-not-a-real-python".into(),
             script: std::path::PathBuf::from("no-such-script.py"),
+            raw_script: std::path::PathBuf::from("no-such-raw-script.py"),
             cache: std::path::PathBuf::new(),
             model: "m".into(),
             strength: 0.0,
@@ -936,6 +1190,7 @@ mod tests {
         DenoiseOpts {
             python_bin: stand_in(dir, writes),
             script,
+            raw_script: dir.join("denoise_raw.py"),
             cache: dir.join("cache"),
             model: "color_real_psnr".into(),
             strength: 1.0,
@@ -981,7 +1236,7 @@ mod tests {
         let out = dir.join("out.png");
 
         // `denoise_active` is what `main::denoise_cmd`'s baked arm calls…
-        let err = denoise_active(&opts, &input, true, &out).unwrap_err().to_string();
+        let err = denoise_active(&opts, &input, &out).unwrap_err().to_string();
         assert!(err.contains("denoise sidecar not found"), "{err}");
         // …and no deliverable may be left behind claiming otherwise.
         assert!(!out.exists(), "a refused denoise must not publish an output");
@@ -1396,5 +1651,257 @@ mod tests {
                  shared sidecar executor nor arms and assigns one itself"
             );
         }
+    }
+
+    // ── The RAW-mosaic bridge (2026-09-15) ──────────────────────────────────
+    // `denoise_mosaic` hands the frame's sensor mosaic to python/denoise_raw.py
+    // before demosaic. The refusals and the in-place replacement are testable
+    // on a synthetic RawImage with a copying stand-in for the sidecar; the
+    // sidecar itself is pinned by its source text, the way denoise.py is.
+
+    const RAW_SIDECAR_SRC: &str =
+        include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/python/denoise_raw.py"));
+
+    /// A synthetic decoded RAW: `w×h` Bayer samples under `pattern`, the
+    /// black level(s) given (one for the frame, or one per CFA site) and one
+    /// white level — everything the bridge reads.
+    fn bayer_fixture(pattern: &str, w: usize, h: usize, black: &[u16], white: u32) -> rawler::RawImage {
+        use rawler::cfa::{PlaneColor, CFA};
+        use rawler::decoders::Camera;
+        use rawler::rawimage::{BlackLevel, CFAConfig, RawImageData, RawPhotometricInterpretation, WhiteLevel};
+        let data: Vec<u16> = (0..w * h).map(|i| 600 + (i * 37 % 900) as u16).collect();
+        let (bw, bh) = if black.len() == 4 { (2, 2) } else { (1, 1) };
+        rawler::RawImage::new_with_data(
+            Camera::new(),
+            RawImageData::Integer(data),
+            w,
+            h,
+            1,
+            [1.0, 1.0, 1.0, f32::NAN],
+            RawPhotometricInterpretation::Cfa(CFAConfig::new(&CFA::new(pattern), &PlaneColor::new("RGB"))),
+            Some(BlackLevel::new(black, bw, bh, 1)),
+            Some(WhiteLevel::new(vec![white])),
+            false,
+        )
+    }
+
+    /// [`stand_in_opts`] plus a RAW sidecar script on disk (the bridge refuses
+    /// a missing one before it spawns) and the strength under test.
+    fn mosaic_opts(dir: &std::path::Path, bin: std::path::PathBuf, strength: f32) -> DenoiseOpts {
+        let mut opts = stand_in_opts(dir, bin);
+        std::fs::write(&opts.raw_script, "# stand-in\n").unwrap();
+        opts.strength = strength;
+        opts
+    }
+
+    fn samples(raw: &rawler::RawImage) -> Vec<u16> {
+        match &raw.data {
+            rawler::RawImageData::Integer(v) => v.clone(),
+            _ => panic!("integer samples expected"),
+        }
+    }
+
+    fn mosaic_temp_files() -> usize {
+        std::fs::read_dir(std::env::temp_dir())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().starts_with("autoshade_dn_mosaic_"))
+            .count()
+    }
+
+    /// The sidecar's three facts come off the decoded RAW: the CFA letters at
+    /// the mosaic origin in row-major order, the black level under each of
+    /// those four sites (a per-site pattern read as such, one frame value
+    /// repeated) and the smallest declared white level.
+    #[test]
+    fn mosaic_args_read_the_letters_and_the_per_site_levels() {
+        use rawler::cfa::CFA;
+        use rawler::rawimage::{BlackLevel, WhiteLevel};
+        let one = BlackLevel::new(&[512u16], 1, 1, 1);
+        let white = WhiteLevel::new(vec![16383u32]);
+        for pattern in ["RGGB", "BGGR", "GRBG", "GBRG"] {
+            let args = super::mosaic_args(&CFA::new(pattern), &one, &white).unwrap();
+            assert_eq!(args.pattern, pattern);
+            assert_eq!(args.black, [512.0; 4]);
+            assert_eq!(args.white, 16383.0);
+        }
+        let sites = BlackLevel::new(&[512u16, 513, 514, 515], 2, 2, 1);
+        let args =
+            super::mosaic_args(&CFA::new("RGGB"), &sites, &WhiteLevel::new(vec![16383u32, 15000, 16383])).unwrap();
+        assert_eq!(args.black, [512.0, 513.0, 514.0, 515.0]);
+        assert_eq!(args.white, 15000.0, "the smallest per-channel white level");
+    }
+
+    /// No 2×2 Bayer mosaic, no mosaic denoise — each refusal says why, so the
+    /// render's fallback to the developed-frame path can disclose it.
+    #[test]
+    fn mosaic_args_refuse_a_sensor_without_a_bayer_mosaic() {
+        use rawler::cfa::CFA;
+        use rawler::rawimage::{BlackLevel, WhiteLevel};
+        let black = BlackLevel::new(&[512u16], 1, 1, 1);
+        let white = WhiteLevel::new(vec![16383u32]);
+        // X-Trans: a 6×6 array.
+        let xtrans = CFA::new("GGRGGBGGBGGRBRGRBGGGBGGRGGRGGBRBGBRG");
+        let why = super::mosaic_args(&xtrans, &black, &white).unwrap_err();
+        assert!(why.contains("6×6"), "{why}");
+        // Two greens on one row are not a Bayer mosaic even at 2×2.
+        let why = super::mosaic_args(&CFA::new("RGBG"), &black, &white).unwrap_err();
+        assert!(why.contains("two G on a diagonal"), "{why}");
+        // A four-colour (RGBE) array.
+        let why = super::mosaic_args(&CFA::new("RGEB"), &black, &white).unwrap_err();
+        assert!(why.contains("other than R, G and B"), "{why}");
+        // Levels that cannot be right.
+        let why = super::mosaic_args(&CFA::new("RGGB"), &BlackLevel::new(&[20000u16], 1, 1, 1), &white)
+            .unwrap_err();
+        assert!(why.contains("below the white level"), "{why}");
+    }
+
+    /// Strength 0 is the identity and spawns nothing — no python, no script,
+    /// no temp files; the samples are untouched.
+    #[test]
+    fn a_zero_strength_mosaic_denoise_spawns_nothing() {
+        let dir = std::env::temp_dir().join(format!("autoshade-dn-mosaic-zero-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut raw = bayer_fixture("RGGB", 8, 6, &[512], 16383);
+        let before = samples(&raw);
+        let mut opts = stand_in_opts(&dir, dir.join("no-such-python"));
+        opts.strength = 0.0;
+        assert!(!opts.raw_script.exists(), "premise: no sidecar script either");
+        assert_eq!(super::denoise_mosaic(&opts, &mut raw).unwrap(), super::MosaicDenoise::Denoised);
+        assert_eq!(samples(&raw), before);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A RAW without a Bayer mosaic is not an error: the bridge says why and
+    /// the render takes the developed-frame path. A missing sidecar script on
+    /// a real mosaic IS an error, named with its override variable.
+    #[test]
+    fn a_raw_without_a_bayer_mosaic_takes_the_developed_frame_path() {
+        use rawler::rawimage::RawPhotometricInterpretation as Photo;
+        let dir = std::env::temp_dir().join(format!("autoshade-dn-mosaic-na-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let opts = stand_in_opts(&dir, dir.join("no-such-python"));
+        let not_applicable = |raw: &mut rawler::RawImage| match super::denoise_mosaic(&opts, raw).unwrap() {
+            super::MosaicDenoise::NotApplicable(why) => why,
+            super::MosaicDenoise::Denoised => panic!("a sensor without a mosaic was 'denoised'"),
+        };
+        let mut raw = bayer_fixture("RGGB", 8, 6, &[512], 16383);
+        raw.photometric = Photo::LinearRaw;
+        assert!(not_applicable(&mut raw).contains("linear"));
+        raw.photometric = Photo::BlackIsZero;
+        assert!(not_applicable(&mut raw).contains("monochrome"));
+        let mut raw = bayer_fixture("RGBG", 8, 6, &[512], 16383);
+        assert!(not_applicable(&mut raw).contains("two G on a diagonal"));
+        let mut raw = bayer_fixture("RGGB", 8, 6, &[512], 16383);
+        raw.cpp = 3;
+        assert!(not_applicable(&mut raw).contains("samples per pixel"));
+        // A real mosaic with no sidecar on disk: an error, not a silent skip.
+        let mut raw = bayer_fixture("RGGB", 8, 6, &[512], 16383);
+        let err = format!("{:#}", super::denoise_mosaic(&opts, &mut raw).unwrap_err());
+        assert!(err.contains("AUTOSHADE_DENOISE_RAW_SCRIPT"), "{err}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The product replaces the sensor samples in place — and only a product
+    /// that fully decodes as a 16-bit grayscale plane of the frame's own
+    /// dimensions does; a wrong-size or RGB product is refused with the
+    /// samples untouched, and both temp files are gone either way.
+    #[test]
+    fn a_denoised_mosaic_replaces_the_samples_in_place_or_is_refused() {
+        let dir = std::env::temp_dir().join(format!("autoshade-dn-mosaic-copy-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let temps = mosaic_temp_files();
+        let (w, h) = (8u32, 6u32);
+        let product: Vec<u16> = (0..w * h).map(|i| 1000 + i as u16 * 3).collect();
+        let plane = |data: Vec<u16>, h: u32| {
+            image::DynamicImage::ImageLuma16(
+                image::ImageBuffer::<image::Luma<u16>, _>::from_raw(w, h, data).unwrap(),
+            )
+        };
+        plane(product.clone(), h).save(dir.join("clean.png")).unwrap();
+        let opts = mosaic_opts(&dir, copying_stand_in(&dir, "clean.png"), 1.0);
+        let mut raw = bayer_fixture("RGGB", w as usize, h as usize, &[512], 16383);
+        assert_eq!(super::denoise_mosaic(&opts, &mut raw).unwrap(), super::MosaicDenoise::Denoised);
+        assert_eq!(samples(&raw), product, "the sidecar's plane is the frame's data now");
+        assert_eq!(mosaic_temp_files(), temps, "both temp files are gone after success");
+        // Wrong size: two rows short.
+        plane(product[..(w * (h - 2)) as usize].to_vec(), h - 2).save(dir.join("short.png")).unwrap();
+        let mut raw = bayer_fixture("RGGB", w as usize, h as usize, &[512], 16383);
+        let before = samples(&raw);
+        let err = super::denoise_mosaic(&mosaic_opts(&dir, copying_stand_in(&dir, "short.png"), 1.0), &mut raw)
+            .unwrap_err();
+        let err = format!("{err:#}");
+        assert!(err.contains("but the frame is"), "{err}");
+        assert_eq!(samples(&raw), before, "a refused product leaves the samples alone");
+        // RGB at the right size.
+        write_png(&dir.join("rgb.png"), w, h);
+        let err = super::denoise_mosaic(&mosaic_opts(&dir, copying_stand_in(&dir, "rgb.png"), 1.0), &mut raw)
+            .unwrap_err();
+        let err = format!("{err:#}");
+        assert!(err.contains("not a 16-bit grayscale"), "{err}");
+        assert_eq!(samples(&raw), before);
+        assert_eq!(mosaic_temp_files(), temps, "both temp files are gone after a refusal");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The hook sits BEFORE demosaic — the whole point: the noise is white
+    /// per CFA plane there and spatially correlated after — and the
+    /// developed-frame pass is gated off once the mosaic was denoised.
+    /// MUTATION: drop the `denoise_mosaic(` call from `render_to_image_in`,
+    /// or move it below `develop_intermediate(`, and this names it.
+    #[test]
+    fn the_mosaic_denoise_runs_before_demosaic() {
+        let src = crate::source_before_tests(include_str!("render.rs"));
+        let start = src.find("fn render_to_image_in(").expect("render_to_image_in moved");
+        let body = &src[start..];
+        let hook = body.find("crate::denoise::denoise_mosaic(").expect("the mosaic hook is gone");
+        let demosaic = body.find(".develop_intermediate(").expect("develop_intermediate moved");
+        assert!(hook < demosaic, "the mosaic denoise must run before demosaic");
+        assert!(
+            body.contains("denoise.filter(|_| !mosaic_denoised)"),
+            "the developed-frame pass must sit out once the mosaic was denoised"
+        );
+    }
+
+    /// python/denoise_raw.py is pinned like denoise.py: its DRUNet weights
+    /// and the two KAIR network files each carry a sha256 and a byte cap and
+    /// go through `_fetch_verified`; the model is built `bias=False` (the
+    /// published weights carry no bias tensors — a biased build fails the
+    /// strict load) and loaded `weights_only=True`; and its `--strength`
+    /// default is the engine's RAW default, so the CLI, the GUI and a bare
+    /// sidecar run agree. MUTATION: drop `bias=False`, and this names it.
+    #[test]
+    fn the_raw_sidecar_is_pinned_and_agrees_on_the_default() {
+        for digest in [
+            "479abe3c5327dfd10ff54a80ec7d4098ca80752a5c9492cdff31cee430bec4b4",
+            "8043b6350f1589d5f08892e3be0b4d12c5a502058014285107b7360696d12bf5",
+            "48406db8867394ac5ae233ebeec7711ac10acfc3a6bbf0072c33aa77d659b6fd",
+        ] {
+            assert!(RAW_SIDECAR_SRC.contains(digest), "pin {digest} is gone");
+        }
+        assert!(RAW_SIDECAR_SRC.contains("\"bytes\": 130579305"), "the weight's byte cap is gone");
+        assert!(RAW_SIDECAR_SRC.contains("_fetch_verified("), "the verified fetch is not used");
+        assert!(!RAW_SIDECAR_SRC.contains("_download("), "a download bypasses the verified fetch");
+        // The CALLS, not the comments about them: the first cut of this pin
+        // matched the comment line and let a `bias=True` build through.
+        assert!(
+            RAW_SIDECAR_SRC.contains("upsample_mode=\"convtranspose\", bias=False)"),
+            "DRUNet must be built without bias tensors"
+        );
+        assert!(
+            RAW_SIDECAR_SRC.contains("torch.load(weights, map_location=\"cpu\", weights_only=True)"),
+            "weights must load with weights_only=True"
+        );
+        let default = format!("\"--strength\", type=float, default={:.1},", super::DEFAULT_STRENGTH_RAW);
+        assert!(
+            RAW_SIDECAR_SRC.contains(&default),
+            "the sidecar's --strength default drifted from DEFAULT_STRENGTH_RAW"
+        );
+        assert_eq!(super::default_strength_for(Path::new("frame.ARW")), super::DEFAULT_STRENGTH_RAW);
+        assert_eq!(super::default_strength_for(Path::new("master.png")), super::DEFAULT_STRENGTH);
+        assert_eq!(super::default_strength_for(Path::new("scan.tif")), super::DEFAULT_STRENGTH);
     }
 }

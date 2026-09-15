@@ -40,14 +40,23 @@ curves, HSL, color grading, texture, clarity, dehaze, noise reduction,
 sharpening, vignette, crop, and lens-related settings, rendered through the
 same engine as `autoshade apply`.
 
-**🤖 AI Denoise now** in the Detail fold runs the SCUNet sidecar on the active
-card's pixels and bakes the result into that card as its master (undoable; a
-≤2048 px working copy unless **Full-res denoise** is ticked). It reads the
-fold's own **AI denoise strength** dial: luminance follows the dial, colour
-noise is removed in full from 50% up, and 100% is the model's whole output —
-which on a 61 MP ISO-640 frame kept 5% of the texture, so the dial starts at
-50%. The Export fold's **🤖 AI Denoise on export** has a dial of its own, and
-neither reaches the other. A master baked into the **▣ Original** card becomes
+**🤖 AI Denoise now** in the Detail fold denoises the active card's pixels at
+full resolution and lands the result as a new **◈ Denoised negative** card
+carrying that card's develop; the card you started from keeps its pixels, and
+there is no working-copy tier and no **Full-res** checkbox any more. A RAW is
+denoised on its sensor mosaic, before demosaic: the sidecar measures the
+frame's own noise model (variance = a·signal + b, per colour plane) and runs a
+non-blind DRUNet on the packed colour triplets under a variance-stabilising
+transform, which is what keeps the texture — against ground truth on a 61 MP
+frame at its measured ISO-640 noise it scored 3.2–4.9 dB above the previous
+SCUNet path, and 3.1–5.9 dB on the most detailed blocks
+(`scripts/denoise_bench.py`). A baked source (a PNG/TIFF/JPEG master) still
+goes through SCUNet on its developed pixels. The fold's own **AI denoise
+strength** dial starts at 100%: on a RAW that is the model's whole output, and
+anything less only puts noise back; on a baked source the SCUNet law applies
+(luminance follows the dial, colour noise is removed in full from 50% up) and
+50% is its sweet spot. The Export fold's **🤖 AI Denoise on export** has a dial
+of its own, and neither reaches the other. While a ◈ card exists its master is
 the photo's negative: a later Reimagine sends it, and a Reverse-fit is solved
 on it and lands on it (section 4).
 
@@ -102,7 +111,7 @@ an honest re-derivation instead of presenting an older alpha as its result.
 ## 4. Use versions and variants
 
 A variant is one card for the same photo: **▣ Original**, **✨ AI generated**,
-**✎ Edited AI image**, or **◭ Reverse-fit**. Each card combines its own base
+**✎ Edited AI image**, **◭ Reverse-fit**, or **◈ Denoised negative**. Each card combines its own base
 pixels with one develop. `Ctrl+S` saves every card in the strip together.
 Switching cards is navigation, not an edit; reopening returns to the card that
 was active at the last save, not the last card viewed.
@@ -133,11 +142,18 @@ Original when you want an editable recipe and sidecar for the full-resolution
 source. **＋ Save as version** snapshots an ✎ card's develop; a pristine ✨ card
 has nothing to snapshot.
 
-A **◭ Reverse-fit** card develops the same negative the ▣ Original card does —
-its in-place master included: after an AI denoise (or heal, clone) on
-the ▣ card, the fit is solved on that master, the ◭ card renders and exports
-from it, and the fit's save links it in `pixels.json` so a reopen restores the
-same pixels. With no master on the ▣ card the ◭ card develops the loaded file.
+A **◭ Reverse-fit** card develops the photo's negative: the **◈ Denoised
+negative** card's master while one exists (an AI denoise lands as that card
+and never changes the ▣ card), else the ▣ Original card's own in-place master
+after a heal or clone on it, else the loaded file. The fit is solved on that
+negative, the ◭ card renders and exports from it, and the fit's save links it
+in `pixels.json` so a reopen restores the same pixels.
+
+A **◈ Denoised negative** card is the negative AI-denoised into its own
+16-bit master. Develop it like the ▣ card — heal and clone stay in place on
+it, a `.xmp` from it carries the sliders only (run Lightroom's own Denoise
+there), and the export-time AI denoise sits out on it because its master is
+already denoised.
 
 A generative fill is not an in-place retouch. The model is shown the active
 card's developed picture — its sliders and masks applied, in the uncropped
@@ -316,11 +332,13 @@ sharpening, and sRGB, Display P3, or Adobe RGB delivery color space. Resizing is
 the last step, uses Lanczos3, preserves aspect ratio, and never enlarges a
 smaller image.
 
-**🤖 AI Denoise on export** runs the SCUNet sidecar inside every
-full-resolution delivery (the batch render skips it) at the Export fold's own
-**Export denoise strength** dial — the same law as the Detail fold's dial and
-the same 50% start, but its own setting: moving one never moves the other.
-The export summary echoes the amount ("AI Denoise 50%").
+**🤖 AI Denoise on export** runs the AI denoise inside every full-resolution
+delivery — a RAW on its sensor mosaic, a baked source through SCUNet — at the
+Export fold's own **Export denoise strength** dial: the same law as the Detail
+fold's dial and the same 100% start, but its own setting: moving one never
+moves the other. The batch render skips it, and so does a ◈ Denoised card,
+whose master is already denoised. The export summary echoes the amount ("AI
+Denoise 100%") and carries none on a ◈ card.
 
 CLI exports use q95 sRGB. `--long-edge N` is available on `apply`, `auto`, and
 `batch --render`; `0` or omission means full resolution. It is deliberately an
@@ -359,8 +377,12 @@ is set (avoiding duplicate analysis and billing for RAW+JPEG pairs), and
 defaults to three photos in flight; `--long-edge` on `batch` requires
 `--render`. `eval` defaults to serial work and resumes from its state file.
 Denoise-strength/model overrides require `--denoise` on `auto`. A denoise
-strength defaults to 0.5 on every surface (`denoise` and `auto --denoise`, the
-web export, both GUI dials): the value blends the luminance, colour noise is
+strength defaults to 1.0 on a RAW and 0.5 on a baked source, on every surface
+(`denoise` and `auto --denoise`, the web export, both GUI dials). On a RAW the
+denoise runs on the sensor mosaic before demosaic and the value blends the
+denoised mosaic with the original; `denoise` then writes a neutral 16-bit
+develop of it, and `--model` (a SCUNet tier) does not apply. On a baked source
+SCUNet runs on the pixels: the value blends the luminance, colour noise is
 removed in full from 0.5 up, and 1.0 is the model's whole output. `retouch`
 without `--prompt` removes what the mask covers — the area is continued from
 its surroundings and nothing new is put there; the GUI's and the browser's
@@ -669,7 +691,7 @@ kept in the local cache rather than committed to the repository.
 | Deterministic render and manual develop, including `apply` | Full vision-backed `analyze` / `auto` proposals and visual model review |
 | Local `match` inverse rendering | `match --style-prompt`, `--ai-judge`, or `--deep` |
 | XMP read/write, masks, curves, and GUI sliders | Generative `reimagine` / `retouch` |
-| SCUNet denoise and local BiRefNet/U²-Net, OneFormer, and SAM masks | Automatic target detection in `heal`; a supplied mask works offline |
+| AI denoise (DRUNet on the RAW mosaic, SCUNet on baked sources) and local BiRefNet/U²-Net, OneFormer, and SAM masks | Automatic target detection in `heal`; a supplied mask works offline |
 | Style indexing and retrieval | |
 
 Without the vision role, the advisor can fall back to its disclosed histogram

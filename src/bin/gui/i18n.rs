@@ -1300,30 +1300,33 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     // ZH keeps this block's 去噪 and the export block's 降噪 — see the note at
     // the export-settings entries.
     ("🤖 AI Denoise now", "🤖 立即 AI 去噪"),
-    ("Full-res denoise", "全分辨率去噪"),
     // The verb's OWN dial (2026-09-13; user decision 2026-09-12 — a control
     // sits in the fold whose verb reads it). The Export fold's twin below
     // keeps that block's 降噪.
     ("AI denoise strength", "AI 去噪强度"),
-    ("How much of the SCUNet result 「🤖 AI Denoise now」 bakes in — this fold's own dial (the Export fold's 「on export」 has its own; neither reaches the other). Luminance follows the dial; colour noise is removed in full from 50% up. 100% is the model's whole output, which on a 61 MP ISO-640 frame kept 5% of the texture — the default 50% keeps the rock and loses the colour speckle. Double-click to reset.",
-        "「🤖 立即 AI 去噪」把多少 SCUNet 结果烘焙进去——本折叠区自己的滑杆（「导出」折叠区的「导出时」有它自己的一把，两把互不相通）。亮度跟随滑杆；颜色噪点从 50% 起完全去除。100% 是模型的全部输出，在一张 61 MP、ISO 640 的照片上只留下 5% 的纹理——默认 50% 留住岩石纹理、去掉彩色噪点。双击复位。"),
-    ("Run the SCUNet GPU sidecar on this variant's pixels at the AI denoise strength above and show the result on canvas (undoable — bakes a clean base into the current variant; the develop sliders keep applying on top; first run downloads the model)",
-        "按上方的 AI 去噪强度，对当前变体的像素跑 SCUNet GPU 边车，结果直接上画布（可撤销——干净基图烘焙进当前变体；显影滑杆继续在其上生效；首次运行会下载模型）"),
+    ("How much of the denoise 「🤖 AI Denoise now」 keeps — this fold's own dial (the Export fold's 「on export」 has its own; neither reaches the other). On a RAW the denoise runs on the sensor mosaic with the noise level measured on the frame: 100% is the model's whole output and the default (the texture stays; anything less only puts noise back). On a baked source (PNG/TIFF/JPEG master) the older SCUNet runs at this dial, and 50% is its sweet spot. Double-click to reset.",
+        "「🤖 立即 AI 去噪」保留多少去噪结果——本折叠区自己的滑杆（「导出」折叠区的「导出时」有它自己的一把，两把互不相通）。RAW 在 RAW 原始数据上去噪，噪声强度按本照片自动测得：100% 是模型的全部输出，也是默认（纹理保留；再低只是把噪点放回来）。烘焙图（PNG/TIFF/JPEG 母图）走旧的 SCUNet，50% 是它最合适的一档。双击复位。"),
+    ("Denoise this card's pixels at full resolution — a RAW on its sensor mosaic before demosaic, a baked source through SCUNet — and land the result as a new ◈ Denoised negative card carrying this card's develop; the card you started from keeps its pixels (first run downloads the model)",
+        "对本卡的像素做全分辨率去噪——RAW 在 RAW 原始数据上、烘焙图走 SCUNet——结果落成新的「◈ 去噪原片」卡，带着本卡的显影；你出发的那张卡像素不动（首次运行会下载模型）"),
+    // The ◈ card's own line in the strip (2026-09-15).
+    ("◈ Denoised negative", "◈ 去噪原片"),
+    ("The negative AI-denoised into its own master: develop it like the ▣ card, reverse-fit and reimagine read it as the negative while it exists; a .xmp from it carries the sliders only — run Lightroom's own Denoise there",
+        "AI 去噪后的原片，自成母图：像 ▣ 卡一样显影；它存在时反推与生图都以它为原片；从它写出的 .xmp 只带滑杆——去噪在 Lightroom 里用它自己的去噪"),
     // The capability arm. WORD-FOR-WORD the segmentation buttons' missing-
     // sidecar line (only the env var and the file name differ), because it is
     // word-for-word the same situation — a release package ships neither
     // helper — and two wordings for one condition is how a user concludes they
     // are two different problems.
-    ("this build did not ship the python sidecar — run AutoShade from the project directory, or point AUTOSHADE_DENOISE_SCRIPT at python/denoise.py",
-        "本版本未随发布包分发 python 边车——请从项目目录运行 AutoShade，或用 AUTOSHADE_DENOISE_SCRIPT 指向 python/denoise.py"),
-    ("Denoise at full resolution (the full-sensor develop for a RAW, the image itself for a baked source; slow) — off = a ≤2048px working copy for a quick on-canvas result",
-        "全分辨率去噪（RAW 用全画幅显影，烘焙图像用原图；慢）——关闭 = 用 ≤2048px 工作副本快速出画布结果"),
-    ("AI denoise (full-res)… (GPU sidecar, can take minutes; first run downloads the model)",
-        "AI 去噪（全分辨率）中…（GPU 边车，可能需数分钟；首次运行会下载模型）"),
-    ("AI denoise… (GPU sidecar on a ≤2048px working copy; first run downloads the model)",
-        "AI 去噪中…（GPU 边车处理 ≤2048px 工作副本；首次运行会下载模型）"),
-    ("AI denoised → {path} (updated current variant)",
-        "AI 去噪完成 → {path}（已更新当前变体）"),
+    ("this build did not ship the python sidecars — run AutoShade from the project directory, or point AUTOSHADE_DENOISE_SCRIPT and AUTOSHADE_DENOISE_RAW_SCRIPT at python/denoise.py and python/denoise_raw.py",
+        "本版本未随发布包分发 python 边车——请从项目目录运行 AutoShade，或用 AUTOSHADE_DENOISE_SCRIPT 与 AUTOSHADE_DENOISE_RAW_SCRIPT 指向 python/denoise.py 与 python/denoise_raw.py"),
+    ("AI denoise (full frame)… (GPU sidecar, can take minutes; first run downloads the model)",
+        "AI 去噪（全画幅）中…（GPU 边车，可能需数分钟；首次运行会下载模型）"),
+    ("AI denoised on the sensor mosaic → {path} (new ◈ card; the card you started from is untouched)",
+        "已在 RAW 原始数据上完成 AI 去噪 → {path}（新的 ◈ 卡；你出发的那张卡未动）"),
+    ("AI denoised (a baked source, so SCUNet on developed pixels) → {path} (new ◈ card; the card you started from is untouched)",
+        "AI 去噪完成（烘焙图，走 SCUNet）→ {path}（新的 ◈ 卡；你出发的那张卡未动）"),
+    ("rendering full-resolution → {path} … (this ◈ card is already denoised — the export-time AI denoise sits out)",
+        "正在渲染全分辨率 → {path} …（这张 ◈ 卡已经去噪——导出时 AI 降噪不再运行）"),
     ("An operation is still running — wait for it to finish, then close",
         "还有操作在运行——等它完成后再关闭"),
     ("over 999 generated variants for this photo — clean up ./out first",
@@ -1520,13 +1523,13 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     ("a .xmp already sits beside this photo ({path}) — click again to replace it",
         "这张照片旁已有 .xmp（{path}）—— 再点一次会替换它"),
     ("the .xmp could not be delivered: {err}", "无法写出 .xmp：{err}"),
-    ("SCUNet AI denoise before developing, at the Export denoise strength below — high-ISO / astro (slow, GPU; needs the python sidecar). Batch render skips it.",
-        "显影前按下方的导出降噪强度做 SCUNet AI 降噪——高 ISO/星空（慢，GPU；需 python 边车）。批量渲染不含此项。"),
+    ("AI denoise before developing, at the Export denoise strength below — a RAW on its sensor mosaic, a baked source through SCUNet — for high-ISO / astro (slow, GPU; needs the python sidecar). Batch render skips it, and so does a ◈ Denoised card, whose master is already denoised.",
+        "显影前按下方的导出降噪强度做 AI 降噪——RAW 在 RAW 原始数据上、烘焙图走 SCUNet——高 ISO/星空（慢，GPU；需 python 边车）。批量渲染不含此项；◈ 去噪原片卡也不再做，它的母图已经去噪。"),
     // The checkbox's OWN dial (2026-09-13) — its own state and key; the
     // Detail fold's 「AI denoise strength」 does not reach it.
     ("Export denoise strength", "导出降噪强度"),
-    ("How much of the SCUNet result the export-time denoise bakes into every full-resolution delivery — this fold's own dial (the Detail fold's 「AI Denoise now」 has its own; neither reaches the other). Luminance follows the dial; colour noise is removed in full from 50% up; 100% is the model's whole output. Double-click to reset.",
-        "导出时降噪把多少 SCUNet 结果烘焙进每一次全分辨率交付——本折叠区自己的滑杆（「细节」折叠区的「立即 AI 去噪」有它自己的一把，两把互不相通）。亮度跟随滑杆；颜色噪点从 50% 起完全去除；100% 是模型的全部输出。双击复位。"),
+    ("How much of the denoise the export-time pass keeps in every full-resolution delivery — this fold's own dial (the Detail fold's 「AI Denoise now」 has its own; neither reaches the other). On a RAW the denoise runs on the sensor mosaic with the noise level measured on the frame: 100% is the model's whole output and the default. On a baked source the older SCUNet runs at this dial, and 50% is its sweet spot. Double-click to reset.",
+        "导出时降噪在每一次全分辨率交付里保留多少去噪结果——本折叠区自己的滑杆（「细节」折叠区的「立即 AI 去噪」有它自己的一把，两把互不相通）。RAW 在 RAW 原始数据上去噪，噪声强度按本照片自动测得：100% 是模型的全部输出，也是默认。烘焙图走旧的 SCUNet，50% 是它最合适的一档。双击复位。"),
     ("All regions", "全部区域"),
     ("Midtones", "中间调"),
     ("Global", "全局"),

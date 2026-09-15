@@ -141,7 +141,14 @@
       "type": "backend",
       "label": "Denoise sidecar",
       "sublabel": "denoise.py · SCUNet × 5",
-      "tag": "opt-in, before tone"
+      "tag": "opt-in, baked sources"
+    },
+    {
+      "id": "denoise-raw-sidecar",
+      "type": "backend",
+      "label": "RAW denoise sidecar",
+      "sublabel": "denoise_raw.py · DRUNet",
+      "tag": "opt-in, on the mosaic"
     }
   ],
   "boundaries": [
@@ -172,7 +179,8 @@
         "correspond-sidecar",
         "segment-sidecar",
         "describe-sidecar",
-        "denoise-sidecar"
+        "denoise-sidecar",
+        "denoise-raw-sidecar"
       ]
     },
     {
@@ -302,6 +310,12 @@
       "from": "denoise-sidecar",
       "to": "render-engine",
       "label": "denoised pixels"
+    },
+    {
+      "id": "denoise-raw-to-render",
+      "from": "denoise-raw-sidecar",
+      "to": "render-engine",
+      "label": "denoised mosaic"
     }
   ],
   "cards": [
@@ -337,7 +351,7 @@
       "title": "Measured, local, quarantined",
       "items": [
         "Lightroom parity by measurement: Texture 45/45 anchors within 0.02, radial 41/41 vectors within 1 px, brush D1 874 -> 9.8 px; linear openly not pixel-closed",
-        "Local models licence-screened and sha256/byte-pinned: BiRefNet, OneFormer ADE20K, SAM 2.1, SigLIP 2, SD 2.1 as DIFT featurizer, SCUNet",
+        "Local models licence-screened and sha256/byte-pinned: BiRefNet, OneFormer ADE20K, SAM 2.1, SigLIP 2, SD 2.1 as DIFT featurizer, SCUNet, DRUNet",
         "Generated pixels (gpt-image-2 reimagine via the Images API, heal, denoise) live on their own cards and are measured with the same D before any fit"
       ]
     }

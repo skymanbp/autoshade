@@ -3571,26 +3571,33 @@
         assert_eq!(app.pixels_on_disk, None);
     }
 
-    /// The negative IS the ▣ card's pixel source: an in-place denoise landing
-    /// on it repoints the negative at the master, and `negative_path` is what
-    /// the reimagine develops from — the master, else the loaded file.
+    /// 2026-09-15 (user decision): an AI denoise is NOT an in-place retouch
+    /// any more — it lands as a NEW ◈ Denoised negative card whose origin is
+    /// the denoised master and whose recipe is a copy of the card it was run
+    /// from, auto-switched to. The ▣ card keeps its pixels, its base and its
+    /// `origin = None` (the old in-place landing redefined the ▣ card and
+    /// left the untouched negative unreachable). The negative then IS the ◈
+    /// card's master (`negative_origin`), and `negative_path` — what the
+    /// reimagine develops from — follows it.
     #[test]
-    fn negative_origin_follows_an_in_place_denoise_on_the_original_card() {
+    fn an_ai_denoise_lands_as_a_new_denoised_card_and_leaves_the_source_and_negative_alone() {
         let ctx = egui::Context::default();
         let src = std::path::PathBuf::from("_negative_follow_test.ARW");
         let mut app = AutoShadeApp { src_path: Some(src.clone()), ..Default::default() };
         let b0 = std::sync::Arc::new(image::DynamicImage::new_rgba8(4, 4));
+        let developed = EditRecipe { contrast: 7.0, ..Default::default() };
         app.variants = vec![Variant {
             id: ORIGINAL_VARIANT_ID.into(),
             name: None,
             kind: VariantKind::Original,
-            recipe: EditRecipe::default(),
+            recipe: developed.clone(),
             base: Some(b0.clone()),
             origin: None,
             thumb: None,
         }];
         app.active = 0;
-        app.base_preview = Some(b0);
+        app.recipe = developed.clone();
+        app.base_preview = Some(b0.clone());
         app.reset_history();
         assert_eq!(app.negative_origin(), None);
         assert_eq!(app.negative_path().as_deref(), Some(src.as_path()), "no master: the loaded file");
@@ -3602,18 +3609,50 @@
             epoch,
             Ok((
                 image::DynamicImage::new_rgba8(4, 4),
-                RetouchNote::Denoised(out.clone()),
+                RetouchNote::Denoised { out: out.clone(), on_mosaic: true },
                 out.clone(),
-                RetouchKind::InPlace,
+                RetouchKind::NewDenoised,
             )),
         );
-        assert_eq!(app.negative_origin().as_deref(), Some(out.as_path()));
+        assert_eq!(
+            strip_kinds(&app),
+            vec![VariantKind::Original, VariantKind::Denoised],
+            "{}",
+            app.status
+        );
+        assert_eq!(app.active, 1, "the new ◈ card is under the canvas");
+        assert_eq!(app.variants[1].origin.as_deref(), Some(out.as_path()), "…hanging off the denoised master");
+        assert_eq!(app.variants[1].recipe, developed, "…carrying the source card's develop");
+        assert!(app.variants[1].kind.is_source_based(), "a ◈ card is parametric over its master");
+        assert!(!app.variants[1].kind.on_ai_pixels(), "…and carries no AI-pixel caveats");
+        assert_eq!(app.variants[0].recipe, developed, "the ▣ card keeps its develop");
+        assert!(
+            app.variants[0].base.as_ref().is_some_and(|b| std::sync::Arc::ptr_eq(b, &b0)),
+            "…and its base"
+        );
+        assert_eq!(app.variants[0].origin, None, "…and its untouched pixel source");
+        assert_eq!(app.negative_origin().as_deref(), Some(out.as_path()), "the negative is now the ◈ master");
         assert_eq!(app.negative_path().as_deref(), Some(out.as_path()), "the reimagine input follows");
         assert_eq!(
             app.active_source_path().as_deref(),
             Some(out.as_path()),
-            "and the ▣ card's own source is the same file — one negative"
+            "and the ◈ card's own source is the same file — one negative"
         );
+        assert!(app.status.contains("new ◈ card"), "{}", app.status);
+        assert!(app.status.contains("sensor mosaic"), "{}", app.status);
+        // The verb's own choices are pinned in the source (the house pattern
+        // for a worker whose sidecar cannot run offline): the denoise lands as
+        // a NEW card, never in place, and always on the full frame — the
+        // ≤2048 px working-copy tier is gone with the checkbox. MUTATION:
+        // `NewDenoised` → `InPlace` in start_ai_denoise, and this names it.
+        let now = include_str!("panels/retouch.rs");
+        let body = &now[now.find("pub(crate) fn start_ai_denoise(").expect("start_ai_denoise moved")..];
+        let body = &body[..body.find("pub(crate) fn start_clone(").expect("start_clone moved")];
+        assert!(body.contains("RetouchKind::NewDenoised))"), "the denoise no longer lands as a new card");
+        assert!(!body.contains("RetouchKind::InPlace"), "the denoise went back to an in-place landing");
+        assert!(body.contains("denoise_active(&opts, &path, &out)"), "the denoise no longer runs the full frame");
+        assert!(!body.contains("2048"), "the ≤2048 px working-copy tier came back");
+        assert!(!body.contains("denoise_fullres"), "the retired Full-res checkbox came back");
         // The worker halves run behind a segmentation call, so they are
         // pinned on the source (the config.rs literal-pin pattern): the fit
         // reads the negative once at the click and the persist links it.
@@ -3627,12 +3666,153 @@
             fit.contains("pixels: match negative.as_deref() {"),
             "the persisted pixel link follows the same capture"
         );
-        let reimagine = include_str!("panels/retouch.rs");
-        assert!(reimagine.contains("let Some(negative) = self.negative_path() else { return };"));
+        assert!(now.contains("let Some(negative) = self.negative_path() else { return };"));
         assert!(
-            reimagine.contains("&cfg, &negative, &prompt, \"high\""),
+            now.contains("&cfg, &negative, &prompt, \"high\""),
             "the reimagine develops the negative, master included"
         );
+    }
+
+    /// The negative master prefers the ◈ card: while one exists, reverse-fit
+    /// and reimagine read ITS master whichever card is active (the active ◈
+    /// card first, then the first ◈ on the strip), and the ▣ card's own
+    /// origin (a legacy in-place bake) only answers when no ◈ card exists.
+    /// MUTATION: `negative_origin` back to the ▣-only definition, and the
+    /// first assertion names it.
+    #[test]
+    fn the_negative_master_prefers_the_denoised_card() {
+        let master = std::path::PathBuf::from("out/_negative_prefers_test.denoise.png");
+        let legacy = std::path::PathBuf::from("out/_negative_prefers_test.legacy.png");
+        let card = |kind: VariantKind, id: &str, origin: Option<std::path::PathBuf>| Variant {
+            id: id.into(),
+            name: None,
+            kind,
+            recipe: EditRecipe::default(),
+            base: None,
+            origin,
+            thumb: None,
+        };
+        let mut app = AutoShadeApp {
+            variants: vec![
+                card(VariantKind::Original, ORIGINAL_VARIANT_ID, None),
+                card(VariantKind::Generated, "gen", Some("out/_negative_prefers_test.reimagine.png".into())),
+                card(VariantKind::Denoised, "dn", Some(master.clone())),
+            ],
+            ..Default::default()
+        };
+        for active in 0..3 {
+            app.active = active;
+            assert_eq!(
+                app.negative_origin().as_deref(),
+                Some(master.as_path()),
+                "card {active} active: the ◈ master is the negative"
+            );
+        }
+        // A legacy ▣ origin loses to the ◈ card…
+        app.variants[0].origin = Some(legacy.clone());
+        app.active = 0;
+        assert_eq!(app.negative_origin().as_deref(), Some(master.as_path()));
+        // …and answers once the ◈ card is gone.
+        app.variants.remove(2);
+        assert_eq!(app.negative_origin().as_deref(), Some(legacy.as_path()));
+        app.variants[0].origin = None;
+        assert_eq!(app.negative_origin(), None);
+    }
+
+    /// A ◈ card round-trips through the strip record: the store admits the
+    /// "denoised" spelling (`known_variant_kind`), the record carries its
+    /// master as `origin`, and the spelling maps back to the kind.
+    #[test]
+    fn a_denoised_card_round_trips_through_the_strip_record() {
+        let dir = std::env::temp_dir()
+            .join(format!("autoshade-gui-denoised-card-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let src = dir.join("_gui_denoised_card.ARW");
+        let dev = autoshade::store::develop_dir(&src);
+        let _ = std::fs::remove_dir_all(&dev);
+        std::fs::create_dir_all(&dev).unwrap();
+        let _scrub = Scrub(vec![dir.clone(), dev.clone()]);
+        let master = dir.join("denoise.png");
+        let developed = EditRecipe { contrast: 4.0, ..Default::default() };
+        let mut app = AutoShadeApp { src_path: Some(src.clone()), ..Default::default() };
+        app.variants = vec![
+            Variant {
+                id: ORIGINAL_VARIANT_ID.into(),
+                name: None,
+                kind: VariantKind::Original,
+                recipe: developed.clone(),
+                base: None,
+                origin: None,
+                thumb: None,
+            },
+            Variant {
+                id: "dn-1".into(),
+                name: Some("clean".into()),
+                kind: VariantKind::Denoised,
+                recipe: developed.clone(),
+                base: None,
+                origin: Some(master.clone()),
+                thumb: None,
+            },
+        ];
+        app.active = 1;
+        app.recipe = developed.clone();
+        assert_eq!(VariantKind::Denoised.store_str(), "denoised");
+        assert_eq!(VariantKind::from_store_str("denoised"), Some(VariantKind::Denoised));
+        let rec = app.current_strip_record().expect("a two-card strip has a record");
+        assert_eq!(rec.active_kind, "denoised");
+        assert_eq!(rec.active_id.as_deref(), Some("dn-1"));
+        assert_eq!(rec.active_name.as_deref(), Some("clean"));
+        app.persist_strip(&src).expect("strip persists");
+        let saved = saved_strip_of(&src);
+        assert_eq!(saved.active_kind, "denoised");
+        assert_eq!(saved.active_pos, 1);
+        assert_eq!(saved.others.len(), 1);
+        assert_eq!(saved.others[0].kind, "original");
+        assert_eq!(saved.others[0].origin, None, "the ▣ card carries no master of its own");
+        // The active card's master travels in pixels.json, the way every
+        // origin-carrying active card's does, flagged by `on_ai_pixels` — and
+        // a ◈ master is a camera frame, not AI pixels: it keeps calibration,
+        // projects to a Lightroom XMP and never earns the AI caveats.
+        assert!(!VariantKind::Denoised.on_ai_pixels());
+        let save = include_str!("actions.rs");
+        assert!(
+            save.contains("pixels: st.origin.clone().map(|o| (o, st.kind.on_ai_pixels())),"),
+            "the save's pixel link no longer reads the card's kind"
+        );
+    }
+
+    /// 「🤖 AI Denoise on export」 sits out on a ◈ card — its master is already
+    /// the denoised negative; a second pass would only smooth it further —
+    /// and the export echo says so by carrying no amount.
+    #[test]
+    fn the_export_denoise_is_skipped_on_a_denoised_card() {
+        let card = |kind: VariantKind| Variant {
+            id: "c".into(),
+            name: None,
+            kind,
+            recipe: EditRecipe::default(),
+            base: None,
+            origin: None,
+            thumb: None,
+        };
+        let mut app = AutoShadeApp { save_denoise: true, save_denoise_strength: 0.35, ..Default::default() };
+        for kind in [VariantKind::Original, VariantKind::Generated, VariantKind::Fitted, VariantKind::Edited] {
+            app.variants = vec![card(kind)];
+            app.active = 0;
+            assert!(app.export_denoise_applies(), "{kind:?}");
+            assert!(app.export_summary(Lang::En).contains("AI Denoise 35%"), "{kind:?}");
+        }
+        app.variants = vec![card(VariantKind::Denoised)];
+        assert!(!app.export_denoise_applies());
+        assert!(!app.export_summary(Lang::En).contains("AI Denoise"), "{}", app.export_summary(Lang::En));
+        app.save_denoise = false;
+        app.variants = vec![card(VariantKind::Original)];
+        assert!(!app.export_denoise_applies(), "unticked is unticked on any card");
+        // The render reads the gate, not the raw checkbox.
+        let export = include_str!("export.rs");
+        assert!(export.contains("let denoise = self.export_denoise_applies();"));
     }
 
     /// 「＋」 has nothing to snapshot on the pristine ✨ card and everything
@@ -5832,6 +6012,7 @@
             python_bin: "python".into(),
             denoise_model: "scunet_color_real_psnr".into(),
             denoise_script: String::new(),
+            denoise_raw_script: String::new(),
             weights_dir: String::new(),
             segment_script: String::new(),
             embed_script: String::new(),
@@ -7481,14 +7662,18 @@
     /// 2026-09-13, the same user decision applied to the denoiser's two
     /// timings: 「🤖 AI Denoise now」 (Detail fold) and 「🤖 AI Denoise on
     /// export」 (Export fold) each read a dial of their own, both starting at
-    /// `denoise::DEFAULT_STRENGTH`, each on its own prefs key — an older prefs
-    /// file must decode to that default and never to serde's 0.0 (the
-    /// identity: every denoise would silently do nothing after an upgrade).
-    /// The worker halves are pinned on their sources, like the fit's dial.
+    /// `denoise::DEFAULT_STRENGTH_RAW` (1.0 since 2026-09-15: the RAW-mosaic
+    /// denoise is non-blind, so its whole output is the right amount; the
+    /// baked-source SCUNet path keeps its own 0.5 in the engine), each on its
+    /// own prefs key — an older prefs file must decode to that default and
+    /// never to serde's 0.0 (the identity: every denoise would silently do
+    /// nothing after an upgrade). The worker halves are pinned on their
+    /// sources, like the fit's dial.
     #[test]
     fn gui_ai_denoise_has_a_dial_in_each_fold() {
-        use autoshade::denoise::DEFAULT_STRENGTH;
+        use autoshade::denoise::DEFAULT_STRENGTH_RAW as DEFAULT_STRENGTH;
         let app = AutoShadeApp::default();
+        assert_eq!(DEFAULT_STRENGTH, 1.0);
         assert_eq!(app.denoise_strength, DEFAULT_STRENGTH);
         assert_eq!(app.save_denoise_strength, DEFAULT_STRENGTH);
         assert_eq!(Prefs::default().denoise_strength, DEFAULT_STRENGTH);

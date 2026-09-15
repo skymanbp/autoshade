@@ -114,8 +114,10 @@ strength.
 The shared renderer stores pixels as deterministic `f32` RGB and explicitly
 decodes to linear light around operations that require radiometric arithmetic;
 the ordinary working buffer itself is sRGB-gamma RGB, so this is not described
-as a wholly linear pipeline. After orientation and optional SCUNet denoise,
-white balance runs before the composed profile/manual vignette and dehaze;
+as a wholly linear pipeline. After orientation and the optional AI denoise (a
+RAW's sensor mosaic is denoised before demosaic, ahead of everything here; a
+baked source goes through SCUNet at this point), white balance runs before the
+composed profile/manual vignette and dehaze;
 dehaze inverts the airlight model `I = J·t + A(1−t)`. The tone LUT then combines
 exposure, contrast, whites, blacks, Highlights, shadows, base curve, and the
 master point curve before RGB point curves, eight-band HSL, colour grading,
@@ -1569,7 +1571,9 @@ literal loopback authority on the actual bound port, API responses are
 bounded instead of allowing browsers or batch jobs to multiply full-resolution
 RAW memory without limit.
 
-SCUNet denoise is an optional local sidecar with an output contract stronger
+AI denoise is a pair of optional local sidecars — a non-blind DRUNet on the
+RAW sensor mosaic, whose noise model the sidecar measures on the frame, and
+SCUNet on baked sources — with an output contract stronger
 than process exit status: the caller accepts success only when the typed result
 sets `sidecar_wrote` and the expected artifact is present, non-empty, and newer
 than the pre-call state; model weights remain outside the repository.
@@ -1639,8 +1643,9 @@ than the pre-call state; model weights remain outside the repository.
   glyph square / toggle, every one exactly one row tall, grid cells for rows
   of equal verbs; the layout pin renders every panel in both languages.
 - `src/serve.rs` and `src/web/` — embedded web UI and loopback defenses.
-- `src/denoise.rs` and `python/denoise.py` — SCUNet sidecar and
-  `sidecar_wrote` contract.
+- `src/denoise.rs`, `python/denoise_raw.py` and `python/denoise.py` — the
+  RAW-mosaic DRUNet and baked-source SCUNet sidecars and the `sidecar_wrote`
+  contract.
 - `src/jobs.rs` and `src/decode.rs` — memory probes, concurrency budget, and
   RAW admission.
 - `src/bin/gui/quit.rs`, `src/bin/gui/macos.rs` and
