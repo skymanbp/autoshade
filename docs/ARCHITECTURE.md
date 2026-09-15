@@ -1,6 +1,6 @@
 # AutoShade — Architecture
 
-> Status: **implemented** (v1.3.4 — the sensor plane is measured from the
+> Status: **implemented** (v1.3.5 — the sensor plane is measured from the
 > container before the decoder is asked to allocate it, so a frame past that
 > decoder's own ceiling is a named refusal naming the frame and the workflow
 > that works instead of an abort, and a CONTAINED panic no longer raises a modal
@@ -134,10 +134,19 @@
 > wrong reason; it writes a `=== name ===` transcript that
 > `scripts/check_docs.py --gates` reads the counts and the lane set back out
 > of, and it prints the by-name test-set difference against a saved baseline.
-> 1499 library + 24 CLI + 187 GUI + 2+2 contract tests are enumerated in the GUI
-> build; the library result is 1484 pass + 15 `#[ignore]`d forensic probes and
-> the GUI result is 186 pass + one explicit scratch-recipe export probe ignored
-> in the ordinary battery. Counts refreshed 2026-09-13 for v1.3.4: +4 / −0 by
+> 1502 library + 24 CLI + 188 GUI + 2+2 contract tests are enumerated in the GUI
+> build; the library result is 1487 pass + 15 `#[ignore]`d forensic probes and
+> the GUI result is 187 pass + one explicit scratch-recipe export probe ignored
+> in the ordinary battery. Counts refreshed 2026-09-15 for v1.3.5: +4 / −0 by
+> name against the v1.3.4 tag (`14a2a4b`), taken statically between the tag's
+> source and this tree (1714 → 1718 `#[test]` functions) — three library pins
+> in `generative` (a blank fill prompt is the removal instruction, that
+> instruction reaching the wire with the mask part on a loopback fill, and
+> `retouch_onto` compositing onto the base its caller produced, never the
+> file) and one GUI pin (a fill landing as a new ✨ card with the filled
+> card's recipe, base and origin untouched, the verb's develop-the-picture
+> and new-card choices pinned in its source).
+> Before that, counts were refreshed 2026-09-13 for v1.3.4: +4 / −0 by
 > name against the v1.3.3 tag (`f5046c9`), taken statically between the tag's
 > source and this tree (1710 → 1714 `#[test]` functions) — one library pin
 > (`the_sidecar_blends_luma_by_strength_and_takes_chroma_first` in `denoise`:

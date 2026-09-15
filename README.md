@@ -8,7 +8,7 @@
 An AI decides *what to change*. A deterministic Rust engine *does* it.
 **In the recipe-development path, the AI never touches a pixel.**
 
-[Download v1.3.4](https://github.com/skymanbp/autoshade/releases/tag/v1.3.4) ·
+[Download v1.3.5](https://github.com/skymanbp/autoshade/releases/tag/v1.3.5) ·
 [Architecture](docs/ARCHITECTURE.md) ·
 [Release ledger](docs/ROADMAP.md) ·
 [MIT](LICENSE)
@@ -470,7 +470,7 @@ the tests [`scripts/check_docs.py`](scripts/check_docs.py) re-derives.
 
 | What | Measured | Where |
 |---|---|---|
-| Automated test battery | 1499 library / 24 CLI / 187 GUI / 2+2 contract tests; `check_docs` re-derives the pinned release claims | [Tech stack](#tech-stack-algorithms-and-design-philosophy) |
+| Automated test battery | 1502 library / 24 CLI / 188 GUI / 2+2 contract tests; `check_docs` re-derives the pinned release claims | [Tech stack](#tech-stack-algorithms-and-design-philosophy) |
 | RAW coverage | 24 extensions, 725 camera bodies; nine-camera format zoo 9/9 at the last release gate | [Supported formats](#supported-formats) |
 | Lightroom Texture parity | 45 of 45 period/depth anchors within ±0.02 | [Develop pipeline](#develop-pipeline-and-tone-model) |
 | Radial mask closure | 41 of 41 measured vectors within ≤1 px | [Lens correction](#lens-correction-and-lightroom-mask-frame-laws) |
@@ -492,7 +492,7 @@ the tests [`scripts/check_docs.py`](scripts/check_docs.py) re-derives.
 
 ### Download a release
 
-The v1.3.4 release is built by GitHub Actions from the tag: the Windows front
+The v1.3.5 release is built by GitHub Actions from the tag: the Windows front
 ends, two macOS universal (arm64 + x86_64) archives and a Linux x64
 command-line archive; `checksums.txt` carries the SHA-256 of every asset.
 
@@ -500,17 +500,17 @@ command-line archive; `checksums.txt` carries the SHA-256 of every asset.
 |---|---:|---|
 | `autoshade.exe` (CLI) | 21,191,680 bytes | `9aacbb6be9123cb7b62a4e081606fd58710e42699ac1c64da0c27ce5c9ac4e8c` |
 | `autoshade-gui.exe` (desktop app) | 27,525,632 bytes | `afaa7315b59965698e4aabf5c317e21add6deee7e3494d0138fdd6a4ad2baa2b` |
-| `AutoShade-Setup-1.3.4.exe` (installer) | 14,717,619 bytes | `430c2b7e5e8035e40d39e763927ff4e25ed779a980d6b03d95b5e33b97f6c45e` |
-| `autoshade-1.3.4-windows-x64.zip` (portable archive) | 19,609,423 bytes | `816de98a7adce5877af950d0f26add43f4b1ec3e5315d33c39c7cd7667afd57b` |
-| `AutoShade-1.3.4-macos-universal.zip` (macOS app bundle) | 39,647,260 bytes | `91579474eda3cefe1e1f36dd175c74f2a50de0f22f8534ffe9a63ede27a17147` |
-| `AutoShade-1.3.4-linux-x64.zip` (Linux command line only) | 9,509,189 bytes | `e53d9e6f2b3d7599f5e7ef4278454da40dec217833fbccab8f792a608fa21c26` |
-| `AutoShade-1.3.4-macos-cli.zip` (macOS command line only) | 17,185,425 bytes | `f866e856f060946d99a4b266e7e8a0d7ca9367447bbc5632988236c458c3d2e3` |
+| `AutoShade-Setup-1.3.5.exe` (installer) | 14,717,619 bytes | `430c2b7e5e8035e40d39e763927ff4e25ed779a980d6b03d95b5e33b97f6c45e` |
+| `autoshade-1.3.5-windows-x64.zip` (portable archive) | 19,609,423 bytes | `816de98a7adce5877af950d0f26add43f4b1ec3e5315d33c39c7cd7667afd57b` |
+| `AutoShade-1.3.5-macos-universal.zip` (macOS app bundle) | 39,647,260 bytes | `91579474eda3cefe1e1f36dd175c74f2a50de0f22f8534ffe9a63ede27a17147` |
+| `AutoShade-1.3.5-linux-x64.zip` (Linux command line only) | 9,509,189 bytes | `e53d9e6f2b3d7599f5e7ef4278454da40dec217833fbccab8f792a608fa21c26` |
+| `AutoShade-1.3.5-macos-cli.zip` (macOS command line only) | 17,185,425 bytes | `f866e856f060946d99a4b266e7e8a0d7ca9367447bbc5632988236c458c3d2e3` |
 
 Download from the
-[v1.3.4 release page](https://github.com/skymanbp/autoshade/releases/tag/v1.3.4):
+[v1.3.5 release page](https://github.com/skymanbp/autoshade/releases/tag/v1.3.5):
 
 \
-- **Installer (recommended):** run `AutoShade-Setup-1.3.4.exe`. It installs for
+- **Installer (recommended):** run `AutoShade-Setup-1.3.5.exe`. It installs for
   the current user without administrator access, adds Start Menu shortcuts, and
   offers optional desktop and user `PATH` tasks.
 - **Upgrading is in place.** Run a newer installer over an existing install and
@@ -526,12 +526,12 @@ Download from the
   weights and the develop store in `%LOCALAPPDATA%\autoshade`. It names the
   size it found for each, and keeping both is the default, so a later install
   starts where you left off.
-- **Silently, for a scripted rollout:** `AutoShade-Setup-1.3.4.exe /VERYSILENT
+- **Silently, for a scripted rollout:** `AutoShade-Setup-1.3.5.exe /VERYSILENT
   /SUPPRESSMSGBOXES /NORESTART` installs or upgrades with no window and no
   prompt, and `unins000.exe /VERYSILENT /SUPPRESSMSGBOXES` in the install
   directory uninstalls the same way. The silent uninstall keeps your weights
   and develop store unless you add `/DELETEDATA=1`.
-- **Portable archive:** extract `autoshade-1.3.4-windows-x64.zip` to a directory
+- **Portable archive:** extract `autoshade-1.3.5-windows-x64.zip` to a directory
   you can keep intact and run either executable from there, beside the bundled
   `assets/` and `python/` sidecars.
 
@@ -540,10 +540,10 @@ Download from the
 Both macOS archives are universal (Apple silicon and Intel in one binary);
 unpack either with Finder or `ditto -x -k <zip> <dir>`.
 
-- `AutoShade-1.3.4-macos-universal.zip` is the app: move `AutoShade.app` to
+- `AutoShade-1.3.5-macos-universal.zip` is the app: move `AutoShade.app` to
   `/Applications`. The command line travels inside it
   (`AutoShade.app/Contents/MacOS/autoshade`), so this download alone serves a
-  terminal user; `AutoShade-1.3.4-macos-cli.zip` is that binary alone.
+  terminal user; `AutoShade-1.3.5-macos-cli.zip` is that binary alone.
 - The bundle is **ad-hoc signed, not notarised**, so the first launch is
   refused: macOS reports that the developer cannot be verified. Clearing it is
   per machine, not per launch — **System Settings → Privacy & Security → Open
@@ -553,7 +553,7 @@ unpack either with Finder or `ditto -x -k <zip> <dir>`.
   bundle; the interpreter is a Settings field with **Detect**
   ([manual](docs/USER_MANUAL.md#configure-and-use-the-ai-features)).
 
-The Linux archive, `AutoShade-1.3.4-linux-x64.zip`, is the command line for
+The Linux archive, `AutoShade-1.3.5-linux-x64.zip`, is the command line for
 x86-64 Linux, built on Ubuntu 22.04 with the same payload as the macOS
 command-line archive: the binary, the Python sidecars without their weights,
 the assets, LICENSE and README. Unpack it anywhere and run `./autoshade`;
@@ -799,13 +799,13 @@ numbers](#measured-numbers) are not repeated.
   the 1800 MB per-photo budget, and a 4 GiB RAW gate bounds admission.
 - The [`build` workflow](.github/workflows/build.yml) covers default and GUI
   feature sets on Ubuntu and macOS; model weights are not stored here. The
-  current battery is **1499 library (1484 pass + 15 `#[ignore]`d forensic probes) / 24 CLI / 187 GUI / 2+2 contract** tests, and
+  current battery is **1502 library (1487 pass + 15 `#[ignore]`d forensic probes) / 24 CLI / 188 GUI / 2+2 contract** tests, and
   [`scripts/check_docs.py`](scripts/check_docs.py) re-derives the pinned
   release claims.
 
 ## Status, roadmap, and known limitations
 
-- Release gates for v1.3.4 cover the CLI, desktop GUI, sidecar contracts,
+- Release gates for v1.3.5 cover the CLI, desktop GUI, sidecar contracts,
   format fixtures and the deterministic renderer; artifact sizes and hashes
   are above.
 - macOS has shipped binaries and an app since v1.2.0 and nobody has reported

@@ -1600,8 +1600,8 @@ than the pre-call state; model weights remain outside the repository.
 - The 61 MP RAW probe measured `151 MB` peak commit for decode,
   `1771 MB` for calibration/render preparation, and `1766 MB` for the
   full-resolution render tail; the combined process peak remained `1771 MB`.
-- The release battery is **1499 library (1484 pass + 15 `#[ignore]`d forensic
-  probes) / 24 CLI / 187 GUI / 2+2 contract** tests. Environment-gated real
+- The release battery is **1502 library (1487 pass + 15 `#[ignore]`d forensic
+  probes) / 24 CLI / 188 GUI / 2+2 contract** tests. Environment-gated real
   Lightroom, brush-table, and RAW-zoo suites are additional and are not
   smuggled into the ordinary count.
 - Tests compile at opt-level 2 (`[profile.test]` in Cargo.toml) with debug
