@@ -92,6 +92,31 @@ pin.
 Not measured: no paid gpt-image call was made for this release; the wire
 prompt and the composite are proven on a loopback endpoint.
 
-The three-lane release battery (`scripts/release_battery.sh`, the p36–p41
-calibration corpus and the sidecar weights in reach) and the reference-pair
-final gate are recorded in the ROADMAP ledger entry with the ship facts.
+Final gate, reference pair, before the tag: the 1.3.5 CLI (built in its own
+target directory, `--version` 1.3.5) re-rendered the 0.85 reference develop
+at full resolution — **0 of 60,217,344 pixels** differ from the v1.3.4 CLI's
+render of the same develop; downscaled to 2048 px it sits at mean |diff|
+0.00044 / max 0.008 against the R37 acceptance render, the same numbers as
+v1.3.4, v1.3.3 and v1.3.2; 0.65 / 0.85 / 1.0 at 2048 px are pixel-identical to
+the v1.3.4 release's renders (0 of 2,795,520 each; 0.85: sky ΔE 4.9, |ΔL*|
+0.6, L* spread 1.03, land ΔE 6.9), and the three crop sheets were viewed
+beside the target — v1.3.4's sheets, since those renders and these are the
+same bytes and the target file has since left the install directory's `out`
+folder: no seam, no rectangle. The solver and the renderer did not change;
+the pixels prove it.
+
+Recorded after the tag: the three-lane release battery
+(`scripts/release_battery.sh`, the p36–p41 calibration corpus and the sidecar
+weights in reach) ran on the `24960d9` snapshot before the tag (the tagged
+code minus the version literal and the documents — `git diff 24960d9 v1.3.5
+-- src tests python assets scripts` is empty) and finished green: library
+**1487 / 0 / 15** (445.96 s, release profile, one process per module),
+CLI 24, contract 2 + 2, doc-tests 0, GUI **187 / 0 / 1**, calibration lane
+**1487 / 0 / 15** (680.99 s; one skip line, the mask-brush specimen
+test whose `AUTOSHADE_MB_SAMPLE_ROOT` specimen is not on this machine),
+`audit_i18n` 0 / 0 / 0 and the font check 875/875 inside the battery, 1502
+library names enumerated (+3 / −0 against the v1.3.4 transcript; GUI 187 →
+188 by name, +1 / −0), and `check_docs.py --gates` on the transcript with the
+XMP census root supplied **30 PASS / 0 FAIL / 0 SKIP**. The ship facts (the
+release run, the downloaded assets, the site, the local upgrade) are in the
+ROADMAP ledger entry.
