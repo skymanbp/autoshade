@@ -133,7 +133,7 @@ pub(crate) struct AutoShadeApp {
     pub(crate) xmp_beside_confirm: bool,
     // --- undo / redo (a drag is one step, committed on release). Each step
     // carries the recipe AND the active variant's pixel identity (base Arc +
-    // origin), so a baked pixel retouch (heal / clone / generative fill) is
+    // origin), so a baked pixel retouch (heal / clone / denoise) is
     // one undoable step instead of a point of no return. Arc clones share the
     // allocation — only a retouch introduces a new raster into history.
     pub(crate) committed: UndoStep,        // current history head (last committed state)

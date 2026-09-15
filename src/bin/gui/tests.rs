@@ -3235,8 +3235,86 @@
         assert!(!app.unsaved_marker_dirty(), "the landing saved the forked strip: {}", app.status);
     }
 
-    /// The immutability rule for PIXELS: an in-place retouch on the pristine
-    /// ✨ card bakes into a new ✎ card; the ✨ card keeps its raster.
+    /// 2026-09-15: a generative fill is NOT an in-place retouch — the model
+    /// was shown the card's picture, so its answer is a picture whose look
+    /// lives in its pixels: it lands as a NEW ✨ card (pristine recipe, the
+    /// artifact as origin, auto-switched to), and the card it was filled
+    /// from keeps its recipe, base and origin. The ▣ negative is untouched
+    /// by construction: `negative_origin` still reads the ▣ card.
+    #[test]
+    fn a_fill_lands_as_a_new_generated_card_and_leaves_the_filled_card_alone() {
+        let ctx = egui::Context::default();
+        let src = std::path::PathBuf::from("_fill_new_card_test.ARW");
+        let mut app = AutoShadeApp { src_path: Some(src.clone()), ..Default::default() };
+        let b0 = std::sync::Arc::new(image::DynamicImage::new_rgba8(4, 4));
+        let developed = EditRecipe { contrast: 7.0, ..Default::default() };
+        app.variants = vec![Variant {
+            id: ORIGINAL_VARIANT_ID.into(),
+            name: None,
+            kind: VariantKind::Original,
+            recipe: developed.clone(),
+            base: Some(b0.clone()),
+            origin: None,
+            thumb: None,
+        }];
+        app.active = 0;
+        app.recipe = developed.clone();
+        app.base_preview = Some(b0.clone());
+        app.reset_history();
+        let out = std::path::PathBuf::from("out/_fill_new_card_test.fill.png");
+        let epoch = app.gen_epoch;
+        app.on_retouched(
+            &ctx,
+            Lang::En,
+            epoch,
+            Ok((
+                image::DynamicImage::new_rgba8(4, 4),
+                RetouchNote::Filled(out.clone()),
+                out.clone(),
+                RetouchKind::NewGenerated,
+            )),
+        );
+        assert_eq!(
+            strip_kinds(&app),
+            vec![VariantKind::Original, VariantKind::Generated],
+            "{}",
+            app.status
+        );
+        assert_eq!(app.active, 1, "the new card is under the canvas");
+        assert_eq!(app.variants[1].origin.as_deref(), Some(out.as_path()));
+        assert!(app.variants[1].recipe.is_noop(), "a ✨ card's look lives in its pixels");
+        assert!(app.recipe.is_noop(), "…and the canvas recipe followed the switch");
+        assert_eq!(app.variants[0].recipe, developed, "the filled card keeps its develop");
+        assert!(
+            app.variants[0].base.as_ref().is_some_and(|b| std::sync::Arc::ptr_eq(b, &b0)),
+            "…and its base"
+        );
+        assert_eq!(app.variants[0].origin, None, "…and its pixel source");
+        assert_eq!(app.negative_origin(), None, "the negative is untouched by a fill");
+        assert!(app.status.contains("new"), "{}", app.status);
+        // The verb's own choices are pinned in the source (the house pattern
+        // for a worker whose model call cannot run offline): the fill develops
+        // the card's picture for the model and lands as a NEW card, never in
+        // place. MUTATION: `NewGenerated` → `InPlace` in start_fill, or the
+        // develop replaced by the neutral base, and this names it.
+        let fill = include_str!("panels/retouch.rs");
+        let body = &fill[fill.find("pub(crate) fn start_fill(").expect("start_fill moved")..];
+        let body = &body[..body.find("pub(crate) fn start_heal(").expect("start_heal moved")];
+        assert!(
+            body.contains("autoshade::generative::retouch_onto("),
+            "the fill no longer hands the library its own base"
+        );
+        assert!(
+            body.contains("develop_preview_framed("),
+            "the fill no longer develops the card's picture for the model"
+        );
+        assert!(body.contains("RetouchKind::NewGenerated))"), "the fill no longer lands as a new card");
+        assert!(!body.contains("RetouchKind::InPlace"), "the fill went back to an in-place landing");
+    }
+
+    /// The immutability rule for PIXELS: an in-place retouch (heal / clone /
+    /// denoise) on the pristine ✨ card bakes into a new ✎ card; the ✨ card
+    /// keeps its raster.
     #[test]
     fn a_retouch_in_place_on_the_pristine_ai_card_bakes_into_an_edited_card() {
         let (mut app, ctx, dir, _src, master, ai_px, _scrub) =
@@ -3250,7 +3328,12 @@
             epoch,
             Ok((
                 image::DynamicImage::ImageRgba8(image::RgbaImage::new(6, 4)),
-                RetouchNote::Filled(healed.clone()),
+                RetouchNote::Healed {
+                    n: 1,
+                    out: healed.clone(),
+                    ai_prose: String::new(),
+                    notes: Vec::new(),
+                },
                 healed.clone(),
                 RetouchKind::InPlace,
             )),

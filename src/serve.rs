@@ -1523,7 +1523,8 @@ struct XmpReq {
 #[derive(Deserialize)]
 struct RetouchReq {
     id: usize,
-    /// What should fill the painted region (e.g. "remove the trash can").
+    /// What should fill the painted region (e.g. "extend the sky"); blank =
+    /// remove what the mask covers (`generative::fill_prompt`).
     prompt: String,
     /// RGBA PNG mask as a data URL or bare base64 — transparent pixels = the
     /// region to regenerate (the brush-painted area in the UI).

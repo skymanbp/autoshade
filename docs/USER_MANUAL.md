@@ -134,10 +134,18 @@ source. **＋ Save as version** snapshots an ✎ card's develop; a pristine ✨ 
 has nothing to snapshot.
 
 A **◭ Reverse-fit** card develops the same negative the ▣ Original card does —
-its in-place master included: after an AI denoise (or heal, clone, fill) on
+its in-place master included: after an AI denoise (or heal, clone) on
 the ▣ card, the fit is solved on that master, the ◭ card renders and exports
 from it, and the fit's save links it in `pixels.json` so a reopen restores the
 same pixels. With no master on the ▣ card the ◭ card develops the loaded file.
+
+A generative fill is not an in-place retouch. The model is shown the active
+card's developed picture — its sliders and masks applied, in the uncropped
+frame the brush paints in — the painted area is regenerated (an empty prompt
+removes it), and the result lands as a new **✨ AI generated** card: its look
+lives in its pixels, crop and straighten are not carried over, and the card you
+filled from is unchanged, the ▣ negative included. The browser's Fill and the
+CLI's `retouch` still composite onto the source's neutral develop.
 
 Reverse-fit uses its own **Reverse-fit strength** dial in the Reverse-fit fold
 (or `match --strength 0..1`) as its honesty budget; the Analysis fold's
@@ -338,7 +346,7 @@ autoshade style-query <photo> [--direction TEXT] [--style 0..1] [--adherence 0..
 autoshade reimagine <src> --prompt TEXT [--fidelity high|low] [--quality low|medium|high|auto] [--fidelity-retry] [-o|--out FILE]
 autoshade match <src> <target> [--render] [--zoned] [--regions 2..4] [--strength 0..1] [--style-prompt] [--ai-judge] [--deep] [-o|--out FILE]
 autoshade correspond <source> <target> [-o|--out FILE]
-autoshade retouch <src> --mask FILE --prompt TEXT [--quality low|medium|high|auto] [--full-res] [-o|--out FILE]
+autoshade retouch <src> --mask FILE [--prompt TEXT] [--quality low|medium|high|auto] [--full-res] [-o|--out FILE]
 autoshade heal <src> [--mask FILE] [--no-auto] [--full-res] [-o|--out FILE]
 autoshade serve <dir> [-p|--port N]
 autoshade recipe-schema
@@ -353,7 +361,10 @@ defaults to three photos in flight; `--long-edge` on `batch` requires
 Denoise-strength/model overrides require `--denoise` on `auto`. A denoise
 strength defaults to 0.5 on every surface (`denoise` and `auto --denoise`, the
 web export, both GUI dials): the value blends the luminance, colour noise is
-removed in full from 0.5 up, and 1.0 is the model's whole output.
+removed in full from 0.5 up, and 1.0 is the model's whole output. `retouch`
+without `--prompt` removes what the mask covers — the area is continued from
+its surroundings and nothing new is put there; the GUI's and the browser's
+Generative Fill treat an empty prompt the same way.
 
 ### Where your `.xmp` sidecars are — `--xmp-dir`
 

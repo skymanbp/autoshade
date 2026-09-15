@@ -399,7 +399,7 @@ pub(crate) enum RetouchKind {
     /// A whole-frame REIMAGINE rendition → a NEW「AI 生成」variant (its look
     /// lives in the pixels).
     NewGenerated,
-    /// A fill/heal/clone touch-up of the CURRENT rendition → bake into the
+    /// A heal/clone/denoise touch-up of the CURRENT rendition → bake into the
     /// active variant's base AND repoint its `origin` at the saved artifact, so
     /// export / reverse-fit / a further retouch all follow the retouched pixels
     /// (WYSIWYG) instead of the pre-retouch source.
@@ -409,7 +409,8 @@ pub(crate) enum RetouchKind {
 /// What one finished retouch DID (L12#4): facts, not prose — the landing
 /// renders them in the landing-time language (`render_retouch_note`).
 pub(crate) enum RetouchNote {
-    /// Generative fill landed at this ./out artifact.
+    /// Generative fill landed at this ./out artifact — as a NEW ✨ card since
+    /// 2026-09-15 (the model is shown the card's picture; see `start_fill`).
     Filled(PathBuf),
     /// Heal: spot count + artifact + the heal report's rationale split per
     /// the L12#2B suffix contract (AI prose prefix + typed notes).
@@ -1071,7 +1072,7 @@ pub(crate) enum SliderFeel {
 }
 
 /// One undo/redo step: the recipe plus the active variant's pixel identity.
-/// A baked pixel retouch (heal / clone / generative fill) swaps the variant's
+/// A baked pixel retouch (heal / clone / denoise) swaps the variant's
 /// base + origin outside the recipe — carrying them here makes Ctrl+Z walk
 /// back through retouches too. History is per-variant (reset on switch), so a
 /// step's pixels always belong to the variant it was recorded on; the base is

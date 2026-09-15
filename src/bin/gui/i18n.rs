@@ -395,8 +395,8 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     ("Brush over the area; box-select is paused while on. Shared by Fill and Heal.",
         "在区域上涂抹；开启时框选暂停。Fill 与 Heal 共用。"),
     ("Generative Fill", "生成填充 · Generative Fill"),
-    ("what belongs there, e.g. remove the trash can, extend the sky",
-        "那里该有什么，例如：移除垃圾桶、延展天空"),
+    ("what belongs there (e.g. extend the sky) — leave empty to remove what you painted",
+        "那里该有什么（例如：延展天空）——留空即移除涂抹的内容"),
     // R22 #16: one 「Full-res」 key served FOUR checkboxes in three panels (fill
     // here, heal + clone below, denoise in Develop · Detail) with three different
     // gates — RAW-only for fill, both source types for the rest. Each label now
@@ -415,8 +415,8 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     ("medium", "中"),
     ("low", "低"),
     ("Remove / Fill", "移除 / 填充"),
-    ("Paint the area, write what belongs there, then Remove/Fill. Needs an image API (OPENAI_API_KEY, or the OAuth image bridge in Settings).",
-        "涂抹区域，写下那里该有什么，再点 Remove/Fill。需图像 API（OPENAI_API_KEY，或设置里的 OAuth 图像桥）。"),
+    ("Paint the area, then Remove/Fill. An empty prompt removes what you painted (the surroundings continue into it); write what belongs there to fill it with something else. The model sees this card's look and the result lands as a new ✨ AI generated card (crop / straighten are not carried — set them there); this card is untouched. Needs an image API (OPENAI_API_KEY, or the OAuth image bridge in Settings).",
+        "涂抹区域，再点 Remove/Fill。提示词留空即移除涂抹的内容（用周围延续填上）；写下那里该有什么则填入别的内容。模型收到的是本卡的外观，结果落成一张新的 ✨ AI 生成卡（裁切/拉直不带过去——到那张卡上再设）；本卡不动。需图像 API（OPENAI_API_KEY，或设置里的 OAuth 图像桥）。"),
     ("Heal (pixel)", "去瑕疵 · Heal（像素）"),
     ("🤖 AI heal (auto)", "🤖 AI 去瑕疵 (auto)"),
     ("Heal area", "修复涂抹区域"),
@@ -1276,12 +1276,12 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
         "蒙版已放置 — 在左侧「局部蒙版」里拉滑杆（当前全为 0，无可见效果）"),
 
     // ── Status bar · generative fill / heal / clone ──────────────────────────
-    ("write what should fill the painted area", "写下涂抹区域该填入什么"),
     ("paint the area to remove/fill first (tick Paint mask)", "先涂抹要移除/填充的区域（勾选「涂抹蒙版」）"),
     ("generative fill (full-res render)… (slow, minutes)", "生成填充（全分辨率渲染）…（慢，数分钟）"),
     ("generative fill via gpt-image… (high quality can run minutes — progress in the status bar; ✕ Cancel to stop)",
         "gpt-image 生成填充中…（高质量可能需要数分钟——进度见状态栏；✕ 取消可停止）"),
-    ("filled → {path} (updated current variant)", "已填充 → {path}（更新当前变体）"),
+    ("filled → {path} (a new ✨ AI generated card built on this card's look — the card you filled from is untouched)",
+        "已填充 → {path}（按本卡外观生成的新 ✨ AI 生成卡——被填充的原卡不动）"),
     ("tick Paint mask and paint the spots, then Heal painted area",
         "勾选「涂抹蒙版」并涂抹瑕疵，再「修复涂抹区域」"),
     ("healing painted area…", "修复涂抹区域中…"),
@@ -1557,8 +1557,8 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
         "启用图章：Alt+点击取源，画笔涂目标区；已涂的画笔蒙版会保留"),
     ("Copy the sampled source over the brushed area verbatim (feathered edges, no tone matching) — local compute",
         "把取样源原样盖到涂抹区（羽化边缘，不做色调匹配）——本地计算"),
-    ("Regenerate ONLY the painted area from your prompt (gpt-image API call — costs per image); the rest keeps the engine's own develop",
-        "只按提示词重生成涂抹区（gpt-image API 调用，按图计费）；其余保持引擎自己的显影"),
+    ("Regenerate ONLY the painted area — from your prompt, or as a removal when the prompt is empty (gpt-image API call — costs per image); the model sees this card's look, and the result is a new ✨ AI generated card — this card stays as it is",
+        "只重生成涂抹区——按提示词，提示词留空则按移除（gpt-image API 调用，按图计费）；模型收到的是本卡的外观，结果落成一张新的 ✨ AI 生成卡——本卡保持不变"),
     ("A vision model finds small dust spots / blemishes (API call), then each is healed from surrounding REAL pixels — never generated",
         "视觉模型自动找出小灰尘/瑕疵（API 调用），逐个用周围真实像素修复——绝不生成"),
     ("Heal the brushed area from surrounding real pixels — local compute, no API",

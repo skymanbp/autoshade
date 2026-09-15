@@ -27,8 +27,9 @@
 //! `reimagine` = full-frame restyle (no mask) → still a generative re-render at
 //! the chosen size, so it stays a low-res experiment / preview, NOT a master.
 //! `retouch` = object removal / generative fill (RGBA mask; transparent pixels =
-//! the region to regenerate) → preview-resolution composite where only the
-//! masked region is generative; the rest is the untouched source preview.
+//! the region to regenerate; a blank prompt is the removal instruction,
+//! [`REMOVE_PROMPT`]) → preview-resolution composite where only the masked
+//! region is generative; the rest is the untouched source preview.
 
 use std::path::Path;
 
@@ -71,6 +72,30 @@ fn hardened_prompt(user: &str, fidelity: &str) -> String {
         FAITHFUL_SCAFFOLD.to_string()
     } else {
         format!("{FAITHFUL_SCAFFOLD}\nStyle direction: {user}")
+    }
+}
+
+/// The instruction a generative fill sends when the user typed nothing. An
+/// empty prompt used to be refused at both front ends ("write what should
+/// fill the painted area") while the mask alone already said what the user
+/// meant: the painted area is what should GO. Blank = remove, one rule for
+/// the CLI, the browser and the GUI (user decision 2026-09-15): the model
+/// continues the surroundings into the area and invents nothing new there.
+pub const REMOVE_PROMPT: &str =
+    "Remove everything inside the masked area and fill it with a seamless \
+     continuation of the surrounding scene - the same background, surfaces, \
+     lighting, texture, perspective and grain - so the area reads as if \
+     nothing had ever been there. Do not add any new object, person, animal, \
+     text or watermark. Leave everything outside the mask exactly as it is.";
+
+/// The wire prompt for a fill: the user's own words, or [`REMOVE_PROMPT`]
+/// when they wrote none. Trimmed, so a field of spaces is a blank field.
+pub fn fill_prompt(user: &str) -> String {
+    let user = user.trim();
+    if user.is_empty() {
+        REMOVE_PROMPT.to_string()
+    } else {
+        user.to_string()
     }
 }
 
@@ -382,9 +407,11 @@ pub fn reimagine(
     Ok(ReimagineReport { divergence, first_divergence })
 }
 
-/// Object removal / generative fill. `mask_path` is an RGBA PNG; transparent
-/// (alpha=0) pixels mark the region to regenerate. The generative result is
-/// composited back over the base so only the masked region is re-rendered.
+/// Object removal / generative fill on the SOURCE's own pixels. `mask_path`
+/// is an RGBA PNG; transparent (alpha=0) pixels mark the region to
+/// regenerate. A blank `prompt` is the removal instruction ([`fill_prompt`]);
+/// typed words ride verbatim. The generative result is composited back over
+/// the base so only the masked region is re-rendered.
 ///
 /// For a RAW the base is the engine's OWN neutral develop — a ≤2048px
 /// thumbnail by default, the full sensor (e.g. 61 MP) with `full_res` so the
@@ -393,7 +420,9 @@ pub fn reimagine(
 /// this used to composite onto: that swapped the canvas onto camera-curve
 /// pixels mid-session and put later edits/exports on a different tone chain
 /// (see `retouch::heal`). For a baked PNG/TIFF the base is the full image
-/// either way, so `full_res` changes nothing.
+/// either way, so `full_res` changes nothing. This is the CLI's and the
+/// browser's fill; the GUI hands [`retouch_onto`] the active card's
+/// developed picture instead.
 pub fn retouch(
     cfg: &Config,
     raw_path: &Path,
@@ -403,23 +432,70 @@ pub fn retouch(
     full_res: bool,
     out: &Path,
 ) -> Result<()> {
-    // FIRST, before the (minutes-long) develop and the BILLED image call
-    // (L09#1): the parent used to be created only after paying AND after
-    // the up-to-1.8 GB composite. See reimagine.
-    pipeline::preflight_out(out, raw_path)?;
-    // A17: the LOCAL full-resolution phase, one at a time process-wide
-    // (`crate::full_res_slot`). It is released explicitly before the model call
-    // below and re-entered for the composite, because those are the two phases
-    // that hold whole frames — holding an admission slot across a call that
-    // runs for minutes would stall every export for that entire time.
-    let heavy = crate::full_res_slot();
     let raw = decode::is_raw(raw_path);
     // ONE dispatch for both source kinds (`render::source_pixels`). The cap is
     // RAW-only here: preview mode develops a RAW AT ≤2048 (the cap runs before
     // tone/geometry) instead of developing 61 MP and thumbnailing the result,
     // while a baked source is composited at its OWN resolution either way (the
     // doc above) — capping it would shrink the delivered master.
-    let base = crate::render::source_pixels(raw_path, (raw && !full_res).then_some(2048))?;
+    retouch_onto(
+        cfg,
+        raw_path,
+        || crate::render::source_pixels(raw_path, (raw && !full_res).then_some(2048)),
+        if full_res && raw { "full-res" } else { "preview" },
+        &FillJob { mask_path, prompt, quality, out },
+    )
+}
+
+/// The four things every fill needs whatever its base: the painted mask, the
+/// user's words (blank = remove), the quality tier and the claimed output path.
+pub struct FillJob<'a> {
+    /// RGBA PNG; transparent (alpha=0) pixels mark the region to regenerate.
+    pub mask_path: &'a Path,
+    /// What should fill the region; blank is the removal instruction.
+    pub prompt: &'a str,
+    /// `low` / `medium` / `high` / `auto`.
+    pub quality: &'a str,
+    /// The claimed `./out` master this fill publishes.
+    pub out: &'a Path,
+}
+
+/// The fill on a base its CALLER produces. `base()` runs INSIDE the
+/// full-resolution section (it is the whole-frame local phase), the model
+/// call runs outside it, and the composite re-enters it. [`retouch`] hands
+/// this the source's neutral develop; the GUI hands it the active card's
+/// developed picture, so the model is shown what the user sees and the
+/// answer is that picture with the painted area regenerated. On the neutral
+/// base (every build through v1.3.4) the model was shown a develop 0.6–1.4 EV
+/// under the card's Before with none of the card's sliders or masks, and the
+/// card's content-keyed corrections then landed on content they were never
+/// solved for — the user's 「不是基于当前变体生成的，而是原图」(2026-09-15).
+///
+/// `source` is the photo the output is guarded against (the read-only-library
+/// preflight) and named after; `base_note` is the word the progress line
+/// prints for the base; `job` is the fill itself ([`FillJob`]).
+pub fn retouch_onto(
+    cfg: &Config,
+    source: &Path,
+    base: impl FnOnce() -> Result<DynamicImage>,
+    base_note: &str,
+    job: &FillJob<'_>,
+) -> Result<()> {
+    let FillJob { mask_path, prompt, quality, out } = *job;
+    // FIRST, before the (minutes-long) develop and the BILLED image call
+    // (L09#1): the parent used to be created only after paying AND after
+    // the up-to-1.8 GB composite. See reimagine.
+    pipeline::preflight_out(out, source)?;
+    // Blank = remove (`fill_prompt`): resolved HERE so the CLI, the browser
+    // and the GUI send one and the same instruction for an empty field.
+    let prompt = fill_prompt(prompt);
+    // A17: the LOCAL full-resolution phase, one at a time process-wide
+    // (`crate::full_res_slot`). It is released explicitly before the model call
+    // below and re-entered for the composite, because those are the two phases
+    // that hold whole frames — holding an admission slot across a call that
+    // runs for minutes would stall every export for that entire time.
+    let heavy = crate::full_res_slot();
+    let base = base()?;
     let (bw, bh) = base.dimensions();
     // A generative tile larger than the base is pointless (it only gets downscaled
     // back onto it) — cap the flexible budget at the base's own pixel count.
@@ -472,7 +548,7 @@ pub fn retouch(
         "⚠ EXPERIMENTAL generative fill via {} ({}, quality={quality}, base={bw}x{bh} {}; composite)",
         cfg.openai_image_model,
         sizes.try_first(),
-        if full_res && raw { "full-res" } else { "preview" }
+        base_note
     );
     // The composite resizes the tile onto the base either way, so a capped
     // return needs no size bookkeeping here — only the note the call itself prints.
@@ -486,7 +562,7 @@ pub fn retouch(
             }
             Ok((png.clone(), Some(mask_png.clone())))
         },
-        prompt,
+        &prompt,
         "high",
         &sizes,
         quality,
@@ -2252,6 +2328,126 @@ mod tests {
             "full repaint as a watercolor",
             "low stays documented free rein"
         );
+    }
+
+    /// Blank = remove: a fill whose user typed nothing sends the removal
+    /// instruction; anything typed rides verbatim (no scaffold on this path:
+    /// the mask is the faithfulness contract, the composite keeps every
+    /// unmasked pixel). A field of spaces is a blank field.
+    #[test]
+    fn a_blank_fill_prompt_is_the_removal_instruction() {
+        assert_eq!(fill_prompt(""), REMOVE_PROMPT);
+        assert_eq!(fill_prompt(" \t\n"), REMOVE_PROMPT);
+        assert_eq!(fill_prompt("  extend the sky  "), "extend the sky");
+        assert!(!fill_prompt("extend the sky").contains("masked area"));
+    }
+
+    /// The rule on the wire: one loopback fill with an EMPTY prompt sends the
+    /// removal instruction in the multipart prompt part, with the mask part
+    /// beside it, and its composite lands; a second fill with typed words
+    /// sends those words and no removal text. The GUI and the browser no
+    /// longer refuse a blank field, so this is the only gate on the rule.
+    #[test]
+    fn a_fill_with_no_prompt_sends_the_removal_instruction() {
+        let dir = std::env::temp_dir().join(format!("autoshade-fill-wire-{}", std::process::id()));
+        // The library layout the read-only guard expects (see the reimagine
+        // wire test): the source in its OWN folder, outputs in a sibling.
+        std::fs::create_dir_all(dir.join("library")).unwrap();
+        let input = dir.join("library").join("input.png");
+        structured_frame(512, 512).save(&input).unwrap();
+        // An RGBA mask: a transparent block = regenerate, opaque elsewhere.
+        let mask = dir.join("mask.png");
+        RgbaImage::from_fn(512, 512, |x, y| {
+            let hole = (128..256).contains(&x) && (128..256).contains(&y);
+            Rgba([0, 0, 0, if hole { 0 } else { 255 }])
+        })
+        .save(&mask)
+        .unwrap();
+        // The enum size the plan requests for a square (the endpoint contract
+        // refuses any other): the composite resizes it onto the base.
+        let echo = encode_png(&structured_frame(1024, 1024)).unwrap();
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&echo);
+        let reply = format!(r#"{{"data":[{{"b64_json":"{b64}"}}]}}"#);
+        let (url, seen, handle) = stub_endpoint(vec![
+            (200, "application/json", reply.clone()),
+            (200, "application/json", reply),
+        ]);
+        let cfg = stub_cfg(url);
+        let removed = dir.join("exports").join("removed.png");
+        retouch(&cfg, &input, &mask, "   ", "auto", false, &removed)
+            .expect("the loopback fill with a blank prompt succeeds");
+        assert!(removed.is_file(), "the removal composite landed");
+        let filled = dir.join("exports").join("filled.png");
+        retouch(&cfg, &input, &mask, "extend the sky", "auto", false, &filled)
+            .expect("the loopback fill with typed words succeeds");
+        bounded_join(handle);
+        let bodies = seen.lock().unwrap().clone();
+        assert_eq!(bodies.len(), 2, "one billed POST per fill");
+        assert!(
+            bodies[0].contains("Remove everything inside the masked area"),
+            "blank = remove reached the wire"
+        );
+        assert!(bodies[0].contains("name=\"mask\""), "the mask rides with it");
+        assert!(bodies[1].contains("extend the sky"), "typed words ride verbatim");
+        assert!(
+            !bodies[1].contains("Remove everything inside the masked area"),
+            "typed words carry no removal text"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `retouch_onto` composites onto the base its CALLER produced — the
+    /// GUI's developed card picture — never the file on disk: outside the
+    /// mask the output is that base, inside it the model's answer.
+    #[test]
+    fn the_fill_composites_onto_the_base_the_caller_produced() {
+        let dir = std::env::temp_dir().join(format!("autoshade-fill-onto-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("library")).unwrap();
+        let input = dir.join("library").join("input.png");
+        structured_frame(256, 256).save(&input).unwrap();
+        let mask = dir.join("mask.png");
+        RgbaImage::from_fn(256, 256, |x, y| {
+            let hole = (96..160).contains(&x) && (96..160).contains(&y);
+            Rgba([0, 0, 0, if hole { 0 } else { 255 }])
+        })
+        .save(&mask)
+        .unwrap();
+        // The model answers a flat red frame at the enum size the plan asks
+        // for (the endpoint contract refuses any other size).
+        let red = DynamicImage::ImageRgb8(RgbImage::from_pixel(1024, 1024, image::Rgb([200, 20, 20])));
+        let b64 = base64::engine::general_purpose::STANDARD.encode(encode_png(&red).unwrap());
+        let (url, _seen, handle) = stub_endpoint(vec![(
+            200,
+            "application/json",
+            format!(r#"{{"data":[{{"b64_json":"{b64}"}}]}}"#),
+        )]);
+        let cfg = stub_cfg(url);
+        let out = dir.join("exports").join("onto.png");
+        // The caller's base: a flat green frame the file on disk never had.
+        let green = image::Rgb([20, 200, 20]);
+        retouch_onto(
+            &cfg,
+            &input,
+            || Ok(DynamicImage::ImageRgb8(RgbImage::from_pixel(256, 256, green))),
+            "caller",
+            &FillJob { mask_path: &mask, prompt: "", quality: "auto", out: &out },
+        )
+        .expect("the loopback fill onto the caller's base succeeds");
+        bounded_join(handle);
+        let got = image::open(&out).unwrap().to_rgb8();
+        assert_eq!(got.dimensions(), (256, 256), "the composite is the base's size");
+        let near = |a: [u8; 3], b: [u8; 3]| a.iter().zip(b).all(|(x, y)| x.abs_diff(y) <= 1);
+        assert!(
+            near(got.get_pixel(8, 8).0, green.0),
+            "outside the mask: the caller's base, not the file ({:?})",
+            got.get_pixel(8, 8)
+        );
+        assert!(
+            near(got.get_pixel(128, 128).0, [200, 20, 20]),
+            "inside the mask: the model's answer ({:?})",
+            got.get_pixel(128, 128)
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A deterministic structured frame: luma gradient + checker + a block,

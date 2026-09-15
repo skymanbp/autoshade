@@ -194,27 +194,38 @@ impl AutoShadeApp {
         true
     }
 
-    /// Generative fill: regenerate the painted area (gpt-image), composite onto
-    /// the source, save to ./out. Runs on a worker thread.
+    /// Generative fill: the model is shown THIS card's developed picture —
+    /// the card's own pixel source under its live recipe, in the original
+    /// frame the mask is painted in (geometry is a view, not a pixel) — the
+    /// painted area is regenerated from the prompt (blank = remove), and the
+    /// result lands as a NEW「✨ AI generated」card whose look lives in its
+    /// pixels; the card you filled from is untouched. Heal / clone / denoise
+    /// stay in-place touch-ups of the neutral master: they are pixel
+    /// arithmetic, not a model that has to see the picture. Through v1.3.4
+    /// this too was in-place on the neutral base, so the model was shown a
+    /// develop 0.6–1.4 EV under the card's Before with none of its sliders
+    /// or masks, and the card's content-keyed corrections then landed on
+    /// content they were never solved for (user, 2026-09-15: 「不是基于当前
+    /// 变体生成的，而是原图」). Runs on a worker thread.
     pub(crate) fn start_fill(&mut self) {
-        // Retouch the ACTIVE variant's pixels (a Generated variant → its origin
-        // PNG), not the raw negative — otherwise a fill on the AI image would
-        // splice in original pixels.
+        // The photo names the artifact (as a reimagine's is named); the
+        // card's OWN pixel source (a ✨/✎ card → its raster, ▣/◭ → the
+        // negative) is what its recipe develops in the worker below.
+        let Some(src) = self.src_path.clone() else { return };
         let Some(path) = self.active_source_path() else { return };
         if self.busy || self.refuse_pixel_work_on_a_turned_photo() {
             return;
         }
         let lang = self.lang; // pre-spawn UI statuses only; results land as FACTS (L12#4)
+        // Blank = remove: the library substitutes its removal instruction
+        // (`generative::fill_prompt`), so an empty box is a verb, not an
+        // error — the mask already says what should go.
         let prompt = self.fill_prompt.trim().to_string();
-        if prompt.is_empty() {
-            self.status = tr(lang, "write what should fill the painted area").into();
-            return;
-        }
         let Some(mask_png) = self.export_mask_png() else {
             self.status = tr(lang, "paint the area to remove/fill first (tick Paint mask)").into();
             return;
         };
-        let Some(out) = unique_out(&path, "retouch") else {
+        let Some(out) = unique_out(&src, "fill") else {
             self.status = tr(lang, "over 999 retouch masters for this photo — clean up ./out first").into();
             return;
         };
@@ -226,7 +237,11 @@ impl AutoShadeApp {
         };
         let quality = ["high", "medium", "low"][self.fill_quality.min(2)].to_string();
         let full_res = self.fill_fullres;
-        let edge = self.canvas_edge(); // bake at the CANVAS's res (canvas_edge)
+        // The card's live develop, captured at the click like every other
+        // input the worker reads; the source kind decides the working size.
+        let recipe = self.recipe.clone();
+        let raw = autoshade::decode::is_raw(&path);
+        let edge = self.canvas_edge(); // show at the CANVAS's res (canvas_edge)
         let out_claim = out.clone(); // release the claim on failure (worker tail)
         let out_panic = out.clone(); // …and on a worker panic (see the error closure)
         let (epoch, flag) = self.arm_cancel();
@@ -246,17 +261,46 @@ impl AutoShadeApp {
                     let cfg = autoshade::config::Config::load();
                     let mask_tmp = gui_tmp_png("fill");
                     std::fs::write(&mask_tmp, &mask_png)?;
-                    let r = autoshade::generative::retouch(&cfg, &path, &mask_tmp, &prompt, &quality, full_res, &out);
+                    let r = autoshade::generative::retouch_onto(
+                        &cfg,
+                        &src,
+                        || {
+                            // The card's picture: its pixel source developed by
+                            // its recipe through the tone chain the canvas runs
+                            // (util::build_preview), at the fill's working size
+                            // (≤2048, or the whole frame with Full-res on a RAW)
+                            // and WITHOUT the geometry stage — the mask lives in
+                            // the original frame (handle_paint), and the range
+                            // reference builds (canvas.rs) state that frame the
+                            // same way.
+                            let base = autoshade::render::source_pixels(
+                                &path,
+                                (raw && !full_res).then_some(2048),
+                            )?;
+                            Ok(autoshade::render::develop_preview_framed(
+                                &base,
+                                &recipe,
+                                &autoshade::diag::pixels(),
+                                autoshade::render::MaskFrame::without_downstream(&recipe.lens_profile),
+                            ))
+                        },
+                        "this card's look",
+                        &autoshade::generative::FillJob {
+                            mask_path: &mask_tmp,
+                            prompt: &prompt,
+                            quality: &quality,
+                            out: &out,
+                        },
+                    );
                     let _ = std::fs::remove_file(&mask_tmp);
                     r?;
                     // baked-by-construction: the ./out master this job just wrote.
                     let img = autoshade::decode::load_image(&out)?.thumbnail(edge, edge);
-                    // InPlace: refine the current rendition — bake into the active
-                    // variant's base AND repoint its origin at this saved artifact
-                    // so export / reverse-fit / next retouch follow the fill.
-                    // FACTS, not prose (L12#4): the landing renders these
-                    // with the language live when the result lands.
-                    Ok((img, RetouchNote::Filled(out.clone()), out, RetouchKind::InPlace))
+                    // NewGenerated: a picture whose look lives in its pixels →
+                    // a new ✨ card, exactly as a reimagine lands. FACTS, not
+                    // prose (L12#4): the landing renders these with the
+                    // language live when the result lands.
+                    Ok((img, RetouchNote::Filled(out.clone()), out, RetouchKind::NewGenerated))
                 })();
                 if res.is_err() {
                     release_empty_claim(&out_claim);
@@ -741,7 +785,7 @@ impl AutoShadeApp {
                 let _field = prompt_field(
                     ui,
                     &mut self.fill_prompt,
-                    tr(lang, "what belongs there, e.g. remove the trash can, extend the sky"),
+                    tr(lang, "what belongs there (e.g. extend the sky) — leave empty to remove what you painted"),
                 );
                 #[cfg(test)]
                 {
@@ -772,7 +816,7 @@ impl AutoShadeApp {
                     ui.add_enabled(src_is_raw, egui::Checkbox::new(&mut self.fill_fullres, tr(lang, "Full-res fill")))
                         .on_hover_text(tr(lang, "Composite onto the full-sensor develop (slow, RAW only)"));
                     if primary(ui, !self.busy, tr(lang, "Remove / Fill"))
-                        .on_hover_text(tr(lang, "Regenerate ONLY the painted area from your prompt (gpt-image API call — costs per image); the rest keeps the engine's own develop"))
+                        .on_hover_text(tr(lang, "Regenerate ONLY the painted area — from your prompt, or as a removal when the prompt is empty (gpt-image API call — costs per image); the model sees this card's look, and the result is a new ✨ AI generated card — this card stays as it is"))
                         .clicked()
                     {
                         self.start_fill();
@@ -780,7 +824,7 @@ impl AutoShadeApp {
                 });
                 ui.label(
                     egui::RichText::new(tr(lang,
-                        "Paint the area, write what belongs there, then Remove/Fill. Needs an image API (OPENAI_API_KEY, or the OAuth image bridge in Settings).",
+                        "Paint the area, then Remove/Fill. An empty prompt removes what you painted (the surroundings continue into it); write what belongs there to fill it with something else. The model sees this card's look and the result lands as a new ✨ AI generated card (crop / straighten are not carried — set them there); this card is untouched. Needs an image API (OPENAI_API_KEY, or the OAuth image bridge in Settings).",
                     ))
                     .weak()
                     .small(),

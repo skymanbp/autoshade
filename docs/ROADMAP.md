@@ -2,7 +2,16 @@
 
 > 这是**已发生之事的台账**，不是待办表：每一条要么是已发布的版本与实测数字，
 > 要么是带理由的终局裁定（一个测出来的数、一条仪器极限、一次用户拍板）。
-> 每项都附 `file:line` 或提交锚点，供新会话不重读全库即可接手。更新于 **2026-09-13**。
+> 每项都附 `file:line` 或提交锚点，供新会话不重读全库即可接手。更新于 **2026-09-15**。
+>
+> **main 上未发版的改动（2026-09-15，用户报障「修饰-涂抹蒙版-生成式填充 这个现在很诡异，好像他不是基于当前变体生成的，
+> 而是原图？」+「让"空输入"提示词等于"移除"」）**：① GUI 的生成式填充改为「看到什么填什么」：工作线程把本卡的像素源按本卡实时配方
+> 走影调链显影（`render::develop_preview_framed` + `MaskFrame::without_downstream`，不走几何——蒙版画在原始帧），交给库新入口
+> `generative::retouch_onto`，结果落成新的「✨ AI 生成」卡（`RetouchKind::NewGenerated`，产物 `<stem>.fill-N.png`），被填充的卡与
+> ▣ 底片不动；修补 / 克隆 / 去噪仍原位。② 空提示词＝移除：`generative::fill_prompt` 在库内把空白换成 `REMOVE_PROMPT`，GUI / 浏览器 /
+> CLI（`--prompt` 改为可省略）三端同一指令，两端的「写下涂抹区域该填入什么」拒绝删除。根因＝`start_fill`→`active_source_path`→
+> `render::source_pixels` 用 `EditRecipe::default()` 显影（无相机曲线、比 Before 暗 0.6–1.4 EV、无本卡滑杆与蒙版），模型看不到画面，
+> 合成回中性母图后本卡为旧内容求解的空间校正再叠上去。用户在四选一里裁定「新卡」（原位反显影与最小改动两案否决）。门见台账首条；未发版。
 >
 > **v1.3.4 已发布**（2026-09-13，tag `v1.3.4` → `14a2a4b`，release run `34801217547`
 > 五工位绿，8 资产回下载字节校验，官网 23/23 逐字节，本机已升；用户报障「AI降噪需要一个数值条」
@@ -66,6 +75,33 @@
 > [docs/ROADMAP-archive.md](ROADMAP-archive.md)（追加式档案，勿重写）。
 
 ## 版本台账（逐版已发布内容与实测数字，新在上；均已完成，勿重做）
+
+### main（未发版）— 生成式填充按本卡外观生成、落新 ✨ 卡；空提示词＝移除（2026-09-15）
+
+- **起因（用户报障，原话）**：「修饰-涂抹蒙版-生成式填充 这个现在很诡异，好像他不是基于当前变体生成的，而是原图？还有，让"空输入"
+  提示词等于"移除"」
+- **根因**：`panels/retouch.rs::start_fill` 取 `active_source_path()`（✨/✎ 卡的 raster，▣/◭ 的 RAW），库 `generative::retouch` 经
+  `render::source_pixels`（render.rs:168）用 `EditRecipe::default()` 显影——没有相机曲线（app.rs / actions.rs 的注释记着它比 Before
+  暗 0.6–1.4 EV）、没有本卡任何滑杆与蒙版；合成结果落回中性母图后（workers.rs `RetouchKind::InPlace` 落地），本卡按旧内容求解的空间
+  校正（`masks` 栅格天空、瓦片、晕影、去雾）再叠在新内容上。对像素算术（修补 / 克隆 / 去噪）这条路是对的；对要「看画面」的生成模型是错的。
+- **裁定（AskUserQuestion 四选一，用户 2026-09-15）**：取「新卡：看到什么填什么」；「原位＋按本卡全局影调反显影回中性母图」（位置相关处理
+  会在区域内叠两次、需样张研究）与「只把喂模型的图换成 Before 外观」两案否决。
+- **改法**：库 `generative::retouch_onto(cfg, source, base 闭包, base_note, &FillJob)`——闭包在全分辨率槽内产出底图、模型调用在槽外、
+  合成再进槽（lib.rs 的槽位顺序测试仍钉着）；原 `retouch` 成为它的薄封装（CLI / 浏览器仍填中性显影，手册已写明）。GUI `start_fill`
+  用本卡实时配方对本卡像素源走 `render::develop_preview_framed(…, MaskFrame::without_downstream)`（影调链，不走几何——蒙版画在原始帧，
+  与 canvas.rs 的参考帧同一声明；≤2048，RAW 勾「全分辨率填充」取整幅），结果以 `RetouchKind::NewGenerated` 落成新 ✨ 卡（产物
+  `<stem>.fill-N.png`，`unique_out` 按照片命名），被填充的卡与 ▣ 底片不动，裁切 / 拉直不带到新卡。空提示词：`generative::fill_prompt`
+  把空白 / 全空格换成 `REMOVE_PROMPT`（延续周围、不添新物），三端同一；CLI `retouch --prompt` 改 `Option`、省略＝移除；GUI 与网页删除
+  「写下涂抹区域该填入什么」拒绝，占位 / 提示 / 悬停文案与落地状态句改写；`FillJob` 把四个填充输入合成一个值（clippy 8/7 参数根治）。
+- **门（发版前，工作树）**：库 **1487 / 0 / 15**（release profile 260.01 s；新增 `generative::tests` 三条：空白＝移除、回环空提示词上线
+  含蒙版部件、合成落调用方底图而非文件）、CLI 24 / 0、契约 2+2、doc 0、GUI **187 / 0 / 1**（新增
+  `a_fill_lands_as_a_new_generated_card_and_leaves_the_filled_card_alone`，含 `start_fill` 源文本钉子；原 ✨ 在位测试改用 Healed 事实）、
+  clippy 两组 0、`audit_i18n` 0 / 0 / 0、字体 `--check` 875/875（新中文串改用已嵌字形：看 / 东 / 西 / 矫 / ＝ 五个字形被字体覆盖测试抓到后
+  改词，未重生成字体资产）、`check_docs` 25P / 0F / 5S、照片名 / 令牌 / 用户目录 grep 0；按名对 v1.3.4 tag（`14a2a4b`）：库 1499 → 1502＝
+  +3 / −0、GUI 187 → 188＝+1 / −0（静态 1714 → 1718 `#[test]`）；变异证伪 4/4 转红（空白原样上线→两条库测试红；`retouch_onto` 无视
+  调用方底图→合成测试红；`start_fill` 改回 InPlace / 改喂中性底图→GUI 源钉子红），每例按 sha256 逐字节还原。
+- **未验证 / 未动的**：未付费真调 gpt-image 看成片；浏览器 Fill 与 CLI `retouch` 仍合成到源的中性显影（有意，无卡条概念；手册披露）；
+  修补 / 克隆 / 去噪的原位契约与 v1.3.4 ② 的底片母图规则未动（仅 fill 退出该规则）。
 
 ### v1.3.4 — AI 去噪：两把强度滑杆、亮度/色度分离的强度、反推与生成图读同一个底片（2026-09-13）
 

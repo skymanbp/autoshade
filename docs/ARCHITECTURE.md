@@ -1553,7 +1553,10 @@ the Analyze landing's install, a version load, the paste's live arm), so no
 record ever names the ✨ card as an edit's holder. The in-place retouch
 landing asks `fork_from_generated` directly — a heal is an edit of the
 PIXELS, however neutral the recipe — so the retouched raster bakes into the
-✎ card and the ✨ card keeps its own. The axis predicate is
+✎ card and the ✨ card keeps its own. A generative fill is not an in-place
+retouch (2026-09-15): the model is shown the active card's developed picture
+and its answer lands as a new ✨ card, `RetouchKind::NewGenerated`, with the
+filled card untouched. The axis predicate is
 `VariantKind::is_source_based` (Original, Fitted) / `on_ai_pixels`
 (Generated, Edited): calibration is stripped from the canvas, the
 `pixels.json` flag is written, and the projection member clears for BOTH

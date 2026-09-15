@@ -885,7 +885,7 @@ impl AutoShadeApp {
 
     /// The on-disk PIXEL SOURCE the active variant renders / retouches /
     /// exports FROM. Any variant whose pixels are baked into a ./out raster — a
-    /// reimagine (Generated), OR an in-place fill/heal/clone on ANY variant —
+    /// reimagine or fill (Generated), OR an in-place heal/clone/denoise on ANY variant —
     /// carries that full-resolution artifact in `origin` and renders from it;
     /// a pristine source-based variant (原片 / 反推 with no pixel retouch) has
     /// `origin = None` and renders from `src_path` (the RAW / loaded image)

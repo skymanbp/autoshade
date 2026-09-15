@@ -2334,7 +2334,7 @@ impl AutoShadeApp {
         match n {
             RetouchNote::Filled(p) => trf(
                 lang,
-                "filled → {path} (updated current variant)",
+                "filled → {path} (a new ✨ AI generated card built on this card's look — the card you filled from is untouched)",
                 &[("path", &p.display().to_string())],
             ),
             RetouchNote::Healed { n, out, ai_prose, notes } => {
@@ -2447,7 +2447,7 @@ impl AutoShadeApp {
                                 );
                             }
                             RetouchKind::InPlace => {
-                                // fill/heal/clone/denoise: a pixel touch-up of the
+                                // heal/clone/denoise: a pixel touch-up of the
                                 // NEUTRAL-DEVELOP base (never the developed
                                 // rendition — the recipe keeps rendering ON TOP,
                                 // so baking developed pixels would cook the tone

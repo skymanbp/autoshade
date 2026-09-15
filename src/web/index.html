@@ -252,7 +252,7 @@
           <label class="chk">Brush <input type="range" class="fill-brush" min="8" max="140" step="2" value="44" style="width:90px" /></label>
           <button class="secondary fill-clear" type="button">Clear</button>
         </div>
-        <input class="guidance fill-prompt" type="text" placeholder="What should be there, e.g. remove the trash can, extend the sky" />
+        <input class="guidance fill-prompt" type="text" placeholder="What should be there (e.g. extend the sky) — leave empty to remove what you painted" />
         <div class="row">
           <select class="fill-quality" title="Higher = more detail, higher cost">
             <option value="high">high</option>
@@ -262,7 +262,7 @@
           <label class="chk" title="Composite onto the full-sensor develop (e.g. 61MP) so the untouched area keeps native resolution. Slow (renders the full RAW); the removed patch is upscaled. RAW only."><input type="checkbox" class="fill-fullres" /> Full-res</label>
           <button class="fill-run" type="button">Remove / Fill</button>
         </div>
-        <div class="hint">Paint the region, write what belongs there, then Remove/Fill. Only the painted area is regenerated; the rest is kept. Default composites onto the source preview (fast); Full-res keeps the untouched area at native resolution (slow, RAW only). Saved to ./out. Needs an image API key (OPENAI_API_KEY or the key saved in Settings; gpt-image) — high quality can run minutes.</div>
+        <div class="hint">Paint the region, then Remove/Fill. An empty prompt removes what you painted (the surroundings continue into it); write what belongs there to fill it with something else. Only the painted area is regenerated; the rest is kept. Default composites onto the source preview (fast); Full-res keeps the untouched area at native resolution (slow, RAW only). Saved to ./out. Needs an image API key (OPENAI_API_KEY or the key saved in Settings; gpt-image) — high quality can run minutes.</div>
       </div>
       <div class="panel heal-panel" style="margin-top:14px">
         <h3>Heal <span class="sub">· pixel retouch</span></h3>
@@ -1265,7 +1265,6 @@ async function selectPhoto(id, stem, el) {
   main.querySelector(".fill-clear").onclick = () => fctx.clearRect(0, 0, fc.width, fc.height);
   main.querySelector(".fill-run").onclick = async () => {
     const prompt = (main.querySelector(".fill-prompt").value || "").trim();
-    if (!prompt) { setStatus("write what should fill the painted area"); return; }
     const src = fctx.getImageData(0, 0, fc.width, fc.height).data;
     let any = false; for (let i = 3; i < src.length; i += 4) { if (src[i] > 10) { any = true; break; } }
     if (!any) { setStatus("paint the area to remove/fill first"); return; }

@@ -486,16 +486,19 @@ enum Command {
         out: Option<PathBuf>,
     },
     /// EXPERIMENTAL: generative object removal via OpenAI Images. The mask is an
-    /// RGBA PNG; transparent pixels mark the region to regenerate.
+    /// RGBA PNG; transparent pixels mark the region to regenerate. Without
+    /// `--prompt` the masked content is REMOVED (continued from its surroundings).
     Retouch {
         /// Path to the RAW file.
         raw: PathBuf,
         /// RGBA PNG mask (transparent = region to edit).
         #[arg(long)]
         mask: PathBuf,
-        /// What to do (e.g. "remove the trash can, fill with pavement").
+        /// What should fill the painted area (e.g. "extend the sky"). Omit it
+        /// to REMOVE what the mask covers: the area is continued from its
+        /// surroundings and nothing new is put there.
         #[arg(long)]
-        prompt: String,
+        prompt: Option<String>,
         /// Output quality tier: low | medium | high | auto (higher = more detail,
         /// higher cost). Defaults to AUTOSHADE_IMAGE_QUALITY (config default: high).
         #[arg(long)]
@@ -641,7 +644,9 @@ fn main() -> Result<()> {
             let q = quality.unwrap_or_else(|| cfg.openai_image_quality.clone());
             require_choice("--quality (or the configured default)", &q, &["low", "medium", "high", "auto"])?;
             require_image_key(&cfg, "retouch")?;
-            generative::retouch(&cfg, &raw, &mask, &prompt, &q, full_res, &out)
+            // No --prompt = remove: the library resolves the blank to its
+            // removal instruction (`generative::fill_prompt`).
+            generative::retouch(&cfg, &raw, &mask, prompt.as_deref().unwrap_or(""), &q, full_res, &out)
         }
         Command::Heal { src, mask, no_auto, full_res, out } => heal_cmd(&src, mask, no_auto, full_res, out),
         Command::Serve { dir, port } => serve::serve(&dir, port),
