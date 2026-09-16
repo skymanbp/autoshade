@@ -608,7 +608,7 @@ shell environment and the variable below therefore cannot be set for it at all.
 | Variable | Effect |
 |---|---|
 | `AUTOSHADE_PYTHON` | The interpreter the sidecars are launched with. The same setting as the Settings field; the environment wins where both are set. |
-| `AUTOSHADE_WEIGHTS_DIR` | Where all five sidecars keep downloaded model weights. Defaults to `weights/` beside the scripts — except inside a macOS `.app`, where it defaults into the develop store, because the bundle is signed and read-only. |
+| `AUTOSHADE_WEIGHTS_DIR` | Where all six sidecars keep downloaded model weights. Defaults to `weights/` beside the scripts — except inside a macOS `.app`, where it defaults into the develop store, because the bundle is signed and read-only. |
 
 Both are *destination* settings — they name a program to execute and a
 directory to write into — so neither may come from a `./autoshade.local.json`

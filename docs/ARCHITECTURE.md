@@ -607,8 +607,8 @@
 > was run from untouched; the ≤2048 px working-copy tier and its checkbox
 > retired the same day, because a master baked from it capped every later
 > export of that card) and a **baked-source mode** (edit an already-exported PNG/TIFF,
-> e.g. one denoised in Lightroom — auto-detected by file type). All four sidecar
-> bridges share one success contract (`lib.rs::sidecar_wrote`): *exit 0 alone
+> e.g. one denoised in Lightroom — auto-detected by file type). Every sidecar
+> bridge shares one success contract (`lib.rs::sidecar_wrote`): *exit 0 alone
 > is not success* — THIS run must have produced the artifact, refusing a
 > missing file, an empty file (the callers that pre-claim the output name
 > create a 0-byte file first, which defeated a bare `exists()` check), and an

@@ -1588,9 +1588,13 @@ pub(crate) fn big_decode_gate() -> &'static std::sync::Mutex<()> {
 
 /// Is the Python segmentation sidecar actually present in THIS install?
 ///
-/// The release packages carry no `python/` directory, so on a downloaded build
-/// 「🤖 AI select subject」/「🤖 AI select sky」 could only ever fail — the button
-/// looked available and spent the click on a "sidecar not found at …" toast.
+/// Every release package ships `python/` (the installer and the portable
+/// archive from one payload, the .app in Resources, both CLI archives staged
+/// by the workflow), but the script can still be unreachable — a build run
+/// from a deep target directory resolves no `python/` beside its executable,
+/// and an override can name a path that moved. Then 「🤖 AI select subject」/
+/// 「🤖 AI select sky」 could only ever fail: the button looked available and
+/// spent the click on a "sidecar not found at …" toast.
 /// Resolved ONCE: `config::bundled_helper` searches the executable's directory
 /// and its ancestors (never the cwd), and the env override is read at launch,
 /// so the answer cannot change under a running process.
@@ -1625,10 +1629,11 @@ fn python_available() -> bool {
 /// scripts since 2026-09-15 — `denoise_raw.py` takes a RAW's sensor mosaic,
 /// `denoise.py` a baked source, and the verb needs whichever the card is).
 ///
-/// One helper family, one treatment: `python/denoise.py` ships exactly the way
-/// `python/segment.py` does — which is to say a release package carries
-/// neither — so 「🤖 AI Denoise now」 had the failure the segmentation buttons
-/// were fixed out of a round ago. It spent the click, ran the worker, and
+/// One helper family, one treatment: `python/denoise.py` and
+/// `python/denoise_raw.py` ship and go missing exactly the way
+/// `python/segment.py` does, so 「🤖 AI Denoise now」 had the failure the
+/// segmentation buttons were fixed out of a round ago. It spent the click,
+/// ran the worker, and
 /// surfaced `denoise.rs`'s English "denoise sidecar not found at …" verbatim
 /// in a status line the rest of the app renders in the user's language. A
 /// capability probe answers before the click and in both languages, and it

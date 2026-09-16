@@ -90,11 +90,11 @@ sensor (a RAW) or the image itself (a baked source).
   `auto --denoise` and the web export take the same RAW path. The default
   strength is 1.0 on a RAW and 0.5 on a baked source.
 - **Configuration.** `AUTOSHADE_DENOISE_RAW_SCRIPT` points at
-  `python/denoise_raw.py` (bundled beside the other sidecars; a release
-  package carries neither, as before). The DRUNet weights (130,579,305 B,
-  MIT, from KAIR/DPIR) and the two KAIR network files download on first use,
-  sha256- and byte-pinned, through the same verified fetch the other sidecars
-  use.
+  `python/denoise_raw.py`, which every release package ships beside the other
+  sidecars (the `python/` payload is copied whole, minus weights and tests).
+  The DRUNet weights (130,579,305 B, MIT, from KAIR/DPIR) and the two KAIR
+  network files download on first use, sha256- and byte-pinned, through the
+  same verified fetch the other sidecars use.
 - **Store format.** The strip record admits the `"denoised"` spelling; no
   other field changed.
 - No solver or recipe schema change, and the renderer's only change is the

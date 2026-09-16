@@ -1701,11 +1701,22 @@ mod tests {
         }
     }
 
+    /// How many mosaic temp files THIS PROCESS is holding. Scoped by pid on
+    /// purpose: the system temp directory is shared, and the release battery
+    /// runs the calibration lane beside the default one, so a bare name match
+    /// counts the other lane's in-flight files and the assertion below fails
+    /// for a reason that has nothing to do with the code under test.
+    /// `temp_path` writes `{tag}_{pid}_{stamp}_{n}.png`, so the pid segment is
+    /// the scope; inside one process only this test spawns the sidecar.
     fn mosaic_temp_files() -> usize {
+        let mine = format!("_{}_", std::process::id());
         std::fs::read_dir(std::env::temp_dir())
             .unwrap()
             .filter_map(|e| e.ok())
-            .filter(|e| e.file_name().to_string_lossy().starts_with("autoshade_dn_mosaic_"))
+            .filter(|e| {
+                let n = e.file_name().to_string_lossy().into_owned();
+                n.starts_with("autoshade_dn_mosaic_") && n.contains(&mine)
+            })
             .count()
     }
 

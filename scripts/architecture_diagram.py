@@ -2,7 +2,7 @@
 """Draw the architecture picture from the architecture source.
 
 `docs/architecture/autoshade.architecture.json` is the model of the program's
-own parts: twenty components, three boundaries, nineteen connections. This
+own parts: twenty-one components, three boundaries, twenty connections. This
 script is its only renderer — archify, which drew the PNG that used to sit in
 the README, is not installable on this machine any more (`npm i -g git+…` finds
 no package.json; the npm package of that name is a different project), and its
@@ -483,7 +483,7 @@ def draw(L):
     alt = ("AutoShade architecture: three front ends over one Rust library "
            "holding RAW decode, the AI advisor, the recipe, the render engine, "
            "the style index, reverse-fit, the local producers and the "
-           "local-field analyzer; five local Python sidecars below it; two "
+           "local-field analyzer; six local Python sidecars below it; two "
            "opt-in external AI services above it")
     c = Canvas(L["w"], L["hgt"], alt, dom_id="architecture")
     kinds = {}
