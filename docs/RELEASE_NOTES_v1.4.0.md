@@ -104,21 +104,42 @@ sensor (a RAW) or the image itself (a baked source).
 
 ## Gates
 
-Measured on the lane before the merge (dev test profile, per-lane target
-directories): library **1494 passed / 0 failed / 15 ignored** (313.28 s; by
-name 1526 → 1533, all seven in `denoise::`), CLI **24 / 0**, contract 2 + 2,
-doc-tests 0, GUI **190 passed / 0 failed / 1 ignored** (by name 188 → 191:
-four ◈-card tests in, the in-place denoise test out), clippy 0 on both
-feature sets, `audit_i18n` 0 / 0 / 0, `subset_gui_fonts.py --check` 874/874
-(one new Chinese string reworded rather than the fonts regenerated),
-`check_docs.py` 25 PASS / 0 FAIL / 5 SKIP, the four python suites 14 + 11 +
-15 + 4, photo-name grep 0. `scripts/denoise_bench.py` at the measured ISO-640
-model: the RAW path leads SCUNet 1.0 on the detail blocks by +3.13 / +5.92 dB
-(whole-frame +3.21 / +4.90) — PASS against the 1.5 dB line; at the
-extrapolated ISO-3200 level +1.10 / +2.60 dB (whole-frame +1.10 / +2.00),
-reported, not gated. Five hand mutations, each restored byte-identically
-(sha256): the mosaic hook deleted from the render, the denoise landing
-flipped to in-place, the landing's card kind flipped, `negative_origin`
-ignoring the ◈ card, and the sidecar built with bias tensors — each named by
-its test (the last one's first pin matched a comment and was tightened to
-the call text before it did).
+The release battery, three lanes in parallel on a frozen snapshot of the
+release code, release profile: library **1494 passed / 0 failed / 15 ignored**
+(1509 enumerated), CLI **24 / 0**, contract 2 + 2, doc-tests 0, GUI
+**190 passed / 0 failed / 1 ignored** (191 enumerated), and the calibration lane
+**1494 / 0 / 15** with its corpus present and nothing skipped. By name the library
+is +7 / −0 against v1.3.5 and the GUI +4 / −1, which is this release's
+eleven new tests and the one the ◈ card replaced. Inside the battery,
+`audit_i18n` 0 / 0 / 0 and `subset_gui_fonts.py --check` 874/874 (one new
+Chinese string reworded rather than the fonts regenerated). Alongside it:
+clippy 0 on both feature sets, `check_docs.py --gates` 30 PASS / 0 FAIL / 0
+SKIP, the four python suites 14 + 11 + 15 + 4, photo-name grep 0.
+
+The first run of that battery was red, and the failure was worth having: the
+new `a_denoised_mosaic_replaces_the_samples_in_place_or_is_refused` counted
+every `autoshade_dn_mosaic_*` file in the system temp directory, and the
+battery runs two library lanes at once, so each lane saw the other's in-flight
+files. The probe is now scoped by process id, which is what the invariant was
+always about.
+
+**The final gate.** v1.4.0 adds a hook that runs before demosaic, so the
+reference pair must render exactly as v1.3.5 rendered it. The 1.4.0 CLI's
+full-resolution 0.85 render differs from the v1.3.5 release CLI's in
+**0 of 60,217,344 pixels**; downscaled it sits 0.00044 mean absolute
+difference from the R37 acceptance render, the same number v1.3.2 through
+v1.3.5 measured. The three strengths at 2048 px are pixel-identical too. The
+plates were looked at: no seam, no rectangle, no patch. (The full-resolution
+AI target left the install's out/ directory before v1.3.5, so the per-region
+Lab report against it is not available; the comparison is against the
+previous release's renders, which were measured against that target.)
+
+`scripts/denoise_bench.py` at the measured ISO-640 model: the RAW path leads
+SCUNet 1.0 on the detail blocks by +3.13 / +5.92 dB (whole-frame +3.21 /
++4.90) — PASS against the 1.5 dB line; at the extrapolated ISO-3200 level
++1.10 / +2.60 dB (whole-frame +1.10 / +2.00), reported, not gated. Five hand
+mutations, each restored byte-identically (sha256): the mosaic hook deleted
+from the render, the denoise landing flipped to in-place, the landing's card
+kind flipped, `negative_origin` ignoring the ◈ card, and the sidecar built
+with bias tensors — each named by its test (the last one's first pin matched a
+comment and was tightened to the call text before it did).

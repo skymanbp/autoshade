@@ -1,6 +1,6 @@
 # AutoShade — Architecture
 
-> Status: **implemented** (v1.3.5 — the sensor plane is measured from the
+> Status: **implemented** (v1.4.0 — the sensor plane is measured from the
 > container before the decoder is asked to allocate it, so a frame past that
 > decoder's own ceiling is a named refusal naming the frame and the workflow
 > that works instead of an abort, and a CONTAINED panic no longer raises a modal
@@ -135,10 +135,22 @@
 > wrong reason; it writes a `=== name ===` transcript that
 > `scripts/check_docs.py --gates` reads the counts and the lane set back out
 > of, and it prints the by-name test-set difference against a saved baseline.
-> 1502 library + 24 CLI + 188 GUI + 2+2 contract tests are enumerated in the GUI
-> build; the library result is 1487 pass + 15 `#[ignore]`d forensic probes and
-> the GUI result is 187 pass + one explicit scratch-recipe export probe ignored
-> in the ordinary battery. Counts refreshed 2026-09-15 for v1.3.5: +4 / −0 by
+> 1509 library + 24 CLI + 191 GUI + 2+2 contract tests are enumerated in the GUI
+> build; the library result is 1494 pass + 15 `#[ignore]`d forensic probes and
+> the GUI result is 190 pass + one explicit scratch-recipe export probe ignored
+> in the ordinary battery. Counts refreshed 2026-09-15 for v1.4.0: +11 / −1 by
+> name against the v1.3.5 tag (`5d3a6b1`), taken statically between the tag's
+> source and this tree (1718 → 1728 `#[test]` functions) — seven library pins
+> in `denoise` (the mosaic facts read off a sensor's CFA and levels, the four
+> refusals for a sensor that carries no 2×2 Bayer mosaic, a zero strength
+> spawning nothing, the product replacing the samples in place or being
+> refused with them untouched, the hook running before demosaic, and the RAW
+> sidecar's pins and shared default) and four GUI pins (a denoise landing as a
+> new ◈ card with the source card and the ▣ negative untouched, the negative
+> master preferring the ◈ card, a ◈ card round-tripping through the strip
+> record, and the export-time denoise sitting out on it); the one removed name
+> is the in-place denoise test the ◈ card replaced.
+> Before that, counts were refreshed 2026-09-15 for v1.3.5: +4 / −0 by
 > name against the v1.3.4 tag (`14a2a4b`), taken statically between the tag's
 > source and this tree (1714 → 1718 `#[test]` functions) — three library pins
 > in `generative` (a blank fill prompt is the removal instruction, that
