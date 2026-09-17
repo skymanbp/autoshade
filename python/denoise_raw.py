@@ -30,16 +30,28 @@ Contract with the Rust side (`denoise::denoise_mosaic`):
 
 Method (every step measured in the 2026-09-15 probe, none assumed):
   1. Normalise per phase, x = (v - black[phase]) / (white - black[phase]),
-     split into the four half-resolution planes R, G1, G2, B.
+     split into the four half-resolution planes R, G1, G2, B. Only the TOP is
+     bounded: a sample below the black level is real sensor data — 14–22 % of
+     a 15 s ISO-8000 frame — and clamping it at 0 rectifies the noise. Measured
+     2026-09-17, that clamp inflated the fitted a by 3–19 % and left the
+     darkest band carrying 0.39–0.65 of the unit variance step 3 promises the
+     model, so the model was told the shadows were 1.5–2.5× noisier than they
+     look and smoothed them accordingly. The GAT has its own floor (its
+     radicand is clipped at 0) and takes over from here.
   2. NOISE MODEL, self-measured on the whole frame per plane: 32×32 blocks;
      per block the mean, the white-noise variance (finest-scale Haar diagonal
      detail, MAD / 0.6745, squared) and the box-5 high-pass variance; a block
      is textureless when box5 var <= 1.25 × 0.96 × Haar var (0.96 is the
      box-5 residual of white noise) and its mean sits in (0.002, 0.9);
-     least squares var = a·x + b on those blocks, b clamped >= 0.
+     least squares var = a·x + b on those blocks, then `physical_model` — a
+     sensor has neither a negative read-noise floor nor a variance that falls
+     as signal rises, and an a <= 0 is fatal to step 3's radicand.
   3. Generalized Anscombe transform per plane, z = 2·sqrt(x/a + 3/8 + b/a²),
      which leaves unit-variance noise; ONE shared affine puts all four planes
-     in [0,1], so the model's sigma is one number, 1/(hi - lo).
+     in [0,1], so the model's sigma is one number. The affine is read off the
+     NOISE MODEL — 0, the GAT's own floor, to max gat(1), the largest z any
+     plane can reach — never off percentiles of this frame's data, so no real
+     sample can fall outside it. `SIGMA_SCALE` × its slope is the sigma.
   4. DRUNet-colour (KAIR, non-blind: the sigma rides in as a 4th channel) on
      two triplets, (R, G1, B) and (R, G2, B); R and B are the mean of their
      two estimates, G1 / G2 come from their own triplet.
@@ -113,6 +125,30 @@ WHITE_BOX5 = 0.96
 TEXTURELESS_SLACK = 1.25
 MIN_BLOCKS_PER_PLANE = 50
 MIN_BLOCKS_POOLED = 20
+
+# One z-unit of the stabilised frame IS one sigma (step 3), so the affine's
+# slope is the noise and this is what the model is TOLD that noise is, as a
+# fraction of the measured one.
+#
+# Measured 2026-09-17 against Lightroom's own Enhance→Denoise answer — the
+# DNG's NewSubfileType=16 enhanced layer — on two astro frames of this camera
+# (ISO 3200 / 15 s and ISO 8000 / 15 s), three 2048² windows each, compared
+# plane by plane in the RAW domain so no demosaic and no tone curve is in the
+# way; and against `scripts/denoise_bench.py` on its ground-truth levels:
+#
+#   scale   grain vs LR      faint sources kept      bench, measured / ×5 level
+#   1.00    0.12 / 0.17×     83 % / 60 %             +4.36 +5.92 / +1.58 +2.13
+#   0.85    0.47 / 0.60×     87 % / 70 %             +4.40 +5.88 / +0.53 +1.60
+#   0.70    1.05 / 1.25×     90 % / 79 %             +3.63 +5.45 / -1.35 +0.27
+#           (Lightroom 1.00) (Lightroom 91 % / 71 %)
+#
+# 0.85 keeps as much faint detail as Lightroom with about half its grain, and
+# costs the measured level nothing. Below 1.0 at all because a Gaussian
+# denoiser at the exactly-measured sigma keeps nothing the frame cannot prove,
+# and a photograph is not a maximum-likelihood estimate of itself; not below
+# 0.85 because dPSNR against SCUNet then falls behind on the ×5 level, and
+# nothing in the Lightroom comparison pays for it.
+SIGMA_SCALE = 0.85
 
 
 def log(msg):
@@ -212,8 +248,9 @@ def fit_ab(means, variances):
     block whose variance sits more than three sampling spreads ABOVE the fit
     carries texture the admission rule let through (pixel-scale grain reads
     as white noise to every local estimator), and noise only ever sets the
-    floor. Two passes settle it. b is clamped to >= 0 — a negative read-noise
-    floor is unphysical and only ever came from a thin sample."""
+    floor. Two passes settle it. `physical_model` then has the last word: least
+    squares can return a model no sensor could have, and the transform below
+    cannot use one."""
     m = np.asarray(means, np.float64)
     v = np.asarray(variances, np.float64)
     keep = np.ones(len(m), bool)
@@ -227,7 +264,40 @@ def fit_ab(means, variances):
         if refined.sum() < max(MIN_BLOCKS_POOLED, 2) or np.array_equal(refined, keep):
             break
         keep = refined
-    return float(a), float(max(b, 0.0))
+    return physical_model(float(a), float(b), m[keep])
+
+
+# When the admitted blocks share one signal level — a flat sky, a flat-field,
+# a frame lit to one tone — the least-squares SLOPE is unidentifiable and comes
+# back negative as often as not. Half the variance is then attributed to shot
+# noise and half to the floor: a prior, and stated as one, but a bounded one
+# (both terms stay within a factor of two of the truth whatever the real split
+# was), and the alternative is worse in every direction.
+UNIDENTIFIABLE_SHOT_SHARE = 0.5
+
+
+def physical_model(a, b, means):
+    """Force `var = a·x + b` to be a noise model a sensor could have.
+
+    `b < 0` is a negative read-noise floor; `a < 0` says variance FALLS as
+    signal rises. Neither is physical, and `a <= 0` is not merely wrong but
+    fatal: `gat`'s radicand `x/a + 3/8 + b/a²` then goes negative for the
+    BRIGHT samples, so every highlight transforms to 0 and comes back inverted.
+    On a synthetic flat sky the fit returns a = -3.9e-04 (2026-09-17).
+
+    What survives an unidentifiable slope is the variance AT the blocks' own
+    signal level — measured 1.01× the truth on that same fixture — so that is
+    what is kept, split by `UNIDENTIFIABLE_SHOT_SHARE`. A frame whose fit is
+    genuinely shot-dominated is untouched: it already has a > 0."""
+    if a > 0.0:
+        return a, max(b, 0.0)
+    x0 = float(np.mean(means)) if len(means) else 0.0
+    var0 = max(a * x0 + b, 0.0)
+    if x0 <= 0.0 or var0 <= 0.0:
+        # No usable level either: leave a floor-only model, which the GAT
+        # handles (it degenerates towards the linear, constant-variance map).
+        return 1e-6, max(b, 0.0)
+    return UNIDENTIFIABLE_SHOT_SHARE * var0 / x0, (1.0 - UNIDENTIFIABLE_SHOT_SHARE) * var0
 
 
 def noise_model(planes):
@@ -274,6 +344,22 @@ def igat(z, a, b):
     ia = (0.25 * z ** 2 + 0.25 * np.sqrt(1.5) / z - (11.0 / 8.0) / z ** 2
           + (5.0 / 8.0) * np.sqrt(1.5) / z ** 3 - 1.0 / 8.0)
     return a * (ia - b / (a * a))
+
+
+def model_affine(ab):
+    """The shared affine that carries the four stabilised planes into the
+    model's [0,1] — `(lo, span)`, from the NOISE MODEL alone.
+
+    It takes no pixels ON PURPOSE. Deriving it from the frame's data was the
+    defect this function exists to make impossible: percentiles put the top at
+    the 99.95th, which is BELOW the brightest samples of any frame whose bright
+    content is rarer than 0.05 % of its pixels, and everything above came back
+    as the single value igat(top). `gat` is monotone in x and floors its
+    radicand at 0, so [0, max gat(1)] brackets every sample any plane can hold
+    and nothing can fall outside it."""
+    lo = 0.0
+    hi = max(float(gat(1.0, *ab[n])) for n in PLANES)
+    return lo, max(hi - lo, 1e-6)
 
 
 # ── Model ───────────────────────────────────────────────────────────────────
@@ -379,21 +465,23 @@ class _nullctx:
 def denoise_planes(model, planes, ab, device, tile, overlap, fp16):
     """Steps 3–5 on the four normalised planes → the four denoised planes."""
     z = {n: gat(p, *ab[n]) for n, p in planes.items()}
-    allz = np.stack([z[n] for n in PLANES])
-    lo, hi = np.percentile(allz, 0.05), np.percentile(allz, 99.95)
-    span = max(hi - lo, 1e-6)
-    lo, hi = lo - 0.05 * span, hi + 0.05 * span
-    sigma = 1.0 / (hi - lo)
-    del allz
-    log(f"model sigma {sigma:.4f} ({sigma*255:.2f}/255) over z range {lo:.1f}..{hi:.1f}")
+    # `model_affine` — from the noise model, never from this frame's data. The
+    # 0.05 / 99.95 percentiles it replaced put a hard ceiling at igat(top): on a
+    # 15 s ISO-3200 star field that ceiling sat at 7.6–14.7 % of full scale per
+    # plane, so every star came back as the same grey dot, keeping 9.7 % of its
+    # excess over the sky against Lightroom's 100 % (measured 2026-09-17).
+    lo, span = model_affine(ab)
+    sigma = SIGMA_SCALE / span
+    log(f"model sigma {sigma:.4f} ({sigma*255:.2f}/255) over z range {lo:.1f}..{lo+span:.1f} "
+        f"at scale {SIGMA_SCALE:g}")
 
     def norm(a):
-        return np.clip((a - lo) / (hi - lo), 0.0, 1.0).astype(np.float32)
+        return np.clip((a - lo) / span, 0.0, 1.0).astype(np.float32)
 
     estimates = {}
     for g in ("G1", "G2"):
         rgb = np.stack([norm(z["R"]), norm(z[g]), norm(z["B"])], axis=2)
-        estimates[g] = run_tiled(model, rgb, sigma, device, tile, overlap, fp16) * (hi - lo) + lo
+        estimates[g] = run_tiled(model, rgb, sigma, device, tile, overlap, fp16) * span + lo
     dz = {
         "R": (estimates["G1"][:, :, 0] + estimates["G2"][:, :, 0]) / 2.0,
         "G1": estimates["G1"][:, :, 1],
@@ -487,7 +575,10 @@ def main():
         planes = {}
         for n, p in split_planes(raw, phases).items():
             b = black_at[n]
-            planes[n] = np.clip((p.astype(np.float32) - b) / (white - b), 0.0, 1.0)
+            # Only the top is bounded (step 1): a sample below the black level
+            # carries the lower half of the noise distribution, and rectifying
+            # it at 0 biases both the fit and the model. `gat` floors it.
+            planes[n] = np.minimum((p.astype(np.float32) - b) / (white - b), 1.0)
         ab = noise_model(planes)
         model = load_model(args.cache, device)
         log("denoising the four CFA planes ...")

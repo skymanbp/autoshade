@@ -590,8 +590,24 @@
 > (R,G1,B)/(R,G2,B) triplets under a generalized Anscombe transform whose
 > noise model `var = a·x + b` the sidecar measures on the frame itself
 > (32-px blocks, Haar-diagonal vs box-5 variance to keep only textureless
-> blocks, least squares with outlier rejection), with the exact unbiased
-> inverse; strength is a mosaic-domain blend whose default is
+> blocks, least squares with outlier rejection, then `physical_model`, which
+> refuses the negative slope least squares returns when the admitted blocks
+> share one signal level — an `a <= 0` sends `gat`'s radicand negative for the
+> BRIGHT samples and inverts every highlight), with the exact unbiased
+> inverse. The affine that carries the stabilised planes into the model's
+> `[0,1]` is read off that noise model and never off the frame's data
+> (`denoise_raw.model_affine`: `0` to `max gat(1)`, which brackets every
+> sample any plane can hold). Built from the data's 0.05 / 99.95 percentiles
+> instead — as it was through v1.4.0 — it put a hard ceiling at `igat(top)`:
+> on a 15 s ISO-3200 star field that ceiling sat at 7.6-14.7 % of full scale
+> per plane and every star came back as the same grey dot, keeping 9.7 % of
+> its excess over the sky against Lightroom's 100 % (2026-09-17). The sigma
+> handed to the model is `SIGMA_SCALE = 0.85` times that affine's slope,
+> measured against Lightroom's own Enhance->Denoise output on two of this
+> camera's astro frames: 0.85 keeps as much faint detail as Lightroom (87 % /
+> 70 % of a faint point source's excess against its 91 % / 71 %) with about
+> half its residual grain, and costs the bench's measured level nothing.
+> Strength is a mosaic-domain blend whose default is
 > `denoise::DEFAULT_STRENGTH_RAW = 1.0`, chosen per source by
 > `denoise::default_strength_for` on the CLI, the web export and the GUI's two
 > dials. Why the mosaic: on the user's ILCE-7RM4A frames the noise is white
@@ -608,7 +624,20 @@
 > bench's acceptance line — the RAW path ≥ 1.5 dB above SCUNet 1.0 on the
 > detail blocks in every window — is defined at the measured level, where it
 > passes with room; the extrapolated level's town window sits under it
-> (+1.1 dB) and is reported, not gated. A baked PNG/TIFF/JPEG source
+> (+1.1 dB) and is reported, not gated. Re-run 2026-09-17 on the affine fix
+> and `SIGMA_SCALE = 0.85` (a different ISO-100 truth frame and a different
+> ISO-640 model frame, so the numbers are a before/after pair on THOSE frames,
+> not a continuation of the v1.4.0 series): the measured level went +4.31 /
+> +5.89 → +4.40 / +5.88 dB, so the affine fix and the operating point cost it
+> nothing, while the ×5 extrapolated level went +1.57 / +2.12 → +0.53 / +1.60.
+> Isolating the two halves at `SIGMA_SCALE = 1.0` gave +4.36 / +5.92 and
+> +1.58 / +2.13 — within 0.05 dB of the baseline in all four windows, which
+> puts the whole of that narrowing on the operating point and none of it on
+> the fix. The narrowing is the perception-distortion trade this metric
+> cannot see: dPSNR pays for smoothing, Lightroom itself leaves 3× the grain
+> the v1.4.0 setting did, and the operating point was chosen against
+> Lightroom's output on real astro frames rather than against dPSNR on a
+> synthetic level. A baked PNG/TIFF/JPEG source
 > keeps `python/denoise.py`'s SCUNet, whose strength has been a luma/chroma
 > split since 2026-09-13 — `blend_luma_chroma`: luminance blended by the
 > value, the model's chroma taken at `min(1, 2·s)` — with its own default

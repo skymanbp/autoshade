@@ -50,7 +50,15 @@ non-blind DRUNet on the packed colour triplets under a variance-stabilising
 transform, which is what keeps the texture — against ground truth on a 61 MP
 frame at its measured ISO-640 noise it scored 3.2–4.9 dB above the previous
 SCUNet path, and 3.1–5.9 dB on the most detailed blocks
-(`scripts/denoise_bench.py`). A baked source (a PNG/TIFF/JPEG master) still
+(`scripts/denoise_bench.py`). Nothing on that path may clip: the map into the
+model's range is built from the measured noise, not from this frame's own
+brightness histogram, so a star field's stars, a night scene's point lights and
+a specular highlight come back at their own brightness instead of at one shared
+ceiling. Through v1.4.0 they did not — the map stopped at the frame's 99.95th
+percentile and a 15 s ISO-3200 star field lost 61 % of every star. Against
+Lightroom's own Enhance→Denoise output on two 15 s astro frames of the same
+camera, the path now keeps as much faint detail as Lightroom does with about
+half the residual grain. A baked source (a PNG/TIFF/JPEG master) still
 goes through SCUNet on its developed pixels. The fold's own **AI denoise
 strength** dial starts at 100%: on a RAW that is the model's whole output, and
 anything less only puts noise back; on a baked source the SCUNet law applies

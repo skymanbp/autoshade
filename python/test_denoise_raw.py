@@ -105,6 +105,32 @@ class TheNoiseModel(unittest.TestCase):
             # the assertion is that it is not wildly off, not that it is exact.
             self.assertLess(abs(fb - b), 0.02 * a, n)
 
+    def test_it_reads_the_samples_that_sit_below_the_black_level(self):
+        """A dark frame's noise straddles the black level — 14–22 % of a 15 s
+        ISO-8000 frame is below it. Clamping those at 0 rectified the noise and
+        inflated the fitted a by 3–19 % (2026-09-17), so the estimator has to
+        take the negative samples as they come."""
+        rng = np.random.default_rng(6)
+        a, b = 1.5e-3, 4.9e-6
+        clean = np.full((1024, 1024), 0.004, np.float32)     # a night sky, near black
+        noisy = clean + rng.normal(0.0, 1.0, clean.shape) * np.sqrt(a * clean + b)
+        self.assertGreater((noisy < 0).mean(), 0.1, "the fixture must straddle the black level")
+        planes = {n: noisy.astype(np.float32) for n in denoise_raw.PLANES}
+        with redirect_stderr(io.StringIO()):
+            model = denoise_raw.noise_model(planes)
+        rectified = {n: np.clip(noisy, 0.0, 1.0).astype(np.float32) for n in denoise_raw.PLANES}
+        with redirect_stderr(io.StringIO()):
+            clamped = denoise_raw.noise_model(rectified)
+        for n in denoise_raw.PLANES:
+            # At one signal level a and b trade off, so the variance the model
+            # predicts THERE is what has to be right, not a alone.
+            var_true = a * 0.004 + b
+            var_fit = model[n][0] * 0.004 + model[n][1]
+            var_clamped = clamped[n][0] * 0.004 + clamped[n][1]
+            self.assertAlmostEqual(var_fit / var_true, 1.0, delta=0.1, msg=n)
+            self.assertLess(var_clamped, 0.9 * var_true,
+                            f"{n}: the rectified fixture must read LOW — that is the defect")
+
     def test_a_frame_with_no_flat_area_is_refused(self):
         # Structured texture everywhere (an 8-px stripe grid): its box-5
         # energy is far above its finest-scale Haar energy, so every block
@@ -116,6 +142,53 @@ class TheNoiseModel(unittest.TestCase):
         with self.assertRaises(SystemExit) as cm, redirect_stderr(io.StringIO()):
             denoise_raw.noise_model(planes)
         self.assertEqual(cm.exception.code, 2)
+
+
+class TheModelAffine(unittest.TestCase):
+    """The map into the model's [0,1] has to carry every sample the sensor can
+    hold. It was once built from the frame's own 0.05 / 99.95 percentiles,
+    which put a hard ceiling at `igat(top)`: on a 15 s ISO-3200 star field that
+    ceiling sat at 7.6–14.7 % of full scale per plane and every star came back
+    as the same grey dot, keeping 9.7 % of its excess over the sky against
+    Lightroom's 100 % (2026-09-17)."""
+
+    MODELS = [
+        (2.0e-4, 1.5e-7),   # the measured ISO-640 model of the camera under test
+        (5.7e-4, 1.6e-6),   # its measured ISO-3200 model
+        (1.5e-3, 4.9e-6),   # its measured ISO-8000 model
+        (1.0e-5, 0.0),      # a near-noiseless frame; b = 0 is legal after the clamp
+    ]
+
+    def test_it_brackets_every_sample_a_plane_can_hold(self):
+        for a, b in self.MODELS:
+            ab = {n: (a, b) for n in denoise_raw.PLANES}
+            lo, span = denoise_raw.model_affine(ab)
+            for x in (0.0, 1e-6, 0.5, 1.0):
+                mapped = (float(denoise_raw.gat(x, a, b)) - lo) / span
+                self.assertGreaterEqual(mapped, 0.0, f"a={a} x={x}")
+                self.assertLessEqual(mapped, 1.0, f"a={a} x={x} maps past the ceiling")
+
+    def test_the_planes_share_one_map_wide_enough_for_the_widest(self):
+        """Four planes of different gain still share one affine — the model
+        takes one sigma — so it must span the WIDEST plane's range, not the
+        first plane's."""
+        gains = dict(zip(denoise_raw.PLANES, (5.7e-4, 6.2e-4, 6.2e-4, 3.7e-4)))
+        ab = {n: (a, 2.0e-6) for n, a in gains.items()}
+        lo, span = denoise_raw.model_affine(ab)
+        for n, (a, b) in ab.items():
+            self.assertLessEqual(float(denoise_raw.gat(1.0, a, b)), lo + span + 1e-9, n)
+
+    def test_it_reads_no_pixels(self):
+        """The signature is the guarantee: an affine that cannot see the frame
+        cannot be dragged off it by a handful of bright outliers."""
+        import inspect
+
+        self.assertEqual(list(inspect.signature(denoise_raw.model_affine).parameters), ["ab"],
+                         "model_affine grew a data argument")
+
+    def test_the_operating_point_is_a_named_constant(self):
+        self.assertGreater(denoise_raw.SIGMA_SCALE, 0.0)
+        self.assertLessEqual(denoise_raw.SIGMA_SCALE, 1.0)
 
 
 class TheStrength(unittest.TestCase):
@@ -198,6 +271,47 @@ class EndToEnd(unittest.TestCase):
         err_in = np.abs(noisy - clean).mean()
         err_out = np.abs(x_out - clean).mean()
         self.assertLess(err_out, 0.5 * err_in, f"in {err_in:.5f} out {err_out:.5f}")
+
+    @unittest.skipUnless(_weights_present()[0], "the pinned DRUNet files are not in the weight cache")
+    def test_bright_content_rarer_than_a_percentile_survives(self):
+        """A star field in miniature: a dark noisy sky at the camera's measured
+        ISO-3200 model with a few bright blocks covering 0.04 % of the frame —
+        under the 0.05 % the old data-percentile affine cut at. Those blocks
+        used to come back at the map's ceiling, `igat(top)`, all of them the
+        same value; on the real 15 s ISO-3200 frame that was 38.8 % of the
+        stars' brightness against Lightroom's 101 % (2026-09-17)."""
+        import cv2
+
+        _, cache = _weights_present()
+        rng = np.random.default_rng(9)
+        black, white = 512.0, 16383.0
+        a, b = 5.7e-4, 1.6e-6
+        sky, star = 0.010, 0.35
+        clean = np.full((512, 512), sky, np.float32)
+        bright = np.zeros(clean.shape, bool)
+        for cy, cx in ((80, 120), (300, 64), (200, 400)):
+            bright[cy : cy + 6, cx : cx + 6] = True          # 3 x 36 px = 0.041 %
+        clean[bright] = star
+        noisy = clean + rng.normal(0.0, 1.0, clean.shape).astype(np.float32) * np.sqrt(a * clean + b)
+        mosaic = np.clip(np.round(noisy * (white - black) + black), 0, white).astype(np.uint16)
+        with tempfile.TemporaryDirectory() as d:
+            src, dst = os.path.join(d, "in.png"), os.path.join(d, "out.png")
+            cv2.imwrite(src, mosaic)
+            r = subprocess.run(
+                [sys.executable, "-E", denoise_raw.__file__, "--input", src, "--output", dst,
+                 "--pattern", "RGGB", "--black", "512", "--white", "16383", "--strength", "1.0",
+                 "--cache", cache],
+                capture_output=True, text=True)
+            self.assertEqual(r.returncode, 0, r.stderr[-2000:])
+            out = cv2.imread(dst, cv2.IMREAD_UNCHANGED)
+        x_out = (out.astype(np.float32) - black) / (white - black)
+        kept = x_out[bright].mean() / noisy[bright].mean()
+        self.assertGreater(kept, 0.85, f"the bright blocks kept only {kept:.1%} of their brightness")
+        # and the sky underneath still got denoised, so this is not just an
+        # identity pass that happens to preserve highlights.
+        sky_in = np.abs(noisy[~bright] - sky).mean()
+        sky_out = np.abs(x_out[~bright] - sky).mean()
+        self.assertLess(sky_out, 0.6 * sky_in, f"sky {sky_in:.5f} -> {sky_out:.5f}")
 
 
 if __name__ == "__main__":
