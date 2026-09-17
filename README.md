@@ -8,7 +8,7 @@
 An AI decides *what to change*. A deterministic Rust engine *does* it.
 **In the recipe-development path, the AI never touches a pixel.**
 
-[Download v1.4.0](https://github.com/skymanbp/autoshade/releases/tag/v1.4.0) ·
+[Download v1.4.1](https://github.com/skymanbp/autoshade/releases/tag/v1.4.1) ·
 [Architecture](docs/ARCHITECTURE.md) ·
 [Release ledger](docs/ROADMAP.md) ·
 [MIT](LICENSE)
@@ -493,7 +493,7 @@ the tests [`scripts/check_docs.py`](scripts/check_docs.py) re-derives.
 
 ### Download a release
 
-The v1.4.0 release is built by GitHub Actions from the tag: the Windows front
+The v1.4.1 release is built by GitHub Actions from the tag: the Windows front
 ends, two macOS universal (arm64 + x86_64) archives and a Linux x64
 command-line archive; `checksums.txt` carries the SHA-256 of every asset.
 
@@ -501,17 +501,17 @@ command-line archive; `checksums.txt` carries the SHA-256 of every asset.
 |---|---:|---|
 | `autoshade.exe` (CLI) | 21,176,320 bytes | `3402009d64298df838465e5a3982e091a91fbde098911341a2a994fc6e10385c` |
 | `autoshade-gui.exe` (desktop app) | 27,526,656 bytes | `221598b7cc7a78532d9ac1a59f9803d1a9ad70f53cc4685f0a335d8e481a1140` |
-| `AutoShade-Setup-1.4.0.exe` (installer) | 14,696,452 bytes | `9930a25183cfb84226401433df9a687e07a44f1005163b295719b53514a97b66` |
-| `autoshade-1.4.0-windows-x64.zip` (portable archive) | 19,620,230 bytes | `d3045da352cd41b5b955d255384e164b2a2c9a14a1b91bfb0a8f49d70f88bbd3` |
-| `AutoShade-1.4.0-macos-universal.zip` (macOS app bundle) | 39,659,275 bytes | `88afba2b7c62410536342cc21ad132c21a53958733a6be706c30177579e2dcbd` |
-| `AutoShade-1.4.0-linux-x64.zip` (Linux command line only) | 9,523,045 bytes | `ba9c0dc5c614e677107fbac0304c4c37470855b05c1f7b2ccd266aba2b4247d6` |
-| `AutoShade-1.4.0-macos-cli.zip` (macOS command line only) | 17,196,029 bytes | `823ec65e758111e3893b7e5321f03426376910bdb55efb23cce020adb5666a83` |
+| `AutoShade-Setup-1.4.1.exe` (installer) | 14,696,452 bytes | `9930a25183cfb84226401433df9a687e07a44f1005163b295719b53514a97b66` |
+| `autoshade-1.4.1-windows-x64.zip` (portable archive) | 19,620,230 bytes | `d3045da352cd41b5b955d255384e164b2a2c9a14a1b91bfb0a8f49d70f88bbd3` |
+| `AutoShade-1.4.1-macos-universal.zip` (macOS app bundle) | 39,659,275 bytes | `88afba2b7c62410536342cc21ad132c21a53958733a6be706c30177579e2dcbd` |
+| `AutoShade-1.4.1-linux-x64.zip` (Linux command line only) | 9,523,045 bytes | `ba9c0dc5c614e677107fbac0304c4c37470855b05c1f7b2ccd266aba2b4247d6` |
+| `AutoShade-1.4.1-macos-cli.zip` (macOS command line only) | 17,196,029 bytes | `823ec65e758111e3893b7e5321f03426376910bdb55efb23cce020adb5666a83` |
 
 Download from the
-[v1.4.0 release page](https://github.com/skymanbp/autoshade/releases/tag/v1.4.0):
+[v1.4.1 release page](https://github.com/skymanbp/autoshade/releases/tag/v1.4.1):
 
 \
-- **Installer (recommended):** run `AutoShade-Setup-1.4.0.exe`. It installs for
+- **Installer (recommended):** run `AutoShade-Setup-1.4.1.exe`. It installs for
   the current user without administrator access, adds Start Menu shortcuts, and
   offers optional desktop and user `PATH` tasks.
 - **Upgrading is in place.** Run a newer installer over an existing install and
@@ -527,12 +527,12 @@ Download from the
   weights and the develop store in `%LOCALAPPDATA%\autoshade`. It names the
   size it found for each, and keeping both is the default, so a later install
   starts where you left off.
-- **Silently, for a scripted rollout:** `AutoShade-Setup-1.4.0.exe /VERYSILENT
+- **Silently, for a scripted rollout:** `AutoShade-Setup-1.4.1.exe /VERYSILENT
   /SUPPRESSMSGBOXES /NORESTART` installs or upgrades with no window and no
   prompt, and `unins000.exe /VERYSILENT /SUPPRESSMSGBOXES` in the install
   directory uninstalls the same way. The silent uninstall keeps your weights
   and develop store unless you add `/DELETEDATA=1`.
-- **Portable archive:** extract `autoshade-1.4.0-windows-x64.zip` to a directory
+- **Portable archive:** extract `autoshade-1.4.1-windows-x64.zip` to a directory
   you can keep intact and run either executable from there, beside the bundled
   `assets/` and `python/` sidecars.
 
@@ -541,10 +541,10 @@ Download from the
 Both macOS archives are universal (Apple silicon and Intel in one binary);
 unpack either with Finder or `ditto -x -k <zip> <dir>`.
 
-- `AutoShade-1.4.0-macos-universal.zip` is the app: move `AutoShade.app` to
+- `AutoShade-1.4.1-macos-universal.zip` is the app: move `AutoShade.app` to
   `/Applications`. The command line travels inside it
   (`AutoShade.app/Contents/MacOS/autoshade`), so this download alone serves a
-  terminal user; `AutoShade-1.4.0-macos-cli.zip` is that binary alone.
+  terminal user; `AutoShade-1.4.1-macos-cli.zip` is that binary alone.
 - The bundle is **ad-hoc signed, not notarised**, so the first launch is
   refused: macOS reports that the developer cannot be verified. Clearing it is
   per machine, not per launch — **System Settings → Privacy & Security → Open
@@ -554,7 +554,7 @@ unpack either with Finder or `ditto -x -k <zip> <dir>`.
   bundle; the interpreter is a Settings field with **Detect**
   ([manual](docs/USER_MANUAL.md#configure-and-use-the-ai-features)).
 
-The Linux archive, `AutoShade-1.4.0-linux-x64.zip`, is the command line for
+The Linux archive, `AutoShade-1.4.1-linux-x64.zip`, is the command line for
 x86-64 Linux, built on Ubuntu 22.04 with the same payload as the macOS
 command-line archive: the binary, the Python sidecars without their weights,
 the assets, LICENSE and README. Unpack it anywhere and run `./autoshade`;
@@ -808,7 +808,7 @@ numbers](#measured-numbers) are not repeated.
 
 ## Status, roadmap, and known limitations
 
-- Release gates for v1.4.0 cover the CLI, desktop GUI, sidecar contracts,
+- Release gates for v1.4.1 cover the CLI, desktop GUI, sidecar contracts,
   format fixtures and the deterministic renderer; artifact sizes and hashes
   are above.
 - macOS has shipped binaries and an app since v1.2.0 and nobody has reported

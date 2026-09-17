@@ -1,6 +1,6 @@
 # AutoShade — Architecture
 
-> Status: **implemented** (v1.4.0 — the sensor plane is measured from the
+> Status: **implemented** (v1.4.1 — the sensor plane is measured from the
 > container before the decoder is asked to allocate it, so a frame past that
 > decoder's own ceiling is a named refusal naming the frame and the workflow
 > that works instead of an abort, and a CONTAINED panic no longer raises a modal

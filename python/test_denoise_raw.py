@@ -313,6 +313,47 @@ class EndToEnd(unittest.TestCase):
         sky_out = np.abs(x_out[~bright] - sky).mean()
         self.assertLess(sky_out, 0.6 * sky_in, f"sky {sky_in:.5f} -> {sky_out:.5f}")
 
+    @unittest.skipUnless(_weights_present()[0], "the pinned DRUNet files are not in the weight cache")
+    def test_the_samples_below_the_black_level_reach_the_estimator(self):
+        """`TheNoiseModel` pins that the ESTIMATOR must read the samples below
+        the black level; this pins that `main` still HANDS THEM OVER. A night
+        sky at the camera's measured ISO-8000 model sits under a stop above
+        the black level, so a quarter of its samples fall below it. Rectifying
+        those at 0 — which the normalisation did through v1.4.0 — reads the
+        noise low, and the sidecar logs the model it fitted, so the fitted
+        variance at the frame's own level is what reads it back."""
+        import re
+
+        import cv2
+
+        _, cache = _weights_present()
+        rng = np.random.default_rng(11)
+        black, white = 512.0, 16383.0
+        a, b = 1.5e-3, 4.9e-6
+        sky = 0.002
+        clean = np.full((512, 512), sky, np.float32)
+        noisy = clean + rng.normal(0.0, 1.0, clean.shape).astype(np.float32) * np.sqrt(a * sky + b)
+        mosaic = np.clip(np.round(noisy * (white - black) + black), 0, white).astype(np.uint16)
+        self.assertGreater((mosaic < black).mean(), 0.15,
+                           "the fixture must straddle the black level for this to measure anything")
+        with tempfile.TemporaryDirectory() as d:
+            src, dst = os.path.join(d, "in.png"), os.path.join(d, "out.png")
+            cv2.imwrite(src, mosaic)
+            r = subprocess.run(
+                [sys.executable, "-E", denoise_raw.__file__, "--input", src, "--output", dst,
+                 "--pattern", "RGGB", "--black", "512", "--white", "16383", "--strength", "1.0",
+                 "--cache", cache],
+                capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr[-2000:])
+        # Both spellings of the per-plane line — its own fit, or the pooled one.
+        fitted = re.findall(r"plane (\w+):.*?a=([-\d.eE+]+) b=([-\d.eE+]+)", r.stderr)
+        self.assertEqual(len(fitted), 4, r.stderr[-2000:])
+        var_true = a * sky + b
+        for name, fa, fb in fitted:
+            var_fit = float(fa) * sky + float(fb)
+            self.assertAlmostEqual(var_fit / var_true, 1.0, delta=0.15,
+                                   msg=f"{name}: fitted {var_fit:.3e} against {var_true:.3e}")
+
 
 if __name__ == "__main__":
     unittest.main()

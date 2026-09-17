@@ -1304,10 +1304,12 @@ crs:Midpoint=\"{midpoint}\" crs:Version=\"{mask_version}\"",
 /// emits only names from this list — so a hand-edited `recipe.json` cannot
 /// smuggle a novel attribute, or markup, into a sidecar.
 ///
-/// Current corpus re-derivation: 174 sidecars; 40 Mask/Aggregate; 104
+/// Current corpus re-derivation: 175 sidecars; 40 Mask/Aggregate; 104
 /// Mask/Image; 391 Mask/Paint; 1037 Mask/*; 40 crs:Gesture (recursive `*.xmp`
 /// census over the operator-supplied corpus root (env `AUTOSHADE_CENSUS_ROOT`),
-/// real XML parser, 0 parse failures; refreshed at the v1.1 release). Measured
+/// real XML parser, 0 parse failures; mask counts refreshed at the v1.1
+/// release, sidecar total re-derived 2026-09-17 — the operator edited one
+/// more photograph in Lightroom, which carries no mask of any kind). Measured
 /// over this corpus: 104 `Mask/Image` instances,
 /// 21 distinct attribute names, of which 7 are modelled fields
 /// ([`MaskGeometry::AiMask`]) plus `crs:What` and `crs:MaskActive` (an
