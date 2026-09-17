@@ -136,15 +136,19 @@ sidecar on a night sky a quarter of whose samples fall below the black level and
 reads the fitted noise model back off the sidecar's own log; with the clamp
 restored it is red.
 
-**The calibration lane did not run, and is not counted.** Its p36–p39 corpus was
-deleted from this machine on 2026-09-03, and `scripts/release_battery.sh`
-refuses to start without it — correctly, because every corpus-gated test prints
-a skip line and passes when the variable is unset, so a lane run that way would
-be green without having measured anything. The battery here ran the other two
-lanes and left the calibration block out of its transcript, which is why the doc
-gate's lane claim reports SKIP rather than PASS; that SKIP is the one claim of
-thirty that is not a PASS. v1.4.0 did run that lane. This release changes the
-python denoise sidecar and one doc comment, and touches nothing the fit covers.
+**The calibration lane did not run before the tag; it ran on the tag the same
+day.** The release battery ran two lanes, not three, because the calibration
+corpus was believed deleted from this machine on 2026-09-03. That belief was
+wrong: the p36–p41 corpus has been at `~/autoshop-fixtures/fit-calibration/`
+throughout, as the roadmap's v1.3.2 entry already records, so the doc gate's
+lane claim reported SKIP at release for a reason that did not hold. After the
+release, `scripts/release_battery.sh` ran unmodified on the `v1.4.1` tag with
+the corpus and the weights in reach, all three lanes: library **1494 / 0 / 15**
+in the default lane and **1494 / 0 / 15** in the calibration lane (884.96 s;
+one SKIPPED, the mask-brush sample test, whose `AUTOSHADE_MB_SAMPLE_ROOT` sample
+is not on this machine), CLI 24, contract 2 + 2, doc-tests 0, GUI
+**190 / 0 / 1**, 1509 test names (+0 / −0) — and `check_docs.py --gates` on
+that transcript **30 PASS / 0 FAIL / 0 SKIP**.
 
 **The final gate.** v1.4.1 moves no renderer code, so the reference pair must
 render exactly as v1.4.0 rendered it. The 1.4.1 CLI's full-resolution 0.85
