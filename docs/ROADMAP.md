@@ -2,7 +2,55 @@
 
 > 这是**已发生之事的台账**，不是待办表：每一条要么是已发布的版本与实测数字，
 > 要么是带理由的终局裁定（一个测出来的数、一条仪器极限、一次用户拍板）。
-> 每项都附 `file:line` 或提交锚点，供新会话不重读全库即可接手。更新于 **2026-09-17**。
+> 每项都附 `file:line` 或提交锚点，供新会话不重读全库即可接手。更新于 **2026-09-19**。
+>
+> **v1.5.0 已发布**（2026-09-19，tag `v1.5.0` → `dfd9fa4`，release run `35438494808` 五工位绿
+> （windows 11 m 59 s、macos 14 m 08 s、linux 2 m 36 s、macos-battery 21 m 35 s、publish 11 s）；
+> 用户令「按顺序全部推完，然后走标准发布流程……趁这次机会，直接把所有我们可以调但是无法渲染的功能全部实现掉，
+> 允许和 LR 有轻微偏差，但是尽量兼容。然后直接发 1.5.0」）**：Lightroom 里能调的控件现在全部真的动像素——Detail、
+> Effects、Lens、Transform/Upright、相机配置文件与创意 Look、HDR 编辑模式与其 SDR 呈现、导入的污点修复、参数曲线
+> 与 Calibration；另加堆栈/合成（包围曝光、景深、曝光合成、全景）与自训 RAW 去噪网络。
+>
+> **资产 9 件，其中 1 件不由 tag 构建**：`autoshade-raw-denoise-v1.pth`（130,585,417 B，sha256 `6929ddd6…`）是训练产物，
+> 发布后手工上传并按发布器自身的格式与排序补进 `checksums.txt`（648 B 7 行 → 743 B 8 行）；侧车按
+> [python/denoise_raw.py:104,122-125](../python/denoise_raw.py) 里钉死的 URL / sha256 / 字节数按需拉取并拒绝不符者，
+> 不上传这件资产等于 AI 去噪对用户是坏的。**九件全部下载回来独立算 SHA-256，`sha256sum -c checksums.txt` 8/8 OK**；
+> 便携 zip 内两 exe 与独立资产 `cmp` 逐字节同，侧车 8 个 `.py` / 0 个 `test_*.py` / 无 `weights` 目录，
+> zip 内 5 个侧车与仓库哈希全等，解包 CLI 自报 `autoshade 1.5.0`。README / 官网资产表由发布字节回填（`d874a38`：
+> CLI 22,922,752 B、GUI 29,314,048 B、安装包 15,234,912 B、便携 20,540,206 B、macOS 通用 41,294,729 B、
+> Linux 9,927,675 B、macOS CLI 17,963,774 B；权重那一行发版提交里就已正确，回填脚本是**核验**它而不是假定）。
+> 发布页正文原写着「下面每个资产都可从该 tag 复现」，加上权重后这句不再成立，已改为按件区分。
+>
+> **官网**：`deploy_site.js` exit 0（24 件跟踪文件，4 新传 + 19 已有，purge OK），校验 **31/31**——23 个文件
+> 加 `/` 在剥掉 367 B 的 Cloudflare beacon 后与 git blob 逐字节相等（beacon 按 `static.cloudflareinsights.com`
+> 的形状剥，不按字节数：v1.3.x 是 359 B，本次 367 B），`_headers` 自身不是路由（取它返回 404.html/404，按设计），
+> 改为按**效果**验其七条规则：CSP / nosniff / DENY / Referrer-Policy 四条在 HTML 上，字体 `max-age=31536000, immutable`、
+> 图片与图标 `max-age=604800` 三条在静态件上，全部实际下发。线上首屏 `Download v1.5.0.`、15 个 `?v=1.5.0` 键、
+> 0 个旧键、八行资产字节与发布字节逐一相等。
+>
+> **本机**：`%LOCALAPPDATA%\Programs\AutoShade` 静默原地升级（跑之前先核安装包 sha256 == 发布值），安装器 exit 0，
+> 按文件验收：两 exe 的 sha256 与 `checksums.txt` 全等、FileVersion 1.5.0、CLI 自报 1.5.0，安装目录一个、卸载条目一条（1.5.0）、
+> 103 → 103 文件无增删（11,787,904,672 → 11,791,471,674 B，差额即两个更大的 exe）、权重 48 件 9,760,701,177 B 一字节未动、
+> 侧车 8 个与仓库逐一哈希相同且 0 个 `test_*.py`、PendingFileRenameOperations 14 条中 0 条涉 AutoShade、全程未启动 GUI。
+>
+> **打 tag 前的门**：三车道电池全绿（库 **1625 / 0 / 15** 两遍 479.89 s / 705.15 s、GUI **200 / 0 / 1**、CLI 25、契约 2+2、
+> 按名 **1640**＝+251 / −11；1 条 SKIPPED 是蒙版画笔样本测试，其 `AUTOSHADE_MB_SAMPLE_ROOT` 样本不在本机，自 v1.3.2 起每版都已具名披露）、
+> `check_docs.py --gates` **30 PASS / 0 FAIL / 0 SKIP**、clippy 两组 0、照片名 / 用户路径 / 令牌形状 grep 各 0。
+> **终门**（参考对）：校准后的构建对门已接受的四张图版 **0 px 不同**（065 / 085 / 100 在 2048×1365，全幅 9504×6336），
+> 且 `git diff 9c81e85 dfd9fa4 -- src/render src/render.rs src/stack src/bin python assets scripts site docs` 为空
+> ——发布树的渲染器与终门跑过的那棵逐字节相同，旧证据成立。
+>
+> **发版途中抓到并根治的缺陷（ETXTBSY）**：上一版 `93f90a0` 的 `debug-asserts` 曾红一条
+> （`claude_verifier_output_is_bounded_and_cannot_hang_the_worker`：`subprocess io: Text file busy (os error 26)`）。
+> 根因不是那条测试：`execve` 只要有**任何**进程把映像以写方式打开着就拒绝，而 `Command::spawn` 的 fork 会把本线程
+> 正在写的描述符复制进子进程，在它自己 `exec` 之前那个副本就是写者——于是 A 线程写完并关闭的桩脚本，会因为 B 线程
+> 启动了毫不相干的子进程而短暂不可执行。描述符是 `CLOEXEC`，窗口自己会关，POSIX 无可等对象。6 个模块 12 处写桩脚本
+> 再执行，只汇到两个 spawn：`run_sidecar_child` 与 claude 校验子进程，两处统一走新的
+> [`spawn_child`](../src/lib.rs)（只重试 `ErrorKind::ExecutableFileBusy`、上限 2 秒，`9fa92ab`）。**三个内核的行为是实测的，不是假定的**：
+> Linux 拒绝（WSL2 5.15 第一方 errno 26，及 run 35436156156 的 ubuntu 两 job 绿）、macOS **不**拒绝
+> （XNU 查的是它所**映射**的映像的写计数，`#!` 脚本的映像是解释器——测试在前提行喊出「this kernel does not refuse…」
+> 而不是空过，run 35436156156）、Windows 报共享冲突。本仓 12 处桩全是脚本，故该状态在 macOS 上不可达，
+> 两条测试按实测收窄到 `cfg(target_os = "linux")`（`dfd9fa4`）而不是放宽断言。
 >
 > **v1.4.1 已发布**（2026-09-17，tag `v1.4.1` → `af7f25e`，release run `35195987007` 五工位绿，8 资产回下载字节校验，官网 23/23 逐字节，本机已升；用户报障「AI降噪效果还不够。我需要它达到Lightroom级别的自动降噪效果。我刚刚尝试了一下星空图片的降噪，完全不是一个级别。」）**：
 > 实测方向与直觉相反——不是降噪不够，是**降过头并把星点削平**。v1.4.0 的 `denoise_planes` 用**本帧数据的 0.05 / 99.95 百分位**造进 DRUNet `[0,1]` 的仿射并两端硬裁，输出上限恰为 `igat(top)`：
