@@ -274,6 +274,22 @@
         </div>
         <div class="hint">AI auto-detects small spots; or tick <i>Paint mask</i> above, paint over a defect, then <i>Heal painted area</i>. Auto needs OPENAI_API_KEY (vision).</div>
       </div>
+      <div class="panel stack-panel" style="margin-top:14px">
+        <h3>Stack <span class="sub">· several frames into one</span></h3>
+        <div class="hint" style="margin-top:0">Merge several frames of one scene into a new master for <b>this</b> photo — it is the reference, so the result keeps its framing and its exposure. Local pixel compute, no AI. Saved to ./out; every later develop, export and download follows it.</div>
+        <div class="row">
+          <select class="stack-kind" title="HDR merge: an exposure bracket into one frame holding the whole range, with the recovered stops turned on for you. Exposure fusion: the same bracket blended where each frame looks best, with no HDR in between. Focus stack: a focus sweep into one frame sharp throughout. Noise stack: repeated frames of a still scene averaged, so the signal adds and the noise does not.">
+            <option value="hdr">HDR merge</option>
+            <option value="fuse">Exposure fusion</option>
+            <option value="focus">Focus stack</option>
+            <option value="noise">Noise stack</option>
+          </select>
+          <label class="chk" title="Alignment is the expensive half of a stack, and on frames that really are registered there is nothing for it to find — measured on a five-frame noise stack, the grain fell 2.03x with it skipped and 1.97x with it running. Leave it off for handheld frames."><input type="checkbox" class="stack-tripod" /> Tripod (skip alignment)</label>
+          <button class="stack-run" type="button">▦ Stack</button>
+        </div>
+        <select class="stack-with" multiple size="5" title="The other frames of this scene, from the gallery page you are on"></select>
+        <div class="hint">Pick the other frames above (Ctrl/⌘-click for several; they come from the gallery page you are on). They must be the same size as this photo. An HDR merge also reports the stops it recovered above this frame's white, and turns the SDR rendition on with that much room.</div>
+      </div>
     </div>
   </div>
 </template>
@@ -437,6 +453,9 @@ document.addEventListener("keydown", e => {
 const PAGE = 200;          // gallery page size (a folder can hold thousands)
 let pageOffset = 0;        // current page's first GLOBAL index
 let listSeq = 0;           // latest-wins: rapid Prev/Next answers race
+// The rows the gallery is currently showing, kept so the Stack panel can offer
+// the other frames of a scene by name instead of asking for id numbers.
+let listItems = [];
 
 // The last {recipe, master} this photo was LOADED or SAVED with — the web's
 // equivalent of the desktop's saved baseline. Slider work AND the fill/heal
@@ -520,6 +539,7 @@ async function loadList(offset) {
     $("#page-prev").disabled = at <= 0;
     $("#page-next").disabled = at + data.shown >= total;
   } else { pb.hidden = true; }
+  listItems = data.items || [];
   grid.innerHTML = `<div class="ghead">${total} source${total===1?"":"s"}${total>PAGE?` · page from ${at+1}`:""}</div>`;
   for (const it of data.items) {
     const div = document.createElement("div");
@@ -1053,6 +1073,13 @@ async function selectPhoto(id, stem, el) {
       if (fr.ok) takeFresh(await fr.json());
     } catch (_) { /* older server without /api/fresh-base */ }
     if (seq !== selectSeq) return;
+    // A recipe.json that names no `schema_era` was written before R25's keys
+    // (the field's own serde default is 0). State it, so the save does not
+    // pass the FILE's silence off as this page's — the server stamps a silent
+    // body with the current control set (serve.rs `body_recipe`), and a
+    // current stamp would let the merge strip Lightroom values this recipe
+    // never held. Every recipe the server builds states its own.
+    if (!("schema_era" in loaded)) loaded.schema_era = 0;
     state.recipe = Object.assign(structuredClone(DEFAULT_RECIPE), loaded);
     markSaved(); // this IS the saved state until the user edits it
     // Which file answered matters: a Lightroom sidecar beside the RAW that
@@ -1375,6 +1402,77 @@ async function selectPhoto(id, stem, el) {
   }
   main.querySelector(".heal-auto").onclick = () => runHeal(false);
   main.querySelector(".heal-painted").onclick = () => runHeal(true);
+
+  // ▦ Stack: several frames of one scene into a new master for THIS photo.
+  // The web has no variant strip, so where the desktop GUI lands a ▦ card the
+  // merged master joins the SESSION CHAIN — the same mechanism heal and the
+  // generative fill use — and every later develop, export and download
+  // follows it without a second concept to learn.
+  const stackWith = main.querySelector(".stack-with");
+  const fillStackList = () => {
+    // A re-listing must not silently drop what the user already ticked.
+    const keep = new Set(Array.from(stackWith.selectedOptions).map(o => o.value));
+    stackWith.innerHTML = "";
+    for (const it of listItems) {
+      if (it.id === state.id) continue;   // the reference is this photo itself
+      const o = document.createElement("option");
+      o.value = String(it.id); o.textContent = it.stem;
+      if (keep.has(o.value)) o.selected = true;
+      stackWith.appendChild(o);
+    }
+  };
+  fillStackList();
+  main.querySelector(".stack-run").onclick = async () => {
+    const extra = Array.from(stackWith.selectedOptions).map(o => Number(o.value));
+    if (!extra.length) { setStatus("pick the other frames of this scene first"); return; }
+    // Same one-retouch-at-a-time gate as fill and heal (see the fill handler).
+    if (retouchBusy) { setStatus("another fill/heal/stack is still running — wait for it to finish"); return; }
+    const kind = main.querySelector(".stack-kind").value;
+    const tripod = main.querySelector(".stack-tripod").checked;
+    retouchBusy = true;
+    const btn = main.querySelector(".stack-run");
+    btn.disabled = true;
+    setStatus(`stacking ${extra.length + 1} frames… (full resolution, local compute, can take minutes)`);
+    // The answer belongs to THIS photo/selection generation (see the fill handler).
+    const reqId = state.id, reqSeq = selectSeq;
+    try {
+      const r = await fetch("/api/stack", {method:"POST", headers:{"Content-Type":"application/json"},
+        body: JSON.stringify({ ids: [reqId, ...extra], kind, tripod,
+                               master: state.sessionMaster || undefined })});
+      // r.ok FIRST — a failed stack saved nothing (see the fill handler).
+      if (!r.ok) {
+        const t = await r.text();
+        const stale = reqId !== state.id || reqSeq !== selectSeq;
+        setStatus((stale ? "the stack for another photo failed: " : "stack failed: ") + t);
+        return;
+      }
+      if (reqId !== state.id || reqSeq !== selectSeq) { setStatus("the stack for another photo finished — its ./out master is saved; reopen that photo to see it"); return; }
+      const blob = await r.blob();
+      if (reqId !== state.id || reqSeq !== selectSeq) { setStatus("the stack for another photo finished — its ./out master is saved; reopen that photo to see it"); return; }
+      setAfterSrc(afterImg, blob);
+      const saved = outPath(r), ev = Number(r.headers.get("X-Stack-Headroom-EV") || 0);
+      if (saved) {
+        state.sessionMaster = saved;
+        // An HDR merge's recovered stops are only reachable through the SDR
+        // rendition stage, so turn it on with the room the merge measured —
+        // the same recipe the CLI writes beside its master and the GUI puts
+        // on its ▦ card. Without it the highlights are in the file and
+        // nothing shows them.
+        if (ev > 0) { state.recipe.hdr_edit = true; state.recipe.hdr_max_ev = ev; syncSliders(); }
+        pushHistory(state.recipe); renderAfter();
+      }
+      const travel = Number(r.headers.get("X-Stack-Travel") || 0);
+      const unc = Number(r.headers.get("X-Stack-Uncovered") || 0);
+      let line = `stacked ${r.headers.get("X-Stack-Frames") || "?"} frames (${kind})${saved ? " → " + saved : ""}`;
+      if (travel >= 0.5) line += ` · aligned by up to ${travel.toFixed(1)} px`;
+      if (unc > 0) line += ` · ${unc.toFixed(2)}% of the frame was outside at least one source`;
+      if (ev > 0) line += ` · recovered ${ev.toFixed(2)} EV above this frame's white`;
+      setStatus(line + " (in ./out; Save records it for reopening)");
+    } catch (e) {
+      const stale = reqId !== state.id || reqSeq !== selectSeq;
+      setStatus((stale ? "the stack for another photo failed: " : "stack failed: ") + (e.message || e));
+    } finally { retouchBusy = false; btn.disabled = false; }
+  };
 }
 
 function showVerdict(v) {

@@ -277,6 +277,30 @@ fn a_lightroom_rewrite_keeps_what_it_did_not_touch_and_yields_what_it_did() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// v1.5.0: a companion's EXPLICIT zero (`EditRecipe::explicit_zero`) through
+/// a Lightroom rewrite. Untouched, the zero Lightroom re-serialises is the one
+/// we wrote, so the payload's list stands; edited away from it in Lightroom,
+/// Lightroom's number wins and the zero's mark leaves with the zero — the
+/// list is reconciled as one leaf, never kept beside a value it no longer
+/// describes.
+#[test]
+fn an_explicit_companion_zero_survives_a_rewrite_and_yields_to_an_edit() {
+    let mut original = EditRecipe { sharpening: 40.0, ..Default::default() };
+    original.set_resolved("sharpen_detail", 0.0);
+    let doc = recipe_to_xmp(&original);
+    assert!(doc.contains("crs:SharpenDetail=\"0\""), "the real zero goes out as one: {doc}");
+
+    let back = xmp_to_recipe(&lightroom_like(&original, &original));
+    assert_eq!(back.explicit_zero, vec!["sharpen_detail".to_string()]);
+    assert_eq!(back.resolved("sharpen_detail"), 0.0);
+
+    let mut edited = original.clone();
+    edited.set_resolved("sharpen_detail", 40.0);
+    let back = xmp_to_recipe(&lightroom_like(&original, &edited));
+    assert!(back.explicit_zero.is_empty(), "{:?}", back.explicit_zero);
+    assert_eq!(back.resolved("sharpen_detail"), 40.0, "Lightroom's Detail wins");
+}
+
 #[test]
 fn rasters_are_placed_beside_the_develop_on_a_disclosing_read_and_never_on_a_silent_one() {
     let dir = scratch("place-src");

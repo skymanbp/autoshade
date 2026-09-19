@@ -21,6 +21,11 @@ pub(crate) struct AutoShadeApp {
     /// frame, so an undo, a variant switch or a version load needs no rotation
     /// code of its own.
     pub(crate) base_turns: u8,
+    /// The active pixel source's full-resolution SHORT EDGE, cached against
+    /// the path and its modification time it was read from
+    /// (`film_short_edge`, v1.5.0) — the film the Detail panel's radii are
+    /// stated in.
+    pub(crate) film_edge: Option<(PathBuf, Option<std::time::SystemTime>, Option<u32>)>,
     pub(crate) before_tex: Option<egui::TextureHandle>,
     pub(crate) after_tex: Option<egui::TextureHandle>,
     pub(crate) recipe: EditRecipe,
@@ -472,10 +477,19 @@ pub(crate) struct AutoShadeApp {
     pub(crate) wb_picking: bool,                      // next image click samples a neutral point
     // --- colour-range sample (Range Mask) ---
     pub(crate) range_picking: Option<usize>,          // next image click keys masks[i]'s Color range
+    // --- Point Color eyedropper (v1.5.0) ---
+    pub(crate) point_color_picking: bool,             // next image click adds a Point Color swatch
     // --- clone stamp ---
     pub(crate) clone_mode: bool,                      // brush paints the clone target; Alt+click = source
     pub(crate) clone_src: Option<(f32, f32)>,         // picked source point, original-frame normalized
     pub(crate) clone_fullres: bool,                   // clone on the full-res develop (RAW only)
+    // --- stacking (v1.5.0 Track S) ---
+    // The Stack fold's own two dials. Deliberately NOT in `Prefs`: which merge
+    // a set of frames wants is a property of that shoot, not a taste — a
+    // bracket and a focus sweep are different jobs, and remembering last
+    // week's answer would run the wrong one on the first click.
+    pub(crate) stack_kind: autoshade::stack::merge::StackKind,
+    pub(crate) stack_tripod: bool,                    // frames already registered — skip alignment
     // --- cancellable retouch/generative workers ---
     // Cancel bumps `gen_epoch`; a worker's Retouched message carries the epoch
     // it was started under and is discarded on mismatch (the canvas is never
@@ -1606,6 +1620,7 @@ impl Default for AutoShadeApp {
             base_preview: None,
             source_preview: None,
             base_turns: 0,
+            film_edge: None,
             before_tex: None,
             after_tex: None,
             recipe: EditRecipe::default(),
@@ -1795,9 +1810,12 @@ impl Default for AutoShadeApp {
             paste_geometry: false,
             wb_picking: false,
             range_picking: None,
+            point_color_picking: false,
             clone_mode: false,
             clone_src: None,
             clone_fullres: false,
+            stack_kind: autoshade::stack::merge::StackKind::Hdr,
+            stack_tripod: false,
             gen_epoch: 0,
             gen_cancel: None,
             analyze_inflight: false,

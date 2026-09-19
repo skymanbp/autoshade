@@ -272,7 +272,9 @@ impl AutoShadeApp {
                             // and WITHOUT the geometry stage — the mask lives in
                             // the original frame (handle_paint), and the range
                             // reference builds (canvas.rs) state that frame the
-                            // same way.
+                            // same way. At the source's own film edge, as the
+                            // canvas develops it: a 2048 px working copy shows
+                            // the Detail panel the way the canvas does.
                             let base = autoshade::render::source_pixels(
                                 &path,
                                 (raw && !full_res).then_some(2048),
@@ -282,6 +284,7 @@ impl AutoShadeApp {
                                 &recipe,
                                 &autoshade::diag::pixels(),
                                 autoshade::render::MaskFrame::without_downstream(&recipe.lens_profile),
+                                autoshade::decode::film_short_edge(&path),
                             ))
                         },
                         "this card's look",
@@ -448,6 +451,91 @@ impl AutoShadeApp {
                     let img = autoshade::decode::load_image(&out)?.thumbnail(edge, edge);
                     // NewDenoised: a new ◈ card hangs off the master.
                     Ok((img, RetouchNote::Denoised { out: out.clone(), on_mosaic }, out, RetouchKind::NewDenoised))
+                })();
+                if res.is_err() {
+                    release_empty_claim(&out_claim);
+                }
+                Msg::Retouched(epoch, Box::new(res))
+            },
+            move |e| {
+                // The worker PANICKED (caught by spawn_worker), so the tail
+                // above never ran — release here too.
+                release_empty_claim(&out_panic);
+                Msg::Retouched(epoch, Box::new(Err(e)))
+            },
+        );
+    }
+
+    /// Stack this card's frame with others (v1.5.0 Track S).
+    ///
+    /// The ACTIVE card's source is frame 0 — the reference, whose framing and
+    /// whose exposure the merge keeps (`stack::merge::merge`) — and `extra`
+    /// are the frames the user picked beside it. The merged master lands as a
+    /// NEW ▦ card carrying this card's develop, on exactly the ◈ denoise
+    /// card's terms: the frame you started from keeps its own pixels.
+    ///
+    /// Full resolution, always, for the denoise landing's reason: a master
+    /// baked from a working copy caps every later export at that size.
+    pub(crate) fn start_stack(&mut self, extra: Vec<PathBuf>) {
+        let Some(path) = self.active_source_path() else { return };
+        if self.busy || extra.is_empty() {
+            return;
+        }
+        let lang = self.lang; // pre-spawn UI statuses only; results land as FACTS (L12#4)
+        let Some(out) = unique_out(&path, "stack") else {
+            self.status = tr(lang, "over 999 retouch masters for this photo — clean up ./out first").into();
+            return;
+        };
+        // This fold's OWN dials, captured at the click like every other input
+        // a worker reads.
+        let (kind, tripod) = (self.stack_kind, self.stack_tripod);
+        let mut inputs = vec![path.clone()];
+        inputs.extend(extra);
+        let frames = inputs.len();
+        self.busy = true;
+        self.status = trf(
+            lang,
+            "Stacking {n} frames… (local pixel compute, minutes at full resolution)",
+            &[("n", &frames.to_string())],
+        );
+        let edge = self.canvas_edge(); // show at the CANVAS's res (canvas_edge)
+        let out_claim = out.clone(); // release the claim on failure (worker tail)
+        let out_panic = out.clone(); // …and on a worker panic (see the error closure)
+        let (epoch, _flag) = self.arm_cancel(); // local compute: Cancel = abandon (epoch discard)
+        self.spawn_worker(
+            move || {
+                // Every frame is held decoded at once, so the commit is the
+                // one-frame estimate times the number of them.
+                let each = crate::budget::estimate_mb(Some(&path));
+                let _mem = crate::budget::heavy_permit(each.saturating_mul(frames as u64));
+                let res = (|| -> RetouchDone {
+                    let opts = autoshade::stack::merge::MergeOptions {
+                        kind,
+                        // A tripod's frames are registered already, and on
+                        // frames that really are registered the aligner has
+                        // nothing to find and costs a little (`MergeOptions`).
+                        align: (!tripod).then_some(autoshade::stack::align::AlignParams::DEFAULT),
+                    };
+                    let done = autoshade::stack::stack_files(&inputs, &opts, None, &out)?;
+                    // baked-by-construction: the ./out master this job just wrote.
+                    let img = autoshade::decode::load_image(&out)?.thumbnail(edge, edge);
+                    let m = &done.merged;
+                    Ok((
+                        img,
+                        RetouchNote::Stacked {
+                            out: out.clone(),
+                            kind,
+                            frames,
+                            // The WORST frame's travel: one badly-registered
+                            // frame is what makes a stack worth looking at
+                            // before trusting it, and an average would hide it.
+                            travel: m.travel.iter().copied().fold(0.0f32, f32::max),
+                            uncovered: m.uncovered,
+                            headroom_ev: m.headroom_ev,
+                        },
+                        out,
+                        RetouchKind::NewStacked,
+                    ))
                 })();
                 if res.is_err() {
                     release_empty_claim(&out_claim);
@@ -747,6 +835,58 @@ impl AutoShadeApp {
         // sitting in the middle of dust-spot healing. Everything below is
         // PIXEL work on the current rendition.
         //
+        // v1.5.0 F9 — what arrived WITH the photograph, above every tool the
+        // photographer might reach for, because it is not a tool at all: it is
+        // a statement about what is already on this canvas. Its own group, per
+        // the user's 2026-09-12 directive that a control belongs to its own
+        // section rather than borrowing a neighbour's.
+        //
+        // Silent on the photographs that carry none, which is 150 of the
+        // reference library's 175.
+        if !self.recipe.retouch.is_empty() {
+            let total = self.recipe.retouch.len();
+            let synth =
+                self.recipe.retouch.iter().filter(|a| a.origin.is_synthesised()).count();
+            ui.add_space(SPACE_XS);
+            group_caption(ui, tr(lang, "Imported removal"));
+            ui.label(
+                egui::RichText::new(trf(
+                    lang,
+                    "Lightroom removed {n} area(s) here; re-solved from this photo's own pixels.",
+                    &[("n", &total.to_string())],
+                ))
+                .weak()
+                .small(),
+            );
+            if synth > 0 {
+                // The sentence that keeps the panel honest: for these areas
+                // the picture on screen is THIS app's repair, and Adobe's own
+                // result is not in the sidecar to be shown.
+                ui.label(
+                    egui::RichText::new(trf(
+                        lang,
+                        "{n} of them were synthesised by Adobe — those pixels are not in the sidecar, so what you see is this app's repair.",
+                        &[("n", &synth.to_string())],
+                    ))
+                    .weak()
+                    .small(),
+                );
+                ui.add_enabled_ui(!self.busy, |ui| {
+                    if action(ui, true, tr(lang, "✨ Regenerate those areas"))
+                        .on_hover_text(tr(lang, "Paint the synthesised areas into the shared brush mask and run the generative model over exactly them — an empty prompt removes, and the result lands as a new ✨ AI generated card (gpt-image API call — costs per image)"))
+                        .clicked()
+                    {
+                        // Paint first, and only spawn if something landed —
+                        // `start_fill` over a blank mask would refuse with a
+                        // status line that reads like the button is broken.
+                        if self.paint_imported_removals() > 0 {
+                            self.start_fill();
+                        }
+                    }
+                });
+            }
+        }
+
         // Mask tools shared by Fill AND Heal — one brush, two consumers. They
         // hang BARE between the sections that use them (#14b), which read as
         // three peers with three loose controls above them; the caption says

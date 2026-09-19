@@ -50,7 +50,8 @@ pub(crate) struct RestoredDevelop {
     pub(crate) imported_masks: usize,
     /// R24-5 M0, the GLOBAL counterpart of `mask_import`: `crs:` properties
     /// the sidecar carries on its own Description that this engine does not
-    /// model (LR's global Texture, Grain, the Transform/Calibration blocks).
+    /// model (LR's creative Look, its `CameraProfileDigest`, a key from a
+    /// newer Camera Raw than this reader knows).
     /// The merge PRESERVES them — this is the sentence saying they are there,
     /// which no surface used to say, so a photo that renders differently in
     /// Lightroom had no explanation on screen. Its own channel, like
@@ -384,7 +385,8 @@ pub(crate) fn read_saved_develop_locked(src: &std::path::Path) -> RestoredDevelo
 ///
 /// `passthrough` is per-photo too, but it is resolved BEFORE this function
 /// rather than in it (`start_paste`, R25 P8): the map is Lightroom's own
-/// Transform / Calibration block read off ONE document, and the answer for a
+/// Transform block and camera profile name read off ONE document, and the
+/// answer for a
 /// foreign target is "we know nothing", not "look up what the target's last
 /// save happened to record". An empty map is what makes that literal — the
 /// merge strips only keys the recipe carries, so the target's own block stays

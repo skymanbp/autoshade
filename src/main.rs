@@ -22,6 +22,7 @@ use autoshade::pipeline::{
     GradeRequest,
 };
 use autoshade::recipe::{DirectionAdherence, EditRecipe, GradeStrength};
+use autoshade::stack::merge::{MergeOptions, StackKind};
 use autoshade::style::StyleIndex;
 
 #[derive(Parser)]
@@ -124,10 +125,15 @@ enum Command {
         reference_image: bool,
     },
     /// Render an existing EditRecipe onto a RAW and save the developed image.
+    /// The recipe may be the JSON `analyze` writes, or a Lightroom / Camera Raw
+    /// `.xmp` sidecar — the same import the desktop app runs when it opens a
+    /// photo that has one.
     Apply {
         /// Path to the RAW file.
         raw: PathBuf,
-        /// Path to the recipe JSON produced by `analyze`.
+        /// Path to the recipe JSON produced by `analyze`, or to a Lightroom /
+        /// Camera Raw `.xmp` sidecar (imported, with the same disclosure of
+        /// anything the import could not carry).
         recipe: PathBuf,
         /// Output image path (extension selects format: .jpg / .png / .tif).
         #[arg(short, long)]
@@ -238,6 +244,34 @@ enum Command {
         /// SCUNet model tier for a BAKED image (see `auto --denoise-model`).
         #[arg(long)]
         model: Option<String>,
+    },
+    /// Merge several frames of ONE scene into a single 16-bit master in ./out:
+    /// an exposure bracket into a frame that holds the whole range (`hdr`) or
+    /// into a finished-looking blend (`fuse`), a focus sweep into a frame
+    /// sharp throughout (`focus`), or repeated frames into one with less noise
+    /// (`noise`). RAWs are developed neutrally first; baked files are read as
+    /// they are. Handheld frames are aligned onto the FIRST one; `--no-align`
+    /// skips that for a tripod. Deterministic, local, no API key.
+    Stack {
+        /// The frames, in order. The FIRST is the reference: its framing and
+        /// its exposure are what the result is registered to.
+        #[arg(required = true, num_args = 2..)]
+        inputs: Vec<PathBuf>,
+        /// hdr | fuse | focus | noise.
+        #[arg(long, default_value = "hdr")]
+        kind: String,
+        /// Output path (default: ./out/<first stem>.stacked.tif).
+        #[arg(short, long)]
+        out: Option<PathBuf>,
+        /// The frames are already registered (tripod, or a camera that stacked
+        /// them): skip the alignment, which on registered frames can only do
+        /// harm.
+        #[arg(long)]
+        no_align: bool,
+        /// Merge at a SIZE (see `apply --long-edge`): long edge in pixels,
+        /// aspect kept, never upscaled. 0 or omitted = full resolution.
+        #[arg(long)]
+        long_edge: Option<u32>,
     },
     /// Batch-process every RAW under a folder (resumes by skipping RAWs that
     /// already have a saved develop). Renders go to ./out; develop state goes
@@ -587,6 +621,9 @@ fn main() -> Result<()> {
             )
         }
         Command::Denoise { input, out, strength, model } => denoise_cmd(&input, out, strength, model),
+        Command::Stack { inputs, kind, out, no_align, long_edge } => {
+            stack_cmd(&inputs, &kind, out, no_align, long_edge)
+        }
         Command::Batch { dir, render, limit, include_baked, jobs, long_edge } => {
             batch_cmd(&dir, render, limit, include_baked, jobs, long_edge)
         }
@@ -1435,11 +1472,32 @@ fn export_opts(long_edge: Option<u32>) -> Option<render::ExportOpts> {
     Some(render::ExportOpts { long_edge: Some(le), ..Default::default() })
 }
 
-fn apply_cmd(raw: &Path, recipe_path: &Path, out: &Path, long_edge: Option<u32>) -> Result<()> {
+/// Read a recipe FILE, whichever of its two formats it is: the JSON `analyze`
+/// writes, or a Lightroom / Camera Raw `.xmp` sidecar.
+///
+/// The format is DETECTED rather than assumed, and that is the whole point. A
+/// sidecar is the artefact this engine spends most of its arithmetic learning
+/// to read, and the CLI was the one front end that could not render one: the
+/// desktop app and the web UI both reach `xmp::xmp_to_recipe_for_photo` when
+/// they open a photo that has a sidecar, while `apply` demanded JSON and
+/// answered a parse error.
+///
+/// Photo-aware, because a sidecar's crop and mask geometry are decoded in the
+/// frame the DOCUMENT declares and then moved into the frame this engine
+/// renders — that turn needs the photograph. The importer also stamps
+/// `coord_era`, so `migrate_recipe_coord_frame` stays inert on this path
+/// instead of turning the same numbers a second time.
+fn read_recipe_at(recipe_path: &Path, raw: &Path) -> Result<EditRecipe> {
     let text = autoshade::store::read_text_capped(recipe_path, autoshade::store::MAX_STORE_JSON)
         .with_context(|| format!("read recipe {}", recipe_path.display()))?;
-    let mut recipe: EditRecipe =
-        serde_json::from_str(&text).with_context(|| format!("parse recipe {}", recipe_path.display()))?;
+    if recipe_path.extension().is_some_and(|e| e.eq_ignore_ascii_case("xmp")) {
+        return Ok(autoshade::xmp::xmp_to_recipe_for_photo(&text, raw));
+    }
+    serde_json::from_str(&text).with_context(|| format!("parse recipe {}", recipe_path.display()))
+}
+
+fn apply_cmd(raw: &Path, recipe_path: &Path, out: &Path, long_edge: Option<u32>) -> Result<()> {
+    let mut recipe: EditRecipe = read_recipe_at(recipe_path, raw)?;
     // Store-written recipes reference their rasters by bare file name — anchor
     // them to the recipe's own directory (legacy cwd-relative refs untouched).
     if let Some(base) = recipe_path.parent() {
@@ -1713,6 +1771,64 @@ fn auto_cmd(
 ///
 /// The route for a small denoised deliverable is the honest one: denoise to a
 /// master, then `apply … --long-edge N` from it.
+/// Merge several frames of one scene into one master.
+///
+/// Every frame is developed or loaded at the SAME size before anything else,
+/// and a frame that comes out a different size is refused by name rather than
+/// resized to fit: two frames of different dimensions are two different
+/// framings, and silently scaling one onto the other would hand the aligner a
+/// zoom it would faithfully solve for.
+fn stack_cmd(
+    inputs: &[PathBuf],
+    kind: &str,
+    out: Option<PathBuf>,
+    no_align: bool,
+    long_edge: Option<u32>,
+) -> Result<()> {
+    let kind = StackKind::from_store_str(kind).with_context(|| {
+        let all: Vec<&str> = StackKind::ALL.iter().map(|k| k.store_str()).collect();
+        format!("unknown stack kind `{kind}` — expected one of {}", all.join(", "))
+    })?;
+    let out = out.unwrap_or_else(|| default_out(&inputs[0], "stacked", "tif"));
+    for f in inputs {
+        pipeline::guard_readonly(&out, f)?;
+    }
+    ensure_parent(&out)?;
+    let opts = MergeOptions {
+        kind,
+        align: (!no_align).then_some(autoshade::stack::align::AlignParams::DEFAULT),
+    };
+    println!("stacking {} frames ({}) ...", inputs.len(), kind.store_str());
+    // The loading, the merge and the master are `stack::stack_files` — the one
+    // path the GUI's stack worker takes too. What is left here is the report.
+    let done = autoshade::stack::stack_files(inputs, &opts, long_edge.filter(|e| *e > 0), &out)?;
+    let (merged, w, h) = (&done.merged, done.width, done.height);
+    for (k, (ev, px)) in merged.exposures.iter().zip(&merged.travel).enumerate() {
+        println!("  frame {}: {ev:+.2} EV, aligned by {px:.1} px", k + 1);
+    }
+    if merged.uncovered > 0.0 {
+        println!("  {:.2}% of the frame was outside at least one source", 100.0 * merged.uncovered);
+    }
+    if merged.headroom_ev > 0.0 {
+        println!(
+            "  recovered {:.2} EV above the first frame's white — saved as HDRMaxValue",
+            merged.headroom_ev
+        );
+    }
+    println!("stacked -> {} ({} x {})", out.display(), w, h);
+    if merged.headroom_ev > 0.0 {
+        let recipe = EditRecipe { hdr_edit: true, hdr_max_ev: merged.headroom_ev, ..Default::default() };
+        let rp = write_recipe(
+            &inputs[0],
+            &recipe,
+            Some(default_out(&out, "recipe", "json")),
+            autoshade::diag::stderr(),
+        )?;
+        println!("recipe -> {} (HDR mode on, so the SDR rendition sliders mean something)", rp.display());
+    }
+    Ok(())
+}
+
 fn denoise_cmd(
     input: &Path,
     out: Option<PathBuf>,
@@ -3248,6 +3364,72 @@ mod tests {
     /// `lightroom_import_note` (or gate it on `decode::is_raw` being FALSE)
     /// and the brush arm goes silent again; drop the `is_raw` guard entirely
     /// and the baked arm starts consulting a neighbouring `.xmp` that belongs
+    /// `apply` takes a Lightroom sidecar, not only the JSON `analyze` writes.
+    ///
+    /// Every other front end could already render a photographer's own edit:
+    /// the desktop app and the web UI import the sidecar when they open a photo
+    /// that has one. The CLI could not, which made the one artefact this engine
+    /// is built to read the one thing it could not be pointed at — and made the
+    /// Lightroom experiment kit unmeasurable, since measuring it means
+    /// rendering each case's sidecar and comparing with Lightroom's export of
+    /// the same file.
+    ///
+    /// Both arms are asserted, because the change is a DETECTION: a reader that
+    /// took the sidecar branch for everything would pass a one-armed test.
+    #[test]
+    fn apply_reads_a_lightroom_sidecar_as_well_as_a_recipe_json() {
+        let root = std::env::temp_dir()
+            .join(format!("autoshade-cli-xmp-recipe-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        // The photograph need not exist: it is consulted only for the frame
+        // turn, and this document declares no orientation of its own.
+        let photo = root.join("photo.ARW");
+
+        let side = root.join("edit.xmp");
+        std::fs::write(
+            &side,
+            "\
+<x:xmpmeta xmlns:x=\"adobe:ns:meta/\" x:xmptk=\"Adobe XMP Core 5.6-c145\">
+ <rdf:RDF xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\">
+  <rdf:Description rdf:about=\"\"
+    xmlns:crs=\"http://ns.adobe.com/camera-raw-settings/1.0/\"
+    crs:Version=\"15.5.1\"
+    crs:ProcessVersion=\"15.4\"
+    crs:Exposure2012=\"+1.50\"
+    crs:HasSettings=\"True\"/>
+ </rdf:RDF>
+</x:xmpmeta>
+",
+        )
+        .unwrap();
+        let from_xmp = read_recipe_at(&side, &photo).expect("a sidecar is a recipe file");
+        assert!(
+            (from_xmp.exposure_ev - 1.5).abs() < 1e-6,
+            "the sidecar's +1.50 EV did not arrive: {}",
+            from_xmp.exposure_ev
+        );
+
+        let js = root.join("recipe.json");
+        std::fs::write(&js, "{\"exposure_ev\": -0.75}").unwrap();
+        let from_json = read_recipe_at(&js, &photo).expect("the JSON arm still reads");
+        assert!(
+            (from_json.exposure_ev + 0.75).abs() < 1e-6,
+            "the JSON's -0.75 EV did not arrive: {}",
+            from_json.exposure_ev
+        );
+
+        // An .xmp that is not XMP at all must not be read as one silently: the
+        // importer answers a neutral recipe for an unparseable document, which
+        // is the disclosed behaviour every other surface already has.
+        let junk = root.join("junk.xmp");
+        std::fs::write(&junk, "this is not a sidecar").unwrap();
+        let neutral = read_recipe_at(&junk, &photo).expect("an unreadable sidecar is not an error");
+        assert_eq!(neutral.exposure_ev, EditRecipe::default().exposure_ev);
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// to somebody else's file.
     #[test]
     fn a_lossy_lightroom_sidecar_is_disclosed_on_the_cli() {

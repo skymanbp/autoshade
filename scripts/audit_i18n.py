@@ -63,6 +63,7 @@ RECIPE = (REPO / "src" / "recipe.rs").read_text(encoding="utf-8")
 ADVISOR = (REPO / "src" / "advisor" / "mod.rs").read_text(encoding="utf-8")
 RATIONALE = (REPO / "src" / "rationale.rs").read_text(encoding="utf-8")
 STYLE = (REPO / "src" / "style.rs").read_text(encoding="utf-8")
+STACK = (REPO / "src" / "stack" / "merge.rs").read_text(encoding="utf-8")
 
 # ── Dynamic-key registry ────────────────────────────────────────────────────
 # Every `tr(lang, <non-literal>)` call site must match one of these argument
@@ -77,6 +78,11 @@ DYNAMIC_SITES = [
     (r"^(?:self\.variants\[self\.active\]\.|v\.)?kind\.label\(\)", "VariantKind::label"),
     (r"^(?:self\.theme|t)\.label\(\)", "ThemePref::label"),
     (r"^(?:self\.exp_format|f)\.label\(\)", "ExportFormat::label"),
+    # v1.5.0 Track S: the four merges, named in the Stack fold's picker and in
+    # the landing line. The labels live in the library beside their persisted
+    # spellings (one table, so the two cannot drift), and the extractor below
+    # takes that table's LABEL column.
+    (r"^(?:self\.stack_kind|k|kind)\.label\(\)", "StackKind::label"),
     # S2: the index build's phase names (`style::BuildStage::label`), rendered
     # by the AI panel's progress line and the status bar.
     (r"^stage\.label\(\)", "BuildStage::label"),
@@ -87,6 +93,12 @@ DYNAMIC_SITES = [
     (r"^EXPORT_SPACES\[", "EXPORT_SPACES"),
     (r"^GRADE_REGIONS\[", "GRADE_REGIONS"),
     (r"^CROP_ASPECTS\[", "CROP_ASPECTS"),
+    # v1.5.0 F6. Both key sets are extracted from their own named arrays in
+    # DYNAMIC_SOURCES above, so a seventh Upright mode or a fourth solver note
+    # still fails the zh check; these two entries only say that the call-site
+    # SPELLINGS are the known ones.
+    (r"^MODES\[", "Upright modes"),
+    (r"^upright_note\b", "Upright solver notes"),
     (r"^what\b", "clipping-triangle what"),
     (r"^name\b", "named rows (CURVE_CHANNELS / HSL_BANDS / GRADE_REGIONS / MaskRole)"),
     (r"^label\b", "AI segmentation labels"),
@@ -111,6 +123,7 @@ DYNAMIC_SITES = [
 #   ("array", src, "const NAME")      literals inside the [...] initialiser
 #   ("impl_fn", src_name, "impl Type", "fn name")  literals inside the fn body
 #   ("calls", src, "name(")           literal FIRST arguments of name(...)
+#   ("tuple_col", src, "const NAME", i)  the i-th literal of each (...) row
 DYNAMIC_SOURCES = [
     ("array", "gui", "const CURVE_CHANNELS"),
     # Round-12 L16-7: the GUI re-exports the recipe's own band table (one
@@ -119,7 +132,18 @@ DYNAMIC_SOURCES = [
     ("array", "gui", "const GRADE_REGIONS"),
     ("array", "gui", "const EXPORT_SPACES"),
     ("array", "gui", "const CROP_ASPECTS"),
+    # v1.5.0 F6: the Upright dropdown's six modes, and the three answers to
+    # "which side solved this photo" — both named arrays so a seventh mode or
+    # a fourth answer without a zh pair fails this gate.
+    ("array", "gui", "const MODES"),
+    ("array", "gui", "const UPRIGHT_NOTES"),
     ("impl_fn", "gui", "impl VariantKind", "fn label"),
+    # v1.5.0 Track S. `fn label` itself reads the SPELLINGS table and holds no
+    # literal of its own, and that table's other column is a PERSISTED format
+    # that must never be translated — so the label column is taken by index
+    # rather than the whole array. A fifth merge without a zh pair fails the
+    # gate the way a fourth export destination does.
+    ("tuple_col", "stack", "const SPELLINGS", 1),
     ("impl_fn", "gui", "impl ThemePref", "fn label"),
     # 阶段4 delivery format+depth labels (model.rs); a sixth variant without
     # a zh pair fails the gate.
@@ -175,7 +199,8 @@ ALLOWED_BYPASS = {
     "Esc",        # keyboard key name (house style, like the shortcut combos)
 }
 
-SRC = {"gui": GUI, "recipe": RECIPE, "advisor": ADVISOR, "rationale": RATIONALE, "style": STYLE}
+SRC = {"gui": GUI, "recipe": RECIPE, "advisor": ADVISOR, "rationale": RATIONALE,
+       "style": STYLE, "stack": STACK}
 
 
 def parse_literal(src: str, i: int) -> tuple[str, int]:
@@ -417,6 +442,24 @@ def extract_source_keys() -> tuple[set[str], list[str]]:
                 problems.append(f"{src_name}: {spec[3]!r} not found inside {anchor!r}")
                 continue
             got = block_literals(src, fn_at, "{", "}")
+        elif kind == "tuple_col":  # the i-th literal of each (...) row
+            got = set()
+            i, col = src.index("=", at), spec[3]
+            end = src.index("];", i)
+            while True:
+                start = src.find("(", i)
+                if start < 0 or start > end:
+                    break
+                lits, j = [], start + 1
+                while j < len(src) and src[j] != ")":
+                    if src[j] == '"':
+                        lit, j = parse_literal(src, j)
+                        lits.append(lit)
+                        continue
+                    j += 1
+                if col < len(lits) and lettered(lits[col]):
+                    got.add(lits[col])
+                i = j
         elif kind == "calls":  # literal FIRST arguments only
             got = set()
             for m in re.finditer(re.escape(anchor), src):

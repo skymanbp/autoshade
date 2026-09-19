@@ -2338,17 +2338,32 @@ pub fn global_export_losses(r: &EditRecipe) -> Vec<&'static str> {
 /// every Lightroom photo, permanently and unactionably, and drown the members
 /// that ARE actionable — the same judgement `xmp_loss_interrupts` makes about
 /// the base curve. The pass-through disclosure is its own develop-panel
-/// section, which shows the sixteen values themselves and says we never read
+/// section, which shows the nine values themselves and says we never read
 /// them. Pinned in both directions by
 /// `the_render_gaps_name_what_lightroom_renders_and_this_engine_does_not`.
 pub fn global_render_gaps(r: &EditRecipe) -> Vec<&'static str> {
-    use crate::advisor::catalogue::{Tier, RECIPE_CONTROLS};
+    render_gaps_in(crate::advisor::catalogue::RECIPE_CONTROLS.as_slice(), r)
+}
+
+/// The derivation itself, over a GIVEN registry slice.
+///
+/// Split out in v1.5.0 for one reason: Track F emptied `CARRIED_ONLY_GLOBAL`,
+/// so the real registry can no longer exercise this at all — every call now
+/// answers with an empty vector, and a test over the real slice would pass
+/// however the comparison were broken. The test feeds a synthetic carried row
+/// instead, which keeps the MECHANISM proven against the day a real one
+/// arrives, rather than leaving a live disclosure with no evidence behind it.
+fn render_gaps_in(
+    controls: &[crate::advisor::catalogue::Control],
+    r: &EditRecipe,
+) -> Vec<&'static str> {
+    use crate::advisor::catalogue::Tier;
     let (Ok(live), Ok(neutral)) =
         (serde_json::to_value(r), serde_json::to_value(EditRecipe::default()))
     else {
         return Vec::new();
     };
-    RECIPE_CONTROLS
+    controls
         .iter()
         .filter(|c| c.tier == Some(Tier::CarriedOnly))
         .filter(|c| live.get(c.name) != neutral.get(c.name))
@@ -2358,11 +2373,12 @@ pub fn global_render_gaps(r: &EditRecipe) -> Vec<&'static str> {
 
 /// **Import-side disclosure, GLOBAL half** (R24-5 M0): the `crs:` properties
 /// this sidecar carries on its own `rdf:Description` that AutoShade does not
-/// model at all — PointColor, the camera Look, `CameraProfileDigest`,
+/// model at all — the camera Look, `CameraProfileDigest`,
 /// `UprightTransform`. (Global Texture and Grain headed that list until R25
-/// B2 modelled them, the whole Defringe block left it in B3, and the
-/// Transform / Calibration blocks left in B4 as [`PASSTHROUGH_CRS`] — the
-/// list SHRINKING by itself, see the paragraph
+/// B2 modelled them, the whole Defringe block left it in B3, the Transform
+/// block and the profile name left in B4 as [`PASSTHROUGH_CRS`], and the
+/// Calibration panel, the B&W mixer and the point colours left in v1.5.0 —
+/// the list SHRINKING by itself, see the paragraph
 /// on the complement below, and the fixture note in
 /// `an_imported_sidecar_names_the_globals_the_engine_does_not_render`.)
 ///
@@ -2502,62 +2518,224 @@ pub fn unmodelled_global_crs(xmp: &str) -> Vec<String> {
 }
 
 /// **The PASS-THROUGH key set** (R25 B4): Lightroom's Transform (Upright /
-/// Perspective) and Camera Calibration blocks, carried verbatim between the
-/// sidecar and `EditRecipe::passthrough` and NEVER interpreted — the first
+/// Perspective) block and the camera profile's name, carried verbatim between
+/// the sidecar and `EditRecipe::passthrough` and NEVER interpreted — the first
 /// real payload `Tier::PassThrough` has ever had.
 ///
 /// A NAMED SET, not "everything unknown", and that is the whole design.
 /// [`owned_attr_keys`] is a static list and it is the merge's REMOVAL
 /// universe: a free-form map would emit keys the merge never strips, so our
 /// value would land beside Lightroom's original as a duplicate attribute.
-/// Sixteen keys we can name are sixteen keys the strip can name too.
+/// Six keys we can name are six keys the strip can name too.
 ///
-/// The complement is not abandoned — it is DISCLOSED. `crs:Look` (a nested
-/// element, not a string), `crs:PointColor`, `crs:CameraProfileDigest`,
-/// `crs:UprightTransform` and the rest stay outside this list, are preserved
-/// by the merge exactly as before, and go on being named by
-/// [`unmodelled_global_crs`]. That is the feature, not the omission.
+/// The complement is not abandoned — it is DISCLOSED. `crs:CameraProfileDigest`
+/// and the rest stay outside this list, are preserved by the merge exactly as
+/// before, and go on being named by [`unmodelled_global_crs`]. That is the
+/// feature, not the omission.
 ///
-/// FIRST-HAND (all seven reference sidecars): every Perspective key is present
-/// on every file, `crs:PerspectiveScale="100"` and `crs:PerspectiveX="0.00"`
-/// are the resting spellings, one file carries `crs:PerspectiveVertical="-35"`
-/// and `crs:PerspectiveRotate="+0.9"` — three different numeric spellings for
-/// the same neutral, which is precisely why these are strings. The
-/// Calibration keys appear on none of them (Lightroom omits the block at its
-/// defaults) and `crs:CameraProfile="Adobe Standard"` on all seven — a NAME,
-/// with a space in it, so the map is `String → String` and not a number map.
-pub const PASSTHROUGH_CRS: [&str; 16] = [
-    // Transform / Upright (8)
-    "PerspectiveUpright",
-    "PerspectiveVertical",
-    "PerspectiveHorizontal",
-    "PerspectiveRotate",
-    "PerspectiveScale",
-    "PerspectiveAspect",
-    "PerspectiveX",
-    "PerspectiveY",
-    // Camera Calibration (8)
+/// FIRST-HAND (all seven reference sidecars, re-measured for F6): one of the
+/// seven carries all six of these keys
+/// (`crs:UprightCenterNormX="0.507694218"`,
+/// `crs:UprightFocalLength35mm="15.491801514"` — nine significant digits that
+/// no `f32` round trip returns, which is precisely why these are strings) and
+/// the other six carry none of them.
+///
+/// The eight `crs:Perspective*` keys were this list's founding members and
+/// left it in v1.5.0 F6: they are present on all seven files too, but they are
+/// OWNED controls now, parsed into `EditRecipe`'s own fields and rendered by
+/// [`crate::render::perspective`]. `crs:CameraProfile` left for the same reason
+/// in F7 — it is on all seven, and [`crate::dcp`] now renders the profile it
+/// names instead of carrying the name past a render that ignored it.
+///
+/// R25 listed seven `CameraCalibration*` keys here as well. Lightroom writes
+/// none of them: its Calibration panel is the unprefixed `crs:ShadowTint` /
+/// `crs:RedHue` / … block (on all seven reference sidecars and 162 of the
+/// operator's 175), so the seven never captured a value, and v1.5.0 renders the
+/// real ones ([`CALIBRATION_CRS`]).
+pub const PASSTHROUGH_CRS: [&str; 6] = [
+    // The ASSUMPTIONS Lightroom's own Upright solver worked from: a version
+    // stamp, and the centre and focal length it took the photograph to have.
+    // None of them changes a pixel here and none is a control a photographer
+    // moves, so they are carried and never interpreted.
+    //
+    // Its cached ANSWER is deliberately not on this list — not the matrices
+    // (`recipe::EditRecipe::upright_transform` reads them and never writes
+    // them), and so also not `UprightTransformCount`, `UprightPreview` or
+    // `UprightDependentDigest`, which describe an answer a fresh sidecar of
+    // ours would no longer contain. A digest whose subject is missing is worse
+    // than no digest: it is exactly the staleness marker Lightroom checks. On
+    // the usual path — a MERGE into Lightroom's own file — all six survive
+    // untouched anyway, because a key we neither own nor carry is a key the
+    // strip never names.
+    "UprightVersion",
+    "UprightCenterMode",
+    "UprightCenterNormX",
+    "UprightCenterNormY",
+    "UprightFocalMode",
+    "UprightFocalLength35mm",
+];
+
+/// The crs keys a creative Look can bake that this engine RENDERS, plus the two
+/// that are bookkeeping. Everything else a Look carries is named in
+/// [`crate::recipe::CreativeLook::unrendered`].
+///
+/// `LookTable` is deliberately NOT here: it is the creative colour table, it is
+/// the one thing the Look carries that cannot be rendered, and leaving it out
+/// is what makes the disclosure name it.
+const LOOK_RENDERED_CRS: [&str; 7] = [
+    "Version",
+    "ProcessVersion",
     "CameraProfile",
-    "CameraCalibrationRedHue",
-    "CameraCalibrationRedSaturation",
-    "CameraCalibrationGreenHue",
-    "CameraCalibrationGreenSaturation",
-    "CameraCalibrationBlueHue",
-    "CameraCalibrationBlueSaturation",
-    "CameraCalibrationShadowTint",
+    "ConvertToGrayscale",
+    "Clarity2012",
+    "Highlights2012",
+    "Shadows2012",
+];
+
+/// The creative profile `crs:Look` names, as far as this engine can render it.
+///
+/// Lightroom writes the creative profile's WHOLE baked half into the sidecar —
+/// on 161 of 161 Looks in the library this was measured against — so the file
+/// in front of us is self-sufficient and nothing has to be looked up on disk.
+/// What it does NOT write out is the colour table: that is a 32-hex reference
+/// (`crs:LookTable`), and [`crate::dcp`] records what was measured about the
+/// payload it refers to and why it is not decodable.
+///
+/// Read from the `<crs:Look>` element itself rather than through the
+/// Description's scope, which is the whole point: those baked properties LOOK
+/// like the photographer's own settings and are not. The engine's global reader
+/// is scoped to exclude them precisely so this function can claim them.
+fn read_creative_look(xmp: &str) -> Option<crate::recipe::CreativeLook> {
+    let body = owned_element_body(xmp, "crs:Look").ok().flatten()?;
+    let head = Scope::new(body);
+    // A Look with no Parameters block states nothing to render; it is still a
+    // Look, and its name and amount are still worth carrying.
+    let params = owned_element_body(body, "crs:Parameters").ok().flatten().unwrap_or("");
+    let p = Scope::new(params);
+    let text = |s: Option<std::borrow::Cow<'_, str>>| s.map(|v| v.into_owned()).unwrap_or_default();
+    let curve = |tag: &str| parse_curve_checked(params, tag).unwrap_or_default();
+    Some(crate::recipe::CreativeLook {
+        name: text(head.crs_str("Name")),
+        // Absent means the whole Look, which is what `crs:Amount="1"` says on
+        // every one of the 161 measured — not zero, which would silently
+        // switch the profile off.
+        amount: head.crs_f32("Amount").filter(|v| v.is_finite()).unwrap_or(1.0),
+        base_profile: text(p.crs_str("CameraProfile")),
+        table: text(p.crs_str("LookTable")),
+        grayscale: p.crs_str("ConvertToGrayscale").as_deref().map(str::trim) == Some("True"),
+        clarity: p.crs_f32("Clarity2012").unwrap_or(0.0),
+        highlights: p.crs_f32("Highlights2012").unwrap_or(0.0),
+        shadows: p.crs_f32("Shadows2012").unwrap_or(0.0),
+        tone_curve: curve("ToneCurvePV2012"),
+        red_curve: curve("ToneCurvePV2012Red"),
+        green_curve: curve("ToneCurvePV2012Green"),
+        blue_curve: curve("ToneCurvePV2012Blue"),
+        unrendered: look_unrendered(params),
+    })
+}
+
+/// Which of the Look's baked crs properties this engine does not act on, by
+/// name, sorted and de-duplicated.
+///
+/// Scans the ATTRIBUTES of every tag inside the Parameters block, which is
+/// where Lightroom writes them, and subtracts [`LOOK_RENDERED_CRS`]. The four
+/// `ToneCurvePV2012*` children are elements rather than attributes, so they
+/// never appear here in the first place.
+fn look_unrendered(params: &str) -> Vec<String> {
+    let mut found: std::collections::BTreeSet<String> = Default::default();
+    let mut from = 0usize;
+    while let Some((start, end, _)) = next_xml_tag(params, from) {
+        let tag = &params[start..=end];
+        if !tag.starts_with("</") {
+            let mut cursor = 0usize;
+            while let Some(a) = next_xml_attribute(tag, &mut cursor) {
+                if let Some(key) = a.name.strip_prefix("crs:")
+                    && !LOOK_RENDERED_CRS.contains(&key)
+                {
+                    found.insert(key.to_string());
+                }
+            }
+        }
+        from = end + 1;
+    }
+    found.into_iter().collect()
+}
+
+/// Adobe's solved Upright matrices, read off `crs:UprightTransform_0…N`.
+///
+/// Each value is nine comma-separated numbers, a row-major 3×3 projective map
+/// in [0,1] FRAME coordinates (see `recipe::EditRecipe::upright_transform` for
+/// the measurement that settled the coordinate system). The list is INDEXED BY
+/// MODE: `_0` is the identity Lightroom writes for "off" and `_5` the one it
+/// writes for a Guided correction with no guides drawn, so index 3 really is
+/// what `crs:PerspectiveUpright="3"` selects.
+///
+/// Stops at the first index the document does not carry, rather than trusting
+/// `crs:UprightTransformCount`, because the count is bookkeeping and the
+/// indices are the thing being indexed. A malformed entry ends the list for the
+/// same reason the recipe's clamp drops the whole list: keeping the later
+/// matrices would shift every mode's meaning by one.
+fn upright_matrices<'a>(scope: impl CrsSource<'a>) -> Vec<[f32; 9]> {
+    let mut out = Vec::new();
+    for i in 0.. {
+        let Some(raw) = scope.crs_str(&format!("UprightTransform_{i}")) else {
+            break;
+        };
+        let mut m = [0.0f32; 9];
+        let mut n = 0usize;
+        for (slot, field) in m.iter_mut().zip(raw.split(',')) {
+            match field.trim().parse::<f32>() {
+                Ok(v) if v.is_finite() => {
+                    *slot = v;
+                    n += 1;
+                }
+                _ => break,
+            }
+        }
+        if n != 9 || raw.split(',').count() != 9 {
+            break;
+        }
+        out.push(m);
+    }
+    out
+}
+
+/// Lightroom's Calibration panel (v1.5.0) in the order Lightroom writes it and
+/// `EditRecipe::calibration` returns it: shadows tint, then the red, green and
+/// blue primaries' hue and saturation. Signed integers, all seven or none.
+pub(crate) const CALIBRATION_CRS: [&str; 7] =
+    ["ShadowTint", "RedHue", "RedSaturation", "GreenHue", "GreenSaturation", "BlueHue", "BlueSaturation"];
+
+/// The seven `crs:SDR*` keys of Lightroom's SDR-rendition panel (v1.5.0 F8),
+/// in [`crate::recipe::EditRecipe::sdr_controls`]'s order.
+///
+/// Unlike the calibration block above these are written INDEPENDENTLY, one key
+/// per moved slider: Lightroom does not stamp the block onto every file (it is
+/// not on one of the 175 sidecars measured), so there is no "all seven or
+/// none" shape in the wild to match, and a key we never saw stays absent.
+pub(crate) const SDR_CRS: [&str; 7] = [
+    "SDRBlend",
+    "SDRBrightness",
+    "SDRContrast",
+    "SDRHighlights",
+    "SDRShadows",
+    "SDRWhites",
+    "SDRClarity",
 ];
 
 /// The `crs:` properties this writer owns that have NO attribute spelling —
-/// the four tone curves and the mask block, which reach the sidecar only as
-/// child elements. [`owned_attr_keys`] is the ATTRIBUTE writer's universe and
-/// names none of them, so every scanner asking "is this ELEMENT ours?" must
-/// union the two lists (the merge's own element strip builds exactly this
-/// union — see [`merge_recipe_into_xmp`]).
-pub(crate) const OWNED_ELEMENT_ONLY: [&str; 5] = [
+/// the four tone curves, the point colours and the mask block, which reach
+/// the sidecar only as child elements. [`owned_attr_keys`] is the ATTRIBUTE
+/// writer's universe and names none of them, so every scanner asking "is this
+/// ELEMENT ours?" must union the two lists (the merge's own element strip
+/// builds exactly this union — see [`merge_recipe_into_xmp`], which also
+/// decides per recipe whether the base's point colours are its to replace).
+pub(crate) const OWNED_ELEMENT_ONLY: [&str; 6] = [
     "ToneCurvePV2012",
     "ToneCurvePV2012Red",
     "ToneCurvePV2012Green",
     "ToneCurvePV2012Blue",
+    "PointColors",
     "MaskGroupBasedCorrections",
 ];
 
@@ -2903,21 +3081,25 @@ crs:MaskBlendMode=\"{}\" crs:MaskInverted=\"{}\" crs:MaskSyncID=\"{seed}\" crs:M
 /// — emitting it would tell Lightroom to sharpen at radius 0 or drop detail
 /// retention from 50 to 0, which is a render change, not a spelling. Those
 /// keep reaching Lightroom by ABSENCE, which is the honest encoding and the
-/// rule `owned_attrs`' vignette/grain block states for the same reason.
+/// rule `owned_attrs`' vignette/grain block states for the same reason —
+/// UNLESS the recipe names the control in `explicit_zero` (v1.5.0), where the
+/// 0 is a value the photographer set and goes out as one. That is not this
+/// function's rule: it is the companion's own, applied beside it.
 ///
 /// **`ColorNoiseReduction` is the one key that goes out at ZERO despite a
 /// non-zero ACR default (v1.3.1).** The argument above — "our 0 means never
 /// learned, absence keeps Lightroom's default" — holds for a control this
-/// engine renders at that default. Colour noise reduction is a control this
-/// engine does not render AT ALL: the pixels AutoShade shows carry none, so
-/// the recipe's 0 is the truth of the render, and an absent key made
-/// Lightroom apply its RAW default of 25 to a photo the app showed without
-/// it. Measured on the Lightroom check of the v1.3.0 sidecars (2026-09-12):
-/// Lightroom materialised `ColorNoiseReduction="25"` into every rewritten
-/// file. Writing the zero is what makes the two renders describe one photo;
-/// the Detail/Smoothness companions stay at-rest-absent (they do nothing at
-/// amount 0, and Lightroom writes its 50/50 back regardless — which the
-/// payload reader treats as a materialisation, not an edit).
+/// engine renders at that default. `color_nr` is not one: its 0 renders NO
+/// colour noise reduction here (none at all before v1.5.0, the luma-guided
+/// operator's amount-0 no-op since), so the recipe's 0 is the truth of the
+/// render, and an absent key made Lightroom apply its RAW default of 25 to a
+/// photo the app showed without it. Measured on the Lightroom check of the
+/// v1.3.0 sidecars (2026-09-12): Lightroom materialised
+/// `ColorNoiseReduction="25"` into every rewritten file. Writing the zero is
+/// what makes the two renders describe one photo; the Detail/Smoothness
+/// companions stay at-rest-absent (they do nothing at amount 0, and
+/// Lightroom writes its 50/50 back regardless — which the payload reader
+/// treats as a materialisation, not an edit).
 fn amount_carries(key: &str, amount: f32) -> bool {
     key == "ColorNoiseReduction"
         || (matches!(key, "LuminanceNoiseReductionContrast" | "SharpenEdgeMasking")
@@ -2929,11 +3111,15 @@ fn owned_attrs(r: &EditRecipe, frame: Option<FrameAspect>) -> String {
     // The SCHEMA-ERA gate's emission half (R25 P8). It has to sit beside the
     // strip half in [`merge_strip_keys`] and agree with it exactly: strip
     // without emit deletes the base's value, emit without strip leaves two
-    // copies of the same attribute in one tag. `era_suppressed_attr_keys`
+    // copies of the same attribute in one tag. `unspoken_attr_keys`
     // returns the ONE set both consult — empty for every current-era recipe,
     // so this costs nothing on the ordinary path.
-    let era_gated = era_suppressed_attr_keys(r);
+    let era_gated = unspoken_attr_keys(r);
     let ungated = |key: &str| !era_gated.contains(key);
+    // Does a stored value STATE something? Non-zero always does; a zero does
+    // when the recipe names the control in `explicit_zero` (v1.5.0) — the
+    // COMPANIONS' real 0, which absence cannot say.
+    let states = |name: &str, v: f32| v != 0.0 || r.explicit_zero.iter().any(|n| n == name);
 
     // ProcessVersion 15.4 / Version 15.5.1 are the verified current values from
     // the user's real sidecar (not the research's guessed 11.0/15.0).
@@ -2983,6 +3169,27 @@ fn owned_attrs(r: &EditRecipe, frame: Option<FrameAspect>) -> String {
     if ungated("Texture") {
         attr(&mut a, "Texture", &signed(r.texture));
     }
+    // The parametric tone curve (v1.5.0), right after the Basic-panel keys,
+    // where Lightroom writes it. ALL SEVEN OR NONE: Lightroom writes the whole
+    // block on every sidecar, and a split with no region beside it is a shape
+    // no real document has. Emitted when anything in the block differs from
+    // Adobe's defaults, so a plain recipe still produces a minimal sidecar —
+    // and a merge onto a Lightroom file carrying the defaults loses nothing by
+    // stripping them, the defaults being what an absent key means. The regions
+    // are SIGNED like the 2012 sliders; the splits are unsigned integers. One
+    // key answers for the block at the era gate, which releases it whole.
+    let splits = [r.param_shadow_split, r.param_midtone_split, r.param_highlight_split];
+    if (r.parametric_regions().is_some() || splits != crate::recipe::PARAMETRIC_SPLITS)
+        && ungated("ParametricShadows")
+    {
+        attr(&mut a, "ParametricShadows", &signed(r.param_shadows));
+        attr(&mut a, "ParametricDarks", &signed(r.param_darks));
+        attr(&mut a, "ParametricLights", &signed(r.param_lights));
+        attr(&mut a, "ParametricHighlights", &signed(r.param_highlights));
+        attr(&mut a, "ParametricShadowSplit", &(splits[0].round() as i64).to_string());
+        attr(&mut a, "ParametricMidtoneSplit", &(splits[1].round() as i64).to_string());
+        attr(&mut a, "ParametricHighlightSplit", &(splits[2].round() as i64).to_string());
+    }
 
     // Per-colour HSL / Color mixer (8 ACR bands). Emit only when non-neutral so
     // a plain global recipe still produces a minimal, v1-compatible sidecar.
@@ -2991,6 +3198,18 @@ fn owned_attrs(r: &EditRecipe, frame: Option<FrameAspect>) -> String {
             attr(&mut a, &format!("HueAdjustment{band}"), &signed(r.hsl.hue[i]));
             attr(&mut a, &format!("SaturationAdjustment{band}"), &signed(r.hsl.saturation[i]));
             attr(&mut a, &format!("LuminanceAdjustment{band}"), &signed(r.hsl.luminance[i]));
+        }
+    }
+    // The B&W mixer (v1.5.0), where Lightroom writes it — the HSL block's
+    // place — ALL EIGHT OR NONE, signed like the HSL cells. Lightroom writes
+    // the eight on every black-and-white photo (at 0 until one moves) and none
+    // on a colour one; a mix moved on a colour photo still goes out, being a
+    // value the recipe holds and a later B&W switch renders. One key answers
+    // for the block at the era gate, which releases it whole.
+    let gray = r.gray_mixer();
+    if (r.convert_to_grayscale || gray.iter().any(|v| *v != 0.0)) && ungated("GrayMixerRed") {
+        for (band, v) in crate::recipe::HSL_BANDS.iter().zip(gray) {
+            attr(&mut a, &format!("GrayMixer{band}"), &signed(v));
         }
     }
 
@@ -3025,37 +3244,39 @@ fn owned_attrs(r: &EditRecipe, frame: Option<FrameAspect>) -> String {
     // SharpenRadius is the one DECIMAL key in the detail block, and the one
     // Lightroom writes with an explicit `+`: `crs:SharpenRadius="+1.0"` in all
     // seven of the user's sidecars (the integer neighbours are bare —
-    // `SharpenDetail="25"`, `SharpenEdgeMasking="0"`). Emitted only when set,
-    // so an absent radius stays absent and Lightroom keeps its own 1.0.
-    if r.sharpen_radius != 0.0 && ungated("SharpenRadius") {
+    // `SharpenDetail="25"`, `SharpenEdgeMasking="0"`). Emitted only when it
+    // states something, so an absent radius stays absent and Lightroom keeps
+    // its own 1.0.
+    if states("sharpen_radius", r.sharpen_radius) && ungated("SharpenRadius") {
         attr(&mut a, "SharpenRadius", &format!("{:+.1}", r.sharpen_radius));
     }
-    for (key, v, amount) in [
-        ("SharpenDetail", r.sharpen_detail, r.sharpening),
-        ("SharpenEdgeMasking", r.sharpen_mask, r.sharpening),
+    for (key, name, v, amount) in [
+        ("SharpenDetail", "sharpen_detail", r.sharpen_detail, r.sharpening),
+        ("SharpenEdgeMasking", "sharpen_mask", r.sharpen_mask, r.sharpening),
     ] {
-        if (v != 0.0 || amount_carries(key, amount)) && ungated(key) {
+        if (states(name, v) || amount_carries(key, amount)) && ungated(key) {
             attr(&mut a, key, &(v.round() as i64).to_string());
         }
     }
     let nr = (r.noise_reduction.round() as i64).clamp(0, 100);
     attr(&mut a, "LuminanceSmoothing", &nr.to_string());
-    // The rest of the R25 B3 carried detail axes, in Lightroom's own key
-    // order (verified against the user's sidecars: Sharpness, SharpenRadius,
+    // The rest of the R25 B3 detail axes, in Lightroom's own key order
+    // (verified against the user's sidecars: Sharpness, SharpenRadius,
     // SharpenDetail, SharpenEdgeMasking, LuminanceSmoothing, then the colour
-    // NR trio). Same per-key "only when non-zero" rule as the B2 effects —
-    // and the same reason: zero here means "the sidecar said nothing", and
-    // the companions Lightroom itself omits when the amount is zero
-    // (ColorNoiseReductionDetail / Smoothness are absent from the two files
-    // whose ColorNoiseReduction is 0) must stay absent from ours too.
-    for (key, v, amount) in [
-        ("LuminanceNoiseReductionDetail", r.nr_detail, r.noise_reduction),
-        ("LuminanceNoiseReductionContrast", r.nr_contrast, r.noise_reduction),
-        ("ColorNoiseReduction", r.color_nr, 0.0),
-        ("ColorNoiseReductionDetail", r.color_nr_detail, r.color_nr),
-        ("ColorNoiseReductionSmoothness", r.color_nr_smooth, r.color_nr),
+    // NR trio). Same per-key "only when it states something" rule as the B2
+    // effects — and the same reason: an absent zero here means "the sidecar
+    // said nothing", and the companions Lightroom itself omits when the
+    // amount is zero (ColorNoiseReductionDetail / Smoothness are absent from
+    // the two files whose ColorNoiseReduction is 0) must stay absent from ours
+    // too.
+    for (key, name, v, amount) in [
+        ("LuminanceNoiseReductionDetail", "nr_detail", r.nr_detail, r.noise_reduction),
+        ("LuminanceNoiseReductionContrast", "nr_contrast", r.nr_contrast, r.noise_reduction),
+        ("ColorNoiseReduction", "color_nr", r.color_nr, 0.0),
+        ("ColorNoiseReductionDetail", "color_nr_detail", r.color_nr_detail, r.color_nr),
+        ("ColorNoiseReductionSmoothness", "color_nr_smooth", r.color_nr_smooth, r.color_nr),
     ] {
-        if (v != 0.0 || amount_carries(key, amount)) && ungated(key) {
+        if (states(name, v) || amount_carries(key, amount)) && ungated(key) {
             attr(&mut a, key, &(v.round() as i64).to_string());
         }
     }
@@ -3077,6 +3298,76 @@ fn owned_attrs(r: &EditRecipe, frame: Option<FrameAspect>) -> String {
     if r.lens_distortion != 0.0 {
         attr(&mut a, "LensManualDistortionAmount", &signed(r.lens_distortion));
     }
+
+    // The PROFILE's two strengths (v1.5.0). Written when they say something —
+    // which here means "away from 100", not "away from 0": 100 is Lightroom's
+    // own neutral and 0 is a real value meaning "switch this component off".
+    // The era gate applies to both, so an era-1 recipe that never saw them
+    // leaves whatever the base document says untouched.
+    for (key, v) in [
+        ("LensProfileDistortionScale", r.lens_profile_distortion_scale),
+        ("LensProfileVignettingScale", r.lens_profile_vignetting_scale),
+    ] {
+        if v != 100.0 && ungated(key) {
+            attr(&mut a, key, &format!("{}", v.round() as i32));
+        }
+    }
+
+    // Lightroom's TRANSFORM panel (v1.5.0 F6). Only-when-set, and each key in
+    // the SPELLING measured in this operator's 175 sidecars rather than
+    // guessed — the three formats really do differ:
+    //
+    //   PerspectiveVertical/Horizontal/Aspect/Scale   plain integers ("0", "-22", "-35", "100")
+    //   PerspectiveRotate                             one decimal WITH an explicit sign ("0.0", "-0.6", "+0.9")
+    //   PerspectiveX/Y                                two decimals ("0.00")
+    //
+    // Lightroom writes all eight on every photo, at neutral or not; this writer
+    // only adds what is off neutral, and the merge leaves the document's own
+    // neutral bytes alone — so a Lightroom file keeps the block it had.
+    //
+    // ONE SPELLING IS EXTRAPOLATED, not measured: whether a non-zero X or Y
+    // carries an explicit `+`. No photograph in the 175-sidecar library has a
+    // non-zero offset, so the library cannot say — and the one non-zero
+    // fractional key it DOES carry, `PerspectiveRotate="+0.9"`, is signed, so
+    // the two offsets are written the same way. A future kit export with the
+    // X slider moved settles it; until then this is the honest guess and it is
+    // marked as one.
+    for (key, v) in [
+        ("PerspectiveVertical", r.perspective_vertical),
+        ("PerspectiveHorizontal", r.perspective_horizontal),
+        ("PerspectiveAspect", r.perspective_aspect),
+    ] {
+        if v != 0.0 && ungated(key) {
+            attr(&mut a, key, &(v.round() as i64).to_string());
+        }
+    }
+    if r.perspective_scale != 100.0 && ungated("PerspectiveScale") {
+        attr(&mut a, "PerspectiveScale", &(r.perspective_scale.round() as i64).to_string());
+    }
+    if r.perspective_rotate != 0.0 && ungated("PerspectiveRotate") {
+        attr(&mut a, "PerspectiveRotate", &format!("{:+.1}", r.perspective_rotate));
+    }
+    for (key, v) in [("PerspectiveX", r.perspective_x), ("PerspectiveY", r.perspective_y)] {
+        if v != 0.0 && ungated(key) {
+            attr(&mut a, key, &format!("{v:+.2}"));
+        }
+    }
+    // The Upright MODE, an integer. Written only when a mode is chosen, for
+    // `AutoLateralCA`'s reason: a recipe that never met the key must not start
+    // asserting "off" into someone's document.
+    if r.perspective_upright != 0.0 && ungated("PerspectiveUpright") {
+        attr(&mut a, "PerspectiveUpright", &(r.perspective_upright.round() as i64).to_string());
+    }
+    // Constrain Crop, the 0/1 flag Lightroom writes — `"0"` on all 52 of this
+    // library's sidecars that carry it, so ON is the only thing worth saying.
+    if r.crop_constrain_to_warp && ungated("CropConstrainToWarp") {
+        attr(&mut a, "CropConstrainToWarp", "1");
+    }
+    // `crs:UprightTransform_0…N` are deliberately NOT written: they are
+    // Adobe's own solution for this photograph, read and rendered
+    // (`recipe::EditRecipe::upright_transform`, tier `RenderedNotExported`), and
+    // the merge preserves the document's own bytes for us. Writing them would
+    // mean claiming Adobe's key for numbers our own solver produced.
 
     // Manual lateral CA (R25 B3), same only-when-set policy. UNSIGNED: these
     // are the legacy PV2010 integer keys, so they belong to the
@@ -3114,7 +3405,7 @@ fn owned_attrs(r: &EditRecipe, frame: Option<FrameAspect>) -> String {
         ("DefringeGreenHueHi", r.defringe_green_hi),
     ] {
         // The era gate releases these six together or not at all (see
-        // `era_suppressed_attr_keys`), so this per-key test can never split
+        // `unspoken_attr_keys`), so this per-key test can never split
         // the block the paragraph above insists on writing whole.
         if ungated(key) {
             attr(&mut a, key, &(v.round() as i64).to_string());
@@ -3142,45 +3433,93 @@ fn owned_attrs(r: &EditRecipe, frame: Option<FrameAspect>) -> String {
             attr(&mut a, key, &signed(v));
         }
     }
-    for (key, v) in [
-        ("PostCropVignetteMidpoint", r.post_crop_vignette_mid),
-        ("PostCropVignetteFeather", r.post_crop_vignette_feather),
-        ("PostCropVignetteStyle", r.post_crop_vignette_style),
-        ("PostCropVignetteHighlightContrast", r.post_crop_vignette_hl),
-        ("GrainAmount", r.grain),
-        ("GrainSize", r.grain_size),
-        ("GrainFrequency", r.grain_rough),
+    for (key, name, v) in [
+        ("PostCropVignetteMidpoint", "post_crop_vignette_mid", r.post_crop_vignette_mid),
+        ("PostCropVignetteFeather", "post_crop_vignette_feather", r.post_crop_vignette_feather),
+        ("PostCropVignetteStyle", "post_crop_vignette_style", r.post_crop_vignette_style),
+        ("PostCropVignetteHighlightContrast", "post_crop_vignette_hl", r.post_crop_vignette_hl),
+        ("GrainAmount", "grain", r.grain),
+        ("GrainSize", "grain_size", r.grain_size),
+        ("GrainFrequency", "grain_rough", r.grain_rough),
     ] {
-        // `ungated` is redundant for every ZERO-neutral key here — a value
-        // that passed `v != 0.0` has already left the default the gate keys
-        // on — and it is written all the same, on both loops and on every
-        // R25 key below and above: the gate is the LAW for these
-        // twenty-seven, and a law spelled at only the sites that need it
-        // today is a law the next default change quietly repeals.
-        if v != 0.0 && ungated(key) {
+        // `ungated` is redundant for every value that states something — it
+        // has already left the default the gate keys on (an explicit zero
+        // counts as moved, `unspoken_attr_keys`) — and it is written
+        // all the same, on both loops and on every R25 key below and above:
+        // the gate is the LAW for these twenty-seven, and a law spelled at
+        // only the sites that need it today is a law the next default change
+        // quietly repeals.
+        if states(name, v) && ungated(key) {
             attr(&mut a, key, &(v.round() as i64).to_string());
         }
     }
 
-    // The PASS-THROUGH blocks (R25 B4): Transform / Upright and Camera
-    // Calibration, written back as the exact strings they arrived as.
+    // Camera Calibration (v1.5.0), after the effects as Lightroom orders it.
+    // ALL SEVEN OR NONE, signed (`crs:BlueHue="-28"`, `crs:ShadowTint="+3"` in
+    // the user's library), and only when a slider moved: Lightroom writes the
+    // block at 0 on nearly every file, and 0 is what an absent key means, so a
+    // plain recipe still produces a minimal sidecar. One key answers for the
+    // block at the era gate, which releases it whole.
+    if let Some(cal) = r.calibration()
+        && ungated(CALIBRATION_CRS[0])
+    {
+        for (key, v) in CALIBRATION_CRS.into_iter().zip(cal) {
+            attr(&mut a, key, &signed(v));
+        }
+    }
+    // The B&W switch (v1.5.0), after the calibration block as Lightroom orders
+    // it, and only when ON: `"False"` is what absence means, and a recipe that
+    // never met the switch must not start asserting it into someone's file.
+    if r.convert_to_grayscale && ungated("ConvertToGrayscale") {
+        attr(&mut a, "ConvertToGrayscale", "True");
+    }
+    // HDR edit mode and its SDR rendition (v1.5.0 F8). Each key on its own
+    // condition, the B&W switch's rule: absent IS the neutral for all nine, so
+    // a photograph that never entered HDR mode produces the same bytes it did
+    // before this batch, and a merge onto a Lightroom file carrying
+    // `crs:HDREditMode="0"` loses nothing by stripping it.
     //
-    // In [`PASSTHROUGH_CRS`] order, NOT the map's. A `BTreeMap` iterates
-    // alphabetically, which would interleave the two blocks
-    // (CameraCalibration… before CameraProfile before Perspective…) and put
-    // them in an order no Lightroom file uses — legal XML, unreadable diffs.
-    // The declared order is Adobe's own grouping.
+    // `HDREditMode` is Lightroom's "0"/"1" and NOT its "True"/"False" — the
+    // two boolean spellings really do sit in one sidecar, three attributes
+    // apart, and writing the wrong one produces a file Lightroom reads as OFF.
+    // `HDRMaxValue` is a DECIMAL like `SharpenRadius`, at two places
+    // (`crs:HDRMaxValue="+1.00"` in the user's library).
+    if r.hdr_edit && ungated("HDREditMode") {
+        attr(&mut a, "HDREditMode", "1");
+    }
+    if r.hdr_max_ev != 0.0 && ungated("HDRMaxValue") {
+        attr(&mut a, "HDRMaxValue", &format!("{:+.2}", r.hdr_max_ev));
+    }
+    for (key, v) in SDR_CRS.into_iter().zip(r.sdr_controls()) {
+        if v != 0.0 && ungated(key) {
+            attr(&mut a, key, &signed(v));
+        }
+    }
+
+    // The PASS-THROUGH block (R25 B4): Lightroom's own Upright bookkeeping,
+    // written back as the exact strings it arrived as.
     //
-    // No formatting whatever: `+0.9`, `0.00` and `Adobe Standard` all go out
-    // as themselves. `attr` still XML-escapes, which is transport, not
-    // interpretation — and it is why a profile name with an `&` in it
-    // survives. A key absent from the map was absent from the document, and
-    // stays absent: we do not invent a Calibration block for a file that
-    // never had one.
+    // In [`PASSTHROUGH_CRS`] order, NOT the map's — a `BTreeMap` iterates
+    // alphabetically, which is an order no Lightroom file uses: legal XML,
+    // unreadable diffs. The declared order is Adobe's own grouping.
+    //
+    // A key absent from the map was absent from the document, and stays
+    // absent: we do not invent a Transform block for a file that never had one.
     for key in PASSTHROUGH_CRS {
         if let Some(v) = r.passthrough.get(key) {
             attr(&mut a, key, v);
         }
+    }
+    // The camera profile's NAME (v1.5.0 F7), AFTER the Upright block because
+    // that is the order Lightroom's own files use — `…UprightFocalLength35mm`
+    // then `CameraProfile` then `CameraProfileDigest`. It is an owned key now
+    // (the render obeys it through [`crate::dcp`]) but it is still written as
+    // the exact string it arrived as: a profile name is an identifier, and
+    // reformatting one would stop it matching the file it names. `attr`
+    // XML-escapes, which is transport rather than interpretation, and is why a
+    // name with an `&` in it survives.
+    if !r.camera_profile.is_empty() && ungated("CameraProfile") {
+        attr(&mut a, "CameraProfile", &r.camera_profile);
     }
 
     // Crop + straighten, as ONE rotated-corner encoding ([`engine_to_lr_crop`],
@@ -3250,14 +3589,36 @@ fn owned_children(
         format!("\n   <crs:{tag}>\n    <rdf:Seq>\n{pts}    </rdf:Seq>\n   </crs:{tag}>")
     };
     let children = format!(
-        "{}{}{}{}{}",
+        "{}{}{}{}{}{}",
         curve_elem("ToneCurvePV2012", &r.tone_curve),
         curve_elem("ToneCurvePV2012Red", &r.red_curve),
         curve_elem("ToneCurvePV2012Green", &r.green_curve),
         curve_elem("ToneCurvePV2012Blue", &r.blue_curve),
+        point_colors_elem(&r.point_colors),
         if include_masks { masks.as_str() } else { "" },
     );
     (children, losses)
+}
+
+/// The point colours (v1.5.0) as Lightroom writes them — between the tone
+/// curves and the mask block, one `rdf:li` of nineteen comma-separated
+/// six-decimal numbers per swatch (`PointColor::to_numbers`) — or nothing for
+/// a recipe with none. Lightroom's no-swatch placeholder (one item of nineteen
+/// `-1.000000`s) is never written: it says what absence says, and the merge
+/// leaves a base's placeholder where it stands.
+fn point_colors_elem(swatches: &[crate::recipe::PointColor]) -> String {
+    if swatches.is_empty() {
+        return String::new();
+    }
+    let items: String = swatches
+        .iter()
+        .map(|p| {
+            // `+ 0.0` folds a negative zero, which prints as `-0.000000`.
+            let numbers: Vec<String> = p.to_numbers().iter().map(|v| format!("{:.6}", v + 0.0)).collect();
+            format!("     <rdf:li>{}</rdf:li>\n", numbers.join(", "))
+        })
+        .collect();
+    format!("\n   <crs:PointColors>\n    <rdf:Seq>\n{items}    </rdf:Seq>\n   </crs:PointColors>")
 }
 
 /// The rationale, made safe for an XML comment. XML comments forbid "--"
@@ -3546,6 +3907,27 @@ pub(crate) fn owned_attr_keys() -> Vec<String> {
         "Vibrance",
         "Saturation",
         "Texture",
+        // HDR edit mode and its SDR rendition (v1.5.0 F8) — owned, all nine,
+        // so a mode the photographer left really does leave the sidecar.
+        "HDREditMode",
+        "HDRMaxValue",
+        "SDRBlend",
+        "SDRBrightness",
+        "SDRContrast",
+        "SDRHighlights",
+        "SDRShadows",
+        "SDRWhites",
+        "SDRClarity",
+        // The parametric tone curve (v1.5.0) — owned, so the merge strips
+        // Lightroom's copy before writing ours and `unmodelled_global_crs`
+        // stops naming a curve this engine renders.
+        "ParametricShadows",
+        "ParametricDarks",
+        "ParametricLights",
+        "ParametricHighlights",
+        "ParametricShadowSplit",
+        "ParametricMidtoneSplit",
+        "ParametricHighlightSplit",
         "SplitToningShadowHue",
         "SplitToningShadowSaturation",
         "SplitToningHighlightHue",
@@ -3578,6 +3960,21 @@ pub(crate) fn owned_attr_keys() -> Vec<String> {
         "VignetteAmount",
         "VignetteMidpoint",
         "LensManualDistortionAmount",
+        "LensProfileDistortionScale",
+        "LensProfileVignettingScale",
+        // The Transform panel (v1.5.0 F6). Owning them is what moves the eight
+        // Perspective keys out of `PASSTHROUGH_CRS` and stops
+        // `unmodelled_global_crs` naming a block this engine now renders.
+        // `UprightTransform_*` stays UNOWNED on purpose — see the writer.
+        "PerspectiveVertical",
+        "PerspectiveHorizontal",
+        "PerspectiveRotate",
+        "PerspectiveScale",
+        "PerspectiveAspect",
+        "PerspectiveX",
+        "PerspectiveY",
+        "PerspectiveUpright",
+        "CropConstrainToWarp",
         "ChromaticAberrationR",
         "ChromaticAberrationB",
         "AutoLateralCA",
@@ -3613,16 +4010,25 @@ pub(crate) fn owned_attr_keys() -> Vec<String> {
     .iter()
     .map(|s| s.to_string())
     .collect();
-    // The R25 B4 PASS-THROUGH blocks. Owning them is what makes the merge
+    // The R25 B4 PASS-THROUGH block. Owning it is what makes the merge
     // strip each key before the writer puts it back — without that, our
     // verbatim copy would land beside Lightroom's original as a duplicate
-    // attribute. It is also what takes the sixteen out of
+    // attribute. It is also what takes the nine out of
     // `unmodelled_global_crs`, whose universe is this list's complement.
     keys.extend(PASSTHROUGH_CRS.iter().map(|s| (*s).to_string()));
+    // v1.5.0 F7: the camera profile's name is OWNED now, so the merge has to
+    // strip Lightroom's copy before the writer puts ours back — exactly the
+    // duplicate-attribute argument the pass-through block is built on.
+    keys.push("CameraProfile".to_string());
+    // The v1.5.0 colour keys: the Calibration panel, the B&W switch and — in
+    // the band loop below, beside the HSL cells — its eight-band mixer.
+    keys.extend(CALIBRATION_CRS.iter().map(|s| (*s).to_string()));
+    keys.push("ConvertToGrayscale".to_string());
     for band in crate::recipe::HSL_BANDS {
         keys.push(format!("HueAdjustment{band}"));
         keys.push(format!("SaturationAdjustment{band}"));
         keys.push(format!("LuminanceAdjustment{band}"));
+        keys.push(format!("GrayMixer{band}"));
     }
     keys
 }
@@ -4643,7 +5049,7 @@ pub struct MergeOutcome {
 /// ⇒ stripped and rewritten verbatim. Either way exactly one copy survives,
 /// which is the duplicate-attribute rule the strip exists for.
 fn merge_strip_keys(r: &EditRecipe) -> Vec<String> {
-    let era_gated = era_suppressed_attr_keys(r);
+    let era_gated = unspoken_attr_keys(r);
     owned_attr_keys()
         .into_iter()
         .filter(|k| !PASSTHROUGH_CRS.contains(&k.as_str()) || r.passthrough.contains_key(k))
@@ -4651,45 +5057,74 @@ fn merge_strip_keys(r: &EditRecipe) -> Vec<String> {
         .collect()
 }
 
-/// The crs ATTRIBUTE keys R25 added to this writer's ownership, paired with the
-/// registry row that carries each — DERIVED, never hand-copied, because a
-/// hand-copied list of twenty-seven spellings is a list that drifts.
+/// The crs ATTRIBUTE keys control-set era `era` gave this writer
+/// (`recipe::SCHEMA_ERA_CONTROLS`: era 1 is R25, era 2 v1.5.0), each paired
+/// with the registry row that carries it. The CONTROLS are named per era in
+/// `recipe.rs`; the key spellings are DERIVED from their registry rows, never
+/// hand-copied, because a hand-copied list of spellings is a list that drifts.
+/// Era 0, and any era this build does not know, added nothing.
 ///
-/// Two arms, and the second is why this cannot simply be "the CarriedOnly
-/// rows":
+/// Membership is by ERA, never by tier. Until v1.5.0 most of R25's list was
+/// derived from `Tier::CarriedOnly`, R25's own tier; v1.5.0 renders the
+/// carried controls batch by batch, and a control that leaves the tier does
+/// not leave R25 — derived from the tier, the eight Detail axes would have
+/// dropped out of this gate the day they started rendering, and an ordinary
+/// save of a legacy recipe would again have deleted `SharpenRadius` and its
+/// neighbours from the photographer's sidecar.
 ///
-///   * every `Tier::CarriedOnly` attribute row — the nine B2 effects, the eight
-///     B3 detail axes, the auto-CA switch and the six de-fringe keys (24). The
-///     tier is R25's own invention and has no pre-R25 members, so it IS the
-///     batch.
-///   * `texture`, `ca_r`, `ca_b` (3) — R25 keys whose control RENDERS, so the
-///     tier cannot name them. Spelled out with the reason rather than inferred
-///     from a date nothing in the tree records.
+/// The B4 PASS-THROUGH keys are deliberately absent from every era: they have
+/// a stronger law of their own in [`merge_strip_keys`] (present in the map ⇒
+/// ours to rewrite, absent ⇒ never touched), which already answers the
+/// question this gate exists for, and answers it for every era.
 ///
-/// The B4 PASS-THROUGH sixteen are deliberately absent: they have a stronger
-/// law of their own in [`merge_strip_keys`] (present in the map ⇒ ours to
-/// rewrite, absent ⇒ never touched), which already answers the question this
-/// gate exists for, and answers it for every era.
-///
-/// Pinned at exactly twenty-seven by
-/// `the_era_gate_is_the_twenty_seven_keys_r25_added`.
-fn r25_attr_keys() -> Vec<(&'static str, &'static str)> {
-    use crate::advisor::catalogue::{Tier, RECIPE_CONTROLS};
-    /// The R25 keys the tier cannot name, because their control renders.
-    const RENDERED_R25: [&str; 3] = ["texture", "ca_r", "ca_b"];
+/// Pinned per era by `the_era_gate_is_the_twenty_seven_keys_r25_added` and
+/// `the_era_gate_names_the_keys_v1_5_0_added`.
+fn era_attr_keys(era: u32) -> Vec<(&'static str, &'static str)> {
+    use crate::advisor::catalogue::RECIPE_CONTROLS;
+    let Some(names) = (era as usize).checked_sub(1).and_then(|i| crate::recipe::SCHEMA_ERA_CONTROLS.get(i))
+    else {
+        return Vec::new();
+    };
     RECIPE_CONTROLS
         .iter()
-        .filter(|c| c.tier == Some(Tier::CarriedOnly) || RENDERED_R25.contains(&c.name))
+        .filter(|c| names.contains(&c.name))
         .filter_map(|c| c.crs.attr().map(|k| (c.name, k)))
         .collect()
 }
 
-/// The keys a merge must neither STRIP nor EMIT for `r`, because `r` has never
-/// seen them — the [`crate::recipe::SCHEMA_ERA`] gate.
+/// The control-set era that introduced registry control `name`
+/// (`recipe::SCHEMA_ERA_CONTROLS`), or 0 for a control every recipe has held.
+fn control_era(name: &str) -> u32 {
+    crate::recipe::SCHEMA_ERA_CONTROLS
+        .iter()
+        .position(|names| names.contains(&name))
+        .map_or(0, |i| i as u32 + 1)
+}
+
+/// The control-name prefixes whose keys the writer emits ALL OR NONE — the
+/// de-fringe six (R25, `owned_attrs`: a hue window with no amount beside it is
+/// a shape no real document has), the parametric seven (v1.5.0, the same
+/// argument for a split with no region), and the Calibration seven and the
+/// B&W mixer's eight (v1.5.0, whole blocks in every Lightroom file too) — and
+/// which [`unspoken_attr_keys`] therefore releases whole.
+const WHOLE_BLOCKS: [&str; 4] = ["defringe", "param_", "cal_", "gray_"];
+
+/// The keys a merge must neither STRIP nor EMIT for `r`, because `r` has
+/// nothing to say about them.
+///
+/// TWO reasons a recipe can be silent about a key, and they are different
+/// things. The first is the [`crate::recipe::SCHEMA_ERA`] gate below: the
+/// recipe predates the control, so serde filled it from the default. The second
+/// arrived with v1.5.0 F7 and is not about eras at all — `camera_profile` is a
+/// NAME, and an empty name is not "no profile", it is "we were not told".
+/// Stripping `crs:CameraProfile` out of a Lightroom document because our own
+/// recipe carries no name would delete the photographer's profile choice on an
+/// ordinary save, which is the very defect the era gate was built to stop,
+/// arriving through a different door.
 ///
 /// **The defect this closes** (R25 P8, one root cause with the mask-block arm
 /// in [`merge_recipe_into_xmp`]): a `recipe.json` written by v0.30 has no key
-/// for any of the twenty-seven above, so serde fills them from
+/// for any of R25's twenty-seven, so serde fills them from
 /// [`EditRecipe::default`] and the recipe "says" texture 0, no grain, no
 /// sharpening radius. Owning a key means the merge STRIPS it before writing
 /// ours back, and the writer omits a slider at rest — so an ordinary Ctrl+S on
@@ -4708,24 +5143,44 @@ fn r25_attr_keys() -> Vec<(&'static str, &'static str)> {
 /// re-stamps the era of a file. So the gate covers only keys still sitting
 /// exactly where serde left them.
 ///
-/// The de-fringe six move as ONE BLOCK: the writer emits all six or none
-/// (`owned_attrs` states why — a hue window with no amount beside it is a shape
-/// no real document has), so a gate that released three of them would publish
-/// exactly that shape.
-fn era_suppressed_attr_keys(r: &EditRecipe) -> std::collections::BTreeSet<&'static str> {
+/// PER ERA as well: a recipe is gated only on the eras newer than its own
+/// stamp. An era-1 (v1.4) recipe has held every R25 key all along and owns
+/// them; it has never seen v1.5.0's parametric curve, and a Lightroom
+/// `ParametricDarks` beside it must survive its save exactly as `Texture`
+/// survived a v0.30 one.
+///
+/// The [`WHOLE_BLOCKS`] move as ONE BLOCK each: the writer emits them all or
+/// none, so a gate that released part of one would publish exactly the shape
+/// the writer refuses to.
+fn unspoken_attr_keys(r: &EditRecipe) -> std::collections::BTreeSet<&'static str> {
     use crate::advisor::catalogue::global_value;
+    // A name we do not hold is a name we must not delete — whatever the era.
+    let mut out: std::collections::BTreeSet<&'static str> = Default::default();
+    if r.camera_profile.is_empty() {
+        out.insert("CameraProfile");
+    }
     if r.schema_era >= crate::recipe::SCHEMA_ERA {
-        return Default::default();
+        return out;
     }
     let neutral = EditRecipe::default();
-    let keys = r25_attr_keys();
-    let untouched = |name: &str| global_value(r, name) == global_value(&neutral, name);
-    let defringe = |name: &str| name.starts_with("defringe");
-    let defringe_untouched = keys.iter().filter(|(n, _)| defringe(n)).all(|(n, _)| untouched(n));
-    keys.iter()
-        .filter(|(n, _)| if defringe(n) { defringe_untouched } else { untouched(n) })
-        .map(|(_, k)| *k)
-        .collect()
+    let keys: Vec<_> = (r.schema_era + 1..=crate::recipe::SCHEMA_ERA).flat_map(era_attr_keys).collect();
+    // An explicit zero (v1.5.0) is a MOVE, though its number is the default's:
+    // it is the photographer setting a companion to 0, not serde filling one.
+    let untouched = |name: &str| {
+        global_value(r, name) == global_value(&neutral, name)
+            && !r.explicit_zero.iter().any(|n| n == name)
+    };
+    let block_untouched =
+        |block: &str| keys.iter().filter(|(n, _)| n.starts_with(block)).all(|(n, _)| untouched(n));
+    out.extend(
+        keys.iter()
+            .filter(|(n, _)| match WHOLE_BLOCKS.iter().find(|b| n.starts_with(**b)) {
+                Some(block) => block_untouched(block),
+                None => untouched(n),
+            })
+            .map(|(_, k)| *k),
+    );
+    out
 }
 
 pub fn merge_recipe_into_xmp(existing: &str, r: &EditRecipe) -> Option<MergeOutcome> {
@@ -5057,12 +5512,35 @@ pub fn merge_recipe_into_xmp_in_frame_for_photo(
             r.masks.len()
         ));
     }
+    // The point colours (v1.5.0): the other owned element a recipe can hold
+    // none of for two opposite reasons. A recipe with swatches speaks for the
+    // element and replaces the base's. One with none speaks for it only when it
+    // could have held some — a recipe of the era that brought them, whose empty
+    // list is the photographer's own "no point colour" — and only over a base
+    // block this reader understands: an older recipe never saw the element (the
+    // era gate's case; the gate's list is attributes, so the stamp is read here
+    // directly), and a block the reader refuses is not one the recipe can have
+    // been imported from. Lightroom's no-swatch placeholder reads as empty, so
+    // it stays where it stands.
+    let base_point_colors = parse_point_colors_checked(mask_scope.as_ref());
+    let own_point_colors = !r.point_colors.is_empty()
+        || (r.schema_era >= control_era("point_colors")
+            && base_point_colors.as_ref().is_ok_and(|swatches| !swatches.is_empty()));
+    if !r.point_colors.is_empty() && base_point_colors.is_err() {
+        notes.push(format!(
+            "the merge base's point colours could not be read — they are not in the new file, which \
+             carries this develop's {} point colour(s) instead (the base file itself is not modified)",
+            r.point_colors.len()
+        ));
+    }
     // [`OWNED_ELEMENT_ONLY`] is the shared list (the import-side disclosure
     // reads the same one), minus the mask block on the arm that keeps the
-    // base's foreign masks verbatim.
+    // base's foreign masks verbatim and the point colours on the arm above
+    // that keeps the base's.
     let owned_elements: std::collections::HashSet<String> = OWNED_ELEMENT_ONLY
         .iter()
         .filter(|k| !(preserve_masks && **k == "MaskGroupBasedCorrections"))
+        .filter(|k| own_point_colors || **k != "PointColors")
         .map(|k| (*k).to_string())
         .chain(merge_strip_keys(r))
         // The base's payload rasters, by the FULL name the base gave them —
@@ -5400,7 +5878,7 @@ impl<'a> CrsSource<'a> for Scope<'a> {
 /// note, web X-Recipe-Warning, store derived-snapshot trace). String-typed
 /// owned keys are exempt.
 pub fn unparsable_crs_numbers(xmp: &str) -> Vec<String> {
-    const STRINGY: [&str; 7] = [
+    const STRINGY: [&str; 8] = [
         "Version",
         "ProcessVersion",
         "WhiteBalance",
@@ -5412,6 +5890,8 @@ pub fn unparsable_crs_numbers(xmp: &str) -> Vec<String> {
         // accepts both — naming it here as unparsable would be a disclosure
         // about a value that imported perfectly.
         "AutoLateralCA",
+        // The B&W switch (v1.5.0), Lightroom's `"True"` / `"False"`.
+        "ConvertToGrayscale",
     ];
     if xmp.len() > MAX_XMP_BYTES {
         return vec!["XMP document exceeds the 16 MiB limit".to_string()];
@@ -5432,7 +5912,7 @@ pub fn unparsable_crs_numbers(xmp: &str) -> Vec<String> {
     let mut bad: Vec<String> = owned_attr_keys()
         .into_iter()
         .filter(|k| !STRINGY.contains(&k.as_str()))
-        // The PASS-THROUGH sixteen are EXEMPT, and not as a special case — as
+        // The PASS-THROUGH nine are EXEMPT, and not as a special case — as
         // the definition of the tier. This scan exists because an owned key
         // whose value does not parse "imports as a SILENT neutral, and the
         // next save overwrites the sidecar with those neutrals". A
@@ -5444,6 +5924,25 @@ pub fn unparsable_crs_numbers(xmp: &str) -> Vec<String> {
         // `crs:PerspectiveX="-140"`, which is out of the ±100 default band
         // this scan falls back to and is a perfectly ordinary Upright result.
         .filter(|k| !PASSTHROUGH_CRS.contains(&k.as_str()))
+        // …and neither is an OWNED key whose registry shape is not a number
+        // (v1.5.0 F7). `crs:CameraProfile` left the carried list and joined the
+        // owned one, and this scan's universe is the owned list — so the same
+        // profile name that was correctly exempt as a carried key came back as
+        // an "unparsable number" the moment it became a control. Asking the
+        // registry for the SHAPE closes the class rather than adding one more
+        // name to the list above: a future text or boolean control is exempt
+        // the day it is registered.
+        .filter(|k| {
+            !crate::advisor::catalogue::RECIPE_CONTROLS.iter().any(|c| {
+                c.crs.attr() == Some(k.as_str())
+                    && !matches!(
+                        c.shape,
+                        crate::advisor::catalogue::Shape::Number
+                            | crate::advisor::catalogue::Shape::NullableNumber
+                            | crate::advisor::catalogue::Shape::Integer
+                    )
+            })
+        })
         .filter(|k| {
             scope.crs_str(k).is_some()
                 && scope
@@ -5460,6 +5959,11 @@ pub fn unparsable_crs_numbers(xmp: &str) -> Vec<String> {
         if parse_curve_checked(scope.text(), tag).is_err() {
             bad.push(tag.to_string());
         }
+    }
+    // The point colours, by the curve rule: a block present but unreadable
+    // imports as no swatch at all, and the photo renders without them.
+    if parse_point_colors_checked(scope.text()).is_err() {
+        bad.push("PointColors".to_string());
     }
     // A structurally inconsistent crop (HasCrop="True" with a missing
     // coordinate, an out-of-domain value, or inverted ordering) imports as a
@@ -5653,6 +6157,48 @@ fn parse_curve(xmp: &str, tag: &str) -> Vec<CurvePoint> {
     parse_curve_checked(xmp, tag).unwrap_or_default()
 }
 
+/// The point colours (v1.5.0) back from `<crs:PointColors>`: one swatch per
+/// `rdf:li` of nineteen numbers, Lightroom's no-swatch placeholder skipped
+/// (`PointColor::from_numbers`). `Err` — present but unreadable, the curve
+/// rule — for an item that is not nineteen numbers in their domains, an
+/// element that never closes, or more swatches than a recipe keeps
+/// ([`crate::recipe::MAX_POINT_COLORS`]): a list cut short would render some
+/// of the photographer's colours and silently not the rest.
+fn parse_point_colors_checked(xmp: &str) -> Result<Vec<crate::recipe::PointColor>, ()> {
+    let Some(body) = owned_element_body(xmp, "crs:PointColors")? else {
+        return Ok(Vec::new());
+    };
+    let mut swatches = Vec::new();
+    let mut from = 0;
+    while let Some((start, end, self_closing)) = next_xml_tag(body, from) {
+        let tag = &body[start..=end];
+        if tag.starts_with("</") || tag_name(tag) != "rdf:li" {
+            from = end + 1;
+            continue;
+        }
+        if self_closing {
+            return Err(()); // an empty <rdf:li/> holds no nineteen numbers
+        }
+        let close = element_close_start(body, "rdf:li", end).ok_or(())?;
+        let numbers = body[end + 1..close]
+            .split(',')
+            .map(|v| v.trim().parse::<f32>().map_err(|_| ()))
+            .collect::<Result<Vec<f32>, ()>>()?;
+        if let Some(swatch) = crate::recipe::PointColor::from_numbers(&numbers)? {
+            if swatches.len() == crate::recipe::MAX_POINT_COLORS {
+                return Err(());
+            }
+            swatches.push(swatch);
+        }
+        from = close + 1;
+    }
+    Ok(swatches)
+}
+
+fn parse_point_colors(xmp: &str) -> Vec<crate::recipe::PointColor> {
+    parse_point_colors_checked(xmp).unwrap_or_default()
+}
+
 
 
 /// Local-mask corrections back from `<crs:MaskGroupBasedCorrections>` —
@@ -5676,6 +6222,115 @@ fn parse_masks_with_source(
     let mut brush_reader = MaskBrushReader::new(photo, diag);
     mask_summary_from_block(block, authored_by_autoshade, intent_namespace_declared(xmp), frame, &mut brush_reader)
         .supported
+}
+
+/// Lightroom's spot removal, back from `<crs:RetouchAreas>` — v1.5.0 F9.
+///
+/// Read from the WHOLE document rather than from [`crs_own_scope`], and the
+/// reason is the scope's own rule: it drops every top-level child that nests
+/// an `rdf:Description`, which is exactly what this element is. That rule is
+/// right for SETTINGS (a nested Description is somebody else's slider values)
+/// and this element is the second one it is wrong about — `crs:RetouchAreas`
+/// nests Descriptions because its AREAS are Descriptions, the same shape
+/// `crs:MaskGroupBasedCorrections` is kept by name for. Reading the document
+/// here rather than widening the scope keeps that rule untouched for the
+/// eighty-odd scalars that depend on it.
+///
+/// **The geometry is the authority, not `crs:pm_target_*`.** The two agree —
+/// the target rectangle's centre, normalised by `crs:pm_whole_image_*`, lands
+/// within 3-4 decimals of the ellipse's own `crs:X`/`crs:Y` on every area that
+/// carries both. The ellipse wins because `pm_whole_image` starts at (32, 20)
+/// rather than at the origin: it is the model's own padded working area, not
+/// the photograph.
+fn parse_retouch_areas(xmp: &str) -> Vec<crate::retouch::RetouchArea> {
+    use crate::retouch::{RetouchArea, RetouchShape, SpotOrigin};
+
+    /// More than an order of magnitude past the largest real file (21 areas)
+    /// and still a bound — a hand-written sidecar must not be able to make one
+    /// photograph cost an unbounded allocation. The same law as
+    /// `MAX_MASKS_FROM_XMP` and `MAX_DAB_TOKENS`.
+    const MAX_AREAS: usize = 512;
+    const DESCRIPTION_CLOSE: &str = "</rdf:Description>";
+
+    let Ok(Some(block)) = owned_element_body(xmp, "crs:RetouchAreas") else {
+        return Vec::new();
+    };
+    let mut out: Vec<RetouchArea> = Vec::new();
+    let mut at = 0usize;
+    while let Some((start, gt, self_closing)) = next_xml_tag(block, at) {
+        at = gt + 1;
+        let tag = &block[start..=gt];
+        // An AREA is the `rdf:Description` that carries `crs:SpotType` — 121
+        // of 121 do. The Descriptions NESTED inside one (a `Mask/Paint`
+        // component) carry none, so this single attribute is the whole test
+        // and there is no nesting depth to count.
+        if tag.starts_with("</") || tag_name(tag) != "rdf:Description" {
+            continue;
+        }
+        let head = Tag::new(tag);
+        let Some(spot_type) = head.crs_str("SpotType") else { continue };
+        if out.len() >= MAX_AREAS {
+            break;
+        }
+        // The FILL axis. An unmeasured `crs:SpotType` is refused rather than
+        // guessed at: its geometry would render perfectly well, but the label
+        // this engine puts under it would be a claim about what Adobe did to
+        // those pixels, and there is no measurement behind it.
+        let fill = head.crs_str("fill_method");
+        let origin = match (spot_type.as_ref(), fill.as_deref()) {
+            ("heal", _) => SpotOrigin::LightroomHeal,
+            ("heal_patchmatch", Some("firefly")) => SpotOrigin::LightroomGenerative,
+            ("heal_patchmatch", None) => SpotOrigin::LightroomContentAware,
+            _ => continue,
+        };
+        if self_closing {
+            continue; // no body, so no component, so no geometry to stand on
+        }
+        let Some(close) = find_matching_close(block, gt + 1) else { continue };
+        let seg = &block[start..close + DESCRIPTION_CLOSE.len()];
+
+        // One walk, both shapes. `components_in` is the reader the mask side
+        // already uses, so an ellipse written as a bare `<rdf:li crs:What=…/>`
+        // (84 of 84) and a Paint written as a nested Description (39 of 39)
+        // arrive through one implementation rather than two.
+        let comps = components_in(seg);
+        let shape = if let Some(e) = comps.iter().find(|c| c.what == "Mask/Ellipse") {
+            let t = Tag::new(e.tag);
+            let num = |k: &str| t.crs_f32(k).filter(|v| v.is_finite());
+            let (Some(cx), Some(cy), Some(size_x), Some(size_y)) =
+                (num("X"), num("Y"), num("SizeX"), num("SizeY"))
+            else {
+                continue; // an ellipse that does not state where it is
+            };
+            RetouchShape::Ellipse { cx, cy, size_x, size_y }
+        } else {
+            let strokes: Vec<_> = comps
+                .iter()
+                .filter(|c| c.what == "Mask/Paint")
+                .filter_map(|c| parse_paint_stroke(seg, c).ok())
+                .collect();
+            if strokes.is_empty() {
+                continue; // neither shape: nothing to remove and nowhere to do it
+            }
+            RetouchShape::Brush(strokes)
+        };
+
+        // `crs:Feather` is stated by the 5 `heal` areas (0.5 on every one) and
+        // by none of the 116 patchmatch ones. An ABSENT attribute is not a
+        // photographer choosing zero, and a hard-edged patch seam is not what
+        // Lightroom showed — so the fallback is this engine's own default.
+        let feather = head
+            .crs_f32("Feather")
+            .filter(|v| v.is_finite() && (0.0..=1.0).contains(v))
+            .unwrap_or_else(|| crate::retouch::HealSpot::default().feather);
+        // Both halves or neither: a donor with one coordinate is not a donor.
+        let donor = match (head.crs_f32("SourceX"), head.crs_f32("OffsetY")) {
+            (Some(x), Some(y)) if x.is_finite() && y.is_finite() => Some([x, y]),
+            _ => None,
+        };
+        out.push(RetouchArea { origin, feather, donor, shape });
+    }
+    out
 }
 
 /// How many corrections in this sidecar produced NO mask at all — AI / depth
@@ -8287,6 +8942,9 @@ fn xmp_to_recipe_clamped_impl(
         })
         .unwrap_or_default();
 
+    // Camera Calibration (v1.5.0): Lightroom's unprefixed seven, whose absent
+    // keys are its zeros, in `EditRecipe::calibration` order.
+    let cal = CALIBRATION_CRS.map(&f);
     let mut r = EditRecipe {
         temperature_k: custom_wb.then(|| scope.crs_f32("Temperature")).flatten(),
         tint: if custom_wb || ours { f("Tint") } else { 0.0 },
@@ -8301,6 +8959,20 @@ fn xmp_to_recipe_clamped_impl(
         vibrance: f("Vibrance"),
         saturation: f("Saturation"),
         texture: f("Texture"),
+        // The parametric tone curve (v1.5.0). The regions fall back to 0 like
+        // every Basic slider; the splits to ADOBE'S DEFAULTS, the de-fringe
+        // rule — `f` would import a split at 0 from a document that never
+        // named one, and the next save would write that invented split into
+        // the sidecar beside the RAW.
+        param_shadows: f("ParametricShadows"),
+        param_darks: f("ParametricDarks"),
+        param_lights: f("ParametricLights"),
+        param_highlights: f("ParametricHighlights"),
+        param_shadow_split: scope.crs_f32("ParametricShadowSplit").unwrap_or(dflt.param_shadow_split),
+        param_midtone_split: scope.crs_f32("ParametricMidtoneSplit").unwrap_or(dflt.param_midtone_split),
+        param_highlight_split: scope
+            .crs_f32("ParametricHighlightSplit")
+            .unwrap_or(dflt.param_highlight_split),
         // The nine CARRIED effects (R25 B2). `f` answers 0 for an absent key,
         // which is exactly this batch's neutral — so a sidecar that names none
         // of them still imports as a no-op, and one that names a real vignette
@@ -8314,7 +8986,35 @@ fn xmp_to_recipe_clamped_impl(
         grain: f("GrainAmount"),
         grain_size: f("GrainSize"),
         grain_rough: f("GrainFrequency"),
+        // F8 (v1.5.0): HDR edit mode, its headroom and the seven SDR-rendition
+        // controls. `f` answers 0 for an absent key, which is the neutral for
+        // all eight numbers; the mode is Lightroom's "0"/"1" spelling, so
+        // anything that is not "1" — including a missing key — is OFF.
+        hdr_edit: scope.crs_str("HDREditMode").as_deref().map(str::trim) == Some("1"),
+        hdr_max_ev: f("HDRMaxValue"),
+        sdr_blend: f("SDRBlend"),
+        sdr_brightness: f("SDRBrightness"),
+        sdr_contrast: f("SDRContrast"),
+        sdr_highlights: f("SDRHighlights"),
+        sdr_shadows: f("SDRShadows"),
+        sdr_whites: f("SDRWhites"),
+        sdr_clarity: f("SDRClarity"),
+        cal_shadow_tint: cal[0],
+        cal_red_hue: cal[1],
+        cal_red_sat: cal[2],
+        cal_green_hue: cal[3],
+        cal_green_sat: cal[4],
+        cal_blue_hue: cal[5],
+        cal_blue_sat: cal[6],
         hsl,
+        // The B&W switch (v1.5.0): Lightroom's `"True"`, and the `true` / `1`
+        // spellings a crs boolean takes in the wild, on THIS Description — a
+        // creative Look's own switch belongs to the Look. The eight-band mixer
+        // is read just below.
+        convert_to_grayscale: matches!(
+            scope.crs_str("ConvertToGrayscale").as_deref().map(str::trim),
+            Some("True") | Some("true") | Some("1")
+        ),
         color_grade,
         // 1:1. Lightroom's Detail > Sharpening "Amount" slider runs 0..150 and
         // `crs:Sharpness` stores that UI number unscaled — 15 real sidecars in
@@ -8327,10 +9027,11 @@ fn xmp_to_recipe_clamped_impl(
         // an unparsable number, and a rendered 60 was written back as 40.
         sharpening: f("Sharpness"),
         noise_reduction: f("LuminanceSmoothing"),
-        // The eight CARRIED detail axes (R25 B3). `f` answers 0 for an absent
-        // key, which IS this block's neutral — an untouched sidecar still
-        // imports as a no-op, and one that names a real sharpening radius
-        // brings the whole triple with it.
+        // The eight detail axes (R25 B3). `f` answers 0 for an absent key,
+        // which IS this block's neutral — an untouched sidecar still imports
+        // as a no-op, and one that names a real sharpening radius brings the
+        // whole triple with it. A companion stated AT 0 is told apart from an
+        // absent one just below (`explicit_zero`).
         sharpen_radius: f("SharpenRadius"),
         sharpen_detail: f("SharpenDetail"),
         sharpen_mask: f("SharpenEdgeMasking"),
@@ -8342,6 +9043,33 @@ fn xmp_to_recipe_clamped_impl(
         lens_vignette: f("VignetteAmount"),
         lens_vignette_mid: scope.crs_f32("VignetteMidpoint").unwrap_or(50.0),
         lens_distortion: f("LensManualDistortionAmount"),
+        // Absent is NOT zero for these two — 100 is Lightroom's neutral, and
+        // reading an absent key as 0 would import "profile correction off"
+        // from a document that never mentioned the profile at all. Same shape
+        // as the de-fringe windows below, and for the same reason.
+        lens_profile_distortion_scale: scope
+            .crs_f32("LensProfileDistortionScale")
+            .unwrap_or(dflt.lens_profile_distortion_scale),
+        lens_profile_vignetting_scale: scope
+            .crs_f32("LensProfileVignettingScale")
+            .unwrap_or(dflt.lens_profile_vignetting_scale),
+        perspective_vertical: f("PerspectiveVertical"),
+        perspective_horizontal: f("PerspectiveHorizontal"),
+        perspective_rotate: f("PerspectiveRotate"),
+        // 100 is the neutral, so an absent key means "the frame as it is" and
+        // NOT "scale to nothing" — the lens-profile strengths' rule again.
+        perspective_scale: scope
+            .crs_f32("PerspectiveScale")
+            .unwrap_or(dflt.perspective_scale),
+        perspective_aspect: f("PerspectiveAspect"),
+        perspective_x: f("PerspectiveX"),
+        perspective_y: f("PerspectiveY"),
+        perspective_upright: f("PerspectiveUpright"),
+        upright_transform: upright_matrices(scope),
+        crop_constrain_to_warp: matches!(
+            scope.crs_str("CropConstrainToWarp").as_deref().map(str::trim),
+            Some("1") | Some("true") | Some("True")
+        ),
         ca_r: f("ChromaticAberrationR"),
         ca_b: f("ChromaticAberrationB"),
         // A FLAG: Lightroom writes 0/1, and "true" is the other spelling in
@@ -8376,7 +9104,10 @@ fn xmp_to_recipe_clamped_impl(
         red_curve: parse_curve(scope.text(), "ToneCurvePV2012Red"),
         green_curve: parse_curve(scope.text(), "ToneCurvePV2012Green"),
         blue_curve: parse_curve(scope.text(), "ToneCurvePV2012Blue"),
+        point_colors: parse_point_colors(scope.text()),
         masks: parse_masks_with_source(scope.text(), ours, frame, photo, diag),
+        // v1.5.0 F9. The whole document, not `scope` — see the reader.
+        retouch: parse_retouch_areas(xmp),
 
         // The PASS-THROUGH blocks (R25 B4), read as STRINGS and stored
         // verbatim. `crs_str` already reads BOTH spellings — the
@@ -8394,10 +9125,45 @@ fn xmp_to_recipe_clamped_impl(
             .filter_map(|k| scope.crs_str(k).map(|v| ((*k).to_string(), v.into_owned())))
             .collect(),
 
+        // v1.5.0 F7. `scope`, not the whole document, for the reason the
+        // comment above gives twice over: a creative Look nests its OWN
+        // `crs:CameraProfile`, and a flat scan would import the Look's base
+        // profile whenever the top level omitted one.
+        camera_profile: scope.crs_str("CameraProfile").unwrap_or_default().into_owned(),
+        look: read_creative_look(xmp),
+
         rationale,
         confidence,
         ..Default::default()
     };
+    // The B&W mixer's eight bands (v1.5.0), through the one door the panel's
+    // rows share, in the band order the writer spells them; an absent key is
+    // the band's zero.
+    for (i, band) in crate::recipe::HSL_BANDS.iter().enumerate() {
+        if let Some(slot) = r.gray_mixer_mut(i) {
+            *slot = f(&format!("GrayMixer{band}"));
+        }
+    }
+    // A COMPANION key present at 0 (`recipe::LR_COMPANION_DEFAULTS`) is a
+    // VALUE the document states — none of those controls defaults to 0, so
+    // Lightroom writes `SharpenDetail="0"` only for a Detail set to 0 — while
+    // `f` above folds a missing key into the same number. Keep the difference
+    // (`EditRecipe::explicit_zero`): the engine renders the absent one at
+    // Lightroom's default and the stated one at zero, as Lightroom does. Each
+    // key's spelling comes from its registry row, never a second copy; an
+    // unparsable value stays "absent", as `f` already has it.
+    r.explicit_zero = crate::recipe::LR_COMPANION_DEFAULTS
+        .iter()
+        .map(|(name, _)| *name)
+        .filter(|name| {
+            crate::advisor::catalogue::global_control(name)
+                .and_then(|c| c.crs.attr())
+                .and_then(|key| scope.crs_f32(key))
+                .is_some_and(|v| v == 0.0)
+        })
+        .map(str::to_string)
+        .collect();
+    r.explicit_zero.sort();
     // PROVENANCE RULE 3 (WB-anchor era): a sidecar WE wrote before the
     // absolute-Kelvin engine (x:xmptk="AutoShade", no era-2 marker) carries a
     // Temperature that was tuned RELATIVE to the historical 5500 K anchor.
@@ -8611,8 +9377,21 @@ mod tests {
                 .map(|c| c.name)
                 .collect::<Vec<_>>(),
             // R33 §G added the third, and the first that is an EDIT rather
-            // than the engine's own measurement of the photo.
-            vec!["base_curve", "lens_profile", "colour_field"],
+            // than the engine's own measurement of the photo; v1.5.0 F6 added
+            // `upright_transform`, which is ADOBE'S measurement of it — read
+            // from `crs:UprightTransform_N`, rendered, and never written back,
+            // because writing it would claim Adobe's key for our own solver's
+            // numbers. Registry order, not alphabetical.
+            // In registry order, which is the panel's draw order: F7's creative
+        // Look sits between the Upright matrices and the base curve because
+        // that is where its field is declared.
+        // v1.5.0 F9 adds `retouch`, and it is the one row here whose export
+        // story has two halves. A MERGE keeps the photographer's own
+        // `crs:RetouchAreas` verbatim (this writer does not own the element,
+        // so it never strips it) — but a FRESH `recipe_to_xmp` emits nothing
+        // for it, and on that path every removal is gone. The tier names the
+        // worse half, which is what a disclosure is for.
+        vec!["upright_transform", "look", "base_curve", "lens_profile", "retouch", "colour_field"],
         );
     }
 
@@ -8622,27 +9401,30 @@ mod tests {
     /// `unsupported_corrections`, which had no partner until now.
     #[test]
     fn an_imported_sidecar_names_the_globals_the_engine_does_not_render() {
-        // FIXTURE NOTE, THIRD REVISION. `Texture` / `GrainAmount` were the
+        // FIXTURE NOTE, FOURTH REVISION. `Texture` / `GrainAmount` were the
         // samples until R25 B2 modelled them; `PerspectiveUpright` took over
-        // and B4 has now claimed that too. The samples are `PointColor` and
-        // `CameraProfileDigest` — the latter chosen deliberately: it sits one
-        // line from `crs:CameraProfile` in every real sidecar, and B4 owns the
-        // profile NAME while the digest stays foreign. The list shrinking under
-        // the fixtures, batch after batch, IS the complement definition working.
+        // and B4 has now claimed that too. `PointColor` served until v1.5.0
+        // modelled Lightroom's point colours (the `crs:PointColors` element).
+        // The samples are `CurveRefineSaturation` — the point curve's Refine
+        // Saturation, which no AutoShade control holds — and
+        // `CameraProfileDigest`, chosen deliberately: it sits one line from
+        // `crs:CameraProfile` in every real sidecar, and B4 owns the profile
+        // NAME while the digest stays foreign. The list shrinking under the
+        // fixtures, batch after batch, IS the complement definition working.
         let doc = "<x:xmpmeta xmlns:x=\"adobe:ns:meta/\"><rdf:RDF \
                    xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\">\
                    <rdf:Description rdf:about=\"\" \
                    xmlns:crs=\"http://ns.adobe.com/camera-raw-settings/1.0/\" \
                    crs:Exposure2012=\"+1.00\" crs:Texture=\"+30\" \
-                   crs:PointColor=\"0\" crs:PerspectiveUpright=\"1\" \
+                   crs:CurveRefineSaturation=\"100\" crs:PerspectiveUpright=\"1\" \
                    crs:CameraProfile=\"Adobe Standard\" \
                    crs:CameraProfileDigest=\"2D1D4700365C3E2831EEAE0D1A8F9CDF\" \
                    crs:RawFileName=\"crs:NotAnAttribute=1.ARW\"/></rdf:RDF></x:xmpmeta>";
         let found = unmodelled_global_crs(doc);
-        assert!(found.contains(&"PointColor".to_string()), "LR's PointColor: {found:?}");
+        assert!(found.contains(&"CurveRefineSaturation".to_string()), "{found:?}");
         assert!(found.contains(&"CameraProfileDigest".to_string()), "{found:?}");
-        // …and the B4 half of the same claim: the Transform / Calibration
-        // blocks are ours now, so they left this list with no edit to it.
+        // …and the B4 half of the same claim: the Transform block and the
+        // profile NAME are ours now, so they left this list with no edit to it.
         assert!(
             !found.contains(&"PerspectiveUpright".to_string()),
             "PerspectiveUpright is passed through since R25 B4: {found:?}"
@@ -9475,9 +10257,9 @@ mod tests {
         // Colour NR Detail/Smoothness 50/50), and inventing a zero for each
         // would be a change to the photo, not a faithful silence. The ONE
         // exception is `ColorNoiseReduction` itself (v1.3.1, `amount_carries`):
-        // this engine renders no colour noise reduction, so its zero IS the
-        // render, and an absent key let Lightroom apply its RAW default of 25
-        // to a photo AutoShade showed without it (measured 2026-09-12).
+        // a recipe's zero is colour noise reduction OFF, which is what this
+        // engine renders, and an absent key let Lightroom apply its RAW default
+        // of 25 to a photo AutoShade showed without it (measured 2026-09-12).
         let neutral = recipe_to_xmp(&EditRecipe::default());
         for key in [
             "SharpenRadius",
@@ -9514,6 +10296,48 @@ mod tests {
         // and it is the engine's zero, never Lightroom's stale 25.
         assert_eq!(cleared.matches("crs:ColorNoiseReduction=").count(), 1, "one answer: {cleared}");
         assert!(cleared.contains(r#"crs:ColorNoiseReduction="0""#), "ours: {cleared}");
+    }
+
+    /// v1.5.0: a COMPANION key Lightroom states AT 0 is a value, an absent one
+    /// is Lightroom's default — the difference `explicit_zero` holds, in both
+    /// directions of the sidecar.
+    ///
+    /// MUTATIONS THIS CATCHES: the reader's explicit-zero pass removed (an LR
+    /// Detail 0 imports as "absent" and renders at 25); the writer's `states`
+    /// reduced to `v != 0.0` (our real 0 leaves the sidecar and Lightroom
+    /// renders its default); the era gate's `untouched` blind to the list (a
+    /// legacy recipe's real 0 is suppressed on save).
+    #[test]
+    fn a_companion_stated_at_zero_is_a_value_and_an_absent_one_is_lightrooms_default() {
+        let lr = "<rdf:Description rdf:about=\"\" \
+                  xmlns:crs=\"http://ns.adobe.com/camera-raw-settings/1.0/\" \
+                  crs:Sharpness=\"40\" crs:SharpenRadius=\"+1.0\" crs:SharpenDetail=\"0\" \
+                  crs:LuminanceSmoothing=\"30\" crs:LuminanceNoiseReductionDetail=\"50\" \
+                  crs:GrainAmount=\"20\" crs:GrainSize=\"0\"/>";
+        let r = xmp_to_recipe(lr);
+        assert_eq!(
+            r.explicit_zero,
+            vec!["grain_size".to_string(), "sharpen_detail".to_string()],
+            "exactly the companions stated at 0"
+        );
+        assert_eq!(r.resolved("sharpen_detail"), 0.0, "Lightroom's Detail 0 renders at 0");
+        assert_eq!(r.resolved("nr_detail"), 50.0, "a stated default is itself");
+        assert_eq!(r.resolved("color_nr_detail"), 50.0, "an absent one renders at the default");
+
+        // Written back: the real zeros go out as zeros, the absent stays absent.
+        let xmp = recipe_to_xmp(&r);
+        assert!(xmp.contains(r#"crs:SharpenDetail="0""#), "{xmp}");
+        assert!(xmp.contains(r#"crs:GrainSize="0""#), "{xmp}");
+        assert!(!xmp.contains("ColorNoiseReductionDetail"), "never an invented zero: {xmp}");
+        assert_eq!(xmp_to_recipe(&xmp).explicit_zero, r.explicit_zero, "and it reads back the same");
+
+        // A LEGACY recipe (schema era 0) still writes a real zero the
+        // photographer set: the era gate suppresses only what serde filled.
+        let mut legacy = EditRecipe { schema_era: 0, sharpening: 40.0, ..Default::default() };
+        legacy.set_resolved("sharpen_detail", 0.0);
+        let written = recipe_to_xmp(&legacy);
+        assert!(written.contains(r#"crs:SharpenDetail="0""#), "{written}");
+        assert!(!written.contains("SharpenRadius"), "the absent radius stays absent: {written}");
     }
 
     /// v0.31.1: `crs:Sharpness` is Lightroom's Detail > Sharpening **Amount**
@@ -9771,12 +10595,20 @@ mod tests {
 
     // ───────────────────── R25 B4: the pass-through blocks ──────────────────
 
-    /// A Lightroom Transform / Calibration block, verbatim, in this batch's
-    /// own spellings — synthetic, but every value below is copied CHARACTER
-    /// FOR CHARACTER out of the seven reference sidecars (a bare `0`, a
-    /// decimal `0.00`, a signed `+0.9`, a plain `100`, a negative `-35` and a
-    /// profile NAME with a space in it: six different spellings of things a
-    /// number formatter would flatten into three).
+    /// A Lightroom Transform block, its Upright solver's own bookkeeping, and a
+    /// camera profile — synthetic, but every value below is copied CHARACTER
+    /// FOR CHARACTER out of the operator's reference sidecars (a bare `0`, a
+    /// decimal `0.00`, a signed `+0.9`, a plain `100`, a negative `-35`, two
+    /// nine-digit normalised fractions, a focal length past the registry's
+    /// fallback band, and a profile NAME with a space in it: nine different
+    /// spellings of things a number formatter would flatten into three).
+    ///
+    /// FIXTURE NOTE, F6 REVISION. The eight `crs:Perspective*` keys are OWNED
+    /// controls since v1.5.0, so they are no longer this document's
+    /// pass-through sample — the six `Upright*` keys beside them are, and
+    /// Lightroom writes those on every photo its Upright panel has touched.
+    /// Keeping the Perspective keys here is the point: the same document now
+    /// exercises both sides of the line.
     fn lr_transform_doc() -> String {
         "<x:xmpmeta xmlns:x=\"adobe:ns:meta/\"><rdf:RDF \
          xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\">\
@@ -9787,6 +10619,11 @@ mod tests {
          crs:PerspectiveHorizontal=\"0\" crs:PerspectiveRotate=\"+0.9\" \
          crs:PerspectiveScale=\"100\" crs:PerspectiveAspect=\"0\" \
          crs:PerspectiveX=\"0.00\" crs:PerspectiveY=\"0.00\" \
+         crs:UprightVersion=\"151388160\" crs:UprightCenterMode=\"0\" \
+         crs:UprightCenterNormX=\"0.422764964\" \
+         crs:UprightCenterNormY=\"0.46112117\" \
+         crs:UprightFocalMode=\"0\" \
+         crs:UprightFocalLength35mm=\"104.944461871\" \
          crs:CameraProfile=\"Adobe Standard\" \
          crs:CameraProfileDigest=\"2D1D4700365C3E2831EEAE0D1A8F9CDF\" \
          crs:HasSettings=\"True\"/></rdf:RDF></x:xmpmeta>"
@@ -9800,21 +10637,37 @@ mod tests {
     #[test]
     fn passthrough_round_trips_verbatim() {
         let r = xmp_to_recipe(&lr_transform_doc());
-        assert_eq!(r.passthrough.len(), 9, "eight Perspective keys + the profile: {:?}", r.passthrough);
+        assert_eq!(
+            r.passthrough.len(),
+            6,
+            "the six Upright bookkeeping keys, and nothing else: {:?}",
+            r.passthrough
+        );
         // VERBATIM means the spelling too. Every one of these would have been
-        // destroyed by a number round trip: `+0.9` loses its sign marker,
-        // `0.00` loses two decimals, `Adobe Standard` is not a number at all.
+        // destroyed by a number round trip: nine significant digits do not
+        // survive an f32 format, 104.944461871 is outside the registry's
+        // fallback band, and `Adobe Standard` is not a number at all.
         for (key, want) in [
-            ("PerspectiveUpright", "0"),
-            ("PerspectiveVertical", "-35"),
-            ("PerspectiveRotate", "+0.9"),
-            ("PerspectiveScale", "100"),
-            ("PerspectiveX", "0.00"),
-            ("CameraProfile", "Adobe Standard"),
+            ("UprightVersion", "151388160"),
+            ("UprightCenterNormX", "0.422764964"),
+            ("UprightCenterNormY", "0.46112117"),
+            ("UprightFocalLength35mm", "104.944461871"),
         ] {
             assert_eq!(r.passthrough.get(key).map(String::as_str), Some(want), "{key}");
         }
-        // The keys OUTSIDE the named sixteen are untouched by all of this:
+        // The profile NAME crossed the same line in F7, and its spelling
+        // matters for the same reason: it is an identifier that has to keep
+        // matching the file it names.
+        assert_eq!(r.camera_profile, "Adobe Standard");
+        assert!(!r.passthrough.contains_key("CameraProfile"), "an owned key is not carried");
+        // The eight Perspective keys crossed the line in v1.5.0 F6: OWNED, so
+        // they are parsed into their own fields and are NOT in this map.
+        for owned in ["PerspectiveVertical", "PerspectiveRotate", "PerspectiveX"] {
+            assert!(!r.passthrough.contains_key(owned), "{owned} is an owned control now");
+        }
+        assert_eq!(r.perspective_vertical, -35.0, "…and it arrived as a number");
+        assert_eq!(r.perspective_rotate, 0.9, "…including the signed one");
+        // The keys OUTSIDE the named nine are untouched by all of this:
         // the digest stays foreign, preserved by the merge and named by the
         // import disclosure. "Named set, not everything unknown."
         assert!(!r.passthrough.contains_key("CameraProfileDigest"));
@@ -9824,30 +10677,31 @@ mod tests {
 
         // Out and back, through OUR writer.
         let ours = recipe_to_xmp(&r);
-        assert!(ours.contains(r#"crs:PerspectiveRotate="+0.9""#), "{ours}");
+        assert!(ours.contains(r#"crs:UprightFocalLength35mm="104.944461871""#), "{ours}");
         assert!(ours.contains(r#"crs:CameraProfile="Adobe Standard""#), "{ours}");
         assert_eq!(xmp_to_recipe(&ours).passthrough, r.passthrough, "a full verbatim round trip");
+        // The owned half round-trips too, in its own measured spellings.
+        assert!(ours.contains(r#"crs:PerspectiveRotate="+0.9""#), "{ours}");
+        assert!(ours.contains(r#"crs:PerspectiveVertical="-35""#), "{ours}");
 
         // Written in PASSTHROUGH_CRS order, not the BTreeMap's alphabetical
-        // one: Adobe groups Transform before Calibration, and a diff against
-        // Lightroom's own file has to be readable.
+        // one: Adobe writes its solver's block before the profile name, and a
+        // diff against Lightroom's own file has to be readable.
         let at = |k: &str| ours.find(&format!("crs:{k}=")).unwrap_or_else(|| panic!("{k} missing"));
-        assert!(at("PerspectiveUpright") < at("PerspectiveY"), "the Transform block keeps its order");
-        assert!(at("PerspectiveY") < at("CameraProfile"), "Transform before Calibration");
+        assert!(at("UprightVersion") < at("UprightFocalLength35mm"), "the block keeps its order");
+        assert!(at("UprightFocalLength35mm") < at("CameraProfile"), "block before the profile name");
 
         // XML transport still applies — escaping is not interpretation, and a
         // profile name really can carry an ampersand.
         let odd = EditRecipe {
-            passthrough: [("CameraProfile".to_string(), "Sky & Sea <v2>".to_string())]
-                .into_iter()
-                .collect(),
+            camera_profile: "Sky & Sea <v2>".to_string(),
             ..Default::default()
         };
         let doc = recipe_to_xmp(&odd);
         assert!(doc.contains("Sky &amp; Sea &lt;v2&gt;"), "escaped on the way out: {doc}");
         assert_eq!(
-            xmp_to_recipe(&doc).passthrough.get("CameraProfile").map(String::as_str),
-            Some("Sky & Sea <v2>"),
+            xmp_to_recipe(&doc).camera_profile,
+            "Sky & Sea <v2>",
             "…and unescaped back to the very same string"
         );
     }
@@ -9883,50 +10737,120 @@ mod tests {
     /// paste from another photo, a fresh Analyze). Stripping on that would
     /// delete the photographer's Upright correction and camera profile from
     /// the file beside their RAW on an ordinary Ctrl+S.
+    ///
+    /// v1.5.0 F6 SPLIT THIS TEST IN TWO, because the block it is named after
+    /// now has two halves with two different protections:
+    ///
+    /// * the six Upright bookkeeping keys are still carried, and
+    ///   `merge_strip_keys` is still what saves them — case (a). The profile
+    ///   NAME left that half in F7 and is protected differently again: it is
+    ///   owned, and an empty name means "not stated" rather than "cleared"
+    ///   (`unspoken_attr_keys`);
+    /// * the eight `crs:Perspective*` keys are OWNED, so a build that has them
+    ///   overwrites Lightroom's exactly as it overwrites `crs:Exposure2012`,
+    ///   and what protects a recipe written before they existed is the SCHEMA
+    ///   ERA, not the strip list — case (a2).
+    ///
+    /// Reading the second half as a regression would have been the easy
+    /// mistake: an owned key that never overwrites is a control that renders
+    /// nothing.
     #[test]
     fn a_recipe_that_never_saw_a_transform_block_does_not_delete_one() {
         let lr = lr_transform_doc();
-        // (a) The dangerous case: empty map, real Transform block in the base.
+        // (a) The dangerous case: empty map, real Upright bookkeeping in the
+        // base. THIS is what the strip list protects.
         let blind = EditRecipe { exposure_ev: 0.25, ..Default::default() };
         let merged = merged_doc(&lr, &blind).expect("mergeable");
         for want in [
-            r#"crs:PerspectiveVertical="-35""#,
-            r#"crs:PerspectiveRotate="+0.9""#,
+            r#"crs:UprightCenterNormX="0.422764964""#,
+            r#"crs:UprightFocalLength35mm="104.944461871""#,
             r#"crs:CameraProfile="Adobe Standard""#,
         ] {
             assert!(merged.contains(want), "the base's own {want} must survive: {merged}");
         }
         assert_eq!(merged.matches("crs:CameraProfile=").count(), 1, "and exactly once");
         assert!(merged.contains(r#"crs:Exposure2012="0.25""#), "…while ours still publish");
+        // …and the OWNED half published ours, which is what owning means. The
+        // recipe is era 2, so it has an opinion about the keystone: none.
+        assert_eq!(blind.schema_era, crate::recipe::SCHEMA_ERA, "premise: a current build");
+        assert!(
+            !merged.contains(r#"crs:PerspectiveVertical="-35""#),
+            "an era-2 recipe states its own Transform, like its own Exposure: {merged}"
+        );
+
+        // (a2) The same dangerous case for the owned half: a recipe written
+        // BEFORE v1.5.0 has never held a Perspective key, so the era gate
+        // neither strips nor re-emits one and Lightroom's own bytes stand.
+        let era1 = EditRecipe { exposure_ev: 0.25, schema_era: 1, ..Default::default() };
+        let merged = merged_doc(&lr, &era1).expect("mergeable");
+        for want in [
+            r#"crs:PerspectiveVertical="-35""#,
+            r#"crs:PerspectiveRotate="+0.9""#,
+            r#"crs:CameraProfile="Adobe Standard""#,
+        ] {
+            assert!(merged.contains(want), "an era-1 recipe must leave {want} alone: {merged}");
+        }
+        assert!(merged.contains(r#"crs:Exposure2012="0.25""#), "…while an era-0 key still does");
 
         // (b) The ordinary case: the recipe DID read the block, so ours are
-        // stripped and rewritten — one copy, never two.
+        // stripped and rewritten — one copy, never two. Probed on a key that
+        // is OFF NEUTRAL in the document, because a neutral one has nothing to
+        // rewrite and would prove the claim by accident.
         let seen = EditRecipe { exposure_ev: 0.25, ..xmp_to_recipe(&lr) };
         let merged = merged_doc(&lr, &seen).expect("mergeable");
         assert_eq!(merged.matches("crs:CameraProfile=").count(), 1, "stripped, then rewritten");
-        assert_eq!(merged.matches("crs:PerspectiveScale=").count(), 1);
+        assert_eq!(merged.matches("crs:PerspectiveVertical=").count(), 1, "the owned half too");
+        assert!(merged.contains(r#"crs:PerspectiveVertical="-35""#), "{merged}");
         assert!(merged.contains(r#"crs:CameraProfile="Adobe Standard""#));
-        // (c) …and a CHANGED value replaces rather than duplicates.
+        // …and the neutral one leaves NO key, which is what every owned control
+        // at rest does (it is how a cleared vignette disappears). Harmless
+        // here, and measured rather than assumed: this recipe's own default is
+        // 100 and `xmp_to_recipe` reads an absent `PerspectiveScale` back as
+        // 100, so the document renders the same in both apps with the key gone.
+        assert_eq!(merged.matches("crs:PerspectiveScale=").count(), 0, "at rest, so not restated");
+        assert_eq!(xmp_to_recipe(&merged).perspective_scale, 100.0, "…and absent still reads 100");
+        // (c) …and a CHANGED value replaces rather than duplicates. Probed on
+        // the OWNED profile name (v1.5.0 F7), because that is now the key with
+        // both a strip and a write behind it — the carried half above is copied
+        // verbatim and could never duplicate by a formatting difference.
         let mut edited = seen.clone();
-        edited.passthrough.insert("CameraProfile".to_string(), "Adobe Landscape".to_string());
+        edited.camera_profile = "Adobe Landscape".to_string();
         let merged = merged_doc(&lr, &edited).expect("mergeable");
         assert_eq!(merged.matches("crs:CameraProfile=").count(), 1);
         assert!(merged.contains(r#"crs:CameraProfile="Adobe Landscape""#), "{merged}");
         assert!(!merged.contains("Adobe Standard\""), "the old value is gone: {merged}");
+        // …and an UNSTATED name is not a cleared one: a recipe holding no
+        // profile leaves Lightroom's own alone rather than deleting it.
+        let mut silent = seen.clone();
+        silent.camera_profile.clear();
+        let kept = merged_doc(&lr, &silent).expect("mergeable");
+        assert!(
+            kept.contains(r#"crs:CameraProfile="Adobe Standard""#),
+            "an empty name must not delete the photographer's profile: {kept}"
+        );
     }
 
     /// The regenerate path — the one that "carries none of the base's
-    /// properties". It carries these: the sixteen live in the RECIPE now, so
-    /// a document rebuilt from scratch still states them. (`pipeline`'s
+    /// properties". It carries these: the seven live in the RECIPE now, so a
+    /// document rebuilt from scratch still states them. (`pipeline`'s
     /// regeneration note names the creative `Look` instead of the camera
     /// profile for exactly this reason.)
+    ///
+    /// Both halves of the F6 block, because after v1.5.0 they reach a fresh
+    /// document by two different routes and the same assertion would have
+    /// passed on either one alone: the carried keys ride the `passthrough`
+    /// map, the eight `crs:Perspective*` keys ride their own owned fields.
     #[test]
     fn passthrough_survives_a_regenerate() {
         let r = xmp_to_recipe(&lr_transform_doc());
         let fresh = recipe_to_xmp(&r); // no base document at all
         assert!(fresh.contains(r#"crs:CameraProfile="Adobe Standard""#), "{fresh}");
-        assert!(fresh.contains(r#"crs:PerspectiveVertical="-35""#), "{fresh}");
+        assert!(fresh.contains(r#"crs:UprightFocalLength35mm="104.944461871""#), "{fresh}");
         assert_eq!(xmp_to_recipe(&fresh).passthrough, r.passthrough);
+        // The owned half, by its own route: a number this time, formatted by
+        // the writer rather than copied as a string.
+        assert!(fresh.contains(r#"crs:PerspectiveVertical="-35""#), "{fresh}");
+        assert_eq!(xmp_to_recipe(&fresh).perspective_rotate, r.perspective_rotate);
     }
 
     /// Both spellings, one scanner. `crs_str` already reads the
@@ -9935,6 +10859,10 @@ mod tests {
     /// the SCOPE rule matters more here than anywhere: a creative Look nests
     /// its own baked `crs:CameraProfile`, and a flat scan would import the
     /// PROFILE's name as the photographer's choice.
+    ///
+    /// The profile name is an OWNED control since v1.5.0 F7, so the assertion
+    /// reads `camera_profile` rather than the carried map — the same question
+    /// about the same scope, asked of the field that now answers it.
     #[test]
     fn passthrough_reads_the_element_form_and_never_the_nested_look() {
         let doc = "<x:xmpmeta xmlns:x=\"adobe:ns:meta/\"><rdf:RDF \
@@ -9942,19 +10870,22 @@ mod tests {
                    <rdf:Description rdf:about=\"\" \
                    xmlns:crs=\"http://ns.adobe.com/camera-raw-settings/1.0/\">\
                    <crs:CameraProfile>Adobe Standard</crs:CameraProfile>\
-                   <crs:PerspectiveScale>110</crs:PerspectiveScale>\
+                   <crs:UprightFocalLength35mm>104.944461871</crs:UprightFocalLength35mm>\
                    <crs:Look><rdf:Description><crs:Parameters><rdf:Description>\
                    <crs:CameraProfile>Camera Landscape</crs:CameraProfile>\
-                   <crs:PerspectiveScale>999</crs:PerspectiveScale>\
+                   <crs:UprightFocalLength35mm>999</crs:UprightFocalLength35mm>\
                    </rdf:Description></crs:Parameters></rdf:Description></crs:Look>\
                    </rdf:Description></rdf:RDF></x:xmpmeta>";
         let r = xmp_to_recipe(doc);
         assert_eq!(
-            r.passthrough.get("CameraProfile").map(String::as_str),
-            Some("Adobe Standard"),
+            r.camera_profile,
+            "Adobe Standard",
             "the Description's OWN profile, never the Look's baked one"
         );
-        assert_eq!(r.passthrough.get("PerspectiveScale").map(String::as_str), Some("110"));
+        assert_eq!(
+            r.passthrough.get("UprightFocalLength35mm").map(String::as_str),
+            Some("104.944461871")
+        );
         // A document with no such block reports none — absence stays absence.
         assert!(xmp_to_recipe("<rdf:Description \
              xmlns:crs=\"http://ns.adobe.com/camera-raw-settings/1.0/\" \
@@ -9963,24 +10894,184 @@ mod tests {
             .is_empty());
     }
 
+    /// A creative Look, as Lightroom 9.4 actually writes one.
+    ///
+    /// Trimmed VERBATIM from the library's "Adobe Landscape" files — the shape
+    /// with baked sliders, which is the one that exercises every field. The
+    /// three `ToneCurvePV2012Red/Green/Blue` children Adobe writes beside the
+    /// master curve are identity on every file measured and are left out here
+    /// so the master curve's own assertion cannot pass by reading a sibling.
+    const LOOK_DOC: &str = "<x:xmpmeta xmlns:x=\"adobe:ns:meta/\"><rdf:RDF \
+         xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\">\
+         <rdf:Description rdf:about=\"\" \
+         xmlns:crs=\"http://ns.adobe.com/camera-raw-settings/1.0/\" \
+         crs:Exposure2012=\"+1.00\" crs:Clarity2012=\"+4\" \
+         crs:CameraProfile=\"Adobe Standard\">\
+         <crs:Look>\
+          <rdf:Description crs:Name=\"Adobe Landscape\" crs:Amount=\"1\" \
+           crs:UUID=\"6F9C877E84273F4E8271E6B91BEB36A1\" \
+           crs:SupportsMonochrome=\"false\">\
+          <crs:Group><rdf:Alt><rdf:li xml:lang=\"x-default\">Profiles</rdf:li>\
+          </rdf:Alt></crs:Group>\
+          <crs:Parameters>\
+           <rdf:Description crs:Version=\"18.0\" crs:ProcessVersion=\"15.4\" \
+            crs:Highlights2012=\"-12\" crs:Shadows2012=\"+12\" \
+            crs:Clarity2012=\"+10\" crs:ConvertToGrayscale=\"False\" \
+            crs:CameraProfile=\"Adobe Standard\" \
+            crs:LookTable=\"0B3BFB5CFB7DBF7FF175E98F24D316B0\">\
+           <crs:ToneCurvePV2012><rdf:Seq>\
+            <rdf:li>0, 0</rdf:li><rdf:li>64, 60</rdf:li>\
+            <rdf:li>128, 128</rdf:li><rdf:li>192, 196</rdf:li>\
+            <rdf:li>255, 255</rdf:li></rdf:Seq></crs:ToneCurvePV2012>\
+           </rdf:Description>\
+          </crs:Parameters>\
+          </rdf:Description>\
+         </crs:Look>\
+         </rdf:Description></rdf:RDF></x:xmpmeta>";
+
+    /// The creative Look is READ — its baked half reaches the recipe, and its
+    /// baked half only.
+    ///
+    /// The line this pins is the one the whole F7 model rests on: the Look's
+    /// `Clarity2012="+10"` is the PROFILE's, the Description's own `"+4"` is
+    /// the PHOTOGRAPHER's, and they are two different numbers living in two
+    /// different fields. A reader that flattened the document would hand the
+    /// profile's value to the slider and show the photographer a clarity they
+    /// never set.
+    ///
+    /// MUTATION: read the Look through the Description's scope, drop any field
+    /// from `read_creative_look`, or let an absent `crs:Amount` mean 0.
+    #[test]
+    fn a_creative_look_is_read_for_its_baked_half_and_nothing_else() {
+        let r = xmp_to_recipe(LOOK_DOC);
+        let look = r.look.as_ref().expect("the document carries a Look");
+        assert_eq!(look.name, "Adobe Landscape");
+        assert_eq!(look.amount, 1.0);
+        assert_eq!(look.base_profile, "Adobe Standard");
+        assert_eq!(look.table, "0B3BFB5CFB7DBF7FF175E98F24D316B0");
+        assert!(!look.grayscale, "this Look is a colour one");
+        assert_eq!((look.highlights, look.shadows, look.clarity), (-12.0, 12.0, 10.0));
+        assert_eq!(look.tone_curve.len(), 5, "the baked curve: {:?}", look.tone_curve);
+        assert_eq!(look.tone_curve[1], CurvePoint { input: 64, output: 60 });
+        assert!(look.red_curve.is_empty() && look.blue_curve.is_empty(), "absent stays absent");
+
+        // …and the two halves do not leak into each other.
+        assert_eq!(r.clarity, 4.0, "the photographer's own clarity, not the profile's");
+        assert_eq!(r.highlights, 0.0, "the profile's baked -12 is NOT a slider the user set");
+        assert!(r.tone_curve.is_empty(), "…and its baked curve is not the user's curve");
+        assert_eq!(r.camera_profile, "Adobe Standard");
+
+        // The table is the one thing that cannot be rendered, so it is NAMED.
+        assert_eq!(look.unrendered, vec!["LookTable".to_string()], "{:?}", look.unrendered);
+        assert!(!look.is_neutral(), "a Look with baked moves is not neutral");
+    }
+
+    /// A document with no Look carries none, and a Look with nothing baked is
+    /// neutral rather than absent.
+    ///
+    /// The difference matters downstream: `baked_look` filters on neutrality,
+    /// so a profile that only names a colour table must not reach the tone
+    /// composition and silently replace the engine's own base curve with an
+    /// empty one.
+    ///
+    /// MUTATION: return `Some(Default)` for a document with no Look, or drop
+    /// the neutrality filter in `EditRecipe::baked_look`.
+    #[test]
+    fn a_look_with_nothing_baked_is_neutral_and_no_look_at_all_is_none() {
+        let bare = LOOK_DOC
+            .replace("crs:Highlights2012=\\\"-12\\\" ", "")
+            .replace("crs:Shadows2012=\\\"+12\\\" ", "")
+            .replace("crs:Clarity2012=\\\"+10\\\" ", "");
+        let bare = bare
+            .replace("crs:Highlights2012=\"-12\" ", "")
+            .replace("crs:Shadows2012=\"+12\" ", "")
+            .replace("crs:Clarity2012=\"+10\" ", "");
+        let stripped = {
+            let start = bare.find("<crs:ToneCurvePV2012>").expect("the curve");
+            let end = bare.find("</crs:ToneCurvePV2012>").expect("the curve end")
+                + "</crs:ToneCurvePV2012>".len();
+            format!("{}{}", &bare[..start], &bare[end..])
+        };
+        let r = xmp_to_recipe(&stripped);
+        let look = r.look.as_ref().expect("the Look element is still there");
+        assert!(look.is_neutral(), "nothing baked: {look:?}");
+        assert!(r.baked_look().is_none(), "a neutral Look does not reach the render");
+        assert_eq!(look.table, "0B3BFB5CFB7DBF7FF175E98F24D316B0", "…but its table is still named");
+
+        // An ABSENT `crs:Amount` is the whole Look, not none of it. The two
+        // readings are one token apart and they differ by everything: amount 0
+        // makes `is_neutral` true, so a profile that bakes a real curve would
+        // be switched off silently rather than rendered. Probed here because
+        // neutrality is exactly what an amount of 0 would forge.
+        let no_amount = LOOK_DOC.replace(" crs:Amount=\"1\"", "");
+        assert!(!no_amount.contains("crs:Amount"), "the attribute really went: {no_amount}");
+        let silent = xmp_to_recipe(&no_amount);
+        let unstated = silent.look.as_ref().expect("a Look with no stated amount is still a Look");
+        assert_eq!(unstated.amount, 1.0, "absent means the whole Look");
+        assert!(!unstated.is_neutral(), "…so its baked curve still renders");
+        assert!(silent.baked_look().is_some(), "…and still reaches the render");
+
+        // No Look element at all.
+        let none = xmp_to_recipe(
+            "<x:xmpmeta xmlns:x=\"adobe:ns:meta/\"><rdf:RDF \
+             xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\">\
+             <rdf:Description rdf:about=\"\" \
+             xmlns:crs=\"http://ns.adobe.com/camera-raw-settings/1.0/\" \
+             crs:Exposure2012=\"0.00\"/></rdf:RDF></x:xmpmeta>",
+        );
+        assert!(none.look.is_none(), "no element, no Look");
+        assert!(!none.renders_grayscale(), "and no black-and-white either");
+    }
+
+    /// A monochrome creative profile renders as black and white.
+    ///
+    /// This is how Lightroom 9.4 spells a B&W treatment — four of the 175
+    /// sidecars measured carry `crs:Look` "Adobe Monochrome" whose Parameters
+    /// hold `ConvertToGrayscale="True"`, while the Description's own switch
+    /// stays absent. An engine that read only the top-level switch rendered
+    /// those four photographs in colour.
+    ///
+    /// MUTATION: read `convert_to_grayscale` alone in `renders_grayscale`.
+    #[test]
+    fn a_monochrome_look_renders_black_and_white() {
+        let mono = LOOK_DOC
+            .replace("crs:ConvertToGrayscale=\"False\"", "crs:ConvertToGrayscale=\"True\"")
+            .replace("Adobe Landscape", "Adobe Monochrome");
+        let r = xmp_to_recipe(&mono);
+        assert!(r.look.as_ref().expect("a Look").grayscale, "the Look's own switch");
+        assert!(!r.convert_to_grayscale, "the photographer never touched theirs");
+        assert!(r.renders_grayscale(), "…and the render still has to turn grey");
+        // The photographer's own switch is still enough on its own.
+        let own = EditRecipe { convert_to_grayscale: true, ..Default::default() };
+        assert!(own.renders_grayscale(), "either switch, not both");
+    }
+
     /// A pass-through value is never "unparsable", because it is never parsed.
     ///
-    /// The trap this closes: the sixteen keys joined `owned_attr_keys`, and
+    /// The trap this closes: the pass-through keys joined `owned_attr_keys`, and
     /// that list IS `unparsable_crs_numbers`' universe — with a ±100 fallback
     /// band for any key the registry states no range for. Without the
-    /// exemption, `crs:CameraProfile="Adobe Standard"` (not a number) and
-    /// `crs:PerspectiveX="-140"` (an ordinary Upright result, outside ±100)
-    /// would both have been reported as values that "import as a silent
-    /// neutral" — about the one block in the recipe that has no neutral and
-    /// is never replaced.
+    /// exemption, `crs:UprightFocalLength35mm="104.944461871"` (a real 105 mm
+    /// prime in this library, well outside ±100) would have been reported as a
+    /// value that "imports as a silent neutral" — about the one block in the
+    /// recipe that has no neutral and is never replaced.
+    ///
+    /// `crs:CameraProfile` is here for the SECOND reason (v1.5.0 F7): it is an
+    /// owned control now, and a control's exemption comes from its registry
+    /// SHAPE. A name is not a number whichever list it sits on.
+    ///
+    /// The sample used to be `crs:PerspectiveX="-140"`; v1.5.0 F6 owns that key
+    /// with a stated band, so an out-of-band value there IS worth reporting now
+    /// and the sample moved to a key that is still carried.
     #[test]
     fn a_passthrough_value_is_never_called_unparsable() {
         let doc = "<x:xmpmeta xmlns:x=\"adobe:ns:meta/\"><rdf:RDF \
                    xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\">\
                    <rdf:Description rdf:about=\"\" \
                    xmlns:crs=\"http://ns.adobe.com/camera-raw-settings/1.0/\" \
-                   crs:CameraProfile=\"Adobe Standard\" crs:PerspectiveX=\"-140\" \
-                   crs:PerspectiveScale=\"117.5\" crs:Contrast2012=\"+22\" \
+                   crs:CameraProfile=\"Adobe Standard\" \
+                   crs:UprightFocalLength35mm=\"104.944461871\" \
+                   crs:UprightVersion=\"151388160\" crs:Contrast2012=\"+22\" \
                    crs:HasSettings=\"True\"/></rdf:RDF></x:xmpmeta>";
         assert!(unparsable_crs_numbers(doc).is_empty(), "{:?}", unparsable_crs_numbers(doc));
         // The premise, so the emptiness above is not emptiness for another
@@ -9990,8 +11081,11 @@ mod tests {
         assert_eq!(unparsable_crs_numbers(&bad), vec!["Contrast2012"]);
         // …and the values still arrive, out of band and all.
         let r = xmp_to_recipe(doc);
-        assert_eq!(r.passthrough.get("PerspectiveX").map(String::as_str), Some("-140"));
-        assert_eq!(r.passthrough.get("PerspectiveScale").map(String::as_str), Some("117.5"));
+        assert_eq!(
+            r.passthrough.get("UprightFocalLength35mm").map(String::as_str),
+            Some("104.944461871")
+        );
+        assert_eq!(r.passthrough.get("UprightVersion").map(String::as_str), Some("151388160"));
     }
 
     /// **The disclosure that had no other half** (R25 B4, work order 4.7):
@@ -10022,11 +11116,16 @@ mod tests {
             "a real sidecar's resting de-fringe block is not a gap: {:?}",
             global_render_gaps(&untouched)
         );
-        // One carried value, named.
-        let grainy = EditRecipe { grain: 30.0, ..Default::default() };
-        assert_eq!(global_render_gaps(&grainy), vec!["grain"]);
-        // A RENDERED control is not a gap, however far it is from neutral.
-        let bright = EditRecipe { exposure_ev: 2.0, texture: 40.0, ..Default::default() };
+        // A RENDERED control is not a gap, however far it is from neutral —
+        // including the grain, which was this test's example until v1.5.0
+        // gave the engine a stage after the crop (`render/finish.rs`).
+        let bright = EditRecipe {
+            exposure_ev: 2.0,
+            texture: 40.0,
+            grain: 30.0,
+            post_crop_vignette: -40.0,
+            ..Default::default()
+        };
         assert!(global_render_gaps(&bright).is_empty(), "{:?}", global_render_gaps(&bright));
         // The B4 row is NOT here, and that is the tier's own definition
         // rather than an omission: we never interpret a pass-through value,
@@ -10052,47 +11151,60 @@ mod tests {
                 .any(|c| c.name == "passthrough" && c.tier == Some(Tier::PassThrough)),
             "premise: the row exists and renders nothing — the exclusion above is a choice"
         );
-        // DERIVATION: the list is exactly the CarriedOnly rows. Moving one to
-        // `Rendered` takes it out of the disclosure with no edit here — which
-        // is the property this test is really pinning.
+        // **v1.5.0's own sentence**: a recipe with EVERY control away from its
+        // neutral still carries no gap, because Track F left nothing carried.
+        // Built through serde so a renamed field cannot slip past.
         let mut every = serde_json::to_value(EditRecipe::default()).expect("serialises");
-        let expect: Vec<&str> = RECIPE_CONTROLS
-            .iter()
-            .filter(|c| c.tier == Some(Tier::CarriedOnly))
-            .map(|c| c.name)
-            .collect();
-        assert!(
-            expect.len() >= 24,
-            "premise: B2+B3 put twenty-four CarriedOnly rows here: {expect:?}"
-        );
-        for name in &expect {
-            let shape = RECIPE_CONTROLS
-                .iter()
-                .find(|c| c.name == *name)
-                .map(|c| c.shape)
-                .expect("a registry row");
-            every[*name] = match shape {
+        for c in RECIPE_CONTROLS.iter().filter(|c| c.shape.is_scalar()) {
+            every[c.name] = match c.shape {
                 crate::advisor::catalogue::Shape::Bool => serde_json::json!(true),
-                _ => serde_json::json!(7.0),
+                _ => serde_json::json!(c.range.map_or(7.0, |(_, hi)| hi.min(7.0))),
             };
         }
         let all: EditRecipe = serde_json::from_value(every).expect("in range");
-        assert_eq!(global_render_gaps(&all), expect, "every non-rendering row, and only those");
-        // The two disclosures are DISJOINT halves of one story, never the
-        // same claim twice: a tier renders or it does not.
-        for g in global_render_gaps(&all) {
+        assert!(
+            global_render_gaps(&all).is_empty(),
+            "nothing is carried any more, so nothing can be a gap: {:?}",
+            global_render_gaps(&all)
+        );
+        assert!(
+            RECIPE_CONTROLS.iter().any(|c| c.name == "defringe_purple" && c.tier == Some(Tier::Rendered)),
+            "premise: the de-fringe block was the LAST carried row, and it renders now — \
+             without this the emptiness above would prove nothing about the batch"
+        );
+        // THE MECHANISM, which the real registry can no longer exercise: one
+        // synthetic CarriedOnly row, over a real serde field so the neutral
+        // comparison has something to read. This is the disclosure the day a
+        // carried control comes back — and the reason `render_gaps_in` is a
+        // function of its registry rather than a closure over the global one.
+        let carried = crate::advisor::catalogue::Control {
+            name: "defringe_purple",
+            shape: crate::advisor::catalogue::Shape::Number,
+            range: Some((0.0, 20.0)),
+            neutral: "0",
+            engine_only: true,
+            crs: crate::advisor::catalogue::CrsKey::Attr("DefringePurpleAmount"),
+            tier: Some(Tier::CarriedOnly),
+            purpose: "a synthetic carried row: the disclosure has to work before it is needed",
+        };
+        let fringed = EditRecipe { defringe_purple: 3.0, ..Default::default() };
+        assert_eq!(
+            render_gaps_in(std::slice::from_ref(&carried), &fringed),
+            vec!["defringe_purple"],
+            "a carried control away from its neutral is named"
+        );
+        assert!(
+            render_gaps_in(std::slice::from_ref(&carried), &EditRecipe::default()).is_empty(),
+            "…and at its neutral it is not"
+        );
+        // The two disclosures are DISJOINT halves of one story, never the same
+        // claim twice: a tier renders or it does not. Trivially satisfied while
+        // the left half is empty — asserted anyway, because the day it is not
+        // empty is the day this matters and nobody will think to add it then.
+        for g in render_gaps_in(std::slice::from_ref(&carried), &fringed) {
             assert!(
-                !global_export_losses(&all).contains(&g),
+                !global_export_losses(&fringed).contains(&g),
                 "{g} cannot be both a render gap and an export loss"
-            );
-        }
-        // And the CarriedOnly whitelist is fully covered by it — a slider on
-        // that list that never reached this sentence would be the silent fork
-        // the SF4-C policy needs this disclosure to close.
-        for (n, _) in crate::advisor::catalogue::CARRIED_ONLY_GLOBAL {
-            assert!(
-                global_render_gaps(&all).contains(n),
-                "{n} is CarriedOnly but never reaches the render-gap disclosure"
             );
         }
         let _ = Tier::PassThrough; // the tier this batch populated
@@ -11392,11 +12504,19 @@ mod tests {
     /// phantom mask (or a phantom loss).
     #[test]
     fn a_retouch_area_is_not_counted_as_a_local_adjustment() {
+        // RE-BASED for v1.5.0 F9. This fixture used to spell the ellipse
+        // `crs:Top/Left/Bottom/Right`, which is `Mask/CircularGradient`'s
+        // encoding and not this one: all 84 retouch ellipses in the reference
+        // library write `crs:X/Y/SizeX/SizeY`. The old spelling did not make
+        // the test wrong — it asserts that the block is not counted as a
+        // correction, which holds either way — but it did mean the fixture was
+        // a shape no Lightroom writes, and F9 now reads these attributes for
+        // real, so it has to be the real one.
         let retouch = "  <crs:RetouchAreas>\n   <rdf:Seq>\n    <rdf:li>\n     \
              <rdf:Description crs:SpotType=\"heal\" crs:SourceState=\"sourceSetAutomatically\">\n\
              \x20    <crs:Masks>\n      <rdf:Seq>\n       <rdf:li crs:What=\"Mask/Ellipse\" \
-             crs:MaskValue=\"1\" crs:Top=\"0.1\" crs:Left=\"0.1\" crs:Bottom=\"0.2\" \
-             crs:Right=\"0.2\"/>\n      </rdf:Seq>\n     </crs:Masks>\n     \
+             crs:MaskValue=\"1\" crs:X=\"0.15\" crs:Y=\"0.15\" crs:SizeX=\"0.05\" \
+             crs:SizeY=\"0.05\"/>\n      </rdf:Seq>\n     </crs:Masks>\n     \
              </rdf:Description>\n    </rdf:li>\n   </rdf:Seq>\n  </crs:RetouchAreas>\n";
         let doc = lr_doc(&lr_correction("R", "", &lr_radial("0", "0")))
             .replace("  <crs:MaskGroupBasedCorrections>", &format!("{retouch}  <crs:MaskGroupBasedCorrections>"));
@@ -11405,6 +12525,213 @@ mod tests {
         assert_eq!(r.masks.len(), 1, "one correction, one mask — the retouch is not one");
         assert_eq!(unsupported_corrections(&doc), 0, "nor is it a LOSS");
         assert!(import_losses(&doc).is_empty(), "{:?}", import_losses(&doc));
+        // …and the other half of the same scoping fact, which is new in F9:
+        // it is not a mask, and it IS a retouch area. Before this batch the
+        // block read as nothing at all.
+        assert_eq!(r.retouch.len(), 1, "the retouch area itself imports");
+    }
+
+    /// v1.5.0 F9: `crs:RetouchAreas` reads back as what Lightroom wrote — the
+    /// three fills and the two geometries, in the two markup forms real files
+    /// use for them.
+    ///
+    /// Every shape here is the measured one. An ellipse is an attribute-only
+    /// `<rdf:li/>` (84 of 84 in the reference library) and a brush is a nested
+    /// `<rdf:Description>` with its own `<crs:Dabs>` (39 of 39), so this
+    /// fixture exercises both of the parser's paths rather than the tidier one
+    /// twice. The counts behind the fill names: 5 `heal`, 99 `heal_patchmatch`
+    /// with no `crs:fill_method`, 17 with `fill_method="firefly"`.
+    ///
+    /// MUTATION THIS CATCHES: read the areas from `crs_own_scope` (which drops
+    /// the whole element, so nothing imports); accept an unmeasured
+    /// `crs:SpotType`; default `crs:Feather` to 0 instead of this engine's own;
+    /// treat `crs:SourceX`/`crs:OffsetY` as one-of-two-is-enough.
+    #[test]
+    fn lightrooms_spot_removal_reads_back_with_its_fill_and_its_shape() {
+        use crate::retouch::{RetouchShape, SpotOrigin};
+        let ellipse = |x: &str, y: &str| {
+            format!(
+                "<crs:Masks><rdf:Seq><rdf:li crs:What=\"Mask/Ellipse\" \
+                 crs:MaskActive=\"true\" crs:MaskBlendMode=\"0\" crs:MaskInverted=\"false\" \
+                 crs:MaskValue=\"1\" crs:X=\"{x}\" crs:Y=\"{y}\" crs:SizeX=\"0.05\" \
+                 crs:SizeY=\"0.05\" crs:Alpha=\"0\" crs:CenterValue=\"1\" \
+                 crs:PerimeterValue=\"0\"/></rdf:Seq></crs:Masks>"
+            )
+        };
+        let paint = "<crs:Masks><rdf:Seq><rdf:Description crs:What=\"Mask/Paint\" \
+             crs:MaskActive=\"true\" crs:MaskBlendMode=\"0\" crs:MaskInverted=\"false\" \
+             crs:MaskSyncID=\"0000000000000000000000000000000A\" crs:MaskValue=\"1\" \
+             crs:Radius=\"0.08\" crs:Flow=\"1\" crs:CenterWeight=\"0.5\">\
+             <crs:Dabs><rdf:Seq><rdf:li>d 0.700000 0.300000</rdf:li></rdf:Seq></crs:Dabs>\
+             </rdf:Description></rdf:Seq></crs:Masks>";
+        let area = |attrs: &str, body: &str| {
+            format!("<rdf:li><rdf:Description {attrs}>{body}</rdf:Description></rdf:li>")
+        };
+        let block = format!(
+            "  <crs:RetouchAreas><rdf:Seq>{}{}{}{}{}</rdf:Seq></crs:RetouchAreas>\n",
+            area(
+                "crs:SpotType=\"heal\" crs:SourceState=\"sourceAutoComputed\" \
+                 crs:Method=\"gaussian\" crs:HealVersion=\"2\" crs:SourceX=\"0.6\" \
+                 crs:OffsetY=\"0.4\" crs:Opacity=\"1\" crs:Feather=\"0.5\" crs:Seed=\"2\"",
+                &ellipse("0.25", "0.5")
+            ),
+            area("crs:SpotType=\"heal_patchmatch\" crs:Opacity=\"1\"", &ellipse("0.4", "0.6")),
+            area(
+                "crs:SpotType=\"heal_patchmatch\" crs:fill_method=\"firefly\" \
+                 crs:pm_clio_model_version=\"clio-erase-2.0#test\"",
+                paint
+            ),
+            // HALF a donor, which is not a donor. No real file does this —
+            // all 5 `heal` areas state both — so this is the malformed-input
+            // guard, and the 17-mutation sweep is what said it needed a case:
+            // relaxing the pattern to `(Some(x), y)` changed nothing that any
+            // test could see.
+            area(
+                "crs:SpotType=\"heal\" crs:SourceX=\"0.6\" crs:Feather=\"0.5\"",
+                &ellipse("0.7", "0.7"),
+            ),
+            // Refused: a spelling nothing has measured. Its geometry would
+            // render perfectly well; the label under it would be a claim.
+            area("crs:SpotType=\"some_future_adobe_fill\"", &ellipse("0.8", "0.8")),
+        );
+        let doc = lr_doc(&lr_correction("R", "", &lr_radial("0", "0")))
+            .replace("  <crs:MaskGroupBasedCorrections>", &format!("{block}  <crs:MaskGroupBasedCorrections>"));
+        let r = xmp_to_recipe(&doc);
+
+        assert_eq!(r.retouch.len(), 4, "four measured fills import, the unmeasured one does not");
+        assert_eq!(
+            r.retouch.iter().map(|a| a.origin).collect::<Vec<_>>(),
+            vec![
+                SpotOrigin::LightroomHeal,
+                SpotOrigin::LightroomContentAware,
+                SpotOrigin::LightroomGenerative,
+                SpotOrigin::LightroomHeal
+            ],
+            "the fill axis is read from SpotType crossed with fill_method"
+        );
+        // Both halves of the donor or neither: the area imports, its geometry
+        // stands, and the half-stated donor is simply not one.
+        assert_eq!(
+            r.retouch[3].donor, None,
+            "a donor with one coordinate is not a donor"
+        );
+
+        // The `heal` area is the only kind that states a donor and a feather.
+        let heal = &r.retouch[0];
+        assert_eq!(heal.donor, Some([0.6, 0.4]), "both halves of the donor or neither");
+        assert_eq!(heal.feather, 0.5);
+        match heal.shape {
+            RetouchShape::Ellipse { cx, cy, size_x, size_y } => {
+                assert_eq!((cx, cy, size_x, size_y), (0.25, 0.5, 0.05, 0.05));
+            }
+            ref other => panic!("an ellipse, got {other:?}"),
+        }
+
+        // A patchmatch area states neither, so the feather is this engine's
+        // own — an ABSENT attribute is not a photographer choosing zero.
+        let pm = &r.retouch[1];
+        assert_eq!(pm.donor, None, "Adobe states a search window, not a donor");
+        assert_eq!(pm.feather, crate::retouch::HealSpot::default().feather);
+
+        // The generative one here is a BRUSH, which is the common pairing:
+        // 14 of the library's 17 firefly areas are brushes, not ellipses.
+        match r.retouch[2].shape {
+            RetouchShape::Brush(ref strokes) => {
+                assert_eq!(strokes.len(), 1);
+                assert_eq!(strokes[0].radius, 0.08);
+                assert_eq!(strokes[0].dabs, "d 0.700000 0.300000");
+            }
+            ref other => panic!("a brush, got {other:?}"),
+        }
+
+        // And none of it reached the local adjustments.
+        assert_eq!(r.masks.len(), 1, "still one correction, one mask");
+    }
+
+    /// v1.5.0 F8: HDR edit mode and the seven SDR controls survive a round
+    /// trip, in Lightroom's own spellings.
+    ///
+    /// Three spellings are pinned here because getting any of them wrong
+    /// produces a file Lightroom reads silently and WRONGLY:
+    ///
+    /// * `crs:HDREditMode` is Lightroom's `"0"`/`"1"` and not its
+    ///   `"True"`/`"False"` — both boolean spellings live in one sidecar, and
+    ///   `"True"` here reads as OFF;
+    /// * `crs:HDRMaxValue` is a two-place decimal (`"+1.00"`), the
+    ///   `SharpenRadius` shape, not an integer;
+    /// * the seven `crs:SDR*` are signed integers like every Basic slider.
+    ///
+    /// Every read here goes through [`bare_document`], and that is the whole
+    /// difference between a test and a tautology. `recipe_to_xmp` embeds the
+    /// recipe as an `ash` PAYLOAD and `xmp_to_recipe` prefers it, so a round
+    /// trip through the public pair proves the JSON survived and says nothing
+    /// about the `crs:` attributes — relaxing the reader to `!= Some("0")`,
+    /// which turns HDR mode on for every photograph in the archive, was GREEN
+    /// against the payload form (falsification case F8-M10).
+    ///
+    /// MUTATION: write `"True"` for the mode; drop the `+.2` from the
+    /// headroom; read the mode with `!= Some("0")` (an absent key turns HDR
+    /// mode ON for every photograph in the archive).
+    #[test]
+    fn hdr_edit_mode_and_its_sdr_rendition_round_trip_in_lightrooms_spellings() {
+        let r = EditRecipe {
+            hdr_edit: true,
+            hdr_max_ev: 1.5,
+            sdr_blend: -30.0,
+            sdr_brightness: 40.0,
+            sdr_contrast: 15.0,
+            sdr_highlights: -50.0,
+            sdr_shadows: 25.0,
+            sdr_whites: -20.0,
+            sdr_clarity: 10.0,
+            ..Default::default()
+        };
+        let doc = recipe_to_xmp(&r);
+        for want in [
+            "crs:HDREditMode=\"1\"",
+            "crs:HDRMaxValue=\"+1.50\"",
+            "crs:SDRBlend=\"-30\"",
+            "crs:SDRBrightness=\"+40\"",
+            "crs:SDRContrast=\"+15\"",
+            "crs:SDRHighlights=\"-50\"",
+            "crs:SDRShadows=\"+25\"",
+            "crs:SDRWhites=\"-20\"",
+            "crs:SDRClarity=\"+10\"",
+        ] {
+            assert!(doc.contains(want), "missing {want} in\n{doc}");
+        }
+        // Read back from the PAYLOAD-FREE projection, so what comes home is
+        // the nine attributes above and not the embedded JSON.
+        let back = xmp_to_recipe(&bare_document(&r, None));
+        assert!(back.hdr_edit, "the mode comes home");
+        assert_eq!(back.hdr_max_ev, 1.5, "…and the headroom, to its two places");
+        assert_eq!(back.sdr_controls(), r.sdr_controls(), "…and all seven controls");
+
+        // The mode is read STRICTLY: absent is off, "0" is off, and so is
+        // Lightroom's other boolean spelling, which this key never uses.
+        let off = EditRecipe::default();
+        let bare = bare_document(&off, None);
+        assert!(!bare.contains("HDREditMode") && !bare.contains("SDR"), "{bare}");
+        assert!(!xmp_to_recipe(&bare).hdr_edit, "an absent key is not HDR mode");
+        let inject = |spelling: &str| {
+            bare.replace("crs:Version=", &format!("crs:HDREditMode=\"{spelling}\" crs:Version="))
+        };
+        // THE POSITIVE CONTROL, and the reason it is here: without it the four
+        // negatives below are satisfied by an injection that never reached the
+        // reader at all, and relaxing the read to `!= Some("0")` — which turns
+        // HDR mode ON for every photograph in the archive — stayed green
+        // (falsification case F8-M10). Prove the door opens before testing
+        // that it is shut.
+        assert!(
+            xmp_to_recipe(&inject("1")).hdr_edit,
+            "premise: an injected crs:HDREditMode must reach the reader"
+        );
+        for spelling in ["0", "True", "true", ""] {
+            assert!(
+                !xmp_to_recipe(&inject(spelling)).hdr_edit,
+                "crs:HDREditMode=\"{spelling}\" is not HDR mode"
+            );
+        }
     }
 
     /// R27 T4, `P2-feather-k-closures.md` §4.3. Lightroom's rule for the
@@ -12549,8 +13876,26 @@ mod tests {
         let mut v = serde_json::to_value(r).expect("serialise");
         let obj = v.as_object_mut().expect("a recipe is an object");
         assert!(obj.remove("schema_era").is_some(), "the era stamp must have been there to remove");
-        for (name, _) in r25_attr_keys() {
+        for (name, _) in era_attr_keys(1) {
             assert!(obj.remove(name).is_some(), "{name} is a recipe field");
+        }
+        // v1.5.0's fields are skipped at their defaults, so one is there to
+        // remove only when the recipe moved it. By CONTROL, not by attribute:
+        // the point colours are an element and have no attribute key.
+        for name in crate::recipe::V150_CONTROLS {
+            obj.remove(name);
+        }
+        serde_json::from_value(v).expect("deserialise")
+    }
+
+    /// The same deletion for a `recipe.json` in the shape v1.4 wrote: stamped
+    /// era 1, and without the keys v1.5.0 added.
+    fn as_v1_4_recipe(r: &EditRecipe) -> EditRecipe {
+        let mut v = serde_json::to_value(r).expect("serialise");
+        let obj = v.as_object_mut().expect("a recipe is an object");
+        obj.insert("schema_era".to_string(), serde_json::json!(1));
+        for name in crate::recipe::V150_CONTROLS {
+            obj.remove(name);
         }
         serde_json::from_value(v).expect("deserialise")
     }
@@ -12675,7 +14020,7 @@ mod tests {
     /// photographer's Lightroom file on an ordinary Ctrl+S.
     ///
     /// MUTATION THIS CATCHES: return an empty set from
-    /// `era_suppressed_attr_keys` (or drop its `schema_era` test) and every
+    /// `unspoken_attr_keys` (or drop its `schema_era` test) and every
     /// value below goes to the writer's default.
     #[test]
     fn a_v0_30_recipe_does_not_strip_the_keys_it_never_had() {
@@ -12777,14 +14122,14 @@ mod tests {
         assert!(out.doc.contains("crs:DefringePurpleAmount=\"5\""), "{}", out.doc);
     }
 
-    /// The era gate's universe, DERIVED and pinned: exactly the twenty-seven
-    /// attribute keys R25 gave this writer. A hand-copied list would drift;
-    /// this asserts the derivation produces the list, so a new `CarriedOnly`
-    /// row arrives inside the gate and a row promoted OUT of the tier leaves
-    /// it — with the count as the tripwire either way.
+    /// The era gate's universe for era 1, DERIVED and pinned: exactly the
+    /// twenty-seven attribute keys R25 gave this writer. The controls are
+    /// named per era in `recipe::SCHEMA_ERA_CONTROLS` and the spellings derived
+    /// from their registry rows; this asserts the derivation produces the list,
+    /// whatever tier those rows have since moved to.
     #[test]
     fn the_era_gate_is_the_twenty_seven_keys_r25_added() {
-        let mut keys: Vec<&str> = r25_attr_keys().into_iter().map(|(_, k)| k).collect();
+        let mut keys: Vec<&str> = era_attr_keys(1).into_iter().map(|(_, k)| k).collect();
         keys.sort_unstable();
         assert_eq!(
             keys,
@@ -12826,12 +14171,483 @@ mod tests {
         }
         // And the gate really is EMPTY for a current-era recipe: the ordinary
         // save path pays nothing and changes nothing.
-        assert!(era_suppressed_attr_keys(&EditRecipe::default()).is_empty());
+        // A current-era recipe is gated on nothing it has SEEN. The one key it
+        // is still silent about is the profile NAME, and for the other reason
+        // `unspoken_attr_keys` now carries: an empty name is "not stated", so
+        // an ordinary save leaves Lightroom's own profile alone.
         assert_eq!(
-            era_suppressed_attr_keys(&EditRecipe { schema_era: 0, ..Default::default() }).len(),
-            27,
-            "an untouched legacy recipe suppresses all twenty-seven"
+            unspoken_attr_keys(&EditRecipe::default()).into_iter().collect::<Vec<_>>(),
+            vec!["CameraProfile"]
         );
+        assert!(
+            unspoken_attr_keys(&EditRecipe {
+                camera_profile: "Adobe Standard".to_string(),
+                ..Default::default()
+            })
+            .is_empty(),
+            "a recipe that NAMES a profile speaks for the key and owns it"
+        );
+        let v150 = era_attr_keys(2).len();
+        assert_eq!(
+            unspoken_attr_keys(&EditRecipe { schema_era: 0, ..Default::default() }).len(),
+            27 + v150,
+            "an untouched v0.30 recipe suppresses all twenty-seven and every later era's"
+        );
+    }
+
+    /// v1.5.0's era: the keys it added, DERIVED and pinned like R25's, and the
+    /// gate PER ERA — an untouched v1.4 (era-1) recipe suppresses exactly
+    /// these and not one R25 key, because it has held those all along.
+    ///
+    /// MUTATION THIS CATCHES: `unspoken_attr_keys` gating from era 1
+    /// regardless of the stamp (an era-1 recipe would lose its R25 keys to the
+    /// gate — a Texture cleared in AutoShade would stop reaching the sidecar),
+    /// or a v1.5.0 control left off `recipe::V150_CONTROLS`.
+    #[test]
+    fn the_era_gate_names_the_keys_v1_5_0_added() {
+        let mut keys: Vec<&str> = era_attr_keys(2).into_iter().map(|(_, k)| k).collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            vec![
+                "BlueHue",
+                "BlueSaturation",
+                "CameraProfile",
+                "ConvertToGrayscale",
+                "CropConstrainToWarp",
+                "GrayMixerAqua",
+                "GrayMixerBlue",
+                "GrayMixerGreen",
+                "GrayMixerMagenta",
+                "GrayMixerOrange",
+                "GrayMixerPurple",
+                "GrayMixerRed",
+                "GrayMixerYellow",
+                "GreenHue",
+                "GreenSaturation",
+                // v1.5.0 F8.
+                "HDREditMode",
+                "HDRMaxValue",
+                "LensProfileDistortionScale",
+                "LensProfileVignettingScale",
+                "ParametricDarks",
+                "ParametricHighlightSplit",
+                "ParametricHighlights",
+                "ParametricLights",
+                "ParametricMidtoneSplit",
+                "ParametricShadowSplit",
+                "ParametricShadows",
+                "PerspectiveAspect",
+                "PerspectiveHorizontal",
+                "PerspectiveRotate",
+                "PerspectiveScale",
+                "PerspectiveUpright",
+                "PerspectiveVertical",
+                "PerspectiveX",
+                "PerspectiveY",
+                "RedHue",
+                "RedSaturation",
+                "SDRBlend",
+                "SDRBrightness",
+                "SDRClarity",
+                "SDRContrast",
+                "SDRHighlights",
+                "SDRShadows",
+                "SDRWhites",
+                "ShadowTint",
+            ]
+        );
+        let owned = owned_attr_keys();
+        for k in &keys {
+            assert!(owned.contains(&(*k).to_string()), "{k} is not an owned attribute");
+        }
+        let mut gated: Vec<&str> =
+            unspoken_attr_keys(&EditRecipe { schema_era: 1, ..Default::default() }).into_iter().collect();
+        gated.sort_unstable();
+        assert_eq!(gated, keys, "an untouched v1.4 recipe is gated on v1.5.0's keys and nothing else");
+        assert!(era_attr_keys(0).is_empty() && era_attr_keys(crate::recipe::SCHEMA_ERA + 1).is_empty());
+    }
+
+    /// A Lightroom sidecar with a real parametric curve — the block in the
+    /// shape Lightroom 9.4 writes it (all seven keys, signed regions, bare
+    /// splits) — beside a Basic-panel Texture.
+    fn lr_parametric_doc() -> String {
+        "<x:xmpmeta xmlns:x=\"adobe:ns:meta/\" x:xmptk=\"Adobe XMP Core 5.6-c145\">\n\
+         \x20<rdf:RDF xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\">\n\
+         \x20 <rdf:Description rdf:about=\"\"\n\
+         \x20   xmlns:crs=\"http://ns.adobe.com/camera-raw-settings/1.0/\"\n\
+         \x20   crs:Version=\"15.5.1\"\n\
+         \x20   crs:ProcessVersion=\"15.4\"\n\
+         \x20   crs:Texture=\"-20\"\n\
+         \x20   crs:ParametricShadows=\"0\"\n\
+         \x20   crs:ParametricDarks=\"+40\"\n\
+         \x20   crs:ParametricLights=\"-15\"\n\
+         \x20   crs:ParametricHighlights=\"0\"\n\
+         \x20   crs:ParametricShadowSplit=\"25\"\n\
+         \x20   crs:ParametricMidtoneSplit=\"50\"\n\
+         \x20   crs:ParametricHighlightSplit=\"80\"\n\
+         \x20   crs:HasSettings=\"True\"/>\n\
+         \x20</rdf:RDF>\n\
+         </x:xmpmeta>\n"
+            .to_string()
+    }
+
+    /// v1.5.0: the parametric curve reads in as Lightroom states it, writes
+    /// back as the whole block Lightroom writes, and stays out of a sidecar
+    /// whose recipe never moved it.
+    ///
+    /// MUTATIONS THIS CATCHES: the reader's split fallback to 0 (a document
+    /// with no parametric keys stops importing as a no-op); the writer's
+    /// all-or-none condition reduced to the regions (a moved split alone never
+    /// reaches the sidecar); a key left out of `owned_attr_keys` (the merge
+    /// writes a second copy beside Lightroom's).
+    #[test]
+    fn the_parametric_curve_round_trips_as_lightroom_writes_it() {
+        let doc = lr_parametric_doc();
+        let r = xmp_to_recipe(&doc);
+        assert_eq!(
+            [r.param_shadows, r.param_darks, r.param_lights, r.param_highlights],
+            [0.0, 40.0, -15.0, 0.0]
+        );
+        assert_eq!(r.parametric_splits(), [25.0, 50.0, 80.0]);
+
+        let out = merge_recipe_into_xmp(&doc, &r).expect("mergeable");
+        for spelling in [
+            "crs:ParametricShadows=\"0\"",
+            "crs:ParametricDarks=\"+40\"",
+            "crs:ParametricLights=\"-15\"",
+            "crs:ParametricHighlights=\"0\"",
+            "crs:ParametricShadowSplit=\"25\"",
+            "crs:ParametricMidtoneSplit=\"50\"",
+            "crs:ParametricHighlightSplit=\"80\"",
+        ] {
+            assert!(out.doc.contains(spelling), "{spelling} missing: {}", out.doc);
+            let key = &spelling[..spelling.find('=').expect("a key") + 1];
+            assert_eq!(out.doc.matches(key).count(), 1, "{key} must appear exactly once");
+        }
+        let round = xmp_to_recipe(&out.doc);
+        assert_eq!(
+            (round.parametric_regions(), round.parametric_splits()),
+            (r.parametric_regions(), r.parametric_splits()),
+            "…and it reads back as itself"
+        );
+
+        // A moved split with every region at rest is still a statement.
+        let split_only = EditRecipe { param_midtone_split: 60.0, ..Default::default() };
+        let written = recipe_to_xmp(&split_only);
+        assert!(written.contains("crs:ParametricMidtoneSplit=\"60\""), "{written}");
+        assert!(written.contains("crs:ParametricDarks=\"0\""), "the block goes out whole: {written}");
+
+        // A recipe that never moved the curve writes none of it, and a
+        // document that names none of it imports as nothing.
+        let neutral = recipe_to_xmp(&EditRecipe::default());
+        assert!(!neutral.contains("Parametric"), "{neutral}");
+        assert!(xmp_to_recipe(&neutral).is_noop());
+    }
+
+    /// v1.5.0, the era gate on the case it was generalised for: a v1.4
+    /// `recipe.json` (era 1) beside a Lightroom sidecar with a parametric
+    /// curve that recipe never saw. Its save must leave the curve standing —
+    /// and must still publish the R25 keys that recipe DOES own.
+    ///
+    /// MUTATION THIS CATCHES: `WHOLE_BLOCKS` without `param_` (the gate
+    /// releases the block key by key and an edited region writes half of it),
+    /// or the gate's era range starting at era 1 (see the test above).
+    #[test]
+    fn a_v1_4_recipe_keeps_the_parametric_curve_it_never_had() {
+        let doc = lr_parametric_doc();
+        let mut legacy = as_v1_4_recipe(&xmp_to_recipe(&doc));
+        assert_eq!(legacy.schema_era, 1);
+        assert_eq!(legacy.param_darks, 0.0, "premise: serde filled the absent field");
+        legacy.texture = 0.0; // an R25 key the v1.4 recipe owns, cleared here
+        let out = merge_recipe_into_xmp(&doc, &legacy).expect("mergeable");
+        assert!(out.doc.contains("crs:ParametricDarks=\"+40\""), "the curve was deleted: {}", out.doc);
+        assert!(out.doc.contains("crs:ParametricHighlightSplit=\"80\""), "{}", out.doc);
+        assert_eq!(out.doc.matches("crs:ParametricDarks=").count(), 1);
+        assert!(out.doc.contains("crs:Texture=\"0\""), "an era-1 recipe still owns Texture: {}", out.doc);
+
+        // One region moved on the legacy recipe releases the WHOLE block.
+        legacy.param_lights = 30.0;
+        let out = merge_recipe_into_xmp(&doc, &legacy).expect("mergeable");
+        for key in ["ParametricShadows", "ParametricDarks", "ParametricLights", "ParametricHighlightSplit"] {
+            assert_eq!(out.doc.matches(&format!("crs:{key}=")).count(), 1, "crs:{key}: {}", out.doc);
+        }
+        assert!(out.doc.contains("crs:ParametricLights=\"+30\""), "{}", out.doc);
+        assert!(out.doc.contains("crs:ParametricDarks=\"0\""), "the recipe's own 0 publishes: {}", out.doc);
+    }
+
+    /// A Lightroom sidecar with the v1.5.0 colour blocks in the shape the
+    /// operator's library carries them: the B&W mixer where Lightroom writes it
+    /// (two bands moved), the Calibration seven (three moved) and the B&W switch
+    /// on — beside a Basic-panel exposure.
+    fn lr_colour_doc() -> String {
+        "<x:xmpmeta xmlns:x=\"adobe:ns:meta/\" x:xmptk=\"Adobe XMP Core 5.6-c145\">\n\
+         \x20<rdf:RDF xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\">\n\
+         \x20 <rdf:Description rdf:about=\"\"\n\
+         \x20   xmlns:crs=\"http://ns.adobe.com/camera-raw-settings/1.0/\"\n\
+         \x20   crs:Version=\"15.5.1\"\n\
+         \x20   crs:ProcessVersion=\"15.4\"\n\
+         \x20   crs:Exposure2012=\"+0.35\"\n\
+         \x20   crs:GrayMixerRed=\"0\"\n\
+         \x20   crs:GrayMixerOrange=\"0\"\n\
+         \x20   crs:GrayMixerYellow=\"0\"\n\
+         \x20   crs:GrayMixerGreen=\"0\"\n\
+         \x20   crs:GrayMixerAqua=\"-1\"\n\
+         \x20   crs:GrayMixerBlue=\"-44\"\n\
+         \x20   crs:GrayMixerPurple=\"0\"\n\
+         \x20   crs:GrayMixerMagenta=\"0\"\n\
+         \x20   crs:ShadowTint=\"+3\"\n\
+         \x20   crs:RedHue=\"0\"\n\
+         \x20   crs:RedSaturation=\"0\"\n\
+         \x20   crs:GreenHue=\"0\"\n\
+         \x20   crs:GreenSaturation=\"0\"\n\
+         \x20   crs:BlueHue=\"-28\"\n\
+         \x20   crs:BlueSaturation=\"+83\"\n\
+         \x20   crs:ConvertToGrayscale=\"True\"\n\
+         \x20   crs:HasSettings=\"True\"/>\n\
+         \x20</rdf:RDF>\n\
+         </x:xmpmeta>\n"
+            .to_string()
+    }
+
+    /// v1.5.0: Calibration and the B&W treatment read in as Lightroom states
+    /// them and write back as the whole blocks Lightroom writes, each key once.
+    ///
+    /// MUTATIONS THIS CATCHES: a calibration or `GrayMixer*` key left out of
+    /// `owned_attr_keys` (the merge writes a second copy beside Lightroom's);
+    /// either block's condition reduced to its moved members; the B&W switch
+    /// written while off, or read off a creative Look.
+    #[test]
+    fn calibration_and_black_and_white_round_trip_as_lightroom_writes_them() {
+        let doc = lr_colour_doc();
+        let r = xmp_to_recipe(&doc);
+        assert_eq!(r.calibration(), Some([3.0, 0.0, 0.0, 0.0, 0.0, -28.0, 83.0]));
+        assert!(r.convert_to_grayscale);
+        assert_eq!(r.gray_mixer(), [0.0, 0.0, 0.0, 0.0, -1.0, -44.0, 0.0, 0.0]);
+        assert!(unparsable_crs_numbers(&doc).is_empty(), "{:?}", unparsable_crs_numbers(&doc));
+        assert!(unmodelled_global_crs(&doc).is_empty(), "{:?}", unmodelled_global_crs(&doc));
+
+        let out = merge_recipe_into_xmp(&doc, &r).expect("mergeable");
+        for spelling in [
+            "crs:ShadowTint=\"+3\"",
+            "crs:RedHue=\"0\"",
+            "crs:BlueHue=\"-28\"",
+            "crs:BlueSaturation=\"+83\"",
+            "crs:GrayMixerRed=\"0\"",
+            "crs:GrayMixerAqua=\"-1\"",
+            "crs:GrayMixerBlue=\"-44\"",
+            "crs:ConvertToGrayscale=\"True\"",
+        ] {
+            assert!(out.doc.contains(spelling), "{spelling} missing: {}", out.doc);
+            let key = &spelling[..spelling.find('=').expect("a key") + 1];
+            assert_eq!(out.doc.matches(key).count(), 1, "{key} must appear exactly once");
+        }
+        let round = xmp_to_recipe(&out.doc);
+        assert_eq!(
+            (round.calibration(), round.convert_to_grayscale, round.gray_mixer()),
+            (r.calibration(), r.convert_to_grayscale, r.gray_mixer()),
+            "…and it reads back as itself"
+        );
+
+        // One moved slider sends its whole block; B&W with an untouched mix
+        // sends the eight at 0, the shape Lightroom writes.
+        let one = recipe_to_xmp(&EditRecipe { cal_green_sat: 37.0, ..Default::default() });
+        assert!(one.contains("crs:GreenSaturation=\"+37\"") && one.contains("crs:ShadowTint=\"0\""), "{one}");
+        assert!(!one.contains("GrayMixer") && !one.contains("ConvertToGrayscale"), "{one}");
+        let bw = recipe_to_xmp(&EditRecipe { convert_to_grayscale: true, ..Default::default() });
+        assert!(bw.contains("crs:ConvertToGrayscale=\"True\""), "{bw}");
+        assert!(bw.contains("crs:GrayMixerRed=\"0\"") && bw.contains("crs:GrayMixerMagenta=\"0\""), "{bw}");
+        assert!(!bw.contains("crs:ShadowTint"), "{bw}");
+
+        // A recipe that never moved them writes none of it, and a document
+        // that names none of it imports as nothing.
+        //
+        // Each key SPELT WITH ITS PREFIX, never bare: `crs:DefringeGreenHueHi`
+        // — which a neutral recipe does write, at Adobe's own default —
+        // contains the bare `GreenHue`, so the bare form asserted that the
+        // de-fringe block was absent and failed on a correct writer.
+        let neutral = recipe_to_xmp(&EditRecipe::default());
+        for key in CALIBRATION_CRS.iter().chain(&["ConvertToGrayscale", "GrayMixer"]) {
+            let spelt = format!("crs:{key}");
+            assert!(!neutral.contains(&spelt), "{spelt}: {neutral}");
+        }
+        assert!(xmp_to_recipe(&neutral).is_noop());
+
+        // A switch Lightroom writes OFF is off…
+        let off = doc.replace("crs:ConvertToGrayscale=\"True\"", "crs:ConvertToGrayscale=\"False\"");
+        assert!(!xmp_to_recipe(&off).convert_to_grayscale);
+        // …and a creative Look's own switch and calibration are the Look's.
+        let look = "<x:xmpmeta xmlns:x=\"adobe:ns:meta/\"><rdf:RDF \
+                    xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\">\
+                    <rdf:Description rdf:about=\"\" \
+                    xmlns:crs=\"http://ns.adobe.com/camera-raw-settings/1.0/\">\
+                    <crs:BlueHue>-7</crs:BlueHue>\
+                    <crs:Look><rdf:Description><crs:Parameters><rdf:Description>\
+                    <crs:ConvertToGrayscale>True</crs:ConvertToGrayscale>\
+                    <crs:BlueHue>+50</crs:BlueHue>\
+                    </rdf:Description></crs:Parameters></rdf:Description></crs:Look>\
+                    </rdf:Description></rdf:RDF></x:xmpmeta>";
+        let r = xmp_to_recipe(look);
+        assert!(!r.convert_to_grayscale, "the Look's B&W switch is the Look's");
+        assert_eq!(r.cal_blue_hue, -7.0, "the Description's own calibration, never the Look's");
+    }
+
+    /// One Lightroom point-colour item: the sampled swatch MIDI2LR's
+    /// `LocalPresets.lua` dumps (SrcHue 1.312043 rad, every shift at -1), in
+    /// the nineteen-number order `PointColor::to_numbers` states.
+    const LR_SWATCH: &str = "1.312043, 0.473663, 0.739782, -1.000000, -1.000000, -1.000000, 0.500000, \
+                             0.000000, 0.330000, 0.670000, 1.000000, 0.000000, 0.290000, 0.650000, 1.000000, \
+                             0.150000, 0.700000, 1.000000, 1.000000";
+
+    /// The no-swatch placeholder Lightroom writes on 113 of the operator's 175
+    /// sidecars: one item of nineteen `-1.000000`s.
+    fn lr_placeholder_item() -> String {
+        ["-1.000000"; 19].join(", ")
+    }
+
+    /// A Lightroom sidecar whose `crs:PointColors` holds `items`.
+    fn lr_point_colors_doc(items: &[&str]) -> String {
+        let lis: String = items.iter().map(|i| format!("     <rdf:li>{i}</rdf:li>\n")).collect();
+        format!(
+            "<x:xmpmeta xmlns:x=\"adobe:ns:meta/\" x:xmptk=\"Adobe XMP Core 5.6-c145\">\n\
+             \x20<rdf:RDF xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\">\n\
+             \x20 <rdf:Description rdf:about=\"\"\n\
+             \x20   xmlns:crs=\"http://ns.adobe.com/camera-raw-settings/1.0/\"\n\
+             \x20   crs:Version=\"15.5.1\"\n\
+             \x20   crs:Exposure2012=\"+0.35\"\n\
+             \x20   crs:HasSettings=\"True\">\n\
+             \x20  <crs:PointColors>\n\
+             \x20   <rdf:Seq>\n\
+             {lis}\
+             \x20   </rdf:Seq>\n\
+             \x20  </crs:PointColors>\n\
+             \x20 </rdf:Description>\n\
+             \x20</rdf:RDF>\n\
+             </x:xmpmeta>\n"
+        )
+    }
+
+    /// v1.5.0: point colours read in from Lightroom's nineteen numbers, write
+    /// back where and as Lightroom writes them, and leave Lightroom's own
+    /// no-swatch placeholder alone.
+    ///
+    /// MUTATIONS THIS CATCHES: the placeholder read as a swatch, or stripped by
+    /// an ordinary save (the merge owning the element unconditionally); a
+    /// legacy recipe's save deleting swatches it never saw (the era read
+    /// dropped); an item written in another order or precision; the element
+    /// left off `OWNED_ELEMENT_ONLY` (a second `crs:PointColors` beside
+    /// Lightroom's, and the import disclosure naming a property this engine
+    /// renders).
+    #[test]
+    fn point_colors_round_trip_and_leave_the_placeholder_alone() {
+        // Lightroom's placeholder: nothing to import, nothing to disclose, and
+        // an ordinary save keeps it where it stands.
+        let placeholder = lr_point_colors_doc(&[lr_placeholder_item().as_str()]);
+        let r = xmp_to_recipe(&placeholder);
+        assert!(r.point_colors.is_empty(), "{:?}", r.point_colors);
+        assert!(unparsable_crs_numbers(&placeholder).is_empty(), "{:?}", unparsable_crs_numbers(&placeholder));
+        assert!(unmodelled_global_crs(&placeholder).is_empty(), "{:?}", unmodelled_global_crs(&placeholder));
+        let kept = merge_recipe_into_xmp(&placeholder, &r).expect("mergeable");
+        assert_eq!(kept.doc.matches("<crs:PointColors>").count(), 1, "{}", kept.doc);
+        assert!(kept.doc.contains(&lr_placeholder_item()), "the placeholder stands: {}", kept.doc);
+
+        // A real swatch reads in number for number…
+        let doc = lr_point_colors_doc(&[LR_SWATCH]);
+        let r = xmp_to_recipe(&doc);
+        assert_eq!(r.point_colors.len(), 1);
+        let p = &r.point_colors[0];
+        assert_eq!((p.src_hue, p.src_sat, p.src_lum), (1.312043, 0.473663, 0.739782));
+        assert_eq!((p.hue_shift, p.sat_scale, p.lum_scale, p.range_amount), (-1.0, -1.0, -1.0, 0.5));
+        assert_eq!((p.hue_range, p.sat_range, p.lum_range), (
+            [0.0, 0.33, 0.67, 1.0],
+            [0.0, 0.29, 0.65, 1.0],
+            [0.15, 0.7, 1.0, 1.0]
+        ));
+        // …and merges back as the very item it arrived as, once.
+        let out = merge_recipe_into_xmp(&doc, &r).expect("mergeable");
+        assert_eq!(out.doc.matches("<crs:PointColors>").count(), 1, "{}", out.doc);
+        assert!(out.doc.contains(&format!("<rdf:li>{LR_SWATCH}</rdf:li>")), "{}", out.doc);
+        assert_eq!(xmp_to_recipe(&out.doc).point_colors, r.point_colors);
+        // Where Lightroom writes it: after the curves, before the masks.
+        let fresh = recipe_to_xmp(&EditRecipe {
+            tone_curve: vec![
+                crate::recipe::CurvePoint { input: 0, output: 0 },
+                crate::recipe::CurvePoint { input: 128, output: 140 },
+                crate::recipe::CurvePoint { input: 255, output: 255 },
+            ],
+            masks: vec![crate::recipe::LocalAdjustment {
+                mask: crate::recipe::MaskGeometry::Linear { zero_x: 0.0, zero_y: 0.0, full_x: 0.0, full_y: 1.0 },
+                enabled: true,
+                amount: 1.0,
+                exposure_ev: 0.5,
+                ..Default::default()
+            }],
+            point_colors: r.point_colors.clone(),
+            ..Default::default()
+        });
+        let at = |needle: &str| fresh.find(needle).unwrap_or_else(|| panic!("{needle} missing: {fresh}"));
+        assert!(at("</crs:ToneCurvePV2012>") < at("<crs:PointColors>"), "{fresh}");
+        assert!(at("</crs:PointColors>") < at("<crs:MaskGroupBasedCorrections>"), "{fresh}");
+
+        // The develop DELETED its swatch: a current-era recipe speaks for the
+        // element, and the base's goes.
+        let cleared = EditRecipe { point_colors: Vec::new(), ..r.clone() };
+        let out = merge_recipe_into_xmp(&doc, &cleared).expect("mergeable");
+        assert!(!out.doc.contains("<crs:PointColors>"), "{}", out.doc);
+
+        // A recipe from before v1.5.0 never saw the element: its save keeps it.
+        let legacy = as_v1_4_recipe(&r);
+        assert!(legacy.point_colors.is_empty() && legacy.schema_era == 1, "premise");
+        let out = merge_recipe_into_xmp(&doc, &legacy).expect("mergeable");
+        assert_eq!(out.doc.matches("<crs:PointColors>").count(), 1, "{}", out.doc);
+        assert!(out.doc.contains(&format!("<rdf:li>{LR_SWATCH}</rdf:li>")), "{}", out.doc);
+
+        // A recipe with a swatch replaces the placeholder: one element, ours.
+        let out = merge_recipe_into_xmp(&placeholder, &r).expect("mergeable");
+        assert_eq!(out.doc.matches("<crs:PointColors>").count(), 1, "{}", out.doc);
+        assert!(!out.doc.contains(&lr_placeholder_item()), "{}", out.doc);
+        assert!(out.notes.is_empty(), "{:?}", out.notes);
+    }
+
+    /// A `crs:PointColors` this reader refuses is NAMED, kept by a save that
+    /// has nothing to put in its place, and replaced out loud by one that has.
+    ///
+    /// MUTATIONS THIS CATCHES: `from_numbers` repairing a record it does not
+    /// understand; the reader keeping the first sixteen of a longer list; the
+    /// merge owning an unreadable base block for a recipe with no swatch (a
+    /// list in some future Lightroom layout deleted on Ctrl+S); the
+    /// replacement note dropped.
+    #[test]
+    fn an_unreadable_point_color_block_is_named_kept_and_replaced_out_loud() {
+        let eighteen = LR_SWATCH.rsplit_once(", ").expect("nineteen numbers").0;
+        let twenty = format!("{LR_SWATCH}, 0.000000");
+        let src_sat_above_one = LR_SWATCH.replacen("0.473663", "1.473663", 1);
+        let backwards_window = LR_SWATCH.replacen("0.290000, 0.650000", "0.650000, 0.290000", 1);
+        let seventeen = [LR_SWATCH; crate::recipe::MAX_POINT_COLORS + 1];
+        for doc in [
+            lr_point_colors_doc(&[eighteen]),
+            lr_point_colors_doc(&[twenty.as_str()]),
+            lr_point_colors_doc(&[src_sat_above_one.as_str()]),
+            lr_point_colors_doc(&[backwards_window.as_str()]),
+            lr_point_colors_doc(&[LR_SWATCH, "not, a, number"]),
+            lr_point_colors_doc(&seventeen),
+        ] {
+            assert_eq!(unparsable_crs_numbers(&doc), vec!["PointColors"], "{doc}");
+            let r = xmp_to_recipe(&doc);
+            assert!(r.point_colors.is_empty(), "refused, never repaired: {doc}");
+            // Nothing to put in its place: the base's own bytes stand.
+            let body = owned_element_body(&doc, "crs:PointColors").expect("closed").expect("present");
+            let kept = merge_recipe_into_xmp(&doc, &r).expect("mergeable");
+            assert!(kept.doc.contains(body), "{}", kept.doc);
+            assert!(kept.notes.is_empty(), "{:?}", kept.notes);
+            // A develop with a swatch of its own replaces it — and says so.
+            let mine = EditRecipe { point_colors: vec![crate::recipe::PointColor::sampled(1.0, 0.5, 0.5)], ..r };
+            let replaced = merge_recipe_into_xmp(&doc, &mine).expect("mergeable");
+            assert_eq!(replaced.doc.matches("<crs:PointColors>").count(), 1, "{}", replaced.doc);
+            assert!(!replaced.doc.contains(body), "{}", replaced.doc);
+            assert_eq!(replaced.notes.len(), 1, "{:?}", replaced.notes);
+            assert!(replaced.notes[0].contains("point colours could not be read"), "{}", replaced.notes[0]);
+        }
     }
 
     /// R25 P8, the READ / WRITE asymmetry: a document whose top-level child
@@ -13455,6 +15271,7 @@ mod tests {
             k: [0.961677, 1.182717, -8.218554],
             focal_x: None,
             sensor_format_factor: 1.0,
+            vignette: None,
         };
         let legacy_warp = model
             .mask_warp_knots((9504.0, 6336.0), 16)
@@ -14414,8 +16231,8 @@ mod tests {
     /// FORENSIC REGRESSION for **the R25 P8 root cause**, on the seven real
     /// sidecars and in the exact shape the defect takes in the field: a v0.30
     /// `recipe.json` (no `schema_era`, no field for any of the twenty-seven
-    /// R25 keys, no masks — that build could not import one) saved back over
-    /// the Lightroom file it came from.
+    /// R25 keys or any v1.5.0 control, no masks — that build could not
+    /// import one) saved back over the Lightroom file it came from.
     ///
     /// Same directory and same silent-skip rule as the probes above. This is
     /// where the numbers in the round report come from: before the fix, four
@@ -14461,22 +16278,57 @@ mod tests {
                 masks_held += corrections;
             }
 
-            // 2) Every one of the twenty-seven keys the recipe never had: the
-            //    VALUE the document arrived with must read back unchanged.
+            // 2) Every key of every era the recipe never had, in BOTH the
+            //    document's terms and the engine's.
+            //
+            //    The document's first, because that is the promise: the
+            //    attribute the file arrived with is still there, spelled
+            //    exactly as Lightroom spelled it, exactly once.
+            //
+            //    Then the read-back recipe — but a COMPANION control
+            //    (`recipe::LR_COMPANION_DEFAULTS`) through `resolved`, because
+            //    its stored 0 and Lightroom's own default for it are ONE
+            //    render, and the payload reconciliation collapses them on
+            //    purpose: a key this writer omits at rest, read back at Camera
+            //    Raw's default, is a materialisation and not an edit
+            //    (`payload::lightroom_materialised`). Comparing the stored
+            //    number instead called an untouched `crs:SharpenRadius="+1.0"`
+            //    a change while the document held it verbatim — the assertion
+            //    was wrong about the engine, not the engine about the file.
             let round = xmp_to_recipe(&out.doc);
-            for (control, key) in r25_attr_keys() {
-                let (before, after) = (
-                    crate::advisor::catalogue::global_value(&live, control),
-                    crate::advisor::catalogue::global_value(&round, control),
-                );
-                assert_eq!(before, after, "{name}: crs:{key} changed on a v0.30 save");
-                if text.contains(&format!("crs:{key}=")) {
+            let attr_value = |doc: &str, spelt: &str| {
+                doc.find(spelt).map(|i| {
+                    let rest = &doc[i + spelt.len()..];
+                    rest[..rest.find('"').unwrap_or(0)].to_string()
+                })
+            };
+            for (control, key) in (1..=crate::recipe::SCHEMA_ERA).flat_map(era_attr_keys) {
+                let spelt = format!("crs:{key}=\"");
+                if let Some(before) = attr_value(&text, &spelt) {
                     assert_eq!(
-                        out.doc.matches(&format!("crs:{key}=")).count(),
+                        Some(&before),
+                        attr_value(&out.doc, &spelt).as_ref(),
+                        "{name}: crs:{key} changed on a v0.30 save"
+                    );
+                    assert_eq!(
+                        out.doc.matches(&spelt).count(),
                         1,
                         "{name}: crs:{key} must appear exactly once"
                     );
                     keys_held += 1;
+                }
+                if crate::recipe::LR_COMPANION_DEFAULTS.iter().any(|(n, _)| *n == control) {
+                    assert_eq!(
+                        live.resolved(control),
+                        round.resolved(control),
+                        "{name}: crs:{key} renders differently after a v0.30 save"
+                    );
+                } else {
+                    assert_eq!(
+                        crate::advisor::catalogue::global_value(&live, control),
+                        crate::advisor::catalogue::global_value(&round, control),
+                        "{name}: crs:{key} changed on a v0.30 save"
+                    );
                 }
             }
             // 3) …and none of it is a silent success by way of an empty file.
@@ -14484,7 +16336,7 @@ mod tests {
         }
         assert!(files > 0, "AUTOSHADE_MB_FIXTURES held no sidecars: {dir}");
         eprintln!(
-            "{files} sidecar(s): {masks_held} correction(s) and {keys_held} R25 key(s) held \
+            "{files} sidecar(s): {masks_held} correction(s) and {keys_held} era-gated key(s) held \
              through a v0.30-shaped save"
         );
     }
@@ -14495,10 +16347,19 @@ mod tests {
     /// This is the one batch whose whole promise is "the bytes come back",
     /// and synthetic fixtures cannot prove it: the spellings are the point,
     /// and only Lightroom writes them. First-hand from the seven reference
-    /// sidecars — all eight Perspective keys on every file, `CameraProfile`
-    /// on every file, and NOT ONE Calibration key anywhere (Lightroom omits
-    /// the block at its defaults), which is exactly why an absent key must
-    /// stay absent instead of being invented at some neutral we chose.
+    /// sidecars — `CameraProfile` on every file, the six Upright bookkeeping
+    /// keys on exactly one, and NOT ONE of the `CameraCalibration*` keys R25
+    /// once listed here (Lightroom's Calibration block is the unprefixed
+    /// `crs:ShadowTint` / `crs:BlueHue` / … one, on all seven, which v1.5.0
+    /// renders) — which is exactly why an absent key must stay absent instead
+    /// of being invented at some neutral we chose.
+    ///
+    /// v1.5.0 F6 REVISION. The eight `crs:Perspective*` keys used to be this
+    /// probe's whole subject and are owned controls now, so the counts below
+    /// moved with them: the probe asserts they reach their own FIELDS on every
+    /// file, and counts the bookkeeping that is still carried. That split is
+    /// the fact the forensic set is uniquely able to state — synthetic bytes
+    /// prove a parser, only Lightroom's own files prove which keys it writes.
     #[test]
     fn real_lightroom_sidecars_pass_their_transform_blocks_through() {
         let Some(dir) = crate::config::live_env("AUTOSHADE_MB_FIXTURES") else {
@@ -14510,6 +16371,7 @@ mod tests {
         let mut files = 0usize;
         let mut seen_profile = 0usize;
         let mut seen_upright = 0usize;
+        let mut seen_sliders = 0usize;
         for e in entries.flatten() {
             let p = e.path();
             if !p.to_string_lossy().to_lowercase().contains(".xmp") {
@@ -14532,8 +16394,34 @@ mod tests {
             if r.passthrough.contains_key("CameraProfile") {
                 seen_profile += 1;
             }
-            if r.passthrough.contains_key("PerspectiveUpright") {
+            if r.passthrough.contains_key("UprightVersion") {
+                assert_eq!(
+                    PASSTHROUGH_CRS.iter().filter(|k| r.passthrough.contains_key(**k)).count(),
+                    7,
+                    "{name}: Lightroom writes the solver's bookkeeping as a block, all or none"
+                );
                 seen_upright += 1;
+            }
+            // The other half of the same measurement, and the half this batch
+            // moved: the Perspective block is on every file, and it now lands
+            // in the recipe's own fields rather than in the carried map. The
+            // resting document reads as all-neutral, which is the value that
+            // would be indistinguishable from "never parsed" — so the ONE file
+            // that is not at rest is what carries the assertion.
+            let block = [
+                r.perspective_vertical, r.perspective_horizontal, r.perspective_rotate,
+                r.perspective_aspect, r.perspective_x, r.perspective_y,
+            ];
+            assert_eq!(r.perspective_scale, 100.0, "{name}: 100 is the Transform panel's rest");
+            if block.iter().any(|v| *v != 0.0) {
+                seen_sliders += 1;
+                eprintln!("{name}: manual Transform sliders {block:?}");
+            }
+            for k in ["PerspectiveUpright", "PerspectiveVertical", "PerspectiveScale"] {
+                assert!(
+                    !r.passthrough.contains_key(k),
+                    "{name}: crs:{k} is an owned control since v1.5.0 F6, not a carried string"
+                );
             }
             // VERBATIM, on real bytes: every value that arrived must reach the
             // merged document as the identical string, and come back as the
@@ -14570,7 +16458,11 @@ mod tests {
         }
         assert!(files > 0, "AUTOSHADE_MB_FIXTURES held no sidecars: {dir}");
         assert_eq!(seen_profile, files, "every reference sidecar carries crs:CameraProfile");
-        assert_eq!(seen_upright, files, "…and the whole Perspective block");
+        // Measured, not assumed: Lightroom writes the Upright solver's
+        // bookkeeping only where its panel has actually run. One file of the
+        // seven — the same one that carries the manual keystone below.
+        assert_eq!(seen_upright, 1, "one reference sidecar carries the Upright bookkeeping");
+        assert_eq!(seen_sliders, 1, "…and exactly one has its Transform sliders off neutral");
     }
 
     /// R25 P0-0.1: the bands `unparsable_crs_numbers` judges a document by ARE

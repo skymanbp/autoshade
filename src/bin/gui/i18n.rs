@@ -418,6 +418,21 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     ("Paint the area, then Remove/Fill. An empty prompt removes what you painted (the surroundings continue into it); write what belongs there to fill it with something else. The model sees this card's look and the result lands as a new ✨ AI generated card (crop / straighten are not carried — set them there); this card is untouched. Needs an image API (OPENAI_API_KEY, or the OAuth image bridge in Settings).",
         "涂抹区域，再点 Remove/Fill。提示词留空即移除涂抹的内容（用周围延续填上）；写下那里该有什么则填入别的内容。模型收到的是本卡的外观，结果落成一张新的 ✨ AI 生成卡（裁切/拉直不带过去——到那张卡上再设）；本卡不动。需图像 API（OPENAI_API_KEY，或设置里的 OAuth 图像桥）。"),
     ("Heal (pixel)", "去瑕疵 · Heal（像素）"),
+    // v1.5.0 F9 — Lightroom's own spot removal, imported and re-solved.
+    ("Imported removal", "导入的移除"),
+    (
+        "Lightroom removed {n} area(s) here; re-solved from this photo's own pixels.",
+        "Lightroom 在这里移除了 {n} 处，已从这张照片自己的像素重解。",
+    ),
+    (
+        "{n} of them were synthesised by Adobe — those pixels are not in the sidecar, so what you see is this app's repair.",
+        "其中 {n} 处是 Adobe 合成的，像素不在侧车里，画面上是本程序的修补。",
+    ),
+    ("✨ Regenerate those areas", "✨ 重新生成这些区域"),
+    (
+        "Paint the synthesised areas into the shared brush mask and run the generative model over exactly them — an empty prompt removes, and the result lands as a new ✨ AI generated card (gpt-image API call — costs per image)",
+        "把这些合成区域画进共享笔刷蒙版，只对它们跑生成式模型，空提示词即移除，结果落成新的 ✨ AI generated 卡（按图计费）",
+    ),
     ("🤖 AI heal (auto)", "🤖 AI 去瑕疵 (auto)"),
     ("Heal area", "修复涂抹区域"),
     ("AI auto-detects dust / blemishes, or paint a mask and Heal it. Pixel retouch from surrounding pixels; saved to ./out.",
@@ -471,6 +486,15 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
 
     // ── Develop · Presence / Detail ──────────────────────────────────────────
     ("Curves", "曲线 · Curves"),
+    // v1.5.0 — the parametric tone curve inside Curves. Its outer regions
+    // reuse the Tone section's 「Highlights / Shadows」 pairs: same word,
+    // same tonal idea.
+    ("Parametric curve", "参数曲线"),
+    ("Lights", "亮调"),
+    ("Darks", "暗调"),
+    ("Shadow split", "阴影分界"),
+    ("Midtone split", "中间调分界"),
+    ("Highlight split", "高光分界"),
     ("Presence", "质感 · Presence"),
     ("Clarity", "清晰度"),
     ("Dehaze", "去朦胧"),
@@ -479,7 +503,7 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     ("Detail", "细节 · Detail"),
     ("Sharpening", "锐化"),
     ("Noise Reduction", "降噪"),
-    // R25 B3 — the eight CarriedOnly detail axes. Qualified labels for the
+    // R25 B3 — the eight detail axes (carried then, rendered since v1.5.0). Qualified labels for the
     // same reason the Effects block below states: the bare 「Detail」 is
     // already the section title, and 「Amount」 is already mask strength.
     ("Sharpen radius", "锐化半径"),
@@ -520,6 +544,19 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     ("Blue", "蓝"),
     ("Purple", "紫"),
     ("Magenta", "洋红"),
+    // v1.5.0 — the rest of Lightroom's Color Mixer: the B&W treatment, whose
+    // eight-band grey mix stands where the colour tabs do while it is on, and
+    // the Point Color swatches with the eyedropper that makes them.
+    ("Black & White", "黑白"),
+    ("B&W mix", "黑白混合"),
+    ("Point Color", "点颜色"),
+    ("💧 Pick a color", "💧 取色"),
+    ("Click a colour in the image to add a swatch; its sliders then move that colour alone. Click again to cancel.",
+        "单击图中的颜色添加色样；之后它的滑块只移动这一种颜色。再次单击取消。"),
+    ("Point Color eyedropper: click the colour to adjust", "点颜色吸管：点击要调整的颜色"),
+    ("Swatch {n}", "色样 {n}"),
+    ("Remove swatch", "删除色样"),
+    ("Range", "范围"),
 
     // ── Develop · Crop + Lens ────────────────────────────────────────────────
     ("Crop", "裁剪 · Crop"),
@@ -566,8 +603,23 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     // batch」 / 「去紫边留待后续批次」. The batch is this one — de-fringe now
     // round-trips, so the sentence states what it actually does instead of
     // when it might arrive.
-    ("Vignette: positive brightens the corners (compensates falloff), negative darkens; a radial gain in linear light. Distortion: positive fixes barrel (wide-angle bulge), negative fixes pincushion (tele pinch); auto-scales to fill the frame, and masks / brush still position on the corrected image. Preview / export / XMP match. Manual CA renders here too; the auto-CA switch and de-fringe are carried to Lightroom without being rendered.",
-        "暗角：正值提亮四角（补偿衰减），负值压暗；在线性光下的径向增益。畸变：正值修桶形（广角外凸），负值修枕形（长焦内缩）；自动缩放填满画幅，蒙版/画笔仍按校正后的图像定位。预览/导出/XMP 一致。手动色差本机也渲染；自动色差校正与去边仅随 XMP 带出，本机不渲染。"),
+    ("Vignette: positive brightens the corners (compensates falloff), negative darkens; a radial gain in linear light. Distortion: positive fixes barrel (wide-angle bulge), negative fixes pincushion (tele pinch); auto-scales to fill the frame, and masks / brush still position on the corrected image. Preview / export / XMP match. Manual CA, the auto-CA switch and de-fringe all render here too.",
+        "暗角：正值提亮四角（补偿衰减），负值压暗；在线性光下的径向增益。畸变：正值修桶形（广角外凸），负值修枕形（长焦内缩）；自动缩放填满画幅，蒙版/画笔仍按校正后的图像定位。预览/导出/XMP 一致。手动色差、自动色差校正与去边本机也全部渲染。"),
+    // v1.5.0 — the lens block renders now (`render/lens.rs`), so the two
+    // tooltips that used to say "carried, not rendered" say what the control
+    // does instead.
+    ("Measures this frame's own red/blue misalignment and adds the answer to the manual pair above.",
+        "测量本张画面的红/蓝偏移，并把结果叠加到上面的手动数值上。"),
+    ("A hue window corrects nothing until its Amount is above 0.",
+        "在对应的强度大于 0 之前，色相范围本身不做任何校正。"),
+    // v1.5.0 F5 — the lens PROFILE's two strengths. 「暗角」 is already the
+    // word this panel uses for the manual slider, so these two are qualified
+    // by the group label above them the way the Effects section's Midpoint is.
+    ("Profile correction strength", "配置文件校正强度"),
+    ("Distortion amount", "畸变强度"),
+    ("Vignetting amount", "暗角强度"),
+    ("100 = exactly what the profile says; 0 switches that component off.",
+        "100 = 完全按配置文件；0 = 关掉该项校正。"),
     // CROP_ASPECTS display names (ratio values are not localized).
     ("Free", "自由"),
     ("Original", "原始"),
@@ -592,17 +644,15 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     ("Grain roughness", "噪点密度"),
     ("Carried to Lightroom, not rendered here", "本机不渲染，仅随 XMP 带出"),
 
-    // ── Develop · Transform + Calibration (R25 B4 — Tier::PassThrough) ───────
-    // A READ-ONLY section: these sixteen crs properties are carried between
-    // the sidecar and recipe.json verbatim and never interpreted, so there is
-    // nothing here to offer a slider for. The two group captions are
-    // QUALIFIED («Perspective correction» / «Camera calibration») while the
-    // bare 「Transform」/「Calibration」 name the blocks in the save-time
-    // render-gap line — the same word doing the same job in both places.
+    // ── Develop · Transform + camera profile (R25 B4 — Tier::PassThrough) ────
+    // A READ-ONLY section: these nine crs properties are carried between the
+    // sidecar and recipe.json verbatim and never interpreted, so there is
+    // nothing here to offer a slider for. The Perspective group's caption is
+    // QUALIFIED («Perspective correction»); the profile's row names itself, so
+    // it carries no caption over it. 「变换」 alone, without an English word
+    // beside it: this is a read-out, not one of the develop sections whose
+    // headings carry both (「校准 · Calibration」 below is one of those).
     ("Transform", "变换"),
-    ("Calibration", "校准"),
-    ("Perspective correction", "透视校正"),
-    ("Camera calibration", "相机校准"),
     // 「相机」, not 「镜头」: this is `crs:CameraProfile`, the colour profile
     // the photographer picked in Lightroom's own profile browser. The
     // 「镜头配置文件」 entry further down is a different thing entirely — the
@@ -610,8 +660,72 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     // the two had the same Chinese name, which pointed the user at the wrong
     // panel to go looking for either.
     ("Camera profile", "相机配置文件"),
+    // v1.5.0 F7 — the creative profile `crs:Look` names, beside the camera
+    // profile it sits on. 「创意」 is Adobe's own Chinese word for this
+    // family of profiles, so the panel and Lightroom agree.
+    ("Creative profile", "创意配置文件"),
+    ("Its baked tone curve and sliders render; its creative colour table does not",
+        "它烘焙的色调曲线与滑杆会渲染；它的创意色彩表不会"),
     ("Carried through to the sidecar unchanged; AutoShade never interprets these",
         "原样带出到边车文件；AutoShade 从不解读这些值"),
+    // v1.5.0 F6 — the Transform panel RENDERS now, so the section holds real
+    // controls instead of a read-out. 「自动校正」 for Upright: Lightroom
+    // leaves the word untranslated, which names nothing to someone who has not
+    // met it, and the mode IS an automatic perspective correction.
+    ("Upright", "自动校正"),
+    ("Off", "关"),
+    ("Auto", "自动"),
+    // 「校平」, not 「水平」: the HORIZONTAL slider below is 「水平」, and the two
+    // are different controls — one levels the frame, one keystones it sideways.
+    ("Level", "校平"),
+    ("Vertical", "垂直"),
+    ("Full", "完全"),
+    ("Guided", "引导"),
+    ("Horizontal", "水平"),
+    // DEGREES, unlike its neighbours' -100..100 — the unit is in the label
+    // because a number read in the wrong unit is the quiet kind of mistake.
+    ("Rotate (°)", "旋转（°）"),
+    // 「变换缩放」, not 「缩放」: the crop section has its own scale and this one
+    // lives inside the transform.
+    ("Transform scale", "变换缩放"),
+    ("Aspect", "宽高比"),
+    ("X offset", "X 偏移"),
+    ("Y offset", "Y 偏移"),
+    ("Constrain crop", "约束裁切"),
+    ("Shrink the crop until it lies inside the warped frame instead of showing the empty corners",
+        "收缩裁切框直到它落在变形后的画面内，而不是显示空角"),
+    ("Rendering the matrix Lightroom solved for this photo",
+        "正在渲染 Lightroom 为本照片解算的结果"),
+    ("Guided needs the guides drawn in Lightroom; only the matrix it wrote can be rendered",
+        "引导模式需要在 Lightroom 里绘制导线，只能渲染它已写入的结果"),
+    ("Lightroom solved no matrix for this photo, so AutoShade solves it from the picture's own lines",
+        "Lightroom 未为本照片解算，AutoShade 从画面的线条自行解算"),
+    ("One projective map, after the lens correction and before the straighten. Preview / export / XMP match. Upright renders the matrix Lightroom published when there is one; the sliders were measured against Lightroom's own exports. A keystone frames a little differently — Lightroom also stretches that axis, by an amount its lens sets.",
+        "一个投影映射，在镜头校正之后、拉直之前。预览 / 导出 / XMP 一致。自动校正有 Lightroom 给出的结果时就用它；滑杆已按 Lightroom 的实际导出测定。梯形校正的取景会略有不同——Lightroom 还会沿该方向拉伸，幅度由镜头决定。"),
+    ("Upright solver bookkeeping", "自动校正求解器的记录"),
+
+    // ── Develop · Calibration (v1.5.0) ───────────────────────────────────────
+    // Lightroom's Calibration panel, RENDERED since v1.5.0 (it never was a
+    // pass-through block: R25 listed seven `CameraCalibration*` keys Lightroom
+    // does not write). A real develop section now, so the house 「中文 ·
+    // English」 heading — and the bare 「校准」 that the heading used to be
+    // reads, in this app's own prose, as the camera curve a delivery applies.
+    ("Calibration", "校准 · Calibration"),
+    ("Red primary", "红原色"),
+    ("Green primary", "绿原色"),
+    ("Blue primary", "蓝原色"),
+    // v1.5.0 F8 — HDR edit mode and the SDR rendition it publishes through.
+    ("HDR & SDR", "HDR 与 SDR"),
+    ("HDR edit mode", "HDR 编辑模式"),
+    ("Headroom (stops)", "高光余量（档）"),
+    ("SDR rendition", "SDR 呈现"),
+    ("renders only in HDR mode", "只在 HDR 模式下渲染"),
+    (
+        "This photograph was edited above diffuse white. Every file this program writes is SDR, so the rendition below is what gets published.",
+        "这张照片在白点之上还有可用范围。本程序写出的每个文件都是 SDR，所以真正发布的是下面这套呈现。",
+    ),
+    ("Blend", "混合"),
+    ("Brightness", "亮度"),
 
     // ── Develop · Local Masks (add + AI segmentation) ────────────────────────
     ("Local Masks ({n})", "局部蒙版 ({n})"),
@@ -1269,6 +1383,11 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
         "WB 吸管：{k} K · tint {tint} — 可在色调区微调"),
     ("Color range: sampled — the 「Tolerance」 slider adjusts the selection width",
         "颜色范围：已取样 — 「容差」滑杆调节选中宽度"),
+    ("Point Color: swatch {n} added — its sliders are in the Color Mixer section",
+        "点颜色：已添加色样 {n}——它的滑块在颜色混合器中"),
+    ("Point Color: that spot is almost grey, so no swatch could move it — pick a more colourful spot",
+        "点颜色：该处几乎是灰色，色样无法移动它——请选颜色更饱和的一处"),
+    ("Point Color: at most {n} swatches", "点颜色：最多 {n} 个色样"),
     ("Manual {n}", "手动 {n}"),
     // ZH must quote the panel's ACTUAL header 「局部蒙版」 (i18n "Local Masks
     // ({n})"), not a panel that doesn't exist.
@@ -1321,6 +1440,33 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
         "本版本未随发布包分发 python 边车——请从项目目录运行 AutoShade，或用 AUTOSHADE_DENOISE_SCRIPT 与 AUTOSHADE_DENOISE_RAW_SCRIPT 指向 python/denoise.py 与 python/denoise_raw.py"),
     ("AI denoise (full frame)… (GPU sidecar, can take minutes; first run downloads the model)",
         "AI 去噪（全画幅）中…（GPU 边车，可能需数分钟；首次运行会下载模型）"),
+    // v1.5.0 Track S — 堆栈/合成
+    ("Stack", "堆栈"),
+    ("▦ Stacked", "▦ 堆栈"),
+    ("HDR merge", "HDR 合并"),
+    ("Exposure fusion", "曝光融合"),
+    ("Focus stack", "景深合成"),
+    ("Noise stack", "降噪堆栈"),
+    ("Merge several frames of one scene into a new ▦ negative. This card's frame is the reference — its framing and its exposure are the ones the result keeps — and the frames you pick join it.",
+        "把同一场景的多帧合并成一张新的 ▦ 底片。当前这张卡的画面是基准——成片保留它的取景和它的曝光——你挑的帧并进来。"),
+    ("HDR merge: an exposure bracket into one frame holding the whole range, with the recovered stops handed to the SDR rendition section. Exposure fusion: the same bracket blended where each frame looks best, with no HDR in between — a finished picture rather than data. Focus stack: a focus sweep into one frame sharp throughout. Noise stack: repeated frames of a still scene averaged, so the signal adds and the noise does not, and anything that moved through one frame is dropped.",
+        "HDR 合并：把一组包围曝光并成一张容得下整个动态范围的画面，恢复出的档位交给「HDR 与 SDR」那一节。曝光融合：同一组包围曝光，按每帧最好看的地方混合，中间不生成 HDR——给的是成片，不是数据。景深合成：把一次对焦包围并成一张通篇清晰的画面。降噪堆栈：同一静止场景的重复帧取平均，信号叠加而噪声不叠加，某一帧里走过去的东西会被丢掉。"),
+    ("Shot on a tripod (skip alignment)", "用三脚架拍的（跳过对齐）"),
+    ("Alignment is the expensive half of a stack, and on frames that really are registered there is nothing for it to find — measured on a five-frame noise stack, the grain fell 2.03x with it skipped and 1.97x with it running. Leave it off for handheld frames.",
+        "对齐是堆栈里最费时间的一半；而对本来就已经配准好的帧，它找不到可对的东西——五帧降噪堆栈实测：跳过对齐时噪声降到 1/2.03，跑对齐时降到 1/1.97。手持拍的不要勾。"),
+    ("▦ Stack with other frames…", "▦ 与其他帧堆栈…"),
+    ("Pick the other frames of this scene. They must be the same size as this one; the merge runs at full resolution and lands as a new ▦ card carrying this card's develop, and the frame you started from keeps its pixels.",
+        "挑出这个场景的其他帧。它们必须和当前这张同尺寸；合并按全分辨率跑，落成一张新的 ▦ 卡并带上当前卡的显影，你出发的那一帧保留自己的像素。"),
+    ("Several frames of this scene merged into their own master: develop it like the ▣ card, reverse-fit and reimagine read it as the negative while it exists; a .xmp from it carries the sliders only — the merged pixels live in the master beside it",
+        "这个场景的多帧合并成的独立母图：像 ▣ 卡一样显影它，它在的时候反推和生图都把它当底片读；从它导出的 .xmp 只带滑杆——合并后的像素在旁边那张母图里"),
+    ("Stacking {n} frames… (local pixel compute, minutes at full resolution)",
+        "正在堆栈 {n} 帧…（本地像素计算，全分辨率下要几分钟）"),
+    ("stacked {n} frames ({how}) → {path} (new ▦ card; the frame you started from is untouched)",
+        "已堆栈 {n} 帧（{how}）→ {path}（新的 ▦ 卡；你出发的那一帧未动）"),
+    (" · aligned by up to {px} px", " · 最多对齐了 {px} px"),
+    (" · {pct}% of the frame was outside at least one source", " · 画面有 {pct}% 落在至少一帧之外"),
+    (" · recovered {ev} EV above the first frame's white — the SDR rendition sliders now mean something",
+        " · 在首帧的白点之上恢复了 {ev} EV——SDR 呈现的那几个滑杆现在有意义了"),
     ("AI denoised on the sensor mosaic → {path} (new ◈ card; the card you started from is untouched)",
         "已在 RAW 原始数据上完成 AI 去噪 → {path}（新的 ◈ 卡；你出发的那张卡未动）"),
     ("AI denoised (a baked source, so SCUNet on developed pixels) → {path} (new ◈ card; the card you started from is untouched)",
@@ -1551,6 +1697,8 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
         "WB 吸管 — 点击应为中性灰/白的位置 · Esc 退出"),
     ("Color range — click the color to pick in the image · Esc to exit",
         "颜色范围 — 点击图中要选取的颜色 · Esc 退出"),
+    ("Point Color eyedropper — click the colour to adjust · Esc to exit",
+        "点颜色吸管 — 点击要调整的颜色 · Esc 退出"),
     ("Stamp — Alt+click to set the source · drag to brush the area to cover · Esc to exit",
         "图章 — Alt+点击取源点 · 拖动涂要覆盖的区域 · Esc 退出"),
     ("Brush — paint over the area to fill / heal · Esc to exit",

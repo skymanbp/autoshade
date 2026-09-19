@@ -8,10 +8,12 @@
 //!
 //! See `docs/ARCHITECTURE.md` for the full design.
 
+pub mod adobe;
 pub mod advisor;
 pub mod config;
 pub mod content_cache;
 pub mod correspond;
+pub mod dcp;
 pub mod decode;
 pub mod denoise;
 pub mod describe;
@@ -38,6 +40,7 @@ pub mod retouch;
 pub mod segment;
 pub mod sha256;
 pub mod serve;
+pub mod stack;
 pub mod store;
 pub mod style;
 pub mod style_cache;

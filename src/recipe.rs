@@ -57,7 +57,7 @@ pub struct EditRecipe {
     /// the XMP merge cannot tell the two apart from the value alone: stripping
     /// `crs:Texture="-20"` out of someone's sidecar because a v0.30
     /// `recipe.json` "says" 0 is deleting an edit, not honouring one
-    /// (`xmp::era_suppressed_attr_keys`).
+    /// (`xmp::unspoken_attr_keys`).
     ///
     /// Deliberately NOT folded into [`version`](Self::version) or
     /// [`coord_era`](Self::coord_era), for the reason spelled out above: those
@@ -121,6 +121,42 @@ pub struct EditRecipe {
     /// Lightroom's HSL / Color mixer. Default = all bands neutral (v1-compatible).
     pub hsl: Hsl,
 
+    // --- Black & white and point colour (v1.5.0) ----------------------------
+    // Lightroom's B&W treatment with its eight-band mixer, and the Color
+    // Mixer's Point Color swatches — rendered by `render::apply_gray_mix` and
+    // `render::apply_point_colors`, the first IN PLACE OF the colour mixer (as
+    // in Lightroom, where the B&W panel replaces the HSL one). Each field is
+    // skipped at its neutral, by the parametric curve's argument: a recipe that
+    // never used them stays byte-identical to what v1.4 wrote.
+    /// The B&W treatment: the frame develops to grey through the mixer below.
+    /// → `crs:ConvertToGrayscale` (the top-level key; the flag a monochrome
+    /// creative profile carries inside its own `crs:Look` is the Look's).
+    #[serde(skip_serializing_if = "is_false")]
+    pub convert_to_grayscale: bool,
+    /// B&W mixer, -100..=100 per band, in [`HSL_BANDS`] order: how light that
+    /// colour turns in grey. Renders only under `convert_to_grayscale`.
+    /// → `crs:GrayMixerRed` … `crs:GrayMixerMagenta`.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub gray_red: f32,
+    #[serde(skip_serializing_if = "is_zero")]
+    pub gray_orange: f32,
+    #[serde(skip_serializing_if = "is_zero")]
+    pub gray_yellow: f32,
+    #[serde(skip_serializing_if = "is_zero")]
+    pub gray_green: f32,
+    #[serde(skip_serializing_if = "is_zero")]
+    pub gray_aqua: f32,
+    #[serde(skip_serializing_if = "is_zero")]
+    pub gray_blue: f32,
+    #[serde(skip_serializing_if = "is_zero")]
+    pub gray_purple: f32,
+    #[serde(skip_serializing_if = "is_zero")]
+    pub gray_magenta: f32,
+    /// Lightroom's Point Color swatches, at most [`MAX_POINT_COLORS`].
+    /// → `crs:PointColors` (an `rdf:Seq` of 19-number records).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub point_colors: Vec<PointColor>,
+
     // --- Colour grading (3-wheel + global) ----------------------------------
     /// Lightroom's Color Grading wheels. Default = neutral (v1-compatible).
     pub color_grade: ColorGrade,
@@ -131,19 +167,20 @@ pub struct EditRecipe {
     /// 0..=100, luminance noise reduction.
     pub noise_reduction: f32,
 
-    // --- Detail: the CARRIED shaping axes (R25 B3) ---------------------------
-    // Eight more Adobe-only operators under policy SF4-C, same contract as the
-    // effects block below: round-tripped through their own `crs:` keys, never
-    // approximated. They shape the two sliders above — Lightroom's sharpening
-    // has a radius / detail / edge-masking triple around its amount, its
-    // luminance NR has a detail / contrast pair, and its COLOUR NR is a third
-    // operator this engine does not have at all. Each carries its reason in
-    // `advisor::catalogue::CARRIED_ONLY_GLOBAL`.
+    // --- Detail: the shaping axes (R25 B3; RENDERED since v1.5.0) -----------
+    // Round-tripped through their own `crs:` keys since R25, when policy SF4-C
+    // carried them without drawing them; `render/detail.rs` renders all eight
+    // since the user revoked that policy. They shape the two sliders above —
+    // Lightroom's sharpening has a radius / detail / edge-masking triple
+    // around its amount, its luminance NR a detail / contrast pair — and add
+    // the COLOUR NR operator with its own detail / smoothness pair.
     //
-    // NEUTRAL AT ZERO, like the effects: zero means "the sidecar said nothing"
-    // and the writer emits a key only when it is non-zero, so an absent key
-    // stays absent and Lightroom keeps its own default (Radius 1.0, Detail 25,
-    // Luminance Detail 50, Colour NR 25/50/50) instead of one we invented.
+    // STORED 0 = "the sidecar said nothing", as since R25: the writer emits a
+    // key only when it is non-zero, so an absent key stays absent and
+    // Lightroom keeps its own default (Radius 1.0, Detail 25, Luminance Detail
+    // 50, Colour NR Detail/Smoothness 50) instead of one we invented, and the
+    // engine renders the same default through `EditRecipe::resolved`. A REAL
+    // 0 on a companion is named in `explicit_zero`.
     /// Sharpening radius, 0..=3.0 (0 = absent; ACR default 1.0 and its band is
     /// 0.5..3.0). The one DECIMAL key in this block — Lightroom writes
     /// `crs:SharpenRadius="+1.0"`, verified in all seven of the user's
@@ -159,8 +196,9 @@ pub struct EditRecipe {
     pub nr_detail: f32,
     /// Luminance NR contrast, 0..=100. → `crs:LuminanceNoiseReductionContrast`.
     pub nr_contrast: f32,
-    /// CHROMA noise reduction amount, 0..=100 (ACR default 25) — an operator
-    /// this engine has none of. → `crs:ColorNoiseReduction`.
+    /// CHROMA noise reduction amount, 0..=100 (ACR's RAW default 25; a
+    /// recipe's 0 is "off", and the writer states it, `xmp::amount_carries`).
+    /// → `crs:ColorNoiseReduction`.
     pub color_nr: f32,
     /// Chroma NR detail, 0..=100 (ACR default 50).
     /// → `crs:ColorNoiseReductionDetail`.
@@ -184,6 +222,81 @@ pub struct EditRecipe {
     /// applied after develop, before straighten — see `render::distort_norm`
     /// for the model. → `crs:LensManualDistortionAmount`.
     pub lens_distortion: f32,
+
+    // --- The lens PROFILE's own two strengths (v1.5.0) ----------------------
+    // Lightroom's Lens Corrections panel has one Amount slider per component
+    // of the PROFILE correction, 0..200 with 100 = "as the profile says". They
+    // are the only controls in this struct whose neutral is 100, so absence is
+    // unambiguous: a value of 0 is a real "switch this component off", which is
+    // why they need no `explicit_zero` companion (X2) the way Midpoint and
+    // Feather do.
+    //
+    // They scale the correction's DEPARTURE from identity, so 100 leaves the
+    // render bit-identical to the pre-v1.5.0 engine and 0 is exactly "no
+    // profile correction" — the same shape for either knot source (the
+    // camera's own metadata, or an Adobe `.lcp` on this machine).
+    /// The profile distortion correction's strength, 0..=200 (Lightroom's
+    /// Distortion Amount; 100 = the profile's own map). → `crs:LensProfileDistortionScale`.
+    pub lens_profile_distortion_scale: f32,
+    /// The profile vignetting correction's strength, 0..=200 (Lightroom's
+    /// Vignetting Amount; 100 = the profile's own gains).
+    /// → `crs:LensProfileVignettingScale`.
+    pub lens_profile_vignetting_scale: f32,
+    // --- Transform / Upright (v1.5.0 F6) ------------------------------------
+    // Lightroom's Transform panel, rendered as ONE projective map between the
+    // lens-geometry resample and the straighten (`render::perspective`).
+    //
+    // The coordinate system is Adobe's own, MEASURED rather than assumed: over
+    // the 125 `crs:UprightTransform_*` matrices in this operator's library, the
+    // frame centre in [0,1] coordinates is a fixed point to 8.6e-4 on the 64
+    // near-identity ones (many to 5e-10), against 2.6e-2 for the sidecar's own
+    // `UprightCenterNorm` and 3.6e-1 for a [-1,1] centre. So the matrices are
+    // written in [0,1] FRAME coordinates — normalised per axis, which is why a
+    // rotation's cover factor matches the UNIT SQUARE's `cos+sin` (1.016934 for
+    // 0.9786°, against the matrix's own 1.017110) and not a 3:2 frame's
+    // (1.011237). The seven manual sliders are built in the same space so the
+    // two compose by plain multiplication.
+    /// Transform, Vertical keystone, -100..=100. → `crs:PerspectiveVertical`.
+    pub perspective_vertical: f32,
+    /// Transform, Horizontal keystone, -100..=100. → `crs:PerspectiveHorizontal`.
+    pub perspective_horizontal: f32,
+    /// Transform, Rotate, -10..=10 DEGREES (Lightroom's own band, and the one
+    /// real value in this library is `+0.9`). Distinct from `straighten_deg`,
+    /// which is the crop's angle and runs after this stage.
+    /// → `crs:PerspectiveRotate`.
+    pub perspective_rotate: f32,
+    /// Transform, Scale, 0..=200 with 100 neutral — the third control in this
+    /// struct whose neutral is 100 (with the two lens-profile strengths).
+    /// → `crs:PerspectiveScale`.
+    pub perspective_scale: f32,
+    /// Transform, Aspect, -100..=100: stretches the frame vertically (+) or
+    /// horizontally (−), area-preserving. → `crs:PerspectiveAspect`.
+    pub perspective_aspect: f32,
+    /// Transform, X Offset, -100..=100. → `crs:PerspectiveX`.
+    pub perspective_x: f32,
+    /// Transform, Y Offset, -100..=100. → `crs:PerspectiveY`.
+    pub perspective_y: f32,
+    /// Lightroom's Upright MODE: 0 off, 1 auto, 2 level, 3 vertical, 4 full,
+    /// 5 guided. An INSTRUCTION, like the auto-CA switch — and Adobe publishes
+    /// its RESULT even though its solver is unpublished, in
+    /// `upright_transform`. When the sidecar carries the matrix this mode
+    /// selects, the render is Adobe's own to the last digit; when it does not
+    /// (this app's own dropdown on a photo Lightroom never solved), the mode is
+    /// answered by `render::perspective::solve_upright`.
+    /// → `crs:PerspectiveUpright`.
+    pub perspective_upright: f32,
+    /// Adobe's solved Upright matrices, index = the mode that selects them,
+    /// row-major 3×3 in [0,1] frame coordinates. READ from
+    /// `crs:UprightTransform_0…N` and rendered; never WRITTEN, on
+    /// `lens_profile`'s ground — it is Adobe's measurement of this photograph,
+    /// and the merge preserves the document's own bytes for us.
+    pub upright_transform: Vec<[f32; 9]>,
+    /// Lightroom's "Constrain Crop": shrink the crop until it lies inside the
+    /// warped frame. Measured `"0"` on all 52 sidecars in this library that
+    /// carry it, so the empty corners a Transform leaves are normally VISIBLE
+    /// and the photographer crops by hand — which is exactly what those
+    /// sidecars show. → `crs:CropConstrainToWarp`.
+    pub crop_constrain_to_warp: bool,
     /// Manual lateral CA, red/cyan axis, -100..=100 (R25 B3). RENDERED: the
     /// engine already resamples red and blue at their own radius for the
     /// in-camera profile's CA knots (`render::apply_lens_geometry`), and this
@@ -282,28 +395,85 @@ pub struct EditRecipe {
     /// → `crs:GrainFrequency`.
     pub grain_rough: f32,
 
-    // --- Transform + Calibration: PASSED THROUGH, never interpreted (R25 B4) -
-    /// Lightroom's Transform (Upright / Perspective) and Camera Calibration
-    /// blocks, carried between the sidecar and `recipe.json` as the VERBATIM
-    /// strings Lightroom wrote — key → value, no parsing, no clamping, no
-    /// meaning. The first member of `Tier::PassThrough`, and the one contract
-    /// that separates it from `CarriedOnly`: a carried control is a NUMBER we
-    /// read, bound and could render one day; a passed-through property is a
-    /// string we have no opinion about at all. Out-of-range, oddly spelled or
-    /// eight-decimal values ride out exactly as they rode in.
+    /// The COMPANION controls (see [`LR_COMPANION_DEFAULTS`]) whose stored 0 is
+    /// a real value rather than "the sidecar said nothing", by serde name,
+    /// sorted and de-duplicated by [`EditRecipe::clamp`].
     ///
-    /// The DOMAIN is a named key set (`xmp::PASSTHROUGH_CRS`, sixteen keys),
+    /// Since R25 a stored 0 on these ten fields has meant ABSENT, and the
+    /// writer has let Lightroom's own default (Detail 25, Feather 50, …) reach
+    /// the sidecar by leaving the key out. That encoding could not say
+    /// "Detail 0" — a value Lightroom's slider has — and while the controls
+    /// moved no pixel here nobody could see the loss. v1.5.0 renders them, so
+    /// the difference between 0 and 25 is now a picture; this list is the one
+    /// bit per control that tells them apart, and [`EditRecipe::resolved`]
+    /// reads every companion through it.
+    ///
+    /// **Serialisation: skipped when empty**, by [`colour_field`]'s argument:
+    /// no recipe written before v1.5.0 has an explicit zero, so every one of
+    /// them stays BYTE-IDENTICAL and `store::recipe_struct_hash` keeps matching
+    /// every archived version. Reading an old file needs no migration either —
+    /// its zeros already meant "absent", which is what an empty list says.
+    ///
+    /// [`colour_field`]: EditRecipe::colour_field
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub explicit_zero: Vec<String>,
+
+    // --- Transform + profile: PASSED THROUGH, never interpreted (R25 B4) -----
+    /// Lightroom's Transform (Upright / Perspective) block and its camera
+    /// profile name, carried between the sidecar and `recipe.json` as the
+    /// VERBATIM strings Lightroom wrote — key → value, no parsing, no clamping,
+    /// no meaning. The first member of `Tier::PassThrough`, and the one
+    /// contract that separates it from `CarriedOnly`: a carried control is a
+    /// NUMBER we read, bound and could render one day; a passed-through
+    /// property is a string we have no opinion about at all. Out-of-range,
+    /// oddly spelled or eight-decimal values ride out exactly as they rode in.
+    ///
+    /// The DOMAIN is a named key set (`xmp::PASSTHROUGH_CRS`, nine keys),
     /// not "everything unknown": `owned_attr_keys` — the merge's strip
     /// universe — is a static list, so a free-for-all map would write keys the
     /// merge does not remove and Lightroom would read our value beside its own
-    /// duplicate. Everything outside those sixteen stays where it always was:
+    /// duplicate. Everything outside those nine stays where it always was:
     /// preserved by the merge, and NAMED by `xmp::unmodelled_global_crs`.
+    /// (R25 listed seven `CameraCalibration*` keys here as well. Lightroom
+    /// writes no such key — its Calibration panel is the unprefixed
+    /// `crs:ShadowTint`, `crs:RedHue` … — so the map never held one, and
+    /// v1.5.0 renders that panel from the `cal_*` fields below.)
     ///
     /// A `BTreeMap`, so `recipe.json` and the R21 structure fingerprint are
     /// deterministic. The container's `#[serde(default)]` covers absence (an
     /// empty map is `BTreeMap::default()`) — no field-level default is needed
     /// here, unlike `coord_era`, whose legacy default DIFFERS from the type's.
     pub passthrough: std::collections::BTreeMap<String, String>,
+
+    // --- Camera calibration (v1.5.0) -----------------------------------------
+    // Lightroom's Calibration panel, rendered as the first develop stage
+    // (`render::Calibration`): each primary's hue and saturation move the
+    // primary itself, and the shadows tint pulls the dark tones toward green
+    // or magenta. Lightroom writes all seven keys on nearly every sidecar (162
+    // of the operator's 175, census 2026-09-17) and really uses them —
+    // `BlueSaturation="+83"`, `BlueHue="-40"`. Skipped at 0, the parametric
+    // curve's argument again.
+    /// Shadows tint, -100..=100: + magenta, − green. → `crs:ShadowTint`.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub cal_shadow_tint: f32,
+    /// Red primary hue, -100..=100 (+ toward yellow). → `crs:RedHue`.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub cal_red_hue: f32,
+    /// Red primary saturation, -100..=100. → `crs:RedSaturation`.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub cal_red_sat: f32,
+    /// Green primary hue, -100..=100 (+ toward cyan). → `crs:GreenHue`.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub cal_green_hue: f32,
+    /// Green primary saturation, -100..=100. → `crs:GreenSaturation`.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub cal_green_sat: f32,
+    /// Blue primary hue, -100..=100 (+ toward magenta). → `crs:BlueHue`.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub cal_blue_hue: f32,
+    /// Blue primary saturation, -100..=100. → `crs:BlueSaturation`.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub cal_blue_sat: f32,
 
     // --- Geometry (optional) ------------------------------------------------
     /// Clockwise straighten angle in degrees, e.g. -2.5..=2.5 for horizons.
@@ -358,6 +528,68 @@ pub struct EditRecipe {
     pub green_curve: Vec<CurvePoint>,
     pub blue_curve: Vec<CurvePoint>,
 
+    // --- Parametric tone curve (v1.5.0) --------------------------------------
+    // Lightroom's Tone Curve panel in its parametric mode: four REGION sliders
+    // over three movable SPLITS, composed between the Basic-panel tone model
+    // and the point curve above (`render::parametric_lut`). Lightroom writes
+    // all seven keys on every sidecar — the three 9.4 rewrites in the payload
+    // fixtures carry `ParametricShadows="0"` … `ParametricHighlightSplit="75"`
+    // — so, as for de-fringe, the neutral is ADOBE'S DEFAULT (splits
+    // 25/50/75) and the reader falls back to it for an absent key.
+    //
+    // **Serialisation: each field is skipped at that default**, by
+    // `colour_field`'s argument: a recipe that never moved the curve stays
+    // BYTE-IDENTICAL to what v1.4 wrote (so `store::recipe_struct_hash` keeps
+    // matching every archived version), and an older build meets an unknown
+    // key only in a recipe that really uses one.
+    /// Parametric Shadows region, -100..=100. → `crs:ParametricShadows`.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub param_shadows: f32,
+    /// Parametric Darks region, -100..=100. → `crs:ParametricDarks`.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub param_darks: f32,
+    /// Parametric Lights region, -100..=100. → `crs:ParametricLights`.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub param_lights: f32,
+    /// Parametric Highlights region, -100..=100. → `crs:ParametricHighlights`.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub param_highlights: f32,
+    /// Where Shadows ends and Darks begins, in percent of the input range
+    /// (ACR default 25). → `crs:ParametricShadowSplit`.
+    #[serde(skip_serializing_if = "at_shadow_split")]
+    pub param_shadow_split: f32,
+    /// Darks | Lights (ACR default 50). → `crs:ParametricMidtoneSplit`.
+    #[serde(skip_serializing_if = "at_midtone_split")]
+    pub param_midtone_split: f32,
+    /// Lights | Highlights (ACR default 75). → `crs:ParametricHighlightSplit`.
+    #[serde(skip_serializing_if = "at_highlight_split")]
+    pub param_highlight_split: f32,
+
+    // --- Camera profile and creative Look (v1.5.0, F7) ----------------------
+    /// `crs:CameraProfile` — the camera profile Lightroom developed this
+    /// photograph through. "Adobe Standard" on 160 of the 175 sidecars in the
+    /// library this was measured against.
+    ///
+    /// Until v1.5.0 this name rode to the sidecar through `passthrough` and the
+    /// engine rendered its colour from the RAW's own embedded matrix instead,
+    /// so the name was a label on a rendering that did not obey it. It is now
+    /// an OWNED key: [`crate::dcp`] reads Adobe's own `.dcp` from the user's
+    /// install and the render applies its tables. Empty = no profile named, and
+    /// the render is exactly what it was before.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub camera_profile: String,
+
+    /// The creative profile `crs:Look` names — "Adobe Color" on 152 of those
+    /// 175 sidecars — read for RENDERING only.
+    ///
+    /// **Read, not written.** The `<crs:Look>` ELEMENT keeps the verbatim merge
+    /// path it has always had, because carrying Adobe's own markup through
+    /// untouched is stricter than anything this struct could re-serialise. What
+    /// this field adds is the half the engine can act on: the Look's baked tone
+    /// curves, its baked slider moves and its black-and-white switch.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub look: Option<CreativeLook>,
+
     // --- Camera-matched base look (engine-only, NEVER exported to XMP) -------
     /// Base tone curve `[x, y]` knots (luma, 0..=1) mapping the NEUTRAL raw
     /// develop toward the camera's own rendition, estimated per photo by
@@ -385,6 +617,88 @@ pub struct EditRecipe {
     /// and composited by the render engine.
     pub masks: Vec<LocalAdjustment>,
 
+    /// Lightroom's spot removal (`crs:RetouchAreas`), v1.5.0 F9 — the dust,
+    /// the power line, the stranger on the beach.
+    ///
+    /// This is the one place the parametric develop holds a PIXEL operation,
+    /// and it is here because in Lightroom that is exactly what it is: a
+    /// develop setting, stored in the sidecar, re-rendered on every open,
+    /// undone by resetting the photo. Leaving it out did not leave it out of
+    /// the photograph — it put every removed object back, on 25 of the
+    /// reference library's 175 photographs, with nothing on screen to say so.
+    ///
+    /// The geometry is the authority and the pixels are not: for 116 of the
+    /// 121 measured areas Lightroom records WHERE but not WHAT, because its
+    /// own result lives in Adobe's store. So this engine re-solves each area
+    /// from the frame's own pixels ([`retouch::heal_planar`]) and says which
+    /// areas those are ([`retouch::SpotOrigin`]).
+    ///
+    /// NOT written back by this engine: `crs:RetouchAreas` is not one of the
+    /// writer's owned elements, so a merge carries the photographer's original
+    /// block through verbatim, Adobe's patch references and all.
+    ///
+    /// [`retouch::heal_planar`]: crate::retouch::heal_planar
+    /// [`retouch::SpotOrigin`]: crate::retouch::SpotOrigin
+    #[serde(default)]
+    pub retouch: Vec<crate::retouch::RetouchArea>,
+
+    // --- HDR edit mode and its SDR rendition (v1.5.0 F8) ---------------------
+    // Lightroom's HDR mode re-labels the capture: diffuse white stops being the
+    // top of the frame and the brightest stops become HEADROOM above it, with
+    // `crs:HDRMaxValue` saying how many. Every file this engine can write is
+    // still SDR — 8- or 16-bit sRGB — so the picture we owe such a photograph
+    // is Lightroom's own answer to the same problem: the SDR RENDITION, the
+    // seven-control panel Lightroom shows only in HDR mode.
+    //
+    // All nine are neutral at their defaults, so a photograph that never
+    // entered HDR mode renders byte-identically to what v1.4 produced.
+    //
+    // CALIBRATION, stated plainly: the reference library has 114 sidecars
+    // carrying `crs:HDREditMode="0"` and NOT ONE carrying `"1"`, so the shape
+    // of the model below is reasoned from Lightroom's own vocabulary and from
+    // this engine's already-calibrated operators, not fitted to a Lightroom
+    // rendition. `render::hdr` states each constant and what would replace it.
+    /// Was this photograph edited in HDR mode? → `crs:HDREditMode` (`"0"`/`"1"`).
+    ///
+    /// The GATE, exactly as in Lightroom, where the SDR panel exists only here:
+    /// with this false the seven controls below render nothing, so a sidecar
+    /// that carries a stale `crs:SDRBrightness` from an HDR session the
+    /// photographer later left cannot silently re-tone an SDR photograph.
+    #[serde(skip_serializing_if = "is_false")]
+    pub hdr_edit: bool,
+    /// The headroom, in STOPS above diffuse white → `crs:HDRMaxValue`
+    /// (Lightroom writes `"+1.00"`). 0 = no headroom, and then HDR mode is a
+    /// label with no tonal consequence.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub hdr_max_ev: f32,
+    /// How much of the headroom's shoulder reaches the SDR rendition,
+    /// -100..=100 → `crs:SDRBlend`. 0 = the model's own amount, −100 = none
+    /// (the SDR rendition ignores the headroom), +100 = twice it.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub sdr_blend: f32,
+    /// The SDR rendition's exposure, -100..=100 → `crs:SDRBrightness`. Named
+    /// Brightness and not Exposure because the SDR panel has no Exposure
+    /// slider: this IS that rendition's exposure control.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub sdr_brightness: f32,
+    /// -100..=100 → `crs:SDRContrast`.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub sdr_contrast: f32,
+    /// -100..=100 → `crs:SDRHighlights`.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub sdr_highlights: f32,
+    /// -100..=100 → `crs:SDRShadows`.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub sdr_shadows: f32,
+    /// -100..=100 → `crs:SDRWhites`.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub sdr_whites: f32,
+    /// -100..=100 → `crs:SDRClarity`. The same local-contrast operator the
+    /// Basic panel's Clarity uses, at the same radius rule — one calibration,
+    /// so "Clarity +30" means one structure wherever it is written.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub sdr_clarity: f32,
+
     // --- Colour field (engine-only) -----------------------------------------
     /// A smooth 12×8×8 bilateral grid of local colour/tone deltas: the
     /// residual the mask-shaped controls above cannot reach, carried as one
@@ -409,7 +723,7 @@ pub struct EditRecipe {
     ///
     /// **[`SCHEMA_ERA`] is deliberately NOT bumped**, and that is not an
     /// oversight: that era's one consumer is
-    /// `xmp::era_suppressed_attr_keys`, which asks a single question — has
+    /// `xmp::unspoken_attr_keys`, which asks a single question — has
     /// this recipe ever seen the twenty-seven R25 `crs:` keys? A colour field
     /// owns no `crs:` key and can own none. Bumping would re-classify every
     /// era-1 recipe in every store as legacy and start suppressing those
@@ -534,10 +848,145 @@ fn coord_era_legacy() -> u32 {
 /// Era 1 = written by a build that has all twenty-seven, so its values for
 /// them are statements.
 ///
-/// The one consumer is [`crate::xmp::era_suppressed_attr_keys`]: on an era-0
-/// recipe the merge neither strips nor re-emits a key still sitting at that
-/// untouched default, so the base document's own bytes stand.
-pub const SCHEMA_ERA: u32 = 1;
+/// Era 2 = v1.5.0, which added the keys named in [`V150_CONTROLS`] (the
+/// parametric tone curve first). An era-1 recipe predates them exactly as an
+/// era-0 one predates R25's, and [`SCHEMA_ERA_CONTROLS`] says which era
+/// brought which control, so a recipe is gated only on the keys it has never
+/// seen: an era-1 file still owns every R25 key.
+///
+/// The one consumer is [`crate::xmp::unspoken_attr_keys`]: on a recipe
+/// older than a control, the merge neither strips nor re-emits that control's
+/// key while it sits at its untouched default, so the base document's own
+/// bytes stand. (`pipeline::carry_over_unrepresentable` keeps a Refine from
+/// laundering the stamp: see its era rule.)
+pub const SCHEMA_ERA: u32 = 2;
+
+/// The controls each control-set era introduced, by registry name: index 0 is
+/// era 1, index 1 era 2. A new era appends its list and bumps [`SCHEMA_ERA`];
+/// a closed era's list never changes, whatever later happens to its controls'
+/// tiers (a carried control that starts rendering has still been in every
+/// era-1 file).
+pub const SCHEMA_ERA_CONTROLS: [&[&str]; 2] = [&R25_CONTROLS, &V150_CONTROLS];
+
+/// Era 1 (R25): global Texture, the eight Detail axes, the manual CA pair, the
+/// auto-CA switch, the six de-fringe keys and the nine effects.
+pub const R25_CONTROLS: [&str; 27] = [
+    "texture",
+    "sharpen_radius",
+    "sharpen_detail",
+    "sharpen_mask",
+    "nr_detail",
+    "nr_contrast",
+    "color_nr",
+    "color_nr_detail",
+    "color_nr_smooth",
+    "ca_r",
+    "ca_b",
+    "auto_lateral_ca",
+    "defringe_purple",
+    "defringe_purple_lo",
+    "defringe_purple_hi",
+    "defringe_green",
+    "defringe_green_lo",
+    "defringe_green_hi",
+    "post_crop_vignette",
+    "post_crop_vignette_mid",
+    "post_crop_vignette_feather",
+    "post_crop_vignette_round",
+    "post_crop_vignette_style",
+    "post_crop_vignette_hl",
+    "grain",
+    "grain_size",
+    "grain_rough",
+];
+
+/// Era 2 (v1.5.0): the controls that release added a `crs:` key for — the
+/// parametric curve, the Calibration panel, the B&W treatment and mixer, and
+/// the point colours (an element, so the era gate's ATTRIBUTE list skips it
+/// and the merge's element rule reads the stamp itself).
+pub const V150_CONTROLS: [&str; 45] = [
+    // F7: the camera profile's NAME. An era-1 recipe predates the field, so
+    // the gate keeps the merge from stripping `crs:CameraProfile` out of a
+    // Lightroom document that a recipe of ours simply has nothing to say about.
+    "camera_profile",
+    // F5: the lens profile's two strengths. Their neutral is 100, so the era
+    // gate matters MORE for them than for a zero-neutral key: an era-1 recipe
+    // that never saw them would otherwise re-emit `…Scale="100"` over a
+    // document where Lightroom wrote something else.
+    "lens_profile_distortion_scale",
+    "lens_profile_vignetting_scale",
+    // F6: the Transform panel. Seven sliders, the Upright mode and Lightroom's
+    // Constrain Crop — every one of them a key this writer only CARRIED before
+    // v1.5.0, so an era-1 recipe has never held one.
+    "perspective_vertical",
+    "perspective_horizontal",
+    "perspective_rotate",
+    "perspective_scale",
+    "perspective_aspect",
+    "perspective_x",
+    "perspective_y",
+    "perspective_upright",
+    "crop_constrain_to_warp",
+    "param_shadows",
+    "param_darks",
+    "param_lights",
+    "param_highlights",
+    "param_shadow_split",
+    "param_midtone_split",
+    "param_highlight_split",
+    "cal_shadow_tint",
+    "cal_red_hue",
+    "cal_red_sat",
+    "cal_green_hue",
+    "cal_green_sat",
+    "cal_blue_hue",
+    "cal_blue_sat",
+    "convert_to_grayscale",
+    "gray_red",
+    "gray_orange",
+    "gray_yellow",
+    "gray_green",
+    "gray_aqua",
+    "gray_blue",
+    "gray_purple",
+    "gray_magenta",
+    "point_colors",
+    // F8: HDR edit mode and the seven SDR-rendition controls. Nine keys this
+    // writer had never emitted, so no era-1 recipe has ever held one.
+    "hdr_edit",
+    "hdr_max_ev",
+    "sdr_blend",
+    "sdr_brightness",
+    "sdr_contrast",
+    "sdr_highlights",
+    "sdr_shadows",
+    "sdr_whites",
+    "sdr_clarity",
+];
+
+/// The COMPANION controls: shaping axes whose Lightroom default is NOT zero,
+/// with that default. A stored 0 on one of them means "the sidecar said
+/// nothing" — Lightroom's default applies — unless the control is named in
+/// [`EditRecipe::explicit_zero`]. [`EditRecipe::resolved`] is the one reader.
+///
+/// Every default is Adobe's own, read off the user's sidecars where Lightroom
+/// materialises them (`SharpenRadius="+1.0"`, `SharpenDetail="25"`, the Detail
+/// and Smoothness 50s) and off Lightroom's panels for the effects block.
+/// Style 1 is Highlight Priority. Radius and Style have no real 0 in
+/// Lightroom (bands 0.5..3 and 1..3); the list still names them so every
+/// member resolves the same way.
+pub const LR_COMPANION_DEFAULTS: [(&str, f32); 10] = [
+    ("sharpen_radius", 1.0),
+    ("sharpen_detail", 25.0),
+    ("nr_detail", 50.0),
+    ("color_nr_detail", 50.0),
+    ("color_nr_smooth", 50.0),
+    ("grain_size", 25.0),
+    ("grain_rough", 50.0),
+    ("post_crop_vignette_mid", 50.0),
+    ("post_crop_vignette_feather", 50.0),
+    ("post_crop_vignette_style", 1.0),
+];
 
 /// Serde default for [`EditRecipe::schema_era`] — deliberately NOT the
 /// container's `Default::default()` value, the same field-level-beats-
@@ -556,6 +1005,44 @@ fn schema_era_legacy() -> u32 {
 #[allow(clippy::trivially_copy_pass_by_ref)] // serde's predicate signature
 fn no_quarter_turn(k: &u8) -> bool {
     *k == 0
+}
+
+/// `skip_serializing_if` predicates for the v1.5.0 controls, each true at the
+/// control's neutral — see the parametric block's doc in [`EditRecipe`].
+#[allow(clippy::trivially_copy_pass_by_ref)] // serde's predicate signature
+fn is_zero(v: &f32) -> bool {
+    *v == 0.0
+}
+#[allow(clippy::trivially_copy_pass_by_ref)] // serde's predicate signature
+fn is_false(v: &bool) -> bool {
+    !*v
+}
+#[allow(clippy::trivially_copy_pass_by_ref)] // serde's predicate signature
+fn at_shadow_split(v: &f32) -> bool {
+    *v == PARAMETRIC_SPLITS[0]
+}
+#[allow(clippy::trivially_copy_pass_by_ref)] // serde's predicate signature
+fn at_midtone_split(v: &f32) -> bool {
+    *v == PARAMETRIC_SPLITS[1]
+}
+#[allow(clippy::trivially_copy_pass_by_ref)] // serde's predicate signature
+fn at_highlight_split(v: &f32) -> bool {
+    *v == PARAMETRIC_SPLITS[2]
+}
+
+/// Lightroom's parametric-curve splits at rest, in percent of the input range:
+/// Shadows | Darks, Darks | Lights, Lights | Highlights.
+pub const PARAMETRIC_SPLITS: [f32; 3] = [25.0, 50.0, 75.0];
+
+/// How close two parametric splits, or a split and an end of the range, may
+/// come — Lightroom's own panel stops a split 10 short of its neighbours.
+pub const PARAMETRIC_SPLIT_GAP: f32 = 10.0;
+
+/// The range split `i` (0 = Shadows | Darks) can reach when its neighbours
+/// make room — 10..=70, 20..=80 and 30..=90, each split's own panel range.
+pub fn parametric_split_band(i: usize) -> (f32, f32) {
+    let gap = PARAMETRIC_SPLIT_GAP;
+    (gap * (i + 1) as f32, 100.0 - gap * (3 - i) as f32)
 }
 
 impl Default for EditRecipe {
@@ -580,6 +1067,16 @@ impl Default for EditRecipe {
             dehaze: 0.0,
             texture: 0.0,
             hsl: Hsl::default(),
+            convert_to_grayscale: false,
+            gray_red: 0.0,
+            gray_orange: 0.0,
+            gray_yellow: 0.0,
+            gray_green: 0.0,
+            gray_aqua: 0.0,
+            gray_blue: 0.0,
+            gray_purple: 0.0,
+            gray_magenta: 0.0,
+            point_colors: Vec::new(),
             color_grade: ColorGrade::default(),
             sharpening: 0.0,
             noise_reduction: 0.0,
@@ -594,6 +1091,20 @@ impl Default for EditRecipe {
             lens_vignette: 0.0,
             lens_vignette_mid: 50.0,
             lens_distortion: 0.0,
+            // 100 = "the profile's own map / gains", the only non-zero-neutral
+            // pair outside the de-fringe block.
+            lens_profile_distortion_scale: 100.0,
+            lens_profile_vignetting_scale: 100.0,
+            perspective_vertical: 0.0,
+            perspective_horizontal: 0.0,
+            perspective_rotate: 0.0,
+            perspective_scale: 100.0,
+            perspective_aspect: 0.0,
+            perspective_x: 0.0,
+            perspective_y: 0.0,
+            perspective_upright: 0.0,
+            upright_transform: Vec::new(),
+            crop_constrain_to_warp: false,
             ca_r: 0.0,
             ca_b: 0.0,
             auto_lateral_ca: false,
@@ -616,10 +1127,29 @@ impl Default for EditRecipe {
             grain: 0.0,
             grain_size: 0.0,
             grain_rough: 0.0,
-            // Empty = the document carried no Transform / Calibration block.
-            // There is no "neutral Upright" to invent here: a key we never saw
-            // must not be written into somebody's sidecar.
+            explicit_zero: Vec::new(),
+            // Empty = the document carried no Transform block and no profile
+            // name. There is no "neutral Upright" to invent here: a key we
+            // never saw must not be written into somebody's sidecar.
             passthrough: std::collections::BTreeMap::new(),
+            cal_shadow_tint: 0.0,
+            cal_red_hue: 0.0,
+            cal_red_sat: 0.0,
+            cal_green_hue: 0.0,
+            cal_green_sat: 0.0,
+            cal_blue_hue: 0.0,
+            cal_blue_sat: 0.0,
+            // F8: no HDR mode, no headroom, no SDR rendition — the state every
+            // photograph this engine has ever rendered was already in.
+            hdr_edit: false,
+            hdr_max_ev: 0.0,
+            sdr_blend: 0.0,
+            sdr_brightness: 0.0,
+            sdr_contrast: 0.0,
+            sdr_highlights: 0.0,
+            sdr_shadows: 0.0,
+            sdr_whites: 0.0,
+            sdr_clarity: 0.0,
             straighten_deg: 0.0,
             quarter_turns: 0,
             crop: None,
@@ -627,13 +1157,169 @@ impl Default for EditRecipe {
             red_curve: Vec::new(),
             green_curve: Vec::new(),
             blue_curve: Vec::new(),
+            param_shadows: 0.0,
+            param_darks: 0.0,
+            param_lights: 0.0,
+            param_highlights: 0.0,
+            param_shadow_split: PARAMETRIC_SPLITS[0],
+            param_midtone_split: PARAMETRIC_SPLITS[1],
+            param_highlight_split: PARAMETRIC_SPLITS[2],
+            camera_profile: String::new(),
+            look: None,
             base_curve: Vec::new(),
             lens_profile: LensProfile::default(),
             masks: Vec::new(),
+            retouch: Vec::new(),
             colour_field: None,
             rationale: String::new(),
             confidence: 0.0,
         }
+    }
+}
+
+/// A creative profile's BAKED half, as the sidecar states it.
+///
+/// Adobe's creative profiles are two things at once: a set of ordinary develop
+/// settings, which Lightroom writes out in full inside `<crs:Look>`, and a
+/// three-dimensional colour table, which it writes as an opaque reference. This
+/// struct is the first half — everything the engine can render — plus the NAME
+/// of the second, so the part that is not rendered can be disclosed instead of
+/// quietly dropped.
+///
+/// The field list is the measured vocabulary, not a guess: across the 161 Looks
+/// in the library the Parameters block carries exactly `Version`,
+/// `ProcessVersion`, `ConvertToGrayscale`, `CameraProfile`, `LookTable`, plus
+/// `Clarity2012` (9 files), `Highlights2012` and `Shadows2012` (5 each), and
+/// the four `ToneCurvePV2012*` children. Anything outside that set lands in
+/// [`unrendered`](Self::unrendered) by name.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(default, deny_unknown_fields)]
+pub struct CreativeLook {
+    /// `crs:Name` — "Adobe Color", "Adobe Landscape", "Adobe Monochrome".
+    pub name: String,
+    /// `crs:Amount`. 1 on every one of the 161 Looks measured; a Look whose
+    /// profile sets `SupportsAmount` can carry less, and the render scales the
+    /// baked half by it.
+    pub amount: f32,
+    /// The Look's OWN `crs:CameraProfile` — the camera profile it sits on top
+    /// of, "Adobe Standard" on all 161. This is what the render resolves when
+    /// the Description's own profile is absent.
+    pub base_profile: String,
+    /// `crs:LookTable`: a 32-hex reference to the creative colour table. Carried
+    /// so the disclosure can NAME what is missing; see [`crate::dcp`] for what
+    /// was measured about that payload and why it is not decodable.
+    pub table: String,
+    /// The Look's baked `crs:ConvertToGrayscale` — `true` on the four "Adobe
+    /// Monochrome" files, which is how Lightroom 9.4 spells a black-and-white
+    /// treatment. The Description's own switch stays the photographer's.
+    pub grayscale: bool,
+    /// Baked `crs:Clarity2012` / `Highlights2012` / `Shadows2012`.
+    pub clarity: f32,
+    pub highlights: f32,
+    pub shadows: f32,
+    /// Baked `crs:ToneCurvePV2012` and its three per-channel companions, in the
+    /// same 0..=255 coordinates as the photographer's own curves.
+    pub tone_curve: Vec<CurvePoint>,
+    pub red_curve: Vec<CurvePoint>,
+    pub green_curve: Vec<CurvePoint>,
+    pub blue_curve: Vec<CurvePoint>,
+    /// crs keys the Look bakes that this engine does not render, by name.
+    ///
+    /// Sorted and de-duplicated so the disclosure is stable. An empty list means
+    /// the Look's whole baked half reached the render — which is the case for
+    /// every Look in the measured library once the table is accounted for.
+    pub unrendered: Vec<String>,
+}
+
+impl EditRecipe {
+    /// The creative profile's baked half, scaled by its own `crs:Amount`, or
+    /// `None` when there is nothing baked to apply.
+    ///
+    /// One door for every reader, so "does this photograph carry a Look that
+    /// moves pixels" is asked the same way everywhere — the mistake the B&W
+    /// switch would otherwise invite, where the render checks one flag and the
+    /// panel another.
+    pub fn baked_look(&self) -> Option<&CreativeLook> {
+        self.look.as_ref().filter(|l| !l.is_neutral())
+    }
+
+    /// Does this photograph render as black and white?
+    ///
+    /// Two switches say so and they belong to different people: the
+    /// photographer's own `crs:ConvertToGrayscale`, and the one baked into a
+    /// monochrome creative profile — which is how Lightroom 9.4 spells "Adobe
+    /// Monochrome", on four of the 175 sidecars measured. Either is enough.
+    pub fn renders_grayscale(&self) -> bool {
+        self.convert_to_grayscale || self.baked_look().is_some_and(|l| l.grayscale)
+    }
+
+    /// The creative profile's baked tone curve, when it has one that renders.
+    ///
+    /// THE one place that answers "does the profile state a base rendition",
+    /// because two places answering it differently is what this method was
+    /// written to end: `render::build_tone_lut` composed the Look's curve as the
+    /// base rendition while `render::apply_develop`'s tone-neutral
+    /// short-circuit still asked only about `base_curve`, so a photograph whose
+    /// only tonal content was its profile skipped the tone pass entirely and
+    /// rendered the profile as nothing at all. That is not an edge case: 161 of
+    /// the 175 sidecars in the reference library carry a `crs:Look`, and the
+    /// default `Adobe Color` bakes a real S-curve and no sliders.
+    pub(crate) fn baked_tone_curve(&self) -> Option<&CreativeLook> {
+        self.baked_look().filter(|l| !l.tone_curve.is_empty())
+    }
+
+    /// Does the tone stage have anything to do?
+    ///
+    /// Every input [`crate::render::build_tone_lut`] reads, asked in one place
+    /// so the short-circuit and the LUT cannot disagree. The two slider terms
+    /// go through [`Self::with_baked`] for the same reason: a profile that
+    /// bakes Highlights −12 onto a photograph the photographer never touched is
+    /// tone work, and a neutrality test reading the raw field would have
+    /// skipped it.
+    pub(crate) fn has_tone_work(&self) -> bool {
+        self.exposure_ev != 0.0
+            || self.contrast != 0.0
+            || self.with_baked(self.highlights, |l| l.highlights) != 0.0
+            || self.with_baked(self.shadows, |l| l.shadows) != 0.0
+            || self.whites != 0.0
+            || self.blacks != 0.0
+            || !self.tone_curve.is_empty()
+            || self.parametric_regions().is_some()
+            || self.baked_tone_curve().is_some()
+            || !self.base_curve.is_empty()
+    }
+
+    /// One tone slider, with the Look's baked move added.
+    ///
+    /// ADDED, and that is exact rather than convenient: the engine's tone model
+    /// is `base + basis·sliders`, LINEAR in the sliders by construction (see
+    /// `render::build_tone_lut`), so a baked −12 followed by the
+    /// photographer's +20 is the same curve as a single +8. The amount scales
+    /// the baked half only, which is what a profile's `crs:Amount` means.
+    pub(crate) fn with_baked(&self, own: f32, pick: fn(&CreativeLook) -> f32) -> f32 {
+        match self.baked_look() {
+            Some(l) => own + pick(l) * l.amount,
+            None => own,
+        }
+    }
+}
+
+impl CreativeLook {
+    /// A Look with no baked half changes nothing, whatever its name.
+    ///
+    /// The table reference alone does NOT count as neutral: it is the thing the
+    /// engine cannot render, so a Look that carries only a table is exactly the
+    /// case the disclosure exists for.
+    pub fn is_neutral(&self) -> bool {
+        self.amount == 0.0
+            || (!self.grayscale
+                && self.clarity == 0.0
+                && self.highlights == 0.0
+                && self.shadows == 0.0
+                && self.tone_curve.is_empty()
+                && self.red_curve.is_empty()
+                && self.green_curve.is_empty()
+                && self.blue_curve.is_empty())
     }
 }
 
@@ -668,7 +1354,7 @@ pub enum MaskWarpSource {
     /// (`render::mask_warp_from_camera_knots`). Source A: no external file, and
     /// exactly the polynomial the camera maker calibrated for this shot.
     CameraMetadata,
-    /// Solved from an Adobe `.lcp` on this machine (`lcp::solve_mask_warp`).
+    /// Solved from an Adobe `.lcp` on this machine (`lcp::solve`).
     /// Source B, for bodies whose RAWs carry no knots.
     Lcp,
     /// The sidecar says `crs:LensProfileEnable="0"`: Lightroom drew NO lens
@@ -763,7 +1449,7 @@ pub struct LensProfile {
     /// map only as a two-handle forward transform when no geometry follows; it
     /// never applies this map pointwise. Same knot placement, same interpolator
     /// and same shape as `distortion` above — one convention, two producers
-    /// (`render::mask_warp_from_camera_knots` and `lcp::solve_mask_warp`).
+    /// (`render::mask_warp_from_camera_knots` and `lcp::solve`).
     ///
     /// Empty = identity, and `mask_warp_src` says why.
     ///
@@ -1077,6 +1763,223 @@ impl ColorGrade {
         }
         self.blending = fin(self.blending, 50.0).clamp(0.0, 100.0);
         self.balance = fin(self.balance, 0.0).clamp(-100.0, 100.0);
+    }
+}
+
+/// How many point colours a recipe keeps — a bound on hand-edited and hostile
+/// files (each swatch is a per-pixel membership test), not a panel limit.
+pub const MAX_POINT_COLORS: usize = 16;
+
+/// The saturation window a freshly sampled swatch materialises at Lightroom's
+/// default Range (0.5), as half-widths around the sampled value: full effect
+/// within ±0.18, none beyond ±0.73, clamped to 0..1. Read off both published
+/// Lua dumps of a sampled swatch (Adobe community thread 14165872: SrcSat
+/// 0.920754 → 0.190754 / 0.740754 / 1 / 1; MIDI2LR's `LocalPresets.lua`:
+/// 0.473663 → 0 / 0.29 / 0.65 / 1). The luminance window uses the same widths
+/// until the Lightroom kit's `PC-*` sidecars pin Lightroom's own rule.
+pub const POINT_COLOR_FULL_HALF_WIDTH: f32 = 0.18;
+pub const POINT_COLOR_NONE_HALF_WIDTH: f32 = 0.73;
+
+/// How the Range slider scales a swatch's windows about its sampled colour:
+/// a Range of `a` multiplies every half-width by `FLOOR + SPREAD·a`, which is 1
+/// at Lightroom's default 0.5 — the windows both published dumps carry — and
+/// never 0, so the narrowest Range still matches its own colour. PROVISIONAL
+/// until the Lightroom kit's `PC-*` sidecars pin Lightroom's own rule.
+pub const POINT_COLOR_RANGE_FLOOR: f32 = 0.25;
+pub const POINT_COLOR_RANGE_SPREAD: f32 = 1.5;
+
+/// One Lightroom Point Color swatch (v1.5.0): the colour it was sampled from,
+/// the three shifts, and the windows that decide which pixels it moves.
+///
+/// Lightroom stores each swatch as ONE `rdf:li` of 19 comma-separated
+/// numbers, in this struct's field order — SrcHue, SrcSat, SrcLum, HueShift,
+/// SatScale, LumScale, RangeAmount, then HueRange, SatRange and LumRange as
+/// {LowerNone, LowerFull, UpperFull, UpperNone} (the order JarvisArt's
+/// XMP→Lua converter reads, and the field set of the Lua dumps cited on
+/// [`POINT_COLOR_FULL_HALF_WIDTH`]) — and a list with no swatch as a single
+/// item of nineteen `-1.000000`s (113 of the operator's 175 sidecars).
+///
+/// Every window is STORED, not derived: Lightroom materialises them from the
+/// Range slider when the swatch is made, so the render reads the numbers and
+/// never needs Lightroom's derivation. The hue window is RELATIVE — 0.5 is
+/// the sampled hue — while saturation and luminance are absolute.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct PointColor {
+    /// The sampled hue, radians 0..2π.
+    pub src_hue: f32,
+    /// The sampled saturation, 0..=1.
+    pub src_sat: f32,
+    /// The sampled luminance, 0..=1.
+    pub src_lum: f32,
+    /// Hue shift, -1..=1 (Lightroom's ±100 slider).
+    pub hue_shift: f32,
+    /// Saturation shift, -1..=1.
+    pub sat_scale: f32,
+    /// Luminance shift, -1..=1.
+    pub lum_scale: f32,
+    /// The Range slider, 0..=1 (Lightroom's default 0.5).
+    pub range_amount: f32,
+    /// {lower none, lower full, upper full, upper none}, relative (0.5 = src).
+    pub hue_range: [f32; 4],
+    /// {lower none, lower full, upper full, upper none}, absolute saturation.
+    pub sat_range: [f32; 4],
+    /// {lower none, lower full, upper full, upper none}, absolute luminance.
+    pub lum_range: [f32; 4],
+}
+
+impl Default for PointColor {
+    fn default() -> Self {
+        Self {
+            src_hue: 0.0,
+            src_sat: 0.0,
+            src_lum: 0.0,
+            hue_shift: 0.0,
+            sat_scale: 0.0,
+            lum_scale: 0.0,
+            range_amount: 0.5,
+            hue_range: [0.0, 1.0 / 3.0, 2.0 / 3.0, 1.0],
+            sat_range: [0.0, 0.0, 1.0, 1.0],
+            lum_range: [0.0, 0.0, 1.0, 1.0],
+        }
+    }
+}
+
+impl PointColor {
+    /// A swatch sampled from a colour (hue in radians, saturation and
+    /// luminance 0..1) with Lightroom's default windows — see
+    /// [`POINT_COLOR_FULL_HALF_WIDTH`] — and no shift yet.
+    pub fn sampled(hue: f32, sat: f32, lum: f32) -> Self {
+        let window = |v: f32| {
+            let at = |d: f32| (v + d).clamp(0.0, 1.0);
+            [
+                at(-POINT_COLOR_NONE_HALF_WIDTH),
+                at(-POINT_COLOR_FULL_HALF_WIDTH),
+                at(POINT_COLOR_FULL_HALF_WIDTH),
+                at(POINT_COLOR_NONE_HALF_WIDTH),
+            ]
+        };
+        let mut p = Self {
+            src_hue: hue,
+            src_sat: sat,
+            src_lum: lum,
+            sat_range: window(sat),
+            lum_range: window(lum),
+            ..Self::default()
+        };
+        p.clamp();
+        p
+    }
+
+    /// Does this swatch move anything? A sampled swatch with every shift at 0
+    /// is a real Lightroom state that renders nothing.
+    pub fn is_neutral(&self) -> bool {
+        self.hue_shift == 0.0 && self.sat_scale == 0.0 && self.lum_scale == 0.0
+    }
+
+    /// Move the Range slider (0..=1) and rebuild the three windows from it, as
+    /// Lightroom materialises them: the render reads the stored windows and
+    /// never `range_amount`, so a Range that only stored its number would be a
+    /// slider that moves no pixel. Each window keeps the sampled colour at its
+    /// centre and scales its half-widths by [`POINT_COLOR_RANGE_SPREAD`]; the
+    /// relative hue window's are 1/6 (full) and 1/2 (none) at the default.
+    pub fn set_range(&mut self, amount: f32) {
+        self.range_amount = if amount.is_finite() { amount.clamp(0.0, 1.0) } else { 0.5 };
+        let k = POINT_COLOR_RANGE_FLOOR + POINT_COLOR_RANGE_SPREAD * self.range_amount;
+        let window = |centre: f32, full: f32, none: f32| {
+            [centre - none * k, centre - full * k, centre + full * k, centre + none * k]
+        };
+        self.hue_range = window(0.5, 1.0 / 6.0, 0.5);
+        self.sat_range = window(self.src_sat, POINT_COLOR_FULL_HALF_WIDTH, POINT_COLOR_NONE_HALF_WIDTH);
+        self.lum_range = window(self.src_lum, POINT_COLOR_FULL_HALF_WIDTH, POINT_COLOR_NONE_HALF_WIDTH);
+        self.clamp();
+    }
+
+    /// The 19 numbers of one `crs:PointColors` item, in Lightroom's order.
+    pub(crate) fn to_numbers(&self) -> [f32; 19] {
+        let mut n = [0.0; 19];
+        n[..7].copy_from_slice(&[
+            self.src_hue,
+            self.src_sat,
+            self.src_lum,
+            self.hue_shift,
+            self.sat_scale,
+            self.lum_scale,
+            self.range_amount,
+        ]);
+        n[7..11].copy_from_slice(&self.hue_range);
+        n[11..15].copy_from_slice(&self.sat_range);
+        n[15..].copy_from_slice(&self.lum_range);
+        n
+    }
+
+    /// One item read back: `Ok(None)` for Lightroom's no-swatch placeholder
+    /// (nineteen `-1`s), `Err` for anything that is not a swatch this model
+    /// can hold — the wrong count, a non-finite or out-of-domain number, a
+    /// window whose edges run backwards. Refused, never repaired: a record
+    /// that fails here is a layout this reader does not understand, and a
+    /// repaired guess would move colours nobody picked.
+    pub(crate) fn from_numbers(n: &[f32]) -> Result<Option<Self>, ()> {
+        if n.len() != 19 {
+            return Err(());
+        }
+        if n.iter().all(|v| *v == -1.0) {
+            return Ok(None);
+        }
+        let unit = |v: f32| (0.0..=1.0).contains(&v);
+        let signed = |v: f32| (-1.0..=1.0).contains(&v);
+        let window = |w: &[f32]| w.iter().all(|v| unit(*v)) && w.windows(2).all(|p| p[0] <= p[1]);
+        let hue_ok = (0.0..=std::f32::consts::TAU + 1e-3).contains(&n[0]);
+        if n.iter().any(|v| !v.is_finite())
+            || !hue_ok
+            || !unit(n[1])
+            || !unit(n[2])
+            || !n[3..6].iter().all(|v| signed(*v))
+            || !unit(n[6])
+            || !window(&n[7..11])
+            || !window(&n[11..15])
+            || !window(&n[15..19])
+        {
+            return Err(());
+        }
+        let four = |at: usize| [n[at], n[at + 1], n[at + 2], n[at + 3]];
+        Ok(Some(Self {
+            src_hue: n[0],
+            src_sat: n[1],
+            src_lum: n[2],
+            hue_shift: n[3],
+            sat_scale: n[4],
+            lum_scale: n[5],
+            range_amount: n[6],
+            hue_range: four(7),
+            sat_range: four(11),
+            lum_range: four(15),
+        }))
+    }
+
+    /// Hold a swatch to its domains: a non-finite number returns to the
+    /// default's, the hue wraps into 0..2π, shifts and windows saturate, and
+    /// a window's edges are put back in order.
+    pub fn clamp(&mut self) {
+        let dflt = Self::default();
+        let fin = |v: f32, d: f32| if v.is_finite() { v } else { d };
+        self.src_hue = fin(self.src_hue, 0.0).rem_euclid(std::f32::consts::TAU);
+        self.src_sat = fin(self.src_sat, 0.0).clamp(0.0, 1.0);
+        self.src_lum = fin(self.src_lum, 0.0).clamp(0.0, 1.0);
+        for v in [&mut self.hue_shift, &mut self.sat_scale, &mut self.lum_scale] {
+            *v = fin(*v, 0.0).clamp(-1.0, 1.0);
+        }
+        self.range_amount = fin(self.range_amount, dflt.range_amount).clamp(0.0, 1.0);
+        for (w, d) in [
+            (&mut self.hue_range, dflt.hue_range),
+            (&mut self.sat_range, dflt.sat_range),
+            (&mut self.lum_range, dflt.lum_range),
+        ] {
+            for (v, dv) in w.iter_mut().zip(d) {
+                *v = fin(*v, dv).clamp(0.0, 1.0);
+            }
+            w.sort_by(f32::total_cmp);
+        }
     }
 }
 
@@ -2625,7 +3528,7 @@ impl EditRecipe {
             cap_rationale(&mut self.rationale, Self::MAX_RATIONALE);
         // The pass-through block is STRINGS from a foreign document, so it
         // falls under the same rule as `rationale` and the mask names above:
-        // the reader fills it from a fixed sixteen keys, but a hand-edited
+        // the reader fills it from a fixed nine keys, but a hand-edited
         // recipe.json is not obliged to. Bounded here rather than trusted —
         // and generously, because the whole promise of these values is that
         // they ride out byte-for-byte (`crs:CameraProfile` is a profile NAME,
@@ -2684,6 +3587,71 @@ impl EditRecipe {
         self.clarity = c(self.clarity, -100.0, 100.0);
         self.dehaze = c(self.dehaze, -100.0, 100.0);
         self.texture = c(self.texture, -100.0, 100.0);
+        // The Calibration panel and the B&W mixer (v1.5.0): Lightroom's ±100
+        // sliders, all of them.
+        for v in [
+            &mut self.cal_shadow_tint,
+            &mut self.cal_red_hue,
+            &mut self.cal_red_sat,
+            &mut self.cal_green_hue,
+            &mut self.cal_green_sat,
+            &mut self.cal_blue_hue,
+            &mut self.cal_blue_sat,
+            &mut self.gray_red,
+            &mut self.gray_orange,
+            &mut self.gray_yellow,
+            &mut self.gray_green,
+            &mut self.gray_aqua,
+            &mut self.gray_blue,
+            &mut self.gray_purple,
+            &mut self.gray_magenta,
+            // …and the SDR rendition (v1.5.0 F8), which is seven more of them.
+            &mut self.sdr_blend,
+            &mut self.sdr_brightness,
+            &mut self.sdr_contrast,
+            &mut self.sdr_highlights,
+            &mut self.sdr_shadows,
+            &mut self.sdr_whites,
+            &mut self.sdr_clarity,
+        ] {
+            *v = c(*v, -100.0, 100.0);
+        }
+        // The HDR headroom is a COUNT OF STOPS, not a ±100 slider, and it has
+        // no negative meaning: headroom below diffuse white is not headroom.
+        // The ceiling is this engine's refusal bound, not Lightroom's — eight
+        // stops above diffuse white is already far past any display, and a
+        // sidecar claiming more is a document to distrust, not to obey.
+        self.hdr_max_ev = c(self.hdr_max_ev, 0.0, 8.0);
+        self.point_colors.truncate(MAX_POINT_COLORS);
+        for p in &mut self.point_colors {
+            p.clamp();
+        }
+        // The parametric curve (v1.5.0): Lightroom's ±100 regions, and each
+        // split in its own band — the band its slider has with the other two
+        // at rest. ORDER is not enforced here: a split's legal range depends on
+        // its neighbours, so a per-field clamp that also ordered them would
+        // move a value the registry states as legal (`parametric_splits`
+        // orders them where they are used). A non-finite split is not a
+        // position and returns to its default.
+        for v in [
+            &mut self.param_shadows,
+            &mut self.param_darks,
+            &mut self.param_lights,
+            &mut self.param_highlights,
+        ] {
+            *v = c(*v, -100.0, 100.0);
+        }
+        for (i, v) in [
+            &mut self.param_shadow_split,
+            &mut self.param_midtone_split,
+            &mut self.param_highlight_split,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let (lo, hi) = parametric_split_band(i);
+            *v = if v.is_finite() { v.clamp(lo, hi) } else { PARAMETRIC_SPLITS[i] };
+        }
         self.hsl.clamp();
         self.color_grade.clamp();
         self.sharpening = c(self.sharpening, 0.0, 150.0);
@@ -2711,6 +3679,24 @@ impl EditRecipe {
         self.lens_vignette = c(self.lens_vignette, -100.0, 100.0);
         self.lens_vignette_mid = c(self.lens_vignette_mid, 0.0, 100.0);
         self.lens_distortion = c(self.lens_distortion, -100.0, 100.0);
+        self.lens_profile_distortion_scale = c(self.lens_profile_distortion_scale, 0.0, 200.0);
+        self.lens_profile_vignetting_scale = c(self.lens_profile_vignetting_scale, 0.0, 200.0);
+        self.perspective_vertical = c(self.perspective_vertical, -100.0, 100.0);
+        self.perspective_horizontal = c(self.perspective_horizontal, -100.0, 100.0);
+        self.perspective_rotate = c(self.perspective_rotate, -10.0, 10.0);
+        self.perspective_scale = c(self.perspective_scale, 0.0, 200.0);
+        self.perspective_aspect = c(self.perspective_aspect, -100.0, 100.0);
+        self.perspective_x = c(self.perspective_x, -100.0, 100.0);
+        self.perspective_y = c(self.perspective_y, -100.0, 100.0);
+        // The mode is an index into Lightroom's own six, so it is clamped to
+        // them and rounded: a fractional mode would select no matrix at all.
+        self.perspective_upright = c(self.perspective_upright.round(), 0.0, 5.0);
+        // A matrix whose numbers are not finite is not a matrix. Dropping the
+        // whole list keeps the index → mode correspondence, which a per-entry
+        // filter would silently shift.
+        if self.upright_transform.iter().flatten().any(|v| !v.is_finite()) {
+            self.upright_transform.clear();
+        }
         self.ca_r = c(self.ca_r, -100.0, 100.0);
         self.ca_b = c(self.ca_b, -100.0, 100.0);
         // De-fringe: Adobe's own bands (amount 0..20, hue windows 0..100).
@@ -2741,6 +3727,18 @@ impl EditRecipe {
         self.grain = c(self.grain, 0.0, 100.0);
         self.grain_size = c(self.grain_size, 0.0, 100.0);
         self.grain_rough = c(self.grain_rough, 0.0, 100.0);
+        // An explicit zero names a companion whose stored value IS 0; any
+        // other entry (an unknown name from a hand-edited file, a name whose
+        // field is non-zero) would claim something the fields do not say.
+        let explicit: Vec<String> = LR_COMPANION_DEFAULTS
+            .iter()
+            .map(|(n, _)| *n)
+            .filter(|n| self.explicit_zero.iter().any(|e| e == n))
+            .filter(|n| self.clone_companions().companion_slot(n).is_some_and(|(v, _)| *v == 0.0))
+            .map(str::to_string)
+            .collect();
+        self.explicit_zero = explicit;
+        self.explicit_zero.sort();
         self.lens_profile.clamp();
         self.straighten_deg = c(self.straighten_deg, -45.0, 45.0);
         // A quarter turn is CYCLIC, so out-of-domain folds rather than
@@ -3001,6 +3999,173 @@ impl EditRecipe {
                 m.whites = m.whites.max(g);
             }
             m.blacks = soft_cap(m.blacks, point_knee, point_ceil);
+        }
+    }
+
+    /// A companion field by serde name, mutably, with its Lightroom default —
+    /// `None` for a name that is not in [`LR_COMPANION_DEFAULTS`].
+    fn companion_slot(&mut self, name: &str) -> Option<(&mut f32, f32)> {
+        let default = LR_COMPANION_DEFAULTS.iter().find(|(n, _)| *n == name)?.1;
+        let slot = match name {
+            "sharpen_radius" => &mut self.sharpen_radius,
+            "sharpen_detail" => &mut self.sharpen_detail,
+            "nr_detail" => &mut self.nr_detail,
+            "color_nr_detail" => &mut self.color_nr_detail,
+            "color_nr_smooth" => &mut self.color_nr_smooth,
+            "grain_size" => &mut self.grain_size,
+            "grain_rough" => &mut self.grain_rough,
+            "post_crop_vignette_mid" => &mut self.post_crop_vignette_mid,
+            "post_crop_vignette_feather" => &mut self.post_crop_vignette_feather,
+            "post_crop_vignette_style" => &mut self.post_crop_vignette_style,
+            _ => return None,
+        };
+        Some((slot, default))
+    }
+
+    /// The Calibration panel as the render reads it — shadows tint, then red,
+    /// green and blue hue/saturation — or `None` while every slider is 0.
+    pub fn calibration(&self) -> Option<[f32; 7]> {
+        let cal = [
+            self.cal_shadow_tint,
+            self.cal_red_hue,
+            self.cal_red_sat,
+            self.cal_green_hue,
+            self.cal_green_sat,
+            self.cal_blue_hue,
+            self.cal_blue_sat,
+        ];
+        cal.iter().any(|v| *v != 0.0).then_some(cal)
+    }
+
+    /// The seven SDR-rendition controls (v1.5.0 F8) in the order
+    /// [`crate::xmp::SDR_CRS`] names them: Blend, Brightness, Contrast,
+    /// Highlights, Shadows, Whites, Clarity.
+    ///
+    /// Unconditional, unlike [`calibration`](Self::calibration): the writer
+    /// emits these key by key rather than as a block, so there is no
+    /// "is the block active" question for this accessor to answer — and the
+    /// RENDER's own question is a different one, asked by
+    /// `render::hdr::SdrRendition::global`, which must also weigh
+    /// [`hdr_edit`](Self::hdr_edit) and the headroom.
+    pub fn sdr_controls(&self) -> [f32; 7] {
+        [
+            self.sdr_blend,
+            self.sdr_brightness,
+            self.sdr_contrast,
+            self.sdr_highlights,
+            self.sdr_shadows,
+            self.sdr_whites,
+            self.sdr_clarity,
+        ]
+    }
+
+    /// The B&W mixer's eight bands in [`HSL_BANDS`] order.
+    pub fn gray_mixer(&self) -> [f32; 8] {
+        [
+            self.gray_red,
+            self.gray_orange,
+            self.gray_yellow,
+            self.gray_green,
+            self.gray_aqua,
+            self.gray_blue,
+            self.gray_purple,
+            self.gray_magenta,
+        ]
+    }
+
+    /// The B&W mixer band `i` ([`HSL_BANDS`] order), mutably — the one door
+    /// the panel's eight rows share.
+    pub fn gray_mixer_mut(&mut self, i: usize) -> Option<&mut f32> {
+        Some(match i {
+            0 => &mut self.gray_red,
+            1 => &mut self.gray_orange,
+            2 => &mut self.gray_yellow,
+            3 => &mut self.gray_green,
+            4 => &mut self.gray_aqua,
+            5 => &mut self.gray_blue,
+            6 => &mut self.gray_purple,
+            7 => &mut self.gray_magenta,
+            _ => return None,
+        })
+    }
+
+    /// The parametric curve's four REGION sliders — shadows, darks, lights,
+    /// highlights — or `None` while every one is 0: the splits alone move no
+    /// pixel (`render::parametric_lut`).
+    pub fn parametric_regions(&self) -> Option<[f32; 4]> {
+        let regions = [self.param_shadows, self.param_darks, self.param_lights, self.param_highlights];
+        regions.iter().any(|v| *v != 0.0).then_some(regions)
+    }
+
+    /// The three parametric splits as the curve USES them, in percent: each
+    /// at least [`PARAMETRIC_SPLIT_GAP`] above the one before it (and the
+    /// start of the range) and short of the end by as much, resolved left to
+    /// right. The panel's sliders cannot cross (their bounds follow their
+    /// neighbours), so this changes nothing a slider set — it is what keeps a
+    /// hand-edited file's crossed splits from handing the curve an empty or
+    /// inverted region.
+    pub fn parametric_splits(&self) -> [f32; 3] {
+        let stored = [self.param_shadow_split, self.param_midtone_split, self.param_highlight_split];
+        let mut floor = 0.0;
+        std::array::from_fn(|i| {
+            let (_, ceiling) = parametric_split_band(i);
+            let v = if stored[i].is_finite() { stored[i] } else { PARAMETRIC_SPLITS[i] };
+            floor = v.clamp(floor + PARAMETRIC_SPLIT_GAP, ceiling);
+            floor
+        })
+    }
+
+    /// The value a companion control RENDERS at: its stored value, or
+    /// Lightroom's default when the stored 0 means "absent" (see
+    /// [`EditRecipe::explicit_zero`]). Any other control name reads 0 — a
+    /// caller asking for a non-companion here has the wrong function, and the
+    /// render tests would show a neutral pass rather than a wrong one.
+    pub fn resolved(&self, name: &str) -> f32 {
+        let mut probe = self.clone_companions();
+        match probe.companion_slot(name) {
+            Some((v, _)) if *v != 0.0 || self.explicit_zero.iter().any(|n| n == name) => *v,
+            Some((_, default)) => default,
+            None => 0.0,
+        }
+    }
+
+    /// Set a companion to the value a slider showed: 0 becomes an EXPLICIT
+    /// zero, anything else is stored as itself and leaves the list. Unknown
+    /// names are ignored.
+    pub fn set_resolved(&mut self, name: &str, value: f32) {
+        let Some((slot, _)) = self.companion_slot(name) else { return };
+        *slot = value;
+        self.explicit_zero.retain(|n| n != name);
+        if value == 0.0 {
+            self.explicit_zero.push(name.to_string());
+            self.explicit_zero.sort();
+        }
+    }
+
+    /// Return a companion to "the sidecar said nothing": stored 0, not explicit.
+    pub fn clear_resolved(&mut self, name: &str) {
+        if let Some((slot, _)) = self.companion_slot(name) {
+            *slot = 0.0;
+            self.explicit_zero.retain(|n| n != name);
+        }
+    }
+
+    /// Just the ten companion fields and the list, copied into an otherwise
+    /// default recipe — what [`resolved`](Self::resolved) needs to borrow a
+    /// slot without cloning masks, curves and fields.
+    fn clone_companions(&self) -> EditRecipe {
+        EditRecipe {
+            sharpen_radius: self.sharpen_radius,
+            sharpen_detail: self.sharpen_detail,
+            nr_detail: self.nr_detail,
+            color_nr_detail: self.color_nr_detail,
+            color_nr_smooth: self.color_nr_smooth,
+            grain_size: self.grain_size,
+            grain_rough: self.grain_rough,
+            post_crop_vignette_mid: self.post_crop_vignette_mid,
+            post_crop_vignette_feather: self.post_crop_vignette_feather,
+            post_crop_vignette_style: self.post_crop_vignette_style,
+            ..EditRecipe::default()
         }
     }
 
@@ -3953,7 +5118,7 @@ mod tests {
     ///
     /// `SCHEMA_ERA` deliberately does NOT move with it. That era answers one
     /// question — has this recipe ever seen the twenty-seven R25 `crs:` keys?
-    /// (`xmp::era_suppressed_attr_keys` is its only consumer) — and a colour
+    /// (`xmp::unspoken_attr_keys` is its only consumer) — and a colour
     /// field owns no `crs:` key and can own none. Bumping it would re-classify
     /// every era-1 recipe in every store as legacy and start suppressing those
     /// twenty-seven keys again on the next merge.
@@ -4032,7 +5197,7 @@ mod tests {
         assert_ne!(schema_era_legacy(), EditRecipe::default().schema_era);
         // …and it round-trips: what we write, we read back unchanged.
         let json = serde_json::to_string(&EditRecipe::default()).unwrap();
-        assert!(json.contains("\"schema_era\":1"), "{json}");
+        assert!(json.contains(&format!("\"schema_era\":{SCHEMA_ERA}")), "{json}");
         assert_eq!(serde_json::from_str::<EditRecipe>(&json).unwrap().schema_era, SCHEMA_ERA);
         // PROVENANCE, not an edit: a neutral v0.30 recipe.json must still read
         // as "no edits", or it would out-rank the XMP beside it
@@ -4114,6 +5279,224 @@ mod tests {
         // A turn is an EDIT, not bookkeeping: it must light ● and outrank a
         // sidecar, or a rotated photo would look clean and never be saved.
         assert!(!EditRecipe { quarter_turns: 1, ..Default::default() }.is_noop());
+    }
+
+    /// v1.5.0's parametric curve serialises only what was moved — the
+    /// `quarter_turns` argument above: a recipe that never touched the curve
+    /// stays byte-identical to what v1.4 wrote (`store::recipe_struct_hash`
+    /// keeps matching every archived version), and one that did carries
+    /// exactly the keys it moved, which is the recipe an older build must
+    /// refuse (`deny_unknown_fields`). The splits skip at ADOBE'S defaults,
+    /// not at zero, and an absent one reads back as that default.
+    ///
+    /// MUTATION THIS CATCHES: a split's predicate testing 0 (every recipe then
+    /// writes three split keys and a v1.4 build refuses them all), or a
+    /// region's `is_zero` skip dropped.
+    #[test]
+    fn an_untouched_parametric_curve_serialises_as_v1_4_wrote_it() {
+        let neutral = serde_json::to_string(&EditRecipe::default()).unwrap();
+        assert!(!neutral.contains("param_"), "{neutral}");
+        let moved = EditRecipe { param_darks: 30.0, param_midtone_split: 60.0, ..Default::default() };
+        let json = serde_json::to_string(&moved).unwrap();
+        assert!(json.contains("\"param_darks\":30.0"), "{json}");
+        assert!(json.contains("\"param_midtone_split\":60.0"), "{json}");
+        for at_rest in ["param_shadows", "param_lights", "param_highlights", "param_shadow_split", "param_highlight_split"] {
+            assert!(!json.contains(at_rest), "{at_rest} was written at rest: {json}");
+        }
+        let back: EditRecipe = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, moved, "the skip is lossless");
+        assert_eq!(back.param_shadow_split, PARAMETRIC_SPLITS[0], "an absent split is Adobe's default, never 0");
+        // A moved curve is an edit — a split alone included: it renders nothing
+        // but it is a value the sidecar carries to Lightroom.
+        assert!(!moved.is_noop());
+        assert!(!EditRecipe { param_shadow_split: 30.0, ..Default::default() }.is_noop());
+    }
+
+    /// The splits' two layers: `clamp` holds each field to its own band and
+    /// reorders nothing (the registry states per-field bands, and one split's
+    /// legal range depends on the other two), while `parametric_splits`
+    /// resolves the order where the curve uses them — so a hand-edited file
+    /// with crossed splits still hands the curve three ordered, gapped ones.
+    ///
+    /// MUTATION THIS CATCHES: the resolution's `floor + PARAMETRIC_SPLIT_GAP`
+    /// dropped (crossed splits reach `render::parametric_lut` as an empty or
+    /// inverted region), or a non-finite split kept.
+    #[test]
+    fn crossed_parametric_splits_resolve_in_order_where_they_are_used() {
+        let mut r = EditRecipe {
+            param_shadow_split: 65.0,
+            param_midtone_split: 22.0,
+            param_highlight_split: 500.0,
+            ..Default::default()
+        };
+        r.clamp();
+        assert_eq!(
+            [r.param_shadow_split, r.param_midtone_split, r.param_highlight_split],
+            [65.0, 22.0, 90.0],
+            "clamp bands each field and reorders nothing"
+        );
+        assert_eq!(r.parametric_splits(), [65.0, 75.0, 90.0]);
+        assert_eq!(EditRecipe::default().parametric_splits(), PARAMETRIC_SPLITS);
+        let nan = EditRecipe { param_midtone_split: f32::NAN, ..Default::default() };
+        assert_eq!(nan.parametric_splits(), PARAMETRIC_SPLITS, "a non-finite split is its default");
+        let mut clamped = nan.clone();
+        clamped.clamp();
+        assert_eq!(clamped.param_midtone_split, PARAMETRIC_SPLITS[1]);
+        for (i, split) in PARAMETRIC_SPLITS.iter().enumerate() {
+            let (lo, hi) = parametric_split_band(i);
+            assert!((lo..=hi).contains(split), "split {i}'s default sits inside its band");
+        }
+        // The regions alone decide whether the curve exists at all.
+        assert!(EditRecipe { param_highlight_split: 40.0, ..Default::default() }.parametric_regions().is_none());
+        assert_eq!(
+            EditRecipe { param_lights: -20.0, ..Default::default() }.parametric_regions(),
+            Some([0.0, 0.0, -20.0, 0.0])
+        );
+    }
+
+    /// v1.5.0's colour controls — the Calibration panel, the B&W treatment
+    /// and mixer, the point colours — serialise only when used, the parametric
+    /// curve's argument: an untouched recipe stays byte-identical to what v1.4
+    /// wrote, and a used one carries exactly the keys it used.
+    ///
+    /// MUTATION THIS CATCHES: a dropped `skip_serializing_if` on any of them
+    /// (every recipe would then carry the key, and a v1.4 build refuses it).
+    #[test]
+    fn untouched_colour_controls_serialise_as_v1_4_wrote_them() {
+        let neutral = serde_json::to_string(&EditRecipe::default()).unwrap();
+        for key in ["cal_", "gray_", "convert_to_grayscale", "point_colors"] {
+            assert!(!neutral.contains(key), "{key} was written at rest: {neutral}");
+        }
+        let moved = EditRecipe {
+            cal_blue_sat: 83.0,
+            convert_to_grayscale: true,
+            gray_blue: -44.0,
+            point_colors: vec![PointColor::sampled(4.12705, 0.920754, 0.839618)],
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&moved).unwrap();
+        for key in ["\"cal_blue_sat\":83.0", "\"convert_to_grayscale\":true", "\"gray_blue\":-44.0", "\"point_colors\":["] {
+            assert!(json.contains(key), "{key}: {json}");
+        }
+        for at_rest in ["cal_red_hue", "cal_shadow_tint", "gray_red", "gray_magenta"] {
+            assert!(!json.contains(at_rest), "{at_rest} was written at rest: {json}");
+        }
+        let back: EditRecipe = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, moved, "the skip is lossless");
+        assert!(!moved.is_noop());
+        assert_eq!(moved.calibration(), Some([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 83.0]));
+        assert_eq!(EditRecipe::default().calibration(), None);
+        assert_eq!(moved.gray_mixer()[5], -44.0, "the mixer is indexed in HSL_BANDS order");
+        let mut r = EditRecipe::default();
+        *r.gray_mixer_mut(7).expect("magenta") = 12.0;
+        assert_eq!(r.gray_magenta, 12.0);
+        assert!(r.gray_mixer_mut(8).is_none());
+        let mut wild = EditRecipe { cal_red_hue: 400.0, gray_aqua: f32::NAN, ..Default::default() };
+        wild.clamp();
+        assert_eq!((wild.cal_red_hue, wild.gray_aqua), (100.0, 0.0));
+    }
+
+    /// The 19-number record Lightroom stores per point colour, read in its
+    /// order, and everything that is not one refused rather than guessed.
+    ///
+    /// MUTATION THIS CATCHES: two fields swapped in `to_numbers` /
+    /// `from_numbers` (the round trip and the named fields disagree), the
+    /// placeholder read as a black swatch, or a sampled swatch's saturation
+    /// window off the published dumps.
+    #[test]
+    fn a_point_color_reads_lightrooms_nineteen_numbers_and_refuses_the_rest() {
+        // Adobe community thread 14165872's dump of a sampled swatch, in the
+        // XMP order.
+        let lr: [f32; 19] = [
+            4.12705, 0.920754, 0.839618, 0.0, 0.0, 0.0, 0.5, 0.0, 0.333333, 0.666667, 1.0,
+            0.190754, 0.740754, 1.0, 1.0, 0.195889, 0.745889, 1.0, 1.0,
+        ];
+        let p = PointColor::from_numbers(&lr).expect("a readable record").expect("a swatch");
+        assert_eq!((p.src_hue, p.src_sat, p.src_lum), (4.12705, 0.920754, 0.839618));
+        assert_eq!(p.range_amount, 0.5);
+        assert_eq!(p.hue_range, [0.0, 0.333333, 0.666667, 1.0]);
+        assert_eq!(p.sat_range, [0.190754, 0.740754, 1.0, 1.0]);
+        assert_eq!(p.lum_range, [0.195889, 0.745889, 1.0, 1.0]);
+        assert!(p.is_neutral(), "no slider moved on that swatch");
+        assert_eq!(p.to_numbers(), lr, "the order goes back out as it came in");
+        assert_eq!(PointColor::from_numbers(&[-1.0; 19]), Ok(None), "the no-swatch placeholder");
+        assert!(PointColor::from_numbers(&lr[..18]).is_err(), "eighteen numbers are not a swatch");
+        let refuse = |at: usize, v: f32| {
+            let mut n = lr;
+            n[at] = v;
+            PointColor::from_numbers(&n).is_err()
+        };
+        assert!(refuse(1, 1.5), "a saturation past 1");
+        assert!(refuse(3, -1.2), "a shift past -1");
+        assert!(refuse(0, 7.0), "a hue past a full turn");
+        assert!(refuse(12, 0.1), "a window whose lower full edge sits below its none edge");
+        assert!(refuse(16, f32::NAN), "a non-finite edge");
+        // A sampled swatch materialises the saturation window both dumps show.
+        let s = PointColor::sampled(4.12705, 0.920754, 0.839618);
+        assert_eq!(s.hue_range, PointColor::default().hue_range);
+        for (got, want) in s.sat_range.iter().zip([0.190754, 0.740754, 1.0, 1.0]) {
+            assert!((got - want).abs() < 1e-5, "{:?}", s.sat_range);
+        }
+        let low = PointColor::sampled(1.312043, 0.473663, 0.739782);
+        for (got, want) in low.sat_range.iter().zip([0.0, 0.29, 0.65, 1.0]) {
+            assert!((got - want).abs() < 0.005, "MIDI2LR's rounded dump: {:?}", low.sat_range);
+        }
+        // `clamp` repairs a hand-edited swatch; the reader above refuses one.
+        let mut wild = PointColor {
+            src_hue: -1.0,
+            src_sat: 2.0,
+            hue_shift: 7.0,
+            range_amount: f32::NAN,
+            sat_range: [0.9, 0.2, 1.4, f32::NAN],
+            ..s.clone()
+        };
+        wild.clamp();
+        assert!((wild.src_hue - (std::f32::consts::TAU - 1.0)).abs() < 1e-5);
+        assert_eq!((wild.src_sat, wild.hue_shift, wild.range_amount), (1.0, 1.0, 0.5));
+        assert_eq!(wild.sat_range, [0.2, 0.9, 1.0, 1.0]);
+        let mut r = EditRecipe { point_colors: vec![s; MAX_POINT_COLORS + 3], ..Default::default() };
+        r.clamp();
+        assert_eq!(r.point_colors.len(), MAX_POINT_COLORS);
+    }
+
+    /// The Range slider rebuilds a swatch's windows about its sampled colour —
+    /// wider for a larger Range, narrower for a smaller one — and at Lightroom's
+    /// default 0.5 lands on the windows `sampled` makes.
+    ///
+    /// MUTATIONS THIS CATCHES: `set_range` storing the number without the
+    /// windows (the GUI's Range slider would move no pixel), a window scaled
+    /// about 0 instead of the sampled colour, and a spread that inverts.
+    #[test]
+    fn a_point_color_range_rebuilds_its_windows_about_the_sampled_colour() {
+        let base = PointColor::sampled(2.0, 0.5, 0.4);
+        let mut same = base.clone();
+        same.set_range(0.5);
+        for (a, b) in base.to_numbers().iter().zip(same.to_numbers()) {
+            assert!((a - b).abs() < 1e-6, "{base:?} vs {same:?}");
+        }
+        let (mut wide, mut narrow) = (base.clone(), base.clone());
+        wide.set_range(1.0);
+        narrow.set_range(0.0);
+        let full = |w: [f32; 4]| w[2] - w[1];
+        for (label, pick) in [
+            ("hue", (|p: &PointColor| p.hue_range) as fn(&PointColor) -> [f32; 4]),
+            ("sat", |p: &PointColor| p.sat_range),
+            ("lum", |p: &PointColor| p.lum_range),
+        ] {
+            assert!(full(pick(&wide)) > full(pick(&base)) + 0.05, "{label}: {wide:?}");
+            assert!(full(pick(&narrow)) < full(pick(&base)) - 0.05, "{label}: {narrow:?}");
+            assert!(full(pick(&narrow)) > 0.0, "{label}: the narrowest Range still holds its colour");
+        }
+        for p in [&wide, &narrow] {
+            assert!((p.sat_range[1]..=p.sat_range[2]).contains(&0.5), "centred on the sample: {p:?}");
+            assert!((p.lum_range[1]..=p.lum_range[2]).contains(&0.4), "centred on the sample: {p:?}");
+            assert!((p.hue_range[1]..=p.hue_range[2]).contains(&0.5), "centred on the sample: {p:?}");
+            assert_eq!(PointColor::from_numbers(&p.to_numbers()), Ok(Some(p.clone())), "a layout the reader takes");
+        }
+        assert_eq!((wide.range_amount, narrow.range_amount), (1.0, 0.0));
+        let mut wild = base.clone();
+        wild.set_range(7.0);
+        assert_eq!(wild.range_amount, 1.0);
     }
 
     /// A quarter turn is a RESIDUE CLASS, so `clamp` folds it instead of
@@ -4704,6 +6087,53 @@ mod tests {
             "44 curve point(s)",
             "zero categories stay OUT of the line — '0 mask(s)' was a false all-clear"
         );
+    }
+
+    /// v1.5.0: a COMPANION control reads through `resolved` — Lightroom's own
+    /// default while the recipe holds no value, the stored value otherwise,
+    /// and a real 0 only when `explicit_zero` names it — and the list costs no
+    /// bytes until something is in it.
+    ///
+    /// MUTATIONS THIS CATCHES: the `explicit_zero` arm of `resolved` dropped
+    /// (Detail 0 renders at 25); `skip_serializing_if` dropped (every stored
+    /// recipe's bytes change and `store::recipe_struct_hash` stops matching
+    /// its archive); the non-zero filter in `clamp` dropped (the list claims a
+    /// zero the field does not hold).
+    #[test]
+    fn a_companion_resolves_to_lightrooms_default_unless_its_zero_is_explicit() {
+        let mut r = EditRecipe::default();
+        for (name, default) in LR_COMPANION_DEFAULTS {
+            assert_eq!(r.resolved(name), default, "{name}: absent renders at Lightroom's default");
+        }
+        assert_eq!(r.resolved("sharpening"), 0.0, "a non-companion has no default to read");
+        let bare = serde_json::to_string(&r).unwrap();
+        assert!(!bare.contains("explicit_zero"), "no explicit zero, no key: {bare}");
+
+        r.set_resolved("sharpen_detail", 0.0);
+        r.set_resolved("nr_detail", 30.0);
+        assert_eq!(r.resolved("sharpen_detail"), 0.0, "a real 0");
+        assert_eq!(r.resolved("nr_detail"), 30.0);
+        assert_eq!(r.explicit_zero, vec!["sharpen_detail".to_string()]);
+        let json = serde_json::to_string(&r).unwrap();
+        let back: EditRecipe = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.resolved("sharpen_detail"), 0.0, "the zero survives recipe.json: {json}");
+
+        // Moving it again takes it off the list; clearing returns it to absent.
+        r.set_resolved("sharpen_detail", 10.0);
+        assert!(r.explicit_zero.is_empty());
+        r.clear_resolved("sharpen_detail");
+        assert_eq!(r.resolved("sharpen_detail"), 25.0);
+
+        // `clamp` keeps only companions whose field IS 0, sorted, once each.
+        let mut hand = EditRecipe {
+            grain_size: 40.0,
+            explicit_zero: ["nr_detail", "grain_size", "not_a_control", "color_nr_smooth", "nr_detail"]
+                .map(String::from)
+                .to_vec(),
+            ..Default::default()
+        };
+        hand.clamp();
+        assert_eq!(hand.explicit_zero, ["color_nr_smooth", "nr_detail"].map(String::from).to_vec());
     }
 
     #[test]

@@ -1877,23 +1877,41 @@ mod tests {
         );
     }
 
-    /// python/denoise_raw.py is pinned like denoise.py: its DRUNet weights
-    /// and the two KAIR network files each carry a sha256 and a byte cap and
-    /// go through `_fetch_verified`; the model is built `bias=False` (the
-    /// published weights carry no bias tensors — a biased build fails the
-    /// strict load) and loaded `weights_only=True`; and its `--strength`
-    /// default is the engine's RAW default, so the CLI, the GUI and a bare
-    /// sidecar run agree. MUTATION: drop `bias=False`, and this names it.
+    /// python/denoise_raw.py is pinned like denoise.py: its weights — OUR
+    /// fine-tune since v1.5.0 — and the two KAIR network files each carry a
+    /// sha256 and a byte cap and go through `_fetch_verified`; the model is
+    /// built `bias=False` (neither the published weights nor the fine-tune of
+    /// them carries bias tensors — a biased build fails the strict load) and
+    /// loaded `weights_only=True`; and its `--strength` default is the
+    /// engine's RAW default, so the CLI, the GUI and a bare sidecar run
+    /// agree. MUTATION: drop `bias=False`, and this names it.
     #[test]
     fn the_raw_sidecar_is_pinned_and_agrees_on_the_default() {
         for digest in [
-            "479abe3c5327dfd10ff54a80ec7d4098ca80752a5c9492cdff31cee430bec4b4",
+            // the fine-tuned weights, released with the version that measured
+            // them (`autoshade-raw-denoise-v1.pth`)
+            "6929ddd6b11b3f27baf3537d92a4552a6a5c39d53ff4167e4f7df26e80413a99",
             "8043b6350f1589d5f08892e3be0b4d12c5a502058014285107b7360696d12bf5",
             "48406db8867394ac5ae233ebeec7711ac10acfc3a6bbf0072c33aa77d659b6fd",
         ] {
             assert!(RAW_SIDECAR_SRC.contains(digest), "pin {digest} is gone");
         }
-        assert!(RAW_SIDECAR_SRC.contains("\"bytes\": 130579305"), "the weight's byte cap is gone");
+        assert!(RAW_SIDECAR_SRC.contains("\"bytes\": 130585417"), "the weight's byte cap is gone");
+        // The weights are OURS and they ride with a RELEASE, not a branch: a
+        // moving URL would hand a future network to a build measured on this
+        // one, which is the same failure the two commit pins above prevent.
+        assert!(
+            RAW_SIDECAR_SRC.contains("releases/download/v1.5.0\"")
+                && RAW_SIDECAR_SRC.contains("{_AUTOSHADE_RELEASE}/autoshade-raw-denoise-v1.pth"),
+            "the fine-tuned weights must come from a pinned release asset"
+        );
+        // The operating point the four acceptance measurements chose
+        // (`SIGMA_SCALE`'s own table): a network and its sigma scale are one
+        // decision, so a weight swap without one is a silent taste change.
+        assert!(
+            RAW_SIDECAR_SRC.contains("SIGMA_SCALE = 0.78"),
+            "the measured operating point for these weights is gone"
+        );
         assert!(RAW_SIDECAR_SRC.contains("_fetch_verified("), "the verified fetch is not used");
         assert!(!RAW_SIDECAR_SRC.contains("_download("), "a download bypasses the verified fetch");
         // The CALLS, not the comments about them: the first cut of this pin

@@ -70,7 +70,7 @@
 //! skipped and, when a profile has nothing else, the whole file is refused with
 //! [`Refusal::Fisheye`] — a named degradation, never a silent identity.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::OnceLock;
 
 /// One calibration node's rectilinear distortion model.
@@ -95,6 +95,32 @@ pub struct PerspectiveModel {
     pub focal_x: Option<f32>,
     /// `stCamera:SensorFormatFactor`; 1.0 when the file omits it.
     pub sensor_format_factor: f32,
+    /// This node's `VignetteModel`, when it carries one. Absent on 1,709 of
+    /// the 3,576 profiles installed on this machine — a distortion-only
+    /// profile is ordinary, not damaged.
+    pub vignette: Option<VignetteModel>,
+}
+
+/// Adobe's vignette model for one node: `V(rho) = 1 + a1·rho² + a2·rho⁴ +
+/// a3·rho⁶`, on the same normalised radius the distortion half uses.
+///
+/// **`V` is the FALLOFF — what the lens did to the light — so the CORRECTION
+/// is its RECIPROCAL.** That is measured, not assumed: over the 126,049
+/// vignette nodes in this machine's Adobe pool that belong to
+/// interchangeable-lens profiles, `V` at a 3:2 frame's corner has median
+/// 0.7751 and sits below 1 on 94.7 % of them (min 0.0569, p10 0.4546, p90
+/// 0.9603). The reciprocal's median, 1.29, is +0.37 EV of corner lift and its
+/// p10, 2.20, is +1.14 EV — which is what a fast lens wide open actually
+/// needs. Read the other way round the profile would DARKEN every corner it
+/// touched, and by up to 4 stops.
+///
+/// `focal_x` is this block's own `stCamera:FocalLengthX`, present on 21,917 of
+/// those 172,260 nodes; when absent the node's perspective reference length
+/// answers, which is the same quantity measured by the same file.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct VignetteModel {
+    pub a: [f32; 3],
+    pub focal_x: Option<f32>,
 }
 
 /// One parsed `.lcp`: the nodes it holds and who it is for.
@@ -311,6 +337,87 @@ impl PerspectiveModel {
         (m.is_finite() && m > 1e-6).then(|| (1.0 / m) as f32)
     }
 
+    /// The RENDER distortion knots for a `dims` frame: the factor the engine
+    /// multiplies an OUTPUT radius by to find the source radius it samples,
+    /// `f(r_out) = P(r_out / D)` — Adobe's own render map with `ScaleFactor`
+    /// LEFT OUT.
+    ///
+    /// Leaving `S` out is the point, not an omission. `S` is Adobe's choice of
+    /// how far to zoom in so the corrected frame has no empty border, and this
+    /// engine makes that choice itself, once, for every map it renders
+    /// (`render::profile_fill_scale`, which the in-camera knots already go
+    /// through). Folding Adobe's zoom in as well would apply two. The module
+    /// header records that `S ≈ 1 / max P` on the calibrated file's
+    /// infinity-focus nodes — i.e. Adobe's own `S` IS essentially that fill
+    /// scale — which is why dropping it and recomputing lands in the same
+    /// place rather than somewhere new.
+    ///
+    /// Same knot placement as [`Self::mask_warp_knots`] and as the in-camera
+    /// spline, for the same reason: one interpolator reads the field.
+    pub fn distortion_knots(&self, dims: (f32, f32), n: usize) -> Option<Vec<f32>> {
+        if n < 2 {
+            return None;
+        }
+        let (w, h) = dims;
+        if !(w > 0.0 && h > 0.0) {
+            return None;
+        }
+        let d = self.reference_px(w)? as f64;
+        let k = [self.k[0] as f64, self.k[1] as f64, self.k[2] as f64];
+        let half_diag = 0.5 * ((w as f64).hypot(h as f64));
+        let mut out = Vec::with_capacity(n);
+        for i in 0..n {
+            let rho = (i as f64 + 0.5) / (n - 1) as f64 * half_diag / d;
+            let f = p_poly(rho, k);
+            if !f.is_finite() || f <= 0.0 {
+                return None; // a folded spline is a corrupt node, not a lens
+            }
+            out.push(f as f32);
+        }
+        Some(out)
+    }
+
+    /// The RENDER vignetting knots for a `dims` frame: the linear-light GAIN
+    /// this engine multiplies a pixel by at each knot radius, `1 / V(rho)`.
+    ///
+    /// `None` when the node states no vignette model, states no reference
+    /// length for it, or its polynomial leaves the plausible band anywhere on
+    /// the frame — the pool's tail holds nodes whose coefficients run to 1e12,
+    /// and a gain solved from one of those is not a lens correction.
+    pub fn vignette_knots(&self, dims: (f32, f32), n: usize) -> Option<Vec<f32>> {
+        if n < 2 {
+            return None;
+        }
+        let v = self.vignette?;
+        let (w, h) = dims;
+        if !(w > 0.0 && h > 0.0) {
+            return None;
+        }
+        // The vignette block's own reference length when it states one, else
+        // this node's — the same quantity, measured by the same file.
+        let d = match v.focal_x {
+            Some(fx) if fx > 0.0 && (fx * w).is_finite() => fx * w,
+            _ => self.reference_px(w)?,
+        } as f64;
+        if !d.is_finite() || d <= 0.0 {
+            return None;
+        }
+        let a = [v.a[0] as f64, v.a[1] as f64, v.a[2] as f64];
+        let half_diag = 0.5 * ((w as f64).hypot(h as f64));
+        let mut out = Vec::with_capacity(n);
+        for i in 0..n {
+            let rho = (i as f64 + 0.5) / (n - 1) as f64 * half_diag / d;
+            let (r2, r4) = (rho * rho, rho * rho * rho * rho);
+            let falloff = 1.0 + a[0] * r2 + a[1] * r4 + a[2] * r4 * r2;
+            // The same band the survey used to tell a lens from a junk node.
+            if !falloff.is_finite() || !(0.05..=20.0).contains(&falloff) {
+                return None;
+            }
+            out.push((1.0 / falloff) as f32);
+        }
+        Some(out)
+    }
+
     /// The MASK WARP knots for a `dims` frame: `m(r) = r_export / r_stored` at
     /// the `n` radii [`crate::recipe::LensProfile`] places its knots on —
     /// `rho_i = (i + 0.5)/(n − 1)` of the HALF-DIAGONAL, RawTherapee's
@@ -409,6 +516,17 @@ impl LensProfileFile {
             // nearer node, or dropped so the focal fallback answers.
             focal_x: if t < 0.5 { a.focal_x } else { b.focal_x },
             sensor_format_factor: mix(a.sensor_format_factor, b.sensor_format_factor),
+            // Blended on the distortion coefficients' terms and registered as
+            // just as UNVERIFIED — and only when BOTH ends state a model, so a
+            // node that says nothing about vignetting cannot be averaged into
+            // half a correction.
+            vignette: match (a.vignette, b.vignette) {
+                (Some(x), Some(y)) => Some(VignetteModel {
+                    a: [mix(x.a[0], y.a[0]), mix(x.a[1], y.a[1]), mix(x.a[2], y.a[2])],
+                    focal_x: if t < 0.5 { x.focal_x } else { y.focal_x },
+                }),
+                _ => None,
+            },
         })
     }
 }
@@ -485,6 +603,34 @@ fn perspective_scope(entry: &str) -> Option<&str> {
     Some(scope)
 }
 
+/// The `VignetteModel` block inside one entry, in either spelling.
+///
+/// Cut the same way and for the same reason as [`perspective_scope`]: the
+/// block repeats `FocalLengthX` and `RadialDistortParam1` with values of its
+/// own, so reading either from the enclosing element would cross the two
+/// models. Nothing nests inside a vignette model, so its own close tag (or the
+/// self-closing form) is the whole cut.
+///
+/// The closing-tag arm is a BOUND that currently never binds, and that is
+/// measured rather than assumed: over the 243,394 vignette blocks in this
+/// machine's 3,576 installed profiles the cut shortens the scope 7,101 times
+/// and changes a read value ZERO times, because Adobe writes the enclosing
+/// model's own properties before the nested one. It stays because it is the
+/// correct scope for one `find` — an unbounded read would start depending on
+/// that ordering — but no mutation of it can falsify anything, which is why the
+/// falsification set points elsewhere in this module.
+fn vignette_scope(entry: &str) -> Option<&str> {
+    const OPEN: &str = "<stCamera:VignetteModel";
+    let start = entry.find(OPEN)?;
+    let rest = &entry[start..];
+    let tag_end = rest.find('>')?;
+    if rest[..tag_end].ends_with('/') {
+        return Some(&rest[..=tag_end]);
+    }
+    let close = rest.find("</stCamera:VignetteModel>").unwrap_or(rest.len());
+    Some(&rest[..close])
+}
+
 /// Parse an `.lcp` document.
 ///
 /// Hand-rolled string scanning rather than an XML dependency, for the same
@@ -526,6 +672,19 @@ pub fn parse(xml: &str) -> Result<LensProfileFile, Refusal> {
             continue;
         }
         let Some(scope) = perspective_scope(entry) else { continue };
+        // The vignette block is cut OUT of `scope` above (it repeats
+        // `FocalLengthX` and `RadialDistortParam1` with its own values), so it
+        // is read from the entry with its own cut.
+        let vignette = vignette_scope(entry).and_then(|v| {
+            Some(VignetteModel {
+                a: [
+                    prop_f32(v, "VignetteModelParam1")?,
+                    prop_f32(v, "VignetteModelParam2").unwrap_or(0.0),
+                    prop_f32(v, "VignetteModelParam3").unwrap_or(0.0),
+                ],
+                focal_x: prop_f32(v, "FocalLengthX").filter(|x| *x > 0.0),
+            })
+        });
         // No `k1` at all = no distortion model in this entry (a vignette-only
         // node). Not a refusal by itself; the file may hold others.
         let Some(k1) = prop_f32(scope, "RadialDistortParam1") else { continue };
@@ -538,6 +697,7 @@ pub fn parse(xml: &str) -> Result<LensProfileFile, Refusal> {
             sensor_format_factor: prop_f32(head, "SensorFormatFactor")
                 .filter(|v| *v > 0.0)
                 .unwrap_or(1.0),
+            vignette,
         });
     }
     if nodes.is_empty() {
@@ -557,51 +717,21 @@ pub fn parse(xml: &str) -> Result<LensProfileFile, Refusal> {
 
 // --- discovery -------------------------------------------------------------
 
-/// Where Adobe keeps lens profiles, from the ENVIRONMENT — never a hard-coded
-/// drive letter (a machine whose `%ProgramData%` is not on `C:` is ordinary,
-/// and a hard-coded path would degrade there while claiming to have looked).
+/// Where Adobe keeps lens profiles.
+///
+/// The environment reading, the macOS literals and the `is_dir` filter live in
+/// [`crate::adobe::camera_raw_roots`] — camera profiles ([`crate::dcp`]) are
+/// found in a sibling directory of the same tree by the same rules, and one
+/// copy of those rules cannot drift from the other.
 ///
 /// `%AUTOSHADE_LCP_DIR%` is consulted FIRST when set: it is how the acceptance
 /// tests point at a fixture without an Adobe install, and how a user with
 /// profiles somewhere else names that place.
 ///
-/// On a non-Windows build neither Adobe variable exists, so this answers empty
+/// On a build with neither Adobe variable in the environment this answers empty
 /// and every caller degrades through [`Refusal::NoRoots`].
 pub fn roots() -> Vec<PathBuf> {
-    let mut out = Vec::new();
-    if let Some(dir) = crate::config::live_env("AUTOSHADE_LCP_DIR")
-        && !dir.is_empty()
-    {
-        out.push(PathBuf::from(dir));
-    }
-    // macOS: Camera Raw keeps the same three-level layout, machine-wide and
-    // per-user. Both are spelled out as absolute literals BECAUSE macOS has no
-    // `ProgramData`/`APPDATA` analogue to derive them from — they are fixed OS
-    // locations, identical on every Mac, and `retain(is_dir)` below means an
-    // install without Camera Raw simply contributes nothing.
-    #[cfg(target_os = "macos")]
-    {
-        out.push(PathBuf::from("/Library/Application Support/Adobe/CameraRaw/LensProfiles"));
-        if let Some(home) = std::env::var_os("HOME") {
-            out.push(
-                Path::new(&home)
-                    .join("Library")
-                    .join("Application Support")
-                    .join("Adobe")
-                    .join("CameraRaw")
-                    .join("LensProfiles"),
-            );
-        }
-    }
-    for var in ["ProgramData", "APPDATA"] {
-        if let Ok(base) = std::env::var(var)
-            && !base.is_empty()
-        {
-            out.push(Path::new(&base).join("Adobe").join("CameraRaw").join("LensProfiles"));
-        }
-    }
-    out.retain(|p| p.is_dir());
-    out
+    crate::adobe::camera_raw_roots("AUTOSHADE_LCP_DIR", "LensProfiles")
 }
 
 /// Every `.lcp` under [`roots`], walked ONCE per process.
@@ -617,32 +747,9 @@ pub fn roots() -> Vec<PathBuf> {
 /// re-walked on a timer would trade a stated limit for an unpredictable one.
 fn index() -> &'static [PathBuf] {
     static INDEX: OnceLock<Vec<PathBuf>> = OnceLock::new();
-    INDEX.get_or_init(|| {
-        let mut out = Vec::new();
-        let mut stack: Vec<PathBuf> = roots();
-        // Bounded: a symlink loop under a profile root must not hang a render.
-        let mut budget = 20_000usize;
-        while let Some(dir) = stack.pop() {
-            let Ok(rd) = std::fs::read_dir(&dir) else { continue };
-            for e in rd.flatten() {
-                if budget == 0 {
-                    return out;
-                }
-                budget -= 1;
-                let p = e.path();
-                match e.file_type() {
-                    Ok(t) if t.is_dir() => stack.push(p),
-                    Ok(t) if t.is_file() => {
-                        if p.extension().is_some_and(|x| x.eq_ignore_ascii_case("lcp")) {
-                            out.push(p);
-                        }
-                    }
-                    _ => {}
-                }
-            }
-        }
-        out
-    })
+    // Bounded inside the walk: a symlink loop under a profile root must not
+    // hang a render.
+    INDEX.get_or_init(|| crate::adobe::walk_extension(roots(), "lcp", 20_000))
 }
 
 /// Lowercase alphanumerics only — the comparison key for a lens name.
@@ -700,20 +807,38 @@ pub fn locate(filename: Option<&str>, make: &str, lens: &str) -> Result<PathBuf,
     best.map(|(_, p)| p.clone()).ok_or(Refusal::NotFound)
 }
 
+/// Everything one `.lcp` node has to say about this frame.
+///
+/// `mask_warp` is the Lightroom-frame quantity R29 Batch-3 added; `distortion`
+/// and `vignette` are what v1.5.0 renders from the same node. They come back
+/// together because they come from ONE parse of one file: solving them
+/// separately would read a 4 MiB document twice and could disclose two
+/// different refusals for one lookup.
+///
+/// `distortion` / `vignette` are EMPTY when this node states no such model, or
+/// states one this engine will not solve — an ordinary outcome for a
+/// distortion-only profile, and never a refusal of the whole lookup.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct Maps {
+    pub mask_warp: Vec<f32>,
+    pub distortion: Vec<f32>,
+    pub vignette: Vec<f32>,
+}
+
 /// The whole source-B path: find the profile, pick the node, solve the knots.
 ///
 /// One entry point so the refusal a caller discloses is the refusal that
 /// actually happened — a caller assembling this from the pieces would have to
 /// re-derive which step failed, which is exactly how a named degradation turns
 /// back into a silent one.
-pub fn solve_mask_warp(
+pub fn solve(
     filename: Option<&str>,
     make: &str,
     lens: &str,
     focal_mm: Option<f32>,
     dims: (f32, f32),
     n: usize,
-) -> Result<Vec<f32>, Refusal> {
+) -> Result<Maps, Refusal> {
     let path = locate(filename, make, lens)?;
     // BOUNDED read (the R28 B2 rule): the pool directory is not this app's to
     // trust — `AUTOSHADE_LCP_DIR` and `%APPDATA%` are user-writable, so a file
@@ -726,7 +851,14 @@ pub fn solve_mask_warp(
         .map_err(|_| Refusal::Unreadable)?;
     let profile = parse(&xml)?;
     let model = profile.model_at(focal_mm)?;
-    model.mask_warp_knots(dims, n).ok_or(Refusal::Unsolvable)
+    Ok(Maps {
+        // The mask warp is the one that can REFUSE: it is the quantity every
+        // existing caller was built around, and a frame with no map for it is
+        // a named degradation. The two render maps are optional by nature.
+        mask_warp: model.mask_warp_knots(dims, n).ok_or(Refusal::Unsolvable)?,
+        distortion: model.distortion_knots(dims, n).unwrap_or_default(),
+        vignette: model.vignette_knots(dims, n).unwrap_or_default(),
+    })
 }
 
 #[cfg(test)]
@@ -856,8 +988,166 @@ mod tests {
  </rdf:li>
 </rdf:Seq>"#;
 
+    /// One rectilinear node with a real `VignetteModel`, VERBATIM from the
+    /// installed pool on this machine (`SONY A (Bower 14mm f/2.8 ED AS IF
+    /// UMC) - RAW`, the f/5.6 close-focus node). Factual data, trimmed of
+    /// nothing: the vignette block is SELF-CLOSING with its parameters as
+    /// attributes and nested inside the perspective block's own
+    /// `rdf:Description`, which is the shape 1,867 of the 3,576 profiles ship
+    /// and the shape [`vignette_scope`] has to cut.
+    ///
+    /// It states no `FocalLength` and no `ScaleFactor`, both on purpose: a
+    /// single-node file answers `model_at` whatever it is asked, and a node
+    /// with no scale is where the distortion knots can be read without Adobe's
+    /// zoom confusing the arithmetic.
+    const VIGNETTE_FIXTURE: &str = r#"<x:xmpmeta xmlns:x="adobe:ns:meta/">
+ <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+  <rdf:Description rdf:about="" xmlns:stCamera="http://ns.adobe.com/photoshop/1.0/camera-profile">
+   <photoshop:CameraProfiles>
+    <rdf:Seq>
+     <rdf:li>
+      <rdf:Description
+       stCamera:Make="SONY"
+       stCamera:LensPrettyName="Bower 14mm f/2.8 ED AS IF UMC"
+       stCamera:SensorFormatFactor="1"
+       stCamera:ImageWidth="5640"
+       stCamera:ImageLength="3752"
+       stCamera:FocusDistance="3"
+       stCamera:ApertureValue="6">
+      <stCamera:PerspectiveModel>
+       <rdf:Description
+        stCamera:Version="2"
+        stCamera:FocalLengthX="0.399824"
+        stCamera:FocalLengthY="0.399824"
+        stCamera:ImageXCenter="0.495736"
+        stCamera:ImageYCenter="0.495205"
+        stCamera:RadialDistortParam1="-0.095549"
+        stCamera:RadialDistortParam2="0.041922"
+        stCamera:RadialDistortParam3="-0.005911">
+       <stCamera:VignetteModel
+        stCamera:FocalLengthX="0.399824"
+        stCamera:FocalLengthY="0.399824"
+        stCamera:VignetteModelParam1="-0.387264"
+        stCamera:VignetteModelParam2="0.150392"
+        stCamera:VignetteModelParam3="-0.042729"/>
+       </rdf:Description>
+      </stCamera:PerspectiveModel>
+      </rdf:Description>
+     </rdf:li>
+    </rdf:Seq>
+   </photoshop:CameraProfiles>
+  </rdf:Description>
+ </rdf:RDF>
+</x:xmpmeta>"#;
+
+    /// That profile's own frame.
+    const BOWER_DIMS: (f32, f32) = (5640.0, 3752.0);
+
     fn node(p: &LensProfileFile, focal: f32) -> PerspectiveModel {
         p.model_at(Some(focal)).expect("the fixture holds this node")
+    }
+
+    /// The one node the vignette fixture holds.
+    fn bower() -> PerspectiveModel {
+        let p = parse(VIGNETTE_FIXTURE).expect("the fixture parses");
+        assert_eq!(p.nodes.len(), 1, "one rectilinear node");
+        p.nodes[0].clone()
+    }
+
+    #[test]
+    fn the_vignette_model_is_a_falloff_so_the_correction_is_its_reciprocal() {
+        let m = bower();
+        let v = m.vignette.expect("the block is parsed, self-closing form and all");
+        assert_eq!(v.a, [-0.387264, 0.150392, -0.042729]);
+        assert_eq!(v.focal_x, Some(0.399824), "the block's OWN reference length");
+        let g = m.vignette_knots(BOWER_DIMS, crate::recipe::MASK_WARP_KNOTS).expect("solves");
+        // THE SIGN, which is the whole question this operator turns on: a lens
+        // is darker in the corner, so the correction LIFTS it. Reading the
+        // polynomial as the gain instead would darken this corner to 0.388 —
+        // a stop and a third the wrong way.
+        assert!(g[0] < 1.001, "the centre needs nothing: {}", g[0]);
+        assert!(
+            g[g.len() - 1] > 1.5,
+            "the corner of a 14 mm must be LIFTED, not darkened: {}",
+            g[g.len() - 1]
+        );
+        // Measured against the polynomial by hand at three radii (rho =
+        // (i+0.5)/63 · 3387.0/2255.007): 1.00006, 1.23083, 2.57740.
+        for (i, want) in [(0usize, 1.00006f32), (32, 1.23083), (63, 2.57740)] {
+            assert!(
+                (g[i] - want).abs() < 5e-4,
+                "knot {i}: {} is not the profile's own gain {want}",
+                g[i]
+            );
+        }
+        // Monotone: a vignette correction that dipped would put a visible ring
+        // in the picture.
+        assert!(g.windows(2).all(|w| w[1] >= w[0] - 1e-6), "the gain must rise outward: {g:?}");
+    }
+
+    #[test]
+    fn the_render_distortion_knots_leave_adobes_scale_factor_out() {
+        let m = bower();
+        let d = m.distortion_knots(BOWER_DIMS, crate::recipe::MASK_WARP_KNOTS).expect("solves");
+        // Same three radii, P(rho) by hand: 0.99999, 0.95647, 0.93006. The
+        // source radius shrinks outward, which is what straightening a 14 mm's
+        // barrel means.
+        for (i, want) in [(0usize, 0.99999f32), (32, 0.95647), (63, 0.93006)] {
+            assert!((d[i] - want).abs() < 5e-4, "knot {i}: {} is not P(rho) = {want}", d[i]);
+        }
+        // …and the DISCRIMINATOR, on a node that does state a scale: the
+        // calibrated Sony file's 24 mm node carries `ScaleFactor="1.027391"`,
+        // and the render knots must not carry it — this engine chooses its own
+        // fill zoom (`render::profile_fill_scale`) and applying Adobe's as well
+        // would zoom twice.
+        let p = parse(FIXTURE).expect("the calibrated file parses");
+        let n24 = node(&p, 24.0);
+        assert!((n24.scale - 1.027391).abs() < 1e-6, "premise: the node states a scale");
+        let k = n24.distortion_knots(DIMS, 16).expect("solves");
+        let d = n24.reference_px(DIMS.0).expect("a reference length") as f64;
+        let half = 0.5 * (DIMS.0 as f64).hypot(DIMS.1 as f64);
+        for (i, f) in k.iter().enumerate() {
+            let rho = (i as f64 + 0.5) / 15.0 * half / d;
+            let bare = p_poly(rho, [n24.k[0] as f64, n24.k[1] as f64, n24.k[2] as f64]);
+            assert!(
+                (*f as f64 - bare).abs() < 1e-6,
+                "knot {i} carries Adobe's zoom: {f} vs P(rho) {bare}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_node_that_states_no_vignette_model_solves_no_gains() {
+        let p = parse(FIXTURE).expect("parses");
+        let n = node(&p, 24.0);
+        assert!(n.vignette.is_none(), "the calibrated file is distortion-only");
+        assert!(n.vignette_knots(DIMS, crate::recipe::MASK_WARP_KNOTS).is_none());
+        // …and a fisheye entry's vignette block is never adopted, because the
+        // entry is skipped WHOLE before the vignette is read. The fisheye
+        // fixture is the case: it carries a `VignetteModelParam1` and nothing
+        // rectilinear, and the refusal is Fisheye rather than a node with half
+        // a correction on it.
+        assert!(FISHEYE_FIXTURE.contains("VignetteModelParam1"), "premise: it has one");
+        assert_eq!(parse(FISHEYE_FIXTURE).err(), Some(Refusal::Fisheye));
+    }
+
+    #[test]
+    fn a_runaway_coefficient_is_refused_rather_than_rendered() {
+        // The pool's tail really does hold these: `VignetteModelParam3` runs to
+        // −1.2e12 on the worst node installed here. A gain solved from one of
+        // those is not a lens correction, and the whole point of refusing is
+        // that the caller then renders NO vignette rather than a wrong one.
+        let broken = VIGNETTE_FIXTURE.replace("-0.042729", "-1200841162752.0");
+        let m = parse(&broken).expect("it still parses — the numbers are legal XML");
+        assert!(
+            m.nodes[0].vignette_knots(BOWER_DIMS, crate::recipe::MASK_WARP_KNOTS).is_none(),
+            "a runaway polynomial must be refused"
+        );
+        // The DISTORTION half refuses on its own terms: a factor at or below
+        // zero is a folded spline.
+        let folded = VIGNETTE_FIXTURE.replace("-0.095549", "-90.0");
+        let m = parse(&folded).expect("parses");
+        assert!(m.nodes[0].distortion_knots(BOWER_DIMS, 16).is_none(), "a folded map is refused");
     }
 
     #[test]

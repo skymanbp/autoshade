@@ -405,6 +405,12 @@ pub(crate) enum RetouchKind {
     /// negative included — keeps its own pixels. An in-place denoise used to
     /// redefine the ▣ card and left the original one Ctrl+Z away, per session.
     NewDenoised,
+    /// A stack/merge → a NEW「▦ Stacked」card (v1.5.0 Track S), on exactly the
+    /// ◈ card's terms: the merged master is its `origin`, this card's develop
+    /// is its recipe, and the frame it was stacked FROM keeps its own pixels.
+    /// The two land through one arm, because they are one idea — a new
+    /// negative made from the old one, standing beside it.
+    NewStacked,
     /// A heal/clone touch-up of the CURRENT rendition → bake into the
     /// active variant's base AND repoint its `origin` at the saved artifact, so
     /// export / reverse-fit / a further retouch all follow the retouched pixels
@@ -425,6 +431,18 @@ pub(crate) enum RetouchNote {
         out: PathBuf,
         ai_prose: String,
         notes: Vec<autoshade::rationale::Note>,
+    },
+    /// A stack landed as a new ▦ card at this ./out master. Facts, not prose:
+    /// which merge ran, how many frames it took, how far the aligner had to
+    /// move the worst of them, how much of the frame no source could cover,
+    /// and the stops of highlight an HDR merge recovered.
+    Stacked {
+        out: PathBuf,
+        kind: autoshade::stack::merge::StackKind,
+        frames: usize,
+        travel: f32,
+        uncovered: f32,
+        headroom_ev: f32,
     },
     /// AI denoise landed as a new ◈ card at this ./out master; `on_mosaic`
     /// says the source was a RAW, denoised on its sensor mosaic before
@@ -1212,6 +1230,7 @@ pub(crate) enum VariantKind {
     Fitted,    // 反推 — the generated look solved back into an editable recipe
     Edited,    // 生图编辑 — the user's own develop over a Generated card's pixels
     Denoised,  // 去噪原片 — the negative AI-denoised into a new master (2026-09-15)
+    Stacked,   // 堆栈 — several frames merged into a new master (v1.5.0 Track S)
 }
 
 impl VariantKind {
@@ -1223,6 +1242,7 @@ impl VariantKind {
             VariantKind::Fitted => "◭ Reverse-fit",
             VariantKind::Edited => "✎ Edited AI image",
             VariantKind::Denoised => "◈ Denoised negative",
+            VariantKind::Stacked => "▦ Stacked",
         }
     }
 
@@ -1235,6 +1255,7 @@ impl VariantKind {
             VariantKind::Fitted => "fitted",
             VariantKind::Edited => "edited",
             VariantKind::Denoised => "denoised",
+            VariantKind::Stacked => "stacked",
         }
     }
 
@@ -1245,6 +1266,7 @@ impl VariantKind {
             "fitted" => Some(VariantKind::Fitted),
             "edited" => Some(VariantKind::Edited),
             "denoised" => Some(VariantKind::Denoised),
+            "stacked" => Some(VariantKind::Stacked),
             _ => None,
         }
     }
@@ -1252,7 +1274,7 @@ impl VariantKind {
     /// The variant taxonomy's ONE binary (R24-1). A photo is *one negative +
     /// N variants + one version history*; every variant is either
     ///
-    /// * SOURCE-BASED (`Original`, `Fitted`, `Denoised`) — the look lives in
+    /// * SOURCE-BASED (`Original`, `Fitted`, `Denoised`, `Stacked`) — the look lives in
     ///   the develop recipe over the photo's own pixels, so it re-renders at
     ///   any resolution, projects to XMP, and carries the camera calibration
     ///   the base-curve estimator repairs. A `Denoised` card (2026-09-15) is
@@ -1297,9 +1319,24 @@ impl VariantKind {
     ///   they ask about the one kind, not the side.
     pub(crate) fn is_source_based(self) -> bool {
         match self {
-            VariantKind::Original | VariantKind::Fitted | VariantKind::Denoised => true,
+            VariantKind::Original
+            | VariantKind::Fitted
+            | VariantKind::Denoised
+            | VariantKind::Stacked => true,
             VariantKind::Generated | VariantKind::Edited => false,
         }
+    }
+
+    /// Is this card the negative REMADE — a new master of the photograph
+    /// itself, standing beside the one it was made from?
+    ///
+    /// Two kinds are, and for the same reason: a ◈ denoise and a ▦ stack both
+    /// produce a new full-resolution master of the SAME scene, which is what
+    /// every later stage should read as the negative
+    /// (`AutoShadeApp::negative_origin`). A ◭ reverse-fit is source-based too
+    /// and is NOT one of these — it carries a recipe, not pixels of its own.
+    pub(crate) fn is_remade_negative(self) -> bool {
+        matches!(self, VariantKind::Denoised | VariantKind::Stacked)
     }
 
     /// The other side of [`VariantKind::is_source_based`], named for the

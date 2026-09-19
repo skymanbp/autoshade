@@ -277,9 +277,10 @@ pub(crate) fn paste_payload(src: EditRecipe, paste_geometry: bool) -> PastePaylo
     // photo's sidecar and by nothing else — so carrying it to another photo
     // copies the SOURCE's Upright solution and camera profile name into a
     // develop that would write them into the TARGET's file beside a RAW they
-    // were never solved for, and the read-only Transform / Calibration section
-    // would show the wrong photo's values on the canvas the moment the paste
-    // landed. Silent by design, unlike the bitmap masks above: an empty map
+    // were never solved for, and the read-only Transform / camera-profile
+    // section would show the wrong photo's values on the canvas the moment the
+    // paste landed. Silent by design, unlike the bitmap masks above: an empty
+    // map
     // STRIPS nothing (`xmp::merge_strip_keys`), so every target's own block
     // survives untouched in its own sidecar and there is no loss to report.
     foreign.passthrough.clear();

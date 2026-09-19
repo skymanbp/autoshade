@@ -255,13 +255,16 @@ mod tests {
                 }
             }
         }
-        // The twelve wiring points, as of v1.2.4. `budget.rs` itself is the
-        // definition and its own tests, not a wiring site.
+        // The thirteen wiring points, as of v1.5.0 — twelve since v1.2.4, plus
+        // the stack worker, which is the first one to hold SEVERAL frames
+        // decoded at once and so commits its estimate times the frame count.
+        // `budget.rs` itself is the definition and its own tests, not a wiring
+        // site.
         const CENSUS: [(&str, usize); 5] = [
             ("actions.rs", 3),
             ("export.rs", 2),
             ("masks.rs", 1),
-            ("retouch.rs", 5),
+            ("retouch.rs", 6),
             ("workers.rs", 1),
         ];
         let gui_src =
@@ -295,7 +298,7 @@ mod tests {
             "the budget wiring moved: every heavy full-frame path takes a permit, \
              and this census is where a new one is declared",
         );
-        assert_eq!(found.values().sum::<usize>(), 12, "twelve wiring points");
+        assert_eq!(found.values().sum::<usize>(), 13, "thirteen wiring points");
     }
 }
 

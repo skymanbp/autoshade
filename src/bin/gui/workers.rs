@@ -278,12 +278,37 @@ impl AutoShadeApp {
         };
         let recipe = self.recipe.clone();
         let show_clipping = self.show_clipping;
+        let film = self.film_short_edge();
         self.develop_inflight = true;
         self.dirty = false;
         self.spawn_worker(
-            move || Msg::Developed(Box::new(Ok(build_preview(base, recipe, show_clipping)))),
+            move || Msg::Developed(Box::new(Ok(build_preview(base, recipe, show_clipping, film)))),
             |e| Msg::Developed(Box::new(Err(e))),
         );
+    }
+
+    /// The full-resolution SHORT EDGE of the active card's pixel source — the
+    /// film the Detail panel states its radii in (`render::FilmScale`,
+    /// v1.5.0), so the canvas shows sharpening and noise reduction the way the
+    /// export looks once it is downscaled to the canvas.
+    ///
+    /// A header read (`decode::film_short_edge`), cached against the path AND its
+    /// modification time: the preview asks on every slider tick, and the
+    /// answer changes only when the source does — a re-baked raster at the
+    /// same path included. `None` (no photo, an unreadable header) develops the
+    /// canvas as its own film, which is what every build before v1.5.0 did.
+    pub(crate) fn film_short_edge(&mut self) -> Option<u32> {
+        let path = self.active_source_path()?;
+        let modified = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
+        if let Some((cached, when, edge)) = &self.film_edge
+            && *cached == path
+            && *when == modified
+        {
+            return *edge;
+        }
+        let edge = autoshade::decode::film_short_edge(&path);
+        self.film_edge = Some((path, modified, edge));
+        edge
     }
 
     /// Accept one worker-built frame if it still describes the active base +
@@ -2366,6 +2391,45 @@ impl AutoShadeApp {
                 "AI denoised (a baked source, so SCUNet on developed pixels) → {path} (new ◈ card; the card you started from is untouched)",
                 &[("path", &out.display().to_string())],
             ),
+            RetouchNote::Stacked { out, kind, frames, travel, uncovered, headroom_ev } => {
+                let mut s = trf(
+                    lang,
+                    "stacked {n} frames ({how}) → {path} (new ▦ card; the frame you started from is untouched)",
+                    &[
+                        ("n", &frames.to_string()),
+                        ("how", tr(lang, kind.label())),
+                        ("path", &out.display().to_string()),
+                    ],
+                );
+                // The three numbers worth reading before trusting a stack, and
+                // only when they have something to say: how far the aligner
+                // had to move the worst frame, how much of the frame no source
+                // could cover, and — an HDR merge only — the stops of
+                // highlight it recovered, which is the number the SDR
+                // rendition panel is then set from.
+                if *travel >= 0.5 {
+                    s.push_str(&trf(
+                        lang,
+                        " · aligned by up to {px} px",
+                        &[("px", &format!("{travel:.1}"))],
+                    ));
+                }
+                if *uncovered > 0.0 {
+                    s.push_str(&trf(
+                        lang,
+                        " · {pct}% of the frame was outside at least one source",
+                        &[("pct", &format!("{:.2}", 100.0 * uncovered))],
+                    ));
+                }
+                if *headroom_ev > 0.0 {
+                    s.push_str(&trf(
+                        lang,
+                        " · recovered {ev} EV above the first frame's white — the SDR rendition sliders now mean something",
+                        &[("ev", &format!("{headroom_ev:.2}"))],
+                    ));
+                }
+                s
+            }
             RetouchNote::Cloned { n, out } => trf(
                 lang,
                 "Cloned {n} spot(s) → {path}",
@@ -2451,21 +2515,40 @@ impl AutoShadeApp {
                                     ctx,
                                 );
                             }
-                            RetouchKind::NewDenoised => {
-                                // AI denoise → a NEW ◈ card (2026-09-15): the
-                                // saved master is its pixel source, the develop
-                                // it was made from is its recipe (the LIVE one
-                                // — a slider moved while the sidecar ran is
-                                // what the user sees), and the card it was made
-                                // from keeps its pixels: push_variant saves that
-                                // card's recipe and switches here, exactly like
-                                // a reimagine landing. Nothing enters the
-                                // outgoing card's undo history — a card is
-                                // deleted, not undone.
-                                let recipe = self.recipe.clone();
+                            RetouchKind::NewDenoised | RetouchKind::NewStacked => {
+                                // A REMADE NEGATIVE — an AI denoise (◈,
+                                // 2026-09-15) or a stack (▦, v1.5.0) — lands
+                                // the same way, because it is the same idea:
+                                // the saved master is its pixel source, the
+                                // develop it was made from is its recipe (the
+                                // LIVE one — a slider moved while the job ran
+                                // is what the user sees), and the card it was
+                                // made from keeps its pixels. push_variant
+                                // saves that card's recipe and switches here,
+                                // exactly like a reimagine landing. Nothing
+                                // enters the outgoing card's undo history — a
+                                // card is deleted, not undone.
+                                let mut recipe = self.recipe.clone();
+                                let stacked = kind == RetouchKind::NewStacked;
+                                // An HDR merge hands over stops of highlight
+                                // above the reference frame's white. They are
+                                // only reachable through the SDR rendition
+                                // stage, so the card arrives with that stage
+                                // ON and told how much room it has — the same
+                                // recipe the CLI writes beside its master.
+                                if let RetouchNote::Stacked { headroom_ev, .. } = &note
+                                    && *headroom_ev > 0.0
+                                {
+                                    recipe.hdr_edit = true;
+                                    recipe.hdr_max_ev = *headroom_ev;
+                                }
                                 self.push_variant(
                                     Variant {
-                                        kind: VariantKind::Denoised,
+                                        kind: if stacked {
+                                            VariantKind::Stacked
+                                        } else {
+                                            VariantKind::Denoised
+                                        },
                                         id: new_variant_id(),
                                         name: None,
                                         recipe,

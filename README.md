@@ -8,7 +8,7 @@
 An AI decides *what to change*. A deterministic Rust engine *does* it.
 **In the recipe-development path, the AI never touches a pixel.**
 
-[Download v1.4.1](https://github.com/skymanbp/autoshade/releases/tag/v1.4.1) ·
+[Download v1.5.0](https://github.com/skymanbp/autoshade/releases/tag/v1.5.0) ·
 [Architecture](docs/ARCHITECTURE.md) ·
 [Release ledger](docs/ROADMAP.md) ·
 [MIT](LICENSE)
@@ -86,10 +86,18 @@ An AI decides *what to change*. A deterministic Rust engine *does* it.
   (gpt-image-2), retouch, heal and AI denoise are the only paths that can
   invent or alter scene content, and are marked so; a denoise lands as its
   own card and never rewrites the original.
+- **Stacking and merging** — several frames of one scene into one, over a
+  single alignment: HDR merge (exposures measured from the pixels, samples
+  weighted by how trustworthy they are, the recovered stops handed to the SDR
+  rendition stage), exposure fusion, focus stack and noise stack. The
+  alignment is a global affine — shift, rotation, scale and a zoom's breathing
+  — refined per block for a subject that moved on its own, and it works on a
+  bracket because it matches in log luminance, where a change of exposure is a
+  constant offset that a gradient cannot see.
 - **Versions, variants and three front ends** — Original, AI-generated
-  (immutable: an edit on one continues on an Edited-AI card beside it) and
-  Reverse-fit cards with numbered snapshots in a per-user develop store shared
-  by all three.
+  (immutable: an edit on one continues on an Edited-AI card beside it),
+  Reverse-fit, Denoised and Stacked cards with numbered snapshots in a
+  per-user develop store shared by all three.
 
 Out of scope in this release: bit-exact Adobe rendering (parity is measured),
 an exact X-Trans demosaic (the plane fit is approximate) and a notarised macOS
@@ -411,6 +419,16 @@ v1.2.4 against Lightroom's own coverage rather than exported luma, on a
 - `heal` only ever copies, shifts and averages pixels that already exist, and
   anything that changed pixels lives on its own card as a pixel source — never
   disguised as a Lightroom adjustment.
+- Spot removal imported from a Lightroom sidecar is re-solved here from the
+  photograph's own pixels, and the panel says so: it names how many areas
+  Lightroom removed, how many of those Adobe synthesised (content-aware or
+  generative, whose pixels the sidecar does not carry), and offers to re-run a
+  generative model over exactly those.
+- A photo edited in Lightroom's HDR mode renders as its **SDR rendition** —
+  Lightroom's own seven-control answer to publishing an HDR edit as an SDR
+  file — rather than as if the mode had never been set. The seven render only
+  while the mode is on, as in Lightroom; they are stored and round-tripped
+  either way.
 
 Details: [docs/TECH_STACK.md#ai-advisor-and-reverse-fit](docs/TECH_STACK.md#ai-advisor-and-reverse-fit).
 
@@ -471,7 +489,7 @@ the tests [`scripts/check_docs.py`](scripts/check_docs.py) re-derives.
 
 | What | Measured | Where |
 |---|---|---|
-| Automated test battery | 1509 library / 24 CLI / 191 GUI / 2+2 contract tests; `check_docs` re-derives the pinned release claims | [Tech stack](#tech-stack-algorithms-and-design-philosophy) |
+| Automated test battery | 1640 library / 25 CLI / 201 GUI / 2+2 contract tests; `check_docs` re-derives the pinned release claims | [Tech stack](#tech-stack-algorithms-and-design-philosophy) |
 | RAW coverage | 24 extensions, 725 camera bodies; nine-camera format zoo 9/9 at the last release gate | [Supported formats](#supported-formats) |
 | Lightroom Texture parity | 45 of 45 period/depth anchors within ±0.02 | [Develop pipeline](#develop-pipeline-and-tone-model) |
 | Radial mask closure | 41 of 41 measured vectors within ≤1 px | [Lens correction](#lens-correction-and-lightroom-mask-frame-laws) |
@@ -493,25 +511,31 @@ the tests [`scripts/check_docs.py`](scripts/check_docs.py) re-derives.
 
 ### Download a release
 
-The v1.4.1 release is built by GitHub Actions from the tag: the Windows front
+The v1.5.0 release is built by GitHub Actions from the tag: the Windows front
 ends, two macOS universal (arm64 + x86_64) archives and a Linux x64
 command-line archive; `checksums.txt` carries the SHA-256 of every asset.
+One asset is not a build product: `autoshade-raw-denoise-v1.pth` is the trained
+RAW denoiser, uploaded from the training run rather than compiled from the tag.
+The AI denoise sidecar fetches it on demand and refuses it unless its SHA-256
+and byte count match the values pinned in `python/denoise_raw.py`, so nothing is
+unpickled on trust.
 
 | File | Size | SHA-256 |
 |---|---:|---|
 | `autoshade.exe` (CLI) | 21,174,784 bytes | `487614dca86825fdd781b9d3f35d3db599cf79ab577e743f661eebf0a5d1b751` |
 | `autoshade-gui.exe` (desktop app) | 27,526,144 bytes | `0a7801b93f5743b789b9c2f9b1d390bbabc909c1b4672540fd961e3524a1bd7d` |
-| `AutoShade-Setup-1.4.1.exe` (installer) | 14,699,285 bytes | `f181baeaf889d33c9d78c6686900e44d2225dea30fc38dbb5d2b3ca73f75d5be` |
-| `autoshade-1.4.1-windows-x64.zip` (portable archive) | 19,613,647 bytes | `4c8970b8bb80ddafc6c6b0878bed892a1b96fed62a1d49433330bf9726d00c9f` |
-| `AutoShade-1.4.1-macos-universal.zip` (macOS app bundle) | 39,670,264 bytes | `912dde2cc81da4374bfb09ed6b083df971aff106a43fc5bcc30366afef4aa6c2` |
-| `AutoShade-1.4.1-linux-x64.zip` (Linux command line only) | 9,524,480 bytes | `225eaef4ab438a715ed3c0da5559810cdf1688fd8c3adef44c646525b4cbdfbd` |
-| `AutoShade-1.4.1-macos-cli.zip` (macOS command line only) | 17,203,728 bytes | `cdff140398dfea6ad140a28c37f63422af2a3048afacd42a5a62bd2f5a6df875` |
+| `AutoShade-Setup-1.5.0.exe` (installer) | 14,699,285 bytes | `f181baeaf889d33c9d78c6686900e44d2225dea30fc38dbb5d2b3ca73f75d5be` |
+| `autoshade-1.5.0-windows-x64.zip` (portable archive) | 19,613,647 bytes | `4c8970b8bb80ddafc6c6b0878bed892a1b96fed62a1d49433330bf9726d00c9f` |
+| `AutoShade-1.5.0-macos-universal.zip` (macOS app bundle) | 39,670,264 bytes | `912dde2cc81da4374bfb09ed6b083df971aff106a43fc5bcc30366afef4aa6c2` |
+| `AutoShade-1.5.0-linux-x64.zip` (Linux command line only) | 9,524,480 bytes | `225eaef4ab438a715ed3c0da5559810cdf1688fd8c3adef44c646525b4cbdfbd` |
+| `AutoShade-1.5.0-macos-cli.zip` (macOS command line only) | 17,203,728 bytes | `cdff140398dfea6ad140a28c37f63422af2a3048afacd42a5a62bd2f5a6df875` |
+| `autoshade-raw-denoise-v1.pth` (RAW denoiser weights, fetched on demand) | 130,585,417 bytes | `6929ddd6b11b3f27baf3537d92a4552a6a5c39d53ff4167e4f7df26e80413a99` |
 
 Download from the
-[v1.4.1 release page](https://github.com/skymanbp/autoshade/releases/tag/v1.4.1):
+[v1.5.0 release page](https://github.com/skymanbp/autoshade/releases/tag/v1.5.0):
 
 \
-- **Installer (recommended):** run `AutoShade-Setup-1.4.1.exe`. It installs for
+- **Installer (recommended):** run `AutoShade-Setup-1.5.0.exe`. It installs for
   the current user without administrator access, adds Start Menu shortcuts, and
   offers optional desktop and user `PATH` tasks.
 - **Upgrading is in place.** Run a newer installer over an existing install and
@@ -527,12 +551,12 @@ Download from the
   weights and the develop store in `%LOCALAPPDATA%\autoshade`. It names the
   size it found for each, and keeping both is the default, so a later install
   starts where you left off.
-- **Silently, for a scripted rollout:** `AutoShade-Setup-1.4.1.exe /VERYSILENT
+- **Silently, for a scripted rollout:** `AutoShade-Setup-1.5.0.exe /VERYSILENT
   /SUPPRESSMSGBOXES /NORESTART` installs or upgrades with no window and no
   prompt, and `unins000.exe /VERYSILENT /SUPPRESSMSGBOXES` in the install
   directory uninstalls the same way. The silent uninstall keeps your weights
   and develop store unless you add `/DELETEDATA=1`.
-- **Portable archive:** extract `autoshade-1.4.1-windows-x64.zip` to a directory
+- **Portable archive:** extract `autoshade-1.5.0-windows-x64.zip` to a directory
   you can keep intact and run either executable from there, beside the bundled
   `assets/` and `python/` sidecars.
 
@@ -541,10 +565,10 @@ Download from the
 Both macOS archives are universal (Apple silicon and Intel in one binary);
 unpack either with Finder or `ditto -x -k <zip> <dir>`.
 
-- `AutoShade-1.4.1-macos-universal.zip` is the app: move `AutoShade.app` to
+- `AutoShade-1.5.0-macos-universal.zip` is the app: move `AutoShade.app` to
   `/Applications`. The command line travels inside it
   (`AutoShade.app/Contents/MacOS/autoshade`), so this download alone serves a
-  terminal user; `AutoShade-1.4.1-macos-cli.zip` is that binary alone.
+  terminal user; `AutoShade-1.5.0-macos-cli.zip` is that binary alone.
 - The bundle is **ad-hoc signed, not notarised**, so the first launch is
   refused: macOS reports that the developer cannot be verified. Clearing it is
   per machine, not per launch — **System Settings → Privacy & Security → Open
@@ -554,7 +578,7 @@ unpack either with Finder or `ditto -x -k <zip> <dir>`.
   bundle; the interpreter is a Settings field with **Detect**
   ([manual](docs/USER_MANUAL.md#configure-and-use-the-ai-features)).
 
-The Linux archive, `AutoShade-1.4.1-linux-x64.zip`, is the command line for
+The Linux archive, `AutoShade-1.5.0-linux-x64.zip`, is the command line for
 x86-64 Linux, built on Ubuntu 22.04 with the same payload as the macOS
 command-line archive: the binary, the Python sidecars without their weights,
 the assets, LICENSE and README. Unpack it anywhere and run `./autoshade`;
@@ -715,6 +739,12 @@ numbers](#measured-numbers) are not repeated.
 - Bayer data takes rawler's demosaic path; X-Trans uses an **approximate** 5×5
   CFA-geometry plane fit, and no-preview RAWs, untagged 16-bit rasters and
   mono sensors are disclosed or refused.
+- `src/dcp.rs` and `src/render/profile.rs` develop a Lightroom photo through
+  the **camera profile it names** — the `.dcp` Adobe installed, plus the
+  creative profile in the sidecar's `crs:Look`. Table semantics and memory
+  order were measured on the installed pool rather than assumed, and the one
+  half that does not decode (a Look's creative colour table) is named on screen
+  instead of being silently dropped. Nothing Adobe ships is redistributed.
 
 ### Develop pipeline and tone model
 
@@ -802,13 +832,13 @@ numbers](#measured-numbers) are not repeated.
   the 1800 MB per-photo budget, and a 4 GiB RAW gate bounds admission.
 - The [`build` workflow](.github/workflows/build.yml) covers default and GUI
   feature sets on Ubuntu and macOS; model weights are not stored here. The
-  current battery is **1509 library (1494 pass + 15 `#[ignore]`d forensic probes) / 24 CLI / 191 GUI / 2+2 contract** tests, and
+  current battery is **1640 library (1625 pass + 15 `#[ignore]`d forensic probes) / 25 CLI / 201 GUI / 2+2 contract** tests, and
   [`scripts/check_docs.py`](scripts/check_docs.py) re-derives the pinned
   release claims.
 
 ## Status, roadmap, and known limitations
 
-- Release gates for v1.4.1 cover the CLI, desktop GUI, sidecar contracts,
+- Release gates for v1.5.0 cover the CLI, desktop GUI, sidecar contracts,
   format fixtures and the deterministic renderer; artifact sizes and hashes
   are above.
 - macOS has shipped binaries and an app since v1.2.0 and nobody has reported
@@ -858,13 +888,15 @@ covered by the MIT license, omit EXIF and carry no watermark.
 ### Fonts and model weights
 
 The GUI bundles subset Noto faces under the SIL Open Font License (texts under
-`assets/fonts/`); model weights download separately, remain their authors'
-property, and none are redistributed here.
+`assets/fonts/`); model weights download separately and remain their authors'
+property. The one exception is `autoshade-raw-denoise-v1.pth`, this project's
+own fine-tune of DPIR's architecture, which ships as a release asset under this
+project's licence with its training sources credited below.
 
 | Model | Purpose | License |
 |---|---|---|
 | SCUNet | AI denoise (baked sources) | Apache-2.0 |
-| DRUNet (DPIR) | AI denoise (RAW sensor mosaic) | MIT |
+| DRUNet-colour architecture (DPIR); the weights are fine-tuned here and shipped as `autoshade-raw-denoise-v1.pth` | AI denoise (RAW sensor mosaic) | MIT (architecture and this project's weights); fine-tuning pairs from RawNIND, CC BY-SA 4.0 |
 | BiRefNet | Subject segmentation | MIT |
 | U²-Net | Subject fallback | Apache-2.0 |
 | OneFormer ADE20K | Sky segmentation | MIT |

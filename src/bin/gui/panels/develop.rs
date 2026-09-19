@@ -49,6 +49,40 @@ impl AutoShadeApp {
         Self::slider_impl(ui, lang, label, value, min, max, default, feel, hint)
     }
 
+    /// A COMPANION control's slider (`recipe::LR_COMPANION_DEFAULTS`, v1.5.0):
+    /// it SHOWS what the engine renders — Lightroom's own default while the
+    /// recipe holds no value — and writes back through
+    /// `EditRecipe::set_resolved`, so a drag to 0 is a real 0 rather than
+    /// "absent". The reset (double- or right-click) and a drag that lands on
+    /// the default both return the control to absent, which renders the same
+    /// and lets Lightroom keep its own default in the sidecar.
+    #[allow(clippy::too_many_arguments)] // `slider_impl`'s track + the recipe and the control name
+    pub(crate) fn companion_slider(
+        ui: &mut egui::Ui,
+        lang: Lang,
+        label: &str,
+        recipe: &mut EditRecipe,
+        name: &str,
+        min: f32,
+        max: f32,
+        feel: SliderFeel,
+    ) -> bool {
+        let default = autoshade::recipe::LR_COMPANION_DEFAULTS
+            .iter()
+            .find(|(n, _)| *n == name)
+            .map_or(0.0, |(_, d)| *d);
+        let mut shown = recipe.resolved(name);
+        let changed = Self::slider_impl(ui, lang, label, &mut shown, min, max, default, feel, "");
+        if changed {
+            if shown == default {
+                recipe.clear_resolved(name);
+            } else {
+                recipe.set_resolved(name, shown);
+            }
+        }
+        changed
+    }
+
     /// A 0..=1-stored fraction shown on Lightroom's 0..100 track (Amount,
     /// feathers, range tolerance): the panel used to mix "Amount 0.65" with
     /// "Shadows 40" in one column, which read as two unit systems. Storage
@@ -276,13 +310,23 @@ impl AutoShadeApp {
         // active adjustment is never invisible. Flags are snapshot up front —
         // Copy bools, so no borrow spans the section closures (E0500).
         //
-        // The five predicates are DERIVED from the control registry's families
+        // The section predicates are DERIVED from the control registry's families
         // (R25 P0): each was a hand-written field tuple that had to be widened
         // by hand whenever its section gained a control, and R22 #16 had
         // already found four of them one field short. `family_is_active` reads
         // the same table the AI's tool plan is built from, so a control that
         // joins a family joins its dot.
-        let (presence_active, detail_active, hsl_active, grade_active, curves_active, effects_active) = {
+        let (
+            presence_active,
+            detail_active,
+            hsl_active,
+            grade_active,
+            curves_active,
+            effects_active,
+            calibration_active,
+            transform_active,
+            hdr_active,
+        ) = {
             let r = &self.recipe;
             let fam = |name: &str| {
                 CONTROL_FAMILIES
@@ -298,13 +342,27 @@ impl AutoShadeApp {
                 // separate families because one is AI-visible and one is not
                 // (see `CONTROL_FAMILIES`), not because the panel splits them.
                 fam("detail") || fam("detail_effects"),
-                fam("hsl"),
+                // v1.5.0: the Color Mixer section holds Lightroom's whole
+                // mixer — the colour bands, the B&W treatment that replaces
+                // them and the point colours — so its ● is the OR of the
+                // three families, for the Detail section's reason above.
+                fam("hsl") || fam("black_white") || fam("point_color"),
                 fam("color_grade"),
-                fam("curves"),
+                // v1.5.0: the Curves section holds the point curves AND the
+                // parametric curve — two families for Detail's reason (one is
+                // AI-visible, one is not), one section, so one ● for both.
+                fam("curves") || fam("parametric"),
                 // R25 B2: the `effects` family has no AI-visible member, so it
                 // reaches the model nowhere — it exists in the table for
                 // exactly this, the section's own ●.
                 fam("effects"),
+                fam("calibration"),
+                // v1.5.0 F6: the Transform section's own family. It has no
+                // AI-visible member either, so like `effects` it exists in the
+                // table for exactly this.
+                fam("transform"),
+                // v1.5.0 F8: likewise — the `hdr` family exists for this ●.
+                fam("hdr"),
             )
         };
         changed |= self.dev_tone_wb(ui);
@@ -312,16 +370,32 @@ impl AutoShadeApp {
         changed |= self.dev_curves(ui, curves_active);
         changed |= self.dev_hsl(ui, hsl_active);
         changed |= self.dev_grading(ui, grade_active);
+        // v1.5.0: Lightroom's Calibration panel, which Lightroom lists last
+        // and this panel closes the colour group with — it is a colour
+        // control, and #14b groups by kind.
+        changed |= self.dev_calibration(ui, calibration_active);
         changed |= self.dev_detail(ui, detail_active);
         changed |= self.dev_effects(ui, effects_active);
         changed |= self.dev_lens(ui);
-        // R25 B4, in Lightroom's own panel order (Transform follows Lens
-        // Corrections). Read-only, so it can never set `changed` — and it
-        // draws nothing at all unless the photo carried such a block.
-        changed |= self.dev_transform(ui);
+        // In Lightroom's own panel order (Transform follows Lens Corrections).
+        // R25 B4 drew this section read-only because nothing here moved a pixel;
+        // v1.5.0 F6 renders all of it, so the sliders are real and only the
+        // Upright solver's own bookkeeping is still carried verbatim.
+        changed |= self.dev_transform(ui, transform_active);
         changed |= self.dev_crop(ui);
         changed |= self.dev_masks(ui);
         changed |= self.dev_versions(ui);
+        // v1.5.0 Track S. Not a develop control at all — a verb that makes a
+        // new negative out of several frames — and it sits here, after the
+        // version history and before the rendition/delivery pair, for that
+        // reason: it belongs to the PHOTOGRAPH's identity, which is what the
+        // sections above it are about, rather than to the file that leaves.
+        self.dev_stack(ui);
+        // v1.5.0 F8, beside Export and not beside Tone: what this section
+        // governs is the file that leaves the program. The rendition is the
+        // develop's LAST stage (`render::hdr`), and every control in it is
+        // about the mapping into SDR rather than about the photograph.
+        changed |= self.dev_hdr(ui, hdr_active);
         changed |= self.dev_export(ui);
         });
 
@@ -480,6 +554,14 @@ impl AutoShadeApp {
                                     label.on_hover_text(tr(
                                         lang,
                                         "A generated image stays as generated: the first edit here continues on a new ✎ Edited AI image card",
+                                    ));
+                                } else if kind == VariantKind::Stacked {
+                                    // The ▦ card (v1.5.0): what it is and what
+                                    // a .xmp from it can carry, said where the
+                                    // card is.
+                                    label.on_hover_text(tr(
+                                        lang,
+                                        "Several frames of this scene merged into their own master: develop it like the ▣ card, reverse-fit and reimagine read it as the negative while it exists; a .xmp from it carries the sliders only — the merged pixels live in the master beside it",
                                     ));
                                 } else if kind == VariantKind::Denoised {
                                     // The ◈ card (2026-09-15): what it is and
@@ -858,12 +940,57 @@ impl AutoShadeApp {
             .default_open(false)
             .show(ui, |ui| {
                 changed |= self.curve_editor(ui);
+                changed |= Self::parametric_curve(ui, lang, &mut self.recipe);
             });
         changed
     }
 
+    /// Lightroom's parametric tone curve (v1.5.0), under the point curve in
+    /// the order the engine composes them (`render::build_tone_lut`: the point
+    /// curve bends what these regions made). The four regions in the panel's
+    /// top-down order, then the three splits — each bounded by its neighbours,
+    /// the way Lightroom's own split handles stop short of each other, so a
+    /// drag can never cross two splits and the sliders always show the layout
+    /// the curve renders (`EditRecipe::parametric_splits`).
+    fn parametric_curve(ui: &mut egui::Ui, lang: Lang, r: &mut EditRecipe) -> bool {
+        use autoshade::recipe::{PARAMETRIC_SPLITS, PARAMETRIC_SPLIT_GAP};
+        ui.separator();
+        ui.label(egui::RichText::new(tr(lang, "Parametric curve")).weak().small());
+        let mut changed = false;
+        changed |= Self::slider(ui, lang, tr(lang, "Highlights"), &mut r.param_highlights, -100.0, 100.0, 0.0);
+        changed |= Self::slider(ui, lang, tr(lang, "Lights"), &mut r.param_lights, -100.0, 100.0, 0.0);
+        changed |= Self::slider(ui, lang, tr(lang, "Darks"), &mut r.param_darks, -100.0, 100.0, 0.0);
+        changed |= Self::slider(ui, lang, tr(lang, "Shadows"), &mut r.param_shadows, -100.0, 100.0, 0.0);
+        let gap = PARAMETRIC_SPLIT_GAP;
+        let mut splits = r.parametric_splits();
+        let mut moved = false;
+        let labels = [tr(lang, "Shadow split"), tr(lang, "Midtone split"), tr(lang, "Highlight split")];
+        for (i, label) in labels.into_iter().enumerate() {
+            let lo = if i == 0 { gap } else { splits[i - 1] + gap };
+            let hi = if i == 2 { 100.0 - gap } else { splits[i + 1] - gap };
+            // The reset lands inside the room the neighbours leave: a reset
+            // must not cross them either (`slider_impl` resets unclamped).
+            let reset = PARAMETRIC_SPLITS[i].clamp(lo, hi);
+            // Whole numbers whatever the room: the sidecar writes integers,
+            // and a narrow range would otherwise pick the fractional feel.
+            moved |= Self::slider_impl(ui, lang, label, &mut splits[i], lo, hi, reset, SliderFeel::Int, "");
+        }
+        if moved {
+            r.param_shadow_split = splits[0];
+            r.param_midtone_split = splits[1];
+            r.param_highlight_split = splits[2];
+        }
+        changed || moved
+    }
+
     /// One develop-panel section — body extracted verbatim from
     /// develop_panel (round-12 decomposition; spacing included).
+    ///
+    /// v1.5.0: the section is Lightroom's WHOLE Color Mixer. The Black & White
+    /// switch swaps the colour bands for the grey mix, because the render runs
+    /// one or the other (`render::apply_gray_mix` in the colour mixer's place,
+    /// as in Lightroom) and showing both would be eight sliders that move no
+    /// pixel; the point colours follow the mixer ([`Self::point_color_rows`]).
     fn dev_hsl(&mut self, ui: &mut egui::Ui, hsl_active: bool) -> bool {
         let lang = self.lang;
         let mut changed = false;
@@ -872,30 +999,60 @@ impl AutoShadeApp {
             .id_salt("sec_hsl")
             .default_open(false)
             .show(ui, |ui| {
+                changed |= ui
+                    .checkbox(&mut self.recipe.convert_to_grayscale, tr(lang, "Black & White"))
+                    .changed();
+                // What the CANVAS does, not what the checkbox says (v1.5.0 F7):
+                // a monochrome creative profile develops the photograph to grey
+                // with the photographer's own switch still off, and a panel
+                // offering the colour mixer over a grey canvas is a row of
+                // sliders that move numbers and no pixels. `render::apply_develop`
+                // asks the same question the same way.
+                let mono = self.recipe.renders_grayscale();
                 // LR's mixer layout: pick ONE property (Hue / Saturation /
                 // Luminance) and see all 8 bands at once. The old band picker
                 // showed one band at a time — every other band's state was
-                // invisible, the opposite of what a mixer is for.
+                // invisible, the opposite of what a mixer is for. The B&W
+                // mixer has ONE property (how light each colour turns), so it
+                // has no tabs — its caption stands where they do.
                 ui.horizontal(|ui| {
-                    for (i, name) in ["Hue", "Saturation", "Luminance"].iter().enumerate() {
-                        if ui.selectable_label(self.hsl_tab == i, tr(lang, name)).clicked() {
-                            self.hsl_tab = i;
+                    if mono {
+                        ui.label(egui::RichText::new(tr(lang, "B&W mix")).weak().small());
+                    } else {
+                        for (i, name) in ["Hue", "Saturation", "Luminance"].iter().enumerate() {
+                            if ui.selectable_label(self.hsl_tab == i, tr(lang, name)).clicked() {
+                                self.hsl_tab = i;
+                            }
                         }
                     }
                     // R38: a glyph square — the same reset in every mixer row;
                     // as a text button it ran the HSL tab row to 318 px at the
                     // 320 px default and widened the auto-fitting panel.
                     if glyph(ui, true, "↺").on_hover_text(tr(lang, "Reset all")).clicked() {
-                        self.recipe.hsl = Hsl::default();
+                        if mono {
+                            for b in 0..HSL_BANDS.len() {
+                                if let Some(v) = self.recipe.gray_mixer_mut(b) {
+                                    *v = 0.0;
+                                }
+                            }
+                        } else {
+                            self.recipe.hsl = Hsl::default();
+                        }
                         changed = true;
                     }
                 });
                 let tab = self.hsl_tab;
                 for (b, name) in HSL_BANDS.iter().enumerate() {
-                    let v = match tab {
-                        0 => &mut self.recipe.hsl.hue[b],
-                        1 => &mut self.recipe.hsl.saturation[b],
-                        _ => &mut self.recipe.hsl.luminance[b],
+                    // ONE row shape for both mixers: same band, same swatch,
+                    // same ±100 track — only the number behind it changes.
+                    let v = match (mono, tab) {
+                        (true, _) => match self.recipe.gray_mixer_mut(b) {
+                            Some(v) => v,
+                            None => continue,
+                        },
+                        (false, 0) => &mut self.recipe.hsl.hue[b],
+                        (false, 1) => &mut self.recipe.hsl.saturation[b],
+                        (false, _) => &mut self.recipe.hsl.luminance[b],
                     };
                     ui.horizontal(|ui| {
                         // Band swatch so rows scan like LR's mixer.
@@ -904,6 +1061,211 @@ impl AutoShadeApp {
                         ui.painter().rect_filled(rect, 2.0, HSL_SWATCH[b]);
                         changed |= Self::slider(ui, lang, tr(lang, name), v, -100.0, 100.0, 0.0);
                     });
+                }
+                changed |= self.point_color_rows(ui);
+            });
+        changed
+    }
+
+    /// Lightroom's Point Color (v1.5.0), under the mixer as in Lightroom: the
+    /// 💧 that arms the canvas eyedropper (`canvas::handle_point_color_pick`
+    /// makes the swatch), then one block per swatch — the colour it was
+    /// sampled from, its three shifts and its Range.
+    ///
+    /// Disabled under Black & White, where `apply_gray_mix` runs in the
+    /// mixer's place and a swatch has no colour left to move.
+    ///
+    /// The Range slider goes through [`autoshade::recipe::PointColor::set_range`],
+    /// which REBUILDS the swatch's three windows: the engine matches pixels
+    /// against the stored windows and never reads `range_amount`, so a Range
+    /// that only wrote its own number would be a slider that moves no pixel.
+    fn point_color_rows(&mut self, ui: &mut egui::Ui) -> bool {
+        use autoshade::recipe::MAX_POINT_COLORS;
+        let lang = self.lang;
+        let mut changed = false;
+        ui.add_space(SPACE_SM);
+        // Point Color has no colour to act on in black and white, whichever of
+        // the two switches produced it (v1.5.0 F7 — see the mixer above).
+        ui.add_enabled_ui(!self.recipe.renders_grayscale(), |ui| {
+            ui.horizontal_wrapped(|ui| {
+                ui.label(egui::RichText::new(tr(lang, "Point Color")).weak().small());
+                let label = if self.point_color_picking {
+                    tr(lang, "💧 Click in image…")
+                } else {
+                    tr(lang, "💧 Pick a color")
+                };
+                let room = self.recipe.point_colors.len() < MAX_POINT_COLORS;
+                if action(ui, room, label)
+                    .on_hover_text(tr(lang,
+                        "Click a colour in the image to add a swatch; its sliders then move that colour alone. Click again to cancel.",
+                    ))
+                    // The limit says itself where the button that hit it is —
+                    // the canvas handler repeats it for the click that arrives
+                    // after a paste filled the list behind an armed tool.
+                    .on_disabled_hover_text(trf(
+                        lang,
+                        "Point Color: at most {n} swatches",
+                        &[("n", &MAX_POINT_COLORS.to_string())],
+                    ))
+                    .clicked()
+                {
+                    let on = !self.point_color_picking;
+                    self.disarm_tools();
+                    self.point_color_picking = on;
+                    if on {
+                        self.status =
+                            tr(lang, "Point Color eyedropper: click the colour to adjust").into();
+                    }
+                }
+            });
+            // Deferred like every other list row's ✕ (R24-5): removing inside
+            // the loop would invalidate the iterator it is drawn from.
+            let mut remove = None;
+            for (i, p) in self.recipe.point_colors.iter_mut().enumerate() {
+                ui.horizontal(|ui| {
+                    // The colour the swatch was sampled from, as a chip: the
+                    // sliders below say what happens to it, and nothing else
+                    // on the row says WHICH colour it is.
+                    let rgb = autoshade::render::point_color_rgb(p)
+                        .map(|c| (c.clamp(0.0, 1.0) * 255.0).round() as u8);
+                    let (rect, _) =
+                        ui.allocate_exact_size(egui::vec2(10.0, 10.0), egui::Sense::hover());
+                    ui.painter().rect_filled(
+                        rect,
+                        2.0,
+                        egui::Color32::from_rgb(rgb[0], rgb[1], rgb[2]),
+                    );
+                    ui.label(trf(lang, "Swatch {n}", &[("n", &(i + 1).to_string())]));
+                    // 🗑, the vocabulary's DELETE-a-list-row glyph (masks,
+                    // versions) — ✕ is "clear / close" and says the wrong thing
+                    // about a swatch that is gone for good.
+                    if glyph(ui, true, "🗑").on_hover_text(tr(lang, "Remove swatch")).clicked() {
+                        remove = Some(i);
+                    }
+                });
+                // Lightroom's ±100 tracks over the stored -1..=1 shifts.
+                for (name, shift) in [
+                    ("Hue", &mut p.hue_shift),
+                    ("Saturation", &mut p.sat_scale),
+                    ("Luminance", &mut p.lum_scale),
+                ] {
+                    let mut shown = *shift * 100.0;
+                    if Self::slider(ui, lang, tr(lang, name), &mut shown, -100.0, 100.0, 0.0) {
+                        *shift = shown / 100.0;
+                        changed = true;
+                    }
+                }
+                let mut range = p.range_amount;
+                if Self::slider_pct(ui, lang, tr(lang, "Range"), &mut range, 1.0, 0.5) {
+                    p.set_range(range);
+                    changed = true;
+                }
+            }
+            if let Some(i) = remove {
+                self.recipe.point_colors.remove(i);
+                changed = true;
+            }
+        });
+        changed
+    }
+
+    /// 校准 — Lightroom's Calibration panel (v1.5.0): the shadows tint and each
+    /// primary's hue and saturation.
+    ///
+    /// Rendered as the develop's FIRST stage (`render::Calibration`), which is
+    /// why it is a section of sliders and not a read-out: every other section
+    /// works on the colours these seven leave behind. Lightroom writes all
+    /// seven keys on nearly every sidecar, so a photo arriving from Lightroom
+    /// usually lands here with values already in it.
+    fn dev_calibration(&mut self, ui: &mut egui::Ui, calibration_active: bool) -> bool {
+        let lang = self.lang;
+        let mut changed = false;
+        ui.add_space(SPACE_MD);
+        egui::CollapsingHeader::new(section_title(tr(lang, "Calibration"), calibration_active))
+            .id_salt("sec_calibration")
+            .default_open(false)
+            .show(ui, |ui| {
+                let r = &mut self.recipe;
+                // Lightroom's own order and grouping: the shadows tint first,
+                // then a hue + saturation pair per primary.
+                ui.label(egui::RichText::new(tr(lang, "Shadows")).weak().small());
+                changed |= Self::slider(
+                    ui,
+                    lang,
+                    tr(lang, "Tint"),
+                    &mut r.cal_shadow_tint,
+                    -100.0,
+                    100.0,
+                    0.0,
+                );
+                for (primary, hue, sat) in [
+                    (tr(lang, "Red primary"), &mut r.cal_red_hue, &mut r.cal_red_sat),
+                    (tr(lang, "Green primary"), &mut r.cal_green_hue, &mut r.cal_green_sat),
+                    (tr(lang, "Blue primary"), &mut r.cal_blue_hue, &mut r.cal_blue_sat),
+                ] {
+                    ui.add_space(SPACE_XS);
+                    ui.label(egui::RichText::new(primary).weak().small());
+                    changed |= Self::slider(ui, lang, tr(lang, "Hue"), hue, -100.0, 100.0, 0.0);
+                    changed |= Self::slider(ui, lang, tr(lang, "Saturation"), sat, -100.0, 100.0, 0.0);
+                }
+            });
+        changed
+    }
+
+    /// v1.5.0 F8 — Lightroom's HDR edit mode and the SDR rendition it is
+    /// published through.
+    ///
+    /// The switch is drawn FIRST and the seven controls under a heading that
+    /// says they need it, because that is the one thing a photographer can get
+    /// wrong here: the seven are live widgets whatever the switch says (they
+    /// are stored either way, and Lightroom's own sidecars keep them across a
+    /// mode change), but nothing they do reaches a pixel while the mode is
+    /// off. Greying them out instead would hide values the file really holds.
+    fn dev_hdr(&mut self, ui: &mut egui::Ui, hdr_active: bool) -> bool {
+        let lang = self.lang;
+        let mut changed = false;
+        ui.add_space(SPACE_MD);
+        egui::CollapsingHeader::new(section_title(tr(lang, "HDR & SDR"), hdr_active))
+            .id_salt("sec_hdr")
+            .default_open(false)
+            .show(ui, |ui| {
+                if ui
+                    .checkbox(&mut self.recipe.hdr_edit, tr(lang, "HDR edit mode"))
+                    .on_hover_text(tr(
+                        lang,
+                        "This photograph was edited above diffuse white. Every file this program writes is SDR, so the rendition below is what gets published.",
+                    ))
+                    .changed()
+                {
+                    changed = true;
+                }
+                let r = &mut self.recipe;
+                changed |= Self::slider_fine(
+                    ui,
+                    lang,
+                    tr(lang, "Headroom (stops)"),
+                    &mut r.hdr_max_ev,
+                    0.0,
+                    8.0,
+                    0.0,
+                );
+                ui.add_space(SPACE_SM);
+                ui.label(egui::RichText::new(tr(lang, "SDR rendition")).weak().small());
+                ui.label(
+                    egui::RichText::new(tr(lang, "renders only in HDR mode"))
+                        .weak()
+                        .small(),
+                );
+                for (label, v) in [
+                    (tr(lang, "Blend"), &mut r.sdr_blend),
+                    (tr(lang, "Brightness"), &mut r.sdr_brightness),
+                    (tr(lang, "Contrast"), &mut r.sdr_contrast),
+                    (tr(lang, "Highlights"), &mut r.sdr_highlights),
+                    (tr(lang, "Shadows"), &mut r.sdr_shadows),
+                    (tr(lang, "Whites"), &mut r.sdr_whites),
+                    (tr(lang, "Clarity"), &mut r.sdr_clarity),
+                ] {
+                    changed |= Self::slider(ui, lang, label, v, -100.0, 100.0, 0.0);
                 }
             });
         changed
@@ -989,31 +1351,31 @@ impl AutoShadeApp {
             .default_open(false)
             .show(ui, |ui| {
                 {
-                    // The SAME disclosure line the Effects section uses (R25
-                    // B3): eight of the eleven controls here move a number and
-                    // no pixel in this app, and every one of them says so on
-                    // the head line of its own tooltip.
-                    let carried = tr(lang, "Carried to Lightroom, not rendered here");
+                    // All eleven controls render since v1.5.0
+                    // (`render/detail.rs`), so none carries the "not rendered
+                    // here" line any more. The five COMPANIONS (radius and the
+                    // three Details, Smoothness) show the value the engine
+                    // renders — Lightroom's default while the recipe holds
+                    // none — and reset to it (`companion_slider`).
                     let r = &mut self.recipe;
                     changed |= Self::slider(ui, lang, tr(lang, "Sharpening"), &mut r.sharpening, 0.0, 150.0, 0.0);
-                    // Lightroom's radius band is 0.5..3.0; 0 is our "absent",
-                    // so the track starts there. `Fine` (0.1 snap, one shown
-                    // decimal), NOT the width rule's `Frac`: the sidecar key
-                    // is written to ONE decimal (`+1.0`), so a 0.01 track
+                    // Lightroom's radius band, 0.5..3.0. `Fine` (0.1 snap, one
+                    // shown decimal), NOT the width rule's `Frac`: the sidecar
+                    // key is written to ONE decimal (`+1.0`), so a 0.01 track
                     // would show a number the file cannot carry and the value
                     // would change under the user on the next read.
-                    changed |= Self::slider_impl(ui, lang, tr(lang, "Sharpen radius"), &mut r.sharpen_radius, 0.0, 3.0, 0.0, SliderFeel::Fine, carried);
-                    changed |= Self::slider_hinted(ui, lang, tr(lang, "Sharpen detail"), &mut r.sharpen_detail, 0.0, 100.0, 0.0, carried);
-                    changed |= Self::slider_hinted(ui, lang, tr(lang, "Sharpen masking"), &mut r.sharpen_mask, 0.0, 100.0, 0.0, carried);
+                    changed |= Self::companion_slider(ui, lang, tr(lang, "Sharpen radius"), r, "sharpen_radius", 0.5, 3.0, SliderFeel::Fine);
+                    changed |= Self::companion_slider(ui, lang, tr(lang, "Sharpen detail"), r, "sharpen_detail", 0.0, 100.0, SliderFeel::Int);
+                    changed |= Self::slider(ui, lang, tr(lang, "Sharpen masking"), &mut r.sharpen_mask, 0.0, 100.0, 0.0);
                     ui.add_space(SPACE_SM);
                     changed |=
                         Self::slider(ui, lang, tr(lang, "Noise Reduction"), &mut r.noise_reduction, 0.0, 100.0, 0.0);
-                    changed |= Self::slider_hinted(ui, lang, tr(lang, "Noise detail"), &mut r.nr_detail, 0.0, 100.0, 0.0, carried);
-                    changed |= Self::slider_hinted(ui, lang, tr(lang, "Noise contrast"), &mut r.nr_contrast, 0.0, 100.0, 0.0, carried);
+                    changed |= Self::companion_slider(ui, lang, tr(lang, "Noise detail"), r, "nr_detail", 0.0, 100.0, SliderFeel::Int);
+                    changed |= Self::slider(ui, lang, tr(lang, "Noise contrast"), &mut r.nr_contrast, 0.0, 100.0, 0.0);
                     ui.add_space(SPACE_SM);
-                    changed |= Self::slider_hinted(ui, lang, tr(lang, "Colour noise reduction"), &mut r.color_nr, 0.0, 100.0, 0.0, carried);
-                    changed |= Self::slider_hinted(ui, lang, tr(lang, "Colour noise detail"), &mut r.color_nr_detail, 0.0, 100.0, 0.0, carried);
-                    changed |= Self::slider_hinted(ui, lang, tr(lang, "Colour noise smoothness"), &mut r.color_nr_smooth, 0.0, 100.0, 0.0, carried);
+                    changed |= Self::slider(ui, lang, tr(lang, "Colour noise reduction"), &mut r.color_nr, 0.0, 100.0, 0.0);
+                    changed |= Self::companion_slider(ui, lang, tr(lang, "Colour noise detail"), r, "color_nr_detail", 0.0, 100.0, SliderFeel::Int);
+                    changed |= Self::companion_slider(ui, lang, tr(lang, "Colour noise smoothness"), r, "color_nr_smooth", 0.0, 100.0, SliderFeel::Int);
                 }
                 // AI denoise as an ACTIVE op: run now, see it on canvas —
                 // export-time denoise (the Export section toggle) stays for
@@ -1075,44 +1437,104 @@ impl AutoShadeApp {
         changed
     }
 
-    /// 效果 — the nine `Tier::CarriedOnly` globals (R25 B2): Lightroom's
-    /// post-crop vignette and film grain.
+    /// ▦ 堆栈 — several frames of one scene merged into a new negative.
     ///
-    /// Every slider here moves a number and NO pixel in this app, which
-    /// `ARCHITECTURE.md` calls the worst kind of bug there is — so each one
-    /// says so in its own tooltip, on the head line, before the drag grammar.
-    /// The values are real and they are not decoration: they round-trip
-    /// through the sidecar, so a Lightroom edit survives an AutoShade save
-    /// instead of being stripped by the merge.
+    /// The ACTIVE card's frame is the reference and the picked frames join it;
+    /// the result is a new ▦ card. Every input the verb reads is drawn in this
+    /// fold (the user decision of 2026-09-12): which merge to run, and whether
+    /// the frames are registered already.
+    ///
+    /// It returns nothing because it changes no recipe field — the merge
+    /// writes a master and pushes a card, which is not an edit of the develop
+    /// the panel is holding.
+    fn dev_stack(&mut self, ui: &mut egui::Ui) {
+        let lang = self.lang;
+        // The section's ● says this photo HAS a stacked card, which is the
+        // only state this fold owns that outlives the click.
+        let has = self.variants.iter().any(|v| v.kind == VariantKind::Stacked);
+        ui.add_space(SPACE_MD);
+        egui::CollapsingHeader::new(section_title(tr(lang, "Stack"), has))
+            .id_salt("sec_stack")
+            .default_open(false)
+            .show(ui, |ui| {
+                ui.label(
+                    egui::RichText::new(tr(
+                        lang,
+                        "Merge several frames of one scene into a new ▦ negative. This card's frame is the reference — its framing and its exposure are the ones the result keeps — and the frames you pick join it.",
+                    ))
+                    .small(),
+                );
+                ui.add_space(SPACE_SM);
+                egui::ComboBox::from_id_salt("stack_kind")
+                    .selected_text(tr(lang, self.stack_kind.label()))
+                    .show_ui(ui, |ui| {
+                        for k in autoshade::stack::merge::StackKind::ALL {
+                            ui.selectable_value(&mut self.stack_kind, k, tr(lang, k.label()));
+                        }
+                    })
+                    .response
+                    .on_hover_text(tr(
+                        lang,
+                        "HDR merge: an exposure bracket into one frame holding the whole range, with the recovered stops handed to the SDR rendition section. Exposure fusion: the same bracket blended where each frame looks best, with no HDR in between — a finished picture rather than data. Focus stack: a focus sweep into one frame sharp throughout. Noise stack: repeated frames of a still scene averaged, so the signal adds and the noise does not, and anything that moved through one frame is dropped.",
+                    ));
+                ui.checkbox(&mut self.stack_tripod, tr(lang, "Shot on a tripod (skip alignment)"))
+                    .on_hover_text(tr(
+                        lang,
+                        "Alignment is the expensive half of a stack, and on frames that really are registered there is nothing for it to find — measured on a five-frame noise stack, the grain fell 2.03x with it skipped and 1.97x with it running. Leave it off for handheld frames.",
+                    ));
+                ui.add_space(SPACE_SM);
+                ui.horizontal(|ui| {
+                    let ready = self.src_path.is_some() && !self.busy;
+                    if action(ui, ready, tr(lang, "▦ Stack with other frames…"))
+                        .on_hover_text(tr(
+                            lang,
+                            "Pick the other frames of this scene. They must be the same size as this one; the merge runs at full resolution and lands as a new ▦ card carrying this card's develop, and the frame you started from keeps its pixels.",
+                        ))
+                        .clicked()
+                        && let Some(extra) = photo_files_dialog()
+                    {
+                        self.start_stack(extra);
+                    }
+                });
+            });
+    }
+
+    /// 效果 — Lightroom's post-crop vignette and film grain.
+    ///
+    /// All nine RENDER since v1.5.0 (`render/finish.rs`, the stage this engine
+    /// grew after its crop), so none of them carries the "moves a number and
+    /// no pixel" disclosure any more. The five COMPANIONS (Midpoint, Feather,
+    /// Style, Grain size and roughness) show the value the engine actually
+    /// renders — Lightroom's own default while the recipe holds none — and a
+    /// reset returns them to absent (`companion_slider`).
     fn dev_effects(&mut self, ui: &mut egui::Ui, effects_active: bool) -> bool {
         let lang = self.lang;
         let mut changed = false;
 
         ui.add_space(SPACE_MD);
-        // ONE disclosure line, shared by all nine (see `slider_hinted`: the
-        // helpers return `bool`, so a caller cannot chain its own tooltip, and
-        // two stacked bubbles over one widget is not a disclosure).
-        let carried = tr(lang, "Carried to Lightroom, not rendered here");
         egui::CollapsingHeader::new(section_title(tr(lang, "Effects"), effects_active))
             .id_salt("sec_effects")
             .default_open(false)
             .show(ui, |ui| {
                 let r = &mut self.recipe;
                 ui.label(egui::RichText::new(tr(lang, "Post-crop vignetting")).weak().small());
-                changed |= Self::slider_hinted(ui, lang, tr(lang, "Vignette amount"), &mut r.post_crop_vignette, -100.0, 100.0, 0.0, carried);
-                changed |= Self::slider_hinted(ui, lang, tr(lang, "Midpoint"), &mut r.post_crop_vignette_mid, 0.0, 100.0, 0.0, carried);
-                changed |= Self::slider_hinted(ui, lang, tr(lang, "Vignette feather"), &mut r.post_crop_vignette_feather, 0.0, 100.0, 0.0, carried);
-                changed |= Self::slider_hinted(ui, lang, tr(lang, "Vignette roundness"), &mut r.post_crop_vignette_round, -100.0, 100.0, 0.0, carried);
+                changed |= Self::slider(ui, lang, tr(lang, "Vignette amount"), &mut r.post_crop_vignette, -100.0, 100.0, 0.0);
+                changed |= Self::companion_slider(ui, lang, tr(lang, "Midpoint"), r, "post_crop_vignette_mid", 0.0, 100.0, SliderFeel::Int);
+                changed |= Self::companion_slider(ui, lang, tr(lang, "Vignette feather"), r, "post_crop_vignette_feather", 0.0, 100.0, SliderFeel::Int);
+                changed |= Self::slider(ui, lang, tr(lang, "Vignette roundness"), &mut r.post_crop_vignette_round, -100.0, 100.0, 0.0);
                 // An operator INDEX (1/2/3), not a band: the ≥20-width rule in
                 // `slider_hinted` would give this 0.01 steps and two decimals,
-                // which is not a thing Adobe's Style can be.
-                changed |= Self::slider_impl(ui, lang, tr(lang, "Vignette style"), &mut r.post_crop_vignette_style, 0.0, 3.0, 0.0, SliderFeel::Int, carried);
-                changed |= Self::slider_hinted(ui, lang, tr(lang, "Vignette highlights"), &mut r.post_crop_vignette_hl, 0.0, 100.0, 0.0, carried);
+                // which is not a thing Adobe's Style can be. The track starts
+                // at 1 because 1/2/3 are all the operators there are — 0 is
+                // "the sidecar named none", which a reset (double-click) still
+                // reaches by landing on the companion default.
+                changed |= Self::companion_slider(ui, lang, tr(lang, "Vignette style"), r, "post_crop_vignette_style", 1.0, 3.0, SliderFeel::Int);
+                changed |= Self::slider(ui, lang, tr(lang, "Vignette highlights"), &mut r.post_crop_vignette_hl, 0.0, 100.0, 0.0);
                 ui.add_space(SPACE_SM);
                 ui.label(egui::RichText::new(tr(lang, "Grain")).weak().small());
-                changed |= Self::slider_hinted(ui, lang, tr(lang, "Grain amount"), &mut r.grain, 0.0, 100.0, 0.0, carried);
-                changed |= Self::slider_hinted(ui, lang, tr(lang, "Grain size"), &mut r.grain_size, 0.0, 100.0, 0.0, carried);
-                changed |= Self::slider_hinted(ui, lang, tr(lang, "Grain roughness"), &mut r.grain_rough, 0.0, 100.0, 0.0, carried);
+                changed |= Self::slider(ui, lang, tr(lang, "Grain amount"), &mut r.grain, 0.0, 100.0, 0.0);
+                changed |= Self::companion_slider(ui, lang, tr(lang, "Grain size"), r, "grain_size", 0.0, 100.0, SliderFeel::Int);
+                changed |= Self::companion_slider(ui, lang, tr(lang, "Grain roughness"), r, "grain_rough", 0.0, 100.0, SliderFeel::Int);
             });
         changed
     }
@@ -1131,9 +1553,11 @@ impl AutoShadeApp {
         // `exp_quality` in dev_export) PLUS the in-camera profile's two
         // rendered components, which are not registry rows of their own:
         // `lens_profile` is one engine-only carrier and belongs to no family.
-        // R25 B3 added `lens_effects` — the manual CA pair (rendered), the
-        // auto-CA switch and the six de-fringe keys (carried). Same OR as the
-        // Detail section above, same reason.
+        // R25 B3 added `lens_effects` — the manual CA pair, the auto-CA switch
+        // and the six de-fringe keys. Same OR as the Detail section above,
+        // same reason. (Those seven were carried and unrendered until v1.5.0;
+        // the family's tiers are uniform now, and the four hue-window sliders
+        // are `DOT_EXEMPT` because a window with no amount corrects nothing.)
         let lens_active = CONTROL_FAMILIES
             .iter()
             .filter(|f| f.name == "lens" || f.name == "lens_effects")
@@ -1229,6 +1653,20 @@ impl AutoShadeApp {
                 // and the sidecar all agree. The pair sits under the
                 // distortion slider because it is the same kind of thing —
                 // an optical defect, not a mood.
+                // The PROFILE's own two strengths (v1.5.0). They belong with
+                // the profile's tick boxes above, not with the manual sliders
+                // below: they scale what the profile does, and at 0 they are
+                // that component's off switch — which is why they are drawn
+                // even when this photo has no profile data, so a recipe
+                // imported from Lightroom shows what it carries.
+                ui.add_space(SPACE_SM);
+                ui.label(egui::RichText::new(tr(lang, "Profile correction strength")).weak().small());
+                {
+                    let r = &mut self.recipe;
+                    let hint = tr(lang, "100 = exactly what the profile says; 0 switches that component off.");
+                    changed |= Self::slider_hinted(ui, lang, tr(lang, "Distortion amount"), &mut r.lens_profile_distortion_scale, 0.0, 200.0, 100.0, hint);
+                    changed |= Self::slider_hinted(ui, lang, tr(lang, "Vignetting amount"), &mut r.lens_profile_vignetting_scale, 0.0, 200.0, 100.0, hint);
+                }
                 ui.add_space(SPACE_SM);
                 ui.label(egui::RichText::new(tr(lang, "Chromatic aberration (manual)")).weak().small());
                 {
@@ -1236,13 +1674,16 @@ impl AutoShadeApp {
                     changed |= Self::slider(ui, lang, tr(lang, "Red / cyan"), &mut r.ca_r, -100.0, 100.0, 0.0);
                     changed |= Self::slider(ui, lang, tr(lang, "Blue / yellow"), &mut r.ca_b, -100.0, 100.0, 0.0);
                 }
-                // …and the CARRIED half of the same panel: Adobe's auto
-                // switch and the whole de-fringe block. Every one of these
-                // says on its own tooltip that it moves no pixel here.
-                let carried = tr(lang, "Carried to Lightroom, not rendered here");
+                // …and the rest of the same panel: Adobe's auto switch and the
+                // whole de-fringe block. Carried and unrendered until v1.5.0;
+                // the switch is an INSTRUCTION, so its tooltip says what the
+                // instruction does rather than what the number means.
                 if ui
                     .checkbox(&mut self.recipe.auto_lateral_ca, tr(lang, "Auto lateral CA"))
-                    .on_hover_text(carried)
+                    .on_hover_text(tr(
+                        lang,
+                        "Measures this frame's own red/blue misalignment and adds the answer to the manual pair above.",
+                    ))
                     .changed()
                 {
                     changed = true;
@@ -1256,17 +1697,18 @@ impl AutoShadeApp {
                     // the one block in the recipe whose neutral is not zero,
                     // and the reset target has to say so or double-click
                     // would invent a 0..0 window).
-                    changed |= Self::slider_hinted(ui, lang, tr(lang, "Purple amount"), &mut r.defringe_purple, 0.0, 20.0, 0.0, carried);
-                    changed |= Self::slider_hinted(ui, lang, tr(lang, "Purple hue low"), &mut r.defringe_purple_lo, 0.0, 100.0, 30.0, carried);
-                    changed |= Self::slider_hinted(ui, lang, tr(lang, "Purple hue high"), &mut r.defringe_purple_hi, 0.0, 100.0, 70.0, carried);
-                    changed |= Self::slider_hinted(ui, lang, tr(lang, "Green amount"), &mut r.defringe_green, 0.0, 20.0, 0.0, carried);
-                    changed |= Self::slider_hinted(ui, lang, tr(lang, "Green hue low"), &mut r.defringe_green_lo, 0.0, 100.0, 40.0, carried);
-                    changed |= Self::slider_hinted(ui, lang, tr(lang, "Green hue high"), &mut r.defringe_green_hi, 0.0, 100.0, 60.0, carried);
+                    let window = tr(lang, "A hue window corrects nothing until its Amount is above 0.");
+                    changed |= Self::slider(ui, lang, tr(lang, "Purple amount"), &mut r.defringe_purple, 0.0, 20.0, 0.0);
+                    changed |= Self::slider_hinted(ui, lang, tr(lang, "Purple hue low"), &mut r.defringe_purple_lo, 0.0, 100.0, 30.0, window);
+                    changed |= Self::slider_hinted(ui, lang, tr(lang, "Purple hue high"), &mut r.defringe_purple_hi, 0.0, 100.0, 70.0, window);
+                    changed |= Self::slider(ui, lang, tr(lang, "Green amount"), &mut r.defringe_green, 0.0, 20.0, 0.0);
+                    changed |= Self::slider_hinted(ui, lang, tr(lang, "Green hue low"), &mut r.defringe_green_lo, 0.0, 100.0, 40.0, window);
+                    changed |= Self::slider_hinted(ui, lang, tr(lang, "Green hue high"), &mut r.defringe_green_hi, 0.0, 100.0, 60.0, window);
                 }
                 ui.add_space(SPACE_SM);
                 ui.label(
                     egui::RichText::new(tr(lang,
-                        "Vignette: positive brightens the corners (compensates falloff), negative darkens; a radial gain in linear light. Distortion: positive fixes barrel (wide-angle bulge), negative fixes pincushion (tele pinch); auto-scales to fill the frame, and masks / brush still position on the corrected image. Preview / export / XMP match. Manual CA renders here too; the auto-CA switch and de-fringe are carried to Lightroom without being rendered.",
+                        "Vignette: positive brightens the corners (compensates falloff), negative darkens; a radial gain in linear light. Distortion: positive fixes barrel (wide-angle bulge), negative fixes pincushion (tele pinch); auto-scales to fill the frame, and masks / brush still position on the corrected image. Preview / export / XMP match. Manual CA, the auto-CA switch and de-fringe all render here too.",
                     ))
                     .weak()
                     .small(),
@@ -1275,50 +1717,160 @@ impl AutoShadeApp {
         changed
     }
 
-    /// 变换 — Lightroom's Transform (Upright / Perspective) and Camera
-    /// Calibration blocks, the first members of `Tier::PassThrough` (R25 B4).
+    /// 变换 — Lightroom's Transform panel, RENDERED since v1.5.0 F6, plus what
+    /// is still carried verbatim beside it.
     ///
-    /// **READ-ONLY, and that is the design, not a shortcut.** Pass-through
-    /// means we never interpret these values: no band, no clamp, no neutral,
-    /// no idea what they do to a pixel. A slider needs all four. Offering one
-    /// would say "this app understands your Upright correction" about sixteen
-    /// strings it copies between two files without reading — and the app
-    /// already has a rule for a control that moves a number and no pixel
-    /// (`ARCHITECTURE.md`: "the worst kind of bug here"). What the section
-    /// owes the photographer is the OPPOSITE of a slider: proof the values
-    /// are still there, and one sentence saying we do not touch them.
+    /// R25 B4 drew this section read-only, and said why: pass-through meant no
+    /// band, no clamp, no neutral and no idea what a value did to a pixel, and a
+    /// slider needs all four. F6 supplies all four — the eight `crs:Perspective*`
+    /// keys are owned controls with measured neutrals, and
+    /// `render::perspective` is the stage that moves the pixels — so the sliders
+    /// are now honest. What remains carried is the ASSUMPTIONS Lightroom's own
+    /// Upright solver worked from (its version stamp, and the centre and focal
+    /// length it took the photograph to have) and the camera profile's name,
+    /// and those keep the old treatment: Adobe's own property spelling, and a
+    /// sentence saying we do not interpret them. Its cached ANSWER — the
+    /// matrices, their count, its preview flag and its staleness digest — is
+    /// not carried at all; see [`crate::xmp::PASSTHROUGH_CRS`] for why.
     ///
-    /// Absent from the recipe ⇒ absent from the panel: a heading over an
-    /// empty list is a promise about a file that never had one.
-    ///
-    /// The rows show Adobe's own `crs:` property names, not friendly labels —
-    /// the honest spelling for something we cannot describe in our own words.
-    /// `CameraProfile` is the exception, because its VALUE is a name the
-    /// photographer chose in Lightroom's profile browser rather than an
-    /// internal of the Upright solver.
-    fn dev_transform(&mut self, ui: &mut egui::Ui) -> bool {
+    /// (The Calibration panel used to share this heading. It renders since
+    /// v1.5.0 — `dev_calibration` above — and was never in this map: R25
+    /// listed seven `CameraCalibration*` keys Lightroom does not write.)
+    fn dev_transform(&mut self, ui: &mut egui::Ui, transform_active: bool) -> bool {
         let lang = self.lang;
-        if self.recipe.passthrough.is_empty() {
-            return false;
-        }
+        let mut changed = false;
         ui.add_space(SPACE_MD);
-        // BOTH blocks in the heading: the section carries Lightroom's
-        // Transform panel AND its Calibration panel, and naming only the first
-        // would send someone looking for their camera profile in the wrong
-        // place. No ● — the dot means "an adjustment is active but collapsed",
-        // and there is no adjustment here to be active.
-        egui::CollapsingHeader::new(format!(
-            "{} / {}",
-            tr(lang, "Transform"),
-            tr(lang, "Calibration")
-        ))
+        egui::CollapsingHeader::new(section_title(tr(lang, "Transform"), transform_active))
             .id_salt("sec_transform")
             .default_open(false)
             .show(ui, |ui| {
+                // Upright is a MODE, so a dropdown and not a slider — and the
+                // one control in this panel whose answer may come from either
+                // side: Lightroom publishes the matrix its own solver found
+                // (`crs:UprightTransform_N`), and when the photo carries none
+                // for the chosen mode this engine solves it
+                // (`render::perspective::solve_upright`).
+                const MODES: [&str; 6] =
+                    ["Off", "Auto", "Level", "Vertical", "Full", "Guided"];
+                let mut mode = self.recipe.perspective_upright.round().clamp(0.0, 5.0) as usize;
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new(tr(lang, "Upright")).small());
+                    egui::ComboBox::from_id_salt("upright_mode")
+                        .selected_text(tr(lang, MODES[mode]))
+                        .width(90.0)
+                        .show_ui(ui, |ui| {
+                            for (i, name) in MODES.iter().enumerate() {
+                                ui.selectable_value(&mut mode, i, tr(lang, name));
+                            }
+                        });
+                });
+                if mode as f32 != self.recipe.perspective_upright {
+                    self.recipe.perspective_upright = mode as f32;
+                    changed = true;
+                }
+                // Which side will answer, said out loud — the difference
+                // between "Adobe's numbers to the last digit" and "our own
+                // solver, which may differ slightly" is exactly what a
+                // photographer comparing the two apps needs to know.
+                if mode > 0 {
+                    let adobes = self
+                        .recipe
+                        .upright_transform
+                        .get(mode)
+                        .is_some_and(|m| *m != [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]);
+                    // Named, in ONE array, for the i18n audit's dynamic-key
+                    // registry: a fourth answer added inline would reach the
+                    // screen with no zh pair and nothing would say so.
+                    const UPRIGHT_NOTES: [&str; 3] = [
+                        "Rendering the matrix Lightroom solved for this photo",
+                        "Guided needs the guides drawn in Lightroom; only the matrix it wrote can be rendered",
+                        "Lightroom solved no matrix for this photo, so AutoShade solves it from the picture's own lines",
+                    ];
+                    // `upright_note`, not `note`: the i18n audit registers a
+                    // dynamic call site by the SPELLING of its argument, and a
+                    // bare `note` would have been a pattern wide enough to
+                    // accept some future unaudited key somewhere else.
+                    let upright_note = if adobes {
+                        UPRIGHT_NOTES[0]
+                    } else if mode == 5 {
+                        UPRIGHT_NOTES[1]
+                    } else {
+                        UPRIGHT_NOTES[2]
+                    };
+                    ui.label(egui::RichText::new(tr(lang, upright_note)).weak().small());
+                }
+                ui.add_space(SPACE_SM);
+                changed |= Self::slider(ui, lang, tr(lang, "Vertical"), &mut self.recipe.perspective_vertical, -100.0, 100.0, 0.0);
+                changed |= Self::slider(ui, lang, tr(lang, "Horizontal"), &mut self.recipe.perspective_horizontal, -100.0, 100.0, 0.0);
+                // DEGREES, unlike every other slider here, and Lightroom's own
+                // band is ±10 — so the label says so rather than letting a
+                // −100..100 habit read the number wrong.
+                changed |= Self::slider(ui, lang, tr(lang, "Rotate (°)"), &mut self.recipe.perspective_rotate, -10.0, 10.0, 0.0);
+                changed |= Self::slider(ui, lang, tr(lang, "Transform scale"), &mut self.recipe.perspective_scale, 0.0, 200.0, 100.0);
+                changed |= Self::slider(ui, lang, tr(lang, "Aspect"), &mut self.recipe.perspective_aspect, -100.0, 100.0, 0.0);
+                changed |= Self::slider(ui, lang, tr(lang, "X offset"), &mut self.recipe.perspective_x, -100.0, 100.0, 0.0);
+                changed |= Self::slider(ui, lang, tr(lang, "Y offset"), &mut self.recipe.perspective_y, -100.0, 100.0, 0.0);
+                if ui
+                    .checkbox(&mut self.recipe.crop_constrain_to_warp, tr(lang, "Constrain crop"))
+                    .on_hover_text(tr(lang, "Shrink the crop until it lies inside the warped frame instead of showing the empty corners"))
+                    .changed()
+                {
+                    changed = true;
+                }
+                ui.add_space(SPACE_SM);
+                ui.label(
+                    egui::RichText::new(tr(lang,
+                        "One projective map, after the lens correction and before the straighten. Preview / export / XMP match. Upright renders the matrix Lightroom published when there is one; the sliders were measured against Lightroom's own exports. A keystone frames a little differently — Lightroom also stretches that axis, by an amount its lens sets.",
+                    ))
+                    .weak()
+                    .small(),
+                );
+                // v1.5.0 F7 — WHICH rendering this photograph starts from.
+                // Read-only here on purpose: the profile is a file on the
+                // photographer's machine and the Look is Adobe's own creative
+                // block, so the panel's job is to say what is being used, not
+                // to offer a picker for something the sidecar decides.
+                let look = self.recipe.look.clone();
+                if !self.recipe.camera_profile.is_empty() || look.is_some() {
+                    ui.add_space(SPACE_MD);
+                    let pair = |ui: &mut egui::Ui, label: String, value: &str| {
+                        ui.horizontal(|ui| {
+                            ui.label(egui::RichText::new(label).small());
+                            ui.label(egui::RichText::new(value).small().strong());
+                        });
+                    };
+                    if !self.recipe.camera_profile.is_empty() {
+                        pair(
+                            ui,
+                            tr(lang, "Camera profile").to_string(),
+                            &self.recipe.camera_profile,
+                        );
+                    }
+                    if let Some(look) = look.as_ref().filter(|l| !l.name.is_empty()) {
+                        pair(ui, tr(lang, "Creative profile").to_string(), &look.name);
+                        // Named, not hidden: the creative colour table is the
+                        // one half of a Look this engine cannot render, and a
+                        // panel that showed the name without saying so would be
+                        // claiming the whole profile.
+                        if !look.table.is_empty() {
+                            ui.label(
+                                egui::RichText::new(tr(lang,
+                                    "Its baked tone curve and sliders render; its creative colour table does not",
+                                ))
+                                .weak()
+                                .small(),
+                            );
+                        }
+                    }
+                }
+                if self.recipe.passthrough.is_empty() {
+                    return;
+                }
+                ui.add_space(SPACE_MD);
                 // In PASSTHROUGH_CRS order (Adobe's own grouping), which is
                 // also the order the writer emits — one order everywhere, so
                 // the panel and the sidecar read the same way.
-                let rows = |ui: &mut egui::Ui, caption: &str, keys: &[&str]| {
+                let rows = |ui: &mut egui::Ui, caption: Option<&str>, keys: &[&str]| {
                     let present: Vec<(&str, &str)> = keys
                         .iter()
                         .filter_map(|k| {
@@ -1328,29 +1880,22 @@ impl AutoShadeApp {
                     if present.is_empty() {
                         return;
                     }
-                    ui.label(egui::RichText::new(caption).weak().small());
+                    if let Some(caption) = caption {
+                        ui.label(egui::RichText::new(caption).weak().small());
+                    }
                     for (key, value) in present {
                         ui.horizontal(|ui| {
-                            let label = if key == "CameraProfile" {
-                                tr(lang, "Camera profile").to_string()
-                            } else {
-                                format!("crs:{key}")
-                            };
-                            ui.label(egui::RichText::new(label).small());
+                            ui.label(egui::RichText::new(format!("crs:{key}")).small());
                             ui.label(egui::RichText::new(value).small().strong());
                         });
                     }
                 };
-                // Partitioned by the KEY, not by a hard-coded midpoint: the
-                // two groups are complements, so a seventeenth key lands in
-                // one of them instead of falling off the end of a `split_at`.
-                let keys = autoshade::xmp::PASSTHROUGH_CRS;
-                let perspective: Vec<&str> =
-                    keys.iter().copied().filter(|k| k.starts_with("Perspective")).collect();
-                let calibration: Vec<&str> =
-                    keys.iter().copied().filter(|k| !k.starts_with("Perspective")).collect();
-                rows(ui, tr(lang, "Perspective correction"), &perspective);
-                rows(ui, tr(lang, "Camera calibration"), &calibration);
+                // Every carried key, in the block's own order. The partition
+                // this used to make had two groups because the profile NAME was
+                // carried alongside the solver's bookkeeping; F7 made the name
+                // an owned control shown above, so what is left is one block
+                // with one caption.
+                rows(ui, Some(tr(lang, "Upright solver bookkeeping")), &autoshade::xmp::PASSTHROUGH_CRS);
                 ui.add_space(SPACE_SM);
                 ui.label(
                     egui::RichText::new(tr(
@@ -1361,8 +1906,7 @@ impl AutoShadeApp {
                     .small(),
                 );
             });
-        // Nothing here can change the recipe — that is the whole point.
-        false
+        changed
     }
 
     /// One develop-panel section — body extracted verbatim from

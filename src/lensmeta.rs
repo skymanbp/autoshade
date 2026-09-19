@@ -170,7 +170,7 @@ pub fn read(path: &Path) -> LensProfile {
                 let m = text(ExifTag::LensModel);
                 if m.is_empty() { text(ExifTag::LensMake) } else { m }
             };
-            match crate::lcp::solve_mask_warp(
+            match crate::lcp::solve(
                 None,
                 &text(ExifTag::Make),
                 &lens,
@@ -178,9 +178,24 @@ pub fn read(path: &Path) -> LensProfile {
                 dims,
                 MASK_WARP_KNOTS,
             ) {
-                Ok(w) => {
-                    out.mask_warp = w;
+                Ok(maps) => {
+                    out.mask_warp = maps.mask_warp;
                     out.mask_warp_src = MaskWarpSource::Lcp;
+                    // v1.5.0: the same node also RENDERS. Only into a component
+                    // the camera left empty — an in-camera spline is this
+                    // photo's own measurement and outranks a lens-model average
+                    // from a profile database, so this fills a hole and never
+                    // overwrites. A body with no correction metadata at all
+                    // used to render with no lens correction while Lightroom
+                    // rendered one; that was the gap, and it closes here rather
+                    // than at a render surface, because every surface already
+                    // reads these two fields.
+                    if out.distortion.is_empty() && !maps.distortion.is_empty() {
+                        out.distortion = maps.distortion;
+                    }
+                    if out.vignette.is_empty() && !maps.vignette.is_empty() {
+                        out.vignette = maps.vignette;
+                    }
                 }
                 Err(r) => out.mask_warp_src = r.into(),
             }

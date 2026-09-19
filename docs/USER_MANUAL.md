@@ -40,17 +40,184 @@ curves, HSL, color grading, texture, clarity, dehaze, noise reduction,
 sharpening, vignette, crop, and lens-related settings, rendered through the
 same engine as `autoshade apply`.
 
+Every slider in the **Effects** fold renders since v1.5.0 too. The post-crop
+vignette is centred on the **crop**, not on the frame — that is the whole point
+of its name — with Midpoint placing the falloff, Feather softening it,
+Roundness running from a rounded rectangle through the crop's own ellipse to a
+circle, and the three Styles behaving the way Lightroom describes them:
+Highlight Priority spares bright pixels channel by channel (and can shift their
+colour), Colour Priority spares them by the pixel's brightness (and cannot),
+Paint Overlay simply mixes toward black or white. Grain is sized in pixels of
+the full-resolution photo like the Detail radii, and it is the same grain every
+time you export — never a fresh sprinkle of random noise. These nine are
+first-principles readings of operators Adobe has not published, so expect a
+family resemblance to Lightroom rather than a pixel match.
+
+Every slider in the **Detail** fold renders since v1.5.0: Sharpening with its
+radius, detail and masking, and both noise reductions with their detail,
+contrast and smoothness (before, eight of them only reached the Lightroom
+sidecar). As in Lightroom, the radii are measured in pixels of the
+full-resolution photo, so the canvas shows them the way the export looks once
+it is shrunk to the canvas: a 1-pixel sharpening radius on a 61 MP frame is
+subtle on screen and plain in the exported file. A slider whose Lightroom
+default is not zero (radius 1.0, sharpen detail 25, the noise detail and
+smoothness sliders 50) shows that default until you move it; setting it to 0
+writes a real 0 to the sidecar. These operators are AutoShade's own, built from
+what Adobe documents about each slider — close to Lightroom, not identical.
+
+The **Lens** fold finishes the set since v1.5.0. **Remove chromatic
+aberration** used to be carried to the sidecar and nothing else — it is an
+instruction, not a number, so rendering it means running the solver it names:
+AutoShade measures this frame's own red-to-green and blue-to-green
+magnification error and adds the answer to the manual Red/Cyan and Blue/Yellow
+sliders, in their own units, so a preview and the export agree and you can see
+what it decided. **Defringe** renders too, with its purple and green Amounts
+and the four hue sliders that set which hues each one acts on: where a
+high-contrast edge carries one of those hues, the fringe loses its colour and
+keeps its brightness, so a purple subject that is not on an edge is never
+touched. Adobe has never published what its 0–100 hue numbers mean in degrees,
+so that mapping is AutoShade's own — its defaults (30/70 purple, 40/60 green)
+land on the violet-to-magenta and the narrow green a fast lens really fringes
+with. A hue window on its own corrects nothing until its Amount is above 0.
+
+The same fold gained Lightroom's two **profile correction strengths**
+(Distortion amount and Vignetting amount, 0–200 with 100 meaning "exactly what
+the profile says" and 0 switching that component off). They scale whichever
+profile this photo has — and since v1.5.0 that can be an **Adobe `.lcp`** read
+from the Camera Raw profiles installed on this machine, for bodies whose RAW
+carries no correction data of its own. AutoShade never bundles or redistributes
+Adobe's profiles; it reads the ones already on the computer, and a camera's own
+in-RAW measurement always outranks a profile-database average. A body with
+neither renders with no profile correction, exactly as before. If a Lightroom
+sidecar says the lens correction was switched off, AutoShade switches it off
+too — including the camera's own — so the canvas and Lightroom agree, and so
+masks and the pixels beside them are in the same frame. The manual Distortion,
+Vignetting and CA sliders are not the profile and are never touched by that
+switch.
+
+The **Transform** fold used to show Lightroom's perspective values and say we
+did not touch them. Since v1.5.0 it moves pixels. Vertical and Horizontal are
+the two keystones — the shape a building takes when the camera is tilted up or
+sideways — with Rotate, Scale, Aspect and the two Offsets beside them, and they
+run as one step after the lens correction and before the straighten, so masks
+and brushes stay on what they were painted on.
+
+Adobe has never published what a Transform slider does, so AutoShade measured
+it: fifteen test photographs were edited in Lightroom, one slider at a time, and
+each export compared against its own untouched version to work out the exact
+move Lightroom had made. Scale, Rotate, Aspect and the two Offsets now match to
+better than a percent. The two keystones match in shape, and differ in one way
+worth knowing about — Lightroom also stretches the picture slightly along the
+axis you are correcting, by an amount that depends on the LENS, and the test set
+was not large enough to work out that rule. So a keystone in AutoShade frames a
+little differently from the same keystone in Lightroom: a touch tighter on a
+long lens, a touch looser on a wide one. The shape of the correction itself is
+right.
+
+**Upright** is the dropdown above them, and it is the honest half of that
+sentence. Lightroom does not publish how its Upright solver works, but it DOES
+write the answer into the sidecar — one matrix per mode — so on a photo you
+corrected in Lightroom, AutoShade renders Lightroom's own result exactly, to
+the last digit. The panel says so while it is doing it. On a photo Lightroom
+never corrected, picking a mode here runs AutoShade's own solver instead: it
+reads the picture's long straight edges, finds where they would meet, and
+builds the turn that sends them parallel again — Level straightens, Vertical
+stands the verticals up, Full does both, Auto is a gentler Full. A photo with
+no strong lines gets no correction rather than a guess. Guided is the one mode
+AutoShade cannot solve: it needs the guide lines you draw in Lightroom, and
+those are not in the sidecar in any form, so only the matrix Lightroom already
+wrote can be rendered.
+
+A perspective correction can leave empty corners. Lightroom has a **Constrain
+crop** switch for that, and AutoShade now obeys it: off (which is what every
+Lightroom file in a real library says) the empty corners show and your own crop
+is what removes them, exactly as in Lightroom; on, the crop shrinks about its
+own centre — keeping its aspect ratio — until it sits inside the corrected
+frame. An Upright correction leaves no corners to fill: Lightroom already
+scales its own answer to cover the frame, and AutoShade's solver does the same.
+
+Under those controls the fold now names the **profile** this photo is developed
+through. Lightroom writes two: a camera profile (「Adobe Standard」 and the
+like, a file Adobe installed on your machine) and, above it, a creative profile
+— 「Adobe Color」 on almost every photo Lightroom has touched, or 「Adobe
+Landscape」, 「Adobe Monochrome」 and the rest if you picked one. Since v1.5.0
+AutoShade reads both and develops through them, which is a large part of why a
+photo now opens looking like it did in Lightroom rather than flatter.
+
+Both rows are read-only, and one of them carries a warning worth reading. A
+creative profile has two halves: a baked tone curve with a few baked sliders,
+which AutoShade renders, and a creative colour table, which Adobe stores in a
+form nobody outside Adobe can read. When a profile has one, the fold says so
+under its name rather than letting you assume the whole profile arrived. Colour
+may therefore sit slightly beside Lightroom's on those photos; tone will not.
+
+The **Curves** fold holds Lightroom's **parametric curve** too since v1.5.0:
+Highlights, Lights, Darks and Shadows sliders (±100) under the point curve, then
+the three splits that set where those regions meet. As in Lightroom the point
+curve is applied on top of it, and both go to the sidecar. A split cannot pass
+its neighbours, and moving a split changes nothing until a region slider moves.
+
+The **Color Mixer (HSL)** fold holds the whole of Lightroom's Color Mixer since
+v1.5.0. **Black & White** at the top of the fold develops the photo to grey and
+swaps the eight colour bands for the **B&W mix**, where each band decides how
+light the greys that came from that colour turn; colour grading still tints the
+result, which is how a split-toned black and white is made. A photo whose
+creative profile is a monochrome one — 「Adobe Monochrome」 and its relatives —
+develops to grey with this switch still off, because in Lightroom the profile is
+what made it black and white. Below the mixer,
+**Point Color** adds one swatch per colour you want to move on its own: click
+「💧 Pick a color」, then click that colour in the image, and the swatch appears
+with its own Hue, Saturation, Luminance and **Range** sliders — Range widens or
+narrows how much of the neighbouring colour it takes with it. A spot that is
+almost grey makes no swatch, because no swatch could move it. Swatches you made
+in Lightroom arrive with the photo and go back to the sidecar; a Lightroom file
+with no swatches keeps its empty block exactly as Lightroom wrote it.
+
+The **Calibration** fold is Lightroom's Calibration panel: the shadows tint and
+each primary's hue and saturation. These seven are the FIRST thing applied to
+the photo, so they move the colours every other section then works on — a
+Lightroom photo usually arrives with values already in them, and they used to
+be shown here without a way to change them.
+
+The **HDR & SDR** fold sits beside Export, because that is what it governs. If
+a photo was edited in Lightroom's HDR mode, its brightest stops sit ABOVE white
+rather than clipped at it, and **Headroom (stops)** is how many. AutoShade only
+ever writes SDR files, so what it renders is the same thing Lightroom would
+publish: the SDR rendition, shaped by the seven sliders under it — Blend,
+Brightness, Contrast, Highlights, Shadows, Whites, Clarity. **Blend** is how
+much of the headroom reaches that rendition: −100 ignores it entirely, 0 is the
+headroom the sidecar states, +100 is twice as many stops of it.
+
+Those seven only render while **HDR edit mode** is ticked, exactly as in
+Lightroom, where the panel is not there otherwise — so a value left over from
+an HDR session you later abandoned cannot quietly re-tone the photo. The values
+are still kept, still written back to the sidecar, and the fold still shows its
+● so nothing a file holds is invisible.
+
+No photo in the reference library ever turned HDR mode on, so this was the one
+part of the develop chain with nothing to check against. A test photograph was
+edited in Lightroom's HDR mode for that purpose, and the shoulder AutoShade
+rolls the headroom off with is now measured against it rather than reasoned
+about: it follows Lightroom's own curve closely at the top of the range, and
+holds back a little in the mid-tones, where Lightroom darkens slightly more
+than AutoShade does.
+
 **🤖 AI Denoise now** in the Detail fold denoises the active card's pixels at
 full resolution and lands the result as a new **◈ Denoised negative** card
 carrying that card's develop; the card you started from keeps its pixels, and
 there is no working-copy tier and no **Full-res** checkbox any more. A RAW is
 denoised on its sensor mosaic, before demosaic: the sidecar measures the
 frame's own noise model (variance = a·signal + b, per colour plane) and runs a
-non-blind DRUNet on the packed colour triplets under a variance-stabilising
+non-blind network on the packed colour triplets under a variance-stabilising
 transform, which is what keeps the texture — against ground truth on a 61 MP
 frame at its measured ISO-640 noise it scored 3.2–4.9 dB above the previous
 SCUNet path, and 3.1–5.9 dB on the most detailed blocks
-(`scripts/denoise_bench.py`). Nothing on that path may clip: the map into the
+(`scripts/denoise_bench.py`). Since v1.5.0 the network is **AutoShade's own**:
+the same architecture, trained for this pipeline on real noisy/clean pairs and
+synthetic sensor noise instead of the general-purpose weights it started from.
+It reads about 2 dB better on held-out pairs than those did, and its strength
+was set where its output has Lightroom's own texture — measured against
+Lightroom's Enhance→Denoise answer on fifteen of this photographer's frames. Nothing on that path may clip: the map into the
 model's range is built from the measured noise, not from this frame's own
 brightness histogram, so a star field's stars, a night scene's point lights and
 a specular highlight come back at their own brightness instead of at one shared
@@ -119,7 +286,8 @@ an honest re-derivation instead of presenting an older alpha as its result.
 ## 4. Use versions and variants
 
 A variant is one card for the same photo: **▣ Original**, **✨ AI generated**,
-**✎ Edited AI image**, **◭ Reverse-fit**, or **◈ Denoised negative**. Each card combines its own base
+**✎ Edited AI image**, **◭ Reverse-fit**, **◈ Denoised negative**, or
+**▦ Stacked**. Each card combines its own base
 pixels with one develop. `Ctrl+S` saves every card in the strip together.
 Switching cards is navigation, not an edit; reopening returns to the card that
 was active at the last save, not the last card viewed.
@@ -134,6 +302,52 @@ their develop with `Ctrl+S` and receive no Lightroom XMP (no sidecar can
 reproduce generated pixels). A photo saved by an earlier version with edits on
 its ✨ card opens split into ✨ + ✎ once, as unsaved work, and `Ctrl+S` keeps it
 that way.
+
+### Stack several frames into one negative
+
+Photographers shoot several frames of one scene for four reasons, and the
+**Stack** section of the Develop panel merges them for all four. The card you
+are standing on is the **reference** — the result keeps its framing and its
+exposure — and the frames you pick join it. Pick the merge, then
+**▦ Stack with other frames…**:
+
+* **HDR merge** — an exposure bracket into one frame that holds the whole
+  range. It measures each frame's exposure *from the pixels* rather than from
+  metadata, divides it back out, and weights each sample by how trustworthy it
+  is as a measurement, so a clipped highlight stops counting. The stops it
+  recovers above the reference frame's white are handed to the **HDR & SDR**
+  section, which arrives switched on with that much room — without it the
+  recovered highlights would be in the file and nothing would show them.
+* **Exposure fusion** — the same bracket with no HDR in between, blended
+  band by band from wherever each frame looks best (detail, colour and
+  exposure decide). A finished picture rather than data: no headroom can be
+  read back out of it, and none is claimed.
+* **Focus stack** — a focus sweep into one frame sharp throughout, each band
+  taken from the frame that resolved it.
+* **Noise stack** — repeated frames of a still scene averaged in linear light,
+  with the readings that disagree withdrawn, so the signal adds, the noise does
+  not, and somebody who walked through one frame is gone.
+
+Handheld frames are aligned first: a global affine (shift, rotation, scale and
+the breathing a zoom does between frames) refined by a local pass for a subject
+that moved on its own. Tick **Shot on a tripod** to skip it: on frames that
+really are registered there is nothing for the alignment to find, and looking
+costs a little. Measured on a five-frame noise stack, the grain fell by 2.03×
+with the alignment skipped and 1.97× with it running. The frames must all be
+the same size; the merge runs at full resolution.
+
+The result lands as a new **▦ Stacked** card carrying the develop you ran it
+from, and the frame you started from keeps its own pixels. While a ▦ card
+exists it *is* the negative: reverse-fit and reimagine read its master, and so
+does a further stack. Its status line reports how far the aligner had to move
+the worst frame, how much of the frame no source could cover, and — for an HDR
+merge — the stops it recovered. A `.xmp` from it carries the sliders only; the
+merged pixels live in the 16-bit master beside it in `./out`.
+
+In the browser the same four merges are in the **Stack** panel beside Heal.
+There is no variant strip there, so the merged master joins the session chain
+the way a heal does: every later develop, export and download follows it, and
+`Save` records it for reopening. On the command line it is `autoshade stack`.
 
 A version is a numbered snapshot of one card's develop at one moment. **＋ Save
 as version** writes `v<N>.recipe.json`, frozen `v<N>.mask-*.png` rasters, and
@@ -162,6 +376,19 @@ A **◈ Denoised negative** card is the negative AI-denoised into its own
 it, a `.xmp` from it carries the sliders only (run Lightroom's own Denoise
 there), and the export-time AI denoise sits out on it because its master is
 already denoised.
+
+**Spot removal you did in Lightroom comes across.** If a photo's `.xmp`
+carries Lightroom's healing — dust, a power line, somebody in the background —
+the Retouch panel opens with an **Imported removal** line saying how many areas
+it found, and the canvas already has them off. Those repairs are AutoShade's
+own: for all but the plainest kind Lightroom keeps its result in Adobe's store
+rather than in the sidecar, so the panel also says how many areas Adobe
+synthesised and leaves a **✨ Regenerate those areas** button, which paints
+exactly those shapes into the shared brush mask and re-runs the generative
+model over them (an empty prompt removes; the result lands as a new ✨ card
+like any other fill). One thing to know when you save: a merge into an existing
+`.xmp` keeps your original removal block untouched, but a sidecar written where
+none existed carries no removals at all, and the save line names that.
 
 A generative fill is not an in-place retouch. The model is shown the active
 card's developed picture — its sliders and masks applied, in the uncropped
@@ -374,6 +601,7 @@ autoshade match <src> <target> [--render] [--zoned] [--regions 2..4] [--strength
 autoshade correspond <source> <target> [-o|--out FILE]
 autoshade retouch <src> --mask FILE [--prompt TEXT] [--quality low|medium|high|auto] [--full-res] [-o|--out FILE]
 autoshade heal <src> [--mask FILE] [--no-auto] [--full-res] [-o|--out FILE]
+autoshade stack <frame1> <frame2> [frame3 ...] [--kind hdr|fuse|focus|noise] [--no-align] [--long-edge N] [-o|--out FILE]
 autoshade serve <dir> [-p|--port N]
 autoshade recipe-schema
 ```
@@ -395,6 +623,12 @@ removed in full from 0.5 up, and 1.0 is the model's whole output. `retouch`
 without `--prompt` removes what the mask covers — the area is continued from
 its surroundings and nothing new is put there; the GUI's and the browser's
 Generative Fill treat an empty prompt the same way.
+`stack` takes two or more frames of one scene, the FIRST being the reference
+whose framing and exposure the result keeps, and writes a 16-bit master; it
+prints each frame's measured exposure and alignment travel, and `--no-align`
+skips the alignment for frames shot on a tripod. After an HDR merge it also
+writes a recipe beside the master with the SDR rendition switched on and the
+recovered stops filled in, because that is the only way to reach them.
 
 ### Where your `.xmp` sidecars are — `--xmp-dir`
 
@@ -541,7 +775,8 @@ vision role.
 
 ## Lightroom and XMP interoperability
 
-AutoShade reads and writes sidecar XMP for global settings, point curves, HSL,
+AutoShade reads and writes sidecar XMP for global settings, point curves, the
+parametric curve, HSL, the B&W mixer, Point Color, camera calibration,
 crop, and supported local corrections; the writer merges owned fields into the
 existing document and preserves unmodeled content byte-for-byte instead of
 round-tripping the whole file through a general XML serializer. Linear and

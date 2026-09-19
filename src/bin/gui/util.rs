@@ -66,6 +66,13 @@ pub(crate) fn photo_file_dialog() -> Option<PathBuf> {
     rfd::FileDialog::new().add_filter("Photos", &photo_exts()).pick_file()
 }
 
+/// The plural, for the stack's door: several frames of one scene at once.
+/// Beside its singular deliberately, so both offer the one derived extension
+/// list rather than growing a second copy of it.
+pub(crate) fn photo_files_dialog() -> Option<Vec<PathBuf>> {
+    rfd::FileDialog::new().add_filter("Photos", &photo_exts()).pick_files()
+}
+
 /// Visualise a mask geometry on the image: linear = the zero→full vector with
 /// end bars (solid = full-effect side); radial = the ellipse outline. Clipped
 /// to the image rect by the painter.
@@ -576,9 +583,11 @@ pub(crate) fn xmp_loss_interrupts(
 /// [`xmp_loss_line`] says "the sidecar cannot carry what you are looking at".
 /// This says the reverse — "you are not looking at everything the sidecar
 /// carries" — and until R25 nothing did. B2 and B3 made that urgent: twenty-
-/// four `Tier::CarriedOnly` controls now round-trip through the sidecar
+/// four `Tier::CarriedOnly` controls round-tripped through the sidecar
 /// without moving one pixel here (policy SF4-C), and B4 added the pass-through
-/// blocks. Each slider says so in its own tooltip; this is the document-level
+/// blocks. v1.5.0 renders them batch by batch (the Detail section's eight
+/// first), and a family that renders leaves this sentence with no edit here.
+/// Each carried slider says so in its own tooltip; this is the document-level
 /// sentence, said at the moment the file is handed to Lightroom.
 ///
 /// NAMED BY SECTION, not by field. `post_crop_vignette_hl` is an internal
@@ -596,7 +605,7 @@ pub(crate) fn xmp_loss_interrupts(
 /// The B4 pass-through blocks do not reach here (`xmp::global_render_gaps`
 /// states why): with no interpretation there is no neutral, so they would
 /// name themselves on every Lightroom photo. They disclose through the
-/// develop panel's own read-only Transform / Calibration section instead.
+/// develop panel's own read-only Transform / camera-profile section instead.
 pub(crate) fn render_gap_line(lang: Lang, gaps: &[&'static str]) -> Option<String> {
     use autoshade::advisor::catalogue::CONTROL_FAMILIES;
     if gaps.is_empty() {
@@ -606,7 +615,6 @@ pub(crate) fn render_gap_line(lang: Lang, gaps: &[&'static str]) -> Option<Strin
     for g in gaps {
         let label = match CONTROL_FAMILIES.iter().find(|f| f.members.contains(g)).map(|f| f.name) {
             Some("effects") => tr(lang, "Effects").to_string(),
-            Some("detail_effects") => tr(lang, "Detail").to_string(),
             Some("lens_effects") => tr(lang, "Lens").to_string(),
             _ => (*g).to_string(),
         };
@@ -1447,9 +1455,18 @@ pub(crate) fn build_preview(
     base: Arc<image::DynamicImage>,
     recipe: EditRecipe,
     show_clipping: bool,
+    film_short_edge: Option<u32>,
 ) -> PreviewDone {
-    let mut after = autoshade::render::develop_preview(&base, &recipe);
-    {
+    // The Detail panel's radii are FILM pixels (v1.5.0): developed against the
+    // source's own short edge, the canvas shows what the export will look like
+    // downscaled to it (`AutoShadeApp::film_short_edge`).
+    let mut after = autoshade::render::develop_preview_film(
+        &base,
+        &recipe,
+        &autoshade::diag::pixels(),
+        film_short_edge,
+    );
+    after = {
         // The COMPOSED profile (R25 B3): the manual CA pair folds onto the
         // same per-channel radius knots, so reading the raw profile here
         // would skip it on any photo with no in-camera CA data of its own.
@@ -1457,13 +1474,25 @@ pub(crate) fn build_preview(
         // the result below (a borrow held by a value with a destructor lives
         // to the end of its scope).
         let geom = autoshade::render::geometry_profile(&recipe);
-        if geom.geometry_active() || recipe.lens_distortion != 0.0 {
-            after = autoshade::render::apply_lens_geometry(&after, &geom, recipe.lens_distortion);
-        }
-    }
-    if recipe.straighten_deg != 0.0 {
-        after = autoshade::render::rotate_straighten(&after, recipe.straighten_deg);
-    }
+        // The ENGINE's tail, not a copy of it (v1.5.0): lens geometry →
+        // straighten → crop → the post-crop vignette and grain, from the same
+        // `frame_and_finish` the export runs, so the canvas cannot drift from
+        // what ships. `CropPolicy::Keep` — this preview stays FULL-FRAME on
+        // purpose (see the histogram note below), so the finishing pass is
+        // POSITIONED on the crop rectangle instead of cutting it.
+        let film = autoshade::render::FilmScale::of(
+            film_short_edge,
+            after.width() as usize,
+            after.height() as usize,
+        );
+        autoshade::render::frame_and_finish(
+            after,
+            &recipe,
+            &geom,
+            film,
+            autoshade::render::CropPolicy::Keep,
+        )
+    };
     // into_rgb8 MOVES the buffer in the common no-geometry case (develop_preview
     // returns ImageRgb8) — to_rgb8() deep-copied ~3.3 MB per tick at 1280.
     let rgb = after.into_rgb8();

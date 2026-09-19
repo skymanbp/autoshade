@@ -52,9 +52,16 @@ Method (every step measured in the 2026-09-15 probe, none assumed):
      NOISE MODEL — 0, the GAT's own floor, to max gat(1), the largest z any
      plane can reach — never off percentiles of this frame's data, so no real
      sample can fall outside it. `SIGMA_SCALE` × its slope is the sigma.
-  4. DRUNet-colour (KAIR, non-blind: the sigma rides in as a 4th channel) on
-     two triplets, (R, G1, B) and (R, G2, B); R and B are the mean of their
-     two estimates, G1 / G2 come from their own triplet.
+  4. DRUNet-colour (KAIR's architecture, non-blind: the sigma rides in as a
+     4th channel) on two triplets, (R, G1, B) and (R, G2, B); R and B are the
+     mean of their two estimates, G1 / G2 come from their own triplet. Since
+     v1.5.0 the WEIGHTS are AutoShade's own: DPIR's released `drunet_color`
+     fine-tuned on this exact pipeline — real RawNIND pairs and synthetic
+     sensor noise over the operator's own low-ISO frames, the loss taken in
+     the stabilised z domain the model actually sees (`scripts/train_raw.py`).
+     It is trained for THIS transform, so it beats the generic weights by
+     1.98 dB on held-out pairs at the shipped operating point and by 7.8 dB on
+     the noisiest bin at its own.
   5. Exact unbiased inverse of the GAT (Mäkitalo & Foi 2013): with D the
      denormalised z, I_A(D) = ¼D² + ¼√(3/2)·D⁻¹ − 11/8·D⁻² + 5/8√(3/2)·D⁻³ − 1/8
      and x̂ = a·(I_A(D) − b/a²).
@@ -63,7 +70,10 @@ Method (every step measured in the 2026-09-15 probe, none assumed):
 
 Every downloaded file — the weights and the two network files — is fetched
 through `denoise._fetch_verified` and verified against a pinned sha256 and
-byte count BEFORE it is executed or unpickled. Both upstreams are MIT.
+byte count BEFORE it is executed or unpickled. KAIR's architecture files are
+MIT; the weights are AutoShade's, released under the project's own licence,
+and the pairs they were fine-tuned on come from RawNIND (Brummer & De Vleeschouwer,
+CC BY-SA 4.0) — credited in `docs/TECH_STACK.md` with the training recipe.
 
 Exit code 0 on success; 2 with one sentence on stderr for a refusal.
 """
@@ -89,6 +99,9 @@ TAG = "denoise_raw"
 
 _KAIR_RELEASE = "https://github.com/cszn/KAIR/releases/download/v1.0"
 _KAIR_RAW = "https://raw.githubusercontent.com/cszn/KAIR"
+# The fine-tuned weights ride with the release that introduced them, so a
+# given AutoShade always fetches the network it was measured with.
+_AUTOSHADE_RELEASE = "https://github.com/skymanbp/autoshade/releases/download/v1.5.0"
 # PINNED to immutable commits (the last commit that touched each file, read
 # from the GitHub commits API on 2026-09-15) — `network_unet.py` is EXECUTED
 # and `basicblock.py` is imported by it, so a branch name here would mean
@@ -96,14 +109,20 @@ _KAIR_RAW = "https://raw.githubusercontent.com/cszn/KAIR"
 NETWORK_COMMIT = "345c87f8364322c40eef52e575f98af893f04126"
 BASICBLOCK_COMMIT = "5d55a5fb88d20eb811dc7ccf6342b921039191cf"
 # sha256 + exact byte count of every file this sidecar downloads, verified
-# 2026-09-15 by fetching each at its pinned commit / release asset and
-# hashing the bytes. The weights are a PICKLE handed to torch, so the CHANNEL
-# is authenticated here and the loader is flagged below (weights_only).
+# 2026-09-15 (the two architecture files) and 2026-09-17 (the weights) by
+# fetching each at its pinned commit / release asset and hashing the bytes.
+# The weights are a PICKLE handed to torch, so the CHANNEL is authenticated
+# here and the loader is flagged below (weights_only).
+#
+# `drunet_color.pth` (sha256 479abe3c…, 130,579,305 B) is no longer fetched:
+# it is what the fine-tune STARTED from, and every one of its 32,640,960
+# parameters moved, so the release below is self-contained and the sidecar
+# downloads 130 MB once instead of twice.
 PINS = {
-    "drunet_color.pth": {
-        "url": f"{_KAIR_RELEASE}/drunet_color.pth",
-        "sha256": "479abe3c5327dfd10ff54a80ec7d4098ca80752a5c9492cdff31cee430bec4b4",
-        "bytes": 130579305,
+    "autoshade-raw-denoise-v1.pth": {
+        "url": f"{_AUTOSHADE_RELEASE}/autoshade-raw-denoise-v1.pth",
+        "sha256": "6929ddd6b11b3f27baf3537d92a4552a6a5c39d53ff4167e4f7df26e80413a99",
+        "bytes": 130585417,
     },
     "network_unet.py": {
         "url": f"{_KAIR_RAW}/{NETWORK_COMMIT}/models/network_unet.py",
@@ -130,25 +149,40 @@ MIN_BLOCKS_POOLED = 20
 # slope is the noise and this is what the model is TOLD that noise is, as a
 # fraction of the measured one.
 #
-# Measured 2026-09-17 against Lightroom's own Enhance→Denoise answer — the
-# DNG's NewSubfileType=16 enhanced layer — on two astro frames of this camera
-# (ISO 3200 / 15 s and ISO 8000 / 15 s), three 2048² windows each, compared
-# plane by plane in the RAW domain so no demosaic and no tone curve is in the
-# way; and against `scripts/denoise_bench.py` on its ground-truth levels:
+# RE-MEASURED 2026-09-17 for the fine-tuned weights, because they are a much
+# stronger denoiser at the same estimate than the generic ones v1.4.1 shipped:
+# the operating point is a property of the network, not a constant, so it was
+# chosen again from the same four measurements (v1.4.1's own table for the
+# generic weights is in that release's history).
 #
-#   scale   grain vs LR      faint sources kept      bench, measured / ×5 level
-#   1.00    0.12 / 0.17×     83 % / 60 %             +4.36 +5.92 / +1.58 +2.13
-#   0.85    0.47 / 0.60×     87 % / 70 %             +4.40 +5.88 / +0.53 +1.60
-#   0.70    1.05 / 1.25×     90 % / 79 %             +3.63 +5.45 / -1.35 +0.27
-#           (Lightroom 1.00) (Lightroom 91 % / 71 %)
+#   * 15 Lightroom pairs (`scripts/lr_realset.py`): the residual grain of our
+#     output over Lightroom's own Enhance→Denoise layer, median over frames
+#     and planes, in a flat / a detailed / a centre window;
+#   * one ISO-8000 astro frame: the same grain ratio in the flat sky, and the
+#     share of the input's faint and very-faint star flux still standing;
+#   * 512 held-out RawNIND crops, PSNR in the sqrt domain;
+#   * `scripts/denoise_bench.py`, dPSNR over SCUNet 1.0 on the two detail
+#     windows of its ×5 synthetic level (the bar is +1.5).
 #
-# 0.85 keeps as much faint detail as Lightroom with about half its grain, and
-# costs the measured level nothing. Below 1.0 at all because a Gaussian
-# denoiser at the exactly-measured sigma keeps nothing the frame cannot prove,
-# and a photograph is not a maximum-likelihood estimate of itself; not below
-# 0.85 because dPSNR against SCUNet then falls behind on the ×5 level, and
-# nothing in the Lightroom comparison pays for it.
-SIGMA_SCALE = 0.85
+#   scale   LR 15 frames    stars: sky / faint / v.faint   held-out   bench ×5
+#   1.00    0.03/0.11/0.06  0.03×   58 %  24 %             46.95      +2.02 +2.77
+#   0.85    0.68/0.55/0.65  0.21×   64 %  32 %             45.95      +1.55 +2.31
+#   0.78    1.06/1.01/1.01  0.53×   69 %  40 %             44.68      +0.81 +1.72
+#   0.72    1.42/1.29/1.32  0.97×   73 %  48 %             43.10      +0.08 +1.17
+#   Lightroom itself: 1.00 everywhere, and it keeps 71 % / 43 % of the stars.
+#   The generic weights at 0.85 (v1.4.1): 0.58/0.71/0.73, 0.59×, 71 % / 47 %,
+#   42.71, +0.53 +1.60.
+#
+# 0.78 is where this network has LIGHTROOM'S OWN texture on real photographs —
+# within 6 % of it in all three windows — and keeps the faint stars within
+# three points of Lightroom's own count, while reading 1.98 dB better than the
+# generic weights on held-out pairs and leading SCUNet further than they did
+# on the one ×5 window neither passes. Higher smooths past Lightroom (at 1.00
+# the sky is a thirtieth of its grain and a quarter of the very faint stars are
+# gone); lower leaves more grain than Lightroom and gives the ×5 level away.
+# Compatibility is the aim, so the point that matches Lightroom wins the ties
+# (user's decision, 2026-09-17).
+SIGMA_SCALE = 0.78
 
 
 def log(msg):
@@ -382,13 +416,15 @@ def _load_verified_module(qualname, path):
 
 
 def load_model(cache_dir, device):
-    """DRUNet-colour, every file verified before it is executed or unpickled."""
+    """AutoShade's RAW denoiser: KAIR's DRUNet-colour architecture carrying
+    OUR fine-tuned weights, every file verified before it is executed or
+    unpickled."""
     import torch
 
     os.makedirs(cache_dir, exist_ok=True)
     basicblock = fetch_pinned("basicblock.py", cache_dir)
     network = fetch_pinned("network_unet.py", cache_dir)
-    weights = fetch_pinned("drunet_color.pth", cache_dir)
+    weights = fetch_pinned("autoshade-raw-denoise-v1.pth", cache_dir)
     # `network_unet.py` says `import models.basicblock as B`: a synthetic
     # `models` package satisfies the import from the VERIFIED file, so the
     # upstream text is never rewritten and no other `models` package on the
@@ -398,8 +434,10 @@ def load_model(cache_dir, device):
     sys.modules["models"] = pkg
     _load_verified_module("models.basicblock", basicblock)
     unet = _load_verified_module("models.network_unet", network)
-    # bias=False: the released weights carry no bias tensors (a strict load
-    # with bias=True lists every `*.bias` as missing — DPIR trained without).
+    # bias=False: neither DPIR's released weights nor the fine-tune of them
+    # carries bias tensors (a strict load with bias=True lists every `*.bias`
+    # as missing), and the fine-tune kept the architecture byte for byte so
+    # that this file — the one that is EXECUTED — never had to change.
     model = unet.UNetRes(in_nc=4, out_nc=3, nc=[64, 128, 256, 512], nb=4, act_mode="R",
                          downsample_mode="strideconv", upsample_mode="convtranspose", bias=False)
     # weights_only: a .pth is a PICKLE; the safe loader suffices for a state
@@ -408,7 +446,7 @@ def load_model(cache_dir, device):
         state = torch.load(weights, map_location="cpu", weights_only=True)
     except TypeError as e:
         raise SystemExit(
-            f"refusing to load the DRUNet weights: this torch ({torch.__version__}) predates "
+            f"refusing to load the denoiser's weights: this torch ({torch.__version__}) predates "
             f"weights_only=True, so the load would execute the weight pickle unsandboxed. "
             f"Upgrade torch and retry. ({e})"
         )

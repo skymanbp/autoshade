@@ -195,7 +195,9 @@ impl AutoShadeApp {
             self.overlay_key = None;
             return;
         }
-        let Some(base) = self.base_preview.as_ref() else {
+        // A handle, not a borrow of `self`: the range reference below asks
+        // `self.film_short_edge()`, which caches into `self`.
+        let Some(base) = self.base_preview.clone() else {
             self.mask_overlay_tex = None;
             self.overlay_key = None;
             return;
@@ -227,7 +229,7 @@ impl AutoShadeApp {
         pre.crop = None;
         let lp = &self.recipe.lens_profile;
         let key = OverlayKey {
-            base: Arc::as_ptr(base) as usize,
+            base: Arc::as_ptr(&base) as usize,
             target: i,
             mask: mask.mask.clone(),
             components: mask.components.clone(),
@@ -272,11 +274,15 @@ impl AutoShadeApp {
                 // No downstream geometry, explicitly: this reference exists to
                 // be SAMPLED for pixel values. The profile still matters for
                 // LINEAR's handle-only raw-frame rule; RADIAL remains stored.
+                // The canvas's own film edge: the Detail passes ran before this
+                // mask on the canvas, at that scale, so the range must too.
+                let film = self.film_short_edge();
                 let img = autoshade::render::develop_preview_framed(
-                    base,
+                    &base,
                     &pre,
                     &autoshade::diag::pixels(),
                     autoshade::render::MaskFrame::without_downstream(&pre.lens_profile),
+                    film,
                 );
                 self.overlay_ref = Some((pre, img));
             }
@@ -463,6 +469,8 @@ impl AutoShadeApp {
             tr(lang, "WB eyedropper — click a spot that should be neutral grey/white · Esc to exit")
         } else if self.range_picking.is_some() {
             tr(lang, "Color range — click the color to pick in the image · Esc to exit")
+        } else if self.point_color_picking {
+            tr(lang, "Point Color eyedropper — click the colour to adjust · Esc to exit")
         } else if self.clone_mode {
             tr(lang, "Stamp — Alt+click to set the source · drag to brush the area to cover · Esc to exit")
         } else if self.paint_mode {
@@ -673,8 +681,9 @@ impl AutoShadeApp {
         }
 
         // Cursor language: say what a click/drag would do right now. The pick
-        // tools (WB / range / clone-source) set their own crosshair in their
-        // handlers; this covers the hand for panning and the drawing tools.
+        // tools (WB / range / point colour / clone-source) set their own
+        // crosshair in their handlers; this covers the hand for panning and the
+        // drawing tools.
         if panning {
             ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
         } else if (space || zoom_pan) && resp.hovered() {
@@ -698,6 +707,8 @@ impl AutoShadeApp {
             self.handle_wb_pick(ui, &resp, xf);
         } else if self.range_picking.is_some() {
             self.handle_range_pick(ui, &resp, xf);
+        } else if self.point_color_picking {
+            self.handle_point_color_pick(ui, &resp, xf);
         } else if self.clone_mode {
             self.handle_clone(ui, &resp, xf);
             self.ensure_mask_tex(ui.ctx());
@@ -895,13 +906,16 @@ impl AutoShadeApp {
             pre.lens_distortion = 0.0;
             pre.crop = None;
             if !matches!(&self.overlay_ref, Some((r, _)) if *r == pre) {
-                // The explicit no-downstream frame for the same reason as the
-                // overlay build above, and it must MATCH it — they share cache.
+                // The explicit no-downstream frame and film edge for the same
+                // reasons as the overlay build above, and they must MATCH it —
+                // they share cache.
+                let film = self.film_short_edge();
                 let img = autoshade::render::develop_preview_framed(
                     &base,
                     &pre,
                     &autoshade::diag::pixels(),
                     autoshade::render::MaskFrame::without_downstream(&pre.lens_profile),
+                    film,
                 );
                 self.overlay_ref = Some((pre, img));
             }
@@ -923,6 +937,84 @@ impl AutoShadeApp {
             "Color range: sampled — the 「Tolerance」 slider adjusts the selection width",
         )
         .into();
+    }
+
+    /// Point Color eyedropper (v1.5.0): click a colour and a swatch keyed to
+    /// it joins the Color Mixer section.
+    ///
+    /// Samples a 5×5 mean of the develop as it stands WHERE THE POINT COLOURS
+    /// RUN (`render::point_color_sampling_recipe`: the grade, the finishing
+    /// passes, the masks and the swatches themselves switched off), so the
+    /// swatch matches the pixel `render::apply_point_colors` will test rather
+    /// than the finished look — the Range mask's rule, for the same reason,
+    /// and at the same price: one preview-sized develop per click. The frame
+    /// and the film edge are that build's too (no geometry stage, the canvas's
+    /// own film edge), and the click maps back to the original frame first.
+    pub(crate) fn handle_point_color_pick(&mut self, ui: &egui::Ui, resp: &egui::Response, xf: ViewXform) {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
+        if !resp.clicked() {
+            return;
+        }
+        let Some(q) = resp.interact_pointer_pos() else { return };
+        let (nx, ny) = xf.to_norm(q);
+        // develop_preview works in the ORIGINAL frame — map out of the view.
+        let ((bw, bh), deg, dist) = self.geom_ctx();
+        let (nx, ny) = view_norm_to_orig(nx, ny, (bw, bh), deg, &dist);
+        let px = {
+            let Some(base) = self.base_preview.clone() else { return };
+            let reference = autoshade::render::point_color_sampling_recipe(&self.recipe);
+            let film = self.film_short_edge();
+            let img = autoshade::render::develop_preview_framed(
+                &base,
+                &reference,
+                &autoshade::diag::pixels(),
+                autoshade::render::MaskFrame::without_downstream(&reference.lens_profile),
+                film,
+            );
+            let Some(px) = sample_5x5_mean(&img, nx, ny) else { return };
+            px
+        };
+        self.pick_point_color(px);
+    }
+
+    /// What ONE eyedropper sample does — the canvas-free half of
+    /// [`Self::handle_point_color_pick`], so the verdict is testable without a
+    /// frame.
+    ///
+    /// A colour becomes a swatch at the end of the list and the tool disarms,
+    /// as the WB and Range pickers do. A near-grey spot adds NOTHING and keeps
+    /// the tool armed, saying why: `render::point_color_at` gives such a pixel
+    /// to no swatch, so a swatch of it would be four sliders that move nothing,
+    /// and the next click is the obvious retry. A full list refuses out loud
+    /// rather than pushing a swatch `EditRecipe::clamp` would drop on the floor.
+    pub(crate) fn pick_point_color(&mut self, px: [f32; 3]) {
+        use autoshade::recipe::MAX_POINT_COLORS;
+        let lang = self.lang;
+        if self.recipe.point_colors.len() >= MAX_POINT_COLORS {
+            self.point_color_picking = false;
+            self.status = trf(
+                lang,
+                "Point Color: at most {n} swatches",
+                &[("n", &MAX_POINT_COLORS.to_string())],
+            );
+            return;
+        }
+        let Some(swatch) = autoshade::render::point_color_at(px) else {
+            self.status = tr(
+                lang,
+                "Point Color: that spot is almost grey, so no swatch could move it — pick a more colourful spot",
+            )
+            .into();
+            return;
+        };
+        self.recipe.point_colors.push(swatch);
+        self.point_color_picking = false;
+        self.dirty = true;
+        self.status = trf(
+            lang,
+            "Point Color: swatch {n} added — its sliders are in the Color Mixer section",
+            &[("n", &self.recipe.point_colors.len().to_string())],
+        );
     }
 
     /// Box-select on the After image: drag a rectangle to target a local edit;

@@ -71,6 +71,84 @@ impl AutoShadeApp {
         );
     }
 
+    /// Paint the imported removals ADOBE SYNTHESISED into the shared brush
+    /// mask, so the generative verb can be run over exactly them and nothing
+    /// else (v1.5.0 F9, the second half of the user's ruling: local repair at
+    /// import, generative re-solve on request).
+    ///
+    /// Returns how many areas were painted, so the caller can stay silent when
+    /// there is nothing to do rather than spawn a worker over a blank mask.
+    ///
+    /// Writes the DUAL PAIR — the red display canvas and the greyscale weight
+    /// buffer — because that is the session contract `clear_mask` documents:
+    /// the brush writes both, Apply bakes the grey, and a surface that wrote
+    /// only the canvas would show strokes that bake to nothing.
+    ///
+    /// The exact painted SHAPE is used wherever the area has one. A brush area
+    /// arrives as `SpotCoverage` (its dabs, rasterised), and asking a model to
+    /// regenerate the enclosing disk of a long thin stroke would rewrite a
+    /// circle of content the photographer never touched.
+    pub(crate) fn paint_imported_removals(&mut self) -> usize {
+        let Some(base) = self.base_preview.as_ref() else { return 0 };
+        let (mw, mh) = base.dimensions();
+        if mw == 0 || mh == 0 {
+            return 0;
+        }
+        let wanted: Vec<_> =
+            autoshade::render::retouch_spots(&self.recipe, mw as usize, mh as usize)
+                .into_iter()
+                .filter(|s| s.origin.is_synthesised())
+                .collect();
+        if wanted.is_empty() {
+            return 0;
+        }
+        // At the PREVIEW's dimensions, which is the frame the brush paints in
+        // and the frame `export_mask_png` hands on.
+        if self.mask_paint.as_ref().is_none_or(|m| m.dimensions() != (mw, mh)) {
+            self.mask_paint = Some(image::RgbaImage::new(mw, mh));
+        }
+        if self.mask_brush_gray.as_ref().is_none_or(|g| g.dimensions() != (mw, mh)) {
+            self.mask_brush_gray = Some(image::GrayImage::new(mw, mh));
+        }
+        let canvas = self.mask_paint.as_mut().expect("just ensured");
+        let gray = self.mask_brush_gray.as_mut().expect("just ensured");
+        let short = mw.min(mh) as f32;
+        for s in &wanted {
+            let c = (s.cx * mw as f32, s.cy * mh as f32);
+            let r = (s.radius * short).max(1.0);
+            match &s.coverage {
+                Some(cov) => {
+                    // Walk the enclosing disk's box and keep only what the
+                    // stroke actually covers.
+                    let x0 = (c.0 - r).floor().max(0.0) as u32;
+                    let y0 = (c.1 - r).floor().max(0.0) as u32;
+                    let x1 = ((c.0 + r).ceil().max(0.0) as u32).min(mw - 1);
+                    let y1 = ((c.1 + r).ceil().max(0.0) as u32).min(mh - 1);
+                    for y in y0..=y1 {
+                        for x in x0..=x1 {
+                            let nx = (x as f32 + 0.5) / mw as f32;
+                            let ny = (y as f32 + 0.5) / mh as f32;
+                            if cov.weight_at(nx, ny) > 0.5 {
+                                canvas.put_pixel(x, y, image::Rgba([255, 64, 64, 160]));
+                                gray.put_pixel(x, y, image::Luma([255]));
+                            }
+                        }
+                    }
+                }
+                // An ellipse IS its disk — 84 of the library's 121 areas.
+                None => {
+                    stamp_dot_px(canvas, c, r, image::Rgba([255, 64, 64, 160]));
+                    stamp_dot_gray(gray, c, r, 255);
+                }
+            }
+        }
+        self.mask_dirty = true;
+        // The whole canvas changed, so a pending sub-rect from an earlier
+        // stroke must not turn this into a partial GPU upload (see clear_mask).
+        self.mask_dirty_rect = None;
+        wanted.len()
+    }
+
     /// PNG bytes of the EXPORT mask: painted → transparent (regenerate / heal
     /// here), unpainted → opaque. None if nothing is painted — mirrors the web.
     pub(crate) fn export_mask_png(&self) -> Option<Vec<u8>> {

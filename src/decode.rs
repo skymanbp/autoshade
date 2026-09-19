@@ -306,17 +306,20 @@ fn decode_peak_bytes(need: u64, orientation: image::metadata::Orientation) -> u6
 /// worst of those moments — enumerated as data (not prose) by
 /// `develop_peak_accounts_for_every_pass`, which is where a new stage lands.
 ///
-/// Three of those moments tie at 24: a spatial pass (12 + the luma plane 4 +
-/// `blur_plane`'s two chained planes 8), a geometric resample (12 + the Rgb16
+/// Several of those moments tie at 24: a spatial pass (12 + at most three
+/// working f32 planes 12 — luma and `blur_plane`'s two chained planes, or the
+/// Detail panel's own three, v1.5.0), a geometric resample (12 + the Rgb16
 /// frame 6 + the resampler's fresh output 6) and the AI-denoise round trip.
 /// The chain has been tuned to that ceiling deliberately (the A7 batch), so
 /// "12 + 6 + 6" is one path to 24 rather than the whole account.
 ///
 /// A further full-frame stage raises this constant only if it is alive AT THE
-/// SAME TIME as the planes: three SEQUENTIAL unsharp passes (clarity, texture,
-/// sharpening) each drop their two planes before the next allocates
+/// SAME TIME as the planes: SEQUENTIAL spatial passes (clarity, texture, the
+/// three Detail passes) each drop their planes before the next allocates
 /// (`render.rs`'s memory note on `apply_masks`), so adding one costs nothing
-/// here. A stage that holds a new buffer concurrently costs its full width.
+/// here. A stage that holds a new buffer concurrently costs its full width —
+/// and a new spatial pass that needs more than three working planes at once
+/// is a new row in `develop_peak_accounts_for_every_pass`, not a free one.
 ///
 /// **R27 R7 — re-derived, not re-assumed, when the RAW format list went from 9
 /// extensions to 24.** The worry raised was "this was tuned on a 61 MP Bayer
@@ -1334,6 +1337,14 @@ pub fn frame_size_turned(path: &Path, quarter_turns: u8) -> Result<(usize, usize
     let ((w, h), exif) = source_frame(path)?;
     let orientation = crate::render::compose_orientation(exif, quarter_turns);
     Ok(if orientation_transposes(orientation) { (h, w) } else { (w, h) })
+}
+
+/// The SHORT edge of [`frame_size`]: the full-resolution develop's, which is
+/// what `render::FilmScale` measures a downscaled working raster against (a
+/// turn does not change it). `None` when the header cannot be read — the
+/// develop then treats its own raster as the film.
+pub fn film_short_edge(path: &Path) -> Option<u32> {
+    frame_size(path).ok().and_then(|(w, h)| u32::try_from(w.min(h)).ok())
 }
 
 /// The frame the FILE STORES, un-turned, together with the turn its own
@@ -3160,10 +3171,14 @@ mod tests {
     /// per-SOURCE-pixel bytes it holds ON TOP of the decoded buffer (which
     /// [`decode_peak_bytes`] charges separately). Re-read from the render
     /// source, not from the old comment: `img.to_rgb16()` is a 6 B/px staging
-    /// copy dropped right after the transcode; `unsharp_luma_weighted` /
-    /// `noise_reduce_luma` hold one luma plane while `blur_plane` chains two
-    /// more (`box_blur_v` allocates its output before the previous buffer is
-    /// dropped); `rgb16_source` BORROWS an already-Rgb16 frame, and
+    /// copy dropped right after the transcode; `unsharp_luma_weighted` holds
+    /// one luma plane while `blur_plane` chains two more (`box_blur_v`
+    /// allocates its output before the previous buffer is dropped); the
+    /// Detail panel (`render/detail.rs`, v1.5.0) is written to the same three:
+    /// sharpening holds luma, the Gaussian's intermediate and its output (the
+    /// edge mask arrives after the intermediate is gone), luminance NR hands
+    /// every source plane to `box_mean_owned`, and colour NR works at 1/s² of
+    /// the frame with s ≥ 2; `rgb16_source` BORROWS an already-Rgb16 frame, and
     /// `rotate_straighten` writes an INSCRIBED (never larger) output, so a
     /// resampler costs exactly one fresh frame.
     ///
@@ -3175,9 +3190,12 @@ mod tests {
     #[test]
     fn develop_peak_accounts_for_every_pass() {
         use image::metadata::Orientation;
-        let stages: [(&str, u64); 6] = [
+        let stages: [(&str, u64); 9] = [
             ("transcode: to_rgb16 staging 6 + the f32 planes 12", 6 + 12),
             ("spatial pass: planes 12 + luma 4 + blur_plane's two chained planes 8", 12 + 4 + 8),
+            ("sharpening: planes 12 + luma 4 + the Gaussian's intermediate 4 + blur 4", 12 + 4 + 4 + 4),
+            ("luminance NR: planes 12 + three of luma / box pass / coefficient planes 12", 12 + 12),
+            ("colour NR: planes 12 + eight planes at 1/s², s ≥ 2 — two full planes 8", 12 + 8),
             ("pack: planes 12 + the packed u16 frame 6", 12 + 6),
             ("geometry: planes 12 + the frame 6 + the resampler's fresh output 6", 12 + 6 + 6),
             ("crop: planes 12 + the frame 6 + the (never larger) cropped copy 6", 12 + 6 + 6),

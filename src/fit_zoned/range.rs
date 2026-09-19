@@ -2520,7 +2520,7 @@ mod tests {
             ..Default::default()
         });
         let value = serde_json::to_value(&new).unwrap();
-        assert_eq!(value["schema_era"], 1);
+        assert_eq!(value["schema_era"], crate::recipe::SCHEMA_ERA, "a new recipe is written at the current era");
         assert_eq!(value["masks"][0]["role"], "custom");
         assert_eq!(value["masks"][0]["range"]["kind"], "luminance");
         serde_json::from_value::<crate::recipe::EditRecipe>(value).expect("explicit range scope");

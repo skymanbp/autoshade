@@ -175,7 +175,7 @@ pub enum Tier {
     /// engine nor reader gives it meaning. Reserved for the LR-only property
     /// blocks the XMP merge already preserves; R25 B4 gave the tier its first
     /// and so far only member, `passthrough` (Lightroom's Transform / Upright
-    /// and Camera Calibration blocks — `xmp::PASSTHROUGH_CRS`, sixteen keys
+    /// block and the camera profile's name — `xmp::PASSTHROUGH_CRS`, nine keys
     /// read and written as the strings Lightroom wrote).
     ///
     /// The line against [`CarriedOnly`](Tier::CarriedOnly): a carried control
@@ -225,94 +225,29 @@ impl Tier {
 /// surface may set although the engine renders nothing from them, each with
 /// the reason.
 ///
-/// **Policy SF4-C** (decided 2026-08-18, R25): membership is limited to
-/// ADOBE-ONLY OPERATORS — a control whose model Adobe has not published and
-/// whose approximation would put our invention into the photographer's
-/// picture. A control we simply have not got around to rendering does NOT
-/// belong here; it belongs in a batch. The first nine members are the R25 B2
-/// effects, and each reason below states the operator, not the schedule.
-pub const CARRIED_ONLY_GLOBAL: &[(&str, &str)] = &[
-    (
-        "post_crop_vignette",
-        "a post-crop vignette must be applied AFTER the crop, and this engine's crop is the \
-         LAST stage (render.rs); the vignette it already has is the pre-crop, single composed \
-         radial gain, and splitting that apart would break the \"compose once, never truncate \
-         per pass\" invariant the gain stage is built on",
-    ),
-    (
-        "post_crop_vignette_mid",
-        "same operator as post_crop_vignette: it lands after a crop this engine applies last",
-    ),
-    (
-        "post_crop_vignette_feather",
-        "same operator as post_crop_vignette: it lands after a crop this engine applies last",
-    ),
-    (
-        "post_crop_vignette_round",
-        "same operator as post_crop_vignette: it lands after a crop this engine applies last",
-    ),
-    (
-        "post_crop_vignette_style",
-        "the three Styles (Highlight Priority / Colour Priority / Paint Overlay) are an \
-         unpublished FAMILY OF OPERATORS, not one parameter — there is nothing here to \
-         approximate with a number",
-    ),
-    (
-        "post_crop_vignette_hl",
-        "a shaping axis of the unpublished Style operators above",
-    ),
-    (
-        "grain",
-        "Adobe's film-grain generator is unpublished; approximating it means adding noise WE \
-         invented to the photographer's picture, which is worse than not doing it",
-    ),
-    ("grain_size", "a shaping axis of the unpublished grain generator above"),
-    ("grain_rough", "a shaping axis of the unpublished grain generator above"),
-    // ── R25 B3: the detail axes, the auto-CA switch and de-fringe ──────────
-    (
-        "sharpen_radius",
-        "our sharpening radius is a σ model NORMALISED by resolution (render.rs, V2 §4c), so \
-         one absolute pixel radius would mean two different strengths on the preview and on a \
-         61 MP export — which is precisely the defect V2 §4c was written to remove",
-    ),
-    (
-        "sharpen_detail",
-        "Adobe's halo-suppression curve is unpublished; there is no number in our unsharp mask \
-         that stands for it",
-    ),
-    ("sharpen_mask", "same unpublished shaping family as sharpen_detail"),
-    (
-        "nr_detail",
-        "our luminance NR is a bilateral-lite (V2 §4d) with no detail / contrast shaping axes \
-         at all — there is nothing here for this value to turn",
-    ),
-    ("nr_contrast", "the second axis of the shaping model our NR does not have"),
-    (
-        "color_nr",
-        "this engine has NO chroma noise reduction whatsoever; inventing one to honour the \
-         slider would put an operator we made up between the photographer and their picture",
-    ),
-    ("color_nr_detail", "a shaping axis of the chroma NR this engine does not have"),
-    ("color_nr_smooth", "a shaping axis of the chroma NR this engine does not have"),
-    (
-        "auto_lateral_ca",
-        "an INSTRUCTION — 「run Adobe's own lateral-CA solver」 — not a parameter. We have no \
-         such solver, and there is no value to approximate: the manual ca_r / ca_b pair beside \
-         it is the part that IS a parameter, and that one renders",
-    ),
-    (
-        "defringe_purple",
-        "the de-fringe hue windows are Adobe's own 0..100 scale, and the mapping from that \
-         scale to an actual hue angle is unpublished AND unmeasured (no sidecar in the user's \
-         library carries a non-default one) — the core unknown of the whole operator, which is \
-         exactly the kind of debt this project keeps refusing to guess at",
-    ),
-    ("defringe_purple_lo", "same operator as defringe_purple: the hue scale is unpublished"),
-    ("defringe_purple_hi", "same operator as defringe_purple: the hue scale is unpublished"),
-    ("defringe_green", "same operator as defringe_purple: the hue scale is unpublished"),
-    ("defringe_green_lo", "same operator as defringe_purple: the hue scale is unpublished"),
-    ("defringe_green_hi", "same operator as defringe_purple: the hue scale is unpublished"),
-];
+/// **Policy SF4-C** (decided 2026-08-18, R25) limited membership to ADOBE-ONLY
+/// OPERATORS — a control whose model Adobe has not published — on the ground
+/// that approximating one would put our invention into the photographer's
+/// picture. **The user revoked it on 2026-09-17** for v1.5.0: every control
+/// the app can set is to render, a slight deviation from Lightroom allowed and
+/// compatibility the aim. So this list only shrinks now, an entry leaving with
+/// the batch that renders it (the eight Detail axes left first, for
+/// `render/detail.rs`, then the nine Effects for `render/finish.rs` — which
+/// also answered the reason they were carried, by giving the engine a stage
+/// AFTER the crop, then the lens batch for `render/lens.rs`).
+///
+/// **It is now EMPTY**, and that is the whole point of Track F: there is no
+/// longer a global control this app can set and this engine renders nothing
+/// from. The list, the allow-list gates around it and
+/// `xmp::global_render_gaps` all stay — emptiness is a measurement, not a
+/// reason to remove the instrument, and the next row that arrives carried
+/// discloses itself the day it is added instead of the release after. The
+/// reasons the twenty-four members USED to give are not kept here: each is now
+/// answered by the module that renders the control (`render/detail.rs`,
+/// `render/finish.rs`, `render/lens.rs`), and the last of them — Adobe's
+/// unpublished 0..100 de-fringe hue scale — is answered by
+/// `lens::PURPLE_SCALE` / `GREEN_SCALE`, which state the mapping as OURS.
+pub const CARRIED_ONLY_GLOBAL: &[(&str, &str)] = &[];
 
 /// The `CarriedOnly` allow-list for [`LOCAL_CONTROLS`].
 pub const CARRIED_ONLY_LOCAL: &[(&str, &str)] = &[(
@@ -347,10 +282,18 @@ pub struct Control {
     /// components now have a CRS spelling and roles have editing metadata),
     /// while `color_gains` still has no classic-ACR counterpart. Schema
     /// ownership is independent of exportability. The nine R25 B2 EFFECTS
-    /// are Adobe-only operators under policy SF4-C — asking the model for a
-    /// number that moves no pixel here would spend a paid request on a slider
-    /// only Lightroom can honour. `enabled` stays here for a reason of its own
-    /// — see [`LOCAL_CONTROLS`]' row for it.
+    /// were carried under policy SF4-C — asking the model for a number that
+    /// moves no pixel here would spend a paid request on a slider only
+    /// Lightroom can honour. The eight Detail axes render since v1.5.0 and stay
+    /// engine-only on `ca_r`'s ground (one-to-three-pixel structure the
+    /// advisor's preview cannot show). The parametric tone curve (v1.5.0) is
+    /// engine-only because the point curve the model already has is the more
+    /// expressive spelling of the same move. The Calibration panel, the B&W
+    /// treatment and the point colours (v1.5.0) are engine-only for the same
+    /// pair of reasons: the colour mixer and the grade are the model's spelling
+    /// of a colour move, and a required field would return neutral values over
+    /// the photographer's own on every Refine. `enabled` stays here for a
+    /// reason of its own — see [`LOCAL_CONTROLS`]' row for it.
     ///
     /// Every engine-only row needs a HOME for its value across a refine: the
     /// response cannot restate it, so either the pipeline re-stamps it
@@ -364,9 +307,11 @@ pub struct Control {
     ///
     /// `None` is not "unclassified": it means the row is NOT a develop control
     /// at all but part of the response ENVELOPE (the era stamp) or the AI's own
-    /// provenance (`rationale`, `confidence`), or mask bookkeeping the solver
-    /// owns (`role`). A `None` row may never own a `crs:` property — asserted,
-    /// so the escape hatch cannot be used to dodge a classification.
+    /// provenance (`rationale`, `confidence`), mask bookkeeping the solver
+    /// owns (`role`), or the recipe's own bookkeeping about OTHER rows
+    /// (`explicit_zero`, which says how a companion's stored 0 reads). A `None`
+    /// row may never own a `crs:` property — asserted, so the escape hatch
+    /// cannot be used to dodge a classification.
     ///
     /// Adding a field to `EditRecipe` / `LocalAdjustment` already fails the
     /// build until it has a row here (the [`global_value`] / [`local_value`]
@@ -402,7 +347,7 @@ fn trim_num(v: f32) -> String {
 /// Every field of [`EditRecipe`], in DECLARATION order — which is also the
 /// order the strict schema's `required` array takes, so the generated schema
 /// is byte-identical to the hand-written mirror it replaced.
-pub const RECIPE_CONTROLS: [Control; 65] = [
+pub const RECIPE_CONTROLS: [Control; 114] = [
     Control {
         name: "version",
         shape: Shape::Integer,
@@ -615,6 +560,118 @@ pub const RECIPE_CONTROLS: [Control; 65] = [
                   of EXACTLY 8 numbers (-100..100) in the FIXED band order red, orange, yellow, \
                   green, aqua, blue, purple, magenta",
     },
+    // v1.5.0 — Lightroom's Black & White treatment: the switch and its
+    // eight-band grey mix, rendered by `render::apply_gray_mix` in the colour
+    // mixer's place. Engine-only on the parametric curve's ground: required
+    // fields would return a colour photo and a flat mix over the
+    // photographer's own on every Refine.
+    Control {
+        name: "convert_to_grayscale",
+        shape: Shape::Bool,
+        // A switch, not a band: `Shape::is_scalar` is false, so there is no
+        // range to state (the `auto_lateral_ca` row's rule).
+        range: None,
+        neutral: "false",
+        engine_only: true,
+        crs: CrsKey::Attr("ConvertToGrayscale"),
+        tier: Some(Tier::Rendered),
+        purpose: "Lightroom's Black & White treatment: the photo renders as a grey mix of its colours",
+    },
+    Control {
+        name: "gray_red",
+        shape: Shape::Number,
+        range: Some((-100.0, 100.0)),
+        neutral: "0",
+        engine_only: true,
+        crs: CrsKey::Attr("GrayMixerRed"),
+        tier: Some(Tier::Rendered),
+        purpose: "B&W mix, reds: how light (+) or dark (−) what was red turns in the grey rendering",
+    },
+    Control {
+        name: "gray_orange",
+        shape: Shape::Number,
+        range: Some((-100.0, 100.0)),
+        neutral: "0",
+        engine_only: true,
+        crs: CrsKey::Attr("GrayMixerOrange"),
+        tier: Some(Tier::Rendered),
+        purpose: "B&W mix, oranges: how light (+) or dark (−) what was orange turns in the grey rendering",
+    },
+    Control {
+        name: "gray_yellow",
+        shape: Shape::Number,
+        range: Some((-100.0, 100.0)),
+        neutral: "0",
+        engine_only: true,
+        crs: CrsKey::Attr("GrayMixerYellow"),
+        tier: Some(Tier::Rendered),
+        purpose: "B&W mix, yellows: how light (+) or dark (−) what was yellow turns in the grey rendering",
+    },
+    Control {
+        name: "gray_green",
+        shape: Shape::Number,
+        range: Some((-100.0, 100.0)),
+        neutral: "0",
+        engine_only: true,
+        crs: CrsKey::Attr("GrayMixerGreen"),
+        tier: Some(Tier::Rendered),
+        purpose: "B&W mix, greens: how light (+) or dark (−) what was green turns in the grey rendering",
+    },
+    Control {
+        name: "gray_aqua",
+        shape: Shape::Number,
+        range: Some((-100.0, 100.0)),
+        neutral: "0",
+        engine_only: true,
+        crs: CrsKey::Attr("GrayMixerAqua"),
+        tier: Some(Tier::Rendered),
+        purpose: "B&W mix, aquas: how light (+) or dark (−) what was aqua turns in the grey rendering",
+    },
+    Control {
+        name: "gray_blue",
+        shape: Shape::Number,
+        range: Some((-100.0, 100.0)),
+        neutral: "0",
+        engine_only: true,
+        crs: CrsKey::Attr("GrayMixerBlue"),
+        tier: Some(Tier::Rendered),
+        purpose: "B&W mix, blues: how light (+) or dark (−) what was blue turns in the grey rendering",
+    },
+    Control {
+        name: "gray_purple",
+        shape: Shape::Number,
+        range: Some((-100.0, 100.0)),
+        neutral: "0",
+        engine_only: true,
+        crs: CrsKey::Attr("GrayMixerPurple"),
+        tier: Some(Tier::Rendered),
+        purpose: "B&W mix, purples: how light (+) or dark (−) what was purple turns in the grey rendering",
+    },
+    Control {
+        name: "gray_magenta",
+        shape: Shape::Number,
+        range: Some((-100.0, 100.0)),
+        neutral: "0",
+        engine_only: true,
+        crs: CrsKey::Attr("GrayMixerMagenta"),
+        tier: Some(Tier::Rendered),
+        purpose: "B&W mix, magentas: how light (+) or dark (−) what was magenta turns in the grey rendering",
+    },
+    // v1.5.0 — Lightroom's Point Color, rendered by `render::apply_point_colors`
+    // after the colour mixer. A carrier: a list of nineteen-number swatches is
+    // nothing a model could state, and a swatch is picked off the photo with
+    // the eyedropper.
+    Control {
+        name: "point_colors",
+        shape: Shape::EngineCarrier,
+        range: None,
+        neutral: "empty = no swatch",
+        engine_only: true,
+        crs: CrsKey::Family("PointColors (an rdf:Seq of nineteen-number swatches)"),
+        tier: Some(Tier::Rendered),
+        purpose: "Lightroom's Point Color swatches: each shifts the hue, saturation and luminance of \
+                  the one colour it was sampled from",
+    },
     Control {
         name: "color_grade",
         shape: Shape::ColorGrade,
@@ -654,30 +711,37 @@ pub const RECIPE_CONTROLS: [Control; 65] = [
         tier: Some(Tier::Rendered),
         purpose: "global luminance noise reduction",
     },
-    // The eight CARRIED detail axes (R25 B3, policy SF4-C) — the shaping
-    // knobs around the two sliders above. `engine_only` AND
-    // `Tier::CarriedOnly`, reasons in [`CARRIED_ONLY_GLOBAL`].
+    // The eight detail axes around the two sliders above (R25 B3), RENDERED
+    // since v1.5.0 (`render/detail.rs`). Still `engine_only`, on the ground
+    // `ca_r` states below: they shape one-to-three-pixel structure the
+    // advisor's ~1024 px preview cannot show, so a required schema field could
+    // only return a guess — and, being required, would return 0 and replace
+    // the photographer's own value on every Refine.
+    //
+    // A COMPANION's stored 0 (`recipe::LR_COMPANION_DEFAULTS`) renders at
+    // Lightroom's default unless `explicit_zero` names it; that is what "0 =
+    // absent" below means.
     Control {
         name: "sharpen_radius",
         shape: Shape::Number,
         // 0 = absent; Lightroom's own band starts at 0.5, so the stated band
         // has to reach the neutral or `clamp` and the registry disagree.
         range: Some((0.0, 3.0)),
-        neutral: "0 = absent (Lightroom's own default is 1.0)",
+        neutral: "0 = absent (renders at Lightroom's default, 1.0)",
         engine_only: true,
         crs: CrsKey::Attr("SharpenRadius"),
-        tier: Some(Tier::CarriedOnly),
-        purpose: "the radius Lightroom sharpens at, in pixels",
+        tier: Some(Tier::Rendered),
+        purpose: "the radius capture sharpening works at, in full-resolution pixels",
     },
     Control {
         name: "sharpen_detail",
         shape: Shape::Number,
         range: Some((0.0, 100.0)),
-        neutral: "0 = absent (Lightroom's own default is 25)",
+        neutral: "0 = absent (renders at Lightroom's default, 25)",
         engine_only: true,
         crs: CrsKey::Attr("SharpenDetail"),
-        tier: Some(Tier::CarriedOnly),
-        purpose: "how far Lightroom's sharpening suppresses its own halos",
+        tier: Some(Tier::Rendered),
+        purpose: "how far sharpening suppresses its own halos (0) or lifts fine texture (100)",
     },
     Control {
         name: "sharpen_mask",
@@ -686,18 +750,18 @@ pub const RECIPE_CONTROLS: [Control; 65] = [
         neutral: "0",
         engine_only: true,
         crs: CrsKey::Attr("SharpenEdgeMasking"),
-        tier: Some(Tier::CarriedOnly),
-        purpose: "how far Lightroom confines its sharpening to edges",
+        tier: Some(Tier::Rendered),
+        purpose: "how far sharpening is confined to edges (0 = everywhere)",
     },
     Control {
         name: "nr_detail",
         shape: Shape::Number,
         range: Some((0.0, 100.0)),
-        neutral: "0 = absent (Lightroom's own default is 50)",
+        neutral: "0 = absent (renders at Lightroom's default, 50)",
         engine_only: true,
         crs: CrsKey::Attr("LuminanceNoiseReductionDetail"),
-        tier: Some(Tier::CarriedOnly),
-        purpose: "the detail-preservation axis of Lightroom's luminance NR",
+        tier: Some(Tier::Rendered),
+        purpose: "how much texture luminance noise reduction keeps",
     },
     Control {
         name: "nr_contrast",
@@ -706,38 +770,41 @@ pub const RECIPE_CONTROLS: [Control; 65] = [
         neutral: "0",
         engine_only: true,
         crs: CrsKey::Attr("LuminanceNoiseReductionContrast"),
-        tier: Some(Tier::CarriedOnly),
-        purpose: "the contrast-preservation axis of Lightroom's luminance NR",
+        tier: Some(Tier::Rendered),
+        purpose: "how much low-frequency local contrast luminance noise reduction puts back",
     },
     Control {
         name: "color_nr",
         shape: Shape::Number,
         range: Some((0.0, 100.0)),
-        neutral: "0 = absent (Lightroom's own default is 25)",
+        // NOT a companion: 0 is no colour noise reduction, and the writer
+        // states it (`xmp::amount_carries`) so Lightroom does not apply its
+        // RAW default of 25 to a photo this engine shows without any.
+        neutral: "0 = none",
         engine_only: true,
         crs: CrsKey::Attr("ColorNoiseReduction"),
-        tier: Some(Tier::CarriedOnly),
-        purpose: "CHROMA noise reduction — an operator this engine does not have at all",
+        tier: Some(Tier::Rendered),
+        purpose: "colour noise reduction — a luma-guided smoothing of the colour-difference planes",
     },
     Control {
         name: "color_nr_detail",
         shape: Shape::Number,
         range: Some((0.0, 100.0)),
-        neutral: "0 = absent (Lightroom's own default is 50)",
+        neutral: "0 = absent (renders at Lightroom's default, 50)",
         engine_only: true,
         crs: CrsKey::Attr("ColorNoiseReductionDetail"),
-        tier: Some(Tier::CarriedOnly),
-        purpose: "the detail axis of the chroma NR above",
+        tier: Some(Tier::Rendered),
+        purpose: "how closely colour noise reduction keeps to the edges luma draws",
     },
     Control {
         name: "color_nr_smooth",
         shape: Shape::Number,
         range: Some((0.0, 100.0)),
-        neutral: "0 = absent (Lightroom's own default is 50)",
+        neutral: "0 = absent (renders at Lightroom's default, 50)",
         engine_only: true,
         crs: CrsKey::Attr("ColorNoiseReductionSmoothness"),
-        tier: Some(Tier::CarriedOnly),
-        purpose: "the smoothness axis of the chroma NR above",
+        tier: Some(Tier::Rendered),
+        purpose: "how much low-frequency colour mottling colour noise reduction removes",
     },
     Control {
         name: "lens_vignette",
@@ -773,6 +840,151 @@ pub const RECIPE_CONTROLS: [Control; 65] = [
         purpose: "manual geometric distortion correction (positive straightens BARREL, negative \
                   PINCUSHION); null means you have NO opinion and the photographer's own value \
                   stands",
+    },
+    // v1.5.0, F5: the lens PROFILE's own two strengths. Engine-only on the
+    // manual CA pair's ground — the correction they scale is measured optics
+    // (the camera's own knots, or an Adobe `.lcp` on this machine), and the
+    // model sees a JPEG. They are the only two rows in this registry whose
+    // neutral is 100.
+    Control {
+        name: "lens_profile_distortion_scale",
+        shape: Shape::Number,
+        range: Some((0.0, 200.0)),
+        neutral: "100 (the profile's own map; 0 = no profile distortion correction)",
+        engine_only: true,
+        crs: CrsKey::Attr("LensProfileDistortionScale"),
+        tier: Some(Tier::Rendered),
+        purpose: "how much of the lens profile's geometric correction to apply",
+    },
+    Control {
+        name: "lens_profile_vignetting_scale",
+        shape: Shape::Number,
+        range: Some((0.0, 200.0)),
+        neutral: "100 (the profile's own gains; 0 = no profile vignetting correction)",
+        engine_only: true,
+        crs: CrsKey::Attr("LensProfileVignettingScale"),
+        tier: Some(Tier::Rendered),
+        purpose: "how much of the lens profile's vignetting correction to apply",
+    },
+    // v1.5.0 F6 — Lightroom's TRANSFORM panel, rendered as one projective map
+    // between the lens-geometry resample and the straighten
+    // (`render::perspective`). Engine-only on the Calibration panel's ground:
+    // a required schema field would return neutral values over the
+    // photographer's own keystone on every Refine, and a ~1024 px preview is
+    // not where a building's verticals get judged.
+    //
+    // Their `crs:` keys were `Tier::PassThrough` from R25 B4 until here — the
+    // whole point of that tier's doc saying it hoped to SHRINK.
+    Control {
+        name: "perspective_vertical",
+        shape: Shape::Number,
+        range: Some((-100.0, 100.0)),
+        neutral: "0",
+        engine_only: true,
+        crs: CrsKey::Attr("PerspectiveVertical"),
+        tier: Some(Tier::Rendered),
+        purpose: "Transform, Vertical: the keystone a camera tilted up or down leaves in the verticals",
+    },
+    Control {
+        name: "perspective_horizontal",
+        shape: Shape::Number,
+        range: Some((-100.0, 100.0)),
+        neutral: "0",
+        engine_only: true,
+        crs: CrsKey::Attr("PerspectiveHorizontal"),
+        tier: Some(Tier::Rendered),
+        purpose: "Transform, Horizontal: the same keystone about the vertical axis",
+    },
+    Control {
+        name: "perspective_rotate",
+        shape: Shape::Number,
+        range: Some((-10.0, 10.0)),
+        neutral: "0 (DEGREES, not the -100..100 of its neighbours)",
+        engine_only: true,
+        crs: CrsKey::Attr("PerspectiveRotate"),
+        tier: Some(Tier::Rendered),
+        purpose: "Transform, Rotate: a turn inside the transform, before the crop's own straighten",
+    },
+    Control {
+        name: "perspective_scale",
+        shape: Shape::Number,
+        range: Some((0.0, 200.0)),
+        neutral: "100 (the frame as it is)",
+        engine_only: true,
+        crs: CrsKey::Attr("PerspectiveScale"),
+        tier: Some(Tier::Rendered),
+        purpose: "Transform, Scale: zoom inside the transform, the usual answer to a keystone's empty corners",
+    },
+    Control {
+        name: "perspective_aspect",
+        shape: Shape::Number,
+        range: Some((-100.0, 100.0)),
+        neutral: "0",
+        engine_only: true,
+        crs: CrsKey::Attr("PerspectiveAspect"),
+        tier: Some(Tier::Rendered),
+        purpose: "Transform, Aspect: stretches the frame vertically (+) or horizontally (−), area-preserving",
+    },
+    Control {
+        name: "perspective_x",
+        shape: Shape::Number,
+        range: Some((-100.0, 100.0)),
+        neutral: "0",
+        engine_only: true,
+        crs: CrsKey::Attr("PerspectiveX"),
+        tier: Some(Tier::Rendered),
+        purpose: "Transform, X Offset: slides the transformed frame sideways",
+    },
+    Control {
+        name: "perspective_y",
+        shape: Shape::Number,
+        range: Some((-100.0, 100.0)),
+        neutral: "0",
+        engine_only: true,
+        crs: CrsKey::Attr("PerspectiveY"),
+        tier: Some(Tier::Rendered),
+        purpose: "Transform, Y Offset: slides the transformed frame up or down",
+    },
+    Control {
+        // An INSTRUCTION, like `auto_lateral_ca` — and the second one this
+        // engine renders by running a solver. Adobe's solver is unpublished but
+        // its ANSWER is not: every sidecar that used Upright carries the six
+        // matrices in `upright_transform`, so a Lightroom photograph renders
+        // Adobe's own numbers and only this app's own dropdown reaches for
+        // `render::perspective::solve_upright`.
+        name: "perspective_upright",
+        shape: Shape::Number,
+        range: Some((0.0, 5.0)),
+        neutral: "0 = off (1 auto, 2 level, 3 vertical, 4 full, 5 guided)",
+        engine_only: true,
+        crs: CrsKey::Attr("PerspectiveUpright"),
+        tier: Some(Tier::Rendered),
+        purpose: "Transform, Upright MODE: which automatic perspective correction to apply",
+    },
+    Control {
+        // Read and rendered, never written — `lens_profile`'s tier, for
+        // `lens_profile`'s reason: these are Adobe's measurement of this
+        // photograph, and the merge preserves the document's own bytes.
+        name: "upright_transform",
+        shape: Shape::EngineCarrier,
+        range: None,
+        neutral: "empty = Lightroom never solved an Upright for this photo",
+        engine_only: true,
+        crs: CrsKey::None,
+        tier: Some(Tier::RenderedNotExported),
+        purpose: "Adobe's solved Upright matrices, read from crs:UprightTransform_0…N and indexed by \
+                  the mode that selects them",
+    },
+    Control {
+        name: "crop_constrain_to_warp",
+        shape: Shape::Bool,
+        range: None,
+        neutral: "false = Lightroom's own value on all 52 sidecars in this library that carry it",
+        engine_only: true,
+        crs: CrsKey::Attr("CropConstrainToWarp"),
+        tier: Some(Tier::Rendered),
+        purpose: "Transform, Constrain Crop: shrink the crop until it lies inside the warped frame \
+                  instead of showing the empty corners",
     },
     // Manual lateral CA (R25 B3) — RENDERED, and the FOURTH kind of
     // `engine_only` (see the field's doc): not staged work, not stamped
@@ -814,13 +1026,16 @@ pub const RECIPE_CONTROLS: [Control; 65] = [
         neutral: "false",
         engine_only: true,
         crs: CrsKey::Attr("AutoLateralCA"),
-        tier: Some(Tier::CarriedOnly),
-        purpose: "Lightroom's 「Remove chromatic aberration」 switch — an instruction to Adobe's \
-                  own solver, carried and never interpreted",
+        tier: Some(Tier::Rendered),
+        purpose: "Lightroom's 「Remove chromatic aberration」 switch — an INSTRUCTION, so \
+                  rendering it means running the solver it names (`render::lens::solve_lateral_ca`) \
+                  and handing the answer to the manual pair above",
     },
-    // De-fringe (R25 B3, policy SF4-C): six carried keys, and the one block
-    // whose neutral is Adobe's default rather than zero — see the fields' own
-    // doc in `recipe.rs` for why absence is not a state this block has.
+    // De-fringe. Six keys carried and unrendered from R25 B3 until v1.5.0,
+    // when the user revoked policy SF4-C and `render/lens.rs` stated the
+    // 0..100 hue scale as OURS. Still the one block whose neutral is Adobe's
+    // default rather than zero — see the fields' own doc in `recipe.rs` for
+    // why absence is not a state this block has.
     Control {
         name: "defringe_purple",
         shape: Shape::Number,
@@ -828,7 +1043,7 @@ pub const RECIPE_CONTROLS: [Control; 65] = [
         neutral: "0",
         engine_only: true,
         crs: CrsKey::Attr("DefringePurpleAmount"),
-        tier: Some(Tier::CarriedOnly),
+        tier: Some(Tier::Rendered),
         purpose: "how hard Lightroom removes purple fringing",
     },
     Control {
@@ -838,7 +1053,7 @@ pub const RECIPE_CONTROLS: [Control; 65] = [
         neutral: "30 (Adobe's own default — this block has no absent state)",
         engine_only: true,
         crs: CrsKey::Attr("DefringePurpleHueLo"),
-        tier: Some(Tier::CarriedOnly),
+        tier: Some(Tier::Rendered),
         purpose: "the low end of the purple hue window de-fringe acts in",
     },
     Control {
@@ -848,7 +1063,7 @@ pub const RECIPE_CONTROLS: [Control; 65] = [
         neutral: "70 (Adobe's own default)",
         engine_only: true,
         crs: CrsKey::Attr("DefringePurpleHueHi"),
-        tier: Some(Tier::CarriedOnly),
+        tier: Some(Tier::Rendered),
         purpose: "the high end of the purple hue window",
     },
     Control {
@@ -858,7 +1073,7 @@ pub const RECIPE_CONTROLS: [Control; 65] = [
         neutral: "0",
         engine_only: true,
         crs: CrsKey::Attr("DefringeGreenAmount"),
-        tier: Some(Tier::CarriedOnly),
+        tier: Some(Tier::Rendered),
         purpose: "how hard Lightroom removes green fringing",
     },
     Control {
@@ -868,7 +1083,7 @@ pub const RECIPE_CONTROLS: [Control; 65] = [
         neutral: "40 (Adobe's own default)",
         engine_only: true,
         crs: CrsKey::Attr("DefringeGreenHueLo"),
-        tier: Some(Tier::CarriedOnly),
+        tier: Some(Tier::Rendered),
         purpose: "the low end of the green hue window",
     },
     Control {
@@ -878,14 +1093,13 @@ pub const RECIPE_CONTROLS: [Control; 65] = [
         neutral: "60 (Adobe's own default)",
         engine_only: true,
         crs: CrsKey::Attr("DefringeGreenHueHi"),
-        tier: Some(Tier::CarriedOnly),
+        tier: Some(Tier::Rendered),
         purpose: "the high end of the green hue window",
     },
-    // The nine CARRIED effects (R25 B2, policy SF4-C). Every one is
-    // `engine_only` AND `Tier::CarriedOnly`: Lightroom renders them, we
-    // round-trip them, and this engine deliberately approximates neither.
-    // Their reasons live in [`CARRIED_ONLY_GLOBAL`], which the tier test
-    // requires an entry in.
+    // The nine Effects. Carried and unrendered from R25 B2 until v1.5.0, when
+    // the engine grew a stage after the crop (`render/finish.rs`) and they
+    // became `Tier::Rendered` like everything else a slider can move. Still
+    // `engine_only`: they have no model of their own in the advisor.
     Control {
         name: "post_crop_vignette",
         shape: Shape::Number,
@@ -893,9 +1107,8 @@ pub const RECIPE_CONTROLS: [Control; 65] = [
         neutral: "0",
         engine_only: true,
         crs: CrsKey::Attr("PostCropVignetteAmount"),
-        tier: Some(Tier::CarriedOnly),
-        purpose: "creative corner darkening applied AFTER the crop (Lightroom renders it; \
-                  carried through the sidecar unchanged)",
+        tier: Some(Tier::Rendered),
+        purpose: "creative corner darkening applied AFTER the crop",
     },
     Control {
         name: "post_crop_vignette_mid",
@@ -904,7 +1117,7 @@ pub const RECIPE_CONTROLS: [Control; 65] = [
         neutral: "0 = absent (Lightroom's own default is 50)",
         engine_only: true,
         crs: CrsKey::Attr("PostCropVignetteMidpoint"),
-        tier: Some(Tier::CarriedOnly),
+        tier: Some(Tier::Rendered),
         purpose: "how far toward the centre the post-crop vignette reaches",
     },
     Control {
@@ -914,7 +1127,7 @@ pub const RECIPE_CONTROLS: [Control; 65] = [
         neutral: "0 = absent (Lightroom's own default is 50)",
         engine_only: true,
         crs: CrsKey::Attr("PostCropVignetteFeather"),
-        tier: Some(Tier::CarriedOnly),
+        tier: Some(Tier::Rendered),
         purpose: "how soft the post-crop vignette's edge is",
     },
     Control {
@@ -924,7 +1137,7 @@ pub const RECIPE_CONTROLS: [Control; 65] = [
         neutral: "0",
         engine_only: true,
         crs: CrsKey::Attr("PostCropVignetteRoundness"),
-        tier: Some(Tier::CarriedOnly),
+        tier: Some(Tier::Rendered),
         purpose: "how circular (positive) or rectangular (negative) the post-crop vignette is",
     },
     Control {
@@ -934,7 +1147,7 @@ pub const RECIPE_CONTROLS: [Control; 65] = [
         neutral: "0 = absent (Lightroom's own default is 1, Highlight Priority)",
         engine_only: true,
         crs: CrsKey::Attr("PostCropVignetteStyle"),
-        tier: Some(Tier::CarriedOnly),
+        tier: Some(Tier::Rendered),
         purpose: "WHICH post-crop vignette operator Adobe applies: 1 = Highlight Priority, \
                   2 = Colour Priority, 3 = Paint Overlay",
     },
@@ -945,8 +1158,8 @@ pub const RECIPE_CONTROLS: [Control; 65] = [
         neutral: "0",
         engine_only: true,
         crs: CrsKey::Attr("PostCropVignetteHighlightContrast"),
-        tier: Some(Tier::CarriedOnly),
-        purpose: "how far the post-crop vignette spares the highlights inside it",
+        tier: Some(Tier::Rendered),
+        purpose: "how far a DARKENING post-crop vignette spares the highlights inside it",
     },
     Control {
         name: "grain",
@@ -955,8 +1168,8 @@ pub const RECIPE_CONTROLS: [Control; 65] = [
         neutral: "0",
         engine_only: true,
         crs: CrsKey::Attr("GrainAmount"),
-        tier: Some(Tier::CarriedOnly),
-        purpose: "film-grain amount (Lightroom renders it; carried through the sidecar unchanged)",
+        tier: Some(Tier::Rendered),
+        purpose: "film-grain amount",
     },
     Control {
         name: "grain_size",
@@ -965,7 +1178,7 @@ pub const RECIPE_CONTROLS: [Control; 65] = [
         neutral: "0 = absent (Lightroom's own default is 25)",
         engine_only: true,
         crs: CrsKey::Attr("GrainSize"),
-        tier: Some(Tier::CarriedOnly),
+        tier: Some(Tier::Rendered),
         purpose: "how coarse each grain particle is",
     },
     Control {
@@ -975,8 +1188,24 @@ pub const RECIPE_CONTROLS: [Control; 65] = [
         neutral: "0 = absent (Lightroom's own default is 50)",
         engine_only: true,
         crs: CrsKey::Attr("GrainFrequency"),
-        tier: Some(Tier::CarriedOnly),
+        tier: Some(Tier::Rendered),
         purpose: "how irregular the grain pattern is",
+    },
+    Control {
+        // v1.5.0. Not a control: one bit per COMPANION row saying its stored
+        // 0 is a value (Detail 0) rather than "the sidecar said nothing"
+        // (`EditRecipe::explicit_zero`, read through `EditRecipe::resolved`).
+        // `EngineCarrier` — a model has nothing to say about which zeros are
+        // meant — and it rides a Refine with the companions it qualifies
+        // (`pipeline::carry_over_unrepresentable`).
+        name: "explicit_zero",
+        shape: Shape::EngineCarrier,
+        range: None,
+        neutral: "empty = every companion's stored 0 renders at Lightroom's default",
+        engine_only: true,
+        crs: CrsKey::None,
+        tier: None,
+        purpose: "which companion controls hold a real 0 rather than an absent value",
     },
     Control {
         name: "straighten_deg",
@@ -1069,6 +1298,117 @@ pub const RECIPE_CONTROLS: [Control; 65] = [
         tier: Some(Tier::Rendered),
         purpose: "per-channel BLUE curve",
     },
+    // v1.5.0 — Lightroom's PARAMETRIC tone curve, rendered by
+    // `render::parametric_lut` between the Basic-panel tone model and the point
+    // curve above. Engine-only: the model already has `tone_curve`, which can
+    // draw every shape these seven can and more, so asking for both would ask
+    // one question twice — and, the fields being required, a response would
+    // return zeros that replace the photographer's own curve on every Refine.
+    Control {
+        name: "param_shadows",
+        shape: Shape::Number,
+        range: Some((-100.0, 100.0)),
+        neutral: "0",
+        engine_only: true,
+        crs: CrsKey::Attr("ParametricShadows"),
+        tier: Some(Tier::Rendered),
+        purpose: "parametric curve, Shadows region: lifts (+) or sinks (−) the darkest tones",
+    },
+    Control {
+        name: "param_darks",
+        shape: Shape::Number,
+        range: Some((-100.0, 100.0)),
+        neutral: "0",
+        engine_only: true,
+        crs: CrsKey::Attr("ParametricDarks"),
+        tier: Some(Tier::Rendered),
+        purpose: "parametric curve, Darks region: the tones between the shadow and midtone splits",
+    },
+    Control {
+        name: "param_lights",
+        shape: Shape::Number,
+        range: Some((-100.0, 100.0)),
+        neutral: "0",
+        engine_only: true,
+        crs: CrsKey::Attr("ParametricLights"),
+        tier: Some(Tier::Rendered),
+        purpose: "parametric curve, Lights region: the tones between the midtone and highlight splits",
+    },
+    Control {
+        name: "param_highlights",
+        shape: Shape::Number,
+        range: Some((-100.0, 100.0)),
+        neutral: "0",
+        engine_only: true,
+        crs: CrsKey::Attr("ParametricHighlights"),
+        tier: Some(Tier::Rendered),
+        purpose: "parametric curve, Highlights region: the brightest tones",
+    },
+    // The three SPLITS. Each stated range is the split's own band — where its
+    // slider reaches with the other two at rest (`recipe::parametric_split_band`)
+    // — because that is what `EditRecipe::clamp` enforces field by field; the
+    // ordering between them is resolved where the curve uses them
+    // (`EditRecipe::parametric_splits`).
+    Control {
+        name: "param_shadow_split",
+        shape: Shape::Number,
+        range: Some((10.0, 70.0)),
+        neutral: "25 (Adobe's default)",
+        engine_only: true,
+        crs: CrsKey::Attr("ParametricShadowSplit"),
+        tier: Some(Tier::Rendered),
+        purpose: "where the parametric Shadows region ends and Darks begins, in percent of the tonal range",
+    },
+    Control {
+        name: "param_midtone_split",
+        shape: Shape::Number,
+        range: Some((20.0, 80.0)),
+        neutral: "50 (Adobe's default)",
+        engine_only: true,
+        crs: CrsKey::Attr("ParametricMidtoneSplit"),
+        tier: Some(Tier::Rendered),
+        purpose: "where the parametric Darks region ends and Lights begins, in percent of the tonal range",
+    },
+    Control {
+        name: "param_highlight_split",
+        shape: Shape::Number,
+        range: Some((30.0, 90.0)),
+        neutral: "75 (Adobe's default)",
+        engine_only: true,
+        crs: CrsKey::Attr("ParametricHighlightSplit"),
+        tier: Some(Tier::Rendered),
+        purpose: "where the parametric Lights region ends and Highlights begins, in percent of the tonal range",
+    },
+    Control {
+        // v1.5.0 F7 — the name Lightroom developed the photograph through.
+        // It rode to the sidecar through `passthrough` until this batch and
+        // moved no pixel; `crate::dcp` now reads Adobe's own profile file out
+        // of the user's install and the render applies its tables.
+        name: "camera_profile",
+        shape: Shape::Text,
+        range: None,
+        neutral: "empty = no profile named, and the RAW's own matrix stands",
+        engine_only: true,
+        crs: CrsKey::Attr("CameraProfile"),
+        tier: Some(Tier::Rendered),
+        purpose: "the Adobe camera profile this photograph is developed through (\"Adobe \
+                  Standard\", \"Camera Vivid\"); rendered from the .dcp installed on this \
+                  machine, never from a bundled copy",
+    },
+    Control {
+        // Read from `<crs:Look>`, rendered, and NOT written: the element keeps
+        // its verbatim merge path, which is stricter than re-serialising it.
+        name: "look",
+        shape: Shape::EngineCarrier,
+        range: None,
+        neutral: "absent = no creative profile",
+        engine_only: true,
+        crs: CrsKey::None,
+        tier: Some(Tier::RenderedNotExported),
+        purpose: "the creative profile's BAKED half — its tone curves, its baked slider moves \
+                  and its black-and-white switch (the creative colour table it also names is \
+                  disclosed, not rendered)",
+    },
     Control {
         name: "base_curve",
         shape: Shape::EngineCarrier,
@@ -1095,7 +1435,7 @@ pub const RECIPE_CONTROLS: [Control; 65] = [
         // R25 B4 — the FIRST member `Tier::PassThrough` has ever had, and the
         // batch the tier's own doc named as the one allowed to give it one.
         //
-        // One row for sixteen `crs:` keys, which is why the shape is a
+        // One row for nine `crs:` keys, which is why the shape is a
         // carrier: the value is a key → verbatim-string map, not a number the
         // schema could ask for. `EngineCarrier` is what keeps it out of the
         // advisor's response schema for good (`engine_carriers_never_reach_
@@ -1105,12 +1445,191 @@ pub const RECIPE_CONTROLS: [Control; 65] = [
         name: "passthrough",
         shape: Shape::EngineCarrier,
         range: None,
-        neutral: "empty = the document carried no Transform / Calibration block",
+        neutral: "empty = the document named no camera profile and carried no Upright bookkeeping",
         engine_only: true,
-        crs: CrsKey::Family("Perspective* + CameraProfile + CameraCalibration* (xmp::PASSTHROUGH_CRS)"),
+        crs: CrsKey::Family("CameraProfile + Upright* bookkeeping (xmp::PASSTHROUGH_CRS)"),
         tier: Some(Tier::PassThrough),
-        purpose: "Lightroom's Transform (Upright) and Camera Calibration blocks, carried between \
-                  the sidecar and recipe.json verbatim and never interpreted",
+        purpose: "the camera profile's NAME and the bookkeeping Lightroom's own Upright solver \
+                  leaves behind (its version stamp, assumed centre and focal length, cache digest), \
+                  carried between the sidecar and recipe.json verbatim and never interpreted",
+    },
+    // v1.5.0 — Lightroom's Calibration panel, rendered as the develop's first
+    // stage (`render::apply_calibration`). Engine-only on the parametric
+    // curve's ground, and on one of its own: a primary belongs to the camera
+    // profile, which the advisor's preview has already been rendered through.
+    // v1.5.0 F8 — Lightroom's HDR edit mode and the seven-control SDR panel it
+    // shows there, rendered as the develop's LAST stage (`render::hdr`).
+    // Engine-only, all nine, and on their own ground: these describe the RANGE
+    // the photograph was edited in and how it is to be mapped into the one this
+    // engine can publish. A model asked for an SDR Highlights would be setting
+    // a control that only exists when a flag it cannot check is on, and setting
+    // `hdr_edit` itself would be making a claim about the capture.
+    Control {
+        name: "hdr_edit",
+        shape: Shape::Bool,
+        // A switch, not a band — `convert_to_grayscale`'s rule.
+        range: None,
+        neutral: "false",
+        engine_only: true,
+        crs: CrsKey::Attr("HDREditMode"),
+        tier: Some(Tier::Rendered),
+        purpose: "was this photograph edited in Lightroom's HDR mode: the gate the seven SDR \
+                  controls below render behind",
+    },
+    Control {
+        name: "hdr_max_ev",
+        shape: Shape::Number,
+        range: Some((0.0, 8.0)),
+        neutral: "0 = no headroom above diffuse white",
+        engine_only: true,
+        crs: CrsKey::Attr("HDRMaxValue"),
+        tier: Some(Tier::Rendered),
+        purpose: "how many stops of highlight headroom sit above diffuse white, which sets how \
+                  far the SDR rendition's shoulder reaches",
+    },
+    Control {
+        name: "sdr_blend",
+        shape: Shape::Number,
+        range: Some((-100.0, 100.0)),
+        neutral: "0",
+        engine_only: true,
+        crs: CrsKey::Attr("SDRBlend"),
+        tier: Some(Tier::Rendered),
+        purpose: "how much of the headroom's shoulder reaches the SDR rendition: −100 none, \
+                  0 the model's own amount, +100 twice it",
+    },
+    Control {
+        name: "sdr_brightness",
+        shape: Shape::Number,
+        range: Some((-100.0, 100.0)),
+        neutral: "0",
+        engine_only: true,
+        crs: CrsKey::Attr("SDRBrightness"),
+        tier: Some(Tier::Rendered),
+        purpose: "the SDR rendition's exposure — named Brightness because Lightroom's SDR panel \
+                  has no Exposure slider",
+    },
+    Control {
+        name: "sdr_contrast",
+        shape: Shape::Number,
+        range: Some((-100.0, 100.0)),
+        neutral: "0",
+        engine_only: true,
+        crs: CrsKey::Attr("SDRContrast"),
+        tier: Some(Tier::Rendered),
+        purpose: "the SDR rendition's contrast",
+    },
+    Control {
+        name: "sdr_highlights",
+        shape: Shape::Number,
+        range: Some((-100.0, 100.0)),
+        neutral: "0",
+        engine_only: true,
+        crs: CrsKey::Attr("SDRHighlights"),
+        tier: Some(Tier::Rendered),
+        purpose: "the SDR rendition's highlights, on top of the shoulder the headroom already put \
+                  there",
+    },
+    Control {
+        name: "sdr_shadows",
+        shape: Shape::Number,
+        range: Some((-100.0, 100.0)),
+        neutral: "0",
+        engine_only: true,
+        crs: CrsKey::Attr("SDRShadows"),
+        tier: Some(Tier::Rendered),
+        purpose: "the SDR rendition's shadows",
+    },
+    Control {
+        name: "sdr_whites",
+        shape: Shape::Number,
+        range: Some((-100.0, 100.0)),
+        neutral: "0",
+        engine_only: true,
+        crs: CrsKey::Attr("SDRWhites"),
+        tier: Some(Tier::Rendered),
+        purpose: "the SDR rendition's white point",
+    },
+    Control {
+        name: "sdr_clarity",
+        shape: Shape::Number,
+        range: Some((-100.0, 100.0)),
+        neutral: "0",
+        engine_only: true,
+        crs: CrsKey::Attr("SDRClarity"),
+        tier: Some(Tier::Rendered),
+        purpose: "the SDR rendition's local contrast, through the Basic panel's own Clarity \
+                  operator at the same radius",
+    },
+    Control {
+        name: "cal_shadow_tint",
+        shape: Shape::Number,
+        range: Some((-100.0, 100.0)),
+        neutral: "0",
+        engine_only: true,
+        crs: CrsKey::Attr("ShadowTint"),
+        tier: Some(Tier::Rendered),
+        purpose: "Calibration, shadows tint: pushes the darkest tones toward green (−) or magenta (+)",
+    },
+    Control {
+        name: "cal_red_hue",
+        shape: Shape::Number,
+        range: Some((-100.0, 100.0)),
+        neutral: "0",
+        engine_only: true,
+        crs: CrsKey::Attr("RedHue"),
+        tier: Some(Tier::Rendered),
+        purpose: "Calibration, red primary hue: turns every colour the camera's red primary builds",
+    },
+    Control {
+        name: "cal_red_sat",
+        shape: Shape::Number,
+        range: Some((-100.0, 100.0)),
+        neutral: "0",
+        engine_only: true,
+        crs: CrsKey::Attr("RedSaturation"),
+        tier: Some(Tier::Rendered),
+        purpose: "Calibration, red primary saturation: strengthens (+) or mutes (−) every colour it builds",
+    },
+    Control {
+        name: "cal_green_hue",
+        shape: Shape::Number,
+        range: Some((-100.0, 100.0)),
+        neutral: "0",
+        engine_only: true,
+        crs: CrsKey::Attr("GreenHue"),
+        tier: Some(Tier::Rendered),
+        purpose: "Calibration, green primary hue: turns every colour the camera's green primary builds",
+    },
+    Control {
+        name: "cal_green_sat",
+        shape: Shape::Number,
+        range: Some((-100.0, 100.0)),
+        neutral: "0",
+        engine_only: true,
+        crs: CrsKey::Attr("GreenSaturation"),
+        tier: Some(Tier::Rendered),
+        purpose: "Calibration, green primary saturation: strengthens (+) or mutes (−) every colour it builds",
+    },
+    Control {
+        name: "cal_blue_hue",
+        shape: Shape::Number,
+        range: Some((-100.0, 100.0)),
+        neutral: "0",
+        engine_only: true,
+        crs: CrsKey::Attr("BlueHue"),
+        tier: Some(Tier::Rendered),
+        purpose: "Calibration, blue primary hue: turns every colour the camera's blue primary builds",
+    },
+    Control {
+        name: "cal_blue_sat",
+        shape: Shape::Number,
+        range: Some((-100.0, 100.0)),
+        neutral: "0",
+        engine_only: true,
+        crs: CrsKey::Attr("BlueSaturation"),
+        tier: Some(Tier::Rendered),
+        purpose: "Calibration, blue primary saturation: strengthens (+) or mutes (−) every colour it builds",
     },
     Control {
         name: "masks",
@@ -1121,6 +1640,37 @@ pub const RECIPE_CONTROLS: [Control; 65] = [
         crs: CrsKey::Family("MaskGroupBasedCorrections"),
         tier: Some(Tier::Rendered),
         purpose: "local (masked) adjustments — one entry per mask, controls listed below",
+    },
+    Control {
+        // v1.5.0 F9. `RenderedNotExported`, and the tier is the interesting
+        // part of this row, because the naive reading of the round trip says
+        // `Rendered`: open a photograph whose sidecar carries
+        // `crs:RetouchAreas`, save it back through the merge, and the block is
+        // still there, byte for byte. It survives because this writer does not
+        // OWN it (`xmp::OWNED_ELEMENT_ONLY` names six elements and this is not
+        // one), so the merge never strips it and never rewrites it.
+        //
+        // Not owning it is exactly why the tier cannot be `Rendered`.
+        // `Tier::owns_crs_key` is checked against the writer, and a fresh
+        // `recipe_to_xmp` — the Analyze writer's path, and every surface that
+        // writes a sidecar where none existed — emits nothing for this field.
+        // On that path the removals are gone. `RenderedNotExported` is what
+        // makes `xmp::global_export_losses` say so instead of letting a
+        // photographer discover it in the exported file.
+        //
+        // `EngineCarrier`/`engine_only` for the reason `colour_field` is: a
+        // retouch area is a geometry read off the photographer's own file, and
+        // there is nothing an advisor could say about one that would be an
+        // answer — a required schema field would return an empty list and
+        // delete the photographer's removals on every Refine.
+        name: "retouch",
+        shape: Shape::EngineCarrier,
+        range: None,
+        neutral: "empty = nothing removed",
+        engine_only: true,
+        crs: CrsKey::None,
+        tier: Some(Tier::RenderedNotExported),
+        purpose: "spot removal imported from Lightroom — each area re-solved from this frame's own pixels",
     },
     Control {
         // R33 §G. The THIRD global `RenderedNotExported` row, beside the two
@@ -1717,12 +2267,32 @@ impl Family {
     }
 }
 
-/// The four globals that are the ENGINE'S OWN MEASUREMENT of this photo,
-/// re-stamped on every open by `pipeline::stamp_calibration` — not an edit
-/// anybody chose, and nothing anybody can undo.
+/// The globals that are a MEASUREMENT OF THIS PHOTO rather than an edit
+/// anybody chose — four of them the engine's own, re-stamped on every open by
+/// `pipeline::stamp_calibration`, and since v1.5.0 two of ADOBE'S.
 ///
-/// The list is not new: [`Control::engine_only`]'s doc has named these four as
-/// "the stamped calibration" since R23-1b. What is new (R33 §G) is that a
+/// F6 added `upright_transform`, the matrices Lightroom's Upright solver wrote
+/// into the sidecar. It joins on the list's real question (can the photographer
+/// act on losing it?) and not on its historical name: nobody chose those
+/// numbers, nobody can restate them, and the merge leaves the document's own
+/// copy in place anyway — so an interrupting toast about them would fire on
+/// every save of every Upright photo and say nothing actionable.
+///
+/// F7 added `look` on all three of those grounds at once, measured on the
+/// photographer's own RAW library rather than on the fixture packs: **161 of
+/// its 175 sidecars carry a `crs:Look`, and 152 of those are Lightroom's
+/// default `Adobe Color`** — the profile it stamps on a file it has merely
+/// touched, whose baked half is one gentle S-curve. The photographer did
+/// choose it, in the sense that they left the default alone; what they cannot
+/// do is act on losing it, because this app ships no profile picker (F7's
+/// stated scope) and `xmp::top_level_owned_spans` preserves the element
+/// verbatim anyway, so the merge loses nothing at all. A toast on 92% of saves
+/// about a block the output still contains is the alarm-on-every-save this
+/// list exists to prevent. The name is still not a measurement, and that is
+/// still not the question being asked.
+///
+/// The list is not new: [`Control::engine_only`]'s doc has named the first four
+/// as "the stamped calibration" since R23-1b. What is new (R33 §G) is that a
 /// SECOND question used to be answered with `engine_only` because the two
 /// coincided — `gui::util::xmp_loss_interrupts` asks whether an export loss is
 /// something the photographer can act on, and until now every `engine_only`
@@ -1732,12 +2302,19 @@ impl Family {
 /// it off in one click. Answering "can they act on it?" with "can the model
 /// say it?" would have filed the first actionable global loss this app has
 /// ever had into the quiet channel.
-pub const STAMPED_CALIBRATION: [&str; 4] =
-    ["as_shot_k", "as_shot_tint", "base_curve", "lens_profile"];
+pub const STAMPED_CALIBRATION: [&str; 6] = [
+    "as_shot_k",
+    "as_shot_tint",
+    "base_curve",
+    "lens_profile",
+    "look",
+    "upright_transform",
+];
 
-/// The 14 families the global controls partition into — 10 the AI plans with
-/// plus four engine-only groupings (see [`Family::ai_visible`]).
-pub const CONTROL_FAMILIES: [Family; 14] = [
+/// The 20 families the global controls partition into — 10 the AI plans with
+/// plus ten engine-only groupings (see [`Family::ai_visible`]), the newest
+/// being v1.5.0's `profile`.
+pub const CONTROL_FAMILIES: [Family; 21] = [
     Family {
         name: "tone",
         covers: "exposure, contrast and the four tonal bands (highlights / shadows / whites / blacks)",
@@ -1773,6 +2350,24 @@ pub const CONTROL_FAMILIES: [Family; 14] = [
         members: &["tone_curve", "red_curve", "green_curve", "blue_curve"],
     },
     Family {
+        // v1.5.0. A family of its own beside `curves` rather than seven new
+        // members on it, for `detail_effects`' reason: a family is all
+        // AI-visible or all engine-only, and the point curves are tools the
+        // model plans with. The develop panel's Curves ● is the OR of the two.
+        name: "parametric",
+        covers: "Lightroom's parametric tone curve — four region sliders over three movable \
+                 splits, rendered here and set by the photographer rather than the AI",
+        members: &[
+            "param_shadows",
+            "param_darks",
+            "param_lights",
+            "param_highlights",
+            "param_shadow_split",
+            "param_midtone_split",
+            "param_highlight_split",
+        ],
+    },
+    Family {
         name: "detail",
         covers: "capture sharpening and global luminance noise reduction",
         members: &["sharpening", "noise_reduction"],
@@ -1787,6 +2382,24 @@ pub const CONTROL_FAMILIES: [Family; 14] = [
         covers: "the manual optical corrections — vignette falloff and geometric distortion \
                  (physical fixes, not mood; leave them null unless you SEE a defect)",
         members: &["lens_vignette", "lens_vignette_mid", "lens_distortion"],
+    },
+    Family {
+        name: "transform",
+        covers: "Lightroom's Transform panel — the two keystones, rotate, scale, aspect and the two \
+                 offsets, plus the Upright mode and Constrain Crop; rendered here, and set by the \
+                 photographer rather than the AI",
+        members: &[
+            "perspective_vertical",
+            "perspective_horizontal",
+            "perspective_rotate",
+            "perspective_scale",
+            "perspective_aspect",
+            "perspective_x",
+            "perspective_y",
+            "perspective_upright",
+            "upright_transform",
+            "crop_constrain_to_warp",
+        ],
     },
     Family {
         name: "masks",
@@ -1835,9 +2448,9 @@ pub const CONTROL_FAMILIES: [Family; 14] = [
         // The develop panel's Detail ● is the OR of the two — the section
         // holds both halves, so its dot has to.
         name: "detail_effects",
-        covers: "the sharpening radius / detail / edge-mask triple and the noise-reduction \
-                 shaping axes — Adobe-only operators AutoShade carries through the sidecar \
-                 without rendering",
+        covers: "the sharpening radius / detail / edge-mask triple, colour noise reduction and \
+                 the noise-reduction shaping axes — rendered here, set by the photographer \
+                 rather than the AI",
         members: &[
             "sharpen_radius",
             "sharpen_detail",
@@ -1851,15 +2464,19 @@ pub const CONTROL_FAMILIES: [Family; 14] = [
     },
     Family {
         // The Lens section's engine-only half, same split and same reason.
-        // MIXED TIERS on purpose: `ca_r`/`ca_b` are `Rendered` and the rest
-        // are `CarriedOnly`. The family split is about who the AI may PLAN
-        // with, not about what renders — grouping is what lights one ●.
+        // The family split is about who the AI may PLAN with, not about what
+        // renders — grouping is what lights one ●. (Until v1.5.0 the tiers
+        // here were MIXED, the pair rendering and the rest carried; the whole
+        // family renders now, so the split is about planning alone.)
         name: "lens_effects",
-        covers: "the manual chromatic-aberration pair (rendered here), Lightroom's auto-CA \
-                 switch and its de-fringe block (carried, not rendered)",
+        covers: "the manual chromatic-aberration pair, Lightroom's auto-CA switch, its de-fringe \
+                 block and the lens profile's two strengths — all rendered, all set by the \
+                 photographer rather than the AI",
         members: &[
             "ca_r",
             "ca_b",
+            "lens_profile_distortion_scale",
+            "lens_profile_vignetting_scale",
             "auto_lateral_ca",
             "defringe_purple",
             "defringe_purple_lo",
@@ -1867,6 +2484,75 @@ pub const CONTROL_FAMILIES: [Family; 14] = [
             "defringe_green",
             "defringe_green_lo",
             "defringe_green_hi",
+        ],
+    },
+    Family {
+        // v1.5.0. The colour mixer section's engine-only halves, on
+        // `detail_effects`' reason: `hsl` is a tool the model plans with, so
+        // the B&W treatment and the point colours are families of their own,
+        // and the develop panel's mixer ● is the OR of the three.
+        name: "black_white",
+        covers: "Lightroom's Black & White treatment and its eight-band grey mix — rendered here, \
+                 set by the photographer rather than the AI",
+        members: &[
+            "convert_to_grayscale",
+            "gray_red",
+            "gray_orange",
+            "gray_yellow",
+            "gray_green",
+            "gray_aqua",
+            "gray_blue",
+            "gray_purple",
+            "gray_magenta",
+        ],
+    },
+    Family {
+        name: "point_color",
+        covers: "Lightroom's Point Color swatches — rendered here, picked off the photo by the \
+                 photographer",
+        members: &["point_colors"],
+    },
+    Family {
+        // v1.5.0 F7. Separate from `calibration`: those seven are the
+        // photographer's own primaries tweak, this pair is WHICH rendering
+        // the photograph starts from.
+        name: "profile",
+        covers: "the Adobe camera profile and the creative Look this photograph is developed \
+                 through",
+        members: &["camera_profile", "look"],
+    },
+    Family {
+        // v1.5.0. A develop-panel section of its own, as in Lightroom.
+        name: "calibration",
+        covers: "Lightroom's Calibration panel — the shadows tint and the red, green and blue \
+                 primaries — rendered here, set by the photographer rather than the AI",
+        members: &[
+            "cal_shadow_tint",
+            "cal_red_hue",
+            "cal_red_sat",
+            "cal_green_hue",
+            "cal_green_sat",
+            "cal_blue_hue",
+            "cal_blue_sat",
+        ],
+    },
+    Family {
+        // v1.5.0 F8. Its own section for the same reason Lightroom gives it
+        // one: these do not adjust the photograph, they say which RANGE it was
+        // adjusted in and how that range reaches an SDR file.
+        name: "hdr",
+        covers: "Lightroom's HDR edit mode and the SDR rendition it is published through — \
+                 rendered here, set by the photographer rather than the AI",
+        members: &[
+            "hdr_edit",
+            "hdr_max_ev",
+            "sdr_blend",
+            "sdr_brightness",
+            "sdr_contrast",
+            "sdr_highlights",
+            "sdr_shadows",
+            "sdr_whites",
+            "sdr_clarity",
         ],
     },
 ];
@@ -1879,18 +2565,85 @@ pub const NOT_A_TOOL: [&str; 3] = ["version", "rationale", "confidence"];
 /// The controls [`family_is_active`] does NOT count — a non-neutral value that
 /// changes no pixel anywhere, so lighting the develop panel's ● for it would
 /// promise an edit the preview, the export and Lightroom all render
-/// identically. One entry, with the reason, on the [`CARRIED_ONLY_GLOBAL`]
+/// identically. Each entry states its reason, on the [`CARRIED_ONLY_GLOBAL`]
 /// pattern: an exemption without a stated reason is indistinguishable from an
 /// oversight.
-pub const DOT_EXEMPT: &[(&str, &str)] = &[(
-    "lens_vignette_mid",
-    "the engine builds the manual falloff LUT only when the AMOUNT is non-zero \
-     — `(r.lens_vignette != 0.0).then(|| manual_vignette_lut(…))`, render.rs — \
-     and the XMP carries VignetteMidpoint under the same zero amount, so a \
-     moved Midpoint alone changes no pixel in the preview, the export or \
-     Lightroom. Whenever it DOES matter, `lens_vignette != 0.0` has already lit \
-     the dot (R22 #16, re-checked R25)",
-)];
+pub const DOT_EXEMPT: &[(&str, &str)] = &[
+    (
+        "lens_vignette_mid",
+        "the engine builds the manual falloff LUT only when the AMOUNT is non-zero \
+         — `(r.lens_vignette != 0.0).then(|| manual_vignette_lut(…))`, render.rs — \
+         and the XMP carries VignetteMidpoint under the same zero amount, so a \
+         moved Midpoint alone changes no pixel in the preview, the export or \
+         Lightroom. Whenever it DOES matter, `lens_vignette != 0.0` has already lit \
+         the dot (R22 #16, re-checked R25)",
+    ),
+    // v1.5.0. A split only says where two regions of the parametric curve
+    // meet.
+    (
+        "param_shadow_split",
+        "while every parametric REGION is 0 the curve is the identity wherever its splits \
+         sit — `render::parametric_lut` answers None — so a moved split alone changes no \
+         pixel in the preview or the export, the straight line Lightroom's own panel draws \
+         until a region moves. Whenever a split DOES matter, a region slider has already lit \
+         the dot",
+    ),
+    ("param_midtone_split", "same reason as param_shadow_split: a split alone moves no pixel"),
+    ("param_highlight_split", "same reason as param_shadow_split: a split alone moves no pixel"),
+    // v1.5.0. A grey-mix band only says how light one colour turns in grey.
+    (
+        "gray_red",
+        "the grey mix renders only under the Black & White treatment — \
+         `apply_develop_with_rasters` runs `apply_gray_mix` while `convert_to_grayscale` is on \
+         and the colour path otherwise, as Lightroom ignores the mix on a colour photo — so a \
+         band moved on a colour photo changes no pixel. Whenever a band DOES matter, the switch \
+         has already lit the dot",
+    ),
+    ("gray_orange", "same reason as gray_red: the grey mix renders only in black and white"),
+    ("gray_yellow", "same reason as gray_red: the grey mix renders only in black and white"),
+    ("gray_green", "same reason as gray_red: the grey mix renders only in black and white"),
+    ("gray_aqua", "same reason as gray_red: the grey mix renders only in black and white"),
+    ("gray_blue", "same reason as gray_red: the grey mix renders only in black and white"),
+    ("gray_purple", "same reason as gray_red: the grey mix renders only in black and white"),
+    ("gray_magenta", "same reason as gray_red: the grey mix renders only in black and white"),
+    // v1.5.0. Every AMOUNT-GATED companion, on `lens_vignette_mid`'s exact
+    // reason and found by the same question: does this control alone move a
+    // pixel? Each operator below is built only when its own amount is non-zero
+    // (`Vignette::of` / `Grain::of` / `Window::of` all answer `None` at zero),
+    // so a companion moved on its own renders identically in the preview, the
+    // export and Lightroom. Whenever it DOES matter, the amount beside it has
+    // already lit the dot.
+    (
+        "post_crop_vignette_mid",
+        "`finish::Vignette::of` returns `None` while PostCropVignetteAmount is 0, so the \
+         midpoint alone builds no falloff — and Lightroom writes the companion keys only \
+         alongside a non-zero amount, which is why their absent state is Adobe's default \
+         rather than 0",
+    ),
+    ("post_crop_vignette_feather", "same reason as post_crop_vignette_mid: the amount gates it"),
+    ("post_crop_vignette_round", "same reason as post_crop_vignette_mid: the amount gates it"),
+    ("post_crop_vignette_style", "same reason as post_crop_vignette_mid: the amount gates it"),
+    (
+        "post_crop_vignette_hl",
+        "gated TWICE over: Highlights acts only when the amount is non-zero AND negative \
+         (`finish::Vignette::apply`, Adobe's own rule), so on its own it is doubly inert",
+    ),
+    (
+        "grain_size",
+        "`finish::Grain::of` returns `None` while GrainAmount is 0, so a lattice size alone \
+         has no grain to size",
+    ),
+    ("grain_rough", "same reason as grain_size: the amount gates it"),
+    (
+        "defringe_purple_lo",
+        "`lens::Window::of` returns `None` while DefringePurpleAmount is 0, so moving the hue \
+         window alone corrects nothing — and this block's neutral is Adobe's 30/70, not zero, \
+         so a photographer who never touched it still carries non-zero numbers here",
+    ),
+    ("defringe_purple_hi", "same reason as defringe_purple_lo: the amount gates the window"),
+    ("defringe_green_lo", "same reason as defringe_purple_lo: the amount gates the window"),
+    ("defringe_green_hi", "same reason as defringe_purple_lo: the amount gates the window"),
+];
 
 /// Is any control in this family standing away from its neutral state?
 ///
@@ -1905,18 +2658,22 @@ pub const DOT_EXEMPT: &[(&str, &str)] = &[(
 /// [`global_value`] so a renamed or retyped field cannot slip past — with the
 /// two structured look objects answering for THEMSELVES (see
 /// [`value_is_active`]) and [`DOT_EXEMPT`] left out.
+///
+/// A companion named in [`EditRecipe::explicit_zero`] is active whatever its
+/// stored number says: that 0 renders differently from the default recipe's
+/// absent one, which inequality on the number alone cannot see.
 pub fn family_is_active(f: &Family, r: &EditRecipe) -> bool {
     let neutral = EditRecipe::default();
-    f.members
-        .iter()
-        .filter(|m| !DOT_EXEMPT.iter().any(|(n, _)| n == *m))
-        .any(|m| match (global_value(r, m), global_value(&neutral, m)) {
-            (Some(live), Some(base)) => value_is_active(live, base),
-            // Unreachable: `every_ai_visible_control_belongs_to_exactly_one_
-            // family` proves the members ARE registry rows. A typo'd member
-            // must not claim activity it cannot read.
-            _ => false,
-        })
+    f.members.iter().filter(|m| !DOT_EXEMPT.iter().any(|(n, _)| n == *m)).any(|m| {
+        r.explicit_zero.iter().any(|e| e == m)
+            || match (global_value(r, m), global_value(&neutral, m)) {
+                (Some(live), Some(base)) => value_is_active(live, base),
+                // Unreachable: `every_ai_visible_control_belongs_to_exactly_one_
+                // family` proves the members ARE registry rows. A typo'd member
+                // must not claim activity it cannot read.
+                _ => false,
+            }
+    })
 }
 
 /// "Away from neutral", per shape: plain inequality against the default recipe,
@@ -1933,6 +2690,9 @@ fn value_is_active(live: GlobalValue<'_>, neutral: GlobalValue<'_>) -> bool {
     match live {
         GlobalValue::Hsl(h) => !h.is_neutral(),
         GlobalValue::Grade(cg) => !cg.is_neutral(),
+        // A swatch whose three shifts are all 0 is a real state that moves no
+        // pixel — the point colours' own `is_neutral`, on the grade's reason.
+        GlobalValue::PointColors(swatches) => swatches.iter().any(|p| !p.is_neutral()),
         other => other != neutral,
     }
 }
@@ -2123,6 +2883,10 @@ pub enum GlobalValue<'a> {
     Grade(&'a ColorGrade),
     Crop(Option<&'a Crop>),
     Masks(&'a [LocalAdjustment]),
+    /// The imported spot-removal areas (v1.5.0 F9). Equality is the whole
+    /// list, which is the right "is it active" answer for a set of geometries
+    /// with no neutral value of their own — an area exists or it does not.
+    Retouch(&'a [crate::retouch::RetouchArea]),
     Knots(&'a [[f32; 2]]),
     Lens(&'a LensProfile),
     /// The solved colour field, or `None` for a recipe that carries none.
@@ -2131,6 +2895,13 @@ pub enum GlobalValue<'a> {
     /// Lightroom wrote. Equality is the whole map, which is the right
     /// "is it active" answer for a value nothing interprets.
     PassThrough(&'a std::collections::BTreeMap<String, String>),
+    /// A list of control names — `explicit_zero`.
+    Names(&'a [String]),
+    /// The point colours (v1.5.0), in the recipe's order.
+    PointColors(&'a [crate::recipe::PointColor]),
+    /// The creative profile's baked half (v1.5.0 F7), or `None` for a
+    /// photograph developed through no creative profile at all.
+    Look(Option<&'a crate::recipe::CreativeLook>),
 }
 
 impl GlobalValue<'_> {
@@ -2156,6 +2927,8 @@ impl GlobalValue<'_> {
 /// gains the row.
 pub fn global_value<'a>(r: &'a EditRecipe, name: &str) -> Option<GlobalValue<'a>> {
     let EditRecipe {
+        camera_profile,
+        look,
         version,
         coord_era,
         schema_era,
@@ -2175,6 +2948,16 @@ pub fn global_value<'a>(r: &'a EditRecipe, name: &str) -> Option<GlobalValue<'a>
         dehaze,
         texture,
         hsl,
+        convert_to_grayscale,
+        gray_red,
+        gray_orange,
+        gray_yellow,
+        gray_green,
+        gray_aqua,
+        gray_blue,
+        gray_purple,
+        gray_magenta,
+        point_colors,
         color_grade,
         sharpening,
         noise_reduction,
@@ -2189,6 +2972,18 @@ pub fn global_value<'a>(r: &'a EditRecipe, name: &str) -> Option<GlobalValue<'a>
         lens_vignette,
         lens_vignette_mid,
         lens_distortion,
+        lens_profile_distortion_scale,
+        lens_profile_vignetting_scale,
+        perspective_vertical,
+        perspective_horizontal,
+        perspective_rotate,
+        perspective_scale,
+        perspective_aspect,
+        perspective_x,
+        perspective_y,
+        perspective_upright,
+        upright_transform: _,
+        crop_constrain_to_warp,
         ca_r,
         ca_b,
         auto_lateral_ca,
@@ -2207,6 +3002,7 @@ pub fn global_value<'a>(r: &'a EditRecipe, name: &str) -> Option<GlobalValue<'a>
         grain,
         grain_size,
         grain_rough,
+        explicit_zero,
         straighten_deg,
         quarter_turns,
         crop,
@@ -2214,11 +3010,35 @@ pub fn global_value<'a>(r: &'a EditRecipe, name: &str) -> Option<GlobalValue<'a>
         red_curve,
         green_curve,
         blue_curve,
+        param_shadows,
+        param_darks,
+        param_lights,
+        param_highlights,
+        param_shadow_split,
+        param_midtone_split,
+        param_highlight_split,
         base_curve,
         lens_profile,
         masks,
+        retouch,
         colour_field,
         passthrough,
+        cal_shadow_tint,
+        cal_red_hue,
+        cal_red_sat,
+        cal_green_hue,
+        cal_green_sat,
+        cal_blue_hue,
+        cal_blue_sat,
+        hdr_edit,
+        hdr_max_ev,
+        sdr_blend,
+        sdr_brightness,
+        sdr_contrast,
+        sdr_highlights,
+        sdr_shadows,
+        sdr_whites,
+        sdr_clarity,
         rationale,
         confidence,
     } = r;
@@ -2242,6 +3062,16 @@ pub fn global_value<'a>(r: &'a EditRecipe, name: &str) -> Option<GlobalValue<'a>
         "dehaze" => GlobalValue::Num(*dehaze),
         "texture" => GlobalValue::Num(*texture),
         "hsl" => GlobalValue::Hsl(hsl),
+        "convert_to_grayscale" => GlobalValue::Bool(*convert_to_grayscale),
+        "gray_red" => GlobalValue::Num(*gray_red),
+        "gray_orange" => GlobalValue::Num(*gray_orange),
+        "gray_yellow" => GlobalValue::Num(*gray_yellow),
+        "gray_green" => GlobalValue::Num(*gray_green),
+        "gray_aqua" => GlobalValue::Num(*gray_aqua),
+        "gray_blue" => GlobalValue::Num(*gray_blue),
+        "gray_purple" => GlobalValue::Num(*gray_purple),
+        "gray_magenta" => GlobalValue::Num(*gray_magenta),
+        "point_colors" => GlobalValue::PointColors(point_colors),
         "color_grade" => GlobalValue::Grade(color_grade),
         "sharpening" => GlobalValue::Num(*sharpening),
         "noise_reduction" => GlobalValue::Num(*noise_reduction),
@@ -2258,7 +3088,18 @@ pub fn global_value<'a>(r: &'a EditRecipe, name: &str) -> Option<GlobalValue<'a>
         "lens_distortion" => GlobalValue::Num(*lens_distortion),
         "ca_r" => GlobalValue::Num(*ca_r),
         "ca_b" => GlobalValue::Num(*ca_b),
+        "lens_profile_distortion_scale" => GlobalValue::Num(*lens_profile_distortion_scale),
+        "lens_profile_vignetting_scale" => GlobalValue::Num(*lens_profile_vignetting_scale),
         "auto_lateral_ca" => GlobalValue::Bool(*auto_lateral_ca),
+        "perspective_vertical" => GlobalValue::Num(*perspective_vertical),
+        "perspective_horizontal" => GlobalValue::Num(*perspective_horizontal),
+        "perspective_rotate" => GlobalValue::Num(*perspective_rotate),
+        "perspective_scale" => GlobalValue::Num(*perspective_scale),
+        "perspective_aspect" => GlobalValue::Num(*perspective_aspect),
+        "perspective_x" => GlobalValue::Num(*perspective_x),
+        "perspective_y" => GlobalValue::Num(*perspective_y),
+        "perspective_upright" => GlobalValue::Num(*perspective_upright),
+        "crop_constrain_to_warp" => GlobalValue::Bool(*crop_constrain_to_warp),
         "defringe_purple" => GlobalValue::Num(*defringe_purple),
         "defringe_purple_lo" => GlobalValue::Num(*defringe_purple_lo),
         "defringe_purple_hi" => GlobalValue::Num(*defringe_purple_hi),
@@ -2274,6 +3115,7 @@ pub fn global_value<'a>(r: &'a EditRecipe, name: &str) -> Option<GlobalValue<'a>
         "grain" => GlobalValue::Num(*grain),
         "grain_size" => GlobalValue::Num(*grain_size),
         "grain_rough" => GlobalValue::Num(*grain_rough),
+        "explicit_zero" => GlobalValue::Names(explicit_zero),
         "straighten_deg" => GlobalValue::Num(*straighten_deg),
         "quarter_turns" => GlobalValue::Int(u32::from(*quarter_turns)),
         "crop" => GlobalValue::Crop(crop.as_ref()),
@@ -2281,11 +3123,37 @@ pub fn global_value<'a>(r: &'a EditRecipe, name: &str) -> Option<GlobalValue<'a>
         "red_curve" => GlobalValue::Curve(red_curve),
         "green_curve" => GlobalValue::Curve(green_curve),
         "blue_curve" => GlobalValue::Curve(blue_curve),
+        "param_shadows" => GlobalValue::Num(*param_shadows),
+        "param_darks" => GlobalValue::Num(*param_darks),
+        "param_lights" => GlobalValue::Num(*param_lights),
+        "param_highlights" => GlobalValue::Num(*param_highlights),
+        "param_shadow_split" => GlobalValue::Num(*param_shadow_split),
+        "param_midtone_split" => GlobalValue::Num(*param_midtone_split),
+        "param_highlight_split" => GlobalValue::Num(*param_highlight_split),
         "base_curve" => GlobalValue::Knots(base_curve),
+        "camera_profile" => GlobalValue::Text(camera_profile),
+        "look" => GlobalValue::Look(look.as_ref()),
         "lens_profile" => GlobalValue::Lens(lens_profile),
         "masks" => GlobalValue::Masks(masks),
+        "retouch" => GlobalValue::Retouch(retouch),
         "colour_field" => GlobalValue::ColourField(colour_field.as_ref()),
         "passthrough" => GlobalValue::PassThrough(passthrough),
+        "cal_shadow_tint" => GlobalValue::Num(*cal_shadow_tint),
+        "cal_red_hue" => GlobalValue::Num(*cal_red_hue),
+        "cal_red_sat" => GlobalValue::Num(*cal_red_sat),
+        "cal_green_hue" => GlobalValue::Num(*cal_green_hue),
+        "cal_green_sat" => GlobalValue::Num(*cal_green_sat),
+        "cal_blue_hue" => GlobalValue::Num(*cal_blue_hue),
+        "cal_blue_sat" => GlobalValue::Num(*cal_blue_sat),
+        "hdr_edit" => GlobalValue::Bool(*hdr_edit),
+        "hdr_max_ev" => GlobalValue::Num(*hdr_max_ev),
+        "sdr_blend" => GlobalValue::Num(*sdr_blend),
+        "sdr_brightness" => GlobalValue::Num(*sdr_brightness),
+        "sdr_contrast" => GlobalValue::Num(*sdr_contrast),
+        "sdr_highlights" => GlobalValue::Num(*sdr_highlights),
+        "sdr_shadows" => GlobalValue::Num(*sdr_shadows),
+        "sdr_whites" => GlobalValue::Num(*sdr_whites),
+        "sdr_clarity" => GlobalValue::Num(*sdr_clarity),
         "rationale" => GlobalValue::Text(rationale),
         "confidence" => GlobalValue::Num(*confidence),
         _ => return None,
@@ -2722,6 +3590,54 @@ mod tests {
             // R33 §G's field skips on `None`, for the argument its doc spells
             // out — the same argument `quarter_turns` makes one line up.
             colour_field: Some(crate::recipe::ColourField::default()),
+            // v1.5.0's list skips when empty, by the same argument again.
+            explicit_zero: vec!["sharpen_detail".to_string()],
+            // …and so does v1.5.0's parametric curve, at Adobe's defaults.
+            param_shadows: 1.0,
+            param_darks: 1.0,
+            param_lights: 1.0,
+            param_highlights: 1.0,
+            param_shadow_split: 30.0,
+            param_midtone_split: 55.0,
+            param_highlight_split: 80.0,
+            // …and so do v1.5.0's colour controls: the calibration seven, the
+            // B&W switch and mix at 0, the point colours when there are none.
+            // …and F7's pair: a profile name, and a creative Look.
+            camera_profile: "Adobe Standard".to_string(),
+            look: Some(crate::recipe::CreativeLook {
+                name: "Adobe Color".to_string(),
+                amount: 1.0,
+                ..Default::default()
+            }),
+            cal_shadow_tint: 1.0,
+            cal_red_hue: 1.0,
+            cal_red_sat: 1.0,
+            cal_green_hue: 1.0,
+            cal_green_sat: 1.0,
+            cal_blue_hue: 1.0,
+            cal_blue_sat: 1.0,
+            convert_to_grayscale: true,
+            gray_red: 1.0,
+            gray_orange: 1.0,
+            gray_yellow: 1.0,
+            gray_green: 1.0,
+            gray_aqua: 1.0,
+            gray_blue: 1.0,
+            gray_purple: 1.0,
+            gray_magenta: 1.0,
+            point_colors: vec![crate::recipe::PointColor::default()],
+            // …and F8's nine, which skip serialisation at their neutrals like
+            // the colour controls above, so the probe has to move every one of
+            // them or this mirror would stop covering them.
+            hdr_edit: true,
+            hdr_max_ev: 1.0,
+            sdr_blend: 1.0,
+            sdr_brightness: 1.0,
+            sdr_contrast: 1.0,
+            sdr_highlights: 1.0,
+            sdr_shadows: 1.0,
+            sdr_whites: 1.0,
+            sdr_clarity: 1.0,
             ..EditRecipe::default()
         };
         let recipe = serde_keys(&serde_json::to_value(probe).unwrap());
@@ -2833,7 +3749,10 @@ mod tests {
         // PassThrough was declared and deliberately unpopulated until R25 B4,
         // and this assertion used to say so ("PassThrough gained a member —
         // that is a B4 decision, not a refactor"). B4 is this batch: the
-        // Transform and Calibration blocks became `EditRecipe::passthrough`,
+        // Transform block and the camera profile name became
+        // `EditRecipe::passthrough` (the seven `CameraCalibration*` keys R25
+        // listed beside them are keys Lightroom never writes, and v1.5.0
+        // renders its Calibration panel from the unprefixed seven instead),
         // and the guard becomes the LAW that membership has to satisfy.
         //
         // Two conditions, each the reason the tier exists:
@@ -2878,6 +3797,127 @@ mod tests {
                 "{}: PassThrough means carried THROUGH THE SIDECAR — a member with no crs key \
                  of its own carries nothing",
                 c.name
+            );
+        }
+    }
+
+    /// **Track F's acceptance criterion** (v1.5.0): nothing is carried any
+    /// more, and every row that left the tier renders.
+    ///
+    /// `render::tests::carried_detail_renders_nothing` asserted the same
+    /// registry↔engine agreement from the other side — "a carried row moves no
+    /// pixel" — and it was the tier's POPULATION that gave that test its force.
+    /// At zero members that sentence is true of nothing, so the claim lives
+    /// here now, the other way round.
+    ///
+    /// The twenty-four names are PINNED rather than derived: a derived list
+    /// would shrink to nothing in silence on the batch that dropped a row by
+    /// accident, which is the exact failure this is watching for. The proof
+    /// that each one really moves a pixel is the module test beside the
+    /// operator (`render::detail::tests`, `render::finish::tests`,
+    /// `render::lens::tests`) — each needs a frame built for it, because a
+    /// de-fringe needs a fringe and an auto-CA solve needs a misaligned
+    /// channel, and one probe image cannot be all of those at once.
+    #[test]
+    fn nothing_is_carried_any_more_and_every_row_that_left_renders() {
+        assert!(
+            CARRIED_ONLY_GLOBAL.is_empty(),
+            "a carried global is back: {CARRIED_ONLY_GLOBAL:?} — that is a decision to take, \
+             not an edit to make here"
+        );
+        assert!(
+            !RECIPE_CONTROLS.iter().any(|c| c.tier == Some(Tier::CarriedOnly)),
+            "the allow-list is empty but a registry row still claims the tier"
+        );
+        // The LOCAL half is untouched, and says why the global half could
+        // empty at all: `name` is a LABEL, not an operator, so it is the one
+        // member of this tier that never had an engine stage to wait for.
+        assert_eq!(
+            CARRIED_ONLY_LOCAL.iter().map(|(n, _)| *n).collect::<Vec<_>>(),
+            vec!["name"],
+            "the mask label is the tier's last member anywhere"
+        );
+        const PROMOTED: [&str; 24] = [
+            // R25 B2's nine Effects → `render/finish.rs`, the stage after the
+            // crop that v1.5.0 gave the engine.
+            "post_crop_vignette",
+            "post_crop_vignette_mid",
+            "post_crop_vignette_feather",
+            "post_crop_vignette_round",
+            "post_crop_vignette_style",
+            "post_crop_vignette_hl",
+            "grain",
+            "grain_size",
+            "grain_rough",
+            // R25 B3's eight Detail axes → `render/detail.rs`.
+            "sharpen_radius",
+            "sharpen_detail",
+            "sharpen_mask",
+            "nr_detail",
+            "nr_contrast",
+            "color_nr",
+            "color_nr_detail",
+            "color_nr_smooth",
+            // R25 B3's lens half → `render/lens.rs`.
+            "auto_lateral_ca",
+            "defringe_purple",
+            "defringe_purple_lo",
+            "defringe_purple_hi",
+            "defringe_green",
+            "defringe_green_lo",
+            "defringe_green_hi",
+        ];
+        for n in PROMOTED {
+            let c = global_control(n).unwrap_or_else(|| panic!("{n} left the registry"));
+            assert_eq!(c.tier, Some(Tier::Rendered), "{n} was promoted and then demoted");
+            // Promotion is about RENDERING, never about who plans: all
+            // twenty-four stay engine-only, because the advisor has no model of
+            // a grain lattice or a hue window and a required schema field would
+            // return 0 and delete the photographer's own value on every Refine.
+            assert!(c.engine_only, "{n} renders now, but that is not a reason to ask the model");
+        }
+        // The AMOUNT-GATED companions among them are exactly the rows that
+        // cannot light a section's ● on their own, which is `DOT_EXEMPT`'s
+        // whole job — so the two facts are checked against each other instead
+        // of kept in two places that can drift apart.
+        //
+        // The WHOLE membership, in declaration order, not a sample of it: a
+        // sample cannot see an entry go MISSING, and one did — a mutation that
+        // deleted `grain_rough` passed the five-name version of this check.
+        let exempt: Vec<&str> = DOT_EXEMPT.iter().map(|(n, _)| *n).collect();
+        assert_eq!(
+            exempt,
+            [
+                "lens_vignette_mid",
+                "param_shadow_split",
+                "param_midtone_split",
+                "param_highlight_split",
+                "gray_red",
+                "gray_orange",
+                "gray_yellow",
+                "gray_green",
+                "gray_aqua",
+                "gray_blue",
+                "gray_purple",
+                "gray_magenta",
+                "post_crop_vignette_mid",
+                "post_crop_vignette_feather",
+                "post_crop_vignette_round",
+                "post_crop_vignette_style",
+                "post_crop_vignette_hl",
+                "grain_size",
+                "grain_rough",
+                "defringe_purple_lo",
+                "defringe_purple_hi",
+                "defringe_green_lo",
+                "defringe_green_hi",
+            ],
+            "every control that renders only under another's amount, and nothing else"
+        );
+        for n in ["post_crop_vignette", "grain", "defringe_purple", "defringe_green"] {
+            assert!(
+                !DOT_EXEMPT.iter().any(|(d, _)| *d == n),
+                "{n} IS the amount — exempting it would hide the whole operator"
             );
         }
     }
@@ -3114,15 +4154,20 @@ mod tests {
             // a measurement and not staged work but a FRAME declaration the
             // model cannot observe — it only ever sees the display frame.
             // The nine R25 B2 EFFECTS joined for a third reason again: they
-            // are `Tier::CarriedOnly` Adobe-only operators (policy SF4-C), so
-            // a number from the model would move no pixel in this engine.
+            // were `Tier::CarriedOnly` Adobe-only operators under policy SF4-C,
+            // so a number from the model would have moved no pixel in this
+            // engine. v1.5.0 renders them — and they stay engine-only, because
+            // `engine_only` is about who PLANS a control, not about what
+            // renders (the fourth kind below is the same distinction).
             // R25 B3 added fifteen more of that third kind (the detail axes,
             // the auto-CA switch, de-fringe) plus a FOURTH kind: `ca_r`/`ca_b`
             // RENDER, and are engine-only anyway — lateral CA is a 1–3 px edge
             // artefact and the advisor's ~1024 px preview cannot show it, so a
             // required schema field could only ever return a guess (and, being
             // required, would return 0 and delete the photographer's own value
-            // on every Refine).
+            // on every Refine). v1.5.0 moved the eight detail axes from the
+            // third kind to the fourth: they render now, on the same pixel
+            // scale the advisor cannot see.
             // R25 B4 adds a FIFTH kind, and the plainest of them all:
             // `passthrough` is a value nobody interprets, so there is no
             // question to ask the model about it (`Tier::PassThrough`).
@@ -3133,6 +4178,22 @@ mod tests {
                 "base_curve",
                 "ca_b",
                 "ca_r",
+                // v1.5.0: the Calibration panel, the B&W treatment and the
+                // point colours, on the parametric curve's ground below — with
+                // the colour mixer and the grade as the model's own spelling
+                // of a colour move.
+                "cal_blue_hue",
+                "cal_blue_sat",
+                "cal_green_hue",
+                "cal_green_sat",
+                "cal_red_hue",
+                "cal_red_sat",
+                "cal_shadow_tint",
+                // v1.5.0 F7, the fifth kind again — nothing to ask. A camera
+                // profile is a FILE on the photographer's machine and a Look
+                // is Adobe's own creative block; a model that named one would
+                // be naming something it cannot see and cannot check.
+                "camera_profile",
                 "color_nr",
                 "color_nr_detail",
                 "color_nr_smooth",
@@ -3141,21 +4202,79 @@ mod tests {
                 // schema field would return an empty grid and delete a solved
                 // field on every Refine.
                 "colour_field",
+                "convert_to_grayscale",
                 "coord_era",
+                // v1.5.0 F6. `crop_constrain_to_warp` is a FLAG about the
+                // frame, not a look, and `upright_transform` is Adobe's own
+                // measurement of this photograph — the first kind, like
+                // `lens_profile`.
+                "crop_constrain_to_warp",
                 "defringe_green",
                 "defringe_green_hi",
                 "defringe_green_lo",
                 "defringe_purple",
                 "defringe_purple_hi",
                 "defringe_purple_lo",
+                // v1.5.0: bookkeeping about the companions above, riding a
+                // Refine with them — a model has no view on which zeros are
+                // meant.
+                "explicit_zero",
                 "grain",
                 "grain_rough",
                 "grain_size",
+                "gray_aqua",
+                "gray_blue",
+                "gray_green",
+                "gray_magenta",
+                "gray_orange",
+                "gray_purple",
+                "gray_red",
+                "gray_yellow",
+                // v1.5.0 F8, the first kind again: a declaration ABOUT the
+                // capture's range and about the rendition it is published
+                // through, neither of which a model can see in a preview that
+                // has already been mapped into SDR.
+                "hdr_edit",
+                "hdr_max_ev",
                 "lens_profile",
+                // v1.5.0 F5: the profile correction strengths. They scale
+                // MEASURED optics — the camera's own knots, or an Adobe `.lcp` on
+                // this machine — and the model sees a JPEG.
+                "lens_profile_distortion_scale",
+                "lens_profile_vignetting_scale",
+                // v1.5.0 F7: the creative profile's baked half. Engine-only for
+                // the same reason `camera_profile` is — Adobe's own block, not
+                // a number to ask a model for.
+                "look",
                 "nr_contrast",
                 "nr_detail",
+                // v1.5.0: the parametric curve, on the second kind's ground —
+                // a required field would return zeros over the photographer's
+                // own curve on every Refine — with the point curve as the
+                // model's own spelling of the move.
+                "param_darks",
+                "param_highlight_split",
+                "param_highlights",
+                "param_lights",
+                "param_midtone_split",
+                "param_shadow_split",
+                "param_shadows",
                 // R25 B4, the fifth kind: nothing to ask, nothing to answer.
                 "passthrough",
+                // v1.5.0 F6: Lightroom's Transform panel. Engine-only for the
+                // Calibration panel's pair of reasons — a required field would
+                // return zeros over the photographer's own keystone, and a
+                // ~1024 px preview is not where a building's verticals get
+                // judged.
+                "perspective_aspect",
+                "perspective_horizontal",
+                "perspective_rotate",
+                "perspective_scale",
+                "perspective_upright",
+                "perspective_vertical",
+                "perspective_x",
+                "perspective_y",
+                "point_colors",
                 "post_crop_vignette",
                 "post_crop_vignette_feather",
                 "post_crop_vignette_hl",
@@ -3170,20 +4289,34 @@ mod tests {
                 // silently un-rotating the photo AND leaving the crop and the
                 // masks turned. Which way is up is a toolbar button.
                 "quarter_turns",
+                // v1.5.0 F9, the sixth kind again and the second EDIT on it:
+                // a retouch area is a geometry read off the photographer's own
+                // Lightroom file. A model cannot state where somebody else
+                // removed something, and a required field would return an
+                // empty list and delete all 121 of the library's removals on
+                // every Refine.
+                "retouch",
                 // R25 P8: `schema_era` joins for `coord_era`'s reason exactly
                 // — a declaration ABOUT the file the recipe came from, which
                 // the model has never seen and could only guess at. A wrong
                 // guess here decides whether an XMP merge strips a key or
                 // leaves it, so the guess would be a data question.
                 "schema_era",
+                "sdr_blend",
+                "sdr_brightness",
+                "sdr_clarity",
+                "sdr_contrast",
+                "sdr_highlights",
+                "sdr_shadows",
+                "sdr_whites",
                 "sharpen_detail",
                 "sharpen_mask",
                 "sharpen_radius",
+                "upright_transform",
             ]
         );
-        // …and every one of the twenty-four really is on the CarriedOnly
-        // allow-list, so "engine-only" here can never quietly mean "staged
-        // work" again.
+        // …and every name still on the CarriedOnly allow-list is engine-only,
+        // so "engine-only" here can never quietly mean "staged work" again.
         for (n, _) in CARRIED_ONLY_GLOBAL {
             assert!(
                 global_control(n).is_some_and(|c| c.engine_only),
@@ -3402,11 +4535,10 @@ mod tests {
         );
     }
 
-    /// R25 P0-0.3: the ● exemption is one named control with one stated
-    /// reason — the same shape [`CARRIED_ONLY_GLOBAL`] uses, and for the same
-    /// reason: an exemption that names a control nobody has, or gives no
-    /// account of itself, is indistinguishable from a control that was
-    /// forgotten.
+    /// R25 P0-0.3: each ● exemption is a named control with a stated reason —
+    /// the same shape [`CARRIED_ONLY_GLOBAL`] uses, and for the same reason: an
+    /// exemption that names a control nobody has, or gives no account of
+    /// itself, is indistinguishable from a control that was forgotten.
     #[test]
     fn dot_exempt_names_exist_and_state_a_reason() {
         for (name, why) in DOT_EXEMPT {
@@ -3428,6 +4560,32 @@ mod tests {
             let neutral = EditRecipe::default();
             match name {
                 &"lens_vignette_mid" => moved.lens_vignette_mid = 12.0,
+                &"param_shadow_split" => moved.param_shadow_split = 40.0,
+                &"param_midtone_split" => moved.param_midtone_split = 60.0,
+                &"param_highlight_split" => moved.param_highlight_split = 85.0,
+                // v1.5.0's amount-gated companions. Each is probed AWAY from
+                // the value `EditRecipe::default()` holds — which for the five
+                // post-crop companions and the two grain ones is 0 meaning
+                // "absent, so Lightroom's own default" (`recipe::resolved`),
+                // and for the four de-fringe windows is Adobe's 30/70/40/60.
+                &"post_crop_vignette_mid" => moved.post_crop_vignette_mid = 80.0,
+                &"post_crop_vignette_feather" => moved.post_crop_vignette_feather = 20.0,
+                &"post_crop_vignette_round" => moved.post_crop_vignette_round = -70.0,
+                &"post_crop_vignette_style" => moved.post_crop_vignette_style = 3.0,
+                &"post_crop_vignette_hl" => moved.post_crop_vignette_hl = 100.0,
+                &"grain_size" => moved.grain_size = 90.0,
+                &"grain_rough" => moved.grain_rough = 10.0,
+                &"defringe_purple_lo" => moved.defringe_purple_lo = 5.0,
+                &"defringe_purple_hi" => moved.defringe_purple_hi = 95.0,
+                &"defringe_green_lo" => moved.defringe_green_lo = 5.0,
+                &"defringe_green_hi" => moved.defringe_green_hi = 95.0,
+                band if band.starts_with("gray_") => {
+                    let i = crate::recipe::HSL_BANDS
+                        .iter()
+                        .position(|b| band.strip_prefix("gray_") == Some(b.to_lowercase().as_str()))
+                        .unwrap_or_else(|| panic!("{band} names no B&W band"));
+                    *moved.gray_mixer_mut(i).expect("eight bands") = 40.0;
+                }
                 other => panic!("{other} has no exemption probe — add one with the entry"),
             }
             assert_ne!(

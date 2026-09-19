@@ -29,7 +29,11 @@ use crate::config::Config;
 /// Runtime-only shape of one painted component. The pixels are bit-packed
 /// relative to the component's own bounding box, while the mask dimensions
 /// preserve the normalised mapping to any heal-image resolution.
-#[derive(Debug, Clone)]
+///
+/// `PartialEq` compares the bitset verbatim, which is what a `HealSpot` inside
+/// an `EditRecipe` needs (v1.5.0 F9): two spots are the same spot when they
+/// cover the same pixels, and the bounding box is part of that answer.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SpotCoverage {
     mask_width: u32,
     mask_height: u32,
@@ -51,6 +55,17 @@ impl SpotCoverage {
         ((self.bits[i / 64] >> (i % 64)) & 1) as f32
     }
 
+    /// The painted weight at a NORMALISED frame coordinate — the exact shape
+    /// rather than the enclosing disk.
+    ///
+    /// Public since v1.5.0 F9 because the GUI has to paint an imported area
+    /// into the shared brush mask before handing it to the generative verb,
+    /// and a disk over a long thin stroke would ask the model to regenerate a
+    /// circle of content the photographer never touched.
+    pub fn weight_at(&self, nx: f32, ny: f32) -> f32 {
+        self.alpha_at(nx, ny)
+    }
+
     /// Bilinear sampling makes boundary pixels fractional when the painted
     /// canvas and healed image differ in resolution.
     fn alpha_at(&self, nx: f32, ny: f32) -> f32 {
@@ -67,11 +82,137 @@ impl SpotCoverage {
     }
 }
 
+/// What made the pixels Lightroom was showing inside a retouch area (v1.5.0
+/// F9) — the FILL axis of `crs:RetouchAreas`.
+///
+/// Two independent facts live in one of Lightroom's areas and it is worth
+/// keeping them apart, because conflating them is what made this reader's
+/// first census wrong. The fill is what this enum carries. The GEOMETRY is a
+/// separate axis, carried where this engine already carries geometry: an
+/// ellipse becomes the spot's `cx`/`cy`/`radius`, a brush stroke becomes its
+/// [`SpotCoverage`]. Measured over the reference library's 121 areas: 84 are
+/// an ellipse and 37 are a brush, crossed with the three fills below.
+///
+/// This engine repairs every one of them the same way, by copying real pixels
+/// out of the same frame. The distinction is not a rendering switch — it is
+/// what the panel has to be able to say, because for 116 of the 121 the pixels
+/// the photographer approved are NOT in the sidecar and are not ours to
+/// reproduce.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum SpotOrigin {
+    /// This engine's own: painted in the UI, or proposed by the detector.
+    #[default]
+    Painted,
+    /// Lightroom `crs:SpotType="heal"` (5 areas) — a plain donor copy, and the
+    /// only kind whose donor Lightroom actually names (`crs:SourceX`,
+    /// `crs:OffsetY`). The one fill this engine reproduces exactly, because
+    /// there is nothing to reproduce beyond the copy itself.
+    LightroomHeal,
+    /// Lightroom `crs:SpotType="heal_patchmatch"` with no `crs:fill_method`
+    /// (99) — Adobe's CLASSICAL content-aware fill. PatchMatch synthesises the
+    /// patch from the frame's own texture; no model is involved, and the
+    /// result still lives in Adobe's own store rather than in the sidecar.
+    LightroomContentAware,
+    /// The same, with `crs:fill_method="firefly"` (17) — a generative model's
+    /// output, stamped with `crs:pm_clio_model_version` (three distinct
+    /// versions in the library). These are the ones no amount of local work
+    /// reconstructs, because their pixels were never in the photograph.
+    LightroomGenerative,
+}
+
+impl SpotOrigin {
+    /// Did LIGHTROOM synthesise this area's pixels rather than copy them?
+    /// True for both patchmatch arms — the classical one invents texture as
+    /// surely as the model does, and neither result is in the sidecar. This is
+    /// the question the panel asks to decide whether to offer the ✨ upgrade.
+    pub fn is_synthesised(self) -> bool {
+        matches!(self, Self::LightroomContentAware | Self::LightroomGenerative)
+    }
+
+    /// Did this area arrive from a sidecar rather than from this session?
+    pub fn is_imported(self) -> bool {
+        !matches!(self, Self::Painted)
+    }
+}
+
+/// One area of Lightroom's spot removal (`crs:RetouchAreas`), as the sidecar
+/// states it — v1.5.0 F9.
+///
+/// Deliberately NOT a [`HealSpot`]. A spot is this engine's RENDER shape: one
+/// disk, in short-side units, at one resolution. An area is the photographer's
+/// STATEMENT, and two of its three shapes have no disk at all until something
+/// rasterises them. Keeping them apart is what lets `render` build the spots
+/// for the frame it is actually working on, the way every mask geometry is
+/// already handled.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RetouchArea {
+    /// What made Lightroom's own pixels here — see [`SpotOrigin`].
+    pub origin: SpotOrigin,
+    /// `crs:Feather`, 0..1. Stated by the 5 `heal` areas (all of them 0.5) and
+    /// by none of the 116 patchmatch ones, which is why the default is this
+    /// engine's own rather than zero: a hard-edged patch seam is not what
+    /// Lightroom showed, and an absent attribute is not a photographer
+    /// choosing 0.
+    pub feather: f32,
+    /// `crs:SourceX` / `crs:OffsetY` — the donor's centre, and ABSOLUTE
+    /// normalised frame coordinates despite what `OffsetY` sounds like.
+    ///
+    /// Measured on all 5 areas that state one: read as a relative offset, one
+    /// of them lands at 0.9461 + 0.8161 = 1.76, which is off the image, and
+    /// three of the five fail the same way. Read as absolute, all five give a
+    /// plausible donor. `None` on the 116 patchmatch areas — Adobe records a
+    /// SEARCH WINDOW there and not a donor, so this engine finds its own.
+    pub donor: Option<[f32; 2]>,
+    /// Where the area is.
+    pub shape: RetouchShape,
+}
+
+impl Default for RetouchArea {
+    fn default() -> Self {
+        Self {
+            origin: SpotOrigin::Painted,
+            feather: HealSpot::default().feather,
+            donor: None,
+            shape: RetouchShape::default(),
+        }
+    }
+}
+
+/// The GEOMETRY axis of a retouch area — the second of the two independent
+/// facts inside one of Lightroom's areas (the first is [`SpotOrigin`]).
+///
+/// Measured over the reference library's 121 areas: 84 ellipses and 37
+/// brushes, every ellipse written as an attribute-only `<rdf:li/>` and every
+/// brush as a nested `<rdf:Description>` with its own `<crs:Dabs>`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum RetouchShape {
+    /// `crs:What="Mask/Ellipse"` (84). `cx`/`cy` are per-axis fractions of the
+    /// frame; `size_x`/`size_y` are half-extents in WIDTH units on BOTH axes,
+    /// the same convention `render::BrushDab` records for `crs:Radius` — a
+    /// spot is a circle in PIXELS, so `size_x == size_y` on all 84 and the y
+    /// half-extent in normalised coordinates is `size_y · W/H`.
+    Ellipse { cx: f32, cy: f32, size_x: f32, size_y: f32 },
+    /// `crs:What="Mask/Paint"` (37 areas, 39 components) — a brush stroke,
+    /// carried as the same [`BrushStroke`] the mask reader already produces so
+    /// that one dab grammar, one rasteriser and one sensor-frame rotation
+    /// serve both.
+    ///
+    /// [`BrushStroke`]: crate::recipe::BrushStroke
+    Brush(Vec<crate::recipe::BrushStroke>),
+}
+
+impl Default for RetouchShape {
+    fn default() -> Self {
+        Self::Ellipse { cx: 0.5, cy: 0.5, size_x: 0.02, size_y: 0.02 }
+    }
+}
+
 /// One heal target: a normalised circular region to repair by sampling nearby
 /// real pixels. `cx`/`cy` are 0..1 of the frame; `radius` is a fraction of the
 /// SHORT side. `source` is an optional explicit donor offset (normalised frame
 /// units) — `None` auto-searches the best clean donor.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct HealSpot {
     pub cx: f32,
@@ -89,6 +230,10 @@ pub struct HealSpot {
     /// clone stamp vs its healing brush — texture transplant vs seamless repair.
     pub clone_raw: bool,
     pub label: String,
+    /// Provenance (v1.5.0 F9). `#[serde(default)]` on the struct means every
+    /// plan written before this field reads back as [`SpotOrigin::Painted`],
+    /// which is what those plans were.
+    pub origin: SpotOrigin,
 }
 
 impl Default for HealSpot {
@@ -102,6 +247,7 @@ impl Default for HealSpot {
             coverage: None,
             clone_raw: false,
             label: String::new(),
+            origin: SpotOrigin::Painted,
         }
     }
 }
@@ -155,6 +301,125 @@ impl HealDepth for u16 {
     }
 }
 
+/// The two halves of what the heal operator wants from a picture: neighbourhood
+/// READS from a pristine source, and WRITES into the target. They are two
+/// traits rather than one because the ends are not always the same buffer, and
+/// they exist at all because of where v1.5.0 F9 had to put this operator.
+///
+/// F9 renders Lightroom's `crs:RetouchAreas` inside the develop chain, whose
+/// plane is `[[f32; 3]]` and whose values run past 1.0 wherever a highlight
+/// did. The cheap way to reuse the operator would have been to quantise that
+/// rect to a 16-bit `ImageBuffer` and hand it to the existing path — and that
+/// clamps, so a spot healed beside a specular highlight would come back with
+/// the highlight crushed to white. Splitting read from write is what keeps the
+/// pixels in f32 from end to end, at the cost of these two small traits.
+trait HealRead {
+    /// Frame size in pixels, in the signed arithmetic the operator works in.
+    fn dims(&self) -> (i32, i32);
+
+    /// One pixel as f32 RGB, coordinates CLAMPED to the image edge.
+    ///
+    /// The UNITS are whatever the buffer stores — 0..255 for an 8-bit image,
+    /// 0..1-and-above for the develop plane — and nothing here needs to know
+    /// which. Every quantity the operator forms (the border SSD, the donor
+    /// interior variance, the low-frequency correction) is quadratic or linear
+    /// in the pixel value, so a global scale factor ranks candidate donors in
+    /// exactly the same order.
+    fn get(&self, x: i32, y: i32) -> [f32; 3];
+}
+
+/// The write half — see [`HealRead`] for why the two are separate.
+trait HealWrite {
+    /// Store one pixel. Coordinates are in bounds by construction: every
+    /// caller has already dropped the out-of-frame target and donor.
+    fn put(&mut self, x: i32, y: i32, v: [f32; 3]);
+}
+
+impl<T: HealDepth> HealRead for ImageBuffer<Rgb<T>, Vec<T>>
+where
+    Rgb<T>: image::Pixel<Subpixel = T>,
+{
+    fn dims(&self) -> (i32, i32) {
+        (self.width() as i32, self.height() as i32)
+    }
+
+    fn get(&self, x: i32, y: i32) -> [f32; 3] {
+        let xx = x.clamp(0, self.width() as i32 - 1) as u32;
+        let yy = y.clamp(0, self.height() as i32 - 1) as u32;
+        let p = self.get_pixel(xx, yy).0;
+        [p[0].chan_f32(), p[1].chan_f32(), p[2].chan_f32()]
+    }
+}
+
+impl<T: HealDepth> HealWrite for ImageBuffer<Rgb<T>, Vec<T>>
+where
+    Rgb<T>: image::Pixel<Subpixel = T>,
+{
+    fn put(&mut self, x: i32, y: i32, v: [f32; 3]) {
+        let out = [T::from_chan(v[0]), T::from_chan(v[1]), T::from_chan(v[2])];
+        self.put_pixel(x as u32, y as u32, Rgb(out));
+    }
+}
+
+/// A borrowed read view of the develop chain's own pixel plane.
+struct PlaneRef<'a> {
+    px: &'a [[f32; 3]],
+    w: i32,
+    h: i32,
+}
+
+/// A borrowed write view of the same — see [`heal_planar`].
+struct PlaneMut<'a> {
+    px: &'a mut [[f32; 3]],
+    w: i32,
+}
+
+impl HealRead for PlaneRef<'_> {
+    fn dims(&self) -> (i32, i32) {
+        (self.w, self.h)
+    }
+
+    fn get(&self, x: i32, y: i32) -> [f32; 3] {
+        let xx = x.clamp(0, self.w - 1) as usize;
+        let yy = y.clamp(0, self.h - 1) as usize;
+        self.px[yy * self.w as usize + xx]
+    }
+}
+
+impl HealWrite for PlaneMut<'_> {
+    fn put(&mut self, x: i32, y: i32, v: [f32; 3]) {
+        self.px[y as usize * self.w as usize + x as usize] = v;
+    }
+}
+
+/// The spot loop both entry points share: place each spot in pixels, settle its
+/// donor, heal it. `src` is the PRISTINE frame and `dst` the one being written,
+/// which is what makes each spot's output a pure function of the source.
+fn heal_spots<S: HealRead, D: HealWrite>(src: &S, dst: &mut D, spots: &[HealSpot]) {
+    let (w, h) = src.dims();
+    let short = w.min(h) as f32;
+    for s in spots {
+        let cx = s.cx.clamp(0.0, 1.0) * w as f32;
+        let cy = s.cy.clamp(0.0, 1.0) * h as f32;
+        let r = (s.radius.clamp(0.0, 0.5) * short).max(2.0);
+        let off = match s.source {
+            Some([sx, sy]) => ((sx * w as f32).round() as i32, (sy * h as f32).round() as i32),
+            None => find_donor(src, cx, cy, r),
+        };
+        heal_one(
+            src,
+            dst,
+            cx,
+            cy,
+            r,
+            s.feather.clamp(0.0, 1.0),
+            off,
+            s.clone_raw,
+            s.coverage.as_ref(),
+        );
+    }
+}
+
 /// Apply every spot to `img` in place, healing from surrounding real pixels.
 /// Donors AND blend bases are read from a snapshot of the ORIGINAL image, so
 /// no spot ever reads a half-written region and each spot's output is a pure
@@ -168,51 +433,36 @@ where
         return;
     }
     let src = img.clone();
-    let (w, h) = img.dimensions();
-    let short = w.min(h) as f32;
-    for s in spots {
-        let cx = s.cx.clamp(0.0, 1.0) * w as f32;
-        let cy = s.cy.clamp(0.0, 1.0) * h as f32;
-        let r = (s.radius.clamp(0.0, 0.5) * short).max(2.0);
-        let off = match s.source {
-            Some([sx, sy]) => ((sx * w as f32).round() as i32, (sy * h as f32).round() as i32),
-            None => find_donor(&src, cx, cy, r),
-        };
-        heal_one(
-            &src,
-            img,
-            cx,
-            cy,
-            r,
-            s.feather.clamp(0.0, 1.0),
-            off,
-            s.clone_raw,
-            s.coverage.as_ref(),
-        );
-    }
+    heal_spots(&src, img, spots);
 }
 
-/// Read a pixel as f32 RGB, clamping coordinates to the image edge.
-#[inline]
-fn px<T: HealDepth>(src: &ImageBuffer<Rgb<T>, Vec<T>>, x: i32, y: i32) -> [f32; 3]
-where
-    Rgb<T>: image::Pixel<Subpixel = T>,
-{
-    let xx = x.clamp(0, src.width() as i32 - 1) as u32;
-    let yy = y.clamp(0, src.height() as i32 - 1) as u32;
-    let p = src.get_pixel(xx, yy).0;
-    [p[0].chan_f32(), p[1].chan_f32(), p[2].chan_f32()]
+/// [`heal_image`] on the develop chain's float plane, for the retouch areas
+/// this photograph arrived carrying (v1.5.0 F9). Same operator, same snapshot
+/// rule, same last-writer overlap — the only difference is that nothing is
+/// quantised on the way through, so a highlight inside a healed spot keeps the
+/// value the sensor recorded.
+///
+/// The snapshot is a full copy of the plane, which is what `heal_image` has
+/// always done and what the full-resolution `heal` path already pays. It is
+/// taken ONLY when there is at least one spot, so the photographs that carry
+/// none — 150 of the 175 measured — pay nothing at all.
+pub fn heal_planar(data: &mut [[f32; 3]], w: usize, h: usize, spots: &[HealSpot]) {
+    if spots.is_empty() || w == 0 || h == 0 || data.len() < w * h {
+        return;
+    }
+    let snapshot = data.to_vec();
+    let src = PlaneRef { px: &snapshot, w: w as i32, h: h as i32 };
+    let mut dst = PlaneMut { px: data, w: w as i32 };
+    heal_spots(&src, &mut dst, spots);
 }
 
 /// Search candidate donor offsets on rings around the spot; pick the one whose
 /// surroundings best match the spot's border (so the patch is seamless) and that
 /// stays in-bounds. Returns a pixel offset (dx, dy) from the spot centre, or
 /// (0,0) if no in-bounds donor exists (caller then leaves the spot untouched).
-fn find_donor<T: HealDepth>(src: &ImageBuffer<Rgb<T>, Vec<T>>, cx: f32, cy: f32, r: f32) -> (i32, i32)
-where
-    Rgb<T>: image::Pixel<Subpixel = T>,
-{
-    let (w, h) = (src.width() as f32, src.height() as f32);
+fn find_donor<S: HealRead>(src: &S, cx: f32, cy: f32, r: f32) -> (i32, i32) {
+    let (wi, hi) = src.dims();
+    let (w, h) = (wi as f32, hi as f32);
     let mut best = (0i32, 0i32);
     let mut best_score = f32::INFINITY;
     for dist_mul in [2.4f32, 3.2, 4.4] {
@@ -235,13 +485,13 @@ where
             for j in 0..24 {
                 let b = j as f32 / 24.0 * std::f32::consts::TAU;
                 let (ox, oy) = (b.cos(), b.sin());
-                let tp = px(src, (cx + ox * rr) as i32, (cy + oy * rr) as i32);
-                let dp = px(src, (cx + vx + ox * rr) as i32, (cy + vy + oy * rr) as i32);
+                let tp = src.get((cx + ox * rr) as i32, (cy + oy * rr) as i32);
+                let dp = src.get((cx + vx + ox * rr) as i32, (cy + vy + oy * rr) as i32);
                 for c in 0..3 {
                     let d = tp[c] - dp[c];
                     ssd += d * d;
                 }
-                let ip = px(src, (dcx + ox * r * 0.5) as i32, (dcy + oy * r * 0.5) as i32);
+                let ip = src.get((dcx + ox * r * 0.5) as i32, (dcy + oy * r * 0.5) as i32);
                 for c in 0..3 {
                     mean[c] += ip[c];
                     m2[c] += ip[c] * ip[c];
@@ -269,9 +519,9 @@ where
 /// clone stamp), which is exactly what you want when transplanting texture and
 /// exactly wrong when repairing into different-toned surroundings.
 #[allow(clippy::too_many_arguments)] // internal helper mirroring HealSpot's fields
-fn heal_one<T: HealDepth>(
-    src: &ImageBuffer<Rgb<T>, Vec<T>>,
-    dst: &mut ImageBuffer<Rgb<T>, Vec<T>>,
+fn heal_one<S: HealRead, D: HealWrite>(
+    src: &S,
+    dst: &mut D,
     cx: f32,
     cy: f32,
     r: f32,
@@ -279,13 +529,13 @@ fn heal_one<T: HealDepth>(
     off: (i32, i32),
     clone_raw: bool,
     coverage: Option<&SpotCoverage>,
-) where
-    Rgb<T>: image::Pixel<Subpixel = T>,
-{
+) {
     if off == (0, 0) {
         return; // no donor found → honest no-op rather than cloning the spot onto itself
     }
-    let (w, h) = (dst.width() as i32, dst.height() as i32);
+    // From the SOURCE, which is the same frame as the destination by
+    // construction and is the one end of the pair that can be measured.
+    let (w, h) = src.dims();
     let (ox, oy) = off;
     // Low-frequency correction: shift the donor so its border matches the spot's
     // border — this is what makes a *heal* blend where a raw *clone* would seam.
@@ -294,8 +544,8 @@ fn heal_one<T: HealDepth>(
         for j in 0..24 {
             let a = j as f32 / 24.0 * std::f32::consts::TAU;
             let (dx, dy) = (a.cos() * r * 1.15, a.sin() * r * 1.15);
-            let tp = px(src, (cx + dx) as i32, (cy + dy) as i32);
-            let dp = px(src, (cx + dx) as i32 + ox, (cy + dy) as i32 + oy);
+            let tp = src.get((cx + dx) as i32, (cy + dy) as i32);
+            let dp = src.get((cx + dx) as i32 + ox, (cy + dy) as i32 + oy);
             for c in 0..3 {
                 corr[c] += tp[c] - dp[c];
             }
@@ -346,15 +596,17 @@ fn heal_one<T: HealDepth>(
             if sx < 0 || sy < 0 || sx >= w || sy >= h {
                 continue;
             }
-            let donor = px(src, sx, sy);
-            let base = px(src, tx, ty);
-            let mut out = [T::from_chan(0.0); 3];
+            let donor = src.get(sx, sy);
+            let base = src.get(tx, ty);
+            let mut out = [0.0f32; 3];
             for c in 0..3 {
                 let healed = donor[c] + corr[c];
-                let v = base[c] * (1.0 - alpha) + healed * alpha;
-                out[c] = T::from_chan(v);
+                out[c] = base[c] * (1.0 - alpha) + healed * alpha;
             }
-            dst.put_pixel(tx as u32, ty as u32, Rgb(out));
+            // The buffer's own impl does the conversion, so an 8-bit image
+            // still rounds and clamps exactly as it did while the develop
+            // plane keeps its value.
+            dst.put(tx, ty, out);
         }
     }
 }
@@ -373,6 +625,29 @@ const MAX_PAINTED_SPOTS: usize = 512;
 const MAX_BBOX_COVERAGE: f64 = 4.0; // Σ bbox px ≤ 4 × mask px
 const MAX_DISK_COVERAGE: f64 = 16.0; // Σ (2r+1)² px ≤ 16 × mask px
 
+/// Pack "which pixels are being healed" into the one-bit-per-pixel form the
+/// planner works in, or `None` for a raster past the `u32` index space.
+///
+/// u64 bitsets, not `Vec<bool>`: at an 8192-edge canvas the flat maps were
+/// ~88 MB of bookkeeping for one bit of information per pixel. The `u32` guard
+/// is not decoration either — the per-blob point list stores flat `u32`
+/// indices, and a raster past 4.29 G px (far beyond any real canvas) must
+/// refuse loudly rather than wrap indices into corrupt radii.
+fn painted_bitset(w: u32, h: u32, mut is_painted: impl FnMut(usize) -> bool) -> Option<Vec<u64>> {
+    let n_px = w as usize * h as usize;
+    if n_px > u32::MAX as usize {
+        eprintln!("⚠ mask raster {w}x{h} exceeds the u32 index space — no heal spots planned");
+        return None;
+    }
+    let mut painted = vec![0u64; n_px.div_ceil(64)];
+    for i in 0..n_px {
+        if is_painted(i) {
+            painted[i / 64] |= 1 << (i % 64);
+        }
+    }
+    Some(painted)
+}
+
 /// Turn a painted RGBA mask (alpha < 128 = painted = heal here, matching the UI's
 /// brush + the generative-mask convention) into heal spots via connected
 /// components: each painted blob becomes one circular heal target. Coordinates
@@ -383,23 +658,46 @@ const MAX_DISK_COVERAGE: f64 = 16.0; // Σ (2r+1)² px ≤ 16 × mask px
 /// it — the skipped regions are left untouched.
 pub fn plan_from_mask(mask: &RgbaImage) -> (Vec<HealSpot>, Option<crate::rationale::Note>) {
     let (w, h) = mask.dimensions();
+    let px = mask.as_raw();
+    let Some(painted) = painted_bitset(w, h, |i| px[i * 4 + 3] < 128) else {
+        return (Vec::new(), None);
+    };
+    let template = HealSpot { feather: 0.4, label: "painted".into(), ..Default::default() };
+    plan_from_painted(&painted, w, h, &template)
+}
+
+/// The same planner over an ALPHA raster — what `render` hands it for one of
+/// Lightroom's brush-shaped retouch areas (v1.5.0 F9), after
+/// `rasterise_brush_group` has stamped that area's dabs.
+///
+/// Two entry points and ONE implementation, on purpose: a second copy of the
+/// connected-component pass would be seventy lines that have to stay in step
+/// with the budget guards, and the only thing that actually differs between
+/// the two callers is how a pixel says "heal me". `template` carries whatever
+/// the caller knows that the raster cannot say — the area's own feather, its
+/// [`SpotOrigin`], its label — and the planner fills in the geometry.
+pub fn plan_from_alpha(
+    alpha: &image::GrayImage,
+    threshold: u8,
+    template: &HealSpot,
+) -> (Vec<HealSpot>, Option<crate::rationale::Note>) {
+    let (w, h) = alpha.dimensions();
+    let px = alpha.as_raw();
+    let Some(painted) = painted_bitset(w, h, |i| px[i] > threshold) else {
+        return (Vec::new(), None);
+    };
+    plan_from_painted(&painted, w, h, template)
+}
+
+/// The connected-component planner both entry points share.
+fn plan_from_painted(
+    painted: &[u64],
+    w: u32,
+    h: u32,
+    template: &HealSpot,
+) -> (Vec<HealSpot>, Option<crate::rationale::Note>) {
     let wu = w as usize;
     let n_px = wu * h as usize;
-    // The per-blob pixel list stores flat u32 indices; a raster past that
-    // index space (>4.29 G px — far beyond any real canvas) must refuse
-    // loudly, not wrap indices into corrupt radii.
-    if n_px > u32::MAX as usize {
-        eprintln!("⚠ mask raster {w}x{h} exceeds the u32 index space — no heal spots planned");
-        return (Vec::new(), None);
-    }
-    // u64 bitsets, not Vec<bool>: at an 8192-edge painted canvas the two flat
-    // maps were ~88 MB of bookkeeping for one bit of information per pixel.
-    let mut painted = vec![0u64; n_px.div_ceil(64)];
-    for (i, p) in mask.pixels().enumerate() {
-        if p.0[3] < 128 {
-            painted[i / 64] |= 1 << (i % 64);
-        }
-    }
     let mut seen = vec![0u64; painted.len()];
     let get = |bits: &[u64], i: usize| bits[i / 64] >> (i % 64) & 1 == 1;
     let short = w.min(h) as f32;
@@ -409,7 +707,7 @@ pub fn plan_from_mask(mask: &RgbaImage) -> (Vec<HealSpot>, Option<crate::rationa
     let mut disk_px = 0u64;
     let mut skipped = 0usize;
     for start in 0..n_px {
-        if !get(&painted, start) || get(&seen, start) {
+        if !get(painted, start) || get(&seen, start) {
             continue;
         }
         stack.clear();
@@ -430,7 +728,7 @@ pub fn plan_from_mask(mask: &RgbaImage) -> (Vec<HealSpot>, Option<crate::rationa
                     continue;
                 }
                 let j = ny as usize * wu + nx as usize;
-                if get(&painted, j) && !get(&seen, j) {
+                if get(painted, j) && !get(&seen, j) {
                     seen[j / 64] |= 1 << (j % 64);
                     stack.push(j);
                 }
@@ -490,12 +788,12 @@ pub fn plan_from_mask(mask: &RgbaImage) -> (Vec<HealSpot>, Option<crate::rationa
             coverage_bits[local / 64] |= 1u64 << (local % 64);
         }
         rad = (rad * 1.1).max(2.0);
+        // Geometry from the raster, everything else from the caller — the
+        // template is what carries the facts a bitset cannot state (v1.5.0 F9).
         spots.push(HealSpot {
             cx: cxp / w as f32,
             cy: cyp / h as f32,
             radius: rad / short,
-            feather: 0.4,
-            source: None,
             coverage: Some(SpotCoverage {
                 mask_width: w,
                 mask_height: h,
@@ -505,8 +803,7 @@ pub fn plan_from_mask(mask: &RgbaImage) -> (Vec<HealSpot>, Option<crate::rationa
                 height: coverage_height,
                 bits: coverage_bits,
             }),
-            clone_raw: false,
-            label: "painted".into(),
+            ..template.clone()
         });
     }
     let note = (skipped > 0).then(|| {
@@ -803,7 +1100,7 @@ fn heal_and_save(base: DynamicImage, spots: &[HealSpot], out: &Path) -> Result<(
         heal_image(&mut rgb, spots);
         DynamicImage::ImageRgb8(rgb)
     };
-    save_master(out, reattach_alpha(healed, alpha))
+    crate::pipeline::save_master(out, reattach_alpha(healed, alpha))
 }
 
 /// 8-bit or deeper? Everything that is not 8-bit heals at 16 bits.
@@ -856,37 +1153,6 @@ fn reattach_alpha(healed: DynamicImage, alpha: Option<Vec<u16>>) -> DynamicImage
     }
 }
 
-/// Stage + rename (the batch-13 export rule): a failed encode must not leave
-/// a partial file at the master name pixels.json / the GUI will link, and a
-/// repeat write must not destroy the previous master before the new one is
-/// known good. JPEG cannot carry 16-bit or alpha — flatten for it (the user
-/// chose that format).
-fn save_master(out: &Path, img: DynamicImage) -> Result<()> {
-    crate::pipeline::ensure_parent(out)?;
-    let ext = out.extension().and_then(|e| e.to_str()).unwrap_or("png").to_ascii_lowercase();
-    let fmt = image::ImageFormat::from_extension(&ext).unwrap_or(image::ImageFormat::Png);
-    let img = if fmt == image::ImageFormat::Jpeg {
-        DynamicImage::ImageRgb8(img.into_rgb8())
-    } else {
-        img
-    };
-    let staged = out.with_extension(format!(
-        "{ext}.tmp.{}.{}",
-        std::process::id(),
-        crate::store::next_tmp_seq()
-    ));
-    if let Err(e) = img.save_with_format(&staged, fmt) {
-        let _ = std::fs::remove_file(&staged);
-        return Err(e).with_context(|| format!("write {}", staged.display()));
-    }
-    // durable_replace, not bare rename (L03): pixels.json will reference
-    // this master durably — its bytes must be on disk first.
-    if let Err(e) = crate::store::durable_replace(&staged, out) {
-        let _ = std::fs::remove_file(&staged);
-        return Err(e).with_context(|| format!("publish {}", out.display()));
-    }
-    Ok(())
-}
 
 /// Clone-stamp mode: copy pixels from a user-picked SOURCE point over every
 /// painted target blob — verbatim texture transplant (feathered edge, no tone
@@ -958,6 +1224,7 @@ mod tests {
             coverage: None,
             clone_raw: true,
             label: "clone".into(),
+            origin: SpotOrigin::Painted,
         }];
         heal_image(&mut img, &spots);
         assert_eq!(
@@ -1073,6 +1340,7 @@ mod tests {
         let spots = vec![HealSpot {
             cx: 0.5, cy: 0.5, radius: 7.0 / 64.0, feather: 0.4, source: None,
             coverage: None, clone_raw: false, label: "x".into(),
+            origin: SpotOrigin::Painted,
         }];
         heal_image(&mut img, &spots);
         let c = img.get_pixel(32, 32).0;
@@ -1094,6 +1362,7 @@ mod tests {
             cx: 30.0 / 40.0, cy: 0.5, radius: 4.0 / 20.0, feather: 0.2,
             source: Some([-0.3, 0.0]), coverage: None,
             clone_raw: false, label: "spot".into(),
+            origin: SpotOrigin::Painted,
         }];
         heal_image(&mut img, &spots);
         let c = img.get_pixel(30, 10).0;
@@ -1121,6 +1390,7 @@ mod tests {
             coverage: None,
             clone_raw,
             label: "clone".into(),
+            origin: SpotOrigin::Painted,
         };
         let mut cloned = base.clone();
         heal_image(&mut cloned, &[spot(true)]);

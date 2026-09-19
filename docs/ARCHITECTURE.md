@@ -1,6 +1,12 @@
 # AutoShade — Architecture
 
-> Status: **implemented** (v1.4.1 — the sensor plane is measured from the
+> Status: **implemented** (v1.5.0 — every Lightroom control this app could
+> already carry now moves pixels: sharpening and both noise reductions,
+> de-fringing and the lateral-CA instruction, Transform and Upright, the
+> camera profile, HDR edit mode and imported spot removal; `src/stack/`
+> merges a burst of one scene over a single alignment four ways; and the RAW
+> denoiser runs weights trained for this pipeline's own stabilised mosaic;
+> v1.4.1 — the sensor plane is measured from the
 > container before the decoder is asked to allocate it, so a frame past that
 > decoder's own ceiling is a named refusal naming the frame and the workflow
 > that works instead of an abort, and a CONTAINED panic no longer raises a modal
@@ -135,11 +141,11 @@
 > wrong reason; it writes a `=== name ===` transcript that
 > `scripts/check_docs.py --gates` reads the counts and the lane set back out
 > of, and it prints the by-name test-set difference against a saved baseline.
-> 1509 library + 24 CLI + 191 GUI + 2+2 contract tests are enumerated in the GUI
-> build; the library result is 1494 pass + 15 `#[ignore]`d forensic probes and
-> the GUI result is 190 pass + one explicit scratch-recipe export probe ignored
-> in the ordinary battery. Counts refreshed 2026-09-15 for v1.4.0: +11 / −1 by
-> name against the v1.3.5 tag (`5d3a6b1`), taken statically between the tag's
+> 1640 library + 25 CLI + 201 GUI + 2+2 contract tests are enumerated in the GUI
+> build; the library result is 1625 pass + 15 `#[ignore]`d forensic probes and
+> the GUI result is 200 pass + one explicit scratch-recipe export probe ignored
+> in the ordinary battery. Counts refreshed 2026-09-18 for v1.5.0: +249 / −11 by
+> name against the v1.4.1 tag (`af7f25e`), taken statically between the tag's
 > source and this tree (1718 → 1728 `#[test]` functions) — seven library pins
 > in `denoise` (the mosaic facts read off a sensor's CFA and levels, the four
 > refusals for a sensor that carries no 2×2 Bayer mosaic, a zero strength
@@ -602,11 +608,20 @@
 > on a 15 s ISO-3200 star field that ceiling sat at 7.6-14.7 % of full scale
 > per plane and every star came back as the same grey dot, keeping 9.7 % of
 > its excess over the sky against Lightroom's 100 % (2026-09-17). The sigma
-> handed to the model is `SIGMA_SCALE = 0.85` times that affine's slope,
-> measured against Lightroom's own Enhance->Denoise output on two of this
-> camera's astro frames: 0.85 keeps as much faint detail as Lightroom (87 % /
-> 70 % of a faint point source's excess against its 91 % / 71 %) with about
-> half its residual grain, and costs the bench's measured level nothing.
+> handed to the model is `SIGMA_SCALE = 0.78` times that affine's slope. The
+> network under it changed in v1.5.0 — `autoshade-raw-denoise-v1.pth` is DPIR's
+> DRUNet-colour fine-tuned for the transform this sidecar actually applies — and
+> a stronger denoiser at the same noise estimate is a different operating point,
+> so it was chosen again from the same four measurements instead of inherited:
+> at 0.78 the grain on 15 real Lightroom pairs reads 1.06 / 1.01 / 1.01 of
+> Lightroom's own, the faint and very faint stars come back at 69 % / 40 %
+> against Lightroom's 71 % / 43 %, held-out PSNR is 44.68 dB — 1.98 dB above
+> the generic weights — and the synthetic bench keeps +0.81 / +1.72 dB at ×5.
+> Higher smooths past Lightroom, lower gives the bench's level away;
+> compatibility is the aim, so the point that matches Lightroom wins the ties
+> (user's decision, 2026-09-17). v1.4.1's 0.85 on DPIR's released weights read
+> 0.68 / 0.55 / 0.65 of Lightroom's grain — half of it — which is what the
+> stronger network made worth measuring again.
 > Strength is a mosaic-domain blend whose default is
 > `denoise::DEFAULT_STRENGTH_RAW = 1.0`, chosen per source by
 > `denoise::default_strength_for` on the CLI, the web export and the GUI's two
@@ -668,7 +683,8 @@
 > `_reclaim_stale_parts`, `_fetch_verified` — and the other five reach it
 > instead of reimplementing it, which is why their progress lines announce
 > themselves as `[denoise]`. `python/denoise_raw.py` (2026-09-15) fetches its
-> DRUNet weights and the two KAIR network files through the same
+> own DRUNet weights (`autoshade-raw-denoise-v1.pth`, a release asset since
+> v1.5.0) and the two KAIR network files through the same
 > `_fetch_verified`, each sha256- and byte-pinned, and builds the model from a
 > synthetic `models` package so the pinned files import as they do upstream.
 >
@@ -708,7 +724,7 @@
 > | sidecar | bridge | model(s) | licence | size |
 > |---|---|---|---|---|
 > | `denoise.py` | `denoise.rs` | SCUNet ×5 | Apache-2.0 (KAIR) | ~72 MB each |
-> | `denoise_raw.py` | `denoise.rs` (`denoise_mosaic`, the RAW path before demosaic) | **DRUNet-colour** (DPIR), sha256-pinned with its two KAIR network files | MIT (weights and code) | 130,579,305 B |
+> | `denoise_raw.py` | `denoise.rs` (`denoise_mosaic`, the RAW path before demosaic) | **`autoshade-raw-denoise-v1.pth`** — DPIR's DRUNet-colour fine-tuned here, sha256-pinned with its two KAIR network files | MIT (this project's weights; KAIR code MIT); fine-tuned on RawNIND, CC BY-SA 4.0 | 130,585,417 B |
 > | `segment.py --target subject` | `segment.rs` | **BiRefNet** (general checkpoint), sha256-pinned | MIT | 444,473,596 B |
 > | `segment.py --target subject` (fallback) | `segment.rs` | U²-Net via a NAMED rembg session | Apache-2.0 | small |
 > | `segment.py --target sky` | `segment.rs` | **OneFormer ADE20K Swin-L**, sha256-pinned | MIT (weights) | 881,196,376 B |
@@ -1265,7 +1281,9 @@ is stated where it is paid: a rotated — or portrait — photo's republished da
 stream is no longer byte-identical to Lightroom's, only numerically equal on
 Lightroom's own six-decimal grid. An unrotated landscape photo is untouched.
 v0.31.0 adds a second stamp built field-for-field on this precedent —
-`schema_era` (0 = written before the R25 control set existed) — for the same
+`schema_era` (0 = written before the R25 control set existed; 1 = before
+v1.5.0's parametric curve; 2 = before its colour keys — the Calibration panel,
+the B&W treatment and the point colours) — for the same
 class of reason: see 「the merge treats ignorance as ignorance」 in §4.5.
 
 The migration's crop arm has one subtlety worth naming, because a reader will
@@ -1365,16 +1383,70 @@ vision advisor.
 
 ### 4.4 Render engine (M2)
 
-Applies the recipe deterministically. Frame stage first: decode → EXIF
-orientation → working-resolution cap → lens geometry (distortion + CA) →
-straighten → crop. Then the pixel stage, in this order: anchored white balance →
-lens-profile vignette → manual vignette → **dehaze in linear light** (before any
-tonal work, so the airlight estimate cannot move when Exposure is dragged) →
-tone LUT (exposure/contrast/whites/blacks/highlights/shadows, the tone curve and
-the per-photo camera base curve composed into one table) → per-channel RGB
-curves → 8-band HSL → colour grading → clarity → **texture** →
-saturation/vibrance → noise reduction → sharpening → local adjustments
-(linear/radial/bitmap masks).
+Applies the recipe deterministically, in a pixel stage, a frame stage and a
+finish — in that order, which v1.5.0 had to state out loud because the Effects
+panel depends on it. Decode → EXIF orientation → working-resolution cap comes
+first, then the **auto lateral-CA solve** (`render::lens::solve_lateral_ca`,
+which is what rendering Lightroom's 「Remove chromatic aberration」 INSTRUCTION
+means: least-squares `R − G` against the radial lever `r·∂G/∂r`, answered in
+the manual pair's own integral slider units so a preview and the export decide
+the same thing), then the PIXEL stage below, then the FRAME stage (lens geometry
+(distortion + CA) → **Transform** → straighten → crop), and finally the FINISHING pass
+(`render::frame_and_finish` → `render/finish.rs`): the post-crop vignette and
+film grain, which are defined on the cropped rectangle and can therefore live
+nowhere else. The pixel stage runs before the geometry because every mask's
+geometry is stored in the ORIGINAL frame's coordinates (`MaskFrame`), and the
+four surfaces that reach a viewable frame — the RAW render, the baked render,
+the GUI canvas and the web preview — now share one function for the tail, so
+they cannot drift; the two previews pass `CropPolicy::Keep`, which positions
+the finishing pass on the crop rectangle while leaving the frame whole for
+slider feedback.
+
+The pixel stage, in this order: anchored white balance →
+**camera calibration** (the Calibration panel's three primaries and shadow
+tint, first because they belong to the camera profile every later stage reads
+through) → **de-fringing** (`render/lens.rs`: the two hue windows, on
+high-contrast edges only, before anything moves a pixel radially) →
+lens-profile vignette → manual vignette → **dehaze in linear light**
+(before any tonal work, so the airlight estimate cannot move when Exposure is
+dragged) →
+tone LUT (exposure/contrast/whites/blacks/highlights/shadows, the parametric
+curve, the tone curve and the per-photo camera base curve composed into one
+table) → **the B&W treatment's grey mix** when the photo is black and white
+(before the channel curves, so a red-channel curve meets the grey the
+photographer mixed) → per-channel RGB
+curves → 8-band HSL and the **point colours**, both skipped in black and white,
+where Lightroom's panel offers the grey mix in their place → colour grading →
+clarity → **texture** →
+saturation/vibrance (also skipped in black and white) → the Detail panel
+(colour noise reduction → luminance noise reduction → sharpening) → local
+adjustments (linear/radial/bitmap masks).
+
+**The Effects panel renders since v1.5.0** (`render/finish.rs`), for the same
+revoked policy as the Detail panel below — and for a second reason of its own:
+its two operators are *post-crop*, and until v1.5.0 this engine had no stage
+after the crop at all. Both are first-principles approximations of unpublished
+Adobe operators, and every constant is named for the kit ladder that will
+replace it (`PCV-*`, `GRAIN-*`).
+
+- **The post-crop vignette** is an exposure-domain gain on a contour centred on
+  the CROP: Midpoint places the falloff between 0.40 and 1.00 of the way to the
+  crop's corner, Feather sets its half-width, Roundness runs from a rounded
+  rectangle (superellipse exponent 6 at −100) through the inscribed ellipse (2)
+  to a circle inscribed in the short edge (+100), and Amount is ±4 stops where
+  the falloff completes. The three **Styles** differ in exactly the way Adobe's
+  own descriptions differ: Highlight Priority computes the Highlights recovery
+  per channel (which is what shifts colour), Colour Priority computes it from
+  the pixel's luminance (which cannot), and Paint Overlay is a flat mix toward
+  black or white in the encoded domain with no recovery at all. Highlights acts
+  only where the vignette darkens, as Adobe states.
+- **Film grain** is two octaves of value noise on a lattice sized in FILM
+  pixels (`FilmScale`, the Detail panel's rule), Roughness mixing the coarser
+  octave in as an amplitude modulation so the grain clumps rather than merely
+  growing, one offset for all three channels (grain is a luminance texture),
+  faded out of pure black and pure white. It is a pure function of the lattice
+  coordinate measured from the crop's own corner — never an RNG — so a preview,
+  its export, and that export repeated tomorrow carry the same grain.
 
 Two R25 additions ride existing stages rather than adding one. **Texture**
 (`render::texture_pass`) is a small-radius detail operator placed between
@@ -1421,10 +1493,589 @@ LUT, not a new operator; every geometry consumer reads the one
 `geometry_profile` funnel so preview, canvas, export and the web surface can
 never disagree about whether the frame moved.
 
+**The Detail panel renders since v1.5.0** (`render/detail.rs`). R25 carried
+eight of its eleven controls to Lightroom without drawing them (policy SF4-C:
+Adobe-only operators are not approximated); the user revoked that policy on
+2026-09-17 ("slight deviation from Lightroom is allowed, compatibility is the
+aim"), so all eleven move pixels, as three passes in the order that matters —
+colour noise, then luminance noise, then sharpening, so the sharpener never
+amplifies what the smoothers were asked to remove:
+
+- **Sharpening** is an unsharp mask on luma at σ = Radius. **Detail** is halo
+  control plus texture: the boost goes through a soft limiter `L·tanh(boost/L)`
+  whose `L` opens with Detail², and a 4-neighbour Laplacian band joins the
+  signal as Detail rises. **Masking** gates the boost by the blurred luma's
+  gradient, so a flat sky stays untouched at high Masking. A mask's signed
+  local Sharpness runs the same operator on the global Radius/Detail/Masking;
+  its negative half is a blur toward the Gaussian.
+- **Luminance noise reduction** is a self-guided filter (He et al. 2010) on
+  luma: where a neighbourhood's variance is far above the threshold ε a pixel
+  keeps its value, far below it takes the neighbourhood mean. Luminance sets
+  the neighbourhood and ε, **Detail** lowers ε (more kept), **Contrast** adds
+  back the low-frequency part of what the filter removed. A mask's local Noise
+  is the same pass inside the mask.
+- **Colour noise reduction** rebuilds the colour-difference planes `R − Y` and
+  `B − Y` from a luma-guided fast guided filter (He & Sun 2015) on a subsampled
+  grid, assembled against full-resolution luma so colour stops at the edges
+  luma draws; **Detail** tightens that edge threshold, **Smoothness** widens
+  the offset term that carries low-frequency mottling. Luma is untouched.
+
+Every radius is in **film pixels** — Lightroom states them at full resolution
+— and converts through `render::FilmScale`, the full-resolution short edge over
+the working raster's. An export develops at scale 1; the GUI canvas, its
+Range-mask references, the fill's picture of a card and the web preview pass
+the source's own edge (`decode::film_short_edge`), so they show what the export
+looks like downscaled to them — a 1 px radius on a 61 MP frame barely registers
+at 1280 px, which is Lightroom's "zoom to 100 %" advice in reverse. The
+analysis surfaces (reverse fit, judge) treat their own raster as the film and
+compare like with like. A σ below 0.6 raster px runs at 0.6 with its amount
+faded by the ratio of the two transfers at Nyquist, and the noise thresholds
+divide by the film factor squared, because averaging k × k film pixels already
+cut the noise variance by k². Each constant is a named `Ramp` over its slider:
+first-principles values until the Lightroom kit's ladders (`SH-*`, `NR-*`,
+`CNR-*`) pin them.
+
+Ten controls have a non-zero Lightroom default — Radius 1.0, Sharpen Detail
+25, the three noise-reduction companions 50, and the grain and post-crop
+vignette companions (`recipe::LR_COMPANION_DEFAULTS`). A recipe has stored 0
+for "the sidecar said nothing" since R25, so `EditRecipe::resolved` reads a
+stored 0 as Lightroom's default and `explicit_zero` names the companions whose
+0 is a real value: written back as `"0"`, read from a sidecar that states
+`"0"`, carried through a refine, the era gate and the payload reconcile, and
+costing no byte until something is in it — `recipe.json` and
+`store::recipe_struct_hash` of every earlier recipe are unchanged.
+
+**The parametric tone curve renders since v1.5.0** (`render::parametric_lut`).
+Lightroom's Tone Curve panel has a second mode beside the point curve — four
+region sliders (Shadows, Darks, Lights, Highlights, ±100) over three movable
+splits (25/50/75 % by default) — and the sidecars Lightroom writes carry all
+seven `crs:Parametric*` keys (165 fixture sidecars, every one at those
+defaults, counted 2026-09-17). The model is a quadratic
+B-spline whose interior knots ARE the splits, so each region is one polynomial
+piece. Its six control values sit at the Greville abscissae — the two ends and
+the four region centres — which makes the spline the identity at rest wherever
+the splits sit. A region slider moves its centre's control value by
+`PARAMETRIC_REACH` (½) × slider/100 × the region's width: the response is C¹
+and reaches into both neighbouring regions, and it is monotone by construction —
+two consecutive abscissae lie half the two regions' widths apart, so no reach up
+to ½ can reorder the control values, and a B-spline whose control values never
+decrease cannot decrease. `build_tone_lut` composes it between the Basic-panel
+model and the point curve (sliders → parametric → point curve, all over the
+camera base curve), the order of Lightroom's own panel. The splits are clamped
+field by field to their own bands (10–70, 20–80, 30–90) and ordered only where
+they are used (`EditRecipe::parametric_splits`, a 10-point gap), so a
+hand-edited file's crossed splits cannot hand the curve an empty region. The
+seven fields serialise only when moved, so an untouched recipe's bytes and hash
+are unchanged; the writer emits the block all or none, Lightroom's shape. The
+reach is first-principles until the Lightroom kit's `PARAM-*` exports pin it.
+
+### Transform (v1.5.0 F6) — `render/perspective.rs`
+
+Lightroom's Transform panel, as ONE projective map between the lens resample
+and the straighten. Seven manual sliders (two keystones, rotate, scale, aspect,
+two offsets), the Upright MODE, and `crs:CropConstrainToWarp`.
+
+The coordinate system is **Adobe's own, measured rather than assumed**. Adobe
+does not publish its Upright solver, but it publishes that solver's RESULT: one
+3×3 matrix per mode in `crs:UprightTransform_0…5`. Over the 125 matrices in the
+operator's library (21 sidecars, 13 with a mode actually selected):
+
+* they are full projective maps — 30 of 125 carry a non-trivial bottom row,
+  strongest `h20 = −0.9458` — not affine;
+* the frame centre in **[0,1] coordinates** is a fixed point to 8.6e-4 on the
+  64 near-identity ones (many to 5e-10), against 2.6e-2 at the sidecar's own
+  `UprightCenterNorm` and 3.6e-1 at a [−1,1] centre;
+* the normalisation is per axis, not aspect-aware: a 0.9786° rotation carries
+  scale 1.017110, the UNIT SQUARE's `cos+sin = 1.016934`, not a 3:2 frame's
+  1.011237;
+* Adobe has already folded the fill scale in — inverting each of the 13
+  selected matrices and mapping the destination corners back, the worst
+  excursion outside the source frame is **+0.000000**, 13 of 13.
+
+So a Lightroom photograph renders Adobe's own numbers to the last digit and
+needs no fill of ours. `render/perspective/upright.rs` is this engine's own
+solver, reached only by this app's dropdown on a photograph Lightroom never
+solved: no Hough transform, because every edge pixel already states a line
+(`l = (gx, gy, −(gx·x + gy·y))`) and the family's vanishing point is the
+smallest eigenvector of `Σ w lᵀl`, taken by Jacobi rotations with one robust
+re-weighting pass. Guided is a named refusal — it needs guides no sidecar
+carries in a form this engine models.
+
+`crs:CropConstrainToWarp` is OBEYED (user ruling, 2026-09-17): at 0 — which is
+what all 52 sidecars in the library that carry it say — the empty corners a
+manual slider leaves are visible and the photographer's own crop removes them,
+exactly as those sidecars show; at 1 the crop shrinks about its own centre, at
+its own aspect, until it lies inside the warped frame.
+
+The stage's PLACE in the frame pass — lens geometry, then Transform, then the
+straighten — is pinned by
+`render::finish::tests::the_frame_stage_runs_the_lens_then_the_transform_then_the_straighten`,
+which composes the three orders from the engine's own operators and asserts
+byte equality against the one `frame_and_finish` uses and inequality against
+its two neighbours. None of the three commutes: a keystone applied before a
+straighten has its axis turned with the horizon, and a radial distortion
+applied after a translation pulls on a radius the photograph never had.
+
+#### The seven sliders, measured (2026-09-19)
+
+The v1.5.0 Lightroom kit exported fifteen `PERSP-*` cases and each was fitted to
+a homography: a grid of phase-correlated blocks, coarse to fine, the reference
+pre-warped by the running estimate each round so a keystone's local scale change
+cannot blunt the correlation. Each fit is taken WITHIN one renderer — Lightroom's
+export against Lightroom's own reference, ours against ours — so demosaic,
+camera profile and working space cancel instead of entering the result. Eleven of
+the fifteen converged to a residual under 0.05 px on 85–96 of 96 blocks.
+
+The instrument was checked before it was believed, against the two cases whose
+answer is known analytically: `PERSP-X+20` must be a pure translation and
+`PERSP-SCALE120` a pure scale. It failed both on the first attempt — a white
+void along the slid edge produced confident, meaningless correlation peaks, and
+an underdetermined coarse seed read a 1.2 scale as a keystone of −0.71 on BOTH
+renderers. Void rejection, an affine seed and a whole-frame first rung fixed it;
+the same three cases then fitted exactly.
+
+Five of the seven sliders were wrong:
+
+| slider | shipped | Lightroom, measured |
+|---|---|---|
+| Scale | `s/100`, isotropic | 0.79995 × 0.80007 at 80, 1.19989 × 1.20011 at 120 — **already right** |
+| X/Y Offset | 0.25 of the frame per full slider | **0.8121** (0.81146 on x, 0.81272 on y), and the **y sign is opposite** |
+| Keystone | +1.0 per full slider, both axes alike | **−0.65** per full slider per SHORT EDGE — sign inverted, and the two axes differ by the frame's aspect because Lightroom divides a pixel offset by one length for both |
+| Rotate | a rotation in the per-axis [0,1] box | a RIGID rotation in PIXELS: slider +5 reads 4.9884°, −10 reads −10.0143°, so the slider is degrees |
+| Aspect | `ln(1.5)` per full slider | `ln(1.1)` — 0.095563 and 0.095844 measured against 0.095310, area 1.00035 and 0.99939 |
+
+The Upright path needed nothing: its four modes reproduce Lightroom to 3–4
+decimal places (`UPRIGHT-FULL` fits keystones −0.10809/+0.13332 against our
+−0.10821/+0.13366, both at 0.00 px), because it renders Adobe's own matrix.
+Against the real library that is the path that matters — of 348 sidecars, 13 use
+Upright and 3 move a manual slider.
+
+`perspective::VOID` is no longer the one unmeasured value. Four kit cases vacate
+part of the frame and every one fills it with pure WHITE: `PERSP-X+20`'s left
+column and `PERSP-Y+20`'s bottom row are 100.0 % `255,255,255`. The fill follows
+the warp and not the scene — `PERSP-V+50` whitens the TOP corners of the same
+frame where `PERSP-V−50` whitens the bottom — so it is Lightroom's fill and not
+a blown sky. It was black, on the stated reasoning that black is what every
+other "no data here" in this engine is. That was a sound argument for a wrong
+answer, which is what the kit was for.
+
+#### Two deviations that remain, both measured and both named
+
+**The keystone's same-axis stretch is not applied** (user ruling, 2026-09-19).
+Every Lightroom keystone fit carries a scale along the keystone's own axis, the
+other axis staying at 1.00: 1.27788 at slider 50 on `K3-REF` and 2.29547 at 100.
+It was nearly shipped as a quadratic through those magnitudes, and
+`PERSP14-V+50` falsified that — the same slider of 50 on `K2-REF` stretches by
+0.9487. Those two sidecars differ in exactly one thing, the lens (a SIGMA 14-24
+at 15.5 mm against a Sony 24-105 at 51 mm), so the stretch follows the LENS and
+not the slider; and 0.9487 is below 1, which no `1/cos φ` can produce, so it is
+not a physical tilt term either. Six readings over two photographs, one of them
+at a single magnitude, do not identify a law. The error is bounded and stated:
+−22 % on the 51 mm frame, +5 % on the 15.5 mm one. Settling it needs one
+photograph at V = 25/50/75/100 plus V = 50 on two or three further focal lengths.
+
+**Two keystones at once induce a roll in Lightroom and not here.** `PERSP-MIX`
+(V −35, H −22, Rotate 0.9) fits at 0.00 px on both sides and its keystones agree
+to 2 % — +0.21943/+0.22479 against our +0.21440/+0.22718, which is what
+validates the coefficient at intermediate slider values — but Lightroom's
+rotation reads +8.027° where ours reads +1.347°. A fixed-focal-length 3D tilt
+would explain a roll from composing two tilts, and is falsified here: the
+implied focal length is 2.446 at slider 50 and 3.187 at 100 on one photograph.
+The kit holds exactly one case with both keystones moved, so fitting a cross
+term would mean fitting a coefficient to a single observation with nothing to
+check it against. No sidecar in the library moves both.
+
+One choice the kit could NOT make: every frame it exported is 3:2, so the length
+the keystone divides by is indistinguishable between the short edge, the long
+edge and the diagonal. The short edge is taken, because it is
+orientation-independent and because a keystone is physically `offset / focal
+length`. A portrait or square export would tell it apart.
+Everything else in this section is a first-party measurement.
+
+### Spot removal, imported (v1.5.0 F9) — `EditRecipe::retouch`, `retouch::heal_planar`
+
+`crs:RetouchAreas` is Lightroom's spot removal: the dust, the power line, the
+stranger on the beach. Until F9 this engine did not read it — and not reading
+it did not leave the objects out of the photograph, it put every one of them
+back. Measured on the reference library: **25 of 175 sidecars, 121 areas**, all
+of them returning to a canvas that said nothing about it.
+
+**What the sidecar states, and what it does not.** Two independent facts live
+in one area, and conflating them is what made this reader's first census wrong:
+
+* the **fill** — what made the pixels Lightroom showed. `crs:SpotType="heal"`
+  (5 areas) is a plain donor copy. `"heal_patchmatch"` with no
+  `crs:fill_method` (99) is Adobe's CLASSICAL content-aware fill — PatchMatch
+  synthesising from the frame's own texture, no model involved. The same with
+  `fill_method="firefly"` (17) is a generative model's output, stamped with
+  `crs:pm_clio_model_version`. `retouch::SpotOrigin` carries this axis.
+* the **geometry** — where. `Mask/Ellipse` (84 areas, written as an
+  attribute-only `<rdf:li/>`) or `Mask/Paint` (37 areas, a nested
+  `rdf:Description` with its own `<crs:Dabs>`). `retouch::RetouchShape` carries
+  this one, and a brush reuses the mask side's `BrushStroke` verbatim so that
+  one dab grammar, one rasteriser and one sensor-frame rotation serve both.
+
+For **116 of the 121** the pixels are NOT in the sidecar — Adobe keeps its own
+result in its own store and records only where. So this engine re-solves each
+area from the frame's own pixels and says which areas those are: the Retouch
+panel names the count, names how many Adobe synthesised, and offers
+「✨ Regenerate those areas」, which paints exactly those shapes into the shared
+brush mask and runs the generative verb over them (the result lands as a new
+✨ card, like every other generative landing).
+
+**Units, at exactly one place** (`render::retouch_spots`). `crs:SizeX`/`SizeY`
+are a half-extent in WIDTH units on both axes — the convention `BrushDab::r`
+already records for `crs:Radius`, and the one the library's ellipses measure to
+(161.5 px / 9504 = 0.016994 against a stored 0.016938) — while a `HealSpot`
+radius is a fraction of the SHORT side. `crs:SourceX`/`crs:OffsetY` are
+ABSOLUTE normalised coordinates of the donor centre despite the second name;
+read as a relative offset, one of the five that state them lands at 1.76, off
+the image. `HealSpot::source` is an offset, so the centre is subtracted there.
+
+**Where it runs, and why no unwarp.** First in `apply_develop_with_rasters`,
+before every spatial stage, so nothing sharpens a patch seam and no removed
+object votes in the local contrast around it. At STORED coordinates, with none
+of the `MaskFrame` transport a RADIAL mask needs — because `crs:pm_whole_image_*`
+is stated in pixels and its extent is exactly the native sensor rectangle every
+time (9504x6336 on 114 areas, 6240x4160 on 6), never a lens-corrected one. These
+coordinates live pre-correction, the same frame this engine measured brush dabs
+in, so the repaired pixels ride the geometry resample with the rest of the
+photograph; unwarping here would apply the field twice. The sensor→display TURN
+is a different matter and is real — 7 of the 25 retouched photographs are
+`tiff:Orientation="8"` — so `orient_recipe_coords` carries a retouch arm beside
+its mask arm.
+
+The heal operator itself moved to a float-native pair of traits
+(`retouch::HealRead` / `HealWrite`) for this. Quantising a develop-chain rect to
+16 bits to reuse the image path would clip every value above 1.0, so a spot
+healed beside a specular highlight would come back with the highlight crushed.
+
+### Stacking and merging (v1.5.0 Track S) — `src/stack/`
+
+Four merges photographers actually shoot for, over ONE alignment:
+
+| kind | what a weight means | what comes out |
+|---|---|---|
+| `Hdr` | how trustworthy a sample is as a MEASUREMENT of light | a radiance, plus the stops of headroom it recovered |
+| `Fuse` | how good a pixel LOOKS | a finished frame, no radiance anywhere in it |
+| `Focus` | how sharp a NEIGHBOURHOOD is | one frame sharp throughout |
+| `Noise` | every frame alike, minus the readings that disagree | one frame with the grain averaged away |
+
+`Hdr` and `Fuse` are two answers to the same question and both are offered
+deliberately: the HDR merge hands the develop pipeline a frame with recovered
+highlights and a recorded headroom, which F8's SDR rendition then shapes; the
+fusion hands it a finished-looking frame that no amount of headroom can be read
+back out of. Neither is a worse version of the other.
+
+**One alignment for all four** (`stack/align.rs`), because the exposure bracket
+is the hard case and an aligner that survives it is more than good enough for
+the three same-exposure stacks. It is inverse-compositional Lucas–Kanade over a
+Gaussian pyramid, in LOG LUMINANCE: a change of exposure is a constant offset
+there, and a gradient cannot see a constant. That is the whole reason a bracket
+aligns at all. The coarse levels solve TRANSLATION ONLY (2-dof) and the fine
+ones the full affine — at 24×18 px a six-parameter fit invents a shear that the
+next level down doubles, which measured as `a = 0.979, b = 0.160, d = 0.785`
+against a truth of a pure 48 px shift. Measured reach: about 2–4 px at the
+coarsest level times 2^(levels−1) — 12 px on a 192×144 frame, 48 px on
+384×288, 64 px on 768×576. A per-block refinement pass then answers the thing
+one affine cannot: a subject that moved on its own. A block with too little
+texture, or too few usable samples at one level, is skipped rather than killed
+— it still has the levels above it.
+
+**A step is a guess, and the first version believed it — twice.** A Gauss–
+Newton step says where the LINEARISATION expects the cost to fall, not where
+the cost was measured to fall. Taken on trust, with every pixel voting equally,
+the global fit read a subject that walked across the frame as evidence about
+the CAMERA: measured on a five-frame fixture whose frames are registered
+exactly and one of which carries a moving rectangle, it answered 539.7 px of
+corner travel and pushed 69.42 % of the frame out of view. Two changes, both
+of them about trusting only what was measured — samples are weighted
+Geman–McClure against a scale of three times the MEDIAN absolute residual (a
+median, so the very region that disagrees cannot inflate the number meant to
+detect it), and the loop keeps the parameters whose cost it actually measured
+on the following pass rather than the last untested step. The same frame then
+answers 0.0 px.
+
+The block pass needed the other half of that lesson. It must NOT be robustly
+weighted: a frame-wide scale is the GROUND's residual, which after the global
+fit is nothing, so weighting here rejects the subject's own motion as an
+outlier — driven that way the parallax test read −0.36 px of a −6 px truth.
+What it does need is the measured-step rule and a floor under it. A
+near-periodic texture matches itself again one period over, so on frames that
+had not moved at all the blocks invented 7.5 to 23.3 px of local field, and the
+noise stack built on that came out at rms 0.05862 against 0.01472 for no
+alignment whatsoever — the aligner doing four times more damage than the noise
+it was there to average away. A block's answer therefore survives only if it
+beats DOING NOTHING by a clear margin (`BLOCK_MARGIN`, 10 %), which is the
+prior the physics offers: consecutive frames of a burst moved a little, not a
+lot.
+
+That margin is a test each block takes alone, and alone is not enough. Where
+the ambiguity is near-exact the wrong answer beats doing nothing HONESTLY, by
+fitting the grain: with the margin in place, six of 96 blocks still answered on
+frames that differed only by a painted rectangle, five of them nowhere near it,
+every one at ±(4.8, −5.7) px — one period of the fixture's own texture, along
+the diagonal its slow structure moves a fifth of the grain in. What separates
+motion from ambiguity is not the block but the FIELD: a subject that moved is
+several blocks wide and its blocks agree with each other, while a period
+re-lock is one block disagreeing with everything around it. So a block's answer
+survives only if one of its four neighbours corroborates it to within half its
+own length (`FIELD_AGREEMENT`) — one neighbour and not a majority, because the
+smallest moving subject this module's tests draw is two blocks by two, where
+each block has two neighbours inside the subject and five outside. The invented
+field then goes to nothing, and the cost of aligning a registered burst falls
+from 8 % of the noise reduction to 3 %.
+
+**The blend is a Laplacian pyramid** (`stack/pyramid.rs`) for `Fuse` and
+`Focus`: each band picked from wherever it is best, so a seam lands in a band
+where it is invisible. The weights are normalised per level and per pixel;
+`expand` samples at `(x − 0.5) · 0.5`, the half-pixel that keeps a level's
+grid on the one below it.
+
+**The HDR merge** (`stack/merge/radiance.rs`) measures each frame's exposure
+from the PIXELS — the median of the log₂ luma ratio over samples both frames
+still record — because metadata is wrong twice over: a bracket shot in aperture
+priority records shutter speeds that do not describe the light which reached
+the sensor, and a stack assembled from developed files has no shutter speed
+left to read. Samples are weighted by Debevec's hat in the form that does not
+taper the whole middle away (`1 − (2v−1)¹²`), taken as the MINIMUM over the
+three channels so a pixel is withdrawn whole and its hue survives, and by
+2^ev so the frame that collected more light carries more of the answer. The
+headroom is the 99.9th percentile rather than the maximum — one hot pixel is
+not a photograph's dynamic range — and a soft shoulder in STOP space, applied
+as a uniform scale on the pixel's brightest channel, brings the recovered range
+back under white without moving any hue.
+
+**The three composites** (`stack/merge/composite.rs`) judge in the space the
+picture is displayed in, not in linear luminance, because they are judgements
+about how a picture LOOKS: a linear luma would weight a shadow's detail at a
+fraction of an identical highlight's. The fusion multiplies detail, saturation
+and well-exposedness (Mertens); the focus stack blurs its sharpness measure
+before it decides anything — a raw Laplacian is a stencil of edges, and beside
+a hard edge a defocused frame has a halo where the sharp frame has nothing at
+all, so the blend would take the halo — and cubes it, so a resolved region goes
+entirely to the frame that resolved it. The noise stack averages in LINEAR
+light, where photons add, and withdraws a reading more than three robust
+spreads from that pixel's own median, which is how somebody who walked through
+one frame disappears.
+
+**Coverage is not optional**: a warped frame keeps its own pixels in the border
+wedge (black would be worse — it is a lie the blend would then spread), and
+those pixels describe a different part of the scene, so every merge multiplies
+its weights by the coverage mask rather than averaging the wedge in.
+
+One entry point loads, merges and writes — `stack::stack_files` — so the CLI's
+`stack` command, the GUI's ▦ card worker and the web's `/api/stack` cannot
+drift on the rules a merge depends on (sixteen bits in, one framing, the first
+frame as the reference).
+
+### HDR edit mode and its SDR rendition (v1.5.0 F8) — `render/hdr.rs`
+
+Lightroom's HDR mode does not change the capture. It changes where DIFFUSE
+WHITE sits in it: the brightest stops stop being clipped and become HEADROOM
+above white, `crs:HDRMaxValue` says how many, and every Basic slider then acts
+on that extended range. Every file this engine writes is SDR, so an HDR
+photograph cannot be published as one — but rendering it as if the mode had
+never been set is not the alternative, because Lightroom has its own answer to
+exactly this problem and writes it into the same sidecar: the SDR RENDITION,
+tuned by the seven-control panel Lightroom shows only in HDR mode
+(`crs:SDRBlend`, `…Brightness`, `…Contrast`, `…Highlights`, `…Shadows`,
+`…Whites`, `…Clarity`). Rendering that rendition is rendering the photograph
+the photographer approved for SDR output.
+
+It is the develop's LAST stage, after the colour field, because that is what it
+is: not another edit but the mapping of the finished edit into the range this
+engine can publish. A control that ran before the masks would be one they could
+then undo.
+
+The model is one tone pass plus Clarity, and the headroom gets its OWN curve:
+
+```text
+W        = 2 ^ (HDRMaxValue · (1 + SDRBlend/100))     the headroom, linear
+shoulder = Reinhard against W, in linear light
+lut      = tone_model_knots(SDRBrightness·EV_PER_100,
+                            [SDRContrast, SDRHighlights,
+                             SDRShadows, SDRWhites, 0]) ∘ shoulder
+```
+
+The stops `crs:HDRMaxValue` states enter as a tone mapper's WHITE POINT — the
+thing a white point already means — so the shoulder has no free parameter to
+fit. It runs first and the seven SDR controls tune what it produced, which is
+both what the panel is for and what keeps `tone_model_knots` inside the
+SDR-ranged domain it was calibrated in. `SDRBlend` scales the headroom rather
+than the shoulder's output, so the curve stays Reinhard — and therefore
+monotone — at every blend value, and at −100 the white point falls to 1, for
+which the expression collapses to the identity exactly. Blacks is absent because
+Lightroom's SDR panel has none; Brightness stands where an Exposure slider
+would, because that panel has no Exposure either.
+
+Until 2026-09-19 the headroom reached the picture as a NEGATIVE HIGHLIGHTS push
+instead, on the reasoning that a shoulder IS a highlight give-back and that
+borrowing the already-calibrated slider beat inventing a private curve. The kit
+falsified it. Folding the shoulder into a slider made it inherit
+`render::limit_tone_sliders`, whose rule is that a slider must SATURATE and
+never annihilate a tonal band — correct for a slider a photographer drags, wrong
+for a rendering transform. The shoulder reached 55 % of Lightroom's and stopped:
+at an input of 0.90 the old model could not get past 0.104 below the diagonal
+where Lightroom reaches 0.189, whatever headroom the sidecar stated. Measured
+end to end through the CLI, the curve moves the whole transfer from rms 0.06344
+to **0.04193** and the top end from an error of +0.0855 to **+0.0037**.
+
+`hdr_edit` is a HARD GATE on all seven, exactly as in Lightroom, where the
+panel exists only in HDR mode. A sidecar can easily carry `crs:SDRBrightness`
+from an HDR session the photographer later left; honouring it on an SDR
+photograph would re-tone a picture whose owner can no longer see the control
+that did it. The values are still stored, still round-tripped, and still light
+the develop panel's ● — a value a file holds and no pixel reflects is exactly
+the kind a collapsed section hides.
+
+**What is measured here and what is not.** The key spellings and value forms
+are first-party: `crs:HDREditMode="0"` on 114 of the reference library's 175
+sidecars and `crs:HDRMaxValue="+1.00"` on one, with the seven `crs:SDR*`
+spellings read out of the settings key table inside the installed Camera Raw
+18.4 build (located by sibling density around `Exposure2012`, not by string
+search — the first scan found `SDRBrightnessSlider`, a UI element path, and
+`fHDREditMode`, a shader constant, neither of which proves an XMP spelling).
+**Not one sidecar in the library has `HDREditMode="1"`**, which is why this
+needed a kit at all. The kit's `HDR-ON` settles the shoulder: it is the same
+frame with the mode switched on, every SDR control at 0 and
+`crs:HDRMaxValue="+2.30"`, so the transfer from the mode-off export of that
+frame to this one is the headroom's curve and nothing else. Reinhard against the
+stated headroom sits at rms 0.0412 of it; letting the white point float instead
+of trusting the sidecar improves that to 0.0410, a 0.5 % gain for a fitted
+parameter — which is the measurement saying the sidecar's own number is already
+the right one. The residual that remains is in the mid-tones, where Lightroom
+compresses further than Reinhard does (at an input of 0.40, −0.021 against
+−0.052).
+
+What is still NOT measured: linearity in the headroom, since all three HDR cases
+carry `+2.30`, so one white point is pinned and the curve's behaviour at other
+headrooms rests on Reinhard's own form; `SDRBlend`, which is 0 in all three; and
+`BRIGHTNESS_EV_PER_100` (1), which stays a first-principles value because
+`HDR-EXP+1-SDR` moves four SDR controls at once and constrains them JOINTLY —
+no kit case moves Brightness by itself. Each is named in `render/hdr.rs` with
+the experiment that would replace it.
+
+### The camera profile (v1.5.0 F7) — `render/profile.rs`, `src/dcp.rs`
+
+WHICH rendering a photograph starts from. Three things arrive together because
+Lightroom writes them together: `crs:CameraProfile` (the name of a `.dcp` on
+this machine), the `<crs:Look>` element (Adobe's creative profile, with a baked
+half and an undecodable half), and the monochrome treatment a Look can carry
+instead of the Description's own switch.
+
+**It is nearly universal, so the render had to notice it.** Of the 175 sidecars
+in the operator's library, **161 carry a `crs:Look`** — 152 of them Lightroom's
+default `Adobe Color`, 5 `Adobe Landscape`, 4 `Adobe Monochrome`. Every one of
+the 161 bakes `Amount=1`, three identity per-channel curves, and a master
+`ToneCurvePV2012`; `Adobe Color`'s is the gentle S
+`0,0 | 22,16 | 40,35 | 127,127 | 224,230 | 240,246 | 255,255`. That curve is a
+large part of why a Lightroom rendering looks like a Lightroom rendering, and
+until F7 this engine applied its own base curve instead.
+
+`src/dcp.rs` parses the `.dcp` files Adobe installed (a plain TIFF/IFD; every
+offset is bounds-checked, because these are files the USER installed and not
+files we shipped). `src/adobe.rs` holds the root discovery both it and
+`src/lcp.rs` use. **Nothing Adobe ships is bundled or redistributed** — the
+profiles are read where they already are, and a machine without them gets a
+named refusal rather than a different picture.
+
+Two table facts were MEASURED rather than recalled, because the obvious reading
+is wrong:
+
+* an entry is three floats — **hue shift in DEGREES, saturation SCALE, value
+  SCALE** — and the storage order is
+  `index = (val * hueDivisions + hue) * satDivisions + sat`. Settled on the 60
+  genuinely three-dimensional tables in the installed pool by the
+  achromatic-plane rule: at saturation index 0 the saturation scale is exactly
+  1.0 on 60 of 60 under this reading and 0 of 60 under either alternative. The
+  two-dimensional tables (`valDivisions == 1`) — which is every
+  `ProfileHueSatMap` Adobe ships — cannot tell the readings apart, which is
+  exactly how the first probe got it backwards.
+* the pipeline ORDER is RawTherapee's (`rtengine/dcp.cc`), fetched and read
+  rather than remembered: reference matrix → HSV → `HueSatMap` → RGB →
+  baseline-exposure scale → HSV → `LookTable` → RGB → tone curve. The tone
+  curve is applied **Adobe's way** (`AdobeToneCurve`): the curve moves the max
+  and min channels and the median is placed back proportionally between them.
+  Per channel is the wrong reading and visibly desaturates.
+
+**A stated deviation.** The profile's own colour MATRIX is not adopted: the
+engine keeps the camera→XYZ transform its calibration lane was measured
+against, and only the tables and the tone curve render. Swapping the matrix in
+is one function (`profile::Stage::build`), and the Lightroom kit will say
+whether it is needed.
+
+**The one half that cannot be rendered is NAMED, not dropped.** A Look's
+`crs:LookTable` is a 32-hex reference to a `crs:Table_<HASH>` payload, and that
+payload does not decode: base85 over a measured 85-character alphabet
+(printable ASCII 33–125 minus `"&,;<>\_`), 6.408 bits per character, magic
+prefixes `vqf00`/`Lir00`, and no decompression under zlib/deflate/gzip/bzip2/
+xz/lzma/zstd/lz4 at any offset ≤ 256 under four base85 conventions. So the
+develop panel says the profile's name and then says which half of it renders,
+and `diag.warn` says the same thing to the CLI. A creative colour table applied
+wrongly would be worse than one not applied at all.
+
+The invariant that keeps F7 from changing any existing picture is
+`Stage::build` returning `None` when a profile has no tables and no curve,
+pinned by `render::profile::tests::a_profile_with_no_tables_and_no_curve_is_not_a_stage`.
+
+**Lightroom's remaining colour panels render since v1.5.0** — the Calibration
+panel, the Black & White treatment with its eight-band mixer, and Point Color.
+All three are engine-only (the model states colour through the mixer and the
+grade, so no response can name them) and all three carry their own `crs:`
+properties, which is why they are `Rendered` and not carried:
+
+- **Calibration** (`render::Calibration`, the develop's first stage). Lightroom
+  writes `crs:ShadowTint`, `crs:RedHue` … `crs:BlueSaturation` — UNPREFIXED and
+  signed — on 162 of the operator's 175 sidecars (census 2026-09-17), and uses
+  them (`BlueSaturation="+83"`). R25 had listed seven `CameraCalibration*` keys
+  in the pass-through map instead; no Lightroom file in the library carries
+  such a key, so that row never held one and the map lost seven of its sixteen
+  there — and the remaining nine lost the eight `crs:Perspective*` keys to F6's
+  own sliders, leaving seven.
+  The operator is one linear-light pass built from the primaries: each hue
+  slider rotates the chroma of pixels near its primary (`CAL_HUE_REACH_RAD`,
+  30° at ±100), each saturation slider scales the same neighbourhood's chroma
+  (`CAL_SAT_REACH`), and the shadow tint moves the dark end along
+  green–magenta under a luminance knee (`CAL_SHADOW_TINT_REACH`). A neutral
+  grey stays grey under every primary slider — a grey has no hue to rotate, and
+  that is the property the test pins.
+- **Black & White** (`crs:ConvertToGrayscale` + `crs:GrayMixerRed` …
+  `crs:GrayMixerMagenta`). The frame develops to grey through the eight-band
+  mixer, each band lightening or darkening the greys that came from its colour
+  by up to `GRAY_MIX_STOPS` (1.5 EV at ±100) with the HSL mixer's own band
+  membership. It runs IN PLACE OF the colour mixer, as Lightroom's panel does,
+  and before the per-channel curves; saturation and vibrance are skipped under
+  it, while colour grading still tints the grey — which is how a split-toned
+  black and white is made. The top-level switch is the photograph's; the one a
+  monochrome creative profile carries inside `crs:Look` belongs to the Look and
+  is read as the Look's (F7's subject, not this one's).
+- **Point Color** (`crs:PointColors`, an `rdf:Seq` of nineteen-number records).
+  Each swatch stores the colour it was sampled from, three shifts, and three
+  windows — hue relative to the sampled hue, saturation and luminance absolute,
+  each a four-number trapezoid. Membership is the PRODUCT of the three, so a
+  swatch moves only what matches it in all three; the engine reads the STORED
+  windows, and the Range slider rebuilds them (`PointColor::set_range`), which
+  is why the GUI's Range goes through that call instead of storing a number the
+  render never reads. The GUI's eyedropper samples the develop as it stands
+  where the point colours run (`render::point_color_sampling_recipe`), so a
+  swatch is keyed to the pixel the engine will test rather than to the finished
+  look, and a near-grey spot makes no swatch at all. 113 of the operator's 175
+  sidecars carry the block as Lightroom's no-swatch placeholder (nineteen
+  `-1`s): the merge keeps a placeholder, keeps — and NAMES — a block it cannot
+  parse, and replaces the block only when this recipe holds swatches or is new
+  enough to have seen the key (`schema_era` 2).
+
+Every constant above is first-principles, within the deviation the user allowed
+on 2026-09-17 ("slight deviation from Lightroom is allowed, compatibility is
+the aim"), until the Lightroom kit's `CAL-*`, `BW-*` and `PC-*` exports pin
+them.
+
 Each mask runs its own sub-chain, in this order: **dehaze** → the fused
 **WB + tone + curves + saturation (+ local hue)** blend → **clarity** →
-**texture** → **sharpness** (signed ±100, the global sharpening stage's own
-radius model — R23-1b) → **noise reduction**. The mask's own **point curves** (R25) live inside that fused pass
+**texture** → **sharpness** (signed ±100, R23-1b; since v1.5.0 the global
+capture-sharpening operator on the recipe's Radius/Detail/Masking) → **noise
+reduction** (the global luminance operator on its Detail/Contrast). The mask's own **point curves** (R25) live inside that fused pass
 and cost no extra one: `main_curve` is handed to the same `build_tone_lut` that
 already composes the mask's synthesized tone recipe, and the three RGB curves
 are compiled once per mask and applied right after it — the global chain's
@@ -1906,11 +2557,20 @@ counts `unsupported_corrections`, i.e. DROPS only, because its ruler needs
 one law behind the round-end fix. A recipe holding a default for something it
 has never read is not a photographer clearing it: a recipe with no masks does
 not delete the sidecar's mask block (the test is 「does the BASE have one」, not
-「was the import lossy」), an era-0 recipe (`schema_era`, `coord_era`'s twin,
-0 = written before v0.31.0) neither strips nor emits any of the 27 R25 scalar
-keys still sitting at their untouched default, and the pass-through map's
+「was the import lossy」), a recipe older than a control set (`schema_era`,
+`coord_era`'s twin: 0 = written before v0.31.0's 27 R25 scalar keys, 1 = before
+v1.5.0's seven parametric-curve keys, 2 = before its 24 colour keys — the
+Calibration panel's seven, the B&W switch and its eight bands, and
+`PointColors`, whose own era decides whether the merge may strip it) neither
+strips nor emits any key of a
+newer era still sitting at its untouched default, and the pass-through map's
 absence is likewise not a clear. All three are per KEY, not per file: drag one
 of those sliders on a legacy photo and it writes, because THAT is a statement.
+Since v1.5.0 two surfaces no longer launder the stamp: a Refine is no more
+current than its base (`pipeline::carry_over_unrepresentable` takes the older
+era, because every engine-only value it copies is the base's), and a browser
+body keeps the era it states — the server stamps only a silent one
+(`serve::body_recipe`), and the page states a legacy file's silence as 0.
 The accepted cost is stated where the rule lives — deleting every mask inside
 AutoShade no longer propagates the deletion to the sidecar (delete them on the
 Lightroom side), and republishing a mask block you HAVE edited recasts
@@ -2047,7 +2707,7 @@ experiment:
   the same three read −5.55 / −17.53 / −38.46 px, growing with radius because
   the excess is then the lens map sampled at the mask's own radius — and
   Lightroom's `.lcp` pool is the measured alternative for that map, not a
-  better one: rendering group A through `lcp::solve_mask_warp` instead of the
+  better one: rendering group A through `lcp::solve` instead of the
   in-camera knots moves the residuals to −24.17 / −46.34 / −73.22 px.
   LINEAR H2 is intentionally not described as 1 px-closed: ON residuals are
   9.748/7.025/6.336 px RMS and OFF residuals are 12.449/9.943/4.979 px RMS.
@@ -2217,17 +2877,18 @@ silently drops what you are looking at」 were both unrepresentable claims.
 
 | tier | engine renders | own `crs:` property | members today | disclosed by |
 |---|---|---|---|---|
-| `Rendered` | yes | yes | the ordinary controls — **29 global, 23 local** (R25 added global `texture` and the manual CA pair `ca_r`/`ca_b`; per mask, the four point curves) | — nothing to disclose |
-| `CarriedOnly` | no | yes | **25**: the 24 unpublished-operator globals R25 ruled on — the six post-crop vignette keys, the three grain keys, the five Sharpen/Noise detail axes, the three colour-NR keys, `auto_lateral_ca`, the six de-fringe keys — plus the mask `name`, a label rather than an operator. Every one carries its REASON in `CARRIED_ONLY_GLOBAL` / `CARRIED_ONLY_LOCAL` | `xmp::global_render_gaps` → 「carried to Lightroom, not rendered here」, on the control and in the save line |
-| `PassThrough` | no | verbatim | **1 row, 16 keys**: `passthrough`, a `BTreeMap<String,String>` over the named `xmp::PASSTHROUGH_CRS` block — the 8 Perspective/Upright keys and `CameraProfile` + the 7 Camera Calibration keys. A NAMED key set, deliberately not 「everything unknown」: the merge's strip universe is a static list, so a free-form map would desynchronise from what is actually written. `unmodelled_global_crs` keeps naming the rest — that is the feature, not the omission | the read-only Transform / Calibration section: values shown, no slider offered, because a slider on something never interpreted would be a lie |
-| `RenderedNotExported` | yes | no | `base_curve`, `lens_profile`; per mask `components`, `enabled`, `color_gains` | `xmp::global_export_losses` + the mask loss list |
+| `Rendered` | yes | yes | the ordinary controls — **98 global, 24 local** (counted from the registry 2026-09-18; R25 added global `texture` and the manual CA pair `ca_r`/`ca_b`; per mask, the four point curves; v1.5.0 the Detail panel's eight shaping axes, the parametric curve's seven keys, the Calibration panel's seven, the B&W switch with its eight mixer bands, the Point Color swatch list, F6's Transform panel — seven sliders, its Upright mode and `crop_constrain_to_warp` — F7's `camera_profile`, which arrived by LEAVING `PassThrough` rather than by being invented, and F8's HDR edit mode with its headroom and the seven SDR-rendition controls) | — nothing to disclose |
+| `CarriedOnly` | no | yes | **1**: the mask `name`, a label rather than an operator — the one member that never had an engine stage to wait for. R25 ruled 24 globals into this tier under policy SF4-C; v1.5.0 rendered all of them, batch by batch (the eight Detail axes → `render/detail.rs`, the nine Effects → `render/finish.rs`, the auto-CA switch and the six de-fringe keys → `render/lens.rs`), so **`CARRIED_ONLY_GLOBAL` is now empty**. The list and its gates stay: emptiness is a measurement, and the next carried row discloses itself the day it is added | `xmp::global_render_gaps` → 「carried to Lightroom, not rendered here」, on the control and in the save line |
+| `PassThrough` | no | verbatim | **1 row, 6 keys**: `passthrough`, a `BTreeMap<String,String>` over the named `xmp::PASSTHROUGH_CRS` block — what is left is exactly Lightroom's own Upright SOLVER bookkeeping (`UprightVersion`, `UprightCenterMode`, `UprightCenterNormX/Y`, `UprightFocalMode`, `UprightFocalLength35mm`). (R25 counted 16, the seven `CameraCalibration*` keys included; Lightroom writes no such key, and its Calibration panel renders since v1.5.0. It counted 9 until v1.5.0 F6, when the eight `crs:Perspective*` keys became owned controls, and 7 until F7, when `CameraProfile` became one — the tier shrinking by itself twice, which is what its own note hoped for.) A NAMED key set, deliberately not 「everything unknown」: the merge's strip universe is a static list, so a free-form map would desynchronise from what is actually written. `unmodelled_global_crs` keeps naming the rest — that is the feature, not the omission | the Transform section's read-only tail: values shown, no slider offered, because a slider on something never interpreted would be a lie. The section's own sliders above it are a different matter — those keys render |
+| `RenderedNotExported` | yes | no | **6 global** in registry order: `upright_transform` (F6), `look` (F7), `base_curve`, `lens_profile`, `retouch` (F9), `colour_field`; per mask `enabled`, `color_gains`. The first four are quiet on save (`catalogue::STAMPED_CALIBRATION`) — nothing the photographer can act on, and for the two Adobe ones the merge preserves the document's own copy anyway — while `retouch` and `colour_field` say so out loud. `retouch` is the sharpest illustration of the split: a MERGE keeps the photographer's `crs:RetouchAreas` byte for byte (this writer does not own the element, so it never strips it), and a FRESH `recipe_to_xmp` emits nothing at all for it. The tier names the worse half, because that is the half a disclosure is for | `xmp::global_export_losses` + the mask loss list |
 | `DerivedWriteOnly` | (yes) | no — only a derived value | `as_shot_k`/`as_shot_tint`, which reach the sidecar as `crs:Temperature`/`Tint` | — |
 
 `Control.tier` is `Option<Tier>`; `None` is not "unclassified" but "not a
 develop control" (the base curve's `version` stamp, the two era stamps, the
-AI's own `rationale`/`confidence`, the solver's mask `role`, and since v0.33.0
-the photographer's `quarter_turns` — seven rows), and such a row may never own
-a `crs:` property. The registry is enforced from three sides: adding a field to `EditRecipe` /
+AI's own `rationale`/`confidence`, the solver's mask `role`, since v0.33.0
+the photographer's `quarter_turns`, and since v1.5.0 `explicit_zero`, the
+bookkeeping of which companion zeros are real — eight rows), and such a row
+may never own a `crs:` property. The registry is enforced from three sides: adding a field to `EditRecipe` /
 `LocalAdjustment` already fails the build until it has a row (the `global_value`
 / `local_value` destructures, R23-1), the row cannot be written without a tier
 (a struct literal has no optional fields), and the tests re-derive both halves
@@ -2252,8 +2913,13 @@ visibly differently in Lightroom, silently — and they join the mask losses in
 the one save sentence. The other direction of the same honesty is
 `xmp::global_render_gaps` (R25), the symmetric list for `CarriedOnly`: what
 LIGHTROOM will render and this canvas will not. It is the precondition for the
-whole carried tier existing — 24 sliders that move a number and no pixel would
-otherwise be exactly the bug the inclusion laws above forbid. It compares
+whole carried tier existing — sliders that move a number and no pixel (24 at
+R25, **0 since v1.5.0**) would otherwise be exactly the bug the inclusion laws
+above forbid. It answers empty on every recipe now, which is the point rather
+than a defect, so the derivation itself moved into `render_gaps_in(controls,
+r)`: a test feeds it a synthetic carried row, because the real registry can no
+longer exercise it and a live disclosure with no evidence behind it is worse
+than none. It compares
 against `EditRecipe::default()` rather than zero, because de-fringe's Adobe
 defaults are non-zero (`0/30/70/0/40/60`, this repo's first non-zero-default
 `crs:` fields), and it excludes `PassThrough` on purpose: a block with no
@@ -2267,12 +2933,13 @@ saying they are there, so a canvas that did not match Lightroom's render had no
 explanation on screen. Its universe is the COMPLEMENT of `owned_attr_keys`, so
 it needs no catalogue of Adobe property names to keep up to date — and R25 is
 the prediction coming true: the day the batches taught the engine `crs:Texture`,
-the Grain block and the Transform/Calibration blocks, those keys joined the
-owned set and left this list by themselves, with no edit to the list at all.
+the Grain block and the Transform block, those keys joined the owned set and
+left this list by themselves, with no edit to the list at all.
 The cost was paid in TEST FIXTURES, which had used exactly those keys as their
-「unmodelled」 samples and had to be re-based four times across the round (they
-now use `PointColor`, `Look` and `CameraProfileDigest`); what remains named is
-what remains unmodelled.
+「unmodelled」 samples and have been re-based five times across the round — the
+fifth in v1.5.0, when `PointColors` became a modelled key and the fixtures
+moved to `crs:CurveRefineSaturation`, `Look` and `CameraProfileDigest`; what
+remains named is what remains unmodelled.
 
 #### The payload: the whole develop under this app's own namespace (v1.3.1)
 
@@ -2356,8 +3023,9 @@ are then anchored to the develop dir exactly as a loaded `recipe.json` is.
 Names are one path component or refused on both sides.
 
 Two smaller consequences of the same measurement. `ColorNoiseReduction` goes
-out at ZERO (`amount_carries`): this engine renders no colour noise reduction,
-so the recipe's 0 is the truth of the render, and the absent key was letting
+out even at ZERO (`amount_carries`): the recipe's 0 is the truth of the render
+— colour noise reduction off, the only state this engine drew before v1.5.0
+and one position of a rendered slider since — and the absent key was letting
 Lightroom apply its RAW default of 25 to a photo the app showed without it.
 And an unnamed zone goes out under its role tag (`written_name`: `sky` /
 `land`), which the reader — `payload::zone_name_role`, together with the
@@ -2991,7 +3659,7 @@ component inversion bit complements the SAME ramp; reversing handles would
 not sum to one. Adjacent bands sum to one, within coverage quantization, using
 the measured eased profile. False is omitted from JSON, preserving older
 recipe bytes; older readers fail loudly only when true is present. SCHEMA_ERA
-still names the R25 CRS control set and does not change. The warm/cool
+did not change for it: it counts `crs:` control sets, and this adds no key. The warm/cool
 fixture requires accepted bands to replace the single correction and improve
 its measured deltaE; a uniform recolour earns no split. The terminal colour field is unchanged and receives the accepted mask
 stack, so it fits only the remainder. Native geometry adds no geometry loss;
@@ -4233,8 +4901,8 @@ v1.2.6, the stage does not narrate itself, and the recipe writes no key
 (`skip_serializing_if`, the `quarter_turns` rule — an archived version's
 `store::recipe_struct_hash` still matches and no re-archive pass is needed).
 `SCHEMA_ERA` is deliberately NOT bumped: its one consumer,
-`xmp::era_suppressed_attr_keys`, asks whether a recipe has seen the
-twenty-seven R25 `crs:` keys, and a colour field owns none.
+`xmp::unspoken_attr_keys`, asks whether a recipe has seen each
+control-set era's `crs:` keys, and a colour field owns none.
 
 ONE renderer: `render::apply_colour_field`, with `LocalField::render` a call
 into it and the guide (`render::field_guide_luma`, re-exported into
@@ -4257,7 +4925,9 @@ foreign arm and counts it, like a bitmap mask. `pipeline::carry_over_unrepresent
 carries it through a refine, because no response schema can state ninety-six
 vertices.
 
-It is the THIRD `Tier::RenderedNotExported` global and the first that is an
+It was the THIRD `Tier::RenderedNotExported` global (F6's `upright_transform`
+and F7's `look` have since joined ahead of it in registry order) and is still
+the only one that is an
 edit rather than a measurement, which moved a rule: `gui::util::xmp_loss_interrupts`
 asked `engine_only` whether an export loss is actionable, which was the right
 answer for the wrong reason (every engine-only global that could be lost

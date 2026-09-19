@@ -12,9 +12,10 @@
 //! orientation + crop.
 //!
 //! HONEST SCOPE: these ops are tasteful **approximations**, not bit-exact
-//! Lightroom — clarity/sharpening are luma unsharp masks, noise reduction is a
-//! bilateral-lite, dehaze is a pointwise scattering inversion (see
-//! [`apply_dehaze`]). LOCAL-mask clarity/dehaze/texture ARE engine-rendered
+//! Lightroom — clarity is a luma unsharp mask, the Detail panel (capture
+//! sharpening, luminance and colour noise reduction, v1.5.0) is built from
+//! Adobe's documented slider behaviour in `detail.rs`, dehaze is a pointwise
+//! scattering inversion (see [`apply_dehaze`]). LOCAL-mask clarity/dehaze/texture ARE engine-rendered
 //! since R22 (local temperature/tint since batch #2-B) — see [`apply_masks`]
 //! for the pass order and the two documented residues vs the global chain.
 //! `texture` gained its GLOBAL stage in R25 B2 and the two share one radius
@@ -35,6 +36,15 @@ use rawler::Orientation;
 use rayon::prelude::*;
 
 use crate::recipe::{Crop, EditRecipe, MaskGeometry, RangeMask};
+
+mod detail;
+mod finish;
+mod hdr;
+mod lens;
+mod perspective;
+mod profile;
+pub use detail::FilmScale;
+pub use finish::{frame_and_finish, CropPolicy};
 
 const LUT_N: usize = 4096;
 pub(crate) const MASK_RASTER_BUDGET_BYTES: usize = 256 * 1024 * 1024;
@@ -343,6 +353,17 @@ pub fn render_to_image_in(
     }
 
     let wide = working != ExportColorSpace::Srgb;
+    // v1.5.0 F7 — the camera profile the sidecar names, resolved against the
+    // Adobe profiles installed on THIS machine. `None` is the ordinary case
+    // (no profile named, or none installed that matches) and costs nothing.
+    let profile_stage = resolve_camera_profile(&rawimage, recipe, working, &diag);
+    // A profile is rendered by the engine's OWN calibrate path whatever the
+    // export space asked for. The sRGB path normally leaves white balance and
+    // calibration to rawler and stays byte-identical to it; that byte identity
+    // is worth keeping when nothing else changes, but a profile changes the
+    // colour by design, and an sRGB export that ignored the profile while the
+    // ProPhoto one obeyed it would be two renderings of one photograph.
+    let own_calibrate = wide || profile_stage.is_some();
     // R28 — a non-2×2 RGB CFA is demosaiced HERE, not by rawler, so its
     // develop keeps only the black/white-level rescale: rawler's `Demosaic`
     // step is Bayer-only (`imgop/develop.rs:145-147` hands every `is_rgb`
@@ -354,7 +375,7 @@ pub fn render_to_image_in(
     let mut dev = RawDevelop::default();
     if geometry_cfa.is_some() {
         dev.steps = vec![ProcessingStep::Rescale];
-    } else if wide {
+    } else if own_calibrate {
         dev.steps.retain(|s| {
             !matches!(
                 s,
@@ -372,7 +393,7 @@ pub fn render_to_image_in(
     // carries the identical `[0].is_nan()` blind spot — but only when a
     // matrix is PRESENT: absence is the normal matrix-less-camera case and
     // rawler then skips calibration entirely.
-    let calibration = if wide {
+    let calibration = if own_calibrate {
         let xyz2cam = camera_matrix(&rawimage)?;
         validate_calibration(&xyz2cam, rawimage.wb_coeffs, working, raw_path)?;
         Some((xyz2cam, normalise_wb(rawimage.wb_coeffs)))
@@ -436,7 +457,7 @@ pub fn render_to_image_in(
     // Wide path: camera-native LINEAR until the calibrate below.
     let mut data: Vec<[f32; 3]> = rgb.data;
     if let Some((xyz2cam, wb)) = calibration {
-        calibrate_camera_buffer(&mut data, &xyz2cam, wb, working);
+        calibrate_camera_buffer(&mut data, &xyz2cam, wb, working, profile_stage.as_ref());
     } else if geometry_cfa.is_some() {
         // A camera with no colour matrix at all: rawler skips its `Calibrate`
         // step there but still applies `SRgb` (`imgop/develop.rs:199-233`).
@@ -468,12 +489,16 @@ pub fn render_to_image_in(
     // rotation transient is the accepted price of preview pixels that
     // match the export path exactly.
     let (data, w, h) = orient_f32(data, w, h, orientation);
+    // The develop's own full-resolution short edge, read BEFORE the cap: the
+    // Detail panel states its radii in pixels of THIS frame (`FilmScale`).
+    let film_short = u32::try_from(w.min(h)).ok();
     // Working-resolution cap: downscale-then-develop, the same order the GUI
     // preview path uses — masks/sharpen/geometry are resolution-normalised.
     let (mut data, w, h) = match max_edge {
         Some(edge) => downscale_f32(data, w, h, edge),
         None => (data, w, h),
     };
+    let film = FilmScale::of(film_short, w, h);
 
     // --- AI denoise on the demosaiced pixels: the FALLBACK for a sensor the
     // mosaic path could not take (see above), before tone/sharpen.
@@ -485,6 +510,13 @@ pub fn render_to_image_in(
     // --- white balance (target Kelvin/tint) in linear light -------------------
     apply_recipe_wb(&mut data, recipe);
 
+    // --- 「Remove Chromatic Aberration」 (v1.5.0): an INSTRUCTION, so
+    // rendering it means running the solver it names and handing the answer to
+    // the manual pair below. Here, because `geometry_profile` is what folds
+    // that pair onto the camera's knots and it is read on the next line.
+    let solved = lens::with_auto_lateral_ca(recipe, &data, w, h);
+    let recipe = &*solved;
+
     // --- tone + clarity + sat/vibrance + NR + sharpen (shared pipeline) -------
     // ONE value decides both the mask chain's frame adaptation and whether the
     // geometry stage runs below (`MaskFrame`). RADIAL keeps its pointwise
@@ -492,7 +524,7 @@ pub fn render_to_image_in(
     // geometry follows, or transports its two handles once when none follows.
     let geom = geometry_profile(recipe);
     let frame = MaskFrame::downstream(&geom, recipe.lens_distortion);
-    apply_develop_with_rasters(&mut data, w, h, recipe, &rasters, frame);
+    apply_develop_with_rasters(&mut data, w, h, recipe, &rasters, frame, film);
 
     // --- pack to 16-bit (highest precision; JPEG downconverts at encode) ------
     let mut buf: Vec<u16> = vec![0u16; w * h * 3];
@@ -505,30 +537,23 @@ pub fn render_to_image_in(
         .ok_or_else(|| anyhow!("pixel buffer size mismatch"))?;
     // Orientation was applied BEFORE develop (see orient_f32 above), so the
     // buffer is already in the display frame — no tail rotation.
-    let mut dynimg = DynamicImage::ImageRgb16(img);
+    let dynimg = DynamicImage::ImageRgb16(img);
 
-    // --- lens geometry (profile distortion/CA + manual amount): radial
-    // resample FIRST in the geometric chain (masks were applied above, in the
-    // original frame). The map depends only on the radius normalised by the
-    // half-diagonal, so it is orientation-invariant and identical between the
-    // small preview and this full render.
+    // --- lens geometry → straighten → crop → the finishing pass, all four in
+    // `frame_and_finish` (`render/finish.rs`) because they are ONE order and
+    // four surfaces need it: the geometric chain is original → corrected →
+    // view, the user crop is defined on the straightened frame (Lightroom's
+    // CropAngle + crop rect), and the post-crop vignette and grain can only
+    // act once that rectangle exists.
+    //
     // `geometry_profile`, not `recipe.lens_profile`: the manual CA pair rides
     // the same per-channel knots (R25 B3), and reading the raw profile here
     // would skip it on a photo with no in-camera CA data. Hoisted above the
-    // develop so the mask chain and this resample are ONE decision.
-    if frame.warps() {
-        dynimg = apply_lens_geometry(&dynimg, &geom, recipe.lens_distortion);
-    }
-
-    // --- straighten: rotate + auto-crop BEFORE the user crop, in display
-    // space (after orientation) so the slider means what the user sees. The
-    // user crop below is therefore defined on the straightened frame — same
-    // composition order as Lightroom's CropAngle + crop rect.
-    if recipe.straighten_deg != 0.0 {
-        dynimg = rotate_straighten(&dynimg, recipe.straighten_deg);
-    }
-
-    Ok(apply_crop(dynimg, recipe.crop.as_ref()))
+    // develop so the mask chain and this resample are ONE decision — the gate
+    // inside is the one `frame.warps()` answers with.
+    //
+    // Orientation was applied BEFORE the develop, so no tail rotation.
+    Ok(frame_and_finish(dynimg, recipe, &geom, film, CropPolicy::Cut))
 }
 
 /// What `RawDevelop::default().develop_intermediate` WILL produce for this
@@ -957,6 +982,8 @@ pub fn render_baked_to_image(
         o => Cow::Owned(oriented(img.clone(), o)),
     };
     let img = turned.as_ref();
+    // The source's own short edge, before the cap (`FilmScale`).
+    let film_short = Some(img.width().min(img.height()));
     // Downscale-only, before anything else allocates a plane. `Cow` so the
     // uncapped path (every shipped export) still borrows and copies nothing.
     let capped: Cow<'_, DynamicImage> = match max_edge {
@@ -983,11 +1010,16 @@ pub fn render_baked_to_image(
     }
 
     apply_recipe_wb(&mut data, recipe);
+    // The auto-CA solver, before the profile that carries its answer — the RAW
+    // arm's rule above, for the same reason.
+    let solved = lens::with_auto_lateral_ca(recipe, &data, w, h);
+    let recipe = &*solved;
     // Same ONE-value rule as the RAW arm above (`MaskFrame`): the mask chain's
     // frame adaptation and the geometry gate below are the same decision.
     let geom = geometry_profile(recipe);
     let frame = MaskFrame::downstream(&geom, recipe.lens_distortion);
-    apply_develop_with_rasters(&mut data, w, h, recipe, &rasters, frame);
+    let film = FilmScale::of(film_short, w, h);
+    apply_develop_with_rasters(&mut data, w, h, recipe, &rasters, frame, film);
 
     let mut buf: Vec<u16> = vec![0u16; w * h * 3];
     buf.par_chunks_mut(3).zip(data.par_iter()).for_each(|(o, px)| {
@@ -997,20 +1029,13 @@ pub fn render_baked_to_image(
     });
     let out: ImageBuffer<Rgb<u16>, _> = ImageBuffer::from_raw(w as u32, h as u32, buf)
         .ok_or_else(|| anyhow!("baked pixel buffer size mismatch"))?;
-    let mut dynimg = DynamicImage::ImageRgb16(out);
+    let dynimg = DynamicImage::ImageRgb16(out);
 
-    // Lens geometry, then straighten, before the user crop — same order as
-    // the RAW path (the geometric chain is original → corrected → view), and
-    // the same composed profile (manual CA included).
-    if frame.warps() {
-        dynimg = apply_lens_geometry(&dynimg, &geom, recipe.lens_distortion);
-    }
-    if recipe.straighten_deg != 0.0 {
-        dynimg = rotate_straighten(&dynimg, recipe.straighten_deg);
-    }
-
-    // Orientation is already baked into the source here.
-    Ok(apply_crop(dynimg, recipe.crop.as_ref()))
+    // The same tail as the RAW arm above, from the same function: lens
+    // geometry → straighten → crop → post-crop vignette and grain, with the
+    // same composed profile (manual CA included). Orientation is already baked
+    // into the source here.
+    Ok(frame_and_finish(dynimg, recipe, &geom, film, CropPolicy::Cut))
 }
 
 /// The output pipeline — Lightroom's export page distilled to the controls
@@ -1083,6 +1108,25 @@ const ADOBE_PRIM: [[f32; 2]; 3] = [[0.64, 0.33], [0.21, 0.71], [0.15, 0.06]];
 /// Adobe RGB (1998) transfer gamma, exact per the spec (= 2.19921875, a
 /// dyadic rational that f32 represents exactly).
 const ADOBE_GAMMA: f32 = 563.0 / 256.0;
+
+/// A row-major 3×3 read out of a flat slice, or `None` when the slice is short.
+///
+/// Two readers of camera calibration build this same array: the RAW's own
+/// `ColorMatrix` ([`camera_matrix`]) and Adobe's `.dcp` ([`crate::dcp`]). The
+/// unpacking is the only thing they share — what counts as a USABLE matrix
+/// differs (the RAW's is judged by [`validate_calibration`] against the space
+/// it will be inverted into; the profile's is judged on its own finiteness), so
+/// this answers the shape question and leaves the judgement to each caller.
+pub(crate) fn mat3_from_slice(v: &[f32]) -> Option<[[f32; 3]; 3]> {
+    let v = v.get(..9)?;
+    let mut m = [[0.0f32; 3]; 3];
+    for (i, row) in m.iter_mut().enumerate() {
+        for (j, cell) in row.iter_mut().enumerate() {
+            *cell = v[i * 3 + j];
+        }
+    }
+    Some(m)
+}
 
 fn mat_vec3(m: &[[f32; 3]; 3], v: &[f32; 3]) -> [f32; 3] {
     [
@@ -1191,16 +1235,8 @@ fn camera_matrix(rawimage: &rawler::RawImage) -> Result<[[f32; 3]; 3]> {
         .or_else(|| rawimage.color_matrix.iter().next())
         .map(|(_, m)| m)
         .ok_or_else(|| anyhow!("no camera colour matrix — the wide-gamut develop needs one"))?;
-    if cm.len() < 9 {
-        bail!("camera colour matrix has {} entries (need 9)", cm.len());
-    }
-    let mut xyz2cam = [[0.0f32; 3]; 3];
-    for (i, row) in xyz2cam.iter_mut().enumerate() {
-        for (j, v) in row.iter_mut().enumerate() {
-            *v = cm[i * 3 + j];
-        }
-    }
-    Ok(xyz2cam)
+    mat3_from_slice(cm)
+        .ok_or_else(|| anyhow!("camera colour matrix has {} entries (need 9)", cm.len()))
 }
 
 /// rawler's AsShotNeutral convention: `wb[0]` NaN ⇒ WB unknown ⇒ neutral
@@ -1348,17 +1384,40 @@ pub const MANUAL_CA_PER_UNIT: f32 = 2.0e-5;
 /// When the profile's own CA is switched OFF, its knots do NOT participate:
 /// the manual pair stands alone (a user who unticked 「Chromatic aberration」
 /// asked for the camera's correction to stop, not to be scaled).
+///
+/// v1.5.0 composes ONE more thing here for the same reason: Lightroom's
+/// profile Distortion strength (`lens_profile_distortion_scale`, 0..200 with
+/// 100 = the profile's own map). A strength on a radial map means scaling its
+/// DEPARTURE FROM IDENTITY, so knot `k` becomes `1 + (k − 1)·s` — which leaves
+/// 100 bit-identical and makes 0 exactly "no profile distortion". At 0 the
+/// knots are DROPPED rather than flattened to ones: an identity spline still
+/// satisfies `geometry_active()`, and the resample it would then run is not
+/// free (it promotes an 8-bit preview to 16-bit on the way through).
 pub fn geometry_profile(r: &EditRecipe) -> Cow<'_, crate::recipe::LensProfile> {
-    if r.ca_r == 0.0 && r.ca_b == 0.0 {
+    let ca_moved = r.ca_r != 0.0 || r.ca_b != 0.0;
+    let dist_scale = (r.lens_profile_distortion_scale / 100.0).clamp(0.0, 2.0);
+    let dist_moved = dist_scale != 1.0 && !r.lens_profile.distortion.is_empty();
+    if !ca_moved && !dist_moved {
         return Cow::Borrowed(&r.lens_profile);
     }
     let p = &r.lens_profile;
+    let distortion = if !dist_moved {
+        p.distortion.clone()
+    } else if dist_scale == 0.0 {
+        Vec::new()
+    } else {
+        p.distortion.iter().map(|k| 1.0 + (k - 1.0) * dist_scale).collect()
+    };
+    if !ca_moved {
+        return Cow::Owned(crate::recipe::LensProfile { distortion, ..p.clone() });
+    }
     let profile_ca_on = p.ca_on && !p.ca_r.is_empty() && !p.ca_b.is_empty();
     let fold = |knots: &[f32], slider: f32| -> Vec<f32> {
         let f = 1.0 + slider * MANUAL_CA_PER_UNIT;
         if profile_ca_on { knots.iter().map(|k| k * f).collect() } else { vec![f] }
     };
     Cow::Owned(crate::recipe::LensProfile {
+        distortion,
         ca_r: fold(&p.ca_r, r.ca_r),
         ca_b: fold(&p.ca_b, r.ca_b),
         ca_on: true,
@@ -1518,11 +1577,20 @@ fn calibrate_camera_buffer(
     xyz2cam: &[[f32; 3]; 3],
     wb: [f32; 3],
     space: ExportColorSpace,
+    profile: Option<&profile::Stage>,
 ) {
     let m = camera_to_space_matrix(xyz2cam, space);
     data.par_iter_mut().for_each(|px| {
         let v = [px[0] * wb[0], px[1] * wb[1], px[2] * wb[2]];
         let mut t = mat_vec3(&m, &v);
+        // The camera profile acts HERE: linear working-space light, after the
+        // calibration matrix and before the transfer encode. Everything
+        // downstream — exposure, tone, the mixer, the masks — then sees a frame
+        // that already carries the profile, which is the order Lightroom's own
+        // panel implies. Absent, this line does not exist.
+        if let Some(p) = profile {
+            p.apply(&mut t);
+        }
         let max = t[0].max(t[1]).max(t[2]);
         if max > 1.0 {
             // Blown pixels take EXACTLY rawler's treatment, including its
@@ -1537,6 +1605,69 @@ fn calibrate_camera_buffer(
         }
         *px = [linear_to_srgb(t[0]), linear_to_srgb(t[1]), linear_to_srgb(t[2])];
     });
+}
+
+/// The camera profile this photograph is developed through, prepared for this
+/// frame — or `None`, with the reason disclosed, when there is not one.
+///
+/// The NAME comes from the sidecar: the Description's own `crs:CameraProfile`
+/// when it has one, otherwise the creative Look's base profile, which is what
+/// Lightroom falls back to for the fifteen files in the measured library that
+/// carry a Look and no top-level profile. The FILE comes from the user's Adobe
+/// install ([`crate::dcp`]) and is never bundled.
+///
+/// Every way this can come up empty is DISCLOSED by name, because "the profile
+/// you named was not applied" is exactly the kind of silence that makes a
+/// render disagree with Lightroom for no visible reason.
+fn resolve_camera_profile(
+    rawimage: &rawler::RawImage,
+    r: &EditRecipe,
+    space: ExportColorSpace,
+    diag: &crate::diag::Diag<'_>,
+) -> Option<profile::Stage> {
+    let name = if !r.camera_profile.is_empty() {
+        r.camera_profile.as_str()
+    } else {
+        r.look.as_ref().map(|l| l.base_profile.as_str()).unwrap_or("")
+    };
+    if name.is_empty() {
+        return None;
+    }
+    // The creative colour table is the one thing a Look carries that cannot be
+    // rendered — see `crate::dcp` for what was measured about that payload.
+    // Named here, where the profile is being applied, rather than nowhere.
+    if let Some(look) = r.look.as_ref()
+        && !look.table.is_empty()
+    {
+        diag.warn(format!(
+            "creative profile \"{}\": its colour table ({}) is not rendered — the rest of the \
+             Look is",
+            look.name, look.table
+        ));
+    }
+    let (make, model) = (rawimage.camera.make.as_str(), rawimage.camera.model.as_str());
+    let (path, prof) = match crate::dcp::find(make, model, name) {
+        Ok(found) => found,
+        Err(e) => {
+            diag.warn(format!("camera profile \"{name}\" is not rendered: {e}"));
+            return None;
+        }
+    };
+    if prof.has_third_illuminant {
+        diag.warn(format!(
+            "camera profile \"{name}\" states three calibration illuminants; rendering with two"
+        ));
+    }
+    let kelvin = wb_to_kelvin_tint(&camera_matrix(rawimage).ok()?, normalise_wb(rawimage.wb_coeffs))
+        .map(|(k, _)| k);
+    let stage = profile::Stage::build(&prof, space, kelvin);
+    if stage.is_none() {
+        diag.warn(format!(
+            "camera profile \"{name}\" ({}) carries no table or curve this engine renders",
+            path.display()
+        ));
+    }
+    stage
 }
 
 /// An Adobe RGB deliverable developed NATIVELY in Adobe primaries still
@@ -1844,18 +1975,44 @@ pub fn develop_preview(preview: &DynamicImage, recipe: &EditRecipe) -> DynamicIm
 /// recipe's geometry is active, because the three surfaces that look at a
 /// preview all do (`bin/gui/util.rs`'s `build_preview`, `serve.rs`'s preview
 /// route, and the GUI coverage overlay). This form is for the exception, and
-/// the exception is real: the GUI's range REFERENCE builds develop a recipe
-/// that still carries a lens profile and then apply NO geometry, because they
-/// exist to sample pixel VALUES rather than to be looked at. They pass
+/// the exception is real: the GUI's range REFERENCE builds and its Point
+/// Color eyedropper develop a recipe that still carries a lens profile and
+/// then apply NO geometry, because they exist to sample pixel VALUES rather
+/// than to be looked at. They pass
 /// [`MaskFrame::without_downstream`] so LINEAR still receives its handle-only
 /// raw-frame rule.
+///
+/// `film_short_edge` is [`develop_preview_film`]'s: a caller reproducing what
+/// the canvas shows (the GUI's Range-mask references and Point Color samples,
+/// the fill's picture of a card) passes the source's own edge so its pixels
+/// are the canvas's pixels;
+/// `None` treats the preview itself as the film.
 pub fn develop_preview_framed(
     preview: &DynamicImage,
     recipe: &EditRecipe,
     diag: &crate::diag::Diag<'_>,
     frame: MaskFrame<'_>,
+    film_short_edge: Option<u32>,
 ) -> DynamicImage {
-    develop_preview_inner(preview, recipe, diag, Some(frame))
+    develop_preview_inner(preview, recipe, diag, Some(frame), film_short_edge)
+}
+
+/// [`develop_preview_with`] for a VIEWING surface that knows how large the
+/// photo really is: `film_short_edge` is the full-resolution develop's short
+/// edge (`decode::film_short_edge`), so the Detail panel's pixel radii land
+/// at the scale the export will show them once it is downscaled to this
+/// preview — see [`FilmScale`]. The GUI canvas (`util::build_preview`) and the
+/// web preview call this, and every surface that must see the canvas's own
+/// pixels passes the same edge to [`develop_preview_framed`]; the analysis
+/// surfaces (the reverse fit, the judge) keep the forms above, which treat the
+/// preview itself as the film and compare like with like.
+pub fn develop_preview_film(
+    preview: &DynamicImage,
+    recipe: &EditRecipe,
+    diag: &crate::diag::Diag<'_>,
+    film_short_edge: Option<u32>,
+) -> DynamicImage {
+    develop_preview_inner(preview, recipe, diag, None, film_short_edge)
 }
 
 /// [`develop_preview`] with the caller's own diagnostics channel — the injected
@@ -1866,7 +2023,7 @@ pub fn develop_preview_with(
     recipe: &EditRecipe,
     diag: &crate::diag::Diag<'_>,
 ) -> DynamicImage {
-    develop_preview_inner(preview, recipe, diag, None)
+    develop_preview_inner(preview, recipe, diag, None, None)
 }
 
 /// The preview develop. `frame` is `None` for the two entry points that let the
@@ -1877,6 +2034,7 @@ fn develop_preview_inner(
     recipe: &EditRecipe,
     diag: &crate::diag::Diag<'_>,
     frame: Option<MaskFrame<'_>>,
+    film_short_edge: Option<u32>,
 ) -> DynamicImage {
     // Entry-point sanitisation: ONE construction, ONE disclosure — the
     // ValidatedRecipe token (arch item c) replaces four hand-rolled
@@ -1884,11 +2042,6 @@ fn develop_preview_inner(
     let validated = crate::recipe::ValidatedRecipe::new(recipe);
     validated.disclose(diag);
     let recipe = &*validated;
-    // Derived from the CLAMPED recipe, and from the same composed profile the
-    // preview surfaces hand `apply_lens_geometry` — `geometry_profile`, not the
-    // raw one, because the manual CA pair rides those knots (R25 B3).
-    let geom = geometry_profile(recipe);
-    let frame = frame.unwrap_or_else(|| MaskFrame::downstream(&geom, recipe.lens_distortion));
     let rgb = preview.to_rgb8();
     let (w, h) = rgb.dimensions();
     let mut data: Vec<[f32; 3]> = rgb
@@ -1897,7 +2050,19 @@ fn develop_preview_inner(
         .map(|p| [p[0] as f32 / 255.0, p[1] as f32 / 255.0, p[2] as f32 / 255.0])
         .collect();
     apply_recipe_wb(&mut data, recipe);
-    apply_develop(&mut data, w as usize, h as usize, recipe, diag, frame);
+    // The pixels come first here (they used to come after the profile) for one
+    // reason: the auto-CA solver reads them, and `geometry_profile` below must
+    // already carry its answer — on this raster as on the export's, because the
+    // estimate is a ratio and it is rounded to the manual slider's own step.
+    let solved = lens::with_auto_lateral_ca(recipe, &data, w as usize, h as usize);
+    let recipe = &*solved;
+    // Derived from the CLAMPED recipe, and from the same composed profile the
+    // preview surfaces hand `apply_lens_geometry` — `geometry_profile`, not the
+    // raw one, because the manual CA pair rides those knots (R25 B3).
+    let geom = geometry_profile(recipe);
+    let frame = frame.unwrap_or_else(|| MaskFrame::downstream(&geom, recipe.lens_distortion));
+    let film = FilmScale::of(film_short_edge, w as usize, h as usize);
+    apply_develop(&mut data, w as usize, h as usize, recipe, diag, frame, film);
     let mut buf = vec![0u8; (w * h * 3) as usize];
     buf.par_chunks_mut(3).zip(data.par_iter()).for_each(|(o, px)| {
         o[0] = to_u8(px[0]);
@@ -1921,9 +2086,10 @@ fn apply_develop(
     r: &EditRecipe,
     diag: &crate::diag::Diag<'_>,
     frame: MaskFrame<'_>,
+    film: FilmScale,
 ) {
     let rasters = best_effort_mask_raster_snapshot(r, diag);
-    apply_develop_with_rasters(data, w, h, r, &rasters, frame);
+    apply_develop_with_rasters(data, w, h, r, &rasters, frame, film);
 }
 
 /// [`apply_develop`] on pixels with no owner and no caller to route to — the
@@ -1935,7 +2101,67 @@ fn apply_develop_anon(data: &mut [[f32; 3]], w: usize, h: usize, r: &EditRecipe)
     // `AsRendered`: these fixtures construct a raw pixel buffer and inspect it
     // directly — no geometry stage runs after them, so every mask belongs at
     // its stored coordinates (`MaskFrame`).
-    apply_develop(data, w, h, r, &crate::diag::pixels(), MaskFrame::AsRendered);
+    apply_develop(data, w, h, r, &crate::diag::pixels(), MaskFrame::AsRendered, FilmScale::NATIVE);
+}
+
+/// The recipe's retouch areas as heal spots for a `w`×`h` working frame
+/// (v1.5.0 F9) — the one place Lightroom's units become this engine's.
+///
+/// Two conversions happen here and nowhere else, because both are frame facts
+/// rather than operator facts:
+///
+///  * **Radius.** Adobe states a half-extent in WIDTH units on both axes (the
+///    convention `BrushDab::r` records for `crs:Radius`, and the one the
+///    library's ellipses measure to: 161.5 px / 9504 = 0.016994 against a
+///    stored 0.016938). A [`HealSpot`]'s radius is a fraction of the SHORT
+///    side. One factor, `w / min(w, h)`, applied once.
+///  * **Donor.** `crs:SourceX`/`crs:OffsetY` are ABSOLUTE normalised
+///    coordinates of the donor's centre; `HealSpot::source` is an OFFSET from
+///    the spot centre, because `find_donor` returns one. The centre comes off
+///    here rather than inside the operator, so the operator has one meaning
+///    for the field no matter who filled it.
+///
+/// A brush area goes through the mask side's own rasteriser and the retouch
+/// side's own planner — no third implementation of "dabs into a shape".
+///
+/// [`HealSpot`]: crate::retouch::HealSpot
+pub fn retouch_spots(r: &EditRecipe, w: usize, h: usize) -> Vec<crate::retouch::HealSpot> {
+    use crate::retouch::{HealSpot, RetouchShape};
+    if r.retouch.is_empty() || w == 0 || h == 0 {
+        return Vec::new();
+    }
+    let to_short = w as f32 / w.min(h) as f32;
+    let mut out = Vec::new();
+    for a in &r.retouch {
+        // Everything the raster cannot say about this area, in one value that
+        // both arms below build from.
+        let template = HealSpot {
+            feather: a.feather,
+            origin: a.origin,
+            ..Default::default()
+        };
+        match &a.shape {
+            RetouchShape::Ellipse { cx, cy, size_x, size_y } => out.push(HealSpot {
+                cx: *cx,
+                cy: *cy,
+                // `max`, although all 84 measured ellipses are circles: the
+                // larger half-extent is the one that must be covered, and a
+                // file that ever states two is not a reason to under-heal.
+                radius: size_x.max(*size_y) * to_short,
+                source: a.donor.map(|[dx, dy]| [dx - *cx, dy - *cy]),
+                ..template
+            }),
+            RetouchShape::Brush(strokes) => {
+                if let Some(alpha) = rasterise_brush_group(strokes, w as u32, h as u32) {
+                    // 127: a dab-stamped alpha is 0..255 and this is the
+                    // half-way mark, the same place `plan_from_mask`'s own
+                    // `< 128` brush convention puts it.
+                    out.extend(crate::retouch::plan_from_alpha(&alpha, 127, &template).0);
+                }
+            }
+        }
+    }
+    out
 }
 
 fn apply_develop_with_rasters(
@@ -1945,7 +2171,46 @@ fn apply_develop_with_rasters(
     r: &EditRecipe,
     rasters: &MaskRasterSnapshot,
     frame: MaskFrame<'_>,
+    film: FilmScale,
 ) {
+    // 0-) spot removal (v1.5.0 F9) — Lightroom's `crs:RetouchAreas`, which
+    //    this engine re-solves from the frame's own pixels. FIRST, for two
+    //    reasons that both say "before", and one measurement that says "here".
+    //
+    //    Before every SPATIAL stage: de-fringe, clarity, noise reduction and
+    //    sharpening all read a neighbourhood, and every one of them would
+    //    otherwise be handed an object the photographer deleted — sharpening
+    //    the patch seam, and letting a removed power line vote in the local
+    //    contrast around it.
+    //
+    //    At STORED coordinates, with no unwarp, and that is the measured part.
+    //    `apply_lens_geometry` runs after this whole chain and resamples the
+    //    frame, so a geometry stored POST-correction has to be pre-compensated
+    //    (what `MaskFrame` exists for, and what a RADIAL mask needs). Retouch
+    //    does not: `crs:pm_whole_image_*` is stated in PIXELS, and across the
+    //    library its extent is exactly the native sensor rectangle every time
+    //    — 9504x6336 on 114 areas and 6240x4160 on 6, the two bodies' full
+    //    frames, never a lens-corrected one. So these coordinates live
+    //    pre-correction, the same frame `render`'s own measurement puts brush
+    //    dabs in, and the repaired pixels ride the geometry resample with the
+    //    rest of the photograph. Unwarping here would apply the field twice.
+    if !r.retouch.is_empty() {
+        crate::retouch::heal_planar(data, w, h, &retouch_spots(r, w, h));
+    }
+    // 00) camera calibration (v1.5.0). Lightroom's Calibration panel belongs
+    //    to the camera profile, so it is the first thing that happens to the
+    //    white-balanced frame and every later stage sees the moved primaries —
+    //    the order Lightroom's own profile has under all of its sliders.
+    apply_calibration(data, r);
+
+    // 00b) de-fringe (v1.5.0, `render/lens.rs`). A lens DEFECT, so it is
+    //    corrected before the picture is made: at the top of the chain the
+    //    edge that carries the fringe still has the contrast the sensor
+    //    recorded, and no later stage is asked to sharpen or saturate a
+    //    colour the lens invented. (Its geometric siblings — profile
+    //    distortion, the CA scales — cannot join it here: they resample the
+    //    frame, and every mask's geometry is stored in this one.)
+    lens::defringe(data, w, h, r);
     // 0/0a) vignette — the in-camera profile falloff map and the manual
     //    slider compensation, both radial gains in LINEAR light, applied as
     //    ONE composed pass. Two sequential passes were NOT equivalent: each
@@ -1977,15 +2242,13 @@ fn apply_develop_with_rasters(
     //    A fully-neutral tone recipe skips the pass outright: sampling an
     //    identity LUT is the identity map up to interpolation rounding, and this
     //    pass used to run unconditionally over the full sensor on every open.
-    //    A camera-matched base curve is tone work too — it must not be skipped.
-    let tone_neutral = r.exposure_ev == 0.0
-        && r.contrast == 0.0
-        && r.highlights == 0.0
-        && r.shadows == 0.0
-        && r.whites == 0.0
-        && r.blacks == 0.0
-        && r.tone_curve.is_empty()
-        && r.base_curve.is_empty();
+    //    A camera-matched base curve is tone work too — it must not be skipped,
+    //    and since v1.5.0 F7 neither must a creative profile's baked curve or
+    //    its baked Highlights/Shadows. The question is asked ONCE, on the
+    //    recipe (`EditRecipe::has_tone_work`), against the same inputs
+    //    `build_tone_lut` reads: this condition listing its own copy of them is
+    //    exactly how the profile came to render nothing.
+    let tone_neutral = !r.has_tone_work();
     if !tone_neutral {
         let lut = build_tone_lut(r);
         data.par_iter_mut().for_each(|px| {
@@ -1994,17 +2257,33 @@ fn apply_develop_with_rasters(
             scale_chroma(px, l_old, l_new);
         });
     }
+    // 1a) the B&W treatment (v1.5.0) replaces the colour mixer, and it runs
+    //    BEFORE the per-channel curves: a red-channel curve on a black-and-white
+    //    photo is how Lightroom photographers tone one, so the curves have to
+    //    meet the grey rather than the colour it came from. Colour grading
+    //    tints the grey further down, in its ordinary place.
+    // Either switch: the photographer's own, or the one a monochrome creative
+    // profile bakes ([`EditRecipe::renders_grayscale`]).
+    let monochrome = r.renders_grayscale();
+    if monochrome {
+        apply_gray_mix(data, &r.gray_mixer());
+    }
     // 1b) per-channel RGB curves (red/green/blue), right after the master curve.
     apply_rgb_curves(data, r);
     // 2) per-colour HSL (the 8 ACR bands): rotate/scale each colour family,
-    //    after global tone and before clarity/saturation (ACR ordering).
-    apply_hsl(data, &r.hsl);
+    //    after global tone and before clarity/saturation (ACR ordering) — then
+    //    the point colours (v1.5.0), the Color Mixer's other half. Neither has
+    //    a colour to act on in black and white, where Lightroom's panel offers
+    //    the B&W mixer in their place.
+    if !monochrome {
+        apply_hsl(data, &r.hsl);
+        apply_point_colors(data, &r.point_colors);
+    }
     // 2b) colour grading wheels (shadow/midtone/highlight/global toning + lum).
     apply_color_grade(data, &r.color_grade);
     // 3) clarity — large-radius, midtone-masked local contrast.
     if r.clarity != 0.0 {
-        let radius = ((0.02 * w.min(h) as f32).round() as usize).max(8);
-        unsharp_luma(data, w, h, radius, r.clarity / 100.0, true);
+        unsharp_luma(data, w, h, clarity_radius(w, h), r.clarity / 100.0, true);
     }
     // 3b) texture — a small-radius detail operator with no midtone mask, so it
     //     works fine detail across the whole tonal range where clarity works
@@ -2025,35 +2304,36 @@ fn apply_develop_with_rasters(
     if r.texture != 0.0 {
         texture_pass(data, w, h, r.texture / 100.0, |_, _, _| 1.0);
     }
-    // 3) saturation / vibrance.
+    // 3) saturation / vibrance — not in black and white, where the only
+    //    colour left is the grade's tint: a Saturation slider that also
+    //    re-strengthened the toning would make the grade's own saturation mean
+    //    two things.
     let (sat, vib) = (r.saturation / 100.0, r.vibrance / 100.0);
-    if sat != 0.0 || vib != 0.0 {
+    if (sat != 0.0 || vib != 0.0) && !monochrome {
         data.par_iter_mut().for_each(|px| {
             *px = apply_sat_vibrance(px[0], px[1], px[2], sat, vib);
         });
     }
-    // 4) noise reduction — BEFORE sharpening (the order that matters most).
-    //    Radius stays pixel-scale by design (V2 spec §4d: noise grain lives at
-    //    sensor-pixel scale) — so NR judged on a downscaled preview reads
-    //    stronger than the full-res export delivers; a known perception gap.
-    if r.noise_reduction > 0.0 {
-        noise_reduce_luma(data, w, h, r.noise_reduction / 100.0);
+    // 4) the Detail panel (v1.5.0, `detail.rs`): colour noise, then luminance
+    //    noise, then sharpening. Noise reduction runs BEFORE sharpening (the
+    //    order that matters most), and colour before luminance so the
+    //    luminance pass smooths a frame whose chroma blotches are already
+    //    gone. Every radius is stated in FILM pixels and converted through
+    //    `film`, which retires the V2 §4c/§4d rules (sharpening σ =
+    //    clamp(0.0008·min(w,h), 0.7, 2.0), NR at a raster-pixel radius) under
+    //    which one slider value meant two structures at preview and at export.
+    if let Some(p) = detail::ChromaNrParams::global(r) {
+        detail::chroma_nr(data, w, h, &p, film);
     }
-    // 5) sharpening — small-radius unsharp mask. Radius follows the V2 spec
-    //    σ = clamp(0.0008·min(w,h), 0.7, 2.0) (docs/V2_PLAN.md §4c) instead of
-    //    a hard-coded 1 px: one slider value used to mean structurally
-    //    different sharpening at 1280px preview vs a 61 MP export. Three box
-    //    passes of radius r ≈ Gaussian σ of √(r(r+1)), so σ rounds to the
-    //    box radius directly (preview ≤1536px → 1, larger frames cap at 2 —
-    //    clarity already scales with resolution the same way).
-    if r.sharpening > 0.0 {
-        let sigma = (0.0008 * w.min(h) as f32).clamp(0.7, 2.0);
-        let radius = (sigma.round() as usize).max(1);
-        unsharp_luma(data, w, h, radius, r.sharpening / 100.0, false);
+    if let Some(p) = detail::LumaNrParams::global(r) {
+        detail::luma_nr(data, w, h, &p, film, |_, _, _| 1.0);
+    }
+    if let Some(p) = detail::SharpenParams::global(r) {
+        detail::sharpen(data, w, h, &p, film, |_, _, _| 1.0);
     }
     // 6) local masked adjustments (linear/radial gradients).
     if !r.masks.is_empty() {
-        apply_masks(data, w, h, r, rasters, frame);
+        apply_masks(data, w, h, r, rasters, frame, film);
     }
     // 7) the colour field, LAST and on purpose: it is the residual the
     //    mask-shaped controls above could not reach, so it must read the
@@ -2061,6 +2341,17 @@ fn apply_develop_with_rasters(
     //    the render's own resolution, which is what makes it a pure function
     //    of the pixels in front of it at any size.
     apply_colour_field(data, w, h, r.colour_field.as_ref());
+    // 8) the SDR rendition (v1.5.0 F8), LAST because that is what it is: not
+    //    another edit but the mapping of the finished edit into the range this
+    //    engine can publish. Lightroom derives it from the completed HDR
+    //    develop, and a control that ran BEFORE the colour field or the masks
+    //    would be one they could then undo.
+    //
+    //    Absent unless the photograph is in HDR edit mode, so every SDR
+    //    photograph reaches the packer through exactly the code it always did.
+    if let Some(p) = hdr::SdrRendition::global(r) {
+        hdr::apply(data, w, h, &p);
+    }
 }
 
 /// Render one [`ColourField`] over the frame it is handed, in place.
@@ -2194,13 +2485,23 @@ fn manual_vignette_lut(amount: f32, midpoint: f32) -> Vec<f32> {
         .collect()
 }
 
-/// In-camera profile vignetting LUT: per-knot linear-light GAINS over the
-/// normalised corner radius (knot placement (i+0.5)/(n−1) — see `lensmeta`),
-/// linearly interpolated. Gains come from the camera, not a slider model.
-fn profile_vignette_lut(knots: &[f32]) -> Vec<f32> {
-    (0..LUT_N)
-        .map(|i| profile_knot_interp(knots, i as f32 / (LUT_N - 1) as f32))
-        .collect()
+/// Profile vignetting LUT: per-knot linear-light GAINS over the normalised
+/// corner radius (knot placement (i+0.5)/(n−1) — see `lensmeta`), linearly
+/// interpolated. Gains come from the PROFILE — the camera's own metadata, or
+/// an Adobe `.lcp` on this machine — not from a slider model.
+///
+/// `scale` is Lightroom's profile Vignetting strength, 0..200 with 100 = the
+/// profile's own gains. Like the distortion strength in [`geometry_profile`]
+/// it scales the correction's DEPARTURE FROM IDENTITY (`1 + (g − 1)·s`), and
+/// 100 takes the branch that returns the gains untouched, so every render made
+/// before v1.5.0 stays bit-identical.
+fn profile_vignette_lut(knots: &[f32], scale: f32) -> Vec<f32> {
+    let g = |i: usize| profile_knot_interp(knots, i as f32 / (LUT_N - 1) as f32);
+    let s = (scale / 100.0).clamp(0.0, 2.0);
+    if s == 1.0 {
+        return (0..LUT_N).map(g).collect();
+    }
+    (0..LUT_N).map(|i| 1.0 + (g(i) - 1.0) * s).collect()
 }
 
 /// The single radial-gain LUT for whichever vignette stages are active —
@@ -2211,7 +2512,7 @@ fn vignette_gain_lut(r: &EditRecipe) -> Option<Vec<f32>> {
     let profile = r
         .lens_profile
         .vignette_active()
-        .then(|| profile_vignette_lut(&r.lens_profile.vignette));
+        .then(|| profile_vignette_lut(&r.lens_profile.vignette, r.lens_profile_vignetting_scale));
     let manual =
         (r.lens_vignette != 0.0).then(|| manual_vignette_lut(r.lens_vignette, r.lens_vignette_mid));
     match (profile, manual) {
@@ -2394,9 +2695,12 @@ fn dehaze_px(px: &[f32; 3], a: f32, s: f32, dec: &[f32], enc: &[f32]) -> [f32; 3
 /// (temperature/tint — the same [`wb_gains`] model as the global stage, see
 /// [`local_temp_to_kelvin`]) + **tone** (exposure/contrast/highlights/shadows/
 /// whites/blacks) + **saturation** + **hue** pass → local **clarity** → local
-/// **texture** → local **sharpness** → local **noise reduction** (smooth luma
-/// toward its neighbourhood, inside the mask — for "this region is noisy"
-/// requests).
+/// **texture** → local **sharpness** → local **noise reduction**. The last two
+/// are the Detail panel's own operators (`render/detail.rs`, v1.5.0) at the
+/// mask's amount — signed Sharpness on the recipe's Radius/Detail/Masking,
+/// Noise on its Luminance Detail/Contrast — because Lightroom's local sliders
+/// have no shaping axes of their own; `film` is the scale those radii are
+/// stated in.
 ///
 /// Clarity/dehaze/texture are ENGINE-RENDERED since R22 (they were XMP-only
 /// before, so a mask that moved only those three appeared to do nothing in-app
@@ -2424,12 +2728,13 @@ fn dehaze_px(px: &[f32; 3], a: f32, s: f32, dec: &[f32], enc: &[f32]) -> [f32; 3
 /// estimated, and clarity/texture scale luma while saturation moves chroma.
 ///
 /// **Memory** (full-resolution export, 61 MP → 244 MB per f32 plane): the
-/// spatial passes each hold one luma plane + one blurred plane and run
-/// SEQUENTIALLY, dropping both before the next starts, so the resident
-/// increment is the same two planes (~488 MB) the local NR pass has always
-/// cost — not three passes' worth. `blur_plane` transiently holds two more of
-/// its own, the existing global-clarity/NR peak. The `!= 0.0` gate on each
-/// pass means a mask that does not use an op allocates nothing for it.
+/// spatial passes run SEQUENTIALLY and each drops its planes before the next
+/// allocates, so the resident increment is ONE pass's peak, never the sum.
+/// That peak is three planes (~732 MB): a luma plane beside `blur_plane`'s two
+/// chained ones for clarity, and the three `detail.rs` documents for each of
+/// its passes — the spatial-pass row of `decode::PIPELINE_BYTES_PER_PIXEL`.
+/// The `!= 0.0` gate on each pass means a mask that does not use an op
+/// allocates nothing for it.
 fn apply_masks(
     data: &mut [[f32; 3]],
     w: usize,
@@ -2437,6 +2742,7 @@ fn apply_masks(
     r: &EditRecipe,
     rasters: &MaskRasterSnapshot,
     frame: MaskFrame<'_>,
+    film: FilmScale,
 ) {
     if w == 0 || h == 0 {
         return; // both passes below chunk by w; rayon asserts chunk_size != 0
@@ -2756,48 +3062,32 @@ fn apply_masks(
             texture_pass(data, w, h, m.texture / 100.0, spatial_weight);
         }
         if m.sharpness != 0.0 {
-            // The GLOBAL sharpening stage's own radius model (stage 5,
-            // docs/V2_PLAN.md §4c: σ = clamp(0.0008·min(w,h), 0.7, 2.0)) — not
-            // a third calibration. One slider value therefore means the same
-            // structure globally and inside a mask, and the same at 1280 px
-            // preview as at 61 MP.
+            // The GLOBAL Detail panel's operator at this mask's own amount
+            // (`detail::sharpen`) — not a second calibration. Lightroom's local
+            // Sharpness has no radius, detail or masking of its own and rides
+            // the global three, so one slider value means one structure
+            // globally and inside a mask, at a preview and at 61 MP (radii in
+            // film pixels).
             //
             // SIGNED, unlike the global stage (which is 0..150): ACR's local
             // Sharpness band runs -100..100 and the negative half is the point
-            // — `unsharp_luma_weighted` with a negative amount subtracts the
-            // detail plane, which softens. That is how a background is thrown
-            // back without touching the subject.
-            let sigma = (0.0008 * w.min(h) as f32).clamp(0.7, 2.0);
-            let radius = (sigma.round() as usize).max(1);
-            unsharp_luma_weighted(data, w, h, radius, m.sharpness / 100.0, false, spatial_weight);
+            // — the operator's negative branch is a blur toward the Radius
+            // Gaussian. That is how a background is thrown back without
+            // touching the subject.
+            let p = detail::SharpenParams::at_amount(r, m.sharpness);
+            detail::sharpen(data, w, h, &p, film, spatial_weight);
         }
 
-        // --- local noise reduction pass (only where the mask covers) ---
-        let nr = (m.noise_reduction / 100.0).clamp(0.0, 1.0);
-        // Gate matches the per-pixel `nw <= 0.001` skip below: with nr at or
-        // under it every weight is rejected anyway, and the two full-frame
-        // f32 planes (~488 MB at 61 MP) were allocated for nothing.
-        if nr > 0.001 {
-            let luma: Vec<f32> = data.par_iter().map(luma601).collect();
-            let blur = blur_plane(&luma, w, h, 2);
-            data.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
-                for (x, px) in row.iter_mut().enumerate() {
-                    let i = y * w + x;
-                    let mut nw = weight_at(x, y) * nr;
-                    if let Some(rm) = &m.range {
-                        // Same intersection as the tone pass (pixel state here
-                        // includes this mask's own tone move — acceptable drift,
-                        // NR is the subtler effect).
-                        nw *= range_weight(rm, px);
-                    }
-                    if nw <= 0.001 {
-                        continue;
-                    }
-                    let l = luma[i];
-                    let new_l = l + (blur[i] - l) * nw;
-                    scale_chroma(px, l, new_l);
-                }
-            });
+        // --- local noise reduction (only where the mask covers) ---
+        // Lightroom's local Noise on the global luminance operator, with the
+        // global Detail / Contrast (`detail::luma_nr`). The weight folds the
+        // Range Mask in exactly as the tone pass does; the pixel state here
+        // includes this mask's own tone move — acceptable drift, NR being the
+        // subtler effect. Below a tenth of a slider step the pass allocates
+        // nothing.
+        if m.noise_reduction > 0.1 {
+            let p = detail::LumaNrParams::at_amount(r, m.noise_reduction);
+            detail::luma_nr(data, w, h, &p, film, spatial_weight);
         }
     }
 }
@@ -5604,6 +5894,60 @@ fn scale_chroma(px: &mut [f32; 3], l_old: f32, l_new: f32) {
     }
 }
 
+/// The four-tap bilinear read of a SCALAR plane at a fractional position, with
+/// the sample grid clamped at the border.
+///
+/// One definition, because the tree grew several: `render/detail.rs` reads a
+/// subsampled plane back up to full resolution with it and `stack/align.rs`
+/// resamples a frame through a warp with it, and those two are the same four
+/// taps and the same two lerps. Callers own the COORDINATE math — which
+/// fraction of which grid a position is — and hand this function a position in
+/// plane units; that is the part that legitimately differs between them.
+///
+/// Clamping rather than refusing is deliberate and is why the bounds question
+/// stays with the caller: `detail.rs` is always inside by construction, while
+/// an alignment warp really can walk off the frame and has to tell its merge
+/// so ([`crate::stack::align::coverage`]). A single "return 0 outside" rule
+/// would be wrong for both.
+pub(crate) fn bilinear_plane(p: &[f32], w: usize, h: usize, u: f32, v: f32) -> f32 {
+    let u = u.clamp(0.0, (w - 1) as f32);
+    let v = v.clamp(0.0, (h - 1) as f32);
+    let (x0, y0) = (u.floor() as usize, v.floor() as usize);
+    let (x1, y1) = ((x0 + 1).min(w - 1), (y0 + 1).min(h - 1));
+    let (fx, fy) = (u - x0 as f32, v - y0 as f32);
+    let top = p[y0 * w + x0] * (1.0 - fx) + p[y0 * w + x1] * fx;
+    let bot = p[y1 * w + x0] * (1.0 - fx) + p[y1 * w + x1] * fx;
+    top * (1.0 - fy) + bot * fy
+}
+
+/// The four axis neighbours of `(x, y)` in a scalar plane — `[left, right, up,
+/// down]` — with the border row and column replicated.
+///
+/// Shared for `bilinear_plane`'s reason: the sharpening pass's fine band and
+/// the aligner's central differences are the same clamped four-neighbourhood,
+/// and the `saturating_sub` / `.min(n - 1)` pair is exactly the kind of
+/// boundary idiom that is correct in one copy and off by one in the next.
+pub(crate) fn neighbours4(p: &[f32], w: usize, h: usize, x: usize, y: usize) -> [f32; 4] {
+    [
+        p[y * w + x.saturating_sub(1)],
+        p[y * w + (x + 1).min(w - 1)],
+        p[y.saturating_sub(1) * w + x],
+        p[(y + 1).min(h - 1) * w + x],
+    ]
+}
+
+/// Clarity's radius on a `w`×`h` raster: 2 % of the SHORT edge, never under 8
+/// pixels.
+///
+/// One definition, because there are two callers — the Basic panel's Clarity
+/// (stage 3) and the SDR rendition's (`hdr::apply`, v1.5.0 F8) — and they are
+/// the SAME control at two points in the chain. Two copies of "0.02 · min(w,h)"
+/// is how one of them would later be tuned and the other left behind, which is
+/// exactly the split `texture_pass` was built to end.
+fn clarity_radius(w: usize, h: usize) -> usize {
+    ((0.02 * w.min(h) as f32).round() as usize).max(8)
+}
+
 /// Unsharp mask on luminance (chroma-preserving). `amount` scales the detail;
 /// `midtone` weights the effect toward midtones (for clarity).
 fn unsharp_luma(data: &mut [[f32; 3]], w: usize, h: usize, radius: usize, amount: f32, midtone: bool) {
@@ -5642,17 +5986,39 @@ fn unsharp_luma_weighted(
     }
     let luma: Vec<f32> = data.par_iter().map(luma601).collect();
     let blurred = blur_plane(&luma, w, h, radius);
+    write_luma_weighted(data, w, weight, |i, l, wgt| {
+        let detail = l - blurred[i];
+        let m = if midtone { 1.0 - (2.0 * l - 1.0).powi(2) } else { 1.0 };
+        l + amount * detail * m * wgt
+    });
+}
+
+/// The WRITE half every chroma-preserving luma pass shares: per pixel, ask
+/// `weight(x, y, px)`, leave the pixel alone at ≤ 0.001, and otherwise move its
+/// luma to `new_luma(i, l, wgt)` (clamped to 0..=1) with [`scale_chroma`].
+///
+/// `l` is read off the pixel itself, before it is written — the same number a
+/// luma plane built at the top of the pass holds, since every pixel is read
+/// before it is written. Clarity, texture and the Detail panel's passes
+/// (`detail.rs`) are the callers; they differ only in the signal they build
+/// and in what `new_luma` does with it.
+fn write_luma_weighted(
+    data: &mut [[f32; 3]],
+    w: usize,
+    weight: impl Fn(usize, usize, &[f32; 3]) -> f32 + Sync,
+    new_luma: impl Fn(usize, f32, f32) -> f32 + Sync,
+) {
+    if w == 0 {
+        return; // par_chunks_mut(0) asserts
+    }
     data.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
         for (x, px) in row.iter_mut().enumerate() {
             let wgt = weight(x, y, px);
             if wgt <= 0.001 {
                 continue;
             }
-            let i = y * w + x;
-            let l = luma[i];
-            let detail = l - blurred[i];
-            let m = if midtone { 1.0 - (2.0 * l - 1.0).powi(2) } else { 1.0 };
-            let new_l = (l + amount * detail * m * wgt).clamp(0.0, 1.0);
+            let l = luma601(px);
+            let new_l = new_luma(y * w + x, l, wgt).clamp(0.0, 1.0);
             scale_chroma(px, l, new_l);
         }
     });
@@ -5912,42 +6278,18 @@ fn texture_negative_pass(
         if fine_on { gauss_blur_plane(&luma, w, h, sigma_fine) } else { luma }
     };
     let coarse = if coarse_on { Some(blur_plane(&fine, w, h, coarse_r)) } else { None };
-    data.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
-        for (x, px) in row.iter_mut().enumerate() {
-            let wgt = weight(x, y, px);
-            if wgt <= 0.001 {
-                continue;
-            }
-            let i = y * w + x;
-            let l = luma601(px);
-            // `fine` holding the unblurred luma would make this term exactly
-            // zero on its own (same function, same pixel, read before written);
-            // the guard states the arm is OFF rather than leaving a reader to
-            // rediscover that.
-            let hp_fine = if fine_on { l - fine[i] } else { 0.0 };
-            let hp_coarse = coarse.as_ref().map_or(0.0, |c| l - c[i]);
-            let mix = TEXTURE_COARSE_AMPLITUDE * hp_coarse + TEXTURE_FINE_AMPLITUDE * hp_fine;
-            let new_l = (l - depth * mix * wgt).clamp(0.0, 1.0);
-            scale_chroma(px, l, new_l);
-        }
+    write_luma_weighted(data, w, weight, |i, l, wgt| {
+        // `fine` holding the unblurred luma would make this term exactly
+        // zero on its own (same function, same pixel, read before written);
+        // the guard states the arm is OFF rather than leaving a reader to
+        // rediscover that.
+        let hp_fine = if fine_on { l - fine[i] } else { 0.0 };
+        let hp_coarse = coarse.as_ref().map_or(0.0, |c| l - c[i]);
+        let mix = TEXTURE_COARSE_AMPLITUDE * hp_coarse + TEXTURE_FINE_AMPLITUDE * hp_fine;
+        l - depth * mix * wgt
     });
 }
 
-/// Bilateral-lite luminance denoise: smooth flat areas, keep edges. `t` in 0..1.
-/// `denoised = l − t·w_edge·detail`, w_edge≈1 in flat regions, ≈0 at edges.
-fn noise_reduce_luma(data: &mut [[f32; 3]], w: usize, h: usize, t: f32) {
-    let luma: Vec<f32> = data.par_iter().map(luma601).collect();
-    let radius = (1.0 + 2.0 * t).round().max(1.0) as usize;
-    let blurred = blur_plane(&luma, w, h, radius);
-    let range = 0.05_f32;
-    data.par_iter_mut().enumerate().for_each(|(i, px)| {
-        let l = luma[i];
-        let detail = l - blurred[i];
-        let w_edge = (-(detail / range) * (detail / range)).exp();
-        let new_l = (l - t * w_edge * detail).clamp(0.0, 1.0);
-        scale_chroma(px, l, new_l);
-    });
-}
 
 /// Approximate a Gaussian blur with 3 separable box-blur passes. Box blur uses a
 /// running sum, so cost is O(N) regardless of `radius` — essential for clarity's
@@ -5989,7 +6331,7 @@ fn blur_plane(src: &[f32], w: usize, h: usize, radius: usize) -> Vec<f32> {
 /// the peak and renormalised away. Both passes are row-parallel and the
 /// vertical one accumulates row-major, for the same cache reason
 /// [`box_blur_v`] gives.
-fn gauss_blur_plane(src: &[f32], w: usize, h: usize, sigma: f32) -> Vec<f32> {
+pub(crate) fn gauss_blur_plane(src: &[f32], w: usize, h: usize, sigma: f32) -> Vec<f32> {
     if w == 0 || h == 0 {
         return src.to_vec();
     }
@@ -6450,7 +6792,14 @@ pub(crate) fn tone_knot_weights(ev: f32) -> [f32; 8] {
 ///
 /// Returning scaled SLIDERS rather than a repaired curve is deliberate: the
 /// knot model stays linear in the sliders, which is what lets `fit.rs` invert
-/// it analytically. ONE caller applies this — `build_tone_lut`. The reverse
+/// it analytically. ONE site applies this — `tone_model_knots`, which is where
+/// the sliders become knots, so every consumer of the knot model inherits it:
+/// `build_tone_lut` for the develop chain and `hdr::SdrRendition` for the SDR
+/// rendition's own four controls. That inheritance is not free, and it is worth
+/// naming: it is what capped the HDR shoulder at 55 % of Lightroom's while the
+/// shoulder was expressed as a negative Highlights, because a rendering
+/// transform was being governed by a taste control's guard (fixed 2026-09-19 —
+/// see `render::hdr::shoulder`). The reverse
 /// fit deliberately does not (see the note at the end of `fit_tone_sliders`):
 /// it scores candidates by rendering them, so it already measures whatever
 /// the engine does, and pre-applying the limiter perturbed a solve that was
@@ -6584,16 +6933,22 @@ pub(crate) fn limit_tone_sliders(ev: f32, s: [f32; 5]) -> [f32; 5] {
 /// curve; contrast is an antisymmetric S; shadows/highlights shape the toe/shoulder
 /// WITHOUT reaching the midtones or the white point (so a strong −Highlights can't
 /// drag specular foam to grey — that is the white point's job, owned by whites);
-/// whites/blacks move the end knots. The recipe's own `tone_curve` is composed on
-/// top. This replaces a summed-region-hump model that could go non-monotonic and
-/// crush mid-bright water / near-white foam (which had needed ad-hoc patches).
+/// whites/blacks move the end knots. The parametric curve (v1.5.0) and then the
+/// recipe's own `tone_curve` are composed on top, Lightroom's Tone Curve panel
+/// order. This replaces a summed-region-hump model that could go non-monotonic
+/// and crush mid-bright water / near-white foam (which had needed ad-hoc
+/// patches).
 pub(crate) fn build_tone_lut(r: &EditRecipe) -> Vec<f32> {
     // Knot OUTPUTS: exposure-mapped identity, then the slider offsets — all from
     // the shared basis below so the reverse-fit (fit.rs) solves against the SAME
     // model the engine renders.
     let contrast = (r.contrast / 100.0).clamp(-1.0, 1.0);
-    let highlights = (r.highlights / 100.0).clamp(-1.0, 1.0);
-    let shadows = (r.shadows / 100.0).clamp(-1.0, 1.0);
+    // v1.5.0 F7 — a creative profile's BAKED tone moves ride with the
+    // photographer's own. "Adobe Landscape" bakes Highlights −12 and Shadows
+    // +12; adding them here is exact, because the knot model below is linear in
+    // the slider vector (see the comment under it).
+    let highlights = (r.with_baked(r.highlights, |l| l.highlights) / 100.0).clamp(-1.0, 1.0);
+    let shadows = (r.with_baked(r.shadows, |l| l.shadows) / 100.0).clamp(-1.0, 1.0);
     let whites = (r.whites / 100.0).clamp(-1.0, 1.0);
     let blacks = (r.blacks / 100.0).clamp(-1.0, 1.0);
 
@@ -6607,20 +6962,118 @@ pub(crate) fn build_tone_lut(r: &EditRecipe) -> Vec<f32> {
         [contrast, highlights, shadows, whites, blacks],
     );
     let curve = curve_lut(&r.tone_curve); // the recipe's own tone_curve, composed on top
+    let parametric = parametric_lut(r); // …over the parametric curve, over the sliders
     let user: Vec<f32> = (0..LUT_N)
         .map(|i| {
             let x = i as f32 / (LUT_N - 1) as f32;
-            sample_lut(&curve, hermite_eval(&TONE_KNOTS_X, &ys, &m, x))
+            let toned = hermite_eval(&TONE_KNOTS_X, &ys, &m, x);
+            let shaped = parametric.as_ref().map_or(toned, |p| sample_lut(p, toned));
+            sample_lut(&curve, shaped)
         })
         .collect();
-    if r.base_curve.is_empty() {
-        return user;
-    }
-    // Camera-matched base look: composed UNDER the user controls — sliders act
-    // on the camera-like base, the same profile-then-sliders order Lightroom
-    // uses. final(x) = user(base(x)); one LUT, still zero extra per-pixel cost.
-    let base = base_curve_lut(&r.base_curve);
+    // The BASE RENDITION the photographer's sliders act on, and there is only
+    // ever one of it.
+    //
+    // A creative profile states its own base curve, MEASURED, and the engine
+    // estimates one per photograph from the camera's embedded preview when
+    // there is no profile to ask. Composing both would put two renditions of
+    // the same intent in series and darken the picture twice, so the profile's
+    // own curve WINS whenever the sidecar carries one. Its `crs:Amount` blends
+    // it toward the identity, as a partial Look means.
+    let base = match (r.baked_tone_curve(), r.base_curve.is_empty()) {
+        (Some(l), _) => {
+            // `curve_lut` is the photographer's own point-curve sampler, and a
+            // Look's `crs:ToneCurvePV2012` is literally that same spelling — so
+            // it is the right sampler, at the wrong RESOLUTION: it returns 256
+            // entries and a base rendition is `LUT_N`. Read it through
+            // `sample_lut`, which interpolates whatever length it is handed,
+            // rather than indexing it with this loop's own counter.
+            let c = curve_lut(&l.tone_curve);
+            let a = l.amount.clamp(0.0, 1.0);
+            (0..LUT_N)
+                .map(|i| {
+                    let x = i as f32 / (LUT_N - 1) as f32;
+                    x + (sample_lut(&c, x) - x) * a
+                })
+                .collect()
+        }
+        (None, true) => return user,
+        (None, false) => base_curve_lut(&r.base_curve),
+    };
+    // Composed UNDER the user controls — sliders act on the camera-like base,
+    // the same profile-then-sliders order Lightroom uses.
+    // final(x) = user(base(x)); one LUT, still zero extra per-pixel cost.
     (0..LUT_N).map(|i| sample_lut(&user, base[i])).collect()
+}
+
+/// How far one parametric region slider at ±100 moves its region's control
+/// value, as a fraction of the region's width. ½ is the largest reach that
+/// keeps the control values ordered at every slider and split setting (see
+/// [`parametric_lut`]), so the extremes may flatten a region — Shadows −100
+/// crushes the toe to black — but can never fold the curve back.
+/// PROVISIONAL: first-principles, until the Lightroom kit's `PARAM-*` exports
+/// measure it.
+const PARAMETRIC_REACH: f32 = 0.5;
+
+/// Lightroom's PARAMETRIC tone curve (v1.5.0) as a [`LUT_N`]-entry table over
+/// gamma input, or `None` while its four region sliders are all 0.
+///
+/// A quadratic B-spline on the knot vector `[0, 0, 0, s₁, s₂, s₃, 1, 1, 1]`:
+/// the three splits ARE the interior knots, so each region is one polynomial
+/// piece and a split moves where two pieces join. Its six control values sit
+/// at the Greville abscissae `0, s₁/2, (s₁+s₂)/2, (s₂+s₃)/2, (s₃+1)/2, 1` —
+/// the two ends and the four REGION CENTRES, which is why this basis and no
+/// other. At rest each control value equals its abscissa and the spline IS the
+/// identity (a B-spline reproduces a straight line through its Greville
+/// points), so moving a split with every slider at 0 changes nothing, as in
+/// Lightroom. A region slider moves its centre's control value by
+/// [`PARAMETRIC_REACH`] × slider/100 × the region's width; the response is
+/// smooth (C¹) and reaches into both neighbouring regions, the broad overlap
+/// Lightroom's panel shades for a hovered region.
+///
+/// Monotone BY CONSTRUCTION, not by a post-hoc sort: a B-spline whose control
+/// values never decrease cannot decrease (variation diminishing), and two
+/// consecutive abscissae lie half the two regions' widths apart, so a reach of
+/// at most ½ keeps every pair ordered for any sliders and any split layout.
+/// The ends stay pinned at 0 and 1.
+pub(crate) fn parametric_lut(r: &EditRecipe) -> Option<Vec<f32>> {
+    let regions = r.parametric_regions()?;
+    let [s1, s2, s3] = r.parametric_splits().map(|s| s / 100.0);
+    let knots = [0.0, 0.0, 0.0, s1, s2, s3, 1.0, 1.0, 1.0];
+    let widths = [s1, s2 - s1, s3 - s2, 1.0 - s3];
+    let centres = [s1 / 2.0, (s1 + s2) / 2.0, (s2 + s3) / 2.0, (s3 + 1.0) / 2.0];
+    let mut control = [0.0f32, 0.0, 0.0, 0.0, 0.0, 1.0];
+    for i in 0..4 {
+        let push = PARAMETRIC_REACH * (regions[i] / 100.0).clamp(-1.0, 1.0) * widths[i];
+        control[i + 1] = (centres[i] + push).clamp(0.0, 1.0);
+    }
+    Some(
+        (0..LUT_N)
+            .map(|i| {
+                let x = i as f32 / (LUT_N - 1) as f32;
+                // The knot span holding x: [0,s₁), [s₁,s₂), [s₂,s₃), [s₃,1].
+                let span = 2 + knots[3..6].iter().filter(|k| x >= **k).count();
+                de_boor_quadratic(&knots, &control, span, x).clamp(0.0, 1.0)
+            })
+            .collect(),
+    )
+}
+
+/// One point of a quadratic B-spline by de Boor's recursion: `span` is the
+/// knot interval `knots[span] <= x < knots[span + 1]` holding `x`. A
+/// zero-length interval (two coincident knots, which ordered splits never
+/// produce) contributes its left value rather than a division by zero.
+fn de_boor_quadratic(knots: &[f32; 9], control: &[f32; 6], span: usize, x: f32) -> f32 {
+    let mut d = [control[span - 2], control[span - 1], control[span]];
+    for r in 1..=2 {
+        for j in (r..=2).rev() {
+            let lo = knots[j + span - 2];
+            let den = knots[j + 1 + span - r] - lo;
+            let alpha = if den > 0.0 { (x - lo) / den } else { 0.0 };
+            d[j] = (1.0 - alpha) * d[j - 1] + alpha * d[j];
+        }
+    }
+    d[2]
 }
 
 /// The knot outputs and spline tangents of the engine's slider-tone model
@@ -6984,12 +7437,41 @@ pub(crate) fn sample_lut(lut: &[f32], x: f32) -> f32 {
 /// companion to the master tone curve. No-op when all three are empty.
 fn apply_rgb_curves(data: &mut [[f32; 3]], r: &EditRecipe) {
     let curves = [&r.red_curve, &r.green_curve, &r.blue_curve];
-    if curves.iter().all(|c| c.is_empty()) {
+    // v1.5.0 F7: a creative profile may bake per-channel curves too, and they
+    // compose UNDER the photographer's for the same reason the master curve
+    // does. Identity on all 161 Looks in the measured library — Adobe writes
+    // the three channels out as `0,0 … 255,255` — so this is the general case
+    // being handled rather than an observed one.
+    let baked = r.baked_look().map(|l| [&l.red_curve, &l.green_curve, &l.blue_curve]);
+    let has_baked = baked.is_some_and(|b| b.iter().any(|c| !c.is_empty()));
+    if curves.iter().all(|c| c.is_empty()) && !has_baked {
         return;
     }
-    let luts: [Vec<f32>; 3] =
-        [curve_lut(curves[0]), curve_lut(curves[1]), curve_lut(curves[2])];
-    let active = [!curves[0].is_empty(), !curves[1].is_empty(), !curves[2].is_empty()];
+    let luts: [Vec<f32>; 3] = std::array::from_fn(|ch| {
+        let own = curve_lut(curves[ch]);
+        match baked.map(|b| b[ch]).filter(|c| !c.is_empty()) {
+            None => own,
+            Some(under) => {
+                // Both LUTs are `curve_lut`'s 256 entries and this table is
+                // `LUT_N`, so BOTH are read through `sample_lut` rather than
+                // indexed by this loop's counter — the same defect the master
+                // curve's arm had, swept here rather than left for the first
+                // Look that bakes a real per-channel curve to find. Every one
+                // of the 161 measured writes the three channels as identity,
+                // which `parse_curve_checked` returns empty, so this arm has
+                // never run on a real file.
+                let base = curve_lut(under);
+                (0..LUT_N)
+                    .map(|i| {
+                        let x = i as f32 / (LUT_N - 1) as f32;
+                        sample_lut(&own, sample_lut(&base, x))
+                    })
+                    .collect()
+            }
+        }
+    });
+    let active: [bool; 3] =
+        std::array::from_fn(|ch| !curves[ch].is_empty() || baked.is_some_and(|b| !b[ch].is_empty()));
     data.par_iter_mut().for_each(|px| {
         for ch in 0..3 {
             if active[ch] {
@@ -7033,8 +7515,8 @@ fn apply_hsl(data: &mut [[f32; 3]], hsl: &crate::recipe::Hsl) {
         // colourfulness measure: ≈0 for near-grey (the overcast-sky blotch case)
         // AND for near-white foam, ramping to full only on genuinely saturated
         // colour, so both are protected while real colours are still adjusted.
-        let chroma = px[0].max(px[1]).max(px[2]) - px[0].min(px[1]).min(px[2]);
-        let satw = smoothstep(0.05, 0.22, chroma);
+        let chroma = chroma(px);
+        let satw = smoothstep(CHROMA_GATE.0, CHROMA_GATE.1, chroma);
         if satw <= 0.0 {
             return; // (per-pixel closure: this pixel is untouched)
         }
@@ -7055,6 +7537,13 @@ fn apply_hsl(data: &mut [[f32; 3]], hsl: &crate::recipe::Hsl) {
 /// ACR band centres in degrees (red..magenta), matching recipe::HSL_BANDS.
 /// Shared with the reverse-fit so its per-band statistics use the SAME partition.
 pub(crate) const HSL_CENTERS: [f32; 8] = [0.0, 30.0, 60.0, 120.0, 180.0, 240.0, 270.0, 300.0];
+
+/// The colourfulness gate every per-colour stage fades in over — chroma
+/// (max − min) from nothing at the first edge to full at the second — so the
+/// colour mixer, the B&W mix, the point colours and the Point Color eyedropper
+/// agree on which pixels have a colour to belong to ([`apply_hsl`] says why
+/// chroma and not HSL saturation).
+const CHROMA_GATE: (f32, f32) = (0.05, 0.22);
 
 /// The two band indices bracketing hue `deg` and the blend weight toward the
 /// second (partition of unity). Centres are non-uniform and wrap (magenta 300°
@@ -7090,6 +7579,14 @@ pub(crate) fn rgb_to_hsl(r: f32, g: f32, b: f32) -> (f32, f32, f32) {
         (r - g) / d + 4.0
     } / 6.0;
     (h.rem_euclid(1.0), s, l)
+}
+
+/// A pixel's CHROMA in this engine's working domain: the spread of its three
+/// channels, which is what every colour gate here measures (`CHROMA_GATE`).
+/// Spelled out at four sites before v1.5.0 and at three more in `fit.rs`; one
+/// name, so a gate and the census that reports on it cannot drift.
+pub(crate) fn chroma(px: &[f32; 3]) -> f32 {
+    px[0].max(px[1]).max(px[2]) - px[0].min(px[1]).min(px[2])
 }
 
 /// HSL → sRGB-gamma RGB (inverse of [`rgb_to_hsl`]).
@@ -7181,6 +7678,277 @@ fn apply_wheel(px: &mut [f32; 3], hue_deg: f32, sat: f32, lum: f32, weight: f32)
             *c = (*c * k).clamp(0.0, 1.0);
         }
     }
+}
+
+/// The Rec. 2020 primaries (CIE xy): the reference gamut the Calibration
+/// panel moves its three primaries in. Wide enough that every working space
+/// this engine develops in (sRGB, Display P3, Adobe RGB) sits inside it, and —
+/// unlike ProPhoto's — every primary is a real colour, so moving one never
+/// leaves the spectral locus's neighbourhood or sends a chromaticity through
+/// the degenerate v′ = 0 edge.
+const REC2020_PRIM: [[f32; 2]; 3] = [[0.708, 0.292], [0.170, 0.797], [0.131, 0.046]];
+
+/// ±100 on a primary's Hue turns that primary this far about D65 in the CIE
+/// 1976 u′v′ plane (+ toward the next primary in hue order: red → yellow,
+/// green → cyan, blue → magenta). PROVISIONAL — first principles until the
+/// Lightroom kit's `CAL-*` exports pin the reach.
+const CAL_HUE_REACH_RAD: f32 = 30.0 * std::f32::consts::PI / 180.0;
+
+/// ±100 on a primary's Saturation scales its u′v′ distance from D65 by
+/// 1 ± this. PROVISIONAL, like the hue reach.
+const CAL_SAT_REACH: f32 = 0.5;
+
+/// ±100 Shadows tint takes this fraction off the green gain at black (+,
+/// magenta) or puts it on (−, green). PROVISIONAL.
+const CAL_SHADOW_TINT_REACH: f32 = 0.15;
+
+/// The linear luminance by which the shadows tint has faded out (18 % grey).
+const CAL_SHADOW_TINT_KNEE: f32 = 0.18;
+
+/// sRGB (Rec. 709) luminance weights — the grey the B&W treatment and the
+/// shadows tint measure a pixel by.
+const REC709_Y: [f32; 3] = [0.2126, 0.7152, 0.0722];
+
+fn xy_to_uv(p: [f32; 2]) -> [f32; 2] {
+    let d = -2.0 * p[0] + 12.0 * p[1] + 3.0;
+    [4.0 * p[0] / d, 9.0 * p[1] / d]
+}
+
+fn uv_to_xy(p: [f32; 2]) -> [f32; 2] {
+    let d = 6.0 * p[0] - 16.0 * p[1] + 12.0;
+    [9.0 * p[0] / d, 4.0 * p[1] / d]
+}
+
+/// Lightroom's Calibration panel (v1.5.0) as one linear-light operator.
+///
+/// **The primaries.** The panel's Red/Green/Blue Hue and Saturation move the
+/// PRIMARIES of the camera's colour space, not a band of pixel hues: every
+/// colour is a mix of the three, so turning the red primary shifts every
+/// colour in proportion to how much red it holds, and a neutral — equal parts
+/// of all three — stays neutral. That is a change of basis, so it is ONE 3×3
+/// matrix: the working pixel's coordinates are taken in the Rec. 2020 basis
+/// ([`REC2020_PRIM`], standing in for the camera's own), reinterpreted under
+/// primaries moved in u′v′ (each turned about D65 by its Hue, its distance from
+/// D65 scaled by its Saturation), and carried back. `rgb_to_xyz` normalises
+/// both bases to D65, so white — and with it every grey — maps to itself by
+/// construction.
+///
+/// **The shadows tint** then moves green against red and blue in the dark
+/// tones, weighted toward black and gone by [`CAL_SHADOW_TINT_KNEE`], with the
+/// red/blue gain chosen so a grey keeps its luminance.
+///
+/// The working primaries are taken as sRGB's; a wide-gamut export conjugates
+/// through the same basis, a second-order difference inside the provisional
+/// reach constants.
+struct Calibration {
+    /// Working linear RGB → the same space under the moved primaries.
+    matrix: [[f32; 3]; 3],
+    /// The shadows tint's green-gain change at black (+ = magenta).
+    shadow_tint: f32,
+}
+
+impl Calibration {
+    fn of(r: &EditRecipe) -> Option<Self> {
+        let [tint, red_hue, red_sat, green_hue, green_sat, blue_hue, blue_sat] = r.calibration()?;
+        let white = xy_to_uv(D65_XY);
+        let moves = [(red_hue, red_sat), (green_hue, green_sat), (blue_hue, blue_sat)];
+        let moved: [[f32; 2]; 3] = std::array::from_fn(|i| {
+            let (hue, sat) = moves[i];
+            let uv = xy_to_uv(REC2020_PRIM[i]);
+            let (du, dv) = (uv[0] - white[0], uv[1] - white[1]);
+            let rho = (du * du + dv * dv).sqrt() * (1.0 + CAL_SAT_REACH * sat / 100.0).max(0.05);
+            let theta = dv.atan2(du) + CAL_HUE_REACH_RAD * hue / 100.0;
+            uv_to_xy([white[0] + rho * theta.cos(), white[1] + rho * theta.sin()])
+        });
+        let working = rgb_to_xyz(SRGB_PRIM, D65_XY);
+        let reference = rgb_to_xyz(REC2020_PRIM, D65_XY);
+        let to_reference = mat_mul3(&inv3(&reference), &working);
+        let matrix = mat_mul3(&inv3(&working), &mat_mul3(&rgb_to_xyz(moved, D65_XY), &to_reference));
+        Some(Self { matrix, shadow_tint: CAL_SHADOW_TINT_REACH * tint / 100.0 })
+    }
+
+    fn apply(&self, lin: [f32; 3]) -> [f32; 3] {
+        let t = mat_vec3(&self.matrix, &lin);
+        if self.shadow_tint == 0.0 {
+            return t;
+        }
+        let y = REC709_Y[0] * t[0] + REC709_Y[1] * t[1] + REC709_Y[2] * t[2];
+        let k = self.shadow_tint * (1.0 - smoothstep(0.0, CAL_SHADOW_TINT_KNEE, y));
+        let rb = 1.0 + k * REC709_Y[1] / (REC709_Y[0] + REC709_Y[2]);
+        [t[0] * rb, t[1] * (1.0 - k), t[2] * rb]
+    }
+}
+
+/// Decode one working-space value to linear light — the LUT inside 0..1, the
+/// exact transfer outside it, so a wide-gamut develop's negative or >1
+/// component survives a linear-light stage instead of being clipped by it.
+fn decode_wide(dec: &[f32], c: f32) -> f32 {
+    if (0.0..=1.0).contains(&c) { sample_lut(dec, c) } else { srgb_to_linear(c) }
+}
+
+/// [`decode_wide`]'s inverse.
+fn encode_wide(enc: &[f32], c: f32) -> f32 {
+    if (0.0..=1.0).contains(&c) { sample_lut(enc, c) } else { linear_to_srgb(c) }
+}
+
+/// The Calibration panel over a frame, in place — nothing at all while every
+/// slider is 0 (see [`Calibration`]).
+fn apply_calibration(data: &mut [[f32; 3]], r: &EditRecipe) {
+    let Some(cal) = Calibration::of(r) else { return };
+    let (dec, enc) = transfer_luts();
+    data.par_iter_mut().for_each(|px| {
+        let lin = [decode_wide(dec, px[0]), decode_wide(dec, px[1]), decode_wide(dec, px[2])];
+        *px = cal.apply(lin).map(|c| encode_wide(enc, c));
+    });
+}
+
+/// ±100 on a B&W mixer band scales a fully coloured pixel's grey by
+/// 2^±this in linear light. PROVISIONAL until the Lightroom kit's `BW-*`.
+const GRAY_MIX_STOPS: f32 = 1.5;
+
+/// Lightroom's B&W treatment (v1.5.0): every pixel becomes the grey of its
+/// linear luminance ([`REC709_Y`]), lightened or darkened by the mixer band
+/// its hue falls in.
+///
+/// The band weights and the colourfulness gate are [`apply_hsl`]'s own — the
+/// same partition over [`HSL_CENTERS`], the same chroma smoothstep — so B&W
+/// Red +100 moves exactly the pixels HSL Red Luminance would, and a grey
+/// (which has no hue to belong to a band) is mixed by nobody.
+fn apply_gray_mix(data: &mut [[f32; 3]], mix: &[f32; 8]) {
+    let (dec, enc) = transfer_luts();
+    let mixing = mix.iter().any(|v| *v != 0.0);
+    data.par_iter_mut().for_each(|px| {
+        let lin = [decode_wide(dec, px[0]), decode_wide(dec, px[1]), decode_wide(dec, px[2])];
+        let mut y = REC709_Y[0] * lin[0] + REC709_Y[1] * lin[1] + REC709_Y[2] * lin[2];
+        if mixing {
+            let chroma = chroma(px);
+            let satw = smoothstep(CHROMA_GATE.0, CHROMA_GATE.1, chroma);
+            if satw > 0.0 {
+                let (h, _, _) = rgb_to_hsl(px[0], px[1], px[2]);
+                let (b0, b1, w1) = bracket_bands(h * 360.0, &HSL_CENTERS);
+                let band = (1.0 - w1) * mix[b0] + w1 * mix[b1];
+                y *= (GRAY_MIX_STOPS * satw * band / 100.0).exp2();
+            }
+        }
+        let g = sample_lut(enc, y.clamp(0.0, 1.0));
+        *px = [g, g, g];
+    });
+}
+
+/// The relative hue window of a point colour spans this far either side of
+/// its sampled hue: the stored 0..1 coordinate is 0.5 at the swatch and 0 / 1
+/// this many radians away. PROVISIONAL until the kit's `PC-*` pins it.
+const POINT_HUE_HALF_SPAN: f32 = std::f32::consts::PI / 3.0;
+
+/// A point colour's ±1 hue shift turns its colours this far. PROVISIONAL.
+const POINT_HUE_SHIFT_TURNS: f32 = 30.0 / 360.0;
+
+/// A point colour's ±1 luminance shift scales HSL lightness by 1 ± this.
+/// PROVISIONAL.
+const POINT_LUM_REACH: f32 = 0.5;
+
+/// A window's membership: 0 outside the none edges, 1 between the full ones,
+/// linear in between. An edge pair that coincides is a hard step.
+fn trapezoid(x: f32, w: &[f32; 4]) -> f32 {
+    if x < w[0] || x > w[3] {
+        0.0
+    } else if x < w[1] {
+        (x - w[0]) / (w[1] - w[0])
+    } else if x <= w[2] {
+        1.0
+    } else {
+        (w[3] - x) / (w[3] - w[2])
+    }
+}
+
+/// The swatch Lightroom's Point Color eyedropper makes of a picked colour,
+/// in the colour model [`apply_point_colors`] matches in — the GUI's
+/// eyedropper calls this, so a swatch always matches the pixel it came from.
+/// `None` for a colour [`CHROMA_GATE`] gives to nobody: a swatch of a near-grey
+/// would be a row of sliders that move no pixel.
+pub fn point_color_at(px: [f32; 3]) -> Option<crate::recipe::PointColor> {
+    let chroma = chroma(&px);
+    if chroma <= CHROMA_GATE.0 {
+        return None;
+    }
+    let (h, s, l) = rgb_to_hsl(px[0], px[1], px[2]);
+    Some(crate::recipe::PointColor::sampled(h * std::f32::consts::TAU, s, l))
+}
+
+/// The colour a swatch was sampled from, in the working space — the chip the
+/// panel draws beside the swatch's sliders. [`point_color_at`]'s inverse.
+pub fn point_color_rgb(p: &crate::recipe::PointColor) -> [f32; 3] {
+    let (r, g, b) = hsl_to_rgb(p.src_hue / std::f32::consts::TAU, p.src_sat, p.src_lum);
+    [r, g, b]
+}
+
+/// The recipe whose develop shows a photo as it stands where the point colours
+/// run: every stage [`apply_develop_with_rasters`] takes after them — the
+/// colour grade, clarity, texture, saturation and vibrance, the Detail panel's
+/// three passes, the masks and the colour field — switched off, the point
+/// colours themselves removed, and everything before them left as it is. The
+/// Point Color eyedropper samples this, so a swatch sits on the pixels
+/// [`apply_point_colors`] will test rather than on the finished look.
+pub fn point_color_sampling_recipe(r: &EditRecipe) -> EditRecipe {
+    EditRecipe {
+        point_colors: Vec::new(),
+        color_grade: crate::recipe::ColorGrade::default(),
+        clarity: 0.0,
+        texture: 0.0,
+        saturation: 0.0,
+        vibrance: 0.0,
+        color_nr: 0.0,
+        noise_reduction: 0.0,
+        sharpening: 0.0,
+        masks: Vec::new(),
+        colour_field: None,
+        ..r.clone()
+    }
+}
+
+/// Lightroom's Point Color (v1.5.0): each swatch moves the hue, saturation and
+/// lightness of the pixels inside its three windows, by its window weight.
+///
+/// Membership is the PRODUCT of the three trapezoids the swatch stores — hue
+/// relative to the sampled hue, saturation and lightness absolute — times
+/// [`apply_hsl`]'s chroma gate, which keeps a near-grey (whose HSL hue is
+/// arbitrary and whose HSL saturation can be high near white) out of every
+/// window. Several swatches add their weighted shifts. A pixel no swatch
+/// reaches is left exactly as it was.
+fn apply_point_colors(data: &mut [[f32; 3]], points: &[crate::recipe::PointColor]) {
+    use std::f32::consts::{PI, TAU};
+    let live: Vec<_> = points.iter().filter(|p| !p.is_neutral()).collect();
+    if live.is_empty() {
+        return;
+    }
+    data.par_iter_mut().for_each(|px| {
+        let chroma = chroma(px);
+        let gate = smoothstep(CHROMA_GATE.0, CHROMA_GATE.1, chroma);
+        if gate <= 0.0 {
+            return;
+        }
+        let (h, s, l) = rgb_to_hsl(px[0], px[1], px[2]);
+        let (mut dh, mut ds, mut dl) = (0.0f32, 0.0f32, 0.0f32);
+        for p in &live {
+            let off = (h * TAU - p.src_hue + PI).rem_euclid(TAU) - PI;
+            let rel = 0.5 + off / (2.0 * POINT_HUE_HALF_SPAN);
+            let w = gate
+                * trapezoid(rel, &p.hue_range)
+                * trapezoid(s, &p.sat_range)
+                * trapezoid(l, &p.lum_range);
+            dh += w * p.hue_shift;
+            ds += w * p.sat_scale;
+            dl += w * p.lum_scale;
+        }
+        if dh == 0.0 && ds == 0.0 && dl == 0.0 {
+            return;
+        }
+        let new_h = (h + dh.clamp(-1.0, 1.0) * POINT_HUE_SHIFT_TURNS).rem_euclid(1.0);
+        let new_s = (s * (1.0 + ds.clamp(-1.0, 1.0))).clamp(0.0, 1.0);
+        let new_l = (l * (1.0 + POINT_LUM_REACH * dl.clamp(-1.0, 1.0))).clamp(0.0, 1.0);
+        let (r, g, b) = hsl_to_rgb(new_h, new_s, new_l);
+        *px = [r, g, b];
+    });
 }
 
 fn to_u8(v: f32) -> u8 {
@@ -7733,6 +8501,50 @@ pub fn orient_recipe_coords(
         // and leaving it behind would put the marker on the wrong subject.
         if let Some(RangeMask::Color { px, py, .. }) = m.range.as_mut() {
             (*px, *py) = orient_point(o, *px, *py);
+        }
+    }
+    // v1.5.0 F9. Lightroom states a retouch area in the UN-ROTATED SENSOR
+    // frame, exactly like a crop rectangle and a brush dab, and this is not a
+    // corner case: 7 of the 25 retouched photographs in the reference library
+    // are `tiff:Orientation="8"`. Left un-turned, every removed object on a
+    // portrait capture would be repaired a quarter turn away from where it is
+    // — healing a clean patch of sky and leaving the power line untouched.
+    //
+    // Centres and the donor point are points in the picture plane and turn
+    // through `orient_point` like every other coordinate above. The ellipse's
+    // half-extents are in WIDTH units on BOTH axes (the convention
+    // `BrushDab::r` records for `crs:Radius`, and the one the library's own
+    // ellipses measure to: 161.5 px / 9504 = 0.016994 against a stored
+    // 0.016938), so a quarter turn rescales them by exactly the factor a
+    // stroke's radius takes — `brush_radius_scale` — because "width" names a
+    // different edge afterwards.
+    //
+    // No `lr_dab_round` here, unlike the stroke arm: that rounding exists so a
+    // dab returns to the sidecar on the decimal grid Lightroom wrote it on,
+    // and this engine never writes `crs:RetouchAreas` back (the merge carries
+    // the photographer's own block through verbatim). Rounding a number nobody
+    // re-emits would only lose precision.
+    for a in r.retouch.iter_mut() {
+        if let Some(d) = a.donor.as_mut() {
+            let (x, y) = orient_point(o, d[0], d[1]);
+            *d = [x, y];
+        }
+        match &mut a.shape {
+            crate::retouch::RetouchShape::Ellipse { cx, cy, size_x, size_y } => {
+                (*cx, *cy) = orient_point(o, *cx, *cy);
+                if let Some(f) = frame {
+                    let scale = f.brush_radius_scale(o);
+                    *size_x *= scale;
+                    *size_y *= scale;
+                }
+            }
+            // The same strokes the mask side carries, so the same rewrite —
+            // one dab grammar and one turn, not two.
+            crate::retouch::RetouchShape::Brush(strokes) => {
+                if let Some(f) = frame {
+                    turn_brush_strokes(strokes, o, f);
+                }
+            }
         }
     }
     // R33 §G. The colour field's spatial axes are the FRAME's, so a turn
@@ -9221,7 +10033,7 @@ mod tests {
     #[test]
     fn opposing_vignette_stages_compose_into_one_clamped_pass() {
         let knots = vec![2.0f32; 4];
-        let p_lut = profile_vignette_lut(&knots);
+        let p_lut = profile_vignette_lut(&knots, 100.0);
         let m_lut = manual_vignette_lut(-50.0, 50.0);
         let r = EditRecipe {
             lens_vignette: -50.0,
@@ -9278,6 +10090,746 @@ mod tests {
         let black = DynamicImage::ImageRgb8(RgbImage::from_pixel(4, 4, image::Rgb([0, 0, 0])));
         lifted.exposure_ev = 0.0;
         assert_eq!(develop_preview(&black, &lifted).to_rgb8()[(0, 0)][0], 0);
+    }
+
+    /// v1.5.0 F7, END TO END: a creative profile's baked half reaches the
+    /// PIXELS, in the direction the profile states.
+    ///
+    /// This is the claim the whole batch rests on and the one the unit tests
+    /// underneath it cannot make. `render::build_tone_lut`,
+    /// `render::apply_rgb_curves` and `EditRecipe::with_baked` each read the
+    /// Look, and every one of them could have been written correctly while
+    /// nothing called them — a develop panel that shows a profile's name over
+    /// an unchanged photograph is exactly the 「a slider that moves a number
+    /// and no pixel」 failure this file's rules call the worst kind here.
+    ///
+    /// The curve is `Adobe Color`'s own, measured off the sidecars: 161 of the
+    /// 175 in the reference library carry a Look and 152 of those are this one,
+    /// so this S is what almost every Lightroom photograph is developed
+    /// through. It darkens the low end (22→16, 40→35) and lifts the high end
+    /// (224→230, 240→246) about a pinned midpoint (127→127).
+    ///
+    /// MUTATION: drop any of the four `baked_look`/`with_baked` reads in this
+    /// file, or let `amount` scale nothing.
+    #[test]
+    fn a_baked_creative_profile_reaches_the_pixels_in_its_own_direction() {
+        use crate::recipe::{CreativeLook, CurvePoint};
+        let knot = |input, output| CurvePoint { input, output };
+        let adobe_color = || CreativeLook {
+            name: "Adobe Color".to_string(),
+            amount: 1.0,
+            tone_curve: vec![
+                knot(0, 0),
+                knot(22, 16),
+                knot(40, 35),
+                knot(127, 127),
+                knot(224, 230),
+                knot(240, 246),
+                knot(255, 255),
+            ],
+            ..Default::default()
+        };
+        let patch = |v: u8| DynamicImage::ImageRgb8(RgbImage::from_pixel(8, 8, image::Rgb([v; 3])));
+        let shot = |img: &DynamicImage, r: &EditRecipe| develop_preview(img, r).to_rgb8()[(0, 0)][0];
+
+        let bare = EditRecipe::default();
+        let profiled = EditRecipe { look: Some(adobe_color()), ..Default::default() };
+
+        // The two ends move the way the curve says, and the pinned middle does
+        // not move at all — which is what makes this the curve's shape rather
+        // than a brightness offset that happens to be signed correctly.
+        let (dark_bare, dark_profiled) = (shot(&patch(40), &bare), shot(&patch(40), &profiled));
+        let (lit_bare, lit_profiled) = (shot(&patch(224), &bare), shot(&patch(224), &profiled));
+        let (mid_bare, mid_profiled) = (shot(&patch(127), &bare), shot(&patch(127), &profiled));
+        assert!(dark_profiled < dark_bare, "40→35 must darken: {dark_bare} → {dark_profiled}");
+        assert!(lit_profiled > lit_bare, "224→230 must lift: {lit_bare} → {lit_profiled}");
+        assert!(
+            mid_profiled.abs_diff(mid_bare) <= 1,
+            "127→127 is pinned: {mid_bare} → {mid_profiled}"
+        );
+
+        // `crs:Amount` scales the baked half, so half of it lands strictly
+        // between doing nothing and doing all of it.
+        let half = EditRecipe {
+            look: Some(CreativeLook { amount: 0.5, ..adobe_color() }),
+            ..Default::default()
+        };
+        let dark_half = shot(&patch(40), &half);
+        assert!(
+            dark_profiled < dark_half && dark_half < dark_bare,
+            "amount 0.5 sits between: {dark_bare} / {dark_half} / {dark_profiled}"
+        );
+
+        // The baked SLIDERS add to the photographer's own rather than replacing
+        // them (`EditRecipe::with_baked`): the same −40 shadows pulls further
+        // down when the profile bakes −40 too.
+        let img = patch(90);
+        let own = EditRecipe { shadows: -40.0, ..Default::default() };
+        let both = EditRecipe {
+            shadows: -40.0,
+            look: Some(CreativeLook { shadows: -40.0, ..adobe_color() }),
+            ..Default::default()
+        };
+        assert!(
+            shot(&img, &both) < shot(&img, &own),
+            "a baked shadow move ADDS: {} vs {}",
+            shot(&img, &both),
+            shot(&img, &own)
+        );
+
+        // …and a monochrome profile develops to grey with the photographer's
+        // own Black & White switch still off.
+        let mono = EditRecipe {
+            look: Some(CreativeLook {
+                name: "Adobe Monochrome".to_string(),
+                grayscale: true,
+                ..adobe_color()
+            }),
+            ..Default::default()
+        };
+        assert!(!mono.convert_to_grayscale, "the photographer never touched the switch");
+        let colourful =
+            DynamicImage::ImageRgb8(RgbImage::from_pixel(8, 8, image::Rgb([200, 60, 40])));
+        let px = develop_preview(&colourful, &mono).to_rgb8()[(0, 0)];
+        let (hi, lo) = (px[0].max(px[1]).max(px[2]), px[0].min(px[1]).min(px[2]));
+        assert!(hi - lo <= 1, "a monochrome profile must develop grey: {px:?}");
+        // The control: the very same frame through the colour profile is not.
+        let colour_px = develop_preview(&colourful, &profiled).to_rgb8()[(0, 0)];
+        assert!(
+            colour_px[0] > colour_px[2] + 20,
+            "…and the colour profile leaves it red: {colour_px:?}"
+        );
+    }
+
+    /// v1.5.0 F9, end to end: an area the photographer removed in Lightroom
+    /// comes off the photograph here too.
+    ///
+    /// This test exists because F7 taught the lesson at cost — two shipped
+    /// defects that each masked the other, invisible to every unit test,
+    /// because the only thing that could see them was a photograph going in
+    /// one end and coming out the other. Both retouch geometries go through
+    /// the public develop entry point here, for the same reason.
+    ///
+    /// `feather: 0.0` on purpose: it makes the healed disc's edge crisp, so
+    /// "was the radius converted" is a question about which pixels changed
+    /// rather than about how far a ramp reached.
+    ///
+    /// MUTATION: drop the `heal_planar` call; drop `to_short` from the radius
+    /// (the 7.5 px disc leaves the blob's rim behind); rasterise the brush at
+    /// the wrong frame size.
+    #[test]
+    fn a_lightroom_retouch_area_takes_the_object_off_the_photograph() {
+        use crate::retouch::{RetouchArea, RetouchShape, SpotOrigin};
+        // 160x120 flat grey with a black disc of radius 8 px at (40, 60).
+        let (w, h) = (160u32, 120u32);
+        let mut src = RgbImage::from_pixel(w, h, image::Rgb([140u8; 3]));
+        for y in 0..h {
+            for x in 0..w {
+                let (dx, dy) = (x as f32 - 40.0, y as f32 - 60.0);
+                if dx * dx + dy * dy <= 64.0 {
+                    src.put_pixel(x, y, image::Rgb([0, 0, 0]));
+                }
+            }
+        }
+        let img = DynamicImage::ImageRgb8(src);
+        // The darkest pixel anywhere in the blob, and a far-field control.
+        // Stated against the SAME rendition's own background rather than
+        // against an absolute code value, so the assertion does not depend on
+        // what the rest of the develop chain does to a flat grey.
+        let darkest = |d: &DynamicImage| {
+            let rgb = d.to_rgb8();
+            let mut m = 255u8;
+            for y in 51..70u32 {
+                for x in 31..50u32 {
+                    let (dx, dy) = (x as f32 - 40.0, y as f32 - 60.0);
+                    if dx * dx + dy * dy <= 64.0 {
+                        m = m.min(rgb[(x, y)][0]);
+                    }
+                }
+            }
+            m
+        };
+        let far = |d: &DynamicImage| d.to_rgb8()[(130, 25)][0];
+
+        // The control: an empty recipe leaves the object exactly where it is.
+        let bare = develop_preview(&img, &EditRecipe::default());
+        assert!(
+            darkest(&bare) + 80 < far(&bare),
+            "the blob must survive an empty recipe: {} vs {}",
+            darkest(&bare),
+            far(&bare)
+        );
+
+        // ELLIPSE. `size_x` is a half-extent in WIDTH units — 10 px of 160 —
+        // which is 10 px of the 120 px short side once converted, and so
+        // covers the 8 px blob. Without the conversion it is 7.5 px and the
+        // rim survives.
+        let ellipse = RetouchArea {
+            origin: SpotOrigin::LightroomContentAware,
+            feather: 0.0,
+            donor: None,
+            shape: RetouchShape::Ellipse {
+                cx: 40.0 / 160.0,
+                cy: 60.0 / 120.0,
+                size_x: 10.0 / 160.0,
+                size_y: 10.0 / 160.0,
+            },
+        };
+        let healed = develop_preview(
+            &img,
+            &EditRecipe { retouch: vec![ellipse.clone()], ..Default::default() },
+        );
+        assert!(
+            darkest(&healed) + 20 > far(&healed),
+            "every pixel of the area must heal to its surroundings: {} vs {}",
+            darkest(&healed),
+            far(&healed)
+        );
+
+        // BRUSH — the other 37 of the library's 121 areas. One dab at the same
+        // place, the same width-unit radius, through the mask side's own
+        // rasteriser and the retouch side's own planner.
+        let brush = RetouchArea {
+            shape: RetouchShape::Brush(vec![crate::recipe::BrushStroke {
+                value: 1.0,
+                radius: 10.0 / 160.0,
+                flow: 1.0,
+                center_weight: 1.0,
+                sync_id: String::new(),
+                dabs: "d 0.250000 0.500000".to_string(),
+            }]),
+            ..ellipse.clone()
+        };
+        let brushed = develop_preview(
+            &img,
+            &EditRecipe { retouch: vec![brush], ..Default::default() },
+        );
+        assert!(
+            darkest(&brushed) + 20 > far(&brushed),
+            "a brush-shaped area heals too: {} vs {}",
+            darkest(&brushed),
+            far(&brushed)
+        );
+    }
+
+    /// v1.5.0 F9: a retouch area turns with the frame, and comes home.
+    ///
+    /// Lightroom states these coordinates in the UN-ROTATED SENSOR frame, like
+    /// a crop rectangle and like a brush dab, and this is not a corner case —
+    /// 7 of the 25 retouched photographs in the reference library are
+    /// `tiff:Orientation="8"`. An area left un-turned is repaired a quarter
+    /// turn from the object: a clean patch of sky rewritten and the power line
+    /// still there.
+    ///
+    /// A round trip, plus the assertion that makes a round trip mean
+    /// something — that the first turn MOVED it. Without that, deleting the
+    /// whole arm passes this test twice over.
+    ///
+    /// MUTATION: drop either arm of the `r.retouch` loop; turn the centre but
+    /// not the half-extents; hand the second turn the un-swapped frame.
+    #[test]
+    fn a_retouch_area_turns_with_the_frame_and_comes_home() {
+        use crate::recipe::BrushStroke;
+        use crate::retouch::{RetouchArea, RetouchShape, SpotOrigin};
+        use rawler::Orientation;
+        // 3:2, so a quarter turn really changes which edge "width" names and a
+        // half-extent that rode through unscaled would come back 1.5x wrong.
+        let area = |shape| RetouchArea {
+            origin: SpotOrigin::LightroomContentAware,
+            feather: 0.5,
+            donor: Some([0.6, 0.4]),
+            shape,
+        };
+        let mut r = EditRecipe {
+            retouch: vec![
+                area(RetouchShape::Ellipse { cx: 0.25, cy: 0.5, size_x: 0.05, size_y: 0.05 }),
+                area(RetouchShape::Brush(vec![BrushStroke {
+                    value: 1.0,
+                    radius: 0.05,
+                    flow: 1.0,
+                    center_weight: 1.0,
+                    sync_id: String::new(),
+                    dabs: "d 0.250000 0.500000".to_string(),
+                }])),
+            ],
+            ..Default::default()
+        };
+        let before = r.retouch.clone();
+
+        orient_recipe_coords(&mut r, Orientation::Rotate90, CoordFrame::new(9504.0, 6336.0));
+        assert_ne!(r.retouch, before, "a quarter turn must MOVE a retouch area");
+        // Both arms moved, not just the one the loop happens to reach first.
+        match (&before[0].shape, &r.retouch[0].shape) {
+            (
+                RetouchShape::Ellipse { cx: c0, size_x: s0, .. },
+                RetouchShape::Ellipse { cx: c1, size_x: s1, .. },
+            ) => {
+                assert_ne!(c0, c1, "the ellipse's centre turns");
+                assert_ne!(s0, s1, "…and its half-extent rescales with the new width");
+            }
+            ref other => panic!("two ellipses, got {other:?}"),
+        }
+        match (&before[1].shape, &r.retouch[1].shape) {
+            (RetouchShape::Brush(b0), RetouchShape::Brush(b1)) => {
+                assert_ne!(b0[0].dabs, b1[0].dabs, "the brush's dabs turn too");
+            }
+            ref other => panic!("two brushes, got {other:?}"),
+        }
+        assert_ne!(before[0].donor, r.retouch[0].donor, "and so does the donor point");
+
+        // Home again, through the TURNED frame — the quarter turns are each
+        // other's inverse, so the second one is handed 6336x9504.
+        orient_recipe_coords(&mut r, Orientation::Rotate270, CoordFrame::new(6336.0, 9504.0));
+        // A tolerance, not equality: the half-extent is multiplied by 1.5 and
+        // then by its reciprocal in f32, which is exact for the dab grid the
+        // writer rounds to and within a millionth here.
+        for (b, a) in before.iter().zip(&r.retouch) {
+            match (&b.shape, &a.shape) {
+                (
+                    RetouchShape::Ellipse { cx: x0, cy: y0, size_x: s0, size_y: t0 },
+                    RetouchShape::Ellipse { cx: x1, cy: y1, size_x: s1, size_y: t1 },
+                ) => {
+                    for (was, now, what) in
+                        [(x0, x1, "cx"), (y0, y1, "cy"), (s0, s1, "size_x"), (t0, t1, "size_y")]
+                    {
+                        assert!(
+                            (was - now).abs() < 1e-6,
+                            "{what} must come home: {was} → {now}"
+                        );
+                    }
+                }
+                (RetouchShape::Brush(b0), RetouchShape::Brush(b1)) => {
+                    assert_eq!(b0[0].dabs, b1[0].dabs, "the dab stream comes home verbatim");
+                    assert!((b0[0].radius - b1[0].radius).abs() < 1e-6, "so does its radius");
+                }
+                ref other => panic!("same shapes both ways, got {other:?}"),
+            }
+            let (Some(d0), Some(d1)) = (b.donor, a.donor) else { panic!("both donors survive") };
+            assert!(
+                (d0[0] - d1[0]).abs() < 1e-6 && (d0[1] - d1[1]).abs() < 1e-6,
+                "the donor comes home: {d0:?} → {d1:?}"
+            );
+        }
+    }
+
+    /// v1.5.0 F9: the two unit conversions `retouch_spots` owns, pinned as
+    /// numbers rather than inferred from a rendition.
+    ///
+    /// Both are places where Lightroom and this engine mean different things
+    /// by the same word, and both are silent when wrong — a radius off by the
+    /// aspect ratio still heals SOMETHING, and a donor read as an offset still
+    /// copies SOME pixels.
+    ///
+    /// MUTATION: normalise the radius by the long side or by width; read the
+    /// donor without subtracting the spot centre.
+    #[test]
+    fn a_retouch_areas_units_become_this_engines_at_exactly_one_place() {
+        use crate::retouch::{RetouchArea, RetouchShape, SpotOrigin};
+        let r = EditRecipe {
+            retouch: vec![
+                RetouchArea {
+                    origin: SpotOrigin::LightroomHeal,
+                    feather: 0.5,
+                    // ABSOLUTE, whatever `crs:OffsetY` sounds like.
+                    donor: Some([0.60, 0.40]),
+                    shape: RetouchShape::Ellipse {
+                        cx: 0.25,
+                        cy: 0.50,
+                        size_x: 0.05,
+                        size_y: 0.05,
+                    },
+                },
+                // A BRUSH area, which reaches the spots by the other road —
+                // rasterised, then planned by connected components. The sweep
+                // is what put it here: the planner takes everything except the
+                // geometry from a `HealSpot` template, and with only an
+                // ellipse in this test that template could be replaced by
+                // `Default::default()` with nothing going red.
+                RetouchArea {
+                    origin: SpotOrigin::LightroomGenerative,
+                    feather: 0.25,
+                    donor: None,
+                    shape: RetouchShape::Brush(vec![crate::recipe::BrushStroke {
+                        value: 1.0,
+                        radius: 0.05,
+                        flow: 1.0,
+                        center_weight: 1.0,
+                        sync_id: String::new(),
+                        dabs: "d 0.750000 0.500000".to_string(),
+                    }]),
+                },
+            ],
+            ..Default::default()
+        };
+        // A 160x120 frame: width 160, short side 120, so a width-unit
+        // half-extent of 0.05 (8 px) is 8/120 of the short side.
+        let spots = super::retouch_spots(&r, 160, 120);
+        assert_eq!(spots.len(), 2, "one spot from the ellipse, one from the stroke");
+        // The brush's spot carries what the RASTER cannot say.
+        assert_eq!(
+            spots[1].origin,
+            SpotOrigin::LightroomGenerative,
+            "a planned spot keeps its area's provenance"
+        );
+        assert_eq!(spots[1].feather, 0.25, "…and its area's feather");
+        assert!(spots[1].coverage.is_some(), "…and the stroke's exact shape");
+        assert!(
+            (spots[0].radius - 8.0 / 120.0).abs() < 1e-6,
+            "0.05 of WIDTH is 8 px is {} of the short side, got {}",
+            8.0 / 120.0,
+            spots[0].radius
+        );
+        let source = spots[0].source.expect("a stated donor survives");
+        assert!(
+            (source[0] - 0.35).abs() < 1e-6 && (source[1] + 0.10).abs() < 1e-6,
+            "an absolute donor becomes an offset from the spot centre: got {source:?}"
+        );
+        assert_eq!(spots[0].feather, 0.5, "the area's own feather rides through");
+        assert_eq!(spots[0].origin, SpotOrigin::LightroomHeal, "so does its provenance");
+    }
+
+    /// v1.5.0 F8: the HDR switch is a GATE, and the SDR rendition really acts.
+    ///
+    /// Both halves in one test, because each is worthless without the other.
+    /// A gate that is always shut renders nothing and passes "the seven do not
+    /// act while the mode is off"; a rendition with no gate passes "the seven
+    /// act" and re-tones every SDR photograph in the archive. So: the same
+    /// seven values, twice, and the ONLY difference is the switch.
+    ///
+    /// MUTATION: drop the `!r.hdr_edit` early return in `SdrRendition::global`
+    /// (the gated arm stops matching the bare one); drop the `hdr::apply` call
+    /// at the end of the chain (the HDR arm stops differing).
+    #[test]
+    fn hdr_edit_mode_gates_the_sdr_rendition_and_the_rendition_renders() {
+        // A vertical ramp: every code value present, so a tone move anywhere
+        // in the range has somewhere to show.
+        let (w, h) = (64u32, 256u32);
+        let mut src = RgbImage::new(w, h);
+        for y in 0..h {
+            for x in 0..w {
+                let v = y as u8;
+                src.put_pixel(x, y, image::Rgb([v, v, v]));
+            }
+        }
+        let img = DynamicImage::ImageRgb8(src);
+        let sdr = EditRecipe {
+            sdr_brightness: 40.0,
+            sdr_contrast: 30.0,
+            sdr_highlights: -50.0,
+            sdr_shadows: 25.0,
+            sdr_whites: -20.0,
+            sdr_clarity: 20.0,
+            ..Default::default()
+        };
+        let bare = develop_preview(&img, &EditRecipe::default());
+        let gated = develop_preview(&img, &sdr);
+        assert_eq!(
+            bare.to_rgb8().as_raw(),
+            gated.to_rgb8().as_raw(),
+            "seven SDR controls outside HDR edit mode must not move one pixel"
+        );
+        let on = develop_preview(&img, &EditRecipe { hdr_edit: true, ..sdr.clone() });
+        assert_ne!(
+            bare.to_rgb8().as_raw(),
+            on.to_rgb8().as_raw(),
+            "…and inside it they must move the photograph"
+        );
+        // The direction, so a rendition that merely perturbs the frame cannot
+        // pass: +40 Brightness on a mid ramp value lifts it.
+        let mid = |d: &DynamicImage| d.to_rgb8()[(32, 96)][0];
+        assert!(
+            mid(&on) > mid(&bare),
+            "+40 SDR Brightness lifts the midtone: {} → {}",
+            mid(&bare),
+            mid(&on)
+        );
+        // …and Brightness ALONE lifts it. The arm above moves five sliders at
+        // once, so it cannot see which one did the lifting: deleting
+        // Brightness entirely left Contrast and Shadows holding the midtone up
+        // and the assertion green (falsification case F8-M6). One slider, one
+        // probe.
+        let bright = develop_preview(
+            &img,
+            &EditRecipe { hdr_edit: true, sdr_brightness: 40.0, ..Default::default() },
+        );
+        assert!(
+            mid(&bright) > mid(&bare),
+            "SDR Brightness is this rendition's exposure and must act by itself: {} → {}",
+            mid(&bare),
+            mid(&bright)
+        );
+    }
+
+    /// v1.5.0 F8: the HEADROOM alone renders, with every SDR slider at 0, and
+    /// it renders as a shoulder — the highlights come down, the shadows do not.
+    ///
+    /// A headroom that reached the picture as an exposure cut, or as contrast,
+    /// would fail the second assertion; one that reached it as a highlights
+    /// LIFT would fail the first. Those four properties are the shoulder's
+    /// contract and they held across the 2026-09-19 change of mechanism, from a
+    /// negative Highlights push to the headroom's own curve — which is what a
+    /// contract is for.
+    ///
+    /// MUTATION: flip the shoulder's sign; drop `hdr_max_ev` from
+    /// `hdr::shoulder`'s white point; drop the blend term (the two headroom
+    /// arms converge).
+    #[test]
+    fn the_hdr_headroom_reaches_the_picture_as_a_shoulder() {
+        let (w, h) = (64u32, 256u32);
+        let mut src = RgbImage::new(w, h);
+        for y in 0..h {
+            for x in 0..w {
+                let v = y as u8;
+                src.put_pixel(x, y, image::Rgb([v, v, v]));
+            }
+        }
+        let img = DynamicImage::ImageRgb8(src);
+        let at = |d: &DynamicImage, y: u32| d.to_rgb8()[(32, y)][0] as i32;
+        let bare = develop_preview(&img, &EditRecipe::default());
+        let one = develop_preview(
+            &img,
+            &EditRecipe { hdr_edit: true, hdr_max_ev: 1.0, ..Default::default() },
+        );
+        assert!(
+            at(&one, 230) < at(&bare, 230),
+            "one stop of headroom pulls the highlights down: {} → {}",
+            at(&bare, 230),
+            at(&one, 230)
+        );
+        assert!(
+            (at(&one, 20) - at(&bare, 20)).abs() <= 1,
+            "…and leaves the shadows where they were: {} → {}",
+            at(&bare, 20),
+            at(&one, 20)
+        );
+        // Blend scales it, and in the stated direction: −100 is no shoulder at
+        // all, +100 is twice one.
+        let off = develop_preview(
+            &img,
+            &EditRecipe {
+                hdr_edit: true,
+                hdr_max_ev: 1.0,
+                sdr_blend: -100.0,
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            bare.to_rgb8().as_raw(),
+            off.to_rgb8().as_raw(),
+            "SDRBlend −100 means the headroom does not reach the rendition at all"
+        );
+        let twice = develop_preview(
+            &img,
+            &EditRecipe {
+                hdr_edit: true,
+                hdr_max_ev: 1.0,
+                sdr_blend: 100.0,
+                ..Default::default()
+            },
+        );
+        assert!(
+            at(&twice, 230) < at(&one, 230),
+            "…and +100 reaches further than 0: {} vs {}",
+            at(&one, 230),
+            at(&twice, 230)
+        );
+    }
+
+    /// v1.5.0 F8: the headroom keeps reaching at every headroom the sidecar can
+    /// state — it is not governed by a taste control's limiter.
+    ///
+    /// The defect this pins, measured off the kit's `HDR-ON` on 2026-09-19:
+    /// the shoulder used to be a negative Highlights push, so it inherited
+    /// [`limit_tone_sliders`], whose rule is that a slider must SATURATE and
+    /// never annihilate a tonal band. Correct for a slider a photographer
+    /// drags; wrong for a rendering transform. The shoulder stopped growing
+    /// partway up the headroom range and reached 55 % of Lightroom's, and no
+    /// larger `crs:HDRMaxValue` could recover the rest.
+    ///
+    /// So this asserts the DEPTH at the headroom the kit itself states, which
+    /// is the quantity that separated the two models. At `crs:HDRMaxValue` of
+    /// +2.30 the old model reached 0.104 below the diagonal at input 0.90 where
+    /// Lightroom reaches 0.189; the curve reaches 0.193. On this ramp that is
+    /// about 27 code values against about 50, so a floor of 40 sits clear of
+    /// both. Direction alone does not catch this — the capped model came down
+    /// too, just not far enough, which is how it passed its tests for a whole
+    /// batch.
+    ///
+    /// Each further stop still reaches further, but by LESS, and that is the
+    /// curve's own form rather than a cap: extended Reinhard tends to
+    /// `L/(1+L)` as its white point grows, so headroom has diminishing returns
+    /// on an input that is itself bounded. This test asserted the opposite when
+    /// it was first written and the measurement corrected it.
+    ///
+    /// MUTATION: clamp `stops` in `SdrRendition::global` to 1.0, or route the
+    /// shoulder back through the highlights slot — the depth falls under 40.
+    #[test]
+    fn the_headroom_keeps_reaching_past_where_a_slider_would_saturate() {
+        let (w, h) = (64u32, 256u32);
+        let mut src = RgbImage::new(w, h);
+        for y in 0..h {
+            for x in 0..w {
+                let v = y as u8;
+                src.put_pixel(x, y, image::Rgb([v, v, v]));
+            }
+        }
+        let img = DynamicImage::ImageRgb8(src);
+        // y = 230 of a 0..255 ramp: high enough to be the shoulder's business,
+        // far enough from 255 that clipping is not doing the work.
+        let top = |ev: f32| {
+            develop_preview(
+                &img,
+                &EditRecipe { hdr_edit: true, hdr_max_ev: ev, ..Default::default() },
+            )
+            .to_rgb8()[(32, 230)][0] as i32
+        };
+        let bare = top(0.0);
+        let (d1, d2, d4) = (bare - top(1.0), bare - top(2.0), bare - top(4.0));
+        assert!(
+            0 < d1 && d1 < d2 && d2 < d4,
+            "every extra stop of headroom must pull the top end further: \
+             {bare} → −{d1} at 1 EV, −{d2} at 2 EV, −{d4} at 4 EV"
+        );
+        // The kit's own headroom, and the depth Lightroom was measured to reach
+        // there. The limiter held the old model to about 27 on this ramp.
+        let stated = bare - top(2.30);
+        assert!(
+            stated >= 40,
+            "at the +2.30 EV the kit states, the shoulder must reach Lightroom's \
+             own depth and not a slider limiter's: {bare} → −{stated}"
+        );
+    }
+
+    /// v1.5.0 F8: the SDR rendition's Clarity is the Basic panel's Clarity —
+    /// one operator at one radius, not a second copy.
+    ///
+    /// The radius rule used to be written twice (`0.02 · min(w,h)`), which is
+    /// how one of the two would have been tuned and the other left behind.
+    /// `clarity_radius` is now the single definition, and this is the probe
+    /// that keeps it single: the same amount through either door has to make
+    /// the same picture.
+    ///
+    /// MUTATION: give `hdr::apply` its own radius expression again (any
+    /// constant but `clarity_radius`'s) and the two renditions diverge.
+    #[test]
+    fn the_sdr_renditions_clarity_is_the_basic_panels_clarity() {
+        // 512 px, and that size is load-bearing. `clarity_radius` is
+        // `0.02·min(w,h)` with a FLOOR of 8, so on the 128 px frame this test
+        // first used the rule never bound — 0.02·128 = 2.56 and 0.03·128 =
+        // 3.84 both clamp to 8, and a mutated coefficient was invisible
+        // (falsification case F8-M7). At 512 the floor is behind us: 10 px
+        // against 15.
+        let (w, h) = (512u32, 512u32);
+        let mut src = RgbImage::new(w, h);
+        for y in 0..h {
+            for x in 0..w {
+                let v = if (x / 32 + y / 32) % 2 == 0 { 90u8 } else { 165u8 };
+                src.put_pixel(x, y, image::Rgb([v, v, v]));
+            }
+        }
+        let img = DynamicImage::ImageRgb8(src);
+        let basic = develop_preview(&img, &EditRecipe { clarity: 60.0, ..Default::default() });
+        let through_sdr = develop_preview(
+            &img,
+            &EditRecipe { hdr_edit: true, sdr_clarity: 60.0, ..Default::default() },
+        );
+        assert_eq!(
+            basic.to_rgb8().as_raw(),
+            through_sdr.to_rgb8().as_raw(),
+            "one Clarity operator at one radius, whichever panel asks for it"
+        );
+        // …and it is not the identity, so the equality above is not two
+        // untouched frames agreeing with each other.
+        let bare = develop_preview(&img, &EditRecipe::default());
+        assert_ne!(
+            bare.to_rgb8().as_raw(),
+            basic.to_rgb8().as_raw(),
+            "Clarity +60 must actually do something to a checkerboard"
+        );
+    }
+
+    /// v1.5.0 F7, the class sweep's SECOND site: a creative profile's
+    /// per-channel curves reach the pixels, and they compose UNDER the
+    /// photographer's own.
+    ///
+    /// This is the arm no real photograph exercises. Adobe writes all three
+    /// channels of every one of the 161 measured Looks as identity
+    /// (`0,0 … 255,255`), which `parse_curve_checked` returns EMPTY, so
+    /// `apply_rgb_curves`'s composition branch has never run on a file. The
+    /// branch was still wrong — it indexed a 256-entry `curve_lut` with this
+    /// table's `LUT_N` = 4096 counter, the same out-of-bounds the master
+    /// curve's arm had — and the 29-mutation sweep is what said so: M27 put
+    /// the defect back and every one of the 1,593 tests stayed green. A fix
+    /// nothing can fail is a fix nobody can keep.
+    ///
+    /// MUTATION: index `base[i]` instead of `sample_lut(&base, x)` (the arm
+    /// panics); compose the two curves in the other order, or drop either one
+    /// (the three-way ordering below stops holding).
+    #[test]
+    fn a_baked_per_channel_curve_reaches_the_pixels_under_the_photographers_own() {
+        use crate::recipe::{CreativeLook, CurvePoint};
+        let knot = |input, output| CurvePoint { input, output };
+        // RED only, so green is an in-frame control for "did this touch the
+        // channels it was not given?".
+        //
+        // The two curves move the SAME input in opposite directions, and they
+        // are deliberately NOT each other's inverse. The first draft made them
+        // inverses (128→64 against 64→128) and the mutation that swaps the
+        // composition order stayed GREEN: where two curves undo each other,
+        // `own(baked(x))` and `baked(own(x))` both land back on x, so the
+        // probe was blind to the very order it claimed to pin. These two share
+        // the knot at 128 instead, which makes the two orders land on opposite
+        // sides of where the pixel started.
+        let darker = vec![knot(0, 0), knot(128, 64), knot(255, 255)];
+        let lighter = vec![knot(0, 0), knot(128, 192), knot(255, 255)];
+        let baked = |c: &[CurvePoint]| CreativeLook {
+            name: "per-channel".to_string(),
+            amount: 1.0,
+            red_curve: c.to_vec(),
+            ..Default::default()
+        };
+        let patch = DynamicImage::ImageRgb8(RgbImage::from_pixel(8, 8, image::Rgb([128; 3])));
+        let shot = |r: &EditRecipe| {
+            let p = develop_preview(&patch, r).to_rgb8()[(0, 0)];
+            (p[0], p[1])
+        };
+
+        let (bare_r, bare_g) = shot(&EditRecipe::default());
+
+        // 1) The PROFILE's curve lands at all, on red alone — the half that
+        //    was unreachable before F7 read a Look's per-channel curves.
+        let (prof_r, prof_g) =
+            shot(&EditRecipe { look: Some(baked(&darker)), ..Default::default() });
+        assert!(prof_r < bare_r, "a baked 128→64 must darken red: {bare_r} → {prof_r}");
+        assert_eq!(prof_g, bare_g, "…and must leave green alone: {bare_g} → {prof_g}");
+
+        // 2) The PHOTOGRAPHER's own curve, on its own, the other way.
+        let (own_r, _) =
+            shot(&EditRecipe { red_curve: lighter.clone(), ..Default::default() });
+        assert!(own_r > bare_r, "a photographer's 64→128 must lift red: {bare_r} → {own_r}");
+
+        // 3) COMPOSITION, in the ORDER the engine claims: the photographer's
+        //    curve reads the PROFILE's output, not the raw pixel.
+        //
+        //    The profile darkens 128 to ~64; the photographer's curve then
+        //    reads 64, which it lifts only part of the way, so the composition
+        //    lands BELOW where the pixel started. Swap the two and the
+        //    photographer's curve reads 128 and lifts it to ~192, which the
+        //    profile then darkens to ~160 — ABOVE where it started. One
+        //    ordering assertion separates them, and it is stated against
+        //    `bare` rather than as an exact value so it does not rest on where
+        //    in the encoding this stage happens to sit.
+        let (both_r, both_g) = shot(&EditRecipe {
+            look: Some(baked(&darker)),
+            red_curve: lighter.clone(),
+            ..Default::default()
+        });
+        assert!(
+            prof_r < both_r && both_r < bare_r,
+            "the photographer's curve reads the profile's OUTPUT, so the pair lands \
+             BELOW bare: darker={prof_r}, composed={both_r}, bare={bare_r}, lighter={own_r}"
+        );
+        assert_eq!(both_g, bare_g, "green is still untouched: {bare_g} → {both_g}");
     }
 
     #[test]
@@ -9980,6 +11532,281 @@ mod tests {
         }
     }
 
+    /// v1.5.0, the parametric curve's contract (`parametric_lut`): nothing at
+    /// rest wherever the splits sit, each region slider moving its OWN region
+    /// the way its sign says and leaving the far end of the range alone, both
+    /// ends pinned and the curve monotone at every extreme and split layout,
+    /// composed UNDER the point curve — and reaching the develop.
+    ///
+    /// MUTATIONS THIS CATCHES: `PARAMETRIC_REACH` above ½ (the extremes fold
+    /// the curve back), a region's control value moved by the wrong index
+    /// (the direction table), the composition order swapped (the point-curve
+    /// case), and `apply_develop`'s `tone_neutral` blind to the curve.
+    #[test]
+    fn the_parametric_curve_moves_its_own_region_and_stays_monotone() {
+        let base = build_tone_lut(&EditRecipe::default());
+        assert!(parametric_lut(&EditRecipe { param_midtone_split: 70.0, ..Default::default() }).is_none());
+        for (field, centre, far) in [
+            ("param_shadows", 0.125f32, 0.875f32),
+            ("param_darks", 0.375, 0.875),
+            ("param_lights", 0.625, 0.125),
+            ("param_highlights", 0.875, 0.125),
+        ] {
+            for sign in [1.0f32, -1.0] {
+                let mut json = serde_json::to_value(EditRecipe::default()).expect("serialises");
+                json[field] = serde_json::json!(100.0 * sign);
+                let r: EditRecipe = serde_json::from_value(json).expect("a region value");
+                let lut = build_tone_lut(&r);
+                let moved = sample_lut(&lut, centre) - sample_lut(&base, centre);
+                assert!(moved * sign > 0.03, "{field} {sign:+}: its own centre moved {moved}");
+                let stray = (sample_lut(&lut, far) - sample_lut(&base, far)).abs();
+                assert!(stray < 0.02, "{field} {sign:+}: the far end of the range moved {stray}");
+            }
+        }
+        // Every extreme, over the split layouts at both walls and the default.
+        for splits in [[25.0, 50.0, 75.0], [10.0, 20.0, 30.0], [70.0, 80.0, 90.0], [10.0, 50.0, 90.0]] {
+            for signs in 0..16u32 {
+                let at = |k: u32| if (signs >> k) & 1 == 1 { 100.0 } else { -100.0 };
+                let r = EditRecipe {
+                    param_shadows: at(0),
+                    param_darks: at(1),
+                    param_lights: at(2),
+                    param_highlights: at(3),
+                    param_shadow_split: splits[0],
+                    param_midtone_split: splits[1],
+                    param_highlight_split: splits[2],
+                    ..Default::default()
+                };
+                let lut = parametric_lut(&r).expect("a moved region builds the curve");
+                for i in 1..lut.len() {
+                    assert!(lut[i] >= lut[i - 1] - 1e-6, "{splits:?} signs {signs:04b}: non-monotone at {i}");
+                }
+                assert!(lut[0].abs() < 1e-6 && (lut[LUT_N - 1] - 1.0).abs() < 1e-6, "{splits:?}: an end moved");
+            }
+        }
+        // Composed UNDER the point curve: the point curve bends what the
+        // regions made, and the order is observable on this pair.
+        let both = EditRecipe {
+            param_darks: 60.0,
+            tone_curve: vec![
+                crate::recipe::CurvePoint { input: 0, output: 0 },
+                crate::recipe::CurvePoint { input: 96, output: 160 },
+                crate::recipe::CurvePoint { input: 255, output: 255 },
+            ],
+            ..Default::default()
+        };
+        let (p, c, lut) = (parametric_lut(&both).expect("moved"), curve_lut(&both.tone_curve), build_tone_lut(&both));
+        let mut observable = 0.0f32;
+        for x in [0.2f32, 0.3, 0.4, 0.5] {
+            let want = sample_lut(&c, sample_lut(&p, x));
+            assert!((sample_lut(&lut, x) - want).abs() < 2e-3, "at {x}: {} vs {want}", sample_lut(&lut, x));
+            observable = observable.max((want - sample_lut(&p, sample_lut(&c, x))).abs());
+        }
+        assert!(observable > 0.02, "premise: the two orders differ here ({observable})");
+        // …and the develop runs it: a mid-dark grey brightens under Darks.
+        let mut grey = vec![[0.3f32, 0.3, 0.3]];
+        apply_develop_anon(&mut grey, 1, 1, &EditRecipe { param_darks: 80.0, ..Default::default() });
+        let mut rest = vec![[0.3f32, 0.3, 0.3]];
+        apply_develop_anon(&mut rest, 1, 1, &EditRecipe::default());
+        assert!(grey[0][1] > rest[0][1] + 0.02, "the develop skipped the curve: {:?} vs {:?}", grey[0], rest[0]);
+    }
+
+    /// v1.5.0, the Calibration panel ([`Calibration`]): a grey is still grey
+    /// under every primary slider at both extremes, each primary's Hue turns
+    /// its own colour the way Lightroom's slider track reads (+ red toward
+    /// yellow, + green toward cyan, + blue toward magenta), Saturation moves
+    /// that colour's chroma, and the shadows tint pulls a dark grey toward
+    /// magenta (+) or green (−) while a light grey does not move.
+    ///
+    /// MUTATIONS THIS CATCHES: the hue rotation's sign flipped, the basis
+    /// change composed the wrong way round (white stops mapping to white), the
+    /// tint's luminance weight inverted (highlights tinted), and the stage
+    /// left out of the develop.
+    #[test]
+    fn calibration_turns_its_own_primary_and_keeps_grey_grey() {
+        let chroma = |p: [f32; 3]| p[0].max(p[1]).max(p[2]) - p[0].min(p[1]).min(p[2]);
+        let with = |name: &str, v: f32| {
+            let mut json = serde_json::to_value(EditRecipe::default()).expect("serialises");
+            json[name] = serde_json::json!(v);
+            serde_json::from_value::<EditRecipe>(json).expect("a calibration value")
+        };
+        let dev = |px: [f32; 3], r: &EditRecipe| {
+            let mut d = vec![px];
+            apply_develop_anon(&mut d, 1, 1, r);
+            d[0]
+        };
+        for name in ["cal_red_hue", "cal_red_sat", "cal_green_hue", "cal_green_sat", "cal_blue_hue", "cal_blue_sat"] {
+            for v in [100.0f32, -100.0] {
+                for g in [0.2f32, 0.5, 0.9] {
+                    let out = dev([g, g, g], &with(name, v));
+                    assert!(
+                        chroma(out) < 2e-3 && (out[1] - g).abs() < 2e-3,
+                        "{name} {v:+}: grey {g} became {out:?}"
+                    );
+                }
+            }
+        }
+        let (red, green, blue) = ([0.8f32, 0.2, 0.2], [0.2f32, 0.8, 0.2], [0.2f32, 0.2, 0.8]);
+        let up = dev(red, &with("cal_red_hue", 100.0));
+        let down = dev(red, &with("cal_red_hue", -100.0));
+        assert!(up[1] > up[2] + 0.02, "red hue + turns red toward yellow: {up:?}");
+        assert!(down[2] > down[1] + 0.02, "red hue − turns red toward magenta: {down:?}");
+        let up = dev(green, &with("cal_green_hue", 100.0));
+        assert!(up[2] > up[0] + 0.02, "green hue + turns green toward cyan: {up:?}");
+        let up = dev(blue, &with("cal_blue_hue", 100.0));
+        assert!(up[0] > up[1] + 0.02, "blue hue + turns blue toward magenta: {up:?}");
+        assert!(chroma(dev(red, &with("cal_red_sat", 100.0))) > chroma(red) + 0.02);
+        assert!(chroma(dev(red, &with("cal_red_sat", -100.0))) < chroma(red) - 0.02);
+        let dark = dev([0.15; 3], &with("cal_shadow_tint", 100.0));
+        assert!(dark[0] > dark[1] + 0.01 && dark[2] > dark[1] + 0.01, "+ tints the shadows magenta: {dark:?}");
+        let dark = dev([0.15; 3], &with("cal_shadow_tint", -100.0));
+        assert!(dark[1] > dark[0] + 0.01, "− tints the shadows green: {dark:?}");
+        let light = dev([0.9; 3], &with("cal_shadow_tint", 100.0));
+        assert!(chroma(light) < 2e-3, "a light grey is not a shadow: {light:?}");
+        assert_eq!(dev(red, &EditRecipe::default()), red, "no slider, no stage");
+    }
+
+    /// v1.5.0, the B&W treatment ([`apply_gray_mix`]): every pixel turns grey,
+    /// a mixer band lightens or darkens its own colour and nothing else, the
+    /// colour mixer has nothing to act on, a mixer without the treatment is
+    /// not a treatment, and the toning tools — the colour grade and the
+    /// per-channel curves — still reach the grey.
+    ///
+    /// MUTATIONS THIS CATCHES: the conversion placed after the RGB curves (the
+    /// channel-curve toning vanishes), the band weight read from the wrong
+    /// band, HSL still applied in black and white, and the mixer applied
+    /// without the treatment.
+    #[test]
+    fn black_and_white_mixes_by_band_and_still_takes_toning() {
+        use crate::recipe::{ColorGrade, CurvePoint, Hsl};
+        let chroma = |p: &[f32; 3]| p[0].max(p[1]).max(p[2]) - p[0].min(p[1]).min(p[2]);
+        let frame = vec![[0.8f32, 0.2, 0.2], [0.2, 0.3, 0.8], [0.5, 0.5, 0.5], [0.3, 0.7, 0.2]];
+        let run = |r: &EditRecipe| {
+            let mut d = frame.clone();
+            apply_develop_anon(&mut d, 4, 1, r);
+            d
+        };
+        let bw = EditRecipe { convert_to_grayscale: true, ..Default::default() };
+        let flat = run(&bw);
+        for p in &flat {
+            assert!(chroma(p) < 1e-4, "black and white leaves no colour: {flat:?}");
+        }
+        assert!((flat[2][0] - 0.5).abs() < 2e-3, "a grey keeps its value: {:?}", flat[2]);
+        let lighter = run(&EditRecipe { gray_red: 100.0, ..bw.clone() });
+        assert!(lighter[0][0] > flat[0][0] + 0.05, "red +100 lightens the red: {lighter:?} vs {flat:?}");
+        for i in 1..4 {
+            assert!((lighter[i][0] - flat[i][0]).abs() < 1e-4, "red +100 moved pixel {i}: {lighter:?}");
+        }
+        let darker = run(&EditRecipe { gray_red: -100.0, ..bw.clone() });
+        assert!(darker[0][0] < flat[0][0] - 0.05, "red −100 darkens the red: {darker:?}");
+        let blue = run(&EditRecipe { gray_blue: 100.0, ..bw.clone() });
+        assert!(blue[1][0] > flat[1][0] + 0.05 && (blue[0][0] - flat[0][0]).abs() < 1e-4);
+        let hsl = run(&EditRecipe { hsl: Hsl { luminance: [100.0; 8], ..Default::default() }, ..bw.clone() });
+        assert_eq!(hsl, flat, "the colour mixer does not act in black and white");
+        assert_eq!(run(&EditRecipe { gray_red: 100.0, ..Default::default() }), frame, "a mixer is not a treatment");
+        let graded = run(&EditRecipe {
+            color_grade: ColorGrade { shadow_hue: 30.0, shadow_sat: 60.0, ..Default::default() },
+            ..bw.clone()
+        });
+        assert!(chroma(&graded[1]) > 0.01, "the grade tones the grey: {graded:?}");
+        let curved = run(&EditRecipe {
+            red_curve: vec![
+                CurvePoint { input: 0, output: 0 },
+                CurvePoint { input: 128, output: 160 },
+                CurvePoint { input: 255, output: 255 },
+            ],
+            ..bw.clone()
+        });
+        assert!(curved[2][0] > curved[2][1] + 0.02, "a red-channel curve tones the grey: {curved:?}");
+        let saturated = run(&EditRecipe { saturation: 100.0, ..bw });
+        assert_eq!(saturated, flat, "Saturation has no colour to move in black and white");
+    }
+
+    /// v1.5.0, Point Color ([`apply_point_colors`]): a swatch sampled from a
+    /// colour moves that colour, fades out across its hue window, leaves a
+    /// colour outside its windows and every grey exactly as they were, and
+    /// moves nothing at all while its shifts are 0.
+    ///
+    /// MUTATIONS THIS CATCHES: the hue offset not wrapped (a red swatch
+    /// missing the red at 359°), the trapezoid's falloff inverted, the chroma
+    /// gate dropped (greys recoloured), and the eyedropper sampling in a
+    /// different colour model from the one the render matches in.
+    #[test]
+    fn a_point_color_moves_its_own_colour_and_nothing_else() {
+        use crate::recipe::PointColor;
+        let red = [0.8f32, 0.2, 0.2];
+        let swatch = point_color_at(red).expect("a red has a colour to hold");
+        let (h, s, l) = rgb_to_hsl(red[0], red[1], red[2]);
+        assert!((swatch.src_hue - h * std::f32::consts::TAU).abs() < 1e-5);
+        assert_eq!((swatch.src_sat, swatch.src_lum), (s, l));
+        let chip = point_color_rgb(&swatch);
+        assert!(chip.iter().zip(red).all(|(a, b)| (a - b).abs() < 1e-4), "the chip is the sample: {chip:?}");
+        assert!(point_color_at([0.5, 0.5, 0.5]).is_none(), "a grey is nobody's colour");
+        assert!(point_color_at([0.52, 0.5, 0.5]).is_none(), "nor is a colour the gate gives to nobody");
+        // red, blue, grey, orange (partly inside the hue window), and a red on
+        // the far side of 0° (hue 355°).
+        let frame = vec![red, [0.2, 0.3, 0.8], [0.5, 0.5, 0.5], [0.8, 0.53, 0.2], [0.8, 0.2, 0.25]];
+        let run = |p: PointColor| {
+            let mut d = frame.clone();
+            apply_develop_anon(&mut d, 5, 1, &EditRecipe { point_colors: vec![p], ..Default::default() });
+            d
+        };
+        assert_eq!(run(swatch.clone()), frame, "a swatch with no shift moves nothing");
+        let turned = run(PointColor { hue_shift: 1.0, ..swatch.clone() });
+        let hue_of = |p: [f32; 3]| rgb_to_hsl(p[0], p[1], p[2]).0;
+        let moved = |i: usize| (hue_of(turned[i]) - hue_of(frame[i]) + 0.5).rem_euclid(1.0) - 0.5;
+        assert!((moved(0) - POINT_HUE_SHIFT_TURNS).abs() < 0.01, "the sampled red turns fully: {}", moved(0));
+        assert!(moved(3) > 0.005 && moved(3) < moved(0) - 0.005, "orange turns partly: {}", moved(3));
+        assert!(moved(4) > 0.02, "a red across 0° is still the swatch's red: {}", moved(4));
+        assert_eq!(turned[1], frame[1], "blue is outside the window");
+        assert_eq!(turned[2], frame[2], "a grey has no colour to match");
+        let greyed = run(PointColor { sat_scale: -1.0, ..swatch.clone() });
+        assert!(greyed[0][0] - greyed[0][2] < 0.02, "saturation −1 greys the red: {:?}", greyed[0]);
+        let lifted = run(PointColor { lum_scale: 1.0, ..swatch });
+        assert!(luma601(&lifted[0]) > luma601(&frame[0]) + 0.05, "luminance +1 lifts the red: {:?}", lifted[0]);
+    }
+
+    /// The Point Color eyedropper's reference develop: what the stages AFTER
+    /// the point colours hold changes nothing in it, and what the stages before
+    /// them hold still does.
+    ///
+    /// MUTATION THIS CATCHES: a downstream stage left on in
+    /// `point_color_sampling_recipe` (the swatch lands on the graded or
+    /// saturated colour, outside the windows the render then tests), or an
+    /// upstream one switched off with them (the swatch misses the colour the
+    /// mixer made).
+    #[test]
+    fn the_point_color_eyedropper_samples_the_frame_the_point_colours_see() {
+        use crate::recipe::{ColorGrade, Hsl, PointColor};
+        let frame: Vec<[f32; 3]> = (0..64)
+            .map(|i| {
+                let t = i as f32 / 63.0;
+                [0.2 + 0.6 * t, 0.5 - 0.3 * t, 0.3 + 0.2 * (t * 7.0).sin().abs()]
+            })
+            .collect();
+        let sample = |r: &EditRecipe| {
+            let mut d = frame.clone();
+            apply_develop_anon(&mut d, 8, 8, &point_color_sampling_recipe(r));
+            d
+        };
+        let upstream = EditRecipe { exposure_ev: 0.3, hsl: Hsl { hue: [40.0; 8], ..Default::default() }, ..Default::default() };
+        let quiet = sample(&upstream);
+        let downstream = EditRecipe {
+            color_grade: ColorGrade { shadow_hue: 200.0, shadow_sat: 80.0, ..Default::default() },
+            clarity: 60.0,
+            texture: 40.0,
+            saturation: 70.0,
+            vibrance: -50.0,
+            color_nr: 40.0,
+            noise_reduction: 40.0,
+            sharpening: 90.0,
+            point_colors: vec![PointColor { hue_shift: 1.0, ..PointColor::sampled(1.0, 0.6, 0.5) }],
+            ..upstream.clone()
+        };
+        assert_eq!(sample(&downstream), quiet, "the stages after the point colours are not in the sample");
+        assert_ne!(sample(&EditRecipe::default()), quiet, "the stages before them are");
+    }
+
     /// A slider must run out of authority, never destroy detail.
     ///
     /// Monotonicity and pinned endpoints — the two things the tone tests
@@ -10292,9 +12119,15 @@ mod tests {
     fn local_noise_reduction_smooths_only_inside_the_mask() {
         // 8x1 strip of alternating luma (= noise). A linear mask covering the
         // RIGHT half with full local NR should flatten the right; left untouched.
+        //
+        // ±0.03, a real noise amplitude. Since v1.5.0 the local pass is the
+        // global Detail operator (`render/detail.rs`), which is EDGE-AWARE: a
+        // ±0.2 alternation is structure to it at any amount (local σ 0.2
+        // against a noise threshold of 0.054 at Luminance 100), where the
+        // pre-v1.5.0 local pass was a plain blur that flattened anything.
         let (w, h) = (8usize, 1usize);
         let mut data: Vec<[f32; 3]> =
-            (0..w).map(|x| { let v = if x % 2 == 0 { 0.3 } else { 0.7 }; [v, v, v] }).collect();
+            (0..w).map(|x| { let v = if x % 2 == 0 { 0.47 } else { 0.53 }; [v, v, v] }).collect();
         let r = EditRecipe {
             masks: vec![LocalAdjustment {
                 mask: MaskGeometry::Linear { zero_x: 0.5, zero_y: 0.5, full_x: 1.0, full_y: 0.5 },
@@ -10694,7 +12527,7 @@ mod tests {
         // — the colour the old clip-at-sRGB pipeline destroyed.
         let xyz2cam = inv3(&rgb_to_xyz(P3_PRIM, D65_XY));
         let mut px = [[1.0f32, 0.0, 0.0]];
-        calibrate_camera_buffer(&mut px, &xyz2cam, [1.0, 1.0, 1.0], ExportColorSpace::DisplayP3);
+        calibrate_camera_buffer(&mut px, &xyz2cam, [1.0, 1.0, 1.0], ExportColorSpace::DisplayP3, None);
         let p = px[0];
         assert!(
             p[0] > 0.99 && p[1].abs() < 0.02 && p[2].abs() < 0.02,
@@ -10706,7 +12539,7 @@ mod tests {
         // NEGATIVE component must reach the caller (the final pack clips it
         // — not the decode).
         let mut px = [[0.8f32, 0.0, 0.0]];
-        calibrate_camera_buffer(&mut px, &xyz2cam, [1.0, 1.0, 1.0], ExportColorSpace::Srgb);
+        calibrate_camera_buffer(&mut px, &xyz2cam, [1.0, 1.0, 1.0], ExportColorSpace::Srgb, None);
         assert!(
             px[0][1] < -0.001 || px[0][2] < -0.001,
             "out-of-gamut components must SURVIVE to the pack, got {:?}",
@@ -10724,7 +12557,7 @@ mod tests {
                 .enumerate()
         {
             let mut px = grey_cam;
-            calibrate_camera_buffer(&mut px, &xyz2cam, wb, space);
+            calibrate_camera_buffer(&mut px, &xyz2cam, wb, space, None);
             out[i] = px[0];
         }
         let want = linear_to_srgb(0.4);
@@ -11432,6 +13265,113 @@ mod tests {
         }
     }
 
+    /// **v1.5.0 F5**: Lightroom's two PROFILE strength sliders — and the
+    /// property that matters most about them, which is that 100 renders the
+    /// pre-v1.5.0 bytes EXACTLY. A strength that only nearly vanished at its
+    /// own neutral would rewrite every photo in the library the day it shipped.
+    #[test]
+    fn the_profile_strengths_scale_the_correction_and_100_changes_nothing() {
+        use crate::recipe::LensProfile;
+        let profile = LensProfile {
+            vignette: (0..16).map(|i| 1.0 + 0.42 * (i as f32 / 15.0).powi(2)).collect(),
+            distortion: (0..16).map(|i| 1.0008 - 0.053 * (i as f32 / 15.0).powi(2)).collect(),
+            vignette_on: true,
+            distortion_on: true,
+            ..Default::default()
+        };
+        let base =
+            DynamicImage::ImageRgb8(RgbImage::from_pixel(120, 80, image::Rgb([100, 100, 100])));
+        let at = |vig: f32, dist: f32| EditRecipe {
+            lens_profile: profile.clone(),
+            lens_profile_vignetting_scale: vig,
+            lens_profile_distortion_scale: dist,
+            ..Default::default()
+        };
+        // (a) 100 is the identity, to the byte — and through the WHOLE tail, so
+        // the distortion strength's effect on the resample counts too.
+        let tail = |r: &EditRecipe| {
+            frame_and_finish(
+                develop_preview(&base, r),
+                r,
+                &geometry_profile(r),
+                FilmScale::NATIVE,
+                CropPolicy::Cut,
+            )
+            .to_rgb8()
+        };
+        let neutral = at(100.0, 100.0);
+        let mut bare = neutral.clone();
+        bare.lens_profile_vignetting_scale = 100.0;
+        bare.lens_profile_distortion_scale = 100.0;
+        assert_eq!(tail(&neutral).as_raw(), tail(&bare).as_raw(), "100 must be the identity");
+        assert!(
+            matches!(geometry_profile(&neutral), std::borrow::Cow::Borrowed(_)),
+            "and at 100 with the CA pair at rest nothing is even allocated"
+        );
+
+        // (b) The VIGNETTING strength scales the lift: half at 50, none at 0,
+        // and twice at 200. Read at a corner, where the gain is largest.
+        let corner = |vig: f32| tail(&at(vig, 100.0))[(0, 0)][0] as f32;
+        let (full, half, none, double) = (corner(100.0), corner(50.0), corner(0.0), corner(200.0));
+        assert!(none < half && half < full && full < double, "{none} {half} {full} {double}");
+        assert_eq!(none, 100.0, "0 is exactly no profile vignetting, so the corner is untouched");
+        // HOW FAR is asserted on the gain LUT rather than on the rendered byte.
+        // The claim is exact — half the slider, half the departure from 1 — and
+        // an 8-bit corner cannot witness it: the byte is rounded, the transfer
+        // pair is itself a LUT, and the two errors bias a RATIO of small
+        // numbers by a couple of percent (measured: 0.477 where 0.5 is meant).
+        // Ordering and the two endpoints above are exact and stay where the
+        // photographer sees them; the arithmetic is checked where it lives.
+        let gains = |s: f32| profile_vignette_lut(&profile.vignette, s);
+        let (g100, g50, g200) = (gains(100.0), gains(50.0), gains(200.0));
+        assert_eq!(
+            g100,
+            (0..LUT_N)
+                .map(|i| profile_knot_interp(&profile.vignette, i as f32 / (LUT_N - 1) as f32))
+                .collect::<Vec<_>>(),
+            "100 hands the profile's own gains straight through"
+        );
+        for i in 0..LUT_N {
+            assert!(
+                ((g50[i] - 1.0) - (g100[i] - 1.0) * 0.5).abs() < 1e-6,
+                "gain {i}: 50 must halve the lift, {} vs {}",
+                g50[i],
+                g100[i]
+            );
+            assert!(
+                ((g200[i] - 1.0) - (g100[i] - 1.0) * 2.0).abs() < 1e-6,
+                "gain {i}: 200 must double it, {} vs {}",
+                g200[i],
+                g100[i]
+            );
+        }
+        assert!(gains(0.0).iter().all(|g| *g == 1.0), "0 is exactly no correction");
+
+        // (c) The DISTORTION strength scales the resample, and 0 switches the
+        // stage OFF rather than running an identity spline — which is visible
+        // in the profile it composes, not just in the pixels.
+        let zero = at(100.0, 0.0);
+        let composed = geometry_profile(&zero);
+        assert!(composed.distortion.is_empty(), "0 drops the knots: {:?}", composed.distortion);
+        assert!(!composed.geometry_active(), "…so the resample does not run at all");
+        let dist_only = |d: f32| {
+            let r = EditRecipe {
+                lens_profile: LensProfile { vignette_on: false, ..profile.clone() },
+                lens_profile_distortion_scale: d,
+                ..Default::default()
+            };
+            geometry_profile(&r).distortion.clone()
+        };
+        let (k100, k50) = (dist_only(100.0), dist_only(50.0));
+        assert_eq!(k100, profile.distortion, "100 hands the profile's own knots straight through");
+        for (i, (a, b)) in k50.iter().zip(&k100).enumerate() {
+            assert!(
+                ((a - 1.0) - (b - 1.0) * 0.5).abs() < 1e-6,
+                "knot {i}: 50 must halve the DEPARTURE from identity, {a} vs {b}"
+            );
+        }
+    }
+
     #[test]
     fn lens_profile_vignette_lifts_corners_only_and_geometry_roundtrips() {
         use crate::recipe::LensProfile;
@@ -11514,6 +13454,7 @@ mod tests {
             k: [-0.127336, 0.087661, -0.019675],
             focal_x: None,
             sensor_format_factor: 1.0,
+            vignette: None,
         };
         n.mask_warp_knots(MASK_WARP_DIMS, crate::recipe::MASK_WARP_KNOTS).expect("solvable")
     }
@@ -12311,6 +14252,7 @@ mod tests {
                     &recipe,
                     &crate::diag::pixels(),
                     MaskFrame::AsRendered,
+                    None,
                 ),
                 &profile,
                 0.0,
@@ -12430,7 +14372,7 @@ mod tests {
         assert_eq!(a.to_rgb8().as_raw(), b.to_rgb8().as_raw(), "an inert profile moved a mask");
         // …and both equal the explicitly-unadapted chain, which is what
         // "unchanged from before this batch" means.
-        let c = develop_preview_framed(&base, &none, &crate::diag::pixels(), MaskFrame::AsRendered);
+        let c = develop_preview_framed(&base, &none, &crate::diag::pixels(), MaskFrame::AsRendered, None);
         assert_eq!(a.to_rgb8().as_raw(), c.to_rgb8().as_raw());
 
         // (a2) The case the identity short-circuit in `MaskUnwarp::new` exists
@@ -12751,8 +14693,8 @@ mod tests {
         // the fix, not a counter-example to the ordering, and asking with the
         // frame pinned is how the ordering stays measurable.
         let anon = crate::diag::pixels();
-        let masked_off = develop_preview_framed(&base, &off, &anon, MaskFrame::AsRendered);
-        let masked_on = develop_preview_framed(&base, &on, &anon, MaskFrame::AsRendered);
+        let masked_off = develop_preview_framed(&base, &off, &anon, MaskFrame::AsRendered, None);
+        let masked_on = develop_preview_framed(&base, &on, &anon, MaskFrame::AsRendered, None);
         assert_eq!(
             masked_off.to_rgb8().as_raw(),
             masked_on.to_rgb8().as_raw(),
@@ -15591,7 +17533,8 @@ mod tests {
         };
         let recipe = EditRecipe { masks: vec![adj.clone()], ..Default::default() };
         let coverage = mask_coverage(&adj, &base, MaskFrame::AsRendered);
-        let rendered = develop_preview_framed(&base, &recipe, &crate::diag::pixels(), MaskFrame::AsRendered).to_rgb8();
+        let rendered =
+            develop_preview_framed(&base, &recipe, &crate::diag::pixels(), MaskFrame::AsRendered, None).to_rgb8();
         let (mut claimed, mut agreed, mut clear, mut clean) = (0u32, 0u32, 0u32, 0u32);
         for (x, y, p) in coverage.enumerate_pixels() {
             let lit = rendered.get_pixel(x, y).0[1];
@@ -15759,7 +17702,8 @@ mod tests {
     fn sharpening_raises_local_contrast_at_an_edge() {
         // A vertical edge: sharpening should push the dark side darker / bright
         // side brighter (overshoot), increasing the edge step. The flat ends
-        // (outside the ±3 px unsharp support at radius 1) must NOT move — a
+        // (outside the ±4 px Gaussian support at the default 1.0 radius) must
+        // NOT move — a
         // global pointwise contrast curve also grows the step, and only the
         // flat-field control tells the two apart (U14).
         let (w, h) = (12usize, 1usize);
@@ -16881,6 +18825,7 @@ mod tests {
                 &EditRecipe { masks: vec![m], ..Default::default() },
                 &MaskRasterSnapshot::default(),
                 MaskFrame::AsRendered,
+                FilmScale::NATIVE,
             );
             out
         };
@@ -16960,6 +18905,7 @@ mod tests {
                 &EditRecipe { masks: vec![m], ..Default::default() },
                 &MaskRasterSnapshot::default(),
                 MaskFrame::AsRendered,
+                FilmScale::NATIVE,
             );
             out
         };
@@ -17009,6 +18955,7 @@ mod tests {
             },
             &MaskRasterSnapshot::default(),
             MaskFrame::AsRendered,
+            FilmScale::NATIVE,
         );
         let energy = |d: &[[f32; 3]], lo: usize, hi: usize| -> f32 {
             let mut e = 0.0;
@@ -17044,6 +18991,7 @@ mod tests {
             },
             &MaskRasterSnapshot::default(),
             MaskFrame::AsRendered,
+            FilmScale::NATIVE,
         );
         assert!(
             energy(&softened, 0, ew / 4) < energy(&flat, 0, ew / 4) * 0.99,
@@ -17573,10 +19521,10 @@ mod tests {
         let snapshot = load_mask_raster_snapshot(&recipe, &crate::diag::pixels()).unwrap();
         let untouched = vec![[0.25, 0.25, 0.25]; 4];
         let mut before_delete = untouched.clone();
-        apply_develop_with_rasters(&mut before_delete, 2, 2, &recipe, &snapshot, MaskFrame::AsRendered);
+        apply_develop_with_rasters(&mut before_delete, 2, 2, &recipe, &snapshot, MaskFrame::AsRendered, FilmScale::NATIVE);
         std::fs::remove_file(&mask).unwrap();
         let mut after_delete = untouched.clone();
-        apply_develop_with_rasters(&mut after_delete, 2, 2, &recipe, &snapshot, MaskFrame::AsRendered);
+        apply_develop_with_rasters(&mut after_delete, 2, 2, &recipe, &snapshot, MaskFrame::AsRendered, FilmScale::NATIVE);
         assert_eq!(after_delete, before_delete);
         assert_ne!(after_delete, untouched, "the retained white mask must still apply");
         let _ = std::fs::remove_dir_all(&dir);
@@ -18027,24 +19975,39 @@ mod tests {
         assert_eq!(composed.ca_b, vec![1.0], "the untouched axis is exactly neutral");
     }
 
-    /// R25 B3: every CARRIED control renders NOTHING — the whole claim
-    /// `Tier::CarriedOnly` makes, re-derived from the registry so a row that
-    /// changes tier without gaining an engine stage fails here.
+    /// **Every tier that renders nothing renders nothing** — re-derived from
+    /// the registry so a row that changes tier without gaining an engine stage
+    /// fails here.
+    ///
+    /// R25 B3 wrote this over `Tier::CarriedOnly` alone, when that tier had
+    /// fifteen members. v1.5.0 emptied it — Track F: everything this app can
+    /// set now renders — so the sieve is the PROPERTY, `!tier.renders()`,
+    /// rather than the one tier that happened to have the members, and
+    /// `passthrough` is what keeps it from being a test over nothing. The
+    /// opposite direction, that the twenty-four promoted rows really do render,
+    /// is `advisor::catalogue::tests::
+    /// nothing_is_carried_any_more_and_every_row_that_left_renders` plus each
+    /// operator's own module test.
     #[test]
-    fn carried_detail_renders_nothing() {
-        use crate::advisor::catalogue::{global_value, Shape, Tier, RECIPE_CONTROLS};
+    fn a_tier_that_renders_nothing_renders_nothing() {
+        use crate::advisor::catalogue::{global_value, Shape, RECIPE_CONTROLS};
         let img = DynamicImage::ImageRgb16(ImageBuffer::from_fn(64, 48, |x, y| {
             Rgb([(x as u16) * 900, (y as u16) * 1200, ((x + y) as u16) * 500])
         }));
         let neutral_recipe = EditRecipe::default();
         let neutral = develop_preview(&img, &neutral_recipe).to_rgb16();
         let mut probed = 0usize;
-        for c in RECIPE_CONTROLS.iter().filter(|c| c.tier == Some(Tier::CarriedOnly)) {
+        for c in RECIPE_CONTROLS.iter().filter(|c| c.tier.is_some_and(|t| !t.renders())) {
             // Through serde, so a renamed field cannot slip past — and BY
-            // SHAPE, because B3 put a flag on this tier.
+            // SHAPE, because B3 put a flag on this tier and B4 a whole map.
             let mut json = serde_json::to_value(&neutral_recipe).expect("recipe serialises");
             json[c.name] = match c.shape {
                 Shape::Bool => serde_json::json!(true),
+                // `passthrough` is a MAP of crs keys nobody interprets, so the
+                // probe has to be a key Lightroom really writes — an invented
+                // one would be dropped and the probe would move nothing, which
+                // this test would then read as inertness.
+                Shape::EngineCarrier => serde_json::json!({ "PerspectiveVertical": "-35" }),
                 _ => serde_json::json!(c.range.map(|(_, hi)| hi).unwrap_or(1.0)),
             };
             let mut r: EditRecipe = serde_json::from_value(json)
@@ -18059,7 +20022,7 @@ mod tests {
             let out = develop_preview(&img, &r).to_rgb16();
             assert!(
                 out.pixels().zip(neutral.pixels()).all(|(p, q)| p.0 == q.0),
-                "{}: a CarriedOnly control moved a pixel — it is not carried, it renders",
+                "{}: a non-rendering tier moved a pixel — then it is not carried, it renders",
                 c.name
             );
             // The GEOMETRIC stage runs after `develop_preview`, so inertness
@@ -18069,12 +20032,37 @@ mod tests {
             assert_eq!(
                 *geometry_profile(&r),
                 *geometry_profile(&neutral_recipe),
-                "{}: a CarriedOnly control changed the composed lens geometry",
+                "{}: a non-rendering tier changed the composed lens geometry",
+                c.name
+            );
+            // …nor the stage AFTER the geometry, which v1.5.0 added: an
+            // operator that reached only the post-crop finish would have passed
+            // both assertions above and still changed the delivered frame.
+            let tail = |r: &EditRecipe| {
+                frame_and_finish(
+                    DynamicImage::ImageRgb16(neutral.clone()),
+                    r,
+                    &geometry_profile(r),
+                    FilmScale::NATIVE,
+                    CropPolicy::Cut,
+                )
+                .to_rgb16()
+            };
+            assert!(
+                tail(&r).pixels().zip(tail(&neutral_recipe).pixels()).all(|(p, q)| p.0 == q.0),
+                "{}: a non-rendering tier moved a pixel in the finishing pass",
                 c.name
             );
             probed += 1;
         }
-        assert!(probed >= 24, "premise: B2's nine plus B3's fifteen, got {probed}");
+        // The premise, and it is now a NAMED one: with `CarriedOnly` empty,
+        // `passthrough` is the only row this sieve can reach, so an unnamed
+        // count would slide to zero the day someone retired it.
+        assert_eq!(
+            probed, 1,
+            "premise: B4's `passthrough` is the last non-rendering row — Track F emptied \
+             `CarriedOnly`, so a second one here is a decision and a zero is a hole"
+        );
     }
 
     /// L04-2: the C2 coordinate contract — the GUI's normalised maps carry

@@ -1,7 +1,7 @@
 {
   "version": 2,
   "coord_era": 1,
-  "schema_era": 1,
+  "schema_era": 2,
   "exposure_ev": 0.0,
   "contrast": 0.0,
   "highlights": 0.0,
@@ -78,6 +78,18 @@
   "lens_vignette": 0.0,
   "lens_vignette_mid": 50.0,
   "lens_distortion": 0.0,
+  "lens_profile_distortion_scale": 100.0,
+  "lens_profile_vignetting_scale": 100.0,
+  "perspective_vertical": 0.0,
+  "perspective_horizontal": 0.0,
+  "perspective_rotate": 0.0,
+  "perspective_scale": 100.0,
+  "perspective_aspect": 0.0,
+  "perspective_x": 0.0,
+  "perspective_y": 0.0,
+  "perspective_upright": 0.0,
+  "upright_transform": [],
+  "crop_constrain_to_warp": false,
   "ca_r": 0.0,
   "ca_b": 0.0,
   "auto_lateral_ca": false,
@@ -118,6 +130,7 @@
     "mask_warp_center": null
   },
   "masks": [],
+  "retouch": [],
   "rationale": "",
   "confidence": 0.0
 }

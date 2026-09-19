@@ -73,12 +73,159 @@ coercing either to RGB would invent a colour model.
   sRGB assumption is disclosed because the file contains no tag that can make
   the choice authoritative.
 
+### Imported spot removal (v1.5.0 F9)
+
+`crs:RetouchAreas` — the dust, the power line, the stranger on the beach — is
+read into `EditRecipe::retouch` and re-solved from the frame's own pixels by
+`retouch::heal_planar`, first in the develop chain so no later stage sharpens a
+patch seam. Measured on the reference library: 25 of 175 sidecars, 121 areas,
+every one of which used to come back onto the canvas with nothing on screen to
+say so.
+
+Two axes, kept apart: the FILL (`crs:SpotType` crossed with `crs:fill_method` —
+5 plain heals, 99 classical PatchMatch, 17 Firefly) and the GEOMETRY (84
+ellipses, 37 brushes, the brushes reusing the mask side's own `BrushStroke` and
+rasteriser). For 116 of the 121 Adobe keeps the pixels in its own store, so the
+panel names how many it synthesised and offers to re-run the generative model
+over exactly those shapes. Coordinates are pre-lens-correction — `pm_whole_image`
+measures the native sensor rectangle on every area — so they need no unwarp, but
+they do turn: 7 of the 25 are `tiff:Orientation="8"`.
+
+### Stacking and merging (v1.5.0 Track S)
+
+`src/stack/` merges several frames of one scene into one: an HDR merge, an
+exposure fusion, a focus stack and a noise stack, over one alignment.
+
+**Alignment** (`stack/align.rs`) is inverse-compositional Lucas–Kanade on a
+Gaussian pyramid, solving in LOG LUMINANCE — a change of exposure is a constant
+offset there, and a gradient is blind to a constant, which is the whole reason
+a two-stop bracket registers at all. Coarse levels solve translation only; the
+full affine starts at 64 px. Measured reach ≈ 2–4 px at the coarsest level ×
+2^(levels−1): 12 px on 192×144, 48 px on 384×288, 64 px on 768×576. A per-block
+pass then recovers a subject that moved on its own; a block below the texture
+floor or below 32 usable samples at one level is skipped at that level rather
+than dropped.
+
+Neither pass trusts a Gauss–Newton step: each keeps the parameters whose cost
+it MEASURED on the following pass, not the step the linearisation proposed.
+The global fit additionally weights samples Geman–McClure against a scale of
+three times the median absolute residual, so a region that moved on its own
+cannot drag the camera's transform after it; the block pass deliberately does
+not (that region is what it exists to find) and instead has to beat DOING
+NOTHING by 10 % (`BLOCK_MARGIN`) before its answer is kept — and then the FIELD
+is asked whether it believes itself, because a near-periodic texture matches
+itself again one period over and a block that locked onto the wrong period
+beats doing nothing honestly. A block survives only if one of its four
+neighbours corroborates it to within half its own length
+(`FIELD_AGREEMENT`): a subject that moved is several blocks wide and its
+blocks agree, a period re-lock is one block disagreeing with everything around
+it. Measured on a five-frame fixture that is registered exactly: without the
+weighting the frame carrying a moving subject aligned to 539.7 px of corner
+travel (69.42 % of the frame outside); without the margin the blocks invented
+7.5–23.3 px of local field on frames that had not moved at all; and with both
+but no field test, six of 96 blocks still answered, five of them nowhere near
+the one thing that had changed and every one of them at ±(4.8, −5.7) px — one
+period of that fixture's own texture, along the diagonal its slow structure
+moves 0.006 in, a fifth of the grain.
+
+**HDR merge** (`stack/merge/radiance.rs`): exposures are measured on the pixels
+(median log₂ luma ratio, samples inside 0.0015–0.95 linear) rather than read off
+metadata. Each sample's weight is `(1 − (2v−1)¹²)` — Debevec's hat without the
+taper through the middle — taken as the MINIMUM over the three channels, times
+2^ev. The headroom is the 99.9th percentile of the merged radiance, clamped to
+0–8 EV, and a two-stop-knee hyperbola in stop space brings it under white as a
+uniform per-pixel scale on the brightest channel.
+
+**Composites** (`stack/merge/composite.rs`) judge on the ENCODED mean of the
+three channels, because they are judgements about how a picture looks. Fusion =
+detail × saturation × well-exposedness (Mertens, σ = 0.2); focus = the detail
+map blurred at 0.6 % of the short side, cubed; noise = a robust weighted mean in
+linear light, rejecting past three MADs. The blend is a Laplacian pyramid down
+to a 16 px short side.
+
+Verified end to end on real files through the CLI: measured exposures −2.49 /
+−4.98 EV against a −2.5 / −5.0 truth; headroom 3.79 EV against log₂(13.5) =
+3.75; a window that was flat at 0.0000 came back with 0.0784 of range while a
+region below the knee stayed byte-identical; the fusion kept 0.298 and 0.290 of
+range in two regions neither source frame held together; the focus stack's two
+halves carried 8505 and 8542 of their own source's detail energy.
+
+The noise stack is measured against the fixture's own truth, and because it is
+the one merge alignment can only cost, it is measured BOTH ways. Five frames,
+384×256, one of them carrying a ghost, grain σ ≈ 0.029 (`noisemeas6.py`):
+
+| | outside a source | rms vs truth | against one frame | worst in the ghost |
+|---|---|---|---|---|
+| one frame | — | 0.02982 | — | 0.1219 |
+| the ghost frame | — | 0.14401 | — | 0.7698 |
+| stacked, no alignment | 0 % | 0.01472 | ÷2.03 | 0.0702 |
+| stacked, aligned | 0.87 % | 0.01514 | ÷1.97 | 0.0663 |
+
+The ideal for five frames is ÷2.24. Aligning frames that were already
+registered therefore costs 3 % of the noise reduction and buys back a little of
+the ghost; the same table read at the two earlier states of the aligner is in
+`stack/align.rs`, because those numbers are what its guards are for.
+
+### HDR edit mode and its SDR rendition (v1.5.0 F8)
+
+Lightroom's HDR mode moves diffuse white down inside the capture and calls the
+stops above it headroom (`crs:HDRMaxValue`). Every file this engine writes is
+SDR, so what it owes such a photograph is Lightroom's own answer: the SDR
+rendition, tuned by the seven `crs:SDR*` controls that panel shows only in HDR
+mode. `render/hdr.rs` renders it as the develop's LAST stage — one tone pass
+through the already-calibrated knot model plus the Basic panel's own Clarity
+operator at the same radius (`clarity_radius`, now one definition instead of
+two). The headroom enters as a negative Highlights push, which is what an
+HDR→SDR shoulder is in a display-referred pipeline; `crs:HDREditMode` gates all
+seven, so a stale SDR value cannot re-tone a photograph whose owner has left
+the mode.
+
+Nine keys, all `Tier::Rendered` — read, rendered and written back. Two
+constants are NOT measured and say so in the source: not one of the reference
+library's 175 sidecars has `HDREditMode="1"`, so the shoulder's slope and
+Brightness's stops-per-100 are first-principles values. The Lightroom kit's
+three HDR cases (`HDR-ON`, `HDR-EXP+1`, `HDR-EXP+1-SDR`) fix the shoulder at
+one headroom and constrain the four SDR tonal controls jointly; the shoulder's
+linearity in stops needs a second headroom value the kit does not have.
+
+### Camera profile (v1.5.0 F7)
+
+A Lightroom sidecar names the rendering it was developed through, and since
+v1.5.0 that name is read rather than carried. `src/dcp.rs` parses the `.dcp`
+Adobe installed (a plain TIFF/IFD, every offset bounds-checked because the file
+is the user's, not ours) and `render/profile.rs` applies it between the camera
+matrix and the working-space encode: reference matrix → HSV → `HueSatMap` →
+RGB → baseline-exposure gain → HSV → `LookTable` → RGB → tone curve, which is
+the order RawTherapee's `rtengine/dcp.cc` documents. Nothing Adobe ships is
+bundled; a machine with no profiles gets a named refusal.
+
+- Table entry: `(hue shift in degrees, saturation scale, value scale)`, stored
+  `index = (val * hueDivisions + hue) * satDivisions + sat` (**measured** — at
+  saturation index 0 the saturation scale is exactly 1.0 on 60 of the 60
+  three-dimensional tables in the installed pool under this reading and 0 of 60
+  under either alternative; the two-dimensional tables Adobe actually ships
+  cannot discriminate).
+- Tone curve applied Adobe's way: the curve moves the max and min channels and
+  the median is placed proportionally between them. Per channel desaturates.
+- Two calibrations blend in **reciprocal** temperature — the midpoint between
+  2856 K and 6504 K is 3969 K, not 4680 K.
+- **Stated deviation**: the profile's colour MATRIX is not adopted. The engine
+  keeps the camera→XYZ transform its calibration lane was measured against, so
+  only the tables and the tone curve render.
+- `crs:LookTable`'s payload is **not decodable**: base85 over a measured
+  85-character alphabet, 6.408 bits/char, no decompression under zlib/deflate/
+  gzip/bzip2/xz/lzma/zstd/lz4 at any offset ≤ 256 under four conventions. It is
+  named in the panel and in `diag.warn` rather than silently dropped.
+
 ### Source
 
 - `src/decode.rs` — extension dispatch, camera count, fallback rendition,
   decoder-failure classification, parser-panic containment, and RAW gate.
 - `src/render.rs` — CFA geometry fit, Bayer/X-Trans selection, `orient_f32`,
-  and the oriented full-resolution buffer.
+  the oriented full-resolution buffer, and `resolve_camera_profile`.
+- `src/dcp.rs` — `.dcp` parse, table lookup and profile discovery (v1.5.0).
+- `src/adobe.rs` — the Adobe Camera Raw roots `dcp.rs` and `lcp.rs` share.
+- `src/render/profile.rs` — the profile render stage (v1.5.0).
 - `docs/ARCHITECTURE.md` — release decode matrix and refusal policy.
 - `docs/ROADMAP-archive.md` — X-S10 before/after measurements.
 
@@ -115,14 +262,34 @@ The shared renderer stores pixels as deterministic `f32` RGB and explicitly
 decodes to linear light around operations that require radiometric arithmetic;
 the ordinary working buffer itself is sRGB-gamma RGB, so this is not described
 as a wholly linear pipeline. After orientation and the optional AI denoise (a
-RAW's sensor mosaic is denoised before demosaic, ahead of everything here; a
-baked source goes through SCUNet at this point), white balance runs before the
+RAW's sensor mosaic is denoised before demosaic by AutoShade's OWN network —
+DPIR's DRUNet-colour architecture carrying weights fine-tuned for this exact
+transform on RawNIND pairs (Brummer & De Vleeschouwer, UCLouvain Dataverse,
+doi:10.14428/DVN/DEQCIM, CC BY-SA 4.0) and synthetic sensor noise, released as
+`autoshade-raw-denoise-v1.pth` with the whole training pipeline in `scripts/`
+(`fetch_rawnind.py` → `prep_pairs.py` / `prep_clean.py` → `train_raw.py`, with
+`val_scales.py`, `lr_realset.py` and `denoise_bench.py` for the acceptance
+measurements); a baked source goes through SCUNet at this point) comes the
+AUTO LATERAL-CA SOLVE when the sidecar asks for it — Lightroom's
+「Remove chromatic aberration」 is an instruction rather than a number, so
+`render::lens::solve_lateral_ca` least-squares `R − G` against the radial lever
+`r·∂G/∂r` and answers in the manual pair's own slider units. Then white balance
+runs before the camera calibration, DE-FRINGING (`render/lens.rs`: two hue
+windows, on high-contrast edges only, before anything moves radially), the
 composed profile/manual vignette and dehaze;
 dehaze inverts the airlight model `I = J·t + A(1−t)`. The tone LUT then combines
-exposure, contrast, whites, blacks, Highlights, shadows, base curve, and the
-master point curve before RGB point curves, eight-band HSL, colour grading,
+exposure, contrast, whites, blacks, Highlights, shadows, base curve, the
+parametric curve and the master point curve before the B&W grey mix (when the
+photo is black and white), RGB point curves, eight-band HSL and the point
+colours, colour grading,
 clarity, Texture, saturation/vibrance, noise reduction, sharpening, and local
-adjustments.
+adjustments. The frame is then resampled — lens geometry, the Transform/Upright projective
+step (`render/perspective.rs`), straighten, crop —
+and only after that does the **finishing pass** run: the post-crop vignette and
+film grain, whose whole definition is "after the crop" (`render/finish.rs`).
+The RAW render, the baked render, the GUI canvas and the web preview all reach
+it through one function, so the frame a photographer judges and the frame that
+ships cannot part company.
 
 `build_tone_lut` samples an eight-knot monotone cubic Hermite curve. Its
 `tone_knot_weights` derive each control's influence from adjacent exposure-curve
@@ -144,6 +311,12 @@ supposed to remove.
 - Tone interpolation: Fritsch–Carlson monotone cubic Hermite
   (**standard designed algorithm**); `tone_knot_weights` replaced uniform
   slider weights after the old curve could flatten or invert intervals.
+- Parametric curve (v1.5.0, `render::parametric_lut`): quadratic B-spline on
+  knots `[0, 0, 0, s₁, s₂, s₃, 1, 1, 1]` with the splits as interior knots
+  (default 25/50/75 %, bands 10–70/20–80/30–90, 10-point gap), control values
+  at the Greville abscissae, a region at ±100 moving its centre by ½ × its
+  width; composed after the slider model and before the point curve
+  (**designed, provisional** until the kit's `PARAM-*` exports).
 - White balance: gains are generated from Kelvin/tint and normalized so green
   is `1`; cool-side coefficients and the 6688 K red plateau were
   **calibrated against measured Lightroom exports**.
@@ -160,13 +333,49 @@ supposed to remove.
   (**measured Lightroom fit**).
 - Negative Texture depth: `d = 0.558583` in the hyperbolic slider law
   (**calibrated against the −50/−100 depth ratio**).
-- Sharpening sigma: `clamp(0.0008·short_edge, 0.7, 2.0)` pixels, implemented
-  with three box passes (**designed**, not Lightroom-measured).
-- Luma noise reduction: a separable BOX blur plus an edge range weight, with
-  `radius = round(1 + 2·t)` pixels (floored at 1) and `range = 0.05`
-  (**designed approximation**). It is a box radius, not a Gaussian sigma; the
-  earlier `sigma = 0.5 + 1.5·t` in this line described an operator this repo
-  has never shipped.
+- Camera calibration (v1.5.0, `render::Calibration`): a 3×3 built in linear
+  light from the three primaries — hue rotates a primary's chroma by
+  `CAL_HUE_REACH_RAD` (30° at ±100), saturation scales it by `CAL_SAT_REACH`
+  (0.5 at ±100) — plus a green–magenta shadow tint of `CAL_SHADOW_TINT_REACH`
+  (0.15 at ±100) under a luminance knee at 0.18 (**designed, provisional**
+  until the kit's `CAL-*` exports).
+- B&W mixer (v1.5.0): each band lightens or darkens its own greys by up to
+  `GRAY_MIX_STOPS` = 1.5 EV at ±100, over the HSL mixer's band membership and
+  its chroma gate (**designed, provisional** until `BW-*`).
+- Point Color (v1.5.0): membership is the product of the swatch's three stored
+  trapezoids; a full hue shift turns `POINT_HUE_SHIFT_TURNS` (30°), a full
+  luminance shift scales L by `POINT_LUM_REACH` (±0.5), and the relative hue
+  window spans `POINT_HUE_HALF_SPAN` (60°) per half. A sampled swatch
+  materialises Lightroom's own windows (±0.18 full, ±0.73 none, read off two
+  published Lua dumps), and the Range slider scales every half-width by
+  `0.25 + 1.5·range` — 1 at Lightroom's default 0.5 (**designed, provisional**
+  until `PC-*`).
+- Detail panel scale (v1.5.0, `render/detail.rs`): every radius is in
+  full-resolution ("film") pixels, converted by `FilmScale` = full short edge ÷
+  working-raster short edge; noise thresholds divide by that factor squared
+  (**designed**). This retires the V2 §4c/§4d rules (sharpening σ =
+  `clamp(0.0008·short_edge, 0.7, 2.0)` raster px, NR at a raster-pixel radius),
+  under which one slider value meant two structures at preview and at export.
+- Sharpening: unsharp mask on luma, true Gaussian σ = Radius (0.5–3.0 film px;
+  an absent key reads Lightroom's 1.0), sampled no finer than 0.6 raster px
+  with the amount faded by the ratio of the two `1 − Ĝ` transfers at Nyquist;
+  gain 1.0 at Amount 100; halo limiter `L·tanh(boost/L)` with
+  `L = 0.02 → 1.0` over Detail²; Laplacian fine band `0 → 0.5` over Detail;
+  Masking edge gate full at a blurred-luma gradient of `0 → 0.04` per film px
+  (**designed, provisional** until the kit's `SH-*` ladder).
+- Luminance noise reduction: self-guided filter on luma, box radius
+  `1 → 4` film px and noise threshold `0.004 → 0.054` (gamma units) over
+  Luminance, the threshold scaled `1.6 → 0.4` over Detail, ε = threshold²;
+  Contrast re-adds the residual box-blurred at twice the radius
+  (**designed, provisional** until `NR-*`).
+- Colour noise reduction: fast guided filter on `R − Y` and `B − Y`,
+  subsample `s = max(2, ⌊r/2.5⌋)`, radius `2 → 16` film px over Color, luma
+  edge threshold `0.08 → 0.01` over Detail, offset plane smoothed `1× → 3×`
+  wider over Smoothness, full replacement from Color 25 up (linear below)
+  (**designed, provisional** until `CNR-*`).
+- Memory: no Detail pass holds more than three f32 planes beside the frame
+  (colour NR: eight planes at `1/s²`), the spatial-pass row of
+  `decode::PIPELINE_BYTES_PER_PIXEL`.
 
 ### Measured results & disclosures
 
@@ -191,7 +400,11 @@ supposed to remove.
 ### Source
 
 - `src/render.rs` — pipeline order, transfer LUTs, dehaze, tone LUT,
-  `tone_knot_weights`, Texture arms, clarity, NR, and sharpening.
+  `tone_knot_weights`, the parametric curve, Texture arms, and clarity.
+- `src/render/detail.rs` — `FilmScale`, sharpening, luminance and colour noise
+  reduction (v1.5.0).
+- `src/render/hdr.rs` — HDR edit mode and the SDR rendition, the develop's last
+  stage (v1.5.0 F8).
 - `src/recipe.rs` — bounded global and local adjustment domains.
 - `docs/V2_PLAN.md` — white-balance, tone, detail-model calibration ledger.
   Kept outside the public tree (`.gitignore`), like the other planning memos;
@@ -932,8 +1145,18 @@ readers, never by the silent probes.
   decimals); Camera Raw defaults treated as materialisation, not edits:
   `SharpenRadius` 1.0, `SharpenDetail` 25, `LuminanceNoiseReductionDetail`
   50, `ColorNoiseReductionDetail` 50, `ColorNoiseReductionSmoothness` 50.
-- `ColorNoiseReduction` is written even at 0 (the engine renders no colour
-  noise reduction; an absent key let Lightroom apply its RAW default of 25).
+- `ColorNoiseReduction` is written even at 0 (a recipe's 0 is colour noise
+  reduction off, which is what the engine renders; an absent key let Lightroom
+  apply its RAW default of 25).
+- Companions with a non-zero Lightroom default (the five above, `GrainSize`
+  25, `GrainFrequency` 50, `PostCropVignetteMidpoint`/`Feather` 50,
+  `PostCropVignetteStyle` 1): a stored 0 means absent and renders at that
+  default; a real 0 is named in `EditRecipe::explicit_zero`, written as `"0"`,
+  and read back from a sidecar that states `"0"` (v1.5.0).
+- `crs:Parametric{Shadows,Darks,Lights,Highlights}` (signed, ±100) and
+  `crs:Parametric{Shadow,Midtone,Highlight}Split` (unsigned integers): written
+  all seven or none, only when any of them differs from Adobe's defaults; an
+  absent split reads as its default (25/50/75), never as 0 (v1.5.0).
 
 ### Measured results & disclosures
 
@@ -1544,7 +1767,8 @@ and zero-confidence fields are conservation-tested to change nothing.
   vetoes, and do-no-harm.
 - `src/generative.rs` — gpt-image-2 sizing, streamed refusal attribution,
   staged publication, reimagine, and generative fill.
-- `src/retouch.rs` — deterministic heal.
+- `src/retouch.rs` — deterministic heal, float-native since v1.5.0 F9 so the
+  develop chain can run it without quantising highlights.
 - `src/correspond.rs` and `python/correspond.py` — DIFT correspondence
   field, digest pins, parse gates, and the `correspond` CLI diagnostic.
 - `docs/V2_PLAN.md`, `docs/ARCHITECTURE.md`, and `docs/ROADMAP-archive.md` —
@@ -1604,8 +1828,8 @@ than the pre-call state; model weights remain outside the repository.
 - The 61 MP RAW probe measured `151 MB` peak commit for decode,
   `1771 MB` for calibration/render preparation, and `1766 MB` for the
   full-resolution render tail; the combined process peak remained `1771 MB`.
-- The release battery is **1509 library (1494 pass + 15 `#[ignore]`d forensic
-  probes) / 24 CLI / 191 GUI / 2+2 contract** tests. Environment-gated real
+- The release battery is **1640 library (1625 pass + 15 `#[ignore]`d forensic
+  probes) / 25 CLI / 201 GUI / 2+2 contract** tests. Environment-gated real
   Lightroom, brush-table, and RAW-zoo suites are additional and are not
   smuggled into the ordinary count.
 - Tests compile at opt-level 2 (`[profile.test]` in Cargo.toml) with debug

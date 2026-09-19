@@ -39,7 +39,7 @@
     /// and authored by nothing in this app. Carried to another photo it is
     /// provenance pollution with teeth: the target's next save would write the
     /// SOURCE's Upright solution into the file beside a RAW it was never
-    /// solved for, and the read-only Transform / Calibration section would
+    /// solved for, and the read-only Transform / camera-profile section would
     /// show the wrong photo's values the moment the paste landed.
     ///
     /// The clipboard's OWN photo keeps it, on the bitmap-mask rule beside it:
@@ -2238,7 +2238,7 @@
         assert!(app.dirty, "the in-flight guard swallows a second dispatch (edit stays armed)");
 
         // A matching frame is accepted and bumps the counter + sets the texture.
-        let good = build_preview(base.clone(), app.recipe.clone(), false);
+        let good = build_preview(base.clone(), app.recipe.clone(), false, None);
         app.finish_redevelop(&ctx, Ok(good));
         assert_eq!(app.develop_count, 1, "matching frame accepted");
         assert!(app.after_tex.is_some(), "after texture set");
@@ -2249,7 +2249,7 @@
         // AND the pending edit re-armed. `dirty` is cleared first — it was
         // still true from the swallowed dispatch above, so the re-arm
         // assertion used to be vacuously satisfiable (L26).
-        let stale = build_preview(base, app.recipe.clone(), false);
+        let stale = build_preview(base, app.recipe.clone(), false, None);
         app.recipe.masks[0].exposure_ev = 1.9; // user kept dragging
         app.dirty = false;
         app.finish_redevelop(&ctx, Ok(stale));
@@ -3312,6 +3312,84 @@
         assert!(!body.contains("RetouchKind::InPlace"), "the fill went back to an in-place landing");
     }
 
+    /// v1.5.0: the canvas preview reaches its frame through the ENGINE's tail
+    /// (`render::frame_and_finish` — lens geometry → straighten → crop → the
+    /// post-crop vignette and grain), with `CropPolicy::Keep` so the frame
+    /// stays whole for slider feedback while the finishing pass is positioned
+    /// on the crop rectangle. Pinned in the source, the house pattern for a
+    /// choice made inside a worker no offline test drives (the web preview's
+    /// half of this pin lives in `render::finish`'s tests).
+    ///
+    /// MUTATION: `CropPolicy::Cut` here, or the old geometry-only chain back,
+    /// and this names it — a canvas that cropped would show a different
+    /// photograph from the one the sliders are moving, and one that skipped
+    /// the tail would show no vignette until export.
+    #[test]
+    fn the_canvas_preview_finishes_through_the_engines_own_tail() {
+        let src = include_str!("util.rs");
+        let head = src.find("pub(crate) fn build_preview(").expect("build_preview moved");
+        let body = &src[head..head + 2000];
+        assert!(
+            body.contains("autoshade::render::frame_and_finish("),
+            "the canvas preview no longer runs the engine's tail"
+        );
+        assert!(
+            body.contains("autoshade::render::CropPolicy::Keep"),
+            "the canvas must keep the whole frame and only POSITION the finish"
+        );
+        assert!(
+            !body.contains("autoshade::render::apply_lens_geometry("),
+            "a second copy of the geometry chain is exactly what the tail replaced"
+        );
+    }
+
+    /// v1.5.0: every surface that SHOWS a photo's develop, or must see the
+    /// canvas's own pixels, develops at the source's film edge
+    /// (`render::FilmScale`): the canvas preview, the web preview, both
+    /// Range-mask reference builds (a range is judged on the pixel as the
+    /// canvas's Detail passes left it), the Point Color eyedropper's sample (a
+    /// swatch is keyed to the pixel the engine will test) and the fill's
+    /// picture of the card (the look the model is asked to keep). The
+    /// analysis surfaces keep their
+    /// raster as the film, which is why this is a named list and not a blanket
+    /// rule. Pinned in the source, the house pattern for a choice made inside a
+    /// UI-thread method, a worker or a request handler no offline test drives.
+    ///
+    /// MUTATION: the edge replaced by `None` in any of the six develops (the
+    /// Detail passes then run at raster scale there, visibly stronger than the
+    /// export), and this names the function.
+    #[test]
+    fn the_surfaces_that_show_canvas_pixels_develop_at_its_film_edge() {
+        fn develops_at_film(src: &str, head: &str, edge: &str, develop: &str) {
+            let body = &src[src.find(head).unwrap_or_else(|| panic!("{head} moved"))..];
+            // The body ends at the next item, a method or a free function.
+            let rest = &body[head.len()..];
+            let next = ["\n    pub(crate) fn ", "\npub(crate) fn ", "\npub fn ", "\nfn "];
+            let end = next.iter().filter_map(|m| rest.find(m)).min().map_or(body.len(), |i| i + head.len());
+            let body = &body[..end];
+            let call = &body[body.find(develop).unwrap_or_else(|| panic!("{head}: no {develop}"))..];
+            // The ARGUMENTS, never the callee: `develop_preview_film(` spells
+            // the word itself, so a whole-call match stayed green with `None`
+            // in the film slot (the v1.5.0 falsification, M13).
+            let args = &call[develop.len()..call.find(';').unwrap_or(call.len())];
+            assert!(body.contains(edge), "{head} no longer reads the source's film edge");
+            assert!(args.contains("film"), "{head} develops at raster scale: {args}");
+        }
+        let canvas = include_str!("canvas.rs");
+        let framed = "develop_preview_framed(";
+        develops_at_film(canvas, "pub(crate) fn refresh_mask_overlay(", "self.film_short_edge()", framed);
+        develops_at_film(canvas, "pub(crate) fn handle_range_pick(", "self.film_short_edge()", framed);
+        develops_at_film(canvas, "pub(crate) fn handle_point_color_pick(", "self.film_short_edge()", framed);
+        let fill = include_str!("panels/retouch.rs");
+        develops_at_film(fill, "pub(crate) fn start_fill(", "autoshade::decode::film_short_edge(&path)", framed);
+        let workers = include_str!("workers.rs");
+        develops_at_film(workers, "pub(crate) fn start_redevelop(", "self.film_short_edge()", "build_preview(");
+        let util = include_str!("util.rs");
+        develops_at_film(util, "pub(crate) fn build_preview(", "film_short_edge", "develop_preview_film(");
+        let serve = include_str!("../../serve.rs");
+        develops_at_film(serve, "fn api_develop(", "decode::film_short_edge(&src)", "develop_preview_film(");
+    }
+
     /// The immutability rule for PIXELS: an in-place retouch (heal / clone /
     /// denoise) on the pristine ✨ card bakes into a new ✎ card; the ✨ card
     /// keeps its raster.
@@ -3780,6 +3858,103 @@
         assert!(
             save.contains("pixels: st.origin.clone().map(|o| (o, st.kind.on_ai_pixels())),"),
             "the save's pixel link no longer reads the card's kind"
+        );
+    }
+
+    /// v1.5.0 Track S: a stack lands as a NEW ▦ card on the ◈ card's terms —
+    /// the merged master is its `origin`, the develop it was run from is its
+    /// recipe, the frame it was made from keeps its own pixels — and it
+    /// becomes the negative. An HDR merge hands over the stops it recovered on
+    /// top of that: they arrive as the SDR rendition stage turned ON with that
+    /// much room, because without them the section would offer a range the
+    /// frame does not have, and the recovered highlights would be unreachable.
+    ///
+    /// MUTATION: `NewStacked` → `NewGenerated` in start_stack; drop the
+    /// headroom transfer in the landing; `is_remade_negative` back to ◈ alone.
+    #[test]
+    fn a_stack_lands_as_a_new_stacked_card_that_becomes_the_negative() {
+        let ctx = egui::Context::default();
+        let src = std::path::PathBuf::from("_stack_landing_test.ARW");
+        let developed = EditRecipe { contrast: 11.0, ..Default::default() };
+        let mut app = AutoShadeApp {
+            src_path: Some(src.clone()),
+            variants: vec![Variant {
+                id: ORIGINAL_VARIANT_ID.into(),
+                name: None,
+                kind: VariantKind::Original,
+                recipe: developed.clone(),
+                base: None,
+                origin: None,
+                thumb: None,
+            }],
+            recipe: developed.clone(),
+            ..Default::default()
+        };
+        app.reset_history();
+        let out = std::path::PathBuf::from("out/_stack_landing_test.stack.png");
+        let epoch = app.gen_epoch;
+        app.on_retouched(
+            &ctx,
+            Lang::En,
+            epoch,
+            Ok((
+                image::DynamicImage::new_rgba8(4, 4),
+                RetouchNote::Stacked {
+                    out: out.clone(),
+                    kind: autoshade::stack::merge::StackKind::Hdr,
+                    frames: 3,
+                    travel: 4.2,
+                    uncovered: 0.0125,
+                    headroom_ev: 3.75,
+                },
+                out.clone(),
+                RetouchKind::NewStacked,
+            )),
+        );
+        assert_eq!(
+            strip_kinds(&app),
+            vec![VariantKind::Original, VariantKind::Stacked],
+            "{}",
+            app.status
+        );
+        assert_eq!(app.active, 1, "the new ▦ card is under the canvas");
+        let card = &app.variants[1];
+        assert_eq!(card.origin.as_deref(), Some(out.as_path()), "…hanging off the merged master");
+        assert_eq!(card.recipe.contrast, developed.contrast, "…carrying the develop it was run from");
+        assert!(card.kind.is_source_based(), "a ▦ master is a camera frame, not AI pixels");
+        assert!(!card.kind.on_ai_pixels(), "…so it earns none of the AI caveats");
+        assert!(card.kind.is_remade_negative(), "…and it is the negative, remade");
+        assert!(card.recipe.hdr_edit, "the recovered stops must reach the rendition stage");
+        assert!((card.recipe.hdr_max_ev - 3.75).abs() < 1e-6, "…with the room the merge measured");
+        assert_eq!(app.variants[0].recipe, developed, "the frame it was made from keeps its develop");
+        assert_eq!(app.variants[0].origin, None, "…and its untouched pixel source");
+        assert_eq!(
+            app.negative_origin().as_deref(),
+            Some(out.as_path()),
+            "the negative is now the ▦ master"
+        );
+        assert_eq!(VariantKind::Stacked.store_str(), "stacked");
+        assert_eq!(VariantKind::from_store_str("stacked"), Some(VariantKind::Stacked));
+        // The landing line names the merge that ran and carries the three
+        // numbers worth reading before trusting a stack.
+        for want in ["3 frames", "HDR merge", "new ▦ card", "4.2 px", "1.25%", "3.75 EV"] {
+            assert!(app.status.contains(want), "{want} missing from: {}", app.status);
+        }
+        // The verb's own choices are pinned in the source (the house pattern
+        // for a worker a unit test cannot run): the stack lands as a NEW card,
+        // always at full resolution (`None` cap), and the frames the user
+        // picked JOIN this card's frame rather than replacing it.
+        let now = include_str!("panels/retouch.rs");
+        let body = &now[now.find("pub(crate) fn start_stack(").expect("start_stack moved")..];
+        let body = &body[..body.find("pub(crate) fn start_clone(").expect("start_clone moved")];
+        assert!(body.contains("RetouchKind::NewStacked,"), "the stack no longer lands as a new card");
+        assert!(
+            body.contains("let mut inputs = vec![path.clone()];"),
+            "this card's frame is no longer the stack's reference"
+        );
+        assert!(
+            body.contains("stack_files(&inputs, &opts, None, &out)"),
+            "the stack no longer runs on the full frame"
         );
     }
 
@@ -7043,13 +7218,13 @@
         // Premise, from the registry rather than from memory. It used to read
         // "every global the export can lose IS engine calibration", and R33 §G
         // ended that: `colour_field` is an unexportable global the USER asked
-        // for. So the premise is now the split itself — three rows in the
-        // tier, of which exactly the stamped calibration is un-actionable.
+        // for. So the premise is now the split itself — six rows in the tier
+        // since v1.5.0 F9, of which exactly the un-actionable ones are quiet.
         let rows: Vec<_> = RECIPE_CONTROLS
             .iter()
             .filter(|c| c.tier == Some(Tier::RenderedNotExported))
             .collect();
-        assert_eq!(rows.len(), 3, "the tier's membership moved — re-read this test");
+        assert_eq!(rows.len(), 6, "the tier's membership moved — re-read this test");
         assert!(
             rows.iter().all(|c| c.engine_only),
             "premise: no unexportable global is a value the advisor can state"
@@ -7058,15 +7233,26 @@
             .iter()
             .map(|c| c.name)
             .partition(|name| STAMPED_CALIBRATION.contains(name));
+        // Registry order, which is the order the panels draw in — Adobe's
+        // Upright solution rides with the Transform panel, above the two the
+        // engine measures for itself.
         assert_eq!(
             calibration,
-            vec!["base_curve", "lens_profile"],
-            "the engine's own per-photo measurements"
+            vec!["upright_transform", "look", "base_curve", "lens_profile"],
+            "per-photo measurements, whether this engine took them or read Adobe's"
         );
+        // v1.5.0 F9 gives this arm its second member, and the contrast with
+        // `look` — which joined the QUIET arm in F7 — is the whole judgement.
+        // A creative profile is on 92% of the library, has no picker to act on
+        // and is preserved verbatim by the merge, so a warning on every save
+        // would be noise. A retouch area is on 14% of it, a FRESH sidecar
+        // write really does drop all 121 of them, and the panel now offers
+        // something to do about it (「✨ Regenerate those areas」). Actionable
+        // and not universal is exactly what the loud arm is for.
         assert_eq!(
             chosen,
-            vec!["colour_field"],
-            "…and the one the photographer asked for by raising Strength"
+            vec!["retouch", "colour_field"],
+            "…and the two the photographer asked for and can still act on"
         );
 
         // The quiet arm: the real, universal case — a stamped base curve.
@@ -7077,6 +7263,18 @@
         assert!(
             !xmp_loss_interrupts(&[], &["base_curve", "lens_profile"]),
             "…nor both halves of the same calibration"
+        );
+        assert!(
+            !xmp_loss_interrupts(&[], &["upright_transform"]),
+            "…nor Adobe's own Upright solution, which the merge leaves in the document anyway"
+        );
+        // v1.5.0 F7, the widest member yet: 161 of the reference library's 175
+        // sidecars carry a creative Look, 152 of them Lightroom's own default.
+        // The merge preserves the element verbatim, so this one is not even a
+        // loss on the path that matters — and there is no picker to act on.
+        assert!(
+            !xmp_loss_interrupts(&[], &["look"]),
+            "…nor the creative profile Lightroom stamps on almost every file it touches"
         );
         // …and it is still SAID: quiet is not silent.
         assert!(
@@ -7512,6 +7710,128 @@
 
     /// A tall frame: egui culls shapes outside the visible clip rect, and the
     /// lower sections sit below a full screen of siblings.
+    /// v1.5.0 F9: a photograph that arrives carrying Lightroom's spot removal
+    /// SAYS so, and the ✨ re-solve is offered for exactly the areas Adobe
+    /// synthesised.
+    ///
+    /// Three arms, because two of them are the complement that makes the first
+    /// mean anything: a photo with no areas draws none of this, and a photo
+    /// whose areas are all plain `heal` gets the summary WITHOUT the button —
+    /// there is nothing for a model to redo when Lightroom only copied pixels.
+    ///
+    /// MUTATION THIS CATCHES: draw the group unconditionally; offer the ✨ verb
+    /// on the whole list instead of `is_synthesised`; count the areas with
+    /// `masks.len()`.
+    #[test]
+    fn an_imported_removal_names_itself_and_offers_the_resolve_only_where_adobe_invented() {
+        use autoshade::retouch::{RetouchArea, RetouchShape, SpotOrigin};
+        let area = |origin| RetouchArea {
+            origin,
+            feather: 0.5,
+            donor: None,
+            shape: RetouchShape::Ellipse { cx: 0.5, cy: 0.5, size_x: 0.05, size_y: 0.05 },
+        };
+        for lang in [crate::i18n::Lang::En, crate::i18n::Lang::Zh] {
+            // 1) Nothing imported: not a word of it on screen.
+            let mut clean = AutoShadeApp { lang, ..Default::default() };
+            let seen = tall_frame(&mut clean, |a, ui| a.retouch_panel(ui));
+            assert!(
+                !seen.iter().any(|t| t == tr(lang, "Imported removal")),
+                "{lang:?}: a photo with no retouch draws no group: {seen:?}"
+            );
+
+            // 2) A plain Lightroom heal: the summary, and NO ✨ verb — the
+            //    pixels were copied, so there is nothing for a model to redo.
+            let mut copied = AutoShadeApp { lang, ..Default::default() };
+            copied.recipe.retouch = vec![area(SpotOrigin::LightroomHeal)];
+            let seen = tall_frame(&mut copied, |a, ui| a.retouch_panel(ui));
+            assert!(
+                seen.iter().any(|t| t == tr(lang, "Imported removal")),
+                "{lang:?}: an imported area names itself: {seen:?}"
+            );
+            assert!(
+                !seen.iter().any(|t| t == tr(lang, "✨ Regenerate those areas")),
+                "{lang:?}: a copied repair gets no generative verb: {seen:?}"
+            );
+
+            // 3) One Adobe-synthesised area among them: the verb appears.
+            let mut invented = AutoShadeApp { lang, ..Default::default() };
+            invented.recipe.retouch = vec![
+                area(SpotOrigin::LightroomHeal),
+                area(SpotOrigin::LightroomGenerative),
+            ];
+            let seen = tall_frame(&mut invented, |a, ui| a.retouch_panel(ui));
+            assert!(
+                seen.iter().any(|t| t == tr(lang, "✨ Regenerate those areas")),
+                "{lang:?}: a synthesised area gets the re-solve: {seen:?}"
+            );
+            // …and the count in the summary is the AREAS, both of them.
+            assert!(
+                seen.iter().any(|t| t.contains('2')),
+                "{lang:?}: the summary counts the areas: {seen:?}"
+            );
+        }
+    }
+
+    /// v1.5.0 F8: a stored SDR control lights its collapsed section's ●, even
+    /// while HDR edit mode is off and it is rendering nothing.
+    ///
+    /// That combination is the whole point and the reason the dot is asserted
+    /// here rather than left to the family table's own test. A sidecar can
+    /// carry `crs:SDRBrightness="+40"` from an HDR session the photographer
+    /// later left; this program stores it, round-trips it, and deliberately
+    /// does NOT render it. A value that a file holds, that a save will write
+    /// back, and that no pixel reflects is exactly the kind a collapsed
+    /// section hides — so the ● has to be on.
+    ///
+    /// MUTATION THIS CATCHES: drive the dot from `hdr_edit` alone instead of
+    /// from the `hdr` family (arm 2 goes dark); drop the section from
+    /// `develop_panel` (every arm loses its header).
+    #[test]
+    fn a_stored_sdr_control_lights_the_hdr_section_even_with_the_mode_off() {
+        for lang in [crate::i18n::Lang::En, crate::i18n::Lang::Zh] {
+            let title = tr(lang, "HDR & SDR").to_string();
+            let lit = format!("{title}  ●");
+
+            // 1) Nothing: the section is there, and dark.
+            let mut clean = AutoShadeApp { lang, ..Default::default() };
+            let seen = tall_frame(&mut clean, |a, ui| {
+                a.develop_panel(ui);
+            });
+            assert!(
+                seen.iter().any(|t| t.starts_with(&title)),
+                "{lang:?}: the section is always drawn: {seen:?}"
+            );
+            assert!(
+                !seen.contains(&lit),
+                "{lang:?}: an untouched recipe lights nothing: {seen:?}"
+            );
+
+            // 2) A stored control with the MODE OFF — renders nothing, and
+            //    must still be visible.
+            let mut stored = AutoShadeApp { lang, ..Default::default() };
+            stored.recipe.sdr_brightness = 40.0;
+            let seen = tall_frame(&mut stored, |a, ui| {
+                a.develop_panel(ui);
+            });
+            assert!(
+                seen.contains(&lit),
+                "{lang:?}: a stored SDR control lights the ● with the mode off: {seen:?}"
+            );
+
+            // 3) …and so does the mode by itself.
+            let mut on = AutoShadeApp { lang, ..Default::default() };
+            on.recipe.hdr_edit = true;
+            let seen = tall_frame(&mut on, |a, ui| {
+                a.develop_panel(ui);
+            });
+            assert!(
+                seen.contains(&lit),
+                "{lang:?}: HDR edit mode alone lights the ●: {seen:?}"
+            );
+        }
+    }
+
     fn tall_frame(app: &mut AutoShadeApp, f: impl Fn(&mut AutoShadeApp, &mut egui::Ui)) -> Vec<String> {
         let ctx = egui::Context::default();
         crate::theme::install_theme(&ctx, crate::theme::ThemePref::Dark);
@@ -7886,10 +8206,21 @@
         use autoshade::advisor::catalogue::{family_is_active, CONTROL_FAMILIES};
         /// (family, the header the panel draws for it, a move inside it)
         type Case = (&'static str, &'static str, fn(&mut autoshade::recipe::EditRecipe));
-        let cases: [Case; 5] = [
+        let cases: [Case; 8] = [
             ("presence", "Presence", |r| r.dehaze = 40.0),
             ("detail", "Detail", |r| r.noise_reduction = 25.0),
             ("hsl", "Color Mixer (HSL)", |r| r.hsl.saturation[3] = -30.0),
+            // v1.5.0: two more families under the mixer's own header — the
+            // B&W treatment that replaces it and the point colours that
+            // follow it — and the Calibration panel's own section.
+            ("black_white", "Color Mixer (HSL)", |r| r.convert_to_grayscale = true),
+            ("point_color", "Color Mixer (HSL)", |r| {
+                r.point_colors = vec![autoshade::recipe::PointColor {
+                    hue_shift: 0.3,
+                    ..autoshade::recipe::PointColor::sampled(0.9, 0.7, 0.5)
+                }]
+            }),
+            ("calibration", "Calibration", |r| r.cal_blue_hue = -40.0),
             ("color_grade", "Color Grading", |r| r.color_grade.highlight_sat = 20.0),
             ("curves", "Curves", |r| {
                 r.green_curve = vec![autoshade::recipe::CurvePoint { input: 128, output: 140 }]
@@ -7919,6 +8250,161 @@
                 "{family}: a moved control must light {header}: {seen:?}"
             );
         }
+    }
+
+    /// v1.5.0: the Curves section draws Lightroom's parametric curve under the
+    /// point curve — four regions and three splits, in both languages — and
+    /// its ● is the OR of the two curve families: a moved REGION lights it,
+    /// a moved split alone does not (a split alone renders nothing,
+    /// `catalogue::DOT_EXEMPT`).
+    ///
+    /// MUTATION THIS CATCHES: the section's dot left at `fam("curves")` (a
+    /// parametric curve becomes an invisible adjustment), or a row dropped
+    /// from `parametric_curve`.
+    #[test]
+    fn the_curves_section_draws_the_parametric_curve() {
+        for (lang, rows) in [
+            (
+                crate::i18n::Lang::En,
+                ["Parametric curve", "Lights", "Darks", "Shadow split", "Midtone split", "Highlight split"],
+            ),
+            (crate::i18n::Lang::Zh, ["参数曲线", "亮调", "暗调", "阴影分界", "中间调分界", "高光分界"]),
+        ] {
+            let mut app = AutoShadeApp { lang, ..Default::default() };
+            let seen = tall_frame(&mut app, |a, ui| a.develop_panel(ui));
+            for row in rows {
+                assert!(seen.iter().any(|t| t == row), "{lang:?}: Curves has no {row:?} row: {seen:?}");
+            }
+        }
+        let mut app = AutoShadeApp::default();
+        let seen = tall_frame(&mut app, |a, ui| a.develop_panel(ui));
+        assert!(seen.iter().any(|t| t == "Curves"), "premise: the header is drawn: {seen:?}");
+        assert!(!seen.iter().any(|t| t == "Curves  ●"), "premise: a rest recipe lights nothing");
+        app.recipe.param_midtone_split = 60.0;
+        let seen = tall_frame(&mut app, |a, ui| a.develop_panel(ui));
+        assert!(!seen.iter().any(|t| t == "Curves  ●"), "a split alone renders nothing: {seen:?}");
+        app.recipe.param_darks = 30.0;
+        let seen = tall_frame(&mut app, |a, ui| a.develop_panel(ui));
+        assert!(seen.iter().any(|t| t == "Curves  ●"), "a moved region must light Curves: {seen:?}");
+    }
+
+    /// v1.5.0: the Color Mixer section draws Lightroom's WHOLE mixer in both
+    /// languages — the Black & White switch, the grey mix in place of the
+    /// colour tabs while it is on, and one block per Point Color swatch with
+    /// its Range — and the Calibration section draws its seven sliders under
+    /// Lightroom's own captions.
+    ///
+    /// MUTATIONS THIS CATCHES: the grey mix drawn always (or never); a swatch
+    /// block that lost its Range, the one slider whose stored number the
+    /// render never reads (`PointColor::set_range` rebuilds the windows it
+    /// does read, which is why the slider has to exist here); a Calibration
+    /// primary dropped.
+    #[test]
+    fn the_color_mixer_draws_the_bw_mix_the_point_colours_and_calibration() {
+        for lang in [crate::i18n::Lang::En, crate::i18n::Lang::Zh] {
+            let mut app = AutoShadeApp { lang, ..Default::default() };
+            let seen = tall_frame(&mut app, |a, ui| a.develop_panel(ui));
+            let drawn = |seen: &[String], want: &str| seen.iter().any(|t| t == want);
+            // Each key spelt AT its `tr` (the i18n audit reads call sites, and
+            // a loop variable is a site it cannot read).
+            for want in [
+                tr(lang, "Black & White"),
+                tr(lang, "Point Color"),
+                tr(lang, "💧 Pick a color"),
+                tr(lang, "Shadows"),
+                tr(lang, "Red primary"),
+                tr(lang, "Green primary"),
+                tr(lang, "Blue primary"),
+            ] {
+                assert!(drawn(&seen, want), "{lang:?}: no {want:?} row: {seen:?}");
+            }
+            assert!(
+                !drawn(&seen, tr(lang, "B&W mix")),
+                "{lang:?}: a colour photo shows the colour bands, not the grey mix: {seen:?}"
+            );
+            assert!(
+                !drawn(&seen, &trf(lang, "Swatch {n}", &[("n", "1")])),
+                "{lang:?}: no swatch, no swatch block: {seen:?}"
+            );
+
+            // Black & White on, one swatch sampled: the grey mix stands where
+            // the tabs were, and the swatch brings its four sliders with it.
+            app.recipe.convert_to_grayscale = true;
+            app.recipe.point_colors.push(autoshade::recipe::PointColor::sampled(0.9, 0.7, 0.5));
+            let seen = tall_frame(&mut app, |a, ui| a.develop_panel(ui));
+            for want in [
+                tr(lang, "B&W mix").to_string(),
+                trf(lang, "Swatch {n}", &[("n", "1")]),
+                tr(lang, "Range").to_string(),
+            ] {
+                assert!(drawn(&seen, &want), "{lang:?}: no {want:?} row: {seen:?}");
+            }
+        }
+        // The Range slider writes through `PointColor::set_range`, which
+        // REBUILDS the three windows the engine matches pixels against. Storing
+        // the number alone would leave the windows where they were — a slider
+        // that moves no pixel, which this repo calls the worst kind of bug —
+        // and no frame can drive a drag, so the choice is pinned in the source.
+        let develop = include_str!("panels/develop.rs");
+        let rows = &develop[develop.find("fn point_color_rows(").expect("point_color_rows moved")..];
+        let rows = &rows[..rows.find("\n    /// ").unwrap_or(rows.len())];
+        assert!(
+            rows.contains("set_range("),
+            "the Range slider no longer rebuilds the swatch's windows"
+        );
+    }
+
+    /// v1.5.0: the Point Color eyedropper — a canvas tool like the WB one, and
+    /// what ONE sample does.
+    ///
+    /// The three outcomes are the design: a colour becomes a swatch keyed to
+    /// that colour and the tool disarms; a near-grey spot adds nothing, says
+    /// why and stays armed (the engine gives such a pixel to no swatch, so its
+    /// sliders would move nothing); a full list refuses out loud instead of
+    /// pushing a swatch `EditRecipe::clamp` would drop on the floor.
+    ///
+    /// MUTATIONS THIS CATCHES: `point_color_picking` left out of `tool_armed`
+    /// (Esc would leave it armed and the canvas would keep taking its clicks)
+    /// or out of `disarm_tools`; a grey sample stored as a swatch; the limit
+    /// unchecked.
+    #[test]
+    fn the_point_color_eyedropper_makes_a_swatch_of_the_colour_clicked() {
+        use autoshade::recipe::MAX_POINT_COLORS;
+        let mut app = AutoShadeApp::default();
+        assert!(!app.tool_armed(), "premise: a fresh app has no tool armed");
+        app.point_color_picking = true;
+        assert!(app.tool_armed(), "an armed eyedropper is an armed canvas tool");
+        app.disarm_tools();
+        assert!(!app.point_color_picking, "Esc's disarm puts it down with the rest");
+
+        app.point_color_picking = true;
+        app.pick_point_color([0.5, 0.5, 0.5]);
+        assert!(app.recipe.point_colors.is_empty(), "a grey spot is no swatch: {}", app.status);
+        assert!(app.point_color_picking, "…and the tool stays armed for the retry");
+        assert!(!app.dirty, "…and nothing was edited");
+
+        app.pick_point_color([0.8, 0.3, 0.2]);
+        assert_eq!(app.recipe.point_colors.len(), 1, "{}", app.status);
+        let chip = autoshade::render::point_color_rgb(&app.recipe.point_colors[0]);
+        for (c, want) in chip.iter().zip([0.8, 0.3, 0.2]) {
+            assert!(
+                (c - want).abs() < 2e-3,
+                "the swatch is keyed to the colour clicked: {chip:?}"
+            );
+        }
+        assert!(!app.point_color_picking, "a landed swatch disarms the tool");
+        assert!(app.dirty, "…and asks for a redevelop");
+
+        app.recipe.point_colors = vec![app.recipe.point_colors[0].clone(); MAX_POINT_COLORS];
+        app.point_color_picking = true;
+        app.pick_point_color([0.2, 0.3, 0.8]);
+        assert_eq!(app.recipe.point_colors.len(), MAX_POINT_COLORS, "a full list takes no more");
+        assert!(!app.point_color_picking, "…and the refusal disarms");
+        assert!(
+            app.status.contains(&MAX_POINT_COLORS.to_string()),
+            "…naming the limit: {}",
+            app.status
+        );
     }
 
     /// R25 B2: the global Texture slider lights the Presence ●.
@@ -8069,9 +8555,10 @@
         }
     }
 
-    /// R25 B3: the Detail section really lays out its eleven controls — the
-    /// two the engine renders and the eight it carries — and the Lens section
-    /// its manual CA pair, the auto switch and the six de-fringe rows.
+    /// R25 B3: the Detail section really lays out its eleven controls — every
+    /// one rendered since v1.5.0, where R25 rendered two and carried eight —
+    /// and the Lens section its manual CA pair, the auto switch and the six
+    /// de-fringe rows.
     ///
     /// Both languages, because the Chinese labels are where a font-subset gap
     /// or a copied key shows up, and because 「彩噪细节」 vs 「锐化细节」 is
@@ -8141,8 +8628,8 @@
                 );
             }
         }
-        // …and the eight carried detail axes light the Detail ● (the section
-        // holds two families since B3, and its dot is the OR of them).
+        // …and the eight detail axes light the Detail ● (the section holds two
+        // families since B3, and its dot is the OR of them).
         let mut app = AutoShadeApp::default();
         let seen = tall_frame(&mut app, |a, ui| a.develop_panel(ui));
         assert!(seen.iter().any(|t| t == "Detail"), "premise: the header is drawn: {seen:?}");
@@ -8151,7 +8638,16 @@
         let seen = tall_frame(&mut app, |a, ui| a.develop_panel(ui));
         assert!(
             seen.iter().any(|t| t == "Detail  ●"),
-            "a carried detail axis must not be an invisible adjustment: {seen:?}"
+            "a detail axis must not be an invisible adjustment: {seen:?}"
+        );
+        // v1.5.0: an EXPLICIT zero on a companion is an adjustment too — its
+        // number is the rest recipe's, its render is not.
+        let mut app = AutoShadeApp::default();
+        app.recipe.set_resolved("sharpen_detail", 0.0);
+        let seen = tall_frame(&mut app, |a, ui| a.develop_panel(ui));
+        assert!(
+            seen.iter().any(|t| t == "Detail  ●"),
+            "Detail 0 renders differently from an absent Detail: {seen:?}"
         );
         // The same for the Lens section and the de-fringe half of its family.
         let mut app = AutoShadeApp::default();
@@ -8163,75 +8659,272 @@
         );
     }
 
-    /// R25 B4: the Transform section SHOWS what the sidecar carried and
-    /// offers no way to change it.
+    /// v1.5.0 F6: the Transform section has SLIDERS now, and the read-out that
+    /// used to be the whole section is the tail underneath them.
     ///
-    /// The negative half is the design, not an omission — pass-through means
-    /// we never interpret these sixteen values, and a slider needs a band, a
-    /// clamp and a neutral we do not have. So how do you prove nothing here is
-    /// a slider, from a frame's drawn text? By the SPELLING. Every slider in
-    /// this panel formats its value through `fixed_decimals(0|1|2)`, so none
-    /// of them can draw `+0.9` (a leading plus), `0.00` (two decimals on an
-    /// integer axis) or `Adobe Standard` (not a number at all). Those three
-    /// strings appearing exactly as Lightroom wrote them IS the proof that the
-    /// section is a read-out — and it is the same assertion as "verbatim",
-    /// which is the whole promise of the tier.
+    /// R25 B4 drew it read-only and said why: pass-through meant no band, no
+    /// clamp, no neutral and no idea what a value did to a pixel, and a slider
+    /// needs all four. F6 supplies all four — the eight `crs:Perspective*` keys
+    /// are owned controls and `render::perspective` moves the pixels — so the
+    /// test's negative half moved WITH the design rather than being dropped: it
+    /// now guards the keys that are still carried. Those are the Upright
+    /// solver's own bookkeeping, and the proof they are a read-out is still the
+    /// SPELLING — every slider in this panel formats through
+    /// `fixed_decimals(0|1|2)`, so none can draw `0.422764964` or
+    /// `Adobe Standard`.
     #[test]
-    fn the_transform_section_shows_values_but_no_sliders() {
-        // A photo that never carried the block draws NO section: a heading
-        // over an empty list is a promise about a file that never had one.
+    fn the_transform_section_has_sliders_and_a_verbatim_tail() {
         for lang in [crate::i18n::Lang::En, crate::i18n::Lang::Zh] {
-            // BOTH block names in the heading: the section carries Lightroom's
-            // Transform panel and its Calibration panel, and half a name sends
-            // someone looking for their camera profile in the wrong place.
-            let header = format!("{} / {}", tr(lang, "Transform"), tr(lang, "Calibration"));
             let mut app = AutoShadeApp { lang, ..Default::default() };
             let seen = tall_frame(&mut app, |a, ui| a.develop_panel(ui));
+            // The section is ALWAYS there now: it holds controls, not a
+            // read-out of something the file may or may not have carried.
             assert!(
-                !seen.contains(&header),
-                "{lang:?}: an empty pass-through map must draw no section: {seen:?}"
+                seen.iter().any(|t| t == tr(lang, "Transform")),
+                "{lang:?}: the Transform section must draw on every photo: {seen:?}"
             );
+            // Every one of the eight controls, by its own label — this is the
+            // half that used to be impossible. Each `tr` takes its key as a
+            // LITERAL rather than a loop variable, so the i18n audit sees ten
+            // ordinary call sites instead of one dynamic key it would have to
+            // be taught to trust.
+            for want in [
+                tr(lang, "Upright"),
+                tr(lang, "Off"),
+                tr(lang, "Vertical"),
+                tr(lang, "Horizontal"),
+                tr(lang, "Rotate (°)"),
+                tr(lang, "Transform scale"),
+                tr(lang, "Aspect"),
+                tr(lang, "X offset"),
+                tr(lang, "Y offset"),
+                tr(lang, "Constrain crop"),
+            ] {
+                assert!(seen.iter().any(|t| t == want), "{lang:?}: {want:?} missing: {seen:?}");
+            }
+            // …and no read-out tail at all while the document carried none —
+            // neither the carried block's heading nor, since v1.5.0 F7, the
+            // profile rows above it, which are their own `is_empty` branch.
+            for absent in [
+                tr(lang, "Upright solver bookkeeping"),
+                tr(lang, "Camera profile"),
+                tr(lang, "Creative profile"),
+            ] {
+                assert!(
+                    !seen.iter().any(|t| t == absent),
+                    "{lang:?}: a heading over an empty list is a promise about a file that never \
+                     had one: {absent:?} in {seen:?}"
+                );
+            }
 
-            // …and one that did shows every key it carried. The values are
-            // the real spellings from the reference sidecars (P51 is the
-            // one file in the library with a non-zero Upright).
+            // The tail, on a document that DID carry the solver's bookkeeping.
+            // Real spellings from the library's own sidecars.
+            //
+            // The profile NAME sits beside them rather than among them since
+            // v1.5.0 F7: it left `PASSTHROUGH_CRS` for a control of its own, so
+            // the row is drawn from `recipe.camera_profile` while the solver's
+            // two keys are still the carried block. Both halves are read-outs,
+            // and the proof is the same for both — a slider would reformat the
+            // spelling, and neither spelling can survive `fixed_decimals`.
+            app.recipe.camera_profile = "Adobe Standard".to_string();
             app.recipe.passthrough = [
-                ("PerspectiveVertical", "-35"),
-                ("PerspectiveRotate", "+0.9"),
-                ("PerspectiveX", "0.00"),
-                ("CameraProfile", "Adobe Standard"),
+                ("UprightCenterNormX", "0.422764964"),
+                ("UprightFocalLength35mm", "13.992594916"),
             ]
             .into_iter()
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect();
             let seen = tall_frame(&mut app, |a, ui| a.develop_panel(ui));
-            assert!(seen.contains(&header), "{lang:?}: no section: {seen:?}");
             for want in [
-                tr(lang, "Perspective correction"),
-                tr(lang, "Camera calibration"),
+                tr(lang, "Upright solver bookkeeping"),
                 tr(lang, "Camera profile"),
                 tr(lang, "Carried through to the sidecar unchanged; AutoShade never interprets these"),
             ] {
                 assert!(seen.iter().any(|t| t == want), "{lang:?}: {want:?} missing: {seen:?}");
             }
-            // Adobe's own property names for the values we cannot describe in
-            // our own words — one label, one key, no invented friendly name.
-            for key in ["crs:PerspectiveVertical", "crs:PerspectiveRotate", "crs:PerspectiveX"] {
+            // Adobe's own property names for the values we still cannot
+            // describe in our own words — one label, one key, no invented
+            // friendly name.
+            for key in ["crs:UprightCenterNormX", "crs:UprightFocalLength35mm"] {
                 assert!(seen.iter().any(|t| t == key), "{lang:?}: {key} row missing: {seen:?}");
             }
-            // NO SLIDERS: the three spellings no slider in this panel can
-            // produce, drawn exactly as Lightroom wrote them.
-            for verbatim in ["-35", "+0.9", "0.00", "Adobe Standard"] {
+            // STILL NO SLIDER on those: the spellings no slider can produce,
+            // drawn exactly as Lightroom wrote them.
+            for verbatim in ["0.422764964", "13.992594916", "Adobe Standard"] {
                 assert!(
                     seen.iter().any(|t| t == verbatim),
-                    "{lang:?}: {verbatim:?} is not on screen as itself — either the row is a \
+                    "{lang:?}: {verbatim:?} is not on screen as itself — either the row became a \
                      slider (which would reformat it) or the value was interpreted: {seen:?}"
                 );
             }
             // A key the document never carried is never invented.
             assert!(
-                !seen.iter().any(|t| t == "crs:CameraCalibrationRedHue"),
-                "{lang:?}: an absent Calibration key must stay absent: {seen:?}"
+                !seen.iter().any(|t| t == "crs:UprightVersion"),
+                "{lang:?}: an absent carried key must stay absent: {seen:?}"
+            );
+        }
+        // And the section's ● lights from its own family, like every other.
+        let mut app = AutoShadeApp::default();
+        app.recipe.perspective_vertical = -35.0;
+        let seen = tall_frame(&mut app, |a, ui| a.develop_panel(ui));
+        assert!(
+            seen.iter().any(|t| t == "Transform  ●"),
+            "a keystone must light the Transform dot: {seen:?}"
+        );
+    }
+
+    /// v1.5.0 F7: the creative profile names itself, and then names the half
+    /// of itself this engine cannot render.
+    ///
+    /// The disclosure is the point. A `crs:Look` has two halves — baked
+    /// sliders and a baked tone curve, which `render::build_tone_lut` and
+    /// `render::apply_rgb_curves` compose as the base rendition, and a
+    /// `crs:LookTable` creative colour table, whose payload does not decode
+    /// (`src/dcp.rs` records what was measured). A panel that printed
+    /// 「Adobe Landscape」 and stopped would be claiming the whole profile
+    /// renders, on a photograph where the colour half does not — the exact
+    /// shape of 「a slider that moves a number and no pixel」 this file's own
+    /// rules call the worst kind of bug here.
+    ///
+    /// MUTATION: drop the weak line, or draw it when `table` is empty.
+    #[test]
+    fn a_creative_profile_names_itself_and_the_half_that_does_not_render() {
+        use autoshade::recipe::{CreativeLook, CurvePoint};
+        for lang in [crate::i18n::Lang::En, crate::i18n::Lang::Zh] {
+            // Adobe Color, the shape 152 of the library's 161 Looks have: one
+            // baked S-curve and a colour table we cannot read.
+            let mut app = AutoShadeApp { lang, ..Default::default() };
+            app.recipe.look = Some(CreativeLook {
+                name: "Adobe Color".to_string(),
+                amount: 1.0,
+                base_profile: "Adobe Standard".to_string(),
+                table: "0B3BFB5CFB7DBF7FF175E98F24D316B0".to_string(),
+                tone_curve: vec![
+                    CurvePoint { input: 0, output: 0 },
+                    CurvePoint { input: 22, output: 16 },
+                    CurvePoint { input: 255, output: 255 },
+                ],
+                ..Default::default()
+            });
+            let seen = tall_frame(&mut app, |a, ui| a.develop_panel(ui));
+            for want in [
+                tr(lang, "Creative profile"),
+                tr(
+                    lang,
+                    "Its baked tone curve and sliders render; its creative colour table does not",
+                ),
+            ] {
+                assert!(seen.iter().any(|t| t == want), "{lang:?}: {want:?} missing: {seen:?}");
+            }
+            // The NAME as Adobe spelled it — no friendly rewrite, no slider.
+            assert!(
+                seen.iter().any(|t| t == "Adobe Color"),
+                "{lang:?}: the profile's own name must be on screen: {seen:?}"
+            );
+            // This photograph has a creative profile and NO camera profile, so
+            // the camera row must not appear at all. A labelled row with an
+            // empty value beside it reads as "your camera profile is (blank)",
+            // which is a claim about the file rather than a description of it —
+            // and each of the two rows answers for itself, because either can
+            // be present without the other.
+            assert!(
+                !seen.iter().any(|t| t == tr(lang, "Camera profile")),
+                "{lang:?}: a row with nothing in it is not a read-out: {seen:?}"
+            );
+            // …and the Look's own camera profile is NOT shown as the
+            // photographer's: the Description carried none here, and the
+            // baked `base_profile` is the profile's business, not a choice
+            // to attribute to them.
+            assert!(
+                !seen.iter().any(|t| t == "Adobe Standard"),
+                "{lang:?}: a Look's baked base profile is not the photo's own: {seen:?}"
+            );
+
+            // A Look with NO table renders whole, so there is nothing to
+            // disclose and the line must not appear — an unconditional
+            // disclaimer is noise that teaches the reader to skip it.
+            if let Some(look) = app.recipe.look.as_mut() {
+                look.table.clear();
+            }
+            let seen = tall_frame(&mut app, |a, ui| a.develop_panel(ui));
+            assert!(
+                seen.iter().any(|t| t == tr(lang, "Creative profile")),
+                "{lang:?}: the name still shows: {seen:?}"
+            );
+            assert!(
+                !seen.iter().any(|t| t
+                    == tr(
+                        lang,
+                        "Its baked tone curve and sliders render; its creative colour table does not",
+                    )),
+                "{lang:?}: nothing is missing, so nothing is disclosed: {seen:?}"
+            );
+        }
+    }
+
+    /// v1.5.0 F7: a monochrome creative profile turns the PANEL black and
+    /// white, not only the canvas.
+    ///
+    /// The panel and the engine have to answer 「is this photograph grey?」 the
+    /// same way. `render::apply_develop` skips `apply_hsl` and
+    /// `apply_point_colors` when `renders_grayscale()`, so a panel that read
+    /// only the photographer's own checkbox would show a Color Mixer and a
+    /// Point Color picker over a grey canvas — eight hue sliders and a swatch
+    /// list that move numbers and no pixels, on the four 「Adobe Monochrome」
+    /// photographs in the reference library.
+    ///
+    /// WHAT THIS DOES NOT COVER: the Point Color block is greyed through
+    /// `add_enabled_ui`, and egui draws a disabled widget's text exactly as it
+    /// draws an enabled one — so a frame dump cannot see that half. It is the
+    /// same one-line question (`renders_grayscale`) at the same kind of site,
+    /// changed with this one, and it is stated here rather than left to look
+    /// covered.
+    ///
+    /// MUTATION: read `convert_to_grayscale` at the mixer site.
+    #[test]
+    fn a_monochrome_profile_turns_the_mixer_black_and_white_too() {
+        use autoshade::recipe::CreativeLook;
+        for lang in [crate::i18n::Lang::En, crate::i18n::Lang::Zh] {
+            // The photographer's own switch is OFF throughout: this is the
+            // profile's doing, which is the whole point.
+            let mut app = AutoShadeApp { lang, ..Default::default() };
+            app.recipe.look = Some(CreativeLook {
+                name: "Adobe Monochrome".to_string(),
+                amount: 1.0,
+                grayscale: true,
+                ..Default::default()
+            });
+            assert!(!app.recipe.convert_to_grayscale, "{lang:?}: the checkbox stays off");
+            let seen = tall_frame(&mut app, |a, ui| a.develop_panel(ui));
+            // The B&W mixer's own caption is up, in place of the three
+            // Hue/Saturation/Luminance tabs the colour mixer draws.
+            assert!(
+                seen.iter().any(|t| t == tr(lang, "B&W mix")),
+                "{lang:?}: a grey photograph gets the B&W mixer: {seen:?}"
+            );
+            // The complement, which is what makes the line above discriminating
+            // rather than a caption that is always there. The colour mixer's own
+            // 「Hue / Saturation / Luminance」 tabs are NOT the probe: Color
+            // Grading and Calibration carry those three words too, so they are
+            // on screen either way and counting them proves nothing.
+            let mut colour = AutoShadeApp { lang, ..Default::default() };
+            colour.recipe.look = Some(CreativeLook {
+                name: "Adobe Color".to_string(),
+                amount: 1.0,
+                ..Default::default()
+            });
+            let colour_seen = tall_frame(&mut colour, |a, ui| a.develop_panel(ui));
+            assert!(
+                !colour_seen.iter().any(|t| t == tr(lang, "B&W mix")),
+                "{lang:?}: a COLOUR profile leaves the colour mixer alone: {colour_seen:?}"
+            );
+            // …and the photographer's own switch still does it on its own.
+            let mut own = AutoShadeApp { lang, ..Default::default() };
+            own.recipe.convert_to_grayscale = true;
+            let seen = tall_frame(&mut own, |a, ui| a.develop_panel(ui));
+            assert!(
+                seen.iter().any(|t| t == tr(lang, "B&W mix")),
+                "{lang:?}: either switch, not both: {seen:?}"
             );
         }
     }
@@ -8245,57 +8938,79 @@
     /// canvas is. It never interrupts, because nothing was lost.
     #[test]
     fn the_render_gap_line_appears_only_when_something_is_carried() {
+        use autoshade::recipe::EditRecipe;
         use autoshade::xmp::global_render_gaps;
-        // A default develop says NOTHING — and this is the assertion that
-        // matters most, because the de-fringe block's neutral is Adobe's own
-        // 30/70/40/60: a "non-zero" test would fire on every photo ever
-        // opened, and a line that always appears is a line nobody reads.
+        // **v1.5.0 first**: there is nothing left to carry. A recipe holding an
+        // imported de-fringe, an auto-CA switch, colour noise reduction and
+        // grain all at once produces NO line, because every one of them renders
+        // now (`render/detail.rs`, `render/finish.rs`, `render/lens.rs`) — and
+        // this is asserted through the real `global_render_gaps`, which is the
+        // only part of this test that can notice a row slipping back.
+        let was_carried = EditRecipe {
+            grain: 30.0,
+            grain_size: 25.0,
+            color_nr: 25.0,
+            defringe_purple: 3.0,
+            defringe_purple_lo: 19.0,
+            auto_lateral_ca: true,
+            // A pass-through block on the same recipe, which must NOT reach
+            // this line either: with nothing interpreted there is no neutral to
+            // compare against, so it would name itself on every Lightroom photo
+            // (xmp::global_render_gaps states it). Its surface is the read-only
+            // Transform / camera-profile section, tested above.
+            passthrough: [("PerspectiveVertical".to_string(), "-35".to_string())]
+                .into_iter()
+                .collect(),
+            ..Default::default()
+        };
+        assert!(
+            global_render_gaps(&was_carried).is_empty(),
+            "Track F left nothing carried: {:?}",
+            global_render_gaps(&was_carried)
+        );
+        // …and the LINE still works, which is the half that has to survive the
+        // emptiness. Fed by NAME — `render_gap_line` takes the gap list, not a
+        // recipe — so the label mapping, the deduplication and the underscore
+        // rule stay under test on the day a carried control comes back.
         for lang in [crate::i18n::Lang::En, crate::i18n::Lang::Zh] {
             assert!(
-                render_gap_line(lang, &global_render_gaps(&Default::default())).is_none(),
-                "{lang:?}: a neutral develop carries no gap"
+                render_gap_line(lang, &global_render_gaps(&was_carried)).is_none(),
+                "{lang:?}: nothing carried, no line"
             );
             assert!(render_gap_line(lang, &[]).is_none(), "{lang:?}: nothing in, nothing out");
 
-            // One carried effect, named by its SECTION — the word the
-            // photographer already has on screen, never `post_crop_vignette`.
-            let grain = autoshade::recipe::EditRecipe { grain: 30.0, ..Default::default() };
-            let line = render_gap_line(lang, &global_render_gaps(&grain))
-                .unwrap_or_else(|| panic!("{lang:?}: an imported grain is a gap"));
-            assert!(line.contains(tr(lang, "Effects")), "{lang:?}: {line}");
+            // One gap, named by its SECTION — the word the photographer already
+            // has on screen, never `defringe_purple`.
+            let line = render_gap_line(lang, &["defringe_purple"])
+                .unwrap_or_else(|| panic!("{lang:?}: a named gap makes a line"));
+            assert!(line.contains(tr(lang, "Lens")), "{lang:?}: {line}");
             assert!(line.contains(tr(lang, "Carried to Lightroom, not rendered here")));
 
-            // Every section, once each — the three carried families,
-            // deduplicated (nine carried effects are one 「Effects」).
-            let all = autoshade::recipe::EditRecipe {
-                grain: 30.0,
-                grain_size: 25.0,
-                color_nr: 25.0,
-                defringe_purple: 3.0,
-                // A pass-through block on the same recipe, which must NOT
-                // reach this line: with nothing interpreted there is no
-                // neutral to compare against, so it would name itself on
-                // every Lightroom photo (xmp::global_render_gaps states it).
-                // Its surface is the read-only Transform / Calibration
-                // section, tested above.
-                passthrough: [("PerspectiveVertical".to_string(), "-35".to_string())]
-                    .into_iter()
-                    .collect(),
-                ..Default::default()
-            };
-            let line = render_gap_line(lang, &global_render_gaps(&all)).expect("three sections");
-            for section in [tr(lang, "Effects"), tr(lang, "Detail"), tr(lang, "Lens")] {
-                assert!(line.contains(section), "{lang:?}: {section:?} missing from {line}");
-            }
-            assert!(
-                !line.contains(tr(lang, "Calibration")),
-                "{lang:?}: a pass-through block has no knowable neutral and must not \
-                 nag on every Lightroom photo: {line}"
-            );
+            // Every section once each, deduplicated: seven lens controls are
+            // one 「Lens」, and a second family is a second word.
+            let line = render_gap_line(
+                lang,
+                &[
+                    "defringe_purple",
+                    "defringe_purple_lo",
+                    "auto_lateral_ca",
+                    "defringe_green",
+                    "grain",
+                ],
+            )
+            .expect("two sections");
             assert_eq!(
-                line.matches(tr(lang, "Effects")).count(),
+                line.matches(tr(lang, "Lens")).count(),
                 1,
-                "{lang:?}: nine carried effects are ONE section: {line}"
+                "{lang:?}: four lens controls are ONE section: {line}"
+            );
+            assert!(
+                line.contains(tr(lang, "Effects")),
+                "{lang:?}: a second family is a second word: {line}"
+            );
+            assert!(
+                !line.contains(tr(lang, "Transform")),
+                "{lang:?}: a pass-through block is not a member of any gap family: {line}"
             );
             // R24's rule, and this test's tripwire: a carried control whose
             // family nobody labelled falls back to its registry NAME, which is
@@ -9796,10 +10511,10 @@
     /// inside its grid cell — rendered at the default panel widths in both
     /// languages with the widest rows armed: a second variant card, a mask
     /// brush session, a raster mask selected with a component, a colour
-    /// field, a version, a reference, a multi-selection. The helpers fill
-    /// the registry themselves, so a button that bypasses the vocabulary is
-    /// simply not here; the count floor keeps the pin from passing on an
-    /// empty registry.
+    /// field, a Point Color swatch, a version, a reference, a
+    /// multi-selection. The helpers fill the registry themselves, so a button
+    /// that bypasses the vocabulary is simply not here; the count floor keeps
+    /// the pin from passing on an empty registry.
     ///
     /// Three frames, with both side panels' widths as witnesses. A cell or a
     /// scoped widget laid past its line's end stands outside the panel and
@@ -9843,6 +10558,9 @@
             });
             app.recipe.colour_field =
                 Some(ColourField { x: 1, y: 1, b: 1, grid: vec![[0.0; 5]], amount: 0.5, enabled: true });
+            // v1.5.0: a Point Color swatch — its row is a chip, a name and a
+            // ✕, and its four sliders are laid beside the mixer's own.
+            app.recipe.point_colors.push(autoshade::recipe::PointColor::sampled(0.9, 0.7, 0.5));
             app.sel_mask = Some(0);
             app.start_mask_brush(None);
             assert!(app.mask_brush.is_some(), "{lang:?}: the brush session armed");

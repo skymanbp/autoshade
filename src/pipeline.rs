@@ -1747,13 +1747,37 @@ pub(crate) fn carry_over_unrepresentable(
     recipe.post_crop_vignette_round = base.post_crop_vignette_round;
     recipe.post_crop_vignette_style = base.post_crop_vignette_style;
     recipe.post_crop_vignette_hl = base.post_crop_vignette_hl;
+    recipe.lens_profile_distortion_scale = base.lens_profile_distortion_scale;
+    recipe.lens_profile_vignetting_scale = base.lens_profile_vignetting_scale;
+    // v1.5.0 F6: the Transform panel. Engine-only, so no response restates any
+    // of it, and one of them — `upright_transform` — is Adobe's own measurement
+    // of this photograph, which nothing on this side could recompute. A refine
+    // that dropped these would straighten a building and then un-straighten it
+    // on the next save.
+    recipe.perspective_vertical = base.perspective_vertical;
+    recipe.perspective_horizontal = base.perspective_horizontal;
+    recipe.perspective_rotate = base.perspective_rotate;
+    recipe.perspective_scale = base.perspective_scale;
+    recipe.perspective_aspect = base.perspective_aspect;
+    recipe.perspective_x = base.perspective_x;
+    recipe.perspective_y = base.perspective_y;
+    recipe.perspective_upright = base.perspective_upright;
+    recipe.upright_transform = base.upright_transform.clone();
+    recipe.crop_constrain_to_warp = base.crop_constrain_to_warp;
+    // v1.5.0 F7: which rendering this photograph starts from. Neither is a
+    // number the model was asked for, and both are the photographer's own
+    // choice made in Lightroom — a refine that dropped them would develop the
+    // next save through a different profile than the one on screen.
+    recipe.camera_profile = base.camera_profile.clone();
+    recipe.look = base.look.clone();
     recipe.grain = base.grain;
     recipe.grain_size = base.grain_size;
     recipe.grain_rough = base.grain_rough;
-    // R25 B3 widened the block by fifteen: the eight carried detail axes, the
-    // auto-CA switch and the six de-fringe keys. Same argument, one sharper
-    // edge — de-fringe's neutral is ADOBE'S DEFAULT, not zero, so a dropped
-    // hue window would not merely lose a value, it would write 0/0 into the
+    // R25 B3 widened the block by fifteen: the eight detail axes (carried
+    // then, rendered since v1.5.0 and engine-only either way), the auto-CA
+    // switch and the six de-fringe keys. Same argument, one sharper edge —
+    // de-fringe's neutral is ADOBE'S DEFAULT, not zero, so a dropped hue
+    // window would not merely lose a value, it would write 0/0 into the
     // sidecar and change what Lightroom renders.
     recipe.sharpen_radius = base.sharpen_radius;
     recipe.sharpen_detail = base.sharpen_detail;
@@ -1763,6 +1787,11 @@ pub(crate) fn carry_over_unrepresentable(
     recipe.color_nr = base.color_nr;
     recipe.color_nr_detail = base.color_nr_detail;
     recipe.color_nr_smooth = base.color_nr_smooth;
+    // v1.5.0: which of the carried COMPANIONS hold a real zero rides with
+    // them. Engine-only bookkeeping with no `crs:` spelling, so no response
+    // restates it — and without it a Detail the photographer set to 0 would
+    // come home as "absent" and render at Lightroom's 25.
+    recipe.explicit_zero = base.explicit_zero.clone();
     recipe.auto_lateral_ca = base.auto_lateral_ca;
     recipe.defringe_purple = base.defringe_purple;
     recipe.defringe_purple_lo = base.defringe_purple_lo;
@@ -1778,9 +1807,59 @@ pub(crate) fn carry_over_unrepresentable(
     // it explicitly, since the derivation there is by `Tier::CarriedOnly`.
     recipe.ca_r = base.ca_r;
     recipe.ca_b = base.ca_b;
-    // R25 B4: the Transform / Calibration pass-through block rides for the
+    // v1.5.0: the parametric tone curve rides on the Detail axes' ground — it
+    // renders, it is engine-only (the model states the point curve instead),
+    // and its keys are owned, so a dropped region would take the
+    // photographer's Lightroom curve out of the sidecar on the next save.
+    recipe.param_shadows = base.param_shadows;
+    recipe.param_darks = base.param_darks;
+    recipe.param_lights = base.param_lights;
+    recipe.param_highlights = base.param_highlights;
+    recipe.param_shadow_split = base.param_shadow_split;
+    recipe.param_midtone_split = base.param_midtone_split;
+    recipe.param_highlight_split = base.param_highlight_split;
+    // v1.5.0: the Calibration panel, the B&W treatment and the point colours
+    // ride on the same ground — they render, they are engine-only (the model
+    // states colour through the mixer and the grade), and their sidecar
+    // properties are owned, so a dropped value would take the photographer's
+    // own Lightroom calibration, grey mix or swatches out of the file on the
+    // next save.
+    recipe.cal_shadow_tint = base.cal_shadow_tint;
+    recipe.cal_red_hue = base.cal_red_hue;
+    recipe.cal_red_sat = base.cal_red_sat;
+    recipe.cal_green_hue = base.cal_green_hue;
+    recipe.cal_green_sat = base.cal_green_sat;
+    recipe.cal_blue_hue = base.cal_blue_hue;
+    recipe.cal_blue_sat = base.cal_blue_sat;
+    recipe.convert_to_grayscale = base.convert_to_grayscale;
+    recipe.gray_red = base.gray_red;
+    recipe.gray_orange = base.gray_orange;
+    recipe.gray_yellow = base.gray_yellow;
+    recipe.gray_green = base.gray_green;
+    recipe.gray_aqua = base.gray_aqua;
+    recipe.gray_blue = base.gray_blue;
+    recipe.gray_purple = base.gray_purple;
+    recipe.gray_magenta = base.gray_magenta;
+    recipe.point_colors = base.point_colors.clone();
+    // v1.5.0 F8: HDR edit mode, its headroom and the seven SDR-rendition
+    // controls, on the same ground again — rendered, engine-only, owned keys.
+    // The edge here is the MODE: it is the gate the other eight render behind,
+    // so a Refine that dropped it would not merely lose a slider, it would
+    // switch off a photograph's whole rendition and write that decision back
+    // into the sidecar, with the seven still sitting in the file saying
+    // otherwise.
+    recipe.hdr_edit = base.hdr_edit;
+    recipe.hdr_max_ev = base.hdr_max_ev;
+    recipe.sdr_blend = base.sdr_blend;
+    recipe.sdr_brightness = base.sdr_brightness;
+    recipe.sdr_contrast = base.sdr_contrast;
+    recipe.sdr_highlights = base.sdr_highlights;
+    recipe.sdr_shadows = base.sdr_shadows;
+    recipe.sdr_whites = base.sdr_whites;
+    recipe.sdr_clarity = base.sdr_clarity;
+    // R25 B4: the Transform / profile-name pass-through block rides for the
     // SAME reason and with the sharpest edge of all. It is `EngineCarrier`, so
-    // no response can restate it; we now OWN its sixteen keys, so the next
+    // no response can restate it; we now OWN its nine keys, so the next
     // save's merge strips them out of the user's sidecar before rewriting —
     // and the writer emits only what the map holds. A Refine that dropped this
     // map would therefore delete the photographer's Upright correction and
@@ -1790,6 +1869,17 @@ pub(crate) fn carry_over_unrepresentable(
     // required to exist by the same test the B2/B3 blocks answer to.
     recipe.passthrough = base.passthrough.clone();
     carry_radial_carried_attributes(recipe, base);
+    // THE ERA RULE (v1.5.0): the refined recipe is no more current than the
+    // base it copied the lines above from. The advisor stamps its response
+    // `SCHEMA_ERA` — every number the model returns answers this build's
+    // control list — but every engine-only value above is the BASE's, and a
+    // base older than a control holds that control's serde default, not a
+    // value. Stamped current, that default would OWN its key, and the next
+    // save would strip the photographer's own Lightroom value from the sidecar
+    // (a v1.4 recipe's Refine deleting its parametric curve). A key the model
+    // MOVED still publishes, because the era gate releases any key that left
+    // its default (`xmp::unspoken_attr_keys`).
+    recipe.schema_era = recipe.schema_era.min(base.schema_era);
     recipe.clamp(); // the size caps still apply after re-attaching
 }
 
@@ -2664,10 +2754,24 @@ pub fn fresh_lens_profile(raw: &Path) -> crate::recipe::LensProfile {
 /// `mask_warp` therefore remains identity for RADIAL while the same solved map
 /// moves once into `linear_handle_warp` for that LINEAR-only operation.
 ///
-/// Only the WARP is answered from the sidecar. The vignette / distortion / CA
-/// toggles are the photographer's own and are left exactly as
-/// [`fresh_lens_profile`] stamped them — see [`crate::xmp::lens_profile_enabled`]
-/// for why reading Lightroom's switch as an instruction would be wrong.
+/// **The switch is obeyed** (user ruling 2026-09-17, reversing R29's): a
+/// document that says `crs:LensProfileEnable="0"` is a document Lightroom drew
+/// with NO lens correction, so this engine draws none either — the three
+/// profile toggles come off with the warp.
+///
+/// R29 left the toggles alone on the ground that they are the photographer's
+/// own and Lightroom's switch is about ADOBE's profile, not the camera's
+/// knots. Two things answer that now. v1.5.0 renders Adobe's `.lcp` itself
+/// ([`crate::lcp::solve`]), so for a body with no in-camera metadata the
+/// switch IS about the very knots we are holding. And the old split was
+/// INCOHERENT even for a Sony: [`retain_disabled_linear_handle_warp`] already
+/// moved the map out of `mask_warp` for this state, so masks were positioned
+/// in the uncorrected frame while the pixels beside them were corrected. One
+/// switch, one frame.
+///
+/// The manual pair (`ca_r`/`ca_b`) and the manual Distortion/Vignette sliders
+/// are untouched: they are not the profile, and Lightroom's own switch does
+/// not turn them off either.
 ///
 /// `None` sidecar, or a document that says nothing, is [`fresh_lens_profile`]
 /// unchanged.
@@ -2677,9 +2781,25 @@ pub fn fresh_lens_profile_for_sidecar(
 ) -> crate::recipe::LensProfile {
     let mut p = fresh_lens_profile(raw);
     if sidecar.and_then(crate::xmp::lens_profile_enabled) == Some(false) {
-        retain_disabled_linear_handle_warp(&mut p);
+        obey_disabled_profile_switch(&mut p);
     }
     p
+}
+
+/// What `crs:LensProfileEnable="0"` means, as ONE function: Lightroom drew no
+/// profile correction, so neither do we — every component off, and the solved
+/// camera map moved aside for LINEAR's H2 rule with a stamp saying why.
+///
+/// A function rather than four lines inline because the state it acts on cannot
+/// be reached from a test through [`fresh_lens_profile`]: that reads a RAW, and
+/// with no RAW on disk the three toggles are already false, so an assertion on
+/// them passed whatever this code did. The test now hands a profile with every
+/// component ON to this function — the real one, not a sketch of it.
+fn obey_disabled_profile_switch(p: &mut crate::recipe::LensProfile) {
+    retain_disabled_linear_handle_warp(p);
+    p.vignette_on = false;
+    p.distortion_on = false;
+    p.ca_on = false;
 }
 
 /// Preserve the solved camera/LCP map across the disabled-sidecar boundary for
@@ -3806,6 +3926,66 @@ mod guard_tests {
         assert!(matches!(proposed.masks[1].mask, MaskGeometry::Linear { .. }));
     }
 
+    /// v1.5.0: a companion's EXPLICIT zero survives a Refine with the
+    /// companion. The list has no `crs:` key, so the sieve in
+    /// `carried_effects_survive_a_refine` cannot reach it — and without it a
+    /// Detail the photographer set to 0 would come home as "absent" and render
+    /// at Lightroom's 25.
+    #[test]
+    fn explicit_zeros_survive_a_refine() {
+        let mut base = EditRecipe { sharpening: 60.0, ..Default::default() };
+        base.set_resolved("sharpen_detail", 0.0);
+        assert_eq!(base.resolved("sharpen_detail"), 0.0, "premise: the base holds a real 0");
+        let mut refined = EditRecipe { sharpening: 40.0, ..Default::default() };
+        assert_eq!(refined.resolved("sharpen_detail"), 25.0, "premise: a response cannot say it");
+        carry_over_unrepresentable(&mut refined, &base, LensOpinion::default(), None);
+        assert_eq!(refined.explicit_zero, vec!["sharpen_detail".to_string()]);
+        assert_eq!(refined.resolved("sharpen_detail"), 0.0);
+        assert_eq!(refined.sharpening, 40.0, "the response's own amount still stands");
+    }
+
+    /// v1.5.0, THE ERA RULE: a Refine is no more current than its base. The
+    /// advisor stamps every response `SCHEMA_ERA`, but the engine-only values
+    /// the carry copies are the base's — on a v1.4 (era-1) base, the serde
+    /// defaults of a parametric curve it never had. Stamped current, the
+    /// merge would own the parametric keys at those defaults and strip the
+    /// photographer's Lightroom curve on the next save; this runs that save.
+    ///
+    /// MUTATION THIS CATCHES: the `min` line deleted (the refined recipe keeps
+    /// the response's stamp, and the sidecar's curve is gone).
+    #[test]
+    fn a_refine_is_no_more_current_than_its_base() {
+        let doc = "<x:xmpmeta xmlns:x=\"adobe:ns:meta/\">\n\
+                   \x20<rdf:RDF xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\">\n\
+                   \x20 <rdf:Description rdf:about=\"\"\n\
+                   \x20   xmlns:crs=\"http://ns.adobe.com/camera-raw-settings/1.0/\"\n\
+                   \x20   crs:ProcessVersion=\"15.4\"\n\
+                   \x20   crs:ParametricShadows=\"0\"\n\
+                   \x20   crs:ParametricDarks=\"+40\"\n\
+                   \x20   crs:ParametricLights=\"0\"\n\
+                   \x20   crs:ParametricHighlights=\"0\"\n\
+                   \x20   crs:ParametricShadowSplit=\"25\"\n\
+                   \x20   crs:ParametricMidtoneSplit=\"50\"\n\
+                   \x20   crs:ParametricHighlightSplit=\"75\"\n\
+                   \x20   crs:HasSettings=\"True\"/>\n\
+                   \x20</rdf:RDF>\n\
+                   </x:xmpmeta>\n";
+        // The v1.4 recipe.json beside that sidecar: stamped era 1, and so
+        // holding no parametric curve at all.
+        let base = EditRecipe { schema_era: 1, exposure_ev: 0.2, ..Default::default() };
+        let mut refined = EditRecipe { exposure_ev: 0.5, ..Default::default() };
+        assert_eq!(refined.schema_era, crate::recipe::SCHEMA_ERA, "premise: a response is stamped current");
+        carry_over_unrepresentable(&mut refined, &base, LensOpinion::default(), None);
+        assert_eq!(refined.schema_era, 1, "the carried defaults are a v1.4 recipe's");
+        let out = crate::xmp::merge_recipe_into_xmp(doc, &refined).expect("mergeable");
+        assert!(out.doc.contains("crs:ParametricDarks=\"+40\""), "the refine's save deleted the curve: {}", out.doc);
+        assert_eq!(refined.exposure_ev, 0.5, "…and the refine itself stands");
+        // A current base leaves a current response current.
+        let mut fresh = EditRecipe { exposure_ev: 0.5, ..Default::default() };
+        carry_over_unrepresentable(&mut fresh, &EditRecipe::default(), LensOpinion::default(), None);
+        assert_eq!(fresh.schema_era, crate::recipe::SCHEMA_ERA);
+    }
+
     /// R25 B2: every `Tier::CarriedOnly` global survives a Refine.
     ///
     /// These are the one class of recipe value with NO other way back: the
@@ -3835,14 +4015,23 @@ mod guard_tests {
         // proves the point — it is not `CarriedOnly`, it is exactly as
         // un-restatable, and a `CarriedOnly`-only sieve would have let B4 ship
         // with no carry line and no test to say so.
+        //
+        // v1.5.0 widened it to the law itself — every ENGINE-ONLY row with a
+        // sidecar property of its own — because rendering is not what decides
+        // the way home. The eight Detail axes started rendering and left
+        // `CarriedOnly`; a tier sieve would have dropped them from this test
+        // while nothing about their carry changed. The rows without a `crs:`
+        // key are re-stamped per photo (the calibration, the era stamps) or
+        // have tests of their own (`colour_field`, `explicit_zero` below).
         let carried: Vec<&str> = RECIPE_CONTROLS
             .iter()
-            .filter(|c| {
-                c.tier.is_some_and(|t| !t.renders() && t.owns_crs_key())
-                    || matches!(c.name, "ca_r" | "ca_b")
-            })
+            .filter(|c| c.engine_only && c.crs.is_owned())
             .map(|c| c.name)
             .collect();
+        assert!(
+            carried.contains(&"sharpen_detail") && carried.contains(&"color_nr"),
+            "premise: the rendered Detail axes must reach this sieve"
+        );
         assert!(carried.len() > 9, "premise: B3 widened the tier past B2's nine");
         assert!(
             carried.contains(&"passthrough"),
@@ -3865,10 +4054,24 @@ mod guard_tests {
                 .expect("a registry row");
             json[*name] = match shape {
                 Shape::Bool => serde_json::json!(true),
+                // v1.5.0's carrier is a LIST of swatches, which neither the map
+                // below nor `3.0` deserialises into: one swatch with a shift.
+                Shape::EngineCarrier if *name == "point_colors" => {
+                    serde_json::json!([{ "src_hue": 1.0, "src_sat": 0.5, "src_lum": 0.5, "hue_shift": 0.3 }])
+                }
+                // v1.5.0 F7's row is a NAME, and `3.0` is not one. A real
+                // Lightroom spelling, because the value rides to the sidecar
+                // verbatim and a placeholder would not show that.
+                Shape::Text => serde_json::json!("Adobe Standard"),
                 // B4's row is a key → verbatim-string MAP, and `3.0` is not a
                 // value it deserialises from. One real Lightroom spelling,
-                // first-hand from the reference sidecars.
-                Shape::EngineCarrier => serde_json::json!({ "PerspectiveVertical": "-35" }),
+                // first-hand from the reference sidecars — an Upright key
+                // since v1.5.0 F6, because the Perspective one this used to
+                // read is an OWNED control now and would have taught a reader
+                // the wrong half of the line.
+                Shape::EngineCarrier => {
+                    serde_json::json!({ "UprightFocalLength35mm": "15.491801514" })
+                }
                 _ => serde_json::json!(3.0),
             };
         }
@@ -4731,6 +4934,47 @@ impl BatchNames {
     }
 }
 
+/// Write a pixel master: stage under a temporary name, then publish.
+///
+/// A failed encode must not leave a partial file at the name `pixels.json` and
+/// the GUI will link, and a repeat write must not destroy the previous master
+/// before the new one is known good. The publish is `store::durable_replace`
+/// rather than a bare rename, because that link is durable and the bytes have
+/// to be on disk before anything points at them.
+///
+/// JPEG cannot carry 16 bits or an alpha channel, so a JPEG target is
+/// flattened — the caller chose that format, and the alternative is failing a
+/// write the caller asked for.
+///
+/// It lives HERE, beside [`default_out`] and [`guard_readonly`], because every
+/// pixel master goes out the same door: `retouch`'s heal and clone, and the
+/// stacked master from [`crate::stack`]. A second copy of this would be a
+/// second place for the staging rule to be got wrong.
+pub fn save_master(out: &Path, img: image::DynamicImage) -> Result<()> {
+    ensure_parent(out)?;
+    let ext = out.extension().and_then(|e| e.to_str()).unwrap_or("png").to_ascii_lowercase();
+    let fmt = image::ImageFormat::from_extension(&ext).unwrap_or(image::ImageFormat::Png);
+    let img = if fmt == image::ImageFormat::Jpeg {
+        image::DynamicImage::ImageRgb8(img.into_rgb8())
+    } else {
+        img
+    };
+    let staged = out.with_extension(format!(
+        "{ext}.tmp.{}.{}",
+        std::process::id(),
+        crate::store::next_tmp_seq()
+    ));
+    if let Err(e) = img.save_with_format(&staged, fmt) {
+        let _ = std::fs::remove_file(&staged);
+        return Err(e).with_context(|| format!("write {}", staged.display()));
+    }
+    if let Err(e) = crate::store::durable_replace(&staged, out) {
+        let _ = std::fs::remove_file(&staged);
+        return Err(e).with_context(|| format!("publish {}", out.display()));
+    }
+    Ok(())
+}
+
 pub fn ensure_parent(path: &Path) -> Result<()> {
     if let Some(parent) = path.parent()
         && !parent.as_os_str().is_empty() {
@@ -4997,6 +5241,108 @@ pub fn find_sources_counted(dir: &Path) -> Result<(Vec<PathBuf>, usize)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **v1.5.0 F5, reversing R29's ruling** (user decision 2026-09-17): the
+    /// switch is OBEYED. `crs:LensProfileEnable="0"` is a document Lightroom
+    /// drew with no lens correction, so the three profile toggles come off with
+    /// the warp.
+    ///
+    /// R29 left them on because our knots came from the CAMERA and Lightroom's
+    /// switch is about ADOBE's profile. Two things answered that: v1.5.0 renders
+    /// Adobe's `.lcp` itself, so for a body with no in-camera metadata the
+    /// switch is about the very knots we hold; and the old split left the mask
+    /// chain in the uncorrected frame (`retain_disabled_linear_handle_warp`)
+    /// while the pixels beside it were corrected, which was incoherent whatever
+    /// Lightroom did.
+    #[test]
+    fn a_disabled_sidecar_switches_the_profile_correction_off_too() {
+        // A profile with all three components, standing in for the photograph's
+        // own metadata — `fresh_lens_profile` cannot read a RAW that is not
+        // there, so the toggles are set here and the SIDECAR arm is what is
+        // under test.
+        let raw = std::env::temp_dir().join("f5-no-such-photo.arw");
+        let off = r#"<x:xmpmeta><rdf:RDF><rdf:Description xmlns:crs="http://ns.adobe.com/camera-raw-settings/1.0/" crs:LensProfileEnable="0" crs:Version="15.0"></rdf:Description></rdf:RDF></x:xmpmeta>"#;
+        let on = off.replace(r#"crs:LensProfileEnable="0""#, r#"crs:LensProfileEnable="1""#);
+        assert_eq!(crate::xmp::lens_profile_enabled(off), Some(false), "premise: the switch reads");
+
+        let stamped = |sidecar: Option<&str>| {
+            let mut p = fresh_lens_profile(&raw);
+            // The state `fresh_lens_profile` would have reached on a real Sony:
+            // knots present, every component on.
+            p.vignette = vec![1.0, 1.2];
+            p.distortion = vec![1.0, 0.96];
+            p.ca_r = vec![1.0005; 4];
+            p.ca_b = vec![0.9995; 4];
+            p.vignette_on = true;
+            p.distortion_on = true;
+            p.ca_on = true;
+            if sidecar.and_then(crate::xmp::lens_profile_enabled) == Some(false) {
+                // The REAL function, not a copy of it — copying it here is what
+                // let a mutation of the engine pass this test.
+                obey_disabled_profile_switch(&mut p);
+            }
+            p
+        };
+        // The premise, so the claim below cannot go vacuous: with no sidecar
+        // the sketch really does carry all three components ON.
+        let armed = stamped(None);
+        assert_eq!(
+            (armed.vignette_on, armed.distortion_on, armed.ca_on),
+            (true, true, true),
+            "premise: the probe profile has every component on before the switch is read"
+        );
+        // And the claim: the same profile, through the switch, has them off.
+        let disabled = stamped(Some(off));
+        assert_eq!(
+            (disabled.vignette_on, disabled.distortion_on, disabled.ca_on),
+            (false, false, false),
+            "a disabled sidecar switches every profile component off"
+        );
+        // The claim, through the real function rather than the sketch above:
+        // a document that says nothing, and one that says "1", leave the
+        // photograph's own toggles exactly as they were.
+        for doc in [None, Some(on.as_str())] {
+            let p = fresh_lens_profile_for_sidecar(&raw, doc);
+            let fresh = fresh_lens_profile(&raw);
+            assert_eq!(
+                (p.vignette_on, p.distortion_on, p.ca_on),
+                (fresh.vignette_on, fresh.distortion_on, fresh.ca_on),
+                "a switch that is absent or ON says nothing about the toggles"
+            );
+        }
+        let p = fresh_lens_profile_for_sidecar(&raw, Some(off));
+        assert_eq!(
+            (p.vignette_on, p.distortion_on, p.ca_on),
+            (false, false, false),
+            "the switch is obeyed"
+        );
+        // And the coherence that was the real defect: the mask frame and the
+        // PIXEL frame now say the same thing. With the toggles off there is no
+        // geometry to resample, so `MaskFrame::downstream` and the render agree
+        // that the stored frame IS the delivered frame.
+        let sketch = stamped(Some(off));
+        assert!(!sketch.geometry_active(), "no geometry, so the pixels stay in the stored frame");
+        assert!(sketch.mask_warp.is_empty(), "…which is exactly what the empty warp asserts");
+        assert_eq!(
+            sketch.mask_warp_src,
+            crate::recipe::MaskWarpSource::DisabledInSidecar,
+            "…and the stamp still says WHY it is identity, which is the difference \
+             between this state and a lens nobody has a profile for"
+        );
+        // The manual controls are NOT the profile and are untouched: Lightroom's
+        // own switch does not turn its Manual tab off either.
+        let manual = EditRecipe {
+            ca_r: 8.0,
+            lens_distortion: -20.0,
+            lens_vignette: 30.0,
+            lens_profile: sketch.clone(),
+            ..Default::default()
+        };
+        assert!(
+            crate::render::geometry_profile(&manual).ca_on,
+            "the manual CA pair still composes its own geometry"
+        );
+    }
 
     /// R29 Batch-3. `crs:LensProfileEnable="0"` is a REASON, not an absence:
     /// Lightroom drew no lens correction, so the frame it stored a mask in is

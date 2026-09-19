@@ -348,6 +348,7 @@ fn id_bound_mutation(path: &str) -> bool {
             | "/api/xmp"
             | "/api/retouch"
             | "/api/heal"
+            | "/api/stack"
     )
 }
 
@@ -427,6 +428,7 @@ fn handle(mut request: Request, state: &AppState, image_token: &str) -> Result<(
         (true, "/api/develop") => api_develop(&mut request, state),
         (true, "/api/retouch") => api_retouch(&mut request, state),
         (true, "/api/heal") => api_heal(&mut request, state),
+        (true, "/api/stack") => api_stack(&mut request, state),
         (true, "/api/export") => api_export(&mut request, state),
         (true, "/api/download") => api_download(&mut request, state),
         (true, "/api/xmp") => api_xmp(&mut request, state),
@@ -1411,8 +1413,11 @@ struct AnalyzeReq {
     #[serde(default)]
     guidance: Option<String>,
     /// Refine mode: the user's CURRENT edit to adjust instead of starting fresh.
-    /// `None` (the default) = propose from the original.
-    #[serde(default)]
+    /// `None` (the default) = propose from the original. Its control-set era
+    /// follows the page's rule ([`body_recipe`]): the Refine takes the base's
+    /// era (`pipeline::carry_over_unrepresentable`), so a silent base must not
+    /// read as a v0.30 file.
+    #[serde(default, deserialize_with = "refine_base")]
     base: Option<EditRecipe>,
     /// 0..1 — how strongly to follow the user's historical style (the Style
     /// slider). `None` falls back to the configured default.
@@ -1468,10 +1473,9 @@ struct Region {
 }
 /// A recipe that arrives over HTTP is authored in the LIVE display frame —
 /// the browser edits the oriented preview — so it is stamped
-/// [`crate::recipe::COORD_ERA`] on the way in, whatever the body said. It is
-/// stamped [`crate::recipe::SCHEMA_ERA`] for the same reason (R25 P8): the
-/// page was served THIS build's control set, so the body's silence about a
-/// key is this build's silence, not a v0.30 file's.
+/// [`crate::recipe::COORD_ERA`] on the way in, whatever the body said. Its
+/// control-set era is [`body_recipe`]'s: the body's own when it states one,
+/// this build's when it is silent.
 ///
 /// `EditRecipe::coord_era`'s serde default means "this JSON predates the
 /// field", which is true of a FILE and false of a request body: the web UI
@@ -1484,9 +1488,41 @@ fn live_frame_recipe<'de, D>(d: D) -> std::result::Result<EditRecipe, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
-    let mut r = EditRecipe::deserialize(d)?;
+    let body = serde_json::Value::deserialize(d)?;
+    let mut r = body_recipe(body).map_err(serde::de::Error::custom)?;
     r.coord_era = crate::recipe::COORD_ERA;
-    r.schema_era = crate::recipe::SCHEMA_ERA;
+    Ok(r)
+}
+
+/// [`AnalyzeReq::base`]'s deserialiser: the same era rule, and no frame stamp
+/// (the refine base's geometry is carried as the page holds it).
+fn refine_base<'de, D>(d: D) -> std::result::Result<Option<EditRecipe>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Option::<serde_json::Value>::deserialize(d)?
+        .map(body_recipe)
+        .transpose()
+        .map_err(serde::de::Error::custom)
+}
+
+/// A request body's recipe at its CONTROL-SET era ([`crate::recipe::SCHEMA_ERA`]):
+/// the stamp it states, or this build's when it states none.
+///
+/// Silence is the page's own: a recipe the page BUILT (a fresh photo, Reset)
+/// was built against this build's controls (R25 P8). A stated stamp is a
+/// FILE's, carried through the page: `/api/recipe` serves a saved recipe.json
+/// verbatim and the page posts it back whole — and the page states `0` for a
+/// file that stated nothing (`index.html`, the load in `selectPhoto`). Until
+/// v1.5.0 every body was stamped current, which made a v1.4 recipe (era 1)
+/// saved from the browser own the parametric keys at their defaults: the
+/// merge stripped the photographer's own Lightroom curve from the sidecar.
+fn body_recipe(body: serde_json::Value) -> std::result::Result<EditRecipe, serde_json::Error> {
+    let states_era = body.get("schema_era").is_some();
+    let mut r = EditRecipe::deserialize(body)?;
+    if !states_era {
+        r.schema_era = crate::recipe::SCHEMA_ERA;
+    }
     Ok(r)
 }
 
@@ -2028,18 +2064,27 @@ fn api_develop(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
         recipe_note = crate::pipeline::repair_pre_era_base_curve(&raw, &mut req.recipe);
     }
     let preview = develop_base(&src)?;
-    let mut after = render::develop_preview(&preview, &req.recipe);
-    // Geometry, mirroring the GUI preview chain (lens geometry → straighten;
-    // the frame stays uncropped for whole-frame slider feedback, same policy).
-    // The web pane previously skipped ALL of it — a recipe with distortion or
-    // straighten previewed one framing and exported another.
+    // The Detail panel's radii are FILM pixels (v1.5.0): the source's own short
+    // edge, from its header, so the web pane shows sharpening and noise
+    // reduction the way the export looks downscaled to it — the GUI canvas's
+    // rule (`AutoShadeApp::film_short_edge`).
+    let film = decode::film_short_edge(&src);
+    let mut after = render::develop_preview_film(&preview, &req.recipe, &crate::diag::pixels(), film);
+    // The engine's own tail, mirroring the GUI preview chain (lens geometry →
+    // straighten → the post-crop vignette and grain; the frame stays uncropped
+    // for whole-frame slider feedback, same policy). The web pane previously
+    // skipped ALL of it — a recipe with distortion or straighten previewed one
+    // framing and exported another.
     let geom = render::geometry_profile(&req.recipe);
-    if geom.geometry_active() || req.recipe.lens_distortion != 0.0 {
-        after = render::apply_lens_geometry(&after, &geom, req.recipe.lens_distortion);
-    }
-    if req.recipe.straighten_deg != 0.0 {
-        after = render::rotate_straighten(&after, req.recipe.straighten_deg);
-    }
+    let film_scale =
+        render::FilmScale::of(film, after.width() as usize, after.height() as usize);
+    after = render::frame_and_finish(
+        after,
+        &req.recipe,
+        &geom,
+        film_scale,
+        render::CropPolicy::Keep,
+    );
     let mut resp = jpeg_response(&after)?;
     if let Some(h) = preview_warning
         .and_then(|m| header("X-Preview-Warning", &m))
@@ -2990,6 +3035,106 @@ fn api_heal(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
     }
 }
 
+/// What a stack asks for: the frames as library ids, the FIRST being the
+/// reference, and the two choices the merge takes.
+#[derive(serde::Deserialize)]
+struct StackReq {
+    ids: Vec<usize>,
+    /// A [`crate::stack::merge::StackKind`] store spelling.
+    kind: String,
+    /// The frames are registered already — skip the alignment.
+    #[serde(default)]
+    tripod: bool,
+    /// The session master this photo is already chained to, if any.
+    master: Option<String>,
+}
+
+/// Merge several frames of one scene into a new master for the FIRST of them.
+///
+/// The web has no variant strip, so where the GUI lands a ▦ card this issues a
+/// SESSION MASTER on the reference photo — the same mechanism heal and the
+/// generative fill use, and it means every later develop, export and download
+/// of that photo follows the merged pixels without a second concept.
+///
+/// The merge runs at full resolution for the reason the GUI's does: a master
+/// baked from a preview would cap every later export at the preview's size.
+fn api_stack(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
+    let stamp = request_gen(request);
+    let req: StackReq = read_json(request)?;
+    let Some(kind) = crate::stack::merge::StackKind::from_store_str(&req.kind) else {
+        let all: Vec<&str> =
+            crate::stack::merge::StackKind::ALL.iter().map(|k| k.store_str()).collect();
+        return Ok(status_response(
+            400,
+            &format!("unknown stack kind `{}` — expected one of {}", req.kind, all.join(", ")),
+        ));
+    };
+    if req.ids.len() < 2 {
+        return Ok(status_response(400, "a stack needs at least two frames"));
+    }
+    // Every id resolved against the CURRENT listing generation, exactly as a
+    // single-photo mutation is: a stack built before a folder switch would
+    // otherwise merge two unrelated pictures.
+    let mut raws: Vec<PathBuf> = Vec::with_capacity(req.ids.len());
+    for id in &req.ids {
+        match state.at_checked(*id, stamp) {
+            Ok(r) => raws.push(r),
+            Err(resp) => return Ok(resp),
+        }
+    }
+    // Frame 0 honours the session master (a stack after a heal must build ON
+    // the healed pixels); every other frame contributes its own pixel source.
+    let (first, first_generated) = match session_master(req.master.as_deref(), &raws[0]) {
+        Ok(Some((p, g))) => (p, g),
+        Ok(None) => crate::store::read_pixel_source(&raws[0]).unwrap_or_else(|| (raws[0].clone(), false)),
+        Err(msg) => return Ok(status_response(400, &msg)),
+    };
+    let mut inputs = vec![first];
+    for r in &raws[1..] {
+        inputs.push(crate::store::read_pixel_source(r).map(|(m, _)| m).unwrap_or_else(|| r.clone()));
+    }
+    let Some(out) = pipeline::unique_out(&raws[0], "stack") else {
+        return Ok(status_response(500, "no free stack output name (999 in ./out)"));
+    };
+    let opts = crate::stack::merge::MergeOptions {
+        kind,
+        align: (!req.tripod).then_some(crate::stack::align::AlignParams::DEFAULT),
+    };
+    match crate::stack::stack_files(&inputs, &opts, None, &out) {
+        Ok(done) => {
+            issue_session_master(&raws[0], &out, first_generated);
+            let img =
+                // baked-by-construction: the ./out master written just above.
+                decode::load_image(&out)?.resize(1400, 1400, image::imageops::FilterType::Triangle);
+            let mut buf = Vec::new();
+            img.write_to(&mut Cursor::new(&mut buf), ImageFormat::Jpeg).context("encode jpeg")?;
+            let m = &done.merged;
+            let mut resp = image_with_path(buf, &out);
+            // The same three numbers the GUI's landing line carries, plus the
+            // merge that ran — headers, because the body is the picture.
+            for (name, value) in [
+                ("X-Stack-Kind", kind.store_str().to_string()),
+                ("X-Stack-Frames", inputs.len().to_string()),
+                ("X-Stack-Travel", format!("{:.1}", m.travel.iter().copied().fold(0.0f32, f32::max))),
+                ("X-Stack-Uncovered", format!("{:.2}", 100.0 * m.uncovered)),
+                ("X-Stack-Headroom-EV", format!("{:.2}", m.headroom_ev)),
+            ] {
+                if let Some(h) = header(name, &value) {
+                    resp = resp.with_header(h);
+                }
+            }
+            Ok(resp)
+        }
+        Err(e) => {
+            // Same 0-byte claim release as api_heal.
+            if std::fs::metadata(&out).is_ok_and(|m| m.len() == 0) {
+                let _ = std::fs::remove_file(&out);
+            }
+            Ok(status_response(500, &format!("stack failed: {e}")))
+        }
+    }
+}
+
 /// Current provider/model settings for the Settings panel. Never returns the raw
 /// API keys — only whether each is present.
 ///
@@ -3627,6 +3772,42 @@ mod tests {
             INDEX_HTML.contains(concat!("style_strength: style,", " adherence")),
             "the page must put it on the wire"
         );
+    }
+
+    /// v1.5.0: a request body's control-set era is the one it STATES, and this
+    /// build's only when it is silent — on the save, the preview and the refine
+    /// base alike — and the page states a legacy file's silence as 0.
+    ///
+    /// MUTATION THIS CATCHES: `body_recipe` stamping unconditionally (a v1.4
+    /// recipe posted back from the browser is era 2 again, and its save
+    /// strips the sidecar's parametric curve — the merge half is pinned by
+    /// `xmp::tests::a_v1_4_recipe_keeps_the_parametric_curve_it_never_had`),
+    /// or the page's legacy line deleted.
+    #[test]
+    fn a_body_keeps_the_era_it_states_and_a_silent_one_is_current() {
+        use crate::recipe::{COORD_ERA, SCHEMA_ERA};
+        let xmp = |body: &str| serde_json::from_str::<XmpReq>(body).expect("an XMP body").recipe;
+        let stated = xmp(r#"{"id":0,"recipe":{"schema_era":1,"coord_era":0,"exposure_ev":0.5}}"#);
+        assert_eq!(stated.schema_era, 1, "a file's stamp rides through the page");
+        assert_eq!(stated.coord_era, COORD_ERA, "the frame stamp is unconditional, as before");
+        assert_eq!(stated.exposure_ev, 0.5);
+        let silent = xmp(r#"{"id":0,"recipe":{"exposure_ev":0.5}}"#);
+        assert_eq!(silent.schema_era, SCHEMA_ERA, "the page's own recipe is this build's");
+        let develop = serde_json::from_str::<DevelopReq>(r#"{"id":0,"recipe":{"schema_era":0}}"#)
+            .expect("a develop body")
+            .recipe;
+        assert_eq!(develop.schema_era, 0);
+        let analyze = |body: &str| serde_json::from_str::<AnalyzeReq>(body).expect("an analyze body").base;
+        assert_eq!(analyze(r#"{"id":0,"base":{"schema_era":1}}"#).map(|b| b.schema_era), Some(1));
+        assert_eq!(analyze(r#"{"id":0,"base":{}}"#).map(|b| b.schema_era), Some(SCHEMA_ERA));
+        assert!(analyze(r#"{"id":0}"#).is_none() && analyze(r#"{"id":0,"base":null}"#).is_none());
+        // Still the recipe's own door: an unknown field is refused through the
+        // intermediate value exactly as it was without one.
+        assert!(serde_json::from_str::<XmpReq>(r#"{"id":0,"recipe":{"no_such_control":1}}"#).is_err());
+        // The page states a legacy file's silence before it holds the recipe.
+        // Assembled so this test cannot match itself.
+        let legacy = concat!("if (!(\"schema_era\" in loaded)) loaded", ".schema_era = 0;");
+        assert!(INDEX_HTML.contains(legacy), "the page must state a legacy file's era");
     }
 
     /// L04-7: the warning header must SURVIVE its worst real payloads — the

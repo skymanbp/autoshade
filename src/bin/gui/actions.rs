@@ -1362,13 +1362,18 @@ impl AutoShadeApp {
     /// ◭ `origin = None`, no `pixels.json`).
     ///
     /// Since 2026-09-15 an AI denoise lands as its own ◈ card instead of
-    /// redefining the ▣ card, so the negative is, in order: the ◈ card the
-    /// user stands on, the first ◈ card in the strip (a denoised negative
-    /// exists because the user wants to work from it), else the ▣ card's own
-    /// in-place master (a heal / clone baked into the source).
+    /// redefining the ▣ card, so the negative is, in order: the remade card
+    /// the user stands on, the first remade card in the strip (one exists
+    /// because the user wants to work from it), else the ▣ card's own in-place
+    /// master (a heal / clone baked into the source).
+    ///
+    /// "Remade" is ◈ AND ▦ since v1.5.0 ([`VariantKind::is_remade_negative`]):
+    /// a stack's merged master is a new negative of the same scene on exactly
+    /// the denoise master's terms, and a reverse-fit solved after it should
+    /// read the stacked frame rather than the single frame it was made from.
     pub(crate) fn negative_origin(&self) -> Option<PathBuf> {
         let denoised =
-            |v: &Variant| (v.kind == VariantKind::Denoised).then(|| v.origin.clone()).flatten();
+            |v: &Variant| v.kind.is_remade_negative().then(|| v.origin.clone()).flatten();
         if let Some(master) = self.active_variant().and_then(denoised) {
             return Some(master);
         }
@@ -2147,6 +2152,7 @@ impl AutoShadeApp {
         self.clone_mode = false;
         self.wb_picking = false;
         self.range_picking = None;
+        self.point_color_picking = false;
         self.placing_mask = None;
         self.place_start = None;
         self.crop_drag = None;
@@ -2235,6 +2241,7 @@ impl AutoShadeApp {
             || self.clone_mode
             || self.wb_picking
             || self.range_picking.is_some()
+            || self.point_color_picking
             || self.placing_mask.is_some()
     }
 
