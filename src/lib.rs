@@ -331,8 +331,18 @@ pub fn sidecar_command(program: impl AsRef<std::ffi::OsStr>) -> std::process::Co
 /// Observed in CI on 2026-09-17 (run 35206439076, `debug-asserts`, Linux): one
 /// test wrote a stand-in `claude` and ran it while the rest of the battery
 /// spawned its own children around it, and that single test reddened the job.
-/// Windows raises a sharing violation rather than this error and is left alone
-/// — it is not in the set matched below, and no run has shown it.
+///
+/// Which kernels put a file into this state was MEASURED, not assumed, and
+/// they differ. Linux refuses a `#!` script whose file is open for writing
+/// (WSL2 5.15, and run 35436156156's ubuntu job). macOS does not: XNU checks
+/// the write count of the image it MAPS, and for a script that image is the
+/// interpreter, so the same probe spawned the child anyway (run 35436156156,
+/// `test (macos-latest)` — the tests below said so out loud rather than
+/// passing vacuously). Windows raises a sharing violation, a different error
+/// entirely. So the wait below is Linux's in practice for everything this
+/// repository launches, since every stand-in it writes is a script; it stays
+/// unconditional because the error, not the platform, is what it matches, and
+/// an interpreter being rewritten under us would raise it anywhere.
 pub fn spawn_child(cmd: &mut std::process::Command) -> std::io::Result<std::process::Child> {
     // Four orders of magnitude above one fork/exec gap, and still finite.
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
@@ -781,12 +791,19 @@ mod sidecar_executor_tests {
     /// few microseconds. Without the retry the first attempt is the answer and
     /// the launch fails; with it the spawn lands once the handle drops.
     ///
-    /// Unix only: `ETXTBSY` is a POSIX exec error, and Windows reports a
-    /// sharing violation that [`super::spawn_child`] deliberately leaves alone.
+    /// Linux only, and that limit is a MEASUREMENT this test made itself. The
+    /// first version ran on every unix and failed on macOS at the premise line
+    /// with "this kernel does not refuse to exec an image open for writing"
+    /// (run 35436156156): XNU checks the write count of the image it maps, and
+    /// for a `#!` script that image is the interpreter, not the script. Since
+    /// every stand-in this repository writes is a script, the state under test
+    /// is unreachable there — so the test goes where its premise holds rather
+    /// than being softened until it passes everywhere.
     ///
     /// MUTATION: delete the `ExecutableFileBusy` arm in `spawn_child` and this
-    /// fails with "Text file busy" instead of running the child.
-    #[cfg(unix)]
+    /// fails with "Text file busy" instead of running the child. The `expect`
+    /// two statements above is that mutation standing, run every time.
+    #[cfg(target_os = "linux")]
     #[test]
     fn a_helper_held_open_for_writing_is_waited_for_not_refused() {
         let dir = crate::test_dir("etxtbsy");
@@ -828,7 +845,9 @@ mod sidecar_executor_tests {
     ///
     /// MUTATION: drop the `deadline` test from the same arm and this never
     /// returns.
-    #[cfg(unix)]
+    ///
+    /// Linux only, for the reason the test above measured.
+    #[cfg(target_os = "linux")]
     #[test]
     fn a_helper_never_released_still_fails_rather_than_hanging() {
         let dir = crate::test_dir("etxtbsy-forever");
