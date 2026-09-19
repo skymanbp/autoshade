@@ -217,7 +217,7 @@ impl ClaudeProvider {
         cmd.stderr(std::process::Stdio::piped());
         // Tree-wide kill on timeout, like both python sidecars (L11#7b).
         crate::arm_kill_group(&mut cmd);
-        let mut child = cmd.spawn()?;
+        let mut child = crate::spawn_child(&mut cmd)?;
         let group = crate::assign_kill_group(&child);
         // The prompt writer is a DEDICATED thread, not an inline write_all:
         // the prompt routinely exceeds the ~64 KiB pipe buffer, so an inline

@@ -313,6 +313,45 @@ pub fn sidecar_command(program: impl AsRef<std::ffi::OsStr>) -> std::process::Co
     cmd
 }
 
+/// Spawn `cmd`, waiting out a kernel that answers `ETXTBSY`.
+///
+/// `execve` refuses with `ETXTBSY` — "Text file busy" — while ANY process
+/// holds the image open for writing. A process that is both multi-threaded and
+/// forks puts files into that state with nobody writing them: `Command::spawn`
+/// duplicates every open descriptor into the child, and between that fork and
+/// the child's own `exec` the duplicate IS a writer. So a helper this process
+/// wrote and closed on one thread can be briefly unexecutable *because* an
+/// unrelated thread launched something else. The descriptors are `CLOEXEC`, so
+/// the window shuts by itself within one fork/exec; POSIX offers no way to wait
+/// on it, and no ordering on this side can prevent it — which is why waiting is
+/// the remedy here rather than a race papered over. The wait is bounded, so a
+/// file something else is genuinely still writing fails exactly as before, with
+/// the kernel's own message.
+///
+/// Observed in CI on 2026-09-17 (run 35206439076, `debug-asserts`, Linux): one
+/// test wrote a stand-in `claude` and ran it while the rest of the battery
+/// spawned its own children around it, and that single test reddened the job.
+/// Windows raises a sharing violation rather than this error and is left alone
+/// — it is not in the set matched below, and no run has shown it.
+pub fn spawn_child(cmd: &mut std::process::Command) -> std::io::Result<std::process::Child> {
+    // Four orders of magnitude above one fork/exec gap, and still finite.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    loop {
+        match cmd.spawn() {
+            Err(e)
+                if e.kind() == std::io::ErrorKind::ExecutableFileBusy
+                    && std::time::Instant::now() < deadline =>
+            {
+                // The wait POSIX does not provide, because the descriptor that
+                // holds the image belongs to a child that is already on its way
+                // to `exec` — there is nothing here to synchronise on.
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            other => return other,
+        }
+    }
+}
+
 /// Spawn a [`sidecar_command`] and wait for it under `budget`.
 ///
 /// `who` names the bridge in every message the user can see; `launched` is what
@@ -327,7 +366,7 @@ pub fn run_sidecar_child(
     budget: std::time::Duration,
 ) -> anyhow::Result<std::process::Output> {
     use anyhow::Context;
-    let child = cmd.spawn().with_context(|| {
+    let child = spawn_child(cmd).with_context(|| {
         format!("launch {who} ({launched}) — is Python on PATH / AUTOSHADE_PYTHON set?")
     })?;
     let group = assign_kill_group(&child);
@@ -732,6 +771,81 @@ mod sidecar_executor_tests {
         .to_string();
         assert!(e.contains("launch test sidecar"), "{e}");
         assert!(e.contains("AUTOSHADE_PYTHON"), "the refusal must name the way out: {e}");
+    }
+
+    /// A helper that is momentarily open for writing is WAITED for, not failed.
+    ///
+    /// The window is synthesised rather than raced for: holding a write handle
+    /// open keeps the kernel answering `ETXTBSY` for exactly as long as this
+    /// test says, which is the same state another thread's fork creates for a
+    /// few microseconds. Without the retry the first attempt is the answer and
+    /// the launch fails; with it the spawn lands once the handle drops.
+    ///
+    /// Unix only: `ETXTBSY` is a POSIX exec error, and Windows reports a
+    /// sharing violation that [`super::spawn_child`] deliberately leaves alone.
+    ///
+    /// MUTATION: delete the `ExecutableFileBusy` arm in `spawn_child` and this
+    /// fails with "Text file busy" instead of running the child.
+    #[cfg(unix)]
+    #[test]
+    fn a_helper_held_open_for_writing_is_waited_for_not_refused() {
+        let dir = crate::test_dir("etxtbsy");
+        let bin = crate::write_stand_in(&dir, "busy", "@exit /b 7\r\n", "exit 7\n");
+        // The writer that makes the kernel say ETXTBSY, released by its own
+        // thread after far longer than one spawn attempt takes.
+        let held = std::fs::OpenOptions::new().write(true).open(&bin).unwrap();
+        // The premise, checked FIRST-PARTY on whatever kernel is running this
+        // rather than assumed: a plain spawn of the same path, right now, is
+        // refused. Without this the test could pass on a kernel that never
+        // enforces `ETXTBSY` while proving nothing at all — and it is the
+        // other half of the point, since the only difference between this
+        // spawn and the one below is `spawn_child`.
+        let refused = std::process::Command::new(&bin)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect_err("this kernel does not refuse to exec an image open for writing");
+        assert_eq!(
+            refused.kind(),
+            std::io::ErrorKind::ExecutableFileBusy,
+            "the premise is ETXTBSY specifically, not some other refusal: {refused}"
+        );
+        let releaser = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(300));
+            drop(held);
+        });
+        let mut cmd = super::sidecar_command(&bin);
+        let out = super::run_sidecar_child(&mut cmd, "busy stand-in", &bin, Duration::from_secs(30))
+            .expect("a momentarily busy helper is waited for, not refused");
+        assert_eq!(out.status.code(), Some(7), "the child itself ran");
+        releaser.join().unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// And the wait is BOUNDED: a helper nothing ever stops writing still
+    /// fails, with the kernel's own message, rather than hanging the caller.
+    ///
+    /// MUTATION: drop the `deadline` test from the same arm and this never
+    /// returns.
+    #[cfg(unix)]
+    #[test]
+    fn a_helper_never_released_still_fails_rather_than_hanging() {
+        let dir = crate::test_dir("etxtbsy-forever");
+        let bin = crate::write_stand_in(&dir, "busy", "@exit /b 0\r\n", "exit 0\n");
+        let _held = std::fs::OpenOptions::new().write(true).open(&bin).unwrap();
+        let started = std::time::Instant::now();
+        let mut cmd = super::sidecar_command(&bin);
+        let e = super::run_sidecar_child(&mut cmd, "busy stand-in", &bin, Duration::from_secs(30))
+            .expect_err("a permanently busy helper cannot launch")
+            .to_string();
+        assert!(e.contains("launch busy stand-in"), "the refusal still names the bridge: {e}");
+        assert!(
+            started.elapsed() < Duration::from_secs(20),
+            "the wait is bounded, not a hang: {:?}",
+            started.elapsed()
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 
