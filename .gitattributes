@@ -33,3 +33,11 @@ python/*.json text eol=lf
 # the default `core.autocrlf=true`, which is this machine's setting and every
 # Windows contributor's.
 src/fixtures/*.json text eol=lf
+
+# And the Lightroom sidecar fixture, for the same reason with the authorship
+# reversed: `src/fixtures/hdr-on-lightroom-9.4.xmp` is Lightroom's OWN bytes,
+# LF-terminated as Lightroom wrote them, pulled in with `include_str!` by
+# `xmp::tests::lightrooms_own_hdr_sidecar_reads_as_the_mode_and_headroom_it_states`.
+# Rewriting its newlines on checkout would make the tree's copy something
+# Lightroom never produced, which is the one property the fixture exists for.
+src/fixtures/*.xmp text eol=lf

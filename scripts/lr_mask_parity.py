@@ -482,10 +482,26 @@ def measure(pack: Pack, tone: np.ndarray) -> dict:
 
 
 def default_pack() -> Path:
+    """Where the 46-export pack lives, asked rather than assumed.
+
+    Until 2026-09-19 this returned `~/autoshop-fixtures/me6-2026-09`, a
+    machine-specific guess that was right on exactly one computer and silently
+    wrong everywhere else. The fixture packs moved out of the home directory
+    that day (they now live together under the machine's scratch root), and
+    the lesson is the move's, not the path's: a script cannot know where a
+    5 GB corpus was put, so it asks and says so when the answer is missing.
+    """
     env = os.environ.get("AUTOSHADE_LR_PACK")
     if env:
         return Path(env)
-    return Path.home() / "autoshop-fixtures" / "me6-2026-09"
+    root = os.environ.get("AUTOSHADE_FIXTURES_ROOT")
+    if root:
+        return Path(root) / "me6-2026-09"
+    raise SystemExit(
+        "pass --pack, or set AUTOSHADE_LR_PACK to the 46-export pack itself, "
+        "or AUTOSHADE_FIXTURES_ROOT to the directory the fixture packs sit in "
+        "(the pack is its me6-2026-09 subdirectory)"
+    )
 
 
 def default_probe() -> Path:

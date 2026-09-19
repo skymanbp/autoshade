@@ -2431,6 +2431,15 @@ the comparison is in coverage rather than in exposed pixels. Five further tests
 in `render::lr_pack` pin the verdicts from the fixture without rendering
 anything, and print a skip reason when `AUTOSHADE_LR_PACK` is unset.
 
+Neither the tests nor the script assume where the pack sits on disk. Until
+2026-09-19 `lr_mask_parity.py` fell back to a folder under the running
+user's home directory, a guess that happened to be right on exactly one
+machine; the fixture packs moved out of that home directory that day and
+the fallback went with them. The script now takes `--pack`, or
+`AUTOSHADE_LR_PACK` for the pack itself, or `AUTOSHADE_FIXTURES_ROOT` for
+the directory the packs share (the pack is its `me6-2026-09`
+subdirectory), and exits saying so when given none of the three.
+
 **R27 Batch-4 (L-08) took the brush half of the remaining refusal.** A
 `Mask/Aggregate` and its `Mask/Paint` children are now a first-class geometry,
 `MaskGeometry::Brush` — the group's `(MaskBlendMode, MaskValue, MaskInverted)`

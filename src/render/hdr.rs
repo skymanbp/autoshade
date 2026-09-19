@@ -95,6 +95,12 @@ use crate::recipe::EditRecipe;
 /// own transfer, and at the top of the range (input 0.90) it lands within
 /// −0.006 of Lightroom's −0.189.
 ///
+/// That kit case is IN THE TREE, at `src/fixtures/hdr-on-lightroom-9.4.xmp` —
+/// the `+2.30` headroom above was read from it, and it is the only sidecar
+/// anywhere on hand with the mode on, so a tree without it could restate this
+/// number but never re-derive it. `xmp::tests::lightrooms_own_hdr_sidecar_
+/// reads_as_the_mode_and_headroom_it_states` holds the reader to those bytes.
+///
 /// This REPLACED a negative Highlights push, and the reason is worth keeping
 /// because the old reasoning was good. Folding the shoulder into the slider
 /// meant it inherited [`render::limit_tone_sliders`](super::limit_tone_sliders),

@@ -12734,6 +12734,50 @@ mod tests {
         }
     }
 
+    /// The same nine keys read from LIGHTROOM's bytes:
+    /// `src/fixtures/hdr-on-lightroom-9.4.xmp`, which Lightroom 9.4 (Camera
+    /// Raw 18.4) wrote on 2026-09-19 with the mode on.
+    ///
+    /// The round trip above proves this writer and this reader agree with
+    /// each other, which is a weaker claim than agreeing with Lightroom, and
+    /// no library file can make the stronger one: the reference library's
+    /// 175 sidecars carry `crs:HDREditMode="0"` on 114 photographs and `"1"`
+    /// on NONE (census 2026-09-17, [`crate::render::hdr`]). This one file is
+    /// also the measurement's own input --- the headroom shoulder in
+    /// `render::hdr` was fitted against its `+2.30` (rms 0.0412 of
+    /// Lightroom's own transfer), so a tree without it cannot re-derive that
+    /// number. It is 8,165 bytes and names no file, place or person; what it
+    /// carries beyond the develop is the camera and the lens.
+    ///
+    /// MUTATION THIS CATCHES: read the headroom with a parser that stops at
+    /// the sign (`+2.30` -> 0.0, a photograph with no headroom at all), or
+    /// let an SDR control fall back to its default instead of reading the
+    /// zero Lightroom wrote.
+    #[test]
+    fn lightrooms_own_hdr_sidecar_reads_as_the_mode_and_headroom_it_states() {
+        let doc = include_str!("fixtures/hdr-on-lightroom-9.4.xmp");
+        // The premise, and what makes this test different from the one
+        // above: Lightroom wrote this file, so there is no payload of ours
+        // to read the develop out of. Everything below is `crs:` attributes.
+        assert!(
+            !doc.contains("xmlns:asr"),
+            "a Lightroom-written sidecar carries no payload of ours"
+        );
+        assert!(
+            doc.contains("crs:HDREditMode=\"1\""),
+            "premise: the mode is on in the bytes themselves"
+        );
+
+        let r = xmp_to_recipe(doc);
+        assert!(r.hdr_edit, "the mode Lightroom wrote comes home");
+        assert_eq!(r.hdr_max_ev, 2.30, "...and the headroom, sign and two places");
+        assert_eq!(
+            r.sdr_controls(),
+            [0.0; 7],
+            "...and all seven SDR controls, at the zero Lightroom wrote"
+        );
+    }
+
     /// R27 T4, `P2-feather-k-closures.md` §4.3. Lightroom's rule for the
     /// detail/NR companions is **amount-gated**: 4/4 exports with
     /// `LuminanceSmoothing > 0` carry the Detail companion and 0 of 207 with
