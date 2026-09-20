@@ -2,7 +2,7 @@
 
 > 这是**已发生之事的台账**，不是待办表：每一条要么是已发布的版本与实测数字，
 > 要么是带理由的终局裁定（一个测出来的数、一条仪器极限、一次用户拍板）。
-> 每项都附 `file:line` 或提交锚点，供新会话不重读全库即可接手。更新于 **2026-09-19**。
+> 每项都附 `file:line` 或提交锚点，供新会话不重读全库即可接手。更新于 **2026-09-20**。
 >
 > **v1.5.0 已发布**（2026-09-19，tag `v1.5.0` → `dfd9fa4`，release run `35438494808` 五工位绿
 > （windows 11 m 59 s、macos 14 m 08 s、linux 2 m 36 s、macos-battery 21 m 35 s、publish 11 s）；
@@ -150,6 +150,35 @@
 > 历史内容——v0.16.1–v1.0.0 层积的旧横幅、各轮计划、2026-08-18 入库的标签定义
 > （`M0`/`M8`/`B2`–`B5`/`SF4`/`M-A`–`M-D`）与更早的「当前状态」条目——逐字存放在
 > [docs/ROADMAP-archive.md](ROADMAP-archive.md)（追加式档案，勿重写）。
+
+## 未发布（已完成的车道改动，尚未发版）
+
+### GUI — 按钮行共享可读宽度，镜头与导出标题按语义显示（2026-09-20）
+
+- **根因**（用户报障「又是可以无限拉长的了」「我明明什么都没调」）：`src/bin/gui/buttons.rs: columns`
+  按整个面板的可用宽度分格，R38 的按钮行漏了 #14a 已用于提示框的 420 px 上限；面板本来就不设最大宽度。
+  `src/bin/gui/panels/develop.rs: dev_lens` 把 `stamp_calibration` 开启的机内测量当成手工调整；
+  `dev_export` 又拿全局 JPEG 等交付偏好与 TIFF 默认值比较，所以两处都能在未调照片时亮 ●。
+- **修复**（`157162e`、`2e467ab`）：`columns` 向下夹到现有 `theme::FIELD_W_MAX`，整行左对齐，保留整像素向下取整与 `n.max(1)`；
+  所有按钮行与提示框共用一个可读宽度，曲线与 HSL 编辑器仍可随面板展开。镜头标题沿用两组手工控件 family，
+  配置部分改读 `!lens_profile.is_as_stamped()`，与未保存徽标一致：盖入的测量不亮，偏离盖章的开关与手工滑杆才亮；
+  两个配置强度滑杆仍由 `lens_effects` 点亮。导出是偏好、无逐片中性态，标题不再带点，工具栏悬停仍列交付摘要。
+- **测试**：`src/bin/gui/tests.rs: a_button_row_never_grows_past_the_readable_width` 在中英两种语言、
+  控制面板 800 / 1600 px、图库 800 px、2400×1200 画布上各跑三帧，展开 AI / 显影 / 修饰 / 图库，
+  逐按钮查宽度与文字适配、查面板不增长，并具名确认修补 / 图章 / 反推 / 复制配方与三格蒙版行都已绘制。
+  原默认宽度测试共用准备函数，原断言不变；镜头测试覆盖盖章、关闭组件、手工暗角、两种配置强度及无数据却开启，
+  导出测试在 JPEG / 2048 / 锐化 / 色域 / 目标 / 降噪设置下读取纯标题，均验中英。
+- **变异证伪**：只移除 `columns` 的 `.min(FIELD_W_MAX)`，新宽度测试转红（0 / 1 / 0，exit 101）：
+  `En, 800 px, frame 0: action "Copy recipe" is 784.0 px wide — past the 420 px readable ceiling`；
+  按 SHA-256 验逐字节还原后复跑 1 / 0 / 0，原默认宽度测试也为 1 / 0 / 0。
+- **门**（release，独立 target 与数据目录）：GUI **203 / 0 / 1**（0.52 s）；唯一忽略项
+  `r35_scratch_recipe_save_line_counts_only_the_remaining_bitmap_masks` 需 `AUTOSHADE_R35_RECIPE` 指向车道内临时配方。
+  clippy `--all-targets` 默认与 `--features gui` 两组 `-D warnings` 均 exit 0、0 警告；
+  `python scripts/check_docs.py` **25 PASS / 0 FAIL / 5 SKIP**（四项发布电池计数无 `--gates` 转录本，
+  一项仓外 XMP 普查无 `AUTOSHADE_CENSUS_ROOT`）。`catalogue.rs` 的旧谓词对照只测手工镜头 family，
+  未编码错误的 profile OR，无需改动；`recipe.rs` 与 `i18n.rs` 未改，未触发库电池与新增字形门。
+  `docs/USER_MANUAL.md` 只同步这三处行为；README / ARCHITECTURE / site 的 ●、dot、activity 语句已查，
+  没有把机内配置或导出列为点亮条件的句子。验证只跑测试，未启动 GUI。
 
 ## 版本台账（逐版已发布内容与实测数字，新在上；均已完成，勿重做）
 
