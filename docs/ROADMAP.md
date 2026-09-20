@@ -153,6 +153,13 @@
 
 ## 未发布（已完成的车道改动，尚未发版）
 
+### 合并与复跑 — 三条车道合入同一棵树，门由主模型在合并树上重跑（2026-09-20）
+
+- **合并**（分支 `review-merge-2026-09-20`，基于 `8a1a2f8`，`--no-ff` 依次合入）：降噪偏好 `a365306`、GUI 宽度与圆点 `587f79b`、生成图调整入口 `fd5a059`。实现全部出自 Astra（codex `gpt-6-astra`，effort max）的三条隔离车道，主模型只做设计、逐行审阅、冲突解决与复跑。
+- **冲突三处**：`src/bin/gui/actions.rs` 的偏好恢复块——保留降噪车道抽出的 `restore_prefs`，调整车道新增的 `adjust_quality` 恢复行搬进函数（该车道在此文件只改三行，逐行核对过）；本台账顶部——四块车道记录原文并列在同一个「未发布」标题下；`assets/fonts/NotoSansSC-autoshade.ttf`——两条车道各自重生成过，二进制不可合并，按合并后的全部文案重生成（58 符号 + 833 CJK，SC 子集 834 码位 / 223,380 字节），其余四个符号字体保持已提交版本，`assets/fonts/README.md` 的三个数字同步为实测值。
+- **合并树的门**（`target-lane-review`，独立 `CARGO_TARGET_DIR` / `AUTOSHADE_DATA_DIR`）：lib **1634 过 / 0 败 / 15 忽略**、GUI **213 / 0 / 1**、clippy 双特性 0 警告、`check_docs` **25 PASS / 0 FAIL / 5 SKIP**、`audit_i18n` 十类 0、字体 **891/891**。按测试名比对而不是比总数：lib 合并 1649 名＝两条改库车道的并集 1649；GUI 合并 214 名＝三车道并集 215 减去 `the_ai_section_dot_follows_the_style_strength_it_used_to_miss`——它钉的是旧规则，已按用户裁定由 `the_ai_dot_reads_this_photos_state_not_the_saved_dials` 取代。新增行里照片文件名形状 0 处、提交尾行 0 处、令牌形状 0 处。
+- **没做的**：三车道发版电池未跑（当时 GPU 上有降噪探针在串行运行，另有常驻服务占用显存；属发版义务，发版前补跑）；未启动 GUI；调整入口未做真实图像接口调用（库侧为回环桩，GUI 侧直接驱动落卡路径）。未推送、未发版，由用户决定。
+
 ### GUI — 按钮行共享可读宽度，镜头、导出与 AI 标题按语义显示（2026-09-20）
 
 - **根因**（用户报障「又是可以无限拉长的了」「我明明什么都没调」）：`src/bin/gui/buttons.rs: columns`
