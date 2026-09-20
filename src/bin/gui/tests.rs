@@ -7979,6 +7979,88 @@
         assert_eq!(req.style, 0.2);
     }
 
+    #[derive(Default)]
+    struct PrefsMemory(std::collections::HashMap<String, String>);
+
+    impl eframe::Storage for PrefsMemory {
+        fn get_string(&self, key: &str) -> Option<String> { self.0.get(key).cloned() }
+        fn set_string(&mut self, key: &str, value: String) { self.0.insert(key.into(), value); }
+        fn flush(&mut self) {}
+    }
+
+    #[test]
+    fn era_zero_denoise_prefs_reset_both_dials_and_explain_the_old_values() {
+        for lang in [Lang::En, Lang::Zh] {
+            let mut storage = PrefsMemory::default();
+            eframe::Storage::set_string(&mut storage, eframe::APP_KEY,
+                format!("(denoise_strength:0.65,save_denoise_strength:0.5,lang:{lang:?})"));
+            let prefs: Prefs = eframe::get_value(&storage, eframe::APP_KEY).unwrap();
+            assert_eq!(prefs.prefs_era, 0, "a missing key must not inherit the current era");
+            let mut app = AutoShadeApp::default();
+            app.restore_prefs(prefs);
+            assert_eq!((app.denoise_strength, app.save_denoise_strength), (1.0, 1.0),
+                "era 0 must reset both denoise dials to the RAW blend default");
+            for old in ["100", "65", "50"] {
+                assert!(app.status.contains(old), "{old} missing from {}", app.status);
+            }
+            assert_eq!(app.status.matches(if lang == Lang::En { "reset to" } else { "已重置" }).count(), 1);
+            assert!(!app.status.contains("{a}"));
+            assert!(app.toasts.is_empty(), "the startup status is the existing disclosure surface");
+        }
+    }
+
+    #[test]
+    fn denoise_prefs_note_survives_the_startup_folder_scan_once() {
+        let mut app = AutoShadeApp { busy: true, ..Default::default() };
+        app.restore_prefs(Prefs { prefs_era: 0, denoise_strength: 0.65,
+            save_denoise_strength: 0.5, ..Prefs::default() });
+        assert!(app.startup_note.is_some());
+        app.tx.send(Msg::Folder(Box::new(Ok((PathBuf::new(), vec![], 0))))).unwrap();
+        app.poll_workers(&egui::Context::default());
+        assert!(app.status.contains("no photos found"), "{}", app.status);
+        assert!(app.status.contains("reset to 100"), "{}", app.status);
+        assert!(app.startup_note.is_none());
+        app.tx.send(Msg::Folder(Box::new(Ok((PathBuf::new(), vec![], 0))))).unwrap();
+        app.poll_workers(&egui::Context::default());
+        assert!(!app.status.contains("reset to"), "a later scan must not repeat the startup note");
+    }
+
+    #[test]
+    fn current_era_denoise_prefs_restore_without_a_reset_note() {
+        let mut app = AutoShadeApp::default();
+        app.restore_prefs(Prefs { prefs_era: 1, denoise_strength: 0.65,
+            save_denoise_strength: 0.5, ..Prefs::default() });
+        assert_eq!((app.denoise_strength, app.save_denoise_strength), (0.65, 0.5));
+        assert_eq!(app.status, tr(Lang::En, "Open a photo, or open a folder to browse your library."));
+        assert!(app.startup_note.is_none());
+    }
+
+    #[test]
+    fn prefs_without_denoise_keys_restore_the_raw_defaults_without_a_note() {
+        let mut storage = PrefsMemory::default();
+        eframe::Storage::set_string(&mut storage, eframe::APP_KEY, "()".into());
+        let prefs: Prefs = eframe::get_value(&storage, eframe::APP_KEY).unwrap();
+        assert_eq!(prefs.prefs_era, 0);
+        let mut app = AutoShadeApp::default();
+        app.restore_prefs(prefs);
+        assert_eq!((app.denoise_strength, app.save_denoise_strength), (1.0, 1.0));
+        assert_eq!(app.status, tr(Lang::En, "Open a photo, or open a folder to browse your library."));
+    }
+
+    #[test]
+    fn saving_prefs_records_the_current_era_and_preserves_new_choices() {
+        assert_eq!(Prefs::default().prefs_era, PREFS_ERA);
+        let mut app = AutoShadeApp { denoise_strength: 0.65, save_denoise_strength: 0.5, ..Default::default() };
+        let mut storage = PrefsMemory::default();
+        eframe::App::save(&mut app, &mut storage);
+        let saved: Prefs = eframe::get_value(&storage, eframe::APP_KEY).unwrap();
+        assert_eq!(saved.prefs_era, PREFS_ERA);
+        let mut reopened = AutoShadeApp::default();
+        reopened.restore_prefs(saved);
+        assert_eq!((reopened.denoise_strength, reopened.save_denoise_strength), (0.65, 0.5));
+        assert!(!reopened.status.contains("reset to"));
+    }
+
     /// 2026-09-13, the same user decision applied to the denoiser's two
     /// timings: 「🤖 AI Denoise now」 (Detail fold) and 「🤖 AI Denoise on
     /// export」 (Export fold) each read a dial of their own, both starting at

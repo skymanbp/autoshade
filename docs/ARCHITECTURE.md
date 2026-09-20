@@ -625,9 +625,13 @@
 > Strength is a mosaic-domain blend whose default is
 > `denoise::DEFAULT_STRENGTH_RAW = 1.0`, chosen per source by
 > `denoise::default_strength_for` on the CLI, the web export and the GUI's two
-> dials. Why the mosaic: on the user's ILCE-7RM4A frames the noise is white
-> per CFA plane there and spatially correlated after demosaic, where neither
-> the blind SCUNet nor a non-blind sRGB-domain model separated it from
+> dials; anything less puts noise back. GUI preferences have a named
+> `PREFS_ERA` (`src/bin/gui/model.rs`): a missing era decodes to 0 while fresh
+> defaults and saves carry era 1. Restore step 0→1 resets both denoise dials
+> to the RAW default and reports changed values once in the startup status;
+> era-1 choices remain intact. Why the mosaic: on the user's ILCE-7RM4A frames
+> the noise is white per CFA plane there and spatially correlated after demosaic,
+> where neither the blind SCUNet nor a non-blind sRGB-domain model separated it from
 > texture — against ground truth (an ISO-100 frame plus synthetic noise at
 > the ISO-640 model the shipped estimator measured on a real frame, injected
 > into the whole 61 MP frame; `scripts/denoise_bench.py`) the mosaic path

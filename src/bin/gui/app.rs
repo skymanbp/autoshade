@@ -34,6 +34,8 @@ pub(crate) struct AutoShadeApp {
     pub(crate) develop_inflight: bool,
     pub(crate) develop_count: u64, // accepted frames; regression counter (latest-wins)
     pub(crate) status: String,
+    // Consumed by the startup greeting or the restored folder's status.
+    pub(crate) startup_note: Option<String>,
     pub(crate) busy: bool, // an analyze/export thread is running
     pub(crate) rx: Option<Receiver<Msg>>,
     pub(crate) tx: Sender<Msg>,
@@ -1628,6 +1630,7 @@ impl Default for AutoShadeApp {
             develop_inflight: false,
             develop_count: 0,
             status: "Open a photo, or open a folder to browse your library.".into(),
+            startup_note: None,
             busy: false,
             rx: Some(rx),
             tx,
@@ -2101,6 +2104,7 @@ impl eframe::App for AutoShadeApp {
             storage,
             eframe::APP_KEY,
             &Prefs {
+                prefs_era: PREFS_ERA,
                 gallery_dir: self.gallery_dir.clone(),
                 style_strength: self.style_strength,
                 grade_strength: self.grade_strength,

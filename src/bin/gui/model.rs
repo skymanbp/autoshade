@@ -183,9 +183,19 @@ pub(crate) enum ExportRoute {
     Ask,
 }
 
+/// Persisted preference laws. Add a row and a restore arm for each new era.
+///
+/// | Era | Migration |
+/// | --- | --- |
+/// | 1 | The two denoise dials changed law in v1.4.0 (SCUNet split, default 0.5 → RAW-domain blend, default 1.0); a file written by v1.3.4–v1.5.0 carries its old numbers; step 0→1 resets both to `denoise::DEFAULT_STRENGTH_RAW`. |
+pub(crate) const PREFS_ERA: u32 = 1;
+
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 pub(crate) struct Prefs {
+    /// Missing on disk means era 0, even though a fresh default is current.
+    #[serde(default)]
+    pub(crate) prefs_era: u32,
     pub(crate) gallery_dir: Option<PathBuf>,
     pub(crate) style_strength: f32,
     /// R23-3: how COMMITTED the AI's grade should be, 0..1 — the second taste
@@ -285,6 +295,7 @@ impl Default for Prefs {
         // Mirror AutoShadeApp's own defaults (see its Default impl) so a pref
         // key missing from an older save degrades to exactly the app default.
         Self {
+            prefs_era: PREFS_ERA,
             gallery_dir: None,
             style_strength: STYLE_STRENGTH_DEFAULT,
             grade_strength: GRADE_STRENGTH_DEFAULT,

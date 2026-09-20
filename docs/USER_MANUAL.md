@@ -231,7 +231,10 @@ strength** dial starts at 100%: on a RAW that is the model's whole output, and
 anything less only puts noise back; on a baked source the SCUNet law applies
 (luminance follows the dial, colour noise is removed in full from 50% up) and
 50% is its sweet spot. The Export fold's **🤖 AI Denoise on export** has a dial
-of its own, and neither reaches the other. While a ◈ card exists its master is
+of its own, and neither reaches the other. On the first launch with preferences
+from v1.3.4–v1.5.0, both dials reset once to 100% because their law changed in
+v1.4.0; the startup status reports changed values, and choices saved in the new
+preferences era survive later launches. While a ◈ card exists its master is
 the photo's negative: a later Reimagine sends it, and a Reverse-fit is solved
 on it and lands on it (section 4).
 

@@ -85,7 +85,9 @@ An AI decides *what to change*. A deterministic Rust engine *does* it.
 - **Generative and pixel tools, opt-in and labelled** — reimagine
   (gpt-image-2), retouch, heal and AI denoise are the only paths that can
   invent or alter scene content, and are marked so; a denoise lands as its
-  own card and never rewrites the original.
+  own card and never rewrites the original. Both denoise dials default to 100%:
+  on a RAW this is the model's whole output, and lowering it puts noise back.
+  Preferences predating the named era reset both dials once; later choices persist.
 - **Stacking and merging** — several frames of one scene into one, over a
   single alignment: HDR merge (exposures measured from the pixels, samples
   weighted by how trustworthy they are, the recovered stops handed to the SDR
