@@ -9120,6 +9120,72 @@
         );
     }
 
+    /// The camera's profile is the photo's neutral calibration. Only a move
+    /// away from that stamp, or a manual correction, claims an adjustment.
+    #[test]
+    fn the_lens_dot_measures_edits_away_from_the_stamp() {
+        type Case = (&'static str, fn(&mut EditRecipe), bool);
+        let cases: [Case; 6] = [
+            ("as stamped", |_| {}, false),
+            ("vignette switched off", |r| r.lens_profile.vignette_on = false, true),
+            ("manual vignette", |r| r.lens_vignette = -20.0, true),
+            ("profile distortion strength", |r| r.lens_profile_distortion_scale = 80.0, true),
+            ("profile vignette strength", |r| r.lens_profile_vignetting_scale = 80.0, true),
+            ("enabled without data", |r| r.lens_profile.vignette.clear(), true),
+        ];
+        for lang in [crate::i18n::Lang::En, crate::i18n::Lang::Zh] {
+            let title = tr(lang, "Lens");
+            let lit = format!("{title}  ●");
+            for (case, change, active) in cases {
+                let mut app = AutoShadeApp { lang, ..Default::default() };
+                app.recipe.lens_profile = autoshade::recipe::LensProfile {
+                    vignette: vec![1.1; 16],
+                    distortion: vec![1.001; 16],
+                    ca_r: vec![1.002; 16],
+                    ca_b: vec![0.999; 16],
+                    vignette_on: true,
+                    distortion_on: true,
+                    ca_on: true,
+                    ..Default::default()
+                };
+                assert!(app.recipe.lens_profile.is_as_stamped(), "premise: all available components enabled");
+                change(&mut app.recipe);
+                let seen = tall_frame(&mut app, |a, ui| a.develop_panel(ui));
+                let headers: Vec<&str> = seen.iter().map(String::as_str)
+                    .filter(|t| *t == title || *t == lit).collect();
+                assert_eq!(
+                    headers, vec![if active { lit.as_str() } else { title }],
+                    "{lang:?}: {case} must light the Lens dot only for an edit"
+                );
+            }
+        }
+    }
+
+    /// Export settings are saved delivery preferences, not photo adjustments.
+    /// Read the drawn header so a detached predicate cannot satisfy this pin.
+    #[test]
+    fn the_export_header_carries_no_dot_whatever_the_delivery_settings() {
+        for lang in [crate::i18n::Lang::En, crate::i18n::Lang::Zh] {
+            let mut app = AutoShadeApp {
+                lang,
+                exp_format: ExportFormat::Jpeg,
+                exp_quality: 100.0,
+                exp_long_edge: 2048,
+                exp_sharpen: 1.0,
+                exp_space: 1,
+                exp_dest: ExportDest::Ask,
+                save_denoise: true,
+                ..Default::default()
+            };
+            let title = tr(lang, "Export");
+            let lit = format!("{title}  ●");
+            let seen = tall_frame(&mut app, |a, ui| a.develop_panel(ui));
+            let headers: Vec<&str> = seen.iter().map(String::as_str)
+                .filter(|t| *t == title || *t == lit).collect();
+            assert_eq!(headers, vec![title], "{lang:?}: delivery preferences must leave the Export title plain");
+        }
+    }
+
     /// R22 #16h (verification, no behaviour change): the export-side MaskLoss
     /// disclosure rides `toast()`, so repeating the SAME save must not stack
     /// copies — the dedup refreshes the live toast and moves it to the BACK of

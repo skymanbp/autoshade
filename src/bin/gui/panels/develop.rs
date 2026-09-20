@@ -1547,23 +1547,18 @@ impl AutoShadeApp {
 
         // --- 镜头校正: in-camera profile + manual corrections -----------------
         ui.add_space(SPACE_MD);
-        // Field set: the registry's `lens` family (the section's two manual
-        // sliders — `lens_vignette_mid` is exempt, and the reason now lives
-        // with the exemption in `catalogue::DOT_EXEMPT`; same rule as
-        // `exp_quality` in dev_export) PLUS the in-camera profile's two
-        // rendered components, which are not registry rows of their own:
-        // `lens_profile` is one engine-only carrier and belongs to no family.
-        // R25 B3 added `lens_effects` — the manual CA pair, the auto-CA switch
-        // and the six de-fringe keys. Same OR as the Detail section above,
-        // same reason. (Those seven were carried and unrendered until v1.5.0;
-        // the family's tiers are uniform now, and the four hue-window sliders
-        // are `DOT_EXEMPT` because a window with no amount corrects nothing.)
+        // The stamped in-camera profile is a measurement, like the catalogue's
+        // `upright_transform` / `look`, not an edit. Use the unsaved badge's
+        // rule: a component switched off, or on without its data, lights the
+        // dot; the stamp itself does not. The `lens` / `lens_effects` families
+        // still cover manual sliders, including the two profile strengths.
+        // `DOT_EXEMPT` keeps the vignette midpoint and de-fringe hue windows
+        // quiet while their amounts are at rest.
         let lens_active = CONTROL_FAMILIES
             .iter()
             .filter(|f| f.name == "lens" || f.name == "lens_effects")
             .any(|f| family_is_active(f, &self.recipe))
-            || self.recipe.lens_profile.vignette_active()
-            || self.recipe.lens_profile.geometry_active();
+            || !self.recipe.lens_profile.is_as_stamped();
         egui::CollapsingHeader::new(section_title(tr(lang, "Lens"), lens_active))
             .id_salt("sec_lens")
             .default_open(false)
@@ -3493,21 +3488,9 @@ impl AutoShadeApp {
         // delivery, these are Export-dialog contents, not toolbar chrome. The
         // toolbar keeps the ACTIONS; their hover echoes this section's state.
         ui.add_space(SPACE_MD);
-        // Field set: every setting this section owns EXCEPT `exp_quality` — the
-        // deliberate omission (R22 #16 re-checked it after `exp_dest` joined in
-        // R22-7). Quality reaches exactly one encoder (`jpeg_quality`,
-        // export.rs), which is why `export_summary` prints "q95" only for JPEG;
-        // and any format that consumes it is by definition `!= Tiff16`, so it has
-        // already lit the dot. Listing quality could therefore only flag a TIFF
-        // delivery whose bytes are identical either way. Same rule as
-        // `lens_vignette_mid` in dev_lens.
-        let export_active = self.exp_format != ExportFormat::Tiff16
-            || self.exp_long_edge != 0
-            || self.exp_sharpen != 0.0
-            || self.exp_space != 0
-            || self.exp_dest != ExportDest::OutFolder
-            || self.save_denoise;
-        egui::CollapsingHeader::new(section_title(tr(lang, "Export"), export_active))
+        // Delivery preferences have no per-photo neutral, so this header has
+        // no adjustment dot. The toolbar's Export hover carries the summary.
+        egui::CollapsingHeader::new(tr(lang, "Export"))
             .id_salt("sec_export")
             .default_open(false)
             .show(ui, |ui| {
