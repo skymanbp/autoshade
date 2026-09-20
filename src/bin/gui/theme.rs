@@ -402,12 +402,14 @@ pub(crate) const RADIUS_SM: f32 = 3.0;
 pub(crate) const RADIUS_MD: f32 = 6.0;
 pub(crate) const RADIUS_LG: f32 = 10.0;
 
-/// Width tokens (#14a). A TEXT FIELD's readable ceiling: prompts are
+/// Width tokens (#14a). One readable width for every row-filling control:
+/// the panel keeps no max width, so the ceiling lives on the controls.
+/// Prompt fields and `buttons::columns` share this ceiling. Prompts are
 /// sentences, and a field that simply takes `available_width()` becomes an
 /// 800 px ribbon the moment the side panel is dragged wide — the eye then
-/// tracks a single line across the whole panel. Fields clamp DOWNWARD to this
-/// (`util::prompt_field`, and the Reimagine row's measured arithmetic
-/// `.min()`s its result), which is why the cap cannot resurrect the R19
+/// tracks a single line across the whole panel. Controls clamp DOWNWARD to this
+/// (`buttons::columns`, `util::prompt_field`, and the Reimagine row's measured
+/// arithmetic `.min()`s its result), which is why the cap cannot resurrect the R19
 /// runaway: that one came from a row asking for MORE than it had.
 ///
 /// NOTE — [`TOAST_W_MAX`] below happens to hold the SAME number for a

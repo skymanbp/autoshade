@@ -95,6 +95,11 @@ masks and the pixels beside them are in the same frame. The manual Distortion,
 Vignetting and CA sliders are not the profile and are never touched by that
 switch.
 
+The Lens header's ● stays unlit for both profiles enabled from the camera's
+calibration and profiles switched off by the imported Lightroom sidecar.
+Changing a profile toggle from that open state or a manual correction
+(including either profile strength) lights it.
+
 The **Transform** fold used to show Lightroom's perspective values and say we
 did not touch them. Since v1.5.0 it moves pixels. Vertical and Horizontal are
 the two keystones — the shape a building takes when the camera is tilted up or
@@ -242,7 +247,10 @@ Buttons follow one vocabulary: the gold button in a group is its main action
 (Export on the toolbar, AI Analyze, Reverse-fit recipe, Apply in a brush
 session, Save settings), icon-only buttons are squares as tall as the text
 buttons beside them, and rows of equal actions in the side panels sit in
-aligned columns. A glyph in front of a label always means the same thing —
+aligned columns. These rows share the prompt fields' 420 px readable ceiling
+and stay left-aligned when the panel is wider; the panel itself can still
+grow for the curve and HSL editors. A glyph in front of a label always means
+the same thing —
 🤖 an AI verb, ✓ finish, ✕ cancel, ＋ add, ↺ reset, 🗂 a folder, 🖌 paint, 💧
 pick from the image.
 
@@ -569,6 +577,12 @@ Open Export with the toolbar, `Ctrl+Shift+E`, or `Ctrl+E`. Choose JPEG, 8- or
 sharpening, and sRGB, Display P3, or Adobe RGB delivery color space. Resizing is
 the last step, uses Lanczos3, preserves aspect ratio, and never enlarges a
 smaller image.
+
+A header's ● describes this photo. Saved preferences — Export's delivery
+settings and the AI Style, Strength, and Reverse-fit strength dials — never
+light it. The AI header lights only for a verdict on screen or a typed Direction.
+The Export header carries no ●; hover over the toolbar's Export button to read
+the current delivery summary.
 
 **🤖 AI Denoise on export** runs the AI denoise inside every full-resolution
 delivery — a RAW on its sensor mosaic, a baked source through SCUNet — at the

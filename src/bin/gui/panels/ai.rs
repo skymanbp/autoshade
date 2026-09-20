@@ -71,30 +71,21 @@ impl AutoShadeApp {
     /// Does the AI area carry state worth a ● on its collapsed header?
     ///
     /// Written next to the panel it describes, and enumerating that panel's OWN
-    /// field set in reading order: the verdict `ai_analysis` prints, the
-    /// Direction it consumes, and the two taste dials that steer both verbs —
-    /// Style and (R23-3) grade Strength.
-    /// Style was the drift this predicate exists to close (R22 #16), and both
-    /// dials have a NON-ZERO default, so the honest test is "moved off
-    /// [`STYLE_STRENGTH_DEFAULT`] / [`GRADE_STRENGTH_DEFAULT`]" — comparing
-    /// against the same constants the sliders reset to means the dot and the
-    /// resets can never disagree.
+    /// field set in reading order: the verdict `ai_analysis` prints and the
+    /// Direction it consumes.
+    /// R22 #16 added the taste dials on the ground that a non-default dial is
+    /// state. On 2026-09-20 they were removed because they are persisted
+    /// preferences, so the dot never went out.
     ///
-    /// Deliberately NOT in the set: `reimagine_prompt`, `fit_ai_judge`,
-    /// `zoned_fit`, and (R23-2) `send_style_ref_image` / `style_src_dir`. Those
-    /// are persisted PREFERENCES of paid verbs, or library bookkeeping — the
-    /// same rule as `fit_ai_judge`, whose default-off state must not light the
-    /// dot either. The dot means "this PHOTO's AI inputs carry state", and a
-    /// remembered folder says nothing about this photo.
+    /// Deliberately NOT in the set: `style_strength`, `grade_strength`, and
+    /// `fit_strength` are remembered dial preferences, not this photo's state;
+    /// `reimagine_prompt`, `fit_ai_judge`, `zoned_fit`, and (R23-2)
+    /// `send_style_ref_image` / `style_src_dir` are persisted preferences of
+    /// paid verbs or library bookkeeping. The dot means "this PHOTO's AI
+    /// inputs carry state", and a remembered dial or folder says nothing
+    /// about this photo.
     pub(crate) fn ai_section_active(&self) -> bool {
-        self.verdict.is_some()
-            || !self.guidance.is_empty()
-            || self.style_strength != STYLE_STRENGTH_DEFAULT
-            // R23-3: the strength axis is the SECOND non-zero-default AI input,
-            // so it joins on the same "moved off the shared default" test.
-            || self.grade_strength != GRADE_STRENGTH_DEFAULT
-            // 2026-09-12: the reverse-fit's own dial lives in this area too.
-            || self.fit_strength != autoshade::recipe::GradeStrength::DEFAULT
+        self.verdict.is_some() || !self.guidance.is_empty()
     }
 
     pub(crate) fn ai_panel(&mut self, ui: &mut egui::Ui) {

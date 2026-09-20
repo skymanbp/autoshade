@@ -151,7 +151,61 @@
 > （`M0`/`M8`/`B2`–`B5`/`SF4`/`M-A`–`M-D`）与更早的「当前状态」条目——逐字存放在
 > [docs/ROADMAP-archive.md](ROADMAP-archive.md)（追加式档案，勿重写）。
 
-## 未发布
+## 未发布（已完成的车道改动，尚未发版）
+
+### GUI — 按钮行共享可读宽度，镜头、导出与 AI 标题按语义显示（2026-09-20）
+
+- **根因**（用户报障「又是可以无限拉长的了」「我明明什么都没调」）：`src/bin/gui/buttons.rs: columns`
+  按整个面板的可用宽度分格，R38 的按钮行漏了 #14a 已用于提示框的 420 px 上限；面板本来就不设最大宽度。
+  `src/bin/gui/panels/develop.rs: dev_lens` 把 `stamp_calibration` 开启的机内测量当成手工调整；
+  `dev_export` 又拿全局 JPEG 等交付偏好与 TIFF 默认值比较；`panels/ai.rs: ai_section_active` 同样把
+  三个全局保存的强度拨盘算成逐片状态，三处都能在未调照片时亮 ●。
+- **修复**（首轮 `157162e`、`2e467ab`，复核补正见下）：`columns` 向下夹到现有 `theme::FIELD_W_MAX`，整行左对齐，保留整像素向下取整与 `n.max(1)`；
+  所有按钮行与提示框共用一个可读宽度，曲线与 HSL 编辑器仍可随面板展开。镜头标题沿用两组手工控件 family，
+  配置部分最终读 `!lens_profile.is_as_opened()`：相机的可用组件全开与侧车明确关闭的全关都是打开时留下的状态，
+  偏离它们的开关与手工滑杆才亮；两个配置强度滑杆仍由 `lens_effects` 点亮。
+  导出是偏好、无逐片中性态，标题不再带点，工具栏悬停仍列交付摘要。
+- **复核补正（Follow-up 1）**：`2e467ab` 只认 `is_as_stamped`，漏了打开路径的第二种盖章：
+  `pipeline::obey_disabled_profile_switch` 遵守侧车 `crs:LensProfileEnable="0"`，保留节点、三开关全关并标为
+  `MaskWarpSource::DisabledInSidecar`；原改动会让这种未碰过的镜头区亮点。新增 `LensProfile::is_as_opened`，
+  只把这个带出处的全关状态纳入标题中性态，手动全关且出处仍是 `CameraMetadata` 则照旧亮点。
+  `is_noop` **不改**，仍读 `is_as_stamped`，保住 `SavedDevelop` 的优先级与未保存徽标的既有语义。
+- **同类复核（Follow-up 2）**：用户于 2026-09-20 选择 AI 标题只读本片状态：屏上有 verdict 或已填 Direction 才亮点。
+  R22 #16 曾把非默认拨盘当作状态；三个强度经 `Prefs` 保存并在启动时恢复，于是改过一次就会逐片常亮。
+  `ai_section_active` 去掉 `style_strength` / `grade_strength` / `fit_strength`，与导出遵守同一条偏好不点亮的规则；
+  AI 折叠区仍默认展开，拨盘的显示、保存与请求传递均不变。
+- **测试**：`src/bin/gui/tests.rs: a_button_row_never_grows_past_the_readable_width` 在中英两种语言、
+  控制面板 800 / 1600 px、图库 800 px、2400×1200 画布上各跑三帧，展开 AI / 显影 / 修饰 / 图库，
+  逐按钮查宽度与文字适配、查面板不增长，并具名确认修补 / 图章 / 反推 / 复制配方与三格蒙版行都已绘制。
+  原默认宽度测试共用准备函数，原断言不变；镜头测试覆盖相机盖章、关闭组件、手工暗角、两种配置强度及无数据却开启，
+  补入相机出处下手动全关、侧车出处下原样全关 / 重开暗角 / 手工暗角三臂，均验中英。
+  `recipe.rs: lens_profile_as_opened_distinguishes_the_two_stamps_from_edits` 穷举七种出处与八种开关组合，
+  另钉空默认、无数据却开启、缺任一半的 CA 及 `is_noop` 不变；导出测试仍读非默认交付设置下的纯标题。
+  Follow-up 2 以 `the_ai_dot_reads_this_photos_state_not_the_saved_dials` 替换旧拨盘点亮测试，中英两种语言各验
+  三拨盘均偏离默认且无逐片输入 → 纯标题、单有 verdict → 点亮、单有 Direction → 点亮；均读取实绘标题。
+  分析 Strength 与反推强度的原测试同步改为偏好不点亮，保留默认值、显示、持久化及请求接线的原断言。
+- **变异证伪**：只移除 `columns` 的 `.min(FIELD_W_MAX)`，新宽度测试转红（0 / 1 / 0，exit 101）：
+  `En, 800 px, frame 0: action "Copy recipe" is 784.0 px wide — past the 420 px readable ceiling`；
+  按 SHA-256 验逐字节还原后复跑 1 / 0 / 0，原默认宽度测试也为 1 / 0 / 0。
+  Follow-up 1 移除 `is_as_opened` 的出处条件，把任何全关都当成打开状态，GUI 镜头测试的手动全关臂转红
+  （0 / 1 / 0，exit 101）：`En: camera, all components switched off by hand must light the Lens dot only for an edit`，
+  实际 `["Lens"]`、应为 `["Lens  ●"]`；`recipe.rs` 按 SHA-256 逐字节还原后完整库与 GUI 电池全绿。
+  Follow-up 2 只放回 Style 拨盘比较，新 AI 测试的纯偏好臂转红（0 / 1 / 0，exit 101）：
+  `En: saved dials only: only this photo's verdict or Direction may light the AI dot`，
+  实际 `["AI  ●"]`、应为 `["AI"]`；`ai.rs` 按 SHA-256 逐字节还原后完整 GUI 电池全绿。
+- **门**（Follow-up 2，release，独立 target 与数据目录）：GUI **203 / 0 / 1**（0.55 s）。
+  唯一 GUI 忽略项
+  `r35_scratch_recipe_save_line_counts_only_the_remaining_bitmap_masks` 需 `AUTOSHADE_R35_RECIPE` 指向车道内临时配方。
+  clippy `--all-targets` 默认与 `--features gui` 两组 `-D warnings` 均 exit 0、0 警告；
+  `python scripts/check_docs.py` **25 PASS / 0 FAIL / 5 SKIP**（四项发布电池计数无 `--gates` 转录本，
+  一项仓外 XMP 普查无 `AUTOSHADE_CENSUS_ROOT`）。`catalogue.rs` 的旧谓词对照只测手工镜头 family，
+  未编码错误的 profile OR，无需改动；Follow-up 1 因 `recipe.rs` 改动补跑库 **1631 / 0 / 15**（499.78 s）。
+  Follow-up 2 未改 GUI 目录以外的库代码，无需再跑库电池；`i18n.rs` 未改。
+  脚本门改用用户指定的系统 Python 3.13.3，真实 AutoShade 偏好与存储目录未触碰。
+  `docs/USER_MANUAL.md` 同步按钮上限、镜头打开态及逐片标题规则；README / ARCHITECTURE / site 的 ●、dot、activity 语句已查，
+  没有把机内配置、导出偏好或 AI 拨盘列为点亮条件的句子。验证只跑测试，未启动 GUI。
+
+### 降噪偏好 — 两把旧强度滑杆按含义迁移一次，状态栏说明旧值（2026-09-20）
 
 - **Lane Denoise：降噪偏好按含义迁移（2026-09-20，`lane-denoise-prefs`）**：
   `src/bin/gui/model.rs: PREFS_ERA` 建具名年代及迁移表；缺键单独解为 0，新默认和保存为 1。

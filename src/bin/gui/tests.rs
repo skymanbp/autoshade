@@ -7851,55 +7851,48 @@
         drawn_texts(&out.shapes)
     }
 
-    /// R22 #16a: the AI section's ● read `verdict.is_some() || !guidance.
-    /// is_empty()` — a field set one item short of the panel's own inputs. The
-    /// Style strength steers every AI proposal, is PERSISTED across launches, and
-    /// was invisible the moment the section was collapsed.
-    ///
-    /// Pins the wiring first: the app default, the pref default and the slider's
-    /// reset target must be ONE constant, or "the user moved it" is not a
-    /// decidable question and this dot cannot exist. Then the rendered header —
-    /// a predicate nobody reads is not a dot.
+    /// User decision 2026-09-20: the AI header describes this photo's verdict
+    /// and Direction. Saved taste dials alone must never light it, even when
+    /// all three differ from their defaults. Read the drawn header in both
+    /// languages so a disconnected predicate cannot pass this test.
     #[test]
-    fn the_ai_section_dot_follows_the_style_strength_it_used_to_miss() {
+    fn the_ai_dot_reads_this_photos_state_not_the_saved_dials() {
         assert_eq!(
             AutoShadeApp::default().style_strength, STYLE_STRENGTH_DEFAULT,
             "the app must start at the shared default"
         );
         assert_eq!(
             Prefs::default().style_strength, STYLE_STRENGTH_DEFAULT,
-            "a pref key missing from an older save must degrade to the SAME number \
-             — otherwise every upgraded install starts with a lit dot"
+            "a pref key missing from an older save must use the same dial default"
         );
-        let mut app = AutoShadeApp::default();
-        assert!(!app.ai_section_active(), "a fresh AI area has no state to flag");
-        app.style_strength = 0.85;
-        assert!(app.ai_section_active(), "a moved Style slider IS AI state");
-        app.style_strength = STYLE_STRENGTH_DEFAULT;
-        assert!(!app.ai_section_active(), "back at the default ⇒ back to no dot");
-        // The two pre-existing members still count (no regression in closing the gap).
-        app.guidance = "warmer and moodier".into();
-        assert!(app.ai_section_active(), "a typed Direction still flags");
-        app.guidance.clear();
-        app.verdict = Some((autoshade::advisor::Decision::Accept, vec!["ok".into()]));
-        assert!(app.ai_section_active(), "a verdict still flags");
-        // …and the header really carries it.
-        let mut app = AutoShadeApp::default();
-        let seen = tall_frame(&mut app, |a, ui| a.ai_panel(ui));
-        assert!(
-            seen.iter().any(|t| t == "AI"),
-            "the AI header was not drawn at all — this test proves nothing: {seen:?}"
-        );
-        assert!(
-            !seen.iter().any(|t| t == "AI  ●"),
-            "a fresh app must not light the AI dot: {seen:?}"
-        );
-        app.style_strength = 0.85;
-        let seen = tall_frame(&mut app, |a, ui| a.ai_panel(ui));
-        assert!(
-            seen.iter().any(|t| t == "AI  ●"),
-            "a moved Style slider must light the collapsed header's ●: {seen:?}"
-        );
+        for lang in [Lang::En, Lang::Zh] {
+            let title = tr(lang, "AI");
+            let lit = format!("{title}  ●");
+            for (case, has_verdict, guidance, active) in [
+                ("saved dials only", false, "", false),
+                ("verdict", true, "", true),
+                ("Direction", false, "warmer and moodier", true),
+            ] {
+                let mut app = AutoShadeApp {
+                    lang,
+                    style_strength: 0.80,
+                    grade_strength: 0.85,
+                    fit_strength: 0.85,
+                    verdict: has_verdict.then(|| (
+                        autoshade::advisor::Decision::Accept, vec!["ok".into()]
+                    )),
+                    guidance: guidance.into(),
+                    ..Default::default()
+                };
+                let seen = tall_frame(&mut app, |a, ui| a.ai_panel(ui));
+                let headers: Vec<_> = seen.iter().map(String::as_str)
+                    .filter(|t| *t == title || *t == lit.as_str()).collect();
+                assert_eq!(
+                    headers, vec![if active { lit.as_str() } else { title }],
+                    "{lang:?}: {case}: only this photo's verdict or Direction may light the AI dot"
+                );
+            }
+        }
     }
 
     /// R23-3 (feedback #5, "the AI is too timid + give me a strength slider"):
@@ -7908,8 +7901,8 @@
     /// Four properties, because a slider that fails any one of them is
     /// decoration: it must be DRAWN beside Style (the two are one pair of axes,
     /// and the reported problem was that only the style half existed), start and
-    /// persist at ONE constant shared with the lib, light the section ● when
-    /// moved, and actually reach the request the analyze worker builds.
+    /// persist at ONE constant shared with the lib, leave the section ● quiet
+    /// when moved alone, and actually reach the request the analyze worker builds.
     #[test]
     fn the_grade_strength_slider_sits_beside_style_and_rides_the_analyze_request() {
         // One definition, three consumers (app default / pref default / the
@@ -7945,21 +7938,21 @@
             );
         }
 
-        // The ● follows it — including a move DOWN to the calibration point,
-        // which is still a move away from the shipped default.
+        // A remembered preference stays quiet, including a move DOWN to the
+        // calibration point, which differs from the shipped default.
         assert!(!app.ai_section_active(), "a fresh AI area has no state to flag");
         app.grade_strength = autoshade::recipe::GradeStrength::CALIBRATED;
         assert!(
-            app.ai_section_active(),
-            "0.50 is the calibration point, not the default — moving there IS AI state"
+            !app.ai_section_active(),
+            "a moved Strength slider is a preference, not this photo's AI state"
         );
         let seen = tall_frame(&mut app, |a, ui| a.ai_panel(ui));
         assert!(
-            seen.iter().any(|t| t == "AI  ●"),
-            "a moved Strength slider must light the collapsed header's ●: {seen:?}"
+            seen.iter().any(|t| t == "AI") && !seen.iter().any(|t| t == "AI  ●"),
+            "a moved Strength slider must leave the AI header plain: {seen:?}"
         );
         app.grade_strength = GRADE_STRENGTH_DEFAULT;
-        assert!(!app.ai_section_active(), "back at the default ⇒ back to no dot");
+        assert!(!app.ai_section_active(), "resetting a preference also leaves the dot unlit");
 
         // …and it reaches the worker's request, on its OWN axis (the two dials
         // must not be able to swap: `style` is a bare fraction, `strength` a
@@ -8176,12 +8169,12 @@
             seen.iter().any(|t| t == "Reverse-fit strength"),
             "the dial must exist in the fold: {seen:?}"
         );
-        // A moved dial lights the AI area's ● like every other AI input.
+        // The saved reverse-fit dial is a preference, so it leaves the ● unlit.
         assert!(!app.ai_section_active(), "a fresh AI area has no state to flag");
         app.fit_strength = 0.85;
-        assert!(app.ai_section_active(), "a moved reverse-fit dial IS AI state");
+        assert!(!app.ai_section_active(), "a moved reverse-fit dial is still a preference");
         app.fit_strength = autoshade::recipe::GradeStrength::DEFAULT;
-        assert!(!app.ai_section_active(), "back at the default ⇒ back to no dot");
+        assert!(!app.ai_section_active(), "resetting a preference also leaves the dot unlit");
         // Persisted on its own key; an older prefs file without it loads at the default.
         let prefs = Prefs { fit_strength: 0.85, ..Prefs::default() };
         let json = serde_json::to_string(&prefs).expect("prefs serialize");
@@ -9200,6 +9193,96 @@
             seen.iter().any(|t| t == "Lens  ●"),
             "a real vignette correction must light the section: {seen:?}"
         );
+    }
+
+    /// Both camera-on and sidecar-disabled calibration are as-opened states.
+    /// A manual correction or a move away from either stamp lights the header.
+    #[test]
+    fn the_lens_dot_measures_edits_away_from_the_stamp() {
+        use autoshade::recipe::{LensProfile, MaskWarpSource};
+        type Case = (&'static str, fn(&mut EditRecipe), bool);
+        let camera_cases: [Case; 7] = [
+            ("as stamped", |_| {}, false),
+            ("vignette switched off", |r| r.lens_profile.vignette_on = false, true),
+            ("manual vignette", |r| r.lens_vignette = -20.0, true),
+            ("profile distortion strength", |r| r.lens_profile_distortion_scale = 80.0, true),
+            ("profile vignette strength", |r| r.lens_profile_vignetting_scale = 80.0, true),
+            ("enabled without data", |r| r.lens_profile.vignette.clear(), true),
+            ("all components switched off by hand", |r| {
+                r.lens_profile.vignette_on = false;
+                r.lens_profile.distortion_on = false;
+                r.lens_profile.ca_on = false;
+            }, true),
+        ];
+        let sidecar_cases: [Case; 3] = [
+            ("as opened", |_| {}, false),
+            ("vignette switched on", |r| r.lens_profile.vignette_on = true, true),
+            ("manual vignette", |r| r.lens_vignette = -20.0, true),
+        ];
+        let camera = LensProfile {
+            vignette: vec![1.1; 16],
+            distortion: vec![1.001; 16],
+            ca_r: vec![1.002; 16],
+            ca_b: vec![0.999; 16],
+            vignette_on: true,
+            distortion_on: true,
+            ca_on: true,
+            mask_warp_src: MaskWarpSource::CameraMetadata,
+            ..Default::default()
+        };
+        let sidecar = LensProfile {
+            vignette_on: false,
+            distortion_on: false,
+            ca_on: false,
+            mask_warp_src: MaskWarpSource::DisabledInSidecar,
+            ..camera.clone()
+        };
+        for lang in [crate::i18n::Lang::En, crate::i18n::Lang::Zh] {
+            let title = tr(lang, "Lens");
+            let lit = format!("{title}  ●");
+            for (base, profile, cases) in [
+                ("camera", &camera, &camera_cases[..]),
+                ("sidecar", &sidecar, &sidecar_cases[..]),
+            ] {
+                for &(case, change, active) in cases {
+                    let mut app = AutoShadeApp { lang, ..Default::default() };
+                    app.recipe.lens_profile = profile.clone();
+                    change(&mut app.recipe);
+                    let seen = tall_frame(&mut app, |a, ui| a.develop_panel(ui));
+                    let headers: Vec<&str> = seen.iter().map(String::as_str)
+                        .filter(|t| *t == title || *t == lit).collect();
+                    assert_eq!(
+                        headers, vec![if active { lit.as_str() } else { title }],
+                        "{lang:?}: {base}, {case} must light the Lens dot only for an edit"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Export settings are saved delivery preferences, not photo adjustments.
+    /// Read the drawn header so a detached predicate cannot satisfy this pin.
+    #[test]
+    fn the_export_header_carries_no_dot_whatever_the_delivery_settings() {
+        for lang in [crate::i18n::Lang::En, crate::i18n::Lang::Zh] {
+            let mut app = AutoShadeApp {
+                lang,
+                exp_format: ExportFormat::Jpeg,
+                exp_quality: 100.0,
+                exp_long_edge: 2048,
+                exp_sharpen: 1.0,
+                exp_space: 1,
+                exp_dest: ExportDest::Ask,
+                save_denoise: true,
+                ..Default::default()
+            };
+            let title = tr(lang, "Export");
+            let lit = format!("{title}  ●");
+            let seen = tall_frame(&mut app, |a, ui| a.develop_panel(ui));
+            let headers: Vec<&str> = seen.iter().map(String::as_str)
+                .filter(|t| *t == title || *t == lit).collect();
+            assert_eq!(headers, vec![title], "{lang:?}: delivery preferences must leave the Export title plain");
+        }
     }
 
     /// R22 #16h (verification, no behaviour change): the export-side MaskLoss
@@ -10588,6 +10671,46 @@
         );
     }
 
+    /// The widest button rows, shared by the default-width and readable-width pins.
+    fn app_with_every_button(lang: crate::i18n::Lang) -> AutoShadeApp {
+        use autoshade::recipe::{ColourField, LocalAdjustment, MaskComponent, MaskGeometry};
+        use crate::model::{Variant, VariantKind};
+        let mk = |kind| Variant {
+            kind,
+            id: crate::model::new_variant_id(),
+            name: None,
+            recipe: EditRecipe::default(),
+            base: None,
+            origin: None,
+            thumb: None,
+        };
+        let mut app = AutoShadeApp {
+            lang,
+            src_path: Some(PathBuf::from("D:/library/_buttons.ARW")),
+            variants: vec![mk(VariantKind::Original), mk(VariantKind::Generated)],
+            active: 1,
+            versions: vec![1],
+            fit_ref: Some(PathBuf::from("D:/library/_buttons-reference.png")),
+            multi_sel: [0usize].into_iter().collect(),
+            ..Default::default()
+        };
+        app.base_preview = Some(std::sync::Arc::new(image::DynamicImage::new_rgb8(64, 96)));
+        app.recipe.masks.push(LocalAdjustment {
+            mask: MaskGeometry::Bitmap { path: "mask-buttons.png".into() },
+            components: vec![MaskComponent::default()],
+            ..Default::default()
+        });
+        app.recipe.colour_field =
+            Some(ColourField { x: 1, y: 1, b: 1, grid: vec![[0.0; 5]], amount: 0.5, enabled: true });
+        // v1.5.0: a Point Color swatch — its row is a chip, a name and a
+        // ✕, and its four sliders are laid beside the mixer's own.
+        app.recipe.point_colors.push(autoshade::recipe::PointColor::sampled(0.9, 0.7, 0.5));
+        app.sel_mask = Some(0);
+        app.start_mask_brush(None);
+        assert!(app.mask_brush.is_some(), "{lang:?}: the brush session armed");
+        app
+    }
+
     /// R38: every button in the vocabulary (`buttons.rs`) stands exactly one
     /// row tall, icon-only verbs are squares of that row, and no label wraps
     /// inside its grid cell — rendered at the default panel widths in both
@@ -10606,46 +10729,12 @@
     /// in it — the strongest form of the witness, not merely "stable".
     #[test]
     fn every_button_stands_one_row_tall_at_the_default_widths() {
-        use autoshade::recipe::{ColourField, LocalAdjustment, MaskComponent, MaskGeometry};
         use crate::buttons::DRAWN;
-        use crate::model::{Variant, VariantKind};
         for lang in [crate::i18n::Lang::En, crate::i18n::Lang::Zh] {
             let ctx = egui::Context::default();
             crate::theme::install_theme(&ctx, crate::theme::ThemePref::Dark);
             let row = ctx.style().spacing.interact_size.y;
-            let mk = |kind| Variant {
-                kind,
-                id: crate::model::new_variant_id(),
-                name: None,
-                recipe: EditRecipe::default(),
-                base: None,
-                origin: None,
-                thumb: None,
-            };
-            let mut app = AutoShadeApp {
-                lang,
-                src_path: Some(PathBuf::from("D:/library/_buttons.ARW")),
-                variants: vec![mk(VariantKind::Original), mk(VariantKind::Generated)],
-                active: 1,
-                versions: vec![1],
-                fit_ref: Some(PathBuf::from("D:/library/_buttons-reference.png")),
-                multi_sel: [0usize].into_iter().collect(),
-                ..Default::default()
-            };
-            app.base_preview = Some(std::sync::Arc::new(image::DynamicImage::new_rgb8(64, 96)));
-            app.recipe.masks.push(LocalAdjustment {
-                mask: MaskGeometry::Bitmap { path: "mask-buttons.png".into() },
-                components: vec![MaskComponent::default()],
-                ..Default::default()
-            });
-            app.recipe.colour_field =
-                Some(ColourField { x: 1, y: 1, b: 1, grid: vec![[0.0; 5]], amount: 0.5, enabled: true });
-            // v1.5.0: a Point Color swatch — its row is a chip, a name and a
-            // ✕, and its four sliders are laid beside the mixer's own.
-            app.recipe.point_colors.push(autoshade::recipe::PointColor::sampled(0.9, 0.7, 0.5));
-            app.sel_mask = Some(0);
-            app.start_mask_brush(None);
-            assert!(app.mask_brush.is_some(), "{lang:?}: the brush session armed");
+            let mut app = app_with_every_button(lang);
             let input = || egui::RawInput {
                 screen_rect: Some(egui::Rect::from_min_size(
                     egui::Pos2::ZERO,
@@ -10716,5 +10805,85 @@
                 drawn.iter().filter(|d| d.kind == "primary").count() >= 8,
                 "{lang:?}: the primary verbs are on screen"
             );
+        }
+    }
+
+    /// The panel stays free to grow for the curve and HSL editors, while every
+    /// row-filling button shares the prompts' readable ceiling. Three frames
+    /// also catch a row that asks for more than it has and grows the panel.
+    #[test]
+    fn a_button_row_never_grows_past_the_readable_width() {
+        use crate::buttons::DRAWN;
+        for lang in [crate::i18n::Lang::En, crate::i18n::Lang::Zh] {
+            for controls_width in [800.0, 1600.0] {
+                let ctx = egui::Context::default();
+                crate::theme::install_theme(&ctx, crate::theme::ThemePref::Dark);
+                let mut app = app_with_every_button(lang);
+                let mut widths = Vec::new();
+                for frame in 0..3 {
+                    DRAWN.with_borrow_mut(Vec::clear);
+                    let _ = ctx.run(
+                        egui::RawInput {
+                            screen_rect: Some(egui::Rect::from_min_size(
+                                egui::Pos2::ZERO,
+                                egui::vec2(2400.0, 1200.0),
+                            )),
+                            ..Default::default()
+                        },
+                        |ctx| {
+                            ctx.memory_mut(|m| m.set_everything_is_visible(true));
+                            let gallery = egui::SidePanel::left("gallery")
+                                .default_width(800.0)
+                                .show(ctx, |ui| app.gallery_panel(ui));
+                            let controls = egui::SidePanel::left("controls")
+                                .default_width(controls_width)
+                                .show(ctx, |ui| {
+                                    egui::ScrollArea::vertical().show(ui, |ui| {
+                                        app.ai_panel(ui);
+                                        app.develop_panel(ui);
+                                        app.retouch_panel(ui);
+                                    });
+                                });
+                            widths.push([gallery.response.rect.width(), controls.response.rect.width()]);
+                        },
+                    );
+                    let drawn = DRAWN.with_borrow(|d| d.clone());
+                    for label in [
+                        tr(lang, "🤖 AI heal (auto)"), tr(lang, "Heal area"),
+                        tr(lang, "⎘ Enter stamp"), tr(lang, "⎘ Clone area"),
+                        tr(lang, "Reverse-fit recipe"), tr(lang, "Extract style"),
+                        tr(lang, "Copy recipe"), tr(lang, "＋ Linear"), tr(lang, "Erase"),
+                    ] {
+                        assert!(
+                            drawn.iter().any(|d| d.label == label),
+                            "{lang:?}, {controls_width} px, frame {frame}: missing button {label:?}"
+                        );
+                    }
+                    for d in &drawn {
+                        assert!(
+                            d.rect.width() <= crate::theme::FIELD_W_MAX + 0.5,
+                            "{lang:?}, {controls_width} px, frame {frame}: {} {:?} is {:.1} px wide — \
+                             past the {:.0} px readable ceiling",
+                            d.kind, d.label, d.rect.width(), crate::theme::FIELD_W_MAX
+                        );
+                        assert!(
+                            d.fits,
+                            "{lang:?}, {controls_width} px, frame {frame}: {} {:?} does not fit its cell on one line",
+                            d.kind, d.label
+                        );
+                    }
+                }
+                for (i, (panel, expected)) in [("gallery", 800.0), ("controls", controls_width)].into_iter().enumerate() {
+                    let seen: Vec<f32> = widths.iter().map(|w| w[i]).collect();
+                    assert!(
+                        (seen[0] - seen[2]).abs() < 0.5,
+                        "{lang:?}: the wide {panel} panel must not grow across frames: {seen:?}"
+                    );
+                    assert!(
+                        seen.iter().all(|w| (w - expected).abs() <= 0.5),
+                        "{lang:?}: the {panel} panel left its {expected} px width: {seen:?}"
+                    );
+                }
+            }
         }
     }
