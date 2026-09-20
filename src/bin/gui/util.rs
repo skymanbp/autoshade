@@ -1543,7 +1543,8 @@ pub(crate) fn build_preview(
 /// Stamp a filled brush dot into the paint mask (painted = translucent red).
 /// One brush dot writing an arbitrary pixel — the shared kernel behind the
 /// classic red paint stamp and the mask-brush ERASE stamp (fully clear).
-pub(crate) fn stamp_dot_px(m: &mut image::RgbaImage, c: (f32, f32), r: f32, px: image::Rgba<u8>) {
+/// Reports whether any pixel was written, including at/outside image edges.
+pub(crate) fn stamp_dot_px(m: &mut image::RgbaImage, c: (f32, f32), r: f32, px: image::Rgba<u8>) -> bool {
     let (w, h) = (m.width() as i32, m.height() as i32);
     let (cx, cy) = c;
     let r2 = r * r;
@@ -1551,14 +1552,17 @@ pub(crate) fn stamp_dot_px(m: &mut image::RgbaImage, c: (f32, f32), r: f32, px: 
     let x1 = ((cx + r).ceil() as i32).min(w - 1);
     let y0 = (cy - r).floor().max(0.0) as i32;
     let y1 = ((cy + r).ceil() as i32).min(h - 1);
+    let mut wrote = false;
     for y in y0..=y1 {
         for x in x0..=x1 {
             let (dx, dy) = (x as f32 - cx, y as f32 - cy);
             if dx * dx + dy * dy <= r2 {
                 m.put_pixel(x as u32, y as u32, px);
+                wrote = true;
             }
         }
     }
+    wrote
 }
 
 /// The mask-brush gray-buffer twin of [`stamp_dot_px`]: same disc, writing
@@ -1589,13 +1593,15 @@ pub(crate) fn stamp_line_px(
     b: (f32, f32),
     r: f32,
     px: image::Rgba<u8>,
-) {
+) -> bool {
     let dist = ((b.0 - a.0).powi(2) + (b.1 - a.1).powi(2)).sqrt();
     let steps = (dist / (r * 0.5).max(1.0)).ceil().max(1.0) as i32;
+    let mut wrote = false;
     for i in 0..=steps {
         let t = i as f32 / steps as f32;
-        stamp_dot_px(m, (a.0 + (b.0 - a.0) * t, a.1 + (b.1 - a.1) * t), r, px);
+        wrote |= stamp_dot_px(m, (a.0 + (b.0 - a.0) * t, a.1 + (b.1 - a.1) * t), r, px);
     }
+    wrote
 }
 
 pub(crate) fn stamp_line_gray(g: &mut image::GrayImage, a: (f32, f32), b: (f32, f32), r: f32, v: u8) {

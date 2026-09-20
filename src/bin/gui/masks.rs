@@ -106,6 +106,7 @@ impl AutoShadeApp {
         // and the frame `export_mask_png` hands on.
         if self.mask_paint.as_ref().is_none_or(|m| m.dimensions() != (mw, mh)) {
             self.mask_paint = Some(image::RgbaImage::new(mw, mh));
+            self.paint_mask_changed(Some(false));
         }
         if self.mask_brush_gray.as_ref().is_none_or(|g| g.dimensions() != (mw, mh)) {
             self.mask_brush_gray = Some(image::GrayImage::new(mw, mh));
@@ -142,27 +143,49 @@ impl AutoShadeApp {
                 }
             }
         }
-        self.mask_dirty = true;
+        self.paint_mask_changed(None);
         // The whole canvas changed, so a pending sub-rect from an earlier
         // stroke must not turn this into a partial GPU upload (see clear_mask).
         self.mask_dirty_rect = None;
         wanted.len()
     }
 
+    /// The one notification door for every paint-buffer replacement/write.
+    /// Callers may supply a known answer only from the pixels they just wrote:
+    /// fresh/cleared = false, an actual red brush stamp = true. Import/erase
+    /// leave it unknown. Texture uploads clear mask_dirty, never this memo.
+    pub(crate) fn paint_mask_changed(&mut self, painted: Option<bool>) {
+        self.mask_painted.set(painted);
+        self.mask_dirty = true;
+    }
+
+    /// Same alpha threshold as export. Scan at most once per unknown change,
+    /// then both the adjust note and verb read the memo in O(1) every frame.
+    pub(crate) fn has_painted_mask(&self) -> bool {
+        if let Some(painted) = self.mask_painted.get() {
+            return painted;
+        }
+        let painted = self.mask_paint.as_ref().is_some_and(|m| {
+            #[cfg(test)]
+            self.mask_presence_scans.set(self.mask_presence_scans.get() + 1);
+            m.pixels().any(|p| p[3] > 10)
+        });
+        self.mask_painted.set(Some(painted));
+        painted
+    }
+
     /// PNG bytes of the EXPORT mask: painted → transparent (regenerate / heal
     /// here), unpainted → opaque. None if nothing is painted — mirrors the web.
     pub(crate) fn export_mask_png(&self) -> Option<Vec<u8>> {
+        if !self.has_painted_mask() {
+            return None;
+        }
         let m = self.mask_paint.as_ref()?;
         let (w, h) = (m.width(), m.height());
         let mut out = image::RgbaImage::new(w, h);
-        let mut any = false;
         for (x, y, p) in m.enumerate_pixels() {
             let painted = p.0[3] > 10;
-            any |= painted;
             out.put_pixel(x, y, image::Rgba([0, 0, 0, if painted { 0 } else { 255 }]));
-        }
-        if !any {
-            return None;
         }
         let mut buf = Vec::new();
         image::DynamicImage::ImageRgba8(out)
@@ -176,7 +199,7 @@ impl AutoShadeApp {
             for p in m.pixels_mut() {
                 *p = image::Rgba([0, 0, 0, 0]);
             }
-            self.mask_dirty = true;
+            self.paint_mask_changed(Some(false));
             // The WHOLE canvas changed: a pending brush sub-rect from an
             // uncommitted stroke would make ensure_mask_tex's partial-upload
             // fast path re-upload only that rectangle, leaving previously
@@ -241,7 +264,7 @@ impl AutoShadeApp {
             }
         }
         self.mask_paint = Some(canvas);
-        self.mask_dirty = true;
+        self.paint_mask_changed(None);
         self.mask_dirty_rect = None;
         self.mask_brush_gray = Some(gray);
         self.mask_brush = Some((target, false));

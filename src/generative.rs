@@ -30,6 +30,8 @@
 //! the region to regenerate; a blank prompt is the removal instruction,
 //! [`REMOVE_PROMPT`]) → preview-resolution composite where only the masked
 //! region is generative; the rest is the untouched source preview.
+//! `adjust_onto` = prompt-only edit of a caller-developed image, no mask →
+//! the whole returned frame, resized to the base dimensions, with measured D.
 
 use std::path::Path;
 
@@ -481,14 +483,72 @@ pub fn retouch_onto(
     base_note: &str,
     job: &FillJob<'_>,
 ) -> Result<()> {
-    let FillJob { mask_path, prompt, quality, out } = *job;
-    // FIRST, before the (minutes-long) develop and the BILLED image call
-    // (L09#1): the parent used to be created only after paying AND after
-    // the up-to-1.8 GB composite. See reimagine.
-    pipeline::preflight_out(out, source)?;
-    // Blank = remove (`fill_prompt`): resolved HERE so the CLI, the browser
-    // and the GUI send one and the same instruction for an empty field.
-    let prompt = fill_prompt(prompt);
+    // FIRST, before the develop and the BILLED call (L09#1).
+    pipeline::preflight_out(job.out, source)?;
+    // Blank = remove, shared by the CLI, browser and GUI.
+    let prompt = fill_prompt(job.prompt);
+    edit_onto(cfg, base, base_note, &ImageEditJob {
+        mask_path: Some(job.mask_path), prompt: &prompt, quality: job.quality, out: job.out,
+    })?;
+    Ok(())
+}
+
+/// A prompt-only edit of the caller's whole picture, without a painted mask.
+pub struct AdjustJob<'a> {
+    /// What to change. Unlike a fill, a whole-image adjust refuses blank words.
+    pub prompt: &'a str,
+    /// `low` / `medium` / `high` / `auto`.
+    pub quality: &'a str,
+    /// The claimed `./out` master this adjust publishes.
+    pub out: &'a Path,
+}
+
+/// What one whole-image [`adjust_onto`] measured against its SENT input.
+#[derive(Debug)]
+pub struct AdjustReport {
+    /// The same structural D as reimagine, before resizing back to the base.
+    pub divergence: f32,
+}
+
+/// Edit the caller's picture WITHOUT a mask; keep the whole returned frame,
+/// resized back to the base's dimensions. The GUI supplies the generated
+/// card's live develop and lands the result as a new, neutral ✨ card.
+/// Preflight, admission slots, size negotiation, cancel and durable output
+/// are shared with [`retouch_onto`]; neither path buys a divergence retry.
+pub fn adjust_onto(
+    cfg: &Config,
+    source: &Path,
+    base: impl FnOnce() -> Result<DynamicImage>,
+    base_note: &str,
+    job: &AdjustJob<'_>,
+) -> Result<AdjustReport> {
+    pipeline::preflight_out(job.out, source)?;
+    let prompt = job.prompt.trim();
+    if prompt.is_empty() {
+        return Err(anyhow!("a whole-image adjust needs a non-blank prompt"));
+    }
+    let divergence = edit_onto(cfg, base, base_note, &ImageEditJob {
+        mask_path: None, prompt, quality: job.quality, out: job.out,
+    })?.context("whole-image adjust has no divergence reading")?;
+    Ok(AdjustReport { divergence })
+}
+
+/// One shared request/size ladder and output path. Only the mask decides
+/// whether the answer is composited or kept whole; callers preflight first.
+struct ImageEditJob<'a> {
+    mask_path: Option<&'a Path>,
+    prompt: &'a str,
+    quality: &'a str,
+    out: &'a Path,
+}
+
+fn edit_onto(
+    cfg: &Config,
+    base: impl FnOnce() -> Result<DynamicImage>,
+    base_note: &str,
+    job: &ImageEditJob<'_>,
+) -> Result<Option<f32>> {
+    let ImageEditJob { mask_path, prompt, quality, out } = *job;
     // A17: the LOCAL full-resolution phase, one at a time process-wide
     // (`crate::full_res_slot`). It is released explicitly before the model call
     // below and re-entered for the composite, because those are the two phases
@@ -507,9 +567,14 @@ pub fn retouch_onto(
     // image from THIS base so the generated pixels match its look (no seam shift).
     let small = DynamicImage::ImageRgb8(base.resize_exact(sw, sh, FilterType::Lanczos3).to_rgb8());
     let png = encode_png(&small)?;
-    let mask_img = crate::render::open_mask_bounded(mask_path)
-        .with_context(|| format!("open mask {}", mask_path.display()))?;
-    let mask_png = encode_png(&mask_img.resize_exact(sw, sh, FilterType::Nearest))?;
+    let mask_img = mask_path.map(|path| {
+        crate::render::open_mask_bounded(path)
+            .with_context(|| format!("open mask {}", path.display()))
+    }).transpose()?;
+    let mask_at = |w, h| {
+        mask_img.as_ref().map(|m| encode_png(&m.resize_exact(w, h, FilterType::Nearest))).transpose()
+    };
+    let mask_png = mask_at(sw, sh)?;
     // The enum-size fallback pair, built EAGERLY from the same 16-bit base:
     // the base is dropped just below (the A7 memory staging), and a retry
     // must send an input whose aspect matches the size it requests (L09-2).
@@ -521,8 +586,7 @@ pub fn retouch_onto(
             let fpng = encode_png(&DynamicImage::ImageRgb8(
                 base.resize_exact(ew, eh, FilterType::Lanczos3).to_rgb8(),
             ))?;
-            let fmask = encode_png(&mask_img.resize_exact(ew, eh, FilterType::Nearest))?;
-            Ok((fpng, Some(fmask)))
+            Ok((fpng, mask_at(ew, eh)?))
         })
         .transpose()?;
     let primary_size = sizes.try_first().to_string();
@@ -537,21 +601,24 @@ pub fn retouch_onto(
     if cancelled() {
         return Err(anyhow!("cancelled by user"));
     }
-    let mut composite = base.to_rgba8();
+    // A whole-image adjust keeps none of the base pixels, so only a fill
+    // retains this full-frame buffer across the model call.
+    let composite = mask_img.as_ref().map(|_| base.to_rgba8());
     drop(base);
     // Out of the full-resolution section: what survives across the model call
     // is the ~240 MB composite (the A7 staging above), and waiting on the
     // network is not what the slot exists to serialise.
     drop(heavy);
 
+    let (verb, mode) = if mask_img.is_some() { ("fill", "composite") } else { ("adjust", "whole image") };
     println!(
-        "⚠ EXPERIMENTAL generative fill via {} ({}, quality={quality}, base={bw}x{bh} {}; composite)",
+        "⚠ EXPERIMENTAL generative {verb} via {} ({}, quality={quality}, base={bw}x{bh} {}; {mode})",
         cfg.openai_image_model,
         sizes.try_first(),
         base_note
     );
-    // The composite resizes the tile onto the base either way, so a capped
-    // return needs no size bookkeeping here — only the note the call itself prints.
+    // `requested` identifies the input ACTUALLY sent, including the enum
+    // fallback. A capped return's delivered size must never select it.
     let result = call_images_edit(
         cfg,
         &mut |size| {
@@ -560,14 +627,13 @@ pub fn retouch_onto(
             {
                 return Ok(fb.clone());
             }
-            Ok((png.clone(), Some(mask_png.clone())))
+            Ok((png.clone(), mask_png.clone()))
         },
-        &prompt,
+        prompt,
         "high",
         &sizes,
         quality,
-    )?
-    .bytes;
+    )?;
     if cancelled() {
         // The user gave up while the model ran; skip the (full-res) composite
         // — at 61 MP it is real work whose result would be discarded anyway.
@@ -597,37 +663,59 @@ pub fn retouch_onto(
     // upscale and the weight plane are ~241 MB each at 61 MP, and this is the
     // phase the slot was scoped to.
     let _heavy = crate::full_res_slot();
-    let gen_img = image::load_from_memory(&result)
+    let divergence = if mask_img.is_none() {
+        let sent = if result.requested != primary_size {
+            fallback.as_ref().map_or(&png, |fb| &fb.0)
+        } else {
+            &png
+        };
+        Some(generation_divergence(sent, &result.bytes)?.d)
+    } else {
+        None
+    };
+    let generated = image::load_from_memory(&result.bytes)
         .context("decode generative result")?
-        .resize_exact(bw, bh, FilterType::Lanczos3)
-        .to_rgb8();
+        .resize_exact(bw, bh, FilterType::Lanczos3);
     // Cancel checkpoints through the composite: at 61 MP the decode/weight/
     // blend stages take seconds each, and a cancel arriving during them was
     // ignored — the abandoned result then landed in ./out anyway.
     if cancelled() {
         return Err(anyhow!("cancelled by user"));
     }
-    let frame_feather = ((bw.min(bh) as usize) / 100).clamp(2, 64); // ~1% of short side, capped
-    let weight = {
-        let mask_full = mask_img.resize_exact(bw, bh, FilterType::Nearest).to_rgba8();
-        let w: Vec<f32> = mask_full.pixels().map(|p| 1.0 - p[3] as f32 / 255.0).collect();
-        // The full-res mask dies HERE, not at the end of this block: it and
-        // the weight plane are ~241 MB each at 61 MP and the blur below
-        // never touches it.
-        drop(mask_full);
-        // Feather scales with the SELECTION, not only the frame (L09-3):
-        // the frame rule alone put a 20 px blur on a 10 px selection at a
-        // 2048 frame — centre weight ~6%, and the fill "looked like it did
-        // nothing". The frame rule stays as the CEILING, so large
-        // selections keep their exact look.
-        let feather = frame_feather.min(selection_feather(&w, bw as usize));
-        if feather > 0 { box_blur(w, bw as usize, bh as usize, feather) } else { w }
+    let composite = if let (Some(mask_img), Some(mut composite)) = (mask_img, composite) {
+        let gen_img = generated.to_rgb8();
+        drop(generated);
+        let frame_feather = ((bw.min(bh) as usize) / 100).clamp(2, 64); // ~1% of short side, capped
+        let weight = {
+            let mask_full = mask_img.resize_exact(bw, bh, FilterType::Nearest).to_rgba8();
+            let w: Vec<f32> = mask_full.pixels().map(|p| 1.0 - p[3] as f32 / 255.0).collect();
+            // The full-res mask dies HERE, not at the end of this block: it and
+            // the weight plane are ~241 MB each at 61 MP and the blur below
+            // never touches it.
+            drop(mask_full);
+            // Feather scales with the SELECTION, not only the frame (L09-3):
+            // the frame rule alone put a 20 px blur on a 10 px selection at a
+            // 2048 frame — centre weight ~6%, and the fill "looked like it did
+            // nothing". The frame rule stays as the CEILING, so large
+            // selections keep their exact look.
+            let feather = frame_feather.min(selection_feather(&w, bw as usize));
+            if feather > 0 { box_blur(w, bw as usize, bh as usize, feather) } else { w }
+        };
+        if cancelled() {
+            return Err(anyhow!("cancelled by user"));
+        }
+        composite_in_place(&mut composite, &gen_img, &weight);
+        drop(gen_img);
+        if cancelled() {
+            return Err(anyhow!("cancelled by user"));
+        }
+
+        composite
+    } else {
+        // No composite and no mask: keep the WHOLE returned frame, at the
+        // base's dimensions, using the fill's Lanczos3 filter and RGBA8 writer.
+        generated.to_rgba8()
     };
-    if cancelled() {
-        return Err(anyhow!("cancelled by user"));
-    }
-    composite_in_place(&mut composite, &gen_img, &weight);
-    drop(gen_img);
     if cancelled() {
         return Err(anyhow!("cancelled by user"));
     }
@@ -652,8 +740,8 @@ pub fn retouch_onto(
         let _ = std::fs::remove_file(&tmp);
         return Err(e).with_context(|| format!("publish {}", out.display()));
     }
-    println!("generative fill -> {} ({bw}x{bh}, composite)", out.display());
-    Ok(())
+    println!("generative {verb} -> {} ({bw}x{bh}, {mode})", out.display());
+    Ok(divergence)
 }
 
 /// The frame `reimagine` puts on the wire for `path`: a RAW's sensor frame
@@ -2449,6 +2537,110 @@ mod tests {
             "inside the mask: the model's answer ({:?})",
             got.get_pixel(128, 128)
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_adjust_without_a_region_sends_no_mask_and_keeps_the_whole_returned_frame() {
+        let dir = std::env::temp_dir().join(format!("autoshade-adjust-whole-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("library")).unwrap();
+        let input = dir.join("library/input.png");
+        structured_frame(192, 128).save(&input).unwrap();
+        let returned = noise_frame(1536, 1024);
+        let b64 = base64::engine::general_purpose::STANDARD.encode(encode_png(&returned).unwrap());
+        let (url, seen, handle) = stub_endpoint(vec![(
+            200, "application/json", format!(r#"{{"data":[{{"b64_json":"{b64}"}}]}}"#),
+        )]);
+        let out = dir.join("exports/adjust.png");
+        adjust_onto(
+            &stub_cfg(url), &input, || Ok(structured_frame(192, 128)), "caller",
+            &AdjustJob { prompt: "make the sky bluer", quality: "medium", out: &out },
+        ).expect("the loopback whole-image adjust succeeds");
+        bounded_join(handle);
+        let bodies = seen.lock().unwrap();
+        assert_eq!(bodies.len(), 1, "one adjust buys one generation");
+        assert!(!bodies[0].contains("name=\"mask\""), "a whole-image adjust must send no mask part");
+        assert!(bodies[0].contains("make the sky bluer"), "the adjust's prompt reached the wire");
+        assert!(bodies[0].contains("\r\nmedium\r\n"), "the adjust's own quality reached the wire");
+        let got = image::open(&out).unwrap();
+        assert_eq!(got.dimensions(), (192, 128), "the master is the caller's base dimensions");
+        assert_eq!(got.color(), image::ColorType::Rgba8, "the fill's own master encoder");
+        assert_eq!(
+            got.to_rgba8(), returned.resize_exact(192, 128, FilterType::Lanczos3).to_rgba8(),
+            "every returned pixel survives the resize; none is composited with the base"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_blank_prompt_is_refused_for_a_whole_image_adjust() {
+        let dir = std::env::temp_dir().join(format!("autoshade-adjust-blank-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("library")).unwrap();
+        let input = dir.join("library/input.png");
+        let out = dir.join("exports/adjust.png");
+        // A live loopback socket witnesses NO call. The blank guard must run
+        // even before decoding; there is deliberately no input file here.
+        let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+        let cfg = stub_cfg(format!("http://{}", server.server_addr().to_ip().unwrap()));
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let count = calls.clone();
+        let handle = std::thread::spawn(move || {
+            if let Some(req) = server.recv_timeout(std::time::Duration::from_secs(1)).unwrap() {
+                count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let _ = req.respond(tiny_http::Response::from_string("unexpected paid call").with_status_code(500));
+            }
+        });
+        let developed = std::cell::Cell::new(false);
+        let err = adjust_onto(
+            &cfg, &input, || { developed.set(true); Ok(structured_frame(64, 64)) }, "caller",
+            &AdjustJob { prompt: " \t\n ", quality: "high", out: &out },
+        ).unwrap_err();
+        bounded_join(handle);
+        assert!(err.to_string().contains("non-blank prompt"), "the blank prompt is named: {err:#}");
+        assert!(!developed.get(), "blank is refused before the base is developed");
+        assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 0, "blank buys no call");
+        assert!(!out.exists(), "blank writes no master");
+
+        // Preflight is FIRST, including before the base and a non-blank call.
+        std::fs::create_dir_all(&out).unwrap();
+        let err = adjust_onto(
+            &cfg, &input, || panic!("preflight must precede the base"), "caller",
+            &AdjustJob { prompt: "bluer sky", quality: "high", out: &out },
+        ).unwrap_err();
+        assert!(err.to_string().contains("refusing to overwrite"), "preflight names the bad output: {err:#}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_adjust_reports_its_divergence_against_the_sent_input() {
+        let dir = std::env::temp_dir().join(format!("autoshade-adjust-divergence-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("library")).unwrap();
+        let input = dir.join("library/input.png");
+        // The source file differs from the caller's base: measuring against
+        // it instead of the SENT develop cannot pass the echo case.
+        noise_frame(256, 256).save(&input).unwrap();
+        let sent = structured_frame(256, 256).resize_exact(1024, 1024, FilterType::Lanczos3);
+        for different in [false, true] {
+            let answer = if different { noise_frame(1024, 1024) } else { sent.clone() };
+            let b64 = base64::engine::general_purpose::STANDARD.encode(encode_png(&answer).unwrap());
+            let (url, seen, handle) = stub_endpoint(vec![(
+                200, "application/json", format!(r#"{{"data":[{{"b64_json":"{b64}"}}]}}"#),
+            )]);
+            let out = dir.join(format!("exports/adjust-{different}.png"));
+            let report = adjust_onto(
+                &stub_cfg(url), &input, || Ok(structured_frame(256, 256)), "caller",
+                &AdjustJob { prompt: "bluer sky", quality: "high", out: &out },
+            ).unwrap();
+            bounded_join(handle);
+            assert_eq!(seen.lock().unwrap().len(), 1, "divergence never buys a retry");
+            if different {
+                assert!(report.divergence >= crate::fit::DIVERGENCE_GLOBAL,
+                    "an unrelated frame must cross the structural threshold: D={}", report.divergence);
+            } else {
+                assert!(report.divergence.abs() < 1e-5,
+                    "an unchanged SENT input has D near zero: D={}", report.divergence);
+            }
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 

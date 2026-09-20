@@ -277,6 +277,11 @@ pub(crate) struct AutoShadeApp {
     pub(crate) paint_mode: bool,                      // brush-paint a mask (pauses box-select)
     pub(crate) brush: f32,                            // brush radius in After-image display px
     pub(crate) mask_paint: Option<image::RgbaImage>,  // painted overlay (red where painted), at preview res
+    // Presence is independent of the texture upload flag: None means one
+    // scan is due after a change; Some is an O(1) answer on every frame.
+    pub(crate) mask_painted: std::cell::Cell<Option<bool>>,
+    #[cfg(test)]
+    pub(crate) mask_presence_scans: std::cell::Cell<usize>,
     pub(crate) mask_tex: Option<egui::TextureHandle>, // overlay texture
     pub(crate) mask_dirty: bool,                      // re-upload the overlay
     // (straighten, distortion, (profile distortion, profile CA), (ca_r, ca_b)) at build.
@@ -308,6 +313,8 @@ pub(crate) struct AutoShadeApp {
     pub(crate) fill_fullres: bool,                    // composite onto the full-res develop
     pub(crate) heal_fullres: bool,                    // heal the full-res develop
     pub(crate) reimagine_prompt: String,              // whole-image restyle prompt (its own entry)
+    pub(crate) adjust_prompt: String,                 // edit the active generated picture
+    pub(crate) adjust_quality: usize,                 // 0=high 1=medium 2=low
     // --- production niceties ---
     pub(crate) view_mode: ViewMode,                   // side-by-side vs after-only (hold B = compare)
     pub(crate) toasts: Vec<Toast>,                    // transient corner notifications
@@ -404,6 +411,8 @@ pub(crate) struct AutoShadeApp {
     pub(crate) edit_list_actions: Vec<String>,
     #[cfg(test)]
     pub(crate) reimagine_btn_rect: Option<egui::Rect>, // test seam: the ✨ Generate button's rect
+    #[cfg(test)]
+    pub(crate) adjust_btn_enabled: Option<bool>,      // actual egui response, including parent gates
     #[cfg(test)]
     pub(crate) gallery_slot_rect: Option<egui::Rect>, // test seam: first drawn gallery thumb's SLOT
     #[cfg(test)]
@@ -1731,6 +1740,9 @@ impl Default for AutoShadeApp {
             paint_mode: false,
             brush: 30.0,
             mask_paint: None,
+            mask_painted: std::cell::Cell::new(None),
+            #[cfg(test)]
+            mask_presence_scans: std::cell::Cell::new(0),
             mask_tex: None,
             mask_dirty_rect: None,
             mask_tex_built: Instant::now(),
@@ -1742,6 +1754,8 @@ impl Default for AutoShadeApp {
             fill_fullres: false,
             heal_fullres: false,
             reimagine_prompt: String::new(),
+            adjust_prompt: String::new(),
+            adjust_quality: 0,
             view_mode: ViewMode::SideBySide,
             toasts: Vec::new(),
             histogram: None,
@@ -1787,6 +1801,8 @@ impl Default for AutoShadeApp {
             edit_list_actions: Vec::new(),
             #[cfg(test)]
             reimagine_btn_rect: None,
+            #[cfg(test)]
+            adjust_btn_enabled: None,
             #[cfg(test)]
             gallery_slot_rect: None,
             #[cfg(test)]
@@ -2135,6 +2151,7 @@ impl eframe::App for AutoShadeApp {
                 // names one file for one photo (see the field).
                 fit_deep: self.fit_deep,
                 reimagine_retry: self.reimagine_retry,
+                adjust_quality: self.adjust_quality,
                 view_mode: self.view_mode,
                 exp_long_edge: self.exp_long_edge,
                 exp_sharpen: self.exp_sharpen,

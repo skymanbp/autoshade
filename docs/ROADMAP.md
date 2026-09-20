@@ -222,6 +222,22 @@
   **0 过 / 1 败**，实得 (0.65, 0.5) 对应期望 (1.0, 1.0)；按字节还原后偏好筛选 8/0、整 GUI 门通过。
   `src/bin/gui` 外无 Rust 改动，未触发 lib 电池条件；未启动 GUI，未读写真实偏好与显影库。
 
+### 调整入口复审跟进 1：输出同一命名规则，空画笔不逐帧扫描（2026-09-20）
+
+- **命名**：`src/pipeline.rs` 逐字还原至 `8a1a2f8`，所有输出族均为 `tag`、`tag-2`、…；adjust 首张 `.adjust.png`、次张 `.adjust-2.png`。GUI 两臂落卡测试、架构与手册同步；库的共享 `edit_onto` 与落卡路径不改。
+- **缓存与写入门**：`app.rs` 在画笔旁存独立的 `Cell<Option<bool>>`；`masks.rs::paint_mask_changed` 是唯一失效通知门，也是唯一 `mask_dirty = true` 写点。新画布／清空直接 false，实际落笔直接 true，擦除／导入／从光栅载入后未知，下次最多扫描一次（alpha > 10）；上传纹理清 dirty 不影响缓存。`util.rs` 两个落笔核返回是否真正写到像素。
+- **写点普查**：`actions.rs::{load_active,rebind_paint_canvas}` 两处新画布；`masks.rs::paint_imported_removals` 换尺寸与导入绘制、`clear_mask` 清空、`start_mask_brush` 载入；`panels/retouch.rs::handle_paint` 拖动／单击的画与擦共用通知。树遍历门钉四处替换、三处可变借用和唯一 dirty 写点；新增写点必须接入并登记。
+- **测试与门**：新增两条 GUI 门：1024×768 空画布五帧最多一次扫描，真实单击／拖动加画零扫描，擦空后最多再扫一次，换卡／换底图零扫描；递归写点普查。最终 release：库 **1633 过／0 败／15 忽略，272.56 s**；GUI **205 过／0 败／1 忽略，0.55 s**；clippy 默认／gui 两配零警告；i18n 十项全 0（902 literal／266 dynamic／1155 zh）；字体 **890/890** 无需重生；check_docs **25 PASS／0 FAIL／5 SKIP**（四项发版 transcript 缺失、一项外部 XMP census 未设）。
+- **变异与边界**：只去掉擦除分支的失效通知，扫描回归 **0 过／1 败，exit 101**，断言 `erasing the last stroke must return the adjust fold to whole image: expected whole image (paint an area to limit it)`；逐字节还原后全 GUI 门通过；无真实 API 调用、未启动 GUI 程序。
+
+### 生成图有自己的「调整」入口：提示词改整图，共用画笔限定区域，每次落新 ✨ 卡（2026-09-20）
+
+- **裁定**：用户选择 AI 面板里独立的「调整 AI 生成图 · Adjust · 付费 API」折叠区，紧接 Reimagine。提示词与质量均在区内；没有涂抹时按非空提示词改整图，有涂抹时仅填该区、空词＝移除。仅 Generated / Edited 可用，忙时禁用；出发的卡保持原样，结果落新 ✨ 卡，可继续调整或反推。Reimagine 仍读底片。
+- **库与像素**（`6e1085f`；`src/generative.rs`、`src/pipeline.rs`）：新增 `AdjustJob`、`AdjustReport`、`adjust_onto`；从 `retouch_onto` 抽出私有 `edit_onto`，输入缩放、可选蒙版、尺寸回退、请求／解码、取消与落盘共用，整图不发 mask、不合成原图，Lanczos3 回到基图尺寸、同 fill 的 RGBA8 编码。D 对实际发送的输入测，绝不因 D 多买一张。preflight 在付费前；全幅槽仅包本地显影与写盘。adjust 与所有输出族共用 `.adjust.png`、`.adjust-2.png`、… 的原子占名规则（复审时还原共享命名器，见上方跟进）。
+- **GUI 与文字**（`1c49d29`；`src/bin/gui/{app,actions,budget,model,masks,workers,tests,i18n}.rs`、`panels/{ai,retouch}.rs`、`assets/fonts/`）：fill 与 adjust 共用 `developed_card_pixels`，按活动卡自己的像素与实时配方、源片 film edge 显影。`has_painted_mask` 与导出同用 alpha > 10，不逐帧编码。质量存 `Prefs`，旧配置默认 high；提示词同 Reimagine 不持久化。`RetouchNote::Adjusted` 只带路径、区域布尔与可选 D，落地时本地化。中英提示与字体子集同步。
+- **测试与门**：新增库三条（无 mask 且整帧保留／空词零调用零写入／D 对发送图测）与 GUI 三条（两臂新卡且源卡不动／启用三态／区域提示翻转），提示词宽度钉四框、按钮单行门点名「✨ Adjust」；最终 release 门：库 **1633 过／0 败／15 忽略，353.11 s**（generative 36 条全绿）；GUI **203 过／0 败／1 忽略，2.53 s**；clippy 默认／gui 两配均 0 警告；i18n 十项全 0（902 literal／266 dynamic／1155 zh），字体 **890/890**，check_docs **25 PASS／0 FAIL／5 SKIP**（四项发版电池数字缺 transcript、一项外部 XMP census 未设）。工位预算登记 adjust 后为 14 处；新输出 decode 按 fill 标注 baked-by-construction。两项变异均亲跑转红：整图强发 mask → `a whole-image adjust must send no mask part`；去掉 AI 像素门 → Original 卡 `left: Some(true)`／`right: Some(false)`；均还原后复验。
+- **文档与边界**：`USER_MANUAL.md`、`README.md`、`ARCHITECTURE.md` 同步。浏览器与 CLI 仍只有区域 retouch，没有整图 adjust；本车道未调用真实图像 API、未启动 GUI 程序。
+
 ## 版本台账（逐版已发布内容与实测数字，新在上；均已完成，勿重做）
 
 ### v1.4.1 — RAW 去噪的仿射读噪声模型、不读本帧，星点保住自己的亮度（2026-09-17）

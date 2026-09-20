@@ -408,6 +408,8 @@ removes it), and the result lands as a new **✨ AI generated** card: its look
 lives in its pixels, crop and straighten are not carried over, and the card you
 filled from is unchanged, the ▣ negative included. The browser's Fill and the
 CLI's `retouch` still composite onto the source's neutral develop.
+**Adjust generated image** is GUI-only: the browser and CLI retain region
+retouch and have no whole-image adjust entry.
 
 Reverse-fit uses its own **Reverse-fit strength** dial in the Reverse-fit fold
 (or `match --strength 0..1`) as its honesty budget; the Analysis fold's
@@ -943,6 +945,23 @@ settings file can supply them.
   off by default, it buys a second image) regenerates once and keeps the
   closer result. Use **Reverse-fit** or `match` to infer a deterministic recipe
   and apply it to the original RAW at full resolution.
+
+- **Adjust generated image · paid API:** the fold directly after Reimagine in
+  the AI panel edits the selected **✨ AI generated** card or its **✎** edit.
+  It has its own prompt and remembered high/medium/low quality. With no brush
+  strokes, enter what to change (for example, "make the sky bluer") and click
+  **✨ Adjust** to edit the whole image. With strokes in the shared brush mask,
+  only the painted area is regenerated; leave the prompt blank to remove what
+  you painted. The line above the button says which area it will read. A blank
+  prompt without strokes, another kind of card, or a running job disables it.
+  The model sees this card's pixels under its current sliders and masks. Each
+  adjust costs one gpt-image generation and lands as a new **✨** card at
+  `./out/<stem>.adjust.png`, then `<stem>.adjust-2.png`, and so on; the source
+  card stays as it is. Crop and straighten are not carried over; set them on
+  the new card.
+  Adjusts can chain, and **Reverse-fit** reads the result just like any other
+  generated card. Whole-image results report structural divergence **D** against
+  the input actually sent. Reimagine continues to read the photo's negative.
 
 Local denoise and segmentation do not need an API key. Their Python sidecars
 resolve relative to the installed program tree, and downloaded weights are

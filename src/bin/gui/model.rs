@@ -279,6 +279,8 @@ pub(crate) struct Prefs {
     /// [`Prefs::default`] gives, so an upgrade never silently starts buying
     /// a second image per reimagine.
     pub(crate) reimagine_retry: bool,
+    /// The adjust fold's own quality; old prefs default to high (0).
+    pub(crate) adjust_quality: usize,
     pub(crate) view_mode: ViewMode,
     pub(crate) exp_long_edge: u32,
     pub(crate) exp_sharpen: f32,
@@ -329,6 +331,7 @@ impl Default for Prefs {
             fit_deep: false,
             // A second billed generation per diverged reimagine — same rule.
             reimagine_retry: false,
+            adjust_quality: 0,
             view_mode: ViewMode::SideBySide,
             exp_long_edge: 0,
             exp_sharpen: 0.0,
@@ -407,7 +410,7 @@ pub(crate) const GRADE_REGIONS: [&str; 4] = ["Shadows", "Midtones", "Highlights"
 /// How a finished retouch enters the variant strip.
 #[derive(Clone, Copy, PartialEq)]
 pub(crate) enum RetouchKind {
-    /// A whole-frame REIMAGINE rendition → a NEW「AI 生成」variant (its look
+    /// A reimagine, fill or adjust → a NEW「AI 生成」variant (its look
     /// lives in the pixels).
     NewGenerated,
     /// An AI denoise → a NEW「◈ Denoised negative」card (2026-09-15, user
@@ -435,6 +438,8 @@ pub(crate) enum RetouchNote {
     /// Generative fill landed at this ./out artifact — as a NEW ✨ card since
     /// 2026-09-15 (the model is shown the card's picture; see `start_fill`).
     Filled(PathBuf),
+    /// An adjust of a generated card: region fills have no whole-frame D.
+    Adjusted { out: PathBuf, region: bool, divergence: Option<f32> },
     /// Heal: spot count + artifact + the heal report's rationale split per
     /// the L12#2B suffix contract (AI prose prefix + typed notes).
     Healed {
@@ -468,7 +473,7 @@ pub(crate) enum RetouchNote {
     Reimagined { out: PathBuf, divergence: f32, discarded: Option<f32> },
 }
 
-/// A finished retouch from any of the five pixel paths (fill/heal/denoise/
+/// A finished retouch from the pixel paths (fill/adjust/heal/denoise/stack/
 /// clone/reimagine): `(preview of the ./out result, typed note, the saved
 /// full-resolution ./out artifact, kind)`. The saved path becomes the affected
 /// variant's `origin` — its export / reverse-fit / next-retouch source.
