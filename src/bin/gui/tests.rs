@@ -7851,55 +7851,48 @@
         drawn_texts(&out.shapes)
     }
 
-    /// R22 #16a: the AI section's ● read `verdict.is_some() || !guidance.
-    /// is_empty()` — a field set one item short of the panel's own inputs. The
-    /// Style strength steers every AI proposal, is PERSISTED across launches, and
-    /// was invisible the moment the section was collapsed.
-    ///
-    /// Pins the wiring first: the app default, the pref default and the slider's
-    /// reset target must be ONE constant, or "the user moved it" is not a
-    /// decidable question and this dot cannot exist. Then the rendered header —
-    /// a predicate nobody reads is not a dot.
+    /// User decision 2026-09-20: the AI header describes this photo's verdict
+    /// and Direction. Saved taste dials alone must never light it, even when
+    /// all three differ from their defaults. Read the drawn header in both
+    /// languages so a disconnected predicate cannot pass this test.
     #[test]
-    fn the_ai_section_dot_follows_the_style_strength_it_used_to_miss() {
+    fn the_ai_dot_reads_this_photos_state_not_the_saved_dials() {
         assert_eq!(
             AutoShadeApp::default().style_strength, STYLE_STRENGTH_DEFAULT,
             "the app must start at the shared default"
         );
         assert_eq!(
             Prefs::default().style_strength, STYLE_STRENGTH_DEFAULT,
-            "a pref key missing from an older save must degrade to the SAME number \
-             — otherwise every upgraded install starts with a lit dot"
+            "a pref key missing from an older save must use the same dial default"
         );
-        let mut app = AutoShadeApp::default();
-        assert!(!app.ai_section_active(), "a fresh AI area has no state to flag");
-        app.style_strength = 0.85;
-        assert!(app.ai_section_active(), "a moved Style slider IS AI state");
-        app.style_strength = STYLE_STRENGTH_DEFAULT;
-        assert!(!app.ai_section_active(), "back at the default ⇒ back to no dot");
-        // The two pre-existing members still count (no regression in closing the gap).
-        app.guidance = "warmer and moodier".into();
-        assert!(app.ai_section_active(), "a typed Direction still flags");
-        app.guidance.clear();
-        app.verdict = Some((autoshade::advisor::Decision::Accept, vec!["ok".into()]));
-        assert!(app.ai_section_active(), "a verdict still flags");
-        // …and the header really carries it.
-        let mut app = AutoShadeApp::default();
-        let seen = tall_frame(&mut app, |a, ui| a.ai_panel(ui));
-        assert!(
-            seen.iter().any(|t| t == "AI"),
-            "the AI header was not drawn at all — this test proves nothing: {seen:?}"
-        );
-        assert!(
-            !seen.iter().any(|t| t == "AI  ●"),
-            "a fresh app must not light the AI dot: {seen:?}"
-        );
-        app.style_strength = 0.85;
-        let seen = tall_frame(&mut app, |a, ui| a.ai_panel(ui));
-        assert!(
-            seen.iter().any(|t| t == "AI  ●"),
-            "a moved Style slider must light the collapsed header's ●: {seen:?}"
-        );
+        for lang in [Lang::En, Lang::Zh] {
+            let title = tr(lang, "AI");
+            let lit = format!("{title}  ●");
+            for (case, has_verdict, guidance, active) in [
+                ("saved dials only", false, "", false),
+                ("verdict", true, "", true),
+                ("Direction", false, "warmer and moodier", true),
+            ] {
+                let mut app = AutoShadeApp {
+                    lang,
+                    style_strength: 0.80,
+                    grade_strength: 0.85,
+                    fit_strength: 0.85,
+                    verdict: has_verdict.then(|| (
+                        autoshade::advisor::Decision::Accept, vec!["ok".into()]
+                    )),
+                    guidance: guidance.into(),
+                    ..Default::default()
+                };
+                let seen = tall_frame(&mut app, |a, ui| a.ai_panel(ui));
+                let headers: Vec<_> = seen.iter().map(String::as_str)
+                    .filter(|t| *t == title || *t == lit.as_str()).collect();
+                assert_eq!(
+                    headers, vec![if active { lit.as_str() } else { title }],
+                    "{lang:?}: {case}: only this photo's verdict or Direction may light the AI dot"
+                );
+            }
+        }
     }
 
     /// R23-3 (feedback #5, "the AI is too timid + give me a strength slider"):
@@ -7908,8 +7901,8 @@
     /// Four properties, because a slider that fails any one of them is
     /// decoration: it must be DRAWN beside Style (the two are one pair of axes,
     /// and the reported problem was that only the style half existed), start and
-    /// persist at ONE constant shared with the lib, light the section ● when
-    /// moved, and actually reach the request the analyze worker builds.
+    /// persist at ONE constant shared with the lib, leave the section ● quiet
+    /// when moved alone, and actually reach the request the analyze worker builds.
     #[test]
     fn the_grade_strength_slider_sits_beside_style_and_rides_the_analyze_request() {
         // One definition, three consumers (app default / pref default / the
@@ -7945,21 +7938,21 @@
             );
         }
 
-        // The ● follows it — including a move DOWN to the calibration point,
-        // which is still a move away from the shipped default.
+        // A remembered preference stays quiet, including a move DOWN to the
+        // calibration point, which differs from the shipped default.
         assert!(!app.ai_section_active(), "a fresh AI area has no state to flag");
         app.grade_strength = autoshade::recipe::GradeStrength::CALIBRATED;
         assert!(
-            app.ai_section_active(),
-            "0.50 is the calibration point, not the default — moving there IS AI state"
+            !app.ai_section_active(),
+            "a moved Strength slider is a preference, not this photo's AI state"
         );
         let seen = tall_frame(&mut app, |a, ui| a.ai_panel(ui));
         assert!(
-            seen.iter().any(|t| t == "AI  ●"),
-            "a moved Strength slider must light the collapsed header's ●: {seen:?}"
+            seen.iter().any(|t| t == "AI") && !seen.iter().any(|t| t == "AI  ●"),
+            "a moved Strength slider must leave the AI header plain: {seen:?}"
         );
         app.grade_strength = GRADE_STRENGTH_DEFAULT;
-        assert!(!app.ai_section_active(), "back at the default ⇒ back to no dot");
+        assert!(!app.ai_section_active(), "resetting a preference also leaves the dot unlit");
 
         // …and it reaches the worker's request, on its OWN axis (the two dials
         // must not be able to swap: `style` is a bare fraction, `strength` a
@@ -8094,12 +8087,12 @@
             seen.iter().any(|t| t == "Reverse-fit strength"),
             "the dial must exist in the fold: {seen:?}"
         );
-        // A moved dial lights the AI area's ● like every other AI input.
+        // The saved reverse-fit dial is a preference, so it leaves the ● unlit.
         assert!(!app.ai_section_active(), "a fresh AI area has no state to flag");
         app.fit_strength = 0.85;
-        assert!(app.ai_section_active(), "a moved reverse-fit dial IS AI state");
+        assert!(!app.ai_section_active(), "a moved reverse-fit dial is still a preference");
         app.fit_strength = autoshade::recipe::GradeStrength::DEFAULT;
-        assert!(!app.ai_section_active(), "back at the default ⇒ back to no dot");
+        assert!(!app.ai_section_active(), "resetting a preference also leaves the dot unlit");
         // Persisted on its own key; an older prefs file without it loads at the default.
         let prefs = Prefs { fit_strength: 0.85, ..Prefs::default() };
         let json = serde_json::to_string(&prefs).expect("prefs serialize");

@@ -575,9 +575,11 @@ sharpening, and sRGB, Display P3, or Adobe RGB delivery color space. Resizing is
 the last step, uses Lanczos3, preserves aspect ratio, and never enlarges a
 smaller image.
 
-The Export header carries no ●: these are saved delivery preferences with no
-per-photo neutral setting. Hover over the toolbar's Export button to read the
-current delivery summary.
+A header's ● describes this photo. Saved preferences — Export's delivery
+settings and the AI Style, Strength, and Reverse-fit strength dials — never
+light it. The AI header lights only for a verdict on screen or a typed Direction.
+The Export header carries no ●; hover over the toolbar's Export button to read
+the current delivery summary.
 
 **🤖 AI Denoise on export** runs the AI denoise inside every full-resolution
 delivery — a RAW on its sensor mosaic, a baked source through SCUNet — at the
