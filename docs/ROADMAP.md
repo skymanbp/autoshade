@@ -52,6 +52,10 @@
 > 而不是空过，run 35436156156）、Windows 报共享冲突。本仓 12 处桩全是脚本，故该状态在 macOS 上不可达，
 > 两条测试按实测收窄到 `cfg(target_os = "linux")`（`dfd9fa4`）而不是放宽断言。
 >
+> **发版后的家务（2026-09-19，`3d3540a`，不改发货行为）**：清 `D:\t` 那 111 GB 车道遗留时发现，F8 那条「MEASURED against the kit's `HDR-ON`，rms 0.0412」所依据的侧车只存在于 scratch 里——库里 175 份无一份 `crs:HDREditMode="1"`，删掉它那个数就只能复述不能重算。该侧车按用户裁定入树：`src/fixtures/hdr-on-lightroom-9.4.xmp`（8,165 B，sha256 `39a5c4b4…`，Lightroom 9.4 原字节），`xmp::tests::lightrooms_own_hdr_sidecar_reads_as_the_mode_and_headroom_it_states` 拿它考读取器（旁边那条往返测试只证明本仓写者与读者互相同意），`.gitattributes` 按 `src/fixtures/*.json` 同理把 `src/fixtures/*.xmp` 钉成 `eol=lf`；变异（把 `next_xml_attribute` 的空白跳过收窄成只认空格——Lightroom 一行一个属性）令其转红。CI 在 `3d3540a` 上 `build` 五 job + `installer-upgrade` 全绿，该测试在 `debug-asserts` / ubuntu / macos 三处日志各 ok 一次。
+>
+> **同日夹具根搬家（用户令）**：仓外临时产物一律进 `D:\Projects\.worktrees\`，夹具根随之从 `~/autoshop-fixtures/` 整体搬到 `D:\Projects\.worktrees\_fixtures\`（robocopy 88 目录 / 553 文件 / 5.253 GB，0 FAILED，源已删）——**本文件下文出现的每处 `~/autoshop-fixtures/…` 都按这个新根读**，包括校准语料 `fit-calibration`（p36–p41）与蒙版包 `me6-2026-09`。[scripts/lr_mask_parity.py:484](../scripts/lr_mask_parity.py) 不再猜主目录，改为 `--pack` / `AUTOSHADE_LR_PACK` / `AUTOSHADE_FIXTURES_ROOT` 三选一，缺一不可时直说；电池的 `AUTOSHADE_FIT_CALIBRATION_DIR` 照旧必填，只是指向新根。「本文件不再持有任何计划中的工作」仍然成立。
+>
 > **v1.4.1 已发布**（2026-09-17，tag `v1.4.1` → `af7f25e`，release run `35195987007` 五工位绿，8 资产回下载字节校验，官网 23/23 逐字节，本机已升；用户报障「AI降噪效果还不够。我需要它达到Lightroom级别的自动降噪效果。我刚刚尝试了一下星空图片的降噪，完全不是一个级别。」）**：
 > 实测方向与直觉相反——不是降噪不够，是**降过头并把星点削平**。v1.4.0 的 `denoise_planes` 用**本帧数据的 0.05 / 99.95 百分位**造进 DRUNet `[0,1]` 的仿射并两端硬裁，输出上限恰为 `igat(top)`：
 > 15 s ISO-3200 星空片四平面天花板 2646 / 2840 / 2821 / 1720 counts（白电平 16383，B 平面只有满量程 7.6 %），出厂输出最大值与 `igat(top)` 五位小数逐位吻合，星点只剩 38.8 % 亮度、
