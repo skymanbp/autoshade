@@ -1547,18 +1547,18 @@ impl AutoShadeApp {
 
         // --- 镜头校正: in-camera profile + manual corrections -----------------
         ui.add_space(SPACE_MD);
-        // The stamped in-camera profile is a measurement, like the catalogue's
-        // `upright_transform` / `look`, not an edit. Use the unsaved badge's
-        // rule: a component switched off, or on without its data, lights the
-        // dot; the stamp itself does not. The `lens` / `lens_effects` families
-        // still cover manual sliders, including the two profile strengths.
-        // `DOT_EXEMPT` keeps the vignette midpoint and de-fringe hue windows
-        // quiet while their amounts are at rest.
+        // Two as-opened states are neutral here: the camera's available
+        // components on, or all off with the sidecar's DisabledInSidecar stamp.
+        // Neither lights the dot; hand-made all-off and other moves away do.
+        // This header rule leaves is_noop's saved-develop precedence and
+        // unsaved badge alone. The `lens` / `lens_effects` families still cover
+        // manual sliders, including the two profile strengths; `DOT_EXEMPT`
+        // keeps midpoints and hue windows quiet with their amounts at rest.
         let lens_active = CONTROL_FAMILIES
             .iter()
             .filter(|f| f.name == "lens" || f.name == "lens_effects")
             .any(|f| family_is_active(f, &self.recipe))
-            || !self.recipe.lens_profile.is_as_stamped();
+            || !self.recipe.lens_profile.is_as_opened();
         egui::CollapsingHeader::new(section_title(tr(lang, "Lens"), lens_active))
             .id_salt("sec_lens")
             .default_open(false)

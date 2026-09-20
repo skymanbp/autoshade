@@ -95,10 +95,10 @@ masks and the pixels beside them are in the same frame. The manual Distortion,
 Vignetting and CA sliders are not the profile and are never touched by that
 switch.
 
-The Lens header's ● marks an edit away from the photo's calibration. The
-automatically enabled in-camera profile leaves it unlit; switching a profile
-component off or changing a manual correction (including either profile
-strength) lights it.
+The Lens header's ● stays unlit for both profiles enabled from the camera's
+calibration and profiles switched off by the imported Lightroom sidecar.
+Changing a profile toggle from that open state or a manual correction
+(including either profile strength) lights it.
 
 The **Transform** fold used to show Lightroom's perspective values and say we
 did not touch them. Since v1.5.0 it moves pixels. Vertical and Horizontal are

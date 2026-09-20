@@ -1539,6 +1539,20 @@ impl LensProfile {
             && self.distortion_on != self.distortion.is_empty()
             && self.ca_on == ca_present
     }
+    /// Exactly a state the OPEN path leaves behind — nothing the photographer chose here.
+    /// `pipeline::fresh_lens_profile` enables every available camera component;
+    /// `pipeline::obey_disabled_profile_switch` keeps the knots but switches
+    /// all three off and records `DisabledInSidecar`. The all-empty default
+    /// is included by `is_as_stamped` too.
+    ///
+    /// `EditRecipe::is_noop` deliberately stays on `is_as_stamped`: it feeds
+    /// the `SavedDevelop` precedence contest and the unsaved badge, whose
+    /// meaning must not move with the section header's as-opened rule.
+    pub fn is_as_opened(&self) -> bool {
+        self.is_as_stamped()
+            || (self.mask_warp_src == MaskWarpSource::DisabledInSidecar
+                && !self.vignette_on && !self.distortion_on && !self.ca_on)
+    }
     /// Defensive ranges for hand-edited files: knot counts capped, vignette
     /// gains and radius factors held to physically plausible bands (the real
     /// Sony data sits well inside: gains ≲ 1.5×, distortion within ±6%).
@@ -4615,6 +4629,70 @@ mod tests {
         });
         r.clamp();
         assert!(r.masks.is_empty(), "a non-finite range drops its whole mask");
+    }
+
+    #[test]
+    fn lens_profile_as_opened_distinguishes_the_two_stamps_from_edits() {
+        assert!(LensProfile::default().is_as_opened(), "no calibration is an open state too");
+        let camera = LensProfile {
+            vignette: vec![1.0, 1.2],
+            distortion: vec![1.0, 0.95],
+            ca_r: vec![1.0],
+            ca_b: vec![1.0],
+            vignette_on: true,
+            distortion_on: true,
+            ca_on: true,
+            mask_warp_src: MaskWarpSource::CameraMetadata,
+            ..Default::default()
+        };
+        // (toggles, opened for any other provenance, opened for DisabledInSidecar).
+        // The all-off exception belongs to the sidecar's stamp alone.
+        let cases = [
+            ((false, false, false), false, true),
+            ((false, false, true), false, false),
+            ((false, true, false), false, false),
+            ((false, true, true), false, false),
+            ((true, false, false), false, false),
+            ((true, false, true), false, false),
+            ((true, true, false), false, false),
+            ((true, true, true), true, true),
+        ];
+        for source in MaskWarpSource::ALL {
+            for ((vignette_on, distortion_on, ca_on), other, sidecar) in cases {
+                let p = LensProfile { vignette_on, distortion_on, ca_on, mask_warp_src: source, ..camera.clone() };
+                let expected = if source == MaskWarpSource::DisabledInSidecar { sidecar } else { other };
+                assert_eq!(
+                    p.is_as_opened(), expected,
+                    "{source:?}, toggles {vignette_on}/{distortion_on}/{ca_on}: only the two open stamps are neutral"
+                );
+            }
+            for (vignette_on, distortion_on, ca_on) in [(true, false, false), (false, true, false), (false, false, true)] {
+                let p = LensProfile { vignette_on, distortion_on, ca_on, mask_warp_src: source, ..Default::default() };
+                assert!(!p.is_as_opened(), "{source:?}: enabling a component without data is an edit");
+            }
+        }
+        // A half-damaged CA pair is unavailable: its toggle must stay off.
+        // Neither the missing red arm nor the missing blue arm can be enabled.
+        for (ca_r, ca_b) in [(vec![1.0], vec![]), (vec![], vec![1.0])] {
+            let mut p = LensProfile { ca_r, ca_b, ca_on: false, ..camera.clone() };
+            assert!(p.is_as_opened(), "an unavailable CA pair is stamped off");
+            p.ca_on = true;
+            assert!(!p.is_as_opened(), "a half-damaged CA pair enabled is not an open stamp");
+        }
+        assert!(EditRecipe { lens_profile: camera.clone(), ..Default::default() }.is_noop());
+        let disabled = LensProfile {
+            vignette_on: false,
+            distortion_on: false,
+            ca_on: false,
+            mask_warp_src: MaskWarpSource::DisabledInSidecar,
+            ..camera
+        };
+        assert!(disabled.is_as_opened());
+        assert!(!disabled.is_as_stamped());
+        assert!(
+            !EditRecipe { lens_profile: disabled, ..Default::default() }.is_noop(),
+            "header neutrality must not change SavedDevelop precedence or the unsaved badge"
+        );
     }
 
     #[test]

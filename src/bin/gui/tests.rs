@@ -9120,43 +9120,67 @@
         );
     }
 
-    /// The camera's profile is the photo's neutral calibration. Only a move
-    /// away from that stamp, or a manual correction, claims an adjustment.
+    /// Both camera-on and sidecar-disabled calibration are as-opened states.
+    /// A manual correction or a move away from either stamp lights the header.
     #[test]
     fn the_lens_dot_measures_edits_away_from_the_stamp() {
+        use autoshade::recipe::{LensProfile, MaskWarpSource};
         type Case = (&'static str, fn(&mut EditRecipe), bool);
-        let cases: [Case; 6] = [
+        let camera_cases: [Case; 7] = [
             ("as stamped", |_| {}, false),
             ("vignette switched off", |r| r.lens_profile.vignette_on = false, true),
             ("manual vignette", |r| r.lens_vignette = -20.0, true),
             ("profile distortion strength", |r| r.lens_profile_distortion_scale = 80.0, true),
             ("profile vignette strength", |r| r.lens_profile_vignetting_scale = 80.0, true),
             ("enabled without data", |r| r.lens_profile.vignette.clear(), true),
+            ("all components switched off by hand", |r| {
+                r.lens_profile.vignette_on = false;
+                r.lens_profile.distortion_on = false;
+                r.lens_profile.ca_on = false;
+            }, true),
         ];
+        let sidecar_cases: [Case; 3] = [
+            ("as opened", |_| {}, false),
+            ("vignette switched on", |r| r.lens_profile.vignette_on = true, true),
+            ("manual vignette", |r| r.lens_vignette = -20.0, true),
+        ];
+        let camera = LensProfile {
+            vignette: vec![1.1; 16],
+            distortion: vec![1.001; 16],
+            ca_r: vec![1.002; 16],
+            ca_b: vec![0.999; 16],
+            vignette_on: true,
+            distortion_on: true,
+            ca_on: true,
+            mask_warp_src: MaskWarpSource::CameraMetadata,
+            ..Default::default()
+        };
+        let sidecar = LensProfile {
+            vignette_on: false,
+            distortion_on: false,
+            ca_on: false,
+            mask_warp_src: MaskWarpSource::DisabledInSidecar,
+            ..camera.clone()
+        };
         for lang in [crate::i18n::Lang::En, crate::i18n::Lang::Zh] {
             let title = tr(lang, "Lens");
             let lit = format!("{title}  ●");
-            for (case, change, active) in cases {
-                let mut app = AutoShadeApp { lang, ..Default::default() };
-                app.recipe.lens_profile = autoshade::recipe::LensProfile {
-                    vignette: vec![1.1; 16],
-                    distortion: vec![1.001; 16],
-                    ca_r: vec![1.002; 16],
-                    ca_b: vec![0.999; 16],
-                    vignette_on: true,
-                    distortion_on: true,
-                    ca_on: true,
-                    ..Default::default()
-                };
-                assert!(app.recipe.lens_profile.is_as_stamped(), "premise: all available components enabled");
-                change(&mut app.recipe);
-                let seen = tall_frame(&mut app, |a, ui| a.develop_panel(ui));
-                let headers: Vec<&str> = seen.iter().map(String::as_str)
-                    .filter(|t| *t == title || *t == lit).collect();
-                assert_eq!(
-                    headers, vec![if active { lit.as_str() } else { title }],
-                    "{lang:?}: {case} must light the Lens dot only for an edit"
-                );
+            for (base, profile, cases) in [
+                ("camera", &camera, &camera_cases[..]),
+                ("sidecar", &sidecar, &sidecar_cases[..]),
+            ] {
+                for &(case, change, active) in cases {
+                    let mut app = AutoShadeApp { lang, ..Default::default() };
+                    app.recipe.lens_profile = profile.clone();
+                    change(&mut app.recipe);
+                    let seen = tall_frame(&mut app, |a, ui| a.develop_panel(ui));
+                    let headers: Vec<&str> = seen.iter().map(String::as_str)
+                        .filter(|t| *t == title || *t == lit).collect();
+                    assert_eq!(
+                        headers, vec![if active { lit.as_str() } else { title }],
+                        "{lang:?}: {base}, {case} must light the Lens dot only for an edit"
+                    );
+                }
             }
         }
     }
