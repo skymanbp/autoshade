@@ -986,7 +986,7 @@ A Rust trait abstracts the two RECIPE-producing calls — `propose` and `verify`
 so providers are interchangeable and transport-agnostic (an HTTP API, or
 shelling out to the `claude` CLI). Two roles, each independently configurable in
 the in-app **Settings (⚙)** panel. (The later pixel-side AI calls — generative
-reimagine/retouch, heal spot-detection, style-prompt extraction, the denoise and
+reimagine/retouch/adjust, heal spot-detection, style-prompt extraction, the denoise and
 segmentation sidecars — talk to their endpoints directly rather than through
 this trait.)
 
@@ -1158,7 +1158,7 @@ image path and the API analysis path each need an OpenAI-compatible key.
 | M5 | Local web UI | `tiny_http` + vanilla JS (gallery, live before/after) | **done** |
 | V2 | AI denoise (high-ISO/astro) | two Python sidecars called from Rust → a non-blind **DRUNet** on the RAW sensor mosaic before demosaic (2026-09-15; the frame's own noise model, GAT + exact unbiased inverse), **SCUNet** on baked sources; the GUI lands the result as a ◈ Denoised negative card | **done** |
 | V2 | Baked-source mode (edit exported PNG/TIFF) | extension dispatch; develop runs on loaded pixels | **done** |
-| V2 | Generative reimagine / retouch | OpenAI Images (`gpt-image-*`); reimagine composes a faithfulness scaffold onto the prompt under `high` (the `input_fidelity` parameter is negotiated away on gpt-image-2), measures the result's structural divergence D with the reverse-fit's own statistic (`fit::structure_divergence_for`, threshold `fit::DIVERGENCE_GLOBAL`), disclosures it, and offers a bounded opt-in retry that keeps the closer of two results | **done (experimental)** |
+| V2 | Generative reimagine / retouch / GUI adjust | OpenAI Images (`gpt-image-*`); reimagine composes a faithfulness scaffold onto the prompt under `high` (the `input_fidelity` parameter is negotiated away on gpt-image-2), measures the result's structural divergence D with the reverse-fit's own statistic (`fit::structure_divergence_for`, threshold `fit::DIVERGENCE_GLOBAL`), disclosures it, and offers a bounded opt-in retry that keeps the closer of two results; `retouch_onto` and `adjust_onto` share the private `edit_onto` request core, with a mask for region compositing or no mask for a whole-frame edit and its sent-input D | **done (experimental)** |
 | V2 | Pixel retouch / heal (spot removal) | deterministic heal engine + vision spot-detect ([`src/retouch.rs`](../src/retouch.rs)) | **done (experimental)** |
 | V2 | Look matching / reverse-fit (`match`) | distribution-level solve for the recipe that reproduces a target rendition ([`src/fit.rs`](../src/fit.rs); zoned variant [`src/fit_zoned.rs`](../src/fit_zoned.rs), range layer [`src/fit_zoned/range.rs`](../src/fit_zoned/range.rs)) | **done** |
 | V2 | Cross-image correspondence (content-divergent pairs) | DIFT (SD 2.1) sidecar → 48×48 field of target coordinates + cyclic×smoothness confidences ([`src/correspond.rs`](../src/correspond.rs), [`python/correspond.py`](../python/correspond.py)); CLI `correspond` diagnostic; the reverse-fit consults it automatically on content-divergent pairs (the fit's own D gate, single-sourced) and FULL zone fits weight pairs by confidence + read shifted content at its corresponded position — share gates and Atmosphere zones keep pre-field semantics, and identity/zero fields are conservation-tested to change nothing | **done (7a instrument + 7b estimator wiring)** |
@@ -2324,7 +2324,43 @@ PIXELS, however neutral the recipe — so the retouched raster bakes into the
 ✎ card and the ✨ card keeps its own. A generative fill is not an in-place
 retouch (2026-09-15): the model is shown the active card's developed picture
 and its answer lands as a new ✨ card, `RetouchKind::NewGenerated`, with the
-filled card untouched. The fifth kind, `VariantKind::Denoised` (「◈ Denoised
+filled card untouched. **Adjust generated image** (2026-09-20) uses that same
+landing for an active Generated or Edited card. Its own prompt and quality
+live in `ai_adjust`, directly after `ai_generate`; `can_adjust` requires
+`!busy && active_on_ai_pixels() && (has_painted_mask() || !adjust_prompt.trim().is_empty())`.
+The prompt stays transient like Reimagine's; `Prefs::adjust_quality` persists
+with a default of high for older files. The shared brush is the only input
+outside the fold, and its status uses the export's alpha > 10 predicate without
+encoding a PNG every frame.
+
+`start_adjust` snapshots the live recipe and `active_source_path()` at the
+click. `developed_card_pixels`, extracted from `start_fill`, develops that
+raster at its film edge with `MaskFrame::without_downstream`; both verbs call
+the same helper. A painted mask takes `generative::retouch_onto` with `FillJob`
+(blank = `fill_prompt`'s removal instruction); no mask takes the new
+`generative::adjust_onto` with `AdjustJob { prompt, quality, out }`, which refuses
+blank words before decoding or calling the model. Both preflight output first.
+Their private `edit_onto` core shares the sized input pairs, optional mask,
+size ladder through `call_images_edit`, decode, cancellation and durable write.
+Local base production and output run under `full_res_slot`; the model call does
+not. A whole-image answer keeps the entire returned frame, resizes with
+Lanczos3 to the base dimensions, and writes the same RGBA8 master as fill.
+`AdjustReport::divergence` measures the successful request's **sent** input with
+`generation_divergence`; it does not buy a retry. Reimagine still reads the
+negative, and the CLI/browser retain their region retouch entry.
+
+| Adjust result | Worker fact | Landing |
+|---|---|---|
+| Painted area | `RetouchNote::Adjusted { out, region: true, divergence: None }` | New ✨ card; the current-language note says painted area only |
+| Whole image | `RetouchNote::Adjusted { out, region: false, divergence: Some(d) }` | New ✨ card; the current-language note reports whole image and D |
+
+Both use `RetouchKind::NewGenerated`: neutral recipe, `origin = out`, switch to
+the new card, preserve the source card, and permit another adjust or reverse-fit.
+`pipeline::unique_out` atomically claims `.adjust-1.png`, `.adjust-2.png`, …;
+the existing artifact families retain their historical first name. No new
+variant kind or store flag is needed.
+
+The fifth kind, `VariantKind::Denoised` (「◈ Denoised
 negative」, store word `"denoised"`, 2026-09-15), is what an AI denoise lands
 as — source-based over its own denoised master (`origin`), the develop copied
 from the card it was run from, `RetouchKind::NewDenoised`; the card it was

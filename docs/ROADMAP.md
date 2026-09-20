@@ -2,7 +2,7 @@
 
 > 这是**已发生之事的台账**，不是待办表：每一条要么是已发布的版本与实测数字，
 > 要么是带理由的终局裁定（一个测出来的数、一条仪器极限、一次用户拍板）。
-> 每项都附 `file:line` 或提交锚点，供新会话不重读全库即可接手。更新于 **2026-09-19**。
+> 每项都附 `file:line` 或提交锚点，供新会话不重读全库即可接手。更新于 **2026-09-20**。
 >
 > **v1.5.0 已发布**（2026-09-19，tag `v1.5.0` → `dfd9fa4`，release run `35438494808` 五工位绿
 > （windows 11 m 59 s、macos 14 m 08 s、linux 2 m 36 s、macos-battery 21 m 35 s、publish 11 s）；
@@ -150,6 +150,16 @@
 > 历史内容——v0.16.1–v1.0.0 层积的旧横幅、各轮计划、2026-08-18 入库的标签定义
 > （`M0`/`M8`/`B2`–`B5`/`SF4`/`M-A`–`M-D`）与更早的「当前状态」条目——逐字存放在
 > [docs/ROADMAP-archive.md](ROADMAP-archive.md)（追加式档案，勿重写）。
+
+## 未发布
+
+### 生成图有自己的「调整」入口：提示词改整图，共用画笔限定区域，每次落新 ✨ 卡（2026-09-20）
+
+- **裁定**：用户选择 AI 面板里独立的「调整 AI 生成图 · Adjust · 付费 API」折叠区，紧接 Reimagine。提示词与质量均在区内；没有涂抹时按非空提示词改整图，有涂抹时仅填该区、空词＝移除。仅 Generated / Edited 可用，忙时禁用；出发的卡保持原样，结果落新 ✨ 卡，可继续调整或反推。Reimagine 仍读底片。
+- **库与像素**（`6e1085f`；`src/generative.rs`、`src/pipeline.rs`）：新增 `AdjustJob`、`AdjustReport`、`adjust_onto`；从 `retouch_onto` 抽出私有 `edit_onto`，输入缩放、可选蒙版、尺寸回退、请求／解码、取消与落盘共用，整图不发 mask、不合成原图，Lanczos3 回到基图尺寸、同 fill 的 RGBA8 编码。D 对实际发送的输入测，绝不因 D 多买一张。preflight 在付费前；全幅槽仅包本地显影与写盘。新族从 `.adjust-1.png` 原子占名，旧族首名不动。
+- **GUI 与文字**（`1c49d29`；`src/bin/gui/{app,actions,budget,model,masks,workers,tests,i18n}.rs`、`panels/{ai,retouch}.rs`、`assets/fonts/`）：fill 与 adjust 共用 `developed_card_pixels`，按活动卡自己的像素与实时配方、源片 film edge 显影。`has_painted_mask` 与导出同用 alpha > 10，不逐帧编码。质量存 `Prefs`，旧配置默认 high；提示词同 Reimagine 不持久化。`RetouchNote::Adjusted` 只带路径、区域布尔与可选 D，落地时本地化。中英提示与字体子集同步。
+- **测试与门**：新增库三条（无 mask 且整帧保留／空词零调用零写入／D 对发送图测）与 GUI 三条（两臂新卡且源卡不动／启用三态／区域提示翻转），提示词宽度钉四框、按钮单行门点名「✨ Adjust」；最终 release 门：库 **1633 过／0 败／15 忽略，353.11 s**（generative 36 条全绿）；GUI **203 过／0 败／1 忽略，2.53 s**；clippy 默认／gui 两配均 0 警告；i18n 十项全 0（902 literal／266 dynamic／1155 zh），字体 **890/890**，check_docs **25 PASS／0 FAIL／5 SKIP**（四项发版电池数字缺 transcript、一项外部 XMP census 未设）。工位预算登记 adjust 后为 14 处；新输出 decode 按 fill 标注 baked-by-construction。两项变异均亲跑转红：整图强发 mask → `a whole-image adjust must send no mask part`；去掉 AI 像素门 → Original 卡 `left: Some(true)`／`right: Some(false)`；均还原后复验。
+- **文档与边界**：`USER_MANUAL.md`、`README.md`、`ARCHITECTURE.md` 同步。浏览器与 CLI 仍只有区域 retouch，没有整图 adjust；本车道未调用真实图像 API、未启动 GUI 程序。
 
 ## 版本台账（逐版已发布内容与实测数字，新在上；均已完成，勿重做）
 

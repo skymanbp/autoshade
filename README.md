@@ -416,6 +416,10 @@ v1.2.4 against Lightroom's own coverage rather than exported luma, on a
   (because `input_fidelity` is silently dropped by gpt-image-2), measures the
   result's structural divergence with the same `D` the reverse-fit uses, warns
   at `D ≥ 0.35`, and can spend one bounded retry keeping the closer image.
+- The GUI's **Adjust generated image** edits a ✨ card or its ✎ edit with its
+  own prompt: the whole picture without strokes, or just the shared painted
+  region (blank = remove). One paid generation lands as a new ✨ card, leaving
+  its source intact; whole-image edits report divergence against the sent input.
 - `heal` only ever copies, shifts and averages pixels that already exist, and
   anything that changed pixels lives on its own card as a pixel source — never
   disguised as a Lightroom adjustment.
@@ -718,9 +722,9 @@ cannot end a batch.
   mosaic, one on baked pixels), correspondence, look descriptions and style
   embeddings run on the machine; pixels leave it only for an AI operation you
   ask for.
-- **Generated pixels are labelled** — reimagine, retouch, heal and denoise are
-  opt-in exceptions on their own cards, and known weaknesses are honesty
-  markers, not caption polish.
+- **Generated pixels are labelled** — reimagine, GUI adjust, retouch, heal
+  and denoise are opt-in exceptions on their own cards, and known weaknesses
+  are honesty markers, not caption polish.
 
 ### Implementation
 
