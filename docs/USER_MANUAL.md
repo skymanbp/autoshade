@@ -939,8 +939,9 @@ settings file can supply them.
   prompt without strokes, another kind of card, or a running job disables it.
   The model sees this card's pixels under its current sliders and masks. Each
   adjust costs one gpt-image generation and lands as a new **✨** card at
-  `./out/<stem>.adjust-1.png`, then `-2`, and so on; the source card stays as it
-  is. Crop and straighten are not carried over; set them on the new card.
+  `./out/<stem>.adjust.png`, then `<stem>.adjust-2.png`, and so on; the source
+  card stays as it is. Crop and straighten are not carried over; set them on
+  the new card.
   Adjusts can chain, and **Reverse-fit** reads the result just like any other
   generated card. Whole-image results report structural divergence **D** against
   the input actually sent. Reimagine continues to read the photo's negative.

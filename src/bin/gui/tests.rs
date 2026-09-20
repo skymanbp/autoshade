@@ -3342,7 +3342,7 @@
                 app.reset_history();
                 let out = unique_out(&src, "adjust").unwrap();
                 assert_eq!(out.file_name().unwrap().to_string_lossy(),
-                    format!("adjust-{lang:?}-{region}.adjust-1.png"));
+                    format!("adjust-{lang:?}-{region}.adjust.png"));
                 let second = unique_out(&src, "adjust").unwrap();
                 assert_eq!(second.file_name().unwrap().to_string_lossy(),
                     format!("adjust-{lang:?}-{region}.adjust-2.png"));
@@ -3407,16 +3407,20 @@
         crate::theme::install_theme(&ctx, crate::theme::ThemePref::Dark);
         let mut texts = Vec::new();
         for _ in 0..3 {
-            let out = ctx.run(egui::RawInput {
-                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1000.0, 20_000.0))),
-                ..Default::default()
-            }, |ctx| {
-                ctx.memory_mut(|m| m.set_everything_is_visible(true));
-                egui::SidePanel::left("adjust-controls").default_width(320.0).show(ctx, |ui| app.ai_panel(ui));
-            });
-            texts = drawn_texts(&out.shapes);
+            texts = draw_adjust_frame(app, &ctx);
         }
         texts
+    }
+
+    fn draw_adjust_frame(app: &mut AutoShadeApp, ctx: &egui::Context) -> Vec<String> {
+        let out = ctx.run(egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1000.0, 20_000.0))),
+            ..Default::default()
+        }, |ctx| {
+            ctx.memory_mut(|m| m.set_everything_is_visible(true));
+            egui::SidePanel::left("adjust-controls").default_width(320.0).show(ctx, |ui| app.ai_panel(ui));
+        });
+        drawn_texts(&out.shapes)
     }
 
     #[test]
@@ -3437,6 +3441,7 @@
                 app.adjust_prompt = prompt.into();
                 app.busy = busy;
                 app.mask_paint = strokes.then(|| image::RgbaImage::from_pixel(2, 2, image::Rgba([255, 64, 64, 160])));
+                app.paint_mask_changed(None);
                 draw_adjust_panel(&mut app);
                 let want = !busy && kind.on_ai_pixels() && (strokes || !prompt.trim().is_empty());
                 assert_eq!(app.adjust_btn_enabled, Some(want),
@@ -3447,6 +3452,7 @@
         app.busy = false;
         app.adjust_prompt.clear();
         app.mask_paint = None;
+        app.paint_mask_changed(Some(false));
         app.src_path = Some(PathBuf::from("adjust-guard.png"));
         app.start_adjust();
         assert!(!app.busy, "blank whole-image adjustment never reaches a worker");
@@ -3464,6 +3470,7 @@
             // is whole-image mode, even though the mask buffer exists.
             for alpha in [0, 10, 11, 160] {
                 app.mask_paint = Some(image::RgbaImage::from_pixel(2, 2, image::Rgba([255, 64, 64, alpha])));
+                app.paint_mask_changed(None);
                 let strokes = alpha > 10;
                 assert_eq!(app.has_painted_mask(), strokes);
                 assert_eq!(app.export_mask_png().is_some(), strokes);
@@ -3490,6 +3497,169 @@
         assert!(!json.contains("adjust_prompt"), "prompt is transient like Reimagine's");
         assert!(include_str!("actions.rs").contains("app.adjust_quality = prefs.adjust_quality.min(2)"));
         assert!(include_str!("app.rs").contains("adjust_quality: self.adjust_quality"));
+    }
+
+    /// Real pointer events cover both stamp branches. The counter measures
+    /// buffer walks, not elapsed time, so a small fast machine cannot hide a
+    /// per-frame scan of an empty preview (the normal state of the fold).
+    #[test]
+    fn the_adjust_fold_scans_only_after_a_paint_mask_change() {
+        fn stroke(app: &mut AutoShadeApp, drag: bool) {
+            let ctx = egui::Context::default();
+            let frame = |app: &mut AutoShadeApp, events: Vec<egui::Event>| {
+                let mut painted_rect = egui::Rect::NOTHING;
+                let _ = ctx.run(egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1100.0, 850.0))),
+                    events, ..Default::default()
+                }, |ctx| {
+                    egui::CentralPanel::default().show(ctx, |ui| {
+                        let (rect, resp) = ui.allocate_exact_size(egui::vec2(1024.0, 768.0), egui::Sense::click_and_drag());
+                        painted_rect = rect;
+                        app.handle_paint(&resp, ViewXform {
+                            rect, uv: egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)),
+                        });
+                    });
+                });
+                painted_rect
+            };
+            let rect = frame(app, vec![]);
+            let start = rect.center();
+            let end = start + egui::vec2(if drag { 48.0 } else { 0.0 }, 0.0);
+            let button = |pos, pressed| egui::Event::PointerButton {
+                pos, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE,
+            };
+            frame(app, vec![egui::Event::PointerMoved(start), button(start, true)]);
+            if drag {
+                frame(app, vec![egui::Event::PointerMoved(end)]);
+            }
+            frame(app, vec![button(end, false)]);
+        }
+        fn five_frames(app: &mut AutoShadeApp, ctx: &egui::Context, painted: bool, why: &str) {
+            let mut text = Vec::new();
+            for _ in 0..5 {
+                // A texture upload consumes this flag; it must not consume
+                // or invalidate the independent paint-presence memo.
+                app.mask_dirty = false;
+                text = draw_adjust_frame(app, ctx);
+            }
+            let region = "painted area only (shared brush)";
+            let whole = "whole image (paint an area to limit it)";
+            let (yes, no) = if painted { (region, whole) } else { (whole, region) };
+            assert!(text.iter().any(|t| t == yes), "{why}: expected {yes}");
+            assert!(!text.iter().any(|t| t == no), "{why}: stale {no}");
+            assert_eq!(app.has_painted_mask(), painted, "{why}");
+        }
+        for drag in [false, true] {
+            let base = Arc::new(image::DynamicImage::new_rgb8(1024, 768));
+            let mut app = AutoShadeApp {
+                base_preview: Some(base.clone()),
+                variants: (0..2).map(|_| Variant {
+                    id: new_variant_id(), name: None, kind: VariantKind::Generated,
+                    recipe: EditRecipe::default(), base: Some(base.clone()), origin: None, thumb: None,
+                }).collect(),
+                ..Default::default()
+            };
+            app.start_mask_brush(None);
+            let ctx = egui::Context::default();
+            crate::theme::install_theme(&ctx, crate::theme::ThemePref::Dark);
+            five_frames(&mut app, &ctx, false, "an empty brush reads the whole image");
+            assert!(app.mask_presence_scans.get() <= 1, "five empty frames may scan only once");
+            let empty_scans = app.mask_presence_scans.get();
+
+            stroke(&mut app, drag);
+            assert!(app.mask_paint.as_ref().unwrap().pixels().any(|p| p[3] > 10), "the real brush added paint");
+            five_frames(&mut app, &ctx, true, "a brush stroke limits the adjust to the painted area");
+            assert_eq!(app.mask_presence_scans.get(), empty_scans, "adding paint needs no presence scan");
+            assert!(app.export_mask_png().is_some());
+
+            app.mask_brush = Some((None, true));
+            app.brush = 100.0;
+            stroke(&mut app, drag);
+            assert!(app.mask_paint.as_ref().unwrap().pixels().all(|p| p[3] <= 10), "the real eraser removed every stroke");
+            five_frames(&mut app, &ctx, false, "erasing the last stroke must return the adjust fold to whole image");
+            assert!(app.mask_presence_scans.get() <= empty_scans + 1, "erasure permits only one new scan");
+            assert!(app.export_mask_png().is_none());
+
+            app.mask_brush = Some((None, false));
+            stroke(&mut app, drag);
+            assert!(app.has_painted_mask());
+            let before_switch = app.mask_presence_scans.get();
+            app.switch_variant(1, &ctx);
+            assert_eq!(app.active, 1);
+            five_frames(&mut app, &ctx, false, "a fresh card starts with an empty brush");
+            assert_eq!(app.mask_presence_scans.get(), before_switch, "a fresh card needs zero scans");
+
+            // The other plate-replacement door is also known empty.
+            app.rebind_paint_canvas(1024, 768);
+            five_frames(&mut app, &ctx, false, "a rebound canvas starts empty");
+            assert_eq!(app.mask_presence_scans.get(), before_switch, "rebinding needs zero scans");
+        }
+    }
+
+    /// Census the entire GUI tree, including the raw mutable borrows. A new
+    /// replacement/write site must declare its notification here; the sole
+    /// texture-dirty setter is itself the presence-invalidation owner.
+    #[test]
+    fn every_paint_buffer_mutation_uses_the_presence_notification_door() {
+        fn walk_rs(dir: &std::path::Path, out: &mut Vec<PathBuf>) {
+            for entry in std::fs::read_dir(dir).expect("GUI source dir listable") {
+                let path = entry.expect("dir entry").path();
+                if path.is_dir() {
+                    walk_rs(&path, out);
+                } else if path.extension().is_some_and(|x| x == "rs") {
+                    out.push(path);
+                }
+            }
+        }
+        const CENSUS: [(&str, usize); 7] = [
+            ("actions.rs::load_active", 1),
+            ("actions.rs::rebind_paint_canvas", 1),
+            ("masks.rs::paint_imported_removals", 2),
+            ("masks.rs::paint_mask_changed", 1),
+            ("masks.rs::clear_mask", 1),
+            ("masks.rs::start_mask_brush", 1),
+            ("panels/retouch.rs::handle_paint", 1),
+        ];
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/bin/gui");
+        let mut sources = Vec::new();
+        walk_rs(&root, &mut sources);
+        assert!(sources.len() >= 6, "expected the split GUI module tree");
+        let replace = concat!("self.", "mask_paint = Some(");
+        let dirty = concat!("self.", "mask_dirty = true");
+        let mutations = [replace, dirty, concat!("self.", "mask_paint.as_mut()"), concat!("&mut self.", "mask_paint")];
+        let mut found: std::collections::BTreeMap<String, usize> = Default::default();
+        for path in sources {
+            let text = std::fs::read_to_string(&path).expect("GUI source readable");
+            let name = path.strip_prefix(&root).unwrap().to_string_lossy().replace(std::path::MAIN_SEPARATOR, "/");
+            let lines: Vec<_> = text.lines().collect();
+            let mut function = "";
+            let mut start = 0;
+            for (i, line) in lines.iter().enumerate() {
+                if let Some(head) = line.strip_prefix("    pub(crate) fn ").or_else(|| line.strip_prefix("    fn ")) {
+                    function = head.split('(').next().unwrap();
+                    start = i;
+                }
+                if line.trim_start().starts_with("//") || !mutations.iter().any(|m| line.contains(m)) {
+                    continue;
+                }
+                let site = format!("{name}::{function}");
+                *found.entry(site.clone()).or_default() += 1;
+                if line.contains(dirty) {
+                    assert_eq!(site, "masks.rs::paint_mask_changed", "only the notification door may mark the overlay dirty");
+                    continue;
+                }
+                let end = lines[start..].iter().position(|l| *l == "    }").expect("method end") + start;
+                let body = lines[start..=end].join("\n");
+                assert!(body.contains("self.paint_mask_changed("), "{site} bypasses paint-presence invalidation");
+                if line.contains(replace) {
+                    assert!(lines[i + 1].trim_start().starts_with("self.paint_mask_changed("),
+                        "{site}: a replacement must immediately notify paint presence");
+                }
+            }
+        }
+        let expected = CENSUS.into_iter().map(|(site, n)| (site.to_string(), n)).collect();
+        assert_eq!(found, expected, "paint-buffer mutation sites changed: wire the notification door and update the census");
+        assert_eq!(found.values().sum::<usize>(), 8, "four replacements, three mutable borrows, one dirty setter");
     }
 
     /// v1.5.0: the canvas preview reaches its frame through the ENGINE's tail

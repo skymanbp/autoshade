@@ -2330,8 +2330,17 @@ live in `ai_adjust`, directly after `ai_generate`; `can_adjust` requires
 `!busy && active_on_ai_pixels() && (has_painted_mask() || !adjust_prompt.trim().is_empty())`.
 The prompt stays transient like Reimagine's; `Prefs::adjust_quality` persists
 with a default of high for older files. The shared brush is the only input
-outside the fold, and its status uses the export's alpha > 10 predicate without
-encoding a PNG every frame.
+outside the fold, and its status uses the export's alpha > 10 predicate.
+`has_painted_mask` memoizes that answer beside the buffer, independently of the
+texture-upload flag: at most one scan after an unknown change, O(1) on unchanged
+frames. All buffer replacements and writes notify `paint_mask_changed`, the
+single owner of presence invalidation and `mask_dirty = true`. Fresh/cleared
+canvases supply false; actual red brush stamps supply true without a scan;
+erase, imported removals and seeded rasters leave the answer unknown. Both
+stroke kernels report whether they wrote pixels, so an off-canvas stamp cannot
+claim paint. A recursive source census pins every replacement/mutable borrow
+and the sole dirty setter; pointer-event tests count scans on a 1024×768 canvas
+through repeated frames, taps/drags, erasure, card switches and rebinding.
 
 `start_adjust` snapshots the live recipe and `active_source_path()` at the
 click. `developed_card_pixels`, extracted from `start_fill`, develops that
@@ -2356,9 +2365,9 @@ negative, and the CLI/browser retain their region retouch entry.
 
 Both use `RetouchKind::NewGenerated`: neutral recipe, `origin = out`, switch to
 the new card, preserve the source card, and permit another adjust or reverse-fit.
-`pipeline::unique_out` atomically claims `.adjust-1.png`, `.adjust-2.png`, …;
-the existing artifact families retain their historical first name. No new
-variant kind or store flag is needed.
+`pipeline::unique_out` atomically claims `.adjust.png`, `.adjust-2.png`, …,
+using the same `tag`, `tag-2`, … law as every output family. No new variant
+kind or store flag is needed.
 
 The fifth kind, `VariantKind::Denoised` (「◈ Denoised
 negative」, store word `"denoised"`, 2026-09-15), is what an AI denoise lands

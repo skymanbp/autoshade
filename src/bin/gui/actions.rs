@@ -1030,6 +1030,7 @@ impl AutoShadeApp {
             // A fresh transparent paint mask sized to THIS base (a generated
             // raster and the source neutral can differ in dimensions).
             self.mask_paint = Some(image::RgbaImage::new(mw, mh));
+            self.paint_mask_changed(Some(false));
             self.mask_tex = None;
             self.mask_dirty = false;
             self.paint_last = None;
@@ -2418,6 +2419,7 @@ impl AutoShadeApp {
             self.toast(ToastKind::Error, t.to_string());
         }
         self.mask_paint = Some(image::RgbaImage::new(w, h));
+        self.paint_mask_changed(Some(false));
         self.mask_tex = None;
         self.mask_dirty = false;
         self.paint_last = None;

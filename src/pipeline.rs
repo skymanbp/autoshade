@@ -3005,8 +3005,7 @@ pub fn recipe_store_bytes(
     recipe_bytes_for(recipe, target.parent(), &crate::diag::Diag::about(sink, raw))
 }
 
-/// First FREE ./out artifact path for `tag` (`tag`, `tag-2`, … `tag-999`;
-/// the adjust family starts explicitly at `adjust-1`),
+/// First FREE ./out artifact path for `tag` (`tag`, `tag-2`, … `tag-999`),
 /// CLAIMED atomically (`create_new`): pixels.json links these paths, GUI undo
 /// history holds them, and a CANCELLED worker may still be running toward the
 /// name it probed — an existence probe alone would hand the same name to the
@@ -3016,10 +3015,9 @@ pub fn recipe_store_bytes(
 /// web fill/heal handlers — a fixed web output name used to overwrite a
 /// master an earlier develop still referenced.
 pub fn unique_out(path: &Path, tag: &str) -> Option<PathBuf> {
-    // New adjust artifacts number every link in their chain. Existing
-    // families keep their historical first name (never rename old masters).
+    // n = 0 → "tag"; n = 1..=998 → "tag-2".."tag-999" (never tag-1000).
     for n in 0..=998u32 {
-        let t = if n == 0 && tag != "adjust" { tag.to_string() } else { format!("{tag}-{}", n + 1) };
+        let t = if n == 0 { tag.to_string() } else { format!("{tag}-{}", n + 1) };
         let cand = default_out(path, &t, "png");
         if ensure_parent(&cand).is_err() {
             return None;

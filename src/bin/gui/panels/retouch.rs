@@ -88,6 +88,7 @@ impl AutoShadeApp {
                 None => n,
             });
         };
+        let mut stamped = false;
         // PRIMARY button only: `dragged()` is button-agnostic, so a
         // secondary-button drag — which the caller intercepts for panning —
         // was also reported here and painted into the fill/heal/clone mask.
@@ -99,7 +100,7 @@ impl AutoShadeApp {
                 let r = brush_at(p);
                 match self.paint_last {
                     Some(prev) => {
-                        stamp_line_px(m, prev, cur, r, display_px);
+                        stamped = stamp_line_px(m, prev, cur, r, display_px);
                         if let Some(g) = gray.as_mut() {
                             stamp_line_gray(g, prev, cur, r, gray_v);
                         }
@@ -109,7 +110,7 @@ impl AutoShadeApp {
                     // current pointer dropped the stroke's lead-in.
                     None => {
                         let start = ui_press_origin(resp).map(&to_mask).unwrap_or(cur);
-                        stamp_line_px(m, start, cur, r, display_px);
+                        stamped = stamp_line_px(m, start, cur, r, display_px);
                         if let Some(g) = gray.as_mut() {
                             stamp_line_gray(g, start, cur, r, gray_v);
                         }
@@ -118,7 +119,6 @@ impl AutoShadeApp {
                 }
                 grow(&mut self.mask_dirty_rect, self.paint_last.unwrap_or(cur), cur, r);
                 self.paint_last = Some(cur);
-                self.mask_dirty = true;
             }
         } else {
             // A quick tap is a CLICK to egui (<6 px / <0.8 s — never a drag):
@@ -128,12 +128,11 @@ impl AutoShadeApp {
             {
                 let cur = to_mask(p);
                 let r = brush_at(p);
-                stamp_dot_px(m, cur, r, display_px);
+                stamped = stamp_dot_px(m, cur, r, display_px);
                 if let Some(g) = gray.as_mut() {
                     stamp_dot_gray(g, cur, r, gray_v);
                 }
                 grow(&mut self.mask_dirty_rect, cur, cur, r);
-                self.mask_dirty = true;
             }
             // No stroke is in flight on any non-drag frame — clearing here
             // (not just on drag_stopped) also covers strokes interrupted by
@@ -143,6 +142,13 @@ impl AutoShadeApp {
             self.paint_last = None;
         }
         self.mask_brush_gray = gray;
+        if stamped {
+            if erase {
+                self.paint_mask_changed(None);
+            } else {
+                self.paint_mask_changed(Some(true));
+            }
+        }
     }
 
     /// Clone-stamp interaction: Alt+click picks the SOURCE point (stored in

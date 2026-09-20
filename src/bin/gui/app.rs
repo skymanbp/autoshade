@@ -275,6 +275,11 @@ pub(crate) struct AutoShadeApp {
     pub(crate) paint_mode: bool,                      // brush-paint a mask (pauses box-select)
     pub(crate) brush: f32,                            // brush radius in After-image display px
     pub(crate) mask_paint: Option<image::RgbaImage>,  // painted overlay (red where painted), at preview res
+    // Presence is independent of the texture upload flag: None means one
+    // scan is due after a change; Some is an O(1) answer on every frame.
+    pub(crate) mask_painted: std::cell::Cell<Option<bool>>,
+    #[cfg(test)]
+    pub(crate) mask_presence_scans: std::cell::Cell<usize>,
     pub(crate) mask_tex: Option<egui::TextureHandle>, // overlay texture
     pub(crate) mask_dirty: bool,                      // re-upload the overlay
     // (straighten, distortion, (profile distortion, profile CA), (ca_r, ca_b)) at build.
@@ -1732,6 +1737,9 @@ impl Default for AutoShadeApp {
             paint_mode: false,
             brush: 30.0,
             mask_paint: None,
+            mask_painted: std::cell::Cell::new(None),
+            #[cfg(test)]
+            mask_presence_scans: std::cell::Cell::new(0),
             mask_tex: None,
             mask_dirty_rect: None,
             mask_tex_built: Instant::now(),
