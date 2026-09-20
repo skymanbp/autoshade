@@ -43,6 +43,9 @@ import warnings
 # is the running script's own directory, which the Rust side resolves against
 # the program's tree and never the working directory.
 from _device import pick_device
+# Where our own copy of every pinned download lives. Stdlib-only table; the
+# fetch below consults it so no caller has to know a mirror exists.
+import _mirror
 
 warnings.filterwarnings("ignore")  # silence requests/urllib3 version warnings only
 
@@ -105,10 +108,18 @@ def log(msg):
     print(f"[denoise] {msg}", file=sys.stderr, flush=True)
 
 
+def _where(url):
+    """`host/owner` — enough to tell our mirror from the upstream it copies
+    (both are huggingface.co) without putting a 150-character URL in a
+    progress line."""
+    parts = url.split("/")
+    return "/".join(parts[2:4]) if len(parts) > 3 else url
+
+
 def _download(url, dest, max_bytes):
     import requests
 
-    log(f"downloading {os.path.basename(dest)} ...")
+    log(f"downloading {os.path.basename(dest)} from {_where(url)} ...")
     # Unique temp per process: two first-time runs racing on ONE ".part"
     # truncated each other and could publish a corrupted download.
     tmp = f"{dest}.{os.getpid()}.part"
@@ -253,11 +264,30 @@ def _fetch_verified(url, dest, want_sha256, max_bytes, what):
     branch — is exactly the case that must not be trusted, so an existing file
     is verified too. One mismatch triggers a single re-download (the benign
     legacy-cache / truncated-download case); a second mismatch is fatal.
+
+    The download is tried against `_mirror.sources(url)` in order: our own copy
+    of the pinned bytes first, then the host the pin names. That is what keeps
+    a model installable after its upstream repo is renamed, made private or
+    deleted — and it is safe for exactly one reason: a source decides WHERE
+    bytes come from, never whether they are acceptable. The sha256 below judges
+    every source the same, so a stale or wrong mirror is refused by the gate a
+    wrong upstream would be refused by, and the next source is tried.
     """
     _reclaim_stale_parts(dest)
-    for attempt in (0, 1):
+    tried = []
+    for source in _mirror.sources(url):
         if not os.path.exists(dest):
-            _download(url, dest, max_bytes)
+            try:
+                _download(source, dest, max_bytes)
+            except (Exception, SystemExit) as e:
+                # why: a source that refuses, stalls or overshoots its cap is
+                # one to move PAST while another holds the same pinned bytes,
+                # not a reason to abandon a download that can still succeed.
+                # Nothing is swallowed — every reason is carried into the
+                # refusal below, which still fires if no source serves.
+                log(f"{what}: {_where(source)} did not serve it ({e})")
+                tried.append(f"{_where(source)}: {e}")
+                continue
         if not os.path.exists(dest):
             # A download that produced nothing without raising must not crash
             # this gate with FileNotFoundError — refuse honestly instead.
@@ -265,18 +295,19 @@ def _fetch_verified(url, dest, want_sha256, max_bytes, what):
         got = _sha256(dest)
         if got == want_sha256:
             return
-        log(f"{what}: checksum mismatch (expected {want_sha256}, got {got})")
+        log(f"{what}: checksum mismatch from {_where(source)} "
+            f"(expected {want_sha256}, got {got})")
+        tried.append(f"{_where(source)}: checksum mismatch")
         try:
             os.remove(dest)
         except OSError:
             # why: cannot re-fetch over a file we may not delete — fail below
             # rather than execute unverified bytes.
             break
-        if attempt == 0:
-            log(f"{what}: re-downloading from the pinned source ...")
     raise SystemExit(
-        f"refusing to run {what}: its bytes do not match the pinned checksum. "
-        f"Delete the cache directory and retry; if it persists, the upstream "
+        f"refusing to run {what}: no source served its pinned bytes "
+        f"({'; '.join(tried) or 'nothing was tried'}). Delete the cache "
+        f"directory and retry; if every source disagrees with the pin, the "
         f"download is not trustworthy."
     )
 

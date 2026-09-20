@@ -893,6 +893,16 @@ property. The one exception is `autoshade-raw-denoise-v1.pth`, this project's
 own fine-tune of DPIR's architecture, which ships as a release asset under this
 project's licence with its training sources credited below.
 
+Every pinned model also has a **byte-exact copy of ours** on Hugging Face
+(`Azng0/autoshade-mirror-*`), which the sidecars try before the upstream host.
+A pinned revision is what makes a download verifiable and also what makes a
+vanished upstream unrecoverable — nothing else is that revision — so the copy
+exists to keep a cold cache installable years from now. Hosting it makes this
+project a redistributor: each mirror carries the upstream licence declaration
+unchanged, and whatever that licence permits or restricts applies to the copy.
+The checksum decides in either case, so a mirror is a second host and never a
+second source of truth. The table is [`python/_mirror.py`](python/_mirror.py).
+
 | Model | Purpose | License |
 |---|---|---|
 | SCUNet | AI denoise (baked sources) | Apache-2.0 |
@@ -903,6 +913,7 @@ project's licence with its training sources credited below.
 | SAM 2.1 | Point-prompted object masks | Apache-2.0 |
 | SigLIP 2 | Optional style embeddings | Apache-2.0 |
 | Qwen3-VL-2B-Instruct | Optional local look descriptions | Apache-2.0 |
+| Stable Diffusion 2.1 | DIFT correspondence field; generative fill | CreativeML Open RAIL++-M (use-based restrictions travel with the weights) |
 
 The project acknowledges the rawler, image, qcms, rayon, clap, serde, ureq,
 egui/eframe, tiny_http and local-model communities whose work makes these

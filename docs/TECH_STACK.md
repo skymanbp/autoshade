@@ -1875,10 +1875,12 @@ than the pre-call state; model weights remain outside the repository.
 - `src/bin/gui/quit.rs`, `src/bin/gui/macos.rs` and
   `scripts/build_app_bundle.sh` — the ⌘Q state machine, its AppKit delivery,
   and the ad-hoc signed application bundle.
-- `python/_device.py`, `python/_sidecar.py` and
+- `python/_device.py`, `python/_sidecar.py`, `python/_mirror.py` and
   `python/requirements-{common,cuda,macos}.txt` — the one cuda/mps/cpu ladder
   every sidecar reads, the shared sidecar plumbing the three single-artifact
-  ones bind rather than copy, and the per-platform dependency sets.
+  ones bind rather than copy, the table of our own mirrors that
+  `_fetch_verified` tries before each pin's upstream host, and the
+  per-platform dependency sets.
 - `.github/workflows/build.yml`, `.github/workflows/release.yml`,
   `.github/workflows/installer-upgrade.yml` and `scripts/check_docs.py` —
   CI, the installer scenario chain run against the previous published

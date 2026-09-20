@@ -45,8 +45,12 @@ MODEL - Stable Diffusion 2.1 (the backbone the DIFT paper measured), fp16
 variant, ~2.6 GB total. LICENCE: the weights carry CreativeML Open RAIL++-M
 - redistribution is permitted and commercial use is allowed, with the
 licence's use-based behavioural restrictions travelling with the weights.
-This repository redistributes nothing; the sidecar downloads at first use,
-and the licence note here is the disclosure. PROVENANCE: the official
+This repository ships no weights; the sidecar downloads at first use - but
+since 2026-09-20 it asks OUR copy first (`_mirror.py`) and the upstream
+second, which does make this project a redistributor of these bytes. The
+mirror carries the same `openrail++` declaration upstream publishes, so the
+licence travels with the copy exactly as it travels with the original, and
+the licence note here is the disclosure for both. PROVENANCE: the official
 `stabilityai/stable-diffusion-2-1` repo was delisted upstream (verified
 2026-08-26: anonymous HTTP 401, authenticated 404), so the pin points at the
 highest-traffic community mirror. The mirror's faithfulness was established

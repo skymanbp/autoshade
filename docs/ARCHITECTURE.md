@@ -734,6 +734,39 @@
 > | `correspond.py` | `correspond.rs` | **Stable Diffusion 2.1** as a DIFT featurizer (unet+vae+text encoder, fp16), sha256-pinned | CreativeML Open RAIL++-M | 2,580,061,174 B |
 > | `describe.py` | `describe.rs` | **Qwen3-VL-2B-Instruct**, one grade sentence per photo, sha256-pinned | Apache-2.0 | 4,255,140,312 B |
 >
+> **Every pinned model has a copy of ours, and it is tried first (2026-09-20).**
+> Each row above is fetched from somebody else's server at a pinned revision,
+> and the pin cuts both ways: it is what makes a download verifiable, and it is
+> what makes a vanished upstream unrecoverable, because nothing else on the
+> internet is that revision. A renamed account or a deleted repo would not be a
+> slow download, it would be a feature that cannot start on any machine whose
+> cache is cold — which is every new installation. So all 52 pinned files live
+> in mirror repositories of ours as well (`Azng0/autoshade-mirror-*`), copied
+> from the pins themselves and accepted only after the same sha256 matched,
+> then read back and re-verified anonymously, which is the only access a user's
+> machine has. [`python/_mirror.py`](../python/_mirror.py) is the one table
+> that says where, and `_fetch_verified` walks `sources(url)` — ours, then the
+> upstream, which keeps the one re-try it always had. **The order is a
+> preference, never a trust decision**: a source decides WHERE bytes come from
+> and the digest decides whether they are kept, so a stale or wrong mirror is
+> refused by exactly the gate a wrong upstream would be, and the next source is
+> tried. The cache identity is deliberately unchanged — `_sidecar.model_dir`
+> still names a directory after the UPSTREAM repo and revision, because that is
+> what the files are, so no existing installation re-downloads a byte for this.
+> Two source invariants hold the table to the sidecars: every pinned model tree
+> must have an entry (`embed::tests::every_pinned_model_tree_has_a_copy_of_ours`)
+> and every executed upstream source must too
+> (`denoise::tests::every_executed_upstream_source_has_a_copy_of_ours`), so a
+> re-pin that is not mirrored fails in CI rather than on a user's cold cache.
+> **Mirroring makes this project a redistributor**, which is why each mirror
+> carries the upstream licence: the verbatim text where upstream publishes one
+> (BiRefNet MIT, KAIR MIT, SCUNet Apache-2.0) and otherwise the same card
+> declaration upstream itself relies on — none of the six Hugging Face
+> repositories ships a licence file, all six declare it in card metadata
+> (verified 2026-09-20 against the Hub API). Every licence in the table permits
+> redistribution; SD 2.1's RAIL++-M use-based restrictions travel with the
+> copy, which is what its mirror's card states.
+>
 > **Licence is a selection criterion, not a footnote.** This is a public
 > repository whose product is being copyright registered, and a licence that
 > restricts *use* is not cured by not redistributing the weights. SegFormer was

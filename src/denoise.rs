@@ -1547,6 +1547,103 @@ mod tests {
         );
     }
 
+    // ── Our own copy of every pinned download (2026-09-19) ─────────────────
+    //
+    // Every model here is fetched from somebody else's server at a pinned
+    // revision, and a pin is exactly what makes a vanished upstream
+    // unrecoverable: nothing else on the internet is that revision. So the
+    // pinned bytes also live in repos of ours, and `python/_mirror.py` is the
+    // one table that says where. Read as TEXT, like the sidecars themselves:
+    // the python suites are local, the Rust battery is what CI runs.
+
+    const MIRROR_SRC: &str =
+        include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/python/_mirror.py"));
+
+    /// The verified fetch tries OUR copy first and the upstream after it.
+    /// Both halves matter: the mirror is why a model whose upstream went away
+    /// still installs, and the fallback is why a mirror that is stale, wrong
+    /// or unreachable costs nothing. The digest is what makes the order a
+    /// preference rather than a trust decision — every source is hashed
+    /// against the same pin, inside the same loop.
+    ///
+    /// MUTATION: put the single `url` back in the loop header and this fails.
+    #[test]
+    fn the_verified_fetch_tries_our_copy_before_the_upstream() {
+        assert!(SIDECAR_SRC.contains("import _mirror"), "denoise.py must bind the table");
+        assert!(
+            SIDECAR_SRC.contains("for source in _mirror.sources(url):"),
+            "the verified fetch must walk the source list, not one URL"
+        );
+        let body = &SIDECAR_SRC[SIDECAR_SRC.find("for source in _mirror.sources(url):").unwrap()..];
+        let body = &body[..body.find("\n\ndef ").unwrap_or(body.len())];
+        assert!(
+            body.contains("got = _sha256(dest)") && body.contains("if got == want_sha256:"),
+            "every source is hashed against the same pin, inside the loop"
+        );
+        assert!(
+            MIRROR_SRC.contains("def sources(url):") && MIRROR_SRC.contains("def mirror_of(url):"),
+            "python/_mirror.py must expose the two functions the fetch binds"
+        );
+    }
+
+    /// Every mirror coordinate is a FULL 40-hex commit hash, exactly as the
+    /// upstream pins are. A mirror named by a branch would drift out from
+    /// under the digest and turn a silent fallback into a download nobody
+    /// pinned.
+    #[test]
+    fn every_mirror_coordinate_is_a_full_commit_hash() {
+        let mut n = 0;
+        for part in MIRROR_SRC.split("/resolve/").skip(1) {
+            let hex: String = part.chars().take_while(|c| *c != '/').collect();
+            assert_eq!(hex.len(), 40, "mirror coordinate {hex:?} is not a full commit hash");
+            assert!(
+                hex.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
+                "mirror coordinate {hex:?} is not lowercase hex"
+            );
+            n += 1;
+        }
+        assert!(n >= 13, "extractor non-vacuity: found {n} coordinates");
+    }
+
+    /// The upstream sources this family EXECUTES — SCUNet's network file,
+    /// DRUNet's, and the block library it imports — each have a copy of ours
+    /// at the same pinned commit. These are the downloads where a dead
+    /// upstream is worst: the weights are inert without the architecture that
+    /// loads them, and a moving branch is exactly what the commit pin exists
+    /// to refuse.
+    ///
+    /// MUTATION: re-pin either commit without mirroring it and this names the
+    /// file and the hash.
+    #[test]
+    fn every_executed_upstream_source_has_a_copy_of_ours() {
+        let mut n = 0;
+        for (what, src) in [("denoise.py", SIDECAR_SRC), ("denoise_raw.py", RAW_SIDECAR_SRC)] {
+            for line in src.lines() {
+                let t = line.trim();
+                for key in ["NETWORK_COMMIT = \"", "BASICBLOCK_COMMIT = \""] {
+                    let Some(rest) = t.strip_prefix(key) else { continue };
+                    let hex: String = rest.chars().take_while(|c| *c != '"').collect();
+                    assert_eq!(hex.len(), 40, "{what}: {hex:?} is not a full commit hash");
+                    assert!(
+                        MIRROR_SRC.contains(&hex),
+                        "{what}: the upstream commit {hex} it EXECUTES from has no copy of ours"
+                    );
+                    n += 1;
+                }
+            }
+        }
+        assert_eq!(n, 3, "extractor non-vacuity: two network files and one block library");
+        // And the weights beside them: the KAIR v1.0 release assets.
+        assert!(
+            SIDECAR_SRC.contains("_BASE = \"https://github.com/cszn/KAIR/releases/download/v1.0\""),
+            "extractor non-vacuity: denoise.py still fetches the KAIR v1.0 assets"
+        );
+        assert!(
+            MIRROR_SRC.contains("https://github.com/cszn/KAIR/releases/download/v1.0/"),
+            "the KAIR release assets have no copy of ours"
+        );
+    }
+
     /// The strength's meaning lives in ONE function of the sidecar, and its
     /// default is THE default (2026-09-13): the luma/chroma split is what
     /// makes 0.5 a usable answer (a plain blend at 0.5 left chroma HF at
@@ -1587,7 +1684,10 @@ mod tests {
     fn orphaned_download_parts_are_reclaimed() {
         assert!(SIDECAR_SRC.contains("def _reclaim_stale_parts(dest):"));
         assert!(
-            SIDECAR_SRC.contains("_reclaim_stale_parts(dest)\n    for attempt in"),
+            // Re-pointed 2026-09-19 with the source list (`_mirror.sources`):
+            // the rule is that the sweep is the FIRST thing the verified fetch
+            // does, and the line that follows it is how this file proves it.
+            SIDECAR_SRC.contains("_reclaim_stale_parts(dest)\n    tried = []\n    for source in"),
             "the sweep runs at the top of every verified fetch"
         );
         assert!(

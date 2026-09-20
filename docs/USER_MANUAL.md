@@ -731,8 +731,12 @@ the fixed attribute tags, and it is what `style-query` prints beside the
 The pass needs `--embed` (the prose only reaches the ranking through the text
 tower), and the **first run downloads about 4.3 GB** of weights into
 `python/weights/` — every file pinned to a 40-hex Hugging Face commit and gated
-on its own sha256 and exact byte count. It is off by default on both front
-ends. Nothing leaves this machine and nothing is billed. Descriptions are
+on its own sha256 and exact byte count. Since 2026-09-20 the download asks
+AutoShade's own mirror of that exact revision first and the original host
+second, so a model whose upstream repository is renamed or removed still
+installs; the checksum decides either way, and a mirror that disagreed with it
+would be refused exactly as a bad upstream download is. It is off by default on
+both front ends. Nothing leaves this machine and nothing is billed. Descriptions are
 cached by frame CONTENT in `style-descriptions.json` beside the index, so a
 rebuild only describes the photographs that actually changed; editing the
 prompt bumps a version that invalidates the cache rather than serving the old

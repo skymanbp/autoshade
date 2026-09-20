@@ -189,5 +189,161 @@ class BlendLawTests(unittest.TestCase):
             np.testing.assert_allclose(out[..., 1], out[..., 2], atol=1e-6)
 
 
+
+
+# ── Where the bytes come from (2026-09-19) ──────────────────────────────────
+#
+# `_mirror` gives every pinned download a copy of ours to try before the host
+# the pin names. These tests hold the two halves of that: ours is FIRST, and
+# the digest — not the order — is what decides whether bytes are kept.
+
+import hashlib
+
+import _mirror
+
+PINNED = b"the pinned bytes"
+PINNED_SHA = hashlib.sha256(PINNED).hexdigest()
+IMPOSTOR = b"the wrong bytes!"  # same length, so only the digest can tell
+assert len(IMPOSTOR) == len(PINNED)
+
+# A real pin, so the table is exercised the way the sidecar exercises it.
+UPSTREAM = "https://github.com/cszn/KAIR/releases/download/v1.0/scunet_color_15.pth"
+# One of ours with no upstream to fall back to: it IS our release asset.
+UNMIRRORED = (
+    "https://github.com/skymanbp/autoshade/releases/download/v1.5.0/"
+    "autoshade-raw-denoise-v1.pth"
+)
+
+
+def fake_hosts(bodies, recorder):
+    """A `requests` stand-in that answers per URL, in call order.
+
+    A value may be bytes (every request to that URL gets them) or a list (one
+    per request, popped in order). A URL that is absent raises the way an
+    unreachable or 404 host does — which is the case the fallback exists for.
+    """
+    def get(url, **kwargs):
+        recorder.append(url)
+        body = bodies.get(url)
+        if isinstance(body, list):
+            body = body.pop(0) if body else None
+        if body is None:
+            raise RuntimeError(f"404 Not Found: {url}")
+        return FakeResponse(body, {"Content-Length": str(len(body))})
+
+    module = types.ModuleType("requests")
+    module.get = get
+    return module
+
+
+class MirrorTableTests(unittest.TestCase):
+    """The table covers what the sidecars actually fetch — every FILE, not
+    just every repo. A pin that rewrites onto nothing is a model with one host
+    again, which is the failure this module exists to prevent."""
+
+    def test_every_pinned_model_file_rewrites_onto_a_copy_of_ours(self):
+        import correspond
+        import describe
+        import embed
+        import segment
+
+        pinned = 0
+        for model in (segment.BIREFNET, segment.SKY, segment.SAM,
+                      embed.MODEL, describe.MODEL, correspond.MODEL):
+            for name in model["files"]:
+                url = (f"https://huggingface.co/{model['repo']}/resolve/"
+                       f"{model['revision']}/{name}")
+                ours = _mirror.mirror_of(url)
+                self.assertIsNotNone(ours, f"no copy of ours for {url}")
+                self.assertTrue(ours.startswith(
+                    f"https://huggingface.co/{_mirror.MIRROR_OWNER}/"), ours)
+                self.assertTrue(ours.endswith("/" + name), ours)
+                pinned += 1
+        self.assertGreaterEqual(pinned, 44, "extractor non-vacuity")
+
+    def test_every_pinned_url_in_the_denoisers_rewrites_too(self):
+        import denoise_raw
+
+        urls = list(denoise.WEIGHT_URLS.values()) + [denoise.NETWORK_URL]
+        urls += [pin["url"] for name, pin in denoise_raw.PINS.items()
+                 if name.endswith(".py")]
+        # Five SCUNet weight sets, SCUNet's network file, DRUNet's and its
+        # block library. The ninth pin, our own fine-tuned .pth, is ours
+        # already and deliberately has no mirror.
+        self.assertEqual(len(urls), 8)
+        for url in urls:
+            ours = _mirror.mirror_of(url)
+            self.assertIsNotNone(ours, f"no copy of ours for {url}")
+            self.assertTrue(ours.endswith("/" + url.rsplit("/", 1)[-1]), ours)
+
+    def test_our_own_release_asset_has_no_mirror_and_keeps_its_re_try(self):
+        # Nothing upstream to be cut off from, so no entry — and the source
+        # list is then exactly the two attempts the fetch always made.
+        self.assertIsNone(_mirror.mirror_of(UNMIRRORED))
+        self.assertEqual(_mirror.sources(UNMIRRORED), [UNMIRRORED, UNMIRRORED])
+
+    def test_a_mirrored_url_puts_ours_first_and_keeps_the_upstream_after_it(self):
+        self.assertEqual(
+            _mirror.sources(UPSTREAM),
+            [_mirror.mirror_of(UPSTREAM), UPSTREAM, UPSTREAM],
+        )
+
+
+class FetchSourceOrderTests(unittest.TestCase):
+    """`_fetch_verified` over that list. The pin is the authority throughout:
+    the order only decides who is ASKED first."""
+
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.dir.cleanup)
+        self.dest = os.path.join(self.dir.name, "scunet_color_15.pth")
+        self.ours = _mirror.mirror_of(UPSTREAM)
+
+    def fetch(self, bodies, url=UPSTREAM):
+        asked = []
+        with mock.patch.dict(sys.modules, {"requests": fake_hosts(bodies, asked)}), \
+                redirect_stderr(io.StringIO()):
+            denoise._fetch_verified(url, self.dest, PINNED_SHA,
+                                    len(PINNED) + 4096, "the pinned test file")
+        return asked
+
+    def test_our_copy_is_the_only_host_asked_when_it_serves(self):
+        asked = self.fetch({self.ours: PINNED, UPSTREAM: PINNED})
+        self.assertEqual(asked, [self.ours], "the upstream must not be touched")
+        with open(self.dest, "rb") as f:
+            self.assertEqual(f.read(), PINNED)
+
+    def test_an_unreachable_mirror_falls_through_to_the_upstream(self):
+        asked = self.fetch({UPSTREAM: PINNED})
+        self.assertEqual(asked, [self.ours, UPSTREAM])
+        self.assertTrue(os.path.exists(self.dest))
+
+    def test_a_mirror_serving_the_wrong_bytes_is_refused_not_trusted(self):
+        # THE reason the order is safe: our copy is judged by the same digest
+        # the upstream is, so being first buys it nothing.
+        asked = self.fetch({self.ours: IMPOSTOR, UPSTREAM: PINNED})
+        self.assertEqual(asked, [self.ours, UPSTREAM])
+        with open(self.dest, "rb") as f:
+            self.assertEqual(f.read(), PINNED)
+
+    def test_an_unmirrored_url_still_gets_its_one_re_try(self):
+        asked = self.fetch({UNMIRRORED: [IMPOSTOR, PINNED]}, url=UNMIRRORED)
+        self.assertEqual(asked, [UNMIRRORED, UNMIRRORED])
+        self.assertTrue(os.path.exists(self.dest))
+
+    def test_when_no_source_serves_the_refusal_names_every_one_it_tried(self):
+        with self.assertRaises(SystemExit) as raised:
+            self.fetch({})
+        message = str(raised.exception.code)
+        self.assertIn("huggingface.co/Azng0", message)
+        self.assertIn("github.com/cszn", message)
+        self.assertFalse(os.path.exists(self.dest), "nothing unverified is left behind")
+
+    def test_a_cache_that_matches_the_pin_asks_nobody(self):
+        with open(self.dest, "wb") as f:
+            f.write(PINNED)
+        self.assertEqual(self.fetch({}), [])
+
+
 if __name__ == "__main__":
     unittest.main()

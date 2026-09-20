@@ -682,6 +682,12 @@ mod tests {
     const DENOISE_RAW_SRC: &str =
         include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/python/denoise_raw.py"));
 
+    /// Our own copy of every pinned download. Like `_sidecar.py` it is NOT on
+    /// the roster — it pins no model of its own — but every pin on the roster
+    /// is answerable to it, which is what the contract below asks.
+    const MIRROR_SRC: &str =
+        include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/python/_mirror.py"));
+
     /// The family roster, in one place: a sidecar that fails to enrol here
     /// escapes all four shared contracts below. `describe.py` (S2) is the
     /// fifth member of the family and `denoise_raw.py` (2026-09-15, the
@@ -752,6 +758,52 @@ mod tests {
         assert!(found >= 3, "extractor non-vacuity: found {found} revision pins");
     }
 
+    /// Every pinned model tree has a copy of OURS. A pinned revision is what
+    /// makes a download safe and also what makes a vanished upstream
+    /// unrecoverable — nothing else on the Hub is that revision — so
+    /// `python/_mirror.py` holds our own copy of each tree and the verified
+    /// fetch tries it first
+    /// (`denoise::tests::the_verified_fetch_tries_our_copy_before_the_upstream`).
+    /// A re-pin that is not mirrored fails HERE, rather than on the first
+    /// machine with a cold cache after the upstream account is renamed.
+    ///
+    /// The pairing walks each file: a `repo` literal — or `SKY_MODEL`, the one
+    /// pin that reaches its repo through a constant — is held until the
+    /// `revision` that follows it, so a mirror entry for the right repo at the
+    /// WRONG revision does not satisfy this.
+    ///
+    /// MUTATION: change one revision digit in either the sidecar or the mirror
+    /// table and this names the repo.
+    #[test]
+    fn every_pinned_model_tree_has_a_copy_of_ours() {
+        fn literal(line: &str, key: &str) -> Option<String> {
+            let rest = line.strip_prefix(key)?.strip_prefix('"')?;
+            Some(rest[..rest.find('"')?].to_string())
+        }
+        let mut found = 0;
+        for (what, src) in SIDECARS {
+            let mut repo: Option<String> = None;
+            for line in src.lines() {
+                let t = line.trim();
+                if let Some(r) = literal(t, "\"repo\": ").or_else(|| literal(t, "SKY_MODEL = ")) {
+                    repo = Some(r);
+                } else if let Some(v) =
+                    literal(t, "\"revision\": ").or_else(|| literal(t, "SKY_REVISION = "))
+                {
+                    let Some(r) = repo.take() else { continue };
+                    let upstream = format!("https://huggingface.co/{r}/resolve/{v}/");
+                    assert!(
+                        MIRROR_SRC.contains(&upstream),
+                        "{what}: {r} @ {v} is pinned but python/_mirror.py has no copy of \
+                         ours — mirror the new revision, or the model has one host again"
+                    );
+                    found += 1;
+                }
+            }
+        }
+        assert_eq!(found, 6, "extractor non-vacuity: six pinned model trees");
+    }
+
     /// `trust_remote_code` downloads and EXECUTES upstream Python through HF's
     /// own cache, which our digest gate never sees — the exact hazard
     /// `denoise.py` was hardened against. It must never appear, and neither
@@ -764,7 +816,13 @@ mod tests {
         // The shared module is swept too: it is where three of the family now
         // do their downloading, so a hazard planted there would reach all three
         // at once.
-        for (what, src) in SIDECARS.iter().chain([&("_sidecar.py", SIDECAR_SHARED_SRC)]) {
+        // `_mirror.py` joins the sweep for the reason the shared module did:
+        // it names a source for every download the family makes, so a hazard
+        // planted there would reach all six at once.
+        for (what, src) in SIDECARS
+            .iter()
+            .chain([&("_sidecar.py", SIDECAR_SHARED_SRC), &("_mirror.py", MIRROR_SRC)])
+        {
             // The CALL, not the word: the docstrings name `trust_remote_code`
             // to explain why it is never used, and a test that banned the
             // token would push that explanation out of the file.
