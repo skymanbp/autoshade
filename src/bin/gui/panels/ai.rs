@@ -4,9 +4,9 @@
 //! verdict + Direction + Analyze/Refine + Style lived at the top of Develop,
 //! whole-image Reimagine and reverse-fit sat in the middle of Retouch (between
 //! the brush tools), and reverse-fit's own 「Zoned fit (sky)」 switch was in
-//! Settings, two panels away from the button it changes. One AI area, four
-//! sub-areas — analysis / reference libraries / whole-image generation /
-//! reverse-fit — is the whole idea; the panel sits at the TOP of the side
+//! Settings, two panels away from the button it changes. One AI area —
+//! analysis / reference libraries / whole-image generation / generated-image
+//! adjustment / reverse-fit — is the whole idea; the panel sits at the TOP of the side
 //! panel because it is the headline feature, above the sliders it writes into.
 //!
 //! What deliberately did NOT move: the PIXEL-level AI verbs (AI select
@@ -118,6 +118,7 @@ impl AutoShadeApp {
                     self.ai_analysis(ui);
                     self.ai_libraries(ui);
                     self.ai_generate(ui);
+                    self.ai_adjust(ui);
                     self.ai_reverse_fit(ui);
                     // Where the AI verbs that did NOT move to this panel live.
                     // A panel called "AI" reads as the complete inventory
@@ -1009,7 +1010,62 @@ impl AutoShadeApp {
             });
     }
 
-    /// Sub-area ④ — REVERSE-FIT (local; the AI review is paid): turn the
+    /// Adjust owns every input except the explicitly shared painted mask.
+    /// Generated and Edited both read AI pixels; the negative never does.
+    pub(crate) fn can_adjust(&self) -> bool {
+        !self.busy && self.active_on_ai_pixels()
+            && (self.has_painted_mask() || !self.adjust_prompt.trim().is_empty())
+    }
+
+    fn ai_adjust(&mut self, ui: &mut egui::Ui) {
+        let lang = self.lang;
+        ui.add_space(SPACE_XS);
+        egui::CollapsingHeader::new(tr(lang, "Adjust generated image · paid API"))
+            .id_salt("sec_ai_adjust")
+            .default_open(false)
+            .open(fold_open_in_tests())
+            .show(ui, |ui| {
+                let _field = prompt_field(
+                    ui,
+                    &mut self.adjust_prompt,
+                    tr(lang, "what to change — e.g. make the sky bluer, remove the wires on the left; blank with a painted area = remove"),
+                );
+                #[cfg(test)]
+                {
+                    self.prompt_rects.push(_field.rect);
+                }
+                egui::ComboBox::from_id_salt("adjust_quality")
+                    .selected_text(tr(lang, ["high", "medium", "low"][self.adjust_quality.min(2)]))
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut self.adjust_quality, 0, tr(lang, "high"));
+                        ui.selectable_value(&mut self.adjust_quality, 1, tr(lang, "medium"));
+                        ui.selectable_value(&mut self.adjust_quality, 2, tr(lang, "low"));
+                    })
+                    .response
+                    .on_hover_text(tr(lang, "gpt-image render quality — higher looks better and costs more per image"));
+                let note = if !self.active_on_ai_pixels() {
+                    tr(lang, "select a ✨ AI generated card (or its ✎ edit) first")
+                } else if self.has_painted_mask() {
+                    tr(lang, "painted area only (shared brush)")
+                } else {
+                    tr(lang, "whole image (paint an area to limit it)")
+                };
+                ui.label(egui::RichText::new(note).weak().small());
+                let resp = primary(ui, self.can_adjust(), tr(lang, "✨ Adjust"))
+                    .on_hover_text(tr(lang,
+                        "Change the generated picture with the prompt: the whole image, or only the painted area when the shared brush has strokes (blank = remove there). One gpt-image call per adjust — costs per image. The result is a new ✨ AI generated card; this card stays as it is; crop / straighten are not carried (set them on the new card). Needs an image API (OPENAI_API_KEY, or the OAuth image bridge in Settings).",
+                    ));
+                #[cfg(test)]
+                {
+                    self.adjust_btn_enabled = Some(resp.enabled());
+                }
+                if resp.clicked() {
+                    self.start_adjust();
+                }
+            });
+    }
+
+    /// Sub-area ⑤ — REVERSE-FIT (local; the AI review is paid): turn the
     /// freshly generated look back into an
     /// editable recipe — how the low-res experiment becomes a full-res, XMP-able
     ///「反推」variant. A PEER of the generation sub-area, not a row inside it:

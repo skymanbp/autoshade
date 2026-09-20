@@ -2362,6 +2362,17 @@ impl AutoShadeApp {
                 "filled → {path} (a new ✨ AI generated card built on this card's look — the card you filled from is untouched)",
                 &[("path", &p.display().to_string())],
             ),
+            RetouchNote::Adjusted { out, region, divergence } => {
+                let note = if *region {
+                    tr(lang, "adjusted → new ✨ card (painted area only)").to_string()
+                } else if let Some(d) = divergence {
+                    trf(lang, "adjusted → new ✨ card (whole image, divergence D = {d})",
+                        &[("d", &format!("{d:.2}"))])
+                } else {
+                    tr(lang, "adjusted → new ✨ card (whole image)").to_string()
+                };
+                format!("{note} · {}", out.display())
+            }
             RetouchNote::Healed { n, out, ai_prose, notes } => {
                 let mut s = trf(
                     lang,

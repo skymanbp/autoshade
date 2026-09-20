@@ -236,7 +236,7 @@ mod tests {
     /// runtime (the module tree is walked, as the inclusion law and the font
     /// gate do — an `include_str!` list would lose a new file silently).
     ///
-    /// The SITES, file by file: a thirteenth is not necessarily wrong, but it
+    /// The SITES, file by file: another is not necessarily wrong, but it
     /// is a new heavy path and it stops here until someone says so in this
     /// list. And the BINDING: `heavy_permit(...)` as a bare statement drops
     /// its guard at the semicolon and reserves nothing at all, which reads
@@ -255,16 +255,16 @@ mod tests {
                 }
             }
         }
-        // The thirteen wiring points, as of v1.5.0 — twelve since v1.2.4, plus
-        // the stack worker, which is the first one to hold SEVERAL frames
-        // decoded at once and so commits its estimate times the frame count.
+        // Fourteen wiring points: the v1.5.0 thirteen plus the generated
+        // image adjust worker (2026-09-20). Like fill, it develops the card
+        // before the model call and holds a permit for that whole worker.
         // `budget.rs` itself is the definition and its own tests, not a wiring
         // site.
         const CENSUS: [(&str, usize); 5] = [
             ("actions.rs", 3),
             ("export.rs", 2),
             ("masks.rs", 1),
-            ("retouch.rs", 6),
+            ("retouch.rs", 7),
             ("workers.rs", 1),
         ];
         let gui_src =
@@ -298,7 +298,7 @@ mod tests {
             "the budget wiring moved: every heavy full-frame path takes a permit, \
              and this census is where a new one is declared",
         );
-        assert_eq!(found.values().sum::<usize>(), 13, "thirteen wiring points");
+        assert_eq!(found.values().sum::<usize>(), 14, "fourteen wiring points");
     }
 }
 

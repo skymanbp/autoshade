@@ -3305,11 +3305,191 @@
             "the fill no longer hands the library its own base"
         );
         assert!(
-            body.contains("develop_preview_framed("),
+            body.contains("developed_card_pixels(&path, &recipe, full_res)"),
             "the fill no longer develops the card's picture for the model"
         );
         assert!(body.contains("RetouchKind::NewGenerated))"), "the fill no longer lands as a new card");
         assert!(!body.contains("RetouchKind::InPlace"), "the fill went back to an in-place landing");
+    }
+
+    /// Both worker arms land through the same new-card path; the source
+    /// raster/recipe survive, and the new card can be adjusted again.
+    #[test]
+    fn an_adjust_lands_as_a_new_generated_card_and_leaves_the_source_card_alone() {
+        let dir = std::env::temp_dir().join(format!("autoshade-gui-adjust-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("library")).unwrap();
+        for lang in [Lang::En, Lang::Zh] {
+            for region in [false, true] {
+                let ctx = egui::Context::default();
+                let src = dir.join("library").join(format!("adjust-{lang:?}-{region}.png"));
+                let base = Arc::new(image::DynamicImage::new_rgb8(4, 4));
+                let origin = dir.join(format!("generated-{lang:?}-{region}.png"));
+                let developed = EditRecipe {
+                    contrast: 7.0, straighten_deg: 2.0,
+                    crop: Some(autoshade::recipe::Crop { top: 0.1, left: 0.1, bottom: 0.9, right: 0.9 }),
+                    ..Default::default()
+                };
+                let mut app = AutoShadeApp {
+                    src_path: Some(src.clone()),
+                    variants: vec![Variant {
+                        id: new_variant_id(), name: None, kind: VariantKind::Generated,
+                        recipe: EditRecipe::default(), base: Some(base.clone()),
+                        origin: Some(origin.clone()), thumb: None,
+                    }],
+                    base_preview: Some(base.clone()),
+                    ..Default::default()
+                };
+                app.reset_history();
+                let out = unique_out(&src, "adjust").unwrap();
+                assert_eq!(out.file_name().unwrap().to_string_lossy(),
+                    format!("adjust-{lang:?}-{region}.adjust-1.png"));
+                let second = unique_out(&src, "adjust").unwrap();
+                assert_eq!(second.file_name().unwrap().to_string_lossy(),
+                    format!("adjust-{lang:?}-{region}.adjust-2.png"));
+                release_empty_claim(&second);
+                let source_recipe = app.variants[0].recipe.clone();
+                app.on_retouched(&ctx, lang, app.gen_epoch, Ok((
+                    image::DynamicImage::new_rgb8(4, 4),
+                    RetouchNote::Adjusted { out: out.clone(), region, divergence: (!region).then_some(0.12) },
+                    out.clone(), RetouchKind::NewGenerated,
+                )));
+                assert_eq!(strip_kinds(&app), vec![VariantKind::Generated, VariantKind::Generated]);
+                assert_eq!(app.active, 1, "the new adjusted card is active");
+                assert_eq!(app.variants[0].origin.as_ref(), Some(&origin), "the source keeps its pixels");
+                assert_eq!(app.variants[0].recipe, source_recipe, "the source keeps its recipe");
+                assert!(Arc::ptr_eq(app.variants[0].base.as_ref().unwrap(), &base));
+                assert_eq!(app.variants[1].origin.as_ref(), Some(&out));
+                assert_eq!(app.active_source_path().as_ref(), Some(&out), "the next adjust follows this master");
+                assert!(app.recipe.is_noop() && app.variants[1].recipe.is_noop());
+                assert_eq!(app.fit_target().as_ref(), Some(&out), "reverse-fit reads the new generated card");
+                let note = match (lang, region) {
+                    (Lang::En, true) => "adjusted → new ✨ card (painted area only)",
+                    (Lang::En, false) => "adjusted → new ✨ card (whole image, divergence D = 0.12)",
+                    (Lang::Zh, true) => "已调整 → 新 ✨ 卡（只改涂抹区域）",
+                    (Lang::Zh, false) => "已调整 → 新 ✨ 卡（整张图，结构偏离 D = 0.12）",
+                };
+                assert!(app.status.starts_with(note), "landing language: {}", app.status);
+                // An edited AI card's non-neutral develop is just as immutable
+                // under another adjust; crop/straighten do not reach the result.
+                app.variants[1].kind = VariantKind::Edited;
+                app.variants[1].recipe = developed.clone();
+                app.recipe = developed.clone();
+                app.on_retouched(&ctx, lang, app.gen_epoch, Ok((
+                    image::DynamicImage::new_rgb8(4, 4),
+                    RetouchNote::Adjusted { out: second.clone(), region, divergence: (!region).then_some(0.0) },
+                    second.clone(), RetouchKind::NewGenerated,
+                )));
+                assert_eq!(app.active, 2);
+                assert_eq!(app.variants[1].recipe, developed);
+                assert_eq!(app.variants[1].origin.as_ref(), Some(&out));
+                assert!(app.variants[2].recipe.is_noop());
+                release_empty_claim(&out);
+            }
+        }
+        let worker = include_str!("panels/retouch.rs");
+        let start = worker.find("pub(crate) fn start_adjust(").unwrap();
+        let body = &worker[start..worker[start..].find("pub(crate) fn start_heal(").unwrap() + start];
+        assert!(body.contains("self.active_source_path()"), "the card supplies its own raster");
+        assert!(body.contains("self.recipe.clone()"), "the live recipe is captured at the click");
+        assert!(body.contains("developed_card_pixels(&path, &recipe, false)"));
+        let split = body.find("if let Some(mask_png) = mask_png").unwrap();
+        let arms = &body[split..];
+        let whole = arms.find("} else {").unwrap();
+        assert!(arms[..whole].contains("autoshade::generative::retouch_onto("), "strokes take the fill path");
+        assert!(arms[whole..].contains("autoshade::generative::adjust_onto("), "no strokes take the whole-image path");
+        assert!(body.contains("RetouchKind::NewGenerated))"));
+        assert!(!body.contains("RetouchKind::InPlace"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn draw_adjust_panel(app: &mut AutoShadeApp) -> Vec<String> {
+        let ctx = egui::Context::default();
+        crate::theme::install_theme(&ctx, crate::theme::ThemePref::Dark);
+        let mut texts = Vec::new();
+        for _ in 0..3 {
+            let out = ctx.run(egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1000.0, 20_000.0))),
+                ..Default::default()
+            }, |ctx| {
+                ctx.memory_mut(|m| m.set_everything_is_visible(true));
+                egui::SidePanel::left("adjust-controls").default_width(320.0).show(ctx, |ui| app.ai_panel(ui));
+            });
+            texts = drawn_texts(&out.shapes);
+        }
+        texts
+    }
+
+    #[test]
+    fn the_adjust_verb_is_disabled_off_ai_pixels_and_with_no_prompt_and_no_strokes() {
+        let mut app = AutoShadeApp::default();
+        // Off AI pixels, empty AI input, and useful AI input are the three
+        // states. Both Generated and Edited count; busy still disables them.
+        for kind in [VariantKind::Original, VariantKind::Fitted, VariantKind::Denoised,
+            VariantKind::Stacked, VariantKind::Generated, VariantKind::Edited]
+        {
+            app.variants = vec![Variant {
+                id: new_variant_id(), name: None, kind, recipe: EditRecipe::default(),
+                base: None, origin: None, thumb: None,
+            }];
+            for (prompt, strokes, busy) in [("bluer sky", false, false), (" \t ", false, false),
+                ("", true, false), ("bluer sky", true, true)]
+            {
+                app.adjust_prompt = prompt.into();
+                app.busy = busy;
+                app.mask_paint = strokes.then(|| image::RgbaImage::from_pixel(2, 2, image::Rgba([255, 64, 64, 160])));
+                draw_adjust_panel(&mut app);
+                let want = !busy && kind.on_ai_pixels() && (strokes || !prompt.trim().is_empty());
+                assert_eq!(app.adjust_btn_enabled, Some(want),
+                    "the adjust verb must stay disabled off AI pixels or without prompt/strokes (kind={kind:?}, prompt={prompt:?}, strokes={strokes}, busy={busy})");
+            }
+        }
+        // The starter uses the same rule before claiming output or spawning.
+        app.busy = false;
+        app.adjust_prompt.clear();
+        app.mask_paint = None;
+        app.src_path = Some(PathBuf::from("adjust-guard.png"));
+        app.start_adjust();
+        assert!(!app.busy, "blank whole-image adjustment never reaches a worker");
+    }
+
+    #[test]
+    fn the_adjust_fold_says_whether_it_reads_the_painted_area() {
+        for lang in [Lang::En, Lang::Zh] {
+            let mut app = AutoShadeApp { lang, ..Default::default() };
+            app.variants = vec![Variant {
+                id: new_variant_id(), name: None, kind: VariantKind::Generated,
+                recipe: EditRecipe::default(), base: None, origin: None, thumb: None,
+            }];
+            // The same >10 alpha predicate as export: a faint/erased mask
+            // is whole-image mode, even though the mask buffer exists.
+            for alpha in [0, 10, 11, 160] {
+                app.mask_paint = Some(image::RgbaImage::from_pixel(2, 2, image::Rgba([255, 64, 64, alpha])));
+                let strokes = alpha > 10;
+                assert_eq!(app.has_painted_mask(), strokes);
+                assert_eq!(app.export_mask_png().is_some(), strokes);
+                let text = draw_adjust_panel(&mut app);
+                let painted = tr(lang, "painted area only (shared brush)");
+                let whole = tr(lang, "whole image (paint an area to limit it)");
+                let (yes, no) = if strokes { (painted, whole) } else { (whole, painted) };
+                assert!(text.iter().any(|t| t == yes), "status missing: {yes}");
+                assert!(!text.iter().any(|t| t == no), "stale status: {no}");
+            }
+            app.variants[0].kind = VariantKind::Original;
+            let text = draw_adjust_panel(&mut app);
+            assert!(text.iter().any(|t| t == tr(lang, "select a ✨ AI generated card (or its ✎ edit) first")));
+            assert!(!text.iter().any(|t| t == tr(lang, "painted area only (shared brush)")));
+        }
+        let prefs = Prefs { adjust_quality: 2, ..Prefs::default() };
+        let json = serde_json::to_string(&prefs).unwrap();
+        let decoded: Prefs = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.adjust_quality, 2);
+        let older = json.replace(r#""adjust_quality":2,"#, "");
+        assert!(!older.contains("adjust_quality"));
+        let old: Prefs = serde_json::from_str(&older).unwrap();
+        assert_eq!(old.adjust_quality, 0, "old prefs keep high as the default");
+        assert!(!json.contains("adjust_prompt"), "prompt is transient like Reimagine's");
+        assert!(include_str!("actions.rs").contains("app.adjust_quality = prefs.adjust_quality.min(2)"));
+        assert!(include_str!("app.rs").contains("adjust_quality: self.adjust_quality"));
     }
 
     /// v1.5.0: the canvas preview reaches its frame through the ENGINE's tail
@@ -3381,7 +3561,7 @@
         develops_at_film(canvas, "pub(crate) fn handle_range_pick(", "self.film_short_edge()", framed);
         develops_at_film(canvas, "pub(crate) fn handle_point_color_pick(", "self.film_short_edge()", framed);
         let fill = include_str!("panels/retouch.rs");
-        develops_at_film(fill, "pub(crate) fn start_fill(", "autoshade::decode::film_short_edge(&path)", framed);
+        develops_at_film(fill, "fn developed_card_pixels(", "autoshade::decode::film_short_edge(path)", framed);
         let workers = include_str!("workers.rs");
         develops_at_film(workers, "pub(crate) fn start_redevelop(", "self.film_short_edge()", "build_preview(");
         let util = include_str!("util.rs");
@@ -6402,10 +6582,10 @@
     /// exactly where the old code fails: every field then measures its full
     /// available width and blows the `FIELD_W_MAX` assertion.
     ///
-    /// All three prompts are pinned by ONE rule over the `prompt_rects` seam:
-    /// Direction and Generative Fill go through `util::prompt_field`, while the
+    /// All four prompts are pinned by ONE rule over the `prompt_rects` seam:
+    /// Direction, Adjust and Generative Fill go through `util::prompt_field`, while the
     /// Reimagine row keeps its own R19 galley arithmetic and only `.min()`s the
-    /// result — three sites, one ceiling, and a fourth field added later is
+    /// result — four sites, one ceiling, and a further field added later is
     /// covered without editing this test.
     #[test]
     fn a_prompt_field_never_grows_past_its_readable_width() {
@@ -6416,6 +6596,7 @@
             // BOX, and a filled buffer also exercises the hover-tooltip arm.
             app.guidance = "warmer and moodier, lift the shadows a lot, and keep the sky honest".into();
             app.reimagine_prompt = app.guidance.clone();
+            app.adjust_prompt = app.guidance.clone();
             app.fill_prompt = app.guidance.clone();
             let ctx = egui::Context::default();
             crate::theme::install_theme(&ctx, crate::theme::ThemePref::Dark);
@@ -6455,8 +6636,8 @@
             );
             assert_eq!(
                 app.prompt_rects.len(),
-                3,
-                "{lang:?}: expected the Direction / Reimagine / Fill prompts to lay out, got {:?}",
+                4,
+                "{lang:?}: expected the Direction / Reimagine / Adjust / Fill prompts to lay out, got {:?}",
                 app.prompt_rects
             );
             for (i, r) in app.prompt_rects.iter().enumerate() {
@@ -10614,6 +10795,8 @@
                     "{lang:?}: the {panel} panel left its {default} px default: {seen:?} — a row overflows it                      (section widths ai/develop/retouch {sections:?}; buttons past the edge: {past:?})"
                 );
             }
+            assert!(drawn.iter().any(|d| d.label == tr(lang, "✨ Adjust")),
+                "{lang:?}: the new adjust button reached DRAWN");
             assert!(drawn.len() >= 60, "{lang:?}: only {} buttons reached the registry", drawn.len());
             for d in &drawn {
                 assert!(

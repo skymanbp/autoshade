@@ -149,20 +149,24 @@ impl AutoShadeApp {
         wanted.len()
     }
 
+    /// Same alpha threshold as export, without allocating or encoding a PNG.
+    /// Shared by the adjust fold's status and verb gate on every frame.
+    pub(crate) fn has_painted_mask(&self) -> bool {
+        self.mask_paint.as_ref().is_some_and(|m| m.pixels().any(|p| p[3] > 10))
+    }
+
     /// PNG bytes of the EXPORT mask: painted → transparent (regenerate / heal
     /// here), unpainted → opaque. None if nothing is painted — mirrors the web.
     pub(crate) fn export_mask_png(&self) -> Option<Vec<u8>> {
+        if !self.has_painted_mask() {
+            return None;
+        }
         let m = self.mask_paint.as_ref()?;
         let (w, h) = (m.width(), m.height());
         let mut out = image::RgbaImage::new(w, h);
-        let mut any = false;
         for (x, y, p) in m.enumerate_pixels() {
             let painted = p.0[3] > 10;
-            any |= painted;
             out.put_pixel(x, y, image::Rgba([0, 0, 0, if painted { 0 } else { 255 }]));
-        }
-        if !any {
-            return None;
         }
         let mut buf = Vec::new();
         image::DynamicImage::ImageRgba8(out)

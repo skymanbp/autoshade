@@ -2,6 +2,25 @@
 
 use crate::*;
 
+/// The picture the canvas shows, in the original frame of its brush mask.
+/// Shared by fill and adjust so the model sees the card's live recipe at
+/// the source's film edge; downstream crop/straighten stay on the view.
+fn developed_card_pixels(
+    path: &std::path::Path,
+    recipe: &EditRecipe,
+    full_res: bool,
+) -> anyhow::Result<image::DynamicImage> {
+    let raw = autoshade::decode::is_raw(path);
+    let base = autoshade::render::source_pixels(path, (raw && !full_res).then_some(2048))?;
+    Ok(autoshade::render::develop_preview_framed(
+        &base,
+        recipe,
+        &autoshade::diag::pixels(),
+        autoshade::render::MaskFrame::without_downstream(&recipe.lens_profile),
+        autoshade::decode::film_short_edge(path),
+    ))
+}
+
 impl AutoShadeApp {
     /// Brush-paint into the mask while dragging on the After image. The canvas
     /// is full-frame at preview resolution; pointer→canvas goes through the
@@ -240,7 +259,6 @@ impl AutoShadeApp {
         // The card's live develop, captured at the click like every other
         // input the worker reads; the source kind decides the working size.
         let recipe = self.recipe.clone();
-        let raw = autoshade::decode::is_raw(&path);
         let edge = self.canvas_edge(); // show at the CANVAS's res (canvas_edge)
         let out_claim = out.clone(); // release the claim on failure (worker tail)
         let out_panic = out.clone(); // …and on a worker panic (see the error closure)
@@ -264,29 +282,7 @@ impl AutoShadeApp {
                     let r = autoshade::generative::retouch_onto(
                         &cfg,
                         &src,
-                        || {
-                            // The card's picture: its pixel source developed by
-                            // its recipe through the tone chain the canvas runs
-                            // (util::build_preview), at the fill's working size
-                            // (≤2048, or the whole frame with Full-res on a RAW)
-                            // and WITHOUT the geometry stage — the mask lives in
-                            // the original frame (handle_paint), and the range
-                            // reference builds (canvas.rs) state that frame the
-                            // same way. At the source's own film edge, as the
-                            // canvas develops it: a 2048 px working copy shows
-                            // the Detail panel the way the canvas does.
-                            let base = autoshade::render::source_pixels(
-                                &path,
-                                (raw && !full_res).then_some(2048),
-                            )?;
-                            Ok(autoshade::render::develop_preview_framed(
-                                &base,
-                                &recipe,
-                                &autoshade::diag::pixels(),
-                                autoshade::render::MaskFrame::without_downstream(&recipe.lens_profile),
-                                autoshade::decode::film_short_edge(&path),
-                            ))
-                        },
+                        || developed_card_pixels(&path, &recipe, full_res),
                         "this card's look",
                         &autoshade::generative::FillJob {
                             mask_path: &mask_tmp,
@@ -313,6 +309,83 @@ impl AutoShadeApp {
             move |e| {
                 // The worker PANICKED (caught by spawn_worker), so the tail
                 // above never ran — release here too.
+                release_empty_claim(&out_panic);
+                Msg::Retouched(epoch, Box::new(Err(e)))
+            },
+        );
+    }
+
+    /// Edit the active generated card's live picture. The optional shared
+    /// brush chooses the region path at the click; blank means remove there.
+    /// Every answer is a new ✨ card, so the source stays immutable and the
+    /// result can be adjusted again or reverse-fit like any generated card.
+    pub(crate) fn start_adjust(&mut self) {
+        let Some(src) = self.src_path.clone() else { return };
+        let Some(path) = self.active_source_path() else { return };
+        if !self.can_adjust() || self.refuse_pixel_work_on_a_turned_photo() {
+            return;
+        }
+        let lang = self.lang;
+        let prompt = self.adjust_prompt.trim().to_string();
+        let mask_png = self.export_mask_png();
+        let region = mask_png.is_some();
+        let Some(out) = unique_out(&src, "adjust") else {
+            self.status = tr(lang, "over 999 retouch masters for this photo — clean up ./out first").into();
+            return;
+        };
+        self.busy = true;
+        self.status = tr(lang, "adjusting generated image via gpt-image… (high quality can run minutes — progress in the status bar; ✕ Cancel to stop)").into();
+        let quality = ["high", "medium", "low"][self.adjust_quality.min(2)].to_string();
+        let recipe = self.recipe.clone();
+        let edge = self.canvas_edge();
+        let out_claim = out.clone();
+        let out_panic = out.clone();
+        let (epoch, flag) = self.arm_cancel();
+        let ptx = self.tx.clone();
+        self.spawn_worker(
+            move || {
+                autoshade::generative::set_worker_hooks(Some(autoshade::generative::WorkerHooks {
+                    progress: Box::new(move |m| {
+                        let _ = ptx.send(Msg::Progress(epoch, m));
+                    }),
+                    cancel: flag,
+                }));
+                let _mem = crate::budget::heavy_permit(crate::budget::estimate_mb(Some(&path)));
+                let res = (|| -> RetouchDone {
+                    let cfg = autoshade::config::Config::load();
+                    let base = || developed_card_pixels(&path, &recipe, false);
+                    let divergence = if let Some(mask_png) = mask_png {
+                        let mask_tmp = gui_tmp_png("adjust");
+                        std::fs::write(&mask_tmp, &mask_png)?;
+                        let r = autoshade::generative::retouch_onto(
+                            &cfg, &src, base, "this card's look",
+                            &autoshade::generative::FillJob {
+                                mask_path: &mask_tmp, prompt: &prompt, quality: &quality, out: &out,
+                            },
+                        );
+                        let _ = std::fs::remove_file(&mask_tmp);
+                        r?;
+                        None
+                    } else {
+                        let report = autoshade::generative::adjust_onto(
+                            &cfg, &src, base, "this card's look",
+                            &autoshade::generative::AdjustJob {
+                                prompt: &prompt, quality: &quality, out: &out,
+                            },
+                        )?;
+                        Some(report.divergence)
+                    };
+                    // baked-by-construction: the ./out PNG master this adjust just wrote.
+                    let img = autoshade::decode::load_image(&out)?.thumbnail(edge, edge);
+                    Ok((img, RetouchNote::Adjusted { out: out.clone(), region, divergence }, out, RetouchKind::NewGenerated))
+                })();
+                if res.is_err() {
+                    release_empty_claim(&out_claim);
+                }
+                Msg::Retouched(epoch, Box::new(res))
+            },
+            move |e| {
+                // A panic skips the normal tail; return its empty claim too.
                 release_empty_claim(&out_panic);
                 Msg::Retouched(epoch, Box::new(Err(e)))
             },

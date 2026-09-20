@@ -306,6 +306,8 @@ pub(crate) struct AutoShadeApp {
     pub(crate) fill_fullres: bool,                    // composite onto the full-res develop
     pub(crate) heal_fullres: bool,                    // heal the full-res develop
     pub(crate) reimagine_prompt: String,              // whole-image restyle prompt (its own entry)
+    pub(crate) adjust_prompt: String,                 // edit the active generated picture
+    pub(crate) adjust_quality: usize,                 // 0=high 1=medium 2=low
     // --- production niceties ---
     pub(crate) view_mode: ViewMode,                   // side-by-side vs after-only (hold B = compare)
     pub(crate) toasts: Vec<Toast>,                    // transient corner notifications
@@ -402,6 +404,8 @@ pub(crate) struct AutoShadeApp {
     pub(crate) edit_list_actions: Vec<String>,
     #[cfg(test)]
     pub(crate) reimagine_btn_rect: Option<egui::Rect>, // test seam: the ✨ Generate button's rect
+    #[cfg(test)]
+    pub(crate) adjust_btn_enabled: Option<bool>,      // actual egui response, including parent gates
     #[cfg(test)]
     pub(crate) gallery_slot_rect: Option<egui::Rect>, // test seam: first drawn gallery thumb's SLOT
     #[cfg(test)]
@@ -1739,6 +1743,8 @@ impl Default for AutoShadeApp {
             fill_fullres: false,
             heal_fullres: false,
             reimagine_prompt: String::new(),
+            adjust_prompt: String::new(),
+            adjust_quality: 0,
             view_mode: ViewMode::SideBySide,
             toasts: Vec::new(),
             histogram: None,
@@ -1784,6 +1790,8 @@ impl Default for AutoShadeApp {
             edit_list_actions: Vec::new(),
             #[cfg(test)]
             reimagine_btn_rect: None,
+            #[cfg(test)]
+            adjust_btn_enabled: None,
             #[cfg(test)]
             gallery_slot_rect: None,
             #[cfg(test)]
@@ -2131,6 +2139,7 @@ impl eframe::App for AutoShadeApp {
                 // names one file for one photo (see the field).
                 fit_deep: self.fit_deep,
                 reimagine_retry: self.reimagine_retry,
+                adjust_quality: self.adjust_quality,
                 view_mode: self.view_mode,
                 exp_long_edge: self.exp_long_edge,
                 exp_sharpen: self.exp_sharpen,
