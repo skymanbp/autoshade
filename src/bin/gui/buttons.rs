@@ -27,8 +27,9 @@
 //!
 //! Rows of equal verbs in the side panels lay out on [`columns`]: every
 //! button in the row takes the same width, so the row lands in aligned
-//! columns instead of a ragged wrapped line; the toolbar wraps only between
-//! its [`group`]s, each measured from its labels so egui can place it whole.
+//! columns, left-aligned within the same [`FIELD_W_MAX`] readable ceiling
+//! as the prompt fields, even when the panel is wider. The toolbar wraps only
+//! between its [`group`]s, each measured from its labels so egui can place it whole.
 //! `every_button_stands_one_row_tall_at_the_default_widths` renders every
 //! panel in both languages over three frames and pins the height, the
 //! squares, that no label wraps inside its cell, and that neither side
@@ -50,7 +51,8 @@ pub(crate) fn row_h(ui: &egui::Ui) -> f32 {
 pub(crate) fn columns(ui: &egui::Ui, n: usize) -> egui::Vec2 {
     let n = n.max(1);
     let gaps = ui.spacing().item_spacing.x * (n - 1) as f32;
-    egui::vec2(((ui.available_width() - gaps) / n as f32).floor().max(0.0), row_h(ui))
+    let width = ui.available_width().min(FIELD_W_MAX);
+    egui::vec2(((width - gaps) / n as f32).floor().max(0.0), row_h(ui))
 }
 
 /// Every button this vocabulary drew on this thread — read by the

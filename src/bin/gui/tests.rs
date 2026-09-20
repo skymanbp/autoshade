@@ -10506,6 +10506,46 @@
         );
     }
 
+    /// The widest button rows, shared by the default-width and readable-width pins.
+    fn app_with_every_button(lang: crate::i18n::Lang) -> AutoShadeApp {
+        use autoshade::recipe::{ColourField, LocalAdjustment, MaskComponent, MaskGeometry};
+        use crate::model::{Variant, VariantKind};
+        let mk = |kind| Variant {
+            kind,
+            id: crate::model::new_variant_id(),
+            name: None,
+            recipe: EditRecipe::default(),
+            base: None,
+            origin: None,
+            thumb: None,
+        };
+        let mut app = AutoShadeApp {
+            lang,
+            src_path: Some(PathBuf::from("D:/library/_buttons.ARW")),
+            variants: vec![mk(VariantKind::Original), mk(VariantKind::Generated)],
+            active: 1,
+            versions: vec![1],
+            fit_ref: Some(PathBuf::from("D:/library/_buttons-reference.png")),
+            multi_sel: [0usize].into_iter().collect(),
+            ..Default::default()
+        };
+        app.base_preview = Some(std::sync::Arc::new(image::DynamicImage::new_rgb8(64, 96)));
+        app.recipe.masks.push(LocalAdjustment {
+            mask: MaskGeometry::Bitmap { path: "mask-buttons.png".into() },
+            components: vec![MaskComponent::default()],
+            ..Default::default()
+        });
+        app.recipe.colour_field =
+            Some(ColourField { x: 1, y: 1, b: 1, grid: vec![[0.0; 5]], amount: 0.5, enabled: true });
+        // v1.5.0: a Point Color swatch — its row is a chip, a name and a
+        // ✕, and its four sliders are laid beside the mixer's own.
+        app.recipe.point_colors.push(autoshade::recipe::PointColor::sampled(0.9, 0.7, 0.5));
+        app.sel_mask = Some(0);
+        app.start_mask_brush(None);
+        assert!(app.mask_brush.is_some(), "{lang:?}: the brush session armed");
+        app
+    }
+
     /// R38: every button in the vocabulary (`buttons.rs`) stands exactly one
     /// row tall, icon-only verbs are squares of that row, and no label wraps
     /// inside its grid cell — rendered at the default panel widths in both
@@ -10524,46 +10564,12 @@
     /// in it — the strongest form of the witness, not merely "stable".
     #[test]
     fn every_button_stands_one_row_tall_at_the_default_widths() {
-        use autoshade::recipe::{ColourField, LocalAdjustment, MaskComponent, MaskGeometry};
         use crate::buttons::DRAWN;
-        use crate::model::{Variant, VariantKind};
         for lang in [crate::i18n::Lang::En, crate::i18n::Lang::Zh] {
             let ctx = egui::Context::default();
             crate::theme::install_theme(&ctx, crate::theme::ThemePref::Dark);
             let row = ctx.style().spacing.interact_size.y;
-            let mk = |kind| Variant {
-                kind,
-                id: crate::model::new_variant_id(),
-                name: None,
-                recipe: EditRecipe::default(),
-                base: None,
-                origin: None,
-                thumb: None,
-            };
-            let mut app = AutoShadeApp {
-                lang,
-                src_path: Some(PathBuf::from("D:/library/_buttons.ARW")),
-                variants: vec![mk(VariantKind::Original), mk(VariantKind::Generated)],
-                active: 1,
-                versions: vec![1],
-                fit_ref: Some(PathBuf::from("D:/library/_buttons-reference.png")),
-                multi_sel: [0usize].into_iter().collect(),
-                ..Default::default()
-            };
-            app.base_preview = Some(std::sync::Arc::new(image::DynamicImage::new_rgb8(64, 96)));
-            app.recipe.masks.push(LocalAdjustment {
-                mask: MaskGeometry::Bitmap { path: "mask-buttons.png".into() },
-                components: vec![MaskComponent::default()],
-                ..Default::default()
-            });
-            app.recipe.colour_field =
-                Some(ColourField { x: 1, y: 1, b: 1, grid: vec![[0.0; 5]], amount: 0.5, enabled: true });
-            // v1.5.0: a Point Color swatch — its row is a chip, a name and a
-            // ✕, and its four sliders are laid beside the mixer's own.
-            app.recipe.point_colors.push(autoshade::recipe::PointColor::sampled(0.9, 0.7, 0.5));
-            app.sel_mask = Some(0);
-            app.start_mask_brush(None);
-            assert!(app.mask_brush.is_some(), "{lang:?}: the brush session armed");
+            let mut app = app_with_every_button(lang);
             let input = || egui::RawInput {
                 screen_rect: Some(egui::Rect::from_min_size(
                     egui::Pos2::ZERO,
@@ -10634,5 +10640,85 @@
                 drawn.iter().filter(|d| d.kind == "primary").count() >= 8,
                 "{lang:?}: the primary verbs are on screen"
             );
+        }
+    }
+
+    /// The panel stays free to grow for the curve and HSL editors, while every
+    /// row-filling button shares the prompts' readable ceiling. Three frames
+    /// also catch a row that asks for more than it has and grows the panel.
+    #[test]
+    fn a_button_row_never_grows_past_the_readable_width() {
+        use crate::buttons::DRAWN;
+        for lang in [crate::i18n::Lang::En, crate::i18n::Lang::Zh] {
+            for controls_width in [800.0, 1600.0] {
+                let ctx = egui::Context::default();
+                crate::theme::install_theme(&ctx, crate::theme::ThemePref::Dark);
+                let mut app = app_with_every_button(lang);
+                let mut widths = Vec::new();
+                for frame in 0..3 {
+                    DRAWN.with_borrow_mut(Vec::clear);
+                    let _ = ctx.run(
+                        egui::RawInput {
+                            screen_rect: Some(egui::Rect::from_min_size(
+                                egui::Pos2::ZERO,
+                                egui::vec2(2400.0, 1200.0),
+                            )),
+                            ..Default::default()
+                        },
+                        |ctx| {
+                            ctx.memory_mut(|m| m.set_everything_is_visible(true));
+                            let gallery = egui::SidePanel::left("gallery")
+                                .default_width(800.0)
+                                .show(ctx, |ui| app.gallery_panel(ui));
+                            let controls = egui::SidePanel::left("controls")
+                                .default_width(controls_width)
+                                .show(ctx, |ui| {
+                                    egui::ScrollArea::vertical().show(ui, |ui| {
+                                        app.ai_panel(ui);
+                                        app.develop_panel(ui);
+                                        app.retouch_panel(ui);
+                                    });
+                                });
+                            widths.push([gallery.response.rect.width(), controls.response.rect.width()]);
+                        },
+                    );
+                    let drawn = DRAWN.with_borrow(|d| d.clone());
+                    for label in [
+                        tr(lang, "🤖 AI heal (auto)"), tr(lang, "Heal area"),
+                        tr(lang, "⎘ Enter stamp"), tr(lang, "⎘ Clone area"),
+                        tr(lang, "Reverse-fit recipe"), tr(lang, "Extract style"),
+                        tr(lang, "Copy recipe"), tr(lang, "＋ Linear"), tr(lang, "Erase"),
+                    ] {
+                        assert!(
+                            drawn.iter().any(|d| d.label == label),
+                            "{lang:?}, {controls_width} px, frame {frame}: missing button {label:?}"
+                        );
+                    }
+                    for d in &drawn {
+                        assert!(
+                            d.rect.width() <= crate::theme::FIELD_W_MAX + 0.5,
+                            "{lang:?}, {controls_width} px, frame {frame}: {} {:?} is {:.1} px wide — \
+                             past the {:.0} px readable ceiling",
+                            d.kind, d.label, d.rect.width(), crate::theme::FIELD_W_MAX
+                        );
+                        assert!(
+                            d.fits,
+                            "{lang:?}, {controls_width} px, frame {frame}: {} {:?} does not fit its cell on one line",
+                            d.kind, d.label
+                        );
+                    }
+                }
+                for (i, (panel, expected)) in [("gallery", 800.0), ("controls", controls_width)].into_iter().enumerate() {
+                    let seen: Vec<f32> = widths.iter().map(|w| w[i]).collect();
+                    assert!(
+                        (seen[0] - seen[2]).abs() < 0.5,
+                        "{lang:?}: the wide {panel} panel must not grow across frames: {seen:?}"
+                    );
+                    assert!(
+                        seen.iter().all(|w| (w - expected).abs() <= 0.5),
+                        "{lang:?}: the {panel} panel left its {expected} px width: {seen:?}"
+                    );
+                }
+            }
         }
     }
