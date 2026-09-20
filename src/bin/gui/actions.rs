@@ -52,60 +52,7 @@ impl AutoShadeApp {
         if let Some(prefs) =
             cc.storage.and_then(|s| eframe::get_value::<Prefs>(s, eframe::APP_KEY))
         {
-            app.style_strength = prefs.style_strength.clamp(0.0, 1.0);
-            app.grade_strength = prefs.grade_strength.clamp(0.0, 1.0);
-            app.fit_strength = prefs.fit_strength.clamp(0.0, 1.0);
-            app.send_style_ref_image = prefs.send_style_ref_image;
-            app.deep_think = prefs.deep_think;
-            app.style_embed = prefs.style_embed;
-            app.style_describe = prefs.style_describe;
-            // Only a folder that still EXISTS is prefilled: a picker opened at
-            // a deleted path lands wherever the OS decides (the same rule the
-            // gallery restore above follows).
-            app.style_src_dir = prefs.style_src_dir.clone().filter(|d| d.is_dir());
-            app.style_xmp_dir = prefs.style_xmp_dir.clone().filter(|d| d.is_dir());
-            app.looks_src_dir = prefs.looks_src_dir.clone().filter(|d| d.is_dir());
-            app.use_looks = prefs.use_looks;
-            app.direction_adherence = autoshade::recipe::DirectionAdherence::new(prefs.direction_adherence).get();
-            app.exp_format = ExportFormat::from_pref(prefs.exp_format, prefs.save_jpeg);
-            app.exp_dest = ExportDest::from_pref(prefs.exp_dest);
-            app.last_export_dir = prefs.last_export_dir.clone();
-            app.save_denoise = prefs.save_denoise;
-            app.save_denoise_strength = prefs.save_denoise_strength.clamp(0.0, 1.0);
-            app.denoise_strength = prefs.denoise_strength.clamp(0.0, 1.0);
-            app.zoned_fit = prefs.zoned_fit;
-            app.zoned_four_regions = prefs.zoned_four_regions;
-            app.fit_ai_judge = prefs.fit_ai_judge;
-            app.fit_deep = prefs.fit_deep;
-            app.reimagine_retry = prefs.reimagine_retry;
-            app.view_mode = prefs.view_mode;
-            app.exp_long_edge = prefs.exp_long_edge;
-            app.exp_sharpen = prefs.exp_sharpen.clamp(0.0, 100.0);
-            app.exp_quality = prefs.exp_quality.clamp(1.0, 100.0);
-            app.show_clipping = prefs.show_clipping;
-            // Restore the UI language (an older save without this key decoded to
-            // `Lang::En` via `#[serde(default)]`, so this is always valid).
-            app.lang = prefs.lang;
-            // Restore the theme and re-apply it — main() installed the Dark
-            // default before prefs were readable (same shape as the greeting).
-            app.theme = prefs.theme;
-            install_theme(&cc.egui_ctx, app.theme);
-            // The greeting was set by default() BEFORE the language was known —
-            // re-issue it, or a Chinese install opens with one English line.
-            app.status =
-                tr(app.lang, "Open a photo, or open a folder to browse your library.").into();
-            // Only known color spaces — an out-of-range pref falls back to sRGB.
-            if prefs.exp_space <= 2 {
-                app.exp_space = prefs.exp_space;
-            }
-            // Only the known steps — a corrupt pref must not produce a 1-px
-            // or 100-MP working preview.
-            if [1280, 2560, 4096].contains(&prefs.preview_edge) {
-                app.preview_edge = prefs.preview_edge;
-            }
-            if let Some(dir) = prefs.gallery_dir.filter(|d| d.is_dir()) {
-                app.open_folder(dir);
-            }
+            app.restore_prefs(prefs);
         }
         // The quit guard's two process-wide hooks (see `quit.rs`): the repaint
         // handle a vetoed quit wakes the UI with, and — on macOS — the
@@ -122,6 +69,100 @@ impl AutoShadeApp {
             );
         }
         app
+    }
+
+    /// Restore the persisted settings through the same path at startup and
+    /// in headless tests; no access to the user's actual prefs is needed.
+    pub(crate) fn restore_prefs(&mut self, prefs: Prefs) {
+        let app = self;
+        app.style_strength = prefs.style_strength.clamp(0.0, 1.0);
+        app.grade_strength = prefs.grade_strength.clamp(0.0, 1.0);
+        app.fit_strength = prefs.fit_strength.clamp(0.0, 1.0);
+        app.send_style_ref_image = prefs.send_style_ref_image;
+        app.deep_think = prefs.deep_think;
+        app.style_embed = prefs.style_embed;
+        app.style_describe = prefs.style_describe;
+        // Only a folder that still EXISTS is prefilled: a picker opened at
+        // a deleted path lands wherever the OS decides (the same rule the
+        // gallery restore above follows).
+        app.style_src_dir = prefs.style_src_dir.clone().filter(|d| d.is_dir());
+        app.style_xmp_dir = prefs.style_xmp_dir.clone().filter(|d| d.is_dir());
+        app.looks_src_dir = prefs.looks_src_dir.clone().filter(|d| d.is_dir());
+        app.use_looks = prefs.use_looks;
+        app.direction_adherence = autoshade::recipe::DirectionAdherence::new(prefs.direction_adherence).get();
+        app.exp_format = ExportFormat::from_pref(prefs.exp_format, prefs.save_jpeg);
+        app.exp_dest = ExportDest::from_pref(prefs.exp_dest);
+        app.last_export_dir = prefs.last_export_dir.clone();
+        app.save_denoise = prefs.save_denoise;
+        app.save_denoise_strength = prefs.save_denoise_strength.clamp(0.0, 1.0);
+        app.denoise_strength = prefs.denoise_strength.clamp(0.0, 1.0);
+        app.zoned_fit = prefs.zoned_fit;
+        app.zoned_four_regions = prefs.zoned_four_regions;
+        app.fit_ai_judge = prefs.fit_ai_judge;
+        app.fit_deep = prefs.fit_deep;
+        app.reimagine_retry = prefs.reimagine_retry;
+        app.view_mode = prefs.view_mode;
+        app.exp_long_edge = prefs.exp_long_edge;
+        app.exp_sharpen = prefs.exp_sharpen.clamp(0.0, 100.0);
+        app.exp_quality = prefs.exp_quality.clamp(1.0, 100.0);
+        app.show_clipping = prefs.show_clipping;
+        // Restore the UI language (an older save without this key decoded to
+        // `Lang::En` via `#[serde(default)]`, so this is always valid).
+        app.lang = prefs.lang;
+        // Restore the theme and re-apply it — main() installed the Dark
+        // default before prefs were readable (same shape as the greeting).
+        app.theme = prefs.theme;
+        install_theme(&app.egui_ctx, app.theme);
+        // The greeting was set by default() BEFORE the language was known —
+        // re-issue it, or a Chinese install opens with one English line.
+        app.status =
+            tr(app.lang, "Open a photo, or open a folder to browse your library.").into();
+        // Each arm advances one persisted dial law; current/future files
+        // keep the choices made under their own law.
+        for era in prefs.prefs_era..PREFS_ERA {
+            match era {
+                0 => {
+                    let full = autoshade::denoise::DEFAULT_STRENGTH_RAW;
+                    if prefs.denoise_strength != full || prefs.save_denoise_strength != full {
+                        app.startup_note = Some(trf(
+                            app.lang,
+                            "AI denoise strength reset to 100 % (Detail fold {a} %, Export fold {b} %): the dial's meaning changed in v1.4.0 — on a RAW it is a sensor-domain blend, and less than 100 % only puts noise back",
+                            &[
+                                ("a", &format!("{:.0}", prefs.denoise_strength * 100.0)),
+                                ("b", &format!("{:.0}", prefs.save_denoise_strength * 100.0)),
+                            ],
+                        ));
+                    }
+                    app.denoise_strength = full;
+                    app.save_denoise_strength = full;
+                }
+                _ => unreachable!("missing preference migration for era {era}"),
+            }
+        }
+        // Only known color spaces — an out-of-range pref falls back to sRGB.
+        if prefs.exp_space <= 2 {
+            app.exp_space = prefs.exp_space;
+        }
+        // Only the known steps — a corrupt pref must not produce a 1-px
+        // or 100-MP working preview.
+        if [1280, 2560, 4096].contains(&prefs.preview_edge) {
+            app.preview_edge = prefs.preview_edge;
+        }
+        if let Some(dir) = prefs.gallery_dir.filter(|d| d.is_dir()) {
+            app.open_folder(dir);
+        }
+        // A restored folder's asynchronous status must not erase the note
+        // before the user sees it. Its completion uses the same status line.
+        if !app.busy {
+            app.show_startup_note();
+        }
+    }
+
+    pub(crate) fn show_startup_note(&mut self) {
+        if let Some(note) = self.startup_note.take() {
+            self.status.push_str(" — ");
+            self.status.push_str(&note);
+        }
     }
 
     /// What quitting RIGHT NOW would cost, in the terms `quit.rs` publishes.

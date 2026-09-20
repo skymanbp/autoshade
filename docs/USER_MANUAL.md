@@ -223,15 +223,17 @@ brightness histogram, so a star field's stars, a night scene's point lights and
 a specular highlight come back at their own brightness instead of at one shared
 ceiling. Through v1.4.0 they did not — the map stopped at the frame's 99.95th
 percentile and a 15 s ISO-3200 star field lost 61 % of every star. Against
-Lightroom's own Enhance→Denoise output on two 15 s astro frames of the same
-camera, the path now keeps as much faint detail as Lightroom does with about
-half the residual grain. A baked source (a PNG/TIFF/JPEG master) still
-goes through SCUNet on its developed pixels. The fold's own **AI denoise
+Lightroom's own Enhance→Denoise output, v1.5.0's default measured about
+1.01–1.06 times its fine grain over 15 real pairs. A baked source (a PNG/TIFF/JPEG
+master) still goes through SCUNet on its developed pixels. The fold's own **AI denoise
 strength** dial starts at 100%: on a RAW that is the model's whole output, and
 anything less only puts noise back; on a baked source the SCUNet law applies
 (luminance follows the dial, colour noise is removed in full from 50% up) and
 50% is its sweet spot. The Export fold's **🤖 AI Denoise on export** has a dial
-of its own, and neither reaches the other. While a ◈ card exists its master is
+of its own, and neither reaches the other. On the first launch with preferences
+from v1.3.4–v1.5.0, both dials reset once to 100% because their law changed in
+v1.4.0; the startup status reports changed values, and choices saved in the new
+preferences era survive later launches. While a ◈ card exists its master is
 the photo's negative: a later Reimagine sends it, and a Reverse-fit is solved
 on it and lands on it (section 4).
 

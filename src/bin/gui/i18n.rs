@@ -174,6 +174,8 @@ fn zh_map() -> &'static HashMap<&'static str, &'static str> {
 /// (placeholders included), or the lookup silently misses.
 #[rustfmt::skip]
 static ZH_ENTRIES: &[(&str, &str)] = &[
+    ("AI denoise strength reset to 100 % (Detail fold {a} %, Export fold {b} %): the dial's meaning changed in v1.4.0 — on a RAW it is a sensor-domain blend, and less than 100 % only puts noise back",
+     "AI 降噪强度已重置为 100%（去噪折叠区原 {a}%、导出折叠区原 {b}%）：v1.4.0 起这把滑杆的含义变了——RAW 上是传感器域混合，低于 100% 只会把噪声放回来"),
     (" [look reference: finished photo {stem} from the photographer's look library; tags: {tags}]", " [外观参考：来自你的成片外观库的照片 {stem}；标签：{tags}]"),
     (" [finished look photo {stem} also went to the vision model as IMAGE 2]", " [成片 {stem} 同时作为 IMAGE 2 发给了视觉模型]"),
     (" [look library unavailable for this develop ({n} finished photos): style embedding was off or no query vector was produced]", " [本次显影用不到外观库（库中有 {n} 张成片）：风格嵌入未开启，或没有生成查询向量]"),

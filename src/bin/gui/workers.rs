@@ -566,7 +566,10 @@ impl AutoShadeApp {
                 Msg::StyleBuilt(outcome) => self.on_style_built(lang, *outcome),
                 Msg::Segmented(res) => self.on_segmented(lang, res),
                 Msg::MaskRefined(res) => self.on_mask_refined(lang, res),
-                Msg::Folder(boxed) => self.on_folder(lang, *boxed),
+                Msg::Folder(boxed) => {
+                    self.on_folder(lang, *boxed);
+                    self.show_startup_note();
+                }
                 Msg::Thumb { generation, idx, img } => self.on_thumb(ctx, generation, idx, *img),
                 Msg::MasterLoaded { photo, origin, edge, stamp, img } => {
                     self.on_master_loaded(ctx, lang, photo, origin, edge, stamp, *img)
