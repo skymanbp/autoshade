@@ -1242,16 +1242,37 @@ fn default_crop(raw: &rawler::RawImage) -> rawler::imgop::Rect {
 /// to place correctly would have landed 32 px right of where Lightroom draws
 /// it.
 ///
-/// **Why rawler does not do it.** Two facts in the dependency compose, and
-/// neither is wrong on its own (rawler 0.7.2, read at
-/// `~/.cargo/registry/src/…/rawler-0.7.2/`):
-///   * `decoders/arw.rs:707-713` builds `active_area` from the
-///     `SonyRawImageSize` tag as `Rect::new(Point::default(), …)` — the tag
-///     carries a SIZE, so the origin is pinned at `(0, 0)`;
-///   * `imgop/develop.rs:216` applies the default crop only
-///     `if crop.d != intermediate.dim()`, and the demosaic ROI has already
-///     taken `active_area.d` pixels, so a default crop that is a pure
-///     TRANSLATION has exactly the same size and is skipped.
+/// **Why rawler does not do it.** rawler 0.7.2 (read at
+/// `~/.cargo/registry/src/…/rawler-0.7.2/`) measures the default crop against
+/// the window its demosaic read, and two shapes of `(active_area, crop_area)`
+/// defeat that:
+///   * **no active area at all** — the MEASURED shape of the body the defect
+///     was found on. `AUTOSHADE_RAW_ZOO` over four ILCE-7RM4A files
+///     (2026-09-21) prints `sensor 9600x6376 active none crop
+///     9504x6336@32,20` for every one: the files carry no `SonyRawImageSize`
+///     tag and the camera database declares no borders
+///     (`decoders/arw.rs:191-196`). The demosaic then reads the whole sensor,
+///     and `imgop/develop.rs:204-209` adapts the crop to
+///     `active_area.unwrap_or(crop)` — to ITSELF — so its origin collapses to
+///     `(0, 0)` and the crop's SIZE is cut from the sensor's corner;
+///   * **an active area of the crop's own size at another origin** — what
+///     `arw.rs:707-713` builds when the tag IS present and reports the trimmed
+///     size (`Rect::new(Point::default(), …)`: the tag carries a size, so the
+///     origin is pinned at `(0, 0)`). `develop.rs:216` applies the default
+///     crop only `if crop.d != intermediate.dim()`, so a default crop that is
+///     a pure TRANSLATION has exactly the same size and is skipped. No file in
+///     hand has this shape: it is a source read, kept because rawler answers
+///     it wrongly by the same arithmetic.
+///
+/// **What v0.32.0 missed.** It shipped the second arm alone, from the source
+/// read, with a test table of synthetic rectangles. On the real files this
+/// function therefore answered [`CropAlignment::NothingToMove`] and every
+/// render kept starting at the sensor's corner. It was caught on 2026-09-21 by
+/// the hot-site map (101 of 101 mapped photosites sat at the SAME coordinates
+/// in the mosaic and in the render) and then read off the render itself: an
+/// unconstrained ±48 px search of a full-resolution render against Lightroom's
+/// export of the same RAW answers `(32, 20)` in three windows of three without
+/// the first arm, and `(0, 0)` with it.
 ///
 /// **The fix, and why it is this one.** Moving the demosaic ROI (i.e.
 /// `active_area`) to the default-crop origin costs nothing — the developed
@@ -1262,12 +1283,12 @@ fn default_crop(raw: &rawler::RawImage) -> rawler::imgop::Rect {
 /// Bayer phase follows; `apply_scaling` has already run over the whole frame
 /// in raw coordinates and is untouched by this.
 ///
-/// Deliberately NARROW: it fires only when the two rectangles are the same
-/// SIZE and differ in origin, which is exactly the case rawler skips. When
-/// they differ in size, rawler's own `CropDefault` step does the right thing
-/// and this leaves it alone. A rectangle that would run off the sensor is
-/// refused rather than clamped — a RAW whose tags disagree with its own
-/// dimensions is not a frame to guess at.
+/// Deliberately NARROW: it fires only on the two shapes above, the ones where
+/// rawler cuts the right SIZE from the wrong ORIGIN. When an active area is
+/// declared and the sizes differ, rawler's own `CropDefault` step does the
+/// right thing and this leaves it alone. A rectangle that would run off the
+/// sensor is refused rather than clamped — a RAW whose tags disagree with its
+/// own dimensions is not a frame to guess at.
 pub fn align_default_crop(raw: &mut rawler::RawImage) -> CropAlignment {
     let verdict = aligned_demosaic_roi(raw.crop_area, raw.active_area, raw.width, raw.height);
     match verdict {
@@ -1328,10 +1349,18 @@ fn aligned_demosaic_roi(
     width: usize,
     height: usize,
 ) -> CropAlignment {
-    let (Some(crop), Some(active)) = (crop, active) else {
+    let Some(crop) = crop else {
         return CropAlignment::NothingToMove;
     };
-    if crop.d != active.d || crop.p == active.p {
+    // Where rawler WILL cut the crop's size from, against where the crop says
+    // it starts. With an active area of another size its own `CropDefault`
+    // measures the difference and is right; the two shapes below are the ones
+    // it answers from the wrong origin (see `align_default_crop`).
+    let misplaced = match active {
+        Some(active) => crop.d == active.d && crop.p != active.p,
+        None => (crop.p.x, crop.p.y) != (0, 0),
+    };
+    if !misplaced {
         return CropAlignment::NothingToMove;
     }
     if crop.p.x + crop.d.w > width || crop.p.y + crop.d.h > height {
@@ -3527,30 +3556,56 @@ mod tests {
     /// v0.32.0 — the develop window sits on the DefaultCrop rectangle, not on
     /// the sensor's top-left corner.
     ///
-    /// The first row is the real Sony A7R IV geometry the defect was measured
-    /// on: `9600 × 6376` raw, `SonyRawImageSize` giving rawler an active area
-    /// of `9504 × 6336` **at (0, 0)**, `DefaultCropOrigin = (32, 20)`. rawler
-    /// 0.7.2 skips its own `CropDefault` there (equal sizes — see
-    /// `align_default_crop`), which is why every ARW render landed 32 px right
-    /// and 20 px down of Lightroom's frame.
+    /// The first row is the geometry the defect was measured on, as the
+    /// `AUTOSHADE_RAW_ZOO` probe printed it for four ILCE-7RM4A files on
+    /// 2026-09-21: `9600 × 6376` raw, NO active area, `DefaultCropOrigin =
+    /// (32, 20)`. rawler 0.7.2 adapts that crop to itself and cuts its size
+    /// from the sensor's corner (see `align_default_crop`), which is why every
+    /// one of those renders landed 32 px right and 20 px down of Lightroom's
+    /// frame. v0.32.0 pinned only the second row — an active area of the
+    /// crop's size at `(0, 0)`, a source read no file in hand has — so its fix
+    /// never fired on the body it was written for.
     ///
     /// The other rows are the cases that must NOT move: rawler's own crop step
     /// already handles a size-reducing crop, an aligned pair has nothing to do,
     /// and a rectangle that would run off the sensor is refused rather than
     /// clamped.
     ///
-    /// MUTATION THIS CATCHES: drop the `crop.d != active.d` guard and the
-    /// size-reducing row starts double-cropping; drop the bounds check and the
-    /// off-sensor row hands rawler a ROI it would index past the buffer with.
+    /// MUTATION THIS CATCHES: answer `NothingToMove` whenever the active area
+    /// is `None` (the v0.32.0 code) and the measured row stops moving; drop the
+    /// `crop.d == active.d` guard and the size-reducing row starts
+    /// double-cropping; drop the bounds check and either off-sensor row hands
+    /// rawler a ROI it would index past the buffer with.
     #[test]
     fn the_demosaic_window_moves_onto_the_default_crop_rectangle() {
         use rawler::imgop::{Dim2, Point, Rect};
         let r = |x, y, w, h| Rect::new(Point::new(x, y), Dim2::new(w, h));
         let sony_crop = r(32, 20, 9504, 6336);
         assert_eq!(
+            aligned_demosaic_roi(Some(sony_crop), None, 9600, 6376),
+            CropAlignment::Moved(sony_crop),
+            "measured on the ILCE-7RM4A: no active area, and the window still starts at \
+             DefaultCropOrigin, not at the sensor corner"
+        );
+        assert_eq!(
+            aligned_demosaic_roi(Some(r(0, 0, 9504, 6336)), None, 9600, 6376),
+            CropAlignment::NothingToMove,
+            "no active area and a crop that starts at the corner: rawler's cut is already right"
+        );
+        assert_eq!(
+            aligned_demosaic_roi(Some(r(200, 20, 9504, 6336)), None, 9600, 6376),
+            CropAlignment::OffSensor { crop: r(200, 20, 9504, 6336), width: 9600, height: 6376 },
+            "the refusal holds without an active area too"
+        );
+        assert_eq!(
+            aligned_demosaic_roi(None, None, 9600, 6376),
+            CropAlignment::NothingToMove,
+            "a RAW that declares neither rectangle keeps the whole sensor"
+        );
+        assert_eq!(
             aligned_demosaic_roi(Some(sony_crop), Some(r(0, 0, 9504, 6336)), 9600, 6376),
             CropAlignment::Moved(sony_crop),
-            "the A7R IV window starts at DefaultCropOrigin, not at the sensor corner"
+            "the source-read shape: an active area of the crop's size at the sensor corner"
         );
         assert_eq!(
             aligned_demosaic_roi(Some(r(32, 20, 9000, 6000)), Some(r(0, 0, 9504, 6336)), 9600, 6376),
@@ -4124,8 +4179,10 @@ mod tests {
     /// files — one per FORMAT, eight makes, Canon covering both CR2 and CR3 —
     /// on 2026-08-19. That is why this test can exist in
     /// a public repository without the photographs — the numbers are the
-    /// fixture. Row 1 (A7R IV) is the geometry the v0.32.0 defect was
-    /// originally measured on and has no zoo file.
+    /// fixture. Row 1 (ILCE-7RM4A) is the body the origin defect was found on,
+    /// measured by the same probe over four files on 2026-09-21; row 1b is the
+    /// shape v0.32.0 ASSUMED for that body from a source read, which no file in
+    /// hand has.
     ///
     /// **What the measurement CORRECTED.** Two claims that a source read alone
     /// had gotten wrong:
@@ -4146,12 +4203,12 @@ mod tests {
     ///
     /// And the A7 III is the sharpest instance — it is a SONY, and it does not
     /// move either, because `SonyRawImageSize` hands rawler the FULL
-    /// 6048×4024 sensor there while on the A7R IV it hands over the
-    /// already-trimmed 9504×6336. The v0.32.0 defect is therefore per-BODY,
-    /// not per-make.
+    /// 6048×4024 sensor there, while the ILCE-7RM4A files carry no such tag
+    /// and reach the develop with no active area at all. The origin defect is
+    /// therefore per-BODY, not per-make.
     ///
     /// MUTATION THIS CATCHES: widen the fix to fire when only the ORIGINS
-    /// differ (drop `crop.d != active.d`) and seven of these nine rows start
+    /// differ (drop `crop.d == active.d`) and seven of these nine rows start
     /// moving a window rawler already sized differently — a per-make offset
     /// with no symptom until someone measures a Canon render against
     /// Lightroom. Widen it to fire on `crop.p == active.p` and the RW2 row
@@ -4162,15 +4219,23 @@ mod tests {
         use rawler::imgop::{Dim2, Point, Rect};
         let r = |x, y, w, h| Rect::new(Point::new(x, y), Dim2::new(w, h));
 
-        // --- Row 1: ARW / Sony A7R IV. `arw.rs:190-197` — active from the
-        // SonyRawImageSize tag at `Point::default()`, crop from
-        // DefaultCropOrigin/Size. Here the tag reports the TRIMMED size, so
-        // the two rectangles are the same size at different origins: the ONE
-        // shape the v0.32.0 fix exists for. Not a zoo file.
+        // --- Row 1: ARW / Sony ILCE-7RM4A, MEASURED (four files, 2026-09-21):
+        // `sensor 9600x6376 active none crop 9504x6336@32,20`. No
+        // SonyRawImageSize tag, no camera-DB borders (`arw.rs:191-196`), crop
+        // from DefaultCropOrigin/Size. rawler adapts that crop to itself and
+        // cuts its size from the sensor's corner, so the window has to move.
+        assert_eq!(
+            aligned_demosaic_roi(Some(r(32, 20, 9504, 6336)), None, 9600, 6376),
+            CropAlignment::Moved(r(32, 20, 9504, 6336)),
+            "ARW (ILCE-7RM4A): no active area, and rawler cuts the crop's size from the corner"
+        );
+        // --- Row 1b: the shape v0.32.0 assumed for that body — active from a
+        // SonyRawImageSize tag that reports the TRIMMED size at
+        // `Point::default()` (`arw.rs:707-713`). A source read, not a zoo file.
         assert_eq!(
             aligned_demosaic_roi(Some(r(32, 20, 9504, 6336)), Some(r(0, 0, 9504, 6336)), 9600, 6376),
             CropAlignment::Moved(r(32, 20, 9504, 6336)),
-            "ARW (A7R IV): equal sizes at different origins is the case rawler skips"
+            "ARW (source read): equal sizes at different origins is the case rawler skips"
         );
 
         // --- Rows 2-9: measured. Every one must be NothingToMove.

@@ -2104,8 +2104,20 @@ const PROJECT_REFINE: usize = 8;
 // only dispose downward.
 //
 // Retuning would need a pair on which THIS term is the number and the number
-// is wrong. The corpus has exactly one pair on which this term is the number,
-// and it is right. So 6.0 stands, and nothing is waiting on it.
+// is wrong. On the frame above the corpus had exactly one pair on which this
+// term is the number, and it was right. So 6.0 stands, and nothing is waiting
+// on it.
+//
+// THE TABLE IS THE 2026-09-02 FRAME and no longer the corpus's. Two fixes of
+// 2026-09-21 moved every residual in it — the base look estimated against the
+// picture the camera drew, and the develop window moved onto the DefaultCrop
+// rectangle — and re-read on the frame those leave, one of the three caps
+// binds on all six `p` pairs, `p36` included: the ladder proposes 0.63 there
+// and 0.51 is reported. So the corpus as it stands measures this slope on NO
+// pair. That is a fact about the corpus, not an argument for a different
+// number, and 6.0 is unchanged: the relation this comment derives is the one
+// `the_confidence_family_is_one_calibration` pins, and it holds frame by
+// frame. The current residuals are in the ledger (Part 13).
 
 /// Confidence per unit of look error.
 const CONFIDENCE_SLOPE: f32 = 6.0;
@@ -12114,10 +12126,22 @@ mod tests {
         worst
     }
 
-    /// Rebuild the exact candidate stage 4 judged for a pair: the fitted
-    /// recipe minus its channel curves (`cur`) and the curves re-derived on
-    /// that state (`with`). Same reconstruction the foreign-hue and rotation
-    /// pin tests use, shared so the three read one census.
+    /// Rebuild a candidate of the shape stage 4 judges: the fitted recipe
+    /// minus its channel curves (`cur`) and the curves re-derived on that
+    /// state (`with`). Shared by the foreign-hue and rotation pin tests so
+    /// they read one census.
+    ///
+    /// NOT the stage's own candidate, and the difference is the estimator:
+    /// this derives the curves with [`residual_channel_curve`], the solve
+    /// with [`residual_channel_curve_weighted`] over the evidence ×
+    /// robust-pairing weights. On a synthetic fixture whose pairing is exact
+    /// the weights are flat and the two agree, which is why the pin tests
+    /// below may use it; on a real photograph they do not. Measured on the
+    /// `p40` calibration pair (2026-09-21): this rebuild reads 13.5° of added
+    /// hue fan where the gate read 11.0°, and 15.4° against 11.9° after the
+    /// develop window moved onto the DefaultCrop rectangle. A test whose
+    /// subject is the GATE'S verdict therefore reads the gate's own published
+    /// number — see `the_fan_gate_costs_a_real_two_temperature_pair_nothing`.
     struct CastCandidate {
         /// The stage's input render: the fitted recipe minus its curves.
         cur: Vec<[f32; 3]>,
@@ -15976,22 +16000,38 @@ mod tests {
     /// different gate entirely (the pixel-aligned re-hue veto), so the fan
     /// gate is not what withheld it there either.
     ///
-    /// Re-measured 2026-09-21, when the calibration's base look began to be
-    /// estimated against the picture the camera drew
-    /// (`render::camera_base_look`: the lens profile's corner lift no longer
-    /// enters the CDF match on a body whose preview does not show it). The
-    /// question this test asks has the same answer: `p40` still reads 13.5°
-    /// and ships admitted, 0.0745 → 0.0342 at confidence 0.599; `p41` now
-    /// reads 13.0°, 2° under the line where it had 6°, and its cast is still
-    /// withheld by the re-hue veto, not by the fan gate. What did move is
-    /// `p41`'s fit itself, 0.0714 → 0.0581 at 0.370 where the old base gave
-    /// 0.0782 → 0.0413 at 0.437: on the brighter base the solve answers with
-    /// −0.3 EV, saturation +60 and a mixer that barely moves, where it had
-    /// answered with +0.8 EV, saturation +36 and Orange / Blue at the mixer's
-    /// ±18. The same fits run on both curves over the six corpus pairs moved
-    /// both ways (`p36` 0.1050 → 0.0550, the other five +0.0007 … +0.0168);
-    /// the figures of 2026-09-02 above stay as the record of what the gate was
-    /// shipped on.
+    /// WHICH fan this test reads, since 2026-09-21. Until then it read a
+    /// candidate it rebuilt itself (`cast_stage_candidate_from`), whose
+    /// channel curves come from the UNWEIGHTED [`residual_channel_curve`]
+    /// while the solve derives its own over the evidence × robust-pairing
+    /// weights. The two have never been one candidate on a real pair — the
+    /// rebuild read 13.5° where the gate itself read 11.0° — and a 2–3° proxy
+    /// gap is not a rounding error on a 15° line. The subject here is the
+    /// GATE'S verdict, so the pin is the gate's own reading, the one it
+    /// publishes in [`keys::FIT_NOTE_CAST_ADMITTED_FAN`] and the photographer
+    /// reads in the rationale.
+    ///
+    /// Re-measured 2026-09-21, twice, because two fixes moved the frame this
+    /// solve reads: the calibration's base look began to be estimated against
+    /// the picture the camera drew (`render::camera_base_look` — the lens
+    /// profile's corner lift no longer enters the CDF match on a body whose
+    /// preview does not show it), and then the develop window moved onto the
+    /// DefaultCrop rectangle for a RAW that declares no active area
+    /// (`decode::aligned_demosaic_roi`), which puts every render of this body
+    /// on Lightroom's own frame instead of 32 px right and 20 px down of it.
+    ///
+    /// The question this test asks keeps its answer, and on a shared frame it
+    /// is answered for one more pair than before. `p40` is unmoved: 11.0° of
+    /// added fan before the origin fix and 11.9° after, against the 15° line,
+    /// admitted both times, 0.0742 → 0.0338 at confidence 0.601. `p41` is
+    /// what moved: its cast used to be withheld — by neither the fan gate nor
+    /// the projection, both measured absent, and the 2026-09-02 record above
+    /// names the pixel-aligned re-hue veto — and on the shared frame it is
+    /// ADMITTED at 9.0°, its fit going 0.0745 → 0.0188 at confidence 0.498
+    /// where the same pair gave 0.0714 → 0.0581 at 0.370 one frame earlier.
+    /// The six corpus pairs' residuals moved both ways under the two fixes;
+    /// the ledger's Part 13 carries the table. The figures of 2026-09-02 stay
+    /// as the record of what the gate was shipped on.
     ///
     /// Both pairs are OPTIONAL, like every other corpus pair: absent, the
     /// test says so and passes, and the synthetic two-temperature fixture
@@ -16004,8 +16044,8 @@ mod tests {
         use crate::rationale::keys;
         let Some(root) = calibration_corpus() else { return };
         for (code, want_fan, want_before, want_after, want_conf) in [
-            ("p40", 13.5f32, 0.0745f32, 0.0342f32, 0.599f32),
-            ("p41", 13.0, 0.0714, 0.0581, 0.370),
+            ("p40", 11.9f32, 0.0742f32, 0.0338f32, 0.601f32),
+            ("p41", 9.0, 0.0745, 0.0188, 0.498),
         ] {
             let raw = root.join(format!("{code}.arw"));
             let target_path = root.join(format!("{code}-target.jpg"));
@@ -16024,18 +16064,24 @@ mod tests {
             let tgt = image::open(target_path).expect("the finished rendition");
             let base = crate::pipeline::calibration_recipe(crate::pipeline::fit_calibration(&raw));
             let report = fit_recipe_from(&src, &tgt, &base);
-            let candidate = cast_stage_candidate_from(&src, &tgt, &base);
-            let evidence = evidence_model(&candidate.cur, &candidate.tp);
-            let (share, fan, _) =
-                hue_fan_weighted(&candidate.cur, &candidate.with_px, &evidence)
-                    .expect("a two-temperature frame has a region-sized hue class");
+            // The cast SHIPS — which is the whole claim, and what makes the
+            // fan reading below exist: the gate publishes what it passed on
+            // only when it admits.
+            assert!(
+                report.notes.iter().any(|n| n.key == keys::FIT_NOTE_CAST_ADMITTED),
+                "{code}: this pair's cast is the thing the gate is supposed to cost nothing, and it \
+                 did not ship: {}",
+                report.recipe.rationale
+            );
+            let fan = projection_arg(&report, keys::FIT_NOTE_CAST_ADMITTED_FAN, "fan")
+                .expect("an admitted cast on a two-temperature frame publishes the fan it passed on");
             eprintln!(
-                "TWO_TEMPERATURE {code} share={share:.3} fitted_fan={fan:.1} err={:.6}->{:.6} conf={:.6}",
+                "TWO_TEMPERATURE {code} gate_fan={fan:.1} err={:.6}->{:.6} conf={:.6}",
                 report.err_before, report.err_after, report.recipe.confidence
             );
             assert!(
                 (fan - want_fan).abs() <= 0.6,
-                "{code}: the fitted cast's fan moved off the measured {want_fan}°: {fan:.1}°"
+                "{code}: the cast's published fan moved off the measured {want_fan}°: {fan:.1}°"
             );
             assert!(
                 fan < FAN_DEG,

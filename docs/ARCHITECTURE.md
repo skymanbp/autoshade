@@ -1473,19 +1473,40 @@ ARWs carry `DefaultCropOrigin = (32, 20)`, `DefaultCropSize = (9504, 6336)`
 inside a `9600 × 6376` raw frame: AutoShade emitted the right SIZE from the
 wrong ORIGIN, so recipe coordinates and Lightroom coordinates disagreed by
 0.34 % of the width at the frame edge. Two facts in the dependency compose to
-produce it, neither wrong on its own — rawler builds the ARW's `active_area`
-from the `SonyRawImageSize` tag, which carries a SIZE, so the origin is pinned
-at `(0, 0)` (`decoders/arw.rs:707`); and its `CropDefault` step applies the
-default crop only `if crop.d != intermediate.dim()` (`imgop/develop.rs:216`),
-which a pure TRANSLATION never satisfies. `decode::align_default_crop` moves
-the demosaic ROI onto the declared rectangle instead, which costs nothing (the
-buffer is the same size, read from the right place) where a post-hoc crop would
-pay a second full-frame copy. Narrow by construction: it fires only for a
-same-size, different-origin pair, refuses a rectangle that would run off the
-sensor, and leaves every size-reducing crop to rawler's own step. **Every Sony
-ARW render therefore shifts by (32, 20) from v0.32.0 on** — stored crops and
-mask coordinates now mean what Lightroom means by them, and a render made
-before the fix is 32 px right and 20 px down of one made after.
+produce it. rawler measures the default crop against the window its demosaic
+read, and TWO shapes of `(active_area, crop_area)` defeat that. The one
+v0.32.0 fixed is a size-equal pair at different origins: `decoders/arw.rs:707`
+builds `active_area` from the `SonyRawImageSize` tag, which carries a SIZE, so
+the origin is pinned at `(0, 0)`, and `imgop/develop.rs:216` applies the
+default crop only `if crop.d != intermediate.dim()`, which a pure TRANSLATION
+never satisfies. The one it MISSED is no active area at all — and that is the
+shape the body it was written for actually has. `AUTOSHADE_RAW_ZOO` over four
+ILCE-7RM4A files (2026-09-21) prints `sensor 9600x6376 active none crop
+9504x6336@32,20` for every one: no `SonyRawImageSize` tag, no camera-database
+borders (`arw.rs:191-196`). rawler then adapts the crop to
+`active_area.unwrap_or(crop)` — to itself — so its origin collapses to
+`(0, 0)` (`imgop/develop.rs:204-209`) and the crop's SIZE is cut from the
+sensor's corner. `decode::aligned_demosaic_roi` answered "nothing to move"
+there, so the v0.32.0 fix never fired on the files it was written for; since
+2026-09-21 it asks where rawler will cut from instead, and moves the demosaic
+ROI onto the declared rectangle in both shapes. That costs nothing (the buffer
+is the same size, read from the right place) where a post-hoc crop would pay a
+second full-frame copy. Still narrow: a rectangle that would run off the
+sensor is refused, and every size-reducing crop is left to rawler's own step.
+**A render of this body therefore shifts by (32, 20) from 2026-09-21 on** —
+stored crops and mask coordinates now mean what Lightroom means by them, an
+unconstrained ±48 px registration of a full-resolution render against
+Lightroom's export of the same RAW reads (32, 20) before the fix and (0, 0)
+after, and the two renders are the same picture translated: 0.10 % of the
+overlap differs and all of it within 3 px of the overlap's own border.
+The frame keeps its SIZE through all of this — only its origin moves — and
+crop and mask geometry is stored normalised to the frame (`recipe.rs:1634`),
+so **a recipe saved before this date keeps its numbers while the picture
+under them moves by (32, 20)**: 0.337 % of the width, 0.316 % of the height.
+Nothing migrates that. `coord_era` TURNS coordinates, it does not translate
+them, and no field in a recipe records which origin it was drawn against, so
+the old batch cannot be told from the new one without a further era. It is
+disclosed here rather than fixed.
 
 Because the frame finally turns, **recipes saved before v0.30.0 hold their crop
 and mask coordinates in the SENSOR frame**. `EditRecipe.coord_era` records

@@ -45,6 +45,13 @@ The map never changes the input-relative metrics or the review plate.
 Faint colour outliers use input SNR
 [5,10). Lines 9--12 are reported, never used to select/tune the measurement.
 
+ONE FRAME (2026-09-21). Until the origin fix a render of this body started at
+the sensor's corner while Lightroom starts at DefaultCropOrigin (32, 20), and
+this script placed Lightroom's pictures at (32, 20) as a constant. Renders now
+share Lightroom's frame, so --lightroom-offset defaults to 0,0 and
+--mosaic-offset to 32,20; an older render needs 32,20 and 0,0. Either way the
+registration check below has to find zero residual or the run stops.
+
 TWO GROUPS (2026-09-21). Measured after the noise-field cleaner: lines 1 and 2
 on the ordinary renders read the camera-matched base curve (11 of its 13 knots
 inside the sky's 0.04--0.17 band, segment slopes 0.33--2.25: the noisy input and
@@ -508,8 +515,9 @@ def run(args, work):
         raise ValueError('--flat-input/--flat-ours and --mosaic-input/--mosaic-ours are given in pairs')
     # The flat pair joins the registration check and the tile statistics, nothing else: no detection, no star rows.
     flat_paths = {'flat-input': resolve(args.flat_input), 'flat-NEW': resolve(args.flat_ours)} if args.flat_input else {}
+    lr_offset = tuple(int(v) for v in args.lightroom_offset.split(','))
     images = {k: Image(path, k in ('LR-OFF', 'Lightroom'),
-                       (32, 20) if k in ('LR-OFF', 'Lightroom') else (0, 0), work)
+                       lr_offset if k in ('LR-OFF', 'Lightroom') else (0, 0), work)
               for k, path in {**paths, **flat_paths}.items()}
     roi = SKY
     # Verify the prescribed integer registration independently of noise tiles.
@@ -659,7 +667,7 @@ def run(args, work):
                    'fwhm_change': float(np.mean(f['fwhm'][width_ok]-base['fwhm'][width_ok])),
                    'core_colour_change': np.median(np.abs(chroma[bright]-old_chroma[bright]), axis=0).tolist()}
     # One input-defined tone map: never refit to a denoised candidate.
-    tone = fit_tone_map(images['input'].y, images['LR-OFF'].y, mask, (32, 20))
+    tone = fit_tone_map(images['input'].y, images['LR-OFF'].y, mask, lr_offset)
     (work/'tone-map.json').write_text(json.dumps(tone, indent=2), encoding='utf-8')
     matched_y = {}
     absolute_detections = {}
@@ -739,7 +747,7 @@ def run(args, work):
               'original_5_and_7': {'5': gates['NEW']['5'], '7': gates['NEW']['7']}}
     result = {'protocol_sha256': hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
               'inputs': {k: str(p) for k, p in paths.items()}, 'root': str(root),
-              'registration': registration, 'sky': roi,
+              'registration': registration, 'lightroom_offset': list(lr_offset), 'sky': roi,
               'mask': {'input_sites': len(detections['input']), 'lr_off_sites': len(detections['LR-OFF']),
                        'surviving_sky_fraction': float(np.mean(~mask[128:4224, 128:9344])),
                        'eligible_tiles': sum(r[2] >= .7 for r in eligibility), 'selected_tiles': len(sites),
@@ -796,7 +804,12 @@ def main():
     ap.add_argument('--flat-ours', help='the denoised render with the recipe base_curve emptied')
     ap.add_argument('--mosaic-input', help='16-bit mosaic the cleaner received (cleaner lines 5c, 7c)')
     ap.add_argument('--mosaic-ours', help='16-bit mosaic the cleaner returned at strength 1')
-    ap.add_argument('--mosaic-offset', default='0,0', help='render (0,0) in mosaic coordinates, X,Y; verified, not trusted')
+    ap.add_argument('--mosaic-offset', default='32,20',
+                    help='render (0,0) in mosaic coordinates, X,Y: this body\'s DefaultCropOrigin; a render made before '
+                         'the 2026-09-21 origin fix started at the sensor corner and needs 0,0. Verified, not trusted')
+    ap.add_argument('--lightroom-offset', default='0,0',
+                    help='render coordinates of Lightroom\'s (0,0), X,Y; a render made before the origin fix needs '
+                         '32,20. Verified by the registration check, not trusted')
     ap.add_argument('--mosaic-white', type=float, default=16383., help='the mosaic white level, for the clipping screen')
     ap.add_argument('--candidate', action='append', default=[])
     ap.add_argument('--work'); ap.add_argument('--json'); ap.add_argument('--mask-sheet')
