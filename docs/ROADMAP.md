@@ -153,6 +153,14 @@
 
 ## 未发布（已完成的车道改动，尚未发版）
 
+### 星空降噪标准 F1：按同一 Detail 设置复测（2026-09-20）
+
+- **同参数显影**：真实 CLI 的 `serve` / `api_download` 读取 XMP 配方，Sharpness 40、半径 1、Detail 25、Masking 0、亮度／颜色 NR 0、Linear、As Shot、Adobe Standard、无镜头校正；只在车道临时 RAW 副本旁写侧车，复用已验证的干净马赛克，GPU 新运行 0。回填在 Detail 之前。前轮未锐化图与 LR 的绝对星点目检不能作为同参数结论。
+- **尺已固定**：`scripts/denoise_star_standard.py` 只读四张预显影图；原图与 LR OFF 的 5σ 局部峰取并集，排除半径 ≥3×FWHM（至少 4 px）；136 块保留 ≥70%，按既定平坦度取 41 块。LR fine-Y p10–p90 宽 0.01089，达 ≤0.03 的遮罩验证；NEW 0.29964 对 LR 0.27170，差 0.02794，默认值仍为 **0.71**。RGB 已相关，检测星点用环带像素 MAD，不把 Haar 的小方差误作像素 σ；细颗粒统计仍用 Haar MAD。星核颜色变化与绝对色差均转到共同线性 sRGB。
+- **未通过项保留**：NEW 第 1／3／7／8 条通过，第 2／4／5／6 条未通过：fine-Y 瓦片宽 0.07704 > 0.03089；mottle Cr/Y 0.25515 > 0.21341；暗星保留 96.784% < 96.998%；合格亮星峰比 0.90759 < 0.94343（ΔFWHM 0.23627 px ≤ LR 0.29822）。共同未裁切且不外推的亮星 172 个。
+- **绝对星点差距仍在**：NEW / LR 的次轴 FWHM 中位数比 **1.26239**（逐星比中位数 1.23832）、对比度比 **0.21428**、≥5σ 检出点数比 **0.38380**；匹配暗星中 **44.917%** 的色度幅度比 LR 多 >0.05。这些是检出局部峰而非天文星表对象数，不归因于单独一个算法。本轮不修改 demosaic、不靠改默认值掩盖其他未通过项；五窗 100%／300% 图版已看，地平线未见色阶带。
+- **门**：测量脚本算术／拒绝路径 7 条通过，标准本身如实返回 1（上述四项红）；无根目录返回 2，不猜用户家目录。详细命令、配方、所有数字与图版保留在不入库的 Part 6 报告。
+
 ### RAW 降噪 — 诚实噪声与去马赛克后的中性颗粒（2026-09-20，lane-denoise-luma-grain）
 
 - **否定结果**：撤回 CFA 四元组内回填。CPU 重放 F2 在 0.70 下，细粒 Y / Cb / Cr 为输入的 0.237 / 0.272 / 0.241；四相重叠虽减轻彩噪，也削弱亮度颗粒。白平衡后四元组相等，不保证去马赛克后中性。
@@ -1078,6 +1086,20 @@
    `cargo fmt -- <文件>` 不是文件过滤器（2026-08-12 误伤 43 文件已还原）——格式靠手写对齐
    周围代码。
 5. When a release-sized batch accumulates, propose the next SemVer version appropriate to its compatibility boundary; never hard-code an already-released version here.
+
+6. **发版终门的降噪一半（F1 星空标准）**：从最后一个 tag 到候选树，只要
+   `python/denoise_raw.py`、`src/denoise.rs` 或 `src/render/denoise_grain.rs` 有改动，
+   就以 LR Denoise 50 的同一捕获 ON/OFF 为标准重跑；AutoShade 两张图必须先经真实
+   渲染路径按相同 Detail 参数显影（40 / 1.0 / 25 / 0，颜色／亮度 NR 0，Linear，
+   As Shot，Adobe Standard，无镜头校正），回填在 Detail 前。执行
+   `python scripts/denoise_star_standard.py --root <夹具根> --input <原图显影.tif> --ours <默认降噪显影.tif> --lr-off <LR-OFF.tif> --lr-on <LR-ON.tif> --json <报告.json> --mask-sheet <遮罩.png>`；
+   根目录也可由 `AUTOSHADE_FIXTURES_ROOT` 指定，两者均无则明确退出 2，绝不猜家目录。
+   工具无需 GPU，输出 1–8 的数值及 PASS/FAIL，9–12 的绝对星点差距逐项报告；
+   `--candidate 旧版=<旧版显影.tif>` 可附加旧版对照，其红项不冒充候选树的退出状态。
+   必须亲看同伸展、无逐列匹配的 100%／300% 图版及遮罩；地平线无可见色阶带才可
+   填 `--banding clear`，否则填 `visible` 或保留 `unreviewed`，第 8 条不放行。
+   NEW 的任一条未过或 LR 遮罩验证宽度 >0.03，退出 1；保存原数与未验证项，不能以
+   只过 F2/F3、像素对自身的比值或一张好看的缩图替代这道门。
 
 ## v1.0.0 发版义务清单（终稿，W4 汇编）
 
