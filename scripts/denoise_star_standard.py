@@ -271,6 +271,22 @@ def aperture_chroma(image, sites):
     return out
 
 
+def tone_cache(work, key, tone, suffix):
+    """Name a tone-mapped cache after BOTH things it depends on: the image and the map.
+
+    `detect` returns a cache on existence alone, and the work directory is keyed by the
+    script's hash only (see `main`), so a name carrying just the image would be shared by
+    two runs that differ in anything upstream of the map -- `--fixed-sites`, an offset,
+    the sky ROI -- and the second would read the first's numbers. Measured 2026-09-21,
+    before this existed: two runs differing only in whether `--fixed-sites` was given
+    returned 228,776 and 220,888 tone-mapped sites for the SAME input image, and every
+    field of the `absolute` group moved with them. The plain `<image>-stars.npy` needs no
+    such stamp: that detection reads the image and nothing else.
+    """
+    stamp = hashlib.sha256(json.dumps(tone, sort_keys=True).encode()).hexdigest()[:8]
+    return work/f'{key}-tone-{stamp}-{suffix}.npy'
+
+
 def detect(yplane, roi, cache):
     if cache.exists():
         return np.load(cache)
@@ -675,13 +691,13 @@ def run(args, work):
         if k in ('LR-OFF', 'Lightroom'):
             matched_y[k] = im.y
         else:
-            path = work/(im.key+'-tone-y.npy')
+            path = tone_cache(work, im.key, tone, 'y')
             out = np.lib.format.open_memmap(path, mode='w+', dtype=np.float32, shape=im.y.shape)
             for top in range(0, len(out), 128):
                 out[top:top+128] = apply_tone(im.y[top:top+128], tone)
             out.flush(); matched_y[k] = out
         x, y, w, h = roi; dx, dy = im.offset
-        det = detect(matched_y[k], (x-dx, y-dy, w, h), work/(im.key+'-tone-stars.npy')).copy()
+        det = detect(matched_y[k], (x-dx, y-dy, w, h), tone_cache(work, im.key, tone, 'stars')).copy()
         det[:, :2] += im.offset; absolute_detections[k] = det
     absolute = {}
     for k in paths:

@@ -192,5 +192,29 @@ class StarStandardTests(unittest.TestCase):
                 self.assertIn('given in pairs', p.stderr)
 
 
+
+class ToneCacheName(unittest.TestCase):
+    """The tone-mapped caches must name the map they hold, not just the image."""
+
+    def setUp(self):
+        self.work = Path('W')
+        self.tone = {'x': [0.0, 0.5, 1.0], 'y': [0.0, 0.4, 1.0], 'bins': 3}
+
+    def test_the_same_map_names_the_same_file(self):
+        self.assertEqual(s.tone_cache(self.work, 'img', self.tone, 'stars'),
+                         s.tone_cache(self.work, 'img', dict(reversed(list(self.tone.items()))), 'stars'))
+
+    def test_a_different_map_names_a_different_file(self):
+        other = {**self.tone, 'y': [0.0, 0.41, 1.0]}
+        self.assertNotEqual(s.tone_cache(self.work, 'img', self.tone, 'stars'),
+                            s.tone_cache(self.work, 'img', other, 'stars'))
+
+    def test_the_image_and_the_kind_still_separate_it(self):
+        a = s.tone_cache(self.work, 'img', self.tone, 'stars')
+        self.assertNotEqual(a, s.tone_cache(self.work, 'other', self.tone, 'stars'))
+        self.assertNotEqual(a, s.tone_cache(self.work, 'img', self.tone, 'y'))
+        self.assertIn('img', a.name)
+
+
 if __name__ == '__main__':
     unittest.main()
