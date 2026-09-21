@@ -886,12 +886,12 @@ fn fresh_base_knots(raw: &Path) -> Vec<[f32; 2]> {
     };
     match develop_base(raw) {
         Ok(neutral) => {
-            // Same contract as the GUI/pipeline estimators: match against the
-            // profile-vignette-corrected neutral (render::estimation_base).
+            // The one entry the GUI and pipeline estimators share: the pair is
+            // made like with like there (render::camera_base_look).
             // None (could not judge) = no base look in the fresh-open
             // payload, exactly like the GUI open.
-            let est = render::estimation_base(&neutral, &pipeline::fresh_lens_profile(raw));
-            render::camera_base_knots(&est, &camera).unwrap_or_default()
+            render::camera_base_look(&neutral, &pipeline::fresh_lens_profile(raw), &camera)
+                .unwrap_or_default()
         }
         Err(e) => {
             // Disclosed, not silent — the pane render will fail loudly too,

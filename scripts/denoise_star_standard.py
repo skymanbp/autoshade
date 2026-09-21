@@ -45,7 +45,43 @@ The map never changes the input-relative metrics or the review plate.
 Faint colour outliers use input SNR
 [5,10). Lines 9--12 are reported, never used to select/tune the measurement.
 
-Exit: 0 NEW and mask-validation gates pass, 1 a gate fails, 2 invalid inputs.
+TWO GROUPS (2026-09-21). Measured after the noise-field cleaner: lines 1 and 2
+on the ordinary renders read the camera-matched base curve (11 of its 13 knots
+inside the sky's 0.04--0.17 band, segment slopes 0.33--2.25: the noisy input and
+the fine grain that is left see different effective slopes), line 5's sites were
+two-thirds noise spikes of the noisy render, and line 7 compared single noisy
+pixels. So the lines are reported in two groups and only the first decides:
+
+CLEANER group -- decides the exit status.
+  1c, 2c  lines 1 and 2 on --flat-input/--flat-ours: the same two renders with
+          the recipe's base_curve emptied and nothing else changed. Lightroom's
+          side is unchanged; its curve is smooth at the scale of the noise.
+  3, 4, 6, 8  as below, on the ordinary renders.
+  5c      line 5 on the faint sites that pass a TRUE-STAR test in
+          --mosaic-input: the 2x2 quads summed and box-averaged 3x3 (36
+          photosites), best of the 3x3 quads at the site over the 14--20 px
+          annulus's median, >= 5 of that annulus's MAD sigmas. A lone
+          photosite's excess is divided by six there, so the spike the render
+          detector accepts at 5 sigma arrives near 1. Both products are counted
+          on the same confirmed sites.
+  7c      (a) in the mosaic, per CFA plane, the ratio of summed 5x5-sample
+          aperture flux (--mosaic-ours over --mosaic-input, ring-subtracted) at
+          the bright qualified stars: the four planes must agree within 0.02,
+          because a star keeps its colour when its planes keep the same share
+          of their flux; per-plane PEAK retention is printed beside it, not
+          gated (a sharper plane loses more peak to any smoothing). (b) the
+          5x5 aperture colour of the same stars: NEW's distance to Lightroom ON
+          must not exceed the input's distance to Lightroom OFF by more than
+          0.01 -- the front end's own colour gap stands on both sides.
+  --mosaic-ours is the cleaner's own output at strength 1: grain returns after
+  demosaic as luminance only, so the mosaic is where the cleaner alone is seen.
+  A cleaner line whose inputs were not given is UNMEASURED and cannot pass.
+
+FRONT-END group -- reported, never decides.
+  1f, 2f  lines 1 and 2 on the ordinary renders (base curve kept).
+  The original readings of lines 5 and 7 stay in the printed rows and the JSON.
+
+Exit: 0 the CLEANER group and mask-validation pass, 1 otherwise, 2 invalid inputs.
 Historical --candidate rows are reported but do not decide the exit status.
 Line 8's visual banding clause needs --banding clear|visible; otherwise it
 cannot pass the release gate. Cached arrays are keyed by source size/mtime,
@@ -145,6 +181,87 @@ def fields(yplane, sites):
         result['fwhm'].append(widths(p, bg))
         result['radial'].append(np.column_stack([*[p[:, m].mean(axis=1) for m in RADIAL], bg]))
     return {k: np.concatenate(v) for k, v in result.items()}
+
+
+QY, QX = np.mgrid[-10:11, -10:11]
+QBG = (np.hypot(QY, QX) >= 7) & (np.hypot(QY, QX) <= 10)
+PY, PX = np.mgrid[-8:9, -8:9]
+PRING = (np.hypot(PY, PX) >= 5) & (np.hypot(PY, PX) <= 8)
+PHASES = ((0, 0), (0, 1), (1, 0), (1, 1))
+
+
+def quad_matched(mosaic):
+    """2x2 quads summed, then a 3x3-quad box: 36 photosites behind every sample."""
+    m = np.asarray(mosaic, np.float32)
+    h, w = len(m)//2*2, m.shape[1]//2*2
+    quads = m[0:h:2, 0:w:2]+m[0:h:2, 1:w:2]+m[1:h:2, 0:w:2]+m[1:h:2, 1:w:2]
+    return cv2.blur(quads, (3, 3))
+
+
+def true_star_snr(matched, xy):
+    """Each site's significance in the quad-matched mosaic; NaN within 22 px of its edge.
+
+    xy are MOSAIC coordinates. The 7--10 quad annulus is the detector's own
+    14--20 px one, and its MAD is the sigma of the box-averaged samples it holds.
+    """
+    x, y = xy[:, 0].astype(int)//2, xy[:, 1].astype(int)//2
+    out = np.full(len(x), np.nan, np.float32)
+    inside = np.flatnonzero((x >= 11) & (y >= 11) & (x < matched.shape[1]-11) & (y < len(matched)-11))
+    for start in range(0, len(inside), 4096):
+        i = inside[start:start+4096]
+        p = matched[y[i, None, None]+QY, x[i, None, None]+QX]
+        ring = p[:, QBG]
+        bg = np.median(ring, axis=1)
+        out[i] = (p[:, 9:12, 9:12].reshape(len(i), -1).max(axis=1)-bg)/np.maximum(mad(ring, axis=1), 1e-10)
+    return out
+
+
+def plane_photometry(mosaic, xy):
+    """Per CFA phase, at the plane sample nearest each site (mosaic coordinates):
+    peak excess, 5x5-sample aperture excess, the 5--8-sample ring's MAD sigma and
+    the peak sample itself. Arrays of shape (4, n); NaN where the window leaves the plane."""
+    out = np.full((4, 4, len(xy)), np.nan, np.float64)
+    for k, (py, px) in enumerate(PHASES):
+        plane = np.asarray(mosaic[py::2, px::2], np.float32)
+        cx, cy = (xy[:, 0].astype(int)-px)//2, (xy[:, 1].astype(int)-py)//2
+        ok = np.flatnonzero((cx >= 8) & (cy >= 8) & (cx < plane.shape[1]-8) & (cy < len(plane)-8))
+        p = plane[cy[ok, None, None]+PY, cx[ok, None, None]+PX]
+        bg = np.median(p[:, PRING], axis=1)
+        out[0, k, ok] = p[:, 8, 8]-bg
+        out[1, k, ok] = p[:, 6:11, 6:11].reshape(len(ok), -1).sum(axis=1)-25*bg
+        out[2, k, ok] = mad(p[:, PRING], axis=1)
+        out[3, k, ok] = p[:, 8, 8]
+    return {'peak': out[0], 'aperture': out[1], 'sigma': out[2], 'sample': out[3]}
+
+
+def plane_retention(before, after, white):
+    """Line 7c(a). Flux: ratio of SUMS over the stars (a ratio of noisy per-star terms is biased; a sum is not). Peak:
+    median per-star ratio where the plane sees the star at >= 10 sigma. Stars whose input sample nears the white level in
+    any plane are left out of every plane, so all four are read on the same stars."""
+    usable = np.all(np.isfinite(before['aperture']) & np.isfinite(after['aperture']), axis=0)
+    usable &= np.all(before['sample'] < .9*white, axis=0) & np.all(before['aperture'] > 0, axis=0)
+    if not usable.any():
+        raise ValueError('no bright star is usable in all four CFA planes; line 7c cannot be measured')
+    flux = [float(after['aperture'][k, usable].sum()/before['aperture'][k, usable].sum()) for k in range(4)]
+    peak, counts = [], []
+    for k in range(4):
+        seen = usable & (before['peak'][k] >= 10*np.maximum(before['sigma'][k], 1e-10))
+        counts.append(int(seen.sum()))
+        peak.append(float(np.median(after['peak'][k, seen]/before['peak'][k, seen])) if seen.any() else None)
+    return {'stars': int(usable.sum()), 'flux': flux, 'flux_spread': float(max(flux)-min(flux)),
+            'peak': peak, 'peak_stars': counts}
+
+
+def aperture_chroma(image, sites):
+    """(R-G)/Y and (B-G)/Y of each site's 5x5 aperture, ring-subtracted, in common linear sRGB."""
+    out = np.full((len(sites), 2), np.nan)
+    for j, (x, y) in enumerate(sites[:, :2].astype(int)):
+        p = image.patch(x-20, y-20, 41).reshape(41, 41, 3)
+        flux = p[18:23, 18:23].reshape(-1, 3).sum(axis=0)-25*np.median(p[BG], axis=0)
+        lum = float(flux @ SRGB[1])
+        if lum > 0:
+            out[j] = (flux[0]-flux[1])/lum, (flux[2]-flux[1])/lum
+    return out
 
 
 def detect(yplane, roi, cache):
@@ -361,6 +478,22 @@ def acceptance(noise, star, absolute, lrnoise, lrstar, banding):
     return {str(i+1): 'PASS' if value else 'FAIL' for i, value in enumerate(values)}
 
 
+def cleaner_group(rendered, flat, lrnoise, truestar, lrtruestar, planes, colour):
+    """The lines that decide. `rendered` is acceptance()'s dict for the ordinary renders; a missing measurement is
+    UNMEASURED, which is not PASS."""
+    width = lambda row: row['fine_y_p10_p90'][1]-row['fine_y_p10_p90'][0]
+    verdict = lambda ok: 'UNMEASURED' if ok is None else 'PASS' if ok else 'FAIL'
+    colour_ok = None
+    if planes is not None and colour is not None:
+        colour_ok = planes['flux_spread'] <= .02 and colour['NEW_to_Lightroom'] <= colour['input_to_LR_OFF']+.01
+    return {'1c': verdict(None if flat is None else abs(flat['fine_y']-lrnoise['fine_y']) <= .03),
+            '2c': verdict(None if flat is None else width(flat) <= width(lrnoise)+.02),
+            '3': rendered['3'], '4': rendered['4'],
+            '5c': verdict(None if truestar is None else
+                          truestar['faint_retention_percent'] >= lrtruestar['faint_retention_percent']-.5),
+            '6': rendered['6'], '7c': verdict(colour_ok), '8': rendered['8']}
+
+
 def run(args, work):
     root = Path(args.root).resolve()
     resolve = lambda p: (root/Path(p)).resolve()
@@ -368,12 +501,16 @@ def run(args, work):
              'LR-OFF': resolve(args.lr_off), 'Lightroom': resolve(args.lr_on)}
     for item in args.candidate:
         label, path = item.split('=', 1)
-        if label in paths:
+        if label in paths or label.startswith('flat-'):
             raise ValueError('duplicate/reserved candidate name '+label)
         paths[label] = resolve(path)
+    if bool(args.flat_input) != bool(args.flat_ours) or bool(args.mosaic_input) != bool(args.mosaic_ours):
+        raise ValueError('--flat-input/--flat-ours and --mosaic-input/--mosaic-ours are given in pairs')
+    # The flat pair joins the registration check and the tile statistics, nothing else: no detection, no star rows.
+    flat_paths = {'flat-input': resolve(args.flat_input), 'flat-NEW': resolve(args.flat_ours)} if args.flat_input else {}
     images = {k: Image(path, k in ('LR-OFF', 'Lightroom'),
                        (32, 20) if k in ('LR-OFF', 'Lightroom') else (0, 0), work)
-              for k, path in paths.items()}
+              for k, path in {**paths, **flat_paths}.items()}
     roi = SKY
     # Verify the prescribed integer registration independently of noise tiles.
     registration = {}
@@ -420,8 +557,9 @@ def run(args, work):
         rows = [tile_stats(im.patch(x, y, 256, 16), mask[y-16:y+272, x-16:x+272], im.w) for x, y in sites]
         raw_noise[k] = np.array(rows)
     noise = {}
+    baseline_of = lambda k: 'LR-OFF' if k in ('Lightroom', 'LR-OFF') else 'flat-input' if k.startswith('flat-') else 'input'
     for k, data in raw_noise.items():
-        base = raw_noise['LR-OFF' if k in ('Lightroom', 'LR-OFF') else 'input']
+        base = raw_noise[baseline_of(k)]
         ratio = data[:, :6]/base[:, :6]
         n = {name: float(np.median(ratio[:, j])) for j, name in enumerate(('fine_y', 'fine_cb', 'fine_cr', 'mottle_y', 'mottle_cb', 'mottle_cr'))}
         n['fine_y_p10_p90'] = np.percentile(ratio[:, 0], [10, 90]).tolist()
@@ -429,7 +567,7 @@ def run(args, work):
         n['mottle_colourfulness'] = np.median(data[:, 4:6]/data[:, 3, None], axis=0).tolist()
         n['fine_colourfulness_magnitude'] = float(np.median(np.linalg.norm(data[:, 7:9], axis=1)/data[:, 6]))
         n['mottle_colourfulness_magnitude'] = float(np.median(np.linalg.norm(data[:, 4:6], axis=1)/data[:, 3]))
-        im = images[k]; base_im = images['LR-OFF' if k in ('Lightroom', 'LR-OFF') else 'input']
+        im = images[k]; base_im = images[baseline_of(k)]
         x, y, w, h = GLOW
         first = im.patch(x, y, w, 32) @ im.w
         before = base_im.patch(x, y, w, 32) @ base_im.w
@@ -438,6 +576,7 @@ def run(args, work):
         n['glow_correlation'] = float(np.corrcoef(a.ravel(), b.ravel())[0, 1])
         noise[k] = n
     np.savez(work/'noise-tiles.npz', **raw_noise)
+    flat_images = {k: images.pop(k) for k in flat_paths}
     # Fixed sites defined by the original, plus input-only linearity screen.
     starsites = detections['input']; field = {}
     for k, im in images.items():
@@ -460,7 +599,42 @@ def run(args, work):
     bright = linear & (starsites[:, 2] >= 10)
     valid = (field['input']['excess'] > 0) & (field['LR-OFF']['excess'] > 0)
     faint = valid & (starsites[:, 2] < 10)
-    np.savez(work/'fixed-sites.npz', sites=starsites, linear=linear, bright=bright, faint=faint)
+    # The mosaic: which faint sites are stars (5c), and what the cleaner alone does to each plane (7c a).
+    truestar = planes = mosaic_report = None
+    confirmed = np.zeros(len(starsites), bool)
+    if args.mosaic_input:
+        ox, oy = (int(v) for v in args.mosaic_offset.split(','))
+        before = cv2.imread(str(resolve(args.mosaic_input)), cv2.IMREAD_UNCHANGED)
+        after = cv2.imread(str(resolve(args.mosaic_ours)), cv2.IMREAD_UNCHANGED)
+        if before is None or after is None or before.ndim != 2 or before.shape != after.shape:
+            raise ValueError('the two mosaics must be single-channel images of one size')
+        matched = quad_matched(before)
+        # Registration, as for the renders: the render's 2x2 mean against the quad sum, band-passed, in three windows.
+        checks = []
+        for x, y in ((2304, 1024), (4800, 1536), (6912, 2048)):
+            bp = lambda z: cv2.blur(z, (3, 3))-cv2.blur(z, (9, 9))
+            ref = np.asarray(images['input'].y[y:y+256, x:x+256])
+            ref = (ref[0::2, 0::2]+ref[0::2, 1::2]+ref[1::2, 0::2]+ref[1::2, 1::2])/4
+            qx, qy = (x+ox)//2, (y+oy)//2
+            target = matched[qy-3:qy+131, qx-3:qx+131]
+            _, corr, _, (dx, dy) = cv2.minMaxLoc(cv2.matchTemplate(bp(target), bp(ref), cv2.TM_CCOEFF_NORMED))
+            checks.append({'delta_quads': [dx-3, dy-3], 'correlation': float(corr)})
+        if any(c['delta_quads'] != [0, 0] for c in checks):
+            raise ValueError(f'mosaic: --mosaic-offset {args.mosaic_offset} failed registration: {checks}')
+        where = starsites[:, :2]+np.array((ox, oy))
+        significance = true_star_snr(matched, where)
+        confirmed = np.nan_to_num(significance, nan=0) >= 5
+        if not (faint & confirmed).any():
+            raise ValueError('no faint site passes the true-star test; line 5c cannot be measured')
+        planes = plane_retention(plane_photometry(before, where[bright]), plane_photometry(after, where[bright]),
+                                 args.mosaic_white)
+        mosaic_report = {'registration': checks, 'offset': [ox, oy], 'faint_sites': int(faint.sum()),
+                         'faint_confirmed': int((faint & confirmed).sum()),
+                         'faint_significance_percentiles': np.nanpercentile(significance[faint], [5, 25, 50, 75, 95]).tolist(),
+                         'bright_confirmed_share': float(np.mean(confirmed[bright])) if bright.any() else None,
+                         'planes': planes}
+        del matched, before, after
+    np.savez(work/'fixed-sites.npz', sites=starsites, linear=linear, bright=bright, faint=faint, confirmed=confirmed)
     star = {}
     for k, f in field.items():
         baseline = 'LR-OFF' if k in ('Lightroom', 'LR-OFF') else 'input'; base = field[baseline]
@@ -473,8 +647,12 @@ def run(args, work):
         xy = starsites[:, :2].astype(int)-im.offset
         unclipped = np.max(im.rgb[xy[:, 1], xy[:, 0]], axis=1) < 65000
         kept = int(np.sum(f['excess'][faint] >= .5*base['excess'][faint]))
+        true = faint & confirmed
         star[k] = {'faint_count': int(faint.sum()), 'faint_kept': kept,
                    'faint_retention_percent': 100*kept/max(int(faint.sum()), 1),
+                   'true_star': None if not args.mosaic_input else {
+                       'faint_count': int(true.sum()), 'faint_kept': int(np.sum(f['excess'][true] >= .5*base['excess'][true])),
+                       'faint_retention_percent': 100*float(np.mean(f['excess'][true] >= .5*base['excess'][true]))},
                    'bright_qualified': int(bright.sum()), 'width_count': int(width_ok.sum()),
                    'output_core_clipped': int(np.sum(bright & ~unclipped)),
                    'peak_ratio': float(np.mean(f['excess'][bright]/base['excess'][bright])),
@@ -544,6 +722,21 @@ def run(args, work):
                        'faint_colour_excess_share': float(np.mean(colour_excess[fm] > .05))}
     gates = {k: acceptance(noise[k], star[k], absolute[k], noise['Lightroom'], star['Lightroom'], args.banding)
              for k in absolute}
+    # Line 7c(b): the same bright stars' aperture colour, each product against its own Lightroom counterpart.
+    colour = None
+    if bright.any():
+        # Sites stay in the input's frame: Image.patch applies each image's own offset.
+        chroma = {k: aperture_chroma(images[k], starsites[bright]) for k in ('input', 'NEW', 'LR-OFF', 'Lightroom')}
+        both = lambda a, b: np.all(np.isfinite(chroma[a]) & np.isfinite(chroma[b]), axis=1)
+        distance = lambda a, b: float(np.median(np.linalg.norm(chroma[a]-chroma[b], axis=1)[both(a, b)]))
+        colour = {'stars': int(np.sum(both('NEW', 'Lightroom') & both('input', 'LR-OFF'))),
+                  'NEW_to_Lightroom': distance('NEW', 'Lightroom'), 'input_to_LR_OFF': distance('input', 'LR-OFF'),
+                  'NEW_change': np.nanmedian(np.abs(chroma['NEW']-chroma['input']), axis=0).tolist(),
+                  'Lightroom_change': np.nanmedian(np.abs(chroma['Lightroom']-chroma['LR-OFF']), axis=0).tolist()}
+    groups = {'cleaner': cleaner_group(gates['NEW'], noise.get('flat-NEW'), noise['Lightroom'],
+                                       star['NEW']['true_star'], star['Lightroom']['true_star'], planes, colour),
+              'front_end': {'1f': gates['NEW']['1'], '2f': gates['NEW']['2']},
+              'original_5_and_7': {'5': gates['NEW']['5'], '7': gates['NEW']['7']}}
     result = {'protocol_sha256': hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
               'inputs': {k: str(p) for k, p in paths.items()}, 'root': str(root),
               'registration': registration, 'sky': roi,
@@ -551,7 +744,8 @@ def run(args, work):
                        'surviving_sky_fraction': float(np.mean(~mask[128:4224, 128:9344])),
                        'eligible_tiles': sum(r[2] >= .7 for r in eligibility), 'selected_tiles': len(sites),
                        'tile_eligibility': eligibility, 'lr_fine_y_width': float(np.diff(noise['Lightroom']['fine_y_p10_p90'])[0])},
-              'noise': noise, 'stars': star, 'absolute': absolute, 'gates': gates,
+              'noise': noise, 'stars': star, 'absolute': absolute, 'gates': gates, 'groups': groups,
+              'mosaic': mosaic_report, 'aperture_colour': colour,
               'profile_qualification': {'input_affine_bright': input_linear_count,
                                         'common_unclipped_in_range_bright': int(bright.sum())},
               'tone_map': tone, 'fixed_sites': args.fixed_sites,
@@ -598,6 +792,12 @@ def main():
     ap.add_argument('--root', default=os.environ.get('AUTOSHADE_FIXTURES_ROOT'))
     for name in ('input', 'ours', 'lr-off', 'lr-on'):
         ap.add_argument('--'+name)
+    ap.add_argument('--flat-input', help='the input render with the recipe base_curve emptied (cleaner lines 1c, 2c)')
+    ap.add_argument('--flat-ours', help='the denoised render with the recipe base_curve emptied')
+    ap.add_argument('--mosaic-input', help='16-bit mosaic the cleaner received (cleaner lines 5c, 7c)')
+    ap.add_argument('--mosaic-ours', help='16-bit mosaic the cleaner returned at strength 1')
+    ap.add_argument('--mosaic-offset', default='0,0', help='render (0,0) in mosaic coordinates, X,Y; verified, not trusted')
+    ap.add_argument('--mosaic-white', type=float, default=16383., help='the mosaic white level, for the clipping screen')
     ap.add_argument('--candidate', action='append', default=[])
     ap.add_argument('--work'); ap.add_argument('--json'); ap.add_argument('--mask-sheet')
     ap.add_argument('--fixed-sites', help='reuse an input-defined star-mask.npy and flat-sites.npy directory')
@@ -632,11 +832,27 @@ def main():
         for i, (value, reference) in enumerate(pairs, 1):
             print(label, i, gates[str(i)], 'value', value, 'Lightroom/limit', reference)
         print(label, 'lines 9--12', json.dumps(result['absolute'][label]))
+    groups, n, ln = result['groups'], result['noise'], result['noise']['Lightroom']
+    width = lambda row: row['fine_y_p10_p90'][1]-row['fine_y_p10_p90'][0]
+    flat, mosaic, colour = n.get('flat-NEW'), result['mosaic'], result['aperture_colour']
+    true = lambda k: result['stars'][k]['true_star']
+    detail = {'1c': flat and ('fine-Y', flat['fine_y'], 'Lightroom', ln['fine_y']),
+              '2c': flat and ('p10--p90 width', width(flat), 'Lightroom', width(ln)),
+              '5c': mosaic and ('true-star faint retention %', true('NEW')['faint_retention_percent'], 'Lightroom',
+                                true('Lightroom')['faint_retention_percent'], 'sites', true('NEW')['faint_count'], 'of',
+                                mosaic['faint_sites']),
+              '7c': mosaic and colour and ('plane flux', mosaic['planes']['flux'], 'spread', mosaic['planes']['flux_spread'],
+                                           'plane peak', mosaic['planes']['peak'], 'aperture colour to Lightroom',
+                                           colour['NEW_to_Lightroom'], 'input to LR OFF', colour['input_to_LR_OFF'])}
+    print('CLEANER group (decides):')
+    for line, verdict in groups['cleaner'].items():
+        print(' ', line, verdict, *(detail.get(line) or ()))
+    print('FRONT-END group (reported only):', groups['front_end'], '| original lines 5 and 7:', groups['original_5_and_7'])
     mask_ok = result['mask']['lr_fine_y_width'] <= .03
     print('Mask proof', 'PASS' if mask_ok else 'FAIL', ': Lightroom fine-Y p10--p90 width', result['mask']['lr_fine_y_width'], '(limit .03)')
     if temp:
         temp.cleanup()
-    return 0 if mask_ok and all(v == 'PASS' for v in result['gates']['NEW'].values()) else 1
+    return 0 if mask_ok and all(v == 'PASS' for v in groups['cleaner'].values()) else 1
 
 
 if __name__ == '__main__':

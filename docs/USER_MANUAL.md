@@ -231,10 +231,20 @@ its own amount. The old 0.78 sigma
 scale left different amounts of grain at different ISOs; grain now comes back
 explicitly from this frame's removed residual. The map into the model's range
 still comes from the noise model, preserving the v1.4.1 highlight guards.
-AI denoise also maps out isolated hot pixels stronger than 20 σ, using a
-local robust noise estimate on each CFA plane before the cleaner and grain
-source are developed. This runs only on supported RAW mosaics at positive
-strength; ordinary renders and strength 0 preserve the original samples.
+Isolated hot pixels stronger than 20 σ are mapped out of every RAW develop,
+with or without AI denoise, before anything else reads the sensor data. A hot
+pixel is a defect of the sensor rather than noise, so it no longer waits for
+AI denoise to be switched on. The noise is judged where the pixel stands —
+its own neighbourhood's, when that is brighter or rougher than the area
+around it — a pixel in texture or on a blown highlight is left alone, and so
+is one whose neighbours — all eight — show any light of their own: stars,
+lights and highlights stay as they are. On the three long-exposure night
+frames measured this changed 0.010 % of the picture or less; on six
+ordinary daytime and dusk frames it mapped 0 to 6 sensor pixels, and a frame
+without such pixels renders exactly as before. One limit is known: a point of pure-colour
+light no wider than one sensor pixel on flat dark ground — single dots of a
+distant red LED sign — cannot be told from a defect in one exposure and loses
+that pixel. Only sensors with an ordinary 2×2 Bayer mosaic are mapped.
 The fold's **AI denoise strength** starts at 71% for a RAW: higher is cleaner,
 lower returns more of the frame's own luminance grain after demosaic, in
 linear light. Every positive strength keeps the clean colour; exactly 0%

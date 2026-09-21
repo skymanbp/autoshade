@@ -141,20 +141,34 @@
 > wrong reason; it writes a `=== name ===` transcript that
 > `scripts/check_docs.py --gates` reads the counts and the lane set back out
 > of, and it prints the by-name test-set difference against a saved baseline.
-> 1659 library + 25 CLI + 215 GUI + 2+2 contract tests are enumerated in the GUI
-> build; the library result is 1644 pass + 15 `#[ignore]`d forensic probes and
+> 1673 library + 25 CLI + 215 GUI + 2+2 contract tests are enumerated in the GUI
+> build; the library result is 1658 pass + 15 `#[ignore]`d forensic probes and
 > the GUI result is 214 pass + one explicit scratch-recipe export probe ignored
-> in the ordinary battery. Counts refreshed 2026-09-21 on the tree that merges
-> the RAW-denoise lane into `main`: +11 / −0 by name against the v1.5.1 tag
-> (`1a122c0`), listed by the test harness itself on both trees — ten library
+> in the ordinary battery. Counts refreshed 2026-09-21 after the RAW-denoise
+> lane merged into `main`, hot-site mapping moved to every develop and its rule
+> was rebuilt on what ordinary frames showed, and the base look's estimate was
+> paired like with like: +25 / −0
+> by name against the v1.5.1 tag
+> (`1a122c0`), listed by the test harness itself on both trees — twenty-four library
 > names (the four laws of the luminance return: a full clean is bit-exact and
 > never develops the original, grey noise returns at the exact share while
 > pure chroma returns nothing, the return keeps chroma and obeys the luminance
-> law, sRGB and wide exports carry the same linear grain; the four hot-site
+> law, sRGB and wide exports carry the same linear grain; the thirteen hot-site
 > tests: strong isolated sites on every phase are mapped while border and
 > faint ones are not, a star with bright edge neighbours is left alone, the
-> mapping precedes both the original's capture and the cleaning, ordinary and
-> zero-strength renders never touch the mosaic; the extra plane reserved
+> mapping is unconditional and precedes every reader of the mosaic, a Bayer
+> frame is mapped without being asked while other sensors are left alone, the
+> network median equals the sorted middle pair everywhere, the local spread is
+> the MAD of the neighbourhood that can move, a rough neighbourhood raises the
+> bar and a flat one does not, flat ground is judged by its tile, a part-blown
+> tile is measured on the samples that can move, a site on clipped ground is
+> not judged, a bright structure in dark tiles is judged by its own
+> brightness, a witness at white cannot vouch and a lit diagonal speaks, a
+> witness is heard at its tile's sigma; the five of the base look's pairing:
+> the estimation base is the picture the camera drew, a corner lift the camera
+> never made does not become tone, the lift is made on the sensor frame and cut
+> to the camera's afterwards, a pair that cannot say keeps the picture the
+> sensor saw, the three open paths share one base-look entry; the extra plane reserved
 > before the RAW ceiling; and the cleaner receiving the whole output with the
 > container's floor kept) and one GUI name (preference era one resets the raw
 > dials and keeps baked choices). At v1.5.1 (2026-09-20) the battery was 1649
@@ -667,14 +681,99 @@
 > four-measurement scale table remains in python/denoise_raw.py; the old 0.78
 > operating point left 0.42 / 0.25 / 0.11 of the full-frame astro input grain
 > across ISO 2500 / 3200 / 8000. The renderer always requests the whole clean
-> mosaic at strength 1, then develops and calibrates it. Before either the
-> original capture or the cleaner, `denoise/hot_pixels.rs` maps isolated hot
+> mosaic at strength 1, then develops and calibrates it. Before anything reads
+> the mosaic — the original capture, the cleaner or the develop itself —
+> `denoise/hot_pixels.rs` maps isolated hot
 > sites above 20 local sigma to their eight same-phase neighbours' median.
-> Sigma is 1.4826 times the MAD of site-minus-median8 in 64×64 plane tiles;
-> all four edge neighbours must stay at or below 3 of their own local sigma.
+> Sigma is 1.4826 times the MAD of site-minus-median8 in 64×64 plane tiles.
 > Decisions use the unchanged mosaic, with a three-sensor-pixel border left
-> alone. Only positive-strength supported Bayer AI renders enter this step;
-> ordinary renders, zero strength and non-Bayer fallback are unchanged.
+> alone. EVERY develop of a supported Bayer mosaic enters this step, whether
+> or not AI denoise was asked for (user ruling 2026-09-21; until then only a
+> positive-strength AI render did, so one photograph kept its hot pixels in an
+> ordinary develop and lost them in a denoised one). The gate is the AI path's
+> own `mosaic_args_for`, so the two cannot disagree; a sensor without a 2×2
+> integer mosaic is left alone.
+> The rule is a test against a null model — flat ground, unclipped, lit like
+> the rest of its tile — and until that ruling it had only met night sky. On
+> six ordinary frames (1/50 to 1/1000 s, where no dark-current defect reaches
+> twenty sigmas) the rule as it arrived mapped 1 / 3866 / 1213 / 1246 / 4003 /
+> 308 sites inside the picture, none at a photosite another frame shared:
+> out-of-focus lights, sunlit walls, blown signs, a red LED board. On the three
+> 15–20 s night frames it mapped 103 / 51 / 97, and of the 17 / 31 / 20 the
+> rule now declines, 17 / 29 / 20 sit INSIDE STARS: read from the mosaics, 41
+> to 48 of the 48 photosites around each, of every colour, stand more than ten
+> sigmas above their colour's local level (4 to 14 around four faint stars) —
+> thirteen in the blown cores of nine of the star frame's brightest, twenty
+> punched out of three trailed stars. The other two are photosites of a
+> four-photosite green cluster that only that exposure holds (the same place
+> is flat sky in the other two night frames), left because same-colour
+> diagonals beside them are lit as well. So each piece of evidence is asked
+> whether it CAN testify where it stands, and every doubt is read for the scene:
+> (1) twenty sigmas are counted WHERE THE SITE STANDS. The tile's sigma is the
+> noise of the tile's majority; a bright structure in a mostly dark tile
+> carries many times that in photon noise, and texture in one colour plane
+> makes every bright sample of it an outlier of the same-colour median. One
+> measurement answers both: the MAD-sigma of the 24 same-colour samples within
+> four pixels of the site joins its scale at a half. Left out, four of the
+> ordinary frames map 10 / 43 / 46 / 32 sites more; joined whole, the night
+> frames lose 23 / 7 / 24 of theirs; at a third one more LED dot is mapped and
+> nothing else moves. Flat Gaussian ground exceeds its tile's sigma at a half
+> once in 133,000 sites (301 of 4·10⁷ simulated neighbourhoods) and then by a
+> hair, so flat ground is judged by its tile as before.
+> (2) Clipped samples measure no noise. A sample, or a background, within a
+> tenth of white joins no tile's statistics — counted in, the sigma of a
+> part-blown tile collapsed to zero where the samples that can move read 93 to
+> 143 counts (the five worst of 480 such tiles on one frame) — and no site's
+> neighbourhood; a site whose background is clipped, or most of whose
+> neighbourhood is, is not judged. On these ten frames each of the three
+> covers for the others: two sites on blown ground return only when the last
+> two are both gone.
+> (3) A witness within three of its sigmas of white cannot show an excess and
+> so cannot vouch (allowed to, one ordinary frame maps a site more); and all
+> EIGHT photosites around the site are asked, not the four edge ones — for a
+> green site the diagonal four are the same colour, so no colour of light hides
+> from them (asked of the edge four only, the night frames map three sites
+> more). A witness is heard at its tile's sigma, never a larger one: in the
+> first version, heard at the sigma its own brightness earned, the lit
+> neighbours of a trailed star's tip passed as quiet and the tip lost a
+> photosite. One loud diagonal is
+> forgiven: the camera's long-exposure filter levels a sample to its brightest
+> same-colour neighbour, so what survives it comes in same-colour pairs equal
+> to the count (3649 beside 3649, 5469 beside 5468), none at a photosite the
+> other night frame shares and none with a lit neighbour of another colour —
+> particle hits. For green the partner is a diagonal neighbour, and a diagonal
+> within one count of the site is that; unforgiven, the night frames lose six
+> sites.
+> What stood here first, the same day: a line through the frame's tiles
+> (variance against level, per CFA phase) carried the tile's sigma to the
+> site's brightness, beside the spread of the ring of eight at a third. Taken
+> out of that rule, the line changed three sites on the ten frames, two of them
+> lone photosites on a night sky that the present rule maps, and it had needed
+> the median's own noise taken out of every background first or it declined
+> 24 sites on the flat sky of two high-ISO night frames. The neighbourhood
+> measures at the site what the line inferred from the frame, so the line went,
+> and its six constants with it.
+> Measured on the same ten frames: the rule maps a SUBSET of what the rule as
+> it arrived mapped on every one of them (nothing gained), 86 / 20 / 77 in the
+> night pictures — all nine photosites that two of the night frames share, a
+> defect's signature, are kept — and 0 / 0 / 0 / 6 / 0 / 4 in the ordinary
+> ones. The four are single photosites of one colour plane, alone on flat dark
+> ground, 130 to 3183 counts up, with nothing around them lit: defects. The six
+> are dots of the red LED board, and they are the rule's known limit: a point
+> of saturated-colour light no wider than a photosite, on flat dark ground,
+> reaches no witness of another colour and cannot be told from a defect in one
+> frame. An ordinary develop of the night frames now differs from an unmapped
+> one in 6,239 / 1,329 / 4,656 of 60,217,344 pixels, and a frame with nothing
+> to map renders byte for byte as it did.
+> The scan costs about a tenth of a second of such a develop — read in process
+> three times on each of six frames, the fastest reading of a frame is
+> 0.086–0.120 s and all eighteen span 0.086–0.175 s with a median of 0.115 s:
+> the eight-neighbour median is a fixed sorting network on the integer samples
+> — eighteen comparators, the optimal nineteen less the one that only orders
+> the middle pair, which is summed — and only the residuals and backgrounds are
+> kept per tile, because the scan as first written — a general selection per
+> sample and a record held for every sample — cost 0.75–0.78 s once the step
+> ran on every develop.
 > The transient is one small tile per Rayon worker, not a full-frame map.
 > At 0 < s < 1 it also
 > develops the original through that identical path, retains only its f32
@@ -701,6 +800,33 @@
 > Ordinary RAW admission stays 31 B/px; 0 < s < 1 reserves an extra 18 B/px
 > before decode (49 B/px conservative total, first refused size 87,652,394 px).
 > Batch rendering requests no AI denoise and keeps its existing budget.
+> The cleaner's acceptance standard is a star frame against the user's own
+> Lightroom Denoise 50 ON/OFF pair of the same capture
+> (`scripts/denoise_star_standard.py`), read since 2026-09-21 in TWO GROUPS.
+> The CLEANER group decides the exit status: lines 1 and 2 on a pair of renders
+> whose `base_curve` is emptied and nothing else changed (1c, 2c), faint-star
+> retention on the sites that pass a true-star test in the mosaic the cleaner
+> received (5c), per-CFA-plane aperture flux in the cleaner's own two mosaics
+> plus aperture colour against Lightroom (7c), and lines 3, 4, 6 and 8 as they
+> were. The FRONT-END group — lines 1 and 2 on the ordinary renders, base curve
+> kept — is reported and never decides: those two read the camera-matched
+> curve, not the cleaner. On the final build, with one real GPU capture
+> replayed into every render, the cleaner group reads 1c, 2c, 3, 4, 8 PASS and
+> 5c, 6, 7c FAIL: 5c by 0.40 of a point and 6 by 0.005, two lines that sit on
+> their limits and whose verdict turns with the star sites the input render's
+> curve selects (they passed by 0.08 and 0.007 on the curve estimated before
+> 2026-09-21, the cleaner and its mosaics byte-identical), and 7c on a
+> plane-flux spread of 0.045 against 0.02 that reads the same on both curves
+> (R +3.3 %, G +1.0 %, B −1.1 %) and is the cleaner's own: on a synthetic star
+> field with known fluxes the network keeps 10 % of a star whose G-plane peak
+> stands 4 sigma over the sky's noise, 73 % at 10 sigma and 97 % at 40, while
+> the transform pair with a perfect smoother in the network's place moves
+> star-free sky by +0.07…+0.22 DN against the network's −0.22…−1.87 — the
+> network was trained to remove isolated positive spikes and never shown a
+> point source. The front-end width
+> (2f) fell 0.096 → 0.039, limit 0.031, when the base look's estimate was
+> paired like with like (see **The base look is estimated against the
+> picture the camera drew**).
 > Why the mosaic: on the user's ILCE-7RM4A frames
 > the noise is white per CFA plane there and spatially correlated after demosaic,
 > where neither the blind SCUNet nor a non-blind sRGB-domain model separated it from
@@ -5367,6 +5493,50 @@ two-pass seed and its `scale_chroma` clamp-order gap (measured up to
 keeps its embedded-preview + post-stamp contract
 (`pipeline::stamp_fit_calibration`) — `preview_only` needs no demosaic,
 and that command's contract was validated on it.
+
+**The base look is estimated against the picture the camera drew**
+(2026-09-21). The three open paths — the GUI open worker,
+`pipeline::photo_base_knots*` and `serve`'s fresh open — enter through one
+function, `render::camera_base_look`, which pairs the neutral develop with the
+embedded rendition LIKE WITH LIKE before the CDF match: on the frame the
+rendition shows (until then only the pipeline's path did, so a GUI or web open
+of a body set to an in-camera aspect matched the whole sensor against the
+centred crop), and with the lens profile's corner lift only when the rendition
+shows it. That second question is MEASURED on the pair
+(`render::corner_residual`): block-mean luma on a 64-column grid cut on each
+picture's own pixels, the camera's tone map read off the pair as the medians of
+32 equal-population groups, and the median of what is left over
+compared between the outer blocks (from 0.75 of the half diagonal) and the
+inner ones (within 0.5). A neutral the rendition is a tone map of reads near
+zero; one that carries a lift the camera never made reads negative; a free
+tone map can absorb neither, because blocks of equal luma stand at different
+radii. The lift is made on the whole frame and the camera's frame is
+cut afterwards, because the gain is a function of the sensor's radius. A pair
+that cannot say keeps the sensor's picture: the lift is a claim about what the
+camera did.
+
+From 2026-08-03 the lift had been applied unconditionally, on a review's
+statement that the camera JPEG already contains the correction. On ten
+ILCE-7RM4A frames (corner gains 1.33–1.98, the body's own switch — tag 0x7031 —
+reading 257 on every one) NONE of the embedded previews shows it: the measure
+reads −0.004…+0.004 as the sensor saw them against −0.009…−0.030 with the lift,
+the nearest pair 2.8 times apart, and LibRaw's develop of the same ten (nothing
+of this engine in the reading) says the same, while a synthetic rendition that
+did carry the lift reads the other way round on all ten. A CDF match has no
+notion of place, so the lift the camera never made came out as TONE. On a star
+frame whose whole picture sits in a band 0.13 wide the estimate's knot slopes
+ran 0.33–2.25 where the camera's own response, read by pairing the two pictures
+in place, runs 0.99–1.32; and rendered with those estimates the ten frames sat
+0.4–6.0 levels darker than the camera's rendition at the median block. Made
+against the sensor's picture the estimates sit within 0.05–1.7 levels, nearer
+in rms on all ten, and the star frame's slopes run 0.40–1.73. A saved recipe
+keeps the curve it was saved with; the change reaches a photograph when its
+base look is next estimated. The reverse fit starts from this look, and the
+same fits run on both curves over the six calibration-corpus pairs moved both
+ways — one pair's fitted residual 0.105 → 0.055, the other five up by
+0.0007–0.0168 — so the two pinned two-temperature readings were re-measured
+(`fit::tests::the_fan_gate_costs_a_real_two_temperature_pair_nothing`; the
+question that test asks kept its answer).
 
 One deliberate asymmetry: the fit does **not** apply
 `render::limit_tone_sliders` to its proposal, even though the engine applies it
