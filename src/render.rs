@@ -400,6 +400,14 @@ pub fn render_to_image_in(
         None
     };
     let strength = denoise.map_or(1.0, |opts| opts.strength);
+    // Correct strong isolated sites before BOTH the grain source and the cleaner.
+    // The helper is a no-op for ordinary renders, strength zero and non-Bayer data.
+    let hot_sites = crate::denoise::hot_pixels::map_for(
+        &mut rawimage, denoise.map(|opts| opts.strength),
+    )?;
+    if hot_sites > 0 {
+        println!("AI denoise: mapped {hot_sites} isolated hot pixels stronger than 20 local sigma");
+    }
     let grain_weights = denoise_grain::weights(working);
     let original_y = denoise_grain::capture_original(
         strength,

@@ -24,6 +24,8 @@ use image::{DynamicImage, GenericImageView, ImageBuffer, Rgb};
 
 use crate::config::Config;
 
+pub(crate) mod hot_pixels;
+
 const SIDECAR_DEFAULT_TIMEOUT_SECS: u64 = 30 * 60;
 const SIDECAR_OUTPUT_CAP: usize = 1024 * 1024;
 
@@ -1764,7 +1766,7 @@ mod tests {
     /// A synthetic decoded RAW: `w×h` Bayer samples under `pattern`, the
     /// black level(s) given (one for the frame, or one per CFA site) and one
     /// white level — everything the bridge reads.
-    fn bayer_fixture(pattern: &str, w: usize, h: usize, black: &[u16], white: u32) -> rawler::RawImage {
+    pub(super) fn bayer_fixture(pattern: &str, w: usize, h: usize, black: &[u16], white: u32) -> rawler::RawImage {
         use rawler::cfa::{PlaneColor, CFA};
         use rawler::decoders::Camera;
         use rawler::rawimage::{BlackLevel, CFAConfig, RawImageData, RawPhotometricInterpretation, WhiteLevel};

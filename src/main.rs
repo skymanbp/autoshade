@@ -208,6 +208,7 @@ enum Command {
         /// Run AI denoise (GPU sidecar) before developing — for high-ISO/astro.
         /// A RAW is denoised on its sensor mosaic, before demosaic (DRUNet,
         /// noise level measured on the frame); a baked source takes SCUNet.
+        /// Positive-strength Bayer AI denoise also maps isolated hot pixels stronger than 20 sigma.
         #[arg(long)]
         denoise: bool,
         /// Denoise strength 0..1. RAW: default 0.71; higher removes more luminance grain.
@@ -230,7 +231,8 @@ enum Command {
     /// 16-bit master in ./out. Manual, GPU-accelerated: a RAW is denoised on
     /// its sensor mosaic before demosaic (DRUNet, the noise level measured on
     /// the frame), a baked image through SCUNet. Default off everywhere else —
-    /// this is the explicit "denoise now" command.
+    /// this is the explicit "denoise now" command. Positive-strength Bayer AI
+    /// denoise also maps isolated hot pixels stronger than 20 sigma.
     Denoise {
         /// RAW (.arw/.dng/...) or image (.png/.tif/.jpg) to denoise.
         input: PathBuf,

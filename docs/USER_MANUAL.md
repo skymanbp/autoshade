@@ -224,6 +224,10 @@ The network now receives the honest measured noise level. The old 0.78 sigma
 scale left different amounts of grain at different ISOs; grain now comes back
 explicitly from this frame's removed residual. The map into the model's range
 still comes from the noise model, preserving the v1.4.1 highlight guards.
+AI denoise also maps out isolated hot pixels stronger than 20 σ, using a
+local robust noise estimate on each CFA plane before the cleaner and grain
+source are developed. This runs only on supported RAW mosaics at positive
+strength; ordinary renders and strength 0 preserve the original samples.
 The fold's **AI denoise strength** starts at 71% for a RAW: higher is cleaner,
 lower returns more of the frame's own luminance grain after demosaic, in
 linear light. Every positive strength keeps the clean colour; exactly 0%

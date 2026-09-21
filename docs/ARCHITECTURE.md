@@ -614,7 +614,16 @@
 > four-measurement scale table remains in python/denoise_raw.py; the old 0.78
 > operating point left 0.42 / 0.25 / 0.11 of the full-frame astro input grain
 > across ISO 2500 / 3200 / 8000. The renderer always requests the whole clean
-> mosaic at strength 1, then develops and calibrates it. At 0 < s < 1 it also
+> mosaic at strength 1, then develops and calibrates it. Before either the
+> original capture or the cleaner, `denoise/hot_pixels.rs` maps isolated hot
+> sites above 20 local sigma to their eight same-phase neighbours' median.
+> Sigma is 1.4826 times the MAD of site-minus-median8 in 64×64 plane tiles;
+> all four edge neighbours must stay at or below 3 of their own local sigma.
+> Decisions use the unchanged mosaic, with a three-sensor-pixel border left
+> alone. Only positive-strength supported Bayer AI renders enter this step;
+> ordinary renders, zero strength and non-Bayer fallback are unchanged.
+> The transient is one small tile per Rayon worker, not a full-frame map.
+> At 0 < s < 1 it also
 > develops the original through that identical path, retains only its f32
 > luminance plane and drops the original RGB. Both buffers use the sRGB transfer,
 > including wide working primaries: decode, add (1-s)*(Y_original-Y_clean)
