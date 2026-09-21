@@ -445,6 +445,24 @@ def _weights_present():
     return all(os.path.exists(os.path.join(cache, n)) for n in denoise_raw.PINS), cache
 
 
+def _run_sidecar(src, dst, cache):
+    """The sidecar as the app spawns it, at full strength: (exit code, its log).
+
+    `-E` keeps the caller's PYTHON* variables out of the child, PYTHONUTF8 among
+    them, so the child's stderr arrives in the console code page whatever mode
+    the caller runs in. Captured as text by a caller in UTF-8 mode, the first
+    em-dash in it (the pooled-fit line) kills subprocess's reader thread and
+    leaves `stderr` None — measured 2026-09-21: the run had exited 0 and the
+    test errored on its own assertion message. So the bytes are captured and
+    decoded here, leniently; every line these tests read is ASCII."""
+    r = subprocess.run(
+        [sys.executable, "-E", denoise_raw.__file__, "--input", src, "--output", dst,
+         "--pattern", "RGGB", "--black", "512", "--white", "16383", "--strength", "1.0",
+         "--cache", cache],
+        capture_output=True)
+    return r.returncode, r.stderr.decode("utf-8", errors="replace")
+
+
 class EndToEnd(unittest.TestCase):
     @unittest.skipUnless(_weights_present()[0], "the pinned DRUNet files are not in the weight cache")
     def test_a_synthetic_mosaic_comes_back_cleaner_at_the_same_size(self):
@@ -461,12 +479,8 @@ class EndToEnd(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             src, dst = os.path.join(d, "in.png"), os.path.join(d, "out.png")
             cv2.imwrite(src, mosaic)
-            r = subprocess.run(
-                [sys.executable, "-E", denoise_raw.__file__, "--input", src, "--output", dst,
-                 "--pattern", "RGGB", "--black", "512", "--white", "16383", "--strength", "1.0",
-                 "--cache", cache],
-                capture_output=True, text=True)
-            self.assertEqual(r.returncode, 0, r.stderr[-2000:])
+            code, log = _run_sidecar(src, dst, cache)
+            self.assertEqual(code, 0, log[-2000:])
             out = cv2.imread(dst, cv2.IMREAD_UNCHANGED)
         self.assertEqual(out.dtype, np.uint16)
         self.assertEqual(out.shape, mosaic.shape)
@@ -500,12 +514,8 @@ class EndToEnd(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             src, dst = os.path.join(d, "in.png"), os.path.join(d, "out.png")
             cv2.imwrite(src, mosaic)
-            r = subprocess.run(
-                [sys.executable, "-E", denoise_raw.__file__, "--input", src, "--output", dst,
-                 "--pattern", "RGGB", "--black", "512", "--white", "16383", "--strength", "1.0",
-                 "--cache", cache],
-                capture_output=True, text=True)
-            self.assertEqual(r.returncode, 0, r.stderr[-2000:])
+            code, log = _run_sidecar(src, dst, cache)
+            self.assertEqual(code, 0, log[-2000:])
             out = cv2.imread(dst, cv2.IMREAD_UNCHANGED)
         x_out = (out.astype(np.float32) - black) / (white - black)
         kept = x_out[bright].mean() / noisy[bright].mean()
@@ -542,15 +552,11 @@ class EndToEnd(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             src, dst = os.path.join(d, "in.png"), os.path.join(d, "out.png")
             cv2.imwrite(src, mosaic)
-            r = subprocess.run(
-                [sys.executable, "-E", denoise_raw.__file__, "--input", src, "--output", dst,
-                 "--pattern", "RGGB", "--black", "512", "--white", "16383", "--strength", "1.0",
-                 "--cache", cache],
-                capture_output=True, text=True)
-        self.assertEqual(r.returncode, 0, r.stderr[-2000:])
+            code, log = _run_sidecar(src, dst, cache)
+        self.assertEqual(code, 0, log[-2000:])
         # Both spellings of the per-plane line — its own fit, or the pooled one.
-        fitted = re.findall(r"plane (\w+):.*?a=([-\d.eE+]+) b=([-\d.eE+]+)", r.stderr)
-        self.assertEqual(len(fitted), 4, r.stderr[-2000:])
+        fitted = re.findall(r"plane (\w+):.*?a=([-\d.eE+]+) b=([-\d.eE+]+)", log)
+        self.assertEqual(len(fitted), 4, log[-2000:])
         var_true = a * sky + b
         for name, fa, fb in fitted:
             var_fit = float(fa) * sky + float(fb)
