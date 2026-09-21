@@ -59,6 +59,12 @@ def candidate_from(run, out):
             note = f"iteration {blob['iter']} (unpacked from {last.name})"
             if best.exists():
                 note += "; best_state.pth also exists, PSNR-selected — not used, see docstring"
+            # `last.pt` is a MOVING target: a reader that labelled this measurement by the
+            # run's progress rather than by the checkpoint it actually opened would file one
+            # iteration's numbers under another's. Say which one this was.
+            (out / "candidate.json").write_text(
+                json.dumps({"weights": flat.name, "iter": int(blob["iter"]), "source": last.name}),
+                encoding="utf-8")
             return flat, note
         raise SystemExit(f"{last} is not a training checkpoint (no 'model'/'iter')")
     if best.exists():
