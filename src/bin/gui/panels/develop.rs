@@ -1377,6 +1377,7 @@ impl AutoShadeApp {
                     changed |= Self::companion_slider(ui, lang, tr(lang, "Colour noise detail"), r, "color_nr_detail", 0.0, 100.0, SliderFeel::Int);
                     changed |= Self::companion_slider(ui, lang, tr(lang, "Colour noise smoothness"), r, "color_nr_smooth", 0.0, 100.0, SliderFeel::Int);
                 }
+                let denoise_raw = self.denoise_uses_raw();
                 // AI denoise as an ACTIVE op: run now, see it on canvas —
                 // export-time denoise (the Export section toggle) stays for
                 // batch/full-res workflows, but nobody should have to export
@@ -1391,11 +1392,11 @@ impl AutoShadeApp {
                     ui,
                     lang,
                     tr(lang, "AI denoise strength"),
-                    &mut self.denoise_strength,
+                    if denoise_raw { &mut self.denoise_strength } else { &mut self.baked_denoise_strength },
                     1.0,
-                    autoshade::denoise::DEFAULT_STRENGTH_RAW,
+                    if denoise_raw { autoshade::denoise::DEFAULT_STRENGTH_RAW } else { autoshade::denoise::DEFAULT_STRENGTH },
                     tr(lang,
-                        "How much of the denoise 「🤖 AI Denoise now」 keeps — this fold's own dial (the Export fold's 「on export」 has its own; neither reaches the other). On a RAW the denoise runs on the sensor mosaic with the noise level measured on the frame: 100% is the model's whole output and the default (the texture stays; anything less only puts noise back). On a baked source (PNG/TIFF/JPEG master) the older SCUNet runs at this dial, and 50% is its sweet spot. Double-click to reset.",
+                        "Detail AI denoise strength, independent of the Export fold. On a RAW, the dial removes luminance grain after demosaic in linear light; the default targets Lightroom Denoise 50. Higher is cleaner, 100% is the complete network output. Every positive strength keeps clean colour; exactly 0% leaves the input untouched. Baked sources keep SCUNet's separate 50% default. Double-click to reset this source type.",
                     ),
                 );
                 ui.horizontal(|ui| {
@@ -3582,16 +3583,17 @@ impl AutoShadeApp {
                 // and neither reaches the other. Always allocated, merely
                 // disabled while the checkbox is off — the appear/disappear
                 // reflow rule the JPEG quality slider above follows.
+                let denoise_raw = self.denoise_uses_raw();
                 ui.add_enabled_ui(self.save_denoise, |ui| {
                     Self::slider_pct_hinted(
                         ui,
                         lang,
                         tr(lang, "Export denoise strength"),
-                        &mut self.save_denoise_strength,
+                        if denoise_raw { &mut self.save_denoise_strength } else { &mut self.baked_save_denoise_strength },
                         1.0,
-                        autoshade::denoise::DEFAULT_STRENGTH_RAW,
+                        if denoise_raw { autoshade::denoise::DEFAULT_STRENGTH_RAW } else { autoshade::denoise::DEFAULT_STRENGTH },
                         tr(lang,
-                            "How much of the denoise the export-time pass keeps in every full-resolution delivery — this fold's own dial (the Detail fold's 「AI Denoise now」 has its own; neither reaches the other). On a RAW the denoise runs on the sensor mosaic with the noise level measured on the frame: 100% is the model's whole output and the default. On a baked source the older SCUNet runs at this dial, and 50% is its sweet spot. Double-click to reset.",
+                            "Export AI denoise strength, independent of the Detail fold. On a RAW, the dial removes luminance grain after demosaic in linear light; the default targets Lightroom Denoise 50. Higher is cleaner, 100% is the complete network output. Every positive strength keeps clean colour; exactly 0% leaves the input untouched. Baked sources keep SCUNet's separate 50% default. Double-click to reset this source type.",
                         ),
                     );
                 });
