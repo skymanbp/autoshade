@@ -99,7 +99,7 @@
         </article>
         <article>
           <h3>A denoiser trained here</h3>
-          <p>The RAW denoiser runs weights fine-tuned for this pipeline's own stabilised mosaic, on real paired captures and synthetic sensor noise: <strong>1.98 dB</strong> over the generic network it replaces, at Lightroom's own texture.</p>
+          <p>The RAW denoiser uses weights trained for its own stabilised mosaic and the frame's honest measured noise. At the 71% RAW default it returns the frame's own luminance grain after demosaic in linear light; every positive strength keeps clean chroma; higher is cleaner, 100% is the complete network output. Baked files keep SCUNet and its separate 50% default.</p>
         </article>
       </div>
 

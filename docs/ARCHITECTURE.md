@@ -141,12 +141,13 @@
 > wrong reason; it writes a `=== name ===` transcript that
 > `scripts/check_docs.py --gates` reads the counts and the lane set back out
 > of, and it prints the by-name test-set difference against a saved baseline.
-> 1640 library + 25 CLI + 201 GUI + 2+2 contract tests are enumerated in the GUI
-> build; the library result is 1625 pass + 15 `#[ignore]`d forensic probes and
-> the GUI result is 200 pass + one explicit scratch-recipe export probe ignored
-> in the ordinary battery. Counts refreshed 2026-09-18 for v1.5.0: +249 / −11 by
+> 1655 library + 25 CLI + 215 GUI + 2+2 contract tests are enumerated in the GUI
+> build; the library result is 1640 pass + 15 `#[ignore]`d forensic probes and
+> the GUI result is 214 pass + one explicit scratch-recipe export probe ignored
+> in the ordinary battery. Current counts refreshed 2026-09-20 for the
+> luminance-return lane. The historical v1.5.0 census (2026-09-18) was +249 / −11 by
 > name against the v1.4.1 tag (`af7f25e`), taken statically between the tag's
-> source and this tree (1718 → 1728 `#[test]` functions) — seven library pins
+> source and the v1.5.0 tree (1718 → 1728 `#[test]` functions) — seven library pins
 > in `denoise` (the mosaic facts read off a sensor's CFA and levels, the four
 > refusals for a sensor that carries no 2×2 Bayer mosaic, a zero strength
 > spawning nothing, the product replacing the samples in place or being
@@ -608,28 +609,37 @@
 > on a 15 s ISO-3200 star field that ceiling sat at 7.6-14.7 % of full scale
 > per plane and every star came back as the same grey dot, keeping 9.7 % of
 > its excess over the sky against Lightroom's 100 % (2026-09-17). The sigma
-> handed to the model is `SIGMA_SCALE = 0.78` times that affine's slope. The
-> network under it changed in v1.5.0 — `autoshade-raw-denoise-v1.pth` is DPIR's
-> DRUNet-colour fine-tuned for the transform this sidecar actually applies — and
-> a stronger denoiser at the same noise estimate is a different operating point,
-> so it was chosen again from the same four measurements instead of inherited:
-> at 0.78 the grain on 15 real Lightroom pairs reads 1.06 / 1.01 / 1.01 of
-> Lightroom's own, the faint and very faint stars come back at 69 % / 40 %
-> against Lightroom's 71 % / 43 %, held-out PSNR is 44.68 dB — 1.98 dB above
-> the generic weights — and the synthetic bench keeps +0.81 / +1.72 dB at ×5.
-> Higher smooths past Lightroom, lower gives the bench's level away;
-> compatibility is the aim, so the point that matches Lightroom wins the ties
-> (user's decision, 2026-09-17). v1.4.1's 0.85 on DPIR's released weights read
-> 0.68 / 0.55 / 0.65 of Lightroom's grain — half of it — which is what the
-> stronger network made worth measuring again.
-> Strength is a mosaic-domain blend whose default is
-> `denoise::DEFAULT_STRENGTH_RAW = 1.0`, chosen per source by
-> `denoise::default_strength_for` on the CLI, the web export and the GUI's two
-> dials; anything less puts noise back. GUI preferences have a named
-> `PREFS_ERA` (`src/bin/gui/model.rs`): a missing era decodes to 0 while fresh
-> defaults and saves carry era 1. Restore step 0→1 resets both denoise dials
-> to the RAW default and reports changed values once in the startup status;
-> era-1 choices remain intact. Why the mosaic: on the user's ILCE-7RM4A frames
+> handed to the model is now the affine's slope itself (sigma = 1.0 / span),
+> the condition AutoShade's fine-tuned weights were trained for. The historical
+> four-measurement scale table remains in python/denoise_raw.py; the old 0.78
+> operating point left 0.42 / 0.25 / 0.11 of the full-frame astro input grain
+> across ISO 2500 / 3200 / 8000. The renderer always requests the whole clean
+> mosaic at strength 1, then develops and calibrates it. At 0 < s < 1 it also
+> develops the original through that identical path, retains only its f32
+> luminance plane and drops the original RGB. Both buffers use the sRGB transfer,
+> including wide working primaries: decode, add (1-s)*(Y_original-Y_clean)
+> equally to R/G/B, then encode again. Y is the working space's XYZ luminance
+> row, from the existing primaries matrix. Grain therefore returns after
+> demosaic and calibration, before recipe white balance, tone and geometry.
+> Linear channel differences cannot change; every positive strength retains
+> clean chroma, while exactly 0 leaves the input untouched and spawns nothing.
+> Strength 1 never develops the original. Non-Bayer SCUNet fallback and baked
+> sources do not enter this return. The sidecar's standalone per-plane strength
+> API remains intact; its output floor is container 0 instead of black.
+> DEFAULT_STRENGTH_RAW = 0.71 controls CLI, web and both GUI RAW dials.
+> Strength 0 preserves input bytes without spawning; 1 returns the complete
+> network output. PREFS_ERA = 2: step 0→1 retains its historical 1.0 law;
+> step 1→2 resets the RAW dials and reports original values once. Separate baked
+> slots retain the old shared choices, so SCUNet users keep their settings;
+> new baked choices start at the unchanged 0.5. Current-era choices persist.
+> The original's extra develop cost on the 60.2 MP CPU replay was 231 MiB
+> peak commit and 5.116 s: strength 1 measured 1765 MiB / 5.131 s, default
+> 0.71 measured 1996 MiB / 10.247 s, fresh processes through the existing
+> peak probe and a captured-mosaic stub. Python/model memory is excluded.
+> Ordinary RAW admission stays 31 B/px; 0 < s < 1 reserves an extra 18 B/px
+> before decode (49 B/px conservative total, first refused size 87,652,394 px).
+> Batch rendering requests no AI denoise and keeps its existing budget.
+> Why the mosaic: on the user's ILCE-7RM4A frames
 > the noise is white per CFA plane there and spatially correlated after demosaic,
 > where neither the blind SCUNet nor a non-blind sRGB-domain model separated it from
 > texture — against ground truth (an ISO-100 frame plus synthetic noise at
@@ -1198,7 +1208,7 @@ line is whether the NUMBERS are wrong or only the fine detail:
 | Embedded preview at an **in-camera aspect crop** (a 4:3 preview over a 3:2 sensor) | **Treat it as the crop it is** (v1.2.2): `reimagine` sizes and sends the sensor frame, `match` fits on a neutral develop of the sensor frame with the calibration composed, the base-look estimator pairs the develop's centred crop | The preview is a display artefact; every consumer that took it for the frame paired two different frames (`fit::same_frame_plausible_dims` is the one rule) |
 | No embedded preview (ORF class) | **Degrade** to a neutral develop + say so | rawler overrides no rendition method for 12 of the 24 formats; that is a fact about the format, not a broken file. `embedded_preview` keeps the strict "camera pixels or nothing" contract, because the base-look estimator's method depends on it |
 | Non-Bayer CFA (X-Trans) | **Demosaic in-tree over the array's own geometry** (v0.34.0, `render::demosaic_over_cfa_geometry`) + disclose per render | rawler's `PPGDemosaic` is Bayer-only and its guard (`CFA::is_rgb`) checks the pattern's NAME, not its geometry; through v0.33.0 its chroma pass left R unwritten at 8 of the 36 photosites per tile and B at a different 8 — the measured green-dark cast. Now every channel interpolates only from photosites that measured it: colour/tone/framing correct, fine detail approximate and disclosed |
-| A RAW whose develop would peak over **4 GiB** — 138,547,333 px and up, at the measured 31 B/px (a 150 MP back; a 102 MP GFX is well clear) | **Refuse**, naming the estimate and its per-pixel basis (v0.34.0, `decode::refuse_raw_develop_over_ceiling`, charged in `render::render_to_image_in` before the sensor is decompressed) | The baked door has refused an over-ceiling file since L02 while the RAW door had NO per-file limit at all, so a ~150 MP back on the default `batch --jobs 3` was the worse instance of the same defect with nothing opt-in about it. The ceiling is the SAME 4 GiB, and the message says outright that `--jobs 1` is not the answer — a single file's peak is not a concurrency budget. This IS a behaviour change: such a file used to be attempted, and would page |
+| An ordinary RAW develop whose peak would exceed **4 GiB** — 138,547,333 px and up, at the measured 31 B/px (a 150 MP back; a 102 MP GFX is well clear) | **Refuse**, naming the estimate and its per-pixel basis (v0.34.0, `decode::refuse_raw_develop_over_ceiling`, charged in `render::render_to_image_in` before the sensor is decompressed) | The baked door has refused an over-ceiling file since L02 while the RAW door had NO per-file limit at all, so a ~150 MP back on the default `batch --jobs 3` was the worse instance of the same defect with nothing opt-in about it. The ceiling is the SAME 4 GiB, and the message says outright that `--jobs 1` is not the answer — a single file's peak is not a concurrency budget. This IS a behaviour change: such a file used to be attempted, and would page |
 | A RAW whose **sensor plane is over the decoder's OWN allocator ceiling** — after the tile round-up, `width × cpp > 50 000`, `height > 50 000`, or `width × cpp × height > 500 M` | **Refuse**, naming the frame the file declares, the allocation it becomes and the workflow that does work (`decode::guard_raw_plane_extent`, at all four `raw_image` doors; `every_raw_image_door_measures_the_plane_first` is the sweep) | rawler's `alloc_image_plain!` (`pixarray.rs:546-556`) PANICS at that ceiling and checks it BEFORE the `dummy` short-circuit, so the 4 GiB refusal above — charged against a pixel count only the dummy probe can produce — was UNREACHABLE for every frame between the two ceilings, and a third-party panic escaped in its place, reported as "a defect in the third-party decoder" when nothing was defective. `plain_image_from_ifd` (`decoders/mod.rs:598`) charges the ceiling with `decode_width * cpp` as the WIDTH, so a three-sample LinearRaw frame reaches it at a third of the pixel count a Bayer frame would: an upscaler's 19008×12672 DNG in 416×416 tiles asks for 57408 × 12896 and trips both limits at once, while the same run's un-upscaled 9504×6336 pass computes 28704 × 6400 and still opens. Rejects ONLY on proof, like the cyclic-chain guard — an IFD that does not declare itself CFA or LinearRaw is a preview and passes through, so no file that decodes today changes |
 | DefaultCrop rectangle off the sensor | **Disclose** and develop un-aligned | Was a silent `None` until R27 — any diagnosis of a misplaced mask started with zero telemetry |
 | Untagged **16-bit** baked input | **Disclose** | It is read as sRGB. Right for 8-bit JPEG (web convention); often wrong for 16-bit, which is what an editor produces — LR's "Edit in…" exports ProPhoto. Warning on every untagged JPEG would be a warning nobody reads |

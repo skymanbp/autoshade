@@ -220,26 +220,23 @@ SCUNet path, and 3.1–5.9 dB on the most detailed blocks
 (`scripts/denoise_bench.py`). Since v1.5.0 the network is **AutoShade's own**:
 the same architecture, trained for this pipeline on real noisy/clean pairs and
 synthetic sensor noise instead of the general-purpose weights it started from.
-It reads about 2 dB better on held-out pairs than those did, and its strength
-was set where its output has Lightroom's own texture — measured against
-Lightroom's Enhance→Denoise answer on fifteen of this photographer's frames. Nothing on that path may clip: the map into the
-model's range is built from the measured noise, not from this frame's own
-brightness histogram, so a star field's stars, a night scene's point lights and
-a specular highlight come back at their own brightness instead of at one shared
-ceiling. Through v1.4.0 they did not — the map stopped at the frame's 99.95th
-percentile and a 15 s ISO-3200 star field lost 61 % of every star. Against
-Lightroom's own Enhance→Denoise output on two 15 s astro frames of the same
-camera, the path now keeps as much faint detail as Lightroom does with about
-half the residual grain. A baked source (a PNG/TIFF/JPEG master) still
-goes through SCUNet on its developed pixels. The fold's own **AI denoise
-strength** dial starts at 100%: on a RAW that is the model's whole output, and
-anything less only puts noise back; on a baked source the SCUNet law applies
-(luminance follows the dial, colour noise is removed in full from 50% up) and
-50% is its sweet spot. The Export fold's **🤖 AI Denoise on export** has a dial
-of its own, and neither reaches the other. On the first launch with preferences
-from v1.3.4–v1.5.0, both dials reset once to 100% because their law changed in
-v1.4.0; the startup status reports changed values, and choices saved in the new
-preferences era survive later launches. While a ◈ card exists its master is
+The network now receives the honest measured noise level. The old 0.78 sigma
+scale left different amounts of grain at different ISOs; grain now comes back
+explicitly from this frame's removed residual. The map into the model's range
+still comes from the noise model, preserving the v1.4.1 highlight guards.
+The fold's **AI denoise strength** starts at 71% for a RAW: higher is cleaner,
+lower returns more of the frame's own luminance grain after demosaic, in
+linear light. Every positive strength keeps the clean colour; exactly 0%
+leaves the input untouched without running the model. 100% keeps the network's
+complete output. The reference for the default is Lightroom Denoise
+50, not a promise that different renderers produce identical pixels.
+A baked PNG/TIFF/JPEG still uses SCUNet, its separate default is 50%, and its
+colour-noise removal is complete from 50% up. The Export fold has its own dial;
+both folds remember RAW and baked choices separately. On the first launch in
+preferences era 2, old RAW choices reset once to the new default, with both old
+percentages in the startup status; old shared values remain the baked choices,
+and choices saved in era 2 survive later launches. While a ◈ card exists its
+master is
 the photo's negative: a later Reimagine sends it, and a Reverse-fit is solved
 on it and lands on it (section 4).
 
@@ -589,10 +586,10 @@ the current delivery summary.
 **🤖 AI Denoise on export** runs the AI denoise inside every full-resolution
 delivery — a RAW on its sensor mosaic, a baked source through SCUNet — at the
 Export fold's own **Export denoise strength** dial: the same law as the Detail
-fold's dial and the same 100% start, but its own setting: moving one never
+fold's dial and the same 71% RAW / 50% baked start, but its own setting: moving one never
 moves the other. The batch render skips it, and so does a ◈ Denoised card,
 whose master is already denoised. The export summary echoes the amount ("AI
-Denoise 100%") and carries none on a ◈ card.
+Denoise 71%") and carries none on a ◈ card.
 
 CLI exports use q95 sRGB. `--long-edge N` is available on `apply`, `auto`, and
 `batch --render`; `0` or omission means full resolution. It is deliberately an
@@ -632,11 +629,11 @@ is set (avoiding duplicate analysis and billing for RAW+JPEG pairs), and
 defaults to three photos in flight; `--long-edge` on `batch` requires
 `--render`. `eval` defaults to serial work and resumes from its state file.
 Denoise-strength/model overrides require `--denoise` on `auto`. A denoise
-strength defaults to 1.0 on a RAW and 0.5 on a baked source, on every surface
+strength defaults to 0.71 on a RAW and 0.5 on a baked source, on every surface
 (`denoise` and `auto --denoise`, the web export, both GUI dials). On a RAW the
-denoise runs on the sensor mosaic before demosaic and the value blends the
-denoised mosaic with the original; `denoise` then writes a neutral 16-bit
-develop of it, and `--model` (a SCUNet tier) does not apply. On a baked source
+network cleans the sensor mosaic at honest sigma; the dial returns only
+linear-light luminance residual after demosaic and calibration; `denoise`
+then writes a neutral 16-bit develop of it, and `--model` (a SCUNet tier) does not apply. On a baked source
 SCUNet runs on the pixels: the value blends the luminance, colour noise is
 removed in full from 0.5 up, and 1.0 is the model's whole output. `retouch`
 without `--prompt` removes what the mask covers — the area is continued from
