@@ -122,6 +122,75 @@ class StarStandardTests(unittest.TestCase):
         np.testing.assert_allclose(observed['y'], reference['y'])
         np.testing.assert_allclose(s.apply_tone(np.array([.03, .07]), observed), [.047, .107], atol=1e-6)
 
+    @staticmethod
+    def _mosaic(stars=(), spikes=(), plane_gain=None):
+        """Noise of sigma 20 on 2000, Gaussian stars (sigma 1.5 px) and lone photosites, as (x, y, height)."""
+        rng = np.random.default_rng(5)
+        m = 2000+rng.normal(0, 20, (512, 512))
+        yy, xx = np.mgrid[:512, :512]
+        for x, y, height in stars:
+            psf = height*np.exp(-.5*((xx-x)**2+(yy-y)**2)/1.5**2)
+            if plane_gain:
+                (py, px), gain = plane_gain
+                psf[py::2, px::2] *= gain
+            m += psf
+        for x, y, height in spikes:
+            m[y, x] += height
+        return np.rint(m).astype(np.uint16)
+
+    def test_a_lone_photosite_is_not_a_star_in_the_quad_matched_mosaic(self):
+        # Both would clear a 5-sigma render detector: the star's peak is 8 sigma, the lone photosite 12.
+        m = self._mosaic(stars=[(200, 200, 160)], spikes=[(300, 300, 240)])
+        snr = s.true_star_snr(s.quad_matched(m), np.array([[200, 200], [300, 300], [100, 400]]))
+        self.assertGreaterEqual(snr[0], 5)
+        self.assertLess(snr[1], 5)
+        self.assertLess(snr[2], 5)      # empty sky
+        # Too near the edge for its annulus: not judged, and never counted as a star.
+        self.assertTrue(np.isnan(s.true_star_snr(s.quad_matched(m), np.array([[10, 10]]))[0]))
+
+    def test_plane_flux_reads_the_plane_that_lost_a_tenth(self):
+        sites = [(120, 120, 900), (260, 131, 1200), (390, 250, 700), (141, 380, 1000), (300, 401, 800)]
+        xy = np.array([(x, y) for x, y, _ in sites])
+        before = self._mosaic(stars=sites)
+        after = self._mosaic(stars=sites, plane_gain=((1, 0), .9))
+        r = s.plane_retention(s.plane_photometry(before, xy), s.plane_photometry(after, xy), 16383.)
+        self.assertEqual(r['stars'], 5)
+        np.testing.assert_allclose(r['flux'], [1, 1, .9, 1], atol=.005)
+        self.assertAlmostEqual(r['flux_spread'], .1, delta=.005)
+        # A star at the white level is left out of all four planes, and with none left the line is refused.
+        with self.assertRaises(ValueError):
+            s.plane_retention(s.plane_photometry(before, xy), s.plane_photometry(after, xy), 2000.)
+
+    def test_the_cleaner_group_decides_and_a_missing_measurement_cannot_pass(self):
+        rendered = {str(i): 'PASS' for i in range(1, 9)}
+        rendered.update({'1': 'FAIL', '2': 'FAIL', '5': 'FAIL', '7': 'FAIL'})   # what the ordinary renders read
+        lr = {'fine_y': .27, 'fine_y_p10_p90': [.265, .276]}
+        flat = {'fine_y': .288, 'fine_y_p10_p90': [.284, .293]}
+        true, lrtrue = {'faint_retention_percent': 97.3}, {'faint_retention_percent': 97.5}
+        planes = {'flux_spread': .012}
+        colour = {'NEW_to_Lightroom': .08, 'input_to_LR_OFF': .09}
+        group = s.cleaner_group(rendered, flat, lr, true, lrtrue, planes, colour)
+        self.assertEqual(set(group.values()), {'PASS'})
+        self.assertEqual(list(group), ['1c', '2c', '3', '4', '5c', '6', '7c', '8'])
+        missing = s.cleaner_group(rendered, None, lr, None, None, None, None)
+        self.assertEqual([missing[k] for k in ('1c', '2c', '5c', '7c')], ['UNMEASURED']*4)
+        self.assertEqual(s.cleaner_group(rendered, dict(flat, fine_y=.301), lr, true, lrtrue, planes, colour)['1c'], 'FAIL')
+        self.assertEqual(s.cleaner_group(rendered, flat, lr, {'faint_retention_percent': 96.9}, lrtrue, planes, colour)['5c'], 'FAIL')
+        self.assertEqual(s.cleaner_group(rendered, flat, lr, true, lrtrue, {'flux_spread': .021}, colour)['7c'], 'FAIL')
+        drifted = {'NEW_to_Lightroom': .101, 'input_to_LR_OFF': .09}
+        self.assertEqual(s.cleaner_group(rendered, flat, lr, true, lrtrue, planes, drifted)['7c'], 'FAIL')
+        # A line the ordinary renders fail still fails the group when it is one of the four taken as they were.
+        self.assertEqual(s.cleaner_group(dict(rendered, **{'6': 'FAIL'}), flat, lr, true, lrtrue, planes, colour)['6'], 'FAIL')
+
+    def test_half_a_pair_is_refused_before_any_image_is_opened(self):
+        with tempfile.TemporaryDirectory() as root:
+            base = [sys.executable, '-B', str(SCRIPT), '--root', root, '--input', 'a.tif', '--ours', 'b.tif',
+                    '--lr-off', 'c.tif', '--lr-on', 'd.tif']
+            for half in (['--flat-input', 'e.tif'], ['--mosaic-ours', 'f.png']):
+                p = subprocess.run(base+half, capture_output=True, text=True)
+                self.assertEqual(p.returncode, 2, p.stderr)
+                self.assertIn('given in pairs', p.stderr)
+
 
 if __name__ == '__main__':
     unittest.main()
