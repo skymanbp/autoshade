@@ -11,8 +11,28 @@ learned that inference cannot reproduce:
   output ẑn → x̂ = igat(ẑn · span, a, b).
 
 The TARGET is therefore in z: t = I_A⁻¹(x_clean / a + b / a²) / span, the
-value whose exact unbiased inverse is the clean sample. The loss is L1 there,
-which weights shadows and highlights by their own noise.
+value whose exact unbiased inverse is the clean sample. v1's loss was L1 there
+(`--loss l1z`), which weights shadows and highlights by their own noise.
+
+v2 (2026-09-21) changes two things, both for one measured defect: v1 erased
+faint point sources (`point_sources.py` has the numbers).
+  * Half of all crops get STARS on the clean side before the noise is drawn, a
+    real pair gets the stars' own photon counts on its noisy side
+    (`point_sources.add_to_pair`, `--stars`).
+  * The loss seeks the MEAN, in the units light adds in (`--loss l2x`, the
+    default): (igat(out) − x_clean)² / (a·level + b + 3a²/8), `level` a 9×9
+    mean of the NOISY input. L1's minimiser is the conditional median, and
+    under a sky of stars too faint to stand alone the median is the empty sky:
+    their flux went missing (0.4–1.9 DN per plane on the operator's star
+    frame). A squared error's minimiser is the conditional mean, which keeps
+    flux whatever it cannot resolve. It is taken after the inverse because
+    E[x] is not igat(E[z]) across two hypotheses as far apart as "sky" and
+    "star". The divisor is the variance the stabiliser itself assumes
+    (1 / gat'² ), so shadows and highlights still weigh by their own noise, and
+    it reads the noisy input only: a weight that knew the clean value would
+    pull the minimiser off the mean, toward the darker hypothesis.
+Validation reports, next to the PSNR of the star-free held-out pairs, the share
+of injected star flux the network returns, by brightness class.
 
 Half of every batch is a REAL pair (RawNIND, the dataset's train split: its
 noisy frame, its own estimated (a, b), the gain-matched mean of its GT
@@ -23,10 +43,12 @@ and the (a, b) the estimator would report for it.
 Augmentation keeps the CFA geometry: mosaic-aware flips and transposes (the
 one-sample crop that restores RGGB after a flip), exposure and white-balance
 gains on the clean side of synthetic samples only.
-Provenance — AutoShade v1.5.0. This is the pipeline that produced
-`autoshade-raw-denoise-v1.pth`, the weights `python/denoise_raw.py` ships:
-DPIR's released `drunet_color` (KAIR, MIT) fine-tuned for that sidecar's own
-transform, so nothing is learned that inference cannot reproduce. The real
+Provenance — AutoShade v1.5.0 and its successor. With `--stars 0 --loss l1z`
+and DPIR's `drunet_color` as the start this is the pipeline that produced
+`autoshade-raw-denoise-v1.pth`: DPIR's released network (KAIR, MIT) fine-tuned
+for the sidecar's own transform, so nothing is learned that inference cannot
+reproduce. As it stands it starts from whatever `denoise_raw.load_model` loads
+(the shipped weights) and produces their successor. The real
 training pairs are RawNIND (Brummer & De Vleeschouwer, UCLouvain Dataverse,
 doi:10.14428/DVN/DEQCIM, CC BY-SA 4.0); the synthetic half is drawn over
 low-ISO frames the operator owns. Every path here is an argument or is derived
@@ -64,6 +86,7 @@ REPO = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "python"))
 import denoise_raw as dr  # noqa: E402  why: importable only after the sys.path insert
 import noise_synth as ns  # noqa: E402  why: same
+import point_sources as ps  # noqa: E402  because it is importable only after the sys.path insert above
 
 
 # ── data ─────────────────────────────────────────────────────────────────────
@@ -155,6 +178,66 @@ def make_batch(x_noisy, x_clean, a, b):
     return zn, tn, 1.0 / span, span
 
 
+def loss_mean_seeking(out, zn_span, x_noisy, x_clean, a, b):
+    """The v2 loss (see the module docstring). out (2B,3,H,W) is the network's
+    answer in normalised z; a, b (B,4)."""
+    pick = lambda v: torch.cat([v[:, [0, 1, 3]], v[:, [0, 2, 3]]], 0)[:, :, None, None]
+    a3, b3 = pick(a), pick(b)
+    span = torch.cat([zn_span, zn_span]).view(-1, 1, 1, 1)
+    # z >= 1 is where I_A is monotone; every target lies above 1.2
+    x_hat = ns.igat((out * span).clamp_min(1.0), a3, b3)
+    level = F.avg_pool2d(F.pad(to_triplets(x_noisy), (4, 4, 4, 4), mode="reflect"), 9, stride=1).clamp_min(0.0)
+    variance = a3 * level + b3 + 0.375 * a3 * a3
+    return ((x_hat - to_triplets(x_clean)) ** 2 / variance).mean()
+
+
+FLUX_CLASSES = ((1.5, 3.0), (3.0, 6.0), (6.0, 12.0), (12.0, 25.0), (25.0, 400.0))
+
+
+def flux_field(clean, dev):
+    """A fixed star field over fixed clean crops at the operator's star-frame
+    noise (a 4.9e-4, b 6.2e-6, measured 2026-09-21): what `validate` asks the
+    network to give back. Returns (noisy, a, b, stars, light, ground)."""
+    rng = np.random.default_rng(777)
+    gen = torch.Generator(device=dev)
+    gen.manual_seed(777)
+    n = clean.shape[0]
+    a = torch.full((n, 4), 4.9e-4, device=dev)
+    b = torch.full((n, 4), 6.2e-6, device=dev)
+    ground = (clean * 0.0 + clean.mean(dim=(2, 3), keepdim=True).clamp(0.005, 0.05))
+    stars = ps.draw(rng, n, clean.shape[2], clean.shape[3], share=1.0, field_share=1.0)
+    sample = torch.as_tensor(stars["sample"], device=dev)
+    sigma = torch.sqrt(a[sample, 1] * ground[sample, 1, 0, 0] + b[sample, 1])
+    light = ps.render(stars, torch.as_tensor(stars["snr"], device=dev).float() * sigma, clean.shape[2], clean.shape[3], dev)
+    p = {"a": a[:, 1], "b": b[:, 1], "tukey": torch.zeros(n, dtype=torch.bool, device=dev),
+         "lam": torch.zeros(n, device=dev), "rho_row": torch.zeros(n, device=dev), "rho_col": torch.zeros(n, device=dev),
+         "hot_rate": torch.zeros(n, device=dev), "blur": torch.zeros(n, device=dev),
+         "step": torch.full((n,), 1.0 / 15871.0, device=dev)}
+    noisy, _ = ns.synthesize(ground + light, p, gen)
+    return noisy, a, b, stars, light, ground
+
+
+def flux_returned(x_hat, stars, light, ground):
+    """Per brightness class: the flux the network returns over the flux that
+    was there, both summed over a 5×5 G1 window at every star of the class
+    (windows overlap in a dense field; both sums count the same neighbours)."""
+    h, w = x_hat.shape[2:]
+    box = lambda v: F.avg_pool2d(F.pad(v[:, 1:2], (2, 2, 2, 2), mode="reflect"), 5, stride=1)[:, 0] * 25.0
+    got, was = box(x_hat - ground), box(light)
+    i0 = torch.as_tensor(np.clip(np.round(stars["y"] / 2.0), 0, h - 1), device=x_hat.device).long()
+    j0 = torch.as_tensor(np.clip(np.round((stars["x"] - 1.0) / 2.0), 0, w - 1), device=x_hat.device).long()
+    sample = torch.as_tensor(stars["sample"], device=x_hat.device)
+    inside = (i0 >= 4) & (i0 < h - 4) & (j0 >= 4) & (j0 < w - 4)
+    snr = torch.as_tensor(stars["snr"], device=x_hat.device)
+    report = {}
+    for lo, hi in FLUX_CLASSES:
+        pick = inside & (snr >= lo) & (snr < hi)
+        report[f"{lo:g}-{hi:g}"] = (float(got[sample[pick], i0[pick], j0[pick]].sum() / was[sample[pick], i0[pick], j0[pick]].sum())
+                                    if int(pick.sum()) else None)
+    report["sky"] = float((x_hat[:, 1] - ground[:, 1] - light[:, 1]).mean() / 4.9e-4)
+    return report
+
+
 # ── training ─────────────────────────────────────────────────────────────────
 
 def main():
@@ -172,6 +255,8 @@ def main():
     ap.add_argument("--seed", type=int, default=20260917)
     ap.add_argument("--dry", type=int, default=0, help="run this many iterations, report speed and memory, exit")
     ap.add_argument("--resume", default="")
+    ap.add_argument("--stars", type=float, default=0.5, help="share of crops that get point sources; 0 is v1")
+    ap.add_argument("--loss", choices=("l2x", "l1z"), default="l2x", help="l1z is v1's")
     args = ap.parse_args()
     out = pathlib.Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
@@ -208,6 +293,7 @@ def main():
     vrng = np.random.default_rng(12345)
     vidx = vrng.choice(len(pairs_val), size=min(args.val_crops, len(pairs_val)), replace=False)
     val = [pairs_val.get(int(k)) for k in vidx]
+    flux = flux_field(torch.from_numpy(np.stack([c[0][4:] for c in val[:32]])).to(dev), dev)
 
     # noise-level bins by the green shot gain: the operator's camera spans
     # 3e-4 (ISO 1000) .. 1.9e-3 (ISO 6400)
@@ -240,8 +326,17 @@ def main():
                     for key, arr in (("sqrt", xh[i]), ("noisy_sqrt", n)):
                         row[key] = 10 * math.log10(1.0 / max(float(((arr.sqrt() - c.sqrt()) ** 2).mean()), 1e-12))
                     rows.append(row)
+            noisy, fa, fb, stars, light, ground = flux
+            zn, _, sigma, span = make_batch(noisy, ground + light, fa, fb)
+            parts = []
+            for k in range(0, noisy.shape[0], 8):
+                with torch.autocast("cuda", dtype=torch.float16):
+                    o = forward(model, zn[k:k + 8], sigma[k:k + 8] * sigma_scale)
+                zhat = merge_triplets(o.float(), o.shape[0] // 2) * span[k:k + 8, None, None, None]
+                parts.append(ns.igat(zhat, fa[k:k + 8, :, None, None], fb[k:k + 8, :, None, None]))
+            returned = flux_returned(torch.cat(parts), stars, light, ground)
         model.train()
-        r = {"tag": tag, "sigma_scale": sigma_scale, "n": len(rows)}
+        r = {"tag": tag, "sigma_scale": sigma_scale, "n": len(rows), "flux": returned}
         for key in ("lin", "sqrt", "noisy_lin", "noisy_sqrt"):
             r[f"psnr_{key}"] = float(np.mean([x[key] for x in rows]))
         for name, lo, hi in BINS:
@@ -252,6 +347,9 @@ def main():
                         for nm, _, _ in BINS)
         print(f"[val {tag} s{sigma_scale}] PSNR lin {r['psnr_lin']:.3f} sqrt {r['psnr_sqrt']:.3f} "
               f"(noisy {r['psnr_noisy_lin']:.3f} / {r['psnr_noisy_sqrt']:.3f}) sqrt by level: {bins}", flush=True)
+        print(f"[val {tag} s{sigma_scale}] star flux returned by G peak sigma: "
+              + " ".join(f"{k} {v:.3f}" for k, v in returned.items() if v is not None and k != "sky")
+              + f"; sky {returned['sky']:+.3f} photons", flush=True)
         return r
 
     history = []
@@ -285,6 +383,9 @@ def main():
         if n_syn:
             xc_syn = torch.from_numpy(np.stack(syn_clean)).to(dev)
             p = ns.sample_params(n_syn, gen, dev)
+            if args.stars > 0:
+                xc_syn, _, _ = ps.add_to_pair(xc_syn, None, p["a"][:, None].expand(-1, 4), p["b"][:, None].expand(-1, 4),
+                                              rng, gen, args.stars)
             xn_syn, b_seen = ns.synthesize(xc_syn, p, gen)
             a_est = p["a"] * torch.exp(torch.randn(n_syn, generator=gen, device=dev) * 0.03)
             b_est = b_seen * torch.exp(torch.randn(n_syn, generator=gen, device=dev) * 0.15)
@@ -293,6 +394,8 @@ def main():
             xc_real = torch.from_numpy(np.stack(xs_c)).to(dev)
             a_real = torch.from_numpy(np.stack(as_)).to(dev).clamp_min(1e-7)
             b_real = torch.from_numpy(np.stack(bs_)).to(dev).clamp_min(0)
+            if args.stars > 0:
+                xc_real, xn_real, _ = ps.add_to_pair(xc_real, xn_real, a_real, b_real, rng, gen, args.stars)
         if n_real and n_syn:
             xn = torch.cat([xn_real, xn_syn]); xc = torch.cat([xc_real, xc_syn])
             a = torch.cat([a_real, a_est[:, None].expand(-1, 4)]); b = torch.cat([b_real, b_est[:, None].expand(-1, 4)])
@@ -300,11 +403,14 @@ def main():
             xn, xc, a, b = xn_real, xc_real, a_real, b_real
         else:
             xn, xc, a, b = xn_syn, xc_syn, a_est[:, None].expand(-1, 4), b_est[:, None].expand(-1, 4)
-        zn, tn, sigma, _ = make_batch(xn, xc, a.contiguous(), b.contiguous())
+        a, b = a.contiguous(), b.contiguous()
+        zn, tn, sigma, span = make_batch(xn, xc, a, b)
         with torch.autocast("cuda", dtype=torch.float16):
             o = forward(model, zn, sigma)
-        target = to_triplets(tn)
-        loss = (o.float() - target).abs().mean()
+        if args.loss == "l1z":
+            loss = (o.float() - to_triplets(tn)).abs().mean()
+        else:
+            loss = loss_mean_seeking(o.float(), span, xn, xc, a, b)
         opt.zero_grad(set_to_none=True)
         scaler.scale(loss).backward()
         scaler.unscale_(opt)
