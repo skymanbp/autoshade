@@ -141,20 +141,29 @@
 > wrong reason; it writes a `=== name ===` transcript that
 > `scripts/check_docs.py --gates` reads the counts and the lane set back out
 > of, and it prints the by-name test-set difference against a saved baseline.
-> 1659 library + 25 CLI + 215 GUI + 2+2 contract tests are enumerated in the GUI
-> build; the library result is 1644 pass + 15 `#[ignore]`d forensic probes and
+> 1668 library + 25 CLI + 215 GUI + 2+2 contract tests are enumerated in the GUI
+> build; the library result is 1653 pass + 15 `#[ignore]`d forensic probes and
 > the GUI result is 214 pass + one explicit scratch-recipe export probe ignored
-> in the ordinary battery. Counts refreshed 2026-09-21 on the tree that merges
-> the RAW-denoise lane into `main`: +11 / −0 by name against the v1.5.1 tag
-> (`1a122c0`), listed by the test harness itself on both trees — ten library
+> in the ordinary battery. Counts refreshed 2026-09-21 after the RAW-denoise
+> lane merged into `main`, hot-site mapping moved to every develop and its rule
+> was rebuilt on what ordinary frames showed: +20 / −0
+> by name against the v1.5.1 tag
+> (`1a122c0`), listed by the test harness itself on both trees — nineteen library
 > names (the four laws of the luminance return: a full clean is bit-exact and
 > never develops the original, grey noise returns at the exact share while
 > pure chroma returns nothing, the return keeps chroma and obeys the luminance
-> law, sRGB and wide exports carry the same linear grain; the four hot-site
+> law, sRGB and wide exports carry the same linear grain; the thirteen hot-site
 > tests: strong isolated sites on every phase are mapped while border and
 > faint ones are not, a star with bright edge neighbours is left alone, the
-> mapping precedes both the original's capture and the cleaning, ordinary and
-> zero-strength renders never touch the mosaic; the extra plane reserved
+> mapping is unconditional and precedes every reader of the mosaic, a Bayer
+> frame is mapped without being asked while other sensors are left alone, the
+> network median equals the sorted middle pair everywhere, the local spread is
+> the MAD of the neighbourhood that can move, a rough neighbourhood raises the
+> bar and a flat one does not, flat ground is judged by its tile, a part-blown
+> tile is measured on the samples that can move, a site on clipped ground is
+> not judged, a bright structure in dark tiles is judged by its own
+> brightness, a witness at white cannot vouch and a lit diagonal speaks, a
+> witness is heard at its tile's sigma; the extra plane reserved
 > before the RAW ceiling; and the cleaner receiving the whole output with the
 > container's floor kept) and one GUI name (preference era one resets the raw
 > dials and keeps baked choices). At v1.5.1 (2026-09-20) the battery was 1649
@@ -667,14 +676,99 @@
 > four-measurement scale table remains in python/denoise_raw.py; the old 0.78
 > operating point left 0.42 / 0.25 / 0.11 of the full-frame astro input grain
 > across ISO 2500 / 3200 / 8000. The renderer always requests the whole clean
-> mosaic at strength 1, then develops and calibrates it. Before either the
-> original capture or the cleaner, `denoise/hot_pixels.rs` maps isolated hot
+> mosaic at strength 1, then develops and calibrates it. Before anything reads
+> the mosaic — the original capture, the cleaner or the develop itself —
+> `denoise/hot_pixels.rs` maps isolated hot
 > sites above 20 local sigma to their eight same-phase neighbours' median.
-> Sigma is 1.4826 times the MAD of site-minus-median8 in 64×64 plane tiles;
-> all four edge neighbours must stay at or below 3 of their own local sigma.
+> Sigma is 1.4826 times the MAD of site-minus-median8 in 64×64 plane tiles.
 > Decisions use the unchanged mosaic, with a three-sensor-pixel border left
-> alone. Only positive-strength supported Bayer AI renders enter this step;
-> ordinary renders, zero strength and non-Bayer fallback are unchanged.
+> alone. EVERY develop of a supported Bayer mosaic enters this step, whether
+> or not AI denoise was asked for (user ruling 2026-09-21; until then only a
+> positive-strength AI render did, so one photograph kept its hot pixels in an
+> ordinary develop and lost them in a denoised one). The gate is the AI path's
+> own `mosaic_args_for`, so the two cannot disagree; a sensor without a 2×2
+> integer mosaic is left alone.
+> The rule is a test against a null model — flat ground, unclipped, lit like
+> the rest of its tile — and until that ruling it had only met night sky. On
+> six ordinary frames (1/50 to 1/1000 s, where no dark-current defect reaches
+> twenty sigmas) the rule as it arrived mapped 1 / 3866 / 1213 / 1246 / 4003 /
+> 308 sites inside the picture, none at a photosite another frame shared:
+> out-of-focus lights, sunlit walls, blown signs, a red LED board. On the three
+> 15–20 s night frames it mapped 103 / 51 / 97, and of the 17 / 31 / 20 the
+> rule now declines, 17 / 29 / 20 sit INSIDE STARS: read from the mosaics, 41
+> to 48 of the 48 photosites around each, of every colour, stand more than ten
+> sigmas above their colour's local level (4 to 14 around four faint stars) —
+> thirteen in the blown cores of nine of the star frame's brightest, twenty
+> punched out of three trailed stars. The other two are photosites of a
+> four-photosite green cluster that only that exposure holds (the same place
+> is flat sky in the other two night frames), left because same-colour
+> diagonals beside them are lit as well. So each piece of evidence is asked
+> whether it CAN testify where it stands, and every doubt is read for the scene:
+> (1) twenty sigmas are counted WHERE THE SITE STANDS. The tile's sigma is the
+> noise of the tile's majority; a bright structure in a mostly dark tile
+> carries many times that in photon noise, and texture in one colour plane
+> makes every bright sample of it an outlier of the same-colour median. One
+> measurement answers both: the MAD-sigma of the 24 same-colour samples within
+> four pixels of the site joins its scale at a half. Left out, four of the
+> ordinary frames map 10 / 43 / 46 / 32 sites more; joined whole, the night
+> frames lose 23 / 7 / 24 of theirs; at a third one more LED dot is mapped and
+> nothing else moves. Flat Gaussian ground exceeds its tile's sigma at a half
+> once in 133,000 sites (301 of 4·10⁷ simulated neighbourhoods) and then by a
+> hair, so flat ground is judged by its tile as before.
+> (2) Clipped samples measure no noise. A sample, or a background, within a
+> tenth of white joins no tile's statistics — counted in, the sigma of a
+> part-blown tile collapsed to zero where the samples that can move read 93 to
+> 143 counts (the five worst of 480 such tiles on one frame) — and no site's
+> neighbourhood; a site whose background is clipped, or most of whose
+> neighbourhood is, is not judged. On these ten frames each of the three
+> covers for the others: two sites on blown ground return only when the last
+> two are both gone.
+> (3) A witness within three of its sigmas of white cannot show an excess and
+> so cannot vouch (allowed to, one ordinary frame maps a site more); and all
+> EIGHT photosites around the site are asked, not the four edge ones — for a
+> green site the diagonal four are the same colour, so no colour of light hides
+> from them (asked of the edge four only, the night frames map three sites
+> more). A witness is heard at its tile's sigma, never a larger one: in the
+> first version, heard at the sigma its own brightness earned, the lit
+> neighbours of a trailed star's tip passed as quiet and the tip lost a
+> photosite. One loud diagonal is
+> forgiven: the camera's long-exposure filter levels a sample to its brightest
+> same-colour neighbour, so what survives it comes in same-colour pairs equal
+> to the count (3649 beside 3649, 5469 beside 5468), none at a photosite the
+> other night frame shares and none with a lit neighbour of another colour —
+> particle hits. For green the partner is a diagonal neighbour, and a diagonal
+> within one count of the site is that; unforgiven, the night frames lose six
+> sites.
+> What stood here first, the same day: a line through the frame's tiles
+> (variance against level, per CFA phase) carried the tile's sigma to the
+> site's brightness, beside the spread of the ring of eight at a third. Taken
+> out of that rule, the line changed three sites on the ten frames, two of them
+> lone photosites on a night sky that the present rule maps, and it had needed
+> the median's own noise taken out of every background first or it declined
+> 24 sites on the flat sky of two high-ISO night frames. The neighbourhood
+> measures at the site what the line inferred from the frame, so the line went,
+> and its six constants with it.
+> Measured on the same ten frames: the rule maps a SUBSET of what the rule as
+> it arrived mapped on every one of them (nothing gained), 86 / 20 / 77 in the
+> night pictures — all nine photosites that two of the night frames share, a
+> defect's signature, are kept — and 0 / 0 / 0 / 6 / 0 / 4 in the ordinary
+> ones. The four are single photosites of one colour plane, alone on flat dark
+> ground, 130 to 3183 counts up, with nothing around them lit: defects. The six
+> are dots of the red LED board, and they are the rule's known limit: a point
+> of saturated-colour light no wider than a photosite, on flat dark ground,
+> reaches no witness of another colour and cannot be told from a defect in one
+> frame. An ordinary develop of the night frames now differs from an unmapped
+> one in 6,239 / 1,329 / 4,656 of 60,217,344 pixels, and a frame with nothing
+> to map renders byte for byte as it did.
+> The scan costs about a tenth of a second of such a develop — read in process
+> three times on each of six frames, the fastest reading of a frame is
+> 0.086–0.120 s and all eighteen span 0.086–0.175 s with a median of 0.115 s:
+> the eight-neighbour median is a fixed sorting network on the integer samples
+> — eighteen comparators, the optimal nineteen less the one that only orders
+> the middle pair, which is summed — and only the residuals and backgrounds are
+> kept per tile, because the scan as first written — a general selection per
+> sample and a record held for every sample — cost 0.75–0.78 s once the step
+> ran on every develop.
 > The transient is one small tile per Rayon worker, not a full-frame map.
 > At 0 < s < 1 it also
 > develops the original through that identical path, retains only its f32
