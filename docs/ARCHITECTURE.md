@@ -1,6 +1,6 @@
 # AutoShade — Architecture
 
-> Status: **implemented** (v1.5.0 — every Lightroom control this app could
+> Status: **implemented** (v1.5.1 — every Lightroom control this app could
 > already carry now moves pixels: sharpening and both noise reductions,
 > de-fringing and the lateral-CA instruction, Transform and Upright, the
 > camera profile, HDR edit mode and imported spot removal; `src/stack/`
@@ -141,10 +141,23 @@
 > wrong reason; it writes a `=== name ===` transcript that
 > `scripts/check_docs.py --gates` reads the counts and the lane set back out
 > of, and it prints the by-name test-set difference against a saved baseline.
-> 1640 library + 25 CLI + 201 GUI + 2+2 contract tests are enumerated in the GUI
-> build; the library result is 1625 pass + 15 `#[ignore]`d forensic probes and
-> the GUI result is 200 pass + one explicit scratch-recipe export probe ignored
-> in the ordinary battery. Counts refreshed 2026-09-18 for v1.5.0: +249 / −11 by
+> 1649 library + 25 CLI + 214 GUI + 2+2 contract tests are enumerated in the GUI
+> build; the library result is 1634 pass + 15 `#[ignore]`d forensic probes and
+> the GUI result is 213 pass + one explicit scratch-recipe export probe ignored
+> in the ordinary battery. Counts refreshed 2026-09-20 for v1.5.1: +23 / −1 by
+> name against the v1.5.0 tag (`dfd9fa4`), listed by the test harness itself on
+> both trees — nine library names (four pins that hold every pinned download to
+> a copy of ours, a full-length mirror coordinate and ours-before-upstream; the
+> three whole-image adjust tests: no mask and the whole frame kept, a blank
+> prompt refused before anything is bought, the divergence measured against the
+> image that was sent; the lens profile's as-opened truth table; and Lightroom's
+> own HDR sidecar read back as the mode and headroom it states) and fourteen GUI
+> names (the button-row width ceiling, the Lens / Export / AI header rules, the
+> five preference-era tests, the adjust fold's landing, enablement and region
+> hint, and the paint-presence scan count with the census of its write sites);
+> the one removed name is the test that pinned a saved strength dial lighting
+> the AI dot, replaced by the user's ruling that the dot reads this photo only.
+> Before that, counts were refreshed 2026-09-18 for v1.5.0: +249 / −11 by
 > name against the v1.4.1 tag (`af7f25e`), taken statically between the tag's
 > source and this tree (1718 → 1728 `#[test]` functions) — seven library pins
 > in `denoise` (the mosaic facts read off a sensor's CFA and levels, the four

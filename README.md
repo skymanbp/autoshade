@@ -8,7 +8,7 @@
 An AI decides *what to change*. A deterministic Rust engine *does* it.
 **In the recipe-development path, the AI never touches a pixel.**
 
-[Download v1.5.0](https://github.com/skymanbp/autoshade/releases/tag/v1.5.0) ·
+[Download v1.5.1](https://github.com/skymanbp/autoshade/releases/tag/v1.5.1) ·
 [Architecture](docs/ARCHITECTURE.md) ·
 [Release ledger](docs/ROADMAP.md) ·
 [MIT](LICENSE)
@@ -495,7 +495,7 @@ the tests [`scripts/check_docs.py`](scripts/check_docs.py) re-derives.
 
 | What | Measured | Where |
 |---|---|---|
-| Automated test battery | 1640 library / 25 CLI / 201 GUI / 2+2 contract tests; `check_docs` re-derives the pinned release claims | [Tech stack](#tech-stack-algorithms-and-design-philosophy) |
+| Automated test battery | 1649 library / 25 CLI / 214 GUI / 2+2 contract tests; `check_docs` re-derives the pinned release claims | [Tech stack](#tech-stack-algorithms-and-design-philosophy) |
 | RAW coverage | 24 extensions, 725 camera bodies; nine-camera format zoo 9/9 at the last release gate | [Supported formats](#supported-formats) |
 | Lightroom Texture parity | 45 of 45 period/depth anchors within ±0.02 | [Develop pipeline](#develop-pipeline-and-tone-model) |
 | Radial mask closure | 41 of 41 measured vectors within ≤1 px | [Lens correction](#lens-correction-and-lightroom-mask-frame-laws) |
@@ -517,11 +517,14 @@ the tests [`scripts/check_docs.py`](scripts/check_docs.py) re-derives.
 
 ### Download a release
 
-The v1.5.0 release is built by GitHub Actions from the tag: the Windows front
+The v1.5.1 release is built by GitHub Actions from the tag: the Windows front
 ends, two macOS universal (arm64 + x86_64) archives and a Linux x64
 command-line archive; `checksums.txt` carries the SHA-256 of every asset.
-One asset is not a build product: `autoshade-raw-denoise-v1.pth` is the trained
-RAW denoiser, uploaded from the training run rather than compiled from the tag.
+One file the app uses is not a build product and is not re-published with each
+release: `autoshade-raw-denoise-v1.pth`, the trained RAW denoiser, stays where
+v1.5.0 published it —
+[`releases/download/v1.5.0/autoshade-raw-denoise-v1.pth`](https://github.com/skymanbp/autoshade/releases/download/v1.5.0/autoshade-raw-denoise-v1.pth),
+the address the sidecar's pin names.
 The AI denoise sidecar fetches it on demand and refuses it unless its SHA-256
 and byte count match the values pinned in `python/denoise_raw.py`, so nothing is
 unpickled on trust.
@@ -530,18 +533,18 @@ unpickled on trust.
 |---|---:|---|
 | `autoshade.exe` (CLI) | 22,922,752 bytes | `d630bea4f0498f7ecfd5f1749c50b8434a600c2792383443fa3a08edca1de2e6` |
 | `autoshade-gui.exe` (desktop app) | 29,314,048 bytes | `6617d66c6f3f0652e8407505a64a1f9b818dd473095be746846232e6c2bcf906` |
-| `AutoShade-Setup-1.5.0.exe` (installer) | 15,234,912 bytes | `5743503db014b2c60515dc093a2695f2e3a576936b891a294b1178d1d432c184` |
-| `autoshade-1.5.0-windows-x64.zip` (portable archive) | 20,540,206 bytes | `99f0f308b708f8fac5b6afe13b0686f8cfa6b33de7fa7a171c253ba5c49dd958` |
-| `AutoShade-1.5.0-macos-universal.zip` (macOS app bundle) | 41,294,729 bytes | `aac2a68f9f38f30eb3bab1d0d6b16a75066322afa76b2871fc7203a44d17e0c4` |
-| `AutoShade-1.5.0-linux-x64.zip` (Linux command line only) | 9,927,675 bytes | `a84c2a851de5bc571e20a0832dbb02fb3a8318c162bf2baf0c0c39f884ccf8f1` |
-| `AutoShade-1.5.0-macos-cli.zip` (macOS command line only) | 17,963,774 bytes | `c36636ea39be0aec445dd83ef914df5fa22b37a166ffbcdd717c6bc96cd1c1e4` |
-| `autoshade-raw-denoise-v1.pth` (RAW denoiser weights, fetched on demand) | 130,585,417 bytes | `6929ddd6b11b3f27baf3537d92a4552a6a5c39d53ff4167e4f7df26e80413a99` |
+| `AutoShade-Setup-1.5.1.exe` (installer) | 15,234,912 bytes | `5743503db014b2c60515dc093a2695f2e3a576936b891a294b1178d1d432c184` |
+| `autoshade-1.5.1-windows-x64.zip` (portable archive) | 20,540,206 bytes | `99f0f308b708f8fac5b6afe13b0686f8cfa6b33de7fa7a171c253ba5c49dd958` |
+| `AutoShade-1.5.1-macos-universal.zip` (macOS app bundle) | 41,294,729 bytes | `aac2a68f9f38f30eb3bab1d0d6b16a75066322afa76b2871fc7203a44d17e0c4` |
+| `AutoShade-1.5.1-linux-x64.zip` (Linux command line only) | 9,927,675 bytes | `a84c2a851de5bc571e20a0832dbb02fb3a8318c162bf2baf0c0c39f884ccf8f1` |
+| `AutoShade-1.5.1-macos-cli.zip` (macOS command line only) | 17,963,774 bytes | `c36636ea39be0aec445dd83ef914df5fa22b37a166ffbcdd717c6bc96cd1c1e4` |
+| `autoshade-raw-denoise-v1.pth` (RAW denoiser weights, fetched on demand from the v1.5.0 release) | 130,585,417 bytes | `6929ddd6b11b3f27baf3537d92a4552a6a5c39d53ff4167e4f7df26e80413a99` |
 
 Download from the
-[v1.5.0 release page](https://github.com/skymanbp/autoshade/releases/tag/v1.5.0):
+[v1.5.1 release page](https://github.com/skymanbp/autoshade/releases/tag/v1.5.1):
 
 \
-- **Installer (recommended):** run `AutoShade-Setup-1.5.0.exe`. It installs for
+- **Installer (recommended):** run `AutoShade-Setup-1.5.1.exe`. It installs for
   the current user without administrator access, adds Start Menu shortcuts, and
   offers optional desktop and user `PATH` tasks.
 - **Upgrading is in place.** Run a newer installer over an existing install and
@@ -557,12 +560,12 @@ Download from the
   weights and the develop store in `%LOCALAPPDATA%\autoshade`. It names the
   size it found for each, and keeping both is the default, so a later install
   starts where you left off.
-- **Silently, for a scripted rollout:** `AutoShade-Setup-1.5.0.exe /VERYSILENT
+- **Silently, for a scripted rollout:** `AutoShade-Setup-1.5.1.exe /VERYSILENT
   /SUPPRESSMSGBOXES /NORESTART` installs or upgrades with no window and no
   prompt, and `unins000.exe /VERYSILENT /SUPPRESSMSGBOXES` in the install
   directory uninstalls the same way. The silent uninstall keeps your weights
   and develop store unless you add `/DELETEDATA=1`.
-- **Portable archive:** extract `autoshade-1.5.0-windows-x64.zip` to a directory
+- **Portable archive:** extract `autoshade-1.5.1-windows-x64.zip` to a directory
   you can keep intact and run either executable from there, beside the bundled
   `assets/` and `python/` sidecars.
 
@@ -571,10 +574,10 @@ Download from the
 Both macOS archives are universal (Apple silicon and Intel in one binary);
 unpack either with Finder or `ditto -x -k <zip> <dir>`.
 
-- `AutoShade-1.5.0-macos-universal.zip` is the app: move `AutoShade.app` to
+- `AutoShade-1.5.1-macos-universal.zip` is the app: move `AutoShade.app` to
   `/Applications`. The command line travels inside it
   (`AutoShade.app/Contents/MacOS/autoshade`), so this download alone serves a
-  terminal user; `AutoShade-1.5.0-macos-cli.zip` is that binary alone.
+  terminal user; `AutoShade-1.5.1-macos-cli.zip` is that binary alone.
 - The bundle is **ad-hoc signed, not notarised**, so the first launch is
   refused: macOS reports that the developer cannot be verified. Clearing it is
   per machine, not per launch — **System Settings → Privacy & Security → Open
@@ -584,7 +587,7 @@ unpack either with Finder or `ditto -x -k <zip> <dir>`.
   bundle; the interpreter is a Settings field with **Detect**
   ([manual](docs/USER_MANUAL.md#configure-and-use-the-ai-features)).
 
-The Linux archive, `AutoShade-1.5.0-linux-x64.zip`, is the command line for
+The Linux archive, `AutoShade-1.5.1-linux-x64.zip`, is the command line for
 x86-64 Linux, built on Ubuntu 22.04 with the same payload as the macOS
 command-line archive: the binary, the Python sidecars without their weights,
 the assets, LICENSE and README. Unpack it anywhere and run `./autoshade`;
@@ -838,13 +841,13 @@ numbers](#measured-numbers) are not repeated.
   the 1800 MB per-photo budget, and a 4 GiB RAW gate bounds admission.
 - The [`build` workflow](.github/workflows/build.yml) covers default and GUI
   feature sets on Ubuntu and macOS; model weights are not stored here. The
-  current battery is **1640 library (1625 pass + 15 `#[ignore]`d forensic probes) / 25 CLI / 201 GUI / 2+2 contract** tests, and
+  current battery is **1649 library (1634 pass + 15 `#[ignore]`d forensic probes) / 25 CLI / 214 GUI / 2+2 contract** tests, and
   [`scripts/check_docs.py`](scripts/check_docs.py) re-derives the pinned
   release claims.
 
 ## Status, roadmap, and known limitations
 
-- Release gates for v1.5.0 cover the CLI, desktop GUI, sidecar contracts,
+- Release gates for v1.5.1 cover the CLI, desktop GUI, sidecar contracts,
   format fixtures and the deterministic renderer; artifact sizes and hashes
   are above.
 - macOS has shipped binaries and an app since v1.2.0 and nobody has reported
