@@ -187,15 +187,14 @@ class TheModelAffine(unittest.TestCase):
                          "model_affine grew a data argument")
 
     def test_the_operating_point_is_a_named_constant(self):
-        self.assertGreater(denoise_raw.SIGMA_SCALE, 0.0)
-        self.assertLessEqual(denoise_raw.SIGMA_SCALE, 1.0)
+        self.assertEqual(denoise_raw.SIGMA_SCALE, 1.0)
 
 
 class TheStrength(unittest.TestCase):
     def test_zero_reproduces_the_input_integers(self):
         rng = np.random.default_rng(7)
         black, white = 512.0, 16383.0
-        v = rng.integers(512, 16384, size=(40, 40), dtype=np.uint16)
+        v = rng.integers(0, 16384, size=(40, 40), dtype=np.uint16)
         x = (v.astype(np.float32) - black) / (white - black)
         den = np.clip(x + 0.01, 0, 1)
         out = denoise_raw.blend_and_quantise(x, den, 0.0, black, white)
@@ -210,7 +209,18 @@ class TheStrength(unittest.TestCase):
         half = denoise_raw.blend_and_quantise(x, np.full((8, 8), 0.0, np.float32), 0.5, black, white)
         self.assertEqual(int(half[0, 0]), round(0.25 * (white - black) + black))
 
-    def test_the_sidecars_own_default_is_the_rust_default(self):
+    def test_dark_blended_noise_is_not_rectified_at_black(self):
+        rng = np.random.default_rng(20260920)
+        black, white, alpha = 512, 16383, 0.3
+        noise = rng.normal(0, 100, (1024, 1024)).astype(np.float32)
+        x = noise / (white - black)
+        out = denoise_raw.blend_and_quantise(x, np.zeros_like(x), 1-alpha,
+                                             black, white).astype(np.float32) - black
+        self.assertGreater(float((out < 0).mean()), 0.48)
+        self.assertAlmostEqual(float(out.mean()), float(alpha * noise.mean()), delta=0.01)
+        self.assertAlmostEqual(float(out.var() / noise.var()), alpha**2, delta=0.0001)
+
+    def test_the_sidecars_own_default_is_the_whole_clean_output(self):
         src = open(denoise_raw.__file__, encoding="utf-8").read()
         self.assertIn('ap.add_argument("--strength", type=float, default=1.0,', src)
 

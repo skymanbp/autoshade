@@ -25,8 +25,11 @@ Contract with the Rust side (`denoise::denoise_mosaic`):
     exactly one R, one B and two G, or the run is refused.
   * `--black`: four values in that same order (a per-frame level is repeated
     four times by the caller); `--white`: one value.
-  * `--strength`: a blend in the RAW domain — 0 reproduces the input bytes,
-    1 is the model's whole output. The Rust side never spawns for 0.
+  * `--strength`: the standalone sidecar keeps its per-plane RAW blend —
+    0 reproduces input bytes, 1 is the complete model output (default).
+    Rust never spawns for 0 and requests 1 for every positive RAW dial;
+    the renderer applies that dial as a neutral luminance return AFTER
+    demosaic and calibration, in linear light.
 
 Method (every step measured in the 2026-09-15 probe, none assumed):
   1. Normalise per phase, x = (v - black[phase]) / (white - black[phase]),
@@ -60,13 +63,14 @@ Method (every step measured in the 2026-09-15 probe, none assumed):
      sensor noise over the operator's own low-ISO frames, the loss taken in
      the stabilised z domain the model actually sees (`scripts/train_raw.py`).
      It is trained for THIS transform, so it beats the generic weights by
-     1.98 dB on held-out pairs at the shipped operating point and by 7.8 dB on
+     1.98 dB on held-out pairs at the former 0.78 operating point and by 7.8 dB on
      the noisiest bin at its own.
   5. Exact unbiased inverse of the GAT (Mäkitalo & Foi 2013): with D the
      denormalised z, I_A(D) = ¼D² + ¼√(3/2)·D⁻¹ − 11/8·D⁻² + 5/8√(3/2)·D⁻³ − 1/8
      and x̂ = a·(I_A(D) − b/a²).
   6. out = x + s·(x̂ − x); re-quantise with the phase's black level, clip to
-     [black, white], reassemble, publish (tmp + fsync + os.replace).
+     [0, white], reassemble, publish (tmp + fsync + os.replace). Below-black
+     samples are data, not a reason to rectify returned or inferred noise.
 
 Every downloaded file — the weights and the two network files — is fetched
 through `denoise._fetch_verified` and verified against a pinned sha256 and
@@ -173,16 +177,18 @@ MIN_BLOCKS_POOLED = 20
 #   The generic weights at 0.85 (v1.4.1): 0.58/0.71/0.73, 0.59×, 71 % / 47 %,
 #   42.71, +0.53 +1.60.
 #
-# 0.78 is where this network has LIGHTROOM'S OWN texture on real photographs —
-# within 6 % of it in all three windows — and keeps the faint stars within
-# three points of Lightroom's own count, while reading 1.98 dB better than the
-# generic weights on held-out pairs and leading SCUNet further than they did
-# on the one ×5 window neither passes. Higher smooths past Lightroom (at 1.00
-# the sky is a thirtieth of its grain and a quarter of the very faint stars are
-# gone); lower leaves more grain than Lightroom and gives the ×5 level away.
-# Compatibility is the aim, so the point that matches Lightroom wins the ties
-# (user's decision, 2026-09-17).
-SIGMA_SCALE = 0.78
+# Historical 0.78 point (2026-09-17): it matched the window-based Lightroom
+# texture measurements above by under-telling sigma. Full-frame measurements
+# on 2026-09-20 instead found residual grain 0.42 / 0.25 / 0.11 across three
+# astro noise levels, against Lightroom's 0.28–0.30. Honest sigma leaves
+# 0.07 / 0.02 / 0.01. The 1.00 row remains the held-out PSNR record: neither
+# the network nor its transform changed, and the shards are no longer local.
+# The cleaner now receives its training noise level. Rust always asks for
+# its whole output, demosaics and calibrates both frames identically, then
+# returns only the original's linear-light luminance residual along RGB grey.
+# A CFA-quad return was measured and withdrawn: demosaic turned its fine
+# neutral grain into colour speckle. Grain return therefore lives AFTER it.
+SIGMA_SCALE = 1.0
 
 
 def log(msg):
@@ -534,7 +540,7 @@ def blend_and_quantise(x_in, x_den, strength, black, white):
     s = float(np.clip(strength, 0.0, 1.0))
     out = x_in + s * (x_den - x_in)
     v = np.round(out * (white - black) + black)
-    return np.clip(v, black, white).astype(np.uint16)
+    return np.clip(v, 0, white).astype(np.uint16)
 
 
 # ── Entry ───────────────────────────────────────────────────────────────────
