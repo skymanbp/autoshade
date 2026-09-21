@@ -208,10 +208,12 @@ enum Command {
         /// Run AI denoise (GPU sidecar) before developing — for high-ISO/astro.
         /// A RAW is denoised on its sensor mosaic, before demosaic (DRUNet,
         /// noise level measured on the frame); a baked source takes SCUNet.
+        /// Positive-strength Bayer AI denoise also maps isolated hot pixels stronger than 20 sigma.
         #[arg(long)]
         denoise: bool,
-        /// Denoise strength 0..1. RAW: a blend in the RAW domain, default 1.0
-        /// (`denoise::DEFAULT_STRENGTH_RAW`). Baked source: luminance blend,
+        /// Denoise strength 0..1. RAW: default 0.71; higher removes more luminance grain.
+        /// Every positive strength keeps clean colour; 0 leaves the input untouched.
+        /// Baked source: luminance blend,
         /// colour noise removed in full from 0.5 up, default 0.5.
         #[arg(long, requires = "denoise", value_parser = unit_interval)]
         denoise_strength: Option<f32>,
@@ -229,15 +231,17 @@ enum Command {
     /// 16-bit master in ./out. Manual, GPU-accelerated: a RAW is denoised on
     /// its sensor mosaic before demosaic (DRUNet, the noise level measured on
     /// the frame), a baked image through SCUNet. Default off everywhere else —
-    /// this is the explicit "denoise now" command.
+    /// this is the explicit "denoise now" command. Positive-strength Bayer AI
+    /// denoise also maps isolated hot pixels stronger than 20 sigma.
     Denoise {
         /// RAW (.arw/.dng/...) or image (.png/.tif/.jpg) to denoise.
         input: PathBuf,
         /// Output path (default: ./out/<stem>.denoised.tif).
         #[arg(short, long)]
         out: Option<PathBuf>,
-        /// Strength 0..1. RAW: a blend in the RAW domain, default 1.0
-        /// (`denoise::DEFAULT_STRENGTH_RAW`). Baked image: luminance blend,
+        /// Strength 0..1. RAW: default 0.71; higher removes more luminance grain.
+        /// Every positive strength keeps clean colour; 0 leaves the input untouched.
+        /// Baked image: luminance blend,
         /// colour noise removed in full from 0.5 up, default 0.5.
         #[arg(long, value_parser = unit_interval)]
         strength: Option<f32>,

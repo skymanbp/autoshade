@@ -513,7 +513,7 @@ impl AutoShadeApp {
         let on_mosaic = autoshade::decode::is_raw(&path);
         // This fold's OWN dial (the Export fold's 「on export」 has its own):
         // captured at the click, like every other input the worker reads.
-        let strength = self.denoise_strength;
+        let strength = self.selected_denoise_strength(false);
         let edge = self.canvas_edge(); // show at the CANVAS's res (canvas_edge)
         let out_claim = out.clone(); // release the claim on failure (worker tail)
         let out_panic = out.clone(); // …and on a worker panic (see the error closure)

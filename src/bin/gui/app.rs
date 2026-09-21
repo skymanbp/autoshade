@@ -215,12 +215,12 @@ pub(crate) struct AutoShadeApp {
     /// 「🤖 AI Denoise now」's OWN strength (the Detail fold's dial) — two
     /// timings of one denoiser, two dials, neither reaching the other (user
     /// decision 2026-09-12: a control sits in the fold whose verb reads it).
-    /// Both start at `denoise::DEFAULT_STRENGTH_RAW` (1.0, the mosaic path's
-    /// whole output, 2026-09-15); what the value means depends on the path —
-    /// a RAW-domain blend on a RAW, the SCUNet luma/chroma split law on a
-    /// baked source (see `DenoiseOpts::strength`).
+    /// RAW starts at the luminance-grain default; baked sources have
+    /// separate saved choices, starting at SCUNet's unchanged 0.5.
     pub(crate) save_denoise_strength: f32,
     pub(crate) denoise_strength: f32,
+    pub(crate) baked_denoise_strength: f32,
+    pub(crate) baked_save_denoise_strength: f32,
     pub(crate) zoned_fit: bool,        // 反推 adds a sky-to-sky zoned correction (bitmap mask)
     pub(crate) zoned_four_regions: bool, // opt-in semantic expansion to up to four regions
     pub(crate) fit_ai_judge: bool,     // 反推 then asks the vision model to SCORE the match (paid, opt-in)
@@ -1689,6 +1689,8 @@ impl Default for AutoShadeApp {
             save_denoise: false,
             save_denoise_strength: autoshade::denoise::DEFAULT_STRENGTH_RAW,
             denoise_strength: autoshade::denoise::DEFAULT_STRENGTH_RAW,
+            baked_denoise_strength: autoshade::denoise::DEFAULT_STRENGTH,
+            baked_save_denoise_strength: autoshade::denoise::DEFAULT_STRENGTH,
             zoned_fit: true,
             zoned_four_regions: false,
             // Paid opt-in (a vision call per fit) — mirror Prefs::default.
@@ -2143,6 +2145,8 @@ impl eframe::App for AutoShadeApp {
                 save_denoise: self.save_denoise,
                 save_denoise_strength: self.save_denoise_strength,
                 denoise_strength: self.denoise_strength,
+                baked_denoise_strength: self.baked_denoise_strength,
+                baked_save_denoise_strength: self.baked_save_denoise_strength,
                 zoned_fit: self.zoned_fit,
                 zoned_four_regions: self.zoned_four_regions,
                 fit_ai_judge: self.fit_ai_judge,

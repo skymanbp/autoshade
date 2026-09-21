@@ -85,9 +85,12 @@ An AI decides *what to change*. A deterministic Rust engine *does* it.
 - **Generative and pixel tools, opt-in and labelled** — reimagine
   (gpt-image-2), retouch, heal and AI denoise are the only paths that can
   invent or alter scene content, and are marked so; a denoise lands as its
-  own card and never rewrites the original. Both denoise dials default to 100%:
-  on a RAW this is the model's whole output, and lowering it puts noise back.
-  Preferences predating the named era reset both dials once; later choices persist.
+  own card and never rewrites the original. RAW denoise uses honest measured
+  noise — measured across the frame, not only by brightness — and returns the
+  frame's own luminance grain at its 71% default, after
+  demosaic in linear light, keeping clean chroma at every positive strength.
+  Higher is cleaner; 100% is the complete network output, 0% the input.
+  Era 2 resets RAW choices once; baked SCUNet choices are preserved separately.
 - **Stacking and merging** — several frames of one scene into one, over a
   single alignment: HDR merge (exposures measured from the pixels, samples
   weighted by how trustworthy they are, the recovered stops handed to the SDR
@@ -495,7 +498,7 @@ the tests [`scripts/check_docs.py`](scripts/check_docs.py) re-derives.
 
 | What | Measured | Where |
 |---|---|---|
-| Automated test battery | 1649 library / 25 CLI / 214 GUI / 2+2 contract tests; `check_docs` re-derives the pinned release claims | [Tech stack](#tech-stack-algorithms-and-design-philosophy) |
+| Automated test battery | 1659 library / 25 CLI / 215 GUI / 2+2 contract tests; `check_docs` re-derives the pinned release claims | [Tech stack](#tech-stack-algorithms-and-design-philosophy) |
 | RAW coverage | 24 extensions, 725 camera bodies; nine-camera format zoo 9/9 at the last release gate | [Supported formats](#supported-formats) |
 | Lightroom Texture parity | 45 of 45 period/depth anchors within ±0.02 | [Develop pipeline](#develop-pipeline-and-tone-model) |
 | Radial mask closure | 41 of 41 measured vectors within ≤1 px | [Lens correction](#lens-correction-and-lightroom-mask-frame-laws) |
@@ -841,7 +844,7 @@ numbers](#measured-numbers) are not repeated.
   the 1800 MB per-photo budget, and a 4 GiB RAW gate bounds admission.
 - The [`build` workflow](.github/workflows/build.yml) covers default and GUI
   feature sets on Ubuntu and macOS; model weights are not stored here. The
-  current battery is **1649 library (1634 pass + 15 `#[ignore]`d forensic probes) / 25 CLI / 214 GUI / 2+2 contract** tests, and
+  current battery is **1659 library (1644 pass + 15 `#[ignore]`d forensic probes) / 25 CLI / 215 GUI / 2+2 contract** tests, and
   [`scripts/check_docs.py`](scripts/check_docs.py) re-derives the pinned
   release claims.
 

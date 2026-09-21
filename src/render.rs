@@ -37,6 +37,7 @@ use rayon::prelude::*;
 
 use crate::recipe::{Crop, EditRecipe, MaskGeometry, RangeMask};
 
+mod denoise_grain;
 mod detail;
 mod finish;
 mod hdr;
@@ -306,6 +307,11 @@ pub fn render_to_image_in(
                 .map_err(|e| anyhow!("raw_image(dummy): {e}"))
         })?;
         crate::decode::refuse_raw_develop_over_ceiling_for(raw_path, &probe)?;
+        if denoise.is_some_and(|o| o.strength > 0.0 && o.strength < 1.0)
+            && crate::denoise::mosaic_args_for(&probe).is_ok()
+        {
+            crate::decode::refuse_raw_grain_return_over_ceiling_for(raw_path, &probe)?;
+        }
         drop(probe);
         // Full sensor data (dummy = false) → demosaic + colour pipeline → float.
         let mut raw = crate::decode::guard_parser_panic(raw_path, "raw_image", || {
@@ -330,27 +336,6 @@ pub fn render_to_image_in(
         crate::decode::align_default_crop(&mut raw);
         (raw, orientation)
     };
-
-    // --- AI denoise on the MOSAIC (opt-in), BEFORE demosaic (2026-09-15).
-    // The noise on the sensor mosaic is white per CFA plane and follows
-    // var = a·x + b, which a non-blind model removes with the texture left in
-    // place; after demosaic it is spatially correlated and no sRGB-domain
-    // model separated it from texture (the 2026-09-15 probe: SCUNet 1.0's
-    // detail blocks scored BELOW the noisy input on a ground-truth window).
-    // Everything downstream — white balance, calibration, tone, masks — sees
-    // a cleaner mosaic and is otherwise untouched. A sensor without a 2×2
-    // Bayer mosaic (X-Trans, four-colour, linear DNG) is disclosed and takes
-    // the older developed-frame path below.
-    let mut mosaic_denoised = false;
-    if let Some(opts) = denoise {
-        println!("AI denoise (RAW mosaic, DRUNet) on {}x{} ...", rawimage.width, rawimage.height);
-        match crate::denoise::denoise_mosaic(opts, &mut rawimage).context("AI denoise")? {
-            crate::denoise::MosaicDenoise::Denoised => mosaic_denoised = true,
-            crate::denoise::MosaicDenoise::NotApplicable(why) => diag.warn(format!(
-                "AI denoise: {why} — denoising the developed frame instead (the SCUNet path)"
-            )),
-        }
-    }
 
     let wide = working != ExportColorSpace::Srgb;
     // v1.5.0 F7 — the camera profile the sidecar names, resolved against the
@@ -414,58 +399,51 @@ pub fn render_to_image_in(
     } else {
         None
     };
-    let inter = dev
-        .develop_intermediate(&rawimage)
-        .map_err(|e| anyhow!("develop: {e}"))?;
-    let inter = match (&geometry_cfa, inter) {
-        (Some(cfa), Intermediate::Monochrome(plane)) => {
-            let roi = rawimage.active_area.unwrap_or_else(|| plane.rect());
-            let rgb = demosaic_over_cfa_geometry(&plane.data, plane.dim(), cfa, roi);
-            let mut out =
-                rawler::pixarray::Color2D::<f32, 3>::new_with(rgb, roi.width(), roi.height());
-            // rawler's `CropDefault` measures the default crop against the
-            // window the demosaic actually read (`develop.rs:204-216`); the
-            // master here is that ROI rather than `active_area`, which is the
-            // same rectangle whenever the file declares one and the correct
-            // one when it does not.
-            if let Some(crop) = rawimage.crop_area.or(rawimage.active_area) {
-                let crop = crop.adapt(&roi);
-                if crop.d != out.dim() {
-                    out = out.crop(crop);
-                }
-            }
-            Intermediate::ThreeColor(out)
+    let strength = denoise.map_or(1.0, |opts| opts.strength);
+    // Correct strong isolated sites before BOTH the grain source and the cleaner.
+    // The helper is a no-op for ordinary renders, strength zero and non-Bayer data.
+    let hot_sites = crate::denoise::hot_pixels::map_for(
+        &mut rawimage, denoise.map(|opts| opts.strength),
+    )?;
+    if hot_sites > 0 {
+        println!("AI denoise: mapped {hot_sites} isolated hot pixels stronger than 20 local sigma");
+    }
+    let grain_weights = denoise_grain::weights(working);
+    let original_y = denoise_grain::capture_original(
+        strength,
+        crate::denoise::mosaic_args_for(&rawimage).is_ok(),
+        grain_weights,
+        || develop_raw_buffer(&rawimage, &dev, geometry_cfa.as_ref(), calibration, working, profile_stage.as_ref())
+            .map(|(rgb, _, _)| rgb),
+    )?;
+    // --- AI denoise on the MOSAIC (opt-in), BEFORE demosaic (2026-09-15).
+    // The noise on the sensor mosaic is white per CFA plane and follows
+    // var = a·x + b, which a non-blind model removes with the texture left in
+    // place; after demosaic it is spatially correlated and no sRGB-domain
+    // model separated it from texture (the 2026-09-15 probe: SCUNet 1.0's
+    // detail blocks scored BELOW the noisy input on a ground-truth window).
+    // The cleaner always returns its whole mosaic. Luminance grain returns
+    // after the same develop and calibration as the original. A sensor without a 2×2
+    // Bayer mosaic (X-Trans, four-colour, linear DNG) is disclosed and takes
+    // the older developed-frame path below.
+    let mut mosaic_denoised = false;
+    if let Some(opts) = denoise {
+        println!("AI denoise (RAW mosaic, DRUNet) on {}x{} ...", rawimage.width, rawimage.height);
+        match crate::denoise::denoise_mosaic(opts, &mut rawimage).context("AI denoise")? {
+            crate::denoise::MosaicDenoise::Denoised => mosaic_denoised = true,
+            crate::denoise::MosaicDenoise::NotApplicable(why) => diag.warn(format!(
+                "AI denoise: {why} — denoising the developed frame instead (the SCUNet path)"
+            )),
         }
-        (_, other) => other,
-    };
-    // The demosaiced float frame owns everything the pipeline needs from here
-    // on; the ~120 MB u16 sensor mosaic would otherwise survive to the end of
-    // the function, under denoise/tone/pack/geometry (A7).
+    }
+
+    let (mut data, w, h) =
+        develop_raw_buffer(&rawimage, &dev, geometry_cfa.as_ref(), calibration, working, profile_stage.as_ref())?;
+    // The clean RGB owns the remaining work. Drop the mosaic before returning
+    // grain; the original RGB already died when capture_original kept only Y.
     drop(rawimage);
-    // `refuse_unsupported_sensor` above has already answered this off the
-    // metadata (A9), so these two arms are now a BACKSTOP against rawler
-    // changing which `Intermediate` a given declaration produces — not the
-    // primary gate. They stay: an engine that silently rendered a monochrome
-    // frame as if it were RGB would be the worse failure.
-    let rgb = match inter {
-        Intermediate::ThreeColor(c) => c,
-        Intermediate::Monochrome(_) => bail!("monochrome RAW not supported by render v1"),
-        Intermediate::FourColor(_) => bail!("4-colour develop output not supported by render v1"),
-    };
-    let (w, h) = (rgb.width, rgb.height);
-    // sRGB path: sRGB-gamma ~[0,1] straight from rawler (owned, no copy).
-    // Wide path: camera-native LINEAR until the calibrate below.
-    let mut data: Vec<[f32; 3]> = rgb.data;
-    if let Some((xyz2cam, wb)) = calibration {
-        calibrate_camera_buffer(&mut data, &xyz2cam, wb, working, profile_stage.as_ref());
-    } else if geometry_cfa.is_some() {
-        // A camera with no colour matrix at all: rawler skips its `Calibrate`
-        // step there but still applies `SRgb` (`imgop/develop.rs:199-233`).
-        // This path stripped both, so the working encoding is applied here or
-        // the frame would publish as linear light.
-        data.par_iter_mut().for_each(|px| {
-            *px = [linear_to_srgb(px[0]), linear_to_srgb(px[1]), linear_to_srgb(px[2])];
-        });
+    if let Some(original_y) = original_y {
+        denoise_grain::return_luminance(&mut data, &original_y, 1.0 - strength, grain_weights);
     }
     let data = data;
 
@@ -554,6 +532,69 @@ pub fn render_to_image_in(
     //
     // Orientation was applied BEFORE the develop, so no tail rotation.
     Ok(frame_and_finish(dynimg, recipe, &geom, film, CropPolicy::Cut))
+}
+
+/// Both original and clean RAW buffers go through this exact develop and
+/// calibration path. Every returned buffer has the sRGB transfer, including
+/// wide working primaries; orientation and recipe work happen afterwards.
+fn develop_raw_buffer(
+    rawimage: &rawler::RawImage,
+    dev: &RawDevelop,
+    geometry_cfa: Option<&rawler::cfa::CFA>,
+    calibration: Option<([[f32; 3]; 3], [f32; 3])>,
+    working: ExportColorSpace,
+    profile_stage: Option<&profile::Stage>,
+) -> Result<(Vec<[f32; 3]>, usize, usize)> {
+    let inter = dev
+        .develop_intermediate(rawimage)
+        .map_err(|e| anyhow!("develop: {e}"))?;
+    let inter = match (geometry_cfa, inter) {
+        (Some(cfa), Intermediate::Monochrome(plane)) => {
+            let roi = rawimage.active_area.unwrap_or_else(|| plane.rect());
+            let rgb = demosaic_over_cfa_geometry(&plane.data, plane.dim(), cfa, roi);
+            let mut out =
+                rawler::pixarray::Color2D::<f32, 3>::new_with(rgb, roi.width(), roi.height());
+            // rawler's `CropDefault` measures the default crop against the
+            // window the demosaic actually read (`develop.rs:204-216`); the
+            // master here is that ROI rather than `active_area`, which is the
+            // same rectangle whenever the file declares one and the correct
+            // one when it does not.
+            if let Some(crop) = rawimage.crop_area.or(rawimage.active_area) {
+                let crop = crop.adapt(&roi);
+                if crop.d != out.dim() {
+                    out = out.crop(crop);
+                }
+            }
+            Intermediate::ThreeColor(out)
+        }
+        (_, other) => other,
+    };
+    // `refuse_unsupported_sensor` above has already answered this off the
+    // metadata (A9), so these two arms are now a BACKSTOP against rawler
+    // changing which `Intermediate` a given declaration produces — not the
+    // primary gate. They stay: an engine that silently rendered a monochrome
+    // frame as if it were RGB would be the worse failure.
+    let rgb = match inter {
+        Intermediate::ThreeColor(c) => c,
+        Intermediate::Monochrome(_) => bail!("monochrome RAW not supported by render v1"),
+        Intermediate::FourColor(_) => bail!("4-colour develop output not supported by render v1"),
+    };
+    let (w, h) = (rgb.width, rgb.height);
+    // sRGB path: sRGB-gamma ~[0,1] straight from rawler (owned, no copy).
+    // Wide path: camera-native LINEAR until the calibrate below.
+    let mut data: Vec<[f32; 3]> = rgb.data;
+    if let Some((xyz2cam, wb)) = calibration {
+        calibrate_camera_buffer(&mut data, &xyz2cam, wb, working, profile_stage);
+    } else if geometry_cfa.is_some() {
+        // A camera with no colour matrix at all: rawler skips its `Calibrate`
+        // step there but still applies `SRgb` (`imgop/develop.rs:199-233`).
+        // This path stripped both, so the working encoding is applied here or
+        // the frame would publish as linear light.
+        data.par_iter_mut().for_each(|px| {
+            *px = [linear_to_srgb(px[0]), linear_to_srgb(px[1]), linear_to_srgb(px[2])];
+        });
+    }
+    Ok((data, w, h))
 }
 
 /// What `RawDevelop::default().develop_intermediate` WILL produce for this

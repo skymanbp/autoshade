@@ -174,8 +174,7 @@ fn zh_map() -> &'static HashMap<&'static str, &'static str> {
 /// (placeholders included), or the lookup silently misses.
 #[rustfmt::skip]
 static ZH_ENTRIES: &[(&str, &str)] = &[
-    ("AI denoise strength reset to 100 % (Detail fold {a} %, Export fold {b} %): the dial's meaning changed in v1.4.0 — on a RAW it is a sensor-domain blend, and less than 100 % only puts noise back",
-     "AI 降噪强度已重置为 100%（去噪折叠区原 {a}%、导出折叠区原 {b}%）：v1.4.0 起这把滑杆的含义变了——RAW 上是传感器域混合，低于 100% 只会把噪声放回来"),
+    ("RAW AI denoise strength reset to {new} % (Detail fold {a} %, Export fold {b} %): the new default targets Lightroom Denoise 50; higher removes more luminance grain, every positive strength keeps the clean colour, and 0% leaves the input untouched", "RAW AI 降噪强度已重置为 {new}%（去噪折叠区原 {a}%、导出折叠区原 {b}%）：新默认值以 Lightroom 降噪 50 为参照；调高去除更多亮度颗粒，任何正强度均保留干净的颜色，0% 则保持原片不变"),
     (" [look reference: finished photo {stem} from the photographer's look library; tags: {tags}]", " [外观参考：来自你的成片外观库的照片 {stem}；标签：{tags}]"),
     (" [finished look photo {stem} also went to the vision model as IMAGE 2]", " [成片 {stem} 同时作为 IMAGE 2 发给了视觉模型]"),
     (" [look library unavailable for this develop ({n} finished photos): style embedding was off or no query vector was produced]", " [本次显影用不到外观库（库中有 {n} 张成片）：风格嵌入未开启，或没有生成查询向量]"),
@@ -1447,8 +1446,7 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     // sits in the fold whose verb reads it). The Export fold's twin below
     // keeps that block's 降噪.
     ("AI denoise strength", "AI 去噪强度"),
-    ("How much of the denoise 「🤖 AI Denoise now」 keeps — this fold's own dial (the Export fold's 「on export」 has its own; neither reaches the other). On a RAW the denoise runs on the sensor mosaic with the noise level measured on the frame: 100% is the model's whole output and the default (the texture stays; anything less only puts noise back). On a baked source (PNG/TIFF/JPEG master) the older SCUNet runs at this dial, and 50% is its sweet spot. Double-click to reset.",
-        "「🤖 立即 AI 去噪」保留多少去噪结果——本折叠区自己的滑杆（「导出」折叠区的「导出时」有它自己的一把，两把互不相通）。RAW 在 RAW 原始数据上去噪，噪声强度按本照片自动测得：100% 是模型的全部输出，也是默认（纹理保留；再低只是把噪点放回来）。烘焙图（PNG/TIFF/JPEG 母图）走旧的 SCUNet，50% 是它最合适的一档。双击复位。"),
+    ("Detail AI denoise strength, independent of the Export fold. On a RAW, the dial removes luminance grain after demosaic in linear light; the default targets Lightroom Denoise 50. Higher is cleaner, 100% is the complete network output. Every positive strength keeps clean colour; exactly 0% leaves the input untouched. Baked sources keep SCUNet's separate 50% default. Double-click to reset this source type.", "去噪折叠区的 AI 降噪强度，与导出折叠区独立。RAW 上这把滑杆在去马赛克后以线性光去除亮度颗粒，默认值以 Lightroom 降噪 50 为参照。调高更干净，100% 是网络的完整输出。任何正强度均保留干净的颜色，恰好 0% 则保持原片不变。烘焙图仍用 SCUNet，独立默认值为 50%。双击重置当前源类型的强度。"),
     ("Denoise this card's pixels at full resolution — a RAW on its sensor mosaic before demosaic, a baked source through SCUNet — and land the result as a new ◈ Denoised negative card carrying this card's develop; the card you started from keeps its pixels (first run downloads the model)",
         "对本卡的像素做全分辨率去噪——RAW 在 RAW 原始数据上、烘焙图走 SCUNet——结果落成新的「◈ 去噪原片」卡，带着本卡的显影；你出发的那张卡像素不动（首次运行会下载模型）"),
     // The ◈ card's own line in the strip (2026-09-15).
@@ -1698,8 +1696,7 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     // The checkbox's OWN dial (2026-09-13) — its own state and key; the
     // Detail fold's 「AI denoise strength」 does not reach it.
     ("Export denoise strength", "导出降噪强度"),
-    ("How much of the denoise the export-time pass keeps in every full-resolution delivery — this fold's own dial (the Detail fold's 「AI Denoise now」 has its own; neither reaches the other). On a RAW the denoise runs on the sensor mosaic with the noise level measured on the frame: 100% is the model's whole output and the default. On a baked source the older SCUNet runs at this dial, and 50% is its sweet spot. Double-click to reset.",
-        "导出时降噪在每一次全分辨率交付里保留多少去噪结果——本折叠区自己的滑杆（「细节」折叠区的「立即 AI 去噪」有它自己的一把，两把互不相通）。RAW 在 RAW 原始数据上去噪，噪声强度按本照片自动测得：100% 是模型的全部输出，也是默认。烘焙图走旧的 SCUNet，50% 是它最合适的一档。双击复位。"),
+    ("Export AI denoise strength, independent of the Detail fold. On a RAW, the dial removes luminance grain after demosaic in linear light; the default targets Lightroom Denoise 50. Higher is cleaner, 100% is the complete network output. Every positive strength keeps clean colour; exactly 0% leaves the input untouched. Baked sources keep SCUNet's separate 50% default. Double-click to reset this source type.", "导出折叠区的 AI 降噪强度，与去噪折叠区独立。RAW 上这把滑杆在去马赛克后以线性光去除亮度颗粒，默认值以 Lightroom 降噪 50 为参照。调高更干净，100% 是网络的完整输出。任何正强度均保留干净的颜色，恰好 0% 则保持原片不变。烘焙图仍用 SCUNet，独立默认值为 50%。双击重置当前源类型的强度。"),
     ("All regions", "全部区域"),
     ("Midtones", "中间调"),
     ("Global", "全局"),

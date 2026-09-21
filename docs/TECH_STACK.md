@@ -1797,7 +1797,20 @@ RAW memory without limit.
 
 AI denoise is a pair of optional local sidecars — a non-blind DRUNet on the
 RAW sensor mosaic, whose noise model the sidecar measures on the frame, and
-SCUNet on baked sources — with an output contract stronger
+SCUNet on baked sources. RAW inference uses honest sigma, honest by position as
+well as by level: each stabilised plane is divided by a noise field the sidecar
+measures per 256-sample cell (finest Haar diagonal band, samples chosen by the
+three orthogonal bands so the choice cannot bias the measure, a local linear
+fit, 1.0 where nothing can be measured) and multiplied back after the network,
+whose weights are unchanged and which, being bias-free, is indifferent to the
+wider span that needs. At the 71% RAW
+default, Rust requests the whole clean mosaic, demosaics and calibrates both
+original and clean through the same path, and returns (1-s) of their linear
+luminance difference equally to R/G/B. Its Y weights come from the working
+space's XYZ matrix. The original is retained as one f32 Y plane; strength 1
+skips that develop. The sidecar's output floor is container zero. Every positive
+RAW strength keeps clean chroma; exactly 0 preserves the untouched input.
+Baked SCUNet retains its 50% default. Both paths have an output contract stronger
 than process exit status: the caller accepts success only when the typed result
 sets `sidecar_wrote` and the expected artifact is present, non-empty, and newer
 than the pre-call state; model weights remain outside the repository.
@@ -1816,8 +1829,10 @@ than the pre-call state; model weights remain outside the repository.
 - Web capability: 32 random bytes, URL-safe base64 without padding
   (**designed per-run secret**).
 - Server request concurrency: 8 (**designed single-user bound**).
-- RAW admission: 4 GiB at 31 B/pixel, or 138,547,333 pixels
-  (**measured memory bound**).
+- Ordinary RAW admission: 4 GiB at 31 B/pixel, or 138,547,333 pixels
+  (**measured memory bound**). RAW luminance return at 0 < s < 1 reserves
+  another 18 B/pixel before decode (49 B/pixel total, conservative; first
+  refused size 87,652,394 pixels). Strength 1 skips that extra allowance.
 - Batch per-photo budget: 1,800 MB (**rounded designed budget from a measured
   1,771 MB high-water mark**).
 - Style index: 5,000 exemplars, 40 KiB maximal record, 228 MiB file cap
@@ -1828,8 +1843,15 @@ than the pre-call state; model weights remain outside the repository.
 - The 61 MP RAW probe measured `151 MB` peak commit for decode,
   `1771 MB` for calibration/render preparation, and `1766 MB` for the
   full-resolution render tail; the combined process peak remained `1771 MB`.
-- The release battery is **1649 library (1634 pass + 15 `#[ignore]`d forensic
-  probes) / 25 CLI / 214 GUI / 2+2 contract** tests. Environment-gated real
+- The current 60.2 MP denoise CPU replay (captured clean mosaic, same peak
+  probe, fresh processes) measured 1765 MiB / 5.131 s at strength 1 and
+  1996 MiB / 10.247 s at 0.71: +231 MiB and +5.116 s for luminance return.
+  This excludes the Python/model process. Batch rendering does not request
+  AI denoise, so its ordinary 1800 MB planning constant is unchanged.
+- The current battery is **1659 library (1644 pass + 15 `#[ignore]`d forensic
+  probes) / 25 CLI / 215 GUI / 2+2 contract** tests (v1.5.1 shipped with 1649
+  library and 214 GUI; the ten library names and one GUI name added since are
+  listed in ARCHITECTURE). Environment-gated real
   Lightroom, brush-table, and RAW-zoo suites are additional and are not
   smuggled into the ordinary count.
 - Tests compile at opt-level 2 (`[profile.test]` in Cargo.toml) with debug

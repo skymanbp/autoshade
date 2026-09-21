@@ -448,6 +448,29 @@ pub(crate) fn refuse_raw_develop_over_ceiling_for(
     refuse_raw_develop_over_ceiling(path, (d.w as u64).saturating_mul(d.h as u64))
 }
 
+/// Grain return develops an original in addition to the clean RAW. Reserve
+/// one RGB (12 B), one luminance (4 B) and one mosaic clone (2 B) per source
+/// pixel above the measured ordinary develop budget. The two RGB frames are
+/// never live together; this conservative allowance also covers allocator
+/// retention between the passes. The 60.2 MP captured-mosaic probe measured
+/// 1765 MiB at strength 1, 1996 MiB at 0.71 (jobs.rs); the conservative 49 B/px
+/// gate also leaves room for other decoders. Neither includes the sidecar.
+pub(crate) fn refuse_raw_grain_return_over_ceiling_for(path: &Path, probe: &rawler::RawImage) -> Result<()> {
+    let d = default_crop(probe).d;
+    let pixels = (d.w as u64).saturating_mul(d.h as u64);
+    refuse_raw_grain_return_over_ceiling(path, pixels)
+}
+
+fn refuse_raw_grain_return_over_ceiling(path: &Path, pixels: u64) -> Result<()> {
+    let need = raw_develop_peak_bytes(pixels).saturating_add(pixels.saturating_mul(18));
+    if allocation_over_ceiling(need) {
+        anyhow::bail!("{} needs about {need} bytes for RAW develop plus luminance grain return, \
+            at or over the {MAX_ALLOC}-byte per-file ceiling; strength 1 skips the original develop",
+            path.display());
+    }
+    Ok(())
+}
+
 /// The per-file develop peak in MB for a source whose HEADER is CHEAP to read,
 /// or `None` when it is not — the admission-time half of the same accounting
 /// the ceilings above enforce.
@@ -3271,6 +3294,18 @@ mod tests {
         assert!(refuse_raw_develop_over_ceiling(p, 200_000_000).is_err());
         // Absurd input saturates instead of wrapping into an accidental pass.
         assert!(refuse_raw_develop_over_ceiling(p, u64::MAX).is_err());
+    }
+
+    #[test]
+    fn grain_return_reserves_its_extra_plane_before_the_raw_ceiling() {
+        let path = std::path::Path::new("large.iiq");
+        assert!(refuse_raw_grain_return_over_ceiling(path, 60_217_344).is_ok());
+        let boundary = MAX_ALLOC.div_ceil(RAW_DEVELOP_BYTES_PER_PIXEL + 18);
+        assert!(refuse_raw_grain_return_over_ceiling(path, boundary - 1).is_ok());
+        assert!(refuse_raw_develop_over_ceiling(path, boundary).is_ok());
+        let error = refuse_raw_grain_return_over_ceiling(path, boundary).unwrap_err().to_string();
+        assert!(error.contains("large.iiq") && error.contains("strength 1"));
+        assert!(refuse_raw_grain_return_over_ceiling(path, u64::MAX).is_err());
     }
 
     /// The RAW and baked ceilings must be the SAME ceiling — the user ruling

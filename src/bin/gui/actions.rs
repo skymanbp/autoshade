@@ -96,6 +96,8 @@ impl AutoShadeApp {
         app.save_denoise = prefs.save_denoise;
         app.save_denoise_strength = prefs.save_denoise_strength.clamp(0.0, 1.0);
         app.denoise_strength = prefs.denoise_strength.clamp(0.0, 1.0);
+        app.baked_denoise_strength = prefs.baked_denoise_strength.clamp(0.0, 1.0);
+        app.baked_save_denoise_strength = prefs.baked_save_denoise_strength.clamp(0.0, 1.0);
         app.zoned_fit = prefs.zoned_fit;
         app.zoned_four_regions = prefs.zoned_four_regions;
         app.fit_ai_judge = prefs.fit_ai_judge;
@@ -123,19 +125,30 @@ impl AutoShadeApp {
         for era in prefs.prefs_era..PREFS_ERA {
             match era {
                 0 => {
-                    let full = autoshade::denoise::DEFAULT_STRENGTH_RAW;
-                    if prefs.denoise_strength != full || prefs.save_denoise_strength != full {
+                    // Era 1's historical RAW law. The final step below emits
+                    // one note using the original saved values, not this hop.
+                    app.denoise_strength = 1.0;
+                    app.save_denoise_strength = 1.0;
+                }
+                1 => {
+                    // The old file cannot tell which source used a shared
+                    // dial. Preserve its choice for SCUNet, reset only RAW.
+                    app.baked_denoise_strength = prefs.denoise_strength.clamp(0.0, 1.0);
+                    app.baked_save_denoise_strength = prefs.save_denoise_strength.clamp(0.0, 1.0);
+                    let default = autoshade::denoise::DEFAULT_STRENGTH_RAW;
+                    if prefs.denoise_strength != default || prefs.save_denoise_strength != default {
                         app.startup_note = Some(trf(
                             app.lang,
-                            "AI denoise strength reset to 100 % (Detail fold {a} %, Export fold {b} %): the dial's meaning changed in v1.4.0 — on a RAW it is a sensor-domain blend, and less than 100 % only puts noise back",
+                            "RAW AI denoise strength reset to {new} % (Detail fold {a} %, Export fold {b} %): the new default targets Lightroom Denoise 50; higher removes more luminance grain, every positive strength keeps the clean colour, and 0% leaves the input untouched",
                             &[
+                                ("new", &format!("{:.0}", default * 100.0)),
                                 ("a", &format!("{:.0}", prefs.denoise_strength * 100.0)),
                                 ("b", &format!("{:.0}", prefs.save_denoise_strength * 100.0)),
                             ],
                         ));
                     }
-                    app.denoise_strength = full;
-                    app.save_denoise_strength = full;
+                    app.denoise_strength = default;
+                    app.save_denoise_strength = default;
                 }
                 _ => unreachable!("missing preference migration for era {era}"),
             }
@@ -156,6 +169,21 @@ impl AutoShadeApp {
         // before the user sees it. Its completion uses the same status line.
         if !app.busy {
             app.show_startup_note();
+        }
+    }
+
+    /// The active card's actual pixels choose the path, including generated
+    /// masters under a RAW original. An unopened app displays the RAW dials.
+    pub(crate) fn denoise_uses_raw(&self) -> bool {
+        self.active_source_path().is_none_or(|p| autoshade::decode::is_raw(&p))
+    }
+
+    pub(crate) fn selected_denoise_strength(&self, on_export: bool) -> f32 {
+        match (self.denoise_uses_raw(), on_export) {
+            (true, false) => self.denoise_strength,
+            (true, true) => self.save_denoise_strength,
+            (false, false) => self.baked_denoise_strength,
+            (false, true) => self.baked_save_denoise_strength,
         }
     }
 

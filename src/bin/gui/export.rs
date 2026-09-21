@@ -334,7 +334,7 @@ impl AutoShadeApp {
             parts.push(format!(
                 "{} {:.0}%",
                 tr(lang, "AI Denoise"),
-                self.save_denoise_strength * 100.0
+                self.selected_denoise_strength(true) * 100.0
             ));
         }
         parts.push(match self.export_dest_dir() {
@@ -444,7 +444,7 @@ impl AutoShadeApp {
         let recipe = self.recipe.clone();
         // The Export fold's OWN dial (the Detail fold's 「AI Denoise now」 has
         // its own), captured at the click like every other export input.
-        let denoise_strength = self.save_denoise_strength;
+        let denoise_strength = self.selected_denoise_strength(true);
         let export = self.export_opts();
         let src_photo = self.src_path.clone();
         self.spawn_worker(

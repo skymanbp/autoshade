@@ -8342,9 +8342,9 @@
             assert_eq!(prefs.prefs_era, 0, "a missing key must not inherit the current era");
             let mut app = AutoShadeApp::default();
             app.restore_prefs(prefs);
-            assert_eq!((app.denoise_strength, app.save_denoise_strength), (1.0, 1.0),
+            assert_eq!((app.denoise_strength, app.save_denoise_strength), (autoshade::denoise::DEFAULT_STRENGTH_RAW, autoshade::denoise::DEFAULT_STRENGTH_RAW),
                 "era 0 must reset both denoise dials to the RAW blend default");
-            for old in ["100", "65", "50"] {
+            for old in ["71", "65", "50"] {
                 assert!(app.status.contains(old), "{old} missing from {}", app.status);
             }
             assert_eq!(app.status.matches(if lang == Lang::En { "reset to" } else { "已重置" }).count(), 1);
@@ -8362,7 +8362,7 @@
         app.tx.send(Msg::Folder(Box::new(Ok((PathBuf::new(), vec![], 0))))).unwrap();
         app.poll_workers(&egui::Context::default());
         assert!(app.status.contains("no photos found"), "{}", app.status);
-        assert!(app.status.contains("reset to 100"), "{}", app.status);
+        assert!(app.status.contains("reset to 71"), "{}", app.status);
         assert!(app.startup_note.is_none());
         app.tx.send(Msg::Folder(Box::new(Ok((PathBuf::new(), vec![], 0))))).unwrap();
         app.poll_workers(&egui::Context::default());
@@ -8372,7 +8372,7 @@
     #[test]
     fn current_era_denoise_prefs_restore_without_a_reset_note() {
         let mut app = AutoShadeApp::default();
-        app.restore_prefs(Prefs { prefs_era: 1, denoise_strength: 0.65,
+        app.restore_prefs(Prefs { prefs_era: 2, denoise_strength: 0.65,
             save_denoise_strength: 0.5, ..Prefs::default() });
         assert_eq!((app.denoise_strength, app.save_denoise_strength), (0.65, 0.5));
         assert_eq!(app.status, tr(Lang::En, "Open a photo, or open a folder to browse your library."));
@@ -8387,7 +8387,7 @@
         assert_eq!(prefs.prefs_era, 0);
         let mut app = AutoShadeApp::default();
         app.restore_prefs(prefs);
-        assert_eq!((app.denoise_strength, app.save_denoise_strength), (1.0, 1.0));
+        assert_eq!((app.denoise_strength, app.save_denoise_strength), (autoshade::denoise::DEFAULT_STRENGTH_RAW, autoshade::denoise::DEFAULT_STRENGTH_RAW));
         assert_eq!(app.status, tr(Lang::En, "Open a photo, or open a folder to browse your library."));
     }
 
@@ -8408,9 +8408,8 @@
     /// 2026-09-13, the same user decision applied to the denoiser's two
     /// timings: 「🤖 AI Denoise now」 (Detail fold) and 「🤖 AI Denoise on
     /// export」 (Export fold) each read a dial of their own, both starting at
-    /// `denoise::DEFAULT_STRENGTH_RAW` (1.0 since 2026-09-15: the RAW-mosaic
-    /// denoise is non-blind, so its whole output is the right amount; the
-    /// baked-source SCUNet path keeps its own 0.5 in the engine), each on its
+    /// `denoise::DEFAULT_STRENGTH_RAW` for RAW sources, with independent
+    /// baked-source SCUNet choices starting at 0.5, each on its
     /// own prefs key — an older prefs file must decode to that default and
     /// never to serde's 0.0 (the identity: every denoise would silently do
     /// nothing after an upgrade). The worker halves are pinned on their
@@ -8419,7 +8418,7 @@
     fn gui_ai_denoise_has_a_dial_in_each_fold() {
         use autoshade::denoise::DEFAULT_STRENGTH_RAW as DEFAULT_STRENGTH;
         let app = AutoShadeApp::default();
-        assert_eq!(DEFAULT_STRENGTH, 1.0);
+        assert_eq!(DEFAULT_STRENGTH, 0.71);
         assert_eq!(app.denoise_strength, DEFAULT_STRENGTH);
         assert_eq!(app.save_denoise_strength, DEFAULT_STRENGTH);
         assert_eq!(Prefs::default().denoise_strength, DEFAULT_STRENGTH);
@@ -8433,7 +8432,7 @@
         let older = json
             .replace(r#""denoise_strength":0.8,"#, "")
             .replace(r#""save_denoise_strength":0.3,"#, "");
-        assert!(!older.contains("denoise_strength"), "both keys really were removed: {older}");
+        assert!(!older.contains("\"denoise_strength\"") && !older.contains("\"save_denoise_strength\""), "both keys really were removed: {older}");
         let decoded: Prefs = serde_json::from_str(&older).expect("an older prefs file loads");
         assert_eq!(decoded.denoise_strength, DEFAULT_STRENGTH);
         assert_eq!(decoded.save_denoise_strength, DEFAULT_STRENGTH);
@@ -8458,11 +8457,11 @@
         // …and each verb reads ITS fold's dial: no literal strength survives
         // in either worker, and neither reads the other's field.
         let now = include_str!("panels/retouch.rs");
-        assert!(now.contains("let strength = self.denoise_strength;"));
+        assert!(now.contains("let strength = self.selected_denoise_strength(false);"));
         assert!(now.contains("DenoiseOpts::from_config(&cfg, None, strength)"));
         assert!(!now.contains("save_denoise_strength"), "「AI Denoise now」 must not read the Export dial");
         let export = include_str!("export.rs");
-        assert!(export.contains("let denoise_strength = self.save_denoise_strength;"));
+        assert!(export.contains("let denoise_strength = self.selected_denoise_strength(true);"));
         assert!(!export.contains("self.denoise_strength"), "the export must not read the Detail dial");
         for (name, src) in [("panels/retouch.rs", now), ("export.rs", export)] {
             assert!(
@@ -8470,6 +8469,40 @@
                 "{name}: a literal strength bypasses the dial"
             );
         }
+    }
+
+    #[test]
+    fn era_one_resets_raw_dials_but_preserves_baked_choices() {
+        for lang in [Lang::En, Lang::Zh] {
+            let mut app = AutoShadeApp::default();
+            app.restore_prefs(Prefs { prefs_era: 1, denoise_strength: 1.0,
+                save_denoise_strength: 1.0, lang, ..Prefs::default() });
+            let default = autoshade::denoise::DEFAULT_STRENGTH_RAW;
+            assert_eq!((app.denoise_strength, app.save_denoise_strength), (default, default),
+                "era 2 must reset both RAW dials to the luminance-grain default");
+            assert!(app.status.contains("100"), "old values missing: {}", app.status);
+            assert!(app.status.contains("71"), "new default missing: {}", app.status);
+            assert!(app.status.contains("Lightroom"));
+            assert_eq!((app.baked_denoise_strength, app.baked_save_denoise_strength), (1.0, 1.0));
+        }
+        let mut app = AutoShadeApp::default();
+        app.restore_prefs(Prefs { prefs_era: 1, denoise_strength: 0.45,
+            save_denoise_strength: 0.6, ..Prefs::default() });
+        app.src_path = Some(PathBuf::from("master.tif"));
+        assert_eq!(app.selected_denoise_strength(false), 0.45);
+        assert_eq!(app.selected_denoise_strength(true), 0.6);
+        let mut storage = PrefsMemory::default();
+        eframe::App::save(&mut app, &mut storage);
+        let prefs: Prefs = eframe::get_value(&storage, eframe::APP_KEY).unwrap();
+        assert_eq!(prefs.prefs_era, 2);
+        let mut reopened = AutoShadeApp::default();
+        reopened.restore_prefs(prefs);
+        reopened.src_path = Some(PathBuf::from("master.tif"));
+        assert_eq!(reopened.selected_denoise_strength(false), 0.45);
+        assert_eq!(reopened.selected_denoise_strength(true), 0.6);
+        assert!(!reopened.status.contains("reset to"));
+        reopened.src_path = Some(PathBuf::from("frame.ARW"));
+        assert_eq!(reopened.selected_denoise_strength(false), autoshade::denoise::DEFAULT_STRENGTH_RAW);
     }
 
     /// User decision 2026-09-12 (「该在哪就在哪」): a control belongs to the fold

@@ -14,9 +14,9 @@ for ⧉ ⊖ ◭ ▭ ◯ ◌ ✓ ✕ 🖌 without these).
 | `NotoSansSC-autoshade.ttf` | `notosanssc/NotoSansSC[wght].ttf` (instanced wght=400) | the hanzi the Chinese UI itself renders |
 
 The CJK face carries only the codepoints the translations use — the checker
-reports 58 symbols + 833 CJK codepoints, all embedded (`subset_gui_fonts.py
---check`, 2026-09-20), and the shipped SC subset measures 834 codepoints /
-223,380 bytes where a full CJK face is ~16 MB. Before it, choosing 中文 on a
+reports 58 symbols + 837 CJK codepoints, all embedded (`subset_gui_fonts.py
+--check`, 2026-09-20), and the shipped SC subset measures 838 codepoints /
+224,624 bytes where a full CJK face is ~16 MB. Before it, choosing 中文 on a
 machine with no system CJK font rendered the entire window as tofu. The runtime system-CJK
 fallback stays in the chain for text this static extraction cannot know,
 such as the user's own file and folder names.

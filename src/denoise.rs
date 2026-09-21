@@ -24,6 +24,8 @@ use image::{DynamicImage, GenericImageView, ImageBuffer, Rgb};
 
 use crate::config::Config;
 
+pub(crate) mod hot_pixels;
+
 const SIDECAR_DEFAULT_TIMEOUT_SECS: u64 = 30 * 60;
 const SIDECAR_OUTPUT_CAP: usize = 1024 * 1024;
 
@@ -41,15 +43,12 @@ const SIDECAR_OUTPUT_CAP: usize = 1024 * 1024;
 /// half the luminance grain comes back, and the texture with it.
 pub const DEFAULT_STRENGTH: f32 = 0.5;
 
-/// Where the RAW-domain path starts (2026-09-15): the model's whole output.
-/// With the noise level measured on the frame itself, DRUNet on the mosaic
-/// kept 94–98 % of the detail blocks' fine energy on the ground-truth
-/// benchmark at 1.0, and everything below it only put noise back — the
-/// probe's 1.3–1.4× sigma scales and a blend both scored lower. The strength
-/// stays a dial (0 is the identity, 1 is this; [`DenoiseOpts::strength`]),
-/// and the GUI's two dials start here; a baked source under the same dial
-/// takes the SCUNet path, whose own sweet spot is [`DEFAULT_STRENGTH`].
-pub const DEFAULT_STRENGTH_RAW: f32 = 1.0;
+/// RAW luminance-noise removal after demosaic and calibration, in linear
+/// light. Every positive value uses the complete clean mosaic at honest sigma;
+/// the renderer returns (1-strength) of the original luminance along RGB grey.
+/// 0 is the untouched input without a spawn; 1 skips the original's develop.
+/// Baked sources keep SCUNet and [`DEFAULT_STRENGTH`].
+pub const DEFAULT_STRENGTH_RAW: f32 = 0.71;
 
 /// The default strength for `src`'s path: [`DEFAULT_STRENGTH_RAW`] for a RAW
 /// (the mosaic-domain denoiser) and [`DEFAULT_STRENGTH`] for a baked source
@@ -273,7 +272,8 @@ pub struct DenoiseOpts {
     /// The SCUNet tier; the mosaic path has one model and ignores it.
     pub model: String,
     /// 0..1, whose LAW depends on the path. On the mosaic ([`denoise_mosaic`])
-    /// it is a blend in the RAW domain: 0 the input samples, 1 the model's
+    /// the renderer returns the original's luminance after demosaic: 0 the
+    /// untouched input, every positive value keeps clean chroma, 1 the model's
     /// whole output, default [`DEFAULT_STRENGTH_RAW`]. On developed pixels
     /// ([`denoise_buffer`], since 2026-09-13) the sidecar blends the
     /// LUMINANCE by this amount and takes the model's chroma at
@@ -571,6 +571,24 @@ pub fn mosaic_args(
     Ok(MosaicArgs { pattern, black: levels, white })
 }
 
+/// Cheap applicability check, shared with the renderer BEFORE it develops
+/// an original luminance plane. No pixels are copied and no sidecar is run.
+pub(crate) fn mosaic_args_for(raw: &rawler::RawImage) -> std::result::Result<MosaicArgs, String> {
+    use rawler::rawimage::{RawImageData, RawPhotometricInterpretation as Photo};
+    let cfa = match &raw.photometric {
+        Photo::Cfa(c) => &c.cfa,
+        Photo::LinearRaw => return Err("the file carries demosaiced (linear) data, not a sensor mosaic".into()),
+        Photo::BlackIsZero => return Err("a monochrome sensor has no colour mosaic".into()),
+    };
+    if raw.cpp != 1 {
+        return Err(format!("the sensor data has {} samples per pixel, not a mosaic", raw.cpp));
+    }
+    if !matches!(raw.data, RawImageData::Integer(_)) {
+        return Err("the sensor data is floating point".into());
+    }
+    mosaic_args(cfa, &raw.blacklevel, &raw.whitelevel)
+}
+
 /// AI-denoise a decoded RAW's sensor mosaic IN PLACE, before demosaic — the
 /// render engine's RAW path (`render_to_image_in`, 2026-09-15).
 ///
@@ -593,28 +611,11 @@ pub fn mosaic_args(
 /// [`MosaicDenoise::NotApplicable`] with the reason, and the caller falls back
 /// to [`denoise_buffer`] on the developed frame.
 pub fn denoise_mosaic(opts: &DenoiseOpts, raw: &mut rawler::RawImage) -> Result<MosaicDenoise> {
-    use rawler::rawimage::{RawImageData, RawPhotometricInterpretation as Photo};
+    use rawler::rawimage::RawImageData;
     if opts.strength <= 0.0 {
         return Ok(MosaicDenoise::Denoised);
     }
-    let cfa = match &raw.photometric {
-        Photo::Cfa(c) => &c.cfa,
-        Photo::LinearRaw => {
-            return Ok(MosaicDenoise::NotApplicable(
-                "the file carries demosaiced (linear) data, not a sensor mosaic".into(),
-            ));
-        }
-        Photo::BlackIsZero => {
-            return Ok(MosaicDenoise::NotApplicable("a monochrome sensor has no colour mosaic".into()));
-        }
-    };
-    if raw.cpp != 1 {
-        return Ok(MosaicDenoise::NotApplicable(format!(
-            "the sensor data has {} samples per pixel, not a mosaic",
-            raw.cpp
-        )));
-    }
-    let args = match mosaic_args(cfa, &raw.blacklevel, &raw.whitelevel) {
+    let args = match mosaic_args_for(raw) {
         Ok(a) => a,
         Err(why) => return Ok(MosaicDenoise::NotApplicable(why)),
     };
@@ -674,7 +675,7 @@ pub fn denoise_mosaic(opts: &DenoiseOpts, raw: &mut rawler::RawImage) -> Result<
             .arg("--white")
             .arg(format!("{}", args.white))
             .arg("--strength")
-            .arg(format!("{:.4}", opts.strength))
+            .arg("1.0000")
             .arg("--cache")
             .arg(&opts.cache);
         let out = crate::run_sidecar_child(
@@ -1765,7 +1766,7 @@ mod tests {
     /// A synthetic decoded RAW: `w×h` Bayer samples under `pattern`, the
     /// black level(s) given (one for the frame, or one per CFA site) and one
     /// white level — everything the bridge reads.
-    fn bayer_fixture(pattern: &str, w: usize, h: usize, black: &[u16], white: u32) -> rawler::RawImage {
+    pub(super) fn bayer_fixture(pattern: &str, w: usize, h: usize, black: &[u16], white: u32) -> rawler::RawImage {
         use rawler::cfa::{PlaneColor, CFA};
         use rawler::decoders::Camera;
         use rawler::rawimage::{BlackLevel, CFAConfig, RawImageData, RawPhotometricInterpretation, WhiteLevel};
@@ -1933,10 +1934,21 @@ mod tests {
             )
         };
         plane(product.clone(), h).save(dir.join("clean.png")).unwrap();
-        let opts = mosaic_opts(&dir, copying_stand_in(&dir, "clean.png"), 1.0);
+        let stub = copying_stand_in(&dir, "clean.png");
+        let body = std::fs::read_to_string(&stub).unwrap();
+        #[cfg(windows)]
+        let body = format!("@echo %* > \"%~dp0argv.txt\"\r\n{body}");
+        #[cfg(not(windows))]
+        let body = body.replacen("#!/bin/sh\n", "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$(dirname \"$0\")/argv.txt\"\n", 1);
+        std::fs::write(&stub, body).unwrap();
+        let opts = mosaic_opts(&dir, stub, 0.37);
         let mut raw = bayer_fixture("RGGB", w as usize, h as usize, &[512], 16383);
         assert_eq!(super::denoise_mosaic(&opts, &mut raw).unwrap(), super::MosaicDenoise::Denoised);
         assert_eq!(samples(&raw), product, "the sidecar's plane is the frame's data now");
+        let argv = std::fs::read_to_string(dir.join("argv.txt")).unwrap();
+        let args: Vec<_> = argv.split_whitespace().collect();
+        let strength = args.iter().position(|a| *a == "--strength").unwrap();
+        assert_eq!(args[strength + 1], "1.0000", "the RAW dial must not blend the clean mosaic");
         assert_eq!(mosaic_temp_files(), temps, "both temp files are gone after success");
         // Wrong size: two rows short.
         plane(product[..(w * (h - 2)) as usize].to_vec(), h - 2).save(dir.join("short.png")).unwrap();
@@ -1982,9 +1994,26 @@ mod tests {
     /// sha256 and a byte cap and go through `_fetch_verified`; the model is
     /// built `bias=False` (neither the published weights nor the fine-tune of
     /// them carries bias tensors — a biased build fails the strict load) and
-    /// loaded `weights_only=True`; and its `--strength` default is the
-    /// engine's RAW default, so the CLI, the GUI and a bare sidecar run
-    /// agree. MUTATION: drop `bias=False`, and this names it.
+    /// loaded `weights_only=True`. Its standalone strength defaults to the
+    /// whole clean mosaic; the renderer owns the user-facing RAW default.
+    /// MUTATION: drop `bias=False`, and this names it.
+    #[test]
+    fn the_raw_cleaner_receives_whole_output_and_keeps_the_container_floor() {
+        assert!(RAW_SIDECAR_SRC.contains("SIGMA_SCALE = 1.0"));
+        assert!(RAW_SIDECAR_SRC.contains("sigma = SIGMA_SCALE / span"));
+        assert!(RAW_SIDECAR_SRC.contains("out = x_in + s * (x_den - x_in)"),
+            "standalone callers keep their per-plane strength contract");
+        assert!(RAW_SIDECAR_SRC.contains("return np.clip(v, 0, white).astype(np.uint16)"),
+            "below-black clean samples must not be rectified");
+        let source = crate::source_before_tests(include_str!("denoise.rs"));
+        let start = source.find("pub fn denoise_mosaic(").unwrap();
+        let end = source[start..].find("\nfn run_sidecar(").unwrap() + start;
+        let bridge = &source[start..end];
+        assert!(bridge.contains(".arg(\"1.0000\")"), "RAW sidecar must receive the whole output");
+        assert!(!bridge.contains("format!(\"{:.4}\", opts.strength)"),
+            "RAW strength belongs to the renderer");
+    }
+
     #[test]
     fn the_raw_sidecar_is_pinned_and_agrees_on_the_default() {
         for digest in [
@@ -2009,8 +2038,8 @@ mod tests {
         // (`SIGMA_SCALE`'s own table): a network and its sigma scale are one
         // decision, so a weight swap without one is a silent taste change.
         assert!(
-            RAW_SIDECAR_SRC.contains("SIGMA_SCALE = 0.78"),
-            "the measured operating point for these weights is gone"
+            RAW_SIDECAR_SRC.contains("SIGMA_SCALE = 1.0"),
+            "the RAW cleaner must receive honest measured sigma"
         );
         assert!(RAW_SIDECAR_SRC.contains("_fetch_verified("), "the verified fetch is not used");
         assert!(!RAW_SIDECAR_SRC.contains("_download("), "a download bypasses the verified fetch");
@@ -2024,10 +2053,10 @@ mod tests {
             RAW_SIDECAR_SRC.contains("torch.load(weights, map_location=\"cpu\", weights_only=True)"),
             "weights must load with weights_only=True"
         );
-        let default = format!("\"--strength\", type=float, default={:.1},", super::DEFAULT_STRENGTH_RAW);
+        let default = "\"--strength\", type=float, default=1.0,";
         assert!(
-            RAW_SIDECAR_SRC.contains(&default),
-            "the sidecar's --strength default drifted from DEFAULT_STRENGTH_RAW"
+            RAW_SIDECAR_SRC.contains(default),
+            "the sidecar must default to the complete clean mosaic"
         );
         assert_eq!(super::default_strength_for(Path::new("frame.ARW")), super::DEFAULT_STRENGTH_RAW);
         assert_eq!(super::default_strength_for(Path::new("master.png")), super::DEFAULT_STRENGTH);

@@ -187,8 +187,9 @@ pub(crate) enum ExportRoute {
 ///
 /// | Era | Migration |
 /// | --- | --- |
-/// | 1 | The two denoise dials changed law in v1.4.0 (SCUNet split, default 0.5 → RAW-domain blend, default 1.0); a file written by v1.3.4–v1.5.0 carries its old numbers; step 0→1 resets both to `denoise::DEFAULT_STRENGTH_RAW`. |
-pub(crate) const PREFS_ERA: u32 = 1;
+/// | 1 | The two denoise dials changed law in v1.4.0 (SCUNet split, default 0.5 → RAW-domain blend, default 1.0); a file written by v1.3.4–v1.5.0 carries its old numbers; step 0→1 resets both to the then-default 1.0. |
+/// | 2 | Honest sigma and post-demosaic luminance return replace the old operating point; step 1→2 resets the RAW dials to the luminance-grain default and copies the old shared choices into separate baked-source slots. |
+pub(crate) const PREFS_ERA: u32 = 2;
 
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(default)]
@@ -263,6 +264,9 @@ pub(crate) struct Prefs {
     /// nothing after an upgrade).
     pub(crate) save_denoise_strength: f32,
     pub(crate) denoise_strength: f32,
+    /// SCUNet choices are independent of RAW dial-law migrations.
+    pub(crate) baked_denoise_strength: f32,
+    pub(crate) baked_save_denoise_strength: f32,
     pub(crate) zoned_fit: bool,
     /// Opt-in expansion from the historical two-region sky/land pass.
     pub(crate) zoned_four_regions: bool,
@@ -319,6 +323,8 @@ impl Default for Prefs {
             save_denoise: false,
             save_denoise_strength: autoshade::denoise::DEFAULT_STRENGTH_RAW,
             denoise_strength: autoshade::denoise::DEFAULT_STRENGTH_RAW,
+            baked_denoise_strength: autoshade::denoise::DEFAULT_STRENGTH,
+            baked_save_denoise_strength: autoshade::denoise::DEFAULT_STRENGTH,
             // Zoned sky reverse-fit ON by default: it degrades gracefully to
             // the plain global fit when segmentation is unavailable.
             zoned_fit: true,
